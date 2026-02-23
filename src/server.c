@@ -195,6 +195,10 @@ int kl_server_run(KlServer *s) {
                     kl_event_add(&s->loop, client_fd,
                                  KL_EVENT_READ, nc);
                 }
+                /* Re-arm listen socket (no-op for persistent backends;
+                 * required for io_uring's one-shot POLL_ADD) */
+                kl_event_mod(&s->loop, s->listen_fd,
+                             KL_EVENT_READ, NULL);
                 continue;
             }
 

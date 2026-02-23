@@ -92,7 +92,6 @@ int kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
         return -1;
 
     io_uring_prep_poll_add(sqe, fd, mask_to_poll(mask));
-    sqe->len = IORING_POLL_ADD_MULTI;
     io_uring_sqe_set_data64(sqe, (uint64_t)fd);
     st->pending++;
     return 0;
@@ -118,7 +117,6 @@ int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     if (!sqe)
         return -1;
     io_uring_prep_poll_add(sqe, fd, mask_to_poll(mask));
-    sqe->len = IORING_POLL_ADD_MULTI;
     io_uring_sqe_set_data64(sqe, (uint64_t)fd);
     st->pending++;
     return 0;
