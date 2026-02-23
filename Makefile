@@ -71,12 +71,12 @@ examples/multipart: examples/multipart.c $(LIB)
 
 examples: examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart
 
-# Tests — relax warnings triggered by utest.h vendor macros
+# Tests — relax pedantic warnings triggered by utest.h vendor macros
 TEST_SRC = $(wildcard tests/test_*.c)
 TEST_BIN = $(TEST_SRC:.c=)
 
 tests/%: tests/%.c $(LIB)
-	$(CC) $(CFLAGS) -Wno-extra-semi -Wno-sign-compare -Ivendor -o $@ $< -L. -lkeel $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< -L. -lkeel $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
