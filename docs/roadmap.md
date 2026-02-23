@@ -18,22 +18,6 @@ Drain active connections before exiting:
 
 Currently `kl_server_stop` sets `running = 0` and the loop exits after the current tick.
 
-### Access logging callback
-
-```c
-typedef void (*KlAccessLogFn)(const KlRequest *req, int status,
-                               size_t bytes_sent, double duration_ms,
-                               void *user_data);
-
-KlConfig cfg = {
-    .port = 8080,
-    .access_log = my_log_fn,
-    .access_log_data = logger,
-};
-```
-
-Called after each response is fully sent. Provides request details, response status, body size, and request duration. Users implement formatting (JSON, CLF, custom).
-
 ### Per-route middleware chain
 
 ```c

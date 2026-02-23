@@ -121,11 +121,23 @@ void kl_conn_pool_free(KlConnPool *pool) {
     }
 }
 
+static void conn_log_access(KlConn *c) {
+    if (!c->access_log) return;
+    size_t bytes = 0;
+    if (c->res.body_mode == KL_BODY_BUFFER) bytes = c->res.body_len;
+    else if (c->res.body_mode == KL_BODY_FILE && c->res.file_size > 0)
+        bytes = (size_t)c->res.file_size;
+    uint64_t now = kl_monotonic_ms();
+    double duration = (double)(now - c->request_start_ms);
+    c->access_log(&c->req, c->res.status, bytes, duration, c->access_log_data);
+}
+
 /*
  * Process a fully parsed request: route match → handler → response setup.
  */
 static KlConnState conn_process(KlConn *c) {
     c->state = KL_CONN_PROCESSING;
+    c->request_start_ms = kl_monotonic_ms();
 
     /* Reset response for this request (buffer reused across keep-alive) */
     if (c->res.hdr_buf) {
@@ -148,6 +160,7 @@ static KlConnState conn_process(KlConn *c) {
 
     /* If streaming, the handler already sent everything */
     if (c->res.body_mode == KL_BODY_STREAM) {
+        conn_log_access(c);
         c->state = KL_CONN_CLOSED;
         return c->state;
     }
@@ -332,7 +345,8 @@ KlConnState kl_conn_on_writable(KlConn *c) {
     if (r < 0) {
         c->state = KL_CONN_CLOSED;
     } else if (r == 0) {
-        /* Done sending — check keep-alive */
+        /* Done sending — log before keep-alive reset clears request */
+        conn_log_access(c);
         if (c->req.keep_alive) {
             /* Clean up body reader before resetting request */
             conn_cleanup_body_reader(c);
