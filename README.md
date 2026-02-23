@@ -1,5 +1,7 @@
 # KEEL — Kernel Event Engine, Lightweight
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable body readers, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
 
 **101K req/s** on a single thread. **68 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
