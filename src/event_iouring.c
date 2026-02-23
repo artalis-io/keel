@@ -3,7 +3,6 @@
 #include <limits.h>
 #include <poll.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -19,6 +18,7 @@
 
 typedef struct {
     struct io_uring ring;
+    KlAllocator *alloc;
     void **fd_udata;    /* fd → udata mapping (flat array, indexed by fd) */
     int fd_udata_cap;
     int pending;        /* SQEs queued but not yet submitted */
@@ -35,7 +35,9 @@ static int ensure_fd_cap(KlIoUringState *st, int fd) {
         new_cap *= 2;
     }
 
-    void **new_arr = realloc(st->fd_udata, (size_t)new_cap * sizeof(void *));
+    size_t old_size = (size_t)st->fd_udata_cap * sizeof(void *);
+    size_t new_size = (size_t)new_cap * sizeof(void *);
+    void **new_arr = kl_realloc(st->alloc, st->fd_udata, old_size, new_size);
     if (!new_arr)
         return -1;
 
@@ -54,19 +56,23 @@ static unsigned mask_to_poll(KlEventMask mask) {
 }
 
 int kl_event_init(KlEventLoop *loop) {
-    KlIoUringState *st = calloc(1, sizeof(*st));
+    KlAllocator *alloc = loop->alloc;
+    KlIoUringState *st = kl_malloc(alloc, sizeof(*st));
     if (!st)
         return -1;
+    memset(st, 0, sizeof(*st));
+    st->alloc = alloc;
 
     if (io_uring_queue_init(RING_SIZE, &st->ring, 0) < 0) {
-        free(st);
+        kl_free(alloc, st, sizeof(*st));
         return -1;
     }
 
-    st->fd_udata = malloc(INITIAL_FD_CAP * sizeof(void *));
+    size_t udata_size = INITIAL_FD_CAP * sizeof(void *);
+    st->fd_udata = kl_malloc(alloc, udata_size);
     if (!st->fd_udata) {
         io_uring_queue_exit(&st->ring);
-        free(st);
+        kl_free(alloc, st, sizeof(*st));
         return -1;
     }
     for (int i = 0; i < INITIAL_FD_CAP; i++)
@@ -144,7 +150,9 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
 
     /* Submit any pending SQEs */
     if (st->pending > 0) {
-        io_uring_submit(&st->ring);
+        int submitted = io_uring_submit(&st->ring);
+        if (submitted < 0)
+            return -1;
         st->pending = 0;
     }
 
@@ -214,9 +222,11 @@ void kl_event_close(KlEventLoop *loop) {
     if (!st)
         return;
 
+    KlAllocator *alloc = st->alloc;
     io_uring_queue_exit(&st->ring);
-    free(st->fd_udata);
-    free(st);
+    kl_free(alloc, st->fd_udata,
+            (size_t)st->fd_udata_cap * sizeof(void *));
+    kl_free(alloc, st, sizeof(*st));
     loop->_backend = NULL;
     loop->fd = -1;
 }
