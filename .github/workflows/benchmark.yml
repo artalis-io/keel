@@ -1,0 +1,45 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  bench:
+    strategy:
+      matrix:
+        include:
+          - name: Linux (epoll)
+            os: ubuntu-latest
+            backend: ""
+            deps: ""
+          - name: Linux (io_uring)
+            os: ubuntu-latest
+            backend: "BACKEND=iouring"
+            deps: "liburing-dev"
+          - name: macOS (kqueue)
+            os: macos-latest
+            backend: ""
+            deps: ""
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk ${{ matrix.deps }}
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install wrk
+
+      - name: Build
+        run: make ${{ matrix.backend }} && make examples ${{ matrix.backend }}
+
+      - name: Benchmark
+        run: DURATION=5s CONNECTIONS=50 THREADS=2 PORT=9095 ./bench.sh

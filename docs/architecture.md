@@ -1,0 +1,337 @@
+# KEEL — Architecture
+
+Deep technical documentation of KEEL's internal design.
+
+## System Overview
+
+```
+                         ┌─────────────────────────────────────────────────┐
+                         │                   KlServer                      │
+                         │                                                 │
+  client                 │  ┌──────────┐   ┌────────┐   ┌──────────┐     │
+  ──────── accept ──────►│  │ EventLoop│──►│ ConnPool│──►│  Router   │     │
+  socket                 │  │ (kqueue/ │   │ (pre-   │   │ (table   │     │
+                         │  │  epoll/  │   │  alloc) │   │  scan)   │     │
+                         │  │  iouring)│   │         │   │          │     │
+                         │  └──────────┘   └────┬───┘   └─────┬────┘     │
+                         │                      │             │           │
+                         │                      ▼             ▼           │
+                         │               ┌────────────┐ ┌──────────┐     │
+                         │               │   Parser   │ │ Handler  │     │
+                         │               │  (llhttp)  │ │(user fn) │     │
+                         │               └──────┬─────┘ └────┬─────┘     │
+                         │                      │            │           │
+                         │                      ▼            ▼           │
+                         │               ┌────────────┐ ┌──────────┐     │
+                         │               │ BodyReader │ │ Response │     │
+                         │               │  (vtable)  │ │ (buffer/ │     │
+                         │               │            │ │  file/   │     │
+                         │               └────────────┘ │  stream) │     │
+                         │                              └──────────┘     │
+                         └─────────────────────────────────────────────────┘
+```
+
+**Request flow**: socket → event loop (readiness) → connection (read) → parser (headers) → router (match) → body reader (data) → handler → response (send) → socket
+
+## Event Loop Abstraction
+
+KEEL provides a unified event API over three backends:
+
+```c
+int  kl_event_init(KlEventLoop *loop);
+int  kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata);
+int  kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata);
+int  kl_event_del(KlEventLoop *loop, int fd);
+int  kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms);
+void kl_event_close(KlEventLoop *loop);
+```
+
+All three backends use **edge-triggered** semantics — the event fires once when a fd becomes ready, not continuously while it's ready. This means fewer syscalls under load but requires draining the fd completely on each notification.
+
+| Backend | Platform | Mechanism |
+|---------|----------|-----------|
+| **kqueue** | macOS, BSD | `EV_ADD \| EV_CLEAR` (edge-triggered) |
+| **epoll** | Linux | `EPOLLET \| EPOLLIN \| EPOLLOUT` |
+| **io_uring** | Linux 5.6+ | `IORING_OP_POLL_ADD` (readiness, not async I/O) |
+
+The io_uring backend uses poll-add mode (readiness notification), not async read/write. This makes it a drop-in for epoll with io_uring's batched submission advantage, without requiring a fundamentally different I/O model.
+
+The server processes up to `KL_EVENTS_PER_TICK` (64) events per `kl_event_wait` call, with a poll timeout of `KL_POLL_TIMEOUT_MS` (1000ms) to ensure the timeout sweep runs regularly.
+
+## Connection State Machine
+
+```
+                    accept()
+                       │
+                       ▼
+               ┌──────────────┐
+               │   READING    │◄──────────────────┐
+               │  (headers)   │                    │
+               └──────┬───────┘                    │
+                      │ HEADERS_OK                 │ keep-alive
+                      ▼                            │ (reset)
+              ┌───────────────┐                    │
+              │ READING_BODY  │                    │
+              │ (body reader) │                    │
+              └───────┬───────┘                    │
+                      │ message complete           │
+                      ▼                            │
+              ┌───────────────┐                    │
+              │  PROCESSING   │                    │
+              │   (handler)   │                    │
+              └───────┬───────┘                    │
+                      │ handler returns            │
+                      ▼                            │
+              ┌───────────────┐                    │
+              │   SENDING     │────────────────────┘
+              │  (response)   │
+              └───────┬───────┘
+                      │ !keep_alive || error
+                      ▼
+              ┌───────────────┐
+              │    CLOSED     │
+              └───────────────┘
+```
+
+**State transitions in detail:**
+
+- **READING → READING_BODY**: Parser returns `KL_PARSE_HEADERS_OK`. Route is matched. If the route has a body reader factory and the request has a body (Content-Length > 0 or chunked), the factory is called to create a reader. Any remaining data in the read buffer is fed to the body reader immediately.
+
+- **READING → PROCESSING**: Parser returns `KL_PARSE_OK` (complete message, no body). Route is matched, handler is called directly.
+
+- **READING_BODY → PROCESSING**: Parser returns `KL_PARSE_OK` (body complete). `on_complete` is called on the body reader. Handler is invoked.
+
+- **PROCESSING → SENDING**: Handler returns. Response is assembled and send begins. For buffer responses, `writev` sends headers + body atomically. For file responses, headers are sent first, then `sendfile`. For streaming, the handler already wrote via the write callback.
+
+- **SENDING → READING**: Keep-alive is set and response fully sent. Connection is reset (response cleared, parser reset, read buffer compacted) and returns to READING for the next request.
+
+- **SENDING → CLOSED**: Not keep-alive, or error during send. Connection is released back to the pool.
+
+- **Any state → CLOSED**: Timeout sweep detects idle connection, read/write returns error, or pool needs to reclaim the slot.
+
+## Two-Phase Parsing
+
+Headers are parsed first, then the body — separately. This is critical because:
+
+1. **Routing needs headers.** The path and method must be known before the body arrives to select the right handler and body reader factory.
+
+2. **Header pointers point into read_buf.** `KlRequest.path`, `KlRequest.method`, and all header name/value pointers are direct pointers into the connection's `read_buf`. No allocation, no copying. These pointers are valid as long as the read buffer isn't overwritten.
+
+3. **Body reading may overwrite read_buf.** For bodies larger than `KL_READ_BUF_SIZE` (8192 bytes), the connection reuses the read buffer as a sliding window. Once body reading starts, the header region of read_buf may be overwritten. This is why the body reader factory receives the request while header pointers are still valid — it can extract Content-Type, Content-Length, etc. during construction.
+
+The parser vtable signals this with `KL_PARSE_HEADERS_OK` (headers complete, body pending) vs `KL_PARSE_OK` (entire message complete).
+
+## Body Reader Vtable
+
+```c
+struct KlBodyReader {
+    int  (*on_data)(KlBodyReader *self, const char *data, size_t len);
+    void (*on_complete)(KlBodyReader *self);
+    void (*on_error)(KlBodyReader *self);
+    void (*destroy)(KlBodyReader *self);
+};
+```
+
+**Factory pattern:**
+
+```c
+typedef KlBodyReader *(*KlBodyReaderFactory)(KlAllocator *alloc,
+                                              KlRequest *req,
+                                              void *user_data);
+```
+
+The factory is called after `KL_PARSE_HEADERS_OK`, while header pointers are valid. It inspects the request (Content-Type, Content-Length) and either:
+- Returns a reader — body data will be fed to `on_data`
+- Returns NULL — KEEL sends 415 Unsupported Media Type
+
+**Data flow:**
+
+1. Parser calls `on_data` on the body reader for each chunk of body data
+2. The reader accumulates, parses, or streams the data
+3. When the parser signals message complete, `on_complete` is called
+4. The handler accesses the finished reader via `req->body_reader`
+5. After the handler returns, `destroy` is called
+
+If `on_data` returns `-1`, the parse is aborted and KEEL sends 413 Payload Too Large.
+
+**Built-in readers:**
+
+| Reader | Factory | user_data | Behavior |
+|--------|---------|-----------|----------|
+| `KlBufReader` | `kl_body_reader_buffer` | `(void *)(size_t)max_size` | Accumulates into growable buffer. 0 = unlimited. |
+| `KlMultipartReader` | `kl_body_reader_multipart` | `KlMultipartConfig *` | RFC 2046 multipart/form-data parser. NULL = defaults. |
+
+## Multipart State Machine
+
+```
+    on_data()
+       │
+       ▼
+  ┌──────────┐     find "\r\n--boundary"     ┌─────────────────┐
+  │ PREAMBLE │──────────────────────────────►│ AFTER_BOUNDARY  │
+  └──────────┘                                └────────┬────────┘
+                                                       │
+                                              "\r\n" ──┤── "--\r\n"
+                                                       │        │
+                                                       ▼        ▼
+                                              ┌──────────┐  ┌──────┐
+                                              │ HEADERS  │  │ DONE │
+                                              └────┬─────┘  └──────┘
+                                                   │ "\r\n\r\n"
+                                                   ▼
+                                              ┌──────────┐
+                                              │  BODY    │
+                                              └────┬─────┘
+                                                   │ find "\r\n--boundary"
+                                                   │
+                                                   ▼
+                                          ┌─────────────────┐
+                                          │ AFTER_BOUNDARY  │ (loop)
+                                          └─────────────────┘
+```
+
+**Overlap buffer algorithm:** Boundaries can span across `on_data` calls. The reader keeps the last `delimiter_len - 1` bytes from each `on_data` call in an overlap buffer. On the next call, the overlap + new data are scanned together for the boundary. This handles the worst case: a boundary split at any byte position across chunks.
+
+**Part metadata extraction:** When entering HEADERS state, part headers are accumulated in a 2048-byte header buffer. On `\r\n\r\n`, the reader parses `Content-Disposition: form-data; name="..."; filename="..."` and `Content-Type: ...` into the `KlMultipartPart` struct.
+
+**Configurable limits:**
+
+| Limit | Field | Default | Effect when exceeded |
+|-------|-------|---------|---------------------|
+| Per-part size | `max_part_size` | unlimited | `on_data` returns -1 → 413 |
+| Total body size | `max_total_size` | unlimited | `on_data` returns -1 → 413 |
+| Number of parts | `max_parts` | unlimited | `on_data` returns -1 → 413 |
+
+## Response Modes
+
+```c
+typedef enum {
+    KL_BODY_NONE,      /* no body (HEAD, 204, 304) */
+    KL_BODY_BUFFER,    /* body in memory — writev(headers + body) */
+    KL_BODY_FILE,      /* body is a file — sendfile(2) */
+    KL_BODY_STREAM     /* chunked transfer encoding */
+} KlBodyMode;
+```
+
+### Buffer mode (`kl_response_body`)
+
+Headers and body are sent in a single `writev(2)` call — one syscall for the entire response. The response builder formats headers into a growable buffer, then `writev` sends `[header_iov, body_iov]` atomically.
+
+### File mode (`kl_response_file`)
+
+1. Headers are sent via `write(2)`
+2. On Linux: `TCP_CORK` is set, then `sendfile(2)`, then `TCP_CORK` is cleared — coalescing headers and file data into minimum packets
+3. On macOS: `sendfile(2)` with the macOS-specific API (reversed src/dst parameters, length via pointer)
+4. Fallback: `read` + `write` loop for platforms without `sendfile`
+
+The caller passes an open `fd` and file size. KEEL manages the fd lifetime — it closes the fd when the response is freed.
+
+### Stream mode (`kl_response_begin_stream` / `kl_response_end_stream`)
+
+1. `begin_stream` sends headers with `Transfer-Encoding: chunked`
+2. Returns a `KlWriteFn` callback — each call formats data as an HTTP chunk (`<hex-len>\r\n<data>\r\n`) and writes it to the socket
+3. `end_stream` sends the terminating `0\r\n\r\n` chunk
+
+The write function signature `int (*)(void *ctx, const char *data, size_t len)` is designed to be passed directly to JSON serializers or any streaming encoder.
+
+## Allocator Design
+
+```c
+typedef struct {
+    void *(*malloc)(void *ctx, size_t size);
+    void *(*realloc)(void *ctx, void *ptr, size_t old_size, size_t new_size);
+    void  (*free)(void *ctx, void *ptr, size_t size);
+    void *ctx;
+} KlAllocator;
+```
+
+**Why `size` is passed to `free` and `old_size` to `realloc`:**
+
+Standard `free(ptr)` requires the allocator to store size metadata (typically 8-16 bytes before the pointer). By passing the size explicitly, KEEL enables:
+
+- **Arena allocators** — bump pointer, free is a no-op, reset frees everything
+- **Pool allocators** — fixed-size slabs, size determines which pool
+- **Tracking allocators** — count bytes allocated/freed without hidden metadata
+- **OS page allocators** — `munmap` needs the size
+
+The default allocator wraps stdlib `malloc`/`realloc`/`free`, ignoring the size parameters.
+
+## Router Design
+
+The router uses a flat array of `KlRoute` structs, scanned linearly on each request:
+
+```c
+int kl_router_match(KlRouter *r,
+                    const char *method, size_t method_len,
+                    const char *path, size_t path_len,
+                    KlRoute **matched,
+                    KlParam *params, int *num_params);
+```
+
+Matching is segment-based (split on `/`). Each segment is compared with `memcmp` (exact) or captured as a parameter (`:name` prefix). Up to `KL_MAX_PARAMS` (16) parameters are extracted.
+
+**Return values:**
+- `200` — match found, `*matched` set, params populated
+- `405` — path matched at least one route but method didn't match any
+- `404` — no route matches the path
+
+**Why linear scan, not a trie?** For a typical API with 10-50 routes, a linear scan with early-exit is faster than a trie due to cache locality. The route table fits in a few cache lines. A trie adds pointer chasing and memory overhead that only pays off at hundreds of routes.
+
+## Timeout Mechanism
+
+```
+ ┌───────────────────────────────────────────────────────────┐
+ │  Event Loop Tick                                          │
+ │                                                           │
+ │  1. kl_event_wait(timeout=1000ms)                        │
+ │  2. Process up to 64 ready events                        │
+ │  3. Every ~400ms: sweep all active connections            │
+ │     └─ if (now - conn.last_active_ms > read_timeout_ms)  │
+ │        └─ send 408 → close                               │
+ └───────────────────────────────────────────────────────────┘
+```
+
+- **Clock**: `kl_monotonic_ms()` — `clock_gettime(CLOCK_MONOTONIC)` on Linux, `mach_absolute_time()` on macOS
+- **Stamping**: `last_active_ms` is updated on every successful `read(2)` or `write(2)` — so active transfers are never timed out
+- **Sweep**: Runs after processing events, not on every connection operation — amortized O(n) over the pool
+
+**Slow-loris protection**: An attacker sending one byte per second keeps the connection in READING state but never completes headers. The timeout sweep catches this — `last_active_ms` advances on each read, but if the total time from connection open exceeds the timeout without completing a request, the connection is closed.
+
+## Memory Model
+
+### Pre-allocated connection pool
+
+```c
+KlConnPool {
+    KlConn *conns;      /* array of max_connections KlConn structs */
+    KlConn *free_list;  /* singly-linked free list through next_free */
+}
+```
+
+All connections are allocated at server init. `kl_conn_acquire` pops from the free list, `kl_conn_release` pushes back. No `malloc` during request handling. If the pool is exhausted, new connections are rejected at `accept(2)`.
+
+Each `KlConn` contains an 8KB `read_buf` inline — no separate allocation for the read buffer.
+
+### Sliding window read buffer
+
+For bodies larger than 8KB, the read buffer is reused as a sliding window:
+
+1. Headers are parsed from `read_buf[0..hdr_len]`
+2. Leftover data after headers is fed to the body reader
+3. Subsequent `read(2)` calls fill the entire `read_buf` from offset 0
+4. Each chunk is fed to the body reader via `on_data`
+
+This means header pointers are invalidated once the body exceeds the initial read — which is why the body reader factory receives the request while headers are still valid.
+
+### Response header buffer
+
+The response builds headers into a growable buffer (initial capacity 512 bytes). For typical responses with 3-5 headers, this never needs to grow. The buffer is reused across keep-alive requests via `kl_response_reset`.
+
+## Zero-Copy Techniques
+
+1. **Header pointers into read buffer** — `KlRequest` fields are direct pointers into `read_buf`, not copied strings
+2. **sendfile(2)** — file responses bypass userspace entirely, kernel copies file→socket
+3. **writev(2) batching** — headers + body sent as a single scatter-gather I/O, one syscall
+4. **TCP_CORK** — on Linux, coalesces headers + sendfile data into minimum TCP segments
+5. **Streaming writes** — chunked transfer encoding writes directly to the socket fd, no intermediate buffer
+6. **Route parameter capture** — `KlParam` values point into `read_buf`, not allocated strings

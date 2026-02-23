@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - name: Linux (epoll)
+            os: ubuntu-latest
+            backend: ""
+            deps: ""
+          - name: Linux (io_uring)
+            os: ubuntu-latest
+            backend: "BACKEND=iouring"
+            deps: "liburing-dev"
+          - name: macOS (kqueue)
+            os: macos-latest
+            backend: ""
+            deps: ""
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk ${{ matrix.deps }}
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install wrk
+
+      - name: Build
+        run: make ${{ matrix.backend }}
+
+      - name: Test
+        run: make test
+
+      - name: Build examples
+        run: make examples ${{ matrix.backend }}
+
+      - name: Smoke test
+        run: |
+          ./examples/hello 9095 &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null" EXIT
+
+          for i in 1 2 3 4 5; do
+            if curl -s http://localhost:9095/hello >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          RESPONSE=$(curl -s http://localhost:9095/hello)
+          echo "Response: $RESPONSE"
+          echo "$RESPONSE" | grep -q '"hello"'

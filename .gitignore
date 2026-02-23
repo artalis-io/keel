@@ -1,0 +1,31 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+
+# Example binaries
+examples/hello
+examples/rest_api
+examples/streaming_json
+examples/static_files
+examples/stream_body
+examples/multipart
+
+# Test binaries
+tests/test_*
+!tests/test_*.c
+
+# Debug/profiling
+*.dSYM/
+*.gcda
+*.gcno
+*.gcov
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store

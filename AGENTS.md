@@ -1,0 +1,151 @@
+# KEEL — Agent Guidelines
+
+Guidelines for AI agents working on keel: code review, auditing, testing, and contributing.
+
+## Code Review Checklist
+
+Every PR should be checked for:
+
+- [ ] **Overflow guards** — All arithmetic on sizes/lengths checked against `SIZE_MAX/2` or `INT_MAX/2` before addition/multiplication
+- [ ] **NULL checks** — Every pointer from allocation, lookup, or parameter is checked before dereference
+- [ ] **Resource cleanup** — Every `_init` has a matching `_free`, every `open` has a `close`, every acquired connection is released
+- [ ] **Bounds checking** — Array indices validated, buffer writes bounded by capacity, `snprintf` not `sprintf`
+- [ ] **Return value checks** — `read`, `write`, `sendfile`, allocation functions all checked for errors
+- [ ] **No allocation in hot path** — The event loop, connection state machine, and response send path must not call `malloc`
+- [ ] **Allocator discipline** — All allocation goes through `KlAllocator`, never raw `malloc`/`free`
+- [ ] **State machine correctness** — Connection state transitions are valid, no state reached without proper setup
+- [ ] **Keep-alive safety** — Response reset clears all state, no stale pointers across requests
+- [ ] **Header pointer lifetime** — After body reading starts, header pointers may be invalidated; don't access them in body reader callbacks
+
+## Security Audit Patterns
+
+### Unsafe functions to scan for
+
+```bash
+# These should NEVER appear in src/ or parsers/
+grep -rn 'sprintf\b' src/ parsers/       # use snprintf
+grep -rn 'strcpy\b' src/ parsers/        # use memcpy with length
+grep -rn 'strcat\b' src/ parsers/        # use snprintf
+grep -rn 'gets\b' src/ parsers/          # never
+grep -rn 'atoi\b' src/ parsers/          # use strtol with validation
+```
+
+### Integer overflow patterns to check
+
+```c
+/* BAD — can overflow */
+size_t new_cap = cap * 2;
+char *buf = alloc(len + extra);
+
+/* GOOD — overflow-safe */
+if (cap > SIZE_MAX / 2) return -1;
+size_t new_cap = cap * 2;
+
+if (extra > SIZE_MAX - len) return -1;
+char *buf = alloc(len + extra);
+```
+
+### Buffer boundary checks
+
+- `read_buf` is `KL_READ_BUF_SIZE` (8192) — verify no write exceeds this
+- `hdr_buf` in multipart reader is 2048 — verify header overflow is caught
+- Response header buffer grows — verify growth arithmetic is overflow-safe
+- Body reader buffer grows — verify `max_size` is checked before growth
+
+### Thread safety
+
+KEEL is single-threaded by design. Verify:
+- No global mutable state (except `volatile int running` for signal handling)
+- Integration tests that use threads properly synchronize server start/stop
+- No `static` mutable variables in any module
+
+## Testing Requirements
+
+### Coverage expectations
+
+- Every public function in `include/keel/*.h` should have at least one test
+- Body reader tests should cover: normal operation, limits exceeded, boundary edge cases, empty input, binary data
+- Integration tests should verify the full request→response cycle over real sockets
+- Timeout tests should verify both triggering and non-triggering cases
+
+### Edge cases to always cover
+
+- Empty input (zero-length body, no headers, empty path)
+- Maximum values (max headers=64, max params=16, max boundary=70)
+- Boundary spanning (data split across multiple `on_data` calls)
+- Allocation failure (if testing custom allocator that can fail)
+- Connection pool exhaustion (all slots taken)
+- Malformed input (bad HTTP, invalid multipart, truncated headers)
+
+### Writing new tests
+
+```c
+#include <utest.h>
+#include <keel/keel.h>
+
+UTEST(suite_name, test_name) {
+    /* Setup */
+    KlAllocator alloc = kl_allocator_default();
+
+    /* Action */
+    int result = kl_some_function(&alloc, ...);
+
+    /* Assert */
+    ASSERT_EQ(0, result);
+}
+
+UTEST_MAIN();
+```
+
+Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Makefile wildcard.
+
+## Performance Considerations
+
+- **No allocation in the hot path** — the event loop, state machine transitions, and response sending must work with pre-allocated buffers
+- **writev batching** — response headers and body are sent in a single writev call, not separate writes
+- **sendfile for files** — never read a file into a buffer to write it to a socket
+- **TCP_CORK on Linux** — coalesce headers + file data into minimal packets
+- **TCP_NODELAY** — no Nagle delay on response writes
+- **Edge-triggered events** — fewer syscalls than level-triggered
+- **Pre-built status lines** — "HTTP/1.1 200 OK\r\n" is a compile-time constant, not formatted per-request
+- **Fast integer formatting** — Content-Length is formatted without snprintf
+
+## Adding a New Module
+
+1. Create header: `include/keel/<module>.h` with include guard `KEEL_<MODULE>_H`
+2. Create source: `src/<module>.c`
+3. Add to `CORE_SRC` in `Makefile`
+4. Add `#include <keel/<module>.h>` to `include/keel/keel.h`
+5. Prefix all public functions with `kl_<module>_`
+6. Write tests: `tests/test_<module>.c`
+7. Update module count in `README.md` and `CLAUDE.md`
+
+## Adding a New Body Reader
+
+1. Implement the `KlBodyReader` vtable (4 functions: `on_data`, `on_complete`, `on_error`, `destroy`)
+2. Define a concrete struct embedding `KlBodyReader base` as the first field
+3. Write a factory function: `KlBodyReader *kl_body_reader_<name>(KlAllocator *alloc, KlRequest *req, void *user_data)`
+4. The factory inspects headers (Content-Type, Content-Length) to validate — return NULL to reject (triggers 415)
+5. Register per-route: `kl_server_route(&s, method, pattern, handler, user_data, kl_body_reader_<name>)`
+6. Create header in `include/keel/body_reader_<name>.h`, source in `src/body_reader_<name>.c`
+7. Add to `CORE_SRC` in Makefile, include in `keel.h`
+
+## Adding a New Event Backend
+
+1. Implement all functions declared in `include/keel/event.h`:
+   - `kl_event_init`, `kl_event_add`, `kl_event_mod`, `kl_event_del`, `kl_event_wait`, `kl_event_close`
+2. Create `src/event_<backend>.c`
+3. Add Makefile conditional:
+   ```makefile
+   ifeq ($(BACKEND),<name>)
+     EVENT_SRC = src/event_<name>.c
+     LDFLAGS += <any required libraries>
+   endif
+   ```
+4. Test on the target platform — event backends are platform-specific
+
+## Commit Conventions
+
+- No `Co-Authored-By` trailers
+- Concise commit messages focused on "why" not "what"
+- One logical change per commit
