@@ -1,0 +1,368 @@
+#include <keel/response.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/uio.h>
+#include <stdint.h>
+
+#if defined(__linux__)
+  #include <sys/sendfile.h>
+  #include <netinet/tcp.h>
+#elif defined(__APPLE__)
+  #include <sys/socket.h>
+#endif
+
+#define KL_HDR_INIT_CAP 512
+
+/* ── Pre-built status lines — no snprintf in the hot path ─────────── */
+
+typedef struct { const char *str; size_t len; } KlStatusLine;
+
+#define SL(s) { (s), sizeof(s) - 1 }
+
+static KlStatusLine status_line_for(int code) {
+    switch (code) {
+        case 200: return (KlStatusLine)SL("HTTP/1.1 200 OK\r\n");
+        case 201: return (KlStatusLine)SL("HTTP/1.1 201 Created\r\n");
+        case 204: return (KlStatusLine)SL("HTTP/1.1 204 No Content\r\n");
+        case 301: return (KlStatusLine)SL("HTTP/1.1 301 Moved Permanently\r\n");
+        case 302: return (KlStatusLine)SL("HTTP/1.1 302 Found\r\n");
+        case 304: return (KlStatusLine)SL("HTTP/1.1 304 Not Modified\r\n");
+        case 400: return (KlStatusLine)SL("HTTP/1.1 400 Bad Request\r\n");
+        case 403: return (KlStatusLine)SL("HTTP/1.1 403 Forbidden\r\n");
+        case 404: return (KlStatusLine)SL("HTTP/1.1 404 Not Found\r\n");
+        case 405: return (KlStatusLine)SL("HTTP/1.1 405 Method Not Allowed\r\n");
+        case 413: return (KlStatusLine)SL("HTTP/1.1 413 Payload Too Large\r\n");
+        case 500: return (KlStatusLine)SL("HTTP/1.1 500 Internal Server Error\r\n");
+        default:  return (KlStatusLine)SL("HTTP/1.1 500 Internal Server Error\r\n");
+    }
+}
+
+/* ── Fast integer formatting — replaces snprintf for Content-Length ── */
+
+static int format_uint(char *p, size_t n) {
+    char tmp[20];
+    int ndigits = 0;
+    if (n == 0) {
+        *p = '0';
+        return 1;
+    }
+    while (n > 0) {
+        tmp[ndigits++] = '0' + (char)(n % 10);
+        n /= 10;
+    }
+    for (int i = ndigits - 1; i >= 0; i--)
+        *p++ = tmp[i];
+    return ndigits;
+}
+
+/* "Content-Length: <n>\r\n" into buf, returns total length */
+static int format_content_length(char *buf, size_t n) {
+    memcpy(buf, "Content-Length: ", 16);
+    int dlen = format_uint(buf + 16, n);
+    buf[16 + dlen] = '\r';
+    buf[17 + dlen] = '\n';
+    return 18 + dlen;
+}
+
+/* "<hex>\r\n" into buf, returns total length */
+static int format_chunk_hdr(char *buf, size_t n) {
+    static const char hex[] = "0123456789abcdef";
+    char tmp[16];
+    int ndigits = 0;
+    size_t v = n;
+    do {
+        tmp[ndigits++] = hex[v & 0xf];
+        v >>= 4;
+    } while (v > 0);
+    char *p = buf;
+    for (int i = ndigits - 1; i >= 0; i--)
+        *p++ = tmp[i];
+    *p++ = '\r';
+    *p++ = '\n';
+    return ndigits + 2;
+}
+
+/* ── Header buffer management ────────────────────────────────────── */
+
+static int hdr_append(KlResponse *res, const char *data, size_t len) {
+    while (res->hdr_len + len > res->hdr_cap) {
+        size_t new_cap;
+        if (res->hdr_cap > SIZE_MAX / 2)
+            return -1;
+        new_cap = res->hdr_cap * 2;
+        char *new_buf = kl_realloc(res->alloc, res->hdr_buf,
+                                   res->hdr_cap, new_cap);
+        if (!new_buf) return -1;
+        res->hdr_buf = new_buf;
+        res->hdr_cap = new_cap;
+    }
+    memcpy(res->hdr_buf + res->hdr_len, data, len);
+    res->hdr_len += len;
+    return 0;
+}
+
+/* ── Init / Reset / Free ─────────────────────────────────────────── */
+
+int kl_response_init(KlResponse *res, KlAllocator *alloc) {
+    memset(res, 0, sizeof(*res));
+    res->alloc = alloc;
+    res->status = 200;
+    res->file_fd = -1;
+    res->hdr_buf = kl_malloc(alloc, KL_HDR_INIT_CAP);
+    if (!res->hdr_buf) return -1;
+    res->hdr_cap = KL_HDR_INIT_CAP;
+    return 0;
+}
+
+void kl_response_reset(KlResponse *res) {
+    /* Fast reinit for keep-alive — reuses header buffer, no alloc */
+    char *buf = res->hdr_buf;
+    size_t cap = res->hdr_cap;
+    KlAllocator *alloc = res->alloc;
+    int conn_fd = res->conn_fd;
+
+    memset(res, 0, sizeof(*res));
+    res->alloc = alloc;
+    res->conn_fd = conn_fd;
+    res->status = 200;
+    res->file_fd = -1;
+    res->hdr_buf = buf;
+    res->hdr_cap = cap;
+}
+
+void kl_response_free(KlResponse *res) {
+    if (res->hdr_buf) {
+        kl_free(res->alloc, res->hdr_buf, res->hdr_cap);
+        res->hdr_buf = NULL;
+    }
+}
+
+/* ── Public API ──────────────────────────────────────────────────── */
+
+void kl_response_status(KlResponse *res, int code) {
+    res->status = code;
+}
+
+void kl_response_header(KlResponse *res, const char *name, const char *value) {
+    if (!name || !value) return;
+    hdr_append(res, name, strlen(name));
+    hdr_append(res, ": ", 2);
+    hdr_append(res, value, strlen(value));
+    hdr_append(res, "\r\n", 2);
+}
+
+void kl_response_body(KlResponse *res, const char *data, size_t len) {
+    res->body_mode = KL_BODY_BUFFER;
+    res->body = data;
+    res->body_len = len;
+}
+
+void kl_response_file(KlResponse *res, int fd, off_t size) {
+    res->body_mode = KL_BODY_FILE;
+    res->file_fd = fd;
+    res->file_size = size;
+    res->file_offset = 0;
+}
+
+void kl_response_json(KlResponse *res, int code, const char *json, size_t len) {
+    kl_response_status(res, code);
+    kl_response_header(res, "Content-Type", "application/json");
+    kl_response_body(res, json, len);
+}
+
+void kl_response_error(KlResponse *res, int code, const char *message) {
+    kl_response_status(res, code);
+    kl_response_header(res, "Content-Type", "text/plain");
+    if (!message) message = "";
+    kl_response_body(res, message, strlen(message));
+}
+
+/* ── sendfile wrapper ────────────────────────────────────────────── */
+
+static ssize_t kl_sendfile_impl(int out_fd, int in_fd, off_t *offset, size_t count) {
+#if defined(__linux__)
+    return sendfile(out_fd, in_fd, offset, count);
+#elif defined(__APPLE__)
+    off_t len = (off_t)count;
+    int r = sendfile(in_fd, out_fd, *offset, &len, NULL, 0);
+    if (r < 0 && errno != EAGAIN) return -1;
+    *offset += len;
+    return (ssize_t)len;
+#else
+    char buf[8192];
+    size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
+    ssize_t nr = pread(in_fd, buf, to_read, *offset);
+    if (nr <= 0) return nr;
+    ssize_t nw = write(out_fd, buf, (size_t)nr);
+    if (nw > 0) *offset += nw;
+    return nw;
+#endif
+}
+
+/* ── Send: single writev for headers + body ──────────────────────── */
+
+static const char kl_keepalive_hdr[] = "Connection: keep-alive\r\n";
+
+int kl_response_send(KlResponse *res) {
+    if (!res->headers_sent) {
+        KlStatusLine sl = status_line_for(res->status);
+
+        char cl_buf[48];
+        int cl_len = 0;
+        if (res->body_mode == KL_BODY_BUFFER) {
+            cl_len = format_content_length(cl_buf, res->body_len);
+        } else if (res->body_mode == KL_BODY_FILE) {
+            cl_len = format_content_length(cl_buf, (size_t)res->file_size);
+        }
+
+        struct iovec iov[7];
+        int iovcnt = 0;
+
+        /* Status line (constant string, no alloc) */
+        iov[iovcnt].iov_base = (void *)sl.str;
+        iov[iovcnt].iov_len = sl.len;
+        iovcnt++;
+
+        /* User headers */
+        if (res->hdr_len > 0) {
+            iov[iovcnt].iov_base = res->hdr_buf;
+            iov[iovcnt].iov_len = res->hdr_len;
+            iovcnt++;
+        }
+
+        /* Content-Length */
+        if (cl_len > 0) {
+            iov[iovcnt].iov_base = cl_buf;
+            iov[iovcnt].iov_len = (size_t)cl_len;
+            iovcnt++;
+        }
+
+        /* Connection: keep-alive */
+        iov[iovcnt].iov_base = (void *)kl_keepalive_hdr;
+        iov[iovcnt].iov_len = sizeof(kl_keepalive_hdr) - 1;
+        iovcnt++;
+
+        /* Header terminator */
+        iov[iovcnt].iov_base = (void *)"\r\n";
+        iov[iovcnt].iov_len = 2;
+        iovcnt++;
+
+        /* Inline body for buffered mode */
+        if (res->body_mode == KL_BODY_BUFFER && res->body_len > 0) {
+            iov[iovcnt].iov_base = (void *)res->body;
+            iov[iovcnt].iov_len = res->body_len;
+            iovcnt++;
+        }
+
+        size_t total = 0;
+        for (int j = 0; j < iovcnt; j++)
+            total += iov[j].iov_len;
+        ssize_t nw = writev(res->conn_fd, iov, iovcnt);
+        if (nw < 0 || (size_t)nw != total) return -1;
+        res->headers_sent = 1;
+
+        if (res->body_mode == KL_BODY_BUFFER)
+            return 0;
+    }
+
+    /* Send file body */
+    if (res->body_mode == KL_BODY_FILE) {
+#if defined(__linux__)
+        /* TCP_CORK: coalesce headers + file data into fewer TCP segments */
+        int cork = 1;
+        (void)setsockopt(res->conn_fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
+#endif
+        size_t remaining = (size_t)(res->file_size - res->file_offset);
+        while (remaining > 0) {
+            ssize_t sent = kl_sendfile_impl(res->conn_fd, res->file_fd,
+                                            &res->file_offset, remaining);
+            if (sent < 0) {
+                if (errno == EAGAIN) return 1;
+                return -1;
+            }
+            if (sent == 0) break;
+            remaining = (size_t)(res->file_size - res->file_offset);
+        }
+#if defined(__linux__)
+        cork = 0;
+        (void)setsockopt(res->conn_fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
+#endif
+        return 0;
+    }
+
+    return 0;
+}
+
+/* ── Chunked streaming ───────────────────────────────────────────── */
+
+static int kl_stream_write(void *ctx, const char *data, size_t len) {
+    KlResponse *res = ctx;
+    if (res->stream_error) return -1;
+    if (len == 0) return 0;
+
+    char hdr[24];
+    int hdr_len = format_chunk_hdr(hdr, len);
+
+    struct iovec iov[3] = {
+        { .iov_base = hdr,          .iov_len = (size_t)hdr_len },
+        { .iov_base = (void *)data, .iov_len = len },
+        { .iov_base = (void *)"\r\n", .iov_len = 2 },
+    };
+
+    /* hdr_len <= 24 and len is user-controlled but bounded by available
+     * memory; overflow not possible in practice. */
+    size_t total = (size_t)hdr_len + len + 2;
+    ssize_t nw = writev(res->conn_fd, iov, 3);
+    if (nw < 0 || (size_t)nw != total) {
+        res->stream_error = 1;
+        return -1;
+    }
+    return 0;
+}
+
+int kl_response_begin_stream(KlResponse *res, int status,
+                             KlWriteFn *out_write, void **out_ctx) {
+    res->body_mode = KL_BODY_STREAM;
+    kl_response_status(res, status);
+    kl_response_header(res, "Transfer-Encoding", "chunked");
+
+    KlStatusLine sl = status_line_for(res->status);
+
+    struct iovec iov[3];
+    int iovcnt = 0;
+
+    iov[iovcnt].iov_base = (void *)sl.str;
+    iov[iovcnt].iov_len = sl.len;
+    iovcnt++;
+
+    if (res->hdr_len > 0) {
+        iov[iovcnt].iov_base = res->hdr_buf;
+        iov[iovcnt].iov_len = res->hdr_len;
+        iovcnt++;
+    }
+
+    iov[iovcnt].iov_base = (void *)"\r\n";
+    iov[iovcnt].iov_len = 2;
+    iovcnt++;
+
+    size_t total = 0;
+    for (int j = 0; j < iovcnt; j++)
+        total += iov[j].iov_len;
+    ssize_t nw = writev(res->conn_fd, iov, iovcnt);
+    if (nw < 0 || (size_t)nw != total) return -1;
+
+    res->headers_sent = 1;
+    *out_write = kl_stream_write;
+    *out_ctx = res;
+    return 0;
+}
+
+int kl_response_end_stream(KlResponse *res) {
+    if (res->stream_error) return -1;
+    if (write(res->conn_fd, "0\r\n\r\n", 5) < 0) {
+        res->stream_error = 1;
+        return -1;
+    }
+    return 0;
+}
