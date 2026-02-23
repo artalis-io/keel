@@ -265,7 +265,7 @@ int main(void) {
 }
 ```
 
-On Linux, use the [pledge polyfill](https://github.com/nicknisi/pledge) (seccomp-bpf + Landlock) for the same API. The key insight: KEEL's `init`/`run` split makes this natural — no library changes needed.
+On Linux, use the [pledge polyfill](https://github.com/jart/pledge) (seccomp-bpf + Landlock) for the same API. The key insight: KEEL's `init`/`run` split makes this natural — no library changes needed.
 
 ## Benchmark
 
@@ -348,6 +348,8 @@ make debug && make test  # run under ASan + UBSan
 **Why not C++?** Everything C gives you here but with a language that fights simplicity. The connection state machine is a clean `enum` + `switch`. In C++ someone would reach for `std::variant<State1, State2, ...>` with `std::visit` or a template-based state machine library. The router is a flat array scan with `memcmp`. In C++ it becomes `std::unordered_map<std::string, std::function<void(...)>>` with heap allocations on every lookup. Both objectively worse for this domain.
 
 **Why not Zig?** Zig's explicit allocators and `comptime` are genuinely appealing — the allocator interface in KEEL is essentially Zig's `std.mem.Allocator` in C. For a new project not needing battle-tested HTTP parsing, Zig would be a strong choice. But llhttp doesn't have a Zig-native equivalent yet, and Zig's ecosystem for production networking (TLS, HTTP/2) isn't there.
+
+**Why not C# / Java / Python?** Managed runtimes are the wrong abstraction for a library that needs to control every byte and syscall. KEEL's connection pool is a flat array with zero per-request allocation. Its response path goes straight from a user buffer to `writev(2)` or `sendfile(2)` — no managed heap, no GC, no object headers. A C# `Span<byte>` or Java `ByteBuffer` gets close but still lives inside a runtime that owns your threads, your memory layout, and your syscall surface. Python is ~100x slower for raw I/O dispatch and adds a GIL. These languages are excellent for application code *on top* of an HTTP server — they're the wrong tool for building the server itself.
 
 ## CI
 

@@ -4,6 +4,38 @@ Future direction and design considerations for keel.
 
 ## Near-Term
 
+### 100-continue (Expect header)
+
+Auto-detect `Expect: 100-continue` and send `HTTP/1.1 100 Continue\r\n\r\n` before reading the body. Currently clients sending this header hang waiting for the 100 response.
+
+### HEAD method auto-strip
+
+`kl_response_send` should detect HEAD requests and suppress the body while preserving `Content-Length`. Currently handlers must manually avoid setting a body for HEAD.
+
+### Graceful connection drain
+
+See "Graceful shutdown" below — expand `kl_server_stop` to stop accepting, set a drain deadline, continue processing in-flight requests, and close remaining at deadline.
+
+### Signal handling
+
+Add an optional built-in SIGTERM/SIGINT handler that calls `kl_server_stop`. Change `volatile int running` to `_Atomic int running` for portable correctness. Document signal safety guarantees.
+
+### HTTP/1.0 compatibility
+
+Send `Connection: close` for HTTP/1.0 clients instead of keep-alive headers. The parser already detects the version — the response layer needs to check it.
+
+### Static analysis in CI
+
+Add clang-analyzer or cppcheck to the GitHub Actions pipeline to catch regressions early. Currently only compiler warnings (`-Wall -Wextra -Wpedantic -Werror`) gate the build.
+
+### Fuzz testing
+
+Add AFL or libFuzzer harnesses for the llhttp parser wrapper and the multipart body reader. These process untrusted input and are the highest-risk attack surface.
+
+### API reference documentation
+
+Generate Doxygen or hand-written man pages for all public API functions. Currently users read headers and examples.
+
 ### Chunked request bodies
 
 Support `Transfer-Encoding: chunked` for requests. The parser already detects the `chunked` flag — the connection layer needs to de-chunk incoming data before feeding it to the body reader. This is straightforward: a small state machine that strips chunk headers and feeds raw data through the existing body reader interface.
