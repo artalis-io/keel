@@ -14,6 +14,12 @@
 #define KL_EVENTS_PER_TICK 64
 #define KL_POLL_TIMEOUT_MS 1000
 
+/* Suppress warn_unused_result on best-effort error writes */
+static inline void best_effort_write(int fd, const void *buf, size_t len) {
+    ssize_t r = write(fd, buf, len);
+    (void)r;
+}
+
 static const char kl_408_response[] =
     "HTTP/1.1 408 Request Timeout\r\n"
     "Content-Length: 0\r\n"
@@ -238,8 +244,8 @@ int kl_server_run(KlServer *s) {
                  * will almost always succeed in one call. */
                 if (tc->state == KL_CONN_READING ||
                     tc->state == KL_CONN_READING_BODY)
-                    (void)write(tc->fd, kl_408_response,
-                                sizeof(kl_408_response) - 1);
+                    best_effort_write(tc->fd, kl_408_response,
+                                      sizeof(kl_408_response) - 1);
                 kl_event_del(&s->loop, tc->fd);
                 kl_conn_release(&s->pool, tc);
             }
