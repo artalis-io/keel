@@ -2,12 +2,20 @@
 #include <liburing.h>
 #include <limits.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #define RING_SIZE 256
 #define INITIAL_FD_CAP 256
+
+/*
+ * Sentinel value for "fd slot is unused."  Distinct from NULL, which is a
+ * valid udata value (the listen socket uses NULL to identify itself).
+ * Pointer value 1 can never be returned by malloc on any architecture.
+ */
+#define UDATA_UNUSED ((void *)(uintptr_t)1)
 
 typedef struct {
     struct io_uring ring;
@@ -31,8 +39,8 @@ static int ensure_fd_cap(KlIoUringState *st, int fd) {
     if (!new_arr)
         return -1;
 
-    memset(new_arr + st->fd_udata_cap, 0,
-           (size_t)(new_cap - st->fd_udata_cap) * sizeof(void *));
+    for (int i = st->fd_udata_cap; i < new_cap; i++)
+        new_arr[i] = UDATA_UNUSED;
     st->fd_udata = new_arr;
     st->fd_udata_cap = new_cap;
     return 0;
@@ -55,12 +63,14 @@ int kl_event_init(KlEventLoop *loop) {
         return -1;
     }
 
-    st->fd_udata = calloc(INITIAL_FD_CAP, sizeof(void *));
+    st->fd_udata = malloc(INITIAL_FD_CAP * sizeof(void *));
     if (!st->fd_udata) {
         io_uring_queue_exit(&st->ring);
         free(st);
         return -1;
     }
+    for (int i = 0; i < INITIAL_FD_CAP; i++)
+        st->fd_udata[i] = UDATA_UNUSED;
     st->fd_udata_cap = INITIAL_FD_CAP;
     st->pending = 0;
 
@@ -126,7 +136,7 @@ int kl_event_del(KlEventLoop *loop, int fd) {
     st->pending++;
 
     if (fd < st->fd_udata_cap)
-        st->fd_udata[fd] = NULL;
+        st->fd_udata[fd] = UDATA_UNUSED;
 
     return 0;
 }
@@ -169,7 +179,8 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
         }
 
         int fd = (int)fd64;
-        if (fd < 0 || fd >= st->fd_udata_cap || !st->fd_udata[fd]) {
+        if (fd < 0 || fd >= st->fd_udata_cap ||
+            st->fd_udata[fd] == UDATA_UNUSED) {
             seen++;
             continue;
         }
