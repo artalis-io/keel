@@ -5,12 +5,7 @@
 #include <errno.h>
 #include <time.h>
 #include <stdint.h>
-
-/* Suppress warn_unused_result on best-effort error writes */
-static inline void best_effort_write(int fd, const void *buf, size_t len) {
-    ssize_t r = write(fd, buf, len);
-    (void)r;
-}
+#include "internal.h"
 
 static const char kl_413_response[] =
     "HTTP/1.1 413 Payload Too Large\r\n"
