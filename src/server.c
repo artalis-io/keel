@@ -9,16 +9,11 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
+#include "internal.h"
 
 #define KL_LISTEN_BACKLOG  128
 #define KL_EVENTS_PER_TICK 64
 #define KL_POLL_TIMEOUT_MS 1000
-
-/* Suppress warn_unused_result on best-effort error writes */
-static inline void best_effort_write(int fd, const void *buf, size_t len) {
-    ssize_t r = write(fd, buf, len);
-    (void)r;
-}
 
 static const char kl_408_response[] =
     "HTTP/1.1 408 Request Timeout\r\n"
@@ -57,13 +52,19 @@ int kl_server_init(KlServer *s, KlConfig *config) {
 
     /* Init subsystems */
     if (kl_router_init(&s->router, alloc) < 0) return -1;
-    if (kl_conn_pool_init(&s->pool, s->config.max_connections, alloc) < 0)
+    if (kl_conn_pool_init(&s->pool, s->config.max_connections, alloc) < 0) {
+        kl_router_free(&s->router);
         return -1;
+    }
 
     /* Create parsers and propagate config for each connection slot */
     for (int i = 0; i < s->pool.capacity; i++) {
         s->pool.conns[i].parser = s->config.parser(alloc);
-        if (!s->pool.conns[i].parser) return -1;
+        if (!s->pool.conns[i].parser) {
+            kl_conn_pool_free(&s->pool);
+            kl_router_free(&s->router);
+            return -1;
+        }
         s->pool.conns[i].access_log = s->config.access_log;
         s->pool.conns[i].access_log_data = s->config.access_log_data;
     }
@@ -132,6 +133,7 @@ int kl_server_run(KlServer *s) {
     }
 
     /* Init event loop */
+    s->loop.alloc = alloc;
     if (kl_event_init(&s->loop) < 0) {
         perror("event_init");
         close(s->listen_fd);
@@ -192,8 +194,11 @@ int kl_server_run(KlServer *s) {
                      * This is set once on accept; response reuses it across keep-alive. */
                     nc->res.alloc = alloc;
 
-                    kl_event_add(&s->loop, client_fd,
-                                 KL_EVENT_READ, nc);
+                    if (kl_event_add(&s->loop, client_fd,
+                                     KL_EVENT_READ, nc) < 0) {
+                        kl_conn_release(&s->pool, nc);
+                        continue;
+                    }
                 }
                 continue;
             }
@@ -217,12 +222,18 @@ int kl_server_run(KlServer *s) {
 
             /* Transition */
             if (new_state == KL_CONN_SENDING) {
-                kl_event_mod(&s->loop, c->fd,
-                             KL_EVENT_WRITE, c);
+                if (kl_event_mod(&s->loop, c->fd,
+                                 KL_EVENT_WRITE, c) < 0) {
+                    kl_event_del(&s->loop, c->fd);
+                    kl_conn_release(&s->pool, c);
+                }
             } else if (new_state == KL_CONN_READING ||
                        new_state == KL_CONN_READING_BODY) {
-                kl_event_mod(&s->loop, c->fd,
-                             KL_EVENT_READ, c);
+                if (kl_event_mod(&s->loop, c->fd,
+                                 KL_EVENT_READ, c) < 0) {
+                    kl_event_del(&s->loop, c->fd);
+                    kl_conn_release(&s->pool, c);
+                }
             } else if (new_state == KL_CONN_CLOSED) {
                 kl_event_del(&s->loop, c->fd);
                 kl_conn_release(&s->pool, c);

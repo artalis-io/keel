@@ -117,6 +117,11 @@ int kl_response_init(KlResponse *res, KlAllocator *alloc) {
 }
 
 void kl_response_reset(KlResponse *res) {
+    /* Close file descriptor if one was set for sendfile */
+    if (res->file_fd >= 0) {
+        close(res->file_fd);
+    }
+
     /* Fast reinit for keep-alive — reuses header buffer, no alloc */
     char *buf = res->hdr_buf;
     size_t cap = res->hdr_cap;
@@ -133,6 +138,10 @@ void kl_response_reset(KlResponse *res) {
 }
 
 void kl_response_free(KlResponse *res) {
+    if (res->file_fd >= 0) {
+        close(res->file_fd);
+        res->file_fd = -1;
+    }
     if (res->hdr_buf) {
         kl_free(res->alloc, res->hdr_buf, res->hdr_cap);
         res->hdr_buf = NULL;
@@ -145,11 +154,22 @@ void kl_response_status(KlResponse *res, int code) {
     res->status = code;
 }
 
+/* Reject strings containing \r or \n to prevent header injection */
+static int contains_crlf(const char *s, size_t len) {
+    for (size_t i = 0; i < len; i++)
+        if (s[i] == '\r' || s[i] == '\n') return 1;
+    return 0;
+}
+
 void kl_response_header(KlResponse *res, const char *name, const char *value) {
     if (!name || !value) return;
-    hdr_append(res, name, strlen(name));
+    size_t name_len = strlen(name);
+    size_t value_len = strlen(value);
+    if (contains_crlf(name, name_len) || contains_crlf(value, value_len))
+        return;
+    hdr_append(res, name, name_len);
     hdr_append(res, ": ", 2);
-    hdr_append(res, value, strlen(value));
+    hdr_append(res, value, value_len);
     hdr_append(res, "\r\n", 2);
 }
 
@@ -199,6 +219,30 @@ static ssize_t kl_sendfile_impl(int out_fd, int in_fd, off_t *offset, size_t cou
     if (nw > 0) *offset += nw;
     return nw;
 #endif
+}
+
+/* ── writev helper — handles short writes and EAGAIN ─────────────── */
+
+static int writev_all(int fd, struct iovec *iov, int iovcnt) {
+    while (iovcnt > 0) {
+        ssize_t nw = writev(fd, iov, iovcnt);
+        if (nw < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            return -1;
+        }
+        size_t written = (size_t)nw;
+        while (iovcnt > 0 && written >= iov[0].iov_len) {
+            written -= iov[0].iov_len;
+            iov++;
+            iovcnt--;
+        }
+        if (iovcnt > 0 && written > 0) {
+            iov[0].iov_base = (char *)iov[0].iov_base + written;
+            iov[0].iov_len -= written;
+        }
+    }
+    return 0;
 }
 
 /* ── Send: single writev for headers + body ──────────────────────── */
@@ -256,11 +300,7 @@ int kl_response_send(KlResponse *res) {
             iovcnt++;
         }
 
-        size_t total = 0;
-        for (int j = 0; j < iovcnt; j++)
-            total += iov[j].iov_len;
-        ssize_t nw = writev(res->conn_fd, iov, iovcnt);
-        if (nw < 0 || (size_t)nw != total) return -1;
+        if (writev_all(res->conn_fd, iov, iovcnt) < 0) return -1;
         res->headers_sent = 1;
 
         if (res->body_mode == KL_BODY_BUFFER)
@@ -311,11 +351,7 @@ static int kl_stream_write(void *ctx, const char *data, size_t len) {
         { .iov_base = (void *)"\r\n", .iov_len = 2 },
     };
 
-    /* hdr_len <= 24 and len is user-controlled but bounded by available
-     * memory; overflow not possible in practice. */
-    size_t total = (size_t)hdr_len + len + 2;
-    ssize_t nw = writev(res->conn_fd, iov, 3);
-    if (nw < 0 || (size_t)nw != total) {
+    if (writev_all(res->conn_fd, iov, 3) < 0) {
         res->stream_error = 1;
         return -1;
     }
@@ -347,11 +383,7 @@ int kl_response_begin_stream(KlResponse *res, int status,
     iov[iovcnt].iov_len = 2;
     iovcnt++;
 
-    size_t total = 0;
-    for (int j = 0; j < iovcnt; j++)
-        total += iov[j].iov_len;
-    ssize_t nw = writev(res->conn_fd, iov, iovcnt);
-    if (nw < 0 || (size_t)nw != total) return -1;
+    if (writev_all(res->conn_fd, iov, iovcnt) < 0) return -1;
 
     res->headers_sent = 1;
     *out_write = kl_stream_write;
