@@ -6,6 +6,12 @@
 #include <time.h>
 #include <stdint.h>
 
+/* Suppress warn_unused_result on best-effort error writes */
+static inline void best_effort_write(int fd, const void *buf, size_t len) {
+    ssize_t r = write(fd, buf, len);
+    (void)r;
+}
+
 static const char kl_413_response[] =
     "HTTP/1.1 413 Payload Too Large\r\n"
     "Content-Length: 0\r\n"
@@ -176,7 +182,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
         /* Read available data */
         size_t space = KL_READ_BUF_SIZE - c->read_len;
         if (space == 0) {
-            (void)write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
+            best_effort_write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
             c->state = KL_CONN_CLOSED;
             return c->state;
         }
@@ -225,7 +231,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                 KlBodyReader *br = c->route->body_reader(
                     c->alloc, &c->req, c->route->user_data);
                 if (!br) {
-                    (void)write(c->fd, kl_415_response,
+                    best_effort_write(c->fd, kl_415_response,
                                 sizeof(kl_415_response) - 1);
                     c->state = KL_CONN_CLOSED;
                     return c->state;
@@ -320,7 +326,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);
             /* Body reader rejected (413) */
-            (void)write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
+            best_effort_write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
             c->state = KL_CONN_CLOSED;
             return c->state;
         }
