@@ -191,6 +191,9 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
 
         seen++;
         int revents = cqe->res;
+        if (revents <= 0)
+            continue;  /* Error/cancelled poll (e.g. from poll_remove) */
+
         KlEventMask ready = 0;
         if (revents & (POLLIN | POLLHUP | POLLERR))
             ready |= KL_EVENT_READ;
