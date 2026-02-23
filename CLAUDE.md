@@ -55,6 +55,11 @@ make clean        # remove all build artifacts
 | `KlRoute` | `router.h` | Single route: method, pattern, handler, user_data, body_reader |
 | `KlEventLoop` | `event.h` | Platform event loop: init, add, mod, del, wait, close |
 
+## Git
+
+- When committing, do NOT add any Co-Authored-By trailers.
+- Do NOT add "Generated with Claude Code" or similar attribution to PRs.
+
 ## Conventions
 
 - C11, compiled with `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror`
