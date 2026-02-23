@@ -7,6 +7,7 @@
 
 #if defined(__linux__)
   #include <sys/sendfile.h>
+  #include <netinet/in.h>
   #include <netinet/tcp.h>
 #elif defined(__APPLE__)
   #include <sys/socket.h>

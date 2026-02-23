@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - name: Linux (epoll)
@@ -44,7 +45,8 @@ jobs:
         run: make ${{ matrix.backend }}
 
       - name: Test
-        run: make test
+        timeout-minutes: 5
+        run: make test ${{ matrix.backend }}
 
       - name: Build examples
         run: make examples ${{ matrix.backend }}

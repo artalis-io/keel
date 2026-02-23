@@ -40,6 +40,13 @@ typedef struct KlConn {
     int route_result;
 
     uint64_t last_active_ms;   /* monotonic clock, updated on every I/O */
+    uint64_t request_start_ms; /* stamped at processing start for access log */
+
+    /* Access logging (set once at pool init, never changes) */
+    void (*access_log)(const KlRequest *req, int status,
+                       size_t body_bytes, double duration_ms,
+                       void *user_data);
+    void *access_log_data;
 
     /* Pool linkage */
     struct KlConn *next_free;

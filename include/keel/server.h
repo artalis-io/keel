@@ -9,6 +9,12 @@
 
 typedef KlParser *(*KlParserFactory)(KlAllocator *alloc);
 
+/* Access log callback — called after each response is fully sent.
+ * NULL = disabled (default, zero overhead). */
+typedef void (*KlAccessLogFn)(const KlRequest *req, int status,
+                               size_t body_bytes, double duration_ms,
+                               void *user_data);
+
 #define KL_DEFAULT_MAX_CONNS    256
 #define KL_DEFAULT_READ_TIMEOUT 30000   /* ms */
 
@@ -19,6 +25,8 @@ typedef struct {
     int read_timeout_ms;        /* default: KL_DEFAULT_READ_TIMEOUT */
     KlAllocator *alloc;         /* default: stdlib */
     KlParserFactory parser;     /* default: kl_parser_llhttp */
+    KlAccessLogFn access_log;   /* default: NULL (disabled) */
+    void *access_log_data;      /* passed as user_data to access_log */
 } KlConfig;
 
 typedef struct {

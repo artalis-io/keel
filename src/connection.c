@@ -6,6 +6,12 @@
 #include <time.h>
 #include <stdint.h>
 
+/* Suppress warn_unused_result on best-effort error writes */
+static inline void best_effort_write(int fd, const void *buf, size_t len) {
+    ssize_t r = write(fd, buf, len);
+    (void)r;
+}
+
 static const char kl_413_response[] =
     "HTTP/1.1 413 Payload Too Large\r\n"
     "Content-Length: 0\r\n"
@@ -121,11 +127,23 @@ void kl_conn_pool_free(KlConnPool *pool) {
     }
 }
 
+static void conn_log_access(KlConn *c) {
+    if (!c->access_log) return;
+    size_t bytes = 0;
+    if (c->res.body_mode == KL_BODY_BUFFER) bytes = c->res.body_len;
+    else if (c->res.body_mode == KL_BODY_FILE && c->res.file_size > 0)
+        bytes = (size_t)c->res.file_size;
+    uint64_t now = kl_monotonic_ms();
+    double duration = (double)(now - c->request_start_ms);
+    c->access_log(&c->req, c->res.status, bytes, duration, c->access_log_data);
+}
+
 /*
  * Process a fully parsed request: route match → handler → response setup.
  */
 static KlConnState conn_process(KlConn *c) {
     c->state = KL_CONN_PROCESSING;
+    c->request_start_ms = kl_monotonic_ms();
 
     /* Reset response for this request (buffer reused across keep-alive) */
     if (c->res.hdr_buf) {
@@ -148,6 +166,7 @@ static KlConnState conn_process(KlConn *c) {
 
     /* If streaming, the handler already sent everything */
     if (c->res.body_mode == KL_BODY_STREAM) {
+        conn_log_access(c);
         c->state = KL_CONN_CLOSED;
         return c->state;
     }
@@ -163,7 +182,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
         /* Read available data */
         size_t space = KL_READ_BUF_SIZE - c->read_len;
         if (space == 0) {
-            (void)write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
+            best_effort_write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
             c->state = KL_CONN_CLOSED;
             return c->state;
         }
@@ -212,7 +231,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                 KlBodyReader *br = c->route->body_reader(
                     c->alloc, &c->req, c->route->user_data);
                 if (!br) {
-                    (void)write(c->fd, kl_415_response,
+                    best_effort_write(c->fd, kl_415_response,
                                 sizeof(kl_415_response) - 1);
                     c->state = KL_CONN_CLOSED;
                     return c->state;
@@ -307,7 +326,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);
             /* Body reader rejected (413) */
-            (void)write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
+            best_effort_write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
             c->state = KL_CONN_CLOSED;
             return c->state;
         }
@@ -332,7 +351,8 @@ KlConnState kl_conn_on_writable(KlConn *c) {
     if (r < 0) {
         c->state = KL_CONN_CLOSED;
     } else if (r == 0) {
-        /* Done sending — check keep-alive */
+        /* Done sending — log before keep-alive reset clears request */
+        conn_log_access(c);
         if (c->req.keep_alive) {
             /* Clean up body reader before resetting request */
             conn_cleanup_body_reader(c);
