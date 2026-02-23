@@ -1,6 +1,8 @@
 #ifndef KEEL_EVENT_H
 #define KEEL_EVENT_H
 
+#include <keel/allocator.h>
+
 typedef enum { KL_EVENT_READ = 1, KL_EVENT_WRITE = 2 } KlEventMask;
 
 typedef struct {
@@ -11,6 +13,7 @@ typedef struct {
 typedef struct {
     int fd;             /* epoll_fd or kqueue_fd, -1 for io_uring */
     void *_backend;     /* reserved for backend-specific state */
+    KlAllocator *alloc; /* set before kl_event_init; used by io_uring backend */
 } KlEventLoop;
 
 int  kl_event_init(KlEventLoop *loop);
