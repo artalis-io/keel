@@ -284,6 +284,88 @@ UTEST(integration, empty_body) {
     stop_server();
 }
 
+/* ── Access log test ────────────────────────────────────────────────── */
+
+typedef struct {
+    char method[16];
+    char path[64];
+    int status;
+    size_t body_bytes;
+    double duration_ms;
+    int call_count;
+} AccessLogCapture;
+
+static void test_access_log_fn(const KlRequest *req, int status,
+                                size_t body_bytes, double duration_ms,
+                                void *user_data) {
+    AccessLogCapture *cap = user_data;
+    size_t mlen = req->method_len < sizeof(cap->method) - 1
+                  ? req->method_len : sizeof(cap->method) - 1;
+    memcpy(cap->method, req->method, mlen);
+    cap->method[mlen] = '\0';
+    size_t plen = req->path_len < sizeof(cap->path) - 1
+                  ? req->path_len : sizeof(cap->path) - 1;
+    memcpy(cap->path, req->path, plen);
+    cap->path[plen] = '\0';
+    cap->status = status;
+    cap->body_bytes = body_bytes;
+    cap->duration_ms = duration_ms;
+    cap->call_count++;
+}
+
+static KlServer log_server;
+static AccessLogCapture log_capture;
+
+static void *log_server_thread(void *arg) {
+    (void)arg;
+    kl_server_run(&log_server);
+    return NULL;
+}
+
+#define LOG_TEST_PORT 18081
+
+UTEST(integration, access_log) {
+    memset(&log_capture, 0, sizeof(log_capture));
+    KlConfig cfg = {
+        .port = LOG_TEST_PORT,
+        .access_log = test_access_log_fn,
+        .access_log_data = &log_capture,
+    };
+    kl_server_init(&log_server, &cfg);
+    kl_server_route(&log_server, "GET", "/hello", handle_hello, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, log_server_thread, NULL);
+    usleep(100000);
+
+    int fd = connect_to(LOG_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "GET /hello HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    /* Wait briefly for the log callback to fire (it fires after send completes) */
+    usleep(50000);
+
+    kl_server_stop(&log_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&log_server);
+
+    ASSERT_EQ(1, log_capture.call_count);
+    ASSERT_STREQ("GET", log_capture.method);
+    ASSERT_STREQ("/hello", log_capture.path);
+    ASSERT_EQ(200, log_capture.status);
+    ASSERT_EQ((size_t)15, log_capture.body_bytes);
+    ASSERT_TRUE(log_capture.duration_ms >= 0.0);
+}
+
 UTEST(integration, multipart_upload) {
     start_server();
 

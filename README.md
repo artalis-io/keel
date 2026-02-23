@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable body readers, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
 
-**101K req/s** on a single thread. **68 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **69 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -46,6 +46,7 @@ int main(void) {
 - **Three response modes** — buffered (writev), file (sendfile zero-copy), stream (chunked transfer encoding)
 - **Route parameters** — `:param` capture, no allocation, pointers into read buffer
 - **Connection timeouts** — monotonic clock sweep, automatic 408 responses, slow-loris protection
+- **Access logging** — pluggable callback after each response, zero overhead when disabled
 - **Pre-allocated connection pool** — no per-request malloc, no fragmentation under load
 - **Pluggable allocator** — bring your own arena/pool/tracking allocator
 - **pledge/unveil sandboxing** — init/run split makes syscall lockdown natural
@@ -196,6 +197,26 @@ KlConfig cfg = {
 
 KEEL stamps each connection with a monotonic clock on every I/O event. A periodic sweep (every ~400ms) closes connections that have been idle longer than `read_timeout_ms` and sends a 408 Request Timeout response. This protects against slow-loris attacks and abandoned connections without affecting active transfers.
 
+## Access Logging
+
+```c
+void my_logger(const KlRequest *req, int status,
+               size_t body_bytes, double duration_ms, void *user_data) {
+    fprintf(stderr, "%.*s %.*s %d %zu %.1fms\n",
+            (int)req->method_len, req->method,
+            (int)req->path_len, req->path,
+            status, body_bytes, duration_ms);
+}
+
+KlConfig cfg = {
+    .port = 8080,
+    .access_log = my_logger,       /* NULL = disabled (default) */
+    .access_log_data = NULL,       /* passed as user_data */
+};
+```
+
+Set a callback in `KlConfig` and KEEL calls it after each response is fully sent. The callback receives the full request (method, path, headers), response status, body size, and wall-clock duration in milliseconds. Users implement their own formatting (JSON, CLF, custom). `NULL` = no logging, zero overhead.
+
 ## Custom Allocator
 
 ```c
@@ -284,7 +305,7 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 
 ## Testing
 
-68 tests across 8 test suites, covering every module:
+69 tests across 8 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -294,7 +315,7 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 | `test_parser` | 7 | GET, POST, query strings, incomplete, reset |
 | `test_connection` | 3 | Pool init, acquire/release, exhaustion |
 | `test_body_reader` | 26 | Buffer + multipart: limits, spanning, binary, edge cases |
-| `test_integration` | 6 | Full server: hello, POST, 413, keepalive, multipart |
+| `test_integration` | 7 | Full server: hello, POST, 413, keepalive, multipart, access log |
 | `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
 
 ```bash

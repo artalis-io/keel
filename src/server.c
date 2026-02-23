@@ -54,11 +54,12 @@ int kl_server_init(KlServer *s, KlConfig *config) {
     if (kl_conn_pool_init(&s->pool, s->config.max_connections, alloc) < 0)
         return -1;
 
-    /* Create parsers for each connection slot */
+    /* Create parsers and propagate config for each connection slot */
     for (int i = 0; i < s->pool.capacity; i++) {
         s->pool.conns[i].parser = s->config.parser(alloc);
         if (!s->pool.conns[i].parser) return -1;
-        /* Each connection's response will use this allocator */
+        s->pool.conns[i].access_log = s->config.access_log;
+        s->pool.conns[i].access_log_data = s->config.access_log_data;
     }
 
     return 0;
