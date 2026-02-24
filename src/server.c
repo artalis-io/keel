@@ -98,7 +98,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
                 return -1;
             }
             /* Validate vtable — all 7 function pointers must be set */
-            KlTls *t = s->pool.conns[i].tls;
+            const KlTls *t = s->pool.conns[i].tls;
             if (!t->handshake || !t->read || !t->write ||
                 !t->shutdown || !t->pending || !t->reset || !t->destroy) {
                 kl_conn_pool_free(&s->pool);
