@@ -88,6 +88,7 @@ static int format_chunk_hdr(char *buf, size_t n) {
 /* ── Header buffer management ────────────────────────────────────── */
 
 static int hdr_append(KlResponse *res, const char *data, size_t len) {
+    if (len > SIZE_MAX - res->hdr_len) return -1;
     while (res->hdr_len + len > res->hdr_cap) {
         size_t new_cap;
         if (res->hdr_cap > SIZE_MAX / 2)
@@ -175,6 +176,7 @@ void kl_response_header(KlResponse *res, const char *name, const char *value) {
 }
 
 void kl_response_body(KlResponse *res, const char *data, size_t len) {
+    if (len > 0 && !data) return;
     res->body_mode = KL_BODY_BUFFER;
     res->body = data;
     res->body_len = len;

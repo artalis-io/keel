@@ -38,6 +38,7 @@ static int set_nonblocking(int fd) {
 }
 
 int kl_server_init(KlServer *s, const KlConfig *config) {
+    if (!s || !config) return -1;
     memset(s, 0, sizeof(*s));
     s->listen_fd = -1;
 

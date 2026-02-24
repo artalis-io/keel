@@ -450,4 +450,31 @@ UTEST(router, middleware_sets_header) {
     kl_router_free(&r);
 }
 
+/* ── Audit coverage: param overflow ─────────────────────────────────── */
+
+UTEST(router, param_overflow_clamped) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    /* Build a pattern with KL_MAX_PARAMS + 1 params */
+    /* /a/:p0/b/:p1/.../q/:p16 — 17 param segments */
+    kl_router_add(&r, "GET",
+                  "/:a/:b/:c/:d/:e/:f/:g/:h/:i/:j/:k/:l/:m/:n/:o/:p/:q",
+                  dummy_handler, NULL, NULL);
+
+    KlRoute *matched;
+    KlParam params[KL_MAX_PARAMS];
+    int num_params;
+    int result = kl_router_match(&r, "GET", 3,
+        "/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17", 43,
+        &matched, params, &num_params);
+    ASSERT_EQ(result, 200);
+    ASSERT_TRUE(matched != NULL);
+    /* Only KL_MAX_PARAMS (16) captured, 17th silently dropped */
+    ASSERT_EQ(num_params, KL_MAX_PARAMS);
+
+    kl_router_free(&r);
+}
+
 UTEST_MAIN();

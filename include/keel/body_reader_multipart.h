@@ -14,6 +14,9 @@ typedef struct {
     char *data;
     size_t data_len;
     size_t data_cap;            /* allocation capacity */
+    size_t name_len;            /* strlen(name), stored to avoid recalc on free */
+    size_t filename_len;        /* strlen(filename) or 0 */
+    size_t content_type_len;    /* strlen(content_type) or 0 */
 } KlMultipartPart;
 
 typedef struct {

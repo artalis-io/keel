@@ -248,4 +248,22 @@ UTEST(cors, middleware_credentials) {
     kl_response_free(&res);
 }
 
+/* ── Audit coverage ────────────────────────────────────────────────── */
+
+UTEST(cors, middleware_null_user_data) {
+    KlRequest req = {0};
+    req.method = "GET"; req.method_len = 3;
+    req.path = "/api"; req.path_len = 4;
+
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    /* NULL user_data should return 0 (pass-through), not crash */
+    int rc = kl_cors_middleware(&req, &res, NULL);
+    ASSERT_EQ(rc, 0);
+
+    kl_response_free(&res);
+}
+
 UTEST_MAIN();
