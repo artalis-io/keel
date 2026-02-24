@@ -39,7 +39,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     }
 
     /* Simple response: "parts=N name0=... len0=..." */
-    char body[1024];
+    static char body[1024];  /* static: body must outlive handler for async writev */
     int off = snprintf(body, sizeof(body), "parts=%d", mr->num_parts);
     for (int i = 0; i < mr->num_parts && off < (int)sizeof(body) - 64; i++) {
         off += snprintf(body + off, sizeof(body) - (size_t)off,

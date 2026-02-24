@@ -5,11 +5,13 @@
 #include <keel/parser.h>
 #include <keel/router.h>
 #include <keel/tls.h>
+#include <keel/h2.h>
 #include <keel/connection.h>
 #include <keel/event.h>
 #include <stdatomic.h>
 #include <stdint.h>
 
+typedef struct KlWsConfig KlWsConfig;
 typedef KlParser *(*KlParserFactory)(KlAllocator *alloc);
 
 /* Access log callback — called after each response is fully sent.
@@ -34,12 +36,14 @@ typedef struct {
     int install_signal_handlers; /* install SIGTERM/SIGINT handlers */
     int drain_timeout_ms;        /* graceful shutdown drain timeout (0 = immediate) */
     KlTlsConfig *tls;           /* TLS config — NULL = plaintext (default) */
+    KlH2Config *h2;             /* HTTP/2 config — NULL = disabled (default) */
 } KlConfig;
 
 typedef struct {
     KlConfig config;
     KlAllocator alloc_storage;  /* owned copy if user didn't provide one */
     KlTlsConfig tls_storage;   /* owned copy of TLS config (if provided) */
+    KlH2Config h2_storage;     /* owned copy of H2 config (if provided) */
     KlRouter router;
     KlConnPool pool;
     KlEventLoop loop;
@@ -75,6 +79,15 @@ int  kl_server_route(KlServer *s, const char *method, const char *pattern,
  */
 int  kl_server_use(KlServer *s, const char *method, const char *pattern,
                    KlMiddleware fn, void *user_data);
+
+/**
+ * @brief Register a WebSocket endpoint. Matches GET with Upgrade: websocket.
+ * @param s       Server instance.
+ * @param pattern URL pattern to match.
+ * @param config  WebSocket configuration (callbacks, limits). Must remain valid.
+ * @return 0 on success, -1 on failure.
+ */
+int  kl_server_ws(KlServer *s, const char *pattern, KlWsConfig *config);
 
 /**
  * @brief Start the event loop (blocks until stopped).

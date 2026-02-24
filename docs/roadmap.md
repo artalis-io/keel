@@ -54,11 +54,11 @@ Comprehensive C code audit with 8 fixes: integer overflow guards in `mp_strdup` 
 
 Pluggable TLS vtable (`KlTls`) — users bring their own TLS backend (BearSSL, LibreSSL, OpenSSL, rustls-ffi) by implementing a 7-function vtable. No vendored TLS library. TLS wraps the transport layer via `conn_read`/`conn_write` helpers. New `KL_CONN_TLS_HANDSHAKE` state for non-blocking handshake. `pending()` function for edge-triggered event loop drain. Sendfile falls back to `pread` + TLS write. Pre-allocated per-connection TLS sessions (one per pool slot). Keep-alive reuses TLS session (no re-handshake). 20 mock-based unit tests.
 
-### HTTP/2 via nghttp2
+### ~~HTTP/2 via nghttp2~~
 
-The pluggable parser makes this feasible — HTTP/2 framing is a different parser backend, not a different architecture. The connection state machine needs multiplexing awareness (multiple concurrent streams per connection), and the response builder needs frame formatting, but the router, handlers, and body readers are unchanged.
+Planned: see `docs/http2_plan.md` for detailed design.
 
-### WebSocket upgrade
+### ~~WebSocket upgrade~~ DONE
 
 Detect `Upgrade: websocket` in the parser, complete the handshake in the handler, then hand the connection to a WebSocket frame codec. The event loop already handles bidirectional I/O — WebSocket is a protocol change, not an architecture change.
 
@@ -72,6 +72,10 @@ kl_response_body_compressed(res, data, len);
 ```
 
 For streaming, integrate with zlib's `deflate` in the chunk write path. For buffer responses, compress before `writev`. File responses are not compressed (use pre-compressed files instead).
+
+### ~~Static file serving~~
+
+Decided: example is sufficient. Static file serving is application logic (MIME types, path traversal, directory listing, etc). The example in `examples/static_files.c` demonstrates the pattern.
 
 ## Long-Term / Research
 

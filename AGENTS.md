@@ -227,7 +227,7 @@ Middleware runs in registration order, after route matching, before body reading
 
 ## Adding a TLS Backend
 
-1. Implement the 7-function `KlTls` vtable (`handshake`, `read`, `write`, `shutdown`, `pending`, `reset`, `destroy`)
+1. Implement the 7 required `KlTls` vtable functions (`handshake`, `read`, `write`, `shutdown`, `pending`, `reset`, `destroy`) plus the optional `alpn_protocol` (NULL if not supported)
 2. Create a `KlTlsCtx` struct for shared state (certificates, keys, ciphers)
 3. Write a factory function: `KlTls *my_tls_factory(KlTlsCtx *ctx, KlAllocator *alloc)`
 4. Register via `KlTlsConfig` in `KlConfig`:
@@ -242,6 +242,25 @@ KlConfig cfg = { .port = 8443, .tls = &tls };
 ```
 
 The factory is called once per connection slot at server init. Each `KlTls` session is reused across keep-alive requests via `reset()`.
+
+## Safety Tooling
+
+All of these should pass cleanly before merging:
+
+```bash
+make test               # 227 unit + integration tests
+make debug && make test  # ASan + UBSan (catches memory errors, undefined behavior)
+make analyze            # Clang static analyzer via scan-build
+make cppcheck           # cppcheck static analysis
+```
+
+Fuzz testing covers the primary attack surface (untrusted network bytes):
+
+```bash
+make fuzz               # build libFuzzer targets (requires clang)
+./fuzz/fuzz_parser fuzz/corpus_parser/
+./fuzz/fuzz_multipart fuzz/corpus_multipart/
+```
 
 ## Commit Conventions
 

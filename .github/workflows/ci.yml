@@ -68,6 +68,40 @@ jobs:
           echo "Response: $RESPONSE"
           echo "$RESPONSE" | grep -q '"hello"'
 
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test with sanitizers
+        timeout-minutes: 10
+        run: make debug-test
+
+  fuzz:
+    name: Fuzz Testing
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build fuzz targets
+        run: make fuzz CC=clang
+
+      - name: Fuzz HTTP parser (60s)
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_parser fuzz/corpus_parser/ -max_total_time=60
+
+      - name: Fuzz multipart parser (60s)
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_multipart fuzz/corpus_multipart/ -max_total_time=60
+
   analyze:
     name: Static Analysis
     runs-on: ubuntu-latest

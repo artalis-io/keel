@@ -7,6 +7,9 @@ make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make test         # build and run all 160 unit tests
 make examples     # build all 6 example programs
 make debug        # debug build with ASan + UBSan (recompiles from clean)
+make analyze      # Clang static analyzer (scan-build)
+make cppcheck     # cppcheck static analysis
+make fuzz         # build libFuzzer fuzz targets (requires clang)
 make clean        # remove all build artifacts
 ```
 
@@ -159,3 +162,28 @@ make test           # run tests under sanitizers
 
 ASan catches: heap/stack buffer overflow, use-after-free, double-free, memory leaks.
 UBSan catches: signed overflow, null dereference, misaligned access, shift overflow.
+
+## Static Analysis
+
+```bash
+make analyze        # Clang static analyzer via scan-build (--status-bugs fails on warnings)
+make cppcheck       # cppcheck with --enable=all (--error-exitcode=1 fails on issues)
+```
+
+Both targets should exit cleanly with no findings before merging.
+
+## Fuzz Testing
+
+Two libFuzzer targets cover the primary attack surface (untrusted network input):
+
+```bash
+# Requires clang with libFuzzer support
+# Linux:  make fuzz CC=clang
+# macOS:  make fuzz CC=/opt/homebrew/opt/llvm@18/bin/clang
+
+# Run a fuzzer (Ctrl-C to stop):
+./fuzz/fuzz_parser fuzz/corpus_parser/       # HTTP parser + chunked decoder
+./fuzz/fuzz_multipart fuzz/corpus_multipart/ # multipart/form-data parser
+```
+
+Fuzz targets are built with ASan + UBSan enabled. Corpus files in `fuzz/corpus_*/` are seed inputs — crashes found by the fuzzer are saved to the corpus automatically.
