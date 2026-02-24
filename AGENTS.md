@@ -16,6 +16,9 @@ Every PR should be checked for:
 - [ ] **State machine correctness** — Connection state transitions are valid, no state reached without proper setup
 - [ ] **Keep-alive safety** — Response reset clears all state, no stale pointers across requests
 - [ ] **Header pointer lifetime** — After body reading starts, header pointers may be invalidated; don't access them in body reader callbacks
+- [ ] **Middleware safety** — Middleware that short-circuits must write a complete response; short-circuit disables keep-alive (body unread)
+- [ ] **Middleware order** — Registration order = execution order; global middleware (`/*`) before specific (`/api/*`) if intended
+- [ ] **Request context cleanup** — `req->ctx` set by middleware is the application's responsibility to clean up in the handler
 
 ## Security Audit Patterns
 
@@ -143,6 +146,81 @@ Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Mak
    endif
    ```
 4. Test on the target platform — event backends are platform-specific
+
+## Adding a New Middleware
+
+Middleware uses the `KlMiddleware` function signature — return `0` to continue, non-zero to short-circuit:
+
+```c
+int my_middleware(KlRequest *req, KlResponse *res, void *user_data) {
+    /* Inspect request, optionally modify response or req->ctx */
+    /* Return 0 to continue, non-zero to short-circuit */
+    return 0;
+}
+```
+
+### Pass-through middleware (logging, metrics)
+
+```c
+int log_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)res; (void)ctx;
+    fprintf(stderr, "[req] %.*s %.*s\n",
+            (int)req->method_len, req->method,
+            (int)req->path_len, req->path);
+    return 0;  /* always continue */
+}
+
+kl_server_use(&s, "*", "/*", log_middleware, NULL);
+```
+
+### Short-circuit middleware (auth, rate limiting)
+
+```c
+typedef struct { const char *api_key; } AuthConfig;
+
+int auth_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+    AuthConfig *cfg = ctx;
+    size_t key_len;
+    const char *key = kl_request_header_len(req, "X-API-Key", &key_len);
+    size_t expect_len = strlen(cfg->api_key);
+    if (!key || key_len != expect_len ||
+        memcmp(key, cfg->api_key, expect_len) != 0) {
+        kl_response_error(res, 401, "Unauthorized");
+        return 1;  /* short-circuit — stop chain, send response */
+    }
+    return 0;
+}
+
+AuthConfig auth = {.api_key = "secret-key-123"};
+kl_server_use(&s, "*", "/api/*", auth_middleware, &auth);
+```
+
+### Context-setting middleware (user lookup)
+
+```c
+int user_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)res; (void)ctx;
+    req->ctx = my_user_lookup(req);  /* handler reads req->ctx */
+    return 0;
+}
+```
+
+### Pattern matching rules
+
+- `"*"` method matches any HTTP method; `"GET"` also matches HEAD requests
+- `/*` suffix = prefix match: `/api/*` matches `/api`, `/api/users`, `/api/users/123`
+- No `/*` suffix = exact match: `/health` matches only `/health`
+- No `:param` extraction in middleware patterns (inspect `req->path` directly)
+
+### Registration
+
+```c
+kl_server_use(&s, method, pattern, fn, user_data);
+// Or directly on the router:
+kl_router_use(&r, method, pattern, fn, user_data);
+```
+
+Middleware runs in registration order, after route matching, before body reading.
 
 ## Commit Conventions
 

@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable body readers, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
+Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
 
-**101K req/s** on a single thread. **100 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **132 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -42,6 +42,8 @@ int main(void) {
 - **Three event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (POLL_ADD)
 - **Pluggable HTTP parser** — ships with llhttp, swap via `KlConfig.parser`
 - **Pluggable body readers** — vtable interface for request body processing
+- **Per-route middleware** — pattern-matched middleware chain with short-circuit support
+- **Built-in CORS middleware** — configurable origins, methods, headers, preflight handling
 - **Multipart form-data** — RFC 2046 parser with configurable size limits
 - **Three response modes** — buffered (writev), file (sendfile zero-copy), stream (chunked transfer encoding)
 - **Route parameters** — `:param` capture, no allocation, pointers into read buffer
@@ -54,7 +56,7 @@ int main(void) {
 
 ## Architecture
 
-11 orthogonal modules, each independently testable:
+12 orthogonal modules, each independently testable:
 
 | Module | Header | Description |
 |--------|--------|-------------|
@@ -63,12 +65,13 @@ int main(void) {
 | **request** | `request.h` | Parsed HTTP request struct (header-only, zero alloc) |
 | **parser** | `parser.h` | Pluggable HTTP parser vtable |
 | **response** | `response.h` | Response builder: buffered, sendfile, or streaming chunked |
-| **router** | `router.h` | Table-scan route matching with `:param` capture |
+| **router** | `router.h` | Route matching with `:param` capture + middleware chain |
 | **connection** | `connection.h` | Pre-allocated connection pool + state machine |
 | **server** | `server.h` | Top-level glue: init, bind, run loop, stop |
 | **body_reader** | `body_reader.h` | Pluggable body reader vtable + buffer reader |
 | **body_reader_multipart** | `body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
 | **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
+| **cors** | `cors.h` | Built-in CORS middleware with configurable origins |
 
 ## Request Body Handling
 
@@ -97,6 +100,90 @@ kl_server_route(&s, "POST", "/api/data", handle_post,
 Pass `NULL` as the body reader factory for routes that don't accept a body. If a request with a body arrives on a route with no reader, KEEL discards the body. If the reader factory returns NULL, KEEL sends 415 Unsupported Media Type.
 
 **Custom readers** — implement the `KlBodyReader` vtable (`on_data`, `on_complete`, `on_error`, `destroy`) and provide a factory function.
+
+## Middleware
+
+Register middleware that runs before handlers. Middleware can inspect/modify the request and response, or short-circuit the chain by returning a non-zero value (e.g., to reject unauthenticated requests).
+
+### Built-in CORS middleware
+
+```c
+KlCorsConfig cors;
+kl_cors_init(&cors);
+kl_cors_add_origin(&cors, "https://app.example.com");
+kl_cors_add_origin(&cors, "https://staging.example.com");
+// Or parse from an environment variable:
+// kl_cors_parse_origins(&cors, getenv("ALLOWED_ORIGINS"));
+
+kl_server_use(&s, "*", "/*", kl_cors_middleware, &cors);
+```
+
+Handles `Access-Control-Allow-Origin`, `Allow-Credentials`, and automatically responds to OPTIONS preflight requests with 204 + all required CORS headers.
+
+### Writing custom middleware
+
+Middleware uses the same `(KlRequest *, KlResponse *, void *)` signature. Return 0 to continue, non-zero to short-circuit:
+
+**Logging middleware:**
+
+```c
+int log_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)res; (void)ctx;
+    fprintf(stderr, "[req] %.*s %.*s\n",
+            (int)req->method_len, req->method,
+            (int)req->path_len, req->path);
+    return 0;  /* continue to next middleware / handler */
+}
+
+kl_server_use(&s, "*", "/*", log_middleware, NULL);
+```
+
+**Auth middleware:**
+
+```c
+typedef struct { const char *api_key; } AuthConfig;
+
+int auth_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+    AuthConfig *cfg = ctx;
+    size_t key_len;
+    const char *key = kl_request_header_len(req, "X-API-Key", &key_len);
+    size_t expect_len = strlen(cfg->api_key);
+    if (!key || key_len != expect_len ||
+        memcmp(key, cfg->api_key, expect_len) != 0) {
+        kl_response_error(res, 401, "Unauthorized");
+        return 1;  /* short-circuit — response already written */
+    }
+    return 0;  /* continue */
+}
+
+AuthConfig auth = {.api_key = "secret-key-123"};
+kl_server_use(&s, "*", "/api/*", auth_middleware, &auth);
+```
+
+**Request context passing (middleware → handler):**
+
+```c
+int user_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)res; (void)ctx;
+    /* Validate token, look up user, set context for handler */
+    req->ctx = my_user_lookup(req);
+    return 0;
+}
+
+void handle_profile(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    User *user = req->ctx;  /* set by middleware */
+    /* ... */
+}
+```
+
+### Middleware patterns
+
+- Patterns ending with `/*` are prefix matches: `/api/*` matches `/api`, `/api/users`, `/api/users/123`
+- Patterns without `/*` are exact matches: `/health` matches only `/health`
+- Method `"*"` matches any HTTP method; `"GET"` also matches HEAD requests
+- Middleware runs in registration order, before body reading
+- Short-circuiting disables keep-alive (unread body can't be drained)
 
 ## Multipart Uploads
 
@@ -306,18 +393,19 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 
 ## Testing
 
-100 tests across 9 test suites, covering every module:
+132 tests across 11 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
 | `test_allocator` | 4 | Default + custom tracking allocators |
-| `test_router` | 9 | Exact match, params, 404, 405, wildcard |
+| `test_router` | 20 | Exact match, params, 404, 405, wildcard, middleware chain |
 | `test_response` | 10 | Status, headers, body, JSON, error, streaming, sendfile |
 | `test_parser` | 9 | GET, POST, query strings, incomplete, reset, chunked TE |
 | `test_connection` | 3 | Pool init, acquire/release, exhaustion |
 | `test_body_reader` | 28 | Buffer + multipart: limits, spanning, binary, edge cases |
 | `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
-| `test_integration` | 16 | Full server: hello, POST, 413, keepalive, multipart, chunked, access log |
+| `test_cors` | 16 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
+| `test_integration` | 21 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
 | `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
 
 ```bash

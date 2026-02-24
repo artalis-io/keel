@@ -30,6 +30,7 @@ static KlStatusLine status_line_for(int code) {
         case 302: return (KlStatusLine)SL("HTTP/1.1 302 Found\r\n");
         case 304: return (KlStatusLine)SL("HTTP/1.1 304 Not Modified\r\n");
         case 400: return (KlStatusLine)SL("HTTP/1.1 400 Bad Request\r\n");
+        case 401: return (KlStatusLine)SL("HTTP/1.1 401 Unauthorized\r\n");
         case 403: return (KlStatusLine)SL("HTTP/1.1 403 Forbidden\r\n");
         case 404: return (KlStatusLine)SL("HTTP/1.1 404 Not Found\r\n");
         case 405: return (KlStatusLine)SL("HTTP/1.1 405 Method Not Allowed\r\n");

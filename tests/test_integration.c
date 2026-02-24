@@ -748,4 +748,259 @@ UTEST(integration, signal_stop) {
     ASSERT_TRUE(1);
 }
 
+/* ── Middleware integration tests ────────────────────────────────────── */
+
+static int cors_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_header(res, "Access-Control-Allow-Origin", "*");
+    return 0;
+}
+
+static int auth_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+    const char *secret = ctx;
+    size_t tok_len;
+    const char *tok = kl_request_header_len(req, "Authorization", &tok_len);
+    size_t secret_len = strlen(secret);
+    if (!tok || tok_len != secret_len || memcmp(tok, secret, secret_len) != 0) {
+        kl_response_error(res, 401, "Unauthorized");
+        return 1;
+    }
+    return 0;
+}
+
+static void handle_mw_hello(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+static void handle_mw_echo(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    KlBufReader *br = (KlBufReader *)req->body_reader;
+    kl_response_status(res, 200);
+    kl_response_header(res, "Content-Type", "text/plain");
+    if (br && br->len > 0)
+        kl_response_body(res, br->data, br->len);
+    else
+        kl_response_body(res, "no body", 7);
+}
+
+static KlServer mw_server;
+
+static void *mw_server_thread(void *arg) {
+    (void)arg;
+    kl_server_run(&mw_server);
+    return NULL;
+}
+
+#define MW_TEST_PORT 18083
+
+static pthread_t mw_server_tid;
+
+static void start_mw_server(void) {
+    KlConfig cfg = {.port = MW_TEST_PORT};
+    kl_server_init(&mw_server, &cfg);
+
+    /* Register middleware */
+    kl_server_use(&mw_server, "*", "/*", cors_middleware, NULL);
+    kl_server_use(&mw_server, "GET", "/api/*", auth_middleware, (void *)"secret123");
+
+    /* Register routes */
+    kl_server_route(&mw_server, "GET", "/hello", handle_mw_hello, NULL, NULL);
+    kl_server_route(&mw_server, "GET", "/api/data", handle_mw_hello, NULL, NULL);
+    kl_server_route(&mw_server, "POST", "/api/echo", handle_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_body_reader_buffer);
+
+    pthread_create(&mw_server_tid, NULL, mw_server_thread, NULL);
+    usleep(100000);
+}
+
+static void stop_mw_server(void) {
+    kl_server_stop(&mw_server);
+    pthread_join(mw_server_tid, NULL);
+    kl_server_free(&mw_server);
+}
+
+UTEST(integration, middleware_cors) {
+    start_mw_server();
+
+    int fd = connect_to(MW_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "GET /hello HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "Access-Control-Allow-Origin: *") != NULL);
+    ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
+
+    stop_mw_server();
+}
+
+UTEST(integration, middleware_auth_reject) {
+    start_mw_server();
+
+    int fd = connect_to(MW_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* No Authorization header → should get 401 */
+    const char *req = "GET /api/data HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "401") != NULL);
+    /* CORS header should still be present (runs before auth) */
+    ASSERT_TRUE(strstr(buf, "Access-Control-Allow-Origin: *") != NULL);
+
+    stop_mw_server();
+}
+
+UTEST(integration, middleware_auth_pass) {
+    start_mw_server();
+
+    int fd = connect_to(MW_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "GET /api/data HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Authorization: secret123\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "Access-Control-Allow-Origin: *") != NULL);
+    ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
+
+    stop_mw_server();
+}
+
+static int mw_add_x_first(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_header(res, "X-First", "1");
+    return 0;
+}
+
+static int mw_add_x_second(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_header(res, "X-Second", "2");
+    return 0;
+}
+
+static KlServer chain_server;
+
+static void *chain_server_thread(void *arg) {
+    (void)arg;
+    kl_server_run(&chain_server);
+    return NULL;
+}
+
+#define CHAIN_TEST_PORT 18084
+
+UTEST(integration, middleware_chain_order) {
+    KlConfig cfg = {.port = CHAIN_TEST_PORT};
+    kl_server_init(&chain_server, &cfg);
+    kl_server_use(&chain_server, "*", "/*", mw_add_x_first, NULL);
+    kl_server_use(&chain_server, "*", "/*", mw_add_x_second, NULL);
+    kl_server_route(&chain_server, "GET", "/hello", handle_mw_hello, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, chain_server_thread, NULL);
+    usleep(100000);
+
+    int fd = connect_to(CHAIN_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "GET /hello HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "X-First: 1") != NULL);
+    ASSERT_TRUE(strstr(buf, "X-Second: 2") != NULL);
+
+    /* Verify order: X-First appears before X-Second in response */
+    char *p1 = strstr(buf, "X-First");
+    char *p2 = strstr(buf, "X-Second");
+    ASSERT_TRUE(p1 != NULL);
+    ASSERT_TRUE(p2 != NULL);
+    ASSERT_TRUE(p1 < p2);
+
+    kl_server_stop(&chain_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&chain_server);
+}
+
+static KlServer sc_body_server;
+
+static void *sc_body_server_thread(void *arg) {
+    (void)arg;
+    kl_server_run(&sc_body_server);
+    return NULL;
+}
+
+#define SC_BODY_TEST_PORT 18085
+
+static int mw_reject_all(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_error(res, 403, "Forbidden");
+    return 1;
+}
+
+UTEST(integration, middleware_short_circuit_body) {
+    KlConfig cfg = {.port = SC_BODY_TEST_PORT};
+    kl_server_init(&sc_body_server, &cfg);
+    kl_server_use(&sc_body_server, "*", "/*", mw_reject_all, NULL);
+    kl_server_route(&sc_body_server, "POST", "/echo", handle_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_body_reader_buffer);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, sc_body_server_thread, NULL);
+    usleep(100000);
+
+    int fd = connect_to(SC_BODY_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* POST with body — middleware should reject before body is read */
+    const char *req = "POST /echo HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Content-Length: 5\r\n"
+                      "Connection: close\r\n"
+                      "\r\n"
+                      "hello";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "403") != NULL);
+
+    kl_server_stop(&sc_body_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&sc_body_server);
+}
+
 UTEST_MAIN();

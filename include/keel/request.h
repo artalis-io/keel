@@ -32,6 +32,7 @@ struct KlRequest {
     size_t content_length;
     int chunked;                 /* 1 if Transfer-Encoding: chunked */
     KlBodyReader *body_reader;   /* set by connection layer, NULL if no body */
+    void *ctx;                   /* opaque per-request context, set by middleware */
 };
 
 /* Find header by name (case-insensitive). Returns value pointer or NULL.

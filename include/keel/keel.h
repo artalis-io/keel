@@ -12,5 +12,6 @@
 #include <keel/router.h>
 #include <keel/connection.h>
 #include <keel/server.h>
+#include <keel/cors.h>
 
 #endif

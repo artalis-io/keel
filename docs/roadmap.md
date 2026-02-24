@@ -40,14 +40,9 @@ Doxyfile + `@brief`/`@param`/`@return` doc comments on all public headers. Gener
 
 Parser-agnostic chunked decoder (`KlChunkedDecoder`) sits between the socket and body reader. The parser only sets `req->chunked = 1`; the connection layer routes body data through the decoder. Includes body deadline timer (`body_timeout_ms`) for slow-chunk DoS protection.
 
-### Per-route middleware chain
+### ~~Per-route middleware chain~~ DONE
 
-```c
-kl_server_use(&s, "GET", "/api/*", auth_middleware, NULL);
-kl_server_use(&s, "*", "/*", cors_middleware, NULL);
-```
-
-Middleware runs before the handler and can short-circuit (return error response) or modify request state. Implemented as a secondary route table checked before the primary handler.
+Pattern-matched middleware via `kl_server_use()` / `kl_router_use()`. Middleware runs after route match, before body reading. Supports prefix (`/api/*`) and exact (`/health`) pattern matching, wildcard method (`*`), and short-circuit (return non-zero to stop chain). Built-in CORS middleware (`kl_cors_middleware`) ships with configurable origins, preflight handling, and credentials support. `req->ctx` enables middleware→handler data passing.
 
 ## Medium-Term
 

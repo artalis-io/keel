@@ -63,6 +63,17 @@ int  kl_server_route(KlServer *s, const char *method, const char *pattern,
                      KlBodyReaderFactory body_reader);
 
 /**
+ * @brief Register middleware on the server.
+ * @param method  HTTP method filter ("GET", "POST", "*" for any).
+ * @param pattern URL pattern — exact or prefix with trailing slash-star.
+ * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
+ * @param user_data Passed to fn on each invocation.
+ * @return 0 on success, -1 on failure.
+ */
+int  kl_server_use(KlServer *s, const char *method, const char *pattern,
+                   KlMiddleware fn, void *user_data);
+
+/**
  * @brief Start the event loop (blocks until stopped).
  * @return 0 on clean shutdown, -1 on fatal error.
  */
