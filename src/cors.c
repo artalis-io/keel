@@ -79,8 +79,9 @@ int kl_cors_is_allowed(const KlCorsConfig *config, const char *origin,
 
 /* ── Middleware function ────────────────────────────────────────────── */
 
+/* cppcheck-suppress constParameterPointer ; signature must match KlMiddleware */
 int kl_cors_middleware(KlRequest *req, KlResponse *res, void *user_data) {
-    KlCorsConfig *config = user_data;
+    const KlCorsConfig *config = user_data;
 
     /* Extract Origin header */
     size_t origin_len;
