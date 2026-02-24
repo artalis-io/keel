@@ -6,6 +6,8 @@
 #include <keel/router.h>
 #include <keel/connection.h>
 #include <keel/event.h>
+#include <stdatomic.h>
+#include <stdint.h>
 
 typedef KlParser *(*KlParserFactory)(KlAllocator *alloc);
 
@@ -27,6 +29,8 @@ typedef struct {
     KlParserFactory parser;     /* default: kl_parser_llhttp */
     KlAccessLogFn access_log;   /* default: NULL (disabled) */
     void *access_log_data;      /* passed as user_data to access_log */
+    int install_signal_handlers; /* install SIGTERM/SIGINT handlers */
+    int drain_timeout_ms;        /* graceful shutdown drain timeout (0 = immediate) */
 } KlConfig;
 
 typedef struct {
@@ -36,15 +40,40 @@ typedef struct {
     KlConnPool pool;
     KlEventLoop loop;
     int listen_fd;
-    volatile int running;
+    _Atomic int running;
+    _Atomic int draining;
+    uint64_t drain_deadline_ms;
 } KlServer;
 
-int  kl_server_init(KlServer *s, KlConfig *config);
+/**
+ * @brief Initialize server with the given configuration.
+ * @param s      Server instance.
+ * @param config Configuration (defaults applied for zero fields).
+ * @return 0 on success, -1 on failure.
+ */
+int  kl_server_init(KlServer *s, const KlConfig *config);
+
+/**
+ * @brief Register a route on the server.
+ * @return 0 on success, -1 on failure.
+ */
 int  kl_server_route(KlServer *s, const char *method, const char *pattern,
                      KlHandler handler, void *user_data,
                      KlBodyReaderFactory body_reader);
+
+/**
+ * @brief Start the event loop (blocks until stopped).
+ * @return 0 on clean shutdown, -1 on fatal error.
+ */
 int  kl_server_run(KlServer *s);
+
+/**
+ * @brief Request server shutdown. If drain_timeout_ms is configured,
+ *        enters drain mode first (stops accepting, waits for in-flight).
+ */
 void kl_server_stop(KlServer *s);
+
+/** @brief Free all server resources (pool, router, event loop). */
 void kl_server_free(KlServer *s);
 
 #endif

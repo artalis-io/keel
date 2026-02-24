@@ -20,7 +20,11 @@ struct KlParser {
     void (*destroy)(KlParser *self);
 };
 
-/* Built-in backends */
+/**
+ * @brief Create an llhttp-based HTTP/1.1 parser.
+ * @param alloc Allocator for parser state.
+ * @return Parser instance, or NULL on allocation failure.
+ */
 KlParser *kl_parser_llhttp(KlAllocator *alloc);
 
 #endif

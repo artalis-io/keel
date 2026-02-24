@@ -117,6 +117,15 @@ int kl_router_match(KlRouter *r, const char *method, size_t method_len,
             *num_params = np;
             return 200;
         }
+
+        /* HEAD falls back to GET routes */
+        if (method_len == 4 && memcmp(method, "HEAD", 4) == 0 &&
+            strlen(route->method) == 3 &&
+            memcmp(route->method, "GET", 3) == 0) {
+            *matched = route;
+            *num_params = np;
+            return 200;
+        }
     }
 
     *matched = NULL;

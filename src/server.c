@@ -15,6 +15,16 @@
 #define KL_EVENTS_PER_TICK 64
 #define KL_POLL_TIMEOUT_MS 1000
 
+/* ── Signal handling ─────────────────────────────────────────────── */
+
+static _Atomic(KlServer *) kl_signal_server = NULL;
+
+static void kl_signal_handler(int sig) {
+    (void)sig;
+    KlServer *s = atomic_load(&kl_signal_server);
+    if (s) kl_server_stop(s);
+}
+
 static const char kl_408_response[] =
     "HTTP/1.1 408 Request Timeout\r\n"
     "Content-Length: 0\r\n"
@@ -27,7 +37,7 @@ static int set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-int kl_server_init(KlServer *s, KlConfig *config) {
+int kl_server_init(KlServer *s, const KlConfig *config) {
     memset(s, 0, sizeof(*s));
     s->listen_fd = -1;
 
@@ -151,10 +161,24 @@ int kl_server_run(KlServer *s) {
     fprintf(stderr, "keel: listening on %s:%d\n",
             s->config.bind_addr, s->config.port);
 
-    s->running = 1;
+    /* Install signal handlers if requested */
+    struct sigaction old_term, old_int;
+    if (s->config.install_signal_handlers) {
+        atomic_store(&kl_signal_server, s);
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = kl_signal_handler;
+        sa.sa_flags = 0;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGTERM, &sa, &old_term);
+        sigaction(SIGINT, &sa, &old_int);
+    }
+
+    atomic_store(&s->running, 1);
+    atomic_store(&s->draining, 0);
     KlEvent events[KL_EVENTS_PER_TICK];
 
-    while (s->running) {
+    while (atomic_load(&s->running)) {
         int n = kl_event_wait(&s->loop, events, KL_EVENTS_PER_TICK,
                               KL_POLL_TIMEOUT_MS);
         if (n < 0) {
@@ -168,6 +192,7 @@ int kl_server_run(KlServer *s) {
 
             if (c == NULL) {
                 /* Listen socket — accept new connections */
+                if (atomic_load(&s->draining)) goto rearm_listen;
                 while (1) {
                     int client_fd = accept(s->listen_fd, NULL, NULL);
                     if (client_fd < 0) {
@@ -202,6 +227,7 @@ int kl_server_run(KlServer *s) {
                 }
                 /* Re-arm listen socket (no-op for persistent backends;
                  * required for io_uring's one-shot POLL_ADD) */
+rearm_listen:
                 kl_event_mod(&s->loop, s->listen_fd,
                              KL_EVENT_READ, NULL);
                 continue;
@@ -265,13 +291,39 @@ int kl_server_run(KlServer *s) {
                 kl_conn_release(&s->pool, tc);
             }
         }
+
+        /* Graceful drain: stop when all connections are idle or deadline hit */
+        if (atomic_load(&s->draining)) {
+            int active = 0;
+            for (int j = 0; j < s->pool.capacity; j++) {
+                if (s->pool.conns[j].state != KL_CONN_CLOSED)
+                    active++;
+            }
+            if (active == 0 || now >= s->drain_deadline_ms) {
+                atomic_store(&s->running, 0);
+            }
+        }
+    }
+
+    /* Restore signal handlers */
+    if (s->config.install_signal_handlers) {
+        sigaction(SIGTERM, &old_term, NULL);
+        sigaction(SIGINT, &old_int, NULL);
+        atomic_store(&kl_signal_server, (KlServer *)NULL);
     }
 
     return 0;
 }
 
 void kl_server_stop(KlServer *s) {
-    s->running = 0;
+    if (s->config.drain_timeout_ms > 0 && !atomic_load(&s->draining)) {
+        /* Enter drain mode: stop accepting, let in-flight finish */
+        atomic_store(&s->draining, 1);
+        s->drain_deadline_ms = kl_monotonic_ms() +
+                               (uint64_t)s->config.drain_timeout_ms;
+    } else {
+        atomic_store(&s->running, 0);
+    }
 }
 
 void kl_server_free(KlServer *s) {

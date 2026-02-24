@@ -59,16 +59,37 @@ typedef struct {
     KlAllocator *alloc;
 } KlConnPool;
 
+/**
+ * @brief Initialize a pre-allocated connection pool.
+ * @param pool     Pool to initialize.
+ * @param capacity Maximum concurrent connections.
+ * @param alloc    Allocator for pool memory.
+ * @return 0 on success, -1 on failure.
+ */
 int     kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc);
+
+/** @brief Acquire a connection slot from the pool. Returns NULL if full. */
 KlConn *kl_conn_acquire(KlConnPool *pool, int fd);
+
+/** @brief Release a connection back to the pool (closes fd). */
 void    kl_conn_release(KlConnPool *pool, KlConn *c);
+
+/** @brief Free all pool resources. */
 void    kl_conn_pool_free(KlConnPool *pool);
 
-/* State transitions */
+/**
+ * @brief Process readable data on a connection (parse headers/body, invoke handler).
+ * @return New connection state.
+ */
 KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router);
+
+/**
+ * @brief Process writable event (send response data).
+ * @return New connection state.
+ */
 KlConnState kl_conn_on_writable(KlConn *c);
 
-/* Monotonic clock in milliseconds */
+/** @brief Monotonic clock in milliseconds (for timeout tracking). */
 uint64_t kl_monotonic_ms(void);
 
 #endif

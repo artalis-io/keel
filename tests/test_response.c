@@ -93,6 +93,88 @@ UTEST(response, send_to_pipe) {
     kl_response_free(&res);
 }
 
+UTEST(response, head_suppresses_body) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    int pipefd[2];
+    ASSERT_EQ(pipe(pipefd), 0);
+
+    res.conn_fd = pipefd[1];
+    res.head_request = 1;
+    kl_response_json(&res, 200, "{\"ok\":true}", 11);
+
+    int r = kl_response_send(&res);
+    ASSERT_EQ(r, 0);
+    close(pipefd[1]);
+
+    char buf[1024];
+    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    ASSERT_TRUE(n > 0);
+    buf[n] = '\0';
+    close(pipefd[0]);
+
+    /* Headers should be present including Content-Length */
+    ASSERT_TRUE(strstr(buf, "HTTP/1.1 200 OK\r\n") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Length: 11\r\n") != NULL);
+
+    /* Body should NOT be present */
+    char *body_start = strstr(buf, "\r\n\r\n");
+    ASSERT_TRUE(body_start != NULL);
+    body_start += 4;
+    ASSERT_EQ((size_t)(n - (body_start - buf)), (size_t)0);
+
+    kl_response_free(&res);
+}
+
+UTEST(response, keep_alive_conditional) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    int pipefd[2];
+    ASSERT_EQ(pipe(pipefd), 0);
+
+    res.conn_fd = pipefd[1];
+    res.keep_alive = 0;
+    kl_response_body(&res, "hi", 2);
+
+    int r = kl_response_send(&res);
+    ASSERT_EQ(r, 0);
+    close(pipefd[1]);
+
+    char buf[1024];
+    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    ASSERT_TRUE(n > 0);
+    buf[n] = '\0';
+    close(pipefd[0]);
+
+    /* No keep-alive header when flag is 0 */
+    ASSERT_TRUE(strstr(buf, "Connection: keep-alive") == NULL);
+
+    /* Now test with keep_alive = 1 */
+    kl_response_free(&res);
+    kl_response_init(&res, &a);
+    ASSERT_EQ(pipe(pipefd), 0);
+    res.conn_fd = pipefd[1];
+    res.keep_alive = 1;
+    kl_response_body(&res, "hi", 2);
+
+    r = kl_response_send(&res);
+    ASSERT_EQ(r, 0);
+    close(pipefd[1]);
+
+    n = read(pipefd[0], buf, sizeof(buf) - 1);
+    ASSERT_TRUE(n > 0);
+    buf[n] = '\0';
+    close(pipefd[0]);
+
+    ASSERT_TRUE(strstr(buf, "Connection: keep-alive") != NULL);
+
+    kl_response_free(&res);
+}
+
 UTEST(response, streaming_chunked) {
     KlAllocator a = kl_allocator_default();
     KlResponse res;

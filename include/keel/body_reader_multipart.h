@@ -61,12 +61,18 @@ typedef struct {
     size_t hdr_len;
 } KlMultipartReader;
 
-/*
- * Factory: extract boundary from Content-Type, create multipart reader.
- * user_data = KlMultipartConfig * (or NULL for defaults).
- * Returns NULL if not multipart/form-data or no boundary -> triggers 415.
+/**
+ * @brief Factory: create a multipart/form-data body reader.
+ *
+ * Extracts the boundary from Content-Type. Returns NULL (triggering 415)
+ * if the content type is not multipart/form-data or has no boundary.
+ *
+ * @param alloc     Allocator for parts and buffers.
+ * @param req       Parsed request (Content-Type must be set).
+ * @param user_data KlMultipartConfig pointer, or NULL for defaults.
+ * @return Multipart body reader, or NULL on rejection.
  */
-KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, KlRequest *req,
+KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlRequest *req,
                                         void *user_data);
 
 #endif

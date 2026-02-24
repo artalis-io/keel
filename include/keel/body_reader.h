@@ -31,7 +31,7 @@ struct KlBodyReader {
  * Return NULL to reject the request (KEEL sends 415 and closes).
  */
 typedef KlBodyReader *(*KlBodyReaderFactory)(KlAllocator *alloc,
-                                              KlRequest *req,
+                                              const KlRequest *req,
                                               void *user_data);
 
 /*
@@ -49,7 +49,18 @@ typedef struct {
     size_t max_size;    /* 0 = unlimited */
 } KlBufReader;
 
-KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, KlRequest *req,
+/**
+ * @brief Factory: create a buffer body reader.
+ *
+ * Pass max_size as user_data via cast: (void *)(size_t)max_size.
+ * Pass NULL (0) for unlimited.
+ *
+ * @param alloc     Allocator for buffer growth.
+ * @param req       Parsed request (headers inspectable).
+ * @param user_data Cast to size_t max_size limit.
+ * @return Body reader, or NULL on allocation failure.
+ */
+KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, const KlRequest *req,
                                      void *user_data);
 
 #endif

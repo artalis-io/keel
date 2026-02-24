@@ -48,7 +48,7 @@ static void buf_destroy(KlBodyReader *self) {
     kl_free(br->alloc, br, sizeof(KlBufReader));
 }
 
-KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, KlRequest *req,
+KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, const KlRequest *req,
                                      void *user_data) {
     (void)req;
 

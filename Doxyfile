@@ -1,0 +1,14 @@
+PROJECT_NAME           = "KEEL"
+PROJECT_BRIEF          = "Minimal, zero-allocation HTTP/1.1 server library for C"
+OUTPUT_DIRECTORY       = docs/api
+INPUT                  = include/keel
+FILE_PATTERNS          = *.h
+RECURSIVE              = NO
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+OPTIMIZE_OUTPUT_FOR_C  = YES
+GENERATE_LATEX         = NO
+GENERATE_HTML          = YES
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+SORT_MEMBER_DOCS       = NO

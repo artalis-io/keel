@@ -283,18 +283,21 @@ int kl_response_send(KlResponse *res) {
             iovcnt++;
         }
 
-        /* Connection: keep-alive */
-        iov[iovcnt].iov_base = (void *)kl_keepalive_hdr;
-        iov[iovcnt].iov_len = sizeof(kl_keepalive_hdr) - 1;
-        iovcnt++;
+        /* Connection: keep-alive (only when flagged) */
+        if (res->keep_alive) {
+            iov[iovcnt].iov_base = (void *)kl_keepalive_hdr;
+            iov[iovcnt].iov_len = sizeof(kl_keepalive_hdr) - 1;
+            iovcnt++;
+        }
 
         /* Header terminator */
         iov[iovcnt].iov_base = (void *)"\r\n";
         iov[iovcnt].iov_len = 2;
         iovcnt++;
 
-        /* Inline body for buffered mode */
-        if (res->body_mode == KL_BODY_BUFFER && res->body_len > 0) {
+        /* Inline body for buffered mode (skip for HEAD) */
+        if (res->body_mode == KL_BODY_BUFFER && res->body_len > 0 &&
+            !res->head_request) {
             iov[iovcnt].iov_base = (void *)res->body;
             iov[iovcnt].iov_len = res->body_len;
             iovcnt++;
@@ -303,11 +306,11 @@ int kl_response_send(KlResponse *res) {
         if (writev_all(res->conn_fd, iov, iovcnt) < 0) return -1;
         res->headers_sent = 1;
 
-        if (res->body_mode == KL_BODY_BUFFER)
+        if (res->body_mode == KL_BODY_BUFFER || res->head_request)
             return 0;
     }
 
-    /* Send file body */
+    /* Send file body (already skipped above for HEAD) */
     if (res->body_mode == KL_BODY_FILE) {
 #if defined(__linux__)
         /* TCP_CORK: coalesce headers + file data into fewer TCP segments */
@@ -341,6 +344,7 @@ static int kl_stream_write(void *ctx, const char *data, size_t len) {
     KlResponse *res = ctx;
     if (res->stream_error) return -1;
     if (len == 0) return 0;
+    if (res->head_request) return 0;
 
     char hdr[24];
     int hdr_len = format_chunk_hdr(hdr, len);
@@ -393,6 +397,7 @@ int kl_response_begin_stream(KlResponse *res, int status,
 
 int kl_response_end_stream(KlResponse *res) {
     if (res->stream_error) return -1;
+    if (res->head_request) return 0;
     if (write(res->conn_fd, "0\r\n\r\n", 5) < 0) {
         res->stream_error = 1;
         return -1;
