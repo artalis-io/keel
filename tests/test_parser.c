@@ -175,4 +175,53 @@ UTEST(parser, reset_between_requests) {
     p->destroy(p);
 }
 
+UTEST(parser, chunked_cl_te_conflict) {
+    KlAllocator a = kl_allocator_default();
+    KlParser *p = kl_parser_llhttp(&a);
+
+    /* Both Content-Length and Transfer-Encoding: chunked.
+     * llhttp (correctly) rejects this as a parse error to prevent
+     * CL/TE request smuggling. Our on_headers_complete zeroing of
+     * content_length is defense-in-depth for other parser backends. */
+    const char *raw = "POST /data HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Content-Length: 100\r\n"
+                      "Transfer-Encoding: chunked\r\n"
+                      "\r\n";
+    size_t len = strlen(raw);
+
+    KlRequest req;
+    memset(&req, 0, sizeof(req));
+    size_t consumed = 0;
+
+    KlParseResult result = p->parse(p, &req, raw, len, &consumed);
+    /* llhttp rejects conflicting CL+TE headers outright */
+    ASSERT_EQ(result, KL_PARSE_ERROR);
+
+    p->destroy(p);
+}
+
+UTEST(parser, chunked_te_only) {
+    KlAllocator a = kl_allocator_default();
+    KlParser *p = kl_parser_llhttp(&a);
+
+    /* Transfer-Encoding: chunked without Content-Length */
+    const char *raw = "POST /data HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Transfer-Encoding: chunked\r\n"
+                      "\r\n";
+    size_t len = strlen(raw);
+
+    KlRequest req;
+    memset(&req, 0, sizeof(req));
+    size_t consumed = 0;
+
+    KlParseResult result = p->parse(p, &req, raw, len, &consumed);
+    ASSERT_EQ(result, KL_PARSE_HEADERS_OK);
+    ASSERT_EQ(req.chunked, 1);
+    ASSERT_EQ(req.content_length, (size_t)0);
+
+    p->destroy(p);
+}
+
 UTEST_MAIN();

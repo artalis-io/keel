@@ -4,51 +4,41 @@ Future direction and design considerations for keel.
 
 ## Near-Term
 
-### 100-continue (Expect header)
+### ~~100-continue (Expect header)~~ DONE
 
-Auto-detect `Expect: 100-continue` and send `HTTP/1.1 100 Continue\r\n\r\n` before reading the body. Currently clients sending this header hang waiting for the 100 response.
+Auto-detect `Expect: 100-continue` and send `HTTP/1.1 100 Continue\r\n\r\n` before reading the body.
 
-### HEAD method auto-strip
+### ~~HEAD method auto-strip~~ DONE
 
-`kl_response_send` should detect HEAD requests and suppress the body while preserving `Content-Length`. Currently handlers must manually avoid setting a body for HEAD.
+HEAD requests automatically match GET routes; response body suppressed while preserving `Content-Length`.
 
-### Graceful connection drain
+### ~~Graceful connection drain~~ DONE
 
-See "Graceful shutdown" below — expand `kl_server_stop` to stop accepting, set a drain deadline, continue processing in-flight requests, and close remaining at deadline.
+`kl_server_stop` enters drain mode: stops accepting, continues in-flight requests, closes at configurable `drain_timeout_ms` deadline.
 
-### Signal handling
+### ~~Signal handling~~ DONE
 
-Add an optional built-in SIGTERM/SIGINT handler that calls `kl_server_stop`. Change `volatile int running` to `_Atomic int running` for portable correctness. Document signal safety guarantees.
+Optional SIGTERM/SIGINT handler via `config.install_signal_handlers`. Uses `_Atomic int running` with `sigaction`.
 
-### HTTP/1.0 compatibility
+### ~~HTTP/1.0 compatibility~~ DONE
 
-Send `Connection: close` for HTTP/1.0 clients instead of keep-alive headers. The parser already detects the version — the response layer needs to check it.
+`Connection: keep-alive` header is now conditional on `req.keep_alive`, preventing confusion for HTTP/1.0 clients.
 
-### Static analysis in CI
+### ~~Static analysis in CI~~ DONE
 
-Add clang-analyzer or cppcheck to the GitHub Actions pipeline to catch regressions early. Currently only compiler warnings (`-Wall -Wextra -Wpedantic -Werror`) gate the build.
+`scan-build` and `cppcheck` run in CI via `make analyze` and `make cppcheck` targets.
 
-### Fuzz testing
+### ~~Fuzz testing~~ DONE
 
-Add AFL or libFuzzer harnesses for the llhttp parser wrapper and the multipart body reader. These process untrusted input and are the highest-risk attack surface.
+libFuzzer harnesses for HTTP parser and multipart reader with seed corpora (`fuzz/`).
 
-### API reference documentation
+### ~~API reference documentation~~ DONE
 
-Generate Doxygen or hand-written man pages for all public API functions. Currently users read headers and examples.
+Doxyfile + `@brief`/`@param`/`@return` doc comments on all public headers. Generate with `make docs`.
 
 ### Chunked request bodies
 
 Support `Transfer-Encoding: chunked` for requests. The parser already detects the `chunked` flag — the connection layer needs to de-chunk incoming data before feeding it to the body reader. This is straightforward: a small state machine that strips chunk headers and feeds raw data through the existing body reader interface.
-
-### Graceful shutdown
-
-Drain active connections before exiting:
-1. Stop accepting new connections (remove listen fd from event loop)
-2. Set a deadline (e.g. 5 seconds)
-3. Continue processing in-flight requests
-4. Close remaining connections at deadline
-
-Currently `kl_server_stop` sets `running = 0` and the loop exits after the current tick.
 
 ### Per-route middleware chain
 

@@ -121,6 +121,11 @@ static int on_headers_complete(llhttp_t *p) {
     req->chunked = (p->flags & F_CHUNKED) ? 1 : 0;
     req->keep_alive = llhttp_should_keep_alive(p);
 
+    /* RFC 7230 §3.3.3: when Transfer-Encoding is present, ignore
+     * Content-Length to prevent CL/TE request smuggling. */
+    if (req->chunked)
+        req->content_length = 0;
+
     lp->headers_done = 1;
     return HPE_PAUSED;  /* pause to let connection layer route + create body reader */
 }

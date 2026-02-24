@@ -6,6 +6,7 @@
 #include <keel/request.h>
 #include <keel/body_reader.h>
 #include <keel/body_reader_multipart.h>
+#include <keel/chunked.h>
 #include <keel/parser.h>
 #include <keel/response.h>
 #include <keel/router.h>
