@@ -4,7 +4,7 @@
 
 ```bash
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
-make test         # build and run all 151 unit tests
+make test         # build and run all 160 unit tests
 make examples     # build all 6 example programs
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make clean        # remove all build artifacts

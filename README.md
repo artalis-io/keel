@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
 
-**101K req/s** on a single thread. **151 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **160 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -416,7 +416,7 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 
 ## Testing
 
-151 tests across 12 test suites, covering every module:
+160 tests across 12 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
