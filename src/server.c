@@ -276,11 +276,22 @@ rearm_listen:
          * have fresh last_active_ms and won't be timed out. */
         uint64_t now = kl_monotonic_ms();
         uint64_t timeout = (uint64_t)s->config.read_timeout_ms;
+        uint64_t body_timeout = s->config.body_timeout_ms > 0
+                                ? (uint64_t)s->config.body_timeout_ms
+                                : timeout;
         for (int i = 0; i < s->pool.capacity; i++) {
             KlConn *tc = &s->pool.conns[i];
             if (tc->state == KL_CONN_CLOSED || tc->state == KL_CONN_PROCESSING)
                 continue;
-            if (now - tc->last_active_ms > timeout) {
+            int timed_out = (now - tc->last_active_ms > timeout);
+            /* Body deadline: absolute time from body start, not resettable.
+             * Catches slow-chunk attacks where 1 byte resets idle timer. */
+            if (!timed_out && tc->state == KL_CONN_READING_BODY &&
+                tc->body_start_ms > 0 &&
+                now - tc->body_start_ms > body_timeout) {
+                timed_out = 1;
+            }
+            if (timed_out) {
                 /* Best-effort 408: small write to non-blocking socket
                  * will almost always succeed in one call. */
                 if (tc->state == KL_CONN_READING ||

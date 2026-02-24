@@ -2,6 +2,7 @@
 #define KEEL_CONNECTION_H
 
 #include <keel/allocator.h>
+#include <keel/chunked.h>
 #include <keel/request.h>
 #include <keel/response.h>
 #include <keel/parser.h>
@@ -41,6 +42,8 @@ typedef struct KlConn {
 
     uint64_t last_active_ms;   /* monotonic clock, updated on every I/O */
     uint64_t request_start_ms; /* stamped at processing start for access log */
+    uint64_t body_start_ms;    /* stamped when entering READING_BODY */
+    KlChunkedDecoder chunked_dec;  /* reused per-request, no allocation */
 
     /* Access logging (set once at pool init, never changes) */
     void (*access_log)(const KlRequest *req, int status,

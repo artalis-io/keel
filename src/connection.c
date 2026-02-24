@@ -1,5 +1,6 @@
 #include <keel/connection.h>
 #include <keel/body_reader.h>
+#include <keel/chunked.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -251,7 +252,23 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                 }
 
                 /* Parse leftover body data in-place (no memmove) */
-                if (leftover > 0) {
+                if (c->req.chunked) {
+                    kl_chunked_init(&c->chunked_dec);
+                    if (leftover > 0) {
+                        int rc = kl_chunked_decode(&c->chunked_dec,
+                                    c->read_buf + consumed, leftover,
+                                    c->req.body_reader);
+                        if (rc < 0) {
+                            c->req.body_reader->on_error(c->req.body_reader);
+                            c->state = KL_CONN_CLOSED;
+                            return c->state;
+                        }
+                        if (rc == 1) {
+                            c->req.body_reader->on_complete(c->req.body_reader);
+                            return conn_process(c);
+                        }
+                    }
+                } else if (leftover > 0) {
                     size_t body_consumed;
                     KlParseResult bpr = c->parser->parse(
                         c->parser, &c->req,
@@ -271,6 +288,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                 }
 
                 c->read_len = 0;
+                c->body_start_ms = kl_monotonic_ms();
                 c->state = KL_CONN_READING_BODY;
                 return c->state;
 
@@ -280,7 +298,20 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
 
             } else {
                 /* Body present but no reader — discard body */
-                if (leftover > 0) {
+                if (c->req.chunked) {
+                    kl_chunked_init(&c->chunked_dec);
+                    if (leftover > 0) {
+                        int rc = kl_chunked_decode(&c->chunked_dec,
+                                    c->read_buf + consumed, leftover, NULL);
+                        if (rc < 0) {
+                            c->state = KL_CONN_CLOSED;
+                            return c->state;
+                        }
+                        if (rc == 1) {
+                            return conn_process(c);
+                        }
+                    }
+                } else if (leftover > 0) {
                     size_t body_consumed;
                     KlParseResult bpr = c->parser->parse(
                         c->parser, &c->req,
@@ -298,6 +329,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                 }
 
                 c->read_len = 0;
+                c->body_start_ms = kl_monotonic_ms();
                 c->state = KL_CONN_READING_BODY;
                 return c->state;
             }
@@ -329,6 +361,26 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
             return c->state;
         }
 
+        if (c->req.chunked) {
+            int rc = kl_chunked_decode(&c->chunked_dec,
+                        c->read_buf, (size_t)nr, c->req.body_reader);
+            if (rc < 0) {
+                if (c->req.body_reader)
+                    c->req.body_reader->on_error(c->req.body_reader);
+                best_effort_write(c->fd, kl_413_response,
+                                  sizeof(kl_413_response) - 1);
+                c->state = KL_CONN_CLOSED;
+                return c->state;
+            }
+            if (rc == 1) {
+                if (c->req.body_reader)
+                    c->req.body_reader->on_complete(c->req.body_reader);
+                return conn_process(c);
+            }
+            return KL_CONN_READING_BODY;
+        }
+
+        /* Content-Length body — existing parser path */
         size_t consumed = 0;
         KlParseResult pr = c->parser->parse(c->parser, &c->req,
                                              c->read_buf, (size_t)nr,
@@ -377,6 +429,7 @@ KlConnState kl_conn_on_writable(KlConn *c) {
             c->route = NULL;
             c->num_params = 0;
             c->route_result = 0;
+            c->body_start_ms = 0;
             c->last_active_ms = kl_monotonic_ms();
             c->state = KL_CONN_READING;
         } else {

@@ -25,6 +25,7 @@ typedef struct {
     const char *bind_addr;      /* default: "0.0.0.0" */
     int max_connections;        /* default: KL_DEFAULT_MAX_CONNS */
     int read_timeout_ms;        /* default: KL_DEFAULT_READ_TIMEOUT */
+    int body_timeout_ms;        /* total body deadline; 0 = use read_timeout_ms */
     KlAllocator *alloc;         /* default: stdlib */
     KlParserFactory parser;     /* default: kl_parser_llhttp */
     KlAccessLogFn access_log;   /* default: NULL (disabled) */

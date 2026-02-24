@@ -24,7 +24,7 @@ endif
 # Core library — parser-agnostic
 CORE_SRC = src/allocator.c src/response.c src/router.c \
            src/connection.c src/server.c src/body_reader_buffer.c \
-           src/body_reader_multipart.c $(EVENT_SRC)
+           src/body_reader_multipart.c src/chunked.c $(EVENT_SRC)
 
 # Default parser backend (llhttp)
 LLHTTP_SRC = parsers/parser_llhttp.c \

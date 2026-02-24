@@ -482,6 +482,226 @@ UTEST(integration, multipart_upload) {
     stop_server();
 }
 
+/* ── Chunked transfer-encoding tests ────────────────────────────────── */
+
+UTEST(integration, chunked_post) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "POST /echo HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Transfer-Encoding: chunked\r\n"
+                      "Connection: close\r\n"
+                      "\r\n"
+                      "5\r\nhello\r\n0\r\n\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "hello") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, chunked_multi_chunk) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "POST /echo HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Transfer-Encoding: chunked\r\n"
+                      "Connection: close\r\n"
+                      "\r\n"
+                      "5\r\nhello\r\n"
+                      "1\r\n \r\n"
+                      "5\r\nworld\r\n"
+                      "0\r\n\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "hello world") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, chunked_keepalive) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* First request: chunked POST */
+    const char *req1 = "POST /echo HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "Transfer-Encoding: chunked\r\n"
+                       "\r\n"
+                       "5\r\nfirst\r\n0\r\n\r\n";
+    (void)write(fd, req1, strlen(req1));
+
+    /* Read first response */
+    char buf[8192];
+    ssize_t total = 0;
+    ssize_t n;
+    while ((n = read(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
+        total += n;
+        buf[total] = '\0';
+        char *body_start = strstr(buf, "\r\n\r\n");
+        if (body_start) {
+            body_start += 4;
+            char *cl = strstr(buf, "Content-Length:");
+            if (cl) {
+                size_t cl_val = (size_t)strtol(cl + 15, NULL, 10);
+                size_t body_received = (size_t)(total - (body_start - buf));
+                if (body_received >= cl_val) break;
+            }
+        }
+    }
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "first") != NULL);
+
+    /* Second request: plain GET on same connection */
+    const char *req2 = "GET /hello HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "Connection: close\r\n"
+                       "\r\n";
+    (void)write(fd, req2, strlen(req2));
+
+    char buf2[4096];
+    read_response(fd, buf2, sizeof(buf2));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf2, "{\"msg\":\"hello\"}") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, chunked_100_continue) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* Send headers with Expect: 100-continue and chunked TE */
+    const char *hdr = "POST /echo HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Transfer-Encoding: chunked\r\n"
+                      "Expect: 100-continue\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, hdr, strlen(hdr));
+
+    /* Wait for 100 Continue */
+    char buf[4096];
+    ssize_t rn = 0;
+    for (int i = 0; i < 20 && rn == 0; i++) {
+        usleep(50000);
+        ssize_t r = read(fd, buf + rn, sizeof(buf) - (size_t)rn - 1);
+        if (r > 0) rn += r;
+    }
+    buf[rn] = '\0';
+    ASSERT_TRUE(strstr(buf, "100 Continue") != NULL);
+
+    /* Send chunked body */
+    const char *body = "b\r\nhello world\r\n0\r\n\r\n";
+    (void)write(fd, body, strlen(body));
+
+    char buf2[4096];
+    read_response(fd, buf2, sizeof(buf2));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf2, "hello world") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, chunked_empty_body) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "POST /echo HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Transfer-Encoding: chunked\r\n"
+                      "Connection: close\r\n"
+                      "\r\n"
+                      "0\r\n\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "no body") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, chunked_large_body) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* Send headers */
+    const char *hdr = "POST /echo HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Transfer-Encoding: chunked\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, hdr, strlen(hdr));
+
+    /* Send 16KB in 1KB chunks */
+    char chunk_data[1024];
+    memset(chunk_data, 'Z', sizeof(chunk_data));
+
+    for (int i = 0; i < 16; i++) {
+        char chunk_hdr[16];
+        int hlen = snprintf(chunk_hdr, sizeof(chunk_hdr), "400\r\n");
+        (void)write(fd, chunk_hdr, (size_t)hlen);
+        (void)write(fd, chunk_data, sizeof(chunk_data));
+        (void)write(fd, "\r\n", 2);
+    }
+    (void)write(fd, "0\r\n\r\n", 5);
+
+    char buf[32768];
+    ssize_t total = read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    /* Find body start */
+    char *body_start = strstr(buf, "\r\n\r\n");
+    ASSERT_TRUE(body_start != NULL);
+    body_start += 4;
+    size_t resp_body_len = (size_t)(total - (body_start - buf));
+    ASSERT_EQ(resp_body_len, (size_t)(16 * 1024));
+
+    /* Verify all bytes are 'Z' */
+    int all_z = 1;
+    for (size_t j = 0; j < resp_body_len; j++) {
+        if (body_start[j] != 'Z') { all_z = 0; break; }
+    }
+    ASSERT_TRUE(all_z);
+
+    stop_server();
+}
+
 /* ── Signal handling test ───────────────────────────────────────────── */
 
 static KlServer signal_server;
