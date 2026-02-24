@@ -44,6 +44,10 @@ Parser-agnostic chunked decoder (`KlChunkedDecoder`) sits between the socket and
 
 Pattern-matched middleware via `kl_server_use()` / `kl_router_use()`. Middleware runs after route match, before body reading. Supports prefix (`/api/*`) and exact (`/health`) pattern matching, wildcard method (`*`), and short-circuit (return non-zero to stop chain). Built-in CORS middleware (`kl_cors_middleware`) ships with configurable origins, preflight handling, and credentials support. `req->ctx` enables middleware→handler data passing.
 
+### ~~Security audit hardening~~ DONE
+
+Comprehensive C code audit with 8 fixes: integer overflow guards in `mp_strdup` and `hdr_append`, bounds-safe param capture in router, NULL guards in CORS middleware / server init / response body, multipart `mp_append_data` bounds check, and stored string lengths in multipart parser to eliminate `strlen` on untrusted data during cleanup.
+
 ## Medium-Term
 
 ### TLS via BearSSL or LibreSSL
