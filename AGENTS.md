@@ -19,6 +19,9 @@ Every PR should be checked for:
 - [ ] **Middleware safety** — Middleware that short-circuits must write a complete response; short-circuit disables keep-alive (body unread)
 - [ ] **Middleware order** — Registration order = execution order; global middleware (`/*`) before specific (`/api/*`) if intended
 - [ ] **Request context cleanup** — `req->ctx` set by middleware is the application's responsibility to clean up in the handler
+- [ ] **TLS orthogonality** — TLS changes must not affect middleware, router, body readers, or handlers
+- [ ] **TLS shutdown** — Connections must call tls->shutdown() before close(fd)
+- [ ] **Pending drain** — After TLS reads, tls->pending() must be checked to drain internal buffers
 
 ## Security Audit Patterns
 
@@ -221,6 +224,24 @@ kl_router_use(&r, method, pattern, fn, user_data);
 ```
 
 Middleware runs in registration order, after route matching, before body reading.
+
+## Adding a TLS Backend
+
+1. Implement the 7-function `KlTls` vtable (`handshake`, `read`, `write`, `shutdown`, `pending`, `reset`, `destroy`)
+2. Create a `KlTlsCtx` struct for shared state (certificates, keys, ciphers)
+3. Write a factory function: `KlTls *my_tls_factory(KlTlsCtx *ctx, KlAllocator *alloc)`
+4. Register via `KlTlsConfig` in `KlConfig`:
+
+```c
+KlTlsConfig tls = {
+    .ctx = my_ctx,
+    .factory = my_tls_factory,
+    .ctx_destroy = my_ctx_free,
+};
+KlConfig cfg = { .port = 8443, .tls = &tls };
+```
+
+The factory is called once per connection slot at server init. Each `KlTls` session is reused across keep-alive requests via `reset()`.
 
 ## Commit Conventions
 

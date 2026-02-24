@@ -4,7 +4,7 @@
 
 ```bash
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
-make test         # build and run all 140 unit tests
+make test         # build and run all 151 unit tests
 make examples     # build all 6 example programs
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make clean        # remove all build artifacts
@@ -22,7 +22,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-12 orthogonal modules, each independently testable:
+13 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring event loop abstraction
@@ -36,6 +36,7 @@ make clean        # remove all build artifacts
 10. **body_reader_multipart** — RFC 2046 multipart/form-data state machine parser
 11. **chunked** — RFC 7230 parser-agnostic chunked transfer-encoding decoder
 12. **cors** — Built-in CORS middleware with configurable origins/methods/headers
+13. **tls** — Pluggable TLS transport vtable (bring-your-own backend)
 
 ## Key Types
 
@@ -60,6 +61,11 @@ make clean        # remove all build artifacts
 | `KlMiddlewareEntry` | `router.h` | Registered middleware: method, pattern, fn, user_data |
 | `KlCorsConfig` | `cors.h` | CORS config: allowed origins, methods, headers, credentials |
 | `KlEventLoop` | `event.h` | Platform event loop: init, add, mod, del, wait, close |
+| `KlTls` | `tls.h` | Vtable: handshake, read, write, shutdown, pending, reset, destroy |
+| `KlTlsCtx` | `tls.h` | Opaque per-server TLS context (user-owned) |
+| `KlTlsConfig` | `tls.h` | TLS config: ctx, factory, ctx_destroy |
+| `KlTlsResult` | `tls.h` | Enum: OK, WANT_READ, WANT_WRITE, ERROR |
+| `KlTlsFactory` | `tls.h` | Factory: creates per-connection KlTls from shared context |
 
 ## Git
 
@@ -75,6 +81,7 @@ make clean        # remove all build artifacts
 - Header-only code in `request.h` uses `static inline`
 - Vendor code compiled with `-w` (relaxed warnings, no `-Werror`)
 - Integer overflow guards: check against `SIZE_MAX/2` or `INT_MAX/2` before arithmetic
+- TLS wraps transport — all I/O goes through `conn_read`/`conn_write` helpers when TLS is active
 - Error handling: return `-1` on failure, `0` on success (or positive value)
 - Resource cleanup: every `_init` has a corresponding `_free`
 

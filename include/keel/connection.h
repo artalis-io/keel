@@ -12,7 +12,10 @@
 
 #define KL_READ_BUF_SIZE 8192
 
+typedef struct KlTls KlTls;
+
 typedef enum {
+    KL_CONN_TLS_HANDSHAKE,   /* TLS handshake in progress */
     KL_CONN_READING,
     KL_CONN_READING_BODY,
     KL_CONN_PROCESSING,
@@ -44,6 +47,10 @@ typedef struct KlConn {
     uint64_t request_start_ms; /* stamped at processing start for access log */
     uint64_t body_start_ms;    /* stamped when entering READING_BODY */
     KlChunkedDecoder chunked_dec;  /* reused per-request, no allocation */
+
+    /* TLS session (NULL for plaintext connections) */
+    KlTls *tls;
+    int tls_want;               /* KL_EVENT_READ or KL_EVENT_WRITE during handshake */
 
     /* Access logging (set once at pool init, never changes) */
     void (*access_log)(const KlRequest *req, int status,
@@ -79,6 +86,12 @@ void    kl_conn_release(KlConnPool *pool, KlConn *c);
 
 /** @brief Free all pool resources. */
 void    kl_conn_pool_free(KlConnPool *pool);
+
+/**
+ * @brief Process TLS handshake on a connection.
+ * @return New connection state.
+ */
+KlConnState kl_conn_on_handshake(KlConn *c);
 
 /**
  * @brief Process readable data on a connection (parse headers/body, invoke handler).

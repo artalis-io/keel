@@ -50,22 +50,9 @@ Comprehensive C code audit with 8 fixes: integer overflow guards in `mp_strdup` 
 
 ## Medium-Term
 
-### TLS via BearSSL or LibreSSL
+### ~~TLS via BearSSL or LibreSSL~~ DONE
 
-Pluggable TLS, not forced:
-
-```c
-KlTlsConfig tls = {
-    .cert_file = "cert.pem",
-    .key_file = "key.pem",
-};
-KlConfig cfg = {
-    .port = 8443,
-    .tls = &tls,
-};
-```
-
-TLS wraps the socket read/write at the connection layer. The rest of the stack (parser, router, handler, response) is unchanged. BearSSL is preferred for its small footprint and no-allocation design; LibreSSL for broader cipher support.
+Pluggable TLS vtable (`KlTls`) — users bring their own TLS backend (BearSSL, LibreSSL, OpenSSL, rustls-ffi) by implementing a 7-function vtable. No vendored TLS library. TLS wraps the transport layer via `conn_read`/`conn_write` helpers. New `KL_CONN_TLS_HANDSHAKE` state for non-blocking handshake. `pending()` function for edge-triggered event loop drain. Sendfile falls back to `pread` + TLS write. Pre-allocated per-connection TLS sessions (one per pool slot). Keep-alive reuses TLS session (no re-handshake). 11 mock-based unit tests.
 
 ### Worker thread pool
 

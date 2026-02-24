@@ -17,21 +17,26 @@ Deep technical documentation of KEEL's internal design.
                          │                      │             │           │
                          │                      ▼             ▼           │
                          │               ┌────────────┐ ┌──────────┐     │
-                         │               │   Parser   │ │ Handler  │     │
-                         │               │  (llhttp)  │ │(user fn) │     │
+                         │               │    TLS     │ │ Handler  │     │
+                         │               │ (vtable/   │ │(user fn) │     │
+                         │               │  optional) │ │          │     │
                          │               └──────┬─────┘ └────┬─────┘     │
                          │                      │            │           │
                          │                      ▼            ▼           │
                          │               ┌────────────┐ ┌──────────┐     │
-                         │               │ BodyReader │ │ Response │     │
-                         │               │  (vtable)  │ │ (buffer/ │     │
-                         │               │            │ │  file/   │     │
-                         │               └────────────┘ │  stream) │     │
-                         │                              └──────────┘     │
+                         │               │   Parser   │ │ Response │     │
+                         │               │  (llhttp)  │ │ (buffer/ │     │
+                         │               └──────┬─────┘ │  file/   │     │
+                         │                      │       │  stream) │     │
+                         │                      ▼       └──────────┘     │
+                         │               ┌────────────┐                   │
+                         │               │ BodyReader │                   │
+                         │               │  (vtable)  │                   │
+                         │               └────────────┘                   │
                          └─────────────────────────────────────────────────┘
 ```
 
-**Request flow**: socket → event loop (readiness) → connection (read) → parser (headers) → router (match) → body reader (data) → handler → response (send) → socket
+**Request flow**: socket → event loop (readiness) → connection (read) → **TLS decrypt** → parser (headers) → router (match) → body reader (data) → handler → response (send) → **TLS encrypt** → socket
 
 ## Event Loop Abstraction
 
@@ -64,6 +69,12 @@ The server processes up to `KL_EVENTS_PER_TICK` (64) events per `kl_event_wait` 
                     accept()
                        │
                        ▼
+            ┌───────────────────┐
+            │  TLS_HANDSHAKE    │ (if TLS configured)
+            │  (non-blocking)   │
+            └────────┬──────────┘
+                     │ KL_TLS_OK
+                     ▼
                ┌──────────────┐
                │   READING    │◄──────────────────┐
                │  (headers)   │                    │
@@ -335,3 +346,41 @@ The response builds headers into a growable buffer (initial capacity 512 bytes).
 4. **TCP_CORK** — on Linux, coalesces headers + sendfile data into minimum TCP segments
 5. **Streaming writes** — chunked transfer encoding writes directly to the socket fd, no intermediate buffer
 6. **Route parameter capture** — `KlParam` values point into `read_buf`, not allocated strings
+
+## TLS Transport Layer
+
+KEEL provides a pluggable TLS vtable (`KlTls`) so users can bring any TLS backend (BearSSL, LibreSSL, OpenSSL, rustls-ffi) without vendoring dependencies.
+
+### Vtable interface
+
+```c
+struct KlTls {
+    KlTlsResult (*handshake)(KlTls *self, int fd);
+    ssize_t     (*read)(KlTls *self, int fd, void *buf, size_t len);
+    ssize_t     (*write)(KlTls *self, int fd, const void *buf, size_t len);
+    KlTlsResult (*shutdown)(KlTls *self, int fd);
+    size_t      (*pending)(KlTls *self);
+    void        (*reset)(KlTls *self);
+    void        (*destroy)(KlTls *self);
+};
+```
+
+### Handshake state
+
+New connections with TLS enter `KL_CONN_TLS_HANDSHAKE` instead of `KL_CONN_READING`. The handshake is non-blocking — it returns `WANT_READ` or `WANT_WRITE` to indicate which event to wait for. The event loop re-arms accordingly. On `KL_TLS_OK`, the connection transitions to `KL_CONN_READING` and proceeds normally.
+
+### Pending drain
+
+Edge-triggered event loops fire once per readiness transition. TLS may decrypt multiple application records in a single `SSL_read`. The `pending()` function reports buffered plaintext. After each `tls->read()`, the connection layer checks `pending()` and loops to drain all available data — preventing stalls when the TLS library has decrypted data but no new TCP segment triggers a readiness event.
+
+### Sendfile fallback
+
+`sendfile(2)` transfers data directly in the kernel, bypassing userspace. This is incompatible with TLS encryption. When TLS is active, file responses fall back to `pread()` into a stack buffer followed by `tls->write()`.
+
+### Connection lifecycle
+
+- **Init**: TLS sessions are pre-allocated (one per connection slot) via the factory
+- **Accept**: If TLS configured, state starts at `KL_CONN_TLS_HANDSHAKE`
+- **Keep-alive**: TLS session persists across HTTP requests (no re-handshake)
+- **Release**: `tls->shutdown()` (close_notify) → `tls->reset()` → `close(fd)`
+- **Pool free**: `tls->destroy()` frees all session resources

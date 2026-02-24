@@ -1,4 +1,5 @@
 #include <keel/response.h>
+#include <keel/tls.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -14,6 +15,8 @@
 #endif
 
 #define KL_HDR_INIT_CAP 512
+#define KL_FILE_BUF_SIZE 8192   /* stack buffer for pread+write fallback */
+#define KL_WRITE_SPIN_MAX 65536 /* max retries on EAGAIN/WANT_WRITE before giving up */
 
 /* ── Pre-built status lines — no snprintf in the hot path ─────────── */
 
@@ -129,10 +132,12 @@ void kl_response_reset(KlResponse *res) {
     size_t cap = res->hdr_cap;
     KlAllocator *alloc = res->alloc;
     int conn_fd = res->conn_fd;
+    KlTls *tls = res->tls;
 
     memset(res, 0, sizeof(*res));
     res->alloc = alloc;
     res->conn_fd = conn_fd;
+    res->tls = tls;
     res->status = 200;
     res->file_fd = -1;
     res->hdr_buf = buf;
@@ -214,7 +219,7 @@ static ssize_t kl_sendfile_impl(int out_fd, int in_fd, off_t *offset, size_t cou
     *offset += len;
     return (ssize_t)len;
 #else
-    char buf[8192];
+    char buf[KL_FILE_BUF_SIZE];
     size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
     ssize_t nr = pread(in_fd, buf, to_read, *offset);
     if (nr <= 0) return nr;
@@ -226,23 +231,50 @@ static ssize_t kl_sendfile_impl(int out_fd, int in_fd, off_t *offset, size_t cou
 
 /* ── writev helper — handles short writes and EAGAIN ─────────────── */
 
-static int writev_all(int fd, struct iovec *iov, int iovcnt) {
-    while (iovcnt > 0) {
-        ssize_t nw = writev(fd, iov, iovcnt);
-        if (nw < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
+static int writev_all(int fd, KlTls *tls, struct iovec *iov, int iovcnt) {
+    int spins = 0;
+
+    if (!tls) {
+        /* Plaintext — use writev for scatter-gather I/O */
+        while (iovcnt > 0) {
+            ssize_t nw = writev(fd, iov, iovcnt);
+            if (nw < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (++spins > KL_WRITE_SPIN_MAX) return -1;
+                    continue;
+                }
+                return -1;
+            }
+            spins = 0;
+            size_t written = (size_t)nw;
+            while (iovcnt > 0 && written >= iov[0].iov_len) {
+                written -= iov[0].iov_len;
+                iov++;
+                iovcnt--;
+            }
+            if (iovcnt > 0 && written > 0) {
+                iov[0].iov_base = (char *)iov[0].iov_base + written;
+                iov[0].iov_len -= written;
+            }
+        }
+        return 0;
+    }
+
+    /* TLS — linearize segments through tls->write */
+    for (int i = 0; i < iovcnt; i++) {
+        const char *p = iov[i].iov_base;
+        size_t remaining = iov[i].iov_len;
+        while (remaining > 0) {
+            ssize_t nw = tls->write(tls, fd, p, remaining);
+            if (nw < 0) return -1;
+            if (nw == 0) {
+                if (++spins > KL_WRITE_SPIN_MAX) return -1;
                 continue;
-            return -1;
-        }
-        size_t written = (size_t)nw;
-        while (iovcnt > 0 && written >= iov[0].iov_len) {
-            written -= iov[0].iov_len;
-            iov++;
-            iovcnt--;
-        }
-        if (iovcnt > 0 && written > 0) {
-            iov[0].iov_base = (char *)iov[0].iov_base + written;
-            iov[0].iov_len -= written;
+            }
+            spins = 0;
+            p += nw;
+            remaining -= (size_t)nw;
         }
     }
     return 0;
@@ -306,7 +338,7 @@ int kl_response_send(KlResponse *res) {
             iovcnt++;
         }
 
-        if (writev_all(res->conn_fd, iov, iovcnt) < 0) return -1;
+        if (writev_all(res->conn_fd, res->tls, iov, iovcnt) < 0) return -1;
         res->headers_sent = 1;
 
         if (res->body_mode == KL_BODY_BUFFER || res->head_request)
@@ -315,6 +347,29 @@ int kl_response_send(KlResponse *res) {
 
     /* Send file body (already skipped above for HEAD) */
     if (res->body_mode == KL_BODY_FILE) {
+        if (res->tls) {
+            /* TLS: sendfile bypasses userspace — incompatible with encryption.
+             * Fall back to pread + tls->write, one chunk per event tick
+             * to avoid head-of-line blocking on slow connections. */
+            if (res->file_offset >= res->file_size) return 0;
+            size_t remaining = (size_t)(res->file_size - res->file_offset);
+            char buf[KL_FILE_BUF_SIZE];
+            size_t to_read = remaining < sizeof(buf) ? remaining : sizeof(buf);
+            ssize_t nr = pread(res->file_fd, buf, to_read, res->file_offset);
+            if (nr <= 0) return -1;
+            const char *p = buf;
+            size_t left = (size_t)nr;
+            while (left > 0) {
+                ssize_t nw = res->tls->write(res->tls, res->conn_fd, p, left);
+                if (nw < 0) return -1;
+                if (nw == 0) break;  /* WANT_WRITE — yield to event loop */
+                p += nw;
+                left -= (size_t)nw;
+            }
+            res->file_offset += (off_t)((size_t)nr - left);
+            return (res->file_offset < res->file_size) ? 1 : 0;
+        }
+
 #if defined(__linux__)
         /* TCP_CORK: coalesce headers + file data into fewer TCP segments */
         int cork = 1;
@@ -358,7 +413,7 @@ static int kl_stream_write(void *ctx, const char *data, size_t len) {
         { .iov_base = (void *)"\r\n", .iov_len = 2 },
     };
 
-    if (writev_all(res->conn_fd, iov, 3) < 0) {
+    if (writev_all(res->conn_fd, res->tls, iov, 3) < 0) {
         res->stream_error = 1;
         return -1;
     }
@@ -390,7 +445,7 @@ int kl_response_begin_stream(KlResponse *res, int status,
     iov[iovcnt].iov_len = 2;
     iovcnt++;
 
-    if (writev_all(res->conn_fd, iov, iovcnt) < 0) return -1;
+    if (writev_all(res->conn_fd, res->tls, iov, iovcnt) < 0) return -1;
 
     res->headers_sent = 1;
     *out_write = kl_stream_write;
@@ -401,7 +456,8 @@ int kl_response_begin_stream(KlResponse *res, int status,
 int kl_response_end_stream(KlResponse *res) {
     if (res->stream_error) return -1;
     if (res->head_request) return 0;
-    if (write(res->conn_fd, "0\r\n\r\n", 5) < 0) {
+    struct iovec iov = { .iov_base = (void *)"0\r\n\r\n", .iov_len = 5 };
+    if (writev_all(res->conn_fd, res->tls, &iov, 1) < 0) {
         res->stream_error = 1;
         return -1;
     }

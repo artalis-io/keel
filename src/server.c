@@ -1,4 +1,5 @@
 #include <keel/server.h>
+#include <keel/tls.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -68,6 +69,12 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         return -1;
     }
 
+    /* Copy TLS config if provided */
+    if (s->config.tls) {
+        s->tls_storage = *s->config.tls;
+        s->config.tls = &s->tls_storage;
+    }
+
     /* Create parsers and propagate config for each connection slot */
     for (int i = 0; i < s->pool.capacity; i++) {
         s->pool.conns[i].parser = s->config.parser(alloc);
@@ -78,6 +85,27 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         }
         s->pool.conns[i].access_log = s->config.access_log;
         s->pool.conns[i].access_log_data = s->config.access_log_data;
+    }
+
+    /* Pre-allocate TLS sessions (one per connection slot) */
+    if (s->config.tls) {
+        for (int i = 0; i < s->pool.capacity; i++) {
+            s->pool.conns[i].tls = s->config.tls->factory(
+                s->config.tls->ctx, alloc);
+            if (!s->pool.conns[i].tls) {
+                kl_conn_pool_free(&s->pool);
+                kl_router_free(&s->router);
+                return -1;
+            }
+            /* Validate vtable — all 7 function pointers must be set */
+            KlTls *t = s->pool.conns[i].tls;
+            if (!t->handshake || !t->read || !t->write ||
+                !t->shutdown || !t->pending || !t->reset || !t->destroy) {
+                kl_conn_pool_free(&s->pool);
+                kl_router_free(&s->router);
+                return -1;
+            }
+        }
     }
 
     return 0;
@@ -225,6 +253,12 @@ int kl_server_run(KlServer *s) {
                      * This is set once on accept; response reuses it across keep-alive. */
                     nc->res.alloc = alloc;
 
+                    /* TLS: enter handshake state instead of reading */
+                    if (s->config.tls) {
+                        nc->state = KL_CONN_TLS_HANDSHAKE;
+                        nc->tls_want = KL_EVENT_READ;
+                    }
+
                     if (kl_event_add(&s->loop, client_fd,
                                      KL_EVENT_READ, nc) < 0) {
                         kl_conn_release(&s->pool, nc);
@@ -242,6 +276,12 @@ rearm_listen:
             /* Client connection event */
             KlConnState new_state = c->state;
 
+            /* TLS handshake — handle before normal read/write */
+            if (c->state == KL_CONN_TLS_HANDSHAKE) {
+                new_state = kl_conn_on_handshake(c);
+                goto transition;
+            }
+
             if (events[i].ready & KL_EVENT_READ) {
                 new_state = kl_conn_on_readable(c, &s->router);
             }
@@ -256,8 +296,15 @@ rearm_listen:
                 new_state = kl_conn_on_writable(c);
             }
 
+transition:
             /* Transition */
-            if (new_state == KL_CONN_SENDING) {
+            if (new_state == KL_CONN_TLS_HANDSHAKE) {
+                if (kl_event_mod(&s->loop, c->fd,
+                                 (KlEventMask)c->tls_want, c) < 0) {
+                    kl_event_del(&s->loop, c->fd);
+                    kl_conn_release(&s->pool, c);
+                }
+            } else if (new_state == KL_CONN_SENDING) {
                 if (kl_event_mod(&s->loop, c->fd,
                                  KL_EVENT_WRITE, c) < 0) {
                     kl_event_del(&s->loop, c->fd);
@@ -289,6 +336,7 @@ rearm_listen:
             KlConn *tc = &s->pool.conns[i];
             if (tc->state == KL_CONN_CLOSED || tc->state == KL_CONN_PROCESSING)
                 continue;
+            /* TLS handshake time counts against read timeout */
             int timed_out = (now - tc->last_active_ms > timeout);
             /* Body deadline: absolute time from body start, not resettable.
              * Catches slow-chunk attacks where 1 byte resets idle timer. */
@@ -299,11 +347,12 @@ rearm_listen:
             }
             if (timed_out) {
                 /* Best-effort 408: small write to non-blocking socket
-                 * will almost always succeed in one call. */
+                 * will almost always succeed in one call.
+                 * Skip for TLS handshake — no HTTP framing yet. */
                 if (tc->state == KL_CONN_READING ||
                     tc->state == KL_CONN_READING_BODY)
-                    best_effort_write(tc->fd, kl_408_response,
-                                      sizeof(kl_408_response) - 1);
+                    best_effort_conn_write(tc, kl_408_response,
+                                           sizeof(kl_408_response) - 1);
                 kl_event_del(&s->loop, tc->fd);
                 kl_conn_release(&s->pool, tc);
             }
@@ -351,4 +400,7 @@ void kl_server_free(KlServer *s) {
     kl_event_close(&s->loop);
     kl_conn_pool_free(&s->pool);
     kl_router_free(&s->router);
+    if (s->config.tls && s->config.tls->ctx_destroy) {
+        s->config.tls->ctx_destroy(s->config.tls->ctx);
+    }
 }

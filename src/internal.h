@@ -1,11 +1,30 @@
 #ifndef KEEL_INTERNAL_H
 #define KEEL_INTERNAL_H
 
+#include <keel/connection.h>
+#include <keel/tls.h>
 #include <unistd.h>
+#include <errno.h>
+
+/* ── Transport helpers — TLS-aware read/write ────────────────────── */
+
+static inline ssize_t conn_read(KlConn *c, void *buf, size_t len) {
+    if (c->tls) return c->tls->read(c->tls, c->fd, buf, len);
+    ssize_t r;
+    do { r = read(c->fd, buf, len); } while (r < 0 && errno == EINTR);
+    return r;
+}
+
+static inline ssize_t conn_write(KlConn *c, const void *buf, size_t len) {
+    if (c->tls) return c->tls->write(c->tls, c->fd, buf, len);
+    ssize_t r;
+    do { r = write(c->fd, buf, len); } while (r < 0 && errno == EINTR);
+    return r;
+}
 
 /* Suppress warn_unused_result on best-effort error writes */
-static inline void best_effort_write(int fd, const void *buf, size_t len) {
-    ssize_t r = write(fd, buf, len);
+static inline void best_effort_conn_write(KlConn *c, const void *buf, size_t len) {
+    ssize_t r = conn_write(c, buf, len);
     (void)r;
 }
 

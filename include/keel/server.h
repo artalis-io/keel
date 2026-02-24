@@ -4,6 +4,7 @@
 #include <keel/allocator.h>
 #include <keel/parser.h>
 #include <keel/router.h>
+#include <keel/tls.h>
 #include <keel/connection.h>
 #include <keel/event.h>
 #include <stdatomic.h>
@@ -32,11 +33,13 @@ typedef struct {
     void *access_log_data;      /* passed as user_data to access_log */
     int install_signal_handlers; /* install SIGTERM/SIGINT handlers */
     int drain_timeout_ms;        /* graceful shutdown drain timeout (0 = immediate) */
+    KlTlsConfig *tls;           /* TLS config — NULL = plaintext (default) */
 } KlConfig;
 
 typedef struct {
     KlConfig config;
     KlAllocator alloc_storage;  /* owned copy if user didn't provide one */
+    KlTlsConfig tls_storage;   /* owned copy of TLS config (if provided) */
     KlRouter router;
     KlConnPool pool;
     KlEventLoop loop;

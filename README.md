@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
+Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
 
-**101K req/s** on a single thread. **132 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **151 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -41,6 +41,7 @@ int main(void) {
 
 - **Three event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (POLL_ADD)
 - **Pluggable HTTP parser** — ships with llhttp, swap via `KlConfig.parser`
+- **Pluggable TLS** — bring your own BearSSL/LibreSSL/OpenSSL via vtable, zero vendored TLS code
 - **Pluggable body readers** — vtable interface for request body processing
 - **Per-route middleware** — pattern-matched middleware chain with short-circuit support
 - **Built-in CORS middleware** — configurable origins, methods, headers, preflight handling
@@ -56,7 +57,7 @@ int main(void) {
 
 ## Architecture
 
-12 orthogonal modules, each independently testable:
+13 orthogonal modules, each independently testable:
 
 | Module | Header | Description |
 |--------|--------|-------------|
@@ -72,6 +73,7 @@ int main(void) {
 | **body_reader_multipart** | `body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
 | **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
 | **cors** | `cors.h` | Built-in CORS middleware with configurable origins |
+| **tls** | `tls.h` | Pluggable TLS transport vtable (bring-your-own backend) |
 
 ## Request Body Handling
 
@@ -330,6 +332,27 @@ KlConfig cfg = {
 
 Implement the 3-function `KlParser` vtable (`parse`, `reset`, `destroy`) for any backend.
 
+## Pluggable TLS
+
+KEEL doesn't vendor any TLS library. Bring your own backend (BearSSL, LibreSSL, OpenSSL, rustls-ffi) by implementing the 7-function `KlTls` vtable:
+
+```c
+KlTlsCtx *ctx = my_bearssl_ctx_new("cert.pem", "key.pem");
+KlTlsConfig tls = {
+    .ctx = ctx,
+    .factory = my_bearssl_factory,
+    .ctx_destroy = my_bearssl_ctx_free,
+};
+KlConfig cfg = {
+    .port = 8443,
+    .tls = &tls,
+};
+```
+
+The vtable interface (`handshake`, `read`, `write`, `shutdown`, `pending`, `reset`, `destroy`) wraps the transport layer. Everything above it — parser, router, middleware, body readers, handlers — works identically on plaintext and TLS connections.
+
+When TLS is active, `sendfile(2)` falls back to `pread` + TLS write (encryption requires userspace access to plaintext). All other response modes (buffered, streaming) work transparently.
+
 ## Sandboxing with pledge/unveil
 
 KEEL deliberately does **not** own your sandbox policy — that's an application concern. The server separates initialization (bind/listen) from the event loop (accept/read/write), so you can lock down syscalls and filesystem access between the two:
@@ -393,7 +416,7 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 
 ## Testing
 
-132 tests across 11 test suites, covering every module:
+151 tests across 12 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -407,6 +430,7 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 | `test_cors` | 16 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
 | `test_integration` | 21 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
 | `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
+| `test_tls` | 11 | TLS vtable, mock handshake states, read/write, pending, config |
 
 ```bash
 make test               # run all tests
