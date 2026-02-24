@@ -8,6 +8,9 @@ int kl_router_init(KlRouter *r, KlAllocator *alloc) {
     r->alloc = alloc;
     r->count = 0;
     r->capacity = KL_ROUTER_INIT_CAP;
+    r->middleware = NULL;
+    r->mw_count = 0;
+    r->mw_capacity = 0;
     r->routes = kl_malloc(alloc, sizeof(KlRoute) * (size_t)r->capacity);
     return r->routes ? 0 : -1;
 }
@@ -94,6 +97,83 @@ static int match_path(const char *pattern, size_t pat_len,
     return (pp >= pp_end && rp >= rp_end) ? 1 : 0;
 }
 
+/* ── Middleware ──────────────────────────────────────────────────────── */
+
+#define KL_MW_INIT_CAP 8
+
+static int match_middleware_pattern(const char *method, size_t method_len,
+                                    const char *mw_method,
+                                    const char *pattern, size_t pat_len,
+                                    const char *path, size_t path_len) {
+    /* Method check */
+    if (mw_method[0] != '*') {
+        size_t mlen = strlen(mw_method);
+        int ok = (mlen == method_len && memcmp(mw_method, method, mlen) == 0);
+        /* HEAD falls back to GET */
+        if (!ok && method_len == 4 && memcmp(method, "HEAD", 4) == 0)
+            ok = (mlen == 3 && memcmp(mw_method, "GET", 3) == 0);
+        if (!ok) return 0;
+    }
+
+    /* Prefix match: pattern ends with slash-star */
+    if (pat_len >= 2 && pattern[pat_len - 2] == '/' &&
+        pattern[pat_len - 1] == '*') {
+        size_t prefix_len = pat_len - 2;
+        if (prefix_len == 0) return 1;  /* matches everything */
+        if (path_len < prefix_len) return 0;
+        if (memcmp(pattern, path, prefix_len) != 0) return 0;
+        return (path_len == prefix_len || path[prefix_len] == '/');
+    }
+
+    /* Exact match */
+    return (pat_len == path_len && memcmp(pattern, path, pat_len) == 0);
+}
+
+int kl_router_use(KlRouter *r, const char *method, const char *pattern,
+                  KlMiddleware fn, void *user_data) {
+    if (r->mw_count >= r->mw_capacity) {
+        int new_cap;
+        if (r->mw_capacity == 0) {
+            new_cap = KL_MW_INIT_CAP;
+        } else {
+            if (r->mw_capacity > INT_MAX / 2) return -1;
+            new_cap = r->mw_capacity * 2;
+        }
+        size_t old_size = sizeof(KlMiddlewareEntry) * (size_t)r->mw_capacity;
+        size_t new_size = sizeof(KlMiddlewareEntry) * (size_t)new_cap;
+        KlMiddlewareEntry *new_mw = kl_realloc(r->alloc, r->middleware,
+                                                old_size, new_size);
+        if (!new_mw) return -1;
+        r->middleware = new_mw;
+        r->mw_capacity = new_cap;
+    }
+
+    r->middleware[r->mw_count] = (KlMiddlewareEntry){
+        .method = method,
+        .pattern = pattern,
+        .fn = fn,
+        .user_data = user_data,
+    };
+    r->mw_count++;
+    return 0;
+}
+
+int kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res) {
+    for (int i = 0; i < r->mw_count; i++) {
+        KlMiddlewareEntry *mw = &r->middleware[i];
+        if (match_middleware_pattern(req->method, req->method_len,
+                                    mw->method,
+                                    mw->pattern, strlen(mw->pattern),
+                                    req->path, req->path_len)) {
+            int rc = mw->fn(req, res, mw->user_data);
+            if (rc != 0) return rc;
+        }
+    }
+    return 0;
+}
+
+/* ── Route matching ─────────────────────────────────────────────────── */
+
 int kl_router_match(KlRouter *r, const char *method, size_t method_len,
                     const char *path, size_t path_len,
                     KlRoute **matched, KlParam *params, int *num_params) {
@@ -137,5 +217,10 @@ void kl_router_free(KlRouter *r) {
     if (r->routes) {
         kl_free(r->alloc, r->routes, sizeof(KlRoute) * (size_t)r->capacity);
         r->routes = NULL;
+    }
+    if (r->middleware) {
+        kl_free(r->alloc, r->middleware,
+                sizeof(KlMiddlewareEntry) * (size_t)r->mw_capacity);
+        r->middleware = NULL;
     }
 }

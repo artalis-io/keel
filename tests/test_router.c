@@ -166,4 +166,288 @@ UTEST(router, user_data_passed) {
     kl_router_free(&r);
 }
 
+/* ── Middleware tests ───────────────────────────────────────────────── */
+
+static int mw_noop(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)res; (void)ctx;
+    return 0;
+}
+
+/* Tracking middleware: appends a letter to a string buffer */
+typedef struct { char buf[64]; int pos; } MwTracker;
+
+static int mw_track_a(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)res;
+    MwTracker *t = ctx;
+    t->buf[t->pos++] = 'A';
+    return 0;
+}
+
+static int mw_track_b(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)res;
+    MwTracker *t = ctx;
+    t->buf[t->pos++] = 'B';
+    return 0;
+}
+
+static int mw_track_c_stop(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)res;
+    MwTracker *t = ctx;
+    t->buf[t->pos++] = 'C';
+    return 1;  /* short-circuit */
+}
+
+UTEST(router, middleware_use) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    ASSERT_EQ(kl_router_use(&r, "*", "/*", mw_noop, NULL), 0);
+    ASSERT_EQ(kl_router_use(&r, "GET", "/api/*", mw_noop, NULL), 0);
+    ASSERT_EQ(r.mw_count, 2);
+
+    kl_router_free(&r);
+}
+
+UTEST(router, middleware_run_prefix) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    MwTracker t = {.pos = 0};
+    kl_router_use(&r, "*", "/*", mw_track_a, &t);
+
+    KlRequest req = {0};
+    req.method = "GET"; req.method_len = 3;
+    req.path = "/anything"; req.path_len = 9;
+
+    KlResponse res = {0};
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 1);
+    ASSERT_EQ(t.buf[0], 'A');
+
+    /* Also matches root */
+    req.path = "/"; req.path_len = 1;
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 2);
+
+    kl_router_free(&r);
+}
+
+UTEST(router, middleware_run_exact) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    MwTracker t = {.pos = 0};
+    kl_router_use(&r, "*", "/health", mw_track_a, &t);
+
+    KlRequest req = {0};
+    req.method = "GET"; req.method_len = 3;
+    KlResponse res = {0};
+
+    req.path = "/health"; req.path_len = 7;
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 1);
+
+    /* Should not match a different path */
+    req.path = "/healthz"; req.path_len = 8;
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 1);  /* unchanged */
+
+    kl_router_free(&r);
+}
+
+UTEST(router, middleware_api_prefix) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    MwTracker t = {.pos = 0};
+    kl_router_use(&r, "*", "/api/*", mw_track_a, &t);
+
+    KlRequest req = {0};
+    req.method = "GET"; req.method_len = 3;
+    KlResponse res = {0};
+
+    req.path = "/api/users"; req.path_len = 10;
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 1);
+
+    req.path = "/api/users/123"; req.path_len = 14;
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 2);
+
+    /* /api itself matches (path_len == prefix_len) */
+    req.path = "/api"; req.path_len = 4;
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 3);
+
+    /* /other should NOT match */
+    req.path = "/other"; req.path_len = 6;
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 3);  /* unchanged */
+
+    kl_router_free(&r);
+}
+
+UTEST(router, middleware_method_filter) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    MwTracker t = {.pos = 0};
+    kl_router_use(&r, "GET", "/*", mw_track_a, &t);
+
+    KlRequest req = {0};
+    KlResponse res = {0};
+
+    req.method = "GET"; req.method_len = 3;
+    req.path = "/test"; req.path_len = 5;
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 1);
+
+    /* POST should be skipped */
+    req.method = "POST"; req.method_len = 4;
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 1);  /* unchanged */
+
+    kl_router_free(&r);
+}
+
+UTEST(router, middleware_wildcard_method) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    MwTracker t = {.pos = 0};
+    kl_router_use(&r, "*", "/*", mw_track_a, &t);
+
+    KlRequest req = {0};
+    KlResponse res = {0};
+    req.path = "/x"; req.path_len = 2;
+
+    req.method = "GET"; req.method_len = 3;
+    kl_router_run_middleware(&r, &req, &res);
+    req.method = "POST"; req.method_len = 4;
+    kl_router_run_middleware(&r, &req, &res);
+    req.method = "DELETE"; req.method_len = 6;
+    kl_router_run_middleware(&r, &req, &res);
+
+    ASSERT_EQ(t.pos, 3);
+
+    kl_router_free(&r);
+}
+
+UTEST(router, middleware_head_falls_back) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    MwTracker t = {.pos = 0};
+    kl_router_use(&r, "GET", "/*", mw_track_a, &t);
+
+    KlRequest req = {0};
+    KlResponse res = {0};
+    req.method = "HEAD"; req.method_len = 4;
+    req.path = "/test"; req.path_len = 5;
+
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 1);  /* HEAD matched GET middleware */
+
+    kl_router_free(&r);
+}
+
+UTEST(router, middleware_order) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    MwTracker t = {.pos = 0};
+    kl_router_use(&r, "*", "/*", mw_track_a, &t);
+    kl_router_use(&r, "*", "/*", mw_track_b, &t);
+
+    KlRequest req = {0};
+    KlResponse res = {0};
+    req.method = "GET"; req.method_len = 3;
+    req.path = "/x"; req.path_len = 2;
+
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 2);
+    ASSERT_EQ(t.buf[0], 'A');
+    ASSERT_EQ(t.buf[1], 'B');
+
+    kl_router_free(&r);
+}
+
+UTEST(router, middleware_short_circuit) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    MwTracker t = {.pos = 0};
+    kl_router_use(&r, "*", "/*", mw_track_a, &t);
+    kl_router_use(&r, "*", "/*", mw_track_c_stop, &t);
+    kl_router_use(&r, "*", "/*", mw_track_b, &t);  /* should NOT run */
+
+    KlRequest req = {0};
+    KlResponse res = {0};
+    req.method = "GET"; req.method_len = 3;
+    req.path = "/x"; req.path_len = 2;
+
+    int rc = kl_router_run_middleware(&r, &req, &res);
+    ASSERT_NE(rc, 0);
+    ASSERT_EQ(t.pos, 2);  /* A ran, C ran, B skipped */
+    ASSERT_EQ(t.buf[0], 'A');
+    ASSERT_EQ(t.buf[1], 'C');
+
+    kl_router_free(&r);
+}
+
+UTEST(router, middleware_no_match) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+
+    MwTracker t = {.pos = 0};
+    kl_router_use(&r, "POST", "/admin/*", mw_track_a, &t);
+
+    KlRequest req = {0};
+    KlResponse res = {0};
+    req.method = "GET"; req.method_len = 3;
+    req.path = "/public"; req.path_len = 7;
+
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+    ASSERT_EQ(t.pos, 0);  /* nothing matched */
+
+    kl_router_free(&r);
+}
+
+static int mw_set_header(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_header(res, "X-Middleware", "applied");
+    return 0;
+}
+
+UTEST(router, middleware_sets_header) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    kl_router_use(&r, "*", "/*", mw_set_header, NULL);
+
+    KlRequest req = {0};
+    req.method = "GET"; req.method_len = 3;
+    req.path = "/test"; req.path_len = 5;
+
+    KlResponse res;
+    kl_response_init(&res, &a);
+    ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
+
+    /* Verify the header was written to the response buffer */
+    ASSERT_TRUE(res.hdr_len > 0);
+
+    kl_response_free(&res);
+    kl_router_free(&r);
+}
+
 UTEST_MAIN();

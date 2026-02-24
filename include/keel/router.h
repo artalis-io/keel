@@ -9,6 +9,13 @@
 
 typedef void (*KlHandler)(KlRequest *req, KlResponse *res, void *user_data);
 
+/**
+ * @brief Middleware function signature.
+ * @return 0 to continue to next middleware/handler, non-zero to short-circuit
+ *         (response must already be written by the middleware).
+ */
+typedef int (*KlMiddleware)(KlRequest *req, KlResponse *res, void *user_data);
+
 typedef struct {
     const char *name;   size_t name_len;
     const char *value;  size_t value_len;
@@ -25,9 +32,21 @@ typedef struct {
 } KlRoute;
 
 typedef struct {
+    const char *method;
+    const char *pattern;
+    KlMiddleware fn;
+    void *user_data;
+} KlMiddlewareEntry;
+
+typedef struct {
     KlRoute *routes;
     int count;
     int capacity;
+
+    KlMiddlewareEntry *middleware;
+    int mw_count;
+    int mw_capacity;
+
     KlAllocator *alloc;
 } KlRouter;
 
@@ -63,6 +82,23 @@ int  kl_router_add(KlRouter *r, const char *method, const char *pattern,
 int  kl_router_match(KlRouter *r, const char *method, size_t method_len,
                      const char *path, size_t path_len,
                      KlRoute **matched, KlParam *params, int *num_params);
+
+/**
+ * @brief Register middleware that runs before matched handlers.
+ * @param method  HTTP method filter ("GET", "POST", "*" for any).
+ * @param pattern URL pattern — exact match or prefix with trailing slash-star.
+ * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
+ * @param user_data Passed to fn on each invocation.
+ * @return 0 on success, -1 on allocation failure.
+ */
+int  kl_router_use(KlRouter *r, const char *method, const char *pattern,
+                   KlMiddleware fn, void *user_data);
+
+/**
+ * @brief Run all matching middleware in registration order.
+ * @return 0 if all passed, non-zero if a middleware short-circuited.
+ */
+int  kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res);
 
 /** @brief Free router resources. */
 void kl_router_free(KlRouter *r);

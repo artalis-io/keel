@@ -139,25 +139,30 @@ static void conn_log_access(KlConn *c) {
 }
 
 /*
- * Process a fully parsed request: route match → handler → response setup.
+ * Initialize response for the current request.  Extracted from conn_process
+ * so middleware can write headers/status before the handler runs.
  */
-static KlConnState conn_process(KlConn *c) {
-    c->state = KL_CONN_PROCESSING;
+static int conn_init_response(KlConn *c) {
     c->request_start_ms = kl_monotonic_ms();
-
-    /* Reset response for this request (buffer reused across keep-alive) */
     if (c->res.hdr_buf) {
         kl_response_reset(&c->res);
     } else {
-        if (kl_response_init(&c->res, c->res.alloc) < 0) {
-            c->state = KL_CONN_CLOSED;
-            return c->state;
-        }
+        if (kl_response_init(&c->res, c->res.alloc) < 0)
+            return -1;
     }
     c->res.conn_fd = c->fd;
     c->res.keep_alive = c->req.keep_alive;
     c->res.head_request = (c->req.method_len == 4 &&
                            memcmp(c->req.method, "HEAD", 4) == 0);
+    return 0;
+}
+
+/*
+ * Process a fully parsed request: handler → response setup.
+ * Response must already be initialized via conn_init_response().
+ */
+static KlConnState conn_process(KlConn *c) {
+    c->state = KL_CONN_PROCESSING;
 
     if (c->route_result == 200 && c->route) {
         c->route->handler(&c->req, &c->res, c->route->user_data);
@@ -225,6 +230,24 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                                                c->req.path, c->req.path_len,
                                                &c->route, c->params,
                                                &c->num_params);
+
+            /* Run middleware before body reading / handler */
+            if (conn_init_response(c) < 0) {
+                c->state = KL_CONN_CLOSED;
+                return c->state;
+            }
+            if (kl_router_run_middleware(router, &c->req, &c->res) != 0) {
+                /* Middleware short-circuited — body may be unread */
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
+                if (c->res.body_mode == KL_BODY_STREAM) {
+                    conn_log_access(c);
+                    c->state = KL_CONN_CLOSED;
+                    return c->state;
+                }
+                c->state = KL_CONN_SENDING;
+                return c->state;
+            }
 
             /* Determine if there's a body to read */
             int has_body = (c->req.content_length > 0 || c->req.chunked);
@@ -345,6 +368,24 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                                                c->req.path, c->req.path_len,
                                                &c->route, c->params,
                                                &c->num_params);
+
+            /* Run middleware */
+            if (conn_init_response(c) < 0) {
+                c->state = KL_CONN_CLOSED;
+                return c->state;
+            }
+            if (kl_router_run_middleware(router, &c->req, &c->res) != 0) {
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
+                if (c->res.body_mode == KL_BODY_STREAM) {
+                    conn_log_access(c);
+                    c->state = KL_CONN_CLOSED;
+                    return c->state;
+                }
+                c->state = KL_CONN_SENDING;
+                return c->state;
+            }
+
             return conn_process(c);
         }
 

@@ -89,6 +89,11 @@ int kl_server_route(KlServer *s, const char *method, const char *pattern,
                          body_reader);
 }
 
+int kl_server_use(KlServer *s, const char *method, const char *pattern,
+                  KlMiddleware fn, void *user_data) {
+    return kl_router_use(&s->router, method, pattern, fn, user_data);
+}
+
 int kl_server_run(KlServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
 

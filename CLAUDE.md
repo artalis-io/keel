@@ -4,7 +4,7 @@
 
 ```bash
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
-make test         # build and run all 100 unit tests
+make test         # build and run all 132 unit tests
 make examples     # build all 6 example programs
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make clean        # remove all build artifacts
@@ -22,19 +22,20 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-11 orthogonal modules, each independently testable:
+12 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring event loop abstraction
 3. **request** — Parsed HTTP request struct (header-only, zero alloc)
 4. **parser** — Pluggable HTTP parser vtable (ships with llhttp backend)
 5. **response** — Response builder: buffered (writev), sendfile, or streaming chunked
-6. **router** — Table-scan route matching with `:param` extraction
+6. **router** — Route matching with `:param` extraction + middleware chain
 7. **connection** — Pre-allocated connection pool + state machine + timeout sweep
 8. **server** — Top-level glue: init, bind, run loop, stop
 9. **body_reader** — Pluggable body reader vtable + built-in buffer reader
 10. **body_reader_multipart** — RFC 2046 multipart/form-data state machine parser
 11. **chunked** — RFC 7230 parser-agnostic chunked transfer-encoding decoder
+12. **cors** — Built-in CORS middleware with configurable origins/methods/headers
 
 ## Key Types
 
@@ -55,6 +56,9 @@ make clean        # remove all build artifacts
 | `KlConn` | `connection.h` | Connection: fd, state, read_buf, request, response, parser, route |
 | `KlRouter` | `router.h` | Route table + match function |
 | `KlRoute` | `router.h` | Single route: method, pattern, handler, user_data, body_reader |
+| `KlMiddleware` | `router.h` | Middleware function: `int (*)(KlRequest *, KlResponse *, void *)` |
+| `KlMiddlewareEntry` | `router.h` | Registered middleware: method, pattern, fn, user_data |
+| `KlCorsConfig` | `cors.h` | CORS config: allowed origins, methods, headers, credentials |
 | `KlEventLoop` | `event.h` | Platform event loop: init, add, mod, del, wait, close |
 
 ## Git
@@ -96,6 +100,26 @@ Factory signature: `KlBodyReader *(*factory)(KlAllocator *alloc, KlRequest *req,
 - `destroy` frees all reader resources
 
 To add a new reader: implement the 4 vtable functions, write a factory, register per-route.
+
+## Middleware Pattern
+
+Middleware uses the `KlMiddleware` function signature:
+
+```c
+typedef int (*KlMiddleware)(KlRequest *req, KlResponse *res, void *user_data);
+```
+
+- Return `0` → continue to next middleware / handler
+- Return non-zero → short-circuit (response must already be written)
+- Registered via `kl_router_use()` / `kl_server_use()` with method + pattern filter
+- Patterns: `/*` = prefix match, `/exact` = exact match, `*` method = any method
+- Middleware runs after route match, before body reading
+- Short-circuit disables keep-alive (body may be unread)
+- `req->ctx` (`void *`) enables middleware→handler data passing
+
+Built-in: `kl_cors_middleware` (pass `KlCorsConfig *` as user_data).
+
+To add a new middleware: implement the `KlMiddleware` signature, register with `kl_server_use()`.
 
 ## Testing
 
