@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
 
-**101K req/s** on a single thread. **160 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **180+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -47,6 +47,7 @@ int main(void) {
 - **Built-in CORS middleware** — configurable origins, methods, headers, preflight handling
 - **Multipart form-data** — RFC 2046 parser with configurable size limits
 - **Three response modes** — buffered (writev), file (sendfile zero-copy), stream (chunked transfer encoding)
+- **WebSocket** — RFC 6455 support with frame encoding/decoding
 - **Route parameters** — `:param` capture, no allocation, pointers into read buffer
 - **Connection timeouts** — monotonic clock sweep, automatic 408 responses, slow-loris protection
 - **Access logging** — pluggable callback after each response, zero overhead when disabled
@@ -73,6 +74,7 @@ int main(void) {
 | **body_reader_multipart** | `body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
 | **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
 | **cors** | `cors.h` | Built-in CORS middleware with configurable origins |
+| **websocket** | `websocket.h` | RFC 6455 WebSocket support |
 | **tls** | `tls.h` | Pluggable TLS transport vtable (bring-your-own backend) |
 
 ## Request Body Handling
@@ -218,6 +220,41 @@ kl_server_route(&s, "POST", "/upload", handle_upload,
 ```bash
 curl -F "name=Alice" -F "file=@photo.jpg" localhost:8080/upload
 ```
+
+## WebSocket
+
+Register a WebSocket endpoint and get bidirectional communication:
+
+```c
+static int ws_on_message(KlWs *ws, KlWsOpcode opcode,
+                         const char *data, size_t len, void *ctx) {
+    (void)ctx;
+    if (opcode == KL_WS_TEXT) {
+        kl_ws_send(ws, KL_WS_TEXT, data, len);  /* echo back */
+    }
+    return 0;
+}
+
+static void ws_on_close(KlWs *ws, void *ctx) {
+    (void)ws; (void)ctx;
+    printf("WebSocket closed\n");
+}
+
+static KlWsConfig ws_config = {
+    .on_message = ws_on_message,
+    .on_close = ws_on_close,
+};
+
+int main(void) {
+    KlServer s;
+    KlConfig cfg = {.port = 8080};
+    kl_server_init(&s, &cfg);
+    kl_server_ws(&s, "/ws", &ws_config);
+    kl_server_run(&s);
+}
+```
+
+The WebSocket module handles frame parsing, masking, and protocol details. The handler receives callbacks for each message — use `kl_ws_send()` to reply.
 
 ## Static File Serving
 
@@ -416,7 +453,7 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 
 ## Testing
 
-160 tests across 12 test suites, covering every module:
+160 tests across 13 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -428,6 +465,7 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 | `test_body_reader` | 28 | Buffer + multipart: limits, spanning, binary, edge cases |
 | `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
 | `test_cors` | 16 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
+| `test_websocket` | ~20+ | Frame parsing, masking, opcode, close, echo |
 | `test_integration` | 21 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
 | `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
 | `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
@@ -475,11 +513,15 @@ KEEL is a transport library — it handles sockets, parsing, routing, and respon
 
 - **Worker thread pool** — CPU-bound work (image processing, compression, templating) should be dispatched to application-owned threads. The application controls thread count, priority, queue depth, and scheduling policy. KEEL's single-threaded event loop handles I/O; your thread pool handles compute. A few lines of pthreads in your handler is simpler and more flexible than a library-imposed threading model.
 
+- **Request IDs / correlation IDs** — These are application-generated identifiers for tracing requests through your system. Use middleware to read/generate X-Request-ID headers and pass them to your logging/observability.
+
 - **Rate limiting** — Rate limits depend on your authentication layer, your billing tiers, your abuse patterns. Implement as middleware with whatever backing store (in-memory, Redis, database) fits your architecture.
 
 - **Request validation** — Schema validation, content-type negotiation, input sanitization. These are application-level concerns that depend on your data model.
 
 - **ETag / Last-Modified** — These are application-specific (KEEL doesn't know when your data changes). Use existing `kl_request_header()` / `kl_response_header()` for the headers; your application handles 304 logic.
+
+- **Static file serving** — MIME types, path traversal protection, directory listing are application decisions. See `examples/static_files.c` for the pattern.
 
 The general principle: if it requires policy decisions that vary between applications, it belongs in application code, not in the transport library. KEEL provides the hooks (middleware, body readers, access log callback) — you provide the policy.
 
