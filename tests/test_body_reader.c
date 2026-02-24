@@ -656,4 +656,50 @@ UTEST(mp, chunked_multipart) {
     br->destroy(br);
 }
 
+/* ── Audit coverage: stored lengths ─────────────────────────────────── */
+
+UTEST(mp, stored_lengths) {
+    KlAllocator a = kl_allocator_default();
+    KlRequest req = make_mp_request(
+        "multipart/form-data; boundary=LEN");
+
+    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    ASSERT_TRUE(br != NULL);
+
+    const char *body =
+        "--LEN\r\n"
+        "Content-Disposition: form-data; name=\"myfield\"; filename=\"photo.jpg\"\r\n"
+        "Content-Type: image/jpeg\r\n"
+        "\r\n"
+        "data"
+        "\r\n--LEN--\r\n";
+
+    ASSERT_EQ(br->on_data(br, body, strlen(body)), 0);
+    br->on_complete(br);
+
+    KlMultipartReader *mr = (KlMultipartReader *)br;
+    ASSERT_EQ(mr->num_parts, 1);
+    ASSERT_EQ(mr->parts[0].name_len, (size_t)7);
+    ASSERT_EQ(mr->parts[0].filename_len, (size_t)9);
+    ASSERT_EQ(mr->parts[0].content_type_len, (size_t)10);
+
+    br->destroy(br);
+}
+
+UTEST(mp, on_error_sets_state) {
+    KlAllocator a = kl_allocator_default();
+    KlRequest req = make_mp_request(
+        "multipart/form-data; boundary=ERR");
+
+    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    ASSERT_TRUE(br != NULL);
+
+    br->on_error(br);
+
+    KlMultipartReader *mr = (KlMultipartReader *)br;
+    ASSERT_EQ(mr->state, KL_MP_ERROR);
+
+    br->destroy(br);
+}
+
 UTEST_MAIN();

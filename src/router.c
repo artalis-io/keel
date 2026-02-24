@@ -79,8 +79,8 @@ static int match_path(const char *pattern, size_t pat_len,
                     .value = rp,
                     .value_len = rs_len,
                 };
+                (*num_params)++;
             }
-            (*num_params)++;
         } else {
             /* Literal match */
             if (ps_len != rs_len || memcmp(pp, rp, ps_len) != 0)

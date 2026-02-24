@@ -211,4 +211,73 @@ UTEST(response, streaming_chunked) {
     kl_response_free(&res);
 }
 
+/* ── Audit coverage tests ───────────────────────────────────────────── */
+
+UTEST(response, reset_reuses_buffer) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    kl_response_header(&res, "X-Test", "value");
+    ASSERT_TRUE(res.hdr_len > 0);
+
+    char *old_buf = res.hdr_buf;
+    size_t old_cap = res.hdr_cap;
+    kl_response_reset(&res);
+
+    /* Buffer pointer and capacity preserved after reset */
+    ASSERT_EQ(res.hdr_buf, old_buf);
+    ASSERT_EQ(res.hdr_cap, old_cap);
+    /* Header content cleared */
+    ASSERT_EQ(res.hdr_len, (size_t)0);
+    /* Status reset to 200 */
+    ASSERT_EQ(res.status, 200);
+
+    kl_response_free(&res);
+}
+
+UTEST(response, file_mode) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    kl_response_file(&res, 42, 1024);
+    ASSERT_EQ(res.body_mode, KL_BODY_FILE);
+    ASSERT_EQ(res.file_fd, 42);
+    ASSERT_EQ(res.file_size, (off_t)1024);
+    ASSERT_EQ(res.file_offset, (off_t)0);
+
+    /* Prevent close(42) from hitting a real fd */
+    res.file_fd = -1;
+    kl_response_free(&res);
+}
+
+UTEST(response, body_null_data_ignored) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    /* NULL data with len > 0 should be silently ignored */
+    kl_response_body(&res, NULL, 100);
+    /* body_mode should remain unset (0) */
+    ASSERT_EQ(res.body_mode, 0);
+
+    kl_response_free(&res);
+}
+
+UTEST(response, header_injection_rejected) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    /* Headers with \r\n in name or value should be silently dropped */
+    kl_response_header(&res, "X-Evil\r\nInjection", "value");
+    ASSERT_EQ(res.hdr_len, (size_t)0);
+
+    kl_response_header(&res, "X-Good", "value\r\nInjection: bad");
+    ASSERT_EQ(res.hdr_len, (size_t)0);
+
+    kl_response_free(&res);
+}
+
 UTEST_MAIN();

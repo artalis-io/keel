@@ -20,6 +20,7 @@ static void *mp_memmem(const void *hay, size_t hlen,
 }
 
 static char *mp_strdup(KlAllocator *alloc, const char *s, size_t len) {
+    if (len > SIZE_MAX - 1) return NULL;
     char *d = kl_malloc(alloc, len + 1);
     if (!d) return NULL;
     memcpy(d, s, len);
@@ -52,6 +53,7 @@ static int mp_add_part(KlMultipartReader *mr) {
 
 static int mp_append_data(KlMultipartReader *mr, const char *data, size_t len) {
     if (len == 0) return 0;
+    if (mr->num_parts == 0) return -1;
     KlMultipartPart *part = &mr->parts[mr->num_parts - 1];
 
     /* C-2: Guard against size_t wrap on additions */
@@ -100,34 +102,41 @@ static int mp_parse_disposition(KlMultipartReader *mr, const char *val,
     np += 5;
     size_t remain = vlen - (size_t)(np - val);
 
+    size_t name_len;
     if (remain > 0 && *np == '"') {
         np++;
         remain--;
         const char *end = memchr(np, '"', remain);
         if (!end) return -1;
-        part->name = mp_strdup(mr->alloc, np, (size_t)(end - np));
+        name_len = (size_t)(end - np);
     } else {
         const char *end = memchr(np, ';', remain);
-        size_t nlen = end ? (size_t)(end - np) : remain;
-        part->name = mp_strdup(mr->alloc, np, nlen);
+        name_len = end ? (size_t)(end - np) : remain;
     }
+    part->name = mp_strdup(mr->alloc, np, name_len);
     if (!part->name) return -1;
+    part->name_len = name_len;
 
     const char *fp = mp_memmem(val, vlen, "filename=", 9);
     if (fp) {
         fp += 9;
         size_t fremain = vlen - (size_t)(fp - val);
+        size_t fn_len = 0;
         if (fremain > 0 && *fp == '"') {
             fp++;
             fremain--;
             const char *end = memchr(fp, '"', fremain);
-            if (end)
-                part->filename = mp_strdup(mr->alloc, fp, (size_t)(end - fp));
+            if (end) {
+                fn_len = (size_t)(end - fp);
+                part->filename = mp_strdup(mr->alloc, fp, fn_len);
+            }
         } else {
             const char *end = memchr(fp, ';', fremain);
-            size_t flen = end ? (size_t)(end - fp) : fremain;
-            part->filename = mp_strdup(mr->alloc, fp, flen);
+            fn_len = end ? (size_t)(end - fp) : fremain;
+            part->filename = mp_strdup(mr->alloc, fp, fn_len);
         }
+        if (part->filename)
+            part->filename_len = fn_len;
     }
 
     return 0;
@@ -163,6 +172,7 @@ static int mp_parse_headers(KlMultipartReader *mr) {
                        strncasecmp(buf, "Content-Type", 12) == 0) {
                 part->content_type = mp_strdup(mr->alloc, val, val_len);
                 if (!part->content_type) return -1;
+                part->content_type_len = val_len;
             }
         }
 
@@ -432,12 +442,12 @@ static void mp_destroy(KlBodyReader *self) {
     for (int i = 0; i < mr->num_parts; i++) {
         KlMultipartPart *p = &mr->parts[i];
         if (p->name)
-            kl_free(mr->alloc, (void *)p->name, strlen(p->name) + 1);
+            kl_free(mr->alloc, (void *)p->name, p->name_len + 1);
         if (p->filename)
-            kl_free(mr->alloc, (void *)p->filename, strlen(p->filename) + 1);
+            kl_free(mr->alloc, (void *)p->filename, p->filename_len + 1);
         if (p->content_type)
             kl_free(mr->alloc, (void *)p->content_type,
-                    strlen(p->content_type) + 1);
+                    p->content_type_len + 1);
         if (p->data)
             kl_free(mr->alloc, p->data, p->data_cap);
     }
