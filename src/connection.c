@@ -1,12 +1,16 @@
 #include <keel/connection.h>
 #include <keel/body_reader.h>
 #include <keel/chunked.h>
+#include <keel/event.h>
+#include <keel/tls.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
 #include <stdint.h>
 #include "internal.h"
+
+#define KL_TLS_DRAIN_MAX 256  /* max pending drain iterations per event */
 
 static const char kl_413_response[] =
     "HTTP/1.1 413 Payload Too Large\r\n"
@@ -85,6 +89,15 @@ static void conn_cleanup_body_reader(KlConn *c) {
 }
 
 void kl_conn_release(KlConnPool *pool, KlConn *c) {
+    /* TLS shutdown before close(fd) — best-effort close_notify.
+     * Retry on WANT_WRITE to flush the close_notify record.
+     * Give up on WANT_READ (can't block for peer's close_notify). */
+    if (c->tls && c->fd >= 0) {
+        KlTlsResult sr = c->tls->shutdown(c->tls, c->fd);
+        for (int i = 0; sr == KL_TLS_WANT_WRITE && i < 4; i++)
+            sr = c->tls->shutdown(c->tls, c->fd);
+        c->tls->reset(c->tls);
+    }
     if (c->fd >= 0) {
         close(c->fd);
         c->fd = -1;
@@ -111,11 +124,21 @@ void kl_conn_pool_free(KlConnPool *pool) {
                     pool->conns[i].req.body_reader);
                 pool->conns[i].req.body_reader = NULL;
             }
+            if (pool->conns[i].tls && pool->conns[i].fd >= 0) {
+                KlTlsResult sr = pool->conns[i].tls->shutdown(
+                    pool->conns[i].tls, pool->conns[i].fd);
+                for (int j = 0; sr == KL_TLS_WANT_WRITE && j < 4; j++)
+                    sr = pool->conns[i].tls->shutdown(
+                        pool->conns[i].tls, pool->conns[i].fd);
+            }
             if (pool->conns[i].fd >= 0) {
                 close(pool->conns[i].fd);
             }
             if (pool->conns[i].parser) {
                 pool->conns[i].parser->destroy(pool->conns[i].parser);
+            }
+            if (pool->conns[i].tls) {
+                pool->conns[i].tls->destroy(pool->conns[i].tls);
             }
             if (pool->conns[i].res.hdr_buf) {
                 kl_response_free(&pool->conns[i].res);
@@ -151,6 +174,7 @@ static int conn_init_response(KlConn *c) {
             return -1;
     }
     c->res.conn_fd = c->fd;
+    c->res.tls = c->tls;
     c->res.keep_alive = c->req.keep_alive;
     c->res.head_request = (c->req.method_len == 4 &&
                            memcmp(c->req.method, "HEAD", 4) == 0);
@@ -183,19 +207,47 @@ static KlConnState conn_process(KlConn *c) {
     return c->state;
 }
 
+KlConnState kl_conn_on_handshake(KlConn *c) {
+    if (!c->tls) {
+        c->state = KL_CONN_CLOSED;
+        return c->state;
+    }
+    KlTlsResult r = c->tls->handshake(c->tls, c->fd);
+    c->last_active_ms = kl_monotonic_ms();
+    switch (r) {
+        case KL_TLS_OK:
+            c->tls_want = 0;
+            c->state = KL_CONN_READING;
+            return c->state;
+        case KL_TLS_WANT_READ:
+            c->tls_want = KL_EVENT_READ;
+            return KL_CONN_TLS_HANDSHAKE;
+        case KL_TLS_WANT_WRITE:
+            c->tls_want = KL_EVENT_WRITE;
+            return KL_CONN_TLS_HANDSHAKE;
+        case KL_TLS_ERROR:
+            c->state = KL_CONN_CLOSED;
+            return c->state;
+    }
+    c->state = KL_CONN_CLOSED;
+    return c->state;
+}
+
 KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
     c->last_active_ms = kl_monotonic_ms();
 
     if (c->state == KL_CONN_READING) {
+        int hdr_drains = 0;
+read_more_headers: ;
         /* Read available data */
         size_t space = KL_READ_BUF_SIZE - c->read_len;
         if (space == 0) {
-            best_effort_write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
+            best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
             c->state = KL_CONN_CLOSED;
             return c->state;
         }
 
-        ssize_t nr = read(c->fd, c->read_buf + c->read_len, space);
+        ssize_t nr = conn_read(c, c->read_buf + c->read_len, space);
         if (nr <= 0) {
             c->state = KL_CONN_CLOSED;
             return c->state;
@@ -208,7 +260,13 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                                              c->read_buf, c->read_len,
                                              &consumed);
 
-        if (pr == KL_PARSE_INCOMPLETE) return KL_CONN_READING;
+        if (pr == KL_PARSE_INCOMPLETE) {
+            /* TLS may buffer multiple records — drain before re-arming */
+            if (c->tls && c->tls->pending(c->tls) > 0
+                && ++hdr_drains < KL_TLS_DRAIN_MAX)
+                goto read_more_headers;
+            return KL_CONN_READING;
+        }
         if (pr == KL_PARSE_ERROR) {
             c->state = KL_CONN_CLOSED;
             return c->state;
@@ -257,7 +315,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                 KlBodyReader *br = c->route->body_reader(
                     c->alloc, &c->req, c->route->user_data);
                 if (!br) {
-                    best_effort_write(c->fd, kl_415_response,
+                    best_effort_conn_write(c, kl_415_response,
                                 sizeof(kl_415_response) - 1);
                     c->state = KL_CONN_CLOSED;
                     return c->state;
@@ -270,8 +328,8 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                     &c->req, "Expect", &expect_len);
                 if (expect && expect_len == 12 &&
                     strncasecmp(expect, "100-continue", 12) == 0) {
-                    best_effort_write(c->fd, kl_100_continue,
-                                      sizeof(kl_100_continue) - 1);
+                    best_effort_conn_write(c, kl_100_continue,
+                                           sizeof(kl_100_continue) - 1);
                 }
 
                 /* Parse leftover body data in-place (no memmove) */
@@ -393,8 +451,11 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
         return c->state;
 
     } else if (c->state == KL_CONN_READING_BODY) {
+        int body_drains = 0;
+read_more_body: ;
         /* Sliding window: read into start of buffer, parse, repeat */
-        ssize_t nr = read(c->fd, c->read_buf, KL_READ_BUF_SIZE);
+        ; /* empty statement after label before declaration */
+        ssize_t nr = conn_read(c, c->read_buf, KL_READ_BUF_SIZE);
         if (nr <= 0) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);
@@ -408,8 +469,8 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
             if (rc < 0) {
                 if (c->req.body_reader)
                     c->req.body_reader->on_error(c->req.body_reader);
-                best_effort_write(c->fd, kl_413_response,
-                                  sizeof(kl_413_response) - 1);
+                best_effort_conn_write(c, kl_413_response,
+                                       sizeof(kl_413_response) - 1);
                 c->state = KL_CONN_CLOSED;
                 return c->state;
             }
@@ -418,6 +479,10 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                     c->req.body_reader->on_complete(c->req.body_reader);
                 return conn_process(c);
             }
+            /* TLS may buffer multiple records — drain before re-arming */
+            if (c->tls && c->tls->pending(c->tls) > 0
+                && ++body_drains < KL_TLS_DRAIN_MAX)
+                goto read_more_body;
             return KL_CONN_READING_BODY;
         }
 
@@ -431,7 +496,7 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);
             /* Body reader rejected (413) */
-            best_effort_write(c->fd, kl_413_response, sizeof(kl_413_response) - 1);
+            best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
             c->state = KL_CONN_CLOSED;
             return c->state;
         }
@@ -440,7 +505,10 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
             return conn_process(c);
         }
 
-        /* INCOMPLETE — stay in READING_BODY */
+        /* INCOMPLETE — TLS may buffer multiple records */
+        if (c->tls && c->tls->pending(c->tls) > 0
+            && ++body_drains < KL_TLS_DRAIN_MAX)
+            goto read_more_body;
         return KL_CONN_READING_BODY;
     }
 

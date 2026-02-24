@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+typedef struct KlTls KlTls;
+
 /* Pluggable write callback — same signature as sh_json's ShJsonWriteFn */
 typedef int (*KlWriteFn)(void *ctx, const char *data, size_t len);
 
@@ -43,6 +45,9 @@ typedef struct {
     /* Protocol flags (set by connection layer) */
     int keep_alive;
     int head_request;
+
+    /* TLS session (NULL for plaintext — set by connection layer) */
+    KlTls *tls;
 } KlResponse;
 
 /**
