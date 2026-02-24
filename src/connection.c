@@ -3,6 +3,8 @@
 #include <keel/chunked.h>
 #include <keel/event.h>
 #include <keel/tls.h>
+#include <keel/websocket.h>
+#include <keel/h2.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -76,6 +78,8 @@ KlConn *kl_conn_acquire(KlConnPool *pool, int fd) {
     c->num_params = 0;
     c->route_result = 0;
     c->last_active_ms = kl_monotonic_ms();
+    c->ws = NULL;
+    c->h2 = NULL;
     memset(&c->req, 0, sizeof(c->req));
 
     return c;
@@ -89,6 +93,11 @@ static void conn_cleanup_body_reader(KlConn *c) {
 }
 
 void kl_conn_release(KlConnPool *pool, KlConn *c) {
+    /* WebSocket cleanup — notify on_close if needed, free state */
+    kl_ws_cleanup(c);
+    /* HTTP/2 cleanup — destroy streams, session, free state */
+    kl_h2_cleanup(c);
+
     /* TLS shutdown before close(fd) — best-effort close_notify.
      * Retry on WANT_WRITE to flush the close_notify record.
      * Give up on WANT_READ (can't block for peer's close_notify). */
@@ -119,6 +128,8 @@ void kl_conn_pool_free(KlConnPool *pool) {
     if (pool->conns) {
         /* Close any active connections */
         for (int i = 0; i < pool->capacity; i++) {
+            kl_ws_cleanup(&pool->conns[i]);
+            kl_h2_cleanup(&pool->conns[i]);
             if (pool->conns[i].req.body_reader) {
                 pool->conns[i].req.body_reader->destroy(
                     pool->conns[i].req.body_reader);
@@ -217,6 +228,19 @@ KlConnState kl_conn_on_handshake(KlConn *c) {
     switch (r) {
         case KL_TLS_OK:
             c->tls_want = 0;
+            /* Check ALPN for HTTP/2 negotiation */
+            if (c->h2_config && c->tls->alpn_protocol) {
+                const char *proto = c->tls->alpn_protocol(c->tls);
+                if (proto && proto[0] == 'h' && proto[1] == '2' &&
+                    proto[2] == '\0') {
+                    int hr = kl_h2_upgrade(c, c->router, c->h2_config,
+                                           NULL, 0);
+                    if (hr == KL_CONN_HTTP2) {
+                        c->state = KL_CONN_HTTP2;
+                        return c->state;
+                    }
+                }
+            }
             c->state = KL_CONN_READING;
             return c->state;
         case KL_TLS_WANT_READ:
@@ -253,6 +277,24 @@ read_more_headers: ;
             return c->state;
         }
         c->read_len += (size_t)nr;
+
+        /* HTTP/2 connection preface detection (before HTTP/1.1 parser) */
+        if (c->h2_config != NULL) {
+            static const char h2_preface[24] =
+                "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+            if (c->read_len >= 24) {
+                if (memcmp(c->read_buf, h2_preface, 24) == 0) {
+                    c->state = (KlConnState)kl_h2_upgrade(
+                        c, router, c->h2_config,
+                        c->read_buf + 24, c->read_len - 24);
+                    return c->state;
+                }
+                /* Not a preface — fall through to HTTP/1.1 parser */
+            } else if (memcmp(c->read_buf, h2_preface, c->read_len) == 0) {
+                /* Partial preface match — wait for more data */
+                return KL_CONN_READING;
+            }
+        }
 
         /* Try parsing */
         size_t consumed = 0;
@@ -305,6 +347,28 @@ read_more_headers: ;
                 }
                 c->state = KL_CONN_SENDING;
                 return c->state;
+            }
+
+            /* WebSocket upgrade — branch before body reading */
+            if (c->route_result == 200 && c->route &&
+                c->route->ws_config) {
+                c->state = (KlConnState)kl_ws_upgrade(
+                    c, c->read_buf + consumed, leftover);
+                return c->state;
+            }
+
+            /* HTTP/2 cleartext upgrade (Upgrade: h2c) */
+            if (c->h2_config != NULL) {
+                size_t ug_len;
+                const char *ug = kl_request_header_len(
+                    &c->req, "Upgrade", &ug_len);
+                if (ug && ug_len == 3 &&
+                    strncasecmp(ug, "h2c", 3) == 0) {
+                    c->state = (KlConnState)kl_h2_upgrade_from_h1(
+                        c, router, c->h2_config,
+                        c->read_buf + consumed, leftover);
+                    return c->state;
+                }
             }
 
             /* Determine if there's a body to read */
@@ -442,6 +506,26 @@ read_more_headers: ;
                 }
                 c->state = KL_CONN_SENDING;
                 return c->state;
+            }
+
+            /* WebSocket upgrade — branch before handler */
+            if (c->route_result == 200 && c->route &&
+                c->route->ws_config) {
+                c->state = (KlConnState)kl_ws_upgrade(c, NULL, 0);
+                return c->state;
+            }
+
+            /* HTTP/2 cleartext upgrade (Upgrade: h2c) */
+            if (c->h2_config != NULL) {
+                size_t ug_len;
+                const char *ug = kl_request_header_len(
+                    &c->req, "Upgrade", &ug_len);
+                if (ug && ug_len == 3 &&
+                    strncasecmp(ug, "h2c", 3) == 0) {
+                    c->state = (KlConnState)kl_h2_upgrade_from_h1(
+                        c, router, c->h2_config, NULL, 0);
+                    return c->state;
+                }
             }
 
             return conn_process(c);

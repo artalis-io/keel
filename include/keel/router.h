@@ -23,12 +23,15 @@ typedef struct {
 
 #define KL_MAX_PARAMS 16
 
+typedef struct KlWsConfig KlWsConfig;
+
 typedef struct {
     const char *method;
     const char *pattern;
     KlHandler handler;
     void *user_data;
     KlBodyReaderFactory body_reader;   /* NULL = discard body */
+    KlWsConfig *ws_config;             /* non-NULL = WebSocket endpoint */
 } KlRoute;
 
 typedef struct {

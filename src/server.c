@@ -1,5 +1,7 @@
 #include <keel/server.h>
 #include <keel/tls.h>
+#include <keel/websocket.h>
+#include <keel/h2.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -75,6 +77,12 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->config.tls = &s->tls_storage;
     }
 
+    /* Copy HTTP/2 config if provided */
+    if (s->config.h2) {
+        s->h2_storage = *s->config.h2;
+        s->config.h2 = &s->h2_storage;
+    }
+
     /* Create parsers and propagate config for each connection slot */
     for (int i = 0; i < s->pool.capacity; i++) {
         s->pool.conns[i].parser = s->config.parser(alloc);
@@ -85,6 +93,8 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         }
         s->pool.conns[i].access_log = s->config.access_log;
         s->pool.conns[i].access_log_data = s->config.access_log_data;
+        s->pool.conns[i].h2_config = s->config.h2;  /* NULL if disabled */
+        s->pool.conns[i].router = &s->router;
     }
 
     /* Pre-allocate TLS sessions (one per connection slot) */
@@ -97,7 +107,8 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
                 kl_router_free(&s->router);
                 return -1;
             }
-            /* Validate vtable — all 7 function pointers must be set */
+            /* Validate vtable — all 7 required pointers must be set
+             * (alpn_protocol is optional, NULL if not supported) */
             const KlTls *t = s->pool.conns[i].tls;
             if (!t->handshake || !t->read || !t->write ||
                 !t->shutdown || !t->pending || !t->reset || !t->destroy) {
@@ -121,6 +132,14 @@ int kl_server_route(KlServer *s, const char *method, const char *pattern,
 int kl_server_use(KlServer *s, const char *method, const char *pattern,
                   KlMiddleware fn, void *user_data) {
     return kl_router_use(&s->router, method, pattern, fn, user_data);
+}
+
+int kl_server_ws(KlServer *s, const char *pattern, KlWsConfig *config) {
+    /* Register as a GET route with no handler — ws_config triggers upgrade */
+    if (kl_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
+        return -1;
+    s->router.routes[s->router.count - 1].ws_config = config;
+    return 0;
 }
 
 int kl_server_run(KlServer *s) {
@@ -282,6 +301,23 @@ rearm_listen:
                 goto transition;
             }
 
+            /* WebSocket — handle read events */
+            if (c->state == KL_CONN_WEBSOCKET) {
+                if (events[i].ready & KL_EVENT_READ)
+                    new_state = (KlConnState)kl_ws_on_readable(c);
+                goto transition;
+            }
+
+            /* HTTP/2 — handle read/write events */
+            if (c->state == KL_CONN_HTTP2) {
+                if (events[i].ready & KL_EVENT_READ)
+                    new_state = (KlConnState)kl_h2_on_readable(c);
+                if (new_state == KL_CONN_HTTP2 &&
+                    (events[i].ready & KL_EVENT_WRITE))
+                    new_state = (KlConnState)kl_h2_on_writable(c);
+                goto transition;
+            }
+
             if (events[i].ready & KL_EVENT_READ) {
                 new_state = kl_conn_on_readable(c, &s->router);
             }
@@ -307,6 +343,21 @@ transition:
             } else if (new_state == KL_CONN_SENDING) {
                 if (kl_event_mod(&s->loop, c->fd,
                                  KL_EVENT_WRITE, c) < 0) {
+                    kl_event_del(&s->loop, c->fd);
+                    kl_conn_release(&s->pool, c);
+                }
+            } else if (new_state == KL_CONN_WEBSOCKET) {
+                if (kl_event_mod(&s->loop, c->fd,
+                                 KL_EVENT_READ, c) < 0) {
+                    kl_event_del(&s->loop, c->fd);
+                    kl_conn_release(&s->pool, c);
+                }
+            } else if (new_state == KL_CONN_HTTP2) {
+                KlEventMask mask = KL_EVENT_READ;
+                if (c->h2 && c->h2->session &&
+                    c->h2->session->want_write(c->h2->session))
+                    mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
+                if (kl_event_mod(&s->loop, c->fd, mask, c) < 0) {
                     kl_event_del(&s->loop, c->fd);
                     kl_conn_release(&s->pool, c);
                 }
@@ -336,6 +387,18 @@ transition:
             KlConn *tc = &s->pool.conns[i];
             if (tc->state == KL_CONN_CLOSED || tc->state == KL_CONN_PROCESSING)
                 continue;
+            /* WebSocket: exempt from HTTP idle timeout, check close deadline */
+            if (tc->state == KL_CONN_WEBSOCKET) {
+                if (kl_ws_check_close_timeout(tc, now)) {
+                    kl_event_del(&s->loop, tc->fd);
+                    kl_conn_release(&s->pool, tc);
+                }
+                continue;
+            }
+            /* HTTP/2: PING keepalive is session's responsibility */
+            if (tc->state == KL_CONN_HTTP2) {
+                continue;
+            }
             /* TLS handshake time counts against read timeout */
             int timed_out = (now - tc->last_active_ms > timeout);
             /* Body deadline: absolute time from body start, not resettable.
@@ -360,6 +423,13 @@ transition:
 
         /* Graceful drain: stop when all connections are idle or deadline hit */
         if (atomic_load(&s->draining)) {
+            /* Send close 1001 to active WebSocket connections */
+            for (int j = 0; j < s->pool.capacity; j++) {
+                if (s->pool.conns[j].state == KL_CONN_WEBSOCKET)
+                    kl_ws_drain_close(&s->pool.conns[j]);
+                if (s->pool.conns[j].state == KL_CONN_HTTP2)
+                    kl_h2_drain_shutdown(&s->pool.conns[j]);
+            }
             int active = 0;
             for (int j = 0; j < s->pool.capacity; j++) {
                 if (s->pool.conns[j].state != KL_CONN_CLOSED)

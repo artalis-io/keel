@@ -14,6 +14,9 @@ make BACKEND=iouring    # build with io_uring backend (Linux 5.6+, requires libu
 make test               # run unit tests
 make examples           # build all example programs
 make debug              # debug build with ASan + UBSan
+make analyze            # Clang static analyzer (scan-build)
+make cppcheck           # cppcheck static analysis
+make fuzz               # build libFuzzer fuzz targets (requires clang)
 make clean              # remove artifacts
 ```
 
@@ -473,6 +476,8 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 ```bash
 make test               # run all tests
 make debug && make test  # run under ASan + UBSan
+make analyze            # Clang static analyzer
+make cppcheck           # cppcheck static analysis
 ```
 
 ## Why C
@@ -482,6 +487,8 @@ make debug && make test  # run under ASan + UBSan
 - `pledge()`/`unveil()` sandboxing — lock down syscalls and filesystem after binding the socket, before entering the event loop
 - `-D_FORTIFY_SOURCE=2 -fstack-protector-strong` — compile-time and runtime buffer overflow detection
 - AddressSanitizer + UBSan in debug builds
+- Clang static analyzer (`make analyze`) and cppcheck (`make cppcheck`) for compile-time bug detection
+- libFuzzer fuzz testing (`make fuzz`) on the HTTP parser and multipart parser — the primary attack surface
 - Pre-allocated connection pool — no per-request `malloc`, no fragmentation, no OOM under load
 - All inputs bounds-checked at system boundaries (read buffer limits, header count limits)
 - Integer overflow guards (`SIZE_MAX/2`, `INT_MAX/2` checks) on all arithmetic

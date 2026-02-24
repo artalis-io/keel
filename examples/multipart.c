@@ -38,8 +38,8 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
         printf(" size=%zu\n", p->data_len);
     }
 
-    /* Respond with summary */
-    char body[1024];
+    /* Respond with summary — static: must outlive handler for async writev */
+    static char body[1024];
     int off = snprintf(body, sizeof(body),
                        "Received %d part(s)\n", mr->num_parts);
     if (off < 0) off = 0;

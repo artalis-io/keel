@@ -24,7 +24,8 @@ endif
 # Core library — parser-agnostic
 CORE_SRC = src/allocator.c src/response.c src/router.c \
            src/connection.c src/server.c src/body_reader_buffer.c \
-           src/body_reader_multipart.c src/chunked.c src/cors.c $(EVENT_SRC)
+           src/body_reader_multipart.c src/chunked.c src/cors.c \
+           src/websocket.c src/h2.c $(EVENT_SRC)
 
 # Default parser backend (llhttp)
 LLHTTP_SRC = parsers/parser_llhttp.c \
@@ -69,7 +70,13 @@ examples/stream_body: examples/stream_body.c $(LIB)
 examples/multipart: examples/multipart.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
-examples: examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart
+examples/websocket_echo: examples/websocket_echo.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
+examples/h2_server: examples/h2_server.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
+examples: examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
 
 # Tests — relax pedantic warnings triggered by utest.h vendor macros
 TEST_SRC = $(wildcard tests/test_*.c)
@@ -88,7 +95,7 @@ test: $(TEST_BIN)
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(LIB) $(TEST_BIN)
-	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart
+	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart
 
 # Debug build with sanitizers: make debug
@@ -103,6 +110,9 @@ DEBUG_LDFLAGS = -fsanitize=address,undefined
 debug:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)"
+
+debug-test: debug
+	$(MAKE) test CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)"
 
 # Static analysis
 analyze:
@@ -131,4 +141,4 @@ fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart
 docs:
 	doxygen Doxyfile
 
-.PHONY: all test clean examples debug analyze cppcheck fuzz docs
+.PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs

@@ -69,6 +69,12 @@ struct KlTls {
      * @brief Free all resources.
      */
     void (*destroy)(KlTls *self);
+
+    /**
+     * @brief Negotiated ALPN protocol, or NULL.
+     * Optional — set to NULL if not supported.
+     */
+    const char *(*alpn_protocol)(KlTls *self);
 };
 
 /**
