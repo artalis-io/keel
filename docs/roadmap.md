@@ -52,7 +52,7 @@ Comprehensive C code audit with 8 fixes: integer overflow guards in `mp_strdup` 
 
 ### ~~TLS via BearSSL or LibreSSL~~ DONE
 
-Pluggable TLS vtable (`KlTls`) — users bring their own TLS backend (BearSSL, LibreSSL, OpenSSL, rustls-ffi) by implementing a 7-function vtable. No vendored TLS library. TLS wraps the transport layer via `conn_read`/`conn_write` helpers. New `KL_CONN_TLS_HANDSHAKE` state for non-blocking handshake. `pending()` function for edge-triggered event loop drain. Sendfile falls back to `pread` + TLS write. Pre-allocated per-connection TLS sessions (one per pool slot). Keep-alive reuses TLS session (no re-handshake). 11 mock-based unit tests.
+Pluggable TLS vtable (`KlTls`) — users bring their own TLS backend (BearSSL, LibreSSL, OpenSSL, rustls-ffi) by implementing a 7-function vtable. No vendored TLS library. TLS wraps the transport layer via `conn_read`/`conn_write` helpers. New `KL_CONN_TLS_HANDSHAKE` state for non-blocking handshake. `pending()` function for edge-triggered event loop drain. Sendfile falls back to `pread` + TLS write. Pre-allocated per-connection TLS sessions (one per pool slot). Keep-alive reuses TLS session (no re-handshake). 20 mock-based unit tests.
 
 ### Worker thread pool
 

@@ -430,7 +430,7 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 | `test_cors` | 16 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
 | `test_integration` | 21 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
 | `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
-| `test_tls` | 11 | TLS vtable, mock handshake states, read/write, pending, config |
+| `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
 
 ```bash
 make test               # run all tests
