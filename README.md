@@ -465,6 +465,22 @@ make debug && make test  # run under ASan + UBSan
 
 **Why not C# / Java / Python?** Managed runtimes are the wrong abstraction for a library that needs to control every byte and syscall. KEEL's connection pool is a flat array with zero per-request allocation. Its response path goes straight from a user buffer to `writev(2)` or `sendfile(2)` — no managed heap, no GC, no object headers. A C# `Span<byte>` or Java `ByteBuffer` gets close but still lives inside a runtime that owns your threads, your memory layout, and your syscall surface. Python is ~100x slower for raw I/O dispatch and adds a GIL. These languages are excellent for application code *on top* of an HTTP server — they're the wrong tool for building the server itself.
 
+## Not in Scope
+
+KEEL is a transport library — it handles sockets, parsing, routing, and response serialization. Everything above the HTTP layer is an application concern:
+
+- **Authentication / authorization** — Token validation, session management, OAuth flows, RBAC. These are policy decisions that vary per application. KEEL's middleware interface makes auth trivial to implement (see [Auth middleware example](#writing-custom-middleware)) but deliberately doesn't ship one.
+
+- **Request logging** — Log format (JSON, CLF, custom), destination (stderr, file, syslog), and filtering are application choices. KEEL provides a pluggable `access_log` callback with method, path, status, body size, and duration — you bring the formatter.
+
+- **Worker thread pool** — CPU-bound work (image processing, compression, templating) should be dispatched to application-owned threads. The application controls thread count, priority, queue depth, and scheduling policy. KEEL's single-threaded event loop handles I/O; your thread pool handles compute. A few lines of pthreads in your handler is simpler and more flexible than a library-imposed threading model.
+
+- **Rate limiting** — Rate limits depend on your authentication layer, your billing tiers, your abuse patterns. Implement as middleware with whatever backing store (in-memory, Redis, database) fits your architecture.
+
+- **Request validation** — Schema validation, content-type negotiation, input sanitization. These are application-level concerns that depend on your data model.
+
+The general principle: if it requires policy decisions that vary between applications, it belongs in application code, not in the transport library. KEEL provides the hooks (middleware, body readers, access log callback) — you provide the policy.
+
 ## CI
 
 GitHub Actions runs on every push and PR against `main`:

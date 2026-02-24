@@ -54,19 +54,6 @@ Comprehensive C code audit with 8 fixes: integer overflow guards in `mp_strdup` 
 
 Pluggable TLS vtable (`KlTls`) — users bring their own TLS backend (BearSSL, LibreSSL, OpenSSL, rustls-ffi) by implementing a 7-function vtable. No vendored TLS library. TLS wraps the transport layer via `conn_read`/`conn_write` helpers. New `KL_CONN_TLS_HANDSHAKE` state for non-blocking handshake. `pending()` function for edge-triggered event loop drain. Sendfile falls back to `pread` + TLS write. Pre-allocated per-connection TLS sessions (one per pool slot). Keep-alive reuses TLS session (no re-handshake). 20 mock-based unit tests.
 
-### Worker thread pool
-
-For CPU-bound handlers (image processing, compression, templating):
-
-```c
-KlConfig cfg = {
-    .port = 8080,
-    .worker_threads = 4,
-};
-```
-
-The event loop remains single-threaded. When a handler is registered as "blocking", the connection is handed to a worker thread for processing. The response is sent back through the event loop. This preserves the single-threaded event loop model while supporting compute-heavy handlers.
-
 ### HTTP/2 via nghttp2
 
 The pluggable parser makes this feasible — HTTP/2 framing is a different parser backend, not a different architecture. The connection state machine needs multiplexing awareness (multiple concurrent streams per connection), and the response builder needs frame formatting, but the router, handlers, and body readers are unchanged.
