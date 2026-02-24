@@ -36,9 +36,9 @@ libFuzzer harnesses for HTTP parser and multipart reader with seed corpora (`fuz
 
 Doxyfile + `@brief`/`@param`/`@return` doc comments on all public headers. Generate with `make docs`.
 
-### Chunked request bodies
+### ~~Chunked request bodies~~ DONE
 
-Support `Transfer-Encoding: chunked` for requests. The parser already detects the `chunked` flag — the connection layer needs to de-chunk incoming data before feeding it to the body reader. This is straightforward: a small state machine that strips chunk headers and feeds raw data through the existing body reader interface.
+Parser-agnostic chunked decoder (`KlChunkedDecoder`) sits between the socket and body reader. The parser only sets `req->chunked = 1`; the connection layer routes body data through the decoder. Includes body deadline timer (`body_timeout_ms`) for slow-chunk DoS protection.
 
 ### Per-route middleware chain
 

@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable body readers, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
 
-**101K req/s** on a single thread. **69 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **100 tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -54,7 +54,7 @@ int main(void) {
 
 ## Architecture
 
-10 orthogonal modules, each independently testable:
+11 orthogonal modules, each independently testable:
 
 | Module | Header | Description |
 |--------|--------|-------------|
@@ -68,6 +68,7 @@ int main(void) {
 | **server** | `server.h` | Top-level glue: init, bind, run loop, stop |
 | **body_reader** | `body_reader.h` | Pluggable body reader vtable + buffer reader |
 | **body_reader_multipart** | `body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
+| **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
 
 ## Request Body Handling
 
@@ -305,17 +306,18 @@ The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a 
 
 ## Testing
 
-69 tests across 8 test suites, covering every module:
+100 tests across 9 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
 | `test_allocator` | 4 | Default + custom tracking allocators |
-| `test_router` | 8 | Exact match, params, 404, 405, wildcard |
-| `test_response` | 8 | Status, headers, body, JSON, error, streaming, sendfile |
-| `test_parser` | 7 | GET, POST, query strings, incomplete, reset |
+| `test_router` | 9 | Exact match, params, 404, 405, wildcard |
+| `test_response` | 10 | Status, headers, body, JSON, error, streaming, sendfile |
+| `test_parser` | 9 | GET, POST, query strings, incomplete, reset, chunked TE |
 | `test_connection` | 3 | Pool init, acquire/release, exhaustion |
-| `test_body_reader` | 26 | Buffer + multipart: limits, spanning, binary, edge cases |
-| `test_integration` | 7 | Full server: hello, POST, 413, keepalive, multipart, access log |
+| `test_body_reader` | 28 | Buffer + multipart: limits, spanning, binary, edge cases |
+| `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
+| `test_integration` | 16 | Full server: hello, POST, 413, keepalive, multipart, chunked, access log |
 | `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
 
 ```bash

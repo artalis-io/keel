@@ -4,7 +4,7 @@
 
 ```bash
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
-make test         # build and run all 75 unit tests
+make test         # build and run all 100 unit tests
 make examples     # build all 6 example programs
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make clean        # remove all build artifacts
@@ -22,7 +22,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-10 orthogonal modules, each independently testable:
+11 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring event loop abstraction
@@ -34,6 +34,7 @@ make clean        # remove all build artifacts
 8. **server** — Top-level glue: init, bind, run loop, stop
 9. **body_reader** — Pluggable body reader vtable + built-in buffer reader
 10. **body_reader_multipart** — RFC 2046 multipart/form-data state machine parser
+11. **chunked** — RFC 7230 parser-agnostic chunked transfer-encoding decoder
 
 ## Key Types
 
@@ -48,6 +49,7 @@ make clean        # remove all build artifacts
 | `KlMultipartReader` | `body_reader_multipart.h` | Multipart parser: parts array, state machine, overlap buffer |
 | `KlMultipartPart` | `body_reader_multipart.h` | Single part: name, filename, content_type, data, data_len |
 | `KlMultipartConfig` | `body_reader_multipart.h` | Limits: max_part_size, max_total_size, max_parts |
+| `KlChunkedDecoder` | `chunked.h` | Chunked TE decoder: state machine, no allocation |
 | `KlAllocator` | `allocator.h` | Vtable: malloc, realloc (with old_size), free (with size) |
 | `KlParser` | `parser.h` | Vtable: parse (returns KlParseResult), reset, destroy |
 | `KlConn` | `connection.h` | Connection: fd, state, read_buf, request, response, parser, route |
