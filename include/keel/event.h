@@ -16,11 +16,28 @@ typedef struct {
     KlAllocator *alloc; /* set before kl_event_init; used by io_uring backend */
 } KlEventLoop;
 
+/** @brief Initialize the platform event loop (epoll/kqueue/io_uring). */
 int  kl_event_init(KlEventLoop *loop);
+
+/** @brief Register a file descriptor for events. */
 int  kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata);
+
+/** @brief Modify the event mask for a registered fd. */
 int  kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata);
+
+/** @brief Remove a file descriptor from the event loop. */
 int  kl_event_del(KlEventLoop *loop, int fd);
+
+/**
+ * @brief Wait for events.
+ * @param out        Array to receive ready events.
+ * @param max        Maximum events to return.
+ * @param timeout_ms Timeout in milliseconds (-1 for infinite).
+ * @return Number of ready events, or -1 on error.
+ */
 int  kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms);
+
+/** @brief Close and clean up the event loop. */
 void kl_event_close(KlEventLoop *loop);
 
 #endif

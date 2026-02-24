@@ -124,6 +124,31 @@ UTEST(router, wildcard_method) {
     kl_router_free(&r);
 }
 
+UTEST(router, head_matches_get) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    kl_router_add(&r, "GET", "/hello", dummy_handler, NULL, NULL);
+
+    KlRoute *matched;
+    KlParam params[KL_MAX_PARAMS];
+    int num_params;
+
+    /* HEAD should match GET route */
+    int result = kl_router_match(&r, "HEAD", 4, "/hello", 6,
+                                  &matched, params, &num_params);
+    ASSERT_EQ(result, 200);
+    ASSERT_TRUE(matched != NULL);
+
+    /* HEAD should NOT match POST-only routes */
+    kl_router_add(&r, "POST", "/submit", dummy_handler, NULL, NULL);
+    result = kl_router_match(&r, "HEAD", 4, "/submit", 7,
+                              &matched, params, &num_params);
+    ASSERT_EQ(result, 405);
+
+    kl_router_free(&r);
+}
+
 UTEST(router, user_data_passed) {
     KlAllocator a = kl_allocator_default();
     KlRouter r;

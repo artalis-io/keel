@@ -16,6 +16,15 @@ examples/multipart
 tests/test_*
 !tests/test_*.c
 
+# Fuzz binaries and corpora artifacts
+fuzz/fuzz_parser
+fuzz/fuzz_multipart
+fuzz/crash-*
+fuzz/oom-*
+
+# Generated API docs
+docs/api/
+
 # Debug/profiling
 *.dSYM/
 *.gcda

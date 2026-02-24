@@ -19,6 +19,10 @@ static const char kl_415_response[] =
     "Connection: close\r\n"
     "\r\n";
 
+static const char kl_100_continue[] =
+    "HTTP/1.1 100 Continue\r\n"
+    "\r\n";
+
 uint64_t kl_monotonic_ms(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
@@ -150,6 +154,9 @@ static KlConnState conn_process(KlConn *c) {
         }
     }
     c->res.conn_fd = c->fd;
+    c->res.keep_alive = c->req.keep_alive;
+    c->res.head_request = (c->req.method_len == 4 &&
+                           memcmp(c->req.method, "HEAD", 4) == 0);
 
     if (c->route_result == 200 && c->route) {
         c->route->handler(&c->req, &c->res, c->route->user_data);
@@ -232,6 +239,16 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
                     return c->state;
                 }
                 c->req.body_reader = br;
+
+                /* Send 100 Continue if client expects it */
+                size_t expect_len;
+                const char *expect = kl_request_header_len(
+                    &c->req, "Expect", &expect_len);
+                if (expect && expect_len == 12 &&
+                    strncasecmp(expect, "100-continue", 12) == 0) {
+                    best_effort_write(c->fd, kl_100_continue,
+                                      sizeof(kl_100_continue) - 1);
+                }
 
                 /* Parse leftover body data in-place (no memmove) */
                 if (leftover > 0) {

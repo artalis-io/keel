@@ -89,6 +89,7 @@ test: $(TEST_BIN)
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(LIB) $(TEST_BIN)
 	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart
+	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart
 
 # Debug build with sanitizers: make debug
 DEBUG_CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Werror -g -O0 \
@@ -103,4 +104,31 @@ debug:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)"
 
-.PHONY: all test clean examples debug
+# Static analysis
+analyze:
+	scan-build --status-bugs $(MAKE) clean all
+
+cppcheck:
+	cppcheck --enable=all --suppress=missingIncludeSystem \
+	  --suppress=unusedFunction --suppress=checkersReport \
+	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
+
+# Fuzz testing (requires clang with libFuzzer)
+# On Linux: make fuzz CC=clang
+# On macOS: make fuzz CC=/opt/homebrew/opt/llvm@18/bin/clang
+FUZZ_CFLAGS = -std=c11 -g -O1 -fsanitize=fuzzer,address,undefined \
+              -fno-omit-frame-pointer -Iinclude -Ivendor/llhttp
+
+fuzz/fuzz_parser: fuzz/fuzz_parser.c $(LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
+fuzz/fuzz_multipart: fuzz/fuzz_multipart.c $(LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
+fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart
+
+# API documentation (requires Doxygen)
+docs:
+	doxygen Doxyfile
+
+.PHONY: all test clean examples debug analyze cppcheck fuzz docs

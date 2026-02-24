@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <signal.h>
 
 #define TEST_PORT 18080
 
@@ -284,6 +285,78 @@ UTEST(integration, empty_body) {
     stop_server();
 }
 
+UTEST(integration, expect_100_continue) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* Send headers with Expect: 100-continue */
+    const char *hdr = "POST /echo HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Content-Length: 11\r\n"
+                      "Expect: 100-continue\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, hdr, strlen(hdr));
+
+    /* Read the 100 Continue interim response */
+    char buf[4096];
+    ssize_t n = 0;
+    /* Wait for 100 Continue */
+    for (int i = 0; i < 20 && n == 0; i++) {
+        usleep(50000);
+        ssize_t r = read(fd, buf + n, sizeof(buf) - (size_t)n - 1);
+        if (r > 0) n += r;
+    }
+    buf[n] = '\0';
+    ASSERT_TRUE(strstr(buf, "100 Continue") != NULL);
+
+    /* Now send the body */
+    (void)write(fd, "hello world", 11);
+
+    /* Read the final response */
+    char buf2[4096];
+    ssize_t total = read_response(fd, buf2, sizeof(buf2));
+    close(fd);
+    (void)total;
+
+    ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf2, "hello world") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, head_request) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "HEAD /hello HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    /* Should get 200 with Content-Length but no body */
+    ASSERT_TRUE(strstr(buf, "HTTP/1.1 200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Length: 15") != NULL);
+    ASSERT_TRUE(strstr(buf, "application/json") != NULL);
+
+    /* No body after headers */
+    char *body_start = strstr(buf, "\r\n\r\n");
+    ASSERT_TRUE(body_start != NULL);
+    body_start += 4;
+    ASSERT_EQ(strlen(body_start), (size_t)0);
+
+    stop_server();
+}
+
 /* ── Access log test ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -407,6 +480,52 @@ UTEST(integration, multipart_upload) {
     ASSERT_TRUE(strstr(buf, "len1=14") != NULL);
 
     stop_server();
+}
+
+/* ── Signal handling test ───────────────────────────────────────────── */
+
+static KlServer signal_server;
+
+static void *signal_server_thread(void *arg) {
+    (void)arg;
+    kl_server_run(&signal_server);
+    return NULL;
+}
+
+#define SIGNAL_TEST_PORT 18082
+
+UTEST(integration, signal_stop) {
+    KlConfig cfg = {
+        .port = SIGNAL_TEST_PORT,
+        .install_signal_handlers = 1,
+    };
+    kl_server_init(&signal_server, &cfg);
+    kl_server_route(&signal_server, "GET", "/hello", handle_hello, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, signal_server_thread, NULL);
+    usleep(100000);
+
+    /* Verify server is up */
+    int fd = connect_to(SIGNAL_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+    const char *req = "GET /hello HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, req, strlen(req));
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    /* Send SIGTERM to ourselves — handler should stop the server */
+    kill(getpid(), SIGTERM);
+    pthread_join(tid, NULL);
+    kl_server_free(&signal_server);
+
+    /* If we get here, the server exited cleanly */
+    ASSERT_TRUE(1);
 }
 
 UTEST_MAIN();

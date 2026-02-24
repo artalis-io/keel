@@ -67,3 +67,21 @@ jobs:
           RESPONSE=$(curl -s http://localhost:9095/hello)
           echo "Response: $RESPONSE"
           echo "$RESPONSE" | grep -q '"hello"'
+
+  analyze:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tools cppcheck
+
+      - name: scan-build
+        run: make analyze
+
+      - name: cppcheck
+        run: make cppcheck

@@ -144,9 +144,6 @@ static int mp_parse_headers(KlMultipartReader *mr) {
         size_t line_len = eol ? (size_t)(eol - buf) : len;
 
         if (line_len == 0) {
-            /* eol found "\r\n" at buf, so len >= 2 is guaranteed */
-            buf += 2;
-            len -= 2;
             break;
         }
 
@@ -402,8 +399,7 @@ static int mp_on_data(KlBodyReader *self, const char *data, size_t len) {
         int rc = mp_process(mr, combined, combined_len);
         if (heap) kl_free(mr->alloc, combined, combined_len);
         if (rc < 0) return -1;
-    } else if (len > 0 && mr->state != KL_MP_DONE &&
-               mr->state != KL_MP_ERROR) {
+    } else if (len > 0) {
         if (mp_process(mr, data, len) < 0) return -1;
     }
 
@@ -414,13 +410,15 @@ static void mp_on_complete(KlBodyReader *self) {
     KlMultipartReader *mr = (KlMultipartReader *)self;
 
     if (mr->overlap_len > 0 && mr->state == KL_MP_BODY && mr->num_parts > 0) {
-        if (mp_append_data(mr, mr->overlap, mr->overlap_len) < 0)
+        if (mp_append_data(mr, mr->overlap, mr->overlap_len) < 0) {
             mr->state = KL_MP_ERROR;
+            mr->overlap_len = 0;
+            return;
+        }
         mr->overlap_len = 0;
     }
 
-    if (mr->state != KL_MP_DONE)
-        mr->state = KL_MP_DONE;
+    mr->state = KL_MP_DONE;
 }
 
 static void mp_on_error(KlBodyReader *self) {
@@ -451,7 +449,7 @@ static void mp_destroy(KlBodyReader *self) {
 
 /* ── Factory ────────────────────────────────────────────────────────── */
 
-KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, KlRequest *req,
+KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlRequest *req,
                                         void *user_data) {
     size_t ct_len = 0;
     const char *ct = kl_request_header_len(req, "Content-Type", &ct_len);

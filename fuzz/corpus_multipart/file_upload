@@ -1,0 +1,10 @@
+--FUZZBOUNDARY
+Content-Disposition: form-data; name="text"
+
+hello
+--FUZZBOUNDARY
+Content-Disposition: form-data; name="file"; filename="test.txt"
+Content-Type: text/plain
+
+file content here
+--FUZZBOUNDARY--
