@@ -479,6 +479,8 @@ KEEL is a transport library — it handles sockets, parsing, routing, and respon
 
 - **Request validation** — Schema validation, content-type negotiation, input sanitization. These are application-level concerns that depend on your data model.
 
+- **ETag / Last-Modified** — These are application-specific (KEEL doesn't know when your data changes). Use existing `kl_request_header()` / `kl_response_header()` for the headers; your application handles 304 logic.
+
 The general principle: if it requires policy decisions that vary between applications, it belongs in application code, not in the transport library. KEEL provides the hooks (middleware, body readers, access log callback) — you provide the policy.
 
 ## CI
