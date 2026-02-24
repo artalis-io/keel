@@ -109,7 +109,7 @@ analyze:
 	scan-build --status-bugs $(MAKE) clean all
 
 cppcheck:
-	cppcheck --enable=all --suppress=missingIncludeSystem \
+	cppcheck --enable=all --inline-suppr --suppress=missingIncludeSystem \
 	  --suppress=unusedFunction --suppress=checkersReport \
 	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
 
