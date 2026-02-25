@@ -1,24 +1,43 @@
 CC      = cc
+AR      = ar
 UNAME_S := $(shell uname -s)
-CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
-          -fstack-protector-strong -Iinclude -Ivendor/llhttp
 LDFLAGS =
 
-# Vendor code — no warnings, no -Werror
-VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
+# Detect Cosmopolitan toolchain
+ifneq ($(findstring cosmocc,$(CC)),)
+  COSMO := 1
+endif
 
-# Platform event loop backend
-ifeq ($(UNAME_S),Linux)
-  ifeq ($(BACKEND),iouring)
-    EVENT_SRC = src/event_iouring.c
-    LDFLAGS += -luring
-  else
-    EVENT_SRC = src/event_epoll.c
-  endif
-  CFLAGS += -D_DEFAULT_SOURCE
-  VENDOR_CFLAGS += -D_DEFAULT_SOURCE
+ifdef COSMO
+  # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
+  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
+            -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
+  EVENT_SRC = src/event_poll.c
 else
-  EVENT_SRC = src/event_kqueue.c
+  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
+            -fstack-protector-strong -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
+
+  # Platform event loop backend
+  ifeq ($(UNAME_S),Linux)
+    ifeq ($(BACKEND),iouring)
+      EVENT_SRC = src/event_iouring.c
+      LDFLAGS += -luring
+    else ifeq ($(BACKEND),poll)
+      EVENT_SRC = src/event_poll.c
+    else
+      EVENT_SRC = src/event_epoll.c
+    endif
+    CFLAGS += -D_DEFAULT_SOURCE
+    VENDOR_CFLAGS += -D_DEFAULT_SOURCE
+  else
+    ifeq ($(BACKEND),poll)
+      EVENT_SRC = src/event_poll.c
+    else
+      EVENT_SRC = src/event_kqueue.c
+    endif
+  endif
 endif
 
 # Core library — parser-agnostic
@@ -38,7 +57,7 @@ LIB = libkeel.a
 all: $(LIB)
 
 $(LIB): $(CORE_OBJ) $(LLHTTP_OBJ)
-	ar rcs $@ $^
+	$(AR) rcs $@ $^
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -95,6 +114,7 @@ test: $(TEST_BIN)
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(LIB) $(TEST_BIN)
+	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart
 

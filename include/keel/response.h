@@ -17,7 +17,7 @@ typedef enum {
     KL_BODY_STREAM
 } KlBodyMode;
 
-typedef struct {
+typedef struct KlResponse {
     KlAllocator *alloc;
     int conn_fd;
 

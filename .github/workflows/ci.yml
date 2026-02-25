@@ -20,6 +20,10 @@ jobs:
             os: ubuntu-latest
             backend: "BACKEND=iouring"
             deps: "liburing-dev"
+          - name: Linux (poll fallback)
+            os: ubuntu-latest
+            backend: "BACKEND=poll"
+            deps: ""
           - name: macOS (kqueue)
             os: macos-latest
             backend: ""
@@ -119,3 +123,61 @@ jobs:
 
       - name: cppcheck
         run: make cppcheck
+
+  musl:
+    name: Linux (musl/Alpine)
+    runs-on: ubuntu-latest
+    container: alpine:3.19
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: apk add --no-cache build-base
+
+      - name: Build
+        run: make
+
+      - name: Test
+        timeout-minutes: 5
+        run: make test
+
+      - name: Build examples
+        run: make examples
+
+  cosmo:
+    name: Cosmopolitan (APE)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cosmocc
+        run: |
+          mkdir -p /opt/cosmo
+          wget -qO- https://cosmo.zip/pub/cosmocc/cosmocc.zip | \
+            busybox unzip -d /opt/cosmo -
+          echo "/opt/cosmo/bin" >> $GITHUB_PATH
+
+      - name: Build
+        run: make CC=cosmocc
+
+      - name: Build examples
+        run: make examples CC=cosmocc
+
+      - name: Smoke test
+        run: |
+          ./examples/hello 9095 &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null" EXIT
+
+          for i in 1 2 3 4 5; do
+            if curl -s http://localhost:9095/hello >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          RESPONSE=$(curl -s http://localhost:9095/hello)
+          echo "Response: $RESPONSE"
+          echo "$RESPONSE" | grep -q '"hello"'

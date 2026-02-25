@@ -5,6 +5,7 @@
 #include <keel/event.h>
 #include <keel/tls.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>

@@ -6,6 +6,7 @@
 #include <keel/websocket.h>
 #include <keel/h2.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>

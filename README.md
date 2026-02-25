@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
+Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring/poll. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
 
 **101K req/s** on a single thread. **180+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
@@ -11,6 +11,8 @@ Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring. Pluggable al
 ```bash
 make                    # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=iouring    # build with io_uring backend (Linux 5.6+, requires liburing-dev)
+make BACKEND=poll       # build with poll() backend (universal POSIX fallback)
+make CC=cosmocc         # build with Cosmopolitan C (Actually Portable Executable)
 make test               # run unit tests
 make examples           # build all example programs
 make debug              # debug build with ASan + UBSan
@@ -42,7 +44,7 @@ int main(void) {
 
 ## Features
 
-- **Three event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (POLL_ADD)
+- **Four event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (POLL_ADD), poll (universal POSIX fallback)
 - **Pluggable HTTP parser** — ships with llhttp, swap via `KlConfig.parser`
 - **Pluggable TLS** — bring your own BearSSL/LibreSSL/OpenSSL via vtable, zero vendored TLS code
 - **Pluggable body readers** — vtable interface for request body processing
@@ -66,7 +68,7 @@ int main(void) {
 | Module | Header | Description |
 |--------|--------|-------------|
 | **allocator** | `allocator.h` | Bring-your-own allocator interface |
-| **event** | `event.h` | epoll / kqueue / io_uring abstraction |
+| **event** | `event.h` | epoll / kqueue / io_uring / poll abstraction |
 | **request** | `request.h` | Parsed HTTP request struct (header-only, zero alloc) |
 | **parser** | `parser.h` | Pluggable HTTP parser vtable |
 | **response** | `response.h` | Response builder: buffered, sendfile, or streaming chunked |
@@ -451,8 +453,13 @@ No GC pauses. No goroutine scheduling. No async runtime overhead. Just `epoll_wa
 | macOS / BSD | kqueue (edge-triggered) | `make` |
 | Linux | epoll (edge-triggered) | `make` |
 | Linux 5.6+ | io_uring (POLL_ADD) | `make BACKEND=iouring` |
+| Any POSIX | poll (level-triggered) | `make BACKEND=poll` |
+| Linux (musl/Alpine) | epoll (edge-triggered) | `make` |
+| Cosmopolitan (APE) | poll (auto-selected) | `make CC=cosmocc` |
 
 The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a drop-in replacement for epoll with io_uring's batched submission advantage. Requires `liburing-dev`.
+
+The poll backend is a universal POSIX fallback that works on any platform with `poll(2)`. It enables Cosmopolitan C support (Actually Portable Executables that run on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary). When `CC=cosmocc` is detected, the Makefile automatically selects the poll backend.
 
 ## Testing
 
@@ -538,7 +545,10 @@ GitHub Actions runs on every push and PR against `main`:
 
 - **Linux (epoll)** — build, test, smoke test
 - **Linux (io_uring)** — build, test, smoke test
+- **Linux (poll fallback)** — build, test, smoke test
 - **macOS (kqueue)** — build, test, smoke test
+- **Linux (musl/Alpine)** — build, test, examples
+- **Cosmopolitan (APE)** — build, examples, smoke test
 
 A separate benchmark workflow runs on push to `main` (informational, not gating).
 

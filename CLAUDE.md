@@ -4,6 +4,8 @@
 
 ```bash
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
+make BACKEND=poll # build with poll() backend (universal POSIX fallback)
+make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
 make test         # build and run all 160 unit tests
 make examples     # build all 6 example programs
 make debug        # debug build with ASan + UBSan (recompiles from clean)
@@ -28,7 +30,7 @@ make clean        # remove all build artifacts
 13 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
-2. **event** — epoll (Linux) / kqueue (macOS) / io_uring event loop abstraction
+2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
 3. **request** — Parsed HTTP request struct (header-only, zero alloc)
 4. **parser** — Pluggable HTTP parser vtable (ships with llhttp backend)
 5. **response** — Response builder: buffered (writev), sendfile, or streaming chunked
