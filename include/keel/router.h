@@ -16,13 +16,6 @@ typedef void (*KlHandler)(KlRequest *req, KlResponse *res, void *user_data);
  */
 typedef int (*KlMiddleware)(KlRequest *req, KlResponse *res, void *user_data);
 
-typedef struct {
-    const char *name;   size_t name_len;
-    const char *value;  size_t value_len;
-} KlParam;
-
-#define KL_MAX_PARAMS 16
-
 typedef struct KlWsConfig KlWsConfig;
 
 typedef struct {

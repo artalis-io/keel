@@ -332,6 +332,11 @@ read_more_headers: ;
                                                &c->route, c->params,
                                                &c->num_params);
 
+            /* Expose route params on request for handlers */
+            memcpy(c->req.params, c->params,
+                   sizeof(KlParam) * (size_t)c->num_params);
+            c->req.num_params = c->num_params;
+
             /* Run middleware before body reading / handler */
             if (conn_init_response(c) < 0) {
                 c->state = KL_CONN_CLOSED;
@@ -491,6 +496,11 @@ read_more_headers: ;
                                                c->req.path, c->req.path_len,
                                                &c->route, c->params,
                                                &c->num_params);
+
+            /* Expose route params on request for handlers */
+            memcpy(c->req.params, c->params,
+                   sizeof(KlParam) * (size_t)c->num_params);
+            c->req.num_params = c->num_params;
 
             /* Run middleware */
             if (conn_init_response(c) < 0) {
