@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -38,6 +39,24 @@ static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+__attribute__((format(printf, 3, 4)))
+static void kl_log(KlServer *s, int level, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    if (s->config.log_fn) {
+        s->config.log_fn(level, fmt, ap, s->config.log_user_data);
+    } else {
+        fprintf(stderr, "keel: ");
+        vfprintf(stderr, fmt, ap);
+        fputc('\n', stderr);
+    }
+    va_end(ap);
+}
+
+static void kl_log_errno(KlServer *s, int level, const char *msg) {
+    kl_log(s, level, "%s: %s", msg, strerror(errno));
 }
 
 int kl_server_init(KlServer *s, const KlConfig *config) {
@@ -151,13 +170,13 @@ int kl_server_run(KlServer *s) {
     /* Create listen socket */
     s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (s->listen_fd < 0) {
-        perror("socket");
+        kl_log_errno(s, KL_LOG_ERROR, "socket");
         return -1;
     }
 
     int opt = 1;
     if (setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-        perror("setsockopt SO_REUSEADDR");
+        kl_log_errno(s, KL_LOG_WARN, "setsockopt SO_REUSEADDR");
 #ifdef SO_REUSEPORT
     (void)setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
@@ -167,29 +186,29 @@ int kl_server_run(KlServer *s) {
         .sin_port = htons((uint16_t)s->config.port),
     };
     if (inet_pton(AF_INET, s->config.bind_addr, &addr.sin_addr) != 1) {
-        fprintf(stderr, "keel: invalid bind address '%s'\n",
-                s->config.bind_addr);
+        kl_log(s, KL_LOG_ERROR, "invalid bind address '%s'",
+               s->config.bind_addr);
         close(s->listen_fd);
         s->listen_fd = -1;
         return -1;
     }
 
     if (bind(s->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind");
+        kl_log_errno(s, KL_LOG_ERROR, "bind");
         close(s->listen_fd);
         s->listen_fd = -1;
         return -1;
     }
 
     if (listen(s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
-        perror("listen");
+        kl_log_errno(s, KL_LOG_ERROR, "listen");
         close(s->listen_fd);
         s->listen_fd = -1;
         return -1;
     }
 
     if (set_nonblocking(s->listen_fd) < 0) {
-        perror("fcntl");
+        kl_log_errno(s, KL_LOG_ERROR, "fcntl");
         close(s->listen_fd);
         s->listen_fd = -1;
         return -1;
@@ -198,21 +217,21 @@ int kl_server_run(KlServer *s) {
     /* Init event loop */
     s->loop.alloc = alloc;
     if (kl_event_init(&s->loop) < 0) {
-        perror("event_init");
+        kl_log_errno(s, KL_LOG_ERROR, "event_init");
         close(s->listen_fd);
         return -1;
     }
 
     /* Register listen socket for read events */
     if (kl_event_add(&s->loop, s->listen_fd, KL_EVENT_READ, NULL) < 0) {
-        perror("event_add listen");
+        kl_log_errno(s, KL_LOG_ERROR, "event_add listen");
         close(s->listen_fd);
         kl_event_close(&s->loop);
         return -1;
     }
 
-    fprintf(stderr, "keel: listening on %s:%d\n",
-            s->config.bind_addr, s->config.port);
+    kl_log(s, KL_LOG_INFO, "listening on %s:%d",
+           s->config.bind_addr, s->config.port);
 
     /* Install signal handlers if requested */
     struct sigaction old_term, old_int;
@@ -236,7 +255,7 @@ int kl_server_run(KlServer *s) {
                               KL_POLL_TIMEOUT_MS);
         if (n < 0) {
             if (errno == EINTR) continue;
-            perror("event_wait");
+            kl_log_errno(s, KL_LOG_ERROR, "event_wait");
             break;
         }
 
@@ -250,7 +269,7 @@ int kl_server_run(KlServer *s) {
                     int client_fd = accept(s->listen_fd, NULL, NULL);
                     if (client_fd < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                        perror("accept");
+                        kl_log_errno(s, KL_LOG_ERROR, "accept");
                         break;
                     }
 

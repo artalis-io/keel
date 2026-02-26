@@ -8,6 +8,7 @@
 #include <keel/h2.h>
 #include <keel/connection.h>
 #include <keel/event.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
 
@@ -19,6 +20,18 @@ typedef KlParser *(*KlParserFactory)(KlAllocator *alloc);
 typedef void (*KlAccessLogFn)(const KlRequest *req, int status,
                                size_t body_bytes, double duration_ms,
                                void *user_data);
+
+/* Log levels (values match rxi/log.c for zero-cost bridging) */
+#define KL_LOG_TRACE 0
+#define KL_LOG_DEBUG 1
+#define KL_LOG_INFO  2
+#define KL_LOG_WARN  3
+#define KL_LOG_ERROR 4
+#define KL_LOG_FATAL 5
+
+/* Diagnostic log callback. NULL = fprintf(stderr) fallback. */
+typedef void (*KlLogFn)(int level, const char *fmt, va_list ap,
+                         void *user_data);
 
 #define KL_DEFAULT_MAX_CONNS    256
 #define KL_DEFAULT_READ_TIMEOUT 30000   /* ms */
@@ -33,6 +46,8 @@ typedef struct {
     KlParserFactory parser;     /* default: kl_parser_llhttp */
     KlAccessLogFn access_log;   /* default: NULL (disabled) */
     void *access_log_data;      /* passed as user_data to access_log */
+    KlLogFn log_fn;             /* default: NULL (fprintf stderr) */
+    void   *log_user_data;
     int install_signal_handlers; /* install SIGTERM/SIGINT handlers */
     int drain_timeout_ms;        /* graceful shutdown drain timeout (0 = immediate) */
     KlTlsConfig *tls;           /* TLS config — NULL = plaintext (default) */
