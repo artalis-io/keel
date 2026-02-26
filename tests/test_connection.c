@@ -67,4 +67,40 @@ UTEST(connection, pool_exhaustion) {
     kl_conn_pool_free(&pool);
 }
 
+UTEST(connection, active_count_tracking) {
+    KlAllocator a = kl_allocator_default();
+    KlConnPool pool;
+    kl_conn_pool_init(&pool, 4, &a);
+    ASSERT_EQ(pool.active_count, 0);
+
+    for (int i = 0; i < 4; i++) {
+        pool.conns[i].parser = kl_parser_llhttp(&a);
+    }
+
+    KlConn *c1 = kl_conn_acquire(&pool, 100);
+    ASSERT_EQ(pool.active_count, 1);
+
+    KlConn *c2 = kl_conn_acquire(&pool, 101);
+    ASSERT_EQ(pool.active_count, 2);
+
+    KlConn *c3 = kl_conn_acquire(&pool, 102);
+    ASSERT_EQ(pool.active_count, 3);
+
+    /* Release one — count decrements, free_list non-NULL */
+    c2->fd = -1;
+    kl_conn_release(&pool, c2);
+    ASSERT_EQ(pool.active_count, 2);
+    ASSERT_TRUE(pool.free_list != NULL);
+
+    /* Acquire again — count back to 3 */
+    KlConn *c4 = kl_conn_acquire(&pool, 103);
+    ASSERT_TRUE(c4 != NULL);
+    ASSERT_EQ(pool.active_count, 3);
+
+    c1->fd = -1;
+    c3->fd = -1;
+    c4->fd = -1;
+    kl_conn_pool_free(&pool);
+}
+
 UTEST_MAIN();

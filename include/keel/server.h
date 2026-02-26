@@ -63,6 +63,7 @@ typedef struct {
     KlConnPool pool;
     KlEventLoop loop;
     int listen_fd;
+    int listen_paused;          /* 1 = listen fd removed from event loop (pool full) */
     _Atomic int running;
     _Atomic int draining;
     uint64_t drain_deadline_ms;
