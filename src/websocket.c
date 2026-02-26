@@ -304,7 +304,7 @@ int kl_ws_upgrade(KlConn *c, const char *leftover, size_t leftover_len) {
     KlWsConfig *cfg = c->route->ws_config;
 
     /* Validate required headers */
-    size_t conn_len, upgrade_len, ver_len, key_len;
+    size_t conn_len = 0, upgrade_len = 0, ver_len = 0, key_len = 0;
     const char *conn_hdr = kl_request_header_len(&c->req, "Connection",
                                                   &conn_len);
     const char *upgrade_hdr = kl_request_header_len(&c->req, "Upgrade",
