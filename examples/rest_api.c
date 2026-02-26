@@ -9,10 +9,18 @@ void handle_get_users(KlRequest *req, KlResponse *res, void *ctx) {
 }
 
 void handle_get_user(KlRequest *req, KlResponse *res, void *ctx) {
-    (void)req; (void)ctx;
-    /* In a real app, you'd look up :id from route params */
-    const char *json = "{\"id\":1,\"name\":\"Alice\"}";
-    kl_response_json(res, 200, json, strlen(json));
+    (void)ctx;
+    size_t id_len;
+    const char *id = kl_request_param(req, "id", &id_len);
+    if (!id) {
+        kl_response_error(res, 400, "Missing id");
+        return;
+    }
+    static char json[256]; /* static: single-threaded event loop, outlives writev */
+    int n = snprintf(json, sizeof(json),
+                     "{\"id\":%.*s,\"name\":\"Alice\"}", (int)id_len, id);
+    if (n < 0) n = 0;
+    kl_response_json(res, 200, json, (size_t)n);
 }
 
 void handle_create_user(KlRequest *req, KlResponse *res, void *ctx) {

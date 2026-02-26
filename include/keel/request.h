@@ -10,6 +10,13 @@
 /* Forward declaration — full definition in body_reader.h */
 typedef struct KlBodyReader KlBodyReader;
 
+typedef struct {
+    const char *name;   size_t name_len;
+    const char *value;  size_t value_len;
+} KlParam;
+
+#define KL_MAX_PARAMS 16
+
 typedef struct KlRequest KlRequest;
 
 struct KlRequest {
@@ -33,6 +40,9 @@ struct KlRequest {
     int chunked;                 /* 1 if Transfer-Encoding: chunked */
     KlBodyReader *body_reader;   /* set by connection layer, NULL if no body */
     void *ctx;                   /* opaque per-request context, set by middleware */
+
+    KlParam params[KL_MAX_PARAMS];
+    int num_params;
 };
 
 /* Find header by name (case-insensitive). Returns value pointer or NULL.
@@ -61,6 +71,22 @@ static inline const char *kl_request_header_len(const KlRequest *req,
             strncasecmp(req->headers[i].name, name, nlen) == 0) {
             *out_len = req->headers[i].value_len;
             return req->headers[i].value;
+        }
+    }
+    return NULL;
+}
+
+/* Find route parameter by name. Returns value pointer and sets *out_len.
+ * Returns NULL if not found. */
+static inline const char *kl_request_param(const KlRequest *req,
+                                            const char *name,
+                                            size_t *out_len) {
+    size_t nlen = strlen(name);
+    for (int i = 0; i < req->num_params; i++) {
+        if (req->params[i].name_len == nlen &&
+            memcmp(req->params[i].name, name, nlen) == 0) {
+            if (out_len) *out_len = req->params[i].value_len;
+            return req->params[i].value;
         }
     }
     return NULL;

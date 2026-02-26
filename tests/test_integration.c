@@ -17,6 +17,23 @@ static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
 }
 
+static void handle_param(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    size_t id_len;
+    const char *id = kl_request_param(req, "id", &id_len);
+    static char body[256]; /* static: body must outlive handler for async writev */
+    int n;
+    if (id) {
+        n = snprintf(body, sizeof(body),
+                     "{\"id\":\"%.*s\",\"num_params\":%d}",
+                     (int)id_len, id, req->num_params);
+    } else {
+        n = snprintf(body, sizeof(body), "{\"id\":null,\"num_params\":0}");
+    }
+    if (n < 0) n = 0;
+    kl_response_json(res, 200, body, (size_t)n);
+}
+
 static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
@@ -102,6 +119,8 @@ static void start_server(void) {
                     kl_body_reader_buffer);
     kl_server_route(&test_server, "POST", "/upload", handle_upload,
                     NULL, kl_body_reader_multipart);
+    kl_server_route(&test_server, "GET", "/users/:id", handle_param,
+                    NULL, NULL);
     pthread_create(&server_tid, NULL, server_thread, NULL);
     usleep(100000);
 }
@@ -1001,6 +1020,29 @@ UTEST(integration, middleware_short_circuit_body) {
     kl_server_stop(&sc_body_server);
     pthread_join(tid, NULL);
     kl_server_free(&sc_body_server);
+}
+
+UTEST(integration, route_params) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req = "GET /users/42 HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "\"id\":\"42\"") != NULL);
+    ASSERT_TRUE(strstr(buf, "\"num_params\":1") != NULL);
+
+    stop_server();
 }
 
 UTEST_MAIN();
