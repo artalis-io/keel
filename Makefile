@@ -9,7 +9,8 @@ ifneq ($(findstring cosmocc,$(CC)),)
 endif
 
 ifdef COSMO
-  # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
+  # Cosmopolitan: force poll backend, use cosmoar, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
+  AR      = cosmoar
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
             -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp

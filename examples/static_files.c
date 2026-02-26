@@ -20,8 +20,12 @@ static const char *mime_type(const char *path, size_t len) {
 void handle_static(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
 
-    /* Reject path traversal (use memmem — req->path is not null-terminated) */
-    if (memmem(req->path, req->path_len, "..", 2) != NULL) {
+    /* Reject path traversal — portable check (req->path is not null-terminated) */
+    int has_dotdot = 0;
+    for (size_t i = 0; i + 1 < req->path_len; i++) {
+        if (req->path[i] == '.' && req->path[i + 1] == '.') { has_dotdot = 1; break; }
+    }
+    if (has_dotdot) {
         kl_response_error(res, 403, "Forbidden");
         return;
     }

@@ -155,8 +155,9 @@ jobs:
       - name: Install cosmocc
         run: |
           mkdir -p /opt/cosmo
-          wget -qO- https://cosmo.zip/pub/cosmocc/cosmocc.zip | \
-            busybox unzip -d /opt/cosmo -
+          wget -qO /tmp/cosmocc.zip https://cosmo.zip/pub/cosmocc/cosmocc.zip
+          unzip -q -d /opt/cosmo /tmp/cosmocc.zip
+          rm /tmp/cosmocc.zip
           echo "/opt/cosmo/bin" >> $GITHUB_PATH
 
       - name: Build
