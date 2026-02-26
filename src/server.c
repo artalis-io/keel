@@ -59,6 +59,18 @@ static void kl_log_errno(KlServer *s, int level, const char *msg) {
     kl_log(s, level, "%s: %s", msg, strerror(errno));
 }
 
+/*
+ * Release a connection and resume the listen socket if it was paused
+ * due to pool exhaustion.  Called from the event loop and timeout sweep.
+ */
+static void server_conn_release(KlServer *s, KlConn *c) {
+    kl_conn_release(&s->pool, c);
+    if (s->listen_paused && s->pool.free_list) {
+        kl_event_add(&s->loop, s->listen_fd, KL_EVENT_READ, NULL);
+        s->listen_paused = 0;
+    }
+}
+
 int kl_server_init(KlServer *s, const KlConfig *config) {
     if (!s || !config) return -1;
     memset(s, 0, sizeof(*s));
@@ -284,7 +296,11 @@ int kl_server_run(KlServer *s) {
                     KlConn *nc = kl_conn_acquire(&s->pool, client_fd);
                     if (!nc) {
                         close(client_fd);
-                        continue;
+                        /* Pool full — stop accepting until a slot frees up.
+                         * The kernel TCP backlog queues further connections. */
+                        kl_event_del(&s->loop, s->listen_fd);
+                        s->listen_paused = 1;
+                        break;
                     }
 
                     /* Set allocator on connection's response.
@@ -299,15 +315,16 @@ int kl_server_run(KlServer *s) {
 
                     if (kl_event_add(&s->loop, client_fd,
                                      KL_EVENT_READ, nc) < 0) {
-                        kl_conn_release(&s->pool, nc);
+                        server_conn_release(s, nc);
                         continue;
                     }
                 }
                 /* Re-arm listen socket (no-op for persistent backends;
                  * required for io_uring's one-shot POLL_ADD) */
 rearm_listen:
-                kl_event_mod(&s->loop, s->listen_fd,
-                             KL_EVENT_READ, NULL);
+                if (!s->listen_paused)
+                    kl_event_mod(&s->loop, s->listen_fd,
+                                 KL_EVENT_READ, NULL);
                 continue;
             }
 
@@ -357,19 +374,19 @@ transition:
                 if (kl_event_mod(&s->loop, c->fd,
                                  (KlEventMask)c->tls_want, c) < 0) {
                     kl_event_del(&s->loop, c->fd);
-                    kl_conn_release(&s->pool, c);
+                    server_conn_release(s, c);
                 }
             } else if (new_state == KL_CONN_SENDING) {
                 if (kl_event_mod(&s->loop, c->fd,
                                  KL_EVENT_WRITE, c) < 0) {
                     kl_event_del(&s->loop, c->fd);
-                    kl_conn_release(&s->pool, c);
+                    server_conn_release(s, c);
                 }
             } else if (new_state == KL_CONN_WEBSOCKET) {
                 if (kl_event_mod(&s->loop, c->fd,
                                  KL_EVENT_READ, c) < 0) {
                     kl_event_del(&s->loop, c->fd);
-                    kl_conn_release(&s->pool, c);
+                    server_conn_release(s, c);
                 }
             } else if (new_state == KL_CONN_HTTP2) {
                 KlEventMask mask = KL_EVENT_READ;
@@ -378,18 +395,18 @@ transition:
                     mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
                 if (kl_event_mod(&s->loop, c->fd, mask, c) < 0) {
                     kl_event_del(&s->loop, c->fd);
-                    kl_conn_release(&s->pool, c);
+                    server_conn_release(s, c);
                 }
             } else if (new_state == KL_CONN_READING ||
                        new_state == KL_CONN_READING_BODY) {
                 if (kl_event_mod(&s->loop, c->fd,
                                  KL_EVENT_READ, c) < 0) {
                     kl_event_del(&s->loop, c->fd);
-                    kl_conn_release(&s->pool, c);
+                    server_conn_release(s, c);
                 }
             } else if (new_state == KL_CONN_CLOSED) {
                 kl_event_del(&s->loop, c->fd);
-                kl_conn_release(&s->pool, c);
+                server_conn_release(s, c);
             }
         }
 
@@ -410,7 +427,7 @@ transition:
             if (tc->state == KL_CONN_WEBSOCKET) {
                 if (kl_ws_check_close_timeout(tc, now)) {
                     kl_event_del(&s->loop, tc->fd);
-                    kl_conn_release(&s->pool, tc);
+                    server_conn_release(s, tc);
                 }
                 continue;
             }
@@ -436,7 +453,7 @@ transition:
                     best_effort_conn_write(tc, kl_408_response,
                                            sizeof(kl_408_response) - 1);
                 kl_event_del(&s->loop, tc->fd);
-                kl_conn_release(&s->pool, tc);
+                server_conn_release(s, tc);
             }
         }
 

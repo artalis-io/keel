@@ -78,6 +78,7 @@ typedef struct KlConn {
 typedef struct {
     KlConn *conns;
     int capacity;
+    int active_count;       /* number of in-use slots */
     KlConn *free_list;
     KlAllocator *alloc;
 } KlConnPool;

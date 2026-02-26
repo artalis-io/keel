@@ -42,6 +42,7 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
     if (capacity <= 0) return -1;
     pool->alloc = alloc;
     pool->capacity = capacity;
+    pool->active_count = 0;
     if ((size_t)capacity > SIZE_MAX / sizeof(KlConn)) return -1;
     pool->conns = kl_malloc(alloc, sizeof(KlConn) * (size_t)capacity);
     if (!pool->conns) return -1;
@@ -70,6 +71,7 @@ KlConn *kl_conn_acquire(KlConnPool *pool, int fd) {
     KlConn *c = pool->free_list;
     pool->free_list = c->next_free;
     c->next_free = NULL;
+    pool->active_count++;
 
     c->fd = fd;
     c->state = KL_CONN_READING;
@@ -123,6 +125,7 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
     c->route = NULL;
     c->next_free = pool->free_list;
     pool->free_list = c;
+    pool->active_count--;
 }
 
 void kl_conn_pool_free(KlConnPool *pool) {
