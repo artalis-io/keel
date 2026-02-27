@@ -36,7 +36,7 @@ typedef void (*KlLogFn)(int level, const char *fmt, va_list ap,
 #define KL_DEFAULT_MAX_CONNS    256
 #define KL_DEFAULT_READ_TIMEOUT 30000   /* ms */
 
-typedef struct {
+typedef struct KlConfig {
     int port;
     const char *bind_addr;      /* default: "0.0.0.0" */
     int max_connections;        /* default: KL_DEFAULT_MAX_CONNS */
@@ -54,7 +54,7 @@ typedef struct {
     KlH2Config *h2;             /* HTTP/2 config — NULL = disabled (default) */
 } KlConfig;
 
-typedef struct {
+typedef struct KlServer {
     KlConfig config;
     KlAllocator alloc_storage;  /* owned copy if user didn't provide one */
     KlTlsConfig tls_storage;   /* owned copy of TLS config (if provided) */
