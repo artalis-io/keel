@@ -34,7 +34,7 @@ typedef struct {
     void *user_data;
 } KlMiddlewareEntry;
 
-typedef struct {
+typedef struct KlRouter {
     KlRoute *routes;
     int count;
     int capacity;
