@@ -51,13 +51,27 @@ CORE_SRC = src/allocator.c src/response.c src/router.c \
 LLHTTP_SRC = parsers/parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
+# Optional mbedTLS backend: make KEEL_TLS=mbedtls MBEDTLS_DIR=/path/to/mbedtls
+ifdef KEEL_TLS
+ifeq ($(KEEL_TLS),mbedtls)
+  MBEDTLS_DIR ?= ../mbedtls
+  CFLAGS += -I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library
+  ifdef MBEDTLS_CONFIG_FILE
+    CFLAGS += -I$(MBEDTLS_DIR) -DMBEDTLS_CONFIG_FILE='"$(MBEDTLS_CONFIG_FILE)"'
+  endif
+  TLS_MBEDTLS_SRC = src/tls_mbedtls.c
+  TLS_MBEDTLS_OBJ = src/tls_mbedtls.o
+endif
+endif
+TLS_MBEDTLS_OBJ ?=
+
 CORE_OBJ = $(CORE_SRC:.c=.o)
 LLHTTP_OBJ = $(LLHTTP_SRC:.c=.o)
 LIB = libkeel.a
 
 all: $(LIB)
 
-$(LIB): $(CORE_OBJ) $(LLHTTP_OBJ)
+$(LIB): $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ)
 	$(AR) rcs $@ $^
 
 %.o: %.c
@@ -114,8 +128,9 @@ test: $(TEST_BIN)
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
 clean:
-	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(LIB) $(TEST_BIN)
+	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
+	rm -f src/tls_mbedtls.o
 	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart
 
