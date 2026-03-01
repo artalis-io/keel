@@ -7,6 +7,10 @@ LDFLAGS =
 ifneq ($(findstring cosmo,$(CC)),)
   COSMO := 1
 endif
+# Fat cosmo compiler creates dual-arch objects (.aarch64/ counterparts)
+ifeq ($(CC),cosmocc)
+  COSMO_FAT := 1
+endif
 ifdef COSMO
   # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
   # Note: plain ar is used instead of cosmoar (cosmoar fails with recursive .aarch64/ lookups)
@@ -72,11 +76,13 @@ all: $(LIB)
 
 $(LIB): $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ)
 ifdef COSMO
-	@# cosmocc creates dual-arch objects; archive each set with plain ar
-	@# (cosmoar fails with recursive .aarch64/ lookups)
+	@# Cosmo toolchain: use plain ar (cosmoar fails with recursive .aarch64/ lookups)
 	ar rcs $@ $^
+ifdef COSMO_FAT
+	@# Fat cosmocc creates dual-arch objects; archive the .aarch64/ set too
 	@mkdir -p .aarch64
 	@ar rcs .aarch64/$@ $(foreach o,$^,$(dir $(o)).aarch64/$(notdir $(o)))
+endif
 else
 	$(AR) rcs $@ $^
 endif
