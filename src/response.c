@@ -16,7 +16,7 @@
 
 #define KL_HDR_INIT_CAP 512
 #define KL_FILE_BUF_SIZE 8192   /* stack buffer for pread+write fallback */
-#define KL_WRITE_SPIN_MAX 65536 /* max retries on EAGAIN/WANT_WRITE before giving up */
+#define KL_WRITE_SPIN_MAX 256  /* max retries on EAGAIN/WANT_WRITE before giving up */
 
 /* ── Pre-built status lines — no snprintf in the hot path ─────────── */
 
@@ -58,7 +58,7 @@ static KlStatusLine status_line_for(int code) {
 /* ── Fast integer formatting — replaces snprintf for Content-Length ── */
 
 static int format_uint(char *p, size_t n) {
-    char tmp[20];
+    char tmp[21];  /* 20 digits max for 64-bit + safety margin */
     int ndigits = 0;
     if (n == 0) {
         *p = '0';
@@ -235,9 +235,26 @@ static ssize_t kl_sendfile_impl(int out_fd, int in_fd, off_t *offset, size_t cou
     size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
     ssize_t nr = pread(in_fd, buf, to_read, *offset);
     if (nr <= 0) return nr;
-    ssize_t nw = write(out_fd, buf, (size_t)nr);
-    if (nw > 0) *offset += nw;
-    return nw;
+    /* Retry partial writes on the fallback path */
+    const char *p = buf;
+    size_t remaining = (size_t)nr;
+    while (remaining > 0) {
+        ssize_t nw = write(out_fd, p, remaining);
+        if (nw < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* Wrote some but not all — update offset for progress */
+                ssize_t wrote = (ssize_t)((size_t)nr - remaining);
+                *offset += wrote;
+                return wrote > 0 ? wrote : -1;
+            }
+            return -1;
+        }
+        p += nw;
+        remaining -= (size_t)nw;
+    }
+    *offset += nr;
+    return nr;
 #endif
 }
 
