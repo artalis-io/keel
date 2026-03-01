@@ -3,14 +3,13 @@ AR      = ar
 UNAME_S := $(shell uname -s)
 LDFLAGS =
 
-# Detect Cosmopolitan toolchain
-ifneq ($(findstring cosmocc,$(CC)),)
+# Detect Cosmopolitan toolchain (cosmocc, x86_64-unknown-cosmo-cc, etc.)
+ifneq ($(findstring cosmo,$(CC)),)
   COSMO := 1
 endif
-
 ifdef COSMO
-  # Cosmopolitan: force poll backend, use cosmoar, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
-  AR      = cosmoar
+  # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
+  # Note: plain ar is used instead of cosmoar (cosmoar fails with recursive .aarch64/ lookups)
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
             -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
@@ -72,7 +71,15 @@ LIB = libkeel.a
 all: $(LIB)
 
 $(LIB): $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ)
+ifdef COSMO
+	@# cosmocc creates dual-arch objects; archive each set with plain ar
+	@# (cosmoar fails with recursive .aarch64/ lookups)
+	ar rcs $@ $^
+	@mkdir -p .aarch64
+	@ar rcs .aarch64/$@ $(foreach o,$^,$(dir $(o)).aarch64/$(notdir $(o)))
+else
 	$(AR) rcs $@ $^
+endif
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -131,6 +138,7 @@ clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f src/tls_mbedtls.o
+	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart
 
