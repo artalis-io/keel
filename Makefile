@@ -7,12 +7,9 @@ LDFLAGS =
 ifneq ($(findstring cosmo,$(CC)),)
   COSMO := 1
 endif
-ifneq ($(findstring cosmocc,$(CC)),)
-  AR      = cosmoar
-endif
-
 ifdef COSMO
   # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
+  # Note: plain ar is used instead of cosmoar (cosmoar fails with recursive .aarch64/ lookups)
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
             -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
@@ -74,11 +71,14 @@ LIB = libkeel.a
 all: $(LIB)
 
 $(LIB): $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ)
-	$(AR) rcs $@ $^
 ifdef COSMO
-	@# cosmocc creates .aarch64/ counterpart objects; archive them for fat linking
+	@# cosmocc creates dual-arch objects; archive each set with plain ar
+	@# (cosmoar fails with recursive .aarch64/ lookups)
+	ar rcs $@ $^
 	@mkdir -p .aarch64
-	@$(AR) rcs .aarch64/$@ $(foreach o,$^,$(dir $(o)).aarch64/$(notdir $(o)))
+	@ar rcs .aarch64/$@ $(foreach o,$^,$(dir $(o)).aarch64/$(notdir $(o)))
+else
+	$(AR) rcs $@ $^
 endif
 
 %.o: %.c
