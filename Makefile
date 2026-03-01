@@ -3,14 +3,16 @@ AR      = ar
 UNAME_S := $(shell uname -s)
 LDFLAGS =
 
-# Detect Cosmopolitan toolchain
-ifneq ($(findstring cosmocc,$(CC)),)
+# Detect Cosmopolitan toolchain (cosmocc, x86_64-unknown-cosmo-cc, etc.)
+ifneq ($(findstring cosmo,$(CC)),)
   COSMO := 1
+endif
+ifneq ($(findstring cosmocc,$(CC)),)
+  AR      = cosmoar
 endif
 
 ifdef COSMO
-  # Cosmopolitan: force poll backend, use cosmoar, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
-  AR      = cosmoar
+  # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
             -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
