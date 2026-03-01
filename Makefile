@@ -75,6 +75,11 @@ all: $(LIB)
 
 $(LIB): $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ)
 	$(AR) rcs $@ $^
+ifdef COSMO
+	@# cosmocc creates .aarch64/ counterpart objects; archive them for fat linking
+	@mkdir -p .aarch64
+	@$(AR) rcs .aarch64/$@ $(foreach o,$^,$(dir $(o)).aarch64/$(notdir $(o)))
+endif
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -133,6 +138,7 @@ clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f src/tls_mbedtls.o
+	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart
 
