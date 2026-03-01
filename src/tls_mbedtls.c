@@ -25,17 +25,14 @@
 #include <unistd.h>
 #include <sys/types.h>
 
-/* Secure zeroing — scrub key material before free */
+/* Secure zeroing — scrub key material before free.
+ * Uses volatile pointer to prevent compiler from optimizing away the store.
+ * Portable across all platforms without requiring platform-specific APIs
+ * (explicit_bzero requires _DEFAULT_SOURCE on Linux, is unavailable in
+ *  strict C11 mode on macOS). */
 static void kl_secure_zero(void *ptr, size_t len) {
-#if defined(__STDC_LIB_EXT1__) || defined(__STDC_WANT_LIB_EXT1__)
-    memset_s(ptr, len, 0, len);
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
-      defined(__linux__)
-    explicit_bzero(ptr, len);
-#else
     volatile unsigned char *p = (volatile unsigned char *)ptr;
     while (len--) *p++ = 0;
-#endif
 }
 
 /* ── Internal context structure ──────────────────────────────────── */
