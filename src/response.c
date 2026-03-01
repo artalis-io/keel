@@ -28,17 +28,29 @@ static KlStatusLine status_line_for(int code) {
     switch (code) {
         case 200: return (KlStatusLine)SL("HTTP/1.1 200 OK\r\n");
         case 201: return (KlStatusLine)SL("HTTP/1.1 201 Created\r\n");
+        case 202: return (KlStatusLine)SL("HTTP/1.1 202 Accepted\r\n");
         case 204: return (KlStatusLine)SL("HTTP/1.1 204 No Content\r\n");
+        case 206: return (KlStatusLine)SL("HTTP/1.1 206 Partial Content\r\n");
         case 301: return (KlStatusLine)SL("HTTP/1.1 301 Moved Permanently\r\n");
         case 302: return (KlStatusLine)SL("HTTP/1.1 302 Found\r\n");
         case 304: return (KlStatusLine)SL("HTTP/1.1 304 Not Modified\r\n");
+        case 307: return (KlStatusLine)SL("HTTP/1.1 307 Temporary Redirect\r\n");
+        case 308: return (KlStatusLine)SL("HTTP/1.1 308 Permanent Redirect\r\n");
         case 400: return (KlStatusLine)SL("HTTP/1.1 400 Bad Request\r\n");
         case 401: return (KlStatusLine)SL("HTTP/1.1 401 Unauthorized\r\n");
         case 403: return (KlStatusLine)SL("HTTP/1.1 403 Forbidden\r\n");
         case 404: return (KlStatusLine)SL("HTTP/1.1 404 Not Found\r\n");
         case 405: return (KlStatusLine)SL("HTTP/1.1 405 Method Not Allowed\r\n");
+        case 409: return (KlStatusLine)SL("HTTP/1.1 409 Conflict\r\n");
+        case 410: return (KlStatusLine)SL("HTTP/1.1 410 Gone\r\n");
         case 413: return (KlStatusLine)SL("HTTP/1.1 413 Payload Too Large\r\n");
+        case 415: return (KlStatusLine)SL("HTTP/1.1 415 Unsupported Media Type\r\n");
+        case 422: return (KlStatusLine)SL("HTTP/1.1 422 Unprocessable Entity\r\n");
+        case 429: return (KlStatusLine)SL("HTTP/1.1 429 Too Many Requests\r\n");
         case 500: return (KlStatusLine)SL("HTTP/1.1 500 Internal Server Error\r\n");
+        case 502: return (KlStatusLine)SL("HTTP/1.1 502 Bad Gateway\r\n");
+        case 503: return (KlStatusLine)SL("HTTP/1.1 503 Service Unavailable\r\n");
+        case 504: return (KlStatusLine)SL("HTTP/1.1 504 Gateway Timeout\r\n");
         default:  return (KlStatusLine)SL("HTTP/1.1 500 Internal Server Error\r\n");
     }
 }
