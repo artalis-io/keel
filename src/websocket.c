@@ -216,15 +216,9 @@ static int ws_send_frame(KlWsConn *ws, int opcode, const char *data,
         hdr_len = 10;
     }
 
-    /* Write header */
-    ssize_t wr = conn_write(ws->conn, hdr, hdr_len);
-    if (wr < 0 || (size_t)wr != hdr_len) return -1;
-
-    /* Write payload */
-    if (len > 0) {
-        wr = conn_write(ws->conn, data, len);
-        if (wr < 0 || (size_t)wr != len) return -1;
-    }
+    /* Write header + payload with retry for short writes (TLS WANT_WRITE) */
+    if (conn_write_all(ws->conn, hdr, hdr_len) < 0) return -1;
+    if (len > 0 && conn_write_all(ws->conn, data, len) < 0) return -1;
 
     return 0;
 }
@@ -373,8 +367,7 @@ int kl_ws_upgrade(KlConn *c, const char *leftover, size_t leftover_len) {
         return KL_CONN_CLOSED;
     }
 
-    ssize_t wr = conn_write(c, resp, (size_t)resp_len);
-    if (wr < 0 || (size_t)wr != (size_t)resp_len) {
+    if (conn_write_all(c, resp, (size_t)resp_len) < 0) {
         return KL_CONN_CLOSED;
     }
 

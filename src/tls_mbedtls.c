@@ -25,6 +25,19 @@
 #include <unistd.h>
 #include <sys/types.h>
 
+/* Secure zeroing — scrub key material before free */
+static void kl_secure_zero(void *ptr, size_t len) {
+#if defined(__STDC_LIB_EXT1__) || defined(__STDC_WANT_LIB_EXT1__)
+    memset_s(ptr, len, 0, len);
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+      defined(__linux__)
+    explicit_bzero(ptr, len);
+#else
+    volatile unsigned char *p = (volatile unsigned char *)ptr;
+    while (len--) *p++ = 0;
+#endif
+}
+
 /* ── Internal context structure ──────────────────────────────────── */
 
 typedef struct {
@@ -358,6 +371,7 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
 
     ret = mbedtls_pk_parse_key(&ctx->pkey, key_buf, key_len,
                                 NULL, 0, mbedtls_ctr_drbg_random, &ctx->drbg);
+    kl_secure_zero(key_buf, key_len);
     free(key_buf);
     if (ret != 0)
         goto fail;

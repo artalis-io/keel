@@ -505,9 +505,8 @@ static const char h2c_101_response[] =
 
 int kl_h2_upgrade_from_h1(KlConn *c, KlRouter *router, KlH2Config *cfg,
                            const char *leftover, size_t leftover_len) {
-    /* Send 101 Switching Protocols */
-    ssize_t wr = conn_write(c, h2c_101_response, sizeof(h2c_101_response) - 1);
-    if (wr < 0 || (size_t)wr != sizeof(h2c_101_response) - 1)
+    /* Send 101 Switching Protocols — retry short writes for TLS */
+    if (conn_write_all(c, h2c_101_response, sizeof(h2c_101_response) - 1) < 0)
         return KL_CONN_CLOSED;
 
     return kl_h2_upgrade(c, router, cfg, leftover, leftover_len);

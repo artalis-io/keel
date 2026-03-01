@@ -52,20 +52,25 @@ static int grow_arrays(KlPollState *st) {
         return -1;
     new_cap *= 2;
 
-    size_t old_fds = (size_t)st->capacity * sizeof(struct pollfd);
-    size_t new_fds = (size_t)new_cap * sizeof(struct pollfd);
-    struct pollfd *nf = kl_realloc(st->alloc, st->fds, old_fds, new_fds);
+    size_t old_fds_sz = (size_t)st->capacity * sizeof(struct pollfd);
+    size_t new_fds_sz = (size_t)new_cap * sizeof(struct pollfd);
+    struct pollfd *nf = kl_realloc(st->alloc, st->fds, old_fds_sz, new_fds_sz);
     if (!nf)
         return -1;
-    st->fds = nf;
 
-    size_t old_ud = (size_t)st->capacity * sizeof(void *);
-    size_t new_ud = (size_t)new_cap * sizeof(void *);
-    void **nu = kl_realloc(st->alloc, st->udata, old_ud, new_ud);
-    if (!nu)
+    size_t old_ud_sz = (size_t)st->capacity * sizeof(void *);
+    size_t new_ud_sz = (size_t)new_cap * sizeof(void *);
+    void **nu = kl_realloc(st->alloc, st->udata, old_ud_sz, new_ud_sz);
+    if (!nu) {
+        /* fds realloc succeeded but udata failed — shrink fds back to
+         * keep state consistent with st->capacity for kl_free sizing. */
+        struct pollfd *rev = kl_realloc(st->alloc, nf, new_fds_sz, old_fds_sz);
+        st->fds = rev ? rev : nf;
         return -1;
-    st->udata = nu;
+    }
 
+    st->fds = nf;
+    st->udata = nu;
     st->capacity = new_cap;
     return 0;
 }

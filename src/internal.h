@@ -22,6 +22,25 @@ static inline ssize_t conn_write(KlConn *c, const void *buf, size_t len) {
     return r;
 }
 
+/* Write all bytes, retrying on short writes (TLS WANT_WRITE, etc.) */
+static inline int conn_write_all(KlConn *c, const void *buf, size_t len) {
+    const char *p = (const char *)buf;
+    size_t remaining = len;
+    int spins = 0;
+    while (remaining > 0) {
+        ssize_t nw = conn_write(c, p, remaining);
+        if (nw < 0) return -1;
+        if (nw == 0) {
+            if (++spins > 256) return -1;
+            continue;
+        }
+        spins = 0;
+        p += nw;
+        remaining -= (size_t)nw;
+    }
+    return 0;
+}
+
 /* Suppress warn_unused_result on best-effort error writes */
 static inline void best_effort_conn_write(KlConn *c, const void *buf, size_t len) {
     ssize_t r = conn_write(c, buf, len);

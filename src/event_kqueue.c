@@ -32,28 +32,29 @@ int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
      * We add the desired filters and disable the unwanted ones.
      *
      * Both READ and WRITE are always registered (via initial add + first mod),
-     * so subsequent mods just enable/disable.
+     * so subsequent mods just enable/disable. The mask may request READ,
+     * WRITE, or both (e.g., HTTP/2 connections need simultaneous read+write).
      */
     struct kevent changes[2];
 
-    if (mask & KL_EVENT_READ) {
-        EV_SET(&changes[0], fd, EVFILT_READ, EV_ADD | EV_ENABLE | EV_CLEAR, 0, 0, udata);
-        EV_SET(&changes[1], fd, EVFILT_WRITE, EV_ADD | EV_DISABLE, 0, 0, udata);
-    } else {
-        EV_SET(&changes[0], fd, EVFILT_READ, EV_ADD | EV_DISABLE, 0, 0, udata);
-        EV_SET(&changes[1], fd, EVFILT_WRITE, EV_ADD | EV_ENABLE | EV_CLEAR, 0, 0, udata);
-    }
+    unsigned short read_flags = (mask & KL_EVENT_READ)
+        ? (EV_ADD | EV_ENABLE | EV_CLEAR)
+        : (EV_ADD | EV_DISABLE);
+    unsigned short write_flags = (mask & KL_EVENT_WRITE)
+        ? (EV_ADD | EV_ENABLE | EV_CLEAR)
+        : (EV_ADD | EV_DISABLE);
 
-    kevent(loop->fd, changes, 2, NULL, 0, NULL);
-    return 0;
+    EV_SET(&changes[0], fd, EVFILT_READ, read_flags, 0, 0, udata);
+    EV_SET(&changes[1], fd, EVFILT_WRITE, write_flags, 0, 0, udata);
+
+    return kevent(loop->fd, changes, 2, NULL, 0, NULL) < 0 ? -1 : 0;
 }
 
 int kl_event_del(KlEventLoop *loop, int fd) {
     struct kevent changes[2];
     EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
     EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-    kevent(loop->fd, changes, 2, NULL, 0, NULL);
-    return 0;
+    return kevent(loop->fd, changes, 2, NULL, 0, NULL) < 0 ? -1 : 0;
 }
 
 int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
