@@ -75,14 +75,15 @@ LIB = libkeel.a
 all: $(LIB)
 
 $(LIB): $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ)
-ifdef COSMO
-	@# Cosmo toolchain: use plain ar (cosmoar fails with recursive .aarch64/ lookups)
-	ar rcs $@ $^
 ifdef COSMO_FAT
-	@# Fat cosmocc creates dual-arch objects; archive the .aarch64/ set too
+	@# Fat cosmocc: use single-arch cosmo ar (not cosmoar which fails with .aarch64/ recursion,
+	@# and not macOS ar which creates BSD archives that GNU ld.bfd can't resolve symbols from)
+	x86_64-unknown-cosmo-ar rcs $@ $^
 	@mkdir -p .aarch64
-	@ar rcs .aarch64/$@ $(foreach o,$^,$(dir $(o)).aarch64/$(notdir $(o)))
-endif
+	@aarch64-unknown-cosmo-ar rcs .aarch64/$@ $(foreach o,$^,$(dir $(o)).aarch64/$(notdir $(o)))
+else ifdef COSMO
+	@# Single-arch cosmo: use the AR passed by the caller (e.g. x86_64-unknown-cosmo-ar)
+	$(AR) rcs $@ $^
 else
 	$(AR) rcs $@ $^
 endif
