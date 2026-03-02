@@ -136,6 +136,6 @@ int  kl_ws_frame_parse(KlWsFrameParser *fp, const uint8_t *data,
  * Used by kl_ws_upgrade() for leftover bytes and by kl_ws_on_readable().
  * @return New connection state.
  */
-int kl_ws_on_readable_data(KlConn *c, const uint8_t *data, size_t len);
+int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len);
 
 #endif

@@ -1045,4 +1045,168 @@ UTEST(integration, route_params) {
     stop_server();
 }
 
+/* ── Post-body middleware integration tests ──────────────────────────── */
+
+static int post_mw_check_body(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    KlBufReader *br = (KlBufReader *)req->body_reader;
+    if (br && br->len >= 6 && memcmp(br->data, "secret", 6) == 0) {
+        return 0;  /* continue to handler */
+    }
+    kl_response_error(res, 403, "Forbidden");
+    return 1;
+}
+
+static void handle_post_mw_echo(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    KlBufReader *br = (KlBufReader *)req->body_reader;
+    kl_response_status(res, 200);
+    kl_response_header(res, "Content-Type", "text/plain");
+    if (br && br->len > 0)
+        kl_response_body(res, br->data, br->len);
+    else
+        kl_response_body(res, "no body", 7);
+}
+
+static KlServer post_mw_server;
+
+static void *post_mw_server_thread(void *arg) {
+    (void)arg;
+    kl_server_run(&post_mw_server);
+    return NULL;
+}
+
+#define POST_MW_TEST_PORT 18086
+
+UTEST(integration, post_middleware_body_access) {
+    KlConfig cfg = {.port = POST_MW_TEST_PORT};
+    kl_server_init(&post_mw_server, &cfg);
+    kl_server_use_post(&post_mw_server, "POST", "/*", post_mw_check_body, NULL);
+    kl_server_route(&post_mw_server, "POST", "/submit", handle_post_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_body_reader_buffer);
+    kl_server_route(&post_mw_server, "GET", "/hello", handle_hello, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, post_mw_server_thread, NULL);
+    usleep(100000);
+
+    /* POST with valid body — should pass post-middleware */
+    int fd = connect_to(POST_MW_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+    const char *req1 = "POST /submit HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "Content-Length: 11\r\n"
+                       "Connection: close\r\n"
+                       "\r\n"
+                       "secret data";
+    (void)write(fd, req1, strlen(req1));
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "secret data") != NULL);
+
+    /* POST with invalid body — should be rejected by post-middleware */
+    fd = connect_to(POST_MW_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+    const char *req2 = "POST /submit HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "Content-Length: 5\r\n"
+                       "Connection: close\r\n"
+                       "\r\n"
+                       "wrong";
+    (void)write(fd, req2, strlen(req2));
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+    ASSERT_TRUE(strstr(buf, "403") != NULL);
+
+    /* GET skips POST-only post-middleware — should succeed */
+    fd = connect_to(POST_MW_TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+    const char *req3 = "GET /hello HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "Connection: close\r\n"
+                       "\r\n";
+    (void)write(fd, req3, strlen(req3));
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    kl_server_stop(&post_mw_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&post_mw_server);
+}
+
+static KlServer post_mw_ka_server;
+
+static void *post_mw_ka_server_thread(void *arg) {
+    (void)arg;
+    kl_server_run(&post_mw_ka_server);
+    return NULL;
+}
+
+#define POST_MW_KA_PORT 18087
+
+UTEST(integration, post_middleware_keepalive_preserved) {
+    KlConfig cfg = {.port = POST_MW_KA_PORT};
+    kl_server_init(&post_mw_ka_server, &cfg);
+    kl_server_use_post(&post_mw_ka_server, "POST", "/*", post_mw_check_body, NULL);
+    kl_server_route(&post_mw_ka_server, "POST", "/submit", handle_post_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_body_reader_buffer);
+    kl_server_route(&post_mw_ka_server, "GET", "/hello", handle_hello, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, post_mw_ka_server_thread, NULL);
+    usleep(100000);
+
+    /* Post-middleware rejection should preserve keep-alive */
+    int fd = connect_to(POST_MW_KA_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* First: POST rejected by post-middleware (body consumed → keep-alive OK) */
+    const char *req1 = "POST /submit HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "Content-Length: 5\r\n"
+                       "\r\n"
+                       "wrong";
+    (void)write(fd, req1, strlen(req1));
+
+    /* Read first response */
+    char buf[8192];
+    ssize_t total = 0;
+    ssize_t n;
+    while ((n = read(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
+        total += n;
+        buf[total] = '\0';
+        char *body_start = strstr(buf, "\r\n\r\n");
+        if (body_start) {
+            body_start += 4;
+            char *cl = strstr(buf, "Content-Length:");
+            if (cl) {
+                size_t cl_val = (size_t)strtol(cl + 15, NULL, 10);
+                size_t body_received = (size_t)(total - (body_start - buf));
+                if (body_received >= cl_val) break;
+            }
+        }
+    }
+    ASSERT_TRUE(strstr(buf, "403") != NULL);
+
+    /* Second: GET on same connection — should work if keep-alive preserved */
+    const char *req2 = "GET /hello HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "Connection: close\r\n"
+                       "\r\n";
+    (void)write(fd, req2, strlen(req2));
+
+    char buf2[4096];
+    read_response(fd, buf2, sizeof(buf2));
+    close(fd);
+    ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf2, "{\"msg\":\"hello\"}") != NULL);
+
+    kl_server_stop(&post_mw_ka_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&post_mw_ka_server);
+}
+
 UTEST_MAIN();

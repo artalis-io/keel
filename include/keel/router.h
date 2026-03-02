@@ -21,6 +21,8 @@ typedef struct KlWsConfig KlWsConfig;
 typedef struct {
     const char *method;
     const char *pattern;
+    size_t method_len;
+    size_t pattern_len;
     KlHandler handler;
     void *user_data;
     KlBodyReaderFactory body_reader;   /* NULL = discard body */
@@ -30,6 +32,8 @@ typedef struct {
 typedef struct {
     const char *method;
     const char *pattern;
+    size_t method_len;
+    size_t pattern_len;
     KlMiddleware fn;
     void *user_data;
 } KlMiddlewareEntry;
@@ -42,6 +46,10 @@ typedef struct KlRouter {
     KlMiddlewareEntry *middleware;
     int mw_count;
     int mw_capacity;
+
+    KlMiddlewareEntry *post_middleware;
+    int post_mw_count;
+    int post_mw_capacity;
 
     KlAllocator *alloc;
 } KlRouter;
@@ -80,7 +88,7 @@ int  kl_router_match(KlRouter *r, const char *method, size_t method_len,
                      KlRoute **matched, KlParam *params, int *num_params);
 
 /**
- * @brief Register middleware that runs before matched handlers.
+ * @brief Register pre-body middleware that runs before body reading.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
  * @param pattern URL pattern — exact match or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
@@ -91,10 +99,31 @@ int  kl_router_use(KlRouter *r, const char *method, const char *pattern,
                    KlMiddleware fn, void *user_data);
 
 /**
- * @brief Run all matching middleware in registration order.
+ * @brief Register post-body middleware that runs after body reading.
+ *
+ * Post-body middleware can access req->body_reader data. Short-circuiting
+ * preserves keep_alive since the body has already been consumed.
+ *
+ * @param method  HTTP method filter ("GET", "POST", "*" for any).
+ * @param pattern URL pattern — exact match or prefix with trailing slash-star.
+ * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
+ * @param user_data Passed to fn on each invocation.
+ * @return 0 on success, -1 on allocation failure.
+ */
+int  kl_router_use_post(KlRouter *r, const char *method, const char *pattern,
+                        KlMiddleware fn, void *user_data);
+
+/**
+ * @brief Run all matching pre-body middleware in registration order.
  * @return 0 if all passed, non-zero if a middleware short-circuited.
  */
 int  kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res);
+
+/**
+ * @brief Run all matching post-body middleware in registration order.
+ * @return 0 if all passed, non-zero if a middleware short-circuited.
+ */
+int  kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlResponse *res);
 
 /** @brief Free router resources. */
 void kl_router_free(KlRouter *r);

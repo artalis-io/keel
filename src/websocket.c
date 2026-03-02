@@ -392,7 +392,7 @@ int kl_ws_upgrade(KlConn *c, const char *leftover, size_t leftover_len) {
     /* Feed any leftover bytes after HTTP headers into the frame parser */
     if (leftover_len > 0) {
         /* Process leftover data as WebSocket frames */
-        return kl_ws_on_readable_data(c, (const uint8_t *)leftover,
+        return kl_ws_on_readable_data(c, (uint8_t *)leftover,
                                        leftover_len);
     }
 
@@ -496,7 +496,7 @@ static int ws_handle_ping(KlWsConn *ws, const uint8_t *payload,
  * Called with raw bytes from the socket (after TLS decryption).
  * Returns new connection state.
  */
-int kl_ws_on_readable_data(KlConn *c, const uint8_t *data, size_t len) {
+int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
     KlWsConn *ws = c->ws;
     size_t pos = 0;
 
@@ -520,7 +520,7 @@ int kl_ws_on_readable_data(KlConn *c, const uint8_t *data, size_t len) {
             /* Payload bytes are at end of consumed range */
             size_t payload_offset = frame_data_start + consumed -
                                     payload_consumed;
-            uint8_t *payload_data = (uint8_t *)(data + payload_offset);
+            uint8_t *payload_data = data + payload_offset;
 
             /* Unmask in-place */
             if (ws->frame.masked) {

@@ -108,7 +108,9 @@ static int h2_extract_response_headers(char *hdr_buf, size_t hdr_len,
             eol++;
 
         /* Null-terminate name and value in place — hdr_buf is owned by
-         * the response and will be freed after submission. */
+         * the response and will be freed after submission.
+         * Single-shot assumption: each response is submitted at most once,
+         * guarded by the response_submitted flag in h2_submit_response(). */
         hdr_buf[colon - hdr_buf] = '\0';
         hdr_buf[eol - hdr_buf] = '\0';
 
@@ -277,15 +279,20 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         req->headers[hdr_count].value_len = hdr_value_lens[i];
         p += hdr_value_lens[i] + 1;
 
-        /* Parse content-length */
+        /* Parse content-length — reject if any non-digit or overflow */
         if (hdr_name_lens[i] == 14 &&
             strncasecmp(req->headers[hdr_count].name, "content-length", 14) == 0) {
             content_length = 0;
+            int cl_valid = (hdr_value_lens[i] > 0) ? 1 : 0;
             for (size_t j = 0; j < hdr_value_lens[i]; j++) {
                 char ch = req->headers[hdr_count].value[j];
-                if (ch < '0' || ch > '9') break;
-                if (content_length > SIZE_MAX / 10) break;
+                if (ch < '0' || ch > '9') { cl_valid = 0; break; }
+                if (content_length > SIZE_MAX / 10) { cl_valid = 0; break; }
                 content_length = content_length * 10 + (size_t)(ch - '0');
+            }
+            if (!cl_valid) {
+                h2_stream_destroy(h2c, stream);
+                return -1;
             }
         }
 
@@ -318,11 +325,11 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     /* Run middleware */
     if (kl_router_run_middleware(h2c->router, req, &stream->res) != 0) {
         /* Middleware short-circuited — submit response immediately */
-        h2_submit_response(h2c, stream);
+        int rc = h2_submit_response(h2c, stream);
         if (h2c->session->want_write(h2c->session))
             h2c->session->flush(h2c->session);
         h2_stream_destroy(h2c, stream);
-        return 0;
+        return rc < 0 ? -1 : 0;
     }
 
     /* Create body reader if needed */
@@ -333,11 +340,11 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         if (!br) {
             /* 415 Unsupported Media Type */
             kl_response_error(&stream->res, 415, "Unsupported Media Type");
-            h2_submit_response(h2c, stream);
+            int rc = h2_submit_response(h2c, stream);
             if (h2c->session->want_write(h2c->session))
                 h2c->session->flush(h2c->session);
             h2_stream_destroy(h2c, stream);
-            return 0;
+            return rc < 0 ? -1 : 0;
         }
         stream->body_reader = br;
         req->body_reader = br;
@@ -345,7 +352,8 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
 
     stream->headers_done = 1;
 
-    /* If no body expected, invoke handler immediately */
+    /* If no body expected, mark body as done — handler runs on stream end.
+     * Session MUST call on_stream_end for HEADERS+END_STREAM frames. */
     if (!has_body) {
         stream->body_done = 1;
     }
@@ -378,6 +386,16 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
     if (stream->body_reader)
         stream->body_reader->on_complete(stream->body_reader);
 
+    /* Run post-body middleware */
+    if (kl_router_run_post_middleware(h2c->router, &stream->req,
+                                      &stream->res) != 0) {
+        int rc = h2_submit_response(h2c, stream);
+        if (h2c->session->want_write(h2c->session))
+            h2c->session->flush(h2c->session);
+        h2_stream_destroy(h2c, stream);
+        return rc < 0 ? -1 : 0;
+    }
+
     /* Invoke handler */
     if (stream->route_result == 200 && stream->route && stream->route->handler) {
         stream->route->handler(&stream->req, &stream->res,
@@ -389,12 +407,12 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
     }
 
     /* Submit response */
-    h2_submit_response(h2c, stream);
+    int rc = h2_submit_response(h2c, stream);
     if (h2c->session->want_write(h2c->session))
         h2c->session->flush(h2c->session);
 
     h2_stream_destroy(h2c, stream);
-    return 0;
+    return rc < 0 ? -1 : 0;
 }
 
 static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,

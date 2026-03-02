@@ -165,6 +165,11 @@ int kl_server_use(KlServer *s, const char *method, const char *pattern,
     return kl_router_use(&s->router, method, pattern, fn, user_data);
 }
 
+int kl_server_use_post(KlServer *s, const char *method, const char *pattern,
+                       KlMiddleware fn, void *user_data) {
+    return kl_router_use_post(&s->router, method, pattern, fn, user_data);
+}
+
 int kl_server_ws(KlServer *s, const char *pattern, KlWsConfig *config) {
     /* Register as a GET route with no handler — ws_config triggers upgrade */
     if (kl_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)

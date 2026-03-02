@@ -149,7 +149,7 @@ clean:
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart
 
 # Debug build with sanitizers: make debug
-DEBUG_CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Werror -g -O0 \
+DEBUG_CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -g -O0 \
                 -fsanitize=address,undefined -fno-omit-frame-pointer \
                 -Iinclude -Ivendor/llhttp
 ifeq ($(UNAME_S),Linux)

@@ -11,6 +11,9 @@ int kl_router_init(KlRouter *r, KlAllocator *alloc) {
     r->middleware = NULL;
     r->mw_count = 0;
     r->mw_capacity = 0;
+    r->post_middleware = NULL;
+    r->post_mw_count = 0;
+    r->post_mw_capacity = 0;
     r->routes = kl_malloc(alloc, sizeof(KlRoute) * (size_t)r->capacity);
     return r->routes ? 0 : -1;
 }
@@ -32,6 +35,8 @@ int kl_router_add(KlRouter *r, const char *method, const char *pattern,
     r->routes[r->count] = (KlRoute){
         .method = method,
         .pattern = pattern,
+        .method_len = strlen(method),
+        .pattern_len = strlen(pattern),
         .handler = handler,
         .user_data = user_data,
         .body_reader = body_reader,
@@ -102,16 +107,16 @@ static int match_path(const char *pattern, size_t pat_len,
 #define KL_MW_INIT_CAP 8
 
 static int match_middleware_pattern(const char *method, size_t method_len,
-                                    const char *mw_method,
+                                    const char *mw_method, size_t mw_method_len,
                                     const char *pattern, size_t pat_len,
                                     const char *path, size_t path_len) {
     /* Method check */
     if (mw_method[0] != '*') {
-        size_t mlen = strlen(mw_method);
-        int ok = (mlen == method_len && memcmp(mw_method, method, mlen) == 0);
+        int ok = (mw_method_len == method_len &&
+                  memcmp(mw_method, method, mw_method_len) == 0);
         /* HEAD falls back to GET */
         if (!ok && method_len == 4 && memcmp(method, "HEAD", 4) == 0)
-            ok = (mlen == 3 && memcmp(mw_method, "GET", 3) == 0);
+            ok = (mw_method_len == 3 && memcmp(mw_method, "GET", 3) == 0);
         if (!ok) return 0;
     }
 
@@ -151,6 +156,8 @@ int kl_router_use(KlRouter *r, const char *method, const char *pattern,
     r->middleware[r->mw_count] = (KlMiddlewareEntry){
         .method = method,
         .pattern = pattern,
+        .method_len = strlen(method),
+        .pattern_len = strlen(pattern),
         .fn = fn,
         .user_data = user_data,
     };
@@ -162,8 +169,53 @@ int kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res) {
     for (int i = 0; i < r->mw_count; i++) {
         KlMiddlewareEntry *mw = &r->middleware[i];
         if (match_middleware_pattern(req->method, req->method_len,
-                                    mw->method,
-                                    mw->pattern, strlen(mw->pattern),
+                                    mw->method, mw->method_len,
+                                    mw->pattern, mw->pattern_len,
+                                    req->path, req->path_len)) {
+            int rc = mw->fn(req, res, mw->user_data);
+            if (rc != 0) return rc;
+        }
+    }
+    return 0;
+}
+
+int kl_router_use_post(KlRouter *r, const char *method, const char *pattern,
+                       KlMiddleware fn, void *user_data) {
+    if (r->post_mw_count >= r->post_mw_capacity) {
+        int new_cap;
+        if (r->post_mw_capacity == 0) {
+            new_cap = KL_MW_INIT_CAP;
+        } else {
+            if (r->post_mw_capacity > INT_MAX / 2) return -1;
+            new_cap = r->post_mw_capacity * 2;
+        }
+        size_t old_size = sizeof(KlMiddlewareEntry) * (size_t)r->post_mw_capacity;
+        size_t new_size = sizeof(KlMiddlewareEntry) * (size_t)new_cap;
+        KlMiddlewareEntry *new_mw = kl_realloc(r->alloc, r->post_middleware,
+                                                old_size, new_size);
+        if (!new_mw) return -1;
+        r->post_middleware = new_mw;
+        r->post_mw_capacity = new_cap;
+    }
+
+    r->post_middleware[r->post_mw_count] = (KlMiddlewareEntry){
+        .method = method,
+        .pattern = pattern,
+        .method_len = strlen(method),
+        .pattern_len = strlen(pattern),
+        .fn = fn,
+        .user_data = user_data,
+    };
+    r->post_mw_count++;
+    return 0;
+}
+
+int kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlResponse *res) {
+    for (int i = 0; i < r->post_mw_count; i++) {
+        KlMiddlewareEntry *mw = &r->post_middleware[i];
+        if (match_middleware_pattern(req->method, req->method_len,
+                                    mw->method, mw->method_len,
+                                    mw->pattern, mw->pattern_len,
                                     req->path, req->path_len)) {
             int rc = mw->fn(req, res, mw->user_data);
             if (rc != 0) return rc;
@@ -183,7 +235,7 @@ int kl_router_match(KlRouter *r, const char *method, size_t method_len,
         KlRoute *route = &r->routes[i];
         int np = 0;
 
-        if (!match_path(route->pattern, strlen(route->pattern),
+        if (!match_path(route->pattern, route->pattern_len,
                         path, path_len, params, &np))
             continue;
 
@@ -191,7 +243,7 @@ int kl_router_match(KlRouter *r, const char *method, size_t method_len,
 
         /* Check method */
         if (route->method[0] == '*' ||
-            (strlen(route->method) == method_len &&
+            (route->method_len == method_len &&
              memcmp(route->method, method, method_len) == 0)) {
             *matched = route;
             *num_params = np;
@@ -200,7 +252,7 @@ int kl_router_match(KlRouter *r, const char *method, size_t method_len,
 
         /* HEAD falls back to GET routes */
         if (method_len == 4 && memcmp(method, "HEAD", 4) == 0 &&
-            strlen(route->method) == 3 &&
+            route->method_len == 3 &&
             memcmp(route->method, "GET", 3) == 0) {
             *matched = route;
             *num_params = np;
@@ -222,5 +274,10 @@ void kl_router_free(KlRouter *r) {
         kl_free(r->alloc, r->middleware,
                 sizeof(KlMiddlewareEntry) * (size_t)r->mw_capacity);
         r->middleware = NULL;
+    }
+    if (r->post_middleware) {
+        kl_free(r->alloc, r->post_middleware,
+                sizeof(KlMiddlewareEntry) * (size_t)r->post_mw_capacity);
+        r->post_middleware = NULL;
     }
 }

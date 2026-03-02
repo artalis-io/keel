@@ -86,7 +86,7 @@ int  kl_server_route(KlServer *s, const char *method, const char *pattern,
                      KlBodyReaderFactory body_reader);
 
 /**
- * @brief Register middleware on the server.
+ * @brief Register pre-body middleware on the server.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
  * @param pattern URL pattern — exact or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
@@ -95,6 +95,21 @@ int  kl_server_route(KlServer *s, const char *method, const char *pattern,
  */
 int  kl_server_use(KlServer *s, const char *method, const char *pattern,
                    KlMiddleware fn, void *user_data);
+
+/**
+ * @brief Register post-body middleware on the server.
+ *
+ * Runs after body reading completes. Can access req->body_reader data.
+ * Short-circuiting preserves keep_alive (body already consumed).
+ *
+ * @param method  HTTP method filter ("GET", "POST", "*" for any).
+ * @param pattern URL pattern — exact or prefix with trailing slash-star.
+ * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
+ * @param user_data Passed to fn on each invocation.
+ * @return 0 on success, -1 on failure.
+ */
+int  kl_server_use_post(KlServer *s, const char *method, const char *pattern,
+                        KlMiddleware fn, void *user_data);
 
 /**
  * @brief Register a WebSocket endpoint. Matches GET with Upgrade: websocket.

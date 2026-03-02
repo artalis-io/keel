@@ -123,15 +123,29 @@ typedef int (*KlMiddleware)(KlRequest *req, KlResponse *res, void *user_data);
 
 - Return `0` → continue to next middleware / handler
 - Return non-zero → short-circuit (response must already be written)
-- Registered via `kl_router_use()` / `kl_server_use()` with method + pattern filter
 - Patterns: `/*` = prefix match, `/exact` = exact match, `*` method = any method
-- Middleware runs after route match, before body reading
-- Short-circuit disables keep-alive (body may be unread)
 - `req->ctx` (`void *`) enables middleware→handler data passing
 
-Built-in: `kl_cors_middleware` (pass `KlCorsConfig *` as user_data).
+### Two-Phase Middleware
 
-To add a new middleware: implement the `KlMiddleware` signature, register with `kl_server_use()`.
+Middleware runs in two phases:
+
+```
+headers → route match → init response → PRE-BODY middleware → ws/h2 → body reading → POST-BODY middleware → handler
+```
+
+**Pre-body** (`kl_server_use()` / `kl_router_use()`):
+- Runs before body is read — ideal for rate limiting, CORS, auth via headers
+- Short-circuit disables keep-alive (body may be unread)
+
+**Post-body** (`kl_server_use_post()` / `kl_router_use_post()`):
+- Runs after body is fully consumed — can access `req->body_reader` data
+- Short-circuit preserves keep-alive (body already consumed)
+- Use for middleware that needs form body access (e.g. CSRF token validation)
+
+Built-in: `kl_cors_middleware` (pass `KlCorsConfig *` as user_data) — pre-body.
+
+To add a new middleware: implement the `KlMiddleware` signature, register with `kl_server_use()` (pre-body) or `kl_server_use_post()` (post-body).
 
 ## Testing
 

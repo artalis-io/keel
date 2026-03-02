@@ -222,6 +222,25 @@ static KlConnState conn_process(KlConn *c) {
     return c->state;
 }
 
+/*
+ * Run post-body middleware, then invoke the handler.
+ * Body has already been consumed, so keep_alive is preserved on short-circuit.
+ */
+static KlConnState conn_run_post_middleware_and_handle(KlConn *c,
+                                                       KlRouter *router) {
+    if (kl_router_run_post_middleware(router, &c->req, &c->res) != 0) {
+        /* Body already consumed — keep_alive preserved */
+        if (c->res.body_mode == KL_BODY_STREAM) {
+            conn_log_access(c);
+            c->state = KL_CONN_CLOSED;
+            return c->state;
+        }
+        c->state = KL_CONN_SENDING;
+        return c->state;
+    }
+    return conn_process(c);
+}
+
 KlConnState kl_conn_on_handshake(KlConn *c) {
     if (!c->tls) {
         c->state = KL_CONN_CLOSED;
@@ -419,7 +438,7 @@ read_more_headers: ;
                         }
                         if (rc == 1) {
                             c->req.body_reader->on_complete(c->req.body_reader);
-                            return conn_process(c);
+                            return conn_run_post_middleware_and_handle(c, router);
                         }
                     }
                 } else if (leftover > 0) {
@@ -436,7 +455,7 @@ read_more_headers: ;
                         return c->state;
                     }
                     if (bpr == KL_PARSE_OK) {
-                        return conn_process(c);
+                        return conn_run_post_middleware_and_handle(c, router);
                     }
                     /* INCOMPLETE — need more body data */
                 }
@@ -448,7 +467,7 @@ read_more_headers: ;
 
             } else if (!has_body) {
                 /* No body — header pointers valid, process immediately */
-                return conn_process(c);
+                return conn_run_post_middleware_and_handle(c, router);
 
             } else {
                 /* Body present but no reader — discard body */
@@ -462,7 +481,7 @@ read_more_headers: ;
                             return c->state;
                         }
                         if (rc == 1) {
-                            return conn_process(c);
+                            return conn_run_post_middleware_and_handle(c, router);
                         }
                     }
                 } else if (leftover > 0) {
@@ -478,7 +497,7 @@ read_more_headers: ;
                         return c->state;
                     }
                     if (bpr == KL_PARSE_OK) {
-                        return conn_process(c);
+                        return conn_run_post_middleware_and_handle(c, router);
                     }
                 }
 
@@ -542,7 +561,7 @@ read_more_headers: ;
                 }
             }
 
-            return conn_process(c);
+            return conn_run_post_middleware_and_handle(c, router);
         }
 
         c->state = KL_CONN_CLOSED;
@@ -575,7 +594,10 @@ read_more_body: ;
             if (rc == 1) {
                 if (c->req.body_reader)
                     c->req.body_reader->on_complete(c->req.body_reader);
-                return conn_process(c);
+                /* c->router is used (not function param) because READING_BODY
+                 * is a continuation — the original router was saved on the
+                 * connection during the READING headers phase. */
+                return conn_run_post_middleware_and_handle(c, c->router);
             }
             /* TLS may buffer multiple records — drain before re-arming */
             if (c->tls && c->tls->pending(c->tls) > 0
@@ -600,7 +622,8 @@ read_more_body: ;
         }
 
         if (pr == KL_PARSE_OK) {
-            return conn_process(c);
+            /* c->router: see comment above — READING_BODY continuation */
+            return conn_run_post_middleware_and_handle(c, c->router);
         }
 
         /* INCOMPLETE — TLS may buffer multiple records */
