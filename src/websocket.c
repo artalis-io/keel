@@ -427,6 +427,7 @@ static int ws_deliver_message(KlWsConn *ws) {
 
 /* Grow message buffer to fit additional data */
 static int ws_msg_grow(KlWsConn *ws, size_t additional) {
+    if (additional > SIZE_MAX - ws->msg_len) return -1;
     size_t needed = ws->msg_len + additional;
     if (needed > ws_max_message(ws->config)) return -1;
 

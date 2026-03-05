@@ -29,6 +29,7 @@ static int ensure_fd_cap(KlIoUringState *st, int fd) {
         return 0;
 
     int new_cap = st->fd_udata_cap;
+    if (new_cap == 0) new_cap = 16;
     while (new_cap <= fd) {
         if (new_cap > INT_MAX / 2)
             return -1;
@@ -111,6 +112,12 @@ int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
 
     st->fd_udata[fd] = udata;
 
+    /* Flush pending SQEs to maximize SQ space before queuing two more */
+    if (st->pending > 0) {
+        io_uring_submit(&st->ring);
+        st->pending = 0;
+    }
+
     /* Cancel existing poll, then add new one */
     struct io_uring_sqe *sqe = io_uring_get_sqe(&st->ring);
     if (!sqe)
@@ -120,8 +127,14 @@ int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     st->pending++;
 
     sqe = io_uring_get_sqe(&st->ring);
-    if (!sqe)
-        return -1;
+    if (!sqe) {
+        /* Cancel already queued — flush it then retry once */
+        io_uring_submit(&st->ring);
+        st->pending = 0;
+        sqe = io_uring_get_sqe(&st->ring);
+        if (!sqe)
+            return -1;
+    }
     io_uring_prep_poll_add(sqe, fd, mask_to_poll(mask));
     io_uring_sqe_set_data64(sqe, (uint64_t)fd);
     st->pending++;

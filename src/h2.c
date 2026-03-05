@@ -310,6 +310,9 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
                                             req->path, req->path_len,
                                             &stream->route, stream->params,
                                             &stream->num_params);
+    memcpy(req->params, stream->params,
+           sizeof(KlParam) * (size_t)stream->num_params);
+    req->num_params = stream->num_params;
 
     /* Initialize response */
     if (kl_response_init(&stream->res, h2c->alloc) < 0) {

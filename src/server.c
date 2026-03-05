@@ -236,6 +236,7 @@ int kl_server_run(KlServer *s) {
     if (kl_event_init(&s->loop) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "event_init");
         close(s->listen_fd);
+        s->listen_fd = -1;
         return -1;
     }
 

@@ -27,6 +27,7 @@ static int ensure_fd_cap(KlPollState *st, int fd) {
         return 0;
 
     int new_cap = st->fd_to_idx_cap;
+    if (new_cap == 0) new_cap = 16;
     while (new_cap <= fd) {
         if (new_cap > INT_MAX / 2)
             return -1;
