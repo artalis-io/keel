@@ -64,6 +64,7 @@ typedef struct KlConn {
     KlH2Conn *h2;
     KlH2Config *h2_config;   /* set once at pool init, NULL if disabled */
     KlRouter *router;        /* back-pointer to server router */
+    size_t max_body_size;    /* discard-path body limit (from KlConfig) */
 
     /* Access logging (set once at pool init, never changes) */
     void (*access_log)(const KlRequest *req, int status,

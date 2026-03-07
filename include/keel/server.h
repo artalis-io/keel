@@ -33,8 +33,9 @@ typedef void (*KlAccessLogFn)(const KlRequest *req, int status,
 typedef void (*KlLogFn)(int level, const char *fmt, va_list ap,
                          void *user_data);
 
-#define KL_DEFAULT_MAX_CONNS    256
-#define KL_DEFAULT_READ_TIMEOUT 30000   /* ms */
+#define KL_DEFAULT_MAX_CONNS      256
+#define KL_DEFAULT_READ_TIMEOUT   30000           /* ms */
+#define KL_DEFAULT_MAX_BODY_SIZE  (1024 * 1024)   /* 1 MB */
 
 typedef struct KlConfig {
     int port;
@@ -52,6 +53,7 @@ typedef struct KlConfig {
     int drain_timeout_ms;        /* graceful shutdown drain timeout (0 = immediate) */
     KlTlsConfig *tls;           /* TLS config — NULL = plaintext (default) */
     KlH2Config *h2;             /* HTTP/2 config — NULL = disabled (default) */
+    size_t max_body_size;       /* discard-path body limit; default: 1 MB */
 } KlConfig;
 
 typedef struct KlServer {

@@ -69,6 +69,11 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_body(res, body, (size_t)off);
 }
 
+static void handle_no_reader(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
 static KlServer test_server;
 
 static void *server_thread(void *arg) {
@@ -111,7 +116,7 @@ static ssize_t read_response(int fd, char *buf, size_t buflen) {
 static pthread_t server_tid;
 
 static void start_server(void) {
-    KlConfig cfg = {.port = TEST_PORT};
+    KlConfig cfg = {.port = TEST_PORT, .max_body_size = 4096};
     kl_server_init(&test_server, &cfg);
     kl_server_route(&test_server, "GET", "/hello", handle_hello, NULL, NULL);
     kl_server_route(&test_server, "POST", "/echo", handle_echo,
@@ -120,6 +125,8 @@ static void start_server(void) {
     kl_server_route(&test_server, "POST", "/upload", handle_upload,
                     NULL, kl_body_reader_multipart);
     kl_server_route(&test_server, "GET", "/users/:id", handle_param,
+                    NULL, NULL);
+    kl_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
                     NULL, NULL);
     pthread_create(&server_tid, NULL, server_thread, NULL);
     usleep(100000);
@@ -1207,6 +1214,100 @@ UTEST(integration, post_middleware_keepalive_preserved) {
     kl_server_stop(&post_mw_ka_server);
     pthread_join(tid, NULL);
     kl_server_free(&post_mw_ka_server);
+}
+
+/* ── Global body size limit tests ─────────────────────────────────── */
+
+UTEST(integration, global_body_limit_413) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* POST to route with no body reader, Content-Length exceeds 4KB limit */
+    const char *req = "POST /no-reader HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Content-Length: 100000\r\n"
+                      "Connection: close\r\n"
+                      "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "413") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, global_body_limit_ok) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* POST to route with no body reader, body within 4KB limit */
+    char body[100];
+    memset(body, 'X', sizeof(body));
+
+    char hdr[256];
+    snprintf(hdr, sizeof(hdr),
+             "POST /no-reader HTTP/1.1\r\n"
+             "Host: localhost\r\n"
+             "Content-Length: %zu\r\n"
+             "Connection: close\r\n"
+             "\r\n", sizeof(body));
+    (void)write(fd, hdr, strlen(hdr));
+    (void)write(fd, body, sizeof(body));
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, per_route_limit_unaffected) {
+    start_server();
+
+    int fd = connect_to(TEST_PORT);
+    ASSERT_TRUE(fd >= 0);
+
+    /* POST to /echo with 32KB body — has 64KB body reader, should succeed
+     * even though global max_body_size is 4KB (only applies to discard path) */
+    size_t body_len = 32768;
+    char *body = malloc(body_len);
+    ASSERT_TRUE(body != NULL);
+    memset(body, 'Y', body_len);
+
+    char hdr[256];
+    snprintf(hdr, sizeof(hdr),
+             "POST /echo HTTP/1.1\r\n"
+             "Host: localhost\r\n"
+             "Content-Length: %zu\r\n"
+             "Connection: close\r\n"
+             "\r\n", body_len);
+    (void)write(fd, hdr, strlen(hdr));
+    (void)write(fd, body, body_len);
+
+    char buf[65536];
+    ssize_t total = read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    /* Verify echoed body length */
+    char *body_start = strstr(buf, "\r\n\r\n");
+    ASSERT_TRUE(body_start != NULL);
+    body_start += 4;
+    size_t resp_body_len = (size_t)(total - (body_start - buf));
+    ASSERT_EQ(resp_body_len, body_len);
+
+    free(body);
+    stop_server();
 }
 
 UTEST_MAIN();

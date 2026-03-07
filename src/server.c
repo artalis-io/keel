@@ -86,6 +86,8 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->config.read_timeout_ms = KL_DEFAULT_READ_TIMEOUT;
     if (s->config.parser == NULL)
         s->config.parser = kl_parser_llhttp;
+    if (s->config.max_body_size == 0)
+        s->config.max_body_size = KL_DEFAULT_MAX_BODY_SIZE;
 
     /* Set up allocator */
     if (s->config.alloc) {
@@ -126,6 +128,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->pool.conns[i].access_log_data = s->config.access_log_data;
         s->pool.conns[i].h2_config = s->config.h2;  /* NULL if disabled */
         s->pool.conns[i].router = &s->router;
+        s->pool.conns[i].max_body_size = s->config.max_body_size;
     }
 
     /* Pre-allocate TLS sessions (one per connection slot) */

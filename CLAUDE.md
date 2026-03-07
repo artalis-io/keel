@@ -48,7 +48,7 @@ make clean        # remove all build artifacts
 | Type | Header | Purpose |
 |------|--------|---------|
 | `KlServer` | `server.h` | Server instance: config, router, pool, event loop |
-| `KlConfig` | `server.h` | Configuration: port, bind_addr, max_connections, timeouts, allocator, parser |
+| `KlConfig` | `server.h` | Configuration: port, bind_addr, max_connections, timeouts, max_body_size, allocator, parser |
 | `KlRequest` | `request.h` | Parsed request: method, path, query, headers, content_length, body_reader |
 | `KlResponse` | `response.h` | Response builder: status, headers, body/file/stream modes |
 | `KlBodyReader` | `body_reader.h` | Vtable: on_data, on_complete, on_error, destroy |

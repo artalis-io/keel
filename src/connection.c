@@ -471,12 +471,30 @@ read_more_headers: ;
 
             } else {
                 /* Body present but no reader — discard body */
+
+                /* Content-Length early reject */
+                if (!c->req.chunked &&
+                    c->max_body_size > 0 &&
+                    c->req.content_length > c->max_body_size) {
+                    best_effort_conn_write(c, kl_413_response,
+                                           sizeof(kl_413_response) - 1);
+                    c->state = KL_CONN_CLOSED;
+                    return c->state;
+                }
+
                 if (c->req.chunked) {
                     kl_chunked_init(&c->chunked_dec);
                     if (leftover > 0) {
                         int rc = kl_chunked_decode(&c->chunked_dec,
                                     c->read_buf + consumed, leftover, NULL);
                         if (rc < 0) {
+                            c->state = KL_CONN_CLOSED;
+                            return c->state;
+                        }
+                        if (c->max_body_size > 0 &&
+                            c->chunked_dec.total_body > c->max_body_size) {
+                            best_effort_conn_write(c, kl_413_response,
+                                                   sizeof(kl_413_response) - 1);
                             c->state = KL_CONN_CLOSED;
                             return c->state;
                         }
@@ -586,6 +604,15 @@ read_more_body: ;
             if (rc < 0) {
                 if (c->req.body_reader)
                     c->req.body_reader->on_error(c->req.body_reader);
+                best_effort_conn_write(c, kl_413_response,
+                                       sizeof(kl_413_response) - 1);
+                c->state = KL_CONN_CLOSED;
+                return c->state;
+            }
+            /* Discard-path chunked limit */
+            if (!c->req.body_reader &&
+                c->max_body_size > 0 &&
+                c->chunked_dec.total_body > c->max_body_size) {
                 best_effort_conn_write(c, kl_413_response,
                                        sizeof(kl_413_response) - 1);
                 c->state = KL_CONN_CLOSED;
