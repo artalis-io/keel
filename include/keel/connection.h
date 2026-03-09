@@ -25,6 +25,7 @@ typedef enum {
     KL_CONN_SENDING,
     KL_CONN_WEBSOCKET,      /* WebSocket connection (upgraded) */
     KL_CONN_HTTP2,          /* HTTP/2 connection (upgraded) */
+    KL_CONN_SUSPENDED,      /* Suspended for async operation */
     KL_CONN_CLOSED
 } KlConnState;
 
@@ -65,6 +66,10 @@ typedef struct KlConn {
     KlH2Config *h2_config;   /* set once at pool init, NULL if disabled */
     KlRouter *router;        /* back-pointer to server router */
     size_t max_body_size;    /* discard-path body limit (from KlConfig) */
+
+    /* Async state (non-NULL when SUSPENDED) */
+    struct KlAsyncOp *async_op;
+    uint64_t suspend_start_ms;
 
     /* Access logging (set once at pool init, never changes) */
     void (*access_log)(const KlRequest *req, int status,

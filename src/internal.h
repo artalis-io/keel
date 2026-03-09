@@ -2,6 +2,7 @@
 #define KEEL_INTERNAL_H
 
 #include <keel/connection.h>
+#include <keel/server.h>
 #include <keel/tls.h>
 #include <unistd.h>
 #include <errno.h>
@@ -46,5 +47,8 @@ static inline void best_effort_conn_write(KlConn *c, const void *buf, size_t len
     ssize_t r = conn_write(c, buf, len);
     (void)r;
 }
+
+/* Release a connection and resume listening if paused (defined in server.c) */
+void kl_server_conn_release(KlServer *s, KlConn *c);
 
 #endif

@@ -56,6 +56,9 @@ typedef struct KlConfig {
     size_t max_body_size;       /* discard-path body limit; default: 1 MB */
 } KlConfig;
 
+typedef struct KlWatcher KlWatcher;
+typedef struct KlAsyncOp KlAsyncOp;
+
 typedef struct KlServer {
     KlConfig config;
     KlAllocator alloc_storage;  /* owned copy if user didn't provide one */
@@ -69,6 +72,8 @@ typedef struct KlServer {
     _Atomic int running;
     _Atomic int draining;
     uint64_t drain_deadline_ms;
+    KlWatcher *watchers;        /* active watcher list (async FDs) */
+    KlAsyncOp *async_ops;       /* active async ops list */
 } KlServer;
 
 /**

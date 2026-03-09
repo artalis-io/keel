@@ -43,6 +43,8 @@ struct KlRequest {
 
     KlParam params[KL_MAX_PARAMS];
     int num_params;
+
+    void *_server_ctx;   /* opaque — set to KlConn* by connection layer (do not modify) */
 };
 
 /* Find header by name (case-insensitive). Returns value pointer or NULL.

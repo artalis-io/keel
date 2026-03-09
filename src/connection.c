@@ -83,6 +83,8 @@ KlConn *kl_conn_acquire(KlConnPool *pool, int fd) {
     c->last_active_ms = kl_monotonic_ms();
     c->ws = NULL;
     c->h2 = NULL;
+    c->async_op = NULL;
+    c->suspend_start_ms = 0;
     memset(&c->req, 0, sizeof(c->req));
 
     return c;
@@ -121,6 +123,7 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
     if (c->res.hdr_buf) {
         kl_response_free(&c->res);
     }
+    c->async_op = NULL;
     c->state = KL_CONN_CLOSED;
     c->route = NULL;
     c->next_free = pool->free_list;
@@ -181,6 +184,7 @@ static void conn_log_access(KlConn *c) {
  * so middleware can write headers/status before the handler runs.
  */
 static int conn_init_response(KlConn *c) {
+    c->req._server_ctx = c;
     c->request_start_ms = kl_monotonic_ms();
     if (c->res.hdr_buf) {
         kl_response_reset(&c->res);
@@ -210,6 +214,10 @@ static KlConnState conn_process(KlConn *c) {
     } else {
         kl_response_error(&c->res, 404, "Not Found");
     }
+
+    /* If handler suspended the connection for async I/O, don't transition */
+    if (c->state == KL_CONN_SUSPENDED)
+        return KL_CONN_SUSPENDED;
 
     /* If streaming, the handler already sent everything */
     if (c->res.body_mode == KL_BODY_STREAM) {

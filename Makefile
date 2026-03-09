@@ -46,7 +46,8 @@ endif
 
 # Core library — parser-agnostic
 CORE_SRC = src/allocator.c src/response.c src/router.c \
-           src/connection.c src/server.c src/body_reader_buffer.c \
+           src/connection.c src/server.c src/async.c \
+           src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
            src/websocket.c src/h2.c $(EVENT_SRC)
 
@@ -144,7 +145,7 @@ test: $(TEST_BIN)
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
-	rm -f src/tls_mbedtls.o
+	rm -f src/async.o src/tls_mbedtls.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart
