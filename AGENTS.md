@@ -22,6 +22,9 @@ Every PR should be checked for:
 - [ ] **TLS orthogonality** — TLS changes must not affect middleware, router, body readers, or handlers
 - [ ] **TLS shutdown** — Connections must call tls->shutdown() before close(fd)
 - [ ] **Pending drain** — After TLS reads, tls->pending() must be checked to drain internal buffers
+- [ ] **Async safety** — `kl_async_complete()` only called from event loop thread, never from workers
+- [ ] **Thread pool callbacks** — `work_fn` must not touch connection/event loop state; `done_fn` runs on event loop thread
+- [ ] **Thread pool shutdown** — `kl_thread_pool_free` called before `kl_server_free` or event loop teardown
 
 ## Security Audit Patterns
 
@@ -60,10 +63,13 @@ char *buf = alloc(len + extra);
 
 ### Thread safety
 
-KEEL is single-threaded by design. Verify:
-- No global mutable state (except `volatile int running` for signal handling)
+KEEL's event loop is single-threaded. The `KlThreadPool` module introduces worker threads, but thread safety is maintained by construction:
+- Workers only touch the work queue (mutex-protected) and a pipe fd — never the event loop or connection state
+- `done_fn` callbacks run on the event loop thread (via pipe watcher) — safe to call `kl_async_complete`
+- `kl_async_complete()` is NOT thread-safe — must only be called from the event loop thread
+- No global mutable state (except `_Atomic int running`/`draining` for signal handling)
 - Integration tests that use threads properly synchronize server start/stop
-- No `static` mutable variables in any module
+- No `static` mutable variables in any module (except test files)
 
 ## Testing Requirements
 
@@ -248,7 +254,7 @@ The factory is called once per connection slot at server init. Each `KlTls` sess
 All of these should pass cleanly before merging:
 
 ```bash
-make test               # 227 unit + integration tests
+make test               # 241 unit + integration tests
 make debug && make test  # ASan + UBSan (catches memory errors, undefined behavior)
 make analyze            # Clang static analyzer via scan-build
 make cppcheck           # cppcheck static analysis

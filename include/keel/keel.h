@@ -17,5 +17,6 @@
 #include <keel/cors.h>
 #include <keel/websocket.h>
 #include <keel/async.h>
+#include <keel/thread_pool.h>
 
 #endif

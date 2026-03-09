@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring/poll. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, zero forced buffering.
+Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring/poll. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, async primitives, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **180+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **240+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -56,6 +56,8 @@ int main(void) {
 - **Route parameters** — `:param` capture, no allocation, pointers into read buffer
 - **Connection timeouts** — monotonic clock sweep, automatic 408 responses, slow-loris protection
 - **Access logging** — pluggable callback after each response, zero overhead when disabled
+- **Async primitives** — KlWatcher (generic FD callbacks) and KlAsyncOp (connection suspension/resumption)
+- **Thread pool** — submit blocking work from event loop, execute on workers, resume via pipe wakeup
 - **Pre-allocated connection pool** — no per-request malloc, no fragmentation under load
 - **Pluggable allocator** — bring your own arena/pool/tracking allocator
 - **pledge/unveil sandboxing** — init/run split makes syscall lockdown natural
@@ -63,7 +65,7 @@ int main(void) {
 
 ## Architecture
 
-13 orthogonal modules, each independently testable:
+15 orthogonal modules, each independently testable:
 
 | Module | Header | Description |
 |--------|--------|-------------|
@@ -81,6 +83,8 @@ int main(void) {
 | **cors** | `cors.h` | Built-in CORS middleware with configurable origins |
 | **websocket** | `websocket.h` | RFC 6455 WebSocket support |
 | **tls** | `tls.h` | Pluggable TLS transport vtable (bring-your-own backend) |
+| **async** | `async.h` | Connection suspension + generic FD watchers |
+| **thread_pool** | `thread_pool.h` | Worker thread pool with pipe-based event loop wakeup |
 
 ## Request Body Handling
 
@@ -260,6 +264,67 @@ int main(void) {
 ```
 
 The WebSocket module handles frame parsing, masking, and protocol details. The handler receives callbacks for each message — use `kl_ws_send()` to reply.
+
+## Async Operations
+
+KEEL provides two primitives for non-blocking operations: **KlWatcher** (generic FD callbacks) and **KlAsyncOp** (connection suspension). Together they allow handlers to suspend a connection, perform work asynchronously, and resume when done — without stalling the event loop.
+
+```c
+void handle_async(KlRequest *req, KlResponse *res, void *user_data) {
+    KlServer *srv = user_data;
+    KlConn *conn = req->_server_ctx;
+
+    /* Allocate context for the async operation */
+    MyCtx *ctx = ...;
+    ctx->op.on_resume = my_resume_cb;
+    ctx->op.on_cancel = my_cancel_cb;
+
+    /* Create a pipe — watcher fires when the pipe is written to */
+    socketpair(AF_UNIX, SOCK_STREAM, 0, ctx->pipe_fds);
+    kl_watcher_add(srv, ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
+
+    /* Suspend the connection (removes it from event loop, exempt from timeouts) */
+    kl_async_suspend(srv, conn, &ctx->op);
+
+    /* Later: write to pipe → watcher fires → kl_async_complete → connection resumes */
+}
+```
+
+The watcher callback runs on the event loop thread, making it safe to call `kl_async_complete()` which re-registers the connection FD and drives the state machine forward.
+
+## Thread Pool
+
+`KlThreadPool` bridges blocking work (SQLite queries, file I/O, DNS, crypto) and the single-threaded event loop. Submit work items from the event loop, execute on worker threads, resume connections via pipe wakeup.
+
+```c
+/* Create pool (auto-detects CPU count, 64-item queue) */
+KlThreadPool *pool = kl_thread_pool_create(&server, NULL);
+
+/* Work callbacks */
+static void do_query(void *ud) {
+    MyWork *w = ud;
+    w->status = sqlite3_exec(w->db, w->sql, ...);  /* runs on worker thread */
+}
+static void query_done(void *ud) {
+    MyWork *w = ud;
+    kl_async_complete(w->server, &w->op);           /* runs on event loop thread */
+}
+
+/* In handler: suspend connection, submit blocking work */
+kl_async_suspend(srv, conn, &work->op);
+KlWorkItem item = { .work_fn = do_query, .done_fn = query_done, .user_data = work };
+kl_thread_pool_submit(pool, &item);
+```
+
+Each `KlWorkItem` has three callbacks:
+
+| Callback | Thread | Purpose |
+|----------|--------|---------|
+| `work_fn` | Worker | Execute blocking work |
+| `done_fn` | Event loop | Resume connection (called via pipe watcher) |
+| `cancel_fn` | Event loop | Cleanup for items still queued at shutdown (may be NULL) |
+
+Thread safety is guaranteed by construction — workers never touch the event loop directly. They push completed items to a done queue and write a byte to a pipe; the pipe watcher fires on the event loop thread and calls `done_fn`. Backpressure: `submit()` returns `-1` when the queue is full.
 
 ## Static File Serving
 
@@ -463,22 +528,25 @@ The poll backend is a universal POSIX fallback that works on any platform with `
 
 ## Testing
 
-160 tests across 13 test suites, covering every module:
+241 tests across 15 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
 | `test_allocator` | 4 | Default + custom tracking allocators |
-| `test_router` | 20 | Exact match, params, 404, 405, wildcard, middleware chain |
-| `test_response` | 10 | Status, headers, body, JSON, error, streaming, sendfile |
+| `test_router` | 27 | Exact match, params, 404, 405, wildcard, middleware chain |
+| `test_response` | 14 | Status, headers, body, JSON, error, streaming, sendfile |
 | `test_parser` | 9 | GET, POST, query strings, incomplete, reset, chunked TE |
-| `test_connection` | 3 | Pool init, acquire/release, exhaustion |
-| `test_body_reader` | 28 | Buffer + multipart: limits, spanning, binary, edge cases |
+| `test_connection` | 4 | Pool init, acquire/release, exhaustion, active count |
+| `test_body_reader` | 30 | Buffer + multipart: limits, spanning, binary, edge cases |
 | `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
-| `test_cors` | 16 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
-| `test_websocket` | ~20+ | Frame parsing, masking, opcode, close, echo |
-| `test_integration` | 21 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
+| `test_cors` | 17 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
+| `test_websocket` | 38 | Frame parsing, masking, opcode, fragments, close, echo |
+| `test_h2` | 29 | HTTP/2 sessions, streams, routing, ALPN, goaway |
+| `test_integration` | 27 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
 | `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
 | `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
+| `test_async` | 14 | Watchers, suspend/resume, deadlines, cancel, e2e async handler |
+| `test_thread_pool` | 12 | Create/free, submit, backpressure, FIFO ordering, multi-worker, shutdown, stress |
 
 ```bash
 make test               # run all tests
@@ -524,8 +592,6 @@ KEEL is a transport library — it handles sockets, parsing, routing, and respon
 - **Authentication / authorization** — Token validation, session management, OAuth flows, RBAC. These are policy decisions that vary per application. KEEL's middleware interface makes auth trivial to implement (see [Auth middleware example](#writing-custom-middleware)) but deliberately doesn't ship one.
 
 - **Request logging** — Log format (JSON, CLF, custom), destination (stderr, file, syslog), and filtering are application choices. KEEL provides a pluggable `access_log` callback with method, path, status, body size, and duration — you bring the formatter.
-
-- **Worker thread pool** — CPU-bound work (image processing, compression, templating) should be dispatched to application-owned threads. The application controls thread count, priority, queue depth, and scheduling policy. KEEL's single-threaded event loop handles I/O; your thread pool handles compute. A few lines of pthreads in your handler is simpler and more flexible than a library-imposed threading model.
 
 - **Request IDs / correlation IDs** — These are application-generated identifiers for tracing requests through your system. Use middleware to read/generate X-Request-ID headers and pass them to your logging/observability.
 

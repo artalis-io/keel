@@ -27,7 +27,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-13 orthogonal modules, each independently testable:
+15 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -42,6 +42,8 @@ make clean        # remove all build artifacts
 11. **chunked** — RFC 7230 parser-agnostic chunked transfer-encoding decoder
 12. **cors** — Built-in CORS middleware with configurable origins/methods/headers
 13. **tls** — Pluggable TLS transport vtable (bring-your-own backend)
+14. **async** — Connection suspension + generic FD watchers for async operations
+15. **thread_pool** — Worker thread pool with pipe-based event loop wakeup
 
 ## Key Types
 
@@ -71,6 +73,13 @@ make clean        # remove all build artifacts
 | `KlTlsConfig` | `tls.h` | TLS config: ctx, factory, ctx_destroy |
 | `KlTlsResult` | `tls.h` | Enum: OK, WANT_READ, WANT_WRITE, ERROR |
 | `KlTlsFactory` | `tls.h` | Factory: creates per-connection KlTls from shared context |
+| `KlWatcher` | `async.h` | Registered FD watcher: fd, callback, user_data, server-owned list |
+| `KlWatcherFn` | `async.h` | Watcher callback: `void (*)(int fd, KlEventMask ready, void *user_data)` |
+| `KlAsyncOp` | `async.h` | In-flight async operation: conn, deadline, on_resume/deadline/cancel |
+| `KlAsyncFn` | `async.h` | Async callback: `void (*)(KlAsyncOp *op, void *user_data)` |
+| `KlThreadPool` | `thread_pool.h` | Opaque thread pool: workers, work/done queues, pipe watcher |
+| `KlWorkItem` | `thread_pool.h` | Work item: work_fn (worker), done_fn (event loop), cancel_fn (shutdown) |
+| `KlThreadPoolConfig` | `thread_pool.h` | Config: num_workers, queue_capacity, allocator |
 
 ## Git
 
@@ -146,6 +155,145 @@ headers → route match → init response → PRE-BODY middleware → ws/h2 → 
 Built-in: `kl_cors_middleware` (pass `KlCorsConfig *` as user_data) — pre-body.
 
 To add a new middleware: implement the `KlMiddleware` signature, register with `kl_server_use()` (pre-body) or `kl_server_use_post()` (post-body).
+
+## Async Pattern
+
+KEEL provides two async primitives for non-blocking operations without stalling the event loop.
+
+### KlWatcher — Generic FD Callbacks
+
+Register any file descriptor with the event loop. When the FD becomes ready, the callback fires on the event loop thread.
+
+```c
+int  kl_watcher_add(KlServer *s, int fd, KlEventMask mask, KlWatcherFn on_ready, void *user_data);
+int  kl_watcher_mod(KlServer *s, int fd, KlEventMask mask);
+void kl_watcher_del(KlServer *s, int fd);
+```
+
+Watchers are heap-allocated and server-owned. Uses tagged pointers (LSB=1) to distinguish watcher events from connection events in the event loop dispatch.
+
+### KlAsyncOp — Connection Suspension
+
+Suspend a connection for an async operation. The connection is removed from the event loop and exempt from idle timeouts while suspended.
+
+```c
+int  kl_async_suspend(KlServer *s, KlConn *conn, KlAsyncOp *op);
+void kl_async_complete(KlServer *s, KlAsyncOp *op);
+```
+
+Three callbacks per op (separate because deadline semantics differ per use case):
+- `on_resume` — called by `kl_async_complete`, handler sets response and state
+- `on_deadline` — called when `deadline_ms` reached (sleep = success, HTTP = timeout)
+- `on_cancel` — called if connection dies while suspended
+
+**Important**: `kl_async_complete()` is NOT thread-safe — it manipulates the ops linked list and calls `kl_event_add`. Always call it from the event loop thread (e.g. from a watcher callback or the thread pool's `done_fn`).
+
+### Typical async flow
+
+```c
+void handler(KlRequest *req, KlResponse *res, void *user_data) {
+    KlServer *srv = user_data;
+    KlConn *conn = req->_server_ctx;
+
+    /* Set up async op (caller-owned, must remain valid until completion) */
+    MyCtx *ctx = ...;
+    ctx->op.on_resume = my_resume;
+    ctx->op.on_cancel = my_cancel;
+
+    /* Create a pipe/socket for completion signal */
+    socketpair(AF_UNIX, SOCK_STREAM, 0, ctx->pipe_fds);
+    kl_watcher_add(srv, ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
+
+    /* Suspend the connection */
+    kl_async_suspend(srv, conn, &ctx->op);
+
+    /* Trigger completion later (e.g. from another thread via pipe write) */
+}
+```
+
+## Thread Pool Pattern
+
+`KlThreadPool` bridges blocking work (SQLite, file I/O, DNS, crypto) and the event loop. Submit work from the event loop, execute on a worker thread, signal completion back via a pipe + `KlWatcher`.
+
+### Architecture
+
+```
+Event loop thread                    Worker threads (N)
+─────────────────                    ─────────────────
+kl_thread_pool_submit()
+  → push to work_queue               pthread_cond_wait
+  → pthread_cond_signal ──────────→  wake, pop work item
+                                     execute work_fn(user_data)
+                                     push to done_queue
+kl_event_wait fires                  write(pipe_wr, "1") ←──────┘
+  → watcher on pipe_rd
+  → drain done_queue
+  → call done_fn(user_data) on event loop thread
+```
+
+### API
+
+```c
+KlThreadPool *kl_thread_pool_create(KlServer *s, const KlThreadPoolConfig *cfg);
+int            kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item);
+void           kl_thread_pool_free(KlThreadPool *pool);
+```
+
+### Three Callbacks
+
+| Callback | Thread | When | Purpose |
+|----------|--------|------|---------|
+| `work_fn` | Worker | Item dequeued | Execute blocking work (SQLite, I/O) |
+| `done_fn` | Event loop | Pipe watcher fires | Resume connection via `kl_async_complete` |
+| `cancel_fn` | Event loop | `kl_thread_pool_free` drains remaining items | Free resources for items that never ran (may be NULL) |
+
+### Thread Safety
+
+Thread safety is guaranteed by construction:
+- `work_fn` runs on a worker thread with no lock held
+- `done_fn` runs on the event loop thread (pipe watcher callback) — safe to call `kl_async_complete`
+- Workers never call `kl_async_complete` directly — they push to the done queue and write a byte to the pipe
+- All queue access is protected by a single mutex
+
+### Backpressure
+
+`submit()` returns `-1` when `inflight >= done_cap` (where `done_cap = queue_capacity + num_workers`). The `inflight` counter tracks items across all three stages (work queue + executing + done queue), preventing done queue overflow.
+
+### Shutdown Sequence
+
+`kl_thread_pool_free()`:
+1. Set `shutdown = 1`, broadcast `work_avail`
+2. `pthread_join` all workers (waits for in-flight work to complete)
+3. Remove pipe watcher from event loop
+4. Drain done queue → call `done_fn` for each
+5. Drain work queue → call `cancel_fn` for each (if non-NULL)
+6. Close pipe, destroy mutex/condvar, free all memory
+
+### Usage with KlAsyncOp
+
+```c
+typedef struct {
+    KlAsyncOp op;
+    KlServer *server;
+    /* ... blocking work context ... */
+} MyWork;
+
+static void my_work_fn(void *ud) {
+    MyWork *w = ud;
+    /* runs on worker thread — do blocking I/O here */
+}
+
+static void my_done_fn(void *ud) {
+    MyWork *w = ud;
+    /* runs on event loop thread — safe to resume connection */
+    kl_async_complete(w->server, &w->op);
+}
+
+/* In handler: */
+kl_async_suspend(srv, conn, &work->op);
+KlWorkItem item = { .work_fn = my_work_fn, .done_fn = my_done_fn, .user_data = work };
+kl_thread_pool_submit(pool, &item);
+```
 
 ## Testing
 
