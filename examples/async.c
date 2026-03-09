@@ -69,7 +69,7 @@ static void delay_watcher(int fd, KlEventMask ready, void *user_data) {
 
     /* Drain the pipe */
     char buf[1];
-    (void)read(ctx->pipe_fds[0], buf, 1);
+    if (read(ctx->pipe_fds[0], buf, 1) < 0) { /* ignore */ }
 
     /* Remove watcher before completing */
     kl_watcher_del(ctx->server, ctx->pipe_fds[0]);
@@ -85,7 +85,7 @@ static void *delay_thread(void *arg) {
 
     /* Signal the event loop */
     char c = 1;
-    (void)write(ctx->pipe_fds[1], &c, 1);
+    if (write(ctx->pipe_fds[1], &c, 1) < 0) { /* ignore */ }
     return NULL;
 }
 
