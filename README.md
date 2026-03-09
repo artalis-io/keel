@@ -589,19 +589,23 @@ make cppcheck           # cppcheck static analysis
 
 KEEL is a transport library — it handles sockets, parsing, routing, and response serialization. Everything above the HTTP layer is an application concern:
 
-- **Authentication / authorization** — Token validation, session management, OAuth flows, RBAC. These are policy decisions that vary per application. KEEL's middleware interface makes auth trivial to implement (see [Auth middleware example](#writing-custom-middleware)) but deliberately doesn't ship one.
+- **Authentication / authorization** — Token validation, session management, OAuth flows, RBAC. These are policy decisions that vary per application. KEEL's middleware interface makes auth trivial to implement (see [Auth middleware example](#writing-custom-middleware)) but deliberately doesn't ship one. *[Hull](https://github.com/artalis-io/hull) provides session, JWT, and RBAC middleware.*
 
-- **Request logging** — Log format (JSON, CLF, custom), destination (stderr, file, syslog), and filtering are application choices. KEEL provides a pluggable `access_log` callback with method, path, status, body size, and duration — you bring the formatter.
+- **Request logging** — Log format (JSON, CLF, custom), destination (stderr, file, syslog), and filtering are application choices. KEEL provides a pluggable `access_log` callback with method, path, status, body size, and duration — you bring the formatter. *Hull provides a structured JSON logger middleware.*
 
-- **Request IDs / correlation IDs** — These are application-generated identifiers for tracing requests through your system. Use middleware to read/generate X-Request-ID headers and pass them to your logging/observability.
+- **Request IDs / correlation IDs** — These are application-generated identifiers for tracing requests through your system. Use middleware to read/generate X-Request-ID headers and pass them to your logging/observability. *Hull generates and propagates request IDs automatically.*
 
-- **Rate limiting** — Rate limits depend on your authentication layer, your billing tiers, your abuse patterns. Implement as middleware with whatever backing store (in-memory, Redis, database) fits your architecture.
+- **Rate limiting** — Rate limits depend on your authentication layer, your billing tiers, your abuse patterns. Implement as middleware with whatever backing store (in-memory, Redis, database) fits your architecture. *Hull provides configurable rate limiting middleware.*
 
-- **Request validation** — Schema validation, content-type negotiation, input sanitization. These are application-level concerns that depend on your data model.
+- **Request validation** — Schema validation, content-type negotiation, input sanitization. These are application-level concerns that depend on your data model. *Hull provides a validation module with schema-based input checking.*
 
-- **ETag / Last-Modified** — These are application-specific (KEEL doesn't know when your data changes). Use existing `kl_request_header()` / `kl_response_header()` for the headers; your application handles 304 logic.
+- **ETag / Last-Modified** — These are application-specific (KEEL doesn't know when your data changes). Use existing `kl_request_header()` / `kl_response_header()` for the headers; your application handles 304 logic. *Hull handles conditional responses for static assets.*
 
-- **Static file serving** — MIME types, path traversal protection, directory listing are application decisions. See `examples/static_files.c` for the pattern.
+- **Static file serving** — MIME types, path traversal protection, directory listing are application decisions. See `examples/static_files.c` for the pattern. *Hull auto-serves embedded or filesystem static assets with MIME detection.*
+
+- **CSRF protection** — Cross-site request forgery tokens for form-based applications. *Hull provides `hull.middleware.csrf` with automatic token generation and validation.*
+
+- **Idempotency keys** — Safe POST retry via `Idempotency-Key` header. *Hull provides `hull.middleware.idempotency` with configurable TTL and response caching.*
 
 The general principle: if it requires policy decisions that vary between applications, it belongs in application code, not in the transport library. KEEL provides the hooks (middleware, body readers, access log callback) — you provide the policy.
 
