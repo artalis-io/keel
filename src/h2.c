@@ -140,7 +140,17 @@ static int h2_submit_response(KlH2Conn *h2c, KlH2Stream *stream) {
         body_len = res->body_len;
     } else if (res->body_mode == KL_BODY_FILE) {
         /* Read file into temp buffer via pread */
-        if (res->file_size > 0 && res->file_size <= 16 * 1024 * 1024) {
+        if (res->file_size > 16 * 1024 * 1024) {
+            /* File too large for in-memory HTTP/2 response — send 500 */
+            const char *err_names[] = {"content-type"};
+            const char *err_values[] = {"text/plain"};
+            const char *err_body = "File too large for HTTP/2 response";
+            h2c->session->submit_response(h2c->session, stream->stream_id,
+                                           500, err_names, err_values, 1,
+                                           err_body, strlen(err_body));
+            return 0;
+        }
+        if (res->file_size > 0) {
             size_t fsize = (size_t)res->file_size;
             file_buf = kl_malloc(h2c->alloc, fsize);
             if (file_buf) {

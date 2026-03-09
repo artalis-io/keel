@@ -338,6 +338,18 @@ int kl_ws_upgrade(KlConn *c, const char *leftover, size_t leftover_len) {
         return KL_CONN_CLOSED;
     }
 
+    /* Validate: Key must contain only valid base64 characters */
+    for (size_t i = 0; i < 24; i++) {
+        char ch = key[i];
+        if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+              (ch >= '0' && ch <= '9') || ch == '+' || ch == '/' ||
+              ch == '=')) {
+            best_effort_conn_write(c, ws_400_response,
+                                   sizeof(ws_400_response) - 1);
+            return KL_CONN_CLOSED;
+        }
+    }
+
     /* Compute Sec-WebSocket-Accept = Base64(SHA-1(key + magic)) */
     char concat[60 + 1];  /* 24 + 36 + null */
     memcpy(concat, key, key_len);

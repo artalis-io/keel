@@ -20,7 +20,7 @@ ifdef COSMO
   EVENT_SRC = src/event_poll.c
 else
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
-            -fstack-protector-strong -Iinclude -Ivendor/llhttp
+            -D_FORTIFY_SOURCE=2 -fstack-protector-strong -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
 
   # Platform event loop backend
@@ -149,7 +149,7 @@ clean:
 	rm -f src/async.o src/thread_pool.o src/tls_mbedtls.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
-	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart
+	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket
 
 # Debug build with sanitizers: make debug
 DEBUG_CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -g -O0 \
@@ -188,7 +188,10 @@ fuzz/fuzz_parser: fuzz/fuzz_parser.c $(LIB)
 fuzz/fuzz_multipart: fuzz/fuzz_multipart.c $(LIB)
 	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
-fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart
+fuzz/fuzz_websocket: fuzz/fuzz_websocket.c $(LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
+fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket
 
 # API documentation (requires Doxygen)
 docs:

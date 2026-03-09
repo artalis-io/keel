@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include <errno.h>
 
+/* Max retries on zero-byte write before giving up (conn_write_all, writev_all) */
+#define KL_CONN_WRITE_SPIN_MAX 256
+
 /* ── Transport helpers — TLS-aware read/write ────────────────────── */
 
 static inline ssize_t conn_read(KlConn *c, void *buf, size_t len) {
@@ -32,7 +35,7 @@ static inline int conn_write_all(KlConn *c, const void *buf, size_t len) {
         ssize_t nw = conn_write(c, p, remaining);
         if (nw < 0) return -1;
         if (nw == 0) {
-            if (++spins > 256) return -1;
+            if (++spins > KL_CONN_WRITE_SPIN_MAX) return -1;
             continue;
         }
         spins = 0;
