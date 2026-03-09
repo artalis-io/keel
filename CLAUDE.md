@@ -7,7 +7,7 @@ make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
 make test         # build and run all 160 unit tests
-make examples     # build all 6 example programs
+make examples     # build all 10 example programs (11 with TLS)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis
@@ -22,7 +22,7 @@ make clean        # remove all build artifacts
 - `parsers/` — Pluggable parser backends (`parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
-- `examples/` — Example programs (hello, rest_api, streaming_json, static_files, stream_body, multipart).
+- `examples/` — Example programs (hello, rest_api, middleware, static_files, streaming, body_readers, websocket, tls, async, thread_pool, h2_server).
 - `docs/` — Architecture and roadmap documentation.
 
 ## Architecture

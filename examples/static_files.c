@@ -1,3 +1,15 @@
+/*
+ * static_files.c — Static file server with sendfile
+ *
+ * Concepts: kl_response_file (sendfile), MIME type detection, path
+ * traversal guard, wildcard route.
+ *
+ * Build:  make examples
+ * Run:    mkdir -p public && echo "<h1>Hi</h1>" > public/index.html
+ *         ./examples/static_files
+ * Test:   curl localhost:8080/index.html
+ */
+
 #include <keel/keel.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,7 +29,7 @@ static const char *mime_type(const char *path, size_t len) {
     return "application/octet-stream";
 }
 
-void handle_static(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_static(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
 
     /* Reject path traversal — portable check (req->path is not null-terminated) */
@@ -56,9 +68,15 @@ void handle_static(KlRequest *req, KlResponse *res, void *ctx) {
 
 int main(void) {
     KlServer s;
-    KlConfig cfg = {.port = 8080};
+    KlConfig cfg = {
+        .port = 8080,
+        .install_signal_handlers = 1,
+    };
     if (kl_server_init(&s, &cfg) < 0) return 1;
     kl_server_route(&s, "GET", "/*", handle_static, NULL, NULL);
+
+    printf("static_files example serving %s on :8080\n", docroot);
+    printf("  curl localhost:8080/index.html\n");
     kl_server_run(&s);
     kl_server_free(&s);
     return 0;

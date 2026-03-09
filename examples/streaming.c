@@ -1,12 +1,17 @@
+/*
+ * streaming.c — Streaming chunked responses
+ *
+ * Concepts: kl_response_begin_stream, KlWriteFn, chunked transfer-encoding.
+ * Demonstrates how to stream JSON (or any data) without intermediate
+ * buffering. Any serializer that accepts a write callback can plug in.
+ *
+ * Build:  make examples
+ * Run:    ./examples/streaming
+ * Test:   curl localhost:8080/stream
+ */
+
 #include <keel/keel.h>
 #include <stdio.h>
-
-/*
- * Demonstrates KEEL's streaming response API.
- * Any writer that accepts a (void *ctx, const char *data, size_t len)
- * callback can write directly through the response — zero intermediate
- * buffering. This is how sh_json or any custom serializer would integrate.
- */
 
 /* Simple streaming writer — writes directly through KEEL's chunked response */
 static int write_json_key(KlWriteFn write_fn, void *ctx,
@@ -17,7 +22,7 @@ static int write_json_key(KlWriteFn write_fn, void *ctx,
     return write_fn(ctx, buf, (size_t)n);
 }
 
-void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
 
     kl_response_header(res, "Content-Type", "application/json");
@@ -50,9 +55,15 @@ void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
 
 int main(void) {
     KlServer s;
-    KlConfig cfg = {.port = 8080};
+    KlConfig cfg = {
+        .port = 8080,
+        .install_signal_handlers = 1,
+    };
     if (kl_server_init(&s, &cfg) < 0) return 1;
     kl_server_route(&s, "GET", "/stream", handle_stream, NULL, NULL);
+
+    printf("streaming example listening on :8080\n");
+    printf("  curl localhost:8080/stream\n");
     kl_server_run(&s);
     kl_server_free(&s);
     return 0;

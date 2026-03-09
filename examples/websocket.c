@@ -1,3 +1,13 @@
+/*
+ * websocket.c — WebSocket echo server
+ *
+ * Concepts: kl_server_ws, KlWsConfig, on_open/on_message/on_close callbacks.
+ *
+ * Build:  make examples
+ * Run:    ./examples/websocket [port]
+ * Test:   websocat ws://localhost:8080/ws
+ */
+
 #include <keel/keel.h>
 #include <stdio.h>
 #include <stdlib.h>

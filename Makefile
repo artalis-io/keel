@@ -102,31 +102,20 @@ vendor/llhttp/http.o: vendor/llhttp/http.c
 	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
 
 # Examples
-examples/hello: examples/hello.c $(LIB)
+EXAMPLES = examples/hello examples/rest_api examples/middleware \
+           examples/static_files examples/streaming examples/body_readers \
+           examples/websocket examples/async examples/thread_pool \
+           examples/h2_server
+
+examples/%: examples/%.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
-examples/rest_api: examples/rest_api.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+# TLS example — only built when KEEL_TLS=mbedtls
+ifeq ($(KEEL_TLS),mbedtls)
+EXAMPLES += examples/tls
+endif
 
-examples/streaming_json: examples/streaming_json.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
-
-examples/static_files: examples/static_files.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
-
-examples/stream_body: examples/stream_body.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
-
-examples/multipart: examples/multipart.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
-
-examples/websocket_echo: examples/websocket_echo.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
-
-examples/h2_server: examples/h2_server.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
-
-examples: examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
+examples: $(EXAMPLES)
 
 # Tests — relax pedantic warnings triggered by utest.h vendor macros
 TEST_SRC = $(wildcard tests/test_*.c)
@@ -148,7 +137,7 @@ clean:
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f src/async.o src/thread_pool.o src/tls_mbedtls.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
-	rm -f examples/hello examples/rest_api examples/streaming_json examples/static_files examples/stream_body examples/multipart examples/websocket_echo examples/h2_server
+	rm -f examples/hello examples/rest_api examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/tls examples/async examples/thread_pool examples/h2_server
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket
 
 # Debug build with sanitizers: make debug
