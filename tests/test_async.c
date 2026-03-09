@@ -18,12 +18,14 @@ static int set_nonblocking(int fd) {
 }
 
 /* Dispatch events — mirrors the tagged-pointer logic in kl_server_run */
-static void dispatch_events(KlEvent *events, int n) {
+static void dispatch_events(KlServer *s, KlEvent *events, int n) {
     for (int i = 0; i < n; i++) {
         uintptr_t tag = (uintptr_t)events[i].udata;
         if (tag & 1) {
             KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
-            w->on_ready(w->fd, events[i].ready, w->user_data);
+            int wfd = w->fd;
+            w->on_ready(wfd, events[i].ready, w->user_data);
+            kl_watcher_rearm(s, wfd);
         }
     }
 }
@@ -121,7 +123,7 @@ UTEST(async, watcher_add_fires_on_read) {
     KlEvent events[8];
     int n = kl_event_wait(&s.loop, events, 8, 100);
     ASSERT_TRUE(n > 0);
-    dispatch_events(events, n);
+    dispatch_events(&s, events, n);
 
     ASSERT_EQ(ctx.called, 1);
     ASSERT_EQ(ctx.got_fd, fds[0]);
@@ -152,7 +154,7 @@ UTEST(async, watcher_mod_changes_interest) {
     KlEvent events[8];
     int n = kl_event_wait(&s.loop, events, 8, 100);
     ASSERT_TRUE(n > 0);
-    dispatch_events(events, n);
+    dispatch_events(&s, events, n);
 
     ASSERT_EQ(ctx.called, 1);
     ASSERT_EQ(ctx.got_fd, fds[0]);
@@ -185,7 +187,7 @@ UTEST(async, watcher_del_stops_events) {
 
     KlEvent events[8];
     int n = kl_event_wait(&s.loop, events, 8, 50);
-    dispatch_events(events, n);
+    dispatch_events(&s, events, n);
 
     ASSERT_EQ(ctx.called, 0);
 
@@ -223,7 +225,7 @@ UTEST(async, watcher_multiple_fds) {
     KlEvent events[16];
     for (int attempt = 0; attempt < 3; attempt++) {
         int n = kl_event_wait(&s.loop, events, 16, 100);
-        dispatch_events(events, n);
+        dispatch_events(&s, events, n);
     }
 
     ASSERT_TRUE(ctx1.called >= 1);
@@ -618,7 +620,7 @@ UTEST(async, watcher_completes_suspended_conn) {
     KlEvent events[16];
     int n = kl_event_wait(&s.loop, events, 16, 100);
     ASSERT_TRUE(n > 0);
-    dispatch_events(events, n);
+    dispatch_events(&s, events, n);
 
     /* Verify the async op completed */
     ASSERT_EQ(actx.resume_called, 1);

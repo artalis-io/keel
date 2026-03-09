@@ -9,12 +9,14 @@
 
 /* ── Helpers (same pattern as test_async.c) ───────────────────────── */
 
-static void dispatch_events(KlEvent *events, int n) {
+static void dispatch_events(KlServer *s, KlEvent *events, int n) {
     for (int i = 0; i < n; i++) {
         uintptr_t tag = (uintptr_t)events[i].udata;
         if (tag & 1) {
             KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
-            w->on_ready(w->fd, events[i].ready, w->user_data);
+            int wfd = w->fd;
+            w->on_ready(wfd, events[i].ready, w->user_data);
+            kl_watcher_rearm(s, wfd);
         }
     }
 }
@@ -42,7 +44,7 @@ static void pump_until(KlServer *s, atomic_int *done_count, int target, int time
     while (atomic_load(done_count) < target && elapsed < timeout_ms) {
         KlEvent events[16];
         int n = kl_event_wait(&s->loop, events, 16, 10);
-        if (n > 0) dispatch_events(events, n);
+        if (n > 0) dispatch_events(s, events, n);
         elapsed += 10;
     }
 }
@@ -474,7 +476,7 @@ UTEST(thread_pool, stress_many_items) {
             /* Queue full — pump event loop to drain done items */
             KlEvent events[16];
             int n = kl_event_wait(&s.loop, events, 16, 10);
-            if (n > 0) dispatch_events(events, n);
+            if (n > 0) dispatch_events(&s, events, n);
         }
     }
 
