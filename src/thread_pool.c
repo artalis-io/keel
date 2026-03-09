@@ -80,7 +80,8 @@ static void *worker_thread(void *arg)
 
         /* Signal event loop */
         char c = 1;
-        (void)write(pool->pipe_wr, &c, 1);
+        ssize_t wr = write(pool->pipe_wr, &c, 1);
+        (void)wr;
 
         pthread_mutex_lock(&pool->mutex);
     }
@@ -97,7 +98,8 @@ static void thread_pool_on_pipe(int fd, KlEventMask ready, void *user_data)
 
     /* Drain pipe — exact count doesn't matter */
     char buf[64];
-    (void)read(fd, buf, sizeof(buf));
+    ssize_t rd = read(fd, buf, sizeof(buf));
+    (void)rd;
 
     pthread_mutex_lock(&pool->mutex);
     while (pool->done_count > 0) {
