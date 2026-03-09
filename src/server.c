@@ -302,7 +302,11 @@ int kl_server_run(KlServer *s) {
             uintptr_t tag = (uintptr_t)events[i].udata;
             if (tag & 1) {
                 KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
-                w->on_ready(w->fd, events[i].ready, w->user_data);
+                int wfd = w->fd;
+                w->on_ready(wfd, events[i].ready, w->user_data);
+                /* Re-arm for one-shot backends (io_uring POLL_ADD).
+                 * Safe no-op if callback removed the watcher. */
+                kl_watcher_rearm(s, wfd);
                 continue;
             }
 

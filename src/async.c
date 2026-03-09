@@ -22,6 +22,7 @@ int kl_watcher_add(KlServer *s, int fd, KlEventMask mask,
     if (!w) return -1;
 
     w->fd = fd;
+    w->mask = mask;
     w->on_ready = on_ready;
     w->user_data = user_data;
     w->next = s->watchers;
@@ -43,7 +44,18 @@ int kl_watcher_mod(KlServer *s, int fd, KlEventMask mask) {
     while (w && w->fd != fd) w = w->next;
     if (!w) return -1;
 
+    w->mask = mask;
     return kl_event_mod(&s->loop, fd, mask, watcher_tag(w));
+}
+
+void kl_watcher_rearm(KlServer *s, int fd) {
+    if (!s || fd < 0) return;
+
+    KlWatcher *w = s->watchers;
+    while (w && w->fd != fd) w = w->next;
+    if (!w) return;
+
+    kl_event_mod(&s->loop, fd, w->mask, watcher_tag(w));
 }
 
 void kl_watcher_del(KlServer *s, int fd) {

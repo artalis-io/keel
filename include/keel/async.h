@@ -22,6 +22,7 @@ typedef void (*KlWatcherFn)(int fd, KlEventMask ready, void *user_data);
  */
 typedef struct KlWatcher {
     int fd;
+    KlEventMask mask;
     KlWatcherFn on_ready;
     void *user_data;
     struct KlWatcher *next;   /* server's watcher list */
@@ -49,6 +50,15 @@ int  kl_watcher_mod(KlServer *s, int fd, KlEventMask mask);
  * @brief Remove a watcher and deregister its FD from the event loop.
  */
 void kl_watcher_del(KlServer *s, int fd);
+
+/**
+ * @brief Re-arm a watcher after its callback fires.
+ *
+ * Required for one-shot backends (io_uring POLL_ADD).  Safe no-op if
+ * the watcher was removed during the callback.  On persistent backends
+ * (epoll, kqueue) this is a harmless re-register.
+ */
+void kl_watcher_rearm(KlServer *s, int fd);
 
 /* ── KlAsyncOp — connection suspension ────────────────────────────── */
 
