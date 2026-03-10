@@ -129,9 +129,8 @@ void kl_async_complete(KlServer *s, KlAsyncOp *op) {
     KlConnState new_state = conn->state;
 
     /* Try immediate send if response is ready */
-    if (new_state == KL_CONN_SENDING) {
+    if (new_state == KL_CONN_SENDING)
         new_state = kl_conn_on_writable(conn);
-    }
 
     /* Re-register FD with appropriate mask */
     if (new_state == KL_CONN_SENDING) {

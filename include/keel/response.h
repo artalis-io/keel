@@ -34,6 +34,10 @@ typedef struct KlResponse {
     const char *body;
     size_t body_len;
 
+    /* Owned body copy (for kl_response_body_copy) */
+    char *body_owned;
+    size_t body_owned_size;
+
     /* KL_BODY_FILE */
     int file_fd;
     off_t file_size;
@@ -77,6 +81,19 @@ void kl_response_header(KlResponse *res, const char *name, const char *value);
  * @param len  Length in bytes.
  */
 void kl_response_body(KlResponse *res, const char *data, size_t len);
+
+/**
+ * @brief Set a buffered body by copying data into an owned buffer.
+ *
+ * Unlike kl_response_body(), the data is copied into a response-owned
+ * allocation that is freed by kl_response_reset() / kl_response_free().
+ * Safe when the source may be freed before the response is sent.
+ *
+ * @param res  Response.
+ * @param data Body bytes (copied).
+ * @param len  Length in bytes.
+ */
+void kl_response_body_copy(KlResponse *res, const char *data, size_t len);
 
 /**
  * @brief Set a file body for zero-copy sendfile transfer.

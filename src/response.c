@@ -138,6 +138,10 @@ void kl_response_reset(KlResponse *res) {
     if (res->file_fd >= 0) {
         close(res->file_fd);
     }
+    /* Free owned body copy if any */
+    if (res->body_owned) {
+        kl_free(res->alloc, res->body_owned, res->body_owned_size);
+    }
 
     /* Fast reinit for keep-alive — reuses header buffer, no alloc */
     char *buf = res->hdr_buf;
@@ -160,6 +164,11 @@ void kl_response_free(KlResponse *res) {
     if (res->file_fd >= 0) {
         close(res->file_fd);
         res->file_fd = -1;
+    }
+    if (res->body_owned) {
+        kl_free(res->alloc, res->body_owned, res->body_owned_size);
+        res->body_owned = NULL;
+        res->body_owned_size = 0;
     }
     if (res->hdr_buf) {
         kl_free(res->alloc, res->hdr_buf, res->hdr_cap);
@@ -196,6 +205,33 @@ void kl_response_body(KlResponse *res, const char *data, size_t len) {
     if (len > 0 && !data) return;
     res->body_mode = KL_BODY_BUFFER;
     res->body = data;
+    res->body_len = len;
+}
+
+void kl_response_body_copy(KlResponse *res, const char *data, size_t len) {
+    if (len > 0 && !data) return;
+
+    /* Free previous owned body if any */
+    if (res->body_owned) {
+        kl_free(res->alloc, res->body_owned, res->body_owned_size);
+        res->body_owned = NULL;
+        res->body_owned_size = 0;
+    }
+
+    if (len == 0) {
+        res->body_mode = KL_BODY_BUFFER;
+        res->body = "";
+        res->body_len = 0;
+        return;
+    }
+
+    res->body_owned = kl_malloc(res->alloc, len);
+    if (!res->body_owned) return;
+    res->body_owned_size = len;
+    memcpy(res->body_owned, data, len);
+
+    res->body_mode = KL_BODY_BUFFER;
+    res->body = res->body_owned;
     res->body_len = len;
 }
 

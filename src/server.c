@@ -155,6 +155,14 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         }
     }
 
+    /* Init event loop — must happen before thread pool / watcher registration */
+    s->loop.alloc = alloc;
+    if (kl_event_init(&s->loop) < 0) {
+        kl_conn_pool_free(&s->pool);
+        kl_router_free(&s->router);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -236,20 +244,11 @@ int kl_server_run(KlServer *s) {
         return -1;
     }
 
-    /* Init event loop */
-    s->loop.alloc = alloc;
-    if (kl_event_init(&s->loop) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "event_init");
-        close(s->listen_fd);
-        s->listen_fd = -1;
-        return -1;
-    }
-
     /* Register listen socket for read events */
     if (kl_event_add(&s->loop, s->listen_fd, KL_EVENT_READ, NULL) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "event_add listen");
         close(s->listen_fd);
-        kl_event_close(&s->loop);
+        s->listen_fd = -1;
         return -1;
     }
 
