@@ -13,9 +13,9 @@
 #define KL_READ_BUF_SIZE 8192
 
 typedef struct KlTls KlTls;
-typedef struct KlWsConn KlWsConn;
-typedef struct KlH2Conn KlH2Conn;
-typedef struct KlH2Config KlH2Config;
+typedef struct KlWsServerConn KlWsServerConn;
+typedef struct KlH2ServerConn KlH2ServerConn;
+typedef struct KlH2ServerConfig KlH2ServerConfig;
 
 typedef enum {
     KL_CONN_TLS_HANDSHAKE,   /* TLS handshake in progress */
@@ -59,11 +59,11 @@ typedef struct KlConn {
     int tls_want;               /* KL_EVENT_READ or KL_EVENT_WRITE during handshake */
 
     /* WebSocket state (NULL until upgrade, heap-allocated) */
-    KlWsConn *ws;
+    KlWsServerConn *ws;
 
     /* HTTP/2 state (NULL until upgrade, heap-allocated) */
-    KlH2Conn *h2;
-    KlH2Config *h2_config;   /* set once at pool init, NULL if disabled */
+    KlH2ServerConn *h2;
+    KlH2ServerConfig *h2_config;   /* set once at pool init, NULL if disabled */
     KlRouter *router;        /* back-pointer to server router */
     size_t max_body_size;    /* discard-path body limit (from KlConfig) */
 

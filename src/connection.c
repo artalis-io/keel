@@ -3,8 +3,8 @@
 #include <keel/chunked.h>
 #include <keel/event.h>
 #include <keel/tls.h>
-#include <keel/websocket.h>
-#include <keel/h2.h>
+#include <keel/websocket_server.h>
+#include <keel/h2_server.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -99,9 +99,9 @@ static void conn_cleanup_body_reader(KlConn *c) {
 
 void kl_conn_release(KlConnPool *pool, KlConn *c) {
     /* WebSocket cleanup — notify on_close if needed, free state */
-    kl_ws_cleanup(c);
+    kl_ws_server_cleanup(c);
     /* HTTP/2 cleanup — destroy streams, session, free state */
-    kl_h2_cleanup(c);
+    kl_h2_server_cleanup(c);
 
     /* TLS shutdown before close(fd) — best-effort close_notify.
      * Retry on WANT_WRITE to flush the close_notify record.
@@ -135,8 +135,8 @@ void kl_conn_pool_free(KlConnPool *pool) {
     if (pool->conns) {
         /* Close any active connections */
         for (int i = 0; i < pool->capacity; i++) {
-            kl_ws_cleanup(&pool->conns[i]);
-            kl_h2_cleanup(&pool->conns[i]);
+            kl_ws_server_cleanup(&pool->conns[i]);
+            kl_h2_server_cleanup(&pool->conns[i]);
             if (pool->conns[i].req.body_reader) {
                 pool->conns[i].req.body_reader->destroy(
                     pool->conns[i].req.body_reader);
@@ -264,7 +264,7 @@ KlConnState kl_conn_on_handshake(KlConn *c) {
                 const char *proto = c->tls->alpn_protocol(c->tls);
                 if (proto && proto[0] == 'h' && proto[1] == '2' &&
                     proto[2] == '\0') {
-                    int hr = kl_h2_upgrade(c, c->router, c->h2_config,
+                    int hr = kl_h2_server_upgrade(c, c->router, c->h2_config,
                                            NULL, 0);
                     if (hr == KL_CONN_HTTP2) {
                         c->state = KL_CONN_HTTP2;
@@ -315,7 +315,7 @@ read_more_headers: ;
                 "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
             if (c->read_len >= 24) {
                 if (memcmp(c->read_buf, h2_preface, 24) == 0) {
-                    c->state = (KlConnState)kl_h2_upgrade(
+                    c->state = (KlConnState)kl_h2_server_upgrade(
                         c, router, c->h2_config,
                         c->read_buf + 24, c->read_len - 24);
                     return c->state;
@@ -388,7 +388,7 @@ read_more_headers: ;
             /* WebSocket upgrade — branch before body reading */
             if (c->route_result == 200 && c->route &&
                 c->route->ws_config) {
-                c->state = (KlConnState)kl_ws_upgrade(
+                c->state = (KlConnState)kl_ws_server_upgrade(
                     c, c->read_buf + consumed, leftover);
                 return c->state;
             }
@@ -400,7 +400,7 @@ read_more_headers: ;
                     &c->req, "Upgrade", &ug_len);
                 if (ug && ug_len == 3 &&
                     strncasecmp(ug, "h2c", 3) == 0) {
-                    c->state = (KlConnState)kl_h2_upgrade_from_h1(
+                    c->state = (KlConnState)kl_h2_server_upgrade_from_h1(
                         c, router, c->h2_config,
                         c->read_buf + consumed, leftover);
                     return c->state;
@@ -570,7 +570,7 @@ read_more_headers: ;
             /* WebSocket upgrade — branch before handler */
             if (c->route_result == 200 && c->route &&
                 c->route->ws_config) {
-                c->state = (KlConnState)kl_ws_upgrade(c, NULL, 0);
+                c->state = (KlConnState)kl_ws_server_upgrade(c, NULL, 0);
                 return c->state;
             }
 
@@ -581,7 +581,7 @@ read_more_headers: ;
                     &c->req, "Upgrade", &ug_len);
                 if (ug && ug_len == 3 &&
                     strncasecmp(ug, "h2c", 3) == 0) {
-                    c->state = (KlConnState)kl_h2_upgrade_from_h1(
+                    c->state = (KlConnState)kl_h2_server_upgrade_from_h1(
                         c, router, c->h2_config, NULL, 0);
                     return c->state;
                 }

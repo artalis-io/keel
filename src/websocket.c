@@ -1,4 +1,5 @@
 #include <keel/websocket.h>
+#include <keel/websocket_server.h>
 #include <keel/connection.h>
 #include <keel/request.h>
 #include <string.h>
@@ -9,42 +10,29 @@
 #include "base64.h"
 #include "utf8.h"
 
-/* ── WebSocket opcodes (RFC 6455 Section 5.2) ────────────────────── */
-
-#define WS_OP_CONTINUATION 0x0
-#define WS_OP_TEXT         0x1
-#define WS_OP_BINARY       0x2
-#define WS_OP_CLOSE        0x8
-#define WS_OP_PING         0x9
-#define WS_OP_PONG         0xA
-
 /* ── Default limits ──────────────────────────────────────────────── */
 
 #define WS_DEFAULT_MAX_MESSAGE  (1024 * 1024)  /* 1 MB */
 #define WS_DEFAULT_MAX_FRAME    (64 * 1024)    /* 64 KB */
 #define WS_DEFAULT_CLOSE_TIMEOUT 5000          /* 5 seconds */
 
-/* ── RFC 6455 magic GUID ─────────────────────────────────────────── */
-
-static const char ws_magic[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-
 /* ── Config ──────────────────────────────────────────────────────── */
 
-void kl_ws_config_init(KlWsConfig *config) {
+void kl_ws_server_config_init(KlWsServerConfig *config) {
     memset(config, 0, sizeof(*config));
 }
 
-static size_t ws_max_message(const KlWsConfig *cfg) {
+static size_t ws_max_message(const KlWsServerConfig *cfg) {
     return cfg->max_message_size ? cfg->max_message_size
                                 : WS_DEFAULT_MAX_MESSAGE;
 }
 
-static size_t ws_max_frame(const KlWsConfig *cfg) {
+static size_t ws_max_frame(const KlWsServerConfig *cfg) {
     return cfg->max_frame_size ? cfg->max_frame_size
                                : WS_DEFAULT_MAX_FRAME;
 }
 
-static int ws_close_timeout(const KlWsConfig *cfg) {
+static int ws_close_timeout(const KlWsServerConfig *cfg) {
     return cfg->close_timeout_ms ? cfg->close_timeout_ms
                                  : WS_DEFAULT_CLOSE_TIMEOUT;
 }
@@ -77,7 +65,7 @@ int kl_ws_frame_parse(KlWsFrameParser *fp, const uint8_t *data,
             if (fp->header_len == 2) {
                 fp->fin = (fp->header_buf[0] >> 7) & 1;
                 int rsv = (fp->header_buf[0] >> 4) & 7;
-                fp->opcode = fp->header_buf[0] & 0x0F;
+                fp->opcode = fp->header_buf[0] & KL_WS_OPCODE_MASK;
                 fp->masked = (fp->header_buf[1] >> 7) & 1;
                 uint8_t len7 = fp->header_buf[1] & 0x7F;
 
@@ -88,7 +76,7 @@ int kl_ws_frame_parse(KlWsFrameParser *fp, const uint8_t *data,
                 size_t extra = 0;
                 if (len7 == 126) extra = 2;
                 else if (len7 == 127) extra = 8;
-                if (fp->masked) extra += 4;
+                if (fp->masked) extra += KL_WS_MASK_KEY_LEN;
                 fp->header_need = 2 + extra;
             }
         }
@@ -120,7 +108,8 @@ int kl_ws_frame_parse(KlWsFrameParser *fp, const uint8_t *data,
 
         /* Extract mask key */
         if (fp->masked) {
-            memcpy(fp->mask_key, fp->header_buf + mask_offset, 4);
+            memcpy(fp->mask_key, fp->header_buf + mask_offset,
+                   KL_WS_MASK_KEY_LEN);
         }
 
         /* Control frames: max 125 bytes, must not be fragmented */
@@ -186,13 +175,13 @@ static void ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4],
 
 /* ── Send frame ──────────────────────────────────────────────────── */
 
-static int ws_send_frame(KlWsConn *ws, int opcode, const char *data,
+static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
                          size_t len) {
     uint8_t hdr[10];
     size_t hdr_len;
 
     /* FIN=1, no RSV, opcode — server frames are never masked */
-    hdr[0] = (uint8_t)(0x80 | (opcode & 0x0F));
+    hdr[0] = (uint8_t)(KL_WS_FIN_BIT | (opcode & KL_WS_OPCODE_MASK));
 
     if (len < 126) {
         hdr[1] = (uint8_t)len;
@@ -225,24 +214,24 @@ static int ws_send_frame(KlWsConn *ws, int opcode, const char *data,
 
 /* ── Public send functions ───────────────────────────────────────── */
 
-int kl_ws_send_text(KlWsConn *ws, const char *data, size_t len) {
+int kl_ws_server_send_text(KlWsServerConn *ws, const char *data, size_t len) {
     if (ws->close_sent) return -1;
-    return ws_send_frame(ws, WS_OP_TEXT, data, len);
+    return ws_send_frame(ws, KL_WS_OP_TEXT, data, len);
 }
 
-int kl_ws_send_binary(KlWsConn *ws, const char *data, size_t len) {
+int kl_ws_server_send_binary(KlWsServerConn *ws, const char *data, size_t len) {
     if (ws->close_sent) return -1;
-    return ws_send_frame(ws, WS_OP_BINARY, data, len);
+    return ws_send_frame(ws, KL_WS_OP_BINARY, data, len);
 }
 
-int kl_ws_send_ping(KlWsConn *ws, const char *data, size_t len) {
+int kl_ws_server_send_ping(KlWsServerConn *ws, const char *data, size_t len) {
     if (ws->close_sent) return -1;
     if (len > 125) return -1;
-    return ws_send_frame(ws, WS_OP_PING, data, len);
+    return ws_send_frame(ws, KL_WS_OP_PING, data, len);
 }
 
-int kl_ws_close(KlWsConn *ws, uint16_t code, const char *reason,
-                size_t reason_len) {
+int kl_ws_server_close(KlWsServerConn *ws, uint16_t code, const char *reason,
+                        size_t reason_len) {
     if (ws->close_sent) return 0;
     ws->close_sent = 1;
     ws->close_code = code;
@@ -263,7 +252,7 @@ int kl_ws_close(KlWsConn *ws, uint16_t code, const char *reason,
         }
     }
 
-    return ws_send_frame(ws, WS_OP_CLOSE, (const char *)buf, plen);
+    return ws_send_frame(ws, KL_WS_OP_CLOSE, (const char *)buf, plen);
 }
 
 /* ── Handshake ───────────────────────────────────────────────────── */
@@ -294,8 +283,9 @@ static const char ws_400_response[] =
     "Connection: close\r\n"
     "\r\n";
 
-int kl_ws_upgrade(KlConn *c, const char *leftover, size_t leftover_len) {
-    KlWsConfig *cfg = c->route->ws_config;
+int kl_ws_server_upgrade(KlConn *c, const char *leftover,
+                          size_t leftover_len) {
+    KlWsServerConfig *cfg = c->route->ws_config;
 
     /* Validate required headers */
     size_t conn_len = 0, upgrade_len = 0, ver_len = 0, key_len = 0;
@@ -353,7 +343,7 @@ int kl_ws_upgrade(KlConn *c, const char *leftover, size_t leftover_len) {
     /* Compute Sec-WebSocket-Accept = Base64(SHA-1(key + magic)) */
     char concat[60 + 1];  /* 24 + 36 + null */
     memcpy(concat, key, key_len);
-    memcpy(concat + key_len, ws_magic, 36);
+    memcpy(concat + key_len, KL_WS_MAGIC_GUID, 36);
     concat[key_len + 36] = '\0';
 
     uint8_t sha1_out[20];
@@ -384,7 +374,7 @@ int kl_ws_upgrade(KlConn *c, const char *leftover, size_t leftover_len) {
     }
 
     /* Allocate WebSocket connection state */
-    KlWsConn *ws = kl_malloc(c->alloc, sizeof(KlWsConn));
+    KlWsServerConn *ws = kl_malloc(c->alloc, sizeof(KlWsServerConn));
     if (!ws) return KL_CONN_CLOSED;
     memset(ws, 0, sizeof(*ws));
 
@@ -404,8 +394,8 @@ int kl_ws_upgrade(KlConn *c, const char *leftover, size_t leftover_len) {
     /* Feed any leftover bytes after HTTP headers into the frame parser */
     if (leftover_len > 0) {
         /* Process leftover data as WebSocket frames */
-        return kl_ws_on_readable_data(c, (uint8_t *)leftover,
-                                       leftover_len);
+        return kl_ws_server_on_readable_data(c, (uint8_t *)leftover,
+                                              leftover_len);
     }
 
     return KL_CONN_WEBSOCKET;
@@ -413,15 +403,15 @@ int kl_ws_upgrade(KlConn *c, const char *leftover, size_t leftover_len) {
 
 /* ── Message delivery ────────────────────────────────────────────── */
 
-static int ws_deliver_message(KlWsConn *ws) {
+static int ws_deliver_message(KlWsServerConn *ws) {
     if (!ws->config->callbacks.on_message) return 0;
 
-    int is_binary = (ws->msg_opcode == WS_OP_BINARY);
+    int is_binary = (ws->msg_opcode == KL_WS_OP_BINARY);
 
     /* UTF-8 validation for text messages */
     if (!is_binary) {
         if (ws->utf8_state != KL_UTF8_ACCEPT) {
-            kl_ws_close(ws, 1007, "Invalid UTF-8", 13);
+            kl_ws_server_close(ws, 1007, "Invalid UTF-8", 13);
             return -1;
         }
     }
@@ -438,7 +428,7 @@ static int ws_deliver_message(KlWsConn *ws) {
 }
 
 /* Grow message buffer to fit additional data */
-static int ws_msg_grow(KlWsConn *ws, size_t additional) {
+static int ws_msg_grow(KlWsServerConn *ws, size_t additional) {
     if (additional > SIZE_MAX - ws->msg_len) return -1;
     size_t needed = ws->msg_len + additional;
     if (needed > ws_max_message(ws->config)) return -1;
@@ -462,7 +452,7 @@ static int ws_msg_grow(KlWsConn *ws, size_t additional) {
 
 /* ── Control frame handling ──────────────────────────────────────── */
 
-static int ws_handle_close(KlWsConn *ws, const uint8_t *payload,
+static int ws_handle_close(KlWsServerConn *ws, const uint8_t *payload,
                             size_t len) {
     ws->close_received = 1;
     uint16_t code = 1005;  /* No Status Received (default) */
@@ -479,7 +469,7 @@ static int ws_handle_close(KlWsConn *ws, const uint8_t *payload,
 
     if (!ws->close_sent) {
         /* Echo close back */
-        kl_ws_close(ws, code, reason, reason_len);
+        kl_ws_server_close(ws, code, reason, reason_len);
     }
 
     /* Notify user */
@@ -490,27 +480,22 @@ static int ws_handle_close(KlWsConn *ws, const uint8_t *payload,
     return KL_CONN_CLOSED;
 }
 
-static int ws_handle_ping(KlWsConn *ws, const uint8_t *payload,
+static int ws_handle_ping(KlWsServerConn *ws, const uint8_t *payload,
                            size_t len) {
     if (ws->config->callbacks.on_ping) {
         ws->config->callbacks.on_ping(ws, (const char *)payload, len,
                                        ws->config->user_data);
     } else {
         /* Auto-pong */
-        ws_send_frame(ws, WS_OP_PONG, (const char *)payload, len);
+        ws_send_frame(ws, KL_WS_OP_PONG, (const char *)payload, len);
     }
     return 0;
 }
 
 /* ── Frame dispatch ──────────────────────────────────────────────── */
 
-/*
- * Process received WebSocket data.
- * Called with raw bytes from the socket (after TLS decryption).
- * Returns new connection state.
- */
-int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
-    KlWsConn *ws = c->ws;
+int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
+    KlWsServerConn *ws = c->ws;
     size_t pos = 0;
 
     while (pos < len) {
@@ -523,7 +508,7 @@ int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
                                     &consumed);
 
         if (rc < 0) {
-            kl_ws_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
+            kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
             return KL_CONN_CLOSED;
         }
 
@@ -543,7 +528,7 @@ int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
 
             /* Frame size check */
             if (ws->frame.payload_len > ws_max_frame(ws->config)) {
-                kl_ws_close(ws, KL_WS_TOO_BIG, NULL, 0);
+                kl_ws_server_close(ws, KL_WS_TOO_BIG, NULL, 0);
                 return KL_CONN_CLOSED;
             }
 
@@ -553,11 +538,11 @@ int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
             if (opcode >= 0x8) {
                 if (rc == 1) {
                     /* Control frame complete */
-                    if (opcode == WS_OP_CLOSE) {
+                    if (opcode == KL_WS_OP_CLOSE) {
                         int state = ws_handle_close(ws, payload_data,
                                                      payload_consumed);
                         return state;
-                    } else if (opcode == WS_OP_PING) {
+                    } else if (opcode == KL_WS_OP_PING) {
                         ws_handle_ping(ws, payload_data, payload_consumed);
                     }
                     /* Pong: ignore (RFC 6455 Section 5.5.3) */
@@ -565,13 +550,13 @@ int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
                 /* Control frames must fit in one parse since max 125 bytes */
             } else {
                 /* Data frame — reassemble */
-                int is_first = (opcode != WS_OP_CONTINUATION);
+                int is_first = (opcode != KL_WS_OP_CONTINUATION);
 
                 if (is_first) {
                     /* Start of new message */
                     if (ws->msg_len > 0 && ws->msg_opcode != 0) {
                         /* Previous message not finished — protocol error */
-                        kl_ws_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
+                        kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
                         return KL_CONN_CLOSED;
                     }
                     ws->msg_opcode = opcode;
@@ -579,13 +564,13 @@ int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
                     ws->utf8_state = KL_UTF8_ACCEPT;
                 } else if (ws->msg_opcode == 0) {
                     /* Continuation without a start frame */
-                    kl_ws_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
+                    kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
                     return KL_CONN_CLOSED;
                 }
 
                 /* Append to message buffer */
                 if (ws_msg_grow(ws, payload_consumed) < 0) {
-                    kl_ws_close(ws, KL_WS_TOO_BIG, NULL, 0);
+                    kl_ws_server_close(ws, KL_WS_TOO_BIG, NULL, 0);
                     return KL_CONN_CLOSED;
                 }
                 memcpy(ws->msg_buf + ws->msg_len, payload_data,
@@ -593,11 +578,11 @@ int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
                 ws->msg_len += payload_consumed;
 
                 /* Incremental UTF-8 validation for text messages */
-                if (ws->msg_opcode == WS_OP_TEXT) {
+                if (ws->msg_opcode == KL_WS_OP_TEXT) {
                     kl_utf8_validate(&ws->utf8_state, payload_data,
                                       payload_consumed);
                     if (ws->utf8_state == KL_UTF8_REJECT) {
-                        kl_ws_close(ws, 1007, "Invalid UTF-8", 13);
+                        kl_ws_server_close(ws, 1007, "Invalid UTF-8", 13);
                         return KL_CONN_CLOSED;
                     }
                 }
@@ -612,13 +597,13 @@ int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
             /* Frame complete with no payload in this chunk (e.g., empty
              * control frame or already consumed) */
             int opcode = ws->frame.opcode;
-            if (opcode == WS_OP_CLOSE) {
+            if (opcode == KL_WS_OP_CLOSE) {
                 return ws_handle_close(ws, NULL, 0);
-            } else if (opcode == WS_OP_PING) {
+            } else if (opcode == KL_WS_OP_PING) {
                 ws_handle_ping(ws, NULL, 0);
             } else if (opcode < 0x8 && ws->frame.fin) {
                 /* Empty final frame or unfragmented empty message */
-                if (opcode != WS_OP_CONTINUATION) {
+                if (opcode != KL_WS_OP_CONTINUATION) {
                     ws->msg_opcode = opcode;
                     ws->msg_len = 0;
                     ws->utf8_state = KL_UTF8_ACCEPT;
@@ -648,7 +633,7 @@ int kl_ws_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
 
 /* ── Readable event ──────────────────────────────────────────────── */
 
-int kl_ws_on_readable(KlConn *c) {
+int kl_ws_server_on_readable(KlConn *c) {
     c->last_active_ms = kl_monotonic_ms();
 
     uint8_t buf[KL_READ_BUF_SIZE];
@@ -658,14 +643,14 @@ int kl_ws_on_readable(KlConn *c) {
         return KL_CONN_CLOSED;
     }
 
-    return kl_ws_on_readable_data(c, buf, (size_t)nr);
+    return kl_ws_server_on_readable_data(c, buf, (size_t)nr);
 }
 
 /* ── Cleanup ─────────────────────────────────────────────────────── */
 
-void kl_ws_cleanup(KlConn *c) {
+void kl_ws_server_cleanup(KlConn *c) {
     if (!c->ws) return;
-    KlWsConn *ws = c->ws;
+    KlWsServerConn *ws = c->ws;
 
     /* Notify on_close if we haven't received a close frame */
     if (!ws->close_received && ws->config->callbacks.on_close)
@@ -674,20 +659,20 @@ void kl_ws_cleanup(KlConn *c) {
 
     if (ws->msg_buf)
         kl_free(ws->alloc, ws->msg_buf, ws->msg_cap);
-    kl_free(c->alloc, ws, sizeof(KlWsConn));
+    kl_free(c->alloc, ws, sizeof(KlWsServerConn));
     c->ws = NULL;
 }
 
 /* ── Drain close ─────────────────────────────────────────────────── */
 
-void kl_ws_drain_close(KlConn *c) {
+void kl_ws_server_drain_close(KlConn *c) {
     if (!c->ws || c->ws->close_sent) return;
-    kl_ws_close(c->ws, KL_WS_GOING_AWAY, "Server shutting down", 20);
+    kl_ws_server_close(c->ws, KL_WS_GOING_AWAY, "Server shutting down", 20);
 }
 
 /* ── Close timeout check ─────────────────────────────────────────── */
 
-int kl_ws_check_close_timeout(const KlConn *c, uint64_t now) {
+int kl_ws_server_check_close_timeout(const KlConn *c, uint64_t now) {
     if (!c->ws) return 0;
     if (c->ws->close_sent && !c->ws->close_received &&
         now >= c->ws->close_deadline_ms) {

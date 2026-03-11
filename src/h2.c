@@ -1,4 +1,4 @@
-#include <keel/h2.h>
+#include <keel/h2_server.h>
 #include <keel/connection.h>
 #include <keel/router.h>
 #include <keel/body_reader.h>
@@ -16,7 +16,8 @@
  * Stream management (static helpers)
  * ═══════════════════════════════════════════════════════════════════ */
 
-static KlH2Stream *h2_stream_find(KlH2Conn *h2c, uint32_t stream_id) {
+static KlH2ServerStream *h2_stream_find(KlH2ServerConn *h2c,
+                                         uint32_t stream_id) {
     for (int i = 0; i < h2c->num_streams; i++) {
         if (h2c->streams[i].stream_id == stream_id)
             return &h2c->streams[i];
@@ -24,18 +25,19 @@ static KlH2Stream *h2_stream_find(KlH2Conn *h2c, uint32_t stream_id) {
     return NULL;
 }
 
-static KlH2Stream *h2_stream_create(KlH2Conn *h2c, uint32_t stream_id) {
+static KlH2ServerStream *h2_stream_create(KlH2ServerConn *h2c,
+                                            uint32_t stream_id) {
     if (h2c->num_streams >= h2c->max_streams)
         return NULL;
 
-    KlH2Stream *s = &h2c->streams[h2c->num_streams];
+    KlH2ServerStream *s = &h2c->streams[h2c->num_streams];
     memset(s, 0, sizeof(*s));
     s->stream_id = stream_id;
     h2c->num_streams++;
     return s;
 }
 
-static void h2_stream_destroy(KlH2Conn *h2c, KlH2Stream *stream) {
+static void h2_stream_destroy(KlH2ServerConn *h2c, KlH2ServerStream *stream) {
     if (stream->body_reader) {
         stream->body_reader->destroy(stream->body_reader);
         stream->body_reader = NULL;
@@ -59,14 +61,6 @@ static void h2_stream_destroy(KlH2Conn *h2c, KlH2Stream *stream) {
 
 /* ═══════════════════════════════════════════════════════════════════
  * Response header extraction
- *
- * Parse the HTTP/1.1-formatted hdr_buf back into discrete name/value
- * pairs for submit_response(). The format is well-defined and KEEL
- * controls it:
- *   HTTP/1.1 200 OK\r\n
- *   Content-Type: application/json\r\n
- *   Content-Length: 42\r\n
- *   \r\n
  * ═══════════════════════════════════════════════════════════════════ */
 
 #define H2_MAX_RESP_HEADERS 64
@@ -76,18 +70,14 @@ static int h2_extract_response_headers(char *hdr_buf, size_t hdr_len,
                                         int max_headers) {
     if (!hdr_buf || hdr_len == 0) return 0;
 
-    /* hdr_buf contains only user headers (no status line).
-     * Format: "Name: Value\r\nName: Value\r\n" */
     const char *p = hdr_buf;
     const char *end = hdr_buf + hdr_len;
 
     int count = 0;
     while (p < end - 1 && count < max_headers) {
-        /* End of headers */
         if (p[0] == '\r' && p[1] == '\n')
             break;
 
-        /* Find colon */
         const char *colon = p;
         while (colon < end && *colon != ':')
             colon++;
@@ -95,22 +85,16 @@ static int h2_extract_response_headers(char *hdr_buf, size_t hdr_len,
 
         names[count] = p;
 
-        /* Skip ": " after colon */
         const char *val = colon + 1;
         while (val < end && *val == ' ')
             val++;
 
         values[count] = val;
 
-        /* Find end of line */
         const char *eol = val;
         while (eol < end - 1 && !(eol[0] == '\r' && eol[1] == '\n'))
             eol++;
 
-        /* Null-terminate name and value in place — hdr_buf is owned by
-         * the response and will be freed after submission.
-         * Single-shot assumption: each response is submitted at most once,
-         * guarded by the response_submitted flag in h2_submit_response(). */
         hdr_buf[colon - hdr_buf] = '\0';
         hdr_buf[eol - hdr_buf] = '\0';
 
@@ -125,7 +109,7 @@ static int h2_extract_response_headers(char *hdr_buf, size_t hdr_len,
  * Response submission
  * ═══════════════════════════════════════════════════════════════════ */
 
-static int h2_submit_response(KlH2Conn *h2c, KlH2Stream *stream) {
+static int h2_submit_response(KlH2ServerConn *h2c, KlH2ServerStream *stream) {
     if (stream->response_submitted) return 0;
     stream->response_submitted = 1;
 
@@ -134,14 +118,11 @@ static int h2_submit_response(KlH2Conn *h2c, KlH2Stream *stream) {
     size_t body_len = 0;
     char *file_buf = NULL;
 
-    /* Determine body based on mode */
     if (res->body_mode == KL_BODY_BUFFER) {
         body = res->body;
         body_len = res->body_len;
     } else if (res->body_mode == KL_BODY_FILE) {
-        /* Read file into temp buffer via pread */
         if (res->file_size > 16 * 1024 * 1024) {
-            /* File too large for in-memory HTTP/2 response — send 500 */
             const char *err_names[] = {"content-type"};
             const char *err_values[] = {"text/plain"};
             const char *err_body = "File too large for HTTP/2 response";
@@ -169,7 +150,6 @@ static int h2_submit_response(KlH2Conn *h2c, KlH2Stream *stream) {
             }
         }
     } else if (res->body_mode == KL_BODY_STREAM) {
-        /* Streaming not supported over HTTP/2 — submit 500 */
         const char *err_names[] = {"content-type"};
         const char *err_values[] = {"text/plain"};
         const char *err_body = "Streaming responses not supported over HTTP/2";
@@ -179,13 +159,11 @@ static int h2_submit_response(KlH2Conn *h2c, KlH2Stream *stream) {
         return 0;
     }
 
-    /* Extract response headers from hdr_buf */
     const char *names[H2_MAX_RESP_HEADERS];
     const char *values[H2_MAX_RESP_HEADERS];
     int num_hdrs = h2_extract_response_headers(
         res->hdr_buf, res->hdr_len, names, values, H2_MAX_RESP_HEADERS);
 
-    /* Filter out connection-level headers that are forbidden in HTTP/2 */
     const char *filt_names[H2_MAX_RESP_HEADERS];
     const char *filt_values[H2_MAX_RESP_HEADERS];
     int filt_count = 0;
@@ -210,7 +188,7 @@ static int h2_submit_response(KlH2Conn *h2c, KlH2Stream *stream) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * Callback implementations (wired into KlH2Callbacks)
+ * Callback implementations (wired into KlH2ServerCallbacks)
  * ═══════════════════════════════════════════════════════════════════ */
 
 static int h2_cb_on_request(void *ud, uint32_t stream_id,
@@ -221,14 +199,14 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
                              const size_t *hdr_name_lens,
                              const size_t *hdr_value_lens,
                              int num_headers) {
-    KlH2Conn *h2c = ud;
+    KlH2ServerConn *h2c = ud;
     (void)authority;
     (void)authority_len;
 
-    KlH2Stream *stream = h2_stream_create(h2c, stream_id);
+    KlH2ServerStream *stream = h2_stream_create(h2c, stream_id);
     if (!stream) return -1;
 
-    /* Calculate total header storage needed: all names + values + null terms */
+    /* Calculate total header storage needed */
     size_t total = method_len + 1 + path_len + 1;
     if (method_len > SIZE_MAX / 2 || path_len > SIZE_MAX / 2) {
         h2_stream_destroy(h2c, stream);
@@ -251,7 +229,6 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     }
     stream->hdr_storage_len = total;
 
-    /* Copy method, path, and headers into contiguous storage */
     char *p = stream->hdr_storage;
     KlRequest *req = &stream->req;
     memset(req, 0, sizeof(*req));
@@ -269,7 +246,6 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     req->path = p;
     req->path_len = path_len;
 
-    /* Split query from path */
     for (size_t i = 0; i < path_len; i++) {
         if (p[i] == '?') {
             req->path_len = i;
@@ -296,7 +272,6 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         req->headers[hdr_count].value_len = hdr_value_lens[i];
         p += hdr_value_lens[i] + 1;
 
-        /* Parse content-length — reject if any non-digit or overflow */
         if (hdr_name_lens[i] == 14 &&
             strncasecmp(req->headers[hdr_count].name, "content-length", 14) == 0) {
             content_length = 0;
@@ -344,7 +319,6 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
 
     /* Run middleware */
     if (kl_router_run_middleware(h2c->router, req, &stream->res) != 0) {
-        /* Middleware short-circuited — submit response immediately */
         int rc = h2_submit_response(h2c, stream);
         if (h2c->session->want_write(h2c->session))
             h2c->session->flush(h2c->session);
@@ -358,7 +332,6 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         KlBodyReader *br = stream->route->body_reader(
             h2c->alloc, req, stream->route->user_data);
         if (!br) {
-            /* 415 Unsupported Media Type */
             kl_response_error(&stream->res, 415, "Unsupported Media Type");
             int rc = h2_submit_response(h2c, stream);
             if (h2c->session->want_write(h2c->session))
@@ -372,8 +345,6 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
 
     stream->headers_done = 1;
 
-    /* If no body expected, mark body as done — handler runs on stream end.
-     * Session MUST call on_stream_end for HEADERS+END_STREAM frames. */
     if (!has_body) {
         stream->body_done = 1;
     }
@@ -383,30 +354,27 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
 
 static int h2_cb_on_data(void *ud, uint32_t stream_id,
                           const char *data, size_t len) {
-    KlH2Conn *h2c = ud;
-    KlH2Stream *stream = h2_stream_find(h2c, stream_id);
+    KlH2ServerConn *h2c = ud;
+    KlH2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return -1;
 
     if (stream->body_reader) {
         return stream->body_reader->on_data(stream->body_reader, data, len);
     }
 
-    /* No body reader — discard data */
     return 0;
 }
 
 static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
-    KlH2Conn *h2c = ud;
-    KlH2Stream *stream = h2_stream_find(h2c, stream_id);
+    KlH2ServerConn *h2c = ud;
+    KlH2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return -1;
 
     stream->body_done = 1;
 
-    /* Complete body reader */
     if (stream->body_reader)
         stream->body_reader->on_complete(stream->body_reader);
 
-    /* Run post-body middleware */
     if (kl_router_run_post_middleware(h2c->router, &stream->req,
                                       &stream->res) != 0) {
         int rc = h2_submit_response(h2c, stream);
@@ -416,7 +384,6 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
         return rc < 0 ? -1 : 0;
     }
 
-    /* Invoke handler */
     if (stream->route_result == 200 && stream->route && stream->route->handler) {
         stream->route->handler(&stream->req, &stream->res,
                                 stream->route->user_data);
@@ -426,7 +393,6 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
         kl_response_error(&stream->res, 404, "Not Found");
     }
 
-    /* Submit response */
     int rc = h2_submit_response(h2c, stream);
     if (h2c->session->want_write(h2c->session))
         h2c->session->flush(h2c->session);
@@ -437,10 +403,10 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
 
 static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
                                     uint32_t error_code) {
-    KlH2Conn *h2c = ud;
+    KlH2ServerConn *h2c = ud;
     (void)error_code;
 
-    KlH2Stream *stream = h2_stream_find(h2c, stream_id);
+    KlH2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return;
 
     if (stream->body_reader)
@@ -450,7 +416,7 @@ static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
 }
 
 static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
-    KlH2Conn *h2c = ud;
+    KlH2ServerConn *h2c = ud;
     return conn_write(h2c->conn, data, len);
 }
 
@@ -458,12 +424,11 @@ static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
  * Connection lifecycle
  * ═══════════════════════════════════════════════════════════════════ */
 
-int kl_h2_upgrade(KlConn *c, KlRouter *router, KlH2Config *cfg,
-                  const char *leftover, size_t leftover_len) {
+int kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
+                          const char *leftover, size_t leftover_len) {
     KlAllocator *alloc = c->alloc;
 
-    /* Allocate per-connection HTTP/2 state */
-    KlH2Conn *h2c = kl_malloc(alloc, sizeof(KlH2Conn));
+    KlH2ServerConn *h2c = kl_malloc(alloc, sizeof(KlH2ServerConn));
     if (!h2c) return KL_CONN_CLOSED;
     memset(h2c, 0, sizeof(*h2c));
 
@@ -471,62 +436,55 @@ int kl_h2_upgrade(KlConn *c, KlRouter *router, KlH2Config *cfg,
     h2c->alloc = alloc;
     h2c->router = router;
 
-    /* Apply config defaults */
     h2c->max_streams = cfg->max_concurrent_streams > 0
                        ? cfg->max_concurrent_streams
                        : KL_H2_DEFAULT_MAX_STREAMS;
 
-    /* Allocate streams array */
-    if ((size_t)h2c->max_streams > SIZE_MAX / sizeof(KlH2Stream)) {
-        kl_free(alloc, h2c, sizeof(KlH2Conn));
+    if ((size_t)h2c->max_streams > SIZE_MAX / sizeof(KlH2ServerStream)) {
+        kl_free(alloc, h2c, sizeof(KlH2ServerConn));
         return KL_CONN_CLOSED;
     }
-    size_t streams_size = sizeof(KlH2Stream) * (size_t)h2c->max_streams;
+    size_t streams_size = sizeof(KlH2ServerStream) * (size_t)h2c->max_streams;
     h2c->streams = kl_malloc(alloc, streams_size);
     if (!h2c->streams) {
-        kl_free(alloc, h2c, sizeof(KlH2Conn));
+        kl_free(alloc, h2c, sizeof(KlH2ServerConn));
         return KL_CONN_CLOSED;
     }
     memset(h2c->streams, 0, streams_size);
 
-    /* Wire callbacks */
     h2c->callbacks.on_request = h2_cb_on_request;
     h2c->callbacks.on_data = h2_cb_on_data;
     h2c->callbacks.on_stream_end = h2_cb_on_stream_end;
     h2c->callbacks.on_stream_reset = h2_cb_on_stream_reset;
     h2c->callbacks.send = h2_cb_send;
 
-    /* Create session via factory */
     h2c->session = cfg->factory(alloc, &h2c->callbacks, h2c);
     if (!h2c->session) {
         kl_free(alloc, h2c->streams, streams_size);
-        kl_free(alloc, h2c, sizeof(KlH2Conn));
+        kl_free(alloc, h2c, sizeof(KlH2ServerConn));
         return KL_CONN_CLOSED;
     }
 
-    /* Validate session vtable: all 6 pointers must be set */
     if (!h2c->session->recv || !h2c->session->submit_response ||
         !h2c->session->want_write || !h2c->session->flush ||
         !h2c->session->shutdown || !h2c->session->destroy) {
         if (h2c->session->destroy)
             h2c->session->destroy(h2c->session);
         kl_free(alloc, h2c->streams, streams_size);
-        kl_free(alloc, h2c, sizeof(KlH2Conn));
+        kl_free(alloc, h2c, sizeof(KlH2ServerConn));
         return KL_CONN_CLOSED;
     }
 
-    /* Feed leftover bytes to session if any */
     if (leftover && leftover_len > 0) {
         ssize_t r = h2c->session->recv(h2c->session, leftover, leftover_len);
         if (r < 0) {
             h2c->session->destroy(h2c->session);
             kl_free(alloc, h2c->streams, streams_size);
-            kl_free(alloc, h2c, sizeof(KlH2Conn));
+            kl_free(alloc, h2c, sizeof(KlH2ServerConn));
             return KL_CONN_CLOSED;
         }
     }
 
-    /* Flush if session has pending output */
     if (h2c->session->want_write(h2c->session))
         h2c->session->flush(h2c->session);
 
@@ -541,17 +499,17 @@ static const char h2c_101_response[] =
     "Upgrade: h2c\r\n"
     "\r\n";
 
-int kl_h2_upgrade_from_h1(KlConn *c, KlRouter *router, KlH2Config *cfg,
-                           const char *leftover, size_t leftover_len) {
-    /* Send 101 Switching Protocols — retry short writes for TLS */
+int kl_h2_server_upgrade_from_h1(KlConn *c, KlRouter *router,
+                                  KlH2ServerConfig *cfg,
+                                  const char *leftover, size_t leftover_len) {
     if (conn_write_all(c, h2c_101_response, sizeof(h2c_101_response) - 1) < 0)
         return KL_CONN_CLOSED;
 
-    return kl_h2_upgrade(c, router, cfg, leftover, leftover_len);
+    return kl_h2_server_upgrade(c, router, cfg, leftover, leftover_len);
 }
 
-int kl_h2_on_readable(KlConn *c) {
-    KlH2Conn *h2c = c->h2;
+int kl_h2_server_on_readable(KlConn *c) {
+    KlH2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return KL_CONN_CLOSED;
 
     int drains = 0;
@@ -565,21 +523,19 @@ read_more:
     ssize_t consumed = h2c->session->recv(h2c->session, c->read_buf, (size_t)nr);
     if (consumed < 0) return KL_CONN_CLOSED;
 
-    /* Flush any pending output (response frames, WINDOW_UPDATE, etc.) */
     if (h2c->session->want_write(h2c->session)) {
         if (h2c->session->flush(h2c->session) < 0)
             return KL_CONN_CLOSED;
     }
 
-    /* TLS may buffer multiple records — drain before re-arming */
     if (c->tls && c->tls->pending(c->tls) > 0 && ++drains < 256)
         goto read_more;
 
     return KL_CONN_HTTP2;
 }
 
-int kl_h2_on_writable(KlConn *c) {
-    KlH2Conn *h2c = c->h2;
+int kl_h2_server_on_writable(KlConn *c) {
+    KlH2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return KL_CONN_CLOSED;
 
     if (h2c->session->flush(h2c->session) < 0)
@@ -588,8 +544,8 @@ int kl_h2_on_writable(KlConn *c) {
     return KL_CONN_HTTP2;
 }
 
-void kl_h2_drain_shutdown(KlConn *c) {
-    KlH2Conn *h2c = c->h2;
+void kl_h2_server_drain_shutdown(KlConn *c) {
+    KlH2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session || h2c->goaway_sent) return;
 
     h2c->session->shutdown(h2c->session);
@@ -598,24 +554,21 @@ void kl_h2_drain_shutdown(KlConn *c) {
     h2c->goaway_sent = 1;
 }
 
-void kl_h2_cleanup(KlConn *c) {
-    KlH2Conn *h2c = c->h2;
+void kl_h2_server_cleanup(KlConn *c) {
+    KlH2ServerConn *h2c = c->h2;
     if (!h2c) return;
 
-    /* Destroy all active streams */
     while (h2c->num_streams > 0)
         h2_stream_destroy(h2c, &h2c->streams[h2c->num_streams - 1]);
 
-    /* Free streams array */
     if (h2c->streams) {
         kl_free(h2c->alloc, h2c->streams,
-                sizeof(KlH2Stream) * (size_t)h2c->max_streams);
+                sizeof(KlH2ServerStream) * (size_t)h2c->max_streams);
     }
 
-    /* Destroy session */
     if (h2c->session)
         h2c->session->destroy(h2c->session);
 
-    kl_free(h2c->alloc, h2c, sizeof(KlH2Conn));
+    kl_free(h2c->alloc, h2c, sizeof(KlH2ServerConn));
     c->h2 = NULL;
 }

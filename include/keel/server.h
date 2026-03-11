@@ -5,14 +5,14 @@
 #include <keel/parser.h>
 #include <keel/router.h>
 #include <keel/tls.h>
-#include <keel/h2.h>
+#include <keel/h2_server.h>
 #include <keel/connection.h>
 #include <keel/event_ctx.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
 
-typedef struct KlWsConfig KlWsConfig;
+typedef struct KlWsServerConfig KlWsServerConfig;
 typedef KlParser *(*KlParserFactory)(KlAllocator *alloc);
 
 /* Access log callback — called after each response is fully sent.
@@ -52,7 +52,7 @@ typedef struct KlConfig {
     int install_signal_handlers; /* install SIGTERM/SIGINT handlers */
     int drain_timeout_ms;        /* graceful shutdown drain timeout (0 = immediate) */
     KlTlsConfig *tls;           /* TLS config — NULL = plaintext (default) */
-    KlH2Config *h2;             /* HTTP/2 config — NULL = disabled (default) */
+    KlH2ServerConfig *h2;             /* HTTP/2 config — NULL = disabled (default) */
     size_t max_body_size;       /* discard-path body limit; default: 1 MB */
 } KlConfig;
 
@@ -62,7 +62,7 @@ typedef struct KlServer {
     KlConfig config;
     KlAllocator alloc_storage;  /* owned copy if user didn't provide one */
     KlTlsConfig tls_storage;   /* owned copy of TLS config (if provided) */
-    KlH2Config h2_storage;     /* owned copy of H2 config (if provided) */
+    KlH2ServerConfig h2_storage;     /* owned copy of H2 config (if provided) */
     KlRouter router;
     KlConnPool pool;
     KlEventCtx ev;              /* event loop + watcher list */
@@ -123,7 +123,7 @@ int  kl_server_use_post(KlServer *s, const char *method, const char *pattern,
  * @param config  WebSocket configuration (callbacks, limits). Must remain valid.
  * @return 0 on success, -1 on failure.
  */
-int  kl_server_ws(KlServer *s, const char *pattern, KlWsConfig *config);
+int  kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config);
 
 /**
  * @brief Start the event loop (blocks until stopped).

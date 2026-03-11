@@ -16,8 +16,8 @@
 | Info     | 9     |
 | **Total**| **21**|
 
-**Files scanned:** 48 (22 source `.c`, 26 headers `.h`)
-**Test suites:** 19 (308 UTEST cases)
+**Files scanned:** 54 (24 source `.c`, 30 headers `.h`)
+**Test suites:** 21 (372 UTEST cases)
 **Lines of code (approx):** ~8,000 (src + parsers), ~2,500 (headers), ~9,500 (tests)
 
 ## Changes Since Last Audit (2026-03-09)
@@ -288,7 +288,7 @@ Good practice for ASan/UBSan diagnostics.
 | client | test_client.c | 12 | Good: sync/async validation, response free, NULL safety |
 | connection | test_connection.c | 4 | Minimal: pool ops only |
 | cors | test_cors.c | 17 | Excellent: origins, preflight, credentials |
-| h2 | test_h2.c | 26 | Good: HPACK, frames, streams, settings, cleanup |
+| h2 | test_h2.c | 29 | Good: HPACK, frames, streams, settings, cleanup |
 | integration | test_integration.c | 28 | Good: full request/response paths, middleware, logging |
 | overflow | test_overflow.c | 18 | Good: integer overflow guards across modules |
 | parser | test_parser.c | 8 | Good: GET, POST, headers, body, chunked |
@@ -298,8 +298,10 @@ Good practice for ASan/UBSan diagnostics.
 | thread_pool | test_thread_pool.c | 12 | Good: create/free, submit, FIFO, stress, cancel, shutdown |
 | timeout | test_timeout.c | 4 | Basic: idle, partial, body timeout |
 | tls | test_tls.c | 20 | Good: vtable mocking, handshake, ALPN, shutdown, pool |
-| url | test_url.c | 15 | Good: HTTP/HTTPS, ports, IPv6, CRLF, edge cases |
-| websocket | test_websocket.c | 33 | Excellent: SHA-1, base64, frames, fragmentation, close |
+| url | test_url.c | 20 | Good: HTTP/HTTPS, ws/wss, ports, IPv6, CRLF, edge cases |
+| websocket | test_websocket.c | 38 | Excellent: SHA-1, base64, frames, fragmentation, close |
+| websocket_client | test_websocket_client.c | 28 | Good: frame encoding, mask XOR, handshake, parser, API |
+| h2_client | test_h2_client.c | 18 | Good: mock session vtable, stream tracking, response free |
 
 ### Coverage Gaps (Priority Order)
 
@@ -307,7 +309,7 @@ Good practice for ASan/UBSan diagnostics.
 
 2. **`kl_response_body_copy`** — Recently added function with no test coverage.
 
-3. **WebSocket send/close API** — `kl_ws_send_text`, `kl_ws_send_binary`, `kl_ws_send_ping`, `kl_ws_close`, `kl_ws_drain_close` have no unit tests. Frame parsing is well covered but the public send API is not.
+3. **WebSocket server send/close API** — `kl_ws_server_send_text`, `kl_ws_server_send_binary`, `kl_ws_server_send_ping`, `kl_ws_server_close`, `kl_ws_server_drain_close` have no unit tests. Frame parsing is well covered but the public send API is not.
 
 4. **`kl_server_ws`** — WebSocket route registration not tested in integration tests.
 
@@ -327,7 +329,7 @@ Good practice for ASan/UBSan diagnostics.
 
 ### All Medium/Low Findings — FIXED
 
-All M-2, M-3, L-4 through L-8 findings have been fixed and verified with `make test` (345 tests, 0 failures).
+All M-2, M-3, L-4 through L-8 findings have been fixed and verified with `make test` (372 tests, 0 failures).
 
 ### Remaining Work
 
@@ -335,7 +337,7 @@ All M-2, M-3, L-4 through L-8 findings have been fixed and verified with `make t
 
 2. **Add connection state machine tests** — `kl_conn_on_readable`, `kl_conn_on_writable` are critical untested paths.
 
-3. **Add WebSocket send API tests** — `kl_ws_send_text/binary/ping/close` public API untested.
+3. **Add WebSocket server send API tests** — `kl_ws_server_send_text/binary/ping/close` public API untested.
 
 4. **Add allocation failure injection** — Custom allocator that fails on Nth call for testing error paths.
 

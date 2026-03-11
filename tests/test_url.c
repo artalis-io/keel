@@ -81,7 +81,7 @@ UTEST(url, crlf_in_path_rejected) {
 UTEST(url, unsupported_scheme) {
     KlUrl u;
     ASSERT_EQ(kl_url_parse("ftp://example.com", &u), -1);
-    ASSERT_EQ(kl_url_parse("ws://example.com", &u), -1);
+    ASSERT_EQ(kl_url_parse("gopher://example.com", &u), -1);
 }
 
 UTEST(url, empty_host_rejected) {
@@ -113,6 +113,58 @@ UTEST(url, trailing_slash) {
     ASSERT_EQ(kl_url_parse("http://example.com/", &u), 0);
     ASSERT_EQ(u.path_len, (size_t)1);
     ASSERT_STREQ(u.path, "/");
+}
+
+UTEST(url, ws_basic) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("ws://example.com", &u), 0);
+    ASSERT_EQ(u.is_https, 0);
+    ASSERT_EQ(u.is_ws, 1);
+    ASSERT_EQ(u.host_len, (size_t)11);
+    ASSERT_EQ(memcmp(u.host, "example.com", 11), 0);
+    ASSERT_EQ(u.port, 80);
+    ASSERT_STREQ(u.path, "/");
+}
+
+UTEST(url, wss_basic) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("wss://example.com", &u), 0);
+    ASSERT_EQ(u.is_https, 1);
+    ASSERT_EQ(u.is_ws, 1);
+    ASSERT_EQ(u.host_len, (size_t)11);
+    ASSERT_EQ(memcmp(u.host, "example.com", 11), 0);
+    ASSERT_EQ(u.port, 443);
+    ASSERT_STREQ(u.path, "/");
+}
+
+UTEST(url, ws_with_port) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("ws://localhost:9090/ws", &u), 0);
+    ASSERT_EQ(u.is_https, 0);
+    ASSERT_EQ(u.is_ws, 1);
+    ASSERT_EQ(u.port, 9090);
+    ASSERT_EQ(u.host_len, (size_t)9);
+    ASSERT_EQ(memcmp(u.host, "localhost", 9), 0);
+    ASSERT_EQ(memcmp(u.path, "/ws", 3), 0);
+}
+
+UTEST(url, ws_with_path) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("wss://api.example.com/v1/stream?token=abc", &u), 0);
+    ASSERT_EQ(u.is_https, 1);
+    ASSERT_EQ(u.is_ws, 1);
+    ASSERT_EQ(u.port, 443);
+    ASSERT_EQ(u.host_len, (size_t)15);
+    ASSERT_TRUE(u.path_len > 0);
+    ASSERT_EQ(memcmp(u.path, "/v1/stream?token=abc", 20), 0);
+}
+
+UTEST(url, http_is_not_ws) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http://example.com", &u), 0);
+    ASSERT_EQ(u.is_ws, 0);
+    ASSERT_EQ(kl_url_parse("https://example.com", &u), 0);
+    ASSERT_EQ(u.is_ws, 0);
 }
 
 UTEST_MAIN();

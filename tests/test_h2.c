@@ -1,6 +1,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <keel/h2.h>
+#include <keel/h2_server.h>
 #include <keel/connection.h>
 #include <keel/router.h>
 #include <keel/body_reader.h>
@@ -10,12 +11,12 @@
 /* ═══════════════════════════════════════════════════════════════════
  * Mock H2 Session
  *
- * Embeds KlH2Session base + tracking fields for test assertions.
+ * Embeds KlH2ServerSession base + tracking fields for test assertions.
  * Factory stores KEEL's callbacks so tests can invoke them directly.
  * ═══════════════════════════════════════════════════════════════════ */
 
 typedef struct {
-    KlH2Session base;
+    KlH2ServerSession base;
 
     /* Tracking */
     int recv_count;
@@ -45,11 +46,11 @@ typedef struct {
     int skip_vtable_init;
 
     /* KEEL's callbacks (stored by factory) */
-    KlH2Callbacks callbacks;
+    KlH2ServerCallbacks callbacks;
     void *cb_user_data;
 } MockH2Session;
 
-static ssize_t mock_recv(KlH2Session *self, const void *data, size_t len) {
+static ssize_t mock_recv(KlH2ServerSession *self, const void *data, size_t len) {
     MockH2Session *m = (MockH2Session *)self;
     m->recv_count++;
     (void)data;
@@ -58,7 +59,7 @@ static ssize_t mock_recv(KlH2Session *self, const void *data, size_t len) {
     return m->recv_return;
 }
 
-static int mock_submit_response(KlH2Session *self, uint32_t stream_id,
+static int mock_submit_response(KlH2ServerSession *self, uint32_t stream_id,
                                  int status, const char **hdr_names,
                                  const char **hdr_values, int num_headers,
                                  const void *body, size_t body_len) {
@@ -84,25 +85,25 @@ static int mock_submit_response(KlH2Session *self, uint32_t stream_id,
     return m->submit_return;
 }
 
-static int mock_want_write(KlH2Session *self) {
+static int mock_want_write(KlH2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->want_write_count++;
     return m->want_write_return;
 }
 
-static int mock_flush(KlH2Session *self) {
+static int mock_flush(KlH2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->flush_count++;
     return m->flush_return;
 }
 
-static int mock_shutdown(KlH2Session *self) {
+static int mock_shutdown(KlH2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->shutdown_count++;
     return m->shutdown_return;
 }
 
-static void mock_destroy(KlH2Session *self) {
+static void mock_destroy(KlH2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->destroy_count++;
 }
@@ -110,8 +111,8 @@ static void mock_destroy(KlH2Session *self) {
 /* Global mock pointer for factory access in tests */
 static MockH2Session *g_mock_session = NULL;
 
-static KlH2Session *mock_factory(KlAllocator *alloc,
-                                  KlH2Callbacks *callbacks,
+static KlH2ServerSession *mock_factory(KlAllocator *alloc,
+                                  KlH2ServerCallbacks *callbacks,
                                   void *user_data) {
     (void)alloc;
     MockH2Session *m = g_mock_session;
@@ -214,7 +215,7 @@ static KlBodyReader *test_br_factory(KlAllocator *alloc, const KlRequest *req,
 
 static KlAllocator test_alloc;
 static KlRouter test_router;
-static KlH2Config test_h2_cfg;
+static KlH2ServerConfig test_h2_cfg;
 
 static void test_setup(void) {
     test_alloc = kl_allocator_default();
@@ -239,7 +240,7 @@ static void test_teardown(void) {
 
 UTEST(h2, config_defaults) {
     /* max_streams=0 should use 128, window_size=0 should use 65535 */
-    KlH2Config cfg = {0};
+    KlH2ServerConfig cfg = {0};
     cfg.factory = mock_factory;
     ASSERT_EQ(cfg.max_concurrent_streams, 0);
     ASSERT_EQ(cfg.initial_window_size, 0);
@@ -255,7 +256,7 @@ UTEST(h2, session_vtable_validation) {
     g_mock_session = &mock;
 
     /* Create a mock factory that returns a session with NULL recv */
-    /* We test via kl_h2_upgrade — need a minimal conn */
+    /* We test via kl_h2_server_upgrade — need a minimal conn */
     int pfd[2];
     ASSERT_EQ(pipe(pfd), 0);
 
@@ -274,7 +275,7 @@ UTEST(h2, session_vtable_validation) {
     mock.base.shutdown = mock_shutdown;
     mock.base.destroy = mock_destroy;
 
-    int r = kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
     ASSERT_EQ(r, (int)KL_CONN_CLOSED);
     /* destroy should have been called during cleanup */
     ASSERT_EQ(mock.destroy_count, 1);
@@ -298,7 +299,7 @@ UTEST(h2, conn_init_and_free) {
     conn.fd = pfd[1];
     conn.alloc = &test_alloc;
 
-    int r = kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
     ASSERT_EQ(r, (int)KL_CONN_HTTP2);
     ASSERT_TRUE(conn.h2 != NULL);
     ASSERT_TRUE(conn.h2->session != NULL);
@@ -306,7 +307,7 @@ UTEST(h2, conn_init_and_free) {
     ASSERT_EQ(conn.h2->max_streams, KL_H2_DEFAULT_MAX_STREAMS);
     ASSERT_EQ(conn.h2->num_streams, 0);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     ASSERT_TRUE(conn.h2 == NULL);
     ASSERT_EQ(mock.destroy_count, 1);
 
@@ -330,7 +331,7 @@ UTEST(h2, stream_create) {
     conn.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/test", test_handler, NULL, NULL);
 
-    int r = kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
     ASSERT_EQ(r, (int)KL_CONN_HTTP2);
 
     /* Invoke the on_request callback to create a stream */
@@ -348,7 +349,7 @@ UTEST(h2, stream_create) {
     ASSERT_EQ(conn.h2->num_streams, 1);
     ASSERT_EQ(conn.h2->streams[0].stream_id, (uint32_t)1);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -373,7 +374,7 @@ UTEST(h2, stream_max_limit) {
     kl_router_add(&test_router, "POST", "/data", test_handler, NULL,
                   test_br_factory);
 
-    int r = kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
     ASSERT_EQ(r, (int)KL_CONN_HTTP2);
     ASSERT_EQ(conn.h2->max_streams, 2);
 
@@ -403,7 +404,7 @@ UTEST(h2, stream_max_limit) {
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(conn.h2->num_streams, 2);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -425,7 +426,7 @@ UTEST(h2, stream_destroy_cleanup) {
     kl_router_add(&test_router, "POST", "/upload", test_handler, NULL,
                   test_br_factory);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     /* Create a stream with body reader */
     const char *hn[] = {"content-length"};
@@ -445,7 +446,7 @@ UTEST(h2, stream_destroy_cleanup) {
     ASSERT_EQ(g_test_br.error_count, 1);
     ASSERT_EQ(g_test_br.destroy_count, 1);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -466,7 +467,7 @@ UTEST(h2, cb_on_request_creates_stream) {
     conn.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/hello", test_handler, NULL, NULL);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     const char *hn[] = {"host", "accept"};
     const char *hv[] = {"localhost", "application/json"};
@@ -480,7 +481,7 @@ UTEST(h2, cb_on_request_creates_stream) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(conn.h2->num_streams, 1);
 
-    KlH2Stream *s = &conn.h2->streams[0];
+    KlH2ServerStream *s = &conn.h2->streams[0];
     ASSERT_EQ(s->stream_id, (uint32_t)1);
     ASSERT_EQ(s->req.method_len, (size_t)3);
     ASSERT_EQ(memcmp(s->req.method, "GET", 3), 0);
@@ -492,7 +493,7 @@ UTEST(h2, cb_on_request_creates_stream) {
     ASSERT_EQ(s->req.num_headers, 2);
     ASSERT_EQ(s->headers_done, 1);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -513,7 +514,7 @@ UTEST(h2, cb_on_request_routes) {
     conn.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/users/:id", test_handler, NULL, NULL);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     const char **hn = NULL;
     const char **hv = NULL;
@@ -524,7 +525,7 @@ UTEST(h2, cb_on_request_routes) {
                                "GET", 3, "/users/42", 9,
                                NULL, 0, hn, hv, hnl, hvl, 0);
 
-    KlH2Stream *s = &conn.h2->streams[0];
+    KlH2ServerStream *s = &conn.h2->streams[0];
     ASSERT_EQ(s->route_result, 200);
     ASSERT_TRUE(s->route != NULL);
     ASSERT_EQ(s->num_params, 1);
@@ -533,7 +534,7 @@ UTEST(h2, cb_on_request_routes) {
     ASSERT_EQ(s->params[0].value_len, (size_t)2);
     ASSERT_EQ(memcmp(s->params[0].value, "42", 2), 0);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -556,7 +557,7 @@ UTEST(h2, cb_on_request_middleware) {
     kl_router_add(&test_router, "GET", "/protected", test_handler, NULL, NULL);
     kl_router_use(&test_router, "*", "/*", test_middleware, NULL);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     mock.callbacks.on_request(mock.cb_user_data, 1,
                                "GET", 3, "/protected", 10,
@@ -568,7 +569,7 @@ UTEST(h2, cb_on_request_middleware) {
     ASSERT_EQ(mock.last_status, 403);
     ASSERT_EQ(conn.h2->num_streams, 0);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -590,7 +591,7 @@ UTEST(h2, cb_on_data_forwards) {
     kl_router_add(&test_router, "POST", "/data", test_handler, NULL,
                   test_br_factory);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     const char *hn[] = {"content-length"};
     const char *hv[] = {"5"};
@@ -607,7 +608,7 @@ UTEST(h2, cb_on_data_forwards) {
     ASSERT_EQ(g_test_br.data_len, (size_t)5);
     ASSERT_EQ(memcmp(g_test_br.data, "hello", 5), 0);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -629,7 +630,7 @@ UTEST(h2, cb_on_data_reject) {
     kl_router_add(&test_router, "POST", "/data", test_handler, NULL,
                   test_br_factory);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     const char *hn[] = {"content-length"};
     const char *hv[] = {"5"};
@@ -646,7 +647,7 @@ UTEST(h2, cb_on_data_reject) {
     int rc = mock.callbacks.on_data(mock.cb_user_data, 1, big, sizeof(big));
     ASSERT_EQ(rc, -1);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -667,7 +668,7 @@ UTEST(h2, cb_on_stream_end_handler) {
     conn.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/hello", test_handler, NULL, NULL);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     mock.callbacks.on_request(mock.cb_user_data, 1,
                                "GET", 3, "/hello", 6,
@@ -684,7 +685,7 @@ UTEST(h2, cb_on_stream_end_handler) {
     /* Stream destroyed after response */
     ASSERT_EQ(conn.h2->num_streams, 0);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -705,7 +706,7 @@ UTEST(h2, cb_on_stream_end_404) {
     conn.alloc = &test_alloc;
     /* No routes registered */
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     mock.callbacks.on_request(mock.cb_user_data, 1,
                                "GET", 3, "/missing", 8,
@@ -715,7 +716,7 @@ UTEST(h2, cb_on_stream_end_404) {
     ASSERT_EQ(mock.submit_count, 1);
     ASSERT_EQ(mock.last_status, 404);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -737,7 +738,7 @@ UTEST(h2, cb_on_stream_reset_cleanup) {
     kl_router_add(&test_router, "POST", "/upload", test_handler, NULL,
                   test_br_factory);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     const char *hn[] = {"content-length"};
     const char *hv[] = {"100"};
@@ -755,7 +756,7 @@ UTEST(h2, cb_on_stream_reset_cleanup) {
     ASSERT_EQ(g_test_br.error_count, 1);
     ASSERT_EQ(g_test_br.destroy_count, 1);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -775,7 +776,7 @@ UTEST(h2, cb_send_wraps_conn_write) {
     conn.fd = pfd[1];
     conn.alloc = &test_alloc;
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     /* Send callback should write to the pipe fd */
     const char *data = "HTTP/2 frame data";
@@ -788,7 +789,7 @@ UTEST(h2, cb_send_wraps_conn_write) {
     ASSERT_EQ(nr, (ssize_t)17);
     ASSERT_EQ(memcmp(buf, "HTTP/2 frame data", 17), 0);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -860,11 +861,11 @@ UTEST(h2, alpn_h2) {
     conn.router = &test_router;
 
     /* Direct upgrade test (simulating ALPN h2) */
-    int r = kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
     ASSERT_EQ(r, (int)KL_CONN_HTTP2);
     ASSERT_TRUE(conn.h2 != NULL);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -907,7 +908,7 @@ UTEST(h2, multi_stream) {
     kl_router_add(&test_router, "GET", "/b", test_handler, NULL, NULL);
     kl_router_add(&test_router, "GET", "/c", test_handler, NULL, NULL);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     /* Create 3 streams */
     mock.callbacks.on_request(mock.cb_user_data, 1,
@@ -937,7 +938,7 @@ UTEST(h2, multi_stream) {
     ASSERT_EQ(handler_called, 3);
     ASSERT_EQ(mock.submit_count, 3);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -957,17 +958,17 @@ UTEST(h2, goaway_shutdown) {
     conn.fd = pfd[1];
     conn.alloc = &test_alloc;
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
-    kl_h2_drain_shutdown(&conn);
+    kl_h2_server_drain_shutdown(&conn);
     ASSERT_EQ(mock.shutdown_count, 1);
     ASSERT_EQ(conn.h2->goaway_sent, 1);
 
     /* Calling again should be a no-op */
-    kl_h2_drain_shutdown(&conn);
+    kl_h2_server_drain_shutdown(&conn);
     ASSERT_EQ(mock.shutdown_count, 1);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -988,7 +989,7 @@ UTEST(h2, cleanup_frees_all) {
     conn.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/x", test_handler, NULL, NULL);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     /* Create 3 streams */
     mock.callbacks.on_request(mock.cb_user_data, 1,
@@ -1003,7 +1004,7 @@ UTEST(h2, cleanup_frees_all) {
     ASSERT_EQ(conn.h2->num_streams, 3);
 
     /* Cleanup should destroy all streams + session */
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     ASSERT_TRUE(conn.h2 == NULL);
     ASSERT_EQ(mock.destroy_count, 1);
 
@@ -1038,7 +1039,7 @@ UTEST(h2, response_header_extraction) {
     conn.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/json", test_handler, NULL, NULL);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     mock.callbacks.on_request(mock.cb_user_data, 1,
                                "GET", 3, "/json", 5,
@@ -1060,7 +1061,7 @@ UTEST(h2, response_header_extraction) {
     }
     ASSERT_EQ(found_ct, 1);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -1086,7 +1087,7 @@ UTEST(h2, handler_same_api) {
     handler_body_len = 8;
     kl_router_add(&test_router, "POST", "/create", test_handler, NULL, NULL);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     mock.callbacks.on_request(mock.cb_user_data, 1,
                                "POST", 4, "/create", 7,
@@ -1098,7 +1099,7 @@ UTEST(h2, handler_same_api) {
     ASSERT_EQ(mock.last_body_len, (size_t)8);
     ASSERT_EQ(memcmp(mock.last_body, "{\"id\":1}", 8), 0);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
@@ -1119,13 +1120,13 @@ UTEST(h2, query_string_parsing) {
     conn.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/search", test_handler, NULL, NULL);
 
-    kl_h2_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
     mock.callbacks.on_request(mock.cb_user_data, 1,
                                "GET", 3, "/search?q=test&page=1", 21,
                                NULL, 0, NULL, NULL, NULL, NULL, 0);
 
-    KlH2Stream *s = &conn.h2->streams[0];
+    KlH2ServerStream *s = &conn.h2->streams[0];
     /* Path should be split at '?' */
     ASSERT_EQ(s->req.path_len, (size_t)7);
     ASSERT_EQ(memcmp(s->req.path, "/search", 7), 0);
@@ -1133,18 +1134,18 @@ UTEST(h2, query_string_parsing) {
     ASSERT_EQ(s->req.query_len, (size_t)13);
     ASSERT_EQ(memcmp(s->req.query, "q=test&page=1", 13), 0);
 
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     close(pfd[0]);
     close(pfd[1]);
     test_teardown();
 }
 
 UTEST(h2, cleanup_null_is_noop) {
-    /* kl_h2_cleanup with NULL h2 should be safe */
+    /* kl_h2_server_cleanup with NULL h2 should be safe */
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.h2 = NULL;
-    kl_h2_cleanup(&conn);
+    kl_h2_server_cleanup(&conn);
     ASSERT_TRUE(conn.h2 == NULL);
 }
 

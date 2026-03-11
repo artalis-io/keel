@@ -13,10 +13,14 @@
 #include <keel/router.h>
 #include <keel/tls.h>
 #include <keel/h2.h>
+#include <keel/h2_server.h>
+#include <keel/h2_client.h>
 #include <keel/connection.h>
 #include <keel/server.h>
 #include <keel/cors.h>
 #include <keel/websocket.h>
+#include <keel/websocket_server.h>
+#include <keel/websocket_client.h>
 #include <keel/async.h>
 #include <keel/thread_pool.h>
 #include <keel/url.h>

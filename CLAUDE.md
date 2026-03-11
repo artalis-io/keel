@@ -6,8 +6,8 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 326 unit tests
-make examples     # build all 11 example programs (12 with TLS)
+make test         # build and run all 372 unit tests
+make examples     # build all 13 example programs (14 with TLS)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis
@@ -22,12 +22,12 @@ make clean        # remove all build artifacts
 - `parsers/` — Pluggable parser backends (`parser_llhttp.c`, `response_parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
-- `examples/` — Example programs (hello, rest_api, middleware, static_files, streaming, body_readers, websocket, tls, async, thread_pool, h2_server).
+- `examples/` — Example programs (hello, rest_api, middleware, static_files, streaming, body_readers, websocket_server, websocket_client, tls, async, thread_pool, h2_server, h2_client).
 - `docs/` — Architecture and roadmap documentation.
 
 ## Architecture
 
-19 orthogonal modules, each independently testable:
+21 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -45,8 +45,10 @@ make clean        # remove all build artifacts
 14. **tls** — Pluggable TLS transport vtable (bring-your-own backend)
 15. **async** — Connection suspension for async operations (uses KlEventCtx)
 16. **thread_pool** — Worker thread pool with pipe-based event loop wakeup
-17. **url** — URL parser (http/https, IPv6, CRLF injection guard)
+17. **url** — URL parser (http/https/ws/wss, IPv6, CRLF injection guard)
 18. **client** — HTTP/1.1 client: sync (blocking) + async (event-driven via KlEventCtx)
+19. **websocket_client** — Async WebSocket client with masked frames (RFC 6455)
+20. **h2_client** — HTTP/2 client with pluggable session vtable (multiplexed streams)
 
 ## Key Types
 
@@ -91,6 +93,14 @@ make clean        # remove all build artifacts
 | `KlClientConfig` | `client.h` | Client config: timeout_ms, max_response_size, TLS |
 | `KlClient` | `client.h` | Opaque async client handle |
 | `KlClientDoneFn` | `client.h` | Async completion callback |
+| `KlWsClientConn` | `websocket_client.h` | WebSocket client connection handle |
+| `KlWsClientConfig` | `websocket_client.h` | Client config: timeout, max_frame_size, TLS, protocol |
+| `KlWsClientCallbacks` | `websocket_client.h` | Callbacks: on_open, on_message, on_close, on_error |
+| `KlH2ClientConn` | `h2_client.h` | HTTP/2 client connection handle |
+| `KlH2ClientConfig` | `h2_client.h` | Config: timeout, max_streams, TLS, session factory |
+| `KlH2ClientSession` | `h2_client.h` | Pluggable session vtable (wraps nghttp2 etc.) |
+| `KlH2ClientHeader` | `h2_client.h` | Request/response header: name, value |
+| `KlH2ClientResponse` | `h2_client.h` | Accumulated stream response: status, headers, body |
 
 ## Git
 

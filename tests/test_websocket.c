@@ -1,5 +1,6 @@
 #include "utest.h"
 #include <keel/websocket.h>
+#include <keel/websocket_server.h>
 #include <keel/connection.h>
 #include <keel/allocator.h>
 #include <string.h>
@@ -470,8 +471,8 @@ UTEST(send, length_16bit) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(ws_config, defaults) {
-    KlWsConfig cfg;
-    kl_ws_config_init(&cfg);
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
 
     ASSERT_EQ(cfg.max_message_size, (size_t)0);
     ASSERT_EQ(cfg.max_frame_size, (size_t)0);
@@ -484,8 +485,8 @@ UTEST(ws_config, defaults) {
 }
 
 UTEST(ws_config, custom_limits) {
-    KlWsConfig cfg;
-    kl_ws_config_init(&cfg);
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
     cfg.max_message_size = 2048;
     cfg.max_frame_size = 512;
     cfg.close_timeout_ms = 3000;
@@ -643,34 +644,34 @@ UTEST(close, empty_close_frame) {
 }
 
 UTEST(close, close_timeout_check) {
-    KlWsConfig cfg;
-    kl_ws_config_init(&cfg);
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
     cfg.close_timeout_ms = 100;
 
-    KlWsConn ws;
+    KlWsServerConn ws;
     memset(&ws, 0, sizeof(ws));
     ws.config = &cfg;
     ws.close_sent = 1;
     ws.close_received = 0;
     ws.close_deadline_ms = 1000;
 
-    /* Create a minimal KlConn to test kl_ws_check_close_timeout */
+    /* Create a minimal KlConn to test kl_ws_server_check_close_timeout */
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.ws = &ws;
 
     /* Before deadline */
-    ASSERT_EQ(kl_ws_check_close_timeout(&conn, 999), 0);
+    ASSERT_EQ(kl_ws_server_check_close_timeout(&conn, 999), 0);
 
     /* At deadline */
-    ASSERT_EQ(kl_ws_check_close_timeout(&conn, 1000), 1);
+    ASSERT_EQ(kl_ws_server_check_close_timeout(&conn, 1000), 1);
 
     /* After deadline */
-    ASSERT_EQ(kl_ws_check_close_timeout(&conn, 1001), 1);
+    ASSERT_EQ(kl_ws_server_check_close_timeout(&conn, 1001), 1);
 
     /* Not timed out if close was received */
     ws.close_received = 1;
-    ASSERT_EQ(kl_ws_check_close_timeout(&conn, 2000), 0);
+    ASSERT_EQ(kl_ws_server_check_close_timeout(&conn, 2000), 0);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -680,7 +681,7 @@ UTEST(close, close_timeout_check) {
 static int cleanup_on_close_called;
 static uint16_t cleanup_on_close_code;
 
-static void test_on_close(KlWsConn *ws, uint16_t code,
+static void test_on_close(KlWsServerConn *ws, uint16_t code,
                            const char *reason, size_t reason_len,
                            void *user_data) {
     (void)ws; (void)reason; (void)reason_len; (void)user_data;
@@ -691,11 +692,11 @@ static void test_on_close(KlWsConn *ws, uint16_t code,
 UTEST(cleanup, abnormal_closure_calls_on_close) {
     KlAllocator alloc = kl_allocator_default();
 
-    KlWsConfig cfg;
-    kl_ws_config_init(&cfg);
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
     cfg.callbacks.on_close = test_on_close;
 
-    KlWsConn *ws = kl_malloc(&alloc, sizeof(KlWsConn));
+    KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
     memset(ws, 0, sizeof(*ws));
     ws->config = &cfg;
     ws->alloc = &alloc;
@@ -710,7 +711,7 @@ UTEST(cleanup, abnormal_closure_calls_on_close) {
     cleanup_on_close_called = 0;
     cleanup_on_close_code = 0;
 
-    kl_ws_cleanup(&conn);
+    kl_ws_server_cleanup(&conn);
 
     ASSERT_EQ(cleanup_on_close_called, 1);
     ASSERT_EQ(cleanup_on_close_code, (uint16_t)1006);
@@ -720,11 +721,11 @@ UTEST(cleanup, abnormal_closure_calls_on_close) {
 UTEST(cleanup, no_callback_if_close_received) {
     KlAllocator alloc = kl_allocator_default();
 
-    KlWsConfig cfg;
-    kl_ws_config_init(&cfg);
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
     cfg.callbacks.on_close = test_on_close;
 
-    KlWsConn *ws = kl_malloc(&alloc, sizeof(KlWsConn));
+    KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
     memset(ws, 0, sizeof(*ws));
     ws->config = &cfg;
     ws->alloc = &alloc;
@@ -737,7 +738,7 @@ UTEST(cleanup, no_callback_if_close_received) {
     conn.ws = ws;
 
     cleanup_on_close_called = 0;
-    kl_ws_cleanup(&conn);
+    kl_ws_server_cleanup(&conn);
 
     ASSERT_EQ(cleanup_on_close_called, 0);
     ASSERT_TRUE(conn.ws == NULL);
@@ -748,7 +749,7 @@ UTEST(cleanup, null_ws_is_noop) {
     memset(&conn, 0, sizeof(conn));
     conn.ws = NULL;
 
-    kl_ws_cleanup(&conn);  /* Should not crash */
+    kl_ws_server_cleanup(&conn);  /* Should not crash */
     ASSERT_TRUE(conn.ws == NULL);
 }
 

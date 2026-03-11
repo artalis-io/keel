@@ -36,8 +36,14 @@ int kl_url_parse(const char *url, KlUrl *out)
         out->is_https = 1;
         url += 8;
     } else if (strncmp(url, "http://", 7) == 0) {
-        out->is_https = 0;
         url += 7;
+    } else if (strncmp(url, "wss://", 6) == 0) {
+        out->is_https = 1;
+        out->is_ws = 1;
+        url += 6;
+    } else if (strncmp(url, "ws://", 5) == 0) {
+        out->is_ws = 1;
+        url += 5;
     } else {
         return -1;  /* unsupported scheme */
     }

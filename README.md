@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **320+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **370+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -52,7 +52,7 @@ int main(void) {
 - **Built-in CORS middleware** — configurable origins, methods, headers, preflight handling
 - **Multipart form-data** — RFC 2046 parser with configurable size limits
 - **Three response modes** — buffered (writev), file (sendfile zero-copy), stream (chunked transfer encoding)
-- **WebSocket** — RFC 6455 support with frame encoding/decoding
+- **WebSocket** — RFC 6455 server + client with frame encoding/decoding
 - **Route parameters** — `:param` capture, no allocation, pointers into read buffer
 - **Connection timeouts** — monotonic clock sweep, automatic 408 responses, slow-loris protection
 - **Access logging** — pluggable callback after each response, zero overhead when disabled
@@ -68,7 +68,7 @@ int main(void) {
 
 ## Architecture
 
-19 orthogonal modules, each independently testable:
+21 orthogonal modules, each independently testable:
 
 | Module | Header | Description |
 |--------|--------|-------------|
@@ -85,11 +85,14 @@ int main(void) {
 | **body_reader_multipart** | `body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
 | **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
 | **cors** | `cors.h` | Built-in CORS middleware with configurable origins |
-| **websocket** | `websocket.h` | RFC 6455 WebSocket support |
+| **websocket** | `websocket.h` + `websocket_server.h` | RFC 6455 WebSocket server support (shared frame parser + server API) |
+| **websocket_client** | `websocket_client.h` | RFC 6455 WebSocket client (masked frames, async handshake) |
 | **tls** | `tls.h` | Pluggable TLS transport vtable (bring-your-own backend) |
+| **h2** | `h2.h` + `h2_server.h` | HTTP/2 server (pluggable session vtable) |
+| **h2_client** | `h2_client.h` | HTTP/2 client (multiplexed streams, pluggable session) |
 | **async** | `async.h` | Connection suspension for async operations |
 | **thread_pool** | `thread_pool.h` | Worker thread pool with pipe-based event loop wakeup |
-| **url** | `url.h` | URL parser (http/https, IPv6, CRLF injection guard) |
+| **url** | `url.h` | URL parser (http/https/ws/wss, IPv6, CRLF injection guard) |
 | **client** | `client.h` | HTTP/1.1 client (sync blocking + async event-driven) |
 
 ## Request Body Handling
@@ -241,21 +244,21 @@ curl -F "name=Alice" -F "file=@photo.jpg" localhost:8080/upload
 Register a WebSocket endpoint and get bidirectional communication:
 
 ```c
-static int ws_on_message(KlWs *ws, KlWsOpcode opcode,
+static int ws_on_message(KlWsServerConn *ws, KlWsOpcode opcode,
                          const char *data, size_t len, void *ctx) {
     (void)ctx;
     if (opcode == KL_WS_TEXT) {
-        kl_ws_send(ws, KL_WS_TEXT, data, len);  /* echo back */
+        kl_ws_server_send_text(ws, data, len);  /* echo back */
     }
     return 0;
 }
 
-static void ws_on_close(KlWs *ws, void *ctx) {
+static void ws_on_close(KlWsServerConn *ws, void *ctx) {
     (void)ws; (void)ctx;
     printf("WebSocket closed\n");
 }
 
-static KlWsConfig ws_config = {
+static KlWsServerConfig ws_config = {
     .on_message = ws_on_message,
     .on_close = ws_on_close,
 };
@@ -269,7 +272,7 @@ int main(void) {
 }
 ```
 
-The WebSocket module handles frame parsing, masking, and protocol details. The handler receives callbacks for each message — use `kl_ws_send()` to reply.
+The WebSocket server module handles frame parsing, masking, and protocol details. The handler receives callbacks for each message — use `kl_ws_server_send_text()` or `kl_ws_server_send_binary()` to reply.
 
 ## Async Operations
 
@@ -368,7 +371,7 @@ kl_client_start(&ev, &alloc, NULL, "GET", "http://example.com/", NULL, 0, NULL, 
 kl_event_ctx_free(&ev);
 ```
 
-The URL parser (`kl_url_parse`) handles `http://`, `https://`, IPv6 `[::1]:port`, default ports, and rejects CRLF injection.
+The URL parser (`kl_url_parse`) handles `http://`, `https://`, `ws://`, `wss://`, IPv6 `[::1]:port`, default ports, and rejects CRLF injection.
 
 ## Static File Serving
 
@@ -572,7 +575,7 @@ The poll backend is a universal POSIX fallback that works on any platform with `
 
 ## Testing
 
-326 tests across 19 test suites, covering every module:
+372 tests across 21 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -586,13 +589,15 @@ The poll backend is a universal POSIX fallback that works on any platform with `
 | `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
 | `test_cors` | 17 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
 | `test_websocket` | 38 | Frame parsing, masking, opcode, fragments, close, echo |
+| `test_websocket_client` | 28 | Client frame encoding, mask XOR, handshake, parser, API, config |
 | `test_h2` | 29 | HTTP/2 sessions, streams, routing, ALPN, goaway |
+| `test_h2_client` | 18 | Mock session vtable, stream tracking, response free, API validation |
 | `test_integration` | 27 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
 | `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
 | `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
 | `test_async` | 15 | Watchers (KlEventCtx), suspend/resume, deadlines, cancel, e2e async handler |
 | `test_thread_pool` | 12 | Create/free, submit, backpressure, FIFO ordering, multi-worker, shutdown, stress |
-| `test_url` | 15 | URL parsing, IPv6, CRLF rejection, default ports, edge cases |
+| `test_url` | 20 | URL parsing, IPv6, CRLF rejection, default ports, ws/wss schemes |
 | `test_client` | 20 | Sync/async client, response free, TLS config, error handling |
 | `test_event_ctx` | 4 | Standalone event context init/free, watcher lifecycle |
 

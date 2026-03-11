@@ -16,7 +16,7 @@ typedef void (*KlHandler)(KlRequest *req, KlResponse *res, void *user_data);
  */
 typedef int (*KlMiddleware)(KlRequest *req, KlResponse *res, void *user_data);
 
-typedef struct KlWsConfig KlWsConfig;
+typedef struct KlWsServerConfig KlWsServerConfig;
 
 typedef struct {
     const char *method;
@@ -26,7 +26,7 @@ typedef struct {
     KlHandler handler;
     void *user_data;
     KlBodyReaderFactory body_reader;   /* NULL = discard body */
-    KlWsConfig *ws_config;             /* non-NULL = WebSocket endpoint */
+    KlWsServerConfig *ws_config;       /* non-NULL = WebSocket endpoint */
 } KlRoute;
 
 typedef struct {

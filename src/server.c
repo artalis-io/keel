@@ -1,8 +1,8 @@
 #include <keel/server.h>
 #include <keel/async.h>
 #include <keel/tls.h>
-#include <keel/websocket.h>
-#include <keel/h2.h>
+#include <keel/websocket_server.h>
+#include <keel/h2_server.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -182,7 +182,7 @@ int kl_server_use_post(KlServer *s, const char *method, const char *pattern,
     return kl_router_use_post(&s->router, method, pattern, fn, user_data);
 }
 
-int kl_server_ws(KlServer *s, const char *pattern, KlWsConfig *config) {
+int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
     /* Register as a GET route with no handler — ws_config triggers upgrade */
     if (kl_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
         return -1;
@@ -376,17 +376,17 @@ rearm_listen:
             /* WebSocket — handle read events */
             if (c->state == KL_CONN_WEBSOCKET) {
                 if (events[i].ready & KL_EVENT_READ)
-                    new_state = (KlConnState)kl_ws_on_readable(c);
+                    new_state = (KlConnState)kl_ws_server_on_readable(c);
                 goto transition;
             }
 
             /* HTTP/2 — handle read/write events */
             if (c->state == KL_CONN_HTTP2) {
                 if (events[i].ready & KL_EVENT_READ)
-                    new_state = (KlConnState)kl_h2_on_readable(c);
+                    new_state = (KlConnState)kl_h2_server_on_readable(c);
                 if (new_state == KL_CONN_HTTP2 &&
                     (events[i].ready & KL_EVENT_WRITE))
-                    new_state = (KlConnState)kl_h2_on_writable(c);
+                    new_state = (KlConnState)kl_h2_server_on_writable(c);
                 goto transition;
             }
 
@@ -467,7 +467,7 @@ transition:
                 continue;
             /* WebSocket: exempt from HTTP idle timeout, check close deadline */
             if (tc->state == KL_CONN_WEBSOCKET) {
-                if (kl_ws_check_close_timeout(tc, now)) {
+                if (kl_ws_server_check_close_timeout(tc, now)) {
                     kl_event_del(&s->ev.loop, tc->fd);
                     kl_server_conn_release(s,tc);
                 }
@@ -517,9 +517,9 @@ transition:
             /* Send close 1001 to active WebSocket connections */
             for (int j = 0; j < s->pool.capacity; j++) {
                 if (s->pool.conns[j].state == KL_CONN_WEBSOCKET)
-                    kl_ws_drain_close(&s->pool.conns[j]);
+                    kl_ws_server_drain_close(&s->pool.conns[j]);
                 if (s->pool.conns[j].state == KL_CONN_HTTP2)
-                    kl_h2_drain_shutdown(&s->pool.conns[j]);
+                    kl_h2_server_drain_shutdown(&s->pool.conns[j]);
             }
             int active = 0;
             for (int j = 0; j < s->pool.capacity; j++) {
