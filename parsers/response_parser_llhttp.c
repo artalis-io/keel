@@ -16,6 +16,7 @@
 #include <string.h>
 
 #define KL_MAX_RESPONSE_HEADERS 64
+#define KL_MAX_HEADER_SIZE      8192
 
 /* ── Parser state ────────────────────────────────────────────────── */
 
@@ -160,6 +161,9 @@ static int resp_on_header_field(llhttp_t *parser, const char *at, size_t len)
             return -1;
     }
 
+    if (p->hdr_name_len + len > KL_MAX_HEADER_SIZE)
+        return -1;
+
     return accum_append(p->alloc, &p->hdr_name, &p->hdr_name_len,
                          &p->hdr_name_cap, at, len);
 }
@@ -167,6 +171,10 @@ static int resp_on_header_field(llhttp_t *parser, const char *at, size_t len)
 static int resp_on_header_value(llhttp_t *parser, const char *at, size_t len)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
+
+    if (p->hdr_value_len + len > KL_MAX_HEADER_SIZE)
+        return -1;
+
     return accum_append(p->alloc, &p->hdr_value, &p->hdr_value_len,
                          &p->hdr_value_cap, at, len);
 }

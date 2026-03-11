@@ -153,12 +153,19 @@ static int h2_submit_response(KlH2Conn *h2c, KlH2Stream *stream) {
         if (res->file_size > 0) {
             size_t fsize = (size_t)res->file_size;
             file_buf = kl_malloc(h2c->alloc, fsize);
-            if (file_buf) {
-                ssize_t nr = pread(res->file_fd, file_buf, fsize, 0);
-                if (nr > 0) {
-                    body = file_buf;
-                    body_len = (size_t)nr;
-                }
+            if (!file_buf) {
+                const char *err_names[] = {"content-type"};
+                const char *err_values[] = {"text/plain"};
+                const char *err_body = "Internal server error";
+                h2c->session->submit_response(h2c->session, stream->stream_id,
+                                               500, err_names, err_values, 1,
+                                               err_body, strlen(err_body));
+                return 0;
+            }
+            ssize_t nr = pread(res->file_fd, file_buf, fsize, 0);
+            if (nr > 0) {
+                body = file_buf;
+                body_len = (size_t)nr;
             }
         }
     } else if (res->body_mode == KL_BODY_STREAM) {

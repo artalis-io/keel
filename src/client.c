@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -38,7 +39,11 @@ static ssize_t io_write(int fd, KlTls *tls, const void *buf, size_t len)
     if (tls)
         return tls->write(tls, fd, buf, len);
     ssize_t r;
+#ifdef MSG_NOSIGNAL
+    do { r = send(fd, buf, len, MSG_NOSIGNAL); } while (r < 0 && errno == EINTR);
+#else
     do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
+#endif
     return r;
 }
 
@@ -505,6 +510,8 @@ static char *build_request(KlAllocator *alloc,
         return NULL;
     off += n;
 
+    if (body_len > SIZE_MAX - (size_t)off)
+        return NULL;
     size_t total = (size_t)off + body_len;
     char *req = kl_malloc(alloc, total);
     if (!req)
@@ -732,6 +739,10 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
                            KlClientDoneFn on_done, void *user_data)
 {
     if (!ev_ctx || !alloc || !method || !url_str)
+        return NULL;
+    if (num_headers < 0 || num_headers > KL_CLIENT_MAX_REQ_HEADERS)
+        return NULL;
+    if (num_headers > 0 && !headers)
         return NULL;
 
     KlUrl parsed;

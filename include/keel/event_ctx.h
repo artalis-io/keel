@@ -85,6 +85,6 @@ void kl_watcher_del(KlEventCtx *ctx, int fd);
  * the watcher was removed during the callback.  On persistent backends
  * (epoll, kqueue) this is a harmless re-register.
  */
-void kl_watcher_rearm(KlEventCtx *ctx, int fd);
+int  kl_watcher_rearm(KlEventCtx *ctx, int fd);
 
 #endif

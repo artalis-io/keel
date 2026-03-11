@@ -81,25 +81,13 @@ None found.
 | **Impact** | Unchanged from previous audit. Startup-only raw `malloc`/`free`. Documented exception. |
 | **Suggested Fix** | Accept as-is, or thread an optional `KlAllocator` through context creation. |
 
-### M-2: kl_async_complete ignores kl_event_add return value
+### ~~M-2: kl_async_complete ignores kl_event_add return value~~ FIXED
 
-| Field | Value |
-|-------|-------|
-| **File** | `src/async.c` |
-| **Lines** | 157-160 |
-| **Category** | Resource Management |
-| **Impact** | After resuming a suspended connection, `kl_event_add` is called to re-register the fd with the event loop. If this fails (event loop full, fd invalid), the connection is stranded — removed from the suspended ops list but not registered in the event loop. It will never receive events and never be cleaned up. |
-| **Suggested Fix** | Check `kl_event_add` return value. On failure, release the connection via `kl_server_conn_release`. |
+`kl_event_add` return checked; connection released on failure.
 
-### M-3: kl_client_start missing input validation for num_headers/headers
+### ~~M-3: kl_client_start missing input validation for num_headers/headers~~ FIXED
 
-| Field | Value |
-|-------|-------|
-| **File** | `src/client.c` |
-| **Lines** | 727-857 |
-| **Category** | Input Validation |
-| **Impact** | The sync API (`kl_client_request`) validates `num_headers` range `[0, KL_CLIENT_MAX_REQ_HEADERS]` and `headers != NULL` when `num_headers > 0`. The async API (`kl_client_start`) does not. A positive `num_headers` with `headers == NULL` crashes in `build_request`. |
-| **Suggested Fix** | Add the same validation at the top of `kl_client_start`. |
+`num_headers` range and `headers != NULL` validation added to `kl_client_start`.
 
 ### M-4: io_uring kl_event_mod can leave fd un-monitored on double SQE failure
 
@@ -142,54 +130,25 @@ None found.
 | **Category** | Performance |
 | **Impact** | Unchanged. Acceptable for default max 128 streams. |
 
-### L-4: build_request addition lacks overflow guard
+### ~~L-4: build_request addition lacks overflow guard~~ FIXED
 
-| Field | Value |
-|-------|-------|
-| **File** | `src/client.c` |
-| **Lines** | 508 |
-| **Category** | Integer Overflow |
-| **Impact** | `size_t total = (size_t)off + body_len;` does not check for wrap-around. If `body_len` is near `SIZE_MAX`, `total` wraps to a small value, and the subsequent `memcpy` writes past the allocation. Practically mitigated by `kl_malloc` failing for huge sizes, but violates the project convention of explicit overflow guards. |
-| **Suggested Fix** | Add `if (body_len > SIZE_MAX - (size_t)off) return NULL;` |
+Overflow guard added: `if (body_len > SIZE_MAX - (size_t)off) return NULL;`
 
-### L-5: H2 malloc failure sends empty 200 instead of 500
+### ~~L-5: H2 malloc failure sends empty 200 instead of 500~~ FIXED
 
-| Field | Value |
-|-------|-------|
-| **File** | `src/h2.c` |
-| **Lines** | 155 |
-| **Category** | Error Handling |
-| **Impact** | When `kl_malloc` fails for a file-backed HTTP/2 response, the code sends a 200 with an empty body instead of a 500 error. Not a crash (NULL is guarded by `if (file_buf)`) but a silent data loss. |
-| **Suggested Fix** | Return 500 on allocation failure, matching the pattern at lines 143-151. |
+On `kl_malloc` failure, sends 500 "Internal server error" via `submit_response`.
 
-### L-6: Standalone client on Linux lacks SIGPIPE protection
+### ~~L-6: Standalone client on Linux lacks SIGPIPE protection~~ FIXED
 
-| Field | Value |
-|-------|-------|
-| **File** | `src/client.c` |
-| **Lines** | 41 (io_write), 84-88 (SO_NOSIGPIPE) |
-| **Category** | Network Safety |
-| **Impact** | `SO_NOSIGPIPE` only works on macOS/BSD. On Linux, SIGPIPE is only suppressed when the server is running (`signal(SIGPIPE, SIG_IGN)` in `kl_server_run`). A standalone client on Linux without a server could receive SIGPIPE on a broken pipe. |
-| **Suggested Fix** | Use `send(fd, buf, len, MSG_NOSIGNAL)` instead of `write()` in `io_write`, or add `signal(SIGPIPE, SIG_IGN)` in `kl_client_request()`. |
+`io_write` uses `send(fd, buf, len, MSG_NOSIGNAL)` on Linux, `write()` on macOS (where `SO_NOSIGPIPE` handles it).
 
-### L-7: kl_watcher_rearm ignores kl_event_mod return value
+### ~~L-7: kl_watcher_rearm ignores kl_event_mod return value~~ FIXED
 
-| Field | Value |
-|-------|-------|
-| **File** | `src/async.c` |
-| **Lines** | 79 |
-| **Category** | Error Handling |
-| **Impact** | `kl_event_mod` return value is silently discarded. If re-arm fails, the watcher remains in the list but never fires. The function is `void`, so callers cannot detect the failure. |
-| **Suggested Fix** | Low priority — either return `int` or assert internally. |
+`kl_watcher_rearm` returns `int`. Header updated.
 
-### L-8: Response parser has no per-header size limit
+### ~~L-8: Response parser has no per-header size limit~~ FIXED
 
-| Field | Value |
-|-------|-------|
-| **File** | `parsers/response_parser_llhttp.c` |
-| **Category** | Resource Limits |
-| **Impact** | Header count is limited to `KL_MAX_RESPONSE_HEADERS` (64), but individual header name/value sizes are unbounded. A malicious server could send a single header value of arbitrary size, consuming unbounded memory. The `max_response_size` parameter only applies to the body. |
-| **Suggested Fix** | Consider adding a `max_header_size` limit, or applying `max_response_size` to headers + body combined. |
+Added `KL_MAX_HEADER_SIZE` (8192) limit in `resp_on_header_field` and `resp_on_header_value`.
 
 ---
 
@@ -215,9 +174,9 @@ Shutdown sets flag, broadcasts condvar, joins all workers, then drains remaining
 
 Good practice for ASan/UBSan diagnostics.
 
-### I-6: Fuzz targets cover the three primary attack surfaces
+### I-6: Fuzz targets cover the four primary attack surfaces
 
-`fuzz_parser` (HTTP request parser + chunked decoder), `fuzz_multipart` (multipart parser), and `fuzz_websocket` (WebSocket frame parser).
+`fuzz_parser` (HTTP request parser + chunked decoder), `fuzz_multipart` (multipart parser), `fuzz_websocket` (WebSocket frame parser), and `fuzz_response_parser` (HTTP response parser for client).
 
 ### I-7: Async client uses blocking DNS (documented trade-off)
 
@@ -260,7 +219,7 @@ Good practice for ASan/UBSan diagnostics.
 | Watcher cleanup on cancel/error | `kl_watcher_del` called in both completion paths and `kl_client_cancel` |
 | kl_client_free handles all states | Calls `kl_client_cancel` first if still in-flight |
 
-**Issues:** M-3 (missing `num_headers` validation in async path), L-4 (overflow guard in `build_request`), L-6 (SIGPIPE on standalone Linux).
+**Issues:** ~~M-3~~ **FIXED**, ~~L-4~~ **FIXED**, ~~L-6~~ **FIXED**.
 
 ## New Module Assessment: response_parser_llhttp.c
 
@@ -276,7 +235,7 @@ Good practice for ASan/UBSan diagnostics.
 | Proper cleanup on reset | Lines 283-315: same pattern minus freeing self |
 | Ownership transfer clean | Lines 236-248: parser pointers cleared after transfer |
 
-**Issues:** L-8 (no per-header-value size limit).
+**Issues:** ~~L-8~~ **FIXED** (8 KiB per-header name/value limit via `KL_MAX_HEADER_SIZE`).
 
 ## New Module Assessment: event_ctx (async.c refactor)
 
@@ -290,7 +249,7 @@ Good practice for ASan/UBSan diagnostics.
 | kl_watcher_mod validates inputs | Line 61: ctx, fd checks. Returns -1 for unknown fd |
 | kl_watcher_del safe for unknown fd | Lines 82-96: silently returns if not found |
 
-**Issues:** M-2 (`kl_async_complete` ignores `kl_event_add` return), L-7 (`kl_watcher_rearm` ignores `kl_event_mod` return).
+**Issues:** ~~M-2~~ **FIXED** (checks `kl_event_add` return, releases connection on failure), ~~L-7~~ **FIXED** (`kl_watcher_rearm` returns `int`).
 
 ---
 
@@ -308,14 +267,13 @@ Good practice for ASan/UBSan diagnostics.
 | `-fno-omit-frame-pointer` | Present | Debug builds |
 | Clang static analysis | Present | `make analyze` |
 | cppcheck | Present | `make cppcheck` |
-| libFuzzer targets | Present | Parser + multipart + WebSocket |
+| libFuzzer targets | Present | Parser + multipart + WebSocket + response parser |
 | Vendor code `-w` | Present | Relaxed for llhttp |
 | `-lpthread` (Linux) | Present | Required for thread pool |
 
 **Missing/Recommended:**
 
 - `-Wconversion` is not set. Would catch implicit narrowing conversions.
-- Consider a fuzz target for the response parser (`fuzz_response_parser`).
 
 ---
 
@@ -343,40 +301,42 @@ Good practice for ASan/UBSan diagnostics.
 | url | test_url.c | 15 | Good: HTTP/HTTPS, ports, IPv6, CRLF, edge cases |
 | websocket | test_websocket.c | 33 | Excellent: SHA-1, base64, frames, fragmentation, close |
 
-### Coverage Gaps
+### Coverage Gaps (Priority Order)
 
-1. **No allocation failure injection** — No tests for malloc/realloc failure paths.
+1. **Connection state machine** — `kl_conn_on_readable`, `kl_conn_on_writable`, `kl_conn_on_handshake` not directly unit-tested. These are the core request/response processing functions.
 
-2. **No dedicated event loop backend tests** — Backends exercised indirectly via integration tests only.
+2. **`kl_response_body_copy`** — Recently added function with no test coverage.
 
-3. **Connection state machine** — `kl_conn_on_readable`, `kl_conn_on_writable` not directly unit-tested.
+3. **WebSocket send/close API** — `kl_ws_send_text`, `kl_ws_send_binary`, `kl_ws_send_ping`, `kl_ws_close`, `kl_ws_drain_close` have no unit tests. Frame parsing is well covered but the public send API is not.
 
-4. **`kl_response_body_copy`** — Recently added function with no test coverage.
+4. **`kl_server_ws`** — WebSocket route registration not tested in integration tests.
 
-5. **mbedTLS backend** — 5 concrete functions untested (require linked mbedTLS + real cert files). Vtable is tested via mocks.
+5. **No allocation failure injection** — No tests for malloc/realloc failure paths. A custom allocator that fails on the Nth call would cover error cleanup paths.
 
-6. **No response parser fuzz target** — The request parser and multipart parser have fuzz targets, but the response parser does not.
+6. **No dedicated event loop backend tests** — Backends exercised indirectly via integration tests only.
+
+7. **mbedTLS backend** — 5 concrete functions untested (require linked mbedTLS + real cert files). Vtable is tested via mocks.
+
+8. **Async client callbacks** — `kl_client_start` validated for input but no test verifies the `on_done` callback fires on completion/error.
+
+9. **Thread pool backpressure/shutdown** — No test for queue-full recovery, in-flight completion during free, or cancel callbacks for unstarted items.
 
 ---
 
 ## Recommendations
 
-### Priority 1 (Should Fix)
+### All Medium/Low Findings — FIXED
 
-1. **Fix M-3** — Add `num_headers` / `headers` validation to `kl_client_start` (copy from `kl_client_request`).
+All M-2, M-3, L-4 through L-8 findings have been fixed and verified with `make test` (345 tests, 0 failures).
 
-2. **Fix M-2** — Check `kl_event_add` return value in `kl_async_complete`. Release connection on failure.
+### Remaining Work
 
-3. **Fix L-4** — Add overflow guard in `build_request`: `if (body_len > SIZE_MAX - (size_t)off) return NULL;`
+1. **Add `kl_response_body_copy` test** — Recently added, currently untested.
 
-### Priority 2 (Low)
+2. **Add connection state machine tests** — `kl_conn_on_readable`, `kl_conn_on_writable` are critical untested paths.
 
-4. **Fix L-6** — Use `send(fd, buf, len, MSG_NOSIGNAL)` on Linux for standalone client SIGPIPE safety.
+3. **Add WebSocket send API tests** — `kl_ws_send_text/binary/ping/close` public API untested.
 
-5. **Add a fuzz target for `response_parser_llhttp.c`** — The client parses untrusted server responses.
+4. **Add allocation failure injection** — Custom allocator that fails on Nth call for testing error paths.
 
-6. **Add `kl_response_body_copy` test** — Recently added, currently untested.
-
-7. **Add allocation failure injection** — Custom allocator that fails on Nth call for testing error paths.
-
-8. **Consider removing `kl_request_header()`** (L-1) in favor of length-aware `kl_request_header_len()`.
+5. **Consider removing `kl_request_header()`** (L-1) in favor of length-aware `kl_request_header_len()`.

@@ -139,7 +139,7 @@ clean:
 	rm -f src/async.o src/thread_pool.o src/tls_mbedtls.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/rest_api examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/tls examples/async examples/thread_pool examples/h2_server
-	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket
+	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser
 
 # Debug build with sanitizers: make debug
 DEBUG_CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -g -O0 \
@@ -181,7 +181,10 @@ fuzz/fuzz_multipart: fuzz/fuzz_multipart.c $(LIB)
 fuzz/fuzz_websocket: fuzz/fuzz_websocket.c $(LIB)
 	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
-fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket
+fuzz/fuzz_response_parser: fuzz/fuzz_response_parser.c $(LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
+fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser
 
 # API documentation (requires Doxygen)
 docs:

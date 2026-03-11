@@ -69,14 +69,14 @@ int kl_watcher_mod(KlEventCtx *ctx, int fd, KlEventMask mask) {
     return kl_event_mod(&ctx->loop, fd, mask, watcher_tag(w));
 }
 
-void kl_watcher_rearm(KlEventCtx *ctx, int fd) {
-    if (!ctx || fd < 0) return;
+int kl_watcher_rearm(KlEventCtx *ctx, int fd) {
+    if (!ctx || fd < 0) return -1;
 
     KlWatcher *w = ctx->watchers;
     while (w && w->fd != fd) w = w->next;
-    if (!w) return;
+    if (!w) return 0;  /* removed during callback — safe no-op */
 
-    kl_event_mod(&ctx->loop, fd, w->mask, watcher_tag(w));
+    return kl_event_mod(&ctx->loop, fd, w->mask, watcher_tag(w));
 }
 
 void kl_watcher_del(KlEventCtx *ctx, int fd) {
@@ -155,9 +155,11 @@ void kl_async_complete(KlServer *s, KlAsyncOp *op) {
 
     /* Re-register FD with appropriate mask */
     if (new_state == KL_CONN_SENDING) {
-        kl_event_add(&s->ev.loop, conn->fd, KL_EVENT_WRITE, conn);
+        if (kl_event_add(&s->ev.loop, conn->fd, KL_EVENT_WRITE, conn) < 0)
+            kl_server_conn_release(s, conn);
     } else if (new_state == KL_CONN_READING) {
-        kl_event_add(&s->ev.loop, conn->fd, KL_EVENT_READ, conn);
+        if (kl_event_add(&s->ev.loop, conn->fd, KL_EVENT_READ, conn) < 0)
+            kl_server_conn_release(s, conn);
     } else if (new_state == KL_CONN_CLOSED) {
         kl_server_conn_release(s, conn);
     }
