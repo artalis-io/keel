@@ -72,7 +72,7 @@ static void delay_watcher(int fd, KlEventMask ready, void *user_data) {
     if (read(ctx->pipe_fds[0], buf, 1) < 0) { /* ignore */ }
 
     /* Remove watcher before completing */
-    kl_watcher_del(ctx->server, ctx->pipe_fds[0]);
+    kl_watcher_del(&ctx->server->ev, ctx->pipe_fds[0]);
 
     /* Resume connection (must be on event loop thread — we are) */
     kl_async_complete(ctx->server, &ctx->op);
@@ -130,7 +130,7 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     }
 
     /* Register read end with event loop */
-    if (kl_watcher_add(srv, ctx->pipe_fds[0], KL_EVENT_READ,
+    if (kl_watcher_add(&srv->ev, ctx->pipe_fds[0], KL_EVENT_READ,
                         delay_watcher, ctx) < 0) {
         close(ctx->pipe_fds[0]);
         close(ctx->pipe_fds[1]);

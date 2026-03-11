@@ -130,7 +130,7 @@ int main(void) {
 
     /* Create thread pool (4 workers, default queue) */
     KlThreadPoolConfig pool_cfg = {.num_workers = 4};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &pool_cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &pool_cfg);
     if (!pool) {
         fprintf(stderr, "thread pool creation failed\n");
         kl_server_free(&s);
