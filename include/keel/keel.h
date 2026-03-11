@@ -3,6 +3,7 @@
 
 #include <keel/allocator.h>
 #include <keel/event.h>
+#include <keel/event_ctx.h>
 #include <keel/request.h>
 #include <keel/body_reader.h>
 #include <keel/body_reader_multipart.h>
@@ -18,5 +19,7 @@
 #include <keel/websocket.h>
 #include <keel/async.h>
 #include <keel/thread_pool.h>
+#include <keel/url.h>
+#include <keel/client.h>
 
 #endif

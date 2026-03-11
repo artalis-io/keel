@@ -1,6 +1,5 @@
 #include <keel/thread_pool.h>
-#include <keel/async.h>
-#include <keel/server.h>
+#include <keel/event_ctx.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -15,7 +14,7 @@
 #define KL_TP_DEFAULT_CAPACITY 64
 
 struct KlThreadPool {
-    KlServer *server;
+    KlEventCtx *ev_ctx;
     KlAllocator *alloc;
 
     /* Pipe for cross-thread wakeup */
@@ -118,11 +117,11 @@ static void thread_pool_on_pipe(int fd, KlEventMask ready, void *user_data)
 
 /* ── Public API ───────────────────────────────────────────────────── */
 
-KlThreadPool *kl_thread_pool_create(KlServer *s, const KlThreadPoolConfig *cfg)
+KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *cfg)
 {
-    if (!s) return NULL;
+    if (!ctx) return NULL;
 
-    KlAllocator *alloc = (cfg && cfg->alloc) ? cfg->alloc : &s->alloc_storage;
+    KlAllocator *alloc = (cfg && cfg->alloc) ? cfg->alloc : ctx->alloc;
     int num_workers = (cfg && cfg->num_workers > 0) ? cfg->num_workers : 0;
     int queue_cap = (cfg && cfg->queue_capacity > 0) ? cfg->queue_capacity
                                                      : KL_TP_DEFAULT_CAPACITY;
@@ -143,7 +142,7 @@ KlThreadPool *kl_thread_pool_create(KlServer *s, const KlThreadPoolConfig *cfg)
     if (!pool) return NULL;
     memset(pool, 0, sizeof(*pool));
 
-    pool->server = s;
+    pool->ev_ctx = ctx;
     pool->alloc = alloc;
     pool->pipe_rd = -1;
     pool->pipe_wr = -1;
@@ -174,7 +173,7 @@ KlThreadPool *kl_thread_pool_create(KlServer *s, const KlThreadPoolConfig *cfg)
     if (pthread_cond_init(&pool->work_avail, NULL) != 0) goto fail_mutex;
 
     /* Register pipe watcher with event loop */
-    if (kl_watcher_add(s, pool->pipe_rd, KL_EVENT_READ,
+    if (kl_watcher_add(ctx, pool->pipe_rd, KL_EVENT_READ,
                        thread_pool_on_pipe, pool) < 0)
         goto fail_cond;
 
@@ -198,7 +197,7 @@ KlThreadPool *kl_thread_pool_create(KlServer *s, const KlThreadPoolConfig *cfg)
 fail_threads:
     kl_free(alloc, pool->threads, (size_t)num_workers * sizeof(pthread_t));
 fail_watcher:
-    kl_watcher_del(s, pool->pipe_rd);
+    kl_watcher_del(ctx, pool->pipe_rd);
 fail_cond:
     pthread_cond_destroy(&pool->work_avail);
 fail_mutex:
@@ -252,7 +251,7 @@ void kl_thread_pool_free(KlThreadPool *pool)
         pthread_join(pool->threads[i], NULL);
 
     /* Remove pipe watcher from event loop */
-    kl_watcher_del(pool->server, pool->pipe_rd);
+    kl_watcher_del(pool->ev_ctx, pool->pipe_rd);
 
     /* Drain remaining done queue items → call done_fn */
     while (pool->done_count > 0) {

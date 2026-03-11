@@ -1,64 +1,11 @@
 #ifndef KEEL_ASYNC_H
 #define KEEL_ASYNC_H
 
-#include <keel/event.h>
+#include <keel/event_ctx.h>
 #include <stdint.h>
 
 typedef struct KlServer KlServer;
 typedef struct KlConn KlConn;
-
-/* ── KlWatcher — generic FD callback ──────────────────────────────── */
-
-/**
- * @brief Callback invoked when a watched FD becomes ready.
- * @param fd     File descriptor that fired.
- * @param ready  Bitmask of ready events (KL_EVENT_READ, KL_EVENT_WRITE).
- * @param user_data Opaque pointer passed to kl_watcher_add.
- */
-typedef void (*KlWatcherFn)(int fd, KlEventMask ready, void *user_data);
-
-/**
- * @brief A registered FD watcher (heap-allocated, server-owned list).
- */
-typedef struct KlWatcher {
-    int fd;
-    KlEventMask mask;
-    KlWatcherFn on_ready;
-    void *user_data;
-    struct KlWatcher *next;   /* server's watcher list */
-} KlWatcher;
-
-/**
- * @brief Register a file descriptor with the event loop.
- *
- * When the FD becomes ready (readable/writable per mask), on_ready is
- * called on the event loop thread.  The watcher is heap-allocated and
- * owned by the server — call kl_watcher_del to remove and free.
- *
- * @return 0 on success, -1 on failure.
- */
-int  kl_watcher_add(KlServer *s, int fd, KlEventMask mask,
-                    KlWatcherFn on_ready, void *user_data);
-
-/**
- * @brief Change the event interest mask for a registered watcher.
- * @return 0 on success, -1 if fd not found or event_mod fails.
- */
-int  kl_watcher_mod(KlServer *s, int fd, KlEventMask mask);
-
-/**
- * @brief Remove a watcher and deregister its FD from the event loop.
- */
-void kl_watcher_del(KlServer *s, int fd);
-
-/**
- * @brief Re-arm a watcher after its callback fires.
- *
- * Required for one-shot backends (io_uring POLL_ADD).  Safe no-op if
- * the watcher was removed during the callback.  On persistent backends
- * (epoll, kqueue) this is a harmless re-register.
- */
-void kl_watcher_rearm(KlServer *s, int fd);
 
 /* ── KlAsyncOp — connection suspension ────────────────────────────── */
 

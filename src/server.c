@@ -68,7 +68,7 @@ static void kl_log_errno(KlServer *s, int level, const char *msg) {
 void kl_server_conn_release(KlServer *s, KlConn *c) {
     kl_conn_release(&s->pool, c);
     if (s->listen_paused && s->pool.free_list) {
-        kl_event_add(&s->loop, s->listen_fd, KL_EVENT_READ, NULL);
+        kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL);
         s->listen_paused = 0;
     }
 }
@@ -155,9 +155,8 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         }
     }
 
-    /* Init event loop — must happen before thread pool / watcher registration */
-    s->loop.alloc = alloc;
-    if (kl_event_init(&s->loop) < 0) {
+    /* Init event context — must happen before thread pool / watcher registration */
+    if (kl_event_ctx_init(&s->ev, alloc) < 0) {
         kl_conn_pool_free(&s->pool);
         kl_router_free(&s->router);
         return -1;
@@ -245,7 +244,7 @@ int kl_server_run(KlServer *s) {
     }
 
     /* Register listen socket for read events */
-    if (kl_event_add(&s->loop, s->listen_fd, KL_EVENT_READ, NULL) < 0) {
+    if (kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "event_add listen");
         close(s->listen_fd);
         s->listen_fd = -1;
@@ -288,7 +287,7 @@ int kl_server_run(KlServer *s) {
             }
         }
 
-        int n = kl_event_wait(&s->loop, events, KL_EVENTS_PER_TICK,
+        int n = kl_event_wait(&s->ev.loop, events, KL_EVENTS_PER_TICK,
                               wait_timeout);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -305,7 +304,7 @@ int kl_server_run(KlServer *s) {
                 w->on_ready(wfd, events[i].ready, w->user_data);
                 /* Re-arm for one-shot backends (io_uring POLL_ADD).
                  * Safe no-op if callback removed the watcher. */
-                kl_watcher_rearm(s, wfd);
+                kl_watcher_rearm(&s->ev, wfd);
                 continue;
             }
 
@@ -335,7 +334,7 @@ int kl_server_run(KlServer *s) {
                         close(client_fd);
                         /* Pool full — stop accepting until a slot frees up.
                          * The kernel TCP backlog queues further connections. */
-                        kl_event_del(&s->loop, s->listen_fd);
+                        kl_event_del(&s->ev.loop, s->listen_fd);
                         s->listen_paused = 1;
                         break;
                     }
@@ -350,7 +349,7 @@ int kl_server_run(KlServer *s) {
                         nc->tls_want = KL_EVENT_READ;
                     }
 
-                    if (kl_event_add(&s->loop, client_fd,
+                    if (kl_event_add(&s->ev.loop, client_fd,
                                      KL_EVENT_READ, nc) < 0) {
                         kl_server_conn_release(s,nc);
                         continue;
@@ -360,7 +359,7 @@ int kl_server_run(KlServer *s) {
                  * required for io_uring's one-shot POLL_ADD) */
 rearm_listen:
                 if (!s->listen_paused)
-                    kl_event_mod(&s->loop, s->listen_fd,
+                    kl_event_mod(&s->ev.loop, s->listen_fd,
                                  KL_EVENT_READ, NULL);
                 continue;
             }
@@ -408,21 +407,21 @@ rearm_listen:
 transition:
             /* Transition */
             if (new_state == KL_CONN_TLS_HANDSHAKE) {
-                if (kl_event_mod(&s->loop, c->fd,
+                if (kl_event_mod(&s->ev.loop, c->fd,
                                  (KlEventMask)c->tls_want, c) < 0) {
-                    kl_event_del(&s->loop, c->fd);
+                    kl_event_del(&s->ev.loop, c->fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_SENDING) {
-                if (kl_event_mod(&s->loop, c->fd,
+                if (kl_event_mod(&s->ev.loop, c->fd,
                                  KL_EVENT_WRITE, c) < 0) {
-                    kl_event_del(&s->loop, c->fd);
+                    kl_event_del(&s->ev.loop, c->fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_WEBSOCKET) {
-                if (kl_event_mod(&s->loop, c->fd,
+                if (kl_event_mod(&s->ev.loop, c->fd,
                                  KL_EVENT_READ, c) < 0) {
-                    kl_event_del(&s->loop, c->fd);
+                    kl_event_del(&s->ev.loop, c->fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_HTTP2) {
@@ -430,22 +429,22 @@ transition:
                 if (c->h2 && c->h2->session &&
                     c->h2->session->want_write(c->h2->session))
                     mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
-                if (kl_event_mod(&s->loop, c->fd, mask, c) < 0) {
-                    kl_event_del(&s->loop, c->fd);
+                if (kl_event_mod(&s->ev.loop, c->fd, mask, c) < 0) {
+                    kl_event_del(&s->ev.loop, c->fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_READING ||
                        new_state == KL_CONN_READING_BODY) {
-                if (kl_event_mod(&s->loop, c->fd,
+                if (kl_event_mod(&s->ev.loop, c->fd,
                                  KL_EVENT_READ, c) < 0) {
-                    kl_event_del(&s->loop, c->fd);
+                    kl_event_del(&s->ev.loop, c->fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_SUSPENDED) {
                 /* Handler suspended for async I/O — FD already removed
                  * from event loop by kl_async_suspend. */
             } else if (new_state == KL_CONN_CLOSED) {
-                kl_event_del(&s->loop, c->fd);
+                kl_event_del(&s->ev.loop, c->fd);
                 kl_server_conn_release(s,c);
             }
         }
@@ -469,7 +468,7 @@ transition:
             /* WebSocket: exempt from HTTP idle timeout, check close deadline */
             if (tc->state == KL_CONN_WEBSOCKET) {
                 if (kl_ws_check_close_timeout(tc, now)) {
-                    kl_event_del(&s->loop, tc->fd);
+                    kl_event_del(&s->ev.loop, tc->fd);
                     kl_server_conn_release(s,tc);
                 }
                 continue;
@@ -495,7 +494,7 @@ transition:
                     tc->state == KL_CONN_READING_BODY)
                     best_effort_conn_write(tc, kl_408_response,
                                            sizeof(kl_408_response) - 1);
-                kl_event_del(&s->loop, tc->fd);
+                kl_event_del(&s->ev.loop, tc->fd);
                 kl_server_conn_release(s,tc);
             }
         }
@@ -565,19 +564,11 @@ void kl_server_free(KlServer *s) {
             op->conn->async_op = NULL;
     }
 
-    /* Free all watchers */
-    while (s->watchers) {
-        KlWatcher *w = s->watchers;
-        s->watchers = w->next;
-        kl_event_del(&s->loop, w->fd);
-        kl_free(&s->alloc_storage, w, sizeof(KlWatcher));
-    }
-
     if (s->listen_fd >= 0) {
         close(s->listen_fd);
         s->listen_fd = -1;
     }
-    kl_event_close(&s->loop);
+    kl_event_ctx_free(&s->ev);
     kl_conn_pool_free(&s->pool);
     kl_router_free(&s->router);
     if (s->config.tls && s->config.tls->ctx_destroy) {

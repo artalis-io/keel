@@ -12,7 +12,7 @@
  */
 
 typedef struct {
-    KlParser base;          /* vtable — must be first */
+    KlRequestParser base;          /* vtable — must be first */
     KlAllocator *alloc;
     llhttp_t llhttp;
     llhttp_settings_t settings;
@@ -157,7 +157,7 @@ static int on_message_complete(llhttp_t *p) {
 
 /* --- KlParser vtable implementation --- */
 
-static KlParseResult llhttp_parse(KlParser *self, KlRequest *req,
+static KlParseResult llhttp_parse(KlRequestParser *self, KlRequest *req,
                                    const char *buf, size_t len,
                                    size_t *consumed) {
     LlhttpParser *lp = (LlhttpParser *)self;
@@ -200,7 +200,7 @@ static KlParseResult llhttp_parse(KlParser *self, KlRequest *req,
     return KL_PARSE_ERROR;
 }
 
-static void llhttp_reset_parser(KlParser *self) {
+static void llhttp_reset_parser(KlRequestParser *self) {
     LlhttpParser *lp = (LlhttpParser *)self;
     llhttp_init(&lp->llhttp, HTTP_REQUEST, &lp->settings);
     lp->llhttp.data = lp;
@@ -211,12 +211,12 @@ static void llhttp_reset_parser(KlParser *self) {
     lp->hdr_field_len = 0;
 }
 
-static void llhttp_destroy_parser(KlParser *self) {
+static void llhttp_destroy_parser(KlRequestParser *self) {
     LlhttpParser *lp = (LlhttpParser *)self;
     kl_free(lp->alloc, lp, sizeof(LlhttpParser));
 }
 
-KlParser *kl_parser_llhttp(KlAllocator *alloc) {
+KlRequestParser *kl_request_parser_llhttp(KlAllocator *alloc) {
     LlhttpParser *lp = kl_malloc(alloc, sizeof(LlhttpParser));
     if (!lp) return NULL;
 

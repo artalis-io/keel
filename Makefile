@@ -50,10 +50,11 @@ CORE_SRC = src/allocator.c src/response.c src/router.c \
            src/connection.c src/server.c src/async.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
-           src/websocket.c src/h2.c src/thread_pool.c $(EVENT_SRC)
+           src/websocket.c src/h2.c src/thread_pool.c src/url.c \
+           src/client.c $(EVENT_SRC)
 
 # Default parser backend (llhttp)
-LLHTTP_SRC = parsers/parser_llhttp.c \
+LLHTTP_SRC = parsers/parser_llhttp.c parsers/response_parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Optional mbedTLS backend: make KEEL_TLS=mbedtls MBEDTLS_DIR=/path/to/mbedtls

@@ -92,13 +92,15 @@ static void mock_tls_init(MockTls *m) {
     m->base.pending    = mock_pending;
     m->base.reset      = mock_reset;
     m->base.destroy    = mock_destroy;
+    m->base.alpn_protocol = NULL;
+    m->base.set_hostname  = NULL;
 }
 
 /* ── Vtable and enum tests ───────────────────────────────────────── */
 
 UTEST(tls, vtable_struct_size) {
-    /* KlTls has 8 function pointers (7 required + alpn_protocol optional) */
-    ASSERT_EQ(sizeof(KlTls), 8 * sizeof(void *));
+    /* KlTls has 9 function pointers (7 required + alpn_protocol + set_hostname optional) */
+    ASSERT_EQ(sizeof(KlTls), 9 * sizeof(void *));
 }
 
 UTEST(tls, result_enum_values) {

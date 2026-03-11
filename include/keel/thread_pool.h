@@ -3,7 +3,7 @@
 
 #include <keel/allocator.h>
 
-typedef struct KlServer KlServer;
+typedef struct KlEventCtx KlEventCtx;
 
 typedef void (*KlWorkFn)(void *user_data);
 typedef void (*KlWorkDoneFn)(void *user_data);
@@ -27,18 +27,18 @@ typedef struct KlWorkItem {
 typedef struct KlThreadPoolConfig {
     int num_workers;          /* 0 = auto-detect via sysconf(_SC_NPROCESSORS_ONLN) */
     int queue_capacity;       /* max items in work queue; 0 = 64 */
-    KlAllocator *alloc;       /* NULL = server's allocator */
+    KlAllocator *alloc;       /* NULL = ctx's allocator */
 } KlThreadPoolConfig;
 
 typedef struct KlThreadPool KlThreadPool;
 
 /**
- * @brief Create pool, start worker threads, register pipe watcher with server.
- * @param s    Server instance (for event loop + allocator).
+ * @brief Create pool, start worker threads, register pipe watcher with ctx.
+ * @param ctx  Event context (for event loop + allocator).
  * @param cfg  Configuration (NULL = all defaults).
  * @return Pool on success, NULL on failure.
  */
-KlThreadPool *kl_thread_pool_create(KlServer *s, const KlThreadPoolConfig *cfg);
+KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *cfg);
 
 /**
  * @brief Submit work. Copies *item into the internal queue.

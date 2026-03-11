@@ -9,14 +9,14 @@
 
 /* ── Helpers (same pattern as test_async.c) ───────────────────────── */
 
-static void dispatch_events(KlServer *s, KlEvent *events, int n) {
+static void dispatch_events(KlEventCtx *ev, KlEvent *events, int n) {
     for (int i = 0; i < n; i++) {
         uintptr_t tag = (uintptr_t)events[i].udata;
         if (tag & 1) {
             KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
             int wfd = w->fd;
             w->on_ready(wfd, events[i].ready, w->user_data);
-            kl_watcher_rearm(s, wfd);
+            kl_watcher_rearm(ev, wfd);
         }
     }
 }
@@ -25,17 +25,11 @@ static void init_test_server(KlServer *s) {
     memset(s, 0, sizeof(*s));
     s->listen_fd = -1;
     s->alloc_storage = kl_allocator_default();
-    s->loop.alloc = &s->alloc_storage;
+    s->ev.alloc = &s->alloc_storage;
 }
 
 static void cleanup_test_server(KlServer *s) {
-    while (s->watchers) {
-        KlWatcher *w = s->watchers;
-        s->watchers = w->next;
-        kl_event_del(&s->loop, w->fd);
-        kl_free(&s->alloc_storage, w, sizeof(KlWatcher));
-    }
-    kl_event_close(&s->loop);
+    kl_event_ctx_free(&s->ev);
 }
 
 /* Pump the event loop until done_count reaches target or timeout */
@@ -43,8 +37,8 @@ static void pump_until(KlServer *s, atomic_int *done_count, int target, int time
     int elapsed = 0;
     while (atomic_load(done_count) < target && elapsed < timeout_ms) {
         KlEvent events[16];
-        int n = kl_event_wait(&s->loop, events, 16, 10);
-        if (n > 0) dispatch_events(s, events, n);
+        int n = kl_event_wait(&s->ev.loop, events, 16, 10);
+        if (n > 0) dispatch_events(&s->ev, events, n);
         elapsed += 10;
     }
 }
@@ -54,10 +48,10 @@ static void pump_until(KlServer *s, atomic_int *done_count, int target, int time
 UTEST(thread_pool, create_and_free) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     KlThreadPoolConfig cfg = {.num_workers = 2, .queue_capacity = 8};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     kl_thread_pool_free(pool);
@@ -81,13 +75,13 @@ static void single_done_fn(void *ud) {
 UTEST(thread_pool, submit_single) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     atomic_store(&single_work_done, 0);
     atomic_store(&single_done_called, 0);
 
     KlThreadPoolConfig cfg = {.num_workers = 1, .queue_capacity = 8};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     KlWorkItem item = {
@@ -117,11 +111,11 @@ static void noop_done_fn(void *ud) { (void)ud; }
 UTEST(thread_pool, submit_fills_queue) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     /* 1 worker, capacity 4 → done_cap = 5, so inflight limit = 5 */
     KlThreadPoolConfig cfg = {.num_workers = 1, .queue_capacity = 4};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     KlWorkItem item = {
@@ -161,12 +155,12 @@ static void capture_tid_work(void *ud) {
 UTEST(thread_pool, work_executes_on_worker) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     atomic_store(&worker_tid_set, 0);
 
     KlThreadPoolConfig cfg = {.num_workers = 1, .queue_capacity = 8};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     atomic_int done_count = 0;
@@ -202,12 +196,12 @@ static void capture_done_tid(void *ud) {
 UTEST(thread_pool, done_runs_on_main) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     atomic_store(&done_tid_set, 0);
 
     KlThreadPoolConfig cfg = {.num_workers = 1, .queue_capacity = 8};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     KlWorkItem item = {
@@ -240,13 +234,13 @@ static void fifo_work_fn(void *ud) {
 UTEST(thread_pool, ordering_fifo) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     atomic_store(&fifo_idx, 0);
     atomic_store(&single_done_called, 0);
 
     KlThreadPoolConfig cfg = {.num_workers = 1, .queue_capacity = FIFO_COUNT};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     int ids[FIFO_COUNT];
@@ -282,12 +276,12 @@ static void multi_done_fn(void *ud) {
 UTEST(thread_pool, multiple_workers) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     atomic_store(&multi_done_count, 0);
 
     KlThreadPoolConfig cfg = {.num_workers = 4, .queue_capacity = 32};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     for (int i = 0; i < 32; i++) {
@@ -323,13 +317,13 @@ static void blocking_work_fn(void *ud) {
 UTEST(thread_pool, shutdown_cancels_pending) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     atomic_store(&cancel_count, 0);
 
     /* 1 worker, capacity 8 — first item blocks the worker */
     KlThreadPoolConfig cfg = {.num_workers = 1, .queue_capacity = 8};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     /* First item blocks the worker for 200ms */
@@ -377,12 +371,12 @@ static void slow_complete_work(void *ud) {
 UTEST(thread_pool, shutdown_waits_for_running) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     atomic_store(&running_completed, 0);
 
     KlThreadPoolConfig cfg = {.num_workers = 1, .queue_capacity = 8};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     KlWorkItem item = {
@@ -408,10 +402,10 @@ UTEST(thread_pool, shutdown_waits_for_running) {
 UTEST(thread_pool, null_cancel_fn) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     KlThreadPoolConfig cfg = {.num_workers = 1, .queue_capacity = 8};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     /* Block the worker */
@@ -454,12 +448,12 @@ static void stress_done_fn(void *ud) {
 UTEST(thread_pool, stress_many_items) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     atomic_store(&stress_done_count, 0);
 
     KlThreadPoolConfig cfg = {.num_workers = 4, .queue_capacity = 64};
-    KlThreadPool *pool = kl_thread_pool_create(&s, &cfg);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, &cfg);
     ASSERT_TRUE(pool != NULL);
 
     int total = 1000;
@@ -475,8 +469,8 @@ UTEST(thread_pool, stress_many_items) {
         } else {
             /* Queue full — pump event loop to drain done items */
             KlEvent events[16];
-            int n = kl_event_wait(&s.loop, events, 16, 10);
-            if (n > 0) dispatch_events(&s, events, n);
+            int n = kl_event_wait(&s.ev.loop, events, 16, 10);
+            if (n > 0) dispatch_events(&s.ev, events, n);
         }
     }
 
@@ -492,10 +486,10 @@ UTEST(thread_pool, stress_many_items) {
 UTEST(thread_pool, default_config) {
     KlServer s;
     init_test_server(&s);
-    ASSERT_EQ(kl_event_init(&s.loop), 0);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     /* NULL config = all defaults */
-    KlThreadPool *pool = kl_thread_pool_create(&s, NULL);
+    KlThreadPool *pool = kl_thread_pool_create(&s.ev, NULL);
     ASSERT_TRUE(pool != NULL);
 
     kl_thread_pool_free(pool);

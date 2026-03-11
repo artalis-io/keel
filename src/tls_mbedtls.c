@@ -231,6 +231,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     t->base.reset        = tls_reset;
     t->base.destroy      = tls_destroy;
     t->base.alpn_protocol = tls_alpn_protocol;
+    t->base.set_hostname  = kl_tls_mbedtls_set_hostname;
 
     /* Initialize SSL context */
     mbedtls_ssl_init(&t->ssl);

@@ -75,6 +75,16 @@ struct KlTls {
      * Optional — set to NULL if not supported.
      */
     const char *(*alpn_protocol)(KlTls *self);
+
+    /**
+     * @brief Set the expected server hostname for SNI (client mode).
+     * Optional — set to NULL if not supported by the backend.
+     * Must be called before handshake().
+     * @param self     TLS session.
+     * @param hostname Server hostname for SNI and certificate verification.
+     * @return 0 on success, -1 on error.
+     */
+    int (*set_hostname)(KlTls *self, const char *hostname);
 };
 
 /**

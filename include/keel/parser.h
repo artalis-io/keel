@@ -11,20 +11,50 @@ typedef enum {
     KL_PARSE_ERROR
 } KlParseResult;
 
-typedef struct KlParser KlParser;
+/* ── Request parser (server-side) ─────────────────────────────────── */
 
-struct KlParser {
-    KlParseResult (*parse)(KlParser *self, KlRequest *req,
+typedef struct KlRequestParser KlRequestParser;
+
+struct KlRequestParser {
+    KlParseResult (*parse)(KlRequestParser *self, KlRequest *req,
                            const char *buf, size_t len, size_t *consumed);
-    void (*reset)(KlParser *self);
-    void (*destroy)(KlParser *self);
+    void (*reset)(KlRequestParser *self);
+    void (*destroy)(KlRequestParser *self);
 };
 
 /**
- * @brief Create an llhttp-based HTTP/1.1 parser.
+ * @brief Create an llhttp-based HTTP/1.1 request parser.
  * @param alloc Allocator for parser state.
  * @return Parser instance, or NULL on allocation failure.
  */
-KlParser *kl_parser_llhttp(KlAllocator *alloc);
+KlRequestParser *kl_request_parser_llhttp(KlAllocator *alloc);
+
+/* Backward compatibility — existing code can use the old names */
+typedef KlRequestParser KlParser;
+#define kl_parser_llhttp kl_request_parser_llhttp
+
+/* ── Response parser (client-side) ────────────────────────────────── */
+
+typedef struct KlClientResponse KlClientResponse;
+typedef struct KlResponseParser KlResponseParser;
+
+struct KlResponseParser {
+    KlParseResult (*parse)(KlResponseParser *self, KlClientResponse *resp,
+                           const char *buf, size_t len, size_t *consumed);
+    void (*reset)(KlResponseParser *self);
+    void (*destroy)(KlResponseParser *self);
+};
+
+typedef KlResponseParser *(*KlResponseParserFactory)(size_t max_response_size,
+                                                       KlAllocator *alloc);
+
+/**
+ * @brief Create an llhttp-based HTTP/1.1 response parser.
+ * @param max_response_size Maximum response body size (0 = no limit).
+ * @param alloc Allocator for parser state.
+ * @return Parser instance, or NULL on allocation failure.
+ */
+KlResponseParser *kl_response_parser_llhttp(size_t max_response_size,
+                                             KlAllocator *alloc);
 
 #endif

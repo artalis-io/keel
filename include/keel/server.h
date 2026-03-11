@@ -7,7 +7,7 @@
 #include <keel/tls.h>
 #include <keel/h2.h>
 #include <keel/connection.h>
-#include <keel/event.h>
+#include <keel/event_ctx.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -56,7 +56,6 @@ typedef struct KlConfig {
     size_t max_body_size;       /* discard-path body limit; default: 1 MB */
 } KlConfig;
 
-typedef struct KlWatcher KlWatcher;
 typedef struct KlAsyncOp KlAsyncOp;
 
 typedef struct KlServer {
@@ -66,13 +65,12 @@ typedef struct KlServer {
     KlH2Config h2_storage;     /* owned copy of H2 config (if provided) */
     KlRouter router;
     KlConnPool pool;
-    KlEventLoop loop;
+    KlEventCtx ev;              /* event loop + watcher list */
     int listen_fd;
     int listen_paused;          /* 1 = listen fd removed from event loop (pool full) */
     _Atomic int running;
     _Atomic int draining;
     uint64_t drain_deadline_ms;
-    KlWatcher *watchers;        /* active watcher list (async FDs) */
     KlAsyncOp *async_ops;       /* active async ops list */
 } KlServer;
 
