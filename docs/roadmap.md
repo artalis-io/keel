@@ -62,6 +62,10 @@ Planned: see `docs/http2_plan.md` for detailed design.
 
 Detect `Upgrade: websocket` in the parser, complete the handshake in the handler, then hand the connection to a WebSocket frame codec. The event loop already handles bidirectional I/O — WebSocket is a protocol change, not an architecture change.
 
+### ~~HTTP Client~~ DONE
+
+Sync (blocking) and async (event-driven) HTTP/1.1 client with TLS support. URL parser with IPv6 and CRLF injection guard. Response parser (llhttp in `HTTP_RESPONSE` mode). `KlEventCtx` composition allows the async client to operate standalone (without `KlServer`). Parser rename: `KlParser` → `KlRequestParser`, new `KlResponseParser` for client-side.
+
 ### Response compression
 
 Gzip/deflate for buffer and stream responses:

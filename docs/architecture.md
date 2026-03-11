@@ -5,38 +5,57 @@ Deep technical documentation of KEEL's internal design.
 ## System Overview
 
 ```
-                         ┌─────────────────────────────────────────────────┐
-                         │                   KlServer                      │
-                         │                                                 │
-  client                 │  ┌──────────┐   ┌────────┐   ┌──────────┐     │
-  ──────── accept ──────►│  │ EventLoop│──►│ ConnPool│──►│  Router   │     │
-  socket                 │  │ (kqueue/ │   │ (pre-   │   │ (table   │     │
-                         │  │  epoll/  │   │  alloc) │   │  scan)   │     │
-                         │  │  iouring)│   │         │   │          │     │
-                         │  └──────────┘   └────┬───┘   └─────┬────┘     │
-                         │                      │             │           │
-                         │                      ▼             ▼           │
-                         │               ┌────────────┐ ┌──────────┐     │
-                         │               │    TLS     │ │ Handler  │     │
-                         │               │ (vtable/   │ │(user fn) │     │
-                         │               │  optional) │ │          │     │
-                         │               └──────┬─────┘ └────┬─────┘     │
-                         │                      │            │           │
-                         │                      ▼            ▼           │
-                         │               ┌────────────┐ ┌──────────┐     │
-                         │               │   Parser   │ │ Response │     │
-                         │               │  (llhttp)  │ │ (buffer/ │     │
-                         │               └──────┬─────┘ │  file/   │     │
-                         │                      │       │  stream) │     │
-                         │                      ▼       └──────────┘     │
-                         │               ┌────────────┐                   │
-                         │               │ BodyReader │                   │
-                         │               │  (vtable)  │                   │
-                         │               └────────────┘                   │
-                         └─────────────────────────────────────────────────┘
+  ┌────────────────────────── Server Side ──────────────────────────────────┐
+  │                           KlServer                                      │
+  │  ┌──────────────────────────────────────────────────────┐              │
+  │  │                KlEventCtx (s.ev)                      │              │
+  │  │  ┌──────────┐   ┌──────────┐   ┌──────────────┐     │              │
+  │  │  │ EventLoop│   │Allocator │   │ Watchers     │     │              │
+  │  │  │ (kqueue/ │   │ (pluggable│   │ (FD callback │     │              │
+  │  │  │  epoll/  │   │  vtable) │   │  linked list)│     │              │
+  │  │  │  iouring)│   └──────────┘   └──────────────┘     │              │
+  │  │  └──────────┘                                        │              │
+  │  └──────────────────────────────────────────────────────┘              │
+  │                      │                                                  │
+  │  ┌───────────┐  ┌────┴───┐  ┌──────────┐  ┌────────────┐             │
+  │  │ ConnPool  │  │ Router │  │ThreadPool│  │ KlAsyncOp  │             │
+  │  │(pre-alloc)│  │ (scan) │  │ (workers)│  │ (suspend/  │             │
+  │  └─────┬─────┘  └────┬───┘  └──────────┘  │  resume)   │             │
+  │        │              │                     └────────────┘             │
+  │        ▼              ▼                                                │
+  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐           │
+  │  │   TLS    │  │ Handler  │  │ Response │  │ BodyReader │           │
+  │  │(vtable)  │  │(user fn) │  │ (buffer/ │  │  (vtable)  │           │
+  │  └──────────┘  └──────────┘  │  file/   │  └────────────┘           │
+  │                               │  stream) │                            │
+  │  ┌───────────────────┐       └──────────┘                            │
+  │  │  RequestParser    │                                                │
+  │  │  (llhttp vtable)  │                                                │
+  │  └───────────────────┘                                                │
+  └────────────────────────────────────────────────────────────────────────┘
+
+  ┌───────────── Client Side (standalone or embedded) ─────────────────────┐
+  │                                                                         │
+  │  KlClient (async)          kl_client_request (sync, blocking)          │
+  │  ┌──────────────────┐     ┌────────────────────────────────┐          │
+  │  │ KlEventCtx *     │     │ socket → connect → send →     │          │
+  │  │ state machine:   │     │ recv → parse → return          │          │
+  │  │  CONNECTING →    │     └────────────────────────────────┘          │
+  │  │  TLS_HANDSHAKE → │                                                  │
+  │  │  SENDING →       │     KlResponseParser (llhttp vtable)            │
+  │  │  RECEIVING →     │     KlUrl (URL parser, CRLF guard)              │
+  │  │  DONE            │                                                  │
+  │  └──────────────────┘                                                  │
+  └────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Request flow**: socket → event loop (readiness) → connection (read) → **TLS decrypt** → parser (headers) → router (match) → body reader (data) → handler → response (send) → **TLS encrypt** → socket
+**Server request flow**: socket → event loop (readiness) → connection (read) → **TLS decrypt** → request parser (headers) → router (match) → body reader (data) → handler → response (send) → **TLS encrypt** → socket
+
+**Client request flow**: `kl_url_parse` → socket (non-blocking connect) → **TLS handshake** → send request → receive response → response parser → `KlClientResponse`
+
+### KlEventCtx — Composable Event Context
+
+`KlEventCtx` contains the event loop, allocator, and watcher list. It is embedded in `KlServer` via `s.ev`, but can also be used standalone — the async HTTP client and thread pool only need `KlEventCtx`, not a full server. This enables client-only programs that share the same event loop.
 
 ## Event Loop Abstraction
 
@@ -362,8 +381,12 @@ struct KlTls {
     size_t      (*pending)(KlTls *self);
     void        (*reset)(KlTls *self);
     void        (*destroy)(KlTls *self);
+    int         (*set_hostname)(KlTls *self, const char *hostname);  /* SNI, NULL = not supported */
+    const char *(*alpn_protocol)(KlTls *self);                       /* NULL = not supported */
 };
 ```
+
+The `set_hostname` function enables SNI (Server Name Indication) for outbound TLS connections — used by the HTTP client to set the hostname before the handshake. Backends that don't support SNI set this to NULL.
 
 ### Handshake state
 

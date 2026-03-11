@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Minimal C11 HTTP server library built on raw epoll/kqueue/io_uring/poll. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, async primitives, thread pool, zero forced buffering.
+Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **240+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **320+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -56,8 +56,11 @@ int main(void) {
 - **Route parameters** — `:param` capture, no allocation, pointers into read buffer
 - **Connection timeouts** — monotonic clock sweep, automatic 408 responses, slow-loris protection
 - **Access logging** — pluggable callback after each response, zero overhead when disabled
-- **Async primitives** — KlWatcher (generic FD callbacks) and KlAsyncOp (connection suspension/resumption)
+- **Async server handlers** — suspend connections via `KlAsyncOp`, resume later from watchers or thread pool workers — no stalling the event loop
+- **HTTP client (sync + async)** — blocking `kl_client_request()` for simple use cases, event-driven `kl_client_start()` for non-blocking I/O, both with TLS support
+- **Composable event context** — `KlEventCtx` decouples the event loop from the server, enabling standalone clients and thread pools without a `KlServer`
 - **Thread pool** — submit blocking work from event loop, execute on workers, resume via pipe wakeup
+- **Generic FD watchers** — register any file descriptor for event-driven callbacks via `KlWatcher`
 - **Pre-allocated connection pool** — no per-request malloc, no fragmentation under load
 - **Pluggable allocator** — bring your own arena/pool/tracking allocator
 - **pledge/unveil sandboxing** — init/run split makes syscall lockdown natural
@@ -65,26 +68,29 @@ int main(void) {
 
 ## Architecture
 
-15 orthogonal modules, each independently testable:
+19 orthogonal modules, each independently testable:
 
 | Module | Header | Description |
 |--------|--------|-------------|
 | **allocator** | `allocator.h` | Bring-your-own allocator interface |
 | **event** | `event.h` | epoll / kqueue / io_uring / poll abstraction |
+| **event_ctx** | `event_ctx.h` | Composable event loop context (watchers + allocator) |
 | **request** | `request.h` | Parsed HTTP request struct (header-only, zero alloc) |
-| **parser** | `parser.h` | Pluggable HTTP parser vtable |
+| **parser** | `parser.h` | Pluggable request/response parser vtables |
 | **response** | `response.h` | Response builder: buffered, sendfile, or streaming chunked |
 | **router** | `router.h` | Route matching with `:param` capture + middleware chain |
 | **connection** | `connection.h` | Pre-allocated connection pool + state machine |
-| **server** | `server.h` | Top-level glue: init, bind, run loop, stop |
+| **server** | `server.h` | Top-level glue: init, bind, async event loop, stop |
 | **body_reader** | `body_reader.h` | Pluggable body reader vtable + buffer reader |
 | **body_reader_multipart** | `body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
 | **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
 | **cors** | `cors.h` | Built-in CORS middleware with configurable origins |
 | **websocket** | `websocket.h` | RFC 6455 WebSocket support |
 | **tls** | `tls.h` | Pluggable TLS transport vtable (bring-your-own backend) |
-| **async** | `async.h` | Connection suspension + generic FD watchers |
+| **async** | `async.h` | Connection suspension for async operations |
 | **thread_pool** | `thread_pool.h` | Worker thread pool with pipe-based event loop wakeup |
+| **url** | `url.h` | URL parser (http/https, IPv6, CRLF injection guard) |
+| **client** | `client.h` | HTTP/1.1 client (sync blocking + async event-driven) |
 
 ## Request Body Handling
 
@@ -267,7 +273,7 @@ The WebSocket module handles frame parsing, masking, and protocol details. The h
 
 ## Async Operations
 
-KEEL provides two primitives for non-blocking operations: **KlWatcher** (generic FD callbacks) and **KlAsyncOp** (connection suspension). Together they allow handlers to suspend a connection, perform work asynchronously, and resume when done — without stalling the event loop.
+Server handlers can be **sync** (return immediately with a response set) or **async** (suspend the connection for later resumption). KEEL provides two primitives for async handlers: **KlWatcher** (generic FD callbacks) and **KlAsyncOp** (connection suspension). Together they allow handlers to park a connection, perform work asynchronously, and resume when done — without stalling the event loop.
 
 ```c
 void handle_async(KlRequest *req, KlResponse *res, void *user_data) {
@@ -281,7 +287,7 @@ void handle_async(KlRequest *req, KlResponse *res, void *user_data) {
 
     /* Create a pipe — watcher fires when the pipe is written to */
     socketpair(AF_UNIX, SOCK_STREAM, 0, ctx->pipe_fds);
-    kl_watcher_add(srv, ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
+    kl_watcher_add(&srv->ev, ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
 
     /* Suspend the connection (removes it from event loop, exempt from timeouts) */
     kl_async_suspend(srv, conn, &ctx->op);
@@ -298,7 +304,7 @@ The watcher callback runs on the event loop thread, making it safe to call `kl_a
 
 ```c
 /* Create pool (auto-detects CPU count, 64-item queue) */
-KlThreadPool *pool = kl_thread_pool_create(&server, NULL);
+KlThreadPool *pool = kl_thread_pool_create(&server.ev, NULL);
 
 /* Work callbacks */
 static void do_query(void *ud) {
@@ -325,6 +331,44 @@ Each `KlWorkItem` has three callbacks:
 | `cancel_fn` | Event loop | Cleanup for items still queued at shutdown (may be NULL) |
 
 Thread safety is guaranteed by construction — workers never touch the event loop directly. They push completed items to a done queue and write a byte to a pipe; the pipe watcher fires on the event loop thread and calls `done_fn`. Backpressure: `submit()` returns `-1` when the queue is full.
+
+## HTTP Client
+
+KEEL includes both **sync** (blocking) and **async** (event-driven) HTTP/1.1 clients with TLS support. The sync client is a single function call for simple use cases. The async client uses `KlEventCtx` (not `KlServer`), so it works standalone — no server required.
+
+**Sync (blocking):**
+
+```c
+KlAllocator alloc = kl_allocator_default();
+KlClientResponse resp;
+if (kl_client_request(&alloc, NULL, "GET", "http://api.example.com/data",
+                       NULL, 0, NULL, 0, &resp) == 0) {
+    printf("status=%d body=%.*s\n", resp.status, (int)resp.body_len, resp.body);
+    kl_client_response_free(&resp);
+}
+```
+
+**Async (event-driven):**
+
+```c
+static void on_done(KlClient *client, void *user_data) {
+    if (kl_client_error(client) == 0) {
+        const KlClientResponse *r = kl_client_response(client);
+        printf("status=%d\n", r->status);
+    }
+    kl_client_free(client);
+}
+
+/* Works with standalone KlEventCtx — no KlServer needed */
+KlAllocator alloc = kl_allocator_default();
+KlEventCtx ev;
+kl_event_ctx_init(&ev, &alloc);
+kl_client_start(&ev, &alloc, NULL, "GET", "http://example.com/", NULL, 0, NULL, 0, on_done, NULL);
+/* pump ev.loop ... */
+kl_event_ctx_free(&ev);
+```
+
+The URL parser (`kl_url_parse`) handles `http://`, `https://`, IPv6 `[::1]:port`, default ports, and rejects CRLF injection.
 
 ## Static File Serving
 
@@ -437,7 +481,7 @@ KlConfig cfg = {
 };
 ```
 
-Implement the 3-function `KlParser` vtable (`parse`, `reset`, `destroy`) for any backend.
+Implement the 3-function `KlRequestParser` vtable (`parse`, `reset`, `destroy`) for any backend. The response parser (`KlResponseParser`) uses the same pattern for the HTTP client.
 
 ## Pluggable TLS
 
@@ -528,14 +572,15 @@ The poll backend is a universal POSIX fallback that works on any platform with `
 
 ## Testing
 
-241 tests across 15 test suites, covering every module:
+326 tests across 19 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
 | `test_allocator` | 4 | Default + custom tracking allocators |
 | `test_router` | 27 | Exact match, params, 404, 405, wildcard, middleware chain |
 | `test_response` | 14 | Status, headers, body, JSON, error, streaming, sendfile |
-| `test_parser` | 9 | GET, POST, query strings, incomplete, reset, chunked TE |
+| `test_parser` | 10 | GET, POST, query strings, incomplete, reset, chunked TE |
+| `test_response_parser` | 9 | HTTP response parsing, chunked, headers, body limits, malformed |
 | `test_connection` | 4 | Pool init, acquire/release, exhaustion, active count |
 | `test_body_reader` | 30 | Buffer + multipart: limits, spanning, binary, edge cases |
 | `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
@@ -545,8 +590,11 @@ The poll backend is a universal POSIX fallback that works on any platform with `
 | `test_integration` | 27 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
 | `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
 | `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
-| `test_async` | 14 | Watchers, suspend/resume, deadlines, cancel, e2e async handler |
+| `test_async` | 15 | Watchers (KlEventCtx), suspend/resume, deadlines, cancel, e2e async handler |
 | `test_thread_pool` | 12 | Create/free, submit, backpressure, FIFO ordering, multi-worker, shutdown, stress |
+| `test_url` | 15 | URL parsing, IPv6, CRLF rejection, default ports, edge cases |
+| `test_client` | 20 | Sync/async client, response free, TLS config, error handling |
+| `test_event_ctx` | 4 | Standalone event context init/free, watcher lifecycle |
 
 ```bash
 make test               # run all tests
@@ -613,12 +661,15 @@ The general principle: if it requires policy decisions that vary between applica
 
 GitHub Actions runs on every push and PR against `main`:
 
-- **Linux (epoll)** — build, test, smoke test
-- **Linux (io_uring)** — build, test, smoke test
-- **Linux (poll fallback)** — build, test, smoke test
-- **macOS (kqueue)** — build, test, smoke test
+- **Linux (epoll)** — build, test, examples, smoke test
+- **Linux (io_uring)** — build, test, examples, smoke test
+- **Linux (poll fallback)** — build, test, examples, smoke test
+- **macOS (kqueue)** — build, test, examples, smoke test
 - **Linux (musl/Alpine)** — build, test, examples
 - **Cosmopolitan (APE)** — build, examples, smoke test
+- **ASan + UBSan** — build and test with sanitizers
+- **Static Analysis** — scan-build + cppcheck
+- **Fuzz Testing** — libFuzzer on HTTP parser + multipart (60s each)
 
 A separate benchmark workflow runs on push to `main` (informational, not gating).
 

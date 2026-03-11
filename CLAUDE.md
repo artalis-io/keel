@@ -6,8 +6,8 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 160 unit tests
-make examples     # build all 10 example programs (11 with TLS)
+make test         # build and run all 326 unit tests
+make examples     # build all 11 example programs (12 with TLS)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis
@@ -19,7 +19,7 @@ make clean        # remove all build artifacts
 
 - `include/keel/` — Public headers. Each module is a `.h` file. `keel.h` is the umbrella.
 - `src/` — Core source. Each module is a `.c` file.
-- `parsers/` — Pluggable parser backends (`parser_llhttp.c`).
+- `parsers/` — Pluggable parser backends (`parser_llhttp.c`, `response_parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
 - `examples/` — Example programs (hello, rest_api, middleware, static_files, streaming, body_readers, websocket, tls, async, thread_pool, h2_server).
@@ -27,23 +27,26 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-15 orthogonal modules, each independently testable:
+19 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
-3. **request** — Parsed HTTP request struct (header-only, zero alloc)
-4. **parser** — Pluggable HTTP parser vtable (ships with llhttp backend)
-5. **response** — Response builder: buffered (writev), sendfile, or streaming chunked
-6. **router** — Route matching with `:param` extraction + middleware chain
-7. **connection** — Pre-allocated connection pool + state machine + timeout sweep
-8. **server** — Top-level glue: init, bind, run loop, stop
-9. **body_reader** — Pluggable body reader vtable + built-in buffer reader
-10. **body_reader_multipart** — RFC 2046 multipart/form-data state machine parser
-11. **chunked** — RFC 7230 parser-agnostic chunked transfer-encoding decoder
-12. **cors** — Built-in CORS middleware with configurable origins/methods/headers
-13. **tls** — Pluggable TLS transport vtable (bring-your-own backend)
-14. **async** — Connection suspension + generic FD watchers for async operations
-15. **thread_pool** — Worker thread pool with pipe-based event loop wakeup
+3. **event_ctx** — Composable event loop context (KlEventCtx: loop + allocator + watcher list)
+4. **request** — Parsed HTTP request struct (header-only, zero alloc)
+5. **parser** — Pluggable request/response parser vtables (ships with llhttp backend)
+6. **response** — Response builder: buffered (writev), sendfile, or streaming chunked
+7. **router** — Route matching with `:param` extraction + middleware chain
+8. **connection** — Pre-allocated connection pool + state machine + timeout sweep
+9. **server** — Top-level glue: init, bind, async event loop, stop (handlers can be sync or async)
+10. **body_reader** — Pluggable body reader vtable + built-in buffer reader
+11. **body_reader_multipart** — RFC 2046 multipart/form-data state machine parser
+12. **chunked** — RFC 7230 parser-agnostic chunked transfer-encoding decoder
+13. **cors** — Built-in CORS middleware with configurable origins/methods/headers
+14. **tls** — Pluggable TLS transport vtable (bring-your-own backend)
+15. **async** — Connection suspension for async operations (uses KlEventCtx)
+16. **thread_pool** — Worker thread pool with pipe-based event loop wakeup
+17. **url** — URL parser (http/https, IPv6, CRLF injection guard)
+18. **client** — HTTP/1.1 client: sync (blocking) + async (event-driven via KlEventCtx)
 
 ## Key Types
 
@@ -60,7 +63,8 @@ make clean        # remove all build artifacts
 | `KlMultipartConfig` | `body_reader_multipart.h` | Limits: max_part_size, max_total_size, max_parts |
 | `KlChunkedDecoder` | `chunked.h` | Chunked TE decoder: state machine, no allocation |
 | `KlAllocator` | `allocator.h` | Vtable: malloc, realloc (with old_size), free (with size) |
-| `KlParser` | `parser.h` | Vtable: parse (returns KlParseResult), reset, destroy |
+| `KlRequestParser` | `parser.h` | Vtable: parse (returns KlParseResult), reset, destroy |
+| `KlResponseParser` | `parser.h` | Client-side response parser vtable |
 | `KlConn` | `connection.h` | Connection: fd, state, read_buf, request, response, parser, route |
 | `KlRouter` | `router.h` | Route table + match function |
 | `KlRoute` | `router.h` | Single route: method, pattern, handler, user_data, body_reader |
@@ -68,18 +72,25 @@ make clean        # remove all build artifacts
 | `KlMiddlewareEntry` | `router.h` | Registered middleware: method, pattern, fn, user_data |
 | `KlCorsConfig` | `cors.h` | CORS config: allowed origins, methods, headers, credentials |
 | `KlEventLoop` | `event.h` | Platform event loop: init, add, mod, del, wait, close |
-| `KlTls` | `tls.h` | Vtable: handshake, read, write, shutdown, pending, reset, destroy |
+| `KlEventCtx` | `event_ctx.h` | Composable event context: loop + allocator + watcher list |
+| `KlTls` | `tls.h` | Vtable: handshake, read, write, shutdown, pending, reset, set_hostname, destroy |
 | `KlTlsCtx` | `tls.h` | Opaque per-server TLS context (user-owned) |
 | `KlTlsConfig` | `tls.h` | TLS config: ctx, factory, ctx_destroy |
 | `KlTlsResult` | `tls.h` | Enum: OK, WANT_READ, WANT_WRITE, ERROR |
 | `KlTlsFactory` | `tls.h` | Factory: creates per-connection KlTls from shared context |
-| `KlWatcher` | `async.h` | Registered FD watcher: fd, callback, user_data, server-owned list |
-| `KlWatcherFn` | `async.h` | Watcher callback: `void (*)(int fd, KlEventMask ready, void *user_data)` |
+| `KlWatcher` | `event_ctx.h` | Registered FD watcher: fd, callback, user_data, ctx-owned list |
+| `KlWatcherFn` | `event_ctx.h` | Watcher callback: `void (*)(int fd, KlEventMask ready, void *user_data)` |
 | `KlAsyncOp` | `async.h` | In-flight async operation: conn, deadline, on_resume/deadline/cancel |
 | `KlAsyncFn` | `async.h` | Async callback: `void (*)(KlAsyncOp *op, void *user_data)` |
 | `KlThreadPool` | `thread_pool.h` | Opaque thread pool: workers, work/done queues, pipe watcher |
 | `KlWorkItem` | `thread_pool.h` | Work item: work_fn (worker), done_fn (event loop), cancel_fn (shutdown) |
 | `KlThreadPoolConfig` | `thread_pool.h` | Config: num_workers, queue_capacity, allocator |
+| `KlUrl` | `url.h` | Parsed URL: is_https, host, port, path |
+| `KlClientHeader` | `client.h` | Request/response header: name, value |
+| `KlClientResponse` | `client.h` | Response: status, body, headers, allocator (by value) |
+| `KlClientConfig` | `client.h` | Client config: timeout_ms, max_response_size, TLS |
+| `KlClient` | `client.h` | Opaque async client handle |
+| `KlClientDoneFn` | `client.h` | Async completion callback |
 
 ## Git
 
@@ -162,15 +173,15 @@ KEEL provides two async primitives for non-blocking operations without stalling 
 
 ### KlWatcher — Generic FD Callbacks
 
-Register any file descriptor with the event loop. When the FD becomes ready, the callback fires on the event loop thread.
+Register any file descriptor with the event loop. When the FD becomes ready, the callback fires on the event loop thread. Watchers operate on `KlEventCtx` (not `KlServer` directly).
 
 ```c
-int  kl_watcher_add(KlServer *s, int fd, KlEventMask mask, KlWatcherFn on_ready, void *user_data);
-int  kl_watcher_mod(KlServer *s, int fd, KlEventMask mask);
-void kl_watcher_del(KlServer *s, int fd);
+int  kl_watcher_add(KlEventCtx *ctx, int fd, KlEventMask mask, KlWatcherFn on_ready, void *user_data);
+int  kl_watcher_mod(KlEventCtx *ctx, int fd, KlEventMask mask);
+void kl_watcher_del(KlEventCtx *ctx, int fd);
 ```
 
-Watchers are heap-allocated and server-owned. Uses tagged pointers (LSB=1) to distinguish watcher events from connection events in the event loop dispatch.
+Watchers are heap-allocated and ctx-owned. `KlServer` embeds `KlEventCtx ev` — use `&server->ev` when calling watcher functions from server context. Uses tagged pointers (LSB=1) to distinguish watcher events from connection events in the event loop dispatch.
 
 ### KlAsyncOp — Connection Suspension
 
@@ -202,7 +213,7 @@ void handler(KlRequest *req, KlResponse *res, void *user_data) {
 
     /* Create a pipe/socket for completion signal */
     socketpair(AF_UNIX, SOCK_STREAM, 0, ctx->pipe_fds);
-    kl_watcher_add(srv, ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
+    kl_watcher_add(&srv->ev, ctx->pipe_fds[0], KL_EVENT_READ, my_watcher, ctx);
 
     /* Suspend the connection */
     kl_async_suspend(srv, conn, &ctx->op);
@@ -234,7 +245,7 @@ kl_event_wait fires                  write(pipe_wr, "1") ←──────�
 ### API
 
 ```c
-KlThreadPool *kl_thread_pool_create(KlServer *s, const KlThreadPoolConfig *cfg);
+KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *cfg);
 int            kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item);
 void           kl_thread_pool_free(KlThreadPool *pool);
 ```

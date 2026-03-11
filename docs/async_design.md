@@ -104,23 +104,26 @@ Hull's capability layer (`hl_cap_http_request`) calls the Keel driver after enfo
 Register any FD with the event loop. When the FD fires, call a callback. Keel doesn't care what the FD is (socket, pipe, eventfd, timerfd, io_uring ring FD).
 
 ```c
-/* include/keel/async.h */
+/* include/keel/event_ctx.h (extracted from async.h during KlEventCtx refactor) */
 
 typedef void (*KlWatcherFn)(int fd, KlEventMask ready, void *user_data);
 
 typedef struct KlWatcher {
     int fd;
+    KlEventMask mask;
     KlWatcherFn on_ready;
     void *user_data;
+    struct KlWatcher *next;
 } KlWatcher;
 
-int  kl_watcher_add(KlServer *s, int fd, KlEventMask mask,
+int  kl_watcher_add(KlEventCtx *ctx, int fd, KlEventMask mask,
                     KlWatcherFn on_ready, void *user_data);
-int  kl_watcher_mod(KlServer *s, int fd, KlEventMask mask);
-void kl_watcher_del(KlServer *s, int fd);
+int  kl_watcher_mod(KlEventCtx *ctx, int fd, KlEventMask mask);
+void kl_watcher_del(KlEventCtx *ctx, int fd);
+void kl_watcher_rearm(KlEventCtx *ctx, int fd);
 ```
 
-Implementation: tagged pointer in event loop `udata` (bit 0 set = watcher, clear = connection).
+Implementation: tagged pointer in event loop `udata` (bit 0 set = watcher, clear = connection). Watchers operate on `KlEventCtx` (not `KlServer`) — this enables standalone use by the HTTP client and thread pool.
 
 ### Primitive 2: KlAsyncOp — connection suspension
 
@@ -254,75 +257,72 @@ int hl_cap_http_request_async(KlServer *s, HlAsyncCtx *ctx,
 }
 ```
 
-### Driver 1: KlHttpClient — async HTTP/1.1
+### Driver 1: KlClient — async HTTP/1.1
 
-Lives in Keel. Uses `KlWatcher` for the outbound socket and `KlTls` for HTTPS. No Hull, no Lua, no JS — pure I/O.
+Lives in Keel. Uses `KlWatcher` for the outbound socket and `KlTls` for HTTPS. No Hull, no Lua, no JS — pure I/O. Also available as a sync (blocking) API via `kl_client_request()`.
 
 ```c
-/* include/keel/http_client.h */
+/* include/keel/client.h (implemented — was planned as http_client.h) */
 
-typedef struct KlHttpClient {
-    int state;               /* CONNECTING, TLS, SENDING, RECEIVING, DONE, ERROR */
-    int fd;                  /* outbound socket */
-    char *send_buf;          /* serialized HTTP request */
-    size_t send_len, send_off;
-    char *recv_buf;          /* raw response bytes */
-    size_t recv_len, recv_cap;
-    KlTls *tls;              /* NULL for plain HTTP */
-    KlHttpClientResponse response; /* parsed status + headers + body */
-    KlAllocator *alloc;
+/* Sync (blocking) */
+int  kl_client_request(KlAllocator *alloc, const KlClientConfig *cfg,
+                       const char *method, const char *url,
+                       const KlClientHeader *headers, int num_headers,
+                       const char *body, size_t body_len,
+                       KlClientResponse *resp);
+void kl_client_response_free(KlClientResponse *resp);
 
-    KlAsyncOp *op;           /* back-pointer — calls kl_async_complete when done */
-    KlServer *server;        /* for watcher management */
-} KlHttpClient;
+/* Async (event-driven) — uses KlEventCtx, NOT KlServer */
+KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
+                           const KlClientConfig *cfg,
+                           const char *method, const char *url,
+                           const KlClientHeader *headers, int num_headers,
+                           const char *body, size_t body_len,
+                           KlClientDoneFn on_done, void *user_data);
 
-/* Start an async HTTP request. Creates socket, starts connect, registers watcher. */
-KlHttpClient *kl_http_client_start(KlServer *s, KlAsyncOp *op,
-                                    const char *method, const char *url,
-                                    const KlHttpClientHeader *headers, int num_headers,
-                                    const char *body, size_t body_len,
-                                    KlAllocator *alloc);
-
-void kl_http_client_free(KlHttpClient *c);
+const KlClientResponse *kl_client_response(const KlClient *client);
+int   kl_client_error(const KlClient *client);
+void  kl_client_cancel(KlClient *client);
+void  kl_client_free(KlClient *client);
 ```
 
-The watcher's `on_ready` drives the state machine:
+The async client's watcher `on_ready` drives the state machine:
 ```
 DNS resolve (synchronous — getaddrinfo, cached/fast)
     → CONNECTING (non-blocking connect, WRITE interest)
     → TLS_HANDSHAKE (if HTTPS — WANT_READ/WANT_WRITE loop via KlTls vtable)
     → SENDING (write request bytes, WRITE interest)
-    → RECEIVING (read response, parse, READ interest)
-    → DONE → kl_async_complete(s, op) / ERROR → kl_async_abort(s, op)
+    → RECEIVING (read response, parse via KlResponseParser, READ interest)
+    → DONE → on_done callback / ERROR → on_done with error flag
 ```
 
-Fully testable standalone — socket + event loop + TLS, no application logic.
+The async client calls `on_done(client, user_data)` on completion — it does NOT call `kl_async_complete` directly. The caller (Hull) handles connection suspension. This keeps the client decoupled from the server's connection model.
+
+Fully testable standalone — socket + event loop + TLS, no application logic. URL parsing via `kl_url_parse()` with IPv6 support and CRLF injection guard.
 
 ### Driver 2: Sleep
 
 Not a separate driver struct. Just a `KlAsyncOp` with `deadline_ms` set and `on_deadline` pointing to `kl_async_complete`. The timeout sweep handles it.
 
-### Future Driver 3: KlThreadPool
+### ~~Future~~ Driver 3: KlThreadPool — DONE
 
 ```c
-/* include/keel/thread_pool.h — future */
+/* include/keel/thread_pool.h (implemented) */
 
-typedef struct KlThreadPool {
-    int completion_fd;       /* read end of pipe (or eventfd on Linux) */
-    pthread_t *workers;
-    int num_workers;
-    KlServer *server;
-    /* work queue (mutex-protected), result queue */
-} KlThreadPool;
+KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *cfg);
+int            kl_thread_pool_submit(KlThreadPool *pool, const KlWorkItem *item);
+void           kl_thread_pool_free(KlThreadPool *pool);
 
-/* Submit blocking work. on_done called on event loop thread when complete. */
-int kl_thread_pool_submit(KlThreadPool *pool, KlAsyncOp *op,
-                          void (*work)(void *arg, void *result),
-                          void *arg, size_t result_size);
+/* Three callbacks per work item: */
+typedef struct KlWorkItem {
+    void (*work_fn)(void *user_data);    /* runs on worker thread */
+    void (*done_fn)(void *user_data);    /* runs on event loop thread (pipe watcher) */
+    void (*cancel_fn)(void *user_data);  /* runs on shutdown for unstarted items */
+    void *user_data;
+} KlWorkItem;
 ```
 
-Worker thread: executes `work(arg, result)`, writes completion token to pipe.
-Watcher on completion_fd: reads token, finds op, calls `kl_async_complete`.
+Takes `KlEventCtx*` (not `KlServer*`), enabling standalone use. Worker thread: executes `work_fn`, pushes to done queue, writes byte to pipe. Pipe watcher fires on event loop thread, drains done queue, calls `done_fn`.
 
 This is how SQLite queries, WASM execution, file I/O, and DNS resolution become async — all through the same Keel primitive. Hull just submits work items.
 

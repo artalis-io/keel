@@ -1,4 +1,4 @@
-# Keel HTTP Server Library — C Code Audit Report
+# Keel HTTP Client/Server Library — C Code Audit Report
 
 **Date:** 2026-03-09
 **Previous Audit:** 2026-03-05

@@ -23,8 +23,13 @@ Every PR should be checked for:
 - [ ] **TLS shutdown** — Connections must call tls->shutdown() before close(fd)
 - [ ] **Pending drain** — After TLS reads, tls->pending() must be checked to drain internal buffers
 - [ ] **Async safety** — `kl_async_complete()` only called from event loop thread, never from workers
+- [ ] **Watcher API** — All `kl_watcher_*` calls use `KlEventCtx *` (via `&server->ev` or standalone), never raw `KlServer *`
 - [ ] **Thread pool callbacks** — `work_fn` must not touch connection/event loop state; `done_fn` runs on event loop thread
+- [ ] **Thread pool creation** — `kl_thread_pool_create` takes `KlEventCtx *` (not `KlServer *`)
 - [ ] **Thread pool shutdown** — `kl_thread_pool_free` called before `kl_server_free` or event loop teardown
+- [ ] **Client response lifetime** — `KlClientResponse.alloc` is stored by value; response remains valid after allocator goes out of scope
+- [ ] **Client async cleanup** — `kl_client_cancel()` + `kl_client_free()` called on error/deadline paths
+- [ ] **URL injection** — URLs passed to `kl_url_parse()` / `kl_client_request()` are validated (CRLF rejection)
 
 ## Security Audit Patterns
 
@@ -130,7 +135,7 @@ Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Mak
 4. Add `#include <keel/<module>.h>` to `include/keel/keel.h`
 5. Prefix all public functions with `kl_<module>_`
 6. Write tests: `tests/test_<module>.c`
-7. Update module count in `README.md` and `CLAUDE.md`
+7. Update module count (currently 19) in `README.md` and `CLAUDE.md`
 
 ## Adding a New Body Reader
 
@@ -233,7 +238,7 @@ Middleware runs in registration order, after route matching, before body reading
 
 ## Adding a TLS Backend
 
-1. Implement the 7 required `KlTls` vtable functions (`handshake`, `read`, `write`, `shutdown`, `pending`, `reset`, `destroy`) plus the optional `alpn_protocol` (NULL if not supported)
+1. Implement the 7 required `KlTls` vtable functions (`handshake`, `read`, `write`, `shutdown`, `pending`, `reset`, `destroy`) plus the optional `alpn_protocol` and `set_hostname` (NULL if not supported)
 2. Create a `KlTlsCtx` struct for shared state (certificates, keys, ciphers)
 3. Write a factory function: `KlTls *my_tls_factory(KlTlsCtx *ctx, KlAllocator *alloc)`
 4. Register via `KlTlsConfig` in `KlConfig`:
@@ -254,7 +259,7 @@ The factory is called once per connection slot at server init. Each `KlTls` sess
 All of these should pass cleanly before merging:
 
 ```bash
-make test               # 241 unit + integration tests
+make test               # 326 unit + integration tests
 make debug && make test  # ASan + UBSan (catches memory errors, undefined behavior)
 make analyze            # Clang static analyzer via scan-build
 make cppcheck           # cppcheck static analysis
