@@ -1,10 +1,10 @@
 /*
- * rest_api.c — REST API with route parameters and body reading
+ * rest_api_server.c — REST API with route parameters and body reading
  *
  * Concepts: Route params (:id), query strings, POST body, KlBufReader.
  *
  * Build:  make examples
- * Run:    ./examples/rest_api
+ * Run:    ./examples/rest_api_server
  * Test:   curl localhost:8080/api/users
  *         curl localhost:8080/api/users/42
  *         curl -X POST -d '{"name":"Eve"}' localhost:8080/api/users

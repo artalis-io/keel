@@ -147,7 +147,14 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_create(&th, &attr, delay_thread, ctx);
+    if (pthread_create(&th, &attr, delay_thread, ctx) != 0) {
+        pthread_attr_destroy(&attr);
+        /* Thread creation failed — resume connection with error */
+        kl_response_json(&conn->res, 500,
+                         "{\"error\":\"thread create failed\"}", 32);
+        kl_async_complete(srv, &ctx->op);
+        return;
+    }
     pthread_attr_destroy(&attr);
 }
 

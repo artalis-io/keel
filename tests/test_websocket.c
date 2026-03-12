@@ -466,6 +466,84 @@ UTEST(send, length_16bit) {
     ASSERT_EQ(fp.payload_len, (size_t)200);
 }
 
+UTEST(send, length_64bit) {
+    /* Server frame header for > 65535-byte payload (64-bit length encoding) */
+    uint8_t frame[10];
+    frame[0] = 0x82;  /* FIN=1, binary */
+    frame[1] = 127;   /* 64-bit length, no mask */
+    uint64_t plen = 70000;
+    for (int i = 0; i < 8; i++)
+        frame[2 + i] = (uint8_t)(plen >> ((7 - i) * 8));
+
+    KlWsFrameParser fp;
+    kl_ws_frame_init(&fp);
+    size_t consumed = 0;
+    /* Only parse the header (no payload data provided) */
+    int rc = kl_ws_frame_parse(&fp, frame, 10, &consumed);
+
+    /* Header parsed, waiting for payload */
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(fp.payload_len, (size_t)70000);
+    ASSERT_EQ(fp.masked, 0);  /* server frames unmasked */
+}
+
+UTEST(send, close_with_reason) {
+    /* Close frame: code 1000 + reason "bye" */
+    uint8_t frame[7];
+    frame[0] = 0x88;  /* FIN=1, opcode=close */
+    frame[1] = 5;     /* payload: 2 (code) + 3 (reason) */
+    frame[2] = 0x03;  /* 1000 >> 8 */
+    frame[3] = 0xE8;  /* 1000 & 0xFF */
+    frame[4] = 'b'; frame[5] = 'y'; frame[6] = 'e';
+
+    KlWsFrameParser fp;
+    kl_ws_frame_init(&fp);
+    size_t consumed = 0;
+    int rc = kl_ws_frame_parse(&fp, frame, 7, &consumed);
+
+    ASSERT_EQ(rc, 1);
+    ASSERT_EQ(fp.opcode, 0x8);
+    ASSERT_EQ(fp.payload_len, (size_t)5);
+    ASSERT_EQ(fp.masked, 0);
+
+    /* Extract code from payload */
+    uint16_t code = (uint16_t)((frame[2] << 8) | frame[3]);
+    ASSERT_EQ(code, (uint16_t)1000);
+}
+
+UTEST(send, close_empty_no_reason) {
+    /* Close frame with code only (no reason string) */
+    uint8_t frame[4];
+    frame[0] = 0x88;  /* FIN=1, opcode=close */
+    frame[1] = 2;     /* payload: just the 2-byte code */
+    frame[2] = 0x03;  /* 1000 >> 8 */
+    frame[3] = 0xE8;  /* 1000 & 0xFF */
+
+    KlWsFrameParser fp;
+    kl_ws_frame_init(&fp);
+    size_t consumed = 0;
+    int rc = kl_ws_frame_parse(&fp, frame, 4, &consumed);
+
+    ASSERT_EQ(rc, 1);
+    ASSERT_EQ(fp.opcode, 0x8);
+    ASSERT_EQ(fp.payload_len, (size_t)2);
+}
+
+UTEST(send, frame_unmasked) {
+    /* Verify server frames do NOT have mask bit set (RFC 6455 Section 5.1) */
+    uint8_t frame[6] = {0x81, 0x04, 't', 'e', 's', 't'};
+
+    KlWsFrameParser fp;
+    kl_ws_frame_init(&fp);
+    size_t consumed = 0;
+    int rc = kl_ws_frame_parse(&fp, frame, 6, &consumed);
+
+    ASSERT_EQ(rc, 1);
+    ASSERT_EQ(fp.masked, 0);  /* server → client: MUST NOT mask */
+    ASSERT_EQ(fp.opcode, 0x1);
+    ASSERT_EQ(fp.payload_len, (size_t)4);
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Config tests
  * ═══════════════════════════════════════════════════════════════════ */

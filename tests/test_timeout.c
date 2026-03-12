@@ -198,4 +198,180 @@ UTEST(timeout, active_not_affected) {
     kl_server_free(&timeout_server);
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * Additional timeout tests
+ * ═══════════════════════════════════════════════════════════════════ */
+
+UTEST(timeout, body_timeout) {
+    KlConfig cfg = {
+        .port = TEST_PORT + 4,
+        .read_timeout_ms = 2000,     /* generous header timeout */
+        .body_timeout_ms = TEST_TIMEOUT_MS, /* tight body timeout */
+    };
+    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
+    kl_server_route(&timeout_server, "POST", "/echo", handle_ok,
+                    NULL, kl_body_reader_buffer);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread, NULL);
+    usleep(100000);
+
+    int fd = connect_to(TEST_PORT + 4);
+    ASSERT_TRUE(fd >= 0);
+
+    /* Send headers with large content-length, then trickle body */
+    const char *req = "POST /echo HTTP/1.1\r\n"
+                      "Host: localhost\r\n"
+                      "Content-Length: 1000\r\n"
+                      "Connection: close\r\n"
+                      "\r\n"
+                      "x"; /* only 1 byte of 1000 */
+    (void)write(fd, req, strlen(req));
+
+    /* Wait for timeout response */
+    char buf[4096];
+    ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 3000);
+    ASSERT_TRUE(n > 0);
+    buf[n] = '\0';
+    ASSERT_TRUE(strstr(buf, "408") != NULL);
+
+    close(fd);
+    kl_server_stop(&timeout_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&timeout_server);
+}
+
+UTEST(timeout, fast_large_body) {
+    KlConfig cfg = {
+        .port = TEST_PORT + 5,
+        .read_timeout_ms = 2000,
+    };
+    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
+    kl_server_route(&timeout_server, "POST", "/echo", handle_ok,
+                    NULL, kl_body_reader_buffer);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread, NULL);
+    usleep(100000);
+
+    int fd = connect_to(TEST_PORT + 5);
+    ASSERT_TRUE(fd >= 0);
+
+    /* Build a request with a 4KB body sent all at once */
+    char body[4096];
+    memset(body, 'A', sizeof(body));
+
+    char header[256];
+    int hlen = snprintf(header, sizeof(header),
+        "POST /echo HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n", sizeof(body));
+    ASSERT_TRUE(hlen > 0);
+
+    (void)write(fd, header, (size_t)hlen);
+    (void)write(fd, body, sizeof(body));
+
+    /* Should get 200 OK, not a timeout */
+    char buf[4096];
+    ssize_t total = 0;
+    ssize_t n;
+    while ((n = read_with_timeout(fd, buf + total,
+                                   sizeof(buf) - (size_t)total - 1, 3000)) > 0) {
+        total += n;
+    }
+    buf[total] = '\0';
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    close(fd);
+    kl_server_stop(&timeout_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&timeout_server);
+}
+
+UTEST(timeout, keepalive_idle_timeout) {
+    KlConfig cfg = {
+        .port = TEST_PORT + 6,
+        .read_timeout_ms = TEST_TIMEOUT_MS,
+    };
+    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
+    kl_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread, NULL);
+    usleep(100000);
+
+    int fd = connect_to(TEST_PORT + 6);
+    ASSERT_TRUE(fd >= 0);
+
+    /* Send first request (keepalive) */
+    const char *req1 = "GET /ok HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "\r\n";
+    (void)write(fd, req1, strlen(req1));
+
+    /* Read first response */
+    char buf[4096];
+    ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
+    ASSERT_TRUE(n > 0);
+    buf[n] = '\0';
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+
+    /* Don't send second request — wait for idle timeout.
+     * The connection should be closed with a 408 or just closed. */
+    n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
+    /* n <= 0 means connection closed, or n > 0 with 408 */
+    if (n > 0) {
+        buf[n] = '\0';
+        ASSERT_TRUE(strstr(buf, "408") != NULL);
+    } else {
+        /* Connection closed without response — also acceptable */
+        ASSERT_TRUE(n <= 0);
+    }
+
+    close(fd);
+    kl_server_stop(&timeout_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&timeout_server);
+}
+
+UTEST(timeout, concurrent_timeouts) {
+    KlConfig cfg = {
+        .port = TEST_PORT + 7,
+        .read_timeout_ms = TEST_TIMEOUT_MS,
+    };
+    ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
+    kl_server_route(&timeout_server, "GET", "/ok", handle_ok, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread, NULL);
+    usleep(100000);
+
+    /* Connect two idle clients */
+    int fd1 = connect_to(TEST_PORT + 7);
+    int fd2 = connect_to(TEST_PORT + 7);
+    ASSERT_TRUE(fd1 >= 0);
+    ASSERT_TRUE(fd2 >= 0);
+
+    /* Both should timeout independently with 408 */
+    char buf1[4096], buf2[4096];
+    ssize_t n1 = read_with_timeout(fd1, buf1, sizeof(buf1) - 1, 2000);
+    ssize_t n2 = read_with_timeout(fd2, buf2, sizeof(buf2) - 1, 2000);
+
+    ASSERT_TRUE(n1 > 0);
+    buf1[n1] = '\0';
+    ASSERT_TRUE(strstr(buf1, "408") != NULL);
+
+    ASSERT_TRUE(n2 > 0);
+    buf2[n2] = '\0';
+    ASSERT_TRUE(strstr(buf2, "408") != NULL);
+
+    close(fd1);
+    close(fd2);
+    kl_server_stop(&timeout_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&timeout_server);
+}
+
 UTEST_MAIN();

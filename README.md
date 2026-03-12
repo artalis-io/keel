@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **370+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **400+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -542,7 +542,7 @@ Manual:
 
 ```bash
 make examples
-./examples/hello &
+./examples/hello_server &
 wrk -t4 -c100 -d10s http://localhost:8080/hello
 kill %1
 ```
@@ -575,7 +575,7 @@ The poll backend is a universal POSIX fallback that works on any platform with `
 
 ## Testing
 
-372 tests across 21 test suites, covering every module:
+408 tests across 23 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -584,22 +584,24 @@ The poll backend is a universal POSIX fallback that works on any platform with `
 | `test_response` | 14 | Status, headers, body, JSON, error, streaming, sendfile |
 | `test_parser` | 10 | GET, POST, query strings, incomplete, reset, chunked TE |
 | `test_response_parser` | 9 | HTTP response parsing, chunked, headers, body limits, malformed |
-| `test_connection` | 4 | Pool init, acquire/release, exhaustion, active count |
+| `test_connection` | 9 | Pool init, acquire/release, exhaustion, active count, state machine, monotonic clock |
 | `test_body_reader` | 30 | Buffer + multipart: limits, spanning, binary, edge cases |
 | `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
 | `test_cors` | 17 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
-| `test_websocket` | 38 | Frame parsing, masking, opcode, fragments, close, echo |
+| `test_websocket` | 42 | Frame parsing, masking, opcode, fragments, close, echo, send frame encoding |
 | `test_websocket_client` | 28 | Client frame encoding, mask XOR, handshake, parser, API, config |
 | `test_h2` | 29 | HTTP/2 sessions, streams, routing, ALPN, goaway |
 | `test_h2_client` | 18 | Mock session vtable, stream tracking, response free, API validation |
 | `test_integration` | 27 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
-| `test_timeout` | 4 | Idle, partial headers, partial body, active connections |
+| `test_timeout` | 8 | Idle, partial headers, partial body, active connections, body timeout, keepalive idle, concurrent |
 | `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
 | `test_async` | 15 | Watchers (KlEventCtx), suspend/resume, deadlines, cancel, e2e async handler |
 | `test_thread_pool` | 12 | Create/free, submit, backpressure, FIFO ordering, multi-worker, shutdown, stress |
 | `test_url` | 20 | URL parsing, IPv6, CRLF rejection, default ports, ws/wss schemes |
 | `test_client` | 20 | Sync/async client, response free, TLS config, error handling |
 | `test_event_ctx` | 4 | Standalone event context init/free, watcher lifecycle |
+| `test_event` | 8 | Event loop init/close, add/wait, del, multiple FDs, timeout, mod mask |
+| `test_request` | 10 | Header case-insensitive lookup, params, query strings, empty/missing values |
 
 ```bash
 make test               # run all tests

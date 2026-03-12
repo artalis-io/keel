@@ -1,11 +1,11 @@
 /*
- * tls.c — HTTPS server using mbedTLS backend
+ * tls_server.c — HTTPS server using mbedTLS backend
  *
  * Concepts: KlTlsConfig, kl_tls_mbedtls_ctx_create, kl_tls_mbedtls_create,
  * cert/key loading, HTTPS on port 8443.
  *
  * Build:  make examples KEEL_TLS=mbedtls MBEDTLS_DIR=/path/to/mbedtls
- * Run:    ./examples/tls [cert.pem key.pem]
+ * Run:    ./examples/tls_server [cert.pem key.pem]
  * Test:   curl -k https://localhost:8443/hello
  *
  * Generate self-signed certs:

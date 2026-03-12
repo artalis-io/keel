@@ -8,7 +8,7 @@ DURATION=${DURATION:-10s}
 URL="http://localhost:$PORT/hello"
 
 # Build if needed
-if [ ! -f examples/hello ]; then
+if [ ! -f examples/hello_server ]; then
     echo "Building..."
     make examples 2>/dev/null
 fi
@@ -20,7 +20,7 @@ if ! command -v wrk >/dev/null 2>&1; then
 fi
 
 # Start server
-./examples/hello "$PORT" 2>/dev/null &
+./examples/hello_server "$PORT" 2>/dev/null &
 SERVER_PID=$!
 trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null" EXIT
 

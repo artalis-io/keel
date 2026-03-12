@@ -1,0 +1,85 @@
+/*
+ * async_client.c — Multiple concurrent async HTTP requests
+ *
+ * Concepts: kl_client_start (async), KlEventCtx standalone event loop,
+ * watcher-based completion, parallel request fan-out, error handling.
+ *
+ * Build:  make examples
+ * Run:    ./examples/async_client
+ *
+ * Requires a running HTTP server on localhost:8080 (e.g. ./examples/hello_server).
+ * Fires 3 concurrent GET requests and waits for all to complete.
+ */
+
+#include <keel/keel.h>
+#include <stdio.h>
+
+#define NUM_REQUESTS 3
+
+static int completed;
+
+static const char *urls[NUM_REQUESTS] = {
+    "http://localhost:8080/hello",
+    "http://localhost:8080/hello",
+    "http://localhost:8080/hello",
+};
+
+static void on_done(KlClient *client, void *user_data) {
+    int idx = *(int *)user_data;
+    printf("[%d] %s -> ", idx, urls[idx]);
+
+    if (kl_client_error(client) < 0) {
+        printf("ERROR\n");
+    } else {
+        const KlClientResponse *r = kl_client_response(client);
+        printf("status=%d body=%.*s\n", r->status,
+               (int)r->body_len, r->body);
+    }
+
+    kl_client_free(client);
+    completed++;
+}
+
+int main(void) {
+    printf("async_client: firing %d concurrent requests\n\n", NUM_REQUESTS);
+
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ev;
+    if (kl_event_ctx_init(&ev, &alloc) < 0) {
+        fprintf(stderr, "event ctx init failed\n");
+        return 1;
+    }
+
+    KlClientConfig cfg = {.timeout_ms = 5000};
+    int indices[NUM_REQUESTS];
+    completed = 0;
+
+    /* Fire all requests concurrently */
+    for (int i = 0; i < NUM_REQUESTS; i++) {
+        indices[i] = i;
+        KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET", urls[i],
+                                        NULL, 0, NULL, 0, on_done, &indices[i]);
+        if (!c) {
+            fprintf(stderr, "[%d] failed to start request\n", i);
+            completed++;
+        }
+    }
+
+    /* Pump event loop until all requests complete */
+    KlEvent events[16];
+    while (completed < NUM_REQUESTS) {
+        int n = kl_event_wait(&ev.loop, events, 16, 1000);
+        if (n < 0) break;
+        for (int i = 0; i < n; i++) {
+            uintptr_t tag = (uintptr_t)events[i].udata;
+            if (tag & 1) {
+                KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
+                w->on_ready(w->fd, events[i].ready, w->user_data);
+            }
+        }
+    }
+
+    printf("\nAll %d requests completed.\n", NUM_REQUESTS);
+    kl_event_ctx_free(&ev);
+    return 0;
+}

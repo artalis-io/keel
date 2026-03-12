@@ -1,10 +1,10 @@
 /*
- * hello.c — Minimal KEEL HTTP server
+ * hello_server.c — Minimal KEEL HTTP server
  *
  * Concepts: KlServer, KlConfig, single route, JSON response.
  *
  * Build:  make examples
- * Run:    ./examples/hello [port]
+ * Run:    ./examples/hello_server [port]
  * Test:   curl localhost:8080/hello
  */
 
