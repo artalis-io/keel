@@ -4,31 +4,29 @@ Future direction and design considerations for keel.
 
 ## Assessment (March 2026)
 
-Keel is **~70-75% of the way to production-ready**. The architecture, module design, and security posture are professional-grade. The test coverage (10.5K lines of tests vs 9.2K of implementation, 1.14:1 ratio) is well above average for C projects this size. What remains is fixing specific correctness issues, filling feature gaps, and hardening the last mile.
+Keel is **~80% production-ready for embedded/edge workloads**. The architecture, module design, and security posture are professional-grade. The test coverage (11K+ lines of tests vs 9.4K of implementation, 1.2:1 ratio) is well above average for C projects this size. The critical correctness issues identified in the initial assessment have been fixed. What remains is filling feature gaps and hardening the last mile.
 
 ### Strengths
 
-- **Architecture**: 21 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
+- **Architecture**: 22 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
-- **Testing**: 24 suites, 408+ tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
+- **Testing**: 24 suites, 428+ tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
 - **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
 
-### Correctness Issues (Fix First)
+### Correctness Issues
 
-| Issue | Location | Impact |
-|-------|----------|--------|
-| `writev_all` spins on EAGAIN | `response.c:300-326` | Busy-waits up to 256 times on TCP backpressure for buffer body sends. File bodies correctly return to event loop; buffer bodies don't. |
-| `kl_response_body_copy` silent failure | `response.c:229` | Returns without setting body on allocation failure. Caller has no way to know the copy failed. |
-| `kl_response_header` silent failure | `response.c:198-201` | `hdr_append` can return -1 but return value is unchecked. Headers silently dropped. |
-| Blocking DNS in async client | `client.c:769-791` | `getaddrinfo()` called synchronously in the "async" path. A slow DNS lookup blocks the event loop. |
-| Non-null-terminated header values | `request.h:52-53` | `kl_request_header` returns `const char *` documented as "NOT null-terminated" but users will pass to `strcmp`/`printf("%s")`. |
+| Issue | Status | Resolution |
+|-------|--------|------------|
+| ~~`writev_all` spins on EAGAIN~~ | **Fixed** | Replaced with single-attempt `try_writev` for buffer bodies. Added `send_offset` field to `KlResponse` for partial send resume. Streaming path uses `stream_writev_all` (spin acceptable for small chunks). |
+| ~~`kl_response_body_copy` silent failure~~ | **Fixed** | `kl_response_body_copy`, `kl_response_header`, `kl_response_json`, `kl_response_error` now return `int` (0 success, -1 failure). Header append includes rollback on partial failure. |
+| ~~Blocking DNS in async client~~ | **Fixed** | Added `KlResolver` vtable (`resolver.h`) for pluggable async DNS. `KlClientConfig.resolver` field; NULL falls back to sync `getaddrinfo`. Client state machine has `KL_HCLIENT_RESOLVING` state with cancel support. |
+| Non-null-terminated header values | Open | `kl_request_header` returns `const char *` documented as "NOT null-terminated" but users will pass to `strcmp`/`printf("%s")`. |
 
 ### Architectural Gaps
 
 | Gap | Details |
 |-----|---------|
-| **No IPv6 in server** | `server.c:200` hardcodes `AF_INET`/`sockaddr_in`. Client supports IPv6 via `AF_UNSPEC`. |
 | **Single-threaded event loop** | No `SO_REUSEPORT` multi-listener. `KlThreadPool` offloads blocking work but I/O path is single-threaded. Fine for embedded/edge; ceiling for high-connection-count workloads. |
 | **O(n) router** | Linear scan over all routes per request (`router.c:234-266`). Fine for 20-50 routes; measurable at hundreds. |
 | **8KB fixed read buffer** | Not growable. Requests with >8KB headers (large cookies) rejected with 413. No configurable `max_header_size`. |
@@ -137,33 +135,25 @@ Sync (blocking) and async (event-driven) HTTP/1.1 client with TLS support. URL p
 
 `KlWatcher` for generic FD callbacks, `KlAsyncOp` for connection suspension, `KlThreadPool` for blocking work offload with pipe-based event loop wakeup. All operate on `KlEventCtx`, independent of `KlServer`.
 
----
+### Buffer body send fix
 
-## Near-Term
+Replaced `writev_all` spin loop (up to 256 EAGAIN retries) with single-attempt `try_writev` for buffer body sends. Added `send_offset` field to `KlResponse` for partial send resume across event loop ticks. Streaming path uses `stream_writev_all` (spin acceptable for small chunks). File body path was already correct.
 
-### Fix buffer body send spin
+### Response API error returns
 
-**Priority: Critical** | **Effort: Low**
-
-`writev_all` in `response.c` busy-loops up to 256 times on EAGAIN for buffered body sends. File bodies correctly return 1 to yield to the event loop; buffer bodies should do the same. Change `kl_response_send` to return 1 (partial) on EAGAIN for buffer bodies, matching the file body path.
-
-### Fix response API silent failures
-
-**Priority: Critical** | **Effort: Low**
-
-`kl_response_body_copy` silently no-ops on allocation failure. `kl_response_header` silently drops headers when `hdr_append` fails. Both should return `-1` on failure so callers can detect and handle errors. This is a breaking API change for `kl_response_header` (currently returns `void`).
+Changed `kl_response_header`, `kl_response_body_copy`, `kl_response_json`, and `kl_response_error` from `void` to `int` (0 success, -1 failure). Header append includes rollback on partial failure — `hdr_len` is saved before appending and restored if any `hdr_append` call fails.
 
 ### IPv6 server support
 
-**Priority: High** | **Effort: Low**
+Replaced hardcoded `AF_INET`/`sockaddr_in`/`inet_pton` with `getaddrinfo` + `AI_NUMERICHOST | AI_PASSIVE` for address resolution. Auto-detects address family from `bind_addr`. Dual-stack (`IPV6_V6ONLY=0`) when binding to `::`. Accept path uses `sockaddr_storage` for IPv6 client addresses.
 
-Server listen socket is hardcoded to `AF_INET`. Switch to `AF_INET6` with `IPV6_V6ONLY=0` (dual-stack) or add `bind_addr6` to `KlConfig`. The client already supports IPv6 via `AF_UNSPEC`.
+### Pluggable DNS resolver
 
-### Async DNS resolution
+Added `KlResolver` vtable (`resolver.h`) for pluggable async DNS resolution. `KlClientConfig.resolver` field; NULL falls back to sync `getaddrinfo` (backward compatible). Client state machine has `KL_HCLIENT_RESOLVING` state with cancel support. Users can plug in c-ares, a thread-pool wrapper, or a custom implementation.
 
-**Priority: High** | **Effort: Moderate**
+---
 
-`kl_client_start` calls `getaddrinfo()` synchronously, blocking the event loop. Options: `getaddrinfo_a()` on Linux, thread pool offload, or c-ares integration. Thread pool offload is simplest since `KlThreadPool` already exists.
+## Near-Term
 
 ### Client streaming responses
 
@@ -343,7 +333,7 @@ HTTP CONNECT tunneling for HTTPS through proxies. Configuration for proxy URL + 
 
 ### DNS caching
 
-`getaddrinfo()` is called per-request in the client. The OS usually caches, but an explicit cache with TTL would help high-frequency client workloads. Could also support pluggable resolver vtable for custom DNS.
+`getaddrinfo()` is called per-request when no `KlResolver` is configured. The OS usually caches, but an explicit cache with TTL would help high-frequency client workloads. A caching resolver implementation could wrap the existing `KlResolver` vtable — intercept `resolve()` calls, check cache, and only delegate to the underlying resolver on miss.
 
 ### WebSocket compression (RFC 7692)
 
