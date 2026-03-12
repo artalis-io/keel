@@ -2,6 +2,67 @@
 
 Future direction and design considerations for keel.
 
+## Assessment (March 2026)
+
+Keel is **~70-75% of the way to production-ready**. The architecture, module design, and security posture are professional-grade. The test coverage (10.5K lines of tests vs 9.2K of implementation, 1.14:1 ratio) is well above average for C projects this size. What remains is fixing specific correctness issues, filling feature gaps, and hardening the last mile.
+
+### Strengths
+
+- **Architecture**: 21 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
+- **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
+- **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
+- **Testing**: 24 suites, 408+ tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
+- **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
+
+### Correctness Issues (Fix First)
+
+| Issue | Location | Impact |
+|-------|----------|--------|
+| `writev_all` spins on EAGAIN | `response.c:300-326` | Busy-waits up to 256 times on TCP backpressure for buffer body sends. File bodies correctly return to event loop; buffer bodies don't. |
+| `kl_response_body_copy` silent failure | `response.c:229` | Returns without setting body on allocation failure. Caller has no way to know the copy failed. |
+| `kl_response_header` silent failure | `response.c:198-201` | `hdr_append` can return -1 but return value is unchecked. Headers silently dropped. |
+| Blocking DNS in async client | `client.c:769-791` | `getaddrinfo()` called synchronously in the "async" path. A slow DNS lookup blocks the event loop. |
+| Non-null-terminated header values | `request.h:52-53` | `kl_request_header` returns `const char *` documented as "NOT null-terminated" but users will pass to `strcmp`/`printf("%s")`. |
+
+### Architectural Gaps
+
+| Gap | Details |
+|-----|---------|
+| **No IPv6 in server** | `server.c:200` hardcodes `AF_INET`/`sockaddr_in`. Client supports IPv6 via `AF_UNSPEC`. |
+| **Single-threaded event loop** | No `SO_REUSEPORT` multi-listener. `KlThreadPool` offloads blocking work but I/O path is single-threaded. Fine for embedded/edge; ceiling for high-connection-count workloads. |
+| **O(n) router** | Linear scan over all routes per request (`router.c:234-266`). Fine for 20-50 routes; measurable at hundreds. |
+| **8KB fixed read buffer** | Not growable. Requests with >8KB headers (large cookies) rejected with 413. No configurable `max_header_size`. |
+| **`connection.c` monolith** | 708 lines, one function handles headers, body, middleware, WS/H2 upgrade, discarding. Code duplication between `HEADERS_OK` and `PARSE_OK` branches. Highest-risk file. |
+| **O(n) timeout sweep** | Iterates all connection slots every tick. Deadline heap or timer wheel would scale better. |
+
+### Testing Gaps
+
+| Gap | Impact |
+|-----|--------|
+| No concurrent connection tests | Pool exhaustion, backpressure (`listen_paused`), and concurrent keep-alive untested. |
+| No TLS integration tests | Only unit-level mocking in `test_tls.c`. |
+| No drain/graceful shutdown tests | `drain_timeout_ms` path in `server.c:508-524` untested. |
+| Hardcoded ports + `usleep` sync | Ports 18080-18090, `usleep(100000)` — inherently racy in CI. |
+| Missing fuzz targets in CI | `fuzz_websocket` and `fuzz_response_parser` built but never run. |
+| No code coverage measurement | No coverage report in CI. |
+
+### Build System Gaps
+
+| Gap | Fix |
+|-----|-----|
+| No header dependency tracking | Add `-MMD -MP` and `-include $(wildcard *.d)` for `.d` files. |
+| No `install` target | Add `install` with configurable `PREFIX`. |
+| No pkg-config file | Generate `keel.pc` from template. |
+
+### API Footguns
+
+- **`kl_response_body` borrows the pointer** (`response.h:80`). Stack-allocated buffers cause use-after-free. `kl_response_body_copy` exists as safe alternative but unsafe one is the default.
+- **`_server_ctx` is a public field** on `KlRequest` (`request.h:47`) — leaks implementation details, invites misuse.
+- **No error detail from failed operations** — every function returns `-1` with no error code or message.
+- **Global signal handler** (`server.c:25`) — only one `KlServer` instance can have signal handlers at a time.
+
+---
+
 ## Completed
 
 ### 100-continue (Expect header)
@@ -79,6 +140,30 @@ Sync (blocking) and async (event-driven) HTTP/1.1 client with TLS support. URL p
 ---
 
 ## Near-Term
+
+### Fix buffer body send spin
+
+**Priority: Critical** | **Effort: Low**
+
+`writev_all` in `response.c` busy-loops up to 256 times on EAGAIN for buffered body sends. File bodies correctly return 1 to yield to the event loop; buffer bodies should do the same. Change `kl_response_send` to return 1 (partial) on EAGAIN for buffer bodies, matching the file body path.
+
+### Fix response API silent failures
+
+**Priority: Critical** | **Effort: Low**
+
+`kl_response_body_copy` silently no-ops on allocation failure. `kl_response_header` silently drops headers when `hdr_append` fails. Both should return `-1` on failure so callers can detect and handle errors. This is a breaking API change for `kl_response_header` (currently returns `void`).
+
+### IPv6 server support
+
+**Priority: High** | **Effort: Low**
+
+Server listen socket is hardcoded to `AF_INET`. Switch to `AF_INET6` with `IPV6_V6ONLY=0` (dual-stack) or add `bind_addr6` to `KlConfig`. The client already supports IPv6 via `AF_UNSPEC`.
+
+### Async DNS resolution
+
+**Priority: High** | **Effort: Moderate**
+
+`kl_client_start` calls `getaddrinfo()` synchronously, blocking the event loop. Options: `getaddrinfo_a()` on Linux, thread pool offload, or c-ares integration. Thread pool offload is simplest since `KlThreadPool` already exists.
 
 ### Client streaming responses
 
