@@ -37,6 +37,11 @@ static struct {
     const char *query;
     size_t query_len;
     int query_null;
+    /* null-termination tests */
+    const char *nt_method;
+    const char *nt_path;
+    const char *nt_query;
+    const char *nt_host;
 } test_state;
 
 static KlServer req_server;
@@ -120,6 +125,18 @@ static void handle_query(KlRequest *req, KlResponse *res, void *ctx) {
     test_state.query = req->query;
     test_state.query_len = req->query_len;
     test_state.query_null = (req->query == NULL) ? 1 : 0;
+
+    kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+static void handle_nulterm(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    memset(&test_state, 0, sizeof(test_state));
+
+    test_state.nt_method = req->method;
+    test_state.nt_path = req->path;
+    test_state.nt_query = req->query;
+    test_state.nt_host = kl_request_header(req, "Host");
 
     kl_response_json(res, 200, "{\"ok\":true}", 11);
 }
@@ -385,6 +402,102 @@ UTEST(request, query_absent) {
 
     ASSERT_EQ(test_state.query_null, 1);
     ASSERT_EQ(test_state.query_len, (size_t)0);
+
+    kl_server_stop(&req_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&req_server);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Null-termination tests
+ * ═══════════════════════════════════════════════════════════════════ */
+
+UTEST(request, header_null_terminated) {
+    KlConfig cfg = {.port = TEST_PORT + 10};
+    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
+    kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread, NULL);
+    usleep(100000);
+
+    send_and_wait(TEST_PORT + 10,
+        "GET /nultest?a=1 HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Connection: close\r\n"
+        "\r\n");
+
+    ASSERT_TRUE(test_state.nt_host != NULL);
+    ASSERT_EQ(strcmp(test_state.nt_host, "localhost"), 0);
+
+    kl_server_stop(&req_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&req_server);
+}
+
+UTEST(request, method_null_terminated) {
+    KlConfig cfg = {.port = TEST_PORT + 11};
+    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
+    kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread, NULL);
+    usleep(100000);
+
+    send_and_wait(TEST_PORT + 11,
+        "GET /nultest?a=1 HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Connection: close\r\n"
+        "\r\n");
+
+    ASSERT_TRUE(test_state.nt_method != NULL);
+    ASSERT_EQ(strcmp(test_state.nt_method, "GET"), 0);
+
+    kl_server_stop(&req_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&req_server);
+}
+
+UTEST(request, path_null_terminated) {
+    KlConfig cfg = {.port = TEST_PORT + 12};
+    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
+    kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread, NULL);
+    usleep(100000);
+
+    send_and_wait(TEST_PORT + 12,
+        "GET /nultest?a=1 HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Connection: close\r\n"
+        "\r\n");
+
+    ASSERT_TRUE(test_state.nt_path != NULL);
+    ASSERT_EQ(strcmp(test_state.nt_path, "/nultest"), 0);
+
+    kl_server_stop(&req_server);
+    pthread_join(tid, NULL);
+    kl_server_free(&req_server);
+}
+
+UTEST(request, query_null_terminated) {
+    KlConfig cfg = {.port = TEST_PORT + 13};
+    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
+    kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread, NULL);
+    usleep(100000);
+
+    send_and_wait(TEST_PORT + 13,
+        "GET /nultest?a=1 HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Connection: close\r\n"
+        "\r\n");
+
+    ASSERT_TRUE(test_state.nt_query != NULL);
+    ASSERT_EQ(strcmp(test_state.nt_query, "a=1"), 0);
 
     kl_server_stop(&req_server);
     pthread_join(tid, NULL);

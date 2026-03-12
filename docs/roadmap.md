@@ -21,7 +21,7 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 | ~~`writev_all` spins on EAGAIN~~ | **Fixed** | Replaced with single-attempt `try_writev` for buffer bodies. Added `send_offset` field to `KlResponse` for partial send resume. Streaming path uses `stream_writev_all` (spin acceptable for small chunks). |
 | ~~`kl_response_body_copy` silent failure~~ | **Fixed** | `kl_response_body_copy`, `kl_response_header`, `kl_response_json`, `kl_response_error` now return `int` (0 success, -1 failure). Header append includes rollback on partial failure. |
 | ~~Blocking DNS in async client~~ | **Fixed** | Added `KlResolver` vtable (`resolver.h`) for pluggable async DNS. `KlClientConfig.resolver` field; NULL falls back to sync `getaddrinfo`. Client state machine has `KL_HCLIENT_RESOLVING` state with cancel support. |
-| Non-null-terminated header values | Open | `kl_request_header` returns `const char *` documented as "NOT null-terminated" but users will pass to `strcmp`/`printf("%s")`. |
+| ~~Non-null-terminated header values~~ | **Fixed** | Method, path, query, and all header names/values are null-terminated in-place after parsing. The byte after each string (HTTP syntax: `\r`, `:`, `?`, space) is overwritten with `\0` — zero allocation, still zero-copy. |
 
 ### Architectural Gaps
 

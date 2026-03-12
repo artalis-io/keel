@@ -348,14 +348,23 @@ read_more_headers: ;
         if (pr == KL_PARSE_HEADERS_OK) {
             /*
              * Header pointers (method, path, headers) reference read_buf.
-             * Route match and factory creation must happen before any
-             * buffer modification.  Leftover body data is parsed in-place
-             * from read_buf + consumed, preserving header pointers for
-             * handlers that complete in a single read cycle.
+             * Null-terminate each string in-place: the byte after each
+             * value is an HTTP syntax char (\r, :, ?, space) that is
+             * never read again post-parse.  Body/leftover data starts
+             * at read_buf + consumed, which is past all header bytes.
              */
+            c->read_buf[(size_t)(c->req.method - c->read_buf) + c->req.method_len] = '\0';
+            c->read_buf[(size_t)(c->req.path - c->read_buf) + c->req.path_len] = '\0';
+            if (c->req.query)
+                c->read_buf[(size_t)(c->req.query - c->read_buf) + c->req.query_len] = '\0';
+            for (int i = 0; i < c->req.num_headers; i++) {
+                c->read_buf[(size_t)(c->req.headers[i].name - c->read_buf) + c->req.headers[i].name_len] = '\0';
+                c->read_buf[(size_t)(c->req.headers[i].value - c->read_buf) + c->req.headers[i].value_len] = '\0';
+            }
+
             size_t leftover = c->read_len - consumed;
 
-            /* Route match — header pointers are still valid */
+            /* Route match */
             c->route_result = kl_router_match(router,
                                                c->req.method, c->req.method_len,
                                                c->req.path, c->req.path_len,

@@ -47,9 +47,8 @@ struct KlRequest {
     void *_server_ctx;   /* opaque — set to KlConn* by connection layer (do not modify) */
 };
 
-/* Find header by name (case-insensitive). Returns value pointer or NULL.
- * WARNING: returned pointer is NOT null-terminated. Use kl_request_header_len()
- * when you need the value length, or copy with snprintf/memcpy before use. */
+/* Find header by name (case-insensitive). Returns null-terminated value
+ * pointer, or NULL if not found. */
 static inline const char *kl_request_header(const KlRequest *req,
                                             const char *name) {
     size_t nlen = strlen(name);
