@@ -42,10 +42,10 @@ int main(void) {
     KlConn *conns[4];
     for (int i = 0; i < capacity; i++) {
         conns[i] = kl_conn_acquire(&pool, 100 + i);
-        printf("  acquired fd=%d, active=%d, state=%d\n",
+        printf("  acquired fd=%d, active=%d, state=%u\n",
                conns[i] ? conns[i]->fd : -1,
                pool.active_count,
-               conns[i] ? conns[i]->state : -1);
+               conns[i] ? (unsigned)conns[i]->state : 0);
     }
 
     /* Pool exhaustion */
