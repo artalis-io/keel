@@ -367,7 +367,7 @@ Test naming: `UTEST(suite, test_name)` — e.g. `UTEST(mp, boundary_spanning)`.
 - **Error handling**: Functions return `int` — negative on error, 0 or positive on success
 - **Resource cleanup**: Always pair `_init`/`_free`. Response has `_reset` for keep-alive reuse.
 - **Overflow guards**: Before `a + b`, check `a > SIZE_MAX/2 || b > SIZE_MAX/2`. Before `n * size`, check `n > SIZE_MAX / size`.
-- **Header access**: Use `kl_request_header(req, "Content-Type")` — case-insensitive, returns NULL if missing
+- **Header access**: Use `kl_request_header(req, "Content-Type")` — case-insensitive, returns null-terminated value or NULL if missing
 - **Body access**: Cast `req->body_reader` to the concrete type (`KlBufReader *`, `KlMultipartReader *`)
 
 ## Debugging
