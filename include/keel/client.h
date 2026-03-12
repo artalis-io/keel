@@ -14,6 +14,7 @@
 #include <keel/allocator.h>
 #include <keel/event_ctx.h>
 #include <keel/parser.h>
+#include <keel/resolver.h>
 #include <keel/tls.h>
 #include <keel/url.h>
 
@@ -46,6 +47,7 @@ typedef struct {
     int              timeout_ms;        /**< Connect/send/recv timeout (0 = default 30s) */
     size_t           max_response_size;  /**< Max response body (0 = default 4 MB) */
     KlTlsConfig     *tls;              /**< TLS config for HTTPS (NULL = no HTTPS) */
+    KlResolver      *resolver;          /**< Async DNS resolver (NULL = sync getaddrinfo) */
 } KlClientConfig;
 
 /* ── Sync API ─────────────────────────────────────────────────────── */

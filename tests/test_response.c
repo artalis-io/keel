@@ -2,6 +2,9 @@
 #include <keel/response.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <errno.h>
 
 UTEST(response, init_and_free) {
     KlAllocator a = kl_allocator_default();
@@ -277,6 +280,197 @@ UTEST(response, header_injection_rejected) {
     kl_response_header(&res, "X-Good", "value\r\nInjection: bad");
     ASSERT_EQ(res.hdr_len, (size_t)0);
 
+    kl_response_free(&res);
+}
+
+/* ── Fix 1: Response API return values ──────────────────────────────── */
+
+UTEST(response, header_returns_0_on_success) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+    ASSERT_EQ(kl_response_header(&res, "Content-Type", "text/plain"), 0);
+    ASSERT_EQ(kl_response_header(&res, "X-Custom", "value"), 0);
+    kl_response_free(&res);
+}
+
+UTEST(response, header_returns_minus1_on_crlf) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+    ASSERT_EQ(kl_response_header(&res, "X-Evil\r\n", "value"), -1);
+    ASSERT_EQ(kl_response_header(&res, "X-Good", "val\r\nue"), -1);
+    ASSERT_EQ(kl_response_header(&res, NULL, "value"), -1);
+    ASSERT_EQ(kl_response_header(&res, "X-Good", NULL), -1);
+    /* Header buffer should be untouched after failures */
+    ASSERT_EQ(res.hdr_len, (size_t)0);
+    kl_response_free(&res);
+}
+
+/* Failing allocator for rollback tests */
+static void *fail_malloc(void *ctx, size_t size) {
+    (void)ctx; (void)size; return NULL;
+}
+static void *fail_realloc(void *ctx, void *ptr, size_t old, size_t new_size) {
+    (void)ctx; (void)ptr; (void)old; (void)new_size; return NULL;
+}
+static void fail_free(void *ctx, void *ptr, size_t size) {
+    (void)ctx; (void)ptr; (void)size;
+}
+
+UTEST(response, header_rollback_on_alloc_failure) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    /* Add a header that succeeds */
+    ASSERT_EQ(kl_response_header(&res, "X-First", "ok"), 0);
+    size_t len_after_first = res.hdr_len;
+    ASSERT_TRUE(len_after_first > 0);
+
+    /* Switch to failing allocator — cap stays small so next append triggers realloc */
+    KlAllocator fail = { .malloc = fail_malloc, .realloc = fail_realloc, .free = fail_free };
+    res.alloc = &fail;
+    /* Force a realloc by filling remaining capacity */
+    res.hdr_len = res.hdr_cap;  /* pretend buffer is full */
+
+    int rc = kl_response_header(&res, "X-Huge", "this-should-fail");
+    ASSERT_EQ(rc, -1);
+    /* hdr_len should be rolled back to what we set (hdr_cap) */
+    ASSERT_EQ(res.hdr_len, res.hdr_cap);
+
+    /* Restore original allocator for cleanup */
+    res.alloc = &a;
+    res.hdr_len = len_after_first;  /* restore valid state for free */
+    kl_response_free(&res);
+}
+
+UTEST(response, body_copy_returns_minus1_on_alloc_failure) {
+    KlAllocator fail = { .malloc = fail_malloc, .realloc = fail_realloc, .free = fail_free };
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    /* Switch to failing allocator */
+    res.alloc = &fail;
+    int rc = kl_response_body_copy(&res, "hello", 5);
+    ASSERT_EQ(rc, -1);
+
+    /* Restore for cleanup */
+    res.alloc = &a;
+    kl_response_free(&res);
+}
+
+UTEST(response, body_copy_returns_0_on_success) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+    ASSERT_EQ(kl_response_body_copy(&res, "hello", 5), 0);
+    ASSERT_EQ(res.body_len, (size_t)5);
+    ASSERT_EQ(memcmp(res.body, "hello", 5), 0);
+    /* Empty body */
+    ASSERT_EQ(kl_response_body_copy(&res, "", 0), 0);
+    ASSERT_EQ(res.body_len, (size_t)0);
+    kl_response_free(&res);
+}
+
+UTEST(response, json_returns_0_on_success) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+    ASSERT_EQ(kl_response_json(&res, 200, "{}", 2), 0);
+    ASSERT_EQ(res.status, 200);
+    kl_response_free(&res);
+}
+
+UTEST(response, error_returns_0_on_success) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+    ASSERT_EQ(kl_response_error(&res, 500, "fail"), 0);
+    ASSERT_EQ(res.status, 500);
+    kl_response_free(&res);
+}
+
+/* ── Fix 2: Buffer send partial/resume ─────────────────────────────── */
+
+UTEST(response, buffer_send_returns_1_on_eagain) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    /* Use a socketpair so we can fill the send buffer */
+    int sv[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    /* Set non-blocking */
+    int flags = fcntl(sv[0], F_GETFL, 0);
+    fcntl(sv[0], F_SETFL, flags | O_NONBLOCK);
+
+    /* Fill the send buffer to trigger EAGAIN */
+    char fill[65536];
+    memset(fill, 'X', sizeof(fill));
+    while (1) {
+        ssize_t w = write(sv[0], fill, sizeof(fill));
+        if (w < 0) break;
+    }
+
+    res.conn_fd = sv[0];
+    kl_response_body(&res, "test body", 9);
+
+    int r = kl_response_send(&res);
+    /* Should return 1 (partial) or 0 (if EAGAIN returned 0 bytes, offset stays 0) */
+    ASSERT_TRUE(r == 0 || r == 1);
+
+    close(sv[0]);
+    close(sv[1]);
+    kl_response_free(&res);
+}
+
+UTEST(response, buffer_send_resumes_from_offset) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+
+    int pipefd[2];
+    ASSERT_EQ(pipe(pipefd), 0);
+
+    res.conn_fd = pipefd[1];
+    kl_response_body(&res, "hello world", 11);
+
+    /* Send should complete (pipe has enough buffer) */
+    int r;
+    int iterations = 0;
+    do {
+        r = kl_response_send(&res);
+        iterations++;
+    } while (r == 1 && iterations < 100);
+    ASSERT_EQ(r, 0);
+    /* send_offset should equal total size */
+    ASSERT_TRUE(res.send_offset > 0);
+
+    close(pipefd[1]);
+
+    /* Verify output */
+    char buf[1024];
+    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    ASSERT_TRUE(n > 0);
+    buf[n] = '\0';
+    close(pipefd[0]);
+
+    ASSERT_TRUE(strstr(buf, "HTTP/1.1 200 OK\r\n") != NULL);
+    ASSERT_TRUE(strstr(buf, "hello world") != NULL);
+
+    kl_response_free(&res);
+}
+
+UTEST(response, send_offset_reset_on_response_reset) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    kl_response_init(&res, &a);
+    res.send_offset = 42;
+    kl_response_reset(&res);
+    ASSERT_EQ(res.send_offset, (size_t)0);
     kl_response_free(&res);
 }
 

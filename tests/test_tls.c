@@ -288,7 +288,9 @@ UTEST(tls, response_send_through_mock) {
     res.tls = &m.base;
     kl_response_json(&res, 200, "{\"tls\":true}", 12);
 
-    int r = kl_response_send(&res);
+    /* Buffer body sends may return 1 (partial) via try_writev — loop */
+    int r;
+    do { r = kl_response_send(&res); } while (r == 1);
     ASSERT_EQ(r, 0);
 
     /* Verify the mock captured the full response */

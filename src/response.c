@@ -189,16 +189,21 @@ static int contains_crlf(const char *s, size_t len) {
     return 0;
 }
 
-void kl_response_header(KlResponse *res, const char *name, const char *value) {
-    if (!name || !value) return;
+int kl_response_header(KlResponse *res, const char *name, const char *value) {
+    if (!name || !value) return -1;
     size_t name_len = strlen(name);
     size_t value_len = strlen(value);
     if (contains_crlf(name, name_len) || contains_crlf(value, value_len))
-        return;
-    hdr_append(res, name, name_len);
-    hdr_append(res, ": ", 2);
-    hdr_append(res, value, value_len);
-    hdr_append(res, "\r\n", 2);
+        return -1;
+    size_t saved_len = res->hdr_len;
+    if (hdr_append(res, name, name_len) < 0 ||
+        hdr_append(res, ": ", 2) < 0 ||
+        hdr_append(res, value, value_len) < 0 ||
+        hdr_append(res, "\r\n", 2) < 0) {
+        res->hdr_len = saved_len;  /* rollback partial append */
+        return -1;
+    }
+    return 0;
 }
 
 void kl_response_body(KlResponse *res, const char *data, size_t len) {
@@ -208,8 +213,8 @@ void kl_response_body(KlResponse *res, const char *data, size_t len) {
     res->body_len = len;
 }
 
-void kl_response_body_copy(KlResponse *res, const char *data, size_t len) {
-    if (len > 0 && !data) return;
+int kl_response_body_copy(KlResponse *res, const char *data, size_t len) {
+    if (len > 0 && !data) return -1;
 
     /* Free previous owned body if any */
     if (res->body_owned) {
@@ -222,17 +227,18 @@ void kl_response_body_copy(KlResponse *res, const char *data, size_t len) {
         res->body_mode = KL_BODY_BUFFER;
         res->body = "";
         res->body_len = 0;
-        return;
+        return 0;
     }
 
     res->body_owned = kl_malloc(res->alloc, len);
-    if (!res->body_owned) return;
+    if (!res->body_owned) return -1;
     res->body_owned_size = len;
     memcpy(res->body_owned, data, len);
 
     res->body_mode = KL_BODY_BUFFER;
     res->body = res->body_owned;
     res->body_len = len;
+    return 0;
 }
 
 void kl_response_file(KlResponse *res, int fd, off_t size) {
@@ -242,17 +248,21 @@ void kl_response_file(KlResponse *res, int fd, off_t size) {
     res->file_offset = 0;
 }
 
-void kl_response_json(KlResponse *res, int code, const char *json, size_t len) {
+int kl_response_json(KlResponse *res, int code, const char *json, size_t len) {
     kl_response_status(res, code);
-    kl_response_header(res, "Content-Type", "application/json");
+    if (kl_response_header(res, "Content-Type", "application/json") < 0)
+        return -1;
     kl_response_body(res, json, len);
+    return 0;
 }
 
-void kl_response_error(KlResponse *res, int code, const char *message) {
+int kl_response_error(KlResponse *res, int code, const char *message) {
     kl_response_status(res, code);
-    kl_response_header(res, "Content-Type", "text/plain");
+    if (kl_response_header(res, "Content-Type", "text/plain") < 0)
+        return -1;
     if (!message) message = "";
     kl_response_body(res, message, strlen(message));
+    return 0;
 }
 
 /* ── sendfile wrapper ────────────────────────────────────────────── */
@@ -294,13 +304,31 @@ static ssize_t kl_sendfile_impl(int out_fd, int in_fd, off_t *offset, size_t cou
 #endif
 }
 
-/* ── writev helper — handles short writes and EAGAIN ─────────────── */
+/* ── try_writev — single attempt, returns bytes written ──────────── */
 
-static int writev_all(int fd, KlTls *tls, struct iovec *iov, int iovcnt) {
+static ssize_t try_writev(int fd, KlTls *tls, struct iovec *iov, int iovcnt) {
+    if (!tls) {
+        ssize_t nw = writev(fd, iov, iovcnt);
+        if (nw < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        if (nw < 0 && errno == EINTR) return 0;
+        return nw;
+    }
+    /* TLS: write first non-empty segment */
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].iov_len == 0) continue;
+        ssize_t nw = tls->write(tls, fd, iov[i].iov_base, iov[i].iov_len);
+        if (nw < 0) return -1;
+        return nw;  /* 0 = WANT_WRITE, >0 = bytes written */
+    }
+    return 0;
+}
+
+/* ── stream_writev_all — spin-write for streaming (small chunks) ── */
+
+static int stream_writev_all(int fd, KlTls *tls, struct iovec *iov, int iovcnt) {
     int spins = 0;
 
     if (!tls) {
-        /* Plaintext — use writev for scatter-gather I/O */
         while (iovcnt > 0) {
             ssize_t nw = writev(fd, iov, iovcnt);
             if (nw < 0) {
@@ -345,68 +373,129 @@ static int writev_all(int fd, KlTls *tls, struct iovec *iov, int iovcnt) {
     return 0;
 }
 
-/* ── Send: single writev for headers + body ──────────────────────── */
+/* ── Send: headers + body with partial-send resume ───────────────── */
 
 static const char kl_keepalive_hdr[] = "Connection: keep-alive\r\n";
 
 int kl_response_send(KlResponse *res) {
+    /* Buffer body path: single-attempt writev with send_offset tracking */
+    if (res->body_mode == KL_BODY_BUFFER || res->body_mode == KL_BODY_NONE) {
+        KlStatusLine sl = status_line_for(res->status);
+
+        char cl_buf[48];
+        int cl_len = format_content_length(cl_buf, res->body_len);
+
+        struct iovec iov[7];
+        int iovcnt = 0;
+        size_t total = 0;
+
+        /* Build full iovec every call — all sources are deterministic */
+        iov[iovcnt].iov_base = (void *)sl.str;
+        iov[iovcnt].iov_len = sl.len;
+        total += sl.len;
+        iovcnt++;
+
+        if (res->hdr_len > 0) {
+            iov[iovcnt].iov_base = res->hdr_buf;
+            iov[iovcnt].iov_len = res->hdr_len;
+            total += res->hdr_len;
+            iovcnt++;
+        }
+
+        if (cl_len > 0) {
+            iov[iovcnt].iov_base = cl_buf;
+            iov[iovcnt].iov_len = (size_t)cl_len;
+            total += (size_t)cl_len;
+            iovcnt++;
+        }
+
+        if (res->keep_alive) {
+            iov[iovcnt].iov_base = (void *)kl_keepalive_hdr;
+            iov[iovcnt].iov_len = sizeof(kl_keepalive_hdr) - 1;
+            total += sizeof(kl_keepalive_hdr) - 1;
+            iovcnt++;
+        }
+
+        iov[iovcnt].iov_base = (void *)"\r\n";
+        iov[iovcnt].iov_len = 2;
+        total += 2;
+        iovcnt++;
+
+        if (res->body_len > 0 && !res->head_request) {
+            iov[iovcnt].iov_base = (void *)res->body;
+            iov[iovcnt].iov_len = res->body_len;
+            total += res->body_len;
+            iovcnt++;
+        }
+
+        /* Skip past already-sent bytes (send_offset) */
+        size_t skip = res->send_offset;
+        int first = 0;
+        while (first < iovcnt && skip >= iov[first].iov_len) {
+            skip -= iov[first].iov_len;
+            first++;
+        }
+        if (first >= iovcnt)
+            return 0;  /* already done */
+
+        /* Adjust first iovec segment */
+        iov[first].iov_base = (char *)iov[first].iov_base + skip;
+        iov[first].iov_len -= skip;
+
+        ssize_t nw = try_writev(res->conn_fd, res->tls,
+                                &iov[first], iovcnt - first);
+        if (nw < 0) return -1;
+        res->send_offset += (size_t)nw;
+        res->headers_sent = 1;
+
+        if (res->send_offset >= total)
+            return 0;  /* done */
+        return 1;  /* partial — yield to event loop */
+    }
+
     if (!res->headers_sent) {
         KlStatusLine sl = status_line_for(res->status);
 
         char cl_buf[48];
         int cl_len = 0;
-        if (res->body_mode == KL_BODY_BUFFER) {
-            cl_len = format_content_length(cl_buf, res->body_len);
-        } else if (res->body_mode == KL_BODY_FILE) {
+        if (res->body_mode == KL_BODY_FILE) {
             cl_len = format_content_length(cl_buf, (size_t)res->file_size);
         }
 
-        struct iovec iov[7];
+        struct iovec iov[5];
         int iovcnt = 0;
 
-        /* Status line (constant string, no alloc) */
         iov[iovcnt].iov_base = (void *)sl.str;
         iov[iovcnt].iov_len = sl.len;
         iovcnt++;
 
-        /* User headers */
         if (res->hdr_len > 0) {
             iov[iovcnt].iov_base = res->hdr_buf;
             iov[iovcnt].iov_len = res->hdr_len;
             iovcnt++;
         }
 
-        /* Content-Length */
         if (cl_len > 0) {
             iov[iovcnt].iov_base = cl_buf;
             iov[iovcnt].iov_len = (size_t)cl_len;
             iovcnt++;
         }
 
-        /* Connection: keep-alive (only when flagged) */
         if (res->keep_alive) {
             iov[iovcnt].iov_base = (void *)kl_keepalive_hdr;
             iov[iovcnt].iov_len = sizeof(kl_keepalive_hdr) - 1;
             iovcnt++;
         }
 
-        /* Header terminator */
         iov[iovcnt].iov_base = (void *)"\r\n";
         iov[iovcnt].iov_len = 2;
         iovcnt++;
 
-        /* Inline body for buffered mode (skip for HEAD) */
-        if (res->body_mode == KL_BODY_BUFFER && res->body_len > 0 &&
-            !res->head_request) {
-            iov[iovcnt].iov_base = (void *)res->body;
-            iov[iovcnt].iov_len = res->body_len;
-            iovcnt++;
-        }
-
-        if (writev_all(res->conn_fd, res->tls, iov, iovcnt) < 0) return -1;
+        if (stream_writev_all(res->conn_fd, res->tls, iov, iovcnt) < 0)
+            return -1;
         res->headers_sent = 1;
 
-        if (res->body_mode == KL_BODY_BUFFER || res->head_request)
+        if (res->head_request)
             return 0;
     }
 
@@ -478,7 +567,7 @@ static int kl_stream_write(void *ctx, const char *data, size_t len) {
         { .iov_base = (void *)"\r\n", .iov_len = 2 },
     };
 
-    if (writev_all(res->conn_fd, res->tls, iov, 3) < 0) {
+    if (stream_writev_all(res->conn_fd, res->tls, iov, 3) < 0) {
         res->stream_error = 1;
         return -1;
     }
@@ -489,7 +578,8 @@ int kl_response_begin_stream(KlResponse *res, int status,
                              KlWriteFn *out_write, void **out_ctx) {
     res->body_mode = KL_BODY_STREAM;
     kl_response_status(res, status);
-    kl_response_header(res, "Transfer-Encoding", "chunked");
+    if (kl_response_header(res, "Transfer-Encoding", "chunked") < 0)
+        return -1;
 
     KlStatusLine sl = status_line_for(res->status);
 
@@ -510,7 +600,7 @@ int kl_response_begin_stream(KlResponse *res, int status,
     iov[iovcnt].iov_len = 2;
     iovcnt++;
 
-    if (writev_all(res->conn_fd, res->tls, iov, iovcnt) < 0) return -1;
+    if (stream_writev_all(res->conn_fd, res->tls, iov, iovcnt) < 0) return -1;
 
     res->headers_sent = 1;
     *out_write = kl_stream_write;
@@ -522,7 +612,7 @@ int kl_response_end_stream(KlResponse *res) {
     if (res->stream_error) return -1;
     if (res->head_request) return 0;
     struct iovec iov = { .iov_base = (void *)"0\r\n\r\n", .iov_len = 5 };
-    if (writev_all(res->conn_fd, res->tls, &iov, 1) < 0) {
+    if (stream_writev_all(res->conn_fd, res->tls, &iov, 1) < 0) {
         res->stream_error = 1;
         return -1;
     }

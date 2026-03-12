@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
+#include <netdb.h>
 #include "internal.h"
 
 #define KL_LISTEN_BACKLOG  128
@@ -196,38 +197,50 @@ int kl_server_run(KlServer *s) {
     /* Ignore SIGPIPE */
     signal(SIGPIPE, SIG_IGN);
 
-    /* Create listen socket */
-    s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    /* Resolve bind address (supports IPv4, IPv6, and hostnames) */
+    struct addrinfo hints, *ai = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", s->config.port);
+
+    int gai_rc = getaddrinfo(s->config.bind_addr, port_str, &hints, &ai);
+    if (gai_rc != 0 || !ai) {
+        kl_log(s, KL_LOG_ERROR, "invalid bind address '%s': %s",
+               s->config.bind_addr, gai_strerror(gai_rc));
+        return -1;
+    }
+
+    s->listen_fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (s->listen_fd < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "socket");
+        freeaddrinfo(ai);
         return -1;
     }
 
     int opt = 1;
-    if (setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-        kl_log_errno(s, KL_LOG_WARN, "setsockopt SO_REUSEADDR");
+    setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #ifdef SO_REUSEPORT
     (void)setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
 
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons((uint16_t)s->config.port),
-    };
-    if (inet_pton(AF_INET, s->config.bind_addr, &addr.sin_addr) != 1) {
-        kl_log(s, KL_LOG_ERROR, "invalid bind address '%s'",
-               s->config.bind_addr);
-        close(s->listen_fd);
-        s->listen_fd = -1;
-        return -1;
+    /* IPv6 dual-stack: accept both IPv4 and IPv6 on :: */
+    if (ai->ai_family == AF_INET6) {
+        int off = 0;
+        setsockopt(s->listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
     }
 
-    if (bind(s->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (bind(s->listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "bind");
         close(s->listen_fd);
         s->listen_fd = -1;
+        freeaddrinfo(ai);
         return -1;
     }
+    freeaddrinfo(ai);
 
     if (listen(s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "listen");

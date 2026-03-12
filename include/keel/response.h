@@ -46,6 +46,9 @@ typedef struct KlResponse {
     /* KL_BODY_STREAM */
     int stream_error;
 
+    /* Buffer send progress (for partial writev resume) */
+    size_t send_offset;
+
     /* Protocol flags (set by connection layer) */
     int keep_alive;
     int head_request;
@@ -70,9 +73,10 @@ void kl_response_status(KlResponse *res, int code);
 
 /**
  * @brief Append a header. Both name and value must be null-terminated.
- *        Strings containing CR or LF are silently rejected (header injection guard).
+ *        Strings containing CR or LF are rejected (header injection guard).
+ * @return 0 on success, -1 on failure (CRLF injection, NULL args, alloc failure).
  */
-void kl_response_header(KlResponse *res, const char *name, const char *value);
+int kl_response_header(KlResponse *res, const char *name, const char *value);
 
 /**
  * @brief Set a buffered body (pointer is borrowed, not copied).
@@ -92,8 +96,9 @@ void kl_response_body(KlResponse *res, const char *data, size_t len);
  * @param res  Response.
  * @param data Body bytes (copied).
  * @param len  Length in bytes.
+ * @return 0 on success, -1 on allocation failure.
  */
-void kl_response_body_copy(KlResponse *res, const char *data, size_t len);
+int kl_response_body_copy(KlResponse *res, const char *data, size_t len);
 
 /**
  * @brief Set a file body for zero-copy sendfile transfer.
@@ -109,12 +114,13 @@ void kl_response_free(KlResponse *res);
 /**
  * @brief Convenience: set status, Content-Type: application/json, and body.
  */
-void kl_response_json(KlResponse *res, int code, const char *json, size_t len);
+int kl_response_json(KlResponse *res, int code, const char *json, size_t len);
 
 /**
  * @brief Convenience: set status, Content-Type: text/plain, and error message.
+ * @return 0 on success, -1 on header append failure.
  */
-void kl_response_error(KlResponse *res, int code, const char *message);
+int kl_response_error(KlResponse *res, int code, const char *message);
 
 /**
  * @brief Begin chunked streaming response.

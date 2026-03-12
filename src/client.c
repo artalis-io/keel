@@ -426,6 +426,7 @@ void kl_client_response_free(KlClientResponse *resp)
  * ══════════════════════════════════════════════════════════════════════ */
 
 typedef enum {
+    KL_HCLIENT_RESOLVING,
     KL_HCLIENT_CONNECTING,
     KL_HCLIENT_TLS_HANDSHAKE,
     KL_HCLIENT_SENDING,
@@ -454,6 +455,10 @@ struct KlClient {
     KlTlsConfig       *tls_cfg;
     char               host_buf[KL_CLIENT_HOSTNAME_MAX];
 
+    /* Async DNS resolver (NULL = sync getaddrinfo was used) */
+    KlResolver        *resolver;
+    KlResolveReq      *resolve_req;
+
     /* Completion callback */
     KlClientDoneFn     on_done;
     void              *user_data;
@@ -464,6 +469,9 @@ static void async_on_event(int fd, KlEventMask ready, void *user_data);
 static void async_complete_success(KlClient *c);
 static void async_complete_error(KlClient *c);
 static void async_handle_tls_handshake(KlClient *c);
+static int  start_connect(KlClient *c, const struct sockaddr *addr,
+                           socklen_t addrlen, int family, int socktype,
+                           int protocol);
 
 /* ── Build request into heap buffer ──────────────────────────────── */
 
@@ -523,6 +531,68 @@ static char *build_request(KlAllocator *alloc,
 
     *out_len = total;
     return req;
+}
+
+/* ── Post-DNS: create socket, connect, register watcher ──────────── */
+
+static int start_connect(KlClient *c, const struct sockaddr *addr,
+                          socklen_t addrlen, int family, int socktype,
+                          int protocol)
+{
+    int fd = socket(family, socktype, protocol);
+    if (fd < 0)
+        return -1;
+
+#ifdef SO_NOSIGPIPE
+    {
+        int on = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    }
+#endif
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    int rc = connect(fd, addr, addrlen);
+    if (rc < 0 && errno != EINPROGRESS) {
+        close(fd);
+        return -1;
+    }
+
+    c->fd = fd;
+    c->state = (rc == 0) ? KL_HCLIENT_SENDING : KL_HCLIENT_CONNECTING;
+
+    if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
+        close(fd);
+        c->fd = -1;
+        return -1;
+    }
+
+    return 0;
+}
+
+/* ── Async DNS resolve callback ──────────────────────────────────── */
+
+static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
+                          int error, void *user_data)
+{
+    KlClient *c = user_data;
+    (void)req;
+    c->resolve_req = NULL;
+
+    if (error || !result) {
+        async_complete_error(c);
+        return;
+    }
+
+    if (start_connect(c, (const struct sockaddr *)&result->addr,
+                       result->addrlen, result->ai_family,
+                       result->ai_socktype, result->ai_protocol) < 0) {
+        async_complete_error(c);
+    }
 }
 
 /* ── State: CONNECTING ───────────────────────────────────────────── */
@@ -651,6 +721,8 @@ static void async_on_event(int fd, KlEventMask ready, void *user_data)
     (void)ready;
 
     switch (c->state) {
+    case KL_HCLIENT_RESOLVING:
+        break;  /* DNS resolution handled by resolver callback, not watcher */
     case KL_HCLIENT_CONNECTING:
         async_handle_connecting(c);
         break;
@@ -766,7 +838,7 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
     if (!req_buf)
         return NULL;
 
-    /* DNS resolve (blocking — typically fast, OS-cached) */
+    /* Copy hostname for SNI */
     char host_buf[KL_CLIENT_HOSTNAME_MAX];
     if (parsed.host_len >= sizeof(host_buf)) {
         kl_free(alloc, req_buf, req_len);
@@ -775,6 +847,51 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
     memcpy(host_buf, parsed.host, parsed.host_len);
     host_buf[parsed.host_len] = '\0';
 
+    /* Allocate client */
+    KlClient *c = kl_malloc(alloc, sizeof(KlClient));
+    if (!c) {
+        kl_free(alloc, req_buf, req_len);
+        return NULL;
+    }
+    memset(c, 0, sizeof(*c));
+
+    c->fd = -1;
+    c->ev_ctx = ev_ctx;
+    c->alloc = alloc;
+    c->tls_cfg = tls_cfg;
+    c->request_buf = req_buf;
+    c->request_len = req_len;
+    c->request_sent = 0;
+    c->on_done = on_done;
+    c->user_data = user_data;
+    memcpy(c->host_buf, host_buf, parsed.host_len + 1);
+
+    /* Create response parser */
+    c->parser = kl_response_parser_llhttp(max_resp, alloc);
+    if (!c->parser) {
+        kl_free(alloc, req_buf, req_len);
+        kl_free(alloc, c, sizeof(KlClient));
+        return NULL;
+    }
+
+    /* Async DNS resolver path */
+    KlResolver *resolver = cfg ? cfg->resolver : NULL;
+    if (resolver) {
+        c->resolver = resolver;
+        c->state = KL_HCLIENT_RESOLVING;
+        c->resolve_req = resolver->resolve(resolver, ev_ctx,
+                                            host_buf, parsed.port,
+                                            dns_resolved, c);
+        if (!c->resolve_req) {
+            c->parser->destroy(c->parser);
+            kl_free(alloc, req_buf, req_len);
+            kl_free(alloc, c, sizeof(KlClient));
+            return NULL;
+        }
+        return c;
+    }
+
+    /* Sync DNS fallback (blocking getaddrinfo) */
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%d", parsed.port);
 
@@ -786,83 +903,22 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
     struct addrinfo *res = NULL;
     int rc = getaddrinfo(host_buf, port_str, &hints, &res);
     if (rc != 0 || !res) {
-        kl_free(alloc, req_buf, req_len);
-        return NULL;
-    }
-
-    /* Create non-blocking socket */
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
-        freeaddrinfo(res);
-        kl_free(alloc, req_buf, req_len);
-        return NULL;
-    }
-
-#ifdef SO_NOSIGPIPE
-    {
-        int on = 1;
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    }
-#endif
-
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(fd);
-        freeaddrinfo(res);
-        kl_free(alloc, req_buf, req_len);
-        return NULL;
-    }
-
-    rc = connect(fd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-    if (rc < 0 && errno != EINPROGRESS) {
-        close(fd);
-        kl_free(alloc, req_buf, req_len);
-        return NULL;
-    }
-
-    /* Allocate client */
-    KlClient *c = kl_malloc(alloc, sizeof(KlClient));
-    if (!c) {
-        close(fd);
-        kl_free(alloc, req_buf, req_len);
-        return NULL;
-    }
-    memset(c, 0, sizeof(*c));
-
-    c->fd = fd;
-    c->state = (rc == 0) ? KL_HCLIENT_SENDING : KL_HCLIENT_CONNECTING;
-    c->ev_ctx = ev_ctx;
-    c->alloc = alloc;
-    c->tls_cfg = tls_cfg;
-
-    c->request_buf = req_buf;
-    c->request_len = req_len;
-    c->request_sent = 0;
-
-    memcpy(c->host_buf, host_buf, parsed.host_len + 1);
-
-    c->on_done = on_done;
-    c->user_data = user_data;
-
-    /* Create response parser */
-    c->parser = kl_response_parser_llhttp(max_resp, alloc);
-    if (!c->parser) {
-        close(fd);
-        kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlClient));
-        return NULL;
-    }
-
-    /* Register watcher */
-    if (kl_watcher_add(ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
         c->parser->destroy(c->parser);
-        close(fd);
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlClient));
         return NULL;
     }
+
+    if (start_connect(c, res->ai_addr, res->ai_addrlen,
+                       res->ai_family, res->ai_socktype,
+                       res->ai_protocol) < 0) {
+        freeaddrinfo(res);
+        c->parser->destroy(c->parser);
+        kl_free(alloc, req_buf, req_len);
+        kl_free(alloc, c, sizeof(KlClient));
+        return NULL;
+    }
+    freeaddrinfo(res);
 
     return c;
 }
@@ -885,6 +941,12 @@ void kl_client_cancel(KlClient *client)
 {
     if (!client)
         return;
+
+    /* Cancel in-flight DNS resolution */
+    if (client->resolve_req && client->resolver) {
+        client->resolver->cancel(client->resolve_req);
+        client->resolve_req = NULL;
+    }
 
     if (client->fd >= 0) {
         kl_watcher_del(client->ev_ctx, client->fd);

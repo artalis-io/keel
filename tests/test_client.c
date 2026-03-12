@@ -1,5 +1,6 @@
 #include "utest.h"
 #include <keel/client.h>
+#include <keel/resolver.h>
 #include <keel/allocator.h>
 #include <string.h>
 
@@ -147,6 +148,120 @@ UTEST(client, cancel_null) {
 UTEST(client, free_null) {
     kl_client_free(NULL);
     ASSERT_TRUE(1);  /* should not crash */
+}
+
+/* ── Fix 4: Resolver vtable tests ────────────────────────────────── */
+
+/* Mock resolver that calls done_fn synchronously with an error */
+static KlResolveReq mock_req;
+static int mock_cancel_called;
+
+static KlResolveReq *mock_resolve(KlResolver *self, KlEventCtx *ctx,
+                                    const char *host, int port,
+                                    KlResolveDoneFn done_fn, void *user_data) {
+    (void)self; (void)ctx; (void)host; (void)port;
+    mock_req.resolver = self;
+    /* Call done_fn synchronously with error to test the callback path */
+    done_fn(&mock_req, NULL, -1, user_data);
+    return &mock_req;
+}
+
+static void mock_cancel(KlResolveReq *req) {
+    (void)req;
+    mock_cancel_called = 1;
+}
+
+static void mock_resolver_destroy(KlResolver *self) {
+    (void)self;
+}
+
+static void mock_done(KlClient *client, void *user_data) {
+    (void)user_data;
+    /* Client should have error set */
+    (void)client;
+}
+
+UTEST(client, async_dns_with_resolver_error) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlResolver resolver = {
+        .resolve = mock_resolve,
+        .cancel = mock_cancel,
+        .destroy = mock_resolver_destroy,
+    };
+
+    KlClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.resolver = &resolver;
+
+    /* The mock resolver calls done_fn with error synchronously.
+     * kl_client_start should still return a valid handle. */
+    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://example.com",
+                                    NULL, 0, NULL, 0, mock_done, NULL);
+    /* Handle may be NULL if done_fn triggered cleanup, or non-NULL if kept */
+    if (c) {
+        ASSERT_EQ(kl_client_error(c), -1);
+        kl_client_free(c);
+    }
+
+    kl_event_ctx_free(&ev);
+}
+
+UTEST(client, sync_dns_fallback) {
+    /* NULL resolver should use sync getaddrinfo — just verify it doesn't crash */
+    KlAllocator a = kl_allocator_default();
+    KlClientResponse resp;
+
+    KlClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.resolver = NULL;
+
+    /* This will fail to connect (no server), but exercises the code path */
+    int rc = kl_client_request(&a, &cfg, "GET", "http://127.0.0.1:1",
+                                NULL, 0, NULL, 0, &resp);
+    ASSERT_EQ(rc, -1);  /* connection refused */
+}
+
+/* Mock resolver that does NOT call done_fn (simulates pending async) */
+static KlResolveReq pending_req;
+
+static KlResolveReq *pending_resolve(KlResolver *self, KlEventCtx *ctx,
+                                      const char *host, int port,
+                                      KlResolveDoneFn done_fn, void *user_data) {
+    (void)self; (void)ctx; (void)host; (void)port;
+    (void)done_fn; (void)user_data;
+    pending_req.resolver = self;
+    return &pending_req;
+}
+
+UTEST(client, resolver_cancel_on_cleanup) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlResolver pending_resolver = {
+        .resolve = pending_resolve,
+        .cancel = mock_cancel,
+        .destroy = mock_resolver_destroy,
+    };
+
+    KlClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.resolver = &pending_resolver;
+
+    mock_cancel_called = 0;
+
+    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://example.com",
+                                    NULL, 0, NULL, 0, NULL, NULL);
+    ASSERT_TRUE(c != NULL);
+
+    /* Free should cancel the pending request */
+    kl_client_free(c);
+    ASSERT_TRUE(mock_cancel_called);
+
+    kl_event_ctx_free(&ev);
 }
 
 UTEST_MAIN();

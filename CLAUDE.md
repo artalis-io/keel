@@ -27,7 +27,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-21 orthogonal modules, each independently testable:
+22 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -49,6 +49,7 @@ make clean        # remove all build artifacts
 18. **client** — HTTP/1.1 client: sync (blocking) + async (event-driven via KlEventCtx)
 19. **websocket_client** — Async WebSocket client with masked frames (RFC 6455)
 20. **h2_client** — HTTP/2 client with pluggable session vtable (multiplexed streams)
+21. **resolver** — Pluggable async DNS resolver vtable (bring-your-own backend)
 
 ## Key Types
 
@@ -93,6 +94,10 @@ make clean        # remove all build artifacts
 | `KlClientConfig` | `client.h` | Client config: timeout_ms, max_response_size, TLS |
 | `KlClient` | `client.h` | Opaque async client handle |
 | `KlClientDoneFn` | `client.h` | Async completion callback |
+| `KlResolver` | `resolver.h` | Pluggable async DNS resolver vtable: resolve, cancel, destroy |
+| `KlResolveReq` | `resolver.h` | Opaque per-request handle (resolver-owned) |
+| `KlResolveResult` | `resolver.h` | Resolved address: sockaddr_storage, addrlen, ai_family |
+| `KlResolveDoneFn` | `resolver.h` | Resolution completion callback |
 | `KlWsClientConn` | `websocket_client.h` | WebSocket client connection handle |
 | `KlWsClientConfig` | `websocket_client.h` | Client config: timeout, max_frame_size, TLS, protocol |
 | `KlWsClientCallbacks` | `websocket_client.h` | Callbacks: on_open, on_message, on_close, on_error |
