@@ -25,6 +25,8 @@ typedef struct {
 } KlIoUringState;
 
 static int ensure_fd_cap(KlIoUringState *st, int fd) {
+    if (fd < 0)
+        return -1;
     if (fd < st->fd_udata_cap)
         return 0;
 
@@ -152,7 +154,7 @@ int kl_event_del(KlEventLoop *loop, int fd) {
     io_uring_sqe_set_data64(sqe, (uint64_t)-1); /* sentinel */
     st->pending++;
 
-    if (fd < st->fd_udata_cap)
+    if (fd >= 0 && fd < st->fd_udata_cap)
         st->fd_udata[fd] = UDATA_UNUSED;
 
     return 0;

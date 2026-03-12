@@ -140,26 +140,15 @@ UTEST(event, multiple_fds) {
     kl_event_close(&loop);
 }
 
-UTEST(event, closed_fd) {
+UTEST(event, invalid_fd) {
     KlEventLoop loop;
     memset(&loop, 0, sizeof(loop));
     KlAllocator alloc = kl_allocator_default();
     loop.alloc = &alloc;
     ASSERT_EQ(kl_event_init(&loop), 0);
 
-    /* Add a valid fd, then close it and try del — should not crash.
-     * We don't test fd=-1 because some backends (io_uring) will do
-     * an out-of-bounds write, and others (poll) silently accept it. */
-    int fds[2];
-    ASSERT_EQ(pipe(fds), 0);
-
-    int marker = 1;
-    ASSERT_EQ(kl_event_add(&loop, fds[0], KL_EVENT_READ, &marker), 0);
-    close(fds[0]);
-    close(fds[1]);
-
-    /* Del after close — backend-dependent, but must not crash */
-    kl_event_del(&loop, fds[0]);
+    /* Negative fd must be rejected on all backends */
+    ASSERT_NE(kl_event_add(&loop, -1, KL_EVENT_READ, NULL), 0);
 
     kl_event_close(&loop);
 }

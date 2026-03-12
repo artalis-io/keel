@@ -23,6 +23,8 @@ static short mask_to_poll(KlEventMask mask) {
 }
 
 static int ensure_fd_cap(KlPollState *st, int fd) {
+    if (fd < 0)
+        return -1;
     if (fd < st->fd_to_idx_cap)
         return 0;
 
@@ -140,7 +142,7 @@ int kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
 int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     KlPollState *st = loop->_backend;
 
-    if (fd >= st->fd_to_idx_cap)
+    if (fd < 0 || fd >= st->fd_to_idx_cap)
         return -1;
     int idx = st->fd_to_idx[fd];
     if (idx < 0)
@@ -154,7 +156,7 @@ int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
 int kl_event_del(KlEventLoop *loop, int fd) {
     KlPollState *st = loop->_backend;
 
-    if (fd >= st->fd_to_idx_cap)
+    if (fd < 0 || fd >= st->fd_to_idx_cap)
         return -1;
     int idx = st->fd_to_idx[fd];
     if (idx < 0)
