@@ -32,6 +32,21 @@ stop_server() {
   sleep 0.2
 }
 
+# POSIX-portable timeout: run command with a time limit.
+# macOS doesn't have GNU timeout; use background + kill instead.
+run_timeout() {
+  secs=$1; shift
+  "$@" &
+  _pid=$!
+  ( sleep "$secs"; kill "$_pid" 2>/dev/null ) &
+  _watchdog=$!
+  wait "$_pid" 2>/dev/null
+  _rc=$?
+  kill "$_watchdog" 2>/dev/null
+  wait "$_watchdog" 2>/dev/null
+  return $_rc
+}
+
 check_contains() {
   label=$1; response=$2; expected=$3
   if echo "$response" | grep -q "$expected"; then
@@ -382,7 +397,7 @@ test_client() {
     stop_server "$server_pid"; return
   fi
 
-  output=$(timeout 10 "./$bin" 2>&1) || true
+  output=$(run_timeout 10 "./$bin" 2>&1) || true
   if echo "$output" | grep -q "request failed"; then
     skip=$((skip + 1))
     echo "  SKIP: client can't connect (localhost may resolve to IPv6)"
@@ -408,7 +423,7 @@ test_async_client() {
     stop_server "$server_pid"; return
   fi
 
-  output=$(timeout 10 "./$bin" 2>&1) || true
+  output=$(run_timeout 10 "./$bin" 2>&1) || true
   if echo "$output" | grep -q "ERROR"; then
     skip=$((skip + 1))
     echo "  SKIP: async_client can't connect (localhost may resolve to IPv6)"
