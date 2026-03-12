@@ -296,17 +296,9 @@ int kl_server_run(KlServer *s) {
         }
 
         for (int i = 0; i < n; i++) {
-            /* Tagged pointer dispatch: bit 0 set = watcher, clear = connection */
-            uintptr_t tag = (uintptr_t)events[i].udata;
-            if (tag & 1) {
-                KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
-                int wfd = w->fd;
-                w->on_ready(wfd, events[i].ready, w->user_data);
-                /* Re-arm for one-shot backends (io_uring POLL_ADD).
-                 * Safe no-op if callback removed the watcher. */
-                kl_watcher_rearm(&s->ev, wfd);
+            /* Watcher dispatch (tagged pointer, LSB=1) */
+            if (kl_event_dispatch(&s->ev, &events[i]))
                 continue;
-            }
 
             KlConn *c = (KlConn *)events[i].udata;
 

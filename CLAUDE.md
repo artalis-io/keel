@@ -193,6 +193,33 @@ void kl_watcher_del(KlEventCtx *ctx, int fd);
 
 Watchers are heap-allocated and ctx-owned. `KlServer` embeds `KlEventCtx ev` — use `&server->ev` when calling watcher functions from server context. Uses tagged pointers (LSB=1) to distinguish watcher events from connection events in the event loop dispatch.
 
+### Dispatch Helpers
+
+Two helpers eliminate the tagged-pointer boilerplate for client-side event loops:
+
+```c
+/* Dispatch a single event: returns 1 if watcher, 0 if not (static inline in event_ctx.h) */
+int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event);
+
+/* Run one tick: wait + dispatch all watchers. Stack-buffers ≤64 events (in async.c) */
+int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms);
+```
+
+**`kl_event_dispatch`** — unmasks the tagged pointer, calls `on_ready`, re-arms. Server uses this inline for mixed connection+watcher dispatch:
+```c
+for (int i = 0; i < n; i++) {
+    if (kl_event_dispatch(&s->ev, &events[i])) continue;
+    /* handle connection events ... */
+}
+```
+
+**`kl_event_ctx_run`** — standalone event loop tick for clients and thread pools (all FDs are watcher-owned):
+```c
+while (!done) {
+    if (kl_event_ctx_run(&ev, 16, 1000) < 0) break;
+}
+```
+
 ### KlAsyncOp — Connection Suspension
 
 Suspend a connection for an async operation. The connection is removed from the event loop and exempt from idle timeouts while suspended.

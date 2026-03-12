@@ -7,19 +7,7 @@
 #include <string.h>
 #include <stdatomic.h>
 
-/* ── Helpers (same pattern as test_async.c) ───────────────────────── */
-
-static void dispatch_events(KlEventCtx *ev, KlEvent *events, int n) {
-    for (int i = 0; i < n; i++) {
-        uintptr_t tag = (uintptr_t)events[i].udata;
-        if (tag & 1) {
-            KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
-            int wfd = w->fd;
-            w->on_ready(wfd, events[i].ready, w->user_data);
-            kl_watcher_rearm(ev, wfd);
-        }
-    }
-}
+/* ── Helpers ───────────────────────────────────────────────────────── */
 
 static void init_test_server(KlServer *s) {
     memset(s, 0, sizeof(*s));
@@ -36,9 +24,7 @@ static void cleanup_test_server(KlServer *s) {
 static void pump_until(KlServer *s, atomic_int *done_count, int target, int timeout_ms) {
     int elapsed = 0;
     while (atomic_load(done_count) < target && elapsed < timeout_ms) {
-        KlEvent events[16];
-        int n = kl_event_wait(&s->ev.loop, events, 16, 10);
-        if (n > 0) dispatch_events(&s->ev, events, n);
+        kl_event_ctx_run(&s->ev, 16, 10);
         elapsed += 10;
     }
 }
@@ -468,9 +454,7 @@ UTEST(thread_pool, stress_many_items) {
             submitted++;
         } else {
             /* Queue full — pump event loop to drain done items */
-            KlEvent events[16];
-            int n = kl_event_wait(&s.ev.loop, events, 16, 10);
-            if (n > 0) dispatch_events(&s.ev, events, n);
+            kl_event_ctx_run(&s.ev, 16, 10);
         }
     }
 

@@ -3,6 +3,7 @@
 
 #include <keel/allocator.h>
 #include <keel/event.h>
+#include <stdint.h>
 
 /* ── KlWatcher — generic FD callback ──────────────────────────────── */
 
@@ -86,5 +87,46 @@ void kl_watcher_del(KlEventCtx *ctx, int fd);
  * (epoll, kqueue) this is a harmless re-register.
  */
 int  kl_watcher_rearm(KlEventCtx *ctx, int fd);
+
+/* ── Dispatch helpers ─────────────────────────────────────────────── */
+
+/**
+ * @brief Dispatch a single event if it is a watcher (tagged pointer).
+ *
+ * Checks the LSB tag on event->udata.  If set, unmasks the KlWatcher*,
+ * calls on_ready, re-arms for one-shot backends, and returns 1.
+ * If the tag is clear (connection, listen socket, etc.) returns 0 —
+ * the caller handles it.
+ *
+ * @return 1 if a watcher was dispatched, 0 otherwise.
+ */
+static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
+    uintptr_t tag = (uintptr_t)event->udata;
+    if (!(tag & 1))
+        return 0;  /* not a watcher — caller handles */
+    KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
+    int wfd = w->fd;
+    w->on_ready(wfd, event->ready, w->user_data);
+    kl_watcher_rearm(ctx, wfd);
+    return 1;
+}
+
+/**
+ * @brief Run one tick of the event loop, dispatching all watcher events.
+ *
+ * Calls kl_event_wait, then kl_event_dispatch for each returned event.
+ * Non-watcher events are silently skipped — this is intended for
+ * standalone KlEventCtx usage (clients, thread pools) where all FDs
+ * are watcher-owned.
+ *
+ * Uses a stack buffer for up to 64 events; heap-allocates via ctx->alloc
+ * for larger requests.
+ *
+ * @param ctx        Event context (loop + allocator + watchers).
+ * @param max_events Maximum events to process per tick.
+ * @param timeout_ms Timeout in milliseconds (-1 for infinite).
+ * @return Number of events returned by kl_event_wait, or -1 on error.
+ */
+int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms);
 
 #endif

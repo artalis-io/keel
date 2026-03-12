@@ -96,6 +96,33 @@ void kl_watcher_del(KlEventCtx *ctx, int fd) {
     }
 }
 
+/* ── kl_event_ctx_run ──────────────────────────────────────────────── */
+
+#define KL_CTX_STACK_EVENTS 64
+
+int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
+    if (!ctx || max_events <= 0) return -1;
+
+    KlEvent stack_buf[KL_CTX_STACK_EVENTS];
+    KlEvent *events = stack_buf;
+
+    if (max_events > KL_CTX_STACK_EVENTS) {
+        events = kl_malloc(ctx->alloc, (size_t)max_events * sizeof(KlEvent));
+        if (!events) return -1;
+    }
+
+    int n = kl_event_wait(&ctx->loop, events, max_events, timeout_ms);
+    if (n > 0) {
+        for (int i = 0; i < n; i++)
+            kl_event_dispatch(ctx, &events[i]);
+    }
+
+    if (events != stack_buf)
+        kl_free(ctx->alloc, events, (size_t)max_events * sizeof(KlEvent));
+
+    return n < 0 ? -1 : n;
+}
+
 /* ── KlAsyncOp ─────────────────────────────────────────────────────── */
 
 int kl_async_suspend(KlServer *s, KlConn *conn, KlAsyncOp *op) {

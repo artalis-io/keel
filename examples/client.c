@@ -84,17 +84,8 @@ static void async_demo(void) {
     }
 
     /* Pump the event loop until the request completes */
-    KlEvent events[8];
     while (!async_done_flag) {
-        int n = kl_event_wait(&ev.loop, events, 8, 1000);
-        if (n < 0) break;
-        for (int i = 0; i < n; i++) {
-            uintptr_t tag = (uintptr_t)events[i].udata;
-            if (tag & 1) {
-                KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
-                w->on_ready(w->fd, events[i].ready, w->user_data);
-            }
-        }
+        if (kl_event_ctx_run(&ev, 8, 1000) < 0) break;
     }
 
     kl_event_ctx_free(&ev);

@@ -66,17 +66,8 @@ int main(void) {
     }
 
     /* Pump event loop until all requests complete */
-    KlEvent events[16];
     while (completed < NUM_REQUESTS) {
-        int n = kl_event_wait(&ev.loop, events, 16, 1000);
-        if (n < 0) break;
-        for (int i = 0; i < n; i++) {
-            uintptr_t tag = (uintptr_t)events[i].udata;
-            if (tag & 1) {
-                KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
-                w->on_ready(w->fd, events[i].ready, w->user_data);
-            }
-        }
+        if (kl_event_ctx_run(&ev, 16, 1000) < 0) break;
     }
 
     printf("\nAll %d requests completed.\n", NUM_REQUESTS);
