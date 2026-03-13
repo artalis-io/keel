@@ -2,6 +2,7 @@
 #define KEEL_EVENT_CTX_H
 
 #include <keel/allocator.h>
+#include <keel/error.h>
 #include <keel/event.h>
 #include <stdint.h>
 
@@ -40,6 +41,7 @@ typedef struct KlEventCtx {
     KlAllocator *alloc;       /* borrowed — must outlive ctx */
     KlWatcher *watchers;
     int dispatch_dirty;       /* set by kl_watcher_mod/del during callback */
+    KlError last_error;       /* diagnostic: set at point of return -1 */
 } KlEventCtx;
 
 /**

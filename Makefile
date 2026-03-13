@@ -46,7 +46,7 @@ else
 endif
 
 # Core library — parser-agnostic
-CORE_SRC = src/allocator.c src/response.c src/router.c \
+CORE_SRC = src/allocator.c src/error.c src/response.c src/router.c \
            src/connection.c src/server.c src/async.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
@@ -141,7 +141,7 @@ test: $(TEST_BIN)
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
-	rm -f src/async.o src/thread_pool.o src/tls_mbedtls.o
+	rm -f src/async.o src/error.o src/thread_pool.o src/tls_mbedtls.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/connection_pool examples/url_parser examples/sse examples/streaming_client
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser

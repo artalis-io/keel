@@ -13,12 +13,20 @@ static void *watcher_tag(KlWatcher *w) {
 /* ── KlEventCtx ───────────────────────────────────────────────────── */
 
 int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
-    if (!ctx || !alloc) return -1;
+    if (!ctx || !alloc) {
+        if (ctx) ctx->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
     ctx->alloc = alloc;
     ctx->watchers = NULL;
     ctx->dispatch_dirty = 0;
+    ctx->last_error = KL_ERR_NONE;
     ctx->loop.alloc = alloc;
-    return kl_event_init(&ctx->loop);
+    if (kl_event_init(&ctx->loop) < 0) {
+        ctx->last_error = KL_ERR_EVENT_INIT;
+        return -1;
+    }
+    return 0;
 }
 
 void kl_event_ctx_free(KlEventCtx *ctx) {

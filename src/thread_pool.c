@@ -147,7 +147,10 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
     if ((size_t)num_workers > SIZE_MAX / sizeof(pthread_t)) return NULL;
 
     KlThreadPool *pool = kl_malloc(alloc, sizeof(KlThreadPool));
-    if (!pool) return NULL;
+    if (!pool) {
+        ctx->last_error = KL_ERR_ALLOC;
+        return NULL;
+    }
     memset(pool, 0, sizeof(*pool));
 
     pool->ev_ctx = ctx;
@@ -160,14 +163,14 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
 
     /* Allocate queues */
     pool->work_queue = kl_malloc(alloc, (size_t)queue_cap * sizeof(KlWorkItem));
-    if (!pool->work_queue) goto fail_pool;
+    if (!pool->work_queue) { ctx->last_error = KL_ERR_ALLOC; goto fail_pool; }
 
     pool->done_queue = kl_malloc(alloc, (size_t)done_cap * sizeof(KlWorkItem));
-    if (!pool->done_queue) goto fail_work;
+    if (!pool->done_queue) { ctx->last_error = KL_ERR_ALLOC; goto fail_work; }
 
     /* Create pipe */
     int pipe_fds[2];
-    if (pipe(pipe_fds) < 0) goto fail_done;
+    if (pipe(pipe_fds) < 0) { ctx->last_error = KL_ERR_PIPE; goto fail_done; }
     pool->pipe_rd = pipe_fds[0];
     pool->pipe_wr = pipe_fds[1];
 
@@ -177,17 +180,19 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
         (void)fcntl(pool->pipe_rd, F_SETFL, flags | O_NONBLOCK);
 
     /* Init synchronization */
-    if (pthread_mutex_init(&pool->mutex, NULL) != 0) goto fail_pipe;
-    if (pthread_cond_init(&pool->work_avail, NULL) != 0) goto fail_mutex;
+    if (pthread_mutex_init(&pool->mutex, NULL) != 0) { ctx->last_error = KL_ERR_THREAD; goto fail_pipe; }
+    if (pthread_cond_init(&pool->work_avail, NULL) != 0) { ctx->last_error = KL_ERR_THREAD; goto fail_mutex; }
 
     /* Register pipe watcher with event loop */
     if (kl_watcher_add(ctx, pool->pipe_rd, KL_EVENT_READ,
-                       thread_pool_on_pipe, pool) < 0)
+                       thread_pool_on_pipe, pool) < 0) {
+        ctx->last_error = KL_ERR_EVENT_ADD;
         goto fail_cond;
+    }
 
     /* Allocate thread array */
     pool->threads = kl_malloc(alloc, (size_t)num_workers * sizeof(pthread_t));
-    if (!pool->threads) goto fail_watcher;
+    if (!pool->threads) { ctx->last_error = KL_ERR_ALLOC; goto fail_watcher; }
 
     /* Spawn worker threads */
     int started = 0;
@@ -197,7 +202,7 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
         started++;
     }
 
-    if (started == 0) goto fail_threads;
+    if (started == 0) { ctx->last_error = KL_ERR_THREAD; goto fail_threads; }
     pool->num_workers = started;
 
     return pool;

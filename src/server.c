@@ -75,7 +75,10 @@ void kl_server_conn_release(KlServer *s, KlConn *c) {
 }
 
 int kl_server_init(KlServer *s, const KlConfig *config) {
-    if (!s || !config) return -1;
+    if (!s || !config) {
+        if (s) s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
     memset(s, 0, sizeof(*s));
     s->listen_fd = -1;
 
@@ -101,8 +104,12 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     KlAllocator *alloc = &s->alloc_storage;
 
     /* Init subsystems */
-    if (kl_router_init(&s->router, alloc) < 0) return -1;
+    if (kl_router_init(&s->router, alloc) < 0) {
+        s->last_error = KL_ERR_ALLOC;
+        return -1;
+    }
     if (kl_conn_pool_init(&s->pool, s->config.max_connections, alloc) < 0) {
+        s->last_error = KL_ERR_ALLOC;
         kl_router_free(&s->router);
         return -1;
     }
@@ -123,6 +130,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     for (int i = 0; i < s->pool.capacity; i++) {
         s->pool.conns[i].parser = s->config.parser(alloc);
         if (!s->pool.conns[i].parser) {
+            s->last_error = KL_ERR_ALLOC;
             kl_conn_pool_free(&s->pool);
             kl_router_free(&s->router);
             return -1;
@@ -140,6 +148,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
             s->pool.conns[i].tls = s->config.tls->factory(
                 s->config.tls->ctx, alloc);
             if (!s->pool.conns[i].tls) {
+                s->last_error = KL_ERR_TLS_INIT;
                 kl_conn_pool_free(&s->pool);
                 kl_router_free(&s->router);
                 return -1;
@@ -149,6 +158,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
             const KlTls *t = s->pool.conns[i].tls;
             if (!t->handshake || !t->read || !t->write ||
                 !t->shutdown || !t->pending || !t->reset || !t->destroy) {
+                s->last_error = KL_ERR_TLS_VTABLE;
                 kl_conn_pool_free(&s->pool);
                 kl_router_free(&s->router);
                 return -1;
@@ -158,6 +168,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
 
     /* Init event context — must happen before thread pool / watcher registration */
     if (kl_event_ctx_init(&s->ev, alloc) < 0) {
+        s->last_error = KL_ERR_EVENT_INIT;
         kl_conn_pool_free(&s->pool);
         kl_router_free(&s->router);
         return -1;
@@ -211,12 +222,14 @@ int kl_server_run(KlServer *s) {
     if (gai_rc != 0 || !ai) {
         kl_log(s, KL_LOG_ERROR, "invalid bind address '%s': %s",
                s->config.bind_addr, gai_strerror(gai_rc));
+        s->last_error = KL_ERR_DNS;
         return -1;
     }
 
     s->listen_fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (s->listen_fd < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "socket");
+        s->last_error = KL_ERR_SOCKET;
         freeaddrinfo(ai);
         return -1;
     }
@@ -235,6 +248,7 @@ int kl_server_run(KlServer *s) {
 
     if (bind(s->listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "bind");
+        s->last_error = KL_ERR_BIND;
         close(s->listen_fd);
         s->listen_fd = -1;
         freeaddrinfo(ai);
@@ -244,6 +258,7 @@ int kl_server_run(KlServer *s) {
 
     if (listen(s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "listen");
+        s->last_error = KL_ERR_LISTEN;
         close(s->listen_fd);
         s->listen_fd = -1;
         return -1;
@@ -251,6 +266,7 @@ int kl_server_run(KlServer *s) {
 
     if (set_nonblocking(s->listen_fd) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "fcntl");
+        s->last_error = KL_ERR_SOCKET;
         close(s->listen_fd);
         s->listen_fd = -1;
         return -1;
@@ -259,6 +275,7 @@ int kl_server_run(KlServer *s) {
     /* Register listen socket for read events */
     if (kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "event_add listen");
+        s->last_error = KL_ERR_EVENT_ADD;
         close(s->listen_fd);
         s->listen_fd = -1;
         return -1;

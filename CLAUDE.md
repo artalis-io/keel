@@ -51,6 +51,7 @@ make clean        # remove all build artifacts
 20. **h2_client** — HTTP/2 client with pluggable session vtable (multiplexed streams)
 21. **resolver** — Pluggable async DNS resolver vtable (bring-your-own backend)
 22. **sse** — Server-Sent Events helper: line framing over chunked streaming (zero alloc)
+23. **error** — Diagnostic error codes (KlError enum) + kl_strerror()
 
 ## Key Types
 
@@ -112,6 +113,7 @@ make clean        # remove all build artifacts
 | `KlH2ClientHeader` | `h2_client.h` | Request/response header: name, value |
 | `KlH2ClientResponse` | `h2_client.h` | Accumulated stream response: status, headers, body |
 | `KlSse` | `sse.h` | SSE stream handle: write_fn + write_ctx + response (zero alloc) |
+| `KlError` | `error.h` | Diagnostic error enum: 23 codes (alloc, network, DNS, TLS, HTTP, event, thread, pipe) |
 
 ## Git
 
@@ -128,7 +130,7 @@ make clean        # remove all build artifacts
 - Vendor code compiled with `-w` (relaxed warnings, no `-Werror`)
 - Integer overflow guards: check against `SIZE_MAX/2` or `INT_MAX/2` before arithmetic
 - TLS wraps transport — all I/O goes through `conn_read`/`conn_write` helpers when TLS is active
-- Error handling: return `-1` on failure, `0` on success (or positive value)
+- Error handling: return `-1` on failure, `0` on success (or positive value). Stateful structs store `KlError last_error` — set at the point of `return -1`, retrieve with `kl_strerror(err)`.
 - Resource cleanup: every `_init` has a corresponding `_free`
 
 ## Body Reader Pattern

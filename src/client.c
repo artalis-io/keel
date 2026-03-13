@@ -60,11 +60,14 @@ static ssize_t io_read(int fd, KlTls *tls, void *buf, size_t len)
 /* ── Connect with timeout ────────────────────────────────────────── */
 
 static int connect_with_timeout(const char *host, size_t host_len,
-                                 int port, int timeout_ms)
+                                 int port, int timeout_ms,
+                                 KlError *out_err)
 {
     char host_buf[KL_CLIENT_HOSTNAME_MAX];
-    if (host_len >= sizeof(host_buf))
+    if (host_len >= sizeof(host_buf)) {
+        if (out_err) *out_err = KL_ERR_INVALID_ARG;
         return -1;
+    }
     memcpy(host_buf, host, host_len);
     host_buf[host_len] = '\0';
 
@@ -78,11 +81,14 @@ static int connect_with_timeout(const char *host, size_t host_len,
 
     struct addrinfo *res = NULL;
     int rc = getaddrinfo(host_buf, port_str, &hints, &res);
-    if (rc != 0 || !res)
+    if (rc != 0 || !res) {
+        if (out_err) *out_err = KL_ERR_DNS;
         return -1;
+    }
 
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) {
+        if (out_err) *out_err = KL_ERR_SOCKET;
         freeaddrinfo(res);
         return -1;
     }
@@ -96,11 +102,13 @@ static int connect_with_timeout(const char *host, size_t host_len,
 
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
+        if (out_err) *out_err = KL_ERR_SOCKET;
         close(fd);
         freeaddrinfo(res);
         return -1;
     }
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        if (out_err) *out_err = KL_ERR_SOCKET;
         close(fd);
         freeaddrinfo(res);
         return -1;
@@ -110,6 +118,7 @@ static int connect_with_timeout(const char *host, size_t host_len,
     freeaddrinfo(res);
 
     if (rc < 0 && errno != EINPROGRESS) {
+        if (out_err) *out_err = KL_ERR_CONNECT;
         close(fd);
         return -1;
     }
@@ -121,6 +130,7 @@ static int connect_with_timeout(const char *host, size_t host_len,
         pfd.revents = 0;
         rc = poll(&pfd, 1, timeout_ms);
         if (rc <= 0) {
+            if (out_err) *out_err = (rc == 0) ? KL_ERR_TIMEOUT : KL_ERR_CONNECT;
             close(fd);
             return -1;
         }
@@ -129,6 +139,7 @@ static int connect_with_timeout(const char *host, size_t host_len,
         socklen_t errlen = sizeof(err);
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
         if (err != 0) {
+            if (out_err) *out_err = KL_ERR_CONNECT;
             close(fd);
             return -1;
         }
@@ -474,19 +485,26 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
                                                             : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
 
     KlUrl parsed;
-    if (kl_url_parse(url_str, &parsed) != 0)
+    if (kl_url_parse(url_str, &parsed) != 0) {
+        resp->error = KL_ERR_URL;
         return -1;
+    }
 
     KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
-    if (parsed.is_https && !tls_cfg)
+    if (parsed.is_https && !tls_cfg) {
+        resp->error = KL_ERR_URL;
         return -1;
+    }
     if (!parsed.is_https)
         tls_cfg = NULL;
 
+    KlError conn_err = KL_ERR_NONE;
     int fd = connect_with_timeout(parsed.host, parsed.host_len,
-                                   parsed.port, timeout_ms);
-    if (fd < 0)
+                                   parsed.port, timeout_ms, &conn_err);
+    if (fd < 0) {
+        resp->error = conn_err;
         return -1;
+    }
 
     KlTls *tls = NULL;
     int ret = -1;
@@ -494,28 +512,38 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     if (parsed.is_https) {
         tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
                                 timeout_ms, alloc);
-        if (!tls)
+        if (!tls) {
+            resp->error = KL_ERR_TLS_HANDSHAKE;
             goto cleanup;
+        }
     }
 
     /* Request streaming: send headers + chunked body */
     if (stream && stream->body_read) {
         if (send_headers_sync(fd, tls, method, &parsed,
-                                headers, num_headers, timeout_ms) != 0)
+                                headers, num_headers, timeout_ms) != 0) {
+            if (!resp->error) resp->error = KL_ERR_IO;
             goto cleanup;
+        }
         if (send_body_chunked_sync(fd, tls, stream->body_read,
-                                     stream->user_data, timeout_ms) != 0)
+                                     stream->user_data, timeout_ms) != 0) {
+            if (!resp->error) resp->error = KL_ERR_IO;
             goto cleanup;
+        }
     } else {
         if (send_request_sync(fd, tls, method, &parsed,
                                headers, num_headers, body, body_len,
-                               timeout_ms) != 0)
+                               timeout_ms) != 0) {
+            if (!resp->error) resp->error = KL_ERR_IO;
             goto cleanup;
+        }
     }
 
     if (recv_response_sync(fd, tls, resp, max_resp, timeout_ms, alloc,
-                            stream) != 0)
+                            stream) != 0) {
+        if (!resp->error) resp->error = KL_ERR_PARSE;
         goto cleanup;
+    }
 
     ret = 0;
 
@@ -598,7 +626,7 @@ struct KlClient {
     /* Response */
     KlClientResponse   resp;
     KlResponseParser  *parser;
-    int                error;
+    KlError            error;
 
     /* TLS (NULL if plain HTTP) */
     KlTls             *tls;
@@ -794,6 +822,7 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
     c->resolve_req = NULL;
 
     if (error || !result) {
+        c->error = KL_ERR_DNS;
         async_complete_error(c);
         return;
     }
@@ -801,6 +830,7 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
     if (start_connect(c, (const struct sockaddr *)&result->addr,
                        result->addrlen, result->ai_family,
                        result->ai_socktype, result->ai_protocol) < 0) {
+        c->error = KL_ERR_CONNECT;
         async_complete_error(c);
     }
 }
@@ -813,6 +843,7 @@ static void async_handle_connecting(KlClient *c)
     socklen_t errlen = sizeof(err);
     getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
     if (err != 0) {
+        c->error = KL_ERR_CONNECT;
         async_complete_error(c);
         return;
     }
@@ -820,6 +851,7 @@ static void async_handle_connecting(KlClient *c)
     if (c->tls_cfg && c->tls_cfg->factory) {
         c->tls = c->tls_cfg->factory(c->tls_cfg->ctx, c->alloc);
         if (!c->tls) {
+            c->error = KL_ERR_TLS_INIT;
             async_complete_error(c);
             return;
         }
@@ -853,6 +885,7 @@ static void async_handle_tls_handshake(KlClient *c)
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
         return;
     }
+    c->error = KL_ERR_TLS_HANDSHAKE;
     async_complete_error(c);
 }
 
@@ -869,10 +902,12 @@ static void async_handle_sending(KlClient *c)
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
+            c->error = KL_ERR_IO;
             async_complete_error(c);
             return;
         }
         if (w == 0) {
+            c->error = KL_ERR_IO;
             async_complete_error(c);
             return;
         }
@@ -1042,8 +1077,10 @@ static void async_handle_receiving(KlClient *c)
         if (nread == 0) {
             if (c->resp.status > 0)
                 async_complete_success(c);
-            else
+            else {
+                c->error = KL_ERR_PARSE;
                 async_complete_error(c);
+            }
             return;
         }
 
@@ -1055,6 +1092,7 @@ static void async_handle_receiving(KlClient *c)
             return;
         }
         if (pr == KL_PARSE_ERROR) {
+            c->error = KL_ERR_PARSE;
             async_complete_error(c);
             return;
         }
@@ -1117,7 +1155,7 @@ static void async_complete_success(KlClient *c)
     }
 
     c->state = KL_HCLIENT_DONE;
-    c->error = 0;
+    c->error = KL_ERR_NONE;
     if (c->on_done)
         c->on_done(c, c->user_data);
 }
@@ -1149,7 +1187,9 @@ static void async_complete_error(KlClient *c)
     }
 
     c->state = KL_HCLIENT_DONE;
-    c->error = -1;
+    /* error already set by caller — fallback if not set */
+    if (c->error == KL_ERR_NONE)
+        c->error = KL_ERR_IO;
     if (c->on_done)
         c->on_done(c, c->user_data);
 }
@@ -1311,7 +1351,7 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
 
 const KlClientResponse *kl_client_response(const KlClient *client)
 {
-    if (!client || client->error != 0)
+    if (!client || client->error != KL_ERR_NONE)
         return NULL;
     return &client->resp;
 }
@@ -1320,6 +1360,13 @@ int kl_client_error(const KlClient *client)
 {
     if (!client)
         return -1;
+    return client->error != KL_ERR_NONE ? -1 : 0;
+}
+
+KlError kl_client_last_error(const KlClient *client)
+{
+    if (!client)
+        return KL_ERR_INVALID_ARG;
     return client->error;
 }
 
@@ -1348,7 +1395,8 @@ void kl_client_cancel(KlClient *client)
     }
 
     client->state = KL_HCLIENT_DONE;
-    client->error = -1;
+    if (client->error == KL_ERR_NONE)
+        client->error = KL_ERR_IO;
 }
 
 void kl_client_free(KlClient *client)

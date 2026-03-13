@@ -1,6 +1,7 @@
 #ifndef KEEL_H
 #define KEEL_H
 
+#include <keel/error.h>
 #include <keel/allocator.h>
 #include <keel/event.h>
 #include <keel/event_ctx.h>

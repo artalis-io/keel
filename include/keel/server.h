@@ -2,6 +2,7 @@
 #define KEEL_SERVER_H
 
 #include <keel/allocator.h>
+#include <keel/error.h>
 #include <keel/parser.h>
 #include <keel/router.h>
 #include <keel/tls.h>
@@ -72,6 +73,7 @@ typedef struct KlServer {
     _Atomic int draining;
     uint64_t drain_deadline_ms;
     KlAsyncOp *async_ops;       /* active async ops list */
+    KlError last_error;         /* diagnostic: set at point of return -1 */
 } KlServer;
 
 /**

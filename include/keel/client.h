@@ -12,6 +12,7 @@
 #define KEEL_CLIENT_H
 
 #include <keel/allocator.h>
+#include <keel/error.h>
 #include <keel/event_ctx.h>
 #include <keel/parser.h>
 #include <keel/resolver.h>
@@ -44,6 +45,7 @@ typedef struct KlClientResponse {
     KlClientHeader  *headers;
     int              num_headers;
     KlAllocator      alloc;     /**< Allocator used for body/headers (stored by value) */
+    KlError          error;     /**< Diagnostic error code (KL_ERR_NONE on success) */
 } KlClientResponse;
 
 typedef struct {
@@ -215,6 +217,12 @@ const KlClientResponse *kl_client_response(const KlClient *client);
  * @return 0 on success, -1 on error.
  */
 int kl_client_error(const KlClient *client);
+
+/**
+ * @brief Get the specific error code from a completed async request.
+ * @return KL_ERR_NONE on success, specific KlError on failure.
+ */
+KlError kl_client_last_error(const KlClient *client);
 
 /**
  * @brief Cancel an in-flight async request (removes watcher, closes socket).

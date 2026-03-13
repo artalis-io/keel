@@ -56,7 +56,7 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 
 - **`kl_response_body` borrows the pointer** (`response.h:80`). Stack-allocated buffers cause use-after-free. `kl_response_body_copy` exists as safe alternative but unsafe one is the default.
 - **`_server_ctx` is a public field** on `KlRequest` (`request.h:47`) — leaks implementation details, invites misuse.
-- **No error detail from failed operations** — every function returns `-1` with no error code or message.
+- ~~**No error detail from failed operations**~~ — **Fixed**: `KlError` enum with 23 codes, stored per-struct (`KlServer.last_error`, `KlClientResponse.error`, `kl_client_last_error()`), `kl_strerror()` for human-readable messages.
 - **Global signal handler** (`server.c:25`) — only one `KlServer` instance can have signal handlers at a time.
 
 ---
@@ -150,6 +150,10 @@ Replaced hardcoded `AF_INET`/`sockaddr_in`/`inet_pton` with `getaddrinfo` + `AI_
 ### Pluggable DNS resolver
 
 Added `KlResolver` vtable (`resolver.h`) for pluggable async DNS resolution. `KlClientConfig.resolver` field; NULL falls back to sync `getaddrinfo` (backward compatible). Client state machine has `KL_HCLIENT_RESOLVING` state with cancel support. Users can plug in c-ares, a thread-pool wrapper, or a custom implementation.
+
+### Error diagnostics
+
+sqlite3-style per-struct error codes. `KlError` enum with 23 codes covering allocation, network, DNS, TLS, HTTP, event loop, thread pool, and IPC failures. Stored as a field on owning structs (`KlServer.last_error`, `KlEventCtx.last_error`, `KlClientResponse.error`, `KlClient.error`). Set at the point of `return -1`, defaults to `KL_ERR_NONE` (0). `kl_strerror()` returns static human-readable message. `kl_client_last_error()` for opaque async client. All existing function signatures unchanged (non-breaking).
 
 ### Client streaming
 
