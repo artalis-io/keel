@@ -1,6 +1,6 @@
 # Keel Examples
 
-21 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, SSE, and utility APIs.
+22 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, SSE, and utility APIs.
 
 ## Quick Start
 
@@ -88,6 +88,7 @@ websocat ws://localhost:8080/ws
 | Example | Requires | Description | Key APIs |
 |---------|----------|-------------|----------|
 | `client` | `hello_server` on :8080 | Sync + async HTTP client | `kl_client_request`, `kl_client_start`, `KlClientResponse` |
+| `streaming_client` | `hello_server` on :8080 | Response + request body streaming | `kl_client_request_s`, `KlClientStreamCfg`, `KlClientBodyFn`, `KlClientReadFn` |
 | `async_client` | `hello_server` on :8080 | Concurrent async requests (fan-out) | `kl_client_start`, `KlEventCtx` standalone loop |
 | `websocket_client` | `websocket_server` on :8080 | WebSocket echo client | `KlWsClientConn`, `KlWsClientCallbacks` |
 | `h2_client` | — | HTTP/2 client with mock session | `KlH2ClientConn`, `KlH2ClientSession` vtable |
@@ -100,6 +101,7 @@ websocat ws://localhost:8080/ws
 
 # Then run a client:
 ./examples/client
+./examples/streaming_client
 ./examples/async_client
 
 # WebSocket client (needs websocket_server running):

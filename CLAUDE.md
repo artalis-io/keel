@@ -6,8 +6,8 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 408 unit tests
-make examples     # build all 18 example programs (20 with TLS)
+make test         # build and run all 424 unit tests
+make examples     # build all 19 example programs (21 with TLS)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis
@@ -22,7 +22,7 @@ make clean        # remove all build artifacts
 - `parsers/` — Pluggable parser backends (`parser_llhttp.c`, `response_parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
-- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser).
+- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser).
 - `docs/` — Architecture and roadmap documentation.
 
 ## Architecture
@@ -46,7 +46,7 @@ make clean        # remove all build artifacts
 15. **async** — Connection suspension for async operations (uses KlEventCtx)
 16. **thread_pool** — Worker thread pool with pipe-based event loop wakeup
 17. **url** — URL parser (http/https/ws/wss, IPv6, CRLF injection guard)
-18. **client** — HTTP/1.1 client: sync (blocking) + async (event-driven via KlEventCtx)
+18. **client** — HTTP/1.1 client: sync (blocking) + async (event-driven via KlEventCtx), response streaming (push) + request streaming (chunked pull)
 19. **websocket_client** — Async WebSocket client with masked frames (RFC 6455)
 20. **h2_client** — HTTP/2 client with pluggable session vtable (multiplexed streams)
 21. **resolver** — Pluggable async DNS resolver vtable (bring-your-own backend)
@@ -95,6 +95,10 @@ make clean        # remove all build artifacts
 | `KlClientConfig` | `client.h` | Client config: timeout_ms, max_response_size, TLS |
 | `KlClient` | `client.h` | Opaque async client handle |
 | `KlClientDoneFn` | `client.h` | Async completion callback |
+| `KlClientStreamCfg` | `client.h` | Per-request streaming config: response push callbacks + request pull callback |
+| `KlClientBodyFn` | `client.h` | Response body streaming callback (push-based) |
+| `KlClientHeadersFn` | `client.h` | Response headers-complete callback |
+| `KlClientReadFn` | `client.h` | Request body streaming callback (pull-based, like read()) |
 | `KlResolver` | `resolver.h` | Pluggable async DNS resolver vtable: resolve, cancel, destroy |
 | `KlResolveReq` | `resolver.h` | Opaque per-request handle (resolver-owned) |
 | `KlResolveResult` | `resolver.h` | Resolved address: sockaddr_storage, addrlen, ai_family |

@@ -280,14 +280,137 @@ static int send_request_sync(int fd, KlTls *tls,
     return 0;
 }
 
-/* ── Receive + parse response (sync) ─────────────────────────────── */
+/* ── Send headers-only (for chunked body streaming) ──────────────── */
+
+static int send_headers_sync(int fd, KlTls *tls,
+                               const char *method, const KlUrl *url,
+                               const KlClientHeader *headers, int num_headers,
+                               int timeout_ms)
+{
+    if (has_crlf(method, strlen(method)))
+        return -1;
+    if (url->path_len > INT_MAX || url->host_len > INT_MAX)
+        return -1;
+
+    char buf[KL_CLIENT_REQ_BUF_SIZE];
+    int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
+                       method,
+                       (int)url->path_len, url->path,
+                       (int)url->host_len, url->host);
+
+    if (off < 0 || (size_t)off >= sizeof(buf))
+        return -1;
+
+    for (int i = 0; i < num_headers; i++) {
+        if (has_crlf(headers[i].name, strlen(headers[i].name)) ||
+            has_crlf(headers[i].value, strlen(headers[i].value)))
+            return -1;
+        int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
+                         "%s: %s\r\n", headers[i].name, headers[i].value);
+        if (n < 0 || (size_t)(off + n) >= sizeof(buf))
+            return -1;
+        off += n;
+    }
+
+    int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
+                     "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+    if (n < 0 || (size_t)(off + n) >= sizeof(buf))
+        return -1;
+    off += n;
+
+    size_t sent = 0;
+    while (sent < (size_t)off) {
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr <= 0)
+            return -1;
+
+        ssize_t w = io_write(fd, tls, buf + sent, (size_t)off - sent);
+        if (w <= 0)
+            return -1;
+        sent += (size_t)w;
+    }
+
+    return 0;
+}
+
+/* ── Send chunked body from body_read callback (sync) ────────────── */
+
+static int send_all_sync(int fd, KlTls *tls, const char *data, size_t len,
+                           int timeout_ms)
+{
+    size_t sent = 0;
+    while (sent < len) {
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr <= 0)
+            return -1;
+
+        ssize_t w = io_write(fd, tls, data + sent, len - sent);
+        if (w <= 0)
+            return -1;
+        sent += (size_t)w;
+    }
+    return 0;
+}
+
+static int send_body_chunked_sync(int fd, KlTls *tls,
+                                    KlClientReadFn body_read, void *user_data,
+                                    int timeout_ms)
+{
+    char data_buf[KL_CLIENT_CHUNK_BUF_SIZE];
+    char hdr_buf[KL_CLIENT_CHUNK_HDR_SIZE];
+
+    for (;;) {
+        ssize_t nread = body_read(data_buf, sizeof(data_buf), user_data);
+        if (nread < 0)
+            return -1;
+
+        if (nread == 0) {
+            /* Final chunk: 0\r\n\r\n */
+            if (send_all_sync(fd, tls, "0\r\n\r\n",
+                               KL_CLIENT_FINAL_CHUNK_LEN, timeout_ms) != 0)
+                return -1;
+            return 0;
+        }
+
+        /* Chunk header: <hex-len>\r\n */
+        int hdr_len = snprintf(hdr_buf, sizeof(hdr_buf), "%zx\r\n", (size_t)nread);
+        if (hdr_len < 0)
+            return -1;
+
+        if (send_all_sync(fd, tls, hdr_buf, (size_t)hdr_len, timeout_ms) != 0)
+            return -1;
+        if (send_all_sync(fd, tls, data_buf, (size_t)nread, timeout_ms) != 0)
+            return -1;
+        if (send_all_sync(fd, tls, "\r\n", sizeof("\r\n") - 1, timeout_ms) != 0)
+            return -1;
+    }
+}
+
+/* ── Receive + parse response (sync, with optional streaming) ────── */
 
 static int recv_response_sync(int fd, KlTls *tls, KlClientResponse *resp,
                                size_t max_response_size, int timeout_ms,
-                               KlAllocator *alloc)
+                               KlAllocator *alloc,
+                               const KlClientStreamCfg *stream)
 {
-    KlResponseParser *parser = kl_response_parser_llhttp(max_response_size,
-                                                          alloc);
+    KlResponseParser *parser;
+    if (stream && stream->on_body) {
+        parser = kl_response_parser_llhttp_s(max_response_size, alloc,
+                                               stream->on_body,
+                                               stream->on_headers,
+                                               stream->on_complete,
+                                               stream->user_data);
+    } else {
+        parser = kl_response_parser_llhttp(max_response_size, alloc);
+    }
     if (!parser)
         return -1;
 
@@ -329,11 +452,12 @@ static int recv_response_sync(int fd, KlTls *tls, KlClientResponse *resp,
 
 /* ── Sync public API ─────────────────────────────────────────────── */
 
-int kl_client_request(KlAllocator *alloc, const KlClientConfig *cfg,
-                      const char *method, const char *url_str,
-                      const KlClientHeader *headers, int num_headers,
-                      const char *body, size_t body_len,
-                      KlClientResponse *resp)
+int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
+                         const char *method, const char *url_str,
+                         const KlClientHeader *headers, int num_headers,
+                         const char *body, size_t body_len,
+                         const KlClientStreamCfg *stream,
+                         KlClientResponse *resp)
 {
     if (!alloc || !method || !url_str || !resp)
         return -1;
@@ -374,12 +498,23 @@ int kl_client_request(KlAllocator *alloc, const KlClientConfig *cfg,
             goto cleanup;
     }
 
-    if (send_request_sync(fd, tls, method, &parsed,
-                           headers, num_headers, body, body_len,
-                           timeout_ms) != 0)
-        goto cleanup;
+    /* Request streaming: send headers + chunked body */
+    if (stream && stream->body_read) {
+        if (send_headers_sync(fd, tls, method, &parsed,
+                                headers, num_headers, timeout_ms) != 0)
+            goto cleanup;
+        if (send_body_chunked_sync(fd, tls, stream->body_read,
+                                     stream->user_data, timeout_ms) != 0)
+            goto cleanup;
+    } else {
+        if (send_request_sync(fd, tls, method, &parsed,
+                               headers, num_headers, body, body_len,
+                               timeout_ms) != 0)
+            goto cleanup;
+    }
 
-    if (recv_response_sync(fd, tls, resp, max_resp, timeout_ms, alloc) != 0)
+    if (recv_response_sync(fd, tls, resp, max_resp, timeout_ms, alloc,
+                            stream) != 0)
         goto cleanup;
 
     ret = 0;
@@ -395,6 +530,17 @@ cleanup:
         kl_client_response_free(resp);
 
     return ret;
+}
+
+int kl_client_request(KlAllocator *alloc, const KlClientConfig *cfg,
+                      const char *method, const char *url_str,
+                      const KlClientHeader *headers, int num_headers,
+                      const char *body, size_t body_len,
+                      KlClientResponse *resp)
+{
+    return kl_client_request_s(alloc, cfg, method, url_str,
+                                headers, num_headers, body, body_len,
+                                NULL, resp);
 }
 
 void kl_client_response_free(KlClientResponse *resp)
@@ -433,6 +579,7 @@ typedef enum {
     KL_HCLIENT_CONNECTING,
     KL_HCLIENT_TLS_HANDSHAKE,
     KL_HCLIENT_SENDING,
+    KL_HCLIENT_SENDING_STREAM,  /* chunked body from body_read callback */
     KL_HCLIENT_RECEIVING,
     KL_HCLIENT_DONE
 } KlClientState;
@@ -465,6 +612,17 @@ struct KlClient {
     /* Completion callback */
     KlClientDoneFn     on_done;
     void              *user_data;
+
+    /* Request streaming (chunked body send) */
+    KlClientReadFn     body_read;
+    void              *stream_user_data;
+    char               chunk_buf[KL_CLIENT_CHUNK_BUF_SIZE];
+    size_t             chunk_len;    /* bytes in chunk_buf to send */
+    size_t             chunk_sent;   /* bytes of chunk_buf already sent */
+    int                chunk_phase;  /* 0=read, 1=send hdr, 2=send data, 3=send crlf, 4=eof */
+    char               chunk_hdr[KL_CLIENT_CHUNK_HDR_SIZE];
+    size_t             chunk_hdr_len;
+    size_t             chunk_hdr_sent;
 };
 
 /* Forward declarations */
@@ -472,6 +630,7 @@ static void async_on_event(int fd, KlEventMask ready, void *user_data);
 static void async_complete_success(KlClient *c);
 static void async_complete_error(KlClient *c);
 static void async_handle_tls_handshake(KlClient *c);
+static void async_handle_sending_stream(KlClient *c);
 static int  start_connect(KlClient *c, const struct sockaddr *addr,
                            socklen_t addrlen, int family, int socktype,
                            int protocol);
@@ -535,6 +694,52 @@ static char *build_request(KlAllocator *alloc,
         memcpy(req + off, body, body_len);
 
     *out_len = total;
+    return req;
+}
+
+/* ── Build headers-only request into heap buffer (chunked TE) ────── */
+
+static char *build_request_headers_only(KlAllocator *alloc,
+                                          const char *method, const KlUrl *url,
+                                          const KlClientHeader *headers,
+                                          int num_headers, size_t *out_len)
+{
+    if (has_crlf(method, strlen(method)))
+        return NULL;
+    if (url->path_len > INT_MAX || url->host_len > INT_MAX)
+        return NULL;
+
+    char buf[KL_CLIENT_REQ_BUF_SIZE];
+    int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
+                       method,
+                       (int)url->path_len, url->path,
+                       (int)url->host_len, url->host);
+
+    if (off < 0 || (size_t)off >= sizeof(buf))
+        return NULL;
+
+    for (int i = 0; i < num_headers; i++) {
+        if (has_crlf(headers[i].name, strlen(headers[i].name)) ||
+            has_crlf(headers[i].value, strlen(headers[i].value)))
+            return NULL;
+        int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
+                         "%s: %s\r\n", headers[i].name, headers[i].value);
+        if (n < 0 || (size_t)(off + n) >= sizeof(buf))
+            return NULL;
+        off += n;
+    }
+
+    int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
+                     "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+    if (n < 0 || (size_t)(off + n) >= sizeof(buf))
+        return NULL;
+    off += n;
+
+    char *req = kl_malloc(alloc, (size_t)off);
+    if (!req)
+        return NULL;
+    memcpy(req, buf, (size_t)off);
+    *out_len = (size_t)off;
     return req;
 }
 
@@ -674,8 +879,148 @@ static void async_handle_sending(KlClient *c)
         c->request_sent += (size_t)w;
     }
 
+    /* If streaming body, transition to chunk-send state */
+    if (c->body_read) {
+        c->state = KL_HCLIENT_SENDING_STREAM;
+        c->chunk_phase = 0;
+        async_handle_sending_stream(c);
+        return;
+    }
+
     c->state = KL_HCLIENT_RECEIVING;
     kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
+}
+
+/* ── State: SENDING_STREAM (chunked body from body_read) ─────────── */
+
+static void async_handle_sending_stream(KlClient *c)
+{
+    for (;;) {
+        switch (c->chunk_phase) {
+        case 0: {
+            /* Read next chunk from body_read */
+            ssize_t nr = c->body_read(c->chunk_buf, sizeof(c->chunk_buf),
+                                       c->stream_user_data);
+            if (nr < 0) {
+                async_complete_error(c);
+                return;
+            }
+            if (nr == 0) {
+                /* EOF — send final chunk */
+                memcpy(c->chunk_hdr, "0\r\n\r\n", KL_CLIENT_FINAL_CHUNK_LEN);
+                c->chunk_hdr_len = KL_CLIENT_FINAL_CHUNK_LEN;
+                c->chunk_hdr_sent = 0;
+                c->chunk_phase = 4;
+                continue;
+            }
+            c->chunk_len = (size_t)nr;
+            c->chunk_sent = 0;
+            /* Format chunk header */
+            int hl = snprintf(c->chunk_hdr, sizeof(c->chunk_hdr),
+                               "%zx\r\n", (size_t)nr);
+            if (hl < 0) {
+                async_complete_error(c);
+                return;
+            }
+            c->chunk_hdr_len = (size_t)hl;
+            c->chunk_hdr_sent = 0;
+            c->chunk_phase = 1;
+        }
+            /* fall through */
+
+        case 1:
+            /* Send chunk header */
+            while (c->chunk_hdr_sent < c->chunk_hdr_len) {
+                ssize_t w = io_write(c->fd, c->tls,
+                                      c->chunk_hdr + c->chunk_hdr_sent,
+                                      c->chunk_hdr_len - c->chunk_hdr_sent);
+                if (w < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        kl_watcher_rearm(c->ev_ctx, c->fd);
+                        return;
+                    }
+                    async_complete_error(c);
+                    return;
+                }
+                if (w == 0) { async_complete_error(c); return; }
+                c->chunk_hdr_sent += (size_t)w;
+            }
+            c->chunk_phase = 2;
+            /* fall through */
+
+        case 2:
+            /* Send chunk data */
+            while (c->chunk_sent < c->chunk_len) {
+                ssize_t w = io_write(c->fd, c->tls,
+                                      c->chunk_buf + c->chunk_sent,
+                                      c->chunk_len - c->chunk_sent);
+                if (w < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        kl_watcher_rearm(c->ev_ctx, c->fd);
+                        return;
+                    }
+                    async_complete_error(c);
+                    return;
+                }
+                if (w == 0) { async_complete_error(c); return; }
+                c->chunk_sent += (size_t)w;
+            }
+            /* Reuse chunk_hdr for trailing \r\n */
+            c->chunk_hdr[0] = '\r';
+            c->chunk_hdr[1] = '\n';
+            c->chunk_hdr_len = 2;
+            c->chunk_hdr_sent = 0;
+            c->chunk_phase = 3;
+            /* fall through */
+
+        case 3:
+            /* Send trailing \r\n */
+            while (c->chunk_hdr_sent < c->chunk_hdr_len) {
+                ssize_t w = io_write(c->fd, c->tls,
+                                      c->chunk_hdr + c->chunk_hdr_sent,
+                                      c->chunk_hdr_len - c->chunk_hdr_sent);
+                if (w < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        kl_watcher_rearm(c->ev_ctx, c->fd);
+                        return;
+                    }
+                    async_complete_error(c);
+                    return;
+                }
+                if (w == 0) { async_complete_error(c); return; }
+                c->chunk_hdr_sent += (size_t)w;
+            }
+            /* Next chunk */
+            c->chunk_phase = 0;
+            continue;
+
+        case 4:
+            /* Send final chunk (0\r\n\r\n) */
+            while (c->chunk_hdr_sent < c->chunk_hdr_len) {
+                ssize_t w = io_write(c->fd, c->tls,
+                                      c->chunk_hdr + c->chunk_hdr_sent,
+                                      c->chunk_hdr_len - c->chunk_hdr_sent);
+                if (w < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        kl_watcher_rearm(c->ev_ctx, c->fd);
+                        return;
+                    }
+                    async_complete_error(c);
+                    return;
+                }
+                if (w == 0) { async_complete_error(c); return; }
+                c->chunk_hdr_sent += (size_t)w;
+            }
+            /* Done sending — switch to receiving */
+            c->state = KL_HCLIENT_RECEIVING;
+            kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
+            return;
+
+        default:
+            async_complete_error(c);
+            return;
+        }
+    }
 }
 
 /* ── State: RECEIVING ────────────────────────────────────────────── */
@@ -736,6 +1081,9 @@ static void async_on_event(int fd, KlEventMask ready, void *user_data)
         break;
     case KL_HCLIENT_SENDING:
         async_handle_sending(c);
+        break;
+    case KL_HCLIENT_SENDING_STREAM:
+        async_handle_sending_stream(c);
         break;
     case KL_HCLIENT_RECEIVING:
         async_handle_receiving(c);
@@ -808,12 +1156,13 @@ static void async_complete_error(KlClient *c)
 
 /* ── Async public API ────────────────────────────────────────────── */
 
-KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
-                           const KlClientConfig *cfg,
-                           const char *method, const char *url_str,
-                           const KlClientHeader *headers, int num_headers,
-                           const char *body, size_t body_len,
-                           KlClientDoneFn on_done, void *user_data)
+KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
+                              const KlClientConfig *cfg,
+                              const char *method, const char *url_str,
+                              const KlClientHeader *headers, int num_headers,
+                              const char *body, size_t body_len,
+                              const KlClientStreamCfg *stream,
+                              KlClientDoneFn on_done, void *user_data)
 {
     if (!ev_ctx || !alloc || !method || !url_str)
         return NULL;
@@ -835,11 +1184,17 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
     size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
                                                             : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
 
-    /* Build request buffer */
+    /* Build request buffer — headers-only for streaming, full for buffered */
     size_t req_len = 0;
-    char *req_buf = build_request(alloc, method, &parsed,
-                                   headers, num_headers, body, body_len,
-                                   &req_len);
+    char *req_buf;
+    if (stream && stream->body_read) {
+        req_buf = build_request_headers_only(alloc, method, &parsed,
+                                               headers, num_headers, &req_len);
+    } else {
+        req_buf = build_request(alloc, method, &parsed,
+                                 headers, num_headers, body, body_len,
+                                 &req_len);
+    }
     if (!req_buf)
         return NULL;
 
@@ -871,8 +1226,22 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->user_data = user_data;
     memcpy(c->host_buf, host_buf, parsed.host_len + 1);
 
-    /* Create response parser */
-    c->parser = kl_response_parser_llhttp(max_resp, alloc);
+    /* Request streaming */
+    if (stream && stream->body_read) {
+        c->body_read = stream->body_read;
+        c->stream_user_data = stream->user_data;
+    }
+
+    /* Create response parser (streaming or buffered) */
+    if (stream && stream->on_body) {
+        c->parser = kl_response_parser_llhttp_s(max_resp, alloc,
+                                                  stream->on_body,
+                                                  stream->on_headers,
+                                                  stream->on_complete,
+                                                  stream->user_data);
+    } else {
+        c->parser = kl_response_parser_llhttp(max_resp, alloc);
+    }
     if (!c->parser) {
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlClient));
@@ -926,6 +1295,18 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
     freeaddrinfo(res);
 
     return c;
+}
+
+KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
+                           const KlClientConfig *cfg,
+                           const char *method, const char *url_str,
+                           const KlClientHeader *headers, int num_headers,
+                           const char *body, size_t body_len,
+                           KlClientDoneFn on_done, void *user_data)
+{
+    return kl_client_start_s(ev_ctx, alloc, cfg, method, url_str,
+                              headers, num_headers, body, body_len,
+                              NULL, on_done, user_data);
 }
 
 const KlClientResponse *kl_client_response(const KlClient *client)

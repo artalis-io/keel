@@ -49,6 +49,13 @@ typedef struct {
     KlClientHeader  *headers;
     int              num_headers;
     int              headers_cap;
+
+    /* Streaming callbacks (NULL = accumulate as before) */
+    KlClientBodyFn     on_body_cb;
+    KlClientHeadersFn  on_headers_cb;
+    void             (*on_complete_cb)(void *user_data);
+    void              *stream_data;
+    size_t             body_streamed;   /**< total bytes forwarded (for size limit) */
 } RespLlhttpParser;
 
 /* ── String accumulation helpers ─────────────────────────────────── */
@@ -189,6 +196,16 @@ static int resp_on_headers_complete(llhttp_t *parser)
     }
 
     p->resp->status = (int)parser->status_code;
+
+    /* Streaming: invoke on_headers callback */
+    if (p->on_headers_cb) {
+        if (p->on_headers_cb(p->resp->status, p->headers, p->num_headers,
+                              p->stream_data) != 0) {
+            p->error = 1;
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -196,6 +213,17 @@ static int resp_on_body(llhttp_t *parser, const char *at, size_t len)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
 
+    /* Streaming mode: forward chunks to callback */
+    if (p->on_body_cb) {
+        if (p->max_body > 0 && p->body_streamed + len > p->max_body) {
+            p->error = 1;
+            return -1;
+        }
+        p->body_streamed += len;
+        return p->on_body_cb(at, len, p->stream_data);
+    }
+
+    /* Buffer mode: accumulate */
     if (p->max_body > 0 && p->body_len + len > p->max_body) {
         p->error = 1;
         return -1;
@@ -209,6 +237,11 @@ static int resp_on_message_complete(llhttp_t *parser)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
     p->complete = 1;
+
+    /* Streaming: invoke on_complete callback */
+    if (p->on_complete_cb)
+        p->on_complete_cb(p->stream_data);
+
     return HPE_PAUSED;
 }
 
@@ -217,15 +250,27 @@ static int resp_on_message_complete(llhttp_t *parser)
 static KlParseResult transfer_to_response(RespLlhttpParser *p,
                                             KlClientResponse *resp)
 {
-    /* NUL-terminate body and realloc to exact size */
-    if (p->body && p->body_len > 0) {
-        char *exact = kl_realloc(p->alloc, p->body, p->body_cap,
-                                  p->body_len + 1);
-        if (!exact)
-            return KL_PARSE_ERROR;
-        exact[p->body_len] = '\0';
-        p->body = exact;
-        p->body_cap = p->body_len + 1;
+    /* Streaming mode: body was forwarded via callback, skip body transfer */
+    if (p->on_body_cb) {
+        resp->body = NULL;
+        resp->body_len = 0;
+    } else {
+        /* NUL-terminate body and realloc to exact size */
+        if (p->body && p->body_len > 0) {
+            char *exact = kl_realloc(p->alloc, p->body, p->body_cap,
+                                      p->body_len + 1);
+            if (!exact)
+                return KL_PARSE_ERROR;
+            exact[p->body_len] = '\0';
+            p->body = exact;
+        }
+
+        resp->body = p->body;
+        resp->body_len = p->body_len;
+
+        p->body = NULL;
+        p->body_len = 0;
+        p->body_cap = 0;
     }
 
     /* Make exact-sized copy of headers array */
@@ -241,16 +286,11 @@ static KlParseResult transfer_to_response(RespLlhttpParser *p,
     }
 
     /* Transfer ownership to response */
-    resp->body = p->body;
-    resp->body_len = p->body_len;
     resp->headers = p->headers;
     resp->num_headers = p->num_headers;
     resp->alloc = *p->alloc;  /* copy by value — safe after caller returns */
 
     /* Clear parser pointers */
-    p->body = NULL;
-    p->body_len = 0;
-    p->body_cap = 0;
     p->headers = NULL;
     p->num_headers = 0;
     p->headers_cap = 0;
@@ -269,7 +309,12 @@ static KlParseResult resp_parser_parse(KlResponseParser *self,
     p->resp = resp;
 
     enum llhttp_errno err = llhttp_execute(&p->parser, buf, len);
-    *consumed = (size_t)(llhttp_get_error_pos(&p->parser) - buf);
+
+    /* HPE_OK: all data consumed. Pause/error: error_pos marks stop point */
+    if (err == HPE_OK)
+        *consumed = len;
+    else
+        *consumed = (size_t)(llhttp_get_error_pos(&p->parser) - buf);
 
     if (p->error)
         return KL_PARSE_ERROR;
@@ -348,8 +393,12 @@ static void resp_parser_destroy(KlResponseParser *self)
 
 /* ── Factory ─────────────────────────────────────────────────────── */
 
-KlResponseParser *kl_response_parser_llhttp(size_t max_response_size,
-                                             KlAllocator *alloc)
+static KlResponseParser *create_parser(size_t max_response_size,
+                                         KlAllocator *alloc,
+                                         KlClientBodyFn on_body,
+                                         KlClientHeadersFn on_headers,
+                                         void (*on_complete)(void *),
+                                         void *stream_user_data)
 {
     RespLlhttpParser *p = kl_malloc(alloc, sizeof(*p));
     if (!p)
@@ -378,5 +427,28 @@ KlResponseParser *kl_response_parser_llhttp(size_t max_response_size,
 
     p->max_body = max_response_size;
 
+    /* Streaming callbacks */
+    p->on_body_cb     = on_body;
+    p->on_headers_cb  = on_headers;
+    p->on_complete_cb = on_complete;
+    p->stream_data    = stream_user_data;
+
     return &p->base;
+}
+
+KlResponseParser *kl_response_parser_llhttp(size_t max_response_size,
+                                             KlAllocator *alloc)
+{
+    return create_parser(max_response_size, alloc, NULL, NULL, NULL, NULL);
+}
+
+KlResponseParser *kl_response_parser_llhttp_s(size_t max_response_size,
+                                                KlAllocator *alloc,
+                                                KlClientBodyFn on_body,
+                                                KlClientHeadersFn on_headers,
+                                                void (*on_complete)(void *),
+                                                void *stream_user_data)
+{
+    return create_parser(max_response_size, alloc,
+                          on_body, on_headers, on_complete, stream_user_data);
 }

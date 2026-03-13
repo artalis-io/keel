@@ -26,6 +26,9 @@
 #define KL_CLIENT_DEFAULT_TIMEOUT_MS 30000
 #define KL_CLIENT_DEFAULT_MAX_RESP   (4 * 1024 * 1024)
 #define KL_CLIENT_RECV_BUF_SIZE      8192
+#define KL_CLIENT_CHUNK_BUF_SIZE     4096
+#define KL_CLIENT_CHUNK_HDR_SIZE     16    /* fits "FFFFFFFFFFFFFFFF\r\n" */
+#define KL_CLIENT_FINAL_CHUNK_LEN    5     /* "0\r\n\r\n" */
 
 /* ── Types ────────────────────────────────────────────────────────── */
 
@@ -49,6 +52,54 @@ typedef struct {
     KlTlsConfig     *tls;              /**< TLS config for HTTPS (NULL = no HTTPS) */
     KlResolver      *resolver;          /**< Async DNS resolver (NULL = sync getaddrinfo) */
 } KlClientConfig;
+
+/* ── Streaming types ──────────────────────────────────────────────── */
+
+/**
+ * @brief Response body streaming callback (push-based).
+ * @param data  Body chunk data.
+ * @param len   Chunk length.
+ * @param user_data  User context from KlClientStreamCfg.
+ * @return 0 to continue, -1 to abort.
+ */
+typedef int (*KlClientBodyFn)(const char *data, size_t len, void *user_data);
+
+/**
+ * @brief Called when response headers are complete.
+ * @return 0 to continue, -1 to abort.
+ */
+typedef int (*KlClientHeadersFn)(int status, const KlClientHeader *headers,
+                                  int num_headers, void *user_data);
+
+/**
+ * @brief Request body streaming callback (pull-based, like read()).
+ * @param buf      Buffer to fill.
+ * @param buf_len  Buffer capacity.
+ * @param user_data  User context from KlClientStreamCfg.
+ * @return >0 bytes produced, 0 = EOF, -1 = error.
+ */
+typedef ssize_t (*KlClientReadFn)(char *buf, size_t buf_len, void *user_data);
+
+/**
+ * @brief Per-request streaming configuration.
+ *
+ * When stream is non-NULL and on_body is set, response body chunks are
+ * pushed via on_body instead of being accumulated into KlClientResponse.body.
+ *
+ * When body_read is set, the request body is pulled via body_read and sent
+ * with Transfer-Encoding: chunked (body/body_len parameters are ignored).
+ */
+typedef struct {
+    /* Response streaming (NULL = buffer as before) */
+    KlClientBodyFn     on_body;
+    KlClientHeadersFn  on_headers;    /**< NULL = skip */
+    void             (*on_complete)(void *user_data);  /**< NULL = skip */
+
+    /* Request streaming (NULL = use body/body_len) */
+    KlClientReadFn     body_read;
+
+    void              *user_data;     /**< shared across all callbacks */
+} KlClientStreamCfg;
 
 /* ── Sync API ─────────────────────────────────────────────────────── */
 
@@ -74,6 +125,21 @@ int kl_client_request(KlAllocator *alloc, const KlClientConfig *cfg,
                       const KlClientHeader *headers, int num_headers,
                       const char *body, size_t body_len,
                       KlClientResponse *resp);
+
+/**
+ * @brief Perform a synchronous (blocking) HTTP request with streaming.
+ *
+ * Same as kl_client_request but supports response and request body streaming.
+ * When stream is NULL, behaves identically to kl_client_request.
+ *
+ * @param stream  Streaming config (NULL = buffer mode, same as kl_client_request).
+ */
+int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
+                         const char *method, const char *url,
+                         const KlClientHeader *headers, int num_headers,
+                         const char *body, size_t body_len,
+                         const KlClientStreamCfg *stream,
+                         KlClientResponse *resp);
 
 /**
  * @brief Free response resources (body, headers).
@@ -123,6 +189,22 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
                            KlClientDoneFn on_done, void *user_data);
 
 /**
+ * @brief Start an asynchronous HTTP request with streaming.
+ *
+ * Same as kl_client_start but supports response and request body streaming.
+ * When stream is NULL, behaves identically to kl_client_start.
+ *
+ * @param stream  Streaming config (NULL = buffer mode, same as kl_client_start).
+ */
+KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
+                              const KlClientConfig *cfg,
+                              const char *method, const char *url,
+                              const KlClientHeader *headers, int num_headers,
+                              const char *body, size_t body_len,
+                              const KlClientStreamCfg *stream,
+                              KlClientDoneFn on_done, void *user_data);
+
+/**
  * @brief Get the response from a completed async request.
  * @return Response pointer (valid until kl_client_free), or NULL if error.
  */
@@ -145,5 +227,29 @@ void kl_client_cancel(KlClient *client);
  * Safe to call after kl_client_cancel() or after completion callback.
  */
 void kl_client_free(KlClient *client);
+
+/* ── Streaming parser factory ─────────────────────────────────────── */
+
+/**
+ * @brief Create a streaming-capable llhttp response parser.
+ *
+ * When on_body is non-NULL, body chunks are forwarded to the callback
+ * instead of being accumulated. Headers/status are still populated in
+ * KlClientResponse. Body is NULL and body_len is 0 in the response.
+ *
+ * @param max_response_size  Body size limit (still enforced in streaming mode).
+ * @param alloc              Allocator for parser state.
+ * @param on_body            Body chunk callback (NULL = accumulate).
+ * @param on_headers         Headers-complete callback (NULL = skip).
+ * @param on_complete        Body-complete callback (NULL = skip).
+ * @param stream_user_data   User data passed to all callbacks.
+ * @return Parser instance, or NULL on allocation failure.
+ */
+KlResponseParser *kl_response_parser_llhttp_s(size_t max_response_size,
+                                                KlAllocator *alloc,
+                                                KlClientBodyFn on_body,
+                                                KlClientHeadersFn on_headers,
+                                                void (*on_complete)(void *),
+                                                void *stream_user_data);
 
 #endif /* KEEL_CLIENT_H */

@@ -11,7 +11,7 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 - **Architecture**: 22 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
-- **Testing**: 24 suites, 428+ tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
+- **Testing**: 25 suites, 444+ tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
 - **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
 
 ### Correctness Issues
@@ -151,43 +151,13 @@ Replaced hardcoded `AF_INET`/`sockaddr_in`/`inet_pton` with `getaddrinfo` + `AI_
 
 Added `KlResolver` vtable (`resolver.h`) for pluggable async DNS resolution. `KlClientConfig.resolver` field; NULL falls back to sync `getaddrinfo` (backward compatible). Client state machine has `KL_HCLIENT_RESOLVING` state with cancel support. Users can plug in c-ares, a thread-pool wrapper, or a custom implementation.
 
+### Client streaming
+
+Response streaming (push-based) and request streaming (pull-based) for both sync and async HTTP/1.1 clients. `KlClientStreamCfg` provides `on_body`/`on_headers`/`on_complete` callbacks for response body delivery as chunks arrive (instead of buffering), and `body_read` callback for chunked request body production. New `_s` API variants (`kl_client_request_s`, `kl_client_start_s`); original APIs are thin wrappers. Streaming parser factory (`kl_response_parser_llhttp_s`) routes decoded body chunks to callbacks. Async request streaming uses a 5-phase non-blocking state machine (`KL_HCLIENT_SENDING_STREAM`).
+
 ---
 
 ## Near-Term
-
-### Client streaming responses
-
-**Priority: High** | **Effort: Moderate**
-
-The async HTTP/1.1 client buffers the entire response body before invoking `on_done`. For SSE, streaming APIs, line-delimited JSON, and large downloads, this is a non-starter.
-
-Add an optional `KlClientChunkFn on_chunk` callback to `kl_client_start()`. When set, the client enters a `RECEIVING_STREAM` state that delivers body chunks to the callback as they arrive instead of accumulating into `KlClientResponse.body`. The response parser already handles chunked TE — the change is routing decoded chunks to the callback instead of `accum_append`.
-
-The same gap exists in the H2 client: `h2c_on_data` accumulates into `KlH2ClientResponse.body`. Adding a per-stream `on_chunk` callback mirrors the HTTP/1.1 fix.
-
-```c
-typedef void (*KlClientChunkFn)(const char *data, size_t len, void *user_data);
-
-/* Async client with streaming */
-kl_client_start(&ev, &alloc, &cfg, "GET", url,
-                NULL, 0, NULL, 0,
-                on_done, on_chunk, user_data);
-```
-
-### Client request streaming
-
-**Priority: High** | **Effort: Moderate**
-
-Both sync and async clients take `const char *body, size_t body_len` — no way to stream a request body. For large file uploads or generated payloads, the entire body must be buffered in memory first.
-
-Add a pluggable body writer callback (mirrors the server-side `KlBodyReader` pattern):
-
-```c
-typedef int (*KlClientBodyFn)(void *ctx, char *buf, size_t buf_size);
-/* Returns bytes written to buf, 0 on EOF, -1 on error */
-```
-
-The client sends `Transfer-Encoding: chunked` when using a body callback (Content-Length unknown). For known-length streams, accept an optional `content_length` parameter.
 
 ### Timer API
 
