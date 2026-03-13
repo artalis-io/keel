@@ -83,7 +83,7 @@ static void handle_data(KlRequest *req, KlResponse *res, void *ctx) {
     }
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body(res, br->data, br->len);
+    kl_response_body_borrow(res, br->data, br->len);
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */

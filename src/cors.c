@@ -131,7 +131,7 @@ int kl_cors_middleware(KlRequest *req, KlResponse *res, void *user_data) {
         }
 
         kl_response_status(res, 204);
-        kl_response_body(res, "", 0);
+        kl_response_body_borrow(res, "", 0);
         return 1;  /* short-circuit — preflight handled */
     }
 

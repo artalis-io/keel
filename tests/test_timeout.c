@@ -10,7 +10,6 @@
 
 /* Short timeout for fast tests */
 #define TEST_TIMEOUT_MS 200
-#define TEST_PORT       18090
 
 static void handle_ok(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -61,9 +60,14 @@ static ssize_t read_with_timeout(int fd, char *buf, size_t buflen, int ms) {
     return read(fd, buf, buflen);
 }
 
+/* Wait for server to bind (max 2s) */
+static void wait_for_bind(KlServer *s) {
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+}
+
 UTEST(timeout, idle_connection) {
     KlConfig cfg = {
-        .port = TEST_PORT,
+        .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
     ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
@@ -71,10 +75,11 @@ UTEST(timeout, idle_connection) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000); /* wait for server to start */
+    wait_for_bind(&timeout_server);
+    int port = timeout_server.bound_port;
 
     /* Connect but send nothing */
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     /* Wait for 408 */
@@ -92,7 +97,7 @@ UTEST(timeout, idle_connection) {
 
 UTEST(timeout, partial_headers) {
     KlConfig cfg = {
-        .port = TEST_PORT + 1,
+        .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
     ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
@@ -100,9 +105,10 @@ UTEST(timeout, partial_headers) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&timeout_server);
+    int port = timeout_server.bound_port;
 
-    int fd = connect_to(TEST_PORT + 1);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send partial request line, then stall */
@@ -123,7 +129,7 @@ UTEST(timeout, partial_headers) {
 
 UTEST(timeout, partial_body) {
     KlConfig cfg = {
-        .port = TEST_PORT + 2,
+        .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
     ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
@@ -132,9 +138,10 @@ UTEST(timeout, partial_body) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&timeout_server);
+    int port = timeout_server.bound_port;
 
-    int fd = connect_to(TEST_PORT + 2);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send headers + partial body, then stall */
@@ -160,7 +167,7 @@ UTEST(timeout, partial_body) {
 
 UTEST(timeout, active_not_affected) {
     KlConfig cfg = {
-        .port = TEST_PORT + 3,
+        .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
     ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
@@ -168,9 +175,10 @@ UTEST(timeout, active_not_affected) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&timeout_server);
+    int port = timeout_server.bound_port;
 
-    int fd = connect_to(TEST_PORT + 3);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send complete request promptly */
@@ -204,7 +212,7 @@ UTEST(timeout, active_not_affected) {
 
 UTEST(timeout, body_timeout) {
     KlConfig cfg = {
-        .port = TEST_PORT + 4,
+        .port = 0,
         .read_timeout_ms = 2000,     /* generous header timeout */
         .body_timeout_ms = TEST_TIMEOUT_MS, /* tight body timeout */
     };
@@ -214,9 +222,10 @@ UTEST(timeout, body_timeout) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&timeout_server);
+    int port = timeout_server.bound_port;
 
-    int fd = connect_to(TEST_PORT + 4);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send headers with large content-length, then trickle body */
@@ -243,7 +252,7 @@ UTEST(timeout, body_timeout) {
 
 UTEST(timeout, fast_large_body) {
     KlConfig cfg = {
-        .port = TEST_PORT + 5,
+        .port = 0,
         .read_timeout_ms = 2000,
     };
     ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
@@ -252,9 +261,10 @@ UTEST(timeout, fast_large_body) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&timeout_server);
+    int port = timeout_server.bound_port;
 
-    int fd = connect_to(TEST_PORT + 5);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     /* Build a request with a 4KB body sent all at once */
@@ -292,7 +302,7 @@ UTEST(timeout, fast_large_body) {
 
 UTEST(timeout, keepalive_idle_timeout) {
     KlConfig cfg = {
-        .port = TEST_PORT + 6,
+        .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
     ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
@@ -300,9 +310,10 @@ UTEST(timeout, keepalive_idle_timeout) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&timeout_server);
+    int port = timeout_server.bound_port;
 
-    int fd = connect_to(TEST_PORT + 6);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send first request (keepalive) */
@@ -338,7 +349,7 @@ UTEST(timeout, keepalive_idle_timeout) {
 
 UTEST(timeout, concurrent_timeouts) {
     KlConfig cfg = {
-        .port = TEST_PORT + 7,
+        .port = 0,
         .read_timeout_ms = TEST_TIMEOUT_MS,
     };
     ASSERT_EQ(kl_server_init(&timeout_server, &cfg), 0);
@@ -346,11 +357,12 @@ UTEST(timeout, concurrent_timeouts) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&timeout_server);
+    int port = timeout_server.bound_port;
 
     /* Connect two idle clients */
-    int fd1 = connect_to(TEST_PORT + 7);
-    int fd2 = connect_to(TEST_PORT + 7);
+    int fd1 = connect_to(port);
+    int fd2 = connect_to(port);
     ASSERT_TRUE(fd1 >= 0);
     ASSERT_TRUE(fd2 >= 0);
 

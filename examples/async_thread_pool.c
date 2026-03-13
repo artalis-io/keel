@@ -78,7 +78,7 @@ static void handle_work(KlRequest *req, KlResponse *res, void *user_data,
                          int work_ms) {
     (void)res;
     AppCtx *app = user_data;
-    KlConn *conn = req->_server_ctx;
+    KlConn *conn = kl_request_conn(req);
 
     WorkCtx *ctx = malloc(sizeof(*ctx));
     if (!ctx) {

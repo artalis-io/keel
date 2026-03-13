@@ -114,14 +114,17 @@ static ssize_t read_one_response(int fd, char *buf, size_t buflen, int timeout_m
     return total;
 }
 
-/* ── Pool exhaustion ────────────────────────────────────────────────── */
+/* Wait for server to bind (max 2s) */
+static void wait_for_bind(KlServer *s) {
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+}
 
-#define POOL_PORT 18100
+/* ── Pool exhaustion ────────────────────────────────────────────────── */
 
 UTEST(server_integration, pool_exhaustion_rejects) {
     KlServer srv;
     KlConfig cfg = {
-        .port = POOL_PORT,
+        .port = 0,
         .max_connections = 2,
     };
     ASSERT_EQ(0, kl_server_init(&srv, &cfg));
@@ -129,11 +132,13 @@ UTEST(server_integration, pool_exhaustion_rejects) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
-    usleep(100000);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    int port = srv.bound_port;
 
     /* Fill pool (2 connections) */
-    int fd1 = connect_to(POOL_PORT);
-    int fd2 = connect_to(POOL_PORT);
+    int fd1 = connect_to(port);
+    int fd2 = connect_to(port);
     ASSERT_TRUE(fd1 >= 0);
     ASSERT_TRUE(fd2 >= 0);
 
@@ -143,7 +148,7 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     /* Third connect — pool full, server paused listening.
      * The OS may queue the connection in the backlog, but it won't
      * get a response because no slot is available. */
-    int fd3 = connect_nb(POOL_PORT);
+    int fd3 = connect_nb(port);
 
     /* Try to get a response on fd3 — should timeout */
     if (fd3 >= 0) {
@@ -161,7 +166,7 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     usleep(200000);
 
     /* Now a new connection should succeed */
-    int fd4 = connect_to(POOL_PORT);
+    int fd4 = connect_to(port);
     ASSERT_TRUE(fd4 >= 0);
 
     const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -180,12 +185,10 @@ UTEST(server_integration, pool_exhaustion_rejects) {
 
 /* ── Backpressure recovery ──────────────────────────────────────────── */
 
-#define BP_PORT 18101
-
 UTEST(server_integration, backpressure_recovery) {
     KlServer srv;
     KlConfig cfg = {
-        .port = BP_PORT,
+        .port = 0,
         .max_connections = 2,
     };
     ASSERT_EQ(0, kl_server_init(&srv, &cfg));
@@ -193,11 +196,13 @@ UTEST(server_integration, backpressure_recovery) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
-    usleep(100000);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    int port = srv.bound_port;
 
     /* Fill pool */
-    int fd1 = connect_to(BP_PORT);
-    int fd2 = connect_to(BP_PORT);
+    int fd1 = connect_to(port);
+    int fd2 = connect_to(port);
     ASSERT_TRUE(fd1 >= 0);
     ASSERT_TRUE(fd2 >= 0);
     usleep(50000);
@@ -207,7 +212,7 @@ UTEST(server_integration, backpressure_recovery) {
     usleep(200000);
 
     /* New connection should succeed */
-    int fd3 = connect_to(BP_PORT);
+    int fd3 = connect_to(port);
     ASSERT_TRUE(fd3 >= 0);
 
     const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -221,8 +226,8 @@ UTEST(server_integration, backpressure_recovery) {
     close(fd3);
     usleep(200000);
 
-    int fd4 = connect_to(BP_PORT);
-    int fd5 = connect_to(BP_PORT);
+    int fd4 = connect_to(port);
+    int fd5 = connect_to(port);
     ASSERT_TRUE(fd4 >= 0);
     ASSERT_TRUE(fd5 >= 0);
 
@@ -241,19 +246,19 @@ UTEST(server_integration, backpressure_recovery) {
 
 /* ── Keep-alive pipeline ────────────────────────────────────────────── */
 
-#define KA_PORT 18102
-
 UTEST(server_integration, keep_alive_pipeline) {
     KlServer srv;
-    KlConfig cfg = { .port = KA_PORT };
+    KlConfig cfg = { .port = 0 };
     ASSERT_EQ(0, kl_server_init(&srv, &cfg));
     kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
-    usleep(100000);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    int port = srv.bound_port;
 
-    int fd = connect_to(KA_PORT);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send 3 sequential requests on one connection */
@@ -284,13 +289,11 @@ UTEST(server_integration, keep_alive_pipeline) {
 
 /* ── Drain completes in-flight ──────────────────────────────────────── */
 
-#define DRAIN_PORT 18103
-
 UTEST(server_integration, drain_completes_inflight) {
     static int delay_ms = 200;
     KlServer srv;
     KlConfig cfg = {
-        .port = DRAIN_PORT,
+        .port = 0,
         .drain_timeout_ms = 2000,
     };
     ASSERT_EQ(0, kl_server_init(&srv, &cfg));
@@ -298,10 +301,12 @@ UTEST(server_integration, drain_completes_inflight) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
-    usleep(100000);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    int port = srv.bound_port;
 
     /* Start a request to the slow handler */
-    int fd = connect_to(DRAIN_PORT);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -325,12 +330,10 @@ UTEST(server_integration, drain_completes_inflight) {
 
 /* ── Drain deadline forces exit with idle connections ────────────────── */
 
-#define DRAIN_DL_PORT 18104
-
 UTEST(server_integration, drain_deadline_forces_exit) {
     KlServer srv;
     KlConfig cfg = {
-        .port = DRAIN_DL_PORT,
+        .port = 0,
         .drain_timeout_ms = 200,
         .read_timeout_ms = 30000,
     };
@@ -339,11 +342,13 @@ UTEST(server_integration, drain_deadline_forces_exit) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
-    usleep(100000);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    int port = srv.bound_port;
 
     /* Open connections but don't send complete requests — they stay in READING */
-    int fd1 = connect_to(DRAIN_DL_PORT);
-    int fd2 = connect_to(DRAIN_DL_PORT);
+    int fd1 = connect_to(port);
+    int fd2 = connect_to(port);
     ASSERT_TRUE(fd1 >= 0);
     ASSERT_TRUE(fd2 >= 0);
 
@@ -369,21 +374,21 @@ UTEST(server_integration, drain_deadline_forces_exit) {
 
 /* ── Concurrent requests ────────────────────────────────────────────── */
 
-#define CONC_PORT 18105
-
 UTEST(server_integration, concurrent_requests) {
     KlServer srv;
-    KlConfig cfg = { .port = CONC_PORT };
+    KlConfig cfg = { .port = 0 };
     ASSERT_EQ(0, kl_server_init(&srv, &cfg));
     kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
-    usleep(100000);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    int port = srv.bound_port;
 
     int fds[4];
     for (int i = 0; i < 4; i++) {
-        fds[i] = connect_to(CONC_PORT);
+        fds[i] = connect_to(port);
         ASSERT_TRUE(fds[i] >= 0);
     }
 

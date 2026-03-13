@@ -6,7 +6,7 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 493 unit tests
+make test         # build and run all 496 unit tests
 make examples     # build all 20 example programs (22 with TLS)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
@@ -260,7 +260,7 @@ Three callbacks per op (separate because deadline semantics differ per use case)
 ```c
 void handler(KlRequest *req, KlResponse *res, void *user_data) {
     KlServer *srv = user_data;
-    KlConn *conn = req->_server_ctx;
+    KlConn *conn = kl_request_conn(req);
 
     /* Set up async op (caller-owned, must remain valid until completion) */
     MyCtx *ctx = ...;

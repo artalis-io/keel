@@ -111,7 +111,7 @@ void handle_post(KlRequest *req, KlResponse *res, void *ctx) {
     }
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body(res, br->data, br->len);
+    kl_response_body_borrow(res, br->data, br->len);
 }
 
 /* Register with size limit (1 MB) */
@@ -281,7 +281,7 @@ Server handlers can be **sync** (return immediately with a response set) or **as
 ```c
 void handle_async(KlRequest *req, KlResponse *res, void *user_data) {
     KlServer *srv = user_data;
-    KlConn *conn = req->_server_ctx;
+    KlConn *conn = kl_request_conn(req);
 
     /* Allocate context for the async operation */
     MyCtx *ctx = ...;

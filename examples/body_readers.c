@@ -44,7 +44,7 @@ static void handle_index(KlRequest *req, KlResponse *res, void *ctx) {
         "</form>";
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "text/html");
-    kl_response_body(res, html, strlen(html));
+    kl_response_body_borrow(res, html, strlen(html));
 }
 
 /* POST /echo — buffer reader echoes body back */
@@ -57,7 +57,7 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
     }
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body(res, br->data, br->len);
+    kl_response_body_borrow(res, br->data, br->len);
 }
 
 /* POST /upload — multipart reader parses form-data */
@@ -97,7 +97,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
 
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body(res, body, (size_t)off);
+    kl_response_body_borrow(res, body, (size_t)off);
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */

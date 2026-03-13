@@ -45,7 +45,7 @@ static void handle_create_user(KlRequest *req, KlResponse *res, void *ctx) {
     /* Echo back the body as "created" */
     kl_response_status(res, 201);
     kl_response_header(res, "Content-Type", "application/json");
-    kl_response_body(res, br->data, br->len);
+    kl_response_body_borrow(res, br->data, br->len);
 }
 
 int main(void) {

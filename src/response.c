@@ -206,7 +206,7 @@ int kl_response_header(KlResponse *res, const char *name, const char *value) {
     return 0;
 }
 
-void kl_response_body(KlResponse *res, const char *data, size_t len) {
+void kl_response_body_borrow(KlResponse *res, const char *data, size_t len) {
     if (len > 0 && !data) return;
     res->body_mode = KL_BODY_BUFFER;
     res->body = data;
@@ -252,7 +252,7 @@ int kl_response_json(KlResponse *res, int code, const char *json, size_t len) {
     kl_response_status(res, code);
     if (kl_response_header(res, "Content-Type", "application/json") < 0)
         return -1;
-    kl_response_body(res, json, len);
+    kl_response_body_borrow(res, json, len);
     return 0;
 }
 
@@ -261,7 +261,7 @@ int kl_response_error(KlResponse *res, int code, const char *message) {
     if (kl_response_header(res, "Content-Type", "text/plain") < 0)
         return -1;
     if (!message) message = "";
-    kl_response_body(res, message, strlen(message));
+    kl_response_body_borrow(res, message, strlen(message));
     return 0;
 }
 

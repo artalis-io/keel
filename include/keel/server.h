@@ -50,7 +50,8 @@ typedef struct KlConfig {
     void *access_log_data;      /* passed as user_data to access_log */
     KlLogFn log_fn;             /* default: NULL (fprintf stderr) */
     void   *log_user_data;
-    int install_signal_handlers; /* install SIGTERM/SIGINT handlers */
+    int install_signal_handlers; /* install SIGTERM/SIGINT handlers (single instance only —
+                                  * only the last server to call kl_server_run() receives signals) */
     int drain_timeout_ms;        /* graceful shutdown drain timeout (0 = immediate) */
     KlTlsConfig *tls;           /* TLS config — NULL = plaintext (default) */
     KlH2ServerConfig *h2;             /* HTTP/2 config — NULL = disabled (default) */
@@ -68,6 +69,7 @@ typedef struct KlServer {
     KlConnPool pool;
     KlEventCtx ev;              /* event loop + watcher list */
     int listen_fd;
+    int bound_port;             /* actual port after bind (useful with port=0) */
     int listen_paused;          /* 1 = listen fd removed from event loop (pool full) */
     _Atomic int running;
     _Atomic int draining;

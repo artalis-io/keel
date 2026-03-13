@@ -14,7 +14,10 @@
  * from inside handlers.
  * ═══════════════════════════════════════════════════════════════════ */
 
-#define TEST_PORT 18200
+/* Wait for server to bind (max 2s) */
+static void wait_for_bind(KlServer *s) {
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+}
 
 /* Shared state between handler and test */
 static struct {
@@ -160,15 +163,16 @@ static int send_and_wait(int port, const char *raw_req) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(request, header_case_insensitive) {
-    KlConfig cfg = {.port = TEST_PORT};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT,
+    send_and_wait(port,
         "GET /hdr HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -184,15 +188,16 @@ UTEST(request, header_case_insensitive) {
 }
 
 UTEST(request, header_missing_returns_null) {
-    KlConfig cfg = {.port = TEST_PORT + 1};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 1,
+    send_and_wait(port,
         "GET /hdr HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -206,15 +211,16 @@ UTEST(request, header_missing_returns_null) {
 }
 
 UTEST(request, header_with_len) {
-    KlConfig cfg = {.port = TEST_PORT + 2};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 2,
+    send_and_wait(port,
         "GET /hdr HTTP/1.1\r\n"
         "Host: my-server.local\r\n"
         "Connection: close\r\n"
@@ -229,15 +235,16 @@ UTEST(request, header_with_len) {
 }
 
 UTEST(request, header_empty_value) {
-    KlConfig cfg = {.port = TEST_PORT + 3};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 3,
+    send_and_wait(port,
         "GET /hdr HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "X-Empty: \r\n"
@@ -257,16 +264,17 @@ UTEST(request, header_empty_value) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(request, param_basic) {
-    KlConfig cfg = {.port = TEST_PORT + 4};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/items/:id", handle_single_param,
                     NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 4,
+    send_and_wait(port,
         "GET /items/42 HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -282,16 +290,17 @@ UTEST(request, param_basic) {
 }
 
 UTEST(request, param_multi) {
-    KlConfig cfg = {.port = TEST_PORT + 5};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/users/:uid/posts/:pid",
                     handle_params, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 5,
+    send_and_wait(port,
         "GET /users/7/posts/99 HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -311,16 +320,17 @@ UTEST(request, param_multi) {
 }
 
 UTEST(request, param_missing) {
-    KlConfig cfg = {.port = TEST_PORT + 6};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/users/:uid/posts/:pid",
                     handle_params, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 6,
+    send_and_wait(port,
         "GET /users/7/posts/99 HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -339,15 +349,16 @@ UTEST(request, param_missing) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(request, query_basic) {
-    KlConfig cfg = {.port = TEST_PORT + 7};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 7,
+    send_and_wait(port,
         "GET /q?foo=bar HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -363,15 +374,16 @@ UTEST(request, query_basic) {
 }
 
 UTEST(request, query_empty) {
-    KlConfig cfg = {.port = TEST_PORT + 8};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 8,
+    send_and_wait(port,
         "GET /q? HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -386,15 +398,16 @@ UTEST(request, query_empty) {
 }
 
 UTEST(request, query_absent) {
-    KlConfig cfg = {.port = TEST_PORT + 9};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 9,
+    send_and_wait(port,
         "GET /q HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -413,15 +426,16 @@ UTEST(request, query_absent) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(request, header_null_terminated) {
-    KlConfig cfg = {.port = TEST_PORT + 10};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 10,
+    send_and_wait(port,
         "GET /nultest?a=1 HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -436,15 +450,16 @@ UTEST(request, header_null_terminated) {
 }
 
 UTEST(request, method_null_terminated) {
-    KlConfig cfg = {.port = TEST_PORT + 11};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 11,
+    send_and_wait(port,
         "GET /nultest?a=1 HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -459,15 +474,16 @@ UTEST(request, method_null_terminated) {
 }
 
 UTEST(request, path_null_terminated) {
-    KlConfig cfg = {.port = TEST_PORT + 12};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 12,
+    send_and_wait(port,
         "GET /nultest?a=1 HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"
@@ -482,15 +498,16 @@ UTEST(request, path_null_terminated) {
 }
 
 UTEST(request, query_null_terminated) {
-    KlConfig cfg = {.port = TEST_PORT + 13};
+    KlConfig cfg = {.port = 0};
     ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
     kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&req_server);
+    int port = req_server.bound_port;
 
-    send_and_wait(TEST_PORT + 13,
+    send_and_wait(port,
         "GET /nultest?a=1 HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: close\r\n"

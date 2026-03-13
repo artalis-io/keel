@@ -10,7 +10,7 @@
 #include <pthread.h>
 #include <signal.h>
 
-#define TEST_PORT 18080
+static int test_port;  /* set by start_server / individual tests */
 
 static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -40,9 +40,9 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0) {
-        kl_response_body(res, br->data, br->len);
+        kl_response_body_borrow(res, br->data, br->len);
     } else {
-        kl_response_body(res, "no body", 7);
+        kl_response_body_borrow(res, "no body", 7);
     }
 }
 
@@ -66,7 +66,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
 
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body(res, body, (size_t)off);
+    kl_response_body_borrow(res, body, (size_t)off);
 }
 
 static void handle_no_reader(KlRequest *req, KlResponse *res, void *ctx) {
@@ -115,8 +115,13 @@ static ssize_t read_response(int fd, char *buf, size_t buflen) {
 
 static pthread_t server_tid;
 
+/* Wait for server to bind (max 2s) */
+static void wait_for_bind(KlServer *s) {
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+}
+
 static void start_server(void) {
-    KlConfig cfg = {.port = TEST_PORT, .max_body_size = 4096};
+    KlConfig cfg = {.port = 0, .max_body_size = 4096};
     kl_server_init(&test_server, &cfg);
     kl_server_route(&test_server, "GET", "/hello", handle_hello, NULL, NULL);
     kl_server_route(&test_server, "POST", "/echo", handle_echo,
@@ -129,7 +134,8 @@ static void start_server(void) {
     kl_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
                     NULL, NULL);
     pthread_create(&server_tid, NULL, server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&test_server);
+    test_port = test_server.bound_port;
 }
 
 static void stop_server(void) {
@@ -143,7 +149,7 @@ static void stop_server(void) {
 UTEST(integration, hello_world) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /hello HTTP/1.1\r\n"
@@ -165,7 +171,7 @@ UTEST(integration, hello_world) {
 UTEST(integration, post_large_body) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* Build a body > 8KB to exercise the READING_BODY sliding window */
@@ -205,7 +211,7 @@ UTEST(integration, post_large_body) {
 UTEST(integration, post_413) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send POST exceeding 64KB limit */
@@ -234,7 +240,7 @@ UTEST(integration, post_413) {
 UTEST(integration, keepalive_post) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* First POST on keep-alive connection */
@@ -291,7 +297,7 @@ UTEST(integration, keepalive_post) {
 UTEST(integration, empty_body) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "POST /echo HTTP/1.1\r\n"
@@ -314,7 +320,7 @@ UTEST(integration, empty_body) {
 UTEST(integration, expect_100_continue) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send headers with Expect: 100-continue */
@@ -356,7 +362,7 @@ UTEST(integration, expect_100_continue) {
 UTEST(integration, head_request) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "HEAD /hello HTTP/1.1\r\n"
@@ -421,12 +427,10 @@ static void *log_server_thread(void *arg) {
     return NULL;
 }
 
-#define LOG_TEST_PORT 18081
-
 UTEST(integration, access_log) {
     memset(&log_capture, 0, sizeof(log_capture));
     KlConfig cfg = {
-        .port = LOG_TEST_PORT,
+        .port = 0,
         .access_log = test_access_log_fn,
         .access_log_data = &log_capture,
     };
@@ -435,9 +439,10 @@ UTEST(integration, access_log) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, log_server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&log_server);
+    int log_port = log_server.bound_port;
 
-    int fd = connect_to(LOG_TEST_PORT);
+    int fd = connect_to(log_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /hello HTTP/1.1\r\n"
@@ -468,7 +473,7 @@ UTEST(integration, access_log) {
 UTEST(integration, multipart_upload) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *body =
@@ -513,7 +518,7 @@ UTEST(integration, multipart_upload) {
 UTEST(integration, chunked_post) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "POST /echo HTTP/1.1\r\n"
@@ -537,7 +542,7 @@ UTEST(integration, chunked_post) {
 UTEST(integration, chunked_multi_chunk) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "POST /echo HTTP/1.1\r\n"
@@ -564,7 +569,7 @@ UTEST(integration, chunked_multi_chunk) {
 UTEST(integration, chunked_keepalive) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* First request: chunked POST */
@@ -617,7 +622,7 @@ UTEST(integration, chunked_keepalive) {
 UTEST(integration, chunked_100_continue) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send headers with Expect: 100-continue and chunked TE */
@@ -657,7 +662,7 @@ UTEST(integration, chunked_100_continue) {
 UTEST(integration, chunked_empty_body) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "POST /echo HTTP/1.1\r\n"
@@ -681,7 +686,7 @@ UTEST(integration, chunked_empty_body) {
 UTEST(integration, chunked_large_body) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* Send headers */
@@ -738,11 +743,9 @@ static void *signal_server_thread(void *arg) {
     return NULL;
 }
 
-#define SIGNAL_TEST_PORT 18082
-
 UTEST(integration, signal_stop) {
     KlConfig cfg = {
-        .port = SIGNAL_TEST_PORT,
+        .port = 0,
         .install_signal_handlers = 1,
     };
     kl_server_init(&signal_server, &cfg);
@@ -750,10 +753,11 @@ UTEST(integration, signal_stop) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, signal_server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&signal_server);
+    int sig_port = signal_server.bound_port;
 
     /* Verify server is up */
-    int fd = connect_to(SIGNAL_TEST_PORT);
+    int fd = connect_to(sig_port);
     ASSERT_TRUE(fd >= 0);
     const char *req = "GET /hello HTTP/1.1\r\n"
                       "Host: localhost\r\n"
@@ -805,9 +809,9 @@ static void handle_mw_echo(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
-        kl_response_body(res, br->data, br->len);
+        kl_response_body_borrow(res, br->data, br->len);
     else
-        kl_response_body(res, "no body", 7);
+        kl_response_body_borrow(res, "no body", 7);
 }
 
 static KlServer mw_server;
@@ -818,12 +822,11 @@ static void *mw_server_thread(void *arg) {
     return NULL;
 }
 
-#define MW_TEST_PORT 18083
-
 static pthread_t mw_server_tid;
+static int mw_port;
 
 static void start_mw_server(void) {
-    KlConfig cfg = {.port = MW_TEST_PORT};
+    KlConfig cfg = {.port = 0};
     kl_server_init(&mw_server, &cfg);
 
     /* Register middleware */
@@ -837,7 +840,8 @@ static void start_mw_server(void) {
                     (void *)(size_t)(64 * 1024), kl_body_reader_buffer);
 
     pthread_create(&mw_server_tid, NULL, mw_server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&mw_server);
+    mw_port = mw_server.bound_port;
 }
 
 static void stop_mw_server(void) {
@@ -849,7 +853,7 @@ static void stop_mw_server(void) {
 UTEST(integration, middleware_cors) {
     start_mw_server();
 
-    int fd = connect_to(MW_TEST_PORT);
+    int fd = connect_to(mw_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /hello HTTP/1.1\r\n"
@@ -872,7 +876,7 @@ UTEST(integration, middleware_cors) {
 UTEST(integration, middleware_auth_reject) {
     start_mw_server();
 
-    int fd = connect_to(MW_TEST_PORT);
+    int fd = connect_to(mw_port);
     ASSERT_TRUE(fd >= 0);
 
     /* No Authorization header → should get 401 */
@@ -896,7 +900,7 @@ UTEST(integration, middleware_auth_reject) {
 UTEST(integration, middleware_auth_pass) {
     start_mw_server();
 
-    int fd = connect_to(MW_TEST_PORT);
+    int fd = connect_to(mw_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /api/data HTTP/1.1\r\n"
@@ -937,10 +941,8 @@ static void *chain_server_thread(void *arg) {
     return NULL;
 }
 
-#define CHAIN_TEST_PORT 18084
-
 UTEST(integration, middleware_chain_order) {
-    KlConfig cfg = {.port = CHAIN_TEST_PORT};
+    KlConfig cfg = {.port = 0};
     kl_server_init(&chain_server, &cfg);
     kl_server_use(&chain_server, "*", "/*", mw_add_x_first, NULL);
     kl_server_use(&chain_server, "*", "/*", mw_add_x_second, NULL);
@@ -948,9 +950,9 @@ UTEST(integration, middleware_chain_order) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, chain_server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&chain_server);
 
-    int fd = connect_to(CHAIN_TEST_PORT);
+    int fd = connect_to(chain_server.bound_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /hello HTTP/1.1\r\n"
@@ -987,8 +989,6 @@ static void *sc_body_server_thread(void *arg) {
     return NULL;
 }
 
-#define SC_BODY_TEST_PORT 18085
-
 static int mw_reject_all(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_response_error(res, 403, "Forbidden");
@@ -996,7 +996,7 @@ static int mw_reject_all(KlRequest *req, KlResponse *res, void *ctx) {
 }
 
 UTEST(integration, middleware_short_circuit_body) {
-    KlConfig cfg = {.port = SC_BODY_TEST_PORT};
+    KlConfig cfg = {.port = 0};
     kl_server_init(&sc_body_server, &cfg);
     kl_server_use(&sc_body_server, "*", "/*", mw_reject_all, NULL);
     kl_server_route(&sc_body_server, "POST", "/echo", handle_mw_echo,
@@ -1004,9 +1004,9 @@ UTEST(integration, middleware_short_circuit_body) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, sc_body_server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&sc_body_server);
 
-    int fd = connect_to(SC_BODY_TEST_PORT);
+    int fd = connect_to(sc_body_server.bound_port);
     ASSERT_TRUE(fd >= 0);
 
     /* POST with body — middleware should reject before body is read */
@@ -1032,7 +1032,7 @@ UTEST(integration, middleware_short_circuit_body) {
 UTEST(integration, route_params) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /users/42 HTTP/1.1\r\n"
@@ -1070,9 +1070,9 @@ static void handle_post_mw_echo(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
-        kl_response_body(res, br->data, br->len);
+        kl_response_body_borrow(res, br->data, br->len);
     else
-        kl_response_body(res, "no body", 7);
+        kl_response_body_borrow(res, "no body", 7);
 }
 
 static KlServer post_mw_server;
@@ -1083,10 +1083,8 @@ static void *post_mw_server_thread(void *arg) {
     return NULL;
 }
 
-#define POST_MW_TEST_PORT 18086
-
 UTEST(integration, post_middleware_body_access) {
-    KlConfig cfg = {.port = POST_MW_TEST_PORT};
+    KlConfig cfg = {.port = 0};
     kl_server_init(&post_mw_server, &cfg);
     kl_server_use_post(&post_mw_server, "POST", "/*", post_mw_check_body, NULL);
     kl_server_route(&post_mw_server, "POST", "/submit", handle_post_mw_echo,
@@ -1095,10 +1093,11 @@ UTEST(integration, post_middleware_body_access) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, post_mw_server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&post_mw_server);
+    int pmw_port = post_mw_server.bound_port;
 
     /* POST with valid body — should pass post-middleware */
-    int fd = connect_to(POST_MW_TEST_PORT);
+    int fd = connect_to(pmw_port);
     ASSERT_TRUE(fd >= 0);
     const char *req1 = "POST /submit HTTP/1.1\r\n"
                        "Host: localhost\r\n"
@@ -1114,7 +1113,7 @@ UTEST(integration, post_middleware_body_access) {
     ASSERT_TRUE(strstr(buf, "secret data") != NULL);
 
     /* POST with invalid body — should be rejected by post-middleware */
-    fd = connect_to(POST_MW_TEST_PORT);
+    fd = connect_to(pmw_port);
     ASSERT_TRUE(fd >= 0);
     const char *req2 = "POST /submit HTTP/1.1\r\n"
                        "Host: localhost\r\n"
@@ -1128,7 +1127,7 @@ UTEST(integration, post_middleware_body_access) {
     ASSERT_TRUE(strstr(buf, "403") != NULL);
 
     /* GET skips POST-only post-middleware — should succeed */
-    fd = connect_to(POST_MW_TEST_PORT);
+    fd = connect_to(pmw_port);
     ASSERT_TRUE(fd >= 0);
     const char *req3 = "GET /hello HTTP/1.1\r\n"
                        "Host: localhost\r\n"
@@ -1152,10 +1151,8 @@ static void *post_mw_ka_server_thread(void *arg) {
     return NULL;
 }
 
-#define POST_MW_KA_PORT 18087
-
 UTEST(integration, post_middleware_keepalive_preserved) {
-    KlConfig cfg = {.port = POST_MW_KA_PORT};
+    KlConfig cfg = {.port = 0};
     kl_server_init(&post_mw_ka_server, &cfg);
     kl_server_use_post(&post_mw_ka_server, "POST", "/*", post_mw_check_body, NULL);
     kl_server_route(&post_mw_ka_server, "POST", "/submit", handle_post_mw_echo,
@@ -1164,10 +1161,10 @@ UTEST(integration, post_middleware_keepalive_preserved) {
 
     pthread_t tid;
     pthread_create(&tid, NULL, post_mw_ka_server_thread, NULL);
-    usleep(100000);
+    wait_for_bind(&post_mw_ka_server);
 
     /* Post-middleware rejection should preserve keep-alive */
-    int fd = connect_to(POST_MW_KA_PORT);
+    int fd = connect_to(post_mw_ka_server.bound_port);
     ASSERT_TRUE(fd >= 0);
 
     /* First: POST rejected by post-middleware (body consumed → keep-alive OK) */
@@ -1221,7 +1218,7 @@ UTEST(integration, post_middleware_keepalive_preserved) {
 UTEST(integration, global_body_limit_413) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* POST to route with no body reader, Content-Length exceeds 4KB limit */
@@ -1244,7 +1241,7 @@ UTEST(integration, global_body_limit_413) {
 UTEST(integration, global_body_limit_ok) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* POST to route with no body reader, body within 4KB limit */
@@ -1273,7 +1270,7 @@ UTEST(integration, global_body_limit_ok) {
 UTEST(integration, per_route_limit_unaffected) {
     start_server();
 
-    int fd = connect_to(TEST_PORT);
+    int fd = connect_to(test_port);
     ASSERT_TRUE(fd >= 0);
 
     /* POST to /echo with 32KB body — has 64KB body reader, should succeed

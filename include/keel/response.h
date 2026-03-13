@@ -84,12 +84,12 @@ int kl_response_header(KlResponse *res, const char *name, const char *value);
  * @param data Body bytes (must remain valid until send completes).
  * @param len  Length in bytes.
  */
-void kl_response_body(KlResponse *res, const char *data, size_t len);
+void kl_response_body_borrow(KlResponse *res, const char *data, size_t len);
 
 /**
  * @brief Set a buffered body by copying data into an owned buffer.
  *
- * Unlike kl_response_body(), the data is copied into a response-owned
+ * Unlike kl_response_body_borrow(), the data is copied into a response-owned
  * allocation that is freed by kl_response_reset() / kl_response_free().
  * Safe when the source may be freed before the response is sent.
  *

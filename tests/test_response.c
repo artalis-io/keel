@@ -38,7 +38,7 @@ UTEST(response, body_buffer) {
     KlAllocator a = kl_allocator_default();
     KlResponse res;
     kl_response_init(&res, &a);
-    kl_response_body(&res, "hello", 5);
+    kl_response_body_borrow(&res, "hello", 5);
     ASSERT_EQ(res.body_mode, KL_BODY_BUFFER);
     ASSERT_EQ(res.body_len, (size_t)5);
     ASSERT_EQ(memcmp(res.body, "hello", 5), 0);
@@ -141,7 +141,7 @@ UTEST(response, keep_alive_conditional) {
 
     res.conn_fd = pipefd[1];
     res.keep_alive = 0;
-    kl_response_body(&res, "hi", 2);
+    kl_response_body_borrow(&res, "hi", 2);
 
     int r = kl_response_send(&res);
     ASSERT_EQ(r, 0);
@@ -162,7 +162,7 @@ UTEST(response, keep_alive_conditional) {
     ASSERT_EQ(pipe(pipefd), 0);
     res.conn_fd = pipefd[1];
     res.keep_alive = 1;
-    kl_response_body(&res, "hi", 2);
+    kl_response_body_borrow(&res, "hi", 2);
 
     r = kl_response_send(&res);
     ASSERT_EQ(r, 0);
@@ -261,7 +261,7 @@ UTEST(response, body_null_data_ignored) {
     kl_response_init(&res, &a);
 
     /* NULL data with len > 0 should be silently ignored */
-    kl_response_body(&res, NULL, 100);
+    kl_response_body_borrow(&res, NULL, 100);
     /* body_mode should remain unset (0) */
     ASSERT_EQ(res.body_mode, 0);
 
@@ -416,7 +416,7 @@ UTEST(response, buffer_send_returns_1_on_eagain) {
     }
 
     res.conn_fd = sv[0];
-    kl_response_body(&res, "test body", 9);
+    kl_response_body_borrow(&res, "test body", 9);
 
     int r = kl_response_send(&res);
     /* Should return 1 (partial) or 0 (if EAGAIN returned 0 bytes, offset stays 0) */
@@ -436,7 +436,7 @@ UTEST(response, buffer_send_resumes_from_offset) {
     ASSERT_EQ(pipe(pipefd), 0);
 
     res.conn_fd = pipefd[1];
-    kl_response_body(&res, "hello world", 11);
+    kl_response_body_borrow(&res, "hello world", 11);
 
     /* Send should complete (pipe has enough buffer) */
     int r;

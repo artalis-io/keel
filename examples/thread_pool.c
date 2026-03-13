@@ -83,7 +83,7 @@ typedef struct {
 static void handle_query(KlRequest *req, KlResponse *res, void *user_data) {
     (void)res;
     AppCtx *app = user_data;
-    KlConn *conn = req->_server_ctx;
+    KlConn *conn = kl_request_conn(req);
 
     QueryCtx *ctx = malloc(sizeof(*ctx));
     if (!ctx) {

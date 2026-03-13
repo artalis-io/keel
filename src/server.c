@@ -257,6 +257,18 @@ int kl_server_run(KlServer *s) {
     }
     freeaddrinfo(ai);
 
+    /* Retrieve OS-assigned port (useful when config.port == 0) */
+    {
+        struct sockaddr_storage sa;
+        socklen_t sa_len = sizeof(sa);
+        if (getsockname(s->listen_fd, (struct sockaddr *)&sa, &sa_len) == 0) {
+            if (sa.ss_family == AF_INET)
+                s->bound_port = ntohs(((struct sockaddr_in *)&sa)->sin_port);
+            else if (sa.ss_family == AF_INET6)
+                s->bound_port = ntohs(((struct sockaddr_in6 *)&sa)->sin6_port);
+        }
+    }
+
     if (listen(s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "listen");
         s->last_error = KL_ERR_LISTEN;
@@ -283,7 +295,7 @@ int kl_server_run(KlServer *s) {
     }
 
     kl_log(s, KL_LOG_INFO, "listening on %s:%d",
-           s->config.bind_addr, s->config.port);
+           s->config.bind_addr, s->bound_port);
 
     /* Install signal handlers if requested */
     struct sigaction old_term, old_int;

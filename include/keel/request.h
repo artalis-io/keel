@@ -47,6 +47,14 @@ struct KlRequest {
     void *_server_ctx;   /* opaque — set to KlConn* by connection layer (do not modify) */
 };
 
+/* Forward declaration — full definition in connection.h */
+typedef struct KlConn KlConn;
+
+/* Typed accessor for the connection handle (preferred over raw _server_ctx). */
+static inline KlConn *kl_request_conn(const KlRequest *req) {
+    return (KlConn *)req->_server_ctx;
+}
+
 /* Find header by name (case-insensitive). Returns null-terminated value
  * pointer, or NULL if not found. */
 static inline const char *kl_request_header(const KlRequest *req,

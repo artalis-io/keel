@@ -15,7 +15,6 @@
 #define TEST_LONG_TIMEOUT   10000
 #define TEST_POLL_MS        50
 #define TEST_MAX_EVENTS     16
-#define TEST_SERVER_SETTLE  100000   /* usleep after server start */
 #define TEST_MAX_BODY       65536
 #define TEST_LARGE_BODY     32768
 #define TEST_CHUNK_1K       1024
@@ -399,7 +398,10 @@ static ssize_t mock_body_read_error(char *buf, size_t buf_len, void *user_data)
  * Integration test infrastructure — real server + client
  * ══════════════════════════════════════════════════════════════════ */
 
-#define STREAM_TEST_PORT 18089
+/* Wait for server to bind (max 2s) */
+static void wait_for_bind(KlServer *s) {
+    for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
+}
 
 /* Server handler: echo body back */
 static void srv_echo(KlRequest *req, KlResponse *res, void *ctx)
@@ -409,9 +411,9 @@ static void srv_echo(KlRequest *req, KlResponse *res, void *ctx)
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
-        kl_response_body(res, br->data, br->len);
+        kl_response_body_borrow(res, br->data, br->len);
     else
-        kl_response_body(res, "no body", 7);
+        kl_response_body_borrow(res, "no body", 7);
 }
 
 /* Server handler: fixed JSON response */
@@ -452,9 +454,11 @@ static void *stream_server_thread(void *arg)
     return NULL;
 }
 
+static int stream_test_port;
+
 static void start_stream_server(void)
 {
-    KlConfig cfg = {.port = STREAM_TEST_PORT, .max_body_size = TEST_MAX_BODY};
+    KlConfig cfg = {.port = 0, .max_body_size = TEST_MAX_BODY};
     kl_server_init(&stream_test_server, &cfg);
     kl_server_route(&stream_test_server, "GET", "/hello",
                     srv_hello, NULL, NULL);
@@ -466,7 +470,8 @@ static void start_stream_server(void)
                     srv_echo, (void *)(size_t)TEST_MAX_BODY,
                     kl_body_reader_buffer);
     pthread_create(&stream_test_tid, NULL, stream_server_thread, NULL);
-    usleep(TEST_SERVER_SETTLE);
+    wait_for_bind(&stream_test_server);
+    stream_test_port = stream_test_server.bound_port;
 }
 
 static void stop_stream_server(void)
@@ -523,7 +528,7 @@ static char url_buf[128];
 static const char *test_url(const char *path)
 {
     snprintf(url_buf, sizeof(url_buf),
-             "http://127.0.0.1:%d%s", STREAM_TEST_PORT, path);
+             "http://127.0.0.1:%d%s", stream_test_port, path);
     return url_buf;
 }
 

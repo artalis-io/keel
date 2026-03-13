@@ -687,7 +687,7 @@ static void sleep_watcher(int fd, KlEventMask ready, void *user_data) {
 static void handle_async_sleep(KlRequest *req, KlResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = req->_server_ctx;
+    KlConn *conn = kl_request_conn(req);
 
     /* Allocate sleep context */
     static SleepCtx sctx;  /* static for simplicity — single-request test */
@@ -715,8 +715,6 @@ static void handle_async_sleep(KlRequest *req, KlResponse *res, void *user_data)
     (void)write(sctx.pipe_fds[1], "!", 1);
 }
 
-#define ASYNC_TEST_PORT 18090
-
 static int connect_to(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -742,15 +740,16 @@ static ssize_t read_response(int fd, char *buf, size_t buflen) {
 }
 
 UTEST(async, e2e_handler_suspend_resume) {
-    KlConfig cfg = {.port = ASYNC_TEST_PORT};
+    KlConfig cfg = {.port = 0};
     kl_server_init(&async_server, &cfg);
     kl_server_route(&async_server, "GET", "/async",
                     handle_async_sleep, &async_server, NULL);
 
     pthread_create(&async_server_tid, NULL, async_server_thread, NULL);
-    usleep(100000);
+    for (int i = 0; i < 200 && async_server.bound_port == 0; i++) usleep(10000);
+    int port = async_server.bound_port;
 
-    int fd = connect_to(ASYNC_TEST_PORT);
+    int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /async HTTP/1.1\r\n"

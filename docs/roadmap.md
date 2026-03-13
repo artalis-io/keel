@@ -38,9 +38,9 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 | Gap | Status |
 |-----|--------|
 | ~~No concurrent connection tests~~ | **Fixed**: `test_server_integration.c` — pool exhaustion, backpressure recovery, concurrent requests, keep-alive pipeline. |
-| No TLS integration tests | Only unit-level mocking in `test_tls.c`. |
+| ~~No TLS integration tests~~ | **Fixed**: `test_tls_integration.c` — passthrough TLS mock validates full handshake→read→write path. |
 | ~~No drain/graceful shutdown tests~~ | **Fixed**: `test_server_integration.c` — drain completes in-flight, drain deadline forces exit. |
-| Hardcoded ports + `usleep` sync | Ports 18080-18090, `usleep(100000)` — inherently racy in CI. |
+| ~~Hardcoded ports + `usleep` sync~~ | **Fixed**: `bound_port` field on `KlServer`, all tests use `port=0` (OS-assigned) + `wait_for_bind()`. |
 | ~~Missing fuzz targets in CI~~ | **Fixed**: All 4 fuzz targets now run in CI (parser, multipart, WebSocket, response parser). |
 | ~~No code coverage measurement~~ | **Fixed**: `make coverage` target generates lcov/genhtml report. |
 
@@ -54,10 +54,10 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 
 ### API Footguns
 
-- **`kl_response_body` borrows the pointer** (`response.h:80`). Stack-allocated buffers cause use-after-free. `kl_response_body_copy` exists as safe alternative but unsafe one is the default.
-- **`_server_ctx` is a public field** on `KlRequest` (`request.h:47`) — leaks implementation details, invites misuse.
+- ~~**`kl_response_body` borrows the pointer**~~ — **Fixed**: Renamed to `kl_response_body_borrow()` to make borrow semantics explicit. `kl_response_body_copy()` unchanged.
+- ~~**`_server_ctx` is a public field**~~ — **Fixed**: Added `kl_request_conn(req)` typed accessor in `request.h`. Field kept for backward compat.
 - ~~**No error detail from failed operations**~~ — **Fixed**: `KlError` enum with 23 codes, stored per-struct (`KlServer.last_error`, `KlClientResponse.error`, `kl_client_last_error()`), `kl_strerror()` for human-readable messages.
-- **Global signal handler** (`server.c:25`) — only one `KlServer` instance can have signal handlers at a time.
+- **Global signal handler** (`server.c:25`) — only one `KlServer` instance can have signal handlers at a time. Documented in `server.h`.
 
 ---
 
