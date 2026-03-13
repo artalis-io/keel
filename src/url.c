@@ -102,3 +102,82 @@ int kl_url_parse(const char *url, KlUrl *out)
 
     return 0;
 }
+
+/* ── URL resolution ─────────────────────────────────────────────── */
+
+/**
+ * Strip fragment (#...) from a string, returning the length without it.
+ */
+static size_t strip_fragment(const char *s, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '#')
+            return i;
+    }
+    return len;
+}
+
+int kl_url_resolve(const char *base_url, const char *location,
+                   char *out, size_t out_size)
+{
+    if (!base_url || !location || !out || out_size == 0)
+        return -1;
+
+    size_t loc_len = strlen(location);
+    if (loc_len == 0)
+        return -1;
+
+    /* 1. Absolute URL — starts with http:// or https:// */
+    if (strncmp(location, "http://", 7) == 0 ||
+        strncmp(location, "https://", 8) == 0) {
+        size_t n = strip_fragment(location, loc_len);
+        if (n >= out_size)
+            return -1;
+        memcpy(out, location, n);
+        out[n] = '\0';
+        return 0;
+    }
+
+    /* 2. Protocol-relative — starts with // */
+    if (location[0] == '/' && location[1] == '/') {
+        /* Extract scheme from base_url */
+        const char *colon = strchr(base_url, ':');
+        if (!colon)
+            return -1;
+        size_t scheme_len = (size_t)(colon - base_url);
+
+        size_t loc_stripped = strip_fragment(location, loc_len);
+        if (scheme_len + 1 + loc_stripped >= out_size)
+            return -1;
+        memcpy(out, base_url, scheme_len + 1); /* "http:" or "https:" */
+        memcpy(out + scheme_len + 1, location, loc_stripped);
+        out[scheme_len + 1 + loc_stripped] = '\0';
+        return 0;
+    }
+
+    /* 3. Absolute path — starts with / */
+    if (location[0] == '/') {
+        /* Extract scheme://host[:port] from base_url */
+        const char *auth = strstr(base_url, "://");
+        if (!auth)
+            return -1;
+        auth += 3; /* past "://" */
+
+        /* Find end of authority (host[:port]) — first / or end */
+        const char *auth_end = auth;
+        while (*auth_end && *auth_end != '/')
+            auth_end++;
+        size_t origin_len = (size_t)(auth_end - base_url);
+
+        size_t loc_stripped = strip_fragment(location, loc_len);
+        if (origin_len + loc_stripped >= out_size)
+            return -1;
+        memcpy(out, base_url, origin_len);
+        memcpy(out + origin_len, location, loc_stripped);
+        out[origin_len + loc_stripped] = '\0';
+        return 0;
+    }
+
+    /* Bare relative refs not supported */
+    return -1;
+}

@@ -179,21 +179,9 @@ Thin SSE framing layer over `kl_response_begin_stream`. `KlSse` handle wraps wri
 
 Implemented in `client_pool.h` / `client_pool.c`. Flat-array pool keyed by `(host, port, is_tls)` with idle timers, per-host limits, test-on-borrow stale detection, and `Connection: keep-alive` tracking. Sync (`kl_client_request_pooled`) and async (`kl_client_start_pooled`) APIs.
 
-### Redirect following
+### ~~Redirect following~~ (Done)
 
-**Priority: Medium** | **Effort: Moderate**
-
-Client returns 3xx status; caller must manually parse `Location` and re-issue. Add optional auto-redirect:
-
-```c
-typedef struct {
-    int   timeout_ms;
-    int   max_redirects;      /* 0 = no following (default), 5 = typical */
-    /* ... */
-} KlClientConfig;
-```
-
-Handles 301/302/303/307/308 with correct method preservation (307/308 preserve method; 301/302/303 switch POST to GET per RFC 7231). Loop detection via visited-URL set. Chains `kl_client_start()` calls internally.
+Implemented in `redirect.h` / `redirect.c`. Orthogonal module wrapping existing client APIs with automatic 3xx redirect following. `KlRedirectConfig` controls max hops (default 10). Method transformation per RFC 7231/7538: 301/302/303 change POST/PUT/PATCH to GET (dropping body); 307/308 preserve method. Cross-origin Authorization header stripping. URL resolution via `kl_url_resolve()`. Sync (`kl_redirect_request`, `kl_redirect_request_pooled`) and async (`kl_redirect_start`, `kl_redirect_start_pooled`) APIs. 33 tests.
 
 ### WebSocket auto-ping keep-alive
 

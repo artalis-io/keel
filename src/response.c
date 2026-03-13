@@ -33,6 +33,7 @@ static KlStatusLine status_line_for(int code) {
         case 206: return (KlStatusLine)SL("HTTP/1.1 206 Partial Content\r\n");
         case 301: return (KlStatusLine)SL("HTTP/1.1 301 Moved Permanently\r\n");
         case 302: return (KlStatusLine)SL("HTTP/1.1 302 Found\r\n");
+        case 303: return (KlStatusLine)SL("HTTP/1.1 303 See Other\r\n");
         case 304: return (KlStatusLine)SL("HTTP/1.1 304 Not Modified\r\n");
         case 307: return (KlStatusLine)SL("HTTP/1.1 307 Temporary Redirect\r\n");
         case 308: return (KlStatusLine)SL("HTTP/1.1 308 Permanent Redirect\r\n");

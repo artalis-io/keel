@@ -49,6 +49,9 @@ typedef enum {
     /* IPC */
     KL_ERR_PIPE,            /**< pipe() failed */
 
+    /* Redirect */
+    KL_ERR_REDIRECT_LOOP,   /**< Too many redirects */
+
     KL_ERR__COUNT           /**< Sentinel — not an error code */
 } KlError;
 

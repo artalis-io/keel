@@ -32,4 +32,25 @@ typedef struct {
  */
 int kl_url_parse(const char *url, KlUrl *out);
 
+/**
+ * @brief Maximum URL length for resolved URLs.
+ */
+#define KL_URL_MAX 2048
+
+/**
+ * @brief Resolve a Location header value against a base URL.
+ *
+ * Handles absolute URLs (http:// or https://), protocol-relative (//),
+ * and absolute-path (/...) references. Strips fragment (#) if present.
+ * Bare relative refs (../foo) are not supported and return -1.
+ *
+ * @param base_url   The URL of the current request.
+ * @param location   The Location header value.
+ * @param out        Output buffer for the resolved URL.
+ * @param out_size   Size of the output buffer.
+ * @return 0 on success, -1 on error.
+ */
+int kl_url_resolve(const char *base_url, const char *location,
+                   char *out, size_t out_size);
+
 #endif
