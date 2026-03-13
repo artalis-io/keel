@@ -56,6 +56,7 @@ typedef struct KlConfig {
     KlTlsConfig *tls;           /* TLS config — NULL = plaintext (default) */
     KlH2ServerConfig *h2;             /* HTTP/2 config — NULL = disabled (default) */
     size_t max_body_size;       /* discard-path body limit; default: 1 MB */
+    size_t max_header_size;     /* max header block size; 0 = KL_READ_BUF_SIZE (8192) */
 } KlConfig;
 
 typedef struct KlAsyncOp KlAsyncOp;

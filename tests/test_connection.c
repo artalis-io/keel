@@ -205,4 +205,68 @@ UTEST(connection, pool_capacity_zero) {
     }
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * Growable read buffer tests
+ * ═══════════════════════════════════════════════════════════════════ */
+
+UTEST(connection, read_buf_allocated) {
+    KlAllocator a = kl_allocator_default();
+    KlConnPool pool;
+    ASSERT_EQ(kl_conn_pool_init(&pool, 4, &a), 0);
+
+    for (int i = 0; i < 4; i++) {
+        ASSERT_TRUE(pool.conns[i].read_buf != NULL);
+        ASSERT_EQ(pool.conns[i].read_cap, (size_t)KL_READ_BUF_SIZE);
+    }
+
+    kl_conn_pool_free(&pool);
+}
+
+UTEST(connection, read_buf_survives_acquire_release) {
+    KlAllocator a = kl_allocator_default();
+    KlConnPool pool;
+    kl_conn_pool_init(&pool, 2, &a);
+    for (int i = 0; i < 2; i++)
+        pool.conns[i].parser = kl_parser_llhttp(&a);
+
+    KlConn *c = kl_conn_acquire(&pool, 100);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_TRUE(c->read_buf != NULL);
+    ASSERT_EQ(c->read_cap, (size_t)KL_READ_BUF_SIZE);
+
+    char *buf_ptr = c->read_buf;
+    c->fd = -1;
+    kl_conn_release(&pool, c);
+
+    /* Re-acquire — buffer should still be valid */
+    KlConn *c2 = kl_conn_acquire(&pool, 101);
+    ASSERT_TRUE(c2 != NULL);
+    ASSERT_TRUE(c2->read_buf != NULL);
+    ASSERT_EQ(c2->read_cap, (size_t)KL_READ_BUF_SIZE);
+    /* Same slot, same buffer pointer */
+    ASSERT_EQ(c2->read_buf, buf_ptr);
+
+    c2->fd = -1;
+    kl_conn_pool_free(&pool);
+}
+
+UTEST(connection, max_header_size_default) {
+    /* max_header_size defaults to KL_READ_BUF_SIZE when 0 */
+    KlAllocator a = kl_allocator_default();
+    KlConnPool pool;
+    kl_conn_pool_init(&pool, 2, &a);
+
+    /* Before server init sets it, max_header_size is 0 */
+    ASSERT_EQ(pool.conns[0].max_header_size, (size_t)0);
+
+    /* Simulate what server.c does */
+    for (int i = 0; i < 2; i++)
+        pool.conns[i].max_header_size = KL_READ_BUF_SIZE;
+
+    ASSERT_EQ(pool.conns[0].max_header_size, (size_t)KL_READ_BUF_SIZE);
+    ASSERT_EQ(pool.conns[1].max_header_size, (size_t)KL_READ_BUF_SIZE);
+
+    kl_conn_pool_free(&pool);
+}
+
 UTEST_MAIN();

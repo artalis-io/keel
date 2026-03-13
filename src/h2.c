@@ -515,7 +515,7 @@ int kl_h2_server_on_readable(KlConn *c) {
     int drains = 0;
 read_more:
     ;
-    ssize_t nr = conn_read(c, c->read_buf, KL_READ_BUF_SIZE);
+    ssize_t nr = conn_read(c, c->read_buf, c->read_cap);
     if (nr <= 0) return KL_CONN_CLOSED;
 
     c->last_active_ms = kl_monotonic_ms();

@@ -34,8 +34,10 @@ typedef struct KlConn {
     KlConnState state;
     KlAllocator *alloc;     /* set once on pool init, never NULL */
 
-    char read_buf[KL_READ_BUF_SIZE];
+    char *read_buf;
     size_t read_len;
+    size_t read_cap;            /* current allocation size */
+    size_t max_header_size;     /* from KlConfig, set at server init */
 
     KlRequest req;
     KlResponse res;

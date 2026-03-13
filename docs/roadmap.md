@@ -29,7 +29,7 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 |-----|---------|
 | **Single-threaded event loop** | No `SO_REUSEPORT` multi-listener. `KlThreadPool` offloads blocking work but I/O path is single-threaded. Fine for embedded/edge; ceiling for high-connection-count workloads. |
 | **O(n) router** | Linear scan over all routes per request (`router.c:234-266`). Fine for 20-50 routes; measurable at hundreds. |
-| **8KB fixed read buffer** | Not growable. Requests with >8KB headers (large cookies) rejected with 413. No configurable `max_header_size`. |
+| ~~**8KB fixed read buffer**~~ | **Fixed**: `read_buf` is now a heap-allocated, growable buffer (doubles up to `max_header_size`). Default 8KB initial, configurable via `KlConfig.max_header_size`. Returns 431 (Request Header Fields Too Large) when exceeded. Shrinks back to 8KB on keep-alive reset. |
 | ~~**`connection.c` monolith**~~ | **Refactored**: Extracted `conn_null_terminate_headers()` and `conn_dispatch_request()` static helpers. `HEADERS_OK`/`PARSE_OK` branches unified into a single dispatch path (~85 lines removed). |
 | **O(n) timeout sweep** | Iterates all connection slots every tick. Deadline heap or timer wheel would scale better. |
 

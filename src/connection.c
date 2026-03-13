@@ -27,6 +27,12 @@ static const char kl_415_response[] =
     "Connection: close\r\n"
     "\r\n";
 
+static const char kl_431_response[] =
+    "HTTP/1.1 431 Request Header Fields Too Large\r\n"
+    "Content-Length: 0\r\n"
+    "Connection: close\r\n"
+    "\r\n";
+
 static const char kl_100_continue[] =
     "HTTP/1.1 100 Continue\r\n"
     "\r\n";
@@ -49,18 +55,23 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
 
     memset(pool->conns, 0, sizeof(KlConn) * (size_t)capacity);
 
-    /* Build free list */
+    /* Build free list and allocate read buffers */
     pool->free_list = &pool->conns[0];
-    for (int i = 0; i < capacity - 1; i++) {
-        pool->conns[i].next_free = &pool->conns[i + 1];
+    for (int i = 0; i < capacity; i++) {
+        pool->conns[i].read_buf = kl_malloc(alloc, KL_READ_BUF_SIZE);
+        if (!pool->conns[i].read_buf) {
+            for (int j = 0; j < i; j++)
+                kl_free(alloc, pool->conns[j].read_buf, KL_READ_BUF_SIZE);
+            kl_free(alloc, pool->conns, sizeof(KlConn) * (size_t)capacity);
+            pool->conns = NULL;
+            return -1;
+        }
+        pool->conns[i].read_cap = KL_READ_BUF_SIZE;
+        pool->conns[i].next_free = (i < capacity - 1) ? &pool->conns[i + 1] : NULL;
         pool->conns[i].fd = -1;
         pool->conns[i].state = KL_CONN_CLOSED;
         pool->conns[i].alloc = alloc;
     }
-    pool->conns[capacity - 1].next_free = NULL;
-    pool->conns[capacity - 1].fd = -1;
-    pool->conns[capacity - 1].state = KL_CONN_CLOSED;
-    pool->conns[capacity - 1].alloc = alloc;
 
     return 0;
 }
@@ -160,6 +171,10 @@ void kl_conn_pool_free(KlConnPool *pool) {
             }
             if (pool->conns[i].res.hdr_buf) {
                 kl_response_free(&pool->conns[i].res);
+            }
+            if (pool->conns[i].read_buf) {
+                kl_free(pool->alloc, pool->conns[i].read_buf,
+                        pool->conns[i].read_cap);
             }
         }
         kl_free(pool->alloc, pool->conns,
@@ -498,11 +513,36 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
         int hdr_drains = 0;
 read_more_headers: ;
         /* Read available data */
-        size_t space = KL_READ_BUF_SIZE - c->read_len;
+        size_t space = c->read_cap - c->read_len;
         if (space == 0) {
-            best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
-            c->state = KL_CONN_CLOSED;
-            return c->state;
+            if (c->read_cap >= c->max_header_size) {
+                best_effort_conn_write(c, kl_431_response,
+                                       sizeof(kl_431_response) - 1);
+                c->state = KL_CONN_CLOSED;
+                return c->state;
+            }
+            size_t new_cap = c->read_cap * 2;
+            if (new_cap > c->max_header_size)
+                new_cap = c->max_header_size;
+            if (new_cap < c->read_cap || new_cap > SIZE_MAX / 2) {
+                best_effort_conn_write(c, kl_431_response,
+                                       sizeof(kl_431_response) - 1);
+                c->state = KL_CONN_CLOSED;
+                return c->state;
+            }
+            char *nb = kl_realloc(c->alloc, c->read_buf,
+                                   c->read_cap, new_cap);
+            if (!nb) {
+                best_effort_conn_write(c, kl_431_response,
+                                       sizeof(kl_431_response) - 1);
+                c->state = KL_CONN_CLOSED;
+                return c->state;
+            }
+            c->read_buf = nb;
+            c->read_cap = new_cap;
+            c->parser->reset(c->parser);
+            memset(&c->req, 0, sizeof(c->req));
+            space = c->read_cap - c->read_len;
         }
 
         ssize_t nr = conn_read(c, c->read_buf + c->read_len, space);
@@ -567,7 +607,7 @@ read_more_headers: ;
 read_more_body: ;
         /* Sliding window: read into start of buffer, parse, repeat */
         ; /* empty statement after label before declaration */
-        ssize_t nr = conn_read(c, c->read_buf, KL_READ_BUF_SIZE);
+        ssize_t nr = conn_read(c, c->read_buf, c->read_cap);
         if (nr <= 0) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);
@@ -659,6 +699,15 @@ KlConnState kl_conn_on_writable(KlConn *c) {
             c->parser->reset(c->parser);
             memset(&c->req, 0, sizeof(c->req));
             c->read_len = 0;
+            if (c->read_cap > KL_READ_BUF_SIZE) {
+                char *shrunk = kl_realloc(c->alloc, c->read_buf,
+                                           c->read_cap, KL_READ_BUF_SIZE);
+                if (shrunk) {
+                    c->read_buf = shrunk;
+                    c->read_cap = KL_READ_BUF_SIZE;
+                }
+                /* realloc failure: keep larger buffer, non-critical */
+            }
             c->hdr_sent = 0;
             c->route = NULL;
             c->num_params = 0;

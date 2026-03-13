@@ -807,6 +807,11 @@ UTEST(h2, preface_detection_full) {
     conn.h2_config = &test_h2_cfg;
     conn.router = &test_router;
 
+    /* Provide a stack buffer since read_buf is now a pointer */
+    char h2_buf[KL_READ_BUF_SIZE];
+    conn.read_buf = h2_buf;
+    conn.read_cap = sizeof(h2_buf);
+
     /* Simulate 24-byte HTTP/2 preface in read_buf */
     static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
     memcpy(conn.read_buf, preface, 24);

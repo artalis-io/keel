@@ -95,6 +95,12 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->config.parser = kl_parser_llhttp;
     if (s->config.max_body_size == 0)
         s->config.max_body_size = KL_DEFAULT_MAX_BODY_SIZE;
+    if (s->config.max_header_size == 0)
+        s->config.max_header_size = KL_READ_BUF_SIZE;
+    if (s->config.max_header_size > SIZE_MAX / 2) {
+        s->last_error = KL_ERR_OVERFLOW;
+        return -1;
+    }
 
     /* Set up allocator */
     if (s->config.alloc) {
@@ -141,6 +147,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->pool.conns[i].h2_config = s->config.h2;  /* NULL if disabled */
         s->pool.conns[i].router = &s->router;
         s->pool.conns[i].max_body_size = s->config.max_body_size;
+        s->pool.conns[i].max_header_size = s->config.max_header_size;
     }
 
     /* Pre-allocate TLS sessions (one per connection slot) */

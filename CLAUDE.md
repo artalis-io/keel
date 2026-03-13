@@ -6,7 +6,7 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 553 unit tests
+make test         # build and run all 563 unit tests
 make examples     # build all 21 example programs (23 with TLS)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
@@ -64,7 +64,7 @@ make clean        # remove all build artifacts
 | Type | Header | Purpose |
 |------|--------|---------|
 | `KlServer` | `server.h` | Server instance: config, router, pool, event loop |
-| `KlConfig` | `server.h` | Configuration: port, bind_addr, max_connections, timeouts, max_body_size, allocator, parser |
+| `KlConfig` | `server.h` | Configuration: port, bind_addr, max_connections, timeouts, max_body_size, max_header_size, allocator, parser |
 | `KlRequest` | `request.h` | Parsed request: method, path, query, headers, content_length, body_reader |
 | `KlResponse` | `response.h` | Response builder: status, headers, body/file/stream modes |
 | `KlBodyReader` | `body_reader.h` | Vtable: on_data, on_complete, on_error, destroy |
