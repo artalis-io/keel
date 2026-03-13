@@ -288,6 +288,209 @@ KlConnState kl_conn_on_handshake(KlConn *c) {
     return c->state;
 }
 
+/*
+ * Null-terminate method, path, query, and all header name/value strings
+ * in-place in read_buf.  The byte after each string is an HTTP syntax
+ * char (\r, :, ?, space) that is never read again post-parse.
+ */
+static void conn_null_terminate_headers(KlConn *c) {
+    c->read_buf[(size_t)(c->req.method - c->read_buf) + c->req.method_len] = '\0';
+    c->read_buf[(size_t)(c->req.path - c->read_buf) + c->req.path_len] = '\0';
+    if (c->req.query)
+        c->read_buf[(size_t)(c->req.query - c->read_buf) + c->req.query_len] = '\0';
+    for (int i = 0; i < c->req.num_headers; i++) {
+        c->read_buf[(size_t)(c->req.headers[i].name - c->read_buf) + c->req.headers[i].name_len] = '\0';
+        c->read_buf[(size_t)(c->req.headers[i].value - c->read_buf) + c->req.headers[i].value_len] = '\0';
+    }
+}
+
+/*
+ * Unified request dispatch: route match, middleware, WS/H2 upgrade, body handling.
+ * Called from both HEADERS_OK (has_leftover=true with leftover data) and
+ * PARSE_OK (has_leftover=false, complete request with no body).
+ */
+static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
+                                          const char *leftover_buf,
+                                          size_t leftover_len) {
+    /* Route match */
+    c->route_result = kl_router_match(router,
+                                       c->req.method, c->req.method_len,
+                                       c->req.path, c->req.path_len,
+                                       &c->route, c->params,
+                                       &c->num_params);
+
+    /* Expose route params on request for handlers */
+    memcpy(c->req.params, c->params,
+           sizeof(KlParam) * (size_t)c->num_params);
+    c->req.num_params = c->num_params;
+
+    /* Init response and run pre-body middleware */
+    if (conn_init_response(c) < 0) {
+        c->state = KL_CONN_CLOSED;
+        return c->state;
+    }
+    if (kl_router_run_middleware(router, &c->req, &c->res) != 0) {
+        /* Middleware short-circuited — body may be unread */
+        c->req.keep_alive = 0;
+        c->res.keep_alive = 0;
+        if (c->res.body_mode == KL_BODY_STREAM) {
+            conn_log_access(c);
+            c->state = KL_CONN_CLOSED;
+            return c->state;
+        }
+        c->state = KL_CONN_SENDING;
+        return c->state;
+    }
+
+    /* WebSocket upgrade — branch before body reading */
+    if (c->route_result == 200 && c->route &&
+        c->route->ws_config) {
+        c->state = (KlConnState)kl_ws_server_upgrade(
+            c, leftover_buf, leftover_len);
+        return c->state;
+    }
+
+    /* HTTP/2 cleartext upgrade (Upgrade: h2c) */
+    if (c->h2_config != NULL) {
+        size_t ug_len;
+        const char *ug = kl_request_header_len(
+            &c->req, "Upgrade", &ug_len);
+        if (ug && ug_len == 3 &&
+            strncasecmp(ug, "h2c", 3) == 0) {
+            c->state = (KlConnState)kl_h2_server_upgrade_from_h1(
+                c, router, c->h2_config,
+                leftover_buf, leftover_len);
+            return c->state;
+        }
+    }
+
+    /* Determine if there's a body to read */
+    int has_body = (c->req.content_length > 0 || c->req.chunked);
+
+    if (has_body && c->route && c->route->body_reader) {
+        /* Create body reader — factory can inspect headers */
+        KlBodyReader *br = c->route->body_reader(
+            c->alloc, &c->req, c->route->user_data);
+        if (!br) {
+            best_effort_conn_write(c, kl_415_response,
+                        sizeof(kl_415_response) - 1);
+            c->state = KL_CONN_CLOSED;
+            return c->state;
+        }
+        c->req.body_reader = br;
+
+        /* Send 100 Continue if client expects it */
+        size_t expect_len;
+        const char *expect = kl_request_header_len(
+            &c->req, "Expect", &expect_len);
+        if (expect && expect_len == 12 &&
+            strncasecmp(expect, "100-continue", 12) == 0) {
+            best_effort_conn_write(c, kl_100_continue,
+                                   sizeof(kl_100_continue) - 1);
+        }
+
+        /* Parse leftover body data in-place (no memmove) */
+        if (c->req.chunked) {
+            kl_chunked_init(&c->chunked_dec);
+            if (leftover_len > 0) {
+                int rc = kl_chunked_decode(&c->chunked_dec,
+                            leftover_buf, leftover_len,
+                            c->req.body_reader);
+                if (rc < 0) {
+                    c->req.body_reader->on_error(c->req.body_reader);
+                    c->state = KL_CONN_CLOSED;
+                    return c->state;
+                }
+                if (rc == 1) {
+                    c->req.body_reader->on_complete(c->req.body_reader);
+                    return conn_run_post_middleware_and_handle(c, router);
+                }
+            }
+        } else if (leftover_len > 0) {
+            size_t body_consumed;
+            KlParseResult bpr = c->parser->parse(
+                c->parser, &c->req,
+                leftover_buf, leftover_len,
+                &body_consumed);
+            (void)body_consumed;
+
+            if (bpr == KL_PARSE_ERROR) {
+                c->req.body_reader->on_error(c->req.body_reader);
+                c->state = KL_CONN_CLOSED;
+                return c->state;
+            }
+            if (bpr == KL_PARSE_OK) {
+                return conn_run_post_middleware_and_handle(c, router);
+            }
+            /* INCOMPLETE — need more body data */
+        }
+
+        c->read_len = 0;
+        c->body_start_ms = kl_monotonic_ms();
+        c->state = KL_CONN_READING_BODY;
+        return c->state;
+
+    } else if (!has_body) {
+        /* No body — header pointers valid, process immediately */
+        return conn_run_post_middleware_and_handle(c, router);
+
+    } else {
+        /* Body present but no reader — discard body */
+
+        /* Content-Length early reject */
+        if (!c->req.chunked &&
+            c->max_body_size > 0 &&
+            c->req.content_length > c->max_body_size) {
+            best_effort_conn_write(c, kl_413_response,
+                                   sizeof(kl_413_response) - 1);
+            c->state = KL_CONN_CLOSED;
+            return c->state;
+        }
+
+        if (c->req.chunked) {
+            kl_chunked_init(&c->chunked_dec);
+            if (leftover_len > 0) {
+                int rc = kl_chunked_decode(&c->chunked_dec,
+                            leftover_buf, leftover_len, NULL);
+                if (rc < 0) {
+                    c->state = KL_CONN_CLOSED;
+                    return c->state;
+                }
+                if (c->max_body_size > 0 &&
+                    c->chunked_dec.total_body > c->max_body_size) {
+                    best_effort_conn_write(c, kl_413_response,
+                                           sizeof(kl_413_response) - 1);
+                    c->state = KL_CONN_CLOSED;
+                    return c->state;
+                }
+                if (rc == 1) {
+                    return conn_run_post_middleware_and_handle(c, router);
+                }
+            }
+        } else if (leftover_len > 0) {
+            size_t body_consumed;
+            KlParseResult bpr = c->parser->parse(
+                c->parser, &c->req,
+                leftover_buf, leftover_len,
+                &body_consumed);
+            (void)body_consumed;
+
+            if (bpr == KL_PARSE_ERROR) {
+                c->state = KL_CONN_CLOSED;
+                return c->state;
+            }
+            if (bpr == KL_PARSE_OK) {
+                return conn_run_post_middleware_and_handle(c, router);
+            }
+        }
+
+        c->read_len = 0;
+        c->body_start_ms = kl_monotonic_ms();
+        c->state = KL_CONN_READING_BODY;
+        return c->state;
+    }
+}
+
 KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
     c->last_active_ms = kl_monotonic_ms();
 
@@ -346,257 +549,14 @@ read_more_headers: ;
         }
 
         if (pr == KL_PARSE_HEADERS_OK) {
-            /*
-             * Header pointers (method, path, headers) reference read_buf.
-             * Null-terminate each string in-place: the byte after each
-             * value is an HTTP syntax char (\r, :, ?, space) that is
-             * never read again post-parse.  Body/leftover data starts
-             * at read_buf + consumed, which is past all header bytes.
-             */
-            c->read_buf[(size_t)(c->req.method - c->read_buf) + c->req.method_len] = '\0';
-            c->read_buf[(size_t)(c->req.path - c->read_buf) + c->req.path_len] = '\0';
-            if (c->req.query)
-                c->read_buf[(size_t)(c->req.query - c->read_buf) + c->req.query_len] = '\0';
-            for (int i = 0; i < c->req.num_headers; i++) {
-                c->read_buf[(size_t)(c->req.headers[i].name - c->read_buf) + c->req.headers[i].name_len] = '\0';
-                c->read_buf[(size_t)(c->req.headers[i].value - c->read_buf) + c->req.headers[i].value_len] = '\0';
-            }
-
-            size_t leftover = c->read_len - consumed;
-
-            /* Route match */
-            c->route_result = kl_router_match(router,
-                                               c->req.method, c->req.method_len,
-                                               c->req.path, c->req.path_len,
-                                               &c->route, c->params,
-                                               &c->num_params);
-
-            /* Expose route params on request for handlers */
-            memcpy(c->req.params, c->params,
-                   sizeof(KlParam) * (size_t)c->num_params);
-            c->req.num_params = c->num_params;
-
-            /* Run middleware before body reading / handler */
-            if (conn_init_response(c) < 0) {
-                c->state = KL_CONN_CLOSED;
-                return c->state;
-            }
-            if (kl_router_run_middleware(router, &c->req, &c->res) != 0) {
-                /* Middleware short-circuited — body may be unread */
-                c->req.keep_alive = 0;
-                c->res.keep_alive = 0;
-                if (c->res.body_mode == KL_BODY_STREAM) {
-                    conn_log_access(c);
-                    c->state = KL_CONN_CLOSED;
-                    return c->state;
-                }
-                c->state = KL_CONN_SENDING;
-                return c->state;
-            }
-
-            /* WebSocket upgrade — branch before body reading */
-            if (c->route_result == 200 && c->route &&
-                c->route->ws_config) {
-                c->state = (KlConnState)kl_ws_server_upgrade(
-                    c, c->read_buf + consumed, leftover);
-                return c->state;
-            }
-
-            /* HTTP/2 cleartext upgrade (Upgrade: h2c) */
-            if (c->h2_config != NULL) {
-                size_t ug_len;
-                const char *ug = kl_request_header_len(
-                    &c->req, "Upgrade", &ug_len);
-                if (ug && ug_len == 3 &&
-                    strncasecmp(ug, "h2c", 3) == 0) {
-                    c->state = (KlConnState)kl_h2_server_upgrade_from_h1(
-                        c, router, c->h2_config,
-                        c->read_buf + consumed, leftover);
-                    return c->state;
-                }
-            }
-
-            /* Determine if there's a body to read */
-            int has_body = (c->req.content_length > 0 || c->req.chunked);
-
-            if (has_body && c->route && c->route->body_reader) {
-                /* Create body reader — factory can inspect headers */
-                KlBodyReader *br = c->route->body_reader(
-                    c->alloc, &c->req, c->route->user_data);
-                if (!br) {
-                    best_effort_conn_write(c, kl_415_response,
-                                sizeof(kl_415_response) - 1);
-                    c->state = KL_CONN_CLOSED;
-                    return c->state;
-                }
-                c->req.body_reader = br;
-
-                /* Send 100 Continue if client expects it */
-                size_t expect_len;
-                const char *expect = kl_request_header_len(
-                    &c->req, "Expect", &expect_len);
-                if (expect && expect_len == 12 &&
-                    strncasecmp(expect, "100-continue", 12) == 0) {
-                    best_effort_conn_write(c, kl_100_continue,
-                                           sizeof(kl_100_continue) - 1);
-                }
-
-                /* Parse leftover body data in-place (no memmove) */
-                if (c->req.chunked) {
-                    kl_chunked_init(&c->chunked_dec);
-                    if (leftover > 0) {
-                        int rc = kl_chunked_decode(&c->chunked_dec,
-                                    c->read_buf + consumed, leftover,
-                                    c->req.body_reader);
-                        if (rc < 0) {
-                            c->req.body_reader->on_error(c->req.body_reader);
-                            c->state = KL_CONN_CLOSED;
-                            return c->state;
-                        }
-                        if (rc == 1) {
-                            c->req.body_reader->on_complete(c->req.body_reader);
-                            return conn_run_post_middleware_and_handle(c, router);
-                        }
-                    }
-                } else if (leftover > 0) {
-                    size_t body_consumed;
-                    KlParseResult bpr = c->parser->parse(
-                        c->parser, &c->req,
-                        c->read_buf + consumed, leftover,
-                        &body_consumed);
-                    (void)body_consumed;
-
-                    if (bpr == KL_PARSE_ERROR) {
-                        c->req.body_reader->on_error(c->req.body_reader);
-                        c->state = KL_CONN_CLOSED;
-                        return c->state;
-                    }
-                    if (bpr == KL_PARSE_OK) {
-                        return conn_run_post_middleware_and_handle(c, router);
-                    }
-                    /* INCOMPLETE — need more body data */
-                }
-
-                c->read_len = 0;
-                c->body_start_ms = kl_monotonic_ms();
-                c->state = KL_CONN_READING_BODY;
-                return c->state;
-
-            } else if (!has_body) {
-                /* No body — header pointers valid, process immediately */
-                return conn_run_post_middleware_and_handle(c, router);
-
-            } else {
-                /* Body present but no reader — discard body */
-
-                /* Content-Length early reject */
-                if (!c->req.chunked &&
-                    c->max_body_size > 0 &&
-                    c->req.content_length > c->max_body_size) {
-                    best_effort_conn_write(c, kl_413_response,
-                                           sizeof(kl_413_response) - 1);
-                    c->state = KL_CONN_CLOSED;
-                    return c->state;
-                }
-
-                if (c->req.chunked) {
-                    kl_chunked_init(&c->chunked_dec);
-                    if (leftover > 0) {
-                        int rc = kl_chunked_decode(&c->chunked_dec,
-                                    c->read_buf + consumed, leftover, NULL);
-                        if (rc < 0) {
-                            c->state = KL_CONN_CLOSED;
-                            return c->state;
-                        }
-                        if (c->max_body_size > 0 &&
-                            c->chunked_dec.total_body > c->max_body_size) {
-                            best_effort_conn_write(c, kl_413_response,
-                                                   sizeof(kl_413_response) - 1);
-                            c->state = KL_CONN_CLOSED;
-                            return c->state;
-                        }
-                        if (rc == 1) {
-                            return conn_run_post_middleware_and_handle(c, router);
-                        }
-                    }
-                } else if (leftover > 0) {
-                    size_t body_consumed;
-                    KlParseResult bpr = c->parser->parse(
-                        c->parser, &c->req,
-                        c->read_buf + consumed, leftover,
-                        &body_consumed);
-                    (void)body_consumed;
-
-                    if (bpr == KL_PARSE_ERROR) {
-                        c->state = KL_CONN_CLOSED;
-                        return c->state;
-                    }
-                    if (bpr == KL_PARSE_OK) {
-                        return conn_run_post_middleware_and_handle(c, router);
-                    }
-                }
-
-                c->read_len = 0;
-                c->body_start_ms = kl_monotonic_ms();
-                c->state = KL_CONN_READING_BODY;
-                return c->state;
-            }
+            conn_null_terminate_headers(c);
+            return conn_dispatch_request(c, router,
+                                          c->read_buf + consumed,
+                                          c->read_len - consumed);
         }
 
-        /* KL_PARSE_OK — request with no body completed in one shot
-         * (e.g., GET that completed before HEADERS_OK was seen because
-         *  the entire message fit in one parse call) */
         if (pr == KL_PARSE_OK) {
-            /* Route match (wasn't done during HEADERS_OK) */
-            c->route_result = kl_router_match(router,
-                                               c->req.method, c->req.method_len,
-                                               c->req.path, c->req.path_len,
-                                               &c->route, c->params,
-                                               &c->num_params);
-
-            /* Expose route params on request for handlers */
-            memcpy(c->req.params, c->params,
-                   sizeof(KlParam) * (size_t)c->num_params);
-            c->req.num_params = c->num_params;
-
-            /* Run middleware */
-            if (conn_init_response(c) < 0) {
-                c->state = KL_CONN_CLOSED;
-                return c->state;
-            }
-            if (kl_router_run_middleware(router, &c->req, &c->res) != 0) {
-                c->req.keep_alive = 0;
-                c->res.keep_alive = 0;
-                if (c->res.body_mode == KL_BODY_STREAM) {
-                    conn_log_access(c);
-                    c->state = KL_CONN_CLOSED;
-                    return c->state;
-                }
-                c->state = KL_CONN_SENDING;
-                return c->state;
-            }
-
-            /* WebSocket upgrade — branch before handler */
-            if (c->route_result == 200 && c->route &&
-                c->route->ws_config) {
-                c->state = (KlConnState)kl_ws_server_upgrade(c, NULL, 0);
-                return c->state;
-            }
-
-            /* HTTP/2 cleartext upgrade (Upgrade: h2c) */
-            if (c->h2_config != NULL) {
-                size_t ug_len;
-                const char *ug = kl_request_header_len(
-                    &c->req, "Upgrade", &ug_len);
-                if (ug && ug_len == 3 &&
-                    strncasecmp(ug, "h2c", 3) == 0) {
-                    c->state = (KlConnState)kl_h2_server_upgrade_from_h1(
-                        c, router, c->h2_config, NULL, 0);
-                    return c->state;
-                }
-            }
-
-            return conn_run_post_middleware_and_handle(c, router);
+            return conn_dispatch_request(c, router, NULL, 0);
         }
 
         c->state = KL_CONN_CLOSED;

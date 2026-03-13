@@ -30,6 +30,12 @@ docs/api/
 *.gcda
 *.gcno
 *.gcov
+coverage.info
+coverage_html/
+
+# Generated files
+*.d
+keel.pc
 
 # Editor/IDE
 .vscode/

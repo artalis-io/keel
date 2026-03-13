@@ -45,6 +45,10 @@ else
   endif
 endif
 
+# Header dependency tracking
+CFLAGS += -MMD -MP
+VENDOR_CFLAGS += -MMD -MP
+
 # Core library — parser-agnostic
 CORE_SRC = src/allocator.c src/error.c src/response.c src/router.c \
            src/connection.c src/server.c src/async.c src/timer.c \
@@ -77,6 +81,9 @@ LLHTTP_OBJ = $(LLHTTP_SRC:.c=.o)
 LIB = libkeel.a
 
 all: $(LIB)
+
+# Include generated dependency files (after default target)
+-include $(CORE_OBJ:.o=.d) $(LLHTTP_OBJ:.o=.d)
 
 $(LIB): $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ)
 ifdef COSMO_FAT
@@ -138,6 +145,26 @@ test: $(TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
+# Install / uninstall
+PREFIX  ?= /usr/local
+DESTDIR ?=
+
+install: $(LIB) keel.pc
+	install -d $(DESTDIR)$(PREFIX)/lib
+	install -d $(DESTDIR)$(PREFIX)/include/keel
+	install -d $(DESTDIR)$(PREFIX)/lib/pkgconfig
+	install -m 644 $(LIB) $(DESTDIR)$(PREFIX)/lib/
+	install -m 644 include/keel/*.h $(DESTDIR)$(PREFIX)/include/keel/
+	install -m 644 keel.pc $(DESTDIR)$(PREFIX)/lib/pkgconfig/
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/lib/$(LIB)
+	rm -rf $(DESTDIR)$(PREFIX)/include/keel
+	rm -f $(DESTDIR)$(PREFIX)/lib/pkgconfig/keel.pc
+
+keel.pc: keel.pc.in
+	sed 's|@PREFIX@|$(PREFIX)|g' $< > $@
+
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
@@ -145,6 +172,12 @@ clean:
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser
+	find . -name '*.d' -delete
+	rm -f keel.pc
+	rm -f coverage.info
+	rm -rf coverage_html
+	find . -name '*.gcda' -delete
+	find . -name '*.gcno' -delete
 
 # Debug build with sanitizers: make debug
 DEBUG_CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -g -O0 \
@@ -161,6 +194,23 @@ debug:
 
 debug-test: debug
 	$(MAKE) test CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)"
+
+# Code coverage (Linux, requires lcov/genhtml)
+COVERAGE_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
+                  -g -O0 --coverage -Iinclude -Ivendor/llhttp
+ifeq ($(UNAME_S),Linux)
+  COVERAGE_CFLAGS += -D_DEFAULT_SOURCE
+endif
+COVERAGE_LDFLAGS = --coverage
+
+coverage:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="$(COVERAGE_CFLAGS)" LDFLAGS="$(COVERAGE_LDFLAGS)"
+	$(MAKE) test CFLAGS="$(COVERAGE_CFLAGS)" LDFLAGS="$(COVERAGE_LDFLAGS)"
+	lcov --capture --directory . --output-file coverage.info --ignore-errors inconsistent
+	lcov --remove coverage.info '*/vendor/*' '*/tests/*' --output-file coverage.info --ignore-errors inconsistent
+	genhtml coverage.info --output-directory coverage_html
+	@echo "Coverage report: coverage_html/index.html"
 
 # Static analysis
 analyze:
@@ -199,4 +249,5 @@ docs:
 smoke: examples
 	sh tests/e2e_examples.sh
 
-.PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke
+.PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
+        install uninstall coverage

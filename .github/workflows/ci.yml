@@ -90,6 +90,14 @@ jobs:
         timeout-minutes: 3
         run: ./fuzz/fuzz_multipart fuzz/corpus_multipart/ -max_total_time=60
 
+      - name: Fuzz WebSocket parser (60s)
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_websocket fuzz/corpus_websocket/ -max_total_time=60
+
+      - name: Fuzz response parser (60s)
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_response_parser fuzz/corpus_response_parser/ -max_total_time=60
+
   analyze:
     name: Static Analysis
     runs-on: ubuntu-latest

@@ -6,12 +6,15 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 487 unit tests
+make test         # build and run all 493 unit tests
 make examples     # build all 20 example programs (22 with TLS)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis
 make fuzz         # build libFuzzer fuzz targets (requires clang)
+make coverage     # code coverage report (Linux, requires lcov)
+make install      # install lib + headers + pkg-config (PREFIX=/usr/local)
+make uninstall    # remove installed files
 make clean        # remove all build artifacts
 ```
 
