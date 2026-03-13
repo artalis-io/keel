@@ -1,13 +1,29 @@
 #include "utest.h"
+#include <keel/keel.h>
 #include <keel/client.h>
 #include <keel/parser.h>
 #include <keel/allocator.h>
 #include <string.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <stdlib.h>
+
+/* ── Test constants ────────────────────────────────────────────────── */
+
+#define TEST_BUF_SIZE       8192
+#define TEST_TIMEOUT_MS     5000
+#define TEST_LONG_TIMEOUT   10000
+#define TEST_POLL_MS        50
+#define TEST_MAX_EVENTS     16
+#define TEST_SERVER_SETTLE  100000   /* usleep after server start */
+#define TEST_MAX_BODY       65536
+#define TEST_LARGE_BODY     32768
+#define TEST_CHUNK_1K       1024
 
 /* ── Streaming test helpers ──────────────────────────────────────── */
 
 typedef struct {
-    char    buf[8192];
+    char    buf[TEST_BUF_SIZE];
     size_t  len;
     int     complete;
     int     headers_called;
@@ -379,38 +395,136 @@ static ssize_t mock_body_read_error(char *buf, size_t buf_len, void *user_data)
     return -1;  /* error */
 }
 
-/* Helper: create a socketpair and send chunked body through it, then read back */
-#include <sys/socket.h>
-#include <unistd.h>
+/* ══════════════════════════════════════════════════════════════════
+ * Integration test infrastructure — real server + client
+ * ══════════════════════════════════════════════════════════════════ */
 
-static int send_and_collect_chunked(KlClientReadFn body_read, void *user_data,
-                                      char *out, size_t out_cap, size_t *out_len)
+#define STREAM_TEST_PORT 18089
+
+/* Server handler: echo body back */
+static void srv_echo(KlRequest *req, KlResponse *res, void *ctx)
 {
-    int fds[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)
-        return -1;
+    (void)ctx;
+    KlBufReader *br = (KlBufReader *)req->body_reader;
+    kl_response_status(res, 200);
+    kl_response_header(res, "Content-Type", "text/plain");
+    if (br && br->len > 0)
+        kl_response_body(res, br->data, br->len);
+    else
+        kl_response_body(res, "no body", 7);
+}
 
-    /* send_body_chunked_sync is static in client.c — we can't call it directly.
-     * Instead, use kl_client_request_s which calls it internally.
-     * For unit testing the format, we test via the streaming API with a real
-     * loopback connection. But that requires a server.
-     *
-     * Alternative: test the format indirectly by parsing what we send.
-     * We use the sync API against a loopback and verify the chunked encoding
-     * round-trips correctly. Since we can't test the wire format without
-     * network, we verify via integration: body_read → chunked send →
-     * recv+parse → verify body matches.
-     *
-     * For now, we verify the API types compile and the callback signatures
-     * match by exercising kl_client_request_s parameter validation. */
-    (void)body_read;
-    (void)user_data;
-    (void)out;
-    (void)out_cap;
-    (void)out_len;
-    close(fds[0]);
-    close(fds[1]);
-    return 0;
+/* Server handler: fixed JSON response */
+static void srv_hello(KlRequest *req, KlResponse *res, void *ctx)
+{
+    (void)req; (void)ctx;
+    kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+/* Server handler: streaming chunked response */
+static void srv_chunked(KlRequest *req, KlResponse *res, void *ctx)
+{
+    (void)req; (void)ctx;
+    kl_response_header(res, "Content-Type", "text/plain");
+    KlWriteFn write_fn;
+    void *write_ctx;
+    kl_response_begin_stream(res, 200, &write_fn, &write_ctx);
+    write_fn(write_ctx, "chunk1", 6);
+    write_fn(write_ctx, "chunk2", 6);
+    write_fn(write_ctx, "chunk3", 6);
+    kl_response_end_stream(res);
+}
+
+/* Server handler: 204 No Content */
+static void srv_no_content(KlRequest *req, KlResponse *res, void *ctx)
+{
+    (void)req; (void)ctx;
+    kl_response_status(res, 204);
+}
+
+static KlServer stream_test_server;
+static pthread_t stream_test_tid;
+
+static void *stream_server_thread(void *arg)
+{
+    (void)arg;
+    kl_server_run(&stream_test_server);
+    return NULL;
+}
+
+static void start_stream_server(void)
+{
+    KlConfig cfg = {.port = STREAM_TEST_PORT, .max_body_size = TEST_MAX_BODY};
+    kl_server_init(&stream_test_server, &cfg);
+    kl_server_route(&stream_test_server, "GET", "/hello",
+                    srv_hello, NULL, NULL);
+    kl_server_route(&stream_test_server, "GET", "/chunked",
+                    srv_chunked, NULL, NULL);
+    kl_server_route(&stream_test_server, "GET", "/nocontent",
+                    srv_no_content, NULL, NULL);
+    kl_server_route(&stream_test_server, "POST", "/echo",
+                    srv_echo, (void *)(size_t)TEST_MAX_BODY,
+                    kl_body_reader_buffer);
+    pthread_create(&stream_test_tid, NULL, stream_server_thread, NULL);
+    usleep(TEST_SERVER_SETTLE);
+}
+
+static void stop_stream_server(void)
+{
+    kl_server_stop(&stream_test_server);
+    pthread_join(stream_test_tid, NULL);
+    kl_server_free(&stream_test_server);
+}
+
+/* ── Async completion context ──────────────────────────────────────── */
+
+typedef struct {
+    StreamCtx  stream;     /* reuse for on_body/on_headers/on_complete */
+    int        done;       /* set by on_done */
+    int        error;      /* kl_client_error result */
+    int        status;     /* response status */
+    char       body[TEST_BUF_SIZE]; /* buffered body (non-streaming path) */
+    size_t     body_len;
+} AsyncCtx;
+
+static void async_on_done(KlClient *client, void *user_data)
+{
+    AsyncCtx *ctx = user_data;
+    ctx->error = kl_client_error(client);
+    if (ctx->error == 0) {
+        const KlClientResponse *resp = kl_client_response(client);
+        if (resp) {
+            ctx->status = resp->status;
+            if (resp->body && resp->body_len > 0) {
+                size_t n = resp->body_len < sizeof(ctx->body) - 1
+                         ? resp->body_len : sizeof(ctx->body) - 1;
+                memcpy(ctx->body, resp->body, n);
+                ctx->body_len = n;
+            }
+        }
+    }
+    ctx->done = 1;
+}
+
+/* Run event loop until ctx->done is set or timeout */
+static int run_until_done(KlEventCtx *ev, AsyncCtx *ctx, int timeout_ms)
+{
+    int elapsed = 0;
+    while (!ctx->done && elapsed < timeout_ms) {
+        int n = kl_event_ctx_run(ev, TEST_MAX_EVENTS, TEST_POLL_MS);
+        if (n < 0) return -1;
+        elapsed += TEST_POLL_MS;
+    }
+    return ctx->done ? 0 : -1;
+}
+
+/* URL helper for stream test port */
+static char url_buf[128];
+static const char *test_url(const char *path)
+{
+    snprintf(url_buf, sizeof(url_buf),
+             "http://127.0.0.1:%d%s", STREAM_TEST_PORT, path);
+    return url_buf;
 }
 
 UTEST(client_stream, stream_req_api_validation) {
@@ -448,43 +562,6 @@ UTEST(client_stream, stream_req_null_stream) {
     ASSERT_EQ(rc, -1);
 }
 
-UTEST(client_stream, stream_req_body_read_types) {
-    /* Verify callback types compile correctly */
-    KlClientStreamCfg cfg;
-    memset(&cfg, 0, sizeof(cfg));
-
-    MockReader mr = { .data = "hello", .len = 5, .pos = 0, .chunk_size = 0 };
-    cfg.body_read = mock_body_read;
-    cfg.user_data = &mr;
-
-    /* Just verify the struct is well-formed — actual send requires a server */
-    ASSERT_TRUE(cfg.body_read != NULL);
-    ASSERT_TRUE(cfg.on_body == NULL);
-    ASSERT_TRUE(cfg.on_headers == NULL);
-    ASSERT_TRUE(cfg.on_complete == NULL);
-}
-
-UTEST(client_stream, stream_req_eof_immediate_types) {
-    KlClientStreamCfg cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.body_read = mock_body_read_eof;
-
-    ASSERT_TRUE(cfg.body_read != NULL);
-    char buf[16];
-    ssize_t r = cfg.body_read(buf, sizeof(buf), NULL);
-    ASSERT_EQ(r, (ssize_t)0);  /* EOF */
-}
-
-UTEST(client_stream, stream_req_error_types) {
-    KlClientStreamCfg cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.body_read = mock_body_read_error;
-
-    char buf[16];
-    ssize_t r = cfg.body_read(buf, sizeof(buf), NULL);
-    ASSERT_EQ(r, (ssize_t)-1);  /* error */
-}
-
 UTEST(client_stream, async_stream_api_validation) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
@@ -505,13 +582,576 @@ UTEST(client_stream, async_stream_api_validation) {
     kl_event_ctx_free(&ev);
 }
 
-/* Test that send_and_collect_chunked helper works (placeholder) */
-UTEST(client_stream, chunked_helper_compiles) {
-    char out[256];
-    size_t out_len = 0;
-    int rc = send_and_collect_chunked(mock_body_read_eof, NULL,
-                                        out, sizeof(out), &out_len);
+/* ══════════════════════════════════════════════════════════════════
+ * Sync integration tests (real server + kl_client_request_s)
+ * ══════════════════════════════════════════════════════════════════ */
+
+UTEST(sync_stream, response_stream_fixed_body) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    KlClientResponse resp;
+    StreamCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    KlClientStreamCfg stream = {
+        .on_body     = test_on_body,
+        .on_headers  = test_on_headers,
+        .on_complete = test_on_complete,
+        .user_data   = &ctx,
+    };
+
+    int rc = kl_client_request_s(&a, &cfg, "GET", test_url("/hello"),
+                                   NULL, 0, NULL, 0, &stream, &resp);
     ASSERT_EQ(rc, 0);
+    ASSERT_EQ(resp.status, 200);
+
+    /* Body was streamed, not buffered */
+    ASSERT_TRUE(resp.body == NULL);
+    ASSERT_EQ(resp.body_len, (size_t)0);
+
+    /* on_body received the JSON */
+    ASSERT_EQ(ctx.len, (size_t)11);
+    ASSERT_EQ(memcmp(ctx.buf, "{\"ok\":true}", 11), 0);
+
+    /* Headers callback fired */
+    ASSERT_TRUE(ctx.headers_called);
+    ASSERT_EQ(ctx.headers_status, 200);
+
+    /* Completion callback fired */
+    ASSERT_TRUE(ctx.complete);
+
+    kl_client_response_free(&resp);
+    stop_stream_server();
+}
+
+UTEST(sync_stream, response_stream_chunked) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    KlClientResponse resp;
+    StreamCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    KlClientStreamCfg stream = {
+        .on_body     = test_on_body,
+        .on_complete = test_on_complete,
+        .user_data   = &ctx,
+    };
+
+    int rc = kl_client_request_s(&a, &cfg, "GET", test_url("/chunked"),
+                                   NULL, 0, NULL, 0, &stream, &resp);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(resp.status, 200);
+    ASSERT_TRUE(resp.body == NULL);
+
+    /* Received all 3 chunks */
+    ASSERT_EQ(ctx.len, (size_t)18);
+    ASSERT_EQ(memcmp(ctx.buf, "chunk1chunk2chunk3", 18), 0);
+    ASSERT_GE(ctx.body_calls, 1);
+    ASSERT_TRUE(ctx.complete);
+
+    kl_client_response_free(&resp);
+    stop_stream_server();
+}
+
+UTEST(sync_stream, response_stream_no_body) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    KlClientResponse resp;
+    StreamCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    KlClientStreamCfg stream = {
+        .on_body     = test_on_body,
+        .on_complete = test_on_complete,
+        .user_data   = &ctx,
+    };
+
+    int rc = kl_client_request_s(&a, &cfg, "GET", test_url("/nocontent"),
+                                   NULL, 0, NULL, 0, &stream, &resp);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(resp.status, 204);
+    ASSERT_EQ(ctx.body_calls, 0);
+    ASSERT_TRUE(ctx.complete);
+
+    kl_client_response_free(&resp);
+    stop_stream_server();
+}
+
+UTEST(sync_stream, request_stream_chunked_upload) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    KlClientResponse resp;
+
+    const char *payload = "streamed upload data";
+    MockReader mr = {
+        .data = payload,
+        .len  = strlen(payload),
+        .pos  = 0,
+        .chunk_size = 8,  /* send in 8-byte chunks */
+    };
+
+    KlClientHeader headers[] = {
+        {"Content-Type", "text/plain"},
+    };
+
+    KlClientStreamCfg stream = {
+        .body_read = mock_body_read,
+        .user_data = &mr,
+    };
+
+    int rc = kl_client_request_s(&a, &cfg, "POST", test_url("/echo"),
+                                   headers, 1, NULL, 0, &stream, &resp);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(resp.status, 200);
+
+    /* Server echoed back our streamed body */
+    ASSERT_EQ(resp.body_len, strlen(payload));
+    ASSERT_EQ(memcmp(resp.body, payload, resp.body_len), 0);
+
+    kl_client_response_free(&resp);
+    stop_stream_server();
+}
+
+UTEST(sync_stream, request_stream_eof_immediate) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    KlClientResponse resp;
+
+    KlClientStreamCfg stream = {
+        .body_read = mock_body_read_eof,
+        .user_data = NULL,
+    };
+
+    int rc = kl_client_request_s(&a, &cfg, "POST", test_url("/echo"),
+                                   NULL, 0, NULL, 0, &stream, &resp);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(resp.status, 200);
+
+    /* Empty chunked body → server sees no body */
+    ASSERT_TRUE(resp.body != NULL);
+    ASSERT_EQ(memcmp(resp.body, "no body", 7), 0);
+
+    kl_client_response_free(&resp);
+    stop_stream_server();
+}
+
+UTEST(sync_stream, request_stream_error_aborts) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    KlClientResponse resp;
+
+    KlClientStreamCfg stream = {
+        .body_read = mock_body_read_error,
+        .user_data = NULL,
+    };
+
+    int rc = kl_client_request_s(&a, &cfg, "POST", test_url("/echo"),
+                                   NULL, 0, NULL, 0, &stream, &resp);
+    ASSERT_EQ(rc, -1);  /* body_read error propagates */
+
+    stop_stream_server();
+}
+
+/* Combined context for bidirectional streaming (body_read + on_body share user_data) */
+typedef struct {
+    MockReader  reader;
+    StreamCtx   stream;
+} BiDiCtx;
+
+static ssize_t bidi_body_read(char *buf, size_t buf_len, void *user_data)
+{
+    BiDiCtx *ctx = user_data;
+    return mock_body_read(buf, buf_len, &ctx->reader);
+}
+
+static int bidi_on_body(const char *data, size_t len, void *user_data)
+{
+    BiDiCtx *ctx = user_data;
+    return test_on_body(data, len, &ctx->stream);
+}
+
+static int bidi_on_headers(int status, const KlClientHeader *headers,
+                            int num_headers, void *user_data)
+{
+    BiDiCtx *ctx = user_data;
+    return test_on_headers(status, headers, num_headers, &ctx->stream);
+}
+
+static void bidi_on_complete(void *user_data)
+{
+    BiDiCtx *ctx = user_data;
+    test_on_complete(&ctx->stream);
+}
+
+UTEST(sync_stream, bidirectional_streaming) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    KlClientResponse resp;
+
+    const char *payload = "bidirectional test";
+    BiDiCtx bctx;
+    memset(&bctx, 0, sizeof(bctx));
+    bctx.reader.data = payload;
+    bctx.reader.len  = strlen(payload);
+
+    KlClientHeader headers[] = {
+        {"Content-Type", "text/plain"},
+    };
+
+    KlClientStreamCfg stream = {
+        .body_read   = bidi_body_read,
+        .on_body     = bidi_on_body,
+        .on_headers  = bidi_on_headers,
+        .on_complete = bidi_on_complete,
+        .user_data   = &bctx,
+    };
+
+    int rc = kl_client_request_s(&a, &cfg, "POST", test_url("/echo"),
+                                   headers, 1, NULL, 0, &stream, &resp);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(resp.status, 200);
+
+    /* Response body was streamed via on_body, not buffered */
+    ASSERT_TRUE(resp.body == NULL);
+    ASSERT_EQ(resp.body_len, (size_t)0);
+
+    /* on_body received the echoed payload */
+    ASSERT_EQ(bctx.stream.len, strlen(payload));
+    ASSERT_EQ(memcmp(bctx.stream.buf, payload, bctx.stream.len), 0);
+
+    /* Headers and completion fired */
+    ASSERT_TRUE(bctx.stream.headers_called);
+    ASSERT_EQ(bctx.stream.headers_status, 200);
+    ASSERT_TRUE(bctx.stream.complete);
+
+    kl_client_response_free(&resp);
+    stop_stream_server();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * Async integration tests (real server + kl_client_start_s)
+ * ══════════════════════════════════════════════════════════════════ */
+
+UTEST(async_stream, response_stream_fixed_body) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    StreamCtx sctx;
+    memset(&sctx, 0, sizeof(sctx));
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+    actx.stream = sctx;
+
+    KlClientStreamCfg stream = {
+        .on_body     = test_on_body,
+        .on_headers  = test_on_headers,
+        .on_complete = test_on_complete,
+        .user_data   = &actx.stream,
+    };
+
+    KlClient *c = kl_client_start_s(&ev, &a, &cfg, "GET", test_url("/hello"),
+                                       NULL, 0, NULL, 0, &stream,
+                                       async_on_done, &actx);
+    ASSERT_TRUE(c != NULL);
+
+    ASSERT_EQ(run_until_done(&ev, &actx, TEST_TIMEOUT_MS), 0);
+    ASSERT_TRUE(actx.done);
+    ASSERT_EQ(actx.error, 0);
+    ASSERT_EQ(actx.status, 200);
+
+    /* Body was streamed via on_body, not buffered */
+    ASSERT_EQ(actx.body_len, (size_t)0);
+    ASSERT_EQ(actx.stream.len, (size_t)11);
+    ASSERT_EQ(memcmp(actx.stream.buf, "{\"ok\":true}", 11), 0);
+    ASSERT_TRUE(actx.stream.headers_called);
+    ASSERT_EQ(actx.stream.headers_status, 200);
+    ASSERT_TRUE(actx.stream.complete);
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+    stop_stream_server();
+}
+
+UTEST(async_stream, response_stream_chunked) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+
+    KlClientStreamCfg stream = {
+        .on_body     = test_on_body,
+        .on_complete = test_on_complete,
+        .user_data   = &actx.stream,
+    };
+
+    KlClient *c = kl_client_start_s(&ev, &a, &cfg, "GET", test_url("/chunked"),
+                                       NULL, 0, NULL, 0, &stream,
+                                       async_on_done, &actx);
+    ASSERT_TRUE(c != NULL);
+
+    ASSERT_EQ(run_until_done(&ev, &actx, TEST_TIMEOUT_MS), 0);
+    ASSERT_EQ(actx.error, 0);
+    ASSERT_EQ(actx.status, 200);
+
+    /* All 3 chunks received */
+    ASSERT_EQ(actx.stream.len, (size_t)18);
+    ASSERT_EQ(memcmp(actx.stream.buf, "chunk1chunk2chunk3", 18), 0);
+    ASSERT_TRUE(actx.stream.complete);
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+    stop_stream_server();
+}
+
+UTEST(async_stream, response_stream_no_body) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+
+    KlClientStreamCfg stream = {
+        .on_body     = test_on_body,
+        .on_complete = test_on_complete,
+        .user_data   = &actx.stream,
+    };
+
+    KlClient *c = kl_client_start_s(&ev, &a, &cfg, "GET", test_url("/nocontent"),
+                                       NULL, 0, NULL, 0, &stream,
+                                       async_on_done, &actx);
+    ASSERT_TRUE(c != NULL);
+
+    ASSERT_EQ(run_until_done(&ev, &actx, TEST_TIMEOUT_MS), 0);
+    ASSERT_EQ(actx.error, 0);
+    ASSERT_EQ(actx.status, 204);
+    ASSERT_EQ(actx.stream.body_calls, 0);
+    ASSERT_TRUE(actx.stream.complete);
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+    stop_stream_server();
+}
+
+UTEST(async_stream, request_stream_chunked_upload) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+
+    const char *payload = "async chunked upload";
+    MockReader mr = {
+        .data = payload,
+        .len  = strlen(payload),
+        .pos  = 0,
+        .chunk_size = 6,  /* small chunks */
+    };
+
+    KlClientHeader headers[] = {
+        {"Content-Type", "text/plain"},
+    };
+
+    KlClientStreamCfg stream = {
+        .body_read = mock_body_read,
+        .user_data = &mr,
+    };
+
+    KlClient *c = kl_client_start_s(&ev, &a, &cfg, "POST", test_url("/echo"),
+                                       headers, 1, NULL, 0, &stream,
+                                       async_on_done, &actx);
+    ASSERT_TRUE(c != NULL);
+
+    ASSERT_EQ(run_until_done(&ev, &actx, TEST_TIMEOUT_MS), 0);
+    ASSERT_EQ(actx.error, 0);
+    ASSERT_EQ(actx.status, 200);
+
+    /* Server echoed back our streamed body */
+    ASSERT_EQ(actx.body_len, strlen(payload));
+    ASSERT_EQ(memcmp(actx.body, payload, actx.body_len), 0);
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+    stop_stream_server();
+}
+
+UTEST(async_stream, request_stream_eof_immediate) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+
+    KlClientStreamCfg stream = {
+        .body_read = mock_body_read_eof,
+        .user_data = NULL,
+    };
+
+    KlClient *c = kl_client_start_s(&ev, &a, &cfg, "POST", test_url("/echo"),
+                                       NULL, 0, NULL, 0, &stream,
+                                       async_on_done, &actx);
+    ASSERT_TRUE(c != NULL);
+
+    ASSERT_EQ(run_until_done(&ev, &actx, TEST_TIMEOUT_MS), 0);
+    ASSERT_EQ(actx.error, 0);
+    ASSERT_EQ(actx.status, 200);
+
+    /* Empty chunked body → "no body" from echo handler */
+    ASSERT_EQ(memcmp(actx.body, "no body", 7), 0);
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+    stop_stream_server();
+}
+
+UTEST(async_stream, request_stream_error_aborts) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+
+    KlClientStreamCfg stream = {
+        .body_read = mock_body_read_error,
+        .user_data = NULL,
+    };
+
+    KlClient *c = kl_client_start_s(&ev, &a, &cfg, "POST", test_url("/echo"),
+                                       NULL, 0, NULL, 0, &stream,
+                                       async_on_done, &actx);
+    ASSERT_TRUE(c != NULL);
+
+    ASSERT_EQ(run_until_done(&ev, &actx, TEST_TIMEOUT_MS), 0);
+    ASSERT_TRUE(actx.done);
+    ASSERT_EQ(actx.error, -1);  /* body_read error */
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+    stop_stream_server();
+}
+
+UTEST(async_stream, null_stream_buffered) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+
+    /* stream=NULL → behaves like kl_client_start (buffered) */
+    KlClient *c = kl_client_start_s(&ev, &a, &cfg, "GET", test_url("/hello"),
+                                       NULL, 0, NULL, 0, NULL,
+                                       async_on_done, &actx);
+    ASSERT_TRUE(c != NULL);
+
+    ASSERT_EQ(run_until_done(&ev, &actx, TEST_TIMEOUT_MS), 0);
+    ASSERT_EQ(actx.error, 0);
+    ASSERT_EQ(actx.status, 200);
+
+    /* Body was buffered normally */
+    ASSERT_EQ(actx.body_len, (size_t)11);
+    ASSERT_EQ(memcmp(actx.body, "{\"ok\":true}", 11), 0);
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+    stop_stream_server();
+}
+
+UTEST(async_stream, request_stream_large_body) {
+    start_stream_server();
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlClientConfig cfg = {.timeout_ms = TEST_TIMEOUT_MS};
+    AsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+
+    /* 32KB body sent in 1KB chunks */
+    size_t payload_len = TEST_LARGE_BODY;
+    char *payload = malloc(payload_len);
+    ASSERT_TRUE(payload != NULL);
+    memset(payload, 'A', payload_len);
+
+    MockReader mr = {
+        .data = payload,
+        .len  = payload_len,
+        .pos  = 0,
+        .chunk_size = TEST_CHUNK_1K,
+    };
+
+    KlClientHeader headers[] = {
+        {"Content-Type", "application/octet-stream"},
+    };
+
+    KlClientStreamCfg stream = {
+        .body_read = mock_body_read,
+        .user_data = &mr,
+    };
+
+    KlClient *c = kl_client_start_s(&ev, &a, &cfg, "POST", test_url("/echo"),
+                                       headers, 1, NULL, 0, &stream,
+                                       async_on_done, &actx);
+    ASSERT_TRUE(c != NULL);
+
+    ASSERT_EQ(run_until_done(&ev, &actx, TEST_LONG_TIMEOUT), 0);
+    ASSERT_EQ(actx.error, 0);
+    ASSERT_EQ(actx.status, 200);
+
+    /* Verify full body echoed back */
+    const KlClientResponse *resp = kl_client_response(c);
+    ASSERT_TRUE(resp != NULL);
+    ASSERT_EQ(resp->body_len, payload_len);
+    /* Verify first and last bytes */
+    ASSERT_EQ(resp->body[0], 'A');
+    ASSERT_EQ(resp->body[payload_len - 1], 'A');
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+    free(payload);
+    stop_stream_server();
 }
 
 UTEST_MAIN();
