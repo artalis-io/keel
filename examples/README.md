@@ -1,6 +1,6 @@
 # Keel Examples
 
-23 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, timer, SSE, and utility APIs.
+24 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, timer, SSE, redirect, and utility APIs.
 
 ## Quick Start
 
@@ -92,6 +92,7 @@ websocat ws://localhost:8080/ws
 | `async_client` | `hello_server` on :8080 | Concurrent async requests (fan-out) | `kl_client_start`, `KlEventCtx` standalone loop |
 | `websocket_client` | `websocket_server` on :8080 | WebSocket echo client | `KlWsClientConn`, `KlWsClientCallbacks` |
 | `h2_client` | — | HTTP/2 client with mock session | `KlH2ClientConn`, `KlH2ClientSession` vtable |
+| `redirect_client` | — (self-contained) | Redirect following: 301, chain, 303 POST→GET | `kl_redirect_request`, `kl_redirect_start`, `KlRedirectConfig` |
 
 ### Running Client Examples
 
