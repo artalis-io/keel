@@ -78,7 +78,7 @@ static inline const char *kl_request_header_len(const KlRequest *req,
     for (int i = 0; i < req->num_headers; i++) {
         if (req->headers[i].name_len == nlen &&
             strncasecmp(req->headers[i].name, name, nlen) == 0) {
-            *out_len = req->headers[i].value_len;
+            if (out_len) *out_len = req->headers[i].value_len;
             return req->headers[i].value;
         }
     }

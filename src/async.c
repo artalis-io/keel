@@ -132,6 +132,7 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
     KlEvent *events = stack_buf;
 
     if (max_events > KL_CTX_STACK_EVENTS) {
+        if ((size_t)max_events > SIZE_MAX / sizeof(KlEvent)) return -1;
         events = kl_malloc(ctx->alloc, (size_t)max_events * sizeof(KlEvent));
         if (!events) return -1;
     }
