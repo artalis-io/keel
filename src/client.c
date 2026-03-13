@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netdb.h>
 #include <poll.h>
 #include <stdint.h>
@@ -202,6 +203,8 @@ static int send_request_sync(int fd, KlTls *tls,
                               int timeout_ms)
 {
     if (has_crlf(method, strlen(method)))
+        return -1;
+    if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return -1;
 
     char buf[KL_CLIENT_REQ_BUF_SIZE];
@@ -482,6 +485,8 @@ static char *build_request(KlAllocator *alloc,
                             size_t *out_len)
 {
     if (has_crlf(method, strlen(method)))
+        return NULL;
+    if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return NULL;
 
     char buf[KL_CLIENT_REQ_BUF_SIZE];

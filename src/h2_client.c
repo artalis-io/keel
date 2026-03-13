@@ -180,6 +180,7 @@ static void h2c_on_response(KlH2ClientSession *s, int32_t stream_id,
     /* Copy headers */
     if (n > 0 && hdrs) {
         if (n > st->resp.headers_cap) {
+            if ((size_t)n > SIZE_MAX / sizeof(KlH2ClientHeader)) return;
             size_t sz = (size_t)n * sizeof(KlH2ClientHeader);
             KlH2ClientHeader *new_hdrs = kl_malloc(c->alloc, sz);
             if (!new_hdrs) return;
@@ -189,6 +190,7 @@ static void h2c_on_response(KlH2ClientSession *s, int32_t stream_id,
             st->resp.headers = new_hdrs;
             st->resp.headers_cap = n;
         }
+        int copied = 0;
         for (int i = 0; i < n; i++) {
             /* Duplicate name/value strings */
             size_t nlen = strlen(hdrs[i].name) + 1;
@@ -198,14 +200,16 @@ static void h2c_on_response(KlH2ClientSession *s, int32_t stream_id,
             if (!name || !value) {
                 if (name) kl_free(c->alloc, name, nlen);
                 if (value) kl_free(c->alloc, value, vlen);
+                st->resp.num_headers = copied;
                 return;
             }
             memcpy(name, hdrs[i].name, nlen);
             memcpy(value, hdrs[i].value, vlen);
             st->resp.headers[i].name = name;
             st->resp.headers[i].value = value;
+            copied++;
         }
-        st->resp.num_headers = n;
+        st->resp.num_headers = copied;
     }
 }
 
@@ -217,6 +221,7 @@ static void h2c_on_data(KlH2ClientSession *s, int32_t stream_id,
     if (!st || len == 0) return;
 
     /* Grow body buffer */
+    if (len > SIZE_MAX - st->resp.body_len) return;
     size_t needed = st->resp.body_len + len;
     if (needed > SIZE_MAX / 2) return;
 

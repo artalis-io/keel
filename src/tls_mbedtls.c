@@ -24,6 +24,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 
 /* Secure zeroing — scrub key material before free.
  * Uses volatile pointer to prevent compiler from optimizing away the store.
@@ -71,9 +72,11 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
     KlMbedtlsTls *t = (KlMbedtlsTls *)ctx;
     ssize_t ret;
 
-    do {
-        ret = write(t->fd, buf, len);
-    } while (ret < 0 && errno == EINTR);
+#ifdef MSG_NOSIGNAL
+    do { ret = send(t->fd, buf, len, MSG_NOSIGNAL); } while (ret < 0 && errno == EINTR);
+#else
+    do { ret = write(t->fd, buf, len); } while (ret < 0 && errno == EINTR);
+#endif
 
     if (ret < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)

@@ -1,6 +1,6 @@
 # Keel Examples
 
-20 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, and utility APIs.
+21 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, SSE, and utility APIs.
 
 ## Quick Start
 
@@ -19,6 +19,7 @@ make examples
 | `middleware` | 8080 | Pre/post-body middleware, CORS, auth | `kl_server_use`, `kl_server_use_post`, `kl_cors_middleware` |
 | `static_files` | 8080 | Static file server with sendfile | `kl_response_file`, MIME detection, path traversal guard |
 | `streaming` | 8080 | Chunked streaming responses | `kl_response_begin_stream`, `KlWriteFn` |
+| `sse` | 8080 | Server-Sent Events streaming | `KlSse`, `kl_sse_begin`, `kl_sse_event`, `kl_sse_comment` |
 | `body_readers` | 8080 | Buffer + multipart body readers | `KlBufReader`, `KlMultipartReader`, `kl_body_reader_multipart` |
 | `async` | 8080 | Async suspend/resume with FD watchers | `KlWatcher`, `KlAsyncOp`, `kl_async_suspend/complete` |
 | `thread_pool` | 8080 | Blocking work on worker threads | `KlThreadPool`, `KlWorkItem`, `work_fn/done_fn/cancel_fn` |
@@ -60,6 +61,9 @@ curl localhost:8080/index.html
 
 # streaming
 curl localhost:8080/stream
+
+# sse
+curl -N localhost:8080/events
 
 # body_readers
 curl -X POST -d 'hello world' localhost:8080/echo

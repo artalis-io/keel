@@ -215,16 +215,19 @@ static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
 /* ── Public send functions ───────────────────────────────────────── */
 
 int kl_ws_server_send_text(KlWsServerConn *ws, const char *data, size_t len) {
+    if (!ws) return -1;
     if (ws->close_sent) return -1;
     return ws_send_frame(ws, KL_WS_OP_TEXT, data, len);
 }
 
 int kl_ws_server_send_binary(KlWsServerConn *ws, const char *data, size_t len) {
+    if (!ws) return -1;
     if (ws->close_sent) return -1;
     return ws_send_frame(ws, KL_WS_OP_BINARY, data, len);
 }
 
 int kl_ws_server_send_ping(KlWsServerConn *ws, const char *data, size_t len) {
+    if (!ws) return -1;
     if (ws->close_sent) return -1;
     if (len > 125) return -1;
     return ws_send_frame(ws, KL_WS_OP_PING, data, len);
@@ -232,6 +235,7 @@ int kl_ws_server_send_ping(KlWsServerConn *ws, const char *data, size_t len) {
 
 int kl_ws_server_close(KlWsServerConn *ws, uint16_t code, const char *reason,
                         size_t reason_len) {
+    if (!ws) return -1;
     if (ws->close_sent) return 0;
     ws->close_sent = 1;
     ws->close_code = code;

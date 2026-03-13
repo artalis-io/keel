@@ -21,6 +21,7 @@ int kl_router_init(KlRouter *r, KlAllocator *alloc) {
 int kl_router_add(KlRouter *r, const char *method, const char *pattern,
                   KlHandler handler, void *user_data,
                   KlBodyReaderFactory body_reader) {
+    if (!r || !method || !pattern) return -1;
     if (r->count >= r->capacity) {
         if (r->capacity > INT_MAX / 2) return -1;
         int new_cap = r->capacity * 2;
@@ -136,6 +137,7 @@ static int match_middleware_pattern(const char *method, size_t method_len,
 
 int kl_router_use(KlRouter *r, const char *method, const char *pattern,
                   KlMiddleware fn, void *user_data) {
+    if (!r || !method || !pattern || !fn) return -1;
     if (r->mw_count >= r->mw_capacity) {
         int new_cap;
         if (r->mw_capacity == 0) {
@@ -181,6 +183,7 @@ int kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res) {
 
 int kl_router_use_post(KlRouter *r, const char *method, const char *pattern,
                        KlMiddleware fn, void *user_data) {
+    if (!r || !method || !pattern || !fn) return -1;
     if (r->post_mw_count >= r->post_mw_capacity) {
         int new_cap;
         if (r->post_mw_capacity == 0) {

@@ -204,20 +204,9 @@ int  kl_timer_cancel(KlEventCtx *ctx, int timer_id);
 
 Implementation: min-heap on `KlEventCtx`, checked after each `kl_event_wait` return. ~200 lines. Unlocks WebSocket keep-alive pings and retry patterns.
 
-### SSE helper
+### SSE helper — COMPLETED
 
-**Priority: Low** | **Effort: Trivial**
-
-`kl_response_begin_stream()` already provides chunked transfer encoding. SSE is just `data:` line framing on top. A thin helper would handle the boilerplate:
-
-```c
-int kl_sse_begin(KlResponse *res, KlWriteFn *write_fn, void **write_ctx);
-int kl_sse_event(KlWriteFn write_fn, void *ctx,
-                 const char *event, const char *data, size_t data_len,
-                 const char *id);
-```
-
-~50 lines of convenience code. No new architecture.
+Thin SSE framing layer over `kl_response_begin_stream`. `KlSse` handle wraps write_fn/write_ctx/res. `kl_sse_begin` sets Content-Type/Cache-Control and starts chunked stream. `kl_sse_event` formats event:/id:/data: fields with multiline auto-split. `kl_sse_comment` for keep-alive pings. Zero allocation, ~60 lines.
 
 ---
 

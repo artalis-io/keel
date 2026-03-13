@@ -22,12 +22,12 @@ make clean        # remove all build artifacts
 - `parsers/` — Pluggable parser backends (`parser_llhttp.c`, `response_parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
-- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser).
+- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser).
 - `docs/` — Architecture and roadmap documentation.
 
 ## Architecture
 
-22 orthogonal modules, each independently testable:
+23 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -50,6 +50,7 @@ make clean        # remove all build artifacts
 19. **websocket_client** — Async WebSocket client with masked frames (RFC 6455)
 20. **h2_client** — HTTP/2 client with pluggable session vtable (multiplexed streams)
 21. **resolver** — Pluggable async DNS resolver vtable (bring-your-own backend)
+22. **sse** — Server-Sent Events helper: line framing over chunked streaming (zero alloc)
 
 ## Key Types
 
@@ -106,6 +107,7 @@ make clean        # remove all build artifacts
 | `KlH2ClientSession` | `h2_client.h` | Pluggable session vtable (wraps nghttp2 etc.) |
 | `KlH2ClientHeader` | `h2_client.h` | Request/response header: name, value |
 | `KlH2ClientResponse` | `h2_client.h` | Accumulated stream response: status, headers, body |
+| `KlSse` | `sse.h` | SSE stream handle: write_fn + write_ctx + response (zero alloc) |
 
 ## Git
 

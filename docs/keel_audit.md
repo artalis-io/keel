@@ -1,7 +1,7 @@
 # Keel HTTP Client/Server Library — C Code Audit Report
 
-**Date:** 2026-03-11
-**Previous Audit:** 2026-03-09
+**Date:** 2026-03-13
+**Previous Audit:** 2026-03-11
 **Auditor:** Claude Opus 4.6 (automated)
 **Scope:** All source files in `src/`, `parsers/`, `include/keel/`, and internal headers (`src/*.h`). Test files in `tests/` checked for coverage gaps.
 
@@ -11,49 +11,38 @@
 |----------|-------|
 | Critical | 0     |
 | High     | 0     |
-| Medium   | 4     |
-| Low      | 8     |
+| Medium   | 5     |
+| Low      | 10    |
 | Info     | 9     |
-| **Total**| **21**|
+| **Total**| **24**|
 
-**Files scanned:** 54 (24 source `.c`, 30 headers `.h`)
-**Test suites:** 21 (372 UTEST cases)
-**Lines of code (approx):** ~8,000 (src + parsers), ~2,500 (headers), ~9,500 (tests)
+**Files scanned:** 56 (25 source `.c`, 31 headers `.h`)
+**Test suites:** 25 (435+ UTEST cases)
+**Lines of code (approx):** ~8,100 (src + parsers), ~2,600 (headers), ~10,000 (tests)
 
-## Changes Since Last Audit (2026-03-09)
+## Changes Since Last Audit (2026-03-11)
 
-### New Modules
-- `src/url.c` / `include/keel/url.h` — URL parser with CRLF injection guard, IPv6 support
-- `src/client.c` / `include/keel/client.h` — Sync (blocking) + async (event-driven) HTTP/1.1 client
-- `parsers/response_parser_llhttp.c` / `include/keel/parser.h` — Client-side HTTP response parser
-- `include/keel/event_ctx.h` — Composable event loop context (refactored from server.h + async.h)
+### New Module
+- `src/sse.c` / `include/keel/sse.h` — Server-Sent Events helper: line framing over chunked streaming (zero alloc)
 
-### Renamed Types
-- `KlParser` → `KlRequestParser`, `kl_parser_llhttp()` → `kl_request_parser_llhttp()`
-- `KlWatcher` / watcher API moved from `async.h` to `event_ctx.h`, now takes `KlEventCtx*` instead of `KlServer*`
-- `KlThreadPool` creation now takes `KlEventCtx*` instead of `KlServer*`
+### New Test Suite
+- `tests/test_sse.c` — 7 tests covering basic events, multiline data, empty data, comments, write errors, header setup
 
-### Resolved Issues (1 of 15)
-| ID | Issue | Resolution |
-|----|-------|------------|
-| M-2 (prev) | listen_fd not set to -1 on event_init failure | Carried forward as resolved from previous audit |
+### New Example
+- `examples/sse.c` — SSE streaming example with E2E smoke test
+
+---
 
 ## Overall Assessment
 
-The Keel codebase remains well-engineered with strong security discipline. The new client modules (url.c, client.c, response_parser_llhttp.c) follow all established conventions. Key strengths:
+The Keel codebase remains well-engineered with strong security discipline. The new SSE module follows the established zero-allocation pattern and correctly delegates to the existing streaming response API. Key strengths:
 
-- **No unsafe string functions:** Zero uses of `strcpy`, `strcat`, `sprintf`, `gets`, `atoi`, `atol`, or `atof` across all 22 source files.
+- **No unsafe string functions:** Zero uses of `strcpy`, `strcat`, `sprintf`, `gets`, `atoi`, `atol`, or `atof` across all 25 source files.
 - **Consistent allocator discipline:** All core allocations go through `kl_malloc`/`kl_free`/`kl_realloc`. Only `tls_mbedtls.c` (startup-only) and `allocator.c` (stdlib backend) use raw `malloc`/`free`.
-- **Integer overflow guards:** Systematic `SIZE_MAX/2`, `INT_MAX/2` checks before multiplications and capacity doublings across all modules (35+ guard sites).
 - **All 32+ kl_malloc calls NULL-checked** within 3 lines of allocation.
-- **CRLF injection prevention:** Three separate `has_crlf()` / `contains_crlf()` guards — server response headers (`response.c`), client request headers (`client.c`), and URL components (`url.c`).
-- **Request smuggling mitigation:** CL/TE priority correctly enforced in `parser_llhttp.c`.
-- **SIGPIPE handled:** `signal(SIGPIPE, SIG_IGN)` in `server.c`; `SO_NOSIGPIPE` on client sockets (BSD/macOS).
-- **Three-layer body size limits:** Content-Length early reject, chunked accumulation tracking, per-route buffer limits.
-- **Client response size limit:** `max_response_size` enforced in response parser via `accum_append` overflow guards.
-- **Thread pool safety by construction:** Workers never touch event loop state; `done_fn` always runs on event loop thread via pipe wakeup.
-- **KlEventCtx composability:** Client and thread pool operate with just `KlEventCtx`, no server dependency.
-- **Build hardening:** `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -D_FORTIFY_SOURCE=2 -fstack-protector-strong`, debug builds with ASan+UBSan, static analysis targets, and fuzz targets (parser, multipart, WebSocket).
+- **Integer overflow guards:** Systematic `SIZE_MAX/2`, `INT_MAX/2` checks before multiplications and capacity doublings (35+ guard sites).
+- **CRLF injection prevention:** Three separate guards — server response headers, client request headers, URL components.
+- **Build hardening:** `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -D_FORTIFY_SOURCE=2 -fstack-protector-strong`, debug builds with ASan+UBSan, static analysis targets, 4 fuzz targets.
 
 ---
 
@@ -81,22 +70,45 @@ None found.
 | **Impact** | Unchanged from previous audit. Startup-only raw `malloc`/`free`. Documented exception. |
 | **Suggested Fix** | Accept as-is, or thread an optional `KlAllocator` through context creation. |
 
-### ~~M-2: kl_async_complete ignores kl_event_add return value~~ FIXED
+### M-2: h2_client partial header copy leaks + UB on allocation failure
 
-`kl_event_add` return checked; connection released on failure.
+| Field | Value |
+|-------|-------|
+| **File** | `src/h2_client.c` |
+| **Lines** | 192-208 |
+| **Category** | Memory Safety / Resource Management |
+| **Impact** | When allocation fails partway through `h2c_on_response` header copy loop, previously copied headers (iterations 0..i-1) are leaked. Additionally, `st->resp.num_headers = n` is set to the *intended* count, not the actually-copied count, leaving uninitialized entries that cause UB when `kl_h2_client_response_free` iterates them. |
+| **Suggested Fix** | Track actual count: `st->resp.num_headers = i;` before the `return;`. On failure, free headers 0..i-1 before returning, or rely on `kl_h2_client_response_free` to clean up with the corrected count. |
 
-### ~~M-3: kl_client_start missing input validation for num_headers/headers~~ FIXED
+### M-3: SSE `kl_sse_event` crashes on NULL data with data_len > 0
 
-`num_headers` range and `headers != NULL` validation added to `kl_client_start`.
+| Field | Value |
+|-------|-------|
+| **File** | `src/sse.c` |
+| **Lines** | 37-39 |
+| **Category** | Input Validation / Memory Safety |
+| **Impact** | `data + data_len` is undefined behavior when `data == NULL`. `memchr(NULL, ...)` dereferences NULL. Crashes on any platform. |
+| **Current Code** | `const char *end = data + data_len;` ... `memchr(p, '\n', (size_t)(end - p))` |
+| **Suggested Fix** | Add guard: `if (data_len > 0 && !data) return -1;` at function entry. |
 
-### M-4: io_uring kl_event_mod can leave fd un-monitored on double SQE failure
+### M-4: Router `kl_router_add` / `kl_router_use` crash on NULL method/pattern
+
+| Field | Value |
+|-------|-------|
+| **File** | `src/router.c` |
+| **Lines** | 21, 137, 182 |
+| **Category** | Input Validation |
+| **Impact** | `strlen(method)` and `strlen(pattern)` crash on NULL. Called via `kl_server_route`, `kl_server_use`, `kl_server_use_post` which also don't validate. |
+| **Suggested Fix** | Add `if (!method \|\| !pattern) return -1;` at entry. |
+
+### M-5: io_uring kl_event_mod can leave fd un-monitored on double SQE failure
 
 | Field | Value |
 |-------|-------|
 | **File** | `src/event_iouring.c` |
 | **Lines** | 107-141 |
 | **Category** | Resource Management / Event Loop |
-| **Impact** | Unchanged from previous audit (was M-5). Extremely unlikely — requires RING_SIZE (256) concurrent mod operations. |
+| **Impact** | Unchanged from previous audit (was M-4). Extremely unlikely — requires RING_SIZE (256) concurrent mod operations. |
 | **Suggested Fix** | Low priority. |
 
 ---
@@ -110,7 +122,7 @@ None found.
 | **File** | `include/keel/request.h` |
 | **Lines** | 51-61 |
 | **Category** | API Safety |
-| **Impact** | Unchanged from previous audit. |
+| **Impact** | Fixed in a45563d — header values are now null-terminated in-place. Retained for documentation. |
 
 ### L-2: body_reader_buffer casts user_data to size_t (pointer-to-integer)
 
@@ -130,25 +142,73 @@ None found.
 | **Category** | Performance |
 | **Impact** | Unchanged. Acceptable for default max 128 streams. |
 
-### ~~L-4: build_request addition lacks overflow guard~~ FIXED
+### L-4: Thread pool `done_cap` and queue allocations lack overflow guards
 
-Overflow guard added: `if (body_len > SIZE_MAX - (size_t)off) return NULL;`
+| Field | Value |
+|-------|-------|
+| **File** | `src/thread_pool.c` |
+| **Lines** | 139, 154, 157, 181 |
+| **Category** | Integer Overflow |
+| **Impact** | `int done_cap = queue_cap + num_workers` has no `INT_MAX/2` guard. `(size_t)cap * sizeof(KlWorkItem)` has no `SIZE_MAX / sizeof(T)` guard. Unlike `connection.c:46` which checks before multiplication. Unreachable with realistic config values. |
+| **Suggested Fix** | Add `if (queue_cap > INT_MAX/2 \|\| num_workers > INT_MAX/2) return NULL;` and `if ((size_t)queue_cap > SIZE_MAX / sizeof(KlWorkItem)) return NULL;` |
 
-### ~~L-5: H2 malloc failure sends empty 200 instead of 500~~ FIXED
+### L-5: h2_client header allocation lacks overflow guard
 
-On `kl_malloc` failure, sends 500 "Internal server error" via `submit_response`.
+| Field | Value |
+|-------|-------|
+| **File** | `src/h2_client.c` |
+| **Lines** | 183 |
+| **Category** | Integer Overflow |
+| **Impact** | `(size_t)n * sizeof(KlH2ClientHeader)` without `SIZE_MAX / sizeof(T)` guard. `n` comes from session vtable (potentially attacker-influenced). |
+| **Suggested Fix** | Add `if ((size_t)n > SIZE_MAX / sizeof(KlH2ClientHeader)) return;` |
 
-### ~~L-6: Standalone client on Linux lacks SIGPIPE protection~~ FIXED
+### L-6: h2_client `h2c_on_data` addition can wrap before SIZE_MAX guard
 
-`io_write` uses `send(fd, buf, len, MSG_NOSIGNAL)` on Linux, `write()` on macOS (where `SO_NOSIGPIPE` handles it).
+| Field | Value |
+|-------|-------|
+| **File** | `src/h2_client.c` |
+| **Lines** | 220-221 |
+| **Category** | Integer Overflow |
+| **Impact** | `size_t needed = st->resp.body_len + len;` can wrap before `if (needed > SIZE_MAX / 2)` catches it. Correct pattern is `if (len > SIZE_MAX - body_len)`. Unreachable in practice (requires body_len near SIZE_MAX). |
+| **Suggested Fix** | `if (len > SIZE_MAX - st->resp.body_len) return;` |
 
-### ~~L-7: kl_watcher_rearm ignores kl_event_mod return value~~ FIXED
+### L-7: SSE module has no NULL checks on public functions
 
-`kl_watcher_rearm` returns `int`. Header updated.
+| Field | Value |
+|-------|-------|
+| **File** | `src/sse.c` |
+| **Lines** | 4, 24, 57, 61 |
+| **Category** | Input Validation |
+| **Impact** | `kl_sse_begin(NULL, sse)`, `kl_sse_comment(NULL, ...)`, `kl_sse_end(NULL)` all crash. Inconsistent with `kl_async_*` which check NULL. |
+| **Suggested Fix** | Add `if (!sse) return -1;` to each function; add `if (!res) return -1;` to `kl_sse_begin`. |
 
-### ~~L-8: Response parser has no per-header size limit~~ FIXED
+### L-8: WebSocket server send API missing NULL ws check
 
-Added `KL_MAX_HEADER_SIZE` (8192) limit in `resp_on_header_field` and `resp_on_header_value`.
+| Field | Value |
+|-------|-------|
+| **File** | `src/websocket.c` |
+| **Lines** | 217-233 |
+| **Category** | Input Validation |
+| **Impact** | `kl_ws_server_send_text/binary/ping`, `kl_ws_server_close` dereference `ws` without NULL check. The client equivalents (`kl_ws_client_send_*`) do check `!ws`. |
+| **Suggested Fix** | Add `if (!ws) return -1;` to each function. |
+
+### L-9: Client (int) cast truncates url path/host length for %.*s
+
+| Field | Value |
+|-------|-------|
+| **File** | `src/client.c` |
+| **Lines** | 210-211, 490-491 |
+| **Category** | Signed/Unsigned |
+| **Impact** | `(int)url->path_len` silently truncates values above `INT_MAX`. In practice, URL paths are small, and snprintf truncation checks catch oversized output. |
+
+### L-10: TLS BIO `bio_send` uses plain `write()` without MSG_NOSIGNAL
+
+| Field | Value |
+|-------|-------|
+| **File** | `src/tls_mbedtls.c` |
+| **Lines** | 69-85 |
+| **Category** | Network Safety |
+| **Impact** | On Linux client-only usage (no server running to set `SIG_IGN`), SIGPIPE from a broken peer during TLS write could kill the process. In practice, macOS provides `SO_NOSIGPIPE` and the server sets `SIG_IGN`, so this path is rarely reached. |
 
 ---
 
@@ -156,7 +216,7 @@ Added `KL_MAX_HEADER_SIZE` (8192) limit in `resp_on_header_field` and `resp_on_h
 
 ### I-1: Thread pool backpressure correctly prevents done queue overflow
 
-The `inflight` counter tracks items across all three stages (work queue + executing + done queue). `submit()` rejects when `inflight >= done_cap` where `done_cap = work_cap + num_workers`.
+The `inflight` counter tracks items across all three stages. `submit()` rejects when `inflight >= done_cap`.
 
 ### I-2: Thread pool shutdown sequence is correct
 
@@ -164,116 +224,44 @@ Shutdown sets flag, broadcasts condvar, joins all workers, then drains remaining
 
 ### I-3: Watcher re-arm is safe when callback removes watcher
 
-`kl_watcher_rearm()` walks the watcher list to find the fd. If the callback called `kl_watcher_del()`, the watcher is removed from the list and `rearm` is a safe no-op.
+`kl_watcher_rearm()` walks the watcher list. If the callback called `kl_watcher_del()`, rearm is a safe no-op.
 
-### I-4: CORS origin_buf stack buffer matches KL_CORS_ORIGIN_SIZE
-
-256-byte stack buffer matches the maximum origin length. Safe.
+### I-4: CORS origin_buf stack buffer matches KL_CORS_ORIGIN_SIZE (256 bytes)
 
 ### I-5: Debug build includes `-fno-omit-frame-pointer`
 
-Good practice for ASan/UBSan diagnostics.
+### I-6: Fuzz targets cover four primary attack surfaces
 
-### I-6: Fuzz targets cover the four primary attack surfaces
-
-`fuzz_parser` (HTTP request parser + chunked decoder), `fuzz_multipart` (multipart parser), `fuzz_websocket` (WebSocket frame parser), and `fuzz_response_parser` (HTTP response parser for client).
+Parser, multipart, WebSocket, response parser.
 
 ### I-7: Async client uses blocking DNS (documented trade-off)
 
-`kl_client_start` calls `getaddrinfo()` synchronously on the event loop thread. Code comment acknowledges this: "blocking — typically fast, OS-cached". For production use with slow DNS, consider async DNS via thread pool.
+`KlResolver` vtable added for pluggable async DNS. NULL falls back to sync `getaddrinfo`.
 
 ### I-8: Tagged pointer alignment assumption undocumented
 
-`watcher_tag()` sets LSB=1 on `KlWatcher*`. This requires 2-byte alignment, which is guaranteed by the struct's `int` and pointer members. A `_Static_assert` would make the assumption explicit.
+`watcher_tag()` sets LSB=1 on `KlWatcher*`. A `_Static_assert` would make the 2-byte alignment assumption explicit.
 
-### I-9: thread_pool queue_cap + num_workers unchecked
+### I-9: thread_pool pipe write return value deliberately ignored
 
-`int done_cap = queue_cap + num_workers` could overflow if both are near `INT_MAX`. Both come from user config (`KlThreadPoolConfig`), typically small values (4-64). Not exploitable in practice.
-
----
-
-## New Module Assessment: url.c
-
-| Check | Status |
-|-------|--------|
-| NULL parameter checks | `kl_url_parse`: checks `!url`, `!out` |
-| CRLF injection guard | `has_crlf()` on hostname (line 68) and path (line 88) |
-| IPv6 bracket handling | Missing `]` returns -1 (line 51). Empty `[]` rejected via `host_len == 0` (line 64) |
-| Port range validation | `strtol` + range check `[1, 65535]` (line 76) |
-| Non-numeric port rejected | `end == url` check after `strtol` (line 74) |
-| Zero-copy documented | Header doc states pointers reference original string |
-| No dynamic allocation | Zero `kl_malloc` calls — pure pointer arithmetic |
-
-**Verdict:** Clean. No issues.
-
-## New Module Assessment: client.c
-
-| Check | Status |
-|-------|--------|
-| All kl_malloc NULL-checked | Lines 281, 509, 815, 839 — all checked within 2 lines |
-| fd closed on all error paths | Sync: goto cleanup → close(fd). Async: every failure point closes fd |
-| TLS shutdown before close | Sync: lines 380-383. Async: `async_complete_success/error` |
-| Response size limit enforced | `max_resp` passed to response parser factory |
-| Connect timeout handled | Non-blocking connect + `poll()` with `timeout_ms` |
-| CRLF injection guarded | Method, header names, header values all checked via `has_crlf()` |
-| Watcher cleanup on cancel/error | `kl_watcher_del` called in both completion paths and `kl_client_cancel` |
-| kl_client_free handles all states | Calls `kl_client_cancel` first if still in-flight |
-
-**Issues:** ~~M-3~~ **FIXED**, ~~L-4~~ **FIXED**, ~~L-6~~ **FIXED**.
-
-## New Module Assessment: response_parser_llhttp.c
-
-| Check | Status |
-|-------|--------|
-| Factory kl_malloc NULL-checked | Line 347 |
-| accum_append realloc NULL-checked | Line 70 |
-| flush_header realloc NULL-checked | Lines 97-98, with cleanup of name_copy on value failure |
-| Body size limit enforced | Line 191: `p->max_body` check |
-| Header count limited | Line 88: `KL_MAX_RESPONSE_HEADERS` (64) cap |
-| Integer overflow in accum_append | Line 59: `SIZE_MAX - *len` guard. Line 65: `SIZE_MAX / 2` guard |
-| Proper cleanup on destroy | Lines 317-338: frees all header strings, body, headers array, self |
-| Proper cleanup on reset | Lines 283-315: same pattern minus freeing self |
-| Ownership transfer clean | Lines 236-248: parser pointers cleared after transfer |
-
-**Issues:** ~~L-8~~ **FIXED** (8 KiB per-header name/value limit via `KL_MAX_HEADER_SIZE`).
-
-## New Module Assessment: event_ctx (async.c refactor)
-
-| Check | Status |
-|-------|--------|
-| kl_event_ctx_init NULL checks | Line 16: `!ctx || !alloc` |
-| kl_event_ctx_free NULL check | Line 23: `!ctx` |
-| All watchers freed on ctx_free | Lines 25-31: walks list, event_del + kl_free each |
-| Event loop closed | Line 31: `kl_event_close` after all watchers removed |
-| kl_watcher_add rollback on failure | Lines 53-55: unlinks from list, frees watcher |
-| kl_watcher_mod validates inputs | Line 61: ctx, fd checks. Returns -1 for unknown fd |
-| kl_watcher_del safe for unknown fd | Lines 82-96: silently returns if not found |
-
-**Issues:** ~~M-2~~ **FIXED** (checks `kl_event_add` return, releases connection on failure), ~~L-7~~ **FIXED** (`kl_watcher_rearm` returns `int`).
+`(void)wr` on pipe write is intentional. If pipe buffer is full, done items are drained on next event loop tick.
 
 ---
 
-## Build Hardening Assessment
+## New Module Assessment: sse.c
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| `-Wall -Wextra -Wpedantic` | Present | All builds |
-| `-Wshadow` | Present | All builds |
-| `-Wformat=2` | Present | All builds |
-| `-Werror` | Present | All builds |
-| `-D_FORTIFY_SOURCE=2` | Present | Non-cosmo, non-debug builds |
-| `-fstack-protector-strong` | Present | Non-cosmo builds |
-| ASan + UBSan (debug) | Present | `make debug` |
-| `-fno-omit-frame-pointer` | Present | Debug builds |
-| Clang static analysis | Present | `make analyze` |
-| cppcheck | Present | `make cppcheck` |
-| libFuzzer targets | Present | Parser + multipart + WebSocket + response parser |
-| Vendor code `-w` | Present | Relaxed for llhttp |
-| `-lpthread` (Linux) | Present | Required for thread pool |
+| Check | Status |
+|-------|--------|
+| Zero allocation | Yes — all writes go through `write_fn` directly |
+| write_fn return values checked | Yes — every call to `write_field` and `sse->write_fn` propagates -1 |
+| Buffer overflow possible | No — no stack or heap buffers used |
+| SSE format correct | Yes — `\n` line terminators, blank line event separator, `: ` comment prefix |
+| Multiline data handling | Yes — splits on `\n`, each line gets `data: ` prefix |
+| Empty data handling | Yes — `data_len == 0` produces `data: \n\n` |
+| NULL parameter checks | **Missing** — see M-3, L-7 |
+| NULL data with data_len == 0 | UB: `NULL + 0` pointer arithmetic (works in practice) |
 
-**Missing/Recommended:**
-
-- `-Wconversion` is not set. Would catch implicit narrowing conversions.
+**Issues found:** M-3 (NULL data crash), L-7 (no NULL checks on any public function).
 
 ---
 
@@ -282,63 +270,87 @@ Good practice for ASan/UBSan diagnostics.
 | Module | Test File | Tests | Coverage |
 |--------|-----------|-------|----------|
 | allocator | test_allocator.c | 4 | Basic: custom, default, realloc |
-| async | test_async.c | 11 | Good: watchers (KlEventCtx), suspend/resume, deadlines, cancel |
-| body_reader | test_body_reader.c | 25 | Excellent: buffer + multipart, limits, spanning, binary |
-| chunked | test_chunked.c | 18 | Excellent: sizes, extensions, trailers, overflow |
-| client | test_client.c | 12 | Good: sync/async validation, response free, NULL safety |
-| connection | test_connection.c | 4 | Minimal: pool ops only |
+| async | test_async.c | 14 | Good: watchers (KlEventCtx), suspend/resume, deadlines, cancel |
+| body_reader | test_body_reader.c | 30 | Excellent: buffer + multipart, limits, spanning, binary |
+| chunked | test_chunked.c | 17 | Excellent: sizes, extensions, trailers, overflow |
+| client | test_client.c | 18 | Good: sync/async validation, response free, NULL safety |
+| connection | test_connection.c | 9 | Basic: pool ops, acquire/release |
 | cors | test_cors.c | 17 | Excellent: origins, preflight, credentials |
-| h2 | test_h2.c | 29 | Good: HPACK, frames, streams, settings, cleanup |
-| integration | test_integration.c | 28 | Good: full request/response paths, middleware, logging |
-| overflow | test_overflow.c | 18 | Good: integer overflow guards across modules |
-| parser | test_parser.c | 8 | Good: GET, POST, headers, body, chunked |
-| response | test_response.c | 14 | Good: modes, CRLF injection, keep-alive |
-| response_parser | test_response_parser.c | 9 | Good: 200, chunked, headers, limits, malformed, reset |
-| router | test_router.c | 30 | Excellent: params, methods, middleware, overlap |
-| thread_pool | test_thread_pool.c | 12 | Good: create/free, submit, FIFO, stress, cancel, shutdown |
-| timeout | test_timeout.c | 4 | Basic: idle, partial, body timeout |
-| tls | test_tls.c | 20 | Good: vtable mocking, handshake, ALPN, shutdown, pool |
-| url | test_url.c | 20 | Good: HTTP/HTTPS, ws/wss, ports, IPv6, CRLF, edge cases |
-| websocket | test_websocket.c | 38 | Excellent: SHA-1, base64, frames, fragmentation, close |
-| websocket_client | test_websocket_client.c | 28 | Good: frame encoding, mask XOR, handshake, parser, API |
-| h2_client | test_h2_client.c | 18 | Good: mock session vtable, stream tracking, response free |
+| event | test_event.c | 7 | Basic: init, add, wait, close |
+| event_ctx | test_event_ctx.c | 8 | Good: watcher lifecycle |
+| h2 | test_h2.c | 18 | Good: HPACK, frames, streams, settings |
+| h2_client | test_h2_client.c | 29 | Good: mock session vtable, stream tracking, response free |
+| integration | test_integration.c | 27 | Good: full request/response paths, middleware |
+| overflow | test_overflow.c | 20 | Good: integer overflow guards across modules |
+| parser | test_parser.c | 9 | Good: GET, POST, headers, body, chunked |
+| request | test_request.c | 14 | Good: header access, params |
+| response | test_response.c | 10 | Good: modes, streaming, CRLF injection, keep-alive |
+| response_parser | test_response_parser.c | 24 | Good: 200, chunked, headers, limits, malformed |
+| router | test_router.c | 27 | Excellent: params, methods, middleware, overlap |
+| **sse** | **test_sse.c** | **7** | **Partial: see below** |
+| thread_pool | test_thread_pool.c | 12 | Good: create/free, submit, FIFO, stress, cancel |
+| timeout | test_timeout.c | 8 | Basic: idle, partial, body timeout |
+| tls | test_tls.c | 20 | Good: vtable mocking, handshake, ALPN, shutdown |
+| url | test_url.c | 20 | Good: HTTP/HTTPS, ws/wss, ports, IPv6, CRLF |
+| websocket | test_websocket.c | 28 | Excellent: SHA-1, base64, frames, fragmentation, close |
+| websocket_client | test_websocket_client.c | 42 | Good: frame encoding, mask XOR, handshake, parser |
 
-### Coverage Gaps (Priority Order)
+### SSE Test Coverage Details
 
-1. **Connection state machine** — `kl_conn_on_readable`, `kl_conn_on_writable`, `kl_conn_on_handshake` not directly unit-tested. These are the core request/response processing functions.
+| Function | Tests | Verdict |
+|----------|-------|---------|
+| `kl_sse_begin` | 1 (`begin_sets_headers`) | Happy path only — no failure path tests |
+| `kl_sse_event` | 5 (basic, data_only, multiline, empty, write_error) | Good for common cases |
+| `kl_sse_comment` | 1 (`comment`) | Happy path only |
+| `kl_sse_end` | 0 | **Not directly tested** (called via `kl_response_end_stream` in begin test) |
 
-2. **`kl_response_body_copy`** — Recently added function with no test coverage.
+**Missing SSE edge cases:**
+1. `kl_sse_end` — no direct test through the SSE API
+2. NULL `data` with `data_len > 0` — crashes (M-3)
+3. Data ending with `\n` — untested framing subtlety
+4. Multiple consecutive events on same handle
+5. Write failure at different points (mid-id, mid-data, terminal newline)
+6. `kl_sse_begin` failure paths (header buffer full)
 
-3. **WebSocket server send/close API** — `kl_ws_server_send_text`, `kl_ws_server_send_binary`, `kl_ws_server_send_ping`, `kl_ws_server_close`, `kl_ws_server_drain_close` have no unit tests. Frame parsing is well covered but the public send API is not.
+### General Coverage Gaps (Priority Order)
 
-4. **`kl_server_ws`** — WebSocket route registration not tested in integration tests.
+1. **Connection state machine** — `kl_conn_on_readable`, `kl_conn_on_writable` not directly unit-tested.
+2. **WebSocket server send API** — `kl_ws_server_send_text/binary/ping/close` have no unit tests.
+3. **No allocation failure injection** — No tests for malloc/realloc failure paths.
+4. **`kl_sse_end`** — Not tested through the SSE API.
 
-5. **No allocation failure injection** — No tests for malloc/realloc failure paths. A custom allocator that fails on the Nth call would cover error cleanup paths.
+---
 
-6. **No dedicated event loop backend tests** — Backends exercised indirectly via integration tests only.
+## Build Hardening Assessment
 
-7. **mbedTLS backend** — 5 concrete functions untested (require linked mbedTLS + real cert files). Vtable is tested via mocks.
+| Feature | Status |
+|---------|--------|
+| `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror` | Present |
+| `-D_FORTIFY_SOURCE=2` | Present (non-cosmo, non-debug) |
+| `-fstack-protector-strong` | Present (non-cosmo) |
+| ASan + UBSan (debug) | Present (`make debug`) |
+| `-fno-omit-frame-pointer` | Present (debug) |
+| Clang static analysis | Present (`make analyze`) |
+| cppcheck | Present (`make cppcheck`) |
+| libFuzzer targets (4) | Present |
+| Vendor code `-w` | Present |
 
-8. **Async client callbacks** — `kl_client_start` validated for input but no test verifies the `on_done` callback fires on completion/error.
-
-9. **Thread pool backpressure/shutdown** — No test for queue-full recovery, in-flight completion during free, or cancel callbacks for unstarted items.
+**Missing/Recommended:** `-Wconversion` (catches implicit narrowing conversions).
 
 ---
 
 ## Recommendations
 
-### All Medium/Low Findings — FIXED
+### Priority Fixes
 
-All M-2, M-3, L-4 through L-8 findings have been fixed and verified with `make test` (372 tests, 0 failures).
+1. **Fix M-3** — Add NULL data guard to `kl_sse_event`: `if (data_len > 0 && !data) return -1;`
+2. **Fix M-2** — Fix h2_client partial header leak: set `st->resp.num_headers = i;` before early return.
+3. **Fix L-7** — Add NULL checks to SSE public functions.
+4. **Fix L-5** — Add overflow guard to h2_client header allocation.
 
-### Remaining Work
+### Test Improvements
 
-1. **Add `kl_response_body_copy` test** — Recently added, currently untested.
-
-2. **Add connection state machine tests** — `kl_conn_on_readable`, `kl_conn_on_writable` are critical untested paths.
-
-3. **Add WebSocket server send API tests** — `kl_ws_server_send_text/binary/ping/close` public API untested.
-
-4. **Add allocation failure injection** — Custom allocator that fails on Nth call for testing error paths.
-
-5. **Consider removing `kl_request_header()`** (L-1) in favor of length-aware `kl_request_header_len()`.
+1. Add direct `kl_sse_end` test through SSE API.
+2. Add SSE NULL data edge case test (after fixing M-3).
+3. Add connection state machine unit tests.
+4. Add allocation failure injection via custom allocator.

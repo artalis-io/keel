@@ -242,6 +242,29 @@ test_streaming() {
   stop_server "$pid"
 }
 
+# sse — hardcoded :8080
+test_sse() {
+  echo "=== sse ==="
+  bin="examples/sse"
+  if [ ! -x "$bin" ]; then skip=$((skip + 1)); echo "  SKIP"; return; fi
+
+  pid=$(start_server "./$bin")
+  if ! wait_for_server 8080; then
+    fail=$((fail + 1)); echo "  FAIL: server didn't start"
+    stop_server "$pid"; return
+  fi
+
+  resp=$($CURL "http://127.0.0.1:8080/events" || true)
+  check_contains "SSE event field" "$resp" 'event: tick'
+  check_contains "SSE data field" "$resp" 'data: {"count":0}'
+  check_contains "SSE id field" "$resp" 'id: 0'
+  check_contains "SSE comment" "$resp" ': stream started'
+  check_contains "SSE multiline event" "$resp" 'event: multi'
+  check_contains "SSE multiline data split" "$resp" 'data: line one'
+
+  stop_server "$pid"
+}
+
 # body_readers — hardcoded :8080
 test_body_readers() {
   echo "=== body_readers ==="
@@ -459,6 +482,7 @@ test_rest_api_server
 test_middleware
 test_static_files
 test_streaming
+test_sse
 test_body_readers
 test_async
 test_thread_pool

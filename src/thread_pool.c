@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
+#include <limits.h>
+#include <stdint.h>
 
 #ifdef __cosmopolitan__
 #define KL_TP_DEFAULT_WORKERS 2
@@ -136,7 +138,13 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
 #endif
     }
 
+    if (queue_cap > INT_MAX / 2 || num_workers > INT_MAX / 2)
+        return NULL;
     int done_cap = queue_cap + num_workers;
+
+    if ((size_t)queue_cap > SIZE_MAX / sizeof(KlWorkItem)) return NULL;
+    if ((size_t)done_cap > SIZE_MAX / sizeof(KlWorkItem)) return NULL;
+    if ((size_t)num_workers > SIZE_MAX / sizeof(pthread_t)) return NULL;
 
     KlThreadPool *pool = kl_malloc(alloc, sizeof(KlThreadPool));
     if (!pool) return NULL;

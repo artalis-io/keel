@@ -26,5 +26,6 @@
 #include <keel/url.h>
 #include <keel/resolver.h>
 #include <keel/client.h>
+#include <keel/sse.h>
 
 #endif
