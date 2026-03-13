@@ -56,7 +56,7 @@ CORE_SRC = src/allocator.c src/error.c src/response.c src/router.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
            src/websocket.c src/websocket_client.c \
            src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
-           src/client.c src/sse.c $(EVENT_SRC)
+           src/client.c src/client_pool.c src/sse.c $(EVENT_SRC)
 
 # Default parser backend (llhttp)
 LLHTTP_SRC = parsers/parser_llhttp.c parsers/response_parser_llhttp.c \

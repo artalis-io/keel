@@ -8,6 +8,7 @@
  */
 
 #include <keel/client.h>
+#include <keel/client_pool.h>
 #include <keel/parser.h>
 
 #include <errno.h>
@@ -211,7 +212,7 @@ static int send_request_sync(int fd, KlTls *tls,
                               const char *method, const KlUrl *url,
                               const KlClientHeader *headers, int num_headers,
                               const char *body, size_t body_len,
-                              int timeout_ms)
+                              int timeout_ms, int keep_alive)
 {
     if (has_crlf(method, strlen(method)))
         return -1;
@@ -247,7 +248,8 @@ static int send_request_sync(int fd, KlTls *tls,
     }
 
     int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
-                     "Connection: close\r\n\r\n");
+                     "Connection: %s\r\n\r\n",
+                     keep_alive ? "keep-alive" : "close");
     if (n < 0 || (size_t)(off + n) >= sizeof(buf))
         return -1;
     off += n;
@@ -296,7 +298,7 @@ static int send_request_sync(int fd, KlTls *tls,
 static int send_headers_sync(int fd, KlTls *tls,
                                const char *method, const KlUrl *url,
                                const KlClientHeader *headers, int num_headers,
-                               int timeout_ms)
+                               int timeout_ms, int keep_alive)
 {
     if (has_crlf(method, strlen(method)))
         return -1;
@@ -324,7 +326,8 @@ static int send_headers_sync(int fd, KlTls *tls,
     }
 
     int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
-                     "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+                     "Transfer-Encoding: chunked\r\nConnection: %s\r\n\r\n",
+                     keep_alive ? "keep-alive" : "close");
     if (n < 0 || (size_t)(off + n) >= sizeof(buf))
         return -1;
     off += n;
@@ -521,7 +524,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     /* Request streaming: send headers + chunked body */
     if (stream && stream->body_read) {
         if (send_headers_sync(fd, tls, method, &parsed,
-                                headers, num_headers, timeout_ms) != 0) {
+                                headers, num_headers, timeout_ms, 0) != 0) {
             if (!resp->error) resp->error = KL_ERR_IO;
             goto cleanup;
         }
@@ -533,7 +536,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     } else {
         if (send_request_sync(fd, tls, method, &parsed,
                                headers, num_headers, body, body_len,
-                               timeout_ms) != 0) {
+                               timeout_ms, 0) != 0) {
             if (!resp->error) resp->error = KL_ERR_IO;
             goto cleanup;
         }
@@ -651,6 +654,12 @@ struct KlClient {
     char               chunk_hdr[KL_CLIENT_CHUNK_HDR_SIZE];
     size_t             chunk_hdr_len;
     size_t             chunk_hdr_sent;
+
+    /* Pool integration (NULL = legacy close-on-complete) */
+    KlClientPool      *pool;
+    KlClientPoolConn   pool_conn;
+    int                pool_port;
+    int                pool_is_tls;
 };
 
 /* Forward declarations */
@@ -669,7 +678,7 @@ static char *build_request(KlAllocator *alloc,
                             const char *method, const KlUrl *url,
                             const KlClientHeader *headers, int num_headers,
                             const char *body, size_t body_len,
-                            size_t *out_len)
+                            size_t *out_len, int keep_alive)
 {
     if (has_crlf(method, strlen(method)))
         return NULL;
@@ -705,7 +714,8 @@ static char *build_request(KlAllocator *alloc,
     }
 
     int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
-                     "Connection: close\r\n\r\n");
+                     "Connection: %s\r\n\r\n",
+                     keep_alive ? "keep-alive" : "close");
     if (n < 0 || (size_t)(off + n) >= sizeof(buf))
         return NULL;
     off += n;
@@ -730,7 +740,8 @@ static char *build_request(KlAllocator *alloc,
 static char *build_request_headers_only(KlAllocator *alloc,
                                           const char *method, const KlUrl *url,
                                           const KlClientHeader *headers,
-                                          int num_headers, size_t *out_len)
+                                          int num_headers, size_t *out_len,
+                                          int keep_alive)
 {
     if (has_crlf(method, strlen(method)))
         return NULL;
@@ -758,7 +769,8 @@ static char *build_request_headers_only(KlAllocator *alloc,
     }
 
     int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
-                     "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+                     "Transfer-Encoding: chunked\r\nConnection: %s\r\n\r\n",
+                     keep_alive ? "keep-alive" : "close");
     if (n < 0 || (size_t)(off + n) >= sizeof(buf))
         return NULL;
     off += n;
@@ -1133,17 +1145,41 @@ static void async_on_event(int fd, KlEventMask ready, void *user_data)
 
 /* ── Completion helpers ──────────────────────────────────────────── */
 
+static int server_wants_close(const KlClientResponse *resp)
+{
+    for (int i = 0; i < resp->num_headers; i++) {
+        if (strcasecmp(resp->headers[i].name, "Connection") == 0 &&
+            strcasecmp(resp->headers[i].value, "close") == 0)
+            return 1;
+    }
+    return 0;
+}
+
 static void async_complete_success(KlClient *c)
 {
     kl_watcher_del(c->ev_ctx, c->fd);
 
-    if (c->tls) {
-        c->tls->shutdown(c->tls, c->fd);
-        c->tls->destroy(c->tls);
+    if (c->pool) {
+        /* Pool-aware: release or discard based on Connection header */
+        c->pool_conn.fd = c->fd;
+        c->pool_conn.tls = c->tls;
+        if (server_wants_close(&c->resp)) {
+            kl_cpool_discard(c->pool, &c->pool_conn);
+        } else {
+            kl_cpool_release(c->pool, &c->pool_conn,
+                              c->host_buf, c->pool_port, c->pool_is_tls);
+        }
         c->tls = NULL;
+        c->fd = -1;
+    } else {
+        if (c->tls) {
+            c->tls->shutdown(c->tls, c->fd);
+            c->tls->destroy(c->tls);
+            c->tls = NULL;
+        }
+        close(c->fd);
+        c->fd = -1;
     }
-    close(c->fd);
-    c->fd = -1;
 
     if (c->request_buf) {
         kl_free(c->alloc, c->request_buf, c->request_len);
@@ -1165,16 +1201,25 @@ static void async_complete_error(KlClient *c)
     if (c->fd >= 0)
         kl_watcher_del(c->ev_ctx, c->fd);
 
-    if (c->tls) {
-        if (c->fd >= 0)
-            c->tls->shutdown(c->tls, c->fd);
-        c->tls->destroy(c->tls);
+    if (c->pool) {
+        /* Pool-aware: discard the connection on error */
+        c->pool_conn.fd = c->fd;
+        c->pool_conn.tls = c->tls;
+        kl_cpool_discard(c->pool, &c->pool_conn);
         c->tls = NULL;
-    }
-
-    if (c->fd >= 0) {
-        close(c->fd);
         c->fd = -1;
+    } else {
+        if (c->tls) {
+            if (c->fd >= 0)
+                c->tls->shutdown(c->tls, c->fd);
+            c->tls->destroy(c->tls);
+            c->tls = NULL;
+        }
+
+        if (c->fd >= 0) {
+            close(c->fd);
+            c->fd = -1;
+        }
     }
 
     if (c->request_buf) {
@@ -1229,11 +1274,11 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     char *req_buf;
     if (stream && stream->body_read) {
         req_buf = build_request_headers_only(alloc, method, &parsed,
-                                               headers, num_headers, &req_len);
+                                               headers, num_headers, &req_len, 0);
     } else {
         req_buf = build_request(alloc, method, &parsed,
                                  headers, num_headers, body, body_len,
-                                 &req_len);
+                                 &req_len, 0);
     }
     if (!req_buf)
         return NULL;
@@ -1384,14 +1429,22 @@ void kl_client_cancel(KlClient *client)
     if (client->fd >= 0) {
         kl_watcher_del(client->ev_ctx, client->fd);
 
-        if (client->tls) {
-            client->tls->shutdown(client->tls, client->fd);
-            client->tls->destroy(client->tls);
+        if (client->pool) {
+            client->pool_conn.fd = client->fd;
+            client->pool_conn.tls = client->tls;
+            kl_cpool_discard(client->pool, &client->pool_conn);
             client->tls = NULL;
-        }
+            client->fd = -1;
+        } else {
+            if (client->tls) {
+                client->tls->shutdown(client->tls, client->fd);
+                client->tls->destroy(client->tls);
+                client->tls = NULL;
+            }
 
-        close(client->fd);
-        client->fd = -1;
+            close(client->fd);
+            client->fd = -1;
+        }
     }
 
     client->state = KL_HCLIENT_DONE;
@@ -1422,4 +1475,273 @@ void kl_client_free(KlClient *client)
 
     KlAllocator *alloc = client->alloc;
     kl_free(alloc, client, sizeof(KlClient));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Pooled client APIs — connection pool integration
+ * ══════════════════════════════════════════════════════════════════════ */
+
+int kl_client_request_pooled(KlClientPool *pool,
+                              KlAllocator *alloc, const KlClientConfig *cfg,
+                              const char *method, const char *url_str,
+                              const KlClientHeader *headers, int num_headers,
+                              const char *body, size_t body_len,
+                              KlClientResponse *resp)
+{
+    if (!pool || !alloc || !method || !url_str || !resp)
+        return -1;
+    if (num_headers < 0 || num_headers > KL_CLIENT_MAX_REQ_HEADERS)
+        return -1;
+    if (num_headers > 0 && !headers)
+        return -1;
+
+    memset(resp, 0, sizeof(*resp));
+
+    int timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
+                                                    : KL_CLIENT_DEFAULT_TIMEOUT_MS;
+    size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
+                                                            : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
+
+    KlUrl parsed;
+    if (kl_url_parse(url_str, &parsed) != 0) {
+        resp->error = KL_ERR_URL;
+        return -1;
+    }
+
+    KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
+    int is_tls = parsed.is_https;
+    if (is_tls && !tls_cfg) {
+        resp->error = KL_ERR_URL;
+        return -1;
+    }
+    if (!is_tls)
+        tls_cfg = NULL;
+
+    /* Host string for pool key */
+    char host_buf[KL_CLIENT_HOSTNAME_MAX];
+    if (parsed.host_len >= sizeof(host_buf)) {
+        resp->error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    memcpy(host_buf, parsed.host, parsed.host_len);
+    host_buf[parsed.host_len] = '\0';
+
+    /* Try to acquire from pool */
+    KlClientPoolConn pconn;
+    memset(&pconn, 0, sizeof(pconn));
+    pconn.fd = -1;
+    int acq = kl_cpool_acquire(pool, host_buf, parsed.port, is_tls, &pconn);
+
+    int fd;
+    KlTls *tls = NULL;
+    int ret = -1;
+
+    if (acq == 0) {
+        /* Pool hit — reuse connection */
+        fd = pconn.fd;
+        tls = pconn.tls;
+    } else {
+        /* Pool miss — connect fresh */
+        KlError conn_err = KL_ERR_NONE;
+        fd = connect_with_timeout(parsed.host, parsed.host_len,
+                                   parsed.port, timeout_ms, &conn_err);
+        if (fd < 0) {
+            resp->error = conn_err;
+            return -1;
+        }
+
+        if (is_tls) {
+            tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
+                                    timeout_ms, alloc);
+            if (!tls) {
+                resp->error = KL_ERR_TLS_HANDSHAKE;
+                close(fd);
+                return -1;
+            }
+        }
+
+        pconn.fd = fd;
+        pconn.tls = tls;
+        pconn.reused = 0;
+    }
+
+    /* Send with keep-alive */
+    if (send_request_sync(fd, tls, method, &parsed,
+                           headers, num_headers, body, body_len,
+                           timeout_ms, 1) != 0) {
+        if (!resp->error) resp->error = KL_ERR_IO;
+        goto cleanup;
+    }
+
+    if (recv_response_sync(fd, tls, resp, max_resp, timeout_ms, alloc,
+                            NULL) != 0) {
+        if (!resp->error) resp->error = KL_ERR_PARSE;
+        goto cleanup;
+    }
+
+    ret = 0;
+
+cleanup:
+    if (ret != 0) {
+        kl_cpool_discard(pool, &pconn);
+        kl_client_response_free(resp);
+    } else if (server_wants_close(resp)) {
+        kl_cpool_discard(pool, &pconn);
+    } else {
+        kl_cpool_release(pool, &pconn, host_buf, parsed.port, is_tls);
+    }
+
+    return ret;
+}
+
+KlClient *kl_client_start_pooled(KlClientPool *pool,
+                                   KlEventCtx *ev_ctx, KlAllocator *alloc,
+                                   const KlClientConfig *cfg,
+                                   const char *method, const char *url_str,
+                                   const KlClientHeader *headers, int num_headers,
+                                   const char *body, size_t body_len,
+                                   KlClientDoneFn on_done, void *user_data)
+{
+    if (!pool || !ev_ctx || !alloc || !method || !url_str)
+        return NULL;
+    if (num_headers < 0 || num_headers > KL_CLIENT_MAX_REQ_HEADERS)
+        return NULL;
+    if (num_headers > 0 && !headers)
+        return NULL;
+
+    KlUrl parsed;
+    if (kl_url_parse(url_str, &parsed) != 0)
+        return NULL;
+
+    KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
+    int is_tls = parsed.is_https;
+    if (is_tls && !tls_cfg)
+        return NULL;
+    if (!is_tls)
+        tls_cfg = NULL;
+
+    size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
+                                                            : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
+
+    /* Build request buffer with keep-alive */
+    size_t req_len = 0;
+    char *req_buf = build_request(alloc, method, &parsed,
+                                   headers, num_headers, body, body_len,
+                                   &req_len, 1);
+    if (!req_buf)
+        return NULL;
+
+    /* Copy hostname for SNI + pool key */
+    char host_buf[KL_CLIENT_HOSTNAME_MAX];
+    if (parsed.host_len >= sizeof(host_buf)) {
+        kl_free(alloc, req_buf, req_len);
+        return NULL;
+    }
+    memcpy(host_buf, parsed.host, parsed.host_len);
+    host_buf[parsed.host_len] = '\0';
+
+    /* Allocate client */
+    KlClient *c = kl_malloc(alloc, sizeof(KlClient));
+    if (!c) {
+        kl_free(alloc, req_buf, req_len);
+        return NULL;
+    }
+    memset(c, 0, sizeof(*c));
+
+    c->fd = -1;
+    c->ev_ctx = ev_ctx;
+    c->alloc = alloc;
+    c->tls_cfg = tls_cfg;
+    c->request_buf = req_buf;
+    c->request_len = req_len;
+    c->request_sent = 0;
+    c->on_done = on_done;
+    c->user_data = user_data;
+    memcpy(c->host_buf, host_buf, parsed.host_len + 1);
+
+    /* Pool integration */
+    c->pool = pool;
+    c->pool_port = parsed.port;
+    c->pool_is_tls = is_tls;
+
+    /* Create response parser */
+    c->parser = kl_response_parser_llhttp(max_resp, alloc);
+    if (!c->parser) {
+        kl_free(alloc, req_buf, req_len);
+        kl_free(alloc, c, sizeof(KlClient));
+        return NULL;
+    }
+
+    /* Try pool acquire */
+    KlClientPoolConn pconn;
+    memset(&pconn, 0, sizeof(pconn));
+    pconn.fd = -1;
+    int acq = kl_cpool_acquire(pool, host_buf, parsed.port, is_tls, &pconn);
+
+    if (acq == 0) {
+        /* Pool hit — skip connect + TLS, go straight to sending */
+        c->fd = pconn.fd;
+        c->tls = pconn.tls;
+        c->pool_conn = pconn;
+        c->state = KL_HCLIENT_SENDING;
+
+        if (kl_watcher_add(ev_ctx, c->fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
+            c->fd = -1;
+            c->tls = NULL;
+            kl_cpool_discard(pool, &pconn);
+            c->parser->destroy(c->parser);
+            kl_free(alloc, req_buf, req_len);
+            kl_free(alloc, c, sizeof(KlClient));
+            return NULL;
+        }
+        return c;
+    }
+
+    /* Pool miss — normal connect flow */
+    KlResolver *resolver = cfg ? cfg->resolver : NULL;
+    if (resolver) {
+        c->resolver = resolver;
+        c->state = KL_HCLIENT_RESOLVING;
+        c->resolve_req = resolver->resolve(resolver, ev_ctx,
+                                            host_buf, parsed.port,
+                                            dns_resolved, c);
+        if (!c->resolve_req) {
+            c->parser->destroy(c->parser);
+            kl_free(alloc, req_buf, req_len);
+            kl_free(alloc, c, sizeof(KlClient));
+            return NULL;
+        }
+        return c;
+    }
+
+    /* Sync DNS fallback */
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", parsed.port);
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *res = NULL;
+    int rc = getaddrinfo(host_buf, port_str, &hints, &res);
+    if (rc != 0 || !res) {
+        c->parser->destroy(c->parser);
+        kl_free(alloc, req_buf, req_len);
+        kl_free(alloc, c, sizeof(KlClient));
+        return NULL;
+    }
+
+    if (start_connect(c, res->ai_addr, res->ai_addrlen,
+                       res->ai_family, res->ai_socktype,
+                       res->ai_protocol) < 0) {
+        freeaddrinfo(res);
+        c->parser->destroy(c->parser);
+        kl_free(alloc, req_buf, req_len);
+        kl_free(alloc, c, sizeof(KlClient));
+        return NULL;
+    }
+    freeaddrinfo(res);
+
+    return c;
 }

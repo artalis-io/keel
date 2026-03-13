@@ -6,7 +6,7 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 496 unit tests
+make test         # build and run all 520 unit tests
 make examples     # build all 20 example programs (22 with TLS)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
@@ -30,7 +30,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-24 orthogonal modules, each independently testable:
+25 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -56,6 +56,7 @@ make clean        # remove all build artifacts
 22. **sse** — Server-Sent Events helper: line framing over chunked streaming (zero alloc)
 23. **error** — Diagnostic error codes (KlError enum) + kl_strerror()
 24. **timer** — One-shot timer scheduling on KlEventCtx (min-heap, checked per event loop tick)
+25. **client_pool** — HTTP client connection pool: caches idle TCP+TLS connections keyed by (host, port, is_tls) for keep-alive reuse
 
 ## Key Types
 
@@ -120,6 +121,9 @@ make clean        # remove all build artifacts
 | `KlError` | `error.h` | Diagnostic error enum: 23 codes (alloc, network, DNS, TLS, HTTP, event, thread, pipe) |
 | `KlTimerFn` | `timer.h` | Timer callback: `void (*)(void *user_data)` |
 | `KlTimerEntry` | `timer.h` | Timer heap entry: deadline_ms, cb, user_data, id |
+| `KlClientPool` | `client_pool.h` | Connection pool: flat array, idle timers, per-host limits |
+| `KlClientPoolConfig` | `client_pool.h` | Pool config: capacity, max_per_host, idle_ms |
+| `KlClientPoolConn` | `client_pool.h` | Acquired connection handle: fd, tls, reused flag |
 
 ## Git
 

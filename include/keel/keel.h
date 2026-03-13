@@ -27,6 +27,7 @@
 #include <keel/url.h>
 #include <keel/resolver.h>
 #include <keel/client.h>
+#include <keel/client_pool.h>
 #include <keel/sse.h>
 #include <keel/timer.h>
 

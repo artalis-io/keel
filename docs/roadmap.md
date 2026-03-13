@@ -175,19 +175,9 @@ Thin SSE framing layer over `kl_response_begin_stream`. `KlSse` handle wraps wri
 
 ## Medium-Term
 
-### Client connection pooling
+### ~~Client connection pooling~~ (Done)
 
-**Priority: High** | **Effort: Significant**
-
-Each `kl_client_start()` opens a fresh TCP + TLS handshake, even for repeated requests to the same host. For microservice patterns with many requests to the same backend, this is the biggest latency hit.
-
-Needs a per-host persistent connection cache with:
-- Idle timeout and eviction
-- Max connections per host
-- Keep-alive management (HTTP/1.1 `Connection: keep-alive` tracking)
-- TLS session reuse
-
-The server-side connection pool is a different shape (pre-allocated, fixed-size). This needs a new per-host LRU cache. Significant effort but highest payoff for repeated-request workloads.
+Implemented in `client_pool.h` / `client_pool.c`. Flat-array pool keyed by `(host, port, is_tls)` with idle timers, per-host limits, test-on-borrow stale detection, and `Connection: keep-alive` tracking. Sync (`kl_client_request_pooled`) and async (`kl_client_start_pooled`) APIs.
 
 ### Redirect following
 
