@@ -59,6 +59,11 @@ make clean        # remove all build artifacts
 25. **client_pool** — HTTP client connection pool: caches idle TCP+TLS connections keyed by (host, port, is_tls) for keep-alive reuse
 26. **redirect** — HTTP redirect following: automatic 3xx redirect with RFC 7231/7538 method transformation, cross-origin auth stripping, URL resolution
 
+**Deliberate design choices:**
+
+- **O(n) router** — Linear scan over routes. A `memcmp` scan over even hundreds of routes costs nanoseconds, invisible next to network I/O. A trie would add complexity for no measurable gain.
+- **O(n) timeout sweep** — Iterates all connection slots once per tick. At default `max_connections=256`, this fits in L1 cache. Not worth optimizing.
+
 ## Key Types
 
 | Type | Header | Purpose |

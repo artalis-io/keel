@@ -61,7 +61,7 @@ char *buf = alloc(len + extra);
 
 ### Buffer boundary checks
 
-- `read_buf` is `KL_READ_BUF_SIZE` (8192) — verify no write exceeds this
+- `read_buf` is heap-allocated, growable up to `max_header_size` — verify no write exceeds `read_cap`
 - `hdr_buf` in multipart reader is 2048 — verify header overflow is caught
 - Response header buffer grows — verify growth arithmetic is overflow-safe
 - Body reader buffer grows — verify `max_size` is checked before growth
