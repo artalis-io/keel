@@ -225,6 +225,9 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
             out[count].udata = st->fd_udata[fd];
             out[count].ready = ready;
             count++;
+            /* Prevent duplicate events for the same fd in this batch.
+             * kl_event_mod (via kl_watcher_rearm) restores the slot. */
+            st->fd_udata[fd] = UDATA_UNUSED;
         }
     }
 

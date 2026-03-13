@@ -39,6 +39,7 @@ typedef struct KlEventCtx {
     KlEventLoop loop;
     KlAllocator *alloc;       /* borrowed — must outlive ctx */
     KlWatcher *watchers;
+    int dispatch_dirty;       /* set by kl_watcher_mod/del during callback */
 } KlEventCtx;
 
 /**
@@ -106,8 +107,11 @@ static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
         return 0;  /* not a watcher — caller handles */
     KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
     int wfd = w->fd;
+    ctx->dispatch_dirty = 0;
     w->on_ready(wfd, event->ready, w->user_data);
-    kl_watcher_rearm(ctx, wfd);
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ctx->dispatch_dirty)
+        kl_watcher_rearm(ctx, wfd);
     return 1;
 }
 

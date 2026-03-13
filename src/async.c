@@ -16,6 +16,7 @@ int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
     if (!ctx || !alloc) return -1;
     ctx->alloc = alloc;
     ctx->watchers = NULL;
+    ctx->dispatch_dirty = 0;
     ctx->loop.alloc = alloc;
     return kl_event_init(&ctx->loop);
 }
@@ -66,6 +67,7 @@ int kl_watcher_mod(KlEventCtx *ctx, int fd, KlEventMask mask) {
     if (!w) return -1;
 
     w->mask = mask;
+    ctx->dispatch_dirty = 1;  /* suppress auto-rearm in kl_event_dispatch */
     return kl_event_mod(&ctx->loop, fd, mask, watcher_tag(w));
 }
 
@@ -90,6 +92,7 @@ void kl_watcher_del(KlEventCtx *ctx, int fd) {
             *pp = w->next;
             kl_event_del(&ctx->loop, fd);
             kl_free(a, w, sizeof(KlWatcher));
+            ctx->dispatch_dirty = 1;  /* suppress auto-rearm */
             return;
         }
         pp = &(*pp)->next;
