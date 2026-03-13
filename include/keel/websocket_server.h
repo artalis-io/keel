@@ -35,6 +35,7 @@ struct KlWsServerConfig {
     size_t max_message_size;    /* 0 = 1MB default */
     size_t max_frame_size;      /* 0 = 64KB default */
     int close_timeout_ms;       /* 0 = 5000ms default */
+    int ping_interval_ms;       /* 0 = disabled (default) */
 };
 typedef struct KlWsServerConfig KlWsServerConfig;
 
@@ -52,6 +53,7 @@ struct KlWsServerConn {
     int close_received;
     uint16_t close_code;
     uint64_t close_deadline_ms;
+    uint64_t next_ping_ms;       /* 0 = auto-ping disabled */
     KlConn *conn;                /* back-pointer for send functions */
     KlAllocator *alloc;
 };
@@ -81,6 +83,7 @@ int  kl_ws_server_on_readable(KlConn *c);
 void kl_ws_server_cleanup(KlConn *c);
 void kl_ws_server_drain_close(KlConn *c);
 int  kl_ws_server_check_close_timeout(const KlConn *c, uint64_t now);
+int  kl_ws_server_auto_ping(KlConn *c, uint64_t now);
 int  kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len);
 
 #endif

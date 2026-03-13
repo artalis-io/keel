@@ -31,6 +31,7 @@ typedef struct {
     size_t       max_frame_size;   /**< 0 = KL_WS_CLIENT_DEFAULT_MAX_FRAME */
     KlTlsConfig *tls;             /**< NULL = ws://, non-NULL = wss:// */
     const char  *protocol;        /**< Sec-WebSocket-Protocol, NULL = none */
+    int          ping_interval_ms;  /**< 0 = disabled (default) */
 } KlWsClientConfig;
 
 typedef struct {

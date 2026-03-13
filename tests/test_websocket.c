@@ -5,6 +5,8 @@
 #include <keel/allocator.h>
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>
+#include <sys/socket.h>
 
 /* Pull in internal headers for direct testing */
 #include "../src/sha1.h"
@@ -820,6 +822,135 @@ UTEST(cleanup, no_callback_if_close_received) {
 
     ASSERT_EQ(cleanup_on_close_called, 0);
     ASSERT_TRUE(conn.ws == NULL);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Auto-ping tests
+ * ═══════════════════════════════════════════════════════════════════ */
+
+UTEST(auto_ping, disabled_by_default) {
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+    ASSERT_EQ(cfg.ping_interval_ms, 0);
+
+    /* A conn with default config should have next_ping_ms = 0 */
+    KlWsServerConn ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.config = &cfg;
+    /* next_ping_ms is zero from memset → auto-ping disabled */
+    ASSERT_EQ(ws.next_ping_ms, (uint64_t)0);
+}
+
+UTEST(auto_ping, sends_ping) {
+    /* Use socketpair so we can read the ping frame back */
+    int fds[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+    ASSERT_EQ(rc, 0);
+
+    KlAllocator alloc = kl_allocator_default();
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+    cfg.ping_interval_ms = 100;
+
+    KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
+    memset(ws, 0, sizeof(*ws));
+    ws->config = &cfg;
+    ws->alloc = &alloc;
+    ws->next_ping_ms = 1000;  /* deadline at t=1000 */
+
+    KlConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.fd = fds[0];
+    conn.alloc = &alloc;
+    conn.ws = ws;
+    ws->conn = &conn;
+
+    /* Before deadline → no ping */
+    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 999), 0);
+
+    /* At deadline → sends ping */
+    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 1000), 1);
+
+    /* Read the ping frame from the other end */
+    uint8_t buf[16];
+    ssize_t nr = read(fds[1], buf, sizeof(buf));
+    ASSERT_EQ(nr, 2);  /* empty ping: 2-byte header */
+    ASSERT_EQ(buf[0], 0x89);  /* FIN=1, opcode=ping */
+    ASSERT_EQ(buf[1], 0x00);  /* no mask, 0 payload */
+
+    close(fds[0]);
+    close(fds[1]);
+    kl_free(&alloc, ws, sizeof(KlWsServerConn));
+}
+
+UTEST(auto_ping, reschedules) {
+    KlAllocator alloc = kl_allocator_default();
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+    cfg.ping_interval_ms = 200;
+
+    int fds[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+
+    KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
+    memset(ws, 0, sizeof(*ws));
+    ws->config = &cfg;
+    ws->alloc = &alloc;
+    ws->next_ping_ms = 1000;
+
+    KlConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.fd = fds[0];
+    conn.alloc = &alloc;
+    conn.ws = ws;
+    ws->conn = &conn;
+
+    kl_ws_server_auto_ping(&conn, 1000);
+    /* next_ping_ms should advance by interval */
+    ASSERT_EQ(ws->next_ping_ms, (uint64_t)1200);
+
+    /* Drain the frame */
+    uint8_t drain[16];
+    read(fds[1], drain, sizeof(drain));
+
+    close(fds[0]);
+    close(fds[1]);
+    kl_free(&alloc, ws, sizeof(KlWsServerConn));
+}
+
+UTEST(auto_ping, skips_closing) {
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+    cfg.ping_interval_ms = 100;
+
+    KlWsServerConn ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.config = &cfg;
+    ws.next_ping_ms = 1000;
+    ws.close_sent = 1;
+
+    KlConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.ws = &ws;
+
+    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 2000), 0);
+}
+
+UTEST(auto_ping, not_before_deadline) {
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+    cfg.ping_interval_ms = 100;
+
+    KlWsServerConn ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.config = &cfg;
+    ws.next_ping_ms = 1000;
+
+    KlConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.ws = &ws;
+
+    ASSERT_EQ(kl_ws_server_auto_ping(&conn, 500), 0);
 }
 
 UTEST(cleanup, null_ws_is_noop) {

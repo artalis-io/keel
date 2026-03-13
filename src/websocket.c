@@ -387,6 +387,8 @@ int kl_ws_server_upgrade(KlConn *c, const char *leftover,
     ws->alloc = c->alloc;
     ws->utf8_state = KL_UTF8_ACCEPT;
     kl_ws_frame_init(&ws->frame);
+    if (cfg->ping_interval_ms > 0)
+        ws->next_ping_ms = kl_monotonic_ms() + (uint64_t)cfg->ping_interval_ms;
 
     c->ws = ws;
     c->state = KL_CONN_WEBSOCKET;
@@ -683,4 +685,15 @@ int kl_ws_server_check_close_timeout(const KlConn *c, uint64_t now) {
         return 1;
     }
     return 0;
+}
+
+/* ── Auto-ping keep-alive ─────────────────────────────────────────── */
+
+int kl_ws_server_auto_ping(KlConn *c, uint64_t now) {
+    if (!c->ws || c->ws->next_ping_ms == 0) return 0;
+    if (c->ws->close_sent || c->ws->close_received) return 0;
+    if (now < c->ws->next_ping_ms) return 0;
+    kl_ws_server_send_ping(c->ws, NULL, 0);
+    c->ws->next_ping_ms = now + (uint64_t)c->ws->config->ping_interval_ms;
+    return 1;
 }

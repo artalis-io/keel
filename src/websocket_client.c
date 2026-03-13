@@ -8,6 +8,7 @@
  */
 
 #include <keel/websocket_client.h>
+#include <keel/timer.h>
 #include <keel/url.h>
 
 #include <errno.h>
@@ -75,6 +76,10 @@ struct KlWsClientConn {
     /* Close handshake state */
     int              close_sent;
     int              close_received;
+
+    /* Auto-ping keep-alive */
+    int              ping_interval_ms;
+    int64_t          ping_timer_id;     /* -1 = no timer */
 };
 
 /* ── Forward declarations ───────────────────────────────────────── */
@@ -82,6 +87,7 @@ struct KlWsClientConn {
 static void wsc_on_event(int fd, KlEventMask ready, void *user_data);
 static void wsc_error(KlWsClientConn *ws, const char *msg);
 static void wsc_close_connection(KlWsClientConn *ws);
+static void wsc_ping_timer(void *user_data);
 
 /* ── I/O abstraction (plain or TLS) ────────────────────────────── */
 
@@ -563,6 +569,11 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
     ws->state = WSC_OPEN;
     kl_watcher_mod(ws->ev, ws->fd, KL_EVENT_READ);
 
+    if (ws->ping_interval_ms > 0) {
+        ws->ping_timer_id = kl_timer_add(ws->ev, (uint64_t)ws->ping_interval_ms,
+                                          wsc_ping_timer, ws);
+    }
+
     if (ws->cbs.on_open)
         ws->cbs.on_open(ws, ws->user_data);
 }
@@ -742,6 +753,17 @@ static void wsc_handle_open(KlWsClientConn *ws)
     kl_watcher_rearm(ws->ev, ws->fd);
 }
 
+/* ── Auto-ping timer callback ───────────────────────────────────── */
+
+static void wsc_ping_timer(void *user_data) {
+    KlWsClientConn *ws = user_data;
+    if (ws->state != WSC_OPEN || ws->close_sent) return;
+    kl_ws_client_send_ping(ws, NULL, 0);
+    /* Re-add for recurring behavior */
+    ws->ping_timer_id = kl_timer_add(ws->ev, (uint64_t)ws->ping_interval_ms,
+                                      wsc_ping_timer, ws);
+}
+
 /* ── Event callback ─────────────────────────────────────────────── */
 
 static void wsc_on_event(int fd, KlEventMask ready, void *user_data)
@@ -772,6 +794,10 @@ static void wsc_on_event(int fd, KlEventMask ready, void *user_data)
 
 static void wsc_close_connection(KlWsClientConn *ws)
 {
+    if (ws->ping_timer_id >= 0) {
+        kl_timer_cancel(ws->ev, ws->ping_timer_id);
+        ws->ping_timer_id = -1;
+    }
     if (ws->fd >= 0) {
         kl_watcher_del(ws->ev, ws->fd);
         if (ws->tls) {
@@ -879,6 +905,8 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     ws->tls_cfg = tls_cfg;
     ws->max_frame_size = (cfg && cfg->max_frame_size > 0) ? cfg->max_frame_size
                                                             : KL_WS_CLIENT_DEFAULT_MAX_FRAME;
+    ws->ping_interval_ms = cfg ? cfg->ping_interval_ms : 0;
+    ws->ping_timer_id = -1;
     if (cbs)
         ws->cbs = *cbs;
     ws->user_data = user_data;

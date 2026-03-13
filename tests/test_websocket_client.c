@@ -360,4 +360,20 @@ UTEST(wsc_standalone, wss_requires_tls) {
     }
 }
 
+/* ── Auto-ping config ────────────────────────────────────────────── */
+
+UTEST(wsc_config, auto_ping_default) {
+    /* Zero-initialized config should have ping_interval_ms == 0 */
+    KlWsClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    ASSERT_EQ(cfg.ping_interval_ms, 0);
+}
+
+UTEST(wsc_config, auto_ping_set) {
+    KlWsClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.ping_interval_ms = 30000;
+    ASSERT_EQ(cfg.ping_interval_ms, 30000);
+}
+
 UTEST_MAIN();

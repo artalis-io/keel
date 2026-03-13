@@ -111,7 +111,7 @@ make clean        # remove all build artifacts
 | `KlResolveResult` | `resolver.h` | Resolved address: sockaddr_storage, addrlen, ai_family |
 | `KlResolveDoneFn` | `resolver.h` | Resolution completion callback |
 | `KlWsClientConn` | `websocket_client.h` | WebSocket client connection handle |
-| `KlWsClientConfig` | `websocket_client.h` | Client config: timeout, max_frame_size, TLS, protocol |
+| `KlWsClientConfig` | `websocket_client.h` | Client config: timeout, max_frame_size, TLS, protocol, ping_interval_ms |
 | `KlWsClientCallbacks` | `websocket_client.h` | Callbacks: on_open, on_message, on_close, on_error |
 | `KlH2ClientConn` | `h2_client.h` | HTTP/2 client connection handle |
 | `KlH2ClientConfig` | `h2_client.h` | Config: timeout, max_streams, TLS, session factory |

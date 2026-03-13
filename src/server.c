@@ -504,6 +504,7 @@ transition:
                 continue;
             /* WebSocket: exempt from HTTP idle timeout, check close deadline */
             if (tc->state == KL_CONN_WEBSOCKET) {
+                kl_ws_server_auto_ping(tc, now);
                 if (kl_ws_server_check_close_timeout(tc, now)) {
                     kl_event_del(&s->ev.loop, tc->fd);
                     kl_server_conn_release(s,tc);

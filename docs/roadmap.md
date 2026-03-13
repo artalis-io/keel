@@ -183,22 +183,9 @@ Implemented in `client_pool.h` / `client_pool.c`. Flat-array pool keyed by `(hos
 
 Implemented in `redirect.h` / `redirect.c`. Orthogonal module wrapping existing client APIs with automatic 3xx redirect following. `KlRedirectConfig` controls max hops (default 10). Method transformation per RFC 7231/7538: 301/302/303 change POST/PUT/PATCH to GET (dropping body); 307/308 preserve method. Cross-origin Authorization header stripping. URL resolution via `kl_url_resolve()`. Sync (`kl_redirect_request`, `kl_redirect_request_pooled`) and async (`kl_redirect_start`, `kl_redirect_start_pooled`) APIs. 33 tests.
 
-### WebSocket auto-ping keep-alive
+### ~~WebSocket auto-ping keep-alive~~ (Done)
 
-**Priority: Medium** | **Effort: Moderate**
-
-Neither WS client nor server sends proactive keep-alive pings. Long-lived connections through proxies/load balancers with idle timeouts silently disconnect.
-
-Add configurable automatic pings:
-
-```c
-typedef struct {
-    /* ... */
-    int ping_interval_ms;   /* 0 = disabled (default) */
-} KlWsClientConfig;
-```
-
-Uses `kl_timer_add` for scheduling. Server-side equivalent via `KlWsServerConfig`.
+Implemented as `ping_interval_ms` field on both `KlWsServerConfig` and `KlWsClientConfig` (0 = disabled, default). Server-side uses sweep-based approach (same pattern as close timeout check); client-side uses `kl_timer_add` for recurring pings. Auto-ping skips connections in close handshake. 7 tests.
 
 ### Response compression
 
