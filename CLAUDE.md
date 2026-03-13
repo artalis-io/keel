@@ -61,6 +61,7 @@ make clean        # remove all build artifacts
 
 **Deliberate design choices:**
 
+- **Single-threaded event loop** — Same model as Node.js, Redis, Nginx (per-worker). No mutexes, no data races. `KlThreadPool` offloads blocking work; multi-core scaling is horizontal via `SO_REUSEPORT`.
 - **O(n) router** — Linear scan over routes. A `memcmp` scan over even hundreds of routes costs nanoseconds, invisible next to network I/O. A trie would add complexity for no measurable gain.
 - **O(n) timeout sweep** — Iterates all connection slots once per tick. At default `max_connections=256`, this fits in L1 cache. Not worth optimizing.
 

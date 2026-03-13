@@ -97,6 +97,7 @@ int main(void) {
 
 **Deliberate design choices:**
 
+- **Single-threaded event loop** — Same model as Node.js, Redis, Nginx (per-worker), and Python asyncio. No mutexes, no lock contention, no data races — the entire connection state machine is lock-free by construction. `KlThreadPool` offloads blocking work to workers; multi-core scaling is horizontal via `SO_REUSEPORT` with multiple processes.
 - **O(n) router** — Linear scan over routes per request. A `memcmp` scan over even hundreds of routes costs nanoseconds, invisible next to network I/O syscalls. A trie or radix tree would add complexity to param extraction and middleware pattern matching for no measurable gain.
 - **O(n) timeout sweep** — Iterates all connection slots once per event loop tick. At `max_connections` = 256 (default), this is a tight loop over a contiguous array well within L1 cache.
 

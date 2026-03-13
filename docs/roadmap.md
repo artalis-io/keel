@@ -27,12 +27,12 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 
 | Gap | Details |
 |-----|---------|
-| **Single-threaded event loop** | No `SO_REUSEPORT` multi-listener. `KlThreadPool` offloads blocking work but I/O path is single-threaded. Fine for embedded/edge; ceiling for high-connection-count workloads. |
 | ~~**8KB fixed read buffer**~~ | **Fixed**: `read_buf` is now a heap-allocated, growable buffer (doubles up to `max_header_size`). Default 8KB initial, configurable via `KlConfig.max_header_size`. Returns 431 (Request Header Fields Too Large) when exceeded. Shrinks back to 8KB on keep-alive reset. |
 | ~~**`connection.c` monolith**~~ | **Refactored**: Extracted `conn_null_terminate_headers()` and `conn_dispatch_request()` static helpers. `HEADERS_OK`/`PARSE_OK` branches unified into a single dispatch path (~85 lines removed). |
 
 **Deliberate design choices** (not gaps):
 
+- **Single-threaded event loop** — Same model as Node.js, Redis, Nginx (per-worker), and Python asyncio. No mutexes, no lock contention, no data races — the entire connection state machine is lock-free by construction. `KlThreadPool` offloads blocking work (SQLite, DNS, file I/O) to workers; the event loop stays responsive. Multi-core scaling is horizontal via `SO_REUSEPORT` with multiple processes, not shared-memory threading.
 - **O(n) router** — Linear scan over all routes per request. A `memcmp` scan over 20-50 routes costs hundreds of nanoseconds, invisible next to network I/O syscalls. Even at hundreds of routes the overhead is trivial. A trie or radix tree would add complexity to param extraction and middleware matching for no measurable gain in Keel's target workload.
 - **O(n) timeout sweep** — Iterates all connection slots once per event loop tick. At `max_connections` = 256 (default), this is a tight loop over a contiguous array — well within L1 cache. A deadline heap or timer wheel would add allocation and pointer chasing for no measurable improvement.
 
