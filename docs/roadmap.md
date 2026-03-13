@@ -11,7 +11,7 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 - **Architecture**: 22 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
-- **Testing**: 25 suites, 444+ tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
+- **Testing**: 27 suites, 477 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
 - **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
 
 ### Correctness Issues
