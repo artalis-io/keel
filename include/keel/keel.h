@@ -28,5 +28,6 @@
 #include <keel/resolver.h>
 #include <keel/client.h>
 #include <keel/sse.h>
+#include <keel/timer.h>
 
 #endif

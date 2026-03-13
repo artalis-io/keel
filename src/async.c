@@ -1,4 +1,5 @@
 #include <keel/async.h>
+#include <keel/timer.h>
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <stdint.h>
@@ -21,6 +22,10 @@ int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
     ctx->watchers = NULL;
     ctx->dispatch_dirty = 0;
     ctx->last_error = KL_ERR_NONE;
+    ctx->timers = NULL;
+    ctx->timer_count = 0;
+    ctx->timer_cap = 0;
+    ctx->timer_next_id = 0;
     ctx->loop.alloc = alloc;
     if (kl_event_init(&ctx->loop) < 0) {
         ctx->last_error = KL_ERR_EVENT_INIT;
@@ -31,6 +36,12 @@ int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
 
 void kl_event_ctx_free(KlEventCtx *ctx) {
     if (!ctx) return;
+    if (ctx->timers)
+        kl_free(ctx->alloc, ctx->timers,
+                (size_t)ctx->timer_cap * sizeof(KlTimerEntry));
+    ctx->timers = NULL;
+    ctx->timer_count = 0;
+    ctx->timer_cap = 0;
     while (ctx->watchers) {
         KlWatcher *w = ctx->watchers;
         ctx->watchers = w->next;
@@ -114,6 +125,9 @@ void kl_watcher_del(KlEventCtx *ctx, int fd) {
 int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
     if (!ctx || max_events <= 0) return -1;
 
+    /* Clamp timeout to next timer deadline */
+    timeout_ms = kl_timer_next_timeout(ctx, timeout_ms);
+
     KlEvent stack_buf[KL_CTX_STACK_EVENTS];
     KlEvent *events = stack_buf;
 
@@ -130,6 +144,9 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
 
     if (events != stack_buf)
         kl_free(ctx->alloc, events, (size_t)max_events * sizeof(KlEvent));
+
+    /* Fire expired timers */
+    kl_timer_fire(ctx);
 
     return n < 0 ? -1 : n;
 }

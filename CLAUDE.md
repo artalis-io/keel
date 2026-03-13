@@ -6,8 +6,8 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 477 unit tests
-make examples     # build all 19 example programs (21 with TLS)
+make test         # build and run all 487 unit tests
+make examples     # build all 20 example programs (22 with TLS)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis
@@ -22,12 +22,12 @@ make clean        # remove all build artifacts
 - `parsers/` — Pluggable parser backends (`parser_llhttp.c`, `response_parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
-- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser).
+- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer).
 - `docs/` — Architecture and roadmap documentation.
 
 ## Architecture
 
-23 orthogonal modules, each independently testable:
+24 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -52,6 +52,7 @@ make clean        # remove all build artifacts
 21. **resolver** — Pluggable async DNS resolver vtable (bring-your-own backend)
 22. **sse** — Server-Sent Events helper: line framing over chunked streaming (zero alloc)
 23. **error** — Diagnostic error codes (KlError enum) + kl_strerror()
+24. **timer** — One-shot timer scheduling on KlEventCtx (min-heap, checked per event loop tick)
 
 ## Key Types
 
@@ -114,6 +115,8 @@ make clean        # remove all build artifacts
 | `KlH2ClientResponse` | `h2_client.h` | Accumulated stream response: status, headers, body |
 | `KlSse` | `sse.h` | SSE stream handle: write_fn + write_ctx + response (zero alloc) |
 | `KlError` | `error.h` | Diagnostic error enum: 23 codes (alloc, network, DNS, TLS, HTTP, event, thread, pipe) |
+| `KlTimerFn` | `timer.h` | Timer callback: `void (*)(void *user_data)` |
+| `KlTimerEntry` | `timer.h` | Timer heap entry: deadline_ms, cb, user_data, id |
 
 ## Git
 

@@ -8,10 +8,10 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 
 ### Strengths
 
-- **Architecture**: 22 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
+- **Architecture**: 24 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
-- **Testing**: 27 suites, 477 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
+- **Testing**: 28 suites, 487 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
 - **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
 
 ### Correctness Issues
@@ -155,6 +155,10 @@ Added `KlResolver` vtable (`resolver.h`) for pluggable async DNS resolution. `Kl
 
 sqlite3-style per-struct error codes. `KlError` enum with 23 codes covering allocation, network, DNS, TLS, HTTP, event loop, thread pool, and IPC failures. Stored as a field on owning structs (`KlServer.last_error`, `KlEventCtx.last_error`, `KlClientResponse.error`, `KlClient.error`). Set at the point of `return -1`, defaults to `KL_ERR_NONE` (0). `kl_strerror()` returns static human-readable message. `kl_client_last_error()` for opaque async client. All existing function signatures unchanged (non-breaking).
 
+### Timer API
+
+One-shot timer scheduling on `KlEventCtx`. Array-based binary min-heap: O(log n) add, O(1) peek, O(n) cancel. `kl_timer_add` returns a monotonic `int64_t` ID for cancellation. `kl_timer_next_timeout` clamps event loop timeout to next deadline. `kl_timer_fire` pops and invokes all expired timers. Integrated into both `kl_event_ctx_run` (standalone clients) and the server main loop. Safe to add/cancel timers from within callbacks. ~140 lines, 10 tests.
+
 ### Client streaming
 
 Response streaming (push-based) and request streaming (pull-based) for both sync and async HTTP/1.1 clients. `KlClientStreamCfg` provides `on_body`/`on_headers`/`on_complete` callbacks for response body delivery as chunks arrive (instead of buffering), and `body_read` callback for chunked request body production. New `_s` API variants (`kl_client_request_s`, `kl_client_start_s`); original APIs are thin wrappers. Streaming parser factory (`kl_response_parser_llhttp_s`) routes decoded body chunks to callbacks. Async request streaming uses a 5-phase non-blocking state machine (`KL_HCLIENT_SENDING_STREAM`).
@@ -162,21 +166,6 @@ Response streaming (push-based) and request streaming (pull-based) for both sync
 ---
 
 ## Near-Term
-
-### Timer API
-
-**Priority: High** | **Effort: Moderate**
-
-No general-purpose timer on `KlEventCtx`. The timeout sweep and `KlAsyncOp` deadlines prove the infrastructure works, but there's no public timer primitive for retry backoff, scheduled cleanup, or periodic tasks.
-
-```c
-typedef void (*KlTimerFn)(void *user_data);
-
-int  kl_timer_add(KlEventCtx *ctx, uint64_t delay_ms, KlTimerFn cb, void *ud);
-int  kl_timer_cancel(KlEventCtx *ctx, int timer_id);
-```
-
-Implementation: min-heap on `KlEventCtx`, checked after each `kl_event_wait` return. ~200 lines. Unlocks WebSocket keep-alive pings and retry patterns.
 
 ### SSE helper — COMPLETED
 
@@ -231,7 +220,7 @@ typedef struct {
 } KlWsClientConfig;
 ```
 
-Depends on the timer API (above). Server-side equivalent via `KlWsServerConfig`.
+Uses `kl_timer_add` for scheduling. Server-side equivalent via `KlWsServerConfig`.
 
 ### Response compression
 

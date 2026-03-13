@@ -29,6 +29,9 @@ typedef struct KlWatcher {
 
 /* ── KlEventCtx — composable event loop + watcher context ────────── */
 
+/** @brief Timer heap entry (defined in src/timer.c). */
+typedef struct KlTimerEntry KlTimerEntry;
+
 /**
  * @brief Composable event loop context.
  *
@@ -42,6 +45,11 @@ typedef struct KlEventCtx {
     KlWatcher *watchers;
     int dispatch_dirty;       /* set by kl_watcher_mod/del during callback */
     KlError last_error;       /* diagnostic: set at point of return -1 */
+    /* Timer heap */
+    KlTimerEntry *timers;     /* min-heap array (NULL until first add) */
+    int timer_count;          /* entries in heap */
+    int timer_cap;            /* allocated slots */
+    int64_t timer_next_id;    /* monotonic ID counter */
 } KlEventCtx;
 
 /**

@@ -1,5 +1,6 @@
 #include <keel/server.h>
 #include <keel/async.h>
+#include <keel/timer.h>
 #include <keel/tls.h>
 #include <keel/websocket_server.h>
 #include <keel/h2_server.h>
@@ -317,6 +318,8 @@ int kl_server_run(KlServer *s) {
             }
         }
 
+        wait_timeout = kl_timer_next_timeout(&s->ev, wait_timeout);
+
         int n = kl_event_wait(&s->ev.loop, events, KL_EVENTS_PER_TICK,
                               wait_timeout);
         if (n < 0) {
@@ -533,6 +536,9 @@ transition:
                 aop = next_aop;
             }
         }
+
+        /* Fire expired timers */
+        kl_timer_fire(&s->ev);
 
         /* Graceful drain: stop when all connections are idle or deadline hit */
         if (atomic_load(&s->draining)) {
