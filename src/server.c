@@ -192,6 +192,11 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         return -1;
     }
 
+    /* Create async file I/O backend (NULL if backend doesn't support it) */
+    s->file_io = kl_file_io_create(&s->ev.loop, alloc);
+    for (int i = 0; i < s->pool.capacity; i++)
+        s->pool.conns[i].file_io = s->file_io;
+
     return 0;
 }
 
@@ -360,6 +365,31 @@ int kl_server_run(KlServer *s) {
             break;
         }
 
+        /* Dispatch async file I/O completions */
+        if (s->file_io) {
+            KlFileIOResult fio_results[KL_EVENTS_PER_TICK];
+            int nf = s->file_io->tick(s->file_io, fio_results,
+                                       KL_EVENTS_PER_TICK);
+            for (int fi = 0; fi < nf; fi++) {
+                KlConn *fc = fio_results[fi].udata;
+                KlConnState fstate = kl_conn_on_file_complete(
+                    fc, fio_results[fi].result);
+                if (fstate == KL_CONN_SENDING) {
+                    if (fc->file_io_phase == 1) {
+                        /* FILE_IO_READING — async read pending, no WRITE reg */
+                    } else {
+                        kl_event_mod(&s->ev.loop, fc->fd,
+                                     KL_EVENT_WRITE, fc);
+                    }
+                } else if (fstate == KL_CONN_READING) {
+                    kl_event_mod(&s->ev.loop, fc->fd, KL_EVENT_READ, fc);
+                } else if (fstate == KL_CONN_CLOSED) {
+                    kl_event_del(&s->ev.loop, fc->fd);
+                    kl_server_conn_release(s, fc);
+                }
+            }
+        }
+
         for (int i = 0; i < n; i++) {
             /* Watcher dispatch (tagged pointer, LSB=1) */
             if (kl_event_dispatch(&s->ev, &events[i]))
@@ -473,7 +503,9 @@ transition:
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_SENDING) {
-                if (kl_event_mod(&s->ev.loop, c->fd,
+                if (c->file_io_phase == 1) {
+                    /* FILE_IO_READING — async read pending, no WRITE event */
+                } else if (kl_event_mod(&s->ev.loop, c->fd,
                                  KL_EVENT_WRITE, c) < 0) {
                     kl_event_del(&s->ev.loop, c->fd);
                     kl_server_conn_release(s,c);
@@ -550,6 +582,14 @@ transition:
                 timed_out = 1;
             }
             if (timed_out) {
+                /* Cancel pending async file read before release */
+                if (tc->file_io_phase == 1 && tc->file_io) {
+                    tc->file_io->cancel(tc->file_io, tc->fd);
+                    tc->file_io_phase = 3;  /* FILE_IO_CANCELLING */
+                    continue;  /* wait for cancel CQE in next tick */
+                }
+                if (tc->file_io_phase == 3)
+                    continue;  /* FILE_IO_CANCELLING — still waiting */
                 /* Best-effort 408: small write to non-blocking socket
                  * will almost always succeed in one call.
                  * Skip for TLS handshake — no HTTP framing yet. */
@@ -632,6 +672,10 @@ void kl_server_free(KlServer *s) {
             op->conn->async_op = NULL;
     }
 
+    if (s->file_io) {
+        s->file_io->destroy(s->file_io);
+        s->file_io = NULL;
+    }
     if (s->listen_fd >= 0) {
         close(s->listen_fd);
         s->listen_fd = -1;

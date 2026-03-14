@@ -3,6 +3,7 @@
 
 #include <keel/allocator.h>
 #include <keel/chunked.h>
+#include <keel/file_io.h>
 #include <keel/request.h>
 #include <keel/response.h>
 #include <keel/parser.h>
@@ -73,6 +74,12 @@ typedef struct KlConn {
     struct KlAsyncOp *async_op;
     uint64_t suspend_start_ms;
 
+    /* Async file I/O state (set once at pool init, NULL if unsupported) */
+    KlFileIO *file_io;
+    int file_io_phase;       /* FILE_IO_IDLE/READING/WRITING/CANCELLING */
+    size_t file_io_len;      /* bytes from last async read */
+    size_t file_io_sent;     /* bytes written to socket so far */
+
     /* Access logging (set once at pool init, never changes) */
     void (*access_log)(const KlRequest *req, int status,
                        size_t body_bytes, double duration_ms,
@@ -126,6 +133,14 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router);
  * @return New connection state.
  */
 KlConnState kl_conn_on_writable(KlConn *c);
+
+/**
+ * @brief Handle async file I/O completion (called from server tick loop).
+ * @param c      Connection that submitted the read.
+ * @param result Bytes read (positive) or error (negative/zero).
+ * @return New connection state.
+ */
+KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result);
 
 /** @brief Monotonic clock in milliseconds (for timeout tracking). */
 uint64_t kl_monotonic_ms(void);

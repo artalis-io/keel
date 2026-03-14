@@ -15,6 +15,12 @@
 
 #define KL_TLS_DRAIN_MAX 256  /* max pending drain iterations per event */
 
+/* File I/O phase constants */
+#define FILE_IO_IDLE       0
+#define FILE_IO_READING    1
+#define FILE_IO_WRITING    2
+#define FILE_IO_CANCELLING 3
+
 static const char kl_413_response[] =
     "HTTP/1.1 413 Payload Too Large\r\n"
     "Content-Length: 0\r\n"
@@ -96,6 +102,7 @@ KlConn *kl_conn_acquire(KlConnPool *pool, int fd) {
     c->h2 = NULL;
     c->async_op = NULL;
     c->suspend_start_ms = 0;
+    c->file_io_phase = FILE_IO_IDLE;
     memset(&c->req, 0, sizeof(c->req));
 
     return c;
@@ -684,44 +691,137 @@ read_more_body: ;
     return c->state;
 }
 
+/* ── Keep-alive reset helper ─────────────────────────────────────── */
+
+static KlConnState conn_keepalive_reset(KlConn *c) {
+    conn_cleanup_body_reader(c);
+    kl_response_reset(&c->res);
+    c->parser->reset(c->parser);
+    memset(&c->req, 0, sizeof(c->req));
+    c->read_len = 0;
+    if (c->read_cap > KL_READ_BUF_SIZE) {
+        char *shrunk = kl_realloc(c->alloc, c->read_buf,
+                                   c->read_cap, KL_READ_BUF_SIZE);
+        if (shrunk) {
+            c->read_buf = shrunk;
+            c->read_cap = KL_READ_BUF_SIZE;
+        }
+    }
+    c->hdr_sent = 0;
+    c->route = NULL;
+    c->num_params = 0;
+    c->route_result = 0;
+    c->body_start_ms = 0;
+    c->file_io_phase = FILE_IO_IDLE;
+    c->last_active_ms = kl_monotonic_ms();
+    c->state = KL_CONN_READING;
+    return c->state;
+}
+
+static KlConnState conn_send_complete(KlConn *c) {
+    conn_log_access(c);
+    if (c->req.keep_alive)
+        return conn_keepalive_reset(c);
+    c->state = KL_CONN_CLOSED;
+    return c->state;
+}
+
+/* ── Async file I/O state machine ────────────────────────────────── */
+
+static KlConnState conn_file_flush(KlConn *c);
+
+static KlConnState conn_file_submit_read(KlConn *c) {
+    if (c->res.file_offset >= c->res.file_size)
+        return conn_send_complete(c);
+
+    size_t remaining = (size_t)(c->res.file_size - c->res.file_offset);
+    size_t to_read = remaining < c->read_cap ? remaining : c->read_cap;
+
+    if (c->file_io->submit(c->file_io, c->res.file_fd, c->read_buf,
+                            to_read, c->res.file_offset,
+                            c->fd, c) < 0) {
+        c->file_io_phase = FILE_IO_IDLE;
+        c->state = KL_CONN_CLOSED;
+        return c->state;
+    }
+
+    c->file_io_phase = FILE_IO_READING;
+    c->state = KL_CONN_SENDING;
+    return c->state;
+}
+
+static KlConnState conn_file_flush(KlConn *c) {
+    while (c->file_io_sent < c->file_io_len) {
+        ssize_t nw = write(c->fd, c->read_buf + c->file_io_sent,
+                           c->file_io_len - c->file_io_sent);
+        if (nw < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                c->state = KL_CONN_SENDING;
+                return c->state;  /* wait for WRITE event */
+            }
+            if (errno == EINTR) continue;
+            c->file_io_phase = FILE_IO_IDLE;
+            c->state = KL_CONN_CLOSED;
+            return c->state;
+        }
+        c->file_io_sent += (size_t)nw;
+    }
+
+    /* Buffer fully sent */
+    c->res.file_offset += (off_t)c->file_io_len;
+    c->file_io_phase = FILE_IO_IDLE;
+    return conn_file_submit_read(c);  /* next chunk or finish */
+}
+
+KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result) {
+    c->last_active_ms = kl_monotonic_ms();
+
+    if (c->file_io_phase == FILE_IO_CANCELLING) {
+        c->file_io_phase = FILE_IO_IDLE;
+        c->state = KL_CONN_CLOSED;
+        return c->state;
+    }
+
+    if (result <= 0) {
+        c->file_io_phase = FILE_IO_IDLE;
+        c->state = KL_CONN_CLOSED;
+        return c->state;
+    }
+
+    c->file_io_len = (size_t)result;
+    c->file_io_sent = 0;
+    c->file_io_phase = FILE_IO_WRITING;
+    return conn_file_flush(c);
+}
+
+/* ── Writable event handler ──────────────────────────────────────── */
+
 KlConnState kl_conn_on_writable(KlConn *c) {
     c->last_active_ms = kl_monotonic_ms();
 
     if (c->state != KL_CONN_SENDING) return c->state;
 
+    /* Resume io_uring file write after EAGAIN */
+    if (c->file_io_phase == FILE_IO_WRITING)
+        return conn_file_flush(c);
+
+    /* Start io_uring async file send (non-TLS only) */
+    if (c->res.body_mode == KL_BODY_FILE && !c->tls && c->file_io) {
+        if (!c->res.headers_sent) {
+            int r = kl_response_send(&c->res);
+            if (r < 0) { c->state = KL_CONN_CLOSED; return c->state; }
+            if (!c->res.headers_sent) return KL_CONN_SENDING;
+        }
+        if (c->res.head_request)
+            return conn_send_complete(c);
+        return conn_file_submit_read(c);
+    }
+
     int r = kl_response_send(&c->res);
     if (r < 0) {
         c->state = KL_CONN_CLOSED;
     } else if (r == 0) {
-        /* Done sending — log before keep-alive reset clears request */
-        conn_log_access(c);
-        if (c->req.keep_alive) {
-            /* Clean up body reader before resetting request */
-            conn_cleanup_body_reader(c);
-            /* Fast reset — reuses header buffer, no alloc/free */
-            kl_response_reset(&c->res);
-            c->parser->reset(c->parser);
-            memset(&c->req, 0, sizeof(c->req));
-            c->read_len = 0;
-            if (c->read_cap > KL_READ_BUF_SIZE) {
-                char *shrunk = kl_realloc(c->alloc, c->read_buf,
-                                           c->read_cap, KL_READ_BUF_SIZE);
-                if (shrunk) {
-                    c->read_buf = shrunk;
-                    c->read_cap = KL_READ_BUF_SIZE;
-                }
-                /* realloc failure: keep larger buffer, non-critical */
-            }
-            c->hdr_sent = 0;
-            c->route = NULL;
-            c->num_params = 0;
-            c->route_result = 0;
-            c->body_start_ms = 0;
-            c->last_active_ms = kl_monotonic_ms();
-            c->state = KL_CONN_READING;
-        } else {
-            c->state = KL_CONN_CLOSED;
-        }
+        return conn_send_complete(c);
     }
     /* r > 0: more to send, stay in SENDING state */
 

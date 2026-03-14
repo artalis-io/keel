@@ -79,6 +79,7 @@ typedef struct KlServer {
     _Atomic int draining;
     uint64_t drain_deadline_ms;
     KlAsyncOp *async_ops;       /* active async ops list */
+    KlFileIO *file_io;          /* async file I/O (auto-created if backend supports it) */
     KlError last_error;         /* diagnostic: set at point of return -1 */
 } KlServer;
 

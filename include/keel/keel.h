@@ -16,6 +16,7 @@
 #include <keel/h2.h>
 #include <keel/h2_server.h>
 #include <keel/h2_client.h>
+#include <keel/file_io.h>
 #include <keel/connection.h>
 #include <keel/server.h>
 #include <keel/cors.h>
