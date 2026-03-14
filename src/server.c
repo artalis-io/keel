@@ -6,7 +6,9 @@
 #include <keel/h2_server.h>
 #include <string.h>
 #include <unistd.h>
+#if !defined(KL_NO_SIGNAL)
 #include <signal.h>
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -24,6 +26,7 @@
 
 /* ── Signal handling ─────────────────────────────────────────────── */
 
+#if !defined(KL_NO_SIGNAL)
 static _Atomic(KlServer *) kl_signal_server = NULL;
 
 static void kl_signal_handler(int sig) {
@@ -31,6 +34,7 @@ static void kl_signal_handler(int sig) {
     KlServer *s = atomic_load(&kl_signal_server);
     if (s) kl_server_stop(s);
 }
+#endif
 
 static const char kl_408_response[] =
     "HTTP/1.1 408 Request Timeout\r\n"
@@ -213,8 +217,9 @@ int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
 int kl_server_run(KlServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
 
-    /* Ignore SIGPIPE */
+#if !defined(KL_NO_SIGNAL)
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     /* Resolve bind address (supports IPv4, IPv6, and hostnames) */
     struct addrinfo hints, *ai = NULL;
@@ -304,6 +309,7 @@ int kl_server_run(KlServer *s) {
     kl_log(s, KL_LOG_INFO, "listening on %s:%d",
            s->config.bind_addr, s->bound_port);
 
+#if !defined(KL_NO_SIGNAL)
     /* Install signal handlers if requested */
     struct sigaction old_term, old_int;
     if (s->config.install_signal_handlers) {
@@ -316,6 +322,7 @@ int kl_server_run(KlServer *s) {
         sigaction(SIGTERM, &sa, &old_term);
         sigaction(SIGINT, &sa, &old_int);
     }
+#endif
 
     atomic_store(&s->running, 1);
     atomic_store(&s->draining, 0);
@@ -580,12 +587,14 @@ transition:
         }
     }
 
+#if !defined(KL_NO_SIGNAL)
     /* Restore signal handlers */
     if (s->config.install_signal_handlers) {
         sigaction(SIGTERM, &old_term, NULL);
         sigaction(SIGINT, &old_int, NULL);
         atomic_store(&kl_signal_server, (KlServer *)NULL);
     }
+#endif
 
     return 0;
 }

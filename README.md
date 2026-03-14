@@ -574,10 +574,13 @@ No GC pauses. No goroutine scheduling. No async runtime overhead. Just `epoll_wa
 | Any POSIX | poll (level-triggered) | `make BACKEND=poll` |
 | Linux (musl/Alpine) | epoll (edge-triggered) | `make` |
 | Cosmopolitan (APE) | poll (auto-selected) | `make CC=cosmocc` |
+| Bare-metal + lwIP | poll (via lwIP sockets) | `make BACKEND=poll` + `-DKL_NO_SIGNAL` |
 
 The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a drop-in replacement for epoll with io_uring's batched submission advantage. Requires `liburing-dev`.
 
 The poll backend is a universal POSIX fallback that works on any platform with `poll(2)`. It enables Cosmopolitan C support (Actually Portable Executables that run on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary). When `CC=cosmocc` is detected, the Makefile automatically selects the poll backend.
+
+For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — their BSD socket compatibility layers provide all the POSIX functions Keel uses (`accept`, `read`, `write`, `close`, `poll`, `getaddrinfo`). Compile with `-DKL_NO_SIGNAL` to disable POSIX signal handling, and exclude `thread_pool.c` from the build if no RTOS is available. See [docs/comparison.md](docs/comparison.md#bare-metal--mcu-support) for details.
 
 ## Testing
 
@@ -669,6 +672,10 @@ KEEL is a transport library — it handles sockets, parsing, routing, and respon
 - **Idempotency keys** — Safe POST retry via `Idempotency-Key` header. *Hull provides `hull.middleware.idempotency` with configurable TTL and response caching.*
 
 The general principle: if it requires policy decisions that vary between applications, it belongs in application code, not in the transport library. KEEL provides the hooks (middleware, body readers, access log callback) — you provide the policy.
+
+## Comparison with Alternatives
+
+See [docs/comparison.md](docs/comparison.md) for a detailed feature comparison with [Mongoose](https://github.com/cesanta/mongoose) (GPLv2/Commercial, bare-metal MCU focus) and [GNU libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/) (LGPL, multi-threaded server). Short version: Keel has more features per line of code (HTTP/2, router, middleware, async client, pluggable everything) with an MIT license, but is younger and less battle-tested.
 
 ## CI
 
