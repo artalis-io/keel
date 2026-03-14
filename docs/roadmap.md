@@ -198,19 +198,9 @@ Pluggable compression vtable (`KlCompress`) — users bring their own compressio
 
 Pluggable decompression vtable (`KlDecompress`) — mirrors `KlCompress` with the same 5-function shape, shares `KlCompressCtx` for algorithm configuration. `KlDecompressConfig` on `KlClientConfig` enables automatic response body decompression. Buffered responses are decompressed in-place (body replaced, `Content-Encoding` header removed). Streaming responses use a `DecompStreamWrap` that intercepts body callbacks and feeds through the decompressor. Miniz-based gzip backend ships as optional source (`decompress_miniz.c`, build with `KEEL_COMPRESS=miniz`). 14 tests.
 
-### Backpressure callback
+### ~~Backpressure callback~~ (Done)
 
-**Priority: Low** | **Effort: Low**
-
-The streaming write path already returns a positive value on partial send, but there's no explicit "socket full, pause writes" callback. For high-throughput streaming (large file downloads, SSE fan-out), an explicit backpressure signal would be cleaner than checking return values:
-
-```c
-typedef struct {
-    void (*on_writable)(KlWsClientConn *ws, void *user_data);
-} KlWsClientCallbacks;
-```
-
-Same pattern applies to server-side streaming responses and HTTP client request streaming.
+Implemented as `KlDrain` (`drain.h` / `drain.c`). Event-loop-agnostic write buffer that sits between a producer (SSE, compress stream, WebSocket, etc.) and a writer function. On would-block (writer returns 0), buffers unsent data; caller composes with `KlWatcher` / `KlAsyncOp` to resume on write-readiness. Lazy buffer allocation (zero overhead on fast path), configurable `max_size` cap, `on_drain` callback on non-empty→empty transition. 17 tests.
 
 ---
 

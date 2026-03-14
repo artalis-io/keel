@@ -6,7 +6,7 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 593 unit tests
+make test         # build and run all 610 unit tests
 make examples     # build all 21 example programs (23 with TLS, 25 with compression)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
@@ -31,7 +31,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-28 orthogonal modules, each independently testable:
+29 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -61,6 +61,7 @@ make clean        # remove all build artifacts
 26. **redirect** — HTTP redirect following: automatic 3xx redirect with RFC 7231/7538 method transformation, cross-origin auth stripping, URL resolution
 27. **compress** — Pluggable response compression vtable: single-shot buffer + streaming chunked, with KlCompressConfig on KlConfig for server-wide use
 28. **decompress** — Pluggable response decompression vtable: single-shot buffer + streaming, with KlDecompressConfig on KlClientConfig for client-side use
+29. **drain** — Backpressure write buffer: buffers unsent data on would-block, flushes on write-readiness, with on_drain callback and max_size cap
 
 **Deliberate design choices:**
 
@@ -145,6 +146,9 @@ make clean        # remove all build artifacts
 | `KlDecompress` | `decompress.h` | Pluggable decompression vtable: decompress, dfeed, encoding, reset, destroy |
 | `KlDecompressConfig` | `decompress.h` | Decompression config: ctx, factory, ctx_destroy (shares KlCompressCtx) |
 | `KlDecompressStream` | `decompress.h` | Decompression stream handle: decomp, alloc, error |
+| `KlDrain` | `drain.h` | Backpressure write buffer: write_fn, buf, max_size, on_drain |
+| `KlDrainWriteFn` | `drain.h` | Writer callback: `ssize_t (*)(const char *data, size_t len, void *ctx)` |
+| `KlDrainCb` | `drain.h` | Drain callback: `void (*)(void *ctx)` |
 
 ## Git
 
