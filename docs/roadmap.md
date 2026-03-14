@@ -194,13 +194,9 @@ Implemented as `ping_interval_ms` field on both `KlWsServerConfig` and `KlWsClie
 
 Pluggable compression vtable (`KlCompress`) — users bring their own compression backend (miniz, zlib, zstd) by implementing a 5-function vtable. Buffer body compression via `kl_response_body_compress()` with automatic expansion fallback. Streaming compression via `KlCompressStream` (wraps chunked stream). `KlCompressConfig` on `KlConfig` for server-wide configuration. Miniz-based gzip backend ships as optional source (`compress_miniz.c`, build with `KEEL_COMPRESS=miniz`). 16 tests.
 
-### Response decompression (client)
+### ~~Response decompression (client)~~ (Done)
 
-**Priority: Medium** | **Effort: Moderate**
-
-Client response parser passes raw body; `Content-Encoding` header is visible but no decompression happens. Many APIs return gzip by default. Users must decompress themselves.
-
-Optional decompression in the response parser or via a post-receive callback. Same zlib dependency concern as response compression. Could share a pluggable compression vtable.
+Pluggable decompression vtable (`KlDecompress`) — mirrors `KlCompress` with the same 5-function shape, shares `KlCompressCtx` for algorithm configuration. `KlDecompressConfig` on `KlClientConfig` enables automatic response body decompression. Buffered responses are decompressed in-place (body replaced, `Content-Encoding` header removed). Streaming responses use a `DecompStreamWrap` that intercepts body callbacks and feeds through the decompressor. Miniz-based gzip backend ships as optional source (`decompress_miniz.c`, build with `KEEL_COMPRESS=miniz`). 14 tests.
 
 ### Backpressure callback
 

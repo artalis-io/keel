@@ -9,6 +9,7 @@
 
 #include <keel/client.h>
 #include <keel/client_pool.h>
+#include <keel/decompress.h>
 #include <keel/parser.h>
 
 #include <errno.h>
@@ -464,6 +465,164 @@ static int recv_response_sync(int fd, KlTls *tls, KlClientResponse *resp,
     return ret;
 }
 
+/* ── Response decompression helpers ───────────────────────────────── */
+
+static const char *find_header_value(const KlClientResponse *resp,
+                                      const char *name)
+{
+    for (int i = 0; i < resp->num_headers; i++) {
+        if (strcasecmp(resp->headers[i].name, name) == 0)
+            return resp->headers[i].value;
+    }
+    return NULL;
+}
+
+static void remove_header(KlClientResponse *resp, const char *name)
+{
+    for (int i = 0; i < resp->num_headers; i++) {
+        if (strcasecmp(resp->headers[i].name, name) == 0) {
+            /* Free the header strings */
+            kl_free(&resp->alloc, (char *)resp->headers[i].name,
+                    strlen(resp->headers[i].name) + 1);
+            kl_free(&resp->alloc, (char *)resp->headers[i].value,
+                    strlen(resp->headers[i].value) + 1);
+            /* Shift remaining headers down */
+            for (int j = i; j < resp->num_headers - 1; j++)
+                resp->headers[j] = resp->headers[j + 1];
+            resp->num_headers--;
+            return;
+        }
+    }
+}
+
+/**
+ * Post-process a buffered response: decompress body if Content-Encoding
+ * matches the decompressor's encoding. Replaces body and removes header.
+ */
+static int decompress_response_body(KlClientResponse *resp,
+                                      KlDecompressConfig *dcfg)
+{
+    if (!dcfg || !dcfg->factory)
+        return 0;  /* no decompression configured — not an error */
+    if (!resp->body || resp->body_len == 0)
+        return 0;
+
+    const char *enc = find_header_value(resp, "Content-Encoding");
+    if (!enc)
+        return 0;  /* no encoding — nothing to do */
+
+    /* Create session and check encoding match */
+    KlDecompress *decomp = dcfg->factory(dcfg->ctx, &resp->alloc);
+    if (!decomp)
+        return -1;
+
+    const char *supported = decomp->encoding(decomp);
+    if (strcasecmp(enc, supported) != 0) {
+        decomp->destroy(decomp);
+        return 0;  /* encoding mismatch — leave body as-is */
+    }
+
+    /* Decompress */
+    char *out = NULL;
+    size_t out_len = 0;
+    int rc = decomp->decompress(decomp, resp->body, resp->body_len,
+                                 &out, &out_len, &resp->alloc);
+    decomp->destroy(decomp);
+
+    if (rc < 0)
+        return -1;
+
+    /* Replace body */
+    kl_free(&resp->alloc, resp->body, resp->body_len + 1);
+    resp->body = out;
+    resp->body_len = out_len;
+
+    /* Remove Content-Encoding header */
+    remove_header(resp, "Content-Encoding");
+
+    return 0;
+}
+
+/* ── Streaming decompression wrapper ─────────────────────────────── */
+
+typedef struct {
+    /* User's original callbacks */
+    KlClientBodyFn     user_on_body;
+    KlClientHeadersFn  user_on_headers;
+    void             (*user_on_complete)(void *user_data);
+    void              *user_data;
+
+    /* Decompression state */
+    KlDecompressStream  ds;
+    int                 active;  /* 1 if decompression is active */
+    KlDecompressConfig *dcfg;
+} DecompStreamWrap;
+
+static int decomp_emit_to_user(void *ctx, const char *data, size_t len)
+{
+    DecompStreamWrap *w = ctx;
+    if (!w->user_on_body)
+        return 0;
+    return w->user_on_body(data, len, w->user_data);
+}
+
+static int decomp_on_headers(int status, const KlClientHeader *headers,
+                               int num_headers, void *user_data)
+{
+    DecompStreamWrap *w = user_data;
+
+    /* Check if Content-Encoding matches our decompressor */
+    for (int i = 0; i < num_headers; i++) {
+        if (strcasecmp(headers[i].name, "Content-Encoding") == 0) {
+            /* Create session and check encoding */
+            KlDecompress *decomp = w->dcfg->factory(w->dcfg->ctx,
+                                                      w->ds.alloc);
+            if (decomp) {
+                const char *supported = decomp->encoding(decomp);
+                if (strcasecmp(headers[i].value, supported) == 0) {
+                    w->ds.decomp = decomp;
+                    w->ds.error = 0;
+                    w->active = 1;
+                } else {
+                    decomp->destroy(decomp);
+                }
+            }
+            break;
+        }
+    }
+
+    if (w->user_on_headers)
+        return w->user_on_headers(status, headers, num_headers, w->user_data);
+    return 0;
+}
+
+static int decomp_on_body(const char *data, size_t len, void *user_data)
+{
+    DecompStreamWrap *w = user_data;
+    if (w->active) {
+        return kl_decompress_stream_feed(&w->ds, data, len, 0,
+                                          decomp_emit_to_user, w);
+    }
+    /* Passthrough */
+    if (w->user_on_body)
+        return w->user_on_body(data, len, w->user_data);
+    return 0;
+}
+
+static void decomp_on_complete(void *user_data)
+{
+    DecompStreamWrap *w = user_data;
+    if (w->active) {
+        /* Final flush */
+        kl_decompress_stream_feed(&w->ds, NULL, 0, 1,
+                                   decomp_emit_to_user, w);
+        kl_decompress_stream_free(&w->ds);
+        w->active = 0;
+    }
+    if (w->user_on_complete)
+        w->user_on_complete(w->user_data);
+}
+
 /* ── Sync public API ─────────────────────────────────────────────── */
 
 int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
@@ -521,6 +680,29 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
         }
     }
 
+    /* Set up streaming decompression wrapper if needed */
+    KlDecompressConfig *dcfg = cfg ? cfg->decompress : NULL;
+    DecompStreamWrap decomp_wrap;
+    const KlClientStreamCfg *actual_stream = stream;
+    KlClientStreamCfg wrapped_stream;
+
+    if (dcfg && dcfg->factory && stream && stream->on_body) {
+        memset(&decomp_wrap, 0, sizeof(decomp_wrap));
+        decomp_wrap.user_on_body = stream->on_body;
+        decomp_wrap.user_on_headers = stream->on_headers;
+        decomp_wrap.user_on_complete = stream->on_complete;
+        decomp_wrap.user_data = stream->user_data;
+        decomp_wrap.dcfg = dcfg;
+        decomp_wrap.ds.alloc = alloc;
+
+        wrapped_stream.on_body = decomp_on_body;
+        wrapped_stream.on_headers = decomp_on_headers;
+        wrapped_stream.on_complete = decomp_on_complete;
+        wrapped_stream.body_read = stream->body_read;
+        wrapped_stream.user_data = &decomp_wrap;
+        actual_stream = &wrapped_stream;
+    }
+
     /* Request streaming: send headers + chunked body */
     if (stream && stream->body_read) {
         if (send_headers_sync(fd, tls, method, &parsed,
@@ -543,9 +725,17 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     }
 
     if (recv_response_sync(fd, tls, resp, max_resp, timeout_ms, alloc,
-                            stream) != 0) {
+                            actual_stream) != 0) {
         if (!resp->error) resp->error = KL_ERR_PARSE;
         goto cleanup;
+    }
+
+    /* Decompress buffered response body if applicable */
+    if (!stream || !stream->on_body) {
+        if (decompress_response_body(resp, dcfg) < 0) {
+            if (!resp->error) resp->error = KL_ERR_COMPRESS;
+            goto cleanup;
+        }
     }
 
     ret = 0;
@@ -660,6 +850,10 @@ struct KlClient {
     KlClientPoolConn   pool_conn;
     int                pool_port;
     int                pool_is_tls;
+
+    /* Response decompression */
+    KlDecompressConfig *decompress_cfg;
+    DecompStreamWrap   *decomp_wrap;     /* heap-allocated for streaming */
 };
 
 /* Forward declarations */
@@ -1190,6 +1384,11 @@ static void async_complete_success(KlClient *c)
         c->parser = NULL;
     }
 
+    /* Decompress buffered response body if applicable */
+    if (!c->decomp_wrap) {
+        decompress_response_body(&c->resp, c->decompress_cfg);
+    }
+
     c->state = KL_HCLIENT_DONE;
     c->error = KL_ERR_NONE;
     if (c->on_done)
@@ -1311,6 +1510,10 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->user_data = user_data;
     memcpy(c->host_buf, host_buf, parsed.host_len + 1);
 
+    /* Response decompression config */
+    KlDecompressConfig *dcfg = cfg ? cfg->decompress : NULL;
+    c->decompress_cfg = dcfg;
+
     /* Request streaming */
     if (stream && stream->body_read) {
         c->body_read = stream->body_read;
@@ -1319,15 +1522,42 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
 
     /* Create response parser (streaming or buffered) */
     if (stream && stream->on_body) {
-        c->parser = kl_response_parser_llhttp_s(max_resp, alloc,
-                                                  stream->on_body,
-                                                  stream->on_headers,
-                                                  stream->on_complete,
-                                                  stream->user_data);
+        /* Wrap streaming callbacks with decompression if configured */
+        if (dcfg && dcfg->factory) {
+            DecompStreamWrap *w = kl_malloc(alloc, sizeof(DecompStreamWrap));
+            if (!w) {
+                kl_free(alloc, req_buf, req_len);
+                kl_free(alloc, c, sizeof(KlClient));
+                return NULL;
+            }
+            memset(w, 0, sizeof(*w));
+            w->user_on_body = stream->on_body;
+            w->user_on_headers = stream->on_headers;
+            w->user_on_complete = stream->on_complete;
+            w->user_data = stream->user_data;
+            w->dcfg = dcfg;
+            w->ds.alloc = alloc;
+            c->decomp_wrap = w;
+
+            c->parser = kl_response_parser_llhttp_s(max_resp, alloc,
+                                                      decomp_on_body,
+                                                      decomp_on_headers,
+                                                      decomp_on_complete,
+                                                      w);
+        } else {
+            c->parser = kl_response_parser_llhttp_s(max_resp, alloc,
+                                                      stream->on_body,
+                                                      stream->on_headers,
+                                                      stream->on_complete,
+                                                      stream->user_data);
+        }
     } else {
         c->parser = kl_response_parser_llhttp(max_resp, alloc);
     }
     if (!c->parser) {
+        if (c->decomp_wrap) {
+            kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
+        }
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlClient));
         return NULL;
@@ -1473,6 +1703,13 @@ void kl_client_free(KlClient *client)
 
     kl_client_response_free(&client->resp);
 
+    if (client->decomp_wrap) {
+        if (client->decomp_wrap->active)
+            kl_decompress_stream_free(&client->decomp_wrap->ds);
+        kl_free(client->alloc, client->decomp_wrap, sizeof(DecompStreamWrap));
+        client->decomp_wrap = NULL;
+    }
+
     KlAllocator *alloc = client->alloc;
     kl_free(alloc, client, sizeof(KlClient));
 }
@@ -1579,6 +1816,15 @@ int kl_client_request_pooled(KlClientPool *pool,
         goto cleanup;
     }
 
+    /* Decompress buffered response body if applicable */
+    {
+        KlDecompressConfig *dcfg = cfg ? cfg->decompress : NULL;
+        if (decompress_response_body(resp, dcfg) < 0) {
+            if (!resp->error) resp->error = KL_ERR_COMPRESS;
+            goto cleanup;
+        }
+    }
+
     ret = 0;
 
 cleanup:
@@ -1663,6 +1909,9 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     c->pool = pool;
     c->pool_port = parsed.port;
     c->pool_is_tls = is_tls;
+
+    /* Response decompression config */
+    c->decompress_cfg = cfg ? cfg->decompress : NULL;
 
     /* Create response parser */
     c->parser = kl_response_parser_llhttp(max_resp, alloc);

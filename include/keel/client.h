@@ -12,6 +12,7 @@
 #define KEEL_CLIENT_H
 
 #include <keel/allocator.h>
+#include <keel/decompress.h>
 #include <keel/error.h>
 #include <keel/event_ctx.h>
 #include <keel/parser.h>
@@ -53,6 +54,7 @@ typedef struct {
     size_t           max_response_size;  /**< Max response body (0 = default 4 MB) */
     KlTlsConfig     *tls;              /**< TLS config for HTTPS (NULL = no HTTPS) */
     KlResolver      *resolver;          /**< Async DNS resolver (NULL = sync getaddrinfo) */
+    KlDecompressConfig *decompress;     /**< Response decompression (NULL = no decompression) */
 } KlClientConfig;
 
 /* ── Streaming types ──────────────────────────────────────────────── */

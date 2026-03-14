@@ -57,7 +57,7 @@ CORE_SRC = src/allocator.c src/error.c src/response.c src/router.c \
            src/websocket.c src/websocket_client.c \
            src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client.c src/client_pool.c src/redirect.c src/sse.c \
-           src/compress.c $(EVENT_SRC)
+           src/compress.c src/decompress.c $(EVENT_SRC)
 
 # Default parser backend (llhttp)
 LLHTTP_SRC = parsers/parser_llhttp.c parsers/response_parser_llhttp.c \
@@ -82,8 +82,8 @@ ifdef KEEL_COMPRESS
 ifeq ($(KEEL_COMPRESS),miniz)
   MINIZ_DIR ?= ../miniz
   CFLAGS += -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO
-  COMPRESS_MINIZ_SRC = src/compress_miniz.c
-  COMPRESS_MINIZ_OBJ = src/compress_miniz.o
+  COMPRESS_MINIZ_SRC = src/compress_miniz.c src/decompress_miniz.c
+  COMPRESS_MINIZ_OBJ = src/compress_miniz.o src/decompress_miniz.o
 endif
 endif
 COMPRESS_MINIZ_OBJ ?=
@@ -143,7 +143,7 @@ endif
 
 # Compression example — only built when KEEL_COMPRESS=miniz
 ifeq ($(KEEL_COMPRESS),miniz)
-EXAMPLES += examples/compress_server
+EXAMPLES += examples/compress_server examples/decompress_client
 endif
 
 examples: $(EXAMPLES)
@@ -186,9 +186,9 @@ keel.pc: keel.pc.in
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
-	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/tls_mbedtls.o src/compress_miniz.o
+	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
-	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/compress_server
+	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/compress_server examples/decompress_client
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser
 	find . -name '*.d' -delete
 	rm -f keel.pc
@@ -214,7 +214,7 @@ debug-test: debug
 	$(MAKE) test CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)"
 
 # Code coverage (Linux, requires lcov/genhtml)
-COVERAGE_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
+COVERAGE_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
                   -g -O0 --coverage -Iinclude -Ivendor/llhttp
 ifeq ($(UNAME_S),Linux)
   COVERAGE_CFLAGS += -D_DEFAULT_SOURCE

@@ -1,6 +1,6 @@
 # Keel Examples
 
-25 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, timer, SSE, redirect, compression, and utility APIs.
+26 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, timer, SSE, redirect, compression, decompression, and utility APIs.
 
 ## Quick Start
 
@@ -137,8 +137,14 @@ make examples KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz
 | Example | Port | Description | Key APIs |
 |---------|------|-------------|----------|
 | `compress_server` | 8080 | Buffer + streaming gzip compression | `KlCompressConfig`, `kl_response_body_compress`, `KlCompressStream` |
+| `decompress_client` | — (self-contained) | Compress → decompress round-trip | `KlDecompressConfig`, `kl_decompress_body`, `KlDecompressStream` |
+
+Set `KlClientConfig.decompress` to automatically decompress gzip responses from servers.
 
 ```bash
+# Self-contained round-trip (no server needed):
+./examples/decompress_client
+
 # Buffer compression (compare sizes with/without Accept-Encoding):
 curl -H "Accept-Encoding: gzip" localhost:8080/json | gunzip
 curl localhost:8080/json

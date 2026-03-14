@@ -458,6 +458,56 @@ test_async_client() {
   stop_server "$server_pid"
 }
 
+# ── Compression examples (conditional build) ──────────────────────────
+
+# decompress_client — standalone round-trip (no server needed)
+test_decompress_client() {
+  echo "=== decompress_client ==="
+  bin="examples/decompress_client"
+  if [ ! -x "$bin" ]; then
+    skip=$((skip + 1))
+    echo "  SKIP: not built (requires KEEL_COMPRESS=miniz)"
+    return
+  fi
+
+  output=$("./$bin" 2>&1) || true
+  check_contains "one-shot round-trip" "$output" "Round-trip: OK"
+  check_contains "streaming round-trip" "$output" "Streaming round-trip: OK"
+}
+
+# compress_server — server-side gzip compression
+test_compress_server() {
+  echo "=== compress_server ==="
+  bin="examples/compress_server"
+  if [ ! -x "$bin" ]; then
+    skip=$((skip + 1))
+    echo "  SKIP: not built (requires KEEL_COMPRESS=miniz)"
+    return
+  fi
+
+  pid=$(start_server "./$bin")
+  if ! wait_for_server 8080; then
+    fail=$((fail + 1)); echo "  FAIL: server didn't start"
+    stop_server "$pid"; return
+  fi
+
+  # Uncompressed JSON
+  resp=$($CURL "http://127.0.0.1:8080/json" || true)
+  check_contains "GET /json (no gzip)" "$resp" '"Hello from Keel"'
+
+  # Compressed JSON — decompress with gunzip
+  resp=$(curl -s --max-time 5 -H "Accept-Encoding: gzip" \
+    "http://127.0.0.1:8080/json" | gunzip 2>/dev/null || true)
+  check_contains "GET /json (gzip)" "$resp" '"Hello from Keel"'
+
+  # Compressed stream
+  resp=$(curl -s --max-time 5 -H "Accept-Encoding: gzip" \
+    "http://127.0.0.1:8080/stream" | gunzip 2>/dev/null || true)
+  check_contains "GET /stream (gzip)" "$resp" "chunk 0"
+
+  stop_server "$pid"
+}
+
 # ── Skipped (TLS / complex dependencies) ───────────────────────────────
 
 test_skipped() {
@@ -493,6 +543,10 @@ test_h2_server
 # Client examples (also use :8080)
 test_client
 test_async_client
+
+# Compression examples (conditional — skip if not built)
+test_decompress_client
+test_compress_server
 
 # Skipped
 test_skipped
