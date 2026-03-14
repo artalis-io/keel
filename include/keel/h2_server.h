@@ -82,6 +82,7 @@ struct KlH2ServerStream {
     int route_result;
     int headers_done;
     int body_done;
+    size_t body_received;
     int response_submitted;
     char *hdr_storage;
     size_t hdr_storage_len;

@@ -111,12 +111,17 @@ static int miniz_decompress_fn(KlDecompress *self,
     const unsigned char *comp_data = (const unsigned char *)in + hdr_end;
     size_t comp_len = in_len - hdr_end - 8;
 
-    /* Allocate output buffer using ISIZE hint (mod 2^32) */
+    /* Allocate output buffer using ISIZE hint (mod 2^32).
+     * Cap initial alloc to 16 MB — untrusted ISIZE could be huge.
+     * Growth loop below handles larger outputs. */
+    #define KL_DECOMP_INIT_MAX (16 * 1024 * 1024)
     size_t buf_size = expected_isize;
     if (buf_size == 0)
         buf_size = comp_len * 4;  /* guess */
     if (buf_size < 64)
         buf_size = 64;
+    if (buf_size > KL_DECOMP_INIT_MAX)
+        buf_size = KL_DECOMP_INIT_MAX;
     if (buf_size > SIZE_MAX / 2)
         return -1;
 

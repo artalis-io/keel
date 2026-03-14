@@ -953,6 +953,42 @@ UTEST(auto_ping, not_before_deadline) {
     ASSERT_EQ(kl_ws_server_auto_ping(&conn, 500), 0);
 }
 
+UTEST(cleanup, rejects_unmasked_client_frame) {
+    /* RFC 6455 §5.1: server MUST close on unmasked client frame */
+    KlAllocator alloc = kl_allocator_default();
+
+    KlWsServerConfig cfg;
+    kl_ws_server_config_init(&cfg);
+
+    int fds[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+
+    KlConn conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.fd = fds[0];
+    conn.alloc = &alloc;
+
+    KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
+    memset(ws, 0, sizeof(*ws));
+    ws->config = &cfg;
+    ws->alloc = &alloc;
+    ws->conn = &conn;
+    kl_ws_frame_init(&ws->frame);
+    conn.ws = ws;
+
+    /* Build an unmasked text frame (mask bit = 0) */
+    uint8_t buf[16];
+    size_t flen = build_frame(buf, 1, 0x1, 0, NULL,
+                              (const uint8_t *)"hi", 2);
+
+    int rc = kl_ws_server_on_readable_data(&conn, buf, flen);
+    ASSERT_EQ(rc, KL_CONN_CLOSED);
+
+    close(fds[0]);
+    close(fds[1]);
+    kl_free(&alloc, ws, sizeof(KlWsServerConn));
+}
+
 UTEST(cleanup, null_ws_is_noop) {
     KlConn conn;
     memset(&conn, 0, sizeof(conn));

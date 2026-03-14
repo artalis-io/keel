@@ -490,8 +490,9 @@ KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path)
         mbedtls_ssl_conf_ca_chain(&ctx->conf, &ctx->ca_cert, NULL);
         mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     } else {
-        /* No CA provided — skip server certificate verification.
-         * Appropriate for development; production should provide CA. */
+        /* WARNING: No CA provided — TLS certificate verification DISABLED.
+         * Connections are encrypted but vulnerable to MITM attacks.
+         * Production deployments MUST provide a CA bundle path. */
         mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_NONE);
     }
 

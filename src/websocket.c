@@ -157,8 +157,6 @@ static void ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4],
 
     /* 4-byte blocks */
     if (start_offset == 0 || i > 0) {
-        size_t mi = (start_offset + i) & 3;
-        (void)mi;
         for (; i + 3 < len; i += 4) {
             size_t base = (start_offset + i) & 3;
             data[i]     ^= mask[base];
@@ -514,6 +512,12 @@ int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
                                     &consumed);
 
         if (rc < 0) {
+            kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
+            return KL_CONN_CLOSED;
+        }
+
+        /* RFC 6455 §5.1: server MUST close on unmasked client frame */
+        if (ws->frame.state != KL_WS_FRAME_HEADER && !ws->frame.masked) {
             kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
             return KL_CONN_CLOSED;
         }

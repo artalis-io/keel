@@ -29,7 +29,6 @@ struct KlRedirectClient {
     /* Redirect state */
     int                max_redirects;
     int                redirects_done;
-    int                auth_dropped;    /* 1 if Authorization already removed */
     char               original_url[KL_URL_MAX]; /* for cross-origin checks */
     char               current_url[KL_URL_MAX];
     char               current_method[16];

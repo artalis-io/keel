@@ -83,6 +83,10 @@ int kl_drain_write(KlDrain *d, const char *data, size_t len) {
         d->error = 1;
         return -1;
     }
+    if ((size_t)n > len) {
+        d->error = 1;
+        return -1;
+    }
     if ((size_t)n == len) return 0;  /* all written */
 
     /* Buffer the remainder */
@@ -107,6 +111,10 @@ int kl_drain_flush(KlDrain *d) {
         if (n == 0) return 1;  /* would-block, more pending */
 
         size_t written = (size_t)n;
+        if (written > d->buf_len) {
+            d->error = 1;
+            return -1;
+        }
         d->buf_len -= written;
         if (d->buf_len > 0)
             memmove(d->buf, d->buf + written, d->buf_len);

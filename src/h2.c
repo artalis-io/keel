@@ -206,6 +206,10 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     KlH2ServerStream *stream = h2_stream_create(h2c, stream_id);
     if (!stream) return -1;
 
+    /* Clamp to max headers (vtable may provide unchecked value) */
+    if (num_headers > KL_MAX_HEADERS)
+        num_headers = KL_MAX_HEADERS;
+
     /* Calculate total header storage needed */
     size_t total = method_len + 1 + path_len + 1;
     if (method_len > SIZE_MAX / 2 || path_len > SIZE_MAX / 2) {
@@ -357,6 +361,13 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
     KlH2ServerConn *h2c = ud;
     KlH2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return -1;
+
+    /* Enforce body size limit (mirrors HTTP/1.1 path in connection.c) */
+    size_t max = h2c->conn->max_body_size;
+    if (max > 0) {
+        if (len > max - stream->body_received) return -1;
+        stream->body_received += len;
+    }
 
     if (stream->body_reader) {
         return stream->body_reader->on_data(stream->body_reader, data, len);

@@ -28,6 +28,7 @@ static ssize_t mock_write(const char *data, size_t len, void *ctx) {
     if (w->switch_after >= 0 && w->call_count > w->switch_after)
         mode = 0;
 
+    if (mode == 4) return (ssize_t)(len + 1);  /* buggy: overreport */
     if (mode == 3) return -1;  /* error */
     if (mode == 2) return 0;   /* would-block */
 
@@ -442,6 +443,41 @@ UTEST(drain, free_resets) {
     ASSERT_TRUE(d.buf == NULL);
     ASSERT_EQ(d.buf_len, (size_t)0);
     ASSERT_EQ(d.buf_cap, (size_t)0);
+}
+
+UTEST(drain, write_fn_overreport) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+    w.mode = 4;  /* buggy: returns len+1 */
+
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+
+    ASSERT_EQ(kl_drain_write(&d, "hello", 5), -1);
+    ASSERT_EQ(d.error, 1);
+
+    kl_drain_free(&d);
+}
+
+UTEST(drain, flush_fn_overreport) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+    w.mode = 2;  /* would-block initially */
+
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+
+    kl_drain_write(&d, "data", 4);
+    ASSERT_EQ(d.buf_len, (size_t)4);
+
+    /* Switch to overreport mode for flush */
+    w.mode = 4;
+    ASSERT_EQ(kl_drain_flush(&d), -1);
+    ASSERT_EQ(d.error, 1);
+
+    kl_drain_free(&d);
 }
 
 UTEST_MAIN();
