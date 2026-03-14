@@ -137,6 +137,12 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->config.h2 = &s->h2_storage;
     }
 
+    /* Copy compress config if provided */
+    if (s->config.compress) {
+        s->compress_storage = *s->config.compress;
+        s->config.compress = &s->compress_storage;
+    }
+
     /* Create parsers and propagate config for each connection slot */
     for (int i = 0; i < s->pool.capacity; i++) {
         s->pool.conns[i].parser = s->config.parser(alloc);
@@ -630,5 +636,8 @@ void kl_server_free(KlServer *s) {
     kl_router_free(&s->router);
     if (s->config.tls && s->config.tls->ctx_destroy) {
         s->config.tls->ctx_destroy(s->config.tls->ctx);
+    }
+    if (s->config.compress && s->config.compress->ctx_destroy) {
+        s->config.compress->ctx_destroy(s->config.compress->ctx);
     }
 }

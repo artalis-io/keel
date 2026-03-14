@@ -6,8 +6,8 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 563 unit tests
-make examples     # build all 21 example programs (23 with TLS)
+make test         # build and run all 579 unit tests
+make examples     # build all 21 example programs (23 with TLS, 24 with compression)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis
@@ -25,12 +25,12 @@ make clean        # remove all build artifacts
 - `parsers/` — Pluggable parser backends (`parser_llhttp.c`, `response_parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
-- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer, redirect_client).
+- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer, redirect_client, compress_server).
 - `docs/` — Architecture and roadmap documentation.
 
 ## Architecture
 
-26 orthogonal modules, each independently testable:
+27 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -58,6 +58,7 @@ make clean        # remove all build artifacts
 24. **timer** — One-shot timer scheduling on KlEventCtx (min-heap, checked per event loop tick)
 25. **client_pool** — HTTP client connection pool: caches idle TCP+TLS connections keyed by (host, port, is_tls) for keep-alive reuse
 26. **redirect** — HTTP redirect following: automatic 3xx redirect with RFC 7231/7538 method transformation, cross-origin auth stripping, URL resolution
+27. **compress** — Pluggable response compression vtable: single-shot buffer + streaming chunked, with KlCompressConfig on KlConfig for server-wide use
 
 **Deliberate design choices:**
 
@@ -134,6 +135,11 @@ make clean        # remove all build artifacts
 | `KlRedirectConfig` | `redirect.h` | Redirect config: max_redirects |
 | `KlRedirectClient` | `redirect.h` | Opaque async redirect client handle |
 | `KlRedirectDoneFn` | `redirect.h` | Async redirect completion callback |
+| `KlCompress` | `compress.h` | Pluggable compression vtable: compress, feed, encoding, reset, destroy |
+| `KlCompressCtx` | `compress.h` | Opaque per-server compression context (user-owned) |
+| `KlCompressConfig` | `compress.h` | Compression config: ctx, factory, ctx_destroy |
+| `KlCompressFactory` | `compress.h` | Factory: creates per-operation KlCompress from shared context |
+| `KlCompressStream` | `compress.h` | Compressed streaming handle: comp, write_fn, write_ctx, res |
 
 ## Git
 

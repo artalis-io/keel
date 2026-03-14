@@ -2,6 +2,7 @@
 #define KEEL_SERVER_H
 
 #include <keel/allocator.h>
+#include <keel/compress.h>
 #include <keel/error.h>
 #include <keel/parser.h>
 #include <keel/router.h>
@@ -57,6 +58,7 @@ typedef struct KlConfig {
     KlH2ServerConfig *h2;             /* HTTP/2 config — NULL = disabled (default) */
     size_t max_body_size;       /* discard-path body limit; default: 1 MB */
     size_t max_header_size;     /* max header block size; 0 = KL_READ_BUF_SIZE (8192) */
+    KlCompressConfig *compress; /* compression config — NULL = disabled (default) */
 } KlConfig;
 
 typedef struct KlAsyncOp KlAsyncOp;
@@ -66,6 +68,7 @@ typedef struct KlServer {
     KlAllocator alloc_storage;  /* owned copy if user didn't provide one */
     KlTlsConfig tls_storage;   /* owned copy of TLS config (if provided) */
     KlH2ServerConfig h2_storage;     /* owned copy of H2 config (if provided) */
+    KlCompressConfig compress_storage; /* owned copy of compress config (if provided) */
     KlRouter router;
     KlConnPool pool;
     KlEventCtx ev;              /* event loop + watcher list */

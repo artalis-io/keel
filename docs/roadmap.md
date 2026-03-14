@@ -190,20 +190,9 @@ Implemented in `redirect.h` / `redirect.c`. Orthogonal module wrapping existing 
 
 Implemented as `ping_interval_ms` field on both `KlWsServerConfig` and `KlWsClientConfig` (0 = disabled, default). Server-side uses sweep-based approach (same pattern as close timeout check); client-side uses `kl_timer_add` for recurring pings. Auto-ping skips connections in close handshake. 7 tests.
 
-### Response compression
+### ~~Response compression~~ (Done)
 
-**Priority: Medium** | **Effort: Moderate**
-
-No automatic response compression. For bandwidth-sensitive deployments, gzip/deflate on buffer and stream responses:
-
-```c
-kl_response_header(res, "Content-Encoding", "gzip");
-kl_response_body_compressed(res, data, len);
-```
-
-For streaming, integrate with zlib's `deflate` in the chunk write path. For buffer responses, compress before `writev`. File responses are not compressed (use pre-compressed files).
-
-Requires zlib dependency or a pluggable compression vtable to avoid forced dependencies.
+Pluggable compression vtable (`KlCompress`) — users bring their own compression backend (miniz, zlib, zstd) by implementing a 5-function vtable. Buffer body compression via `kl_response_body_compress()` with automatic expansion fallback. Streaming compression via `KlCompressStream` (wraps chunked stream). `KlCompressConfig` on `KlConfig` for server-wide configuration. Miniz-based gzip backend ships as optional source (`compress_miniz.c`, build with `KEEL_COMPRESS=miniz`). 16 tests.
 
 ### Response decompression (client)
 

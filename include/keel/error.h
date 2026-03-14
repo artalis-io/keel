@@ -52,6 +52,9 @@ typedef enum {
     /* Redirect */
     KL_ERR_REDIRECT_LOOP,   /**< Too many redirects */
 
+    /* Compression */
+    KL_ERR_COMPRESS,        /**< Compression error */
+
     KL_ERR__COUNT           /**< Sentinel — not an error code */
 } KlError;
 

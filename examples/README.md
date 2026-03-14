@@ -1,6 +1,6 @@
 # Keel Examples
 
-24 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, timer, SSE, redirect, and utility APIs.
+25 example programs demonstrating KEEL's HTTP server, client, WebSocket, HTTP/2, async, timer, SSE, redirect, compression, and utility APIs.
 
 ## Quick Start
 
@@ -124,6 +124,27 @@ websocat ws://localhost:8080/ws
 ./examples/connection_pool
 ./examples/url_parser
 ./examples/timer
+```
+
+## Compression Examples
+
+Requires building with miniz support:
+
+```bash
+make examples KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz
+```
+
+| Example | Port | Description | Key APIs |
+|---------|------|-------------|----------|
+| `compress_server` | 8080 | Buffer + streaming gzip compression | `KlCompressConfig`, `kl_response_body_compress`, `KlCompressStream` |
+
+```bash
+# Buffer compression (compare sizes with/without Accept-Encoding):
+curl -H "Accept-Encoding: gzip" localhost:8080/json | gunzip
+curl localhost:8080/json
+
+# Streaming compression:
+curl -H "Accept-Encoding: gzip" localhost:8080/stream | gunzip
 ```
 
 ## TLS Examples
