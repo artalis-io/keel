@@ -9,6 +9,7 @@
 #define KEEL_WEBSOCKET_SERVER_H
 
 #include <keel/websocket.h>
+#include <keel/drain.h>
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
@@ -56,6 +57,8 @@ struct KlWsServerConn {
     uint64_t next_ping_ms;       /* 0 = auto-ping disabled */
     KlConn *conn;                /* back-pointer for send functions */
     KlAllocator *alloc;
+    KlDrain drain;               /* backpressure write buffer (opt-in) */
+    int drain_enabled;           /* 0 = off (default), 1 = on */
 };
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -76,10 +79,15 @@ int kl_ws_server_send_ping(KlWsServerConn *ws, const char *data, size_t len);
 int kl_ws_server_close(KlWsServerConn *ws, uint16_t code, const char *reason,
                         size_t reason_len);
 
+/** Enable drain-based backpressure for WebSocket writes. */
+int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size);
+
 /* ── Internal (used by connection.c / server.c) ──────────────────── */
 
 int  kl_ws_server_upgrade(KlConn *c, const char *leftover, size_t leftover_len);
 int  kl_ws_server_on_readable(KlConn *c);
+int  kl_ws_server_on_writable(KlConn *c);
+int  kl_ws_server_drain_pending(const KlConn *c);
 void kl_ws_server_cleanup(KlConn *c);
 void kl_ws_server_drain_close(KlConn *c);
 int  kl_ws_server_check_close_timeout(const KlConn *c, uint64_t now);

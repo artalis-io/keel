@@ -2,6 +2,7 @@
 #define KEEL_RESPONSE_H
 
 #include <keel/allocator.h>
+#include <keel/drain.h>
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -45,6 +46,11 @@ typedef struct KlResponse {
 
     /* KL_BODY_STREAM */
     int stream_error;
+    int stream_ended;       /* 1 = end_stream called, drain flush will close */
+
+    /* Streaming backpressure buffer (opt-in via kl_response_enable_drain) */
+    KlDrain drain;
+    int drain_enabled;      /* 0 = off (default), 1 = on */
 
     /* Buffer send progress (for partial writev resume) */
     size_t send_offset;
@@ -121,6 +127,20 @@ int kl_response_json(KlResponse *res, int code, const char *json, size_t len);
  * @return 0 on success, -1 on header append failure.
  */
 int kl_response_error(KlResponse *res, int code, const char *message);
+
+/**
+ * @brief Enable drain-based backpressure for chunked streaming.
+ *
+ * Must be called before kl_response_begin_stream(). When enabled,
+ * kl_stream_write() buffers data on would-block instead of spin-looping.
+ *
+ * @param res      Response.
+ * @param alloc    Allocator for drain buffer.
+ * @param max_size Hard cap on buffered bytes (0 = unlimited).
+ * @return 0 on success, -1 on error.
+ */
+int kl_response_enable_drain(KlResponse *res, KlAllocator *alloc,
+                              size_t max_size);
 
 /**
  * @brief Begin chunked streaming response.

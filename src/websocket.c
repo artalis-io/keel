@@ -171,6 +171,28 @@ static void ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4],
         data[i] ^= mask[(start_offset + i) & 3];
 }
 
+/* ── Drain writer — wraps conn_write for KlDrainWriteFn ──────────── */
+
+static ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
+    KlWsServerConn *ws = ctx;
+    ssize_t nw = conn_write(ws->conn, data, len);
+    if (nw < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;
+        return -1;
+    }
+    return nw;
+}
+
+int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size) {
+    if (!ws) return -1;
+    kl_drain_init(&ws->drain, ws_drain_writer, ws, ws->alloc);
+    if (max_size > 0)
+        kl_drain_set_max_size(&ws->drain, max_size);
+    ws->drain_enabled = 1;
+    return 0;
+}
+
 /* ── Send frame ──────────────────────────────────────────────────── */
 
 static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
@@ -201,6 +223,14 @@ static int ws_send_frame(KlWsServerConn *ws, int opcode, const char *data,
         hdr[8] = (uint8_t)(plen >> 8);
         hdr[9] = (uint8_t)(plen);
         hdr_len = 10;
+    }
+
+    if (ws->drain_enabled) {
+        if (kl_drain_write(&ws->drain, (const char *)hdr, hdr_len) < 0)
+            return -1;
+        if (len > 0 && kl_drain_write(&ws->drain, data, len) < 0)
+            return -1;
+        return 0;
     }
 
     /* Write header + payload with retry for short writes (TLS WANT_WRITE) */
@@ -656,6 +686,21 @@ int kl_ws_server_on_readable(KlConn *c) {
     return kl_ws_server_on_readable_data(c, buf, (size_t)nr);
 }
 
+/* ── Write-readiness (drain flush) ────────────────────────────────── */
+
+int kl_ws_server_on_writable(KlConn *c) {
+    if (!c->ws || !c->ws->drain_enabled)
+        return KL_CONN_WEBSOCKET;
+    int r = kl_drain_flush(&c->ws->drain);
+    if (r < 0) return KL_CONN_CLOSED;
+    return KL_CONN_WEBSOCKET;
+}
+
+int kl_ws_server_drain_pending(const KlConn *c) {
+    if (!c->ws || !c->ws->drain_enabled) return 0;
+    return kl_drain_pending(&c->ws->drain);
+}
+
 /* ── Cleanup ─────────────────────────────────────────────────────── */
 
 void kl_ws_server_cleanup(KlConn *c) {
@@ -667,6 +712,8 @@ void kl_ws_server_cleanup(KlConn *c) {
         ws->config->callbacks.on_close(ws, 1006, NULL, 0,
                                         ws->config->user_data);
 
+    if (ws->drain_enabled)
+        kl_drain_free(&ws->drain);
     if (ws->msg_buf)
         kl_free(ws->alloc, ws->msg_buf, ws->msg_cap);
     kl_free(c->alloc, ws, sizeof(KlWsServerConn));

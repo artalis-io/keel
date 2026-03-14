@@ -143,6 +143,10 @@ void kl_response_reset(KlResponse *res) {
     if (res->body_owned) {
         kl_free(res->alloc, res->body_owned, res->body_owned_size);
     }
+    /* Free drain buffer if enabled */
+    if (res->drain_enabled) {
+        kl_drain_free(&res->drain);
+    }
 
     /* Fast reinit for keep-alive — reuses header buffer, no alloc */
     char *buf = res->hdr_buf;
@@ -170,6 +174,10 @@ void kl_response_free(KlResponse *res) {
         kl_free(res->alloc, res->body_owned, res->body_owned_size);
         res->body_owned = NULL;
         res->body_owned_size = 0;
+    }
+    if (res->drain_enabled) {
+        kl_drain_free(&res->drain);
+        res->drain_enabled = 0;
     }
     if (res->hdr_buf) {
         kl_free(res->alloc, res->hdr_buf, res->hdr_cap);
@@ -500,6 +508,16 @@ int kl_response_send(KlResponse *res) {
             return 0;
     }
 
+    /* Drain-based stream flush (backpressure path) */
+    if (res->body_mode == KL_BODY_STREAM && res->drain_enabled) {
+        int r = kl_drain_flush(&res->drain);
+        if (r < 0) return -1;
+        if (r == 1) return 1;  /* more pending */
+        /* Fully drained — if stream ended, we're done */
+        if (res->stream_ended) return 0;
+        return 1;  /* handler may produce more data */
+    }
+
     /* Send file body (already skipped above for HEAD) */
     if (res->body_mode == KL_BODY_FILE) {
         if (res->tls) {
@@ -551,6 +569,35 @@ int kl_response_send(KlResponse *res) {
     return 0;
 }
 
+/* ── Drain writer — wraps raw write/TLS for KlDrainWriteFn ───────── */
+
+static ssize_t response_drain_writer(const char *data, size_t len, void *ctx) {
+    KlResponse *res = ctx;
+    ssize_t nw;
+    if (res->tls) {
+        nw = res->tls->write(res->tls, res->conn_fd, data, len);
+        if (nw < 0) return -1;
+        return nw;  /* 0 = WANT_WRITE (would-block) */
+    }
+    nw = write(res->conn_fd, data, len);
+    if (nw < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            return 0;
+        return -1;
+    }
+    return nw;
+}
+
+int kl_response_enable_drain(KlResponse *res, KlAllocator *alloc,
+                              size_t max_size) {
+    if (!res || !alloc) return -1;
+    kl_drain_init(&res->drain, response_drain_writer, res, alloc);
+    if (max_size > 0)
+        kl_drain_set_max_size(&res->drain, max_size);
+    res->drain_enabled = 1;
+    return 0;
+}
+
 /* ── Chunked streaming ───────────────────────────────────────────── */
 
 static int kl_stream_write(void *ctx, const char *data, size_t len) {
@@ -561,6 +608,16 @@ static int kl_stream_write(void *ctx, const char *data, size_t len) {
 
     char hdr[24];
     int hdr_len = format_chunk_hdr(hdr, len);
+
+    if (res->drain_enabled) {
+        if (kl_drain_write(&res->drain, hdr, (size_t)hdr_len) < 0 ||
+            kl_drain_write(&res->drain, data, len) < 0 ||
+            kl_drain_write(&res->drain, "\r\n", 2) < 0) {
+            res->stream_error = 1;
+            return -1;
+        }
+        return 0;
+    }
 
     struct iovec iov[3] = {
         { .iov_base = hdr,          .iov_len = (size_t)hdr_len },
@@ -612,6 +669,16 @@ int kl_response_begin_stream(KlResponse *res, int status,
 int kl_response_end_stream(KlResponse *res) {
     if (res->stream_error) return -1;
     if (res->head_request) return 0;
+
+    if (res->drain_enabled) {
+        if (kl_drain_write(&res->drain, "0\r\n\r\n", 5) < 0) {
+            res->stream_error = 1;
+            return -1;
+        }
+        res->stream_ended = 1;
+        return 0;
+    }
+
     struct iovec iov = { .iov_base = (void *)"0\r\n\r\n", .iov_len = 5 };
     if (stream_writev_all(res->conn_fd, res->tls, &iov, 1) < 0) {
         res->stream_error = 1;

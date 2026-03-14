@@ -430,10 +430,13 @@ rearm_listen:
                 goto transition;
             }
 
-            /* WebSocket — handle read events */
+            /* WebSocket — handle read/write events */
             if (c->state == KL_CONN_WEBSOCKET) {
                 if (events[i].ready & KL_EVENT_READ)
                     new_state = (KlConnState)kl_ws_server_on_readable(c);
+                if (new_state == KL_CONN_WEBSOCKET &&
+                    (events[i].ready & KL_EVENT_WRITE))
+                    new_state = (KlConnState)kl_ws_server_on_writable(c);
                 goto transition;
             }
 
@@ -476,8 +479,10 @@ transition:
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_WEBSOCKET) {
-                if (kl_event_mod(&s->ev.loop, c->fd,
-                                 KL_EVENT_READ, c) < 0) {
+                KlEventMask ws_mask = KL_EVENT_READ;
+                if (kl_ws_server_drain_pending(c))
+                    ws_mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
+                if (kl_event_mod(&s->ev.loop, c->fd, ws_mask, c) < 0) {
                     kl_event_del(&s->ev.loop, c->fd);
                     kl_server_conn_release(s,c);
                 }

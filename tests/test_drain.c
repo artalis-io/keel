@@ -1,6 +1,9 @@
 #include "utest.h"
 #include <keel/drain.h>
 #include <keel/allocator.h>
+#include <keel/response.h>
+#include <keel/websocket_server.h>
+#include <keel/connection.h>
 #include <string.h>
 
 /* ── Mock writer ─────────────────────────────────────────────────────── */
@@ -478,6 +481,245 @@ UTEST(drain, flush_fn_overreport) {
     ASSERT_EQ(d.error, 1);
 
     kl_drain_free(&d);
+}
+
+/* ── Response drain integration tests ─────────────────────────────────── */
+
+UTEST(drain, response_drain_enable) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+    res.file_fd = -1;
+
+    ASSERT_EQ(kl_response_enable_drain(&res, &a, 4096), 0);
+    ASSERT_EQ(res.drain_enabled, 1);
+    ASSERT_EQ(res.drain.max_size, (size_t)4096);
+    ASSERT_TRUE(res.drain.write_fn != NULL);
+
+    kl_drain_free(&res.drain);
+}
+
+UTEST(drain, response_drain_enable_unlimited) {
+    KlAllocator a = kl_allocator_default();
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+    res.file_fd = -1;
+
+    ASSERT_EQ(kl_response_enable_drain(&res, &a, 0), 0);
+    ASSERT_EQ(res.drain.max_size, (size_t)0);
+
+    kl_drain_free(&res.drain);
+}
+
+UTEST(drain, response_stream_with_drain) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+    w.mode = 2;  /* would-block */
+
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+    res.file_fd = -1;
+    res.body_mode = KL_BODY_STREAM;
+
+    /* Enable drain with our mock writer */
+    res.drain_enabled = 1;
+    kl_drain_init(&res.drain, mock_write, &w, &a);
+
+    /* Manually set up what begin_stream would do (minus actual I/O) */
+    res.headers_sent = 1;
+
+    /* Call the stream write function directly by calling kl_drain_write
+     * as kl_stream_write would */
+    char hdr[24];
+    /* "5\r\n" for 5-byte chunk */
+    hdr[0] = '5'; hdr[1] = '\r'; hdr[2] = '\n';
+    ASSERT_EQ(kl_drain_write(&res.drain, hdr, 3), 0);
+    ASSERT_EQ(kl_drain_write(&res.drain, "hello", 5), 0);
+    ASSERT_EQ(kl_drain_write(&res.drain, "\r\n", 2), 0);
+
+    /* All buffered since writer would-block */
+    ASSERT_EQ(kl_drain_buffered(&res.drain), (size_t)10);
+    ASSERT_EQ(w.len, (size_t)0);
+
+    /* Flush with normal writer */
+    w.mode = 0;
+    ASSERT_EQ(kl_drain_flush(&res.drain), 0);
+    ASSERT_EQ(w.len, (size_t)10);
+    ASSERT_EQ(memcmp(w.buf, "5\r\nhello\r\n", 10), 0);
+
+    kl_drain_free(&res.drain);
+}
+
+UTEST(drain, response_end_stream_drain) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+    w.mode = 2;  /* would-block */
+
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+    res.file_fd = -1;
+    res.body_mode = KL_BODY_STREAM;
+    res.headers_sent = 1;
+    res.drain_enabled = 1;
+    kl_drain_init(&res.drain, mock_write, &w, &a);
+
+    /* end_stream writes final chunk through drain */
+    ASSERT_EQ(kl_response_end_stream(&res), 0);
+    ASSERT_EQ(res.stream_ended, 1);
+    ASSERT_EQ(kl_drain_buffered(&res.drain), (size_t)5);
+    ASSERT_EQ(memcmp(res.drain.buf, "0\r\n\r\n", 5), 0);
+
+    /* Flush it */
+    w.mode = 0;
+    ASSERT_EQ(kl_drain_flush(&res.drain), 0);
+    ASSERT_EQ(w.len, (size_t)5);
+
+    kl_drain_free(&res.drain);
+}
+
+UTEST(drain, response_send_stream_flush) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+    res.file_fd = -1;
+    res.body_mode = KL_BODY_STREAM;
+    res.headers_sent = 1;
+    res.drain_enabled = 1;
+    kl_drain_init(&res.drain, mock_write, &w, &a);
+
+    /* Buffer some data (would-block) */
+    w.mode = 2;
+    kl_drain_write(&res.drain, "0\r\n\r\n", 5);
+    res.stream_ended = 1;
+
+    /* Send with would-block: returns 1 (more pending) */
+    int r = kl_response_send(&res);
+    ASSERT_EQ(r, 1);
+
+    /* Now writer accepts */
+    w.mode = 0;
+    r = kl_response_send(&res);
+    ASSERT_EQ(r, 0);  /* fully drained + stream_ended → done */
+    ASSERT_EQ(w.len, (size_t)5);
+
+    kl_drain_free(&res.drain);
+}
+
+UTEST(drain, response_drain_cleanup) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+    w.mode = 2;  /* would-block */
+
+    KlResponse res;
+    ASSERT_EQ(kl_response_init(&res, &a), 0);
+
+    /* Set up drain with mock writer (bypassing response_drain_writer
+     * which needs a real fd) */
+    res.drain_enabled = 1;
+    kl_drain_init(&res.drain, mock_write, &w, &a);
+
+    /* Buffer some data */
+    kl_drain_write(&res.drain, "data", 4);
+    ASSERT_TRUE(res.drain.buf != NULL);
+
+    /* Reset should free drain buffer */
+    kl_response_reset(&res);
+    ASSERT_EQ(res.drain_enabled, 0);
+
+    /* Re-enable for free test */
+    res.drain_enabled = 1;
+    kl_drain_init(&res.drain, mock_write, &w, &a);
+    kl_drain_write(&res.drain, "more", 4);
+
+    kl_response_free(&res);
+    /* drain_enabled cleared by free */
+}
+
+/* ── WebSocket drain integration tests ───────────────────────────────── */
+
+UTEST(drain, ws_drain_enable) {
+    KlAllocator a = kl_allocator_default();
+    KlWsServerConn ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.alloc = &a;
+
+    ASSERT_EQ(kl_ws_server_enable_drain(&ws, 8192), 0);
+    ASSERT_EQ(ws.drain_enabled, 1);
+    ASSERT_EQ(ws.drain.max_size, (size_t)8192);
+    ASSERT_TRUE(ws.drain.write_fn != NULL);
+
+    kl_drain_free(&ws.drain);
+}
+
+UTEST(drain, ws_send_frame_drain) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+    w.mode = 2;  /* would-block */
+
+    KlWsServerConn ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.alloc = &a;
+    ws.drain_enabled = 1;
+    kl_drain_init(&ws.drain, mock_write, &w, &a);
+
+    /* Simulate a text frame send via drain_write (header + payload) */
+    /* Frame header for 5-byte text: [0x81, 0x05] */
+    uint8_t hdr[2] = {0x81, 0x05};
+    ASSERT_EQ(kl_drain_write(&ws.drain, (const char *)hdr, 2), 0);
+    ASSERT_EQ(kl_drain_write(&ws.drain, "hello", 5), 0);
+
+    ASSERT_EQ(kl_drain_buffered(&ws.drain), (size_t)7);
+
+    /* Flush */
+    w.mode = 0;
+    ASSERT_EQ(kl_drain_flush(&ws.drain), 0);
+    ASSERT_EQ(w.len, (size_t)7);
+    ASSERT_EQ((uint8_t)w.buf[0], (uint8_t)0x81);
+    ASSERT_EQ((uint8_t)w.buf[1], (uint8_t)0x05);
+    ASSERT_EQ(memcmp(w.buf + 2, "hello", 5), 0);
+
+    kl_drain_free(&ws.drain);
+}
+
+UTEST(drain, ws_drain_pending_check) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+
+    KlConn c;
+    memset(&c, 0, sizeof(c));
+    c.fd = -1;
+    c.alloc = &a;
+
+    /* No WS state → not pending */
+    ASSERT_EQ(kl_ws_server_drain_pending(&c), 0);
+
+    KlWsServerConn ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.alloc = &a;
+    ws.conn = &c;
+    c.ws = &ws;
+
+    /* WS present but drain not enabled → not pending */
+    ASSERT_EQ(kl_ws_server_drain_pending(&c), 0);
+
+    /* Enable drain, buffer data */
+    ws.drain_enabled = 1;
+    kl_drain_init(&ws.drain, mock_write, &w, &a);
+    w.mode = 2;
+    kl_drain_write(&ws.drain, "x", 1);
+
+    ASSERT_EQ(kl_ws_server_drain_pending(&c), 1);
+
+    kl_drain_free(&ws.drain);
+    c.ws = NULL;
 }
 
 UTEST_MAIN();

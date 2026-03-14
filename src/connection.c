@@ -234,8 +234,12 @@ static KlConnState conn_process(KlConn *c) {
     if (c->state == KL_CONN_SUSPENDED)
         return KL_CONN_SUSPENDED;
 
-    /* If streaming, the handler already sent everything */
+    /* If streaming, the handler already sent everything — unless drain is pending */
     if (c->res.body_mode == KL_BODY_STREAM) {
+        if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
+            c->state = KL_CONN_SENDING;
+            return c->state;
+        }
         conn_log_access(c);
         c->state = KL_CONN_CLOSED;
         return c->state;
