@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **400+ tests** with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **613 tests** (35 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -61,6 +61,15 @@ int main(void) {
 - **Composable event context** — `KlEventCtx` decouples the event loop from the server, enabling standalone clients and thread pools without a `KlServer`
 - **Thread pool** — submit blocking work from event loop, execute on workers, resume via pipe wakeup
 - **Generic FD watchers** — register any file descriptor for event-driven callbacks via `KlWatcher`
+- **Server-Sent Events** — zero-alloc SSE framing (`kl_sse_event`, `kl_sse_comment`) over chunked streaming
+- **Response compression** — pluggable compression vtable; ships with miniz gzip backend
+- **Client decompression** — automatic `Content-Encoding: gzip` response decompression
+- **Client connection pool** — keep-alive reuse keyed by (host, port, is_tls) with idle timers
+- **Redirect following** — automatic 3xx redirect with RFC 7231/7538 method transformation
+- **Backpressure write buffer** — `KlDrain` buffers unsent data on would-block, flushes on write-readiness
+- **Timer scheduling** — one-shot timers on the event loop via min-heap
+- **Error diagnostics** — sqlite3-style per-struct error codes with `kl_strerror()`
+- **Pluggable DNS resolver** — bring your own async DNS (c-ares, thread-pool wrapper)
 - **Pre-allocated connection pool** — no per-request malloc, no fragmentation under load
 - **Pluggable allocator** — bring your own arena/pool/tracking allocator
 - **pledge/unveil sandboxing** — init/run split makes syscall lockdown natural
@@ -68,7 +77,7 @@ int main(void) {
 
 ## Architecture
 
-21 orthogonal modules, each independently testable:
+29 orthogonal modules, each independently testable:
 
 | Module | Header | Description |
 |--------|--------|-------------|
@@ -85,15 +94,24 @@ int main(void) {
 | **body_reader_multipart** | `body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
 | **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
 | **cors** | `cors.h` | Built-in CORS middleware with configurable origins |
-| **websocket** | `websocket.h` + `websocket_server.h` | RFC 6455 WebSocket server support (shared frame parser + server API) |
-| **websocket_client** | `websocket_client.h` | RFC 6455 WebSocket client (masked frames, async handshake) |
 | **tls** | `tls.h` | Pluggable TLS transport vtable (bring-your-own backend) |
-| **h2** | `h2.h` + `h2_server.h` | HTTP/2 server (pluggable session vtable) |
-| **h2_client** | `h2_client.h` | HTTP/2 client (multiplexed streams, pluggable session) |
 | **async** | `async.h` | Connection suspension for async operations |
 | **thread_pool** | `thread_pool.h` | Worker thread pool with pipe-based event loop wakeup |
 | **url** | `url.h` | URL parser (http/https/ws/wss, IPv6, CRLF injection guard) |
 | **client** | `client.h` | HTTP/1.1 client (sync blocking + async event-driven) |
+| **websocket** | `websocket.h` + `websocket_server.h` | RFC 6455 WebSocket server (shared frame parser + server API) |
+| **websocket_client** | `websocket_client.h` | RFC 6455 WebSocket client (masked frames, async handshake) |
+| **h2** | `h2.h` + `h2_server.h` | HTTP/2 server (pluggable session vtable) |
+| **h2_client** | `h2_client.h` | HTTP/2 client (multiplexed streams, pluggable session) |
+| **resolver** | `resolver.h` | Pluggable async DNS resolver vtable |
+| **sse** | `sse.h` | Server-Sent Events: line framing over chunked streaming (zero alloc) |
+| **error** | `error.h` | Diagnostic error codes (KlError enum) + kl_strerror() |
+| **timer** | `timer.h` | One-shot timer scheduling on KlEventCtx (min-heap) |
+| **client_pool** | `client_pool.h` | HTTP client connection pool with keep-alive reuse |
+| **redirect** | `redirect.h` | Automatic 3xx redirect following (RFC 7231/7538) |
+| **compress** | `compress.h` | Pluggable response compression vtable (buffer + streaming) |
+| **decompress** | `decompress.h` | Pluggable response decompression vtable (client-side) |
+| **drain** | `drain.h` | Backpressure write buffer with on_drain callback |
 
 **Deliberate design choices:**
 
@@ -584,33 +602,45 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 
 ## Testing
 
-408 tests across 23 test suites, covering every module:
+613 tests across 35 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
 | `test_allocator` | 4 | Default + custom tracking allocators |
-| `test_router` | 27 | Exact match, params, 404, 405, wildcard, middleware chain |
-| `test_response` | 14 | Status, headers, body, JSON, error, streaming, sendfile |
-| `test_parser` | 10 | GET, POST, query strings, incomplete, reset, chunked TE |
-| `test_response_parser` | 9 | HTTP response parsing, chunked, headers, body limits, malformed |
-| `test_connection` | 9 | Pool init, acquire/release, exhaustion, active count, state machine, monotonic clock |
+| `test_async` | 14 | Watchers (KlEventCtx), suspend/resume, deadlines, cancel, e2e async handler |
 | `test_body_reader` | 30 | Buffer + multipart: limits, spanning, binary, edge cases |
 | `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
+| `test_client` | 18 | Sync/async client, response free, TLS config, error handling |
+| `test_client_pool` | 24 | Connection pool: acquire/release, per-host limits, idle expiry, stale detection |
+| `test_client_stream` | 27 | Response streaming (push), request streaming (pull), chunked body production |
+| `test_compress` | 16 | Compression vtable, buffer + streaming, miniz gzip backend |
+| `test_connection` | 12 | Pool init, acquire/release, exhaustion, active count, state machine, monotonic clock |
 | `test_cors` | 17 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
-| `test_websocket` | 42 | Frame parsing, masking, opcode, fragments, close, echo, send frame encoding |
-| `test_websocket_client` | 28 | Client frame encoding, mask XOR, handshake, parser, API, config |
-| `test_h2` | 29 | HTTP/2 sessions, streams, routing, ALPN, goaway |
+| `test_decompress` | 14 | Decompression vtable, gzip one-shot + streaming, CRC/ISIZE verification |
+| `test_drain` | 19 | Backpressure buffer: passthrough, partial, EAGAIN, flush, on_drain, max_size, overreport |
+| `test_error` | 11 | Error codes, kl_strerror, per-struct error storage |
+| `test_event` | 8 | Event loop init/close, add/wait, del, multiple FDs, timeout, mod mask |
+| `test_event_ctx` | 7 | Standalone event context init/free, watcher lifecycle, dispatch helpers |
+| `test_h2` | 29 | HTTP/2 sessions, streams, routing, ALPN, goaway, body limits |
 | `test_h2_client` | 18 | Mock session vtable, stream tracking, response free, API validation |
 | `test_integration` | 27 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
-| `test_timeout` | 8 | Idle, partial headers, partial body, active connections, body timeout, keepalive idle, concurrent |
-| `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
-| `test_async` | 15 | Watchers (KlEventCtx), suspend/resume, deadlines, cancel, e2e async handler |
+| `test_overflow` | 20 | Integer overflow guards across all modules |
+| `test_parser` | 9 | GET, POST, query strings, incomplete, reset, chunked TE |
+| `test_redirect` | 33 | 3xx redirect following, method transform, cross-origin auth strip, pooled |
+| `test_request` | 14 | Header case-insensitive lookup, params, query strings, empty/missing values |
+| `test_response` | 24 | Status, headers, body, JSON, error, streaming, sendfile, compression |
+| `test_response_parser` | 10 | HTTP response parsing, chunked, headers, body limits, malformed |
+| `test_router` | 27 | Exact match, params, 404, 405, wildcard, middleware chain |
+| `test_server_integration` | 6 | Pool exhaustion, backpressure recovery, concurrent requests, drain |
+| `test_sse` | 7 | SSE framing: event, data, id, comment, multiline, begin/end |
 | `test_thread_pool` | 12 | Create/free, submit, backpressure, FIFO ordering, multi-worker, shutdown, stress |
+| `test_timeout` | 8 | Idle, partial headers, partial body, active connections, body timeout, keepalive idle, concurrent |
+| `test_timer` | 10 | Min-heap scheduling, cancellation, callback safety, next-timeout |
+| `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
+| `test_tls_integration` | 3 | Passthrough TLS mock: full handshake→read→write path |
 | `test_url` | 20 | URL parsing, IPv6, CRLF rejection, default ports, ws/wss schemes |
-| `test_client` | 20 | Sync/async client, response free, TLS config, error handling |
-| `test_event_ctx` | 4 | Standalone event context init/free, watcher lifecycle |
-| `test_event` | 8 | Event loop init/close, add/wait, del, multiple FDs, timeout, mod mask |
-| `test_request` | 10 | Header case-insensitive lookup, params, query strings, empty/missing values |
+| `test_websocket` | 48 | Frame parsing, masking, opcode, fragments, close, echo, unmasked rejection |
+| `test_websocket_client` | 30 | Client frame encoding, mask XOR, handshake, parser, API, config, auto-ping |
 
 ```bash
 make test               # run all tests
@@ -633,7 +663,7 @@ make cppcheck           # cppcheck static analysis
 - Integer overflow guards (`SIZE_MAX/2`, `INT_MAX/2` checks) on all arithmetic
 - Pluggable allocator — swap in an arena allocator per-request for deterministic cleanup
 
-**Why not Rust?** Rust's safety guarantees are real, and for a large-team, high-churn codebase they pay off. For a small, focused library with 7 source files and one or two authors:
+**Why not Rust?** Rust's safety guarantees are real, and for a large-team, high-churn codebase they pay off. For a focused library with ~12K LOC and one or two authors:
 
 - *The hot path is FFI.* The HTTP parser is llhttp — a C library. Every request crosses an `unsafe` boundary. You get Rust's borrow checker overhead without Rust's safety guarantees where the actual parsing happens.
 - *Self-referential request structs.* `KlRequest` holds pointers into the connection's read buffer. This is one line of C; in Rust it's a lifetime annotation project or a `Pin<Box<>>` adventure.
@@ -675,7 +705,27 @@ The general principle: if it requires policy decisions that vary between applica
 
 ## Comparison with Alternatives
 
-See [docs/comparison.md](docs/comparison.md) for a detailed feature comparison with [Mongoose](https://github.com/cesanta/mongoose) (GPLv2/Commercial, bare-metal MCU focus) and [GNU libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/) (LGPL, multi-threaded server). Short version: Keel has more features per line of code (HTTP/2, router, middleware, async client, pluggable everything) with an MIT license, but is younger and less battle-tested.
+Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparison.md) for full details with API examples.
+
+| | Keel | [Mongoose](https://github.com/cesanta/mongoose) | [GNU libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/) |
+|---|------|----------|---------------|
+| **License** | MIT | GPLv2 / Commercial | LGPLv2.1+ |
+| **LOC** | ~12K | ~33K | ~19K |
+| **Architecture** | 29 independent modules | Monolithic amalgam | Monolithic |
+| **Maturity** | New (2025–2026) | 20+ years (NASA, Siemens, Samsung) | GNU project, 18+ years (NASA, Sony, systemd) |
+| **HTTP/2** | Server + client | No | No |
+| **Event backends** | epoll, kqueue, io_uring, poll | select/poll only | select, poll, epoll |
+| **Router + middleware** | Built-in with `:param` capture | None (DIY if/else) | None (single callback) |
+| **HTTP client** | Sync + async + streaming + H2 | Basic client | Server only |
+| **Allocator** | Runtime vtable (bring-your-own) | Compile-time macros | None (raw malloc) |
+| **TLS** | Pluggable vtable — any backend | Built-in TLS 1.3 + pluggable | GnuTLS only |
+| **Compression** | Pluggable vtable (gzip + extensible) | No | No |
+| **Threading** | Single-threaded + thread pool | Single-threaded | 4 modes incl. thread-per-connection |
+| **Bare-metal MCU** | Via lwIP/picoTCP (BSD sockets) | Built-in TCP/IP stack | Requires OS networking |
+| **Cosmopolitan C** | Supported (APE binaries) | No | No |
+| **Tests** | 613 (35 suites) | ~4K LOC tests | Fewer relative to size |
+
+**Choose Keel** when you want MIT licensing, HTTP/2, a built-in router/middleware/client, and pluggable everything. **Choose Mongoose** when you're targeting bare-metal MCUs with no OS, need a built-in TCP/IP stack, or need battle-tested maturity. **Choose libmicrohttpd** when you need multi-threaded request handling, independently audited security, or wide distro packaging.
 
 ## CI
 

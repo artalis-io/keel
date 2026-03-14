@@ -135,7 +135,7 @@ Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Mak
 4. Add `#include <keel/<module>.h>` to `include/keel/keel.h`
 5. Prefix all public functions with `kl_<module>_`
 6. Write tests: `tests/test_<module>.c`
-7. Update module count (currently 19) in `README.md` and `CLAUDE.md`
+7. Update module count (currently 29) in `README.md` and `CLAUDE.md`
 
 ## Adding a New Body Reader
 
@@ -259,8 +259,8 @@ The factory is called once per connection slot at server init. Each `KlTls` sess
 All of these should pass cleanly before merging:
 
 ```bash
-make test               # 326 unit + integration tests
-make debug && make test  # ASan + UBSan (catches memory errors, undefined behavior)
+make test               # 613 unit + integration tests (35 suites)
+make debug-test         # ASan + UBSan (catches memory errors, undefined behavior)
 make analyze            # Clang static analyzer via scan-build
 make cppcheck           # cppcheck static analysis
 ```

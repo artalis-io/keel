@@ -9,7 +9,7 @@ A fact-based comparison of three embedded C HTTP libraries. Data gathered March 
 | **First release** | 2025 | 2004 | 2007 |
 | **License** | MIT | GPLv2 / Commercial | LGPLv2.1+ |
 | **Core LOC** | ~12K | ~33K (amalgamated) | ~19K |
-| **Architecture** | 27 independent modules | Monolithic amalgam | Monolithic |
+| **Architecture** | 29 independent modules | Monolithic amalgam | Monolithic |
 | **Primary target** | Embedded servers, edge services | Bare-metal MCU, IoT | Desktop/server embedding |
 | **GitHub stars** | Early stage | 12,600+ | 135 (mirror; canonical repo on GNU Savannah) |
 
@@ -20,7 +20,7 @@ A fact-based comparison of three embedded C HTTP libraries. Data gathered March 
 | **License** | MIT — no restrictions | GPLv2 or paid commercial license | LGPL — linking constraints |
 | **HTTP/2** | Server + client | Not supported | Not supported |
 | **Event backends** | epoll, kqueue, io_uring, poll | select/poll only | select, poll, epoll |
-| **Modularity** | 27 independent, testable modules | Single amalgamated file | Monolithic library |
+| **Modularity** | 29 independent, testable modules | Single amalgamated file | Monolithic library |
 | **Allocator** | Runtime vtable (bring-your-own) | Compile-time macros only | None (raw malloc) |
 | **TLS model** | Pluggable vtable — any backend | Built-in TLS 1.3 + pluggable | GnuTLS only |
 | **HTTP parser** | Pluggable vtable — swappable | Hardcoded | Hardcoded |
@@ -30,9 +30,12 @@ A fact-based comparison of three embedded C HTTP libraries. Data gathered March 
 | **HTTP client** | Sync + async + streaming + H2 | Basic client | Server only — no client |
 | **Connection pooling** | Client-side pool with keep-alive reuse | None | None |
 | **Redirect following** | Built-in (RFC 7231 method transform) | None | None |
+| **Compression** | Pluggable vtable (gzip via miniz, extensible) | None | None |
+| **Decompression** | Pluggable client-side response decompression | None | None |
+| **Backpressure** | Built-in write buffer (`KlDrain`) | None | None |
 | **Timers** | Built-in min-heap scheduling | No dedicated API | No dedicated API |
 | **Cosmopolitan C** | Supported (APE binaries) | Not supported | Not supported |
-| **Test density** | 579 tests for 12K LOC | ~4K LOC tests for 33K LOC | Fewer relative to size |
+| **Test density** | 613 tests (35 suites) for 12K LOC | ~4K LOC tests for 33K LOC | Fewer relative to size |
 | **Code size** | ~12K LOC — auditable in a day | ~33K LOC (includes TCP/IP stack, drivers) | ~19K LOC |
 
 ## Where Keel loses
