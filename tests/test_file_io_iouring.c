@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <sys/socket.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * io_uring file I/O integration tests
