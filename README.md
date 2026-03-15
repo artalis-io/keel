@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **671 tests** (41 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **671 tests** (40 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -609,7 +609,7 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 
 ## Testing
 
-671 tests across 41 test suites, covering every module (678 on io_uring builds):
+671 tests across 40 test suites, covering every module (678 on io_uring builds):
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -721,7 +721,7 @@ Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparis
 | **Threading** | Single-threaded + thread pool | Single-threaded | 4 modes incl. thread-per-connection |
 | **Bare-metal MCU** | Via lwIP/picoTCP (BSD sockets) | Built-in TCP/IP stack | Requires OS networking |
 | **Cosmopolitan C** | Supported (APE binaries) | No | No |
-| **Tests** | 664 (40 suites) | ~4K LOC tests | Fewer relative to size |
+| **Tests** | 671 (40 suites) | ~4K LOC tests | Fewer relative to size |
 
 **Choose Keel** when you want MIT licensing, HTTP/2, a built-in router/middleware/client, and pluggable everything. **Choose Mongoose** when you're targeting bare-metal MCUs with no OS, need a built-in TCP/IP stack, or need battle-tested maturity. **Choose libmicrohttpd** when you need multi-threaded request handling, independently audited security, or wide distro packaging.
 
