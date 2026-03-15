@@ -16,6 +16,9 @@ examples/multipart
 tests/test_*
 !tests/test_*.c
 
+# Benchmark binary
+bench/bench_server
+
 # Fuzz binaries and corpora artifacts
 fuzz/fuzz_parser
 fuzz/fuzz_multipart
