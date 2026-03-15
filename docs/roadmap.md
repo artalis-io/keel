@@ -210,9 +210,9 @@ Implemented in `client.h` / `client.c`. Two modes: HTTP forwarding (absolute-for
 
 ## Long-Term / Research
 
-### io_uring native file I/O
+### ~~io_uring native file I/O~~ (Done)
 
-Replace `sendfile(2)` with `IORING_OP_READ` for file responses. The current io_uring backend only uses poll-add (readiness notification). Native async file I/O would eliminate the `sendfile` syscall entirely — the kernel reads the file and writes to the socket in a single submission.
+Implemented in two phases. Phase 1: `IORING_OP_READ` for async file reads into userspace buffers (module 30, `KlFileIO` vtable). Phase 2: `IORING_OP_SPLICE` for zero-copy file→pipe→socket transfer entirely in kernel space (Linux 5.7+). Two-phase splice: file→pipe (`splice_in`) then pipe→socket (`splice_out`), with short-splice retry for partial writes. Splice availability probed at create time via `io_uring_get_probe_ring`; graceful fallback to buffered reads when splice is unavailable (older kernels, pipe creation failure, TLS connections). `KlFileIOResult.zero_copy` flag tells the connection layer to skip the WRITING phase. Pipes managed per-socket slot, created lazily, reused across chunks.
 
 ### QUIC / HTTP/3
 

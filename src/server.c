@@ -373,7 +373,7 @@ int kl_server_run(KlServer *s) {
             for (int fi = 0; fi < nf; fi++) {
                 KlConn *fc = fio_results[fi].udata;
                 KlConnState fstate = kl_conn_on_file_complete(
-                    fc, fio_results[fi].result);
+                    fc, fio_results[fi].result, fio_results[fi].zero_copy);
                 if (fstate == KL_CONN_SENDING) {
                     if (fc->file_io_phase == 1) {
                         /* FILE_IO_READING — async read pending, no WRITE reg */

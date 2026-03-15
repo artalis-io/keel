@@ -136,11 +136,12 @@ KlConnState kl_conn_on_writable(KlConn *c);
 
 /**
  * @brief Handle async file I/O completion (called from server tick loop).
- * @param c      Connection that submitted the read.
- * @param result Bytes read (positive) or error (negative/zero).
+ * @param c         Connection that submitted the read.
+ * @param result    Bytes read/transferred (positive) or error (negative/zero).
+ * @param zero_copy 1 if data was spliced directly to socket (no WRITING phase).
  * @return New connection state.
  */
-KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result);
+KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result, int zero_copy);
 
 /** @brief Monotonic clock in milliseconds (for timeout tracking). */
 uint64_t kl_monotonic_ms(void);

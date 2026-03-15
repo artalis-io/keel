@@ -63,6 +63,7 @@ static int mock_tick(KlFileIO *fio, KlFileIOResult *out, int max) {
     if (!m->has_completion || max <= 0) return 0;
     out[0].udata = m->completion_udata;
     out[0].result = m->completion_result;
+    out[0].zero_copy = 0;
     m->has_completion = 0;
     return 1;
 }
@@ -94,7 +95,8 @@ UTEST(file_io, vtable_null_on_non_iouring) {
 }
 
 UTEST(file_io, submit_called) {
-    /* Connection with mock file_io calls submit for file body */
+    /* Connection with mock file_io calls submit for file body.
+     * Non-TLS path tries splice first (buf=NULL). */
     MockFileIO mock;
     mock_file_io_init(&mock);
 
@@ -126,7 +128,7 @@ UTEST(file_io, submit_called) {
     ASSERT_EQ(mock.submitted, 1);
     ASSERT_EQ(mock.last_file_fd, 10);
     ASSERT_EQ(mock.last_sock_fd, 42);
-    ASSERT_EQ(mock.last_buf, c.read_buf);
+    ASSERT_EQ(mock.last_buf, (void *)NULL);  /* splice path: buf=NULL */
     ASSERT_EQ(mock.last_offset, (off_t)0);
     ASSERT_EQ(c.file_io_phase, FILE_IO_READING);
 
@@ -205,7 +207,7 @@ UTEST(file_io, complete_writes) {
     c.res.headers_sent = 1;
 
     /* Deliver completion: 11 bytes read */
-    KlConnState state = kl_conn_on_file_complete(&c, 11);
+    KlConnState state = kl_conn_on_file_complete(&c, 11, 0);
 
     /* File fully sent — should complete (CLOSED since keep_alive=0) */
     ASSERT_EQ(state, KL_CONN_CLOSED);
@@ -257,7 +259,7 @@ UTEST(file_io, partial_write) {
     c.res.file_offset = 0;
     c.res.headers_sent = 1;
 
-    KlConnState state = kl_conn_on_file_complete(&c, 14);
+    KlConnState state = kl_conn_on_file_complete(&c, 14, 0);
     /* Socket full → EAGAIN → stays SENDING in WRITING phase */
     ASSERT_EQ(state, KL_CONN_SENDING);
     ASSERT_EQ(c.file_io_phase, FILE_IO_WRITING);
@@ -305,7 +307,7 @@ UTEST(file_io, multi_chunk) {
 
     /* Complete first chunk */
     memset(c.read_buf, 'A', 100);
-    state = kl_conn_on_file_complete(&c, 100);
+    state = kl_conn_on_file_complete(&c, 100, 0);
 
     /* After writing 100 bytes, offset advances, submits next read */
     ASSERT_EQ(c.res.file_offset, (off_t)100);
@@ -315,14 +317,14 @@ UTEST(file_io, multi_chunk) {
 
     /* Complete second chunk */
     memset(c.read_buf, 'B', 100);
-    state = kl_conn_on_file_complete(&c, 100);
+    state = kl_conn_on_file_complete(&c, 100, 0);
     ASSERT_EQ(c.res.file_offset, (off_t)200);
     ASSERT_EQ(mock.submitted, 3);
     ASSERT_EQ(mock.last_len, (size_t)50);  /* remaining = 50 */
 
     /* Complete final chunk */
     memset(c.read_buf, 'C', 50);
-    state = kl_conn_on_file_complete(&c, 50);
+    state = kl_conn_on_file_complete(&c, 50, 0);
     ASSERT_EQ(c.res.file_offset, (off_t)250);
 
     /* Drain the data from the read end (non-blocking) */
@@ -381,7 +383,7 @@ UTEST(file_io, cancel_cqe) {
     c.read_cap = 8192;
 
     /* Cancel CQE arrives with -ECANCELED */
-    KlConnState state = kl_conn_on_file_complete(&c, -125);  /* -ECANCELED */
+    KlConnState state = kl_conn_on_file_complete(&c, -125, 0);  /* -ECANCELED */
     ASSERT_EQ(state, KL_CONN_CLOSED);
     ASSERT_EQ(c.file_io_phase, FILE_IO_IDLE);
 
@@ -477,17 +479,171 @@ UTEST(file_io, read_error) {
     c.read_buf = kl_malloc(&a, 8192);
     c.read_cap = 8192;
 
-    KlConnState state = kl_conn_on_file_complete(&c, -5);
+    KlConnState state = kl_conn_on_file_complete(&c, -5, 0);
     ASSERT_EQ(state, KL_CONN_CLOSED);
     ASSERT_EQ(c.file_io_phase, FILE_IO_IDLE);
 
     /* Zero-byte read also closes */
     c.state = KL_CONN_SENDING;
     c.file_io_phase = FILE_IO_READING;
-    state = kl_conn_on_file_complete(&c, 0);
+    state = kl_conn_on_file_complete(&c, 0, 0);
     ASSERT_EQ(state, KL_CONN_CLOSED);
 
     kl_free(&a, c.read_buf, 8192);
+}
+
+UTEST(file_io, zero_copy_skips_write) {
+    /* zero_copy=1: data already on socket, advance offset, no WRITING phase */
+    MockFileIO mock;
+    mock_file_io_init(&mock);
+    KlAllocator a = kl_allocator_default();
+
+    int fds[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+
+    KlConn c;
+    memset(&c, 0, sizeof(c));
+    c.alloc = &a;
+    c.fd = fds[0];
+    c.state = KL_CONN_SENDING;
+    c.file_io = &mock.base;
+    c.file_io_phase = FILE_IO_READING;
+
+    c.read_buf = kl_malloc(&a, 8192);
+    c.read_cap = 8192;
+
+    memset(&c.res, 0, sizeof(c.res));
+    c.res.body_mode = KL_BODY_FILE;
+    c.res.file_fd = 10;
+    c.res.file_size = 500;
+    c.res.file_offset = 0;
+    c.res.headers_sent = 1;
+
+    /* Simulate zero-copy completion of 500 bytes */
+    KlConnState state = kl_conn_on_file_complete(&c, 500, 1);
+
+    /* File fully sent — offset advanced, should complete */
+    ASSERT_EQ(c.res.file_offset, (off_t)500);
+    /* No WRITING phase — file_io_phase should NOT be FILE_IO_WRITING */
+    ASSERT_NE(c.file_io_phase, FILE_IO_WRITING);
+    /* Connection done (CLOSED since keep_alive=0) */
+    ASSERT_EQ(state, KL_CONN_CLOSED);
+
+    kl_free(&a, c.read_buf, 8192);
+    close(fds[0]);
+    close(fds[1]);
+}
+
+UTEST(file_io, zero_copy_multi_chunk) {
+    /* zero_copy: multiple chunks, offset advances, next read submitted */
+    MockFileIO mock;
+    mock_file_io_init(&mock);
+    KlAllocator a = kl_allocator_default();
+
+    int fds[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+
+    KlConn c;
+    memset(&c, 0, sizeof(c));
+    c.alloc = &a;
+    c.fd = fds[0];
+    c.state = KL_CONN_SENDING;
+    c.file_io = &mock.base;
+
+    size_t bufcap = 100;
+    c.read_buf = kl_malloc(&a, bufcap);
+    c.read_cap = bufcap;
+
+    memset(&c.res, 0, sizeof(c.res));
+    c.res.body_mode = KL_BODY_FILE;
+    c.res.file_fd = 10;
+    c.res.file_size = 250;
+    c.res.file_offset = 0;
+    c.res.headers_sent = 1;
+
+    /* First chunk: zero-copy 100 bytes */
+    c.file_io_phase = FILE_IO_READING;
+    KlConnState state = kl_conn_on_file_complete(&c, 100, 1);
+    ASSERT_EQ(c.res.file_offset, (off_t)100);
+    ASSERT_EQ(state, KL_CONN_SENDING);
+    ASSERT_EQ(mock.submitted, 1);  /* next read submitted */
+
+    /* Second chunk: zero-copy 100 bytes */
+    c.file_io_phase = FILE_IO_READING;
+    state = kl_conn_on_file_complete(&c, 100, 1);
+    ASSERT_EQ(c.res.file_offset, (off_t)200);
+    ASSERT_EQ(mock.submitted, 2);
+
+    /* Final chunk: zero-copy 50 bytes */
+    c.file_io_phase = FILE_IO_READING;
+    state = kl_conn_on_file_complete(&c, 50, 1);
+    ASSERT_EQ(c.res.file_offset, (off_t)250);
+    /* File done */
+
+    kl_free(&a, c.read_buf, bufcap);
+    close(fds[0]);
+    close(fds[1]);
+}
+
+/* Mock submit that rejects buf=NULL (no splice), accepts buf!=NULL */
+static int mock_submit_no_splice(KlFileIO *fio, int file_fd, void *buf,
+                                  size_t len, off_t offset,
+                                  int sock_fd, void *udata) {
+    MockFileIO *m = (MockFileIO *)fio;
+    if (buf == NULL) return -1;  /* no splice support */
+    m->submitted++;
+    m->last_file_fd = file_fd;
+    m->last_buf = buf;
+    m->last_len = len;
+    m->last_offset = offset;
+    m->last_sock_fd = sock_fd;
+    m->last_udata = udata;
+    return 0;
+}
+
+UTEST(file_io, splice_fallback) {
+    /* When splice submit (buf=NULL) returns -1, falls back to buffered read */
+    MockFileIO mock;
+    mock_file_io_init(&mock);
+    mock.base.submit = mock_submit_no_splice;
+
+    KlAllocator a = kl_allocator_default();
+
+    int fds[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+
+    KlConn c;
+    memset(&c, 0, sizeof(c));
+    c.alloc = &a;
+    c.fd = fds[0];
+    c.state = KL_CONN_SENDING;
+    c.file_io = &mock.base;
+    c.file_io_phase = FILE_IO_IDLE;
+
+    c.read_buf = kl_malloc(&a, 8192);
+    c.read_cap = 8192;
+
+    memset(&c.res, 0, sizeof(c.res));
+    c.res.body_mode = KL_BODY_FILE;
+    c.res.file_fd = 10;
+    c.res.file_size = 100;
+    c.res.file_offset = 0;
+    c.res.headers_sent = 1;
+
+    /* on_writable triggers conn_file_submit_read:
+     * splice (buf=NULL) fails → falls back to buffered read (buf=read_buf) */
+    KlConnState state = kl_conn_on_writable(&c);
+    ASSERT_EQ(state, KL_CONN_SENDING);
+    ASSERT_EQ(mock.submitted, 1);
+    ASSERT_EQ(mock.last_buf, c.read_buf);  /* buffered path used */
+    ASSERT_EQ(c.file_io_phase, FILE_IO_READING);
+
+    kl_free(&a, c.read_buf, 8192);
+    close(fds[0]);
+    close(fds[1]);
 }
 
 UTEST_MAIN();

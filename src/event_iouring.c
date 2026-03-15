@@ -195,6 +195,19 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
             continue;
         }
 
+        /* Buffer splice-out (pipe→socket) completions for tick() */
+        if (fd64 & URING_OP_SPLICE_OUT) {
+            seen++;
+            if (st->file_completion_count < st->file_completion_cap) {
+                int idx = st->file_completion_count++;
+                st->file_completions[idx].result = cqe->res;
+                st->file_completions[idx].sock_fd =
+                    (int)(fd64 & ~(URING_OP_FILE | URING_OP_SPLICE_OUT));
+                st->file_completions[idx].is_splice_out = 1;
+            }
+            continue;
+        }
+
         /* Buffer file I/O completions for tick() */
         if (fd64 & URING_OP_FILE) {
             seen++;
@@ -203,6 +216,7 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
                 st->file_completions[idx].result = cqe->res;
                 st->file_completions[idx].sock_fd =
                     (int)(fd64 & ~URING_OP_FILE);
+                st->file_completions[idx].is_splice_out = 0;
             }
             continue;
         }

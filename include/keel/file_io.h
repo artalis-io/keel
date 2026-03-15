@@ -9,7 +9,8 @@ typedef struct KlFileIO KlFileIO;
 
 typedef struct {
     void *udata;       /* connection pointer (opaque to file I/O backend) */
-    ssize_t result;    /* bytes read, or negative error */
+    ssize_t result;    /* bytes read/transferred, or negative error */
+    int zero_copy;     /* 1 = data already sent to socket (splice path) */
 } KlFileIOResult;
 
 struct KlFileIO {

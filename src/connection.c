@@ -737,6 +737,17 @@ static KlConnState conn_file_submit_read(KlConn *c) {
     size_t remaining = (size_t)(c->res.file_size - c->res.file_offset);
     size_t to_read = remaining < c->read_cap ? remaining : c->read_cap;
 
+    /* Try zero-copy splice first (non-TLS only, buf=NULL) */
+    if (!c->tls &&
+        c->file_io->submit(c->file_io, c->res.file_fd, NULL,
+                            to_read, c->res.file_offset,
+                            c->fd, c) == 0) {
+        c->file_io_phase = FILE_IO_READING;
+        c->state = KL_CONN_SENDING;
+        return c->state;
+    }
+
+    /* Fallback: async read into buffer */
     if (c->file_io->submit(c->file_io, c->res.file_fd, c->read_buf,
                             to_read, c->res.file_offset,
                             c->fd, c) < 0) {
@@ -773,7 +784,7 @@ static KlConnState conn_file_flush(KlConn *c) {
     return conn_file_submit_read(c);  /* next chunk or finish */
 }
 
-KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result) {
+KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result, int zero_copy) {
     c->last_active_ms = kl_monotonic_ms();
 
     if (c->file_io_phase == FILE_IO_CANCELLING) {
@@ -786,6 +797,13 @@ KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result) {
         c->file_io_phase = FILE_IO_IDLE;
         c->state = KL_CONN_CLOSED;
         return c->state;
+    }
+
+    if (zero_copy) {
+        /* Data already sent to socket via splice — advance offset, next chunk */
+        c->res.file_offset += (off_t)result;
+        c->file_io_phase = FILE_IO_IDLE;
+        return conn_file_submit_read(c);
     }
 
     c->file_io_len = (size_t)result;

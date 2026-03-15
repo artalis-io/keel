@@ -11,6 +11,9 @@
 /* High bit tags a CQE as a file I/O completion (not a poll event) */
 #define URING_OP_FILE ((uint64_t)1 << 63)
 
+/* Second-highest bit tags a splice-out (pipe→socket) completion */
+#define URING_OP_SPLICE_OUT ((uint64_t)1 << 62)
+
 /*
  * Sentinel value for "fd slot is unused."  Distinct from NULL, which is a
  * valid udata value (the listen socket uses NULL to identify itself).
@@ -21,6 +24,7 @@
 typedef struct {
     ssize_t result;
     int sock_fd;
+    int is_splice_out;  /* 1 if this is a splice-out (pipe→socket) completion */
 } KlIoUringFileCompletion;
 
 typedef struct {
