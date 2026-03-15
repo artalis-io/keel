@@ -31,8 +31,9 @@ int main(int argc, char **argv) {
     }
 
     /* Create TLS context (loads cert + key) */
+    KlAllocator alloc = kl_allocator_default();
     KlTlsCtx *tls_ctx = kl_tls_mbedtls_ctx_create(cert_path, key_path,
-                                                     NULL, 0);
+                                                     NULL, 0, &alloc);
     if (!tls_ctx) {
         fprintf(stderr, "Failed to load %s / %s\n", cert_path, key_path);
         return 1;

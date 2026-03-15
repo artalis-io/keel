@@ -11,7 +11,7 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 - **Architecture**: 30 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
-- **Testing**: 37 suites, 633 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
+- **Testing**: 38 suites, 644 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
 - **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
 
 ### Correctness Issues
@@ -202,6 +202,10 @@ Pluggable decompression vtable (`KlDecompress`) — mirrors `KlCompress` with th
 
 Implemented as `KlDrain` (`drain.h` / `drain.c`). Event-loop-agnostic write buffer that sits between a producer (SSE, compress stream, WebSocket, etc.) and a writer function. On would-block (writer returns 0), buffers unsent data; caller composes with `KlWatcher` / `KlAsyncOp` to resume on write-readiness. Lazy buffer allocation (zero overhead on fast path), configurable `max_size` cap, `on_drain` callback on non-empty→empty transition. 17 tests.
 
+### ~~HTTP proxy support~~ (Done)
+
+Implemented in `client.h` / `client.c`. Two modes: HTTP forwarding (absolute-form URL through proxy, RFC 7230 §5.3.2) and HTTPS CONNECT tunneling (RFC 7231 §4.3.6). `KlProxyConfig` struct with host, port, optional Basic auth. Sync and async paths both supported. Async path adds two states (`KL_HCLIENT_PROXY_CONNECTING`, `KL_HCLIENT_PROXY_HANDSHAKE`) for non-blocking CONNECT. Connection pool extended with proxy key fields — entries keyed by `(host, port, is_tls, proxy_host, proxy_port)`. Redirect client inherits proxy config automatically. `KL_ERR_PROXY` error code for proxy failures. 11 tests.
+
 ---
 
 ## Long-Term / Research
@@ -221,10 +225,6 @@ Linux `MSG_ZEROCOPY` for `send(2)` avoids copying response data from userspace t
 ### eBPF request steering
 
 Use eBPF `SO_REUSEPORT` programs to steer connections to specific threads/cores based on request characteristics. Enables CPU affinity without application-level load balancing.
-
-### Proxy support
-
-HTTP CONNECT tunneling for HTTPS through proxies. Configuration for proxy URL + optional auth. Non-trivial integration point but important in corporate/containerized environments.
 
 ### DNS caching
 

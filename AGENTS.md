@@ -30,6 +30,9 @@ Every PR should be checked for:
 - [ ] **Client response lifetime** — `KlClientResponse.alloc` is stored by value; response remains valid after allocator goes out of scope
 - [ ] **Client async cleanup** — `kl_client_cancel()` + `kl_client_free()` called on error/deadline paths
 - [ ] **URL injection** — URLs passed to `kl_url_parse()` / `kl_client_request()` are validated (CRLF rejection)
+- [ ] **Proxy buffer cleanup** — connect_buf and proxy_recv freed on all error/success paths
+- [ ] **Proxy auth isolation** — Proxy-Authorization header not forwarded to target after CONNECT
+- [ ] **Pool proxy key** — kl_cpool_acquire/release include proxy_host/proxy_port for cache isolation
 
 ## Security Audit Patterns
 
@@ -259,7 +262,7 @@ The factory is called once per connection slot at server init. Each `KlTls` sess
 All of these should pass cleanly before merging:
 
 ```bash
-make test               # 613 unit + integration tests (35 suites)
+make test               # 644 unit + integration tests (38 suites)
 make debug-test         # ASan + UBSan (catches memory errors, undefined behavior)
 make analyze            # Clang static analyzer via scan-build
 make cppcheck           # cppcheck static analysis

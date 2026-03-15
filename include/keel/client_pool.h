@@ -55,6 +55,8 @@ typedef struct KlClientPoolEntry {
     char     host[KL_CLIENT_HOSTNAME_MAX]; /**< NUL-terminated key */
     int      port;
     int      is_tls;
+    char     proxy_host[KL_CLIENT_HOSTNAME_MAX]; /**< "" = direct connection */
+    int      proxy_port;                          /**< 0 = direct connection */
     int      fd;            /**< -1 = free slot */
     KlTls   *tls;
     uint64_t idle_since_ms; /**< kl_monotonic_ms() when returned */
@@ -95,22 +97,26 @@ void kl_cpool_free(KlClientPool *pool);
 
 /**
  * @brief Try to acquire an idle connection from the pool.
- * @param pool   Connection pool.
- * @param host   Target hostname.
- * @param port   Target port.
- * @param is_tls 1 for TLS, 0 for plaintext.
- * @param conn   Output: populated on hit.
+ * @param pool       Connection pool.
+ * @param host       Target hostname.
+ * @param port       Target port.
+ * @param is_tls     1 for TLS, 0 for plaintext.
+ * @param proxy_host Proxy hostname (NULL = direct connection).
+ * @param proxy_port Proxy port (0 = direct connection).
+ * @param conn       Output: populated on hit.
  * @return 0 = hit (conn populated), 1 = miss, -1 = error.
  */
 int  kl_cpool_acquire(KlClientPool *pool, const char *host, int port,
-                      int is_tls, KlClientPoolConn *conn);
+                      int is_tls, const char *proxy_host, int proxy_port,
+                      KlClientPoolConn *conn);
 
 /**
  * @brief Return a connection to the pool for reuse.
  * @return 0 on success, -1 on error (connection discarded).
  */
 int  kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
-                      const char *host, int port, int is_tls);
+                      const char *host, int port, int is_tls,
+                      const char *proxy_host, int proxy_port);
 
 /**
  * @brief Close and discard a connection (not returned to pool).
@@ -134,7 +140,8 @@ int  kl_cpool_idle_count(const KlClientPool *pool);
  * @brief Count idle connections for a specific host tuple.
  */
 int  kl_cpool_host_count(const KlClientPool *pool, const char *host,
-                         int port, int is_tls);
+                         int port, int is_tls,
+                         const char *proxy_host, int proxy_port);
 
 /* ── Pooled client request variants ──────────────────────────────── */
 

@@ -18,12 +18,20 @@
 /* ── Entry helpers ───────────────────────────────────────────────── */
 
 static int entry_matches(const KlClientPoolEntry *e,
-                          const char *host, int port, int is_tls)
+                          const char *host, int port, int is_tls,
+                          const char *proxy_host, int proxy_port)
 {
-    return e->fd >= 0 &&
-           e->port == port &&
-           e->is_tls == is_tls &&
-           strcmp(e->host, host) == 0;
+    if (e->fd < 0 || e->port != port || e->is_tls != is_tls ||
+        strcmp(e->host, host) != 0)
+        return 0;
+
+    /* Proxy key comparison */
+    if (proxy_host)
+        return e->proxy_port == proxy_port &&
+               strcmp(e->proxy_host, proxy_host) == 0;
+
+    /* Direct: match only direct entries */
+    return e->proxy_host[0] == '\0';
 }
 
 static void entry_close(KlClientPoolEntry *e)
@@ -90,6 +98,8 @@ int kl_cpool_init(KlClientPool *pool, const KlClientPoolConfig *cfg,
         entries[i].tls = NULL;
         entries[i].timer_id = -1;
         entries[i].host[0] = '\0';
+        entries[i].proxy_host[0] = '\0';
+        entries[i].proxy_port = 0;
     }
 
     pool->entries = entries;
@@ -127,14 +137,15 @@ void kl_cpool_free(KlClientPool *pool)
 /* ── Acquire (test-on-borrow) ────────────────────────────────────── */
 
 int kl_cpool_acquire(KlClientPool *pool, const char *host, int port,
-                      int is_tls, KlClientPoolConn *conn)
+                      int is_tls, const char *proxy_host, int proxy_port,
+                      KlClientPoolConn *conn)
 {
     if (!pool || !host || !conn)
         return -1;
 
     for (int i = 0; i < pool->capacity; i++) {
         KlClientPoolEntry *e = &pool->entries[i];
-        if (!entry_matches(e, host, port, is_tls))
+        if (!entry_matches(e, host, port, is_tls, proxy_host, proxy_port))
             continue;
 
         /* Test-on-borrow: check if peer closed the connection */
@@ -174,13 +185,20 @@ int kl_cpool_acquire(KlClientPool *pool, const char *host, int port,
 /* ── Release ─────────────────────────────────────────────────────── */
 
 int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
-                      const char *host, int port, int is_tls)
+                      const char *host, int port, int is_tls,
+                      const char *proxy_host, int proxy_port)
 {
     if (!pool || !conn || !host || conn->fd < 0)
         return -1;
 
     size_t hlen = strlen(host);
     if (hlen >= KL_CLIENT_HOSTNAME_MAX) {
+        pool->last_error = KL_ERR_INVALID_ARG;
+        kl_cpool_discard(pool, conn);
+        return -1;
+    }
+
+    if (proxy_host && strlen(proxy_host) >= KL_CLIENT_HOSTNAME_MAX) {
         pool->last_error = KL_ERR_INVALID_ARG;
         kl_cpool_discard(pool, conn);
         return -1;
@@ -193,7 +211,7 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
 
     for (int i = 0; i < pool->capacity; i++) {
         const KlClientPoolEntry *e = &pool->entries[i];
-        if (entry_matches(e, host, port, is_tls)) {
+        if (entry_matches(e, host, port, is_tls, proxy_host, proxy_port)) {
             host_count++;
             if (e->idle_since_ms < oldest_time) {
                 oldest_time = e->idle_since_ms;
@@ -254,6 +272,14 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
     memcpy(e->host, host, hlen + 1);
     e->port = port;
     e->is_tls = is_tls;
+    if (proxy_host) {
+        size_t plen = strlen(proxy_host);
+        memcpy(e->proxy_host, proxy_host, plen + 1);
+        e->proxy_port = proxy_port;
+    } else {
+        e->proxy_host[0] = '\0';
+        e->proxy_port = 0;
+    }
     e->fd = conn->fd;
     e->tls = conn->tls;
     e->idle_since_ms = kl_monotonic_ms();
@@ -336,7 +362,8 @@ int kl_cpool_idle_count(const KlClientPool *pool)
 }
 
 int kl_cpool_host_count(const KlClientPool *pool, const char *host,
-                         int port, int is_tls)
+                         int port, int is_tls,
+                         const char *proxy_host, int proxy_port)
 {
     if (!pool || !host)
         return 0;
@@ -344,7 +371,7 @@ int kl_cpool_host_count(const KlClientPool *pool, const char *host,
     int count = 0;
     for (int i = 0; i < pool->capacity; i++) {
         const KlClientPoolEntry *e = &pool->entries[i];
-        if (entry_matches(e, host, port, is_tls))
+        if (entry_matches(e, host, port, is_tls, proxy_host, proxy_port))
             count++;
     }
     return count;

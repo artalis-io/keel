@@ -26,6 +26,7 @@ static const char *kl_error_messages[] = {
     [KL_ERR_PIPE]          = "pipe creation failed",
     [KL_ERR_REDIRECT_LOOP] = "too many redirects",
     [KL_ERR_COMPRESS]      = "compression error",
+    [KL_ERR_PROXY]         = "proxy error",
 };
 
 const char *kl_strerror(KlError err)

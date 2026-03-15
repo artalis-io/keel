@@ -24,6 +24,10 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+/* ── Proxy constants ─────────────────────────────────────────────── */
+
+#define KL_PROXY_RESPONSE_MAX 4096
+
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
 static int has_crlf(const char *s, size_t len)
@@ -207,23 +211,116 @@ static KlTls *do_tls_handshake(int fd, KlTlsConfig *tls_cfg,
     }
 }
 
+/* ── Proxy CONNECT handshake (sync) ──────────────────────────────── */
+
+static int proxy_connect_sync(int fd, const char *host, uint16_t port,
+                                const char *proxy_auth, int timeout_ms)
+{
+    char buf[KL_PROXY_RESPONSE_MAX];
+    int n;
+    if (proxy_auth)
+        n = snprintf(buf, sizeof(buf),
+                     "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n"
+                     "Proxy-Authorization: %s\r\n\r\n",
+                     host, port, host, port, proxy_auth);
+    else
+        n = snprintf(buf, sizeof(buf),
+                     "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n\r\n",
+                     host, port, host, port);
+
+    if (n < 0 || (size_t)n >= sizeof(buf))
+        return -1;
+
+    /* Send CONNECT request */
+    size_t sent = 0;
+    while (sent < (size_t)n) {
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr <= 0)
+            return -1;
+
+        ssize_t w = write(fd, buf + sent, (size_t)n - sent);
+        if (w <= 0) {
+            if (w < 0 && errno == EINTR)
+                continue;
+            return -1;
+        }
+        sent += (size_t)w;
+    }
+
+    /* Read proxy response — look for "HTTP/1.x 200" */
+    size_t recv_len = 0;
+    for (;;) {
+        if (recv_len >= sizeof(buf) - 1)
+            return -1;  /* response too large */
+
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr <= 0)
+            return -1;
+
+        ssize_t r = read(fd, buf + recv_len, sizeof(buf) - 1 - recv_len);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR)
+                continue;
+            return -1;
+        }
+        recv_len += (size_t)r;
+        buf[recv_len] = '\0';
+
+        /* Check for end of headers */
+        if (strstr(buf, "\r\n\r\n")) {
+            /* Verify 200 status */
+            if (recv_len < 12)
+                return -1;
+            if (strncmp(buf, "HTTP/1.", 7) != 0)
+                return -1;
+            if (buf[9] != '2' || buf[10] != '0' || buf[11] != '0')
+                return -1;
+            return 0;
+        }
+    }
+}
+
 /* ── Build request into stack buffer, send ───────────────────────── */
 
 static int send_request_sync(int fd, KlTls *tls,
                               const char *method, const KlUrl *url,
                               const KlClientHeader *headers, int num_headers,
                               const char *body, size_t body_len,
-                              int timeout_ms, int keep_alive)
+                              int timeout_ms, int keep_alive,
+                              const char *absolute_url)
 {
     if (has_crlf(method, strlen(method)))
         return -1;
     if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return -1;
 
+    /* When proxied (HTTP forwarding), use absolute-form URL as target */
+    const char *target;
+    int target_len;
+    const char path_fallback[] = "/";
+    if (absolute_url) {
+        target = absolute_url;
+        target_len = (int)strlen(absolute_url);
+    } else if (url->path_len > 0) {
+        target = url->path;
+        target_len = (int)url->path_len;
+    } else {
+        target = path_fallback;
+        target_len = 1;
+    }
+
     char buf[KL_CLIENT_REQ_BUF_SIZE];
     int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
                        method,
-                       (int)url->path_len, url->path,
+                       target_len, target,
                        (int)url->host_len, url->host);
 
     if (off < 0 || (size_t)off >= sizeof(buf))
@@ -299,17 +396,32 @@ static int send_request_sync(int fd, KlTls *tls,
 static int send_headers_sync(int fd, KlTls *tls,
                                const char *method, const KlUrl *url,
                                const KlClientHeader *headers, int num_headers,
-                               int timeout_ms, int keep_alive)
+                               int timeout_ms, int keep_alive,
+                               const char *absolute_url)
 {
     if (has_crlf(method, strlen(method)))
         return -1;
     if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return -1;
 
+    const char *target;
+    int target_len;
+    const char path_fallback[] = "/";
+    if (absolute_url) {
+        target = absolute_url;
+        target_len = (int)strlen(absolute_url);
+    } else if (url->path_len > 0) {
+        target = url->path;
+        target_len = (int)url->path_len;
+    } else {
+        target = path_fallback;
+        target_len = 1;
+    }
+
     char buf[KL_CLIENT_REQ_BUF_SIZE];
     int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
                        method,
-                       (int)url->path_len, url->path,
+                       target_len, target,
                        (int)url->host_len, url->host);
 
     if (off < 0 || (size_t)off >= sizeof(buf))
@@ -660,9 +772,19 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     if (!parsed.is_https)
         tls_cfg = NULL;
 
+    /* Proxy routing: connect to proxy host instead of target */
+    const KlProxyConfig *proxy = cfg ? cfg->proxy : NULL;
+    int is_proxied = (proxy && proxy->host);
+
     KlError conn_err = KL_ERR_NONE;
-    int fd = connect_with_timeout(parsed.host, parsed.host_len,
+    int fd;
+    if (is_proxied) {
+        fd = connect_with_timeout(proxy->host, strlen(proxy->host),
+                                   proxy->port, timeout_ms, &conn_err);
+    } else {
+        fd = connect_with_timeout(parsed.host, parsed.host_len,
                                    parsed.port, timeout_ms, &conn_err);
+    }
     if (fd < 0) {
         resp->error = conn_err;
         return -1;
@@ -671,13 +793,64 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     KlTls *tls = NULL;
     int ret = -1;
 
-    if (parsed.is_https) {
+    if (is_proxied && parsed.is_https) {
+        /* CONNECT tunnel through proxy, then TLS handshake */
+        char target_host[KL_CLIENT_HOSTNAME_MAX];
+        if (parsed.host_len >= sizeof(target_host)) {
+            resp->error = KL_ERR_INVALID_ARG;
+            goto cleanup;
+        }
+        memcpy(target_host, parsed.host, parsed.host_len);
+        target_host[parsed.host_len] = '\0';
+
+        if (proxy_connect_sync(fd, target_host, (uint16_t)parsed.port,
+                                 proxy->auth, timeout_ms) != 0) {
+            resp->error = KL_ERR_PROXY;
+            goto cleanup;
+        }
         tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
                                 timeout_ms, alloc);
         if (!tls) {
             resp->error = KL_ERR_TLS_HANDSHAKE;
             goto cleanup;
         }
+    } else if (parsed.is_https) {
+        tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
+                                timeout_ms, alloc);
+        if (!tls) {
+            resp->error = KL_ERR_TLS_HANDSHAKE;
+            goto cleanup;
+        }
+    }
+
+    /* Build absolute-form URL for HTTP forwarding through proxy */
+    char abs_url_buf[KL_CLIENT_REQ_BUF_SIZE];
+    const char *absolute_url = NULL;
+    if (is_proxied && !parsed.is_https) {
+        char host_z[KL_CLIENT_HOSTNAME_MAX];
+        if (parsed.host_len >= sizeof(host_z)) {
+            resp->error = KL_ERR_INVALID_ARG;
+            goto cleanup;
+        }
+        memcpy(host_z, parsed.host, parsed.host_len);
+        host_z[parsed.host_len] = '\0';
+
+        const char *path = (parsed.path_len > 0) ? parsed.path : "/";
+        int path_len = (parsed.path_len > 0) ? (int)parsed.path_len : 1;
+
+        int n;
+        if (parsed.port == 80)
+            n = snprintf(abs_url_buf, sizeof(abs_url_buf),
+                         "http://%s%.*s", host_z, path_len, path);
+        else
+            n = snprintf(abs_url_buf, sizeof(abs_url_buf),
+                         "http://%s:%d%.*s", host_z, parsed.port,
+                         path_len, path);
+        if (n < 0 || (size_t)n >= sizeof(abs_url_buf)) {
+            resp->error = KL_ERR_OVERFLOW;
+            goto cleanup;
+        }
+        absolute_url = abs_url_buf;
     }
 
     /* Set up streaming decompression wrapper if needed */
@@ -706,7 +879,8 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     /* Request streaming: send headers + chunked body */
     if (stream && stream->body_read) {
         if (send_headers_sync(fd, tls, method, &parsed,
-                                headers, num_headers, timeout_ms, 0) != 0) {
+                                headers, num_headers, timeout_ms, 0,
+                                absolute_url) != 0) {
             if (!resp->error) resp->error = KL_ERR_IO;
             goto cleanup;
         }
@@ -718,7 +892,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     } else {
         if (send_request_sync(fd, tls, method, &parsed,
                                headers, num_headers, body, body_len,
-                               timeout_ms, 0) != 0) {
+                               timeout_ms, 0, absolute_url) != 0) {
             if (!resp->error) resp->error = KL_ERR_IO;
             goto cleanup;
         }
@@ -798,6 +972,8 @@ void kl_client_response_free(KlClientResponse *resp)
 typedef enum {
     KL_HCLIENT_RESOLVING,
     KL_HCLIENT_CONNECTING,
+    KL_HCLIENT_PROXY_CONNECTING,   /* sending CONNECT request */
+    KL_HCLIENT_PROXY_HANDSHAKE,    /* reading proxy 200 response */
     KL_HCLIENT_TLS_HANDSHAKE,
     KL_HCLIENT_SENDING,
     KL_HCLIENT_SENDING_STREAM,  /* chunked body from body_read callback */
@@ -854,6 +1030,17 @@ struct KlClient {
     /* Response decompression */
     KlDecompressConfig *decompress_cfg;
     DecompStreamWrap   *decomp_wrap;     /* heap-allocated for streaming */
+
+    /* Proxy state */
+    int             is_proxied;     /* connected via proxy */
+    int             is_tunnel;      /* CONNECT tunnel (HTTPS through proxy) */
+    char           *connect_buf;    /* CONNECT request buffer (heap) */
+    size_t          connect_len;
+    size_t          connect_sent;
+    char           *proxy_recv;     /* CONNECT response buffer (heap) */
+    size_t          proxy_recv_len;
+    const char     *proxy_auth;     /* borrowed from config */
+    uint16_t        target_port;    /* original target port for CONNECT */
 };
 
 /* Forward declarations */
@@ -862,6 +1049,8 @@ static void async_complete_success(KlClient *c);
 static void async_complete_error(KlClient *c);
 static void async_handle_tls_handshake(KlClient *c);
 static void async_handle_sending_stream(KlClient *c);
+static void async_handle_proxy_connecting(KlClient *c);
+static void async_handle_proxy_handshake(KlClient *c);
 static int  start_connect(KlClient *c, const struct sockaddr *addr,
                            socklen_t addrlen, int family, int socktype,
                            int protocol);
@@ -872,17 +1061,31 @@ static char *build_request(KlAllocator *alloc,
                             const char *method, const KlUrl *url,
                             const KlClientHeader *headers, int num_headers,
                             const char *body, size_t body_len,
-                            size_t *out_len, int keep_alive)
+                            size_t *out_len, int keep_alive,
+                            const char *absolute_url)
 {
     if (has_crlf(method, strlen(method)))
         return NULL;
     if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return NULL;
 
+    const char *target;
+    int target_len;
+    if (absolute_url) {
+        target = absolute_url;
+        target_len = (int)strlen(absolute_url);
+    } else if (url->path_len > 0) {
+        target = url->path;
+        target_len = (int)url->path_len;
+    } else {
+        target = "/";
+        target_len = 1;
+    }
+
     char buf[KL_CLIENT_REQ_BUF_SIZE];
     int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
                        method,
-                       (int)url->path_len, url->path,
+                       target_len, target,
                        (int)url->host_len, url->host);
 
     if (off < 0 || (size_t)off >= sizeof(buf))
@@ -935,17 +1138,31 @@ static char *build_request_headers_only(KlAllocator *alloc,
                                           const char *method, const KlUrl *url,
                                           const KlClientHeader *headers,
                                           int num_headers, size_t *out_len,
-                                          int keep_alive)
+                                          int keep_alive,
+                                          const char *absolute_url)
 {
     if (has_crlf(method, strlen(method)))
         return NULL;
     if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return NULL;
 
+    const char *target;
+    int target_len;
+    if (absolute_url) {
+        target = absolute_url;
+        target_len = (int)strlen(absolute_url);
+    } else if (url->path_len > 0) {
+        target = url->path;
+        target_len = (int)url->path_len;
+    } else {
+        target = "/";
+        target_len = 1;
+    }
+
     char buf[KL_CLIENT_REQ_BUF_SIZE];
     int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
                        method,
-                       (int)url->path_len, url->path,
+                       target_len, target,
                        (int)url->host_len, url->host);
 
     if (off < 0 || (size_t)off >= sizeof(buf))
@@ -975,6 +1192,35 @@ static char *build_request_headers_only(KlAllocator *alloc,
     memcpy(req, buf, (size_t)off);
     *out_len = (size_t)off;
     return req;
+}
+
+/* ── Build CONNECT request into heap buffer ──────────────────────── */
+
+static int build_connect_request(KlClient *c, const char *host,
+                                   uint16_t port, const char *auth)
+{
+    char buf[KL_PROXY_RESPONSE_MAX];
+    int n;
+    if (auth)
+        n = snprintf(buf, sizeof(buf),
+                     "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n"
+                     "Proxy-Authorization: %s\r\n\r\n",
+                     host, port, host, port, auth);
+    else
+        n = snprintf(buf, sizeof(buf),
+                     "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n\r\n",
+                     host, port, host, port);
+
+    if (n < 0 || (size_t)n >= sizeof(buf))
+        return -1;
+
+    c->connect_buf = kl_malloc(c->alloc, (size_t)n);
+    if (!c->connect_buf)
+        return -1;
+    memcpy(c->connect_buf, buf, (size_t)n);
+    c->connect_len = (size_t)n;
+    c->connect_sent = 0;
+    return 0;
 }
 
 /* ── Post-DNS: create socket, connect, register watcher ──────────── */
@@ -1054,6 +1300,26 @@ static void async_handle_connecting(KlClient *c)
         return;
     }
 
+    /* Proxy: HTTPS target needs CONNECT tunnel first */
+    if (c->is_proxied && c->is_tunnel) {
+        if (build_connect_request(c, c->host_buf, c->target_port,
+                                    c->proxy_auth) != 0) {
+            c->error = KL_ERR_ALLOC;
+            async_complete_error(c);
+            return;
+        }
+        c->state = KL_HCLIENT_PROXY_CONNECTING;
+        kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
+        return;
+    }
+
+    /* Proxy: HTTP target — request already has absolute-form URL, send directly */
+    if (c->is_proxied) {
+        c->state = KL_HCLIENT_SENDING;
+        kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
+        return;
+    }
+
     if (c->tls_cfg && c->tls_cfg->factory) {
         c->tls = c->tls_cfg->factory(c->tls_cfg->ctx, c->alloc);
         if (!c->tls) {
@@ -1070,6 +1336,123 @@ static void async_handle_connecting(KlClient *c)
     } else {
         c->state = KL_HCLIENT_SENDING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
+    }
+}
+
+/* ── State: PROXY_CONNECTING (send CONNECT request) ──────────────── */
+
+static void async_handle_proxy_connecting(KlClient *c)
+{
+    while (c->connect_sent < c->connect_len) {
+        ssize_t w = write(c->fd, c->connect_buf + c->connect_sent,
+                           c->connect_len - c->connect_sent);
+        if (w < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                kl_watcher_rearm(c->ev_ctx, c->fd);
+                return;
+            }
+            if (errno == EINTR)
+                continue;
+            c->error = KL_ERR_IO;
+            async_complete_error(c);
+            return;
+        }
+        if (w == 0) {
+            c->error = KL_ERR_IO;
+            async_complete_error(c);
+            return;
+        }
+        c->connect_sent += (size_t)w;
+    }
+
+    /* CONNECT request fully sent — switch to reading proxy response */
+    kl_free(c->alloc, c->connect_buf, c->connect_len);
+    c->connect_buf = NULL;
+
+    /* Allocate proxy response buffer */
+    c->proxy_recv = kl_malloc(c->alloc, KL_PROXY_RESPONSE_MAX);
+    if (!c->proxy_recv) {
+        c->error = KL_ERR_ALLOC;
+        async_complete_error(c);
+        return;
+    }
+    c->proxy_recv_len = 0;
+
+    c->state = KL_HCLIENT_PROXY_HANDSHAKE;
+    kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
+}
+
+/* ── State: PROXY_HANDSHAKE (read proxy 200 response) ────────────── */
+
+static void async_handle_proxy_handshake(KlClient *c)
+{
+    for (;;) {
+        if (c->proxy_recv_len >= KL_PROXY_RESPONSE_MAX - 1) {
+            c->error = KL_ERR_PROXY;
+            async_complete_error(c);
+            return;
+        }
+
+        ssize_t r = read(c->fd, c->proxy_recv + c->proxy_recv_len,
+                          KL_PROXY_RESPONSE_MAX - 1 - c->proxy_recv_len);
+        if (r < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                kl_watcher_rearm(c->ev_ctx, c->fd);
+                return;
+            }
+            if (errno == EINTR)
+                continue;
+            c->error = KL_ERR_IO;
+            async_complete_error(c);
+            return;
+        }
+        if (r == 0) {
+            c->error = KL_ERR_PROXY;
+            async_complete_error(c);
+            return;
+        }
+
+        c->proxy_recv_len += (size_t)r;
+        c->proxy_recv[c->proxy_recv_len] = '\0';
+
+        /* Check for end of headers */
+        if (!strstr(c->proxy_recv, "\r\n\r\n"))
+            continue;
+
+        /* Verify HTTP/1.x 200 status */
+        if (c->proxy_recv_len < 12 ||
+            strncmp(c->proxy_recv, "HTTP/1.", 7) != 0 ||
+            c->proxy_recv[9] != '2' || c->proxy_recv[10] != '0' ||
+            c->proxy_recv[11] != '0') {
+            c->error = KL_ERR_PROXY;
+            async_complete_error(c);
+            return;
+        }
+
+        /* CONNECT tunnel established — free buffer, start TLS */
+        kl_free(c->alloc, c->proxy_recv, KL_PROXY_RESPONSE_MAX);
+        c->proxy_recv = NULL;
+
+        /* Create TLS session over the tunnel */
+        if (!c->tls_cfg || !c->tls_cfg->factory) {
+            c->error = KL_ERR_TLS_INIT;
+            async_complete_error(c);
+            return;
+        }
+
+        c->tls = c->tls_cfg->factory(c->tls_cfg->ctx, c->alloc);
+        if (!c->tls) {
+            c->error = KL_ERR_TLS_INIT;
+            async_complete_error(c);
+            return;
+        }
+
+        if (c->tls->set_hostname && c->host_buf[0])
+            c->tls->set_hostname(c->tls, c->host_buf);
+
+        c->state = KL_HCLIENT_TLS_HANDSHAKE;
+        async_handle_tls_handshake(c);
+        return;
     }
 }
 
@@ -1320,6 +1703,12 @@ static void async_on_event(int fd, KlEventMask ready, void *user_data)
     case KL_HCLIENT_CONNECTING:
         async_handle_connecting(c);
         break;
+    case KL_HCLIENT_PROXY_CONNECTING:
+        async_handle_proxy_connecting(c);
+        break;
+    case KL_HCLIENT_PROXY_HANDSHAKE:
+        async_handle_proxy_handshake(c);
+        break;
     case KL_HCLIENT_TLS_HANDSHAKE:
         async_handle_tls_handshake(c);
         break;
@@ -1361,7 +1750,8 @@ static void async_complete_success(KlClient *c)
             kl_cpool_discard(c->pool, &c->pool_conn);
         } else {
             kl_cpool_release(c->pool, &c->pool_conn,
-                              c->host_buf, c->pool_port, c->pool_is_tls);
+                              c->host_buf, c->pool_port, c->pool_is_tls,
+                              NULL, 0);
         }
         c->tls = NULL;
         c->fd = -1;
@@ -1430,6 +1820,16 @@ static void async_complete_error(KlClient *c)
         c->parser = NULL;
     }
 
+    /* Free proxy buffers */
+    if (c->connect_buf) {
+        kl_free(c->alloc, c->connect_buf, c->connect_len);
+        c->connect_buf = NULL;
+    }
+    if (c->proxy_recv) {
+        kl_free(c->alloc, c->proxy_recv, KL_PROXY_RESPONSE_MAX);
+        c->proxy_recv = NULL;
+    }
+
     c->state = KL_HCLIENT_DONE;
     /* error already set by caller — fallback if not set */
     if (c->error == KL_ERR_NONE)
@@ -1468,21 +1868,56 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
                                                             : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
 
+    /* Proxy routing */
+    const KlProxyConfig *proxy = cfg ? cfg->proxy : NULL;
+    int is_proxied = (proxy && proxy->host);
+    int is_tunnel = is_proxied && parsed.is_https;
+
+    /* For HTTPS through proxy: tls_cfg stays set (used after CONNECT),
+     * but we don't do TLS on initial connect to proxy */
+
+    /* Build absolute-form URL for HTTP forwarding through proxy */
+    char abs_url_buf[KL_CLIENT_REQ_BUF_SIZE];
+    const char *absolute_url = NULL;
+    if (is_proxied && !parsed.is_https) {
+        char host_z[KL_CLIENT_HOSTNAME_MAX];
+        if (parsed.host_len >= sizeof(host_z))
+            return NULL;
+        memcpy(host_z, parsed.host, parsed.host_len);
+        host_z[parsed.host_len] = '\0';
+
+        const char *path = (parsed.path_len > 0) ? parsed.path : "/";
+        int path_len = (parsed.path_len > 0) ? (int)parsed.path_len : 1;
+
+        int n;
+        if (parsed.port == 80)
+            n = snprintf(abs_url_buf, sizeof(abs_url_buf),
+                         "http://%s%.*s", host_z, path_len, path);
+        else
+            n = snprintf(abs_url_buf, sizeof(abs_url_buf),
+                         "http://%s:%d%.*s", host_z, parsed.port,
+                         path_len, path);
+        if (n < 0 || (size_t)n >= sizeof(abs_url_buf))
+            return NULL;
+        absolute_url = abs_url_buf;
+    }
+
     /* Build request buffer — headers-only for streaming, full for buffered */
     size_t req_len = 0;
     char *req_buf;
     if (stream && stream->body_read) {
         req_buf = build_request_headers_only(alloc, method, &parsed,
-                                               headers, num_headers, &req_len, 0);
+                                               headers, num_headers, &req_len, 0,
+                                               absolute_url);
     } else {
         req_buf = build_request(alloc, method, &parsed,
                                  headers, num_headers, body, body_len,
-                                 &req_len, 0);
+                                 &req_len, 0, absolute_url);
     }
     if (!req_buf)
         return NULL;
 
-    /* Copy hostname for SNI */
+    /* Copy hostname for SNI (always the target host, not the proxy) */
     char host_buf[KL_CLIENT_HOSTNAME_MAX];
     if (parsed.host_len >= sizeof(host_buf)) {
         kl_free(alloc, req_buf, req_len);
@@ -1502,13 +1937,23 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->fd = -1;
     c->ev_ctx = ev_ctx;
     c->alloc = alloc;
-    c->tls_cfg = tls_cfg;
+    c->tls_cfg = is_tunnel ? tls_cfg : NULL;  /* only for CONNECT tunnels */
     c->request_buf = req_buf;
     c->request_len = req_len;
     c->request_sent = 0;
     c->on_done = on_done;
     c->user_data = user_data;
     memcpy(c->host_buf, host_buf, parsed.host_len + 1);
+
+    /* Proxy state */
+    c->is_proxied = is_proxied;
+    c->is_tunnel = is_tunnel;
+    c->target_port = (uint16_t)parsed.port;
+    c->proxy_auth = (proxy && proxy->auth) ? proxy->auth : NULL;
+
+    /* Non-tunnel direct connections still need tls_cfg */
+    if (!is_proxied)
+        c->tls_cfg = tls_cfg;
 
     /* Response decompression config */
     KlDecompressConfig *dcfg = cfg ? cfg->decompress : NULL;
@@ -1563,13 +2008,17 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return NULL;
     }
 
+    /* DNS resolution — resolve proxy host when proxied, target host otherwise */
+    const char *resolve_host = is_proxied ? proxy->host : host_buf;
+    int resolve_port = is_proxied ? proxy->port : parsed.port;
+
     /* Async DNS resolver path */
     KlResolver *resolver = cfg ? cfg->resolver : NULL;
     if (resolver) {
         c->resolver = resolver;
         c->state = KL_HCLIENT_RESOLVING;
         c->resolve_req = resolver->resolve(resolver, ev_ctx,
-                                            host_buf, parsed.port,
+                                            resolve_host, resolve_port,
                                             dns_resolved, c);
         if (!c->resolve_req) {
             c->parser->destroy(c->parser);
@@ -1581,8 +2030,22 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     }
 
     /* Sync DNS fallback (blocking getaddrinfo) */
+    char dns_host_buf[KL_CLIENT_HOSTNAME_MAX];
+    if (is_proxied) {
+        size_t phl = strlen(proxy->host);
+        if (phl >= sizeof(dns_host_buf)) {
+            c->parser->destroy(c->parser);
+            kl_free(alloc, req_buf, req_len);
+            kl_free(alloc, c, sizeof(KlClient));
+            return NULL;
+        }
+        memcpy(dns_host_buf, proxy->host, phl + 1);
+    } else {
+        memcpy(dns_host_buf, host_buf, parsed.host_len + 1);
+    }
+
     char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", parsed.port);
+    snprintf(port_str, sizeof(port_str), "%d", resolve_port);
 
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
@@ -1590,7 +2053,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     hints.ai_socktype = SOCK_STREAM;
 
     struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host_buf, port_str, &hints, &res);
+    int rc = getaddrinfo(dns_host_buf, port_str, &hints, &res);
     if (rc != 0 || !res) {
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
@@ -1710,6 +2173,16 @@ void kl_client_free(KlClient *client)
         client->decomp_wrap = NULL;
     }
 
+    /* Free proxy buffers */
+    if (client->connect_buf) {
+        kl_free(client->alloc, client->connect_buf, client->connect_len);
+        client->connect_buf = NULL;
+    }
+    if (client->proxy_recv) {
+        kl_free(client->alloc, client->proxy_recv, KL_PROXY_RESPONSE_MAX);
+        client->proxy_recv = NULL;
+    }
+
     KlAllocator *alloc = client->alloc;
     kl_free(alloc, client, sizeof(KlClient));
 }
@@ -1767,7 +2240,8 @@ int kl_client_request_pooled(KlClientPool *pool,
     KlClientPoolConn pconn;
     memset(&pconn, 0, sizeof(pconn));
     pconn.fd = -1;
-    int acq = kl_cpool_acquire(pool, host_buf, parsed.port, is_tls, &pconn);
+    int acq = kl_cpool_acquire(pool, host_buf, parsed.port, is_tls,
+                                NULL, 0, &pconn);
 
     int fd;
     KlTls *tls = NULL;
@@ -1802,10 +2276,10 @@ int kl_client_request_pooled(KlClientPool *pool,
         pconn.reused = 0;
     }
 
-    /* Send with keep-alive */
+    /* Send with keep-alive (pooled = no proxy support in v1, pass NULL) */
     if (send_request_sync(fd, tls, method, &parsed,
                            headers, num_headers, body, body_len,
-                           timeout_ms, 1) != 0) {
+                           timeout_ms, 1, NULL) != 0) {
         if (!resp->error) resp->error = KL_ERR_IO;
         goto cleanup;
     }
@@ -1834,7 +2308,8 @@ cleanup:
     } else if (server_wants_close(resp)) {
         kl_cpool_discard(pool, &pconn);
     } else {
-        kl_cpool_release(pool, &pconn, host_buf, parsed.port, is_tls);
+        kl_cpool_release(pool, &pconn, host_buf, parsed.port, is_tls,
+                          NULL, 0);
     }
 
     return ret;
@@ -1869,11 +2344,11 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
                                                             : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
 
-    /* Build request buffer with keep-alive */
+    /* Build request buffer with keep-alive (pooled = no proxy in v1) */
     size_t req_len = 0;
     char *req_buf = build_request(alloc, method, &parsed,
                                    headers, num_headers, body, body_len,
-                                   &req_len, 1);
+                                   &req_len, 1, NULL);
     if (!req_buf)
         return NULL;
 
@@ -1925,7 +2400,8 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     KlClientPoolConn pconn;
     memset(&pconn, 0, sizeof(pconn));
     pconn.fd = -1;
-    int acq = kl_cpool_acquire(pool, host_buf, parsed.port, is_tls, &pconn);
+    int acq = kl_cpool_acquire(pool, host_buf, parsed.port, is_tls,
+                                NULL, 0, &pconn);
 
     if (acq == 0) {
         /* Pool hit — skip connect + TLS, go straight to sending */

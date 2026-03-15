@@ -5,8 +5,9 @@
  * Supports mutual TLS (mTLS) with configurable client authentication.
  *
  * Usage:
+ *   KlAllocator alloc = kl_allocator_default();
  *   KlTlsCtx *ctx = kl_tls_mbedtls_ctx_create("cert.pem", "key.pem",
- *                                               NULL, 0);
+ *                                               NULL, 0, &alloc);
  *   KlConfig config = {
  *       .tls = &(KlTlsConfig){
  *           .ctx = ctx,
@@ -17,7 +18,8 @@
  *   };
  *
  * For client-side usage (e.g. Hull HTTP client):
- *   KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create(NULL);
+ *   KlAllocator alloc = kl_allocator_default();
+ *   KlTlsCtx *ctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);
  *   KlTls *tls = kl_tls_mbedtls_create(ctx, &alloc);
  *   tls->handshake(tls, fd);
  *   tls->write(tls, fd, buf, len);
@@ -52,12 +54,14 @@ typedef enum {
  * @param ca_path     Path to PEM-encoded CA cert for client verification (mTLS).
  *                    NULL to disable client authentication.
  * @param client_auth Client authentication mode (KlMtlsMode).
+ * @param alloc       Allocator for context storage (borrowed — must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
                                       const char *key_path,
                                       const char *ca_path,
-                                      int client_auth);
+                                      int client_auth,
+                                      KlAllocator *alloc);
 
 /**
  * @brief Create a client-side TLS context (for outbound connections).
@@ -66,9 +70,11 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
  *                 NULL skips certificate verification — requires explicit
  *                 opt-in via --skip-ca-bundle flag. Production deployments
  *                 should always provide a valid CA bundle path.
+ * @param alloc    Allocator for context storage (borrowed — must outlive context).
  * @return Opaque context, or NULL on error.
  */
-KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path);
+KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
+                                              KlAllocator *alloc);
 
 /**
  * @brief Destroy a TLS context.

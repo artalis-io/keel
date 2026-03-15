@@ -32,6 +32,17 @@
 #define KL_CLIENT_CHUNK_HDR_SIZE     16    /* fits "FFFFFFFFFFFFFFFF\r\n" */
 #define KL_CLIENT_FINAL_CHUNK_LEN    5     /* "0\r\n\r\n" */
 
+/* ── Proxy ────────────────────────────────────────────────────────── */
+
+/**
+ * @brief HTTP proxy configuration (borrowed pointers, caller-owned).
+ */
+typedef struct {
+    const char *host;       /**< Proxy hostname */
+    uint16_t    port;       /**< Proxy port (typically 8080, 3128) */
+    const char *auth;       /**< "Basic <base64>" or NULL (no auth) */
+} KlProxyConfig;
+
 /* ── Types ────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -55,6 +66,7 @@ typedef struct {
     KlTlsConfig     *tls;              /**< TLS config for HTTPS (NULL = no HTTPS) */
     KlResolver      *resolver;          /**< Async DNS resolver (NULL = sync getaddrinfo) */
     KlDecompressConfig *decompress;     /**< Response decompression (NULL = no decompression) */
+    KlProxyConfig   *proxy;             /**< HTTP proxy (NULL = direct connection) */
 } KlClientConfig;
 
 /* ── Streaming types ──────────────────────────────────────────────── */

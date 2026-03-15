@@ -89,7 +89,8 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *user_data) {
 
 int main(void) {
     /* Create gzip compression context (level 6 = default) */
-    KlCompressCtx *cctx = kl_compress_miniz_ctx_create(6);
+    KlAllocator alloc = kl_allocator_default();
+    KlCompressCtx *cctx = kl_compress_miniz_ctx_create(6, &alloc);
     if (!cctx) { fprintf(stderr, "compress ctx failed\n"); return 1; }
 
     KlCompressConfig comp = {

@@ -20,7 +20,6 @@
 
 #include <errno.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -45,6 +44,7 @@ typedef struct {
     mbedtls_x509_crt      ca_cert;    /* CA cert for peer verification */
     mbedtls_ctr_drbg_context drbg;
     mbedtls_entropy_context  entropy;
+    KlAllocator           *alloc;     /* allocator used to create this context */
     int                    is_server;  /* 1 = server, 0 = client */
     int                    has_ca;     /* 1 = ca_cert loaded */
 } KlMbedtlsCtx;
@@ -266,7 +266,8 @@ int kl_tls_mbedtls_set_hostname(KlTls *tls, const char *hostname)
 
 /* ── Helper: read entire file into buffer ────────────────────────── */
 
-static unsigned char *read_file(const char *path, size_t *out_len)
+static unsigned char *read_file(const char *path, size_t *out_len,
+                                 KlAllocator *alloc)
 {
     if (!path || !out_len)
         return NULL;
@@ -292,7 +293,7 @@ static unsigned char *read_file(const char *path, size_t *out_len)
     }
 
     /* +1 for null terminator (PEM parser needs it) */
-    unsigned char *buf = malloc((size_t)len + 1);
+    unsigned char *buf = kl_malloc(alloc, (size_t)len + 1);
     if (!buf) {
         fclose(f);
         return NULL;
@@ -302,7 +303,7 @@ static unsigned char *read_file(const char *path, size_t *out_len)
     fclose(f);
 
     if (nread != (size_t)len) {
-        free(buf);
+        kl_free(alloc, buf, (size_t)len + 1);
         return NULL;
     }
 
@@ -313,27 +314,21 @@ static unsigned char *read_file(const char *path, size_t *out_len)
 
 /* ── Server context creation ─────────────────────────────────────── */
 
-/*
- * ctx_create functions use raw malloc/free intentionally:
- *   - Called once at startup, not per-request
- *   - Run before KlAllocator-tracked lifetime begins
- *   - Per-connection TLS sessions (factory) use kl_malloc/kl_free
- *   - read_file() uses raw malloc for temporary file I/O buffers
- */
-
 KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
                                       const char *key_path,
                                       const char *ca_path,
-                                      int client_auth)
+                                      int client_auth,
+                                      KlAllocator *alloc)
 {
-    if (!cert_path || !key_path)
+    if (!cert_path || !key_path || !alloc)
         return NULL;
 
-    KlMbedtlsCtx *ctx = malloc(sizeof(*ctx));  /* startup-only, see note above */
+    KlMbedtlsCtx *ctx = kl_malloc(alloc, sizeof(*ctx));
     if (!ctx)
         return NULL;
 
     memset(ctx, 0, sizeof(*ctx));
+    ctx->alloc = alloc;
     ctx->is_server = 1;
 
     /* Initialize all mbedTLS structures */
@@ -355,37 +350,37 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
 
     /* Load server certificate */
     size_t cert_len;
-    unsigned char *cert_buf = read_file(cert_path, &cert_len);
+    unsigned char *cert_buf = read_file(cert_path, &cert_len, alloc);
     if (!cert_buf)
         goto fail;
 
     ret = mbedtls_x509_crt_parse(&ctx->cert, cert_buf, cert_len);
-    free(cert_buf);
+    kl_free(alloc, cert_buf, cert_len);
     if (ret != 0)
         goto fail;
 
     /* Load server private key */
     size_t key_len;
-    unsigned char *key_buf = read_file(key_path, &key_len);
+    unsigned char *key_buf = read_file(key_path, &key_len, alloc);
     if (!key_buf)
         goto fail;
 
     ret = mbedtls_pk_parse_key(&ctx->pkey, key_buf, key_len,
                                 NULL, 0, mbedtls_ctr_drbg_random, &ctx->drbg);
     kl_secure_zero(key_buf, key_len);
-    free(key_buf);
+    kl_free(alloc, key_buf, key_len);
     if (ret != 0)
         goto fail;
 
     /* Load CA certificate for mTLS (optional) */
     if (ca_path) {
         size_t ca_len;
-        unsigned char *ca_buf = read_file(ca_path, &ca_len);
+        unsigned char *ca_buf = read_file(ca_path, &ca_len, alloc);
         if (!ca_buf)
             goto fail;
 
         ret = mbedtls_x509_crt_parse(&ctx->ca_cert, ca_buf, ca_len);
-        free(ca_buf);
+        kl_free(alloc, ca_buf, ca_len);
         if (ret != 0)
             goto fail;
 
@@ -429,19 +424,24 @@ fail:
     mbedtls_x509_crt_free(&ctx->ca_cert);
     mbedtls_ctr_drbg_free(&ctx->drbg);
     mbedtls_entropy_free(&ctx->entropy);
-    free(ctx);
+    kl_free(alloc, ctx, sizeof(*ctx));
     return NULL;
 }
 
 /* ── Client context creation ─────────────────────────────────────── */
 
-KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path)
+KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
+                                              KlAllocator *alloc)
 {
-    KlMbedtlsCtx *ctx = malloc(sizeof(*ctx));  /* startup-only, see note above */
+    if (!alloc)
+        return NULL;
+
+    KlMbedtlsCtx *ctx = kl_malloc(alloc, sizeof(*ctx));
     if (!ctx)
         return NULL;
 
     memset(ctx, 0, sizeof(*ctx));
+    ctx->alloc = alloc;
     ctx->is_server = 0;
 
     /* Initialize all mbedTLS structures */
@@ -464,12 +464,12 @@ KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path)
     /* Load CA certificates for server verification (optional) */
     if (ca_path) {
         size_t ca_len;
-        unsigned char *ca_buf = read_file(ca_path, &ca_len);
+        unsigned char *ca_buf = read_file(ca_path, &ca_len, alloc);
         if (!ca_buf)
             goto fail;
 
         ret = mbedtls_x509_crt_parse(&ctx->ca_cert, ca_buf, ca_len);
-        free(ca_buf);
+        kl_free(alloc, ca_buf, ca_len);
         if (ret != 0)
             goto fail;
 
@@ -505,7 +505,7 @@ fail:
     mbedtls_x509_crt_free(&ctx->ca_cert);
     mbedtls_ctr_drbg_free(&ctx->drbg);
     mbedtls_entropy_free(&ctx->entropy);
-    free(ctx);
+    kl_free(alloc, ctx, sizeof(*ctx));
     return NULL;
 }
 
@@ -525,5 +525,5 @@ void kl_tls_mbedtls_ctx_destroy(KlTlsCtx *raw_ctx)
     mbedtls_ctr_drbg_free(&ctx->drbg);
     mbedtls_entropy_free(&ctx->entropy);
 
-    free(ctx);
+    kl_free(ctx->alloc, ctx, sizeof(*ctx));
 }

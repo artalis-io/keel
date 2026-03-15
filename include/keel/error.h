@@ -55,6 +55,9 @@ typedef enum {
     /* Compression */
     KL_ERR_COMPRESS,        /**< Compression error */
 
+    /* Proxy */
+    KL_ERR_PROXY,           /**< Proxy CONNECT rejected or protocol error */
+
     KL_ERR__COUNT           /**< Sentinel — not an error code */
 } KlError;
 

@@ -1,5 +1,4 @@
 #include <keel/compress_miniz.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* miniz public API — included via -I$(MINIZ_DIR) */
@@ -8,7 +7,8 @@
 /* ── Internal context struct ─────────────────────────────────────── */
 
 typedef struct {
-    int level;  /* compression level 1-9 */
+    int          level;  /* compression level 1-9 */
+    KlAllocator *alloc;  /* allocator used to create this context */
 } KlMinizCtx;
 
 /* ── Internal session struct ─────────────────────────────────────── */
@@ -185,17 +185,21 @@ static void miniz_destroy(KlCompress *self) {
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-KlCompressCtx *kl_compress_miniz_ctx_create(int level) {
+KlCompressCtx *kl_compress_miniz_ctx_create(int level, KlAllocator *alloc) {
+    if (!alloc) return NULL;
     if (level < 1) level = 1;
     if (level > 9) level = 9;
-    KlMinizCtx *ctx = malloc(sizeof(*ctx));
+    KlMinizCtx *ctx = kl_malloc(alloc, sizeof(*ctx));
     if (!ctx) return NULL;
     ctx->level = level;
+    ctx->alloc = alloc;
     return (KlCompressCtx *)ctx;
 }
 
 void kl_compress_miniz_ctx_destroy(KlCompressCtx *ctx) {
-    free(ctx);
+    if (!ctx) return;
+    KlMinizCtx *mctx = (KlMinizCtx *)ctx;
+    kl_free(mctx->alloc, mctx, sizeof(*mctx));
 }
 
 /* cppcheck-suppress constParameterPointer ; signature must match KlCompressFactory typedef */

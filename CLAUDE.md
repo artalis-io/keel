@@ -6,8 +6,8 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 633 unit tests
-make examples     # build all 21 example programs (23 with TLS, 25 with compression)
+make test         # build and run all 644 unit tests
+make examples     # build all 22 example programs (24 with TLS, 26 with compression)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis
@@ -25,7 +25,7 @@ make clean        # remove all build artifacts
 - `parsers/` — Pluggable parser backends (`parser_llhttp.c`, `response_parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
-- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer, redirect_client, compress_server, decompress_client).
+- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer, redirect_client, proxy_client, compress_server, decompress_client).
   - Compression backend also provides decompression (`decompress_miniz.c`) for client-side use.
 - `docs/` — Architecture and roadmap documentation.
 
@@ -110,7 +110,8 @@ make clean        # remove all build artifacts
 | `KlUrl` | `url.h` | Parsed URL: is_https, host, port, path |
 | `KlClientHeader` | `client.h` | Request/response header: name, value |
 | `KlClientResponse` | `client.h` | Response: status, body, headers, allocator (by value) |
-| `KlClientConfig` | `client.h` | Client config: timeout_ms, max_response_size, TLS |
+| `KlProxyConfig` | `client.h` | Proxy config: host, port, auth (borrowed pointers) |
+| `KlClientConfig` | `client.h` | Client config: timeout_ms, max_response_size, TLS, proxy |
 | `KlClient` | `client.h` | Opaque async client handle |
 | `KlClientDoneFn` | `client.h` | Async completion callback |
 | `KlClientStreamCfg` | `client.h` | Per-request streaming config: response push callbacks + request pull callback |
@@ -130,7 +131,7 @@ make clean        # remove all build artifacts
 | `KlH2ClientHeader` | `h2_client.h` | Request/response header: name, value |
 | `KlH2ClientResponse` | `h2_client.h` | Accumulated stream response: status, headers, body |
 | `KlSse` | `sse.h` | SSE stream handle: write_fn + write_ctx + response (zero alloc) |
-| `KlError` | `error.h` | Diagnostic error enum: 24 codes (alloc, network, DNS, TLS, HTTP, redirect, event, thread, pipe) |
+| `KlError` | `error.h` | Diagnostic error enum: 25 codes (alloc, network, DNS, TLS, HTTP, redirect, proxy, event, thread, pipe) |
 | `KlTimerFn` | `timer.h` | Timer callback: `void (*)(void *user_data)` |
 | `KlTimerEntry` | `timer.h` | Timer heap entry: deadline_ms, cb, user_data, id |
 | `KlClientPool` | `client_pool.h` | Connection pool: flat array, idle timers, per-host limits |

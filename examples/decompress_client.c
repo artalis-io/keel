@@ -40,7 +40,7 @@ int main(void) {
     KlAllocator alloc = kl_allocator_default();
 
     /* Create shared gzip context (level 6 = default) */
-    KlCompressCtx *cctx = kl_compress_miniz_ctx_create(6);
+    KlCompressCtx *cctx = kl_compress_miniz_ctx_create(6, &alloc);
     if (!cctx) { fprintf(stderr, "compress ctx failed\n"); return 1; }
 
     /* ── 1. Compress data via vtable ───────────────────────────────── */

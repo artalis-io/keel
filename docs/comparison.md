@@ -35,7 +35,7 @@ A fact-based comparison of three embedded C HTTP libraries. Data gathered March 
 | **Backpressure** | Built-in write buffer (`KlDrain`) | None | None |
 | **Timers** | Built-in min-heap scheduling | No dedicated API | No dedicated API |
 | **Cosmopolitan C** | Supported (APE binaries) | Not supported | Not supported |
-| **Test density** | 633 tests (37 suites) for 12K LOC | ~4K LOC tests for 33K LOC | Fewer relative to size |
+| **Test density** | 644 tests (38 suites) for 12K LOC | ~4K LOC tests for 33K LOC | Fewer relative to size |
 | **Code size** | ~12K LOC — auditable in a day | ~33K LOC (includes TCP/IP stack, drivers) | ~19K LOC |
 
 ## Where Keel loses

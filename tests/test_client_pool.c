@@ -73,7 +73,7 @@ UTEST(cpool, acquire_empty_miss) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     KlClientPoolConn conn;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 80, 0, &conn), 1);
+    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 80, 0, NULL, 0, &conn), 1);
 
     kl_cpool_free(&pool);
 }
@@ -89,13 +89,13 @@ UTEST(cpool, release_then_acquire) {
 
     /* Release one end into the pool */
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0, NULL, 0), 0);
     ASSERT_EQ(kl_cpool_idle_count(&pool), 1);
-    ASSERT_EQ(kl_cpool_host_count(&pool, "example.com", 80, 0), 1);
+    ASSERT_EQ(kl_cpool_host_count(&pool, "example.com", 80, 0, NULL, 0), 1);
 
     /* Acquire — should hit */
     KlClientPoolConn acq;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 80, 0, &acq), 0);
+    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 80, 0, NULL, 0, &acq), 0);
     ASSERT_EQ(acq.reused, 1);
     ASSERT_EQ(acq.fd, fds[0]);
     ASSERT_EQ(kl_cpool_idle_count(&pool), 0);
@@ -114,10 +114,10 @@ UTEST(cpool, acquire_wrong_host) {
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn, "host-a.com", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &conn, "host-a.com", 80, 0, NULL, 0), 0);
 
     KlClientPoolConn acq;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "host-b.com", 80, 0, &acq), 1);  /* miss */
+    ASSERT_EQ(kl_cpool_acquire(&pool, "host-b.com", 80, 0, NULL, 0, &acq), 1);  /* miss */
 
     kl_cpool_free(&pool);
     close(fds[1]);
@@ -132,10 +132,10 @@ UTEST(cpool, acquire_wrong_port) {
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0, NULL, 0), 0);
 
     KlClientPoolConn acq;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 443, 0, &acq), 1);  /* miss */
+    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 443, 0, NULL, 0, &acq), 1);  /* miss */
 
     kl_cpool_free(&pool);
     close(fds[1]);
@@ -150,10 +150,10 @@ UTEST(cpool, acquire_wrong_tls) {
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 443, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 443, 0, NULL, 0), 0);
 
     KlClientPoolConn acq;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 443, 1, &acq), 1);  /* miss */
+    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 443, 1, NULL, 0, &acq), 1);  /* miss */
 
     kl_cpool_free(&pool);
     close(fds[1]);
@@ -173,11 +173,11 @@ UTEST(cpool, max_per_host_evicts_oldest) {
     /* Release 3 connections for same host (max_per_host=2) */
     for (int i = 0; i < 3; i++) {
         KlClientPoolConn conn = { .fd = fds[i][0], .tls = NULL, .reused = 0, ._entry = NULL };
-        ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0), 0);
+        ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0, NULL, 0), 0);
     }
 
     /* Only 2 should remain (oldest evicted) */
-    ASSERT_EQ(kl_cpool_host_count(&pool, "example.com", 80, 0), 2);
+    ASSERT_EQ(kl_cpool_host_count(&pool, "example.com", 80, 0, NULL, 0), 2);
     ASSERT_EQ(kl_cpool_idle_count(&pool), 2);
 
     for (int i = 0; i < 3; i++)
@@ -201,13 +201,13 @@ UTEST(cpool, pool_full_evicts_lru) {
     for (int i = 0; i < 2; i++) {
         snprintf(host, sizeof(host), "host%d.com", i);
         KlClientPoolConn conn = { .fd = fds[i][0], .tls = NULL, .reused = 0, ._entry = NULL };
-        ASSERT_EQ(kl_cpool_release(&pool, &conn, host, 80, 0), 0);
+        ASSERT_EQ(kl_cpool_release(&pool, &conn, host, 80, 0, NULL, 0), 0);
     }
     ASSERT_EQ(kl_cpool_idle_count(&pool), 2);
 
     /* Release one more — should evict oldest */
     KlClientPoolConn conn3 = { .fd = fds[2][0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn3, "host2.com", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &conn3, "host2.com", 80, 0, NULL, 0), 0);
     ASSERT_EQ(kl_cpool_idle_count(&pool), 2);
 
     for (int i = 0; i < 3; i++)
@@ -248,17 +248,17 @@ UTEST(cpool, idle_count) {
         ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds[i]), 0);
 
     KlClientPoolConn c1 = { .fd = fds[0][0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &c1, "a.com", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &c1, "a.com", 80, 0, NULL, 0), 0);
     ASSERT_EQ(kl_cpool_idle_count(&pool), 1);
-    ASSERT_EQ(kl_cpool_host_count(&pool, "a.com", 80, 0), 1);
+    ASSERT_EQ(kl_cpool_host_count(&pool, "a.com", 80, 0, NULL, 0), 1);
 
     KlClientPoolConn c2 = { .fd = fds[1][0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &c2, "b.com", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &c2, "b.com", 80, 0, NULL, 0), 0);
     ASSERT_EQ(kl_cpool_idle_count(&pool), 2);
 
     /* Acquire one */
     KlClientPoolConn acq;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "a.com", 80, 0, &acq), 0);
+    ASSERT_EQ(kl_cpool_acquire(&pool, "a.com", 80, 0, NULL, 0, &acq), 0);
     ASSERT_EQ(kl_cpool_idle_count(&pool), 1);
 
     /* Discard acquired */
@@ -281,14 +281,14 @@ UTEST(cpool, evict_expired) {
         ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds[i]), 0);
 
     KlClientPoolConn c1 = { .fd = fds[0][0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &c1, "a.com", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &c1, "a.com", 80, 0, NULL, 0), 0);
 
     /* Wait for expiry */
     usleep(5000);
 
     /* Release a second (fresh) one */
     KlClientPoolConn c2 = { .fd = fds[1][0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &c2, "b.com", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &c2, "b.com", 80, 0, NULL, 0), 0);
 
     int evicted = kl_cpool_evict_expired(&pool);
     ASSERT_TRUE(evicted >= 1);
@@ -311,7 +311,7 @@ UTEST(cpool, stale_detection) {
 
     /* Release one end */
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0, NULL, 0), 0);
 
     /* Close the other end (simulate server disconnect) */
     close(fds[1]);
@@ -319,7 +319,7 @@ UTEST(cpool, stale_detection) {
 
     /* Acquire should detect stale and return miss */
     KlClientPoolConn acq;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 80, 0, &acq), 1);
+    ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 80, 0, NULL, 0, &acq), 1);
     ASSERT_EQ(kl_cpool_idle_count(&pool), 0);
 
     kl_cpool_free(&pool);
@@ -339,7 +339,7 @@ UTEST(cpool, hostname_too_long) {
     long_host[sizeof(long_host) - 1] = '\0';
 
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn, long_host, 80, 0), -1);
+    ASSERT_EQ(kl_cpool_release(&pool, &conn, long_host, 80, 0, NULL, 0), -1);
 
     /* fd should be closed by discard inside release */
     close(fds[1]);
@@ -352,9 +352,9 @@ UTEST(cpool, acquire_null_args) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     KlClientPoolConn conn;
-    ASSERT_EQ(kl_cpool_acquire(NULL, "x", 80, 0, &conn), -1);
-    ASSERT_EQ(kl_cpool_acquire(&pool, NULL, 80, 0, &conn), -1);
-    ASSERT_EQ(kl_cpool_acquire(&pool, "x", 80, 0, NULL), -1);
+    ASSERT_EQ(kl_cpool_acquire(NULL, "x", 80, 0, NULL, 0, &conn), -1);
+    ASSERT_EQ(kl_cpool_acquire(&pool, NULL, 80, 0, NULL, 0, &conn), -1);
+    ASSERT_EQ(kl_cpool_acquire(&pool, "x", 80, 0, NULL, 0, NULL), -1);
 
     kl_cpool_free(&pool);
 }
@@ -371,7 +371,7 @@ UTEST(cpool, discard_null) {
 }
 
 UTEST(cpool, host_count_null) {
-    ASSERT_EQ(kl_cpool_host_count(NULL, "x", 80, 0), 0);
+    ASSERT_EQ(kl_cpool_host_count(NULL, "x", 80, 0, NULL, 0), 0);
     ASSERT_EQ(kl_cpool_idle_count(NULL), 0);
 }
 

@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **633 tests** (37 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **644 tests** (38 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -64,8 +64,9 @@ int main(void) {
 - **Server-Sent Events** — zero-alloc SSE framing (`kl_sse_event`, `kl_sse_comment`) over chunked streaming
 - **Response compression** — pluggable compression vtable; ships with miniz gzip backend
 - **Client decompression** — automatic `Content-Encoding: gzip` response decompression
-- **Client connection pool** — keep-alive reuse keyed by (host, port, is_tls) with idle timers
+- **Client connection pool** — keep-alive reuse keyed by (host, port, is_tls, proxy) with idle timers
 - **Redirect following** — automatic 3xx redirect with RFC 7231/7538 method transformation
+- **HTTP proxy** — HTTP forwarding (absolute-form URL) and HTTPS CONNECT tunneling through proxies
 - **Backpressure write buffer** — `KlDrain` buffers unsent data on would-block, flushes on write-readiness
 - **Timer scheduling** — one-shot timers on the event loop via min-heap
 - **Error diagnostics** — sqlite3-style per-struct error codes with `kl_strerror()`
