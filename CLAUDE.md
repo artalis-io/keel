@@ -8,6 +8,7 @@ make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
 make test         # build and run all 671 unit tests
 make examples     # build all 22 example programs (24 with TLS, 26 with compression)
+make bench        # build bench server + run 4-endpoint wrk benchmark suite
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis

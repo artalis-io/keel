@@ -38,8 +38,5 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install wrk
 
-      - name: Build
-        run: make ${{ matrix.backend }} && make examples ${{ matrix.backend }}
-
       - name: Benchmark
-        run: DURATION=5s CONNECTIONS=50 THREADS=2 PORT=9095 ./bench.sh
+        run: DURATION=5s CONNECTIONS=50 THREADS=2 PORT=9095 make bench ${{ matrix.backend }}

@@ -565,28 +565,29 @@ On Linux, use the [pledge polyfill](https://github.com/jart/pledge) (seccomp-bpf
 ## Benchmark
 
 ```bash
-./bench.sh              # automated: build, start server, warmup, wrk benchmark
+make bench              # build bench server, run 4 wrk benchmarks with latency
+JSON=1 make bench       # JSON output for CI/tooling
 ```
 
-Manual:
+The benchmark suite runs 4 endpoints against a dedicated bench server:
 
-```bash
-make examples
-./examples/hello_server &
-wrk -t4 -c100 -d10s http://localhost:8080/hello
-kill %1
-```
+| Endpoint | What it measures |
+|----------|-----------------|
+| `GET /hello` | **Baseline** — minimal JSON, no routing params, no middleware |
+| `GET /users/:id` | **Router** — param extraction + snprintf response |
+| `GET /mw/hello` | **Middleware** — same response through 2 pass-through middleware |
+| `POST /echo` | **Body reading** — KlBufReader + echo body back |
 
-Measured on a single thread, single core (Apple M-series):
+Sample results (Apple M1 Max, single thread, 100 connections, kqueue):
 
-| Metric | Value |
-|--------|-------|
-| Requests/sec | ~101,000 |
-| Avg latency | ~0.98ms |
-| Connections | 100 concurrent |
-| Transfer | ~13 MB/s |
+| Endpoint | Req/sec | Avg Latency | p99 |
+|----------|---------|-------------|-----|
+| `GET /hello` (baseline) | 111,650 | 0.89ms | 1.13ms |
+| `GET /users/42` (route params) | 109,112 | 0.91ms | 1.15ms |
+| `GET /mw/hello` (middleware chain) | 111,247 | 0.89ms | 1.14ms |
+| `POST /echo` (body reading) | 109,370 | 0.90ms | 1.15ms |
 
-No GC pauses. No goroutine scheduling. No async runtime overhead. Just `epoll_wait` → `read` → `write`.
+Route params, middleware, and body reading add no measurable overhead — all within ~2% of the baseline. No GC pauses. No goroutine scheduling. No async runtime overhead. Just `kqueue` → `read` → `write`.
 
 ## Platform Support
 
@@ -674,7 +675,7 @@ The tradeoff is real — C has no borrow checker, no bounds-checked slices, no R
 - `pledge()`/`unveil()` sandboxing, `-D_FORTIFY_SOURCE=2 -fstack-protector-strong`
 - Pluggable allocator for arena/pool strategies with deterministic cleanup
 
-This is adequate for a focused ~12K LOC library with thorough testing, but it's not a language-level guarantee. If you're evaluating Keel and memory safety is your primary concern, that's a legitimate reason to look elsewhere.
+This is adequate for a focused ~14K LOC library with thorough testing, but it's not a language-level guarantee. If you're evaluating Keel and memory safety is your primary concern, that's a legitimate reason to look elsewhere.
 
 ## Not in Scope
 
@@ -707,7 +708,7 @@ Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparis
 | | Keel | [Mongoose](https://github.com/cesanta/mongoose) | [GNU libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/) |
 |---|------|----------|---------------|
 | **License** | MIT | GPLv2 / Commercial | LGPLv2.1+ |
-| **LOC** | ~12K | ~33K | ~19K |
+| **LOC** | ~14K | ~33K | ~19K |
 | **Architecture** | 31 independent modules | Monolithic amalgam | Monolithic |
 | **Maturity** | New (2025–2026) | 20+ years (NASA, Siemens, Samsung) | GNU project, 18+ years (NASA, Sony, systemd) |
 | **HTTP/2** | Server + client | No | No |
