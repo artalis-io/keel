@@ -27,6 +27,7 @@
 #include <keel/thread_pool.h>
 #include <keel/url.h>
 #include <keel/resolver.h>
+#include <keel/resolver_cache.h>
 #include <keel/client.h>
 #include <keel/client_pool.h>
 #include <keel/redirect.h>

@@ -6,7 +6,7 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 644 unit tests
+make test         # build and run all 660 unit tests
 make examples     # build all 22 example programs (24 with TLS, 26 with compression)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
@@ -31,7 +31,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-30 orthogonal modules, each independently testable:
+31 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -63,6 +63,7 @@ make clean        # remove all build artifacts
 28. **decompress** — Pluggable response decompression vtable: single-shot buffer + streaming, with KlDecompressConfig on KlClientConfig for client-side use
 29. **drain** — Backpressure write buffer: buffers unsent data on would-block, flushes on write-readiness, with on_drain callback and max_size cap
 30. **file_io** — Pluggable async file I/O vtable: submit/cancel/tick lifecycle, io_uring backend for true async reads (non-TLS file responses)
+31. **resolver_cache** — Caching DNS resolver decorator: wraps any KlResolver, caches successful results with configurable TTL/capacity, transparent to consumers
 
 **Deliberate design choices:**
 
@@ -153,6 +154,7 @@ make clean        # remove all build artifacts
 | `KlDrainCb` | `drain.h` | Drain callback: `void (*)(void *ctx)` |
 | `KlFileIO` | `file_io.h` | Pluggable async file I/O vtable: submit, cancel, tick, destroy |
 | `KlFileIOResult` | `file_io.h` | File I/O completion result: udata + bytes read |
+| `KlResolverCacheConfig` | `resolver_cache.h` | Cache config: ttl_ms, capacity |
 
 ## Git
 

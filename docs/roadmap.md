@@ -8,10 +8,10 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 
 ### Strengths
 
-- **Architecture**: 30 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
+- **Architecture**: 31 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
-- **Testing**: 38 suites, 644 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
+- **Testing**: 39 suites, 660 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
 - **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
 
 ### Correctness Issues
@@ -226,9 +226,9 @@ Linux `MSG_ZEROCOPY` for `send(2)` avoids copying response data from userspace t
 
 Use eBPF `SO_REUSEPORT` programs to steer connections to specific threads/cores based on request characteristics. Enables CPU affinity without application-level load balancing.
 
-### DNS caching
+### ~~DNS caching~~ (Done)
 
-`getaddrinfo()` is called per-request when no `KlResolver` is configured. The OS usually caches, but an explicit cache with TTL would help high-frequency client workloads. A caching resolver implementation could wrap the existing `KlResolver` vtable — intercept `resolve()` calls, check cache, and only delegate to the underlying resolver on miss.
+Implemented in `resolver_cache.h` / `resolver_cache.c`. Decorator pattern wrapping any `KlResolver` vtable. Flat-array cache keyed by `(host, port)` with configurable TTL (default 60s) and capacity (default 64). Cache hits call `done_fn` synchronously; misses delegate to the inner resolver and store on completion. Errors are never cached. Eviction policy: expired first, then closest-to-expiry. `kl_resolver_cache_clear()` and `kl_resolver_cache_count()` for management. 13 tests.
 
 ### WebSocket compression (RFC 7692)
 
