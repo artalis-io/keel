@@ -1,9 +1,16 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <keel/file_io.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <string.h>
 #include <unistd.h>
 #include "iouring_internal.h"
+
+#ifndef SPLICE_F_NONBLOCK
+#define SPLICE_F_NONBLOCK 0x02
+#endif
 
 /* Per-socket slot tracking splice state and pipe lifecycle */
 typedef struct {
