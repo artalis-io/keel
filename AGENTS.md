@@ -135,7 +135,7 @@ Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Mak
 4. Add `#include <keel/<module>.h>` to `include/keel/keel.h`
 5. Prefix all public functions with `kl_<module>_`
 6. Write tests: `tests/test_<module>.c`
-7. Update module count (currently 29) in `README.md` and `CLAUDE.md`
+7. Update module count (currently 30) in `README.md` and `CLAUDE.md`
 
 ## Adding a New Body Reader
 

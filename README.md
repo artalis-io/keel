@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **613 tests** (35 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **633 tests** (37 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -77,7 +77,7 @@ int main(void) {
 
 ## Architecture
 
-29 orthogonal modules, each independently testable:
+30 orthogonal modules, each independently testable:
 
 | Module | Header | Description |
 |--------|--------|-------------|
@@ -112,6 +112,7 @@ int main(void) {
 | **compress** | `compress.h` | Pluggable response compression vtable (buffer + streaming) |
 | **decompress** | `decompress.h` | Pluggable response decompression vtable (client-side) |
 | **drain** | `drain.h` | Backpressure write buffer with on_drain callback |
+| **file_io** | `file_io.h` | Pluggable async file I/O vtable (io_uring backend) |
 
 **Deliberate design choices:**
 
@@ -602,7 +603,7 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 
 ## Testing
 
-613 tests across 35 test suites, covering every module:
+633 tests across 37 test suites, covering every module (640 tests on io_uring builds):
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -621,6 +622,8 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 | `test_error` | 11 | Error codes, kl_strerror, per-struct error storage |
 | `test_event` | 8 | Event loop init/close, add/wait, del, multiple FDs, timeout, mod mask |
 | `test_event_ctx` | 7 | Standalone event context init/free, watcher lifecycle, dispatch helpers |
+| `test_file_io` | 11 | Async file I/O vtable: mock submit/cancel/tick, state machine, EAGAIN, TLS fallback |
+| `test_file_io_iouring` | 7 | io_uring integration: real IORING_OP_READ submissions, CQE routing, offset/EOF (io_uring builds only) |
 | `test_h2` | 29 | HTTP/2 sessions, streams, routing, ALPN, goaway, body limits |
 | `test_h2_client` | 18 | Mock session vtable, stream tracking, response free, API validation |
 | `test_integration` | 27 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
@@ -711,7 +714,7 @@ Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparis
 |---|------|----------|---------------|
 | **License** | MIT | GPLv2 / Commercial | LGPLv2.1+ |
 | **LOC** | ~12K | ~33K | ~19K |
-| **Architecture** | 29 independent modules | Monolithic amalgam | Monolithic |
+| **Architecture** | 30 independent modules | Monolithic amalgam | Monolithic |
 | **Maturity** | New (2025–2026) | 20+ years (NASA, Siemens, Samsung) | GNU project, 18+ years (NASA, Sony, systemd) |
 | **HTTP/2** | Server + client | No | No |
 | **Event backends** | epoll, kqueue, io_uring, poll | select/poll only | select, poll, epoll |
