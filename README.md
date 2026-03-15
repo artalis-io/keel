@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **664 tests** (40 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **671 tests** (41 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -608,7 +608,7 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 
 ## Testing
 
-664 tests across 40 test suites, covering every module (671 on io_uring builds):
+671 tests across 41 test suites, covering every module (678 on io_uring builds):
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -622,18 +622,20 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 | `test_compress` | 16 | Compression vtable, buffer + streaming, miniz gzip backend |
 | `test_connection` | 12 | Pool init, acquire/release, exhaustion, active count, state machine, monotonic clock |
 | `test_cors` | 17 | Config, origin whitelist, wildcard, preflight, credentials, middleware |
+| `test_cross_module` | 7 | Cross-module integration: compress+drain, TLS+async, middleware+body+async, resolver cache, TLS+middleware+compress, stats during load |
 | `test_decompress` | 14 | Decompression vtable, gzip one-shot + streaming, CRC/ISIZE verification |
-| `test_drain` | 19 | Backpressure buffer: passthrough, partial, EAGAIN, flush, on_drain, max_size, overreport |
+| `test_drain` | 28 | Backpressure buffer: passthrough, partial, EAGAIN, flush, on_drain, max_size, overreport |
 | `test_error` | 11 | Error codes, kl_strerror, per-struct error storage |
 | `test_event` | 8 | Event loop init/close, add/wait, del, multiple FDs, timeout, mod mask |
 | `test_event_ctx` | 7 | Standalone event context init/free, watcher lifecycle, dispatch helpers |
-| `test_file_io` | 11 | Async file I/O vtable: mock submit/cancel/tick, state machine, EAGAIN, TLS fallback |
+| `test_file_io` | 14 | Async file I/O vtable: mock submit/cancel/tick, state machine, EAGAIN, TLS fallback |
 | `test_file_io_iouring` | 7 | io_uring integration: real IORING_OP_READ submissions, CQE routing, offset/EOF (io_uring builds only) |
 | `test_h2` | 29 | HTTP/2 sessions, streams, routing, ALPN, goaway, body limits |
 | `test_h2_client` | 18 | Mock session vtable, stream tracking, response free, API validation |
 | `test_integration` | 27 | Full server: hello, POST, keepalive, multipart, chunked, middleware |
 | `test_overflow` | 20 | Integer overflow guards across all modules |
 | `test_parser` | 9 | GET, POST, query strings, incomplete, reset, chunked TE |
+| `test_proxy` | 11 | HTTP proxy: forwarding, CONNECT tunnel, auth, async proxy states, pool keying |
 | `test_redirect` | 33 | 3xx redirect following, method transform, cross-origin auth strip, pooled |
 | `test_request` | 14 | Header case-insensitive lookup, params, query strings, empty/missing values |
 | `test_response` | 24 | Status, headers, body, JSON, error, streaming, sendfile, compression |
@@ -661,33 +663,18 @@ make cppcheck           # cppcheck static analysis
 
 ## Why C
 
-**The attack surface is the network.** An HTTP server processes untrusted bytes from the internet through a parser (llhttp) into application handlers. We address this with defense-in-depth rather than language-level guarantees:
+An HTTP server at this level is mostly syscalls, pointer arithmetic, and state machines. C is a natural fit: direct `writev`/`sendfile`/`epoll_wait` access, zero-copy pointers into read buffers, explicit memory layout, no runtime. One vendored dependency (llhttp), 2-second clean builds, runs on everything from io_uring to bare-metal MCUs.
 
-- `pledge()`/`unveil()` sandboxing — lock down syscalls and filesystem after binding the socket, before entering the event loop
-- `-D_FORTIFY_SOURCE=2 -fstack-protector-strong` — compile-time and runtime buffer overflow detection
-- AddressSanitizer + UBSan in debug builds
-- Clang static analyzer (`make analyze`) and cppcheck (`make cppcheck`) for compile-time bug detection
-- libFuzzer fuzz testing (`make fuzz`) on the HTTP parser and multipart parser — the primary attack surface
-- Pre-allocated connection pool — no per-request `malloc`, no fragmentation, no OOM under load
-- All inputs bounds-checked at system boundaries (read buffer limits, header count limits)
-- Integer overflow guards (`SIZE_MAX/2`, `INT_MAX/2` checks) on all arithmetic
-- Pluggable allocator — swap in an arena allocator per-request for deterministic cleanup
+The tradeoff is real — C has no borrow checker, no bounds-checked slices, no RAII. We compensate with defense-in-depth:
 
-**Why not Rust?** Rust's safety guarantees are real, and for a large-team, high-churn codebase they pay off. For a focused library with ~12K LOC and one or two authors:
+- Pre-allocated connection pool (no per-request `malloc`, no fragmentation)
+- `SIZE_MAX/2` overflow guards on all arithmetic, bounds checks at system boundaries
+- ASan + UBSan in debug builds, Clang static analyzer + cppcheck in CI
+- libFuzzer on the HTTP parser and multipart parser (the primary attack surface)
+- `pledge()`/`unveil()` sandboxing, `-D_FORTIFY_SOURCE=2 -fstack-protector-strong`
+- Pluggable allocator for arena/pool strategies with deterministic cleanup
 
-- *The hot path is FFI.* The HTTP parser is llhttp — a C library. Every request crosses an `unsafe` boundary. You get Rust's borrow checker overhead without Rust's safety guarantees where the actual parsing happens.
-- *Self-referential request structs.* `KlRequest` holds pointers into the connection's read buffer. This is one line of C; in Rust it's a lifetime annotation project or a `Pin<Box<>>` adventure.
-- *Zero-copy response streaming.* The write callback passes raw `(ctx, data, len)` through to `write(2)`. No intermediate `Vec<u8>`, no `String`, no `Arc<Mutex<>>`. The streaming interface is 3 lines of C. In Rust, safely sharing the socket fd between the response builder and the caller's streaming writer requires careful lifetime management that adds complexity without adding safety — the fd is valid for the connection's lifetime, period.
-- *Cargo supply chain.* A Rust HTTP server pulls tokio, hyper, http, bytes, pin-project, mio — 100+ transitive crates. KEEL vendors exactly one dependency (llhttp, 4 files you can read in an afternoon).
-- *Build time.* Clean build: under 2 seconds. A comparable Rust project: 30–90 seconds.
-
-**Why not Go?** Go's goroutine-per-connection model is elegant but fundamentally different. KEEL's single-threaded event loop with edge-triggered epoll/kqueue gives predictable latency and zero GC pauses. Go's GC alone can exceed the per-request budget of a sub-microsecond JSON response. No manual memory layout control, no zero-copy sendfile, no pluggable allocator.
-
-**Why not C++?** Everything C gives you here but with a language that fights simplicity. The connection state machine is a clean `enum` + `switch`. In C++ someone would reach for `std::variant<State1, State2, ...>` with `std::visit` or a template-based state machine library. The router is a flat array scan with `memcmp`. In C++ it becomes `std::unordered_map<std::string, std::function<void(...)>>` with heap allocations on every lookup. Both objectively worse for this domain.
-
-**Why not Zig?** Zig's explicit allocators and `comptime` are genuinely appealing — the allocator interface in KEEL is essentially Zig's `std.mem.Allocator` in C. For a new project not needing battle-tested HTTP parsing, Zig would be a strong choice. But llhttp doesn't have a Zig-native equivalent yet, and Zig's ecosystem for production networking (TLS, HTTP/2) isn't there.
-
-**Why not C# / Java / Python?** Managed runtimes are the wrong abstraction for a library that needs to control every byte and syscall. KEEL's connection pool is a flat array with zero per-request allocation. Its response path goes straight from a user buffer to `writev(2)` or `sendfile(2)` — no managed heap, no GC, no object headers. A C# `Span<byte>` or Java `ByteBuffer` gets close but still lives inside a runtime that owns your threads, your memory layout, and your syscall surface. Python is ~100x slower for raw I/O dispatch and adds a GIL. These languages are excellent for application code *on top* of an HTTP server — they're the wrong tool for building the server itself.
+This is adequate for a focused ~12K LOC library with thorough testing, but it's not a language-level guarantee. If you're evaluating Keel and memory safety is your primary concern, that's a legitimate reason to look elsewhere.
 
 ## Not in Scope
 

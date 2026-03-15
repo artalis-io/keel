@@ -274,7 +274,7 @@ The factory is called once per connection slot at server init. Each `KlTls` sess
 All of these should pass cleanly before merging:
 
 ```bash
-make test               # 664 unit + integration tests (40 suites)
+make test               # 671 unit + integration tests (41 suites)
 make debug-test         # ASan + UBSan (catches memory errors, undefined behavior)
 make analyze            # Clang static analyzer via scan-build
 make cppcheck           # cppcheck static analysis
