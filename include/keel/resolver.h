@@ -42,6 +42,13 @@ struct KlResolver {
      * Start async name resolution. Must not block.
      * Returns a KlResolveReq handle (resolver-owned), or NULL on error.
      * Calls done_fn on the event loop thread when resolution completes.
+     *
+     * Sync completion: resolve() MAY call done_fn synchronously (inside
+     * the call, before returning).  Decorators that wrap another resolver
+     * must handle this — the inner resolver's done_fn may fire before
+     * inner->resolve() returns.  Use an in_resolve/completed sentinel
+     * to detect sync completion and defer freeing the per-request handle.
+     * See resolver_cache.c for the canonical implementation of this pattern.
      */
     KlResolveReq *(*resolve)(KlResolver *self, KlEventCtx *ctx,
                               const char *host, int port,

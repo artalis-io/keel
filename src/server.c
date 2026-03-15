@@ -661,6 +661,22 @@ void kl_server_stop(KlServer *s) {
     }
 }
 
+void kl_server_stats(const KlServer *s, KlServerStats *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!s) return;
+
+    out->active_connections = s->pool.active_count;
+    out->max_connections    = s->pool.capacity;
+    out->listen_paused      = s->listen_paused;
+
+    /* Count suspended connections by walking the async ops list */
+    int suspended = 0;
+    for (const KlAsyncOp *op = s->async_ops; op; op = op->next)
+        suspended++;
+    out->async_suspended = suspended;
+}
+
 void kl_server_free(KlServer *s) {
     /* Cancel all active async ops */
     while (s->async_ops) {

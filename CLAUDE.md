@@ -6,7 +6,7 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 660 unit tests
+make test         # build and run all 664 unit tests
 make examples     # build all 22 example programs (24 with TLS, 26 with compression)
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
@@ -70,6 +70,9 @@ make clean        # remove all build artifacts
 - **Single-threaded event loop** — Same model as Node.js, Redis, Nginx (per-worker). No mutexes, no data races. `KlThreadPool` offloads blocking work; multi-core scaling is horizontal via `SO_REUSEPORT`.
 - **O(n) router** — Linear scan over routes. A `memcmp` scan over even hundreds of routes costs nanoseconds, invisible next to network I/O. A trie would add complexity for no measurable gain.
 - **O(n) timeout sweep** — Iterates all connection slots once per tick. At default `max_connections=256`, this fits in L1 cache. Not worth optimizing.
+- **No built-in 503 / load shedding** — `kl_server_stats()` exposes connection counts so users can implement load shedding as middleware. Policy decisions (thresholds, Retry-After values) belong in application code, not the framework.
+- **No global memory monitoring** — The allocator is pluggable, so the framework can't reliably track total memory. OS-level OOM handling is the right layer. Existing per-resource caps (`max_body_size`, `max_header_size`, `KlDrain.max_size`) bound the main vectors.
+- **Resolver sync-completion contract** — `KlResolver.resolve()` may call `done_fn` synchronously. Decorators handle this via an `in_resolve`/`completed` sentinel pattern (see `resolver_cache.c`). This is inherent to sync-completion-capable vtables and documented rather than architecturally changed.
 
 ## Key Types
 
@@ -155,6 +158,7 @@ make clean        # remove all build artifacts
 | `KlFileIO` | `file_io.h` | Pluggable async file I/O vtable: submit, cancel, tick, destroy |
 | `KlFileIOResult` | `file_io.h` | File I/O completion result: udata + bytes read |
 | `KlResolverCacheConfig` | `resolver_cache.h` | Cache config: ttl_ms, capacity |
+| `KlServerStats` | `server.h` | Read-only server load snapshot: active_connections, max_connections, async_suspended, listen_paused |
 
 ## Git
 

@@ -4,7 +4,7 @@
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **644 tests** (38 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **664 tests** (40 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -70,7 +70,8 @@ int main(void) {
 - **Backpressure write buffer** — `KlDrain` buffers unsent data on would-block, flushes on write-readiness
 - **Timer scheduling** — one-shot timers on the event loop via min-heap
 - **Error diagnostics** — sqlite3-style per-struct error codes with `kl_strerror()`
-- **Pluggable DNS resolver** — bring your own async DNS (c-ares, thread-pool wrapper)
+- **Pluggable DNS resolver** — bring your own async DNS (c-ares, thread-pool wrapper), with caching decorator
+- **Server load introspection** — `kl_server_stats()` for connection counts, enabling user-space load-shedding middleware
 - **Pre-allocated connection pool** — no per-request malloc, no fragmentation under load
 - **Pluggable allocator** — bring your own arena/pool/tracking allocator
 - **pledge/unveil sandboxing** — init/run split makes syscall lockdown natural
@@ -78,7 +79,7 @@ int main(void) {
 
 ## Architecture
 
-30 orthogonal modules, each independently testable:
+31 orthogonal modules, each independently testable:
 
 | Module | Header | Description |
 |--------|--------|-------------|
@@ -114,12 +115,15 @@ int main(void) {
 | **decompress** | `decompress.h` | Pluggable response decompression vtable (client-side) |
 | **drain** | `drain.h` | Backpressure write buffer with on_drain callback |
 | **file_io** | `file_io.h` | Pluggable async file I/O vtable (io_uring backend) |
+| **resolver_cache** | `resolver_cache.h` | Caching DNS resolver decorator with configurable TTL/capacity |
 
 **Deliberate design choices:**
 
 - **Single-threaded event loop** — Same model as Node.js, Redis, Nginx (per-worker), and Python asyncio. No mutexes, no lock contention, no data races — the entire connection state machine is lock-free by construction. `KlThreadPool` offloads blocking work to workers; multi-core scaling is horizontal via `SO_REUSEPORT` with multiple processes.
 - **O(n) router** — Linear scan over routes per request. A `memcmp` scan over even hundreds of routes costs nanoseconds, invisible next to network I/O syscalls. A trie or radix tree would add complexity to param extraction and middleware pattern matching for no measurable gain.
 - **O(n) timeout sweep** — Iterates all connection slots once per event loop tick. At `max_connections` = 256 (default), this is a tight loop over a contiguous array well within L1 cache.
+- **No built-in 503 / load shedding** — `kl_server_stats()` exposes connection counts for user-space middleware to make load-shedding decisions. Thresholds and `Retry-After` policy belong in application code, not the framework.
+- **No global memory monitoring** — The allocator is pluggable, so the framework can't reliably track total memory. Existing per-resource caps (`max_body_size`, `max_header_size`, `KlDrain.max_size`) bound the main vectors; OS-level OOM handling covers the rest.
 
 ## Request Body Handling
 
@@ -604,7 +608,7 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 
 ## Testing
 
-633 tests across 37 test suites, covering every module (640 tests on io_uring builds):
+664 tests across 40 test suites, covering every module (671 on io_uring builds):
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -636,6 +640,8 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 | `test_response_parser` | 10 | HTTP response parsing, chunked, headers, body limits, malformed |
 | `test_router` | 27 | Exact match, params, 404, 405, wildcard, middleware chain |
 | `test_server_integration` | 6 | Pool exhaustion, backpressure recovery, concurrent requests, drain |
+| `test_server_stats` | 4 | Server stats: initial, active count, max connections, null safety |
+| `test_resolver_cache` | 13 | DNS cache: hit/miss, TTL expiry, eviction, cancel, error non-caching |
 | `test_sse` | 7 | SSE framing: event, data, id, comment, multiline, begin/end |
 | `test_thread_pool` | 12 | Create/free, submit, backpressure, FIFO ordering, multi-worker, shutdown, stress |
 | `test_timeout` | 8 | Idle, partial headers, partial body, active connections, body timeout, keepalive idle, concurrent |
@@ -715,7 +721,7 @@ Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparis
 |---|------|----------|---------------|
 | **License** | MIT | GPLv2 / Commercial | LGPLv2.1+ |
 | **LOC** | ~12K | ~33K | ~19K |
-| **Architecture** | 30 independent modules | Monolithic amalgam | Monolithic |
+| **Architecture** | 31 independent modules | Monolithic amalgam | Monolithic |
 | **Maturity** | New (2025–2026) | 20+ years (NASA, Siemens, Samsung) | GNU project, 18+ years (NASA, Sony, systemd) |
 | **HTTP/2** | Server + client | No | No |
 | **Event backends** | epoll, kqueue, io_uring, poll | select/poll only | select, poll, epoll |
@@ -727,7 +733,7 @@ Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparis
 | **Threading** | Single-threaded + thread pool | Single-threaded | 4 modes incl. thread-per-connection |
 | **Bare-metal MCU** | Via lwIP/picoTCP (BSD sockets) | Built-in TCP/IP stack | Requires OS networking |
 | **Cosmopolitan C** | Supported (APE binaries) | No | No |
-| **Tests** | 613 (35 suites) | ~4K LOC tests | Fewer relative to size |
+| **Tests** | 664 (40 suites) | ~4K LOC tests | Fewer relative to size |
 
 **Choose Keel** when you want MIT licensing, HTTP/2, a built-in router/middleware/client, and pluggable everything. **Choose Mongoose** when you're targeting bare-metal MCUs with no OS, need a built-in TCP/IP stack, or need battle-tested maturity. **Choose libmicrohttpd** when you need multi-threaded request handling, independently audited security, or wide distro packaging.
 

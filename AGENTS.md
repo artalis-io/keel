@@ -79,6 +79,18 @@ KEEL's event loop is single-threaded. The `KlThreadPool` module introduces worke
 - Integration tests that use threads properly synchronize server start/stop
 - No `static` mutable variables in any module (except test files)
 
+### Graceful degradation
+
+- **No built-in 503**: `kl_server_stats()` exposes `active_connections` / `max_connections` / `async_suspended` / `listen_paused` — users implement load shedding as middleware (threshold, `Retry-After`, etc. are policy decisions)
+- **No global memory monitoring**: allocator is pluggable, so the framework can't reliably track total memory; existing caps (`max_body_size`, `max_header_size`, `KlDrain.max_size`) bound the main vectors
+- **No automatic 503 or adaptive load shedding**: too opinionated for a transport library; users know their workload
+
+### Resolver sync-completion pattern
+
+- `KlResolver.resolve()` may call `done_fn` synchronously before returning
+- Decorators (e.g. `resolver_cache.c`) use `in_resolve`/`completed` sentinel flags to detect sync completion and defer freeing the per-request handle
+- This is the canonical pattern — any new resolver decorator must replicate it
+
 ## Testing Requirements
 
 ### Coverage expectations
@@ -138,7 +150,7 @@ Add the test file as `tests/test_<module>.c` — it's auto-discovered by the Mak
 4. Add `#include <keel/<module>.h>` to `include/keel/keel.h`
 5. Prefix all public functions with `kl_<module>_`
 6. Write tests: `tests/test_<module>.c`
-7. Update module count (currently 30) in `README.md` and `CLAUDE.md`
+7. Update module count (currently 31) in `README.md` and `CLAUDE.md`
 
 ## Adding a New Body Reader
 
@@ -262,7 +274,7 @@ The factory is called once per connection slot at server init. Each `KlTls` sess
 All of these should pass cleanly before merging:
 
 ```bash
-make test               # 644 unit + integration tests (38 suites)
+make test               # 664 unit + integration tests (40 suites)
 make debug-test         # ASan + UBSan (catches memory errors, undefined behavior)
 make analyze            # Clang static analyzer via scan-build
 make cppcheck           # cppcheck static analysis

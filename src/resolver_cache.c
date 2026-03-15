@@ -36,6 +36,23 @@ typedef struct KlResolverCache {
 
 /* ── Per-request handle ──────────────────────────────────────────── */
 
+/*
+ * Sync-completion sentinel pattern:
+ *
+ * The inner resolver's resolve() may call done_fn synchronously (before
+ * returning).  When this happens, inner_done_fn fires while we're still
+ * inside cache_resolve.  Without guards, inner_done_fn would free the
+ * KlResCacheReq while cache_resolve still holds a pointer to it.
+ *
+ * Solution: cache_resolve sets in_resolve=1 before calling inner->resolve
+ * and clears it after.  inner_done_fn checks in_resolve:
+ *   - If 1 (sync): sets completed=1 and does NOT free — cache_resolve
+ *     will see completed and knows the callback already fired.
+ *   - If 0 (async): frees the request — it's unreferenced after callback.
+ *
+ * This is the canonical pattern for decorators wrapping a KlResolver.
+ * Any new decorator that forwards to an inner resolver must replicate it.
+ */
 typedef struct {
     KlResolveReq     base;
     KlResolveReq    *inner_req;   /* NULL if cache hit */

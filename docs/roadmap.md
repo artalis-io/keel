@@ -11,7 +11,7 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 - **Architecture**: 31 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
-- **Testing**: 39 suites, 660 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
+- **Testing**: 40 suites, 664 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, 4 fuzz targets.
 - **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
 
 ### Correctness Issues
@@ -229,6 +229,14 @@ Use eBPF `SO_REUSEPORT` programs to steer connections to specific threads/cores 
 ### ~~DNS caching~~ (Done)
 
 Implemented in `resolver_cache.h` / `resolver_cache.c`. Decorator pattern wrapping any `KlResolver` vtable. Flat-array cache keyed by `(host, port)` with configurable TTL (default 60s) and capacity (default 64). Cache hits call `done_fn` synchronously; misses delegate to the inner resolver and store on completion. Errors are never cached. Eviction policy: expired first, then closest-to-expiry. `kl_resolver_cache_clear()` and `kl_resolver_cache_count()` for management. 13 tests.
+
+### ~~Resolver sync-completion documentation~~ (Done)
+
+Documented the `KlResolver.resolve()` sync-completion contract: `resolve()` may call `done_fn` synchronously before returning. Decorators must use an `in_resolve`/`completed` sentinel pattern to handle this safely. `resolver_cache.c` serves as the canonical implementation with a detailed block comment explaining the pattern. `resolver.h` doc comment updated.
+
+### ~~Server stats for load introspection~~ (Done)
+
+`KlServerStats` struct and `kl_server_stats()` function in `server.h` / `server.c`. Zero-overhead read-only snapshot: `active_connections`, `max_connections`, `async_suspended`, `listen_paused`. Enables user-space load-shedding middleware (503 Service Unavailable) without baking policy into the framework core. NULL-safe. 4 tests.
 
 ### WebSocket compression (RFC 7692)
 

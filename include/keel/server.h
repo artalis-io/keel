@@ -149,4 +149,22 @@ void kl_server_stop(KlServer *s);
 /** @brief Free all server resources (pool, router, event loop). */
 void kl_server_free(KlServer *s);
 
+/**
+ * Server load statistics — read-only snapshot for load-shedding decisions.
+ * All fields are populated from existing server state (zero overhead).
+ */
+typedef struct {
+    int active_connections;    /**< Currently active connection slots */
+    int max_connections;       /**< Configured pool capacity */
+    int async_suspended;       /**< Connections in async suspend */
+    int listen_paused;         /**< 1 if listener paused (pool full) */
+} KlServerStats;
+
+/**
+ * @brief Populate a stats snapshot from current server state.
+ * @param s    Server instance (may be NULL — zeroes out).
+ * @param out  Output struct (may be NULL — no-op).
+ */
+void kl_server_stats(const KlServer *s, KlServerStats *out);
+
 #endif
