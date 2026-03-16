@@ -9,14 +9,16 @@ on:
     - cron: '0 3 * * 3'
 
 permissions:
-  security-events: write
-  actions: read
   contents: read
 
 jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write
+      actions: read
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
