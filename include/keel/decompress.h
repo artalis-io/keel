@@ -76,7 +76,7 @@ typedef KlDecompress *(*KlDecompressFactory)(KlCompressCtx *ctx,
  *
  * Shares KlCompressCtx with KlCompressConfig for algorithm configuration.
  */
-typedef struct {
+typedef struct KlDecompressConfig {
     KlCompressCtx       *ctx;         /**< Shared context — user-owned */
     KlDecompressFactory  factory;     /**< Creates per-operation KlDecompress */
     void (*ctx_destroy)(KlCompressCtx *ctx);  /**< Optional cleanup */

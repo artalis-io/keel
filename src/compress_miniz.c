@@ -4,6 +4,9 @@
 /* miniz public API — included via -I$(MINIZ_DIR) */
 #include <miniz.h>
 
+/* miniz defines 'compress' as a macro → conflicts with vtable field name */
+#undef compress
+
 /* ── Internal context struct ─────────────────────────────────────── */
 
 typedef struct {
@@ -54,7 +57,7 @@ static int miniz_compress(KlCompress *self, const char *in, size_t in_len,
     KlMinizSession *s = (KlMinizSession *)self;
 
     /* Output: 10 (header) + compress_bound + 8 (trailer) */
-    size_t bound = tdefl_compress_bound(in_len);
+    size_t bound = (size_t)mz_compressBound((mz_ulong)in_len);
     if (bound > SIZE_MAX / 2) return -1;
     size_t buf_size = 10 + bound + 8;
     char *buf = kl_malloc(alloc, buf_size);

@@ -78,7 +78,7 @@ typedef KlCompress *(*KlCompressFactory)(KlCompressCtx *ctx,
 /**
  * @brief Compression configuration for KlConfig.
  */
-typedef struct {
+typedef struct KlCompressConfig {
     KlCompressCtx     *ctx;         /**< Shared context — user-owned */
     KlCompressFactory  factory;     /**< Creates per-operation KlCompress */
     void (*ctx_destroy)(KlCompressCtx *ctx);  /**< Optional cleanup */
