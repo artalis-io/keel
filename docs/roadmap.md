@@ -1,34 +1,43 @@
 # KEEL — Roadmap
 
-Future direction and design considerations for keel.
+## v1.0.0 (March 2026)
 
-## Assessment (March 2026)
+### Status
 
-Keel is **~80% production-ready for embedded/edge workloads**. The architecture, module design, and security posture are professional-grade. The test coverage (11K+ lines of tests vs 9.4K of implementation, 1.2:1 ratio) is well above average for C projects this size. The critical correctness issues identified in the initial assessment have been fixed. What remains is filling feature gaps and hardening the last mile.
+Keel is **production-ready for embedded/edge workloads**. 31 orthogonal modules with clean vtable-based pluggability. 671 tests (40 suites), 4 fuzz targets, ASan+UBSan+static analysis in CI. The architecture, module design, and security posture are professional-grade. Test coverage (11K+ lines of tests vs ~14K of implementation) is well above average for C projects this size.
 
 ### Strengths
 
 - **Architecture**: 31 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
-- **Testing**: 41 suites, 671 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, cross-module integration tests, 4 fuzz targets.
+- **Testing**: 40 suites, 671 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, cross-module integration tests, 4 fuzz targets.
 - **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
 
-### Correctness Issues
+### What's in 1.0.0
 
-| Issue | Status | Resolution |
-|-------|--------|------------|
-| ~~`writev_all` spins on EAGAIN~~ | **Fixed** | Replaced with single-attempt `try_writev` for buffer bodies. Added `send_offset` field to `KlResponse` for partial send resume. Streaming path uses `stream_writev_all` (spin acceptable for small chunks). |
-| ~~`kl_response_body_copy` silent failure~~ | **Fixed** | `kl_response_body_copy`, `kl_response_header`, `kl_response_json`, `kl_response_error` now return `int` (0 success, -1 failure). Header append includes rollback on partial failure. |
-| ~~Blocking DNS in async client~~ | **Fixed** | Added `KlResolver` vtable (`resolver.h`) for pluggable async DNS. `KlClientConfig.resolver` field; NULL falls back to sync `getaddrinfo`. Client state machine has `KL_HCLIENT_RESOLVING` state with cancel support. |
-| ~~Non-null-terminated header values~~ | **Fixed** | Method, path, query, and all header names/values are null-terminated in-place after parsing. The byte after each string (HTTP syntax: `\r`, `:`, `?`, space) is overwritten with `\0` — zero allocation, still zero-copy. |
+- **Core**: 100-continue, HEAD auto-strip, graceful drain, signal handling, HTTP/1.0 compat, IPv6, chunked decoder, growable read buffer (431 on overflow), null-terminated header values, buffer body send fix (`try_writev` + `send_offset`)
+- **Pluggable interfaces**: TLS vtable, parser vtable, body reader vtable, resolver vtable, compress/decompress vtables, file I/O vtable (io_uring splice), H2 session vtable
+- **Client**: HTTP/1.1 (sync + async + streaming), H2 client, WebSocket client, connection pool (keep-alive reuse), redirect following (RFC 7231/7538), proxy support (HTTP + CONNECT tunnel), response decompression
+- **Server features**: Router with `:param` capture, two-phase middleware (pre-body + post-body), CORS middleware, H2 server, WebSocket server (auto-ping keep-alive), SSE helper, response compression, server stats for load introspection
+- **Infrastructure**: `KlEventCtx` composition, `KlWatcher` FD callbacks, `KlAsyncOp` suspend/resume, `KlThreadPool` with pipe-based wakeup, `KlDrain` backpressure buffer, `KlTimer` min-heap scheduling, `KlError` diagnostics (23 codes + `kl_strerror`), `KlAllocator` vtable, `KlResolverCache` decorator
+- **Build/test**: Static analysis (scan-build + cppcheck), fuzz testing (4 targets), Doxygen API docs, `make install` + pkg-config, Cosmopolitan C support, code coverage
 
-### Architectural Gaps
+### Correctness Issues Fixed
 
-| Gap | Details |
-|-----|---------|
-| ~~**8KB fixed read buffer**~~ | **Fixed**: `read_buf` is now a heap-allocated, growable buffer (doubles up to `max_header_size`). Default 8KB initial, configurable via `KlConfig.max_header_size`. Returns 431 (Request Header Fields Too Large) when exceeded. Shrinks back to 8KB on keep-alive reset. |
-| ~~**`connection.c` monolith**~~ | **Refactored**: Extracted `conn_null_terminate_headers()` and `conn_dispatch_request()` static helpers. `HEADERS_OK`/`PARSE_OK` branches unified into a single dispatch path (~85 lines removed). |
+| Issue | Resolution |
+|-------|------------|
+| `writev_all` spins on EAGAIN | Replaced with single-attempt `try_writev` for buffer bodies. Added `send_offset` for partial send resume. |
+| `kl_response_body_copy` silent failure | Response API functions now return `int` (0 success, -1 failure). Header append includes rollback on partial failure. |
+| Blocking DNS in async client | Added `KlResolver` vtable for pluggable async DNS. Client state machine has `KL_HCLIENT_RESOLVING` state with cancel support. |
+| Non-null-terminated header values | Method, path, query, and all header names/values null-terminated in-place after parsing. Zero allocation, still zero-copy. |
+
+### Architectural Gaps Fixed
+
+| Gap | Resolution |
+|-----|------------|
+| 8KB fixed read buffer | Heap-allocated, growable buffer (doubles up to `max_header_size`). Returns 431 when exceeded. Shrinks back on keep-alive reset. |
+| `connection.c` monolith | Extracted static helpers, unified `HEADERS_OK`/`PARSE_OK` dispatch path (~85 lines removed). |
 
 **Deliberate design choices** (not gaps):
 
@@ -36,215 +45,18 @@ Keel is **~80% production-ready for embedded/edge workloads**. The architecture,
 - **O(n) router** — Linear scan over all routes per request. A `memcmp` scan over 20-50 routes costs hundreds of nanoseconds, invisible next to network I/O syscalls. Even at hundreds of routes the overhead is trivial. A trie or radix tree would add complexity to param extraction and middleware matching for no measurable gain in Keel's target workload.
 - **O(n) timeout sweep** — Iterates all connection slots once per event loop tick. At `max_connections` = 256 (default), this is a tight loop over a contiguous array — well within L1 cache. A deadline heap or timer wheel would add allocation and pointer chasing for no measurable improvement.
 
-### Testing Gaps
-
-| Gap | Status |
-|-----|--------|
-| ~~No concurrent connection tests~~ | **Fixed**: `test_server_integration.c` — pool exhaustion, backpressure recovery, concurrent requests, keep-alive pipeline. |
-| ~~No TLS integration tests~~ | **Fixed**: `test_tls_integration.c` — passthrough TLS mock validates full handshake→read→write path. |
-| ~~No drain/graceful shutdown tests~~ | **Fixed**: `test_server_integration.c` — drain completes in-flight, drain deadline forces exit. |
-| ~~Hardcoded ports + `usleep` sync~~ | **Fixed**: `bound_port` field on `KlServer`, all tests use `port=0` (OS-assigned) + `wait_for_bind()`. |
-| ~~Missing fuzz targets in CI~~ | **Fixed**: All 4 fuzz targets now run in CI (parser, multipart, WebSocket, response parser). |
-| ~~No code coverage measurement~~ | **Fixed**: `make coverage` target generates lcov/genhtml report. |
-
-### Build System Gaps
-
-| Gap | Status |
-|-----|--------|
-| ~~No header dependency tracking~~ | **Fixed**: `-MMD -MP` with `-include *.d` — changing a header recompiles only affected files. |
-| ~~No `install` target~~ | **Fixed**: `make install PREFIX=...` installs lib, headers, pkg-config. |
-| ~~No pkg-config file~~ | **Fixed**: `keel.pc.in` template, generated by `make install`. |
-
-### API Footguns
-
-- ~~**`kl_response_body` borrows the pointer**~~ — **Fixed**: Renamed to `kl_response_body_borrow()` to make borrow semantics explicit. `kl_response_body_copy()` unchanged.
-- ~~**`_server_ctx` is a public field**~~ — **Fixed**: Added `kl_request_conn(req)` typed accessor in `request.h`. Field kept for backward compat.
-- ~~**No error detail from failed operations**~~ — **Fixed**: `KlError` enum with 23 codes, stored per-struct (`KlServer.last_error`, `KlClientResponse.error`, `kl_client_last_error()`), `kl_strerror()` for human-readable messages.
-- **Global signal handler** (`server.c:25`) — only one `KlServer` instance can have signal handlers at a time. Documented in `server.h`.
-
 ---
 
-## Completed
+## Future
 
-### 100-continue (Expect header)
+### Research / Long-Term
 
-Auto-detect `Expect: 100-continue` and send `HTTP/1.1 100 Continue\r\n\r\n` before reading the body.
+- **QUIC / HTTP/3** — Requires a UDP-based event model and a QUIC library (quiche, ngtcp2). Significant architectural change — the connection model shifts from persistent TCP streams to multiplexed UDP datagrams with connection migration.
+- **Zero-copy receive (MSG_ZEROCOPY)** — Linux `MSG_ZEROCOPY` for `send(2)` avoids copying response data from userspace to kernel. Marginal benefit for small responses but significant for large file transfers.
+- **eBPF request steering** — Use eBPF `SO_REUSEPORT` programs to steer connections to specific threads/cores based on request characteristics.
+- **WebSocket compression (RFC 7692)** — `permessage-deflate` compression negotiation and per-message compression. Rarely needed in practice due to CPU overhead vs. bandwidth savings.
 
-### HEAD method auto-strip
-
-HEAD requests automatically match GET routes; response body suppressed while preserving `Content-Length`.
-
-### Graceful connection drain
-
-`kl_server_stop` enters drain mode: stops accepting, continues in-flight requests, closes at configurable `drain_timeout_ms` deadline.
-
-### Signal handling
-
-Optional SIGTERM/SIGINT handler via `config.install_signal_handlers`. Uses `_Atomic int running` with `sigaction`.
-
-### HTTP/1.0 compatibility
-
-`Connection: keep-alive` header is now conditional on `req.keep_alive`, preventing confusion for HTTP/1.0 clients.
-
-### Static analysis in CI
-
-`scan-build` and `cppcheck` run in CI via `make analyze` and `make cppcheck` targets.
-
-### Fuzz testing
-
-libFuzzer harnesses for HTTP parser, multipart reader, WebSocket frame parser, and response parser with seed corpora (`fuzz/`).
-
-### API reference documentation
-
-Doxyfile + `@brief`/`@param`/`@return` doc comments on all public headers. Generate with `make docs`.
-
-### Chunked request bodies
-
-Parser-agnostic chunked decoder (`KlChunkedDecoder`) sits between the socket and body reader. The parser only sets `req->chunked = 1`; the connection layer routes body data through the decoder. Includes body deadline timer (`body_timeout_ms`) for slow-chunk DoS protection.
-
-### Per-route middleware chain
-
-Pattern-matched middleware via `kl_server_use()` / `kl_router_use()`. Middleware runs after route match, before body reading. Supports prefix (`/api/*`) and exact (`/health`) pattern matching, wildcard method (`*`), and short-circuit (return non-zero to stop chain). Built-in CORS middleware (`kl_cors_middleware`) ships with configurable origins, preflight handling, and credentials support. `req->ctx` enables middleware-to-handler data passing.
-
-### Security audit hardening
-
-Comprehensive C code audit with 8 fixes: integer overflow guards in `mp_strdup` and `hdr_append`, bounds-safe param capture in router, NULL guards in CORS middleware / server init / response body, multipart `mp_append_data` bounds check, and stored string lengths in multipart parser to eliminate `strlen` on untrusted data during cleanup.
-
-### TLS via pluggable vtable
-
-Pluggable TLS vtable (`KlTls`) — users bring their own TLS backend (BearSSL, LibreSSL, OpenSSL, rustls-ffi) by implementing a 7-function vtable. No vendored TLS library. TLS wraps the transport layer via `conn_read`/`conn_write` helpers.
-
-### HTTP/2 server
-
-Pluggable session vtable (`KlH2ServerSession`). Server-side HTTP/2 with multiplexed streams, upgrade from HTTP/1.1 or direct. Shared protocol constants in `h2.h`, server API in `h2_server.h`.
-
-### WebSocket server
-
-RFC 6455 WebSocket with frame encoding/decoding, fragmentation, close handshake. Shared frame parser in `websocket.h`, server API in `websocket_server.h`.
-
-### WebSocket client
-
-Async WebSocket client (`websocket_client.h`) with masked frames, handshake validation, TLS support. Symmetric API with server side. 28 tests.
-
-### HTTP/2 client
-
-Async HTTP/2 client (`h2_client.h`) with pluggable session vtable, multiplexed streams, per-stream response accumulation. Mock-testable without nghttp2. 18 tests.
-
-### HTTP/1.1 client
-
-Sync (blocking) and async (event-driven) HTTP/1.1 client with TLS support. URL parser with http/https/ws/wss, IPv6, and CRLF injection guard. Response parser (llhttp in `HTTP_RESPONSE` mode). `KlEventCtx` composition allows standalone operation without `KlServer`.
-
-### Async primitives
-
-`KlWatcher` for generic FD callbacks, `KlAsyncOp` for connection suspension, `KlThreadPool` for blocking work offload with pipe-based event loop wakeup. All operate on `KlEventCtx`, independent of `KlServer`.
-
-### Buffer body send fix
-
-Replaced `writev_all` spin loop (up to 256 EAGAIN retries) with single-attempt `try_writev` for buffer body sends. Added `send_offset` field to `KlResponse` for partial send resume across event loop ticks. Streaming path uses `stream_writev_all` (spin acceptable for small chunks). File body path was already correct.
-
-### Response API error returns
-
-Changed `kl_response_header`, `kl_response_body_copy`, `kl_response_json`, and `kl_response_error` from `void` to `int` (0 success, -1 failure). Header append includes rollback on partial failure — `hdr_len` is saved before appending and restored if any `hdr_append` call fails.
-
-### IPv6 server support
-
-Replaced hardcoded `AF_INET`/`sockaddr_in`/`inet_pton` with `getaddrinfo` + `AI_NUMERICHOST | AI_PASSIVE` for address resolution. Auto-detects address family from `bind_addr`. Dual-stack (`IPV6_V6ONLY=0`) when binding to `::`. Accept path uses `sockaddr_storage` for IPv6 client addresses.
-
-### Pluggable DNS resolver
-
-Added `KlResolver` vtable (`resolver.h`) for pluggable async DNS resolution. `KlClientConfig.resolver` field; NULL falls back to sync `getaddrinfo` (backward compatible). Client state machine has `KL_HCLIENT_RESOLVING` state with cancel support. Users can plug in c-ares, a thread-pool wrapper, or a custom implementation.
-
-### Error diagnostics
-
-sqlite3-style per-struct error codes. `KlError` enum with 23 codes covering allocation, network, DNS, TLS, HTTP, event loop, thread pool, and IPC failures. Stored as a field on owning structs (`KlServer.last_error`, `KlEventCtx.last_error`, `KlClientResponse.error`, `KlClient.error`). Set at the point of `return -1`, defaults to `KL_ERR_NONE` (0). `kl_strerror()` returns static human-readable message. `kl_client_last_error()` for opaque async client. All existing function signatures unchanged (non-breaking).
-
-### Timer API
-
-One-shot timer scheduling on `KlEventCtx`. Array-based binary min-heap: O(log n) add, O(1) peek, O(n) cancel. `kl_timer_add` returns a monotonic `int64_t` ID for cancellation. `kl_timer_next_timeout` clamps event loop timeout to next deadline. `kl_timer_fire` pops and invokes all expired timers. Integrated into both `kl_event_ctx_run` (standalone clients) and the server main loop. Safe to add/cancel timers from within callbacks. ~140 lines, 10 tests.
-
-### Client streaming
-
-Response streaming (push-based) and request streaming (pull-based) for both sync and async HTTP/1.1 clients. `KlClientStreamCfg` provides `on_body`/`on_headers`/`on_complete` callbacks for response body delivery as chunks arrive (instead of buffering), and `body_read` callback for chunked request body production. New `_s` API variants (`kl_client_request_s`, `kl_client_start_s`); original APIs are thin wrappers. Streaming parser factory (`kl_response_parser_llhttp_s`) routes decoded body chunks to callbacks. Async request streaming uses a 5-phase non-blocking state machine (`KL_HCLIENT_SENDING_STREAM`).
-
----
-
-## Near-Term
-
-### SSE helper — COMPLETED
-
-Thin SSE framing layer over `kl_response_begin_stream`. `KlSse` handle wraps write_fn/write_ctx/res. `kl_sse_begin` sets Content-Type/Cache-Control and starts chunked stream. `kl_sse_event` formats event:/id:/data: fields with multiline auto-split. `kl_sse_comment` for keep-alive pings. Zero allocation, ~60 lines.
-
----
-
-## Medium-Term
-
-### ~~Client connection pooling~~ (Done)
-
-Implemented in `client_pool.h` / `client_pool.c`. Flat-array pool keyed by `(host, port, is_tls)` with idle timers, per-host limits, test-on-borrow stale detection, and `Connection: keep-alive` tracking. Sync (`kl_client_request_pooled`) and async (`kl_client_start_pooled`) APIs.
-
-### ~~Redirect following~~ (Done)
-
-Implemented in `redirect.h` / `redirect.c`. Orthogonal module wrapping existing client APIs with automatic 3xx redirect following. `KlRedirectConfig` controls max hops (default 10). Method transformation per RFC 7231/7538: 301/302/303 change POST/PUT/PATCH to GET (dropping body); 307/308 preserve method. Cross-origin Authorization header stripping. URL resolution via `kl_url_resolve()`. Sync (`kl_redirect_request`, `kl_redirect_request_pooled`) and async (`kl_redirect_start`, `kl_redirect_start_pooled`) APIs. 33 tests.
-
-### ~~WebSocket auto-ping keep-alive~~ (Done)
-
-Implemented as `ping_interval_ms` field on both `KlWsServerConfig` and `KlWsClientConfig` (0 = disabled, default). Server-side uses sweep-based approach (same pattern as close timeout check); client-side uses `kl_timer_add` for recurring pings. Auto-ping skips connections in close handshake. 7 tests.
-
-### ~~Response compression~~ (Done)
-
-Pluggable compression vtable (`KlCompress`) — users bring their own compression backend (miniz, zlib, zstd) by implementing a 5-function vtable. Buffer body compression via `kl_response_body_compress()` with automatic expansion fallback. Streaming compression via `KlCompressStream` (wraps chunked stream). `KlCompressConfig` on `KlConfig` for server-wide configuration. Miniz-based gzip backend ships as optional source (`compress_miniz.c`, build with `KEEL_COMPRESS=miniz`). 16 tests.
-
-### ~~Response decompression (client)~~ (Done)
-
-Pluggable decompression vtable (`KlDecompress`) — mirrors `KlCompress` with the same 5-function shape, shares `KlCompressCtx` for algorithm configuration. `KlDecompressConfig` on `KlClientConfig` enables automatic response body decompression. Buffered responses are decompressed in-place (body replaced, `Content-Encoding` header removed). Streaming responses use a `DecompStreamWrap` that intercepts body callbacks and feeds through the decompressor. Miniz-based gzip backend ships as optional source (`decompress_miniz.c`, build with `KEEL_COMPRESS=miniz`). 14 tests.
-
-### ~~Backpressure callback~~ (Done)
-
-Implemented as `KlDrain` (`drain.h` / `drain.c`). Event-loop-agnostic write buffer that sits between a producer (SSE, compress stream, WebSocket, etc.) and a writer function. On would-block (writer returns 0), buffers unsent data; caller composes with `KlWatcher` / `KlAsyncOp` to resume on write-readiness. Lazy buffer allocation (zero overhead on fast path), configurable `max_size` cap, `on_drain` callback on non-empty→empty transition. 17 tests.
-
-### ~~HTTP proxy support~~ (Done)
-
-Implemented in `client.h` / `client.c`. Two modes: HTTP forwarding (absolute-form URL through proxy, RFC 7230 §5.3.2) and HTTPS CONNECT tunneling (RFC 7231 §4.3.6). `KlProxyConfig` struct with host, port, optional Basic auth. Sync and async paths both supported. Async path adds two states (`KL_HCLIENT_PROXY_CONNECTING`, `KL_HCLIENT_PROXY_HANDSHAKE`) for non-blocking CONNECT. Connection pool extended with proxy key fields — entries keyed by `(host, port, is_tls, proxy_host, proxy_port)`. Redirect client inherits proxy config automatically. `KL_ERR_PROXY` error code for proxy failures. 11 tests.
-
----
-
-## Long-Term / Research
-
-### ~~io_uring native file I/O~~ (Done)
-
-Implemented in two phases. Phase 1: `IORING_OP_READ` for async file reads into userspace buffers (module 30, `KlFileIO` vtable). Phase 2: `IORING_OP_SPLICE` for zero-copy file→pipe→socket transfer entirely in kernel space (Linux 5.7+). Two-phase splice: file→pipe (`splice_in`) then pipe→socket (`splice_out`), with short-splice retry for partial writes. Splice availability probed at create time via `io_uring_get_probe_ring`; graceful fallback to buffered reads when splice is unavailable (older kernels, pipe creation failure, TLS connections). `KlFileIOResult.zero_copy` flag tells the connection layer to skip the WRITING phase. Pipes managed per-socket slot, created lazily, reused across chunks.
-
-### QUIC / HTTP/3
-
-Requires a UDP-based event model and a QUIC library (quiche, ngtcp2). This is a significant architectural change — the connection model shifts from persistent TCP streams to multiplexed UDP datagrams with connection migration. Worth tracking but not near-term.
-
-### Zero-copy receive (MSG_ZEROCOPY)
-
-Linux `MSG_ZEROCOPY` for `send(2)` avoids copying response data from userspace to kernel. Requires notification-based completion and careful buffer lifetime management. Marginal benefit for small responses but significant for large file transfers.
-
-### eBPF request steering
-
-Use eBPF `SO_REUSEPORT` programs to steer connections to specific threads/cores based on request characteristics. Enables CPU affinity without application-level load balancing.
-
-### ~~DNS caching~~ (Done)
-
-Implemented in `resolver_cache.h` / `resolver_cache.c`. Decorator pattern wrapping any `KlResolver` vtable. Flat-array cache keyed by `(host, port)` with configurable TTL (default 60s) and capacity (default 64). Cache hits call `done_fn` synchronously; misses delegate to the inner resolver and store on completion. Errors are never cached. Eviction policy: expired first, then closest-to-expiry. `kl_resolver_cache_clear()` and `kl_resolver_cache_count()` for management. 13 tests.
-
-### ~~Resolver sync-completion documentation~~ (Done)
-
-Documented the `KlResolver.resolve()` sync-completion contract: `resolve()` may call `done_fn` synchronously before returning. Decorators must use an `in_resolve`/`completed` sentinel pattern to handle this safely. `resolver_cache.c` serves as the canonical implementation with a detailed block comment explaining the pattern. `resolver.h` doc comment updated.
-
-### ~~Server stats for load introspection~~ (Done)
-
-`KlServerStats` struct and `kl_server_stats()` function in `server.h` / `server.c`. Zero-overhead read-only snapshot: `active_connections`, `max_connections`, `async_suspended`, `listen_paused`. Enables user-space load-shedding middleware (503 Service Unavailable) without baking policy into the framework core. NULL-safe. 4 tests.
-
-### WebSocket compression (RFC 7692)
-
-`permessage-deflate` compression negotiation and per-message compression. Rarely needed in practice due to CPU overhead vs. bandwidth savings. Significant effort (new handshake negotiation + compression integration).
-
----
-
-## Considered and Rejected
+### Considered and Rejected
 
 These belong in application code or middleware, not in the transport library:
 

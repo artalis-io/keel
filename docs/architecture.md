@@ -59,7 +59,7 @@ Deep technical documentation of KEEL's internal design.
 
 ## Event Loop Abstraction
 
-KEEL provides a unified event API over three backends:
+KEEL provides a unified event API over four backends:
 
 ```c
 int  kl_event_init(KlEventLoop *loop);
@@ -70,13 +70,14 @@ int  kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms);
 void kl_event_close(KlEventLoop *loop);
 ```
 
-All three backends use **edge-triggered** semantics — the event fires once when a fd becomes ready, not continuously while it's ready. This means fewer syscalls under load but requires draining the fd completely on each notification.
+The kqueue, epoll, and io_uring backends use **edge-triggered** semantics — the event fires once when a fd becomes ready, not continuously while it's ready. This means fewer syscalls under load but requires draining the fd completely on each notification. The poll backend uses **level-triggered** semantics (standard POSIX `poll(2)` behavior).
 
 | Backend | Platform | Mechanism |
 |---------|----------|-----------|
 | **kqueue** | macOS, BSD | `EV_ADD \| EV_CLEAR` (edge-triggered) |
 | **epoll** | Linux | `EPOLLET \| EPOLLIN \| EPOLLOUT` |
 | **io_uring** | Linux 5.6+ | `IORING_OP_POLL_ADD` (readiness, not async I/O) |
+| **poll** | Any POSIX | `poll(2)` (level-triggered, universal fallback) |
 
 The io_uring backend uses poll-add mode (readiness notification), not async read/write. This makes it a drop-in for epoll with io_uring's batched submission advantage, without requiring a fundamentally different I/O model.
 

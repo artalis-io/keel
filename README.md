@@ -172,7 +172,7 @@ kl_server_use(&s, "*", "/*", kl_cors_middleware, &cors);
 
 Handles `Access-Control-Allow-Origin`, `Allow-Credentials`, and automatically responds to OPTIONS preflight requests with 204 + all required CORS headers.
 
-### Writing custom middleware
+### Writing custom middleware {#writing-custom-middleware}
 
 Middleware uses the same `(KlRequest *, KlResponse *, void *)` signature. Return 0 to continue, non-zero to short-circuit:
 

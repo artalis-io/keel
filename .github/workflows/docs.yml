@@ -6,6 +6,9 @@ on:
     paths:
       - 'include/keel/*.h'
       - 'Doxyfile'
+      - 'README.md'
+      - 'docs/architecture.md'
+      - 'docs/comparison.md'
 
 permissions:
   contents: read

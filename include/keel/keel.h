@@ -1,6 +1,6 @@
 /**
  * @file keel.h
- * @brief KEEL — Minimal, zero-allocation HTTP/1.1 server library for C.
+ * @brief KEEL — Minimal C11 HTTP client/server library built on epoll/kqueue/io_uring/poll.
  *
  * Umbrella header that includes all public KEEL modules.
  *

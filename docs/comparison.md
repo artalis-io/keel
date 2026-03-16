@@ -8,8 +8,8 @@ A fact-based comparison of three embedded C HTTP libraries. Data gathered March 
 |---|------|----------|---------------|
 | **First release** | 2025 | 2004 | 2007 |
 | **License** | MIT | GPLv2 / Commercial | LGPLv2.1+ |
-| **Core LOC** | ~12K | ~33K (amalgamated) | ~19K |
-| **Architecture** | 29 independent modules | Monolithic amalgam | Monolithic |
+| **Core LOC** | ~14K | ~33K (amalgamated) | ~19K |
+| **Architecture** | 31 independent modules | Monolithic amalgam | Monolithic |
 | **Primary target** | Embedded servers, edge services | Bare-metal MCU, IoT | Desktop/server embedding |
 | **GitHub stars** | Early stage | 12,600+ | 135 (mirror; canonical repo on GNU Savannah) |
 
@@ -20,7 +20,7 @@ A fact-based comparison of three embedded C HTTP libraries. Data gathered March 
 | **License** | MIT — no restrictions | GPLv2 or paid commercial license | LGPL — linking constraints |
 | **HTTP/2** | Server + client | Not supported | Not supported |
 | **Event backends** | epoll, kqueue, io_uring, poll | select/poll only | select, poll, epoll |
-| **Modularity** | 29 independent, testable modules | Single amalgamated file | Monolithic library |
+| **Modularity** | 31 independent, testable modules | Single amalgamated file | Monolithic library |
 | **Allocator** | Runtime vtable (bring-your-own) | Compile-time macros only | None (raw malloc) |
 | **TLS model** | Pluggable vtable — any backend | Built-in TLS 1.3 + pluggable | GnuTLS only |
 | **HTTP parser** | Pluggable vtable — swappable | Hardcoded | Hardcoded |
@@ -35,8 +35,8 @@ A fact-based comparison of three embedded C HTTP libraries. Data gathered March 
 | **Backpressure** | Built-in write buffer (`KlDrain`) | None | None |
 | **Timers** | Built-in min-heap scheduling | No dedicated API | No dedicated API |
 | **Cosmopolitan C** | Supported (APE binaries) | Not supported | Not supported |
-| **Test density** | 644 tests (38 suites) for 12K LOC | ~4K LOC tests for 33K LOC | Fewer relative to size |
-| **Code size** | ~12K LOC — auditable in a day | ~33K LOC (includes TCP/IP stack, drivers) | ~19K LOC |
+| **Test density** | 671 tests (40 suites) for ~14K LOC | ~4K LOC tests for 33K LOC | Fewer relative to size |
+| **Code size** | ~14K LOC — auditable in a day | ~33K LOC (includes TCP/IP stack, drivers) | ~19K LOC |
 
 ## Where Keel loses
 
@@ -142,7 +142,7 @@ KlConfig cfg = { .alloc = &alloc };
 - You value pluggability (allocator, parser, TLS all swappable at runtime)
 - You're building on Linux or macOS and want io_uring/kqueue/epoll
 - You're targeting bare-metal with lwIP/picoTCP (BSD socket compatibility — no transport vtable needed)
-- Code auditability matters — 12K LOC is readable in a day
+- Code auditability matters — ~14K LOC is readable in a day
 
 **Choose Mongoose when:**
 - You're targeting bare-metal microcontrollers (STM32, ESP32, etc.)
