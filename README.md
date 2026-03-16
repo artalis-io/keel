@@ -1,6 +1,7 @@
 # KEEL — Kernel Event Engine, Lightweight
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/artalis-io/keel/badge)](https://scorecard.dev/viewer/?uri=github.com/artalis-io/keel)
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 

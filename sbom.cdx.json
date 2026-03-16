@@ -1,0 +1,84 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "library",
+      "name": "keel",
+      "version": "1.0.0",
+      "purl": "pkg:github/artalis-io/keel@1.0.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "description": "Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "llhttp",
+      "version": "9.3.1",
+      "purl": "pkg:github/nodejs/llhttp@9.3.1",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "evidence": {
+        "identity": {
+          "field": "version",
+          "methods": [
+            {
+              "technique": "source-code-analysis",
+              "value": "LLHTTP_VERSION_MAJOR=9, LLHTTP_VERSION_MINOR=3, LLHTTP_VERSION_PATCH=1 in vendor/llhttp/llhttp.h"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "library",
+      "name": "utest.h",
+      "version": "unversioned",
+      "purl": "pkg:github/sheredom/utest.h",
+      "scope": "excluded",
+      "licenses": [
+        {
+          "license": {
+            "id": "Unlicense"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f20f27a4fa3f8a32e5044f5609ffcd2407db72bbb55afcb676f873c756988bf4"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:github/artalis-io/keel@1.0.0",
+      "dependsOn": [
+        "pkg:github/nodejs/llhttp@9.3.1"
+      ]
+    },
+    {
+      "ref": "pkg:github/nodejs/llhttp@9.3.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:github/sheredom/utest.h",
+      "dependsOn": []
+    }
+  ]
+}

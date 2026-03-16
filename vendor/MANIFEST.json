@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "description": "Vendored dependencies for Keel",
+  "dependencies": [
+    {
+      "name": "llhttp",
+      "version": "9.3.1",
+      "version_source": "LLHTTP_VERSION_MAJOR/MINOR/PATCH in vendor/llhttp/llhttp.h",
+      "upstream": "https://github.com/nodejs/llhttp",
+      "tag": "release/v9.3.1",
+      "license": "MIT",
+      "scope": "production",
+      "files": [
+        "llhttp/llhttp.h",
+        "llhttp/llhttp.c",
+        "llhttp/api.c",
+        "llhttp/http.c"
+      ]
+    },
+    {
+      "name": "utest.h",
+      "version": "unversioned",
+      "sha256": "f20f27a4fa3f8a32e5044f5609ffcd2407db72bbb55afcb676f873c756988bf4",
+      "upstream": "https://github.com/sheredom/utest.h",
+      "license": "Unlicense",
+      "scope": "test",
+      "files": [
+        "utest.h"
+      ]
+    }
+  ]
+}
