@@ -18,25 +18,25 @@ typedef struct KlEventCtx KlEventCtx;
 typedef struct KlResolver KlResolver;
 typedef struct KlResolveReq KlResolveReq;
 
-/* Result passed to the completion callback */
+/** @brief Result passed to the completion callback. */
 typedef struct {
-    struct sockaddr_storage addr;
-    socklen_t addrlen;
-    int ai_family;
-    int ai_socktype;
-    int ai_protocol;
+    struct sockaddr_storage addr;  /**< Resolved address */
+    socklen_t addrlen;             /**< Address length */
+    int ai_family;                 /**< Address family (AF_INET/AF_INET6) */
+    int ai_socktype;               /**< Socket type */
+    int ai_protocol;               /**< Protocol */
 } KlResolveResult;
 
-/* Completion callback — called on the event loop thread */
+/** @brief Completion callback — called on the event loop thread. */
 typedef void (*KlResolveDoneFn)(KlResolveReq *req, const KlResolveResult *result,
                                  int error, void *user_data);
 
-/* Opaque per-request handle — resolver implementation allocates */
+/** @brief Opaque per-request handle — resolver implementation allocates. */
 struct KlResolveReq {
-    KlResolver *resolver;  /* back-pointer */
+    KlResolver *resolver;  /**< Back-pointer to owning resolver */
 };
 
-/* Resolver vtable */
+/** @brief Async DNS resolver vtable. */
 struct KlResolver {
     /**
      * Start async name resolution. Must not block.

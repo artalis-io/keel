@@ -11,9 +11,9 @@
  * All writes go through write_fn — zero allocation.
  */
 typedef struct {
-    KlWriteFn  write_fn;
-    void      *write_ctx;
-    KlResponse *res;
+    KlWriteFn  write_fn;   /**< Chunked stream write callback */
+    void      *write_ctx;  /**< Chunked stream write context */
+    KlResponse *res;       /**< Response (for end_stream) */
 } KlSse;
 
 /**

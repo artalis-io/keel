@@ -5,8 +5,11 @@
 
 typedef struct KlEventCtx KlEventCtx;
 
+/** @brief Work function — runs on a worker thread. */
 typedef void (*KlWorkFn)(void *user_data);
+/** @brief Done function — runs on the event loop thread after work completes. */
 typedef void (*KlWorkDoneFn)(void *user_data);
+/** @brief Cancel function — runs on shutdown if work item never started. */
 typedef void (*KlWorkCancelFn)(void *user_data);
 
 /**
@@ -14,10 +17,10 @@ typedef void (*KlWorkCancelFn)(void *user_data);
  * Copied into the internal queue (caller can stack-allocate).
  */
 typedef struct KlWorkItem {
-    KlWorkFn work_fn;           /* runs on worker thread */
-    KlWorkDoneFn done_fn;       /* runs on event loop thread */
-    KlWorkCancelFn cancel_fn;   /* runs on shutdown if item never started (may be NULL) */
-    void *user_data;            /* opaque — passed to all three callbacks */
+    KlWorkFn work_fn;           /**< Runs on worker thread */
+    KlWorkDoneFn done_fn;       /**< Runs on event loop thread */
+    KlWorkCancelFn cancel_fn;   /**< Runs on shutdown if item never started (may be NULL) */
+    void *user_data;            /**< Opaque — passed to all three callbacks */
 } KlWorkItem;
 
 /**
@@ -25,9 +28,9 @@ typedef struct KlWorkItem {
  * All fields have sensible defaults when set to 0/NULL.
  */
 typedef struct KlThreadPoolConfig {
-    int num_workers;          /* 0 = auto-detect via sysconf(_SC_NPROCESSORS_ONLN) */
-    int queue_capacity;       /* max items in work queue; 0 = 64 */
-    KlAllocator *alloc;       /* NULL = ctx's allocator */
+    int num_workers;          /**< 0 = auto-detect via sysconf(_SC_NPROCESSORS_ONLN) */
+    int queue_capacity;       /**< Max items in work queue (0 = 64) */
+    KlAllocator *alloc;       /**< NULL = ctx's allocator */
 } KlThreadPoolConfig;
 
 typedef struct KlThreadPool KlThreadPool;

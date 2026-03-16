@@ -3,17 +3,20 @@
 
 #include <keel/allocator.h>
 
-typedef enum { KL_EVENT_READ = 1, KL_EVENT_WRITE = 2 } KlEventMask;
+typedef enum {
+    KL_EVENT_READ  = 1, /**< FD is readable */
+    KL_EVENT_WRITE = 2  /**< FD is writable */
+} KlEventMask;
 
 typedef struct {
-    void *udata;
-    KlEventMask ready;
+    void *udata;        /**< Opaque user data (connection or tagged watcher ptr) */
+    KlEventMask ready;  /**< Bitmask of ready events */
 } KlEvent;
 
 typedef struct {
-    int fd;             /* epoll_fd or kqueue_fd, -1 for io_uring */
-    void *_backend;     /* reserved for backend-specific state */
-    KlAllocator *alloc; /* set before kl_event_init; used by io_uring backend */
+    int fd;             /**< epoll_fd or kqueue_fd, -1 for io_uring */
+    void *_backend;     /**< reserved for backend-specific state */
+    KlAllocator *alloc; /**< set before kl_event_init; used by io_uring backend */
 } KlEventLoop;
 
 /** @brief Initialize the platform event loop (epoll/kqueue/io_uring). */
@@ -30,6 +33,7 @@ int  kl_event_del(KlEventLoop *loop, int fd);
 
 /**
  * @brief Wait for events.
+ * @param loop       Event loop instance.
  * @param out        Array to receive ready events.
  * @param max        Maximum events to return.
  * @param timeout_ms Timeout in milliseconds (-1 for infinite).

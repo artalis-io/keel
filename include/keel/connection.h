@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/** @brief Default read buffer size (bytes). */
 #define KL_READ_BUF_SIZE 8192
 
 typedef struct KlTls KlTls;
@@ -19,83 +20,75 @@ typedef struct KlH2ServerConn KlH2ServerConn;
 typedef struct KlH2ServerConfig KlH2ServerConfig;
 
 typedef enum {
-    KL_CONN_TLS_HANDSHAKE,   /* TLS handshake in progress */
-    KL_CONN_READING,
-    KL_CONN_READING_BODY,
-    KL_CONN_PROCESSING,
-    KL_CONN_SENDING,
-    KL_CONN_WEBSOCKET,      /* WebSocket connection (upgraded) */
-    KL_CONN_HTTP2,          /* HTTP/2 connection (upgraded) */
-    KL_CONN_SUSPENDED,      /* Suspended for async operation */
-    KL_CONN_CLOSED
+    KL_CONN_TLS_HANDSHAKE,   /**< TLS handshake in progress */
+    KL_CONN_READING,         /**< Reading request headers */
+    KL_CONN_READING_BODY,    /**< Reading request body */
+    KL_CONN_PROCESSING,      /**< Processing request */
+    KL_CONN_SENDING,         /**< Sending response */
+    KL_CONN_WEBSOCKET,       /**< WebSocket connection (upgraded) */
+    KL_CONN_HTTP2,           /**< HTTP/2 connection (upgraded) */
+    KL_CONN_SUSPENDED,       /**< Suspended for async operation */
+    KL_CONN_CLOSED           /**< Connection closed */
 } KlConnState;
 
 typedef struct KlConn {
-    int fd;
-    KlConnState state;
-    KlAllocator *alloc;     /* set once on pool init, never NULL */
+    int fd;                     /**< Socket file descriptor */
+    KlConnState state;          /**< Connection state */
+    KlAllocator *alloc;         /**< Allocator (set once on pool init) */
 
-    char *read_buf;
-    size_t read_len;
-    size_t read_cap;            /* current allocation size */
-    size_t max_header_size;     /* from KlConfig, set at server init */
+    char *read_buf;             /**< Read buffer */
+    size_t read_len;            /**< Bytes in read buffer */
+    size_t read_cap;            /**< Read buffer capacity */
+    size_t max_header_size;     /**< Max header size (from KlConfig) */
 
-    KlRequest req;
-    KlResponse res;
-    KlParser *parser;
+    KlRequest req;              /**< Current request */
+    KlResponse res;             /**< Current response */
+    KlParser *parser;           /**< HTTP parser */
 
-    size_t hdr_sent;
+    size_t hdr_sent;            /**< Header bytes sent */
 
-    /* Routing (set after HEADERS_OK, used in PROCESSING) */
-    KlRoute *route;
-    KlParam params[KL_MAX_PARAMS];
-    int num_params;
-    int route_result;
+    KlRoute *route;             /**< Matched route (set after HEADERS_OK) */
+    KlParam params[KL_MAX_PARAMS]; /**< Extracted route parameters */
+    int num_params;             /**< Number of route parameters */
+    int route_result;           /**< Router match result (200/404/405) */
 
-    uint64_t last_active_ms;   /* monotonic clock, updated on every I/O */
-    uint64_t request_start_ms; /* stamped at processing start for access log */
-    uint64_t body_start_ms;    /* stamped when entering READING_BODY */
-    KlChunkedDecoder chunked_dec;  /* reused per-request, no allocation */
+    uint64_t last_active_ms;    /**< Monotonic clock, updated on every I/O */
+    uint64_t request_start_ms;  /**< Stamped at processing start for access log */
+    uint64_t body_start_ms;     /**< Stamped when entering READING_BODY */
+    KlChunkedDecoder chunked_dec; /**< Chunked decoder (reused per-request) */
 
-    /* TLS session (NULL for plaintext connections) */
-    KlTls *tls;
-    int tls_want;               /* KL_EVENT_READ or KL_EVENT_WRITE during handshake */
+    KlTls *tls;                 /**< TLS session (NULL for plaintext) */
+    int tls_want;               /**< KL_EVENT_READ or KL_EVENT_WRITE during handshake */
 
-    /* WebSocket state (NULL until upgrade, heap-allocated) */
-    KlWsServerConn *ws;
+    KlWsServerConn *ws;         /**< WebSocket state (NULL until upgrade) */
 
-    /* HTTP/2 state (NULL until upgrade, heap-allocated) */
-    KlH2ServerConn *h2;
-    KlH2ServerConfig *h2_config;   /* set once at pool init, NULL if disabled */
-    KlRouter *router;        /* back-pointer to server router */
-    size_t max_body_size;    /* discard-path body limit (from KlConfig) */
+    KlH2ServerConn *h2;         /**< HTTP/2 state (NULL until upgrade) */
+    KlH2ServerConfig *h2_config; /**< HTTP/2 config (set once at pool init) */
+    KlRouter *router;           /**< Back-pointer to server router */
+    size_t max_body_size;       /**< Discard-path body limit (from KlConfig) */
 
-    /* Async state (non-NULL when SUSPENDED) */
-    struct KlAsyncOp *async_op;
-    uint64_t suspend_start_ms;
+    struct KlAsyncOp *async_op; /**< Active async op (non-NULL when SUSPENDED) */
+    uint64_t suspend_start_ms;  /**< Monotonic time when suspended */
 
-    /* Async file I/O state (set once at pool init, NULL if unsupported) */
-    KlFileIO *file_io;
-    int file_io_phase;       /* FILE_IO_IDLE/READING/WRITING/CANCELLING */
-    size_t file_io_len;      /* bytes from last async read */
-    size_t file_io_sent;     /* bytes written to socket so far */
+    KlFileIO *file_io;          /**< Async file I/O (set once at pool init) */
+    int file_io_phase;          /**< FILE_IO_IDLE/READING/WRITING/CANCELLING */
+    size_t file_io_len;         /**< Bytes from last async read */
+    size_t file_io_sent;        /**< Bytes written to socket so far */
 
-    /* Access logging (set once at pool init, never changes) */
     void (*access_log)(const KlRequest *req, int status,
                        size_t body_bytes, double duration_ms,
-                       void *user_data);
-    void *access_log_data;
+                       void *user_data); /**< Access log callback (set once at pool init) */
+    void *access_log_data;      /**< Opaque data for access_log callback */
 
-    /* Pool linkage */
-    struct KlConn *next_free;
+    struct KlConn *next_free;   /**< Free list linkage */
 } KlConn;
 
 typedef struct {
-    KlConn *conns;
-    int capacity;
-    int active_count;       /* number of in-use slots */
-    KlConn *free_list;
-    KlAllocator *alloc;
+    KlConn *conns;          /**< Connection slot array */
+    int capacity;           /**< Maximum connection slots */
+    int active_count;       /**< Number of in-use slots */
+    KlConn *free_list;      /**< Free slot linked list */
+    KlAllocator *alloc;     /**< Allocator for pool memory */
 } KlConnPool;
 
 /**

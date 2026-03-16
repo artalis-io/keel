@@ -1,5 +1,6 @@
-/*
- * client_pool.h — HTTP client connection pool
+/**
+ * @file client_pool.h
+ * @brief HTTP client connection pool.
  *
  * Caches idle TCP+TLS connections keyed by (host, port, is_tls),
  * enabling HTTP keep-alive reuse across requests. Opt-in: pass a
@@ -21,9 +22,12 @@
 
 /* ── Defaults ────────────────────────────────────────────────────── */
 
+/** @brief Default pool capacity. */
 #define KL_CPOOL_DEFAULT_CAPACITY      32
+/** @brief Default max idle connections per host. */
 #define KL_CPOOL_DEFAULT_MAX_PER_HOST   4
-#define KL_CPOOL_DEFAULT_IDLE_MS    60000  /* 60 seconds */
+/** @brief Default idle timeout (ms). */
+#define KL_CPOOL_DEFAULT_IDLE_MS    60000  /**< 60 seconds */
 
 /* ── Types ───────────────────────────────────────────────────────── */
 

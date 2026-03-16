@@ -1,5 +1,6 @@
-/*
- * h2_client.h — HTTP/2 client API
+/**
+ * @file h2_client.h
+ * @brief HTTP/2 client API
  *
  * Async HTTP/2 client driven by KlEventCtx watchers.
  * Uses a pluggable session vtable (KlH2ClientSession) so the actual
@@ -19,7 +20,9 @@
 
 /* ── Defaults ────────────────────────────────────────────────────── */
 
+/** @brief Default connect/request timeout (ms). */
 #define KL_H2_CLIENT_DEFAULT_TIMEOUT_MS  30000
+/** @brief Receive buffer size (bytes). */
 #define KL_H2_CLIENT_RECV_BUF_SIZE       16384
 
 /* ── Types ───────────────────────────────────────────────────────── */
@@ -29,19 +32,19 @@ typedef struct KlH2ClientStream  KlH2ClientStream;
 typedef struct KlH2ClientSession KlH2ClientSession;
 
 typedef struct {
-    const char *name;
-    const char *value;
+    const char *name;   /**< Header name. */
+    const char *value;  /**< Header value. */
 } KlH2ClientHeader;
 
 /** Accumulated response from a single stream. */
 typedef struct {
-    int              status;
-    KlH2ClientHeader *headers;
-    int              num_headers;
-    int              headers_cap;
-    char             *body;
-    size_t           body_len;
-    size_t           body_cap;
+    int              status;      /**< HTTP status code. */
+    KlH2ClientHeader *headers;   /**< Response headers array. */
+    int              num_headers; /**< Number of response headers. */
+    int              headers_cap; /**< Allocated capacity of headers array. */
+    char             *body;       /**< Response body (allocator-owned). */
+    size_t           body_len;    /**< Length of response body in bytes. */
+    size_t           body_cap;    /**< Allocated capacity of body buffer. */
 } KlH2ClientResponse;
 
 /* ── Session callbacks (session -> KEEL) ─────────────────────────── */
@@ -80,6 +83,7 @@ struct KlH2ClientSession {
     void *keel_ctx;
 };
 
+/** @brief Factory for creating client-side HTTP/2 sessions. */
 typedef KlH2ClientSession *(*KlH2ClientSessionFactory)(KlAllocator *alloc);
 
 /* ── Config ──────────────────────────────────────────────────────── */
@@ -93,9 +97,11 @@ typedef struct {
 
 /* ── Callbacks ───────────────────────────────────────────────────── */
 
+/** @brief Per-stream response completion callback. */
 typedef void (*KlH2ClientResponseFn)(KlH2ClientConn *c, int32_t stream_id,
                                       const KlH2ClientResponse *resp,
                                       void *user_data);
+/** @brief Connection-level error callback. */
 typedef void (*KlH2ClientErrorFn)(KlH2ClientConn *c, const char *msg,
                                    void *user_data);
 
@@ -132,8 +138,11 @@ int32_t kl_h2_client_request(KlH2ClientConn *c, const char *method,
                               const char *body, size_t body_len,
                               KlH2ClientResponseFn on_resp, void *ud);
 
+/** @brief Close the HTTP/2 client connection. */
 void kl_h2_client_close(KlH2ClientConn *c);
+/** @brief Free all HTTP/2 client resources. */
 void kl_h2_client_free(KlH2ClientConn *c);
+/** @brief Free a response's headers and body (allocator-owned). */
 void kl_h2_client_response_free(KlH2ClientResponse *resp, KlAllocator *alloc);
 
 #endif

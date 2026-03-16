@@ -20,11 +20,11 @@ typedef void (*KlWatcherFn)(int fd, KlEventMask ready, void *user_data);
  * @brief A registered FD watcher (heap-allocated, ctx-owned list).
  */
 typedef struct KlWatcher {
-    int fd;
-    KlEventMask mask;
-    KlWatcherFn on_ready;
-    void *user_data;
-    struct KlWatcher *next;
+    int fd;                  /**< Watched file descriptor */
+    KlEventMask mask;        /**< Event interest mask */
+    KlWatcherFn on_ready;    /**< Callback when FD is ready */
+    void *user_data;         /**< Opaque user pointer */
+    struct KlWatcher *next;  /**< Next watcher in ctx-owned list */
 } KlWatcher;
 
 /* ── KlEventCtx — composable event loop + watcher context ────────── */
@@ -40,16 +40,16 @@ typedef struct KlTimerEntry KlTimerEntry;
  * (e.g. by KlClient, KlThreadPool) without requiring a full server.
  */
 typedef struct KlEventCtx {
-    KlEventLoop loop;
-    KlAllocator *alloc;       /* borrowed — must outlive ctx */
-    KlWatcher *watchers;
-    int dispatch_dirty;       /* set by kl_watcher_mod/del during callback */
-    KlError last_error;       /* diagnostic: set at point of return -1 */
+    KlEventLoop loop;             /**< Platform event loop */
+    KlAllocator *alloc;           /**< borrowed — must outlive ctx */
+    KlWatcher *watchers;          /**< Head of ctx-owned watcher list */
+    int dispatch_dirty;       /**< set by kl_watcher_mod/del during callback */
+    KlError last_error;       /**< diagnostic: set at point of return -1 */
     /* Timer heap */
-    KlTimerEntry *timers;     /* min-heap array (NULL until first add) */
-    int timer_count;          /* entries in heap */
-    int timer_cap;            /* allocated slots */
-    int64_t timer_next_id;    /* monotonic ID counter */
+    KlTimerEntry *timers;     /**< min-heap array (NULL until first add) */
+    int timer_count;          /**< entries in heap */
+    int timer_cap;            /**< allocated slots */
+    int64_t timer_next_id;    /**< monotonic ID counter */
 } KlEventCtx;
 
 /**

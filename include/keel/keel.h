@@ -1,5 +1,27 @@
+/**
+ * @file keel.h
+ * @brief KEEL — Minimal, zero-allocation HTTP/1.1 server library for C.
+ *
+ * Umbrella header that includes all public KEEL modules.
+ *
+ * @defgroup version Version
+ * @brief Compile-time version macros.
+ * @{
+ */
+
 #ifndef KEEL_H
 #define KEEL_H
+
+/** @brief Major version number. */
+#define KL_VERSION_MAJOR  1
+/** @brief Minor version number. */
+#define KL_VERSION_MINOR  0
+/** @brief Patch version number. */
+#define KL_VERSION_PATCH  0
+/** @brief Version string ("major.minor.patch"). */
+#define KL_VERSION_STRING "1.0.0"
+
+/** @} */
 
 #include <keel/error.h>
 #include <keel/allocator.h>

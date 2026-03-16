@@ -8,59 +8,50 @@
 
 typedef struct KlTls KlTls;
 
-/* Pluggable write callback — same signature as sh_json's ShJsonWriteFn */
+/** @brief Pluggable write callback — same signature as sh_json's ShJsonWriteFn. */
 typedef int (*KlWriteFn)(void *ctx, const char *data, size_t len);
 
 typedef enum {
-    KL_BODY_NONE,
-    KL_BODY_BUFFER,
-    KL_BODY_FILE,
-    KL_BODY_STREAM
+    KL_BODY_NONE,       /**< No body */
+    KL_BODY_BUFFER,     /**< Buffered body */
+    KL_BODY_FILE,       /**< File body (sendfile) */
+    KL_BODY_STREAM      /**< Chunked streaming body */
 } KlBodyMode;
 
 typedef struct KlResponse {
-    KlAllocator *alloc;
-    int conn_fd;
+    KlAllocator *alloc;     /**< Allocator for header buffer */
+    int conn_fd;            /**< Connection file descriptor */
 
-    /* Header buffer (allocated, grows via allocator) */
-    char *hdr_buf;
-    size_t hdr_len;
-    size_t hdr_cap;
+    char *hdr_buf;          /**< Header buffer (allocated, grows via allocator) */
+    size_t hdr_len;         /**< Header buffer used length */
+    size_t hdr_cap;         /**< Header buffer capacity */
 
-    int status;
-    int headers_sent;
-    KlBodyMode body_mode;
+    int status;             /**< HTTP status code */
+    int headers_sent;       /**< 1 if headers already flushed */
+    KlBodyMode body_mode;   /**< Body mode (none/buffer/file/stream) */
 
-    /* KL_BODY_BUFFER */
-    const char *body;
-    size_t body_len;
+    const char *body;       /**< Buffered body pointer (borrowed) */
+    size_t body_len;        /**< Buffered body length */
 
-    /* Owned body copy (for kl_response_body_copy) */
-    char *body_owned;
-    size_t body_owned_size;
+    char *body_owned;       /**< Owned body copy (for kl_response_body_copy) */
+    size_t body_owned_size; /**< Owned body copy size */
 
-    /* KL_BODY_FILE */
-    int file_fd;
-    off_t file_size;
-    off_t file_offset;
+    int file_fd;            /**< File descriptor for sendfile */
+    off_t file_size;        /**< File size in bytes */
+    off_t file_offset;      /**< File offset for sendfile resume */
 
-    /* KL_BODY_STREAM */
-    int stream_error;
-    int stream_ended;       /* 1 = end_stream called, drain flush will close */
+    int stream_error;       /**< Streaming error flag */
+    int stream_ended;       /**< 1 = end_stream called, drain flush will close */
 
-    /* Streaming backpressure buffer (opt-in via kl_response_enable_drain) */
-    KlDrain drain;
-    int drain_enabled;      /* 0 = off (default), 1 = on */
+    KlDrain drain;          /**< Streaming backpressure buffer */
+    int drain_enabled;      /**< 0 = off (default), 1 = on */
 
-    /* Buffer send progress (for partial writev resume) */
-    size_t send_offset;
+    size_t send_offset;     /**< Buffer send progress (partial writev resume) */
 
-    /* Protocol flags (set by connection layer) */
-    int keep_alive;
-    int head_request;
+    int keep_alive;         /**< Keep-alive flag (set by connection layer) */
+    int head_request;       /**< 1 if HEAD request (suppress body) */
 
-    /* TLS session (NULL for plaintext — set by connection layer) */
-    KlTls *tls;
+    KlTls *tls;             /**< TLS session (NULL for plaintext) */
 } KlResponse;
 
 /**

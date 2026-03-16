@@ -1,5 +1,6 @@
-/*
- * redirect.h — HTTP redirect following (sync + async)
+/**
+ * @file redirect.h
+ * @brief HTTP redirect following (sync + async).
  *
  * Orthogonal redirect module that wraps the existing client APIs
  * with automatic 3xx redirect following. Does not modify client.h
@@ -18,6 +19,7 @@
 
 /* ── Constants ────────────────────────────────────────────────────── */
 
+/** @brief Default maximum redirects. */
 #define KL_REDIRECT_DEFAULT_MAX 10
 
 /* ── Config ───────────────────────────────────────────────────────── */

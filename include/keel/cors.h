@@ -5,25 +5,30 @@
 #include <keel/response.h>
 #include <stddef.h>
 
-/* cors.h — Built-in CORS middleware.
+/** @file cors.h
+ *  @brief Built-in CORS middleware.
  *
- * Usage:
- *   KlCorsConfig cors;
- *   kl_cors_init(&cors);
- *   kl_cors_add_origin(&cors, "https://app.example.com");
- *   kl_server_use(&s, "*", pattern, kl_cors_middleware, &cors);
+ *  Usage:
+ *  @code
+ *    KlCorsConfig cors;
+ *    kl_cors_init(&cors);
+ *    kl_cors_add_origin(&cors, "https://app.example.com");
+ *    kl_server_use(&s, "*", pattern, kl_cors_middleware, &cors);
+ *  @endcode
  */
 
+/** @brief Maximum number of allowed origins. */
 #define KL_CORS_MAX_ORIGINS 16
+/** @brief Maximum origin string length. */
 #define KL_CORS_ORIGIN_SIZE 256
 
 typedef struct {
     char allowed_origins[KL_CORS_MAX_ORIGINS][KL_CORS_ORIGIN_SIZE];
-    int origin_count;             /* 0 = allow all (*) */
-    const char *allowed_methods;  /* default: "GET, POST, OPTIONS" */
-    const char *allowed_headers;  /* default: "Content-Type, Authorization" */
-    int allow_credentials;        /* 1 = include credentials header */
-    int max_age_seconds;          /* preflight cache time (default: 86400) */
+    int origin_count;             /**< 0 = allow all (*) */
+    const char *allowed_methods;  /**< default: "GET, POST, OPTIONS" */
+    const char *allowed_headers;  /**< default: "Content-Type, Authorization" */
+    int allow_credentials;        /**< 1 = include credentials header */
+    int max_age_seconds;          /**< preflight cache time (default: 86400) */
 } KlCorsConfig;
 
 /**

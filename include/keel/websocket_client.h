@@ -1,5 +1,6 @@
-/*
- * websocket_client.h — WebSocket client API
+/**
+ * @file websocket_client.h
+ * @brief WebSocket client API.
  *
  * Async WebSocket client driven by KlEventCtx watchers.
  * Reuses the shared frame parser from websocket.h.
@@ -16,10 +17,15 @@
 
 /* ── Defaults ────────────────────────────────────────────────────── */
 
+/** @brief Default connect/handshake timeout in milliseconds. */
 #define KL_WS_CLIENT_DEFAULT_TIMEOUT_MS   30000
+/** @brief Receive buffer size in bytes. */
 #define KL_WS_CLIENT_RECV_BUF_SIZE        8192
+/** @brief Default maximum frame size (16 MB). */
 #define KL_WS_CLIENT_DEFAULT_MAX_FRAME    (16 * 1024 * 1024)
-#define KL_WS_CLIENT_KEY_B64_SIZE         25   /* 16 bytes -> 24 Base64 chars + NUL */
+/** @brief Base64-encoded key size (16 bytes -> 24 Base64 chars + NUL). */
+#define KL_WS_CLIENT_KEY_B64_SIZE         25
+/** @brief Initial upgrade response buffer size. */
 #define KL_WS_CLIENT_UPGRADE_BUF_INIT     512
 
 /* ── Types ───────────────────────────────────────────────────────── */
@@ -35,12 +41,12 @@ typedef struct {
 } KlWsClientConfig;
 
 typedef struct {
-    void (*on_open)(KlWsClientConn *ws, void *user_data);
+    void (*on_open)(KlWsClientConn *ws, void *user_data);             /**< Connection opened */
     void (*on_message)(KlWsClientConn *ws, const char *data, size_t len,
-                       int is_binary, void *user_data);
+                       int is_binary, void *user_data);                /**< Message received */
     void (*on_close)(KlWsClientConn *ws, uint16_t code,
-                     const char *reason, size_t reason_len, void *user_data);
-    void (*on_error)(KlWsClientConn *ws, const char *msg, void *user_data);
+                     const char *reason, size_t reason_len, void *user_data); /**< Close frame received */
+    void (*on_error)(KlWsClientConn *ws, const char *msg, void *user_data);   /**< Error occurred */
 } KlWsClientCallbacks;
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -65,11 +71,20 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
                                       const KlWsClientCallbacks *cbs,
                                       void *user_data);
 
+/** @brief Send a text frame. @return 0 on success, -1 on error. */
 int   kl_ws_client_send_text(KlWsClientConn *ws, const char *data, size_t len);
+
+/** @brief Send a binary frame. @return 0 on success, -1 on error. */
 int   kl_ws_client_send_binary(KlWsClientConn *ws, const char *data, size_t len);
+
+/** @brief Send a ping frame. @return 0 on success, -1 on error. */
 int   kl_ws_client_send_ping(KlWsClientConn *ws, const char *data, size_t len);
+
+/** @brief Initiate close handshake. */
 void  kl_ws_client_close(KlWsClientConn *ws, uint16_t code,
                           const char *reason, size_t reason_len);
+
+/** @brief Free all WebSocket client resources. */
 void  kl_ws_client_free(KlWsClientConn *ws);
 
 #endif

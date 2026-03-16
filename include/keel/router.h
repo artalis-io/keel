@@ -7,6 +7,7 @@
 #include <keel/body_reader.h>
 #include <stddef.h>
 
+/** @brief Route handler function. */
 typedef void (*KlHandler)(KlRequest *req, KlResponse *res, void *user_data);
 
 /**
@@ -19,39 +20,39 @@ typedef int (*KlMiddleware)(KlRequest *req, KlResponse *res, void *user_data);
 typedef struct KlWsServerConfig KlWsServerConfig;
 
 typedef struct {
-    const char *method;
-    const char *pattern;
-    size_t method_len;
-    size_t pattern_len;
-    KlHandler handler;
-    void *user_data;
-    KlBodyReaderFactory body_reader;   /* NULL = discard body */
-    KlWsServerConfig *ws_config;       /* non-NULL = WebSocket endpoint */
+    const char *method;                /**< HTTP method ("GET", "POST", "*") */
+    const char *pattern;               /**< URL pattern ("/path", "/path/:param") */
+    size_t method_len;                 /**< Length of method string */
+    size_t pattern_len;                /**< Length of pattern string */
+    KlHandler handler;                 /**< Handler function */
+    void *user_data;                   /**< Opaque data passed to handler */
+    KlBodyReaderFactory body_reader;   /**< Body reader factory (NULL = discard body) */
+    KlWsServerConfig *ws_config;       /**< WebSocket config (non-NULL = WebSocket endpoint) */
 } KlRoute;
 
 typedef struct {
-    const char *method;
-    const char *pattern;
-    size_t method_len;
-    size_t pattern_len;
-    KlMiddleware fn;
-    void *user_data;
+    const char *method;    /**< HTTP method filter */
+    const char *pattern;   /**< URL pattern filter */
+    size_t method_len;     /**< Length of method string */
+    size_t pattern_len;    /**< Length of pattern string */
+    KlMiddleware fn;       /**< Middleware function */
+    void *user_data;       /**< Opaque data passed to fn */
 } KlMiddlewareEntry;
 
 typedef struct KlRouter {
-    KlRoute *routes;
-    int count;
-    int capacity;
+    KlRoute *routes;                   /**< Route table array */
+    int count;                         /**< Number of registered routes */
+    int capacity;                      /**< Route table capacity */
 
-    KlMiddlewareEntry *middleware;
-    int mw_count;
-    int mw_capacity;
+    KlMiddlewareEntry *middleware;     /**< Pre-body middleware array */
+    int mw_count;                      /**< Number of pre-body middleware entries */
+    int mw_capacity;                   /**< Pre-body middleware capacity */
 
-    KlMiddlewareEntry *post_middleware;
-    int post_mw_count;
-    int post_mw_capacity;
+    KlMiddlewareEntry *post_middleware; /**< Post-body middleware array */
+    int post_mw_count;                 /**< Number of post-body middleware entries */
+    int post_mw_capacity;              /**< Post-body middleware capacity */
 
-    KlAllocator *alloc;
+    KlAllocator *alloc;                /**< Allocator for table growth */
 } KlRouter;
 
 /**
@@ -64,6 +65,7 @@ int  kl_router_init(KlRouter *r, KlAllocator *alloc);
 
 /**
  * @brief Register a route. Pattern supports :param segments (e.g. "/users/:id").
+ * @param r           Router instance.
  * @param method      HTTP method ("GET", "POST", "*" for any).
  * @param pattern     URL pattern to match.
  * @param handler     Handler function invoked on match.
@@ -78,6 +80,11 @@ int  kl_router_add(KlRouter *r, const char *method, const char *pattern,
 /**
  * @brief Match a request against registered routes.
  *        HEAD requests automatically fall back to GET routes.
+ * @param r          Router instance.
+ * @param method     Request method string.
+ * @param method_len Length of method string.
+ * @param path       Request path string.
+ * @param path_len   Length of path string.
  * @param matched    Receives the matched route, or NULL.
  * @param params     Receives extracted :param values.
  * @param num_params Receives the number of extracted params.
@@ -89,6 +96,7 @@ int  kl_router_match(KlRouter *r, const char *method, size_t method_len,
 
 /**
  * @brief Register pre-body middleware that runs before body reading.
+ * @param r       Router instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
  * @param pattern URL pattern — exact match or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
@@ -104,6 +112,7 @@ int  kl_router_use(KlRouter *r, const char *method, const char *pattern,
  * Post-body middleware can access req->body_reader data. Short-circuiting
  * preserves keep_alive since the body has already been consumed.
  *
+ * @param r       Router instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
  * @param pattern URL pattern — exact match or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.

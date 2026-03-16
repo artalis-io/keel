@@ -5,58 +5,62 @@
 #include <string.h>
 #include <strings.h>
 
+/** @brief Maximum number of request headers. */
 #define KL_MAX_HEADERS 64
 
-/* Forward declaration — full definition in body_reader.h */
+/** @brief Forward declaration — full definition in body_reader.h. */
 typedef struct KlBodyReader KlBodyReader;
 
 typedef struct {
-    const char *name;   size_t name_len;
-    const char *value;  size_t value_len;
+    const char *name;   /**< Parameter name pointer. */
+    size_t name_len;    /**< Parameter name length. */
+    const char *value;  /**< Parameter value pointer. */
+    size_t value_len;   /**< Parameter value length. */
 } KlParam;
 
+/** @brief Maximum number of route parameters. */
 #define KL_MAX_PARAMS 16
 
 typedef struct KlRequest KlRequest;
 
 struct KlRequest {
-    const char *method;
-    size_t method_len;
-    const char *path;
-    size_t path_len;
-    const char *query;      /* after '?' or NULL */
-    size_t query_len;
-    int version_major;
-    int version_minor;
-    int keep_alive;
+    const char *method;          /**< HTTP method pointer. */
+    size_t method_len;           /**< HTTP method length. */
+    const char *path;            /**< Request path pointer. */
+    size_t path_len;             /**< Request path length. */
+    const char *query;           /**< After '?' or NULL. */
+    size_t query_len;            /**< Query string length. */
+    int version_major;           /**< HTTP major version. */
+    int version_minor;           /**< HTTP minor version. */
+    int keep_alive;              /**< 1 if connection is keep-alive. */
 
     struct {
         const char *name;  size_t name_len;
         const char *value; size_t value_len;
-    } headers[KL_MAX_HEADERS];
-    int num_headers;
+    } headers[KL_MAX_HEADERS];  /**< Parsed request headers. */
+    int num_headers;             /**< Number of parsed headers. */
 
-    size_t content_length;
-    int chunked;                 /* 1 if Transfer-Encoding: chunked */
-    KlBodyReader *body_reader;   /* set by connection layer, NULL if no body */
-    void *ctx;                   /* opaque per-request context, set by middleware */
+    size_t content_length;       /**< Content-Length value. */
+    int chunked;                 /**< 1 if Transfer-Encoding: chunked. */
+    KlBodyReader *body_reader;   /**< Set by connection layer, NULL if no body. */
+    void *ctx;                   /**< Opaque per-request context, set by middleware. */
 
-    KlParam params[KL_MAX_PARAMS];
-    int num_params;
+    KlParam params[KL_MAX_PARAMS]; /**< Matched route parameters. */
+    int num_params;              /**< Number of matched route parameters. */
 
-    void *_server_ctx;   /* opaque — set to KlConn* by connection layer (do not modify) */
+    void *_server_ctx;           /**< Opaque — set to KlConn* by connection layer (do not modify). */
 };
 
-/* Forward declaration — full definition in connection.h */
+/** @brief Forward declaration — full definition in connection.h. */
 typedef struct KlConn KlConn;
 
-/* Typed accessor for the connection handle (preferred over raw _server_ctx). */
+/** @brief Typed accessor for the connection handle (preferred over raw _server_ctx). */
 static inline KlConn *kl_request_conn(const KlRequest *req) {
     return (KlConn *)req->_server_ctx;
 }
 
-/* Find header by name (case-insensitive). Returns null-terminated value
- * pointer, or NULL if not found. */
+/** @brief Find header by name (case-insensitive).
+ *  @return Null-terminated value pointer, or NULL if not found. */
 static inline const char *kl_request_header(const KlRequest *req,
                                             const char *name) {
     size_t nlen = strlen(name);
@@ -69,8 +73,8 @@ static inline const char *kl_request_header(const KlRequest *req,
     return NULL;
 }
 
-/* Find header by name (case-insensitive). Returns value pointer and sets *out_len.
- * Returns NULL if not found. */
+/** @brief Find header by name (case-insensitive).
+ *  @return Value pointer (sets *out_len), or NULL if not found. */
 static inline const char *kl_request_header_len(const KlRequest *req,
                                                 const char *name,
                                                 size_t *out_len) {
@@ -85,8 +89,8 @@ static inline const char *kl_request_header_len(const KlRequest *req,
     return NULL;
 }
 
-/* Find route parameter by name. Returns value pointer and sets *out_len.
- * Returns NULL if not found. */
+/** @brief Find route parameter by name.
+ *  @return Value pointer (sets *out_len), or NULL if not found. */
 static inline const char *kl_request_param(const KlRequest *req,
                                             const char *name,
                                             size_t *out_len) {

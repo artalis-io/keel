@@ -10,10 +10,10 @@
  * implementations for arena/pool allocation, tracking, or sandboxing.
  */
 typedef struct {
-    void *(*malloc)(void *ctx, size_t size);
-    void *(*realloc)(void *ctx, void *ptr, size_t old_size, size_t new_size);
-    void  (*free)(void *ctx, void *ptr, size_t size);
-    void *ctx;
+    void *(*malloc)(void *ctx, size_t size);                        /**< Allocate size bytes */
+    void *(*realloc)(void *ctx, void *ptr, size_t old_size, size_t new_size); /**< Resize allocation */
+    void  (*free)(void *ctx, void *ptr, size_t size);              /**< Free allocation */
+    void *ctx;                                                     /**< User-provided context */
 } KlAllocator;
 
 /**

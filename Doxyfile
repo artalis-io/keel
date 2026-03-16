@@ -1,4 +1,5 @@
 PROJECT_NAME           = "KEEL"
+PROJECT_NUMBER         = 1.0.0
 PROJECT_BRIEF          = "Minimal, zero-allocation HTTP/1.1 server library for C"
 OUTPUT_DIRECTORY       = docs/api
 INPUT                  = include/keel
@@ -10,5 +11,5 @@ OPTIMIZE_OUTPUT_FOR_C  = YES
 GENERATE_LATEX         = NO
 GENERATE_HTML          = YES
 QUIET                  = YES
-WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_UNDOCUMENTED   = YES
 SORT_MEMBER_DOCS       = NO

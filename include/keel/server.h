@@ -15,72 +15,76 @@
 #include <stdint.h>
 
 typedef struct KlWsServerConfig KlWsServerConfig;
+/** @brief Factory function for creating request parsers. */
 typedef KlParser *(*KlParserFactory)(KlAllocator *alloc);
 
-/* Access log callback — called after each response is fully sent.
- * NULL = disabled (default, zero overhead). */
+/** @brief Access log callback — called after each response is fully sent. NULL = disabled. */
 typedef void (*KlAccessLogFn)(const KlRequest *req, int status,
                                size_t body_bytes, double duration_ms,
                                void *user_data);
 
-/* Log levels (values match rxi/log.c for zero-cost bridging) */
-#define KL_LOG_TRACE 0
-#define KL_LOG_DEBUG 1
-#define KL_LOG_INFO  2
-#define KL_LOG_WARN  3
-#define KL_LOG_ERROR 4
-#define KL_LOG_FATAL 5
+/** @brief Log levels (values match rxi/log.c for zero-cost bridging). @{ */
+#define KL_LOG_TRACE 0  /**< Trace */
+#define KL_LOG_DEBUG 1  /**< Debug */
+#define KL_LOG_INFO  2  /**< Info */
+#define KL_LOG_WARN  3  /**< Warning */
+#define KL_LOG_ERROR 4  /**< Error */
+#define KL_LOG_FATAL 5  /**< Fatal */
+/** @} */
 
-/* Diagnostic log callback. NULL = fprintf(stderr) fallback. */
+/** @brief Diagnostic log callback. NULL = fprintf(stderr) fallback. */
 typedef void (*KlLogFn)(int level, const char *fmt, va_list ap,
                          void *user_data);
 
+/** @brief Default max connections. */
 #define KL_DEFAULT_MAX_CONNS      256
-#define KL_DEFAULT_READ_TIMEOUT   30000           /* ms */
-#define KL_DEFAULT_MAX_BODY_SIZE  (1024 * 1024)   /* 1 MB */
+/** @brief Default read timeout (ms). */
+#define KL_DEFAULT_READ_TIMEOUT   30000           /**< ms */
+/** @brief Default max body size. */
+#define KL_DEFAULT_MAX_BODY_SIZE  (1024 * 1024)   /**< 1 MB */
 
 typedef struct KlConfig {
     int port;
-    const char *bind_addr;      /* default: "0.0.0.0" */
-    int max_connections;        /* default: KL_DEFAULT_MAX_CONNS */
-    int read_timeout_ms;        /* default: KL_DEFAULT_READ_TIMEOUT */
-    int body_timeout_ms;        /* total body deadline; 0 = use read_timeout_ms */
-    KlAllocator *alloc;         /* default: stdlib */
-    KlParserFactory parser;     /* default: kl_parser_llhttp */
-    KlAccessLogFn access_log;   /* default: NULL (disabled) */
-    void *access_log_data;      /* passed as user_data to access_log */
-    KlLogFn log_fn;             /* default: NULL (fprintf stderr) */
+    const char *bind_addr;      /**< default: "0.0.0.0" */
+    int max_connections;        /**< default: KL_DEFAULT_MAX_CONNS */
+    int read_timeout_ms;        /**< default: KL_DEFAULT_READ_TIMEOUT */
+    int body_timeout_ms;        /**< total body deadline; 0 = use read_timeout_ms */
+    KlAllocator *alloc;         /**< default: stdlib */
+    KlParserFactory parser;     /**< default: kl_parser_llhttp */
+    KlAccessLogFn access_log;   /**< default: NULL (disabled) */
+    void *access_log_data;      /**< passed as user_data to access_log */
+    KlLogFn log_fn;             /**< default: NULL (fprintf stderr) */
     void   *log_user_data;
-    int install_signal_handlers; /* install SIGTERM/SIGINT handlers (single instance only —
+    int install_signal_handlers; /**< install SIGTERM/SIGINT handlers (single instance only —
                                   * only the last server to call kl_server_run() receives signals) */
-    int drain_timeout_ms;        /* graceful shutdown drain timeout (0 = immediate) */
-    KlTlsConfig *tls;           /* TLS config — NULL = plaintext (default) */
-    KlH2ServerConfig *h2;             /* HTTP/2 config — NULL = disabled (default) */
-    size_t max_body_size;       /* discard-path body limit; default: 1 MB */
-    size_t max_header_size;     /* max header block size; 0 = KL_READ_BUF_SIZE (8192) */
-    KlCompressConfig *compress; /* compression config — NULL = disabled (default) */
+    int drain_timeout_ms;        /**< graceful shutdown drain timeout (0 = immediate) */
+    KlTlsConfig *tls;           /**< TLS config — NULL = plaintext (default) */
+    KlH2ServerConfig *h2;             /**< HTTP/2 config — NULL = disabled (default) */
+    size_t max_body_size;       /**< discard-path body limit; default: 1 MB */
+    size_t max_header_size;     /**< max header block size; 0 = KL_READ_BUF_SIZE (8192) */
+    KlCompressConfig *compress; /**< compression config — NULL = disabled (default) */
 } KlConfig;
 
 typedef struct KlAsyncOp KlAsyncOp;
 
 typedef struct KlServer {
     KlConfig config;
-    KlAllocator alloc_storage;  /* owned copy if user didn't provide one */
-    KlTlsConfig tls_storage;   /* owned copy of TLS config (if provided) */
-    KlH2ServerConfig h2_storage;     /* owned copy of H2 config (if provided) */
-    KlCompressConfig compress_storage; /* owned copy of compress config (if provided) */
-    KlRouter router;
-    KlConnPool pool;
-    KlEventCtx ev;              /* event loop + watcher list */
-    int listen_fd;
-    int bound_port;             /* actual port after bind (useful with port=0) */
-    int listen_paused;          /* 1 = listen fd removed from event loop (pool full) */
-    _Atomic int running;
-    _Atomic int draining;
-    uint64_t drain_deadline_ms;
-    KlAsyncOp *async_ops;       /* active async ops list */
-    KlFileIO *file_io;          /* async file I/O (auto-created if backend supports it) */
-    KlError last_error;         /* diagnostic: set at point of return -1 */
+    KlAllocator alloc_storage;  /**< owned copy if user didn't provide one */
+    KlTlsConfig tls_storage;   /**< owned copy of TLS config (if provided) */
+    KlH2ServerConfig h2_storage;     /**< owned copy of H2 config (if provided) */
+    KlCompressConfig compress_storage; /**< owned copy of compress config (if provided) */
+    KlRouter router;            /**< Route table */
+    KlConnPool pool;            /**< Connection pool */
+    KlEventCtx ev;              /**< event loop + watcher list */
+    int listen_fd;              /**< Listening socket fd */
+    int bound_port;             /**< actual port after bind (useful with port=0) */
+    int listen_paused;          /**< 1 = listen fd removed from event loop (pool full) */
+    _Atomic int running;        /**< Server is running */
+    _Atomic int draining;       /**< Graceful shutdown in progress */
+    uint64_t drain_deadline_ms; /**< Drain timeout deadline */
+    KlAsyncOp *async_ops;       /**< active async ops list */
+    KlFileIO *file_io;          /**< async file I/O (auto-created if backend supports it) */
+    KlError last_error;         /**< diagnostic: set at point of return -1 */
 } KlServer;
 
 /**
@@ -101,6 +105,7 @@ int  kl_server_route(KlServer *s, const char *method, const char *pattern,
 
 /**
  * @brief Register pre-body middleware on the server.
+ * @param s       Server instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
  * @param pattern URL pattern — exact or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
@@ -116,6 +121,7 @@ int  kl_server_use(KlServer *s, const char *method, const char *pattern,
  * Runs after body reading completes. Can access req->body_reader data.
  * Short-circuiting preserves keep_alive (body already consumed).
  *
+ * @param s       Server instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).
  * @param pattern URL pattern — exact or prefix with trailing slash-star.
  * @param fn      Middleware function. Return 0 to continue, non-zero to short-circuit.
@@ -149,10 +155,7 @@ void kl_server_stop(KlServer *s);
 /** @brief Free all server resources (pool, router, event loop). */
 void kl_server_free(KlServer *s);
 
-/**
- * Server load statistics — read-only snapshot for load-shedding decisions.
- * All fields are populated from existing server state (zero overhead).
- */
+/** @brief Server load statistics — read-only snapshot for load-shedding decisions. */
 typedef struct {
     int active_connections;    /**< Currently active connection slots */
     int max_connections;       /**< Configured pool capacity */

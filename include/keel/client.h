@@ -1,5 +1,6 @@
-/*
- * client.h — HTTP/1.1 client (sync + async)
+/**
+ * @file client.h
+ * @brief HTTP/1.1 client (sync + async).
  *
  * Sync API: blocking request/response with poll()-based I/O.
  * Async API: non-blocking state machine driven by KlEventCtx watchers.
@@ -22,15 +23,24 @@
 
 /* ── Constants ────────────────────────────────────────────────────── */
 
+/** @brief Maximum hostname length. */
 #define KL_CLIENT_HOSTNAME_MAX       256
+/** @brief Request buffer size. */
 #define KL_CLIENT_REQ_BUF_SIZE       4096
+/** @brief Maximum request headers. */
 #define KL_CLIENT_MAX_REQ_HEADERS    64
+/** @brief Default timeout (ms). */
 #define KL_CLIENT_DEFAULT_TIMEOUT_MS 30000
+/** @brief Default max response size. */
 #define KL_CLIENT_DEFAULT_MAX_RESP   (4 * 1024 * 1024)
+/** @brief Receive buffer size. */
 #define KL_CLIENT_RECV_BUF_SIZE      8192
+/** @brief Chunked encoding buffer size. */
 #define KL_CLIENT_CHUNK_BUF_SIZE     4096
-#define KL_CLIENT_CHUNK_HDR_SIZE     16    /* fits "FFFFFFFFFFFFFFFF\r\n" */
-#define KL_CLIENT_FINAL_CHUNK_LEN    5     /* "0\r\n\r\n" */
+/** @brief Chunked header size. */
+#define KL_CLIENT_CHUNK_HDR_SIZE     16    /**< Fits "FFFFFFFFFFFFFFFF\\r\\n" */
+/** @brief Final chunk length. */
+#define KL_CLIENT_FINAL_CHUNK_LEN    5     /**< "0\\r\\n\\r\\n" */
 
 /* ── Proxy ────────────────────────────────────────────────────────── */
 
@@ -46,8 +56,8 @@ typedef struct {
 /* ── Types ────────────────────────────────────────────────────────── */
 
 typedef struct {
-    const char *name;
-    const char *value;
+    const char *name;   /**< Header name */
+    const char *value;  /**< Header value */
 } KlClientHeader;
 
 typedef struct KlClientResponse {
@@ -106,13 +116,11 @@ typedef ssize_t (*KlClientReadFn)(char *buf, size_t buf_len, void *user_data);
  * with Transfer-Encoding: chunked (body/body_len parameters are ignored).
  */
 typedef struct {
-    /* Response streaming (NULL = buffer as before) */
-    KlClientBodyFn     on_body;
+    KlClientBodyFn     on_body;        /**< Response body callback (NULL = buffer) */
     KlClientHeadersFn  on_headers;    /**< NULL = skip */
     void             (*on_complete)(void *user_data);  /**< NULL = skip */
 
-    /* Request streaming (NULL = use body/body_len) */
-    KlClientReadFn     body_read;
+    KlClientReadFn     body_read;     /**< Request body pull callback (NULL = use body/body_len) */
 
     void              *user_data;     /**< shared across all callbacks */
 } KlClientStreamCfg;
@@ -148,7 +156,17 @@ int kl_client_request(KlAllocator *alloc, const KlClientConfig *cfg,
  * Same as kl_client_request but supports response and request body streaming.
  * When stream is NULL, behaves identically to kl_client_request.
  *
- * @param stream  Streaming config (NULL = buffer mode, same as kl_client_request).
+ * @param alloc       Allocator for response data.
+ * @param cfg         Client config (timeouts, TLS, limits). May be NULL for defaults.
+ * @param method      HTTP method ("GET", "POST", etc.).
+ * @param url         Full URL ("http://host/path" or "https://host/path").
+ * @param headers     Request headers (may be NULL if num_headers == 0).
+ * @param num_headers Number of request headers.
+ * @param body        Request body (may be NULL).
+ * @param body_len    Request body length.
+ * @param stream      Streaming config (NULL = buffer mode, same as kl_client_request).
+ * @param resp        Output: populated on success. Caller must call kl_client_response_free().
+ * @return 0 on success, -1 on error.
  */
 int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
                          const char *method, const char *url,
@@ -210,7 +228,19 @@ KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
  * Same as kl_client_start but supports response and request body streaming.
  * When stream is NULL, behaves identically to kl_client_start.
  *
- * @param stream  Streaming config (NULL = buffer mode, same as kl_client_start).
+ * @param ev_ctx      Event context for watcher registration.
+ * @param alloc       Allocator for client state and response.
+ * @param cfg         Client config (timeouts, TLS, limits). May be NULL for defaults.
+ * @param method      HTTP method.
+ * @param url         Full URL.
+ * @param headers     Request headers (may be NULL).
+ * @param num_headers Number of request headers.
+ * @param body        Request body (may be NULL).
+ * @param body_len    Request body length.
+ * @param stream      Streaming config (NULL = buffer mode, same as kl_client_start).
+ * @param on_done     Callback invoked on completion or error.
+ * @param user_data   User data passed to on_done.
+ * @return Client handle, or NULL on immediate failure.
  */
 KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                               const KlClientConfig *cfg,

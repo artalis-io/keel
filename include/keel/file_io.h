@@ -8,9 +8,9 @@
 typedef struct KlFileIO KlFileIO;
 
 typedef struct {
-    void *udata;       /* connection pointer (opaque to file I/O backend) */
-    ssize_t result;    /* bytes read/transferred, or negative error */
-    int zero_copy;     /* 1 = data already sent to socket (splice path) */
+    void *udata;       /**< connection pointer (opaque to file I/O backend) */
+    ssize_t result;    /**< bytes read/transferred, or negative error */
+    int zero_copy;     /**< 1 = data already sent to socket (splice path) */
 } KlFileIOResult;
 
 struct KlFileIO {
@@ -31,7 +31,7 @@ struct KlFileIO {
     void (*destroy)(KlFileIO *fio);
 };
 
-/** Create async file I/O backend from the event loop.
+/** @brief Create async file I/O backend from the event loop.
  *  Returns NULL if the backend doesn't support async file I/O.
  *  Caller owns the returned object; free with fio->destroy(fio). */
 KlFileIO *kl_file_io_create(KlEventLoop *loop, KlAllocator *alloc);

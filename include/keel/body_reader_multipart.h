@@ -5,29 +5,29 @@
 #include <keel/request.h>
 #include <stddef.h>
 
-#define KL_MP_MAX_BOUNDARY 70   /* RFC 2046 */
+#define KL_MP_MAX_BOUNDARY 70   /**< RFC 2046 */
 
 typedef struct {
-    const char *name;           /* null-terminated, allocated */
-    const char *filename;       /* null-terminated or NULL */
-    const char *content_type;   /* null-terminated or NULL */
-    char *data;
-    size_t data_len;
-    size_t data_cap;            /* allocation capacity */
-    size_t name_len;            /* strlen(name), stored to avoid recalc on free */
-    size_t filename_len;        /* strlen(filename) or 0 */
-    size_t content_type_len;    /* strlen(content_type) or 0 */
+    const char *name;           /**< null-terminated, allocated */
+    const char *filename;       /**< null-terminated or NULL */
+    const char *content_type;   /**< null-terminated or NULL */
+    char *data;                 /**< Part body data */
+    size_t data_len;            /**< Part body length */
+    size_t data_cap;            /**< allocation capacity */
+    size_t name_len;            /**< strlen(name), stored to avoid recalc on free */
+    size_t filename_len;        /**< strlen(filename) or 0 */
+    size_t content_type_len;    /**< strlen(content_type) or 0 */
 } KlMultipartPart;
 
 typedef struct {
-    size_t max_part_size;       /* 0 = unlimited */
-    size_t max_total_size;      /* 0 = unlimited */
-    int max_parts;              /* 0 = unlimited */
+    size_t max_part_size;       /**< 0 = unlimited */
+    size_t max_total_size;      /**< 0 = unlimited */
+    int max_parts;              /**< 0 = unlimited */
 } KlMultipartConfig;
 
 typedef enum {
     KL_MP_PREAMBLE,
-    KL_MP_AFTER_BOUNDARY,  /* boundary found, waiting for \r\n or -- */
+    KL_MP_AFTER_BOUNDARY,  /**< boundary found, waiting for CRLF or -- */
     KL_MP_HEADERS,
     KL_MP_BODY,
     KL_MP_DONE,
@@ -35,33 +35,33 @@ typedef enum {
 } KlMultipartState;
 
 typedef struct {
-    KlBodyReader base;
-    KlAllocator *alloc;
+    KlBodyReader base;          /**< Base body reader vtable */
+    KlAllocator *alloc;         /**< Allocator for parts and buffers */
 
-    /* "\r\n--" + boundary for body scanning */
+    /** "\r\n--" + boundary for body scanning */
     char delimiter[KL_MP_MAX_BOUNDARY + 6];
-    size_t delimiter_len;
+    size_t delimiter_len;       /**< Length of delimiter string */
 
-    /* Parts (growable array) */
-    KlMultipartPart *parts;
-    int num_parts;
-    int parts_cap;
+    /** Parts (growable array) */
+    KlMultipartPart *parts;     /**< Parsed parts array */
+    int num_parts;              /**< Number of parsed parts */
+    int parts_cap;              /**< Parts array capacity */
 
-    /* Limits */
-    KlMultipartConfig config;
-    size_t total_received;
+    /** Limits */
+    KlMultipartConfig config;   /**< Size and count limits */
+    size_t total_received;      /**< Total bytes received so far */
 
-    /* State machine */
-    KlMultipartState state;
+    /** State machine */
+    KlMultipartState state;     /**< Current parser state */
 
-    /* Overlap buffer: last (delimiter_len - 1) bytes from previous on_data,
+    /** Overlap buffer: last (delimiter_len - 1) bytes from previous on_data,
      * to detect boundaries spanning chunks */
     char overlap[KL_MP_MAX_BOUNDARY + 6];
-    size_t overlap_len;
+    size_t overlap_len;         /**< Bytes in overlap buffer */
 
-    /* Part header accumulator */
-    char hdr_buf[2048];
-    size_t hdr_len;
+    /** Part header accumulator */
+    char hdr_buf[2048];         /**< Header line buffer */
+    size_t hdr_len;             /**< Bytes in header buffer */
 } KlMultipartReader;
 
 /**

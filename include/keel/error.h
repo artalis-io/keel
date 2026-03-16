@@ -9,7 +9,7 @@
  * existing memset initialization.
  */
 typedef enum {
-    KL_ERR_NONE = 0,
+    KL_ERR_NONE = 0,        /**< No error */
 
     /* General */
     KL_ERR_INVALID_ARG,     /**< NULL pointer, negative count, bad params */
