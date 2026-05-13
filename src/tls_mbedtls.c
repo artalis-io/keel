@@ -430,7 +430,12 @@ fail:
 
 /* ── Client context creation ─────────────────────────────────────── */
 
-KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
+/* Shared client-ctx initialization. Caller passes either:
+ *   - ca_buf/ca_len: in-memory CA bundle (parsed, copied), OR
+ *   - both NULL/0 : no CA verification (verify_none)
+ * Returns the ctx on success, NULL on failure (mbedTLS structures freed). */
+static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf,
+                                              size_t ca_len,
                                               KlAllocator *alloc)
 {
     if (!alloc)
@@ -462,17 +467,10 @@ KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
         goto fail;
 
     /* Load CA certificates for server verification (optional) */
-    if (ca_path) {
-        size_t ca_len;
-        unsigned char *ca_buf = read_file(ca_path, &ca_len, alloc);
-        if (!ca_buf)
-            goto fail;
-
+    if (ca_buf && ca_len > 0) {
         ret = mbedtls_x509_crt_parse(&ctx->ca_cert, ca_buf, ca_len);
-        kl_free(alloc, ca_buf, ca_len);
         if (ret != 0)
             goto fail;
-
         ctx->has_ca = 1;
     }
 
@@ -492,7 +490,7 @@ KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
     } else {
         /* WARNING: No CA provided — TLS certificate verification DISABLED.
          * Connections are encrypted but vulnerable to MITM attacks.
-         * Production deployments MUST provide a CA bundle path. */
+         * Production deployments MUST provide a CA bundle. */
         mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_NONE);
     }
 
@@ -507,6 +505,35 @@ fail:
     mbedtls_entropy_free(&ctx->entropy);
     kl_free(alloc, ctx, sizeof(*ctx));
     return NULL;
+}
+
+KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
+                                              KlAllocator *alloc)
+{
+    if (!alloc)
+        return NULL;
+
+    /* No CA path → no-verify client */
+    if (!ca_path)
+        return client_ctx_create_from_mem(NULL, 0, alloc);
+
+    size_t ca_len;
+    unsigned char *ca_buf = read_file(ca_path, &ca_len, alloc);
+    if (!ca_buf)
+        return NULL;
+
+    KlTlsCtx *ctx = client_ctx_create_from_mem(ca_buf, ca_len, alloc);
+    kl_free(alloc, ca_buf, ca_len);
+    return ctx;
+}
+
+KlTlsCtx *kl_tls_mbedtls_client_ctx_create_from_buf(const unsigned char *ca_buf,
+                                                      size_t ca_len,
+                                                      KlAllocator *alloc)
+{
+    if (!ca_buf || ca_len == 0 || !alloc)
+        return NULL;
+    return client_ctx_create_from_mem(ca_buf, ca_len, alloc);
 }
 
 /* ── Context destruction ─────────────────────────────────────────── */
