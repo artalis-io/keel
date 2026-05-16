@@ -119,6 +119,31 @@ jobs:
       - name: cppcheck
         run: make cppcheck
 
+      - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
+        run: make wx-guard
+
+      - name: Build hardening — binary flag assertion
+        run: |
+          # Build a test binary and assert the hardening flags actually
+          # propagated to the linker output. RW (not RWE) on GNU_STACK
+          # confirms -Wl,-z,noexecstack landed. BIND_NOW + GNU_RELRO
+          # confirm RELRO is full, not partial.
+          make tests/test_router
+          if ! readelf -l tests/test_router | grep -q 'GNU_STACK.*RW '; then
+            echo "FAIL: GNU_STACK is not RW (executable stack)"
+            readelf -l tests/test_router | grep GNU_STACK
+            exit 1
+          fi
+          if ! readelf -d tests/test_router | grep -q 'BIND_NOW'; then
+            echo "FAIL: BIND_NOW not present (no full RELRO)"
+            exit 1
+          fi
+          if ! readelf -l tests/test_router | grep -q 'GNU_RELRO'; then
+            echo "FAIL: GNU_RELRO segment missing"
+            exit 1
+          fi
+          echo "PASS: GNU_STACK=RW, BIND_NOW set, GNU_RELRO present"
+
   musl:
     name: Linux (musl/Alpine)
     runs-on: ubuntu-latest

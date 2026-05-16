@@ -12,6 +12,32 @@
 #ifndef KEEL_H
 #define KEEL_H
 
+/* ── W^X / no-runtime-codegen invariant ────────────────────────────────
+ *
+ * Keel is structurally W^X: it contains no JIT, no `dlopen`, no
+ * `mmap PROT_EXEC`, no `memfd_create`, no `MAP_JIT`. The HTTP/2,
+ * WebSocket, multipart, and URL parsers all operate on heap + stack
+ * memory only; libFuzzer targets in `fuzz/` exercise these paths.
+ *
+ * Keel does not own a process boundary — W^X enforcement at the
+ * kernel-sandbox layer (seccomp / Seatbelt / Hardened Runtime) is the
+ * host application's responsibility. See SECURITY.md for the host
+ * policy Keel composes under.
+ *
+ * The macros below are reserved opt-in flags. We do not define them;
+ * any future configuration that turns one on must clear this guard
+ * and intentionally weaken Keel's posture. The build fails until
+ * that happens, so the policy violation cannot land silently. */
+#if defined(KEEL_ENABLE_JIT)
+#error "Keel's W^X policy forbids runtime JIT (KEEL_ENABLE_JIT)."
+#endif
+#if defined(KEEL_ENABLE_DYNAMIC_CODE)
+#error "Keel's W^X policy forbids runtime dynamic code (KEEL_ENABLE_DYNAMIC_CODE)."
+#endif
+#if defined(KEEL_ENABLE_DLOPEN)
+#error "Keel's W^X policy forbids dlopen (KEEL_ENABLE_DLOPEN)."
+#endif
+
 /** @brief Major version number. */
 #define KL_VERSION_MAJOR  1
 /** @brief Minor version number. */
