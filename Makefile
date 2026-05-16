@@ -26,8 +26,13 @@ else
   #   -fstack-protector-strong — stack canaries on functions with buffers
   #   -D_FORTIFY_SOURCE=3    — runtime checks on str/mem calls (glibc 2.34+ / gcc 12+ / clang 9+).
   #                            Older toolchains emit a noisy warning and behave as =2; leave loud.
+  # Some toolchain spec files (Alpine/musl, hardened Debian, etc.) pre-set
+  # _FORTIFY_SOURCE at the command line. Undefine first so our value wins
+  # without provoking a "macro redefined" warning that -Werror would
+  # promote to a hard error.
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
-            -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fPIE \
+            -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
+            -fstack-protector-strong -fPIE \
             -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -fPIE -Iinclude -Ivendor/llhttp
   # Use -Wl,-pie so clang routes the flag to the linker without flagging

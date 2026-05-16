@@ -128,17 +128,27 @@ jobs:
           # propagated to the linker output. RW (not RWE) on GNU_STACK
           # confirms -Wl,-z,noexecstack landed. BIND_NOW + GNU_RELRO
           # confirm RELRO is full, not partial.
+          #
+          # `readelf -lW` forces wide one-line-per-segment output so
+          # the flag column (RW / RWE / R) is on the same line as the
+          # segment name. Without -W, flags wrap to a second line and
+          # grep cannot correlate them with GNU_STACK.
           make tests/test_router
-          if ! readelf -l tests/test_router | grep -q 'GNU_STACK.*RW '; then
-            echo "FAIL: GNU_STACK is not RW (executable stack)"
-            readelf -l tests/test_router | grep GNU_STACK
+          STACK_LINE=$(readelf -lW tests/test_router | awk '/GNU_STACK/ {print; exit}')
+          echo "GNU_STACK: $STACK_LINE"
+          if echo "$STACK_LINE" | grep -qE ' RWE '; then
+            echo "FAIL: GNU_STACK is executable (RWE)"
+            exit 1
+          fi
+          if ! echo "$STACK_LINE" | grep -qE ' RW '; then
+            echo "FAIL: GNU_STACK missing RW flag"
             exit 1
           fi
           if ! readelf -d tests/test_router | grep -q 'BIND_NOW'; then
             echo "FAIL: BIND_NOW not present (no full RELRO)"
             exit 1
           fi
-          if ! readelf -l tests/test_router | grep -q 'GNU_RELRO'; then
+          if ! readelf -lW tests/test_router | grep -q 'GNU_RELRO'; then
             echo "FAIL: GNU_RELRO segment missing"
             exit 1
           fi
