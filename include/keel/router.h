@@ -134,6 +134,41 @@ int  kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res);
  */
 int  kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlResponse *res);
 
+/**
+ * @brief Run a fully-formed synthetic request through the router pipeline:
+ *        match → pre-body middleware → post-body middleware → handler.
+ *
+ * The caller is responsible for initialising `req` (method, path,
+ * headers, optional `body_reader`) and `res` (via `kl_response_init`).
+ * On return, `res` holds the response state the handler (or a
+ * short-circuiting middleware) produced; the caller is responsible
+ * for `kl_response_free` and for inspecting `res->status`,
+ * `res->body`, `res->hdr_buf`, etc.
+ *
+ * `req->num_params` / `req->params` are filled in from the match
+ * before the pipeline runs; callers do not need to pre-populate them.
+ *
+ * If `run_middleware` is 0, pre- and post-body middleware are skipped
+ * (only the matched handler runs). When the match fails (404/405) and
+ * middleware is disabled, no handler is invoked and the caller should
+ * read the return value to know what happened.
+ *
+ * This is the in-process counterpart to the network-driven dispatch in
+ * `connection.c` / `h2.c`. Hull's test harness uses it; user code can
+ * use it for synthetic requests (e.g. agent-API self-calls).
+ *
+ * @param r              Router instance.
+ * @param req            Pre-built request (must outlive the call).
+ * @param res            Pre-initialised response (the call writes into it).
+ * @param run_middleware Non-zero to run pre- and post-body middleware.
+ * @return 200 if the handler ran (or middleware short-circuited with a
+ *         success-shaped response); 404 if no path matched; 405 if a
+ *         path matched but the method didn't; non-zero short-circuit
+ *         code if middleware short-circuited; -1 on invalid arguments.
+ */
+int  kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
+                                   KlResponse *res, int run_middleware);
+
 /** @brief Free router resources. */
 void kl_router_free(KlRouter *r);
 

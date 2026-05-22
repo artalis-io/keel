@@ -227,6 +227,47 @@ int kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlResponse *res) 
     return 0;
 }
 
+/* ── Synthetic request dispatch ─────────────────────────────────────── */
+
+int kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
+                                  KlResponse *res, int run_middleware) {
+    if (!r || !req || !res) return -1;
+
+    /* Match route. params live on the request; the caller doesn't have
+     * to pre-fill them. */
+    KlRoute *matched = NULL;
+    int num_params = 0;
+    int match_status = kl_router_match(r, req->method, req->method_len,
+                                       req->path, req->path_len,
+                                       &matched, req->params, &num_params);
+    req->num_params = num_params;
+
+    /* No-middleware fast path for a miss — caller decides what to do
+     * with the status (e.g. a test that explicitly asserts 404 doesn't
+     * want middleware to run). */
+    if (!run_middleware && (match_status != 200 || !matched))
+        return match_status;
+
+    /* Pre-body middleware. Short-circuit returns the middleware's
+     * return value so the caller can distinguish handler-status from
+     * middleware-short-circuit. */
+    if (run_middleware) {
+        int mw_rc = kl_router_run_middleware(r, req, res);
+        if (mw_rc != 0) return mw_rc;
+
+        mw_rc = kl_router_run_post_middleware(r, req, res);
+        if (mw_rc != 0) return mw_rc;
+    }
+
+    /* Dispatch handler if matched; otherwise stamp the match status. */
+    if (match_status == 200 && matched) {
+        matched->handler(req, res, matched->user_data);
+        return 200;
+    }
+    kl_response_status(res, match_status);
+    return match_status;
+}
+
 /* ── Route matching ─────────────────────────────────────────────────── */
 
 int kl_router_match(KlRouter *r, const char *method, size_t method_len,
