@@ -240,6 +240,12 @@ int kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
     int match_status = kl_router_match(r, req->method, req->method_len,
                                        req->path, req->path_len,
                                        &matched, req->params, &num_params);
+    /* Defensive clamp: kl_router_match already bounds writes into params
+     * by KL_MAX_PARAMS (see match_path) — repeating the clamp on the
+     * count we expose protects req->num_params against any future
+     * regression in the matcher and costs nothing on the hot path. */
+    if (num_params < 0) num_params = 0;
+    if (num_params > KL_MAX_PARAMS) num_params = KL_MAX_PARAMS;
     req->num_params = num_params;
 
     /* No-middleware fast path for a miss — caller decides what to do
