@@ -38,19 +38,6 @@ jobs:
           aws s3 sync site/build/ s3://www.libkeel.dev \
             --delete
 
-      - name: Configure CloudFront default root object
-        if: ${{ env.CF_DISTRIBUTION_ID != '' }}
-        run: |
-          aws cloudfront get-distribution-config \
-            --id "$CF_DISTRIBUTION_ID" > /tmp/cf-config.json
-          ETAG="$(jq -r '.ETag' /tmp/cf-config.json)"
-          jq '.DistributionConfig.DefaultRootObject = "index.html" | .DistributionConfig' \
-            /tmp/cf-config.json > /tmp/cf-distribution-config.json
-          aws cloudfront update-distribution \
-            --id "$CF_DISTRIBUTION_ID" \
-            --if-match "$ETAG" \
-            --distribution-config file:///tmp/cf-distribution-config.json
-
       - name: Invalidate CloudFront cache
         if: ${{ env.CF_DISTRIBUTION_ID != '' }}
         run: |
