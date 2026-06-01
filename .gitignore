@@ -27,6 +27,7 @@ fuzz/oom-*
 
 # Generated API docs
 docs/api/
+site/build/
 
 # Debug/profiling
 *.dSYM/
