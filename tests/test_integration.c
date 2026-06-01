@@ -46,22 +46,60 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
     }
 }
 
-/* Handler that reports multipart parts as JSON */
+/* Handler that drives the streaming multipart iterator and reports a
+ * "parts=N name0=... len0=..." summary line. The full body has been
+ * received by the time the handler fires, so kl_multipart_next never
+ * returns NEED_DATA here. */
 static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
-    KlMultipartReader *mr = (KlMultipartReader *)req->body_reader;
-    if (!mr || mr->num_parts == 0) {
+    KlBodyReader *br = req->body_reader;
+    if (!br) {
+        kl_response_error(res, 400, "No reader");
+        return;
+    }
+
+    /* Static so the slice handed to kl_response_body_borrow outlives the handler. */
+    static char  body[1024];
+    static char  names[8][128];  /* dup names because the meta pointers
+                                  * become stale after the next call. */
+    static size_t lens[8];
+    int parts = 0;
+
+    KlMultipartPartMeta meta;
+    const char *d = NULL;
+    size_t      dn = 0;
+    for (;;) {
+        KlMultipartEvent e = kl_multipart_next(br, &meta, &d, &dn);
+        if (e == KL_MP_EVT_PART_BEGIN) {
+            if (parts < 8) {
+                size_t n = meta.name_len < sizeof(names[0]) - 1
+                               ? meta.name_len : sizeof(names[0]) - 1;
+                memcpy(names[parts], meta.name, n);
+                names[parts][n] = '\0';
+                lens[parts] = 0;
+            }
+            parts++;
+            continue;
+        }
+        if (e == KL_MP_EVT_PART_DATA) {
+            if (parts > 0 && parts <= 8) lens[parts - 1] += dn;
+            continue;
+        }
+        if (e == KL_MP_EVT_PART_END) continue;
+        if (e == KL_MP_EVT_DONE)     break;
+        kl_response_error(res, 400, "Parse error");
+        return;
+    }
+    if (parts == 0) {
         kl_response_error(res, 400, "No parts");
         return;
     }
 
-    /* Simple response: "parts=N name0=... len0=..." */
-    static char body[1024];  /* static: body must outlive handler for async writev */
-    int off = snprintf(body, sizeof(body), "parts=%d", mr->num_parts);
-    for (int i = 0; i < mr->num_parts && off < (int)sizeof(body) - 64; i++) {
+    int off = snprintf(body, sizeof(body), "parts=%d", parts);
+    for (int i = 0; i < parts && i < 8 && off < (int)sizeof(body) - 64; i++) {
         off += snprintf(body + off, sizeof(body) - (size_t)off,
                         " name%d=%s len%d=%zu",
-                        i, mr->parts[i].name, i, mr->parts[i].data_len);
+                        i, names[i], i, lens[i]);
     }
 
     kl_response_status(res, 200);

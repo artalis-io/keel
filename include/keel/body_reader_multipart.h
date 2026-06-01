@@ -5,77 +5,131 @@
 #include <keel/request.h>
 #include <stddef.h>
 
-#define KL_MP_MAX_BOUNDARY 70   /**< RFC 2046 */
+/**
+ * @brief Streaming multipart/form-data parser.
+ *
+ * The reader is a pull iterator on top of the framework's push-shaped
+ * body callback. Each call to kl_multipart_next() advances the parser
+ * by one event:
+ *
+ *   PART_BEGIN  — headers parsed; meta is populated. The pointers in
+ *                 meta are owned by the reader and remain valid until
+ *                 the NEXT call to kl_multipart_next().
+ *   PART_DATA   — a chunk of the current part body is available. *data
+ *                 / *data_len are populated with a borrowed slice of
+ *                 the internal input buffer. Valid until the next call.
+ *   PART_END    — the current part finished (boundary hit). No data.
+ *   DONE        — the closing boundary was seen. The reader is finished.
+ *   NEED_DATA   — input buffer drained; the caller should yield and
+ *                 wait for more bytes to arrive via on_data.
+ *   ERROR       — malformed input or a cap was exceeded. Call
+ *                 kl_multipart_last_error() for the specific code.
+ *
+ * Caps:
+ *   max_part_size    — bytes of body per part. Exceeded → ERROR.
+ *   max_total_size   — total bytes received from the socket.
+ *   max_parts        — distinct parts; counted when PART_BEGIN is emitted.
+ *   max_input_buffer — bytes the reader may hold internally. Exceeded
+ *                      means the framework delivered data faster than
+ *                      the handler consumed it. 0 = unlimited.
+ *
+ * 413 mapping:
+ *   The factory returns NULL for non-multipart content types (→ 415).
+ *   Any cap overflow during parsing causes kl_multipart_next() to
+ *   return ERROR; the handler should respond 413.
+ */
 
-typedef struct {
-    const char *name;           /**< null-terminated, allocated */
-    const char *filename;       /**< null-terminated or NULL */
-    const char *content_type;   /**< null-terminated or NULL */
-    char *data;                 /**< Part body data */
-    size_t data_len;            /**< Part body length */
-    size_t data_cap;            /**< allocation capacity */
-    size_t name_len;            /**< strlen(name), stored to avoid recalc on free */
-    size_t filename_len;        /**< strlen(filename) or 0 */
-    size_t content_type_len;    /**< strlen(content_type) or 0 */
-} KlMultipartPart;
+/** RFC 2046 maximum boundary length. */
+#define KL_MP_MAX_BOUNDARY 70
 
+/** Events returned by kl_multipart_next(). */
+typedef enum {
+    KL_MP_EVT_PART_BEGIN = 1,
+    KL_MP_EVT_PART_DATA,
+    KL_MP_EVT_PART_END,
+    KL_MP_EVT_DONE,
+    KL_MP_EVT_NEED_DATA,
+    KL_MP_EVT_ERROR
+} KlMultipartEvent;
+
+/** Error codes reported by kl_multipart_last_error(). */
+typedef enum {
+    KL_MP_ERR_NONE = 0,
+    KL_MP_ERR_MALFORMED,         /**< bad preamble / boundary / header line */
+    KL_MP_ERR_PART_TOO_LARGE,    /**< per-part body cap exceeded */
+    KL_MP_ERR_TOTAL_TOO_LARGE,   /**< total body cap exceeded */
+    KL_MP_ERR_TOO_MANY_PARTS,    /**< max-parts cap exceeded */
+    KL_MP_ERR_HEADERS_TOO_LARGE, /**< single part's headers exceeded buffer */
+    KL_MP_ERR_INPUT_OVERFLOW,    /**< unconsumed input buffer over cap */
+    KL_MP_ERR_PREMATURE_EOF,     /**< on_complete called mid-part */
+    KL_MP_ERR_NOMEM              /**< allocator failure */
+} KlMultipartErrorCode;
+
+/** Per-part metadata returned at PART_BEGIN. Pointers are reader-owned. */
 typedef struct {
-    size_t max_part_size;       /**< 0 = unlimited */
-    size_t max_total_size;      /**< 0 = unlimited */
-    int max_parts;              /**< 0 = unlimited */
+    const char *name;
+    size_t      name_len;
+    const char *filename;        /**< NULL if no filename= attribute */
+    size_t      filename_len;
+    const char *content_type;    /**< NULL if no Content-Type header */
+    size_t      content_type_len;
+} KlMultipartPartMeta;
+
+/** Parser caps. All fields default to 0 = unlimited; the caller is
+ * responsible for setting sensible limits for adversarial input. */
+typedef struct {
+    size_t max_part_size;     /**< per-part body bytes; 0 = unlimited */
+    size_t max_total_size;    /**< total bytes received; 0 = unlimited */
+    int    max_parts;         /**< distinct parts; 0 = unlimited */
+    size_t max_headers_size;  /**< per-part header bytes; 0 = unlimited */
+    size_t max_input_buffer;  /**< unconsumed bytes held by reader; 0 = unlimited */
 } KlMultipartConfig;
 
-typedef enum {
-    KL_MP_PREAMBLE,
-    KL_MP_AFTER_BOUNDARY,  /**< boundary found, waiting for CRLF or -- */
-    KL_MP_HEADERS,
-    KL_MP_BODY,
-    KL_MP_DONE,
-    KL_MP_ERROR
-} KlMultipartState;
-
-typedef struct {
-    KlBodyReader base;          /**< Base body reader vtable */
-    KlAllocator *alloc;         /**< Allocator for parts and buffers */
-
-    /** "\r\n--" + boundary for body scanning */
-    char delimiter[KL_MP_MAX_BOUNDARY + 6];
-    size_t delimiter_len;       /**< Length of delimiter string */
-
-    /** Parts (growable array) */
-    KlMultipartPart *parts;     /**< Parsed parts array */
-    int num_parts;              /**< Number of parsed parts */
-    int parts_cap;              /**< Parts array capacity */
-
-    /** Limits */
-    KlMultipartConfig config;   /**< Size and count limits */
-    size_t total_received;      /**< Total bytes received so far */
-
-    /** State machine */
-    KlMultipartState state;     /**< Current parser state */
-
-    /** Overlap buffer: last (delimiter_len - 1) bytes from previous on_data,
-     * to detect boundaries spanning chunks */
-    char overlap[KL_MP_MAX_BOUNDARY + 6];
-    size_t overlap_len;         /**< Bytes in overlap buffer */
-
-    /** Part header accumulator */
-    char hdr_buf[2048];         /**< Header line buffer */
-    size_t hdr_len;             /**< Bytes in header buffer */
-} KlMultipartReader;
+/** Opaque reader. Obtain via the factory; consume via kl_multipart_next. */
+typedef struct KlMultipartReader KlMultipartReader;
 
 /**
- * @brief Factory: create a multipart/form-data body reader.
+ * @brief Factory: produce a streaming multipart reader for a request.
  *
- * Extracts the boundary from Content-Type. Returns NULL (triggering 415)
- * if the content type is not multipart/form-data or has no boundary.
+ * Extracts boundary from Content-Type. Returns NULL if the content type
+ * is not multipart/form-data, the boundary is missing or too long, or
+ * allocation fails. NULL triggers a 415 response from the framework.
  *
- * @param alloc     Allocator for parts and buffers.
- * @param req       Parsed request (Content-Type must be set).
- * @param user_data KlMultipartConfig pointer, or NULL for defaults.
- * @return Multipart body reader, or NULL on rejection.
+ * @param alloc     Allocator used for all internal allocations.
+ * @param req       Parsed request; Content-Type header must be set.
+ * @param user_data Optional KlMultipartConfig*; NULL → defaults.
+ * @return Body reader, or NULL.
  */
 KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlRequest *req,
                                         void *user_data);
+
+/**
+ * @brief Advance the parser by one event.
+ *
+ * @param br        The body reader returned by the factory.
+ * @param meta      On PART_BEGIN: populated with part metadata. Otherwise untouched.
+ * @param data      On PART_DATA: set to a borrowed slice of the input buffer.
+ *                  Borrowed pointer is valid only until the NEXT mutation of
+ *                  the reader — that is, the next kl_multipart_next() call
+ *                  OR the next on_data callback. If your caller can yield
+ *                  to the framework's read loop while holding the slice
+ *                  (so on_data may fire), copy the bytes before yielding.
+ * @param data_len  On PART_DATA: bytes in *data.
+ * @return One of the KL_MP_EVT_* event codes.
+ *
+ * meta and data may be NULL if the caller doesn't care about that variant.
+ */
+KlMultipartEvent kl_multipart_next(KlBodyReader *br,
+                                    KlMultipartPartMeta *meta,
+                                    const char **data,
+                                    size_t *data_len);
+
+/**
+ * @brief Return the error code for the latest ERROR event.
+ *
+ * @param br The body reader.
+ * @return KL_MP_ERR_NONE if no error, else the specific cause.
+ */
+KlMultipartErrorCode kl_multipart_last_error(const KlBodyReader *br);
 
 #endif
