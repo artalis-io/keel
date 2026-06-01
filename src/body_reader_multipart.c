@@ -632,8 +632,8 @@ KlMultipartErrorCode kl_multipart_last_error(const KlBodyReader *br) {
 
 /* ── Factory ─────────────────────────────────────────────────────────── */
 
-KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlRequest *req,
-                                        void *user_data) {
+/* cppcheck-suppress constParameterPointer ; signature must match KlBodyReaderFactory typedef */
+KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlRequest *req, void *user_data) {
     if (!alloc || !req) return NULL;
 
     size_t ct_len = 0;
