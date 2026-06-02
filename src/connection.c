@@ -729,6 +729,26 @@ read_more_body: ;
                  * connection during the READING headers phase. */
                 return conn_run_post_middleware_and_handle(c, c->router);
             }
+            /* Mid-stream non-READING_BODY transitions from streaming
+             * handlers: honor the handler's chosen state. */
+            if (c->route && c->route->streaming_handler) {
+                if (c->state == KL_CONN_SUSPENDED) {
+                    /* Handler yielded for async I/O — kl_async_suspend
+                     * removed the FD. kl_async_complete will resume.
+                     * Keep-alive stays as-is; the async op continues
+                     * the request normally. */
+                    return c->state;
+                }
+                if (c->state == KL_CONN_SENDING ||
+                    c->state == KL_CONN_CLOSED) {
+                    /* Handler completed synchronously inside an on_data
+                     * resume. Force keep-alive off so unread body bytes
+                     * don't bleed into the next request on this conn. */
+                    c->req.keep_alive = 0;
+                    c->res.keep_alive = 0;
+                    return c->state;
+                }
+            }
             /* TLS may buffer multiple records — drain before re-arming */
             if (c->tls && c->tls->pending(c->tls) > 0
                 && ++body_drains < KL_TLS_DRAIN_MAX)
@@ -759,6 +779,19 @@ read_more_body: ;
             return conn_run_post_middleware_and_handle(c, c->router);
         }
 
+        /* Mid-stream non-READING_BODY transitions from streaming
+         * handlers — same logic as the chunked path above. */
+        if (c->route && c->route->streaming_handler) {
+            if (c->state == KL_CONN_SUSPENDED) {
+                return c->state;
+            }
+            if (c->state == KL_CONN_SENDING ||
+                c->state == KL_CONN_CLOSED) {
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
+                return c->state;
+            }
+        }
         /* INCOMPLETE — TLS may buffer multiple records */
         if (c->tls && c->tls->pending(c->tls) > 0
             && ++body_drains < KL_TLS_DRAIN_MAX)
