@@ -28,6 +28,12 @@ typedef struct {
     void *user_data;                   /**< Opaque data passed to handler */
     KlBodyReaderFactory body_reader;   /**< Body reader factory (NULL = discard body) */
     KlWsServerConfig *ws_config;       /**< WebSocket config (non-NULL = WebSocket endpoint) */
+    int streaming_handler;             /**< 1 = invoke handler after body_reader setup
+                                            BEFORE the body is fully read; the handler
+                                            may yield mid-stream and the body reader's
+                                            on_data callback is responsible for
+                                            resuming. Used by streaming multipart and
+                                            similar pull-from-body APIs. */
 } KlRoute;
 
 typedef struct {
@@ -76,6 +82,26 @@ int  kl_router_init(KlRouter *r, KlAllocator *alloc);
 int  kl_router_add(KlRouter *r, const char *method, const char *pattern,
                    KlHandler handler, void *user_data,
                    KlBodyReaderFactory body_reader);
+
+/**
+ * @brief Register a streaming-handler route. Identical to kl_router_add
+ *        except the handler runs after the body reader is set up but
+ *        BEFORE the body is fully received. The handler is expected to
+ *        consume the body incrementally (e.g. via the streaming
+ *        multipart pull iterator) and may yield mid-stream. The body
+ *        reader's on_data callback is responsible for resuming the
+ *        yielded handler when more bytes arrive.
+ *
+ *        Post-body middleware is NOT run for streaming routes (the
+ *        handler has already executed by the time the body completes).
+ *
+ *        A non-NULL body_reader factory is required.
+ *
+ * @return 0 on success, -1 on allocation failure or NULL body_reader.
+ */
+int  kl_router_add_streaming(KlRouter *r, const char *method, const char *pattern,
+                              KlHandler handler, void *user_data,
+                              KlBodyReaderFactory body_reader);
 
 /**
  * @brief Match a request against registered routes.
