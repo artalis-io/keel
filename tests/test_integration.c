@@ -224,6 +224,83 @@ static void handle_no_reader(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
+/* ── Mid-stream early-exit fixture ───────────────────────────────────
+ *
+ * Synthetic body reader + handler pair used by the
+ * streaming_mid_stream_early_exit test. Together they simulate what a
+ * Lua/JS coroutine-based handler would do: yield at dispatch time
+ * (state = READING_BODY), then "resume" inside on_data, set up the
+ * response, and transition state to SENDING. Without the early-exit
+ * branch in kl_conn_on_readable's READING_BODY mid-stream return,
+ * Keel would override that SENDING with READING_BODY and the response
+ * would never be sent.
+ */
+/* Set by handle_early_exit when it runs. The test thread polls this
+ * to know when the handler has run (and therefore when it's safe to
+ * send the second body chunk), instead of guessing with a fixed
+ * usleep. Reset to 0 at the start of each test. */
+static volatile int eer_handler_called = 0;
+
+typedef struct {
+    KlBodyReader  base;
+    KlAllocator  *alloc;
+    KlConn       *conn;        /* stashed by handler at dispatch time */
+    KlResponse   *res;         /* same */
+    int           responded;   /* one-shot guard */
+} EarlyExitReader;
+
+static int  eer_on_data(KlBodyReader *self, const char *data, size_t len) {
+    EarlyExitReader *r = (EarlyExitReader *)self;
+    (void)data; (void)len;
+    if (r->responded || !r->conn || !r->res) return 0;
+    /* Mimic a coroutine waking on first on_data: set up the response,
+     * transition state to SENDING. The new mid-stream early-exit
+     * branch in connection.c sees the terminal state and returns it
+     * instead of forcing READING_BODY. */
+    kl_response_status(r->res, 200);
+    kl_response_header(r->res, "Content-Type", "text/plain");
+    kl_response_body_borrow(r->res, "early exit", 10);
+    r->conn->state = KL_CONN_SENDING;
+    r->responded = 1;
+    return 0;
+}
+static void eer_on_complete(KlBodyReader *self) { (void)self; }
+static void eer_on_error(KlBodyReader *self)    { (void)self; }
+static void eer_destroy(KlBodyReader *self) {
+    EarlyExitReader *r = (EarlyExitReader *)self;
+    kl_free(r->alloc, r, sizeof(*r));
+}
+
+static KlBodyReader *eer_factory(KlAllocator *alloc, const KlRequest *req,
+                                  void *user_data) {
+    (void)req; (void)user_data;
+    EarlyExitReader *r = kl_malloc(alloc, sizeof(*r));
+    if (!r) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->base.on_data     = eer_on_data;
+    r->base.on_complete = eer_on_complete;
+    r->base.on_error    = eer_on_error;
+    r->base.destroy     = eer_destroy;
+    r->alloc            = alloc;
+    return &r->base;
+}
+
+static void handle_early_exit(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    /* Stash conn + res on the body reader so on_data can wake "us"
+     * with the response. Then yield by leaving state as READING_BODY
+     * so conn_invoke_streaming_handler returns READING_BODY and the
+     * event loop keeps pumping on_data. */
+    EarlyExitReader *r = (EarlyExitReader *)req->body_reader;
+    if (!r) { kl_response_error(res, 500, "no reader"); return; }
+    r->conn = kl_request_conn(req);
+    r->res  = res;
+    r->conn->state = KL_CONN_READING_BODY;
+    /* Signal the test thread that we've run — it polls this before
+     * sending the second body chunk so the test isn't timing-fragile. */
+    eer_handler_called = 1;
+}
+
 static KlServer test_server;
 
 static void *server_thread(void *arg) {
@@ -288,6 +365,9 @@ static void start_server(void) {
      * path is exercised. */
     kl_server_route_streaming(&test_server, "POST", "/upload-stream",
                                handle_upload, NULL, kl_body_reader_multipart);
+    /* Mid-stream early-exit test route (Keel v2.1.1). */
+    kl_server_route_streaming(&test_server, "POST", "/early-exit",
+                               handle_early_exit, NULL, eer_factory);
     kl_server_route(&test_server, "GET", "/users/:id", handle_param,
                     NULL, NULL);
     kl_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
@@ -668,6 +748,93 @@ UTEST(integration, multipart_upload) {
     ASSERT_TRUE(strstr(buf, "name0=field1") != NULL);
     ASSERT_TRUE(strstr(buf, "name1=file") != NULL);
     ASSERT_TRUE(strstr(buf, "len1=14") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, streaming_mid_stream_early_exit) {
+    /* Synthetic streaming handler that "yields" at dispatch time and
+     * "wakes" inside on_data to send a 200 response BEFORE the body
+     * is fully received. Without the v2.1.1 mid-stream early-exit
+     * check in connection.c's READING_BODY, Keel would force the
+     * state back to READING_BODY after on_data, ignoring the
+     * handler's SENDING transition, and the response would never be
+     * sent (the test would hang).
+     *
+     * Body is sent in TWO writes with a small sleep between so the
+     * server processes them in two separate reads. The dispatcher
+     * runs the handler after the leftover from write 1 has been
+     * fed via on_data (NULL conn — no-op). Write 2 arrives later,
+     * fires on_data with conn+res now set, triggers the response
+     * mid-stream, and the early-exit branch returns SENDING. */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    KlAllocator alloc = kl_allocator_default();
+
+    /* Sizes scoped to the test, expressed at the call site. The
+     * announced Content-Length is larger than the two chunks sum so
+     * the body genuinely never completes — proves the early-exit
+     * branch doesn't rely on end-of-body. */
+    size_t chunk1_len       = 64;
+    size_t chunk2_len       = 64;
+    size_t announced_cl_len = chunk1_len + chunk2_len + 1024;
+    size_t hdr_cap          = 256;
+    size_t resp_cap         = 512;
+
+    /* Reset the handler-ran flag so the poll below has clean state. */
+    eer_handler_called = 0;
+
+    char *hdr = kl_malloc(&alloc, hdr_cap);
+    ASSERT_TRUE(hdr != NULL);
+    int hdr_len = snprintf(hdr, hdr_cap,
+        "POST /early-exit HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n", announced_cl_len);
+    ASSERT_TRUE(hdr_len > 0);
+
+    char *chunk1 = kl_malloc(&alloc, chunk1_len);
+    char *chunk2 = kl_malloc(&alloc, chunk2_len);
+    ASSERT_TRUE(chunk1 != NULL);
+    ASSERT_TRUE(chunk2 != NULL);
+    memset(chunk1, 'A', chunk1_len);
+    memset(chunk2, 'B', chunk2_len);
+
+    /* Write 1: header + chunk1. Server's first read consumes both;
+     * leftover (chunk1) is fed via on_data with NULL conn → no-op.
+     * Then handler runs, stashes conn+res, yields. */
+    (void)write(fd, hdr, (size_t)hdr_len);
+    (void)write(fd, chunk1, chunk1_len);
+
+    /* Wait for the handler to have run before sending chunk2 — same
+     * polling pattern as wait_for_bind() above. Avoids fixed-sleep
+     * flakiness on loaded CI. ~2-second cap covers slow runners; the
+     * normal-case wait is much shorter (a few ms). */
+    for (int i = 0; i < 200 && !eer_handler_called; i++) usleep(10000);
+    ASSERT_TRUE(eer_handler_called);
+
+    /* Write 2: chunk2. Arrives in READING_BODY state, on_data fires
+     * with conn+res NOW set → response goes out, state = SENDING.
+     * The early-exit branch returns SENDING instead of forcing
+     * READING_BODY. */
+    (void)write(fd, chunk2, chunk2_len);
+
+    char *buf = kl_malloc(&alloc, resp_cap);
+    ASSERT_TRUE(buf != NULL);
+    read_response(fd, buf, resp_cap);
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "early exit") != NULL);
+
+    kl_free(&alloc, hdr,    hdr_cap);
+    kl_free(&alloc, chunk1, chunk1_len);
+    kl_free(&alloc, chunk2, chunk2_len);
+    kl_free(&alloc, buf,    resp_cap);
 
     stop_server();
 }
