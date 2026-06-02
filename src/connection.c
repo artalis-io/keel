@@ -275,6 +275,50 @@ static KlConnState conn_run_post_middleware_and_handle(KlConn *c,
     return conn_process(c);
 }
 
+/*
+ * Invoke a streaming-handler route's handler. The handler is expected
+ * to consume the body incrementally (e.g. via the streaming multipart
+ * pull iterator) and may yield mid-stream. Post-body middleware is NOT
+ * run for streaming routes (the handler runs before on_complete so a
+ * post-body middleware would not see a complete body).
+ *
+ * Post-handler transition mirrors conn_process. The handler can:
+ *   - Complete synchronously (return with response set) → SENDING
+ *   - Yield waiting for more body bytes → handler sets state
+ *       KL_CONN_READING_BODY; the body reader's on_data callback
+ *       resumes the handler when more bytes arrive
+ *   - Yield for async I/O (db.async, http.fetch, etc.) → handler sets
+ *       state KL_CONN_SUSPENDED via kl_async_suspend
+ *   - Emit a streaming response (SSE / chunked) → drain or close
+ */
+static KlConnState conn_invoke_streaming_handler(KlConn *c) {
+    if (!c->route || !c->route->handler) {
+        c->state = KL_CONN_CLOSED;
+        return c->state;
+    }
+    c->state = KL_CONN_PROCESSING;
+    c->route->handler(&c->req, &c->res, c->route->user_data);
+
+    /* Yields keep the conn alive without transitioning to SENDING. */
+    if (c->state == KL_CONN_SUSPENDED) return KL_CONN_SUSPENDED;
+    if (c->state == KL_CONN_READING_BODY) return KL_CONN_READING_BODY;
+
+    /* Streaming response — handler already wrote chunks. */
+    if (c->res.body_mode == KL_BODY_STREAM) {
+        if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
+            c->state = KL_CONN_SENDING;
+            return c->state;
+        }
+        conn_log_access(c);
+        c->state = KL_CONN_CLOSED;
+        return c->state;
+    }
+
+    /* Standard buffered response — send it. */
+    c->state = KL_CONN_SENDING;
+    return c->state;
+}
+
 KlConnState kl_conn_on_handshake(KlConn *c) {
     if (!c->tls) {
         c->state = KL_CONN_CLOSED;
@@ -429,6 +473,8 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
                 }
                 if (rc == 1) {
                     c->req.body_reader->on_complete(c->req.body_reader);
+                    if (c->route->streaming_handler)
+                        return conn_invoke_streaming_handler(c);
                     return conn_run_post_middleware_and_handle(c, router);
                 }
             }
@@ -446,9 +492,25 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
                 return c->state;
             }
             if (bpr == KL_PARSE_OK) {
+                if (c->route->streaming_handler)
+                    return conn_invoke_streaming_handler(c);
                 return conn_run_post_middleware_and_handle(c, router);
             }
             /* INCOMPLETE — need more body data */
+        }
+
+        /* Streaming-handler routes: invoke the handler NOW (after any
+         * leftover has been fed via on_data). The handler will consume
+         * what's available and yield on NEED_DATA, leaving the conn in
+         * KL_CONN_READING_BODY so the event loop continues pumping
+         * on_data. The body reader's on_data callback resumes the
+         * yielded handler. */
+        if (c->route->streaming_handler) {
+            KlConnState s = conn_invoke_streaming_handler(c);
+            if (s != KL_CONN_READING_BODY)
+                return s;
+            /* Handler yielded waiting for more body — fall through to
+             * enter READING_BODY so the event loop continues pumping. */
         }
 
         c->read_len = 0;
@@ -457,7 +519,13 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         return c->state;
 
     } else if (!has_body) {
-        /* No body — header pointers valid, process immediately */
+        /* No body — header pointers valid, process immediately.
+         * Streaming routes still run the handler (with req->body_reader
+         * == NULL); they're expected to detect and handle gracefully.
+         * Skipping the streaming branch here would silently bypass the
+         * handler for CL:0 streaming requests — degenerate but real. */
+        if (c->route && c->route->streaming_handler)
+            return conn_invoke_streaming_handler(c);
         return conn_run_post_middleware_and_handle(c, router);
 
     } else {
@@ -649,6 +717,13 @@ read_more_body: ;
             if (rc == 1) {
                 if (c->req.body_reader)
                     c->req.body_reader->on_complete(c->req.body_reader);
+                /* Streaming handlers were invoked at body-reader-setup
+                 * time and have been pumped by on_data callbacks during
+                 * READING_BODY. on_complete may have triggered a final
+                 * resume inside the body reader — c->state is whatever
+                 * the handler set. */
+                if (c->route && c->route->streaming_handler)
+                    return c->state;
                 /* c->router is used (not function param) because READING_BODY
                  * is a continuation — the original router was saved on the
                  * connection during the READING headers phase. */
@@ -677,6 +752,9 @@ read_more_body: ;
         }
 
         if (pr == KL_PARSE_OK) {
+            /* Same skip-for-streaming logic as the chunked path above. */
+            if (c->route && c->route->streaming_handler)
+                return c->state;
             /* c->router: see comment above — READING_BODY continuation */
             return conn_run_post_middleware_and_handle(c, c->router);
         }

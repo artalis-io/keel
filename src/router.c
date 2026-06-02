@@ -46,6 +46,18 @@ int kl_router_add(KlRouter *r, const char *method, const char *pattern,
     return 0;
 }
 
+int kl_router_add_streaming(KlRouter *r, const char *method, const char *pattern,
+                             KlHandler handler, void *user_data,
+                             KlBodyReaderFactory body_reader) {
+    /* Streaming handlers need a body reader to pump on_data into. */
+    if (!body_reader) return -1;
+    int rc = kl_router_add(r, method, pattern, handler, user_data, body_reader);
+    if (rc < 0) return rc;
+    /* kl_router_add appended to slot count-1. Mark it streaming. */
+    r->routes[r->count - 1].streaming_handler = 1;
+    return 0;
+}
+
 /*
  * Match a single pattern segment against a path segment.
  * Pattern segment starts with ':' for param capture.

@@ -48,8 +48,42 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
 
 /* Handler that drives the streaming multipart iterator and reports a
  * "parts=N name0=... len0=..." summary line. The full body has been
- * received by the time the handler fires, so kl_multipart_next never
- * returns NEED_DATA here. */
+ * received by the time the handler fires (in the non-streaming route),
+ * so kl_multipart_next never returns NEED_DATA here.
+ *
+ * All allocations go through the keel allocator — no fixed-size static
+ * buffers, no magic-constant part caps. The response body is sent via
+ * kl_response_body_copy so Keel owns the bytes after this function
+ * returns; the handler's scratch allocations are freed before return. */
+typedef struct {
+    char  *name;
+    size_t name_len;
+    char  *filename;
+    size_t filename_len;
+    int    has_filename;
+    size_t size;
+} HandleUploadPart;
+
+static void handle_upload_free_parts(KlAllocator *a, HandleUploadPart *parts,
+                                      size_t count, size_t cap) {
+    if (!parts) return;
+    for (size_t i = 0; i < count; i++) {
+        if (parts[i].name)
+            kl_free(a, parts[i].name, parts[i].name_len + 1);
+        if (parts[i].filename)
+            kl_free(a, parts[i].filename, parts[i].filename_len + 1);
+    }
+    kl_free(a, parts, cap * sizeof(*parts));
+}
+
+static char *handle_upload_dup(KlAllocator *a, const char *s, size_t n) {
+    char *d = kl_malloc(a, n + 1);
+    if (!d) return NULL;
+    if (n > 0) memcpy(d, s, n);
+    d[n] = '\0';
+    return d;
+}
+
 static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
     KlBodyReader *br = req->body_reader;
@@ -57,13 +91,11 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
         kl_response_error(res, 400, "No reader");
         return;
     }
+    KlAllocator alloc = kl_allocator_default();
 
-    /* Static so the slice handed to kl_response_body_borrow outlives the handler. */
-    static char  body[1024];
-    static char  names[8][128];  /* dup names because the meta pointers
-                                  * become stale after the next call. */
-    static size_t lens[8];
-    int parts = 0;
+    HandleUploadPart *parts = NULL;
+    size_t parts_count = 0;
+    size_t parts_cap = 0;
 
     KlMultipartPartMeta meta;
     const char *d = NULL;
@@ -71,40 +103,120 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     for (;;) {
         KlMultipartEvent e = kl_multipart_next(br, &meta, &d, &dn);
         if (e == KL_MP_EVT_PART_BEGIN) {
-            if (parts < 8) {
-                size_t n = meta.name_len < sizeof(names[0]) - 1
-                               ? meta.name_len : sizeof(names[0]) - 1;
-                memcpy(names[parts], meta.name, n);
-                names[parts][n] = '\0';
-                lens[parts] = 0;
+            if (parts_count == parts_cap) {
+                size_t new_cap = parts_cap ? parts_cap * 2 : 4;
+                size_t old_sz  = parts_cap * sizeof(*parts);
+                size_t new_sz  = new_cap   * sizeof(*parts);
+                HandleUploadPart *np = kl_realloc(&alloc, parts, old_sz, new_sz);
+                if (!np) {
+                    handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+                    kl_response_error(res, 500, "OOM");
+                    return;
+                }
+                parts = np;
+                parts_cap = new_cap;
             }
-            parts++;
+            HandleUploadPart *p = &parts[parts_count];
+            memset(p, 0, sizeof(*p));
+            p->name = handle_upload_dup(&alloc, meta.name, meta.name_len);
+            if (!p->name) {
+                /* L1 fix: don't promote a partially-initialised part
+                 * (with NULL name) into the active count — later
+                 * snprintf would deref it. Bail cleanly. */
+                handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+                kl_response_error(res, 500, "OOM");
+                return;
+            }
+            p->name_len = meta.name_len;
+            if (meta.filename) {
+                p->filename = handle_upload_dup(&alloc, meta.filename,
+                                                meta.filename_len);
+                if (!p->filename) {
+                    kl_free(&alloc, p->name, p->name_len + 1);
+                    handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+                    kl_response_error(res, 500, "OOM");
+                    return;
+                }
+                p->filename_len = meta.filename_len;
+                p->has_filename = 1;
+            }
+            parts_count++;
             continue;
         }
         if (e == KL_MP_EVT_PART_DATA) {
-            if (parts > 0 && parts <= 8) lens[parts - 1] += dn;
+            if (parts_count > 0) parts[parts_count - 1].size += dn;
             continue;
         }
         if (e == KL_MP_EVT_PART_END) continue;
         if (e == KL_MP_EVT_DONE)     break;
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
         kl_response_error(res, 400, "Parse error");
         return;
     }
-    if (parts == 0) {
+    if (parts_count == 0) {
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
         kl_response_error(res, 400, "No parts");
         return;
     }
 
-    int off = snprintf(body, sizeof(body), "parts=%d", parts);
-    for (int i = 0; i < parts && i < 8 && off < (int)sizeof(body) - 64; i++) {
-        off += snprintf(body + off, sizeof(body) - (size_t)off,
-                        " name%d=%s len%d=%zu",
-                        i, names[i], i, lens[i]);
+    /* Two-pass: size the response body via snprintf(NULL,0,...), then
+     * allocate exactly what's needed. L2 fix: validate each snprintf
+     * return individually so a single failure can't poison the running
+     * total. */
+    size_t body_cap = 0;
+    int n = snprintf(NULL, 0, "parts=%zu", parts_count);
+    if (n < 0) {
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+        kl_response_error(res, 500, "snprintf");
+        return;
+    }
+    body_cap += (size_t)n;
+    for (size_t i = 0; i < parts_count; i++) {
+        n = snprintf(NULL, 0, " name%zu=%s len%zu=%zu",
+                     i, parts[i].name, i, parts[i].size);
+        if (n < 0) {
+            handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+            kl_response_error(res, 500, "snprintf");
+            return;
+        }
+        body_cap += (size_t)n;
+    }
+    body_cap += 1;  /* trailing NUL */
+    char *body = kl_malloc(&alloc, body_cap);
+    if (!body) {
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+        kl_response_error(res, 500, "OOM");
+        return;
+    }
+    size_t off = 0;
+    n = snprintf(body + off, body_cap - off, "parts=%zu", parts_count);
+    if (n < 0 || (size_t)n >= body_cap - off) {
+        kl_free(&alloc, body, body_cap);
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+        kl_response_error(res, 500, "snprintf");
+        return;
+    }
+    off += (size_t)n;
+    for (size_t i = 0; i < parts_count; i++) {
+        n = snprintf(body + off, body_cap - off,
+                     " name%zu=%s len%zu=%zu",
+                     i, parts[i].name, i, parts[i].size);
+        if (n < 0 || (size_t)n >= body_cap - off) {
+            kl_free(&alloc, body, body_cap);
+            handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+            kl_response_error(res, 500, "snprintf");
+            return;
+        }
+        off += (size_t)n;
     }
 
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body_borrow(res, body, (size_t)off);
+    /* body_copy: Keel takes its own copy, we free our scratch. */
+    kl_response_body_copy(res, body, off);
+
+    kl_free(&alloc, body, body_cap);
+    handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
 }
 
 static void handle_no_reader(KlRequest *req, KlResponse *res, void *ctx) {
@@ -167,6 +279,15 @@ static void start_server(void) {
                     kl_body_reader_buffer);
     kl_server_route(&test_server, "POST", "/upload", handle_upload,
                     NULL, kl_body_reader_multipart);
+    /* Streaming variant: same handler, same body reader, but registered
+     * with kl_server_route_streaming so the dispatch path invokes the
+     * handler after body-reader setup BEFORE on_complete. The handler
+     * itself doesn't yield (kl_multipart_next never returns NEED_DATA
+     * because the body arrives in one chunk in this test), so the
+     * observable behaviour is the same response shape — the dispatch
+     * path is exercised. */
+    kl_server_route_streaming(&test_server, "POST", "/upload-stream",
+                               handle_upload, NULL, kl_body_reader_multipart);
     kl_server_route(&test_server, "GET", "/users/:id", handle_param,
                     NULL, NULL);
     kl_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
@@ -537,6 +658,103 @@ UTEST(integration, multipart_upload) {
              "\r\n", body_len);
     (void)write(fd, hdr, strlen(hdr));
     (void)write(fd, body, body_len);
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "parts=2") != NULL);
+    ASSERT_TRUE(strstr(buf, "name0=field1") != NULL);
+    ASSERT_TRUE(strstr(buf, "name1=file") != NULL);
+    ASSERT_TRUE(strstr(buf, "len1=14") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, streaming_route_no_body_runs_handler) {
+    /* L3 regression: CL:0 + streaming route — handler must still be
+     * invoked. Its body_reader is NULL (no factory call since
+     * has_body=0), so handle_upload responds 400 "No reader". The
+     * test verifies the handler RAN (we got 400, not 500 or hang). */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req =
+        "POST /upload-stream HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[1024];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    /* Handler ran (saw NULL body_reader) and emitted 400 "No reader". */
+    ASSERT_TRUE(strstr(buf, "400 ") != NULL);
+    ASSERT_TRUE(strstr(buf, "No reader") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, multipart_upload_streaming_route) {
+    /* Same payload + handler as the non-streaming multipart_upload
+     * test, but routed through /upload-stream which is registered with
+     * kl_server_route_streaming. Exercises the early-dispatch code
+     * path in conn_dispatch_request and the on_complete-skip-post-
+     * middleware branch.
+     *
+     * NOTE: handle_upload is a plain C handler with no yield mechanism.
+     * If it gets KL_MP_EVT_NEED_DATA it errors out with 400 (since
+     * yielding requires a coroutine, which lives in Hull, not Keel).
+     * To exercise the happy path here, send headers + body in one
+     * write so the entire body sits in the leftover buffer by the
+     * time the dispatcher invokes the handler — kl_multipart_next
+     * never has to return NEED_DATA. Hull's bindings will provide
+     * the yield path. */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *body =
+        "--TESTBND\r\n"
+        "Content-Disposition: form-data; name=\"field1\"\r\n"
+        "\r\n"
+        "value1"
+        "\r\n--TESTBND\r\n"
+        "Content-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\n"
+        "Content-Type: text/plain\r\n"
+        "\r\n"
+        "file data here"
+        "\r\n--TESTBND--\r\n";
+    size_t body_len = strlen(body);
+
+    char hdr[512];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+             "POST /upload-stream HTTP/1.1\r\n"
+             "Host: localhost\r\n"
+             "Content-Type: multipart/form-data; boundary=TESTBND\r\n"
+             "Content-Length: %zu\r\n"
+             "Connection: close\r\n"
+             "\r\n", body_len);
+    ASSERT_TRUE(hdr_len > 0);
+
+    /* Combined single write: headers + body in one packet so the body
+     * is in the leftover buffer when the streaming dispatcher fires.
+     * Allocate exactly what's needed — no magic-sized fixed buffer. */
+    KlAllocator alloc = kl_allocator_default();
+    size_t combined_len = (size_t)hdr_len + body_len;
+    char *combined = kl_malloc(&alloc, combined_len);
+    ASSERT_TRUE(combined != NULL);
+    memcpy(combined, hdr, (size_t)hdr_len);
+    memcpy(combined + hdr_len, body, body_len);
+    (void)write(fd, combined, combined_len);
+    kl_free(&alloc, combined, combined_len);
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
