@@ -4,7 +4,9 @@
 
 | Version | Supported |
 |---------|-----------|
-| 1.0.x   | Yes       |
+| 1.2.x   | Yes       |
+| 1.1.x   | Yes       |
+| 1.0.x   | No (use 1.1.x or later) |
 
 ## Reporting a Vulnerability
 
@@ -22,11 +24,36 @@ Include:
 
 Keel employs multiple layers of security testing:
 
-- **Compiler hardening**: `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -fstack-protector-strong`
+- **Compiler hardening**: `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -fstack-protector-strong -fPIE`, `_FORTIFY_SOURCE=3` (release builds), `-pie`. Linux linker hardening: `-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack`.
 - **AddressSanitizer + UndefinedBehaviorSanitizer**: CI runs all tests under ASan/UBSan (`make debug-test`)
 - **Fuzz testing**: libFuzzer targets for HTTP parser, multipart parser, WebSocket parser, and response parser
 - **Static analysis**: Clang scan-build and cppcheck in CI
 - **CodeQL**: GitHub SAST scanning on every push and PR
+- **W^X surface guard**: `tests/no_codegen_surface.sh` fails the build if any future commit introduces `mmap PROT_EXEC`, `MAP_JIT`, `dlopen`, `dlsym`, `memfd_create`, `pthread_jit_*`, `popen`, or `system()` under `src/` or `parsers/`.
+- **Binary hardening assertion**: CI verifies the built test binaries have a non-executable stack and the `PIE` flag set (`readelf -l` / `otool -hv`).
+
+## Architectural Guarantees
+
+Keel is **structurally W^X**: it has no path that creates executable memory or loads native code at runtime.
+
+| Construct | Present in Keel | Notes |
+|-----------|-----------------|-------|
+| `mmap` with `PROT_EXEC` | **No** | All buffers are heap+stack |
+| `MAP_JIT` | **No** | No JIT layer |
+| `mprotect` adding `PROT_EXEC` | **No** | No W→X transition path |
+| `memfd_create` | **No** | No anonymous-fd-then-mmap pattern |
+| `dlopen` / `dlsym` | **No** | No dynamic native loading |
+| `popen` / `system` / `exec*` | **No** | No subprocess invocation |
+| JIT (LLVM / Fast / Multi-tier) | **No** | No JIT macros recognised; `KEEL_ENABLE_JIT` / `KEEL_ENABLE_DYNAMIC_CODE` / `KEEL_ENABLE_DLOPEN` are reserved opt-in flags that fire a `#error` at the top of `keel.h` if defined. |
+
+The HTTP/1.1 parser (llhttp), HTTP/2 framing, WebSocket framing, multipart parsing, chunked transfer encoding, URL parsing, and TLS-via-vtable layers all operate on heap and stack memory only. The libFuzzer targets in `fuzz/` exercise the four primary network-input attack surfaces.
+
+Keel does **not** own a process boundary. W^X enforcement at the kernel-sandbox layer (seccomp + Landlock on Linux, Seatbelt + Hardened Runtime on macOS, pledge/unveil on OpenBSD and Cosmopolitan) is the responsibility of the host application that embeds `libkeel.a`. The companion Hull project (https://github.com/artalis-io/hull) ships such a host policy; see Hull's `docs/security.md` §3.A "Inject native code at runtime" for the canonical layered model.
+
+The guard against silent regression is twofold:
+
+1. **At build time**, `keel.h`'s `#error` directives on `KEEL_ENABLE_JIT` / `KEEL_ENABLE_DYNAMIC_CODE` / `KEEL_ENABLE_DLOPEN` make any future opt-in fail loudly.
+2. **At CI time**, `tests/no_codegen_surface.sh` greps `src/` and `parsers/` for the syscalls and APIs that could violate the invariant and fails the build if any appears.
 
 ## Vendored Dependencies
 

@@ -609,4 +609,62 @@ UTEST(router, post_middleware_method_filter) {
     kl_router_free(&r);
 }
 
+/* ── Streaming-handler registration ───────────────────────────────── */
+
+static KlBodyReader *dummy_body_factory(KlAllocator *alloc, const KlRequest *req,
+                                         void *user_data) {
+    (void)alloc; (void)req; (void)user_data;
+    return NULL;
+}
+
+UTEST(router, regular_add_clears_streaming_flag) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    ASSERT_EQ(kl_router_add(&r, "GET", "/x", dummy_handler, NULL, NULL), 0);
+    ASSERT_EQ(r.count, 1);
+    ASSERT_EQ(r.routes[0].streaming_handler, 0);
+    kl_router_free(&r);
+}
+
+UTEST(router, streaming_add_sets_flag) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    ASSERT_EQ(kl_router_add_streaming(&r, "POST", "/upload", dummy_handler,
+                                       NULL, dummy_body_factory), 0);
+    ASSERT_EQ(r.count, 1);
+    ASSERT_EQ(r.routes[0].streaming_handler, 1);
+    ASSERT_TRUE(r.routes[0].body_reader == dummy_body_factory);
+    kl_router_free(&r);
+}
+
+UTEST(router, streaming_add_rejects_null_body_factory) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    /* Streaming handlers MUST have a body reader to pump on_data into. */
+    ASSERT_EQ(kl_router_add_streaming(&r, "POST", "/upload", dummy_handler,
+                                       NULL, NULL), -1);
+    ASSERT_EQ(r.count, 0);
+    kl_router_free(&r);
+}
+
+UTEST(router, streaming_and_regular_routes_independent) {
+    /* Mixing streaming + regular routes in the same router: each
+     * retains its own flag, lookups stay independent. */
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    ASSERT_EQ(kl_router_add(&r, "GET", "/page", dummy_handler, NULL, NULL), 0);
+    ASSERT_EQ(kl_router_add_streaming(&r, "POST", "/upload", dummy_handler,
+                                       NULL, dummy_body_factory), 0);
+    ASSERT_EQ(kl_router_add(&r, "GET", "/other", dummy_handler, NULL, NULL), 0);
+    ASSERT_EQ(r.count, 3);
+    ASSERT_EQ(r.routes[0].streaming_handler, 0);
+    ASSERT_EQ(r.routes[1].streaming_handler, 1);
+    ASSERT_EQ(r.routes[2].streaming_handler, 0);
+    kl_router_free(&r);
+}
+
 UTEST_MAIN();

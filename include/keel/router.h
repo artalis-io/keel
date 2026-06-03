@@ -28,6 +28,12 @@ typedef struct {
     void *user_data;                   /**< Opaque data passed to handler */
     KlBodyReaderFactory body_reader;   /**< Body reader factory (NULL = discard body) */
     KlWsServerConfig *ws_config;       /**< WebSocket config (non-NULL = WebSocket endpoint) */
+    int streaming_handler;             /**< 1 = invoke handler after body_reader setup
+                                            BEFORE the body is fully read; the handler
+                                            may yield mid-stream and the body reader's
+                                            on_data callback is responsible for
+                                            resuming. Used by streaming multipart and
+                                            similar pull-from-body APIs. */
 } KlRoute;
 
 typedef struct {
@@ -76,6 +82,26 @@ int  kl_router_init(KlRouter *r, KlAllocator *alloc);
 int  kl_router_add(KlRouter *r, const char *method, const char *pattern,
                    KlHandler handler, void *user_data,
                    KlBodyReaderFactory body_reader);
+
+/**
+ * @brief Register a streaming-handler route. Identical to kl_router_add
+ *        except the handler runs after the body reader is set up but
+ *        BEFORE the body is fully received. The handler is expected to
+ *        consume the body incrementally (e.g. via the streaming
+ *        multipart pull iterator) and may yield mid-stream. The body
+ *        reader's on_data callback is responsible for resuming the
+ *        yielded handler when more bytes arrive.
+ *
+ *        Post-body middleware is NOT run for streaming routes (the
+ *        handler has already executed by the time the body completes).
+ *
+ *        A non-NULL body_reader factory is required.
+ *
+ * @return 0 on success, -1 on allocation failure or NULL body_reader.
+ */
+int  kl_router_add_streaming(KlRouter *r, const char *method, const char *pattern,
+                              KlHandler handler, void *user_data,
+                              KlBodyReaderFactory body_reader);
 
 /**
  * @brief Match a request against registered routes.
@@ -133,6 +159,41 @@ int  kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res);
  * @return 0 if all passed, non-zero if a middleware short-circuited.
  */
 int  kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlResponse *res);
+
+/**
+ * @brief Run a fully-formed synthetic request through the router pipeline:
+ *        match → pre-body middleware → post-body middleware → handler.
+ *
+ * The caller is responsible for initialising `req` (method, path,
+ * headers, optional `body_reader`) and `res` (via `kl_response_init`).
+ * On return, `res` holds the response state the handler (or a
+ * short-circuiting middleware) produced; the caller is responsible
+ * for `kl_response_free` and for inspecting `res->status`,
+ * `res->body`, `res->hdr_buf`, etc.
+ *
+ * `req->num_params` / `req->params` are filled in from the match
+ * before the pipeline runs; callers do not need to pre-populate them.
+ *
+ * If `run_middleware` is 0, pre- and post-body middleware are skipped
+ * (only the matched handler runs). When the match fails (404/405) and
+ * middleware is disabled, no handler is invoked and the caller should
+ * read the return value to know what happened.
+ *
+ * This is the in-process counterpart to the network-driven dispatch in
+ * `connection.c` / `h2.c`. Hull's test harness uses it; user code can
+ * use it for synthetic requests (e.g. agent-API self-calls).
+ *
+ * @param r              Router instance.
+ * @param req            Pre-built request (must outlive the call).
+ * @param res            Pre-initialised response (the call writes into it).
+ * @param run_middleware Non-zero to run pre- and post-body middleware.
+ * @return 200 if the handler ran (or middleware short-circuited with a
+ *         success-shaped response); 404 if no path matched; 405 if a
+ *         path matched but the method didn't; non-zero short-circuit
+ *         code if middleware short-circuited; -1 on invalid arguments.
+ */
+int  kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
+                                   KlResponse *res, int run_middleware);
 
 /** @brief Free router resources. */
 void kl_router_free(KlRouter *r);

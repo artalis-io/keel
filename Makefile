@@ -14,15 +14,32 @@ endif
 ifdef COSMO
   # Cosmopolitan: force poll backend, omit -D_DEFAULT_SOURCE and -fstack-protector-strong
   # Note: plain ar is used instead of cosmoar (cosmoar fails with recursive .aarch64/ lookups)
+  # APE binaries have their own non-relocatable layout — no PIE / RELRO / FORTIFY here.
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
             -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
   EVENT_SRC = src/event_poll.c
   FILE_IO_SRC = src/file_io.c
 else
+  # Build hardening (parity with Hull's W^X posture in docs/security.md):
+  #   -fPIE / -pie           — ASLR for executables linking libkeel.a
+  #   -fstack-protector-strong — stack canaries on functions with buffers
+  #   -D_FORTIFY_SOURCE=3    — runtime checks on str/mem calls (glibc 2.34+ / gcc 12+ / clang 9+).
+  #                            Older toolchains emit a noisy warning and behave as =2; leave loud.
+  # Some toolchain spec files (Alpine/musl, hardened Debian, etc.) pre-set
+  # _FORTIFY_SOURCE at the command line. Undefine first so our value wins
+  # without provoking a "macro redefined" warning that -Werror would
+  # promote to a hard error.
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
-            -D_FORTIFY_SOURCE=2 -fstack-protector-strong -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
+            -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
+            -fstack-protector-strong -fPIE \
+            -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = -std=c11 -O2 -fPIE -Iinclude -Ivendor/llhttp
+  # Use -Wl,-pie so clang routes the flag to the linker without flagging
+  # it as "unused during compilation" — Keel's one-shot compile+link
+  # rules (tests/, examples/) combined with -Werror would otherwise
+  # promote that warning to a hard error.
+  LDFLAGS += -Wl,-pie
 
   # Platform event loop backend
   ifeq ($(UNAME_S),Linux)
@@ -39,7 +56,9 @@ else
     endif
     CFLAGS += -D_DEFAULT_SOURCE
     VENDOR_CFLAGS += -D_DEFAULT_SOURCE
-    LDFLAGS += -lpthread
+    # Linux linker hardening — RELRO + BIND_NOW + non-executable stack.
+    # ld64 (macOS) rejects -z flags, so gate to Linux.
+    LDFLAGS += -lpthread -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
   else
     ifeq ($(BACKEND),poll)
       EVENT_SRC = src/event_poll.c
@@ -252,6 +271,11 @@ cppcheck:
 	cppcheck --enable=all --inline-suppr --suppress=missingIncludeSystem \
 	  --suppress=unusedFunction --suppress=checkersReport \
 	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
+
+# W^X / no-runtime-codegen regression guard.
+# See SECURITY.md "Architectural Guarantees" for the invariant.
+wx-guard:
+	@sh tests/no_codegen_surface.sh
 
 # Fuzz testing (requires clang with libFuzzer)
 # On Linux: make fuzz CC=clang
