@@ -2,8 +2,8 @@
  * body_readers.c — Buffer and multipart body readers
  *
  * Concepts: kl_body_reader_buffer, kl_body_reader_multipart,
- * KlBufReader, KlMultipartReader, KlMultipartConfig, per-route
- * body reader factories.
+ * KlBufReader, kl_multipart_next streaming iterator,
+ * KlMultipartConfig, per-route body reader factories.
  *
  * Build:  make examples
  * Run:    ./examples/body_readers
@@ -13,6 +13,7 @@
  */
 
 #include <keel/keel.h>
+#include <keel/body_reader_multipart.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -60,39 +61,82 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_body_borrow(res, br->data, br->len);
 }
 
-/* POST /upload — multipart reader parses form-data */
+/* POST /upload — multipart streaming iterator parses form-data.
+ *
+ * Drives kl_multipart_next() to walk the events. The full body has
+ * been received by the time the handler runs, so NEED_DATA never
+ * fires here (it would in a handler that yields mid-stream). */
 static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
-    KlMultipartReader *mr = (KlMultipartReader *)req->body_reader;
-    if (!mr || mr->num_parts == 0) {
+    KlBodyReader *br = req->body_reader;
+    if (!br) {
+        kl_response_error(res, 400, "No reader");
+        return;
+    }
+
+    /* Static so the slice handed to kl_response_body_borrow outlives the
+     * handler return. Capped at 8 parts for the demo. */
+    static char  body[1024];
+    static char  names[8][128];
+    static char  fnames[8][128];
+    static size_t sizes[8];
+    static int   has_filename[8];
+    int parts = 0;
+
+    KlMultipartPartMeta meta;
+    const char *d = NULL;
+    size_t      dn = 0;
+    for (;;) {
+        KlMultipartEvent e = kl_multipart_next(br, &meta, &d, &dn);
+        if (e == KL_MP_EVT_PART_BEGIN) {
+            if (parts < 8) {
+                size_t n = meta.name_len < sizeof(names[0]) - 1
+                               ? meta.name_len : sizeof(names[0]) - 1;
+                memcpy(names[parts], meta.name, n);
+                names[parts][n] = '\0';
+                has_filename[parts] = meta.filename != NULL;
+                if (has_filename[parts]) {
+                    size_t fn = meta.filename_len < sizeof(fnames[0]) - 1
+                                    ? meta.filename_len : sizeof(fnames[0]) - 1;
+                    memcpy(fnames[parts], meta.filename, fn);
+                    fnames[parts][fn] = '\0';
+                }
+                sizes[parts] = 0;
+            }
+            parts++;
+            continue;
+        }
+        if (e == KL_MP_EVT_PART_DATA) {
+            if (parts > 0 && parts <= 8) sizes[parts - 1] += dn;
+            continue;
+        }
+        if (e == KL_MP_EVT_PART_END) continue;
+        if (e == KL_MP_EVT_DONE)     break;
+        kl_response_error(res, 400, "Parse error");
+        return;
+    }
+    if (parts == 0) {
         kl_response_error(res, 400, "No parts received");
         return;
     }
 
-    printf("Received %d part(s):\n", mr->num_parts);
-    for (int i = 0; i < mr->num_parts; i++) {
-        KlMultipartPart *p = &mr->parts[i];
-        printf("  [%d] name=\"%s\"", i, p->name);
-        if (p->filename)
-            printf(" filename=\"%s\"", p->filename);
-        if (p->content_type)
-            printf(" type=\"%s\"", p->content_type);
-        printf(" size=%zu\n", p->data_len);
+    printf("Received %d part(s):\n", parts);
+    for (int i = 0; i < parts && i < 8; i++) {
+        printf("  [%d] name=\"%s\"", i, names[i]);
+        if (has_filename[i]) printf(" filename=\"%s\"", fnames[i]);
+        printf(" size=%zu\n", sizes[i]);
     }
 
-    /* Summary response — static buffer (single-threaded, must outlive writev) */
-    static char body[1024];
     int off = snprintf(body, sizeof(body),
-                       "Received %d part(s)\n", mr->num_parts);
+                       "Received %d part(s)\n", parts);
     if (off < 0) off = 0;
-    for (int i = 0; i < mr->num_parts && off < (int)sizeof(body) - 128; i++) {
-        KlMultipartPart *p = &mr->parts[i];
+    for (int i = 0; i < parts && i < 8 && off < (int)sizeof(body) - 128; i++) {
         off += snprintf(body + off, sizeof(body) - (size_t)off,
                         "  %s: %zu bytes%s%s%s\n",
-                        p->name, p->data_len,
-                        p->filename ? " (file: " : "",
-                        p->filename ? p->filename : "",
-                        p->filename ? ")" : "");
+                        names[i], sizes[i],
+                        has_filename[i] ? " (file: " : "",
+                        has_filename[i] ? fnames[i] : "",
+                        has_filename[i] ? ")" : "");
     }
 
     kl_response_status(res, 200);

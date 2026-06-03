@@ -1,0 +1,904 @@
+<!doctype html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keel. Hull's default event and transport substrate</title>
+  <meta name="description" content="Keel is Hull's default swappable C11 event loop and transport layer for HTTP, WebSocket, SSE, async clients, timers, file descriptors, and sandboxed side-car native binaries.">
+  <meta name="theme-color" content="#0a0a0a">
+
+  <meta property="og:title" content="Keel. Hull's default event and transport substrate">
+  <meta property="og:description" content="Minimal C11 event loop and transport layer for Hull, OTTO, side-car native binaries, and local-first agent systems. HTTP, WebSocket, SSE, epoll, kqueue, io_uring, poll.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
+  <meta property="og:image:type" content="image/svg+xml">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
+
+  <link rel="icon" type="image/svg+xml" href="mark.svg">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Keel",
+    "applicationCategory": "DeveloperApplication",
+    "applicationSubCategory": "NetworkingLibrary",
+    "operatingSystem": "Linux, macOS, BSD, POSIX",
+    "description": "Hull's default swappable C11 event loop and transport layer: HTTP client/server, WebSocket, SSE, async clients, timers, file descriptor watchers, and side-car native binary transport over epoll, kqueue, io_uring, and poll. Also used across Artalis projects such as OTTO.",
+    "url": "https://github.com/artalis-io/keel",
+    "codeRepository": "https://github.com/artalis-io/keel",
+    "programmingLanguage": ["C"],
+    "license": "https://opensource.org/license/mit",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Organization", "name": "Artalis", "url": "https://artalis.io" }
+  }
+  </script>
+
+  <link rel="preconnect" href="https://cdn.tailwindcss.com">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+          },
+          colors: {
+            ink:    { 950: '#0a0a0a', 900: '#111111', 800: '#1a1a1a', 700: '#262626' },
+            paper:  { 50:  '#fafafa', 100: '#f4f4f5', 200: '#e4e4e7' },
+            mute:   { 400: '#a1a1aa', 500: '#71717a', 600: '#52525b' },
+            accent: { DEFAULT: '#22d3a8', dim: '#0f7d63' },
+          },
+          letterSpacing: { tightish: '-0.015em' },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    html, body { background: #0a0a0a; color: #f4f4f5; -webkit-font-smoothing: antialiased; overflow-x: hidden; max-width: 100%; }
+    .grid > * { min-width: 0; }
+    code, pre { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .grid-bg {
+      background-image:
+        linear-gradient(to right, rgba(255,255,255,0.04) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255,255,255,0.04) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(ellipse at top, black 30%, transparent 75%);
+      -webkit-mask-image: radial-gradient(ellipse at top, black 30%, transparent 75%);
+    }
+    .hairline { border-color: rgba(255,255,255,0.08); }
+    .hairline-b { border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .hairline-t { border-top: 1px solid rgba(255,255,255,0.08); }
+    .chip {
+      display: inline-flex; align-items: center; gap: .375rem;
+      padding: .125rem .5rem; border-radius: 9999px;
+      font-size: .6875rem; letter-spacing: .04em; text-transform: uppercase;
+      color: #d4d4d8; border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.025);
+    }
+    .accent-dot { width: .375rem; height: .375rem; border-radius: 9999px; background: #fafafa; }
+    .btn {
+      display: inline-flex; align-items: center; gap: .5rem;
+      padding: .625rem 1rem; border-radius: .375rem;
+      font-size: .875rem; font-weight: 500;
+      transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+    }
+    .btn-primary { background: #f4f4f5; color: #0a0a0a; }
+    .btn-primary:hover { background: #ffffff; }
+    .btn-ghost { background: transparent; color: #f4f4f5; border: 1px solid rgba(255,255,255,0.12); }
+    .btn-ghost:hover { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.22); }
+    .link { color: #d4d4d8; transition: color .15s ease; }
+    .link:hover { color: #ffffff; }
+    .kbd { font-family: 'JetBrains Mono', monospace; font-size: .75rem; padding: .0625rem .375rem; border-radius: .25rem; background: rgba(255,255,255,0.06); color: #e4e4e7; border: 1px solid rgba(255,255,255,0.08); }
+    .code-block { background: #0f0f10; border: 1px solid rgba(255,255,255,0.08); border-radius: .5rem; overflow: hidden; }
+    .code-block header { padding: .5rem .875rem; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: .6875rem; color: #a1a1aa; letter-spacing: .04em; text-transform: uppercase; display: flex; align-items: center; gap: .5rem; }
+    .code-block pre { padding: 1rem 1.125rem; overflow-x: auto; font-size: .8125rem; line-height: 1.6; color: #e4e4e7; }
+    .tk-attr { color: #c4b5fd; }
+    .tk-type { color: #f0abfc; }
+    .tk-key { color: #c4b5fd; }
+    .tk-str { color: #86efac; }
+    .tk-num { color: #fcd34d; }
+    .tk-com { color: #71717a; font-style: italic; }
+    .tk-fn  { color: #93c5fd; }
+    .tk-kw  { color: #f0abfc; }
+    .tk-id  { color: #e4e4e7; }
+    .tk-acc { color: #22d3a8; }
+    .rule { height: 1px; background: linear-gradient(to right, transparent, rgba(255,255,255,0.08), transparent); }
+    .cmp-table { width: 100%; border-collapse: collapse; font-size: .8125rem; }
+    .cmp-table th, .cmp-table td { padding: .75rem 1rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .cmp-table thead th { font-size: .6875rem; text-transform: uppercase; letter-spacing: .04em; color: #a1a1aa; font-weight: 500; background: rgba(255,255,255,0.015); }
+    .cmp-table tbody td:not(:first-child) { text-align: center; font-family: 'JetBrains Mono', monospace; font-size: .875rem; }
+    .cmp-table tbody tr:hover { background: rgba(255,255,255,0.015); }
+    .cmp-table tbody tr:last-child td { border-bottom: 0; }
+    .maturity-table tbody td:not(:first-child) { text-align: left; font-family: 'Inter', ui-sans-serif, system-ui, sans-serif; font-size: .8125rem; }
+    .maturity-table tbody td:nth-child(2) { width: 8.5rem; font-family: 'JetBrains Mono', monospace; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+    .cmp-yes { color: #22d3a8; }
+    .cmp-no  { color: #52525b; }
+    .cmp-part { color: #a78bfa; font-size: .75rem !important; letter-spacing: .04em; }
+    .cmp-keel-col { background: rgba(34,211,168,0.04); border-left: 1px solid rgba(34,211,168,0.15); border-right: 1px solid rgba(34,211,168,0.15); }
+    .stat-num { font-family: 'JetBrains Mono', monospace; font-weight: 500; color: #fafafa; font-size: 1.5rem; line-height: 1; }
+    .stat-num small { font-size: .875rem; color: #a1a1aa; margin-left: .125rem; }
+    .stat-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: #a1a1aa; margin-top: .5rem; }
+    .stat-foot  { font-size: .75rem; color: #a1a1aa; margin-top: .375rem; line-height: 1.4; }
+    @media (max-width: 640px) {
+      .code-block pre { padding: .75rem .875rem; font-size: .75rem; }
+      .cmp-table th, .cmp-table td { padding: .5rem .625rem; font-size: .75rem; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; animation: none !important; }
+      html { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+
+<body class="font-sans tracking-tightish">
+  <header class="hairline-b sticky top-0 z-30 backdrop-blur-md bg-ink-950/80">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <a href="#" class="flex items-center gap-2.5 group">
+        <svg viewBox="0 0 24 24" class="w-6 h-6 text-paper-50 opacity-90 group-hover:opacity-100 transition" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="4"/>
+          <path d="M8 16V8"/><path d="M16 8l-6 6"/><path d="M11.5 12.5 16 16"/>
+        </svg>
+        <span class="text-paper-100 font-semibold tracking-tight">Keel</span>
+        <span class="chip ml-1.5 hidden sm:inline-flex">
+          <span class="accent-dot"></span>
+          C11
+        </span>
+      </a>
+
+      <nav class="hidden md:flex items-center gap-x-6 text-sm">
+        <a href="#scope" class="link">Scope</a>
+        <a href="#principles" class="link">Principles</a>
+        <a href="#substrate" class="link">Substrate</a>
+        <a href="#protocols" class="link">Protocols</a>
+        <a href="#compare" class="link">Compare</a>
+        <a href="#how" class="link">How</a>
+        <a href="#security" class="link">Security</a>
+        <a href="#trust" class="link">Trust</a>
+        <a href="https://github.com/artalis-io/keel#readme" class="link">Docs</a>
+      </nav>
+
+      <div class="flex items-center gap-2">
+        <a href="https://github.com/artalis-io/keel" class="btn btn-ghost text-xs">
+          <i data-lucide="github" class="w-3.5 h-3.5"></i>
+          <span>GitHub</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <section class="relative overflow-hidden">
+    <div class="absolute inset-0 grid-bg pointer-events-none" aria-hidden="true"></div>
+    <div class="relative max-w-6xl mx-auto px-6 pt-12 pb-16 md:pt-28 md:pb-32">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-16 items-start">
+        <div class="lg:col-span-7">
+          <a href="#substrate" class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/[0.025] hover:bg-white/[0.05] hover:border-white/20 transition text-[11px] text-mute-400 hover:text-paper-100 mb-6">
+            <i data-lucide="route" class="w-3 h-3 shrink-0"></i>
+            <span>Hull's default event loop and transport layer</span>
+            <i data-lucide="arrow-right" class="w-3 h-3 shrink-0"></i>
+          </a>
+
+          <h1 class="text-[2rem] sm:text-4xl md:text-5xl lg:text-6xl font-semibold leading-[1.05] tracking-tight text-paper-50">
+            Built for events
+            you need to trust.
+          </h1>
+
+          <p class="mt-6 text-base md:text-lg text-mute-400 max-w-xl leading-relaxed">
+            Keel is the default event loop and transport layer for Hull. It is
+            swappable, but it is the first-class path for HTTP, WebSocket, SSE,
+            async clients, file descriptors, timers, and worker wakeups over
+            epoll, kqueue, io_uring, or poll.
+          </p>
+
+          <div class="mt-8 flex flex-wrap items-center gap-3">
+            <a href="https://github.com/artalis-io/keel#readme" class="btn btn-primary">
+              Read the docs
+              <i data-lucide="arrow-right" class="w-4 h-4"></i>
+            </a>
+            <a href="https://github.com/artalis-io/keel" class="btn btn-ghost">
+              <i data-lucide="github" class="w-4 h-4"></i>
+              View on GitHub
+            </a>
+          </div>
+
+          <div class="mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 text-xs text-mute-400">
+            <div class="flex items-center gap-2">
+              <i data-lucide="activity" class="w-3.5 h-3.5"></i>
+              <span>101K req/s benchmark peak</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <i data-lucide="cpu" class="w-3.5 h-3.5"></i>
+              <span>epoll &middot; kqueue &middot; io_uring &middot; poll</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <i data-lucide="plug" class="w-3.5 h-3.5"></i>
+              <span>Pluggable TLS &middot; parser &middot; allocator</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
+              <span>pledge/unveil-friendly init/run split</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="lg:col-span-5">
+          <div class="code-block shadow-xl shadow-black/40">
+            <header>
+              <i data-lucide="file-code-2" class="w-3.5 h-3.5"></i>
+              <span>keel server</span>
+              <span class="ml-auto text-[10px] text-mute-500">compilable C11</span>
+            </header>
+<pre><span class="tk-kw">#include</span> <span class="tk-str">&lt;keel/keel.h&gt;</span>
+
+<span class="tk-kw">static void</span> <span class="tk-fn">handle_run</span>(KlRequest *req,
+                       KlResponse *res,
+                       <span class="tk-kw">void</span> *ctx) {
+    (<span class="tk-kw">void</span>)req;
+    (<span class="tk-kw">void</span>)ctx;
+
+    <span class="tk-kw">static const char</span> body[] =
+        <span class="tk-str">"{\"ok\":true,\"transport\":\"keel\"}"</span>;
+    <span class="tk-fn">kl_response_json</span>(res, <span class="tk-num">200</span>, body,
+        <span class="tk-kw">sizeof</span>(body) - <span class="tk-num">1</span>);
+}
+
+<span class="tk-kw">int</span> <span class="tk-fn">main</span>(<span class="tk-kw">void</span>) {
+    KlServer s;
+    KlConfig cfg = { .<span class="tk-key">port</span> = <span class="tk-num">7070</span> };
+
+    <span class="tk-fn">kl_server_init</span>(&amp;s, &amp;cfg);
+    <span class="tk-fn">kl_server_route</span>(&amp;s, <span class="tk-str">"GET"</span>, <span class="tk-str">"/run"</span>,
+        handle_run, NULL, NULL);
+    <span class="tk-fn">kl_server_run</span>(&amp;s);
+    <span class="tk-fn">kl_server_free</span>(&amp;s);
+}</pre>
+          </div>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            Keel does not replace Hull's capability boundary. It is the default
+            event and transport substrate beneath Hull: a narrow, auditable path
+            to sockets, timers, local native services, side-car binaries, device
+            bridges, and high-throughput protocol edges. OTTO and other Artalis
+            systems use the same substrate where C eventing and transport matter.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-14 md:py-16">
+      <div class="grid lg:grid-cols-12 gap-8 lg:gap-12 items-start">
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Build &amp; test</div>
+          <h2 class="text-xl md:text-2xl font-semibold text-paper-50 tracking-tight">
+            One library.
+            Four event backends.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            Keel builds as a static C library. Use kqueue on macOS and BSD,
+            epoll on Linux, io_uring where it makes sense, and poll when
+            portability matters more than edge-triggered performance.
+          </p>
+        </div>
+
+        <div class="lg:col-span-8">
+          <div class="code-block">
+            <header>
+              <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+              <span>shell</span>
+              <span class="ml-auto text-[10px] text-mute-500">local build</span>
+            </header>
+<pre><span class="tk-com"># Build libkeel.a with the platform default backend.</span>
+$ make
+
+<span class="tk-com"># Linux 5.6+: readiness events through io_uring.</span>
+$ make BACKEND=iouring
+
+<span class="tk-com"># Universal POSIX fallback.</span>
+$ make BACKEND=poll
+
+<span class="tk-com"># Run the test suite and example programs.</span>
+$ make test
+$ make examples</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="hairline-t bg-ink-900/50">
+    <div class="max-w-6xl mx-auto px-6 py-8">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
+        <div>
+          <div class="stat-num">101K</div>
+          <div class="stat-label">req/s</div>
+          <div class="stat-foot">Peak reported by the repo benchmark suite.</div>
+        </div>
+        <div>
+          <div class="stat-num">671</div>
+          <div class="stat-label">tests</div>
+          <div class="stat-foot">40 suites with ASan/UBSan.</div>
+        </div>
+        <div>
+          <div class="stat-num">4</div>
+          <div class="stat-label">backends</div>
+          <div class="stat-foot">epoll, kqueue, io_uring, poll.</div>
+        </div>
+        <div>
+          <div class="stat-num">1</div>
+          <div class="stat-label">vendored dep</div>
+          <div class="stat-foot">llhttp parser by default.</div>
+        </div>
+      </div>
+      <p class="mt-6 text-[11px] text-mute-500 leading-relaxed">
+        Benchmark context:
+        <a href="https://github.com/artalis-io/keel/blob/main/bench/bench.sh" class="link">make bench</a>
+        runs a dedicated local benchmark server across four endpoints with wrk
+        latency reporting. Defaults are 4 threads, 100 connections, and 10s
+        duration; the
+        <a href="https://github.com/artalis-io/keel/blob/main/.github/workflows/benchmark.yml" class="link">benchmark workflow</a>
+        also runs Linux epoll, Linux io_uring, and macOS kqueue with 2 threads,
+        50 connections, and 5s duration.
+      </p>
+    </div>
+  </section>
+
+  <section id="scope" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid md:grid-cols-12 gap-10">
+        <div class="md:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Scope</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+            Keel is Hull's default event loop and transport layer.
+          </h2>
+        </div>
+        <div class="md:col-span-8 grid sm:grid-cols-2 gap-5">
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <h3 class="font-medium text-paper-50">What it is</h3>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              A minimal C11 event loop and protocol substrate with async server
+              handlers, sync/async clients, WebSocket, SSE, timers,
+              thread-pool wakeups, body readers, streaming, and connection
+              pooling. Hull uses it by default; OTTO and other Artalis systems
+              reuse it where they need the same C-level eventing and transport.
+            </p>
+          </div>
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <h3 class="font-medium text-paper-50">What it is not</h3>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              Not a web framework, not an application runtime, not a policy
+              engine, not an RPC religion. Hull owns capabilities. Keel is the
+              default byte-moving layer, and remains replaceable at the boundary.
+            </p>
+          </div>
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <h3 class="font-medium text-paper-50">Why it exists</h3>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              Local-first and embedded systems need a predictable event loop and
+              network edge that can be compiled, audited, fuzzed, sandboxed, and
+              carried into constrained deployments.
+            </p>
+          </div>
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <h3 class="font-medium text-paper-50">Where it fits</h3>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              Beneath Hull's capability-limited orchestration layer, in
+              native Artalis services, and between Hull and side-cars that
+              perform routing, optimization, inference, device IO, or other
+              compute-heavy work.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="principles" class="hairline-t bg-ink-900">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="max-w-2xl">
+        <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Principles</div>
+        <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+          Small pieces. Explicit edges.
+        </h2>
+      </div>
+
+      <div class="mt-10 grid md:grid-cols-3 gap-6">
+        <div>
+          <div class="flex items-center gap-2 text-paper-50 font-medium">
+            <i data-lucide="split" class="w-4 h-4 text-accent"></i>
+            Orthogonal modules
+          </div>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            Allocator, parser, body reader, TLS, resolver, router, client, and
+            server modules are independently testable and replaceable.
+          </p>
+        </div>
+        <div>
+          <div class="flex items-center gap-2 text-paper-50 font-medium">
+            <i data-lucide="database-zap" class="w-4 h-4 text-accent"></i>
+            No forced buffering
+          </div>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            Buffer, file, and streaming response modes let services avoid copying
+            when sendfile, writev, chunking, or backpressure are the right tool.
+          </p>
+        </div>
+        <div>
+          <div class="flex items-center gap-2 text-paper-50 font-medium">
+            <i data-lucide="lock-keyhole" class="w-4 h-4 text-accent"></i>
+            Sandbox-shaped
+          </div>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            The init/run split, fixed resource limits, explicit vtables, and
+            narrow file descriptor model make syscall lockdown natural.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="substrate" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
+        <div class="lg:col-span-5">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Hull + OTTO + side-cars</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+            The default event and transport substrate for constrained systems.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            Hull should not need to embed every native capability directly into
+            the scripting runtime. Keel is the default event loop and local
+            transport path to native binaries that can be sandboxed, restarted,
+            versioned, audited, and replaced independently.
+          </p>
+          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+            The important architectural point is the seam: Keel is the standard
+            substrate, but Hull does not hard-code trust into it. Capability
+            checks stay above; side-car process isolation stays below. The same
+            eventing and transport layer can be reused directly by native
+            services that do not need the Hull scripting runtime.
+          </p>
+          <div class="mt-5 grid sm:grid-cols-2 gap-3 text-xs text-mute-400">
+            <div class="flex items-start gap-2">
+              <i data-lucide="server" class="w-3.5 h-3.5 text-accent mt-0.5 shrink-0"></i>
+              <span>Hull HTTP server, routing, middleware, and static-file edge.</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <i data-lucide="timer" class="w-3.5 h-3.5 text-accent mt-0.5 shrink-0"></i>
+              <span>Hull timers, SSE, async requests, and thread-pool wakeups.</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <i data-lucide="cpu" class="w-3.5 h-3.5 text-accent mt-0.5 shrink-0"></i>
+              <span>Native optimizer, router, and inference side-car gateways.</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <i data-lucide="boxes" class="w-3.5 h-3.5 text-accent mt-0.5 shrink-0"></i>
+              <span>Reusable C service substrate for OTTO-style systems.</span>
+            </div>
+          </div>
+          <p class="mt-4 text-[11px] text-mute-500 leading-relaxed">
+            In Hull, Keel is wired into server startup, route dispatch, middleware,
+            timers, SSE, async work, and static-file serving. See Hull's
+            <a href="https://github.com/artalis-io/hull/blob/main/docs/architecture.md#1-keel-http-server" class="link">architecture notes</a>
+            and
+            <a href="https://github.com/artalis-io/hull/blob/main/README.md#dependencies" class="link">dependency table</a>.
+          </p>
+        </div>
+
+        <div class="lg:col-span-7">
+          <div class="code-block">
+            <header>
+              <i data-lucide="network" class="w-3.5 h-3.5"></i>
+              <span>layers</span>
+              <span class="ml-auto text-[10px] text-mute-500">local system boundary</span>
+            </header>
+<pre>+-------------------------------------------------------+
+| Hull app code                                         |
+| Lua / JS orchestration, routes, workflows             |
++--------------------------+----------------------------+
+                           |
+                           | manifest-declared calls
+                           v
++-------------------------------------------------------+
+| Hull runtime boundary                                 |
+| capabilities, audit, sandbox, WASM compute            |
+|                                                       |
+|   Keel default event + transport layer                |
+|   HTTP / WS / SSE / clients / timers / watchers       |
++--------------------------+----------------------------+
+                           |
+                           | explicit local transport
+                           v
++-------------------------------------------------------+
+| Sandboxed native side-car                             |
+| optimizer, router, inference, device bridge           |
++-------------------------------------------------------+</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="compare" class="hairline-t bg-ink-900/50">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="max-w-2xl">
+        <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Compare</div>
+        <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+          Less framework. More substrate.
+        </h2>
+        <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+          Keel is deliberately closer to the metal than application servers,
+          but more protocol-aware than a generic event loop.
+        </p>
+      </div>
+
+      <div class="mt-8 code-block overflow-x-auto">
+        <table class="cmp-table">
+          <thead>
+            <tr>
+              <th>Capability</th>
+              <th class="cmp-keel-col">Keel</th>
+              <th>libuv</th>
+              <th>Nginx</th>
+              <th>gRPC</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Embeddable C library</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-yes">yes</td>
+              <td class="cmp-no">no</td>
+              <td class="cmp-part">part</td>
+            </tr>
+            <tr>
+              <td>HTTP server and client in one substrate</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-no">no</td>
+              <td class="cmp-no">server</td>
+              <td class="cmp-part">rpc</td>
+            </tr>
+            <tr>
+              <td>Pluggable TLS/parser/allocator/body reader</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-part">part</td>
+              <td class="cmp-no">no</td>
+              <td class="cmp-no">no</td>
+            </tr>
+            <tr>
+              <td>Designed for side-car sandbox boundaries</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-part">generic</td>
+              <td class="cmp-part">edge</td>
+              <td class="cmp-part">service</td>
+            </tr>
+            <tr>
+              <td>Single small static-library deployment</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-yes">yes</td>
+              <td class="cmp-no">no</td>
+              <td class="cmp-no">heavy</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="protocols" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Protocols &amp; maturity</div>
+        <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+          A mature HTTP core, with protocol edges around it.
+        </h2>
+        <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            Keel's center of gravity is event-loop integration plus HTTP/1.1
+            transport. WebSocket, SSE, client pooling, compression, proxying,
+            redirects, generic FD watchers, timers, and HTTP/2 hooks extend that
+            core without turning Keel into a monolithic application server.
+        </p>
+        </div>
+
+        <div class="lg:col-span-8">
+          <div class="code-block overflow-x-auto">
+            <table class="cmp-table maturity-table">
+              <thead>
+                <tr>
+                  <th>Surface</th>
+                  <th>Status</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Event loop core</td>
+                  <td class="cmp-yes">stable</td>
+                  <td>epoll, kqueue, io_uring poll-add, and POSIX poll behind one small API; exercised by server, client, timers, and watcher tests.</td>
+                </tr>
+                <tr>
+                  <td>Timers and worker wakeups</td>
+                  <td class="cmp-yes">stable</td>
+                  <td>One-shot timers, thread-pool resume, and pipe-based event-loop wakeup with public examples.</td>
+                </tr>
+                <tr>
+                  <td>HTTP/1.1 server</td>
+                  <td class="cmp-yes">stable</td>
+                  <td>Routing, middleware, keep-alive, timeouts, buffered/file/stream responses; covered by the main test and example suite.</td>
+                </tr>
+                <tr>
+                  <td>HTTP/1.1 client</td>
+                  <td class="cmp-yes">stable</td>
+                  <td>Blocking and async APIs, TLS hooks, proxy support, redirects, connection pooling, and decompression support.</td>
+                </tr>
+                <tr>
+                  <td>WebSocket</td>
+                  <td class="cmp-yes">tested</td>
+                  <td>RFC 6455 server and client, shared frame parser, masked client frames, and dedicated fuzz corpus.</td>
+                </tr>
+                <tr>
+                  <td>Server-Sent Events</td>
+                  <td class="cmp-yes">stable</td>
+                  <td>Zero-alloc SSE framing over chunked streaming responses.</td>
+                </tr>
+                <tr>
+                  <td>Multipart form-data</td>
+                  <td class="cmp-yes">tested</td>
+                  <td>RFC 2046 parser with part, total-size, and part-count limits plus dedicated fuzz targets.</td>
+                </tr>
+                <tr>
+                  <td>Compression / decompression</td>
+                  <td class="cmp-yes">stable</td>
+                  <td>Pluggable vtables; miniz gzip backend ships in-tree.</td>
+                </tr>
+                <tr>
+                  <td>HTTP proxy / CONNECT</td>
+                  <td class="cmp-yes">stable</td>
+                  <td>HTTP forwarding and HTTPS tunneling for client-side transport.</td>
+                </tr>
+                <tr>
+                  <td>HTTP/2</td>
+                  <td class="cmp-part">pluggable</td>
+                  <td>Server and client surfaces use session vtables; backend choice remains explicit.</td>
+                </tr>
+                <tr>
+                  <td>TLS</td>
+                  <td class="cmp-part">bring your own</td>
+                  <td>Keel defines the transport vtable and avoids vendoring TLS policy.</td>
+                </tr>
+                <tr>
+                  <td>Async DNS</td>
+                  <td class="cmp-part">bring your own</td>
+                  <td>Resolver vtable plus caching decorator; c-ares or thread-pool wrappers fit here.</td>
+                </tr>
+                <tr>
+                  <td>Generic FD watchers</td>
+                  <td class="cmp-yes">stable</td>
+                  <td>Register arbitrary file descriptors for callbacks on the same event context.</td>
+                </tr>
+                <tr>
+                  <td>Side-car local transport</td>
+                  <td class="cmp-yes">default</td>
+                  <td>Hull's default route to sandboxed native binaries; replaceable at explicit boundaries.</td>
+                </tr>
+                <tr>
+                  <td>OTTO/native service substrate</td>
+                  <td class="cmp-yes">in use</td>
+                  <td>Reusable event loop and transport library for C services that sit outside Hull.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">How it works</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+            Event loop first.
+            Protocols around it.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            The composable event context owns readiness, watchers, timers, and
+            allocator state. Server, client, thread pool, SSE, WebSocket, and
+            side-car bridges sit on top of that same loop.
+          </p>
+        </div>
+
+        <div class="lg:col-span-8 grid sm:grid-cols-2 gap-5">
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <div class="flex items-center gap-2 text-paper-50 font-medium">
+              <i data-lucide="radio-receiver" class="w-4 h-4 text-accent"></i>
+              Event backends
+            </div>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              Edge-triggered epoll/kqueue, io_uring poll-add, and POSIX poll
+              expose the same small event API to higher layers.
+            </p>
+          </div>
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <div class="flex items-center gap-2 text-paper-50 font-medium">
+              <i data-lucide="repeat-2" class="w-4 h-4 text-accent"></i>
+              Suspend and resume
+            </div>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              Async handlers can suspend a connection and resume it from a file
+              descriptor watcher, timer, client callback, or worker completion.
+            </p>
+          </div>
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <div class="flex items-center gap-2 text-paper-50 font-medium">
+              <i data-lucide="layers-3" class="w-4 h-4 text-accent"></i>
+              Body readers
+            </div>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              Request bodies are routed into explicit readers: buffer, multipart,
+              stream-oriented custom parsers, or application-specific sinks.
+            </p>
+          </div>
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <div class="flex items-center gap-2 text-paper-50 font-medium">
+              <i data-lucide="waves" class="w-4 h-4 text-accent"></i>
+              Streaming edges
+            </div>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              Chunked responses, SSE, WebSocket frames, backpressure drain
+              buffers, and client pools keep long-lived local services cheap.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="security" class="hairline-t bg-ink-900">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
+        <div class="lg:col-span-5">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Security model</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+            Narrow transport makes sandboxing practical.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            Keel is not the authorization layer. Hull decides what an app can do.
+            Keel keeps the local transport path small enough to test, fuzz,
+            constrain, and place behind kernel sandboxing.
+          </p>
+        </div>
+
+        <div class="lg:col-span-7 space-y-4">
+          <div class="flex gap-4">
+            <i data-lucide="shield" class="w-5 h-5 text-accent mt-0.5 shrink-0"></i>
+            <div>
+              <h3 class="text-paper-50 font-medium">Resource limits at the edge</h3>
+              <p class="mt-1 text-sm text-mute-400 leading-relaxed">
+                Header size, body size, multipart part limits, drain buffers,
+                connection timeouts, idle timers, and route-level readers make
+                overload behavior explicit.
+              </p>
+            </div>
+          </div>
+          <div class="rule"></div>
+          <div class="flex gap-4">
+            <i data-lucide="scan-search" class="w-5 h-5 text-accent mt-0.5 shrink-0"></i>
+            <div>
+              <h3 class="text-paper-50 font-medium">Fuzzed protocol surfaces</h3>
+              <p class="mt-1 text-sm text-mute-400 leading-relaxed">
+                Parser, response parser, multipart, and WebSocket paths have
+                dedicated fuzz targets and corpus fixtures.
+              </p>
+            </div>
+          </div>
+          <div class="rule"></div>
+          <div class="flex gap-4">
+            <i data-lucide="box" class="w-5 h-5 text-accent mt-0.5 shrink-0"></i>
+            <div>
+              <h3 class="text-paper-50 font-medium">Bring your own hardening</h3>
+              <p class="mt-1 text-sm text-mute-400 leading-relaxed">
+                TLS, allocators, DNS, compression, file IO, and parsers are
+                vtables, so production users can choose the backend appropriate
+                for their threat model.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="trust" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Trust</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+            Built like infrastructure.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            Keel is intentionally boring in the places that matter: C11, static
+            library, CI, sanitizers, fuzzing, OpenSSF checks, and examples that
+            compile against the public API.
+          </p>
+        </div>
+
+        <div class="lg:col-span-8">
+          <div class="code-block">
+            <header>
+              <i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i>
+              <span>quality gates</span>
+              <span class="ml-auto text-[10px] text-mute-500">repo workflow</span>
+            </header>
+<pre>$ make debug      <span class="tk-com"># ASan + UBSan</span>
+$ make test       <span class="tk-com"># unit and integration suites</span>
+$ make analyze    <span class="tk-com"># clang static analyzer</span>
+$ make cppcheck   <span class="tk-com"># static analysis</span>
+$ make fuzz       <span class="tk-com"># parser and protocol fuzz targets</span></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-10 space-y-6">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div class="flex items-center gap-3">
+          <svg viewBox="0 0 24 24" class="w-5 h-5 text-paper-50 opacity-80" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="4"/>
+            <path d="M8 16V8"/><path d="M16 8l-6 6"/><path d="M11.5 12.5 16 16"/>
+          </svg>
+          <span class="text-sm text-mute-400">
+            Keel. Kernel Event Engine, Lightweight
+          </span>
+        </div>
+        <div class="flex items-center gap-2 text-xs text-mute-500 leading-relaxed">
+          <i data-lucide="shield-check" class="w-3.5 h-3.5 text-accent shrink-0"></i>
+          <span>MIT licensed C transport substrate for local-first systems.</span>
+        </div>
+      </div>
+
+      <div class="rule"></div>
+
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <nav class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+          <a href="https://github.com/artalis-io/keel" class="link inline-flex items-center gap-1.5">
+            <i data-lucide="github" class="w-3.5 h-3.5"></i> GitHub
+          </a>
+          <a href="https://github.com/artalis-io/keel#readme" class="link">Docs</a>
+          <a href="https://github.com/artalis-io/keel/tree/main/examples" class="link">Examples</a>
+          <a href="https://github.com/artalis-io/keel/security/advisories/new" class="link inline-flex items-center gap-1.5">
+            <i data-lucide="shield" class="w-3.5 h-3.5"></i> Report a vulnerability
+          </a>
+        </nav>
+        <a href="https://github.com/artalis-io/keel/blob/main/LICENSE" class="kbd hover:bg-white/10 hover:text-paper-50 transition no-underline">
+          MIT
+        </a>
+      </div>
+
+      <p class="text-[11px] text-mute-400 leading-relaxed">
+        Page last updated <time datetime="2026-05">May&nbsp;2026</time>.
+        Keel is the event loop and transport substrate; Hull remains the capability-secure runtime.
+      </p>
+    </div>
+  </footer>
+
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script>
+    if (window.lucide) { lucide.createIcons(); }
+  </script>
+</body>
+</html>

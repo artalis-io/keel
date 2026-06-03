@@ -46,32 +46,259 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
     }
 }
 
-/* Handler that reports multipart parts as JSON */
+/* Handler that drives the streaming multipart iterator and reports a
+ * "parts=N name0=... len0=..." summary line. The full body has been
+ * received by the time the handler fires (in the non-streaming route),
+ * so kl_multipart_next never returns NEED_DATA here.
+ *
+ * All allocations go through the keel allocator — no fixed-size static
+ * buffers, no magic-constant part caps. The response body is sent via
+ * kl_response_body_copy so Keel owns the bytes after this function
+ * returns; the handler's scratch allocations are freed before return. */
+typedef struct {
+    char  *name;
+    size_t name_len;
+    char  *filename;
+    size_t filename_len;
+    int    has_filename;
+    size_t size;
+} HandleUploadPart;
+
+static void handle_upload_free_parts(KlAllocator *a, HandleUploadPart *parts,
+                                      size_t count, size_t cap) {
+    if (!parts) return;
+    for (size_t i = 0; i < count; i++) {
+        if (parts[i].name)
+            kl_free(a, parts[i].name, parts[i].name_len + 1);
+        if (parts[i].filename)
+            kl_free(a, parts[i].filename, parts[i].filename_len + 1);
+    }
+    kl_free(a, parts, cap * sizeof(*parts));
+}
+
+static char *handle_upload_dup(KlAllocator *a, const char *s, size_t n) {
+    char *d = kl_malloc(a, n + 1);
+    if (!d) return NULL;
+    if (n > 0) memcpy(d, s, n);
+    d[n] = '\0';
+    return d;
+}
+
 static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
-    KlMultipartReader *mr = (KlMultipartReader *)req->body_reader;
-    if (!mr || mr->num_parts == 0) {
+    KlBodyReader *br = req->body_reader;
+    if (!br) {
+        kl_response_error(res, 400, "No reader");
+        return;
+    }
+    KlAllocator alloc = kl_allocator_default();
+
+    HandleUploadPart *parts = NULL;
+    size_t parts_count = 0;
+    size_t parts_cap = 0;
+
+    KlMultipartPartMeta meta;
+    const char *d = NULL;
+    size_t      dn = 0;
+    for (;;) {
+        KlMultipartEvent e = kl_multipart_next(br, &meta, &d, &dn);
+        if (e == KL_MP_EVT_PART_BEGIN) {
+            if (parts_count == parts_cap) {
+                size_t new_cap = parts_cap ? parts_cap * 2 : 4;
+                size_t old_sz  = parts_cap * sizeof(*parts);
+                size_t new_sz  = new_cap   * sizeof(*parts);
+                HandleUploadPart *np = kl_realloc(&alloc, parts, old_sz, new_sz);
+                if (!np) {
+                    handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+                    kl_response_error(res, 500, "OOM");
+                    return;
+                }
+                parts = np;
+                parts_cap = new_cap;
+            }
+            HandleUploadPart *p = &parts[parts_count];
+            memset(p, 0, sizeof(*p));
+            p->name = handle_upload_dup(&alloc, meta.name, meta.name_len);
+            if (!p->name) {
+                /* L1 fix: don't promote a partially-initialised part
+                 * (with NULL name) into the active count — later
+                 * snprintf would deref it. Bail cleanly. */
+                handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+                kl_response_error(res, 500, "OOM");
+                return;
+            }
+            p->name_len = meta.name_len;
+            if (meta.filename) {
+                p->filename = handle_upload_dup(&alloc, meta.filename,
+                                                meta.filename_len);
+                if (!p->filename) {
+                    kl_free(&alloc, p->name, p->name_len + 1);
+                    handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+                    kl_response_error(res, 500, "OOM");
+                    return;
+                }
+                p->filename_len = meta.filename_len;
+                p->has_filename = 1;
+            }
+            parts_count++;
+            continue;
+        }
+        if (e == KL_MP_EVT_PART_DATA) {
+            if (parts_count > 0) parts[parts_count - 1].size += dn;
+            continue;
+        }
+        if (e == KL_MP_EVT_PART_END) continue;
+        if (e == KL_MP_EVT_DONE)     break;
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+        kl_response_error(res, 400, "Parse error");
+        return;
+    }
+    if (parts_count == 0) {
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
         kl_response_error(res, 400, "No parts");
         return;
     }
 
-    /* Simple response: "parts=N name0=... len0=..." */
-    static char body[1024];  /* static: body must outlive handler for async writev */
-    int off = snprintf(body, sizeof(body), "parts=%d", mr->num_parts);
-    for (int i = 0; i < mr->num_parts && off < (int)sizeof(body) - 64; i++) {
-        off += snprintf(body + off, sizeof(body) - (size_t)off,
-                        " name%d=%s len%d=%zu",
-                        i, mr->parts[i].name, i, mr->parts[i].data_len);
+    /* Two-pass: size the response body via snprintf(NULL,0,...), then
+     * allocate exactly what's needed. L2 fix: validate each snprintf
+     * return individually so a single failure can't poison the running
+     * total. */
+    size_t body_cap = 0;
+    int n = snprintf(NULL, 0, "parts=%zu", parts_count);
+    if (n < 0) {
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+        kl_response_error(res, 500, "snprintf");
+        return;
+    }
+    body_cap += (size_t)n;
+    for (size_t i = 0; i < parts_count; i++) {
+        n = snprintf(NULL, 0, " name%zu=%s len%zu=%zu",
+                     i, parts[i].name, i, parts[i].size);
+        if (n < 0) {
+            handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+            kl_response_error(res, 500, "snprintf");
+            return;
+        }
+        body_cap += (size_t)n;
+    }
+    body_cap += 1;  /* trailing NUL */
+    char *body = kl_malloc(&alloc, body_cap);
+    if (!body) {
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+        kl_response_error(res, 500, "OOM");
+        return;
+    }
+    size_t off = 0;
+    n = snprintf(body + off, body_cap - off, "parts=%zu", parts_count);
+    if (n < 0 || (size_t)n >= body_cap - off) {
+        kl_free(&alloc, body, body_cap);
+        handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+        kl_response_error(res, 500, "snprintf");
+        return;
+    }
+    off += (size_t)n;
+    for (size_t i = 0; i < parts_count; i++) {
+        n = snprintf(body + off, body_cap - off,
+                     " name%zu=%s len%zu=%zu",
+                     i, parts[i].name, i, parts[i].size);
+        if (n < 0 || (size_t)n >= body_cap - off) {
+            kl_free(&alloc, body, body_cap);
+            handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
+            kl_response_error(res, 500, "snprintf");
+            return;
+        }
+        off += (size_t)n;
     }
 
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body_borrow(res, body, (size_t)off);
+    /* body_copy: Keel takes its own copy, we free our scratch. */
+    kl_response_body_copy(res, body, off);
+
+    kl_free(&alloc, body, body_cap);
+    handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
 }
 
 static void handle_no_reader(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+/* ── Mid-stream early-exit fixture ───────────────────────────────────
+ *
+ * Synthetic body reader + handler pair used by the
+ * streaming_mid_stream_early_exit test. Together they simulate what a
+ * Lua/JS coroutine-based handler would do: yield at dispatch time
+ * (state = READING_BODY), then "resume" inside on_data, set up the
+ * response, and transition state to SENDING. Without the early-exit
+ * branch in kl_conn_on_readable's READING_BODY mid-stream return,
+ * Keel would override that SENDING with READING_BODY and the response
+ * would never be sent.
+ */
+/* Set by handle_early_exit when it runs. The test thread polls this
+ * to know when the handler has run (and therefore when it's safe to
+ * send the second body chunk), instead of guessing with a fixed
+ * usleep. Reset to 0 at the start of each test. */
+static volatile int eer_handler_called = 0;
+
+typedef struct {
+    KlBodyReader  base;
+    KlAllocator  *alloc;
+    KlConn       *conn;        /* stashed by handler at dispatch time */
+    KlResponse   *res;         /* same */
+    int           responded;   /* one-shot guard */
+} EarlyExitReader;
+
+static int  eer_on_data(KlBodyReader *self, const char *data, size_t len) {
+    EarlyExitReader *r = (EarlyExitReader *)self;
+    (void)data; (void)len;
+    if (r->responded || !r->conn || !r->res) return 0;
+    /* Mimic a coroutine waking on first on_data: set up the response,
+     * transition state to SENDING. The new mid-stream early-exit
+     * branch in connection.c sees the terminal state and returns it
+     * instead of forcing READING_BODY. */
+    kl_response_status(r->res, 200);
+    kl_response_header(r->res, "Content-Type", "text/plain");
+    kl_response_body_borrow(r->res, "early exit", 10);
+    r->conn->state = KL_CONN_SENDING;
+    r->responded = 1;
+    return 0;
+}
+static void eer_on_complete(KlBodyReader *self) { (void)self; }
+static void eer_on_error(KlBodyReader *self)    { (void)self; }
+static void eer_destroy(KlBodyReader *self) {
+    EarlyExitReader *r = (EarlyExitReader *)self;
+    kl_free(r->alloc, r, sizeof(*r));
+}
+
+static KlBodyReader *eer_factory(KlAllocator *alloc, const KlRequest *req,
+                                  void *user_data) {
+    (void)req; (void)user_data;
+    EarlyExitReader *r = kl_malloc(alloc, sizeof(*r));
+    if (!r) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->base.on_data     = eer_on_data;
+    r->base.on_complete = eer_on_complete;
+    r->base.on_error    = eer_on_error;
+    r->base.destroy     = eer_destroy;
+    r->alloc            = alloc;
+    return &r->base;
+}
+
+static void handle_early_exit(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    /* Stash conn + res on the body reader so on_data can wake "us"
+     * with the response. Then yield by leaving state as READING_BODY
+     * so conn_invoke_streaming_handler returns READING_BODY and the
+     * event loop keeps pumping on_data. */
+    EarlyExitReader *r = (EarlyExitReader *)req->body_reader;
+    if (!r) { kl_response_error(res, 500, "no reader"); return; }
+    r->conn = kl_request_conn(req);
+    r->res  = res;
+    r->conn->state = KL_CONN_READING_BODY;
+    /* Signal the test thread that we've run — it polls this before
+     * sending the second body chunk so the test isn't timing-fragile. */
+    eer_handler_called = 1;
 }
 
 static KlServer test_server;
@@ -129,6 +356,18 @@ static void start_server(void) {
                     kl_body_reader_buffer);
     kl_server_route(&test_server, "POST", "/upload", handle_upload,
                     NULL, kl_body_reader_multipart);
+    /* Streaming variant: same handler, same body reader, but registered
+     * with kl_server_route_streaming so the dispatch path invokes the
+     * handler after body-reader setup BEFORE on_complete. The handler
+     * itself doesn't yield (kl_multipart_next never returns NEED_DATA
+     * because the body arrives in one chunk in this test), so the
+     * observable behaviour is the same response shape — the dispatch
+     * path is exercised. */
+    kl_server_route_streaming(&test_server, "POST", "/upload-stream",
+                               handle_upload, NULL, kl_body_reader_multipart);
+    /* Mid-stream early-exit test route (Keel v2.1.1). */
+    kl_server_route_streaming(&test_server, "POST", "/early-exit",
+                               handle_early_exit, NULL, eer_factory);
     kl_server_route(&test_server, "GET", "/users/:id", handle_param,
                     NULL, NULL);
     kl_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
@@ -499,6 +738,190 @@ UTEST(integration, multipart_upload) {
              "\r\n", body_len);
     (void)write(fd, hdr, strlen(hdr));
     (void)write(fd, body, body_len);
+
+    char buf[4096];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "parts=2") != NULL);
+    ASSERT_TRUE(strstr(buf, "name0=field1") != NULL);
+    ASSERT_TRUE(strstr(buf, "name1=file") != NULL);
+    ASSERT_TRUE(strstr(buf, "len1=14") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, streaming_mid_stream_early_exit) {
+    /* Synthetic streaming handler that "yields" at dispatch time and
+     * "wakes" inside on_data to send a 200 response BEFORE the body
+     * is fully received. Without the v2.1.1 mid-stream early-exit
+     * check in connection.c's READING_BODY, Keel would force the
+     * state back to READING_BODY after on_data, ignoring the
+     * handler's SENDING transition, and the response would never be
+     * sent (the test would hang).
+     *
+     * Body is sent in TWO writes with a small sleep between so the
+     * server processes them in two separate reads. The dispatcher
+     * runs the handler after the leftover from write 1 has been
+     * fed via on_data (NULL conn — no-op). Write 2 arrives later,
+     * fires on_data with conn+res now set, triggers the response
+     * mid-stream, and the early-exit branch returns SENDING. */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    KlAllocator alloc = kl_allocator_default();
+
+    /* Sizes scoped to the test, expressed at the call site. The
+     * announced Content-Length is larger than the two chunks sum so
+     * the body genuinely never completes — proves the early-exit
+     * branch doesn't rely on end-of-body. */
+    size_t chunk1_len       = 64;
+    size_t chunk2_len       = 64;
+    size_t announced_cl_len = chunk1_len + chunk2_len + 1024;
+    size_t hdr_cap          = 256;
+    size_t resp_cap         = 512;
+
+    /* Reset the handler-ran flag so the poll below has clean state. */
+    eer_handler_called = 0;
+
+    char *hdr = kl_malloc(&alloc, hdr_cap);
+    ASSERT_TRUE(hdr != NULL);
+    int hdr_len = snprintf(hdr, hdr_cap,
+        "POST /early-exit HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n", announced_cl_len);
+    ASSERT_TRUE(hdr_len > 0);
+
+    char *chunk1 = kl_malloc(&alloc, chunk1_len);
+    char *chunk2 = kl_malloc(&alloc, chunk2_len);
+    ASSERT_TRUE(chunk1 != NULL);
+    ASSERT_TRUE(chunk2 != NULL);
+    memset(chunk1, 'A', chunk1_len);
+    memset(chunk2, 'B', chunk2_len);
+
+    /* Write 1: header + chunk1. Server's first read consumes both;
+     * leftover (chunk1) is fed via on_data with NULL conn → no-op.
+     * Then handler runs, stashes conn+res, yields. */
+    (void)write(fd, hdr, (size_t)hdr_len);
+    (void)write(fd, chunk1, chunk1_len);
+
+    /* Wait for the handler to have run before sending chunk2 — same
+     * polling pattern as wait_for_bind() above. Avoids fixed-sleep
+     * flakiness on loaded CI. ~2-second cap covers slow runners; the
+     * normal-case wait is much shorter (a few ms). */
+    for (int i = 0; i < 200 && !eer_handler_called; i++) usleep(10000);
+    ASSERT_TRUE(eer_handler_called);
+
+    /* Write 2: chunk2. Arrives in READING_BODY state, on_data fires
+     * with conn+res NOW set → response goes out, state = SENDING.
+     * The early-exit branch returns SENDING instead of forcing
+     * READING_BODY. */
+    (void)write(fd, chunk2, chunk2_len);
+
+    char *buf = kl_malloc(&alloc, resp_cap);
+    ASSERT_TRUE(buf != NULL);
+    read_response(fd, buf, resp_cap);
+    close(fd);
+
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "early exit") != NULL);
+
+    kl_free(&alloc, hdr,    hdr_cap);
+    kl_free(&alloc, chunk1, chunk1_len);
+    kl_free(&alloc, chunk2, chunk2_len);
+    kl_free(&alloc, buf,    resp_cap);
+
+    stop_server();
+}
+
+UTEST(integration, streaming_route_no_body_runs_handler) {
+    /* L3 regression: CL:0 + streaming route — handler must still be
+     * invoked. Its body_reader is NULL (no factory call since
+     * has_body=0), so handle_upload responds 400 "No reader". The
+     * test verifies the handler RAN (we got 400, not 500 or hang). */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *req =
+        "POST /upload-stream HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    (void)write(fd, req, strlen(req));
+
+    char buf[1024];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    /* Handler ran (saw NULL body_reader) and emitted 400 "No reader". */
+    ASSERT_TRUE(strstr(buf, "400 ") != NULL);
+    ASSERT_TRUE(strstr(buf, "No reader") != NULL);
+
+    stop_server();
+}
+
+UTEST(integration, multipart_upload_streaming_route) {
+    /* Same payload + handler as the non-streaming multipart_upload
+     * test, but routed through /upload-stream which is registered with
+     * kl_server_route_streaming. Exercises the early-dispatch code
+     * path in conn_dispatch_request and the on_complete-skip-post-
+     * middleware branch.
+     *
+     * NOTE: handle_upload is a plain C handler with no yield mechanism.
+     * If it gets KL_MP_EVT_NEED_DATA it errors out with 400 (since
+     * yielding requires a coroutine, which lives in Hull, not Keel).
+     * To exercise the happy path here, send headers + body in one
+     * write so the entire body sits in the leftover buffer by the
+     * time the dispatcher invokes the handler — kl_multipart_next
+     * never has to return NEED_DATA. Hull's bindings will provide
+     * the yield path. */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    const char *body =
+        "--TESTBND\r\n"
+        "Content-Disposition: form-data; name=\"field1\"\r\n"
+        "\r\n"
+        "value1"
+        "\r\n--TESTBND\r\n"
+        "Content-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\n"
+        "Content-Type: text/plain\r\n"
+        "\r\n"
+        "file data here"
+        "\r\n--TESTBND--\r\n";
+    size_t body_len = strlen(body);
+
+    char hdr[512];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+             "POST /upload-stream HTTP/1.1\r\n"
+             "Host: localhost\r\n"
+             "Content-Type: multipart/form-data; boundary=TESTBND\r\n"
+             "Content-Length: %zu\r\n"
+             "Connection: close\r\n"
+             "\r\n", body_len);
+    ASSERT_TRUE(hdr_len > 0);
+
+    /* Combined single write: headers + body in one packet so the body
+     * is in the leftover buffer when the streaming dispatcher fires.
+     * Allocate exactly what's needed — no magic-sized fixed buffer. */
+    KlAllocator alloc = kl_allocator_default();
+    size_t combined_len = (size_t)hdr_len + body_len;
+    char *combined = kl_malloc(&alloc, combined_len);
+    ASSERT_TRUE(combined != NULL);
+    memcpy(combined, hdr, (size_t)hdr_len);
+    memcpy(combined + hdr_len, body, body_len);
+    (void)write(fd, combined, combined_len);
+    kl_free(&alloc, combined, combined_len);
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));

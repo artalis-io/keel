@@ -77,6 +77,27 @@ KlTlsCtx *kl_tls_mbedtls_client_ctx_create(const char *ca_path,
                                               KlAllocator *alloc);
 
 /**
+ * @brief Create a TLS client context from an in-memory CA bundle.
+ *
+ * Same as kl_tls_mbedtls_client_ctx_create() but reads the CA bundle from
+ * a buffer instead of a file. Useful for embedded bundles where there is
+ * no filesystem path. The buffer must be PEM-encoded; binary DER is also
+ * accepted by mbedTLS (it auto-detects).
+ *
+ * The buffer is parsed and copied internally; the caller may free it
+ * immediately after this call returns.
+ *
+ * @param ca_buf  PEM (or DER) CA bundle bytes. Must be non-NULL.
+ * @param ca_len  Length in bytes. For PEM, must include the trailing NUL
+ *                — mbedTLS requires PEM input to be NUL-terminated.
+ * @param alloc   Allocator for context storage (borrowed — must outlive context).
+ * @return Opaque context, or NULL on error.
+ */
+KlTlsCtx *kl_tls_mbedtls_client_ctx_create_from_buf(const unsigned char *ca_buf,
+                                                      size_t ca_len,
+                                                      KlAllocator *alloc);
+
+/**
  * @brief Destroy a TLS context.
  *
  * Safe to pass as ctx_destroy in KlTlsConfig.

@@ -87,6 +87,7 @@ struct KlWsClientConn {
 static void wsc_on_event(int fd, KlEventMask ready, void *user_data);
 static void wsc_error(KlWsClientConn *ws, const char *msg);
 static void wsc_close_connection(KlWsClientConn *ws);
+static int  wsc_process_frames(KlWsClientConn *ws, const uint8_t *data, size_t len);
 static void wsc_ping_timer(void *user_data);
 
 /* ── I/O abstraction (plain or TLS) ────────────────────────────── */
@@ -553,6 +554,24 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
         return;
     }
 
+    /* Compute leftover bytes after HTTP headers (may contain WS frame data
+     * that arrived in the same TCP segment as the upgrade response) */
+    size_t http_end_offset = 0;
+    for (size_t i = 0; i + 3 < ws->handshake_len; i++) {
+        if (ws->handshake_buf[i] == '\r' && ws->handshake_buf[i+1] == '\n' &&
+            ws->handshake_buf[i+2] == '\r' && ws->handshake_buf[i+3] == '\n') {
+            http_end_offset = i + 4;
+            break;
+        }
+    }
+    size_t leftover_len = ws->handshake_len - http_end_offset;
+    char *leftover = NULL;
+    if (leftover_len > 0) {
+        leftover = kl_malloc(ws->alloc, leftover_len);
+        if (leftover)
+            memcpy(leftover, ws->handshake_buf + http_end_offset, leftover_len);
+    }
+
     /* Handshake complete — free handshake buffers */
     if (ws->upgrade_buf) {
         kl_free(ws->alloc, ws->upgrade_buf, ws->upgrade_len);
@@ -576,44 +595,33 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
 
     if (ws->cbs.on_open)
         ws->cbs.on_open(ws, ws->user_data);
+
+    /* Feed leftover bytes into frame parser (data that arrived with the
+     * HTTP upgrade response in the same TCP segment) */
+    if (leftover && leftover_len > 0 && ws->state == WSC_OPEN) {
+        wsc_process_frames(ws, (const uint8_t *)leftover, leftover_len);
+        kl_free(ws->alloc, leftover, leftover_len);
+    } else if (leftover) {
+        kl_free(ws->alloc, leftover, leftover_len);
+    }
 }
 
-static void wsc_handle_open(KlWsClientConn *ws)
+/* Process WS frame data. Called from wsc_handle_open (normal reads) and
+ * from handshake completion (leftover bytes). Returns 0 to rearm, -1 on
+ * close/error (caller must not access ws after -1). */
+static int wsc_process_frames(KlWsClientConn *ws, const uint8_t *data,
+                               size_t len)
 {
-    uint8_t buf[KL_WS_CLIENT_RECV_BUF_SIZE];
-
-    ssize_t nread = wsc_read(ws, buf, sizeof(buf));
-    if (nread < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            kl_watcher_rearm(ws->ev, ws->fd);
-            return;
-        }
-        wsc_error(ws, "read error");
-        return;
-    }
-    if (nread == 0) {
-        /* Server closed connection */
-        if (!ws->close_received) {
-            if (ws->cbs.on_close)
-                ws->cbs.on_close(ws, KL_WS_GOING_AWAY, NULL, 0,
-                                 ws->user_data);
-        }
-        ws->state = WSC_CLOSED;
-        wsc_close_connection(ws);
-        return;
-    }
-
-    /* Parse frames from received data (mirrors server on_readable_data) */
     size_t pos = 0;
-    while (pos < (size_t)nread) {
+    while (pos < len) {
         size_t payload_before = ws->fp.payload_read;
         size_t consumed = 0;
-        int rc = kl_ws_frame_parse(&ws->fp, buf + pos,
-                                    (size_t)nread - pos, &consumed);
+        int rc = kl_ws_frame_parse(&ws->fp, data + pos,
+                                    len - pos, &consumed);
 
         if (rc < 0) {
             wsc_error(ws, "frame parse error");
-            return;
+            return -1;
         }
 
         /* Extract payload bytes from this parse call */
@@ -621,12 +629,12 @@ static void wsc_handle_open(KlWsClientConn *ws)
         if (payload_consumed > 0 && ws->fp.state != KL_WS_FRAME_HEADER) {
             /* Payload bytes are at end of consumed range */
             size_t payload_offset = pos + consumed - payload_consumed;
-            const char *payload_data = (const char *)(buf + payload_offset);
+            const char *payload_data = (const char *)(data + payload_offset);
 
             /* Frame size check */
             if (ws->fp.payload_len > ws->max_frame_size) {
                 wsc_error(ws, "frame too large");
-                return;
+                return -1;
             }
 
             int opcode = ws->fp.opcode;
@@ -655,7 +663,7 @@ static void wsc_handle_open(KlWsClientConn *ws)
                                              ws->user_data);
                         ws->state = WSC_CLOSED;
                         wsc_close_connection(ws);
-                        return;
+                        return -1;
                     } else if (opcode == KL_WS_OP_PING) {
                         wsc_send_frame(ws, KL_WS_OP_PONG,
                                        payload_data, payload_consumed);
@@ -670,12 +678,12 @@ static void wsc_handle_open(KlWsClientConn *ws)
                     ws->msg_opcode = opcode;
                 } else if (ws->msg_opcode == 0) {
                     wsc_error(ws, "continuation without start");
-                    return;
+                    return -1;
                 }
 
                 if (wsc_msg_append(ws, payload_data, payload_consumed) != 0) {
                     wsc_error(ws, "message too large");
-                    return;
+                    return -1;
                 }
 
                 /* Incremental UTF-8 validation */
@@ -685,7 +693,7 @@ static void wsc_handle_open(KlWsClientConn *ws)
                                      payload_consumed);
                     if (ws->utf8_state == KL_UTF8_REJECT) {
                         wsc_error(ws, "invalid UTF-8");
-                        return;
+                        return -1;
                     }
                 }
 
@@ -693,7 +701,7 @@ static void wsc_handle_open(KlWsClientConn *ws)
                     if (ws->msg_opcode == KL_WS_OP_TEXT &&
                         ws->utf8_state != KL_UTF8_ACCEPT) {
                         wsc_error(ws, "invalid UTF-8");
-                        return;
+                        return -1;
                     }
                     if (ws->cbs.on_message)
                         ws->cbs.on_message(ws, ws->msg_buf, ws->msg_len,
@@ -715,7 +723,7 @@ static void wsc_handle_open(KlWsClientConn *ws)
                     ws->cbs.on_close(ws, 1005, NULL, 0, ws->user_data);
                 ws->state = WSC_CLOSED;
                 wsc_close_connection(ws);
-                return;
+                return -1;
             } else if (opcode == KL_WS_OP_PING) {
                 wsc_send_frame(ws, KL_WS_OP_PONG, NULL, 0);
             } else if (opcode < 0x8 && ws->fp.fin) {
@@ -747,10 +755,39 @@ static void wsc_handle_open(KlWsClientConn *ws)
     if (ws->close_sent && ws->close_received) {
         ws->state = WSC_CLOSED;
         wsc_close_connection(ws);
+        return -1;
+    }
+
+    return 0;
+}
+
+static void wsc_handle_open(KlWsClientConn *ws)
+{
+    uint8_t buf[KL_WS_CLIENT_RECV_BUF_SIZE];
+
+    ssize_t nread = wsc_read(ws, buf, sizeof(buf));
+    if (nread < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            kl_watcher_rearm(ws->ev, ws->fd);
+            return;
+        }
+        wsc_error(ws, "read error");
+        return;
+    }
+    if (nread == 0) {
+        /* Server closed connection */
+        if (!ws->close_received) {
+            if (ws->cbs.on_close)
+                ws->cbs.on_close(ws, KL_WS_GOING_AWAY, NULL, 0,
+                                 ws->user_data);
+        }
+        ws->state = WSC_CLOSED;
+        wsc_close_connection(ws);
         return;
     }
 
-    kl_watcher_rearm(ws->ev, ws->fd);
+    if (wsc_process_frames(ws, buf, (size_t)nread) == 0)
+        kl_watcher_rearm(ws->ev, ws->fd);
 }
 
 /* ── Auto-ping timer callback ───────────────────────────────────── */

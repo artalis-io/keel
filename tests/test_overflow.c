@@ -174,7 +174,9 @@ UTEST(overflow, chunked_no_digits_before_ext) {
 /* ── Multipart overflow ──────────────────────────────────────────── */
 
 UTEST(overflow, multipart_max_parts_exceeded) {
-    /* body_reader_multipart.c:34 — max_parts enforcement */
+    /* In the streaming parser, max_parts is enforced at PART_BEGIN
+     * inside kl_multipart_next (on_data is parse-free). Drive the
+     * iterator and assert the third part trips KL_MP_ERR_TOO_MANY_PARTS. */
     KlAllocator alloc = kl_allocator_default();
 
     KlRequest req;
@@ -196,7 +198,6 @@ UTEST(overflow, multipart_max_parts_exceeded) {
     KlBodyReader *reader = kl_body_reader_multipart(&alloc, &req, &cfg);
     ASSERT_TRUE(reader != NULL);
 
-    /* Feed data with 3 parts — should reject the 3rd */
     const char *data =
         "--testboundary\r\n"
         "Content-Disposition: form-data; name=\"a\"\r\n\r\ndata1"
@@ -205,15 +206,25 @@ UTEST(overflow, multipart_max_parts_exceeded) {
         "\r\n--testboundary\r\n"
         "Content-Disposition: form-data; name=\"c\"\r\n\r\ndata3"
         "\r\n--testboundary--";
+    ASSERT_EQ(reader->on_data(reader, data, strlen(data)), 0);
+    reader->on_complete(reader);
 
-    int rc = reader->on_data(reader, data, strlen(data));
-    ASSERT_EQ(rc, -1);
+    int part_begins = 0;
+    KlMultipartEvent e;
+    do {
+        e = kl_multipart_next(reader, NULL, NULL, NULL);
+        if (e == KL_MP_EVT_PART_BEGIN) part_begins++;
+    } while (e != KL_MP_EVT_DONE && e != KL_MP_EVT_ERROR);
+    ASSERT_EQ(e, KL_MP_EVT_ERROR);
+    ASSERT_EQ(kl_multipart_last_error(reader), KL_MP_ERR_TOO_MANY_PARTS);
+    ASSERT_EQ(part_begins, 2);
 
     reader->destroy(reader);
 }
 
 UTEST(overflow, multipart_max_part_size_exceeded) {
-    /* body_reader_multipart.c:63-64 — max_part_size enforcement */
+    /* max_part_size is enforced as PART_DATA events accumulate inside
+     * kl_multipart_next. on_data is parse-free in the streaming model. */
     KlAllocator alloc = kl_allocator_default();
 
     KlRequest req;
@@ -240,9 +251,15 @@ UTEST(overflow, multipart_max_part_size_exceeded) {
         "Content-Disposition: form-data; name=\"a\"\r\n\r\n"
         "this data is definitely longer than ten bytes"
         "\r\n--testboundary--";
+    ASSERT_EQ(reader->on_data(reader, data, strlen(data)), 0);
+    reader->on_complete(reader);
 
-    int rc = reader->on_data(reader, data, strlen(data));
-    ASSERT_EQ(rc, -1);
+    KlMultipartEvent e;
+    do {
+        e = kl_multipart_next(reader, NULL, NULL, NULL);
+    } while (e != KL_MP_EVT_DONE && e != KL_MP_EVT_ERROR);
+    ASSERT_EQ(e, KL_MP_EVT_ERROR);
+    ASSERT_EQ(kl_multipart_last_error(reader), KL_MP_ERR_PART_TOO_LARGE);
 
     reader->destroy(reader);
 }

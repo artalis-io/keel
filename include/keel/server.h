@@ -104,6 +104,23 @@ int  kl_server_route(KlServer *s, const char *method, const char *pattern,
                      KlBodyReaderFactory body_reader);
 
 /**
+ * @brief Register a streaming-handler route. The handler runs after
+ *        the body reader is set up but BEFORE the body is fully
+ *        received, so it can pull bytes incrementally (e.g. via the
+ *        streaming multipart iterator) and yield mid-stream. The body
+ *        reader's on_data callback is responsible for resuming the
+ *        yielded handler.
+ *
+ *        Post-body middleware does NOT run for streaming routes.
+ *        A non-NULL body_reader factory is required.
+ *
+ * @return 0 on success, -1 on failure.
+ */
+int  kl_server_route_streaming(KlServer *s, const char *method, const char *pattern,
+                                KlHandler handler, void *user_data,
+                                KlBodyReaderFactory body_reader);
+
+/**
  * @brief Register pre-body middleware on the server.
  * @param s       Server instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).

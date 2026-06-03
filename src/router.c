@@ -46,6 +46,18 @@ int kl_router_add(KlRouter *r, const char *method, const char *pattern,
     return 0;
 }
 
+int kl_router_add_streaming(KlRouter *r, const char *method, const char *pattern,
+                             KlHandler handler, void *user_data,
+                             KlBodyReaderFactory body_reader) {
+    /* Streaming handlers need a body reader to pump on_data into. */
+    if (!body_reader) return -1;
+    int rc = kl_router_add(r, method, pattern, handler, user_data, body_reader);
+    if (rc < 0) return rc;
+    /* kl_router_add appended to slot count-1. Mark it streaming. */
+    r->routes[r->count - 1].streaming_handler = 1;
+    return 0;
+}
+
 /*
  * Match a single pattern segment against a path segment.
  * Pattern segment starts with ':' for param capture.
@@ -225,6 +237,53 @@ int kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlResponse *res) 
         }
     }
     return 0;
+}
+
+/* ── Synthetic request dispatch ─────────────────────────────────────── */
+
+int kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
+                                  KlResponse *res, int run_middleware) {
+    if (!r || !req || !res) return -1;
+
+    /* Match route. params live on the request; the caller doesn't have
+     * to pre-fill them. */
+    KlRoute *matched = NULL;
+    int num_params = 0;
+    int match_status = kl_router_match(r, req->method, req->method_len,
+                                       req->path, req->path_len,
+                                       &matched, req->params, &num_params);
+    /* Defensive clamp: kl_router_match already bounds writes into params
+     * by KL_MAX_PARAMS (see match_path) — repeating the clamp on the
+     * count we expose protects req->num_params against any future
+     * regression in the matcher and costs nothing on the hot path. */
+    if (num_params < 0) num_params = 0;
+    if (num_params > KL_MAX_PARAMS) num_params = KL_MAX_PARAMS;
+    req->num_params = num_params;
+
+    /* No-middleware fast path for a miss — caller decides what to do
+     * with the status (e.g. a test that explicitly asserts 404 doesn't
+     * want middleware to run). */
+    if (!run_middleware && (match_status != 200 || !matched))
+        return match_status;
+
+    /* Pre-body middleware. Short-circuit returns the middleware's
+     * return value so the caller can distinguish handler-status from
+     * middleware-short-circuit. */
+    if (run_middleware) {
+        int mw_rc = kl_router_run_middleware(r, req, res);
+        if (mw_rc != 0) return mw_rc;
+
+        mw_rc = kl_router_run_post_middleware(r, req, res);
+        if (mw_rc != 0) return mw_rc;
+    }
+
+    /* Dispatch handler if matched; otherwise stamp the match status. */
+    if (match_status == 200 && matched) {
+        matched->handler(req, res, matched->user_data);
+        return 200;
+    }
+    kl_response_status(res, match_status);
+    return match_status;
 }
 
 /* ── Route matching ─────────────────────────────────────────────────── */

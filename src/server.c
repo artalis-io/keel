@@ -207,6 +207,13 @@ int kl_server_route(KlServer *s, const char *method, const char *pattern,
                          body_reader);
 }
 
+int kl_server_route_streaming(KlServer *s, const char *method, const char *pattern,
+                               KlHandler handler, void *user_data,
+                               KlBodyReaderFactory body_reader) {
+    return kl_router_add_streaming(&s->router, method, pattern, handler,
+                                    user_data, body_reader);
+}
+
 int kl_server_use(KlServer *s, const char *method, const char *pattern,
                   KlMiddleware fn, void *user_data) {
     return kl_router_use(&s->router, method, pattern, fn, user_data);
