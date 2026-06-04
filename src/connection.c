@@ -700,6 +700,22 @@ read_more_body: ;
             if (rc < 0) {
                 if (c->req.body_reader)
                     c->req.body_reader->on_error(c->req.body_reader);
+                /* Streaming routes: if the body-reader's on_error chain
+                 * resumed a handler that caught the parser error and
+                 * prepared a response, c->state will already be SENDING
+                 * (or CLOSED). Honor that response instead of clobbering
+                 * it with the hardcoded 413 — sibling of the v2.1.0/v2.1.1
+                 * mid-stream early-exit logic on the success-return path
+                 * (just below). Force keep-alive off: the body wasn't
+                 * drained, so unread bytes would bleed into the next
+                 * request on this conn. */
+                if (c->route && c->route->streaming_handler &&
+                    (c->state == KL_CONN_SENDING ||
+                     c->state == KL_CONN_CLOSED)) {
+                    c->req.keep_alive = 0;
+                    c->res.keep_alive = 0;
+                    return c->state;
+                }
                 best_effort_conn_write(c, kl_413_response,
                                        sizeof(kl_413_response) - 1);
                 c->state = KL_CONN_CLOSED;
@@ -765,6 +781,17 @@ read_more_body: ;
         if (pr == KL_PARSE_ERROR) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);
+            /* Streaming routes: same handler-state-honoring logic as
+             * the chunked path's rc<0 branch above — mirrors v2.1.0/
+             * v2.1.1's mid-stream early-exit, just for the error-
+             * return path. */
+            if (c->route && c->route->streaming_handler &&
+                (c->state == KL_CONN_SENDING ||
+                 c->state == KL_CONN_CLOSED)) {
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
+                return c->state;
+            }
             /* Body reader rejected (413) */
             best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
             c->state = KL_CONN_CLOSED;
