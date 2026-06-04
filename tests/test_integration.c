@@ -224,6 +224,76 @@ static void handle_no_reader(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
+/* ── Mid-stream early-exit on ERROR-return fixture ──────────────────
+ *
+ * Sibling of the streaming_mid_stream_early_exit test for the case
+ * where the body reader REJECTS the body (returns -1 from on_data —
+ * e.g. cap-exceeded). The handler stashes conn+res at dispatch time;
+ * on_data writes the response, sets state = SENDING, then returns
+ * -1 to simulate the reader rejecting the body bytes. The new branch
+ * in kl_conn_on_readable's rc<0 / pr==KL_PARSE_ERROR paths must see
+ * the SENDING state and honor it instead of overwriting with the
+ * hardcoded 413 + CLOSED. */
+static volatile int eer_err_handler_called = 0;
+
+typedef struct {
+    KlBodyReader  base;
+    KlAllocator  *alloc;
+    KlConn       *conn;
+    KlResponse   *res;
+    int           responded;
+} EarlyExitErrReader;
+
+static int  eer_err_on_data(KlBodyReader *self, const char *data, size_t len) {
+    EarlyExitErrReader *r = (EarlyExitErrReader *)self;
+    (void)data; (void)len;
+    /* First call (handler hasn't stashed conn+res yet) or already
+     * responded: succeed silently so the handler gets a chance to
+     * run. Mirrors eer_on_data's null-conn handling. */
+    if (r->responded || !r->conn || !r->res) return 0;
+    /* Handler is alive — now pretend we just hit a cap. Write a
+     * structured "handler" response BEFORE returning -1. The new
+     * error-path branch in connection.c sees state == SENDING and
+     * returns it without overwriting. */
+    kl_response_status(r->res, 413);
+    kl_response_header(r->res, "Content-Type", "text/plain");
+    /* 31 bytes — em-dash is 3 bytes UTF-8 */
+    kl_response_body_borrow(r->res, "cap exceeded — handler caught", 31);
+    r->conn->state = KL_CONN_SENDING;
+    r->responded = 1;
+    return -1;   /* simulate body-reader rejection */
+}
+static void eer_err_on_complete(KlBodyReader *self) { (void)self; }
+static void eer_err_on_error(KlBodyReader *self)    { (void)self; }
+static void eer_err_destroy(KlBodyReader *self) {
+    EarlyExitErrReader *r = (EarlyExitErrReader *)self;
+    kl_free(r->alloc, r, sizeof(*r));
+}
+
+static KlBodyReader *eer_err_factory(KlAllocator *alloc, const KlRequest *req,
+                                       void *user_data) {
+    (void)req; (void)user_data;
+    EarlyExitErrReader *r = kl_malloc(alloc, sizeof(*r));
+    if (!r) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->base.on_data     = eer_err_on_data;
+    r->base.on_complete = eer_err_on_complete;
+    r->base.on_error    = eer_err_on_error;
+    r->base.destroy     = eer_err_destroy;
+    r->alloc            = alloc;
+    return &r->base;
+}
+
+static void handle_early_exit_err(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    EarlyExitErrReader *r = (EarlyExitErrReader *)req->body_reader;
+    if (!r) { kl_response_error(res, 500, "no reader"); return; }
+    r->conn = kl_request_conn(req);
+    r->res  = res;
+    r->conn->state = KL_CONN_READING_BODY;
+    eer_err_handler_called = 1;
+}
+
 /* ── Mid-stream early-exit fixture ───────────────────────────────────
  *
  * Synthetic body reader + handler pair used by the
@@ -368,6 +438,9 @@ static void start_server(void) {
     /* Mid-stream early-exit test route (Keel v2.1.1). */
     kl_server_route_streaming(&test_server, "POST", "/early-exit",
                                handle_early_exit, NULL, eer_factory);
+    /* Mid-stream early-exit on body-reader-ERROR-return route (v2.1.2). */
+    kl_server_route_streaming(&test_server, "POST", "/early-exit-err",
+                               handle_early_exit_err, NULL, eer_err_factory);
     kl_server_route(&test_server, "GET", "/users/:id", handle_param,
                     NULL, NULL);
     kl_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
@@ -830,6 +903,85 @@ UTEST(integration, streaming_mid_stream_early_exit) {
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "early exit") != NULL);
+
+    kl_free(&alloc, hdr,    hdr_cap);
+    kl_free(&alloc, chunk1, chunk1_len);
+    kl_free(&alloc, chunk2, chunk2_len);
+    kl_free(&alloc, buf,    resp_cap);
+
+    stop_server();
+}
+
+UTEST(integration, streaming_mid_stream_early_exit_on_error) {
+    /* v2.1.2 — sibling of streaming_mid_stream_early_exit for the
+     * body-reader-returns-(-1) path. The fixture's on_data writes a
+     * structured handler response (413 + "cap exceeded — handler
+     * caught"), sets state = SENDING, and returns -1 to simulate a
+     * cap-exceeded rejection. The new early-exit branch in
+     * kl_conn_on_readable's rc<0 / pr==KL_PARSE_ERROR clauses must
+     * see SENDING and return it without overwriting state with
+     * KL_CONN_CLOSED + the hardcoded kl_413_response. The test
+     * asserts on the handler-supplied body, not the hardcoded one. */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    KlAllocator alloc = kl_allocator_default();
+    size_t chunk1_len       = 64;
+    size_t chunk2_len       = 64;
+    size_t announced_cl_len = chunk1_len + chunk2_len + 1024;
+    size_t hdr_cap          = 256;
+    size_t resp_cap         = 512;
+
+    eer_err_handler_called = 0;
+
+    char *hdr = kl_malloc(&alloc, hdr_cap);
+    ASSERT_TRUE(hdr != NULL);
+    int hdr_len = snprintf(hdr, hdr_cap,
+        "POST /early-exit-err HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n", announced_cl_len);
+    ASSERT_TRUE(hdr_len > 0);
+
+    char *chunk1 = kl_malloc(&alloc, chunk1_len);
+    char *chunk2 = kl_malloc(&alloc, chunk2_len);
+    ASSERT_TRUE(chunk1 != NULL);
+    ASSERT_TRUE(chunk2 != NULL);
+    memset(chunk1, 'A', chunk1_len);
+    memset(chunk2, 'B', chunk2_len);
+
+    /* Same two-write sync pattern as the success-path test — handler
+     * runs after chunk1's leftover, stashes conn+res, yields. */
+    (void)write(fd, hdr, (size_t)hdr_len);
+    (void)write(fd, chunk1, chunk1_len);
+
+    for (int i = 0; i < 200 && !eer_err_handler_called; i++) usleep(10000);
+    ASSERT_TRUE(eer_err_handler_called);
+
+    /* Chunk 2 arrives in READING_BODY. on_data fires with conn+res
+     * set, writes the 413 response, sets state = SENDING, returns -1.
+     * Without the fix Keel would write the hardcoded 413 + close;
+     * with the fix the handler's "cap exceeded" body lands. */
+    (void)write(fd, chunk2, chunk2_len);
+
+    char *buf = kl_malloc(&alloc, resp_cap);
+    ASSERT_TRUE(buf != NULL);
+    read_response(fd, buf, resp_cap);
+    close(fd);
+
+    /* The handler's structured response landed — NOT the hardcoded
+     * kl_413_response. Both share the "413 Payload Too Large" status
+     * line (it's the standard reason phrase), so the discriminator is
+     * the body: the hardcoded response has Content-Length: 0; ours
+     * carries the "cap exceeded — handler caught" payload + custom
+     * Content-Type: text/plain. */
+    ASSERT_TRUE(strstr(buf, "413") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Type: text/plain") != NULL);
+    ASSERT_TRUE(strstr(buf, "cap exceeded") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Length: 31") != NULL);
 
     kl_free(&alloc, hdr,    hdr_cap);
     kl_free(&alloc, chunk1, chunk1_len);
