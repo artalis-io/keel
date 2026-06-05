@@ -121,6 +121,32 @@ int  kl_server_route_streaming(KlServer *s, const char *method, const char *patt
                                 KlBodyReaderFactory body_reader);
 
 /**
+ * @brief Register an async-streaming-handler route (v2.2.0+).
+ *
+ *        Like kl_server_route_streaming, plus the handler is invoked
+ *        BEFORE any leftover body bytes are fed via on_data. The
+ *        handler MUST yield on NEED_DATA — the body reader's on_data
+ *        callback resumes it for the leftover and subsequent reads.
+ *
+ *        Enables the full error-path mid-stream early-exit: caps
+ *        that fire during leftover processing now resume the parked
+ *        handler via on_error so it can write a structured response,
+ *        instead of clobbering with the hardcoded 413.
+ *
+ *        Synchronous C handlers that need the body fully buffered
+ *        before they run should keep using kl_server_route_streaming.
+ *
+ *        See router.h::kl_router_add_streaming_async for the full
+ *        contract.
+ *
+ * @return 0 on success, -1 on failure.
+ */
+int  kl_server_route_streaming_async(KlServer *s, const char *method,
+                                       const char *pattern,
+                                       KlHandler handler, void *user_data,
+                                       KlBodyReaderFactory body_reader);
+
+/**
  * @brief Register pre-body middleware on the server.
  * @param s       Server instance.
  * @param method  HTTP method filter ("GET", "POST", "*" for any).

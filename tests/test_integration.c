@@ -294,6 +294,32 @@ static void handle_early_exit_err(KlRequest *req, KlResponse *res, void *ctx) {
     eer_err_handler_called = 1;
 }
 
+/* ── Streaming-async early-invoke fixture (v2.2.0) ───────────────────
+ *
+ * Same shape as handle_early_exit_err, but registered with
+ * kl_server_route_streaming_async so the handler runs BEFORE leftover
+ * is fed via on_data. That lets us close the single-read leftover-cap
+ * gap: a body that arrives in the same kernel read as the header now
+ * gets rejected via the parked handler's structured response, instead
+ * of the body-reader's on_data silently succeeding because the handler
+ * hadn't stashed conn+res yet.
+ *
+ * The fixture reuses eer_err_factory (stateless) but tracks invocation
+ * with its own flag so tests stay independent.
+ */
+static volatile int eer_async_err_handler_called = 0;
+
+static void handle_early_exit_async_err(KlRequest *req, KlResponse *res,
+                                          void *ctx) {
+    (void)ctx;
+    EarlyExitErrReader *r = (EarlyExitErrReader *)req->body_reader;
+    if (!r) { kl_response_error(res, 500, "no reader"); return; }
+    r->conn = kl_request_conn(req);
+    r->res  = res;
+    r->conn->state = KL_CONN_READING_BODY;
+    eer_async_err_handler_called = 1;
+}
+
 /* ── Mid-stream early-exit fixture ───────────────────────────────────
  *
  * Synthetic body reader + handler pair used by the
@@ -441,6 +467,12 @@ static void start_server(void) {
     /* Mid-stream early-exit on body-reader-ERROR-return route (v2.1.2). */
     kl_server_route_streaming(&test_server, "POST", "/early-exit-err",
                                handle_early_exit_err, NULL, eer_err_factory);
+    /* Streaming-async early-invoke route (v2.2.0) — handler runs BEFORE
+     * leftover is fed via on_data, closing the single-read leftover-
+     * cap gap. */
+    kl_server_route_streaming_async(&test_server, "POST", "/early-exit-async-err",
+                                      handle_early_exit_async_err, NULL,
+                                      eer_err_factory);
     kl_server_route(&test_server, "GET", "/users/:id", handle_param,
                     NULL, NULL);
     kl_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
@@ -986,6 +1018,77 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
     kl_free(&alloc, hdr,    hdr_cap);
     kl_free(&alloc, chunk1, chunk1_len);
     kl_free(&alloc, chunk2, chunk2_len);
+    kl_free(&alloc, buf,    resp_cap);
+
+    stop_server();
+}
+
+UTEST(integration, streaming_async_single_read_leftover_cap) {
+    /* v2.2.0 — closes the single-read leftover-rejection gap that
+     * v2.1.2's fix left behind. With the legacy
+     * kl_server_route_streaming, a body that arrives in the SAME
+     * kernel read as the header gets processed as "leftover" inside
+     * conn_dispatch_request BEFORE the handler runs — so on_data fires
+     * with the body reader's conn+res still unstashed, the safety
+     * guard kicks in (returns 0), and the cap goes silently undetected.
+     *
+     * The new kl_server_route_streaming_async dispatches the handler
+     * FIRST. The handler stashes conn+res and parks (state ==
+     * READING_BODY). Leftover processing then fires on_data with the
+     * fixture's conn+res set, which writes the 413 + sets state =
+     * SENDING, returns -1, and the v2.1.2 state-honoring branch in
+     * the leftover path returns SENDING instead of clobbering with
+     * the hardcoded kl_413_response. */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    KlAllocator alloc = kl_allocator_default();
+    size_t body_len         = 64;
+    size_t announced_cl_len = body_len + 1024;
+    size_t total_cap        = 1024;
+    size_t resp_cap         = 512;
+
+    eer_async_err_handler_called = 0;
+
+    char *packet = kl_malloc(&alloc, total_cap);
+    ASSERT_TRUE(packet != NULL);
+    int hdr_len = snprintf(packet, total_cap,
+        "POST /early-exit-async-err HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n", announced_cl_len);
+    ASSERT_TRUE(hdr_len > 0);
+    ASSERT_TRUE((size_t)hdr_len + body_len < total_cap);
+
+    /* Body bytes immediately after the header — this is the critical
+     * single-write/single-read shape. Without v2.2.0's reorder, these
+     * bytes get fed to on_data BEFORE the handler runs and the cap
+     * goes undetected. */
+    memset(packet + hdr_len, 'A', body_len);
+
+    /* Single write — packetised together by TCP, single read on the
+     * server side (in the common case; the asserts below tolerate the
+     * rare split). */
+    (void)write(fd, packet, (size_t)hdr_len + body_len);
+
+    char *buf = kl_malloc(&alloc, resp_cap);
+    ASSERT_TRUE(buf != NULL);
+    read_response(fd, buf, resp_cap);
+    close(fd);
+
+    /* Handler must have run (proves the reorder fired) AND the
+     * structured 413 response must have landed (proves the state-
+     * honoring branch picked it up over the hardcoded one). */
+    ASSERT_TRUE(eer_async_err_handler_called);
+    ASSERT_TRUE(strstr(buf, "413") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Type: text/plain") != NULL);
+    ASSERT_TRUE(strstr(buf, "cap exceeded") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Length: 31") != NULL);
+
+    kl_free(&alloc, packet, total_cap);
     kl_free(&alloc, buf,    resp_cap);
 
     stop_server();

@@ -58,6 +58,23 @@ int kl_router_add_streaming(KlRouter *r, const char *method, const char *pattern
     return 0;
 }
 
+int kl_router_add_streaming_async(KlRouter *r, const char *method,
+                                    const char *pattern,
+                                    KlHandler handler, void *user_data,
+                                    KlBodyReaderFactory body_reader) {
+    if (!body_reader) return -1;
+    int rc = kl_router_add(r, method, pattern, handler, user_data, body_reader);
+    if (rc < 0) return rc;
+    /* streaming_handler enables the early-dispatch / mid-stream-exit
+     * machinery; streaming_async additionally tells conn_dispatch_request
+     * to invoke the handler BEFORE feeding leftover body bytes (so the
+     * handler can park on NEED_DATA and be resumed by on_data — both
+     * for the leftover AND subsequent socket reads). */
+    r->routes[r->count - 1].streaming_handler = 1;
+    r->routes[r->count - 1].streaming_async   = 1;
+    return 0;
+}
+
 /*
  * Match a single pattern segment against a path segment.
  * Pattern segment starts with ':' for param capture.
