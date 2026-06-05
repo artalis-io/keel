@@ -5,6 +5,7 @@
 #include <keel/tls.h>
 #include <keel/websocket_server.h>
 #include <keel/h2_server.h>
+#include <assert.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -467,11 +468,26 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
          * errors that fire inside on_data — including caps that hit
          * on the very first byte chunk. */
         if (c->route->streaming_handler && c->route->streaming_async) {
+            /* streaming_async implies streaming_handler — enforced by
+             * kl_router_add_streaming_async. Assert here to catch
+             * downstream API misuse (direct KlRoute mutation) in
+             * debug builds without runtime cost in release. */
+            assert(c->route->streaming_handler);
             KlConnState s = conn_invoke_streaming_handler(c);
             if (s != KL_CONN_READING_BODY) {
-                /* Handler completed synchronously (response queued
-                 * OR error). Skip leftover — bytes are dropped on
-                 * the floor, keep-alive will be forced off. */
+                /* Handler completed synchronously (sent a response,
+                 * suspended for async I/O, or emitted a streaming
+                 * response) without parking on the body reader. The
+                 * leftover bytes — and any subsequent body bytes still
+                 * in the kernel buffer — are now stranded: nothing in
+                 * the conn state machine will drain them. Force
+                 * keep-alive off so the connection closes after the
+                 * response sends, instead of bleeding stale body bytes
+                 * into a re-used connection's next request. Mirror of
+                 * the post-handler force-off at the READING_BODY rc<0
+                 * and SENDING/CLOSED branches below. */
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
                 return s;
             }
             /* Handler parked. Fall through to leftover processing
