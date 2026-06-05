@@ -5,6 +5,7 @@
 #include <keel/tls.h>
 #include <keel/websocket_server.h>
 #include <keel/h2_server.h>
+#include <assert.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -459,6 +460,40 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
                                    sizeof(kl_100_continue) - 1);
         }
 
+        /* v2.2.0+ ── streaming_async routes: invoke the handler BEFORE
+         * feeding any leftover body bytes. The handler is expected to
+         * yield on NEED_DATA (empty buffer); the body reader's on_data
+         * callback will then resume it for the leftover AND subsequent
+         * socket reads, giving the handler a chance to catch parser
+         * errors that fire inside on_data — including caps that hit
+         * on the very first byte chunk. */
+        if (c->route->streaming_handler && c->route->streaming_async) {
+            /* streaming_async implies streaming_handler — enforced by
+             * kl_router_add_streaming_async. Assert here to catch
+             * downstream API misuse (direct KlRoute mutation) in
+             * debug builds without runtime cost in release. */
+            assert(c->route->streaming_handler);
+            KlConnState s = conn_invoke_streaming_handler(c);
+            if (s != KL_CONN_READING_BODY) {
+                /* Handler completed synchronously (sent a response,
+                 * suspended for async I/O, or emitted a streaming
+                 * response) without parking on the body reader. The
+                 * leftover bytes — and any subsequent body bytes still
+                 * in the kernel buffer — are now stranded: nothing in
+                 * the conn state machine will drain them. Force
+                 * keep-alive off so the connection closes after the
+                 * response sends, instead of bleeding stale body bytes
+                 * into a re-used connection's next request. Mirror of
+                 * the post-handler force-off at the READING_BODY rc<0
+                 * and SENDING/CLOSED branches below. */
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
+                return s;
+            }
+            /* Handler parked. Fall through to leftover processing
+             * which will resume it via the body reader's on_data. */
+        }
+
         /* Parse leftover body data in-place (no memmove) */
         if (c->req.chunked) {
             kl_chunked_init(&c->chunked_dec);
@@ -468,13 +503,30 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
                             c->req.body_reader);
                 if (rc < 0) {
                     c->req.body_reader->on_error(c->req.body_reader);
+                    /* v2.1.2/v2.2.0 — honor streaming handler's
+                     * response if the on_error chain resumed it
+                     * (see READING_BODY paths below for the twin). */
+                    if (c->route->streaming_handler &&
+                        (c->state == KL_CONN_SENDING ||
+                         c->state == KL_CONN_CLOSED)) {
+                        c->req.keep_alive = 0;
+                        c->res.keep_alive = 0;
+                        return c->state;
+                    }
                     c->state = KL_CONN_CLOSED;
                     return c->state;
                 }
                 if (rc == 1) {
                     c->req.body_reader->on_complete(c->req.body_reader);
-                    if (c->route->streaming_handler)
+                    if (c->route->streaming_handler) {
+                        /* For streaming_async: handler was invoked
+                         * above and may have completed during the
+                         * on_data + on_complete chain — return its
+                         * state. Otherwise: invoke now (legacy). */
+                        if (c->route->streaming_async)
+                            return c->state;
                         return conn_invoke_streaming_handler(c);
+                    }
                     return conn_run_post_middleware_and_handle(c, router);
                 }
             }
@@ -488,29 +540,38 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
 
             if (bpr == KL_PARSE_ERROR) {
                 c->req.body_reader->on_error(c->req.body_reader);
+                /* v2.1.2/v2.2.0 — same handler-state-honoring as the
+                 * chunked path. */
+                if (c->route->streaming_handler &&
+                    (c->state == KL_CONN_SENDING ||
+                     c->state == KL_CONN_CLOSED)) {
+                    c->req.keep_alive = 0;
+                    c->res.keep_alive = 0;
+                    return c->state;
+                }
                 c->state = KL_CONN_CLOSED;
                 return c->state;
             }
             if (bpr == KL_PARSE_OK) {
-                if (c->route->streaming_handler)
+                if (c->route->streaming_handler) {
+                    if (c->route->streaming_async)
+                        return c->state;
                     return conn_invoke_streaming_handler(c);
+                }
                 return conn_run_post_middleware_and_handle(c, router);
             }
             /* INCOMPLETE — need more body data */
         }
 
-        /* Streaming-handler routes: invoke the handler NOW (after any
-         * leftover has been fed via on_data). The handler will consume
-         * what's available and yield on NEED_DATA, leaving the conn in
-         * KL_CONN_READING_BODY so the event loop continues pumping
-         * on_data. The body reader's on_data callback resumes the
-         * yielded handler. */
-        if (c->route->streaming_handler) {
+        /* Legacy streaming-handler (not async): invoke the handler NOW
+         * (after any leftover has been fed via on_data). The handler
+         * will consume what's available and yield on NEED_DATA, leaving
+         * the conn in KL_CONN_READING_BODY so the event loop continues
+         * pumping on_data. Async routes already invoked above. */
+        if (c->route->streaming_handler && !c->route->streaming_async) {
             KlConnState s = conn_invoke_streaming_handler(c);
             if (s != KL_CONN_READING_BODY)
                 return s;
-            /* Handler yielded waiting for more body — fall through to
-             * enter READING_BODY so the event loop continues pumping. */
         }
 
         c->read_len = 0;

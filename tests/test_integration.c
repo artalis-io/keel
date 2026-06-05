@@ -294,6 +294,80 @@ static void handle_early_exit_err(KlRequest *req, KlResponse *res, void *ctx) {
     eer_err_handler_called = 1;
 }
 
+/* ── Streaming-async early-invoke fixture (v2.2.0) ───────────────────
+ *
+ * Same shape as handle_early_exit_err, but registered with
+ * kl_server_route_streaming_async so the handler runs BEFORE leftover
+ * is fed via on_data. That lets us close the single-read leftover-cap
+ * gap: a body that arrives in the same kernel read as the header now
+ * gets rejected via the parked handler's structured response, instead
+ * of the body-reader's on_data silently succeeding because the handler
+ * hadn't stashed conn+res yet.
+ *
+ * The fixture reuses eer_err_factory (stateless) but tracks invocation
+ * with its own flag so tests stay independent.
+ */
+static volatile int eer_async_err_handler_called = 0;
+
+static void handle_early_exit_async_err(KlRequest *req, KlResponse *res,
+                                          void *ctx) {
+    (void)ctx;
+    EarlyExitErrReader *r = (EarlyExitErrReader *)req->body_reader;
+    if (!r) { kl_response_error(res, 500, "no reader"); return; }
+    r->conn = kl_request_conn(req);
+    r->res  = res;
+    r->conn->state = KL_CONN_READING_BODY;
+    eer_async_err_handler_called = 1;
+}
+
+/* ── Streaming-async synchronous-completion fixture (v2.2.0) ─────────
+ *
+ * Covers the H1 keep-alive contract: a streaming-async handler that
+ * responds WITHOUT parking on the body reader (e.g. auth check that
+ * fails before consuming body bytes). The dispatch path must force
+ * keep-alive off; otherwise stale body bytes bleed into the next
+ * request on a re-used connection.
+ *
+ * Body reader is a no-op — on_data succeeds silently so the dispatch
+ * code path is the one under test, not the body reader. */
+typedef struct {
+    KlBodyReader  base;
+    KlAllocator  *alloc;
+} NoopReader;
+
+static int  noop_on_data(KlBodyReader *self, const char *data, size_t len) {
+    (void)self; (void)data; (void)len;
+    return 0;
+}
+static void noop_on_complete(KlBodyReader *self) { (void)self; }
+static void noop_on_error(KlBodyReader *self)    { (void)self; }
+static void noop_destroy(KlBodyReader *self) {
+    NoopReader *r = (NoopReader *)self;
+    kl_free(r->alloc, r, sizeof(*r));
+}
+static KlBodyReader *noop_factory(KlAllocator *alloc, const KlRequest *req,
+                                    void *user_data) {
+    (void)req; (void)user_data;
+    NoopReader *r = kl_malloc(alloc, sizeof(*r));
+    if (!r) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->base.on_data     = noop_on_data;
+    r->base.on_complete = noop_on_complete;
+    r->base.on_error    = noop_on_error;
+    r->base.destroy     = noop_destroy;
+    r->alloc            = alloc;
+    return &r->base;
+}
+
+/* Handler responds with 401 and returns — never touches body. */
+static void handle_async_sync_reject(KlRequest *req, KlResponse *res,
+                                        void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_status(res, 401);
+    kl_response_header(res, "Content-Type", "text/plain");
+    kl_response_body_borrow(res, "unauthorized", 12);
+}
+
 /* ── Mid-stream early-exit fixture ───────────────────────────────────
  *
  * Synthetic body reader + handler pair used by the
@@ -441,6 +515,18 @@ static void start_server(void) {
     /* Mid-stream early-exit on body-reader-ERROR-return route (v2.1.2). */
     kl_server_route_streaming(&test_server, "POST", "/early-exit-err",
                                handle_early_exit_err, NULL, eer_err_factory);
+    /* Streaming-async early-invoke route (v2.2.0) — handler runs BEFORE
+     * leftover is fed via on_data, closing the single-read leftover-
+     * cap gap. */
+    kl_server_route_streaming_async(&test_server, "POST", "/early-exit-async-err",
+                                      handle_early_exit_async_err, NULL,
+                                      eer_err_factory);
+    /* Streaming-async synchronous-completion route (v2.2.0) — handler
+     * responds with 401 without parking on the body reader. Tests the
+     * keep-alive force-off contract on the synchronous return path. */
+    kl_server_route_streaming_async(&test_server, "POST", "/async-sync-reject",
+                                      handle_async_sync_reject, NULL,
+                                      noop_factory);
     kl_server_route(&test_server, "GET", "/users/:id", handle_param,
                     NULL, NULL);
     kl_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
@@ -987,6 +1073,135 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
     kl_free(&alloc, chunk1, chunk1_len);
     kl_free(&alloc, chunk2, chunk2_len);
     kl_free(&alloc, buf,    resp_cap);
+
+    stop_server();
+}
+
+UTEST(integration, streaming_async_single_read_leftover_cap) {
+    /* v2.2.0 — closes the single-read leftover-rejection gap that
+     * v2.1.2's fix left behind. With the legacy
+     * kl_server_route_streaming, a body that arrives in the SAME
+     * kernel read as the header gets processed as "leftover" inside
+     * conn_dispatch_request BEFORE the handler runs — so on_data fires
+     * with the body reader's conn+res still unstashed, the safety
+     * guard kicks in (returns 0), and the cap goes silently undetected.
+     *
+     * The new kl_server_route_streaming_async dispatches the handler
+     * FIRST. The handler stashes conn+res and parks (state ==
+     * READING_BODY). Leftover processing then fires on_data with the
+     * fixture's conn+res set, which writes the 413 + sets state =
+     * SENDING, returns -1, and the v2.1.2 state-honoring branch in
+     * the leftover path returns SENDING instead of clobbering with
+     * the hardcoded kl_413_response. */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    KlAllocator alloc = kl_allocator_default();
+    size_t body_len         = 64;
+    size_t announced_cl_len = body_len + 1024;
+    size_t total_cap        = 1024;
+    size_t resp_cap         = 512;
+
+    eer_async_err_handler_called = 0;
+
+    char *packet = kl_malloc(&alloc, total_cap);
+    ASSERT_TRUE(packet != NULL);
+    int hdr_len = snprintf(packet, total_cap,
+        "POST /early-exit-async-err HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n", announced_cl_len);
+    ASSERT_TRUE(hdr_len > 0);
+    ASSERT_TRUE((size_t)hdr_len + body_len < total_cap);
+
+    /* Body bytes immediately after the header — this is the critical
+     * single-write/single-read shape. Without v2.2.0's reorder, these
+     * bytes get fed to on_data BEFORE the handler runs and the cap
+     * goes undetected. */
+    memset(packet + hdr_len, 'A', body_len);
+
+    /* Single write — packetised together by TCP, single read on the
+     * server side (in the common case; the asserts below tolerate the
+     * rare split). */
+    (void)write(fd, packet, (size_t)hdr_len + body_len);
+
+    char *buf = kl_malloc(&alloc, resp_cap);
+    ASSERT_TRUE(buf != NULL);
+    read_response(fd, buf, resp_cap);
+    close(fd);
+
+    /* Handler must have run (proves the reorder fired) AND the
+     * structured 413 response must have landed (proves the state-
+     * honoring branch picked it up over the hardcoded one). */
+    ASSERT_TRUE(eer_async_err_handler_called);
+    ASSERT_TRUE(strstr(buf, "413") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Type: text/plain") != NULL);
+    ASSERT_TRUE(strstr(buf, "cap exceeded") != NULL);
+    ASSERT_TRUE(strstr(buf, "Content-Length: 31") != NULL);
+
+    kl_free(&alloc, packet, total_cap);
+    kl_free(&alloc, buf,    resp_cap);
+
+    stop_server();
+}
+
+UTEST(integration, streaming_async_sync_completion_forces_close) {
+    /* v2.2.0 H1 contract — a streaming-async handler that responds
+     * WITHOUT parking on the body reader (e.g. auth rejection that
+     * happens before reading body) must force keep-alive off. The
+     * leftover bytes — and any remaining body bytes still queued in
+     * the kernel buffer — are stranded by the early return, so
+     * keeping the connection alive would let those stale bytes bleed
+     * into a subsequent request's headers on this same connection.
+     *
+     * The test sends a POST with a Content-Length-announced body
+     * larger than what's actually written, so leftover IS present
+     * after the handler responds. The handler emits 401 with its own
+     * "Connection: keep-alive" preference (we even send "Connection:
+     * keep-alive" in the request to bias toward keeping it open) —
+     * the dispatch layer must override that with Connection: close. */
+    start_server();
+
+    int fd = connect_to(test_port);
+    ASSERT_TRUE(fd >= 0);
+
+    /* Short recv timeout: without the H1 fix the connection stays
+     * open after the response (keep-alive on, dispatcher returned
+     * SENDING and skipped leftover) — read_response would otherwise
+     * block until the whole-suite timeout. With the fix, the conn
+     * closes and read returns 0 immediately. */
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    const char *packet =
+        "POST /async-sync-reject HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: 4096\r\n"           /* claim 4KB body */
+        "Connection: keep-alive\r\n"         /* request keep-alive */
+        "\r\n"
+        "stranded body bytes left in buffer"; /* partial body */
+    (void)write(fd, packet, strlen(packet));
+
+    char buf[1024];
+    read_response(fd, buf, sizeof(buf));
+    close(fd);
+
+    /* Handler's 401 response lands. */
+    ASSERT_TRUE(strstr(buf, "401") != NULL);
+    ASSERT_TRUE(strstr(buf, "unauthorized") != NULL);
+    /* Crucial: keep-alive was forced off because the body wasn't
+     * drained — stranded leftover bytes would otherwise bleed into
+     * a subsequent request on this conn. Keel only emits `Connection:
+     * keep-alive` when keep_alive=1, so the absence of that header
+     * is the signal that the H1 fix fired. Without the fix the line
+     * would be present and read_response would block until the test
+     * timeout (because the socket would stay open after the
+     * response). */
+    ASSERT_TRUE(strstr(buf, "Connection: keep-alive") == NULL);
+    ASSERT_TRUE(strstr(buf, "connection: keep-alive") == NULL);
 
     stop_server();
 }

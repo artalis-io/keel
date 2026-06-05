@@ -34,6 +34,23 @@ typedef struct {
                                             on_data callback is responsible for
                                             resuming. Used by streaming multipart and
                                             similar pull-from-body APIs. */
+    int streaming_async;               /**< 1 = invoke handler BEFORE feeding any
+                                            leftover body bytes via on_data (v2.2.0+).
+                                            Requires the handler to yield on
+                                            NEED_DATA — it'll be resumed by the body
+                                            reader's on_data callback for the leftover
+                                            AND subsequent socket reads.
+
+                                            Implies streaming_handler=1 — set both via
+                                            kl_server_route_streaming_async.
+
+                                            Enables the full error-path mid-stream
+                                            early-exit (a structured response can be
+                                            written even when the cap fires inside
+                                            leftover processing). Routes that opt out
+                                            (use the legacy kl_server_route_streaming)
+                                            still get the partial early-exit covering
+                                            caps that fire after dispatch. */
 } KlRoute;
 
 typedef struct {
@@ -102,6 +119,43 @@ int  kl_router_add(KlRouter *r, const char *method, const char *pattern,
 int  kl_router_add_streaming(KlRouter *r, const char *method, const char *pattern,
                               KlHandler handler, void *user_data,
                               KlBodyReaderFactory body_reader);
+
+/**
+ * @brief Register an async-streaming-handler route (v2.2.0+).
+ *
+ *        Identical to kl_router_add_streaming, plus: the handler is
+ *        invoked BEFORE any leftover body bytes are fed via on_data.
+ *        It MUST yield on NEED_DATA — the body reader's on_data
+ *        callback will resume it when bytes arrive (both the leftover
+ *        from the headers-read and subsequent socket reads).
+ *
+ *        Enables the full error-path mid-stream early-exit: if the
+ *        body reader rejects bytes (on_data returns -1) at any point,
+ *        the parked handler is resumed via on_error and can catch the
+ *        parser error to write a structured response. Routes that opt
+ *        out (use the legacy kl_router_add_streaming) still get the
+ *        partial early-exit covering caps that fire after dispatch
+ *        but lose the structured response for caps that fire during
+ *        leftover processing.
+ *
+ *        Synchronous C handlers that consume the body without yielding
+ *        (i.e. they call into the body reader expecting events to be
+ *        immediately available) must use the legacy kl_router_add_
+ *        streaming — they'll see NEED_DATA on the first call here
+ *        and have no way to recover.
+ *
+ * @param r           Router instance.
+ * @param method      HTTP method.
+ * @param pattern     URL pattern.
+ * @param handler     Yield-on-NEED_DATA handler.
+ * @param user_data   Opaque pointer.
+ * @param body_reader Body reader factory (NULL rejected).
+ * @return 0 on success, -1 on allocation failure or NULL body_reader.
+ */
+int  kl_router_add_streaming_async(KlRouter *r, const char *method,
+                                     const char *pattern,
+                                     KlHandler handler, void *user_data,
+                                     KlBodyReaderFactory body_reader);
 
 /**
  * @brief Match a request against registered routes.
