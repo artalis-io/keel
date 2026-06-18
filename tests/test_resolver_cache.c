@@ -422,4 +422,120 @@ UTEST(rescache, count) {
     cache->destroy(cache);
 }
 
+/* ── Re-entrant cancel from inside done_fn (audit H-1 regression test) ── */
+/*
+ * The user's done_fn calls cache->cancel(req) on the same request that
+ * just completed.  Before the H-1 fix, this freed the request inside
+ * cache_cancel, then inner_done_fn dereferenced cr->* on the freed
+ * memory (UAF) — and on the sync path cache_resolve subsequently wrote
+ * cr->inner_req on the freed slab.  The fix uses an in_user_done +
+ * cancel_deferred flag pair so cancel() during user_done defers the
+ * free to whichever caller (cache_resolve or inner_done_fn) is still
+ * holding cr alive; the cancel is then honoured exactly once with no
+ * UAF and no double-free.
+ *
+ * Verification: run under ASan (make debug); a regression would crash
+ * with heap-use-after-free in the first variant and double-free in
+ * the second.
+ */
+static KlResolver  *reentrant_cache_under_test;
+static int          reentrant_cancel_inside_done;
+
+static void reentrant_done_fn(KlResolveReq *req, const KlResolveResult *result,
+                                int error, void *user_data)
+{
+    (void)result; (void)error; (void)user_data;
+    if (reentrant_cancel_inside_done) {
+        reentrant_cache_under_test->cancel(req);
+    }
+    done_called++;
+}
+
+UTEST(rescache, reentrant_cancel_in_sync_done_fn_cache_hit) {
+    /* Sync completion via cache hit + user cancels inside done_fn. */
+    reset_mocks();
+    reset_done();
+    KlAllocator a = kl_allocator_default();
+    KlResolver inner = { .resolve = mock_resolve, .cancel = mock_cancel,
+                          .destroy = mock_destroy };
+
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+    reentrant_cache_under_test = cache;
+
+    /* Warm the cache with a no-cancel call. */
+    reentrant_cancel_inside_done = 0;
+    KlResolveReq *req = cache->resolve(cache, NULL, "example.com", 80,
+                                         reentrant_done_fn, NULL);
+    ASSERT_TRUE(req != NULL);
+    cache->cancel(req);
+
+    /* Now resolve the SAME host: cache hit → sync done_fn → user cancels. */
+    reentrant_cancel_inside_done = 1;
+    reset_done();
+    req = cache->resolve(cache, NULL, "example.com", 80,
+                          reentrant_done_fn, NULL);
+    /* cache_resolve sees cancel_deferred and returns NULL (the user
+     * already released the request); no leak, no UAF. */
+    ASSERT_TRUE(req == NULL);
+    ASSERT_EQ(done_called, 1);
+
+    cache->destroy(cache);
+}
+
+UTEST(rescache, reentrant_cancel_in_sync_done_fn_cache_miss) {
+    /* Sync completion via inner.resolve calling done_fn synchronously
+     * + user cancels inside done_fn.  Distinct path from the cache-hit
+     * variant: inner_done_fn rather than cache_resolve fires user_done. */
+    reset_mocks();
+    reset_done();
+    KlAllocator a = kl_allocator_default();
+    KlResolver inner = { .resolve = mock_resolve, .cancel = mock_cancel,
+                          .destroy = mock_destroy };
+
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+    reentrant_cache_under_test = cache;
+
+    reentrant_cancel_inside_done = 1;
+    KlResolveReq *req = cache->resolve(cache, NULL, "example.com", 80,
+                                         reentrant_done_fn, NULL);
+    /* Sync completion: inner_done_fn ran user_done which cancelled.
+     * cache_resolve detects cancel_deferred and returns NULL. */
+    ASSERT_TRUE(req == NULL);
+    ASSERT_EQ(mock_resolve_count, 1);
+    ASSERT_EQ(done_called, 1);
+
+    cache->destroy(cache);
+}
+
+UTEST(rescache, reentrant_cancel_in_async_done_fn) {
+    /* Async completion (pending_resolve) + user cancels inside done_fn. */
+    reset_mocks();
+    reset_done();
+    KlAllocator a = kl_allocator_default();
+    KlResolver inner = { .resolve = pending_resolve, .cancel = mock_cancel,
+                          .destroy = mock_destroy };
+
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+    reentrant_cache_under_test = cache;
+
+    reentrant_cancel_inside_done = 1;
+    KlResolveReq *req = cache->resolve(cache, NULL, "example.com", 80,
+                                         reentrant_done_fn, NULL);
+    /* Async: cache_resolve returns the handle, inner hasn't fired yet. */
+    ASSERT_TRUE(req != NULL);
+    ASSERT_EQ(done_called, 0);
+
+    /* Now fire the saved callback — user_done will cancel inside.
+     * The fix defers, inner_done_fn frees on its async branch.
+     * No double free, no UAF. */
+    KlResolveResult r = make_result();
+    saved_done_fn(saved_req, &r, 0, saved_done_ud);
+    ASSERT_EQ(done_called, 1);
+
+    cache->destroy(cache);
+}
+
 UTEST_MAIN();
