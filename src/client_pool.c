@@ -340,7 +340,13 @@ int kl_cpool_evict_expired(KlClientPool *pool)
         if (e->fd < 0)
             continue;
 
-        if (now - e->idle_since_ms >= pool->idle_ms) {
+        /* Defensive: `now >= e->idle_since_ms` should always hold
+         * because `kl_monotonic_ms` is monotonic, but explicit guard
+         * means a hypothetical clock-skew event (kernel bug, CLOCK_*
+         * choice change, suspended-VM resume bugs) can't underflow
+         * unsigned subtraction and evict every live entry. */
+        if (now >= e->idle_since_ms &&
+            now - e->idle_since_ms >= pool->idle_ms) {
             if (pool->ev_ctx && e->timer_id >= 0)
                 kl_timer_cancel(pool->ev_ctx, e->timer_id);
             entry_close(e);
