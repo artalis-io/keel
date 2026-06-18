@@ -210,13 +210,21 @@ static int do_sync_request(KlClientPool *pool, KlAllocator *alloc,
         /* Advance */
         size_t nlen = strlen(next_url);
         if (nlen >= sizeof(cur_url)) {
+            /* Zero the struct before setting error — kl_client_response_free
+             * above invalidated headers/body/num_headers; a caller that
+             * inspects them after seeing error != 0 (perfectly reasonable)
+             * would hit UAF.  Match the sibling pattern at line ~220
+             * (KL_ERR_REDIRECT_LOOP). */
+            memset(resp, 0, sizeof(*resp));
             resp->error = KL_ERR_URL;
             return -1;
         }
         memcpy(cur_url, next_url, nlen + 1);
     }
 
-    /* Exceeded max redirects */
+    /* More than max_redirects hops attempted (the loop above runs
+     * `max_redir + 1` iterations total — the initial request plus
+     * `max_redir` redirect chases). */
     memset(resp, 0, sizeof(*resp));
     resp->error = KL_ERR_REDIRECT_LOOP;
     return -1;
