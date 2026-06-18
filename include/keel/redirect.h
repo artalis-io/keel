@@ -25,7 +25,13 @@
 /* ── Config ───────────────────────────────────────────────────────── */
 
 typedef struct {
-    int max_redirects;   /**< Max redirects to follow (0 = default 10) */
+    /**
+     * Maximum number of redirect HOPS to follow.  `max_redirects = N`
+     * means up to N redirect responses are chased; the total request
+     * count is therefore N + 1 (the initial request plus N follow-ups).
+     * Matches curl / fetch / most HTTP clients.  0 = use default 10.
+     */
+    int max_redirects;
 } KlRedirectConfig;
 
 /* ── Sync API ─────────────────────────────────────────────────────── */
@@ -93,7 +99,13 @@ KlRedirectClient *kl_redirect_start_pooled(KlClientPool *pool,
 
 /**
  * @brief Get the final response from a completed redirect client.
- * @return Response pointer (valid until kl_redirect_free), or NULL if error.
+ *
+ * Valid until @ref kl_redirect_free.  Returns NULL when the request
+ * terminated in an error state (whether the failure occurred on the
+ * initial request, a redirect-following step, or because the
+ * @ref kl_redirect_start call itself never produced an inner client).
+ * Callers should pair this with @ref kl_redirect_last_error to
+ * distinguish "no response yet" from "no response ever."
  */
 const KlClientResponse *kl_redirect_response(const KlRedirectClient *rc);
 
@@ -105,6 +117,12 @@ int kl_redirect_error(const KlRedirectClient *rc);
 
 /**
  * @brief Get the specific error code from a completed redirect request.
+ *
+ * Defined post-completion (after the @ref KlRedirectDoneFn fires).
+ * Together with @ref kl_redirect_response NULL, a non-zero error here
+ * is the only indicator a caller has that no response was ever
+ * received — there is no separate "inner client construction failed"
+ * vs. "all redirect hops failed" distinction in the public API.
  */
 KlError kl_redirect_last_error(const KlRedirectClient *rc);
 
