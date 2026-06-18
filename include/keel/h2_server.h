@@ -42,8 +42,21 @@ struct KlH2ServerCallbacks {
                          uint32_t stream_id);     /**< Stream fully received (END_STREAM). */
     void (*on_stream_reset)(void *ud, uint32_t stream_id,
                             uint32_t error_code); /**< Stream reset by peer. */
-    ssize_t (*send)(void *ud, const void *data,
-                    size_t len);                   /**< Write data to the network. */
+    /**
+     * Write data to the network.  May return short — `< len` bytes
+     * written — under socket backpressure.  The session library MUST
+     * handle short returns by re-queuing the un-written tail and
+     * retrying on the next @ref KlH2ServerSession::flush call.  A
+     * session implementation that assumes "send always writes
+     * everything" will silently truncate HTTP/2 frames under load,
+     * which the peer then rejects with PROTOCOL_ERROR or
+     * COMPRESSION_ERROR.
+     *
+     * (KEEL's WebSocket server wraps the equivalent boundary with
+     * @ref kl_drain — there's no analogous helper for HTTP/2 yet;
+     * the session library is expected to manage its own send queue.)
+     */
+    ssize_t (*send)(void *ud, const void *data, size_t len);
 };
 
 /* ── KlH2ServerSession — user-provided vtable ───────────────────── */
