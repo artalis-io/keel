@@ -1,4 +1,5 @@
 #include <keel/router.h>
+#include <sh_seal_arena.h>
 #include <string.h>
 #include <limits.h>
 
@@ -358,7 +359,7 @@ void kl_router_free(KlRouter *r) {
          * unmaps the backing memory.  The per-table kl_free below
          * would try to free the original allocator-owned arrays —
          * but those were freed at freeze time. */
-        kl_seal_arena_destroy(&r->seal_arena);
+        sh_seal_arena_destroy(&r->seal_arena);
         r->routes = NULL;
         r->middleware = NULL;
         r->post_middleware = NULL;
@@ -400,7 +401,7 @@ int kl_router_freeze(KlRouter *r) {
      * One page covers everything for any plausible app; rounded up by
      * init() to a page boundary anyway. */
     size_t total = routes_bytes + pre_bytes + post_bytes + 64;
-    if (kl_seal_arena_init(&r->seal_arena, total, "kl-router") != 0) {
+    if (sh_seal_arena_init(&r->seal_arena, total, "kl-router") != 0) {
         return -1;
     }
 
@@ -412,24 +413,24 @@ int kl_router_freeze(KlRouter *r) {
     KlMiddlewareEntry *new_post = NULL;
 
     if (routes_bytes > 0) {
-        new_routes = kl_seal_arena_alloc(&r->seal_arena, routes_bytes, 8);
+        new_routes = sh_seal_arena_alloc(&r->seal_arena, routes_bytes, 8);
         if (!new_routes) goto fail;
         memcpy(new_routes, r->routes, routes_bytes);
     }
     if (pre_bytes > 0) {
-        new_pre = kl_seal_arena_alloc(&r->seal_arena, pre_bytes, 8);
+        new_pre = sh_seal_arena_alloc(&r->seal_arena, pre_bytes, 8);
         if (!new_pre) goto fail;
         memcpy(new_pre, r->middleware, pre_bytes);
     }
     if (post_bytes > 0) {
-        new_post = kl_seal_arena_alloc(&r->seal_arena, post_bytes, 8);
+        new_post = sh_seal_arena_alloc(&r->seal_arena, post_bytes, 8);
         if (!new_post) goto fail;
         memcpy(new_post, r->post_middleware, post_bytes);
     }
 
     /* Mprotect-RO BEFORE we wire the new pointers in, so the
      * pre-seal failure path can still undo cleanly. */
-    if (kl_seal_arena_seal(&r->seal_arena) != 0) goto fail;
+    if (sh_seal_arena_seal(&r->seal_arena) != 0) goto fail;
 
     /* Free the original alloc-owned tables, then repoint.
      * Capacity is now equal to count for each table (we tightened). */
@@ -454,6 +455,6 @@ int kl_router_freeze(KlRouter *r) {
     return 0;
 
 fail:
-    kl_seal_arena_destroy(&r->seal_arena);
+    sh_seal_arena_destroy(&r->seal_arena);
     return -1;
 }

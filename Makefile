@@ -16,8 +16,8 @@ ifdef COSMO
   # Note: plain ar is used instead of cosmoar (cosmoar fails with recursive .aarch64/ lookups)
   # APE binaries have their own non-relocatable layout — no PIE / RELRO / FORTIFY here.
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
-            -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
+            -Iinclude -Ivendor/llhttp -Ivendor/sh_seal_arena
+  VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp -Ivendor/sh_seal_arena
   EVENT_SRC = src/event_poll.c
   FILE_IO_SRC = src/file_io.c
 else
@@ -33,8 +33,8 @@ else
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
             -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
             -fstack-protector-strong -fPIE \
-            -Iinclude -Ivendor/llhttp
-  VENDOR_CFLAGS = -std=c11 -O2 -fPIE -Iinclude -Ivendor/llhttp
+            -Iinclude -Ivendor/llhttp -Ivendor/sh_seal_arena
+  VENDOR_CFLAGS = -std=c11 -O2 -fPIE -Iinclude -Ivendor/llhttp -Ivendor/sh_seal_arena
   # Use -Wl,-pie so clang routes the flag to the linker without flagging
   # it as "unused during compilation" — Keel's one-shot compile+link
   # rules (tests/, examples/) combined with -Werror would otherwise
@@ -81,8 +81,9 @@ CORE_SRC = src/allocator.c src/error.c src/response.c src/router.c \
            src/websocket.c src/websocket_client.c \
            src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client.c src/client_pool.c src/redirect.c src/sse.c \
-           src/resolver_cache.c src/seal_arena.c \
+           src/resolver_cache.c \
            src/compress.c src/decompress.c src/drain.c \
+           vendor/sh_seal_arena/sh_seal_arena.c \
            $(FILE_IO_SRC) $(EVENT_SRC)
 
 # Default parser backend (llhttp)

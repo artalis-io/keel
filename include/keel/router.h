@@ -5,7 +5,7 @@
 #include <keel/request.h>
 #include <keel/response.h>
 #include <keel/body_reader.h>
-#include <keel/seal_arena.h>
+#include <sh_seal_arena.h>
 #include <stddef.h>
 
 /** @brief Route handler function. */
@@ -89,7 +89,7 @@ typedef struct KlRouter {
      * pre-freeze API contract.
      */
     int frozen;
-    KlSealArena seal_arena;
+    ShSealArena seal_arena;
 } KlRouter;
 
 /**

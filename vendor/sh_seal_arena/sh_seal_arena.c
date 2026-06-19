@@ -1,5 +1,5 @@
 /*
- * seal_arena.c — see include/keel/seal_arena.h.
+ * sh_seal_arena.c — see sh_seal_arena.h.
  *
  * POSIX-only (mmap/mprotect/sysconf). Cosmopolitan's libc shim
  * provides the same surface, so APE builds work unmodified.
@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "keel/seal_arena.h"
+#include "sh_seal_arena.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -31,7 +31,7 @@ static size_t align_up(size_t n, size_t align)
 {
     if (align == 0) return 0;
     size_t mask = align - 1;
-    if (n > SIZE_MAX - mask) return 0; /* overflow */
+    if (n > SIZE_MAX - mask) return 0;
     return (n + mask) & ~mask;
 }
 
@@ -42,7 +42,7 @@ static int is_power_of_two(size_t x)
 
 /* ── lifecycle ─────────────────────────────────────────────────────── */
 
-int kl_seal_arena_init(KlSealArena *arena, size_t size, const char *name)
+int sh_seal_arena_init(ShSealArena *arena, size_t size, const char *name)
 {
     if (!arena) return -1;
     arena->base      = NULL;
@@ -66,7 +66,7 @@ int kl_seal_arena_init(KlSealArena *arena, size_t size, const char *name)
     return 0;
 }
 
-void kl_seal_arena_destroy(KlSealArena *arena)
+void sh_seal_arena_destroy(ShSealArena *arena)
 {
     if (!arena || !arena->base) return;
     (void)munmap(arena->base, arena->capacity);
@@ -80,7 +80,7 @@ void kl_seal_arena_destroy(KlSealArena *arena)
 
 /* ── allocation ────────────────────────────────────────────────────── */
 
-void *kl_seal_arena_alloc(KlSealArena *arena, size_t size, size_t align)
+void *sh_seal_arena_alloc(ShSealArena *arena, size_t size, size_t align)
 {
     if (!arena || !arena->base) return NULL;
     if (arena->sealed) return NULL;
@@ -98,21 +98,21 @@ void *kl_seal_arena_alloc(KlSealArena *arena, size_t size, size_t align)
     return p;
 }
 
-char *kl_seal_arena_strdup(KlSealArena *arena, const char *s)
+char *sh_seal_arena_strdup(ShSealArena *arena, const char *s)
 {
     if (!s) return NULL;
     size_t len = strlen(s);
     if (len == SIZE_MAX) return NULL;
-    char *dst = (char *)kl_seal_arena_alloc(arena, len + 1, 1);
+    char *dst = (char *)sh_seal_arena_alloc(arena, len + 1, 1);
     if (!dst) return NULL;
     memcpy(dst, s, len + 1);
     return dst;
 }
 
-void *kl_seal_arena_memdup(KlSealArena *arena, const void *src, size_t len)
+void *sh_seal_arena_memdup(ShSealArena *arena, const void *src, size_t len)
 {
     if (!src) return NULL;
-    void *dst = kl_seal_arena_alloc(arena, len, 1);
+    void *dst = sh_seal_arena_alloc(arena, len, 1);
     if (!dst) return NULL;
     memcpy(dst, src, len);
     return dst;
@@ -120,7 +120,7 @@ void *kl_seal_arena_memdup(KlSealArena *arena, const void *src, size_t len)
 
 /* ── seal ─────────────────────────────────────────────────────────── */
 
-int kl_seal_arena_seal(KlSealArena *arena)
+int sh_seal_arena_seal(ShSealArena *arena)
 {
     if (!arena || !arena->base) return -1;
     if (arena->sealed) return -1;
@@ -131,24 +131,24 @@ int kl_seal_arena_seal(KlSealArena *arena)
     return 0;
 }
 
-int kl_seal_arena_is_sealed(const KlSealArena *arena)
+int sh_seal_arena_is_sealed(const ShSealArena *arena)
 {
     return (arena && arena->sealed) ? 1 : 0;
 }
 
 /* ── diagnostics ──────────────────────────────────────────────────── */
 
-size_t kl_seal_arena_capacity(const KlSealArena *arena)
+size_t sh_seal_arena_capacity(const ShSealArena *arena)
 {
     return arena ? arena->capacity : 0;
 }
 
-size_t kl_seal_arena_used(const KlSealArena *arena)
+size_t sh_seal_arena_used(const ShSealArena *arena)
 {
     return arena ? arena->used : 0;
 }
 
-size_t kl_seal_arena_remaining(const KlSealArena *arena)
+size_t sh_seal_arena_remaining(const ShSealArena *arena)
 {
     if (!arena) return 0;
     return arena->capacity - arena->used;
