@@ -8,6 +8,7 @@
  */
 
 #include <keel/tls_mbedtls.h>
+#include <sh_seal_arena.h>
 
 #include <mbedtls/ssl.h>
 #include <mbedtls/ssl_ciphersuites.h>
@@ -37,16 +38,50 @@ static void kl_secure_zero(void *ptr, size_t len) {
 
 /* ── Internal context structure ──────────────────────────────────── */
 
+/*
+ * Policy half — configured once at _create then sealed read-only.
+ * Holds the SSL config (incl. authmode, cipher allowlist, RNG
+ * callback pointer), the cert chain, private key, and CA chain.
+ *
+ * Why seal: a heap-write primitive into `conf.MBEDTLS_PRIVATE(authmode)`
+ * (a single byte) would silently flip mTLS verification from
+ * VERIFY_REQUIRED to VERIFY_NONE, disabling peer certificate
+ * checks.  Equivalent one-byte primitives flip the cipher allowlist
+ * head or replace the CA chain root pointer (a downgrade attack
+ * against handshakes).  Sealing the policy struct turns any such
+ * write into SIGSEGV instead of a quiet protocol downgrade.
+ *
+ * Per the audit, mbedtls treats `mbedtls_ssl_config` as const after
+ * mbedtls_ssl_setup() — per-session state lives in mbedtls_ssl_context
+ * (NOT here).  Cert and key parse trees are likewise immutable after
+ * load.  Deep allocations inside these structures (cert chain link
+ * list nodes) come from mbedTLS's own allocator and stay heap-
+ * resident; the seal only protects the top-level fields.  Worthwhile
+ * because the top-level fields are where the highest-value control-
+ * flow + policy bytes live.
+ */
 typedef struct {
     mbedtls_ssl_config    conf;
     mbedtls_x509_crt      cert;       /* server/client certificate */
-    mbedtls_pk_context     pkey;       /* private key */
+    mbedtls_pk_context    pkey;       /* private key */
     mbedtls_x509_crt      ca_cert;    /* CA cert for peer verification */
-    mbedtls_ctr_drbg_context drbg;
-    mbedtls_entropy_context  entropy;
-    KlAllocator           *alloc;     /* allocator used to create this context */
-    int                    is_server;  /* 1 = server, 0 = client */
-    int                    has_ca;     /* 1 = ca_cert loaded */
+    int                   is_server;  /* 1 = server, 0 = client */
+    int                   has_ca;     /* 1 = ca_cert loaded */
+} KlMbedtlsCtxPolicy;
+
+typedef struct {
+    /* Pointer to policy struct, which lives in policy_arena.
+     * Sealed RO after _create completes; reads only. */
+    KlMbedtlsCtxPolicy       *policy;
+    /* RNG state — MUST stay mutable.  Every random draw updates
+     * the DRBG's internal state; sealing would break it. */
+    mbedtls_ctr_drbg_context  drbg;
+    mbedtls_entropy_context   entropy;
+    KlAllocator              *alloc;
+    /* Backs *policy.  Initialised RW by _create, mprotect-RO at
+     * the end of _create / _client_create.  Destroyed by
+     * _ctx_destroy. */
+    ShSealArena               policy_arena;
 } KlMbedtlsCtx;
 
 /* ── Per-connection TLS session ──────────────────────────────────── */
@@ -239,7 +274,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     /* Initialize SSL context */
     mbedtls_ssl_init(&t->ssl);
 
-    int ret = mbedtls_ssl_setup(&t->ssl, &mctx->conf);
+    int ret = mbedtls_ssl_setup(&t->ssl, &mctx->policy->conf);
     if (ret != 0) {
         mbedtls_ssl_free(&t->ssl);
         kl_free(alloc, t, sizeof(*t));
@@ -329,13 +364,32 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
 
     memset(ctx, 0, sizeof(*ctx));
     ctx->alloc = alloc;
-    ctx->is_server = 1;
+
+    /* Allocate the policy struct in a per-context seal arena.  The
+     * arena starts RW so mbedtls_*_init / mbedtls_ssl_conf_* calls
+     * below can populate fields normally; we seal at the end of the
+     * success path. */
+    if (sh_seal_arena_init(&ctx->policy_arena, sizeof(KlMbedtlsCtxPolicy),
+                            "kl-tls-policy") != 0) {
+        kl_free(alloc, ctx, sizeof(*ctx));
+        return NULL;
+    }
+    ctx->policy = sh_seal_arena_alloc(&ctx->policy_arena,
+                                        sizeof(KlMbedtlsCtxPolicy),
+                                        _Alignof(KlMbedtlsCtxPolicy));
+    if (!ctx->policy) {
+        sh_seal_arena_destroy(&ctx->policy_arena);
+        kl_free(alloc, ctx, sizeof(*ctx));
+        return NULL;
+    }
+    memset(ctx->policy, 0, sizeof(*ctx->policy));
+    ctx->policy->is_server = 1;
 
     /* Initialize all mbedTLS structures */
-    mbedtls_ssl_config_init(&ctx->conf);
-    mbedtls_x509_crt_init(&ctx->cert);
-    mbedtls_pk_init(&ctx->pkey);
-    mbedtls_x509_crt_init(&ctx->ca_cert);
+    mbedtls_ssl_config_init(&ctx->policy->conf);
+    mbedtls_x509_crt_init(&ctx->policy->cert);
+    mbedtls_pk_init(&ctx->policy->pkey);
+    mbedtls_x509_crt_init(&ctx->policy->ca_cert);
     mbedtls_ctr_drbg_init(&ctx->drbg);
     mbedtls_entropy_init(&ctx->entropy);
 
@@ -354,7 +408,7 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
     if (!cert_buf)
         goto fail;
 
-    ret = mbedtls_x509_crt_parse(&ctx->cert, cert_buf, cert_len);
+    ret = mbedtls_x509_crt_parse(&ctx->policy->cert, cert_buf, cert_len);
     kl_free(alloc, cert_buf, cert_len);
     if (ret != 0)
         goto fail;
@@ -365,7 +419,7 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
     if (!key_buf)
         goto fail;
 
-    ret = mbedtls_pk_parse_key(&ctx->pkey, key_buf, key_len,
+    ret = mbedtls_pk_parse_key(&ctx->policy->pkey, key_buf, key_len,
                                 NULL, 0, mbedtls_ctr_drbg_random, &ctx->drbg);
     kl_secure_zero(key_buf, key_len);
     kl_free(alloc, key_buf, key_len);
@@ -379,51 +433,61 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
         if (!ca_buf)
             goto fail;
 
-        ret = mbedtls_x509_crt_parse(&ctx->ca_cert, ca_buf, ca_len);
+        ret = mbedtls_x509_crt_parse(&ctx->policy->ca_cert, ca_buf, ca_len);
         kl_free(alloc, ca_buf, ca_len);
         if (ret != 0)
             goto fail;
 
-        ctx->has_ca = 1;
+        ctx->policy->has_ca = 1;
     }
 
     /* Configure SSL */
-    ret = mbedtls_ssl_config_defaults(&ctx->conf,
+    ret = mbedtls_ssl_config_defaults(&ctx->policy->conf,
                                        MBEDTLS_SSL_IS_SERVER,
                                        MBEDTLS_SSL_TRANSPORT_STREAM,
                                        MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0)
         goto fail;
 
-    mbedtls_ssl_conf_rng(&ctx->conf, mbedtls_ctr_drbg_random, &ctx->drbg);
-    mbedtls_ssl_conf_ca_chain(&ctx->conf, ctx->has_ca ? &ctx->ca_cert : NULL, NULL);
+    mbedtls_ssl_conf_rng(&ctx->policy->conf, mbedtls_ctr_drbg_random, &ctx->drbg);
+    mbedtls_ssl_conf_ca_chain(&ctx->policy->conf, ctx->policy->has_ca ? &ctx->policy->ca_cert : NULL, NULL);
 
-    ret = mbedtls_ssl_conf_own_cert(&ctx->conf, &ctx->cert, &ctx->pkey);
+    ret = mbedtls_ssl_conf_own_cert(&ctx->policy->conf, &ctx->policy->cert, &ctx->policy->pkey);
     if (ret != 0)
         goto fail;
 
     /* mTLS: set client authentication mode */
     switch (client_auth) {
     case KL_MTLS_OPTIONAL:
-        mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+        mbedtls_ssl_conf_authmode(&ctx->policy->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
         break;
     case KL_MTLS_REQUIRED:
-        mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+        mbedtls_ssl_conf_authmode(&ctx->policy->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
         break;
     default:
-        mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_NONE);
+        mbedtls_ssl_conf_authmode(&ctx->policy->conf, MBEDTLS_SSL_VERIFY_NONE);
         break;
     }
+
+    /* Policy fully populated.  Seal the arena RO — any heap-write
+     * primitive that lands on conf.authmode, the cipher allowlist,
+     * the CA chain head, the cert chain head, or any other field
+     * faults instead of silently downgrading TLS. */
+    if (sh_seal_arena_seal(&ctx->policy_arena) != 0)
+        goto fail;
 
     return (KlTlsCtx *)ctx;
 
 fail:
-    mbedtls_ssl_config_free(&ctx->conf);
-    mbedtls_x509_crt_free(&ctx->cert);
-    mbedtls_pk_free(&ctx->pkey);
-    mbedtls_x509_crt_free(&ctx->ca_cert);
+    if (ctx->policy) {
+        mbedtls_ssl_config_free(&ctx->policy->conf);
+        mbedtls_x509_crt_free(&ctx->policy->cert);
+        mbedtls_pk_free(&ctx->policy->pkey);
+        mbedtls_x509_crt_free(&ctx->policy->ca_cert);
+    }
     mbedtls_ctr_drbg_free(&ctx->drbg);
     mbedtls_entropy_free(&ctx->entropy);
+    sh_seal_arena_destroy(&ctx->policy_arena);
     kl_free(alloc, ctx, sizeof(*ctx));
     return NULL;
 }
@@ -447,13 +511,30 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf,
 
     memset(ctx, 0, sizeof(*ctx));
     ctx->alloc = alloc;
-    ctx->is_server = 0;
+
+    /* Allocate the policy struct in a per-context seal arena.
+     * See kl_tls_mbedtls_ctx_create for the rationale. */
+    if (sh_seal_arena_init(&ctx->policy_arena, sizeof(KlMbedtlsCtxPolicy),
+                            "kl-tls-policy") != 0) {
+        kl_free(alloc, ctx, sizeof(*ctx));
+        return NULL;
+    }
+    ctx->policy = sh_seal_arena_alloc(&ctx->policy_arena,
+                                        sizeof(KlMbedtlsCtxPolicy),
+                                        _Alignof(KlMbedtlsCtxPolicy));
+    if (!ctx->policy) {
+        sh_seal_arena_destroy(&ctx->policy_arena);
+        kl_free(alloc, ctx, sizeof(*ctx));
+        return NULL;
+    }
+    memset(ctx->policy, 0, sizeof(*ctx->policy));
+    ctx->policy->is_server = 0;
 
     /* Initialize all mbedTLS structures */
-    mbedtls_ssl_config_init(&ctx->conf);
-    mbedtls_x509_crt_init(&ctx->cert);
-    mbedtls_pk_init(&ctx->pkey);
-    mbedtls_x509_crt_init(&ctx->ca_cert);
+    mbedtls_ssl_config_init(&ctx->policy->conf);
+    mbedtls_x509_crt_init(&ctx->policy->cert);
+    mbedtls_pk_init(&ctx->policy->pkey);
+    mbedtls_x509_crt_init(&ctx->policy->ca_cert);
     mbedtls_ctr_drbg_init(&ctx->drbg);
     mbedtls_entropy_init(&ctx->entropy);
 
@@ -468,41 +549,48 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf,
 
     /* Load CA certificates for server verification (optional) */
     if (ca_buf && ca_len > 0) {
-        ret = mbedtls_x509_crt_parse(&ctx->ca_cert, ca_buf, ca_len);
+        ret = mbedtls_x509_crt_parse(&ctx->policy->ca_cert, ca_buf, ca_len);
         if (ret != 0)
             goto fail;
-        ctx->has_ca = 1;
+        ctx->policy->has_ca = 1;
     }
 
     /* Configure as TLS client */
-    ret = mbedtls_ssl_config_defaults(&ctx->conf,
+    ret = mbedtls_ssl_config_defaults(&ctx->policy->conf,
                                        MBEDTLS_SSL_IS_CLIENT,
                                        MBEDTLS_SSL_TRANSPORT_STREAM,
                                        MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0)
         goto fail;
 
-    mbedtls_ssl_conf_rng(&ctx->conf, mbedtls_ctr_drbg_random, &ctx->drbg);
+    mbedtls_ssl_conf_rng(&ctx->policy->conf, mbedtls_ctr_drbg_random, &ctx->drbg);
 
-    if (ctx->has_ca) {
-        mbedtls_ssl_conf_ca_chain(&ctx->conf, &ctx->ca_cert, NULL);
-        mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    if (ctx->policy->has_ca) {
+        mbedtls_ssl_conf_ca_chain(&ctx->policy->conf, &ctx->policy->ca_cert, NULL);
+        mbedtls_ssl_conf_authmode(&ctx->policy->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     } else {
         /* WARNING: No CA provided — TLS certificate verification DISABLED.
          * Connections are encrypted but vulnerable to MITM attacks.
          * Production deployments MUST provide a CA bundle. */
-        mbedtls_ssl_conf_authmode(&ctx->conf, MBEDTLS_SSL_VERIFY_NONE);
+        mbedtls_ssl_conf_authmode(&ctx->policy->conf, MBEDTLS_SSL_VERIFY_NONE);
     }
+
+    /* Policy fully populated.  Seal RO. */
+    if (sh_seal_arena_seal(&ctx->policy_arena) != 0)
+        goto fail;
 
     return (KlTlsCtx *)ctx;
 
 fail:
-    mbedtls_ssl_config_free(&ctx->conf);
-    mbedtls_x509_crt_free(&ctx->cert);
-    mbedtls_pk_free(&ctx->pkey);
-    mbedtls_x509_crt_free(&ctx->ca_cert);
+    if (ctx->policy) {
+        mbedtls_ssl_config_free(&ctx->policy->conf);
+        mbedtls_x509_crt_free(&ctx->policy->cert);
+        mbedtls_pk_free(&ctx->policy->pkey);
+        mbedtls_x509_crt_free(&ctx->policy->ca_cert);
+    }
     mbedtls_ctr_drbg_free(&ctx->drbg);
     mbedtls_entropy_free(&ctx->entropy);
+    sh_seal_arena_destroy(&ctx->policy_arena);
     kl_free(alloc, ctx, sizeof(*ctx));
     return NULL;
 }
@@ -545,12 +633,22 @@ void kl_tls_mbedtls_ctx_destroy(KlTlsCtx *raw_ctx)
 
     KlMbedtlsCtx *ctx = (KlMbedtlsCtx *)raw_ctx;
 
-    mbedtls_ssl_config_free(&ctx->conf);
-    mbedtls_x509_crt_free(&ctx->cert);
-    mbedtls_pk_free(&ctx->pkey);
-    mbedtls_x509_crt_free(&ctx->ca_cert);
+    /* mbedtls_*_free traverses internal heap-allocated chains
+     * (cert.next list, cipher suite array, etc.) AND zeroes the
+     * root struct on exit (mbedtls_platform_zeroize).  The root
+     * struct here lives in our sealed arena — RO — so zeroing
+     * would fault.  Copy the policy out to a stack-local first;
+     * the copy aliases the same heap chains, so mbedtls_*_free
+     * correctly releases the chains, then we destroy the arena. */
+    if (ctx->policy) {
+        KlMbedtlsCtxPolicy local = *ctx->policy;
+        mbedtls_ssl_config_free(&local.conf);
+        mbedtls_x509_crt_free(&local.cert);
+        mbedtls_pk_free(&local.pkey);
+        mbedtls_x509_crt_free(&local.ca_cert);
+    }
     mbedtls_ctr_drbg_free(&ctx->drbg);
     mbedtls_entropy_free(&ctx->entropy);
-
+    sh_seal_arena_destroy(&ctx->policy_arena);
     kl_free(ctx->alloc, ctx, sizeof(*ctx));
 }
