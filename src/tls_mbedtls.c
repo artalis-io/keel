@@ -97,15 +97,25 @@ static int kl_mbed_ptr_in_arena(const ShSealArena *a, const void *p)
 {
     if (!a || !a->base) return 0;
     uintptr_t lo = (uintptr_t)a->base;
-    uintptr_t hi = lo + a->capacity;
     uintptr_t pp = (uintptr_t)p;
-    return pp >= lo && pp < hi;
+    /* Subtract before compare to dodge the lo+capacity overflow case
+     * (capacity is size_t; if mmap ever returned a base near
+     * UINTPTR_MAX, lo+capacity would wrap and the naive `pp < hi`
+     * test would admit every pointer).  pp - lo underflows to a
+     * huge value when pp < lo, which `< capacity` catches. */
+    return pp >= lo && (pp - lo) < a->capacity;
 }
 
 static void *kl_mbed_arena_calloc(size_t n, size_t sz)
 {
-    if (n != 0 && sz > (size_t)-1 / n) return NULL;
-    size_t total = n * sz;
+    /* Precise overflow guard via the compiler's checked-mul intrinsic.
+     * Catches the exact n*sz == SIZE_MAX case that the naive
+     * `sz > SIZE_MAX/n` divide-and-compare missed without over-
+     * rejecting valid boundary sizes.  GCC + Clang both provide this;
+     * Keel and Hull require -Wall builds that exercise the same
+     * compiler family. */
+    size_t total;
+    if (__builtin_mul_overflow(n, sz, &total)) return NULL;
     if (g_current_arena) {
         if (total == 0) total = 1;
         void *p = sh_seal_arena_alloc(g_current_arena, total, 16);
@@ -198,6 +208,17 @@ static int kl_mbed_prewarm_chain(mbedtls_x509_crt *chain,
         } else if (t == MBEDTLS_PK_ECKEY || t == MBEDTLS_PK_ECDSA) {
             mbedtls_ecp_keypair *kp = mbedtls_pk_ec(c->pk);
             mbedtls_ecp_group *grp = &kp->MBEDTLS_PRIVATE(grp);
+
+            /* grp->T (the comb table we're trying to populate) is a
+             * Short Weierstrass optimization — Montgomery curves
+             * (Curve25519 / X25519) don't use it.  And their scalar
+             * encoding (RFC 7748 §5: bits 0+1 must be 0) rejects
+             * scalar=1, so the prewarm call below would fail with
+             * MBEDTLS_ERR_ECP_INVALID_KEY and abort the whole
+             * ctx_create.  Skip Montgomery curves cleanly. */
+            if (mbedtls_ecp_get_type(grp) == MBEDTLS_ECP_TYPE_MONTGOMERY)
+                continue;
+
             mbedtls_ecp_point R;
             mbedtls_mpi one;
             mbedtls_ecp_point_init(&R);
@@ -744,6 +765,27 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf,
     memset(ctx->policy, 0, sizeof(*ctx->policy));
     ctx->policy->is_server = 0;
 
+    /* Initialise entropy + DRBG OUTSIDE the arena swap window.
+     * mbedtls_entropy_init internally calls mbedtls_md_setup, which
+     * allocates a SHA-512 hash state via mbedtls_calloc.  If that
+     * landed in the arena it would be sealed RO at the end of
+     * ctx_create and mbedtls_entropy_free at destroy time would
+     * fault when it zeroises the hash state.  Same risk for
+     * ctr_drbg_seed's internal allocations.
+     *
+     * Keep these on the heap so mbedtls_entropy_free /
+     * mbedtls_ctr_drbg_free at destroy can do their normal zero-
+     * then-free traversal without hitting an RO page.  This is also
+     * required by the design — DRBG state advances on every random
+     * draw and cannot live in a sealed page anyway. */
+    mbedtls_ctr_drbg_init(&ctx->drbg);
+    mbedtls_entropy_init(&ctx->entropy);
+
+    int ret = mbedtls_ctr_drbg_seed(&ctx->drbg, mbedtls_entropy_func,
+                                     &ctx->entropy,
+                                     (const unsigned char *)"keel-client", 11);
+    if (ret != 0) goto fail;
+
     /* ── Arena swap opens ──────────────────────────────────────── */
     g_current_arena = &ctx->policy_arena;
 
@@ -751,15 +793,6 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf,
     mbedtls_x509_crt_init(&ctx->policy->cert);
     mbedtls_pk_init(&ctx->policy->pkey);
     mbedtls_x509_crt_init(&ctx->policy->ca_cert);
-    mbedtls_ctr_drbg_init(&ctx->drbg);
-    mbedtls_entropy_init(&ctx->entropy);
-
-    int ret;
-
-    ret = mbedtls_ctr_drbg_seed(&ctx->drbg, mbedtls_entropy_func,
-                                 &ctx->entropy,
-                                 (const unsigned char *)"keel-client", 11);
-    if (ret != 0) goto fail;
 
     if (ca_buf && ca_len > 0) {
         ret = mbedtls_x509_crt_parse(&ctx->policy->ca_cert, ca_buf, ca_len);
