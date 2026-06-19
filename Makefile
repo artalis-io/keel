@@ -73,6 +73,16 @@ endif
 CFLAGS += -MMD -MP
 VENDOR_CFLAGS += -MMD -MP
 
+# Caller-side extra flags.  Honored by append so the caller never
+# clobbers Keel's base flags.  Used by Hull's HL_ENABLE_LTO=1 path to
+# thread -flto=thin into every Keel TU + the libkeel.a link.  Pass via
+# the sub-make invocation, e.g.:
+#   make KEEL_EXTRA_CFLAGS=-flto=thin KEEL_EXTRA_LDFLAGS=-flto=thin
+# Empty when the caller doesn't need them (harmless no-op).
+CFLAGS        += $(KEEL_EXTRA_CFLAGS)
+VENDOR_CFLAGS += $(KEEL_EXTRA_CFLAGS)
+LDFLAGS       += $(KEEL_EXTRA_LDFLAGS)
+
 # Core library — parser-agnostic
 CORE_SRC = src/allocator.c src/error.c src/response.c src/router.c \
            src/connection.c src/server.c src/async.c src/timer.c \
