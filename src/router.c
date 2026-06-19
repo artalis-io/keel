@@ -14,6 +14,10 @@ int kl_router_init(KlRouter *r, KlAllocator *alloc) {
     r->post_middleware = NULL;
     r->post_mw_count = 0;
     r->post_mw_capacity = 0;
+    r->frozen = 0;
+    /* Lazy: arena is only init'd by kl_router_freeze.  Routers that
+     * never freeze never mmap. */
+    memset(&r->seal_arena, 0, sizeof(r->seal_arena));
     r->routes = kl_malloc(alloc, sizeof(KlRoute) * (size_t)r->capacity);
     return r->routes ? 0 : -1;
 }
@@ -22,6 +26,8 @@ int kl_router_add(KlRouter *r, const char *method, const char *pattern,
                   KlHandler handler, void *user_data,
                   KlBodyReaderFactory body_reader) {
     if (!r || !method || !pattern) return -1;
+    /* Frozen router: registration is closed.  Caller bug. */
+    if (r->frozen) return -1;
     if (r->count >= r->capacity) {
         if (r->capacity > INT_MAX / 2) return -1;
         int new_cap = r->capacity * 2;
@@ -167,6 +173,7 @@ static int match_middleware_pattern(const char *method, size_t method_len,
 int kl_router_use(KlRouter *r, const char *method, const char *pattern,
                   KlMiddleware fn, void *user_data) {
     if (!r || !method || !pattern || !fn) return -1;
+    if (r->frozen) return -1;
     if (r->mw_count >= r->mw_capacity) {
         int new_cap;
         if (r->mw_capacity == 0) {
@@ -213,6 +220,7 @@ int kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res) {
 int kl_router_use_post(KlRouter *r, const char *method, const char *pattern,
                        KlMiddleware fn, void *user_data) {
     if (!r || !method || !pattern || !fn) return -1;
+    if (r->frozen) return -1;
     if (r->post_mw_count >= r->post_mw_capacity) {
         int new_cap;
         if (r->post_mw_capacity == 0) {
@@ -345,6 +353,18 @@ int kl_router_match(KlRouter *r, const char *method, size_t method_len,
 }
 
 void kl_router_free(KlRouter *r) {
+    if (r->frozen) {
+        /* All three tables live in the seal arena; arena destroy
+         * unmaps the backing memory.  The per-table kl_free below
+         * would try to free the original allocator-owned arrays —
+         * but those were freed at freeze time. */
+        kl_seal_arena_destroy(&r->seal_arena);
+        r->routes = NULL;
+        r->middleware = NULL;
+        r->post_middleware = NULL;
+        r->frozen = 0;
+        return;
+    }
     if (r->routes) {
         kl_free(r->alloc, r->routes, sizeof(KlRoute) * (size_t)r->capacity);
         r->routes = NULL;
@@ -359,4 +379,81 @@ void kl_router_free(KlRouter *r) {
                 sizeof(KlMiddlewareEntry) * (size_t)r->post_mw_capacity);
         r->post_middleware = NULL;
     }
+}
+
+/* ── Freeze ─────────────────────────────────────────────────────── */
+
+int kl_router_is_frozen(const KlRouter *r) {
+    return (r && r->frozen) ? 1 : 0;
+}
+
+int kl_router_freeze(KlRouter *r) {
+    if (!r) return -1;
+    if (r->frozen) return -1; /* idempotent: already frozen */
+
+    /* Live-element sizes (NOT capacity — we tighten on freeze). */
+    size_t routes_bytes = sizeof(KlRoute)         * (size_t)r->count;
+    size_t pre_bytes    = sizeof(KlMiddlewareEntry) * (size_t)r->mw_count;
+    size_t post_bytes   = sizeof(KlMiddlewareEntry) * (size_t)r->post_mw_count;
+
+    /* Arena capacity: total live data + headroom for alignment slack.
+     * One page covers everything for any plausible app; rounded up by
+     * init() to a page boundary anyway. */
+    size_t total = routes_bytes + pre_bytes + post_bytes + 64;
+    if (kl_seal_arena_init(&r->seal_arena, total, "kl-router") != 0) {
+        return -1;
+    }
+
+    /* Allocate + copy each table.  We use alignof-equivalent (8 here
+     * — every modern target's _Alignof KlRoute / KlMiddlewareEntry).
+     * The arena's bump pointer is alignment-aware. */
+    KlRoute *new_routes = NULL;
+    KlMiddlewareEntry *new_pre = NULL;
+    KlMiddlewareEntry *new_post = NULL;
+
+    if (routes_bytes > 0) {
+        new_routes = kl_seal_arena_alloc(&r->seal_arena, routes_bytes, 8);
+        if (!new_routes) goto fail;
+        memcpy(new_routes, r->routes, routes_bytes);
+    }
+    if (pre_bytes > 0) {
+        new_pre = kl_seal_arena_alloc(&r->seal_arena, pre_bytes, 8);
+        if (!new_pre) goto fail;
+        memcpy(new_pre, r->middleware, pre_bytes);
+    }
+    if (post_bytes > 0) {
+        new_post = kl_seal_arena_alloc(&r->seal_arena, post_bytes, 8);
+        if (!new_post) goto fail;
+        memcpy(new_post, r->post_middleware, post_bytes);
+    }
+
+    /* Mprotect-RO BEFORE we wire the new pointers in, so the
+     * pre-seal failure path can still undo cleanly. */
+    if (kl_seal_arena_seal(&r->seal_arena) != 0) goto fail;
+
+    /* Free the original alloc-owned tables, then repoint.
+     * Capacity is now equal to count for each table (we tightened). */
+    if (r->routes) {
+        kl_free(r->alloc, r->routes, sizeof(KlRoute) * (size_t)r->capacity);
+    }
+    if (r->middleware) {
+        kl_free(r->alloc, r->middleware,
+                sizeof(KlMiddlewareEntry) * (size_t)r->mw_capacity);
+    }
+    if (r->post_middleware) {
+        kl_free(r->alloc, r->post_middleware,
+                sizeof(KlMiddlewareEntry) * (size_t)r->post_mw_capacity);
+    }
+    r->routes          = new_routes;
+    r->capacity        = r->count;
+    r->middleware      = new_pre;
+    r->mw_capacity     = r->mw_count;
+    r->post_middleware = new_post;
+    r->post_mw_capacity = r->post_mw_count;
+    r->frozen          = 1;
+    return 0;
+
+fail:
+    kl_seal_arena_destroy(&r->seal_arena);
+    return -1;
 }

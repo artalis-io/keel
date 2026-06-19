@@ -721,3 +721,14 @@ void kl_server_free(KlServer *s) {
         s->config.compress->ctx_destroy(s->config.compress->ctx);
     }
 }
+
+/* ── Freeze ─────────────────────────────────────────────────────── */
+
+int kl_server_freeze(KlServer *s) {
+    if (!s) return -1;
+    return kl_router_freeze(&s->router);
+}
+
+int kl_server_is_frozen(const KlServer *s) {
+    return s ? kl_router_is_frozen(&s->router) : 0;
+}

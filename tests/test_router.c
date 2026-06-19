@@ -5,6 +5,11 @@ static void dummy_handler(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)res; (void)ctx;
 }
 
+static int dummy_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)res; (void)ctx;
+    return 0;
+}
+
 UTEST(router, init_and_free) {
     KlAllocator a = kl_allocator_default();
     KlRouter r;
@@ -664,6 +669,143 @@ UTEST(router, streaming_and_regular_routes_independent) {
     ASSERT_EQ(r.routes[0].streaming_handler, 0);
     ASSERT_EQ(r.routes[1].streaming_handler, 1);
     ASSERT_EQ(r.routes[2].streaming_handler, 0);
+    kl_router_free(&r);
+}
+
+/* ── Freeze (v2.3.0+) ───────────────────────────────────────────── */
+
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+UTEST(router, freeze_basic) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    ASSERT_EQ(kl_router_add(&r, "GET",  "/a", dummy_handler, (void *)1, NULL), 0);
+    ASSERT_EQ(kl_router_add(&r, "POST", "/b", dummy_handler, (void *)2, NULL), 0);
+    ASSERT_EQ(kl_router_use(&r, "*",    "/c", dummy_middleware, (void *)3), 0);
+    ASSERT_EQ(kl_router_use_post(&r, "*", "/d", dummy_middleware, (void *)4), 0);
+
+    ASSERT_EQ(kl_router_is_frozen(&r), 0);
+    ASSERT_EQ(kl_router_freeze(&r), 0);
+    ASSERT_EQ(kl_router_is_frozen(&r), 1);
+
+    /* Live data survived the move — pointer identity changed but
+     * values match.  The handler/user_data pointers are the SAME
+     * function pointers / opaque pointers, just in a different
+     * mapping. */
+    ASSERT_EQ(r.count, 2);
+    ASSERT_EQ(r.mw_count, 1);
+    ASSERT_EQ(r.post_mw_count, 1);
+    ASSERT_TRUE(r.routes[0].handler   == dummy_handler);
+    ASSERT_TRUE(r.routes[0].user_data == (void *)1);
+    ASSERT_TRUE(r.routes[1].user_data == (void *)2);
+    ASSERT_TRUE(r.middleware[0].fn    == dummy_middleware);
+    ASSERT_TRUE(r.middleware[0].user_data == (void *)3);
+    ASSERT_TRUE(r.post_middleware[0].user_data == (void *)4);
+
+    kl_router_free(&r);
+    ASSERT_EQ(kl_router_is_frozen(&r), 0);
+}
+
+UTEST(router, freeze_blocks_subsequent_registration) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    ASSERT_EQ(kl_router_add(&r, "GET", "/a", dummy_handler, NULL, NULL), 0);
+    ASSERT_EQ(kl_router_freeze(&r), 0);
+
+    /* All four register entry points must reject post-freeze. */
+    ASSERT_EQ(kl_router_add(&r, "GET", "/late", dummy_handler, NULL, NULL), -1);
+    ASSERT_EQ(kl_router_add_streaming(&r, "POST", "/up", dummy_handler,
+                                       NULL, dummy_body_factory), -1);
+    ASSERT_EQ(kl_router_use(&r, "*", "/x", dummy_middleware, NULL), -1);
+    ASSERT_EQ(kl_router_use_post(&r, "*", "/y", dummy_middleware, NULL), -1);
+
+    /* Counts unchanged — the rejection is total, not partial. */
+    ASSERT_EQ(r.count, 1);
+    ASSERT_EQ(r.mw_count, 0);
+    ASSERT_EQ(r.post_mw_count, 0);
+
+    kl_router_free(&r);
+}
+
+UTEST(router, freeze_idempotent_returns_error) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    ASSERT_EQ(kl_router_add(&r, "GET", "/a", dummy_handler, NULL, NULL), 0);
+    ASSERT_EQ(kl_router_freeze(&r), 0);
+    /* Double-freeze is a programming bug; returns -1, no side effect. */
+    ASSERT_EQ(kl_router_freeze(&r), -1);
+    ASSERT_EQ(kl_router_is_frozen(&r), 1);
+    kl_router_free(&r);
+}
+
+UTEST(router, freeze_empty_router) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    /* No routes, no middleware.  Freeze should still succeed and
+     * the arena's mprotect should still apply (even on a near-empty
+     * page). */
+    ASSERT_EQ(kl_router_freeze(&r), 0);
+    ASSERT_EQ(kl_router_is_frozen(&r), 1);
+    /* Counts stay at 0; tables are NULL. */
+    ASSERT_EQ(r.count, 0);
+    ASSERT_EQ(r.mw_count, 0);
+    ASSERT_EQ(r.post_mw_count, 0);
+    kl_router_free(&r);
+}
+
+UTEST(router, freeze_dispatch_still_works) {
+    /* Match-and-dispatch must work identically on a frozen router. */
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    ASSERT_EQ(kl_router_add(&r, "GET", "/hello", dummy_handler, NULL, NULL), 0);
+    ASSERT_EQ(kl_router_freeze(&r), 0);
+
+    KlParam params[4];
+    int np = 0;
+    KlRoute *m = NULL;
+    int rc = kl_router_match(&r, "GET", 3, "/hello", 6, &m, params, &np);
+    ASSERT_EQ(rc, 200);
+    ASSERT_TRUE(m != NULL);
+    ASSERT_TRUE(m->handler == dummy_handler);
+    kl_router_free(&r);
+}
+
+/* Fork+SIGSEGV death test: writing to a frozen route table faults.
+ * Child resets SIGSEGV/SIGBUS so sanitizer runtimes don't swallow
+ * the signal (same pattern Hull uses for its sealed-arena tests). */
+UTEST(router, frozen_table_write_faults) {
+    KlAllocator a = kl_allocator_default();
+    KlRouter r;
+    kl_router_init(&r, &a);
+    ASSERT_EQ(kl_router_add(&r, "GET", "/a", dummy_handler, (void *)42, NULL), 0);
+    ASSERT_EQ(kl_router_freeze(&r), 0);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS,  SIG_DFL);
+        /* Try to overwrite the handler — would be a control-flow
+         * hijack against a non-frozen router. */
+        ((volatile KlRoute *)r.routes)[0].handler =
+            (KlHandler)(uintptr_t)0xdeadbeef;
+        _exit(0);
+    }
+    ASSERT_TRUE(pid > 0);
+
+    int status = 0;
+    pid_t w = waitpid(pid, &status, 0);
+    ASSERT_EQ(pid, w);
+    ASSERT_TRUE(WIFSIGNALED(status));
+    int sig = WTERMSIG(status);
+    ASSERT_TRUE(sig == SIGSEGV || sig == SIGBUS);
+
     kl_router_free(&r);
 }
 

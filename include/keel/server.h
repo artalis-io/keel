@@ -198,6 +198,41 @@ void kl_server_stop(KlServer *s);
 /** @brief Free all server resources (pool, router, event loop). */
 void kl_server_free(KlServer *s);
 
+/**
+ * @brief Freeze the server's routing state (v2.3.0+).
+ *
+ * Forwards to @ref kl_router_freeze on the server's embedded router,
+ * sealing the route table, pre-middleware array, and post-middleware
+ * array into an mprotect-RO arena.  Intended to be called once,
+ * AFTER all route/middleware registration is complete and BEFORE
+ * @ref kl_server_run is entered.  Post-freeze:
+ *
+ *   - kl_server_route / kl_server_use / kl_server_use_post all
+ *     return -1 (registration is closed).
+ *   - A heap-write primitive into the routing tables faults
+ *     (SIGSEGV/SIGBUS) instead of pivoting control flow to an
+ *     attacker-controlled function pointer or relaxing a middleware
+ *     gate.
+ *
+ * Calling this is optional — Keel will continue to serve correctly
+ * without it.  Callers that want the hardening guarantee SHOULD
+ * adopt the pattern:
+ *
+ *   kl_server_init(&s, &cfg);
+ *   kl_server_route(&s, "GET", "/", home, NULL, NULL);
+ *   kl_server_use  (&s, "*", "/api/...", auth_mw, &auth_ctx);
+ *   ...  all registration here
+ *   kl_server_freeze(&s);    once, after all adds
+ *   kl_server_run(&s);
+ *
+ * @return 0 on success, -1 on failure (already frozen, arena init
+ *         or seal failed, OOM).
+ */
+int  kl_server_freeze(KlServer *s);
+
+/** @brief Returns 1 if @p s has been frozen via @ref kl_server_freeze. */
+int  kl_server_is_frozen(const KlServer *s);
+
 /** @brief Server load statistics — read-only snapshot for load-shedding decisions. */
 typedef struct {
     int active_connections;    /**< Currently active connection slots */

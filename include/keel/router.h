@@ -5,6 +5,7 @@
 #include <keel/request.h>
 #include <keel/response.h>
 #include <keel/body_reader.h>
+#include <keel/seal_arena.h>
 #include <stddef.h>
 
 /** @brief Route handler function. */
@@ -76,6 +77,19 @@ typedef struct KlRouter {
     int post_mw_capacity;              /**< Post-body middleware capacity */
 
     KlAllocator *alloc;                /**< Allocator for table growth */
+
+    /**
+     * Freeze state (v2.3.0+).  After kl_router_freeze succeeds:
+     *   - routes / middleware / post_middleware point INTO seal_arena
+     *     (which is mprotect-RO);
+     *   - kl_router_add* / kl_router_use* return -1;
+     *   - kl_router_free skips the per-table kl_free (the arena owns
+     *     the storage; arena destroy unmaps everything).
+     * Zero on a non-frozen router; never observed as 1 in the
+     * pre-freeze API contract.
+     */
+    int frozen;
+    KlSealArena seal_arena;
 } KlRouter;
 
 /**
@@ -251,5 +265,45 @@ int  kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
 
 /** @brief Free router resources. */
 void kl_router_free(KlRouter *r);
+
+/**
+ * @brief Freeze the router (v2.3.0+).
+ *
+ * Copies the live route, pre-middleware, and post-middleware arrays
+ * into an internal seal arena, repoints the router's table pointers
+ * at the in-arena copies, frees the original allocator-owned arrays,
+ * and mprotect-RO's the arena.  After this call:
+ *
+ *   - kl_router_add / kl_router_add_streaming /
+ *     kl_router_add_streaming_async / kl_router_use /
+ *     kl_router_use_post all return -1.  Registration after freeze
+ *     is a programming bug.
+ *   - Any heap-write primitive into the route or middleware tables
+ *     faults (SIGSEGV/SIGBUS) instead of overwriting a handler
+ *     function pointer.
+ *   - kl_router_free unmaps the arena (skipping the per-table free
+ *     since the arena now owns the storage).
+ *   - Match performance is identical (pure read path).
+ *
+ * Strings (method, pattern) are NOT copied — the router continues
+ * to borrow caller-owned strings, which in practice are string
+ * literals from app code (already .rodata).  The seal protects the
+ * pointer tables and the metadata; protecting the strings would
+ * also be valid but the only attack surface freed by it is the
+ * already-.rodata-protected app text segment.
+ *
+ * Idempotent: calling on an already-frozen router returns -1.
+ * Calling on an empty router (no routes, no middleware) is a no-op
+ * (returns 0; arena is initialised but immediately sealed).
+ *
+ * @return 0 on success, -1 on failure (already frozen, arena init
+ *         failure, OOM).  Failure leaves the router unfrozen and
+ *         in its prior state (atomic with respect to observable
+ *         post-conditions).
+ */
+int  kl_router_freeze(KlRouter *r);
+
+/** @brief Returns 1 if @p r has been frozen, 0 otherwise. */
+int  kl_router_is_frozen(const KlRouter *r);
 
 #endif
