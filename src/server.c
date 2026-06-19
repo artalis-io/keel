@@ -80,6 +80,15 @@ void kl_server_conn_release(KlServer *s, KlConn *c) {
     }
 }
 
+/* Page-sized arena for the boot-built policy seal (config snapshot,
+ * bind_addr, storage mirrors, and the allocator vtable subsystems
+ * dispatch through).  Allocated in kl_server_init, populated across
+ * init + freeze, sealed RO in kl_server_freeze, destroyed in
+ * kl_server_free.  4 KiB = one page on every supported OS; the
+ * actual high-water is well under that today.  See docs/security.md
+ * § 4b for what this protects. */
+#define KL_SERVER_CFG_ARENA_BYTES 4096
+
 int kl_server_init(KlServer *s, const KlConfig *config) {
     if (!s || !config) {
         if (s) s->last_error = KL_ERR_INVALID_ARG;
@@ -107,22 +116,54 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         return -1;
     }
 
-    /* Set up allocator */
-    if (s->config.alloc) {
-        s->alloc_storage = *s->config.alloc;
-    } else {
-        s->alloc_storage = kl_allocator_default();
+    /* Set up the policy seal arena early — kl_server_freeze later
+     * adds the KlConfig snapshot to it.  Initialised here (instead
+     * of lazily at freeze time) so the KlAllocator vtable that
+     * every per-request allocation routes through can live IN the
+     * arena from the start.  After kl_server_freeze mprotects the
+     * arena RO, the alloc / free / realloc function pointers in
+     * that vtable are unrewriteable — defeats the highest-value
+     * control-flow hijack the per-request allocation path exposes
+     * (every Keel malloc dispatches through the vtable). */
+    if (sh_seal_arena_init(&s->config_arena,
+                            KL_SERVER_CFG_ARENA_BYTES,
+                            "kl_server_config") != 0) {
+        s->last_error = KL_ERR_ALLOC;
+        return -1;
     }
-    KlAllocator *alloc = &s->alloc_storage;
+
+    /* Allocate the allocator slot in the arena and populate it from
+     * the user-provided config.alloc (if any) or the default.
+     * `s->alloc_storage` is kept as a non-load-bearing mirror for
+     * the small number of internal tests that construct a KlServer
+     * by hand without calling kl_server_init (see test_async.c).
+     * The arena slot is the load-bearing copy; every subsystem
+     * receives THIS pointer as its `alloc`, so the vtable they
+     * dispatch through is the one the seal protects. */
+    KlAllocator *alloc = (KlAllocator *)sh_seal_arena_alloc(
+        &s->config_arena, sizeof(KlAllocator), _Alignof(KlAllocator));
+    if (!alloc) {
+        sh_seal_arena_destroy(&s->config_arena);
+        s->last_error = KL_ERR_ALLOC;
+        return -1;
+    }
+    if (s->config.alloc) {
+        *alloc = *s->config.alloc;
+    } else {
+        *alloc = kl_allocator_default();
+    }
+    s->alloc_storage = *alloc;
 
     /* Init subsystems */
     if (kl_router_init(&s->router, alloc) < 0) {
         s->last_error = KL_ERR_ALLOC;
+        sh_seal_arena_destroy(&s->config_arena);
         return -1;
     }
     if (kl_conn_pool_init(&s->pool, s->config.max_connections, alloc) < 0) {
         s->last_error = KL_ERR_ALLOC;
         kl_router_free(&s->router);
+        sh_seal_arena_destroy(&s->config_arena);
         return -1;
     }
 
@@ -151,6 +192,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
             s->last_error = KL_ERR_ALLOC;
             kl_conn_pool_free(&s->pool);
             kl_router_free(&s->router);
+            sh_seal_arena_destroy(&s->config_arena);
             return -1;
         }
         s->pool.conns[i].access_log = s->config.access_log;
@@ -170,6 +212,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
                 s->last_error = KL_ERR_TLS_INIT;
                 kl_conn_pool_free(&s->pool);
                 kl_router_free(&s->router);
+                sh_seal_arena_destroy(&s->config_arena);
                 return -1;
             }
             /* Validate vtable — all 7 required pointers must be set
@@ -180,6 +223,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
                 s->last_error = KL_ERR_TLS_VTABLE;
                 kl_conn_pool_free(&s->pool);
                 kl_router_free(&s->router);
+                sh_seal_arena_destroy(&s->config_arena);
                 return -1;
             }
         }
@@ -190,6 +234,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->last_error = KL_ERR_EVENT_INIT;
         kl_conn_pool_free(&s->pool);
         kl_router_free(&s->router);
+        sh_seal_arena_destroy(&s->config_arena);
         return -1;
     }
 
@@ -733,11 +778,6 @@ void kl_server_free(KlServer *s) {
 
 /* ── Freeze ─────────────────────────────────────────────────────── */
 
-/* Page-sized arena is plenty: KlConfig (~120 B) + bind_addr (< 256 B
- * realistic) + three storage mirrors (< 256 B together).  Use 4 KiB so
- * we always end up with exactly one page on every supported OS. */
-#define KL_SERVER_CFG_ARENA_BYTES 4096
-
 int kl_server_freeze(KlServer *s) {
     if (!s) return -1;
 
@@ -750,17 +790,25 @@ int kl_server_freeze(KlServer *s) {
         return 0;
     }
 
-    if (sh_seal_arena_init(&s->config_arena,
-                            KL_SERVER_CFG_ARENA_BYTES,
-                            "kl_server_config") != 0) {
-        s->last_error = KL_ERR_ALLOC;
-        return -1;
-    }
+    /* The config arena was initialised in kl_server_init (so the
+     * allocator vtable could be allocated INSIDE it and handed to
+     * every subsystem from the start).  Adding the config snapshot
+     * + storage mirrors + bind_addr to that same arena now, then
+     * sealing in one operation — everything that was allocated
+     * during init AND everything we add here gets the same
+     * mprotect-RO treatment. */
 
     /* Deep-copy the live config into the arena.  This snapshots all
      * the security-relevant function pointers (parser, log_fn,
      * access_log) and DoS caps (max_body_size, max_header_size) plus
-     * the bind_addr string and any storage-mirror sub-configs. */
+     * the bind_addr string and any storage-mirror sub-configs.
+     *
+     * NOTE: cfg->alloc points at s->config.alloc (the user-provided
+     * pointer or NULL).  The LOAD-BEARING allocator that subsystems
+     * dispatch through is the arena-resident copy allocated in
+     * kl_server_init, already in this same arena.  Subsystems hold
+     * THAT pointer, so the seal applies regardless of what
+     * cfg->alloc references. */
     KlConfig *cfg = (KlConfig *)sh_seal_arena_alloc(
         &s->config_arena, sizeof(KlConfig), _Alignof(KlConfig));
     if (!cfg) goto fail;
@@ -816,7 +864,16 @@ int kl_server_freeze(KlServer *s) {
     return 0;
 
 fail:
-    sh_seal_arena_destroy(&s->config_arena);
+    /* Do NOT destroy s->config_arena here.  It was allocated by
+     * kl_server_init and the live allocator vtable subsystems
+     * dispatch through lives inside it; destroying it would
+     * invalidate every per-request allocation.  Hull treats freeze
+     * failure as a logged warning (server keeps running unfrozen),
+     * so we leave the arena in its still-unsealed RW state and let
+     * kl_server_free reclaim it at shutdown.  The cost is the
+     * partially-populated KlConfig snapshot in arena (wasted bytes,
+     * < 1 KiB) — acceptable for a path that only fires on arena
+     * OOM, which is itself a sign the process is already in trouble. */
     s->last_error = KL_ERR_ALLOC;
     return -1;
 }
