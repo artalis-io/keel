@@ -52,8 +52,9 @@ __attribute__((format(printf, 3, 4)))
 static void kl_log(KlServer *s, int level, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    if (s->config.log_fn) {
-        s->config.log_fn(level, fmt, ap, s->config.log_user_data);
+    const KlConfig *cfg = kl_server_config(s);
+    if (cfg->log_fn) {
+        cfg->log_fn(level, fmt, ap, cfg->log_user_data);
     } else {
         fprintf(stderr, "keel: ");
         vfprintf(stderr, fmt, ap);
@@ -242,6 +243,10 @@ int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
 
 int kl_server_run(KlServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
+    /* Snapshot the (possibly sealed) config once per call.  Reads
+     * here are guaranteed to be against the RO copy when the caller
+     * froze the server before kl_server_run. */
+    const KlConfig *cfg = kl_server_config(s);
 
 #if !defined(KL_NO_SIGNAL)
     signal(SIGPIPE, SIG_IGN);
@@ -255,12 +260,12 @@ int kl_server_run(KlServer *s) {
     hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
 
     char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", s->config.port);
+    snprintf(port_str, sizeof(port_str), "%d", cfg->port);
 
-    int gai_rc = getaddrinfo(s->config.bind_addr, port_str, &hints, &ai);
+    int gai_rc = getaddrinfo(cfg->bind_addr, port_str, &hints, &ai);
     if (gai_rc != 0 || !ai) {
         kl_log(s, KL_LOG_ERROR, "invalid bind address '%s': %s",
-               s->config.bind_addr, gai_strerror(gai_rc));
+               cfg->bind_addr, gai_strerror(gai_rc));
         s->last_error = KL_ERR_DNS;
         return -1;
     }
@@ -333,12 +338,12 @@ int kl_server_run(KlServer *s) {
     }
 
     kl_log(s, KL_LOG_INFO, "listening on %s:%d",
-           s->config.bind_addr, s->bound_port);
+           cfg->bind_addr, s->bound_port);
 
 #if !defined(KL_NO_SIGNAL)
     /* Install signal handlers if requested */
     struct sigaction old_term, old_int;
-    if (s->config.install_signal_handlers) {
+    if (cfg->install_signal_handlers) {
         atomic_store(&kl_signal_server, s);
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
@@ -446,7 +451,7 @@ int kl_server_run(KlServer *s) {
                     nc->res.alloc = alloc;
 
                     /* TLS: enter handshake state instead of reading */
-                    if (s->config.tls) {
+                    if (cfg->tls) {
                         nc->state = KL_CONN_TLS_HANDSHAKE;
                         nc->tls_want = KL_EVENT_READ;
                     }
@@ -563,9 +568,9 @@ transition:
          * complete, so connection states are stable.  Newly acquired slots
          * have fresh last_active_ms and won't be timed out. */
         now = kl_monotonic_ms();
-        uint64_t timeout = (uint64_t)s->config.read_timeout_ms;
-        uint64_t body_timeout = s->config.body_timeout_ms > 0
-                                ? (uint64_t)s->config.body_timeout_ms
+        uint64_t timeout = (uint64_t)cfg->read_timeout_ms;
+        uint64_t body_timeout = cfg->body_timeout_ms > 0
+                                ? (uint64_t)cfg->body_timeout_ms
                                 : timeout;
         for (int i = 0; i < s->pool.capacity; i++) {
             KlConn *tc = &s->pool.conns[i];
@@ -655,7 +660,7 @@ transition:
 
 #if !defined(KL_NO_SIGNAL)
     /* Restore signal handlers */
-    if (s->config.install_signal_handlers) {
+    if (cfg->install_signal_handlers) {
         sigaction(SIGTERM, &old_term, NULL);
         sigaction(SIGINT, &old_int, NULL);
         atomic_store(&kl_signal_server, (KlServer *)NULL);
@@ -666,11 +671,12 @@ transition:
 }
 
 void kl_server_stop(KlServer *s) {
-    if (s->config.drain_timeout_ms > 0 && !atomic_load(&s->draining)) {
+    const KlConfig *cfg = kl_server_config(s);
+    if (cfg->drain_timeout_ms > 0 && !atomic_load(&s->draining)) {
         /* Enter drain mode: stop accepting, let in-flight finish */
         atomic_store(&s->draining, 1);
         s->drain_deadline_ms = kl_monotonic_ms() +
-                               (uint64_t)s->config.drain_timeout_ms;
+                               (uint64_t)cfg->drain_timeout_ms;
     } else {
         atomic_store(&s->running, 0);
     }
@@ -720,15 +726,105 @@ void kl_server_free(KlServer *s) {
     if (s->config.compress && s->config.compress->ctx_destroy) {
         s->config.compress->ctx_destroy(s->config.compress->ctx);
     }
+    /* Release the sealed config arena (no-op if never frozen). */
+    sh_seal_arena_destroy(&s->config_arena);
+    s->config_frozen = NULL;
 }
 
 /* ── Freeze ─────────────────────────────────────────────────────── */
 
+/* Page-sized arena is plenty: KlConfig (~120 B) + bind_addr (< 256 B
+ * realistic) + three storage mirrors (< 256 B together).  Use 4 KiB so
+ * we always end up with exactly one page on every supported OS. */
+#define KL_SERVER_CFG_ARENA_BYTES 4096
+
 int kl_server_freeze(KlServer *s) {
     if (!s) return -1;
-    return kl_router_freeze(&s->router);
+
+    /* Idempotent: fully-frozen returns OK without re-sealing.  Lets
+     * callers freeze defensively without tracking state.  (Note:
+     * kl_router_freeze itself is NOT idempotent — it returns -1 on a
+     * second call — but that's a router-internal contract.  At the
+     * KlServer layer "already frozen" is a no-op success.) */
+    if (s->config_frozen && kl_router_is_frozen(&s->router)) {
+        return 0;
+    }
+
+    if (sh_seal_arena_init(&s->config_arena,
+                            KL_SERVER_CFG_ARENA_BYTES,
+                            "kl_server_config") != 0) {
+        s->last_error = KL_ERR_ALLOC;
+        return -1;
+    }
+
+    /* Deep-copy the live config into the arena.  This snapshots all
+     * the security-relevant function pointers (parser, log_fn,
+     * access_log) and DoS caps (max_body_size, max_header_size) plus
+     * the bind_addr string and any storage-mirror sub-configs. */
+    KlConfig *cfg = (KlConfig *)sh_seal_arena_alloc(
+        &s->config_arena, sizeof(KlConfig), _Alignof(KlConfig));
+    if (!cfg) goto fail;
+    *cfg = s->config;
+
+    /* Re-point bind_addr at an arena-resident copy so a heap-write
+     * primitive can't swap the listen address after freeze. */
+    if (s->config.bind_addr) {
+        const char *dup = sh_seal_arena_strdup(&s->config_arena,
+                                                s->config.bind_addr);
+        if (!dup) goto fail;
+        cfg->bind_addr = dup;
+    }
+
+    /* Storage mirrors (tls/h2/compress) — `s->config.tls` etc. point
+     * at `s->tls_storage` etc., which live inside the still-mutable
+     * KlServer struct.  Mirror those into the arena and re-point. */
+    if (s->config.tls) {
+        KlTlsConfig *tls_copy = (KlTlsConfig *)sh_seal_arena_memdup(
+            &s->config_arena, s->config.tls, sizeof(*s->config.tls));
+        if (!tls_copy) goto fail;
+        cfg->tls = tls_copy;
+    }
+    if (s->config.h2) {
+        KlH2ServerConfig *h2_copy = (KlH2ServerConfig *)sh_seal_arena_memdup(
+            &s->config_arena, s->config.h2, sizeof(*s->config.h2));
+        if (!h2_copy) goto fail;
+        cfg->h2 = h2_copy;
+    }
+    if (s->config.compress) {
+        KlCompressConfig *cc_copy = (KlCompressConfig *)sh_seal_arena_memdup(
+            &s->config_arena, s->config.compress, sizeof(*s->config.compress));
+        if (!cc_copy) goto fail;
+        cfg->compress = cc_copy;
+    }
+
+    if (sh_seal_arena_seal(&s->config_arena) != 0) goto fail;
+
+    /* Publish the sealed pointer.  After this line every
+     * kl_server_config(s) caller reads the RO copy. */
+    s->config_frozen = cfg;
+
+    /* Also freeze the router (existing behaviour). */
+    if (kl_router_freeze(&s->router) != 0) {
+        /* Router freeze failure leaves config sealed but routes
+         * mutable.  Mark as not-fully-frozen by leaving the router
+         * unfrozen — the config_frozen pointer is still safe to use,
+         * caller sees -1 and can retry / abort.  We do NOT roll back
+         * the config seal because doing so would require an unseal
+         * primitive, which is exactly what we don't want exposed. */
+        return -1;
+    }
+    return 0;
+
+fail:
+    sh_seal_arena_destroy(&s->config_arena);
+    s->last_error = KL_ERR_ALLOC;
+    return -1;
 }
 
 int kl_server_is_frozen(const KlServer *s) {
-    return s ? kl_router_is_frozen(&s->router) : 0;
+    if (!s) return 0;
+    /* Server is considered "fully frozen" only when BOTH config and
+     * router are sealed.  Either alone is a partial state callers
+     * should not rely on. */
+    return (s->config_frozen != NULL) && kl_router_is_frozen(&s->router);
 }

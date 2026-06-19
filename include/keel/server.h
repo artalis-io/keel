@@ -10,6 +10,7 @@
 #include <keel/h2_server.h>
 #include <keel/connection.h>
 #include <keel/event_ctx.h>
+#include <sh_seal_arena.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -85,7 +86,36 @@ typedef struct KlServer {
     KlAsyncOp *async_ops;       /**< active async ops list */
     KlFileIO *file_io;          /**< async file I/O (auto-created if backend supports it) */
     KlError last_error;         /**< diagnostic: set at point of return -1 */
+    /**
+     * Sealed config snapshot (v2.4.0+).  NULL until @ref kl_server_freeze.
+     * After freeze, points to a deep copy of `config` (plus its referenced
+     * storage mirrors and `bind_addr` string) in @ref config_arena, which
+     * is mprotect-RO.  Read via @ref kl_server_config — the accessor
+     * returns &config (mutable) pre-freeze and config_frozen (sealed)
+     * post-freeze.
+     */
+    const KlConfig *config_frozen;
+    /**
+     * Backs *config_frozen.  Lazily initialised by kl_server_freeze;
+     * untouched on routers that aren't frozen.  Destroyed by
+     * kl_server_free. */
+    ShSealArena    config_arena;
 } KlServer;
+
+/**
+ * @brief Read accessor for server config — returns the sealed copy
+ *        post-freeze, the mutable original pre-freeze.
+ *
+ * Hot-path readers (parser, log_fn, access_log, max_body_size,
+ * max_header_size, tls, compress) MUST use this accessor; direct
+ * `s->config.X` access bypasses the seal and continues to read from
+ * the unsealed original even after @ref kl_server_freeze succeeds.
+ * Init-time writes (in @ref kl_server_init) write to `&s->config`
+ * directly — they run before any freeze.
+ */
+static inline const KlConfig *kl_server_config(const KlServer *s) {
+    return s->config_frozen ? s->config_frozen : &s->config;
+}
 
 /**
  * @brief Initialize server with the given configuration.
