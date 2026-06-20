@@ -694,8 +694,14 @@ read_more_headers: ;
 
         /* HTTP/2 connection preface detection (before HTTP/1.1 parser) */
         if (c->h2_config != NULL) {
-            static const char h2_preface[24] =
-                "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+            /* Explicit byte array (not a string literal) so clang's
+             * -Wunterminated-string-initialization doesn't trip on
+             * the missing null terminator — we use memcmp with the
+             * explicit 24 below, never as a C string. */
+            static const unsigned char h2_preface[24] = {
+                'P','R','I',' ','*',' ','H','T','T','P','/','2','.','0',
+                '\r','\n','\r','\n','S','M','\r','\n','\r','\n'
+            };
             if (c->read_len >= 24) {
                 if (memcmp(c->read_buf, h2_preface, 24) == 0) {
                     c->state = (KlConnState)kl_h2_server_upgrade(
