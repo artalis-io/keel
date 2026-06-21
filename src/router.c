@@ -205,12 +205,20 @@ int kl_router_use(KlRouter *r, const char *method, const char *pattern,
 }
 
 int kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res) {
+    /* Read method/path via accessors so seal mode (req->sealed != NULL)
+     * routes through the mprotect-RO snapshot.  Cache the lookups
+     * outside the loop — KEEL_SEAL_REQUEST builds add one indirection
+     * per call site. */
+    const char *m = kl_request_method(req);
+    size_t      mlen = kl_request_method_len(req);
+    const char *p = kl_request_path(req);
+    size_t      plen = kl_request_path_len(req);
     for (int i = 0; i < r->mw_count; i++) {
         KlMiddlewareEntry *mw = &r->middleware[i];
-        if (match_middleware_pattern(req->method, req->method_len,
+        if (match_middleware_pattern(m, mlen,
                                     mw->method, mw->method_len,
                                     mw->pattern, mw->pattern_len,
-                                    req->path, req->path_len)) {
+                                    p, plen)) {
             int rc = mw->fn(req, res, mw->user_data);
             if (rc != 0) return rc;
         }
@@ -252,12 +260,16 @@ int kl_router_use_post(KlRouter *r, const char *method, const char *pattern,
 }
 
 int kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlResponse *res) {
+    const char *m = kl_request_method(req);
+    size_t      mlen = kl_request_method_len(req);
+    const char *p = kl_request_path(req);
+    size_t      plen = kl_request_path_len(req);
     for (int i = 0; i < r->post_mw_count; i++) {
         KlMiddlewareEntry *mw = &r->post_middleware[i];
-        if (match_middleware_pattern(req->method, req->method_len,
+        if (match_middleware_pattern(m, mlen,
                                     mw->method, mw->method_len,
                                     mw->pattern, mw->pattern_len,
-                                    req->path, req->path_len)) {
+                                    p, plen)) {
             int rc = mw->fn(req, res, mw->user_data);
             if (rc != 0) return rc;
         }
@@ -272,11 +284,15 @@ int kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
     if (!r || !req || !res) return -1;
 
     /* Match route. params live on the request; the caller doesn't have
-     * to pre-fill them. */
+     * to pre-fill them.  Synthetic dispatch path is used by tests and
+     * has no KlConn, so req->sealed is NULL and accessors fall back
+     * to direct fields — same bytes either way. */
     KlRoute *matched = NULL;
     int num_params = 0;
-    int match_status = kl_router_match(r, req->method, req->method_len,
-                                       req->path, req->path_len,
+    int match_status = kl_router_match(r, kl_request_method(req),
+                                       kl_request_method_len(req),
+                                       kl_request_path(req),
+                                       kl_request_path_len(req),
                                        &matched, req->params, &num_params);
     /* Defensive clamp: kl_router_match already bounds writes into params
      * by KL_MAX_PARAMS (see match_path) — repeating the clamp on the

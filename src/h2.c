@@ -300,10 +300,16 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     req->version_minor = 0;
     req->keep_alive = 1;
 
-    /* Route match */
+    /* Route match.  HTTP/2 path does not currently snapshot+seal the
+     * request (snapshot fires only in conn_dispatch_request for HTTP/1.1).
+     * Accessors fall back to direct fields here because req->sealed is
+     * NULL.  Migration to accessors keeps the call site source-stable
+     * for when h2 seal lands as a follow-up. */
     stream->route_result = kl_router_match(h2c->router,
-                                            req->method, req->method_len,
-                                            req->path, req->path_len,
+                                            kl_request_method(req),
+                                            kl_request_method_len(req),
+                                            kl_request_path(req),
+                                            kl_request_path_len(req),
                                             &stream->route, stream->params,
                                             &stream->num_params);
     memcpy(req->params, stream->params,
@@ -318,8 +324,8 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     stream->res.conn_fd = h2c->conn->fd;
     stream->res.tls = h2c->conn->tls;
     stream->res.keep_alive = 1;
-    stream->res.head_request = (req->method_len == 4 &&
-                                 memcmp(req->method, "HEAD", 4) == 0);
+    stream->res.head_request = (kl_request_method_len(req) == 4 &&
+                                 memcmp(kl_request_method(req), "HEAD", 4) == 0);
 
     /* Run middleware */
     if (kl_router_run_middleware(h2c->router, req, &stream->res) != 0) {
@@ -331,7 +337,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     }
 
     /* Create body reader if needed */
-    int has_body = (req->content_length > 0);
+    int has_body = (kl_request_content_length(req) > 0);
     if (has_body && stream->route && stream->route->body_reader) {
         KlBodyReader *br = stream->route->body_reader(
             h2c->alloc, req, stream->route->user_data);

@@ -115,8 +115,8 @@ int kl_cors_middleware(KlRequest *req, KlResponse *res, void *user_data) {
         kl_response_header(res, "Access-Control-Allow-Credentials", "true");
 
     /* Handle OPTIONS preflight */
-    int is_options = (req->method_len == 7 &&
-                      memcmp(req->method, "OPTIONS", 7) == 0);
+    int is_options = (kl_request_method_len(req) == 7 &&
+                      memcmp(kl_request_method(req), "OPTIONS", 7) == 0);
     if (is_options) {
         if (config->allowed_methods)
             kl_response_header(res, "Access-Control-Allow-Methods",

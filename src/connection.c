@@ -353,8 +353,12 @@ static int conn_init_response(KlConn *c) {
     c->res.conn_fd = c->fd;
     c->res.tls = c->tls;
     c->res.keep_alive = c->req.keep_alive;
-    c->res.head_request = (c->req.method_len == 4 &&
-                           memcmp(c->req.method, "HEAD", 4) == 0);
+    /* HEAD check via accessors: post-snapshot read should resolve
+     * through req->sealed when KEEL_SEAL_REQUEST=1, direct field
+     * otherwise.  The legacy path's c->req.method is still the same
+     * bytes (parser scratch), so result is byte-identical. */
+    c->res.head_request = (kl_request_method_len(&c->req) == 4 &&
+                           memcmp(kl_request_method(&c->req), "HEAD", 4) == 0);
     return 0;
 }
 
@@ -590,7 +594,8 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
     }
 
     /* Determine if there's a body to read */
-    int has_body = (c->req.content_length > 0 || c->req.chunked);
+    int has_body = (kl_request_content_length(&c->req) > 0 ||
+                    kl_request_is_chunked(&c->req));
 
     if (has_body && c->route && c->route->body_reader) {
         /* Create body reader — factory can inspect headers */
@@ -649,7 +654,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         }
 
         /* Parse leftover body data in-place (no memmove) */
-        if (c->req.chunked) {
+        if (kl_request_is_chunked(&c->req)) {
             kl_chunked_init(&c->chunked_dec);
             if (leftover_len > 0) {
                 int rc = kl_chunked_decode(&c->chunked_dec,
@@ -747,16 +752,16 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         /* Body present but no reader — discard body */
 
         /* Content-Length early reject */
-        if (!c->req.chunked &&
+        if (!kl_request_is_chunked(&c->req) &&
             c->max_body_size > 0 &&
-            c->req.content_length > c->max_body_size) {
+            kl_request_content_length(&c->req) > c->max_body_size) {
             best_effort_conn_write(c, kl_413_response,
                                    sizeof(kl_413_response) - 1);
             c->state = KL_CONN_CLOSED;
             return c->state;
         }
 
-        if (c->req.chunked) {
+        if (kl_request_is_chunked(&c->req)) {
             kl_chunked_init(&c->chunked_dec);
             if (leftover_len > 0) {
                 int rc = kl_chunked_decode(&c->chunked_dec,
@@ -915,7 +920,7 @@ read_more_body: ;
             return c->state;
         }
 
-        if (c->req.chunked) {
+        if (kl_request_is_chunked(&c->req)) {
             int rc = kl_chunked_decode(&c->chunked_dec,
                         c->read_buf, (size_t)nr, c->req.body_reader);
             if (rc < 0) {
