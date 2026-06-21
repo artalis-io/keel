@@ -14,10 +14,20 @@
  *   sh_seal_arena_memdup  — copy raw bytes
  *   sh_seal_arena_seal    — mprotect(RO); after this, alloc fails and
  *                            writes to allocated blocks fault
+ *   sh_seal_arena_reset   — mprotect(RW), used=0.  Cycles the arena
+ *                            back to the init state for re-use.  ONLY
+ *                            for arenas with deliberately ephemeral
+ *                            lifecycle (per-request, per-connection)
+ *                            owned by a single code path.  Boot-time
+ *                            policy arenas must NEVER reset.
  *   sh_seal_arena_destroy — munmap; safe on sealed/unsealed arenas
  *
- * After sealing the arena is one-way: there is NO unseal — that would
- * defeat the purpose.  To rebuild, init a fresh arena.
+ * Sealing is intentionally one-way per arena instance under normal
+ * lifecycle (boot-time policy).  `_reset` exists as an opt-in escape
+ * hatch for arenas whose purpose is to be cycled (Keel's per-request
+ * sealed request snapshot is the canonical use case).  If you find
+ * yourself reaching for `_reset` on a policy arena, you almost
+ * certainly want a fresh `_init` instead.
  *
  * Threading: NOT thread-safe during the init→alloc→seal lifecycle.
  * That's a feature — these operations are by-design single-threaded
@@ -69,12 +79,42 @@ char  *sh_seal_arena_strdup(ShSealArena *arena, const char *s);
 /** Copy @p len bytes (binary-safe, NOT NUL-terminated). NULL on failure. */
 void  *sh_seal_arena_memdup(ShSealArena *arena, const void *src, size_t len);
 
+/** Copy @p len bytes followed by a trailing '\0'.  Allocates len+1
+ *  bytes, copies the data, appends NUL.  The result is C-string
+ *  compatible (`strlen`/`strcmp`/`memcmp` all work) AND length-prefixed
+ *  (the NUL is part of the arena allocation, not derived from input).
+ *  Use when the source is parser-produced (header values, route param
+ *  values, manifest entries) and downstream consumers expect a
+ *  NUL-terminated read.  NULL on failure. */
+void  *sh_seal_arena_memdup_nt(ShSealArena *arena, const void *src, size_t len);
+
 /** Seal: mprotect(PROT_READ). After this:
  *    - sh_seal_arena_alloc returns NULL
  *    - reads from already-allocated blocks continue to work
  *    - writes to those blocks fault (SIGSEGV)
  *  Returns 0 on success, -1 on failure (treat as FATAL). */
 int    sh_seal_arena_seal(ShSealArena *arena);
+
+/** Reset: mprotect(PROT_READ|PROT_WRITE), used = 0, sealed = 0.
+ *  Cycles the arena back to the state immediately after init.
+ *
+ *  ONLY for arenas with deliberately ephemeral lifecycle owned by a
+ *  single code path: per-request, per-connection, etc.  After reset
+ *  the previous allocations are still mapped at the same addresses
+ *  but are now writable; the bump pointer rewinds to zero, so the
+ *  next allocation reuses the same memory.  Any pointers callers
+ *  cached into the previous fill are dangling — caller must drop
+ *  them before reset.
+ *
+ *  Race window: between reset and the next seal, the pages are RW.
+ *  Concurrent readers from another thread reading the old contents
+ *  during this window would read torn data.  Single-threaded
+ *  callsites (event loop per worker) are safe.
+ *
+ *  Returns 0 on success, -1 on failure (mprotect failed, NULL arena,
+ *  arena never init'd).  Reset on an already-RW (unsealed) arena is
+ *  a no-op success: bump pointer rewinds, no mprotect call. */
+int    sh_seal_arena_reset(ShSealArena *arena);
 
 /** Returns 1 if sealed, 0 otherwise (including for NULL). */
 int    sh_seal_arena_is_sealed(const ShSealArena *arena);

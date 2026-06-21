@@ -78,6 +78,29 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
         pool->conns[i].fd = -1;
         pool->conns[i].state = KL_CONN_CLOSED;
         pool->conns[i].alloc = alloc;
+
+#ifdef KEEL_SEAL_REQUEST
+        /* Per-connection sealed-request arena.  32 KB (eight 4K pages)
+         * covers the worst-case parsed request: 64 headers * 256 bytes
+         * each + method + path + query + KL_MAX_PARAMS route params +
+         * the KlSealedRequest struct itself.  If a request exceeds the
+         * arena, snapshot_and_seal returns -1 and the connection layer
+         * rejects with 431.  Tear-down path freees read_buf for prior
+         * slots on failure but NOT the arena (init failed → nothing
+         * allocated for this slot); the per-slot cleanup loop in
+         * kl_conn_pool_free handles successful inits. */
+        if (sh_seal_arena_init(&pool->conns[i].req_arena,
+                               32 * 1024, "kl_req_arena") != 0) {
+            for (int j = 0; j < i; j++) {
+                kl_free(alloc, pool->conns[j].read_buf, KL_READ_BUF_SIZE);
+                sh_seal_arena_destroy(&pool->conns[j].req_arena);
+            }
+            kl_free(alloc, pool->conns[i].read_buf, KL_READ_BUF_SIZE);
+            kl_free(alloc, pool->conns, sizeof(KlConn) * (size_t)capacity);
+            pool->conns = NULL;
+            return -1;
+        }
+#endif
     }
 
     return 0;
@@ -142,6 +165,13 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
     if (c->res.hdr_buf) {
         kl_response_free(&c->res);
     }
+#ifdef KEEL_SEAL_REQUEST
+    /* Cycle the sealed-request arena back to RW for the next
+     * acquisition.  Drop the sealed pointer so a use-after-release
+     * read crashes instead of dangling into reset memory. */
+    sh_seal_arena_reset(&c->req_arena);
+    c->req.sealed = NULL;
+#endif
     c->async_op = NULL;
     c->state = KL_CONN_CLOSED;
     c->route = NULL;
@@ -184,6 +214,9 @@ void kl_conn_pool_free(KlConnPool *pool) {
                 kl_free(pool->alloc, pool->conns[i].read_buf,
                         pool->conns[i].read_cap);
             }
+#ifdef KEEL_SEAL_REQUEST
+            sh_seal_arena_destroy(&pool->conns[i].req_arena);
+#endif
         }
         kl_free(pool->alloc, pool->conns,
                 sizeof(KlConn) * (size_t)pool->capacity);
@@ -201,6 +234,108 @@ static void conn_log_access(KlConn *c) {
     double duration = (double)(now - c->request_start_ms);
     c->access_log(&c->req, c->res.status, bytes, duration, c->access_log_data);
 }
+
+#ifdef KEEL_SEAL_REQUEST
+/*
+ * Snapshot the parser-populated KlRequest fields into the connection's
+ * per-request seal arena, then mprotect the arena read-only.  Called
+ * AFTER routing fills c->req.params[] and BEFORE the first user-code
+ * dispatch (pre-body middleware).
+ *
+ * After this returns 0, c->req.sealed points at a sealed KlSealedRequest
+ * whose method/path/query/headers/params bytes live in the arena and
+ * are read-only.  Handler/middleware writes through accessors that
+ * resolve to req->sealed->* will SIGSEGV.
+ *
+ * Returns 0 on success, -1 on failure (arena OOM — caller must respond
+ * 431 and close the connection).  c->req.sealed stays NULL on failure.
+ */
+static int snapshot_and_seal(KlConn *c) {
+    ShSealArena *a = &c->req_arena;
+
+    /* Reset is a no-op on a freshly-acquired connection (arena was
+     * already reset at release time); doing it here belt-and-braces
+     * also covers a re-snapshot path that doesn't exist today but
+     * might be added later.  Cheap when not sealed. */
+    if (sh_seal_arena_reset(a) != 0) return -1;
+
+    KlSealedRequest *s = sh_seal_arena_alloc(a, sizeof(*s),
+                                              _Alignof(KlSealedRequest));
+    if (!s) return -1;
+    memset(s, 0, sizeof(*s));
+
+    /* Method / path / query bytes.  Preserve NULL-ness: parser may
+     * leave query NULL for "GET /" (no '?').  But for non-NULL
+     * source, always allocate (even when len == 0) so the sealed
+     * pointer is non-NULL — matches the legacy zero-copy behaviour
+     * where an empty-but-present field has a non-NULL pointer into
+     * read_buf with len 0. */
+    if (c->req.method) {
+        void *p = sh_seal_arena_memdup_nt(a, c->req.method, c->req.method_len);
+        if (!p) return -1;
+        s->method = p;
+        s->method_len = c->req.method_len;
+    }
+    if (c->req.path) {
+        void *p = sh_seal_arena_memdup_nt(a, c->req.path, c->req.path_len);
+        if (!p) return -1;
+        s->path = p;
+        s->path_len = c->req.path_len;
+    }
+    if (c->req.query) {
+        void *p = sh_seal_arena_memdup_nt(a, c->req.query, c->req.query_len);
+        if (!p) return -1;
+        s->query = p;
+        s->query_len = c->req.query_len;
+    }
+
+    /* Scalar fields */
+    s->version_major  = c->req.version_major;
+    s->version_minor  = c->req.version_minor;
+    s->content_length = c->req.content_length;
+    s->chunked        = c->req.chunked;
+
+    /* Headers (bounded by KL_MAX_HEADERS already enforced in parser) */
+    s->num_headers = c->req.num_headers;
+    for (int i = 0; i < c->req.num_headers; i++) {
+        const KlHeader *src = &c->req.headers[i];
+        if (src->name) {
+            void *p = sh_seal_arena_memdup_nt(a, src->name, src->name_len);
+            if (!p) return -1;
+            s->headers[i].name = p;
+            s->headers[i].name_len = src->name_len;
+        }
+        if (src->value) {
+            void *p = sh_seal_arena_memdup_nt(a, src->value, src->value_len);
+            if (!p) return -1;
+            s->headers[i].value = p;
+            s->headers[i].value_len = src->value_len;
+        }
+    }
+
+    /* Route params (bounded by KL_MAX_PARAMS) */
+    s->num_params = c->req.num_params;
+    for (int i = 0; i < c->req.num_params; i++) {
+        const KlParam *src = &c->req.params[i];
+        if (src->name) {
+            void *p = sh_seal_arena_memdup_nt(a, src->name, src->name_len);
+            if (!p) return -1;
+            s->params[i].name = p;
+            s->params[i].name_len = src->name_len;
+        }
+        if (src->value) {
+            void *p = sh_seal_arena_memdup_nt(a, src->value, src->value_len);
+            if (!p) return -1;
+            s->params[i].value = p;
+            s->params[i].value_len = src->value_len;
+        }
+    }
+
+    if (sh_seal_arena_seal(a) != 0) return -1;
+    c->req.sealed = s;
+    return 0;
+}
+#endif /* KEEL_SEAL_REQUEST */
 
 /*
  * Initialize response for the current request.  Extracted from conn_process
@@ -394,6 +529,25 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
     memcpy(c->req.params, c->params,
            sizeof(KlParam) * (size_t)c->num_params);
     c->req.num_params = c->num_params;
+
+#ifdef KEEL_SEAL_REQUEST
+    /* Snapshot the parsed request into the per-connection seal arena
+     * and mprotect it RO before any user code (middleware / body
+     * reader factory / handler) runs.  Handler reads via the
+     * kl_request_* accessors which resolve to req->sealed->*; a write
+     * through those (cast-away-const or otherwise) faults at the
+     * call site.  See request.h KlSealedRequest doc + docs/security.md
+     * § 4e. */
+    if (snapshot_and_seal(c) != 0) {
+        /* Arena OOM — parsed request exceeded sealed-arena budget.
+         * Respond 431 and close.  No need to call conn_init_response /
+         * route handlers; middleware never ran. */
+        best_effort_conn_write(c, kl_431_response,
+                               sizeof(kl_431_response) - 1);
+        c->state = KL_CONN_CLOSED;
+        return c->state;
+    }
+#endif
 
     /* Init response and run pre-body middleware */
     if (conn_init_response(c) < 0) {

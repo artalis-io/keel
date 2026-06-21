@@ -118,6 +118,18 @@ void *sh_seal_arena_memdup(ShSealArena *arena, const void *src, size_t len)
     return dst;
 }
 
+void *sh_seal_arena_memdup_nt(ShSealArena *arena, const void *src, size_t len)
+{
+    if (!src) return NULL;
+    /* len+1 with overflow guard. len == SIZE_MAX would wrap. */
+    if (len == SIZE_MAX) return NULL;
+    char *dst = (char *)sh_seal_arena_alloc(arena, len + 1, 1);
+    if (!dst) return NULL;
+    if (len > 0) memcpy(dst, src, len);
+    dst[len] = '\0';
+    return dst;
+}
+
 /* ── seal ─────────────────────────────────────────────────────────── */
 
 int sh_seal_arena_seal(ShSealArena *arena)
@@ -128,6 +140,20 @@ int sh_seal_arena_seal(ShSealArena *arena)
         return -1;
     }
     arena->sealed = 1;
+    return 0;
+}
+
+int sh_seal_arena_reset(ShSealArena *arena)
+{
+    if (!arena || !arena->base) return -1;
+    if (arena->sealed) {
+        if (mprotect(arena->base, arena->capacity,
+                     PROT_READ | PROT_WRITE) != 0) {
+            return -1;
+        }
+        arena->sealed = 0;
+    }
+    arena->used = 0;
     return 0;
 }
 

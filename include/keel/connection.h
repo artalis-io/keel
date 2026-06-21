@@ -11,6 +11,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef KEEL_SEAL_REQUEST
+#include <sh_seal_arena.h>
+#endif
+
 /** @brief Default read buffer size (bytes). */
 #define KL_READ_BUF_SIZE 8192
 
@@ -44,6 +48,17 @@ typedef struct KlConn {
     KlRequest req;              /**< Current request */
     KlResponse res;             /**< Current response */
     KlParser *parser;           /**< HTTP parser */
+
+#ifdef KEEL_SEAL_REQUEST
+    /* Per-connection sealed-request arena.  Holds the
+     * KlSealedRequest snapshot (and its referenced bytes — method,
+     * path, query, header names/values, route param names/values)
+     * between snapshot point (post-routing, pre-middleware) and
+     * request end.  mprotect-RO during that window; sh_seal_arena_reset
+     * cycles it back to RW for the next request.  See
+     * docs/security.md § 4e. */
+    ShSealArena req_arena;
+#endif
 
     size_t hdr_sent;            /**< Header bytes sent */
 

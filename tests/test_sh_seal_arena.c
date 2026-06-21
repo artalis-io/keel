@@ -172,6 +172,47 @@ UTEST(seal_arena, memdup_binary_safe)
     sh_seal_arena_destroy(&a);
 }
 
+UTEST(seal_arena, memdup_nt_appends_nul_and_is_strlen_safe)
+{
+    ShSealArena a;
+    ASSERT_EQ(0, sh_seal_arena_init(&a, 4096, NULL));
+    const char src[] = "hello"; /* 5 bytes + the implicit NUL we don't pass */
+    char *dst = (char *)sh_seal_arena_memdup_nt(&a, src, 5);
+    ASSERT_TRUE(dst != NULL);
+    ASSERT_EQ(0, memcmp(src, dst, 5));
+    ASSERT_EQ('\0', dst[5]);                /* trailing NUL */
+    ASSERT_EQ((size_t)5, strlen(dst));      /* C-string safe */
+    sh_seal_arena_destroy(&a);
+}
+
+UTEST(seal_arena, memdup_nt_zero_length_yields_empty_string)
+{
+    ShSealArena a;
+    ASSERT_EQ(0, sh_seal_arena_init(&a, 4096, NULL));
+    char *dst = (char *)sh_seal_arena_memdup_nt(&a, "anything", 0);
+    ASSERT_TRUE(dst != NULL);
+    ASSERT_EQ('\0', dst[0]);
+    ASSERT_EQ((size_t)0, strlen(dst));
+    sh_seal_arena_destroy(&a);
+}
+
+UTEST(seal_arena, memdup_nt_null_src_returns_null)
+{
+    ShSealArena a;
+    ASSERT_EQ(0, sh_seal_arena_init(&a, 4096, NULL));
+    ASSERT_TRUE(sh_seal_arena_memdup_nt(&a, NULL, 10) == NULL);
+    sh_seal_arena_destroy(&a);
+}
+
+UTEST(seal_arena, memdup_nt_rejects_size_max)
+{
+    ShSealArena a;
+    ASSERT_EQ(0, sh_seal_arena_init(&a, 4096, NULL));
+    /* len == SIZE_MAX would overflow len+1; the helper rejects. */
+    ASSERT_TRUE(sh_seal_arena_memdup_nt(&a, "x", SIZE_MAX) == NULL);
+    sh_seal_arena_destroy(&a);
+}
+
 /* ── seal lifecycle ────────────────────────────────────────────────── */
 
 UTEST(seal_arena, seal_blocks_subsequent_allocs)
@@ -257,6 +298,89 @@ UTEST(seal_arena, write_after_seal_faults)
     /* SIGSEGV on Linux/macOS for write to read-only pages. SIGBUS on
      * some BSDs / older kernels. Either is correct evidence that the
      * mprotect actually took effect. */
+    ASSERT_TRUE(sig == SIGSEGV || sig == SIGBUS);
+
+    sh_seal_arena_destroy(&a);
+}
+
+/* ── reset cycle: RO → RW → fill → RO → reset → fill → RO ──────────── */
+
+UTEST(seal_arena, reset_on_unsealed_rewinds_bump)
+{
+    ShSealArena a;
+    ASSERT_EQ(0, sh_seal_arena_init(&a, 4096, NULL));
+    (void)sh_seal_arena_alloc(&a, 100, 8);
+    ASSERT_EQ((size_t)100, sh_seal_arena_used(&a));
+
+    ASSERT_EQ(0, sh_seal_arena_reset(&a));
+    ASSERT_EQ((size_t)0, sh_seal_arena_used(&a));
+    ASSERT_EQ(0, sh_seal_arena_is_sealed(&a));
+
+    void *p = sh_seal_arena_alloc(&a, 50, 8);
+    ASSERT_TRUE(p != NULL); /* alloc works after reset */
+    sh_seal_arena_destroy(&a);
+}
+
+UTEST(seal_arena, reset_on_sealed_unprotects_and_rewinds)
+{
+    ShSealArena a;
+    ASSERT_EQ(0, sh_seal_arena_init(&a, 4096, NULL));
+    char *p1 = sh_seal_arena_strdup(&a, "first-cycle");
+    ASSERT_TRUE(p1 != NULL);
+    ASSERT_EQ(0, sh_seal_arena_seal(&a));
+    ASSERT_EQ(1, sh_seal_arena_is_sealed(&a));
+
+    ASSERT_EQ(0, sh_seal_arena_reset(&a));
+    ASSERT_EQ(0, sh_seal_arena_is_sealed(&a));
+    ASSERT_EQ((size_t)0, sh_seal_arena_used(&a));
+
+    /* alloc must work again */
+    char *p2 = sh_seal_arena_strdup(&a, "second-cycle");
+    ASSERT_TRUE(p2 != NULL);
+    ASSERT_STREQ("second-cycle", p2);
+
+    /* the previous allocation's memory is reused at the same address */
+    ASSERT_EQ((void *)p1, (void *)p2);
+
+    sh_seal_arena_destroy(&a);
+}
+
+UTEST(seal_arena, reset_null_returns_error)
+{
+    ASSERT_EQ(-1, sh_seal_arena_reset(NULL));
+    ShSealArena zero = {0};
+    ASSERT_EQ(-1, sh_seal_arena_reset(&zero)); /* no base */
+}
+
+UTEST(seal_arena, full_cycle_seal_reset_seal_again)
+{
+    ShSealArena a;
+    ASSERT_EQ(0, sh_seal_arena_init(&a, 4096, NULL));
+
+    /* first cycle: fill + seal */
+    (void)sh_seal_arena_strdup(&a, "cycle-1");
+    ASSERT_EQ(0, sh_seal_arena_seal(&a));
+
+    /* reset + second cycle: fill + seal */
+    ASSERT_EQ(0, sh_seal_arena_reset(&a));
+    char *p = sh_seal_arena_strdup(&a, "cycle-2");
+    ASSERT_TRUE(p != NULL);
+    ASSERT_EQ(0, sh_seal_arena_seal(&a));
+    ASSERT_EQ(1, sh_seal_arena_is_sealed(&a));
+
+    /* writes still fault after re-seal */
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS,  SIG_DFL);
+        p[0] = 'X';
+        _exit(0);
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    ASSERT_EQ(pid, waitpid(pid, &status, 0));
+    ASSERT_TRUE(WIFSIGNALED(status));
+    int sig = WTERMSIG(status);
     ASSERT_TRUE(sig == SIGSEGV || sig == SIGBUS);
 
     sh_seal_arena_destroy(&a);
