@@ -34,12 +34,67 @@ else
             -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
             -fstack-protector-strong -fPIE \
             -Iinclude -Ivendor/llhttp -Ivendor/sh_seal_arena
-  VENDOR_CFLAGS = -std=c11 -O2 -fPIE -Iinclude -Ivendor/llhttp -Ivendor/sh_seal_arena
+  # Vendor TUs (llhttp) get the same stack-protector + FORTIFY
+  # baseline as first-party Keel TUs.  Without this, ROP gadgets in
+  # the parser's text segment stay reachable even when the rest of
+  # the binary is hardened.  The probed flag set is added below.
+  VENDOR_CFLAGS = -std=c11 -O2 \
+            -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
+            -fstack-protector-strong -fPIE \
+            -Iinclude -Ivendor/llhttp -Ivendor/sh_seal_arena
   # Use -Wl,-pie so clang routes the flag to the linker without flagging
   # it as "unused during compilation" — Keel's one-shot compile+link
   # rules (tests/, examples/) combined with -Werror would otherwise
   # promote that warning to a hard error.
   LDFLAGS += -Wl,-pie
+
+  # Probe-based additional hardening (parity with Hull's hl_have_cflag).
+  # Each flag is independently probed; toolchains that reject a subset
+  # still build cleanly.  Applied to BOTH first-party (CFLAGS) and
+  # vendor (VENDOR_CFLAGS) TUs so the entire .text segment is hardened.
+  #
+  # Skip the whole block with KEEL_DISABLE_HARDENING=1 (debug/local only;
+  # release CI must never set this).
+  ifndef KEEL_DISABLE_HARDENING
+    comma := ,
+    kl_have_cflag = $(shell tmp="$$(mktemp 2>/dev/null || echo /tmp/klprobe$$$$.o)"; \
+        printf 'int main(void){return 0;}\n' \
+        | $(CC) -Werror $(1) -x c -c -o "$$tmp" - >/dev/null 2>&1 \
+        && echo "$(1)"; rm -f "$$tmp")
+
+    # Universal hardening:
+    #  -fstack-clash-protection  — probe per stack frame >4K (gcc 8+ / clang 11+)
+    #  -fno-plt                   — direct GOT calls, shrinks ROP gadget surface
+    #  -fno-common                — reject K&R-style tentative defs (modern default)
+    #  -ftrivial-auto-var-init=zero — zero stack vars (clang 8+ / gcc 12+)
+    #  -fzero-call-used-regs=used-gpr — zero GPRs on return (gcc 11+ / clang 15+)
+    KEEL_HARDEN_CFLAGS := \
+        $(call kl_have_cflag,-fstack-clash-protection) \
+        $(call kl_have_cflag,-fno-plt) \
+        $(call kl_have_cflag,-fno-common) \
+        $(call kl_have_cflag,-ftrivial-auto-var-init=zero) \
+        $(call kl_have_cflag,-fzero-call-used-regs=used-gpr)
+
+    # Architecture-specific CFI / branch hardening.
+    UNAME_M := $(shell uname -m)
+    ifneq (,$(filter x86_64 amd64,$(UNAME_M)))
+      KEEL_HARDEN_CFLAGS += $(call kl_have_cflag,-fcf-protection=full)
+    endif
+    ifneq (,$(filter arm64 aarch64,$(UNAME_M)))
+      KEEL_HARDEN_CFLAGS += $(call kl_have_cflag,-mbranch-protection=standard)
+    endif
+
+    CFLAGS        += $(KEEL_HARDEN_CFLAGS)
+    VENDOR_CFLAGS += $(KEEL_HARDEN_CFLAGS)
+
+    # Linker hardening — gated to Linux (ld64 rejects -z flags).
+    ifeq ($(UNAME_S),Linux)
+      KEEL_HARDEN_LDFLAGS := $(call kl_have_cflag,-Wl$(comma)-z$(comma)separate-code)
+      LDFLAGS += $(KEEL_HARDEN_LDFLAGS)
+    endif
+    # --as-needed is universal where supported; ld64 ignores it harmlessly.
+    LDFLAGS += $(call kl_have_cflag,-Wl$(comma)--as-needed)
+  endif
 
   # Platform event loop backend
   ifeq ($(UNAME_S),Linux)
@@ -151,7 +206,10 @@ endif
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# Vendor code — relaxed warnings
+# Vendor code (llhttp) — relaxed warnings (no -Wall/-Wextra/-Werror),
+# but the full hardening flag set still applies via VENDOR_CFLAGS so
+# ROP gadgets in the parser's text segment are protected the same way
+# first-party Keel TUs are.
 vendor/llhttp/llhttp.o: vendor/llhttp/llhttp.c
 	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
 vendor/llhttp/api.o: vendor/llhttp/api.c
