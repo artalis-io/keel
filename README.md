@@ -107,7 +107,25 @@ clients support it. The pooled variants (`kl_client_request_pooled` /
 pool — UNIX sockets have no host:port to key on, and a local-socket connect is
 cheap. Proxying is incompatible with UNIX targets.
 
+The WebSocket and HTTP/2 clients speak UNIX too:
+`ws+unix://` / `wss+unix://` (`kl_ws_client_connect`) and `http+unix://` /
+`https+unix://` (`kl_h2_client_connect`). Redirects are followed over UNIX
+(relative `Location` values keep the `http+unix` authority). In every case the
+`Host` / `:authority` defaults to `localhost`.
+
 See `examples/unix_socket_server.c` for a server demonstrating all three.
+
+### Limitations
+
+- **Abstract-namespace sockets** (Linux `@name`, leading-NUL `sun_path`) are
+  **not** supported: they carry no filesystem permissions, so `unix_socket_mode`
+  / ownership cannot restrict access — that conflicts with KEEL's permission
+  model. Use a path in an application-owned directory instead.
+- **`SO_REUSEPORT` multi-worker scaling does not apply to UNIX sockets.** For
+  multiple workers on one UNIX socket, use socket activation / fd passing (bind
+  once, share the fd) rather than each worker binding the same path.
+- **`kl_systemd_listen_fds(&count)`** reports how many fds were passed
+  (consecutive from fd 3); `KlConfig.listen_fd` adopts one at a time.
 
 ## Features
 

@@ -7,7 +7,7 @@ make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
 make test         # build and run all 671 unit tests
-make examples     # build all 22 example programs (24 with TLS, 26 with compression)
+make examples     # build all 23 example programs (25 with TLS, 27 with compression)
 make bench        # build bench server + run 4-endpoint wrk benchmark suite
 make debug        # debug build with ASan + UBSan (recompiles from clean)
 make analyze      # Clang static analyzer (scan-build)
@@ -26,7 +26,7 @@ make clean        # remove all build artifacts
 - `parsers/` — Pluggable parser backends (`parser_llhttp.c`, `response_parser_llhttp.c`).
 - `vendor/` — Vendored libraries (llhttp, utest.h). Do not modify.
 - `tests/` — Unit tests using Sheredom's utest.h framework.
-- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer, redirect_client, proxy_client, compress_server, decompress_client).
+- `examples/` — Example programs (hello_server, rest_api_server, middleware, static_files, streaming, sse, body_readers, websocket_server, websocket_client, tls_server, tls_client, async, thread_pool, h2_server, h2_client, client, streaming_client, async_client, async_thread_pool, custom_allocator, connection_pool, url_parser, timer, redirect_client, proxy_client, unix_socket_server, compress_server, decompress_client).
   - Compression backend also provides decompression (`decompress_miniz.c`) for client-side use.
 - `docs/` — Architecture and roadmap documentation.
 

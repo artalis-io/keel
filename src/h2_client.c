@@ -14,11 +14,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 
 /* ── Connection states ──────────────────────────────────────────── */
 
@@ -456,60 +458,99 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     KlUrl parsed;
     if (kl_url_parse(url, &parsed) != 0)
         return NULL;
-    /* HTTP/2 over a UNIX socket is not supported; reject http+unix:// URLs
-     * here so parsed.host (NULL for unix) is never used below. */
-    if (parsed.is_unix)
-        return NULL;
+    /* HTTP/2 over UNIX: no host/port. Normalize the :authority host to
+     * "localhost"; connection goes to parsed.unix_path (h2c with prior
+     * knowledge over plaintext, or h2 over TLS for https+unix://). */
+    if (parsed.is_unix) {
+        parsed.host = "localhost";
+        parsed.host_len = 9;
+    }
 
     if (parsed.is_https && !cfg->tls)
         return NULL;
 
-    /* DNS resolve */
+    /* Host for the :authority pseudo-header (SNI too when TLS). */
     char host_buf[256];
     if (parsed.host_len >= sizeof(host_buf))
         return NULL;
     memcpy(host_buf, parsed.host, parsed.host_len);
     host_buf[parsed.host_len] = '\0';
 
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", parsed.port);
+    int fd;
+    int rc = -1;
+    if (parsed.is_unix) {
+        /* Connect directly to the UNIX socket, bypassing DNS. */
+        struct sockaddr_un un;
+        size_t plen = strlen(parsed.unix_path);
+        if (plen == 0 || plen >= sizeof(un.sun_path))
+            return NULL;
+        memset(&un, 0, sizeof(un));
+        un.sun_family = AF_UNIX;
+        memcpy(un.sun_path, parsed.unix_path, plen + 1);
+        socklen_t un_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
+                                       plen + 1);
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0)
+            return NULL;
+#ifdef SO_NOSIGPIPE
+        {
+            int on = 1;
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+        }
+#endif
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            close(fd);
+            return NULL;
+        }
+        rc = connect(fd, (struct sockaddr *)&un, un_len);
+        if (rc < 0 && errno != EINPROGRESS) {
+            close(fd);
+            return NULL;
+        }
+    } else {
+        /* DNS resolve */
+        char port_str[8];
+        snprintf(port_str, sizeof(port_str), "%d", parsed.port);
 
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host_buf, port_str, &hints, &res);
-    if (rc != 0 || !res)
-        return NULL;
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
 
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
-        freeaddrinfo(res);
-        return NULL;
-    }
+        struct addrinfo *res = NULL;
+        rc = getaddrinfo(host_buf, port_str, &hints, &res);
+        if (rc != 0 || !res)
+            return NULL;
+
+        fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (fd < 0) {
+            freeaddrinfo(res);
+            return NULL;
+        }
 
 #ifdef SO_NOSIGPIPE
-    {
-        int on = 1;
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    }
+        {
+            int on = 1;
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+        }
 #endif
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(fd);
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            close(fd);
+            freeaddrinfo(res);
+            return NULL;
+        }
+
+        rc = connect(fd, res->ai_addr, res->ai_addrlen);
         freeaddrinfo(res);
-        return NULL;
-    }
 
-    rc = connect(fd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-    if (rc < 0 && errno != EINPROGRESS) {
-        close(fd);
-        return NULL;
+        if (rc < 0 && errno != EINPROGRESS) {
+            close(fd);
+            return NULL;
+        }
     }
 
     KlH2ClientConn *c = kl_malloc(alloc, sizeof(KlH2ClientConn));
@@ -528,7 +569,10 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     c->user_data = user_data;
 
     memcpy(c->host_buf, host_buf, parsed.host_len + 1);
-    snprintf(c->authority, sizeof(c->authority), "%s:%d", host_buf, parsed.port);
+    if (parsed.is_unix)
+        snprintf(c->authority, sizeof(c->authority), "%s", host_buf);
+    else
+        snprintf(c->authority, sizeof(c->authority), "%s:%d", host_buf, parsed.port);
 
     /* If already connected (rc == 0), create session immediately */
     if (c->state == H2C_H2_INIT) {

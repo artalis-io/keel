@@ -90,6 +90,51 @@ static void *unix_server_thread(void *arg) {
     return NULL;
 }
 
+/* 302 → relative /hello (redirect-over-unix). */
+static void unix_handle_redirect(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_status(res, 302);
+    kl_response_header(res, "Location", "/hello");
+    kl_response_body_borrow(res, "moved", 5);
+}
+
+/* WebSocket echo callbacks (server side). */
+static void ws_srv_on_message(KlWsServerConn *ws, const char *data, size_t len,
+                              int is_binary, void *ctx) {
+    (void)is_binary; (void)ctx;
+    kl_ws_server_send_text(ws, data, len);
+}
+
+/* WebSocket client context. */
+typedef struct {
+    int  open;
+    int  got_msg;
+    int  closed;
+    char msg[128];
+    size_t msg_len;
+} WsCliCtx;
+
+static void ws_cli_on_open(KlWsClientConn *ws, void *ud) {
+    WsCliCtx *c = ud;
+    c->open = 1;
+    kl_ws_client_send_text(ws, "ping", 4);
+}
+static void ws_cli_on_message(KlWsClientConn *ws, const char *data, size_t len,
+                              int is_binary, void *ud) {
+    (void)ws; (void)is_binary;
+    WsCliCtx *c = ud;
+    size_t n = len < sizeof(c->msg) - 1 ? len : sizeof(c->msg) - 1;
+    memcpy(c->msg, data, n);
+    c->msg[n] = '\0';
+    c->msg_len = n;
+    c->got_msg = 1;
+}
+static void ws_cli_on_close(KlWsClientConn *ws, uint16_t code, const char *r,
+                            size_t rlen, void *ud) {
+    (void)ws; (void)code; (void)r; (void)rlen;
+    ((WsCliCtx *)ud)->closed = 1;
+}
+
 static void test_sock_path(char *buf, size_t buflen, const char *name) {
     snprintf(buf, buflen, "./keel-%ld-%s.sock", (long)getpid(), name);
 }
@@ -406,14 +451,23 @@ UTEST(unix_socket, systemd_listen_fd_protocol) {
     char pidbuf[32];
     snprintf(pidbuf, sizeof(pidbuf), "%ld", (long)getpid());
 
-    /* Correct handshake → first fd (SD_LISTEN_FDS_START == 3). */
+    /* Correct handshake → first fd (SD_LISTEN_FDS_START == 3), count reported. */
     setenv("LISTEN_PID", pidbuf, 1);
-    setenv("LISTEN_FDS", "1", 1);
-    ASSERT_EQ(3, kl_systemd_listen_fd());
+    setenv("LISTEN_FDS", "3", 1);
+    int n = -1;
+    ASSERT_EQ(3, kl_systemd_listen_fds(&n));
+    ASSERT_EQ(3, n);
 
     /* Env is cleared after the call, so a second call reports "no activation". */
     ASSERT_TRUE(getenv("LISTEN_PID") == NULL);
-    ASSERT_EQ(-1, kl_systemd_listen_fd());
+    n = -1;
+    ASSERT_EQ(-1, kl_systemd_listen_fds(&n));
+    ASSERT_EQ(0, n);
+
+    /* The single-fd convenience wrapper still works. */
+    setenv("LISTEN_PID", pidbuf, 1);
+    setenv("LISTEN_FDS", "1", 1);
+    ASSERT_EQ(3, kl_systemd_listen_fd());
 
     /* Wrong PID → not for us. */
     setenv("LISTEN_PID", "1", 1);
@@ -527,6 +581,107 @@ UTEST(unix_socket, async_client_connects_over_http_unix) {
     kl_client_free(pc);
     kl_cpool_free(&pool);
 
+    kl_event_ctx_free(&ev);
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+}
+
+UTEST(unix_socket, redirect_follows_over_http_unix) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "redir");
+    unlink(path);
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+    kl_server_route(&srv, "GET", "/go", unix_handle_redirect, NULL, NULL);
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    char enc[220];
+    pct_encode_path(path, enc, sizeof(enc));
+    char url[300];
+    snprintf(url, sizeof(url), "http+unix://%s/go", enc);
+
+    KlAllocator a = kl_allocator_default();
+    KlClientResponse resp;
+    /* /go → 302 → relative /hello → 200; redirect resolution keeps the
+     * http+unix authority. */
+    int rc = kl_redirect_request(&a, NULL, NULL, "GET", url,
+                                 NULL, 0, NULL, 0, &resp);
+    ASSERT_EQ(0, rc);
+    ASSERT_EQ(200, resp.status);
+    ASSERT_TRUE(resp.body != NULL && strstr(resp.body, "\"ok\":true") != NULL);
+    kl_client_response_free(&resp);
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+}
+
+UTEST(unix_socket, websocket_connects_over_ws_unix) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "wsunix");
+    unlink(path);
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+
+    KlWsServerConfig ws_cfg;
+    kl_ws_server_config_init(&ws_cfg);
+    ws_cfg.callbacks.on_message = ws_srv_on_message;
+    ASSERT_EQ(0, kl_server_ws(&srv, "/ws", &ws_cfg));
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    char enc[220];
+    pct_encode_path(path, enc, sizeof(enc));
+    char url[300];
+    snprintf(url, sizeof(url), "ws+unix://%s/ws", enc);
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+
+    WsCliCtx wc;
+    memset(&wc, 0, sizeof(wc));
+    KlWsClientCallbacks cbs = {
+        .on_open = ws_cli_on_open,
+        .on_message = ws_cli_on_message,
+        .on_close = ws_cli_on_close,
+    };
+    KlWsClientConn *ws = kl_ws_client_connect(&ev, &a, NULL, url, &cbs, &wc);
+    ASSERT_TRUE(ws != NULL);
+
+    int elapsed = 0;
+    while (!wc.got_msg && elapsed < 3000) {
+        if (kl_event_ctx_run(&ev, 16, 50) < 0) break;
+        elapsed += 50;
+    }
+    ASSERT_TRUE(wc.open);
+    ASSERT_TRUE(wc.got_msg);
+    ASSERT_STREQ(wc.msg, "ping");   /* echoed back */
+
+    kl_ws_client_free(ws);
     kl_event_ctx_free(&ev);
     kl_server_stop(&srv);
     pthread_join(tid, NULL);

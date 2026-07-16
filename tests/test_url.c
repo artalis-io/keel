@@ -131,6 +131,25 @@ UTEST(url, unix_socket_bad_escape_rejected) {
     ASSERT_EQ(kl_url_parse("http+unix://%00x/v1", &u), -1);      /* embedded NUL */
 }
 
+UTEST(url, ws_unix) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("ws+unix://%2Ftmp%2Fw.sock/chat", &u), 0);
+    ASSERT_TRUE(u.is_unix);
+    ASSERT_TRUE(u.is_ws);
+    ASSERT_FALSE(u.is_https);
+    ASSERT_STREQ(u.unix_path, "/tmp/w.sock");
+    ASSERT_STRNEQ(u.path, "/chat", 5);
+}
+
+UTEST(url, wss_unix) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("wss+unix://%2Ftmp%2Fw.sock/", &u), 0);
+    ASSERT_TRUE(u.is_unix);
+    ASSERT_TRUE(u.is_ws);
+    ASSERT_TRUE(u.is_https);
+    ASSERT_STREQ(u.unix_path, "/tmp/w.sock");
+}
+
 UTEST(url, unix_socket_unencoded_path) {
     /* Slashes need not be encoded if the socket path has no leading slash
      * conflict — but the first literal '/' always starts the request path.

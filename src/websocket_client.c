@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <time.h>
 
 #include "sha1.h"
@@ -925,6 +927,12 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         return NULL;
     if (!parsed.is_ws)
         return NULL;
+    /* UNIX socket target (ws+unix:// / wss+unix://): no host/port. Normalize
+     * the Host header to "localhost"; the connection goes to parsed.unix_path. */
+    if (parsed.is_unix) {
+        parsed.host = "localhost";
+        parsed.host_len = 9;
+    }
 
     KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
     if (parsed.is_https && !tls_cfg)
@@ -932,53 +940,89 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     if (!parsed.is_https)
         tls_cfg = NULL;
 
-    /* DNS resolve */
+    /* Host for the upgrade request (SNI too when wss). */
     char host_buf[256];
     if (parsed.host_len >= sizeof(host_buf))
         return NULL;
     memcpy(host_buf, parsed.host, parsed.host_len);
     host_buf[parsed.host_len] = '\0';
 
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", parsed.port);
+    int fd;
+    int rc = -1;
+    if (parsed.is_unix) {
+        /* Connect directly to the UNIX socket, bypassing DNS. */
+        struct sockaddr_un un;
+        size_t plen = strlen(parsed.unix_path);
+        if (plen == 0 || plen >= sizeof(un.sun_path))
+            return NULL;
+        memset(&un, 0, sizeof(un));
+        un.sun_family = AF_UNIX;
+        memcpy(un.sun_path, parsed.unix_path, plen + 1);
+        socklen_t un_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
+                                       plen + 1);
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0)
+            return NULL;
+#ifdef SO_NOSIGPIPE
+        {
+            int on = 1;
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+        }
+#endif
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            close(fd);
+            return NULL;
+        }
+        rc = connect(fd, (struct sockaddr *)&un, un_len);
+        if (rc < 0 && errno != EINPROGRESS) {
+            close(fd);
+            return NULL;
+        }
+    } else {
+        /* DNS resolve */
+        char port_str[8];
+        snprintf(port_str, sizeof(port_str), "%d", parsed.port);
 
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host_buf, port_str, &hints, &res);
-    if (rc != 0 || !res)
-        return NULL;
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
 
-    /* Create non-blocking socket */
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
-        freeaddrinfo(res);
-        return NULL;
-    }
+        struct addrinfo *res = NULL;
+        rc = getaddrinfo(host_buf, port_str, &hints, &res);
+        if (rc != 0 || !res)
+            return NULL;
+
+        /* Create non-blocking socket */
+        fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (fd < 0) {
+            freeaddrinfo(res);
+            return NULL;
+        }
 
 #ifdef SO_NOSIGPIPE
-    {
-        int on = 1;
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    }
+        {
+            int on = 1;
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+        }
 #endif
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(fd);
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            close(fd);
+            freeaddrinfo(res);
+            return NULL;
+        }
+
+        rc = connect(fd, res->ai_addr, res->ai_addrlen);
         freeaddrinfo(res);
-        return NULL;
-    }
 
-    rc = connect(fd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-    if (rc < 0 && errno != EINPROGRESS) {
-        close(fd);
-        return NULL;
+        if (rc < 0 && errno != EINPROGRESS) {
+            close(fd);
+            return NULL;
+        }
     }
 
     /* Allocate connection */

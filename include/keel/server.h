@@ -68,7 +68,9 @@ typedef struct KlConfig {
     size_t max_body_size;       /**< discard-path body limit; default: 1 MB */
     size_t max_header_size;     /**< max header block size; 0 = KL_READ_BUF_SIZE (8192) */
     KlCompressConfig *compress; /**< compression config — NULL = disabled (default) */
-    KlTransport transport;      /**< default: KL_TRANSPORT_TCP; unix_socket_path implies UNIX */
+    KlTransport transport;      /**< default: KL_TRANSPORT_TCP. Setting unix_socket_path
+                                 *   forces UNIX regardless of this field (TCP == 0 is
+                                 *   indistinguishable from unset, so a non-NULL path wins). */
     const char *unix_socket_path; /**< AF_UNIX path when transport is KL_TRANSPORT_UNIX */
     int unix_socket_unlink;     /**< unlink path before bind and on free after successful bind */
     unsigned int unix_socket_mode; /**< chmod socket path after bind; 0 = leave umask/default */
@@ -264,5 +266,17 @@ int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out);
  * @return The inherited fd (>= 3), or -1 if socket activation is not in use.
  */
 int kl_systemd_listen_fd(void);
+
+/**
+ * @brief Like kl_systemd_listen_fd(), but also reports how many fds were passed.
+ *
+ * When socket activation is in use, the passed fds are consecutive starting at
+ * SD_LISTEN_FDS_START (3): fd 3, 4, ..., 3 + *count - 1. Returns the first fd
+ * (3), or -1 if socket activation is not in use (in which case *count is 0).
+ *
+ * @param count  Receives the number of passed fds (may be NULL).
+ * @return The first inherited fd (3), or -1 if not socket-activated.
+ */
+int kl_systemd_listen_fds(int *count);
 
 #endif

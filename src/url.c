@@ -84,6 +84,15 @@ int kl_url_parse(const char *url, KlUrl *out)
         url += 8;
     } else if (strncmp(url, "http://", 7) == 0) {
         url += 7;
+    } else if (strncmp(url, "wss+unix://", 11) == 0) {
+        out->is_https = 1;
+        out->is_ws = 1;
+        out->is_unix = 1;
+        url += 11;
+    } else if (strncmp(url, "ws+unix://", 10) == 0) {
+        out->is_ws = 1;
+        out->is_unix = 1;
+        url += 10;
     } else if (strncmp(url, "wss://", 6) == 0) {
         out->is_https = 1;
         out->is_ws = 1;

@@ -129,6 +129,7 @@ static int kl_server_bind_tcp(KlServer *s) {
     /* Retrieve OS-assigned port (useful when config.port == 0) */
     {
         struct sockaddr_storage sa;
+        memset(&sa, 0, sizeof(sa));
         socklen_t sa_len = sizeof(sa);
         if (getsockname(s->listen_fd, (struct sockaddr *)&sa, &sa_len) == 0) {
             if (sa.ss_family == AF_INET)
@@ -251,6 +252,7 @@ static int kl_server_adopt_fd(KlServer *s) {
     s->listen_fd = s->config.listen_fd;
 
     struct sockaddr_storage sa;
+    memset(&sa, 0, sizeof(sa));
     socklen_t sa_len = sizeof(sa);
     if (getsockname(s->listen_fd, (struct sockaddr *)&sa, &sa_len) != 0) {
         kl_log_errno(s, KL_LOG_ERROR, "getsockname on adopted fd");
@@ -317,18 +319,21 @@ int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
 #endif
 }
 
-int kl_systemd_listen_fd(void) {
+int kl_systemd_listen_fds(int *count) {
     const char *pid_s = getenv("LISTEN_PID");
     const char *fds_s = getenv("LISTEN_FDS");
-    int result = -1;
+    int first = -1;
+    int n = 0;
 
     if (pid_s && fds_s) {
         char *end;
         long lpid = strtol(pid_s, &end, 10);
         if (end != pid_s && *end == '\0' && (long)getpid() == lpid) {
             long nfds = strtol(fds_s, &end, 10);
-            if (end != fds_s && *end == '\0' && nfds >= 1)
-                result = 3;  /* SD_LISTEN_FDS_START */
+            if (end != fds_s && *end == '\0' && nfds >= 1 && nfds <= 4096) {
+                n = (int)nfds;
+                first = 3;  /* SD_LISTEN_FDS_START; the fds are 3 .. 3+n-1 */
+            }
         }
     }
 
@@ -336,7 +341,13 @@ int kl_systemd_listen_fd(void) {
     unsetenv("LISTEN_PID");
     unsetenv("LISTEN_FDS");
     unsetenv("LISTEN_FDNAMES");
-    return result;
+    if (count)
+        *count = n;
+    return first;
+}
+
+int kl_systemd_listen_fd(void) {
+    return kl_systemd_listen_fds(NULL);
 }
 
 static void kl_server_close_listener(KlServer *s) {
