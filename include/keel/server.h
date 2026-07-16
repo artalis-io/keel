@@ -72,7 +72,25 @@ typedef struct KlConfig {
     const char *unix_socket_path; /**< AF_UNIX path when transport is KL_TRANSPORT_UNIX */
     int unix_socket_unlink;     /**< unlink path before bind and on free after successful bind */
     unsigned int unix_socket_mode; /**< chmod socket path after bind; 0 = leave umask/default */
+    int listen_fd;              /**< adopt this pre-bound+listening fd (socket activation);
+                                 *   0 = disabled (KEEL creates its own socket). Transport is
+                                 *   auto-detected from the fd; KEEL never unlinks an adopted
+                                 *   UNIX socket. See kl_systemd_listen_fd(). */
 } KlConfig;
+
+/**
+ * @brief Peer credentials of a UNIX-domain-socket client.
+ *
+ * Populated by kl_request_peer_cred(). On Linux all three fields are
+ * available (SO_PEERCRED). On macOS/BSD only uid/gid are available
+ * (getpeereid) and has_pid is 0.
+ */
+typedef struct {
+    long uid;       /**< Peer effective user id */
+    long gid;       /**< Peer effective group id */
+    long pid;       /**< Peer process id (valid only if has_pid) */
+    int  has_pid;   /**< 1 if pid is valid (Linux), 0 otherwise */
+} KlPeerCred;
 
 typedef struct KlAsyncOp KlAsyncOp;
 
@@ -222,5 +240,29 @@ typedef struct {
  * @param out  Output struct (may be NULL — no-op).
  */
 void kl_server_stats(const KlServer *s, KlServerStats *out);
+
+/**
+ * @brief Read the peer credentials of a request's connection.
+ *
+ * Only meaningful for connections accepted on a UNIX-domain socket.
+ *
+ * @param req  The request (its connection fd is queried).
+ * @param out  Receives the peer credentials on success.
+ * @return 0 on success, -1 if unavailable (not a UNIX socket, unsupported
+ *         platform, or the socket has no peer credentials).
+ */
+int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out);
+
+/**
+ * @brief Return an inherited listening socket fd from socket activation.
+ *
+ * Implements the systemd LISTEN_FDS protocol: if LISTEN_PID matches this
+ * process and LISTEN_FDS >= 1, returns the first passed fd (SD_LISTEN_FDS_START
+ * = 3). The relevant environment variables are unset so they are not
+ * inherited by children. Pass the result to KlConfig.listen_fd.
+ *
+ * @return The inherited fd (>= 3), or -1 if socket activation is not in use.
+ */
+int kl_systemd_listen_fd(void);
 
 #endif

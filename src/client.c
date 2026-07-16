@@ -21,8 +21,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <stddef.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 
 /* ── Proxy constants ─────────────────────────────────────────────── */
 
@@ -154,6 +156,86 @@ static int connect_with_timeout(const char *host, size_t host_len,
     /* Restore blocking mode */
     fcntl(fd, F_SETFL, flags);
 
+    return fd;
+}
+
+/* ── UNIX socket address + connect ───────────────────────────────── */
+
+/*
+ * Fill a sockaddr_un for `path`. Returns the address length, or 0 if the
+ * path is empty or too long for sun_path. Shared by the sync and async
+ * connect paths.
+ */
+static socklen_t fill_sockaddr_un(struct sockaddr_un *addr, const char *path)
+{
+    size_t path_len = strlen(path);
+    if (path_len == 0 || path_len >= sizeof(addr->sun_path))
+        return 0;
+    memset(addr, 0, sizeof(*addr));
+    addr->sun_family = AF_UNIX;
+    memcpy(addr->sun_path, path, path_len + 1);
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + path_len + 1);
+}
+
+static int unix_connect_with_timeout(const char *path, int timeout_ms,
+                                     KlError *out_err)
+{
+    struct sockaddr_un addr;
+    socklen_t addr_len = fill_sockaddr_un(&addr, path);
+    if (addr_len == 0) {
+        if (out_err) *out_err = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        if (out_err) *out_err = KL_ERR_SOCKET;
+        return -1;
+    }
+
+#ifdef SO_NOSIGPIPE
+    {
+        int on = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    }
+#endif
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        if (out_err) *out_err = KL_ERR_SOCKET;
+        close(fd);
+        return -1;
+    }
+
+    int rc = connect(fd, (struct sockaddr *)&addr, addr_len);
+    if (rc < 0 && errno != EINPROGRESS) {
+        if (out_err) *out_err = KL_ERR_CONNECT;
+        close(fd);
+        return -1;
+    }
+
+    if (rc < 0) {
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        rc = poll(&pfd, 1, timeout_ms);
+        if (rc <= 0) {
+            if (out_err) *out_err = (rc == 0) ? KL_ERR_TIMEOUT : KL_ERR_CONNECT;
+            close(fd);
+            return -1;
+        }
+        int err = 0;
+        socklen_t errlen = sizeof(err);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+        if (err != 0) {
+            if (out_err) *out_err = KL_ERR_CONNECT;
+            close(fd);
+            return -1;
+        }
+    }
+
+    fcntl(fd, F_SETFL, flags);  /* restore blocking mode */
     return fd;
 }
 
@@ -776,9 +858,23 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     const KlProxyConfig *proxy = cfg ? cfg->proxy : NULL;
     int is_proxied = (proxy && proxy->host);
 
+    /* UNIX socket target: no host/port. Normalize the Host header to
+     * "localhost" so all downstream request building works unchanged; the
+     * connection itself goes to parsed.unix_path. Proxying is incompatible. */
+    if (parsed.is_unix) {
+        if (is_proxied) {
+            resp->error = KL_ERR_INVALID_ARG;
+            return -1;
+        }
+        parsed.host = "localhost";
+        parsed.host_len = 9;
+    }
+
     KlError conn_err = KL_ERR_NONE;
     int fd;
-    if (is_proxied) {
+    if (parsed.is_unix) {
+        fd = unix_connect_with_timeout(parsed.unix_path, timeout_ms, &conn_err);
+    } else if (is_proxied) {
         fd = connect_with_timeout(proxy->host, strlen(proxy->host),
                                    proxy->port, timeout_ms, &conn_err);
     } else {
@@ -1867,6 +1963,15 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     KlUrl parsed;
     if (kl_url_parse(url_str, &parsed) != 0)
         return NULL;
+    /* UNIX socket target: no host/port. Normalize the Host header to
+     * "localhost" so all request building works unchanged; the connect
+     * (below) goes to parsed.unix_path, bypassing DNS. Proxy is incompatible. */
+    if (parsed.is_unix) {
+        if (cfg && cfg->proxy && cfg->proxy->host)
+            return NULL;
+        parsed.host = "localhost";
+        parsed.host_len = 9;
+    }
 
     KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
     if (parsed.is_https && !tls_cfg)
@@ -2015,6 +2120,23 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlClient));
         return NULL;
+    }
+
+    /* UNIX socket: connect directly, bypassing DNS resolution entirely. */
+    if (parsed.is_unix) {
+        struct sockaddr_un un;
+        socklen_t un_len = fill_sockaddr_un(&un, parsed.unix_path);
+        if (un_len == 0 ||
+            start_connect(c, (const struct sockaddr *)&un, un_len,
+                          AF_UNIX, SOCK_STREAM, 0) < 0) {
+            c->parser->destroy(c->parser);
+            if (c->decomp_wrap)
+                kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
+            kl_free(alloc, req_buf, req_len);
+            kl_free(alloc, c, sizeof(KlClient));
+            return NULL;
+        }
+        return c;
     }
 
     /* DNS resolution — resolve proxy host when proxied, target host otherwise */
@@ -2226,6 +2348,13 @@ int kl_client_request_pooled(KlClientPool *pool,
         resp->error = KL_ERR_URL;
         return -1;
     }
+    /* UNIX sockets have no host:port to key the pool on, so bypass the pool
+     * and connect directly (local-socket connect is cheap). */
+    if (parsed.is_unix) {
+        return kl_client_request_s(alloc, cfg, method, url_str,
+                                   headers, num_headers, body, body_len,
+                                   NULL, resp);
+    }
 
     KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
     int is_tls = parsed.is_https;
@@ -2342,6 +2471,13 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     KlUrl parsed;
     if (kl_url_parse(url_str, &parsed) != 0)
         return NULL;
+    /* UNIX sockets are not pooled (no host:port key); bypass the pool and
+     * start a normal non-pooled async request. */
+    if (parsed.is_unix) {
+        return kl_client_start_s(ev_ctx, alloc, cfg, method, url_str,
+                                 headers, num_headers, body, body_len,
+                                 NULL, on_done, user_data);
+    }
 
     KlTlsConfig *tls_cfg = cfg ? cfg->tls : NULL;
     int is_tls = parsed.is_https;

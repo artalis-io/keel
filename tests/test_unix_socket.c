@@ -5,11 +5,79 @@
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+/* Peer-credential capture (set inside the handler). */
+static KlPeerCred g_captured_cred;
+static int        g_cred_rc = -2;
+
+static void unix_handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    g_cred_rc = kl_request_peer_cred(req, &g_captured_cred);
+    kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+/* Percent-encode a socket path for an http+unix:// URL (encode everything
+ * that is not an RFC 3986 unreserved character). */
+static void pct_encode_path(const char *src, char *dst, size_t dstsz) {
+    static const char *hex = "0123456789ABCDEF";
+    size_t di = 0;
+    for (size_t i = 0; src[i] && di + 4 < dstsz; i++) {
+        unsigned char c = (unsigned char)src[i];
+        int unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                         (c >= '0' && c <= '9') ||
+                         c == '-' || c == '_' || c == '.' || c == '~';
+        if (unreserved) {
+            dst[di++] = (char)c;
+        } else {
+            dst[di++] = '%';
+            dst[di++] = hex[c >> 4];
+            dst[di++] = hex[c & 0xF];
+        }
+    }
+    dst[di] = '\0';
+}
+
+/* Minimal async-client harness. */
+typedef struct {
+    int    done;
+    int    error;
+    int    status;
+    char   body[256];
+    size_t body_len;
+} UnixAsyncCtx;
+
+static void unix_async_done(KlClient *client, void *user_data) {
+    UnixAsyncCtx *ctx = user_data;
+    ctx->error = kl_client_error(client);
+    if (ctx->error == 0) {
+        const KlClientResponse *resp = kl_client_response(client);
+        if (resp) {
+            ctx->status = resp->status;
+            if (resp->body && resp->body_len > 0) {
+                size_t n = resp->body_len < sizeof(ctx->body) - 1
+                         ? resp->body_len : sizeof(ctx->body) - 1;
+                memcpy(ctx->body, resp->body, n);
+                ctx->body_len = n;
+            }
+        }
+    }
+    ctx->done = 1;
+}
+
+static int unix_run_until_done(KlEventCtx *ev, UnixAsyncCtx *ctx, int timeout_ms) {
+    int elapsed = 0;
+    while (!ctx->done && elapsed < timeout_ms) {
+        if (kl_event_ctx_run(ev, 16, 50) < 0) return -1;
+        elapsed += 50;
+    }
+    return ctx->done ? 0 : -1;
+}
 
 static void unix_handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req;
@@ -222,6 +290,246 @@ UTEST(unix_socket, too_long_path_is_invalid) {
     ASSERT_EQ(0, kl_server_init(&srv, &cfg));
     ASSERT_EQ(-1, kl_server_run(&srv));
     ASSERT_EQ(srv.last_error, KL_ERR_INVALID_ARG);
+    kl_server_free(&srv);
+}
+
+UTEST(unix_socket, socket_mode_is_applied) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "mode");
+    unlink(path);
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .unix_socket_mode = 0660,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+
+    int fd = connect_unix_retry(path, 200);
+    ASSERT_TRUE(fd >= 0);
+    close(fd);
+
+    struct stat st;
+    ASSERT_EQ(0, stat(path, &st));
+    ASSERT_EQ((mode_t)0660, (mode_t)(st.st_mode & 0777));
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+}
+
+UTEST(unix_socket, peer_credentials_available) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "cred");
+    unlink(path);
+    g_cred_rc = -2;
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/whoami", unix_handle_whoami, NULL, NULL);
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+
+    int fd = connect_unix_retry(path, 200);
+    ASSERT_TRUE(fd >= 0);
+    const char *req =
+        "GET /whoami HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ((ssize_t)strlen(req), write(fd, req, strlen(req)));
+    char buf[1024];
+    ASSERT_TRUE(read_unix_response(fd, buf, sizeof(buf)) > 0);
+    close(fd);
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+
+    ASSERT_EQ(0, g_cred_rc);
+    ASSERT_EQ((long)getuid(), g_captured_cred.uid);
+    ASSERT_EQ((long)getgid(), g_captured_cred.gid);
+}
+
+UTEST(unix_socket, adopts_inherited_listen_fd) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "adopt");
+    unlink(path);
+
+    /* Simulate socket activation: pre-bind + listen, then hand the fd off. */
+    int lfd = create_bound_unix_socket(path);
+    ASSERT_TRUE(lfd >= 0);
+    ASSERT_EQ(0, listen(lfd, 16));
+
+    KlServer srv;
+    KlConfig cfg = {
+        .listen_fd = lfd,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+
+    int fd = connect_unix_retry(path, 200);
+    ASSERT_TRUE(fd >= 0);
+    const char *req =
+        "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ((ssize_t)strlen(req), write(fd, req, strlen(req)));
+    char buf[1024];
+    ssize_t n = read_unix_response(fd, buf, sizeof(buf));
+    ASSERT_TRUE(n > 0);
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    close(fd);
+
+    /* A completed round-trip means kl_server_run finished adopting the fd,
+     * so reading the (now-stable) transport here is race-free. */
+    ASSERT_EQ(KL_TRANSPORT_UNIX, srv.config.transport);
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+    /* Adopted socket path is not unlinked by KEEL (supervisor owns it). */
+    unlink(path);
+}
+
+UTEST(unix_socket, systemd_listen_fd_protocol) {
+    char pidbuf[32];
+    snprintf(pidbuf, sizeof(pidbuf), "%ld", (long)getpid());
+
+    /* Correct handshake → first fd (SD_LISTEN_FDS_START == 3). */
+    setenv("LISTEN_PID", pidbuf, 1);
+    setenv("LISTEN_FDS", "1", 1);
+    ASSERT_EQ(3, kl_systemd_listen_fd());
+
+    /* Env is cleared after the call, so a second call reports "no activation". */
+    ASSERT_TRUE(getenv("LISTEN_PID") == NULL);
+    ASSERT_EQ(-1, kl_systemd_listen_fd());
+
+    /* Wrong PID → not for us. */
+    setenv("LISTEN_PID", "1", 1);
+    setenv("LISTEN_FDS", "1", 1);
+    ASSERT_EQ(-1, kl_systemd_listen_fd());
+}
+
+UTEST(unix_socket, client_connects_over_http_unix) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "clientunix");
+    unlink(path);
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    char enc[220];
+    pct_encode_path(path, enc, sizeof(enc));
+    char url[300];
+    snprintf(url, sizeof(url), "http+unix://%s/hello", enc);
+
+    KlAllocator a = kl_allocator_default();
+    KlClientResponse resp;
+    int rc = kl_client_request(&a, NULL, "GET", url,
+                               NULL, 0, NULL, 0, &resp);
+    ASSERT_EQ(0, rc);
+    ASSERT_EQ(200, resp.status);
+    ASSERT_TRUE(resp.body != NULL &&
+                strstr(resp.body, "\"ok\":true") != NULL);
+    kl_client_response_free(&resp);
+
+    /* Pooled path bypasses the pool for UNIX and still serves the request. */
+    KlClientResponse resp2;
+    KlClientPool pool;
+    ASSERT_EQ(0, kl_cpool_init(&pool, NULL, &a, NULL));
+    ASSERT_EQ(0, kl_client_request_pooled(&pool, &a, NULL, "GET", url,
+                                          NULL, 0, NULL, 0, &resp2));
+    ASSERT_EQ(200, resp2.status);
+    ASSERT_TRUE(resp2.body != NULL && strstr(resp2.body, "\"ok\":true") != NULL);
+    kl_client_response_free(&resp2);
+    kl_cpool_free(&pool);
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+}
+
+UTEST(unix_socket, async_client_connects_over_http_unix) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "asyncunix");
+    unlink(path);
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    char enc[220];
+    pct_encode_path(path, enc, sizeof(enc));
+    char url[300];
+    snprintf(url, sizeof(url), "http+unix://%s/hello", enc);
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+
+    /* Async, non-pooled. */
+    UnixAsyncCtx actx;
+    memset(&actx, 0, sizeof(actx));
+    KlClient *c = kl_client_start(&ev, &a, NULL, "GET", url,
+                                  NULL, 0, NULL, 0, unix_async_done, &actx);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, unix_run_until_done(&ev, &actx, 3000));
+    ASSERT_EQ(0, actx.error);
+    ASSERT_EQ(200, actx.status);
+    ASSERT_TRUE(strstr(actx.body, "\"ok\":true") != NULL);
+    kl_client_free(c);
+
+    /* Async pooled path bypasses the pool for UNIX too. */
+    KlClientPool pool;
+    ASSERT_EQ(0, kl_cpool_init(&pool, NULL, &a, &ev));
+    UnixAsyncCtx pctx;
+    memset(&pctx, 0, sizeof(pctx));
+    KlClient *pc = kl_client_start_pooled(&pool, &ev, &a, NULL, "GET", url,
+                                          NULL, 0, NULL, 0, unix_async_done, &pctx);
+    ASSERT_TRUE(pc != NULL);
+    ASSERT_EQ(0, unix_run_until_done(&ev, &pctx, 3000));
+    ASSERT_EQ(200, pctx.status);
+    kl_client_free(pc);
+    kl_cpool_free(&pool);
+
+    kl_event_ctx_free(&ev);
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
     kl_server_free(&srv);
 }
 

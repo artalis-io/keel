@@ -9,14 +9,19 @@
  * All string fields are non-owning pointers into the original URL string.
  * The URL string must remain valid for the lifetime of this struct.
  */
+/** @brief Max AF_UNIX socket path (fits the largest sun_path across platforms). */
+#define KL_URL_UNIX_PATH_MAX 108
+
 typedef struct {
     int         is_https;   /**< 1 for https:// or wss://, 0 for http:// or ws:// */
     int         is_ws;      /**< 1 for ws:// or wss://, 0 for http:// or https:// */
-    const char *host;       /**< Hostname (without brackets for IPv6) */
+    int         is_unix;    /**< 1 for http+unix:// or https+unix:// */
+    const char *host;       /**< Hostname (without brackets for IPv6); NULL for unix */
     size_t      host_len;
-    int         port;       /**< Port number (default: 80 for http/ws, 443 for https/wss) */
+    int         port;       /**< Port number (default: 80 for http/ws, 443 for https/wss; 0 for unix) */
     const char *path;       /**< Path including leading '/' and query string */
     size_t      path_len;
+    char        unix_path[KL_URL_UNIX_PATH_MAX]; /**< Decoded AF_UNIX socket path (when is_unix) */
 } KlUrl;
 
 /**
@@ -25,6 +30,11 @@ typedef struct {
  * Supports http://, https://, ws://, and wss:// schemes, IPv6
  * addresses in brackets ([::1]:port), explicit ports, and
  * path+query. Rejects CRLF injection in hostname and path.
+ *
+ * Also supports http+unix:// and https+unix://, where the authority is a
+ * percent-encoded AF_UNIX socket path (e.g. http+unix://%2Frun%2Fapp.sock/v1).
+ * The decoded path is written to out->unix_path and out->is_unix is set;
+ * out->host is NULL (callers use "localhost" for the Host header).
  *
  * @param url  URL string to parse.
  * @param out  Parsed components (pointers into url).

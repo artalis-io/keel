@@ -22,6 +22,46 @@ static int has_crlf(const char *s, size_t len)
     return 0;
 }
 
+/* ── Percent-decoding (for http+unix:// socket paths) ─────────────── */
+
+static int hex_val(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/*
+ * Percent-decode src[0..len) into dst (NUL-terminated, capacity dstsz).
+ * Rejects invalid %XX escapes, an embedded NUL, and overflow.
+ * Returns the decoded length on success, -1 on error.
+ */
+static int pct_decode(const char *src, size_t len, char *dst, size_t dstsz)
+{
+    size_t di = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = src[i];
+        if (c == '%') {
+            if (i + 2 >= len)
+                return -1;  /* truncated escape */
+            int hi = hex_val(src[i + 1]);
+            int lo = hex_val(src[i + 2]);
+            if (hi < 0 || lo < 0)
+                return -1;  /* invalid hex */
+            c = (char)((hi << 4) | lo);
+            i += 2;
+        }
+        if (c == '\0')
+            return -1;  /* embedded NUL not allowed in a socket path */
+        if (di + 1 >= dstsz)
+            return -1;  /* no room for byte + NUL */
+        dst[di++] = c;
+    }
+    dst[di] = '\0';
+    return (int)di;
+}
+
 /* ── URL parsing ─────────────────────────────────────────────────── */
 
 int kl_url_parse(const char *url, KlUrl *out)
@@ -31,8 +71,15 @@ int kl_url_parse(const char *url, KlUrl *out)
 
     memset(out, 0, sizeof(*out));
 
-    /* Scheme */
-    if (strncmp(url, "https://", 8) == 0) {
+    /* Scheme (check the longer "+unix" variants before the plain ones) */
+    if (strncmp(url, "https+unix://", 13) == 0) {
+        out->is_https = 1;
+        out->is_unix = 1;
+        url += 13;
+    } else if (strncmp(url, "http+unix://", 12) == 0) {
+        out->is_unix = 1;
+        url += 12;
+    } else if (strncmp(url, "https://", 8) == 0) {
         out->is_https = 1;
         url += 8;
     } else if (strncmp(url, "http://", 7) == 0) {
@@ -46,6 +93,39 @@ int kl_url_parse(const char *url, KlUrl *out)
         url += 5;
     } else {
         return -1;  /* unsupported scheme */
+    }
+
+    /* UNIX socket: authority is a percent-encoded socket path up to the
+     * first literal '/'.  There is no host/port; callers use "localhost"
+     * for the Host header. */
+    if (out->is_unix) {
+        const char *auth = url;
+        while (*url && *url != '/')
+            url++;
+        size_t enc_len = (size_t)(url - auth);
+        if (enc_len == 0)
+            return -1;  /* empty socket path */
+        int dec = pct_decode(auth, enc_len, out->unix_path,
+                             sizeof(out->unix_path));
+        if (dec < 0)
+            return -1;
+        if (has_crlf(out->unix_path, (size_t)dec))
+            return -1;
+
+        out->host = NULL;
+        out->host_len = 0;
+        out->port = 0;
+
+        if (*url == '/') {
+            out->path = url;
+            out->path_len = strlen(url);
+            if (has_crlf(out->path, out->path_len))
+                return -1;
+        } else {
+            out->path = "/";
+            out->path_len = 1;
+        }
+        return 0;
     }
 
     /* Host (may include :port) */

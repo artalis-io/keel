@@ -1,3 +1,10 @@
+#if defined(__linux__)
+/* Needed for struct ucred / SO_PEERCRED (kl_request_peer_cred). Must precede
+ * any libc header. server.c uses no function whose signature changes under
+ * _GNU_SOURCE, so this is safe. */
+#define _GNU_SOURCE
+#endif
+
 #include <keel/server.h>
 #include <keel/async.h>
 #include <keel/timer.h>
@@ -11,6 +18,7 @@
 #endif
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <fcntl.h>
 #include <stddef.h>
@@ -234,10 +242,101 @@ static int kl_server_bind_unix(KlServer *s) {
     return 0;
 }
 
+/*
+ * Adopt a pre-bound, already-listening fd (socket activation). The fd's
+ * family determines the transport, so TCP_NODELAY and unlink policy stay
+ * correct. KEEL never owns (never unlinks) an adopted UNIX socket.
+ */
+static int kl_server_adopt_fd(KlServer *s) {
+    s->listen_fd = s->config.listen_fd;
+
+    struct sockaddr_storage sa;
+    socklen_t sa_len = sizeof(sa);
+    if (getsockname(s->listen_fd, (struct sockaddr *)&sa, &sa_len) != 0) {
+        kl_log_errno(s, KL_LOG_ERROR, "getsockname on adopted fd");
+        s->last_error = KL_ERR_SOCKET;
+        s->listen_fd = -1;
+        return -1;
+    }
+
+    if (sa.ss_family == AF_UNIX) {
+        s->config.transport = KL_TRANSPORT_UNIX;
+        s->bound_port = 0;
+    } else {
+        s->config.transport = KL_TRANSPORT_TCP;
+        if (sa.ss_family == AF_INET)
+            s->bound_port = ntohs(((struct sockaddr_in *)&sa)->sin_port);
+        else if (sa.ss_family == AF_INET6)
+            s->bound_port = ntohs(((struct sockaddr_in6 *)&sa)->sin6_port);
+    }
+    /* Adopted fd is never unlinked — the supervisor owns the socket path. */
+    s->unix_socket_owned = 0;
+    return 0;
+}
+
 static int kl_server_bind_listener(KlServer *s) {
+    if (s->config.listen_fd > 0)
+        return kl_server_adopt_fd(s);
     if (s->config.transport == KL_TRANSPORT_UNIX)
         return kl_server_bind_unix(s);
     return kl_server_bind_tcp(s);
+}
+
+int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
+    if (!req || !out)
+        return -1;
+    KlConn *conn = kl_request_conn(req);
+    if (!conn || conn->fd < 0)
+        return -1;
+    int fd = conn->fd;
+
+#if defined(__linux__) && defined(SO_PEERCRED)
+    struct ucred cr;
+    socklen_t len = sizeof(cr);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0)
+        return -1;
+    out->uid = (long)cr.uid;
+    out->gid = (long)cr.gid;
+    out->pid = (long)cr.pid;
+    out->has_pid = 1;
+    return 0;
+#elif defined(__APPLE__) || defined(__FreeBSD__) || \
+      defined(__OpenBSD__) || defined(__NetBSD__)
+    uid_t uid;
+    gid_t gid;
+    if (getpeereid(fd, &uid, &gid) != 0)
+        return -1;
+    out->uid = (long)uid;
+    out->gid = (long)gid;
+    out->pid = 0;
+    out->has_pid = 0;
+    return 0;
+#else
+    (void)fd;
+    return -1;  /* peer credentials not supported on this platform */
+#endif
+}
+
+int kl_systemd_listen_fd(void) {
+    const char *pid_s = getenv("LISTEN_PID");
+    const char *fds_s = getenv("LISTEN_FDS");
+    int result = -1;
+
+    if (pid_s && fds_s) {
+        char *end;
+        long lpid = strtol(pid_s, &end, 10);
+        if (end != pid_s && *end == '\0' && (long)getpid() == lpid) {
+            long nfds = strtol(fds_s, &end, 10);
+            if (end != fds_s && *end == '\0' && nfds >= 1)
+                result = 3;  /* SD_LISTEN_FDS_START */
+        }
+    }
+
+    /* Clear so the variables are not inherited by child processes. */
+    unsetenv("LISTEN_PID");
+    unsetenv("LISTEN_FDS");
+    unsetenv("LISTEN_FDNAMES");
+    return result;
 }
 
 static void kl_server_close_listener(KlServer *s) {
@@ -289,6 +388,12 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     if (s->config.unix_socket_path &&
         s->config.transport == KL_TRANSPORT_TCP) {
         s->config.transport = KL_TRANSPORT_UNIX;
+    }
+    /* listen_fd: 0 = disabled, > 0 = adopt (fds 0-2 are stdio, not listeners).
+     * Reject a negative value rather than silently ignoring it. */
+    if (s->config.listen_fd < 0) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
     }
     if (s->config.bind_addr == NULL)
         s->config.bind_addr = "0.0.0.0";
@@ -451,7 +556,8 @@ int kl_server_run(KlServer *s) {
     if (kl_server_bind_listener(s) < 0)
         return -1;
 
-    if (listen(s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
+    /* An adopted fd (socket activation) is already listening — don't re-listen. */
+    if (s->config.listen_fd <= 0 && listen(s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "listen");
         s->last_error = KL_ERR_LISTEN;
         kl_server_close_listener(s);
@@ -474,8 +580,13 @@ int kl_server_run(KlServer *s) {
     }
 
     if (s->config.transport == KL_TRANSPORT_UNIX) {
+        /* An adopted fd (socket activation) has no path we own. */
         kl_log(s, KL_LOG_INFO, "listening on unix:%s",
-               s->config.unix_socket_path);
+               s->config.unix_socket_path ? s->config.unix_socket_path
+                                          : "(inherited fd)");
+    } else if (s->config.listen_fd > 0) {
+        kl_log(s, KL_LOG_INFO, "listening on inherited fd %d (port %d)",
+               s->listen_fd, s->bound_port);
     } else {
         kl_log(s, KL_LOG_INFO, "listening on %s:%d",
                s->config.bind_addr, s->bound_port);

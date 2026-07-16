@@ -456,6 +456,10 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     KlUrl parsed;
     if (kl_url_parse(url, &parsed) != 0)
         return NULL;
+    /* HTTP/2 over a UNIX socket is not supported; reject http+unix:// URLs
+     * here so parsed.host (NULL for unix) is never used below. */
+    if (parsed.is_unix)
+        return NULL;
 
     if (parsed.is_https && !cfg->tls)
         return NULL;

@@ -157,7 +157,8 @@ EXAMPLES = examples/hello_server examples/rest_api_server examples/middleware \
            examples/client examples/async_client examples/async_thread_pool \
            examples/custom_allocator examples/connection_pool examples/url_parser \
            examples/sse examples/streaming_client examples/timer \
-           examples/redirect_client examples/proxy_client
+           examples/redirect_client examples/proxy_client \
+           examples/unix_socket_server
 
 examples/%: examples/%.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)

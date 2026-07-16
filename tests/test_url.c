@@ -89,6 +89,58 @@ UTEST(url, empty_host_rejected) {
     ASSERT_EQ(kl_url_parse("http:///path", &u), -1);
 }
 
+UTEST(url, unix_socket_basic) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http+unix://%2Frun%2Fapp.sock/v1/ping", &u), 0);
+    ASSERT_TRUE(u.is_unix);
+    ASSERT_FALSE(u.is_https);
+    ASSERT_STREQ(u.unix_path, "/run/app.sock");
+    ASSERT_EQ(u.host_len, (size_t)0);
+    ASSERT_EQ(u.port, 0);
+    ASSERT_EQ((int)u.path_len, 8);
+    ASSERT_STRNEQ(u.path, "/v1/ping", 8);
+}
+
+UTEST(url, unix_socket_https) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("https+unix://%2Ftmp%2Fx.sock/", &u), 0);
+    ASSERT_TRUE(u.is_unix);
+    ASSERT_TRUE(u.is_https);
+    ASSERT_STREQ(u.unix_path, "/tmp/x.sock");
+    ASSERT_STRNEQ(u.path, "/", 1);
+}
+
+UTEST(url, unix_socket_no_path_defaults_root) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http+unix://%2Ftmp%2Fx.sock", &u), 0);
+    ASSERT_TRUE(u.is_unix);
+    ASSERT_STREQ(u.unix_path, "/tmp/x.sock");
+    ASSERT_STRNEQ(u.path, "/", 1);
+    ASSERT_EQ((int)u.path_len, 1);
+}
+
+UTEST(url, unix_socket_empty_path_rejected) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http+unix:///v1", &u), -1);
+}
+
+UTEST(url, unix_socket_bad_escape_rejected) {
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http+unix://%2G%2Fx/v1", &u), -1);   /* bad hex */
+    ASSERT_EQ(kl_url_parse("http+unix://%2/v1", &u), -1);        /* truncated */
+    ASSERT_EQ(kl_url_parse("http+unix://%00x/v1", &u), -1);      /* embedded NUL */
+}
+
+UTEST(url, unix_socket_unencoded_path) {
+    /* Slashes need not be encoded if the socket path has no leading slash
+     * conflict — but the first literal '/' always starts the request path.
+     * A relative-looking socket name works unescaped: */
+    KlUrl u;
+    ASSERT_EQ(kl_url_parse("http+unix://app.sock/health", &u), 0);
+    ASSERT_STREQ(u.unix_path, "app.sock");
+    ASSERT_STRNEQ(u.path, "/health", 7);
+}
+
 UTEST(url, invalid_port) {
     KlUrl u;
     ASSERT_EQ(kl_url_parse("http://example.com:0/path", &u), -1);

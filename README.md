@@ -64,6 +64,51 @@ kl_server_free(&s);
 
 `KlConfig.transport = KL_TRANSPORT_UNIX` is also available when you want to be explicit. TCP remains the zero-initialized default.
 
+### Peer credentials
+
+On a UNIX socket you can identify the connecting process from a handler:
+
+```c
+KlPeerCred cred;
+if (kl_request_peer_cred(req, &cred) == 0) {
+    /* cred.uid, cred.gid always available; cred.pid only if cred.has_pid
+     * (Linux SO_PEERCRED; macOS/BSD getpeereid provides uid/gid only). */
+}
+```
+
+### Socket activation (inherited fd)
+
+Instead of binding its own socket, KEEL can adopt a pre-bound, already-listening
+fd passed by systemd, launchd, or a supervising parent. `kl_systemd_listen_fd()`
+implements the systemd `LISTEN_FDS` protocol; the transport (TCP vs UNIX) is
+auto-detected from the fd, and KEEL never unlinks an adopted UNIX socket.
+
+```c
+int fd = kl_systemd_listen_fd();          /* -1 if not socket-activated */
+KlConfig cfg = { .listen_fd = fd > 0 ? fd : 0,
+                 .unix_socket_path = fd > 0 ? NULL : "/run/myapp/keel.sock" };
+```
+
+### Connecting a client over UNIX
+
+The client connects to a UNIX socket via the `http+unix://` (or `https+unix://`)
+scheme, where the authority is the percent-encoded socket path:
+
+```c
+/* GET /v1/ping over /run/app.sock */
+kl_client_request(&alloc, NULL, "GET",
+                  "http+unix://%2Frun%2Fapp.sock/v1/ping",
+                  NULL, 0, NULL, 0, &resp);
+```
+
+Both the synchronous (`kl_client_request`) and asynchronous (`kl_client_start`)
+clients support it. The pooled variants (`kl_client_request_pooled` /
+`kl_client_start_pooled`) accept `http+unix://` too but bypass the connection
+pool — UNIX sockets have no host:port to key on, and a local-socket connect is
+cheap. Proxying is incompatible with UNIX targets.
+
+See `examples/unix_socket_server.c` for a server demonstrating all three.
+
 ## Features
 
 - **Four event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (POLL_ADD), poll (universal POSIX fallback)
