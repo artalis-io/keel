@@ -284,10 +284,12 @@ static int kl_server_bind_listener(KlServer *s) {
     return kl_server_bind_tcp(s);
 }
 
+/* cppcheck-suppress constParameterPointer  ; 'out' is written on the
+   platform branches below (invisible to cppcheck's default config). */
 int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
     if (!req || !out)
         return -1;
-    KlConn *conn = kl_request_conn(req);
+    const KlConn *conn = kl_request_conn(req);
     if (!conn || conn->fd < 0)
         return -1;
     int fd = conn->fd;
