@@ -125,6 +125,19 @@ int kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     if (ensure_fd_cap(st, fd) < 0)
         return -1;
 
+    /* Idempotent re-add: if fd is already registered, update the existing
+     * slot in place instead of appending a duplicate.  Appending would
+     * orphan the first slot (leaving a stale fd in poll()) and corrupt the
+     * swap-compaction in kl_event_del.  This matches the upsert semantics of
+     * the epoll (EPOLL_CTL_ADD → EEXIST) and kqueue (EV_ADD) backends. */
+    if (st->fd_to_idx[fd] >= 0) {
+        int existing = st->fd_to_idx[fd];
+        st->fds[existing].events = mask_to_poll(mask);
+        st->fds[existing].revents = 0;
+        st->udata[existing] = udata;
+        return 0;
+    }
+
     if (st->count >= st->capacity) {
         if (grow_arrays(st) < 0)
             return -1;

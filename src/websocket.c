@@ -72,6 +72,12 @@ int kl_ws_frame_parse(KlWsFrameParser *fp, const uint8_t *data,
                 /* RSV bits must be 0 (no extensions) */
                 if (rsv != 0) return -1;
 
+                /* Reject reserved opcodes (RFC 6455 §5.2): only 0x0-0x2
+                 * (continuation/text/binary) and 0x8-0xA (close/ping/pong)
+                 * are defined; 0x3-0x7 and 0xB-0xF must fail the connection. */
+                if ((fp->opcode > 0x2 && fp->opcode < 0x8) || fp->opcode > 0xA)
+                    return -1;
+
                 /* Determine header size based on payload length encoding */
                 size_t extra = 0;
                 if (len7 == 126) extra = 2;

@@ -5,6 +5,15 @@
 /* miniz public API — included via -I$(MINIZ_DIR) */
 #include <miniz.h>
 
+/* Hard ceiling on decompressed output — anti-decompression-bomb bound.
+ * The gzip trailer ISIZE is untrusted (and only 32 bits, so it wraps), so
+ * it cannot be relied on to bound output.  Both the one-shot growth loop
+ * and the streaming path enforce this cap independently.  Override at build
+ * time with -DKL_DECOMP_MAX_OUTPUT=<bytes>. */
+#ifndef KL_DECOMP_MAX_OUTPUT
+#define KL_DECOMP_MAX_OUTPUT ((size_t)256 * 1024 * 1024)   /* 256 MB */
+#endif
+
 /* ── Internal session struct ─────────────────────────────────────── */
 
 typedef struct {
@@ -13,6 +22,7 @@ typedef struct {
     tinfl_decompressor   decomp;    /* ~11KB */
     uint32_t            crc;
     uint32_t            total_out;
+    uint64_t            out_full;   /* non-wrapping cumulative output (bomb cap) */
     int                 started;    /* gzip header parsed? */
     int                 done;       /* decompression finished? */
     unsigned char       hdr_buf[10];
@@ -107,6 +117,13 @@ static int miniz_decompress_fn(KlDecompress *self,
     uint32_t expected_crc = read_le32(trailer);
     uint32_t expected_isize = read_le32(trailer + 4);
 
+    /* Reject up front if the (untrusted) declared output size already
+     * exceeds the anti-bomb ceiling.  The growth loop below enforces the
+     * same cap against the actual output, so a forged-small ISIZE cannot
+     * bypass it. */
+    if (expected_isize > KL_DECOMP_MAX_OUTPUT)
+        return -1;
+
     /* Compressed data region */
     const unsigned char *comp_data = (const unsigned char *)in + hdr_end;
     size_t comp_len = in_len - hdr_end - 8;
@@ -157,11 +174,18 @@ static int miniz_decompress_fn(KlDecompress *self,
 
         if (status == TINFL_STATUS_HAS_MORE_OUTPUT) {
             /* Need bigger buffer */
+            if (buf_size >= KL_DECOMP_MAX_OUTPUT) {
+                /* Already at the anti-bomb ceiling and still more output. */
+                kl_free(alloc, buf, buf_size);
+                return -1;
+            }
             if (buf_size > SIZE_MAX / 2) {
                 kl_free(alloc, buf, buf_size);
                 return -1;
             }
             size_t new_size = buf_size * 2;
+            if (new_size > KL_DECOMP_MAX_OUTPUT)
+                new_size = KL_DECOMP_MAX_OUTPUT;
             char *new_buf = kl_malloc(alloc, new_size);
             if (!new_buf) {
                 kl_free(alloc, buf, buf_size);
@@ -277,6 +301,7 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
         tinfl_init(&s->decomp);
         s->crc = (uint32_t)MZ_CRC32_INIT;
         s->total_out = 0;
+        s->out_full = 0;
         s->started = 1;
     }
 
@@ -298,6 +323,12 @@ static int miniz_dfeed_fn(KlDecompress *self, const char *data, size_t len,
         remaining -= in_bytes;
 
         if (out_bytes > 0) {
+            /* Enforce the anti-bomb ceiling before emitting.  s->total_out
+             * is only 32 bits and wraps at 4 GB, so it cannot bound output;
+             * s->out_full is a non-wrapping cumulative counter. */
+            s->out_full += out_bytes;
+            if (s->out_full > KL_DECOMP_MAX_OUTPUT)
+                return -1;
             s->crc = (uint32_t)mz_crc32(s->crc, out_buf, out_bytes);
             s->total_out += (uint32_t)out_bytes;
             if (emit(emit_ctx, (const char *)out_buf, out_bytes) < 0)
@@ -351,6 +382,7 @@ static void miniz_decomp_reset(KlDecompress *self) {
     KlMinizDecompSession *s = (KlMinizDecompSession *)self;
     s->crc = 0;
     s->total_out = 0;
+    s->out_full = 0;
     s->started = 0;
     s->done = 0;
     s->hdr_len = 0;

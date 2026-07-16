@@ -13,7 +13,10 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <stddef.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
@@ -66,6 +69,195 @@ static void kl_log_errno(KlServer *s, int level, const char *msg) {
     kl_log(s, level, "%s: %s", msg, strerror(errno));
 }
 
+static int kl_server_bind_tcp(KlServer *s) {
+    /* Resolve bind address (supports IPv4, IPv6, and hostnames) */
+    struct addrinfo hints, *ai = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", s->config.port);
+
+    int gai_rc = getaddrinfo(s->config.bind_addr, port_str, &hints, &ai);
+    if (gai_rc != 0 || !ai) {
+        kl_log(s, KL_LOG_ERROR, "invalid bind address '%s': %s",
+               s->config.bind_addr, gai_strerror(gai_rc));
+        s->last_error = KL_ERR_DNS;
+        return -1;
+    }
+
+    s->listen_fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (s->listen_fd < 0) {
+        kl_log_errno(s, KL_LOG_ERROR, "socket");
+        s->last_error = KL_ERR_SOCKET;
+        freeaddrinfo(ai);
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+    (void)setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
+
+    /* IPv6 dual-stack: accept both IPv4 and IPv6 on :: */
+    if (ai->ai_family == AF_INET6) {
+        int off = 0;
+        setsockopt(s->listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+    }
+
+    if (bind(s->listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) {
+        kl_log_errno(s, KL_LOG_ERROR, "bind");
+        s->last_error = KL_ERR_BIND;
+        close(s->listen_fd);
+        s->listen_fd = -1;
+        freeaddrinfo(ai);
+        return -1;
+    }
+    freeaddrinfo(ai);
+
+    /* Retrieve OS-assigned port (useful when config.port == 0) */
+    {
+        struct sockaddr_storage sa;
+        socklen_t sa_len = sizeof(sa);
+        if (getsockname(s->listen_fd, (struct sockaddr *)&sa, &sa_len) == 0) {
+            if (sa.ss_family == AF_INET)
+                s->bound_port = ntohs(((struct sockaddr_in *)&sa)->sin_port);
+            else if (sa.ss_family == AF_INET6)
+                s->bound_port = ntohs(((struct sockaddr_in6 *)&sa)->sin6_port);
+        }
+    }
+
+    return 0;
+}
+
+static int kl_server_unlink_stale_unix_socket(KlServer *s, const char *path) {
+    struct stat st;
+    if (lstat(path, &st) < 0) {
+        if (errno == ENOENT)
+            return 0;
+        kl_log_errno(s, KL_LOG_ERROR, "lstat unix socket");
+        s->last_error = KL_ERR_BIND;
+        return -1;
+    }
+
+    if (!S_ISSOCK(st.st_mode)) {
+        kl_log(s, KL_LOG_ERROR,
+               "refusing to unlink non-socket unix path '%s'", path);
+        s->last_error = KL_ERR_BIND;
+        return -1;
+    }
+
+    if (unlink(path) < 0) {
+        kl_log_errno(s, KL_LOG_ERROR, "unlink unix socket");
+        s->last_error = KL_ERR_BIND;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int kl_server_bind_unix(KlServer *s) {
+    const char *path = s->config.unix_socket_path;
+    if (!path || path[0] == '\0') {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+
+    size_t path_len = strlen(path);
+    if (path_len >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+
+    s->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s->listen_fd < 0) {
+        kl_log_errno(s, KL_LOG_ERROR, "socket");
+        s->last_error = KL_ERR_SOCKET;
+        return -1;
+    }
+
+    if (s->config.unix_socket_unlink &&
+        kl_server_unlink_stale_unix_socket(s, path) < 0) {
+        close(s->listen_fd);
+        s->listen_fd = -1;
+        return -1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, path, path_len + 1);
+
+    socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
+                                     path_len + 1);
+
+    /* Create the socket node with the requested mode atomically: bind()
+     * applies (0777 & ~umask), so a temporary umask closes the window in
+     * which the socket would otherwise be reachable with default (looser)
+     * permissions before the chmod below.  Restored immediately after bind. */
+    mode_t old_umask = 0;
+    int umask_set = 0;
+    if (s->config.unix_socket_mode != 0) {
+        old_umask = umask(0777 & ~(mode_t)s->config.unix_socket_mode);
+        umask_set = 1;
+    }
+    int bind_rc = bind(s->listen_fd, (struct sockaddr *)&addr, addr_len);
+    if (umask_set)
+        umask(old_umask);
+    if (bind_rc < 0) {
+        kl_log_errno(s, KL_LOG_ERROR, "bind");
+        s->last_error = KL_ERR_BIND;
+        close(s->listen_fd);
+        s->listen_fd = -1;
+        return -1;
+    }
+
+    s->unix_socket_owned = 1;
+    /* Enforce the exact mode regardless of the platform's socket-creation
+     * base (some create nodes 0666, not 0777).  The umask above already
+     * closed the permissions window; this guarantees the precise bits. */
+    if (s->config.unix_socket_mode != 0 &&
+        chmod(path, (mode_t)s->config.unix_socket_mode) < 0) {
+        kl_log_errno(s, KL_LOG_ERROR, "chmod unix socket");
+        s->last_error = KL_ERR_BIND;
+        close(s->listen_fd);
+        s->listen_fd = -1;
+        unlink(path);
+        s->unix_socket_owned = 0;
+        return -1;
+    }
+
+    s->bound_port = 0;
+    return 0;
+}
+
+static int kl_server_bind_listener(KlServer *s) {
+    if (s->config.transport == KL_TRANSPORT_UNIX)
+        return kl_server_bind_unix(s);
+    return kl_server_bind_tcp(s);
+}
+
+static void kl_server_close_listener(KlServer *s) {
+    if (s->listen_fd >= 0) {
+        close(s->listen_fd);
+        s->listen_fd = -1;
+    }
+    if (s->unix_socket_owned && s->config.unix_socket_unlink &&
+        s->config.unix_socket_path) {
+        /* Re-check that the path is still a socket before unlinking, so a
+         * regular file (or a socket from a different process) that replaced
+         * our path is not removed.  lstat (not stat) avoids following a
+         * symlink.  Best-effort teardown — no error reporting. */
+        struct stat st;
+        if (lstat(s->config.unix_socket_path, &st) == 0 && S_ISSOCK(st.st_mode))
+            unlink(s->config.unix_socket_path);
+    }
+    s->unix_socket_owned = 0;
+}
+
 /*
  * Release a connection and resume the listen socket if it was paused
  * due to pool exhaustion.  Called from the event loop, timeout sweep,
@@ -89,6 +281,15 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
 
     /* Apply defaults */
     s->config = *config;
+    if (s->config.transport != KL_TRANSPORT_TCP &&
+        s->config.transport != KL_TRANSPORT_UNIX) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    if (s->config.unix_socket_path &&
+        s->config.transport == KL_TRANSPORT_TCP) {
+        s->config.transport = KL_TRANSPORT_UNIX;
+    }
     if (s->config.bind_addr == NULL)
         s->config.bind_addr = "0.0.0.0";
     if (s->config.max_connections <= 0)
@@ -247,79 +448,20 @@ int kl_server_run(KlServer *s) {
     signal(SIGPIPE, SIG_IGN);
 #endif
 
-    /* Resolve bind address (supports IPv4, IPv6, and hostnames) */
-    struct addrinfo hints, *ai = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
-
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", s->config.port);
-
-    int gai_rc = getaddrinfo(s->config.bind_addr, port_str, &hints, &ai);
-    if (gai_rc != 0 || !ai) {
-        kl_log(s, KL_LOG_ERROR, "invalid bind address '%s': %s",
-               s->config.bind_addr, gai_strerror(gai_rc));
-        s->last_error = KL_ERR_DNS;
+    if (kl_server_bind_listener(s) < 0)
         return -1;
-    }
-
-    s->listen_fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (s->listen_fd < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "socket");
-        s->last_error = KL_ERR_SOCKET;
-        freeaddrinfo(ai);
-        return -1;
-    }
-
-    int opt = 1;
-    setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#ifdef SO_REUSEPORT
-    (void)setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-#endif
-
-    /* IPv6 dual-stack: accept both IPv4 and IPv6 on :: */
-    if (ai->ai_family == AF_INET6) {
-        int off = 0;
-        setsockopt(s->listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
-    }
-
-    if (bind(s->listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "bind");
-        s->last_error = KL_ERR_BIND;
-        close(s->listen_fd);
-        s->listen_fd = -1;
-        freeaddrinfo(ai);
-        return -1;
-    }
-    freeaddrinfo(ai);
-
-    /* Retrieve OS-assigned port (useful when config.port == 0) */
-    {
-        struct sockaddr_storage sa;
-        socklen_t sa_len = sizeof(sa);
-        if (getsockname(s->listen_fd, (struct sockaddr *)&sa, &sa_len) == 0) {
-            if (sa.ss_family == AF_INET)
-                s->bound_port = ntohs(((struct sockaddr_in *)&sa)->sin_port);
-            else if (sa.ss_family == AF_INET6)
-                s->bound_port = ntohs(((struct sockaddr_in6 *)&sa)->sin6_port);
-        }
-    }
 
     if (listen(s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "listen");
         s->last_error = KL_ERR_LISTEN;
-        close(s->listen_fd);
-        s->listen_fd = -1;
+        kl_server_close_listener(s);
         return -1;
     }
 
     if (set_nonblocking(s->listen_fd) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "fcntl");
         s->last_error = KL_ERR_SOCKET;
-        close(s->listen_fd);
-        s->listen_fd = -1;
+        kl_server_close_listener(s);
         return -1;
     }
 
@@ -327,13 +469,17 @@ int kl_server_run(KlServer *s) {
     if (kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "event_add listen");
         s->last_error = KL_ERR_EVENT_ADD;
-        close(s->listen_fd);
-        s->listen_fd = -1;
+        kl_server_close_listener(s);
         return -1;
     }
 
-    kl_log(s, KL_LOG_INFO, "listening on %s:%d",
-           s->config.bind_addr, s->bound_port);
+    if (s->config.transport == KL_TRANSPORT_UNIX) {
+        kl_log(s, KL_LOG_INFO, "listening on unix:%s",
+               s->config.unix_socket_path);
+    } else {
+        kl_log(s, KL_LOG_INFO, "listening on %s:%d",
+               s->config.bind_addr, s->bound_port);
+    }
 
 #if !defined(KL_NO_SIGNAL)
     /* Install signal handlers if requested */
@@ -427,9 +573,11 @@ int kl_server_run(KlServer *s) {
                         close(client_fd);
                         continue;
                     }
-                    int nodelay = 1;
-                    (void)setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY,
-                                     &nodelay, sizeof(nodelay));
+                    if (s->config.transport == KL_TRANSPORT_TCP) {
+                        int nodelay = 1;
+                        (void)setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY,
+                                         &nodelay, sizeof(nodelay));
+                    }
 
                     KlConn *nc = kl_conn_acquire(&s->pool, client_fd);
                     if (!nc) {
@@ -707,10 +855,7 @@ void kl_server_free(KlServer *s) {
         s->file_io->destroy(s->file_io);
         s->file_io = NULL;
     }
-    if (s->listen_fd >= 0) {
-        close(s->listen_fd);
-        s->listen_fd = -1;
-    }
+    kl_server_close_listener(s);
     kl_event_ctx_free(&s->ev);
     kl_conn_pool_free(&s->pool);
     kl_router_free(&s->router);

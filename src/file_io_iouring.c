@@ -100,6 +100,16 @@ static int iouring_fio_submit(KlFileIO *fio, int file_fd, void *buf,
                                int sock_fd, void *udata) {
     KlFileIOIoUring *self = (KlFileIOIoUring *)fio;
 
+    /* io_uring_prep_splice/prep_read take a 32-bit unsigned length; reject an
+     * oversized chunk rather than silently truncating it mod 2^32 (L3).
+     * Callers cap file chunks well below this, so this is purely defensive.
+     * The phase-2 splice length is derived from already-bounded bytes.
+     * Guarded so the comparison isn't tautological where size_t == unsigned. */
+#if SIZE_MAX > UINT_MAX
+    if (len > UINT_MAX)
+        return -1;
+#endif
+
     if (ensure_slot_cap(self, sock_fd) < 0)
         return -1;
 

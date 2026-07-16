@@ -10,6 +10,7 @@
 #include <keel/websocket_client.h>
 #include <keel/timer.h>
 #include <keel/url.h>
+#include <keel/drain.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -80,7 +81,18 @@ struct KlWsClientConn {
     /* Auto-ping keep-alive */
     int              ping_interval_ms;
     int64_t          ping_timer_id;     /* -1 = no timer */
+
+    /* Outbound backpressure: buffers unsent frame bytes on would-block and
+     * flushes them on write-readiness (see M3).  Preserves frame integrity
+     * on non-blocking sockets / TLS WANT_WRITE. */
+    KlDrain          out_drain;
+    int              out_drain_ready;   /* drain initialized */
 };
+
+/* Hard cap on buffered outbound bytes.  A peer that never reads would
+ * otherwise let the buffer grow without bound; exceeding this aborts the
+ * connection cleanly rather than exhausting memory. */
+#define KL_WS_CLIENT_MAX_DRAIN ((size_t)4 * 1024 * 1024)   /* 4 MB */
 
 /* ── Forward declarations ───────────────────────────────────────── */
 
@@ -114,21 +126,30 @@ static ssize_t wsc_read(KlWsClientConn *ws, void *buf, size_t len)
     return r;
 }
 
-static int wsc_write_all(KlWsClientConn *ws, const void *buf, size_t len)
+/* KlDrain writer: adapts wsc_write's ssize_t contract to the drain's
+ * (>0 bytes written, 0 would-block, -1 error).  Both plain-socket EAGAIN
+ * and TLS WANT_READ/WANT_WRITE (which wsc_write returns as 0) map to
+ * would-block, so the drain buffers the unsent tail instead of the frame
+ * being truncated or the connection aborted. */
+static ssize_t wsc_drain_write_fn(const char *data, size_t len, void *ctx)
 {
-    const char *p = (const char *)buf;
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t w = wsc_write(ws, p + sent, len - sent);
-        if (w < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                return -2;  /* would block — caller should retry */
-            return -1;
-        }
-        if (w == 0) return -1;
-        sent += (size_t)w;
-    }
-    return 0;
+    KlWsClientConn *ws = ctx;
+    ssize_t r = wsc_write(ws, data, len);
+    if (r > 0) return r;
+    if (r == 0) return 0;  /* TLS WANT_* — treat as would-block */
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+    return -1;
+}
+
+/* Register READ interest, plus WRITE while outbound data is pending, so the
+ * event loop wakes us to flush the drain.  kl_watcher_mod arms immediately. */
+static void wsc_update_write_interest(KlWsClientConn *ws)
+{
+    if (ws->fd < 0) return;
+    KlEventMask mask = KL_EVENT_READ;
+    if (kl_drain_pending(&ws->out_drain))
+        mask |= KL_EVENT_WRITE;
+    kl_watcher_mod(ws->ev, ws->fd, mask);
 }
 
 /* ── Random bytes for mask key ──────────────────────────────────── */
@@ -350,8 +371,14 @@ static int wsc_send_frame(KlWsClientConn *ws, int opcode, const char *data,
     /* Append mask key to header */
     memcpy(hdr + mask_offset, mask_key, KL_WS_MASK_KEY_LEN);
 
-    /* Send header */
-    if (wsc_write_all(ws, hdr, hdr_len) < 0) return -1;
+    /* Write header + masked payload through the drain.  The drain writes what
+     * it can immediately and buffers the remainder on would-block, preserving
+     * frame ordering and integrity.  A drain error (e.g. buffer cap exceeded)
+     * fails the send. */
+    if (kl_drain_write(&ws->out_drain, (const char *)hdr, hdr_len) < 0) {
+        wsc_update_write_interest(ws);
+        return -1;
+    }
 
     /* Send masked payload */
     if (len > 0) {
@@ -364,11 +391,17 @@ static int wsc_send_frame(KlWsClientConn *ws, int opcode, const char *data,
             memcpy(chunk, data + sent, chunk_len);
             for (size_t i = 0; i < chunk_len; i++)
                 chunk[i] ^= mask_key[(sent + i) & 3];
-            if (wsc_write_all(ws, chunk, chunk_len) < 0) return -1;
+            if (kl_drain_write(&ws->out_drain, (const char *)chunk,
+                               chunk_len) < 0) {
+                wsc_update_write_interest(ws);
+                return -1;
+            }
             sent += chunk_len;
         }
     }
 
+    /* Arm WRITE interest if any bytes are still buffered. */
+    wsc_update_write_interest(ws);
     return 0;
 }
 
@@ -509,8 +542,10 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
         ws->handshake_len = 0;
     }
 
-    /* Grow if needed */
-    if (ws->handshake_len >= ws->handshake_cap) {
+    /* Grow if needed.  Always keep one spare byte for a NUL terminator so
+     * the str*-based handshake parser (strstr/strncmp/strncasecmp) cannot
+     * over-read past the end of the buffer (L4). */
+    if (ws->handshake_len + 1 >= ws->handshake_cap) {
         if (ws->handshake_cap > SIZE_MAX / 2) {
             wsc_error(ws, "handshake response too large");
             return;
@@ -527,8 +562,9 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
         ws->handshake_cap = new_cap;
     }
 
+    /* Reserve the last byte for the NUL terminator written below. */
     ssize_t nread = wsc_read(ws, ws->handshake_buf + ws->handshake_len,
-                              ws->handshake_cap - ws->handshake_len);
+                              ws->handshake_cap - ws->handshake_len - 1);
     if (nread < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             kl_watcher_rearm(ws->ev, ws->fd);
@@ -542,6 +578,7 @@ static void wsc_handle_ws_handshake(KlWsClientConn *ws, KlEventMask ready)
         return;
     }
     ws->handshake_len += (size_t)nread;
+    ws->handshake_buf[ws->handshake_len] = '\0';
 
     int rc = wsc_parse_handshake_response(ws);
     if (rc < 0) {
@@ -801,6 +838,17 @@ static void wsc_ping_timer(void *user_data) {
                                       wsc_ping_timer, ws);
 }
 
+/* Flush buffered outbound data on write-readiness. */
+static void wsc_handle_writable(KlWsClientConn *ws)
+{
+    if (kl_drain_flush(&ws->out_drain) < 0) {
+        wsc_error(ws, "write error");
+        return;
+    }
+    /* Drops WRITE interest once fully drained; keeps it while pending. */
+    wsc_update_write_interest(ws);
+}
+
 /* ── Event callback ─────────────────────────────────────────────── */
 
 static void wsc_on_event(int fd, KlEventMask ready, void *user_data)
@@ -820,7 +868,13 @@ static void wsc_on_event(int fd, KlEventMask ready, void *user_data)
         break;
     case WSC_OPEN:
     case WSC_CLOSING:
-        wsc_handle_open(ws);
+        if (ready & KL_EVENT_WRITE) {
+            wsc_handle_writable(ws);
+            if (ws->state == WSC_CLOSED)
+                break;
+        }
+        if (ready & KL_EVENT_READ)
+            wsc_handle_open(ws);
         break;
     case WSC_CLOSED:
         break;
@@ -948,6 +1002,11 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         ws->cbs = *cbs;
     ws->user_data = user_data;
 
+    /* Outbound backpressure buffer (lazy-allocated on first would-block). */
+    kl_drain_init(&ws->out_drain, wsc_drain_write_fn, ws, alloc);
+    kl_drain_set_max_size(&ws->out_drain, KL_WS_CLIENT_MAX_DRAIN);
+    ws->out_drain_ready = 1;
+
     memcpy(ws->host_buf, host_buf, parsed.host_len + 1);
 
     /* Generate WebSocket key and build upgrade request */
@@ -1031,6 +1090,10 @@ void kl_ws_client_free(KlWsClientConn *ws)
     if (ws->msg_buf) {
         kl_free(ws->alloc, ws->msg_buf, ws->msg_cap);
         ws->msg_buf = NULL;
+    }
+    if (ws->out_drain_ready) {
+        kl_drain_free(&ws->out_drain);
+        ws->out_drain_ready = 0;
     }
 
     KlAllocator *alloc = ws->alloc;

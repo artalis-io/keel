@@ -144,6 +144,21 @@ static void mp_free_str(KlAllocator *alloc, char **p, size_t *len) {
 }
 
 /*
+ * L6: reject control bytes (< 0x20, or DEL 0x7F) in a disposition
+ * name/filename. A full CRLF cannot appear (the value comes from a line
+ * already split on "\r\n"), but a lone CR/LF/TAB/NUL can survive inside a
+ * quoted string and would otherwise reach application form/file handlers as
+ * a log-injection or NUL-truncation vector. Returns 1 if any is present.
+ */
+static int mp_has_ctl(const char *s, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c == 0x7F) return 1;
+    }
+    return 0;
+}
+
+/*
  * Generic growable-buffer reserve. cap_limit == 0 means unbounded
  * (constrained only by the allocator). Growth is exponential from
  * whatever the current cap is; if the buffer is empty, it grows to
@@ -246,6 +261,7 @@ static int mp_parse_disposition(KlMultipartReader *mr, const char *val,
             name_len--;
     }
     if (name_len == 0) return -1;  /* empty form-field name → MALFORMED */
+    if (mp_has_ctl(name_src, name_len)) return -1;  /* L6 → MALFORMED */
     mr->cur_name = mp_strdup(mr->alloc, name_src, name_len);
     if (!mr->cur_name) { mr->last_error = KL_MP_ERR_NOMEM; return -1; }
     mr->cur_name_len = name_len;
@@ -273,6 +289,7 @@ static int mp_parse_disposition(KlMultipartReader *mr, const char *val,
                 fn_src[fn_len - 1] == '\t'))
             fn_len--;
     }
+    if (mp_has_ctl(fn_src, fn_len)) return -1;  /* L6 → MALFORMED */
     mr->cur_filename = mp_strdup(mr->alloc, fn_src, fn_len);
     if (!mr->cur_filename) { mr->last_error = KL_MP_ERR_NOMEM; return -1; }
     mr->cur_filename_len = fn_len;

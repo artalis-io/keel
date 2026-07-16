@@ -58,6 +58,21 @@ int kl_watcher_add(KlEventCtx *ctx, int fd, KlEventMask mask,
 {
     if (!ctx || fd < 0 || !on_ready) return -1;
 
+    /* Idempotent: if fd is already watched, update the existing watcher in
+     * place rather than prepending a duplicate node.  A duplicate would
+     * orphan the first node (leaked, never dispatched) on backends whose
+     * kl_event_add tolerates re-add (kqueue, poll).  Mirrors the event_poll
+     * upsert semantics. */
+    for (KlWatcher *e = ctx->watchers; e; e = e->next) {
+        if (e->fd == fd) {
+            e->mask = mask;
+            e->on_ready = on_ready;
+            e->user_data = user_data;
+            ctx->dispatch_dirty = 1;  /* suppress auto-rearm if in a callback */
+            return kl_event_mod(&ctx->loop, fd, mask, watcher_tag(e));
+        }
+    }
+
     KlAllocator *a = ctx->alloc;
     KlWatcher *w = kl_malloc(a, sizeof(KlWatcher));
     if (!w) return -1;

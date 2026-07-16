@@ -6,7 +6,7 @@
 
 Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **671 tests** (40 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **676 tests** (41 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -44,9 +44,30 @@ int main(void) {
 }
 ```
 
+## UNIX Socket Servers
+
+Set `unix_socket_path` to serve the same HTTP routes over a UNIX domain stream socket instead of TCP. `unix_socket_unlink` removes a stale socket file before binding and removes the socket path again when the server is freed after a successful bind. It refuses to unlink non-socket files; place socket paths in an application-owned directory rather than a shared writable directory.
+
+```c
+KlServer s;
+KlConfig cfg = {
+    .unix_socket_path = "/run/myapp/keel.sock",
+    .unix_socket_unlink = 1,
+    .unix_socket_mode = 0660,  /* optional; 0 leaves umask/default */
+};
+
+kl_server_init(&s, &cfg);
+kl_server_route(&s, "GET", "/health", handle_health, NULL, NULL);
+kl_server_run(&s);
+kl_server_free(&s);
+```
+
+`KlConfig.transport = KL_TRANSPORT_UNIX` is also available when you want to be explicit. TCP remains the zero-initialized default.
+
 ## Features
 
 - **Four event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (POLL_ADD), poll (universal POSIX fallback)
+- **TCP or UNIX socket servers** — same HTTP stack over TCP/IP or `AF_UNIX/SOCK_STREAM`
 - **Pluggable HTTP parser** — ships with llhttp, swap via `KlConfig.parser`
 - **Pluggable TLS** — bring your own BearSSL/LibreSSL/OpenSSL via vtable, zero vendored TLS code
 - **Pluggable body readers** — vtable interface for request body processing
@@ -93,7 +114,7 @@ int main(void) {
 | **response** | `response.h` | Response builder: buffered, sendfile, or streaming chunked |
 | **router** | `router.h` | Route matching with `:param` capture + middleware chain |
 | **connection** | `connection.h` | Pre-allocated connection pool + state machine |
-| **server** | `server.h` | Top-level glue: init, bind, async event loop, stop |
+| **server** | `server.h` | Top-level glue: TCP/UNIX bind, async event loop, stop |
 | **body_reader** | `body_reader.h` | Pluggable body reader vtable + buffer reader |
 | **body_reader_multipart** | `body_reader_multipart.h` | RFC 2046 multipart/form-data parser |
 | **chunked** | `chunked.h` | Parser-agnostic chunked transfer-encoding decoder |
@@ -611,7 +632,7 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 
 ## Testing
 
-671 tests across 40 test suites, covering every module (678 on io_uring builds):
+676 tests across 41 test suites, covering every module (683 on io_uring builds):
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -653,6 +674,7 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 | `test_timer` | 10 | Min-heap scheduling, cancellation, callback safety, next-timeout |
 | `test_tls` | 20 | TLS vtable, handshake FSM, response send/stream/file via mock, shutdown retry, pool teardown |
 | `test_tls_integration` | 3 | Passthrough TLS mock: full handshake→read→write path |
+| `test_unix_socket` | 5 | UNIX socket server: HTTP round-trip, stale path policy, cleanup, path limits |
 | `test_url` | 20 | URL parsing, IPv6, CRLF rejection, default ports, ws/wss schemes |
 | `test_websocket` | 48 | Frame parsing, masking, opcode, fragments, close, echo, unmasked rejection |
 | `test_websocket_client` | 30 | Client frame encoding, mask XOR, handshake, parser, API, config, auto-ping |
@@ -723,7 +745,7 @@ Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparis
 | **Threading** | Single-threaded + thread pool | Single-threaded | 4 modes incl. thread-per-connection |
 | **Bare-metal MCU** | Via lwIP/picoTCP (BSD sockets) | Built-in TCP/IP stack | Requires OS networking |
 | **Cosmopolitan C** | Supported (APE binaries) | No | No |
-| **Tests** | 671 (40 suites) | ~4K LOC tests | Fewer relative to size |
+| **Tests** | 676 (41 suites) | ~4K LOC tests | Fewer relative to size |
 
 **Choose Keel** when you want MIT licensing, HTTP/2, a built-in router/middleware/client, and pluggable everything. **Choose Mongoose** when you're targeting bare-metal MCUs with no OS, need a built-in TCP/IP stack, or need battle-tested maturity. **Choose libmicrohttpd** when you need multi-threaded request handling, independently audited security, or wide distro packaging.
 

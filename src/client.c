@@ -792,6 +792,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
 
     KlTls *tls = NULL;
     int ret = -1;
+    int decomp_installed = 0;   /* streaming decompressor wrapper active */
 
     if (is_proxied && parsed.is_https) {
         /* CONNECT tunnel through proxy, then TLS handshake */
@@ -874,6 +875,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
         wrapped_stream.body_read = stream->body_read;
         wrapped_stream.user_data = &decomp_wrap;
         actual_stream = &wrapped_stream;
+        decomp_installed = 1;
     }
 
     /* Request streaming: send headers + chunked body */
@@ -915,6 +917,13 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     ret = 0;
 
 cleanup:
+    /* Free the streaming decompressor session if it was installed.  It is
+     * otherwise freed only by decomp_on_complete (fired on parser
+     * message-complete), so error paths and EOF-terminated success would
+     * leak it.  kl_decompress_stream_free is idempotent, so freeing after a
+     * normal completion is safe. */
+    if (decomp_installed)
+        kl_decompress_stream_free(&decomp_wrap.ds);
     if (tls) {
         tls->shutdown(tls, fd);
         tls->destroy(tls);

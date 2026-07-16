@@ -43,6 +43,11 @@ typedef void (*KlLogFn)(int level, const char *fmt, va_list ap,
 /** @brief Default max body size. */
 #define KL_DEFAULT_MAX_BODY_SIZE  (1024 * 1024)   /**< 1 MB */
 
+typedef enum {
+    KL_TRANSPORT_TCP = 0,   /**< TCP/IP stream socket (default) */
+    KL_TRANSPORT_UNIX = 1   /**< UNIX domain stream socket */
+} KlTransport;
+
 typedef struct KlConfig {
     int port;
     const char *bind_addr;      /**< default: "0.0.0.0" */
@@ -63,6 +68,10 @@ typedef struct KlConfig {
     size_t max_body_size;       /**< discard-path body limit; default: 1 MB */
     size_t max_header_size;     /**< max header block size; 0 = KL_READ_BUF_SIZE (8192) */
     KlCompressConfig *compress; /**< compression config — NULL = disabled (default) */
+    KlTransport transport;      /**< default: KL_TRANSPORT_TCP; unix_socket_path implies UNIX */
+    const char *unix_socket_path; /**< AF_UNIX path when transport is KL_TRANSPORT_UNIX */
+    int unix_socket_unlink;     /**< unlink path before bind and on free after successful bind */
+    unsigned int unix_socket_mode; /**< chmod socket path after bind; 0 = leave umask/default */
 } KlConfig;
 
 typedef struct KlAsyncOp KlAsyncOp;
@@ -78,6 +87,7 @@ typedef struct KlServer {
     KlEventCtx ev;              /**< event loop + watcher list */
     int listen_fd;              /**< Listening socket fd */
     int bound_port;             /**< actual port after bind (useful with port=0) */
+    int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */
     int listen_paused;          /**< 1 = listen fd removed from event loop (pool full) */
     _Atomic int running;        /**< Server is running */
     _Atomic int draining;       /**< Graceful shutdown in progress */
