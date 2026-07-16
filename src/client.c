@@ -2152,6 +2152,8 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                                             resolve_host, resolve_port,
                                             dns_resolved, c);
         if (!c->resolve_req) {
+            if (c->decomp_wrap)
+                kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
             kl_free(alloc, c, sizeof(KlClient));
@@ -2165,6 +2167,8 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     if (is_proxied) {
         size_t phl = strlen(proxy->host);
         if (phl >= sizeof(dns_host_buf)) {
+            if (c->decomp_wrap)
+                kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
             kl_free(alloc, c, sizeof(KlClient));
@@ -2186,6 +2190,8 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     struct addrinfo *res = NULL;
     int rc = getaddrinfo(dns_host_buf, port_str, &hints, &res);
     if (rc != 0 || !res) {
+        if (c->decomp_wrap)
+            kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlClient));
@@ -2196,6 +2202,8 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                        res->ai_family, res->ai_socktype,
                        res->ai_protocol) < 0) {
         freeaddrinfo(res);
+        if (c->decomp_wrap)
+            kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlClient));
@@ -2559,6 +2567,8 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
             c->fd = -1;
             c->tls = NULL;
             kl_cpool_discard(pool, &pconn);
+            if (c->decomp_wrap)
+                kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
             kl_free(alloc, c, sizeof(KlClient));
@@ -2576,6 +2586,8 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
                                             host_buf, parsed.port,
                                             dns_resolved, c);
         if (!c->resolve_req) {
+            if (c->decomp_wrap)
+                kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
             kl_free(alloc, c, sizeof(KlClient));
@@ -2596,6 +2608,8 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     struct addrinfo *res = NULL;
     int rc = getaddrinfo(host_buf, port_str, &hints, &res);
     if (rc != 0 || !res) {
+        if (c->decomp_wrap)
+            kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlClient));
@@ -2606,6 +2620,8 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
                        res->ai_family, res->ai_socktype,
                        res->ai_protocol) < 0) {
         freeaddrinfo(res);
+        if (c->decomp_wrap)
+            kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlClient));
