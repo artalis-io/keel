@@ -694,7 +694,10 @@ read_more_headers: ;
 
         /* HTTP/2 connection preface detection (before HTTP/1.1 parser) */
         if (c->h2_config != NULL) {
-            static const char h2_preface[24] =
+            /* Size deduced (25 incl. NUL) so newer compilers don't warn
+             * under -Wunterminated-string-initialization; the 24-byte
+             * preface is compared with explicit length 24 below. */
+            static const char h2_preface[] =
                 "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
             if (c->read_len >= 24) {
                 if (memcmp(c->read_buf, h2_preface, 24) == 0) {
