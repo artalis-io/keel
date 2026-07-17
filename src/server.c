@@ -455,6 +455,46 @@ int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
 #endif
 }
 
+const struct sockaddr *kl_request_peer_sockaddr(const KlRequest *req,
+                                                socklen_t *len) {
+    if (!req)
+        return NULL;
+    const KlConn *conn = kl_request_conn(req);
+    if (!conn || conn->peer_addr_len == 0)
+        return NULL;
+    if (len)
+        *len = conn->peer_addr_len;
+    return (const struct sockaddr *)&conn->peer_addr;
+}
+
+int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
+                         uint16_t *port) {
+    if (!req || !ip || iplen == 0)
+        return -1;
+    const KlConn *conn = kl_request_conn(req);
+    if (!conn || conn->peer_addr_len == 0)
+        return -1;
+
+    const struct sockaddr *sa = (const struct sockaddr *)&conn->peer_addr;
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *s4 = (const struct sockaddr_in *)sa;
+        if (!inet_ntop(AF_INET, &s4->sin_addr, ip, (socklen_t)iplen))
+            return -1;
+        if (port)
+            *port = ntohs(s4->sin_port);
+        return 0;
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)sa;
+        if (!inet_ntop(AF_INET6, &s6->sin6_addr, ip, (socklen_t)iplen))
+            return -1;
+        if (port)
+            *port = ntohs(s6->sin6_port);
+        return 0;
+    }
+    return -1;  /* AF_UNIX or other — no IP address (use peer credentials) */
+}
+
 int kl_systemd_listen_fds(int *count) {
     const char *pid_s = getenv("LISTEN_PID");
     const char *fds_s = getenv("LISTEN_FDS");
@@ -858,7 +898,10 @@ int kl_server_run(KlServer *s) {
                 /* Listen socket — accept new connections */
                 if (atomic_load(&s->draining)) goto rearm_listen;
                 while (1) {
-                    int client_fd = accept(s->listen_fd, NULL, NULL);
+                    struct sockaddr_storage peer;
+                    socklen_t peer_len = sizeof(peer);
+                    int client_fd = accept(s->listen_fd,
+                                           (struct sockaddr *)&peer, &peer_len);
                     if (client_fd < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                         kl_log_errno(s, KL_LOG_ERROR, "accept");
@@ -885,6 +928,14 @@ int kl_server_run(KlServer *s) {
                         kl_event_del(&s->ev.loop, s->listen_fd);
                         s->listen_paused = 1;
                         break;
+                    }
+
+                    /* Record the client address for kl_request_peer_addr(). */
+                    if (peer_len > 0 && peer_len <= sizeof(nc->peer_addr)) {
+                        memcpy(&nc->peer_addr, &peer, peer_len);
+                        nc->peer_addr_len = peer_len;
+                    } else {
+                        nc->peer_addr_len = 0;
                     }
 
                     /* Set allocator on connection's response.

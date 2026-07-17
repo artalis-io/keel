@@ -87,6 +87,9 @@ if (kl_request_peer_cred(req, &cred) == 0) {
 ```
 
 Related accessors:
+- `kl_request_peer_addr(req, ip, sizeof ip, &port)` — the client's IP/port for
+  any request (TCP/TLS); `-1` for UNIX sockets. Also `kl_request_peer_sockaddr`
+  for the raw address.
 - `kl_ws_server_peer_cred(ws, &cred)` — same, for a live WebSocket connection
   *after* the HTTP upgrade (when there's no longer a `KlRequest`).
 - `kl_request_peer_label(req, buf, sizeof buf)` — the peer's SELinux/AppArmor

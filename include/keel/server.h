@@ -285,6 +285,29 @@ int kl_peer_cred_fd(int fd, KlPeerCred *out);
 int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen);
 
 /**
+ * @brief Format the client's IP address and port for a request.
+ *
+ * @param req    The request.
+ * @param ip     Buffer for the NUL-terminated address ("203.0.113.7" / "2001:db8::1").
+ * @param iplen  Size of @p ip (>= INET6_ADDRSTRLEN recommended).
+ * @param port   Receives the client port (host byte order); may be NULL.
+ * @return 0 on success, -1 if unavailable (e.g. AF_UNIX — use peer credentials).
+ */
+int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
+                         uint16_t *port);
+
+/**
+ * @brief Raw client socket address for a request (for advanced use).
+ *
+ * @param req  The request.
+ * @param len  Receives the address length; may be NULL.
+ * @return Pointer to the address (owned by the connection), or NULL if
+ *         unavailable. Valid until the request completes.
+ */
+const struct sockaddr *kl_request_peer_sockaddr(const KlRequest *req,
+                                                socklen_t *len);
+
+/**
  * @brief Return an inherited listening socket fd from socket activation.
  *
  * Implements the systemd LISTEN_FDS protocol: if LISTEN_PID matches this

@@ -10,6 +10,7 @@
 #include <keel/router.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/socket.h>   /* struct sockaddr_storage, socklen_t */
 
 /** @brief Default read buffer size (bytes). */
 #define KL_READ_BUF_SIZE 8192
@@ -35,6 +36,9 @@ typedef struct KlConn {
     int fd;                     /**< Socket file descriptor */
     KlConnState state;          /**< Connection state */
     KlAllocator *alloc;         /**< Allocator (set once on pool init) */
+
+    struct sockaddr_storage peer_addr;  /**< Client address (captured at accept) */
+    socklen_t peer_addr_len;            /**< 0 if unavailable */
 
     char *read_buf;             /**< Read buffer */
     size_t read_len;            /**< Bytes in read buffer */

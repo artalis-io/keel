@@ -19,12 +19,16 @@ static KlPeerCred g_captured_cred;
 static int        g_cred_rc = -2;
 static char       g_captured_label[256];
 static int        g_label_rc = -2;
+static int        g_addr_rc = -2;
 
 static void unix_handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
+    char ip[64];
+    uint16_t port = 0;
     g_cred_rc = kl_request_peer_cred(req, &g_captured_cred);
     g_label_rc = kl_request_peer_label(req, g_captured_label,
                                        sizeof(g_captured_label));
+    g_addr_rc = kl_request_peer_addr(req, ip, sizeof(ip), &port);
     kl_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
@@ -457,6 +461,8 @@ UTEST(unix_socket, peer_credentials_available) {
     ASSERT_EQ(0, g_cred_rc);
     ASSERT_EQ((long)getuid(), g_captured_cred.uid);
     ASSERT_EQ((long)getgid(), g_captured_cred.gid);
+    /* A UNIX socket has no IP address — peer_addr reports unavailable. */
+    ASSERT_EQ(-1, g_addr_rc);
     /* Peer is this same test process; when a pid is available (Linux
      * SO_PEERCRED, macOS LOCAL_PEERPID) it must be ours. */
     if (g_captured_cred.has_pid)
