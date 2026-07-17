@@ -90,6 +90,18 @@ Related accessors:
 - `kl_request_peer_addr(req, ip, sizeof ip, &port)` — the client's IP/port for
   any request (TCP/TLS); `-1` for UNIX sockets. Also `kl_request_peer_sockaddr`
   for the raw address.
+
+Behind an L4 load balancer, set `proxy_trusted_cidrs` to recover the real client
+address from a PROXY protocol (v1/v2) header:
+
+```c
+KlConfig cfg = {
+    .proxy_trusted_cidrs = "10.0.0.0/8,::1/128",  /* honor PROXY only from these */
+};
+```
+The header is parsed only when the connection originates from a trusted CIDR (so
+an untrusted peer can't spoof its IP); from other sources it's ignored and the
+socket address is used. `kl_request_peer_addr` then returns the real client.
 - `kl_ws_server_peer_cred(ws, &cred)` — same, for a live WebSocket connection
   *after* the HTTP upgrade (when there's no longer a `KlRequest`).
 - `kl_request_peer_label(req, buf, sizeof buf)` — the peer's SELinux/AppArmor

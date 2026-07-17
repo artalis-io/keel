@@ -5,6 +5,8 @@
 #include <keel/tls.h>
 #include <keel/websocket_server.h>
 #include <keel/h2_server.h>
+#include <keel/proxy_protocol.h>
+#include <sys/socket.h>
 #include <assert.h>
 #include <string.h>
 #include <strings.h>
@@ -357,6 +359,54 @@ KlConnState kl_conn_on_handshake(KlConn *c) {
     }
     c->state = KL_CONN_CLOSED;
     return c->state;
+}
+
+int kl_conn_read_proxy_header(KlConn *c) {
+    uint8_t buf[KL_PROXY_HEADER_MAX];
+    ssize_t n;
+    do {
+        n = recv(c->fd, buf, sizeof(buf), MSG_PEEK);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0)
+        return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+    if (n == 0)
+        return -1;   /* peer closed before sending a header */
+
+    struct sockaddr_storage peer;
+    socklen_t peer_len = 0;
+    size_t consumed = 0;
+    KlProxyResult r = kl_proxy_parse(buf, (size_t)n, &consumed, &peer, &peer_len);
+
+    switch (r) {
+        case KL_PROXY_NEED_MORE:
+            /* Full peek buffer and still incomplete → malformed / oversized. */
+            return ((size_t)n >= sizeof(buf)) ? -1 : 0;
+        case KL_PROXY_INVALID:
+            return -1;
+        case KL_PROXY_NONE:
+            return 1;   /* not a PROXY header; leave bytes for TLS/HTTP */
+        case KL_PROXY_OK:
+            break;
+    }
+
+    /* Consume exactly the header bytes (they were only peeked). */
+    size_t left = consumed;
+    while (left > 0) {
+        size_t want = left < sizeof(buf) ? left : sizeof(buf);
+        ssize_t rd;
+        do { rd = recv(c->fd, buf, want, 0); } while (rd < 0 && errno == EINTR);
+        if (rd <= 0)
+            return -1;
+        left -= (size_t)rd;
+    }
+
+    if (peer_len > 0 && peer_len <= sizeof(c->peer_addr)) {
+        memcpy(&c->peer_addr, &peer, peer_len);
+        c->peer_addr_len = peer_len;
+        c->peer_source = KL_PEER_PROXY;
+    }
+    /* LOCAL/UNKNOWN (peer_len == 0): keep the socket address. */
+    return 1;
 }
 
 /*

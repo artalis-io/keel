@@ -674,6 +674,32 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->config.compress = &s->compress_storage;
     }
 
+    /* Parse the PROXY protocol trusted-source CIDR allowlist (if any). */
+    s->proxy_cidrs = NULL;
+    s->proxy_cidr_count = 0;
+    if (s->config.proxy_trusted_cidrs) {
+        KlCidr tmp[64];
+        int cn = kl_cidr_parse_list(s->config.proxy_trusted_cidrs, tmp,
+                                    (int)(sizeof(tmp) / sizeof(tmp[0])));
+        if (cn < 0) {
+            s->last_error = KL_ERR_INVALID_ARG;
+            kl_conn_pool_free(&s->pool);
+            kl_router_free(&s->router);
+            return -1;
+        }
+        if (cn > 0) {
+            s->proxy_cidrs = kl_malloc(alloc, (size_t)cn * sizeof(KlCidr));
+            if (!s->proxy_cidrs) {
+                s->last_error = KL_ERR_ALLOC;
+                kl_conn_pool_free(&s->pool);
+                kl_router_free(&s->router);
+                return -1;
+            }
+            memcpy(s->proxy_cidrs, tmp, (size_t)cn * sizeof(KlCidr));
+            s->proxy_cidr_count = cn;
+        }
+    }
+
     /* Create parsers and propagate config for each connection slot */
     for (int i = 0; i < s->pool.capacity; i++) {
         s->pool.conns[i].parser = s->config.parser(alloc);
@@ -931,6 +957,7 @@ int kl_server_run(KlServer *s) {
                     }
 
                     /* Record the client address for kl_request_peer_addr(). */
+                    nc->peer_source = KL_PEER_SOCKET;
                     if (peer_len > 0 && peer_len <= sizeof(nc->peer_addr)) {
                         memcpy(&nc->peer_addr, &peer, peer_len);
                         nc->peer_addr_len = peer_len;
@@ -946,6 +973,14 @@ int kl_server_run(KlServer *s) {
                     if (s->config.tls) {
                         nc->state = KL_CONN_TLS_HANDSHAKE;
                         nc->tls_want = KL_EVENT_READ;
+                    }
+
+                    /* PROXY protocol: from a trusted source, read the header
+                     * first (before TLS/HTTP). Overrides the state above. */
+                    if (s->proxy_cidr_count > 0 && peer_len > 0 &&
+                        kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count,
+                                      (struct sockaddr *)&peer)) {
+                        nc->state = KL_CONN_PROXY_HEADER;
                     }
 
                     if (kl_event_add(&s->ev.loop, client_fd,
@@ -965,6 +1000,36 @@ rearm_listen:
 
             /* Client connection event */
             KlConnState new_state = c->state;
+
+            /* PROXY protocol header — read before TLS/HTTP */
+            if (c->state == KL_CONN_PROXY_HEADER) {
+                int pr = kl_conn_read_proxy_header(c);
+                if (pr < 0) {
+                    new_state = KL_CONN_CLOSED;
+                    goto transition;
+                }
+                if (pr == 0) {
+                    new_state = KL_CONN_PROXY_HEADER;   /* need more bytes */
+                    goto transition;
+                }
+                /* Done — advance to the real initial state. */
+                if (s->config.tls) {
+                    c->tls_want = KL_EVENT_READ;
+                    c->state = KL_CONN_TLS_HANDSHAKE;
+                } else {
+                    c->state = KL_CONN_READING;
+                }
+                new_state = c->state;
+                /* Process any bytes already buffered after the header this
+                 * tick; if none are pending, wait for the next event (edge-
+                 * triggered backends don't re-deliver the consumed readiness,
+                 * but newly-arriving bytes always trigger). */
+                {
+                    uint8_t probe;
+                    if (recv(c->fd, &probe, 1, MSG_PEEK) <= 0)
+                        goto transition;
+                }
+            }
 
             /* TLS handshake — handle before normal read/write */
             if (c->state == KL_CONN_TLS_HANDSHAKE) {
@@ -1040,7 +1105,8 @@ transition:
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_READING ||
-                       new_state == KL_CONN_READING_BODY) {
+                       new_state == KL_CONN_READING_BODY ||
+                       new_state == KL_CONN_PROXY_HEADER) {
                 if (kl_event_mod(&s->ev.loop, c->fd,
                                  KL_EVENT_READ, c) < 0) {
                     kl_event_del(&s->ev.loop, c->fd);
@@ -1206,6 +1272,12 @@ void kl_server_free(KlServer *s) {
     }
     kl_server_close_listener(s);
     kl_event_ctx_free(&s->ev);
+    if (s->proxy_cidrs) {
+        kl_free(&s->alloc_storage, s->proxy_cidrs,
+                (size_t)s->proxy_cidr_count * sizeof(KlCidr));
+        s->proxy_cidrs = NULL;
+        s->proxy_cidr_count = 0;
+    }
     kl_conn_pool_free(&s->pool);
     kl_router_free(&s->router);
     if (s->config.tls && s->config.tls->ctx_destroy) {

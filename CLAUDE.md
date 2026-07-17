@@ -32,7 +32,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-31 orthogonal modules, each independently testable:
+32 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -65,6 +65,7 @@ make clean        # remove all build artifacts
 29. **drain** — Backpressure write buffer: buffers unsent data on would-block, flushes on write-readiness, with on_drain callback and max_size cap
 30. **file_io** — Pluggable async file I/O vtable: submit/cancel/tick lifecycle, io_uring backend for true async reads (non-TLS file responses)
 31. **resolver_cache** — Caching DNS resolver decorator: wraps any KlResolver, caches successful results with configurable TTL/capacity, transparent to consumers
+32. **proxy_protocol** — PROXY protocol v1/v2 header parser + CIDR trust matching (recover the real client address behind an L4 load balancer; gated by `proxy_trusted_cidrs`)
 
 **Deliberate design choices:**
 

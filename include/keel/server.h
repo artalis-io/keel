@@ -10,6 +10,7 @@
 #include <keel/h2_server.h>
 #include <keel/connection.h>
 #include <keel/event_ctx.h>
+#include <keel/proxy_protocol.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -78,6 +79,9 @@ typedef struct KlConfig {
                                     *   Changing owner needs privilege (CAP_CHOWN/root). */
     const char *unix_socket_group; /**< chown socket to this group name; NULL = leave.
                                     *   Applied before listen(), so no exposure window. */
+    const char *proxy_trusted_cidrs; /**< accept PROXY protocol (v1/v2) headers only from
+                                      *   sources in this comma-separated CIDR allowlist
+                                      *   ("10.0.0.0/8,::1/128"); NULL = disabled. */
     int listen_fd;              /**< adopt this pre-bound+listening fd (socket activation);
                                  *   0 = disabled (KEEL creates its own socket). Transport is
                                  *   auto-detected from the fd; KEEL never unlinks an adopted
@@ -112,6 +116,8 @@ typedef struct KlServer {
     int listen_fd;              /**< Listening socket fd */
     int bound_port;             /**< actual port after bind (useful with port=0) */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */
+    KlCidr *proxy_cidrs;        /**< parsed proxy_trusted_cidrs (NULL = off) */
+    int proxy_cidr_count;       /**< number of trusted CIDRs */
     int listen_paused;          /**< 1 = listen fd removed from event loop (pool full) */
     _Atomic int running;        /**< Server is running */
     _Atomic int draining;       /**< Graceful shutdown in progress */

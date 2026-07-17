@@ -1,6 +1,6 @@
 # Client-Identity Trio — Design
 
-Status: **A in progress**, B/C planned.
+Status: **A + B done**, C planned.
 Author: design agreed 2026-07-17.
 
 Exposes *who is on the other end* of a connection to handlers — the TCP/TLS
@@ -52,7 +52,15 @@ Tests: loopback client → `127.0.0.1` + port; IPv6; AF_UNIX → -1.
 
 ---
 
-## B. PROXY protocol (v1 + v2, CIDR-gated)  *(planned)*
+## B. PROXY protocol (v1 + v2, CIDR-gated)  *(done)*
+
+Implementation notes: `src/proxy_protocol.c` holds the pure v1/v2 parser +
+CIDR list; `KL_CONN_PROXY_HEADER` runs before TLS/HTTP and uses `MSG_PEEK` to
+detect + size the header, then consumes exactly it. After the header, a 1-byte
+`MSG_PEEK` decides whether to process already-buffered bytes this tick or wait
+for the next event (edge-triggered epoll/kqueue don't re-deliver consumed
+readiness). `peer_source` records SOCKET vs PROXY.
+
 
 Config:
 ```c

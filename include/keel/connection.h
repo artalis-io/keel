@@ -15,12 +15,18 @@
 /** @brief Default read buffer size (bytes). */
 #define KL_READ_BUF_SIZE 8192
 
+/** @brief peer_source values. @{ */
+#define KL_PEER_SOCKET 0   /**< Address came from the accepted socket */
+#define KL_PEER_PROXY  1   /**< Address came from a trusted PROXY header */
+/** @} */
+
 typedef struct KlTls KlTls;
 typedef struct KlWsServerConn KlWsServerConn;
 typedef struct KlH2ServerConn KlH2ServerConn;
 typedef struct KlH2ServerConfig KlH2ServerConfig;
 
 typedef enum {
+    KL_CONN_PROXY_HEADER,    /**< Reading a PROXY protocol header (pre-TLS) */
     KL_CONN_TLS_HANDSHAKE,   /**< TLS handshake in progress */
     KL_CONN_READING,         /**< Reading request headers */
     KL_CONN_READING_BODY,    /**< Reading request body */
@@ -39,6 +45,7 @@ typedef struct KlConn {
 
     struct sockaddr_storage peer_addr;  /**< Client address (captured at accept) */
     socklen_t peer_addr_len;            /**< 0 if unavailable */
+    uint8_t peer_source;                /**< KL_PEER_SOCKET | KL_PEER_PROXY */
 
     char *read_buf;             /**< Read buffer */
     size_t read_len;            /**< Bytes in read buffer */
@@ -118,6 +125,17 @@ void    kl_conn_pool_free(KlConnPool *pool);
  * @return New connection state.
  */
 KlConnState kl_conn_on_handshake(KlConn *c);
+
+/**
+ * @brief Read/parse a PROXY protocol header (state KL_CONN_PROXY_HEADER).
+ *
+ * Uses MSG_PEEK to inspect the leading bytes without consuming the following
+ * TLS/HTTP stream; on a valid header it consumes exactly the header bytes and
+ * overwrites conn->peer_addr with the real client address.
+ *
+ * @return 1 = done (proceed to TLS/read), 0 = need more bytes, -1 = close.
+ */
+int kl_conn_read_proxy_header(KlConn *c);
 
 /**
  * @brief Process readable data on a connection (parse headers/body, invoke handler).
