@@ -99,8 +99,9 @@ static void mock_tls_init(MockTls *m) {
 /* ── Vtable and enum tests ───────────────────────────────────────── */
 
 UTEST(tls, vtable_struct_size) {
-    /* KlTls has 9 function pointers (7 required + alpn_protocol + set_hostname optional) */
-    ASSERT_EQ(sizeof(KlTls), 9 * sizeof(void *));
+    /* KlTls has 10 function pointers (7 required + alpn_protocol + set_hostname
+     * + peer_cert optional) */
+    ASSERT_EQ(sizeof(KlTls), 10 * sizeof(void *));
 }
 
 UTEST(tls, result_enum_values) {

@@ -101,7 +101,8 @@ make clean        # remove all build artifacts
 | `KlCorsConfig` | `cors.h` | CORS config: allowed origins, methods, headers, credentials |
 | `KlEventLoop` | `event.h` | Platform event loop: init, add, mod, del, wait, close |
 | `KlEventCtx` | `event_ctx.h` | Composable event context: loop + allocator + watcher list |
-| `KlTls` | `tls.h` | Vtable: handshake, read, write, shutdown, pending, reset, set_hostname, destroy |
+| `KlTls` | `tls.h` | Vtable: handshake, read, write, shutdown, pending, reset, set_hostname, destroy, alpn_protocol, peer_cert |
+| `KlPeerCert` | `tls.h` | Verified mTLS client-cert identity: subject/issuer CN, SANs, SHA-256 fingerprint, validity window, raw DER |
 | `KlTlsCtx` | `tls.h` | Opaque per-server TLS context (user-owned) |
 | `KlTlsConfig` | `tls.h` | TLS config: ctx, factory, ctx_destroy |
 | `KlTlsResult` | `tls.h` | Enum: OK, WANT_READ, WANT_WRITE, ERROR |

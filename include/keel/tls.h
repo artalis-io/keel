@@ -3,6 +3,7 @@
 
 #include <keel/allocator.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 /**
@@ -23,6 +24,32 @@ typedef enum {
  * at server init and reused via reset() across keep-alive connections.
  */
 typedef struct KlTls KlTls;
+
+/**
+ * @brief Verified peer (client) certificate identity from an mTLS handshake.
+ *
+ * Filled by the optional KlTls::peer_cert method. `verified` reports whether
+ * the certificate passed CA-chain validation — a certificate can be *present*
+ * (client sent one) yet *unverified* (chain/expiry/hostname failure) when the
+ * server is configured for optional client auth. Always check `verified` before
+ * trusting the identity fields.
+ *
+ * String fields are always NUL-terminated (empty string when the field is
+ * absent from the certificate). `der` points into backend-owned memory that
+ * remains valid only until the next reset()/destroy() on the session — copy it
+ * if you need it beyond the current request.
+ */
+typedef struct {
+    int      verified;               /**< 1 = passed CA verification, 0 = present but not verified */
+    char     subject_cn[256];        /**< Subject CommonName, or "" */
+    char     san[512];               /**< Comma-separated DNS/IP SANs, or "" */
+    char     issuer_cn[256];         /**< Issuer CommonName, or "" */
+    char     fingerprint_sha256[65]; /**< Lowercase hex SHA-256 of the DER cert, or "" */
+    int64_t  not_before;             /**< Validity start (unix time), or 0 */
+    int64_t  not_after;              /**< Validity end (unix time), or 0 */
+    const uint8_t *der;              /**< Raw DER certificate (backend-owned) */
+    size_t   der_len;                /**< Length of `der`, 0 if none */
+} KlPeerCert;
 
 struct KlTls {
     /**
@@ -85,6 +112,18 @@ struct KlTls {
      * @return 0 on success, -1 on error.
      */
     int (*set_hostname)(KlTls *self, const char *hostname);
+
+    /**
+     * @brief Extract the verified peer (client) certificate identity.
+     *
+     * Server-side mTLS: fills `*out` with the client certificate presented
+     * during the handshake. Optional — set to NULL if the backend does not
+     * support client-certificate extraction.
+     * @param self TLS session (handshake must be complete).
+     * @param out  Caller-provided struct to populate.
+     * @return 0 if a certificate was present and `*out` filled, -1 if none.
+     */
+    int (*peer_cert)(KlTls *self, KlPeerCert *out);
 };
 
 /**

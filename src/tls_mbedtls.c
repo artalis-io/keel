@@ -17,13 +17,18 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/error.h>
 #include <mbedtls/net_sockets.h>
+#include <mbedtls/sha256.h>
+#include <mbedtls/oid.h>
+#include <mbedtls/asn1.h>
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 
 /* Secure zeroing — scrub key material before free.
  * Uses volatile pointer to prevent compiler from optimizing away the store.
@@ -207,6 +212,111 @@ static const char *tls_alpn_protocol(KlTls *self)
     return mbedtls_ssl_get_alpn_protocol(&t->ssl);
 }
 
+/* ── mTLS peer-certificate extraction ────────────────────────────── */
+
+/* Copy the CommonName RDN of an X.509 name into a NUL-terminated buffer. */
+static void x509_extract_cn(const mbedtls_x509_name *name, char *out, size_t outlen)
+{
+    out[0] = '\0';
+    for (const mbedtls_x509_name *n = name; n != NULL; n = n->next) {
+        if (MBEDTLS_OID_CMP(MBEDTLS_OID_AT_CN, &n->oid) == 0) {
+            size_t len = n->val.len;
+            if (len >= outlen)
+                len = outlen - 1;
+            memcpy(out, n->val.p, len);
+            out[len] = '\0';
+            return;
+        }
+    }
+}
+
+/* Render the subjectAltName sequence as a comma-separated "DNS:x,IP:y" list. */
+static void x509_extract_san(const mbedtls_x509_sequence *seq, char *out, size_t outlen)
+{
+    out[0] = '\0';
+    size_t off = 0;
+    for (const mbedtls_x509_sequence *cur = seq; cur != NULL; cur = cur->next) {
+        char item[INET6_ADDRSTRLEN + 8];
+        int tag = cur->buf.tag & MBEDTLS_ASN1_TAG_VALUE_MASK;
+
+        if (tag == MBEDTLS_X509_SAN_DNS_NAME) {
+            size_t len = cur->buf.len;
+            if (len > sizeof(item) - 5)
+                len = sizeof(item) - 5;
+            memcpy(item, "DNS:", 4);
+            memcpy(item + 4, cur->buf.p, len);
+            item[4 + len] = '\0';
+        } else if (tag == MBEDTLS_X509_SAN_IP_ADDRESS) {
+            char ip[INET6_ADDRSTRLEN];
+            if (cur->buf.len == 4 && inet_ntop(AF_INET, cur->buf.p, ip, sizeof(ip)))
+                snprintf(item, sizeof(item), "IP:%s", ip);
+            else if (cur->buf.len == 16 && inet_ntop(AF_INET6, cur->buf.p, ip, sizeof(ip)))
+                snprintf(item, sizeof(item), "IP:%s", ip);
+            else
+                continue;
+        } else {
+            continue;   /* rfc822Name, URI, etc. — not surfaced */
+        }
+
+        size_t ilen = strlen(item);
+        if (off + ilen + (off ? 1u : 0u) >= outlen)
+            break;      /* out of room — stop cleanly */
+        if (off)
+            out[off++] = ',';
+        memcpy(out + off, item, ilen);
+        off += ilen;
+        out[off] = '\0';
+    }
+}
+
+/* Convert an X.509 UTC broken-down time to a Unix timestamp (timegm-style,
+ * no TZ dependency; Howard Hinnant's days-from-civil algorithm). */
+static int64_t x509_time_to_unix(const mbedtls_x509_time *t)
+{
+    int64_t y = t->year;
+    int m = t->mon, d = t->day;
+    y -= (m <= 2);
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    int64_t days = era * 146097 + doe - 719468;
+    return days * 86400 + (int64_t)t->hour * 3600 + (int64_t)t->min * 60 + t->sec;
+}
+
+static int tls_peer_cert(KlTls *self, KlPeerCert *out)
+{
+    KlMbedtlsTls *t = (KlMbedtlsTls *)self;
+    if (!t->handshake_done)
+        return -1;
+
+    const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&t->ssl);
+    if (!crt)
+        return -1;   /* no client certificate presented */
+
+    memset(out, 0, sizeof(*out));
+    out->verified = (mbedtls_ssl_get_verify_result(&t->ssl) == 0) ? 1 : 0;
+    x509_extract_cn(&crt->subject, out->subject_cn, sizeof(out->subject_cn));
+    x509_extract_cn(&crt->issuer, out->issuer_cn, sizeof(out->issuer_cn));
+    x509_extract_san(&crt->subject_alt_names, out->san, sizeof(out->san));
+
+    unsigned char hash[32];
+    if (mbedtls_sha256(crt->raw.p, crt->raw.len, hash, 0) == 0) {
+        static const char hex[] = "0123456789abcdef";
+        for (int i = 0; i < 32; i++) {
+            out->fingerprint_sha256[i * 2]     = hex[hash[i] >> 4];
+            out->fingerprint_sha256[i * 2 + 1] = hex[hash[i] & 0x0F];
+        }
+        out->fingerprint_sha256[64] = '\0';
+    }
+
+    out->not_before = x509_time_to_unix(&crt->valid_from);
+    out->not_after  = x509_time_to_unix(&crt->valid_to);
+    out->der     = crt->raw.p;
+    out->der_len = crt->raw.len;
+    return 0;
+}
+
 /* ── Factory ─────────────────────────────────────────────────────── */
 
 KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
@@ -235,6 +345,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     t->base.destroy      = tls_destroy;
     t->base.alpn_protocol = tls_alpn_protocol;
     t->base.set_hostname  = kl_tls_mbedtls_set_hostname;
+    t->base.peer_cert     = tls_peer_cert;
 
     /* Initialize SSL context */
     mbedtls_ssl_init(&t->ssl);

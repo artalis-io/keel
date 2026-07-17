@@ -314,6 +314,27 @@ const struct sockaddr *kl_request_peer_sockaddr(const KlRequest *req,
                                                 socklen_t *len);
 
 /**
+ * @brief Extract the verified mTLS client certificate for a request.
+ *
+ * Server-side mutual TLS: when the client presented a certificate during the
+ * handshake, fills @p out with its parsed identity (subject/issuer CN, SANs,
+ * SHA-256 fingerprint, validity window) and raw DER.
+ *
+ * `out->verified` reports whether the certificate passed CA-chain validation.
+ * A certificate can be *present* but *unverified* when the server is configured
+ * for optional client auth — always check `verified` before trusting the
+ * identity. `out->der` points into connection-owned memory valid only until the
+ * request completes; copy it if you need it longer.
+ *
+ * @param req  The request.
+ * @param out  Caller-provided struct to populate (zeroed on entry).
+ * @return 0 if a certificate was present and @p out filled, -1 otherwise
+ *         (plaintext connection, no client certificate, or a TLS backend
+ *         without client-certificate support).
+ */
+int kl_request_peer_cert(const KlRequest *req, KlPeerCert *out);
+
+/**
  * @brief Return an inherited listening socket fd from socket activation.
  *
  * Implements the systemd LISTEN_FDS protocol: if LISTEN_PID matches this

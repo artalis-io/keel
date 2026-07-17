@@ -1,6 +1,6 @@
 # Client-Identity Trio — Design
 
-Status: **A + B done**, C planned.
+Status: **A + B + C done**.
 Author: design agreed 2026-07-17.
 
 Exposes *who is on the other end* of a connection to handlers — the TCP/TLS
@@ -90,7 +90,24 @@ bound DoS; malformed CIDR at init → `KL_ERR_INVALID_ARG`.
 
 ---
 
-## C. TLS client certificate (mTLS)  *(planned)*
+## C. TLS client certificate (mTLS)  *(done)*
+
+Implementation notes: `KlTls` gains an optional `peer_cert` vtable method
+(NULL-able like `alpn_protocol`); `kl_request_peer_cert()` delegates to it.
+The mbedtls backend (`src/tls_mbedtls.c`) implements extraction via
+`mbedtls_ssl_get_peer_cert` + `mbedtls_ssl_get_verify_result`, walking the
+subject/issuer RDNs for CN, the subjectAltName sequence for DNS/IP SANs, a
+SHA-256 over the raw DER for the fingerprint, and a TZ-free civil-time
+conversion for the validity window. The mTLS auth mode is wired through the
+existing `kl_tls_mbedtls_ctx_create(..., KlMtlsMode, ...)` config
+(`KL_MTLS_NONE/OPTIONAL/REQUIRED` → `MBEDTLS_SSL_VERIFY_*`).
+
+Testing: `tests/test_peer_cert.c` validates the handler→vtable plumbing with a
+passthrough TLS mock (runs in the default/CI build). The real mbedtls
+extraction was verified end-to-end against a live mTLS handshake and
+cross-checked field-by-field against `openssl x509` output (fingerprint,
+validity timestamps, SANs all matched) — the mbedtls backend is not in the
+default/CI build, so that check is run manually with `KEEL_TLS=mbedtls`.
 
 Optional vtable method on `KlTls` (NULL-able like `alpn_protocol`):
 ```c

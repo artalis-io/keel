@@ -108,6 +108,28 @@ socket address is used. `kl_request_peer_addr` then returns the real client.
   security label (Linux `SO_PEERSEC`; `-1` elsewhere).
 - `kl_peer_cred_fd(fd, &cred)` — the building block, for any connected fd.
 
+### mTLS client certificates
+
+When the server requests a client certificate (mutual TLS), a handler can read
+the verified client identity:
+
+```c
+KlPeerCert pc;
+if (kl_request_peer_cert(req, &pc) == 0 && pc.verified) {
+    /* pc.subject_cn, pc.san, pc.issuer_cn, pc.fingerprint_sha256,
+     * pc.not_before/not_after, pc.der/der_len — the raw DER. */
+}
+```
+
+`kl_request_peer_cert` returns `-1` for a plaintext connection, when the client
+presented no certificate, or on a TLS backend without client-cert support.
+`pc.verified` reports whether the certificate passed CA-chain validation — a
+certificate can be *present* but *unverified* under optional client auth, so
+always check it before trusting the identity. Extraction is provided by the
+TLS backend's optional `peer_cert` vtable method (implemented by the bundled
+mbedtls backend; the mTLS mode is set via `kl_tls_mbedtls_ctx_create(...,
+KL_MTLS_OPTIONAL|KL_MTLS_REQUIRED, ...)`).
+
 ### Socket activation (inherited fd)
 
 Instead of binding its own socket, KEEL can adopt a pre-bound, already-listening

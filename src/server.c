@@ -495,6 +495,16 @@ int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
     return -1;  /* AF_UNIX or other — no IP address (use peer credentials) */
 }
 
+int kl_request_peer_cert(const KlRequest *req, KlPeerCert *out) {
+    if (!req || !out)
+        return -1;
+    const KlConn *conn = kl_request_conn(req);
+    if (!conn || !conn->tls || !conn->tls->peer_cert)
+        return -1;   /* plaintext connection, or backend lacks mTLS support */
+    memset(out, 0, sizeof(*out));
+    return conn->tls->peer_cert(conn->tls, out);
+}
+
 int kl_systemd_listen_fds(int *count) {
     const char *pid_s = getenv("LISTEN_PID");
     const char *fds_s = getenv("LISTEN_FDS");
