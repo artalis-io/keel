@@ -41,11 +41,11 @@
 /** @brief Major version number. */
 #define KL_VERSION_MAJOR  2
 /** @brief Minor version number. */
-#define KL_VERSION_MINOR  2
+#define KL_VERSION_MINOR  8
 /** @brief Patch version number. */
-#define KL_VERSION_PATCH  1
+#define KL_VERSION_PATCH  0
 /** @brief Version string ("major.minor.patch"). */
-#define KL_VERSION_STRING "2.2.1"
+#define KL_VERSION_STRING "2.8.0"
 
 /** @} */
 
