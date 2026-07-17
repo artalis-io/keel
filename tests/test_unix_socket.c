@@ -1,6 +1,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <poll.h>
 #include <pthread.h>
@@ -133,6 +134,46 @@ static void ws_cli_on_close(KlWsClientConn *ws, uint16_t code, const char *r,
                             size_t rlen, void *ud) {
     (void)ws; (void)code; (void)r; (void)rlen;
     ((WsCliCtx *)ud)->closed = 1;
+}
+
+/* Passthrough TLS: routes I/O through the KlTls vtable without encryption, so
+ * the full https+unix code path (handshake state, SNI, TLS read/write) is
+ * exercised without a real crypto backend. */
+typedef struct { KlTls base; KlAllocator *alloc; } PtTls;
+
+static KlTlsResult pt_handshake(KlTls *self, int fd) { (void)self; (void)fd; return KL_TLS_OK; }
+static ssize_t pt_read(KlTls *self, int fd, void *buf, size_t len) {
+    (void)self; ssize_t r;
+    do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+    return r;
+}
+static ssize_t pt_write(KlTls *self, int fd, const void *buf, size_t len) {
+    (void)self; ssize_t r;
+    do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+    return r;
+}
+static KlTlsResult pt_shutdown(KlTls *self, int fd) { (void)self; (void)fd; return KL_TLS_OK; }
+static size_t pt_pending(KlTls *self) { (void)self; return 0; }
+static void pt_reset(KlTls *self) { (void)self; }
+static void pt_destroy(KlTls *self) { PtTls *p = (PtTls *)self; kl_free(p->alloc, p, sizeof(*p)); }
+static KlTls *pt_factory(KlTlsCtx *ctx, KlAllocator *alloc) {
+    (void)ctx;
+    PtTls *p = kl_malloc(alloc, sizeof(*p));
+    if (!p) return NULL;
+    memset(p, 0, sizeof(*p));
+    p->alloc = alloc;
+    p->base.handshake = pt_handshake;
+    p->base.read = pt_read;
+    p->base.write = pt_write;
+    p->base.shutdown = pt_shutdown;
+    p->base.pending = pt_pending;
+    p->base.reset = pt_reset;
+    p->base.destroy = pt_destroy;
+    p->base.alpn_protocol = NULL;
+    p->base.set_hostname = NULL;
+    return &p->base;
 }
 
 static void test_sock_path(char *buf, size_t buflen, const char *name) {
@@ -683,6 +724,81 @@ UTEST(unix_socket, websocket_connects_over_ws_unix) {
 
     kl_ws_client_free(ws);
     kl_event_ctx_free(&ev);
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+}
+
+UTEST(unix_socket, tls_over_https_unix) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "tlsunix");
+    unlink(path);
+
+    KlTlsConfig srv_tls = { .factory = pt_factory };
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+        .tls = &srv_tls,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/hello", unix_handle_hello, NULL, NULL);
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    char enc[220];
+    pct_encode_path(path, enc, sizeof(enc));
+    char url[300];
+    snprintf(url, sizeof(url), "https+unix://%s/hello", enc);
+
+    /* Client speaks TLS (passthrough) over the UNIX socket; SNI defaults to
+     * "localhost". Exercises the https+unix connect + handshake path. */
+    KlTlsConfig cli_tls = { .factory = pt_factory };
+    KlClientConfig ccfg;
+    memset(&ccfg, 0, sizeof(ccfg));
+    ccfg.tls = &cli_tls;
+
+    KlAllocator a = kl_allocator_default();
+    KlClientResponse resp;
+    int rc = kl_client_request(&a, &ccfg, "GET", url, NULL, 0, NULL, 0, &resp);
+    ASSERT_EQ(0, rc);
+    ASSERT_EQ(200, resp.status);
+    ASSERT_TRUE(resp.body != NULL && strstr(resp.body, "\"ok\":true") != NULL);
+    kl_client_response_free(&resp);
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+}
+
+UTEST(unix_socket, listen_fd_is_cloexec) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "cloexec");
+    unlink(path);
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    int fdflags = fcntl(srv.listen_fd, F_GETFD);
+    ASSERT_TRUE(fdflags >= 0);
+    ASSERT_TRUE((fdflags & FD_CLOEXEC) != 0);
+
     kl_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_server_free(&srv);
