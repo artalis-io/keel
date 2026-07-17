@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <grp.h>
 
 /* Peer-credential capture (set inside the handler). */
 static KlPeerCred g_captured_cred;
@@ -774,6 +775,82 @@ UTEST(unix_socket, tls_over_https_unix) {
     kl_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_server_free(&srv);
+}
+
+UTEST(unix_socket, socket_group_is_applied) {
+    struct group *g = getgrgid(getgid());
+    if (!g || !g->gr_name)
+        UTEST_SKIP("no group name for current gid");
+    char grpname[128];
+    snprintf(grpname, sizeof(grpname), "%s", g->gr_name);
+
+    char path[108];
+    test_sock_path(path, sizeof(path), "grp");
+    unlink(path);
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .unix_socket_group = grpname,   /* our own group — allowed unprivileged */
+        .unix_socket_mode = 0660,
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
+    int probe = connect_unix_retry(path, 200);
+    ASSERT_TRUE(probe >= 0);
+    close(probe);
+
+    struct stat st;
+    ASSERT_EQ(0, stat(path, &st));
+    ASSERT_EQ(getgid(), st.st_gid);
+    ASSERT_EQ((mode_t)0660, (mode_t)(st.st_mode & 0777));
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+}
+
+UTEST(unix_socket, unknown_owner_rejected) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "badowner");
+    unlink(path);
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .unix_socket_owner = "keel_no_such_user_zzz9",
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_server_run(&srv));
+    ASSERT_EQ(srv.last_error, KL_ERR_INVALID_ARG);
+    kl_server_free(&srv);
+    ASSERT_NE(0, access(path, F_OK));   /* socket unlinked on failure */
+    unlink(path);
+}
+
+UTEST(unix_socket, unknown_group_rejected) {
+    char path[108];
+    test_sock_path(path, sizeof(path), "badgroup");
+    unlink(path);
+
+    KlServer srv;
+    KlConfig cfg = {
+        .unix_socket_path = path,
+        .unix_socket_unlink = 1,
+        .unix_socket_group = "keel_no_such_group_zzz9",
+        .max_connections = 4,
+    };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    ASSERT_EQ(-1, kl_server_run(&srv));
+    ASSERT_EQ(srv.last_error, KL_ERR_INVALID_ARG);
+    kl_server_free(&srv);
+    unlink(path);
 }
 
 UTEST(unix_socket, listen_fd_is_cloexec) {

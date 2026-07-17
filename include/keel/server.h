@@ -74,6 +74,10 @@ typedef struct KlConfig {
     const char *unix_socket_path; /**< AF_UNIX path when transport is KL_TRANSPORT_UNIX */
     int unix_socket_unlink;     /**< unlink path before bind and on free after successful bind */
     unsigned int unix_socket_mode; /**< chmod socket path after bind; 0 = leave umask/default */
+    const char *unix_socket_owner; /**< chown socket to this username; NULL = leave.
+                                    *   Changing owner needs privilege (CAP_CHOWN/root). */
+    const char *unix_socket_group; /**< chown socket to this group name; NULL = leave.
+                                    *   Applied before listen(), so no exposure window. */
     int listen_fd;              /**< adopt this pre-bound+listening fd (socket activation);
                                  *   0 = disabled (KEEL creates its own socket). Transport is
                                  *   auto-detected from the fd; KEEL never unlinks an adopted

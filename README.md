@@ -53,7 +53,9 @@ KlServer s;
 KlConfig cfg = {
     .unix_socket_path = "/run/myapp/keel.sock",
     .unix_socket_unlink = 1,
-    .unix_socket_mode = 0660,  /* optional; 0 leaves umask/default */
+    .unix_socket_mode = 0660,       /* optional; 0 leaves umask/default */
+    .unix_socket_group = "myapp",   /* optional; chown to this group */
+    .unix_socket_owner = NULL,      /* optional; chown to this user (needs root) */
 };
 
 kl_server_init(&s, &cfg);
@@ -61,6 +63,14 @@ kl_server_route(&s, "GET", "/health", handle_health, NULL, NULL);
 kl_server_run(&s);
 kl_server_free(&s);
 ```
+
+`unix_socket_group` / `unix_socket_owner` name a group / user to `chown` the
+socket to — the classic "only members of group X may connect" pattern (pair with
+`unix_socket_mode = 0660`). Ownership is applied *before* `listen()`, so the
+socket is never reachable with the wrong owner/group. Setting the group to one
+the process belongs to works unprivileged; changing the owner to a different
+user needs `CAP_CHOWN`/root. Unknown names fail `kl_server_run` with
+`KL_ERR_INVALID_ARG`.
 
 `KlConfig.transport = KL_TRANSPORT_UNIX` is also available when you want to be explicit. TCP remains the zero-initialized default.
 

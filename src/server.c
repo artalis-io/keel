@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <pwd.h>
+#include <grp.h>
 #include <stddef.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -178,6 +180,49 @@ static int kl_server_unlink_stale_unix_socket(KlServer *s, const char *path) {
     return 0;
 }
 
+/* Resolve a username to a uid via getpwnam_r. Returns 0 on success, -1 if the
+ * user is unknown or on allocation failure (sets last_error accordingly). */
+static int kl_resolve_uid(KlServer *s, const char *name, uid_t *out) {
+    long hint = sysconf(_SC_GETPW_R_SIZE_MAX);
+    size_t bufsz = (hint > 0) ? (size_t)hint : 4096;
+    for (;;) {
+        char *buf = kl_malloc(&s->alloc_storage, bufsz);
+        if (!buf) { s->last_error = KL_ERR_ALLOC; return -1; }
+        struct passwd pw, *res = NULL;
+        int rc = getpwnam_r(name, &pw, buf, bufsz, &res);
+        if (rc == 0) {
+            int ok = res ? 0 : -1;
+            if (ok == 0) *out = res->pw_uid;
+            kl_free(&s->alloc_storage, buf, bufsz);
+            return ok;
+        }
+        kl_free(&s->alloc_storage, buf, bufsz);
+        if (rc == ERANGE && bufsz < (1u << 20)) { bufsz *= 2; continue; }
+        return -1;
+    }
+}
+
+/* Resolve a group name to a gid via getgrnam_r. Same contract as above. */
+static int kl_resolve_gid(KlServer *s, const char *name, gid_t *out) {
+    long hint = sysconf(_SC_GETGR_R_SIZE_MAX);
+    size_t bufsz = (hint > 0) ? (size_t)hint : 4096;
+    for (;;) {
+        char *buf = kl_malloc(&s->alloc_storage, bufsz);
+        if (!buf) { s->last_error = KL_ERR_ALLOC; return -1; }
+        struct group gr, *res = NULL;
+        int rc = getgrnam_r(name, &gr, buf, bufsz, &res);
+        if (rc == 0) {
+            int ok = res ? 0 : -1;
+            if (ok == 0) *out = res->gr_gid;
+            kl_free(&s->alloc_storage, buf, bufsz);
+            return ok;
+        }
+        kl_free(&s->alloc_storage, buf, bufsz);
+        if (rc == ERANGE && bufsz < (1u << 20)) { bufsz *= 2; continue; }
+        return -1;
+    }
+}
+
 static int kl_server_bind_unix(KlServer *s) {
     const char *path = s->config.unix_socket_path;
     if (!path || path[0] == '\0') {
@@ -236,22 +281,60 @@ static int kl_server_bind_unix(KlServer *s) {
     }
 
     s->unix_socket_owned = 1;
+
+    /* Ownership: resolve owner/group names to ids and chown the socket node.
+     * Done before listen() (where connections first become possible), so the
+     * socket is never reachable with the wrong owner/group.  chown to a
+     * different user needs privilege (CAP_CHOWN/root); setting group to one
+     * the process belongs to is generally allowed for the file owner. */
+    if (s->config.unix_socket_owner || s->config.unix_socket_group) {
+        uid_t uid = (uid_t)-1;   /* -1 = leave unchanged (chown semantics) */
+        gid_t gid = (gid_t)-1;
+        if (s->config.unix_socket_owner &&
+            kl_resolve_uid(s, s->config.unix_socket_owner, &uid) < 0) {
+            if (s->last_error != KL_ERR_ALLOC) {
+                kl_log(s, KL_LOG_ERROR, "unknown unix socket owner '%s'",
+                       s->config.unix_socket_owner);
+                s->last_error = KL_ERR_INVALID_ARG;
+            }
+            goto fail;
+        }
+        if (s->config.unix_socket_group &&
+            kl_resolve_gid(s, s->config.unix_socket_group, &gid) < 0) {
+            if (s->last_error != KL_ERR_ALLOC) {
+                kl_log(s, KL_LOG_ERROR, "unknown unix socket group '%s'",
+                       s->config.unix_socket_group);
+                s->last_error = KL_ERR_INVALID_ARG;
+            }
+            goto fail;
+        }
+        if (chown(path, uid, gid) < 0) {
+            kl_log_errno(s, KL_LOG_ERROR, "chown unix socket");
+            s->last_error = KL_ERR_BIND;
+            goto fail;
+        }
+    }
+
     /* Enforce the exact mode regardless of the platform's socket-creation
      * base (some create nodes 0666, not 0777).  The umask above already
-     * closed the permissions window; this guarantees the precise bits. */
+     * closed the permissions window; this guarantees the precise bits, and
+     * re-asserts them after any chown (which clears set-gid on some OSes). */
     if (s->config.unix_socket_mode != 0 &&
         chmod(path, (mode_t)s->config.unix_socket_mode) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "chmod unix socket");
         s->last_error = KL_ERR_BIND;
-        close(s->listen_fd);
-        s->listen_fd = -1;
-        unlink(path);
-        s->unix_socket_owned = 0;
-        return -1;
+        goto fail;
     }
 
     s->bound_port = 0;
     return 0;
+
+fail:
+    close(s->listen_fd);
+    s->listen_fd = -1;
+    unlink(path);
+    s->unix_socket_owned = 0;
+    return -1;
 }
 
 /*
