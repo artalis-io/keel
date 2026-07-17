@@ -81,10 +81,17 @@ On a UNIX socket you can identify the connecting process from a handler:
 ```c
 KlPeerCred cred;
 if (kl_request_peer_cred(req, &cred) == 0) {
-    /* cred.uid, cred.gid always available; cred.pid only if cred.has_pid
-     * (Linux SO_PEERCRED; macOS/BSD getpeereid provides uid/gid only). */
+    /* cred.uid, cred.gid always available; cred.pid when cred.has_pid
+     * (Linux SO_PEERCRED, macOS LOCAL_PEERPID). */
 }
 ```
+
+Related accessors:
+- `kl_ws_server_peer_cred(ws, &cred)` — same, for a live WebSocket connection
+  *after* the HTTP upgrade (when there's no longer a `KlRequest`).
+- `kl_request_peer_label(req, buf, sizeof buf)` — the peer's SELinux/AppArmor
+  security label (Linux `SO_PEERSEC`; `-1` elsewhere).
+- `kl_peer_cred_fd(fd, &cred)` — the building block, for any connected fd.
 
 ### Socket activation (inherited fd)
 
@@ -98,6 +105,10 @@ int fd = kl_systemd_listen_fd();          /* -1 if not socket-activated */
 KlConfig cfg = { .listen_fd = fd > 0 ? fd : 0,
                  .unix_socket_path = fd > 0 ? NULL : "/run/myapp/keel.sock" };
 ```
+
+For a unit passing several sockets, `kl_systemd_listen_fds(&count)` reports how
+many were passed (fds 3 … 3+count-1) and `kl_systemd_listen_fd_by_name("https")`
+selects one by its `FileDescriptorName`. Adopt one per `KlServer`.
 
 ### Connecting a client over UNIX
 

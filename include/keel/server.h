@@ -260,6 +260,31 @@ void kl_server_stats(const KlServer *s, KlServerStats *out);
 int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out);
 
 /**
+ * @brief Read peer credentials directly from a connected socket fd.
+ *
+ * The building block behind kl_request_peer_cred / kl_ws_server_peer_cred.
+ * Meaningful for AF_UNIX sockets. On macOS the pid is filled via LOCAL_PEERPID
+ * (has_pid = 1); Linux uses SO_PEERCRED.
+ *
+ * @param fd   Connected socket fd.
+ * @param out  Receives the peer credentials on success.
+ * @return 0 on success, -1 if unavailable.
+ */
+int kl_peer_cred_fd(int fd, KlPeerCred *out);
+
+/**
+ * @brief Read the peer's security label (SELinux/AppArmor) of a request's
+ *        connection. Linux-only (SO_PEERSEC).
+ *
+ * @param req     The request.
+ * @param buf     Buffer to receive the NUL-terminated label.
+ * @param buflen  Size of buf.
+ * @return 0 on success, -1 if unavailable (non-Linux, no label, or not a
+ *         UNIX socket).
+ */
+int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen);
+
+/**
  * @brief Return an inherited listening socket fd from socket activation.
  *
  * Implements the systemd LISTEN_FDS protocol: if LISTEN_PID matches this
@@ -282,5 +307,18 @@ int kl_systemd_listen_fd(void);
  * @return The first inherited fd (3), or -1 if not socket-activated.
  */
 int kl_systemd_listen_fds(int *count);
+
+/**
+ * @brief Return an inherited fd by its systemd socket name (FileDescriptorName).
+ *
+ * Matches @p name against the colon-separated LISTEN_FDNAMES list and returns
+ * the corresponding fd (SD_LISTEN_FDS_START + index). Like the other
+ * kl_systemd_listen_fd* helpers, this consumes (unsets) the LISTEN_* env vars,
+ * so call exactly one of them once.
+ *
+ * @param name  The socket name from the unit's ListenStream=/FileDescriptorName=.
+ * @return The matching fd (>= 3), or -1 if not socket-activated / no match.
+ */
+int kl_systemd_listen_fd_by_name(const char *name);
 
 #endif

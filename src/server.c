@@ -382,13 +382,9 @@ static int kl_server_bind_listener(KlServer *s) {
 
 /* cppcheck-suppress constParameterPointer  ; 'out' is written on the
    platform branches below (invisible to cppcheck's default config). */
-int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
-    if (!req || !out)
+int kl_peer_cred_fd(int fd, KlPeerCred *out) {
+    if (fd < 0 || !out)
         return -1;
-    const KlConn *conn = kl_request_conn(req);
-    if (!conn || conn->fd < 0)
-        return -1;
-    int fd = conn->fd;
 
 #if defined(__linux__) && defined(SO_PEERCRED)
     struct ucred cr;
@@ -410,10 +406,52 @@ int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
     out->gid = (long)gid;
     out->pid = 0;
     out->has_pid = 0;
+    /* macOS/BSD getpeereid gives no pid; LOCAL_PEERPID supplies it on macOS. */
+#if defined(__APPLE__) && defined(LOCAL_PEERPID)
+    {
+        pid_t pid = 0;
+        socklen_t pl = sizeof(pid);
+        if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &pl) == 0) {
+            out->pid = (long)pid;
+            out->has_pid = 1;
+        }
+    }
+#endif
     return 0;
 #else
     (void)fd;
     return -1;  /* peer credentials not supported on this platform */
+#endif
+}
+
+int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
+    if (!req)
+        return -1;
+    const KlConn *conn = kl_request_conn(req);
+    if (!conn)
+        return -1;
+    return kl_peer_cred_fd(conn->fd, out);
+}
+
+int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
+    if (!req || !buf || buflen == 0)
+        return -1;
+    const KlConn *conn = kl_request_conn(req);
+    if (!conn || conn->fd < 0)
+        return -1;
+
+#if defined(__linux__) && defined(SO_PEERSEC)
+    socklen_t len = (socklen_t)buflen;
+    if (getsockopt(conn->fd, SOL_SOCKET, SO_PEERSEC, buf, &len) != 0)
+        return -1;
+    /* Ensure NUL-termination regardless of what the kernel returned. */
+    if ((size_t)len >= buflen)
+        len = (socklen_t)(buflen - 1);
+    buf[len] = '\0';
+    return 0;
+#else
+    (void)buf; (void)buflen;
+    return -1;  /* SO_PEERSEC (SELinux/AppArmor label) is Linux-only */
 #endif
 }
 
@@ -446,6 +484,44 @@ int kl_systemd_listen_fds(int *count) {
 
 int kl_systemd_listen_fd(void) {
     return kl_systemd_listen_fds(NULL);
+}
+
+int kl_systemd_listen_fd_by_name(const char *name) {
+    if (!name)
+        return -1;
+    const char *pid_s = getenv("LISTEN_PID");
+    const char *fds_s = getenv("LISTEN_FDS");
+    const char *names = getenv("LISTEN_FDNAMES");
+    int result = -1;
+
+    if (pid_s && fds_s && names) {
+        char *end;
+        long lpid = strtol(pid_s, &end, 10);
+        long nfds = 0;
+        if (end != pid_s && *end == '\0' && (long)getpid() == lpid) {
+            nfds = strtol(fds_s, &end, 10);
+            if (!(end != fds_s && *end == '\0' && nfds >= 1 && nfds <= 4096))
+                nfds = 0;
+        }
+        /* LISTEN_FDNAMES is a colon-separated list, one name per passed fd in
+         * fd order starting at SD_LISTEN_FDS_START (3). */
+        size_t namelen = strlen(name);
+        const char *p = names;
+        for (long idx = 0; idx < nfds && p; idx++) {
+            const char *colon = strchr(p, ':');
+            size_t seglen = colon ? (size_t)(colon - p) : strlen(p);
+            if (seglen == namelen && memcmp(p, name, namelen) == 0) {
+                result = 3 + (int)idx;
+                break;
+            }
+            p = colon ? colon + 1 : NULL;
+        }
+    }
+
+    unsetenv("LISTEN_PID");
+    unsetenv("LISTEN_FDS");
+    unsetenv("LISTEN_FDNAMES");
+    return result;
 }
 
 static void kl_server_close_listener(KlServer *s) {

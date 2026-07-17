@@ -11,6 +11,7 @@
 
 #include <keel/websocket.h>
 #include <keel/drain.h>
+#include <keel/server.h>   /* KlPeerCred + kl_peer_cred_fd */
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
@@ -82,6 +83,19 @@ int kl_ws_server_close(KlWsServerConn *ws, uint16_t code, const char *reason,
 
 /** @brief Enable drain-based backpressure for WebSocket writes. */
 int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size);
+
+/**
+ * @brief Read the peer credentials of a live WebSocket connection.
+ *
+ * The post-upgrade equivalent of kl_request_peer_cred — lets a handler
+ * identify the process on the other end of a UNIX-socket WebSocket after the
+ * HTTP upgrade, when there is no longer a KlRequest.
+ *
+ * @param ws   The WebSocket server connection.
+ * @param out  Receives the peer credentials on success.
+ * @return 0 on success, -1 if unavailable (not a UNIX socket / unsupported).
+ */
+int kl_ws_server_peer_cred(const KlWsServerConn *ws, KlPeerCred *out);
 
 /* ── Internal (used by connection.c / server.c) ──────────────────── */
 

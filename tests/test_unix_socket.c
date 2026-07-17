@@ -17,11 +17,24 @@
 /* Peer-credential capture (set inside the handler). */
 static KlPeerCred g_captured_cred;
 static int        g_cred_rc = -2;
+static char       g_captured_label[256];
+static int        g_label_rc = -2;
 
 static void unix_handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
     g_cred_rc = kl_request_peer_cred(req, &g_captured_cred);
+    g_label_rc = kl_request_peer_label(req, g_captured_label,
+                                       sizeof(g_captured_label));
     kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+/* WS server-side peer-cred capture (set in on_open, post-upgrade). */
+static KlPeerCred g_ws_srv_cred;
+static int        g_ws_srv_cred_rc = -2;
+
+static void ws_srv_on_open(KlWsServerConn *ws, void *ctx) {
+    (void)ctx;
+    g_ws_srv_cred_rc = kl_ws_server_peer_cred(ws, &g_ws_srv_cred);
 }
 
 /* Percent-encode a socket path for an http+unix:// URL (encode everything
@@ -444,6 +457,12 @@ UTEST(unix_socket, peer_credentials_available) {
     ASSERT_EQ(0, g_cred_rc);
     ASSERT_EQ((long)getuid(), g_captured_cred.uid);
     ASSERT_EQ((long)getgid(), g_captured_cred.gid);
+    /* Peer is this same test process; when a pid is available (Linux
+     * SO_PEERCRED, macOS LOCAL_PEERPID) it must be ours. */
+    if (g_captured_cred.has_pid)
+        ASSERT_EQ((long)getpid(), g_captured_cred.pid);
+    /* Peer label is Linux/SELinux-only; smoke-check it doesn't misbehave. */
+    ASSERT_TRUE(g_label_rc == 0 || g_label_rc == -1);
 }
 
 UTEST(unix_socket, adopts_inherited_listen_fd) {
@@ -515,6 +534,26 @@ UTEST(unix_socket, systemd_listen_fd_protocol) {
     setenv("LISTEN_PID", "1", 1);
     setenv("LISTEN_FDS", "1", 1);
     ASSERT_EQ(-1, kl_systemd_listen_fd());
+}
+
+UTEST(unix_socket, systemd_listen_fd_by_name) {
+    char pidbuf[32];
+    snprintf(pidbuf, sizeof(pidbuf), "%ld", (long)getpid());
+
+    /* Three passed sockets named http:https:admin → fds 3,4,5. */
+    setenv("LISTEN_PID", pidbuf, 1);
+    setenv("LISTEN_FDS", "3", 1);
+    setenv("LISTEN_FDNAMES", "http:https:admin", 1);
+    ASSERT_EQ(4, kl_systemd_listen_fd_by_name("https"));
+
+    /* Env is consumed, so a repeat reports nothing. */
+    ASSERT_EQ(-1, kl_systemd_listen_fd_by_name("http"));
+
+    /* Unknown name → -1. */
+    setenv("LISTEN_PID", pidbuf, 1);
+    setenv("LISTEN_FDS", "3", 1);
+    setenv("LISTEN_FDNAMES", "http:https:admin", 1);
+    ASSERT_EQ(-1, kl_systemd_listen_fd_by_name("nope"));
 }
 
 UTEST(unix_socket, client_connects_over_http_unix) {
@@ -684,8 +723,10 @@ UTEST(unix_socket, websocket_connects_over_ws_unix) {
     };
     ASSERT_EQ(0, kl_server_init(&srv, &cfg));
 
+    g_ws_srv_cred_rc = -2;
     KlWsServerConfig ws_cfg;
     kl_ws_server_config_init(&ws_cfg);
+    ws_cfg.callbacks.on_open = ws_srv_on_open;
     ws_cfg.callbacks.on_message = ws_srv_on_message;
     ASSERT_EQ(0, kl_server_ws(&srv, "/ws", &ws_cfg));
 
@@ -722,6 +763,9 @@ UTEST(unix_socket, websocket_connects_over_ws_unix) {
     ASSERT_TRUE(wc.open);
     ASSERT_TRUE(wc.got_msg);
     ASSERT_STREQ(wc.msg, "ping");   /* echoed back */
+    /* Server read the peer's creds on the live (post-upgrade) WS connection. */
+    ASSERT_EQ(0, g_ws_srv_cred_rc);
+    ASSERT_EQ((long)getuid(), g_ws_srv_cred.uid);
 
     kl_ws_client_free(ws);
     kl_event_ctx_free(&ev);

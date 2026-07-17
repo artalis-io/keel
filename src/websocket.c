@@ -190,6 +190,12 @@ static ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
     return nw;
 }
 
+int kl_ws_server_peer_cred(const KlWsServerConn *ws, KlPeerCred *out) {
+    if (!ws || !ws->conn)
+        return -1;
+    return kl_peer_cred_fd(ws->conn->fd, out);
+}
+
 int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size) {
     if (!ws) return -1;
     kl_drain_init(&ws->drain, ws_drain_writer, ws, ws->alloc);
