@@ -1,5 +1,9 @@
-/* macOS hides IPV6_PKTINFO / IPV6_RECVPKTINFO behind RFC 3542; opt in before
- * <netinet/in.h>. No-op on Linux. */
+/* glibc gates struct in{,6}_pktinfo + IP_PKTINFO / IPV6_PKTINFO behind
+ * _GNU_SOURCE; macOS hides the v6 ones behind RFC 3542. Opt into both before
+ * any system header. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #if defined(__APPLE__) && !defined(__APPLE_USE_RFC_3542)
 #define __APPLE_USE_RFC_3542
 #endif
