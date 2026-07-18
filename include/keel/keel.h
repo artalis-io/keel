@@ -82,6 +82,7 @@
 #include <keel/compress.h>
 #include <keel/decompress.h>
 #include <keel/drain.h>
+#include <keel/udp.h>
 #include <keel/sse.h>
 #include <keel/timer.h>
 
