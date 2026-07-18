@@ -5,8 +5,10 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -806,6 +808,112 @@ UTEST(dns, search_falls_back_to_bare) {
 
     r->destroy(r);
     kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── Real-response corpus (hermetic): wire formats the mock doesn't emit ── */
+
+/* CNAME chain: a.test CNAME b.test, then A 5.6.7.8 for b.test. Owner names use
+ * compression pointers, as real recursive resolvers emit. */
+static const uint8_t RESP_CNAME[] = {
+    0xAB,0xCD, 0x81,0x80, 0x00,0x01, 0x00,0x02, 0x00,0x00, 0x00,0x00,
+    0x01,'a', 0x04,'t','e','s','t', 0x00, 0x00,0x01, 0x00,0x01,        /* Q a.test A IN */
+    0xC0,0x0C, 0x00,0x05, 0x00,0x01, 0x00,0x00,0x01,0x2C, 0x00,0x08,   /* AN1 CNAME */
+    0x01,'b', 0x04,'t','e','s','t', 0x00,                             /* rdata b.test @36 */
+    0xC0,0x24, 0x00,0x01, 0x00,0x01, 0x00,0x00,0x01,0x2C, 0x00,0x04,   /* AN2 A for @36 */
+    0x05,0x06,0x07,0x08
+};
+
+/* Three A records for m.test (10.0.0.1/.2/.3). */
+static const uint8_t RESP_MULTI_A[] = {
+    0x11,0x11, 0x81,0x80, 0x00,0x01, 0x00,0x03, 0x00,0x00, 0x00,0x00,
+    0x01,'m', 0x04,'t','e','s','t', 0x00, 0x00,0x01, 0x00,0x01,
+    0xC0,0x0C, 0x00,0x01, 0x00,0x01, 0x00,0x00,0x00,0x3C, 0x00,0x04, 10,0,0,1,
+    0xC0,0x0C, 0x00,0x01, 0x00,0x01, 0x00,0x00,0x00,0x3C, 0x00,0x04, 10,0,0,2,
+    0xC0,0x0C, 0x00,0x01, 0x00,0x01, 0x00,0x00,0x00,0x3C, 0x00,0x04, 10,0,0,3
+};
+
+/* A record + an EDNS0 OPT in the additional section (arcount=1). */
+static const uint8_t RESP_EDNS_OPT[] = {
+    0x22,0x22, 0x81,0x80, 0x00,0x01, 0x00,0x01, 0x00,0x00, 0x00,0x01,
+    0x01,'e', 0x04,'t','e','s','t', 0x00, 0x00,0x01, 0x00,0x01,
+    0xC0,0x0C, 0x00,0x01, 0x00,0x01, 0x00,0x00,0x00,0x3C, 0x00,0x04, 9,9,9,9, /* AN A */
+    0x00, 0x00,0x29, 0x10,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00               /* AR OPT */
+};
+
+UTEST(dns_parse, real_cname_chain) {
+    KlResolveResult r;
+    ASSERT_EQ(0, kl_dns_parse_response(RESP_CNAME, sizeof(RESP_CNAME), 0xABCD,
+                                       KL_DNS_TYPE_A, NULL, 0, &r));
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addr)->sin_addr, ip, sizeof(ip));
+    ASSERT_STREQ("5.6.7.8", ip);           /* A after the CNAME is found */
+}
+
+UTEST(dns_parse, real_multi_a_returns_first) {
+    KlResolveResult r;
+    ASSERT_EQ(0, kl_dns_parse_response(RESP_MULTI_A, sizeof(RESP_MULTI_A), 0x1111,
+                                       KL_DNS_TYPE_A, NULL, 0, &r));
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addr)->sin_addr, ip, sizeof(ip));
+    ASSERT_STREQ("10.0.0.1", ip);
+}
+
+UTEST(dns_parse, real_edns_opt_ignored) {
+    KlResolveResult r;
+    ASSERT_EQ(0, kl_dns_parse_response(RESP_EDNS_OPT, sizeof(RESP_EDNS_OPT), 0x2222,
+                                       KL_DNS_TYPE_A, NULL, 0, &r));
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addr)->sin_addr, ip, sizeof(ip));
+    ASSERT_STREQ("9.9.9.9", ip);           /* OPT in additional doesn't derail the walk */
+}
+
+/* ── Opt-in live comparison vs the system resolver (KEEL_DNS_E2E=1) ─────── */
+
+UTEST(dns, e2e_vs_getaddrinfo) {
+    if (!getenv("KEEL_DNS_E2E"))
+        UTEST_SKIP("set KEEL_DNS_E2E=1 to run the live system-DNS comparison");
+
+    static const char *names[] = { "example.com", "dns.google" };
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlResolver *r = kl_dns_resolver_create(&ctx, NULL);   /* real /etc/resolv.conf */
+    ASSERT_TRUE(r != NULL);
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        struct addrinfo hints, *gai = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(names[i], NULL, &hints, &gai) != 0 || !gai) {
+            if (gai) freeaddrinfo(gai);
+            continue;                        /* unresolvable here — skip this name */
+        }
+
+        reset_dns();
+        ASSERT_TRUE(r->resolve(r, &ctx, names[i], 80, on_done, NULL) != NULL);
+        for (int t = 0; t < 100 && g_done == 0; t++)
+            kl_event_ctx_run(&ctx, 16, 50);   /* up to ~5s */
+
+        ASSERT_EQ(1, g_done);
+        ASSERT_EQ(0, g_err);
+        ASSERT_EQ(AF_INET, g_res.ai_family);
+
+        /* Our single answer must be a member of getaddrinfo's address set. */
+        uint32_t ours = ((struct sockaddr_in *)&g_res.addr)->sin_addr.s_addr;
+        int found = 0;
+        for (struct addrinfo *a = gai; a; a = a->ai_next)
+            if (a->ai_family == AF_INET &&
+                ((struct sockaddr_in *)a->ai_addr)->sin_addr.s_addr == ours) {
+                found = 1;
+                break;
+            }
+        freeaddrinfo(gai);
+        ASSERT_TRUE(found);
+    }
+
+    r->destroy(r);
     kl_event_ctx_free(&ctx);
 }
 
