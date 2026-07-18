@@ -77,9 +77,8 @@ static int dns_skip_name(const uint8_t *pkt, size_t len, size_t off, size_t *out
     }
 }
 
-/* Non-static: public API declared in dns_resolver.h, exercised by the unit
- * tests and fuzz target (not called elsewhere inside the library). */
-/* cppcheck-suppress staticFunction */
+/* Public API (declared in dns_resolver.h): exercised by the unit tests and the
+ * fuzz target, though not called elsewhere inside the library. */
 int kl_dns_parse_response(const uint8_t *pkt, size_t len, uint16_t expect_id,
                           int want_qtype, KlResolveResult *out) {
     if (!pkt || !out || len < 12)
