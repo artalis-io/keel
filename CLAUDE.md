@@ -32,7 +32,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-34 orthogonal modules, each independently testable:
+35 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -68,6 +68,7 @@ make clean        # remove all build artifacts
 32. **proxy_protocol** — PROXY protocol v1/v2 header parser + CIDR trust matching (recover the real client address behind an L4 load balancer; gated by `proxy_trusted_cidrs`)
 33. **udp** — Non-blocking UDP datagram socket over `KlEventCtx`: async per-datagram receive with source address + capped whole-datagram send queue (backpressure). Foundation for a future async DNS resolver and QUIC/HTTP-3 (see `docs/udp_design.md`)
 34. **udp_server** — Datagram dispatch surface over `udp`, symmetric with `KlServer` (bind + per-datagram handler + reply). Shares a `KlEventCtx` so one process serves TCP HTTP and UDP on a single loop; horizontal scaling via `SO_REUSEPORT`
+35. **dns_resolver** — Built-in async DNS resolver over `udp` implementing the `KlResolver` vtable: non-blocking A/AAAA queries with timeout/retransmit, replacing the blocking `getaddrinfo` fallback. Bounds-safe response parser (`kl_dns_parse_response`) is fuzzed (`fuzz_dns`)
 
 **Deliberate design choices:**
 
@@ -168,6 +169,7 @@ make clean        # remove all build artifacts
 | `KlUdpConfig` | `udp.h` | UDP config: ctx, family, bind_addr/port, recv_buf_size, max_send_queue, reuse_addr/port, allocator |
 | `KlUdpServer` | `udp_server.h` | Datagram dispatch server: bound KlUdp + per-datagram handler + reply; shares a KlEventCtx with the TCP server |
 | `KlUdpHandlerFn` | `udp_server.h` | Datagram handler: `void (*)(KlUdpServer *, const void *data, size_t, const struct sockaddr *src, socklen_t, void *)` |
+| `KlDnsResolverConfig` | `dns_resolver.h` | DNS resolver config: nameserver, port, timeout_ms, attempts, prefer_ipv6, allocator (`kl_dns_resolver_create` returns a `KlResolver *`) |
 
 ## Git
 
@@ -453,7 +455,7 @@ Both targets should exit cleanly with no findings before merging.
 
 ## Fuzz Testing
 
-Two libFuzzer targets cover the primary attack surface (untrusted network input):
+Five libFuzzer targets cover the primary attack surface (untrusted network input):
 
 ```bash
 # Requires clang with libFuzzer support
@@ -461,8 +463,11 @@ Two libFuzzer targets cover the primary attack surface (untrusted network input)
 # macOS:  make fuzz CC=/opt/homebrew/opt/llvm@18/bin/clang
 
 # Run a fuzzer (Ctrl-C to stop):
-./fuzz/fuzz_parser fuzz/corpus_parser/       # HTTP parser + chunked decoder
-./fuzz/fuzz_multipart fuzz/corpus_multipart/ # multipart/form-data parser
+./fuzz/fuzz_parser fuzz/corpus_parser/                   # HTTP parser + chunked decoder
+./fuzz/fuzz_multipart fuzz/corpus_multipart/             # multipart/form-data parser
+./fuzz/fuzz_websocket fuzz/corpus_websocket/             # WebSocket frame decoder
+./fuzz/fuzz_response_parser fuzz/corpus_response_parser/ # client-side response parser
+./fuzz/fuzz_dns fuzz/corpus_dns/                         # DNS response parser
 ```
 
 Fuzz targets are built with ASan + UBSan enabled. Corpus files in `fuzz/corpus_*/` are seed inputs — crashes found by the fuzzer are saved to the corpus automatically.

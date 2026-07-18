@@ -82,6 +82,7 @@ CORE_SRC = src/allocator.c src/error.c src/response.c src/router.c \
            src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client.c src/client_pool.c src/redirect.c src/sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/udp.c src/udp_server.c \
+           src/dns_resolver.c \
            src/compress.c src/decompress.c src/drain.c \
            $(FILE_IO_SRC) $(EVENT_SRC)
 
@@ -223,7 +224,7 @@ clean:
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
 	rm -f tests/test_file_io_iouring
 	rm -f $(BENCH_SERVER)
-	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser
+	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns
 	find . -name '*.d' -delete
 	rm -f keel.pc
 	rm -f coverage.info
@@ -296,7 +297,10 @@ fuzz/fuzz_websocket: fuzz/fuzz_websocket.c $(LIB)
 fuzz/fuzz_response_parser: fuzz/fuzz_response_parser.c $(LIB)
 	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
-fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser
+fuzz/fuzz_dns: fuzz/fuzz_dns.c $(LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
+fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns
 
 # API documentation (requires Doxygen)
 docs:
