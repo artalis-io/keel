@@ -74,6 +74,7 @@ static int g_seen_n;
 static uint8_t g_last_q[128];    /* last query's question-section bytes */
 static size_t g_last_q_len;
 static int g_last_arcount;       /* last query's ARCOUNT (1 = EDNS0 OPT present) */
+static char g_last_qname[256];   /* last query's decoded name (lowercased) */
 
 /* Parse qtype from the question and emit a canned response. */
 static void mock_ns(KlUdpServer *s, const void *data, size_t len,
@@ -102,6 +103,23 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
     g_last_q_len = qend - 12;
     if (g_last_q_len <= sizeof(g_last_q))
         memcpy(g_last_q, q + 12, g_last_q_len);
+
+    /* Decode the queried name (lowercased, dot-joined) for search/ndots tests. */
+    {
+        size_t o = 12, w = 0;
+        while (o < len && q[o] != 0 && w < sizeof(g_last_qname) - 1) {
+            uint8_t ll = q[o++];
+            if (ll & 0xC0) break;
+            for (uint8_t k = 0; k < ll && o < len && w < sizeof(g_last_qname) - 1; k++, o++) {
+                char c = (char)q[o];
+                if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+                g_last_qname[w++] = c;
+            }
+            if (w < sizeof(g_last_qname) - 1) g_last_qname[w++] = '.';
+        }
+        if (w > 0 && g_last_qname[w - 1] == '.') w--;
+        g_last_qname[w] = '\0';
+    }
 
     if (g_silent) return;
 
@@ -172,7 +190,7 @@ static void on_done(KlResolveReq *req, const KlResolveResult *result,
 static void reset_dns(void) {
     g_answer_a = g_answer_aaaa = 0; g_rcode = 0; g_silent = 0; g_queries = 0;
     g_flip_case = 0; g_wrong_question = 0; g_seen_n = 0; g_last_q_len = 0;
-    g_last_arcount = 0;
+    g_last_arcount = 0; g_last_qname[0] = '\0';
     g_done = 0; g_err = 0; memset(&g_res, 0, sizeof(g_res));
 }
 
@@ -701,6 +719,94 @@ UTEST(dns, all_nameservers_silent_times_out) {
     kl_udp_server_free(&ns2);
     kl_event_ctx_free(&ctx);
     unlink(rcpath);
+}
+
+/* ── Phase 1b-ii: search domains + ndots ─────────────────────────────── */
+
+/* Build a resolver from a resolv.conf fixture with one mock nameserver. */
+static KlResolver *resolver_with_search(KlEventCtx *ctx, KlUdpServer *ns,
+                                        const char *search_line, int timeout_ms) {
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    if (kl_udp_server_init(ns, ctx, &sc, mock_ns, NULL) != 0)
+        return NULL;
+    static char rcbuf[256];
+    snprintf(rcbuf, sizeof(rcbuf), "nameserver 127.0.0.1#%u\n%s\n",
+             kl_udp_server_local_port(ns), search_line);
+    const char *rcpath = write_resolv(rcbuf);
+    if (!rcpath) return NULL;
+    KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = timeout_ms,
+                               .attempts = 1 };
+    return kl_dns_resolver_create(ctx, &dc);
+}
+
+UTEST(dns, search_appended_for_unqualified) {
+    /* 0 dots < ndots(1): the search domain is appended and tried first. */
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = resolver_with_search(&ctx, &ns, "search corp.example", 500);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "myhost", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_STREQ("myhost.corp.example", g_last_qname);   /* search-appended */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(dns, absolute_tried_first_when_ndots_met) {
+    /* 1 dot >= ndots(1): the name is tried as-is first (no search prefix). */
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = resolver_with_search(&ctx, &ns, "search corp.example", 500);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "my.host", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_STREQ("my.host", g_last_qname);   /* queried absolute, not my.host.corp.example */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(dns, search_falls_back_to_bare) {
+    /* NXDOMAIN on every candidate: search variant first, then the bare name,
+     * then fail. The last name queried is the bare one. */
+    reset_dns();
+    g_rcode = 3;   /* NXDOMAIN */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = resolver_with_search(&ctx, &ns, "search corp.example", 500);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "myhost", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 300);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(KL_ERR_DNS, g_err);
+    ASSERT_STREQ("myhost", g_last_qname);    /* bare name tried after the search variant */
+    ASSERT_TRUE(g_queries >= 2);             /* both candidates were queried */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
 }
 
 UTEST_MAIN();

@@ -19,6 +19,8 @@
 #define DNS_OPT_RR_LEN    11    /* wire length of a bare OPT RR */
 #define DNS_MAX_NS        3     /* nameservers tried (resolv.conf MAXNS) */
 #define DNS_PORT          53    /* default nameserver port */
+#define DNS_MAX_SEARCH    6     /* search domains (resolv.conf MAXDNSRCH) */
+#define DNS_MAX_CAND      8     /* candidate names per resolve (search + bare) */
 
 /* ── Per-request handle ──────────────────────────────────────────────── */
 
@@ -28,7 +30,10 @@ typedef struct KlDnsReq {
     struct KlDnsResolver *r;
     KlResolveDoneFn   done;
     void             *ud;
-    char              host[DNS_NAME_MAX];
+    char              host[DNS_NAME_MAX];        /* current candidate being queried */
+    char              cand[DNS_MAX_CAND][DNS_NAME_MAX]; /* candidate names (search + bare) */
+    int               ncand;                     /* number of candidates */
+    int               ci;                        /* current candidate index */
     int               port;
     uint16_t          id;          /* current transaction id */
     int               qtype;       /* current query type (A/AAAA) */
@@ -60,6 +65,9 @@ typedef struct KlDnsResolver {
     struct sockaddr_storage ns[DNS_MAX_NS];   /* nameserver addresses */
     socklen_t      ns_len[DNS_MAX_NS];
     int            nns;                        /* number of nameservers */
+    char           search[DNS_MAX_SEARCH][DNS_NAME_MAX]; /* search domains */
+    int            nsearch;
+    int            ndots;                     /* threshold for search expansion */
     KlDnsReq      *inflight;
     unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
     size_t         rnd_off;       /* next unused byte in rnd_pool */
@@ -353,12 +361,24 @@ static int dns_transmit(KlDnsResolver *r, KlDnsReq *q) {
     return (q->timer_id >= 0) ? 0 : -1;
 }
 
-/* Advance to the other address family, or fail if both are exhausted. */
-static void dns_advance_or_fail(KlDnsResolver *r, KlDnsReq *q) {
-    if (!q->tried_secondary) {
+/* Advance the query: try the other address family (unless the name is known
+ * not to exist), then the next candidate name; fail when all are exhausted.
+ * @param nxdomain 1 = the current name does not exist (skip family, next name). */
+static void dns_advance(KlDnsResolver *r, KlDnsReq *q, int nxdomain) {
+    if (!nxdomain && !q->tried_secondary) {
         q->tried_secondary = 1;
         q->qtype = (q->qtype == KL_DNS_TYPE_A) ? KL_DNS_TYPE_AAAA : KL_DNS_TYPE_A;
         q->tries_left = r->attempts * r->nns;   /* cycle every nameserver per attempt */
+        if (dns_transmit(r, q) == 0)
+            return;
+    }
+    /* Next candidate name (search expansion). */
+    q->ci++;
+    if (q->ci < q->ncand) {
+        memcpy(q->host, q->cand[q->ci], DNS_NAME_MAX);
+        q->qtype = r->prefer_ipv6 ? KL_DNS_TYPE_AAAA : KL_DNS_TYPE_A;
+        q->tried_secondary = 0;
+        q->tries_left = r->attempts * r->nns;
         if (dns_transmit(r, q) == 0)
             return;
     }
@@ -379,7 +399,7 @@ static void dns_on_timer(void *ud) {
             dns_complete(r, q, NULL, KL_ERR_DNS);
         return;
     }
-    dns_advance_or_fail(r, q);                     /* try the other family / fail */
+    dns_advance(r, q, 0);                          /* timeout: other family / next name */
 }
 
 /* ── Receive ─────────────────────────────────────────────────────────── */
@@ -453,11 +473,11 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
      * ours — otherwise ignore (spoofed or unrelated) and keep waiting. */
     if (!dns_question_matches(pkt, len, q->question, q->question_len))
         return;
-    if ((pkt[3] & 0x0F) == 3) {                   /* NXDOMAIN — definitive */
-        dns_complete(r, q, NULL, KL_ERR_DNS);
+    if ((pkt[3] & 0x0F) == 3) {                   /* NXDOMAIN — name doesn't exist */
+        dns_advance(r, q, 1);                      /* skip family, try next candidate */
         return;
     }
-    dns_advance_or_fail(r, q);                     /* no record of this family */
+    dns_advance(r, q, 0);                           /* no record of this family */
 }
 
 /* ── Literal-IP shortcut ─────────────────────────────────────────────── */
@@ -567,6 +587,112 @@ static int dns_hosts_lookup(const char *path, const char *host, int port,
     return 1;
 }
 
+/* ── Candidate names (search domains + ndots) ────────────────────────── */
+
+/* Copy `a` into out (length-checked; avoids snprintf %s format-truncation). */
+static int dns_copy(char *out, size_t cap, const char *a) {
+    size_t la = strlen(a);
+    if (la + 1 > cap)
+        return -1;
+    memcpy(out, a, la + 1);
+    return 0;
+}
+
+/* out = "a.b" (length-checked). */
+static int dns_join(char *out, size_t cap, const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    if (la + 1 + lb + 1 > cap)
+        return -1;
+    memcpy(out, a, la);
+    out[la] = '.';
+    memcpy(out + la + 1, b, lb);
+    out[la + 1 + lb] = '\0';
+    return 0;
+}
+
+static void dns_add_cand(KlDnsReq *q, const char *name) {
+    if (q->ncand < DNS_MAX_CAND &&
+        dns_copy(q->cand[q->ncand], DNS_NAME_MAX, name) == 0)
+        q->ncand++;
+}
+
+/* Build the candidate-name list for `host` from search domains + ndots.
+ * Absolute (trailing-dot) or dots >= ndots: bare name first, then search
+ * variants. Otherwise: search variants first, then the bare name. */
+static void dns_build_candidates(const KlDnsResolver *r, KlDnsReq *q, const char *host) {
+    q->ncand = 0;
+    q->ci = 0;
+
+    char base[DNS_NAME_MAX];
+    if (dns_copy(base, sizeof(base), host) != 0)
+        return;                                  /* too long — no candidates */
+    size_t bl = strlen(base);
+    int absolute = (bl > 0 && base[bl - 1] == '.');
+    if (absolute)
+        base[bl - 1] = '\0';                     /* drop the trailing dot */
+
+    int dots = 0;
+    for (const char *p = base; *p; p++)
+        if (*p == '.') dots++;
+
+    if (absolute || r->nsearch == 0) {
+        dns_add_cand(q, base);
+        return;
+    }
+
+    char joined[DNS_NAME_MAX];
+    if (dots >= r->ndots) {
+        dns_add_cand(q, base);
+        for (int i = 0; i < r->nsearch; i++)
+            if (dns_join(joined, sizeof(joined), base, r->search[i]) == 0)
+                dns_add_cand(q, joined);
+    } else {
+        for (int i = 0; i < r->nsearch; i++)
+            if (dns_join(joined, sizeof(joined), base, r->search[i]) == 0)
+                dns_add_cand(q, joined);
+        dns_add_cand(q, base);
+    }
+}
+
+/* Parse `search`/`domain` and `options ndots:` from a resolv.conf file. */
+static void dns_parse_resolv_options(const char *path,
+                                     char search[][DNS_NAME_MAX], int max_s,
+                                     int *nsearch, int *ndots) {
+    *nsearch = 0;
+    *ndots = 1;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        char *hash = strchr(line, '#');
+        if (hash) *hash = '\0';
+        char *save = NULL;
+        const char *kw = strtok_r(line, " \t\r\n", &save);
+        if (!kw)
+            continue;
+        if (strcmp(kw, "search") == 0 || strcmp(kw, "domain") == 0) {
+            *nsearch = 0;                        /* last search/domain line wins */
+            const char *tok;
+            while ((tok = strtok_r(NULL, " \t\r\n", &save)) != NULL && *nsearch < max_s) {
+                if (dns_copy(search[*nsearch], DNS_NAME_MAX, tok) == 0)
+                    (*nsearch)++;
+            }
+        } else if (strcmp(kw, "options") == 0) {
+            const char *tok;
+            while ((tok = strtok_r(NULL, " \t\r\n", &save)) != NULL) {
+                if (strncmp(tok, "ndots:", 6) == 0) {
+                    char *end;
+                    long n = strtol(tok + 6, &end, 10);
+                    if (end != tok + 6 && *end == '\0' && n >= 0 && n <= 15)
+                        *ndots = (int)n;
+                }
+            }
+        }
+    }
+    fclose(f);
+}
+
 /* ── Vtable ──────────────────────────────────────────────────────────── */
 
 static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
@@ -608,6 +734,15 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
         return &q->base;
     }
 
+    /* Expand into candidate names (search domains + ndots), query the first. */
+    dns_build_candidates(r, q, host);
+    if (q->ncand == 0) {
+        dns_unlink(r, q);
+        kl_free(r->alloc, q, sizeof(*q));
+        return NULL;
+    }
+    memcpy(q->host, q->cand[0], DNS_NAME_MAX);
+    q->ci = 0;
     q->qtype = r->prefer_ipv6 ? KL_DNS_TYPE_AAAA : KL_DNS_TYPE_A;
     q->tries_left = r->attempts * r->nns;   /* cycle every nameserver per attempt */
     if (dns_transmit(r, q) != 0) {
@@ -734,13 +869,16 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
     int count = 0;
     uint16_t defport = (cfg && cfg->port) ? cfg->port : DNS_PORT;
 
+    r->ndots = 1;
     if (cfg && cfg->nameserver) {
+        /* Explicit nameserver overrides resolv.conf entirely (no search domains). */
         snprintf(nsbuf[0], sizeof(nsbuf[0]), "%s", cfg->nameserver);
         count = 1;
     } else {
         const char *rc = (cfg && cfg->resolv_conf_path) ? cfg->resolv_conf_path
                                                         : "/etc/resolv.conf";
         count = resolv_conf_nameservers(rc, nsbuf, DNS_MAX_NS);
+        dns_parse_resolv_options(rc, r->search, DNS_MAX_SEARCH, &r->nsearch, &r->ndots);
         if (count == 0) {
             snprintf(nsbuf[0], sizeof(nsbuf[0]), "127.0.0.1");
             count = 1;
