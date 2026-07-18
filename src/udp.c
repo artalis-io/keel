@@ -400,6 +400,17 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     }
 #endif
 
+    /* Kernel socket-buffer sizing (best-effort; the kernel clamps to its
+     * rmem_max/wmem_max and may round/double the value). */
+    if (cfg->so_rcvbuf > 0) {
+        int v = cfg->so_rcvbuf;
+        (void)setsockopt(udp->fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v));
+    }
+    if (cfg->so_sndbuf > 0) {
+        int v = cfg->so_sndbuf;
+        (void)setsockopt(udp->fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v));
+    }
+
     /* Enable per-datagram local-address capture (best-effort per platform). */
     if (cfg->recv_pktinfo) {
         int opt = 1;

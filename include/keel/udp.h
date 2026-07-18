@@ -62,6 +62,8 @@ typedef struct {
     int          reuse_addr;     /**< Set SO_REUSEADDR. */
     int          reuse_port;     /**< Set SO_REUSEPORT (fan-out across workers). */
     int          recv_pktinfo;   /**< Capture each datagram's local address (IP_PKTINFO / IPV6_RECVPKTINFO). */
+    int          so_rcvbuf;      /**< SO_RCVBUF kernel receive buffer in bytes (0 = OS default). Bounds kernel-side drops under load. */
+    int          so_sndbuf;      /**< SO_SNDBUF kernel send buffer in bytes (0 = OS default). */
     KlAllocator *alloc;          /**< NULL = default allocator. */
 } KlUdpConfig;
 

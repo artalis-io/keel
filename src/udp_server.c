@@ -49,6 +49,8 @@ int kl_udp_server_init(KlUdpServer *s, KlEventCtx *ctx,
         .reuse_addr     = 1,               /* servers want quick rebind */
         .reuse_port     = cfg->reuse_port,
         .recv_pktinfo   = udp_addr_is_wildcard(cfg->bind_addr),
+        .so_rcvbuf      = cfg->so_rcvbuf,
+        .so_sndbuf      = cfg->so_sndbuf,
         .alloc          = cfg->alloc,
     };
     if (kl_udp_init(&s->udp, &uc) != 0) {

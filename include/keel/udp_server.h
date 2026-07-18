@@ -50,6 +50,8 @@ typedef struct {
     size_t       recv_buf_size;  /**< Per-datagram recv buffer; 0 = 2048. */
     size_t       max_send_queue; /**< Reply backpressure cap; 0 = 256 KiB. */
     int          reuse_port;     /**< SO_REUSEPORT for worker fan-out. */
+    int          so_rcvbuf;      /**< SO_RCVBUF kernel receive buffer in bytes (0 = OS default). */
+    int          so_sndbuf;      /**< SO_SNDBUF kernel send buffer in bytes (0 = OS default). */
     KlAllocator *alloc;          /**< NULL = event-context allocator. */
 } KlUdpServerConfig;
 

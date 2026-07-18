@@ -166,7 +166,7 @@ make clean        # remove all build artifacts
 | `KlResolverCacheConfig` | `resolver_cache.h` | Cache config: ttl_ms, capacity |
 | `KlServerStats` | `server.h` | Read-only server load snapshot: active_connections, max_connections, async_suspended, listen_paused |
 | `KlUdp` | `udp.h` | Non-blocking UDP socket: async recv (per-datagram + source addr), capped whole-datagram send queue with on-drain backpressure callback |
-| `KlUdpConfig` | `udp.h` | UDP config: ctx, family, bind_addr/port, recv_buf_size, max_send_queue, reuse_addr/port, allocator |
+| `KlUdpConfig` | `udp.h` | UDP config: ctx, family, bind_addr/port, recv_buf_size, max_send_queue, reuse_addr/port, recv_pktinfo, so_rcvbuf/so_sndbuf, allocator |
 | `KlUdpServer` | `udp_server.h` | Datagram dispatch server: bound KlUdp + per-datagram handler + reply; shares a KlEventCtx with the TCP server |
 | `KlUdpHandlerFn` | `udp_server.h` | Datagram handler: `void (*)(KlUdpServer *, const void *data, size_t, const struct sockaddr *src, socklen_t, void *)` |
 | `KlDnsResolverConfig` | `dns_resolver.h` | DNS resolver config: nameserver, port, timeout_ms, attempts, prefer_ipv6, allocator (`kl_dns_resolver_create` returns a `KlResolver *`) |

@@ -394,6 +394,35 @@ UTEST(udp, pktinfo_multihomed_local) {
 }
 #endif
 
+UTEST(udp, so_bufsize_applied) {
+    /* Setting a small SO_RCVBUF/SO_SNDBUF must shrink the kernel buffers below
+     * the default. Shrinking is deterministic across platforms, unlike growth
+     * (which the kernel caps at rmem_max/wmem_max). */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp def, small;
+    KlUdpConfig dc = { .ctx = &ctx };
+    KlUdpConfig sc = { .ctx = &ctx, .so_rcvbuf = 8192, .so_sndbuf = 8192 };
+    ASSERT_EQ(0, kl_udp_init(&def, &dc));
+    ASSERT_EQ(0, kl_udp_init(&small, &sc));
+
+    int drb = 0, srb = 0, dsb = 0, ssb = 0;
+    socklen_t l = sizeof(int);
+    ASSERT_EQ(0, getsockopt(kl_udp_fd(&def),   SOL_SOCKET, SO_RCVBUF, &drb, &l));
+    ASSERT_EQ(0, getsockopt(kl_udp_fd(&small), SOL_SOCKET, SO_RCVBUF, &srb, &l));
+    ASSERT_EQ(0, getsockopt(kl_udp_fd(&def),   SOL_SOCKET, SO_SNDBUF, &dsb, &l));
+    ASSERT_EQ(0, getsockopt(kl_udp_fd(&small), SOL_SOCKET, SO_SNDBUF, &ssb, &l));
+
+    ASSERT_TRUE(srb > 0 && srb < drb);   /* rcvbuf knob shrank the buffer */
+    ASSERT_TRUE(ssb > 0 && ssb < dsb);   /* sndbuf knob shrank the buffer */
+
+    kl_udp_free(&small);
+    kl_udp_free(&def);
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST(udp, null_and_arg_guards) {
     ASSERT_EQ(-1, kl_udp_init(NULL, NULL));
     ASSERT_EQ(-1, kl_udp_send(NULL, "x", 1));
