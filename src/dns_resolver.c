@@ -661,7 +661,10 @@ static void dns_destroy(KlResolver *self) {
 static int dns_parse_ns(const char *s, uint16_t defport,
                         struct sockaddr_storage *out, socklen_t *out_len, int *family) {
     char buf[80];
-    snprintf(buf, sizeof(buf), "%s", s);
+    size_t sl = strlen(s);
+    if (sl >= sizeof(buf))
+        return -1;                /* nameserver token too long */
+    memcpy(buf, s, sl + 1);
     uint16_t port = defport;
     char *hash = strchr(buf, '#');
     if (hash) {
