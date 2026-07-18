@@ -19,15 +19,19 @@
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     KlResolveResult out;
 
-    /* Transaction-ID mismatch path + both families. */
-    kl_dns_parse_response(data, size, 0x0000, KL_DNS_TYPE_A, &out);
-    kl_dns_parse_response(data, size, 0xFFFF, KL_DNS_TYPE_AAAA, &out);
+    /* Transaction-ID mismatch path + both families (no question verification). */
+    kl_dns_parse_response(data, size, 0x0000, KL_DNS_TYPE_A, NULL, 0, &out);
+    kl_dns_parse_response(data, size, 0xFFFF, KL_DNS_TYPE_AAAA, NULL, 0, &out);
 
     /* Matching-ID path: parse the id from the packet so the answer walk runs. */
     if (size >= 2) {
         uint16_t id = (uint16_t)((data[0] << 8) | data[1]);
-        kl_dns_parse_response(data, size, id, KL_DNS_TYPE_A, &out);
-        kl_dns_parse_response(data, size, id, KL_DNS_TYPE_AAAA, &out);
+        kl_dns_parse_response(data, size, id, KL_DNS_TYPE_A, NULL, 0, &out);
+        kl_dns_parse_response(data, size, id, KL_DNS_TYPE_AAAA, NULL, 0, &out);
+        /* Question-verification path: feed part of the packet as expected bytes
+         * so the compare + skip logic runs against hostile input. */
+        if (size >= 16)
+            kl_dns_parse_response(data, size, id, KL_DNS_TYPE_A, data + 12, 8, &out);
     }
     return 0;
 }

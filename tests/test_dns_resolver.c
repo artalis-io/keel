@@ -22,7 +22,7 @@ UTEST(dns_parse, valid_a_record) {
     KlResolveResult r;
     memset(&r, 0, sizeof(r));
     ASSERT_EQ(0, kl_dns_parse_response(A_RESP, sizeof(A_RESP), 0x1234,
-                                       KL_DNS_TYPE_A, &r));
+                                       KL_DNS_TYPE_A, NULL, 0, &r));
     ASSERT_EQ(AF_INET, r.ai_family);
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addr)->sin_addr, ip, sizeof(ip));
@@ -32,19 +32,19 @@ UTEST(dns_parse, valid_a_record) {
 UTEST(dns_parse, id_mismatch) {
     KlResolveResult r;
     ASSERT_EQ(-1, kl_dns_parse_response(A_RESP, sizeof(A_RESP), 0x9999,
-                                        KL_DNS_TYPE_A, &r));
+                                        KL_DNS_TYPE_A, NULL, 0, &r));
 }
 
 UTEST(dns_parse, wrong_type_no_record) {
     KlResolveResult r;
     ASSERT_EQ(-1, kl_dns_parse_response(A_RESP, sizeof(A_RESP), 0x1234,
-                                        KL_DNS_TYPE_AAAA, &r));
+                                        KL_DNS_TYPE_AAAA, NULL, 0, &r));
 }
 
 UTEST(dns_parse, truncated_is_safe) {
     KlResolveResult r;
     for (size_t n = 0; n < sizeof(A_RESP); n++)
-        ASSERT_EQ(-1, kl_dns_parse_response(A_RESP, n, 0x1234, KL_DNS_TYPE_A, &r));
+        ASSERT_EQ(-1, kl_dns_parse_response(A_RESP, n, 0x1234, KL_DNS_TYPE_A, NULL, 0, &r));
 }
 
 UTEST(dns_parse, compression_loop_is_safe) {
@@ -55,7 +55,7 @@ UTEST(dns_parse, compression_loop_is_safe) {
         0x00,0x01, 0x00,0x01
     };
     KlResolveResult r;
-    ASSERT_EQ(-1, kl_dns_parse_response(pkt, sizeof(pkt), 0x1234, KL_DNS_TYPE_A, &r));
+    ASSERT_EQ(-1, kl_dns_parse_response(pkt, sizeof(pkt), 0x1234, KL_DNS_TYPE_A, NULL, 0, &r));
 }
 
 /* ── Mock nameserver + resolver integration ──────────────────────────── */
@@ -65,6 +65,12 @@ static int g_answer_aaaa;   /* reply with an AAAA record for AAAA queries */
 static int g_rcode;         /* rcode to set (0 = NOERROR, 3 = NXDOMAIN) */
 static int g_silent;        /* drop queries (to exercise timeout)      */
 static int g_queries;
+static int g_flip_case;     /* echo the question name with each letter case-flipped */
+static int g_wrong_question;/* echo a different question entirely (spoof) */
+static uint16_t g_seen_ids[8];   /* transaction ids observed, in order */
+static int g_seen_n;
+static uint8_t g_last_q[128];    /* last query's question-section bytes */
+static size_t g_last_q_len;
 
 /* Parse qtype from the question and emit a canned response. */
 static void mock_ns(KlUdpServer *s, const void *data, size_t len,
@@ -72,9 +78,11 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
     (void)ud;
     if (len < 12) return;
     g_queries++;
-    if (g_silent) return;
 
     const uint8_t *q = data;
+    if (g_seen_n < 8)
+        g_seen_ids[g_seen_n++] = (uint16_t)((q[0] << 8) | q[1]);
+
     /* Walk the question name to find qtype. */
     size_t off = 12;
     while (off < len && q[off] != 0) {
@@ -85,6 +93,13 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
     if (off + 4 > len) return;
     int qtype = (q[off] << 8) | q[off + 1];
     size_t qend = off + 4;                   /* end of question */
+
+    /* Capture the query's question section for inspection. */
+    g_last_q_len = qend - 12;
+    if (g_last_q_len <= sizeof(g_last_q))
+        memcpy(g_last_q, q + 12, g_last_q_len);
+
+    if (g_silent) return;
 
     uint8_t resp[512];
     size_t n = 0;
@@ -97,8 +112,28 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
     resp[6] = 0; resp[7] = (uint8_t)(answer ? 1 : 0);   /* ancount */
     resp[8] = 0; resp[9] = 0; resp[10] = 0; resp[11] = 0;
     n = 12;
-    memcpy(resp + n, q + 12, qend - 12);     /* echo question */
-    n += qend - 12;
+    if (g_wrong_question) {
+        /* Emit a fixed, different question ("evil" A IN) — right id, wrong name. */
+        static const uint8_t evilq[] = { 0x04,'e','v','i','l',0x00, 0x00,0x01, 0x00,0x01 };
+        memcpy(resp + n, evilq, sizeof(evilq));
+        n += sizeof(evilq);
+    } else {
+        memcpy(resp + n, q + 12, qend - 12); /* echo question */
+        if (g_flip_case) {                    /* tamper: flip case of name letters */
+            size_t p = n;
+            while (resp[p] != 0) {            /* walk labels */
+                uint8_t lab = resp[p++];
+                for (uint8_t k = 0; k < lab; k++) {
+                    uint8_t c = resp[p + k];
+                    uint8_t low = (uint8_t)(c | 0x20);
+                    if (low >= 'a' && low <= 'z')
+                        resp[p + k] = (uint8_t)(c ^ 0x20);
+                }
+                p += lab;
+            }
+        }
+        n += qend - 12;
+    }
 
     if (answer) {
         resp[n++] = 0xc0; resp[n++] = 0x0c;  /* name → question */
@@ -132,24 +167,26 @@ static void on_done(KlResolveReq *req, const KlResolveResult *result,
 
 static void reset_dns(void) {
     g_answer_a = g_answer_aaaa = 0; g_rcode = 0; g_silent = 0; g_queries = 0;
+    g_flip_case = 0; g_wrong_question = 0; g_seen_n = 0; g_last_q_len = 0;
     g_done = 0; g_err = 0; memset(&g_res, 0, sizeof(g_res));
+}
+
+/* Start the mock nameserver and create a resolver pointed at it (custom cfg). */
+static KlResolver *make_resolver_cfg(KlEventCtx *ctx, KlUdpServer *ns,
+                                     KlDnsResolverConfig *dc) {
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    if (kl_udp_server_init(ns, ctx, &sc, mock_ns, NULL) != 0)
+        return NULL;
+    dc->nameserver = "127.0.0.1";
+    dc->port = kl_udp_server_local_port(ns);
+    return kl_dns_resolver_create(ctx, dc);
 }
 
 /* Build a resolver + mock nameserver on one ctx. Caller frees. */
 static KlResolver *make_resolver(KlEventCtx *ctx, KlUdpServer *ns, int timeout_ms,
                                  int attempts) {
-    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
-    if (kl_udp_server_init(ns, ctx, &sc, mock_ns, NULL) != 0)
-        return NULL;
-    char portbuf[8];
-    snprintf(portbuf, sizeof(portbuf), "%u", kl_udp_server_local_port(ns));
-    KlDnsResolverConfig dc = {
-        .nameserver = "127.0.0.1",
-        .port = kl_udp_server_local_port(ns),
-        .timeout_ms = timeout_ms,
-        .attempts = attempts,
-    };
-    return kl_dns_resolver_create(ctx, &dc);
+    KlDnsResolverConfig dc = { .timeout_ms = timeout_ms, .attempts = attempts };
+    return make_resolver_cfg(ctx, ns, &dc);
 }
 
 static void pump(KlEventCtx *ctx, int *flag, int ticks) {
@@ -275,6 +312,33 @@ UTEST(dns, literal_ip_shortcut) {
     kl_event_ctx_free(&ctx);
 }
 
+UTEST(dns, localhost_shortcut) {
+    /* "localhost" resolves to loopback without a DNS query. */
+    reset_dns();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "localhost", 8080, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 50);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_EQ(AF_INET, g_res.ai_family);
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addr)->sin_addr, ip, sizeof(ip));
+    ASSERT_STREQ("127.0.0.1", ip);
+    ASSERT_EQ(8080, ntohs(((struct sockaddr_in *)&g_res.addr)->sin_port));
+    ASSERT_EQ(0, g_queries);            /* no packet sent */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST(dns, destroy_with_inflight) {
     /* Destroy while a query is outstanding — must free cleanly (ASan). */
     reset_dns();
@@ -291,6 +355,134 @@ UTEST(dns, destroy_with_inflight) {
     r->destroy(r);                       /* in-flight req + timer freed here */
     ASSERT_EQ(0, g_done);                /* never completed */
 
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── Hardening (#2) ──────────────────────────────────────────────────── */
+
+UTEST(dns, spoofed_question_rejected) {
+    /* Right transaction id, wrong question → response must be ignored (ID-only
+     * matching no longer suffices), so the query times out. */
+    reset_dns();
+    g_answer_a = 1; g_wrong_question = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 30, 1);   /* fast timeout */
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(KL_ERR_DNS, g_err);        /* not accepted despite matching id */
+    ASSERT_TRUE(g_queries >= 1);         /* the spoof reply was seen and rejected */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(dns, case_tamper_rejected) {
+    /* 0x20 on (default): a case-flipped question echo must be rejected. */
+    reset_dns();
+    g_answer_a = 1; g_flip_case = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 30, 1);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(KL_ERR_DNS, g_err);
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* Count uppercase ASCII letters in the captured query question. */
+static int q_uppercase_count(void) {
+    int up = 0;
+    for (size_t i = 0; i < g_last_q_len; i++)
+        if (g_last_q[i] >= 'A' && g_last_q[i] <= 'Z') up++;
+    return up;
+}
+
+UTEST(dns, dns_0x20_randomizes_case) {
+    /* With 0x20 on, a long letter-rich name gets mixed-case in the wire query. */
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx,
+        "averylonghostnamewithmanyletters.example.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_TRUE(q_uppercase_count() > 0);   /* ~30 letters → all-lowercase is ~2^-30 */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(dns, disable_0x20_lowercase_and_resolves) {
+    /* Escape hatch: no case randomization; verbatim echo still resolves. */
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlDnsResolverConfig dc = { .timeout_ms = 500, .attempts = 2, .disable_0x20 = 1 };
+    KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);                    /* resolves */
+    ASSERT_EQ(0, q_uppercase_count());      /* lowercase in, lowercase out: no 0x20 */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(dns, transaction_ids_not_sequential) {
+    /* IDs must not be the old predictable 1,2,3 counter. */
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
+    ASSERT_TRUE(r != NULL);
+
+    for (int i = 0; i < 3; i++) {
+        g_done = 0;
+        ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+        pump(&ctx, &g_done, 200);
+        ASSERT_EQ(1, g_done);
+    }
+    ASSERT_TRUE(g_seen_n >= 3);
+    /* The old counter would have produced exactly 1,2,3. */
+    ASSERT_FALSE(g_seen_ids[0] == 1 && g_seen_ids[1] == 2 && g_seen_ids[2] == 3);
+
+    r->destroy(r);
     kl_udp_server_free(&ns);
     kl_event_ctx_free(&ctx);
 }

@@ -10,8 +10,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#define DNS_NAME_MAX     256
-#define DNS_QUERY_MAX    512   /* classic DNS message cap (no EDNS0) */
+#define DNS_NAME_MAX      256
+#define DNS_QUERY_MAX     512   /* classic DNS message cap (no EDNS0) */
+#define DNS_RND_POOL_SIZE 256   /* entropy bytes buffered per /dev/urandom read */
 
 /* ── Per-request handle ──────────────────────────────────────────────── */
 
@@ -32,6 +33,8 @@ typedef struct KlDnsReq {
     KlResolveResult   result;      /* literal result, pending deferral */
     int               in_done;     /* reentrancy guard */
     int               cancelled;   /* cancel() arrived during done */
+    uint8_t           question[DNS_NAME_MAX + 8]; /* transmitted question section (qname+qtype+qclass) */
+    size_t            question_len;/* length of the stored question */
 } KlDnsReq;
 
 /* ── Resolver ────────────────────────────────────────────────────────── */
@@ -44,9 +47,39 @@ typedef struct KlDnsResolver {
     int            timeout_ms;
     int            attempts;
     int            prefer_ipv6;
-    uint16_t       next_id;
+    int            disable_0x20;
     KlDnsReq      *inflight;
+    unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
+    size_t         rnd_off;       /* next unused byte in rnd_pool */
 } KlDnsResolver;
+
+/* ── Entropy (pooled /dev/urandom — portable across glibc/musl/macOS/cosmo) ── */
+
+static void dns_rand_refill(KlDnsResolver *r) {
+    FILE *f = fopen("/dev/urandom", "rb");
+    size_t got = 0;
+    if (f) {
+        got = fread(r->rnd_pool, 1, sizeof(r->rnd_pool), f);
+        fclose(f);
+    }
+    /* Fallback if /dev/urandom is unavailable (effectively never on a real
+     * system): the low byte of each element's own address still varies per
+     * slot, so we produce *a* non-crashing value without a magic mixer. */
+    for (size_t i = got; i < sizeof(r->rnd_pool); i++)
+        r->rnd_pool[i] = (unsigned char)(uintptr_t)&r->rnd_pool[i];
+    r->rnd_off = 0;
+}
+
+static unsigned char dns_rand_byte(KlDnsResolver *r) {
+    if (r->rnd_off >= sizeof(r->rnd_pool))
+        dns_rand_refill(r);
+    return r->rnd_pool[r->rnd_off++];
+}
+
+static uint16_t dns_rand_u16(KlDnsResolver *r) {
+    uint16_t hi = dns_rand_byte(r);
+    return (uint16_t)((hi << 8) | dns_rand_byte(r));
+}
 
 /* ── Response parser (public, bounds-safe — fuzzed) ───────────────────── */
 
@@ -80,7 +113,8 @@ static int dns_skip_name(const uint8_t *pkt, size_t len, size_t off, size_t *out
 /* Public API (declared in dns_resolver.h): exercised by the unit tests and the
  * fuzz target, though not called elsewhere inside the library. */
 int kl_dns_parse_response(const uint8_t *pkt, size_t len, uint16_t expect_id,
-                          int want_qtype, KlResolveResult *out) {
+                          int want_qtype, const uint8_t *expect_q, size_t expect_q_len,
+                          KlResolveResult *out) {
     if (!pkt || !out || len < 12)
         return -1;
 
@@ -102,6 +136,13 @@ int kl_dns_parse_response(const uint8_t *pkt, size_t len, uint16_t expect_id,
         if (off + 4 > len)
             return -1;
         off += 4;                                /* qtype + qclass */
+    }
+
+    /* Bind the answer to our query: the question section must echo exactly the
+     * bytes we sent (name + type + class, including 0x20 case). */
+    if (expect_q) {
+        if (off - 12 != expect_q_len || memcmp(pkt + 12, expect_q, expect_q_len) != 0)
+            return -1;
     }
 
     for (uint16_t i = 0; i < an; i++) {          /* walk answers */
@@ -144,8 +185,12 @@ int kl_dns_parse_response(const uint8_t *pkt, size_t len, uint16_t expect_id,
 
 /* ── Query builder ────────────────────────────────────────────────────── */
 
-static int dns_build_query(uint8_t *buf, size_t cap, uint16_t id,
-                           const char *host, int qtype, size_t *out_len) {
+/* Build a query with transaction id, applying DNS 0x20 case randomization to
+ * the QNAME letters (unless disabled). Also returns the question-section span
+ * [*q_off, off) so the caller can store it for response verification. */
+static int dns_build_query(KlDnsResolver *r, uint8_t *buf, size_t cap, uint16_t id,
+                           const char *host, int qtype,
+                           size_t *out_len, size_t *q_off, size_t *q_len) {
     if (cap < 12)
         return -1;
     memset(buf, 0, 12);
@@ -154,6 +199,7 @@ static int dns_build_query(uint8_t *buf, size_t cap, uint16_t id,
     buf[2] = 0x01;                 /* RD = recursion desired */
     buf[5] = 0x01;                 /* qdcount = 1 */
 
+    int use_0x20 = !r->disable_0x20;
     size_t off = 12;
     const char *p = host;
     while (*p) {
@@ -164,7 +210,13 @@ static int dns_build_query(uint8_t *buf, size_t cap, uint16_t id,
         if (off + 1 + lab > cap)
             return -1;
         buf[off++] = (uint8_t)lab;
-        memcpy(buf + off, p, lab);
+        for (size_t k = 0; k < lab; k++) {
+            unsigned char c = (unsigned char)p[k];
+            unsigned char lower = (unsigned char)(c | 0x20);
+            if (use_0x20 && lower >= 'a' && lower <= 'z')
+                c = (dns_rand_byte(r) & 1) ? lower : (unsigned char)(c & (unsigned char)~0x20);
+            buf[off + k] = c;
+        }
         off += lab;
         if (!dot)
             break;
@@ -178,6 +230,8 @@ static int dns_build_query(uint8_t *buf, size_t cap, uint16_t id,
     buf[off++] = 0x00;
     buf[off++] = 0x01;                           /* QCLASS = IN */
     *out_len = off;
+    *q_off = 12;
+    *q_len = off - 12;
     return 0;
 }
 
@@ -227,16 +281,36 @@ static void dns_set_port(KlResolveResult *res, int port) {
 
 static void dns_on_timer(void *ud);
 
+/* 1 if some other in-flight request already carries this id. */
+static int dns_id_in_use(const KlDnsResolver *r, uint16_t id, const KlDnsReq *self) {
+    for (const KlDnsReq *q = r->inflight; q; q = q->next)
+        if (q != self && !q->literal && q->id == id)
+            return 1;
+    return 0;
+}
+
 static int dns_transmit(KlDnsResolver *r, KlDnsReq *q) {
     if (q->tries_left <= 0)
         return -1;
     q->tries_left--;
-    q->id = r->next_id++;
+
+    /* Randomized transaction id (redraw on the rare in-flight collision). */
+    for (int tries = 0; tries < 8; tries++) {
+        q->id = dns_rand_u16(r);
+        if (!dns_id_in_use(r, q->id, q))
+            break;
+    }
 
     uint8_t buf[DNS_QUERY_MAX];
-    size_t qlen = 0;
-    if (dns_build_query(buf, sizeof(buf), q->id, q->host, q->qtype, &qlen) != 0)
+    size_t qlen = 0, q_off = 0, q_len = 0;
+    if (dns_build_query(r, buf, sizeof(buf), q->id, q->host, q->qtype,
+                        &qlen, &q_off, &q_len) != 0)
         return -1;
+    /* Stash the exact question bytes to verify the response echoes them. */
+    if (q_len > sizeof(q->question))
+        return -1;
+    memcpy(q->question, buf + q_off, q_len);
+    q->question_len = q_len;
     if (kl_udp_send(&r->sock, buf, qlen) != 0)
         return -1;
 
@@ -277,6 +351,24 @@ static void dns_on_timer(void *ud) {
 
 /* ── Receive ─────────────────────────────────────────────────────────── */
 
+/* Does the response's first question echo exactly the bytes we sent
+ * (name + type + class, including 0x20 case)? Bounds-safe. */
+static int dns_question_matches(const uint8_t *pkt, size_t len,
+                                const uint8_t *eq, size_t eq_len) {
+    if (len < 12)
+        return 0;
+    uint16_t qd = (uint16_t)((pkt[4] << 8) | pkt[5]);
+    if (qd < 1)
+        return 0;
+    size_t off = 12;
+    if (dns_skip_name(pkt, len, off, &off) != 0)
+        return 0;
+    if (off + 4 > len)
+        return 0;
+    off += 4;                                    /* qtype + qclass */
+    return (off - 12 == eq_len) && (memcmp(pkt + 12, eq, eq_len) == 0);
+}
+
 static void dns_on_recv(KlUdp *u, const void *data, size_t len,
                         const struct sockaddr *src, socklen_t src_len, void *ud) {
     (void)u; (void)src; (void)src_len;
@@ -291,11 +383,16 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
 
     KlResolveResult res;
     memset(&res, 0, sizeof(res));
-    if (kl_dns_parse_response(pkt, len, id, q->qtype, &res) == 0) {
+    if (kl_dns_parse_response(pkt, len, id, q->qtype,
+                              q->question, q->question_len, &res) == 0) {
         dns_set_port(&res, q->port);
         dns_complete(r, q, &res, 0);
         return;
     }
+    /* Parse failed: only trust rcode / advance if the question is genuinely
+     * ours — otherwise ignore (spoofed or unrelated) and keep waiting. */
+    if (!dns_question_matches(pkt, len, q->question, q->question_len))
+        return;
     if ((pkt[3] & 0x0F) == 3) {                   /* NXDOMAIN — definitive */
         dns_complete(r, q, NULL, KL_ERR_DNS);
         return;
@@ -332,6 +429,24 @@ static int dns_is_literal(const char *host, int port, KlResolveResult *out) {
     return 0;
 }
 
+/* ASCII case-insensitive equality (letters only; targets are all-lowercase). */
+static int dns_ci_eq(const char *a, const char *b) {
+    for (; *a && *b; a++, b++)
+        if (((unsigned char)*a | 0x20) != ((unsigned char)*b | 0x20))
+            return 0;
+    return *a == *b;
+}
+
+/* "localhost" → loopback, since it's usually served by /etc/hosts, not DNS.
+ * A minimal safety net for the opt-out built-in-DNS default (full /etc/hosts
+ * is a roadmap item). */
+static int dns_is_localhost(const char *host, int port, int prefer_ipv6,
+                            KlResolveResult *out) {
+    if (!dns_ci_eq(host, "localhost"))
+        return 0;
+    return dns_is_literal(prefer_ipv6 ? "::1" : "127.0.0.1", port, out);
+}
+
 /* ── Vtable ──────────────────────────────────────────────────────────── */
 
 static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
@@ -358,7 +473,8 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
     q->next = r->inflight;
     r->inflight = q;
 
-    if (dns_is_literal(host, port, &q->result)) {
+    if (dns_is_literal(host, port, &q->result) ||
+        dns_is_localhost(host, port, r->prefer_ipv6, &q->result)) {
         q->literal = 1;
         q->timer_id = kl_timer_add(r->ctx, 0, dns_on_timer, q);
         if (q->timer_id < 0) {
@@ -508,7 +624,8 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
     r->timeout_ms = (cfg && cfg->timeout_ms) ? cfg->timeout_ms : 5000;
     r->attempts = (cfg && cfg->attempts) ? cfg->attempts : 2;
     r->prefer_ipv6 = cfg ? cfg->prefer_ipv6 : 0;
-    r->next_id = 1;
+    r->disable_0x20 = cfg ? cfg->disable_0x20 : 0;
+    r->rnd_off = sizeof(r->rnd_pool);   /* pool empty → refills on first draw */
 
     KlUdpConfig uc = { .ctx = ctx, .family = family, .alloc = alloc };
     if (kl_udp_init(&r->sock, &uc) != 0) {

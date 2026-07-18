@@ -2,7 +2,11 @@
 #include <keel/client.h>
 #include <keel/resolver.h>
 #include <keel/allocator.h>
+#include <keel/server.h>
+#include <keel/event_ctx.h>
 #include <string.h>
+#include <pthread.h>
+#include <unistd.h>
 
 /* ── kl_client_response_free tests ───────────────────────────────── */
 
@@ -262,6 +266,104 @@ UTEST(client, resolver_cancel_on_cleanup) {
     ASSERT_TRUE(mock_cancel_called);
 
     kl_event_ctx_free(&ev);
+}
+
+/* ── #4: default resolver wiring (opt-out built-in async DNS) ─────── */
+
+typedef struct { int done, error, status; } DnsWireCtx;
+
+static void wire_done(KlClient *client, void *ud) {
+    DnsWireCtx *c = ud;
+    c->error = kl_client_error(client);
+    if (c->error == 0) {
+        const KlClientResponse *resp = kl_client_response(client);
+        if (resp) c->status = resp->status;
+    }
+    c->done = 1;
+}
+
+static void wire_hello(KlRequest *req, KlResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+static void *wire_server_thread(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+
+static int wire_run(KlEventCtx *ev, DnsWireCtx *c, int timeout_ms) {
+    int elapsed = 0;
+    while (!c->done && elapsed < timeout_ms) {
+        if (kl_event_ctx_run(ev, 16, 10) < 0) return -1;
+        elapsed += 10;
+    }
+    return c->done ? 0 : -1;
+}
+
+/* Default config (no resolver, no system_dns): the async client auto-creates a
+ * built-in resolver; "localhost" resolves via the shortcut → local server. */
+UTEST(client, async_default_resolver_localhost) {
+    KlServer srv;
+    KlConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
+    ASSERT_EQ(0, kl_server_init(&srv, &scfg));
+    kl_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, wire_server_thread, &srv));
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    ASSERT_TRUE(srv.bound_port > 0);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://localhost:%d/", srv.bound_port);
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    DnsWireCtx c = {0};
+    KlClient *cl = kl_client_start(&ev, &a, NULL, "GET", url,
+                                   NULL, 0, NULL, 0, wire_done, &c);
+    ASSERT_TRUE(cl != NULL);
+    ASSERT_EQ(0, wire_run(&ev, &c, 3000));
+    ASSERT_EQ(0, c.error);
+    ASSERT_EQ(200, c.status);
+    kl_client_free(cl);            /* frees the auto-created resolver (ASan) */
+    kl_event_ctx_free(&ev);
+
+    kl_server_stop(&srv);
+    pthread_join(t, NULL);
+    kl_server_free(&srv);
+}
+
+/* system_dns=1 routes the async client through blocking getaddrinfo. */
+UTEST(client, async_system_dns) {
+    KlServer srv;
+    KlConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
+    ASSERT_EQ(0, kl_server_init(&srv, &scfg));
+    kl_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, wire_server_thread, &srv));
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
+    ASSERT_TRUE(srv.bound_port > 0);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/", srv.bound_port);
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    KlClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.system_dns = 1;
+    DnsWireCtx c = {0};
+    KlClient *cl = kl_client_start(&ev, &a, &cfg, "GET", url,
+                                   NULL, 0, NULL, 0, wire_done, &c);
+    ASSERT_TRUE(cl != NULL);
+    ASSERT_EQ(0, wire_run(&ev, &c, 3000));
+    ASSERT_EQ(0, c.error);
+    ASSERT_EQ(200, c.status);
+    kl_client_free(cl);
+    kl_event_ctx_free(&ev);
+
+    kl_server_stop(&srv);
+    pthread_join(t, NULL);
+    kl_server_free(&srv);
 }
 
 UTEST_MAIN();

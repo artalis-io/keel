@@ -10,6 +10,7 @@
 #include <keel/client.h>
 #include <keel/client_pool.h>
 #include <keel/decompress.h>
+#include <keel/dns_resolver.h>
 #include <keel/parser.h>
 
 #include <errno.h>
@@ -1110,6 +1111,7 @@ struct KlClient {
     /* Async DNS resolver (NULL = sync getaddrinfo was used) */
     KlResolver        *resolver;
     KlResolveReq      *resolve_req;
+    int                owns_resolver;   /* 1 = auto-created, destroy on teardown */
 
     /* Completion callback */
     KlClientDoneFn     on_done;
@@ -1390,6 +1392,23 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
         c->error = KL_ERR_CONNECT;
         async_complete_error(c);
     }
+}
+
+/* Select the resolver for an async request. Precedence: explicit cfg->resolver
+ * (borrowed) → cfg->system_dns (NULL → blocking getaddrinfo) → auto-created
+ * built-in async resolver (owned; *owned = 1). Returns NULL to fall back to
+ * getaddrinfo (also on auto-create failure — better than failing the request). */
+static KlResolver *client_pick_resolver(const KlClientConfig *cfg,
+                                        KlEventCtx *ev_ctx, int *owned) {
+    *owned = 0;
+    if (cfg && cfg->resolver)
+        return cfg->resolver;
+    if (cfg && cfg->system_dns)
+        return NULL;
+    KlResolver *r = kl_dns_resolver_create(ev_ctx, NULL);
+    if (r)
+        *owned = 1;
+    return r;
 }
 
 /* ── State: CONNECTING ───────────────────────────────────────────── */
@@ -2143,15 +2162,21 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     const char *resolve_host = is_proxied ? proxy->host : host_buf;
     int resolve_port = is_proxied ? proxy->port : parsed.port;
 
-    /* Async DNS resolver path */
-    KlResolver *resolver = cfg ? cfg->resolver : NULL;
+    /* Async DNS resolver path (explicit, built-in default, or getaddrinfo). */
+    int res_owned = 0;
+    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, &res_owned);
     if (resolver) {
         c->resolver = resolver;
+        c->owns_resolver = res_owned;
         c->state = KL_HCLIENT_RESOLVING;
         c->resolve_req = resolver->resolve(resolver, ev_ctx,
                                             resolve_host, resolve_port,
                                             dns_resolved, c);
         if (!c->resolve_req) {
+            if (res_owned)
+                resolver->destroy(resolver);
+            c->resolver = NULL;
+            c->owns_resolver = 0;
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
@@ -2289,9 +2314,16 @@ void kl_client_free(KlClient *client)
     if (!client)
         return;
 
-    /* Cancel if still in-flight */
+    /* Cancel if still in-flight (cancels any pending resolve_req first). */
     if (client->state != KL_HCLIENT_DONE)
         kl_client_cancel(client);
+
+    /* Destroy the auto-created resolver (after any resolve_req was cancelled). */
+    if (client->owns_resolver && client->resolver) {
+        client->resolver->destroy(client->resolver);
+        client->resolver = NULL;
+        client->owns_resolver = 0;
+    }
 
     if (client->request_buf) {
         kl_free(client->alloc, client->request_buf, client->request_len);
@@ -2578,14 +2610,20 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     }
 
     /* Pool miss — normal connect flow */
-    KlResolver *resolver = cfg ? cfg->resolver : NULL;
+    int res_owned = 0;
+    KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, &res_owned);
     if (resolver) {
         c->resolver = resolver;
+        c->owns_resolver = res_owned;
         c->state = KL_HCLIENT_RESOLVING;
         c->resolve_req = resolver->resolve(resolver, ev_ctx,
                                             host_buf, parsed.port,
                                             dns_resolved, c);
         if (!c->resolve_req) {
+            if (res_owned)
+                resolver->destroy(resolver);
+            c->resolver = NULL;
+            c->owns_resolver = 0;
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);

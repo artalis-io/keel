@@ -29,6 +29,7 @@ typedef struct {
     int          timeout_ms;  /**< Per-attempt timeout; 0 = 5000. */
     int          attempts;    /**< Transmits per family before failing; 0 = 2. */
     int          prefer_ipv6; /**< Query AAAA before A. */
+    int          disable_0x20;/**< Disable DNS 0x20 case randomization (for resolvers that normalize case). */
     KlAllocator *alloc;       /**< NULL = event-context allocator. */
 } KlDnsResolverConfig;
 
@@ -53,14 +54,22 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
  * truncated, or hostile packets (every read is checked against @p len, and
  * name-label traversal is capped). Does not set the address port.
  *
- * @param pkt        Response bytes.
- * @param len        Response length.
- * @param expect_id  Transaction ID the response must carry.
- * @param want_qtype KL_DNS_TYPE_A or KL_DNS_TYPE_AAAA.
- * @param out        Filled with the address on success (addr/addrlen/ai_family).
+ * When @p expect_q is non-NULL, the response's question section must echo those
+ * exact bytes (encoded QNAME + QTYPE + QCLASS, including 0x20 case) or the
+ * response is rejected — binding the answer to the query, not just the ID.
+ * Pass NULL to skip question verification (answer extraction only).
+ *
+ * @param pkt          Response bytes.
+ * @param len          Response length.
+ * @param expect_id    Transaction ID the response must carry.
+ * @param want_qtype   KL_DNS_TYPE_A or KL_DNS_TYPE_AAAA.
+ * @param expect_q     Expected question-section wire bytes, or NULL to skip.
+ * @param expect_q_len Length of @p expect_q.
+ * @param out          Filled with the address on success (addr/addrlen/ai_family).
  * @return 0 if a matching record was found and @p out filled, -1 otherwise.
  */
 int kl_dns_parse_response(const uint8_t *pkt, size_t len, uint16_t expect_id,
-                          int want_qtype, KlResolveResult *out);
+                          int want_qtype, const uint8_t *expect_q, size_t expect_q_len,
+                          KlResolveResult *out);
 
 #endif /* KEEL_DNS_RESOLVER_H */

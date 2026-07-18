@@ -49,9 +49,23 @@ Keel is **production-ready for embedded/edge workloads**. 31 orthogonal modules 
 
 ## Future
 
+### UDP / DNS follow-ups
+
+Follow-ups to the UDP datagram arc (`KlUdp` + `KlUdpServer` + `dns_resolver`,
+2026-07). The active hardening + default-wiring work (resolver anti-spoofing and
+opt-out built-in DNS) is specced separately in `docs/dns_resolver_hardening.md`;
+the items below are the remaining gaps, roughly in priority order.
+
+- **`IP_PKTINFO` / `IPV6_RECVPKTINFO` — source address on wildcard binds** *(correctness)* — A `0.0.0.0`/`::`-bound UDP responder on a multi-homed host must reply *from the exact local address the client hit*, or the client drops the reply. Capture the local address on receive (`IP_PKTINFO`/`IPV6_RECVPKTINFO`) and set it on the reply. Also a hard requirement for a QUIC server. Additive: a `KlUdpConfig` opt-in flag plus a richer recv variant carrying the local address.
+- **`SO_RCVBUF` / `SO_SNDBUF` sizing knobs** *(easy win)* — Under load the kernel silently drops inbound datagrams before the recv loop sees them, and the `dropped`/`truncated` counters don't capture kernel-side loss. Add two `KlUdpConfig` fields to size the kernel socket buffers.
+- **DNS parity with `getaddrinfo`** *(completeness)* — `/etc/hosts` lookup, `resolv.conf` `search`/`ndots` expansion for unqualified names, multiple-nameserver failover (today only the first is used), EDNS0 (advertise a larger UDP buffer to avoid truncation), and multiple-address return / Happy Eyeballs (RFC 8305) instead of the first record with sequential A→AAAA. Landing `/etc/hosts` + search removes the remaining semantic gap of the opt-out built-in-DNS default.
+- **Multicast / broadcast** *(feature)* — `IP_ADD_MEMBERSHIP` (join groups), `IP_MULTICAST_TTL`/`IP_MULTICAST_LOOP`, `SO_BROADCAST`. Unlocks mDNS, SSDP/UPnP, and LAN service discovery.
+- **Batching + QoS** *(throughput)* — `recvmmsg`/`sendmmsg` (one syscall per many datagrams), UDP GSO/GRO segmentation offload, and ECN/TOS/DSCP marking. Matters for high-PPS services and QUIC.
+- **DNS extras** *(deferred)* — TCP fallback on the truncation (`TC`) bit, DNSSEC validation, DoT/DoH transports (DoH rides the existing HTTPS client), and DNS cookies (RFC 7873, a stronger off-path anti-spoof than 0x20).
+
 ### Research / Long-Term
 
-- **QUIC / HTTP/3** — Requires a UDP-based event model and a QUIC library (quiche, ngtcp2). Significant architectural change — the connection model shifts from persistent TCP streams to multiplexed UDP datagrams with connection migration.
+- **QUIC / HTTP/3** — The UDP event model now exists (`KlUdp`); remaining work is a QUIC library (quiche, ngtcp2), `IP_PKTINFO` source-address handling (above), and the connection model shift from persistent TCP streams to multiplexed UDP datagrams with connection migration.
 - **Zero-copy receive (MSG_ZEROCOPY)** — Linux `MSG_ZEROCOPY` for `send(2)` avoids copying response data from userspace to kernel. Marginal benefit for small responses but significant for large file transfers.
 - **eBPF request steering** — Use eBPF `SO_REUSEPORT` programs to steer connections to specific threads/cores based on request characteristics.
 - **WebSocket compression (RFC 7692)** — `permessage-deflate` compression negotiation and per-message compression. Rarely needed in practice due to CPU overhead vs. bandwidth savings.
