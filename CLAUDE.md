@@ -68,7 +68,7 @@ make clean        # remove all build artifacts
 32. **proxy_protocol** — PROXY protocol v1/v2 header parser + CIDR trust matching (recover the real client address behind an L4 load balancer; gated by `proxy_trusted_cidrs`)
 33. **udp** — Non-blocking UDP datagram socket over `KlEventCtx`: async per-datagram receive with source + local (dest) address via `IP_PKTINFO`, capped whole-datagram send queue (backpressure), source-pinned sends (`kl_udp_send_to_from`). Foundation for a future async DNS resolver and QUIC/HTTP-3 (see `docs/udp_design.md`)
 34. **udp_server** — Datagram dispatch surface over `udp`, symmetric with `KlServer` (bind + per-datagram handler + reply). Shares a `KlEventCtx` so one process serves TCP HTTP and UDP on a single loop; horizontal scaling via `SO_REUSEPORT`
-35. **dns_resolver** — Built-in async DNS resolver over `udp` implementing the `KlResolver` vtable: non-blocking A/AAAA queries with timeout/retransmit, replacing the blocking `getaddrinfo` fallback. Bounds-safe response parser (`kl_dns_parse_response`) is fuzzed (`fuzz_dns`)
+35. **dns_resolver** — Built-in async DNS resolver over `udp` implementing the `KlResolver` vtable: non-blocking A/AAAA queries with timeout/retransmit, `/etc/hosts` lookup, EDNS0, replacing the blocking `getaddrinfo` fallback. Bounds-safe response parser (`kl_dns_parse_response`) is fuzzed (`fuzz_dns`)
 
 **Deliberate design choices:**
 

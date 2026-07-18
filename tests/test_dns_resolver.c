@@ -4,7 +4,9 @@
 #include <keel/udp_server.h>
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -71,6 +73,7 @@ static uint16_t g_seen_ids[8];   /* transaction ids observed, in order */
 static int g_seen_n;
 static uint8_t g_last_q[128];    /* last query's question-section bytes */
 static size_t g_last_q_len;
+static int g_last_arcount;       /* last query's ARCOUNT (1 = EDNS0 OPT present) */
 
 /* Parse qtype from the question and emit a canned response. */
 static void mock_ns(KlUdpServer *s, const void *data, size_t len,
@@ -82,6 +85,7 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
     const uint8_t *q = data;
     if (g_seen_n < 8)
         g_seen_ids[g_seen_n++] = (uint16_t)((q[0] << 8) | q[1]);
+    g_last_arcount = (q[10] << 8) | q[11];
 
     /* Walk the question name to find qtype. */
     size_t off = 12;
@@ -168,6 +172,7 @@ static void on_done(KlResolveReq *req, const KlResolveResult *result,
 static void reset_dns(void) {
     g_answer_a = g_answer_aaaa = 0; g_rcode = 0; g_silent = 0; g_queries = 0;
     g_flip_case = 0; g_wrong_question = 0; g_seen_n = 0; g_last_q_len = 0;
+    g_last_arcount = 0;
     g_done = 0; g_err = 0; memset(&g_res, 0, sizeof(g_res));
 }
 
@@ -481,6 +486,120 @@ UTEST(dns, transaction_ids_not_sequential) {
     ASSERT_TRUE(g_seen_n >= 3);
     /* The old counter would have produced exactly 1,2,3. */
     ASSERT_FALSE(g_seen_ids[0] == 1 && g_seen_ids[1] == 2 && g_seen_ids[2] == 3);
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── Phase 1a: /etc/hosts + EDNS0 ────────────────────────────────────── */
+
+static const char *write_hosts(const char *content) {
+    static char path[64];
+    snprintf(path, sizeof(path), "/tmp/keel_hosts_%d", (int)getpid());
+    FILE *f = fopen(path, "w");
+    if (!f) return NULL;
+    fputs(content, f);
+    fclose(f);
+    return path;
+}
+
+UTEST(dns, hosts_file_lookup) {
+    reset_dns();
+    const char *hp = write_hosts("# a comment\n10.9.8.7  myhost.test alias.test\n");
+    ASSERT_TRUE(hp != NULL);
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlDnsResolverConfig dc = { .timeout_ms = 500, .attempts = 2, .hosts_path = hp };
+    KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    /* Resolve via the alias name — must hit the hosts file, no DNS query. */
+    ASSERT_TRUE(r->resolve(r, &ctx, "alias.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 50);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_EQ(AF_INET, g_res.ai_family);
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addr)->sin_addr, ip, sizeof(ip));
+    ASSERT_STREQ("10.9.8.7", ip);
+    ASSERT_EQ(80, ntohs(((struct sockaddr_in *)&g_res.addr)->sin_port));
+    ASSERT_EQ(0, g_queries);            /* no packet sent */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+    unlink(hp);
+}
+
+UTEST(dns, hosts_prefer_ipv6) {
+    reset_dns();
+    const char *hp = write_hosts("10.0.0.1 dual.test\n2001:db8::1 dual.test\n");
+    ASSERT_TRUE(hp != NULL);
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlDnsResolverConfig dc = { .prefer_ipv6 = 1, .hosts_path = hp };
+    KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "dual.test", 443, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 50);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(AF_INET6, g_res.ai_family);   /* prefer_ipv6 picks the AAAA line */
+    char ip[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&g_res.addr)->sin6_addr, ip, sizeof(ip));
+    ASSERT_STREQ("2001:db8::1", ip);
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+    unlink(hp);
+}
+
+UTEST(dns, edns0_opt_advertised) {
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 500, 2);   /* EDNS0 on by default */
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_EQ(1, g_last_arcount);           /* OPT record in the additional section */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(dns, edns0_disabled) {
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlDnsResolverConfig dc = { .timeout_ms = 500, .attempts = 2, .disable_edns = 1 };
+    KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_last_arcount);           /* no OPT record */
 
     r->destroy(r);
     kl_udp_server_free(&ns);

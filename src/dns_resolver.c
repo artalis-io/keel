@@ -11,8 +11,11 @@
 #include <sys/socket.h>
 
 #define DNS_NAME_MAX      256
-#define DNS_QUERY_MAX     512   /* classic DNS message cap (no EDNS0) */
+#define DNS_QUERY_MAX     512   /* query buffer (question + EDNS0 OPT fit easily) */
 #define DNS_RND_POOL_SIZE 256   /* entropy bytes buffered per /dev/urandom read */
+#define DNS_TYPE_OPT      41    /* EDNS0 OPT pseudo-record type */
+#define DNS_EDNS_UDP_SIZE 1232  /* advertised UDP payload size (DNS flag day) */
+#define DNS_OPT_RR_LEN    11    /* wire length of a bare OPT RR */
 
 /* ── Per-request handle ──────────────────────────────────────────────── */
 
@@ -48,6 +51,8 @@ typedef struct KlDnsResolver {
     int            attempts;
     int            prefer_ipv6;
     int            disable_0x20;
+    int            disable_edns;
+    char           hosts_path[DNS_NAME_MAX];
     KlDnsReq      *inflight;
     unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
     size_t         rnd_off;       /* next unused byte in rnd_pool */
@@ -229,9 +234,25 @@ static int dns_build_query(KlDnsResolver *r, uint8_t *buf, size_t cap, uint16_t 
     buf[off++] = (uint8_t)(qtype & 0xFF);
     buf[off++] = 0x00;
     buf[off++] = 0x01;                           /* QCLASS = IN */
-    *out_len = off;
     *q_off = 12;
-    *q_len = off - 12;
+    *q_len = off - 12;                           /* question section (excludes EDNS0) */
+
+    /* EDNS0: advertise a larger UDP payload via a bare OPT RR in the additional
+     * section (arcount = 1). Backward-compatible; a non-EDNS server ignores it. */
+    if (!r->disable_edns) {
+        if (off + DNS_OPT_RR_LEN > cap)
+            return -1;
+        buf[11] = 0x01;                          /* arcount = 1 */
+        buf[off++] = 0x00;                       /* OPT owner name = root */
+        buf[off++] = (uint8_t)(DNS_TYPE_OPT >> 8);
+        buf[off++] = (uint8_t)(DNS_TYPE_OPT & 0xFF);
+        buf[off++] = (uint8_t)(DNS_EDNS_UDP_SIZE >> 8);
+        buf[off++] = (uint8_t)(DNS_EDNS_UDP_SIZE & 0xFF);
+        buf[off++] = 0x00; buf[off++] = 0x00;    /* extended rcode + version */
+        buf[off++] = 0x00; buf[off++] = 0x00;    /* flags */
+        buf[off++] = 0x00; buf[off++] = 0x00;    /* rdlen = 0 */
+    }
+    *out_len = off;
     return 0;
 }
 
@@ -448,6 +469,66 @@ static int dns_is_localhost(const char *host, int port, int prefer_ipv6,
     return dns_is_literal(prefer_ipv6 ? "::1" : "127.0.0.1", port, out);
 }
 
+/* Look up `host` in a hosts file (default /etc/hosts), honoring prefer_ipv6.
+ * Fills a v4 and/or v6 address from matching lines and returns 1 if found. */
+static int dns_hosts_lookup(const char *path, const char *host, int port,
+                            int prefer_ipv6, KlResolveResult *out) {
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+
+    char line[512];
+    int have_v4 = 0, have_v6 = 0;
+    struct in_addr a4;
+    struct in6_addr a6;
+    while (fgets(line, sizeof(line), f)) {
+        char *hash = strchr(line, '#');
+        if (hash) *hash = '\0';                 /* strip comment */
+
+        char *save = NULL;
+        const char *addr = strtok_r(line, " \t\r\n", &save);
+        if (!addr)
+            continue;
+        int match = 0;
+        const char *name;
+        while ((name = strtok_r(NULL, " \t\r\n", &save)) != NULL) {
+            if (dns_ci_eq(name, host)) { match = 1; break; }
+        }
+        if (!match)
+            continue;
+
+        if (!have_v4 && inet_pton(AF_INET, addr, &a4) == 1)
+            have_v4 = 1;
+        else if (!have_v6 && inet_pton(AF_INET6, addr, &a6) == 1)
+            have_v6 = 1;
+        if (have_v4 && have_v6)
+            break;
+    }
+    fclose(f);
+
+    if (!have_v4 && !have_v6)
+        return 0;
+
+    memset(out, 0, sizeof(*out));
+    if ((prefer_ipv6 && have_v6) || (!have_v4 && have_v6)) {
+        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&out->addr;
+        s6->sin6_family = AF_INET6;
+        s6->sin6_addr = a6;
+        s6->sin6_port = htons((uint16_t)port);
+        out->addrlen = sizeof(*s6);
+        out->ai_family = AF_INET6;
+    } else {
+        struct sockaddr_in *s4 = (struct sockaddr_in *)&out->addr;
+        s4->sin_family = AF_INET;
+        s4->sin_addr = a4;
+        s4->sin_port = htons((uint16_t)port);
+        out->addrlen = sizeof(*s4);
+        out->ai_family = AF_INET;
+    }
+    out->ai_socktype = SOCK_STREAM;
+    return 1;
+}
+
 /* ── Vtable ──────────────────────────────────────────────────────────── */
 
 static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
@@ -474,7 +555,10 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
     q->next = r->inflight;
     r->inflight = q;
 
+    /* Resolve without a query where possible: literal IP → hosts file →
+     * localhost fallback (for hosts files that omit it). */
     if (dns_is_literal(host, port, &q->result) ||
+        dns_hosts_lookup(r->hosts_path, host, port, r->prefer_ipv6, &q->result) ||
         dns_is_localhost(host, port, r->prefer_ipv6, &q->result)) {
         q->literal = 1;
         q->timer_id = kl_timer_add(r->ctx, 0, dns_on_timer, q);
@@ -626,6 +710,9 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
     r->attempts = (cfg && cfg->attempts) ? cfg->attempts : 2;
     r->prefer_ipv6 = cfg ? cfg->prefer_ipv6 : 0;
     r->disable_0x20 = cfg ? cfg->disable_0x20 : 0;
+    r->disable_edns = cfg ? cfg->disable_edns : 0;
+    snprintf(r->hosts_path, sizeof(r->hosts_path), "%s",
+             (cfg && cfg->hosts_path) ? cfg->hosts_path : "/etc/hosts");
     r->rnd_off = sizeof(r->rnd_pool);   /* pool empty → refills on first draw */
 
     KlUdpConfig uc = { .ctx = ctx, .family = family, .alloc = alloc };
