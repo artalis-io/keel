@@ -32,7 +32,7 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-33 orthogonal modules, each independently testable:
+34 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
 2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
@@ -67,6 +67,7 @@ make clean        # remove all build artifacts
 31. **resolver_cache** — Caching DNS resolver decorator: wraps any KlResolver, caches successful results with configurable TTL/capacity, transparent to consumers
 32. **proxy_protocol** — PROXY protocol v1/v2 header parser + CIDR trust matching (recover the real client address behind an L4 load balancer; gated by `proxy_trusted_cidrs`)
 33. **udp** — Non-blocking UDP datagram socket over `KlEventCtx`: async per-datagram receive with source address + capped whole-datagram send queue (backpressure). Foundation for a future async DNS resolver and QUIC/HTTP-3 (see `docs/udp_design.md`)
+34. **udp_server** — Datagram dispatch surface over `udp`, symmetric with `KlServer` (bind + per-datagram handler + reply). Shares a `KlEventCtx` so one process serves TCP HTTP and UDP on a single loop; horizontal scaling via `SO_REUSEPORT`
 
 **Deliberate design choices:**
 
@@ -165,6 +166,8 @@ make clean        # remove all build artifacts
 | `KlServerStats` | `server.h` | Read-only server load snapshot: active_connections, max_connections, async_suspended, listen_paused |
 | `KlUdp` | `udp.h` | Non-blocking UDP socket: async recv (per-datagram + source addr), capped whole-datagram send queue with on-drain backpressure callback |
 | `KlUdpConfig` | `udp.h` | UDP config: ctx, family, bind_addr/port, recv_buf_size, max_send_queue, reuse_addr/port, allocator |
+| `KlUdpServer` | `udp_server.h` | Datagram dispatch server: bound KlUdp + per-datagram handler + reply; shares a KlEventCtx with the TCP server |
+| `KlUdpHandlerFn` | `udp_server.h` | Datagram handler: `void (*)(KlUdpServer *, const void *data, size_t, const struct sockaddr *src, socklen_t, void *)` |
 
 ## Git
 

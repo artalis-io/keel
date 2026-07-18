@@ -1,6 +1,6 @@
 # UDP Support — Design
 
-Status: **Layer A (`KlUdp`) done; `dns_resolver` + `KlUdpServer` planned.**
+Status: **Layers A (`KlUdp`) + C-server (`KlUdpServer`) done; `dns_resolver` planned.**
 Decisions taken (2026-07-18):
 - Deliver **three layers**: the `KlUdp` socket primitive, a built-in async DNS
   resolver over it, and a `KlUdpServer` datagram-dispatch surface.

@@ -81,7 +81,7 @@ CORE_SRC = src/allocator.c src/error.c src/response.c src/router.c \
            src/websocket.c src/websocket_client.c \
            src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client.c src/client_pool.c src/redirect.c src/sse.c \
-           src/resolver_cache.c src/proxy_protocol.c src/udp.c \
+           src/resolver_cache.c src/proxy_protocol.c src/udp.c src/udp_server.c \
            src/compress.c src/decompress.c src/drain.c \
            $(FILE_IO_SRC) $(EVENT_SRC)
 

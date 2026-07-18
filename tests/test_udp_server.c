@@ -1,0 +1,155 @@
+#include "utest.h"
+#include <keel/udp_server.h>
+#include <keel/udp.h>
+#include <keel/event_ctx.h>
+#include <keel/allocator.h>
+#include <string.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+/* ── Server side: echo handler ───────────────────────────────────────── */
+
+static int g_srv_hits;
+static char g_srv_src_ip[INET6_ADDRSTRLEN];
+
+static void echo_handler(KlUdpServer *s, const void *data, size_t len,
+                         const struct sockaddr *src, socklen_t src_len, void *ud) {
+    (void)ud;
+    g_srv_hits++;
+    g_srv_src_ip[0] = '\0';
+    if (src && src->sa_family == AF_INET)
+        inet_ntop(AF_INET, &((const struct sockaddr_in *)src)->sin_addr,
+                  g_srv_src_ip, sizeof(g_srv_src_ip));
+    kl_udp_server_reply(s, data, len, src, src_len);
+}
+
+/* ── Client side: capture ────────────────────────────────────────────── */
+
+static char   g_cli_buf[512];
+static size_t g_cli_len;
+static int    g_cli_got;
+
+static void cli_recv(KlUdp *u, const void *data, size_t len,
+                     const struct sockaddr *src, socklen_t src_len, void *ud) {
+    (void)u; (void)src; (void)src_len; (void)ud;
+    if (len > sizeof(g_cli_buf)) len = sizeof(g_cli_buf);
+    memcpy(g_cli_buf, data, len);
+    g_cli_len = len;
+    g_cli_got++;
+}
+
+static void reset(void) {
+    g_srv_hits = 0; g_srv_src_ip[0] = '\0';
+    g_cli_len = 0; g_cli_got = 0; memset(g_cli_buf, 0, sizeof(g_cli_buf));
+}
+
+static void pump_until(KlEventCtx *ctx, int *flag, int want, int ticks) {
+    for (int i = 0; i < ticks && *flag < want; i++)
+        kl_event_ctx_run(ctx, 16, 10);
+}
+
+static void dest_v4(struct sockaddr_in *a, uint16_t port) {
+    memset(a, 0, sizeof(*a));
+    a->sin_family = AF_INET;
+    a->sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &a->sin_addr);
+}
+
+/* ── Tests ───────────────────────────────────────────────────────────── */
+
+UTEST(udp_server, echo_roundtrip) {
+    reset();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdpServer srv;
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    ASSERT_EQ(0, kl_udp_server_init(&srv, &ctx, &sc, echo_handler, NULL));
+    uint16_t port = kl_udp_server_local_port(&srv);
+    ASSERT_TRUE(port > 0);
+
+    KlUdp cli;
+    KlUdpConfig cc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&cli, &cc));
+    ASSERT_EQ(0, kl_udp_recv_start(&cli, cli_recv, NULL));
+
+    struct sockaddr_in dst;
+    dest_v4(&dst, port);
+    const char *msg = "discover";
+    ASSERT_EQ(0, kl_udp_send_to(&cli, msg, strlen(msg),
+                                (struct sockaddr *)&dst, sizeof(dst)));
+
+    /* client -> server (handler) -> reply -> client */
+    pump_until(&ctx, &g_cli_got, 1, 300);
+
+    ASSERT_EQ(1, g_srv_hits);
+    ASSERT_STREQ("127.0.0.1", g_srv_src_ip);   /* server saw the client's addr */
+    ASSERT_EQ(1, g_cli_got);
+    ASSERT_EQ(strlen(msg), g_cli_len);
+    ASSERT_EQ(0, memcmp(g_cli_buf, msg, g_cli_len));
+
+    kl_udp_free(&cli);
+    kl_udp_server_free(&srv);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(udp_server, shared_loop_two_servers) {
+    /* Two UDP servers on one event context — proves the shared-loop model. */
+    reset();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdpServer a, b;
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    ASSERT_EQ(0, kl_udp_server_init(&a, &ctx, &sc, echo_handler, NULL));
+    ASSERT_EQ(0, kl_udp_server_init(&b, &ctx, &sc, echo_handler, NULL));
+    ASSERT_TRUE(kl_udp_server_local_port(&a) != kl_udp_server_local_port(&b));
+
+    KlUdp cli;
+    KlUdpConfig cc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&cli, &cc));
+    ASSERT_EQ(0, kl_udp_recv_start(&cli, cli_recv, NULL));
+
+    struct sockaddr_in dst;
+    dest_v4(&dst, kl_udp_server_local_port(&b));   /* hit server B */
+    ASSERT_EQ(0, kl_udp_send_to(&cli, "hi", 2, (struct sockaddr *)&dst, sizeof(dst)));
+    pump_until(&ctx, &g_cli_got, 1, 300);
+
+    ASSERT_EQ(1, g_srv_hits);        /* exactly one server handled it */
+    ASSERT_EQ(1, g_cli_got);
+    ASSERT_EQ((size_t)2, g_cli_len);
+
+    kl_udp_free(&cli);
+    kl_udp_server_free(&a);
+    kl_udp_server_free(&b);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(udp_server, null_and_arg_guards) {
+    ASSERT_EQ(-1, kl_udp_server_init(NULL, NULL, NULL, NULL, NULL));
+    ASSERT_EQ(-1, kl_udp_server_reply(NULL, "x", 1, NULL, 0));
+    ASSERT_EQ((uint16_t)0, kl_udp_server_local_port(NULL));
+    ASSERT_EQ(-1, kl_udp_server_fd(NULL));
+
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdpServer srv;
+    /* NULL handler rejected. */
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(-1, kl_udp_server_init(&srv, &ctx, &sc, NULL, NULL));
+    ASSERT_EQ(KL_ERR_INVALID_ARG, kl_udp_server_last_error(&srv));
+
+    /* Valid init, then double-free safety. */
+    ASSERT_EQ(0, kl_udp_server_init(&srv, &ctx, &sc, echo_handler, NULL));
+    kl_udp_server_free(&srv);
+    kl_udp_server_free(&srv);
+
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST_MAIN();
