@@ -103,11 +103,15 @@ static ssize_t udp_send_from(KlUdp *udp, const void *data, size_t len,
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
     msg.msg_control = control.buf;
+    msg.msg_controllen = sizeof(control.buf);   /* must be set before CMSG_FIRSTHDR */
 
     struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+    if (!cm) {
+        errno = EINVAL;
+        return -1;
+    }
 #if defined(IP_PKTINFO)
     if (src->sa_family == AF_INET) {
-        msg.msg_controllen = CMSG_SPACE(sizeof(struct in_pktinfo));
         cm->cmsg_level = IPPROTO_IP;
         cm->cmsg_type = IP_PKTINFO;
         cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
@@ -115,10 +119,10 @@ static ssize_t udp_send_from(KlUdp *udp, const void *data, size_t len,
         memset(&pi, 0, sizeof(pi));
         pi.ipi_spec_dst = ((const struct sockaddr_in *)src)->sin_addr;
         memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+        msg.msg_controllen = CMSG_SPACE(sizeof(struct in_pktinfo));
     } else
 #endif
     if (src->sa_family == AF_INET6) {
-        msg.msg_controllen = CMSG_SPACE(sizeof(struct in6_pktinfo));
         cm->cmsg_level = IPPROTO_IPV6;
         cm->cmsg_type = IPV6_PKTINFO;
         cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
@@ -126,6 +130,7 @@ static ssize_t udp_send_from(KlUdp *udp, const void *data, size_t len,
         memset(&pi, 0, sizeof(pi));
         pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
         memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+        msg.msg_controllen = CMSG_SPACE(sizeof(struct in6_pktinfo));
     } else {
         errno = EINVAL;
         return -1;

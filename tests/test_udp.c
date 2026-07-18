@@ -300,6 +300,40 @@ UTEST(udp, pktinfo_captures_local_addr) {
     kl_event_ctx_free(&ctx);
 }
 
+UTEST(udp, send_to_from_loopback) {
+    /* Exercise the source-pinned send path (sendmsg + pktinfo cmsg) on every
+     * platform — a regression guard for the CMSG_FIRSTHDR ordering. Delivery
+     * from a pinned source is asserted only where the platform honors it. */
+    reset_capture();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp rx, tx;
+    KlUdpConfig rc_ = { .ctx = &ctx, .bind_addr = "0.0.0.0", .recv_pktinfo = 1 };
+    KlUdpConfig tc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&rx, &rc_));
+    ASSERT_EQ(0, kl_udp_init(&tx, &tc));
+    ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
+
+    struct sockaddr_in dst, src;
+    dest_v4(&dst, kl_udp_local_port(&rx));
+    memset(&src, 0, sizeof(src));
+    src.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &src.sin_addr);
+
+    /* Must not crash constructing the control message (the bug this guards). */
+    (void)kl_udp_send_to_from(&tx, "hi", 2, (struct sockaddr *)&dst, sizeof(dst),
+                              (struct sockaddr *)&src, sizeof(src));
+    pump_until(&ctx, 1, 200);
+    if (g_got)                                    /* delivered → pinned source honored */
+        ASSERT_STREQ("127.0.0.1", g_src_ip);
+
+    kl_udp_free(&tx);
+    kl_udp_free(&rx);
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST(udp, pktinfo_off_no_local) {
     /* Without recv_pktinfo, the callback's local address is NULL. */
     reset_capture();
