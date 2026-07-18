@@ -29,19 +29,26 @@ static void echo_handler(KlUdpServer *s, const void *data, size_t len,
 static char   g_cli_buf[512];
 static size_t g_cli_len;
 static int    g_cli_got;
+static char   g_cli_src_ip[INET6_ADDRSTRLEN];
 
 static void cli_recv(KlUdp *u, const void *data, size_t len,
-                     const struct sockaddr *src, socklen_t src_len, void *ud) {
-    (void)u; (void)src; (void)src_len; (void)ud;
+                     const struct sockaddr *src, socklen_t src_len,
+                     const struct sockaddr *local, socklen_t local_len, void *ud) {
+    (void)u; (void)src_len; (void)local; (void)local_len; (void)ud;
     if (len > sizeof(g_cli_buf)) len = sizeof(g_cli_buf);
     memcpy(g_cli_buf, data, len);
     g_cli_len = len;
+    g_cli_src_ip[0] = '\0';
+    if (src && src->sa_family == AF_INET)
+        inet_ntop(AF_INET, &((const struct sockaddr_in *)src)->sin_addr,
+                  g_cli_src_ip, sizeof(g_cli_src_ip));
     g_cli_got++;
 }
 
 static void reset(void) {
     g_srv_hits = 0; g_srv_src_ip[0] = '\0';
     g_cli_len = 0; g_cli_got = 0; memset(g_cli_buf, 0, sizeof(g_cli_buf));
+    g_cli_src_ip[0] = '\0';
 }
 
 static void pump_until(KlEventCtx *ctx, int *flag, int want, int ticks) {
@@ -151,5 +158,42 @@ UTEST(udp_server, null_and_arg_guards) {
 
     kl_event_ctx_free(&ctx);
 }
+
+#if defined(__linux__)
+/* Linux: a wildcard-bound server auto-enables pktinfo and replies FROM the
+ * address the client hit. Client sends to 127.0.0.2 → reply comes from 127.0.0.2
+ * (not the routing-table default), which the client observes as the source. */
+UTEST(udp_server, reply_from_hit_address) {
+    reset();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdpServer srv;
+    KlUdpServerConfig sc = { .bind_addr = "0.0.0.0", .port = 0 };  /* wildcard */
+    ASSERT_EQ(0, kl_udp_server_init(&srv, &ctx, &sc, echo_handler, NULL));
+    uint16_t port = kl_udp_server_local_port(&srv);
+
+    KlUdp cli;
+    KlUdpConfig cc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&cli, &cc));
+    ASSERT_EQ(0, kl_udp_recv_start(&cli, cli_recv, NULL));
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.2", &dst.sin_addr);   /* hit a non-primary loopback */
+    ASSERT_EQ(0, kl_udp_send_to(&cli, "ping", 4, (struct sockaddr *)&dst, sizeof(dst)));
+    pump_until(&ctx, &g_cli_got, 1, 300);
+
+    ASSERT_EQ(1, g_cli_got);
+    ASSERT_STREQ("127.0.0.2", g_cli_src_ip);   /* reply egressed from the hit addr */
+
+    kl_udp_free(&cli);
+    kl_udp_server_free(&srv);
+    kl_event_ctx_free(&ctx);
+}
+#endif
 
 UTEST_MAIN();

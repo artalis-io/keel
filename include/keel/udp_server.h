@@ -61,6 +61,8 @@ struct KlUdpServer {
     KlUdpHandlerFn handler;
     void          *user_data;
     KlError        last_error;
+    struct sockaddr_storage local;   /* current datagram's local (dest) addr, if pktinfo */
+    socklen_t      local_len;        /* 0 = unknown (reply uses the socket default) */
 };
 
 /**

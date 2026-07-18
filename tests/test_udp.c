@@ -13,10 +13,13 @@ static char     g_buf[2048];
 static size_t   g_len;
 static int      g_got;
 static char     g_src_ip[INET6_ADDRSTRLEN];
+static char     g_local_ip[INET6_ADDRSTRLEN];
+static int      g_has_local;
 
 static void on_recv(KlUdp *udp, const void *data, size_t len,
-                    const struct sockaddr *src, socklen_t src_len, void *ud) {
-    (void)udp; (void)ud; (void)src_len;
+                    const struct sockaddr *src, socklen_t src_len,
+                    const struct sockaddr *local, socklen_t local_len, void *ud) {
+    (void)udp; (void)ud; (void)src_len; (void)local_len;
     if (len > sizeof(g_buf)) len = sizeof(g_buf);
     memcpy(g_buf, data, len);
     g_len = len;
@@ -27,11 +30,20 @@ static void on_recv(KlUdp *udp, const void *data, size_t len,
     else if (src && src->sa_family == AF_INET6)
         inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)src)->sin6_addr,
                   g_src_ip, sizeof(g_src_ip));
+    g_local_ip[0] = '\0';
+    g_has_local = (local != NULL);
+    if (local && local->sa_family == AF_INET)
+        inet_ntop(AF_INET, &((const struct sockaddr_in *)local)->sin_addr,
+                  g_local_ip, sizeof(g_local_ip));
+    else if (local && local->sa_family == AF_INET6)
+        inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)local)->sin6_addr,
+                  g_local_ip, sizeof(g_local_ip));
     g_got++;
 }
 
 static void reset_capture(void) {
     g_len = 0; g_got = 0; g_src_ip[0] = '\0'; memset(g_buf, 0, sizeof(g_buf));
+    g_local_ip[0] = '\0'; g_has_local = 0;
 }
 
 /* Pump the loop up to `ticks` times or until g_got reaches `want`. */
@@ -257,6 +269,96 @@ UTEST(udp, backpressure_best_effort) {
     kl_udp_free(&rx);
     kl_event_ctx_free(&ctx);
 }
+
+/* ── IP_PKTINFO local-address capture ────────────────────────────────── */
+
+UTEST(udp, pktinfo_captures_local_addr) {
+    /* Wildcard-bound socket with pktinfo → callback sees the local dest addr. */
+    reset_capture();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp rx, tx;
+    KlUdpConfig rc = { .ctx = &ctx, .bind_addr = "0.0.0.0", .recv_pktinfo = 1 };
+    KlUdpConfig tc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&rx, &rc));
+    ASSERT_EQ(0, kl_udp_init(&tx, &tc));
+    ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
+
+    struct sockaddr_in dst;
+    dest_v4(&dst, kl_udp_local_port(&rx));    /* send to 127.0.0.1 */
+    ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, (struct sockaddr *)&dst, sizeof(dst)));
+    pump_until(&ctx, 1, 200);
+
+    ASSERT_EQ(1, g_got);
+    ASSERT_TRUE(g_has_local);                 /* pktinfo delivered a local addr */
+    ASSERT_STREQ("127.0.0.1", g_local_ip);    /* the address we sent to */
+
+    kl_udp_free(&tx);
+    kl_udp_free(&rx);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(udp, pktinfo_off_no_local) {
+    /* Without recv_pktinfo, the callback's local address is NULL. */
+    reset_capture();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp rx, tx;
+    KlUdpConfig rc = { .ctx = &ctx, .bind_addr = "127.0.0.1" };   /* pktinfo off */
+    KlUdpConfig tc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&rx, &rc));
+    ASSERT_EQ(0, kl_udp_init(&tx, &tc));
+    ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
+
+    struct sockaddr_in dst;
+    dest_v4(&dst, kl_udp_local_port(&rx));
+    ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, (struct sockaddr *)&dst, sizeof(dst)));
+    pump_until(&ctx, 1, 200);
+
+    ASSERT_EQ(1, g_got);
+    ASSERT_FALSE(g_has_local);
+
+    kl_udp_free(&tx);
+    kl_udp_free(&rx);
+    kl_event_ctx_free(&ctx);
+}
+
+#if defined(__linux__)
+/* Linux: the whole 127.0.0.0/8 is local, so we can exercise a genuine
+ * multi-homed capture — send to 127.0.0.2 and confirm the local addr matches. */
+UTEST(udp, pktinfo_multihomed_local) {
+    reset_capture();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp rx, tx;
+    KlUdpConfig rc = { .ctx = &ctx, .bind_addr = "0.0.0.0", .recv_pktinfo = 1 };
+    KlUdpConfig tc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&rx, &rc));
+    ASSERT_EQ(0, kl_udp_init(&tx, &tc));
+    ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(kl_udp_local_port(&rx));
+    inet_pton(AF_INET, "127.0.0.2", &dst.sin_addr);
+    ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, (struct sockaddr *)&dst, sizeof(dst)));
+    pump_until(&ctx, 1, 200);
+
+    ASSERT_EQ(1, g_got);
+    ASSERT_STREQ("127.0.0.2", g_local_ip);    /* not 127.0.0.1 */
+
+    kl_udp_free(&tx);
+    kl_udp_free(&rx);
+    kl_event_ctx_free(&ctx);
+}
+#endif
 
 UTEST(udp, null_and_arg_guards) {
     ASSERT_EQ(-1, kl_udp_init(NULL, NULL));

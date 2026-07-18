@@ -1,3 +1,9 @@
+/* macOS hides IPV6_PKTINFO / IPV6_RECVPKTINFO behind RFC 3542; opt in before
+ * <netinet/in.h>. No-op on Linux. */
+#if defined(__APPLE__) && !defined(__APPLE_USE_RFC_3542)
+#define __APPLE_USE_RFC_3542
+#endif
+
 #include <keel/udp.h>
 
 #include <errno.h>
@@ -16,6 +22,8 @@ struct KlUdpDatagram {
     struct KlUdpDatagram   *next;
     struct sockaddr_storage dest;      /* destination for sendto */
     socklen_t               dest_len;  /* 0 = connected send (use send()) */
+    struct sockaddr_storage src;       /* pinned source address, or unset */
+    socklen_t               src_len;   /* 0 = no source cmsg */
     size_t                  len;       /* payload length */
     unsigned char           data[];    /* payload */
 };
@@ -72,8 +80,63 @@ static void udp_update_interest(KlUdp *udp) {
 
 /* ── Send path ────────────────────────────────────────────────────────── */
 
+/* Send via sendmsg with a pktinfo control message pinning the source address.
+ * Returns -1/EINVAL if the family isn't supported for source pinning. */
+static ssize_t udp_send_from(KlUdp *udp, const void *data, size_t len,
+                             const struct sockaddr *dest, socklen_t dest_len,
+                             const struct sockaddr *src) {
+    union {
+        struct cmsghdr align;
+        unsigned char  buf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
+    } control;
+    memset(&control, 0, sizeof(control));
+
+    struct iovec iov = { .iov_base = (void *)data, .iov_len = len };
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_name = (void *)dest;
+    msg.msg_namelen = dest_len;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.buf;
+
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+#if defined(IP_PKTINFO)
+    if (src->sa_family == AF_INET) {
+        msg.msg_controllen = CMSG_SPACE(sizeof(struct in_pktinfo));
+        cm->cmsg_level = IPPROTO_IP;
+        cm->cmsg_type = IP_PKTINFO;
+        cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+        struct in_pktinfo pi;
+        memset(&pi, 0, sizeof(pi));
+        pi.ipi_spec_dst = ((const struct sockaddr_in *)src)->sin_addr;
+        memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+    } else
+#endif
+    if (src->sa_family == AF_INET6) {
+        msg.msg_controllen = CMSG_SPACE(sizeof(struct in6_pktinfo));
+        cm->cmsg_level = IPPROTO_IPV6;
+        cm->cmsg_type = IPV6_PKTINFO;
+        cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
+        struct in6_pktinfo pi;
+        memset(&pi, 0, sizeof(pi));
+        pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
+        memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+    } else {
+        errno = EINVAL;
+        return -1;
+    }
+
+    ssize_t n;
+    do { n = sendmsg(udp->fd, &msg, 0); } while (n < 0 && errno == EINTR);
+    return n;
+}
+
 static ssize_t udp_raw_send(KlUdp *udp, const void *data, size_t len,
-                            const struct sockaddr *dest, socklen_t dest_len) {
+                            const struct sockaddr *dest, socklen_t dest_len,
+                            const struct sockaddr *src, socklen_t src_len) {
+    if (src && src_len)
+        return udp_send_from(udp, data, len, dest, dest_len, src);
     ssize_t n;
     do {
         if (dest_len == 0)
@@ -85,7 +148,8 @@ static ssize_t udp_raw_send(KlUdp *udp, const void *data, size_t len,
 }
 
 static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
-                       const struct sockaddr *dest, socklen_t dest_len) {
+                       const struct sockaddr *dest, socklen_t dest_len,
+                       const struct sockaddr *src, socklen_t src_len) {
     /* Backpressure cap (avoids max_send_queue - len underflow). */
     if (len > udp->max_send_queue || udp->q_bytes > udp->max_send_queue - len) {
         udp->dropped++;
@@ -112,6 +176,12 @@ static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
     } else {
         node->dest_len = 0;
     }
+    if (src && src_len) {
+        memcpy(&node->src, src, src_len);
+        node->src_len = src_len;
+    } else {
+        node->src_len = 0;
+    }
     if (len)
         memcpy(node->data, data, len);
 
@@ -125,20 +195,21 @@ static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
 }
 
 static int udp_send_common(KlUdp *udp, const void *data, size_t len,
-                           const struct sockaddr *dest, socklen_t dest_len) {
+                           const struct sockaddr *dest, socklen_t dest_len,
+                           const struct sockaddr *src, socklen_t src_len) {
     if (udp->fd < 0) {
         udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     /* Preserve ordering: if anything is queued, queue behind it. */
     if (udp->q_head)
-        return udp_enqueue(udp, data, len, dest, dest_len);
+        return udp_enqueue(udp, data, len, dest, dest_len, src, src_len);
 
-    ssize_t n = udp_raw_send(udp, data, len, dest, dest_len);
+    ssize_t n = udp_raw_send(udp, data, len, dest, dest_len, src, src_len);
     if (n >= 0)
         return 0;   /* UDP send is all-or-nothing — no short-send handling */
     if (errno == EAGAIN || errno == EWOULDBLOCK)
-        return udp_enqueue(udp, data, len, dest, dest_len);
+        return udp_enqueue(udp, data, len, dest, dest_len, src, src_len);
 
     udp->last_error = KL_ERR_IO;
     return -1;
@@ -150,7 +221,9 @@ static void udp_flush_queue(KlUdp *udp) {
         KlUdpDatagram *node = udp->q_head;
         ssize_t n = udp_raw_send(udp, node->data, node->len,
                                  node->dest_len ? (struct sockaddr *)&node->dest : NULL,
-                                 node->dest_len);
+                                 node->dest_len,
+                                 node->src_len ? (struct sockaddr *)&node->src : NULL,
+                                 node->src_len);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 break;                 /* socket buffer still full — retry later */
@@ -170,7 +243,40 @@ static void udp_flush_queue(KlUdp *udp) {
 
 /* ── Receive path ─────────────────────────────────────────────────────── */
 
+/* Extract the datagram's local (destination) address from pktinfo control
+ * messages into udp->recv_local. Returns its length, or 0 if none present. */
+static socklen_t udp_parse_local(KlUdp *udp, struct msghdr *msg) {
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(msg); cm; cm = CMSG_NXTHDR(msg, cm)) {
+#if defined(IP_PKTINFO)
+        if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_PKTINFO) {
+            struct in_pktinfo pi;
+            memcpy(&pi, CMSG_DATA(cm), sizeof(pi));
+            struct sockaddr_in *s4 = (struct sockaddr_in *)&udp->recv_local;
+            memset(s4, 0, sizeof(*s4));
+            s4->sin_family = AF_INET;
+            s4->sin_addr = pi.ipi_addr;
+            return sizeof(*s4);
+        }
+#endif
+        if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_PKTINFO) {
+            struct in6_pktinfo pi;
+            memcpy(&pi, CMSG_DATA(cm), sizeof(pi));
+            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&udp->recv_local;
+            memset(s6, 0, sizeof(*s6));
+            s6->sin6_family = AF_INET6;
+            s6->sin6_addr = pi.ipi6_addr;
+            return sizeof(*s6);
+        }
+    }
+    return 0;
+}
+
 static void udp_recv_drain(KlUdp *udp) {
+    union {
+        struct cmsghdr align;
+        unsigned char  buf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
+    } control;
+
     for (;;) {
         struct msghdr msg;
         struct iovec  iov;
@@ -181,6 +287,10 @@ static void udp_recv_drain(KlUdp *udp) {
         msg.msg_iovlen = 1;
         msg.msg_name = &udp->recv_src;
         msg.msg_namelen = sizeof(udp->recv_src);
+        if (udp->pktinfo) {
+            msg.msg_control = control.buf;
+            msg.msg_controllen = sizeof(control.buf);
+        }
 
         ssize_t n;
         do { n = recvmsg(udp->fd, &msg, 0); } while (n < 0 && errno == EINTR);
@@ -192,10 +302,13 @@ static void udp_recv_drain(KlUdp *udp) {
         if (msg.msg_flags & MSG_TRUNC)
             udp->truncated++;
 
+        socklen_t local_len = udp->pktinfo ? udp_parse_local(udp, &msg) : 0;
+
         if (udp->on_recv)
             udp->on_recv(udp, udp->recv_buf, (size_t)n,
                          (struct sockaddr *)&udp->recv_src, msg.msg_namelen,
-                         udp->recv_ud);
+                         local_len ? (struct sockaddr *)&udp->recv_local : NULL,
+                         local_len, udp->recv_ud);
 
         /* The callback may have called recv_stop() or free() — re-check. */
         if (!udp->recv_active || udp->fd < 0)
@@ -277,6 +390,26 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         (void)setsockopt(udp->fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
     }
 #endif
+
+    /* Enable per-datagram local-address capture (best-effort per platform). */
+    if (cfg->recv_pktinfo) {
+        int opt = 1;
+        (void)opt;   /* unused on platforms lacking every pktinfo option */
+        if (family == AF_INET) {
+#if defined(IP_PKTINFO)
+            if (setsockopt(udp->fd, IPPROTO_IP, IP_PKTINFO, &opt, sizeof(opt)) == 0)
+                udp->pktinfo = 1;
+#elif defined(IP_RECVPKTINFO)
+            if (setsockopt(udp->fd, IPPROTO_IP, IP_RECVPKTINFO, &opt, sizeof(opt)) == 0)
+                udp->pktinfo = 1;
+#endif
+        } else if (family == AF_INET6) {
+#if defined(IPV6_RECVPKTINFO)
+            if (setsockopt(udp->fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &opt, sizeof(opt)) == 0)
+                udp->pktinfo = 1;
+#endif
+        }
+    }
 
     if (ai) {
         if (bind(udp->fd, ai->ai_addr, ai->ai_addrlen) < 0) {
@@ -366,12 +499,19 @@ void kl_udp_recv_stop(KlUdp *udp) {
 
 int kl_udp_send_to(KlUdp *udp, const void *data, size_t len,
                    const struct sockaddr *dest, socklen_t dest_len) {
+    return kl_udp_send_to_from(udp, data, len, dest, dest_len, NULL, 0);
+}
+
+int kl_udp_send_to_from(KlUdp *udp, const void *data, size_t len,
+                        const struct sockaddr *dest, socklen_t dest_len,
+                        const struct sockaddr *src, socklen_t src_len) {
     if (!udp || (!data && len) || !dest || dest_len == 0 ||
-        dest_len > sizeof(struct sockaddr_storage)) {
+        dest_len > sizeof(struct sockaddr_storage) ||
+        (src && src_len > sizeof(struct sockaddr_storage))) {
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    return udp_send_common(udp, data, len, dest, dest_len);
+    return udp_send_common(udp, data, len, dest, dest_len, src, src_len);
 }
 
 int kl_udp_send(KlUdp *udp, const void *data, size_t len) {
@@ -383,7 +523,7 @@ int kl_udp_send(KlUdp *udp, const void *data, size_t len) {
         udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    return udp_send_common(udp, data, len, NULL, 0);
+    return udp_send_common(udp, data, len, NULL, 0, NULL, 0);
 }
 
 void kl_udp_on_drain(KlUdp *udp, KlUdpDrainFn cb, void *user_data) {

@@ -370,8 +370,9 @@ static int dns_question_matches(const uint8_t *pkt, size_t len,
 }
 
 static void dns_on_recv(KlUdp *u, const void *data, size_t len,
-                        const struct sockaddr *src, socklen_t src_len, void *ud) {
-    (void)u; (void)src; (void)src_len;
+                        const struct sockaddr *src, socklen_t src_len,
+                        const struct sockaddr *local, socklen_t local_len, void *ud) {
+    (void)u; (void)src; (void)src_len; (void)local; (void)local_len;
     KlDnsResolver *r = ud;
     if (len < 12)
         return;

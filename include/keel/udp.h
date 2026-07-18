@@ -33,10 +33,15 @@ typedef struct KlUdpDatagram KlUdpDatagram;
  * @param len       Payload length in bytes.
  * @param src       Sender address (borrowed — copy to retain).
  * @param src_len   Length of @p src.
+ * @param local     Local (destination) address the datagram arrived on, or NULL
+ *                  when pktinfo is disabled/unavailable. Borrowed. Useful on a
+ *                  wildcard-bound multi-homed socket to reply from the right IP.
+ * @param local_len Length of @p local (0 when @p local is NULL).
  * @param user_data Opaque pointer from kl_udp_recv_start.
  */
 typedef void (*KlUdpRecvFn)(KlUdp *udp, const void *data, size_t len,
                             const struct sockaddr *src, socklen_t src_len,
+                            const struct sockaddr *local, socklen_t local_len,
                             void *user_data);
 
 /**
@@ -56,6 +61,7 @@ typedef struct {
     size_t       max_send_queue; /**< Backpressure cap in bytes; 0 = 256 KiB. */
     int          reuse_addr;     /**< Set SO_REUSEADDR. */
     int          reuse_port;     /**< Set SO_REUSEPORT (fan-out across workers). */
+    int          recv_pktinfo;   /**< Capture each datagram's local address (IP_PKTINFO / IPV6_RECVPKTINFO). */
     KlAllocator *alloc;          /**< NULL = default allocator. */
 } KlUdpConfig;
 
@@ -74,6 +80,8 @@ struct KlUdp {
     unsigned char *recv_buf;
     size_t         recv_buf_size;
     struct sockaddr_storage recv_src; /**< Scratch for the current datagram's source. */
+    struct sockaddr_storage recv_local; /**< Scratch for the current datagram's local (dest) address. */
+    int            pktinfo;          /**< 1 = local-address capture enabled. */
     uint64_t       truncated;        /**< Count of oversized (truncated) datagrams. */
     /* Send queue (whole-datagram FIFO) */
     KlUdpDatagram *q_head;
@@ -126,6 +134,18 @@ void kl_udp_recv_stop(KlUdp *udp);
  */
 int kl_udp_send_to(KlUdp *udp, const void *data, size_t len,
                    const struct sockaddr *dest, socklen_t dest_len);
+
+/**
+ * @brief Send a datagram to @p dest FROM a specific local source address.
+ *
+ * Like kl_udp_send_to but pins the reply's source address via a pktinfo control
+ * message — needed on a wildcard-bound multi-homed socket so the reply egresses
+ * from the address the client contacted. @p src NULL behaves like kl_udp_send_to.
+ * @return 0 if sent or queued, -1 on error or over-cap (last_error set).
+ */
+int kl_udp_send_to_from(KlUdp *udp, const void *data, size_t len,
+                        const struct sockaddr *dest, socklen_t dest_len,
+                        const struct sockaddr *src, socklen_t src_len);
 
 /**
  * @brief Send a datagram to the connected peer (requires kl_udp_connect).
