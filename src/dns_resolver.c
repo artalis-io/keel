@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -16,6 +17,8 @@
 #define DNS_TYPE_OPT      41    /* EDNS0 OPT pseudo-record type */
 #define DNS_EDNS_UDP_SIZE 1232  /* advertised UDP payload size (DNS flag day) */
 #define DNS_OPT_RR_LEN    11    /* wire length of a bare OPT RR */
+#define DNS_MAX_NS        3     /* nameservers tried (resolv.conf MAXNS) */
+#define DNS_PORT          53    /* default nameserver port */
 
 /* ── Per-request handle ──────────────────────────────────────────────── */
 
@@ -32,6 +35,7 @@ typedef struct KlDnsReq {
     int               tries_left;  /* transmits remaining for this family */
     int               tried_secondary;
     int64_t           timer_id;    /* timeout/deferred timer, -1 if none */
+    int               ns_idx;      /* next nameserver to send to (round-robin) */
     int               literal;     /* 1 = literal-IP deferred completion */
     KlResolveResult   result;      /* literal result, pending deferral */
     int               in_done;     /* reentrancy guard */
@@ -53,6 +57,9 @@ typedef struct KlDnsResolver {
     int            disable_0x20;
     int            disable_edns;
     char           hosts_path[DNS_NAME_MAX];
+    struct sockaddr_storage ns[DNS_MAX_NS];   /* nameserver addresses */
+    socklen_t      ns_len[DNS_MAX_NS];
+    int            nns;                        /* number of nameservers */
     KlDnsReq      *inflight;
     unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
     size_t         rnd_off;       /* next unused byte in rnd_pool */
@@ -332,7 +339,12 @@ static int dns_transmit(KlDnsResolver *r, KlDnsReq *q) {
         return -1;
     memcpy(q->question, buf + q_off, q_len);
     q->question_len = q_len;
-    if (kl_udp_send(&r->sock, buf, qlen) != 0)
+
+    /* Send to the current nameserver, then rotate for the next transmit. */
+    const struct sockaddr *nsa = (const struct sockaddr *)&r->ns[q->ns_idx];
+    socklen_t nsl = r->ns_len[q->ns_idx];
+    q->ns_idx = (q->ns_idx + 1) % r->nns;
+    if (kl_udp_send_to(&r->sock, buf, qlen, nsa, nsl) != 0)
         return -1;
 
     if (q->timer_id >= 0)
@@ -346,7 +358,7 @@ static void dns_advance_or_fail(KlDnsResolver *r, KlDnsReq *q) {
     if (!q->tried_secondary) {
         q->tried_secondary = 1;
         q->qtype = (q->qtype == KL_DNS_TYPE_A) ? KL_DNS_TYPE_AAAA : KL_DNS_TYPE_A;
-        q->tries_left = r->attempts;
+        q->tries_left = r->attempts * r->nns;   /* cycle every nameserver per attempt */
         if (dns_transmit(r, q) == 0)
             return;
     }
@@ -390,13 +402,39 @@ static int dns_question_matches(const uint8_t *pkt, size_t len,
     return (off - 12 == eq_len) && (memcmp(pkt + 12, eq, eq_len) == 0);
 }
 
+/* Is the response from one of our configured nameservers? (The socket is
+ * unconnected for multi-NS, so this replaces the kernel peer filter.) */
+static int dns_src_is_ns(const KlDnsResolver *r, const struct sockaddr *src) {
+    for (int i = 0; i < r->nns; i++) {
+        const struct sockaddr *ns = (const struct sockaddr *)&r->ns[i];
+        if (src->sa_family != ns->sa_family)
+            continue;
+        if (src->sa_family == AF_INET) {
+            const struct sockaddr_in *a = (const struct sockaddr_in *)src;
+            const struct sockaddr_in *b = (const struct sockaddr_in *)ns;
+            if (a->sin_port == b->sin_port &&
+                a->sin_addr.s_addr == b->sin_addr.s_addr)
+                return 1;
+        } else if (src->sa_family == AF_INET6) {
+            const struct sockaddr_in6 *a = (const struct sockaddr_in6 *)src;
+            const struct sockaddr_in6 *b = (const struct sockaddr_in6 *)ns;
+            if (a->sin6_port == b->sin6_port &&
+                memcmp(&a->sin6_addr, &b->sin6_addr, sizeof(a->sin6_addr)) == 0)
+                return 1;
+        }
+    }
+    return 0;
+}
+
 static void dns_on_recv(KlUdp *u, const void *data, size_t len,
                         const struct sockaddr *src, socklen_t src_len,
                         const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)u; (void)src; (void)src_len; (void)local; (void)local_len;
+    (void)u; (void)src_len; (void)local; (void)local_len;
     KlDnsResolver *r = ud;
     if (len < 12)
         return;
+    if (!src || !dns_src_is_ns(r, src))
+        return;                                  /* not from a nameserver — ignore (anti-spoof) */
     const uint8_t *pkt = data;
     uint16_t id = (uint16_t)((pkt[0] << 8) | pkt[1]);
     KlDnsReq *q = dns_find_by_id(r, id);
@@ -571,7 +609,7 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
     }
 
     q->qtype = r->prefer_ipv6 ? KL_DNS_TYPE_AAAA : KL_DNS_TYPE_A;
-    q->tries_left = r->attempts;
+    q->tries_left = r->attempts * r->nns;   /* cycle every nameserver per attempt */
     if (dns_transmit(r, q) != 0) {
         if (q->timer_id >= 0)
             kl_timer_cancel(r->ctx, q->timer_id);
@@ -618,50 +656,26 @@ static void dns_destroy(KlResolver *self) {
 
 /* ── Nameserver selection ────────────────────────────────────────────── */
 
-static int resolv_conf_nameserver(char *out, size_t cap) {
-    FILE *f = fopen("/etc/resolv.conf", "r");
-    if (!f)
-        return -1;
-    char line[256];
-    int found = -1;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "nameserver", 10) != 0)
-            continue;
-        const char *p = line + 10;
-        if (*p != ' ' && *p != '\t')
-            continue;
-        while (*p == ' ' || *p == '\t')
-            p++;
-        size_t i = 0;
-        while (p[i] && p[i] != ' ' && p[i] != '\t' && p[i] != '\n' &&
-               p[i] != '\r' && i + 1 < cap) {
-            out[i] = p[i];
-            i++;
-        }
-        out[i] = '\0';
-        if (i > 0) { found = 0; break; }
+/* Parse "IP" or "IP#port" into a sockaddr (the #port form is a testing/advanced
+ * extension; standard resolv.conf entries have no port and default to 53). */
+static int dns_parse_ns(const char *s, uint16_t defport,
+                        struct sockaddr_storage *out, socklen_t *out_len, int *family) {
+    char buf[80];
+    snprintf(buf, sizeof(buf), "%s", s);
+    uint16_t port = defport;
+    char *hash = strchr(buf, '#');
+    if (hash) {
+        *hash = '\0';
+        char *end;
+        long p = strtol(hash + 1, &end, 10);
+        if (end != hash + 1 && *end == '\0' && p > 0 && p <= 65535)
+            port = (uint16_t)p;
     }
-    fclose(f);
-    return found;
-}
-
-static int dns_nameserver_addr(const KlDnsResolverConfig *cfg,
-                               struct sockaddr_storage *out, socklen_t *out_len,
-                               int *family) {
-    char nsbuf[64];
-    const char *ns = cfg ? cfg->nameserver : NULL;
-    if (!ns) {
-        if (resolv_conf_nameserver(nsbuf, sizeof(nsbuf)) == 0)
-            ns = nsbuf;
-        else
-            ns = "127.0.0.1";
-    }
-    uint16_t port = (cfg && cfg->port) ? cfg->port : 53;
 
     memset(out, 0, sizeof(*out));
     struct in_addr a4;
     struct in6_addr a6;
-    if (inet_pton(AF_INET, ns, &a4) == 1) {
+    if (inet_pton(AF_INET, buf, &a4) == 1) {
         struct sockaddr_in *s4 = (struct sockaddr_in *)out;
         s4->sin_family = AF_INET;
         s4->sin_addr = a4;
@@ -670,7 +684,7 @@ static int dns_nameserver_addr(const KlDnsResolverConfig *cfg,
         *family = AF_INET;
         return 0;
     }
-    if (inet_pton(AF_INET6, ns, &a6) == 1) {
+    if (inet_pton(AF_INET6, buf, &a6) == 1) {
         struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)out;
         s6->sin6_family = AF_INET6;
         s6->sin6_addr = a6;
@@ -682,6 +696,77 @@ static int dns_nameserver_addr(const KlDnsResolverConfig *cfg,
     return -1;
 }
 
+/* Collect up to `max` `nameserver` entries from a resolv.conf file. */
+static int resolv_conf_nameservers(const char *path, char out[][80], int max) {
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char line[256];
+    int n = 0;
+    while (n < max && fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "nameserver", 10) != 0)
+            continue;
+        const char *p = line + 10;
+        if (*p != ' ' && *p != '\t')
+            continue;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        size_t i = 0;
+        while (p[i] && p[i] != ' ' && p[i] != '\t' && p[i] != '\n' &&
+               p[i] != '\r' && i + 1 < 80) {
+            out[n][i] = p[i];
+            i++;
+        }
+        out[n][i] = '\0';
+        if (i > 0)
+            n++;
+    }
+    fclose(f);
+    return n;
+}
+
+/* Fill the resolver's nameserver list; returns the (single) socket family. */
+static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, int *family) {
+    char nsbuf[DNS_MAX_NS][80];
+    int count = 0;
+    uint16_t defport = (cfg && cfg->port) ? cfg->port : DNS_PORT;
+
+    if (cfg && cfg->nameserver) {
+        snprintf(nsbuf[0], sizeof(nsbuf[0]), "%s", cfg->nameserver);
+        count = 1;
+    } else {
+        const char *rc = (cfg && cfg->resolv_conf_path) ? cfg->resolv_conf_path
+                                                        : "/etc/resolv.conf";
+        count = resolv_conf_nameservers(rc, nsbuf, DNS_MAX_NS);
+        if (count == 0) {
+            snprintf(nsbuf[0], sizeof(nsbuf[0]), "127.0.0.1");
+            count = 1;
+        }
+    }
+
+    /* Parse; keep only nameservers of the first one's family (one socket). */
+    int fam = -1, nns = 0;
+    for (int i = 0; i < count && nns < DNS_MAX_NS; i++) {
+        struct sockaddr_storage ss;
+        socklen_t sl = 0;
+        int f;
+        if (dns_parse_ns(nsbuf[i], defport, &ss, &sl, &f) != 0)
+            continue;
+        if (fam == -1)
+            fam = f;
+        else if (f != fam)
+            continue;
+        r->ns[nns] = ss;
+        r->ns_len[nns] = sl;
+        nns++;
+    }
+    if (nns == 0)
+        return -1;
+    r->nns = nns;
+    *family = fam;
+    return 0;
+}
+
 /* ── Constructor ─────────────────────────────────────────────────────── */
 
 KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *cfg) {
@@ -689,12 +774,6 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
         return NULL;
     KlAllocator *alloc = (cfg && cfg->alloc) ? cfg->alloc : ctx->alloc;
     if (!alloc)
-        return NULL;
-
-    struct sockaddr_storage ns;
-    socklen_t ns_len = 0;
-    int family = AF_INET;
-    if (dns_nameserver_addr(cfg, &ns, &ns_len, &family) != 0)
         return NULL;
 
     KlDnsResolver *r = kl_malloc(alloc, sizeof(*r));
@@ -715,13 +794,20 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
              (cfg && cfg->hosts_path) ? cfg->hosts_path : "/etc/hosts");
     r->rnd_off = sizeof(r->rnd_pool);   /* pool empty → refills on first draw */
 
+    int family = AF_INET;
+    if (dns_build_ns_list(r, cfg, &family) != 0) {
+        kl_free(alloc, r, sizeof(*r));
+        return NULL;
+    }
+
+    /* Unconnected socket — sends target each nameserver by address (multi-NS);
+     * dns_on_recv verifies the source is a configured nameserver. */
     KlUdpConfig uc = { .ctx = ctx, .family = family, .alloc = alloc };
     if (kl_udp_init(&r->sock, &uc) != 0) {
         kl_free(alloc, r, sizeof(*r));
         return NULL;
     }
-    if (kl_udp_connect(&r->sock, (struct sockaddr *)&ns, ns_len) != 0 ||
-        kl_udp_recv_start(&r->sock, dns_on_recv, r) != 0) {
+    if (kl_udp_recv_start(&r->sock, dns_on_recv, r) != 0) {
         kl_udp_free(&r->sock);
         kl_free(alloc, r, sizeof(*r));
         return NULL;

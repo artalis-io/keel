@@ -504,6 +504,24 @@ static const char *write_hosts(const char *content) {
     return path;
 }
 
+static const char *write_resolv(const char *content) {
+    static char path[64];
+    snprintf(path, sizeof(path), "/tmp/keel_resolv_%d", (int)getpid());
+    FILE *f = fopen(path, "w");
+    if (!f) return NULL;
+    fputs(content, f);
+    fclose(f);
+    return path;
+}
+
+/* A nameserver that receives but never replies (to exercise failover). */
+static int g_silent_hits;
+static void silent_ns(KlUdpServer *s, const void *data, size_t len,
+                      const struct sockaddr *src, socklen_t src_len, void *ud) {
+    (void)s; (void)data; (void)len; (void)src; (void)src_len; (void)ud;
+    g_silent_hits++;
+}
+
 UTEST(dns, hosts_file_lookup) {
     reset_dns();
     const char *hp = write_hosts("# a comment\n10.9.8.7  myhost.test alias.test\n");
@@ -604,6 +622,85 @@ UTEST(dns, edns0_disabled) {
     r->destroy(r);
     kl_udp_server_free(&ns);
     kl_event_ctx_free(&ctx);
+}
+
+/* ── Phase 1b-i: multiple nameservers + failover ─────────────────────── */
+
+UTEST(dns, nameserver_failover) {
+    /* Two nameservers via a resolv.conf fixture: the first is silent, so the
+     * resolver must fail over to the second (which answers). */
+    reset_dns();
+    g_answer_a = 1;
+    g_silent_hits = 0;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdpServer ns1, ns2;
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    ASSERT_EQ(0, kl_udp_server_init(&ns1, &ctx, &sc, silent_ns, NULL));
+    ASSERT_EQ(0, kl_udp_server_init(&ns2, &ctx, &sc, mock_ns, NULL));
+    uint16_t p1 = kl_udp_server_local_port(&ns1);
+    uint16_t p2 = kl_udp_server_local_port(&ns2);
+
+    char rc[160];
+    snprintf(rc, sizeof(rc),
+             "# fixture\nnameserver 127.0.0.1#%u\nnameserver 127.0.0.1#%u\n", p1, p2);
+    const char *rcpath = write_resolv(rc);
+    ASSERT_TRUE(rcpath != NULL);
+
+    KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = 40, .attempts = 2 };
+    KlResolver *r = kl_dns_resolver_create(&ctx, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 400);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);                 /* resolved via the second nameserver */
+    ASSERT_EQ(AF_INET, g_res.ai_family);
+    ASSERT_TRUE(g_silent_hits >= 1);     /* the first (silent) nameserver was tried */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns1);
+    kl_udp_server_free(&ns2);
+    kl_event_ctx_free(&ctx);
+    unlink(rcpath);
+}
+
+UTEST(dns, all_nameservers_silent_times_out) {
+    /* Both nameservers silent → the resolve fails after exhausting them. */
+    reset_dns();
+    g_silent_hits = 0;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdpServer ns1, ns2;
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    ASSERT_EQ(0, kl_udp_server_init(&ns1, &ctx, &sc, silent_ns, NULL));
+    ASSERT_EQ(0, kl_udp_server_init(&ns2, &ctx, &sc, silent_ns, NULL));
+    char rc[160];
+    snprintf(rc, sizeof(rc), "nameserver 127.0.0.1#%u\nnameserver 127.0.0.1#%u\n",
+             kl_udp_server_local_port(&ns1), kl_udp_server_local_port(&ns2));
+    const char *rcpath = write_resolv(rc);
+
+    KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = 20, .attempts = 1 };
+    KlResolver *r = kl_dns_resolver_create(&ctx, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 400);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(KL_ERR_DNS, g_err);
+    ASSERT_TRUE(g_silent_hits >= 2);     /* both nameservers were tried */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns1);
+    kl_udp_server_free(&ns2);
+    kl_event_ctx_free(&ctx);
+    unlink(rcpath);
 }
 
 UTEST_MAIN();

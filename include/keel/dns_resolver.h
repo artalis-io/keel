@@ -24,10 +24,11 @@
  * @brief DNS resolver configuration.
  */
 typedef struct {
-    const char  *nameserver;  /**< Numeric NS address; NULL = /etc/resolv.conf, else 127.0.0.1. */
-    uint16_t     port;        /**< NS port; 0 = 53. */
+    const char  *nameserver;  /**< Single numeric NS address (overrides resolv.conf). NULL = use resolv.conf. */
+    uint16_t     port;        /**< Port for `nameserver`; 0 = 53. */
+    const char  *resolv_conf_path; /**< resolv.conf path (nameservers, search, ndots); NULL = /etc/resolv.conf. */
     int          timeout_ms;  /**< Per-attempt timeout; 0 = 5000. */
-    int          attempts;    /**< Transmits per family before failing; 0 = 2. */
+    int          attempts;    /**< Attempts over the whole nameserver list per family; 0 = 2. */
     int          prefer_ipv6; /**< Query AAAA before A. */
     int          disable_0x20;/**< Disable DNS 0x20 case randomization (for resolvers that normalize case). */
     int          disable_edns;/**< Disable the EDNS0 OPT record (for servers that reject it). */

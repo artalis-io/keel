@@ -24,6 +24,12 @@ each independently testable — not one mega-commit.
 
 ## Phase 1b — `search`/`ndots` + multi-nameserver failover  *(state-machine rework)*
 
+*Split into two commits: **1b-i multi-nameserver failover (DONE 2026-07-19)** —
+unconnected socket + per-transmit nameserver rotation + source-address
+verification + resolv.conf `nameserver` list (with `IP#port` extension); **1b-ii
+search/ndots** to follow.*
+
+
 The request state machine currently has one dimension: **family** (A → AAAA).
 These add two more:
 
