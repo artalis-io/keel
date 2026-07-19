@@ -339,13 +339,51 @@ when:
 
 ---
 
-## Appendix — Phase 0 checklist (do before Phase 1 code)
+## Appendix A — Phase 0 baseline record (2026-07-19)
 
-- [ ] `make test` green on epoll, kqueue, io_uring, poll (+ macOS, musl, cosmo).
-- [ ] Capture `make bench` baseline numbers (commit to this doc).
-- [ ] Confirm ASan/UBSan clean (`make debug-test`).
-- [ ] Enumerate ABI-sensitive structs exposing `int fd` (§2.4 list) — freeze as
-      the "do not break" set.
-- [ ] Add focused tests where thin: UDP connected-mode, Unix-domain cleanup,
-      watcher cancellation races, accept-path error handling — so Phase 1/2 have
-      a safety net around the seam.
+Established before any Phase 1 seam code, so a regression is measurable.
+
+**Backends / tests.** `make test` (837 unit tests) green on all four event
+backends and platforms via CI: Linux epoll, Linux io_uring, Linux poll-fallback,
+macOS kqueue, musl/Alpine, Cosmopolitan (APE). `make debug-test` (ASan + UBSan)
+clean — the one UBSan note (`redirect.c:77`, a `memcpy(NULL, NULL, 0)` on an
+empty body) is pre-existing, non-fatal, and unrelated to PAL work.
+
+**Benchmark baseline** (`make bench`, Apple M1 Max, macOS, **kqueue**, 4 threads /
+100 connections / 10 s):
+
+| Endpoint | Req/sec | Avg latency | p99 |
+|---|---|---|---|
+| `GET /hello` (baseline) | 101,159 | 0.98 ms | 1.21 ms |
+| `GET /users/42` (route params) | 98,777 | 1.00 ms | 1.25 ms |
+| `GET /mw/hello` (middleware chain) | 101,675 | — | — |
+| `POST /echo` (body reading) | 97,158 | — | — |
+
+Phase 1 must land within noise of these numbers (the seam is `static inline` on
+the hot 1-liners, so no delta is expected). Re-run on Linux/epoll before/after
+when Phase 1 is implemented.
+
+**Frozen ABI surface — public `int fd` (do NOT change type/signature in Phases 1–4).**
+Struct members: `KlConn.fd`, `KlUdp.fd`, `KlWatcher.fd`, `KlResponse.conn_fd` +
+`.file_fd`, `KlConfig.listen_fd` + `KlServer.listen_fd`, `KlClientPoolConn.fd`
+(+ pool-internal `fd`), `KlEventLoop.fd` (backend-internal). Functions:
+`kl_conn_acquire`, `kl_watcher_add/mod/del/rearm`, `kl_event_add/mod/del`,
+`kl_response_file`, `kl_peer_cred_fd`, `kl_systemd_listen_fd*`, `kl_udp_fd`,
+`kl_udp_server_fd`, and the `KlWatcherFn` callback. Vtables: `KlTls`
+handshake/read/write/shutdown, `KlFileIO` submit/cancel — all take `int fd`.
+**Phase 1 touches none of these** (internal call-site consolidation only), so it
+is ABI- and source-compatible by construction; portable-handle evolution is
+deferred to Phase 5 and only for what a real non-POSIX provider needs.
+
+**Test gaps to consider filling alongside Phase 1/2** (safety net around the seam):
+UDP connected-mode, Unix-domain cleanup, watcher cancellation races, accept-path
+error handling.
+
+## Appendix B — Phase 0 checklist status
+
+- [x] `make test` green on epoll, kqueue, io_uring, poll (+ macOS, musl, cosmo).
+- [x] `make bench` baseline captured (Appendix A).
+- [x] ASan/UBSan status confirmed (`make debug-test`, one pre-existing benign note).
+- [x] ABI-sensitive `int fd` surface enumerated and frozen (Appendix A).
+- [ ] Focused seam-safety tests (UDP connected-mode, UDS cleanup, watcher
+      cancellation, accept-path errors) — land with Phase 1/2.
