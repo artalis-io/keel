@@ -576,8 +576,12 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
 
     /* Optional init-time multicast join (requires a bound socket). */
     if (cfg->multicast_group && cfg->multicast_group[0]) {
-        if (udp_mcast_membership(udp, cfg->multicast_group,
-                                 cfg->multicast_iface, 1) != 0)
+        int mrc = udp_mcast_membership(udp, cfg->multicast_group,
+                                       cfg->multicast_iface, 1);
+        /* cppcheck-suppress knownConditionTrueFalse ; false positive: the helper
+         * returns 0 on real platforms (where IP_ADD_MEMBERSHIP is defined), and
+         * only always -1 in cppcheck's synthetic no-multicast-macro config. */
+        if (mrc != 0)
             goto fail;   /* last_error set by helper */
     }
 
