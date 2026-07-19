@@ -272,6 +272,7 @@ analyze:
 cppcheck:
 	cppcheck --enable=all --inline-suppr --suppress=missingIncludeSystem \
 	  --suppress=unusedFunction --suppress=checkersReport \
+	  --suppress=toomanyconfigs \
 	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
 
 # W^X / no-runtime-codegen regression guard.
