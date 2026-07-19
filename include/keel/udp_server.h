@@ -52,6 +52,11 @@ typedef struct {
     int          reuse_port;     /**< SO_REUSEPORT for worker fan-out. */
     int          so_rcvbuf;      /**< SO_RCVBUF kernel receive buffer in bytes (0 = OS default). */
     int          so_sndbuf;      /**< SO_SNDBUF kernel send buffer in bytes (0 = OS default). */
+    int          broadcast;      /**< SO_BROADCAST — allow broadcast replies (IPv4). */
+    int          multicast_ttl;  /**< IP_MULTICAST_TTL / IPV6_MULTICAST_HOPS for multicast sends; 0 = default. */
+    int          multicast_disable_loop; /**< 1 = disable local loopback of sent multicast. */
+    unsigned     multicast_iface;/**< Egress interface index for multicast sends; 0 = default. */
+    const char  *multicast_group;/**< Optional multicast group to join at init (after bind); NULL = none. */
     KlAllocator *alloc;          /**< NULL = event-context allocator. */
 } KlUdpServerConfig;
 
@@ -81,6 +86,16 @@ int kl_udp_server_init(KlUdpServer *s, KlEventCtx *ctx,
  */
 int kl_udp_server_reply(KlUdpServer *s, const void *data, size_t len,
                         const struct sockaddr *dest, socklen_t dest_len);
+
+/**
+ * @brief Join / leave an any-source multicast group on the server socket.
+ *
+ * For dynamic membership beyond the optional init-time @c multicast_group. See
+ * kl_udp_multicast_join for the @p group / @p iface_index semantics.
+ * @return 0 on success, -1 on failure (last_error set).
+ */
+int kl_udp_server_multicast_join(KlUdpServer *s, const char *group, unsigned iface_index);
+int kl_udp_server_multicast_leave(KlUdpServer *s, const char *group, unsigned iface_index);
 
 /**
  * @brief Stop dispatching, close the socket, and free buffers.

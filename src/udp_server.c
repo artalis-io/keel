@@ -51,6 +51,11 @@ int kl_udp_server_init(KlUdpServer *s, KlEventCtx *ctx,
         .recv_pktinfo   = udp_addr_is_wildcard(cfg->bind_addr),
         .so_rcvbuf      = cfg->so_rcvbuf,
         .so_sndbuf      = cfg->so_sndbuf,
+        .broadcast      = cfg->broadcast,
+        .multicast_ttl  = cfg->multicast_ttl,
+        .multicast_disable_loop = cfg->multicast_disable_loop,
+        .multicast_iface = cfg->multicast_iface,
+        .multicast_group = cfg->multicast_group,
         .alloc          = cfg->alloc,
     };
     if (kl_udp_init(&s->udp, &uc) != 0) {
@@ -73,6 +78,24 @@ int kl_udp_server_reply(KlUdpServer *s, const void *data, size_t len,
     int rc = kl_udp_send_to_from(&s->udp, data, len, dest, dest_len,
                                  s->local_len ? (struct sockaddr *)&s->local : NULL,
                                  s->local_len);
+    if (rc != 0)
+        s->last_error = kl_udp_last_error(&s->udp);
+    return rc;
+}
+
+int kl_udp_server_multicast_join(KlUdpServer *s, const char *group,
+                                 unsigned iface_index) {
+    if (!s) return -1;
+    int rc = kl_udp_multicast_join(&s->udp, group, iface_index);
+    if (rc != 0)
+        s->last_error = kl_udp_last_error(&s->udp);
+    return rc;
+}
+
+int kl_udp_server_multicast_leave(KlUdpServer *s, const char *group,
+                                  unsigned iface_index) {
+    if (!s) return -1;
+    int rc = kl_udp_multicast_leave(&s->udp, group, iface_index);
     if (rc != 0)
         s->last_error = kl_udp_last_error(&s->udp);
     return rc;

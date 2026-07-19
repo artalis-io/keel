@@ -21,6 +21,12 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+/* Some platforms spell the IPv6 group ops the "membership" way. */
+#if !defined(IPV6_JOIN_GROUP) && defined(IPV6_ADD_MEMBERSHIP)
+#define IPV6_JOIN_GROUP  IPV6_ADD_MEMBERSHIP
+#define IPV6_LEAVE_GROUP IPV6_DROP_MEMBERSHIP
+#endif
+
 /* Whole-datagram FIFO node: header + inline payload (single allocation). */
 struct KlUdpDatagram {
     struct KlUdpDatagram   *next;
@@ -336,6 +342,128 @@ static void udp_on_ready(int fd, KlEventMask ready, void *user_data) {
         udp_recv_drain(udp);
 }
 
+/* ── Multicast group membership ───────────────────────────────────────── */
+
+/* Join (join=1) or leave (join=0) an any-source multicast group. Validates the
+ * address is multicast and matches the socket family. Returns 0 / -1 (last_error). */
+static int udp_mcast_membership(KlUdp *udp, const char *group,
+                                unsigned iface_index, int join) {
+    if (udp->family == AF_INET) {
+        struct in_addr maddr;
+        if (inet_pton(AF_INET, group, &maddr) != 1 ||
+            (ntohl(maddr.s_addr) >> 28) != 0xE) {   /* not in 224.0.0.0/4 */
+            udp->last_error = KL_ERR_INVALID_ARG;
+            return -1;
+        }
+#if defined(IP_ADD_MEMBERSHIP)
+#if defined(__linux__)
+        struct ip_mreqn mreq;
+        memset(&mreq, 0, sizeof(mreq));
+        mreq.imr_multiaddr = maddr;
+        mreq.imr_address.s_addr = htonl(INADDR_ANY);
+        mreq.imr_ifindex = (int)iface_index;
+#else
+        (void)iface_index;   /* IPv4 by-index unsupported here; default interface */
+        struct ip_mreq mreq;
+        memset(&mreq, 0, sizeof(mreq));
+        mreq.imr_multiaddr = maddr;
+        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+#endif
+        if (setsockopt(udp->fd, IPPROTO_IP,
+                       join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP,
+                       &mreq, sizeof(mreq)) != 0) {
+            udp->last_error = KL_ERR_SOCKET;
+            return -1;
+        }
+        return 0;
+#else
+        udp->last_error = KL_ERR_SOCKET;   /* multicast unsupported on this build */
+        return -1;
+#endif
+    } else if (udp->family == AF_INET6) {
+        struct in6_addr maddr;
+        if (inet_pton(AF_INET6, group, &maddr) != 1 || maddr.s6_addr[0] != 0xff) {
+            udp->last_error = KL_ERR_INVALID_ARG;
+            return -1;
+        }
+#if defined(IPV6_JOIN_GROUP)
+        struct ipv6_mreq mreq;
+        memset(&mreq, 0, sizeof(mreq));
+        mreq.ipv6mr_multiaddr = maddr;
+        mreq.ipv6mr_interface = iface_index;
+        if (setsockopt(udp->fd, IPPROTO_IPV6,
+                       join ? IPV6_JOIN_GROUP : IPV6_LEAVE_GROUP,
+                       &mreq, sizeof(mreq)) != 0) {
+            udp->last_error = KL_ERR_SOCKET;
+            return -1;
+        }
+        return 0;
+#else
+        udp->last_error = KL_ERR_SOCKET;
+        return -1;
+#endif
+    }
+    udp->last_error = KL_ERR_INVALID_ARG;
+    return -1;
+}
+
+/* Apply multicast/broadcast transmit options (best-effort). */
+static void udp_apply_tx_options(int fd, int family, const KlUdpConfig *cfg) {
+    if (cfg->broadcast) {
+        int opt = 1;
+        (void)setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+    }
+    if (family == AF_INET) {
+#if defined(IP_MULTICAST_TTL)
+        if (cfg->multicast_ttl > 0) {
+#if defined(__linux__)
+            int ttl = cfg->multicast_ttl;
+#else
+            unsigned char ttl = (unsigned char)cfg->multicast_ttl;
+#endif
+            (void)setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+        }
+#endif
+#if defined(IP_MULTICAST_LOOP)
+        if (cfg->multicast_disable_loop) {
+#if defined(__linux__)
+            int off = 0;
+#else
+            unsigned char off = 0;
+#endif
+            (void)setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &off, sizeof(off));
+        }
+#endif
+#if defined(__linux__) && defined(IP_MULTICAST_IF)
+        if (cfg->multicast_iface > 0) {
+            struct ip_mreqn mr;
+            memset(&mr, 0, sizeof(mr));
+            mr.imr_ifindex = (int)cfg->multicast_iface;
+            (void)setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &mr, sizeof(mr));
+        }
+#endif
+    } else if (family == AF_INET6) {
+#if defined(IPV6_MULTICAST_HOPS)
+        if (cfg->multicast_ttl > 0) {
+            int hops = cfg->multicast_ttl;
+            (void)setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops));
+        }
+#endif
+#if defined(IPV6_MULTICAST_LOOP)
+        if (cfg->multicast_disable_loop) {
+            int off = 0;
+            (void)setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &off, sizeof(off));
+        }
+#endif
+#if defined(IPV6_MULTICAST_IF)
+        if (cfg->multicast_iface > 0) {
+            unsigned idx = cfg->multicast_iface;
+            (void)setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_IF, &idx, sizeof(idx));
+        }
+#endif
+    }
+}
+
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
 
 int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
@@ -385,6 +513,7 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         udp->last_error = KL_ERR_SOCKET;
         goto fail;
     }
+    udp->family = family;
     udp_set_cloexec(udp->fd);
     if (udp_set_nonblocking(udp->fd) < 0) {
         udp->last_error = KL_ERR_SOCKET;
@@ -413,6 +542,9 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         (void)setsockopt(udp->fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v));
     }
 
+    /* Broadcast + multicast transmit options (best-effort). */
+    udp_apply_tx_options(udp->fd, family, cfg);
+
     /* Enable per-datagram local-address capture (best-effort per platform). */
     if (cfg->recv_pktinfo) {
         int opt = 1;
@@ -440,6 +572,13 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         }
         freeaddrinfo(ai);
         ai = NULL;
+    }
+
+    /* Optional init-time multicast join (requires a bound socket). */
+    if (cfg->multicast_group && cfg->multicast_group[0]) {
+        if (udp_mcast_membership(udp, cfg->multicast_group,
+                                 cfg->multicast_iface, 1) != 0)
+            goto fail;   /* last_error set by helper */
     }
 
     udp->recv_buf = kl_malloc(udp->alloc, udp->recv_buf_size);
@@ -546,6 +685,22 @@ int kl_udp_send(KlUdp *udp, const void *data, size_t len) {
         return -1;
     }
     return udp_send_common(udp, data, len, NULL, 0, NULL, 0);
+}
+
+int kl_udp_multicast_join(KlUdp *udp, const char *group, unsigned iface_index) {
+    if (!udp || udp->fd < 0 || !group) {
+        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    return udp_mcast_membership(udp, group, iface_index, 1);
+}
+
+int kl_udp_multicast_leave(KlUdp *udp, const char *group, unsigned iface_index) {
+    if (!udp || udp->fd < 0 || !group) {
+        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    return udp_mcast_membership(udp, group, iface_index, 0);
 }
 
 void kl_udp_on_drain(KlUdp *udp, KlUdpDrainFn cb, void *user_data) {

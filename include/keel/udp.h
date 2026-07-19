@@ -64,6 +64,11 @@ typedef struct {
     int          recv_pktinfo;   /**< Capture each datagram's local address (IP_PKTINFO / IPV6_RECVPKTINFO). */
     int          so_rcvbuf;      /**< SO_RCVBUF kernel receive buffer in bytes (0 = OS default). Bounds kernel-side drops under load. */
     int          so_sndbuf;      /**< SO_SNDBUF kernel send buffer in bytes (0 = OS default). */
+    int          broadcast;      /**< SO_BROADCAST — allow sending to broadcast addresses (IPv4). */
+    int          multicast_ttl;  /**< IP_MULTICAST_TTL / IPV6_MULTICAST_HOPS for multicast sends; 0 = kernel default (1 = link-local). */
+    int          multicast_disable_loop; /**< 1 = disable local loopback of sent multicast (default: enabled). */
+    unsigned     multicast_iface;/**< Egress interface index for multicast sends; 0 = kernel default. IPv4 by-index honored on Linux only. */
+    const char  *multicast_group;/**< Optional numeric multicast address to join at init (after bind); NULL = none. */
     KlAllocator *alloc;          /**< NULL = default allocator. */
 } KlUdpConfig;
 
@@ -74,6 +79,7 @@ struct KlUdp {
     KlEventCtx    *ctx;
     KlAllocator   *alloc;
     int            fd;
+    int            family;           /**< AF_INET / AF_INET6 (resolved at init). */
     int            connected;        /**< 1 after kl_udp_connect. */
     /* Receive */
     KlUdpRecvFn    on_recv;
@@ -154,6 +160,24 @@ int kl_udp_send_to_from(KlUdp *udp, const void *data, size_t len,
  * @return 0 if sent or queued, -1 on error or over-cap (last_error set).
  */
 int kl_udp_send(KlUdp *udp, const void *data, size_t len);
+
+/**
+ * @brief Join an any-source multicast group.
+ *
+ * @param group        Numeric multicast address matching the socket family
+ *                     (IPv4 224.0.0.0/4, IPv6 ff00::/8).
+ * @param iface_index  Interface index to join on, 0 = kernel default. IPv6 uses
+ *                     the index on all platforms; IPv4 by-index is honored on
+ *                     Linux only — elsewhere a non-zero index falls back to the
+ *                     default interface. Membership is auto-dropped on
+ *                     kl_udp_free (socket close).
+ * @return 0 on success, -1 on failure — KL_ERR_INVALID_ARG (not a multicast
+ *         address / family mismatch) or KL_ERR_SOCKET (setsockopt failed).
+ */
+int kl_udp_multicast_join(KlUdp *udp, const char *group, unsigned iface_index);
+
+/** @brief Leave a multicast group previously joined (symmetric with join). */
+int kl_udp_multicast_leave(KlUdp *udp, const char *group, unsigned iface_index);
 
 /** @brief Register the send-queue-drained callback (NULL to clear). */
 void kl_udp_on_drain(KlUdp *udp, KlUdpDrainFn cb, void *user_data);
