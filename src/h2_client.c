@@ -22,6 +22,8 @@
 #include <sys/types.h>
 #include <sys/un.h>
 
+#include "socket.h"
+
 /* ── Connection states ──────────────────────────────────────────── */
 
 typedef enum {
@@ -80,22 +82,14 @@ static ssize_t h2c_write(KlH2ClientConn *c, const void *buf, size_t len)
 {
     if (c->tls)
         return c->tls->write(c->tls, c->fd, buf, len);
-    ssize_t r;
-#ifdef MSG_NOSIGNAL
-    do { r = send(c->fd, buf, len, MSG_NOSIGNAL); } while (r < 0 && errno == EINTR);
-#else
-    do { r = write(c->fd, buf, len); } while (r < 0 && errno == EINTR);
-#endif
-    return r;
+    return kl_sock_send(c->fd, buf, len);
 }
 
 static ssize_t h2c_read(KlH2ClientConn *c, void *buf, size_t len)
 {
     if (c->tls)
         return c->tls->read(c->tls, c->fd, buf, len);
-    ssize_t r;
-    do { r = read(c->fd, buf, len); } while (r < 0 && errno == EINTR);
-    return r;
+    return kl_sock_recv(c->fd, buf, len);
 }
 
 /* ── Stream tracking ────────────────────────────────────────────── */
@@ -493,14 +487,8 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0)
             return NULL;
-#ifdef SO_NOSIGPIPE
-        {
-            int on = 1;
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-        }
-#endif
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        kl_sock_set_nosigpipe(fd);
+        if (kl_sock_set_nonblocking(fd) < 0) {
             close(fd);
             return NULL;
         }
@@ -530,15 +518,8 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             return NULL;
         }
 
-#ifdef SO_NOSIGPIPE
-        {
-            int on = 1;
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-        }
-#endif
-
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        kl_sock_set_nosigpipe(fd);
+        if (kl_sock_set_nonblocking(fd) < 0) {
             close(fd);
             freeaddrinfo(res);
             return NULL;

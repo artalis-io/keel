@@ -75,7 +75,7 @@ CFLAGS += -MMD -MP
 VENDOR_CFLAGS += -MMD -MP
 
 # Core library — parser-agnostic
-CORE_SRC = src/allocator.c src/error.c src/response.c src/router.c \
+CORE_SRC = src/allocator.c src/error.c src/socket.c src/response.c src/router.c \
            src/connection.c src/server.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \

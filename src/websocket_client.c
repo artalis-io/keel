@@ -29,6 +29,7 @@
 #include "sha1.h"
 #include "base64.h"
 #include "utf8.h"
+#include "socket.h"
 
 /* ── Connection states ──────────────────────────────────────────── */
 
@@ -110,22 +111,14 @@ static ssize_t wsc_write(KlWsClientConn *ws, const void *buf, size_t len)
 {
     if (ws->tls)
         return ws->tls->write(ws->tls, ws->fd, buf, len);
-    ssize_t r;
-#ifdef MSG_NOSIGNAL
-    do { r = send(ws->fd, buf, len, MSG_NOSIGNAL); } while (r < 0 && errno == EINTR);
-#else
-    do { r = write(ws->fd, buf, len); } while (r < 0 && errno == EINTR);
-#endif
-    return r;
+    return kl_sock_send(ws->fd, buf, len);
 }
 
 static ssize_t wsc_read(KlWsClientConn *ws, void *buf, size_t len)
 {
     if (ws->tls)
         return ws->tls->read(ws->tls, ws->fd, buf, len);
-    ssize_t r;
-    do { r = read(ws->fd, buf, len); } while (r < 0 && errno == EINTR);
-    return r;
+    return kl_sock_recv(ws->fd, buf, len);
 }
 
 /* KlDrain writer: adapts wsc_write's ssize_t contract to the drain's
@@ -964,14 +957,8 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0)
             return NULL;
-#ifdef SO_NOSIGPIPE
-        {
-            int on = 1;
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-        }
-#endif
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        kl_sock_set_nosigpipe(fd);
+        if (kl_sock_set_nonblocking(fd) < 0) {
             close(fd);
             return NULL;
         }
@@ -1002,15 +989,8 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             return NULL;
         }
 
-#ifdef SO_NOSIGPIPE
-        {
-            int on = 1;
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-        }
-#endif
-
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        kl_sock_set_nosigpipe(fd);
+        if (kl_sock_set_nonblocking(fd) < 0) {
             close(fd);
             freeaddrinfo(res);
             return NULL;

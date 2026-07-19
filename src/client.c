@@ -28,6 +28,8 @@
 #include <sys/types.h>
 #include <sys/un.h>
 
+#include "socket.h"
+
 /* ── Proxy constants ─────────────────────────────────────────────── */
 
 #define KL_PROXY_RESPONSE_MAX 4096
@@ -49,22 +51,14 @@ static ssize_t io_write(int fd, KlTls *tls, const void *buf, size_t len)
 {
     if (tls)
         return tls->write(tls, fd, buf, len);
-    ssize_t r;
-#ifdef MSG_NOSIGNAL
-    do { r = send(fd, buf, len, MSG_NOSIGNAL); } while (r < 0 && errno == EINTR);
-#else
-    do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
-#endif
-    return r;
+    return kl_sock_send(fd, buf, len);
 }
 
 static ssize_t io_read(int fd, KlTls *tls, void *buf, size_t len)
 {
     if (tls)
         return tls->read(tls, fd, buf, len);
-    ssize_t r;
-    do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
-    return r;
+    return kl_sock_recv(fd, buf, len);
 }
 
 /* ── Connect with timeout ────────────────────────────────────────── */
@@ -103,13 +97,9 @@ static int connect_with_timeout(const char *host, size_t host_len,
         return -1;
     }
 
-#ifdef SO_NOSIGPIPE
-    {
-        int on = 1;
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    }
-#endif
+    kl_sock_set_nosigpipe(fd);
 
+    /* Saved for restore after the blocking connect-with-timeout below. */
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
         if (out_err) *out_err = KL_ERR_SOCKET;
@@ -195,13 +185,9 @@ static int unix_connect_with_timeout(const char *path, int timeout_ms,
         return -1;
     }
 
-#ifdef SO_NOSIGPIPE
-    {
-        int on = 1;
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    }
-#endif
+    kl_sock_set_nosigpipe(fd);
 
+    /* Saved for restore after the blocking connect-with-timeout below. */
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
         if (out_err) *out_err = KL_ERR_SOCKET;
@@ -1367,15 +1353,8 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
     if (fd < 0)
         return -1;
 
-#ifdef SO_NOSIGPIPE
-    {
-        int on = 1;
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    }
-#endif
-
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    kl_sock_set_nosigpipe(fd);
+    if (kl_sock_set_nonblocking(fd) < 0) {
         close(fd);
         return -1;
     }
@@ -1469,15 +1448,8 @@ static int he_new_attempt(KlClient *c, int idx)
     if (fd < 0)
         return -1;
 
-#ifdef SO_NOSIGPIPE
-    {
-        int on = 1;
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    }
-#endif
-
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    kl_sock_set_nosigpipe(fd);
+    if (kl_sock_set_nonblocking(fd) < 0) {
         close(fd);
         return -1;
     }

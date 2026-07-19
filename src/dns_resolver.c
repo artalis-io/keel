@@ -15,6 +15,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include "socket.h"
+
 #define DNS_NAME_MAX      256
 #define DNS_QUERY_MAX     512   /* query buffer (question + EDNS0 OPT fit easily) */
 #define DNS_RND_POOL_SIZE 256   /* entropy bytes buffered per /dev/urandom read */
@@ -741,16 +743,12 @@ static void dns_tcp_on_event(int fd, KlEventMask mask, void *ud);
 static ssize_t dns_tcp_write(KlDnsTcp *t, const void *b, size_t n) {
     if (t->tls)
         return t->tls->write(t->tls, t->fd, b, n);
-    ssize_t r;
-    do { r = send(t->fd, b, n, 0); } while (r < 0 && errno == EINTR);
-    return r;
+    return kl_sock_send(t->fd, b, n);
 }
 static ssize_t dns_tcp_read(KlDnsTcp *t, void *b, size_t n) {
     if (t->tls)
         return t->tls->read(t->tls, t->fd, b, n);
-    ssize_t r;
-    do { r = recv(t->fd, b, n, 0); } while (r < 0 && errno == EINTR);
-    return r;
+    return kl_sock_recv(t->fd, b, n);
 }
 
 /* Number of legs still awaiting a response on this nameserver's connection. */
@@ -844,10 +842,8 @@ static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
     int fd = socket(nsa->sa_family, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
-    int fl = fcntl(fd, F_GETFL, 0);
-    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) { close(fd); return -1; }
-    fl = fcntl(fd, F_GETFD, 0);
-    if (fl >= 0) (void)fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+    if (kl_sock_set_nonblocking(fd) < 0) { close(fd); return -1; }
+    kl_sock_set_cloexec(fd);
 
     int rc = connect(fd, nsa, nsl);
     if (rc < 0 && errno != EINPROGRESS) { close(fd); return -1; }

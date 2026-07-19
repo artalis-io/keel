@@ -32,6 +32,7 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include "internal.h"
+#include "socket.h"
 
 #define KL_LISTEN_BACKLOG  128
 #define KL_EVENTS_PER_TICK 64
@@ -54,21 +55,6 @@ static const char kl_408_response[] =
     "Content-Length: 0\r\n"
     "Connection: close\r\n"
     "\r\n";
-
-static int set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-/* Set close-on-exec so the listen socket and live client connections are not
- * leaked into any child process the application exec()s. Best-effort; done via
- * fcntl for portability (macOS lacks SOCK_CLOEXEC on socket()). */
-static void set_cloexec(int fd) {
-    int flags = fcntl(fd, F_GETFD, 0);
-    if (flags >= 0)
-        (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
-}
 
 __attribute__((format(printf, 3, 4)))
 static void kl_log(KlServer *s, int level, const char *fmt, ...) {
@@ -114,7 +100,7 @@ static int kl_server_bind_tcp(KlServer *s) {
         freeaddrinfo(ai);
         return -1;
     }
-    set_cloexec(s->listen_fd);
+    kl_sock_set_cloexec(s->listen_fd);
 
     int opt = 1;
     setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -242,7 +228,7 @@ static int kl_server_bind_unix(KlServer *s) {
         s->last_error = KL_ERR_SOCKET;
         return -1;
     }
-    set_cloexec(s->listen_fd);
+    kl_sock_set_cloexec(s->listen_fd);
 
     if (s->config.unix_socket_unlink &&
         kl_server_unlink_stale_unix_socket(s, path) < 0) {
@@ -368,7 +354,7 @@ static int kl_server_adopt_fd(KlServer *s) {
     /* Adopted fd is never unlinked — the supervisor owns the socket path. */
     s->unix_socket_owned = 0;
     /* CLOEXEC so the inherited listener doesn't re-leak to our own children. */
-    set_cloexec(s->listen_fd);
+    kl_sock_set_cloexec(s->listen_fd);
     return 0;
 }
 
@@ -825,7 +811,7 @@ int kl_server_run(KlServer *s) {
         return -1;
     }
 
-    if (set_nonblocking(s->listen_fd) < 0) {
+    if (kl_sock_set_nonblocking(s->listen_fd) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "fcntl");
         s->last_error = KL_ERR_SOCKET;
         kl_server_close_listener(s);
@@ -944,12 +930,12 @@ int kl_server_run(KlServer *s) {
                         break;
                     }
 
-                    if (set_nonblocking(client_fd) < 0) {
+                    if (kl_sock_set_nonblocking(client_fd) < 0) {
                         close(client_fd);
                         continue;
                     }
                     /* Don't leak client connections into child processes. */
-                    set_cloexec(client_fd);
+                    kl_sock_set_cloexec(client_fd);
                     if (s->config.transport == KL_TRANSPORT_TCP) {
                         int nodelay = 1;
                         (void)setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY,

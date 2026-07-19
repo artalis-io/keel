@@ -165,6 +165,11 @@ Per the task's required classification:
 | **9** | lwIP raw provider | 6(lwIP),7 | very high | additive |
 | **10** | UEFI feasibility + optional prototype | 5,7 | very high | additive/subset |
 
+**Status:** Phase 0 done (`f29ed15`, baseline in Appendix A). **Phase 1 done** —
+`src/socket.{h,c}` landed and the client transports (`client.c`, `h2_client.c`,
+`websocket_client.c`), the DNS resolver, and the server switched over; POSIX-only,
+no public API change, benchmarks within noise (Appendix C).
+
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
 
@@ -387,3 +392,31 @@ error handling.
 - [x] ABI-sensitive `int fd` surface enumerated and frozen (Appendix A).
 - [ ] Focused seam-safety tests (UDP connected-mode, UDS cleanup, watcher
       cancellation, accept-path errors) — land with Phase 1/2.
+
+## Appendix C — Phase 1 record (2026-07-19)
+
+`src/socket.{h,c}` introduced (internal, POSIX-only, one provider). Surface:
+`kl_sock_set_nonblocking`, `kl_sock_set_cloexec`, `kl_sock_set_nosigpipe`
+(out-of-line in socket.c), and inline `kl_sock_send`/`kl_sock_recv`
+(MSG_NOSIGNAL / EINTR loop). Migrated: the duplicated nonblock+CLOEXEC+
+SO_NOSIGPIPE+send/recv idioms in `client.c` (io_write/io_read + 2 async connects;
+the 2 sync connect-with-timeout paths keep their own fcntl only because they
+*restore* blocking mode), `h2_client.c`, `websocket_client.c`, `dns_resolver.c`
+(TCP connect + TCP I/O), and `server.c` (`set_nonblocking`/`set_cloexec`
+removed). Net: the `#ifdef SO_NOSIGPIPE` block (was 7×) and the `#ifdef
+MSG_NOSIGNAL` send loop (was 3×) now live once.
+
+No public API change; no ABI change (frozen `int fd` surface untouched). Verified
+on macOS + Linux (epoll + poll) full suite, ASan/UBSan, smoke, scan-build,
+cppcheck 2.13. Benchmark before → after (M1 Max / kqueue, req/s): /hello
+101,159 → 108,299; /users/42 98,777 → 102,368; /mw/hello 101,675 → 105,544;
+POST /echo 97,158 → 104,978 — within run-to-run noise (inline hot path).
+
+**Consciously deferred** (not in this pass): `udp.c`/`udp_server.c` (its own
+`set_nonblocking` + the multicast/GSO/TOS setsockopt surface — migrate the clean
+1:1 bits in a Phase 1b); `tls_mbedtls.c` (opt-in backend, has its own
+MSG_NOSIGNAL write — a TLS-transport concern, not the socket seam);
+`thread_pool.c` pipe nonblocking (a pipe, not a socket); `kl_sock_create` /
+`kl_sock_connect_nonblocking` combined helpers (call sites' cleanup differs
+enough that the granular helpers read better — revisit if a second provider wants
+them).
