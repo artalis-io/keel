@@ -39,8 +39,11 @@
 #endif
 #endif
 
-/* RX control buffer: a pktinfo cmsg (local address) plus a UDP_GRO cmsg. */
-#define UDP_RX_CMSG_SPACE (CMSG_SPACE(sizeof(struct in6_pktinfo)) + CMSG_SPACE(sizeof(int)))
+/* RX control buffer: pktinfo (local address) + UDP_GRO + TOS cmsgs. */
+#define UDP_RX_CMSG_SPACE (CMSG_SPACE(sizeof(struct in6_pktinfo)) + \
+                           CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(int)))
+/* TX control buffer: a source-pin pktinfo cmsg + a TOS/Traffic-Class cmsg. */
+#define UDP_TX_CMSG_SPACE (CMSG_SPACE(sizeof(struct in6_pktinfo)) + CMSG_SPACE(sizeof(int)))
 
 /* Whole-datagram FIFO node: header + inline payload (single allocation). */
 struct KlUdpDatagram {
@@ -49,6 +52,7 @@ struct KlUdpDatagram {
     socklen_t               dest_len;  /* 0 = connected send (use send()) */
     struct sockaddr_storage src;       /* pinned source address, or unset */
     socklen_t               src_len;   /* 0 = no source cmsg */
+    int                     tos;       /* per-packet TOS byte, or -1 */
     size_t                  len;       /* payload length */
     unsigned char           data[];    /* payload */
 };
@@ -124,7 +128,7 @@ static UdpTxBatch *udp_tx_batch_new(KlAllocator *a, int n) {
     if (!b) return NULL;
     memset(b, 0, sizeof(*b));
     b->n = n;
-    b->ctrl_sz = CMSG_SPACE(sizeof(struct in6_pktinfo));
+    b->ctrl_sz = UDP_TX_CMSG_SPACE;   /* pktinfo + TOS */
     b->msgs = kl_malloc(a, (size_t)n * sizeof(struct mmsghdr));
     b->iov  = kl_malloc(a, (size_t)n * sizeof(struct iovec));
     b->ctrl = kl_malloc(a, (size_t)n * b->ctrl_sz);
@@ -135,41 +139,71 @@ static UdpTxBatch *udp_tx_batch_new(KlAllocator *a, int n) {
     return b;
 }
 
-/* Write a source-pinning pktinfo cmsg for `src` into `buf`; returns the
- * msg_controllen to use, or 0 on an unsupported family. */
-static size_t udp_build_pktinfo(unsigned char *buf, size_t bufsz,
-                                const struct sockaddr *src) {
+#endif /* __linux__ */
+
+/* Build per-datagram control messages: a source-pinning pktinfo cmsg (when src
+ * is non-NULL) and an IP_TOS / IPV6_TCLASS mark cmsg (when tos >= 0). `family`
+ * selects the IP level for the TOS cmsg. Returns the msg_controllen to use (0 if
+ * none). Portable — used by the single send/flush path and the batched flush. */
+static size_t udp_build_control(unsigned char *buf, size_t bufsz,
+                                const struct sockaddr *src, int tos, int family) {
     struct msghdr tmp;
     memset(&tmp, 0, sizeof(tmp));
     tmp.msg_control = buf;
     tmp.msg_controllen = bufsz;
     struct cmsghdr *cm = CMSG_FIRSTHDR(&tmp);
-    if (!cm) return 0;
+    size_t used = 0;
+
+    if (src && cm) {
 #if defined(IP_PKTINFO)
-    if (src->sa_family == AF_INET) {
-        cm->cmsg_level = IPPROTO_IP;
-        cm->cmsg_type = IP_PKTINFO;
-        cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
-        struct in_pktinfo pi;
-        memset(&pi, 0, sizeof(pi));
-        pi.ipi_spec_dst = ((const struct sockaddr_in *)src)->sin_addr;
-        memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
-        return CMSG_SPACE(sizeof(struct in_pktinfo));
-    }
+        if (src->sa_family == AF_INET) {
+            cm->cmsg_level = IPPROTO_IP;
+            cm->cmsg_type = IP_PKTINFO;
+            cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+            struct in_pktinfo pi;
+            memset(&pi, 0, sizeof(pi));
+            pi.ipi_spec_dst = ((const struct sockaddr_in *)src)->sin_addr;
+            memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+            used += CMSG_SPACE(sizeof(struct in_pktinfo));
+            cm = CMSG_NXTHDR(&tmp, cm);
+        } else
 #endif
-    if (src->sa_family == AF_INET6) {
-        cm->cmsg_level = IPPROTO_IPV6;
-        cm->cmsg_type = IPV6_PKTINFO;
-        cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
-        struct in6_pktinfo pi;
-        memset(&pi, 0, sizeof(pi));
-        pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
-        memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
-        return CMSG_SPACE(sizeof(struct in6_pktinfo));
+        if (src->sa_family == AF_INET6) {
+            cm->cmsg_level = IPPROTO_IPV6;
+            cm->cmsg_type = IPV6_PKTINFO;
+            cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
+            struct in6_pktinfo pi;
+            memset(&pi, 0, sizeof(pi));
+            pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
+            memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+            used += CMSG_SPACE(sizeof(struct in6_pktinfo));
+            cm = CMSG_NXTHDR(&tmp, cm);
+        }
     }
-    return 0;
+
+    if (tos >= 0 && cm) {
+        if (family == AF_INET) {
+#if defined(IP_TOS)
+            int v = tos & 0xff;
+            cm->cmsg_level = IPPROTO_IP;
+            cm->cmsg_type = IP_TOS;
+            cm->cmsg_len = CMSG_LEN(sizeof(int));
+            memcpy(CMSG_DATA(cm), &v, sizeof(v));
+            used += CMSG_SPACE(sizeof(int));
+#endif
+        } else if (family == AF_INET6) {
+#if defined(IPV6_TCLASS)
+            int v = tos & 0xff;
+            cm->cmsg_level = IPPROTO_IPV6;
+            cm->cmsg_type = IPV6_TCLASS;
+            cm->cmsg_len = CMSG_LEN(sizeof(int));
+            memcpy(CMSG_DATA(cm), &v, sizeof(v));
+            used += CMSG_SPACE(sizeof(int));
+#endif
+        }
+    }
+    return used;
 }
-#endif /* __linux__ */
 
 /* ── Socket flag helpers (portable; macOS lacks SOCK_CLOEXEC on socket()) ── */
 
@@ -223,16 +257,15 @@ static void udp_update_interest(KlUdp *udp) {
 
 /* ── Send path ────────────────────────────────────────────────────────── */
 
-/* Send via sendmsg with a pktinfo control message pinning the source address.
- * Returns -1/EINVAL if the family isn't supported for source pinning. */
-static ssize_t udp_send_from(KlUdp *udp, const void *data, size_t len,
-                             const struct sockaddr *dest, socklen_t dest_len,
-                             const struct sockaddr *src) {
-    union {
-        struct cmsghdr align;
-        unsigned char  buf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
-    } control;
-    memset(&control, 0, sizeof(control));
+/* sendmsg with control messages: source-pin pktinfo (when src) and/or a TOS
+ * mark (when tos >= 0). */
+static ssize_t udp_send_msg(KlUdp *udp, const void *data, size_t len,
+                            const struct sockaddr *dest, socklen_t dest_len,
+                            const struct sockaddr *src, int tos) {
+    unsigned char control[UDP_TX_CMSG_SPACE];
+    memset(control, 0, sizeof(control));
+    int family = dest_len ? dest->sa_family : udp->family;
+    size_t clen = udp_build_control(control, sizeof(control), src, tos, family);
 
     struct iovec iov = { .iov_base = (void *)data, .iov_len = len };
     struct msghdr msg;
@@ -241,38 +274,9 @@ static ssize_t udp_send_from(KlUdp *udp, const void *data, size_t len,
     msg.msg_namelen = dest_len;
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = control.buf;
-    msg.msg_controllen = sizeof(control.buf);   /* must be set before CMSG_FIRSTHDR */
-
-    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
-    if (!cm) {
-        errno = EINVAL;
-        return -1;
-    }
-#if defined(IP_PKTINFO)
-    if (src->sa_family == AF_INET) {
-        cm->cmsg_level = IPPROTO_IP;
-        cm->cmsg_type = IP_PKTINFO;
-        cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
-        struct in_pktinfo pi;
-        memset(&pi, 0, sizeof(pi));
-        pi.ipi_spec_dst = ((const struct sockaddr_in *)src)->sin_addr;
-        memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
-        msg.msg_controllen = CMSG_SPACE(sizeof(struct in_pktinfo));
-    } else
-#endif
-    if (src->sa_family == AF_INET6) {
-        cm->cmsg_level = IPPROTO_IPV6;
-        cm->cmsg_type = IPV6_PKTINFO;
-        cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
-        struct in6_pktinfo pi;
-        memset(&pi, 0, sizeof(pi));
-        pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
-        memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
-        msg.msg_controllen = CMSG_SPACE(sizeof(struct in6_pktinfo));
-    } else {
-        errno = EINVAL;
-        return -1;
+    if (clen) {
+        msg.msg_control = control;
+        msg.msg_controllen = clen;
     }
 
     ssize_t n;
@@ -282,9 +286,10 @@ static ssize_t udp_send_from(KlUdp *udp, const void *data, size_t len,
 
 static ssize_t udp_raw_send(KlUdp *udp, const void *data, size_t len,
                             const struct sockaddr *dest, socklen_t dest_len,
-                            const struct sockaddr *src, socklen_t src_len) {
-    if (src && src_len)
-        return udp_send_from(udp, data, len, dest, dest_len, src);
+                            const struct sockaddr *src, socklen_t src_len, int tos) {
+    if ((src && src_len) || tos >= 0)
+        return udp_send_msg(udp, data, len, dest, dest_len,
+                            (src && src_len) ? src : NULL, tos);
     ssize_t n;
     do {
         if (dest_len == 0)
@@ -297,7 +302,7 @@ static ssize_t udp_raw_send(KlUdp *udp, const void *data, size_t len,
 
 static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
                        const struct sockaddr *dest, socklen_t dest_len,
-                       const struct sockaddr *src, socklen_t src_len) {
+                       const struct sockaddr *src, socklen_t src_len, int tos) {
     /* Backpressure cap (avoids max_send_queue - len underflow). */
     if (len > udp->max_send_queue || udp->q_bytes > udp->max_send_queue - len) {
         udp->dropped++;
@@ -330,6 +335,7 @@ static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
     } else {
         node->src_len = 0;
     }
+    node->tos = tos;
     if (len)
         memcpy(node->data, data, len);
 
@@ -344,20 +350,20 @@ static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
 
 static int udp_send_common(KlUdp *udp, const void *data, size_t len,
                            const struct sockaddr *dest, socklen_t dest_len,
-                           const struct sockaddr *src, socklen_t src_len) {
+                           const struct sockaddr *src, socklen_t src_len, int tos) {
     if (udp->fd < 0) {
         udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     /* Preserve ordering: if anything is queued, queue behind it. */
     if (udp->q_head)
-        return udp_enqueue(udp, data, len, dest, dest_len, src, src_len);
+        return udp_enqueue(udp, data, len, dest, dest_len, src, src_len, tos);
 
-    ssize_t n = udp_raw_send(udp, data, len, dest, dest_len, src, src_len);
+    ssize_t n = udp_raw_send(udp, data, len, dest, dest_len, src, src_len, tos);
     if (n >= 0)
         return 0;   /* UDP send is all-or-nothing — no short-send handling */
     if (errno == EAGAIN || errno == EWOULDBLOCK)
-        return udp_enqueue(udp, data, len, dest, dest_len, src, src_len);
+        return udp_enqueue(udp, data, len, dest, dest_len, src, src_len, tos);
 
     udp->last_error = KL_ERR_IO;
     return -1;
@@ -397,10 +403,13 @@ static void udp_flush_queue_batched(KlUdp *udp) {
                 m->msg_name = &node->dest;
                 m->msg_namelen = node->dest_len;
             }
-            if (node->src_len) {
+            if (node->src_len || node->tos >= 0) {
                 unsigned char *ctrl = b->ctrl + (size_t)cnt * b->ctrl_sz;
-                size_t clen = udp_build_pktinfo(ctrl, b->ctrl_sz,
-                                                (struct sockaddr *)&node->src);
+                int fam = node->dest_len ? node->dest.ss_family : udp->family;
+                size_t clen = udp_build_control(
+                    ctrl, b->ctrl_sz,
+                    node->src_len ? (struct sockaddr *)&node->src : NULL,
+                    node->tos, fam);
                 if (clen) { m->msg_control = ctrl; m->msg_controllen = clen; }
             }
             b->msgs[cnt].msg_len = 0;
@@ -443,7 +452,7 @@ static void udp_flush_queue(KlUdp *udp) {
                                  node->dest_len ? (struct sockaddr *)&node->dest : NULL,
                                  node->dest_len,
                                  node->src_len ? (struct sockaddr *)&node->src : NULL,
-                                 node->src_len);
+                                 node->src_len, node->tos);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 break;                 /* socket buffer still full — retry later */
@@ -511,6 +520,37 @@ static int udp_parse_gro(struct msghdr *msg) {
     return 0;
 }
 
+/* Read the received TOS / Traffic-Class byte from control messages (IP_TOS /
+ * IPV6_TCLASS), or -1 if none. The cmsg payload is 1 byte or an int per platform. */
+static int udp_parse_tos(struct msghdr *msg) {
+#if defined(IP_TOS) || defined(IPV6_TCLASS)
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(msg); cm; cm = CMSG_NXTHDR(msg, cm)) {
+        int is_tos = 0;
+#if defined(IP_TOS)
+        if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_TOS)
+            is_tos = 1;
+#endif
+#if defined(IPV6_TCLASS)
+        if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_TCLASS)
+            is_tos = 1;
+#endif
+        if (is_tos) {
+            size_t dl = cm->cmsg_len - CMSG_LEN(0);
+            if (dl >= sizeof(int)) {
+                int v;
+                memcpy(&v, CMSG_DATA(cm), sizeof(v));
+                return v & 0xff;
+            }
+            if (dl >= 1)
+                return CMSG_DATA(cm)[0];
+        }
+    }
+#else
+    (void)msg;
+#endif
+    return -1;
+}
+
 /* Deliver one received buffer. A GRO-coalesced buffer (gro_seg > 0 and
  * len > gro_seg) goes whole to on_recv_segments when set, else is split into
  * per-segment on_recv calls; a plain datagram goes to on_recv. */
@@ -555,7 +595,7 @@ static void udp_recv_drain_batched(KlUdp *udp) {
             m->msg_iovlen = 1;
             m->msg_name = &b->src[i];
             m->msg_namelen = sizeof(struct sockaddr_storage);
-            if (udp->pktinfo || udp->recv_gro) {
+            if (udp->pktinfo || udp->recv_gro || udp->recv_tos) {
                 m->msg_control = b->ctrl + (size_t)i * b->ctrl_sz;
                 m->msg_controllen = b->ctrl_sz;
             }
@@ -579,6 +619,7 @@ static void udp_recv_drain_batched(KlUdp *udp) {
                 udp->truncated++;
             socklen_t local_len = udp->pktinfo ? udp_parse_local(udp, m) : 0;
             int gro = udp->recv_gro ? udp_parse_gro(m) : 0;
+            udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(m) : -1;
             udp_deliver(udp, b->iov[i].iov_base, (size_t)b->msgs[i].msg_len, gro,
                         (struct sockaddr *)&b->src[i], m->msg_namelen,
                         local_len ? (struct sockaddr *)&udp->recv_local : NULL,
@@ -612,7 +653,7 @@ static void udp_recv_drain(KlUdp *udp) {
         msg.msg_iovlen = 1;
         msg.msg_name = &udp->recv_src;
         msg.msg_namelen = sizeof(udp->recv_src);
-        if (udp->pktinfo || udp->recv_gro) {
+        if (udp->pktinfo || udp->recv_gro || udp->recv_tos) {
             msg.msg_control = control.buf;
             msg.msg_controllen = sizeof(control.buf);
         }
@@ -629,6 +670,7 @@ static void udp_recv_drain(KlUdp *udp) {
 
         socklen_t local_len = udp->pktinfo ? udp_parse_local(udp, &msg) : 0;
         int gro = udp->recv_gro ? udp_parse_gro(&msg) : 0;
+        udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(&msg) : -1;
 
         udp_deliver(udp, udp->recv_buf, (size_t)n, gro,
                     (struct sockaddr *)&udp->recv_src, msg.msg_namelen,
@@ -720,6 +762,20 @@ static void udp_apply_tx_options(int fd, int family, const KlUdpConfig *cfg) {
     if (cfg->broadcast) {
         int opt = 1;
         (void)setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+    }
+    /* Default TOS/DSCP/ECN marking for outgoing datagrams. */
+    if (cfg->tos) {
+        if (family == AF_INET) {
+#if defined(IP_TOS)
+            int v = cfg->tos & 0xff;
+            (void)setsockopt(fd, IPPROTO_IP, IP_TOS, &v, sizeof(v));
+#endif
+        } else if (family == AF_INET6) {
+#if defined(IPV6_TCLASS)
+            int v = cfg->tos & 0xff;
+            (void)setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &v, sizeof(v));
+#endif
+        }
     }
     if (family == AF_INET) {
 #if defined(IP_MULTICAST_TTL)
@@ -828,6 +884,7 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         goto fail;
     }
     udp->family = family;
+    udp->recv_tos_val = -1;
     udp_set_cloexec(udp->fd);
     if (udp_set_nonblocking(udp->fd) < 0) {
         udp->last_error = KL_ERR_SOCKET;
@@ -887,6 +944,23 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
             udp->recv_gro = 1;
     }
 #endif
+
+    /* Deliver each datagram's TOS/Traffic-Class byte (best-effort). */
+    if (cfg->recv_tos) {
+        if (family == AF_INET) {
+#if defined(IP_RECVTOS)
+            int on = 1;
+            if (setsockopt(udp->fd, IPPROTO_IP, IP_RECVTOS, &on, sizeof(on)) == 0)
+                udp->recv_tos = 1;
+#endif
+        } else if (family == AF_INET6) {
+#if defined(IPV6_RECVTCLASS)
+            int on = 1;
+            if (setsockopt(udp->fd, IPPROTO_IPV6, IPV6_RECVTCLASS, &on, sizeof(on)) == 0)
+                udp->recv_tos = 1;
+#endif
+        }
+    }
 
     if (ai) {
         if (bind(udp->fd, ai->ai_addr, ai->ai_addrlen) < 0) {
@@ -1018,7 +1092,46 @@ int kl_udp_send_to_from(KlUdp *udp, const void *data, size_t len,
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    return udp_send_common(udp, data, len, dest, dest_len, src, src_len);
+    return udp_send_common(udp, data, len, dest, dest_len, src, src_len, -1);
+}
+
+int kl_udp_send_to_tos(KlUdp *udp, const void *data, size_t len,
+                       const struct sockaddr *dest, socklen_t dest_len, int tos) {
+    if (!udp || (!data && len) || !dest || dest_len == 0 ||
+        dest_len > sizeof(struct sockaddr_storage) || tos < 0 || tos > 255) {
+        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    return udp_send_common(udp, data, len, dest, dest_len, NULL, 0, tos);
+}
+
+int kl_udp_set_tos(KlUdp *udp, int tos) {
+    if (!udp || udp->fd < 0 || tos < 0 || tos > 255) {
+        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+#if defined(IP_TOS) || defined(IPV6_TCLASS)
+    int rc = -1;
+    if (udp->family == AF_INET) {
+#if defined(IP_TOS)
+        int v = tos & 0xff;
+        rc = setsockopt(udp->fd, IPPROTO_IP, IP_TOS, &v, sizeof(v));
+#endif
+    } else if (udp->family == AF_INET6) {
+#if defined(IPV6_TCLASS)
+        int v = tos & 0xff;
+        rc = setsockopt(udp->fd, IPPROTO_IPV6, IPV6_TCLASS, &v, sizeof(v));
+#endif
+    }
+    if (rc == 0)
+        return 0;
+#endif
+    udp->last_error = KL_ERR_SOCKET;
+    return -1;
+}
+
+int kl_udp_recv_tos(const KlUdp *udp) {
+    return udp ? udp->recv_tos_val : -1;
 }
 
 int kl_udp_send(KlUdp *udp, const void *data, size_t len) {
@@ -1030,7 +1143,7 @@ int kl_udp_send(KlUdp *udp, const void *data, size_t len) {
         udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    return udp_send_common(udp, data, len, NULL, 0, NULL, 0);
+    return udp_send_common(udp, data, len, NULL, 0, NULL, 0, -1);
 }
 
 /* Portable GSO fallback: send each segment individually via the normal path
@@ -1042,7 +1155,7 @@ static int udp_send_segments(KlUdp *udp, const void *buf, size_t total_len,
     while (off < total_len) {
         size_t chunk = (total_len - off < seg) ? (total_len - off) : seg;
         if (udp_send_common(udp, (const char *)buf + off, chunk,
-                            dest, dest_len, NULL, 0) != 0)
+                            dest, dest_len, NULL, 0, -1) != 0)
             return -1;   /* over-cap / hard error — remaining segments dropped */
         off += chunk;
     }

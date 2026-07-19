@@ -136,9 +136,11 @@ Passthrough config (`mmsg_batch`, `recv_gro`), plus `kl_udp_server_send_gso` and
 
 ## Non-goals (v1)
 
-`SO_TXTIME`/pacing, hardware timestamping, `IP_TOS`/DSCP marking (separate
-roadmap item), zerocopy `MSG_ZEROCOPY`, and io_uring UDP multishot (the io_uring
-file backend is separate).
+`SO_TXTIME`/pacing, hardware timestamping, zerocopy `MSG_ZEROCOPY`, and io_uring
+UDP multishot (the io_uring file backend is separate). *(ECN/TOS/DSCP marking —
+originally listed here as a separate roadmap item — was implemented 2026-07-19:
+`KlUdpConfig.tos`, `kl_udp_set_tos`, per-packet `kl_udp_send_to_tos`, and
+`recv_tos` + `kl_udp_recv_tos`.)*
 
 ## Tests (`tests/test_udp_batching.c`)
 

@@ -22,6 +22,31 @@
 
 typedef struct KlUdp KlUdp;
 
+/* DSCP class selectors + Expedited Forwarding (RFC 2474 / 4594). Shift into the
+ * TOS / Traffic-Class byte with KL_TOS(). */
+#define KL_DSCP_CS0   0
+#define KL_DSCP_CS1   8
+#define KL_DSCP_CS2  16
+#define KL_DSCP_CS3  24
+#define KL_DSCP_CS4  32
+#define KL_DSCP_CS5  40
+#define KL_DSCP_CS6  48
+#define KL_DSCP_CS7  56
+#define KL_DSCP_AF11 10
+#define KL_DSCP_AF21 18
+#define KL_DSCP_AF31 26
+#define KL_DSCP_AF41 34
+#define KL_DSCP_EF   46
+
+/* ECN codepoints — the low 2 bits of the TOS byte (RFC 3168). */
+#define KL_ECN_NOT_ECT 0
+#define KL_ECN_ECT1    1
+#define KL_ECN_ECT0    2
+#define KL_ECN_CE      3
+
+/** @brief Compose a TOS/Traffic-Class byte from a DSCP class and ECN codepoint. */
+#define KL_TOS(dscp, ecn) ((((dscp) & 0x3f) << 2) | ((ecn) & 0x3))
+
 /** @brief Internal queued-datagram node (defined in src/udp.c). */
 typedef struct KlUdpDatagram KlUdpDatagram;
 
@@ -80,6 +105,8 @@ typedef struct {
     int          so_sndbuf;      /**< SO_SNDBUF kernel send buffer in bytes (0 = OS default). */
     int          mmsg_batch;     /**< recvmmsg/sendmmsg batch size (Linux); 0 = default (16), 1 = per-datagram, capped at 64. Higher amortizes syscalls at the cost of RX memory (batch × recv_buf_size). */
     int          recv_gro;       /**< Enable UDP_GRO receive coalescing (Linux ≥5.0; opt-in). Coalesced buffers are split per-segment into on_recv unless a segments callback is set (kl_udp_recv_segments). */
+    int          tos;            /**< IP_TOS / IPV6_TCLASS byte stamped on every send (DSCP<<2 | ECN); 0 = OS default. Compose with KL_TOS(). */
+    int          recv_tos;       /**< Deliver each datagram's TOS/Traffic-Class byte (IP_RECVTOS / IPV6_RECVTCLASS); read it during on_recv via kl_udp_recv_tos. */
     int          broadcast;      /**< SO_BROADCAST — allow sending to broadcast addresses (IPv4). */
     int          multicast_ttl;  /**< IP_MULTICAST_TTL / IPV6_MULTICAST_HOPS for multicast sends; 0 = kernel default (1 = link-local). */
     int          multicast_disable_loop; /**< 1 = disable local loopback of sent multicast (default: enabled). */
@@ -104,6 +131,8 @@ struct KlUdp {
     void          *recv_seg_ud;
     int            recv_gro;         /**< 1 = UDP_GRO enabled on this socket. */
     int            gso_disabled;     /**< 1 = UDP GSO ruled unsupported; use fallback. */
+    int            recv_tos;         /**< 1 = deliver per-datagram TOS byte. */
+    int            recv_tos_val;     /**< Current datagram's TOS byte, or -1. */
     int            recv_active;
     unsigned char *recv_buf;
     size_t         recv_buf_size;
@@ -229,6 +258,32 @@ int kl_udp_send_gso(KlUdp *udp, const void *buf, size_t total_len,
  * the KlUdpRecvFn handler.
  */
 void kl_udp_recv_segments(KlUdp *udp, KlUdpRecvSegmentsFn cb, void *user_data);
+
+/**
+ * @brief Set the socket's default TOS/Traffic-Class byte for outgoing datagrams
+ *        (IP_TOS / IPV6_TCLASS). Compose with KL_TOS(); 0 clears to OS default.
+ * @return 0 on success, -1 on failure (last_error set).
+ */
+int kl_udp_set_tos(KlUdp *udp, int tos);
+
+/**
+ * @brief Send one datagram with a per-packet TOS/ECN mark, overriding the
+ *        socket default via an IP_TOS / IPV6_TCLASS control message.
+ *
+ * For congestion controllers that vary the ECN codepoint per packet (e.g. QUIC).
+ * @param tos the TOS/Traffic-Class byte (0–255); compose with KL_TOS().
+ * @return 0 if sent or queued, -1 on error / over-cap (last_error set).
+ */
+int kl_udp_send_to_tos(KlUdp *udp, const void *data, size_t len,
+                       const struct sockaddr *dest, socklen_t dest_len, int tos);
+
+/**
+ * @brief The TOS/Traffic-Class byte of the datagram currently being delivered,
+ *        or -1 if unavailable (recv_tos disabled, or none present).
+ *
+ * Only meaningful while inside the KlUdpRecvFn / KlUdpRecvSegmentsFn callback.
+ */
+int kl_udp_recv_tos(const KlUdp *udp);
 
 /** @brief Register the send-queue-drained callback (NULL to clear). */
 void kl_udp_on_drain(KlUdp *udp, KlUdpDrainFn cb, void *user_data);
