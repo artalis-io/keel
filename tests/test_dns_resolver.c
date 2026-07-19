@@ -71,6 +71,7 @@ static int g_silent;        /* drop queries (to exercise timeout)      */
 static int g_queries;
 static int g_flip_case;     /* echo the question name with each letter case-flipped */
 static int g_wrong_question;/* echo a different question entirely (spoof) */
+static int g_silent_aaaa;   /* drop only AAAA queries (to exercise resolution delay) */
 static uint16_t g_seen_ids[8];   /* transaction ids observed, in order */
 static int g_seen_n;
 static uint8_t g_last_q[128];    /* last query's question-section bytes */
@@ -124,6 +125,7 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
     }
 
     if (g_silent) return;
+    if (g_silent_aaaa && qtype == KL_DNS_TYPE_AAAA) return;   /* drop AAAA only */
 
     uint8_t resp[512];
     size_t n = 0;
@@ -192,7 +194,7 @@ static void on_done(KlResolveReq *req, const KlResolveResult *result,
 static void reset_dns(void) {
     g_answer_a = g_answer_aaaa = 0; g_rcode = 0; g_silent = 0; g_queries = 0;
     g_flip_case = 0; g_wrong_question = 0; g_seen_n = 0; g_last_q_len = 0;
-    g_last_arcount = 0; g_last_qname[0] = '\0';
+    g_last_arcount = 0; g_last_qname[0] = '\0'; g_silent_aaaa = 0;
     g_done = 0; g_err = 0; memset(&g_res, 0, sizeof(g_res));
 }
 
@@ -920,6 +922,91 @@ UTEST(dns, e2e_vs_getaddrinfo) {
     }
 
     r->destroy(r);
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── Phase 2b: dual-family (A + AAAA concurrent) + resolution delay ────── */
+
+UTEST(dns, dual_family_returns_both) {
+    /* Both families answer → the result carries both, interleaved (A first by
+     * default), from concurrent A and AAAA queries. */
+    reset_dns();
+    g_answer_a = 1; g_answer_aaaa = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_EQ(2, g_res.naddrs);
+    ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);    /* A first (default preference) */
+    ASSERT_EQ(AF_INET6, g_res.addrs[1].ss_family);
+    char ip[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addrs[0])->sin_addr, ip, sizeof(ip));
+    ASSERT_STREQ("10.1.2.3", ip);
+    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&g_res.addrs[1])->sin6_addr, ip, sizeof(ip));
+    ASSERT_STREQ("::1", ip);
+    ASSERT_EQ(80, ntohs(((struct sockaddr_in6 *)&g_res.addrs[1])->sin6_port));
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(dns, dual_family_prefer_ipv6_orders_first) {
+    /* prefer_ipv6 → AAAA leads the interleaved list. */
+    reset_dns();
+    g_answer_a = 1; g_answer_aaaa = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlDnsResolverConfig dc = { .prefer_ipv6 = 1, .timeout_ms = 500, .attempts = 2 };
+    KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(2, g_res.naddrs);
+    ASSERT_EQ(AF_INET6, g_res.addrs[0].ss_family);   /* AAAA first when preferred */
+    ASSERT_EQ(AF_INET, g_res.addrs[1].ss_family);
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+UTEST(dns, resolution_delay_does_not_stall_on_slow_family) {
+    /* A answers, AAAA never does. The resolve must complete via the ~50ms
+     * resolution delay, NOT wait for the (2s) AAAA timeout. */
+    reset_dns();
+    g_answer_a = 1; g_silent_aaaa = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlDnsResolverConfig dc = { .timeout_ms = 2000, .attempts = 1 };
+    KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 40);              /* ~400ms: enough for the 50ms delay, not 2s */
+
+    ASSERT_EQ(1, g_done);                 /* completed via resolution delay */
+    ASSERT_EQ(0, g_err);
+    ASSERT_EQ(1, g_res.naddrs);           /* A only — AAAA never arrived */
+    ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
     kl_event_ctx_free(&ctx);
 }
 

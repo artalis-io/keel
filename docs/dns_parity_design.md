@@ -1,6 +1,6 @@
 # DNS Parity with getaddrinfo — Design
 
-Status: **planned (phased).**
+Status: **Phases 1a–2b done; Phase 3 (client Happy Eyeballs) remaining.**
 Decisions taken (2026-07-19): deliver all four resolver-internal features
 (`/etc/hosts`, `search`/`ndots`, multi-nameserver failover, EDNS0) **and**
 multiple-address return + Happy Eyeballs (RFC 8305).
@@ -100,7 +100,7 @@ single-address form). The new list path gets its own `fuzz_dns` coverage.
 - `resolver_cache` and the client are unchanged (client still uses `addr[0]`).
 - Tests: a 3-A-record response fills `naddrs == 3` in order.
 
-### Phase 2b — dual-family concurrency + resolution delay
+### Phase 2b — dual-family concurrency + resolution delay  *(DONE 2026-07-19)*
 
 The request gains **two legs** (A and AAAA), each with its own transaction id,
 retry/nameserver-rotation state, timeout timer, question bytes, and `done` flag:

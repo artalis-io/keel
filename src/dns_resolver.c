@@ -24,6 +24,25 @@
 
 /* ── Per-request handle ──────────────────────────────────────────────── */
 
+/* One address-family query "leg" (A or AAAA), run concurrently with the other
+ * for the current candidate name. Each leg carries its own transaction id,
+ * retry/nameserver-rotation state, timeout timer, question bytes, and the
+ * addresses it collected. */
+typedef struct {
+    struct KlDnsReq *req;          /* owning request (timer back-pointer) */
+    int              qtype;        /* KL_DNS_TYPE_A or AAAA */
+    uint16_t         id;           /* current transaction id */
+    int              tries_left;   /* transmits remaining for this leg */
+    int              ns_idx;       /* nameserver rotation cursor */
+    int64_t          timer_id;     /* per-leg timeout, -1 if none */
+    int              done;         /* 1 = settled (answered / empty / exhausted) */
+    uint8_t          question[DNS_NAME_MAX + 8]; /* transmitted question (name+type+class) */
+    size_t           question_len;
+    struct sockaddr_storage addrs[KL_RESOLVE_MAX_ADDRS]; /* collected addresses */
+    socklen_t        addrlens[KL_RESOLVE_MAX_ADDRS];
+    int              naddrs;
+} KlDnsLeg;
+
 typedef struct KlDnsReq {
     KlResolveReq      base;        /* MUST be first for upcast */
     struct KlDnsReq  *next;        /* in-flight singly-linked list */
@@ -35,18 +54,14 @@ typedef struct KlDnsReq {
     int               ncand;                     /* number of candidates */
     int               ci;                        /* current candidate index */
     int               port;
-    uint16_t          id;          /* current transaction id */
-    int               qtype;       /* current query type (A/AAAA) */
-    int               tries_left;  /* transmits remaining for this family */
-    int               tried_secondary;
-    int64_t           timer_id;    /* timeout/deferred timer, -1 if none */
-    int               ns_idx;      /* next nameserver to send to (round-robin) */
-    int               literal;     /* 1 = literal-IP deferred completion */
-    KlResolveResult   result;      /* literal result, pending deferral */
+    KlDnsLeg          legs[2];     /* [0] = preferred family, [1] = other */
+    int64_t           rdelay_timer;/* RFC 8305 §3 resolution-delay timer, -1 if none */
+    int               rdelay_armed;/* 1 = resolution delay is running */
+    int64_t           timer_id;    /* literal-IP deferred-completion timer, -1 if none */
+    int               literal;     /* 1 = literal-IP / hosts deferred completion */
+    KlResolveResult   result;      /* literal result / final merged result */
     int               in_done;     /* reentrancy guard */
     int               cancelled;   /* cancel() arrived during done */
-    uint8_t           question[DNS_NAME_MAX + 8]; /* transmitted question section (qname+qtype+qclass) */
-    size_t            question_len;/* length of the stored question */
 } KlDnsReq;
 
 /* ── Resolver ────────────────────────────────────────────────────────── */
@@ -278,21 +293,34 @@ static void dns_unlink(KlDnsResolver *r, KlDnsReq *q) {
     }
 }
 
-static KlDnsReq *dns_find_by_id(KlDnsResolver *r, uint16_t id) {
-    for (KlDnsReq *q = r->inflight; q; q = q->next)
-        if (!q->literal && q->id == id)
-            return q;
+/* Find the in-flight leg carrying transaction id (across all requests). */
+static KlDnsLeg *dns_find_leg(KlDnsResolver *r, uint16_t id) {
+    for (KlDnsReq *q = r->inflight; q; q = q->next) {
+        if (q->literal)
+            continue;
+        for (int i = 0; i < 2; i++)
+            if (!q->legs[i].done && q->legs[i].id == id)
+                return &q->legs[i];
+    }
     return NULL;
 }
 
 /* ── Completion ──────────────────────────────────────────────────────── */
 
+/* Cancel every timer a request may own (literal, both legs, resolution delay). */
+static void dns_cancel_timers(KlDnsResolver *r, KlDnsReq *q) {
+    if (q->timer_id >= 0)      { kl_timer_cancel(r->ctx, q->timer_id);      q->timer_id = -1; }
+    if (q->rdelay_timer >= 0)  { kl_timer_cancel(r->ctx, q->rdelay_timer);  q->rdelay_timer = -1; }
+    for (int i = 0; i < 2; i++)
+        if (q->legs[i].timer_id >= 0) {
+            kl_timer_cancel(r->ctx, q->legs[i].timer_id);
+            q->legs[i].timer_id = -1;
+        }
+}
+
 static void dns_complete(KlDnsResolver *r, KlDnsReq *q,
                          const KlResolveResult *result, int error) {
-    if (q->timer_id >= 0) {
-        kl_timer_cancel(r->ctx, q->timer_id);
-        q->timer_id = -1;
-    }
+    dns_cancel_timers(r, q);
     dns_unlink(r, q);
 
     q->in_done = 1;
@@ -312,93 +340,179 @@ static void dns_set_port(KlResolveResult *res, int port) {
     }
 }
 
-/* ── Transmit + timeout ──────────────────────────────────────────────── */
+/* ── Two-leg (dual-family) state machine ─────────────────────────────── */
 
-static void dns_on_timer(void *ud);
+#define DNS_RESOLUTION_DELAY_MS 50   /* RFC 8305 §3: wait for the 2nd family */
 
-/* 1 if some other in-flight request already carries this id. */
-static int dns_id_in_use(const KlDnsResolver *r, uint16_t id, const KlDnsReq *self) {
-    for (const KlDnsReq *q = r->inflight; q; q = q->next)
-        if (q != self && !q->literal && q->id == id)
-            return 1;
+static void dns_on_leg_timer(void *ud);
+static void dns_on_rdelay(void *ud);
+static void dns_on_literal(void *ud);
+static void dns_advance_candidate(KlDnsResolver *r, KlDnsReq *q);
+
+/* 1 if some other in-flight leg already carries this id. */
+static int dns_id_in_use(const KlDnsResolver *r, uint16_t id, const KlDnsLeg *self) {
+    for (const KlDnsReq *q = r->inflight; q; q = q->next) {
+        if (q->literal)
+            continue;
+        for (int i = 0; i < 2; i++)
+            if (&q->legs[i] != self && !q->legs[i].done && q->legs[i].id == id)
+                return 1;
+    }
     return 0;
 }
 
-static int dns_transmit(KlDnsResolver *r, KlDnsReq *q) {
-    if (q->tries_left <= 0)
+/* Transmit one leg's query (rotating nameserver); schedules its timeout. */
+static int dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLeg *leg) {
+    if (leg->tries_left <= 0)
         return -1;
-    q->tries_left--;
+    leg->tries_left--;
 
-    /* Randomized transaction id (redraw on the rare in-flight collision). */
     for (int tries = 0; tries < 8; tries++) {
-        q->id = dns_rand_u16(r);
-        if (!dns_id_in_use(r, q->id, q))
+        leg->id = dns_rand_u16(r);
+        if (!dns_id_in_use(r, leg->id, leg))
             break;
     }
 
     uint8_t buf[DNS_QUERY_MAX];
     size_t qlen = 0, q_off = 0, q_len = 0;
-    if (dns_build_query(r, buf, sizeof(buf), q->id, q->host, q->qtype,
+    if (dns_build_query(r, buf, sizeof(buf), leg->id, q->host, leg->qtype,
                         &qlen, &q_off, &q_len) != 0)
         return -1;
-    /* Stash the exact question bytes to verify the response echoes them. */
-    if (q_len > sizeof(q->question))
+    if (q_len > sizeof(leg->question))
         return -1;
-    memcpy(q->question, buf + q_off, q_len);
-    q->question_len = q_len;
+    memcpy(leg->question, buf + q_off, q_len);
+    leg->question_len = q_len;
 
-    /* Send to the current nameserver, then rotate for the next transmit. */
-    const struct sockaddr *nsa = (const struct sockaddr *)&r->ns[q->ns_idx];
-    socklen_t nsl = r->ns_len[q->ns_idx];
-    q->ns_idx = (q->ns_idx + 1) % r->nns;
+    const struct sockaddr *nsa = (const struct sockaddr *)&r->ns[leg->ns_idx];
+    socklen_t nsl = r->ns_len[leg->ns_idx];
+    leg->ns_idx = (leg->ns_idx + 1) % r->nns;
     if (kl_udp_send_to(&r->sock, buf, qlen, nsa, nsl) != 0)
         return -1;
 
-    if (q->timer_id >= 0)
-        kl_timer_cancel(r->ctx, q->timer_id);
-    q->timer_id = kl_timer_add(r->ctx, (uint64_t)r->timeout_ms, dns_on_timer, q);
-    return (q->timer_id >= 0) ? 0 : -1;
+    if (leg->timer_id >= 0)
+        kl_timer_cancel(r->ctx, leg->timer_id);
+    leg->timer_id = kl_timer_add(r->ctx, (uint64_t)r->timeout_ms, dns_on_leg_timer, leg);
+    return (leg->timer_id >= 0) ? 0 : -1;
 }
 
-/* Advance the query: try the other address family (unless the name is known
- * not to exist), then the next candidate name; fail when all are exhausted.
- * @param nxdomain 1 = the current name does not exist (skip family, next name). */
-static void dns_advance(KlDnsResolver *r, KlDnsReq *q, int nxdomain) {
-    if (!nxdomain && !q->tried_secondary) {
-        q->tried_secondary = 1;
-        q->qtype = (q->qtype == KL_DNS_TYPE_A) ? KL_DNS_TYPE_AAAA : KL_DNS_TYPE_A;
-        q->tries_left = r->attempts * r->nns;   /* cycle every nameserver per attempt */
-        if (dns_transmit(r, q) == 0)
-            return;
+/* Merge both legs' addresses, interleaved preferred-first (RFC 8305 §4). */
+static void dns_finalize(KlDnsResolver *r, KlDnsReq *q) {
+    KlResolveResult *res = &q->result;
+    memset(res, 0, sizeof(*res));
+    res->ai_socktype = SOCK_STREAM;
+    res->ai_protocol = 0;
+    int i0 = 0, i1 = 0;                          /* legs[0] = preferred */
+    while ((i0 < q->legs[0].naddrs || i1 < q->legs[1].naddrs) &&
+           res->naddrs < KL_RESOLVE_MAX_ADDRS) {
+        if (i0 < q->legs[0].naddrs) {
+            res->addrs[res->naddrs]   = q->legs[0].addrs[i0];
+            res->addrlens[res->naddrs] = q->legs[0].addrlens[i0];
+            res->naddrs++; i0++;
+        }
+        if (res->naddrs < KL_RESOLVE_MAX_ADDRS && i1 < q->legs[1].naddrs) {
+            res->addrs[res->naddrs]   = q->legs[1].addrs[i1];
+            res->addrlens[res->naddrs] = q->legs[1].addrlens[i1];
+            res->naddrs++; i1++;
+        }
     }
-    /* Next candidate name (search expansion). */
+    dns_set_port(res, q->port);
+    dns_complete(r, q, res, 0);
+}
+
+/* Called after a leg settles or the resolution delay fires: decide whether to
+ * complete, wait for the other leg, or advance to the next candidate. */
+static void dns_check_complete(KlDnsResolver *r, KlDnsReq *q) {
+    int both_done = q->legs[0].done && q->legs[1].done;
+    int have_addr = (q->legs[0].naddrs + q->legs[1].naddrs) > 0;
+
+    if (both_done) {
+        if (have_addr)
+            dns_finalize(r, q);
+        else
+            dns_advance_candidate(r, q);           /* both families empty → next name */
+        return;
+    }
+    /* One leg still outstanding. If we already have addresses, run the
+     * resolution-delay timer so a slow/absent family can't stall us. */
+    if (have_addr && !q->rdelay_armed) {
+        q->rdelay_armed = 1;
+        q->rdelay_timer = kl_timer_add(r->ctx, DNS_RESOLUTION_DELAY_MS,
+                                       dns_on_rdelay, q);
+    }
+}
+
+/* Mark a leg settled (cancel its timeout) and re-evaluate completion. */
+static void dns_leg_settle(KlDnsResolver *r, KlDnsReq *q, KlDnsLeg *leg) {
+    if (leg->timer_id >= 0) {
+        kl_timer_cancel(r->ctx, leg->timer_id);
+        leg->timer_id = -1;
+    }
+    leg->done = 1;
+    dns_check_complete(r, q);
+}
+
+/* Fire both legs (A + AAAA) for the current candidate name. */
+static int dns_start_candidate(KlDnsResolver *r, KlDnsReq *q) {
+    if (q->rdelay_timer >= 0) {
+        kl_timer_cancel(r->ctx, q->rdelay_timer);
+        q->rdelay_timer = -1;
+    }
+    q->rdelay_armed = 0;
+
+    q->legs[0].qtype = r->prefer_ipv6 ? KL_DNS_TYPE_AAAA : KL_DNS_TYPE_A;
+    q->legs[1].qtype = r->prefer_ipv6 ? KL_DNS_TYPE_A : KL_DNS_TYPE_AAAA;
+    int any = 0;
+    for (int i = 0; i < 2; i++) {
+        KlDnsLeg *leg = &q->legs[i];
+        leg->req = q;
+        leg->tries_left = r->attempts * r->nns;
+        leg->ns_idx = 0;
+        leg->timer_id = -1;
+        leg->done = 0;
+        leg->naddrs = 0;
+        if (dns_transmit_leg(r, q, leg) == 0)
+            any = 1;
+        else
+            leg->done = 1;                          /* couldn't send → treat as empty */
+    }
+    return any ? 0 : -1;                            /* -1 = neither leg could transmit */
+}
+
+/* Move to the next candidate name (search expansion) or fail. */
+static void dns_advance_candidate(KlDnsResolver *r, KlDnsReq *q) {
     q->ci++;
     if (q->ci < q->ncand) {
         memcpy(q->host, q->cand[q->ci], DNS_NAME_MAX);
-        q->qtype = r->prefer_ipv6 ? KL_DNS_TYPE_AAAA : KL_DNS_TYPE_A;
-        q->tried_secondary = 0;
-        q->tries_left = r->attempts * r->nns;
-        if (dns_transmit(r, q) == 0)
+        if (dns_start_candidate(r, q) == 0)
             return;
     }
     dns_complete(r, q, NULL, KL_ERR_DNS);
 }
 
-static void dns_on_timer(void *ud) {
-    KlDnsReq *q = ud;
+static void dns_on_leg_timer(void *ud) {
+    KlDnsLeg *leg = ud;
+    KlDnsReq *q = leg->req;
     KlDnsResolver *r = q->r;
-    q->timer_id = -1;
+    leg->timer_id = -1;
 
-    if (q->literal) {                            /* deferred literal-IP success */
-        dns_complete(r, q, &q->result, 0);
-        return;
+    if (leg->tries_left > 0) {                      /* retransmit (rotates nameserver) */
+        if (dns_transmit_leg(r, q, leg) == 0)
+            return;
     }
-    if (q->tries_left > 0) {                      /* retransmit same family */
-        if (dns_transmit(r, q) != 0)
-            dns_complete(r, q, NULL, KL_ERR_DNS);
-        return;
-    }
-    dns_advance(r, q, 0);                          /* timeout: other family / next name */
+    dns_leg_settle(r, q, leg);                       /* exhausted → empty */
+}
+
+static void dns_on_rdelay(void *ud) {
+    KlDnsReq *q = ud;
+    q->rdelay_timer = -1;
+    /* Armed only after ≥1 address was collected, so finalize with what we have. */
+    dns_finalize(q->r, q);
+}
+
+static void dns_on_literal(void *ud) {
+    KlDnsReq *q = ud;
+    q->timer_id = -1;
+    dns_complete(q->r, q, &q->result, 0);            /* deferred literal / hosts success */
 }
 
 /* ── Receive ─────────────────────────────────────────────────────────── */
@@ -456,27 +570,31 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
         return;                                  /* not from a nameserver — ignore (anti-spoof) */
     const uint8_t *pkt = data;
     uint16_t id = (uint16_t)((pkt[0] << 8) | pkt[1]);
-    KlDnsReq *q = dns_find_by_id(r, id);
-    if (!q)
+    KlDnsLeg *leg = dns_find_leg(r, id);
+    if (!leg)
         return;                                  /* stale or unknown id */
+    KlDnsReq *q = leg->req;
 
-    KlResolveResult res;
-    memset(&res, 0, sizeof(res));
-    if (kl_dns_parse_response(pkt, len, id, q->qtype,
-                              q->question, q->question_len, &res) == 0) {
-        dns_set_port(&res, q->port);
-        dns_complete(r, q, &res, 0);
+    KlResolveResult scratch;
+    memset(&scratch, 0, sizeof(scratch));
+    if (kl_dns_parse_response(pkt, len, id, leg->qtype,
+                              leg->question, leg->question_len, &scratch) == 0) {
+        /* Collect this leg's addresses; arm the resolution delay on first data. */
+        leg->naddrs = scratch.naddrs;
+        for (int i = 0; i < scratch.naddrs; i++) {
+            leg->addrs[i] = scratch.addrs[i];
+            leg->addrlens[i] = scratch.addrlens[i];
+        }
+        dns_leg_settle(r, q, leg);
         return;
     }
-    /* Parse failed: only trust rcode / advance if the question is genuinely
-     * ours — otherwise ignore (spoofed or unrelated) and keep waiting. */
-    if (!dns_question_matches(pkt, len, q->question, q->question_len))
+    /* Parse failed: only act if the question is genuinely ours (else ignore the
+     * spoof and keep waiting). NXDOMAIN and no-record both settle the leg empty
+     * — the other family runs concurrently, so there's no in-family fallback. */
+    if (!dns_question_matches(pkt, len, leg->question, leg->question_len))
         return;
-    if ((pkt[3] & 0x0F) == 3) {                   /* NXDOMAIN — name doesn't exist */
-        dns_advance(r, q, 1);                      /* skip family, try next candidate */
-        return;
-    }
-    dns_advance(r, q, 0);                           /* no record of this family */
+    leg->naddrs = 0;
+    dns_leg_settle(r, q, leg);
 }
 
 /* ── Literal-IP shortcut ─────────────────────────────────────────────── */
@@ -711,6 +829,9 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
     q->ud = user_data;
     q->port = port;
     q->timer_id = -1;
+    q->rdelay_timer = -1;
+    q->legs[0].timer_id = -1;
+    q->legs[1].timer_id = -1;
     snprintf(q->host, sizeof(q->host), "%s", host);
 
     /* Link before scheduling so a synchronous timer/send callback can find it. */
@@ -723,7 +844,7 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
         dns_hosts_lookup(r->hosts_path, host, port, r->prefer_ipv6, &q->result) ||
         dns_is_localhost(host, port, r->prefer_ipv6, &q->result)) {
         q->literal = 1;
-        q->timer_id = kl_timer_add(r->ctx, 0, dns_on_timer, q);
+        q->timer_id = kl_timer_add(r->ctx, 0, dns_on_literal, q);
         if (q->timer_id < 0) {
             dns_unlink(r, q);
             kl_free(r->alloc, q, sizeof(*q));
@@ -732,7 +853,8 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
         return &q->base;
     }
 
-    /* Expand into candidate names (search domains + ndots), query the first. */
+    /* Expand into candidate names (search domains + ndots), query the first
+     * with both address families concurrently. */
     dns_build_candidates(r, q, host);
     if (q->ncand == 0) {
         dns_unlink(r, q);
@@ -741,11 +863,8 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
     }
     memcpy(q->host, q->cand[0], DNS_NAME_MAX);
     q->ci = 0;
-    q->qtype = r->prefer_ipv6 ? KL_DNS_TYPE_AAAA : KL_DNS_TYPE_A;
-    q->tries_left = r->attempts * r->nns;   /* cycle every nameserver per attempt */
-    if (dns_transmit(r, q) != 0) {
-        if (q->timer_id >= 0)
-            kl_timer_cancel(r->ctx, q->timer_id);
+    if (dns_start_candidate(r, q) != 0) {
+        dns_cancel_timers(r, q);
         dns_unlink(r, q);
         kl_free(r->alloc, q, sizeof(*q));
         return NULL;
@@ -762,10 +881,7 @@ static void dns_cancel(KlResolveReq *req) {
         q->cancelled = 1;
         return;
     }
-    if (q->timer_id >= 0) {
-        kl_timer_cancel(r->ctx, q->timer_id);
-        q->timer_id = -1;
-    }
+    dns_cancel_timers(r, q);
     dns_unlink(r, q);
     kl_free(r->alloc, q, sizeof(*q));
 }
@@ -777,8 +893,7 @@ static void dns_destroy(KlResolver *self) {
     KlDnsReq *q = r->inflight;
     while (q) {
         KlDnsReq *next = q->next;
-        if (q->timer_id >= 0)
-            kl_timer_cancel(r->ctx, q->timer_id);
+        dns_cancel_timers(r, q);
         kl_free(r->alloc, q, sizeof(*q));
         q = next;
     }
