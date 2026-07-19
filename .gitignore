@@ -19,11 +19,20 @@ tests/test_*
 # Benchmark binary
 bench/bench_server
 
-# Fuzz binaries and corpora artifacts
+# Fuzz binaries + instrumented-lib artifacts (corpus seeds ARE committed)
 fuzz/fuzz_parser
 fuzz/fuzz_multipart
+fuzz/fuzz_websocket
+fuzz/fuzz_response_parser
+fuzz/fuzz_dns
+fuzz/fuzz_proxy
+fuzz/fuzz_url
+fuzz/fuzz_decompress
 fuzz/crash-*
 fuzz/oom-*
+fuzz/timeout-*
+libkeel_fuzz.a
+*.fuzz.o
 
 # Generated API docs
 docs/api/

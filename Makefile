@@ -56,6 +56,7 @@ else
     endif
     CFLAGS += -D_DEFAULT_SOURCE
     VENDOR_CFLAGS += -D_DEFAULT_SOURCE
+    FUZZ_PLATFORM_CFLAGS += -D_DEFAULT_SOURCE
     # Linux linker hardening — RELRO + BIND_NOW + non-executable stack.
     # ld64 (macOS) rejects -z flags, so gate to Linux.
     LDFLAGS += -lpthread -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
@@ -108,7 +109,8 @@ TLS_MBEDTLS_OBJ ?=
 ifdef KEEL_COMPRESS
 ifeq ($(KEEL_COMPRESS),miniz)
   MINIZ_DIR ?= ../miniz
-  CFLAGS += -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO
+  MINIZ_CFLAGS = -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO
+  CFLAGS += $(MINIZ_CFLAGS)
   COMPRESS_MINIZ_SRC = src/compress_miniz.c src/decompress_miniz.c
   COMPRESS_MINIZ_OBJ = src/compress_miniz.o src/decompress_miniz.o
 endif
@@ -224,7 +226,8 @@ clean:
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
 	rm -f tests/test_file_io_iouring
 	rm -f $(BENCH_SERVER)
-	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns
+	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns fuzz/fuzz_proxy fuzz/fuzz_url fuzz/fuzz_decompress
+	rm -f $(FUZZ_LIB) src/*.fuzz.o parsers/*.fuzz.o vendor/llhttp/*.fuzz.o
 	find . -name '*.d' -delete
 	rm -f keel.pc
 	rm -f coverage.info
@@ -286,22 +289,55 @@ wx-guard:
 FUZZ_CFLAGS = -std=c11 -g -O1 -fsanitize=fuzzer,address,undefined \
               -fno-omit-frame-pointer -Iinclude -Ivendor/llhttp
 
-fuzz/fuzz_parser: fuzz/fuzz_parser.c $(LIB)
-	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+# The fuzzers link a SEPARATE instrumented build of the library: every library
+# object is compiled with SanitizerCoverage (-fsanitize=fuzzer-no-link) + ASan +
+# UBSan, so libFuzzer actually explores the parsers AND memory-checks them.
+# Linking the plain libkeel.a (uninstrumented) would fuzz only the harness — no
+# coverage feedback and, worse, no ASan on the library code. Objects use a
+# .fuzz.o suffix so they never collide with the normal build. `-w` because the
+# production build already enforces -Werror; here we only want instrumentation.
+FUZZ_INSTR_CFLAGS = -std=c11 -g -O1 -fsanitize=fuzzer-no-link,address,undefined \
+                    -fno-omit-frame-pointer -w -Iinclude -Ivendor/llhttp \
+                    $(FUZZ_PLATFORM_CFLAGS) $(MINIZ_CFLAGS)
+FUZZ_LIB = libkeel_fuzz.a
+FUZZ_LIB_OBJ = $(CORE_SRC:%.c=%.fuzz.o) $(LLHTTP_SRC:%.c=%.fuzz.o) \
+               $(COMPRESS_MINIZ_SRC:%.c=%.fuzz.o)
 
-fuzz/fuzz_multipart: fuzz/fuzz_multipart.c $(LIB)
-	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+%.fuzz.o: %.c
+	$(CC) $(FUZZ_INSTR_CFLAGS) -c -o $@ $<
 
-fuzz/fuzz_websocket: fuzz/fuzz_websocket.c $(LIB)
-	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+$(FUZZ_LIB): $(FUZZ_LIB_OBJ)
+	$(AR) rcs $@ $^
 
-fuzz/fuzz_response_parser: fuzz/fuzz_response_parser.c $(LIB)
-	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+fuzz/fuzz_parser: fuzz/fuzz_parser.c $(FUZZ_LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
 
-fuzz/fuzz_dns: fuzz/fuzz_dns.c $(LIB)
-	$(CC) $(FUZZ_CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+fuzz/fuzz_multipart: fuzz/fuzz_multipart.c $(FUZZ_LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
 
-fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns
+fuzz/fuzz_websocket: fuzz/fuzz_websocket.c $(FUZZ_LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
+
+fuzz/fuzz_response_parser: fuzz/fuzz_response_parser.c $(FUZZ_LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
+
+fuzz/fuzz_dns: fuzz/fuzz_dns.c $(FUZZ_LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
+
+fuzz/fuzz_proxy: fuzz/fuzz_proxy.c $(FUZZ_LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
+
+fuzz/fuzz_url: fuzz/fuzz_url.c $(FUZZ_LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
+
+# Decompression fuzzer needs the miniz backend compiled into FUZZ_LIB:
+#   make fuzz-decompress KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz CC=clang
+fuzz/fuzz_decompress: fuzz/fuzz_decompress.c $(FUZZ_LIB)
+	$(CC) $(FUZZ_CFLAGS) -o $@ $< $(FUZZ_LIB) $(LDFLAGS)
+fuzz-decompress: fuzz/fuzz_decompress
+
+fuzz: fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns \
+      fuzz/fuzz_proxy fuzz/fuzz_url
 
 # API documentation (requires Doxygen)
 docs:

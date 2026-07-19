@@ -455,7 +455,7 @@ Both targets should exit cleanly with no findings before merging.
 
 ## Fuzz Testing
 
-Five libFuzzer targets cover the primary attack surface (untrusted network input):
+Seven libFuzzer targets cover the untrusted-input attack surface:
 
 ```bash
 # Requires clang with libFuzzer support
@@ -468,6 +468,20 @@ Five libFuzzer targets cover the primary attack surface (untrusted network input
 ./fuzz/fuzz_websocket fuzz/corpus_websocket/             # WebSocket frame decoder
 ./fuzz/fuzz_response_parser fuzz/corpus_response_parser/ # client-side response parser
 ./fuzz/fuzz_dns fuzz/corpus_dns/                         # DNS response parser
+./fuzz/fuzz_proxy fuzz/corpus_proxy/                     # PROXY protocol v1/v2 + CIDR
+./fuzz/fuzz_url fuzz/corpus_url/                         # URL parser (redirect Location)
 ```
 
-Fuzz targets are built with ASan + UBSan enabled. Corpus files in `fuzz/corpus_*/` are seed inputs — crashes found by the fuzzer are saved to the corpus automatically.
+The fuzzers link a **separately-instrumented** build of the library
+(`libkeel_fuzz.a`, `.fuzz.o` objects): every library object is compiled with
+SanitizerCoverage (`-fsanitize=fuzzer-no-link`) + ASan + UBSan, so libFuzzer
+actually explores AND memory-checks the parsers. (Linking the plain `libkeel.a`
+would fuzz only the harness — no coverage, no ASan on library code.) Corpus files
+in `fuzz/corpus_*/` are seeds; crashes are saved automatically.
+
+An 8th target, `fuzz/fuzz_decompress` (gzip/deflate + decompression-bomb cap),
+needs the optional miniz backend and is built on demand:
+
+```bash
+make fuzz-decompress KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz CC=clang
+```

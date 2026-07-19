@@ -101,6 +101,18 @@ jobs:
         timeout-minutes: 3
         run: ./fuzz/fuzz_response_parser fuzz/corpus_response_parser/ -max_total_time=60
 
+      - name: Fuzz DNS response parser (60s)
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_dns fuzz/corpus_dns/ -max_total_time=60
+
+      - name: Fuzz PROXY protocol parser (60s)
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_proxy fuzz/corpus_proxy/ -max_total_time=60
+
+      - name: Fuzz URL parser (60s)
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_url fuzz/corpus_url/ -max_total_time=60
+
   analyze:
     name: Static Analysis
     runs-on: ubuntu-latest
