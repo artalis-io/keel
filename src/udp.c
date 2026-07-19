@@ -257,7 +257,8 @@ static void udp_flush_queue(KlUdp *udp) {
 static socklen_t udp_parse_local(KlUdp *udp, struct msghdr *msg) {
     for (struct cmsghdr *cm = CMSG_FIRSTHDR(msg); cm; cm = CMSG_NXTHDR(msg, cm)) {
 #if defined(IP_PKTINFO)
-        if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_PKTINFO) {
+        if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_PKTINFO &&
+            cm->cmsg_len >= CMSG_LEN(sizeof(struct in_pktinfo))) {
             struct in_pktinfo pi;
             memcpy(&pi, CMSG_DATA(cm), sizeof(pi));
             struct sockaddr_in *s4 = (struct sockaddr_in *)&udp->recv_local;
@@ -267,7 +268,8 @@ static socklen_t udp_parse_local(KlUdp *udp, struct msghdr *msg) {
             return sizeof(*s4);
         }
 #endif
-        if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_PKTINFO) {
+        if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_PKTINFO &&
+            cm->cmsg_len >= CMSG_LEN(sizeof(struct in6_pktinfo))) {
             struct in6_pktinfo pi;
             memcpy(&pi, CMSG_DATA(cm), sizeof(pi));
             struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&udp->recv_local;

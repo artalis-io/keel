@@ -213,6 +213,53 @@ UTEST(client, async_dns_with_resolver_error) {
     kl_event_ctx_free(&ev);
 }
 
+/* Regression (audit H1): a resolver that completes synchronously AND returns
+ * NULL (both contract-permitted). The client must NOT treat the NULL as a start
+ * failure and free itself out from under on_done — it must return a live handle
+ * that the caller frees. */
+static KlResolveReq mock_req_syncnull;
+static int          syncnull_done_fired;
+
+static KlResolveReq *mock_resolve_sync_null(KlResolver *self, KlEventCtx *ctx,
+                                            const char *host, int port,
+                                            KlResolveDoneFn done_fn, void *ud) {
+    (void)ctx; (void)host; (void)port;
+    mock_req_syncnull.resolver = self;
+    done_fn(&mock_req_syncnull, NULL, -1, ud);   /* synchronous completion */
+    return NULL;                                  /* ...and NULL return */
+}
+
+static void syncnull_done(KlClient *client, void *user_data) {
+    (void)client; (void)user_data;
+    syncnull_done_fired = 1;
+}
+
+UTEST(client, async_resolver_sync_complete_null_return) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev;
+    ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
+
+    KlResolver resolver = {
+        .resolve = mock_resolve_sync_null,
+        .cancel = mock_cancel,
+        .destroy = mock_resolver_destroy,
+    };
+    KlClientConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.resolver = &resolver;
+
+    syncnull_done_fired = 0;
+    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://example.com",
+                                    NULL, 0, NULL, 0, syncnull_done, NULL);
+
+    ASSERT_TRUE(syncnull_done_fired);      /* on_done fired synchronously */
+    ASSERT_TRUE(c != NULL);                /* handle kept alive (not freed under us) */
+    ASSERT_EQ(kl_client_error(c), -1);     /* completed with the resolver error */
+    kl_client_free(c);                     /* caller owns it — no double-free/UAF */
+
+    kl_event_ctx_free(&ev);
+}
+
 UTEST(client, sync_dns_fallback) {
     /* NULL resolver should use sync getaddrinfo — just verify it doesn't crash */
     KlAllocator a = kl_allocator_default();

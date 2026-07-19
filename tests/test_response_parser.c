@@ -237,4 +237,35 @@ UTEST(response_parser, reset_and_reparse) {
     p->destroy(p);
 }
 
+/* Regression (audit L2): an empty-valued header must be preserved as its own
+ * header, not merged into the following header's name. */
+UTEST(response_parser, empty_valued_header) {
+    KlAllocator a = kl_allocator_default();
+    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+
+    const char *raw = "HTTP/1.1 200 OK\r\n"
+                      "X-Empty:\r\n"
+                      "X-Next: v\r\n"
+                      "Content-Length: 0\r\n"
+                      "\r\n";
+    size_t len = strlen(raw);
+
+    KlClientResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    size_t consumed = 0;
+
+    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_PARSE_OK);
+    ASSERT_EQ(resp.num_headers, 3);
+    ASSERT_STREQ(resp.headers[0].name, "X-Empty");
+    ASSERT_STREQ(resp.headers[0].value, "");      /* preserved, not merged */
+    ASSERT_STREQ(resp.headers[1].name, "X-Next");
+    ASSERT_STREQ(resp.headers[1].value, "v");
+    ASSERT_STREQ(resp.headers[2].name, "Content-Length");
+    ASSERT_STREQ(resp.headers[2].value, "0");
+
+    free_client_response(&resp);
+    p->destroy(p);
+}
+
 UTEST_MAIN();

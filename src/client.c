@@ -2417,9 +2417,18 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         c->resolver = resolver;
         c->owns_resolver = res_owned;
         c->state = KL_HCLIENT_RESOLVING;
-        c->resolve_req = resolver->resolve(resolver, ev_ctx,
-                                            resolve_host, resolve_port,
-                                            dns_resolved, c);
+        KlResolveReq *rq = resolver->resolve(resolver, ev_ctx,
+                                             resolve_host, resolve_port,
+                                             dns_resolved, c);
+        /* The resolver contract permits synchronous completion: dns_resolved
+         * may have already run inside resolve() — firing on_done (DONE) or
+         * advancing the connect (CONNECTING/…) — and taken ownership of c. In
+         * that case the caller owns c (and frees it via kl_client_free); a NULL
+         * return is NOT a start failure and must not free c out from under
+         * on_done. Only when we are still RESOLVING did resolve() truly defer. */
+        if (c->state != KL_HCLIENT_RESOLVING)
+            return c;                 /* rq discarded; resolve_req cleared by dns_resolved */
+        c->resolve_req = rq;
         if (!c->resolve_req) {
             if (res_owned)
                 resolver->destroy(resolver);

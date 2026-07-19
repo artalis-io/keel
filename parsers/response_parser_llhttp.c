@@ -64,6 +64,8 @@ static int accum_append(KlAllocator *alloc,
                          char **buf, size_t *len, size_t *cap,
                          const char *data, size_t data_len)
 {
+    if (data_len == 0)
+        return 0;   /* no-op; also avoids NULL+0 when *buf is unallocated */
     if (data_len > SIZE_MAX - *len)
         return -1;
     size_t needed = *len + data_len;
@@ -163,11 +165,9 @@ static int resp_on_header_field(llhttp_t *parser, const char *at, size_t len)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
 
-    if (p->hdr_value_len > 0) {
-        if (flush_header(p) != 0)
-            return -1;
-    }
-
+    /* A completed header (name+value) is flushed at on_header_value_complete,
+     * so the accumulators are empty here even after an empty-valued header —
+     * no heuristic flush needed (which would merge empty-valued headers). */
     if (p->hdr_name_len + len > KL_MAX_HEADER_SIZE)
         return -1;
 
@@ -184,6 +184,14 @@ static int resp_on_header_value(llhttp_t *parser, const char *at, size_t len)
 
     return accum_append(p->alloc, &p->hdr_value, &p->hdr_value_len,
                          &p->hdr_value_cap, at, len);
+}
+
+static int resp_on_header_value_complete(llhttp_t *parser)
+{
+    RespLlhttpParser *p = (RespLlhttpParser *)parser->data;
+    /* llhttp signals the end of each header's value here — including empty
+     * values — so this is the correct boundary to commit name+value. */
+    return flush_header(p);
 }
 
 static int resp_on_headers_complete(llhttp_t *parser)
@@ -415,9 +423,10 @@ static KlResponseParser *create_parser(size_t max_response_size,
     /* Configure llhttp callbacks */
     llhttp_settings_init(&p->settings);
     p->settings.on_status           = resp_on_status;
-    p->settings.on_header_field     = resp_on_header_field;
-    p->settings.on_header_value     = resp_on_header_value;
-    p->settings.on_headers_complete = resp_on_headers_complete;
+    p->settings.on_header_field          = resp_on_header_field;
+    p->settings.on_header_value          = resp_on_header_value;
+    p->settings.on_header_value_complete = resp_on_header_value_complete;
+    p->settings.on_headers_complete      = resp_on_headers_complete;
     p->settings.on_body             = resp_on_body;
     p->settings.on_message_complete = resp_on_message_complete;
 
