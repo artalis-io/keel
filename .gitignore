@@ -4,13 +4,10 @@
 *.so
 *.dylib
 
-# Example binaries
-examples/hello
-examples/rest_api
-examples/streaming_json
-examples/static_files
-examples/stream_body
-examples/multipart
+# Example binaries (extensionless; sources are .c, docs are .md)
+examples/*
+!examples/*.c
+!examples/*.md
 
 # Test binaries
 tests/test_*

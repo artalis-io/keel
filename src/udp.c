@@ -21,6 +21,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include "socket.h"
+
 /* Some platforms spell the IPv6 group ops the "membership" way. */
 #if !defined(IPV6_JOIN_GROUP) && defined(IPV6_ADD_MEMBERSHIP)
 #define IPV6_JOIN_GROUP  IPV6_ADD_MEMBERSHIP
@@ -203,20 +205,6 @@ static size_t udp_build_control(unsigned char *buf, size_t bufsz,
         }
     }
     return used;
-}
-
-/* ── Socket flag helpers (portable; macOS lacks SOCK_CLOEXEC on socket()) ── */
-
-static int udp_set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-static void udp_set_cloexec(int fd) {
-    int flags = fcntl(fd, F_GETFD, 0);
-    if (flags >= 0)
-        (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
 /* ── Forward decls ────────────────────────────────────────────────────── */
@@ -886,8 +874,8 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     }
     udp->family = family;
     udp->recv_tos_val = -1;
-    udp_set_cloexec(udp->fd);
-    if (udp_set_nonblocking(udp->fd) < 0) {
+    kl_sock_set_cloexec(udp->fd);
+    if (kl_sock_set_nonblocking(udp->fd) < 0) {
         udp->last_error = KL_ERR_SOCKET;
         goto fail;
     }

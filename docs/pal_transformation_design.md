@@ -412,9 +412,14 @@ cppcheck 2.13. Benchmark before → after (M1 Max / kqueue, req/s): /hello
 101,159 → 108,299; /users/42 98,777 → 102,368; /mw/hello 101,675 → 105,544;
 POST /echo 97,158 → 104,978 — within run-to-run noise (inline hot path).
 
-**Consciously deferred** (not in this pass): `udp.c`/`udp_server.c` (its own
-`set_nonblocking` + the multicast/GSO/TOS setsockopt surface — migrate the clean
-1:1 bits in a Phase 1b); `tls_mbedtls.c` (opt-in backend, has its own
+**Phase 1b (2026-07-19):** `udp.c`'s own `udp_set_nonblocking` /
+`udp_set_cloexec` (exact duplicates of the seam helpers) removed and pointed at
+`kl_sock_set_nonblocking` / `kl_sock_set_cloexec`. The UDP `sendmsg`/`recvmsg`/
+`recvmmsg` + multicast/GSO/TOS `setsockopt` surface stays specialized (not a
+`kl_sock_*` concern). Also folded in: a `.gitignore` fix so all extensionless
+example binaries are ignored (`examples/*` + `!examples/*.c` + `!examples/*.md`).
+
+**Still consciously deferred:** `tls_mbedtls.c` (opt-in backend, has its own
 MSG_NOSIGNAL write — a TLS-transport concern, not the socket seam);
 `thread_pool.c` pipe nonblocking (a pipe, not a socket); `kl_sock_create` /
 `kl_sock_connect_nonblocking` combined helpers (call sites' cleanup differs
