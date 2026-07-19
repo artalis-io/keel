@@ -535,13 +535,14 @@ static int udp_parse_tos(struct msghdr *msg) {
             is_tos = 1;
 #endif
         if (is_tos) {
-            size_t dl = cm->cmsg_len - CMSG_LEN(0);
-            if (dl >= sizeof(int)) {
+            /* Payload is an int or a single byte per platform; compare cmsg_len
+             * additively (never subtract — avoids size_t underflow on a runt). */
+            if (cm->cmsg_len >= CMSG_LEN(sizeof(int))) {
                 int v;
                 memcpy(&v, CMSG_DATA(cm), sizeof(v));
                 return v & 0xff;
             }
-            if (dl >= 1)
+            if (cm->cmsg_len >= CMSG_LEN(1))
                 return CMSG_DATA(cm)[0];
         }
     }

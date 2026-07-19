@@ -87,10 +87,11 @@ Address sets larger than 8 are truncated to the first 8 (preferred-first).
 
 ### Parser
 
-Add `kl_dns_parse_all(pkt, len, expect_id, want_qtype, expect_q, expect_q_len,
-out_addrs[], out_lens[], max) -> count` — collects *all* records of `want_qtype`
-(bounds-safe, fuzzed alongside `kl_dns_parse_response`, which stays as the
-single-address form). The new list path gets its own `fuzz_dns` coverage.
+*Planned:* a separate `kl_dns_parse_all(...)` collecting *all* records of a type.
+**As implemented:** the list collection was folded directly into
+`kl_dns_parse_response` (it fills `out->addrs[]` up to `KL_RESOLVE_MAX_ADDRS`), so
+no separate function was added — `kl_dns_parse_response` is the single fuzzed
+(`fuzz_dns`) bounds-safe parser.
 
 ### Phase 2a — struct + list, single-family collection  *(DONE 2026-07-19)*
 
