@@ -349,10 +349,11 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
 }
 
 #if defined(__linux__)
-/* Dequeue+free the first `k` queued datagrams (already sent or dropped). */
-static void udp_dequeue_front(KlUdp *udp, KlUdpDatagram **nodes, int k) {
-    for (int i = 0; i < k; i++) {
-        KlUdpDatagram *node = nodes[i];
+/* Dequeue+free the first `k` queued datagrams from the front (sent or dropped).
+ * Reads only udp->q_head and self-bounds on it — never over-runs the queue. */
+static void udp_drop_front(KlUdp *udp, int k) {
+    for (int i = 0; i < k && udp->q_head; i++) {
+        KlUdpDatagram *node = udp->q_head;
         udp->q_head = node->next;
         if (!udp->q_head) udp->q_tail = NULL;
         udp->q_bytes -= node->len;
@@ -360,17 +361,17 @@ static void udp_dequeue_front(KlUdp *udp, KlUdpDatagram **nodes, int k) {
     }
 }
 
-/* Drain the send queue in sendmmsg batches. */
+/* Drain the send queue in sendmmsg batches. The batch mirrors the queue front
+ * in order, so after N are sent we simply drop the front N — no need to retain
+ * the node pointers. */
 static void udp_flush_queue_batched(KlUdp *udp) {
     UdpTxBatch *b = udp->tx_batch;
     int had_data = (udp->q_head != NULL);
 
     while (udp->q_head) {
-        KlUdpDatagram *nodes[UDP_MMSG_MAX];
         int cnt = 0;
         for (KlUdpDatagram *node = udp->q_head; node && cnt < b->n;
              node = node->next, cnt++) {
-            nodes[cnt] = node;
             b->iov[cnt].iov_base = node->data;
             b->iov[cnt].iov_len  = node->len;
             struct msghdr *m = &b->msgs[cnt].msg_hdr;
@@ -389,6 +390,8 @@ static void udp_flush_queue_batched(KlUdp *udp) {
             }
             b->msgs[cnt].msg_len = 0;
         }
+        if (cnt == 0)
+            break;                   /* nothing to send */
 
         int sent;
         do { sent = sendmmsg(udp->fd, b->msgs, (unsigned)cnt, 0); }
@@ -400,12 +403,10 @@ static void udp_flush_queue_batched(KlUdp *udp) {
             /* Hard error on the head datagram: drop it and continue. */
             udp->last_error = KL_ERR_IO;
             udp->dropped++;
-            udp_dequeue_front(udp, nodes, 1);
+            udp_drop_front(udp, 1);
             continue;
         }
-        if (sent > cnt) sent = cnt;  /* sendmmsg never exceeds vlen; guards the
-                                      * dequeue against reading past nodes[cnt) */
-        udp_dequeue_front(udp, nodes, sent);   /* 1 <= sent <= cnt here */
+        udp_drop_front(udp, sent);   /* drop the front `sent` we just sent */
         if (sent < cnt)
             break;                   /* next message would block — retry later */
     }
