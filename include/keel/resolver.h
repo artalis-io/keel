@@ -18,13 +18,22 @@ typedef struct KlEventCtx KlEventCtx;
 typedef struct KlResolver KlResolver;
 typedef struct KlResolveReq KlResolveReq;
 
-/** @brief Result passed to the completion callback. */
+/** @brief Maximum addresses returned per resolution. */
+#define KL_RESOLVE_MAX_ADDRS 8
+
+/**
+ * @brief Result passed to the completion callback.
+ *
+ * Carries an ordered address list (preferred first). Each address's family is
+ * its `ss_family`; `addrs[0]` is the primary/preferred address. `ai_socktype`
+ * and `ai_protocol` are shared across all entries.
+ */
 typedef struct {
-    struct sockaddr_storage addr;  /**< Resolved address */
-    socklen_t addrlen;             /**< Address length */
-    int ai_family;                 /**< Address family (AF_INET/AF_INET6) */
-    int ai_socktype;               /**< Socket type */
-    int ai_protocol;               /**< Protocol */
+    struct sockaddr_storage addrs[KL_RESOLVE_MAX_ADDRS]; /**< Resolved addresses, preferred first */
+    socklen_t addrlens[KL_RESOLVE_MAX_ADDRS];            /**< Length of each address */
+    int naddrs;                                          /**< Number of addresses (>= 1 on success) */
+    int ai_socktype;                                     /**< Socket type (shared) */
+    int ai_protocol;                                     /**< Protocol (shared) */
 } KlResolveResult;
 
 /** @brief Completion callback — called on the event loop thread. */

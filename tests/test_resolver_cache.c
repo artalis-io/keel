@@ -24,12 +24,12 @@ static KlResolveReq mock_req_storage;
 static KlResolveResult make_result(void) {
     KlResolveResult r;
     memset(&r, 0, sizeof(r));
-    struct sockaddr_in *sin = (struct sockaddr_in *)&r.addr;
+    struct sockaddr_in *sin = (struct sockaddr_in *)&r.addrs[0];
     sin->sin_family = AF_INET;
     sin->sin_port = htons(80);
     sin->sin_addr.s_addr = htonl(0x7f000001); /* 127.0.0.1 */
-    r.addrlen = sizeof(struct sockaddr_in);
-    r.ai_family = AF_INET;
+    r.addrlens[0] = sizeof(struct sockaddr_in);
+    r.naddrs = 1;
     r.ai_socktype = SOCK_STREAM;
     r.ai_protocol = 0;
     return r;

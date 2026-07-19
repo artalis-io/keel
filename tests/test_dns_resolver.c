@@ -27,9 +27,9 @@ UTEST(dns_parse, valid_a_record) {
     memset(&r, 0, sizeof(r));
     ASSERT_EQ(0, kl_dns_parse_response(A_RESP, sizeof(A_RESP), 0x1234,
                                        KL_DNS_TYPE_A, NULL, 0, &r));
-    ASSERT_EQ(AF_INET, r.ai_family);
+    ASSERT_EQ(AF_INET, r.addrs[0].ss_family);
     char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addr)->sin_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addrs[0])->sin_addr, ip, sizeof(ip));
     ASSERT_STREQ("1.2.3.4", ip);
 }
 
@@ -234,11 +234,12 @@ UTEST(dns, resolve_a) {
 
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(0, g_err);
-    ASSERT_EQ(AF_INET, g_res.ai_family);
+    ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
     char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addr)->sin_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addrs[0])->sin_addr, ip, sizeof(ip));
     ASSERT_STREQ("10.1.2.3", ip);
-    ASSERT_EQ(8080, ntohs(((struct sockaddr_in *)&g_res.addr)->sin_port));
+    ASSERT_EQ(8080, ntohs(((struct sockaddr_in *)&g_res.addrs[0])->sin_port));
+    ASSERT_EQ(1, g_res.naddrs);            /* resolver propagates the address list */
 
     r->destroy(r);
     kl_udp_server_free(&ns);
@@ -261,7 +262,7 @@ UTEST(dns, fallback_a_to_aaaa) {
 
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(0, g_err);
-    ASSERT_EQ(AF_INET6, g_res.ai_family);
+    ASSERT_EQ(AF_INET6, g_res.addrs[0].ss_family);
     ASSERT_TRUE(g_queries >= 2);        /* A then AAAA */
 
     r->destroy(r);
@@ -325,11 +326,11 @@ UTEST(dns, literal_ip_shortcut) {
 
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(0, g_err);
-    ASSERT_EQ(AF_INET, g_res.ai_family);
+    ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
     char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addr)->sin_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addrs[0])->sin_addr, ip, sizeof(ip));
     ASSERT_STREQ("192.0.2.10", ip);
-    ASSERT_EQ(1234, ntohs(((struct sockaddr_in *)&g_res.addr)->sin_port));
+    ASSERT_EQ(1234, ntohs(((struct sockaddr_in *)&g_res.addrs[0])->sin_port));
     ASSERT_EQ(0, g_queries);            /* no packet sent */
 
     r->destroy(r);
@@ -352,11 +353,11 @@ UTEST(dns, localhost_shortcut) {
 
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(0, g_err);
-    ASSERT_EQ(AF_INET, g_res.ai_family);
+    ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
     char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addr)->sin_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addrs[0])->sin_addr, ip, sizeof(ip));
     ASSERT_STREQ("127.0.0.1", ip);
-    ASSERT_EQ(8080, ntohs(((struct sockaddr_in *)&g_res.addr)->sin_port));
+    ASSERT_EQ(8080, ntohs(((struct sockaddr_in *)&g_res.addrs[0])->sin_port));
     ASSERT_EQ(0, g_queries);            /* no packet sent */
 
     r->destroy(r);
@@ -560,11 +561,11 @@ UTEST(dns, hosts_file_lookup) {
 
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(0, g_err);
-    ASSERT_EQ(AF_INET, g_res.ai_family);
+    ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
     char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addr)->sin_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addrs[0])->sin_addr, ip, sizeof(ip));
     ASSERT_STREQ("10.9.8.7", ip);
-    ASSERT_EQ(80, ntohs(((struct sockaddr_in *)&g_res.addr)->sin_port));
+    ASSERT_EQ(80, ntohs(((struct sockaddr_in *)&g_res.addrs[0])->sin_port));
     ASSERT_EQ(0, g_queries);            /* no packet sent */
 
     r->destroy(r);
@@ -589,9 +590,9 @@ UTEST(dns, hosts_prefer_ipv6) {
     pump(&ctx, &g_done, 50);
 
     ASSERT_EQ(1, g_done);
-    ASSERT_EQ(AF_INET6, g_res.ai_family);   /* prefer_ipv6 picks the AAAA line */
+    ASSERT_EQ(AF_INET6, g_res.addrs[0].ss_family);   /* prefer_ipv6 picks the AAAA line */
     char ip[INET6_ADDRSTRLEN];
-    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&g_res.addr)->sin6_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&g_res.addrs[0])->sin6_addr, ip, sizeof(ip));
     ASSERT_STREQ("2001:db8::1", ip);
 
     r->destroy(r);
@@ -678,7 +679,7 @@ UTEST(dns, nameserver_failover) {
 
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(0, g_err);                 /* resolved via the second nameserver */
-    ASSERT_EQ(AF_INET, g_res.ai_family);
+    ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
     ASSERT_TRUE(g_silent_hits >= 1);     /* the first (silent) nameserver was tried */
 
     r->destroy(r);
@@ -846,17 +847,22 @@ UTEST(dns_parse, real_cname_chain) {
     ASSERT_EQ(0, kl_dns_parse_response(RESP_CNAME, sizeof(RESP_CNAME), 0xABCD,
                                        KL_DNS_TYPE_A, NULL, 0, &r));
     char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addr)->sin_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addrs[0])->sin_addr, ip, sizeof(ip));
     ASSERT_STREQ("5.6.7.8", ip);           /* A after the CNAME is found */
 }
 
-UTEST(dns_parse, real_multi_a_returns_first) {
+UTEST(dns_parse, real_multi_a_returns_all) {
     KlResolveResult r;
+    memset(&r, 0, sizeof(r));
     ASSERT_EQ(0, kl_dns_parse_response(RESP_MULTI_A, sizeof(RESP_MULTI_A), 0x1111,
                                        KL_DNS_TYPE_A, NULL, 0, &r));
-    char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addr)->sin_addr, ip, sizeof(ip));
-    ASSERT_STREQ("10.0.0.1", ip);
+    ASSERT_EQ(3, r.naddrs);                 /* all three A records collected */
+    const char *want[] = { "10.0.0.1", "10.0.0.2", "10.0.0.3" };
+    for (int i = 0; i < 3; i++) {
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addrs[i])->sin_addr, ip, sizeof(ip));
+        ASSERT_STREQ(want[i], ip);
+    }
 }
 
 UTEST(dns_parse, real_edns_opt_ignored) {
@@ -864,7 +870,7 @@ UTEST(dns_parse, real_edns_opt_ignored) {
     ASSERT_EQ(0, kl_dns_parse_response(RESP_EDNS_OPT, sizeof(RESP_EDNS_OPT), 0x2222,
                                        KL_DNS_TYPE_A, NULL, 0, &r));
     char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addr)->sin_addr, ip, sizeof(ip));
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&r.addrs[0])->sin_addr, ip, sizeof(ip));
     ASSERT_STREQ("9.9.9.9", ip);           /* OPT in additional doesn't derail the walk */
 }
 
@@ -898,10 +904,10 @@ UTEST(dns, e2e_vs_getaddrinfo) {
 
         ASSERT_EQ(1, g_done);
         ASSERT_EQ(0, g_err);
-        ASSERT_EQ(AF_INET, g_res.ai_family);
+        ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
 
         /* Our single answer must be a member of getaddrinfo's address set. */
-        uint32_t ours = ((struct sockaddr_in *)&g_res.addr)->sin_addr.s_addr;
+        uint32_t ours = ((struct sockaddr_in *)&g_res.addrs[0])->sin_addr.s_addr;
         int found = 0;
         for (struct addrinfo *a = gai; a; a = a->ai_next)
             if (a->ai_family == AF_INET &&

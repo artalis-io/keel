@@ -1380,14 +1380,16 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
     (void)req;
     c->resolve_req = NULL;
 
-    if (error || !result) {
+    if (error || !result || result->naddrs < 1) {
         c->error = KL_ERR_DNS;
         async_complete_error(c);
         return;
     }
 
-    if (start_connect(c, (const struct sockaddr *)&result->addr,
-                       result->addrlen, result->ai_family,
+    /* Use the preferred address (addrs[0]); Happy Eyeballs over the full list
+     * lands in a later phase. */
+    if (start_connect(c, (const struct sockaddr *)&result->addrs[0],
+                       result->addrlens[0], result->addrs[0].ss_family,
                        result->ai_socktype, result->ai_protocol) < 0) {
         c->error = KL_ERR_CONNECT;
         async_complete_error(c);

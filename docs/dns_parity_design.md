@@ -50,26 +50,86 @@ nested cursor. Careful ordering so one lookup issues a bounded number of queries
 
 ## Phase 2 — multiple-address return  *(vtable change)*
 
-`KlResolveResult` gains an address **list** while keeping `addr`/`addrlen`/
-`ai_family` as the primary (first) entry for source compatibility:
+Decisions (2026-07-19): **dual-family** — every resolve queries A *and* AAAA and
+returns a merged, RFC 8305 §4-interleaved list; completion uses a **Resolution
+Delay** cap (RFC 8305 §3) so a slow/absent family never stalls the result.
+
+Split into two commits: **2a** (struct + list-parser + single-family collection)
+and **2b** (dual-family concurrency + resolution delay + interleave).
+
+### Struct (`KlResolveResult`) — clean list (no back-compat constraint)
 
 ```c
 #define KL_RESOLVE_MAX_ADDRS 8
 typedef struct {
-    struct sockaddr_storage addr;      /* = addrs[0]; existing consumers keep working */
-    socklen_t               addrlen;
-    int ai_family, ai_socktype, ai_protocol;
-    struct sockaddr_storage addrs[KL_RESOLVE_MAX_ADDRS];  /* full list */
+    struct sockaddr_storage addrs[KL_RESOLVE_MAX_ADDRS]; /* preferred-first, family-interleaved */
     socklen_t               addrlens[KL_RESOLVE_MAX_ADDRS];
     int                     naddrs;
+    int                     ai_socktype;   /* shared: SOCK_STREAM */
+    int                     ai_protocol;   /* shared: 0 */
 } KlResolveResult;
 ```
 
-- The resolver collects *all* A and AAAA records from the response(s) and
-  interleaves families (AAAA-first when `prefer_ipv6`, else A-first), RFC 8305
-  §4 ordering.
-- `resolver_cache` caches the whole list. The client keeps using `addr` (first)
-  until Phase 3. Existing single-address consumers are unaffected.
+The old single `addr`/`addrlen`/`ai_family` triple is **dropped**, not kept as
+`addrs[0]`: a lone `ai_family` can't honestly describe a mixed v4/v6 list, so a
+per-address family (`addrs[i].ss_family`) is both cleaner and more correct. The
+resolver is unreleased, so there's no compatibility cost — the consumers move to
+`addrs[0]` in 2a:
+
+- `client.c` `dns_resolved`: `result->addr` → `result->addrs[0]`,
+  `result->ai_family` → `result->addrs[0].ss_family`, etc. (small edit; the
+  client uses only `addrs[0]` until Phase 3).
+- `resolver_cache.c`: still copies the struct by value — no logic change.
+- `test_dns_resolver.c` assertions: `g_res.addr`/`g_res.ai_family` →
+  `g_res.addrs[0]`/`g_res.addrs[0].ss_family` (mechanical, ~15 sites).
+
+Address sets larger than 8 are truncated to the first 8 (preferred-first).
+
+### Parser
+
+Add `kl_dns_parse_all(pkt, len, expect_id, want_qtype, expect_q, expect_q_len,
+out_addrs[], out_lens[], max) -> count` — collects *all* records of `want_qtype`
+(bounds-safe, fuzzed alongside `kl_dns_parse_response`, which stays as the
+single-address form). The new list path gets its own `fuzz_dns` coverage.
+
+### Phase 2a — struct + list, single-family collection  *(DONE 2026-07-19)*
+
+- Introduce the struct + `kl_dns_parse_all`.
+- On a successful response, collect *all* records of the answering family into
+  the list (keep the existing A→AAAA fallback — one family per resolve for now).
+- `resolver_cache` and the client are unchanged (client still uses `addr[0]`).
+- Tests: a 3-A-record response fills `naddrs == 3` in order.
+
+### Phase 2b — dual-family concurrency + resolution delay
+
+The request gains **two legs** (A and AAAA), each with its own transaction id,
+retry/nameserver-rotation state, timeout timer, question bytes, and `done` flag:
+
+```c
+typedef struct { uint16_t id; int tries_left, ns_idx; int64_t timer_id;
+                 int done; uint8_t question[...]; size_t question_len; } KlDnsLeg;
+```
+
+- **resolve / next candidate**: fire *both* legs concurrently.
+- **recv**: match the response id to a leg; collect that leg's records
+  (inserted family-interleaved into `result`); mark the leg `done`; on the first
+  addresses, arm the Resolution-Delay timer (~50 ms).
+- **complete** when: both legs are `done`, **or** the resolution-delay fires with
+  ≥1 address collected. Merge is already interleaved (§4: preferred family
+  first, then alternate).
+- **both legs empty** (NXDOMAIN / no-record / timeout on both) → advance to the
+  next candidate (fire both legs again); fail when candidates exhaust.
+- **cancel / destroy**: cancel both leg timers + the resolution-delay timer.
+
+State machine after 2b: candidate → {A-leg, AAAA-leg concurrent} → per-leg
+nameserver rotation × attempts. The single-active-query model of 1b becomes a
+two-leg model; `dns_find_by_id` matches a leg within a request.
+
+### Effort
+
+2a ≈ 1 day (struct + parser + collection + tests); 2b ≈ 2 days (two-leg state
+machine + resolution delay + interleave + tests). Each ships CI-green, gcc-14
+verified before handoff.
 
 ## Phase 3 — Happy Eyeballs (RFC 8305)  *(client connect racing)*
 
