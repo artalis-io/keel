@@ -50,6 +50,20 @@ typedef void (*KlUdpRecvFn)(KlUdp *udp, const void *data, size_t len,
 typedef void (*KlUdpDrainFn)(KlUdp *udp, void *user_data);
 
 /**
+ * @brief Called with a whole GRO-coalesced receive buffer (opt-in).
+ *
+ * When registered via kl_udp_recv_segments (and recv_gro is enabled), a
+ * kernel-coalesced buffer is delivered here in one call: @p data holds K
+ * back-to-back datagrams, each @p segment_size bytes except possibly the last.
+ * The consumer splits it. Non-coalesced datagrams still go to KlUdpRecvFn.
+ */
+typedef void (*KlUdpRecvSegmentsFn)(KlUdp *udp, const void *data, size_t len,
+                                    size_t segment_size,
+                                    const struct sockaddr *src, socklen_t src_len,
+                                    const struct sockaddr *local, socklen_t local_len,
+                                    void *user_data);
+
+/**
  * @brief UDP socket configuration.
  */
 typedef struct {
@@ -65,6 +79,7 @@ typedef struct {
     int          so_rcvbuf;      /**< SO_RCVBUF kernel receive buffer in bytes (0 = OS default). Bounds kernel-side drops under load. */
     int          so_sndbuf;      /**< SO_SNDBUF kernel send buffer in bytes (0 = OS default). */
     int          mmsg_batch;     /**< recvmmsg/sendmmsg batch size (Linux); 0 = default (16), 1 = per-datagram, capped at 64. Higher amortizes syscalls at the cost of RX memory (batch × recv_buf_size). */
+    int          recv_gro;       /**< Enable UDP_GRO receive coalescing (Linux ≥5.0; opt-in). Coalesced buffers are split per-segment into on_recv unless a segments callback is set (kl_udp_recv_segments). */
     int          broadcast;      /**< SO_BROADCAST — allow sending to broadcast addresses (IPv4). */
     int          multicast_ttl;  /**< IP_MULTICAST_TTL / IPV6_MULTICAST_HOPS for multicast sends; 0 = kernel default (1 = link-local). */
     int          multicast_disable_loop; /**< 1 = disable local loopback of sent multicast (default: enabled). */
@@ -85,6 +100,10 @@ struct KlUdp {
     /* Receive */
     KlUdpRecvFn    on_recv;
     void          *recv_ud;
+    KlUdpRecvSegmentsFn on_recv_segments; /**< Coalesced-GRO callback, or NULL. */
+    void          *recv_seg_ud;
+    int            recv_gro;         /**< 1 = UDP_GRO enabled on this socket. */
+    int            gso_disabled;     /**< 1 = UDP GSO ruled unsupported; use fallback. */
     int            recv_active;
     unsigned char *recv_buf;
     size_t         recv_buf_size;
@@ -184,6 +203,32 @@ int kl_udp_multicast_join(KlUdp *udp, const char *group, unsigned iface_index);
 
 /** @brief Leave a multicast group previously joined (symmetric with join). */
 int kl_udp_multicast_leave(KlUdp *udp, const char *group, unsigned iface_index);
+
+/**
+ * @brief Send @p buf as a run of UDP datagrams of @p segment_size bytes each
+ *        (the last may be shorter), using UDP GSO where available.
+ *
+ * On Linux this is one sendmsg with a UDP_SEGMENT control message (the kernel
+ * splits it on the wire); elsewhere — or if the kernel rejects GSO, or the
+ * socket is under backpressure — it sends each segment individually through the
+ * normal send/queue path. The on-wire result is identical; only the syscall
+ * count differs.
+ *
+ * @param segment_size in (0, total_len]; @p total_len must be > 0 and ≤ 65507.
+ * @return 0 if all segments were sent or queued, -1 on invalid args / over-cap.
+ */
+int kl_udp_send_gso(KlUdp *udp, const void *buf, size_t total_len,
+                    size_t segment_size, const struct sockaddr *dest,
+                    socklen_t dest_len);
+
+/**
+ * @brief Register a coalesced-GRO receive callback (NULL to clear).
+ *
+ * When set and recv_gro is enabled, kernel-coalesced buffers are delivered whole
+ * to @p cb (with the segment size); otherwise they are split per-segment into
+ * the KlUdpRecvFn handler.
+ */
+void kl_udp_recv_segments(KlUdp *udp, KlUdpRecvSegmentsFn cb, void *user_data);
 
 /** @brief Register the send-queue-drained callback (NULL to clear). */
 void kl_udp_on_drain(KlUdp *udp, KlUdpDrainFn cb, void *user_data);

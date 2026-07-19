@@ -27,6 +27,21 @@
 #define IPV6_LEAVE_GROUP IPV6_DROP_MEMBERSHIP
 #endif
 
+/* UDP GSO/GRO (Linux). The macros live in <linux/udp.h>, which conflicts with
+ * <netinet/udp.h> on glibc; define them ourselves when absent to avoid that. */
+#if defined(__linux__)
+#include <netinet/udp.h>
+#ifndef UDP_SEGMENT
+#define UDP_SEGMENT 103
+#endif
+#ifndef UDP_GRO
+#define UDP_GRO 104
+#endif
+#endif
+
+/* RX control buffer: a pktinfo cmsg (local address) plus a UDP_GRO cmsg. */
+#define UDP_RX_CMSG_SPACE (CMSG_SPACE(sizeof(struct in6_pktinfo)) + CMSG_SPACE(sizeof(int)))
+
 /* Whole-datagram FIFO node: header + inline payload (single allocation). */
 struct KlUdpDatagram {
     struct KlUdpDatagram   *next;
@@ -83,7 +98,7 @@ static UdpRxBatch *udp_rx_batch_new(KlAllocator *a, int n, size_t bufsz) {
     memset(b, 0, sizeof(*b));
     b->n = n;
     b->bufsz = bufsz;
-    b->ctrl_sz = CMSG_SPACE(sizeof(struct in6_pktinfo));
+    b->ctrl_sz = UDP_RX_CMSG_SPACE;   /* pktinfo + UDP_GRO */
     b->msgs = kl_malloc(a, (size_t)n * sizeof(struct mmsghdr));
     b->iov  = kl_malloc(a, (size_t)n * sizeof(struct iovec));
     b->src  = kl_malloc(a, (size_t)n * sizeof(struct sockaddr_storage));
@@ -478,6 +493,52 @@ static socklen_t udp_parse_local(KlUdp *udp, struct msghdr *msg) {
     return 0;
 }
 
+/* Read the UDP_GRO segment size from a coalesced datagram's control messages,
+ * or 0 if none present (or GRO unsupported at build time). */
+static int udp_parse_gro(struct msghdr *msg) {
+#if defined(__linux__) && defined(UDP_GRO)
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(msg); cm; cm = CMSG_NXTHDR(msg, cm)) {
+        if (cm->cmsg_level == IPPROTO_UDP && cm->cmsg_type == UDP_GRO &&
+            cm->cmsg_len >= CMSG_LEN(sizeof(int))) {
+            int seg;
+            memcpy(&seg, CMSG_DATA(cm), sizeof(seg));
+            return seg;
+        }
+    }
+#else
+    (void)msg;
+#endif
+    return 0;
+}
+
+/* Deliver one received buffer. A GRO-coalesced buffer (gro_seg > 0 and
+ * len > gro_seg) goes whole to on_recv_segments when set, else is split into
+ * per-segment on_recv calls; a plain datagram goes to on_recv. */
+static void udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
+                        struct sockaddr *src, socklen_t src_len,
+                        struct sockaddr *local, socklen_t local_len) {
+    if (gro_seg > 0 && len > (size_t)gro_seg) {
+        if (udp->on_recv_segments) {
+            udp->on_recv_segments(udp, data, len, (size_t)gro_seg,
+                                  src, src_len, local, local_len, udp->recv_seg_ud);
+            return;
+        }
+        size_t seg = (size_t)gro_seg, off = 0;
+        while (off < len) {
+            size_t chunk = (len - off < seg) ? (len - off) : seg;
+            if (udp->on_recv)
+                udp->on_recv(udp, (const char *)data + off, chunk,
+                             src, src_len, local, local_len, udp->recv_ud);
+            if (!udp->recv_active || udp->fd < 0)
+                return;   /* callback stopped/freed mid-split */
+            off += chunk;
+        }
+        return;
+    }
+    if (udp->on_recv)
+        udp->on_recv(udp, data, len, src, src_len, local, local_len, udp->recv_ud);
+}
+
 #if defined(__linux__)
 /* Drain the socket in recvmmsg batches, firing on_recv per datagram. */
 static void udp_recv_drain_batched(KlUdp *udp) {
@@ -494,7 +555,7 @@ static void udp_recv_drain_batched(KlUdp *udp) {
             m->msg_iovlen = 1;
             m->msg_name = &b->src[i];
             m->msg_namelen = sizeof(struct sockaddr_storage);
-            if (udp->pktinfo) {
+            if (udp->pktinfo || udp->recv_gro) {
                 m->msg_control = b->ctrl + (size_t)i * b->ctrl_sz;
                 m->msg_controllen = b->ctrl_sz;
             }
@@ -517,11 +578,11 @@ static void udp_recv_drain_batched(KlUdp *udp) {
             if (m->msg_flags & MSG_TRUNC)
                 udp->truncated++;
             socklen_t local_len = udp->pktinfo ? udp_parse_local(udp, m) : 0;
-            if (udp->on_recv)
-                udp->on_recv(udp, b->iov[i].iov_base, (size_t)b->msgs[i].msg_len,
-                             (struct sockaddr *)&b->src[i], m->msg_namelen,
-                             local_len ? (struct sockaddr *)&udp->recv_local : NULL,
-                             local_len, udp->recv_ud);
+            int gro = udp->recv_gro ? udp_parse_gro(m) : 0;
+            udp_deliver(udp, b->iov[i].iov_base, (size_t)b->msgs[i].msg_len, gro,
+                        (struct sockaddr *)&b->src[i], m->msg_namelen,
+                        local_len ? (struct sockaddr *)&udp->recv_local : NULL,
+                        local_len);
             /* The callback may have called recv_stop() or free() — re-check. */
             if (!udp->recv_active || udp->fd < 0)
                 return;
@@ -538,7 +599,7 @@ static void udp_recv_drain(KlUdp *udp) {
 #endif
     union {
         struct cmsghdr align;
-        unsigned char  buf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
+        unsigned char  buf[UDP_RX_CMSG_SPACE];
     } control;
 
     for (;;) {
@@ -551,7 +612,7 @@ static void udp_recv_drain(KlUdp *udp) {
         msg.msg_iovlen = 1;
         msg.msg_name = &udp->recv_src;
         msg.msg_namelen = sizeof(udp->recv_src);
-        if (udp->pktinfo) {
+        if (udp->pktinfo || udp->recv_gro) {
             msg.msg_control = control.buf;
             msg.msg_controllen = sizeof(control.buf);
         }
@@ -567,12 +628,12 @@ static void udp_recv_drain(KlUdp *udp) {
             udp->truncated++;
 
         socklen_t local_len = udp->pktinfo ? udp_parse_local(udp, &msg) : 0;
+        int gro = udp->recv_gro ? udp_parse_gro(&msg) : 0;
 
-        if (udp->on_recv)
-            udp->on_recv(udp, udp->recv_buf, (size_t)n,
-                         (struct sockaddr *)&udp->recv_src, msg.msg_namelen,
-                         local_len ? (struct sockaddr *)&udp->recv_local : NULL,
-                         local_len, udp->recv_ud);
+        udp_deliver(udp, udp->recv_buf, (size_t)n, gro,
+                    (struct sockaddr *)&udp->recv_src, msg.msg_namelen,
+                    local_len ? (struct sockaddr *)&udp->recv_local : NULL,
+                    local_len);
 
         /* The callback may have called recv_stop() or free() — re-check. */
         if (!udp->recv_active || udp->fd < 0)
@@ -818,6 +879,15 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         }
     }
 
+    /* Enable UDP_GRO receive coalescing (best-effort; Linux ≥5.0). */
+#if defined(__linux__) && defined(UDP_GRO)
+    if (cfg->recv_gro) {
+        int on = 1;
+        if (setsockopt(udp->fd, IPPROTO_UDP, UDP_GRO, &on, sizeof(on)) == 0)
+            udp->recv_gro = 1;
+    }
+#endif
+
     if (ai) {
         if (bind(udp->fd, ai->ai_addr, ai->ai_addrlen) < 0) {
             udp->last_error = KL_ERR_BIND;
@@ -961,6 +1031,88 @@ int kl_udp_send(KlUdp *udp, const void *data, size_t len) {
         return -1;
     }
     return udp_send_common(udp, data, len, NULL, 0, NULL, 0);
+}
+
+/* Portable GSO fallback: send each segment individually via the normal path
+ * (immediate send, or queued under backpressure — order preserved). */
+static int udp_send_segments(KlUdp *udp, const void *buf, size_t total_len,
+                             size_t seg, const struct sockaddr *dest,
+                             socklen_t dest_len) {
+    size_t off = 0;
+    while (off < total_len) {
+        size_t chunk = (total_len - off < seg) ? (total_len - off) : seg;
+        if (udp_send_common(udp, (const char *)buf + off, chunk,
+                            dest, dest_len, NULL, 0) != 0)
+            return -1;   /* over-cap / hard error — remaining segments dropped */
+        off += chunk;
+    }
+    return 0;
+}
+
+#if defined(__linux__) && defined(UDP_SEGMENT)
+/* One sendmsg carrying a UDP_SEGMENT cmsg — the kernel splits `data` into
+ * `seg`-byte datagrams on the wire. Returns the sendmsg result. */
+static ssize_t udp_raw_send_gso(KlUdp *udp, const void *data, size_t len,
+                                uint16_t seg, const struct sockaddr *dest,
+                                socklen_t dest_len) {
+    union {
+        struct cmsghdr align;
+        unsigned char  buf[CMSG_SPACE(sizeof(uint16_t))];
+    } control;
+    memset(&control, 0, sizeof(control));
+    struct iovec iov = { .iov_base = (void *)data, .iov_len = len };
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_name = (void *)dest;
+    msg.msg_namelen = dest_len;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.buf;
+    msg.msg_controllen = sizeof(control.buf);
+
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+    if (!cm) { errno = EINVAL; return -1; }
+    cm->cmsg_level = IPPROTO_UDP;
+    cm->cmsg_type = UDP_SEGMENT;
+    cm->cmsg_len = CMSG_LEN(sizeof(uint16_t));
+    memcpy(CMSG_DATA(cm), &seg, sizeof(seg));
+    msg.msg_controllen = CMSG_SPACE(sizeof(uint16_t));
+
+    ssize_t n;
+    do { n = sendmsg(udp->fd, &msg, 0); } while (n < 0 && errno == EINTR);
+    return n;
+}
+#endif
+
+int kl_udp_send_gso(KlUdp *udp, const void *buf, size_t total_len,
+                    size_t segment_size, const struct sockaddr *dest,
+                    socklen_t dest_len) {
+    if (!udp || (!buf && total_len) || total_len == 0 || segment_size == 0 ||
+        segment_size > total_len || total_len > 65507 ||
+        !dest || dest_len == 0 || dest_len > sizeof(struct sockaddr_storage)) {
+        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+#if defined(__linux__) && defined(UDP_SEGMENT)
+    /* Single-syscall GSO when there is more than one segment, nothing is already
+     * queued (preserve ordering), and GSO hasn't been ruled unsupported. */
+    if (segment_size < total_len && !udp->q_head && !udp->gso_disabled) {
+        ssize_t n = udp_raw_send_gso(udp, buf, total_len, (uint16_t)segment_size,
+                                     dest, dest_len);
+        if (n >= 0)
+            return 0;
+        if (errno != EAGAIN && errno != EWOULDBLOCK)
+            udp->gso_disabled = 1;   /* GSO unsupported here — stop trying */
+        /* EAGAIN or unsupported: fall through and send/queue per-segment. */
+    }
+#endif
+    return udp_send_segments(udp, buf, total_len, segment_size, dest, dest_len);
+}
+
+void kl_udp_recv_segments(KlUdp *udp, KlUdpRecvSegmentsFn cb, void *user_data) {
+    if (!udp) return;
+    udp->on_recv_segments = cb;
+    udp->recv_seg_ud = user_data;
 }
 
 int kl_udp_multicast_join(KlUdp *udp, const char *group, unsigned iface_index) {

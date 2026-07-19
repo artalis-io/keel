@@ -1,7 +1,7 @@
 # UDP Batching + Segmentation Offload — Design
 
-Status: **Phase A (recvmmsg/sendmmsg batching) implemented 2026-07-19; Phase B
-(GSO/GRO) pending.**
+Status: **Complete — Phase A (recvmmsg/sendmmsg batching) + Phase B (GSO/GRO)
+implemented 2026-07-19.**
 Decisions: GSO via a **new per-call send API** (`kl_udp_send_gso`, with a portable
 per-segment fallback); GRO delivered **both ways** — transparent per-segment split
 by default, plus an opt-in coalesced-buffer callback; `recvmmsg`/`sendmmsg`
@@ -125,8 +125,14 @@ Passthrough config (`mmsg_batch`, `recv_gro`), plus `kl_udp_server_send_gso` and
   with the `mmsg_batch` knob (always-on where available). No API change; the
   syscall-amortization win. Both paths verified — batched on a Linux container
   (compile + tests + ASan/UBSan), fallback on macOS.
-- **Phase B — offload:** GRO (`recv_gro` + internal split + `kl_udp_recv_segments`
-  coalesced callback) and GSO (`kl_udp_send_gso`). Each phase ships CI-green.
+- **Phase B — offload *(DONE 2026-07-19)*:** GRO (`recv_gro` + internal split +
+  `kl_udp_recv_segments` coalesced callback) and GSO (`kl_udp_send_gso`).
+  GSO backpressure degrades to per-segment queued sends through the existing
+  queue (no special GSO queue node — simpler than the original sketch and
+  equivalent on the wire). `KlUdpServer` passes `recv_gro` through (transparent
+  split); the GSO/coalesced-callback advanced surface lives on `KlUdp`. Both
+  paths verified — offload on a Linux container (compile + tests + ASan/UBSan +
+  the exact CI scan-build), fallback on macOS.
 
 ## Non-goals (v1)
 
