@@ -21,6 +21,11 @@
 #define DNS_TYPE_OPT      41    /* EDNS0 OPT pseudo-record type */
 #define DNS_EDNS_UDP_SIZE 1232  /* advertised UDP payload size (DNS flag day) */
 #define DNS_OPT_RR_LEN    11    /* wire length of a bare OPT RR */
+#define DNS_OPT_COOKIE    10    /* EDNS0 COOKIE option code (RFC 7873) */
+#define DNS_COOKIE_CLIENT  8    /* client cookie length (fixed) */
+#define DNS_COOKIE_SRV_MAX 32   /* max server cookie length */
+#define DNS_RCODE_BADCOOKIE 23  /* full (extended) rcode = BADCOOKIE (RFC 7873 §5.3) */
+#define DNS_COOKIE_RETRY_MAX 1  /* BADCOOKIE re-transmits per leg (bounded, no loop) */
 #define DNS_MAX_NS        3     /* nameservers tried (resolv.conf MAXNS) */
 #define DNS_PORT          53    /* default nameserver port */
 #define DNS_TCP_IDLE_MS   10000 /* close an idle persistent TCP connection (RFC 7766) */
@@ -52,6 +57,7 @@ typedef struct {
     int              naddrs;
     int              tcp_pending;  /* 1 = awaiting a DNS-over-TCP response */
     int              tcp_ns;       /* nameserver index of the TCP connection, or -1 */
+    int              cookie_retry; /* BADCOOKIE re-transmits already spent on this leg */
 } KlDnsLeg;
 
 typedef struct KlDnsReq {
@@ -100,6 +106,16 @@ typedef struct {
     KlEventMask    want;           /* current watcher interest */
 } KlDnsTcp;
 
+/* Per-nameserver DNS cookie state (RFC 7873). The client cookie is generated
+ * once per nameserver; the server cookie is learned from responses and echoed
+ * back on subsequent queries. */
+typedef struct {
+    uint8_t client[DNS_COOKIE_CLIENT];   /* our client cookie (random, per NS) */
+    uint8_t server[DNS_COOKIE_SRV_MAX];  /* server cookie learned from responses */
+    uint8_t server_len;                  /* 0 = none learned yet (8..32 once known) */
+    uint8_t have_client;                 /* 1 = client cookie generated */
+} KlDnsCookie;
+
 struct KlDnsResolver {
     KlResolver     base;           /* MUST be first for upcast */
     KlEventCtx    *ctx;
@@ -110,6 +126,7 @@ struct KlDnsResolver {
     int            prefer_ipv6;
     int            disable_0x20;
     int            disable_edns;
+    int            disable_cookies;           /* 1 = don't send/verify DNS cookies */
     char           hosts_path[DNS_NAME_MAX];
     struct sockaddr_storage ns[DNS_MAX_NS];   /* nameserver addresses */
     socklen_t      ns_len[DNS_MAX_NS];
@@ -119,6 +136,7 @@ struct KlDnsResolver {
     int            ndots;                     /* threshold for search expansion */
     KlDnsReq      *inflight;
     KlDnsTcp       tcp[DNS_MAX_NS]; /* per-nameserver persistent TCP fallback conns */
+    KlDnsCookie    cookie[DNS_MAX_NS]; /* per-nameserver DNS cookie state (RFC 7873) */
     unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
     size_t         rnd_off;       /* next unused byte in rnd_pool */
 };
@@ -252,11 +270,24 @@ int kl_dns_parse_response(const uint8_t *pkt, size_t len, uint16_t expect_id,
 
 /* ── Query builder ────────────────────────────────────────────────────── */
 
+/* Return the client cookie for a nameserver, generating it once on first use. */
+static const uint8_t *dns_cookie_client(KlDnsResolver *r, int ns_idx) {
+    KlDnsCookie *c = &r->cookie[ns_idx];
+    if (!c->have_client) {
+        for (int i = 0; i < DNS_COOKIE_CLIENT; i++)
+            c->client[i] = dns_rand_byte(r);
+        c->have_client = 1;
+    }
+    return c->client;
+}
+
 /* Build a query with transaction id, applying DNS 0x20 case randomization to
  * the QNAME letters (unless disabled). Also returns the question-section span
- * [*q_off, off) so the caller can store it for response verification. */
+ * [*q_off, off) so the caller can store it for response verification. When
+ * cookies are enabled, a COOKIE option (client [+ learned server]) is added to
+ * the EDNS0 OPT rdata for nameserver @p ns_idx. */
 static int dns_build_query(KlDnsResolver *r, uint8_t *buf, size_t cap, uint16_t id,
-                           const char *host, int qtype,
+                           const char *host, int qtype, int ns_idx,
                            size_t *out_len, size_t *q_off, size_t *q_len) {
     if (cap < 12)
         return -1;
@@ -302,7 +333,11 @@ static int dns_build_query(KlDnsResolver *r, uint8_t *buf, size_t cap, uint16_t 
     /* EDNS0: advertise a larger UDP payload via a bare OPT RR in the additional
      * section (arcount = 1). Backward-compatible; a non-EDNS server ignores it. */
     if (!r->disable_edns) {
-        if (off + DNS_OPT_RR_LEN > cap)
+        int cookie = !r->disable_cookies && ns_idx >= 0 && ns_idx < r->nns;
+        uint8_t srv_len = cookie ? r->cookie[ns_idx].server_len : 0;
+        size_t optlen = cookie ? (size_t)DNS_COOKIE_CLIENT + srv_len : 0;
+        size_t rdlen  = cookie ? 4 + optlen : 0;   /* option-code+len (4) + data */
+        if (off + DNS_OPT_RR_LEN + rdlen > cap)
             return -1;
         buf[11] = 0x01;                          /* arcount = 1 */
         buf[off++] = 0x00;                       /* OPT owner name = root */
@@ -312,7 +347,21 @@ static int dns_build_query(KlDnsResolver *r, uint8_t *buf, size_t cap, uint16_t 
         buf[off++] = (uint8_t)(DNS_EDNS_UDP_SIZE & 0xFF);
         buf[off++] = 0x00; buf[off++] = 0x00;    /* extended rcode + version */
         buf[off++] = 0x00; buf[off++] = 0x00;    /* flags */
-        buf[off++] = 0x00; buf[off++] = 0x00;    /* rdlen = 0 */
+        buf[off++] = (uint8_t)(rdlen >> 8);      /* OPT rdlen */
+        buf[off++] = (uint8_t)(rdlen & 0xFF);
+        if (cookie) {                            /* COOKIE option (RFC 7873) */
+            const uint8_t *cc = dns_cookie_client(r, ns_idx);
+            buf[off++] = (uint8_t)(DNS_OPT_COOKIE >> 8);
+            buf[off++] = (uint8_t)(DNS_OPT_COOKIE & 0xFF);
+            buf[off++] = (uint8_t)(optlen >> 8);
+            buf[off++] = (uint8_t)(optlen & 0xFF);
+            memcpy(buf + off, cc, DNS_COOKIE_CLIENT);
+            off += DNS_COOKIE_CLIENT;
+            if (srv_len) {
+                memcpy(buf + off, r->cookie[ns_idx].server, srv_len);
+                off += srv_len;
+            }
+        }
     }
     *out_len = off;
     return 0;
@@ -414,7 +463,7 @@ static int dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLeg *leg) 
     uint8_t buf[DNS_QUERY_MAX];
     size_t qlen = 0, q_off = 0, q_len = 0;
     if (dns_build_query(r, buf, sizeof(buf), leg->id, q->host, leg->qtype,
-                        &qlen, &q_off, &q_len) != 0)
+                        leg->ns_idx, &qlen, &q_off, &q_len) != 0)
         return -1;
     if (q_len > sizeof(leg->question))
         return -1;
@@ -510,6 +559,7 @@ static int dns_start_candidate(KlDnsResolver *r, KlDnsReq *q) {
         leg->naddrs = 0;
         leg->tcp_pending = 0;
         leg->tcp_ns = -1;
+        leg->cookie_retry = 0;
         if (dns_transmit_leg(r, q, leg) == 0)
             any = 1;
         else
@@ -579,6 +629,84 @@ static int dns_question_matches(const uint8_t *pkt, size_t len,
         return 0;
     off += 4;                                    /* qtype + qclass */
     return (off - 12 == eq_len) && (memcmp(pkt + 12, eq, eq_len) == 0);
+}
+
+/* Walk to the OPT RR in the additional section. On finding one, sets *ext_rcode
+ * (the OPT TTL's high byte — the EDNS extended-rcode bits) and, if a COOKIE
+ * option is present with a valid length, copies the echoed client cookie (8) +
+ * server cookie (0..32) and sets *have_cookie. Returns 0 if an OPT RR was found,
+ * -1 otherwise. Fully bounds-checked against hostile packets. */
+static int dns_extract_opt(const uint8_t *pkt, size_t len, uint8_t *ext_rcode,
+                           uint8_t *client_out, uint8_t *server_out,
+                           uint8_t *server_len_out, int *have_cookie) {
+    *ext_rcode = 0;
+    *server_len_out = 0;
+    *have_cookie = 0;
+    if (len < 12)
+        return -1;
+    uint16_t qd = (uint16_t)((pkt[4] << 8) | pkt[5]);
+    uint16_t an = (uint16_t)((pkt[6] << 8) | pkt[7]);
+    uint16_t nscount = (uint16_t)((pkt[8] << 8) | pkt[9]);
+    uint16_t ar = (uint16_t)((pkt[10] << 8) | pkt[11]);
+
+    size_t off = 12;
+    for (uint16_t i = 0; i < qd; i++) {          /* skip questions */
+        if (dns_skip_name(pkt, len, off, &off) != 0)
+            return -1;
+        if (off + 4 > len)
+            return -1;
+        off += 4;
+    }
+    uint32_t pre = (uint32_t)an + nscount;       /* skip answer + authority RRs */
+    for (uint32_t i = 0; i < pre; i++) {
+        if (dns_skip_name(pkt, len, off, &off) != 0)
+            return -1;
+        if (off + 10 > len)
+            return -1;
+        uint16_t rdlen = (uint16_t)((pkt[off + 8] << 8) | pkt[off + 9]);
+        off += 10;
+        if (off + rdlen > len)
+            return -1;
+        off += rdlen;
+    }
+    for (uint16_t i = 0; i < ar; i++) {          /* scan additional for OPT */
+        if (dns_skip_name(pkt, len, off, &off) != 0)
+            return -1;
+        if (off + 10 > len)
+            return -1;
+        uint16_t rtype = (uint16_t)((pkt[off] << 8) | pkt[off + 1]);
+        uint16_t rdlen = (uint16_t)((pkt[off + 8] << 8) | pkt[off + 9]);
+        if (rtype == DNS_TYPE_OPT) {
+            *ext_rcode = pkt[off + 4];           /* TTL byte 0 = extended rcode hi */
+            size_t rd = off + 10, end = rd + rdlen;
+            if (end > len)
+                return -1;
+            for (size_t o = rd; o + 4 <= end; ) { /* walk EDNS options */
+                uint16_t oc = (uint16_t)((pkt[o] << 8) | pkt[o + 1]);
+                uint16_t ol = (uint16_t)((pkt[o + 2] << 8) | pkt[o + 3]);
+                o += 4;
+                if (o + ol > end)
+                    break;
+                if (oc == DNS_OPT_COOKIE &&
+                    (ol == DNS_COOKIE_CLIENT ||
+                     (ol >= DNS_COOKIE_CLIENT + 8 &&
+                      ol <= DNS_COOKIE_CLIENT + DNS_COOKIE_SRV_MAX))) {
+                    memcpy(client_out, pkt + o, DNS_COOKIE_CLIENT);
+                    uint8_t sl = (uint8_t)(ol - DNS_COOKIE_CLIENT);
+                    if (sl)
+                        memcpy(server_out, pkt + o + DNS_COOKIE_CLIENT, sl);
+                    *server_len_out = sl;
+                    *have_cookie = 1;
+                }
+                o += ol;
+            }
+            return 0;
+        }
+        if (off + 10 + rdlen > len)
+            return -1;
+        off += 10 + rdlen;
+    }
+    return -1;                                    /* no OPT RR */
 }
 
 /* The index of the configured nameserver `src` matches, or -1. (The socket is
@@ -845,7 +973,7 @@ static void dns_tcp_send_leg(KlDnsResolver *r, KlDnsLeg *leg, int ns_idx) {
     uint8_t qb[DNS_QUERY_MAX];
     size_t qlen = 0, q_off = 0, q_len = 0;
     if (dns_build_query(r, qb, sizeof(qb), leg->id, q->host, leg->qtype,
-                        &qlen, &q_off, &q_len) != 0 ||
+                        ns_idx, &qlen, &q_off, &q_len) != 0 ||
         q_len > sizeof(leg->question) || qlen > DNS_TCP_MSG_MAX) {
         leg->naddrs = 0; dns_leg_settle(r, q, leg); return;
     }
@@ -901,6 +1029,42 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
         if (dns_question_matches(pkt, len, leg->question, leg->question_len))
             dns_tcp_send_leg(r, leg, ns_idx);
         return;
+    }
+
+    /* DNS cookies (RFC 7873): verify the echoed client cookie (a strong off-path
+     * anti-spoof layered on txn-id/0x20/source), learn the server cookie, and on
+     * BADCOOKIE re-issue once carrying it. A response without a cookie option
+     * (server doesn't support cookies) is accepted for backward compatibility. */
+    if (!r->disable_cookies && !r->disable_edns) {
+        uint8_t ext = 0, ck_client[DNS_COOKIE_CLIENT];
+        uint8_t ck_server[DNS_COOKIE_SRV_MAX], ck_slen = 0;
+        int have = 0;
+        if (dns_extract_opt(pkt, len, &ext, ck_client, ck_server, &ck_slen, &have) == 0 &&
+            have) {
+            KlDnsCookie *c = &r->cookie[ns_idx];
+            if (c->have_client &&
+                memcmp(ck_client, c->client, DNS_COOKIE_CLIENT) != 0)
+                return;                          /* client-cookie mismatch → spoof, ignore */
+            if (ck_slen) {
+                memcpy(c->server, ck_server, ck_slen);
+                c->server_len = ck_slen;
+            }
+            if ((((int)ext << 4) | (pkt[3] & 0x0F)) == DNS_RCODE_BADCOOKIE) {
+                if (leg->cookie_retry < DNS_COOKIE_RETRY_MAX && leg->tries_left > 0) {
+                    leg->cookie_retry++;
+                    leg->ns_idx = ns_idx;        /* retry the same NS with its cookie */
+                    if (leg->timer_id >= 0) {
+                        kl_timer_cancel(r->ctx, leg->timer_id);
+                        leg->timer_id = -1;
+                    }
+                    if (dns_transmit_leg(r, q, leg) == 0)
+                        return;                  /* awaiting the cookie'd retry */
+                }
+                leg->naddrs = 0;                 /* retries exhausted → settle empty */
+                dns_leg_settle(r, q, leg);
+                return;
+            }
+        }
     }
 
     KlResolveResult scratch;
@@ -1376,6 +1540,7 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
     r->prefer_ipv6 = cfg ? cfg->prefer_ipv6 : 0;
     r->disable_0x20 = cfg ? cfg->disable_0x20 : 0;
     r->disable_edns = cfg ? cfg->disable_edns : 0;
+    r->disable_cookies = cfg ? cfg->disable_cookies : 0;
     snprintf(r->hosts_path, sizeof(r->hosts_path), "%s",
              (cfg && cfg->hosts_path) ? cfg->hosts_path : "/etc/hosts");
     r->rnd_off = sizeof(r->rnd_pool);   /* pool empty → refills on first draw */

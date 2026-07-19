@@ -1,7 +1,7 @@
 # DNS TCP fallback (RFC 7766) + Cookies (RFC 7873) — Design
 
-Status: **Phase 1 (persistent TCP fallback) implemented (2026-07-19); Phase 2
-(cookies) pending.**
+Status: **Phase 1 (persistent TCP fallback) and Phase 2 (cookies) implemented
+(2026-07-19).**
 Decisions: TCP fallback uses **persistent/pooled** per-nameserver connections with
 pipelining + idle close; DNS cookies are **on by default** with client-cookie
 verification and a **BADCOOKIE retry**.
@@ -77,7 +77,17 @@ TCP query is rebuilt (fresh 0x20 casing is fine — the response echoes what we
 send, and `leg->question` is updated to match). The per-leg timer bounds the TCP
 exchange; TCP settle reuses the existing `dns_leg_settle` path.
 
-## Phase 2 — DNS cookies (RFC 7873)
+## Phase 2 — DNS cookies (RFC 7873) — **implemented**
+
+Landed in `src/dns_resolver.c`: per-NS `KlDnsCookie cookie[DNS_MAX_NS]` (lazy
+8-byte client cookie from the entropy pool + learned server cookie);
+`dns_build_query` gained an `ns_idx` parameter and appends a COOKIE option to the
+EDNS0 OPT rdata; a bounds-safe `dns_extract_opt` walks to the OPT RR in
+`dns_on_recv` to verify the echoed client cookie (mismatch → ignore as spoof),
+learn the server cookie, and honor BADCOOKIE (full rcode 23) with one bounded
+re-transmit to the same NS carrying the cookie. On by default; opt out with
+`KlDnsResolverConfig.disable_cookies`. Tests: `dns.cookie_learned_and_echoed`,
+`dns.cookie_badcookie_retry`, `dns.cookie_client_mismatch_ignored`.
 
 ### Per-NS cookie state
 ```c

@@ -32,6 +32,7 @@ typedef struct {
     int          prefer_ipv6; /**< Query AAAA before A. */
     int          disable_0x20;/**< Disable DNS 0x20 case randomization (for resolvers that normalize case). */
     int          disable_edns;/**< Disable the EDNS0 OPT record (for servers that reject it). */
+    int          disable_cookies;/**< Disable DNS cookies (RFC 7873, on by default; needs EDNS0). */
     const char  *hosts_path;  /**< Path to a hosts file checked before DNS; NULL = /etc/hosts. */
     KlAllocator *alloc;       /**< NULL = event-context allocator. */
 } KlDnsResolverConfig;

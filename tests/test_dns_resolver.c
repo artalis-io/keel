@@ -70,6 +70,16 @@ static int g_answer_aaaa;   /* reply with an AAAA record for AAAA queries */
 static int g_rcode;         /* rcode to set (0 = NOERROR, 3 = NXDOMAIN) */
 static int g_silent;        /* drop queries (to exercise timeout)      */
 static int g_truncate;      /* reply with the TC bit set (force TCP fallback) */
+/* DNS cookies (RFC 7873) */
+static int g_cookie;             /* mock supports cookies: echo client + add server */
+static int g_cookie_wrong_client;/* echo a corrupted client cookie (spoof test) */
+static int g_cookie_badcookie_once;/* first cookie'd response is BADCOOKIE */
+static int g_cookie_bad_sent;    /* internal: a BADCOOKIE reply was already sent */
+static const uint8_t g_srv_cookie[8] = {0xA0,0xA1,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7};
+static uint8_t g_seen_client[8]; /* client cookie carried by the last query */
+static int g_seen_client_ok;     /* 1 = last query carried a client cookie */
+static uint8_t g_seen_server[32]; /* server cookie carried by the last query */
+static uint8_t g_seen_server_len; /* server-cookie length in last query (0 = none) */
 static int g_queries;
 static int g_flip_case;     /* echo the question name with each letter case-flipped */
 static int g_wrong_question;/* echo a different question entirely (spoof) */
@@ -193,11 +203,58 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
         g_last_qname[w] = '\0';
     }
 
+    /* Capture the COOKIE option the query carried. The query is
+     * [header][question][OPT RR], so the OPT RR begins right at qend. */
+    g_seen_client_ok = 0; g_seen_server_len = 0;
+    if (qend + 11 <= len && q[qend] == 0x00 &&
+        ((q[qend + 1] << 8) | q[qend + 2]) == 41 /* OPT */) {
+        uint16_t rdlen = (uint16_t)((q[qend + 9] << 8) | q[qend + 10]);
+        size_t o = qend + 11, end = o + rdlen;
+        if (end <= len) {
+            while (o + 4 <= end) {
+                uint16_t oc = (uint16_t)((q[o] << 8) | q[o + 1]);
+                uint16_t ol = (uint16_t)((q[o + 2] << 8) | q[o + 3]);
+                o += 4;
+                if (o + ol > end) break;
+                if (oc == 10 && ol >= 8) {        /* COOKIE */
+                    memcpy(g_seen_client, q + o, 8);
+                    g_seen_client_ok = 1;
+                    uint8_t sl = (uint8_t)(ol - 8);
+                    if (sl && sl <= 32) { memcpy(g_seen_server, q + o + 8, sl); g_seen_server_len = sl; }
+                }
+                o += ol;
+            }
+        }
+    }
+
     if (g_silent) return;
     if (g_silent_aaaa && qtype == KL_DNS_TYPE_AAAA) return;   /* drop AAAA only */
 
     uint8_t resp[512];
+    int badcookie = g_cookie && g_cookie_badcookie_once && !g_cookie_bad_sent;
     size_t n = dns_write_response(q, qend, qtype, resp, g_truncate);
+    if (g_cookie) {
+        if (badcookie) {                          /* no answer + BADCOOKIE rcode */
+            resp[3] = (uint8_t)(0x80 | 7);        /* RA + header rcode 7 */
+            resp[7] = 0;                          /* ancount = 0 */
+            n = 12 + (qend - 12);                 /* drop any answer: header + question */
+            g_cookie_bad_sent = 1;
+        }
+        resp[10] = 0; resp[11] = 1;               /* arcount = 1 (OPT) */
+        resp[n++] = 0x00;                         /* OPT owner = root */
+        resp[n++] = 0x00; resp[n++] = 41;         /* type OPT */
+        resp[n++] = 0x04; resp[n++] = 0xD0;       /* UDP size 1232 */
+        resp[n++] = badcookie ? 0x01 : 0x00;      /* TTL b0 = ext rcode (1 => BADCOOKIE) */
+        resp[n++] = 0x00; resp[n++] = 0x00; resp[n++] = 0x00; /* version + flags */
+        resp[n++] = 0x00; resp[n++] = 4 + 16;     /* rdlen = opt-hdr(4) + client(8)+server(8) */
+        resp[n++] = 0x00; resp[n++] = 10;         /* option-code COOKIE */
+        resp[n++] = 0x00; resp[n++] = 16;         /* option-length */
+        uint8_t cli[8];
+        if (g_seen_client_ok) memcpy(cli, g_seen_client, 8); else memset(cli, 0, 8);
+        if (g_cookie_wrong_client) cli[0] = (uint8_t)(cli[0] ^ 0xFF);
+        memcpy(resp + n, cli, 8); n += 8;         /* echo client cookie */
+        memcpy(resp + n, g_srv_cookie, 8); n += 8;/* add server cookie */
+    }
     kl_udp_server_reply(s, resp, n, src, src_len);
 }
 
@@ -316,6 +373,8 @@ static void reset_dns(void) {
     g_flip_case = 0; g_wrong_question = 0; g_seen_n = 0; g_last_q_len = 0;
     g_last_arcount = 0; g_last_qname[0] = '\0'; g_silent_aaaa = 0;
     g_truncate = 0;
+    g_cookie = g_cookie_wrong_client = g_cookie_badcookie_once = g_cookie_bad_sent = 0;
+    g_seen_client_ok = 0; g_seen_server_len = 0;
     g_done = 0; g_err = 0; memset(&g_res, 0, sizeof(g_res));
 }
 
@@ -1229,6 +1288,96 @@ UTEST(dns, tcp_drop) {
 
     r->destroy(r);
     mock_tcp_stop(&tcp);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── DNS cookies (RFC 7873) ───────────────────────────────────────────── */
+
+/* The resolver learns the server cookie from a response and echoes it on the
+ * next query to the same nameserver. */
+UTEST(dns, cookie_learned_and_echoed) {
+    reset_dns();
+    g_answer_a = 1;
+    g_cookie = 1;                         /* mock echoes client + adds server cookie */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
+    ASSERT_TRUE(r != NULL);
+
+    /* First resolve — the query carries only a client cookie; resolver learns
+     * the server cookie from the reply. */
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(1, g_seen_client_ok);       /* the query carried a client cookie */
+
+    /* Second resolve — the query must now echo the learned server cookie. */
+    g_done = 0; g_seen_server_len = 0;
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(8, g_seen_server_len);      /* server cookie sent back */
+    ASSERT_EQ(0, memcmp(g_seen_server, g_srv_cookie, 8));
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* A BADCOOKIE response carries a fresh server cookie; the resolver stores it and
+ * re-issues the query once, which then resolves. */
+UTEST(dns, cookie_badcookie_retry) {
+    reset_dns();
+    g_answer_a = 1;                       /* only A answers */
+    g_cookie = 1;
+    g_cookie_badcookie_once = 1;          /* first cookie'd reply is BADCOOKIE */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 1000, 2);
+    ASSERT_TRUE(r != NULL);
+
+    /* A leg is transmitted before AAAA, so A receives the BADCOOKIE and must
+     * retry to recover its address. */
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(1, g_res.naddrs);           /* A recovered via the cookie'd retry */
+    ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
+    ASSERT_TRUE(g_queries >= 3);          /* BADCOOKIE + retry + the other family */
+    ASSERT_EQ(8, g_seen_server_len);      /* the retry carried the server cookie */
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* A response echoing the wrong client cookie is treated as a spoof and ignored,
+ * even though it carries a valid-looking answer. */
+UTEST(dns, cookie_client_mismatch_ignored) {
+    reset_dns();
+    g_answer_a = 1;                       /* the spoof would resolve if not rejected */
+    g_cookie = 1;
+    g_cookie_wrong_client = 1;            /* echo a corrupted client cookie */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 300, 1);  /* short timeout, single try */
+    ASSERT_TRUE(r != NULL);
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);             /* wait past the per-leg timeout */
+
+    ASSERT_EQ(1, g_done);                 /* completes (via timeout), not from the spoof */
+    ASSERT_EQ(0, g_res.naddrs);           /* the mismatched-cookie answer was rejected */
+
+    r->destroy(r);
     kl_udp_server_free(&ns);
     kl_event_ctx_free(&ctx);
 }
