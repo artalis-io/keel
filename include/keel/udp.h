@@ -64,6 +64,7 @@ typedef struct {
     int          recv_pktinfo;   /**< Capture each datagram's local address (IP_PKTINFO / IPV6_RECVPKTINFO). */
     int          so_rcvbuf;      /**< SO_RCVBUF kernel receive buffer in bytes (0 = OS default). Bounds kernel-side drops under load. */
     int          so_sndbuf;      /**< SO_SNDBUF kernel send buffer in bytes (0 = OS default). */
+    int          mmsg_batch;     /**< recvmmsg/sendmmsg batch size (Linux); 0 = default (16), 1 = per-datagram, capped at 64. Higher amortizes syscalls at the cost of RX memory (batch × recv_buf_size). */
     int          broadcast;      /**< SO_BROADCAST — allow sending to broadcast addresses (IPv4). */
     int          multicast_ttl;  /**< IP_MULTICAST_TTL / IPV6_MULTICAST_HOPS for multicast sends; 0 = kernel default (1 = link-local). */
     int          multicast_disable_loop; /**< 1 = disable local loopback of sent multicast (default: enabled). */
@@ -99,6 +100,11 @@ struct KlUdp {
     uint64_t       dropped;          /**< Datagrams dropped over the cap. */
     KlUdpDrainFn   on_drain;
     void          *drain_ud;
+    /* recv/sendmmsg batching (Linux). Batch blocks are opaque (defined in
+     * src/udp.c) to keep this header free of the Linux-only struct mmsghdr. */
+    int            mmsg_batch;       /**< Effective batch (1 = per-datagram). */
+    void          *rx_batch;         /**< Opaque recvmmsg batch, or NULL. */
+    void          *tx_batch;         /**< Opaque sendmmsg batch, or NULL. */
     /* Event-loop interest tracking */
     int            watcher_added;
     KlEventMask    want_mask;

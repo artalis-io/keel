@@ -38,6 +38,124 @@ struct KlUdpDatagram {
     unsigned char           data[];    /* payload */
 };
 
+/* ── recv/sendmmsg batching (Linux) ───────────────────────────────────── */
+
+#define UDP_MMSG_DEFAULT 16
+#define UDP_MMSG_MAX      64
+
+#if defined(__linux__)
+/* RX batch: N slots for one recvmmsg call. Data is one contiguous block sliced
+ * per slot; each slot has its own source addr + control buffer (pktinfo). */
+typedef struct {
+    struct mmsghdr          *msgs;
+    struct iovec            *iov;
+    struct sockaddr_storage *src;
+    unsigned char           *data;     /* n * bufsz */
+    unsigned char           *ctrl;     /* n * ctrl_sz */
+    size_t                   bufsz;
+    size_t                   ctrl_sz;
+    int                      n;
+} UdpRxBatch;
+
+/* TX batch: N msghdrs for one sendmmsg call; payloads live in the queue nodes,
+ * each slot carries its own control buffer for a source-pinning pktinfo cmsg. */
+typedef struct {
+    struct mmsghdr *msgs;
+    struct iovec   *iov;
+    unsigned char  *ctrl;     /* n * ctrl_sz */
+    size_t          ctrl_sz;
+    int             n;
+} UdpTxBatch;
+
+static void udp_rx_batch_free(KlAllocator *a, UdpRxBatch *b) {
+    if (!b) return;
+    kl_free(a, b->msgs, (size_t)b->n * sizeof(struct mmsghdr));
+    kl_free(a, b->iov,  (size_t)b->n * sizeof(struct iovec));
+    kl_free(a, b->src,  (size_t)b->n * sizeof(struct sockaddr_storage));
+    kl_free(a, b->data, (size_t)b->n * b->bufsz);
+    kl_free(a, b->ctrl, (size_t)b->n * b->ctrl_sz);
+    kl_free(a, b, sizeof(*b));
+}
+
+static UdpRxBatch *udp_rx_batch_new(KlAllocator *a, int n, size_t bufsz) {
+    UdpRxBatch *b = kl_malloc(a, sizeof(*b));
+    if (!b) return NULL;
+    memset(b, 0, sizeof(*b));
+    b->n = n;
+    b->bufsz = bufsz;
+    b->ctrl_sz = CMSG_SPACE(sizeof(struct in6_pktinfo));
+    b->msgs = kl_malloc(a, (size_t)n * sizeof(struct mmsghdr));
+    b->iov  = kl_malloc(a, (size_t)n * sizeof(struct iovec));
+    b->src  = kl_malloc(a, (size_t)n * sizeof(struct sockaddr_storage));
+    b->data = kl_malloc(a, (size_t)n * bufsz);
+    b->ctrl = kl_malloc(a, (size_t)n * b->ctrl_sz);
+    if (!b->msgs || !b->iov || !b->src || !b->data || !b->ctrl) {
+        udp_rx_batch_free(a, b);
+        return NULL;
+    }
+    return b;
+}
+
+static void udp_tx_batch_free(KlAllocator *a, UdpTxBatch *b) {
+    if (!b) return;
+    kl_free(a, b->msgs, (size_t)b->n * sizeof(struct mmsghdr));
+    kl_free(a, b->iov,  (size_t)b->n * sizeof(struct iovec));
+    kl_free(a, b->ctrl, (size_t)b->n * b->ctrl_sz);
+    kl_free(a, b, sizeof(*b));
+}
+
+static UdpTxBatch *udp_tx_batch_new(KlAllocator *a, int n) {
+    UdpTxBatch *b = kl_malloc(a, sizeof(*b));
+    if (!b) return NULL;
+    memset(b, 0, sizeof(*b));
+    b->n = n;
+    b->ctrl_sz = CMSG_SPACE(sizeof(struct in6_pktinfo));
+    b->msgs = kl_malloc(a, (size_t)n * sizeof(struct mmsghdr));
+    b->iov  = kl_malloc(a, (size_t)n * sizeof(struct iovec));
+    b->ctrl = kl_malloc(a, (size_t)n * b->ctrl_sz);
+    if (!b->msgs || !b->iov || !b->ctrl) {
+        udp_tx_batch_free(a, b);
+        return NULL;
+    }
+    return b;
+}
+
+/* Write a source-pinning pktinfo cmsg for `src` into `buf`; returns the
+ * msg_controllen to use, or 0 on an unsupported family. */
+static size_t udp_build_pktinfo(unsigned char *buf, size_t bufsz,
+                                const struct sockaddr *src) {
+    struct msghdr tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.msg_control = buf;
+    tmp.msg_controllen = bufsz;
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&tmp);
+    if (!cm) return 0;
+#if defined(IP_PKTINFO)
+    if (src->sa_family == AF_INET) {
+        cm->cmsg_level = IPPROTO_IP;
+        cm->cmsg_type = IP_PKTINFO;
+        cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+        struct in_pktinfo pi;
+        memset(&pi, 0, sizeof(pi));
+        pi.ipi_spec_dst = ((const struct sockaddr_in *)src)->sin_addr;
+        memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+        return CMSG_SPACE(sizeof(struct in_pktinfo));
+    }
+#endif
+    if (src->sa_family == AF_INET6) {
+        cm->cmsg_level = IPPROTO_IPV6;
+        cm->cmsg_type = IPV6_PKTINFO;
+        cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
+        struct in6_pktinfo pi;
+        memset(&pi, 0, sizeof(pi));
+        pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
+        memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
+        return CMSG_SPACE(sizeof(struct in6_pktinfo));
+    }
+    return 0;
+}
+#endif /* __linux__ */
+
 /* ── Socket flag helpers (portable; macOS lacks SOCK_CLOEXEC on socket()) ── */
 
 static int udp_set_nonblocking(int fd) {
@@ -230,7 +348,76 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
     return -1;
 }
 
+#if defined(__linux__)
+/* Dequeue+free the first `k` queued datagrams (already sent or dropped). */
+static void udp_dequeue_front(KlUdp *udp, KlUdpDatagram **nodes, int k) {
+    for (int i = 0; i < k; i++) {
+        KlUdpDatagram *node = nodes[i];
+        udp->q_head = node->next;
+        if (!udp->q_head) udp->q_tail = NULL;
+        udp->q_bytes -= node->len;
+        kl_free(udp->alloc, node, sizeof(KlUdpDatagram) + node->len);
+    }
+}
+
+/* Drain the send queue in sendmmsg batches. */
+static void udp_flush_queue_batched(KlUdp *udp) {
+    UdpTxBatch *b = udp->tx_batch;
+    int had_data = (udp->q_head != NULL);
+
+    while (udp->q_head) {
+        KlUdpDatagram *nodes[UDP_MMSG_MAX];
+        int cnt = 0;
+        for (KlUdpDatagram *node = udp->q_head; node && cnt < b->n;
+             node = node->next, cnt++) {
+            nodes[cnt] = node;
+            b->iov[cnt].iov_base = node->data;
+            b->iov[cnt].iov_len  = node->len;
+            struct msghdr *m = &b->msgs[cnt].msg_hdr;
+            memset(m, 0, sizeof(*m));
+            m->msg_iov = &b->iov[cnt];
+            m->msg_iovlen = 1;
+            if (node->dest_len) {
+                m->msg_name = &node->dest;
+                m->msg_namelen = node->dest_len;
+            }
+            if (node->src_len) {
+                unsigned char *ctrl = b->ctrl + (size_t)cnt * b->ctrl_sz;
+                size_t clen = udp_build_pktinfo(ctrl, b->ctrl_sz,
+                                                (struct sockaddr *)&node->src);
+                if (clen) { m->msg_control = ctrl; m->msg_controllen = clen; }
+            }
+            b->msgs[cnt].msg_len = 0;
+        }
+
+        int sent;
+        do { sent = sendmmsg(udp->fd, b->msgs, (unsigned)cnt, 0); }
+        while (sent < 0 && errno == EINTR);
+
+        if (sent < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                break;               /* socket buffer full — retry later */
+            /* Hard error on the head datagram: drop it and continue. */
+            udp->last_error = KL_ERR_IO;
+            udp->dropped++;
+            udp_dequeue_front(udp, nodes, 1);
+            continue;
+        }
+        udp_dequeue_front(udp, nodes, sent);   /* sent >= 1 here */
+        if (sent < cnt)
+            break;                   /* next message would block — retry later */
+    }
+
+    udp_update_interest(udp);
+    if (had_data && udp->q_head == NULL && udp->on_drain)
+        udp->on_drain(udp, udp->drain_ud);
+}
+#endif /* __linux__ */
+
 static void udp_flush_queue(KlUdp *udp) {
+#if defined(__linux__)
+    if (udp->tx_batch) { udp_flush_queue_batched(udp); return; }
+#endif
     int had_data = (udp->q_head != NULL);
     while (udp->q_head) {
         KlUdpDatagram *node = udp->q_head;
@@ -288,7 +475,64 @@ static socklen_t udp_parse_local(KlUdp *udp, struct msghdr *msg) {
     return 0;
 }
 
+#if defined(__linux__)
+/* Drain the socket in recvmmsg batches, firing on_recv per datagram. */
+static void udp_recv_drain_batched(KlUdp *udp) {
+    UdpRxBatch *b = udp->rx_batch;
+    for (;;) {
+        /* (Re)init the msghdrs each round — the kernel mutates
+         * msg_len/flags/namelen/controllen. */
+        for (int i = 0; i < b->n; i++) {
+            b->iov[i].iov_base = b->data + (size_t)i * b->bufsz;
+            b->iov[i].iov_len  = b->bufsz;
+            struct msghdr *m = &b->msgs[i].msg_hdr;
+            memset(m, 0, sizeof(*m));
+            m->msg_iov = &b->iov[i];
+            m->msg_iovlen = 1;
+            m->msg_name = &b->src[i];
+            m->msg_namelen = sizeof(struct sockaddr_storage);
+            if (udp->pktinfo) {
+                m->msg_control = b->ctrl + (size_t)i * b->ctrl_sz;
+                m->msg_controllen = b->ctrl_sz;
+            }
+            b->msgs[i].msg_len = 0;
+        }
+
+        int cnt;
+        do { cnt = recvmmsg(udp->fd, b->msgs, (unsigned)b->n, 0, NULL); }
+        while (cnt < 0 && errno == EINTR);
+        if (cnt < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK)
+                udp->last_error = KL_ERR_IO;
+            break;
+        }
+        if (cnt == 0)
+            break;
+
+        for (int i = 0; i < cnt; i++) {
+            struct msghdr *m = &b->msgs[i].msg_hdr;
+            if (m->msg_flags & MSG_TRUNC)
+                udp->truncated++;
+            socklen_t local_len = udp->pktinfo ? udp_parse_local(udp, m) : 0;
+            if (udp->on_recv)
+                udp->on_recv(udp, b->iov[i].iov_base, (size_t)b->msgs[i].msg_len,
+                             (struct sockaddr *)&b->src[i], m->msg_namelen,
+                             local_len ? (struct sockaddr *)&udp->recv_local : NULL,
+                             local_len, udp->recv_ud);
+            /* The callback may have called recv_stop() or free() — re-check. */
+            if (!udp->recv_active || udp->fd < 0)
+                return;
+        }
+        if (cnt < b->n)
+            break;   /* fewer than a full batch → socket drained */
+    }
+}
+#endif /* __linux__ */
+
 static void udp_recv_drain(KlUdp *udp) {
+#if defined(__linux__)
+    if (udp->rx_batch) { udp_recv_drain_batched(udp); return; }
+#endif
     union {
         struct cmsghdr align;
         unsigned char  buf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
@@ -488,6 +732,12 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     udp->recv_buf_size = rbs;
     udp->max_send_queue = cfg->max_send_queue ? cfg->max_send_queue : (256u * 1024u);
 
+    /* recv/sendmmsg batch size: 0 = default, clamp to [1, UDP_MMSG_MAX]. */
+    int batch = cfg->mmsg_batch > 0 ? cfg->mmsg_batch : UDP_MMSG_DEFAULT;
+    if (batch > UDP_MMSG_MAX) batch = UDP_MMSG_MAX;
+    if (batch < 1) batch = 1;
+    udp->mmsg_batch = batch;
+
     int family = cfg->family;
     struct addrinfo *ai = NULL;
     if (cfg->bind_addr) {
@@ -590,6 +840,14 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         udp->last_error = KL_ERR_ALLOC;
         goto fail;
     }
+
+#if defined(__linux__)
+    /* Allocate the (small) sendmmsg batch upfront; the recvmmsg batch (which
+     * carries the large data block) is allocated lazily in kl_udp_recv_start.
+     * Allocation failure just disables batching — it is an optimization. */
+    if (batch > 1)
+        udp->tx_batch = udp_tx_batch_new(udp->alloc, batch);
+#endif
     return 0;
 
 fail:
@@ -620,6 +878,10 @@ void kl_udp_free(KlUdp *udp) {
         kl_free(udp->alloc, udp->recv_buf, udp->recv_buf_size);
         udp->recv_buf = NULL;
     }
+#if defined(__linux__)
+    if (udp->rx_batch) { udp_rx_batch_free(udp->alloc, udp->rx_batch); udp->rx_batch = NULL; }
+    if (udp->tx_batch) { udp_tx_batch_free(udp->alloc, udp->tx_batch); udp->tx_batch = NULL; }
+#endif
     if (udp->fd >= 0) {
         close(udp->fd);
         udp->fd = -1;
@@ -647,6 +909,13 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
     udp->on_recv = on_recv;
     udp->recv_ud = user_data;
     udp->recv_active = 1;
+#if defined(__linux__)
+    /* Lazily allocate the recvmmsg batch (large: mmsg_batch × recv_buf_size).
+     * Failure just leaves rx_batch NULL → the per-datagram path is used. */
+    if (udp->mmsg_batch > 1 && !udp->rx_batch)
+        udp->rx_batch = udp_rx_batch_new(udp->alloc, udp->mmsg_batch,
+                                         udp->recv_buf_size);
+#endif
     udp_update_interest(udp);
     if (!(udp->want_mask & KL_EVENT_READ)) {   /* watcher registration failed */
         udp->recv_active = 0;

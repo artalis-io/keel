@@ -52,6 +52,7 @@ typedef struct {
     int          reuse_port;     /**< SO_REUSEPORT for worker fan-out. */
     int          so_rcvbuf;      /**< SO_RCVBUF kernel receive buffer in bytes (0 = OS default). */
     int          so_sndbuf;      /**< SO_SNDBUF kernel send buffer in bytes (0 = OS default). */
+    int          mmsg_batch;     /**< recvmmsg/sendmmsg batch size (Linux); 0 = default (16). */
     int          broadcast;      /**< SO_BROADCAST — allow broadcast replies (IPv4). */
     int          multicast_ttl;  /**< IP_MULTICAST_TTL / IPV6_MULTICAST_HOPS for multicast sends; 0 = default. */
     int          multicast_disable_loop; /**< 1 = disable local loopback of sent multicast. */
