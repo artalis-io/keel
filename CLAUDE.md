@@ -6,7 +6,7 @@
 make              # build libkeel.a (epoll on Linux, kqueue on macOS)
 make BACKEND=poll # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 671 unit tests
+make test         # build and run all 811 unit tests
 make examples     # build all 23 example programs (25 with TLS, 27 with compression)
 make bench        # build bench server + run 4-endpoint wrk benchmark suite
 make debug        # debug build with ASan + UBSan (recompiles from clean)
@@ -51,7 +51,7 @@ make clean        # remove all build artifacts
 15. **async** — Connection suspension for async operations (uses KlEventCtx)
 16. **thread_pool** — Worker thread pool with pipe-based event loop wakeup
 17. **url** — URL parser (http/https/ws/wss, IPv6, CRLF injection guard)
-18. **client** — HTTP/1.1 client: sync (blocking) + async (event-driven via KlEventCtx), response streaming (push) + request streaming (chunked pull)
+18. **client** — HTTP/1.1 client: sync (blocking) + async (event-driven via KlEventCtx), response streaming (push) + request streaming (chunked pull). Async connect uses Happy Eyeballs (RFC 8305): races the resolved address list with a configurable Connection Attempt Delay, first handshake wins, plus an overall request deadline timer
 19. **websocket_client** — Async WebSocket client with masked frames (RFC 6455)
 20. **h2_client** — HTTP/2 client with pluggable session vtable (multiplexed streams)
 21. **resolver** — Pluggable async DNS resolver vtable (bring-your-own backend)
@@ -121,7 +121,7 @@ make clean        # remove all build artifacts
 | `KlClientHeader` | `client.h` | Request/response header: name, value |
 | `KlClientResponse` | `client.h` | Response: status, body, headers, allocator (by value) |
 | `KlProxyConfig` | `client.h` | Proxy config: host, port, auth (borrowed pointers) |
-| `KlClientConfig` | `client.h` | Client config: timeout_ms, max_response_size, TLS, proxy |
+| `KlClientConfig` | `client.h` | Client config: timeout_ms, max_response_size, TLS, proxy, connect_attempt_delay_ms (Happy Eyeballs) |
 | `KlClient` | `client.h` | Opaque async client handle |
 | `KlClientDoneFn` | `client.h` | Async completion callback |
 | `KlClientStreamCfg` | `client.h` | Per-request streaming config: response push callbacks + request pull callback |

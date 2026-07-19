@@ -214,7 +214,8 @@ See `examples/unix_socket_server.c` for a server demonstrating all three.
 - **Backpressure write buffer** — `KlDrain` buffers unsent data on would-block, flushes on write-readiness
 - **Timer scheduling** — one-shot timers on the event loop via min-heap
 - **Error diagnostics** — sqlite3-style per-struct error codes with `kl_strerror()`
-- **Pluggable DNS resolver** — bring your own async DNS (c-ares, thread-pool wrapper), with caching decorator
+- **Pluggable DNS resolver** — bring your own async DNS (c-ares, thread-pool wrapper), with caching decorator; ships a built-in async resolver (dual-family A+AAAA, RFC 8305)
+- **Happy Eyeballs client connect** — async client races the resolved address list (RFC 8305): configurable Connection Attempt Delay, first handshake wins, overall request deadline
 - **Server load introspection** — `kl_server_stats()` for connection counts, enabling user-space load-shedding middleware
 - **Pre-allocated connection pool** — no per-request malloc, no fragmentation under load
 - **Pluggable allocator** — bring your own arena/pool/tracking allocator
@@ -762,6 +763,7 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 | `test_body_reader` | 30 | Buffer + multipart: limits, spanning, binary, edge cases |
 | `test_chunked` | 17 | Chunked decoder: single/multi chunk, hex, extensions, trailers, errors |
 | `test_client` | 18 | Sync/async client, response free, TLS config, error handling |
+| `test_client_happy_eyeballs` | 6 | Happy Eyeballs (RFC 8305): first-wins, refused-fallback, all-fail, single-address, slow-first race, deadline timer |
 | `test_client_pool` | 24 | Connection pool: acquire/release, per-host limits, idle expiry, stale detection |
 | `test_client_stream` | 27 | Response streaming (push), request streaming (pull), chunked body production |
 | `test_compress` | 16 | Compression vtable, buffer + streaming, miniz gzip backend |

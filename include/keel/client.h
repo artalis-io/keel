@@ -41,6 +41,8 @@
 #define KL_CLIENT_CHUNK_HDR_SIZE     16    /**< Fits "FFFFFFFFFFFFFFFF\\r\\n" */
 /** @brief Final chunk length. */
 #define KL_CLIENT_FINAL_CHUNK_LEN    5     /**< "0\\r\\n\\r\\n" */
+/** @brief Default Happy Eyeballs Connection Attempt Delay, ms (RFC 8305 §5). */
+#define KL_CLIENT_CONNECT_ATTEMPT_DELAY_MS 250
 
 /* ── Proxy ────────────────────────────────────────────────────────── */
 
@@ -78,6 +80,7 @@ typedef struct {
     int              system_dns;        /**< Async client: force blocking getaddrinfo (preserves /etc/hosts + search domains). Default 0 = built-in async DNS. Ignored when `resolver` is set. */
     KlDecompressConfig *decompress;     /**< Response decompression (NULL = no decompression) */
     KlProxyConfig   *proxy;             /**< HTTP proxy (NULL = direct connection) */
+    int              connect_attempt_delay_ms; /**< Async: Happy Eyeballs Connection Attempt Delay (RFC 8305). 0 = default 250ms. A large value degenerates to sequential connect. */
 } KlClientConfig;
 
 /* ── Streaming types ──────────────────────────────────────────────── */

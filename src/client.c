@@ -12,6 +12,7 @@
 #include <keel/decompress.h>
 #include <keel/dns_resolver.h>
 #include <keel/parser.h>
+#include <keel/timer.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1087,6 +1088,9 @@ typedef enum {
     KL_HCLIENT_DONE
 } KlClientState;
 
+/* One in-flight racing connect socket (Happy Eyeballs). */
+typedef struct { int fd; int active; } KlConnAttempt;
+
 struct KlClient {
     int                fd;
     KlClientState      state;
@@ -1112,6 +1116,20 @@ struct KlClient {
     KlResolver        *resolver;
     KlResolveReq      *resolve_req;
     int                owns_resolver;   /* 1 = auto-created, destroy on teardown */
+
+    /* Happy Eyeballs — racing connect over the resolved address list (RFC 8305).
+     * Only active on the async resolver path (conn_racing=1); the UNIX and sync
+     * getaddrinfo paths stay single-fd. */
+    KlConnAttempt      conn_attempts[KL_RESOLVE_MAX_ADDRS];
+    KlResolveResult    conn_addrs;      /* full list, copied from the resolver */
+    int                conn_next;       /* index of next address to dial */
+    int                conn_pending;    /* number of in-flight attempts */
+    int                conn_racing;     /* 1 = HE attempts in conn_attempts[] */
+    int64_t            conn_delay_timer;/* Connection Attempt Delay timer (-1) */
+    int64_t            deadline_timer;  /* overall request deadline timer (-1) */
+    int                timeout_ms;      /* overall deadline (0 = none) */
+    int                connect_delay_ms;/* Connection Attempt Delay */
+    KlError            conn_last_err;   /* last connect error, for the all-fail case */
 
     /* Completion callback */
     KlClientDoneFn     on_done;
@@ -1161,6 +1179,15 @@ static void async_handle_proxy_handshake(KlClient *c);
 static int  start_connect(KlClient *c, const struct sockaddr *addr,
                            socklen_t addrlen, int family, int socktype,
                            int protocol);
+/* Happy Eyeballs helpers (defined below start_connect) */
+static void he_proceed_after_connect(KlClient *c);
+static void he_start_next(KlClient *c);
+static void he_win(KlClient *c, int fd);
+static void he_on_writable(KlClient *c, int fd);
+static void he_close_attempts(KlClient *c, int keep_fd);
+static void he_cancel_timers(KlClient *c);
+static void he_on_deadline(void *user_data);
+static void he_on_delay(void *user_data);
 
 /* ── Build request into heap buffer ──────────────────────────────── */
 
@@ -1371,7 +1398,197 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
     return 0;
 }
 
+/* ── Happy Eyeballs — racing connect over the resolved list (RFC 8305) ─── */
+
+/* Cancel the Connection Attempt Delay + overall deadline timers (idempotent). */
+static void he_cancel_timers(KlClient *c)
+{
+    if (c->conn_delay_timer >= 0) {
+        kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
+        c->conn_delay_timer = -1;
+    }
+    if (c->deadline_timer >= 0) {
+        kl_timer_cancel(c->ev_ctx, c->deadline_timer);
+        c->deadline_timer = -1;
+    }
+}
+
+/* Close every active racing attempt except keep_fd (the winner, or -1 for all). */
+static void he_close_attempts(KlClient *c, int keep_fd)
+{
+    for (int i = 0; i < c->conn_next; i++) {
+        if (c->conn_attempts[i].active && c->conn_attempts[i].fd != keep_fd) {
+            kl_watcher_del(c->ev_ctx, c->conn_attempts[i].fd);
+            close(c->conn_attempts[i].fd);
+            c->conn_attempts[i].active = 0;
+        }
+    }
+    c->conn_pending = 0;
+}
+
+/* A winner has connected: stop the stagger, drop the losers, adopt its fd, and
+ * hand off to the shared post-connect path. The overall deadline stays armed to
+ * bound the remaining TLS/send/recv. */
+static void he_win(KlClient *c, int fd)
+{
+    if (c->conn_delay_timer >= 0) {
+        kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
+        c->conn_delay_timer = -1;
+    }
+    /* Mark the winner inactive so he_close_attempts won't touch its fd. */
+    for (int i = 0; i < c->conn_next; i++)
+        if (c->conn_attempts[i].active && c->conn_attempts[i].fd == fd)
+            c->conn_attempts[i].active = 0;
+    he_close_attempts(c, fd);
+    c->fd = fd;
+    he_proceed_after_connect(c);
+}
+
+/* Arm the Connection Attempt Delay to stagger the next address, if any remain. */
+static void he_arm_delay(KlClient *c)
+{
+    if (c->conn_delay_timer >= 0) {
+        kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
+        c->conn_delay_timer = -1;
+    }
+    if (c->state == KL_HCLIENT_CONNECTING && c->conn_next < c->conn_addrs.naddrs)
+        c->conn_delay_timer = kl_timer_add(c->ev_ctx,
+                                           (uint64_t)c->connect_delay_ms,
+                                           he_on_delay, c);
+}
+
+/* Start a nonblocking connect to address index idx. Returns 0 if an attempt is
+ * now in flight (or already won), -1 on a hard local failure (try the next). */
+static int he_new_attempt(KlClient *c, int idx)
+{
+    struct sockaddr *sa = (struct sockaddr *)&c->conn_addrs.addrs[idx];
+    socklen_t sl = c->conn_addrs.addrlens[idx];
+    int fam = c->conn_addrs.addrs[idx].ss_family;
+
+    int fd = socket(fam, c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
+    if (fd < 0)
+        return -1;
+
+#ifdef SO_NOSIGPIPE
+    {
+        int on = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    }
+#endif
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    int rc = connect(fd, sa, sl);
+    if (rc < 0 && errno != EINPROGRESS) {
+        c->conn_last_err = KL_ERR_CONNECT;
+        close(fd);
+        return -1;
+    }
+
+    if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    c->conn_attempts[idx].fd = fd;
+    c->conn_attempts[idx].active = 1;
+    c->conn_pending++;
+
+    if (rc == 0)            /* connected immediately (e.g. loopback) */
+        he_win(c, fd);
+    return 0;
+}
+
+/* Advance the cursor and start the next viable address; skip hard local
+ * failures without consuming the delay. Complete with an error when the list is
+ * exhausted and nothing is pending. */
+static void he_start_next(KlClient *c)
+{
+    while (c->state == KL_HCLIENT_CONNECTING &&
+           c->conn_next < c->conn_addrs.naddrs) {
+        int idx = c->conn_next++;
+        if (he_new_attempt(c, idx) == 0) {
+            he_arm_delay(c);   /* schedule the next staggered attempt */
+            return;
+        }
+    }
+    if (c->state == KL_HCLIENT_CONNECTING && c->conn_pending == 0) {
+        c->error = (c->conn_last_err != KL_ERR_NONE) ? c->conn_last_err
+                                                     : KL_ERR_CONNECT;
+        async_complete_error(c);
+    }
+}
+
+/* Connection Attempt Delay fired: start the next address if we're still racing. */
+static void he_on_delay(void *user_data)
+{
+    KlClient *c = user_data;
+    c->conn_delay_timer = -1;
+    if (c->state == KL_HCLIENT_CONNECTING)
+        he_start_next(c);
+}
+
+/* Overall request deadline fired: fail the whole request (covers connect racing
+ * and the otherwise-untimed TLS handshake / send / recv). */
+static void he_on_deadline(void *user_data)
+{
+    KlClient *c = user_data;
+    c->deadline_timer = -1;
+    if (c->state == KL_HCLIENT_DONE)
+        return;
+    he_close_attempts(c, -1);    /* drop any racing sockets */
+    c->error = KL_ERR_TIMEOUT;
+    async_complete_error(c);
+}
+
+/* One racing attempt failed: drop it, then either fast-start the next address
+ * (a failure must not wait out the delay, §5) or complete when all are gone. */
+static void he_fail_attempt(KlClient *c, int fd)
+{
+    for (int i = 0; i < c->conn_next; i++) {
+        if (c->conn_attempts[i].active && c->conn_attempts[i].fd == fd) {
+            kl_watcher_del(c->ev_ctx, fd);
+            close(fd);
+            c->conn_attempts[i].active = 0;
+            c->conn_pending--;
+            break;
+        }
+    }
+    c->conn_last_err = KL_ERR_CONNECT;
+
+    if (c->conn_next < c->conn_addrs.naddrs)
+        he_start_next(c);
+    else if (c->conn_pending == 0) {
+        c->error = c->conn_last_err;
+        async_complete_error(c);
+    }
+}
+
+/* A racing socket became writable: SO_ERROR==0 wins the race, else it failed. */
+static void he_on_writable(KlClient *c, int fd)
+{
+    int err = 0;
+    socklen_t errlen = sizeof(err);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+    if (err == 0)
+        he_win(c, fd);
+    else
+        he_fail_attempt(c, fd);
+}
+
 /* ── Async DNS resolve callback ──────────────────────────────────── */
+
+/* Arm the overall request deadline (0 = none). */
+static void he_arm_deadline(KlClient *c)
+{
+    if (c->timeout_ms > 0)
+        c->deadline_timer = kl_timer_add(c->ev_ctx, (uint64_t)c->timeout_ms,
+                                         he_on_deadline, c);
+}
 
 static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
                           int error, void *user_data)
@@ -1386,14 +1603,18 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
         return;
     }
 
-    /* Use the preferred address (addrs[0]); Happy Eyeballs over the full list
-     * lands in a later phase. */
-    if (start_connect(c, (const struct sockaddr *)&result->addrs[0],
-                       result->addrlens[0], result->addrs[0].ss_family,
-                       result->ai_socktype, result->ai_protocol) < 0) {
-        c->error = KL_ERR_CONNECT;
-        async_complete_error(c);
-    }
+    /* Copy the whole (family-interleaved, preferred-first) list and race it. */
+    c->conn_addrs = *result;
+    if (c->conn_addrs.naddrs > KL_RESOLVE_MAX_ADDRS)
+        c->conn_addrs.naddrs = KL_RESOLVE_MAX_ADDRS;
+    c->conn_next = 0;
+    c->conn_pending = 0;
+    c->conn_racing = 1;
+    c->conn_last_err = KL_ERR_NONE;
+    c->state = KL_HCLIENT_CONNECTING;
+
+    he_arm_deadline(c);
+    he_start_next(c);
 }
 
 /* Select the resolver for an async request. Precedence: explicit cfg->resolver
@@ -1415,6 +1636,8 @@ static KlResolver *client_pick_resolver(const KlClientConfig *cfg,
 
 /* ── State: CONNECTING ───────────────────────────────────────────── */
 
+/* Single-fd connect completion (UNIX socket + sync getaddrinfo paths). The
+ * Happy Eyeballs path uses he_on_writable instead. */
 static void async_handle_connecting(KlClient *c)
 {
     int err = 0;
@@ -1425,7 +1648,14 @@ static void async_handle_connecting(KlClient *c)
         async_complete_error(c);
         return;
     }
+    he_proceed_after_connect(c);
+}
 
+/* Shared post-connect path: c->fd is a connected socket (Happy Eyeballs winner,
+ * or the single-fd UNIX / sync-getaddrinfo connect). Advances to the proxy /
+ * TLS / sending state. */
+static void he_proceed_after_connect(KlClient *c)
+{
     /* Proxy: HTTPS target needs CONNECT tunnel first */
     if (c->is_proxied && c->is_tunnel) {
         if (build_connect_request(c, c->host_buf, c->target_port,
@@ -1820,14 +2050,18 @@ static void async_handle_receiving(KlClient *c)
 static void async_on_event(int fd, KlEventMask ready, void *user_data)
 {
     KlClient *c = user_data;
-    (void)fd;
     (void)ready;
 
     switch (c->state) {
     case KL_HCLIENT_RESOLVING:
         break;  /* DNS resolution handled by resolver callback, not watcher */
     case KL_HCLIENT_CONNECTING:
-        async_handle_connecting(c);
+        /* Happy Eyeballs races several fds — dispatch by the fd that fired.
+         * The single-fd UNIX / sync-getaddrinfo path uses c->fd directly. */
+        if (c->conn_racing)
+            he_on_writable(c, fd);
+        else
+            async_handle_connecting(c);
         break;
     case KL_HCLIENT_PROXY_CONNECTING:
         async_handle_proxy_connecting(c);
@@ -1866,6 +2100,7 @@ static int server_wants_close(const KlClientResponse *resp)
 
 static void async_complete_success(KlClient *c)
 {
+    he_cancel_timers(c);
     kl_watcher_del(c->ev_ctx, c->fd);
 
     if (c->pool) {
@@ -1913,6 +2148,7 @@ static void async_complete_success(KlClient *c)
 
 static void async_complete_error(KlClient *c)
 {
+    he_cancel_timers(c);
     if (c->fd >= 0)
         kl_watcher_del(c->ev_ctx, c->fd);
 
@@ -2080,6 +2316,15 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->user_data = user_data;
     memcpy(c->host_buf, host_buf, parsed.host_len + 1);
 
+    /* Happy Eyeballs / deadline timer state (timer ids: -1 = unset). */
+    c->conn_delay_timer = -1;
+    c->deadline_timer = -1;
+    c->timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
+                                                 : KL_CLIENT_DEFAULT_TIMEOUT_MS;
+    c->connect_delay_ms = (cfg && cfg->connect_attempt_delay_ms > 0)
+                              ? cfg->connect_attempt_delay_ms
+                              : KL_CLIENT_CONNECT_ATTEMPT_DELAY_MS;
+
     /* Proxy state */
     c->is_proxied = is_proxied;
     c->is_tunnel = is_tunnel;
@@ -2157,6 +2402,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             kl_free(alloc, c, sizeof(KlClient));
             return NULL;
         }
+        he_arm_deadline(c);   /* bound the connect/send/recv (single-fd path) */
         return c;
     }
 
@@ -2238,6 +2484,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     }
     freeaddrinfo(res);
 
+    he_arm_deadline(c);   /* bound the connect/send/recv (single-fd path) */
     return c;
 }
 
@@ -2284,6 +2531,10 @@ void kl_client_cancel(KlClient *client)
         client->resolver->cancel(client->resolve_req);
         client->resolve_req = NULL;
     }
+
+    /* Cancel Happy Eyeballs racing (timers + any in-flight attempt sockets). */
+    he_cancel_timers(client);
+    he_close_attempts(client, -1);
 
     if (client->fd >= 0) {
         kl_watcher_del(client->ev_ctx, client->fd);
