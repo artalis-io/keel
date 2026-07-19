@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -68,6 +69,7 @@ static int g_answer_a;      /* reply with an A record for A queries   */
 static int g_answer_aaaa;   /* reply with an AAAA record for AAAA queries */
 static int g_rcode;         /* rcode to set (0 = NOERROR, 3 = NXDOMAIN) */
 static int g_silent;        /* drop queries (to exercise timeout)      */
+static int g_truncate;      /* reply with the TC bit set (force TCP fallback) */
 static int g_queries;
 static int g_flip_case;     /* echo the question name with each letter case-flipped */
 static int g_wrong_question;/* echo a different question entirely (spoof) */
@@ -78,6 +80,73 @@ static uint8_t g_last_q[128];    /* last query's question-section bytes */
 static size_t g_last_q_len;
 static int g_last_arcount;       /* last query's ARCOUNT (1 = EDNS0 OPT present) */
 static char g_last_qname[256];   /* last query's decoded name (lowercased) */
+
+/* Parse a DNS query's question: set *qtype, return qend (0 on malformed). */
+static size_t dns_q_parse(const uint8_t *q, size_t len, int *qtype) {
+    size_t off = 12;
+    while (off < len && q[off] != 0) {
+        if (q[off] & 0xC0) return 0;             /* no compression in our queries */
+        off += 1 + q[off];
+    }
+    off += 1;                                    /* root label */
+    if (off + 4 > len) return 0;
+    *qtype = (q[off] << 8) | q[off + 1];
+    return off + 4;                              /* end of question */
+}
+
+/* Emit a DNS response for query q[0..qend) into resp[]; returns byte count.
+ * tc: set the TC (truncation) bit and emit no answer (forces a TCP retry). */
+static size_t dns_write_response(const uint8_t *q, size_t qend, int qtype,
+                                 uint8_t *resp, int tc) {
+    size_t n = 0;
+    resp[0] = q[0]; resp[1] = q[1];              /* echo id */
+    resp[2] = (uint8_t)(tc ? 0x83 : 0x81);       /* QR + RD (+ TC when truncated) */
+    resp[3] = (uint8_t)(0x80 | (g_rcode & 0x0F));/* RA + rcode */
+    resp[4] = 0; resp[5] = 1;                    /* qdcount */
+    int answer = !tc && ((qtype == KL_DNS_TYPE_A && g_answer_a) ||
+                         (qtype == KL_DNS_TYPE_AAAA && g_answer_aaaa));
+    resp[6] = 0; resp[7] = (uint8_t)(answer ? 1 : 0);   /* ancount */
+    resp[8] = 0; resp[9] = 0; resp[10] = 0; resp[11] = 0;
+    n = 12;
+    if (g_wrong_question) {
+        /* Emit a fixed, different question ("evil" A IN) — right id, wrong name. */
+        static const uint8_t evilq[] = { 0x04,'e','v','i','l',0x00, 0x00,0x01, 0x00,0x01 };
+        memcpy(resp + n, evilq, sizeof(evilq));
+        n += sizeof(evilq);
+    } else {
+        memcpy(resp + n, q + 12, qend - 12);     /* echo question */
+        if (g_flip_case) {                        /* tamper: flip case of name letters */
+            size_t p = n;
+            while (resp[p] != 0) {               /* walk labels */
+                uint8_t lab = resp[p++];
+                for (uint8_t k = 0; k < lab; k++) {
+                    uint8_t c = resp[p + k];
+                    uint8_t low = (uint8_t)(c | 0x20);
+                    if (low >= 'a' && low <= 'z')
+                        resp[p + k] = (uint8_t)(c ^ 0x20);
+                }
+                p += lab;
+            }
+        }
+        n += qend - 12;
+    }
+    if (answer) {
+        resp[n++] = 0xc0; resp[n++] = 0x0c;      /* name → question */
+        resp[n++] = (uint8_t)(qtype >> 8); resp[n++] = (uint8_t)(qtype & 0xFF);
+        resp[n++] = 0x00; resp[n++] = 0x01;      /* IN */
+        resp[n++] = 0; resp[n++] = 0; resp[n++] = 0x01; resp[n++] = 0x00; /* ttl */
+        if (qtype == KL_DNS_TYPE_A) {
+            resp[n++] = 0; resp[n++] = 4;
+            resp[n++] = 10; resp[n++] = 1; resp[n++] = 2; resp[n++] = 3;
+        } else {
+            resp[n++] = 0; resp[n++] = 16;
+            memset(resp + n, 0, 16);
+            resp[n + 15] = 1;                    /* ::1 */
+            n += 16;
+        }
+    }
+    return n;
+}
 
 /* Parse qtype from the question and emit a canned response. */
 static void mock_ns(KlUdpServer *s, const void *data, size_t len,
@@ -128,55 +197,106 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
     if (g_silent_aaaa && qtype == KL_DNS_TYPE_AAAA) return;   /* drop AAAA only */
 
     uint8_t resp[512];
-    size_t n = 0;
-    resp[0] = q[0]; resp[1] = q[1];          /* echo id */
-    resp[2] = 0x81;                          /* QR + RD */
-    resp[3] = (uint8_t)(0x80 | (g_rcode & 0x0F));  /* RA + rcode */
-    resp[4] = 0; resp[5] = 1;                /* qdcount */
-    int answer = (qtype == KL_DNS_TYPE_A && g_answer_a) ||
-                 (qtype == KL_DNS_TYPE_AAAA && g_answer_aaaa);
-    resp[6] = 0; resp[7] = (uint8_t)(answer ? 1 : 0);   /* ancount */
-    resp[8] = 0; resp[9] = 0; resp[10] = 0; resp[11] = 0;
-    n = 12;
-    if (g_wrong_question) {
-        /* Emit a fixed, different question ("evil" A IN) — right id, wrong name. */
-        static const uint8_t evilq[] = { 0x04,'e','v','i','l',0x00, 0x00,0x01, 0x00,0x01 };
-        memcpy(resp + n, evilq, sizeof(evilq));
-        n += sizeof(evilq);
-    } else {
-        memcpy(resp + n, q + 12, qend - 12); /* echo question */
-        if (g_flip_case) {                    /* tamper: flip case of name letters */
-            size_t p = n;
-            while (resp[p] != 0) {            /* walk labels */
-                uint8_t lab = resp[p++];
-                for (uint8_t k = 0; k < lab; k++) {
-                    uint8_t c = resp[p + k];
-                    uint8_t low = (uint8_t)(c | 0x20);
-                    if (low >= 'a' && low <= 'z')
-                        resp[p + k] = (uint8_t)(c ^ 0x20);
-                }
-                p += lab;
-            }
-        }
-        n += qend - 12;
-    }
-
-    if (answer) {
-        resp[n++] = 0xc0; resp[n++] = 0x0c;  /* name → question */
-        resp[n++] = (uint8_t)(qtype >> 8); resp[n++] = (uint8_t)(qtype & 0xFF);
-        resp[n++] = 0x00; resp[n++] = 0x01;  /* IN */
-        resp[n++] = 0; resp[n++] = 0; resp[n++] = 0x01; resp[n++] = 0x00; /* ttl */
-        if (qtype == KL_DNS_TYPE_A) {
-            resp[n++] = 0; resp[n++] = 4;
-            resp[n++] = 10; resp[n++] = 1; resp[n++] = 2; resp[n++] = 3;
-        } else {
-            resp[n++] = 0; resp[n++] = 16;
-            memset(resp + n, 0, 16);
-            resp[n + 15] = 1;                /* ::1 */
-            n += 16;
-        }
-    }
+    size_t n = dns_write_response(q, qend, qtype, resp, g_truncate);
     kl_udp_server_reply(s, resp, n, src, src_len);
+}
+
+/* ── Mock DNS-over-TCP server (event-loop driven, RFC 7766 framing) ─────── */
+
+#define MOCK_TCP_MAX 8
+typedef struct MockTcp MockTcp;
+typedef struct {
+    MockTcp      *m;
+    int           fd;
+    size_t        len;
+    unsigned char buf[4096];
+} MockTcpConn;
+
+struct MockTcp {
+    KlEventCtx  *ctx;
+    int          listen_fd;
+    int          accepts;        /* accepted connections (persistent-reuse assertion) */
+    int          drop_on_accept; /* close each connection immediately (simulate drop) */
+    MockTcpConn *conns[MOCK_TCP_MAX];
+    int          nconns;
+};
+
+static void mock_tcp_on_client(int fd, KlEventMask ready, void *ud) {
+    (void)ready;
+    MockTcpConn *c = ud;
+    ssize_t r = recv(fd, c->buf + c->len, sizeof(c->buf) - c->len, 0);
+    if (r <= 0)
+        return;                                  /* EOF / error — test tears down */
+    c->len += (size_t)r;
+
+    size_t off = 0;
+    while (c->len - off >= 2) {                   /* frame by the 2-byte length prefix */
+        size_t mlen = ((size_t)c->buf[off] << 8) | c->buf[off + 1];
+        if (c->len - off - 2 < mlen)
+            break;                               /* incomplete frame — wait for more */
+        const uint8_t *q = c->buf + off + 2;
+        int qtype = 0;
+        size_t qend = dns_q_parse(q, mlen, &qtype);
+        if (qend) {
+            uint8_t resp[512];
+            size_t n = dns_write_response(q, qend, qtype, resp, 0);
+            unsigned char framed[2 + 512];
+            framed[0] = (uint8_t)(n >> 8); framed[1] = (uint8_t)(n & 0xFF);
+            memcpy(framed + 2, resp, n);
+            ssize_t w = send(fd, framed, n + 2, 0);
+            (void)w;
+        }
+        off += 2 + mlen;
+    }
+    if (off > 0) { memmove(c->buf, c->buf + off, c->len - off); c->len -= off; }
+}
+
+static void mock_tcp_on_listen(int fd, KlEventMask ready, void *ud) {
+    (void)ready;
+    MockTcp *m = ud;
+    int cfd = accept(fd, NULL, NULL);
+    if (cfd < 0)
+        return;
+    m->accepts++;
+    int fl = fcntl(cfd, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(cfd, F_SETFL, fl | O_NONBLOCK);
+    if (m->drop_on_accept || m->nconns >= MOCK_TCP_MAX) { close(cfd); return; }
+    MockTcpConn *c = calloc(1, sizeof(*c));
+    if (!c) { close(cfd); return; }
+    c->m = m; c->fd = cfd;
+    m->conns[m->nconns++] = c;
+    kl_watcher_add(m->ctx, cfd, KL_EVENT_READ, mock_tcp_on_client, c);
+}
+
+/* Bind a TCP DNS listener on 127.0.0.1:port (the same port the UDP mock uses). */
+static int mock_tcp_start(MockTcp *m, KlEventCtx *ctx, int port) {
+    memset(m, 0, sizeof(*m));
+    m->ctx = ctx;
+    m->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (m->listen_fd < 0) return -1;
+    int one = 1;
+    setsockopt(m->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in a; memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(m->listen_fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+        close(m->listen_fd); return -1;
+    }
+    if (listen(m->listen_fd, 8) != 0) { close(m->listen_fd); return -1; }
+    int fl = fcntl(m->listen_fd, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(m->listen_fd, F_SETFL, fl | O_NONBLOCK);
+    return kl_watcher_add(ctx, m->listen_fd, KL_EVENT_READ, mock_tcp_on_listen, m);
+}
+
+static void mock_tcp_stop(MockTcp *m) {
+    for (int i = 0; i < m->nconns; i++) {
+        kl_watcher_del(m->ctx, m->conns[i]->fd);
+        close(m->conns[i]->fd);
+        free(m->conns[i]);
+    }
+    kl_watcher_del(m->ctx, m->listen_fd);
+    close(m->listen_fd);
 }
 
 static int             g_done;
@@ -195,6 +315,7 @@ static void reset_dns(void) {
     g_answer_a = g_answer_aaaa = 0; g_rcode = 0; g_silent = 0; g_queries = 0;
     g_flip_case = 0; g_wrong_question = 0; g_seen_n = 0; g_last_q_len = 0;
     g_last_arcount = 0; g_last_qname[0] = '\0'; g_silent_aaaa = 0;
+    g_truncate = 0;
     g_done = 0; g_err = 0; memset(&g_res, 0, sizeof(g_res));
 }
 
@@ -1006,6 +1127,108 @@ UTEST(dns, resolution_delay_does_not_stall_on_slow_family) {
     ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
 
     r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── DNS-over-TCP fallback (RFC 7766) ─────────────────────────────────── */
+
+/* A truncated (TC) UDP response makes the resolver retry over TCP and recover
+ * the answer from the mock TCP DNS server. */
+UTEST(dns, tcp_fallback) {
+    reset_dns();
+    g_answer_a = 1;                       /* TCP server answers A; AAAA has none */
+    g_truncate = 1;                       /* every UDP reply sets TC → force TCP */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 2000, 1);
+    ASSERT_TRUE(r != NULL);
+    MockTcp tcp;
+    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_udp_server_local_port(&ns)));
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_EQ(1, g_res.naddrs);           /* A recovered over TCP; AAAA empty */
+    ASSERT_EQ(AF_INET, g_res.addrs[0].ss_family);
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&g_res.addrs[0])->sin_addr, ip, sizeof(ip));
+    ASSERT_STREQ("10.1.2.3", ip);
+    ASSERT_TRUE(tcp.accepts >= 1);        /* the fallback actually opened a TCP conn */
+
+    r->destroy(r);
+    mock_tcp_stop(&tcp);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* The per-nameserver TCP connection is persistent: a second resolve reuses the
+ * connection cached from the first (single accept), and both A+AAAA legs of a
+ * single resolve pipeline over it. */
+UTEST(dns, tcp_persistent_reuse) {
+    reset_dns();
+    g_answer_a = 1; g_answer_aaaa = 1;    /* TCP answers both families */
+    g_truncate = 1;                       /* force both legs to TCP */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 2000, 1);
+    ASSERT_TRUE(r != NULL);
+    MockTcp tcp;
+    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_udp_server_local_port(&ns)));
+
+    /* First resolve — both families pipeline over one connection. */
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_EQ(2, g_res.naddrs);           /* A + AAAA both recovered over TCP */
+    ASSERT_EQ(1, tcp.accepts);            /* single connection for two pipelined legs */
+
+    /* Second resolve — reuses the idle-cached connection (still one accept). */
+    g_done = 0;
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(2, g_res.naddrs);
+    ASSERT_EQ(1, tcp.accepts);            /* persistent: no new connection */
+
+    r->destroy(r);
+    mock_tcp_stop(&tcp);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* If the TCP connection drops before answering, the pending legs settle empty
+ * and the resolve completes (best effort) rather than hanging. */
+UTEST(dns, tcp_drop) {
+    reset_dns();
+    g_answer_a = 1;
+    g_truncate = 1;                       /* force TCP */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 2000, 1);
+    ASSERT_TRUE(r != NULL);
+    MockTcp tcp;
+    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_udp_server_local_port(&ns)));
+    tcp.drop_on_accept = 1;               /* accept then immediately close */
+
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+    pump(&ctx, &g_done, 200);
+
+    ASSERT_EQ(1, g_done);                 /* completed, not hung */
+    ASSERT_EQ(0, g_res.naddrs);           /* no addresses recovered */
+    ASSERT_TRUE(tcp.accepts >= 1);
+
+    r->destroy(r);
+    mock_tcp_stop(&tcp);
     kl_udp_server_free(&ns);
     kl_event_ctx_free(&ctx);
 }

@@ -1,12 +1,16 @@
 #include <keel/dns_resolver.h>
 #include <keel/udp.h>
 #include <keel/timer.h>
+#include <keel/event_ctx.h>
+#include <keel/tls.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -19,6 +23,11 @@
 #define DNS_OPT_RR_LEN    11    /* wire length of a bare OPT RR */
 #define DNS_MAX_NS        3     /* nameservers tried (resolv.conf MAXNS) */
 #define DNS_PORT          53    /* default nameserver port */
+#define DNS_TCP_IDLE_MS   10000 /* close an idle persistent TCP connection (RFC 7766) */
+#define DNS_TCP_MSG_MAX   65535 /* max DNS-over-TCP message (2-byte length prefix) */
+
+/* DNS-over-TCP connection state. */
+enum { DNS_TCP_CLOSED = 0, DNS_TCP_CONNECTING, DNS_TCP_READY };
 #define DNS_MAX_SEARCH    6     /* search domains (resolv.conf MAXDNSRCH) */
 #define DNS_MAX_CAND      8     /* candidate names per resolve (search + bare) */
 
@@ -41,6 +50,8 @@ typedef struct {
     struct sockaddr_storage addrs[KL_RESOLVE_MAX_ADDRS]; /* collected addresses */
     socklen_t        addrlens[KL_RESOLVE_MAX_ADDRS];
     int              naddrs;
+    int              tcp_pending;  /* 1 = awaiting a DNS-over-TCP response */
+    int              tcp_ns;       /* nameserver index of the TCP connection, or -1 */
 } KlDnsLeg;
 
 typedef struct KlDnsReq {
@@ -66,7 +77,30 @@ typedef struct KlDnsReq {
 
 /* ── Resolver ────────────────────────────────────────────────────────── */
 
-typedef struct KlDnsResolver {
+typedef struct KlDnsResolver KlDnsResolver;
+
+/* Persistent DNS-over-TCP connection to one nameserver (RFC 7766). The TCP
+ * fallback path for truncated (TC-bit) responses; reused + pipelined, closed
+ * after DNS_TCP_IDLE_MS of inactivity. `tls` is NULL here (plain Do53/TCP) — it
+ * is the wrapping point for DNS-over-TLS. All I/O goes through the (fd, tls)
+ * helpers so DoT is a drop-in. */
+typedef struct {
+    KlDnsResolver *r;              /* owner (for callbacks) */
+    int            ns_idx;         /* which nameserver this connects to */
+    int            fd;             /* -1 = closed */
+    int            state;          /* DNS_TCP_CLOSED / CONNECTING / READY */
+    KlTls         *tls;            /* NULL = plaintext; set for DoT */
+    unsigned char *wbuf;           /* queued outbound framed queries */
+    size_t         wlen, wsent, wcap;
+    unsigned char *rbuf;           /* accumulated inbound bytes */
+    size_t         rlen, rcap;
+    size_t         rneed;          /* current message length from prefix (0 = need prefix) */
+    int64_t        idle_timer;     /* -1 = none */
+    int            watching;       /* 1 = watcher registered on fd */
+    KlEventMask    want;           /* current watcher interest */
+} KlDnsTcp;
+
+struct KlDnsResolver {
     KlResolver     base;           /* MUST be first for upcast */
     KlEventCtx    *ctx;
     KlAllocator   *alloc;
@@ -84,9 +118,10 @@ typedef struct KlDnsResolver {
     int            nsearch;
     int            ndots;                     /* threshold for search expansion */
     KlDnsReq      *inflight;
+    KlDnsTcp       tcp[DNS_MAX_NS]; /* per-nameserver persistent TCP fallback conns */
     unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
     size_t         rnd_off;       /* next unused byte in rnd_pool */
-} KlDnsResolver;
+};
 
 /* ── Entropy (pooled /dev/urandom — portable across glibc/musl/macOS/cosmo) ── */
 
@@ -318,6 +353,8 @@ static void dns_cancel_timers(KlDnsResolver *r, KlDnsReq *q) {
         }
 }
 
+static void dns_tcp_touch_idle_all(KlDnsResolver *r);
+
 static void dns_complete(KlDnsResolver *r, KlDnsReq *q,
                          const KlResolveResult *result, int error) {
     dns_cancel_timers(r, q);
@@ -329,6 +366,7 @@ static void dns_complete(KlDnsResolver *r, KlDnsReq *q,
      * (cancelled is honoured only to avoid a double-free if cancel() were
      * called re-entrantly during done — the free still happens exactly here.) */
     kl_free(r->alloc, q, sizeof(*q));
+    dns_tcp_touch_idle_all(r);   /* a TCP-pending leg may have just vanished */
 }
 
 static void dns_set_port(KlResolveResult *res, int port) {
@@ -470,6 +508,8 @@ static int dns_start_candidate(KlDnsResolver *r, KlDnsReq *q) {
         leg->timer_id = -1;
         leg->done = 0;
         leg->naddrs = 0;
+        leg->tcp_pending = 0;
+        leg->tcp_ns = -1;
         if (dns_transmit_leg(r, q, leg) == 0)
             any = 1;
         else
@@ -495,6 +535,12 @@ static void dns_on_leg_timer(void *ud) {
     KlDnsResolver *r = q->r;
     leg->timer_id = -1;
 
+    if (leg->tcp_pending) {                          /* DNS-over-TCP exchange timed out */
+        leg->tcp_pending = 0;
+        leg->tcp_ns = -1;
+        dns_leg_settle(r, q, leg);
+        return;
+    }
     if (leg->tries_left > 0) {                      /* retransmit (rotates nameserver) */
         if (dns_transmit_leg(r, q, leg) == 0)
             return;
@@ -535,9 +581,9 @@ static int dns_question_matches(const uint8_t *pkt, size_t len,
     return (off - 12 == eq_len) && (memcmp(pkt + 12, eq, eq_len) == 0);
 }
 
-/* Is the response from one of our configured nameservers? (The socket is
+/* The index of the configured nameserver `src` matches, or -1. (The socket is
  * unconnected for multi-NS, so this replaces the kernel peer filter.) */
-static int dns_src_is_ns(const KlDnsResolver *r, const struct sockaddr *src) {
+static int dns_ns_index(const KlDnsResolver *r, const struct sockaddr *src) {
     for (int i = 0; i < r->nns; i++) {
         const struct sockaddr *ns = (const struct sockaddr *)&r->ns[i];
         if (src->sa_family != ns->sa_family)
@@ -547,16 +593,289 @@ static int dns_src_is_ns(const KlDnsResolver *r, const struct sockaddr *src) {
             const struct sockaddr_in *b = (const struct sockaddr_in *)ns;
             if (a->sin_port == b->sin_port &&
                 a->sin_addr.s_addr == b->sin_addr.s_addr)
-                return 1;
+                return i;
         } else if (src->sa_family == AF_INET6) {
             const struct sockaddr_in6 *a = (const struct sockaddr_in6 *)src;
             const struct sockaddr_in6 *b = (const struct sockaddr_in6 *)ns;
             if (a->sin6_port == b->sin6_port &&
                 memcmp(&a->sin6_addr, &b->sin6_addr, sizeof(a->sin6_addr)) == 0)
-                return 1;
+                return i;
         }
     }
+    return -1;
+}
+
+/* ── DNS-over-TCP fallback (RFC 7766): persistent, pipelined per-NS ─────── */
+
+static void dns_tcp_on_event(int fd, KlEventMask mask, void *ud);
+
+/* Transport read/write — plaintext today; the tls branch is the DoT hook. */
+static ssize_t dns_tcp_write(KlDnsTcp *t, const void *b, size_t n) {
+    if (t->tls)
+        return t->tls->write(t->tls, t->fd, b, n);
+    ssize_t r;
+    do { r = send(t->fd, b, n, 0); } while (r < 0 && errno == EINTR);
+    return r;
+}
+static ssize_t dns_tcp_read(KlDnsTcp *t, void *b, size_t n) {
+    if (t->tls)
+        return t->tls->read(t->tls, t->fd, b, n);
+    ssize_t r;
+    do { r = recv(t->fd, b, n, 0); } while (r < 0 && errno == EINTR);
+    return r;
+}
+
+/* Number of legs still awaiting a response on this nameserver's connection. */
+static int dns_tcp_pending_on(KlDnsResolver *r, int ns_idx) {
+    int n = 0;
+    for (KlDnsReq *q = r->inflight; q; q = q->next)
+        for (int i = 0; i < 2; i++)
+            if (q->legs[i].tcp_pending && q->legs[i].tcp_ns == ns_idx)
+                n++;
+    return n;
+}
+
+static void dns_tcp_close(KlDnsResolver *r, KlDnsTcp *t) {
+    if (t->idle_timer >= 0) { kl_timer_cancel(r->ctx, t->idle_timer); t->idle_timer = -1; }
+    if (t->watching)        { kl_watcher_del(r->ctx, t->fd); t->watching = 0; }
+    if (t->tls)             { t->tls->destroy(t->tls); t->tls = NULL; }
+    if (t->fd >= 0)         { close(t->fd); t->fd = -1; }
+    if (t->wbuf) { kl_free(r->alloc, t->wbuf, t->wcap); t->wbuf = NULL; t->wcap = 0; }
+    if (t->rbuf) { kl_free(r->alloc, t->rbuf, t->rcap); t->rbuf = NULL; t->rcap = 0; }
+    t->wlen = t->wsent = t->rlen = t->rneed = 0;
+    t->state = DNS_TCP_CLOSED;
+    t->want = 0;
+}
+
+/* Reconcile watcher interest: READ always; WRITE while connecting or unsent. */
+static void dns_tcp_update_interest(KlDnsResolver *r, KlDnsTcp *t) {
+    if (!t->watching) return;
+    KlEventMask want = KL_EVENT_READ;
+    if (t->state == DNS_TCP_CONNECTING || t->wsent < t->wlen)
+        want |= KL_EVENT_WRITE;
+    if (want != t->want && kl_watcher_mod(r->ctx, t->fd, want) == 0)
+        t->want = want;
+}
+
+static void dns_tcp_on_idle(void *ud) {
+    KlDnsTcp *t = ud;
+    t->idle_timer = -1;
+    if (dns_tcp_pending_on(t->r, t->ns_idx) == 0 && t->wlen == t->wsent)
+        dns_tcp_close(t->r, t);
+}
+
+/* Arm the idle-close timer when the connection has no pending work; cancel it
+ * while busy. */
+static void dns_tcp_arm_idle(KlDnsResolver *r, KlDnsTcp *t) {
+    if (t->fd < 0) return;
+    int busy = dns_tcp_pending_on(r, t->ns_idx) > 0 || t->wlen > t->wsent;
+    if (busy) {
+        if (t->idle_timer >= 0) { kl_timer_cancel(r->ctx, t->idle_timer); t->idle_timer = -1; }
+    } else if (t->idle_timer < 0) {
+        t->idle_timer = kl_timer_add(r->ctx, DNS_TCP_IDLE_MS, dns_tcp_on_idle, t);
+    }
+}
+
+/* Re-evaluate idle state of every open connection (after a request completes and
+ * a pending leg may have vanished). */
+static void dns_tcp_touch_idle_all(KlDnsResolver *r) {
+    for (int i = 0; i < r->nns; i++)
+        if (r->tcp[i].fd >= 0)
+            dns_tcp_arm_idle(r, &r->tcp[i]);
+}
+
+/* Close the connection and settle every leg that was waiting on it (empty). The
+ * scan restarts after each settle since dns_leg_settle may complete + free a
+ * request. */
+static void dns_tcp_fail(KlDnsResolver *r, KlDnsTcp *t) {
+    int ns = t->ns_idx;
+    dns_tcp_close(r, t);
+    for (int again = 1; again; ) {
+        again = 0;
+        for (KlDnsReq *q = r->inflight; q; q = q->next) {
+            int settled = 0;
+            for (int i = 0; i < 2; i++)
+                if (q->legs[i].tcp_pending && q->legs[i].tcp_ns == ns) {
+                    q->legs[i].tcp_pending = 0;
+                    q->legs[i].tcp_ns = -1;
+                    q->legs[i].naddrs = 0;
+                    dns_leg_settle(r, q, &q->legs[i]);   /* may free q → restart */
+                    settled = 1;
+                    break;
+                }
+            /* dns_leg_settle may have freed q — break BEFORE q = q->next runs on
+             * freed memory, then rescan from the (updated) inflight head. */
+            if (settled) { again = 1; break; }
+        }
+    }
+}
+
+static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
+    const struct sockaddr *nsa = (const struct sockaddr *)&r->ns[ns_idx];
+    socklen_t nsl = r->ns_len[ns_idx];
+    int fd = socket(nsa->sa_family, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) { close(fd); return -1; }
+    fl = fcntl(fd, F_GETFD, 0);
+    if (fl >= 0) (void)fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+
+    int rc = connect(fd, nsa, nsl);
+    if (rc < 0 && errno != EINPROGRESS) { close(fd); return -1; }
+
+    t->r = r; t->ns_idx = ns_idx; t->fd = fd;
+    t->state = (rc == 0) ? DNS_TCP_READY : DNS_TCP_CONNECTING;
+    t->want = KL_EVENT_READ | KL_EVENT_WRITE;
+    if (kl_watcher_add(r->ctx, fd, t->want, dns_tcp_on_event, t) != 0) {
+        close(fd); t->fd = -1; t->state = DNS_TCP_CLOSED; return -1;
+    }
+    t->watching = 1;
     return 0;
+}
+
+/* Frame + parse each complete inbound message; route to its leg by txn-id. */
+static void dns_tcp_deliver(KlDnsResolver *r, KlDnsTcp *t) {
+    for (;;) {
+        if (t->rneed == 0) {
+            if (t->rlen < 2)
+                break;
+            t->rneed = ((size_t)t->rbuf[0] << 8) | t->rbuf[1];
+        }
+        if (t->rlen < 2 + t->rneed)
+            break;                                   /* need more bytes */
+        const uint8_t *msg = t->rbuf + 2;
+        size_t mlen = t->rneed;
+        uint16_t id = (mlen >= 2) ? (uint16_t)((msg[0] << 8) | msg[1]) : 0;
+        KlDnsLeg *leg = (mlen > 0) ? dns_find_leg(r, id) : NULL;
+        KlDnsReq *q = NULL;
+
+        if (leg && leg->tcp_pending && leg->tcp_ns == t->ns_idx) {
+            q = leg->req;
+            leg->tcp_pending = 0; leg->tcp_ns = -1;
+            KlResolveResult scr;
+            memset(&scr, 0, sizeof(scr));
+            if (kl_dns_parse_response(msg, mlen, id, leg->qtype,
+                                      leg->question, leg->question_len, &scr) == 0) {
+                leg->naddrs = scr.naddrs;
+                for (int i = 0; i < scr.naddrs; i++) {
+                    leg->addrs[i] = scr.addrs[i];
+                    leg->addrlens[i] = scr.addrlens[i];
+                }
+            } else {
+                leg->naddrs = 0;
+            }
+        }
+        /* Consume the framed message BEFORE settling (settle may re-enter/free). */
+        memmove(t->rbuf, t->rbuf + 2 + mlen, t->rlen - (2 + mlen));
+        t->rlen -= 2 + mlen;
+        t->rneed = 0;
+
+        if (q)
+            dns_leg_settle(r, q, leg);
+    }
+}
+
+static void dns_tcp_flush(KlDnsResolver *r, KlDnsTcp *t) {
+    while (t->wsent < t->wlen) {
+        ssize_t n = dns_tcp_write(t, t->wbuf + t->wsent, t->wlen - t->wsent);
+        if (n > 0) { t->wsent += (size_t)n; continue; }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return;                                  /* keep WRITE interest */
+        dns_tcp_fail(r, t);                          /* peer closed / hard error */
+        return;
+    }
+    t->wlen = t->wsent = 0;                           /* fully flushed */
+    dns_tcp_update_interest(r, t);
+}
+
+static void dns_tcp_on_event(int fd, KlEventMask mask, void *ud) {
+    (void)fd;
+    KlDnsTcp *t = ud;
+    KlDnsResolver *r = t->r;
+
+    if (t->state == DNS_TCP_CONNECTING) {
+        int err = 0;
+        socklen_t el = sizeof(err);
+        getsockopt(t->fd, SOL_SOCKET, SO_ERROR, &err, &el);
+        if (err != 0) { dns_tcp_fail(r, t); return; }
+        t->state = DNS_TCP_READY;
+        dns_tcp_update_interest(r, t);
+    }
+    if (mask & KL_EVENT_WRITE)
+        dns_tcp_flush(r, t);
+    if (t->fd < 0)
+        return;                                      /* flush failed → closed */
+
+    if (mask & KL_EVENT_READ) {
+        for (;;) {
+            if (t->rlen == t->rcap) {
+                size_t ncap = t->rcap ? t->rcap * 2 : 4096;
+                if (ncap > 2 + DNS_TCP_MSG_MAX) ncap = 2 + DNS_TCP_MSG_MAX;
+                if (ncap == t->rcap) { dns_tcp_fail(r, t); return; }  /* oversize */
+                unsigned char *nb = kl_realloc(r->alloc, t->rbuf, t->rcap, ncap);
+                if (!nb) { dns_tcp_fail(r, t); return; }
+                t->rbuf = nb; t->rcap = ncap;
+            }
+            ssize_t n = dns_tcp_read(t, t->rbuf + t->rlen, t->rcap - t->rlen);
+            if (n > 0) {
+                t->rlen += (size_t)n;
+                dns_tcp_deliver(r, t);
+                if (t->fd < 0) return;
+                continue;
+            }
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                break;
+            dns_tcp_fail(r, t);                       /* EOF / error */
+            return;
+        }
+    }
+    dns_tcp_arm_idle(r, t);
+}
+
+/* Re-issue a truncated leg's query over the nameserver's TCP connection. */
+static void dns_tcp_send_leg(KlDnsResolver *r, KlDnsLeg *leg, int ns_idx) {
+    KlDnsReq *q = leg->req;
+    KlDnsTcp *t = &r->tcp[ns_idx];
+
+    if (t->fd < 0 && dns_tcp_connect(r, t, ns_idx) != 0) {
+        leg->naddrs = 0; dns_leg_settle(r, q, leg); return;
+    }
+
+    uint8_t qb[DNS_QUERY_MAX];
+    size_t qlen = 0, q_off = 0, q_len = 0;
+    if (dns_build_query(r, qb, sizeof(qb), leg->id, q->host, leg->qtype,
+                        &qlen, &q_off, &q_len) != 0 ||
+        q_len > sizeof(leg->question) || qlen > DNS_TCP_MSG_MAX) {
+        leg->naddrs = 0; dns_leg_settle(r, q, leg); return;
+    }
+    memcpy(leg->question, qb + q_off, q_len);
+    leg->question_len = q_len;
+
+    size_t need = t->wlen + 2 + qlen;
+    if (need > t->wcap) {
+        size_t ncap = t->wcap ? t->wcap : 2048;
+        while (ncap < need) ncap *= 2;
+        unsigned char *nb = kl_realloc(r->alloc, t->wbuf, t->wcap, ncap);
+        if (!nb) { leg->naddrs = 0; dns_leg_settle(r, q, leg); return; }
+        t->wbuf = nb; t->wcap = ncap;
+    }
+    t->wbuf[t->wlen++] = (uint8_t)(qlen >> 8);
+    t->wbuf[t->wlen++] = (uint8_t)(qlen & 0xFF);
+    memcpy(t->wbuf + t->wlen, qb, qlen);
+    t->wlen += qlen;
+
+    leg->tcp_pending = 1;
+    leg->tcp_ns = ns_idx;
+    if (leg->timer_id >= 0)
+        kl_timer_cancel(r->ctx, leg->timer_id);
+    leg->timer_id = kl_timer_add(r->ctx, (uint64_t)r->timeout_ms, dns_on_leg_timer, leg);
+    if (t->idle_timer >= 0) { kl_timer_cancel(r->ctx, t->idle_timer); t->idle_timer = -1; }
+
+    if (t->state == DNS_TCP_READY)
+        dns_tcp_flush(r, t);
+    else
+        dns_tcp_update_interest(r, t);
 }
 
 static void dns_on_recv(KlUdp *u, const void *data, size_t len,
@@ -566,7 +885,8 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
     KlDnsResolver *r = ud;
     if (len < 12)
         return;
-    if (!src || !dns_src_is_ns(r, src))
+    int ns_idx = src ? dns_ns_index(r, src) : -1;
+    if (ns_idx < 0)
         return;                                  /* not from a nameserver — ignore (anti-spoof) */
     const uint8_t *pkt = data;
     uint16_t id = (uint16_t)((pkt[0] << 8) | pkt[1]);
@@ -574,6 +894,14 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
     if (!leg)
         return;                                  /* stale or unknown id */
     KlDnsReq *q = leg->req;
+
+    /* Truncation (TC bit): recover the answer over TCP (RFC 7766) — but only when
+     * the response genuinely echoes our question, so a spoofed TC can't force TCP. */
+    if ((pkt[2] & 0x02) && !leg->tcp_pending) {
+        if (dns_question_matches(pkt, len, leg->question, leg->question_len))
+            dns_tcp_send_leg(r, leg, ns_idx);
+        return;
+    }
 
     KlResolveResult scratch;
     memset(&scratch, 0, sizeof(scratch));
@@ -884,12 +1212,16 @@ static void dns_cancel(KlResolveReq *req) {
     dns_cancel_timers(r, q);
     dns_unlink(r, q);
     kl_free(r->alloc, q, sizeof(*q));
+    dns_tcp_touch_idle_all(r);   /* a TCP-pending leg may have just vanished */
 }
 
 static void dns_destroy(KlResolver *self) {
     KlDnsResolver *r = (KlDnsResolver *)self;
     if (!r)
         return;
+    for (int i = 0; i < r->nns; i++)
+        if (r->tcp[i].fd >= 0)
+            dns_tcp_close(r, &r->tcp[i]);          /* close persistent TCP conns */
     KlDnsReq *q = r->inflight;
     while (q) {
         KlDnsReq *next = q->next;
@@ -1047,6 +1379,10 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
     snprintf(r->hosts_path, sizeof(r->hosts_path), "%s",
              (cfg && cfg->hosts_path) ? cfg->hosts_path : "/etc/hosts");
     r->rnd_off = sizeof(r->rnd_pool);   /* pool empty → refills on first draw */
+    for (int i = 0; i < DNS_MAX_NS; i++) {
+        r->tcp[i].fd = -1;
+        r->tcp[i].idle_timer = -1;
+    }
 
     int family = AF_INET;
     if (dns_build_ns_list(r, cfg, &family) != 0) {
