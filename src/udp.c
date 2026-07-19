@@ -403,7 +403,9 @@ static void udp_flush_queue_batched(KlUdp *udp) {
             udp_dequeue_front(udp, nodes, 1);
             continue;
         }
-        udp_dequeue_front(udp, nodes, sent);   /* sent >= 1 here */
+        if (sent > cnt) sent = cnt;  /* sendmmsg never exceeds vlen; guards the
+                                      * dequeue against reading past nodes[cnt) */
+        udp_dequeue_front(udp, nodes, sent);   /* 1 <= sent <= cnt here */
         if (sent < cnt)
             break;                   /* next message would block — retry later */
     }
