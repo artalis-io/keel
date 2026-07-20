@@ -35,52 +35,52 @@ void kl_posix_set_nosigpipe(int fd) {
 
 /* ── POSIX provider ─────────────────────────────────────────────────────── */
 
-static int posix_set_nonblocking(void *ctx, int fd) {
+static int psx_set_nonblocking(void *ctx, int fd) {
     (void)ctx; return kl_posix_set_nonblocking(fd);
 }
-static void posix_set_cloexec(void *ctx, int fd) {
+static void psx_set_cloexec(void *ctx, int fd) {
     (void)ctx; kl_posix_set_cloexec(fd);
 }
-static void posix_set_nosigpipe(void *ctx, int fd) {
+static void psx_set_nosigpipe(void *ctx, int fd) {
     (void)ctx; kl_posix_set_nosigpipe(fd);
 }
-static int posix_socket(void *ctx, int domain, int type, int protocol) {
+static int psx_socket(void *ctx, int domain, int type, int protocol) {
     (void)ctx; return socket(domain, type, protocol);
 }
-static int posix_connect(void *ctx, int fd, const struct sockaddr *a, socklen_t l) {
+static int psx_connect(void *ctx, int fd, const struct sockaddr *a, socklen_t l) {
     (void)ctx; return connect(fd, a, l);
 }
-static int posix_bind(void *ctx, int fd, const struct sockaddr *a, socklen_t l) {
+static int psx_bind(void *ctx, int fd, const struct sockaddr *a, socklen_t l) {
     (void)ctx; return bind(fd, a, l);
 }
-static int posix_listen(void *ctx, int fd, int backlog) {
+static int psx_listen(void *ctx, int fd, int backlog) {
     (void)ctx; return listen(fd, backlog);
 }
-static int posix_accept(void *ctx, int fd, struct sockaddr *a, socklen_t *l) {
+static int psx_accept(void *ctx, int fd, struct sockaddr *a, socklen_t *l) {
     (void)ctx; return accept(fd, a, l);
 }
-static int posix_close(void *ctx, int fd) {
+static int psx_close(void *ctx, int fd) {
     (void)ctx; return close(fd);
 }
-static ssize_t posix_send(void *ctx, int fd, const void *buf, size_t len) {
+static ssize_t psx_send(void *ctx, int fd, const void *buf, size_t len) {
     (void)ctx; return kl_sock_send(NULL, fd, buf, len);   /* inline POSIX path */
 }
-static ssize_t posix_recv(void *ctx, int fd, void *buf, size_t len) {
+static ssize_t psx_recv(void *ctx, int fd, void *buf, size_t len) {
     (void)ctx; return kl_sock_recv(NULL, fd, buf, len);
 }
 
 static const KlSocketOps POSIX_OPS = {
-    .set_nonblocking = posix_set_nonblocking,
-    .set_cloexec     = posix_set_cloexec,
-    .set_nosigpipe   = posix_set_nosigpipe,
-    .socket          = posix_socket,
-    .connect         = posix_connect,
-    .bind            = posix_bind,
-    .listen          = posix_listen,
-    .accept          = posix_accept,
-    .close           = posix_close,
-    .send            = posix_send,
-    .recv            = posix_recv,
+    .set_nonblocking = psx_set_nonblocking,
+    .set_cloexec     = psx_set_cloexec,
+    .set_nosigpipe   = psx_set_nosigpipe,
+    .socket          = psx_socket,
+    .connect         = psx_connect,
+    .bind            = psx_bind,
+    .listen          = psx_listen,
+    .accept          = psx_accept,
+    .close           = psx_close,
+    .send            = psx_send,
+    .recv            = psx_recv,
     .name            = "posix",
 };
 
