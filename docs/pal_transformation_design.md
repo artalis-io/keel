@@ -190,8 +190,13 @@ keep the coarse `KlError` mapping.
 
 **Phase 5 + 6 (portable handles + Winsock) designed** in
 `docs/phase6_winsock_design.md`. Decisions: **Phase 5 first** — a `KlSocketHandle`
-type (a no-op `int` typedef on POSIX; `SOCKET` on Windows) across the
-socket-facing API, so the vtable is correct on Win64 before any Winsock code;
+type, **`intptr_t` (pointer-width) on every platform**, across the socket-facing
+API, so the vtable is correct on Win64 before any Winsock code and future
+pointer-handle stacks (lwIP raw `tcp_pcb *`, UEFI protocol pointers) fit without a
+second break. Behaviorally a no-op on POSIX (source-compatible; ABI widens
+4→8 bytes, fine under static linking). Descriptor-based providers — POSIX,
+Winsock, **lwIP socket API** — share the `-1` invalid sentinel and the readiness
+model; raw APIs (lwIP raw, IOCP) are a separate event-axis concern.
 `writev`/`sendfile` become real vtable ops (POSIX + Winsock `WSASend`/
 `TransmitFile`). **MinGW-w64 + a `windows-latest` CI runner** (WSAPoll backend via
 `#ifdef` in `event_poll.c`; link `ws2_32`/`bcrypt`). **Fuller port**, staged:

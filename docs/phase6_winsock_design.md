@@ -22,21 +22,33 @@ is what proves the abstraction.
 
 ## Part A — Phase 5: portable socket handle
 
-### A.1 The type
+### A.1 The type — pointer-width on every platform
 ```c
 /* keel/handle.h (new, installed) */
-#if defined(_WIN32)
-  typedef UINT_PTR KlSocketHandle;             /* a Winsock SOCKET */
-#else
-  typedef int      KlSocketHandle;             /* a POSIX fd */
-#endif
-#define KL_INVALID_SOCKET ((KlSocketHandle)-1) /* -1 == POSIX -1 == INVALID_SOCKET */
+#include <stdint.h>
+typedef intptr_t KlSocketHandle;               /* holds any provider's handle */
+#define KL_INVALID_SOCKET ((KlSocketHandle)-1)
 static inline int kl_handle_valid(KlSocketHandle h) { return h != KL_INVALID_SOCKET; }
 ```
-`INVALID_SOCKET` is `(SOCKET)(~0)`, i.e. `-1` reinterpreted — so `KL_INVALID_SOCKET
-== -1` on both platforms. **But `SOCKET` is unsigned**, so the ubiquitous POSIX
-idiom `if (fd < 0)` is wrong on Windows. The core Phase 5 migration is mechanical
-but wide: replace `fd < 0` / `fd == -1` socket checks with `!kl_handle_valid(fd)`.
+`KlSocketHandle` is **`intptr_t` (pointer-width) on all platforms**, not `int` on
+POSIX. Pointer-width because a provider's native handle may be wider than `int`
+*or* a pointer:
+
+| Provider | Native handle | Fits `intptr_t` |
+|---|---|---|
+| POSIX sockets | `int` fd | yes |
+| Winsock | `SOCKET` (`UINT_PTR`) | yes |
+| lwIP socket API | `int` fd | yes |
+| lwIP raw API | `struct tcp_pcb *` | yes (needs pointer width) |
+| UEFI | `EFI_*_PROTOCOL *` | yes (needs pointer width) |
+
+Doing the (one-time, API-breaking) handle change now at pointer width avoids a
+*second* break when a pointer-handle stack lands. `INVALID_SOCKET` is `(SOCKET)(~0)`
+= `-1` reinterpreted, so `KL_INVALID_SOCKET == -1` is the shared invalid sentinel
+for every **descriptor**-based provider (POSIX, Winsock, lwIP socket API). Because
+`SOCKET` is unsigned, the ubiquitous POSIX idiom `if (fd < 0)` is unreliable on
+Windows — so the core Phase 5 migration is mechanical but wide: replace
+`fd < 0` / `fd == -1` socket checks with `!kl_handle_valid(fd)`.
 
 ### A.2 What changes to `KlSocketHandle`
 Socket descriptors only: `KlConn.fd`, `KlUdp.fd`, `KlWatcher.fd`,
@@ -53,14 +65,46 @@ WSAPoll like poll). File and socket handles are genuinely different types on
 Windows and must not be conflated.
 
 ### A.3 Source/ABI impact
-On POSIX, `int` → `KlSocketHandle` is `int` → `int`: a **no-op** (the typedef *is*
-`int`). So Phase 5 is a pure rename on POSIX — zero behavior/ABI change, verified
-by the existing full gauntlet. The only real edits are the `fd < 0` → 
-`kl_handle_valid` sweep. Public-API-wise it is additive/compatible on POSIX;
-Windows is new. Ship Phase 5 as its own CI-green commit **on POSIX only** (it must
-be a no-op there) before any Winsock code.
+On POSIX, `int` → `intptr_t` is **source-compatible** (an `int` fd stored in a
+signed pointer-width integer; `-1` still invalid; arithmetic/comparison
+unchanged), but **ABI-widening** — socket-handle struct fields grow 4→8 bytes on
+LP64. That is fine under Keel's static-linking model (a version bump is a
+recompile anyway) and has no runtime-behavior effect. So Phase 5 is *behaviorally*
+a no-op on POSIX — the only real edits are the `fd < 0` → `kl_handle_valid` sweep
+and the typedef — verified byte-for-byte by the existing full gauntlet (incl.
+musl) + a flat bench. Ship it as its own CI-green POSIX-only commit before any
+Winsock code. (Note: this loses the "pure no-op / no ABI change" property of an
+`int` typedef; the trade is deliberate — one pointer-width break now vs two
+breaks later.)
 
 ---
+
+### A.4 lwIP compatibility — socket API vs raw API
+lwIP is a future provider target; the handle decision above is what makes it fit
+(or not), and the two lwIP APIs behave very differently:
+
+**lwIP socket API** (`lwip_socket`/`lwip_send`/`lwip_recv`, BSD-compatible) —
+**directly compatible.** Its descriptors are small `int` indices into lwIP's
+socket table, and it returns `-1` on error like POSIX. `KlSocketHandle` (as
+`intptr_t`) holds them, `KL_INVALID_SOCKET = -1` is correct, and its
+`poll`/`select` shim maps onto the existing readiness `event_poll` backend. This
+is the **low-risk lwIP integration** (a `KlSocketProvider` over `lwip_*` + a
+poll-style backend) — mostly a provider + backend selection, no model change.
+
+**lwIP raw API** (`struct tcp_pcb *` + callbacks) — the handle is a **pointer**,
+which is exactly why `KlSocketHandle` is pointer-width: a raw-lwIP provider stores
+the `tcp_pcb *` in the handle. **But the handle is the easy part.** The raw API is
+not descriptor/readiness-based — it is callback-driven around
+`sys_check_timeouts()`, structurally like IOCP (completion, not readiness), and
+its invalid sentinel is `NULL` (`0`), not `-1`. So a raw-lwIP provider needs
+**event-axis** work — a callback-driven progress model, not fd polling — which is
+Phase 9, independent of this handle change. `intptr_t` makes the raw handle
+*storable* today; it does not make raw lwIP *drivable* until Phase 9.
+
+**Takeaway:** pointer-width `KlSocketHandle` keeps all three *descriptor*-based
+stacks (POSIX, Winsock, lwIP socket API) on one readiness model with a shared
+`-1` sentinel; the raw APIs (lwIP raw, IOCP) are a separate event-axis concern
+regardless of handle type.
 
 ## Part B — Phase 6: the Winsock provider
 
@@ -145,8 +189,9 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
 
 ## Part C — Staging (each a CI-green commit)
 
-1. **Phase 5 — `KlSocketHandle` (POSIX no-op).** Type + `fd<0`→`kl_handle_valid`
-   sweep + `writev`/`sendfile` promoted to real POSIX ops. Full POSIX gauntlet
+1. **Phase 5 — `KlSocketHandle` (POSIX behavior-preserving).** `intptr_t` type +
+   `fd<0`→`kl_handle_valid` sweep + `writev`/`sendfile` promoted to real POSIX
+   ops. Behaviorally a no-op on POSIX (ABI widens 4→8 bytes); full POSIX gauntlet
    incl. musl; bench flat. *No Windows code yet.*
 2. **6a — Winsock provider + WSAPoll + build.** `socket_winsock.c`, WSAPoll
    `#ifdef`, monotonic clock + entropy shims, MinGW Makefile, the loopback-pair
