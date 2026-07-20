@@ -91,3 +91,54 @@ static const KlSocketProvider POSIX_PROVIDER = {
 const KlSocketProvider *kl_socket_provider_posix(void) {
     return &POSIX_PROVIDER;
 }
+
+/* ── Error taxonomy ─────────────────────────────────────────────────────── */
+
+KlError kl_sock_errno_to_error(int err) {
+    switch (err) {
+        case ETIMEDOUT:
+            return KL_ERR_TIMEOUT;
+        case ECONNREFUSED:
+        case ECONNABORTED:
+        case ENETUNREACH:
+        case EHOSTUNREACH:
+        case ENETDOWN:
+#ifdef EHOSTDOWN
+        case EHOSTDOWN:
+#endif
+            return KL_ERR_CONNECT;   /* refused / unreachable — connect-class */
+        case EADDRINUSE:
+        case EADDRNOTAVAIL:
+        case EACCES:
+            return KL_ERR_BIND;      /* address-in-use / not-available / denied */
+        case EMFILE:
+        case ENFILE:
+        case ENOBUFS:
+        case ENOMEM:
+            return KL_ERR_ALLOC;     /* resource exhaustion */
+        case EOPNOTSUPP:
+        case EAFNOSUPPORT:
+        case EPROTONOSUPPORT:
+#ifdef ESOCKTNOSUPPORT
+        case ESOCKTNOSUPPORT:
+#endif
+        case EINVAL:
+        case EBADF:
+        case EFAULT:
+            return KL_ERR_INVALID_ARG;   /* unsupported / invalid state */
+        case EAGAIN:
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+        case EWOULDBLOCK:
+#endif
+        case EINPROGRESS:
+        case EINTR:
+        case ECONNRESET:
+        case EPIPE:
+        case ENOTCONN:
+#ifdef ESHUTDOWN
+        case ESHUTDOWN:
+#endif
+        default:
+            return KL_ERR_IO;        /* transient / reset / generic I/O */
+    }
+}

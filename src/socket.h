@@ -23,6 +23,8 @@
 #include <unistd.h>
 #include <stdint.h>
 
+#include <keel/error.h>
+
 /* Provider operation table. `ctx` is the provider's own context (NULL for the
  * built-in POSIX provider). Any op may be NULL, in which case the wrapper falls
  * back to the POSIX implementation. */
@@ -41,6 +43,9 @@ typedef struct KlSocketOps {
     /* I/O */
     ssize_t (*send)(void *ctx, int fd, const void *buf, size_t len);
     ssize_t (*recv)(void *ctx, int fd, void *buf, size_t len);
+    /* lifecycle: release provider-owned context. May be NULL (nothing to free,
+     * e.g. the static POSIX provider). */
+    void    (*destroy)(void *ctx);
     const char *name;                 /* provider identity, for diagnostics */
 } KlSocketOps;
 
@@ -139,5 +144,35 @@ static inline int kl_sock_close(const KlSocketProvider *p, int fd) {
     if (p && p->ops->close) return p->ops->close(p->context, fd);
     return close(fd);
 }
+
+/* ── Lifecycle / capabilities / error taxonomy (Phase 3 semantics) ──────── */
+
+/* Release a provider's own context. NULL provider (POSIX) and a NULL destroy op
+ * are both no-ops. The KlSocketProvider struct's storage is the owner's; this
+ * only tears down provider-owned state. Providers are borrowed by transports
+ * and must outlive them. */
+static inline void kl_socket_provider_destroy(const KlSocketProvider *p) {
+    if (p && p->ops->destroy) p->ops->destroy(p->context);
+}
+
+/* Capability query. A NULL provider is the built-in POSIX provider, which is
+ * native-fd. */
+static inline int kl_socket_provider_has_cap(const KlSocketProvider *p,
+                                             uint64_t cap) {
+    uint64_t caps = p ? p->capabilities : KL_SOCK_CAP_NATIVE_FD;
+    return (caps & cap) != 0;
+}
+
+/* Native-descriptor escape hatch: when the provider advertises native fds, the
+ * int handle IS a real OS descriptor (usable with syscalls, poll, etc.) and is
+ * returned as-is; otherwise -1 (the caller must not treat it as an OS fd). */
+static inline int kl_sock_native_fd(const KlSocketProvider *p, int fd) {
+    return kl_socket_provider_has_cap(p, KL_SOCK_CAP_NATIVE_FD) ? fd : -1;
+}
+
+/* Map a socket errno to a stable KlError category (errno itself is preserved by
+ * the caller for diagnostics). Uses the existing coarse KlError network codes;
+ * finer public categories are deferred to the Phase 4 public error taxonomy. */
+KlError kl_sock_errno_to_error(int err);
 
 #endif /* KEEL_SRC_SOCKET_H */

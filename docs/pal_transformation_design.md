@@ -167,11 +167,16 @@ Per the task's required classification:
 
 **Status:** Phase 0 done (`f29ed15`, baseline in Appendix A). **Phase 1 + 1b done**
 — `src/socket.{h,c}` landed; client transports, DNS resolver, server, and udp
-switched over (Appendix C). **Phase 2 done** (Appendix D) — the seam became a
-`KlSocketProvider` vtable (this pulls Phase 3's provider object forward),
-threaded through the client transports via `KlEventCtx.sockets` (internal,
-opaque — NOT the public Phase 4 selection API), with a fault-injection mock and
-conformance tests. The server conn I/O hot path stays on the direct POSIX path.
+switched over (Appendix C). **Phase 2 done** (Appendix D + E) — the seam became a
+`KlSocketProvider` vtable threaded through the client transports via
+`KlEventCtx.sockets` (internal, opaque — NOT the public Phase 4 selection API),
+with a fault-injection mock + conformance tests, and the ops table extended to
+the full socket lifecycle. **Phase 3 done** (Appendix F) — provider semantics:
+`destroy` lifecycle hook, capability query + native-fd escape hatch, and a
+`kl_sock_errno_to_error` taxonomy (errno → stable `KlError`, native errno
+preserved). Still internal — no public API. The server conn-I/O hot path stays
+on the direct POSIX path (adoption deferred); finer public error categories +
+`KlConfig.sockets` selection are Phase 4.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
@@ -486,3 +491,36 @@ a full socket→bind→listen→connect→accept→close loop over loopback via 
 wrappers, mock socket-op dispatch with a NULL-op fallback, and deterministic
 connect-failure (ECONNREFUSED) injection. Bench unchanged (lifecycle ops are
 one-shot, not per-byte).
+
+## Appendix F — Phase 3 semantics (2026-07-20)
+
+Completes the provider object (the vtable shape landed in Phase 2). All internal;
+no public API.
+
+- **Lifecycle.** `KlSocketOps` gained an optional `void (*destroy)(void *ctx)`;
+  `kl_socket_provider_destroy(p)` invokes it (NULL provider / NULL op → no-op).
+  Contract: a provider is *borrowed* by transports and must outlive them; the
+  owner tears it down after all its transports are freed. The POSIX provider is
+  static with `destroy == NULL`.
+- **Capabilities + native-fd escape hatch.**
+  `kl_socket_provider_has_cap(p, cap)` (NULL == POSIX == native-fd);
+  `kl_sock_native_fd(p, fd)` returns the OS descriptor as-is when the provider
+  advertises `KL_SOCK_CAP_NATIVE_FD`, else -1 (the caller must not treat the
+  handle as an OS fd). This is the documented seam for a future non-native
+  provider (lwIP raw, UEFI) where the int is an index, not a descriptor.
+- **Error taxonomy.** `kl_sock_errno_to_error(int)` maps socket errnos onto the
+  existing coarse `KlError` network codes (TIMEOUT / CONNECT for
+  refused+unreachable / BIND for in-use+denied / ALLOC for resource exhaustion /
+  INVALID_ARG for unsupported+invalid / IO for reset+transient+generic). The raw
+  errno is preserved for diagnostics (the function is pure). Finer *public*
+  categories (distinct would-block / conn-reset / unreachable codes) are deferred
+  to the Phase 4 public error-taxonomy work rather than churning the public
+  `KlError` enum during an internal phase.
+
+Tests (`tests/test_socket_provider.c`, now 17 cases): capability query,
+native-fd escape hatch (POSIX vs a no-cap mock), destroy called-exactly-once +
+no-op paths, and the errno→KlError mapping incl. errno-preservation.
+
+**Not done (Phase 4+):** public `KlConfig.sockets` selection API + custom-provider
+example; finer public error codes; server hot-path adoption; connect/bind ops
+already exist but the server still passes NULL.

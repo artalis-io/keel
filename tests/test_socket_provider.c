@@ -260,4 +260,55 @@ UTEST(sockprov, mock_connect_failure) {
     ASSERT_EQ(1, m.connect_calls);
 }
 
+/* ── Phase 3 semantics: capabilities, native-fd, destroy, error taxonomy ── */
+
+UTEST(sockprov, capability_query) {
+    /* NULL provider == POSIX == native-fd. */
+    ASSERT_TRUE(kl_socket_provider_has_cap(NULL, KL_SOCK_CAP_NATIVE_FD));
+    ASSERT_TRUE(kl_socket_provider_has_cap(kl_socket_provider_posix(), KL_SOCK_CAP_NATIVE_FD));
+    /* A mock with no capabilities advertises none. */
+    MockSock m; memset(&m, 0, sizeof(m));
+    KlSocketProvider p = mock_provider(&m);   /* capabilities = 0 */
+    ASSERT_FALSE(kl_socket_provider_has_cap(&p, KL_SOCK_CAP_NATIVE_FD));
+}
+
+UTEST(sockprov, native_fd_escape_hatch) {
+    ASSERT_EQ(7, kl_sock_native_fd(NULL, 7));                      /* POSIX: fd is native */
+    ASSERT_EQ(7, kl_sock_native_fd(kl_socket_provider_posix(), 7));
+    MockSock m; memset(&m, 0, sizeof(m));
+    KlSocketProvider p = mock_provider(&m);                        /* no NATIVE_FD cap */
+    ASSERT_EQ(-1, kl_sock_native_fd(&p, 7));                       /* not a native fd */
+}
+
+static int g_destroyed;
+static void mock_destroy(void *ctx) { (void)ctx; g_destroyed++; }
+
+UTEST(sockprov, provider_destroy_lifecycle) {
+    g_destroyed = 0;
+    /* NULL provider and a NULL-destroy provider are both no-ops. */
+    kl_socket_provider_destroy(NULL);
+    kl_socket_provider_destroy(kl_socket_provider_posix());
+    ASSERT_EQ(0, g_destroyed);
+    /* A provider with a destroy op is torn down exactly once. */
+    static const KlSocketOps ops = { .destroy = mock_destroy, .name = "destroyable" };
+    KlSocketProvider p = { &ops, NULL, 0 };
+    kl_socket_provider_destroy(&p);
+    ASSERT_EQ(1, g_destroyed);
+}
+
+UTEST(sockprov, errno_to_error_taxonomy) {
+    ASSERT_EQ(KL_ERR_TIMEOUT, kl_sock_errno_to_error(ETIMEDOUT));
+    ASSERT_EQ(KL_ERR_CONNECT, kl_sock_errno_to_error(ECONNREFUSED));
+    ASSERT_EQ(KL_ERR_CONNECT, kl_sock_errno_to_error(EHOSTUNREACH));
+    ASSERT_EQ(KL_ERR_BIND,    kl_sock_errno_to_error(EADDRINUSE));
+    ASSERT_EQ(KL_ERR_ALLOC,   kl_sock_errno_to_error(EMFILE));
+    ASSERT_EQ(KL_ERR_INVALID_ARG, kl_sock_errno_to_error(EAFNOSUPPORT));
+    ASSERT_EQ(KL_ERR_IO,      kl_sock_errno_to_error(ECONNRESET));
+    ASSERT_EQ(KL_ERR_IO,      kl_sock_errno_to_error(EAGAIN));
+    /* errno is not clobbered by the translation. */
+    errno = ECONNREFUSED;
+    (void)kl_sock_errno_to_error(ETIMEDOUT);
+    ASSERT_EQ(ECONNREFUSED, errno);
+}
+
 UTEST_MAIN();
