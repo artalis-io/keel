@@ -16,6 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -28,7 +29,7 @@ typedef struct {
     int     force_recv_err;    /* errno to fail the NEXT recv with (0 = none) */
     int     force_connect_err; /* errno to fail the NEXT connect with (0 = none) */
     int     nb_calls, cloexec_calls, nosig_calls, send_calls, recv_calls;
-    int     socket_calls, connect_calls;
+    int     socket_calls, connect_calls, writev_calls, sendfile_calls;
 } MockSock;
 
 static int mock_set_nonblocking(void *ctx, int fd) {
@@ -56,6 +57,20 @@ static ssize_t mock_recv(void *ctx, int fd, void *buf, size_t len) {
     if (m->wrap) return recv(fd, buf, len, 0);
     return 0;
 }
+static ssize_t mock_writev(void *ctx, int fd, const struct iovec *iov, int iovcnt) {
+    MockSock *m = ctx;
+    m->writev_calls++;
+    if (m->wrap) return writev(fd, iov, iovcnt);
+    ssize_t t = 0;
+    for (int i = 0; i < iovcnt; i++) t += (ssize_t)iov[i].iov_len;
+    return t;
+}
+static ssize_t mock_sendfile(void *ctx, int out_fd, int in_fd, off_t *offset, size_t count) {
+    MockSock *m = ctx; (void)out_fd; (void)in_fd;
+    m->sendfile_calls++;
+    *offset += (off_t)count;                 /* pretend fully sent */
+    return (ssize_t)count;
+}
 static int mock_socket(void *ctx, int domain, int type, int protocol) {
     MockSock *m = ctx; m->socket_calls++; return socket(domain, type, protocol);
 }
@@ -74,6 +89,8 @@ static const KlSocketOps MOCK_OPS = {
     .connect         = mock_connect,
     .send            = mock_send,
     .recv            = mock_recv,
+    .writev          = mock_writev,
+    .sendfile        = mock_sendfile,
     .name            = "mock",
     /* bind/listen/accept/close left NULL → POSIX fallback */
 };
@@ -309,6 +326,32 @@ UTEST(sockprov, errno_to_error_taxonomy) {
     errno = ECONNREFUSED;
     (void)kl_sock_errno_to_error(ETIMEDOUT);
     ASSERT_EQ(ECONNREFUSED, errno);
+}
+
+/* A custom writev/sendfile op is dispatched (the Winsock WSASend/TransmitFile
+ * path); a NULL provider takes the raw POSIX call. */
+UTEST(sockprov, writev_sendfile_op_dispatch) {
+    MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1; m.wrap = 1;
+    KlSocketProvider p = mock_provider(&m);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    char a[] = "AB", b[] = "CD";
+    struct iovec iov[2] = { { a, 2 }, { b, 2 } };
+    ASSERT_EQ((ssize_t)4, kl_sock_writev(&p, sv[0], iov, 2));  /* dispatches to op */
+    ASSERT_EQ(1, m.writev_calls);
+    char buf[8] = {0};
+    ASSERT_EQ((ssize_t)4, recv(sv[1], buf, sizeof(buf), 0));
+    ASSERT_EQ(0, memcmp(buf, "ABCD", 4));
+
+    ASSERT_EQ((ssize_t)4, kl_sock_writev(NULL, sv[0], iov, 2));/* NULL → real writev */
+    ASSERT_EQ((ssize_t)4, recv(sv[1], buf, sizeof(buf), 0));
+    close(sv[0]); close(sv[1]);
+
+    off_t off = 0;
+    ASSERT_EQ((ssize_t)100, kl_sock_sendfile(&p, 9, 9, &off, 100)); /* dispatches to op */
+    ASSERT_EQ(1, m.sendfile_calls);
+    ASSERT_EQ((off_t)100, off);
 }
 
 UTEST_MAIN();

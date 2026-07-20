@@ -278,45 +278,6 @@ int kl_response_error(KlResponse *res, int code, const char *message) {
     return 0;
 }
 
-/* ── sendfile wrapper ────────────────────────────────────────────── */
-
-static ssize_t kl_sendfile_impl(int out_fd, int in_fd, off_t *offset, size_t count) {
-#if defined(__linux__)
-    return sendfile(out_fd, in_fd, offset, count);
-#elif defined(__APPLE__)
-    off_t len = (off_t)count;
-    int r = sendfile(in_fd, out_fd, *offset, &len, NULL, 0);
-    if (r < 0 && errno != EAGAIN) return -1;
-    *offset += len;
-    return (ssize_t)len;
-#else
-    char buf[KL_FILE_BUF_SIZE];
-    size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
-    ssize_t nr = pread(in_fd, buf, to_read, *offset);
-    if (nr <= 0) return nr;
-    /* Retry partial writes on the fallback path */
-    const char *p = buf;
-    size_t remaining = (size_t)nr;
-    while (remaining > 0) {
-        ssize_t nw = write(out_fd, p, remaining);
-        if (nw < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /* Wrote some but not all — update offset for progress */
-                ssize_t wrote = (ssize_t)((size_t)nr - remaining);
-                *offset += wrote;
-                return wrote > 0 ? wrote : -1;
-            }
-            return -1;
-        }
-        p += nw;
-        remaining -= (size_t)nw;
-    }
-    *offset += nr;
-    return nr;
-#endif
-}
-
 /* The socket provider for a response (ctx->sockets; NULL = POSIX). */
 static inline const KlSocketProvider *res_provider(const KlResponse *res) {
     return res->ctx ? res->ctx->sockets : NULL;
@@ -326,10 +287,10 @@ static inline const KlSocketProvider *res_provider(const KlResponse *res) {
  * supports vectored I/O (POSIX / NULL), else a serialized kl_sock_send over the
  * iov. Same return contract as writev (bytes written, -1 on error, errno set). */
 static ssize_t seam_writev(const KlSocketProvider *p, int fd,
-                           struct iovec *iov, int iovcnt) {
-    if (!p || (p->capabilities & KL_SOCK_CAP_WRITEV))
-        return writev(fd, iov, iovcnt);
-    ssize_t total = 0;
+                           const struct iovec *iov, int iovcnt) {
+    if (!p || p->ops->writev)                     /* NULL=POSIX, or a writev op */
+        return kl_sock_writev(p, fd, iov, iovcnt);
+    ssize_t total = 0;                            /* no writev op → serialize */
     for (int i = 0; i < iovcnt; i++) {
         size_t off = 0;
         while (off < iov[i].iov_len) {
@@ -580,7 +541,7 @@ int kl_response_send(KlResponse *res) {
          * aren't sendfile-able): pread + provider send, one chunk per tick —
          * same shape as the TLS branch. */
         const KlSocketProvider *sp = res_provider(res);
-        if (sp && !(sp->capabilities & KL_SOCK_CAP_SENDFILE)) {
+        if (sp && !sp->ops->sendfile) {
             if (res->file_offset >= res->file_size) return 0;
             size_t remaining = (size_t)(res->file_size - res->file_offset);
             char buf[KL_FILE_BUF_SIZE];
@@ -610,7 +571,7 @@ int kl_response_send(KlResponse *res) {
 #endif
         size_t remaining = (size_t)(res->file_size - res->file_offset);
         while (remaining > 0) {
-            ssize_t sent = kl_sendfile_impl(res->conn_fd, res->file_fd,
+            ssize_t sent = kl_sock_sendfile(sp, res->conn_fd, res->file_fd,
                                             &res->file_offset, remaining);
             if (sent < 0) {
                 if (errno == EAGAIN) return 1;

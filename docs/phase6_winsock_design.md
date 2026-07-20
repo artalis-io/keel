@@ -189,10 +189,15 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
 
 ## Part C — Staging (each a CI-green commit)
 
-1. **Phase 5 — `KlSocketHandle` (POSIX behavior-preserving).** `intptr_t` type +
-   `fd<0`→`kl_handle_valid` sweep + `writev`/`sendfile` promoted to real POSIX
-   ops. Behaviorally a no-op on POSIX (ABI widens 4→8 bytes); full POSIX gauntlet
-   incl. musl; bench flat. *No Windows code yet.*
+1. **Phase 5 groundwork (done).** `keel/handle.h` (`KlSocketHandle = intptr_t` +
+   `KL_INVALID_SOCKET` + `kl_handle_valid`) added to the umbrella; `writev` +
+   `sendfile` promoted to real `KlSocketOps` ops (POSIX impls in `socket.c`;
+   `kl_posix_sendfile` moved out of `response.c`); `response.c` dispatches through
+   `kl_sock_writev`/`kl_sock_sendfile` (op present → op; else serialize/pread-send
+   fallback). POSIX-validatable + bench flat. The **132-site `int fd` →
+   `KlSocketHandle` field/check sweep is deferred to 6a**, where the MinGW build
+   validates the unsigned-`SOCKET` / `!kl_handle_valid` correctness that the POSIX
+   gauntlet structurally cannot.
 2. **6a — Winsock provider + WSAPoll + build.** `socket_winsock.c`, WSAPoll
    `#ifdef`, monotonic clock + entropy shims, MinGW Makefile, the loopback-pair
    wakeup. Green: build + the socket-provider tests + a plaintext server/client

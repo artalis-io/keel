@@ -10,6 +10,11 @@
 #include "socket.h"
 
 #include <fcntl.h>
+#if defined(__linux__)
+  #include <sys/sendfile.h>
+#endif
+
+#define KL_SENDFILE_BUF 8192   /* pread+write fallback chunk (no-sendfile hosts) */
 
 int kl_posix_set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -30,6 +35,41 @@ void kl_posix_set_nosigpipe(int fd) {
     (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
 #else
     (void)fd;
+#endif
+}
+
+ssize_t kl_posix_sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
+#if defined(__linux__)
+    return sendfile(out_fd, in_fd, offset, count);
+#elif defined(__APPLE__)
+    off_t len = (off_t)count;
+    int r = sendfile(in_fd, out_fd, *offset, &len, NULL, 0);
+    if (r < 0 && errno != EAGAIN) return -1;
+    *offset += len;
+    return (ssize_t)len;
+#else
+    char buf[KL_SENDFILE_BUF];
+    size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
+    ssize_t nr = pread(in_fd, buf, to_read, *offset);
+    if (nr <= 0) return nr;
+    const char *p = buf;
+    size_t remaining = (size_t)nr;
+    while (remaining > 0) {
+        ssize_t nw = write(out_fd, p, remaining);
+        if (nw < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                ssize_t wrote = (ssize_t)((size_t)nr - remaining);
+                *offset += wrote;
+                return wrote > 0 ? wrote : -1;
+            }
+            return -1;
+        }
+        p += nw;
+        remaining -= (size_t)nw;
+    }
+    *offset += nr;
+    return nr;
 #endif
 }
 
@@ -68,6 +108,12 @@ static ssize_t psx_send(void *ctx, int fd, const void *buf, size_t len) {
 static ssize_t psx_recv(void *ctx, int fd, void *buf, size_t len) {
     (void)ctx; return kl_sock_recv(NULL, fd, buf, len);
 }
+static ssize_t psx_writev(void *ctx, int fd, const struct iovec *iov, int iovcnt) {
+    (void)ctx; return writev(fd, iov, iovcnt);
+}
+static ssize_t psx_sendfile(void *ctx, int out_fd, int in_fd, off_t *offset, size_t count) {
+    (void)ctx; return kl_posix_sendfile(out_fd, in_fd, offset, count);
+}
 
 static const KlSocketOps POSIX_OPS = {
     .set_nonblocking = psx_set_nonblocking,
@@ -81,6 +127,8 @@ static const KlSocketOps POSIX_OPS = {
     .close           = psx_close,
     .send            = psx_send,
     .recv            = psx_recv,
+    .writev          = psx_writev,
+    .sendfile        = psx_sendfile,
     .name            = "posix",
 };
 

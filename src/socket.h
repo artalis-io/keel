@@ -19,6 +19,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -43,6 +44,13 @@ typedef struct KlSocketOps {
     /* I/O */
     ssize_t (*send)(void *ctx, int fd, const void *buf, size_t len);
     ssize_t (*recv)(void *ctx, int fd, void *buf, size_t len);
+    /* Vectored write + zero-copy file send. May be NULL — a provider without
+     * them advertises no WRITEV/SENDFILE capability and the caller serializes /
+     * pread-sends instead. POSIX fills these; Winsock will use WSASend /
+     * TransmitFile. `sendfile` writes from file `in_fd` at `*offset` (advanced
+     * by the bytes sent) to socket `out_fd`. */
+    ssize_t (*writev)(void *ctx, int fd, const struct iovec *iov, int iovcnt);
+    ssize_t (*sendfile)(void *ctx, int out_fd, int in_fd, off_t *offset, size_t count);
     /* lifecycle: release provider-owned context. May be NULL (nothing to free,
      * e.g. the static POSIX provider). */
     void    (*destroy)(void *ctx);
@@ -68,6 +76,9 @@ const KlSocketProvider *kl_socket_provider_posix(void);
 int  kl_posix_set_nonblocking(int fd);
 void kl_posix_set_cloexec(int fd);
 void kl_posix_set_nosigpipe(int fd);
+/* Platform sendfile (or a pread+write fallback where absent). Advances *offset
+ * by the bytes sent; same return contract as the moved kl_sendfile_impl. */
+ssize_t kl_posix_sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
 
 /*
  * Provider-aware wrappers. A NULL provider (production default) takes the inline
@@ -145,6 +156,19 @@ static inline int kl_sock_accept(const KlSocketProvider *p, int fd,
 static inline int kl_sock_close(const KlSocketProvider *p, int fd) {
     if (p && p->ops->close) return p->ops->close(p->context, fd);
     return close(fd);
+}
+
+static inline ssize_t kl_sock_writev(const KlSocketProvider *p, int fd,
+                                     const struct iovec *iov, int iovcnt) {
+    if (p && p->ops->writev) return p->ops->writev(p->context, fd, iov, iovcnt);
+    return writev(fd, iov, iovcnt);
+}
+
+static inline ssize_t kl_sock_sendfile(const KlSocketProvider *p, int out_fd,
+                                       int in_fd, off_t *offset, size_t count) {
+    if (p && p->ops->sendfile)
+        return p->ops->sendfile(p->context, out_fd, in_fd, offset, count);
+    return kl_posix_sendfile(out_fd, in_fd, offset, count);
 }
 
 /* ── Lifecycle / capabilities / error taxonomy (Phase 3 semantics) ──────── */
