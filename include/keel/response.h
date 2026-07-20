@@ -7,6 +7,9 @@
 #include <sys/types.h>
 
 typedef struct KlTls KlTls;
+/* Back-pointer to the owning event ctx (for the internal socket provider,
+ * ctx->sockets). Opaque forward decl keeps the provider seam out of this header. */
+struct KlEventCtx;
 
 /** @brief Pluggable write callback — same signature as sh_json's ShJsonWriteFn. */
 typedef int (*KlWriteFn)(void *ctx, const char *data, size_t len);
@@ -52,6 +55,8 @@ typedef struct KlResponse {
     int head_request;       /**< 1 if HEAD request (suppress body) */
 
     KlTls *tls;             /**< TLS session (NULL for plaintext) */
+    struct KlEventCtx *ctx; /**< Back-pointer to event ctx (for ctx->sockets;
+                                 bound with conn_fd, preserved across reset) */
 } KlResponse;
 
 /**

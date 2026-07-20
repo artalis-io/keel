@@ -219,6 +219,7 @@ static int conn_init_response(KlConn *c) {
     }
     c->res.conn_fd = c->fd;
     c->res.tls = c->tls;
+    c->res.ctx = c->ctx;   /* socket provider for writev/sendfile (ctx->sockets) */
     c->res.keep_alive = c->req.keep_alive;
     c->res.head_request = (c->req.method_len == 4 &&
                            memcmp(c->req.method, "HEAD", 4) == 0);

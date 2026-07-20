@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <poll.h>
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -18,6 +19,39 @@
 static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+
+/* A large body forces partial sends through the serialized writev fallback. */
+static char g_big_body[64 * 1024];
+static void handle_big(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    for (size_t i = 0; i < sizeof(g_big_body); i++)
+        g_big_body[i] = (char)('A' + (i % 26));
+    kl_response_json(res, 200, g_big_body, sizeof(g_big_body));
+}
+
+/* ── A provider with native fds but NO vectored/sendfile support: forces the
+ * serialized writev + pread-send sendfile fallbacks in response.c. send/recv
+ * are plain POSIX; the other ops fall back to POSIX (NULL). ────────────────── */
+static ssize_t noviv_send(void *c, int fd, const void *b, size_t n) {
+    (void)c; return send(fd, b, n, 0);
+}
+static ssize_t noviv_recv(void *c, int fd, void *b, size_t n) {
+    (void)c; return recv(fd, b, n, 0);
+}
+static const KlSocketOps NOVIV_OPS = { .send = noviv_send, .recv = noviv_recv,
+                                       .name = "noviv" };
+static const KlSocketProvider g_noviv = { &NOVIV_OPS, NULL, KL_SOCK_CAP_NATIVE_FD };
+
+/* Serve a fixed file (sendfile path) from a global path. */
+static char g_file_path[256];
+static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    int fd = open(g_file_path, O_RDONLY);
+    if (fd < 0) { kl_response_json(res, 500, "{}", 2); return; }
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); kl_response_json(res, 500, "{}", 2); return; }
+    kl_response_file(res, fd, st.st_size);   /* Keel closes fd on reset */
 }
 
 static void handle_slow(KlRequest *req, KlResponse *res, void *ctx) {
@@ -448,6 +482,104 @@ UTEST(server_integration, explicit_posix_provider_roundtrip) {
     kl_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_server_free(&srv);
+}
+
+/* A provider without KL_SOCK_CAP_WRITEV makes response.c serialize its
+ * vectored writes through kl_sock_send. The full 64 KB body must still arrive
+ * byte-correct, proving the serialized writev fallback. */
+UTEST(server_integration, serialized_writev_fallback) {
+    KlServer srv;
+    KlConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/big", handle_big, NULL, NULL);
+    srv.ev.sockets = &g_noviv;   /* native fds, no writev/sendfile */
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    int port = srv.bound_port;
+
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    const char *req = "GET /big HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(write(fd, req, strlen(req)) > 0);
+
+    /* Read the whole response (headers + 64 KB body). */
+    char *buf = malloc(128 * 1024);
+    ASSERT_TRUE(buf != NULL);
+    ssize_t n = read_response(fd, buf, 128 * 1024, 2000);
+    ASSERT_TRUE(n > 0);
+    char *body = strstr(buf, "\r\n\r\n");
+    ASSERT_TRUE(body != NULL);
+    body += 4;
+    ssize_t body_len = n - (body - buf);
+    ASSERT_EQ(body_len, (ssize_t)sizeof(g_big_body));
+    /* Verify the pattern round-tripped through the serialized path. */
+    int ok = 1;
+    for (size_t i = 0; i < sizeof(g_big_body) && ok; i++)
+        if (body[i] != (char)('A' + (i % 26))) ok = 0;
+    ASSERT_TRUE(ok);
+    free(buf);
+    close(fd);
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+}
+
+/* A provider without KL_SOCK_CAP_SENDFILE makes response.c serve KL_BODY_FILE
+ * via pread + kl_sock_send instead of sendfile(); the file body must arrive
+ * byte-correct. */
+UTEST(server_integration, sendfile_fallback) {
+    /* Write a known temp file (~40 KB, spanning multiple read chunks). */
+    snprintf(g_file_path, sizeof(g_file_path), "/tmp/keel_sf_%d.dat", (int)getpid());
+    int wf = open(g_file_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT_TRUE(wf >= 0);
+    const size_t FLEN = 40000;
+    for (size_t i = 0; i < FLEN; i++) {
+        char c = (char)('a' + (i % 26));
+        ASSERT_EQ(write(wf, &c, 1), (ssize_t)1);
+    }
+    close(wf);
+
+    KlServer srv;
+    KlConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/file", handle_file, NULL, NULL);
+    srv.ev.sockets = &g_noviv;   /* no sendfile → pread+send fallback */
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    int port = srv.bound_port;
+
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    const char *req = "GET /file HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(write(fd, req, strlen(req)) > 0);
+
+    char *buf = malloc(64 * 1024);
+    ASSERT_TRUE(buf != NULL);
+    ssize_t n = read_response(fd, buf, 64 * 1024, 2000);
+    ASSERT_TRUE(n > 0);
+    char *body = strstr(buf, "\r\n\r\n");
+    ASSERT_TRUE(body != NULL);
+    body += 4;
+    ssize_t body_len = n - (body - buf);
+    ASSERT_EQ(body_len, (ssize_t)FLEN);
+    int ok = 1;
+    for (size_t i = 0; i < FLEN && ok; i++)
+        if (body[i] != (char)('a' + (i % 26))) ok = 0;
+    ASSERT_TRUE(ok);
+    free(buf);
+    close(fd);
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+    unlink(g_file_path);
 }
 
 UTEST_MAIN();

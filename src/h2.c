@@ -317,6 +317,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     }
     stream->res.conn_fd = h2c->conn->fd;
     stream->res.tls = h2c->conn->tls;
+    stream->res.ctx = h2c->conn->ctx;
     stream->res.keep_alive = 1;
     stream->res.head_request = (req->method_len == 4 &&
                                  memcmp(req->method, "HEAD", 4) == 0);

@@ -1,7 +1,30 @@
 # Server socket-provider adoption — Design
 
-Status: **stages 1–2 implemented (2026-07-20); stages 3–4 pending.** Follow-on to
-PAL Phases 1–3 (`docs/pal_transformation_design.md`).
+Status: **stages 1–4 implemented (2026-07-20).** Follow-on to PAL Phases 1–3
+(`docs/pal_transformation_design.md`). The server is now provider-aware for its
+lifecycle, byte I/O, and the vectored/zero-copy response fast paths.
+
+**Stage 3 (writev/sendfile).** `KlResponse` gains a `KlEventCtx *ctx`
+back-pointer (bound with `conn_fd`/`tls`, preserved across reset; set for h2
+streams too). `try_writev`/`stream_writev_all` route through a `seam_writev`
+helper: the raw `writev()` when the provider has `KL_SOCK_CAP_WRITEV`
+(POSIX/NULL — unchanged fast path), else a serialized `kl_sock_send` over the
+iov. The non-TLS `KL_BODY_FILE` path uses `sendfile()` when the provider has
+`KL_SOCK_CAP_SENDFILE`, else a `pread` + `kl_sock_send` fallback. POSIX
+advertises both caps, so the default build is byte-identical — bench flat.
+
+**The capability-gate uses the raw POSIX `writev`/`sendfile` syscall**, valid
+only for native-POSIX-fd providers (POSIX, a mock over real fds). A future
+non-POSIX native provider (Winsock) will instead add `writev`/`sendfile` **ops**
+to the vtable (`WSASend`/`TransmitFile`) in Phase 6 — adding those ops now, with
+no consumer, would be speculative. So today: POSIX fast path preserved; minimal
+providers serialize.
+
+**Stage 4 (tests).** `serialized_writev_fallback` (64 KB body round-trips
+byte-correct through a provider with no `WRITEV` cap) and `sendfile_fallback`
+(a ~40 KB file served via pread+send when `SENDFILE` is absent), both over a
+real server with a native-fd/no-vectored mock provider; plus the stage-1/2
+`explicit_posix_provider_roundtrip` conformance test.
 
 **Implemented (stages 1+2):** `KlConn.ctx` back-pointer (set at pool init to
 `&s->ev`); the server's `socket`/`bind`/`listen`/`accept`/`set_nonblocking`/

@@ -57,6 +57,8 @@ typedef struct KlSocketProvider {
 
 /* Capability flags. */
 #define KL_SOCK_CAP_NATIVE_FD  (1ull << 0)  /* fd is a real OS descriptor */
+#define KL_SOCK_CAP_WRITEV     (1ull << 1)  /* POSIX writev() usable on this fd */
+#define KL_SOCK_CAP_SENDFILE   (1ull << 2)  /* POSIX sendfile() usable on this fd */
 
 /* The built-in POSIX provider (static storage, no allocation). */
 const KlSocketProvider *kl_socket_provider_posix(void);
