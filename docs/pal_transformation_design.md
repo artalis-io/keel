@@ -188,6 +188,17 @@ handle width, `writev`/`sendfile` ops, accept/connect shape). Build Winsock
 first, freeze the public vtable once. Finer public error codes: **deferred** —
 keep the coarse `KlError` mapping.
 
+**Phase 5 + 6 (portable handles + Winsock) designed** in
+`docs/phase6_winsock_design.md`. Decisions: **Phase 5 first** — a `KlSocketHandle`
+type (a no-op `int` typedef on POSIX; `SOCKET` on Windows) across the
+socket-facing API, so the vtable is correct on Win64 before any Winsock code;
+`writev`/`sendfile` become real vtable ops (POSIX + Winsock `WSASend`/
+`TransmitFile`). **MinGW-w64 + a `windows-latest` CI runner** (WSAPoll backend via
+`#ifdef` in `event_poll.c`; link `ws2_32`/`bcrypt`). **Fuller port**, staged:
+5 (POSIX no-op) → 6a (provider + WSAPoll + build + clock/entropy shims, core
+tests green) → 6b (UDP, thread pool, breadth). 6a is the point where the vtable is
+validated and Phase 4 unblocks.
+
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
 
