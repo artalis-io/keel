@@ -923,7 +923,7 @@ int kl_server_run(KlServer *s) {
                 while (1) {
                     struct sockaddr_storage peer;
                     socklen_t peer_len = sizeof(peer);
-                    int client_fd = kl_sock_accept(s->ev.sockets, s->listen_fd,
+                    KlSocketHandle client_fd = kl_sock_accept(s->ev.sockets, s->listen_fd,
                                            (struct sockaddr *)&peer, &peer_len);
                     if (client_fd < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;

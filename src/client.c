@@ -92,7 +92,7 @@ static int connect_with_timeout(const char *host, size_t host_len,
         return -1;
     }
 
-    int fd = kl_sock_socket(NULL, res->ai_family, res->ai_socktype, res->ai_protocol);
+    KlSocketHandle fd = kl_sock_socket(NULL, res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) {
         if (out_err) *out_err = KL_ERR_SOCKET;
         freeaddrinfo(res);
@@ -181,7 +181,7 @@ static int unix_connect_with_timeout(const char *path, int timeout_ms,
         return -1;
     }
 
-    int fd = kl_sock_socket(NULL, AF_UNIX, SOCK_STREAM, 0);
+    KlSocketHandle fd = kl_sock_socket(NULL, AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         if (out_err) *out_err = KL_ERR_SOCKET;
         return -1;
@@ -861,7 +861,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     }
 
     KlError conn_err = KL_ERR_NONE;
-    int fd;
+    KlSocketHandle fd;
     if (parsed.is_unix) {
         fd = unix_connect_with_timeout(parsed.unix_path, timeout_ms, &conn_err);
     } else if (is_proxied) {
@@ -1077,10 +1077,10 @@ typedef enum {
 } KlClientState;
 
 /* One in-flight racing connect socket (Happy Eyeballs). */
-typedef struct { int fd; int active; } KlConnAttempt;
+typedef struct { KlSocketHandle fd; int active; } KlConnAttempt;
 
 struct KlClient {
-    int                fd;
+    KlSocketHandle     fd;
     KlClientState      state;
     KlEventCtx        *ev_ctx;
     KlAllocator       *alloc;
@@ -1351,7 +1351,7 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
                           socklen_t addrlen, int family, int socktype,
                           int protocol)
 {
-    int fd = kl_sock_socket(c->ev_ctx->sockets, family, socktype, protocol);
+    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, family, socktype, protocol);
     if (fd < 0)
         return -1;
 
@@ -1446,7 +1446,7 @@ static int he_new_attempt(KlClient *c, int idx)
     socklen_t sl = c->conn_addrs.addrlens[idx];
     int fam = c->conn_addrs.addrs[idx].ss_family;
 
-    int fd = kl_sock_socket(c->ev_ctx->sockets, fam, c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
+    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, fam, c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
     if (fd < 0)
         return -1;
 
@@ -2657,7 +2657,7 @@ int kl_client_request_pooled(KlClientPool *pool,
     int acq = kl_cpool_acquire(pool, host_buf, parsed.port, is_tls,
                                 NULL, 0, &pconn);
 
-    int fd;
+    KlSocketHandle fd;
     KlTls *tls = NULL;
     int ret = -1;
 

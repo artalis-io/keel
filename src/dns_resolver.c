@@ -95,7 +95,7 @@ typedef struct KlDnsResolver KlDnsResolver;
 typedef struct {
     KlDnsResolver *r;              /* owner (for callbacks) */
     int            ns_idx;         /* which nameserver this connects to */
-    int            fd;             /* -1 = closed */
+    KlSocketHandle fd;             /* -1 = closed */
     int            state;          /* DNS_TCP_CLOSED / CONNECTING / READY */
     KlTls         *tls;            /* NULL = plaintext; set for DoT */
     unsigned char *wbuf;           /* queued outbound framed queries */
@@ -839,7 +839,7 @@ static void dns_tcp_fail(KlDnsResolver *r, KlDnsTcp *t) {
 static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
     const struct sockaddr *nsa = (const struct sockaddr *)&r->ns[ns_idx];
     socklen_t nsl = r->ns_len[ns_idx];
-    int fd = kl_sock_socket(r->ctx->sockets, nsa->sa_family, SOCK_STREAM, 0);
+    KlSocketHandle fd = kl_sock_socket(r->ctx->sockets, nsa->sa_family, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
     if (kl_sock_set_nonblocking(r->ctx->sockets, fd) < 0) { close(fd); return -1; }

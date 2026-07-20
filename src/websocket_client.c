@@ -45,7 +45,7 @@ typedef enum {
 /* ── Connection struct ──────────────────────────────────────────── */
 
 struct KlWsClientConn {
-    int              fd;
+    KlSocketHandle   fd;
     WscState         state;
     KlEventCtx      *ev;
     KlAllocator     *alloc;
@@ -940,7 +940,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     memcpy(host_buf, parsed.host, parsed.host_len);
     host_buf[parsed.host_len] = '\0';
 
-    int fd;
+    KlSocketHandle fd;
     int rc = -1;
     if (parsed.is_unix) {
         /* Connect directly to the UNIX socket, bypassing DNS. */

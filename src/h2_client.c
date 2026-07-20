@@ -47,7 +47,7 @@ struct KlH2ClientStream {
 /* ── Connection struct ──────────────────────────────────────────── */
 
 struct KlH2ClientConn {
-    int                    fd;
+    KlSocketHandle         fd;
     H2cState               state;
     KlEventCtx            *ev;
     KlAllocator           *alloc;
@@ -470,7 +470,7 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     memcpy(host_buf, parsed.host, parsed.host_len);
     host_buf[parsed.host_len] = '\0';
 
-    int fd;
+    KlSocketHandle fd;
     int rc = -1;
     if (parsed.is_unix) {
         /* Connect directly to the UNIX socket, bypassing DNS. */

@@ -230,9 +230,25 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    conversion) and the `fd < 0` → `kl_handle_valid` check style (behavior-
    equivalent for the intptr_t rep — INVALID_SOCKET→-1 — so not a correctness
    change on POSIX, done where the `.c` cross-compiles).
-2. **6a-3 — Winsock provider + WSAPoll + build.** The local `int fd`→handle
-   variable conversions + `fd<0`→`kl_handle_valid` (MinGW-`-Wconversion`
-   validated), `socket_winsock.c`, WSAPoll `#ifdef`, monotonic
+1c. **6a-3a — socket-handle storage sweep (done, POSIX-green + `-Wconversion`
+   validated).** Retyped the *internal* socket-handle storage that 6a-2 (public
+   headers only) didn't reach: the transport structs' fd fields (`KlClient.fd`,
+   `KlConnAttempt.fd`, `KlH2ClientConn.fd`, `KlWsClientConn.fd`, `KlDnsTcp.fd`)
+   and the `int fd = kl_sock_socket(...)` / `kl_sock_accept(...)` locals across
+   client.c/h2_client.c/websocket_client.c/dns_resolver.c/server.c → all
+   `KlSocketHandle`. This kills the *truncate-at-birth* bug: a Winsock `SOCKET`
+   is no longer narrowed to `int` at the point it's created/accepted. Validated
+   the POSIX way — **`gcc -Wconversion` as a per-file audit** (it flags every
+   `KlSocketHandle`→`int` narrowing, even on Linux): confirmed **zero** remaining
+   narrowings involve `kl_sock_socket`/`kl_sock_accept` storage; the residue is
+   exclusively terminal raw-POSIX-syscall args. Normal `-Werror` build unchanged
+   (no `-Wconversion` in the Makefile — it's an audit tool, not a build gate).
+2. **6a-3b — raw-syscall routing + Winsock provider + WSAPoll + build.** The
+   remaining `-Wconversion` residue — direct `setsockopt`/`close`/`getsockname`/
+   `recv(MSG_PEEK)`/`fcntl` on socket handles (not through the seam) — is a
+   per-call **route-through-seam-vs-`#ifdef`** decision, made against the actual
+   MinGW build (where `closesocket`/winsock `setsockopt(SOCKET,…)` diverge), plus
+   `fd<0`→`kl_handle_valid`. Then `socket_winsock.c`, WSAPoll `#ifdef`, monotonic
    clock + entropy shims, MinGW Makefile, the loopback-pair wakeup. Green: build +
    the socket-provider tests + a plaintext server/client roundtrip on the Windows
    runner.
