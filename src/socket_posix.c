@@ -6,49 +6,90 @@
  * socket.h is the platform-neutral seam (vtable + dispatchers); this file is the
  * POSIX implementation of it.
  *
- * The setup helpers run at connect/accept time (out of line here); the
- * send/recv fast paths are inline in the header. The POSIX provider wraps these
- * so a decorator/mock can wrap or replace the built-in stack. See
- * docs/pal_transformation_design.md and docs/phase6_winsock_design.md §B.0.
+ * Defines the platform-default socket ops (kl_sockdef_*) the neutral socket.h
+ * seam calls when there's no provider op, plus the POSIX provider (thin adapters
+ * over those defaults). No raw syscall lives in socket.h — this TU owns them for
+ * POSIX. See docs/pal_transformation_design.md and docs/phase6_winsock_design.md
+ * §B.0.
  */
 
 #include "socket.h"
 
 #include <fcntl.h>
+#include <unistd.h>
 #if defined(__linux__)
   #include <sys/sendfile.h>
 #endif
 
 #define KL_SENDFILE_BUF 8192   /* pread+write fallback chunk (no-sendfile hosts) */
 
-int kl_posix_set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
+/* ── Platform default socket ops (POSIX) — the kl_sockdef_* the seam calls ── */
+
+int kl_sockdef_set_nonblocking(KlSocketHandle fd) {
+    int flags = fcntl((int)fd, F_GETFL, 0);
     if (flags < 0)
         return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    return fcntl((int)fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void kl_posix_set_cloexec(int fd) {
-    int flags = fcntl(fd, F_GETFD, 0);
+void kl_sockdef_set_cloexec(KlSocketHandle fd) {
+    int flags = fcntl((int)fd, F_GETFD, 0);
     if (flags >= 0)
-        (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+        (void)fcntl((int)fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
-void kl_posix_set_nosigpipe(int fd) {
+void kl_sockdef_set_nosigpipe(KlSocketHandle fd) {
 #ifdef SO_NOSIGPIPE
     int on = 1;
-    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    (void)setsockopt((int)fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
 #else
     (void)fd;
 #endif
 }
 
-ssize_t kl_posix_sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
+KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
+    return (KlSocketHandle)socket(domain, type, protocol);
+}
+int kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+    return connect((int)fd, a, l);
+}
+int kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+    return bind((int)fd, a, l);
+}
+int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
+    return listen((int)fd, backlog);
+}
+KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+    return (KlSocketHandle)accept((int)fd, a, l);
+}
+int kl_sockdef_close(KlSocketHandle fd) {
+    return close((int)fd);
+}
+
+ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
+    ssize_t r;
+#ifdef MSG_NOSIGNAL
+    do { r = send((int)fd, buf, len, MSG_NOSIGNAL); } while (r < 0 && errno == EINTR);
+#else
+    do { r = send((int)fd, buf, len, 0); } while (r < 0 && errno == EINTR);
+#endif
+    return r;
+}
+ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
+    ssize_t r;
+    do { r = recv((int)fd, buf, len, 0); } while (r < 0 && errno == EINTR);
+    return r;
+}
+ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
+    return writev((int)fd, iov, iovcnt);
+}
+
+ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
 #if defined(__linux__)
-    return sendfile(out_fd, in_fd, offset, count);
+    return sendfile((int)out_fd, in_fd, offset, count);
 #elif defined(__APPLE__)
     off_t len = (off_t)count;
-    int r = sendfile(in_fd, out_fd, *offset, &len, NULL, 0);
+    int r = sendfile(in_fd, (int)out_fd, *offset, &len, NULL, 0);
     if (r < 0 && errno != EAGAIN) return -1;
     *offset += len;
     return (ssize_t)len;
@@ -60,7 +101,7 @@ ssize_t kl_posix_sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
     const char *p = buf;
     size_t remaining = (size_t)nr;
     while (remaining > 0) {
-        ssize_t nw = write(out_fd, p, remaining);
+        ssize_t nw = write((int)out_fd, p, remaining);
         if (nw < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -78,46 +119,46 @@ ssize_t kl_posix_sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
 #endif
 }
 
-/* ── POSIX provider ─────────────────────────────────────────────────────── */
+/* ── POSIX provider — thin adapters over the kl_sockdef_* defaults ──────── */
 
 static int psx_set_nonblocking(void *ctx, KlSocketHandle fd) {
-    (void)ctx; return kl_posix_set_nonblocking((int)fd);
+    (void)ctx; return kl_sockdef_set_nonblocking(fd);
 }
 static void psx_set_cloexec(void *ctx, KlSocketHandle fd) {
-    (void)ctx; kl_posix_set_cloexec((int)fd);
+    (void)ctx; kl_sockdef_set_cloexec(fd);
 }
 static void psx_set_nosigpipe(void *ctx, KlSocketHandle fd) {
-    (void)ctx; kl_posix_set_nosigpipe((int)fd);
+    (void)ctx; kl_sockdef_set_nosigpipe(fd);
 }
 static KlSocketHandle psx_socket(void *ctx, int domain, int type, int protocol) {
-    (void)ctx; return (KlSocketHandle)socket(domain, type, protocol);
+    (void)ctx; return kl_sockdef_socket(domain, type, protocol);
 }
 static int psx_connect(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    (void)ctx; return connect((int)fd, a, l);
+    (void)ctx; return kl_sockdef_connect(fd, a, l);
 }
 static int psx_bind(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    (void)ctx; return bind((int)fd, a, l);
+    (void)ctx; return kl_sockdef_bind(fd, a, l);
 }
 static int psx_listen(void *ctx, KlSocketHandle fd, int backlog) {
-    (void)ctx; return listen((int)fd, backlog);
+    (void)ctx; return kl_sockdef_listen(fd, backlog);
 }
 static KlSocketHandle psx_accept(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    (void)ctx; return (KlSocketHandle)accept((int)fd, a, l);
+    (void)ctx; return kl_sockdef_accept(fd, a, l);
 }
 static int psx_close(void *ctx, KlSocketHandle fd) {
-    (void)ctx; return close((int)fd);
+    (void)ctx; return kl_sockdef_close(fd);
 }
 static ssize_t psx_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
-    (void)ctx; return kl_sock_send(NULL, fd, buf, len);   /* inline POSIX path */
+    (void)ctx; return kl_sockdef_send(fd, buf, len);
 }
 static ssize_t psx_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
-    (void)ctx; return kl_sock_recv(NULL, fd, buf, len);
+    (void)ctx; return kl_sockdef_recv(fd, buf, len);
 }
 static ssize_t psx_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
-    (void)ctx; return writev((int)fd, iov, iovcnt);
+    (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
 }
 static ssize_t psx_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
-    (void)ctx; return kl_posix_sendfile((int)out_fd, in_fd, offset, count);
+    (void)ctx; return kl_sockdef_sendfile(out_fd, in_fd, offset, count);
 }
 
 static const KlSocketOps POSIX_OPS = {

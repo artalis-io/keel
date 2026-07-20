@@ -282,9 +282,24 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    never compiled there), and `event_wsapoll.c` cross-compiles clean under
    MinGW-w64 with `-Werror`. Full `make OS=windows` does not link yet — it needs
    the remaining Windows TUs below.
-2. **6a-3b-ii — Winsock provider + platform TUs + raw-syscall routing.**
-   `src/socket_winsock.c` (the Winsock `KlSocketOps` — WSASend/TransmitFile/
-   ioctlsocket/closesocket + `WSAStartup`/`WSACleanup`); `src/platform_win.c`
+1f. **6a-3b-ii/a — socket.h made platform-neutral (done, POSIX-green +
+   MinGW-`socket.h`-compiles).** The seam header had raw POSIX syscalls in its
+   inline NULL-provider fast path (`send(MSG_NOSIGNAL)`, `writev`, `close`) — they
+   would not compile under MinGW. Moved those bodies out of the header into the
+   per-platform provider TU as a `kl_sockdef_*` default family (declared in
+   socket.h, defined in socket_posix.c; socket_winsock.c will define the Windows
+   versions). socket.h now dispatches inline through a provider's ops, else calls
+   `kl_sockdef_*` — zero syscall in the header. The one unavoidable platform-
+   include divergence (winsock2/ws2tcpip vs sys/socket, `struct iovec` shim,
+   `off_t`/`ssize_t`) is isolated in a new `src/sockcompat.h`. `response.c` is
+   untouched — the `struct iovec` shim keeps the seam's `writev` signature intact
+   (no `KlIoVec` churn). Behaviorally a no-op on POSIX; the NULL-provider default
+   is now one direct call (bench flat — it wraps a syscall). Validated: full POSIX
+   gauntlet (epoll/kqueue/io_uring/poll + musl) + a MinGW compile of `socket.h`.
+2. **6a-3b-ii/b — Winsock provider + platform TUs + raw-syscall routing.**
+   `src/socket_winsock.c` (defines the Windows `kl_sockdef_*` + the Winsock
+   `KlSocketOps` — WSASend/TransmitFile/ioctlsocket/closesocket + `WSAStartup`/
+   `WSACleanup`); `src/platform_win.c`
    (monotonic clock via `QueryPerformanceCounter`, entropy via `BCryptGenRandom`,
    loopback-pair thread wakeup) behind a narrow `platform.h` with a
    `platform_posix.c` sibling; and the raw-syscall residue routed through **new
