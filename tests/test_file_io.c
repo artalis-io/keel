@@ -39,7 +39,7 @@ typedef struct {
 
 static int mock_submit(KlFileIO *fio, int file_fd, void *buf,
                         size_t len, off_t offset,
-                        int sock_fd, void *udata) {
+                        KlSocketHandle sock_fd, void *udata) {
     MockFileIO *m = (MockFileIO *)fio;
     m->submitted++;
     m->last_file_fd = file_fd;
@@ -51,7 +51,7 @@ static int mock_submit(KlFileIO *fio, int file_fd, void *buf,
     return 0;
 }
 
-static int mock_cancel(KlFileIO *fio, int sock_fd) {
+static int mock_cancel(KlFileIO *fio, KlSocketHandle sock_fd) {
     MockFileIO *m = (MockFileIO *)fio;
     m->cancelled++;
     m->cancel_sock_fd = sock_fd;
@@ -590,7 +590,7 @@ UTEST(file_io, zero_copy_multi_chunk) {
 /* Mock submit that rejects buf=NULL (no splice), accepts buf!=NULL */
 static int mock_submit_no_splice(KlFileIO *fio, int file_fd, void *buf,
                                   size_t len, off_t offset,
-                                  int sock_fd, void *udata) {
+                                  KlSocketHandle sock_fd, void *udata) {
     MockFileIO *m = (MockFileIO *)fio;
     if (buf == NULL) return -1;  /* no splice support */
     m->submitted++;

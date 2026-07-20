@@ -99,7 +99,7 @@ struct KlWsClientConn {
 
 /* ── Forward declarations ───────────────────────────────────────── */
 
-static void wsc_on_event(int fd, KlEventMask ready, void *user_data);
+static void wsc_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data);
 static void wsc_error(KlWsClientConn *ws, const char *msg);
 static void wsc_close_connection(KlWsClientConn *ws);
 static int  wsc_process_frames(KlWsClientConn *ws, const uint8_t *data, size_t len);
@@ -846,7 +846,7 @@ static void wsc_handle_writable(KlWsClientConn *ws)
 
 /* ── Event callback ─────────────────────────────────────────────── */
 
-static void wsc_on_event(int fd, KlEventMask ready, void *user_data)
+static void wsc_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
     KlWsClientConn *ws = user_data;
     (void)fd;

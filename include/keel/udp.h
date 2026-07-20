@@ -2,6 +2,7 @@
 #define KEEL_UDP_H
 
 #include <keel/allocator.h>
+#include <keel/handle.h>
 #include <keel/error.h>
 #include <keel/event_ctx.h>
 
@@ -121,7 +122,7 @@ typedef struct {
 struct KlUdp {
     KlEventCtx    *ctx;
     KlAllocator   *alloc;
-    int            fd;
+    KlSocketHandle fd;
     int            family;           /**< AF_INET / AF_INET6 (resolved at init). */
     int            connected;        /**< 1 after kl_udp_connect. */
     /* Receive */
@@ -298,7 +299,7 @@ uint64_t kl_udp_dropped(const KlUdp *udp);
 uint64_t kl_udp_truncated(const KlUdp *udp);
 
 /** @brief The underlying socket fd (for getsockname etc.), or -1. */
-int kl_udp_fd(const KlUdp *udp);
+KlSocketHandle kl_udp_fd(const KlUdp *udp);
 
 /** @brief The local (bound) port in host byte order, or 0 if unbound/unknown. */
 uint16_t kl_udp_local_port(const KlUdp *udp);

@@ -1157,7 +1157,7 @@ struct KlClient {
 };
 
 /* Forward declarations */
-static void async_on_event(int fd, KlEventMask ready, void *user_data);
+static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data);
 static void async_complete_success(KlClient *c);
 static void async_complete_error(KlClient *c);
 static void async_handle_tls_handshake(KlClient *c);
@@ -2021,7 +2021,7 @@ static void async_handle_receiving(KlClient *c)
 
 /* ── KlWatcher callback ─────────────────────────────────────────── */
 
-static void async_on_event(int fd, KlEventMask ready, void *user_data)
+static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
     KlClient *c = user_data;
     (void)ready;

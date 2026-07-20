@@ -2,6 +2,7 @@
 #define KEEL_CONNECTION_H
 
 #include <keel/allocator.h>
+#include <keel/handle.h>
 #include <keel/chunked.h>
 #include <keel/file_io.h>
 #include <keel/request.h>
@@ -43,7 +44,7 @@ typedef enum {
 } KlConnState;
 
 typedef struct KlConn {
-    int fd;                     /**< Socket file descriptor */
+    KlSocketHandle fd;                     /**< Socket file descriptor */
     KlConnState state;          /**< Connection state */
     KlAllocator *alloc;         /**< Allocator (set once on pool init) */
 
@@ -118,7 +119,7 @@ typedef struct {
 int     kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc);
 
 /** @brief Acquire a connection slot from the pool. Returns NULL if full. */
-KlConn *kl_conn_acquire(KlConnPool *pool, int fd);
+KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd);
 
 /** @brief Release a connection back to the pool (closes fd). */
 void    kl_conn_release(KlConnPool *pool, KlConn *c);

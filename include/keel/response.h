@@ -2,6 +2,7 @@
 #define KEEL_RESPONSE_H
 
 #include <keel/allocator.h>
+#include <keel/handle.h>
 #include <keel/drain.h>
 #include <stddef.h>
 #include <sys/types.h>
@@ -23,7 +24,7 @@ typedef enum {
 
 typedef struct KlResponse {
     KlAllocator *alloc;     /**< Allocator for header buffer */
-    int conn_fd;            /**< Connection file descriptor */
+    KlSocketHandle conn_fd;            /**< Connection file descriptor */
 
     char *hdr_buf;          /**< Header buffer (allocated, grows via allocator) */
     size_t hdr_len;         /**< Header buffer used length */
@@ -108,7 +109,7 @@ int kl_response_body_copy(KlResponse *res, const char *data, size_t len);
  * @param fd   Open file descriptor (ownership transferred to response).
  * @param size File size in bytes.
  */
-void kl_response_file(KlResponse *res, int fd, off_t size);
+void kl_response_file(KlResponse *res, KlSocketHandle fd, off_t size);
 
 /** @brief Free response resources (header buffer, close file fd). */
 void kl_response_free(KlResponse *res);

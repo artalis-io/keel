@@ -45,7 +45,7 @@ typedef struct {
     KlEventMask got_mask;
 } WatcherCtx;
 
-static void test_watcher_cb(int fd, KlEventMask ready, void *user_data) {
+static void test_watcher_cb(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     WatcherCtx *ctx = user_data;
     ctx->called++;
     ctx->got_fd = fd;
@@ -534,7 +534,7 @@ typedef struct {
     int pipe_read_fd;
 } WatcherCompleteCtx;
 
-static void watcher_complete_cb(int fd, KlEventMask ready, void *user_data) {
+static void watcher_complete_cb(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)ready;
     WatcherCompleteCtx *ctx = user_data;
 
@@ -673,7 +673,7 @@ static void sleep_resume(KlAsyncOp *op, void *user_data) {
     c->state = KL_CONN_SENDING;
 }
 
-static void sleep_watcher(int fd, KlEventMask ready, void *user_data) {
+static void sleep_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)ready;
     SleepCtx *ctx = user_data;
     char buf[8];

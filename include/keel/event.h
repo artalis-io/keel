@@ -2,6 +2,7 @@
 #define KEEL_EVENT_H
 
 #include <keel/allocator.h>
+#include <keel/handle.h>
 
 typedef enum {
     KL_EVENT_READ  = 1, /**< FD is readable */
@@ -23,13 +24,13 @@ typedef struct {
 int  kl_event_init(KlEventLoop *loop);
 
 /** @brief Register a file descriptor for events. */
-int  kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata);
+int  kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata);
 
 /** @brief Modify the event mask for a registered fd. */
-int  kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata);
+int  kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata);
 
 /** @brief Remove a file descriptor from the event loop. */
-int  kl_event_del(KlEventLoop *loop, int fd);
+int  kl_event_del(KlEventLoop *loop, KlSocketHandle fd);
 
 /**
  * @brief Wait for events.

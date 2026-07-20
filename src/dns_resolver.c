@@ -737,7 +737,7 @@ static int dns_ns_index(const KlDnsResolver *r, const struct sockaddr *src) {
 
 /* ── DNS-over-TCP fallback (RFC 7766): persistent, pipelined per-NS ─────── */
 
-static void dns_tcp_on_event(int fd, KlEventMask mask, void *ud);
+static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud);
 
 /* Transport read/write — plaintext today; the tls branch is the DoT hook. */
 static ssize_t dns_tcp_write(KlDnsTcp *t, const void *b, size_t n) {
@@ -913,7 +913,7 @@ static void dns_tcp_flush(KlDnsResolver *r, KlDnsTcp *t) {
     dns_tcp_update_interest(r, t);
 }
 
-static void dns_tcp_on_event(int fd, KlEventMask mask, void *ud) {
+static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud) {
     (void)fd;
     KlDnsTcp *t = ud;
     KlDnsResolver *r = t->r;

@@ -278,7 +278,7 @@ struct MockTcp {
     int          nconns;
 };
 
-static void mock_tcp_on_client(int fd, KlEventMask ready, void *ud) {
+static void mock_tcp_on_client(KlSocketHandle fd, KlEventMask ready, void *ud) {
     (void)ready;
     MockTcpConn *c = ud;
     ssize_t r = recv(fd, c->buf + c->len, sizeof(c->buf) - c->len, 0);
@@ -308,7 +308,7 @@ static void mock_tcp_on_client(int fd, KlEventMask ready, void *ud) {
     if (off > 0) { memmove(c->buf, c->buf + off, c->len - off); c->len -= off; }
 }
 
-static void mock_tcp_on_listen(int fd, KlEventMask ready, void *ud) {
+static void mock_tcp_on_listen(KlSocketHandle fd, KlEventMask ready, void *ud) {
     (void)ready;
     MockTcp *m = ud;
     int cfd = accept(fd, NULL, NULL);

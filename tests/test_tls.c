@@ -21,7 +21,7 @@ typedef struct {
     int destroy_called;
 } MockTls;
 
-static KlTlsResult mock_handshake(KlTls *self, int fd) {
+static KlTlsResult mock_handshake(KlTls *self, KlSocketHandle fd) {
     (void)fd;
     MockTls *m = (MockTls *)self;
     switch (m->handshake_result) {
@@ -32,7 +32,7 @@ static KlTlsResult mock_handshake(KlTls *self, int fd) {
     }
 }
 
-static ssize_t mock_read(KlTls *self, int fd, void *buf, size_t len) {
+static ssize_t mock_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
     (void)fd;
     MockTls *m = (MockTls *)self;
     if (m->read_len == 0) return 0;  /* WANT_READ */
@@ -45,7 +45,7 @@ static ssize_t mock_read(KlTls *self, int fd, void *buf, size_t len) {
     return (ssize_t)to_copy;
 }
 
-static ssize_t mock_write(KlTls *self, int fd, const void *buf, size_t len) {
+static ssize_t mock_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
     (void)fd;
     MockTls *m = (MockTls *)self;
     size_t space = sizeof(m->write_buf) - m->write_len;
@@ -56,7 +56,7 @@ static ssize_t mock_write(KlTls *self, int fd, const void *buf, size_t len) {
     return (ssize_t)to_copy;
 }
 
-static KlTlsResult mock_shutdown(KlTls *self, int fd) {
+static KlTlsResult mock_shutdown(KlTls *self, KlSocketHandle fd) {
     (void)fd;
     MockTls *m = (MockTls *)self;
     m->shutdown_called = 1;

@@ -31,13 +31,13 @@ typedef struct {
     KlTls base;
 } PassthroughTls;
 
-static KlTlsResult pt_handshake(KlTls *self, int fd)
+static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd)
     { (void)self; (void)fd; return KL_TLS_OK; }
-static ssize_t pt_read(KlTls *self, int fd, void *buf, size_t len)
+static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len)
     { (void)self; return read(fd, buf, len); }
-static ssize_t pt_write(KlTls *self, int fd, const void *buf, size_t len)
+static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len)
     { (void)self; return write(fd, buf, len); }
-static KlTlsResult pt_shutdown(KlTls *self, int fd)
+static KlTlsResult pt_shutdown(KlTls *self, KlSocketHandle fd)
     { (void)self; (void)fd; return KL_TLS_OK; }
 static size_t pt_pending(KlTls *self)
     { (void)self; return 0; }

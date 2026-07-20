@@ -209,7 +209,7 @@ static size_t udp_build_control(unsigned char *buf, size_t bufsz,
 
 /* ── Forward decls ────────────────────────────────────────────────────── */
 
-static void udp_on_ready(int fd, KlEventMask ready, void *user_data);
+static void udp_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data);
 static void udp_recv_drain(KlUdp *udp);
 static void udp_flush_queue(KlUdp *udp);
 
@@ -672,7 +672,7 @@ static void udp_recv_drain(KlUdp *udp) {
     }
 }
 
-static void udp_on_ready(int fd, KlEventMask ready, void *user_data) {
+static void udp_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)fd;
     KlUdp *udp = user_data;
     if (ready & KL_EVENT_WRITE)
@@ -1242,7 +1242,7 @@ void kl_udp_on_drain(KlUdp *udp, KlUdpDrainFn cb, void *user_data) {
 size_t   kl_udp_send_queued(const KlUdp *udp) { return udp ? udp->q_bytes : 0; }
 uint64_t kl_udp_dropped(const KlUdp *udp)     { return udp ? udp->dropped : 0; }
 uint64_t kl_udp_truncated(const KlUdp *udp)   { return udp ? udp->truncated : 0; }
-int      kl_udp_fd(const KlUdp *udp)          { return udp ? udp->fd : -1; }
+KlSocketHandle kl_udp_fd(const KlUdp *udp)    { return udp ? udp->fd : KL_INVALID_SOCKET; }
 KlError  kl_udp_last_error(const KlUdp *udp)  { return udp ? udp->last_error : KL_ERR_INVALID_ARG; }
 
 uint16_t kl_udp_local_port(const KlUdp *udp) {

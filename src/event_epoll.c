@@ -16,7 +16,7 @@ static uint32_t mask_to_epoll(KlEventMask mask) {
     return ev;
 }
 
-int kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
+int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     struct epoll_event ev = {
         .events = mask_to_epoll(mask),
         .data.ptr = udata,
@@ -24,7 +24,7 @@ int kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     return epoll_ctl(loop->fd, EPOLL_CTL_ADD, fd, &ev);
 }
 
-int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
+int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     struct epoll_event ev = {
         .events = mask_to_epoll(mask),
         .data.ptr = udata,
@@ -32,7 +32,7 @@ int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     return epoll_ctl(loop->fd, EPOLL_CTL_MOD, fd, &ev);
 }
 
-int kl_event_del(KlEventLoop *loop, int fd) {
+int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
     return epoll_ctl(loop->fd, EPOLL_CTL_DEL, fd, NULL);
 }
 

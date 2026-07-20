@@ -159,20 +159,20 @@ static void ws_cli_on_close(KlWsClientConn *ws, uint16_t code, const char *r,
  * exercised without a real crypto backend. */
 typedef struct { KlTls base; KlAllocator *alloc; } PtTls;
 
-static KlTlsResult pt_handshake(KlTls *self, int fd) { (void)self; (void)fd; return KL_TLS_OK; }
-static ssize_t pt_read(KlTls *self, int fd, void *buf, size_t len) {
+static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd) { (void)self; (void)fd; return KL_TLS_OK; }
+static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
     (void)self; ssize_t r;
     do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     return r;
 }
-static ssize_t pt_write(KlTls *self, int fd, const void *buf, size_t len) {
+static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
     (void)self; ssize_t r;
     do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     return r;
 }
-static KlTlsResult pt_shutdown(KlTls *self, int fd) { (void)self; (void)fd; return KL_TLS_OK; }
+static KlTlsResult pt_shutdown(KlTls *self, KlSocketHandle fd) { (void)self; (void)fd; return KL_TLS_OK; }
 static size_t pt_pending(KlTls *self) { (void)self; return 0; }
 static void pt_reset(KlTls *self) { (void)self; }
 static void pt_destroy(KlTls *self) { PtTls *p = (PtTls *)self; kl_free(p->alloc, p, sizeof(*p)); }

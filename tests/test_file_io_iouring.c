@@ -34,7 +34,7 @@ static int make_temp_file(const char *content, size_t len) {
 /* Helper: submit a read, wait for CQE, tick, return completion count */
 static int submit_wait_tick(KlFileIO *fio, KlEventLoop *loop,
                             int file_fd, void *buf, size_t len,
-                            off_t offset, int sock_fd, void *udata,
+                            off_t offset, KlSocketHandle sock_fd, void *udata,
                             KlFileIOResult *out, int max) {
     if (fio->submit(fio, file_fd, buf, len, offset, sock_fd, udata) < 0)
         return -1;
@@ -289,7 +289,7 @@ UTEST(file_io_iouring, zero_copy_field_set) {
 /* Helper: submit a splice (buf=NULL), wait for CQEs, tick, return count */
 static int submit_splice_wait_tick(KlFileIO *fio, KlEventLoop *loop,
                                     int file_fd, size_t len, off_t offset,
-                                    int sock_fd, void *udata,
+                                    KlSocketHandle sock_fd, void *udata,
                                     KlFileIOResult *out, int max) {
     if (fio->submit(fio, file_fd, NULL, len, offset, sock_fd, udata) < 0)
         return -1;

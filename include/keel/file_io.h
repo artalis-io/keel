@@ -2,6 +2,7 @@
 #define KEEL_FILE_IO_H
 
 #include <keel/allocator.h>
+#include <keel/handle.h>
 #include <keel/event.h>
 #include <sys/types.h>
 
@@ -18,10 +19,10 @@ struct KlFileIO {
      *  sock_fd is an opaque key for routing/cancellation.
      *  Returns 0 on success, -1 on error. */
     int (*submit)(KlFileIO *fio, int file_fd, void *buf,
-                  size_t len, off_t offset, int sock_fd, void *udata);
+                  size_t len, off_t offset, KlSocketHandle sock_fd, void *udata);
 
     /** Cancel pending read keyed by sock_fd. Best-effort. */
-    int (*cancel)(KlFileIO *fio, int sock_fd);
+    int (*cancel)(KlFileIO *fio, KlSocketHandle sock_fd);
 
     /** Collect completions since last tick.
      *  Called once per event loop iteration. Returns count. */

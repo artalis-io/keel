@@ -43,7 +43,7 @@ int main(void) {
     for (int i = 0; i < capacity; i++) {
         conns[i] = kl_conn_acquire(&pool, 100 + i);
         printf("  acquired fd=%d, active=%d, state=%u\n",
-               conns[i] ? conns[i]->fd : -1,
+               conns[i] ? (int)conns[i]->fd : -1,
                pool.active_count,
                conns[i] ? (unsigned)conns[i]->state : 0);
     }
@@ -62,7 +62,7 @@ int main(void) {
 
     KlConn *reused = kl_conn_acquire(&pool, 201);
     printf("  re-acquired fd=%d, active=%d\n",
-           reused ? reused->fd : -1, pool.active_count);
+           reused ? (int)reused->fd : -1, pool.active_count);
 
     /* Timing */
     printf("\n--- Monotonic clock ---\n");

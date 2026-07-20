@@ -116,7 +116,7 @@ uint16_t kl_udp_server_local_port(const KlUdpServer *s) {
     return s ? kl_udp_local_port(&s->udp) : 0;
 }
 
-int kl_udp_server_fd(const KlUdpServer *s) {
+KlSocketHandle kl_udp_server_fd(const KlUdpServer *s) {
     return s ? kl_udp_fd(&s->udp) : -1;
 }
 

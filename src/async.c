@@ -54,7 +54,7 @@ void kl_event_ctx_free(KlEventCtx *ctx) {
 
 /* ── KlWatcher ─────────────────────────────────────────────────────── */
 
-int kl_watcher_add(KlEventCtx *ctx, int fd, KlEventMask mask,
+int kl_watcher_add(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask,
                    KlWatcherFn on_ready, void *user_data)
 {
     if (!ctx || fd < 0 || !on_ready) return -1;
@@ -94,7 +94,7 @@ int kl_watcher_add(KlEventCtx *ctx, int fd, KlEventMask mask,
     return 0;
 }
 
-int kl_watcher_mod(KlEventCtx *ctx, int fd, KlEventMask mask) {
+int kl_watcher_mod(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask) {
     if (!ctx || fd < 0) return -1;
 
     KlWatcher *w = ctx->watchers;
@@ -106,7 +106,7 @@ int kl_watcher_mod(KlEventCtx *ctx, int fd, KlEventMask mask) {
     return kl_event_mod(&ctx->loop, fd, mask, watcher_tag(w));
 }
 
-int kl_watcher_rearm(KlEventCtx *ctx, int fd) {
+int kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd) {
     if (!ctx || fd < 0) return -1;
 
     KlWatcher *w = ctx->watchers;
@@ -116,7 +116,7 @@ int kl_watcher_rearm(KlEventCtx *ctx, int fd) {
     return kl_event_mod(&ctx->loop, fd, w->mask, watcher_tag(w));
 }
 
-void kl_watcher_del(KlEventCtx *ctx, int fd) {
+void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd) {
     if (!ctx || fd < 0) return;
 
     KlAllocator *a = ctx->alloc;

@@ -14,6 +14,7 @@
 #define KEEL_CLIENT_POOL_H
 
 #include <keel/allocator.h>
+#include <keel/handle.h>
 #include <keel/client.h>
 #include <keel/error.h>
 #include <keel/event_ctx.h>
@@ -46,7 +47,7 @@ typedef struct {
  * or kl_cpool_discard when done.
  */
 typedef struct {
-    int    fd;       /**< TCP socket */
+    KlSocketHandle fd;       /**< TCP socket */
     KlTls *tls;      /**< TLS session (NULL for plaintext) */
     int    reused;   /**< 1 if from pool, 0 if fresh */
     void  *_entry;   /**< Internal bookkeeping -- do not touch */
@@ -61,7 +62,7 @@ typedef struct KlClientPoolEntry {
     int      is_tls;
     char     proxy_host[KL_CLIENT_HOSTNAME_MAX]; /**< "" = direct connection */
     int      proxy_port;                          /**< 0 = direct connection */
-    int      fd;            /**< -1 = free slot */
+    KlSocketHandle fd;            /**< -1 = free slot */
     KlTls   *tls;
     uint64_t idle_since_ms; /**< kl_monotonic_ms() when returned */
     int64_t  timer_id;      /**< idle timer (-1 = none) */

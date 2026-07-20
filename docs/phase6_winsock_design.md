@@ -212,8 +212,27 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    `int fd = kl_sock_socket(...)` narrows silently — those storage sites are the
    6a-2 field sweep). Validated on MinGW: the vtable is now non-lossy for a
    `SOCKET`.
-2. **6a — Winsock provider + WSAPoll + build.** The `int fd`→`KlSocketHandle`
-   field/check sweep (6a-2), `socket_winsock.c`, WSAPoll `#ifdef`, monotonic
+1b. **6a-2 — retype the public socket-handle API surface to `KlSocketHandle`
+   (done, POSIX-green + MinGW-header-validated).** The struct fields + function
+   signatures that carry a socket descriptor: `KlConn.fd`, `KlUdp.fd`,
+   `KlWatcher.fd` + `KlWatcherFn`, `KlResponse.conn_fd`, `KlServer/KlConfig
+   .listen_fd`, `KlClientPoolConn.fd`; the `event.h`/`event_ctx.h` APIs
+   (`kl_event_*`, `kl_watcher_*`), `kl_conn_acquire`, `kl_response_file`,
+   `kl_udp_fd`, `kl_udp_server_fd`, `kl_peer_cred_fd`; and the `KlTls` +
+   `KlFileIO` (`sock_fd`) vtables. `KlEventLoop.fd` and `file_fd`/`in_fd` stay
+   `int` (backend-internal / *file* handles). Every consumer forced by `-Werror`
+   (watcher callbacks, event backends, TLS/file_io impls in src + tests +
+   examples) retyped. Validated: full POSIX gauntlet (epoll/kqueue/io_uring/poll +
+   musl) + a MinGW compile of the retyped public headers under `winsock2.h` (the
+   handle-bearing surface is SOCKET-compatible). **Deferred to 6a-3:** the local
+   `int fd` *variables* in consumers that store a socket handle (they narrow
+   silently on POSIX; `-Wconversion` on the MinGW build validates their
+   conversion) and the `fd < 0` → `kl_handle_valid` check style (behavior-
+   equivalent for the intptr_t rep — INVALID_SOCKET→-1 — so not a correctness
+   change on POSIX, done where the `.c` cross-compiles).
+2. **6a-3 — Winsock provider + WSAPoll + build.** The local `int fd`→handle
+   variable conversions + `fd<0`→`kl_handle_valid` (MinGW-`-Wconversion`
+   validated), `socket_winsock.c`, WSAPoll `#ifdef`, monotonic
    clock + entropy shims, MinGW Makefile, the loopback-pair wakeup. Green: build +
    the socket-provider tests + a plaintext server/client roundtrip on the Windows
    runner.

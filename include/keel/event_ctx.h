@@ -4,6 +4,7 @@
 #include <keel/allocator.h>
 #include <keel/error.h>
 #include <keel/event.h>
+#include <keel/handle.h>
 #include <stdint.h>
 
 /* ── KlWatcher — generic FD callback ──────────────────────────────── */
@@ -14,13 +15,13 @@
  * @param ready  Bitmask of ready events (KL_EVENT_READ, KL_EVENT_WRITE).
  * @param user_data Opaque pointer passed to kl_watcher_add.
  */
-typedef void (*KlWatcherFn)(int fd, KlEventMask ready, void *user_data);
+typedef void (*KlWatcherFn)(KlSocketHandle fd, KlEventMask ready, void *user_data);
 
 /**
  * @brief A registered FD watcher (heap-allocated, ctx-owned list).
  */
 typedef struct KlWatcher {
-    int fd;                  /**< Watched file descriptor */
+    KlSocketHandle fd;       /**< Watched file descriptor */
     KlEventMask mask;        /**< Event interest mask */
     KlWatcherFn on_ready;    /**< Callback when FD is ready */
     void *user_data;         /**< Opaque user pointer */
@@ -84,19 +85,19 @@ void kl_event_ctx_free(KlEventCtx *ctx);
  *
  * @return 0 on success, -1 on failure.
  */
-int  kl_watcher_add(KlEventCtx *ctx, int fd, KlEventMask mask,
+int  kl_watcher_add(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask,
                     KlWatcherFn on_ready, void *user_data);
 
 /**
  * @brief Change the event interest mask for a registered watcher.
  * @return 0 on success, -1 if fd not found or event_mod fails.
  */
-int  kl_watcher_mod(KlEventCtx *ctx, int fd, KlEventMask mask);
+int  kl_watcher_mod(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask);
 
 /**
  * @brief Remove a watcher and deregister its FD from the event loop.
  */
-void kl_watcher_del(KlEventCtx *ctx, int fd);
+void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd);
 
 /**
  * @brief Re-arm a watcher after its callback fires.
@@ -105,7 +106,7 @@ void kl_watcher_del(KlEventCtx *ctx, int fd);
  * the watcher was removed during the callback.  On persistent backends
  * (epoll, kqueue) this is a harmless re-register.
  */
-int  kl_watcher_rearm(KlEventCtx *ctx, int fd);
+int  kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd);
 
 /* ── Dispatch helpers ─────────────────────────────────────────────── */
 

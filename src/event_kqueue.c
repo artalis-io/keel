@@ -9,7 +9,7 @@ int kl_event_init(KlEventLoop *loop) {
     return loop->fd < 0 ? -1 : 0;
 }
 
-int kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
+int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     struct kevent changes[2];
     int n = 0;
 
@@ -25,7 +25,7 @@ int kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     return kevent(loop->fd, changes, n, NULL, 0, NULL) < 0 ? -1 : 0;
 }
 
-int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
+int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     /*
      * kqueue: EV_ADD on an existing filter updates it in place (upsert).
      * EV_ADD | EV_ENABLE re-enables a disabled filter.
@@ -50,7 +50,7 @@ int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     return kevent(loop->fd, changes, 2, NULL, 0, NULL) < 0 ? -1 : 0;
 }
 
-int kl_event_del(KlEventLoop *loop, int fd) {
+int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
     struct kevent changes[2];
     EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
     EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);

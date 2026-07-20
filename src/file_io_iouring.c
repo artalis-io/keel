@@ -81,7 +81,7 @@ static void slot_close_pipe(KlFileIOSlot *slot) {
 
 /* Submit splice phase 2: pipe_rd → sock_fd */
 static int submit_splice_out(KlFileIOIoUring *self, KlFileIOSlot *slot,
-                              int sock_fd, ssize_t len) {
+                             KlSocketHandle sock_fd, ssize_t len) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&self->st->ring);
     if (!sqe)
         return -1;
@@ -97,7 +97,7 @@ static int submit_splice_out(KlFileIOIoUring *self, KlFileIOSlot *slot,
 
 static int iouring_fio_submit(KlFileIO *fio, int file_fd, void *buf,
                                size_t len, off_t offset,
-                               int sock_fd, void *udata) {
+                              KlSocketHandle sock_fd, void *udata) {
     KlFileIOIoUring *self = (KlFileIOIoUring *)fio;
 
     /* io_uring_prep_splice/prep_read take a 32-bit unsigned length; reject an
@@ -157,7 +157,7 @@ static int iouring_fio_submit(KlFileIO *fio, int file_fd, void *buf,
     return 0;
 }
 
-static int iouring_fio_cancel(KlFileIO *fio, int sock_fd) {
+static int iouring_fio_cancel(KlFileIO *fio, KlSocketHandle sock_fd) {
     KlFileIOIoUring *self = (KlFileIOIoUring *)fio;
 
     struct io_uring_sqe *sqe = io_uring_get_sqe(&self->st->ring);

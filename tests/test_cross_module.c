@@ -153,13 +153,13 @@ typedef struct {
     int          handshake_done;
 } PassthroughTls;
 
-static KlTlsResult pt_handshake(KlTls *self, int fd) {
+static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd) {
     (void)fd;
     ((PassthroughTls *)self)->handshake_done = 1;
     return KL_TLS_OK;
 }
 
-static ssize_t pt_read(KlTls *self, int fd, void *buf, size_t len) {
+static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
     (void)self;
     ssize_t r;
     do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
@@ -167,7 +167,7 @@ static ssize_t pt_read(KlTls *self, int fd, void *buf, size_t len) {
     return r;
 }
 
-static ssize_t pt_write(KlTls *self, int fd, const void *buf, size_t len) {
+static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
     (void)self;
     ssize_t r;
     do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
@@ -175,7 +175,7 @@ static ssize_t pt_write(KlTls *self, int fd, const void *buf, size_t len) {
     return r;
 }
 
-static KlTlsResult pt_shutdown(KlTls *self, int fd) {
+static KlTlsResult pt_shutdown(KlTls *self, KlSocketHandle fd) {
     (void)self; (void)fd;
     return KL_TLS_OK;
 }
@@ -392,7 +392,7 @@ static void tls_async_resume(KlAsyncOp *op, void *user_data) {
     conn->state = KL_CONN_SENDING;
 }
 
-static void tls_async_watcher(int fd, KlEventMask ready, void *user_data) {
+static void tls_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)ready;
     TlsAsyncCtx *ctx = user_data;
     char buf[16];
@@ -505,7 +505,7 @@ static void mw_async_resume(KlAsyncOp *op, void *user_data) {
     conn->state = KL_CONN_SENDING;
 }
 
-static void mw_async_watcher(int fd, KlEventMask ready, void *user_data) {
+static void mw_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)ready;
     MwAsyncCtx *ctx = user_data;
     char buf[16];
@@ -744,7 +744,7 @@ static void hold_resume(KlAsyncOp *op, void *user_data) {
     conn->state = KL_CONN_SENDING;
 }
 
-static void hold_watcher(int fd, KlEventMask ready, void *user_data) {
+static void hold_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)ready;
     TlsAsyncCtx *ctx = user_data;
     char buf[16];

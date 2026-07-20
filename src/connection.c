@@ -85,7 +85,7 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
     return 0;
 }
 
-KlConn *kl_conn_acquire(KlConnPool *pool, int fd) {
+KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd) {
     if (!pool->free_list) return NULL;
 
     KlConn *c = pool->free_list;

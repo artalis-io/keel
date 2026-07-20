@@ -368,7 +368,7 @@ static int kl_server_bind_listener(KlServer *s) {
 
 /* cppcheck-suppress constParameterPointer  ; 'out' is written on the
    platform branches below (invisible to cppcheck's default config). */
-int kl_peer_cred_fd(int fd, KlPeerCred *out) {
+int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out) {
     if (fd < 0 || !out)
         return -1;
 
@@ -834,7 +834,7 @@ int kl_server_run(KlServer *s) {
                                           : "(inherited fd)");
     } else if (s->config.listen_fd > 0) {
         kl_log(s, KL_LOG_INFO, "listening on inherited fd %d (port %d)",
-               s->listen_fd, s->bound_port);
+               (int)s->listen_fd, s->bound_port);
     } else {
         kl_log(s, KL_LOG_INFO, "listening on %s:%d",
                s->config.bind_addr, s->bound_port);

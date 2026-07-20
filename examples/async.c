@@ -63,7 +63,7 @@ static void delay_on_cancel(KlAsyncOp *op, void *user_data) {
 }
 
 /* Watcher callback: pipe became readable → complete the async op */
-static void delay_watcher(int fd, KlEventMask ready, void *user_data) {
+static void delay_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)fd; (void)ready;
     DelayCtx *ctx = user_data;
 

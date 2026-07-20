@@ -18,7 +18,7 @@ typedef struct {
     KlEventMask got_mask;
 } WatcherCtx;
 
-static void test_watcher_cb(int fd, KlEventMask ready, void *user_data) {
+static void test_watcher_cb(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     WatcherCtx *ctx = user_data;
     ctx->called++;
     ctx->got_fd = fd;

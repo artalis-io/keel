@@ -92,7 +92,7 @@ static void *worker_thread(void *arg)
 
 /* ── Pipe watcher callback (runs on event loop thread) ────────────── */
 
-static void thread_pool_on_pipe(int fd, KlEventMask ready, void *user_data)
+static void thread_pool_on_pipe(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
     (void)ready;
     KlThreadPool *pool = user_data;

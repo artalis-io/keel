@@ -119,7 +119,7 @@ int kl_event_init(KlEventLoop *loop) {
     return 0;
 }
 
-int kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
+int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlPollState *st = loop->_backend;
 
     if (ensure_fd_cap(st, fd) < 0)
@@ -152,7 +152,7 @@ int kl_event_add(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     return 0;
 }
 
-int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
+int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlPollState *st = loop->_backend;
 
     if (fd < 0 || fd >= st->fd_to_idx_cap)
@@ -166,7 +166,7 @@ int kl_event_mod(KlEventLoop *loop, int fd, KlEventMask mask, void *udata) {
     return 0;
 }
 
-int kl_event_del(KlEventLoop *loop, int fd) {
+int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
     KlPollState *st = loop->_backend;
 
     if (fd < 0 || fd >= st->fd_to_idx_cap)

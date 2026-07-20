@@ -254,7 +254,7 @@ int kl_response_body_copy(KlResponse *res, const char *data, size_t len) {
     return 0;
 }
 
-void kl_response_file(KlResponse *res, int fd, off_t size) {
+void kl_response_file(KlResponse *res, KlSocketHandle fd, off_t size) {
     res->body_mode = KL_BODY_FILE;
     res->file_fd = fd;
     res->file_size = size;

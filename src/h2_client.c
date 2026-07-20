@@ -72,7 +72,7 @@ struct KlH2ClientConn {
 
 /* ── Forward declarations ───────────────────────────────────────── */
 
-static void h2c_on_event(int fd, KlEventMask ready, void *user_data);
+static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data);
 static void h2c_error(KlH2ClientConn *c, const char *msg);
 static void h2c_close_connection(KlH2ClientConn *c);
 
@@ -389,7 +389,7 @@ static void h2c_handle_active(KlH2ClientConn *c)
 
 /* ── Event callback ─────────────────────────────────────────────── */
 
-static void h2c_on_event(int fd, KlEventMask ready, void *user_data)
+static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
     KlH2ClientConn *c = user_data;
     (void)fd;

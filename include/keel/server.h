@@ -2,6 +2,7 @@
 #define KEEL_SERVER_H
 
 #include <keel/allocator.h>
+#include <keel/handle.h>
 #include <keel/compress.h>
 #include <keel/error.h>
 #include <keel/parser.h>
@@ -82,7 +83,7 @@ typedef struct KlConfig {
     const char *proxy_trusted_cidrs; /**< accept PROXY protocol (v1/v2) headers only from
                                       *   sources in this comma-separated CIDR allowlist
                                       *   ("10.0.0.0/8,::1/128"); NULL = disabled. */
-    int listen_fd;              /**< adopt this pre-bound+listening fd (socket activation);
+    KlSocketHandle listen_fd;              /**< adopt this pre-bound+listening fd (socket activation);
                                  *   0 = disabled (KEEL creates its own socket). Transport is
                                  *   auto-detected from the fd; KEEL never unlinks an adopted
                                  *   UNIX socket. See kl_systemd_listen_fd(). */
@@ -113,7 +114,7 @@ typedef struct KlServer {
     KlRouter router;            /**< Route table */
     KlConnPool pool;            /**< Connection pool */
     KlEventCtx ev;              /**< event loop + watcher list */
-    int listen_fd;              /**< Listening socket fd */
+    KlSocketHandle listen_fd;              /**< Listening socket fd */
     int bound_port;             /**< actual port after bind (useful with port=0) */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */
     KlCidr *proxy_cidrs;        /**< parsed proxy_trusted_cidrs (NULL = off) */
@@ -276,7 +277,7 @@ int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out);
  * @param out  Receives the peer credentials on success.
  * @return 0 on success, -1 if unavailable.
  */
-int kl_peer_cred_fd(int fd, KlPeerCred *out);
+int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out);
 
 /**
  * @brief Read the peer's security label (SELinux/AppArmor) of a request's

@@ -2,6 +2,7 @@
 #define KEEL_UDP_SERVER_H
 
 #include <keel/allocator.h>
+#include <keel/handle.h>
 #include <keel/error.h>
 #include <keel/event_ctx.h>
 #include <keel/udp.h>
@@ -112,7 +113,7 @@ void kl_udp_server_free(KlUdpServer *s);
 uint16_t kl_udp_server_local_port(const KlUdpServer *s);
 
 /** @brief The underlying socket fd, or -1. */
-int kl_udp_server_fd(const KlUdpServer *s);
+KlSocketHandle kl_udp_server_fd(const KlUdpServer *s);
 
 /** @brief Last error recorded on a -1 return. */
 KlError kl_udp_server_last_error(const KlUdpServer *s);
