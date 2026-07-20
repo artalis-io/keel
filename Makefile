@@ -3,6 +3,19 @@ AR      = ar
 UNAME_S := $(shell uname -s)
 LDFLAGS =
 
+# Windows detection: explicit `make OS=windows` (e.g. MinGW cross-compile from
+# Linux: make CC=x86_64-w64-mingw32-gcc OS=windows) or a native MSYS2/MinGW shell
+# where uname reports MINGW*/MSYS*. Selects the WSAPoll event backend + Winsock.
+ifeq ($(OS),windows)
+  WINDOWS := 1
+endif
+ifneq ($(findstring MINGW,$(UNAME_S)),)
+  WINDOWS := 1
+endif
+ifneq ($(findstring MSYS,$(UNAME_S)),)
+  WINDOWS := 1
+endif
+
 # Detect Cosmopolitan toolchain (cosmocc, x86_64-unknown-cosmo-cc, etc.)
 ifneq ($(findstring cosmo,$(CC)),)
   COSMO := 1
@@ -20,6 +33,17 @@ ifdef COSMO
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
   EVENT_SRC = src/event_poll.c
   FILE_IO_SRC = src/file_io.c
+else ifdef WINDOWS
+  # Windows (MinGW-w64): WSAPoll event backend + Winsock socket provider, its own
+  # TUs (event_wsapoll.c / socket_winsock.c / platform_win.c — no #ifdef in the
+  # POSIX TUs). PE has no ELF -z RELRO / _FORTIFY_SOURCE=3; keep CFLAGS simple.
+  CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
+            -fstack-protector-strong -Iinclude -Ivendor/llhttp
+  VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
+  EVENT_SRC = src/event_wsapoll.c
+  FILE_IO_SRC = src/file_io.c
+  LDFLAGS += -lws2_32 -lbcrypt
+  EXE = .exe
 else
   # Build hardening (parity with Hull's W^X posture in docs/security.md):
   #   -fPIE / -pie           — ASLR for executables linking libkeel.a

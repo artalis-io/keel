@@ -131,15 +131,44 @@ that call the syscalls; the capability-gate stays for minimal providers.
 (refcounted; `WSACleanup` on `destroy`). A `SOCKET` is native-pollable, so
 NATIVE_FD holds and the server/event loop accept it.
 
-### B.2 WSAPoll event backend
-`WSAPOLLFD` is layout- and flag-compatible with `struct pollfd` (`POLLIN`/
-`POLLOUT` exist in Winsock). Reuse `src/event_poll.c` with `#ifdef _WIN32`:
-`poll` → `WSAPoll`, `<poll.h>` → `<winsock2.h>`. **Known WSAPoll defect:** a
-failed non-blocking `connect` is not reported via `POLLOUT`. Keel already
-verifies connect completion with `getsockopt(SO_ERROR)` after the writable event;
-the mitigation is a bounded connect deadline so a never-signalled failure still
-times out (the client already has the Happy-Eyeballs deadline; the server does
-not `connect`). Document + test explicitly.
+### B.0 Platform-isolation principle (architecture)
+**One platform family per translation unit, selected by the Makefile — never
+`#ifdef _WIN32` inside a POSIX TU.** This is not new: Keel already isolates event
+backends this way — `event_epoll.c`, `event_kqueue.c`, `event_poll.c`,
+`event_iouring.c` are fully independent TUs that share no code, each implementing
+`kl_event_*` for its platform, one selected per build. The Windows port extends
+that existing pattern rather than threading `#ifdef` through shared files:
+- **Event backend** → a new independent `src/event_wsapoll.c` TU (sibling to the
+  others). `event_poll.c` is *not touched*.
+- **Socket provider** → `socket.c` stays POSIX-family (its `__linux__`/`__APPLE__`
+  `sendfile` variants are all POSIX); Winsock lives entirely in a separate
+  `src/socket_winsock.c`. Consumers only call the `kl_sock_*` seam, so the
+  remaining raw syscalls (`setsockopt`/`getsockname`/`close`/…) are handled by
+  **routing them through new seam ops**, not by `#ifdef` in `server.c`/`udp.c`.
+- **Platform services** (clock, entropy, thread wakeup) → a narrow interface with
+  per-OS TUs (`platform_posix.c` / `platform_win.c`), replacing the scattered
+  `#ifdef __APPLE__`/`/dev/urandom`/`clock_gettime` sites — not new `#ifdef _WIN32`
+  blocks in `connection.c`/`dns_resolver.c`/`websocket_client.c`.
+
+The Makefile already branches `EVENT_SRC`/`FILE_IO_SRC` by platform+backend; the
+Windows branch adds `event_wsapoll.c` + `socket_winsock.c` + `platform_win.c` and
+links `ws2_32`/`bcrypt`. Zero cross-platform `#ifdef` enters an existing TU.
+
+### B.2 WSAPoll event backend (independent TU)
+`src/event_wsapoll.c` — a self-contained backend TU implementing `kl_event_*`
+over `WSAPoll(WSAPOLLFD*, ULONG, INT)`. It does **not** reuse `event_poll.c`'s
+`fd_to_idx[fd]` direct-index map: a `SOCKET` is a large sparse kernel handle, not
+a small dense fd, so the direct-index array is wrong for Windows. WSAPoll uses a
+`SOCKET`-safe fd→slot lookup instead (linear scan over the active `WSAPOLLFD`
+array — O(n) per add/mod/del, consistent with Keel's O(n) router / O(n) timeout
+sweep; upgrade to a small hash only if profiling warrants). Uses `POLLRDNORM`/
+`POLLWRNORM` for the `events` field (WSAPoll's documented input flags) and reads
+`POLLRDNORM|POLLHUP|POLLERR` / `POLLWRNORM` from `revents`. **Known WSAPoll
+defect:** a failed non-blocking `connect` is not reported via a writable event.
+Keel already verifies connect completion with `getsockopt(SO_ERROR)` after the
+writable event; the mitigation is a bounded connect deadline so a never-signalled
+failure still times out (the client already has the Happy-Eyeballs deadline; the
+server does not `connect`). Document + test explicitly.
 
 ### B.3 Platform services for a fuller port (narrow interfaces, per the PAL doc)
 Not everything is socket-shaped. A fuller Windows port needs small platform shims
@@ -243,15 +272,28 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    narrowings involve `kl_sock_socket`/`kl_sock_accept` storage; the residue is
    exclusively terminal raw-POSIX-syscall args. Normal `-Werror` build unchanged
    (no `-Wconversion` in the Makefile — it's an audit tool, not a build gate).
-2. **6a-3b — raw-syscall routing + Winsock provider + WSAPoll + build.** The
-   remaining `-Wconversion` residue — direct `setsockopt`/`close`/`getsockname`/
-   `recv(MSG_PEEK)`/`fcntl` on socket handles (not through the seam) — is a
-   per-call **route-through-seam-vs-`#ifdef`** decision, made against the actual
-   MinGW build (where `closesocket`/winsock `setsockopt(SOCKET,…)` diverge), plus
-   `fd<0`→`kl_handle_valid`. Then `socket_winsock.c`, WSAPoll `#ifdef`, monotonic
-   clock + entropy shims, MinGW Makefile, the loopback-pair wakeup. Green: build +
-   the socket-provider tests + a plaintext server/client roundtrip on the Windows
-   runner.
+1d. **6a-3b-i — WSAPoll backend TU + Makefile Windows branch (done, scaffolding).**
+   `src/event_wsapoll.c` — an independent backend TU (sibling to event_epoll/
+   kqueue/poll, no shared `#ifdef`), WSAPoll with a `SOCKET`-safe linear-scan
+   fd→slot lookup (not the fd-indexed map poll uses). Makefile gains a top-level
+   `WINDOWS` branch (`OS=windows` or MinGW/MSYS uname) selecting
+   `event_wsapoll.c` + `-lws2_32 -lbcrypt`, isolated from the ELF hardening.
+   Validated: POSIX builds unchanged (still select epoll/kqueue; `event_wsapoll.c`
+   never compiled there), and `event_wsapoll.c` cross-compiles clean under
+   MinGW-w64 with `-Werror`. Full `make OS=windows` does not link yet — it needs
+   the remaining Windows TUs below.
+2. **6a-3b-ii — Winsock provider + platform TUs + raw-syscall routing.**
+   `src/socket_winsock.c` (the Winsock `KlSocketOps` — WSASend/TransmitFile/
+   ioctlsocket/closesocket + `WSAStartup`/`WSACleanup`); `src/platform_win.c`
+   (monotonic clock via `QueryPerformanceCounter`, entropy via `BCryptGenRandom`,
+   loopback-pair thread wakeup) behind a narrow `platform.h` with a
+   `platform_posix.c` sibling; and the raw-syscall residue routed through **new
+   seam ops** (`setsockopt`/`getsockname`/`shutdown`/…) so `server.c`/`udp.c` stay
+   POSIX-`#ifdef`-free, plus `fd<0`→`kl_handle_valid`. The Makefile's Windows
+   `CORE_SRC` swaps `socket.c`→`socket_winsock.c` and `platform_posix.c`→
+   `platform_win.c` and drops POSIX-only TUs, so `make OS=windows` links. Green:
+   build + socket-provider tests + a plaintext server/client roundtrip on the
+   Windows runner.
 3. **6b — breadth.** UDP over Winsock, thread pool, more of the server/client
    suite, AF_UNIX probe, TLS (mbedtls build or skip). Expand the Windows test
    subset toward parity; document what's skipped and why.
