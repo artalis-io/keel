@@ -198,10 +198,25 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    `KlSocketHandle` field/check sweep is deferred to 6a**, where the MinGW build
    validates the unsigned-`SOCKET` / `!kl_handle_valid` correctness that the POSIX
    gauntlet structurally cannot.
-2. **6a — Winsock provider + WSAPoll + build.** `socket_winsock.c`, WSAPoll
-   `#ifdef`, monotonic clock + entropy shims, MinGW Makefile, the loopback-pair
-   wakeup. Green: build + the socket-provider tests + a plaintext server/client
-   roundtrip on the Windows runner.
+   **Local validation loop (established):** a `debian:bookworm` +
+   `gcc-mingw-w64-x86-64` container cross-compiles/links a Winsock program with
+   `-Werror` — used as the pre-CI Windows check until a `windows-latest` runner
+   exists. A `_Static_assert(sizeof(KlSocketHandle) >= sizeof(SOCKET))` +
+   `INVALID_SOCKET`→`kl_handle_valid` compile-check confirms the handle type is
+   lossless for a Winsock `SOCKET`.
+1a. **6a-1 — retype the provider vtable to `KlSocketHandle` (done, POSIX-green +
+   MinGW-validated).** `KlSocketOps` fd params + `socket`/`accept` returns +
+   `kl_sock_*` wrappers + the POSIX ops adapters + the test mocks now use
+   `KlSocketHandle` (POSIX fallbacks cast `(int)fd`; `in_fd` for `sendfile` stays
+   `int` — a *file* handle). Behavior-preserving on POSIX (the callers' existing
+   `int fd = kl_sock_socket(...)` narrows silently — those storage sites are the
+   6a-2 field sweep). Validated on MinGW: the vtable is now non-lossy for a
+   `SOCKET`.
+2. **6a — Winsock provider + WSAPoll + build.** The `int fd`→`KlSocketHandle`
+   field/check sweep (6a-2), `socket_winsock.c`, WSAPoll `#ifdef`, monotonic
+   clock + entropy shims, MinGW Makefile, the loopback-pair wakeup. Green: build +
+   the socket-provider tests + a plaintext server/client roundtrip on the Windows
+   runner.
 3. **6b — breadth.** UDP over Winsock, thread pool, more of the server/client
    suite, AF_UNIX probe, TLS (mbedtls build or skip). Expand the Windows test
    subset toward parity; document what's skipped and why.

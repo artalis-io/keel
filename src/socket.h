@@ -25,32 +25,34 @@
 #include <stdint.h>
 
 #include <keel/error.h>
+#include <keel/handle.h>
 
 /* Provider operation table. `ctx` is the provider's own context (NULL for the
  * built-in POSIX provider). Any op may be NULL, in which case the wrapper falls
  * back to the POSIX implementation. */
 typedef struct KlSocketOps {
     /* setup */
-    int     (*set_nonblocking)(void *ctx, int fd);
-    void    (*set_cloexec)(void *ctx, int fd);
-    void    (*set_nosigpipe)(void *ctx, int fd);
-    /* lifecycle */
-    int     (*socket)(void *ctx, int domain, int type, int protocol);
-    int     (*connect)(void *ctx, int fd, const struct sockaddr *addr, socklen_t len);
-    int     (*bind)(void *ctx, int fd, const struct sockaddr *addr, socklen_t len);
-    int     (*listen)(void *ctx, int fd, int backlog);
-    int     (*accept)(void *ctx, int fd, struct sockaddr *addr, socklen_t *len);
-    int     (*close)(void *ctx, int fd);
+    int     (*set_nonblocking)(void *ctx, KlSocketHandle fd);
+    void    (*set_cloexec)(void *ctx, KlSocketHandle fd);
+    void    (*set_nosigpipe)(void *ctx, KlSocketHandle fd);
+    /* lifecycle. `socket`/`accept` return a KlSocketHandle (KL_INVALID_SOCKET on
+     * failure) — a Winsock SOCKET is pointer-width, hence the handle type. */
+    KlSocketHandle (*socket)(void *ctx, int domain, int type, int protocol);
+    int     (*connect)(void *ctx, KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
+    int     (*bind)(void *ctx, KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
+    int     (*listen)(void *ctx, KlSocketHandle fd, int backlog);
+    KlSocketHandle (*accept)(void *ctx, KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
+    int     (*close)(void *ctx, KlSocketHandle fd);
     /* I/O */
-    ssize_t (*send)(void *ctx, int fd, const void *buf, size_t len);
-    ssize_t (*recv)(void *ctx, int fd, void *buf, size_t len);
+    ssize_t (*send)(void *ctx, KlSocketHandle fd, const void *buf, size_t len);
+    ssize_t (*recv)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
     /* Vectored write + zero-copy file send. May be NULL — a provider without
      * them advertises no WRITEV/SENDFILE capability and the caller serializes /
      * pread-sends instead. POSIX fills these; Winsock will use WSASend /
-     * TransmitFile. `sendfile` writes from file `in_fd` at `*offset` (advanced
-     * by the bytes sent) to socket `out_fd`. */
-    ssize_t (*writev)(void *ctx, int fd, const struct iovec *iov, int iovcnt);
-    ssize_t (*sendfile)(void *ctx, int out_fd, int in_fd, off_t *offset, size_t count);
+     * TransmitFile. `in_fd` is a *file* descriptor (stays int — a CRT fd on
+     * Windows); `out_fd` is a socket handle. `sendfile` advances `*offset`. */
+    ssize_t (*writev)(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt);
+    ssize_t (*sendfile)(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count);
     /* lifecycle: release provider-owned context. May be NULL (nothing to free,
      * e.g. the static POSIX provider). */
     void    (*destroy)(void *ctx);
@@ -86,89 +88,89 @@ ssize_t kl_posix_sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
  * ops (with a per-op POSIX fallback when that op is NULL). send/recv keep the
  * EINTR retry + MSG_NOSIGNAL behaviour of the code they replaced.
  */
-static inline int kl_sock_set_nonblocking(const KlSocketProvider *p, int fd) {
+static inline int kl_sock_set_nonblocking(const KlSocketProvider *p, KlSocketHandle fd) {
     if (p && p->ops->set_nonblocking) return p->ops->set_nonblocking(p->context, fd);
-    return kl_posix_set_nonblocking(fd);
+    return kl_posix_set_nonblocking((int)fd);
 }
 
-static inline void kl_sock_set_cloexec(const KlSocketProvider *p, int fd) {
+static inline void kl_sock_set_cloexec(const KlSocketProvider *p, KlSocketHandle fd) {
     if (p && p->ops->set_cloexec) { p->ops->set_cloexec(p->context, fd); return; }
-    kl_posix_set_cloexec(fd);
+    kl_posix_set_cloexec((int)fd);
 }
 
-static inline void kl_sock_set_nosigpipe(const KlSocketProvider *p, int fd) {
+static inline void kl_sock_set_nosigpipe(const KlSocketProvider *p, KlSocketHandle fd) {
     if (p && p->ops->set_nosigpipe) { p->ops->set_nosigpipe(p->context, fd); return; }
-    kl_posix_set_nosigpipe(fd);
+    kl_posix_set_nosigpipe((int)fd);
 }
 
-static inline ssize_t kl_sock_send(const KlSocketProvider *p, int fd,
+static inline ssize_t kl_sock_send(const KlSocketProvider *p, KlSocketHandle fd,
                                    const void *buf, size_t len) {
     if (p && p->ops->send) return p->ops->send(p->context, fd, buf, len);
     ssize_t r;
 #ifdef MSG_NOSIGNAL
-    do { r = send(fd, buf, len, MSG_NOSIGNAL); } while (r < 0 && errno == EINTR);
+    do { r = send((int)fd, buf, len, MSG_NOSIGNAL); } while (r < 0 && errno == EINTR);
 #else
-    do { r = send(fd, buf, len, 0); } while (r < 0 && errno == EINTR);
+    do { r = send((int)fd, buf, len, 0); } while (r < 0 && errno == EINTR);
 #endif
     return r;
 }
 
-static inline ssize_t kl_sock_recv(const KlSocketProvider *p, int fd,
+static inline ssize_t kl_sock_recv(const KlSocketProvider *p, KlSocketHandle fd,
                                    void *buf, size_t len) {
     if (p && p->ops->recv) return p->ops->recv(p->context, fd, buf, len);
     ssize_t r;
-    do { r = recv(fd, buf, len, 0); } while (r < 0 && errno == EINTR);
+    do { r = recv((int)fd, buf, len, 0); } while (r < 0 && errno == EINTR);
     return r;
 }
 
 /* Lifecycle wrappers. NULL provider / NULL op → the raw POSIX syscall. These
  * are one-shot (connect/accept/bind/listen) so they are not on any per-byte hot
  * path; the branch is negligible. */
-static inline int kl_sock_socket(const KlSocketProvider *p, int domain,
-                                 int type, int protocol) {
+static inline KlSocketHandle kl_sock_socket(const KlSocketProvider *p, int domain,
+                                            int type, int protocol) {
     if (p && p->ops->socket) return p->ops->socket(p->context, domain, type, protocol);
-    return socket(domain, type, protocol);
+    return (KlSocketHandle)socket(domain, type, protocol);
 }
 
-static inline int kl_sock_connect(const KlSocketProvider *p, int fd,
+static inline int kl_sock_connect(const KlSocketProvider *p, KlSocketHandle fd,
                                   const struct sockaddr *addr, socklen_t len) {
     if (p && p->ops->connect) return p->ops->connect(p->context, fd, addr, len);
-    return connect(fd, addr, len);
+    return connect((int)fd, addr, len);
 }
 
-static inline int kl_sock_bind(const KlSocketProvider *p, int fd,
+static inline int kl_sock_bind(const KlSocketProvider *p, KlSocketHandle fd,
                                const struct sockaddr *addr, socklen_t len) {
     if (p && p->ops->bind) return p->ops->bind(p->context, fd, addr, len);
-    return bind(fd, addr, len);
+    return bind((int)fd, addr, len);
 }
 
-static inline int kl_sock_listen(const KlSocketProvider *p, int fd, int backlog) {
+static inline int kl_sock_listen(const KlSocketProvider *p, KlSocketHandle fd, int backlog) {
     if (p && p->ops->listen) return p->ops->listen(p->context, fd, backlog);
-    return listen(fd, backlog);
+    return listen((int)fd, backlog);
 }
 
-static inline int kl_sock_accept(const KlSocketProvider *p, int fd,
-                                 struct sockaddr *addr, socklen_t *len) {
+static inline KlSocketHandle kl_sock_accept(const KlSocketProvider *p, KlSocketHandle fd,
+                                            struct sockaddr *addr, socklen_t *len) {
     if (p && p->ops->accept) return p->ops->accept(p->context, fd, addr, len);
-    return accept(fd, addr, len);
+    return (KlSocketHandle)accept((int)fd, addr, len);
 }
 
-static inline int kl_sock_close(const KlSocketProvider *p, int fd) {
+static inline int kl_sock_close(const KlSocketProvider *p, KlSocketHandle fd) {
     if (p && p->ops->close) return p->ops->close(p->context, fd);
-    return close(fd);
+    return close((int)fd);
 }
 
-static inline ssize_t kl_sock_writev(const KlSocketProvider *p, int fd,
+static inline ssize_t kl_sock_writev(const KlSocketProvider *p, KlSocketHandle fd,
                                      const struct iovec *iov, int iovcnt) {
     if (p && p->ops->writev) return p->ops->writev(p->context, fd, iov, iovcnt);
-    return writev(fd, iov, iovcnt);
+    return writev((int)fd, iov, iovcnt);
 }
 
-static inline ssize_t kl_sock_sendfile(const KlSocketProvider *p, int out_fd,
+static inline ssize_t kl_sock_sendfile(const KlSocketProvider *p, KlSocketHandle out_fd,
                                        int in_fd, off_t *offset, size_t count) {
     if (p && p->ops->sendfile)
         return p->ops->sendfile(p->context, out_fd, in_fd, offset, count);
-    return kl_posix_sendfile(out_fd, in_fd, offset, count);
+    return kl_posix_sendfile((int)out_fd, in_fd, offset, count);
 }
 
 /* ── Lifecycle / capabilities / error taxonomy (Phase 3 semantics) ──────── */
@@ -190,10 +192,11 @@ static inline int kl_socket_provider_has_cap(const KlSocketProvider *p,
 }
 
 /* Native-descriptor escape hatch: when the provider advertises native fds, the
- * int handle IS a real OS descriptor (usable with syscalls, poll, etc.) and is
- * returned as-is; otherwise -1 (the caller must not treat it as an OS fd). */
-static inline int kl_sock_native_fd(const KlSocketProvider *p, int fd) {
-    return kl_socket_provider_has_cap(p, KL_SOCK_CAP_NATIVE_FD) ? fd : -1;
+ * handle IS a real OS descriptor (usable with syscalls, poll, etc.) and is
+ * returned as-is; otherwise KL_INVALID_SOCKET (the caller must not treat it as
+ * an OS fd). */
+static inline KlSocketHandle kl_sock_native_fd(const KlSocketProvider *p, KlSocketHandle fd) {
+    return kl_socket_provider_has_cap(p, KL_SOCK_CAP_NATIVE_FD) ? fd : KL_INVALID_SOCKET;
 }
 
 /* Map a socket errno to a stable KlError category (errno itself is preserved by

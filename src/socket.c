@@ -75,44 +75,44 @@ ssize_t kl_posix_sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
 
 /* ── POSIX provider ─────────────────────────────────────────────────────── */
 
-static int psx_set_nonblocking(void *ctx, int fd) {
-    (void)ctx; return kl_posix_set_nonblocking(fd);
+static int psx_set_nonblocking(void *ctx, KlSocketHandle fd) {
+    (void)ctx; return kl_posix_set_nonblocking((int)fd);
 }
-static void psx_set_cloexec(void *ctx, int fd) {
-    (void)ctx; kl_posix_set_cloexec(fd);
+static void psx_set_cloexec(void *ctx, KlSocketHandle fd) {
+    (void)ctx; kl_posix_set_cloexec((int)fd);
 }
-static void psx_set_nosigpipe(void *ctx, int fd) {
-    (void)ctx; kl_posix_set_nosigpipe(fd);
+static void psx_set_nosigpipe(void *ctx, KlSocketHandle fd) {
+    (void)ctx; kl_posix_set_nosigpipe((int)fd);
 }
-static int psx_socket(void *ctx, int domain, int type, int protocol) {
-    (void)ctx; return socket(domain, type, protocol);
+static KlSocketHandle psx_socket(void *ctx, int domain, int type, int protocol) {
+    (void)ctx; return (KlSocketHandle)socket(domain, type, protocol);
 }
-static int psx_connect(void *ctx, int fd, const struct sockaddr *a, socklen_t l) {
-    (void)ctx; return connect(fd, a, l);
+static int psx_connect(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+    (void)ctx; return connect((int)fd, a, l);
 }
-static int psx_bind(void *ctx, int fd, const struct sockaddr *a, socklen_t l) {
-    (void)ctx; return bind(fd, a, l);
+static int psx_bind(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+    (void)ctx; return bind((int)fd, a, l);
 }
-static int psx_listen(void *ctx, int fd, int backlog) {
-    (void)ctx; return listen(fd, backlog);
+static int psx_listen(void *ctx, KlSocketHandle fd, int backlog) {
+    (void)ctx; return listen((int)fd, backlog);
 }
-static int psx_accept(void *ctx, int fd, struct sockaddr *a, socklen_t *l) {
-    (void)ctx; return accept(fd, a, l);
+static KlSocketHandle psx_accept(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+    (void)ctx; return (KlSocketHandle)accept((int)fd, a, l);
 }
-static int psx_close(void *ctx, int fd) {
-    (void)ctx; return close(fd);
+static int psx_close(void *ctx, KlSocketHandle fd) {
+    (void)ctx; return close((int)fd);
 }
-static ssize_t psx_send(void *ctx, int fd, const void *buf, size_t len) {
+static ssize_t psx_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)ctx; return kl_sock_send(NULL, fd, buf, len);   /* inline POSIX path */
 }
-static ssize_t psx_recv(void *ctx, int fd, void *buf, size_t len) {
+static ssize_t psx_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx; return kl_sock_recv(NULL, fd, buf, len);
 }
-static ssize_t psx_writev(void *ctx, int fd, const struct iovec *iov, int iovcnt) {
-    (void)ctx; return writev(fd, iov, iovcnt);
+static ssize_t psx_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
+    (void)ctx; return writev((int)fd, iov, iovcnt);
 }
-static ssize_t psx_sendfile(void *ctx, int out_fd, int in_fd, off_t *offset, size_t count) {
-    (void)ctx; return kl_posix_sendfile(out_fd, in_fd, offset, count);
+static ssize_t psx_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
+    (void)ctx; return kl_posix_sendfile((int)out_fd, in_fd, offset, count);
 }
 
 static const KlSocketOps POSIX_OPS = {

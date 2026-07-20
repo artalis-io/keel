@@ -33,11 +33,11 @@ static void handle_big(KlRequest *req, KlResponse *res, void *ctx) {
 /* ── A provider with native fds but NO vectored/sendfile support: forces the
  * serialized writev + pread-send sendfile fallbacks in response.c. send/recv
  * are plain POSIX; the other ops fall back to POSIX (NULL). ────────────────── */
-static ssize_t noviv_send(void *c, int fd, const void *b, size_t n) {
-    (void)c; return send(fd, b, n, 0);
+static ssize_t noviv_send(void *c, KlSocketHandle fd, const void *b, size_t n) {
+    (void)c; return send((int)fd, b, n, 0);
 }
-static ssize_t noviv_recv(void *c, int fd, void *b, size_t n) {
-    (void)c; return recv(fd, b, n, 0);
+static ssize_t noviv_recv(void *c, KlSocketHandle fd, void *b, size_t n) {
+    (void)c; return recv((int)fd, b, n, 0);
 }
 static const KlSocketOps NOVIV_OPS = { .send = noviv_send, .recv = noviv_recv,
                                        .name = "noviv" };
