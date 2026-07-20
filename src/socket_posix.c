@@ -1,10 +1,15 @@
 /*
- * socket.c — internal socket seam: POSIX implementations + POSIX provider.
+ * socket_posix.c — the POSIX socket provider (implements the socket.h seam).
+ *
+ * One provider per TU: sibling-to-be of socket_winsock.c / socket_lwip.c, the
+ * analog of event_epoll.c/event_kqueue.c implementing the event.h interface.
+ * socket.h is the platform-neutral seam (vtable + dispatchers); this file is the
+ * POSIX implementation of it.
  *
  * The setup helpers run at connect/accept time (out of line here); the
  * send/recv fast paths are inline in the header. The POSIX provider wraps these
  * so a decorator/mock can wrap or replace the built-in stack. See
- * docs/pal_transformation_design.md.
+ * docs/pal_transformation_design.md and docs/phase6_winsock_design.md §B.0.
  */
 
 #include "socket.h"

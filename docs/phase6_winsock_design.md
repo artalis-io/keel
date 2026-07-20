@@ -140,7 +140,7 @@ backends this way — `event_epoll.c`, `event_kqueue.c`, `event_poll.c`,
 that existing pattern rather than threading `#ifdef` through shared files:
 - **Event backend** → a new independent `src/event_wsapoll.c` TU (sibling to the
   others). `event_poll.c` is *not touched*.
-- **Socket provider** → `socket.c` stays POSIX-family (its `__linux__`/`__APPLE__`
+- **Socket provider** → `socket_posix.c` (the POSIX provider) stays POSIX-family (its `__linux__`/`__APPLE__`
   `sendfile` variants are all POSIX); Winsock lives entirely in a separate
   `src/socket_winsock.c`. Consumers only call the `kl_sock_*` seam, so the
   remaining raw syscalls (`setsockopt`/`getsockname`/`close`/…) are handled by
@@ -220,7 +220,7 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
 
 1. **Phase 5 groundwork (done).** `keel/handle.h` (`KlSocketHandle = intptr_t` +
    `KL_INVALID_SOCKET` + `kl_handle_valid`) added to the umbrella; `writev` +
-   `sendfile` promoted to real `KlSocketOps` ops (POSIX impls in `socket.c`;
+   `sendfile` promoted to real `KlSocketOps` ops (POSIX impls in `socket_posix.c`;
    `kl_posix_sendfile` moved out of `response.c`); `response.c` dispatches through
    `kl_sock_writev`/`kl_sock_sendfile` (op present → op; else serialize/pread-send
    fallback). POSIX-validatable + bench flat. The **132-site `int fd` →
@@ -290,7 +290,7 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    `platform_posix.c` sibling; and the raw-syscall residue routed through **new
    seam ops** (`setsockopt`/`getsockname`/`shutdown`/…) so `server.c`/`udp.c` stay
    POSIX-`#ifdef`-free, plus `fd<0`→`kl_handle_valid`. The Makefile's Windows
-   `CORE_SRC` swaps `socket.c`→`socket_winsock.c` and `platform_posix.c`→
+   `CORE_SRC` swaps `socket_posix.c`→`socket_winsock.c` and `platform_posix.c`→
    `platform_win.c` and drops POSIX-only TUs, so `make OS=windows` links. Green:
    build + socket-provider tests + a plaintext server/client roundtrip on the
    Windows runner.
