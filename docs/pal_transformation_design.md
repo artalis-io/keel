@@ -174,9 +174,19 @@ with a fault-injection mock + conformance tests, and the ops table extended to
 the full socket lifecycle. **Phase 3 done** (Appendix F) — provider semantics:
 `destroy` lifecycle hook, capability query + native-fd escape hatch, and a
 `kl_sock_errno_to_error` taxonomy (errno → stable `KlError`, native errno
-preserved). Still internal — no public API. The server conn-I/O hot path stays
-on the direct POSIX path (adoption deferred); finer public error categories +
-`KlConfig.sockets` selection are Phase 4.
+preserved). Still internal — no public API. **Server adoption done**
+(`docs/server_provider_adoption_design.md`, commits `29d8e33`+`aa27663`) — the
+server's lifecycle, `conn_read`/`conn_write`, and the `writev`/`sendfile`
+response fast paths now flow through the seam (capability-gated; POSIX
+byte-identical, bench flat).
+
+**Phase 4 (public selection) resequenced to run AFTER Phase 6 (Winsock
+prototype)** — designed in `docs/phase4_public_provider_design.md`, implementation
+gated. Rationale: the `int fd` vtable isn't yet proven by a real non-POSIX
+provider, so publishing it now risks a public breaking change (Winsock `SOCKET`
+handle width, `writev`/`sendfile` ops, accept/connect shape). Build Winsock
+first, freeze the public vtable once. Finer public error codes: **deferred** —
+keep the coarse `KlError` mapping.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
