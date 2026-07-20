@@ -743,12 +743,12 @@ static void dns_tcp_on_event(int fd, KlEventMask mask, void *ud);
 static ssize_t dns_tcp_write(KlDnsTcp *t, const void *b, size_t n) {
     if (t->tls)
         return t->tls->write(t->tls, t->fd, b, n);
-    return kl_sock_send(t->fd, b, n);
+    return kl_sock_send(t->r->ctx->sockets, t->fd, b, n);
 }
 static ssize_t dns_tcp_read(KlDnsTcp *t, void *b, size_t n) {
     if (t->tls)
         return t->tls->read(t->tls, t->fd, b, n);
-    return kl_sock_recv(t->fd, b, n);
+    return kl_sock_recv(t->r->ctx->sockets, t->fd, b, n);
 }
 
 /* Number of legs still awaiting a response on this nameserver's connection. */
@@ -842,8 +842,8 @@ static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
     int fd = socket(nsa->sa_family, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
-    if (kl_sock_set_nonblocking(fd) < 0) { close(fd); return -1; }
-    kl_sock_set_cloexec(fd);
+    if (kl_sock_set_nonblocking(r->ctx->sockets, fd) < 0) { close(fd); return -1; }
+    kl_sock_set_cloexec(r->ctx->sockets, fd);
 
     int rc = connect(fd, nsa, nsl);
     if (rc < 0 && errno != EINPROGRESS) { close(fd); return -1; }

@@ -1,9 +1,9 @@
 /*
- * socket.c — internal POSIX socket seam (PAL Phase 1).
+ * socket.c — internal socket seam: POSIX implementations + POSIX provider.
  *
- * The one production provider behind src/socket.h. Setup helpers live here
- * (out of line — they run at connect/accept time, not on the hot path); the
- * send/recv fast paths are inline in the header. See
+ * The setup helpers run at connect/accept time (out of line here); the
+ * send/recv fast paths are inline in the header. The POSIX provider wraps these
+ * so a decorator/mock can wrap or replace the built-in stack. See
  * docs/pal_transformation_design.md.
  */
 
@@ -11,24 +11,55 @@
 
 #include <fcntl.h>
 
-int kl_sock_set_nonblocking(int fd) {
+int kl_posix_set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0)
         return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void kl_sock_set_cloexec(int fd) {
+void kl_posix_set_cloexec(int fd) {
     int flags = fcntl(fd, F_GETFD, 0);
     if (flags >= 0)
         (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
-void kl_sock_set_nosigpipe(int fd) {
+void kl_posix_set_nosigpipe(int fd) {
 #ifdef SO_NOSIGPIPE
     int on = 1;
     (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
 #else
     (void)fd;
 #endif
+}
+
+/* ── POSIX provider ─────────────────────────────────────────────────────── */
+
+static int posix_set_nonblocking(void *ctx, int fd) {
+    (void)ctx; return kl_posix_set_nonblocking(fd);
+}
+static void posix_set_cloexec(void *ctx, int fd) {
+    (void)ctx; kl_posix_set_cloexec(fd);
+}
+static void posix_set_nosigpipe(void *ctx, int fd) {
+    (void)ctx; kl_posix_set_nosigpipe(fd);
+}
+static ssize_t posix_send(void *ctx, int fd, const void *buf, size_t len) {
+    (void)ctx; return kl_sock_send(NULL, fd, buf, len);   /* inline POSIX path */
+}
+static ssize_t posix_recv(void *ctx, int fd, void *buf, size_t len) {
+    (void)ctx; return kl_sock_recv(NULL, fd, buf, len);
+}
+
+static const KlSocketOps POSIX_OPS = {
+    posix_set_nonblocking, posix_set_cloexec, posix_set_nosigpipe,
+    posix_send, posix_recv, "posix",
+};
+
+static const KlSocketProvider POSIX_PROVIDER = {
+    &POSIX_OPS, NULL, KL_SOCK_CAP_NATIVE_FD,
+};
+
+const KlSocketProvider *kl_socket_provider_posix(void) {
+    return &POSIX_PROVIDER;
 }

@@ -32,6 +32,11 @@ typedef struct KlWatcher {
 /** @brief Timer heap entry (defined in src/timer.c). */
 typedef struct KlTimerEntry KlTimerEntry;
 
+/* Internal socket provider (src/socket.h). Carried as an opaque pointer so the
+ * provider vtable stays internal — this is NOT the public provider-selection
+ * API (that is a later phase). NULL selects the built-in POSIX path. */
+struct KlSocketProvider;
+
 /**
  * @brief Composable event loop context.
  *
@@ -50,6 +55,9 @@ typedef struct KlEventCtx {
     int timer_count;          /**< entries in heap */
     int timer_cap;            /**< allocated slots */
     int64_t timer_next_id;    /**< monotonic ID counter */
+    /* Internal: socket provider for transports created on this ctx (opaque;
+     * NULL = POSIX). Set by tests / future providers, not public API. */
+    const struct KlSocketProvider *sockets;
 } KlEventCtx;
 
 /**

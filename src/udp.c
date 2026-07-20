@@ -874,8 +874,8 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     }
     udp->family = family;
     udp->recv_tos_val = -1;
-    kl_sock_set_cloexec(udp->fd);
-    if (kl_sock_set_nonblocking(udp->fd) < 0) {
+    kl_sock_set_cloexec(udp->ctx->sockets, udp->fd);
+    if (kl_sock_set_nonblocking(udp->ctx->sockets, udp->fd) < 0) {
         udp->last_error = KL_ERR_SOCKET;
         goto fail;
     }

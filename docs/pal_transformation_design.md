@@ -165,10 +165,13 @@ Per the task's required classification:
 | **9** | lwIP raw provider | 6(lwIP),7 | very high | additive |
 | **10** | UEFI feasibility + optional prototype | 5,7 | very high | additive/subset |
 
-**Status:** Phase 0 done (`f29ed15`, baseline in Appendix A). **Phase 1 done** —
-`src/socket.{h,c}` landed and the client transports (`client.c`, `h2_client.c`,
-`websocket_client.c`), the DNS resolver, and the server switched over; POSIX-only,
-no public API change, benchmarks within noise (Appendix C).
+**Status:** Phase 0 done (`f29ed15`, baseline in Appendix A). **Phase 1 + 1b done**
+— `src/socket.{h,c}` landed; client transports, DNS resolver, server, and udp
+switched over (Appendix C). **Phase 2 done** (Appendix D) — the seam became a
+`KlSocketProvider` vtable (this pulls Phase 3's provider object forward),
+threaded through the client transports via `KlEventCtx.sockets` (internal,
+opaque — NOT the public Phase 4 selection API), with a fault-injection mock and
+conformance tests. The server conn I/O hot path stays on the direct POSIX path.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
@@ -425,3 +428,40 @@ MSG_NOSIGNAL write — a TLS-transport concern, not the socket seam);
 `kl_sock_connect_nonblocking` combined helpers (call sites' cleanup differs
 enough that the granular helpers read better — revisit if a second provider wants
 them).
+
+## Appendix D — Phase 2 record (2026-07-20)
+
+The seam gained a provider object (Phase 3's `KlSocketProvider` pulled forward so
+a mock can be injected): an immutable `KlSocketOps` table + `void *context` +
+capability flags, with a built-in static POSIX provider
+(`kl_socket_provider_posix()`, cap `KL_SOCK_CAP_NATIVE_FD`, name "posix"). The
+`kl_sock_*` wrappers now take `const KlSocketProvider *`; **a NULL provider keeps
+the inline POSIX fast path with no indirect call**, so production hot paths are
+unchanged (bench flat — Appendix C numbers held). Any individual op may be NULL
+and falls back to POSIX.
+
+**Injection point:** `KlEventCtx` gained an opaque `const struct KlSocketProvider
+*sockets` field (forward-declared tag only — the vtable stays in `src/socket.h`,
+internal). This is *not* the public provider-selection API (Phase 4); it is
+internal plumbing a test or a future provider sets before creating a transport.
+Threaded through the client transports (`client.c` io_write/io_read + async
+connects; `h2_client.c`; `websocket_client.c`; `dns_resolver.c` TCP I/O +
+connect; `udp.c` setup) by reading `ctx->sockets`. The sync blocking-client path
+and the **server conn_read/conn_write hot path** pass NULL (stay POSIX) — server
+adoption is deferred (it is the throughput-critical path and gains least from
+injection).
+
+**Tests** (`tests/test_socket_provider.c`, 10 cases): POSIX identity + caps;
+NULL-provider and explicit-POSIX real I/O over socketpair; mock dispatch + setup
+hooks; short-write, EWOULDBLOCK, ECONNRESET injection; per-op NULL fallback; a
+decorator wrapping real socketpair I/O with a forced short write; and a KlUdp
+created on a mock-carrying ctx (proves `ctx->sockets` reaches a real transport).
+
+**Stop check:** adding the `sockets` field to the public `KlEventCtx` is an
+additive, source-compatible, opaque-pointer change — it does not expose the
+provider API or commit to Phase 4. No behavior change for existing callers.
+
+**Deferred to later phases:** server hot-path adoption; connect/bind/listen/accept
+in the ops table (Phase 1 seam only covered setup + send/recv); the public
+`KlConfig.sockets` selection API + portable error taxonomy (Phase 4); a real
+non-POSIX provider (Phase 6).

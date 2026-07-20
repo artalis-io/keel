@@ -2,44 +2,81 @@
 #define KEEL_SRC_SOCKET_H
 
 /*
- * socket.h — internal POSIX socket seam (PAL Phase 1).
+ * socket.h — internal socket seam + provider vtable (PAL Phase 2).
  *
- * Centralizes the socket create/setup/I/O idioms that were duplicated across the
- * client transports (client, h2_client, websocket_client), the DNS resolver, and
- * the server: the O_NONBLOCK / FD_CLOEXEC fcntl dances, the SO_NOSIGPIPE option,
- * and the MSG_NOSIGNAL-or-plain send/recv loop.
+ * Phase 1 centralized the POSIX socket idioms behind free functions. Phase 2
+ * turns the seam into a pluggable provider: a KlSocketProvider (immutable ops
+ * table + context + capability flags) that a transport can carry so a
+ * non-POSIX stack — or, today, a test-only fault-injection mock — can replace
+ * the syscalls. See docs/pal_transformation_design.md.
  *
- * This is an INTERNAL header — not installed, no ABI commitment. There is exactly
- * one production provider today (POSIX). It exists so these platform assumptions
- * live behind one seam that a future non-POSIX socket provider can replace; see
- * docs/pal_transformation_design.md. Signatures deliberately still use int fds —
- * portable-handle evolution is a later phase.
+ * INTERNAL header — not installed, no ABI commitment. The one production
+ * provider is POSIX. The provider-aware wrappers below take a
+ * `const KlSocketProvider *`; a NULL provider selects the inline POSIX fast
+ * path with NO indirect call, so production hot paths are unchanged. Signatures
+ * still use int fds — portable-handle evolution is a later phase.
  */
 
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <errno.h>
 #include <unistd.h>
+#include <stdint.h>
 
-/* Put fd into non-blocking mode. Returns 0 on success, -1 on error (errno set). */
-int  kl_sock_set_nonblocking(int fd);
+/* Provider operation table. `ctx` is the provider's own context (NULL for the
+ * built-in POSIX provider). Any op may be NULL, in which case the wrapper falls
+ * back to the POSIX implementation. */
+typedef struct KlSocketOps {
+    int     (*set_nonblocking)(void *ctx, int fd);
+    void    (*set_cloexec)(void *ctx, int fd);
+    void    (*set_nosigpipe)(void *ctx, int fd);
+    ssize_t (*send)(void *ctx, int fd, const void *buf, size_t len);
+    ssize_t (*recv)(void *ctx, int fd, void *buf, size_t len);
+    const char *name;                 /* provider identity, for diagnostics */
+} KlSocketOps;
 
-/* Set close-on-exec so the fd is not leaked into exec()'d children. Best-effort;
- * done via fcntl for portability (macOS lacks SOCK_CLOEXEC on socket()). */
-void kl_sock_set_cloexec(int fd);
+typedef struct KlSocketProvider {
+    const KlSocketOps *ops;
+    void              *context;
+    uint64_t           capabilities;
+} KlSocketProvider;
 
-/* Suppress SIGPIPE on writes to this socket where the platform offers a
- * socket-level option (SO_NOSIGPIPE, BSD/macOS). A no-op elsewhere; on those
- * platforms writes carry MSG_NOSIGNAL instead — see kl_sock_send(). Best-effort. */
-void kl_sock_set_nosigpipe(int fd);
+/* Capability flags. */
+#define KL_SOCK_CAP_NATIVE_FD  (1ull << 0)  /* fd is a real OS descriptor */
+
+/* The built-in POSIX provider (static storage, no allocation). */
+const KlSocketProvider *kl_socket_provider_posix(void);
+
+/* Raw POSIX implementations — the inline fast path and the POSIX ops share
+ * these. Declared here so the header wrappers can call them when p == NULL. */
+int  kl_posix_set_nonblocking(int fd);
+void kl_posix_set_cloexec(int fd);
+void kl_posix_set_nosigpipe(int fd);
 
 /*
- * send()/recv() with EINTR retry and SIGPIPE suppression (MSG_NOSIGNAL where the
- * platform defines it). On a connected socket that also has SO_NOSIGPIPE set,
- * these are behaviourally identical to the write()/read() loops they replace.
- * Kept inline so the hot path has no call-overhead delta versus the originals.
+ * Provider-aware wrappers. A NULL provider (production default) takes the inline
+ * POSIX path with no indirect call; a non-NULL provider dispatches through its
+ * ops (with a per-op POSIX fallback when that op is NULL). send/recv keep the
+ * EINTR retry + MSG_NOSIGNAL behaviour of the code they replaced.
  */
-static inline ssize_t kl_sock_send(int fd, const void *buf, size_t len) {
+static inline int kl_sock_set_nonblocking(const KlSocketProvider *p, int fd) {
+    if (p && p->ops->set_nonblocking) return p->ops->set_nonblocking(p->context, fd);
+    return kl_posix_set_nonblocking(fd);
+}
+
+static inline void kl_sock_set_cloexec(const KlSocketProvider *p, int fd) {
+    if (p && p->ops->set_cloexec) { p->ops->set_cloexec(p->context, fd); return; }
+    kl_posix_set_cloexec(fd);
+}
+
+static inline void kl_sock_set_nosigpipe(const KlSocketProvider *p, int fd) {
+    if (p && p->ops->set_nosigpipe) { p->ops->set_nosigpipe(p->context, fd); return; }
+    kl_posix_set_nosigpipe(fd);
+}
+
+static inline ssize_t kl_sock_send(const KlSocketProvider *p, int fd,
+                                   const void *buf, size_t len) {
+    if (p && p->ops->send) return p->ops->send(p->context, fd, buf, len);
     ssize_t r;
 #ifdef MSG_NOSIGNAL
     do { r = send(fd, buf, len, MSG_NOSIGNAL); } while (r < 0 && errno == EINTR);
@@ -49,7 +86,9 @@ static inline ssize_t kl_sock_send(int fd, const void *buf, size_t len) {
     return r;
 }
 
-static inline ssize_t kl_sock_recv(int fd, void *buf, size_t len) {
+static inline ssize_t kl_sock_recv(const KlSocketProvider *p, int fd,
+                                   void *buf, size_t len) {
+    if (p && p->ops->recv) return p->ops->recv(p->context, fd, buf, len);
     ssize_t r;
     do { r = recv(fd, buf, len, 0); } while (r < 0 && errno == EINTR);
     return r;

@@ -82,14 +82,14 @@ static ssize_t h2c_write(KlH2ClientConn *c, const void *buf, size_t len)
 {
     if (c->tls)
         return c->tls->write(c->tls, c->fd, buf, len);
-    return kl_sock_send(c->fd, buf, len);
+    return kl_sock_send(c->ev->sockets, c->fd, buf, len);
 }
 
 static ssize_t h2c_read(KlH2ClientConn *c, void *buf, size_t len)
 {
     if (c->tls)
         return c->tls->read(c->tls, c->fd, buf, len);
-    return kl_sock_recv(c->fd, buf, len);
+    return kl_sock_recv(c->ev->sockets, c->fd, buf, len);
 }
 
 /* ── Stream tracking ────────────────────────────────────────────── */
@@ -487,8 +487,8 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0)
             return NULL;
-        kl_sock_set_nosigpipe(fd);
-        if (kl_sock_set_nonblocking(fd) < 0) {
+        kl_sock_set_nosigpipe(ev->sockets, fd);
+        if (kl_sock_set_nonblocking(ev->sockets, fd) < 0) {
             close(fd);
             return NULL;
         }
@@ -518,8 +518,8 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             return NULL;
         }
 
-        kl_sock_set_nosigpipe(fd);
-        if (kl_sock_set_nonblocking(fd) < 0) {
+        kl_sock_set_nosigpipe(ev->sockets, fd);
+        if (kl_sock_set_nonblocking(ev->sockets, fd) < 0) {
             close(fd);
             freeaddrinfo(res);
             return NULL;

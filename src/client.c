@@ -47,18 +47,20 @@ static int has_crlf(const char *s, size_t len)
 
 /* ── I/O abstraction (plain or TLS) ──────────────────────────────── */
 
-static ssize_t io_write(int fd, KlTls *tls, const void *buf, size_t len)
+static ssize_t io_write(const KlSocketProvider *p, int fd, KlTls *tls,
+                        const void *buf, size_t len)
 {
     if (tls)
         return tls->write(tls, fd, buf, len);
-    return kl_sock_send(fd, buf, len);
+    return kl_sock_send(p, fd, buf, len);
 }
 
-static ssize_t io_read(int fd, KlTls *tls, void *buf, size_t len)
+static ssize_t io_read(const KlSocketProvider *p, int fd, KlTls *tls,
+                       void *buf, size_t len)
 {
     if (tls)
         return tls->read(tls, fd, buf, len);
-    return kl_sock_recv(fd, buf, len);
+    return kl_sock_recv(p, fd, buf, len);
 }
 
 /* ── Connect with timeout ────────────────────────────────────────── */
@@ -97,7 +99,7 @@ static int connect_with_timeout(const char *host, size_t host_len,
         return -1;
     }
 
-    kl_sock_set_nosigpipe(fd);
+    kl_sock_set_nosigpipe(NULL, fd);
 
     /* Saved for restore after the blocking connect-with-timeout below. */
     int flags = fcntl(fd, F_GETFL, 0);
@@ -185,7 +187,7 @@ static int unix_connect_with_timeout(const char *path, int timeout_ms,
         return -1;
     }
 
-    kl_sock_set_nosigpipe(fd);
+    kl_sock_set_nosigpipe(NULL, fd);
 
     /* Saved for restore after the blocking connect-with-timeout below. */
     int flags = fcntl(fd, F_GETFL, 0);
@@ -433,7 +435,7 @@ static int send_request_sync(int fd, KlTls *tls,
         if (pr <= 0)
             return -1;
 
-        ssize_t w = io_write(fd, tls, buf + sent, (size_t)off - sent);
+        ssize_t w = io_write(NULL, fd, tls, buf + sent, (size_t)off - sent);
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -451,7 +453,7 @@ static int send_request_sync(int fd, KlTls *tls,
             if (pr <= 0)
                 return -1;
 
-            ssize_t w = io_write(fd, tls, body + sent, body_len - sent);
+            ssize_t w = io_write(NULL, fd, tls, body + sent, body_len - sent);
             if (w <= 0)
                 return -1;
             sent += (size_t)w;
@@ -525,7 +527,7 @@ static int send_headers_sync(int fd, KlTls *tls,
         if (pr <= 0)
             return -1;
 
-        ssize_t w = io_write(fd, tls, buf + sent, (size_t)off - sent);
+        ssize_t w = io_write(NULL, fd, tls, buf + sent, (size_t)off - sent);
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -549,7 +551,7 @@ static int send_all_sync(int fd, KlTls *tls, const char *data, size_t len,
         if (pr <= 0)
             return -1;
 
-        ssize_t w = io_write(fd, tls, data + sent, len - sent);
+        ssize_t w = io_write(NULL, fd, tls, data + sent, len - sent);
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -623,7 +625,7 @@ static int recv_response_sync(int fd, KlTls *tls, KlClientResponse *resp,
         if (pr <= 0)
             break;
 
-        ssize_t nread = io_read(fd, tls, buf, sizeof(buf));
+        ssize_t nread = io_read(NULL, fd, tls, buf, sizeof(buf));
         if (nread < 0)
             break;
         if (nread == 0) {
@@ -1353,8 +1355,8 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
     if (fd < 0)
         return -1;
 
-    kl_sock_set_nosigpipe(fd);
-    if (kl_sock_set_nonblocking(fd) < 0) {
+    kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
+    if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
         close(fd);
         return -1;
     }
@@ -1448,8 +1450,8 @@ static int he_new_attempt(KlClient *c, int idx)
     if (fd < 0)
         return -1;
 
-    kl_sock_set_nosigpipe(fd);
-    if (kl_sock_set_nonblocking(fd) < 0) {
+    kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
+    if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
         close(fd);
         return -1;
     }
@@ -1811,7 +1813,7 @@ static void async_handle_tls_handshake(KlClient *c)
 static void async_handle_sending(KlClient *c)
 {
     while (c->request_sent < c->request_len) {
-        ssize_t w = io_write(c->fd, c->tls,
+        ssize_t w = io_write(c->ev_ctx->sockets, c->fd, c->tls,
                               c->request_buf + c->request_sent,
                               c->request_len - c->request_sent);
         if (w < 0) {
@@ -1883,7 +1885,7 @@ static void async_handle_sending_stream(KlClient *c)
         case 1:
             /* Send chunk header */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                ssize_t w = io_write(c->fd, c->tls,
+                ssize_t w = io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w < 0) {
@@ -1903,7 +1905,7 @@ static void async_handle_sending_stream(KlClient *c)
         case 2:
             /* Send chunk data */
             while (c->chunk_sent < c->chunk_len) {
-                ssize_t w = io_write(c->fd, c->tls,
+                ssize_t w = io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_buf + c->chunk_sent,
                                       c->chunk_len - c->chunk_sent);
                 if (w < 0) {
@@ -1928,7 +1930,7 @@ static void async_handle_sending_stream(KlClient *c)
         case 3:
             /* Send trailing \r\n */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                ssize_t w = io_write(c->fd, c->tls,
+                ssize_t w = io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w < 0) {
@@ -1949,7 +1951,7 @@ static void async_handle_sending_stream(KlClient *c)
         case 4:
             /* Send final chunk (0\r\n\r\n) */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                ssize_t w = io_write(c->fd, c->tls,
+                ssize_t w = io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w < 0) {
@@ -1982,7 +1984,7 @@ static void async_handle_receiving(KlClient *c)
     char buf[KL_CLIENT_RECV_BUF_SIZE];
 
     for (;;) {
-        ssize_t nread = io_read(c->fd, c->tls, buf, sizeof(buf));
+        ssize_t nread = io_read(c->ev_ctx->sockets, c->fd, c->tls, buf, sizeof(buf));
         if (nread < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);

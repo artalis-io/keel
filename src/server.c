@@ -100,7 +100,7 @@ static int kl_server_bind_tcp(KlServer *s) {
         freeaddrinfo(ai);
         return -1;
     }
-    kl_sock_set_cloexec(s->listen_fd);
+    kl_sock_set_cloexec(NULL, s->listen_fd);
 
     int opt = 1;
     setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -228,7 +228,7 @@ static int kl_server_bind_unix(KlServer *s) {
         s->last_error = KL_ERR_SOCKET;
         return -1;
     }
-    kl_sock_set_cloexec(s->listen_fd);
+    kl_sock_set_cloexec(NULL, s->listen_fd);
 
     if (s->config.unix_socket_unlink &&
         kl_server_unlink_stale_unix_socket(s, path) < 0) {
@@ -354,7 +354,7 @@ static int kl_server_adopt_fd(KlServer *s) {
     /* Adopted fd is never unlinked — the supervisor owns the socket path. */
     s->unix_socket_owned = 0;
     /* CLOEXEC so the inherited listener doesn't re-leak to our own children. */
-    kl_sock_set_cloexec(s->listen_fd);
+    kl_sock_set_cloexec(NULL, s->listen_fd);
     return 0;
 }
 
@@ -811,7 +811,7 @@ int kl_server_run(KlServer *s) {
         return -1;
     }
 
-    if (kl_sock_set_nonblocking(s->listen_fd) < 0) {
+    if (kl_sock_set_nonblocking(NULL, s->listen_fd) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "fcntl");
         s->last_error = KL_ERR_SOCKET;
         kl_server_close_listener(s);
@@ -930,12 +930,12 @@ int kl_server_run(KlServer *s) {
                         break;
                     }
 
-                    if (kl_sock_set_nonblocking(client_fd) < 0) {
+                    if (kl_sock_set_nonblocking(NULL, client_fd) < 0) {
                         close(client_fd);
                         continue;
                     }
                     /* Don't leak client connections into child processes. */
-                    kl_sock_set_cloexec(client_fd);
+                    kl_sock_set_cloexec(NULL, client_fd);
                     if (s->config.transport == KL_TRANSPORT_TCP) {
                         int nodelay = 1;
                         (void)setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY,
