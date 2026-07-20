@@ -7,6 +7,7 @@
 #include <keel/body_reader.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/socket.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * Mock H2 Session
@@ -769,7 +770,7 @@ UTEST(h2, cb_send_wraps_conn_write) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -778,7 +779,7 @@ UTEST(h2, cb_send_wraps_conn_write) {
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
-    /* Send callback should write to the pipe fd */
+    /* Send callback should write to the socket fd */
     const char *data = "HTTP/2 frame data";
     ssize_t r = mock.callbacks.send(mock.cb_user_data, data, 17);
     ASSERT_EQ(r, (ssize_t)17);

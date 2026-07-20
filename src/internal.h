@@ -7,23 +7,26 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include "socket.h"
+
 /* Max retries on zero-byte write before giving up (conn_write_all, writev_all) */
 #define KL_CONN_WRITE_SPIN_MAX 256
 
 /* ── Transport helpers — TLS-aware read/write ────────────────────── */
 
+/* The socket provider for a connection (ctx->sockets; NULL = POSIX fast path). */
+static inline const KlSocketProvider *conn_provider(const KlConn *c) {
+    return c->ctx ? c->ctx->sockets : NULL;
+}
+
 static inline ssize_t conn_read(KlConn *c, void *buf, size_t len) {
     if (c->tls) return c->tls->read(c->tls, c->fd, buf, len);
-    ssize_t r;
-    do { r = read(c->fd, buf, len); } while (r < 0 && errno == EINTR);
-    return r;
+    return kl_sock_recv(conn_provider(c), c->fd, buf, len);
 }
 
 static inline ssize_t conn_write(KlConn *c, const void *buf, size_t len) {
     if (c->tls) return c->tls->write(c->tls, c->fd, buf, len);
-    ssize_t r;
-    do { r = write(c->fd, buf, len); } while (r < 0 && errno == EINTR);
-    return r;
+    return kl_sock_send(conn_provider(c), c->fd, buf, len);
 }
 
 /* Write all bytes, retrying on short writes (TLS WANT_WRITE, etc.) */

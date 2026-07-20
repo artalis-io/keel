@@ -24,6 +24,10 @@ typedef struct KlTls KlTls;
 typedef struct KlWsServerConn KlWsServerConn;
 typedef struct KlH2ServerConn KlH2ServerConn;
 typedef struct KlH2ServerConfig KlH2ServerConfig;
+/* Back-pointer to the owning event context (for the internal socket provider,
+ * ctx->sockets). Opaque forward decl keeps the provider seam out of this
+ * header. */
+struct KlEventCtx;
 
 typedef enum {
     KL_CONN_PROXY_HEADER,    /**< Reading a PROXY protocol header (pre-TLS) */
@@ -76,6 +80,8 @@ typedef struct KlConn {
     KlH2ServerConn *h2;         /**< HTTP/2 state (NULL until upgrade) */
     KlH2ServerConfig *h2_config; /**< HTTP/2 config (set once at pool init) */
     KlRouter *router;           /**< Back-pointer to server router */
+    struct KlEventCtx *ctx;     /**< Back-pointer to event ctx (set once at pool init;
+                                     hot path reads ctx->sockets for the provider) */
     size_t max_body_size;       /**< Discard-path body limit (from KlConfig) */
 
     struct KlAsyncOp *async_op; /**< Active async op (non-NULL when SUSPENDED) */

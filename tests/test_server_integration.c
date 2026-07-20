@@ -1,5 +1,6 @@
 #include "utest.h"
 #include <keel/keel.h>
+#include "../src/socket.h"   /* internal: exercise the socket-provider seam */
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -408,6 +409,41 @@ UTEST(server_integration, concurrent_requests) {
                          "Connection %d should have correct body");
         close(fds[i]);
     }
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+}
+
+/* Conformance: driving accepted-connection I/O through the explicit POSIX
+ * provider (the vtable dispatch path, not just the NULL fast path) is
+ * byte-identical to the default. Proves the server's KlConn.ctx->sockets
+ * plumbing + conn_read/conn_write seam adoption. */
+UTEST(server_integration, explicit_posix_provider_roundtrip) {
+    KlServer srv;
+    KlConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    /* Post-init, pre-run: stamp the event ctx with the explicit POSIX provider;
+     * accept() + accepted-connection reads/writes now dispatch through it. */
+    srv.ev.sockets = kl_socket_provider_posix();
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+    int port = srv.bound_port;
+
+    int fd = connect_to(port);
+    ASSERT_TRUE(fd >= 0);
+    const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(write(fd, req, strlen(req)) > 0);
+    char buf[1024];
+    ssize_t n = read_response(fd, buf, sizeof(buf), 1000);
+    ASSERT_TRUE(n > 0);
+    ASSERT_TRUE(strstr(buf, "200") != NULL);
+    ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
+    close(fd);
 
     kl_server_stop(&srv);
     pthread_join(tid, NULL);
