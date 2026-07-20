@@ -867,7 +867,7 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         family = AF_INET;
     }
 
-    udp->fd = socket(family, SOCK_DGRAM, 0);
+    udp->fd = kl_sock_socket(udp->ctx->sockets, family, SOCK_DGRAM, 0);
     if (udp->fd < 0) {
         udp->last_error = KL_ERR_SOCKET;
         goto fail;
@@ -952,7 +952,7 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     }
 
     if (ai) {
-        if (bind(udp->fd, ai->ai_addr, ai->ai_addrlen) < 0) {
+        if (kl_sock_bind(udp->ctx->sockets, udp->fd, ai->ai_addr, ai->ai_addrlen) < 0) {
             udp->last_error = KL_ERR_BIND;
             goto fail;
         }
@@ -1029,7 +1029,7 @@ int kl_udp_connect(KlUdp *udp, const struct sockaddr *peer, socklen_t peer_len) 
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    if (connect(udp->fd, peer, peer_len) < 0) {
+    if (kl_sock_connect(udp->ctx->sockets, udp->fd, peer, peer_len) < 0) {
         udp->last_error = KL_ERR_CONNECT;
         return -1;
     }

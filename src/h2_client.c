@@ -484,7 +484,7 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         socklen_t un_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
                                        plen + 1);
 
-        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        fd = kl_sock_socket(ev->sockets, AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0)
             return NULL;
         kl_sock_set_nosigpipe(ev->sockets, fd);
@@ -492,7 +492,7 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             close(fd);
             return NULL;
         }
-        rc = connect(fd, (struct sockaddr *)&un, un_len);
+        rc = kl_sock_connect(ev->sockets, fd, (struct sockaddr *)&un, un_len);
         if (rc < 0 && errno != EINPROGRESS) {
             close(fd);
             return NULL;
@@ -512,7 +512,7 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         if (rc != 0 || !res)
             return NULL;
 
-        fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        fd = kl_sock_socket(ev->sockets, res->ai_family, res->ai_socktype, res->ai_protocol);
         if (fd < 0) {
             freeaddrinfo(res);
             return NULL;
@@ -525,7 +525,7 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             return NULL;
         }
 
-        rc = connect(fd, res->ai_addr, res->ai_addrlen);
+        rc = kl_sock_connect(ev->sockets, fd, res->ai_addr, res->ai_addrlen);
         freeaddrinfo(res);
 
         if (rc < 0 && errno != EINPROGRESS) {

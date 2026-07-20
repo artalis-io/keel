@@ -93,7 +93,7 @@ static int kl_server_bind_tcp(KlServer *s) {
         return -1;
     }
 
-    s->listen_fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    s->listen_fd = kl_sock_socket(NULL, ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (s->listen_fd < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "socket");
         s->last_error = KL_ERR_SOCKET;
@@ -114,7 +114,7 @@ static int kl_server_bind_tcp(KlServer *s) {
         setsockopt(s->listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
     }
 
-    if (bind(s->listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) {
+    if (kl_sock_bind(NULL, s->listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
         close(s->listen_fd);
@@ -222,7 +222,7 @@ static int kl_server_bind_unix(KlServer *s) {
         return -1;
     }
 
-    s->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    s->listen_fd = kl_sock_socket(NULL, AF_UNIX, SOCK_STREAM, 0);
     if (s->listen_fd < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "socket");
         s->last_error = KL_ERR_SOCKET;
@@ -255,7 +255,7 @@ static int kl_server_bind_unix(KlServer *s) {
         old_umask = umask(0777 & ~(mode_t)s->config.unix_socket_mode);
         umask_set = 1;
     }
-    int bind_rc = bind(s->listen_fd, (struct sockaddr *)&addr, addr_len);
+    int bind_rc = kl_sock_bind(NULL, s->listen_fd, (struct sockaddr *)&addr, addr_len);
     if (umask_set)
         umask(old_umask);
     if (bind_rc < 0) {
@@ -804,7 +804,7 @@ int kl_server_run(KlServer *s) {
         return -1;
 
     /* An adopted fd (socket activation) is already listening — don't re-listen. */
-    if (s->config.listen_fd <= 0 && listen(s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
+    if (s->config.listen_fd <= 0 && kl_sock_listen(NULL, s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "listen");
         s->last_error = KL_ERR_LISTEN;
         kl_server_close_listener(s);
@@ -922,7 +922,7 @@ int kl_server_run(KlServer *s) {
                 while (1) {
                     struct sockaddr_storage peer;
                     socklen_t peer_len = sizeof(peer);
-                    int client_fd = accept(s->listen_fd,
+                    int client_fd = kl_sock_accept(NULL, s->listen_fd,
                                            (struct sockaddr *)&peer, &peer_len);
                     if (client_fd < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;

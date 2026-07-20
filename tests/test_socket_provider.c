@@ -16,6 +16,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* ── Programmable mock provider ────────────────────────────────────── */
 
@@ -24,7 +26,9 @@ typedef struct {
     ssize_t short_send;        /* cap a send to this many bytes (-1 = no cap) */
     int     force_send_err;    /* errno to fail the NEXT send with (0 = none) */
     int     force_recv_err;    /* errno to fail the NEXT recv with (0 = none) */
+    int     force_connect_err; /* errno to fail the NEXT connect with (0 = none) */
     int     nb_calls, cloexec_calls, nosig_calls, send_calls, recv_calls;
+    int     socket_calls, connect_calls;
 } MockSock;
 
 static int mock_set_nonblocking(void *ctx, int fd) {
@@ -52,10 +56,26 @@ static ssize_t mock_recv(void *ctx, int fd, void *buf, size_t len) {
     if (m->wrap) return recv(fd, buf, len, 0);
     return 0;
 }
+static int mock_socket(void *ctx, int domain, int type, int protocol) {
+    MockSock *m = ctx; m->socket_calls++; return socket(domain, type, protocol);
+}
+static int mock_connect(void *ctx, int fd, const struct sockaddr *a, socklen_t l) {
+    MockSock *m = ctx;
+    m->connect_calls++;
+    if (m->force_connect_err) { int e = m->force_connect_err; m->force_connect_err = 0; errno = e; return -1; }
+    return connect(fd, a, l);
+}
 
 static const KlSocketOps MOCK_OPS = {
-    mock_set_nonblocking, mock_set_cloexec, mock_set_nosigpipe,
-    mock_send, mock_recv, "mock",
+    .set_nonblocking = mock_set_nonblocking,
+    .set_cloexec     = mock_set_cloexec,
+    .set_nosigpipe   = mock_set_nosigpipe,
+    .socket          = mock_socket,
+    .connect         = mock_connect,
+    .send            = mock_send,
+    .recv            = mock_recv,
+    .name            = "mock",
+    /* bind/listen/accept/close left NULL → POSIX fallback */
 };
 
 static KlSocketProvider mock_provider(MockSock *m) {
@@ -135,7 +155,7 @@ UTEST(sockprov, mock_recv_econnreset) {
 
 /* A provider whose send/recv ops are NULL falls back to the POSIX path. */
 UTEST(sockprov, per_op_null_fallback) {
-    static const KlSocketOps partial = { NULL, NULL, NULL, NULL, NULL, "partial" };
+    static const KlSocketOps partial = { .name = "partial" };  /* all ops NULL */
     KlSocketProvider p = { &partial, NULL, 0 };
     int sv[2];
     ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
@@ -189,6 +209,55 @@ UTEST(sockprov, udp_transport_threads_provider) {
 
     kl_udp_free(&udp);
     kl_event_ctx_free(&ctx);
+}
+
+/* ── Lifecycle ops (Phase 2 ops-table extension) ───────────────────── */
+
+/* socket/bind/listen/connect/accept/close all via the seam over loopback. */
+UTEST(sockprov, lifecycle_posix_loopback) {
+    int lfd = kl_sock_socket(NULL, AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(lfd >= 0);
+    struct sockaddr_in a; memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    ASSERT_EQ(0, kl_sock_bind(NULL, lfd, (struct sockaddr *)&a, sizeof(a)));
+    ASSERT_EQ(0, kl_sock_listen(NULL, lfd, 8));
+    socklen_t al = sizeof(a);
+    ASSERT_EQ(0, getsockname(lfd, (struct sockaddr *)&a, &al));
+
+    int cfd = kl_sock_socket(NULL, AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(cfd >= 0);
+    ASSERT_EQ(0, kl_sock_connect(NULL, cfd, (struct sockaddr *)&a, sizeof(a)));
+
+    struct sockaddr_storage pa; socklen_t pl = sizeof(pa);
+    int sfd = kl_sock_accept(NULL, lfd, (struct sockaddr *)&pa, &pl);
+    ASSERT_TRUE(sfd >= 0);
+
+    ASSERT_EQ(0, kl_sock_close(NULL, sfd));
+    ASSERT_EQ(0, kl_sock_close(NULL, cfd));
+    ASSERT_EQ(0, kl_sock_close(NULL, lfd));
+}
+
+/* A mock socket op is dispatched + counted; a NULL op (close) falls back. */
+UTEST(sockprov, mock_socket_dispatch) {
+    MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1;
+    KlSocketProvider p = mock_provider(&m);
+    int fd = kl_sock_socket(&p, AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_EQ(1, m.socket_calls);
+    ASSERT_EQ(0, kl_sock_close(&p, fd));       /* close op is NULL → POSIX */
+}
+
+/* Deterministic connect-failure injection through the seam. */
+UTEST(sockprov, mock_connect_failure) {
+    MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1; m.force_connect_err = ECONNREFUSED;
+    KlSocketProvider p = mock_provider(&m);
+    struct sockaddr_in a; memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
+    errno = 0;
+    ASSERT_EQ(-1, kl_sock_connect(&p, 9, (struct sockaddr *)&a, sizeof(a)));
+    ASSERT_EQ(ECONNREFUSED, errno);
+    ASSERT_EQ(1, m.connect_calls);
 }
 
 UTEST_MAIN();

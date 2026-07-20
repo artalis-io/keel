@@ -44,6 +44,24 @@ static void posix_set_cloexec(void *ctx, int fd) {
 static void posix_set_nosigpipe(void *ctx, int fd) {
     (void)ctx; kl_posix_set_nosigpipe(fd);
 }
+static int posix_socket(void *ctx, int domain, int type, int protocol) {
+    (void)ctx; return socket(domain, type, protocol);
+}
+static int posix_connect(void *ctx, int fd, const struct sockaddr *a, socklen_t l) {
+    (void)ctx; return connect(fd, a, l);
+}
+static int posix_bind(void *ctx, int fd, const struct sockaddr *a, socklen_t l) {
+    (void)ctx; return bind(fd, a, l);
+}
+static int posix_listen(void *ctx, int fd, int backlog) {
+    (void)ctx; return listen(fd, backlog);
+}
+static int posix_accept(void *ctx, int fd, struct sockaddr *a, socklen_t *l) {
+    (void)ctx; return accept(fd, a, l);
+}
+static int posix_close(void *ctx, int fd) {
+    (void)ctx; return close(fd);
+}
 static ssize_t posix_send(void *ctx, int fd, const void *buf, size_t len) {
     (void)ctx; return kl_sock_send(NULL, fd, buf, len);   /* inline POSIX path */
 }
@@ -52,8 +70,18 @@ static ssize_t posix_recv(void *ctx, int fd, void *buf, size_t len) {
 }
 
 static const KlSocketOps POSIX_OPS = {
-    posix_set_nonblocking, posix_set_cloexec, posix_set_nosigpipe,
-    posix_send, posix_recv, "posix",
+    .set_nonblocking = posix_set_nonblocking,
+    .set_cloexec     = posix_set_cloexec,
+    .set_nosigpipe   = posix_set_nosigpipe,
+    .socket          = posix_socket,
+    .connect         = posix_connect,
+    .bind            = posix_bind,
+    .listen          = posix_listen,
+    .accept          = posix_accept,
+    .close           = posix_close,
+    .send            = posix_send,
+    .recv            = posix_recv,
+    .name            = "posix",
 };
 
 static const KlSocketProvider POSIX_PROVIDER = {

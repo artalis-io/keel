@@ -27,9 +27,18 @@
  * built-in POSIX provider). Any op may be NULL, in which case the wrapper falls
  * back to the POSIX implementation. */
 typedef struct KlSocketOps {
+    /* setup */
     int     (*set_nonblocking)(void *ctx, int fd);
     void    (*set_cloexec)(void *ctx, int fd);
     void    (*set_nosigpipe)(void *ctx, int fd);
+    /* lifecycle */
+    int     (*socket)(void *ctx, int domain, int type, int protocol);
+    int     (*connect)(void *ctx, int fd, const struct sockaddr *addr, socklen_t len);
+    int     (*bind)(void *ctx, int fd, const struct sockaddr *addr, socklen_t len);
+    int     (*listen)(void *ctx, int fd, int backlog);
+    int     (*accept)(void *ctx, int fd, struct sockaddr *addr, socklen_t *len);
+    int     (*close)(void *ctx, int fd);
+    /* I/O */
     ssize_t (*send)(void *ctx, int fd, const void *buf, size_t len);
     ssize_t (*recv)(void *ctx, int fd, void *buf, size_t len);
     const char *name;                 /* provider identity, for diagnostics */
@@ -92,6 +101,43 @@ static inline ssize_t kl_sock_recv(const KlSocketProvider *p, int fd,
     ssize_t r;
     do { r = recv(fd, buf, len, 0); } while (r < 0 && errno == EINTR);
     return r;
+}
+
+/* Lifecycle wrappers. NULL provider / NULL op → the raw POSIX syscall. These
+ * are one-shot (connect/accept/bind/listen) so they are not on any per-byte hot
+ * path; the branch is negligible. */
+static inline int kl_sock_socket(const KlSocketProvider *p, int domain,
+                                 int type, int protocol) {
+    if (p && p->ops->socket) return p->ops->socket(p->context, domain, type, protocol);
+    return socket(domain, type, protocol);
+}
+
+static inline int kl_sock_connect(const KlSocketProvider *p, int fd,
+                                  const struct sockaddr *addr, socklen_t len) {
+    if (p && p->ops->connect) return p->ops->connect(p->context, fd, addr, len);
+    return connect(fd, addr, len);
+}
+
+static inline int kl_sock_bind(const KlSocketProvider *p, int fd,
+                               const struct sockaddr *addr, socklen_t len) {
+    if (p && p->ops->bind) return p->ops->bind(p->context, fd, addr, len);
+    return bind(fd, addr, len);
+}
+
+static inline int kl_sock_listen(const KlSocketProvider *p, int fd, int backlog) {
+    if (p && p->ops->listen) return p->ops->listen(p->context, fd, backlog);
+    return listen(fd, backlog);
+}
+
+static inline int kl_sock_accept(const KlSocketProvider *p, int fd,
+                                 struct sockaddr *addr, socklen_t *len) {
+    if (p && p->ops->accept) return p->ops->accept(p->context, fd, addr, len);
+    return accept(fd, addr, len);
+}
+
+static inline int kl_sock_close(const KlSocketProvider *p, int fd) {
+    if (p && p->ops->close) return p->ops->close(p->context, fd);
+    return close(fd);
 }
 
 #endif /* KEEL_SRC_SOCKET_H */

@@ -465,3 +465,24 @@ provider API or commit to Phase 4. No behavior change for existing callers.
 in the ops table (Phase 1 seam only covered setup + send/recv); the public
 `KlConfig.sockets` selection API + portable error taxonomy (Phase 4); a real
 non-POSIX provider (Phase 6).
+
+## Appendix E — Phase 2 ops-table extension (2026-07-20)
+
+Follow-up to Appendix D: the `KlSocketOps` table grew the socket lifecycle —
+`socket`, `connect`, `bind`, `listen`, `accept`, `close` — alongside the existing
+setup + send/recv ops, so a provider can own the whole descriptor lifecycle
+(a real non-POSIX provider and the public Phase 4 API both need this). Inline
+`kl_sock_socket/connect/bind/listen/accept/close` wrappers keep the NULL-provider
+/ NULL-op → raw-syscall fast path; the POSIX provider gained matching adapters
+(ops table switched to designated initializers).
+
+Adoption: every `socket()`/`connect()` in the client transports now routes
+through the seam with its provider (`client.c` sync=NULL + async=ctx, `h2_client`,
+`websocket_client`, `dns_resolver` TCP, `udp` socket+bind+connect); the server's
+`socket`/`bind`/`listen`/`accept` route through the seam with a NULL provider
+(passthrough — no behavior change, but the whole socket lifecycle now flows
+through one seam, so future server adoption is a NULL→provider flip). Tests added:
+a full socket→bind→listen→connect→accept→close loop over loopback via the
+wrappers, mock socket-op dispatch with a NULL-op fallback, and deterministic
+connect-failure (ECONNREFUSED) injection. Bench unchanged (lifecycle ops are
+one-shot, not per-byte).

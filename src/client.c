@@ -92,7 +92,7 @@ static int connect_with_timeout(const char *host, size_t host_len,
         return -1;
     }
 
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    int fd = kl_sock_socket(NULL, res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) {
         if (out_err) *out_err = KL_ERR_SOCKET;
         freeaddrinfo(res);
@@ -116,7 +116,7 @@ static int connect_with_timeout(const char *host, size_t host_len,
         return -1;
     }
 
-    rc = connect(fd, res->ai_addr, res->ai_addrlen);
+    rc = kl_sock_connect(NULL, fd, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
 
     if (rc < 0 && errno != EINPROGRESS) {
@@ -181,7 +181,7 @@ static int unix_connect_with_timeout(const char *path, int timeout_ms,
         return -1;
     }
 
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int fd = kl_sock_socket(NULL, AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         if (out_err) *out_err = KL_ERR_SOCKET;
         return -1;
@@ -197,7 +197,7 @@ static int unix_connect_with_timeout(const char *path, int timeout_ms,
         return -1;
     }
 
-    int rc = connect(fd, (struct sockaddr *)&addr, addr_len);
+    int rc = kl_sock_connect(NULL, fd, (struct sockaddr *)&addr, addr_len);
     if (rc < 0 && errno != EINPROGRESS) {
         if (out_err) *out_err = KL_ERR_CONNECT;
         close(fd);
@@ -1351,7 +1351,7 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
                           socklen_t addrlen, int family, int socktype,
                           int protocol)
 {
-    int fd = socket(family, socktype, protocol);
+    int fd = kl_sock_socket(c->ev_ctx->sockets, family, socktype, protocol);
     if (fd < 0)
         return -1;
 
@@ -1361,7 +1361,7 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
         return -1;
     }
 
-    int rc = connect(fd, addr, addrlen);
+    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, addr, addrlen);
     if (rc < 0 && errno != EINPROGRESS) {
         close(fd);
         return -1;
@@ -1442,11 +1442,11 @@ static void he_arm_delay(KlClient *c)
  * now in flight (or already won), -1 on a hard local failure (try the next). */
 static int he_new_attempt(KlClient *c, int idx)
 {
-    struct sockaddr *sa = (struct sockaddr *)&c->conn_addrs.addrs[idx];
+    const struct sockaddr *sa = (const struct sockaddr *)&c->conn_addrs.addrs[idx];
     socklen_t sl = c->conn_addrs.addrlens[idx];
     int fam = c->conn_addrs.addrs[idx].ss_family;
 
-    int fd = socket(fam, c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
+    int fd = kl_sock_socket(c->ev_ctx->sockets, fam, c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
     if (fd < 0)
         return -1;
 
@@ -1456,7 +1456,7 @@ static int he_new_attempt(KlClient *c, int idx)
         return -1;
     }
 
-    int rc = connect(fd, sa, sl);
+    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, sa, sl);
     if (rc < 0 && errno != EINPROGRESS) {
         c->conn_last_err = KL_ERR_CONNECT;
         close(fd);

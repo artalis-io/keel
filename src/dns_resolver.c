@@ -839,13 +839,13 @@ static void dns_tcp_fail(KlDnsResolver *r, KlDnsTcp *t) {
 static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
     const struct sockaddr *nsa = (const struct sockaddr *)&r->ns[ns_idx];
     socklen_t nsl = r->ns_len[ns_idx];
-    int fd = socket(nsa->sa_family, SOCK_STREAM, 0);
+    int fd = kl_sock_socket(r->ctx->sockets, nsa->sa_family, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
     if (kl_sock_set_nonblocking(r->ctx->sockets, fd) < 0) { close(fd); return -1; }
     kl_sock_set_cloexec(r->ctx->sockets, fd);
 
-    int rc = connect(fd, nsa, nsl);
+    int rc = kl_sock_connect(r->ctx->sockets, fd, nsa, nsl);
     if (rc < 0 && errno != EINPROGRESS) { close(fd); return -1; }
 
     t->r = r; t->ns_idx = ns_idx; t->fd = fd;
