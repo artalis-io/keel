@@ -42,6 +42,7 @@ else ifdef WINDOWS
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
   EVENT_SRC = src/event_wsapoll.c
   SOCKET_SRC = src/socket_winsock.c
+  PLATFORM_SRC = src/platform_win.c
   FILE_IO_SRC = src/file_io.c
   LDFLAGS += -lws2_32 -lmswsock -lbcrypt
   EXE = .exe
@@ -100,9 +101,11 @@ CFLAGS += -MMD -MP
 VENDOR_CFLAGS += -MMD -MP
 
 # Core library — parser-agnostic
-# Socket provider: POSIX default; the Windows branch sets src/socket_winsock.c.
+# Socket provider + platform services: POSIX defaults; the Windows branch sets
+# the socket_winsock.c / platform_win.c siblings.
 SOCKET_SRC ?= src/socket_posix.c
-CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) src/response.c src/router.c \
+PLATFORM_SRC ?= src/platform_posix.c
+CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/response.c src/router.c \
            src/connection.c src/server.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \

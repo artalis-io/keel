@@ -12,7 +12,6 @@
 #include <strings.h>
 #include <unistd.h>
 #include <errno.h>
-#include <time.h>
 #include <stdint.h>
 #include "internal.h"
 
@@ -45,13 +44,6 @@ static const char kl_431_response[] =
 static const char kl_100_continue[] =
     "HTTP/1.1 100 Continue\r\n"
     "\r\n";
-
-uint64_t kl_monotonic_ms(void) {
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-        return 0;
-    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-}
 
 int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
     if (capacity <= 0) return -1;

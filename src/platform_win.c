@@ -1,0 +1,22 @@
+/*
+ * platform_win.c — Windows platform services (implements platform.h).
+ *
+ * One-platform-per-TU (Makefile PLATFORM_SRC), compiled only on Windows. See
+ * docs/phase6_winsock_design.md §B.3.
+ */
+
+#include "platform.h"
+
+#include <windows.h>
+
+uint64_t kl_monotonic_ms(void) {
+    LARGE_INTEGER freq, ctr;
+    if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&ctr) ||
+        freq.QuadPart == 0)
+        return (uint64_t)GetTickCount64();   /* fallback: also monotonic ms */
+    /* Overflow-safe QPC-ticks -> ms (avoid ctr*1000 overflowing after ~decades). */
+    uint64_t q    = (uint64_t)freq.QuadPart;
+    uint64_t sec  = (uint64_t)ctr.QuadPart / q;
+    uint64_t rem  = (uint64_t)ctr.QuadPart % q;
+    return sec * 1000 + (rem * 1000) / q;
+}
