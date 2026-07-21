@@ -8,6 +8,7 @@
 #include "platform.h"
 
 #include <windows.h>
+#include <bcrypt.h>
 
 uint64_t kl_monotonic_ms(void) {
     LARGE_INTEGER freq, ctr;
@@ -19,4 +20,15 @@ uint64_t kl_monotonic_ms(void) {
     uint64_t sec  = (uint64_t)ctr.QuadPart / q;
     uint64_t rem  = (uint64_t)ctr.QuadPart % q;
     return sec * 1000 + (rem * 1000) / q;
+}
+
+void kl_plat_random(void *buf, size_t len) {
+    /* BCRYPT_USE_SYSTEM_PREFERRED_RNG: no algorithm handle needed. */
+    if (BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)len,
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0)   /* STATUS_SUCCESS */
+        return;
+    /* Last resort — non-cryptographic, never leaves the buffer undefined. */
+    unsigned char *p = buf;
+    for (size_t i = 0; i < len; i++)
+        p[i] = (unsigned char)((uintptr_t)&p[i] ^ (i * 131u));
 }

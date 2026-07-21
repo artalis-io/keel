@@ -30,6 +30,7 @@
 #include "base64.h"
 #include "utf8.h"
 #include "socket.h"
+#include "platform.h"
 
 /* ── Connection states ──────────────────────────────────────────── */
 
@@ -151,28 +152,7 @@ static void wsc_update_write_interest(KlWsClientConn *ws)
 
 static void wsc_random_bytes(uint8_t *buf, size_t len)
 {
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-    arc4random_buf(buf, len);
-#else
-    /* Fallback: /dev/urandom */
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) {
-        size_t total = 0;
-        while (total < len) {
-            ssize_t r = read(fd, buf + total, len - total);
-            if (r <= 0) break;
-            total += (size_t)r;
-        }
-        close(fd);
-        if (total == len) return;
-    }
-    /* Last resort: time-seeded PRNG (not cryptographic, but WS masking
-       is defense-in-depth, not a security boundary) */
-    static int seeded = 0;
-    if (!seeded) { srand((unsigned)time(NULL)); seeded = 1; }
-    for (size_t i = 0; i < len; i++)
-        buf[i] = (uint8_t)(rand() & 0xFF);
-#endif
+    kl_plat_random(buf, len);
 }
 
 /* ── Generate WebSocket key ─────────────────────────────────────── */

@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 
 #include "socket.h"
+#include "platform.h"
 
 #define DNS_NAME_MAX      256
 #define DNS_QUERY_MAX     512   /* query buffer (question + EDNS0 OPT fit easily) */
@@ -143,20 +144,10 @@ struct KlDnsResolver {
     size_t         rnd_off;       /* next unused byte in rnd_pool */
 };
 
-/* ── Entropy (pooled /dev/urandom — portable across glibc/musl/macOS/cosmo) ── */
+/* ── Entropy (pooled OS RNG via the platform layer) ─────────────────────── */
 
 static void dns_rand_refill(KlDnsResolver *r) {
-    FILE *f = fopen("/dev/urandom", "rb");
-    size_t got = 0;
-    if (f) {
-        got = fread(r->rnd_pool, 1, sizeof(r->rnd_pool), f);
-        fclose(f);
-    }
-    /* Fallback if /dev/urandom is unavailable (effectively never on a real
-     * system): the low byte of each element's own address still varies per
-     * slot, so we produce *a* non-crashing value without a magic mixer. */
-    for (size_t i = got; i < sizeof(r->rnd_pool); i++)
-        r->rnd_pool[i] = (unsigned char)(uintptr_t)&r->rnd_pool[i];
+    kl_plat_random(r->rnd_pool, sizeof(r->rnd_pool));
     r->rnd_off = 0;
 }
 
