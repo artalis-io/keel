@@ -297,18 +297,24 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    is now one direct call (bench flat — it wraps a syscall). Validated: full POSIX
    gauntlet (epoll/kqueue/io_uring/poll + musl) + a MinGW compile of `socket.h`.
 2. **6a-3b-ii/b — Winsock provider + platform TUs + raw-syscall routing.**
-   `src/socket_winsock.c` (defines the Windows `kl_sockdef_*` + the Winsock
-   `KlSocketOps` — WSASend/TransmitFile/ioctlsocket/closesocket + `WSAStartup`/
-   `WSACleanup`); `src/platform_win.c`
+   **6a-3b-ii/b-1 — Winsock provider (done, MinGW cross-compile validated).**
+   `src/socket_winsock.c`: the Windows `kl_sockdef_*` (ioctlsocket FIONBIO,
+   closesocket, WSASend for writev via `struct iovec`→`WSABUF`, a `_read`+`send`
+   sendfile — TransmitFile is a 6b optimization, `SetHandleInformation` cloexec,
+   no-op nosigpipe) + the Winsock `KlSocketOps` + `kl_socket_provider_winsock()`
+   (`WSAStartup`/`WSACleanup` on destroy) + a WSA-code `kl_sock_errno_to_error`.
+   Makefile gains a `SOCKET_SRC` selector (POSIX `socket_posix.c` default; Windows
+   `socket_winsock.c`) + `-lmswsock`; `socket.h` declares the winsock factory.
+   POSIX unaffected; `socket_winsock.c` cross-compiles clean under MinGW-w64.
+   **Still pending (6a-3b-ii/b-2):** `src/platform_win.c`
    (monotonic clock via `QueryPerformanceCounter`, entropy via `BCryptGenRandom`,
    loopback-pair thread wakeup) behind a narrow `platform.h` with a
-   `platform_posix.c` sibling; and the raw-syscall residue routed through **new
-   seam ops** (`setsockopt`/`getsockname`/`shutdown`/…) so `server.c`/`udp.c` stay
-   POSIX-`#ifdef`-free, plus `fd<0`→`kl_handle_valid`. The Makefile's Windows
-   `CORE_SRC` swaps `socket_posix.c`→`socket_winsock.c` and `platform_posix.c`→
-   `platform_win.c` and drops POSIX-only TUs, so `make OS=windows` links. Green:
-   build + socket-provider tests + a plaintext server/client roundtrip on the
-   Windows runner.
+   `platform_posix.c` sibling; the raw-syscall residue routed through **new seam
+   ops** (`setsockopt`/`getsockname`/`shutdown`/…) so `server.c`/`udp.c` stay
+   POSIX-`#ifdef`-free, plus `fd<0`→`kl_handle_valid`; the Windows `CORE_SRC`
+   swapping in `platform_win.c` and dropping POSIX-only TUs so `make OS=windows`
+   *links*. Green: build + socket-provider tests + a plaintext server/client
+   roundtrip on the Windows runner.
 3. **6b — breadth.** UDP over Winsock, thread pool, more of the server/client
    suite, AF_UNIX probe, TLS (mbedtls build or skip). Expand the Windows test
    subset toward parity; document what's skipped and why.

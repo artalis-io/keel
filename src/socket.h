@@ -69,8 +69,12 @@ typedef struct KlSocketProvider {
 #define KL_SOCK_CAP_WRITEV     (1ull << 1)  /* POSIX writev() usable on this fd */
 #define KL_SOCK_CAP_SENDFILE   (1ull << 2)  /* POSIX sendfile() usable on this fd */
 
-/* The built-in POSIX provider (static storage, no allocation). */
+/* Built-in provider factories (static storage, no allocation). Each is defined
+ * in its own platform TU: kl_socket_provider_posix() in socket_posix.c,
+ * kl_socket_provider_winsock() in socket_winsock.c (defined only on Windows;
+ * the declaration is unconditional but only ever called on Windows). */
 const KlSocketProvider *kl_socket_provider_posix(void);
+const KlSocketProvider *kl_socket_provider_winsock(void);
 
 /*
  * Platform default socket ops — the raw syscall for each operation, DEFINED

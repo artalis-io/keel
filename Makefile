@@ -41,8 +41,9 @@ else ifdef WINDOWS
             -fstack-protector-strong -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
   EVENT_SRC = src/event_wsapoll.c
+  SOCKET_SRC = src/socket_winsock.c
   FILE_IO_SRC = src/file_io.c
-  LDFLAGS += -lws2_32 -lbcrypt
+  LDFLAGS += -lws2_32 -lmswsock -lbcrypt
   EXE = .exe
 else
   # Build hardening (parity with Hull's W^X posture in docs/security.md):
@@ -99,7 +100,9 @@ CFLAGS += -MMD -MP
 VENDOR_CFLAGS += -MMD -MP
 
 # Core library — parser-agnostic
-CORE_SRC = src/allocator.c src/error.c src/socket_posix.c src/response.c src/router.c \
+# Socket provider: POSIX default; the Windows branch sets src/socket_winsock.c.
+SOCKET_SRC ?= src/socket_posix.c
+CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) src/response.c src/router.c \
            src/connection.c src/server.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \

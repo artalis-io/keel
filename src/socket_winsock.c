@@ -1,0 +1,239 @@
+/*
+ * socket_winsock.c — the Winsock socket provider (implements the socket.h seam).
+ *
+ * The Windows sibling of socket_posix.c: one provider per TU, compiled only on
+ * Windows (Makefile OS=windows branch), so it uses Winsock directly with no
+ * internal #ifdef. Defines the platform-default socket ops (kl_sockdef_*) the
+ * neutral socket.h seam calls, plus the Winsock KlSocketProvider. See
+ * docs/phase6_winsock_design.md §B.1.
+ *
+ * A SOCKET is pointer-width (UINT_PTR); it round-trips through KlSocketHandle
+ * (intptr_t). INVALID_SOCKET == (SOCKET)(~0) == -1 reinterpreted, so it maps to
+ * KL_INVALID_SOCKET. Winsock ops return 0 / SOCKET_ERROR(-1), matching the
+ * seam's POSIX 0/-1 contract. Windows has no SIGPIPE (no MSG_NOSIGNAL needed)
+ * and blocking Winsock calls don't return WSAEINTR (no EINTR loop needed).
+ */
+
+#include "socket.h"
+
+#include <windows.h>
+#include <mswsock.h>   /* TransmitFile prototype (linked via -lws2_32 / mswsock) */
+#include <io.h>        /* _read, _lseeki64, _get_osfhandle */
+#include <limits.h>
+
+#define KL_WSK_SENDFILE_BUF 8192
+
+static int clamp_int(size_t n) {
+    return n > (size_t)INT_MAX ? INT_MAX : (int)n;
+}
+
+/* ── Platform default socket ops (Winsock) ─────────────────────────────── */
+
+int kl_sockdef_set_nonblocking(KlSocketHandle fd) {
+    u_long mode = 1;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &mode) == 0 ? 0 : -1;
+}
+
+void kl_sockdef_set_cloexec(KlSocketHandle fd) {
+    /* Clear inherit so the socket isn't leaked into child processes — the
+     * Windows analog of FD_CLOEXEC. Best-effort. */
+    (void)SetHandleInformation((HANDLE)(SOCKET)fd, HANDLE_FLAG_INHERIT, 0);
+}
+
+void kl_sockdef_set_nosigpipe(KlSocketHandle fd) {
+    (void)fd;   /* no SIGPIPE on Windows */
+}
+
+KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
+    return (KlSocketHandle)socket(domain, type, protocol);
+}
+int kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+    return connect((SOCKET)fd, a, l);
+}
+int kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+    return bind((SOCKET)fd, a, l);
+}
+int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
+    return listen((SOCKET)fd, backlog);
+}
+KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+    return (KlSocketHandle)accept((SOCKET)fd, a, l);
+}
+int kl_sockdef_close(KlSocketHandle fd) {
+    return closesocket((SOCKET)fd);
+}
+
+ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
+    int r = send((SOCKET)fd, (const char *)buf, clamp_int(len), 0);
+    return r == SOCKET_ERROR ? -1 : r;
+}
+ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
+    int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), 0);
+    return r == SOCKET_ERROR ? -1 : r;
+}
+
+/* Vectored write via WSASend. struct iovec (base,len) -> WSABUF (len,buf). */
+ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
+    if (iovcnt <= 0)
+        return 0;
+    WSABUF stackbufs[16];
+    WSABUF *bufs = stackbufs;
+    if (iovcnt > (int)(sizeof(stackbufs) / sizeof(stackbufs[0]))) {
+        /* Only the response header+body vectors reach here (<= a few); a large
+         * iovcnt is unexpected — cap to the stack buffer to stay bounded. */
+        iovcnt = (int)(sizeof(stackbufs) / sizeof(stackbufs[0]));
+    }
+    for (int i = 0; i < iovcnt; i++) {
+        bufs[i].len = (ULONG)iov[i].iov_len;
+        bufs[i].buf = (CHAR *)iov[i].iov_base;
+    }
+    DWORD sent = 0;
+    int rc = WSASend((SOCKET)fd, bufs, (DWORD)iovcnt, &sent, 0, NULL, NULL);
+    if (rc == SOCKET_ERROR)
+        return -1;
+    return (ssize_t)sent;
+}
+
+/* No TransmitFile yet (an offset-aware OVERLAPPED optimization for 6b); a
+ * pread+send loop is correct and cross-compiles. Sends one chunk per call from
+ * *offset, advancing it — same one-chunk-per-tick shape as the POSIX fallback. */
+ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
+    char buf[KL_WSK_SENDFILE_BUF];
+    size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
+    if (_lseeki64(in_fd, (long long)*offset, SEEK_SET) < 0)
+        return -1;
+    int nr = _read(in_fd, buf, clamp_int(to_read));
+    if (nr <= 0)
+        return nr;
+    const char *p = buf;
+    int remaining = nr;
+    while (remaining > 0) {
+        int nw = send((SOCKET)out_fd, p, remaining, 0);
+        if (nw == SOCKET_ERROR) {
+            int e = WSAGetLastError();
+            if (e == WSAEWOULDBLOCK) {
+                int wrote = nr - remaining;
+                *offset += wrote;
+                return wrote > 0 ? wrote : -1;
+            }
+            return -1;
+        }
+        p += nw;
+        remaining -= nw;
+    }
+    *offset += nr;
+    return nr;
+}
+
+/* ── Winsock provider — thin adapters over the kl_sockdef_* defaults ────── */
+
+static int wsk_set_nonblocking(void *ctx, KlSocketHandle fd) {
+    (void)ctx; return kl_sockdef_set_nonblocking(fd);
+}
+static void wsk_set_cloexec(void *ctx, KlSocketHandle fd) {
+    (void)ctx; kl_sockdef_set_cloexec(fd);
+}
+static void wsk_set_nosigpipe(void *ctx, KlSocketHandle fd) {
+    (void)ctx; kl_sockdef_set_nosigpipe(fd);
+}
+static KlSocketHandle wsk_socket(void *ctx, int domain, int type, int protocol) {
+    (void)ctx; return kl_sockdef_socket(domain, type, protocol);
+}
+static int wsk_connect(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+    (void)ctx; return kl_sockdef_connect(fd, a, l);
+}
+static int wsk_bind(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+    (void)ctx; return kl_sockdef_bind(fd, a, l);
+}
+static int wsk_listen(void *ctx, KlSocketHandle fd, int backlog) {
+    (void)ctx; return kl_sockdef_listen(fd, backlog);
+}
+static KlSocketHandle wsk_accept(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+    (void)ctx; return kl_sockdef_accept(fd, a, l);
+}
+static int wsk_close(void *ctx, KlSocketHandle fd) {
+    (void)ctx; return kl_sockdef_close(fd);
+}
+static ssize_t wsk_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
+    (void)ctx; return kl_sockdef_send(fd, buf, len);
+}
+static ssize_t wsk_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
+    (void)ctx; return kl_sockdef_recv(fd, buf, len);
+}
+static ssize_t wsk_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
+    (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
+}
+static ssize_t wsk_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
+    (void)ctx; return kl_sockdef_sendfile(out_fd, in_fd, offset, count);
+}
+static void wsk_destroy(void *ctx) {
+    (void)ctx; WSACleanup();   /* balance the WSAStartup in the factory */
+}
+
+static const KlSocketOps WINSOCK_OPS = {
+    .set_nonblocking = wsk_set_nonblocking,
+    .set_cloexec     = wsk_set_cloexec,
+    .set_nosigpipe   = wsk_set_nosigpipe,
+    .socket          = wsk_socket,
+    .connect         = wsk_connect,
+    .bind            = wsk_bind,
+    .listen          = wsk_listen,
+    .accept          = wsk_accept,
+    .close           = wsk_close,
+    .send            = wsk_send,
+    .recv            = wsk_recv,
+    .writev          = wsk_writev,
+    .sendfile        = wsk_sendfile,
+    .destroy         = wsk_destroy,
+    .name            = "winsock",
+};
+
+static const KlSocketProvider WINSOCK_PROVIDER = {
+    &WINSOCK_OPS, NULL,
+    KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | KL_SOCK_CAP_SENDFILE,
+};
+
+const KlSocketProvider *kl_socket_provider_winsock(void) {
+    WSADATA wsa;
+    (void)WSAStartup(MAKEWORD(2, 2), &wsa);   /* refcounted; WSACleanup on destroy */
+    return &WINSOCK_PROVIDER;
+}
+
+/* ── Error taxonomy (Winsock) ───────────────────────────────────────────── */
+
+KlError kl_sock_errno_to_error(int err) {
+    switch (err) {
+        case WSAETIMEDOUT:
+            return KL_ERR_TIMEOUT;
+        case WSAECONNREFUSED:
+        case WSAECONNABORTED:
+        case WSAENETUNREACH:
+        case WSAEHOSTUNREACH:
+        case WSAENETDOWN:
+        case WSAEHOSTDOWN:
+            return KL_ERR_CONNECT;
+        case WSAEADDRINUSE:
+        case WSAEADDRNOTAVAIL:
+        case WSAEACCES:
+            return KL_ERR_BIND;
+        case WSAEMFILE:
+        case WSAENOBUFS:
+            return KL_ERR_ALLOC;
+        case WSAEOPNOTSUPP:
+        case WSAEAFNOSUPPORT:
+        case WSAEPROTONOSUPPORT:
+        case WSAESOCKTNOSUPPORT:
+        case WSAEINVAL:
+        case WSAENOTSOCK:
+        case WSAEFAULT:
+            return KL_ERR_INVALID_ARG;
+        case WSAEWOULDBLOCK:
+        case WSAEINPROGRESS:
+        case WSAEINTR:
+        case WSAECONNRESET:
+        case WSAENOTCONN:
+        case WSAESHUTDOWN:
+        default:
+            return KL_ERR_IO;
+    }
+}
