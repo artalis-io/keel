@@ -94,7 +94,7 @@ static int kl_server_bind_tcp(KlServer *s) {
     }
 
     s->listen_fd = kl_sock_socket(s->ev.sockets, ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (s->listen_fd < 0) {
+    if (!kl_handle_valid(s->listen_fd)) {
         kl_log_errno(s, KL_LOG_ERROR, "socket");
         s->last_error = KL_ERR_SOCKET;
         freeaddrinfo(ai);
@@ -112,8 +112,8 @@ static int kl_server_bind_tcp(KlServer *s) {
     if (kl_sock_bind(s->ev.sockets, s->listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
-        close(s->listen_fd);
-        s->listen_fd = -1;
+        kl_sock_close(s->ev.sockets, s->listen_fd);
+        s->listen_fd = KL_INVALID_SOCKET;
         freeaddrinfo(ai);
         return -1;
     }
@@ -218,7 +218,7 @@ static int kl_server_bind_unix(KlServer *s) {
     }
 
     s->listen_fd = kl_sock_socket(s->ev.sockets, AF_UNIX, SOCK_STREAM, 0);
-    if (s->listen_fd < 0) {
+    if (!kl_handle_valid(s->listen_fd)) {
         kl_log_errno(s, KL_LOG_ERROR, "socket");
         s->last_error = KL_ERR_SOCKET;
         return -1;
@@ -227,8 +227,8 @@ static int kl_server_bind_unix(KlServer *s) {
 
     if (s->config.unix_socket_unlink &&
         kl_server_unlink_stale_unix_socket(s, path) < 0) {
-        close(s->listen_fd);
-        s->listen_fd = -1;
+        kl_sock_close(s->ev.sockets, s->listen_fd);
+        s->listen_fd = KL_INVALID_SOCKET;
         return -1;
     }
 
@@ -256,8 +256,8 @@ static int kl_server_bind_unix(KlServer *s) {
     if (bind_rc < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
-        close(s->listen_fd);
-        s->listen_fd = -1;
+        kl_sock_close(s->ev.sockets, s->listen_fd);
+        s->listen_fd = KL_INVALID_SOCKET;
         return -1;
     }
 
@@ -311,8 +311,8 @@ static int kl_server_bind_unix(KlServer *s) {
     return 0;
 
 fail:
-    close(s->listen_fd);
-    s->listen_fd = -1;
+    kl_sock_close(s->ev.sockets, s->listen_fd);
+    s->listen_fd = KL_INVALID_SOCKET;
     unlink(path);
     s->unix_socket_owned = 0;
     return -1;
@@ -332,7 +332,7 @@ static int kl_server_adopt_fd(KlServer *s) {
     if (kl_sock_get_local_addr(s->ev.sockets, s->listen_fd, (struct sockaddr *)&sa, &sa_len) != 0) {
         kl_log_errno(s, KL_LOG_ERROR, "getsockname on adopted fd");
         s->last_error = KL_ERR_SOCKET;
-        s->listen_fd = -1;
+        s->listen_fd = KL_INVALID_SOCKET;
         return -1;
     }
 
@@ -364,7 +364,7 @@ static int kl_server_bind_listener(KlServer *s) {
 /* cppcheck-suppress constParameterPointer  ; 'out' is written on the
    platform branches below (invisible to cppcheck's default config). */
 int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out) {
-    if (fd < 0 || !out)
+    if (!kl_handle_valid(fd) || !out)
         return -1;
 
 #if defined(__linux__) && defined(SO_PEERCRED)
@@ -418,7 +418,7 @@ int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
     if (!req || !buf || buflen == 0)
         return -1;
     const KlConn *conn = kl_request_conn(req);
-    if (!conn || conn->fd < 0)
+    if (!conn || !kl_handle_valid(conn->fd))
         return -1;
 
 #if defined(__linux__) && defined(SO_PEERSEC)
@@ -556,9 +556,9 @@ int kl_systemd_listen_fd_by_name(const char *name) {
 }
 
 static void kl_server_close_listener(KlServer *s) {
-    if (s->listen_fd >= 0) {
-        close(s->listen_fd);
-        s->listen_fd = -1;
+    if (kl_handle_valid(s->listen_fd)) {
+        kl_sock_close(s->ev.sockets, s->listen_fd);
+        s->listen_fd = KL_INVALID_SOCKET;
     }
     if (s->unix_socket_owned && s->config.unix_socket_unlink &&
         s->config.unix_socket_path) {
@@ -592,7 +592,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         return -1;
     }
     memset(s, 0, sizeof(*s));
-    s->listen_fd = -1;
+    s->listen_fd = KL_INVALID_SOCKET;
 
     /* Apply defaults */
     s->config = *config;
@@ -920,14 +920,14 @@ int kl_server_run(KlServer *s) {
                     socklen_t peer_len = sizeof(peer);
                     KlSocketHandle client_fd = kl_sock_accept(s->ev.sockets, s->listen_fd,
                                            (struct sockaddr *)&peer, &peer_len);
-                    if (client_fd < 0) {
+                    if (!kl_handle_valid(client_fd)) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                         kl_log_errno(s, KL_LOG_ERROR, "accept");
                         break;
                     }
 
                     if (kl_sock_set_nonblocking(s->ev.sockets, client_fd) < 0) {
-                        close(client_fd);
+                        kl_sock_close(s->ev.sockets, client_fd);
                         continue;
                     }
                     /* Don't leak client connections into child processes. */
@@ -937,7 +937,7 @@ int kl_server_run(KlServer *s) {
 
                     KlConn *nc = kl_conn_acquire(&s->pool, client_fd);
                     if (!nc) {
-                        close(client_fd);
+                        kl_sock_close(s->ev.sockets, client_fd);
                         /* Pool full — stop accepting until a slot frees up.
                          * The kernel TCP backlog queues further connections. */
                         kl_event_del(&s->ev.loop, s->listen_fd);
