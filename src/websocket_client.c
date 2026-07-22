@@ -141,7 +141,7 @@ static ssize_t wsc_drain_write_fn(const char *data, size_t len, void *ctx)
  * event loop wakes us to flush the drain.  kl_watcher_mod arms immediately. */
 static void wsc_update_write_interest(KlWsClientConn *ws)
 {
-    if (ws->fd < 0) return;
+    if (!kl_handle_valid(ws->fd)) return;
     KlEventMask mask = KL_EVENT_READ;
     if (kl_drain_pending(&ws->out_drain))
         mask |= KL_EVENT_WRITE;
@@ -864,15 +864,15 @@ static void wsc_close_connection(KlWsClientConn *ws)
         kl_timer_cancel(ws->ev, ws->ping_timer_id);
         ws->ping_timer_id = -1;
     }
-    if (ws->fd >= 0) {
+    if (kl_handle_valid(ws->fd)) {
         kl_watcher_del(ws->ev, ws->fd);
         if (ws->tls) {
             ws->tls->shutdown(ws->tls, ws->fd);
             ws->tls->destroy(ws->tls);
             ws->tls = NULL;
         }
-        close(ws->fd);
-        ws->fd = -1;
+        kl_sock_close(ws->ev->sockets, ws->fd);
+        ws->fd = KL_INVALID_SOCKET;
     }
 }
 
@@ -935,16 +935,16 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
                                        plen + 1);
 
         fd = kl_sock_socket(ev->sockets, AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0)
+        if (!kl_handle_valid(fd))
             return NULL;
         kl_sock_set_nosigpipe(ev->sockets, fd);
         if (kl_sock_set_nonblocking(ev->sockets, fd) < 0) {
-            close(fd);
+            kl_sock_close(ev->sockets, fd);
             return NULL;
         }
         rc = kl_sock_connect(ev->sockets, fd, (struct sockaddr *)&un, un_len);
         if (rc < 0 && errno != EINPROGRESS) {
-            close(fd);
+            kl_sock_close(ev->sockets, fd);
             return NULL;
         }
     } else {
@@ -964,14 +964,14 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
 
         /* Create non-blocking socket */
         fd = kl_sock_socket(ev->sockets, res->ai_family, res->ai_socktype, res->ai_protocol);
-        if (fd < 0) {
+        if (!kl_handle_valid(fd)) {
             freeaddrinfo(res);
             return NULL;
         }
 
         kl_sock_set_nosigpipe(ev->sockets, fd);
         if (kl_sock_set_nonblocking(ev->sockets, fd) < 0) {
-            close(fd);
+            kl_sock_close(ev->sockets, fd);
             freeaddrinfo(res);
             return NULL;
         }
@@ -980,7 +980,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         freeaddrinfo(res);
 
         if (rc < 0 && errno != EINPROGRESS) {
-            close(fd);
+            kl_sock_close(ev->sockets, fd);
             return NULL;
         }
     }
@@ -988,7 +988,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     /* Allocate connection */
     KlWsClientConn *ws = kl_malloc(alloc, sizeof(KlWsClientConn));
     if (!ws) {
-        close(fd);
+        kl_sock_close(ev->sockets, fd);
         return NULL;
     }
     memset(ws, 0, sizeof(*ws));
@@ -1016,7 +1016,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     /* Generate WebSocket key and build upgrade request */
     wsc_generate_key(ws);
     if (wsc_build_upgrade(ws, &parsed, cfg ? cfg->protocol : NULL) != 0) {
-        close(fd);
+        kl_sock_close(ev->sockets, fd);
         kl_free(alloc, ws, sizeof(KlWsClientConn));
         return NULL;
     }
@@ -1025,7 +1025,7 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     if (kl_watcher_add(ev, fd, KL_EVENT_WRITE, wsc_on_event, ws) != 0) {
         if (ws->upgrade_buf)
             kl_free(alloc, ws->upgrade_buf, ws->upgrade_len);
-        close(fd);
+        kl_sock_close(ev->sockets, fd);
         kl_free(alloc, ws, sizeof(KlWsClientConn));
         return NULL;
     }
