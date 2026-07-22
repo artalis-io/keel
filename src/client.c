@@ -1170,9 +1170,9 @@ static int  start_connect(KlClient *c, const struct sockaddr *addr,
 /* Happy Eyeballs helpers (defined below start_connect) */
 static void he_proceed_after_connect(KlClient *c);
 static void he_start_next(KlClient *c);
-static void he_win(KlClient *c, int fd);
-static void he_on_writable(KlClient *c, int fd);
-static void he_close_attempts(KlClient *c, int keep_fd);
+static void he_win(KlClient *c, KlSocketHandle fd);
+static void he_on_writable(KlClient *c, KlSocketHandle fd);
+static void he_close_attempts(KlClient *c, KlSocketHandle keep_fd);
 static void he_cancel_timers(KlClient *c);
 static void he_on_deadline(void *user_data);
 static void he_on_delay(void *user_data);
@@ -1352,18 +1352,18 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
                           int protocol)
 {
     KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, family, socktype, protocol);
-    if (fd < 0)
+    if (!kl_handle_valid(fd))
         return -1;
 
     kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
     if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
-        close(fd);
+        kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
     }
 
     int rc = kl_sock_connect(c->ev_ctx->sockets, fd, addr, addrlen);
     if (rc < 0 && errno != EINPROGRESS) {
-        close(fd);
+        kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
     }
 
@@ -1371,8 +1371,8 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
     c->state = (rc == 0) ? KL_HCLIENT_SENDING : KL_HCLIENT_CONNECTING;
 
     if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
-        close(fd);
-        c->fd = -1;
+        kl_sock_close(c->ev_ctx->sockets, fd);
+        c->fd = KL_INVALID_SOCKET;
         return -1;
     }
 
@@ -1395,12 +1395,12 @@ static void he_cancel_timers(KlClient *c)
 }
 
 /* Close every active racing attempt except keep_fd (the winner, or -1 for all). */
-static void he_close_attempts(KlClient *c, int keep_fd)
+static void he_close_attempts(KlClient *c, KlSocketHandle keep_fd)
 {
     for (int i = 0; i < c->conn_next; i++) {
         if (c->conn_attempts[i].active && c->conn_attempts[i].fd != keep_fd) {
             kl_watcher_del(c->ev_ctx, c->conn_attempts[i].fd);
-            close(c->conn_attempts[i].fd);
+            kl_sock_close(c->ev_ctx->sockets, c->conn_attempts[i].fd);
             c->conn_attempts[i].active = 0;
         }
     }
@@ -1410,7 +1410,7 @@ static void he_close_attempts(KlClient *c, int keep_fd)
 /* A winner has connected: stop the stagger, drop the losers, adopt its fd, and
  * hand off to the shared post-connect path. The overall deadline stays armed to
  * bound the remaining TLS/send/recv. */
-static void he_win(KlClient *c, int fd)
+static void he_win(KlClient *c, KlSocketHandle fd)
 {
     if (c->conn_delay_timer >= 0) {
         kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
@@ -1447,24 +1447,24 @@ static int he_new_attempt(KlClient *c, int idx)
     int fam = c->conn_addrs.addrs[idx].ss_family;
 
     KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, fam, c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
-    if (fd < 0)
+    if (!kl_handle_valid(fd))
         return -1;
 
     kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
     if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
-        close(fd);
+        kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
     }
 
     int rc = kl_sock_connect(c->ev_ctx->sockets, fd, sa, sl);
     if (rc < 0 && errno != EINPROGRESS) {
         c->conn_last_err = KL_ERR_CONNECT;
-        close(fd);
+        kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
     }
 
     if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
-        close(fd);
+        kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
     }
 
@@ -1514,19 +1514,19 @@ static void he_on_deadline(void *user_data)
     c->deadline_timer = -1;
     if (c->state == KL_HCLIENT_DONE)
         return;
-    he_close_attempts(c, -1);    /* drop any racing sockets */
+    he_close_attempts(c, KL_INVALID_SOCKET);    /* drop any racing sockets */
     c->error = KL_ERR_TIMEOUT;
     async_complete_error(c);
 }
 
 /* One racing attempt failed: drop it, then either fast-start the next address
  * (a failure must not wait out the delay, §5) or complete when all are gone. */
-static void he_fail_attempt(KlClient *c, int fd)
+static void he_fail_attempt(KlClient *c, KlSocketHandle fd)
 {
     for (int i = 0; i < c->conn_next; i++) {
         if (c->conn_attempts[i].active && c->conn_attempts[i].fd == fd) {
             kl_watcher_del(c->ev_ctx, fd);
-            close(fd);
+            kl_sock_close(c->ev_ctx->sockets, fd);
             c->conn_attempts[i].active = 0;
             c->conn_pending--;
             break;
@@ -1543,7 +1543,7 @@ static void he_fail_attempt(KlClient *c, int fd)
 }
 
 /* A racing socket became writable: SO_ERROR==0 wins the race, else it failed. */
-static void he_on_writable(KlClient *c, int fd)
+static void he_on_writable(KlClient *c, KlSocketHandle fd)
 {
     int err = 0;
     socklen_t errlen = sizeof(err);
@@ -2089,15 +2089,15 @@ static void async_complete_success(KlClient *c)
                               NULL, 0);
         }
         c->tls = NULL;
-        c->fd = -1;
+        c->fd = KL_INVALID_SOCKET;
     } else {
         if (c->tls) {
             c->tls->shutdown(c->tls, c->fd);
             c->tls->destroy(c->tls);
             c->tls = NULL;
         }
-        close(c->fd);
-        c->fd = -1;
+        kl_sock_close(c->ev_ctx->sockets, c->fd);
+        c->fd = KL_INVALID_SOCKET;
     }
 
     if (c->request_buf) {
@@ -2123,7 +2123,7 @@ static void async_complete_success(KlClient *c)
 static void async_complete_error(KlClient *c)
 {
     he_cancel_timers(c);
-    if (c->fd >= 0)
+    if (kl_handle_valid(c->fd))
         kl_watcher_del(c->ev_ctx, c->fd);
 
     if (c->pool) {
@@ -2132,18 +2132,18 @@ static void async_complete_error(KlClient *c)
         c->pool_conn.tls = c->tls;
         kl_cpool_discard(c->pool, &c->pool_conn);
         c->tls = NULL;
-        c->fd = -1;
+        c->fd = KL_INVALID_SOCKET;
     } else {
         if (c->tls) {
-            if (c->fd >= 0)
+            if (kl_handle_valid(c->fd))
                 c->tls->shutdown(c->tls, c->fd);
             c->tls->destroy(c->tls);
             c->tls = NULL;
         }
 
-        if (c->fd >= 0) {
-            close(c->fd);
-            c->fd = -1;
+        if (kl_handle_valid(c->fd)) {
+            kl_sock_close(c->ev_ctx->sockets, c->fd);
+            c->fd = KL_INVALID_SOCKET;
         }
     }
 
@@ -2279,7 +2279,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     }
     memset(c, 0, sizeof(*c));
 
-    c->fd = -1;
+    c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
     c->alloc = alloc;
     c->tls_cfg = is_tunnel ? tls_cfg : NULL;  /* only for CONNECT tunnels */
@@ -2517,9 +2517,9 @@ void kl_client_cancel(KlClient *client)
 
     /* Cancel Happy Eyeballs racing (timers + any in-flight attempt sockets). */
     he_cancel_timers(client);
-    he_close_attempts(client, -1);
+    he_close_attempts(client, KL_INVALID_SOCKET);
 
-    if (client->fd >= 0) {
+    if (kl_handle_valid(client->fd)) {
         kl_watcher_del(client->ev_ctx, client->fd);
 
         if (client->pool) {
@@ -2527,7 +2527,7 @@ void kl_client_cancel(KlClient *client)
             client->pool_conn.tls = client->tls;
             kl_cpool_discard(client->pool, &client->pool_conn);
             client->tls = NULL;
-            client->fd = -1;
+            client->fd = KL_INVALID_SOCKET;
         } else {
             if (client->tls) {
                 client->tls->shutdown(client->tls, client->fd);
@@ -2535,8 +2535,8 @@ void kl_client_cancel(KlClient *client)
                 client->tls = NULL;
             }
 
-            close(client->fd);
-            client->fd = -1;
+            kl_sock_close(client->ev_ctx->sockets, client->fd);
+            client->fd = KL_INVALID_SOCKET;
         }
     }
 
@@ -2790,7 +2790,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     }
     memset(c, 0, sizeof(*c));
 
-    c->fd = -1;
+    c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
     c->alloc = alloc;
     c->tls_cfg = tls_cfg;
@@ -2832,7 +2832,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
         c->state = KL_HCLIENT_SENDING;
 
         if (kl_watcher_add(ev_ctx, c->fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
-            c->fd = -1;
+            c->fd = KL_INVALID_SOCKET;
             c->tls = NULL;
             kl_cpool_discard(pool, &pconn);
             if (c->decomp_wrap)
