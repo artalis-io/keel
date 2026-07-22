@@ -44,6 +44,23 @@ void kl_sockdef_set_nosigpipe(KlSocketHandle fd) {
     (void)fd;   /* no SIGPIPE on Windows */
 }
 
+int kl_sockdef_set_reuseaddr(KlSocketHandle fd, int on) {
+    return setsockopt((SOCKET)fd, SOL_SOCKET, SO_REUSEADDR,
+                      (const char *)&on, sizeof(on)) == 0 ? 0 : -1;
+}
+int kl_sockdef_set_reuseport(KlSocketHandle fd, int on) {
+    (void)fd; (void)on;
+    return -1;   /* no SO_REUSEPORT on Windows — best-effort, caller ignores */
+}
+int kl_sockdef_set_ipv6only(KlSocketHandle fd, int on) {
+    return setsockopt((SOCKET)fd, IPPROTO_IPV6, IPV6_V6ONLY,
+                      (const char *)&on, sizeof(on)) == 0 ? 0 : -1;
+}
+int kl_sockdef_set_tcp_nodelay(KlSocketHandle fd, int on) {
+    return setsockopt((SOCKET)fd, IPPROTO_TCP, TCP_NODELAY,
+                      (const char *)&on, sizeof(on)) == 0 ? 0 : -1;
+}
+
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
     return (KlSocketHandle)socket(domain, type, protocol);
 }
@@ -62,6 +79,9 @@ KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_
 int kl_sockdef_close(KlSocketHandle fd) {
     return closesocket((SOCKET)fd);
 }
+int kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+    return getsockname((SOCKET)fd, a, l) == 0 ? 0 : -1;
+}
 
 ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
     int r = send((SOCKET)fd, (const char *)buf, clamp_int(len), 0);
@@ -69,6 +89,11 @@ ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
 }
 ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), 0);
+    return r == SOCKET_ERROR ? -1 : r;
+}
+ssize_t kl_sockdef_peek1(KlSocketHandle fd) {
+    char b;
+    int r = recv((SOCKET)fd, &b, 1, MSG_PEEK);
     return r == SOCKET_ERROR ? -1 : r;
 }
 
@@ -136,6 +161,18 @@ static void wsk_set_cloexec(void *ctx, KlSocketHandle fd) {
 static void wsk_set_nosigpipe(void *ctx, KlSocketHandle fd) {
     (void)ctx; kl_sockdef_set_nosigpipe(fd);
 }
+static int wsk_set_reuseaddr(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_reuseaddr(fd, on);
+}
+static int wsk_set_reuseport(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_reuseport(fd, on);
+}
+static int wsk_set_ipv6only(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_ipv6only(fd, on);
+}
+static int wsk_set_tcp_nodelay(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_tcp_nodelay(fd, on);
+}
 static KlSocketHandle wsk_socket(void *ctx, int domain, int type, int protocol) {
     (void)ctx; return kl_sockdef_socket(domain, type, protocol);
 }
@@ -154,11 +191,17 @@ static KlSocketHandle wsk_accept(void *ctx, KlSocketHandle fd, struct sockaddr *
 static int wsk_close(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_close(fd);
 }
+static int wsk_get_local_addr(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+    (void)ctx; return kl_sockdef_get_local_addr(fd, a, l);
+}
 static ssize_t wsk_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)ctx; return kl_sockdef_send(fd, buf, len);
 }
 static ssize_t wsk_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx; return kl_sockdef_recv(fd, buf, len);
+}
+static ssize_t wsk_peek1(void *ctx, KlSocketHandle fd) {
+    (void)ctx; return kl_sockdef_peek1(fd);
 }
 static ssize_t wsk_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
     (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
@@ -174,14 +217,20 @@ static const KlSocketOps WINSOCK_OPS = {
     .set_nonblocking = wsk_set_nonblocking,
     .set_cloexec     = wsk_set_cloexec,
     .set_nosigpipe   = wsk_set_nosigpipe,
+    .set_reuseaddr   = wsk_set_reuseaddr,
+    .set_reuseport   = wsk_set_reuseport,
+    .set_ipv6only    = wsk_set_ipv6only,
+    .set_tcp_nodelay = wsk_set_tcp_nodelay,
     .socket          = wsk_socket,
     .connect         = wsk_connect,
     .bind            = wsk_bind,
     .listen          = wsk_listen,
     .accept          = wsk_accept,
     .close           = wsk_close,
+    .get_local_addr  = wsk_get_local_addr,
     .send            = wsk_send,
     .recv            = wsk_recv,
+    .peek1           = wsk_peek1,
     .writev          = wsk_writev,
     .sendfile        = wsk_sendfile,
     .destroy         = wsk_destroy,

@@ -102,17 +102,12 @@ static int kl_server_bind_tcp(KlServer *s) {
     }
     kl_sock_set_cloexec(s->ev.sockets, s->listen_fd);
 
-    int opt = 1;
-    setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#ifdef SO_REUSEPORT
-    (void)setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-#endif
+    (void)kl_sock_set_reuseaddr(s->ev.sockets, s->listen_fd, 1);
+    (void)kl_sock_set_reuseport(s->ev.sockets, s->listen_fd, 1);   /* best-effort */
 
     /* IPv6 dual-stack: accept both IPv4 and IPv6 on :: */
-    if (ai->ai_family == AF_INET6) {
-        int off = 0;
-        setsockopt(s->listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
-    }
+    if (ai->ai_family == AF_INET6)
+        (void)kl_sock_set_ipv6only(s->ev.sockets, s->listen_fd, 0);
 
     if (kl_sock_bind(s->ev.sockets, s->listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "bind");
@@ -129,7 +124,7 @@ static int kl_server_bind_tcp(KlServer *s) {
         struct sockaddr_storage sa;
         memset(&sa, 0, sizeof(sa));
         socklen_t sa_len = sizeof(sa);
-        if (getsockname(s->listen_fd, (struct sockaddr *)&sa, &sa_len) == 0) {
+        if (kl_sock_get_local_addr(s->ev.sockets, s->listen_fd, (struct sockaddr *)&sa, &sa_len) == 0) {
             if (sa.ss_family == AF_INET)
                 s->bound_port = ntohs(((struct sockaddr_in *)&sa)->sin_port);
             else if (sa.ss_family == AF_INET6)
@@ -334,7 +329,7 @@ static int kl_server_adopt_fd(KlServer *s) {
     struct sockaddr_storage sa;
     memset(&sa, 0, sizeof(sa));
     socklen_t sa_len = sizeof(sa);
-    if (getsockname(s->listen_fd, (struct sockaddr *)&sa, &sa_len) != 0) {
+    if (kl_sock_get_local_addr(s->ev.sockets, s->listen_fd, (struct sockaddr *)&sa, &sa_len) != 0) {
         kl_log_errno(s, KL_LOG_ERROR, "getsockname on adopted fd");
         s->last_error = KL_ERR_SOCKET;
         s->listen_fd = -1;
@@ -937,11 +932,8 @@ int kl_server_run(KlServer *s) {
                     }
                     /* Don't leak client connections into child processes. */
                     kl_sock_set_cloexec(s->ev.sockets, client_fd);
-                    if (s->config.transport == KL_TRANSPORT_TCP) {
-                        int nodelay = 1;
-                        (void)setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY,
-                                         &nodelay, sizeof(nodelay));
-                    }
+                    if (s->config.transport == KL_TRANSPORT_TCP)
+                        (void)kl_sock_set_tcp_nodelay(s->ev.sockets, client_fd, 1);
 
                     KlConn *nc = kl_conn_acquire(&s->pool, client_fd);
                     if (!nc) {
@@ -1021,11 +1013,8 @@ rearm_listen:
                  * tick; if none are pending, wait for the next event (edge-
                  * triggered backends don't re-deliver the consumed readiness,
                  * but newly-arriving bytes always trigger). */
-                {
-                    uint8_t probe;
-                    if (recv(c->fd, &probe, 1, MSG_PEEK) <= 0)
-                        goto transition;
-                }
+                if (kl_sock_peek1(s->ev.sockets, c->fd) <= 0)
+                    goto transition;
             }
 
             /* TLS handshake — handle before normal read/write */

@@ -17,6 +17,7 @@
 
 #include <fcntl.h>
 #include <unistd.h>
+#include <netinet/tcp.h>   /* IPPROTO_TCP / TCP_NODELAY */
 #if defined(__linux__)
   #include <sys/sendfile.h>
 #endif
@@ -47,6 +48,29 @@ void kl_sockdef_set_nosigpipe(KlSocketHandle fd) {
 #endif
 }
 
+int kl_sockdef_set_reuseaddr(KlSocketHandle fd, int on) {
+    return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+}
+int kl_sockdef_set_reuseport(KlSocketHandle fd, int on) {
+#ifdef SO_REUSEPORT
+    return setsockopt((int)fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
+#else
+    (void)fd; (void)on;
+    return -1;   /* not supported — best-effort, caller ignores */
+#endif
+}
+int kl_sockdef_set_ipv6only(KlSocketHandle fd, int on) {
+#ifdef IPV6_V6ONLY
+    return setsockopt((int)fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on));
+#else
+    (void)fd; (void)on;
+    return -1;
+#endif
+}
+int kl_sockdef_set_tcp_nodelay(KlSocketHandle fd, int on) {
+    return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+}
+
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
     return (KlSocketHandle)socket(domain, type, protocol);
 }
@@ -65,6 +89,9 @@ KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_
 int kl_sockdef_close(KlSocketHandle fd) {
     return close((int)fd);
 }
+int kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+    return getsockname((int)fd, a, l);
+}
 
 ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
     ssize_t r;
@@ -78,6 +105,12 @@ ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
 ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
     ssize_t r;
     do { r = recv((int)fd, buf, len, 0); } while (r < 0 && errno == EINTR);
+    return r;
+}
+ssize_t kl_sockdef_peek1(KlSocketHandle fd) {
+    char b;
+    ssize_t r;
+    do { r = recv((int)fd, &b, 1, MSG_PEEK); } while (r < 0 && errno == EINTR);
     return r;
 }
 ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
@@ -130,6 +163,18 @@ static void psx_set_cloexec(void *ctx, KlSocketHandle fd) {
 static void psx_set_nosigpipe(void *ctx, KlSocketHandle fd) {
     (void)ctx; kl_sockdef_set_nosigpipe(fd);
 }
+static int psx_set_reuseaddr(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_reuseaddr(fd, on);
+}
+static int psx_set_reuseport(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_reuseport(fd, on);
+}
+static int psx_set_ipv6only(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_ipv6only(fd, on);
+}
+static int psx_set_tcp_nodelay(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_tcp_nodelay(fd, on);
+}
 static KlSocketHandle psx_socket(void *ctx, int domain, int type, int protocol) {
     (void)ctx; return kl_sockdef_socket(domain, type, protocol);
 }
@@ -148,11 +193,17 @@ static KlSocketHandle psx_accept(void *ctx, KlSocketHandle fd, struct sockaddr *
 static int psx_close(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_close(fd);
 }
+static int psx_get_local_addr(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+    (void)ctx; return kl_sockdef_get_local_addr(fd, a, l);
+}
 static ssize_t psx_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)ctx; return kl_sockdef_send(fd, buf, len);
 }
 static ssize_t psx_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx; return kl_sockdef_recv(fd, buf, len);
+}
+static ssize_t psx_peek1(void *ctx, KlSocketHandle fd) {
+    (void)ctx; return kl_sockdef_peek1(fd);
 }
 static ssize_t psx_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
     (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
@@ -165,14 +216,20 @@ static const KlSocketOps POSIX_OPS = {
     .set_nonblocking = psx_set_nonblocking,
     .set_cloexec     = psx_set_cloexec,
     .set_nosigpipe   = psx_set_nosigpipe,
+    .set_reuseaddr   = psx_set_reuseaddr,
+    .set_reuseport   = psx_set_reuseport,
+    .set_ipv6only    = psx_set_ipv6only,
+    .set_tcp_nodelay = psx_set_tcp_nodelay,
     .socket          = psx_socket,
     .connect         = psx_connect,
     .bind            = psx_bind,
     .listen          = psx_listen,
     .accept          = psx_accept,
     .close           = psx_close,
+    .get_local_addr  = psx_get_local_addr,
     .send            = psx_send,
     .recv            = psx_recv,
+    .peek1           = psx_peek1,
     .writev          = psx_writev,
     .sendfile        = psx_sendfile,
     .name            = "posix",

@@ -34,6 +34,14 @@ typedef struct KlSocketOps {
     int     (*set_nonblocking)(void *ctx, KlSocketHandle fd);
     void    (*set_cloexec)(void *ctx, KlSocketHandle fd);
     void    (*set_nosigpipe)(void *ctx, KlSocketHandle fd);
+    /* Socket options (each maps to a single setsockopt on POSIX/Winsock). `on` is
+     * a boolean toggle. Best-effort by contract — a provider/platform that lacks
+     * the option returns -1 and the caller ignores it (SO_REUSEPORT, IPV6_V6ONLY,
+     * TCP_NODELAY are all tuning knobs, not correctness gates). */
+    int     (*set_reuseaddr)(void *ctx, KlSocketHandle fd, int on);
+    int     (*set_reuseport)(void *ctx, KlSocketHandle fd, int on);
+    int     (*set_ipv6only)(void *ctx, KlSocketHandle fd, int on);
+    int     (*set_tcp_nodelay)(void *ctx, KlSocketHandle fd, int on);
     /* lifecycle. `socket`/`accept` return a KlSocketHandle (KL_INVALID_SOCKET on
      * failure) — a Winsock SOCKET is pointer-width, hence the handle type. */
     KlSocketHandle (*socket)(void *ctx, int domain, int type, int protocol);
@@ -42,9 +50,16 @@ typedef struct KlSocketOps {
     int     (*listen)(void *ctx, KlSocketHandle fd, int backlog);
     KlSocketHandle (*accept)(void *ctx, KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
     int     (*close)(void *ctx, KlSocketHandle fd);
+    /* Read the local (bound) address — getsockname. Used for ephemeral-port
+     * readback and to recover the family of an adopted (socket-activation) fd. */
+    int     (*get_local_addr)(void *ctx, KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
     /* I/O */
     ssize_t (*send)(void *ctx, KlSocketHandle fd, const void *buf, size_t len);
     ssize_t (*recv)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
+    /* Peek a single byte without consuming it (recv/MSG_PEEK). >0 = a byte is
+     * available, 0 = peer closed, <0 = error/would-block. Used by the PROXY-
+     * protocol pre-read to test for a pending header before TLS/HTTP. */
+    ssize_t (*peek1)(void *ctx, KlSocketHandle fd);
     /* Vectored write + zero-copy file send. May be NULL — a provider without
      * them advertises no WRITEV/SENDFILE capability and the caller serializes /
      * pread-sends instead. POSIX fills these; Winsock will use WSASend /
@@ -87,14 +102,20 @@ const KlSocketProvider *kl_socket_provider_winsock(void);
 int            kl_sockdef_set_nonblocking(KlSocketHandle fd);
 void           kl_sockdef_set_cloexec(KlSocketHandle fd);
 void           kl_sockdef_set_nosigpipe(KlSocketHandle fd);
+int            kl_sockdef_set_reuseaddr(KlSocketHandle fd, int on);
+int            kl_sockdef_set_reuseport(KlSocketHandle fd, int on);
+int            kl_sockdef_set_ipv6only(KlSocketHandle fd, int on);
+int            kl_sockdef_set_tcp_nodelay(KlSocketHandle fd, int on);
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol);
 int            kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
 int            kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
 int            kl_sockdef_listen(KlSocketHandle fd, int backlog);
 KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
 int            kl_sockdef_close(KlSocketHandle fd);
+int            kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
 ssize_t        kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len);
 ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
+ssize_t        kl_sockdef_peek1(KlSocketHandle fd);
 ssize_t        kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt);
 ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count);
 
@@ -117,6 +138,26 @@ static inline void kl_sock_set_cloexec(const KlSocketProvider *p, KlSocketHandle
 static inline void kl_sock_set_nosigpipe(const KlSocketProvider *p, KlSocketHandle fd) {
     if (p && p->ops->set_nosigpipe) { p->ops->set_nosigpipe(p->context, fd); return; }
     kl_sockdef_set_nosigpipe(fd);
+}
+
+static inline int kl_sock_set_reuseaddr(const KlSocketProvider *p, KlSocketHandle fd, int on) {
+    if (p && p->ops->set_reuseaddr) return p->ops->set_reuseaddr(p->context, fd, on);
+    return kl_sockdef_set_reuseaddr(fd, on);
+}
+
+static inline int kl_sock_set_reuseport(const KlSocketProvider *p, KlSocketHandle fd, int on) {
+    if (p && p->ops->set_reuseport) return p->ops->set_reuseport(p->context, fd, on);
+    return kl_sockdef_set_reuseport(fd, on);
+}
+
+static inline int kl_sock_set_ipv6only(const KlSocketProvider *p, KlSocketHandle fd, int on) {
+    if (p && p->ops->set_ipv6only) return p->ops->set_ipv6only(p->context, fd, on);
+    return kl_sockdef_set_ipv6only(fd, on);
+}
+
+static inline int kl_sock_set_tcp_nodelay(const KlSocketProvider *p, KlSocketHandle fd, int on) {
+    if (p && p->ops->set_tcp_nodelay) return p->ops->set_tcp_nodelay(p->context, fd, on);
+    return kl_sockdef_set_tcp_nodelay(fd, on);
 }
 
 static inline ssize_t kl_sock_send(const KlSocketProvider *p, KlSocketHandle fd,
@@ -163,6 +204,17 @@ static inline KlSocketHandle kl_sock_accept(const KlSocketProvider *p, KlSocketH
 static inline int kl_sock_close(const KlSocketProvider *p, KlSocketHandle fd) {
     if (p && p->ops->close) return p->ops->close(p->context, fd);
     return kl_sockdef_close(fd);
+}
+
+static inline int kl_sock_get_local_addr(const KlSocketProvider *p, KlSocketHandle fd,
+                                         struct sockaddr *addr, socklen_t *len) {
+    if (p && p->ops->get_local_addr) return p->ops->get_local_addr(p->context, fd, addr, len);
+    return kl_sockdef_get_local_addr(fd, addr, len);
+}
+
+static inline ssize_t kl_sock_peek1(const KlSocketProvider *p, KlSocketHandle fd) {
+    if (p && p->ops->peek1) return p->ops->peek1(p->context, fd);
+    return kl_sockdef_peek1(fd);
 }
 
 static inline ssize_t kl_sock_writev(const KlSocketProvider *p, KlSocketHandle fd,
