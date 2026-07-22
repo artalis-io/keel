@@ -1,8 +1,8 @@
 #include <keel/thread_pool.h>
 #include <keel/event_ctx.h>
+#include "platform.h"
 #include <pthread.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <string.h>
 #include <limits.h>
 #include <stdint.h>
@@ -19,9 +19,8 @@ struct KlThreadPool {
     KlEventCtx *ev_ctx;
     KlAllocator *alloc;
 
-    /* Pipe for cross-thread wakeup */
-    int pipe_rd;
-    int pipe_wr;
+    /* Self-pipe / loopback pair for cross-thread wakeup (platform.h) */
+    KlPlatWakeup wakeup;
 
     /* Work queue: producer = event loop, consumers = workers */
     KlWorkItem *work_queue;
@@ -80,9 +79,7 @@ static void *worker_thread(void *arg)
         pthread_mutex_unlock(&pool->mutex);
 
         /* Signal event loop */
-        char c = 1;
-        ssize_t wr = write(pool->pipe_wr, &c, 1);
-        (void)wr;
+        kl_plat_wakeup_signal(&pool->wakeup);
 
         pthread_mutex_lock(&pool->mutex);
     }
@@ -97,10 +94,8 @@ static void thread_pool_on_pipe(KlSocketHandle fd, KlEventMask ready, void *user
     (void)ready;
     KlThreadPool *pool = user_data;
 
-    /* Drain pipe — exact count doesn't matter */
-    char buf[64];
-    ssize_t rd = read(fd, buf, sizeof(buf));
-    (void)rd;
+    /* Drain wakeup channel — exact count doesn't matter */
+    kl_plat_wakeup_drain(fd);
 
     pthread_mutex_lock(&pool->mutex);
     while (pool->done_count > 0) {
@@ -155,8 +150,8 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
 
     pool->ev_ctx = ctx;
     pool->alloc = alloc;
-    pool->pipe_rd = -1;
-    pool->pipe_wr = -1;
+    pool->wakeup.rd = KL_INVALID_SOCKET;
+    pool->wakeup.wr = KL_INVALID_SOCKET;
     pool->work_cap = queue_cap;
     pool->done_cap = done_cap;
     pool->num_workers = num_workers;
@@ -168,23 +163,15 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
     pool->done_queue = kl_malloc(alloc, (size_t)done_cap * sizeof(KlWorkItem));
     if (!pool->done_queue) { ctx->last_error = KL_ERR_ALLOC; goto fail_work; }
 
-    /* Create pipe */
-    int pipe_fds[2];
-    if (pipe(pipe_fds) < 0) { ctx->last_error = KL_ERR_PIPE; goto fail_done; }
-    pool->pipe_rd = pipe_fds[0];
-    pool->pipe_wr = pipe_fds[1];
-
-    /* Set read end non-blocking */
-    int flags = fcntl(pool->pipe_rd, F_GETFL, 0);
-    if (flags >= 0)
-        (void)fcntl(pool->pipe_rd, F_SETFL, flags | O_NONBLOCK);
+    /* Create cross-thread wakeup channel (read end already non-blocking) */
+    if (kl_plat_wakeup_open(&pool->wakeup) < 0) { ctx->last_error = KL_ERR_PIPE; goto fail_done; }
 
     /* Init synchronization */
     if (pthread_mutex_init(&pool->mutex, NULL) != 0) { ctx->last_error = KL_ERR_THREAD; goto fail_pipe; }
     if (pthread_cond_init(&pool->work_avail, NULL) != 0) { ctx->last_error = KL_ERR_THREAD; goto fail_mutex; }
 
-    /* Register pipe watcher with event loop */
-    if (kl_watcher_add(ctx, pool->pipe_rd, KL_EVENT_READ,
+    /* Register wakeup watcher with event loop */
+    if (kl_watcher_add(ctx, pool->wakeup.rd, KL_EVENT_READ,
                        thread_pool_on_pipe, pool) < 0) {
         ctx->last_error = KL_ERR_EVENT_ADD;
         goto fail_cond;
@@ -210,14 +197,13 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
 fail_threads:
     kl_free(alloc, pool->threads, (size_t)num_workers * sizeof(pthread_t));
 fail_watcher:
-    kl_watcher_del(ctx, pool->pipe_rd);
+    kl_watcher_del(ctx, pool->wakeup.rd);
 fail_cond:
     pthread_cond_destroy(&pool->work_avail);
 fail_mutex:
     pthread_mutex_destroy(&pool->mutex);
 fail_pipe:
-    close(pool->pipe_rd);
-    close(pool->pipe_wr);
+    kl_plat_wakeup_close(&pool->wakeup);
 fail_done:
     kl_free(alloc, pool->done_queue, (size_t)done_cap * sizeof(KlWorkItem));
 fail_work:
@@ -263,8 +249,8 @@ void kl_thread_pool_free(KlThreadPool *pool)
     for (int i = 0; i < pool->num_workers; i++)
         pthread_join(pool->threads[i], NULL);
 
-    /* Remove pipe watcher from event loop */
-    kl_watcher_del(pool->ev_ctx, pool->pipe_rd);
+    /* Remove wakeup watcher from event loop */
+    kl_watcher_del(pool->ev_ctx, pool->wakeup.rd);
 
     /* Drain remaining done queue items → call done_fn */
     while (pool->done_count > 0) {
@@ -283,9 +269,8 @@ void kl_thread_pool_free(KlThreadPool *pool)
             item.cancel_fn(item.user_data);
     }
 
-    /* Close pipe */
-    close(pool->pipe_rd);
-    close(pool->pipe_wr);
+    /* Close wakeup channel */
+    kl_plat_wakeup_close(&pool->wakeup);
 
     /* Destroy synchronization */
     pthread_cond_destroy(&pool->work_avail);
