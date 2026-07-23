@@ -418,15 +418,15 @@ static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 
 static void h2c_close_connection(KlH2ClientConn *c)
 {
-    if (c->fd >= 0) {
+    if (kl_handle_valid(c->fd)) {
         kl_watcher_del(c->ev, c->fd);
         if (c->tls) {
             c->tls->shutdown(c->tls, c->fd);
             c->tls->destroy(c->tls);
             c->tls = NULL;
         }
-        close(c->fd);
-        c->fd = -1;
+        kl_sock_close(c->ev->sockets, c->fd);
+        c->fd = KL_INVALID_SOCKET;
     }
 }
 
@@ -485,16 +485,16 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
                                        plen + 1);
 
         fd = kl_sock_socket(ev->sockets, AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0)
+        if (!kl_handle_valid(fd))
             return NULL;
         kl_sock_set_nosigpipe(ev->sockets, fd);
         if (kl_sock_set_nonblocking(ev->sockets, fd) < 0) {
-            close(fd);
+            kl_sock_close(ev->sockets, fd);
             return NULL;
         }
         rc = kl_sock_connect(ev->sockets, fd, (struct sockaddr *)&un, un_len);
         if (rc < 0 && errno != EINPROGRESS) {
-            close(fd);
+            kl_sock_close(ev->sockets, fd);
             return NULL;
         }
     } else {
@@ -513,14 +513,14 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             return NULL;
 
         fd = kl_sock_socket(ev->sockets, res->ai_family, res->ai_socktype, res->ai_protocol);
-        if (fd < 0) {
+        if (!kl_handle_valid(fd)) {
             freeaddrinfo(res);
             return NULL;
         }
 
         kl_sock_set_nosigpipe(ev->sockets, fd);
         if (kl_sock_set_nonblocking(ev->sockets, fd) < 0) {
-            close(fd);
+            kl_sock_close(ev->sockets, fd);
             freeaddrinfo(res);
             return NULL;
         }
@@ -529,14 +529,14 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         freeaddrinfo(res);
 
         if (rc < 0 && errno != EINPROGRESS) {
-            close(fd);
+            kl_sock_close(ev->sockets, fd);
             return NULL;
         }
     }
 
     KlH2ClientConn *c = kl_malloc(alloc, sizeof(KlH2ClientConn));
     if (!c) {
-        close(fd);
+        kl_sock_close(ev->sockets, fd);
         return NULL;
     }
     memset(c, 0, sizeof(*c));
@@ -559,7 +559,7 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     if (c->state == H2C_H2_INIT) {
         c->session = cfg->session(alloc);
         if (!c->session) {
-            close(fd);
+            kl_sock_close(ev->sockets, fd);
             kl_free(alloc, c, sizeof(KlH2ClientConn));
             return NULL;
         }
@@ -574,7 +574,7 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     if (kl_watcher_add(ev, fd, KL_EVENT_READ | KL_EVENT_WRITE,
                        h2c_on_event, c) != 0) {
         if (c->session) c->session->destroy(c->session);
-        close(fd);
+        kl_sock_close(ev->sockets, fd);
         kl_free(alloc, c, sizeof(KlH2ClientConn));
         return NULL;
     }
