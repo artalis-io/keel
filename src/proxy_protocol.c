@@ -2,8 +2,7 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include "sockcompat.h"   /* inet_pton / htons / struct in_addr — cross-platform */
 
 /* ── PROXY protocol header parsing ───────────────────────────────────── */
 

@@ -84,3 +84,9 @@ void kl_plat_wakeup_close(KlPlatWakeup *w)
     if (kl_handle_valid(w->wr)) close((int)w->wr);
     w->rd = w->wr = KL_INVALID_SOCKET;
 }
+
+int kl_plat_cpu_count(void)
+{
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+}

@@ -12,7 +12,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/socket.h>
+#include <keel/net.h>
 
 typedef enum {
     KL_PROXY_NONE = 0,   /**< Leading bytes are not a PROXY header — direct conn */

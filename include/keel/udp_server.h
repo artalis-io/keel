@@ -9,7 +9,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/socket.h>
+#include <keel/net.h>
 
 /**
  * udp_server.h — Datagram dispatch surface, symmetric with KlServer.

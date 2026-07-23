@@ -111,3 +111,10 @@ void kl_plat_wakeup_close(KlPlatWakeup *w)
     if (kl_handle_valid(w->wr)) closesocket((SOCKET)w->wr);
     w->rd = w->wr = KL_INVALID_SOCKET;
 }
+
+int kl_plat_cpu_count(void)
+{
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+}

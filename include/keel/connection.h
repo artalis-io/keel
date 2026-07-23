@@ -11,7 +11,7 @@
 #include <keel/router.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/socket.h>   /* struct sockaddr_storage, socklen_t */
+#include <keel/net.h>   /* struct sockaddr_storage, socklen_t */
 
 /** @brief Default read buffer size (bytes). */
 #define KL_READ_BUF_SIZE 8192

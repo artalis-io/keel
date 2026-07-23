@@ -2,7 +2,6 @@
 #include <keel/event_ctx.h>
 #include "platform.h"
 #include <pthread.h>
-#include <unistd.h>
 #include <string.h>
 #include <limits.h>
 #include <stdint.h>
@@ -128,8 +127,7 @@ KlThreadPool *kl_thread_pool_create(KlEventCtx *ctx, const KlThreadPoolConfig *c
 #ifdef KL_TP_DEFAULT_WORKERS
         num_workers = KL_TP_DEFAULT_WORKERS;
 #else
-        long n = sysconf(_SC_NPROCESSORS_ONLN);
-        num_workers = (n > 0) ? (int)n : 1;
+        num_workers = kl_plat_cpu_count();
 #endif
     }
 

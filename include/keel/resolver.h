@@ -11,7 +11,7 @@
 #define KEEL_RESOLVER_H
 
 #include <keel/allocator.h>
-#include <sys/socket.h>
+#include <keel/net.h>
 
 /* Forward declarations */
 typedef struct KlEventCtx KlEventCtx;

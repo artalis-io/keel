@@ -8,7 +8,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/socket.h>
+#include <keel/net.h>
 
 /**
  * udp.h — Non-blocking UDP datagram socket over KlEventCtx.

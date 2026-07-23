@@ -63,4 +63,8 @@ void kl_plat_wakeup_drain(KlSocketHandle rd);
 /* Close both ends and set them to KL_INVALID_SOCKET. */
 void kl_plat_wakeup_close(KlPlatWakeup *w);
 
+/* Number of online logical CPUs (>= 1), for default thread-pool sizing. POSIX:
+ * sysconf(_SC_NPROCESSORS_ONLN). Windows: GetSystemInfo. Returns 1 if unknown. */
+int kl_plat_cpu_count(void);
+
 #endif /* KEEL_SRC_PLATFORM_H */
