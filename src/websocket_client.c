@@ -423,8 +423,7 @@ static void wsc_msg_reset(KlWsClientConn *ws)
 static void wsc_handle_connecting(KlWsClientConn *ws)
 {
     int err = 0;
-    socklen_t errlen = sizeof(err);
-    getsockopt(ws->fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+    kl_sock_get_so_error(ws->ev->sockets, ws->fd, &err);
     if (err != 0) {
         wsc_error(ws, "connect failed");
         return;

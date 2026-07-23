@@ -1546,8 +1546,7 @@ static void he_fail_attempt(KlClient *c, KlSocketHandle fd)
 static void he_on_writable(KlClient *c, KlSocketHandle fd)
 {
     int err = 0;
-    socklen_t errlen = sizeof(err);
-    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+    kl_sock_get_so_error(c->ev_ctx->sockets, fd, &err);
     if (err == 0)
         he_win(c, fd);
     else
@@ -1615,8 +1614,7 @@ static KlResolver *client_pick_resolver(const KlClientConfig *cfg,
 static void async_handle_connecting(KlClient *c)
 {
     int err = 0;
-    socklen_t errlen = sizeof(err);
-    getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+    kl_sock_get_so_error(c->ev_ctx->sockets, c->fd, &err);
     if (err != 0) {
         c->error = KL_ERR_CONNECT;
         async_complete_error(c);

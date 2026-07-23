@@ -53,6 +53,12 @@ typedef struct KlSocketOps {
     /* Read the local (bound) address — getsockname. Used for ephemeral-port
      * readback and to recover the family of an adopted (socket-activation) fd. */
     int     (*get_local_addr)(void *ctx, KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
+    /* Read + clear the pending socket error — getsockopt(SO_ERROR). Writes the
+     * error to *out_err (0 = none) and returns 0, or returns -1 if the query
+     * itself fails (leaving *out_err untouched). Used for async connect
+     * completion: 0 means the nonblocking connect succeeded. The value is a
+     * platform error code (errno / WSA*); callers only test zero vs non-zero. */
+    int     (*get_so_error)(void *ctx, KlSocketHandle fd, int *out_err);
     /* I/O */
     ssize_t (*send)(void *ctx, KlSocketHandle fd, const void *buf, size_t len);
     ssize_t (*recv)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
@@ -113,6 +119,7 @@ int            kl_sockdef_listen(KlSocketHandle fd, int backlog);
 KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
 int            kl_sockdef_close(KlSocketHandle fd);
 int            kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
+int            kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err);
 ssize_t        kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len);
 ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
 ssize_t        kl_sockdef_peek1(KlSocketHandle fd);
@@ -210,6 +217,11 @@ static inline int kl_sock_get_local_addr(const KlSocketProvider *p, KlSocketHand
                                          struct sockaddr *addr, socklen_t *len) {
     if (p && p->ops->get_local_addr) return p->ops->get_local_addr(p->context, fd, addr, len);
     return kl_sockdef_get_local_addr(fd, addr, len);
+}
+
+static inline int kl_sock_get_so_error(const KlSocketProvider *p, KlSocketHandle fd, int *out_err) {
+    if (p && p->ops->get_so_error) return p->ops->get_so_error(p->context, fd, out_err);
+    return kl_sockdef_get_so_error(fd, out_err);
 }
 
 static inline ssize_t kl_sock_peek1(const KlSocketProvider *p, KlSocketHandle fd) {

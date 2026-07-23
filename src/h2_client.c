@@ -259,8 +259,7 @@ static void h2c_on_stream_close(KlH2ClientSession *s, int32_t stream_id,
 static void h2c_handle_connecting(KlH2ClientConn *c)
 {
     int err = 0;
-    socklen_t errlen = sizeof(err);
-    getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+    kl_sock_get_so_error(c->ev->sockets, c->fd, &err);
     if (err != 0) {
         h2c_error(c, "connect failed");
         return;

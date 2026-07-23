@@ -92,6 +92,14 @@ int kl_sockdef_close(KlSocketHandle fd) {
 int kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
     return getsockname((int)fd, a, l);
 }
+int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (getsockopt((int)fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0)
+        return -1;
+    *out_err = err;
+    return 0;
+}
 
 ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
     ssize_t r;
@@ -196,6 +204,9 @@ static int psx_close(void *ctx, KlSocketHandle fd) {
 static int psx_get_local_addr(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
     (void)ctx; return kl_sockdef_get_local_addr(fd, a, l);
 }
+static int psx_get_so_error(void *ctx, KlSocketHandle fd, int *out_err) {
+    (void)ctx; return kl_sockdef_get_so_error(fd, out_err);
+}
 static ssize_t psx_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)ctx; return kl_sockdef_send(fd, buf, len);
 }
@@ -227,6 +238,7 @@ static const KlSocketOps POSIX_OPS = {
     .accept          = psx_accept,
     .close           = psx_close,
     .get_local_addr  = psx_get_local_addr,
+    .get_so_error    = psx_get_so_error,
     .send            = psx_send,
     .recv            = psx_recv,
     .peek1           = psx_peek1,

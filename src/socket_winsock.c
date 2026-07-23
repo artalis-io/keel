@@ -82,6 +82,14 @@ int kl_sockdef_close(KlSocketHandle fd) {
 int kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
     return getsockname((SOCKET)fd, a, l) == 0 ? 0 : -1;
 }
+int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
+    int err = 0;
+    int len = sizeof(err);   /* Winsock getsockopt optlen is int*, optval char* */
+    if (getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR, (char *)&err, &len) != 0)
+        return -1;
+    *out_err = err;   /* WSA* error code — callers only test zero vs non-zero */
+    return 0;
+}
 
 ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
     int r = send((SOCKET)fd, (const char *)buf, clamp_int(len), 0);
@@ -194,6 +202,9 @@ static int wsk_close(void *ctx, KlSocketHandle fd) {
 static int wsk_get_local_addr(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
     (void)ctx; return kl_sockdef_get_local_addr(fd, a, l);
 }
+static int wsk_get_so_error(void *ctx, KlSocketHandle fd, int *out_err) {
+    (void)ctx; return kl_sockdef_get_so_error(fd, out_err);
+}
 static ssize_t wsk_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)ctx; return kl_sockdef_send(fd, buf, len);
 }
@@ -228,6 +239,7 @@ static const KlSocketOps WINSOCK_OPS = {
     .accept          = wsk_accept,
     .close           = wsk_close,
     .get_local_addr  = wsk_get_local_addr,
+    .get_so_error    = wsk_get_so_error,
     .send            = wsk_send,
     .recv            = wsk_recv,
     .peek1           = wsk_peek1,
