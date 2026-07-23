@@ -9,11 +9,15 @@
 #include <keel/client_pool.h>
 #include <keel/connection.h>  /* kl_monotonic_ms */
 #include <keel/timer.h>
+#include "socket.h"
 
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
+
+/* Socket provider for pooled fds (NULL -> POSIX default close). */
+static inline const KlSocketProvider *cpool_sp(const KlClientPool *pool) {
+    return (pool && pool->ev_ctx) ? pool->ev_ctx->sockets : NULL;
+}
 
 /* ── Entry helpers ───────────────────────────────────────────────── */
 
@@ -21,7 +25,7 @@ static int entry_matches(const KlClientPoolEntry *e,
                           const char *host, int port, int is_tls,
                           const char *proxy_host, int proxy_port)
 {
-    if (e->fd < 0 || e->port != port || e->is_tls != is_tls ||
+    if (!kl_handle_valid(e->fd) || e->port != port || e->is_tls != is_tls ||
         strcmp(e->host, host) != 0)
         return 0;
 
@@ -41,9 +45,9 @@ static void entry_close(KlClientPoolEntry *e)
         e->tls->destroy(e->tls);
         e->tls = NULL;
     }
-    if (e->fd >= 0) {
-        close(e->fd);
-        e->fd = -1;
+    if (kl_handle_valid(e->fd)) {
+        kl_sock_close(cpool_sp(e->pool), e->fd);
+        e->fd = KL_INVALID_SOCKET;
     }
 }
 
@@ -55,7 +59,7 @@ static void idle_timer_cb(void *user_data)
     KlClientPool *pool = e->pool;
 
     /* Entry may have been acquired/evicted since timer was scheduled */
-    if (e->fd >= 0) {
+    if (kl_handle_valid(e->fd)) {
         entry_close(e);
         e->timer_id = -1;
         pool->active--;
@@ -92,14 +96,17 @@ int kl_cpool_init(KlClientPool *pool, const KlClientPoolConfig *cfg,
         return -1;
     }
 
-    /* Mark all slots free */
+    /* Mark all slots free. The pool back-pointer is set here (not just on
+     * insert) so entry_close -> cpool_sp(e->pool) is always valid, even for a
+     * slot that never held a connection. */
     for (int i = 0; i < cap; i++) {
-        entries[i].fd = -1;
+        entries[i].fd = KL_INVALID_SOCKET;
         entries[i].tls = NULL;
         entries[i].timer_id = -1;
         entries[i].host[0] = '\0';
         entries[i].proxy_host[0] = '\0';
         entries[i].proxy_port = 0;
+        entries[i].pool = pool;
     }
 
     pool->entries = entries;
@@ -120,7 +127,7 @@ void kl_cpool_free(KlClientPool *pool)
         return;
 
     for (int i = 0; i < pool->capacity; i++) {
-        if (pool->entries[i].fd >= 0) {
+        if (kl_handle_valid(pool->entries[i].fd)) {
             /* Cancel idle timer if ev_ctx is available */
             if (pool->ev_ctx && pool->entries[i].timer_id >= 0)
                 kl_timer_cancel(pool->ev_ctx, pool->entries[i].timer_id);
@@ -148,9 +155,14 @@ int kl_cpool_acquire(KlClientPool *pool, const char *host, int port,
         if (!entry_matches(e, host, port, is_tls, proxy_host, proxy_port))
             continue;
 
-        /* Test-on-borrow: check if peer closed the connection */
+        /* Test-on-borrow: peek for a peer close. Ensure the fd is non-blocking
+         * first (it already is in production — the async client sets it) so the
+         * MSG_PEEK returns EAGAIN on an idle connection instead of blocking. This
+         * is the portable replacement for the old per-call MSG_DONTWAIT, which
+         * Winsock lacks. */
+        (void)kl_sock_set_nonblocking(cpool_sp(pool), e->fd);
         char peek;
-        ssize_t r = recv(e->fd, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+        ssize_t r = kl_sock_recv_peek(cpool_sp(pool), e->fd, &peek, 1);
         if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
             /* Stale connection — close and skip */
             if (pool->ev_ctx && e->timer_id >= 0)
@@ -170,7 +182,7 @@ int kl_cpool_acquire(KlClientPool *pool, const char *host, int port,
         conn->reused = 1;
         conn->_entry = NULL;
 
-        e->fd = -1;
+        e->fd = KL_INVALID_SOCKET;
         e->tls = NULL;
         e->timer_id = -1;
         e->host[0] = '\0';
@@ -188,7 +200,7 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
                       const char *host, int port, int is_tls,
                       const char *proxy_host, int proxy_port)
 {
-    if (!pool || !conn || !host || conn->fd < 0)
+    if (!pool || !conn || !host || !kl_handle_valid(conn->fd))
         return -1;
 
     size_t hlen = strlen(host);
@@ -233,7 +245,7 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
     /* Find a free slot */
     int slot = -1;
     for (int i = 0; i < pool->capacity; i++) {
-        if (pool->entries[i].fd < 0) {
+        if (!kl_handle_valid(pool->entries[i].fd)) {
             slot = i;
             break;
         }
@@ -245,7 +257,7 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
         oldest_time = UINT64_MAX;
         for (int i = 0; i < pool->capacity; i++) {
             const KlClientPoolEntry *e = &pool->entries[i];
-            if (e->fd >= 0 && e->idle_since_ms < oldest_time) {
+            if (kl_handle_valid(e->fd) && e->idle_since_ms < oldest_time) {
                 oldest_time = e->idle_since_ms;
                 oldest_idx = i;
             }
@@ -295,7 +307,7 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
     pool->active++;
 
     /* Clear the conn handle */
-    conn->fd = -1;
+    conn->fd = KL_INVALID_SOCKET;
     conn->tls = NULL;
     conn->reused = 0;
     conn->_entry = NULL;
@@ -305,21 +317,22 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
 
 /* ── Discard ─────────────────────────────────────────────────────── */
 
+/* cppcheck-suppress constParameterPointer ; kept non-const for API symmetry
+   with the rest of the kl_cpool_* family (which do mutate pool) */
 void kl_cpool_discard(KlClientPool *pool, KlClientPoolConn *conn)
 {
-    (void)pool;
     if (!conn)
         return;
 
     if (conn->tls) {
-        if (conn->fd >= 0)
+        if (kl_handle_valid(conn->fd))
             conn->tls->shutdown(conn->tls, conn->fd);
         conn->tls->destroy(conn->tls);
         conn->tls = NULL;
     }
-    if (conn->fd >= 0) {
-        close(conn->fd);
-        conn->fd = -1;
+    if (kl_handle_valid(conn->fd)) {
+        kl_sock_close(cpool_sp(pool), conn->fd);
+        conn->fd = KL_INVALID_SOCKET;
     }
     conn->reused = 0;
     conn->_entry = NULL;
@@ -337,7 +350,7 @@ int kl_cpool_evict_expired(KlClientPool *pool)
 
     for (int i = 0; i < pool->capacity; i++) {
         KlClientPoolEntry *e = &pool->entries[i];
-        if (e->fd < 0)
+        if (!kl_handle_valid(e->fd))
             continue;
 
         /* Defensive: `now >= e->idle_since_ms` should always hold
