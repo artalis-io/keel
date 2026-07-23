@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include "internal.h"
+#include "socket.h"
 
 #define KL_TLS_DRAIN_MAX 256  /* max pending drain iterations per event */
 
@@ -69,7 +70,7 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
         }
         pool->conns[i].read_cap = KL_READ_BUF_SIZE;
         pool->conns[i].next_free = (i < capacity - 1) ? &pool->conns[i + 1] : NULL;
-        pool->conns[i].fd = -1;
+        pool->conns[i].fd = KL_INVALID_SOCKET;
         pool->conns[i].state = KL_CONN_CLOSED;
         pool->conns[i].alloc = alloc;
     }
@@ -119,15 +120,16 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
     /* TLS shutdown before close(fd) — best-effort close_notify.
      * Retry on WANT_WRITE to flush the close_notify record.
      * Give up on WANT_READ (can't block for peer's close_notify). */
-    if (c->tls && c->fd >= 0) {
+    if (c->tls && kl_handle_valid(c->fd)) {
         KlTlsResult sr = c->tls->shutdown(c->tls, c->fd);
         for (int i = 0; sr == KL_TLS_WANT_WRITE && i < 4; i++)
             sr = c->tls->shutdown(c->tls, c->fd);
         c->tls->reset(c->tls);
     }
-    if (c->fd >= 0) {
-        close(c->fd);
-        c->fd = -1;
+    if (kl_handle_valid(c->fd)) {
+        /* NULL ctx (standalone pool, no provider wired) -> POSIX default close. */
+        kl_sock_close(c->ctx ? c->ctx->sockets : NULL, c->fd);
+        c->fd = KL_INVALID_SOCKET;
     }
     conn_cleanup_body_reader(c);
     if (c->parser) {
@@ -155,15 +157,16 @@ void kl_conn_pool_free(KlConnPool *pool) {
                     pool->conns[i].req.body_reader);
                 pool->conns[i].req.body_reader = NULL;
             }
-            if (pool->conns[i].tls && pool->conns[i].fd >= 0) {
+            if (pool->conns[i].tls && kl_handle_valid(pool->conns[i].fd)) {
                 KlTlsResult sr = pool->conns[i].tls->shutdown(
                     pool->conns[i].tls, pool->conns[i].fd);
                 for (int j = 0; sr == KL_TLS_WANT_WRITE && j < 4; j++)
                     sr = pool->conns[i].tls->shutdown(
                         pool->conns[i].tls, pool->conns[i].fd);
             }
-            if (pool->conns[i].fd >= 0) {
-                close(pool->conns[i].fd);
+            if (kl_handle_valid(pool->conns[i].fd)) {
+                kl_sock_close(pool->conns[i].ctx ? pool->conns[i].ctx->sockets : NULL,
+                              pool->conns[i].fd);
             }
             if (pool->conns[i].parser) {
                 pool->conns[i].parser->destroy(pool->conns[i].parser);
