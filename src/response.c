@@ -2,19 +2,13 @@
 #include <keel/tls.h>
 #include <keel/event_ctx.h>
 #include "socket.h"
+#include "platform.h"
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
-#include <sys/uio.h>
 #include <stdint.h>
-
-#if defined(__linux__)
-  #include <sys/sendfile.h>
-  #include <netinet/in.h>
-  #include <netinet/tcp.h>
-#elif defined(__APPLE__)
-  #include <sys/socket.h>
-#endif
+/* socket types (struct iovec, sockaddr) + TCP_NODELAY/cork come via socket.h ->
+ * sockcompat.h; no raw net headers here. */
 
 #define KL_HDR_INIT_CAP 512
 #define KL_FILE_BUF_SIZE 8192   /* stack buffer for pread+write fallback */
@@ -522,7 +516,7 @@ int kl_response_send(KlResponse *res) {
             size_t remaining = (size_t)(res->file_size - res->file_offset);
             char buf[KL_FILE_BUF_SIZE];
             size_t to_read = remaining < sizeof(buf) ? remaining : sizeof(buf);
-            ssize_t nr = pread(res->file_fd, buf, to_read, res->file_offset);
+            ssize_t nr = kl_plat_file_pread(res->file_fd, buf, to_read, (long long)res->file_offset);
             if (nr <= 0) return -1;
             const char *p = buf;
             size_t left = (size_t)nr;
@@ -546,7 +540,7 @@ int kl_response_send(KlResponse *res) {
             size_t remaining = (size_t)(res->file_size - res->file_offset);
             char buf[KL_FILE_BUF_SIZE];
             size_t to_read = remaining < sizeof(buf) ? remaining : sizeof(buf);
-            ssize_t nr = pread(res->file_fd, buf, to_read, res->file_offset);
+            ssize_t nr = kl_plat_file_pread(res->file_fd, buf, to_read, (long long)res->file_offset);
             if (nr <= 0) return -1;
             const char *p = buf;
             size_t left = (size_t)nr;
@@ -564,11 +558,8 @@ int kl_response_send(KlResponse *res) {
             return (res->file_offset < res->file_size) ? 1 : 0;
         }
 
-#if defined(__linux__)
-        /* TCP_CORK: coalesce headers + file data into fewer TCP segments */
-        int cork = 1;
-        (void)setsockopt(res->conn_fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
-#endif
+        /* Cork: coalesce headers + file data into fewer segments (best-effort). */
+        (void)kl_sock_set_cork(sp, res->conn_fd, 1);
         size_t remaining = (size_t)(res->file_size - res->file_offset);
         while (remaining > 0) {
             ssize_t sent = kl_sock_sendfile(sp, res->conn_fd, res->file_fd,
@@ -580,10 +571,7 @@ int kl_response_send(KlResponse *res) {
             if (sent == 0) break;
             remaining = (size_t)(res->file_size - res->file_offset);
         }
-#if defined(__linux__)
-        cork = 0;
-        (void)setsockopt(res->conn_fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
-#endif
+        (void)kl_sock_set_cork(sp, res->conn_fd, 0);   /* uncork -> flush */
         return 0;
     }
 
@@ -600,7 +588,7 @@ static ssize_t response_drain_writer(const char *data, size_t len, void *ctx) {
         if (nw < 0) return -1;
         return nw;  /* 0 = WANT_WRITE (would-block) */
     }
-    nw = write(res->conn_fd, data, len);
+    nw = kl_sock_send(res_provider(res), res->conn_fd, data, len);
     if (nw < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
             return 0;

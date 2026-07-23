@@ -90,3 +90,9 @@ int kl_plat_cpu_count(void)
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int)n : 1;
 }
+
+int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset)
+{
+    ssize_t r = pread(fd, buf, count, (off_t)offset);
+    return (int)r;
+}

@@ -70,6 +70,16 @@ int kl_sockdef_set_ipv6only(KlSocketHandle fd, int on) {
 int kl_sockdef_set_tcp_nodelay(KlSocketHandle fd, int on) {
     return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 }
+int kl_sockdef_set_cork(KlSocketHandle fd, int on) {
+#if defined(TCP_CORK)
+    return setsockopt((int)fd, IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
+#elif defined(TCP_NOPUSH)
+    return setsockopt((int)fd, IPPROTO_TCP, TCP_NOPUSH, &on, sizeof(on));
+#else
+    (void)fd; (void)on;
+    return -1;   /* no cork primitive — best-effort, caller ignores */
+#endif
+}
 
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
     return (KlSocketHandle)socket(domain, type, protocol);
@@ -183,6 +193,9 @@ static int psx_set_ipv6only(void *ctx, KlSocketHandle fd, int on) {
 static int psx_set_tcp_nodelay(void *ctx, KlSocketHandle fd, int on) {
     (void)ctx; return kl_sockdef_set_tcp_nodelay(fd, on);
 }
+static int psx_set_cork(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_cork(fd, on);
+}
 static KlSocketHandle psx_socket(void *ctx, int domain, int type, int protocol) {
     (void)ctx; return kl_sockdef_socket(domain, type, protocol);
 }
@@ -231,6 +244,7 @@ static const KlSocketOps POSIX_OPS = {
     .set_reuseport   = psx_set_reuseport,
     .set_ipv6only    = psx_set_ipv6only,
     .set_tcp_nodelay = psx_set_tcp_nodelay,
+    .set_cork        = psx_set_cork,
     .socket          = psx_socket,
     .connect         = psx_connect,
     .bind            = psx_bind,

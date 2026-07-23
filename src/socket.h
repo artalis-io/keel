@@ -42,6 +42,11 @@ typedef struct KlSocketOps {
     int     (*set_reuseport)(void *ctx, KlSocketHandle fd, int on);
     int     (*set_ipv6only)(void *ctx, KlSocketHandle fd, int on);
     int     (*set_tcp_nodelay)(void *ctx, KlSocketHandle fd, int on);
+    /* Cork/uncork to coalesce header+file into fewer segments during a file
+     * send: on=1 before, on=0 (flush) after. Linux TCP_CORK / macOS TCP_NOPUSH;
+     * best-effort (-1 where unavailable — Windows TransmitFile coalesces on its
+     * own, so it's a no-op there). */
+    int     (*set_cork)(void *ctx, KlSocketHandle fd, int on);
     /* lifecycle. `socket`/`accept` return a KlSocketHandle (KL_INVALID_SOCKET on
      * failure) — a Winsock SOCKET is pointer-width, hence the handle type. */
     KlSocketHandle (*socket)(void *ctx, int domain, int type, int protocol);
@@ -112,6 +117,7 @@ int            kl_sockdef_set_reuseaddr(KlSocketHandle fd, int on);
 int            kl_sockdef_set_reuseport(KlSocketHandle fd, int on);
 int            kl_sockdef_set_ipv6only(KlSocketHandle fd, int on);
 int            kl_sockdef_set_tcp_nodelay(KlSocketHandle fd, int on);
+int            kl_sockdef_set_cork(KlSocketHandle fd, int on);
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol);
 int            kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
 int            kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
@@ -165,6 +171,11 @@ static inline int kl_sock_set_ipv6only(const KlSocketProvider *p, KlSocketHandle
 static inline int kl_sock_set_tcp_nodelay(const KlSocketProvider *p, KlSocketHandle fd, int on) {
     if (p && p->ops->set_tcp_nodelay) return p->ops->set_tcp_nodelay(p->context, fd, on);
     return kl_sockdef_set_tcp_nodelay(fd, on);
+}
+
+static inline int kl_sock_set_cork(const KlSocketProvider *p, KlSocketHandle fd, int on) {
+    if (p && p->ops->set_cork) return p->ops->set_cork(p->context, fd, on);
+    return kl_sockdef_set_cork(fd, on);
 }
 
 static inline ssize_t kl_sock_send(const KlSocketProvider *p, KlSocketHandle fd,

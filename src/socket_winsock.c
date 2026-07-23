@@ -60,6 +60,10 @@ int kl_sockdef_set_tcp_nodelay(KlSocketHandle fd, int on) {
     return setsockopt((SOCKET)fd, IPPROTO_TCP, TCP_NODELAY,
                       (const char *)&on, sizeof(on)) == 0 ? 0 : -1;
 }
+int kl_sockdef_set_cork(KlSocketHandle fd, int on) {
+    (void)fd; (void)on;
+    return -1;   /* no TCP_CORK/NOPUSH on Winsock; TransmitFile coalesces itself */
+}
 
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
     return (KlSocketHandle)socket(domain, type, protocol);
@@ -181,6 +185,9 @@ static int wsk_set_ipv6only(void *ctx, KlSocketHandle fd, int on) {
 static int wsk_set_tcp_nodelay(void *ctx, KlSocketHandle fd, int on) {
     (void)ctx; return kl_sockdef_set_tcp_nodelay(fd, on);
 }
+static int wsk_set_cork(void *ctx, KlSocketHandle fd, int on) {
+    (void)ctx; return kl_sockdef_set_cork(fd, on);
+}
 static KlSocketHandle wsk_socket(void *ctx, int domain, int type, int protocol) {
     (void)ctx; return kl_sockdef_socket(domain, type, protocol);
 }
@@ -232,6 +239,7 @@ static const KlSocketOps WINSOCK_OPS = {
     .set_reuseport   = wsk_set_reuseport,
     .set_ipv6only    = wsk_set_ipv6only,
     .set_tcp_nodelay = wsk_set_tcp_nodelay,
+    .set_cork        = wsk_set_cork,
     .socket          = wsk_socket,
     .connect         = wsk_connect,
     .bind            = wsk_bind,

@@ -67,4 +67,11 @@ void kl_plat_wakeup_close(KlPlatWakeup *w);
  * sysconf(_SC_NPROCESSORS_ONLN). Windows: GetSystemInfo. Returns 1 if unknown. */
 int kl_plat_cpu_count(void);
 
+/* Positioned read from a file descriptor at @offset, up to @count bytes into
+ * @buf. Returns bytes read (0 = EOF), or -1 on error. POSIX: pread (offset
+ * unchanged). Windows: _lseeki64 + _read (advances the fd offset — fine for the
+ * sequential, per-response file sends this serves). @fd is a CRT file
+ * descriptor; @count is bounded by the caller's buffer (fits in int). */
+int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset);
+
 #endif /* KEEL_SRC_PLATFORM_H */

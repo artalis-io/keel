@@ -10,6 +10,8 @@
 #include "sockcompat.h"   /* winsock2.h before windows.h (avoids winsock.h v1 clash) */
 #include <windows.h>
 #include <bcrypt.h>
+#include <io.h>        /* _read / _lseeki64 (CRT file descriptors) */
+#include <limits.h>
 #include <string.h>
 
 uint64_t kl_monotonic_ms(void) {
@@ -117,4 +119,12 @@ int kl_plat_cpu_count(void)
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+}
+
+int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset)
+{
+    if (_lseeki64(fd, offset, SEEK_SET) < 0)
+        return -1;
+    unsigned n = count > (size_t)INT_MAX ? (unsigned)INT_MAX : (unsigned)count;
+    return _read(fd, buf, n);
 }
