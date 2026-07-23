@@ -103,9 +103,8 @@ ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), 0);
     return r == SOCKET_ERROR ? -1 : r;
 }
-ssize_t kl_sockdef_peek1(KlSocketHandle fd) {
-    char b;
-    int r = recv((SOCKET)fd, &b, 1, MSG_PEEK);
+ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
+    int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), MSG_PEEK);
     return r == SOCKET_ERROR ? -1 : r;
 }
 
@@ -218,8 +217,8 @@ static ssize_t wsk_send(void *ctx, KlSocketHandle fd, const void *buf, size_t le
 static ssize_t wsk_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx; return kl_sockdef_recv(fd, buf, len);
 }
-static ssize_t wsk_peek1(void *ctx, KlSocketHandle fd) {
-    (void)ctx; return kl_sockdef_peek1(fd);
+static ssize_t wsk_recv_peek(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
+    (void)ctx; return kl_sockdef_recv_peek(fd, buf, len);
 }
 static ssize_t wsk_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
     (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
@@ -250,7 +249,7 @@ static const KlSocketOps WINSOCK_OPS = {
     .get_so_error    = wsk_get_so_error,
     .send            = wsk_send,
     .recv            = wsk_recv,
-    .peek1           = wsk_peek1,
+    .recv_peek       = wsk_recv_peek,
     .writev          = wsk_writev,
     .sendfile        = wsk_sendfile,
     .destroy         = wsk_destroy,

@@ -6,7 +6,6 @@
 #include <keel/websocket_server.h>
 #include <keel/h2_server.h>
 #include <keel/proxy_protocol.h>
-#include <sys/socket.h>
 #include <assert.h>
 #include <string.h>
 #include <strings.h>
@@ -15,6 +14,12 @@
 #include <stdint.h>
 #include "internal.h"
 #include "socket.h"
+
+/* Socket provider for this connection's fd. NULL (POSIX default) for a
+ * standalone pool with no event ctx wired — see kl_conn_release. */
+static inline const KlSocketProvider *conn_sp(const KlConn *c) {
+    return c->ctx ? c->ctx->sockets : NULL;
+}
 
 #define KL_TLS_DRAIN_MAX 256  /* max pending drain iterations per event */
 
@@ -127,8 +132,7 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
         c->tls->reset(c->tls);
     }
     if (kl_handle_valid(c->fd)) {
-        /* NULL ctx (standalone pool, no provider wired) -> POSIX default close. */
-        kl_sock_close(c->ctx ? c->ctx->sockets : NULL, c->fd);
+        kl_sock_close(conn_sp(c), c->fd);
         c->fd = KL_INVALID_SOCKET;
     }
     conn_cleanup_body_reader(c);
@@ -165,8 +169,7 @@ void kl_conn_pool_free(KlConnPool *pool) {
                         pool->conns[i].tls, pool->conns[i].fd);
             }
             if (kl_handle_valid(pool->conns[i].fd)) {
-                kl_sock_close(pool->conns[i].ctx ? pool->conns[i].ctx->sockets : NULL,
-                              pool->conns[i].fd);
+                kl_sock_close(conn_sp(&pool->conns[i]), pool->conns[i].fd);
             }
             if (pool->conns[i].parser) {
                 pool->conns[i].parser->destroy(pool->conns[i].parser);
@@ -361,7 +364,7 @@ int kl_conn_read_proxy_header(KlConn *c) {
     uint8_t buf[KL_PROXY_HEADER_MAX];
     ssize_t n;
     do {
-        n = recv(c->fd, buf, sizeof(buf), MSG_PEEK);
+        n = kl_sock_recv_peek(conn_sp(c), c->fd, buf, sizeof(buf));
     } while (n < 0 && errno == EINTR);
     if (n < 0)
         return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
@@ -390,13 +393,13 @@ int kl_conn_read_proxy_header(KlConn *c) {
     while (left > 0) {
         size_t want = left < sizeof(buf) ? left : sizeof(buf);
         ssize_t rd;
-        do { rd = recv(c->fd, buf, want, 0); } while (rd < 0 && errno == EINTR);
+        rd = kl_sock_recv(conn_sp(c), c->fd, buf, want);
         if (rd <= 0)
             return -1;
         left -= (size_t)rd;
     }
 
-    if (peer_len > 0 && peer_len <= sizeof(c->peer_addr)) {
+    if (peer_len > 0 && (size_t)peer_len <= sizeof(c->peer_addr)) {
         memcpy(&c->peer_addr, &peer, peer_len);
         c->peer_addr_len = peer_len;
         c->peer_source = KL_PEER_PROXY;
@@ -1011,8 +1014,8 @@ static KlConnState conn_file_submit_read(KlConn *c) {
 
 static KlConnState conn_file_flush(KlConn *c) {
     while (c->file_io_sent < c->file_io_len) {
-        ssize_t nw = write(c->fd, c->read_buf + c->file_io_sent,
-                           c->file_io_len - c->file_io_sent);
+        ssize_t nw = kl_sock_send(conn_sp(c), c->fd, c->read_buf + c->file_io_sent,
+                                  c->file_io_len - c->file_io_sent);
         if (nw < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 c->state = KL_CONN_SENDING;

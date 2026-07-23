@@ -1013,7 +1013,8 @@ rearm_listen:
                  * tick; if none are pending, wait for the next event (edge-
                  * triggered backends don't re-deliver the consumed readiness,
                  * but newly-arriving bytes always trigger). */
-                if (kl_sock_peek1(s->ev.sockets, c->fd) <= 0)
+                uint8_t probe;
+                if (kl_sock_recv_peek(s->ev.sockets, c->fd, &probe, 1) <= 0)
                     goto transition;
             }
 

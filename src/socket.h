@@ -67,10 +67,11 @@ typedef struct KlSocketOps {
     /* I/O */
     ssize_t (*send)(void *ctx, KlSocketHandle fd, const void *buf, size_t len);
     ssize_t (*recv)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
-    /* Peek a single byte without consuming it (recv/MSG_PEEK). >0 = a byte is
-     * available, 0 = peer closed, <0 = error/would-block. Used by the PROXY-
-     * protocol pre-read to test for a pending header before TLS/HTTP. */
-    ssize_t (*peek1)(void *ctx, KlSocketHandle fd);
+    /* Peek up to @len bytes without consuming them (recv/MSG_PEEK). >0 = bytes
+     * available (count returned), 0 = peer closed, <0 = error/would-block. Used
+     * to test for a pending byte before TLS/HTTP (len 1) and to peek+parse a
+     * whole PROXY-protocol header (len N) before consuming it. */
+    ssize_t (*recv_peek)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
     /* Vectored write + zero-copy file send. May be NULL — a provider without
      * them advertises no WRITEV/SENDFILE capability and the caller serializes /
      * pread-sends instead. POSIX fills these; Winsock will use WSASend /
@@ -128,7 +129,7 @@ int            kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *add
 int            kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err);
 ssize_t        kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len);
 ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
-ssize_t        kl_sockdef_peek1(KlSocketHandle fd);
+ssize_t        kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len);
 ssize_t        kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt);
 ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count);
 
@@ -235,9 +236,10 @@ static inline int kl_sock_get_so_error(const KlSocketProvider *p, KlSocketHandle
     return kl_sockdef_get_so_error(fd, out_err);
 }
 
-static inline ssize_t kl_sock_peek1(const KlSocketProvider *p, KlSocketHandle fd) {
-    if (p && p->ops->peek1) return p->ops->peek1(p->context, fd);
-    return kl_sockdef_peek1(fd);
+static inline ssize_t kl_sock_recv_peek(const KlSocketProvider *p, KlSocketHandle fd,
+                                        void *buf, size_t len) {
+    if (p && p->ops->recv_peek) return p->ops->recv_peek(p->context, fd, buf, len);
+    return kl_sockdef_recv_peek(fd, buf, len);
 }
 
 static inline ssize_t kl_sock_writev(const KlSocketProvider *p, KlSocketHandle fd,

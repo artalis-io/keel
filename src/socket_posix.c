@@ -125,10 +125,9 @@ ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
     do { r = recv((int)fd, buf, len, 0); } while (r < 0 && errno == EINTR);
     return r;
 }
-ssize_t kl_sockdef_peek1(KlSocketHandle fd) {
-    char b;
+ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     ssize_t r;
-    do { r = recv((int)fd, &b, 1, MSG_PEEK); } while (r < 0 && errno == EINTR);
+    do { r = recv((int)fd, buf, len, MSG_PEEK); } while (r < 0 && errno == EINTR);
     return r;
 }
 ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
@@ -226,8 +225,8 @@ static ssize_t psx_send(void *ctx, KlSocketHandle fd, const void *buf, size_t le
 static ssize_t psx_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx; return kl_sockdef_recv(fd, buf, len);
 }
-static ssize_t psx_peek1(void *ctx, KlSocketHandle fd) {
-    (void)ctx; return kl_sockdef_peek1(fd);
+static ssize_t psx_recv_peek(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
+    (void)ctx; return kl_sockdef_recv_peek(fd, buf, len);
 }
 static ssize_t psx_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
     (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
@@ -255,7 +254,7 @@ static const KlSocketOps POSIX_OPS = {
     .get_so_error    = psx_get_so_error,
     .send            = psx_send,
     .recv            = psx_recv,
-    .peek1           = psx_peek1,
+    .recv_peek       = psx_recv_peek,
     .writev          = psx_writev,
     .sendfile        = psx_sendfile,
     .name            = "posix",
