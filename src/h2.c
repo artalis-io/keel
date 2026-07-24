@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include "internal.h"
+#include "platform.h"   /* kl_plat_file_pread */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Stream management (static helpers)
@@ -143,7 +144,7 @@ static int h2_submit_response(KlH2ServerConn *h2c, KlH2ServerStream *stream) {
                                                err_body, strlen(err_body));
                 return 0;
             }
-            ssize_t nr = pread(res->file_fd, file_buf, fsize, 0);
+            ssize_t nr = kl_plat_file_pread(res->file_fd, file_buf, fsize, 0);
             if (nr > 0) {
                 body = file_buf;
                 body_len = (size_t)nr;
