@@ -23,6 +23,22 @@
 
 #define KL_WSK_SENDFILE_BUF 8192
 
+/* Winsock must be started before ANY socket call. The provider factory does it
+ * too (refcounted), but the default path — kl_sockdef_* via a NULL provider —
+ * calls socket()/connect() directly, so without this an unconfigured process
+ * would get WSANOTINITIALISED. A library constructor initializes it once at
+ * load (socket_winsock.o is always linked in on Windows); WSAStartup is
+ * refcounted, so this composes with the factory's own WSAStartup/WSACleanup. */
+__attribute__((constructor))
+static void kl_winsock_global_init(void) {
+    WSADATA wsa;
+    (void)WSAStartup(MAKEWORD(2, 2), &wsa);
+}
+__attribute__((destructor))
+static void kl_winsock_global_fini(void) {
+    WSACleanup();
+}
+
 static int clamp_int(size_t n) {
     return n > (size_t)INT_MAX ? INT_MAX : (int)n;
 }
