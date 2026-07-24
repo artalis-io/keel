@@ -57,4 +57,10 @@ static inline void best_effort_conn_write(KlConn *c, const void *buf, size_t len
 /* Release a connection and resume listening if paused (defined in server.c) */
 void kl_server_conn_release(KlServer *s, KlConn *c);
 
+/* Server logging helpers (defined in server.c; used by the per-platform
+ * server_plat_*.c TUs too). */
+__attribute__((format(printf, 3, 4)))
+void kl_log(KlServer *s, int level, const char *fmt, ...);
+void kl_log_errno(KlServer *s, int level, const char *msg);
+
 #endif

@@ -43,6 +43,7 @@ else ifdef WINDOWS
   EVENT_SRC = src/event_wsapoll.c
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
+  SERVER_PLAT_SRC = src/server_plat_win.c
   FILE_IO_SRC = src/file_io.c
   LDFLAGS += -lws2_32 -lmswsock -lbcrypt
   EXE = .exe
@@ -105,8 +106,9 @@ VENDOR_CFLAGS += -MMD -MP
 # the socket_winsock.c / platform_win.c siblings.
 SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
+SERVER_PLAT_SRC ?= src/server_plat_posix.c
 CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/response.c src/router.c \
-           src/connection.c src/server.c src/async.c src/timer.c \
+           src/connection.c src/server.c $(SERVER_PLAT_SRC) src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
            src/websocket.c src/websocket_client.c \

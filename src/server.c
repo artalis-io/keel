@@ -1,10 +1,3 @@
-#if defined(__linux__)
-/* Needed for struct ucred / SO_PEERCRED (kl_request_peer_cred). Must precede
- * any libc header. server.c uses no function whose signature changes under
- * _GNU_SOURCE, so this is safe. */
-#define _GNU_SOURCE
-#endif
-
 #include <keel/server.h>
 #include <keel/async.h>
 #include <keel/timer.h>
@@ -12,43 +5,18 @@
 #include <keel/websocket_server.h>
 #include <keel/h2_server.h>
 #include <string.h>
-#include <unistd.h>
-#if !defined(KL_NO_SIGNAL)
-#include <signal.h>
-#endif
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
-#include <fcntl.h>
-#include <pwd.h>
-#include <grp.h>
 #include <stddef.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netinet/tcp.h>
-#include <netdb.h>
 #include "internal.h"
-#include "socket.h"
+#include "socket.h"       /* seam + sockcompat: sockaddr / getaddrinfo / inet_ntop / TCP opts */
+#include "server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
 
 #define KL_LISTEN_BACKLOG  128
 #define KL_EVENTS_PER_TICK 64
 #define KL_POLL_TIMEOUT_MS 1000
-
-/* ── Signal handling ─────────────────────────────────────────────── */
-
-#if !defined(KL_NO_SIGNAL)
-static _Atomic(KlServer *) kl_signal_server = NULL;
-
-static void kl_signal_handler(int sig) {
-    (void)sig;
-    KlServer *s = atomic_load(&kl_signal_server);
-    if (s) kl_server_stop(s);
-}
-#endif
 
 static const char kl_408_response[] =
     "HTTP/1.1 408 Request Timeout\r\n"
@@ -56,8 +24,7 @@ static const char kl_408_response[] =
     "Connection: close\r\n"
     "\r\n";
 
-__attribute__((format(printf, 3, 4)))
-static void kl_log(KlServer *s, int level, const char *fmt, ...) {
+void kl_log(KlServer *s, int level, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     if (s->config.log_fn) {
@@ -70,7 +37,7 @@ static void kl_log(KlServer *s, int level, const char *fmt, ...) {
     va_end(ap);
 }
 
-static void kl_log_errno(KlServer *s, int level, const char *msg) {
+void kl_log_errno(KlServer *s, int level, const char *msg) {
     kl_log(s, level, "%s: %s", msg, strerror(errno));
 }
 
@@ -135,189 +102,6 @@ static int kl_server_bind_tcp(KlServer *s) {
     return 0;
 }
 
-static int kl_server_unlink_stale_unix_socket(KlServer *s, const char *path) {
-    struct stat st;
-    if (lstat(path, &st) < 0) {
-        if (errno == ENOENT)
-            return 0;
-        kl_log_errno(s, KL_LOG_ERROR, "lstat unix socket");
-        s->last_error = KL_ERR_BIND;
-        return -1;
-    }
-
-    if (!S_ISSOCK(st.st_mode)) {
-        kl_log(s, KL_LOG_ERROR,
-               "refusing to unlink non-socket unix path '%s'", path);
-        s->last_error = KL_ERR_BIND;
-        return -1;
-    }
-
-    if (unlink(path) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "unlink unix socket");
-        s->last_error = KL_ERR_BIND;
-        return -1;
-    }
-
-    return 0;
-}
-
-/* Resolve a username to a uid via getpwnam_r. Returns 0 on success, -1 if the
- * user is unknown or on allocation failure (sets last_error accordingly). */
-static int kl_resolve_uid(KlServer *s, const char *name, uid_t *out) {
-    long hint = sysconf(_SC_GETPW_R_SIZE_MAX);
-    size_t bufsz = (hint > 0) ? (size_t)hint : 4096;
-    for (;;) {
-        char *buf = kl_malloc(&s->alloc_storage, bufsz);
-        if (!buf) { s->last_error = KL_ERR_ALLOC; return -1; }
-        struct passwd pw, *res = NULL;
-        int rc = getpwnam_r(name, &pw, buf, bufsz, &res);
-        if (rc == 0) {
-            int ok = res ? 0 : -1;
-            if (ok == 0) *out = res->pw_uid;
-            kl_free(&s->alloc_storage, buf, bufsz);
-            return ok;
-        }
-        kl_free(&s->alloc_storage, buf, bufsz);
-        if (rc == ERANGE && bufsz < (1u << 20)) { bufsz *= 2; continue; }
-        return -1;
-    }
-}
-
-/* Resolve a group name to a gid via getgrnam_r. Same contract as above. */
-static int kl_resolve_gid(KlServer *s, const char *name, gid_t *out) {
-    long hint = sysconf(_SC_GETGR_R_SIZE_MAX);
-    size_t bufsz = (hint > 0) ? (size_t)hint : 4096;
-    for (;;) {
-        char *buf = kl_malloc(&s->alloc_storage, bufsz);
-        if (!buf) { s->last_error = KL_ERR_ALLOC; return -1; }
-        struct group gr, *res = NULL;
-        int rc = getgrnam_r(name, &gr, buf, bufsz, &res);
-        if (rc == 0) {
-            int ok = res ? 0 : -1;
-            if (ok == 0) *out = res->gr_gid;
-            kl_free(&s->alloc_storage, buf, bufsz);
-            return ok;
-        }
-        kl_free(&s->alloc_storage, buf, bufsz);
-        if (rc == ERANGE && bufsz < (1u << 20)) { bufsz *= 2; continue; }
-        return -1;
-    }
-}
-
-static int kl_server_bind_unix(KlServer *s) {
-    const char *path = s->config.unix_socket_path;
-    if (!path || path[0] == '\0') {
-        s->last_error = KL_ERR_INVALID_ARG;
-        return -1;
-    }
-
-    size_t path_len = strlen(path);
-    if (path_len >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
-        s->last_error = KL_ERR_INVALID_ARG;
-        return -1;
-    }
-
-    s->listen_fd = kl_sock_socket(s->ev.sockets, AF_UNIX, SOCK_STREAM, 0);
-    if (!kl_handle_valid(s->listen_fd)) {
-        kl_log_errno(s, KL_LOG_ERROR, "socket");
-        s->last_error = KL_ERR_SOCKET;
-        return -1;
-    }
-    kl_sock_set_cloexec(s->ev.sockets, s->listen_fd);
-
-    if (s->config.unix_socket_unlink &&
-        kl_server_unlink_stale_unix_socket(s, path) < 0) {
-        kl_sock_close(s->ev.sockets, s->listen_fd);
-        s->listen_fd = KL_INVALID_SOCKET;
-        return -1;
-    }
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    memcpy(addr.sun_path, path, path_len + 1);
-
-    socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
-                                     path_len + 1);
-
-    /* Create the socket node with the requested mode atomically: bind()
-     * applies (0777 & ~umask), so a temporary umask closes the window in
-     * which the socket would otherwise be reachable with default (looser)
-     * permissions before the chmod below.  Restored immediately after bind. */
-    mode_t old_umask = 0;
-    int umask_set = 0;
-    if (s->config.unix_socket_mode != 0) {
-        old_umask = umask(0777 & ~(mode_t)s->config.unix_socket_mode);
-        umask_set = 1;
-    }
-    int bind_rc = kl_sock_bind(s->ev.sockets, s->listen_fd, (struct sockaddr *)&addr, addr_len);
-    if (umask_set)
-        umask(old_umask);
-    if (bind_rc < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "bind");
-        s->last_error = KL_ERR_BIND;
-        kl_sock_close(s->ev.sockets, s->listen_fd);
-        s->listen_fd = KL_INVALID_SOCKET;
-        return -1;
-    }
-
-    s->unix_socket_owned = 1;
-
-    /* Ownership: resolve owner/group names to ids and chown the socket node.
-     * Done before listen() (where connections first become possible), so the
-     * socket is never reachable with the wrong owner/group.  chown to a
-     * different user needs privilege (CAP_CHOWN/root); setting group to one
-     * the process belongs to is generally allowed for the file owner. */
-    if (s->config.unix_socket_owner || s->config.unix_socket_group) {
-        uid_t uid = (uid_t)-1;   /* -1 = leave unchanged (chown semantics) */
-        gid_t gid = (gid_t)-1;
-        if (s->config.unix_socket_owner &&
-            kl_resolve_uid(s, s->config.unix_socket_owner, &uid) < 0) {
-            if (s->last_error != KL_ERR_ALLOC) {
-                kl_log(s, KL_LOG_ERROR, "unknown unix socket owner '%s'",
-                       s->config.unix_socket_owner);
-                s->last_error = KL_ERR_INVALID_ARG;
-            }
-            goto fail;
-        }
-        if (s->config.unix_socket_group &&
-            kl_resolve_gid(s, s->config.unix_socket_group, &gid) < 0) {
-            if (s->last_error != KL_ERR_ALLOC) {
-                kl_log(s, KL_LOG_ERROR, "unknown unix socket group '%s'",
-                       s->config.unix_socket_group);
-                s->last_error = KL_ERR_INVALID_ARG;
-            }
-            goto fail;
-        }
-        if (chown(path, uid, gid) < 0) {
-            kl_log_errno(s, KL_LOG_ERROR, "chown unix socket");
-            s->last_error = KL_ERR_BIND;
-            goto fail;
-        }
-    }
-
-    /* Enforce the exact mode regardless of the platform's socket-creation
-     * base (some create nodes 0666, not 0777).  The umask above already
-     * closed the permissions window; this guarantees the precise bits, and
-     * re-asserts them after any chown (which clears set-gid on some OSes). */
-    if (s->config.unix_socket_mode != 0 &&
-        chmod(path, (mode_t)s->config.unix_socket_mode) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "chmod unix socket");
-        s->last_error = KL_ERR_BIND;
-        goto fail;
-    }
-
-    s->bound_port = 0;
-    return 0;
-
-fail:
-    kl_sock_close(s->ev.sockets, s->listen_fd);
-    s->listen_fd = KL_INVALID_SOCKET;
-    unlink(path);
-    s->unix_socket_owned = 0;
-    return -1;
-}
-
 /*
  * Adopt a pre-bound, already-listening fd (socket activation). The fd's
  * family determines the transport, so TCP_NODELAY and unlink policy stay
@@ -357,52 +141,8 @@ static int kl_server_bind_listener(KlServer *s) {
     if (s->config.listen_fd > 0)
         return kl_server_adopt_fd(s);
     if (s->config.transport == KL_TRANSPORT_UNIX)
-        return kl_server_bind_unix(s);
+        return kl_srv_bind_unix(s);
     return kl_server_bind_tcp(s);
-}
-
-/* cppcheck-suppress constParameterPointer  ; 'out' is written on the
-   platform branches below (invisible to cppcheck's default config). */
-int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out) {
-    if (!kl_handle_valid(fd) || !out)
-        return -1;
-
-#if defined(__linux__) && defined(SO_PEERCRED)
-    struct ucred cr;
-    socklen_t len = sizeof(cr);
-    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0)
-        return -1;
-    out->uid = (long)cr.uid;
-    out->gid = (long)cr.gid;
-    out->pid = (long)cr.pid;
-    out->has_pid = 1;
-    return 0;
-#elif defined(__APPLE__) || defined(__FreeBSD__) || \
-      defined(__OpenBSD__) || defined(__NetBSD__)
-    uid_t uid;
-    gid_t gid;
-    if (getpeereid(fd, &uid, &gid) != 0)
-        return -1;
-    out->uid = (long)uid;
-    out->gid = (long)gid;
-    out->pid = 0;
-    out->has_pid = 0;
-    /* macOS/BSD getpeereid gives no pid; LOCAL_PEERPID supplies it on macOS. */
-#if defined(__APPLE__) && defined(LOCAL_PEERPID)
-    {
-        pid_t pid = 0;
-        socklen_t pl = sizeof(pid);
-        if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &pl) == 0) {
-            out->pid = (long)pid;
-            out->has_pid = 1;
-        }
-    }
-#endif
-    return 0;
-#else
-    (void)fd;
-    return -1;  /* peer credentials not supported on this platform */
-#endif
 }
 
 int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
@@ -421,19 +161,7 @@ int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
     if (!conn || !kl_handle_valid(conn->fd))
         return -1;
 
-#if defined(__linux__) && defined(SO_PEERSEC)
-    socklen_t len = (socklen_t)buflen;
-    if (getsockopt(conn->fd, SOL_SOCKET, SO_PEERSEC, buf, &len) != 0)
-        return -1;
-    /* Ensure NUL-termination regardless of what the kernel returned. */
-    if ((size_t)len >= buflen)
-        len = (socklen_t)(buflen - 1);
-    buf[len] = '\0';
-    return 0;
-#else
-    (void)buf; (void)buflen;
-    return -1;  /* SO_PEERSEC (SELinux/AppArmor label) is Linux-only */
-#endif
+    return kl_srv_peer_label_fd(conn->fd, buf, buflen);
 }
 
 const struct sockaddr *kl_request_peer_sockaddr(const KlRequest *req,
@@ -505,9 +233,9 @@ int kl_systemd_listen_fds(int *count) {
     }
 
     /* Clear so the variables are not inherited by child processes. */
-    unsetenv("LISTEN_PID");
-    unsetenv("LISTEN_FDS");
-    unsetenv("LISTEN_FDNAMES");
+    kl_srv_unsetenv("LISTEN_PID");
+    kl_srv_unsetenv("LISTEN_FDS");
+    kl_srv_unsetenv("LISTEN_FDNAMES");
     if (count)
         *count = n;
     return first;
@@ -549,9 +277,9 @@ int kl_systemd_listen_fd_by_name(const char *name) {
         }
     }
 
-    unsetenv("LISTEN_PID");
-    unsetenv("LISTEN_FDS");
-    unsetenv("LISTEN_FDNAMES");
+    kl_srv_unsetenv("LISTEN_PID");
+    kl_srv_unsetenv("LISTEN_FDS");
+    kl_srv_unsetenv("LISTEN_FDNAMES");
     return result;
 }
 
@@ -560,17 +288,7 @@ static void kl_server_close_listener(KlServer *s) {
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
     }
-    if (s->unix_socket_owned && s->config.unix_socket_unlink &&
-        s->config.unix_socket_path) {
-        /* Re-check that the path is still a socket before unlinking, so a
-         * regular file (or a socket from a different process) that replaced
-         * our path is not removed.  lstat (not stat) avoids following a
-         * symlink.  Best-effort teardown — no error reporting. */
-        struct stat st;
-        if (lstat(s->config.unix_socket_path, &st) == 0 && S_ISSOCK(st.st_mode))
-            unlink(s->config.unix_socket_path);
-    }
-    s->unix_socket_owned = 0;
+    kl_srv_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
 }
 
 /*
@@ -792,10 +510,6 @@ int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
 int kl_server_run(KlServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
 
-#if !defined(KL_NO_SIGNAL)
-    signal(SIGPIPE, SIG_IGN);
-#endif
-
     if (kl_server_bind_listener(s) < 0)
         return -1;
 
@@ -835,20 +549,10 @@ int kl_server_run(KlServer *s) {
                s->config.bind_addr, s->bound_port);
     }
 
-#if !defined(KL_NO_SIGNAL)
-    /* Install signal handlers if requested */
-    struct sigaction old_term, old_int;
-    if (s->config.install_signal_handlers) {
-        atomic_store(&kl_signal_server, s);
-        struct sigaction sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sa_handler = kl_signal_handler;
-        sa.sa_flags = 0;
-        sigemptyset(&sa.sa_mask);
-        sigaction(SIGTERM, &sa, &old_term);
-        sigaction(SIGINT, &sa, &old_int);
-    }
-#endif
+    /* Ignore SIGPIPE + install SIGTERM/SIGINT graceful-stop handlers (POSIX) or
+     * a console Ctrl handler (Windows). Done here — past the setup early-returns
+     * — so a failed bind never leaves handlers installed without a restore. */
+    kl_srv_signals_install(s);
 
     atomic_store(&s->running, 1);
     atomic_store(&s->draining, 0);
@@ -947,7 +651,7 @@ int kl_server_run(KlServer *s) {
 
                     /* Record the client address for kl_request_peer_addr(). */
                     nc->peer_source = KL_PEER_SOCKET;
-                    if (peer_len > 0 && peer_len <= sizeof(nc->peer_addr)) {
+                    if (peer_len > 0 && (size_t)peer_len <= sizeof(nc->peer_addr)) {
                         memcpy(&nc->peer_addr, &peer, peer_len);
                         nc->peer_addr_len = peer_len;
                     } else {
@@ -1203,14 +907,7 @@ transition:
         }
     }
 
-#if !defined(KL_NO_SIGNAL)
-    /* Restore signal handlers */
-    if (s->config.install_signal_handlers) {
-        sigaction(SIGTERM, &old_term, NULL);
-        sigaction(SIGINT, &old_int, NULL);
-        atomic_store(&kl_signal_server, (KlServer *)NULL);
-    }
-#endif
+    kl_srv_signals_restore(s);
 
     return 0;
 }
