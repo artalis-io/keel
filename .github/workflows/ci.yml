@@ -59,6 +59,33 @@ jobs:
         timeout-minutes: 5
         run: make smoke ${{ matrix.backend }}
 
+  windows:
+    name: Windows (MinGW, TCP core)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      # NOTE: SHA-pin this to match the repo's action-pinning policy.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          release: false
+          install: mingw-w64-x86_64-gcc make
+
+      # WSAPoll event backend + Winsock provider. UDP + the built-in DNS
+      # resolver aren't ported to Winsock yet (excluded by the Makefile); this
+      # builds and links the TCP HTTP server + sync/async client core, then runs
+      # a real plaintext request over loopback.
+      - name: Build TCP core (Winsock)
+        run: make OS=windows CC=gcc
+
+      - name: Link + plaintext roundtrip smoke test
+        timeout-minutes: 3
+        run: make OS=windows CC=gcc smoke-tcp
+
   sanitizers:
     name: ASan + UBSan
     runs-on: ubuntu-latest

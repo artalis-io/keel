@@ -12,6 +12,8 @@ examples/*
 # Test binaries
 tests/test_*
 !tests/test_*.c
+tests/smoke_tcp
+tests/smoke_tcp.exe
 
 # Benchmark binary
 bench/bench_server

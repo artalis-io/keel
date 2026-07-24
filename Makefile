@@ -119,6 +119,16 @@ CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/respons
            src/compress.c src/decompress.c src/drain.c \
            $(FILE_IO_SRC) $(EVENT_SRC)
 
+# UDP + the built-in DNS resolver aren't ported to Winsock yet (cmsg/recvmmsg/
+# GSO datagram I/O, resolv.conf/hosts) — exclude them from the Windows build and
+# swap in dns_resolver_stub.c, which provides kl_dns_resolver_create -> NULL (the
+# client then falls back to blocking getaddrinfo). The rest of the TCP core has
+# no kl_udp_* references.
+ifdef WINDOWS
+  CORE_SRC := $(filter-out src/udp.c src/udp_server.c src/dns_resolver.c,$(CORE_SRC)) \
+              src/dns_resolver_stub.c
+endif
+
 # Default parser backend (llhttp)
 LLHTTP_SRC = parsers/parser_llhttp.c parsers/response_parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
@@ -229,6 +239,15 @@ test: $(TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
+# Plaintext TCP link + roundtrip smoke test — the cross-platform link gate
+# (the Windows CI runs this to prove the TCP core links and serves). Standalone
+# (not a utest suite), so it needs -lpthread explicitly (Windows LDFLAGS omits it).
+SMOKE_BIN = tests/smoke_tcp$(EXE)
+smoke-tcp: $(SMOKE_BIN)
+	./$(SMOKE_BIN)
+$(SMOKE_BIN): tests/smoke_tcp.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
 # Install / uninstall
 PREFIX  ?= /usr/local
 DESTDIR ?=
@@ -251,6 +270,7 @@ keel.pc: keel.pc.in
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
+	rm -f tests/smoke_tcp tests/smoke_tcp.exe
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f src/file_io.o src/file_io_iouring.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
