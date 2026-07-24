@@ -34,6 +34,11 @@ int kl_sockdef_set_nonblocking(KlSocketHandle fd) {
     return ioctlsocket((SOCKET)fd, FIONBIO, &mode) == 0 ? 0 : -1;
 }
 
+int kl_sockdef_set_blocking(KlSocketHandle fd) {
+    u_long mode = 0;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &mode) == 0 ? 0 : -1;
+}
+
 void kl_sockdef_set_cloexec(KlSocketHandle fd) {
     /* Clear inherit so the socket isn't leaked into child processes — the
      * Windows analog of FD_CLOEXEC. Best-effort. */
@@ -166,6 +171,9 @@ ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, siz
 static int wsk_set_nonblocking(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_set_nonblocking(fd);
 }
+static int wsk_set_blocking(void *ctx, KlSocketHandle fd) {
+    (void)ctx; return kl_sockdef_set_blocking(fd);
+}
 static void wsk_set_cloexec(void *ctx, KlSocketHandle fd) {
     (void)ctx; kl_sockdef_set_cloexec(fd);
 }
@@ -232,6 +240,7 @@ static void wsk_destroy(void *ctx) {
 
 static const KlSocketOps WINSOCK_OPS = {
     .set_nonblocking = wsk_set_nonblocking,
+    .set_blocking    = wsk_set_blocking,
     .set_cloexec     = wsk_set_cloexec,
     .set_nosigpipe   = wsk_set_nosigpipe,
     .set_reuseaddr   = wsk_set_reuseaddr,

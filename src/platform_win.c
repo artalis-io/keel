@@ -128,3 +128,13 @@ int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset)
     unsigned n = count > (size_t)INT_MAX ? (unsigned)INT_MAX : (unsigned)count;
     return _read(fd, buf, n);
 }
+
+int kl_plat_poll1(KlSocketHandle fd, int events, int timeout_ms)
+{
+    WSAPOLLFD pfd;
+    pfd.fd = (SOCKET)fd;
+    pfd.events = (SHORT)(((events & KL_POLL_IN) ? POLLRDNORM : 0) |
+                         ((events & KL_POLL_OUT) ? POLLWRNORM : 0));
+    pfd.revents = 0;
+    return WSAPoll(&pfd, 1, timeout_ms);
+}

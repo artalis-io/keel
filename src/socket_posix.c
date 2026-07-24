@@ -33,6 +33,13 @@ int kl_sockdef_set_nonblocking(KlSocketHandle fd) {
     return fcntl((int)fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+int kl_sockdef_set_blocking(KlSocketHandle fd) {
+    int flags = fcntl((int)fd, F_GETFL, 0);
+    if (flags < 0)
+        return -1;
+    return fcntl((int)fd, F_SETFL, flags & ~O_NONBLOCK);
+}
+
 void kl_sockdef_set_cloexec(KlSocketHandle fd) {
     int flags = fcntl((int)fd, F_GETFD, 0);
     if (flags >= 0)
@@ -174,6 +181,9 @@ ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, siz
 static int psx_set_nonblocking(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_set_nonblocking(fd);
 }
+static int psx_set_blocking(void *ctx, KlSocketHandle fd) {
+    (void)ctx; return kl_sockdef_set_blocking(fd);
+}
 static void psx_set_cloexec(void *ctx, KlSocketHandle fd) {
     (void)ctx; kl_sockdef_set_cloexec(fd);
 }
@@ -237,6 +247,7 @@ static ssize_t psx_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *
 
 static const KlSocketOps POSIX_OPS = {
     .set_nonblocking = psx_set_nonblocking,
+    .set_blocking    = psx_set_blocking,
     .set_cloexec     = psx_set_cloexec,
     .set_nosigpipe   = psx_set_nosigpipe,
     .set_reuseaddr   = psx_set_reuseaddr,

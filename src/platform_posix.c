@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <poll.h>
 
 uint64_t kl_monotonic_ms(void) {
     struct timespec ts;
@@ -95,4 +96,14 @@ int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset)
 {
     ssize_t r = pread(fd, buf, count, (off_t)offset);
     return (int)r;
+}
+
+int kl_plat_poll1(KlSocketHandle fd, int events, int timeout_ms)
+{
+    struct pollfd pfd;
+    pfd.fd = (int)fd;
+    pfd.events = (short)(((events & KL_POLL_IN) ? POLLIN : 0) |
+                         ((events & KL_POLL_OUT) ? POLLOUT : 0));
+    pfd.revents = 0;
+    return poll(&pfd, 1, timeout_ms);
 }

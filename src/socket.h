@@ -32,6 +32,7 @@
 typedef struct KlSocketOps {
     /* setup */
     int     (*set_nonblocking)(void *ctx, KlSocketHandle fd);
+    int     (*set_blocking)(void *ctx, KlSocketHandle fd);   /* inverse of set_nonblocking */
     void    (*set_cloexec)(void *ctx, KlSocketHandle fd);
     void    (*set_nosigpipe)(void *ctx, KlSocketHandle fd);
     /* Socket options (each maps to a single setsockopt on POSIX/Winsock). `on` is
@@ -112,6 +113,7 @@ const KlSocketProvider *kl_socket_provider_winsock(void);
  * `kl_sockdef_sendfile`'s `in_fd` is a *file* descriptor.
  */
 int            kl_sockdef_set_nonblocking(KlSocketHandle fd);
+int            kl_sockdef_set_blocking(KlSocketHandle fd);
 void           kl_sockdef_set_cloexec(KlSocketHandle fd);
 void           kl_sockdef_set_nosigpipe(KlSocketHandle fd);
 int            kl_sockdef_set_reuseaddr(KlSocketHandle fd, int on);
@@ -142,6 +144,11 @@ ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offs
 static inline int kl_sock_set_nonblocking(const KlSocketProvider *p, KlSocketHandle fd) {
     if (p && p->ops->set_nonblocking) return p->ops->set_nonblocking(p->context, fd);
     return kl_sockdef_set_nonblocking(fd);
+}
+
+static inline int kl_sock_set_blocking(const KlSocketProvider *p, KlSocketHandle fd) {
+    if (p && p->ops->set_blocking) return p->ops->set_blocking(p->context, fd);
+    return kl_sockdef_set_blocking(fd);
 }
 
 static inline void kl_sock_set_cloexec(const KlSocketProvider *p, KlSocketHandle fd) {

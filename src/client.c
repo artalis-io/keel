@@ -15,20 +15,16 @@
 #include <keel/timer.h>
 
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <netdb.h>
-#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <stddef.h>
-#include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/un.h>
 
-#include "socket.h"
+#include "socket.h"     /* seam + sockcompat: sockaddr / getaddrinfo / sys_un / SO_ERROR op */
+#include "platform.h"   /* kl_plat_poll1 — sync readiness wait (poll/WSAPoll) */
 
 /* ── Proxy constants ─────────────────────────────────────────────── */
 
@@ -47,7 +43,7 @@ static int has_crlf(const char *s, size_t len)
 
 /* ── I/O abstraction (plain or TLS) ──────────────────────────────── */
 
-static ssize_t io_write(const KlSocketProvider *p, int fd, KlTls *tls,
+static ssize_t io_write(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
                         const void *buf, size_t len)
 {
     if (tls)
@@ -55,7 +51,7 @@ static ssize_t io_write(const KlSocketProvider *p, int fd, KlTls *tls,
     return kl_sock_send(p, fd, buf, len);
 }
 
-static ssize_t io_read(const KlSocketProvider *p, int fd, KlTls *tls,
+static ssize_t io_read(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
                        void *buf, size_t len)
 {
     if (tls)
@@ -65,7 +61,7 @@ static ssize_t io_read(const KlSocketProvider *p, int fd, KlTls *tls,
 
 /* ── Connect with timeout ────────────────────────────────────────── */
 
-static int connect_with_timeout(const char *host, size_t host_len,
+static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
                                  int port, int timeout_ms,
                                  KlError *out_err)
 {
@@ -93,7 +89,7 @@ static int connect_with_timeout(const char *host, size_t host_len,
     }
 
     KlSocketHandle fd = kl_sock_socket(NULL, res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
+    if (!kl_handle_valid(fd)) {
         if (out_err) *out_err = KL_ERR_SOCKET;
         freeaddrinfo(res);
         return -1;
@@ -101,17 +97,10 @@ static int connect_with_timeout(const char *host, size_t host_len,
 
     kl_sock_set_nosigpipe(NULL, fd);
 
-    /* Saved for restore after the blocking connect-with-timeout below. */
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
+    /* Nonblocking for the timed connect; restored to blocking below. */
+    if (kl_sock_set_nonblocking(NULL, fd) < 0) {
         if (out_err) *out_err = KL_ERR_SOCKET;
-        close(fd);
-        freeaddrinfo(res);
-        return -1;
-    }
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        if (out_err) *out_err = KL_ERR_SOCKET;
-        close(fd);
+        kl_sock_close(NULL, fd);
         freeaddrinfo(res);
         return -1;
     }
@@ -121,34 +110,28 @@ static int connect_with_timeout(const char *host, size_t host_len,
 
     if (rc < 0 && errno != EINPROGRESS) {
         if (out_err) *out_err = KL_ERR_CONNECT;
-        close(fd);
+        kl_sock_close(NULL, fd);
         return -1;
     }
 
     if (rc < 0) {
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        rc = poll(&pfd, 1, timeout_ms);
-        if (rc <= 0) {
-            if (out_err) *out_err = (rc == 0) ? KL_ERR_TIMEOUT : KL_ERR_CONNECT;
-            close(fd);
+        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
+        if (pr <= 0) {
+            if (out_err) *out_err = (pr == 0) ? KL_ERR_TIMEOUT : KL_ERR_CONNECT;
+            kl_sock_close(NULL, fd);
             return -1;
         }
 
         int err = 0;
-        socklen_t errlen = sizeof(err);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+        kl_sock_get_so_error(NULL, fd, &err);
         if (err != 0) {
             if (out_err) *out_err = KL_ERR_CONNECT;
-            close(fd);
+            kl_sock_close(NULL, fd);
             return -1;
         }
     }
 
-    /* Restore blocking mode */
-    fcntl(fd, F_SETFL, flags);
+    kl_sock_set_blocking(NULL, fd);   /* restore blocking mode */
 
     return fd;
 }
@@ -171,7 +154,7 @@ static socklen_t fill_sockaddr_un(struct sockaddr_un *addr, const char *path)
     return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + path_len + 1);
 }
 
-static int unix_connect_with_timeout(const char *path, int timeout_ms,
+static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms,
                                      KlError *out_err)
 {
     struct sockaddr_un addr;
@@ -182,56 +165,50 @@ static int unix_connect_with_timeout(const char *path, int timeout_ms,
     }
 
     KlSocketHandle fd = kl_sock_socket(NULL, AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
+    if (!kl_handle_valid(fd)) {
         if (out_err) *out_err = KL_ERR_SOCKET;
         return -1;
     }
 
     kl_sock_set_nosigpipe(NULL, fd);
 
-    /* Saved for restore after the blocking connect-with-timeout below. */
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    /* Nonblocking for the timed connect; restored to blocking below. */
+    if (kl_sock_set_nonblocking(NULL, fd) < 0) {
         if (out_err) *out_err = KL_ERR_SOCKET;
-        close(fd);
+        kl_sock_close(NULL, fd);
         return -1;
     }
 
     int rc = kl_sock_connect(NULL, fd, (struct sockaddr *)&addr, addr_len);
     if (rc < 0 && errno != EINPROGRESS) {
         if (out_err) *out_err = KL_ERR_CONNECT;
-        close(fd);
+        kl_sock_close(NULL, fd);
         return -1;
     }
 
     if (rc < 0) {
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        rc = poll(&pfd, 1, timeout_ms);
-        if (rc <= 0) {
-            if (out_err) *out_err = (rc == 0) ? KL_ERR_TIMEOUT : KL_ERR_CONNECT;
-            close(fd);
+        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
+        if (pr <= 0) {
+            if (out_err) *out_err = (pr == 0) ? KL_ERR_TIMEOUT : KL_ERR_CONNECT;
+            kl_sock_close(NULL, fd);
             return -1;
         }
         int err = 0;
-        socklen_t errlen = sizeof(err);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+        kl_sock_get_so_error(NULL, fd, &err);
         if (err != 0) {
             if (out_err) *out_err = KL_ERR_CONNECT;
-            close(fd);
+            kl_sock_close(NULL, fd);
             return -1;
         }
     }
 
-    fcntl(fd, F_SETFL, flags);  /* restore blocking mode */
+    kl_sock_set_blocking(NULL, fd);   /* restore blocking mode */
     return fd;
 }
 
 /* ── TLS handshake (sync) ────────────────────────────────────────── */
 
-static KlTls *do_tls_handshake(int fd, KlTlsConfig *tls_cfg,
+static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
                                  const char *host, size_t host_len,
                                  int timeout_ms, KlAllocator *alloc)
 {
@@ -264,12 +241,8 @@ static KlTls *do_tls_handshake(int fd, KlTlsConfig *tls_cfg,
             return NULL;
         }
 
-        short events = (r == KL_TLS_WANT_READ) ? POLLIN : POLLOUT;
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = events;
-        pfd.revents = 0;
-        int pr = poll(&pfd, 1, step);
+        int events = (r == KL_TLS_WANT_READ) ? KL_POLL_IN : KL_POLL_OUT;
+        int pr = kl_plat_poll1(fd, events, step);
         if (pr < 0) {
             tls->destroy(tls);
             return NULL;
@@ -285,7 +258,7 @@ static KlTls *do_tls_handshake(int fd, KlTlsConfig *tls_cfg,
 
 /* ── Proxy CONNECT handshake (sync) ──────────────────────────────── */
 
-static int proxy_connect_sync(int fd, const char *host, uint16_t port,
+static int proxy_connect_sync(KlSocketHandle fd, const char *host, uint16_t port,
                                 const char *proxy_auth, int timeout_ms)
 {
     char buf[KL_PROXY_RESPONSE_MAX];
@@ -306,11 +279,7 @@ static int proxy_connect_sync(int fd, const char *host, uint16_t port,
     /* Send CONNECT request */
     size_t sent = 0;
     while (sent < (size_t)n) {
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
         if (pr <= 0)
             return -1;
 
@@ -329,11 +298,7 @@ static int proxy_connect_sync(int fd, const char *host, uint16_t port,
         if (recv_len >= sizeof(buf) - 1)
             return -1;  /* response too large */
 
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        pfd.revents = 0;
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = kl_plat_poll1(fd, KL_POLL_IN, timeout_ms);
         if (pr <= 0)
             return -1;
 
@@ -362,7 +327,7 @@ static int proxy_connect_sync(int fd, const char *host, uint16_t port,
 
 /* ── Build request into stack buffer, send ───────────────────────── */
 
-static int send_request_sync(int fd, KlTls *tls,
+static int send_request_sync(KlSocketHandle fd, KlTls *tls,
                               const char *method, const KlUrl *url,
                               const KlClientHeader *headers, int num_headers,
                               const char *body, size_t body_len,
@@ -427,11 +392,7 @@ static int send_request_sync(int fd, KlTls *tls,
     /* Send header block */
     size_t sent = 0;
     while (sent < (size_t)off) {
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
         if (pr <= 0)
             return -1;
 
@@ -445,11 +406,7 @@ static int send_request_sync(int fd, KlTls *tls,
     if (body && body_len > 0) {
         sent = 0;
         while (sent < body_len) {
-            struct pollfd pfd;
-            pfd.fd = fd;
-            pfd.events = POLLOUT;
-            pfd.revents = 0;
-            int pr = poll(&pfd, 1, timeout_ms);
+            int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
             if (pr <= 0)
                 return -1;
 
@@ -465,7 +422,7 @@ static int send_request_sync(int fd, KlTls *tls,
 
 /* ── Send headers-only (for chunked body streaming) ──────────────── */
 
-static int send_headers_sync(int fd, KlTls *tls,
+static int send_headers_sync(KlSocketHandle fd, KlTls *tls,
                                const char *method, const KlUrl *url,
                                const KlClientHeader *headers, int num_headers,
                                int timeout_ms, int keep_alive,
@@ -519,11 +476,7 @@ static int send_headers_sync(int fd, KlTls *tls,
 
     size_t sent = 0;
     while (sent < (size_t)off) {
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
         if (pr <= 0)
             return -1;
 
@@ -538,16 +491,12 @@ static int send_headers_sync(int fd, KlTls *tls,
 
 /* ── Send chunked body from body_read callback (sync) ────────────── */
 
-static int send_all_sync(int fd, KlTls *tls, const char *data, size_t len,
+static int send_all_sync(KlSocketHandle fd, KlTls *tls, const char *data, size_t len,
                            int timeout_ms)
 {
     size_t sent = 0;
     while (sent < len) {
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = kl_plat_poll1(fd, KL_POLL_OUT, timeout_ms);
         if (pr <= 0)
             return -1;
 
@@ -559,7 +508,7 @@ static int send_all_sync(int fd, KlTls *tls, const char *data, size_t len,
     return 0;
 }
 
-static int send_body_chunked_sync(int fd, KlTls *tls,
+static int send_body_chunked_sync(KlSocketHandle fd, KlTls *tls,
                                     KlClientReadFn body_read, void *user_data,
                                     int timeout_ms)
 {
@@ -595,7 +544,7 @@ static int send_body_chunked_sync(int fd, KlTls *tls,
 
 /* ── Receive + parse response (sync, with optional streaming) ────── */
 
-static int recv_response_sync(int fd, KlTls *tls, KlClientResponse *resp,
+static int recv_response_sync(KlSocketHandle fd, KlTls *tls, KlClientResponse *resp,
                                size_t max_response_size, int timeout_ms,
                                KlAllocator *alloc,
                                const KlClientStreamCfg *stream)
@@ -617,11 +566,7 @@ static int recv_response_sync(int fd, KlTls *tls, KlClientResponse *resp,
     int ret = -1;
 
     for (;;) {
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        pfd.revents = 0;
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = kl_plat_poll1(fd, KL_POLL_IN, timeout_ms);
         if (pr <= 0)
             break;
 
@@ -871,7 +816,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
         fd = connect_with_timeout(parsed.host, parsed.host_len,
                                    parsed.port, timeout_ms, &conn_err);
     }
-    if (fd < 0) {
+    if (!kl_handle_valid(fd)) {
         resp->error = conn_err;
         return -1;
     }
@@ -1014,7 +959,7 @@ cleanup:
         tls->shutdown(tls, fd);
         tls->destroy(tls);
     }
-    close(fd);
+    kl_sock_close(NULL, fd);
 
     if (ret != 0)
         kl_client_response_free(resp);
@@ -2668,7 +2613,7 @@ int kl_client_request_pooled(KlClientPool *pool,
         KlError conn_err = KL_ERR_NONE;
         fd = connect_with_timeout(parsed.host, parsed.host_len,
                                    parsed.port, timeout_ms, &conn_err);
-        if (fd < 0) {
+        if (!kl_handle_valid(fd)) {
             resp->error = conn_err;
             return -1;
         }
@@ -2678,7 +2623,7 @@ int kl_client_request_pooled(KlClientPool *pool,
                                     timeout_ms, alloc);
             if (!tls) {
                 resp->error = KL_ERR_TLS_HANDSHAKE;
-                close(fd);
+                kl_sock_close(NULL, fd);
                 return -1;
             }
         }

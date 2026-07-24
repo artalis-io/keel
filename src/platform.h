@@ -74,4 +74,12 @@ int kl_plat_cpu_count(void);
  * descriptor; @count is bounded by the caller's buffer (fits in int). */
 int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset);
 
+/* Single-socket readiness wait (the blocking poll(&pfd,1,timeout) idiom used by
+ * the sync client). @events is a mask of KL_POLL_IN / KL_POLL_OUT. Returns >0 if
+ * ready (requested event or an error/hangup event), 0 on timeout, -1 on failure.
+ * POSIX: poll(2). Windows: WSAPoll. */
+#define KL_POLL_IN   0x1
+#define KL_POLL_OUT  0x2
+int kl_plat_poll1(KlSocketHandle fd, int events, int timeout_ms);
+
 #endif /* KEEL_SRC_PLATFORM_H */
