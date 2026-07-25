@@ -20,6 +20,7 @@
 #include <mswsock.h>   /* TransmitFile prototype (linked via -lws2_32 / mswsock) */
 #include <io.h>        /* _read, _lseeki64, _get_osfhandle */
 #include <limits.h>
+#include <errno.h>
 
 #define KL_WSK_SENDFILE_BUF 8192
 
@@ -41,6 +42,43 @@ static void kl_winsock_global_fini(void) {
 
 static int clamp_int(size_t n) {
     return n > (size_t)INT_MAX ? INT_MAX : (int)n;
+}
+
+/* Translate the last Winsock error into the CRT errno space. Winsock reports
+ * failures via WSAGetLastError() and never touches the CRT errno, but the
+ * seam's callers (server accept loop, client connect, connection read/write)
+ * all branch on POSIX errno — EAGAIN/EWOULDBLOCK, EINPROGRESS, EINTR — exactly
+ * as they do on POSIX. Without this, every non-blocking would-block/in-progress
+ * check on Windows sees errno==0 and misfires (the accept loop spins logging
+ * "accept: No error"; a pending connect looks like a hard failure). Reading
+ * WSAGetLastError() does not clear it, so callers that additionally feed it to
+ * kl_sock_errno_to_error() are unaffected. */
+static void wsa_set_errno(void) {
+    switch (WSAGetLastError()) {
+        case WSAEWOULDBLOCK:   errno = EWOULDBLOCK;   break;
+        case WSAEINPROGRESS:
+        case WSAEALREADY:      errno = EINPROGRESS;   break;
+        case WSAEINTR:         errno = EINTR;         break;
+        case WSAECONNRESET:    errno = ECONNRESET;    break;
+        case WSAECONNABORTED:  errno = ECONNABORTED;  break;
+        case WSAECONNREFUSED:  errno = ECONNREFUSED;  break;
+        case WSAETIMEDOUT:     errno = ETIMEDOUT;     break;
+        case WSAENOTCONN:      errno = ENOTCONN;      break;
+        case WSAESHUTDOWN:     errno = EPIPE;         break;
+        case WSAEHOSTUNREACH:  errno = EHOSTUNREACH;  break;
+        case WSAENETUNREACH:   errno = ENETUNREACH;   break;
+        case WSAENETDOWN:      errno = ENETDOWN;      break;
+        case WSAENETRESET:     errno = ENETRESET;     break;
+        case WSAEADDRINUSE:    errno = EADDRINUSE;    break;
+        case WSAEADDRNOTAVAIL: errno = EADDRNOTAVAIL; break;
+        case WSAEACCES:        errno = EACCES;        break;
+        case WSAEMFILE:        errno = EMFILE;        break;
+        case WSAENOBUFS:       errno = ENOBUFS;       break;
+        case WSAEMSGSIZE:      errno = EMSGSIZE;      break;
+        case WSAEINVAL:        errno = EINVAL;        break;
+        case WSAEFAULT:        errno = EFAULT;        break;
+        default:               errno = EIO;           break;
+    }
 }
 
 /* ── Platform default socket ops (Winsock) ─────────────────────────────── */
@@ -90,7 +128,14 @@ KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
     return (KlSocketHandle)socket(domain, type, protocol);
 }
 int kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    return connect((SOCKET)fd, a, l);
+    if (connect((SOCKET)fd, a, l) == SOCKET_ERROR) {
+        /* A non-blocking connect that can't finish immediately reports
+         * WSAEWOULDBLOCK on Winsock, but POSIX callers expect EINPROGRESS. */
+        if (WSAGetLastError() == WSAEWOULDBLOCK) errno = EINPROGRESS;
+        else wsa_set_errno();
+        return -1;
+    }
+    return 0;
 }
 int kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
     return bind((SOCKET)fd, a, l);
@@ -99,7 +144,9 @@ int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
     return listen((SOCKET)fd, backlog);
 }
 KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    return (KlSocketHandle)accept((SOCKET)fd, a, l);
+    SOCKET c = accept((SOCKET)fd, a, l);
+    if (c == INVALID_SOCKET) wsa_set_errno();
+    return (KlSocketHandle)c;
 }
 int kl_sockdef_close(KlSocketHandle fd) {
     return closesocket((SOCKET)fd);
@@ -118,15 +165,18 @@ int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
 
 ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
     int r = send((SOCKET)fd, (const char *)buf, clamp_int(len), 0);
-    return r == SOCKET_ERROR ? -1 : r;
+    if (r == SOCKET_ERROR) { wsa_set_errno(); return -1; }
+    return r;
 }
 ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), 0);
-    return r == SOCKET_ERROR ? -1 : r;
+    if (r == SOCKET_ERROR) { wsa_set_errno(); return -1; }
+    return r;
 }
 ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), MSG_PEEK);
-    return r == SOCKET_ERROR ? -1 : r;
+    if (r == SOCKET_ERROR) { wsa_set_errno(); return -1; }
+    return r;
 }
 
 /* Vectored write via WSASend. struct iovec (base,len) -> WSABUF (len,buf). */
@@ -146,8 +196,10 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt
     }
     DWORD sent = 0;
     int rc = WSASend((SOCKET)fd, bufs, (DWORD)iovcnt, &sent, 0, NULL, NULL);
-    if (rc == SOCKET_ERROR)
+    if (rc == SOCKET_ERROR) {
+        wsa_set_errno();
         return -1;
+    }
     return (ssize_t)sent;
 }
 
@@ -167,12 +219,14 @@ ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, siz
     while (remaining > 0) {
         int nw = send((SOCKET)out_fd, p, remaining, 0);
         if (nw == SOCKET_ERROR) {
-            int e = WSAGetLastError();
-            if (e == WSAEWOULDBLOCK) {
+            if (WSAGetLastError() == WSAEWOULDBLOCK) {
                 int wrote = nr - remaining;
                 *offset += wrote;
-                return wrote > 0 ? wrote : -1;
+                if (wrote > 0) return wrote;
+                errno = EWOULDBLOCK;
+                return -1;
             }
+            wsa_set_errno();
             return -1;
         }
         p += nw;
