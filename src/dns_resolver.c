@@ -1026,7 +1026,10 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
      * BADCOOKIE re-issue once carrying it. A response without a cookie option
      * (server doesn't support cookies) is accepted for backward compatibility. */
     if (!r->disable_cookies && !r->disable_edns) {
-        uint8_t ext = 0, ck_client[DNS_COOKIE_CLIENT];
+        /* Zero-init ck_client: dns_extract_opt fills it before setting have=1,
+         * but that cross-function contract is opaque to gcc's -O2
+         * maybe-uninitialized analysis (newer MinGW gcc flags it under -Werror). */
+        uint8_t ext = 0, ck_client[DNS_COOKIE_CLIENT] = {0};
         uint8_t ck_server[DNS_COOKIE_SRV_MAX], ck_slen = 0;
         int have = 0;
         if (dns_extract_opt(pkt, len, &ext, ck_client, ck_server, &ck_slen, &have) == 0 &&
