@@ -109,6 +109,10 @@ SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
 SERVER_PLAT_SRC ?= src/server_plat_posix.c
 UDP_IO_SRC ?= src/udp_io_posix.c
+# DNS config discovery (nameservers/hosts/search): POSIX resolv.conf/hosts; the
+# Windows branch swaps the iphlpapi sibling. dns_resolver.c itself is #ifdef-free
+# and runs over the udp + socket.h seams.
+DNS_SYS_SRC ?= src/dns_sys_posix.c
 CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/response.c src/router.c \
            src/connection.c src/server.c $(SERVER_PLAT_SRC) src/async.c src/timer.c \
            src/body_reader_buffer.c \
@@ -117,18 +121,18 @@ CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/respons
            src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client.c src/client_pool.c src/redirect.c src/sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(UDP_IO_SRC) src/udp_server.c \
-           src/dns_resolver.c \
+           src/dns_resolver.c $(DNS_SYS_SRC) \
            src/compress.c src/decompress.c src/drain.c \
            $(FILE_IO_SRC) $(EVENT_SRC)
 
-# The built-in DNS resolver isn't ported to Winsock yet (resolv.conf/hosts, TCP
-# fallback) — exclude dns_resolver.c from the Windows build and swap in
-# dns_resolver_stub.c, which provides kl_dns_resolver_create -> NULL (the client
-# then falls back to blocking getaddrinfo). UDP *is* built on Windows: udp.c +
-# udp_io_win.c (via UDP_IO_SRC above) + udp_server.c, per-datagram (no recvmmsg/
-# sendmmsg/GSO/GRO — those degrade to no-ops in the Winsock I/O TU).
+# The built-in DNS resolver's Winsock config-discovery sibling (dns_sys_win.c,
+# iphlpapi) isn't in tree yet — exclude dns_resolver.c + the POSIX dns_sys from
+# the Windows build and swap in dns_resolver_stub.c, which provides
+# kl_dns_resolver_create -> NULL (the client then falls back to blocking
+# getaddrinfo). UDP *is* built on Windows: udp.c + udp_io_win.c (via UDP_IO_SRC)
+# + udp_server.c, per-datagram (no recvmmsg/sendmmsg/GSO/GRO on Winsock).
 ifdef WINDOWS
-  CORE_SRC := $(filter-out src/dns_resolver.c,$(CORE_SRC)) \
+  CORE_SRC := $(filter-out src/dns_resolver.c src/dns_sys_posix.c,$(CORE_SRC)) \
               src/dns_resolver_stub.c
 endif
 

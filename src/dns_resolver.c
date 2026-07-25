@@ -5,20 +5,18 @@
 #include <keel/tls.h>
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
-#include "socket.h"
+#include "socket.h"      /* sockaddr / inet_pton / htons / ntohs via sockcompat.h */
 #include "platform.h"
+#include "dns_sys.h"     /* platform config discovery (nameservers/hosts/search) */
 
 #define DNS_NAME_MAX      256
+_Static_assert(DNS_NAME_MAX == KL_DNS_SYS_NAME_MAX,
+               "dns_sys search-domain width must match DNS_NAME_MAX");
 #define DNS_QUERY_MAX     512   /* query buffer (question + EDNS0 OPT fit easily) */
 #define DNS_RND_POOL_SIZE 256   /* entropy bytes buffered per /dev/urandom read */
 #define DNS_TYPE_OPT      41    /* EDNS0 OPT pseudo-record type */
@@ -756,7 +754,7 @@ static void dns_tcp_close(KlDnsResolver *r, KlDnsTcp *t) {
     if (t->idle_timer >= 0) { kl_timer_cancel(r->ctx, t->idle_timer); t->idle_timer = -1; }
     if (t->watching)        { kl_watcher_del(r->ctx, t->fd); t->watching = 0; }
     if (t->tls)             { t->tls->destroy(t->tls); t->tls = NULL; }
-    if (t->fd >= 0)         { close(t->fd); t->fd = -1; }
+    if (kl_handle_valid(t->fd)) { kl_sock_close(r->ctx->sockets, t->fd); t->fd = KL_INVALID_SOCKET; }
     if (t->wbuf) { kl_free(r->alloc, t->wbuf, t->wcap); t->wbuf = NULL; t->wcap = 0; }
     if (t->rbuf) { kl_free(r->alloc, t->rbuf, t->rcap); t->rbuf = NULL; t->rcap = 0; }
     t->wlen = t->wsent = t->rlen = t->rneed = 0;
@@ -784,7 +782,7 @@ static void dns_tcp_on_idle(void *ud) {
 /* Arm the idle-close timer when the connection has no pending work; cancel it
  * while busy. */
 static void dns_tcp_arm_idle(KlDnsResolver *r, KlDnsTcp *t) {
-    if (t->fd < 0) return;
+    if (!kl_handle_valid(t->fd)) return;
     int busy = dns_tcp_pending_on(r, t->ns_idx) > 0 || t->wlen > t->wsent;
     if (busy) {
         if (t->idle_timer >= 0) { kl_timer_cancel(r->ctx, t->idle_timer); t->idle_timer = -1; }
@@ -797,7 +795,7 @@ static void dns_tcp_arm_idle(KlDnsResolver *r, KlDnsTcp *t) {
  * a pending leg may have vanished). */
 static void dns_tcp_touch_idle_all(KlDnsResolver *r) {
     for (int i = 0; i < r->nns; i++)
-        if (r->tcp[i].fd >= 0)
+        if (kl_handle_valid(r->tcp[i].fd))
             dns_tcp_arm_idle(r, &r->tcp[i]);
 }
 
@@ -831,19 +829,24 @@ static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
     const struct sockaddr *nsa = (const struct sockaddr *)&r->ns[ns_idx];
     socklen_t nsl = r->ns_len[ns_idx];
     KlSocketHandle fd = kl_sock_socket(r->ctx->sockets, nsa->sa_family, SOCK_STREAM, 0);
-    if (fd < 0)
+    if (!kl_handle_valid(fd))
         return -1;
-    if (kl_sock_set_nonblocking(r->ctx->sockets, fd) < 0) { close(fd); return -1; }
+    if (kl_sock_set_nonblocking(r->ctx->sockets, fd) < 0) {
+        kl_sock_close(r->ctx->sockets, fd); return -1;
+    }
     kl_sock_set_cloexec(r->ctx->sockets, fd);
 
     int rc = kl_sock_connect(r->ctx->sockets, fd, nsa, nsl);
-    if (rc < 0 && errno != EINPROGRESS) { close(fd); return -1; }
+    if (rc < 0 && errno != EINPROGRESS) {
+        kl_sock_close(r->ctx->sockets, fd); return -1;
+    }
 
     t->r = r; t->ns_idx = ns_idx; t->fd = fd;
     t->state = (rc == 0) ? DNS_TCP_READY : DNS_TCP_CONNECTING;
     t->want = KL_EVENT_READ | KL_EVENT_WRITE;
     if (kl_watcher_add(r->ctx, fd, t->want, dns_tcp_on_event, t) != 0) {
-        close(fd); t->fd = -1; t->state = DNS_TCP_CLOSED; return -1;
+        kl_sock_close(r->ctx->sockets, fd);
+        t->fd = KL_INVALID_SOCKET; t->state = DNS_TCP_CLOSED; return -1;
     }
     t->watching = 1;
     return 0;
@@ -911,15 +914,15 @@ static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud) {
 
     if (t->state == DNS_TCP_CONNECTING) {
         int err = 0;
-        socklen_t el = sizeof(err);
-        getsockopt(t->fd, SOL_SOCKET, SO_ERROR, &err, &el);
-        if (err != 0) { dns_tcp_fail(r, t); return; }
+        if (kl_sock_get_so_error(r->ctx->sockets, t->fd, &err) != 0 || err != 0) {
+            dns_tcp_fail(r, t); return;
+        }
         t->state = DNS_TCP_READY;
         dns_tcp_update_interest(r, t);
     }
     if (mask & KL_EVENT_WRITE)
         dns_tcp_flush(r, t);
-    if (t->fd < 0)
+    if (!kl_handle_valid(t->fd))
         return;                                      /* flush failed → closed */
 
     if (mask & KL_EVENT_READ) {
@@ -936,7 +939,7 @@ static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud) {
             if (n > 0) {
                 t->rlen += (size_t)n;
                 dns_tcp_deliver(r, t);
-                if (t->fd < 0) return;
+                if (!kl_handle_valid(t->fd)) return;
                 continue;
             }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
@@ -953,7 +956,7 @@ static void dns_tcp_send_leg(KlDnsResolver *r, KlDnsLeg *leg, int ns_idx) {
     KlDnsReq *q = leg->req;
     KlDnsTcp *t = &r->tcp[ns_idx];
 
-    if (t->fd < 0 && dns_tcp_connect(r, t, ns_idx) != 0) {
+    if (!kl_handle_valid(t->fd) && dns_tcp_connect(r, t, ns_idx) != 0) {
         leg->naddrs = 0; dns_leg_settle(r, q, leg); return;
     }
 
@@ -1249,45 +1252,6 @@ static void dns_build_candidates(const KlDnsResolver *r, KlDnsReq *q, const char
     }
 }
 
-/* Parse `search`/`domain` and `options ndots:` from a resolv.conf file. */
-static void dns_parse_resolv_options(const char *path,
-                                     char search[][DNS_NAME_MAX], int max_s,
-                                     int *nsearch, int *ndots) {
-    *nsearch = 0;
-    *ndots = 1;
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return;
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        char *hash = strchr(line, '#');
-        if (hash) *hash = '\0';
-        char *save = NULL;
-        const char *kw = strtok_r(line, " \t\r\n", &save);
-        if (!kw)
-            continue;
-        if (strcmp(kw, "search") == 0 || strcmp(kw, "domain") == 0) {
-            *nsearch = 0;                        /* last search/domain line wins */
-            const char *tok;
-            while ((tok = strtok_r(NULL, " \t\r\n", &save)) != NULL && *nsearch < max_s) {
-                if (dns_copy(search[*nsearch], DNS_NAME_MAX, tok) == 0)
-                    (*nsearch)++;
-            }
-        } else if (strcmp(kw, "options") == 0) {
-            const char *tok;
-            while ((tok = strtok_r(NULL, " \t\r\n", &save)) != NULL) {
-                if (strncmp(tok, "ndots:", 6) == 0) {
-                    char *end;
-                    long n = strtol(tok + 6, &end, 10);
-                    if (end != tok + 6 && *end == '\0' && n >= 0 && n <= 15)
-                        *ndots = (int)n;
-                }
-            }
-        }
-    }
-    fclose(f);
-}
-
 /* ── Vtable ──────────────────────────────────────────────────────────── */
 
 static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
@@ -1371,7 +1335,7 @@ static void dns_destroy(KlResolver *self) {
     if (!r)
         return;
     for (int i = 0; i < r->nns; i++)
-        if (r->tcp[i].fd >= 0)
+        if (kl_handle_valid(r->tcp[i].fd))
             dns_tcp_close(r, &r->tcp[i]);          /* close persistent TCP conns */
     KlDnsReq *q = r->inflight;
     while (q) {
@@ -1430,51 +1394,21 @@ static int dns_parse_ns(const char *s, uint16_t defport,
     return -1;
 }
 
-/* Collect up to `max` `nameserver` entries from a resolv.conf file. */
-static int resolv_conf_nameservers(const char *path, char out[][80], int max) {
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
-    char line[256];
-    int n = 0;
-    while (n < max && fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "nameserver", 10) != 0)
-            continue;
-        const char *p = line + 10;
-        if (*p != ' ' && *p != '\t')
-            continue;
-        while (*p == ' ' || *p == '\t')
-            p++;
-        size_t i = 0;
-        while (p[i] && p[i] != ' ' && p[i] != '\t' && p[i] != '\n' &&
-               p[i] != '\r' && i + 1 < 80) {
-            out[n][i] = p[i];
-            i++;
-        }
-        out[n][i] = '\0';
-        if (i > 0)
-            n++;
-    }
-    fclose(f);
-    return n;
-}
-
 /* Fill the resolver's nameserver list; returns the (single) socket family. */
 static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, int *family) {
-    char nsbuf[DNS_MAX_NS][80];
+    char nsbuf[DNS_MAX_NS][KL_DNS_SYS_NS_STRMAX];
     int count = 0;
     uint16_t defport = (cfg && cfg->port) ? cfg->port : DNS_PORT;
 
     r->ndots = 1;
     if (cfg && cfg->nameserver) {
-        /* Explicit nameserver overrides resolv.conf entirely (no search domains). */
+        /* Explicit nameserver overrides system discovery (no search domains). */
         snprintf(nsbuf[0], sizeof(nsbuf[0]), "%s", cfg->nameserver);
         count = 1;
     } else {
-        const char *rc = (cfg && cfg->resolv_conf_path) ? cfg->resolv_conf_path
-                                                        : "/etc/resolv.conf";
-        count = resolv_conf_nameservers(rc, nsbuf, DNS_MAX_NS);
-        dns_parse_resolv_options(rc, r->search, DNS_MAX_SEARCH, &r->nsearch, &r->ndots);
+        const char *rc = (cfg && cfg->resolv_conf_path) ? cfg->resolv_conf_path : NULL;
+        count = kl_dns_sys_nameservers(rc, nsbuf, DNS_MAX_NS);
+        kl_dns_sys_resolv_options(rc, r->search, DNS_MAX_SEARCH, &r->nsearch, &r->ndots);
         if (count == 0) {
             snprintf(nsbuf[0], sizeof(nsbuf[0]), "127.0.0.1");
             count = 1;
@@ -1529,10 +1463,11 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
     r->disable_edns = cfg ? cfg->disable_edns : 0;
     r->disable_cookies = cfg ? cfg->disable_cookies : 0;
     snprintf(r->hosts_path, sizeof(r->hosts_path), "%s",
-             (cfg && cfg->hosts_path) ? cfg->hosts_path : "/etc/hosts");
+             (cfg && cfg->hosts_path) ? cfg->hosts_path
+                                      : kl_dns_sys_default_hosts_path());
     r->rnd_off = sizeof(r->rnd_pool);   /* pool empty → refills on first draw */
     for (int i = 0; i < DNS_MAX_NS; i++) {
-        r->tcp[i].fd = -1;
+        r->tcp[i].fd = KL_INVALID_SOCKET;
         r->tcp[i].idle_timer = -1;
     }
 
