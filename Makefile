@@ -44,6 +44,7 @@ else ifdef WINDOWS
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
   SERVER_PLAT_SRC = src/server_plat_win.c
+  UDP_IO_SRC = src/udp_io_win.c
   FILE_IO_SRC = src/file_io.c
   LDFLAGS += -lws2_32 -lmswsock -lbcrypt
   EXE = .exe
@@ -120,13 +121,14 @@ CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/respons
            src/compress.c src/decompress.c src/drain.c \
            $(FILE_IO_SRC) $(EVENT_SRC)
 
-# UDP + the built-in DNS resolver aren't ported to Winsock yet (cmsg/recvmmsg/
-# GSO datagram I/O, resolv.conf/hosts) — exclude them from the Windows build and
-# swap in dns_resolver_stub.c, which provides kl_dns_resolver_create -> NULL (the
-# client then falls back to blocking getaddrinfo). The rest of the TCP core has
-# no kl_udp_* references.
+# The built-in DNS resolver isn't ported to Winsock yet (resolv.conf/hosts, TCP
+# fallback) — exclude dns_resolver.c from the Windows build and swap in
+# dns_resolver_stub.c, which provides kl_dns_resolver_create -> NULL (the client
+# then falls back to blocking getaddrinfo). UDP *is* built on Windows: udp.c +
+# udp_io_win.c (via UDP_IO_SRC above) + udp_server.c, per-datagram (no recvmmsg/
+# sendmmsg/GSO/GRO — those degrade to no-ops in the Winsock I/O TU).
 ifdef WINDOWS
-  CORE_SRC := $(filter-out src/udp.c src/udp_io_posix.c src/udp_server.c src/dns_resolver.c,$(CORE_SRC)) \
+  CORE_SRC := $(filter-out src/dns_resolver.c,$(CORE_SRC)) \
               src/dns_resolver_stub.c
 endif
 
@@ -249,6 +251,14 @@ smoke-tcp: $(SMOKE_BIN)
 $(SMOKE_BIN): tests/smoke_tcp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
+# (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
+SMOKE_UDP_BIN = tests/smoke_udp$(EXE)
+smoke-udp: $(SMOKE_UDP_BIN)
+	./$(SMOKE_UDP_BIN)
+$(SMOKE_UDP_BIN): tests/smoke_udp.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
 # Install / uninstall
 PREFIX  ?= /usr/local
 DESTDIR ?=
@@ -271,7 +281,7 @@ keel.pc: keel.pc.in
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
-	rm -f tests/smoke_tcp tests/smoke_tcp.exe
+	rm -f tests/smoke_tcp tests/smoke_tcp.exe tests/smoke_udp tests/smoke_udp.exe
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f src/file_io.o src/file_io_iouring.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
@@ -410,4 +420,4 @@ smoke: examples
 	sh tests/e2e_examples.sh
 
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
-        install uninstall coverage bench
+        smoke-tcp smoke-udp install uninstall coverage bench

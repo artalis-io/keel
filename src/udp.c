@@ -1,15 +1,11 @@
 #include <keel/udp.h>
 
 #include <errno.h>
-#include <netdb.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
-#include "socket.h"
+#include "socket.h"   /* sockaddr / getaddrinfo / inet_ntop / ntohs via sockcompat.h */
 #include "udp_internal.h"
 #include "udp_io.h"
 
@@ -357,8 +353,8 @@ int kl_udp_send_to_from(KlUdp *udp, const void *data, size_t len,
                         const struct sockaddr *dest, socklen_t dest_len,
                         const struct sockaddr *src, socklen_t src_len) {
     if (!udp || (!data && len) || !dest || dest_len == 0 ||
-        dest_len > sizeof(struct sockaddr_storage) ||
-        (src && src_len > sizeof(struct sockaddr_storage))) {
+        (size_t)dest_len > sizeof(struct sockaddr_storage) ||
+        (src && (size_t)src_len > sizeof(struct sockaddr_storage))) {
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
@@ -368,7 +364,7 @@ int kl_udp_send_to_from(KlUdp *udp, const void *data, size_t len,
 int kl_udp_send_to_tos(KlUdp *udp, const void *data, size_t len,
                        const struct sockaddr *dest, socklen_t dest_len, int tos) {
     if (!udp || (!data && len) || !dest || dest_len == 0 ||
-        dest_len > sizeof(struct sockaddr_storage) || tos < 0 || tos > 255) {
+        (size_t)dest_len > sizeof(struct sockaddr_storage) || tos < 0 || tos > 255) {
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
@@ -423,7 +419,7 @@ int kl_udp_send_gso(KlUdp *udp, const void *buf, size_t total_len,
                     socklen_t dest_len) {
     if (!udp || (!buf && total_len) || total_len == 0 || segment_size == 0 ||
         segment_size > total_len || total_len > 65507 ||
-        !dest || dest_len == 0 || dest_len > sizeof(struct sockaddr_storage)) {
+        !dest || dest_len == 0 || (size_t)dest_len > sizeof(struct sockaddr_storage)) {
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
@@ -482,7 +478,7 @@ uint16_t kl_udp_local_port(const KlUdp *udp) {
     struct sockaddr_storage sa;
     memset(&sa, 0, sizeof(sa));
     socklen_t len = sizeof(sa);
-    if (getsockname(udp->fd, (struct sockaddr *)&sa, &len) != 0)
+    if (kl_sock_get_local_addr(udp->ctx->sockets, udp->fd, (struct sockaddr *)&sa, &len) != 0)
         return 0;
     if (sa.ss_family == AF_INET)
         return ntohs(((struct sockaddr_in *)&sa)->sin_port);

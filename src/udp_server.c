@@ -10,7 +10,7 @@ static void udp_server_on_recv(KlUdp *udp, const void *data, size_t len,
                                void *user_data) {
     (void)udp;
     KlUdpServer *s = user_data;
-    if (local && local_len && local_len <= sizeof(s->local)) {
+    if (local && local_len && (size_t)local_len <= sizeof(s->local)) {
         memcpy(&s->local, local, local_len);
         s->local_len = local_len;
     } else {
