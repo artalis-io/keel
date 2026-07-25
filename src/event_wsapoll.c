@@ -15,7 +15,7 @@
 
 #include <keel/event.h>
 
-#include <winsock2.h>
+#include "sockcompat.h"   /* winsock2.h + kl_wsa_set_errno() */
 #include <limits.h>
 #include <string.h>
 
@@ -163,8 +163,13 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     }
 
     int n = WSAPoll(st->fds, (ULONG)st->count, timeout_ms);
-    if (n == SOCKET_ERROR)
+    if (n == SOCKET_ERROR) {
+        /* Translate so the caller's post-`-1` errno check works — the server's
+         * accept loop tests `errno == EINTR` to decide retry-vs-abort; without
+         * this it would read a stale errno (WSAPoll leaves errno untouched). */
+        kl_wsa_set_errno();
         return -1;
+    }
 
     int count = 0;
     for (int i = 0; i < st->count && count < max; i++) {
