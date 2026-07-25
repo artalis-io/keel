@@ -318,6 +318,27 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
 3. **6b — breadth.** UDP over Winsock, thread pool, more of the server/client
    suite, AF_UNIX probe, TLS (mbedtls build or skip). Expand the Windows test
    subset toward parity; document what's skipped and why.
+   **6b-1 — Winsock UDP + built-in DNS (done).** `udp_io_win.c` (WSARecvMsg/
+   WSASendMsg + cmsg) and `dns_sys_win.c` (iphlpapi config discovery), each gated
+   by a loopback smoke test on the runner (`smoke-udp`, `smoke-dns`).
+   **6b-2 — staged `utest` suite on the runner (done, Tier 1).** The Windows CI
+   ran only link+roundtrip smoke tests; it now also runs a curated `make test-win`
+   subset of the real `utest` suites. Unblocking fix: `utest.h` self-declares
+   `QueryPerformanceCounter` on MinGW unless `<windows.h>` precedes it, clashing
+   once a Keel header pulls in `<winsock2.h>`; a force-included `tests/win_prelude.h`
+   (winsock2→ws2tcpip→windows, the sockcompat ordering) resolves it for every test
+   without touching vendored `utest.h` or the 55 test files. `WIN_TEST_SUITES`
+   (Makefile) is **Tier 1**: 12 platform-neutral suites (allocator, body_reader,
+   chunked, cors, decompress, drain, multipart_stream, overflow, parser,
+   response_parser, router, url) — pure in-memory logic, guaranteed green. The
+   rest are staged: **Tier 2** (build-clean but socket/thread *runtime*, pending
+   validation on the runner — client, client_stream, connection, h2_client,
+   redirect, server_stats, thread_pool, timer, websocket_client) and **Tier 3**
+   (30 suites whose *test files* include `<netinet/in.h>`/`<sys/socket.h>`/…
+   directly and must route those through the shim before they compile under MinGW;
+   4 more — compress/event/sse/tls — call `pipe()` directly). Local validation:
+   the 12 build to PE32+ via `make OS=windows` (MinGW-w64) and run green natively
+   as a subset; the runner executes them for real.
 4. **Feed back to the vtable.** Confirm `KlSocketHandle` + `writev`/`sendfile`
    ops are sufficient → **unblocks Phase 4** (publish the now-proven vtable).
 
