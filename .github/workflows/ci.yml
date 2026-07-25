@@ -60,7 +60,7 @@ jobs:
         run: make smoke ${{ matrix.backend }}
 
   windows:
-    name: Windows (MinGW, TCP + UDP core)
+    name: Windows (MinGW, full core)
     runs-on: windows-latest
     defaults:
       run:
@@ -75,11 +75,12 @@ jobs:
           release: false
           install: mingw-w64-x86_64-gcc make
 
-      # WSAPoll event backend + Winsock provider. The built-in DNS resolver
-      # isn't ported to Winsock yet (excluded by the Makefile); this builds and
-      # links the TCP HTTP server + sync/async client core AND the UDP datagram
-      # core (WSARecvMsg/WSASendMsg + cmsg), then runs real loopback roundtrips.
-      - name: Build TCP + UDP core (Winsock)
+      # WSAPoll event backend + Winsock provider. Builds and links the entire
+      # library on Windows — TCP HTTP server + sync/async client, the UDP
+      # datagram core (WSARecvMsg/WSASendMsg + cmsg), AND the built-in DNS
+      # resolver (iphlpapi config discovery) — then runs real loopback smoke
+      # tests for each.
+      - name: Build full core (Winsock)
         run: make OS=windows CC=gcc
 
       - name: Link + plaintext TCP roundtrip smoke test
@@ -89,6 +90,10 @@ jobs:
       - name: Link + UDP datagram roundtrip smoke test
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-udp
+
+      - name: Link + DNS resolver init/resolve smoke test
+        timeout-minutes: 3
+        run: make OS=windows CC=gcc smoke-dns
 
   sanitizers:
     name: ASan + UBSan

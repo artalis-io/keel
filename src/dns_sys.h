@@ -12,6 +12,8 @@
 #ifndef KL_DNS_SYS_H
 #define KL_DNS_SYS_H
 
+#include <keel/allocator.h>
+
 /* Max nameserver token, "IP" or "IP#port" (matches dns_resolver.c's nsbuf). */
 #define KL_DNS_SYS_NS_STRMAX  80
 /* Max search-domain string; must equal dns_resolver.c's DNS_NAME_MAX. */
@@ -20,16 +22,18 @@
 /* Collect up to @p max system nameserver address strings ("IP" or "IP#port")
  * into @p out. @p resolv_conf_path is the POSIX resolv.conf path, or NULL for
  * the platform default (/etc/resolv.conf); it is ignored on Windows, where the
- * nameservers come from iphlpapi. Returns the count (0 if none found). */
-int kl_dns_sys_nameservers(const char *resolv_conf_path,
+ * nameservers come from iphlpapi. @p alloc backs any transient OS-query buffer
+ * (the Windows GetAdaptersAddresses list); the POSIX impl ignores it. Returns
+ * the count (0 if none found). */
+int kl_dns_sys_nameservers(KlAllocator *alloc, const char *resolv_conf_path,
                            char out[][KL_DNS_SYS_NS_STRMAX], int max);
 
 /* Fill the search-domain list + ndots for name expansion. POSIX parses
  * resolv.conf `search`/`domain` and `options ndots:`; Windows uses the iphlpapi
- * suffix list. @p resolv_conf_path is as above. @p search is a caller array of
- * @p max_s strings, each KL_DNS_SYS_NAME_MAX wide. On return *nsearch is the
- * number filled and *ndots the threshold (default 1). */
-void kl_dns_sys_resolv_options(const char *resolv_conf_path,
+ * suffix list. @p resolv_conf_path / @p alloc are as above. @p search is a
+ * caller array of @p max_s strings, each KL_DNS_SYS_NAME_MAX wide. On return
+ * *nsearch is the number filled and *ndots the threshold (default 1). */
+void kl_dns_sys_resolv_options(KlAllocator *alloc, const char *resolv_conf_path,
                                char search[][KL_DNS_SYS_NAME_MAX], int max_s,
                                int *nsearch, int *ndots);
 

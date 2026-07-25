@@ -16,6 +16,8 @@ tests/smoke_tcp
 tests/smoke_tcp.exe
 tests/smoke_udp
 tests/smoke_udp.exe
+tests/smoke_dns
+tests/smoke_dns.exe
 
 # Benchmark binary
 bench/bench_server

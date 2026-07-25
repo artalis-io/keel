@@ -1407,8 +1407,9 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
         count = 1;
     } else {
         const char *rc = (cfg && cfg->resolv_conf_path) ? cfg->resolv_conf_path : NULL;
-        count = kl_dns_sys_nameservers(rc, nsbuf, DNS_MAX_NS);
-        kl_dns_sys_resolv_options(rc, r->search, DNS_MAX_SEARCH, &r->nsearch, &r->ndots);
+        count = kl_dns_sys_nameservers(r->alloc, rc, nsbuf, DNS_MAX_NS);
+        kl_dns_sys_resolv_options(r->alloc, rc, r->search, DNS_MAX_SEARCH,
+                                  &r->nsearch, &r->ndots);
         if (count == 0) {
             snprintf(nsbuf[0], sizeof(nsbuf[0]), "127.0.0.1");
             count = 1;

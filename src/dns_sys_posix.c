@@ -20,8 +20,9 @@ static int dns_sys_copy(char *out, size_t cap, const char *a) {
     return 0;
 }
 
-int kl_dns_sys_nameservers(const char *resolv_conf_path,
+int kl_dns_sys_nameservers(KlAllocator *alloc, const char *resolv_conf_path,
                            char out[][KL_DNS_SYS_NS_STRMAX], int max) {
+    (void)alloc;   /* POSIX reads a file — no transient OS-query buffer */
     const char *path = resolv_conf_path ? resolv_conf_path : "/etc/resolv.conf";
     FILE *f = fopen(path, "r");
     if (!f)
@@ -50,9 +51,10 @@ int kl_dns_sys_nameservers(const char *resolv_conf_path,
     return n;
 }
 
-void kl_dns_sys_resolv_options(const char *resolv_conf_path,
+void kl_dns_sys_resolv_options(KlAllocator *alloc, const char *resolv_conf_path,
                                char search[][KL_DNS_SYS_NAME_MAX], int max_s,
                                int *nsearch, int *ndots) {
+    (void)alloc;
     *nsearch = 0;
     *ndots = 1;
     const char *path = resolv_conf_path ? resolv_conf_path : "/etc/resolv.conf";

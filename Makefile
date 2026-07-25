@@ -45,8 +45,9 @@ else ifdef WINDOWS
   PLATFORM_SRC = src/platform_win.c
   SERVER_PLAT_SRC = src/server_plat_win.c
   UDP_IO_SRC = src/udp_io_win.c
+  DNS_SYS_SRC = src/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
-  LDFLAGS += -lws2_32 -lmswsock -lbcrypt
+  LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi
   EXE = .exe
 else
   # Build hardening (parity with Hull's W^X posture in docs/security.md):
@@ -125,16 +126,10 @@ CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/respons
            src/compress.c src/decompress.c src/drain.c \
            $(FILE_IO_SRC) $(EVENT_SRC)
 
-# The built-in DNS resolver's Winsock config-discovery sibling (dns_sys_win.c,
-# iphlpapi) isn't in tree yet — exclude dns_resolver.c + the POSIX dns_sys from
-# the Windows build and swap in dns_resolver_stub.c, which provides
-# kl_dns_resolver_create -> NULL (the client then falls back to blocking
-# getaddrinfo). UDP *is* built on Windows: udp.c + udp_io_win.c (via UDP_IO_SRC)
-# + udp_server.c, per-datagram (no recvmmsg/sendmmsg/GSO/GRO on Winsock).
-ifdef WINDOWS
-  CORE_SRC := $(filter-out src/dns_resolver.c src/dns_sys_posix.c,$(CORE_SRC)) \
-              src/dns_resolver_stub.c
-endif
+# The built-in DNS resolver now builds on every platform: dns_resolver.c is
+# #ifdef-free (over the udp + socket.h seams) and DNS_SYS_SRC swaps the config-
+# discovery TU (dns_sys_posix.c / dns_sys_win.c iphlpapi), so no filtering is
+# needed here.
 
 # Default parser backend (llhttp)
 LLHTTP_SRC = parsers/parser_llhttp.c parsers/response_parser_llhttp.c \
@@ -263,6 +258,14 @@ smoke-udp: $(SMOKE_UDP_BIN)
 $(SMOKE_UDP_BIN): tests/smoke_udp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
+# DNS resolver link + init/resolve smoke test — the Windows CI gate for
+# dns_sys_win.c (iphlpapi config discovery). Single-threaded event loop.
+SMOKE_DNS_BIN = tests/smoke_dns$(EXE)
+smoke-dns: $(SMOKE_DNS_BIN)
+	./$(SMOKE_DNS_BIN)
+$(SMOKE_DNS_BIN): tests/smoke_dns.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
 # Install / uninstall
 PREFIX  ?= /usr/local
 DESTDIR ?=
@@ -285,7 +288,8 @@ keel.pc: keel.pc.in
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
-	rm -f tests/smoke_tcp tests/smoke_tcp.exe tests/smoke_udp tests/smoke_udp.exe
+	rm -f tests/smoke_tcp tests/smoke_tcp.exe tests/smoke_udp tests/smoke_udp.exe \
+	      tests/smoke_dns tests/smoke_dns.exe
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f src/file_io.o src/file_io_iouring.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
@@ -424,4 +428,4 @@ smoke: examples
 	sh tests/e2e_examples.sh
 
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
-        smoke-tcp smoke-udp install uninstall coverage bench
+        smoke-tcp smoke-udp smoke-dns install uninstall coverage bench
