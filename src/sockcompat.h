@@ -40,6 +40,12 @@
     #define KL_HAVE_STRUCT_IOVEC
     struct iovec { void *iov_base; size_t iov_len; };
   #endif
+
+  /* Translate WSAGetLastError() into the CRT errno space (defined in
+   * socket_winsock.c). Shared so the Winsock event backend and kl_plat_poll1
+   * signal would-block/EINTR the same way the socket seam ops do — callers that
+   * branch on errno after a -1 return depend on it. */
+  void kl_wsa_set_errno(void);
 #else
   #include <sys/types.h>
   #include <sys/socket.h>

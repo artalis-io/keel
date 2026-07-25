@@ -136,5 +136,7 @@ int kl_plat_poll1(KlSocketHandle fd, int events, int timeout_ms)
     pfd.events = (SHORT)(((events & KL_POLL_IN) ? POLLRDNORM : 0) |
                          ((events & KL_POLL_OUT) ? POLLWRNORM : 0));
     pfd.revents = 0;
-    return WSAPoll(&pfd, 1, timeout_ms);
+    int r = WSAPoll(&pfd, 1, timeout_ms);
+    if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }   /* errno for the caller */
+    return r;
 }

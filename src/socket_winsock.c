@@ -52,9 +52,14 @@ static int clamp_int(size_t n) {
  * check on Windows sees errno==0 and misfires (the accept loop spins logging
  * "accept: No error"; a pending connect looks like a hard failure). Reading
  * WSAGetLastError() does not clear it, so callers that additionally feed it to
- * kl_sock_errno_to_error() are unaffected. */
-static void wsa_set_errno(void) {
+ * kl_sock_errno_to_error() are unaffected. Shared (declared in sockcompat.h) so
+ * the Winsock event backend (event_wsapoll.c) and kl_plat_poll1 translate the
+ * same way — the server's `errno == EINTR` retry check depends on it. */
+void kl_wsa_set_errno(void) {
     switch (WSAGetLastError()) {
+        /* NB: on MinGW EAGAIN (11) != EWOULDBLOCK (140), unlike POSIX where they
+         * are equal. Callers that test would-block must OR both codes (they do);
+         * code testing EAGAIN alone would misfire on Windows. */
         case WSAEWOULDBLOCK:   errno = EWOULDBLOCK;   break;
         case WSAEINPROGRESS:
         case WSAEALREADY:      errno = EINPROGRESS;   break;
@@ -85,12 +90,14 @@ static void wsa_set_errno(void) {
 
 int kl_sockdef_set_nonblocking(KlSocketHandle fd) {
     u_long mode = 1;
-    return ioctlsocket((SOCKET)fd, FIONBIO, &mode) == 0 ? 0 : -1;
+    if (ioctlsocket((SOCKET)fd, FIONBIO, &mode) != 0) { kl_wsa_set_errno(); return -1; }
+    return 0;
 }
 
 int kl_sockdef_set_blocking(KlSocketHandle fd) {
     u_long mode = 0;
-    return ioctlsocket((SOCKET)fd, FIONBIO, &mode) == 0 ? 0 : -1;
+    if (ioctlsocket((SOCKET)fd, FIONBIO, &mode) != 0) { kl_wsa_set_errno(); return -1; }
+    return 0;
 }
 
 void kl_sockdef_set_cloexec(KlSocketHandle fd) {
@@ -125,57 +132,64 @@ int kl_sockdef_set_cork(KlSocketHandle fd, int on) {
 }
 
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
-    return (KlSocketHandle)socket(domain, type, protocol);
+    SOCKET s = socket(domain, type, protocol);
+    if (s == INVALID_SOCKET) kl_wsa_set_errno();
+    return (KlSocketHandle)s;
 }
 int kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
     if (connect((SOCKET)fd, a, l) == SOCKET_ERROR) {
         /* A non-blocking connect that can't finish immediately reports
          * WSAEWOULDBLOCK on Winsock, but POSIX callers expect EINPROGRESS. */
         if (WSAGetLastError() == WSAEWOULDBLOCK) errno = EINPROGRESS;
-        else wsa_set_errno();
+        else kl_wsa_set_errno();
         return -1;
     }
     return 0;
 }
 int kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    return bind((SOCKET)fd, a, l);
+    if (bind((SOCKET)fd, a, l) == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
+    return 0;
 }
 int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
-    return listen((SOCKET)fd, backlog);
+    if (listen((SOCKET)fd, backlog) == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
+    return 0;
 }
 KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
     SOCKET c = accept((SOCKET)fd, a, l);
-    if (c == INVALID_SOCKET) wsa_set_errno();
+    if (c == INVALID_SOCKET) kl_wsa_set_errno();
     return (KlSocketHandle)c;
 }
 int kl_sockdef_close(KlSocketHandle fd) {
     return closesocket((SOCKET)fd);
 }
 int kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    return getsockname((SOCKET)fd, a, l) == 0 ? 0 : -1;
+    if (getsockname((SOCKET)fd, a, l) != 0) { kl_wsa_set_errno(); return -1; }
+    return 0;
 }
 int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
     int err = 0;
     int len = sizeof(err);   /* Winsock getsockopt optlen is int*, optval char* */
-    if (getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR, (char *)&err, &len) != 0)
+    if (getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR, (char *)&err, &len) != 0) {
+        kl_wsa_set_errno();
         return -1;
+    }
     *out_err = err;   /* WSA* error code — callers only test zero vs non-zero */
     return 0;
 }
 
 ssize_t kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len) {
     int r = send((SOCKET)fd, (const char *)buf, clamp_int(len), 0);
-    if (r == SOCKET_ERROR) { wsa_set_errno(); return -1; }
+    if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
 }
 ssize_t kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len) {
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), 0);
-    if (r == SOCKET_ERROR) { wsa_set_errno(); return -1; }
+    if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
 }
 ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     int r = recv((SOCKET)fd, (char *)buf, clamp_int(len), MSG_PEEK);
-    if (r == SOCKET_ERROR) { wsa_set_errno(); return -1; }
+    if (r == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return r;
 }
 
@@ -186,9 +200,11 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt
     WSABUF stackbufs[16];
     WSABUF *bufs = stackbufs;
     if (iovcnt > (int)(sizeof(stackbufs) / sizeof(stackbufs[0]))) {
-        /* Only the response header+body vectors reach here (<= a few); a large
-         * iovcnt is unexpected — cap to the stack buffer to stay bounded. */
-        iovcnt = (int)(sizeof(stackbufs) / sizeof(stackbufs[0]));
+        /* Only the response header+body vectors reach here (<= a few, capped at
+         * iov[7] by response.c). Fail loud rather than silently dropping the
+         * overflow vectors, which would truncate/corrupt the payload. */
+        errno = EINVAL;
+        return -1;
     }
     for (int i = 0; i < iovcnt; i++) {
         bufs[i].len = (ULONG)iov[i].iov_len;
@@ -197,7 +213,7 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt
     DWORD sent = 0;
     int rc = WSASend((SOCKET)fd, bufs, (DWORD)iovcnt, &sent, 0, NULL, NULL);
     if (rc == SOCKET_ERROR) {
-        wsa_set_errno();
+        kl_wsa_set_errno();
         return -1;
     }
     return (ssize_t)sent;
@@ -226,7 +242,7 @@ ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, siz
                 errno = EWOULDBLOCK;
                 return -1;
             }
-            wsa_set_errno();
+            kl_wsa_set_errno();
             return -1;
         }
         p += nw;

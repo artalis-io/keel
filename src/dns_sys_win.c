@@ -137,8 +137,14 @@ const char *kl_dns_sys_default_hosts_path(void) {
             n = (UINT)strlen(path);
         }
         const char *tail = "\\drivers\\etc\\hosts";
-        if (n + strlen(tail) + 1 <= sizeof(path))
+        if (n + strlen(tail) + 1 <= sizeof(path)) {
             memcpy(path + n, tail, strlen(tail) + 1);
+        } else {
+            /* System dir too long to append the tail — use the full default
+             * rather than caching a truncated directory-only path. */
+            const char *full = "C:\\Windows\\System32\\drivers\\etc\\hosts";
+            memcpy(path, full, strlen(full) + 1);
+        }
     }
     return path;
 }

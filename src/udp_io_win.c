@@ -313,6 +313,7 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
         ssize_t n = 0;
         WSAMSG msg;
         socklen_t src_len = 0;
+        int have_control = 0;   /* cmsgs only valid on a full (non-truncated) recv */
 
         if (want_control) {
             memset(&msg, 0, sizeof(msg));
@@ -330,6 +331,9 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
                     udp->truncated++;
                     n = (ssize_t)udp->recv_buf_size;
                     src_len = (socklen_t)msg.namelen;
+                    /* On WSAEMSGSIZE, WSARecvMsg does not reliably populate
+                     * Control.buf/len — leave have_control 0 so the parse below
+                     * skips the (indeterminate) control buffer for this datagram. */
                 } else {
                     if (e != WSAEWOULDBLOCK)
                         udp->last_error = KL_ERR_IO;
@@ -338,6 +342,7 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
             } else {
                 n = (ssize_t)got;
                 src_len = (socklen_t)msg.namelen;
+                have_control = 1;   /* Control.buf/len valid — safe to parse cmsgs */
                 if (msg.dwFlags & MSG_TRUNC)
                     udp->truncated++;
             }
@@ -362,8 +367,8 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
             }
         }
 
-        socklen_t local_len = (want_control && udp->pktinfo) ? udp_parse_local(udp, &msg) : 0;
-        udp->recv_tos_val = (want_control && udp->recv_tos) ? udp_parse_tos(&msg) : -1;
+        socklen_t local_len = (have_control && udp->pktinfo) ? udp_parse_local(udp, &msg) : 0;
+        udp->recv_tos_val = (have_control && udp->recv_tos) ? udp_parse_tos(&msg) : -1;
 
         /* Windows has no UDP GRO → gro_seg is always 0. */
         kl_udp_deliver(udp, udp->recv_buf, (size_t)n, 0,
