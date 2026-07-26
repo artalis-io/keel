@@ -57,7 +57,7 @@ void kl_event_ctx_free(KlEventCtx *ctx) {
 int kl_watcher_add(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask,
                    KlWatcherFn on_ready, void *user_data)
 {
-    if (!ctx || fd < 0 || !on_ready) return -1;
+    if (!ctx || !kl_handle_valid(fd) || !on_ready) return -1;
 
     /* Idempotent: if fd is already watched, update the existing watcher in
      * place rather than prepending a duplicate node.  A duplicate would
@@ -95,7 +95,7 @@ int kl_watcher_add(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask,
 }
 
 int kl_watcher_mod(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask) {
-    if (!ctx || fd < 0) return -1;
+    if (!ctx || !kl_handle_valid(fd)) return -1;
 
     KlWatcher *w = ctx->watchers;
     while (w && w->fd != fd) w = w->next;
@@ -107,7 +107,7 @@ int kl_watcher_mod(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask) {
 }
 
 int kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd) {
-    if (!ctx || fd < 0) return -1;
+    if (!ctx || !kl_handle_valid(fd)) return -1;
 
     KlWatcher *w = ctx->watchers;
     while (w && w->fd != fd) w = w->next;
@@ -117,7 +117,7 @@ int kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd) {
 }
 
 void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd) {
-    if (!ctx || fd < 0) return;
+    if (!ctx || !kl_handle_valid(fd)) return;
 
     KlAllocator *a = ctx->alloc;
     KlWatcher **pp = &ctx->watchers;

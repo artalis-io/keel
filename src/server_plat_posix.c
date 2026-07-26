@@ -320,6 +320,20 @@ int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out) {
 #endif
 }
 
+unsigned kl_platform_caps(void) {
+    /* Mirrors kl_peer_cred_fd's per-dialect support (F5: POSIX dialects are the
+     * PAL TU's own business). systemd socket activation is a Linux concept. */
+    unsigned caps = 0;
+#if defined(__linux__) && defined(SO_PEERCRED)
+    caps |= KL_PLATCAP_PEER_CRED | KL_PLATCAP_PEER_CRED_PID | KL_PLATCAP_SYSTEMD_ACTIVATION;
+#elif defined(__APPLE__)
+    caps |= KL_PLATCAP_PEER_CRED | KL_PLATCAP_PEER_CRED_PID;   /* getpeereid + LOCAL_PEERPID */
+#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    caps |= KL_PLATCAP_PEER_CRED;                              /* getpeereid: uid/gid only */
+#endif
+    return caps;
+}
+
 void kl_srv_unsetenv(const char *name) {
     unsetenv(name);
 }

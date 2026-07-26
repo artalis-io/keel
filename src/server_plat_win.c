@@ -125,6 +125,10 @@ int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out) {
     return -1;
 }
 
+unsigned kl_platform_caps(void) {
+    return 0;   /* no SO_PEERCRED, no systemd socket activation on Windows */
+}
+
 int kl_srv_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen) {
     (void)fd; (void)buf; (void)buflen;
     return -1;

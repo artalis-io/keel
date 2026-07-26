@@ -255,9 +255,35 @@ typedef struct {
 void kl_server_stats(const KlServer *s, KlServerStats *out);
 
 /**
+ * @brief Optional platform capabilities.
+ *
+ * A few server helpers below are only meaningful on certain platforms and
+ * return -1 (or fail) elsewhere: the peer-credential and systemd socket-
+ * activation calls. Rather than relying on a -1 return to discover support,
+ * query kl_platform_caps() and gate the calls on the relevant bit — this makes
+ * the portability contract explicit and keeps platform assumptions out of
+ * application logic.
+ */
+typedef enum {
+    KL_PLATCAP_PEER_CRED          = 1u << 0, /**< kl_request_peer_cred / kl_peer_cred_fd yield uid+gid (AF_UNIX; POSIX) */
+    KL_PLATCAP_PEER_CRED_PID      = 1u << 1, /**< peer credentials also include the peer pid (Linux SO_PEERCRED / macOS LOCAL_PEERPID) */
+    KL_PLATCAP_SYSTEMD_ACTIVATION = 1u << 2  /**< kl_systemd_listen_fd* honor the systemd LISTEN_FDS protocol (Linux/systemd) */
+} KlPlatformCap;
+
+/**
+ * @brief Bitmask of KlPlatformCap values supported by this build/platform.
+ *
+ * Resolved by the platform slice (server_plat_*), so it reflects the actual
+ * target — e.g. PEER_CRED|PEER_CRED_PID|SYSTEMD_ACTIVATION on Linux, PEER_CRED|
+ * PEER_CRED_PID on macOS, 0 on Windows.
+ */
+unsigned kl_platform_caps(void);
+
+/**
  * @brief Read the peer credentials of a request's connection.
  *
- * Only meaningful for connections accepted on a UNIX-domain socket.
+ * Only meaningful for connections accepted on a UNIX-domain socket, and only
+ * where KL_PLATCAP_PEER_CRED is set (see kl_platform_caps()).
  *
  * @param req  The request (its connection fd is queried).
  * @param out  Receives the peer credentials on success.
