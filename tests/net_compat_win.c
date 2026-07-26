@@ -5,6 +5,10 @@
  * has no socketpair() and no pollable pipes, so the pair is a self-connected
  * loopback TCP pair; close/read/write map to closesocket/recv/send. See
  * tests/net_compat.h.
+ *
+ * Precondition: Winsock must already be initialized (WSAStartup) before these
+ * helpers are called — the library does this at load (socket_winsock.c's
+ * constructor), which every test links, so tests need no explicit WSAStartup.
  */
 #include "net_compat.h"
 

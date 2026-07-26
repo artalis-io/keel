@@ -1,5 +1,94 @@
 # C Audit Report: KEEL
 
+## Fourth pass — mbedTLS backend + test shim + parser re-audit (2026-07-26)
+
+**Scope:** the surface that changed since the third pass — `src/tls_mbedtls.c`
+(significantly refactored: BIO callbacks routed through the socket seam, fds
+retyped to `KlSocketHandle`, a shared `server_ctx_from_mem` + new
+`kl_tls_mbedtls_ctx_create_from_buf`), the new test-network shim
+(`tests/net_compat.{h,c}` posix/win + `tests/smoke_tls.c`), and a regression
+re-audit of the untrusted-input parsers after the Winsock seam sweep + socket-
+handle retype.
+**Method:** three parallel source-level auditors — (1) deep `tls_mbedtls.c`
+memory-safety (peer-cert extraction on untrusted mTLS input, error-path free
+discipline, allocator/key-material handling), (2) the `net_compat` shim +
+`smoke_tls` resource safety, (3) a regression re-check of `dns_resolver`,
+`proxy_protocol`, `url`, `websocket`, `chunked`, `connection` — plus a tooling
+sweep (dangerous functions, VLAs, raw alloc, cppcheck, and an ASan+UBSan real-
+handshake run of the mbedTLS backend).
+
+**Issues found: 3** (Critical: 0, High: 0, Medium: 0, **Low: 2, Doc: 1**) —
+**all fixed.**
+
+The TLS backend came through clean. The auditors confirmed the hard parts sound:
+the peer-cert CN/SAN extraction (`x509_extract_cn`/`x509_extract_san`) is
+bounds-safe on attacker-controlled certs — every `memcpy` into the fixed `subject_cn`/
+`issuer_cn`(256)/`san`(512) buffers is length-clamped before the copy, the
+comma-separated SAN accumulator checks `off + ilen (+1) >= outlen` *before* every
+write and always NUL-terminates, and the SHA-256 fingerprint fits its `char[65]`
+exactly; the refactored ctx-creation error paths free each mbedTLS structure
+exactly once and scrub key material (`kl_secure_zero`) on every path that owns the
+key buffer (success and every early return); `read_file`'s length handling
+(negative `ftell`, 1 MB cap, `len+1`) is safe; the BIO `kl_sockdef_send`/`recv`
+errno→mbedTLS mapping is correct on both platforms; allocator create/destroy is
+paired with the right sizes and the shared ctx is never double-freed. The
+untrusted-input parsers showed **no regression** from the seam/handle changes —
+the seam preserves the POSIX `ssize_t` contract and every `fd < 0` check migrated
+to `kl_handle_valid`. Tooling: no dangerous functions, no VLAs, no unsanctioned
+allocation, cppcheck clean, and the mbedTLS backend runs a real loopback handshake
+clean under ASan+UBSan.
+
+---
+
+### Low
+
+**L1 — `x509_extract_cn` / `x509_extract_san`: defensive `outlen == 0` guard**
+**`src/tls_mbedtls.c`** — *fixed.* Both peer-cert extractors wrote `out[0] = '\0'`
+unconditionally and (CN) computed `outlen - 1`; safe with today's callers (fixed
+256/512 buffers), but a future `outlen == 0` caller would write OOB / underflow.
+Added `if (outlen == 0) return;` at the top of each — defense-in-depth on
+untrusted-input functions.
+
+**L2 — `tests/smoke_tls.c`: client URL hard-coded the port instead of `SMOKE_PORT`**
+**`tests/smoke_tls.c`** — *fixed.* The HTTPS URL literal duplicated `18443`; if
+`SMOKE_PORT` changed, the client would silently target the old port and the test
+would fail confusingly. Now built with `snprintf` from `SMOKE_PORT`.
+
+### Documentation
+
+**D1 — `tests/net_compat_win.c`: undocumented WSAStartup precondition**
+**`tests/net_compat_win.c`** — *fixed.* The loopback-pair helper needs Winsock
+initialized; the library's load-time `WSAStartup` (socket_winsock.c) covers every
+test, but that was implicit. Added a precondition note to the file comment.
+
+### Areas audited clean (no findings)
+- **`tls_mbedtls.c` peer-cert extraction** — bounds-safe on untrusted mTLS certs
+  (clamped CN/SAN copies, pre-write accumulator bound, exact-fit fingerprint).
+- **`tls_mbedtls.c` ctx error paths** — each mbedTLS struct freed once; key
+  material scrubbed on all owning paths; no double-free/leak/UAF; correct free
+  sizes; shared ctx not freed per-connection.
+- **`tls_mbedtls.c` BIO + fd** — seam-routed I/O, correct errno mapping,
+  `KlSocketHandle`/`KL_INVALID_SOCKET` throughout, transport owns the fd.
+- **`net_compat_win.c` `kl_test_socketpair`** — each of listener/client/server
+  closed exactly once on every `goto fail`, no double-close on success, no SOCKET
+  leak, `addrlen` initialized before `getsockname`.
+- **`smoke_tls.c` lifetimes** — server ctx freed on all paths (direct on init
+  fail; via `kl_server_free` otherwise), per-iteration client ctx destroyed once,
+  server stopped+joined before ctx destroy.
+- **Untrusted-input parsers** (`dns_resolver`, `proxy_protocol`, `url`,
+  `websocket`, `chunked`, `connection`) — no regression; all bounds checks,
+  length math, anti-spoof, and smuggling guards intact after the seam/handle sweep.
+- **Tooling** — no `strcpy`/`sprintf`/`atoi`/`alloca`/…; no VLAs; no libc alloc
+  outside `allocator.c`; `make cppcheck` clean; mbedTLS backend real-handshake
+  ASan+UBSan green; full ASan+UBSan gauntlet green in CI on `main`.
+
+## Recommendation
+All three findings fixed. The mbedTLS backend — including the untrusted-input
+peer-cert parsers and the refactored error paths — is well-bounded and now
+platform-neutral. No further action.
+
+---
+
 ## Third pass — Windows/Winsock PAL surface (2026-07-25)
 
 **Scope:** the Windows platform TUs that landed with PAL Phase 6 (the Winsock

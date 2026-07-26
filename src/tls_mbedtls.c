@@ -217,6 +217,8 @@ static const char *tls_alpn_protocol(KlTls *self)
 /* Copy the CommonName RDN of an X.509 name into a NUL-terminated buffer. */
 static void x509_extract_cn(const mbedtls_x509_name *name, char *out, size_t outlen)
 {
+    if (outlen == 0)
+        return;   /* defensive: no room even for the NUL */
     out[0] = '\0';
     for (const mbedtls_x509_name *n = name; n != NULL; n = n->next) {
         if (MBEDTLS_OID_CMP(MBEDTLS_OID_AT_CN, &n->oid) == 0) {
@@ -233,6 +235,8 @@ static void x509_extract_cn(const mbedtls_x509_name *name, char *out, size_t out
 /* Render the subjectAltName sequence as a comma-separated "DNS:x,IP:y" list. */
 static void x509_extract_san(const mbedtls_x509_sequence *seq, char *out, size_t outlen)
 {
+    if (outlen == 0)
+        return;   /* defensive: no room even for the NUL */
     out[0] = '\0';
     size_t off = 0;
     for (const mbedtls_x509_sequence *cur = seq; cur != NULL; cur = cur->next) {
