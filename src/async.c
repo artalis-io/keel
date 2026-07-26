@@ -53,21 +53,32 @@ void kl_event_ctx_free(KlEventCtx *ctx) {
     kl_event_close(&ctx->loop);
 }
 
-/* PAL Phase 7: negotiate the event loop against the socket provider. The neutral
- * meeting point — this ctx already holds both the loop and the provider, so the
- * socket seam and the event axis stay decoupled (F3). Today only the readiness +
- * native-fd model exists: the provider must expose native fds AND the loop must be
- * a native-fd readiness poller. A NULL provider is the built-in POSIX default
- * (native-fd). A future completion loop or a non-native provider is rejected here
- * rather than failing obscurely at kl_event_add. */
-int kl_event_ctx_sockets_compatible(const struct KlEventCtx *ctx) {
-    if (!ctx) return 0;
-    unsigned ev = kl_event_caps(&ctx->loop);
-    int provider_native = kl_socket_provider_has_cap(ctx->sockets, KL_SOCK_CAP_NATIVE_FD);
+/* PAL Phase 7/8: negotiate an event loop against a socket provider. Pure over the
+ * two axes (event model × handle domain), taking the loop caps explicitly so it is
+ * unit-testable without a real backend. F3-safe: reads only capability bits, never
+ * crosses the socket↔event seam. A NULL provider is the built-in POSIX default. */
+int kl_caps_compatible(unsigned ev_caps, const struct KlSocketProvider *sockets) {
+    if (ev_caps & KL_EVENT_CAP_COMPLETION) {
+        /* Completion model (Phase 8, IOCP): the provider must route I/O through the
+         * loop's overlapped submit path rather than synchronous send/recv. */
+        return kl_socket_provider_has_cap(sockets, KL_SOCK_CAP_OVERLAPPED);
+    }
+    /* Readiness model (shipped): provider exposes native fds AND the loop is a
+     * native-fd readiness poller. */
+    int provider_native = kl_socket_provider_has_cap(sockets, KL_SOCK_CAP_NATIVE_FD);
     int loop_watches_fds =
-        (ev & (KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD)) ==
+        (ev_caps & (KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD)) ==
         (KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD);
     return provider_native && loop_watches_fds;
+}
+
+/* PAL Phase 7: negotiate the ctx's event loop against its socket provider. The
+ * neutral meeting point — this ctx already holds both the loop and the provider, so
+ * the socket seam and the event axis stay decoupled (F3). Rejects an incoherent
+ * pairing here rather than failing obscurely at kl_event_add. */
+int kl_event_ctx_sockets_compatible(const struct KlEventCtx *ctx) {
+    if (!ctx) return 0;
+    return kl_caps_compatible(kl_event_caps(&ctx->loop), ctx->sockets);
 }
 
 /* ── KlWatcher ─────────────────────────────────────────────────────── */

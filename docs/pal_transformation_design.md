@@ -244,6 +244,17 @@ OVERLAPPED). Grep-assertable litmus tests enforce the containment; the crux/stop
 condition is whether the transport/protocol-core split holds without the completion
 concept leaking into the shared core.
 
+**Phase 8a is landing incrementally** (IOCP is Windows-runtime-only — the completion
+path is validated by a Windows CI oracle, not the dev host). *Increment 1 — the
+completion-model negotiation — done:* an internal `KL_SOCK_CAP_OVERLAPPED` bit
+(reserved from the public cap space, kept out of `<keel/socket.h>`), and the Phase 7
+negotiation generalized into a pure `kl_caps_compatible(ev_caps, provider)` with a
+completion arm (a `KL_EVENT_CAP_COMPLETION` loop requires an `OVERLAPPED` provider;
+the readiness arm is unchanged). Unit-tested on POSIX across the full matrix
+(`test_event_caps`) even without an IOCP backend. Remaining increments: the IOCP
+event backend + overlapped provider + completion connection driver + `BACKEND=iocp`
+build and the Windows-IOCP CI job.
+
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
 
