@@ -137,8 +137,16 @@ ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     do { r = recv((int)fd, buf, len, MSG_PEEK); } while (r < 0 && errno == EINTR);
     return r;
 }
-ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
-    return writev((int)fd, iov, iovcnt);
+ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
+    /* Translate the Keel-owned vector into POSIX struct iovec here, so struct
+     * iovec never escapes this provider TU. */
+    if (iovcnt <= 0 || iovcnt > KL_SOCK_IOV_MAX) { errno = EINVAL; return -1; }
+    struct iovec sysv[KL_SOCK_IOV_MAX];
+    for (int i = 0; i < iovcnt; i++) {
+        sysv[i].iov_base = iov[i].base;
+        sysv[i].iov_len  = iov[i].len;
+    }
+    return writev((int)fd, sysv, iovcnt);
 }
 
 ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
@@ -238,7 +246,7 @@ static ssize_t psx_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
 static ssize_t psx_recv_peek(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx; return kl_sockdef_recv_peek(fd, buf, len);
 }
-static ssize_t psx_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
+static ssize_t psx_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
 }
 static ssize_t psx_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {

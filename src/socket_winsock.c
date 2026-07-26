@@ -193,11 +193,12 @@ ssize_t kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len) {
     return r;
 }
 
-/* Vectored write via WSASend. struct iovec (base,len) -> WSABUF (len,buf). */
-ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
+/* Vectored write via WSASend. KlIoVec (base,len) -> WSABUF (len,buf) — WSABUF
+ * stays inside this provider TU. */
+ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     if (iovcnt <= 0)
         return 0;
-    WSABUF stackbufs[16];
+    WSABUF stackbufs[KL_SOCK_IOV_MAX];
     WSABUF *bufs = stackbufs;
     if (iovcnt > (int)(sizeof(stackbufs) / sizeof(stackbufs[0]))) {
         /* Only the response header+body vectors reach here (<= a few, capped at
@@ -207,8 +208,8 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt
         return -1;
     }
     for (int i = 0; i < iovcnt; i++) {
-        bufs[i].len = (ULONG)iov[i].iov_len;
-        bufs[i].buf = (CHAR *)iov[i].iov_base;
+        bufs[i].len = (ULONG)iov[i].len;
+        bufs[i].buf = (CHAR *)iov[i].base;
     }
     DWORD sent = 0;
     int rc = WSASend((SOCKET)fd, bufs, (DWORD)iovcnt, &sent, 0, NULL, NULL);
@@ -314,7 +315,7 @@ static ssize_t wsk_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
 static ssize_t wsk_recv_peek(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx; return kl_sockdef_recv_peek(fd, buf, len);
 }
-static ssize_t wsk_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
+static ssize_t wsk_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
 }
 static ssize_t wsk_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {

@@ -26,6 +26,20 @@
 #include <keel/error.h>
 #include <keel/handle.h>
 
+/* Keel-owned scatter-gather vector — the seam's I/O-vector currency. Layout is
+ * deliberately distinct from POSIX `struct iovec` / Winsock `WSABUF` so those
+ * platform types never appear outside a provider TU (which translates KlIoVec ->
+ * its native vector). Destined for the public keel/socket.h (Phase 4). */
+typedef struct KlIoVec {
+    void  *base;
+    size_t len;
+} KlIoVec;
+
+/* Upper bound on scatter-gather segments a provider must handle in one writev.
+ * Response assembly uses <= 7 (status line + headers + body); a provider
+ * translates into a stack vector of this size and fails EINVAL beyond it. */
+#define KL_SOCK_IOV_MAX 16
+
 /* Provider operation table. `ctx` is the provider's own context (NULL for the
  * built-in POSIX provider). Any op may be NULL, in which case the wrapper falls
  * back to the POSIX implementation. */
@@ -78,7 +92,7 @@ typedef struct KlSocketOps {
      * pread-sends instead. POSIX fills these; Winsock will use WSASend /
      * TransmitFile. `in_fd` is a *file* descriptor (stays int — a CRT fd on
      * Windows); `out_fd` is a socket handle. `sendfile` advances `*offset`. */
-    ssize_t (*writev)(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt);
+    ssize_t (*writev)(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
     ssize_t (*sendfile)(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count);
     /* lifecycle: release provider-owned context. May be NULL (nothing to free,
      * e.g. the static POSIX provider). */
@@ -132,7 +146,7 @@ int            kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err);
 ssize_t        kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len);
 ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
 ssize_t        kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len);
-ssize_t        kl_sockdef_writev(KlSocketHandle fd, const struct iovec *iov, int iovcnt);
+ssize_t        kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
 ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count);
 
 /*
@@ -250,7 +264,7 @@ static inline ssize_t kl_sock_recv_peek(const KlSocketProvider *p, KlSocketHandl
 }
 
 static inline ssize_t kl_sock_writev(const KlSocketProvider *p, KlSocketHandle fd,
-                                     const struct iovec *iov, int iovcnt) {
+                                     const KlIoVec *iov, int iovcnt) {
     if (p && p->ops->writev) return p->ops->writev(p->context, fd, iov, iovcnt);
     return kl_sockdef_writev(fd, iov, iovcnt);
 }
