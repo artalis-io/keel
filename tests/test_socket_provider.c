@@ -11,9 +11,13 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/udp.h>
+#include <keel/server.h>
+#include <keel/client.h>
 
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
+#include <pthread.h>
 #include "net_compat.h"
 
 /* ── Programmable mock provider ────────────────────────────────────── */
@@ -360,6 +364,98 @@ UTEST(sockprov, writev_sendfile_op_dispatch) {
     ASSERT_EQ((ssize_t)100, kl_sock_sendfile(&p, 9, 9, &off, 100)); /* dispatches to op */
     ASSERT_EQ(1, m.sendfile_calls);
     ASSERT_EQ((uint64_t)100, off);
+}
+
+/* ── Provider SELECTION via public config (Phase 4 step 3) ─────────────── */
+
+/* A native-fd decorator over the built-in defaults: counts socket()/accept()/
+ * connect() and delegates everything else (NULL ops fall back to kl_sockdef_*).
+ * Advertises NATIVE_FD so the readiness server/client accept it. */
+typedef struct { int socket_calls, accept_calls, connect_calls; } Deco;
+
+static KlSocketHandle deco_socket(void *ctx, int d, int t, int p) {
+    ((Deco *)ctx)->socket_calls++;
+    return kl_sockdef_socket(d, t, p);
+}
+static KlSocketHandle deco_accept(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+    ((Deco *)ctx)->accept_calls++;
+    return kl_sockdef_accept(fd, a, l);
+}
+static int deco_connect(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+    ((Deco *)ctx)->connect_calls++;
+    return kl_sockdef_connect(fd, a, l);
+}
+static const KlSocketOps deco_ops = {
+    .socket = deco_socket, .accept = deco_accept, .connect = deco_connect, .name = "deco",
+};
+
+/* A minimal ops table with NO native-fd capability — used only to prove the
+ * guard rejects it (its ops are never invoked). */
+static const KlSocketOps nonnative_ops = { .name = "nonnative" };
+
+static void deco_ok_handler(KlRequest *req, KlResponse *res, void *u) {
+    (void)req; (void)u;
+    kl_response_json(res, 200, "{\"ok\":true}", 11);
+}
+static void *deco_server_thread(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+
+/* #1 — the native-fd guard: a non-native provider is rejected at init; a native
+ * one (and NULL = built-in) is accepted. */
+UTEST(sockprov, select_native_fd_guard) {
+    KlSocketProvider nonnative = { &nonnative_ops, NULL, 0 };  /* no NATIVE_FD */
+    KlServer s;
+    KlConfig bad = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &nonnative };
+    ASSERT_EQ(-1, kl_server_init(&s, &bad));
+    ASSERT_EQ(KL_ERR_SOCKET, s.last_error);
+
+    Deco d = {0,0,0};
+    KlSocketProvider native = { &deco_ops, &d, KL_SOCK_CAP_NATIVE_FD };
+    KlServer s2;
+    KlConfig good = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &native };
+    ASSERT_EQ(0, kl_server_init(&s2, &good));
+    kl_server_free(&s2);
+}
+
+/* #2 — end-to-end selection: a decorator provider on BOTH the server
+ * (KlConfig.sockets) and the client (KlClientConfig.sockets), over a real
+ * loopback request. The listen socket + accept flow through the server decorator;
+ * the client socket + connect flow through the client decorator. (The listen
+ * socket is created in kl_server_run, not _init, so this needs a running server.
+ * Fixed port, like the smoke tests, to avoid a cross-thread bound_port read.) */
+UTEST(sockprov, provider_selection_end_to_end) {
+    Deco sd = {0,0,0}, cd = {0,0,0};
+    KlSocketProvider sprov = { &deco_ops, &sd, KL_SOCK_CAP_NATIVE_FD };
+    KlServer s;
+    KlConfig scfg = { .port = 19099, .bind_addr = "127.0.0.1", .sockets = &sprov };
+    ASSERT_EQ(0, kl_server_init(&s, &scfg));
+    kl_server_route(&s, "GET", "/", deco_ok_handler, NULL, NULL);
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, deco_server_thread, &s));
+
+    KlSocketProvider cprov = { &deco_ops, &cd, KL_SOCK_CAP_NATIVE_FD };
+    KlAllocator a = kl_allocator_default();
+    int ok = 0;
+    for (int i = 0; i < 50 && !ok; i++) {
+        struct timespec ts = { 0, 30 * 1000000L };
+        nanosleep(&ts, NULL);
+        KlClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cprov };
+        KlClientResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        if (kl_client_request(&a, &ccfg, "GET", "http://127.0.0.1:19099/",
+                              NULL, 0, NULL, 0, &resp) == 0) {
+            ok = (resp.status == 200);
+            kl_client_response_free(&resp);
+        }
+    }
+    kl_server_stop(&s);
+    pthread_join(th, NULL);
+    kl_server_free(&s);
+
+    ASSERT_TRUE(ok);
+    ASSERT_GT(sd.socket_calls, 0);   /* server listen socket via its provider */
+    ASSERT_GT(sd.accept_calls, 0);   /* accepted connection via its provider */
+    ASSERT_GT(cd.socket_calls, 0);   /* client socket via its provider */
+    ASSERT_GT(cd.connect_calls, 0);  /* ...and connected through it */
 }
 
 UTEST_MAIN();

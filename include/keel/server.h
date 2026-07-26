@@ -3,6 +3,7 @@
 
 #include <keel/allocator.h>
 #include <keel/handle.h>
+#include <keel/socket.h>
 #include <keel/compress.h>
 #include <keel/error.h>
 #include <keel/parser.h>
@@ -87,6 +88,10 @@ typedef struct KlConfig {
                                  *   0 = disabled (KEEL creates its own socket). Transport is
                                  *   auto-detected from the fd; KEEL never unlinks an adopted
                                  *   UNIX socket. See kl_systemd_listen_fd(). */
+    const KlSocketProvider *sockets; /**< custom socket provider (bring-your-own stack);
+                                      *   NULL = built-in POSIX/Winsock default. Must advertise
+                                      *   KL_SOCK_CAP_NATIVE_FD — the readiness event loop needs a
+                                      *   pollable OS descriptor (rejected at init otherwise). */
 } KlConfig;
 
 /**
