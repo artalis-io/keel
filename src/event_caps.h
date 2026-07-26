@@ -31,11 +31,20 @@
  * vs completion) but is unused by today's readiness backends. */
 unsigned kl_event_caps(const KlEventLoop *loop);
 
-/* Can the ctx's event loop watch the ctx's socket provider's handles? For the only
- * model shipped (readiness over native fds): the provider must expose native fds
- * AND the loop must be a native-fd readiness poller. Returns 1 if compatible, 0 if
- * not. A NULL provider is the built-in POSIX (native-fd) default. Defined in
- * async.c (the KlEventCtx wire-up); KlEventCtx is opaque here on purpose. */
+/* Pure negotiation over the two axes — takes the event-loop caps explicitly (so it
+ * is unit-testable without a real backend). Returns 1 if the loop can drive the
+ * provider, 0 if not. A NULL provider is the built-in POSIX (native-fd) default.
+ *   - completion loop (KL_EVENT_CAP_COMPLETION): the provider must route I/O through
+ *     the loop's overlapped submit path (KL_SOCK_CAP_OVERLAPPED).
+ *   - readiness loop: the provider must expose native fds AND the loop must be a
+ *     native-fd readiness poller.
+ * Defined in async.c; KlSocketProvider is opaque here (F3: no socket-seam include). */
+struct KlSocketProvider;
+int kl_caps_compatible(unsigned ev_caps, const struct KlSocketProvider *sockets);
+
+/* Can the ctx's event loop watch/drive the ctx's socket provider? Convenience wrapper
+ * over kl_caps_compatible with the ctx's actual backend caps. Defined in async.c;
+ * KlEventCtx is opaque here on purpose. */
 struct KlEventCtx;
 int kl_event_ctx_sockets_compatible(const struct KlEventCtx *ctx);
 

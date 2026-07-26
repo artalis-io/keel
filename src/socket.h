@@ -25,6 +25,14 @@
 #include <keel/socket.h>      /* public: KlSocketProvider/KlSocketOps/KlIoVec/caps/... */
 #include "sockcompat.h"       /* ssize_t (+ struct sockaddr / socklen_t on both platforms) */
 
+/* Internal socket-provider capability (PAL Phase 8), reserving bit 3 out of the
+ * public KL_SOCK_CAP_* space (bits 0-2 in <keel/socket.h>). Kept OUT of the public
+ * header on purpose: completion-mode I/O is an internal event-axis concern — the
+ * provider's data plane is driven by the completion loop's overlapped submit path
+ * (WSARecv/WSASend) rather than the synchronous send/recv ops. A completion event
+ * loop negotiates against this bit (see kl_caps_compatible). No public API change. */
+#define KL_SOCK_CAP_OVERLAPPED (1ull << 3)
+
 /*
  * Platform default socket ops — the raw syscall for each operation, DEFINED
  * per-platform in the provider TU (socket_posix.c: POSIX; socket_winsock.c:

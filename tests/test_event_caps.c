@@ -12,6 +12,7 @@
  */
 #include "utest.h"
 #include "../src/event_caps.h"
+#include "../src/socket.h"   /* internal KL_SOCK_CAP_OVERLAPPED (Phase 8) */
 
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
@@ -29,6 +30,12 @@ static const KlSocketProvider native_provider = {
  * readiness loop cannot watch. */
 static const KlSocketProvider non_native_provider = {
     &stub_ops, NULL, KL_SOCK_CAP_WRITEV,
+};
+
+/* Overlapped provider (Phase 8 / IOCP): native SOCKET handles whose I/O is driven
+ * by the completion loop's submit path. */
+static const KlSocketProvider overlapped_provider = {
+    &stub_ops, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED,
 };
 
 UTEST(event_caps, backend_advertises_readiness_native_fd) {
@@ -79,6 +86,25 @@ UTEST(event_caps, rejects_non_native_provider) {
 UTEST(event_caps, null_ctx_is_incompatible) {
     /* Defensive: a NULL ctx negotiates as incompatible, never a crash. */
     ASSERT_FALSE(kl_event_ctx_sockets_compatible(NULL));
+}
+
+/* The full negotiation matrix over both axes, via the pure helper — unit-testable
+ * without a real IOCP backend (Phase 8's completion arm). */
+UTEST(event_caps, negotiation_matrix_readiness) {
+    unsigned readiness = KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
+    ASSERT_TRUE(kl_caps_compatible(readiness, NULL));                    /* POSIX default */
+    ASSERT_TRUE(kl_caps_compatible(readiness, &native_provider));        /* native fd */
+    ASSERT_TRUE(kl_caps_compatible(readiness, &overlapped_provider));    /* also native */
+    ASSERT_FALSE(kl_caps_compatible(readiness, &non_native_provider));   /* not watchable */
+}
+
+UTEST(event_caps, negotiation_matrix_completion) {
+    unsigned completion = KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
+    /* A completion loop needs a provider that routes I/O through its submit path. */
+    ASSERT_TRUE(kl_caps_compatible(completion, &overlapped_provider));   /* OVERLAPPED */
+    ASSERT_FALSE(kl_caps_compatible(completion, &native_provider));      /* sync send/recv only */
+    ASSERT_FALSE(kl_caps_compatible(completion, NULL));                  /* POSIX default */
+    ASSERT_FALSE(kl_caps_compatible(completion, &non_native_provider));
 }
 
 UTEST_MAIN();
