@@ -108,7 +108,7 @@ PORT=19800
 # ── Standalone examples (run, check exit 0) ────────────────────────────
 
 test_standalone() {
-  for name in custom_allocator connection_pool url_parser timer redirect_client proxy_client; do
+  for name in custom_allocator custom_socket_provider connection_pool url_parser timer redirect_client proxy_client; do
     bin="examples/$name"
     echo "=== $name ==="
     if [ ! -x "$bin" ]; then

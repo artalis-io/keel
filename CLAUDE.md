@@ -35,7 +35,7 @@ make clean        # remove all build artifacts
 35 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
-2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) event loop abstraction
+2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) / WSAPoll (Windows) event loop abstraction
 3. **event_ctx** — Composable event loop context (KlEventCtx: loop + allocator + watcher list)
 4. **request** — Parsed HTTP request struct (header-only, zero alloc)
 5. **parser** — Pluggable request/response parser vtables (ships with llhttp backend)

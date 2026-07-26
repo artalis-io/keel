@@ -4,7 +4,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/artalis-io/keel/badge)](https://scorecard.dev/viewer/?uri=github.com/artalis-io/keel)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12186/badge)](https://www.bestpractices.dev/projects/12186)
 
-Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
+Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll/WSAPoll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
 **101K req/s** on a single thread. **676 tests** (41 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
 
@@ -185,9 +185,48 @@ See `examples/unix_socket_server.c` for a server demonstrating all three.
 - **`kl_systemd_listen_fds(&count)`** reports how many fds were passed
   (consecutive from fd 3); `KlConfig.listen_fd` adopts one at a time.
 
+## Custom socket provider
+
+The socket layer is a pluggable vtable (`<keel/socket.h>`), so you can run KEEL
+over a non-POSIX stack (Winsock is built in; lwIP / a test mock / an
+instrumentation decorator fit the same interface). A provider is an immutable ops
+table + context + capability flags:
+
+```c
+#include <keel/socket.h>
+
+/* Decorate the built-in provider: count bytes, forward the rest. */
+typedef struct { const KlSocketProvider *base; long tx; } Ctx;
+static kl_ssize_t my_send(void *c, KlSocketHandle fd, const void *b, size_t n) {
+    Ctx *x = c;
+    kl_ssize_t r = x->base->ops->send(x->base->context, fd, b, n);
+    if (r > 0) x->tx += r;
+    return r;
+}
+static const KlSocketOps ops = { .send = my_send, .name = "counting" };
+/* Ops left NULL fall back to KEEL's built-in default. */
+
+Ctx ctx = { .base = kl_socket_provider_posix() };
+KlSocketProvider prov = { &ops, &ctx, KL_SOCK_CAP_NATIVE_FD };
+
+/* Select it — server: */
+KlConfig cfg = { .port = 8080, .sockets = &prov };
+/* ...or client: */
+KlClientConfig ccfg = { .sockets = &prov };
+```
+
+Portability contract: the API exposes no platform-only types — sizes are
+`kl_ssize_t`, scatter-gather is `KlIoVec`, the sendfile offset is `uint64_t`; a
+provider translates to its native shapes (`struct iovec`/`WSABUF`/`off_t`)
+internally. A provider advertises what it supports via `KL_SOCK_CAP_*`
+(`NATIVE_FD`, `WRITEV`, `SENDFILE`) and KEEL falls back for anything it lacks —
+except the **server requires `KL_SOCK_CAP_NATIVE_FD`** (the readiness event loop
+polls real descriptors; a non-native provider is rejected at `kl_server_init`).
+Full runnable demo: **`examples/custom_socket_provider.c`**.
+
 ## Features
 
-- **Four event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (POLL_ADD), poll (universal POSIX fallback)
+- **Five event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (POLL_ADD), poll (universal POSIX fallback), WSAPoll (Windows/Winsock)
 - **TCP or UNIX socket servers** — same HTTP stack over TCP/IP or `AF_UNIX/SOCK_STREAM`
 - **Pluggable HTTP parser** — ships with llhttp, swap via `KlConfig.parser`
 - **Pluggable TLS** — bring your own BearSSL/LibreSSL/OpenSSL via vtable, zero vendored TLS code
@@ -219,6 +258,7 @@ See `examples/unix_socket_server.c` for a server demonstrating all three.
 - **Server load introspection** — `kl_server_stats()` for connection counts, enabling user-space load-shedding middleware
 - **Pre-allocated connection pool** — no per-request malloc, no fragmentation under load
 - **Pluggable allocator** — bring your own arena/pool/tracking allocator
+- **Pluggable socket provider** — bring your own socket stack (Winsock built in, lwIP-ready) via a capability-gated vtable; select per server/client. See [Custom socket provider](#custom-socket-provider)
 - **pledge/unveil sandboxing** — init/run split makes syscall lockdown natural
 - **Zero-copy techniques** — header pointers into read buffer, sendfile, writev batching
 
@@ -229,7 +269,7 @@ See `examples/unix_socket_server.c` for a server demonstrating all three.
 | Module | Header | Description |
 |--------|--------|-------------|
 | **allocator** | `allocator.h` | Bring-your-own allocator interface |
-| **event** | `event.h` | epoll / kqueue / io_uring / poll abstraction |
+| **event** | `event.h` | epoll / kqueue / io_uring / poll / WSAPoll abstraction |
 | **event_ctx** | `event_ctx.h` | Composable event loop context (watchers + allocator) |
 | **request** | `request.h` | Parsed HTTP request struct (header-only, zero alloc) |
 | **parser** | `parser.h` | Pluggable request/response parser vtables |
@@ -859,7 +899,7 @@ Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparis
 | **Architecture** | 31 independent modules | Monolithic amalgam | Monolithic |
 | **Maturity** | New (2025–2026) | 20+ years (NASA, Siemens, Samsung) | GNU project, 18+ years (NASA, Sony, systemd) |
 | **HTTP/2** | Server + client | No | No |
-| **Event backends** | epoll, kqueue, io_uring, poll | select/poll only | select, poll, epoll |
+| **Event backends** | epoll, kqueue, io_uring, poll, WSAPoll | select/poll only | select, poll, epoll |
 | **Router + middleware** | Built-in with `:param` capture | None (DIY if/else) | None (single callback) |
 | **HTTP client** | Sync + async + streaming + H2 | Basic client | Server only |
 | **Allocator** | Runtime vtable (bring-your-own) | Compile-time macros | None (raw malloc) |
