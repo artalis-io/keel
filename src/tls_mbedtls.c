@@ -77,7 +77,7 @@ typedef struct {
 
 static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 {
-    KlMbedtlsTls *t = (KlMbedtlsTls *)ctx;
+    const KlMbedtlsTls *t = (const KlMbedtlsTls *)ctx;
     /* kl_sockdef_send suppresses SIGPIPE (MSG_NOSIGNAL) and retries EINTR on
      * POSIX; on Windows it's the Winsock send with kl_wsa_set_errno — so the
      * EAGAIN/EWOULDBLOCK check below works on both. */
@@ -94,7 +94,7 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 
 static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 {
-    KlMbedtlsTls *t = (KlMbedtlsTls *)ctx;
+    const KlMbedtlsTls *t = (const KlMbedtlsTls *)ctx;
     ssize_t ret = kl_sockdef_recv(t->fd, buf, len);
 
     if (ret < 0) {

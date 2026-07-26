@@ -177,8 +177,11 @@ UTEST(rescache, ttl_expiry) {
     KlResolver inner = { .resolve = mock_resolve, .cancel = mock_cancel,
                           .destroy = mock_destroy };
 
-    /* 1 ms TTL — will expire almost immediately */
-    KlResolverCacheConfig cfg = { .ttl_ms = 1, .capacity = 4 };
+    /* Short TTL, but with a wide sleep margin: a 1 ms TTL + 2 ms sleep is racy
+     * under coarse timer granularity / scheduling jitter (esp. the Windows
+     * runner), where the entry can read as not-yet-expired. 20 ms TTL + 60 ms
+     * sleep keeps the test fast but reliably past expiry on every platform. */
+    KlResolverCacheConfig cfg = { .ttl_ms = 20, .capacity = 4 };
     KlResolver *cache = kl_resolver_cache_create(&inner, &cfg, &a);
     ASSERT_TRUE(cache != NULL);
 
@@ -186,8 +189,8 @@ UTEST(rescache, ttl_expiry) {
     resolve_fire(cache, "example.com", 80);
     ASSERT_EQ(mock_resolve_count, 1);
 
-    /* Wait for TTL to expire */
-    struct timespec ts = { .tv_sec = 0, .tv_nsec = 2000000 }; /* 2 ms */
+    /* Wait for TTL to expire (60 ms >> 20 ms TTL) */
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 60000000 }; /* 60 ms */
     nanosleep(&ts, NULL);
 
     /* Should be a miss now */
