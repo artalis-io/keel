@@ -2,129 +2,37 @@
 #define KEEL_SRC_SOCKET_H
 
 /*
- * socket.h — the platform-neutral socket seam + provider vtable.
+ * src/socket.h — Keel's INTERNAL consumers of the socket seam.
  *
- * The interface: a KlSocketProvider (immutable ops table + context + capability
- * flags) that a transport carries so a non-POSIX stack (Winsock, lwIP) — or a
- * test-only fault-injection mock — can replace the syscalls. The analog of
- * event.h: this header DECLARES; the per-platform provider TUs (socket_posix.c,
- * socket_winsock.c, …) DEFINE. See docs/pal_transformation_design.md and
- * docs/phase6_winsock_design.md §B.0.
+ * The public authoring API — KlSocketProvider, KlSocketOps, KlIoVec, the
+ * capability flags, the provider factories, the query helpers, and
+ * kl_sock_errno_to_error — lives in the installed <keel/socket.h>. This internal
+ * header adds the two things a *consumer* (server.c, connection.c, response.c,
+ * client.c, …) needs but a provider author does not:
  *
- * Logic-neutral by construction: no raw syscall appears in this header. The
- * inline wrappers dispatch through a provider's ops when present, else call the
- * platform default `kl_sockdef_*` (defined per-platform in the provider TU) — so
- * the header compiles on any platform. The only platform-specific thing is the
- * system-header selection for socket types, isolated in sockcompat.h.
+ *   - kl_sockdef_*  : the built-in platform defaults (raw syscall per op),
+ *                     DEFINED per-platform in the provider TU (socket_posix.c /
+ *                     socket_winsock.c); declared here for the dispatchers below.
+ *   - kl_sock_*     : inline dispatchers that route through a provider's op when
+ *                     present, else the kl_sockdef_* default.
+ *
+ * Logic-neutral: no raw syscall appears here. Internal types (ssize_t, off_t)
+ * are used only in these internal decls — the public header exposes none of them.
  *
  * INTERNAL header — not installed, no ABI commitment.
  */
 
-#include <stdint.h>
-
-#include "sockcompat.h"       /* struct sockaddr / socklen_t / struct iovec / ssize_t */
-#include <keel/error.h>
-#include <keel/handle.h>
-
-/* Keel-owned scatter-gather vector — the seam's I/O-vector currency. Layout is
- * deliberately distinct from POSIX `struct iovec` / Winsock `WSABUF` so those
- * platform types never appear outside a provider TU (which translates KlIoVec ->
- * its native vector). Destined for the public keel/socket.h (Phase 4). */
-typedef struct KlIoVec {
-    void  *base;
-    size_t len;
-} KlIoVec;
-
-/* Upper bound on scatter-gather segments a provider must handle in one writev.
- * Response assembly uses <= 7 (status line + headers + body); a provider
- * translates into a stack vector of this size and fails EINVAL beyond it. */
-#define KL_SOCK_IOV_MAX 16
-
-/* Provider operation table. `ctx` is the provider's own context (NULL for the
- * built-in POSIX provider). Any op may be NULL, in which case the wrapper falls
- * back to the POSIX implementation. */
-typedef struct KlSocketOps {
-    /* setup */
-    int     (*set_nonblocking)(void *ctx, KlSocketHandle fd);
-    int     (*set_blocking)(void *ctx, KlSocketHandle fd);   /* inverse of set_nonblocking */
-    void    (*set_cloexec)(void *ctx, KlSocketHandle fd);
-    void    (*set_nosigpipe)(void *ctx, KlSocketHandle fd);
-    /* Socket options (each maps to a single setsockopt on POSIX/Winsock). `on` is
-     * a boolean toggle. Best-effort by contract — a provider/platform that lacks
-     * the option returns -1 and the caller ignores it (SO_REUSEPORT, IPV6_V6ONLY,
-     * TCP_NODELAY are all tuning knobs, not correctness gates). */
-    int     (*set_reuseaddr)(void *ctx, KlSocketHandle fd, int on);
-    int     (*set_reuseport)(void *ctx, KlSocketHandle fd, int on);
-    int     (*set_ipv6only)(void *ctx, KlSocketHandle fd, int on);
-    int     (*set_tcp_nodelay)(void *ctx, KlSocketHandle fd, int on);
-    /* Cork/uncork to coalesce header+file into fewer segments during a file
-     * send: on=1 before, on=0 (flush) after. Linux TCP_CORK / macOS TCP_NOPUSH;
-     * best-effort (-1 where unavailable — Windows TransmitFile coalesces on its
-     * own, so it's a no-op there). */
-    int     (*set_cork)(void *ctx, KlSocketHandle fd, int on);
-    /* lifecycle. `socket`/`accept` return a KlSocketHandle (KL_INVALID_SOCKET on
-     * failure) — a Winsock SOCKET is pointer-width, hence the handle type. */
-    KlSocketHandle (*socket)(void *ctx, int domain, int type, int protocol);
-    int     (*connect)(void *ctx, KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
-    int     (*bind)(void *ctx, KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
-    int     (*listen)(void *ctx, KlSocketHandle fd, int backlog);
-    KlSocketHandle (*accept)(void *ctx, KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
-    int     (*close)(void *ctx, KlSocketHandle fd);
-    /* Read the local (bound) address — getsockname. Used for ephemeral-port
-     * readback and to recover the family of an adopted (socket-activation) fd. */
-    int     (*get_local_addr)(void *ctx, KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
-    /* Read + clear the pending socket error — getsockopt(SO_ERROR). Writes the
-     * error to *out_err (0 = none) and returns 0, or returns -1 if the query
-     * itself fails (leaving *out_err untouched). Used for async connect
-     * completion: 0 means the nonblocking connect succeeded. The value is a
-     * platform error code (errno / WSA*); callers only test zero vs non-zero. */
-    int     (*get_so_error)(void *ctx, KlSocketHandle fd, int *out_err);
-    /* I/O */
-    ssize_t (*send)(void *ctx, KlSocketHandle fd, const void *buf, size_t len);
-    ssize_t (*recv)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
-    /* Peek up to @len bytes without consuming them (recv/MSG_PEEK). >0 = bytes
-     * available (count returned), 0 = peer closed, <0 = error/would-block. Used
-     * to test for a pending byte before TLS/HTTP (len 1) and to peek+parse a
-     * whole PROXY-protocol header (len N) before consuming it. */
-    ssize_t (*recv_peek)(void *ctx, KlSocketHandle fd, void *buf, size_t len);
-    /* Vectored write + zero-copy file send. May be NULL — a provider without
-     * them advertises no WRITEV/SENDFILE capability and the caller serializes /
-     * pread-sends instead. POSIX fills these; Winsock will use WSASend /
-     * TransmitFile. `in_fd` is a *file* descriptor (stays int — a CRT fd on
-     * Windows); `out_fd` is a socket handle. `sendfile` advances `*offset`. */
-    ssize_t (*writev)(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
-    ssize_t (*sendfile)(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count);
-    /* lifecycle: release provider-owned context. May be NULL (nothing to free,
-     * e.g. the static POSIX provider). */
-    void    (*destroy)(void *ctx);
-    const char *name;                 /* provider identity, for diagnostics */
-} KlSocketOps;
-
-typedef struct KlSocketProvider {
-    const KlSocketOps *ops;
-    void              *context;
-    uint64_t           capabilities;
-} KlSocketProvider;
-
-/* Capability flags. */
-#define KL_SOCK_CAP_NATIVE_FD  (1ull << 0)  /* fd is a real OS descriptor */
-#define KL_SOCK_CAP_WRITEV     (1ull << 1)  /* POSIX writev() usable on this fd */
-#define KL_SOCK_CAP_SENDFILE   (1ull << 2)  /* POSIX sendfile() usable on this fd */
-
-/* Built-in provider factories (static storage, no allocation). Each is defined
- * in its own platform TU: kl_socket_provider_posix() in socket_posix.c,
- * kl_socket_provider_winsock() in socket_winsock.c (defined only on Windows;
- * the declaration is unconditional but only ever called on Windows). */
-const KlSocketProvider *kl_socket_provider_posix(void);
-const KlSocketProvider *kl_socket_provider_winsock(void);
+#include <keel/socket.h>      /* public: KlSocketProvider/KlSocketOps/KlIoVec/caps/... */
+#include "sockcompat.h"       /* ssize_t (+ struct sockaddr / socklen_t on both platforms) */
 
 /*
  * Platform default socket ops — the raw syscall for each operation, DEFINED
  * per-platform in the provider TU (socket_posix.c: POSIX; socket_winsock.c:
  * Winsock). Declared here so the inline dispatchers below can call them for the
- * NULL-provider / NULL-op default WITHOUT putting any syscall in this header.
+ * NULL-provider / NULL-op default WITHOUT putting any syscall in a header.
  * `kl_sockdef_send`/`recv` keep the EINTR-retry + SIGPIPE-suppression behaviour;
- * `kl_sockdef_sendfile`'s `in_fd` is a *file* descriptor.
+ * `kl_sockdef_sendfile`'s `in_fd` is a *file* descriptor and `offset` a byte
+ * offset (uint64_t, matching the public op) translated to off_t in the TU.
  */
 int            kl_sockdef_set_nonblocking(KlSocketHandle fd);
 int            kl_sockdef_set_blocking(KlSocketHandle fd);
@@ -147,13 +55,14 @@ ssize_t        kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len);
 ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
 ssize_t        kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len);
 ssize_t        kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
-ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count);
+ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count);
 
 /*
  * Provider-aware wrappers. Inline dispatch: a non-NULL provider whose op is set
  * goes straight through the ops table; otherwise the platform default
  * `kl_sockdef_*` (one direct call — negligible next to the syscall it wraps).
- * No raw syscall in this header, so it compiles on any platform.
+ * No raw syscall in this header, so it compiles on any platform. Returns are
+ * ssize_t internally (== kl_ssize_t == pointer-width) for the consumers' benefit.
  */
 static inline int kl_sock_set_nonblocking(const KlSocketProvider *p, KlSocketHandle fd) {
     if (p && p->ops->set_nonblocking) return p->ops->set_nonblocking(p->context, fd);
@@ -270,41 +179,10 @@ static inline ssize_t kl_sock_writev(const KlSocketProvider *p, KlSocketHandle f
 }
 
 static inline ssize_t kl_sock_sendfile(const KlSocketProvider *p, KlSocketHandle out_fd,
-                                       int in_fd, off_t *offset, size_t count) {
+                                       int in_fd, uint64_t *offset, size_t count) {
     if (p && p->ops->sendfile)
         return p->ops->sendfile(p->context, out_fd, in_fd, offset, count);
     return kl_sockdef_sendfile(out_fd, in_fd, offset, count);
 }
-
-/* ── Lifecycle / capabilities / error taxonomy (Phase 3 semantics) ──────── */
-
-/* Release a provider's own context. NULL provider (POSIX) and a NULL destroy op
- * are both no-ops. The KlSocketProvider struct's storage is the owner's; this
- * only tears down provider-owned state. Providers are borrowed by transports
- * and must outlive them. */
-static inline void kl_socket_provider_destroy(const KlSocketProvider *p) {
-    if (p && p->ops->destroy) p->ops->destroy(p->context);
-}
-
-/* Capability query. A NULL provider is the built-in POSIX provider, which is
- * native-fd. */
-static inline int kl_socket_provider_has_cap(const KlSocketProvider *p,
-                                             uint64_t cap) {
-    uint64_t caps = p ? p->capabilities : KL_SOCK_CAP_NATIVE_FD;
-    return (caps & cap) != 0;
-}
-
-/* Native-descriptor escape hatch: when the provider advertises native fds, the
- * handle IS a real OS descriptor (usable with syscalls, poll, etc.) and is
- * returned as-is; otherwise KL_INVALID_SOCKET (the caller must not treat it as
- * an OS fd). */
-static inline KlSocketHandle kl_sock_native_fd(const KlSocketProvider *p, KlSocketHandle fd) {
-    return kl_socket_provider_has_cap(p, KL_SOCK_CAP_NATIVE_FD) ? fd : KL_INVALID_SOCKET;
-}
-
-/* Map a socket errno to a stable KlError category (errno itself is preserved by
- * the caller for diagnostics). Uses the existing coarse KlError network codes;
- * finer public categories are deferred to the Phase 4 public error taxonomy. */
-KlError kl_sock_errno_to_error(int err);
 
 #endif /* KEEL_SRC_SOCKET_H */

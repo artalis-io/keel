@@ -223,7 +223,7 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
 /* No TransmitFile yet (an offset-aware OVERLAPPED optimization for 6b); a
  * pread+send loop is correct and cross-compiles. Sends one chunk per call from
  * *offset, advancing it — same one-chunk-per-tick shape as the POSIX fallback. */
-ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
+ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     char buf[KL_WSK_SENDFILE_BUF];
     size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
     if (_lseeki64(in_fd, (long long)*offset, SEEK_SET) < 0)
@@ -318,7 +318,7 @@ static ssize_t wsk_recv_peek(void *ctx, KlSocketHandle fd, void *buf, size_t len
 static ssize_t wsk_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
 }
-static ssize_t wsk_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
+static ssize_t wsk_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     (void)ctx; return kl_sockdef_sendfile(out_fd, in_fd, offset, count);
 }
 static void wsk_destroy(void *ctx) {
