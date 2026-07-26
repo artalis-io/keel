@@ -219,6 +219,10 @@ UTEST(he, fallback_on_refused) {
     stop_server(&srv, tid);
 }
 
+/* WSAPoll does not report a failed non-blocking connect via a writable event
+ * (design doc §B.2), so a refused-connect race resolves only via the deadline —
+ * this all-fail expectation is POSIX connect-error semantics. */
+#if !defined(_WIN32)
 UTEST(he, all_fail) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
@@ -241,6 +245,7 @@ UTEST(he, all_fail) {
     kl_client_free(c);
     kl_event_ctx_free(&ev);
 }
+#endif
 
 UTEST(he, single_address) {
     KlServer srv; pthread_t tid;

@@ -39,7 +39,9 @@ static const KlSocketOps NOVIV_OPS = { .send = noviv_send, .recv = noviv_recv,
                                        .name = "noviv" };
 static const KlSocketProvider g_noviv = { &NOVIV_OPS, NULL, KL_SOCK_CAP_NATIVE_FD };
 
-/* Serve a fixed file (sendfile path) from a global path. */
+/* Serve a fixed file (sendfile path) from a global path. Used only by the
+ * sendfile_fallback test, which is POSIX-only (hardcoded /tmp + CRT file I/O). */
+#if !defined(_WIN32)
 static char g_file_path[256];
 static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -49,6 +51,7 @@ static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
     if (fstat(fd, &st) != 0) { close(fd); kl_response_json(res, 500, "{}", 2); return; }
     kl_response_file(res, fd, st.st_size);   /* Keel closes fd on reset */
 }
+#endif
 
 static void handle_slow(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -531,6 +534,7 @@ UTEST(server_integration, serialized_writev_fallback) {
 /* A provider without KL_SOCK_CAP_SENDFILE makes response.c serve KL_BODY_FILE
  * via pread + kl_sock_send instead of sendfile(); the file body must arrive
  * byte-correct. */
+#if !defined(_WIN32)   /* hardcoded /tmp path + CRT file I/O — POSIX-specific */
 UTEST(server_integration, sendfile_fallback) {
     /* Write a known temp file (~40 KB, spanning multiple read chunks). */
     snprintf(g_file_path, sizeof(g_file_path), "/tmp/keel_sf_%d.dat", (int)getpid());
@@ -581,5 +585,6 @@ UTEST(server_integration, sendfile_fallback) {
     kl_server_free(&srv);
     unlink(g_file_path);
 }
+#endif
 
 UTEST_MAIN();

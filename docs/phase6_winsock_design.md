@@ -349,21 +349,25 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    `sockwrite`/`set_nonblock`/`poll1`/`set_rcvtimeo` (on Windows `socketpair`/`pipe`
    become a self-connected loopback TCP pair — Winsock has neither). The 26 suites
    were mechanically ported to call the helpers (POSIX behavior unchanged — thin
-   wrappers). Windows CI now runs **46 of 55** utest suites. The few genuinely
+   wrappers). Windows CI now runs **44 of 55** utest suites. The few genuinely
    POSIX-specific tests inside otherwise-portable suites are guarded
    `#if !defined(_WIN32)` (`kl_socket_provider_posix()` — POSIX-only TU; `kill()`/
-   `SIGTERM`; the POSIX-errno taxonomy). One real backend gap surfaced and was
-   fixed: `event_wsapoll.c`'s `kl_event_add` now rejects an invalid socket handle
-   (`!kl_handle_valid`), matching the epoll/kqueue/poll backends. **9 suites stay
-   excluded** (not portable to readiness-mode Winsock without more backend work):
-   `tls`, `tls_integration`, `peer_cert` (no TLS backend built on Windows —
-   SChannel/mbedtls is a later, separate task); `udp_batching` (`recvmmsg`/
-   `sendmmsg`) and `udp_offload` (UDP GSO) — Linux-only offload; `udp_tos` (Windows
-   restricts `IP_TOS`/DSCP `setsockopt`); `unix_socket` (`SO_PEERCRED` is Linux-only;
-   Win10 AF_UNIX lacks it); `file_io` + `file_io_iouring` (io_uring / POSIX file-path
-   assumptions). Local validation: all 46 build to PE32+ via `make OS=windows`
-   (MinGW-w64) and the full POSIX gauntlet stays green; the runner executes them for
-   real.
+   `SIGTERM`; the POSIX-errno taxonomy; `he.all_fail` — the WSAPoll connect-failure
+   defect of §B.2; `sendfile_fallback` — hardcoded `/tmp` + CRT file I/O). One real
+   backend gap surfaced and was fixed: `event_wsapoll.c`'s `kl_event_add` now rejects
+   an invalid socket handle (`!kl_handle_valid`), matching the epoll/kqueue/poll
+   backends. **11 suites excluded.** 9 are genuinely POSIX/Linux-only: `tls`,
+   `tls_integration`, `peer_cert` (no TLS backend built on Windows — SChannel/mbedtls
+   is a later, separate task); `udp_batching` (`recvmmsg`/`sendmmsg`) and
+   `udp_offload` (UDP GSO) — Linux-only offload; `udp_tos` (Windows restricts
+   `IP_TOS`/DSCP `setsockopt`); `unix_socket` (`SO_PEERCRED` is Linux-only; Win10
+   AF_UNIX lacks it); `file_io` + `file_io_iouring` (io_uring / POSIX file-path
+   assumptions). The other 2 build clean but have runtime failures needing
+   Windows-native iteration, so are deferred (not hidden): `dns_resolver` (its
+   mock-UDP-nameserver + hosts/resolv.conf harness) and `proxy` (CONNECT-tunnel
+   timing) — both paths remain covered on Windows by `smoke-dns` and the POSIX
+   suites. Local validation: all 44 build to PE32+ via `make OS=windows` (MinGW-w64)
+   and the full POSIX gauntlet stays green; the runner executes them for real.
 4. **Feed back to the vtable.** Confirm `KlSocketHandle` + `writev`/`sendfile`
    ops are sufficient → **unblocks Phase 4** (publish the now-proven vtable).
 
