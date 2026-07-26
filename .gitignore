@@ -8,6 +8,8 @@
 examples/*
 !examples/*.c
 !examples/*.md
+# opt-in BYO lwIP reference (sources/config, not built by default)
+!examples/lwip/
 
 # Test binaries
 tests/test_*
