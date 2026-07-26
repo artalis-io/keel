@@ -323,10 +323,11 @@ test-win: $(WIN_TEST_BIN)
 
 # Windows IOCP backend (BACKEND=iocp) test subset. Increment 2: the completion
 # connection driver does not exist yet, so a server cannot run over IOCP — this
-# runs only the backend-lifecycle + negotiation suites (no server-over-IOCP). The
-# full suite over IOCP joins once the driver lands. Build with BACKEND=iocp so
-# libkeel.a carries event_iocp.o.
-WIN_IOCP_TEST_SUITES = event_caps iocp_engine
+# runs only the IOCP backend-lifecycle + negotiation suite (no server-over-IOCP).
+# The full suite over IOCP joins once the driver lands. Build with BACKEND=iocp so
+# libkeel.a carries event_iocp.o. (test_event_caps is a *readiness*-backend suite —
+# it asserts READINESS caps — so it runs in the WSAPoll/POSIX jobs, NOT here.)
+WIN_IOCP_TEST_SUITES = iocp_engine
 WIN_IOCP_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_IOCP_TEST_SUITES)))
 test-win-iocp: $(WIN_IOCP_TEST_BIN)
 	@failed=0; \
