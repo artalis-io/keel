@@ -204,6 +204,23 @@ model; raw APIs (lwIP raw, IOCP) are a separate event-axis concern.
 tests green) → 6b (UDP, thread pool, breadth). 6a is the point where the vtable is
 validated and Phase 4 unblocks.
 
+**Phase 4 done** — public `KlConfig.sockets`/`KlClientConfig.sockets` selection
+landed (`include/keel/socket.h`), no internal/POSIX types leaked, validated by the
+**lwIP BYO reference** (`examples/lwip/`, `docs/lwip_platform_design.md`) which
+proves the public provider/event API is sufficient for a third platform. mbedTLS
+backend builds on POSIX + Windows (seam-routed, BYO/out-of-CI).
+
+**Phase 7 (event/socket capability negotiation) designed** in
+`docs/phase7_capability_negotiation_design.md`. Decisions: **formalize the contract
+only** — the event backend gets an internal capability surface (`src/event_caps.h`,
+`KL_EVENT_CAP_READINESS | _NATIVE_FD`, `COMPLETION` reserved/unimplemented) and the
+server's implicit native-fd assumption (`server.c:337`) becomes a two-sided
+event↔socket negotiation at the `KlEventCtx` wire-up (F3-safe: the socket seam and
+event axis stay decoupled). **Internal-first** — no public `keel/event.h` change;
+the public event-capability API is frozen only when a real consumer (Phase 8 IOCP /
+Phase 9 lwIP-raw) exercises it. Behaviorally a no-op today (readiness+native-fd is
+one point in the new space); the guard becomes truthful rather than assumed.
+
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
 
