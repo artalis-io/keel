@@ -329,6 +329,16 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
+    /* A custom socket provider must expose native OS descriptors — the readiness
+     * event loop polls them. Reject a non-native provider up front (before any
+     * allocation), rather than failing obscurely at add-to-loop. NULL = built-in
+     * default (native). A non-readiness provider (e.g. raw lwIP) is a completion-
+     * axis concern (Phase 8/9), not a server socket provider. */
+    if (s->config.sockets &&
+        !kl_socket_provider_has_cap(s->config.sockets, KL_SOCK_CAP_NATIVE_FD)) {
+        s->last_error = KL_ERR_SOCKET;
+        return -1;
+    }
     if (s->config.bind_addr == NULL)
         s->config.bind_addr = "0.0.0.0";
     if (s->config.max_connections <= 0)
@@ -458,6 +468,9 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         kl_router_free(&s->router);
         return -1;
     }
+    /* Route all socket ops (listen socket + accepted conns) through the selected
+     * provider; NULL = built-in default. Validated native-fd above. */
+    s->ev.sockets = s->config.sockets;
 
     /* Create async file I/O backend (NULL if backend doesn't support it) */
     s->file_io = kl_file_io_create(&s->ev.loop, alloc);

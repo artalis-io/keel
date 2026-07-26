@@ -18,6 +18,7 @@
 #include <keel/event_ctx.h>
 #include <keel/parser.h>
 #include <keel/resolver.h>
+#include <keel/socket.h>
 #include <keel/tls.h>
 #include <keel/url.h>
 
@@ -81,6 +82,11 @@ typedef struct {
     KlDecompressConfig *decompress;     /**< Response decompression (NULL = no decompression) */
     KlProxyConfig   *proxy;             /**< HTTP proxy (NULL = direct connection) */
     int              connect_attempt_delay_ms; /**< Async: Happy Eyeballs Connection Attempt Delay (RFC 8305). 0 = default 250ms. A large value degenerates to sequential connect. */
+    const KlSocketProvider *sockets;    /**< custom socket provider (bring-your-own stack); NULL =
+                                         *   built-in default. When set, applied to the client's
+                                         *   event context. The async client may instead set
+                                         *   ctx.sockets directly; a non-NULL value here takes
+                                         *   precedence. Must advertise KL_SOCK_CAP_NATIVE_FD. */
 } KlClientConfig;
 
 /* ── Streaming types ──────────────────────────────────────────────── */
