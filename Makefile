@@ -214,7 +214,8 @@ EXAMPLES = examples/hello_server examples/rest_api_server examples/middleware \
            examples/async examples/thread_pool \
            examples/h2_server examples/h2_client \
            examples/client examples/async_client examples/async_thread_pool \
-           examples/custom_allocator examples/connection_pool examples/url_parser \
+           examples/custom_allocator examples/custom_socket_provider \
+           examples/connection_pool examples/url_parser \
            examples/sse examples/streaming_client examples/timer \
            examples/redirect_client examples/proxy_client \
            examples/unix_socket_server
@@ -372,7 +373,7 @@ clean:
 	rm -f src/file_io.o src/file_io_iouring.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
-	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
+	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/custom_socket_provider examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
 	rm -f tests/test_file_io_iouring
 	rm -f $(BENCH_SERVER)
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns fuzz/fuzz_proxy fuzz/fuzz_url fuzz/fuzz_decompress
