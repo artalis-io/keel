@@ -241,6 +241,36 @@ test: $(TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
+# Windows unit-test subset (staged toward parity — see docs/phase6_winsock_design.md
+# Part C). Tier 1: platform-neutral suites (pure in-memory logic). Tier 2:
+# socket/thread runtime suites, validated on the Windows runner (they exercise the
+# same WSAPoll/Winsock/winpthreads machinery the smoke tests prove). The remaining
+# suites need their direct POSIX network includes (<netinet/in.h>, <sys/socket.h>,
+# ...) routed through the shim before they compile under MinGW — see Tier 3 in the
+# design doc.
+WIN_TEST_SUITES = allocator body_reader chunked cors decompress drain \
+                  multipart_stream overflow parser response_parser router url \
+                  client client_stream connection h2_client redirect \
+                  server_stats thread_pool timer websocket_client
+WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
+
+# On Windows the test binaries need the `.exe` suffix and the win_prelude.h
+# force-include (utest.h QueryPerformanceCounter clash). POSIX builds fall through
+# to the extension-less `tests/%` rule above, so `test-win` also runs natively as
+# a subset sanity check.
+ifeq ($(WINDOWS),1)
+tests/test_%$(EXE): tests/test_%.c $(LIB)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< -L. -lkeel $(LDFLAGS)
+endif
+
+test-win: $(WIN_TEST_BIN)
+	@failed=0; \
+	for t in $(WIN_TEST_BIN); do \
+		echo "--- $$t ---"; \
+		./$$t || failed=1; \
+	done; \
+	if [ $$failed -eq 1 ]; then echo "SOME WINDOWS TESTS FAILED"; exit 1; fi
+
 # Plaintext TCP link + roundtrip smoke test — the cross-platform link gate
 # (the Windows CI runs this to prove the TCP core links and serves). Standalone
 # (not a utest suite), so it needs -lpthread explicitly (Windows LDFLAGS omits it).
@@ -290,6 +320,7 @@ clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f tests/smoke_tcp tests/smoke_tcp.exe tests/smoke_udp tests/smoke_udp.exe \
 	      tests/smoke_dns tests/smoke_dns.exe
+	rm -f $(WIN_TEST_BIN) tests/test_*.exe
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f src/file_io.o src/file_io_iouring.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o

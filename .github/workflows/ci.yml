@@ -95,6 +95,13 @@ jobs:
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-dns
 
+      # Platform-neutral unit-test subset (utest suites that build AND run on
+      # Winsock today). Staged toward parity — see docs/phase6_winsock_design.md
+      # Part C; expand WIN_TEST_SUITES in the Makefile as more suites are ported.
+      - name: Run Windows unit-test subset
+        timeout-minutes: 5
+        run: make OS=windows CC=gcc test-win
+
   sanitizers:
     name: ASan + UBSan
     runs-on: ubuntu-latest
