@@ -53,12 +53,12 @@ static ssize_t mock_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     if (m->wrap) return recv((int)fd, buf, len, 0);
     return 0;
 }
-static ssize_t mock_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
+static ssize_t mock_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     MockSock *m = ctx;
     m->writev_calls++;
     if (m->wrap) return kl_sockdef_writev(fd, iov, iovcnt);
     ssize_t t = 0;
-    for (int i = 0; i < iovcnt; i++) t += (ssize_t)iov[i].iov_len;
+    for (int i = 0; i < iovcnt; i++) t += (ssize_t)iov[i].len;
     return t;
 }
 static ssize_t mock_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
@@ -345,7 +345,7 @@ UTEST(sockprov, writev_sendfile_op_dispatch) {
     ASSERT_EQ(0, kl_test_socketpair(sv));
 
     char a[] = "AB", b[] = "CD";
-    struct iovec iov[2] = { { a, 2 }, { b, 2 } };
+    KlIoVec iov[2] = { { a, 2 }, { b, 2 } };
     ASSERT_EQ((ssize_t)4, kl_sock_writev(&p, sv[0], iov, 2));  /* dispatches to op */
     ASSERT_EQ(1, m.writev_calls);
     char buf[8] = {0};
