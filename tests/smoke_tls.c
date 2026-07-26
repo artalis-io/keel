@@ -114,7 +114,9 @@ int main(void) {
         KlClientConfig ccfg = { .timeout_ms = 2000, .tls = &cli_tls };
         KlClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        last_rc = kl_client_request(&alloc, &ccfg, "GET", "https://127.0.0.1:18443/",
+        char url[48];
+        snprintf(url, sizeof(url), "https://127.0.0.1:%d/", SMOKE_PORT);
+        last_rc = kl_client_request(&alloc, &ccfg, "GET", url,
                                     NULL, 0, NULL, 0, &resp);
         if (last_rc == 0) {
             last_status = resp.status;
