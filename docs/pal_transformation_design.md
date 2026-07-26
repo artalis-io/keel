@@ -227,6 +227,23 @@ consumer (Phase 8 IOCP / Phase 9 lwIP-raw) exercises it. Behaviorally a no-op to
 rather than assumed. `test_event_caps` proves it rejects a non-native provider
 (POSIX + Windows CI).
 
+**Phase 8 (IOCP completion backend) designed** in `docs/phase8_iocp_design.md`.
+Decisions: a **true completion axis** (IOCP owns overlapped buffers; the provider
+posts `WSARecv`/`WSASend`; completions carry the data — no `\Device\Afd` readiness
+flattening), staged as a **foundational subset (8a)**: the IOCP backend + selection
++ the plaintext TCP HTTP path (accept/read/write/close/keep-alive), with TLS/UDP/
+streaming/file-I/O completion deferred to 8b. The overriding constraint is
+**orthogonality**: the completion model is contained to `event_iocp.c` + an internal
+I/O-engine seam (`io_engine.h`) + a completion connection driver, and must not
+percolate into orthogonal concepts (the model-blind protocol core is shared
+verbatim), into other platforms (IOCP objects live only in the Windows/`BACKEND=iocp`
+Makefile branch — no `#ifdef` in shared code), or into **Keel's public API** (zero
+`include/keel/*.h` change; `KL_EVENT_CAP_COMPLETION`/`KL_SOCK_CAP_OVERLAPPED` are
+internal). The Phase 7 negotiation gains its completion arm (COMPLETION ⋄
+OVERLAPPED). Grep-assertable litmus tests enforce the containment; the crux/stop
+condition is whether the transport/protocol-core split holds without the completion
+concept leaking into the shared core.
+
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
 
