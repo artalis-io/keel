@@ -339,21 +339,31 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    wakeup) passes on Windows. That brought CI to **21 utest suites** on Windows.
    **6b-3 — Tier 3 (done).** The remaining portable suites use raw POSIX socket
    idioms in the *test harness* (`<sys/socket.h>` et al. plus socketpair/pipe/close/
-   read/write/fcntl/poll/SO_RCVTIMEO). A new **`tests/net_compat.h`** shim provides
-   the portable includes + `kl_test_*` helpers (a loopback-pair `socketpair`/`pipe`
-   emulation for Windows, plus socket close/read/write/nonblock/poll/rcvtimeo), and
-   the 26 suites were mechanically ported to call them (POSIX behavior unchanged —
-   thin wrappers). Windows CI now runs **47 of 55** utest suites. The few genuinely
+   read/write/fcntl/poll/SO_RCVTIMEO). These are abstracted behind
+   **`tests/net_compat.h`** — deliberately shaped like the library's own socket seam
+   (`socket.h` + `socket_posix.c`/`socket_winsock.c`): the header carries no logic
+   `#ifdef`, only the one include-selection boundary (the same boundary
+   `src/sockcompat.h` owns), and the platform logic lives in two sibling TUs
+   **`net_compat_posix.c`** / **`net_compat_win.c`** selected by the Makefile and
+   linked into each test. The helpers are `kl_test_socketpair`/`closesock`/`sockread`/
+   `sockwrite`/`set_nonblock`/`poll1`/`set_rcvtimeo` (on Windows `socketpair`/`pipe`
+   become a self-connected loopback TCP pair — Winsock has neither). The 26 suites
+   were mechanically ported to call the helpers (POSIX behavior unchanged — thin
+   wrappers). Windows CI now runs **46 of 55** utest suites. The few genuinely
    POSIX-specific tests inside otherwise-portable suites are guarded
-   `#if !defined(_WIN32)` (e.g. `kl_socket_provider_posix()` — POSIX-only TU;
-   `kill()`/`SIGTERM`). **8 suites stay excluded** (not portable to readiness-mode
-   Winsock without more backend work): `tls`, `tls_integration`, `peer_cert` (no TLS
-   backend built on Windows — SChannel/mbedtls is a later, separate task);
-   `udp_batching` (`recvmmsg`/`sendmmsg`) and `udp_offload` (UDP GSO) — Linux-only
-   offload; `unix_socket` (`SO_PEERCRED` is Linux-only; Win10 AF_UNIX lacks it);
-   `file_io` + `file_io_iouring` (io_uring / POSIX file-path assumptions). Local
-   validation: all 47 build to PE32+ via `make OS=windows` (MinGW-w64) and the full
-   POSIX gauntlet stays green; the runner executes them for real.
+   `#if !defined(_WIN32)` (`kl_socket_provider_posix()` — POSIX-only TU; `kill()`/
+   `SIGTERM`; the POSIX-errno taxonomy). One real backend gap surfaced and was
+   fixed: `event_wsapoll.c`'s `kl_event_add` now rejects an invalid socket handle
+   (`!kl_handle_valid`), matching the epoll/kqueue/poll backends. **9 suites stay
+   excluded** (not portable to readiness-mode Winsock without more backend work):
+   `tls`, `tls_integration`, `peer_cert` (no TLS backend built on Windows —
+   SChannel/mbedtls is a later, separate task); `udp_batching` (`recvmmsg`/
+   `sendmmsg`) and `udp_offload` (UDP GSO) — Linux-only offload; `udp_tos` (Windows
+   restricts `IP_TOS`/DSCP `setsockopt`); `unix_socket` (`SO_PEERCRED` is Linux-only;
+   Win10 AF_UNIX lacks it); `file_io` + `file_io_iouring` (io_uring / POSIX file-path
+   assumptions). Local validation: all 46 build to PE32+ via `make OS=windows`
+   (MinGW-w64) and the full POSIX gauntlet stays green; the runner executes them for
+   real.
 4. **Feed back to the vtable.** Confirm `KlSocketHandle` + `writev`/`sendfile`
    ops are sufficient → **unblocks Phase 4** (publish the now-proven vtable).
 

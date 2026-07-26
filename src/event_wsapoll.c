@@ -105,6 +105,11 @@ int kl_event_init(KlEventLoop *loop) {
 int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlWsaPollState *st = loop->_backend;
 
+    /* Reject an invalid socket handle up front (matches the epoll/kqueue/poll
+     * backends, which reject fd < 0). INVALID_SOCKET is (SOCKET)-1. */
+    if (!kl_handle_valid(fd))
+        return -1;
+
     /* Idempotent re-add: update in place (matches epoll/kqueue/poll upsert). */
     int existing = find_slot(st, fd);
     if (existing >= 0) {

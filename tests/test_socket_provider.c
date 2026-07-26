@@ -319,6 +319,7 @@ UTEST(sockprov, provider_destroy_lifecycle) {
     ASSERT_EQ(1, g_destroyed);
 }
 
+#if !defined(_WIN32)   /* POSIX-errno taxonomy; the Winsock seam maps WSA codes */
 UTEST(sockprov, errno_to_error_taxonomy) {
     ASSERT_EQ(KL_ERR_TIMEOUT, kl_sock_errno_to_error(ETIMEDOUT));
     ASSERT_EQ(KL_ERR_CONNECT, kl_sock_errno_to_error(ECONNREFUSED));
@@ -333,6 +334,7 @@ UTEST(sockprov, errno_to_error_taxonomy) {
     (void)kl_sock_errno_to_error(ETIMEDOUT);
     ASSERT_EQ(ECONNREFUSED, errno);
 }
+#endif
 
 /* A custom writev/sendfile op is dispatched (the Winsock WSASend/TransmitFile
  * path); a NULL provider takes the raw POSIX call. */
