@@ -1,7 +1,7 @@
 #include "utest.h"
 #include <keel/event.h>
 #include <keel/allocator.h>
-#include <unistd.h>
+#include "net_compat.h"
 #include <string.h>
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -29,7 +29,7 @@ UTEST(event, add_and_wait) {
     ASSERT_EQ(kl_event_init(&loop), 0);
 
     int fds[2];
-    ASSERT_EQ(pipe(fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     /* Register read end */
     int marker = 42;
@@ -37,7 +37,7 @@ UTEST(event, add_and_wait) {
 
     /* Write to trigger readability */
     char c = 'x';
-    ASSERT_EQ((int)write(fds[1], &c, 1), 1);
+    ASSERT_EQ((int)kl_test_sockwrite(fds[1], &c, 1), 1);
 
     /* Wait for event */
     KlEvent events[4];
@@ -55,8 +55,8 @@ UTEST(event, add_and_wait) {
     ASSERT_TRUE(found);
 
     kl_event_del(&loop, fds[0]);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     kl_event_close(&loop);
 }
 
@@ -68,7 +68,7 @@ UTEST(event, del_fd) {
     ASSERT_EQ(kl_event_init(&loop), 0);
 
     int fds[2];
-    ASSERT_EQ(pipe(fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     int marker = 1;
     ASSERT_EQ(kl_event_add(&loop, fds[0], KL_EVENT_READ, &marker), 0);
@@ -79,7 +79,7 @@ UTEST(event, del_fd) {
 
     /* Write data */
     char c = 'x';
-    (void)write(fds[1], &c, 1);
+    (void)kl_test_sockwrite(fds[1], &c, 1);
 
     /* Wait — should timeout, no events for removed fd */
     KlEvent events[4];
@@ -91,8 +91,8 @@ UTEST(event, del_fd) {
     }
     ASSERT_FALSE(found);
 
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     kl_event_close(&loop);
 }
 
@@ -104,9 +104,9 @@ UTEST(event, multiple_fds) {
     ASSERT_EQ(kl_event_init(&loop), 0);
 
     int pipe1[2], pipe2[2], pipe3[2];
-    ASSERT_EQ(pipe(pipe1), 0);
-    ASSERT_EQ(pipe(pipe2), 0);
-    ASSERT_EQ(pipe(pipe3), 0);
+    ASSERT_EQ(kl_test_socketpair(pipe1), 0);
+    ASSERT_EQ(kl_test_socketpair(pipe2), 0);
+    ASSERT_EQ(kl_test_socketpair(pipe3), 0);
 
     int m1 = 1, m2 = 2, m3 = 3;
     ASSERT_EQ(kl_event_add(&loop, pipe1[0], KL_EVENT_READ, &m1), 0);
@@ -115,8 +115,8 @@ UTEST(event, multiple_fds) {
 
     /* Write to pipe1 and pipe3 only */
     char c = 'x';
-    (void)write(pipe1[1], &c, 1);
-    (void)write(pipe3[1], &c, 1);
+    (void)kl_test_sockwrite(pipe1[1], &c, 1);
+    (void)kl_test_sockwrite(pipe3[1], &c, 1);
 
     /* Wait for events */
     KlEvent events[8];
@@ -134,9 +134,9 @@ UTEST(event, multiple_fds) {
     kl_event_del(&loop, pipe1[0]);
     kl_event_del(&loop, pipe2[0]);
     kl_event_del(&loop, pipe3[0]);
-    close(pipe1[0]); close(pipe1[1]);
-    close(pipe2[0]); close(pipe2[1]);
-    close(pipe3[0]); close(pipe3[1]);
+    kl_test_closesock(pipe1[0]); kl_test_closesock(pipe1[1]);
+    kl_test_closesock(pipe2[0]); kl_test_closesock(pipe2[1]);
+    kl_test_closesock(pipe3[0]); kl_test_closesock(pipe3[1]);
     kl_event_close(&loop);
 }
 
@@ -176,7 +176,7 @@ UTEST(event, mod_mask) {
     ASSERT_EQ(kl_event_init(&loop), 0);
 
     int fds[2];
-    ASSERT_EQ(pipe(fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     int marker = 99;
     /* Register for READ */
@@ -190,8 +190,8 @@ UTEST(event, mod_mask) {
      * may still report READ. We only assert mod returns 0. */
 
     kl_event_del(&loop, fds[0]);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     kl_event_close(&loop);
 }
 

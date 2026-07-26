@@ -1,15 +1,11 @@
 #include "utest.h"
 #include <keel/keel.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include "net_compat.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
 static int set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    return kl_test_set_nonblock(fd);
 }
 
 typedef struct {
@@ -33,14 +29,14 @@ UTEST(event_ctx, dispatch_watcher_returns_1) {
     ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
     WatcherCtx ctx = {0};
     ASSERT_EQ(kl_watcher_add(&ev, fds[0], KL_EVENT_READ, test_watcher_cb, &ctx), 0);
 
-    (void)write(fds[1], "x", 1);
+    (void)kl_test_sockwrite(fds[1], "x", 1);
 
     KlEvent events[4];
     int n = kl_event_wait(&ev.loop, events, 4, 100);
@@ -52,8 +48,8 @@ UTEST(event_ctx, dispatch_watcher_returns_1) {
     ASSERT_EQ(ctx.got_fd, fds[0]);
 
     kl_watcher_del(&ev, fds[0]);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     kl_event_ctx_free(&ev);
 }
 
@@ -91,14 +87,14 @@ UTEST(event_ctx, run_dispatches_watcher) {
     ASSERT_EQ(kl_event_ctx_init(&ev, &alloc), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
     WatcherCtx ctx = {0};
     ASSERT_EQ(kl_watcher_add(&ev, fds[0], KL_EVENT_READ, test_watcher_cb, &ctx), 0);
 
-    (void)write(fds[1], "hello", 5);
+    (void)kl_test_sockwrite(fds[1], "hello", 5);
 
     int n = kl_event_ctx_run(&ev, 8, 100);
     ASSERT_TRUE(n > 0);
@@ -107,8 +103,8 @@ UTEST(event_ctx, run_dispatches_watcher) {
     ASSERT_TRUE(ctx.got_mask & KL_EVENT_READ);
 
     kl_watcher_del(&ev, fds[0]);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     kl_event_ctx_free(&ev);
 }
 

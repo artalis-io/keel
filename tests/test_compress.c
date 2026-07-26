@@ -2,7 +2,7 @@
 #include <keel/compress.h>
 #include <keel/allocator.h>
 #include <string.h>
-#include <unistd.h>
+#include "net_compat.h"
 
 /* ── Mock compressor ─────────────────────────────────────────────── */
 
@@ -251,7 +251,7 @@ UTEST(compress, stream_basic) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    pipe(pipefd);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
     res.conn_fd = pipefd[1];
 
     KlCompressConfig cfg = { .ctx = NULL, .factory = mock_factory };
@@ -269,8 +269,8 @@ UTEST(compress, stream_basic) {
     /* Destroy called */
     ASSERT_TRUE(g_mock.destroy_called);
 
-    close(pipefd[0]);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[0]);
+    kl_test_closesock(pipefd[1]);
     kl_response_free(&res);
 }
 
@@ -280,7 +280,7 @@ UTEST(compress, stream_multiple_writes) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    pipe(pipefd);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
     res.conn_fd = pipefd[1];
 
     KlCompressConfig cfg = { .ctx = NULL, .factory = mock_factory };
@@ -299,8 +299,8 @@ UTEST(compress, stream_multiple_writes) {
     /* Final flush called */
     ASSERT_EQ(g_mock.last_flush, 1);
 
-    close(pipefd[0]);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[0]);
+    kl_test_closesock(pipefd[1]);
     kl_response_free(&res);
 }
 
@@ -310,7 +310,7 @@ UTEST(compress, stream_end_flushes) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    pipe(pipefd);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
     res.conn_fd = pipefd[1];
 
     KlCompressConfig cfg = { .ctx = NULL, .factory = mock_factory };
@@ -322,8 +322,8 @@ UTEST(compress, stream_end_flushes) {
     /* flush=1 called even with no writes */
     ASSERT_EQ(g_mock.last_flush, 1);
 
-    close(pipefd[0]);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[0]);
+    kl_test_closesock(pipefd[1]);
     kl_response_free(&res);
 }
 
@@ -333,7 +333,7 @@ UTEST(compress, stream_zero_len_write) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    pipe(pipefd);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
     res.conn_fd = pipefd[1];
 
     KlCompressConfig cfg = { .ctx = NULL, .factory = mock_factory };
@@ -347,8 +347,8 @@ UTEST(compress, stream_zero_len_write) {
 
     ASSERT_EQ(kl_compress_stream_end(&cs), 0);
 
-    close(pipefd[0]);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[0]);
+    kl_test_closesock(pipefd[1]);
     kl_response_free(&res);
 }
 

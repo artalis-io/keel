@@ -1,14 +1,10 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <errno.h>
-#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "net_compat.h"
 
 static char     g_ip[INET6_ADDRSTRLEN];
 static uint16_t g_port;
@@ -26,9 +22,8 @@ static void *srv_thread(void *a) { kl_server_run((KlServer *)a); return NULL; }
 
 static void drain_response(int fd) {
     char buf[512];
-    struct pollfd p = { .fd = fd, .events = POLLIN };
-    while (poll(&p, 1, 2000) > 0) {
-        ssize_t n = read(fd, buf, sizeof(buf));
+    while (kl_test_poll1(fd, 0, 2000) > 0) {
+        long n = kl_test_sockread(fd, buf, sizeof(buf));
         if (n <= 0) break;
     }
 }
@@ -54,9 +49,9 @@ UTEST(peer_addr, tcp_ipv4) {
     ASSERT_EQ(0, connect(fd, (struct sockaddr *)&a, sizeof(a)));
 
     const char *req = "GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-    ASSERT_EQ((ssize_t)strlen(req), write(fd, req, strlen(req)));
+    ASSERT_EQ((long)strlen(req), kl_test_sockwrite(fd, req, strlen(req)));
     drain_response(fd);
-    close(fd);
+    kl_test_closesock(fd);
 
     kl_server_stop(&srv);
     pthread_join(t, NULL);
@@ -91,10 +86,10 @@ UTEST(peer_addr, tcp_ipv6) {
     int crc = (fd >= 0) ? connect(fd, (struct sockaddr *)&a6, sizeof(a6)) : -1;
     if (crc == 0) {
         const char *req = "GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-        write(fd, req, strlen(req));
+        kl_test_sockwrite(fd, req, strlen(req));
         drain_response(fd);
     }
-    if (fd >= 0) close(fd);
+    if (fd >= 0) kl_test_closesock(fd);
 
     kl_server_stop(&srv);
     pthread_join(t, NULL);
@@ -116,7 +111,7 @@ static int connect_local(int port) {
     a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)port);
     inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); return -1; }
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { kl_test_closesock(fd); return -1; }
     return fd;
 }
 
@@ -137,9 +132,9 @@ UTEST(peer_addr, proxy_v1_trusted) {
     const char *msg =
         "PROXY TCP4 203.0.113.7 10.0.0.1 5000 443\r\n"
         "GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-    ASSERT_EQ((ssize_t)strlen(msg), write(fd, msg, strlen(msg)));
+    ASSERT_EQ((long)strlen(msg), kl_test_sockwrite(fd, msg, strlen(msg)));
     drain_response(fd);
-    close(fd);
+    kl_test_closesock(fd);
 
     kl_server_stop(&srv); pthread_join(t, NULL); kl_server_free(&srv);
     ASSERT_EQ(0, g_rc);
@@ -172,11 +167,11 @@ UTEST(peer_addr, proxy_v2_trusted) {
     memcpy(hdr + 16, &s, 4); memcpy(hdr + 20, &d, 4);
     uint16_t sp = htons(40000), dp = htons(443);
     memcpy(hdr + 24, &sp, 2); memcpy(hdr + 26, &dp, 2);
-    ASSERT_EQ((ssize_t)28, write(fd, hdr, 28));
+    ASSERT_EQ((long)28, kl_test_sockwrite(fd, hdr, 28));
     const char *req = "GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-    ASSERT_EQ((ssize_t)strlen(req), write(fd, req, strlen(req)));
+    ASSERT_EQ((long)strlen(req), kl_test_sockwrite(fd, req, strlen(req)));
     drain_response(fd);
-    close(fd);
+    kl_test_closesock(fd);
 
     kl_server_stop(&srv); pthread_join(t, NULL); kl_server_free(&srv);
     ASSERT_EQ(0, g_rc);
@@ -200,9 +195,9 @@ UTEST(peer_addr, proxy_trusted_no_header) {
     int fd = connect_local(srv.bound_port);
     ASSERT_TRUE(fd >= 0);
     const char *req = "GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-    ASSERT_EQ((ssize_t)strlen(req), write(fd, req, strlen(req)));
+    ASSERT_EQ((long)strlen(req), kl_test_sockwrite(fd, req, strlen(req)));
     drain_response(fd);
-    close(fd);
+    kl_test_closesock(fd);
 
     kl_server_stop(&srv); pthread_join(t, NULL); kl_server_free(&srv);
     ASSERT_EQ(0, g_rc);

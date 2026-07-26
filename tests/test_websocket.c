@@ -5,8 +5,7 @@
 #include <keel/allocator.h>
 #include <string.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <sys/socket.h>
+#include "net_compat.h"
 
 /* Pull in internal headers for direct testing */
 #include "../src/sha1.h"
@@ -844,7 +843,7 @@ UTEST(auto_ping, disabled_by_default) {
 UTEST(auto_ping, sends_ping) {
     /* Use socketpair so we can read the ping frame back */
     int fds[2];
-    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+    int rc = kl_test_socketpair(fds);
     ASSERT_EQ(rc, 0);
 
     KlAllocator alloc = kl_allocator_default();
@@ -873,13 +872,13 @@ UTEST(auto_ping, sends_ping) {
 
     /* Read the ping frame from the other end */
     uint8_t buf[16];
-    ssize_t nr = read(fds[1], buf, sizeof(buf));
+    ssize_t nr = kl_test_sockread(fds[1], buf, sizeof(buf));
     ASSERT_EQ(nr, 2);  /* empty ping: 2-byte header */
     ASSERT_EQ(buf[0], 0x89);  /* FIN=1, opcode=ping */
     ASSERT_EQ(buf[1], 0x00);  /* no mask, 0 payload */
 
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     kl_free(&alloc, ws, sizeof(KlWsServerConn));
 }
 
@@ -890,7 +889,7 @@ UTEST(auto_ping, reschedules) {
     cfg.ping_interval_ms = 200;
 
     int fds[2];
-    socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
     memset(ws, 0, sizeof(*ws));
@@ -911,10 +910,10 @@ UTEST(auto_ping, reschedules) {
 
     /* Drain the frame */
     uint8_t drain[16];
-    read(fds[1], drain, sizeof(drain));
+    kl_test_sockread(fds[1], drain, sizeof(drain));
 
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     kl_free(&alloc, ws, sizeof(KlWsServerConn));
 }
 
@@ -961,7 +960,7 @@ UTEST(cleanup, rejects_unmasked_client_frame) {
     kl_ws_server_config_init(&cfg);
 
     int fds[2];
-    socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -984,8 +983,8 @@ UTEST(cleanup, rejects_unmasked_client_frame) {
     int rc = kl_ws_server_on_readable_data(&conn, buf, flen);
     ASSERT_EQ(rc, KL_CONN_CLOSED);
 
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     kl_free(&alloc, ws, sizeof(KlWsServerConn));
 }
 

@@ -47,6 +47,7 @@ else ifdef WINDOWS
   UDP_IO_SRC = src/udp_io_win.c
   DNS_SYS_SRC = src/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
+  TEST_COMPAT_SRC = tests/net_compat_win.c
   LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi
   EXE = .exe
 else
@@ -110,6 +111,9 @@ SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
 SERVER_PLAT_SRC ?= src/server_plat_posix.c
 UDP_IO_SRC ?= src/udp_io_posix.c
+# Test-harness network helpers: per-platform sibling TU (mirrors SOCKET_SRC), so
+# tests/net_compat.h stays logic-#ifdef-free. Linked into each test binary.
+TEST_COMPAT_SRC ?= tests/net_compat_posix.c
 # DNS config discovery (nameservers/hosts/search): POSIX resolv.conf/hosts; the
 # Windows branch swaps the iphlpapi sibling. dns_resolver.c itself is #ifdef-free
 # and runs over the udp + socket.h seams.
@@ -230,8 +234,16 @@ ifeq ($(BACKEND),iouring)
 endif
 TEST_BIN = $(TEST_SRC:.c=)
 
-tests/%: tests/%.c $(LIB)
-	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< -L. -lkeel $(LDFLAGS)
+# Per-platform test-network helpers (net_compat_posix.c / net_compat_win.c),
+# linked into every test binary. Built by the generic %.o rule.
+TEST_COMPAT_OBJ = $(TEST_COMPAT_SRC:.c=.o)
+# Keep the compat .o from being auto-deleted as a pattern-rule intermediate
+# (it's a prerequisite of the tests/% pattern rule, so Make would otherwise
+# rebuild it on every invocation).
+.SECONDARY: $(TEST_COMPAT_OBJ)
+
+tests/%: tests/%.c $(LIB) $(TEST_COMPAT_OBJ)
+	$(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 
 test: $(TEST_BIN)
 	@failed=0; \
@@ -241,17 +253,29 @@ test: $(TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
-# Windows unit-test subset (staged toward parity — see docs/phase6_winsock_design.md
-# Part C). Tier 1: platform-neutral suites (pure in-memory logic). Tier 2:
-# socket/thread runtime suites, validated on the Windows runner (they exercise the
-# same WSAPoll/Winsock/winpthreads machinery the smoke tests prove). The remaining
-# suites need their direct POSIX network includes (<netinet/in.h>, <sys/socket.h>,
-# ...) routed through the shim before they compile under MinGW — see Tier 3 in the
-# design doc.
+# Windows unit-test subset (see docs/phase6_winsock_design.md Part C). 44 of the
+# 55 suites run on the Windows runner. Tier 1: platform-neutral logic. Tier 2:
+# socket/thread runtime (WSAPoll/Winsock/winpthreads). Tier 3: suites whose POSIX
+# network idioms (<sys/socket.h> etc., socketpair/pipe/close/read/write/fcntl/poll)
+# are routed through tests/net_compat.h.
+#
+# 11 not listed. 9 are genuinely POSIX/Linux-only: tls, tls_integration, peer_cert
+# (no TLS backend built on Windows), udp_batching (recvmmsg), udp_offload (UDP GSO),
+# udp_tos (Windows restricts IP_TOS/DSCP setsockopt), unix_socket (SO_PEERCRED),
+# file_io + file_io_iouring (io_uring / POSIX file-path assumptions). 2 build clean
+# but have runtime failures needing Windows-native iteration, deferred for now:
+# dns_resolver (mock-UDP-nameserver + hosts/resolv.conf harness) and proxy (CONNECT
+# tunnel timing). The DNS + proxy paths are still covered on Windows by smoke-dns
+# and the POSIX suites.
 WIN_TEST_SUITES = allocator body_reader chunked cors decompress drain \
                   multipart_stream overflow parser response_parser router url \
                   client client_stream connection h2_client redirect \
-                  server_stats thread_pool timer websocket_client
+                  server_stats thread_pool timer websocket_client \
+                  error proxy_protocol resolver_cache request timeout \
+                  integration server_integration peer_addr client_happy_eyeballs \
+                  async client_pool cross_module event_ctx \
+                  h2 response socket_provider websocket compress event sse \
+                  udp udp_server udp_multicast
 WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
@@ -259,8 +283,8 @@ WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 # to the extension-less `tests/%` rule above, so `test-win` also runs natively as
 # a subset sanity check.
 ifeq ($(WINDOWS),1)
-tests/test_%$(EXE): tests/test_%.c $(LIB)
-	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< -L. -lkeel $(LDFLAGS)
+tests/test_%$(EXE): tests/test_%.c $(LIB) $(TEST_COMPAT_OBJ)
+	$(CC) $(CFLAGS) -include tests/win_prelude.h -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor -o $@ $< $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS)
 endif
 
 test-win: $(WIN_TEST_BIN)
@@ -320,7 +344,7 @@ clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f tests/smoke_tcp tests/smoke_tcp.exe tests/smoke_udp tests/smoke_udp.exe \
 	      tests/smoke_dns tests/smoke_dns.exe
-	rm -f $(WIN_TEST_BIN) tests/test_*.exe
+	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f src/file_io.o src/file_io_iouring.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o

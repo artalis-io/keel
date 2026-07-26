@@ -4,9 +4,7 @@
 #include <keel/client.h>
 #include <limits.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
+#include "net_compat.h"
 
 /* ── kl_strerror ─────────────────────────────────────────────────── */
 
@@ -83,7 +81,7 @@ UTEST(error, server_run_bind_in_use) {
     ASSERT_EQ(s.last_error, KL_ERR_BIND);
 
     kl_server_free(&s);
-    close(sock);
+    kl_test_closesock(sock);
 }
 
 /* ── KlClientResponse.error (sync) ──────────────────────────────── */

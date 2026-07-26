@@ -4,12 +4,8 @@
 
 #include <limits.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "net_compat.h"
 #include <pthread.h>
-#include <poll.h>
 #include <errno.h>
 
 /* ── Unit tests: pool init/free ──────────────────────────────────── */
@@ -85,7 +81,7 @@ UTEST(cpool, release_then_acquire) {
 
     /* Create a socketpair to get a valid, testable fd */
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     /* Release one end into the pool */
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
@@ -100,8 +96,8 @@ UTEST(cpool, release_then_acquire) {
     ASSERT_EQ(acq.fd, fds[0]);
     ASSERT_EQ(kl_cpool_idle_count(&pool), 0);
 
-    close(acq.fd);
-    close(fds[1]);
+    kl_test_closesock(acq.fd);
+    kl_test_closesock(fds[1]);
     kl_cpool_free(&pool);
 }
 
@@ -111,7 +107,7 @@ UTEST(cpool, acquire_wrong_host) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
     ASSERT_EQ(kl_cpool_release(&pool, &conn, "host-a.com", 80, 0, NULL, 0), 0);
@@ -120,7 +116,7 @@ UTEST(cpool, acquire_wrong_host) {
     ASSERT_EQ(kl_cpool_acquire(&pool, "host-b.com", 80, 0, NULL, 0, &acq), 1);  /* miss */
 
     kl_cpool_free(&pool);
-    close(fds[1]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST(cpool, acquire_wrong_port) {
@@ -129,7 +125,7 @@ UTEST(cpool, acquire_wrong_port) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
     ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0, NULL, 0), 0);
@@ -138,7 +134,7 @@ UTEST(cpool, acquire_wrong_port) {
     ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 443, 0, NULL, 0, &acq), 1);  /* miss */
 
     kl_cpool_free(&pool);
-    close(fds[1]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST(cpool, acquire_wrong_tls) {
@@ -147,7 +143,7 @@ UTEST(cpool, acquire_wrong_tls) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
     ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 443, 0, NULL, 0), 0);
@@ -156,7 +152,7 @@ UTEST(cpool, acquire_wrong_tls) {
     ASSERT_EQ(kl_cpool_acquire(&pool, "example.com", 443, 1, NULL, 0, &acq), 1);  /* miss */
 
     kl_cpool_free(&pool);
-    close(fds[1]);
+    kl_test_closesock(fds[1]);
 }
 
 UTEST(cpool, max_per_host_evicts_oldest) {
@@ -168,7 +164,7 @@ UTEST(cpool, max_per_host_evicts_oldest) {
     /* Create 3 socketpairs */
     int fds[3][2];
     for (int i = 0; i < 3; i++)
-        ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds[i]), 0);
+        ASSERT_EQ(kl_test_socketpair(fds[i]), 0);
 
     /* Release 3 connections for same host (max_per_host=2) */
     for (int i = 0; i < 3; i++) {
@@ -181,7 +177,7 @@ UTEST(cpool, max_per_host_evicts_oldest) {
     ASSERT_EQ(kl_cpool_idle_count(&pool), 2);
 
     for (int i = 0; i < 3; i++)
-        close(fds[i][1]);
+        kl_test_closesock(fds[i][1]);
 
     kl_cpool_free(&pool);
 }
@@ -195,7 +191,7 @@ UTEST(cpool, pool_full_evicts_lru) {
     /* Fill pool */
     int fds[3][2];
     for (int i = 0; i < 3; i++)
-        ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds[i]), 0);
+        ASSERT_EQ(kl_test_socketpair(fds[i]), 0);
 
     char host[32];
     for (int i = 0; i < 2; i++) {
@@ -211,7 +207,7 @@ UTEST(cpool, pool_full_evicts_lru) {
     ASSERT_EQ(kl_cpool_idle_count(&pool), 2);
 
     for (int i = 0; i < 3; i++)
-        close(fds[i][1]);
+        kl_test_closesock(fds[i][1]);
 
     kl_cpool_free(&pool);
 }
@@ -222,7 +218,7 @@ UTEST(cpool, discard_closes_fd) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
     kl_cpool_discard(&pool, &conn);
@@ -230,9 +226,9 @@ UTEST(cpool, discard_closes_fd) {
 
     /* Verify fd is closed — write should fail */
     char c = 'x';
-    ASSERT_TRUE(write(fds[0], &c, 1) < 0);
+    ASSERT_TRUE(kl_test_sockwrite(fds[0], &c, 1) < 0);
 
-    close(fds[1]);
+    kl_test_closesock(fds[1]);
     kl_cpool_free(&pool);
 }
 
@@ -245,7 +241,7 @@ UTEST(cpool, idle_count) {
 
     int fds[2][2];
     for (int i = 0; i < 2; i++)
-        ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds[i]), 0);
+        ASSERT_EQ(kl_test_socketpair(fds[i]), 0);
 
     KlClientPoolConn c1 = { .fd = fds[0][0], .tls = NULL, .reused = 0, ._entry = NULL };
     ASSERT_EQ(kl_cpool_release(&pool, &c1, "a.com", 80, 0, NULL, 0), 0);
@@ -265,7 +261,7 @@ UTEST(cpool, idle_count) {
     kl_cpool_discard(&pool, &acq);
 
     for (int i = 0; i < 2; i++)
-        close(fds[i][1]);
+        kl_test_closesock(fds[i][1]);
 
     kl_cpool_free(&pool);
 }
@@ -278,7 +274,7 @@ UTEST(cpool, evict_expired) {
 
     int fds[2][2];
     for (int i = 0; i < 2; i++)
-        ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds[i]), 0);
+        ASSERT_EQ(kl_test_socketpair(fds[i]), 0);
 
     KlClientPoolConn c1 = { .fd = fds[0][0], .tls = NULL, .reused = 0, ._entry = NULL };
     ASSERT_EQ(kl_cpool_release(&pool, &c1, "a.com", 80, 0, NULL, 0), 0);
@@ -296,7 +292,7 @@ UTEST(cpool, evict_expired) {
     ASSERT_TRUE(kl_cpool_idle_count(&pool) <= 1);
 
     for (int i = 0; i < 2; i++)
-        close(fds[i][1]);
+        kl_test_closesock(fds[i][1]);
 
     kl_cpool_free(&pool);
 }
@@ -307,14 +303,14 @@ UTEST(cpool, stale_detection) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     /* Release one end */
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
     ASSERT_EQ(kl_cpool_release(&pool, &conn, "example.com", 80, 0, NULL, 0), 0);
 
     /* Close the other end (simulate server disconnect) */
-    close(fds[1]);
+    kl_test_closesock(fds[1]);
     usleep(10000);  /* let OS propagate the close */
 
     /* Acquire should detect stale and return miss */
@@ -331,7 +327,7 @@ UTEST(cpool, hostname_too_long) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     /* Build a hostname that's too long */
     char long_host[KL_CLIENT_HOSTNAME_MAX + 10];
@@ -342,7 +338,7 @@ UTEST(cpool, hostname_too_long) {
     ASSERT_EQ(kl_cpool_release(&pool, &conn, long_host, 80, 0, NULL, 0), -1);
 
     /* fd should be closed by discard inside release */
-    close(fds[1]);
+    kl_test_closesock(fds[1]);
     kl_cpool_free(&pool);
 }
 

@@ -4,8 +4,7 @@
 
 #include <string.h>
 #include <time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "net_compat.h"
 
 /* ── Mock resolver ───────────────────────────────────────────────── */
 

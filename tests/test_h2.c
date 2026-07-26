@@ -6,8 +6,7 @@
 #include <keel/router.h>
 #include <keel/body_reader.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
+#include "net_compat.h"
 
 /* ═══════════════════════════════════════════════════════════════════
  * Mock H2 Session
@@ -259,7 +258,7 @@ UTEST(h2, session_vtable_validation) {
     /* Create a mock factory that returns a session with NULL recv */
     /* We test via kl_h2_server_upgrade — need a minimal conn */
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -281,8 +280,8 @@ UTEST(h2, session_vtable_validation) {
     /* destroy should have been called during cleanup */
     ASSERT_EQ(mock.destroy_count, 1);
 
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -293,7 +292,7 @@ UTEST(h2, conn_init_and_free) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -312,8 +311,8 @@ UTEST(h2, conn_init_and_free) {
     ASSERT_TRUE(conn.h2 == NULL);
     ASSERT_EQ(mock.destroy_count, 1);
 
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -324,7 +323,7 @@ UTEST(h2, stream_create) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -351,8 +350,8 @@ UTEST(h2, stream_create) {
     ASSERT_EQ(conn.h2->streams[0].stream_id, (uint32_t)1);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -366,7 +365,7 @@ UTEST(h2, stream_max_limit) {
     test_h2_cfg.max_concurrent_streams = 2;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -406,8 +405,8 @@ UTEST(h2, stream_max_limit) {
     ASSERT_EQ(conn.h2->num_streams, 2);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -418,7 +417,7 @@ UTEST(h2, stream_destroy_cleanup) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -448,8 +447,8 @@ UTEST(h2, stream_destroy_cleanup) {
     ASSERT_EQ(g_test_br.destroy_count, 1);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -460,7 +459,7 @@ UTEST(h2, cb_on_request_creates_stream) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -495,8 +494,8 @@ UTEST(h2, cb_on_request_creates_stream) {
     ASSERT_EQ(s->headers_done, 1);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -507,7 +506,7 @@ UTEST(h2, cb_on_request_routes) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -536,8 +535,8 @@ UTEST(h2, cb_on_request_routes) {
     ASSERT_EQ(memcmp(s->params[0].value, "42", 2), 0);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -549,7 +548,7 @@ UTEST(h2, cb_on_request_middleware) {
     middleware_return = 1;  /* short-circuit */
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -571,8 +570,8 @@ UTEST(h2, cb_on_request_middleware) {
     ASSERT_EQ(conn.h2->num_streams, 0);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -583,7 +582,7 @@ UTEST(h2, cb_on_data_forwards) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -610,8 +609,8 @@ UTEST(h2, cb_on_data_forwards) {
     ASSERT_EQ(memcmp(g_test_br.data, "hello", 5), 0);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -622,7 +621,7 @@ UTEST(h2, cb_on_data_reject) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -649,8 +648,8 @@ UTEST(h2, cb_on_data_reject) {
     ASSERT_EQ(rc, -1);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -661,7 +660,7 @@ UTEST(h2, cb_on_stream_end_handler) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -687,8 +686,8 @@ UTEST(h2, cb_on_stream_end_handler) {
     ASSERT_EQ(conn.h2->num_streams, 0);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -699,7 +698,7 @@ UTEST(h2, cb_on_stream_end_404) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -718,8 +717,8 @@ UTEST(h2, cb_on_stream_end_404) {
     ASSERT_EQ(mock.last_status, 404);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -730,7 +729,7 @@ UTEST(h2, cb_on_stream_reset_cleanup) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -758,8 +757,8 @@ UTEST(h2, cb_on_stream_reset_cleanup) {
     ASSERT_EQ(g_test_br.destroy_count, 1);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -770,7 +769,7 @@ UTEST(h2, cb_send_wraps_conn_write) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -786,13 +785,13 @@ UTEST(h2, cb_send_wraps_conn_write) {
 
     /* Read from pipe to verify */
     char buf[64];
-    ssize_t nr = read(pfd[0], buf, sizeof(buf));
+    ssize_t nr = kl_test_sockread(pfd[0], buf, sizeof(buf));
     ASSERT_EQ(nr, (ssize_t)17);
     ASSERT_EQ(memcmp(buf, "HTTP/2 frame data", 17), 0);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -857,7 +856,7 @@ UTEST(h2, alpn_h2) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -872,8 +871,8 @@ UTEST(h2, alpn_h2) {
     ASSERT_TRUE(conn.h2 != NULL);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -904,7 +903,7 @@ UTEST(h2, multi_stream) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -945,8 +944,8 @@ UTEST(h2, multi_stream) {
     ASSERT_EQ(mock.submit_count, 3);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -957,7 +956,7 @@ UTEST(h2, goaway_shutdown) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -975,8 +974,8 @@ UTEST(h2, goaway_shutdown) {
     ASSERT_EQ(mock.shutdown_count, 1);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -987,7 +986,7 @@ UTEST(h2, cleanup_frees_all) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -1014,8 +1013,8 @@ UTEST(h2, cleanup_frees_all) {
     ASSERT_TRUE(conn.h2 == NULL);
     ASSERT_EQ(mock.destroy_count, 1);
 
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -1037,7 +1036,7 @@ UTEST(h2, response_header_extraction) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -1068,8 +1067,8 @@ UTEST(h2, response_header_extraction) {
     ASSERT_EQ(found_ct, 1);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -1080,7 +1079,7 @@ UTEST(h2, handler_same_api) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -1106,8 +1105,8 @@ UTEST(h2, handler_same_api) {
     ASSERT_EQ(memcmp(mock.last_body, "{\"id\":1}", 8), 0);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
@@ -1118,7 +1117,7 @@ UTEST(h2, query_string_parsing) {
     g_mock_session = &mock;
 
     int pfd[2];
-    ASSERT_EQ(pipe(pfd), 0);
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
@@ -1141,8 +1140,8 @@ UTEST(h2, query_string_parsing) {
     ASSERT_EQ(memcmp(s->req.query, "q=test&page=1", 13), 0);
 
     kl_h2_server_cleanup(&conn);
-    close(pfd[0]);
-    close(pfd[1]);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
     test_teardown();
 }
 
