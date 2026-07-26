@@ -284,7 +284,7 @@ WIN_TEST_SUITES = allocator body_reader chunked cors decompress drain \
                   server_stats thread_pool timer websocket_client \
                   error proxy_protocol resolver_cache request timeout \
                   integration server_integration peer_addr client_happy_eyeballs \
-                  async client_pool cross_module event_ctx \
+                  async client_pool cross_module event_ctx event_caps \
                   h2 response socket_provider websocket compress event sse \
                   udp udp_server udp_multicast \
                   tls tls_integration peer_cert

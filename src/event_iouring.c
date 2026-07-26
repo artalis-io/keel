@@ -1,4 +1,5 @@
 #include <keel/event.h>
+#include "event_caps.h"
 #include <limits.h>
 #include <poll.h>
 #include <string.h>
@@ -271,4 +272,13 @@ void kl_event_close(KlEventLoop *loop) {
     kl_free(alloc, st, sizeof(*st));
     loop->_backend = NULL;
     loop->fd = -1;
+}
+
+/* PAL Phase 7: this backend is used in a readiness-emulation shape (it emits
+ * KlEvent readiness over native OS descriptors). A true io_uring completion mode
+ * would advertise KL_EVENT_CAP_COMPLETION — that is Phase 8, hence the `loop`
+ * parameter is carried now for a future per-loop-mode decision. */
+unsigned kl_event_caps(const KlEventLoop *loop) {
+    (void)loop;
+    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }

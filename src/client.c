@@ -25,6 +25,7 @@
 
 #include "socket.h"     /* seam + sockcompat: sockaddr / getaddrinfo / sys_un / SO_ERROR op */
 #include "platform.h"   /* kl_plat_poll1 — sync readiness wait (poll/WSAPoll) */
+#include "event_caps.h" /* PAL Phase 7: event↔socket capability negotiation */
 
 /* ── Proxy constants ─────────────────────────────────────────────── */
 
@@ -2231,6 +2232,13 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
     if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
+    /* PAL Phase 7: the async client's readiness loop must be able to watch the
+     * provider's handles (native fds). Reject an incoherent pairing up front. */
+    if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
+        kl_free(alloc, req_buf, req_len);
+        kl_free(alloc, c, sizeof(KlClient));
+        return NULL;
+    }
     c->alloc = alloc;
     c->tls_cfg = is_tunnel ? tls_cfg : NULL;  /* only for CONNECT tunnels */
     c->request_buf = req_buf;
@@ -2747,6 +2755,13 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
     if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
+    /* PAL Phase 7: the async client's readiness loop must be able to watch the
+     * provider's handles (native fds). Reject an incoherent pairing up front. */
+    if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
+        kl_free(alloc, req_buf, req_len);
+        kl_free(alloc, c, sizeof(KlClient));
+        return NULL;
+    }
     c->alloc = alloc;
     c->tls_cfg = tls_cfg;
     c->request_buf = req_buf;

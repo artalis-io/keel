@@ -14,6 +14,7 @@
  */
 
 #include <keel/event.h>
+#include "event_caps.h"
 
 #include "sockcompat.h"   /* winsock2.h + kl_wsa_set_errno() */
 #include <limits.h>
@@ -209,4 +210,10 @@ void kl_event_close(KlEventLoop *loop) {
     kl_free(alloc, st, sizeof(*st));
     loop->_backend = NULL;
     loop->fd = -1;
+}
+
+/* PAL Phase 7: WSAPoll is a readiness poller of native OS descriptors (SOCKETs). */
+unsigned kl_event_caps(const KlEventLoop *loop) {
+    (void)loop;
+    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }
