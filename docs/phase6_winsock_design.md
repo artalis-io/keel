@@ -328,17 +328,20 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    once a Keel header pulls in `<winsock2.h>`; a force-included `tests/win_prelude.h`
    (winsock2→ws2tcpip→windows, the sockcompat ordering) resolves it for every test
    without touching vendored `utest.h` or the 55 test files. `WIN_TEST_SUITES`
-   (Makefile) is **Tier 1**: 12 platform-neutral suites (allocator, body_reader,
-   chunked, cors, decompress, drain, multipart_stream, overflow, parser,
-   response_parser, router, url) — pure in-memory logic, guaranteed green. The
-   rest are staged: **Tier 2** (build-clean but socket/thread *runtime*, pending
-   validation on the runner — client, client_stream, connection, h2_client,
-   redirect, server_stats, thread_pool, timer, websocket_client) and **Tier 3**
-   (30 suites whose *test files* include `<netinet/in.h>`/`<sys/socket.h>`/…
-   directly and must route those through the shim before they compile under MinGW;
-   4 more — compress/event/sse/tls — call `pipe()` directly). Local validation:
-   the 12 build to PE32+ via `make OS=windows` (MinGW-w64) and run green natively
-   as a subset; the runner executes them for real.
+   (Makefile) started as **Tier 1**: 12 platform-neutral suites (allocator,
+   body_reader, chunked, cors, decompress, drain, multipart_stream, overflow,
+   parser, response_parser, router, url) — pure in-memory logic. **Tier 2** then
+   added the 9 build-clean socket/thread *runtime* suites (client, client_stream,
+   connection, h2_client, redirect, server_stats, thread_pool, timer,
+   websocket_client), validated green on the runner — they exercise the same
+   WSAPoll/Winsock/winpthreads machinery the smoke tests prove. This also **clears
+   the Part-D thread-pool risk**: `thread_pool` (winpthreads + the loopback-pair
+   wakeup) passes on Windows. That brings CI to **21 utest suites** on Windows.
+   **Tier 3** remains: 30 suites whose *test
+   files* include `<netinet/in.h>`/`<sys/socket.h>`/… directly and must route those
+   through the shim before they compile under MinGW; 4 more — compress/event/sse/tls
+   — call `pipe()` directly. Local validation: the suites build to PE32+ via
+   `make OS=windows` (MinGW-w64); the runner executes them for real.
 4. **Feed back to the vtable.** Confirm `KlSocketHandle` + `writev`/`sendfile`
    ops are sufficient → **unblocks Phase 4** (publish the now-proven vtable).
 

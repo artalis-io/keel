@@ -242,15 +242,16 @@ test: $(TEST_BIN)
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
 # Windows unit-test subset (staged toward parity — see docs/phase6_winsock_design.md
-# Part C). Tier 1: platform-neutral suites that build AND run on Winsock today
-# (pure in-memory logic — no socket/thread runtime dependence). The remaining
-# suites are follow-on stages: (a) build-clean but socket/thread runtime, pending
-# validation on the Windows runner — client, client_stream, connection, h2_client,
-# redirect, server_stats, thread_pool, timer, websocket_client; (b) need their
-# direct POSIX network includes (<netinet/in.h>, <sys/socket.h>, ...) routed
-# through the shim before they compile under MinGW.
+# Part C). Tier 1: platform-neutral suites (pure in-memory logic). Tier 2:
+# socket/thread runtime suites, validated on the Windows runner (they exercise the
+# same WSAPoll/Winsock/winpthreads machinery the smoke tests prove). The remaining
+# suites need their direct POSIX network includes (<netinet/in.h>, <sys/socket.h>,
+# ...) routed through the shim before they compile under MinGW — see Tier 3 in the
+# design doc.
 WIN_TEST_SUITES = allocator body_reader chunked cors decompress drain \
-                  multipart_stream overflow parser response_parser router url
+                  multipart_stream overflow parser response_parser router url \
+                  client client_stream connection h2_client redirect \
+                  server_stats thread_pool timer websocket_client
 WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
