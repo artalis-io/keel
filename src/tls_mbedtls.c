@@ -75,6 +75,8 @@ typedef struct {
  * These translate between mbedTLS error codes and POSIX.
  */
 
+/* cppcheck-suppress constParameterCallback ; ctx must be void* to match the
+ * mbedTLS f_send BIO function-pointer signature (mbedtls_ssl_set_bio) */
 static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 {
     const KlMbedtlsTls *t = (const KlMbedtlsTls *)ctx;
@@ -92,6 +94,8 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
     return (int)ret;
 }
 
+/* cppcheck-suppress constParameterCallback ; ctx must be void* to match the
+ * mbedTLS f_recv BIO function-pointer signature (mbedtls_ssl_set_bio) */
 static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 {
     const KlMbedtlsTls *t = (const KlMbedtlsTls *)ctx;
