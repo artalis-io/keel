@@ -1,4 +1,5 @@
 #include <keel/event.h>
+#include "event_caps.h"
 #include <sys/event.h>
 #include <unistd.h>
 
@@ -89,4 +90,10 @@ void kl_event_close(KlEventLoop *loop) {
         close(loop->fd);
         loop->fd = -1;
     }
+}
+
+/* PAL Phase 7: kqueue is a readiness poller of native OS descriptors. */
+unsigned kl_event_caps(const KlEventLoop *loop) {
+    (void)loop;
+    return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }

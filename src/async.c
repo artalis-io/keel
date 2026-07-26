@@ -4,6 +4,7 @@
 #include <keel/connection.h>
 #include <stdint.h>
 #include "internal.h"
+#include "event_caps.h"
 
 /* ── Tagged pointer helpers ────────────────────────────────────────── */
 
@@ -50,6 +51,23 @@ void kl_event_ctx_free(KlEventCtx *ctx) {
         kl_free(ctx->alloc, w, sizeof(KlWatcher));
     }
     kl_event_close(&ctx->loop);
+}
+
+/* PAL Phase 7: negotiate the event loop against the socket provider. The neutral
+ * meeting point — this ctx already holds both the loop and the provider, so the
+ * socket seam and the event axis stay decoupled (F3). Today only the readiness +
+ * native-fd model exists: the provider must expose native fds AND the loop must be
+ * a native-fd readiness poller. A NULL provider is the built-in POSIX default
+ * (native-fd). A future completion loop or a non-native provider is rejected here
+ * rather than failing obscurely at kl_event_add. */
+int kl_event_ctx_sockets_compatible(const struct KlEventCtx *ctx) {
+    if (!ctx) return 0;
+    unsigned ev = kl_event_caps(&ctx->loop);
+    int provider_native = kl_socket_provider_has_cap(ctx->sockets, KL_SOCK_CAP_NATIVE_FD);
+    int loop_watches_fds =
+        (ev & (KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD)) ==
+        (KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD);
+    return provider_native && loop_watches_fds;
 }
 
 /* ── KlWatcher ─────────────────────────────────────────────────────── */

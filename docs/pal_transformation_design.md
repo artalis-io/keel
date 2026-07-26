@@ -210,16 +210,22 @@ landed (`include/keel/socket.h`), no internal/POSIX types leaked, validated by t
 proves the public provider/event API is sufficient for a third platform. mbedTLS
 backend builds on POSIX + Windows (seam-routed, BYO/out-of-CI).
 
-**Phase 7 (event/socket capability negotiation) designed** in
-`docs/phase7_capability_negotiation_design.md`. Decisions: **formalize the contract
-only** — the event backend gets an internal capability surface (`src/event_caps.h`,
-`KL_EVENT_CAP_READINESS | _NATIVE_FD`, `COMPLETION` reserved/unimplemented) and the
-server's implicit native-fd assumption (`server.c:337`) becomes a two-sided
-event↔socket negotiation at the `KlEventCtx` wire-up (F3-safe: the socket seam and
-event axis stay decoupled). **Internal-first** — no public `keel/event.h` change;
-the public event-capability API is frozen only when a real consumer (Phase 8 IOCP /
-Phase 9 lwIP-raw) exercises it. Behaviorally a no-op today (readiness+native-fd is
-one point in the new space); the guard becomes truthful rather than assumed.
+**Phase 7 (event/socket capability negotiation) done** — designed in
+`docs/phase7_capability_negotiation_design.md`, implemented as specified.
+**Formalize the contract only:** the event backend gets an internal capability
+surface (`src/event_caps.h`, `KL_EVENT_CAP_READINESS | _NATIVE_FD`, `COMPLETION`
+reserved/unimplemented; each of the 5 backends returns a one-line const set), and
+the server's implicit native-fd assumption became a two-sided event↔socket
+negotiation (`kl_event_ctx_sockets_compatible()` in async.c, at the `KlEventCtx`
+wire-up — F3-safe: `event_caps.h` pulls only `<keel/event.h>`, never the socket
+seam). The server guard moved from a pre-alloc provider-only check to the truthful
+two-sided check after loop+provider are wired; the async client rejects an
+incoherent pairing at both start paths. **Internal-first** — no public
+`keel/event.h` change; the public event-capability API is frozen only when a real
+consumer (Phase 8 IOCP / Phase 9 lwIP-raw) exercises it. Behaviorally a no-op today
+(readiness+native-fd is one point in the new space); the guard is now truthful
+rather than assumed. `test_event_caps` proves it rejects a non-native provider
+(POSIX + Windows CI).
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
