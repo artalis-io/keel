@@ -33,6 +33,12 @@
  * loop negotiates against this bit (see kl_caps_compatible). No public API change. */
 #define KL_SOCK_CAP_OVERLAPPED (1ull << 3)
 
+/* The overlapped socket provider that pairs with the IOCP completion backend
+ * (defined in event_iocp.c, Windows/BACKEND=iocp only). Internal — kept out of the
+ * public header alongside its capability. Declared unconditionally; only ever
+ * defined/called in the IOCP build. */
+const KlSocketProvider *kl_socket_provider_iocp(void);
+
 /*
  * Platform default socket ops — the raw syscall for each operation, DEFINED
  * per-platform in the provider TU (socket_posix.c: POSIX; socket_winsock.c:
