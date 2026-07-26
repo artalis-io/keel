@@ -20,6 +20,12 @@
 #if defined(_WIN32)
   #include <winsock2.h>   /* SOCKET, struct sockaddr, fd_set */
   #include <ws2tcpip.h>   /* struct sockaddr_storage, socklen_t, getaddrinfo */
+#elif defined(KEEL_PLATFORM_LWIP)
+  /* lwIP target: the stack provides its own BSD socket types (struct sockaddr,
+   * socklen_t, ...) via lwip/sockets.h — do NOT pull the host <sys/socket.h>,
+   * which would clash. Inert unless a build/provider defines KEEL_PLATFORM_LWIP
+   * (e.g. the examples/lwip reference). See docs/lwip_platform_design.md. */
+  #include "lwip/sockets.h"
 #else
   #include <sys/socket.h>
 #endif
