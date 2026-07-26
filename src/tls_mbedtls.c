@@ -9,6 +9,13 @@
 
 #include <keel/tls_mbedtls.h>
 
+/* The socket seam: BIO I/O goes through kl_sockdef_send/recv (POSIX + Winsock,
+ * with EINTR-retry, SIGPIPE suppression, and errno translation), and this also
+ * supplies inet_ntop/AF_INET (SAN formatting) + KlSocketHandle. Included before
+ * the mbedTLS headers so, on Windows, winsock2.h precedes any windows.h an
+ * mbedTLS header might pull in. */
+#include "socket.h"
+
 #include <mbedtls/ssl.h>
 #include <mbedtls/ssl_ciphersuites.h>
 #include <mbedtls/x509_crt.h>
@@ -16,7 +23,7 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/error.h>
-#include <mbedtls/net_sockets.h>
+#include <mbedtls/net_sockets.h>   /* MBEDTLS_ERR_NET_SEND/RECV_FAILED (BIO codes) */
 #include <mbedtls/sha256.h>
 #include <mbedtls/oid.h>
 #include <mbedtls/asn1.h>
@@ -25,10 +32,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
 
 /* Secure zeroing — scrub key material before free.
  * Uses volatile pointer to prevent compiler from optimizing away the store.
@@ -61,7 +64,7 @@ typedef struct {
     mbedtls_ssl_context ssl;
     KlMbedtlsCtx      *ctx;       /* shared context (not owned) */
     KlAllocator        *alloc;
-    int                 fd;        /* cached for BIO callbacks */
+    KlSocketHandle      fd;        /* cached for BIO callbacks */
     int                 handshake_done;
 } KlMbedtlsTls;
 
@@ -72,16 +75,15 @@ typedef struct {
  * These translate between mbedTLS error codes and POSIX.
  */
 
+/* cppcheck-suppress constParameterCallback ; ctx must be void* to match the
+ * mbedTLS f_send BIO function-pointer signature (mbedtls_ssl_set_bio) */
 static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 {
-    KlMbedtlsTls *t = (KlMbedtlsTls *)ctx;
-    ssize_t ret;
-
-#ifdef MSG_NOSIGNAL
-    do { ret = send(t->fd, buf, len, MSG_NOSIGNAL); } while (ret < 0 && errno == EINTR);
-#else
-    do { ret = write(t->fd, buf, len); } while (ret < 0 && errno == EINTR);
-#endif
+    const KlMbedtlsTls *t = (const KlMbedtlsTls *)ctx;
+    /* kl_sockdef_send suppresses SIGPIPE (MSG_NOSIGNAL) and retries EINTR on
+     * POSIX; on Windows it's the Winsock send with kl_wsa_set_errno — so the
+     * EAGAIN/EWOULDBLOCK check below works on both. */
+    ssize_t ret = kl_sockdef_send(t->fd, buf, len);
 
     if (ret < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -92,14 +94,12 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
     return (int)ret;
 }
 
+/* cppcheck-suppress constParameterCallback ; ctx must be void* to match the
+ * mbedTLS f_recv BIO function-pointer signature (mbedtls_ssl_set_bio) */
 static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 {
-    KlMbedtlsTls *t = (KlMbedtlsTls *)ctx;
-    ssize_t ret;
-
-    do {
-        ret = read(t->fd, buf, len);
-    } while (ret < 0 && errno == EINTR);
+    const KlMbedtlsTls *t = (const KlMbedtlsTls *)ctx;
+    ssize_t ret = kl_sockdef_recv(t->fd, buf, len);
 
     if (ret < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -115,7 +115,7 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 
 /* ── KlTls vtable implementation ─────────────────────────────────── */
 
-static KlTlsResult tls_handshake(KlTls *self, int fd)
+static KlTlsResult tls_handshake(KlTls *self, KlSocketHandle fd)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     t->fd = fd;
@@ -134,7 +134,7 @@ static KlTlsResult tls_handshake(KlTls *self, int fd)
     return KL_TLS_ERROR;
 }
 
-static ssize_t tls_read(KlTls *self, int fd, void *buf, size_t len)
+static ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     t->fd = fd;
@@ -151,7 +151,7 @@ static ssize_t tls_read(KlTls *self, int fd, void *buf, size_t len)
     return -1;  /* error */
 }
 
-static ssize_t tls_write(KlTls *self, int fd, const void *buf, size_t len)
+static ssize_t tls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     t->fd = fd;
@@ -166,7 +166,7 @@ static ssize_t tls_write(KlTls *self, int fd, const void *buf, size_t len)
     return -1;  /* error */
 }
 
-static KlTlsResult tls_shutdown(KlTls *self, int fd)
+static KlTlsResult tls_shutdown(KlTls *self, KlSocketHandle fd)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     t->fd = fd;
@@ -194,7 +194,7 @@ static void tls_reset(KlTls *self)
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     mbedtls_ssl_session_reset(&t->ssl);
     t->handshake_done = 0;
-    t->fd = -1;
+    t->fd = KL_INVALID_SOCKET;
 }
 
 static void tls_destroy(KlTls *self)
@@ -333,7 +333,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     memset(t, 0, sizeof(*t));
     t->alloc = alloc;
     t->ctx = mctx;
-    t->fd = -1;
+    t->fd = KL_INVALID_SOCKET;
 
     /* Set up vtable */
     t->base.handshake    = tls_handshake;
@@ -425,13 +425,16 @@ static unsigned char *read_file(const char *path, size_t *out_len,
 
 /* ── Server context creation ─────────────────────────────────────── */
 
-KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
-                                      const char *key_path,
-                                      const char *ca_path,
-                                      int client_auth,
-                                      KlAllocator *alloc)
+/* Build a server context from in-memory cert/key/(optional CA) buffers. PEM
+ * buffers must be NUL-terminated with the length counting the NUL (mbedTLS PEM
+ * rule); DER is auto-detected. Does not take ownership of or scrub the buffers —
+ * the caller does. Shared by the file-path and _from_buf public entry points. */
+static KlTlsCtx *server_ctx_from_mem(const unsigned char *cert_buf, size_t cert_len,
+                                     const unsigned char *key_buf, size_t key_len,
+                                     const unsigned char *ca_buf, size_t ca_len,
+                                     int client_auth, KlAllocator *alloc)
 {
-    if (!cert_path || !key_path || !alloc)
+    if (!cert_buf || !key_buf || !alloc)
         return NULL;
 
     KlMbedtlsCtx *ctx = kl_malloc(alloc, sizeof(*ctx));
@@ -459,42 +462,20 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
     if (ret != 0)
         goto fail;
 
-    /* Load server certificate */
-    size_t cert_len;
-    unsigned char *cert_buf = read_file(cert_path, &cert_len, alloc);
-    if (!cert_buf)
-        goto fail;
-
     ret = mbedtls_x509_crt_parse(&ctx->cert, cert_buf, cert_len);
-    kl_free(alloc, cert_buf, cert_len);
     if (ret != 0)
-        goto fail;
-
-    /* Load server private key */
-    size_t key_len;
-    unsigned char *key_buf = read_file(key_path, &key_len, alloc);
-    if (!key_buf)
         goto fail;
 
     ret = mbedtls_pk_parse_key(&ctx->pkey, key_buf, key_len,
                                 NULL, 0, mbedtls_ctr_drbg_random, &ctx->drbg);
-    kl_secure_zero(key_buf, key_len);
-    kl_free(alloc, key_buf, key_len);
     if (ret != 0)
         goto fail;
 
-    /* Load CA certificate for mTLS (optional) */
-    if (ca_path) {
-        size_t ca_len;
-        unsigned char *ca_buf = read_file(ca_path, &ca_len, alloc);
-        if (!ca_buf)
-            goto fail;
-
+    /* CA certificate for mTLS (optional) */
+    if (ca_buf && ca_len) {
         ret = mbedtls_x509_crt_parse(&ctx->ca_cert, ca_buf, ca_len);
-        kl_free(alloc, ca_buf, ca_len);
         if (ret != 0)
             goto fail;
-
         ctx->has_ca = 1;
     }
 
@@ -537,6 +518,55 @@ fail:
     mbedtls_entropy_free(&ctx->entropy);
     kl_free(alloc, ctx, sizeof(*ctx));
     return NULL;
+}
+
+KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
+                                      const char *key_path,
+                                      const char *ca_path,
+                                      int client_auth,
+                                      KlAllocator *alloc)
+{
+    if (!cert_path || !key_path || !alloc)
+        return NULL;
+
+    size_t cert_len = 0, key_len = 0, ca_len = 0;
+    unsigned char *cert_buf = read_file(cert_path, &cert_len, alloc);
+    if (!cert_buf)
+        return NULL;
+    unsigned char *key_buf = read_file(key_path, &key_len, alloc);
+    if (!key_buf) {
+        kl_free(alloc, cert_buf, cert_len);
+        return NULL;
+    }
+    unsigned char *ca_buf = NULL;
+    if (ca_path) {
+        ca_buf = read_file(ca_path, &ca_len, alloc);
+        if (!ca_buf) {
+            kl_secure_zero(key_buf, key_len);
+            kl_free(alloc, key_buf, key_len);
+            kl_free(alloc, cert_buf, cert_len);
+            return NULL;
+        }
+    }
+
+    KlTlsCtx *ctx = server_ctx_from_mem(cert_buf, cert_len, key_buf, key_len,
+                                        ca_buf, ca_len, client_auth, alloc);
+
+    kl_free(alloc, cert_buf, cert_len);
+    kl_secure_zero(key_buf, key_len);
+    kl_free(alloc, key_buf, key_len);
+    if (ca_buf)
+        kl_free(alloc, ca_buf, ca_len);
+    return ctx;
+}
+
+KlTlsCtx *kl_tls_mbedtls_ctx_create_from_buf(const unsigned char *cert_buf, size_t cert_len,
+                                              const unsigned char *key_buf, size_t key_len,
+                                              const unsigned char *ca_buf, size_t ca_len,
+                                              int client_auth, KlAllocator *alloc)
+{
+    return server_ctx_from_mem(cert_buf, cert_len, key_buf, key_len,
+                               ca_buf, ca_len, client_auth, alloc);
 }
 
 /* ── Client context creation ─────────────────────────────────────── */

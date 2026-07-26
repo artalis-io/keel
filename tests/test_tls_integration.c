@@ -1,14 +1,10 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <keel/tls.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "net_compat.h"
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
-#include <poll.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * Passthrough TLS mock
@@ -34,7 +30,7 @@ static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd) {
 static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
     (void)self;
     ssize_t r;
-    do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
+    do { r = kl_test_sockread(fd, buf, len); } while (r < 0 && errno == EINTR);
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     return r;
 }
@@ -42,7 +38,7 @@ static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
 static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
     (void)self;
     ssize_t r;
-    do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
+    do { r = kl_test_sockwrite(fd, buf, len); } while (r < 0 && errno == EINTR);
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     return r;
 }
@@ -110,7 +106,7 @@ static int connect_to(int port) {
     };
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+        kl_test_closesock(fd);
         return -1;
     }
     return fd;
@@ -118,11 +114,10 @@ static int connect_to(int port) {
 
 static ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
     ssize_t total = 0;
-    struct pollfd pfd = { .fd = fd, .events = POLLIN };
     while (total < (ssize_t)buflen - 1) {
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = kl_test_poll1(fd, 0, timeout_ms);
         if (pr <= 0) break;
-        ssize_t n = read(fd, buf + total, buflen - (size_t)total - 1);
+        ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
         if (n <= 0) break;
         total += n;
     }
@@ -132,11 +127,10 @@ static ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
 
 static ssize_t read_one_response(int fd, char *buf, size_t buflen, int timeout_ms) {
     ssize_t total = 0;
-    struct pollfd pfd = { .fd = fd, .events = POLLIN };
     while (total < (ssize_t)buflen - 1) {
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = kl_test_poll1(fd, 0, timeout_ms);
         if (pr <= 0) break;
-        ssize_t n = read(fd, buf + total, buflen - (size_t)total - 1);
+        ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
         if (n <= 0) break;
         total += n;
         buf[total] = '\0';
@@ -183,14 +177,14 @@ UTEST(tls_integration, hello_request) {
     ASSERT_TRUE(fd >= 0);
 
     const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    write(fd, req, strlen(req));
+    kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[2048];
     read_response(fd, buf, sizeof(buf), 2000);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_server_free(&srv);
@@ -219,7 +213,7 @@ UTEST(tls_integration, keep_alive) {
 
     /* First request (keep-alive) */
     const char *req1 = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    write(fd, req1, strlen(req1));
+    kl_test_sockwrite(fd, req1, strlen(req1));
 
     char buf[2048];
     read_one_response(fd, buf, sizeof(buf), 2000);
@@ -228,13 +222,13 @@ UTEST(tls_integration, keep_alive) {
 
     /* Second request on same connection (tests TLS reset()) */
     const char *req2 = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    write(fd, req2, strlen(req2));
+    kl_test_sockwrite(fd, req2, strlen(req2));
 
     read_response(fd, buf, sizeof(buf), 2000);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_server_free(&srv);
@@ -267,7 +261,7 @@ UTEST(tls_integration, concurrent) {
 
     const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     for (int i = 0; i < 3; i++) {
-        write(fds[i], req, strlen(req));
+        kl_test_sockwrite(fds[i], req, strlen(req));
     }
 
     for (int i = 0; i < 3; i++) {
@@ -277,7 +271,7 @@ UTEST(tls_integration, concurrent) {
                          "TLS connection %d should get 200 OK");
         ASSERT_TRUE_MSG(strstr(buf, "{\"ok\":true}") != NULL,
                          "TLS connection %d should have correct body");
-        close(fds[i]);
+        kl_test_closesock(fds[i]);
     }
 
     kl_server_stop(&srv);

@@ -139,14 +139,22 @@ CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/respons
 LLHTTP_SRC = parsers/parser_llhttp.c parsers/response_parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
-# Optional mbedTLS backend: make KEEL_TLS=mbedtls MBEDTLS_DIR=/path/to/mbedtls
+# Optional mbedTLS backend (bring-your-own — mbedTLS is not vendored). Portable:
+# the same src/tls_mbedtls.c builds on POSIX and Windows (its BIO I/O goes through
+# the socket seam). Point MBEDTLS_DIR at a source tree (include/ + library/) OR a
+# system prefix (include/ + lib/, e.g. `MBEDTLS_DIR=$(brew --prefix mbedtls)`); if
+# unset, the compiler's default search paths are used (e.g. MSYS2 /mingw64).
+#   make KEEL_TLS=mbedtls [MBEDTLS_DIR=/path]
 ifdef KEEL_TLS
 ifeq ($(KEEL_TLS),mbedtls)
-  MBEDTLS_DIR ?= ../mbedtls
-  CFLAGS += -I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library
+  ifdef MBEDTLS_DIR
+    CFLAGS  += -I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library
+    LDFLAGS += -L$(MBEDTLS_DIR)/library -L$(MBEDTLS_DIR)/lib
+  endif
   ifdef MBEDTLS_CONFIG_FILE
     CFLAGS += -I$(MBEDTLS_DIR) -DMBEDTLS_CONFIG_FILE='"$(MBEDTLS_CONFIG_FILE)"'
   endif
+  LDFLAGS += -lmbedtls -lmbedx509 -lmbedcrypto   # after -lkeel in the link line
   TLS_MBEDTLS_SRC = src/tls_mbedtls.c
   TLS_MBEDTLS_OBJ = src/tls_mbedtls.o
 endif
@@ -253,20 +261,22 @@ test: $(TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
-# Windows unit-test subset (see docs/phase6_winsock_design.md Part C). 44 of the
+# Windows unit-test subset (see docs/phase6_winsock_design.md Part C). 47 of the
 # 55 suites run on the Windows runner. Tier 1: platform-neutral logic. Tier 2:
 # socket/thread runtime (WSAPoll/Winsock/winpthreads). Tier 3: suites whose POSIX
 # network idioms (<sys/socket.h> etc., socketpair/pipe/close/read/write/fcntl/poll)
-# are routed through tests/net_compat.h.
+# are routed through tests/net_compat.h — including the mock-TLS suites (tls,
+# tls_integration, peer_cert), which exercise the TLS server/client integration
+# against an in-test mock KlTls and need no mbedTLS.
 #
-# 11 not listed. 9 are genuinely POSIX/Linux-only: tls, tls_integration, peer_cert
-# (no TLS backend built on Windows), udp_batching (recvmmsg), udp_offload (UDP GSO),
-# udp_tos (Windows restricts IP_TOS/DSCP setsockopt), unix_socket (SO_PEERCRED),
-# file_io + file_io_iouring (io_uring / POSIX file-path assumptions). 2 build clean
-# but have runtime failures needing Windows-native iteration, deferred for now:
-# dns_resolver (mock-UDP-nameserver + hosts/resolv.conf harness) and proxy (CONNECT
-# tunnel timing). The DNS + proxy paths are still covered on Windows by smoke-dns
-# and the POSIX suites.
+# 8 not listed. 6 are genuinely POSIX/Linux-only: udp_batching (recvmmsg),
+# udp_offload (UDP GSO), udp_tos (Windows restricts IP_TOS/DSCP setsockopt),
+# unix_socket (SO_PEERCRED), file_io + file_io_iouring (io_uring / POSIX file-path
+# assumptions). 2 build clean but have runtime failures needing Windows-native
+# iteration, deferred for now: dns_resolver (mock-UDP-nameserver + hosts/resolv.conf
+# harness) and proxy (CONNECT tunnel timing) — both still covered on Windows by
+# smoke-dns and the POSIX suites. (The real mbedTLS backend is validated separately
+# by `make KEEL_TLS=mbedtls smoke-tls`; mbedTLS is BYO and stays out of CI.)
 WIN_TEST_SUITES = allocator body_reader chunked cors decompress drain \
                   multipart_stream overflow parser response_parser router url \
                   client client_stream connection h2_client redirect \
@@ -275,7 +285,8 @@ WIN_TEST_SUITES = allocator body_reader chunked cors decompress drain \
                   integration server_integration peer_addr client_happy_eyeballs \
                   async client_pool cross_module event_ctx \
                   h2 response socket_provider websocket compress event sse \
-                  udp udp_server udp_multicast
+                  udp udp_server udp_multicast \
+                  tls tls_integration peer_cert
 WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h
@@ -320,6 +331,18 @@ smoke-dns: $(SMOKE_DNS_BIN)
 $(SMOKE_DNS_BIN): tests/smoke_dns.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
+# TLS handshake smoke test — a real mbedTLS handshake + request/response over
+# loopback with an embedded self-signed cert. The local/BYO validation gate for
+# the mbedTLS backend on both POSIX and Windows (mbedTLS stays out of CI). Needs
+# KEEL_TLS=mbedtls (else tls_mbedtls.o isn't in the lib). Standalone → -lpthread
+# explicitly (Windows LDFLAGS omits it); mbedTLS libs ride in LDFLAGS.
+#   make KEEL_TLS=mbedtls MBEDTLS_DIR=$(brew --prefix mbedtls) smoke-tls
+SMOKE_TLS_BIN = tests/smoke_tls$(EXE)
+smoke-tls: $(SMOKE_TLS_BIN)
+	./$(SMOKE_TLS_BIN)
+$(SMOKE_TLS_BIN): tests/smoke_tls.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
 # Install / uninstall
 PREFIX  ?= /usr/local
 DESTDIR ?=
@@ -343,7 +366,7 @@ keel.pc: keel.pc.in
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
 	rm -f tests/smoke_tcp tests/smoke_tcp.exe tests/smoke_udp tests/smoke_udp.exe \
-	      tests/smoke_dns tests/smoke_dns.exe
+	      tests/smoke_dns tests/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
 	rm -f src/file_io.o src/file_io_iouring.o

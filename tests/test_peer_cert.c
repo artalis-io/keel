@@ -1,14 +1,10 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <keel/tls.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "net_compat.h"
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
-#include <poll.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * Passthrough TLS mock with a canned peer_cert
@@ -43,14 +39,14 @@ static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd) {
 static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
     (void)self;
     ssize_t r;
-    do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
+    do { r = kl_test_sockread(fd, buf, len); } while (r < 0 && errno == EINTR);
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     return r;
 }
 static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
     (void)self;
     ssize_t r;
-    do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
+    do { r = kl_test_sockwrite(fd, buf, len); } while (r < 0 && errno == EINTR);
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     return r;
 }
@@ -120,15 +116,14 @@ static int connect_local(int port) {
     a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)port);
     inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); return -1; }
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { kl_test_closesock(fd); return -1; }
     return fd;
 }
 
 static void drain(int fd) {
     char buf[512];
-    struct pollfd p = { .fd = fd, .events = POLLIN };
-    while (poll(&p, 1, 2000) > 0) {
-        ssize_t n = read(fd, buf, sizeof(buf));
+    while (kl_test_poll1(fd, 0, 2000) > 0) {
+        ssize_t n = kl_test_sockread(fd, buf, sizeof(buf));
         if (n <= 0) break;
     }
 }
@@ -154,11 +149,11 @@ static int run_once(KlConfig *cfg) {
         int fd = connect_local(srv.bound_port);
         if (fd >= 0) {
             const char *req = "GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-            if (write(fd, req, strlen(req)) == (ssize_t)strlen(req)) {
+            if (kl_test_sockwrite(fd, req, strlen(req)) == (ssize_t)strlen(req)) {
                 drain(fd);
                 rc = 0;
             }
-            close(fd);
+            kl_test_closesock(fd);
         }
     }
 
