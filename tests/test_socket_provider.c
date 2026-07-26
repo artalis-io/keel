@@ -61,10 +61,10 @@ static ssize_t mock_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int
     for (int i = 0; i < iovcnt; i++) t += (ssize_t)iov[i].len;
     return t;
 }
-static ssize_t mock_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
+static ssize_t mock_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     MockSock *m = ctx; (void)out_fd; (void)in_fd;
     m->sendfile_calls++;
-    *offset += (off_t)count;                 /* pretend fully sent */
+    *offset += (uint64_t)count;              /* pretend fully sent */
     return (ssize_t)count;
 }
 static KlSocketHandle mock_socket(void *ctx, int domain, int type, int protocol) {
@@ -356,10 +356,10 @@ UTEST(sockprov, writev_sendfile_op_dispatch) {
     ASSERT_EQ((ssize_t)4, recv(sv[1], buf, sizeof(buf), 0));
     kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 
-    off_t off = 0;
+    uint64_t off = 0;
     ASSERT_EQ((ssize_t)100, kl_sock_sendfile(&p, 9, 9, &off, 100)); /* dispatches to op */
     ASSERT_EQ(1, m.sendfile_calls);
-    ASSERT_EQ((off_t)100, off);
+    ASSERT_EQ((uint64_t)100, off);
 }
 
 UTEST_MAIN();

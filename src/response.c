@@ -564,8 +564,12 @@ int kl_response_send(KlResponse *res) {
         (void)kl_sock_set_cork(sp, res->conn_fd, 1);
         size_t remaining = (size_t)(res->file_size - res->file_offset);
         while (remaining > 0) {
+            /* The seam offset is uint64_t (no off_t on the public API); convert
+             * around the call and write the advanced offset back to file_offset. */
+            uint64_t off = (uint64_t)res->file_offset;
             ssize_t sent = kl_sock_sendfile(sp, res->conn_fd, res->file_fd,
-                                            &res->file_offset, remaining);
+                                            &off, remaining);
+            res->file_offset = (off_t)off;
             if (sent < 0) {
                 if (errno == EAGAIN) return 1;
                 return -1;

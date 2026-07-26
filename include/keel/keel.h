@@ -52,6 +52,7 @@
 #include <keel/error.h>
 #include <keel/allocator.h>
 #include <keel/handle.h>
+#include <keel/socket.h>
 #include <keel/event.h>
 #include <keel/event_ctx.h>
 #include <keel/request.h>

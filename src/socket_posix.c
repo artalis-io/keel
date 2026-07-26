@@ -149,19 +149,24 @@ ssize_t kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     return writev((int)fd, sysv, iovcnt);
 }
 
-ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
+ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
+    /* The seam offset is uint64_t; translate to the platform off_t here so off_t
+     * never crosses the provider boundary. */
+    off_t soff = (off_t)*offset;
 #if defined(__linux__)
-    return sendfile((int)out_fd, in_fd, offset, count);
+    ssize_t ret = sendfile((int)out_fd, in_fd, &soff, count);   /* advances soff */
+    *offset = (uint64_t)soff;
+    return ret;
 #elif defined(__APPLE__)
     off_t len = (off_t)count;
-    int r = sendfile(in_fd, (int)out_fd, *offset, &len, NULL, 0);
+    int r = sendfile(in_fd, (int)out_fd, soff, &len, NULL, 0);
     if (r < 0 && errno != EAGAIN) return -1;
-    *offset += len;
+    *offset = (uint64_t)(soff + len);
     return (ssize_t)len;
 #else
     char buf[KL_SENDFILE_BUF];
     size_t to_read = count < sizeof(buf) ? count : sizeof(buf);
-    ssize_t nr = pread(in_fd, buf, to_read, *offset);
+    ssize_t nr = pread(in_fd, buf, to_read, soff);
     if (nr <= 0) return nr;
     const char *p = buf;
     size_t remaining = (size_t)nr;
@@ -171,7 +176,7 @@ ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, siz
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 ssize_t wrote = (ssize_t)((size_t)nr - remaining);
-                *offset += wrote;
+                *offset = (uint64_t)(soff + wrote);
                 return wrote > 0 ? wrote : -1;
             }
             return -1;
@@ -179,7 +184,7 @@ ssize_t kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, off_t *offset, siz
         p += nw;
         remaining -= (size_t)nw;
     }
-    *offset += nr;
+    *offset = (uint64_t)(soff + nr);
     return nr;
 #endif
 }
@@ -249,7 +254,7 @@ static ssize_t psx_recv_peek(void *ctx, KlSocketHandle fd, void *buf, size_t len
 static ssize_t psx_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
 }
-static ssize_t psx_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, off_t *offset, size_t count) {
+static ssize_t psx_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     (void)ctx; return kl_sockdef_sendfile(out_fd, in_fd, offset, count);
 }
 
