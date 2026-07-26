@@ -368,6 +368,27 @@ Fuzzers/valgrind stay Linux-only. Start with the core test subset green, expand.
    timing) — both paths remain covered on Windows by `smoke-dns` and the POSIX
    suites. Local validation: all 44 build to PE32+ via `make OS=windows` (MinGW-w64)
    and the full POSIX gauntlet stays green; the runner executes them for real.
+   **6b-4 — mbedTLS backend on Windows + the mock-TLS mis-exclusion (done).** The
+   mbedTLS `KlTls` backend (`src/tls_mbedtls.c`) is now platform-neutral: its BIO
+   callbacks route through the socket seam (`kl_sockdef_send`/`kl_sockdef_recv`) —
+   which already own SIGPIPE suppression, EINTR retry, and errno translation
+   (incl. Winsock `kl_wsa_set_errno`) — instead of raw `send(MSG_NOSIGNAL)`/`read`/
+   `write` + POSIX socket includes. So the same TU builds on POSIX and Windows with
+   **zero platform `#ifdef`**, mirroring how the rest of PAL was done. A latent PAL
+   regression was fixed along the way (the vtable moved to `KlSocketHandle` in 6a-2
+   but `tls_mbedtls.c` still used `int fd`; uncaught because it's in no CI). The
+   Makefile `KEEL_TLS=mbedtls` branch now also links (`-lmbedtls -lmbedx509
+   -lmbedcrypto`) and accepts either a source-tree or system-prefix `MBEDTLS_DIR`
+   (or default search paths). A real handshake is validated by `make KEEL_TLS=mbedtls
+   smoke-tls` (`tests/smoke_tls.c`: loopback mbedTLS server+client, embedded
+   self-signed cert via the new `kl_tls_mbedtls_ctx_create_from_buf`). **mbedTLS is
+   bring-your-own and stays out of CI** (matching the miniz precedent) — the backend
+   is validated locally (macOS real handshake + MinGW compile-gate) and documented,
+   not gated. Separately, the 3 "TLS" utest suites (`tls`, `tls_integration`,
+   `peer_cert`) were found to use an **in-test mock KlTls, not mbedTLS** — they were
+   mis-excluded in 6b-3. Ported via `net_compat.h` (a few POSIX-only tests guarded)
+   and added to `WIN_TEST_SUITES`, bringing the Windows runner to **47 of 55**
+   suites; the excluded set drops to 8 (6 POSIX/Linux-only + 2 runtime-deferred).
 4. **Feed back to the vtable.** Confirm `KlSocketHandle` + `writev`/`sendfile`
    ops are sufficient → **unblocks Phase 4** (publish the now-proven vtable).
 

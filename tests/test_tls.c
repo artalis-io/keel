@@ -1,8 +1,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include "net_compat.h"
 
 /* ── Mock TLS implementation ─────────────────────────────────────── */
 
@@ -283,7 +282,7 @@ UTEST(tls, response_send_through_mock) {
      * plaintext codepath, but TLS path ignores it — the mock captures
      * all writes in write_buf) */
     int pipefd[2];
-    ASSERT_EQ(pipe(pipefd), 0);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
@@ -303,8 +302,8 @@ UTEST(tls, response_send_through_mock) {
     ASSERT_TRUE(strstr(m.write_buf, "Content-Length: 12\r\n") != NULL);
     ASSERT_TRUE(strstr(m.write_buf, "{\"tls\":true}") != NULL);
 
-    close(pipefd[0]);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[0]);
+    kl_test_closesock(pipefd[1]);
     kl_response_free(&res);
 }
 
@@ -318,7 +317,7 @@ UTEST(tls, response_stream_through_mock) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    ASSERT_EQ(pipe(pipefd), 0);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
@@ -340,11 +339,12 @@ UTEST(tls, response_stream_through_mock) {
     ASSERT_TRUE(strstr(m.write_buf, "6\r\n world\r\n") != NULL);
     ASSERT_TRUE(strstr(m.write_buf, "0\r\n\r\n") != NULL);
 
-    close(pipefd[0]);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[0]);
+    kl_test_closesock(pipefd[1]);
     kl_response_free(&res);
 }
 
+#if !defined(_WIN32)   /* mkstemp + hardcoded /tmp path — POSIX-specific */
 UTEST(tls, response_file_through_mock) {
     /* File send through TLS uses pread+tls->write fallback */
     MockTls m;
@@ -423,6 +423,7 @@ UTEST(tls, file_send_yields_on_want_write) {
     kl_response_free(&res);
     unlink(tmppath);
 }
+#endif /* !_WIN32 */
 
 /* ── Response reset preserves TLS pointer ────────────────────────── */
 
@@ -457,6 +458,7 @@ UTEST(tls, response_reset_preserves_tls) {
 
 /* ── Shutdown WANT_WRITE retry ───────────────────────────────────── */
 
+#if !defined(_WIN32)   /* open("/dev/null") — POSIX-specific device path */
 UTEST(tls, shutdown_retries_want_write) {
     /* kl_conn_release should retry shutdown on WANT_WRITE */
     MockTls m;
@@ -540,5 +542,6 @@ UTEST(tls, pool_free_calls_shutdown_and_destroy) {
     ASSERT_TRUE(m.shutdown_called);
     ASSERT_TRUE(m.destroy_called);
 }
+#endif /* !_WIN32 */
 
 UTEST_MAIN();

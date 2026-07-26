@@ -64,6 +64,29 @@ KlTlsCtx *kl_tls_mbedtls_ctx_create(const char *cert_path,
                                       KlAllocator *alloc);
 
 /**
+ * @brief Create a server TLS context from in-memory cert/key/(optional CA).
+ *
+ * Same as kl_tls_mbedtls_ctx_create() but reads cert, key, and (optional) mTLS
+ * CA from buffers instead of files — for embedded certs where there is no
+ * filesystem path. Buffers are parsed and copied internally; the caller may free
+ * them immediately after this returns.
+ *
+ * @param cert_buf    Server cert bytes (PEM or DER). Must be non-NULL.
+ * @param cert_len    Length; for PEM, must include the trailing NUL.
+ * @param key_buf     Private key bytes (PEM or DER). Must be non-NULL.
+ * @param key_len     Length; for PEM, must include the trailing NUL.
+ * @param ca_buf      mTLS CA bytes, or NULL to disable client authentication.
+ * @param ca_len      CA length (0 when ca_buf is NULL).
+ * @param client_auth Client authentication mode (KlMtlsMode).
+ * @param alloc       Allocator for context storage (borrowed — must outlive it).
+ * @return Opaque context, or NULL on error.
+ */
+KlTlsCtx *kl_tls_mbedtls_ctx_create_from_buf(const unsigned char *cert_buf, size_t cert_len,
+                                              const unsigned char *key_buf, size_t key_len,
+                                              const unsigned char *ca_buf, size_t ca_len,
+                                              int client_auth, KlAllocator *alloc);
+
+/**
  * @brief Create a client-side TLS context (for outbound connections).
  *
  * @param ca_path  Path to PEM-encoded CA cert bundle for server verification.
