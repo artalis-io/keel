@@ -1,9 +1,6 @@
 #include "utest.h"
 #include <keel/keel.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "net_compat.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -464,7 +461,7 @@ static int connect_to(int port) {
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+        kl_test_closesock(fd);
         return -1;
     }
     return fd;
@@ -473,8 +470,8 @@ static int connect_to(int port) {
 /* Read full response (until EOF or read returns 0) */
 static ssize_t read_response(int fd, char *buf, size_t buflen) {
     ssize_t total = 0;
-    ssize_t n;
-    while ((n = read(fd, buf + total,
+    long n;
+    while ((n = kl_test_sockread(fd, buf + total,
                      buflen - (size_t)total - 1)) > 0) {
         total += n;
     }
@@ -554,11 +551,11 @@ UTEST(integration, hello_world) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "HTTP/1.1 200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "{\"msg\":\"hello\"}") != NULL);
@@ -585,12 +582,12 @@ UTEST(integration, post_large_body) {
              "Content-Length: %zu\r\n"
              "Connection: close\r\n"
              "\r\n", body_len);
-    (void)write(fd, hdr, strlen(hdr));
-    (void)write(fd, body, body_len);
+    (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
+    (void)kl_test_sockwrite(fd, body, body_len);
 
     char buf[32768];
     ssize_t total = read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
@@ -618,17 +615,17 @@ UTEST(integration, post_413) {
                       "Content-Length: 100000\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, hdr, strlen(hdr));
+    (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
 
     /* Send some data to trigger the body reader */
     char chunk[8192];
     memset(chunk, 'A', sizeof(chunk));
     for (int i = 0; i < 15; i++)
-        (void)write(fd, chunk, sizeof(chunk));
+        (void)kl_test_sockwrite(fd, chunk, sizeof(chunk));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "413") != NULL);
 
@@ -647,14 +644,14 @@ UTEST(integration, keepalive_post) {
                        "Content-Length: 5\r\n"
                        "\r\n"
                        "first";
-    (void)write(fd, req1, strlen(req1));
+    (void)kl_test_sockwrite(fd, req1, strlen(req1));
 
     /* Read first response — need to parse Content-Length to know when done */
     char buf[8192];
     ssize_t total = 0;
     ssize_t n;
     /* Read until we have the full first response */
-    while ((n = read(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
+    while ((n = kl_test_sockread(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
         total += n;
         buf[total] = '\0';
         /* Check if we have a complete response */
@@ -680,11 +677,11 @@ UTEST(integration, keepalive_post) {
                        "Connection: close\r\n"
                        "\r\n"
                        "second";
-    (void)write(fd, req2, strlen(req2));
+    (void)kl_test_sockwrite(fd, req2, strlen(req2));
 
     char buf2[8192];
     read_response(fd, buf2, sizeof(buf2));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf2, "second") != NULL);
@@ -703,11 +700,11 @@ UTEST(integration, empty_body) {
                       "Content-Length: 0\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "no body") != NULL);
@@ -728,7 +725,7 @@ UTEST(integration, expect_100_continue) {
                       "Expect: 100-continue\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, hdr, strlen(hdr));
+    (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
 
     /* Read the 100 Continue interim response */
     char buf[4096];
@@ -736,19 +733,19 @@ UTEST(integration, expect_100_continue) {
     /* Wait for 100 Continue */
     for (int i = 0; i < 20 && n == 0; i++) {
         usleep(50000);
-        ssize_t r = read(fd, buf + n, sizeof(buf) - (size_t)n - 1);
+        ssize_t r = kl_test_sockread(fd, buf + n, sizeof(buf) - (size_t)n - 1);
         if (r > 0) n += r;
     }
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "100 Continue") != NULL);
 
     /* Now send the body */
-    (void)write(fd, "hello world", 11);
+    (void)kl_test_sockwrite(fd, "hello world", 11);
 
     /* Read the final response */
     char buf2[4096];
     ssize_t total = read_response(fd, buf2, sizeof(buf2));
-    close(fd);
+    kl_test_closesock(fd);
     (void)total;
 
     ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
@@ -767,11 +764,11 @@ UTEST(integration, head_request) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     /* Should get 200 with Content-Length but no body */
     ASSERT_TRUE(strstr(buf, "HTTP/1.1 200 OK") != NULL);
@@ -847,11 +844,11 @@ UTEST(integration, access_log) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     /* Wait briefly for the log callback to fire (it fires after send completes) */
     usleep(50000);
@@ -895,12 +892,12 @@ UTEST(integration, multipart_upload) {
              "Content-Length: %zu\r\n"
              "Connection: close\r\n"
              "\r\n", body_len);
-    (void)write(fd, hdr, strlen(hdr));
-    (void)write(fd, body, body_len);
+    (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
+    (void)kl_test_sockwrite(fd, body, body_len);
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "parts=2") != NULL);
@@ -966,8 +963,8 @@ UTEST(integration, streaming_mid_stream_early_exit) {
     /* Write 1: header + chunk1. Server's first read consumes both;
      * leftover (chunk1) is fed via on_data with NULL conn → no-op.
      * Then handler runs, stashes conn+res, yields. */
-    (void)write(fd, hdr, (size_t)hdr_len);
-    (void)write(fd, chunk1, chunk1_len);
+    (void)kl_test_sockwrite(fd, hdr, (size_t)hdr_len);
+    (void)kl_test_sockwrite(fd, chunk1, chunk1_len);
 
     /* Wait for the handler to have run before sending chunk2 — same
      * polling pattern as wait_for_bind() above. Avoids fixed-sleep
@@ -980,12 +977,12 @@ UTEST(integration, streaming_mid_stream_early_exit) {
      * with conn+res NOW set → response goes out, state = SENDING.
      * The early-exit branch returns SENDING instead of forcing
      * READING_BODY. */
-    (void)write(fd, chunk2, chunk2_len);
+    (void)kl_test_sockwrite(fd, chunk2, chunk2_len);
 
     char *buf = kl_malloc(&alloc, resp_cap);
     ASSERT_TRUE(buf != NULL);
     read_response(fd, buf, resp_cap);
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "early exit") != NULL);
@@ -1041,8 +1038,8 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
 
     /* Same two-write sync pattern as the success-path test — handler
      * runs after chunk1's leftover, stashes conn+res, yields. */
-    (void)write(fd, hdr, (size_t)hdr_len);
-    (void)write(fd, chunk1, chunk1_len);
+    (void)kl_test_sockwrite(fd, hdr, (size_t)hdr_len);
+    (void)kl_test_sockwrite(fd, chunk1, chunk1_len);
 
     for (int i = 0; i < 200 && !eer_err_handler_called; i++) usleep(10000);
     ASSERT_TRUE(eer_err_handler_called);
@@ -1051,12 +1048,12 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
      * set, writes the 413 response, sets state = SENDING, returns -1.
      * Without the fix Keel would write the hardcoded 413 + close;
      * with the fix the handler's "cap exceeded" body lands. */
-    (void)write(fd, chunk2, chunk2_len);
+    (void)kl_test_sockwrite(fd, chunk2, chunk2_len);
 
     char *buf = kl_malloc(&alloc, resp_cap);
     ASSERT_TRUE(buf != NULL);
     read_response(fd, buf, resp_cap);
-    close(fd);
+    kl_test_closesock(fd);
 
     /* The handler's structured response landed — NOT the hardcoded
      * kl_413_response. Both share the "413 Payload Too Large" status
@@ -1126,12 +1123,12 @@ UTEST(integration, streaming_async_single_read_leftover_cap) {
     /* Single write — packetised together by TCP, single read on the
      * server side (in the common case; the asserts below tolerate the
      * rare split). */
-    (void)write(fd, packet, (size_t)hdr_len + body_len);
+    (void)kl_test_sockwrite(fd, packet, (size_t)hdr_len + body_len);
 
     char *buf = kl_malloc(&alloc, resp_cap);
     ASSERT_TRUE(buf != NULL);
     read_response(fd, buf, resp_cap);
-    close(fd);
+    kl_test_closesock(fd);
 
     /* Handler must have run (proves the reorder fired) AND the
      * structured 413 response must have landed (proves the state-
@@ -1173,8 +1170,7 @@ UTEST(integration, streaming_async_sync_completion_forces_close) {
      * SENDING and skipped leftover) — read_response would otherwise
      * block until the whole-suite timeout. With the fix, the conn
      * closes and read returns 0 immediately. */
-    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    kl_test_set_rcvtimeo(fd, 1000);   /* portable SO_RCVTIMEO (ms) */
 
     const char *packet =
         "POST /async-sync-reject HTTP/1.1\r\n"
@@ -1183,11 +1179,11 @@ UTEST(integration, streaming_async_sync_completion_forces_close) {
         "Connection: keep-alive\r\n"         /* request keep-alive */
         "\r\n"
         "stranded body bytes left in buffer"; /* partial body */
-    (void)write(fd, packet, strlen(packet));
+    (void)kl_test_sockwrite(fd, packet, strlen(packet));
 
     char buf[1024];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     /* Handler's 401 response lands. */
     ASSERT_TRUE(strstr(buf, "401") != NULL);
@@ -1222,11 +1218,11 @@ UTEST(integration, streaming_route_no_body_runs_handler) {
         "Content-Length: 0\r\n"
         "Connection: close\r\n"
         "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[1024];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     /* Handler ran (saw NULL body_reader) and emitted 400 "No reader". */
     ASSERT_TRUE(strstr(buf, "400 ") != NULL);
@@ -1287,12 +1283,12 @@ UTEST(integration, multipart_upload_streaming_route) {
     ASSERT_TRUE(combined != NULL);
     memcpy(combined, hdr, (size_t)hdr_len);
     memcpy(combined + hdr_len, body, body_len);
-    (void)write(fd, combined, combined_len);
+    (void)kl_test_sockwrite(fd, combined, combined_len);
     kl_free(&alloc, combined, combined_len);
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "parts=2") != NULL);
@@ -1317,11 +1313,11 @@ UTEST(integration, chunked_post) {
                       "Connection: close\r\n"
                       "\r\n"
                       "5\r\nhello\r\n0\r\n\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "hello") != NULL);
@@ -1344,11 +1340,11 @@ UTEST(integration, chunked_multi_chunk) {
                       "1\r\n \r\n"
                       "5\r\nworld\r\n"
                       "0\r\n\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "hello world") != NULL);
@@ -1368,13 +1364,13 @@ UTEST(integration, chunked_keepalive) {
                        "Transfer-Encoding: chunked\r\n"
                        "\r\n"
                        "5\r\nfirst\r\n0\r\n\r\n";
-    (void)write(fd, req1, strlen(req1));
+    (void)kl_test_sockwrite(fd, req1, strlen(req1));
 
     /* Read first response */
     char buf[8192];
     ssize_t total = 0;
     ssize_t n;
-    while ((n = read(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
+    while ((n = kl_test_sockread(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
         total += n;
         buf[total] = '\0';
         char *body_start = strstr(buf, "\r\n\r\n");
@@ -1397,11 +1393,11 @@ UTEST(integration, chunked_keepalive) {
                        "Host: localhost\r\n"
                        "Connection: close\r\n"
                        "\r\n";
-    (void)write(fd, req2, strlen(req2));
+    (void)kl_test_sockwrite(fd, req2, strlen(req2));
 
     char buf2[4096];
     read_response(fd, buf2, sizeof(buf2));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf2, "{\"msg\":\"hello\"}") != NULL);
@@ -1422,14 +1418,14 @@ UTEST(integration, chunked_100_continue) {
                       "Expect: 100-continue\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, hdr, strlen(hdr));
+    (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
 
     /* Wait for 100 Continue */
     char buf[4096];
     ssize_t rn = 0;
     for (int i = 0; i < 20 && rn == 0; i++) {
         usleep(50000);
-        ssize_t r = read(fd, buf + rn, sizeof(buf) - (size_t)rn - 1);
+        ssize_t r = kl_test_sockread(fd, buf + rn, sizeof(buf) - (size_t)rn - 1);
         if (r > 0) rn += r;
     }
     buf[rn] = '\0';
@@ -1437,11 +1433,11 @@ UTEST(integration, chunked_100_continue) {
 
     /* Send chunked body */
     const char *body = "b\r\nhello world\r\n0\r\n\r\n";
-    (void)write(fd, body, strlen(body));
+    (void)kl_test_sockwrite(fd, body, strlen(body));
 
     char buf2[4096];
     read_response(fd, buf2, sizeof(buf2));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf2, "hello world") != NULL);
@@ -1461,11 +1457,11 @@ UTEST(integration, chunked_empty_body) {
                       "Connection: close\r\n"
                       "\r\n"
                       "0\r\n\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "no body") != NULL);
@@ -1485,7 +1481,7 @@ UTEST(integration, chunked_large_body) {
                       "Transfer-Encoding: chunked\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, hdr, strlen(hdr));
+    (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
 
     /* Send 16KB in 1KB chunks */
     char chunk_data[1024];
@@ -1494,15 +1490,15 @@ UTEST(integration, chunked_large_body) {
     for (int i = 0; i < 16; i++) {
         char chunk_hdr[16];
         int hlen = snprintf(chunk_hdr, sizeof(chunk_hdr), "400\r\n");
-        (void)write(fd, chunk_hdr, (size_t)hlen);
-        (void)write(fd, chunk_data, sizeof(chunk_data));
-        (void)write(fd, "\r\n", 2);
+        (void)kl_test_sockwrite(fd, chunk_hdr, (size_t)hlen);
+        (void)kl_test_sockwrite(fd, chunk_data, sizeof(chunk_data));
+        (void)kl_test_sockwrite(fd, "\r\n", 2);
     }
-    (void)write(fd, "0\r\n\r\n", 5);
+    (void)kl_test_sockwrite(fd, "0\r\n\r\n", 5);
 
     char buf[32768];
     ssize_t total = read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
@@ -1524,6 +1520,11 @@ UTEST(integration, chunked_large_body) {
 }
 
 /* ── Signal handling test ───────────────────────────────────────────── */
+
+/* POSIX-only: exercises SIGTERM-driven shutdown via kill()/getpid(), which
+ * have no Winsock/net_compat mapping (Windows has no POSIX signal delivery).
+ * Excluded from the Windows build; unchanged on POSIX. */
+#if !defined(_WIN32)
 
 static KlServer signal_server;
 
@@ -1553,10 +1554,10 @@ UTEST(integration, signal_stop) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
     /* Send SIGTERM to ourselves — handler should stop the server */
@@ -1567,6 +1568,8 @@ UTEST(integration, signal_stop) {
     /* If we get here, the server exited cleanly */
     ASSERT_TRUE(1);
 }
+
+#endif /* !_WIN32 */
 
 /* ── Middleware integration tests ────────────────────────────────────── */
 
@@ -1650,11 +1653,11 @@ UTEST(integration, middleware_cors) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "Access-Control-Allow-Origin: *") != NULL);
@@ -1674,11 +1677,11 @@ UTEST(integration, middleware_auth_reject) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "401") != NULL);
     /* CORS header should still be present (runs before auth) */
@@ -1698,11 +1701,11 @@ UTEST(integration, middleware_auth_pass) {
                       "Authorization: secret123\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "Access-Control-Allow-Origin: *") != NULL);
@@ -1749,11 +1752,11 @@ UTEST(integration, middleware_chain_order) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "X-First: 1") != NULL);
@@ -1806,11 +1809,11 @@ UTEST(integration, middleware_short_circuit_body) {
                       "Connection: close\r\n"
                       "\r\n"
                       "hello";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "403") != NULL);
 
@@ -1829,11 +1832,11 @@ UTEST(integration, route_params) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "\"id\":\"42\"") != NULL);
@@ -1895,10 +1898,10 @@ UTEST(integration, post_middleware_body_access) {
                        "Connection: close\r\n"
                        "\r\n"
                        "secret data";
-    (void)write(fd, req1, strlen(req1));
+    (void)kl_test_sockwrite(fd, req1, strlen(req1));
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "secret data") != NULL);
 
@@ -1911,9 +1914,9 @@ UTEST(integration, post_middleware_body_access) {
                        "Connection: close\r\n"
                        "\r\n"
                        "wrong";
-    (void)write(fd, req2, strlen(req2));
+    (void)kl_test_sockwrite(fd, req2, strlen(req2));
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
     ASSERT_TRUE(strstr(buf, "403") != NULL);
 
     /* GET skips POST-only post-middleware — should succeed */
@@ -1923,9 +1926,9 @@ UTEST(integration, post_middleware_body_access) {
                        "Host: localhost\r\n"
                        "Connection: close\r\n"
                        "\r\n";
-    (void)write(fd, req3, strlen(req3));
+    (void)kl_test_sockwrite(fd, req3, strlen(req3));
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
     kl_server_stop(&post_mw_server);
@@ -1963,13 +1966,13 @@ UTEST(integration, post_middleware_keepalive_preserved) {
                        "Content-Length: 5\r\n"
                        "\r\n"
                        "wrong";
-    (void)write(fd, req1, strlen(req1));
+    (void)kl_test_sockwrite(fd, req1, strlen(req1));
 
     /* Read first response */
     char buf[8192];
     ssize_t total = 0;
     ssize_t n;
-    while ((n = read(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
+    while ((n = kl_test_sockread(fd, buf + total, sizeof(buf) - (size_t)total - 1)) > 0) {
         total += n;
         buf[total] = '\0';
         char *body_start = strstr(buf, "\r\n\r\n");
@@ -1990,11 +1993,11 @@ UTEST(integration, post_middleware_keepalive_preserved) {
                        "Host: localhost\r\n"
                        "Connection: close\r\n"
                        "\r\n";
-    (void)write(fd, req2, strlen(req2));
+    (void)kl_test_sockwrite(fd, req2, strlen(req2));
 
     char buf2[4096];
     read_response(fd, buf2, sizeof(buf2));
-    close(fd);
+    kl_test_closesock(fd);
     ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf2, "{\"msg\":\"hello\"}") != NULL);
 
@@ -2017,11 +2020,11 @@ UTEST(integration, global_body_limit_413) {
                       "Content-Length: 100000\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "413") != NULL);
 
@@ -2045,12 +2048,12 @@ UTEST(integration, global_body_limit_ok) {
              "Content-Length: %zu\r\n"
              "Connection: close\r\n"
              "\r\n", sizeof(body));
-    (void)write(fd, hdr, strlen(hdr));
-    (void)write(fd, body, sizeof(body));
+    (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
+    (void)kl_test_sockwrite(fd, body, sizeof(body));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
@@ -2077,12 +2080,12 @@ UTEST(integration, per_route_limit_unaffected) {
              "Content-Length: %zu\r\n"
              "Connection: close\r\n"
              "\r\n", body_len);
-    (void)write(fd, hdr, strlen(hdr));
-    (void)write(fd, body, body_len);
+    (void)kl_test_sockwrite(fd, hdr, strlen(hdr));
+    (void)kl_test_sockwrite(fd, body, body_len);
 
     char buf[65536];
     ssize_t total = read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 

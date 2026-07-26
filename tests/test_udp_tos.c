@@ -10,9 +10,7 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <string.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+#include "net_compat.h"
 
 static int g_got;
 static int g_tos;

@@ -11,14 +11,9 @@
 #include <keel/client_pool.h>
 
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "net_compat.h"
 #include <pthread.h>
-#include <poll.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
@@ -29,7 +24,7 @@ static int make_listener(int *out_port)
     if (fd < 0) return -1;
 
     int on = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -38,7 +33,7 @@ static int make_listener(int *out_port)
     addr.sin_port = 0;
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+        kl_test_closesock(fd);
         return -1;
     }
 
@@ -47,7 +42,7 @@ static int make_listener(int *out_port)
     *out_port = ntohs(addr.sin_port);
 
     if (listen(fd, 4) < 0) {
-        close(fd);
+        kl_test_closesock(fd);
         return -1;
     }
     return fd;
@@ -55,8 +50,7 @@ static int make_listener(int *out_port)
 
 static int accept_with_timeout(int listen_fd, int timeout_ms)
 {
-    struct pollfd pfd = { .fd = listen_fd, .events = POLLIN };
-    int rc = poll(&pfd, 1, timeout_ms);
+    int rc = kl_test_poll1(listen_fd, 0, timeout_ms);
     if (rc <= 0) return -1;
     return accept(listen_fd, NULL, NULL);
 }
@@ -66,11 +60,10 @@ static ssize_t read_until(int fd, char *buf, size_t buf_sz,
 {
     size_t total = 0;
     while (total < buf_sz - 1) {
-        struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        int rc = poll(&pfd, 1, timeout_ms);
+        int rc = kl_test_poll1(fd, 0, timeout_ms);
         if (rc <= 0) break;
 
-        ssize_t r = read(fd, buf + total, buf_sz - 1 - total);
+        ssize_t r = kl_test_sockread(fd, buf + total, buf_sz - 1 - total);
         if (r <= 0) break;
         total += (size_t)r;
         buf[total] = '\0';
@@ -154,13 +147,13 @@ UTEST(proxy, absolute_url_http) {
     ASSERT_TRUE(strstr(buf, "Host: example.com\r\n") != NULL);
 
     const char *resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
-    write(client_fd, resp, strlen(resp));
-    close(client_fd);
+    kl_test_sockwrite(client_fd, resp, strlen(resp));
+    kl_test_closesock(client_fd);
 
     pthread_join(tid, NULL);
     ASSERT_EQ(rctx.status, 200);
 
-    close(listen_fd);
+    kl_test_closesock(listen_fd);
 }
 
 /* ── Test 3: CONNECT request format correct ──────────────────────── */
@@ -202,11 +195,11 @@ UTEST(proxy, connect_request_format) {
     ASSERT_TRUE(strstr(buf, "Proxy-Authorization") == NULL);
 
     const char *reject = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
-    write(client_fd, reject, strlen(reject));
-    close(client_fd);
+    kl_test_sockwrite(client_fd, reject, strlen(reject));
+    kl_test_closesock(client_fd);
 
     pthread_join(tid, NULL);
-    close(listen_fd);
+    kl_test_closesock(listen_fd);
 }
 
 /* ── Test 4: Proxy-Authorization header included when auth set ───── */
@@ -248,11 +241,11 @@ UTEST(proxy, connect_with_auth) {
     ASSERT_TRUE(strstr(buf, "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n") != NULL);
 
     const char *reject = "HTTP/1.1 407 Proxy Auth Required\r\nContent-Length: 0\r\n\r\n";
-    write(client_fd, reject, strlen(reject));
-    close(client_fd);
+    kl_test_sockwrite(client_fd, reject, strlen(reject));
+    kl_test_closesock(client_fd);
 
     pthread_join(tid, NULL);
-    close(listen_fd);
+    kl_test_closesock(listen_fd);
 }
 
 /* ── Test 5: CONNECT 200 → TLS handshake proceeds ───────────────── */
@@ -288,12 +281,12 @@ UTEST(proxy, connect_success_transitions_to_tls) {
 
     /* Respond 200 — CONNECT succeeds */
     const char *ok = "HTTP/1.1 200 Connection Established\r\n\r\n";
-    write(client_fd, ok, strlen(ok));
+    kl_test_sockwrite(client_fd, ok, strlen(ok));
 
     /* Client will try TLS handshake with null factory → fail with TLS error */
     pthread_join(tid, NULL);
-    close(client_fd);
-    close(listen_fd);
+    kl_test_closesock(client_fd);
+    kl_test_closesock(listen_fd);
 
     /* Error should be TLS-related (not proxy), proving CONNECT succeeded */
     ASSERT_TRUE(tctx.err == KL_ERR_TLS_HANDSHAKE || tctx.err == KL_ERR_TLS_INIT);
@@ -331,11 +324,11 @@ UTEST(proxy, connect_rejected) {
 
     /* Respond with 403 (not 200) */
     const char *reject = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
-    write(client_fd, reject, strlen(reject));
-    close(client_fd);
+    kl_test_sockwrite(client_fd, reject, strlen(reject));
+    kl_test_closesock(client_fd);
 
     pthread_join(tid, NULL);
-    close(listen_fd);
+    kl_test_closesock(listen_fd);
 
     ASSERT_EQ((int)rctx.err, (int)KL_ERR_PROXY);
 }
@@ -381,12 +374,12 @@ UTEST(proxy, connect_buf_overflow) {
         off += n;
     }
     /* No final \r\n\r\n — buffer fills without end-of-headers */
-    write(client_fd, giant, (size_t)off);
+    kl_test_sockwrite(client_fd, giant, (size_t)off);
     usleep(50000);
-    close(client_fd);
+    kl_test_closesock(client_fd);
 
     pthread_join(tid, NULL);
-    close(listen_fd);
+    kl_test_closesock(listen_fd);
 
     ASSERT_TRUE(octx.err == KL_ERR_PROXY || octx.err == KL_ERR_IO);
 }
@@ -423,11 +416,11 @@ UTEST(proxy, dns_resolves_proxy_host) {
     ASSERT_TRUE(strstr(buf, "GET http://nonexistent-host.invalid/test HTTP/1.1\r\n") != NULL);
 
     const char *resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    write(client_fd, resp, strlen(resp));
-    close(client_fd);
+    kl_test_sockwrite(client_fd, resp, strlen(resp));
+    kl_test_closesock(client_fd);
 
     pthread_join(tid, NULL);
-    close(listen_fd);
+    kl_test_closesock(listen_fd);
 }
 
 /* ── Test 9: Redirect client inherits proxy config ───────────────── */
@@ -461,13 +454,13 @@ UTEST(proxy, redirect_inherits) {
     ASSERT_TRUE(strstr(buf, "http://redirect-test.example.com/start") != NULL);
 
     const char *resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    write(client_fd, resp, strlen(resp));
-    close(client_fd);
+    kl_test_sockwrite(client_fd, resp, strlen(resp));
+    kl_test_closesock(client_fd);
 
     pthread_join(tid, NULL);
     ASSERT_EQ(rctx.status, 200);
 
-    close(listen_fd);
+    kl_test_closesock(listen_fd);
 }
 
 /* ── Test 10: Pool key: proxied entry matches same proxy ─────────── */
@@ -478,7 +471,7 @@ UTEST(proxy, pool_key_match) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
 
     KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
     ASSERT_EQ(kl_cpool_release(&pool, &conn, "target.com", 80, 0,
@@ -493,8 +486,8 @@ UTEST(proxy, pool_key_match) {
     ASSERT_EQ(acq.reused, 1);
     ASSERT_EQ(acq.fd, fds[0]);
 
-    close(acq.fd);
-    close(fds[1]);
+    kl_test_closesock(acq.fd);
+    kl_test_closesock(fds[1]);
     kl_cpool_free(&pool);
 }
 
@@ -506,8 +499,8 @@ UTEST(proxy, pool_direct_no_match) {
     ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2][2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds[0]), 0);
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds[1]), 0);
+    ASSERT_EQ(kl_test_socketpair(fds[0]), 0);
+    ASSERT_EQ(kl_test_socketpair(fds[1]), 0);
 
     /* Release a direct connection */
     KlClientPoolConn conn1 = { .fd = fds[0][0], .tls = NULL, .reused = 0, ._entry = NULL };
@@ -538,10 +531,10 @@ UTEST(proxy, pool_direct_no_match) {
     ASSERT_EQ(kl_cpool_acquire(&pool, "target.com", 80, 0,
                                 "other-proxy.com", 3128, &acq3), 1);
 
-    close(acq.fd);
-    close(acq2.fd);
-    close(fds[0][1]);
-    close(fds[1][1]);
+    kl_test_closesock(acq.fd);
+    kl_test_closesock(acq2.fd);
+    kl_test_closesock(fds[0][1]);
+    kl_test_closesock(fds[1][1]);
     kl_cpool_free(&pool);
 }
 

@@ -241,17 +241,24 @@ test: $(TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 
-# Windows unit-test subset (staged toward parity — see docs/phase6_winsock_design.md
-# Part C). Tier 1: platform-neutral suites (pure in-memory logic). Tier 2:
-# socket/thread runtime suites, validated on the Windows runner (they exercise the
-# same WSAPoll/Winsock/winpthreads machinery the smoke tests prove). The remaining
-# suites need their direct POSIX network includes (<netinet/in.h>, <sys/socket.h>,
-# ...) routed through the shim before they compile under MinGW — see Tier 3 in the
-# design doc.
+# Windows unit-test subset (see docs/phase6_winsock_design.md Part C). 47 of the
+# 55 suites run on the Windows runner. Tier 1: platform-neutral logic. Tier 2:
+# socket/thread runtime (WSAPoll/Winsock/winpthreads). Tier 3: suites whose POSIX
+# network idioms (<sys/socket.h> etc., socketpair/pipe/close/read/write/fcntl/poll)
+# are routed through tests/net_compat.h. The 8 not listed are genuinely POSIX/
+# Linux-only and stay excluded (documented in the design doc): tls, tls_integration,
+# peer_cert (no TLS backend built on Windows), udp_batching (recvmmsg), udp_offload
+# (UDP GSO), unix_socket (SO_PEERCRED), file_io + file_io_iouring (io_uring / POSIX
+# file-path assumptions).
 WIN_TEST_SUITES = allocator body_reader chunked cors decompress drain \
                   multipart_stream overflow parser response_parser router url \
                   client client_stream connection h2_client redirect \
-                  server_stats thread_pool timer websocket_client
+                  server_stats thread_pool timer websocket_client \
+                  error proxy_protocol resolver_cache request timeout \
+                  integration server_integration peer_addr client_happy_eyeballs \
+                  dns_resolver async client_pool cross_module proxy event_ctx \
+                  h2 response socket_provider websocket compress event sse \
+                  udp udp_server udp_tos udp_multicast
 WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 
 # On Windows the test binaries need the `.exe` suffix and the win_prelude.h

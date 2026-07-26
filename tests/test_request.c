@@ -1,9 +1,6 @@
 #include "utest.h"
 #include <keel/keel.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "net_compat.h"
 #include <string.h>
 #include <pthread.h>
 
@@ -64,20 +61,16 @@ static int connect_to(int port) {
     };
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+        kl_test_closesock(fd);
         return -1;
     }
     return fd;
 }
 
 static ssize_t read_response(int fd, char *buf, size_t buflen) {
-    struct timeval tv = {.tv_sec = 2};
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(fd, &fds);
-    int r = select(fd + 1, &fds, NULL, NULL, &tv);
+    int r = kl_test_poll1(fd, 0, 2000);
     if (r <= 0) return r;
-    return read(fd, buf, buflen);
+    return kl_test_sockread(fd, buf, buflen);
 }
 
 /* ── Handlers ─────────────────────────────────────────────────────── */
@@ -149,10 +142,10 @@ static void handle_nulterm(KlRequest *req, KlResponse *res, void *ctx) {
 static int send_and_wait(int port, const char *raw_req) {
     int fd = connect_to(port);
     if (fd < 0) return -1;
-    (void)write(fd, raw_req, strlen(raw_req));
+    (void)kl_test_sockwrite(fd, raw_req, strlen(raw_req));
     char buf[4096];
     ssize_t n = read_response(fd, buf, sizeof(buf) - 1);
-    close(fd);
+    kl_test_closesock(fd);
     if (n <= 0) return -1;
     buf[n] = '\0';
     return strstr(buf, "200") ? 0 : -1;

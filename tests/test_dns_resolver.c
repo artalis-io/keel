@@ -7,12 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+#include "net_compat.h"
 
 /* ── A canned A-record response for a.com → 1.2.3.4, id 0x1234 ────────── */
 static const uint8_t A_RESP[] = {
@@ -315,11 +310,10 @@ static void mock_tcp_on_listen(KlSocketHandle fd, KlEventMask ready, void *ud) {
     if (cfd < 0)
         return;
     m->accepts++;
-    int fl = fcntl(cfd, F_GETFL, 0);
-    if (fl >= 0) (void)fcntl(cfd, F_SETFL, fl | O_NONBLOCK);
-    if (m->drop_on_accept || m->nconns >= MOCK_TCP_MAX) { close(cfd); return; }
+    kl_test_set_nonblock(cfd);
+    if (m->drop_on_accept || m->nconns >= MOCK_TCP_MAX) { kl_test_closesock(cfd); return; }
     MockTcpConn *c = calloc(1, sizeof(*c));
-    if (!c) { close(cfd); return; }
+    if (!c) { kl_test_closesock(cfd); return; }
     c->m = m; c->fd = cfd;
     m->conns[m->nconns++] = c;
     kl_watcher_add(m->ctx, cfd, KL_EVENT_READ, mock_tcp_on_client, c);
@@ -332,28 +326,27 @@ static int mock_tcp_start(MockTcp *m, KlEventCtx *ctx, int port) {
     m->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (m->listen_fd < 0) return -1;
     int one = 1;
-    setsockopt(m->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(m->listen_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
     struct sockaddr_in a; memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)port);
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (bind(m->listen_fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
-        close(m->listen_fd); return -1;
+        kl_test_closesock(m->listen_fd); return -1;
     }
-    if (listen(m->listen_fd, 8) != 0) { close(m->listen_fd); return -1; }
-    int fl = fcntl(m->listen_fd, F_GETFL, 0);
-    if (fl >= 0) (void)fcntl(m->listen_fd, F_SETFL, fl | O_NONBLOCK);
+    if (listen(m->listen_fd, 8) != 0) { kl_test_closesock(m->listen_fd); return -1; }
+    kl_test_set_nonblock(m->listen_fd);
     return kl_watcher_add(ctx, m->listen_fd, KL_EVENT_READ, mock_tcp_on_listen, m);
 }
 
 static void mock_tcp_stop(MockTcp *m) {
     for (int i = 0; i < m->nconns; i++) {
         kl_watcher_del(m->ctx, m->conns[i]->fd);
-        close(m->conns[i]->fd);
+        kl_test_closesock(m->conns[i]->fd);
         free(m->conns[i]);
     }
     kl_watcher_del(m->ctx, m->listen_fd);
-    close(m->listen_fd);
+    kl_test_closesock(m->listen_fd);
 }
 
 static int             g_done;

@@ -4,9 +4,7 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <string.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+#include "net_compat.h"
 
 /* ── Server side: echo handler ───────────────────────────────────────── */
 

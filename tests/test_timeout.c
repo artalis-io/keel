@@ -1,9 +1,6 @@
 #include "utest.h"
 #include <keel/keel.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "net_compat.h"
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
@@ -37,27 +34,19 @@ static int connect_to(int port) {
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+        kl_test_closesock(fd);
         return -1;
     }
     return fd;
 }
 
-/* Read with timeout (select-based, avoids blocking forever if server
+/* Read with timeout (poll-based, avoids blocking forever if server
  * doesn't send anything before test timeout) */
 static ssize_t read_with_timeout(int fd, char *buf, size_t buflen, int ms) {
-    struct timeval tv;
-    tv.tv_sec = ms / 1000;
-    tv.tv_usec = (ms % 1000) * 1000;
-
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(fd, &fds);
-
-    int r = select(fd + 1, &fds, NULL, NULL, &tv);
+    int r = kl_test_poll1(fd, 0, ms);
     if (r <= 0) return r; /* 0 = timeout, -1 = error */
 
-    return read(fd, buf, buflen);
+    return kl_test_sockread(fd, buf, buflen);
 }
 
 /* Wait for server to bind (max 2s) */
@@ -89,7 +78,7 @@ UTEST(timeout, idle_connection) {
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&timeout_server);
     pthread_join(tid, NULL);
     kl_server_free(&timeout_server);
@@ -113,7 +102,7 @@ UTEST(timeout, partial_headers) {
 
     /* Send partial request line, then stall */
     const char *partial = "GET /ok HTT";
-    (void)write(fd, partial, strlen(partial));
+    (void)kl_test_sockwrite(fd, partial, strlen(partial));
 
     char buf[4096];
     ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
@@ -121,7 +110,7 @@ UTEST(timeout, partial_headers) {
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&timeout_server);
     pthread_join(tid, NULL);
     kl_server_free(&timeout_server);
@@ -151,7 +140,7 @@ UTEST(timeout, partial_body) {
                       "Connection: close\r\n"
                       "\r\n"
                       "partial";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     ssize_t n = read_with_timeout(fd, buf, sizeof(buf) - 1, 2000);
@@ -159,7 +148,7 @@ UTEST(timeout, partial_body) {
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&timeout_server);
     pthread_join(tid, NULL);
     kl_server_free(&timeout_server);
@@ -186,7 +175,7 @@ UTEST(timeout, active_not_affected) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     ssize_t total = 0;
@@ -200,7 +189,7 @@ UTEST(timeout, active_not_affected) {
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&timeout_server);
     pthread_join(tid, NULL);
     kl_server_free(&timeout_server);
@@ -235,7 +224,7 @@ UTEST(timeout, body_timeout) {
                       "Connection: close\r\n"
                       "\r\n"
                       "x"; /* only 1 byte of 1000 */
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     /* Wait for timeout response */
     char buf[4096];
@@ -244,7 +233,7 @@ UTEST(timeout, body_timeout) {
     buf[n] = '\0';
     ASSERT_TRUE(strstr(buf, "408") != NULL);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&timeout_server);
     pthread_join(tid, NULL);
     kl_server_free(&timeout_server);
@@ -280,8 +269,8 @@ UTEST(timeout, fast_large_body) {
         "\r\n", sizeof(body));
     ASSERT_TRUE(hlen > 0);
 
-    (void)write(fd, header, (size_t)hlen);
-    (void)write(fd, body, sizeof(body));
+    (void)kl_test_sockwrite(fd, header, (size_t)hlen);
+    (void)kl_test_sockwrite(fd, body, sizeof(body));
 
     /* Should get 200 OK, not a timeout */
     char buf[4096];
@@ -294,7 +283,7 @@ UTEST(timeout, fast_large_body) {
     buf[total] = '\0';
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&timeout_server);
     pthread_join(tid, NULL);
     kl_server_free(&timeout_server);
@@ -320,7 +309,7 @@ UTEST(timeout, keepalive_idle_timeout) {
     const char *req1 = "GET /ok HTTP/1.1\r\n"
                        "Host: localhost\r\n"
                        "\r\n";
-    (void)write(fd, req1, strlen(req1));
+    (void)kl_test_sockwrite(fd, req1, strlen(req1));
 
     /* Read first response */
     char buf[4096];
@@ -341,7 +330,7 @@ UTEST(timeout, keepalive_idle_timeout) {
         ASSERT_TRUE(n <= 0);
     }
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&timeout_server);
     pthread_join(tid, NULL);
     kl_server_free(&timeout_server);
@@ -379,8 +368,8 @@ UTEST(timeout, concurrent_timeouts) {
     buf2[n2] = '\0';
     ASSERT_TRUE(strstr(buf2, "408") != NULL);
 
-    close(fd1);
-    close(fd2);
+    kl_test_closesock(fd1);
+    kl_test_closesock(fd2);
     kl_server_stop(&timeout_server);
     pthread_join(tid, NULL);
     kl_server_free(&timeout_server);

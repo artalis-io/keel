@@ -16,14 +16,9 @@
 #include <keel/server.h>
 #include <keel/allocator.h>
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
+#include "net_compat.h"
 #include <pthread.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 /* A blackhole address (RFC 5737 TEST-NET-1): a connect there stays pending
  * (SYN dropped by the default gateway) until the deadline — used to exercise the
@@ -114,7 +109,7 @@ static int reserve_closed_port(void) {
     socklen_t l = sizeof(a);
     getsockname(s, (struct sockaddr *)&a, &l);
     int port = ntohs(a.sin_port);
-    close(s);
+    kl_test_closesock(s);
     return port;
 }
 
@@ -123,21 +118,19 @@ static int reserve_closed_port(void) {
  * tests UTEST_SKIP when this returns 0, keeping them green everywhere. */
 static int blackhole_stalls(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    int fl = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    kl_test_set_nonblock(fd);
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
     a.sin_port = htons(80);
     inet_pton(AF_INET, BLACKHOLE_IP, &a.sin_addr);
     connect(fd, (struct sockaddr *)&a, sizeof(a));
-    struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-    int pr = poll(&pfd, 1, 250);
+    int pr = kl_test_poll1(fd, 1, 250);
     int stalled = 1;
     if (pr != 0) {                       /* completed or errored → not a stall */
         stalled = 0;
     }
-    close(fd);
+    kl_test_closesock(fd);
     return stalled;
 }
 

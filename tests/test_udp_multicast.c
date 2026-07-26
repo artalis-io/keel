@@ -10,9 +10,7 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <string.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+#include "net_compat.h"
 
 #define GROUP_V4 "239.255.42.99"     /* administratively-scoped, no well-known clash */
 #define GROUP_V6 "ff12::4b45"

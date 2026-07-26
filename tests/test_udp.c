@@ -3,9 +3,7 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <string.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+#include "net_compat.h"
 
 /* ── Captured receive state ──────────────────────────────────────────── */
 
@@ -245,7 +243,7 @@ UTEST(udp, backpressure_best_effort) {
 
     /* Shrink the send buffer to encourage EAGAIN. */
     int sndbuf = 2048;
-    (void)setsockopt(kl_udp_fd(&tx), SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    (void)setsockopt(kl_udp_fd(&tx), SOL_SOCKET, SO_SNDBUF, (char *)&sndbuf, sizeof(sndbuf));
 
     struct sockaddr_in dst;
     dest_v4(&dst, kl_udp_local_port(&rx));
@@ -410,10 +408,10 @@ UTEST(udp, so_bufsize_applied) {
 
     int drb = 0, srb = 0, dsb = 0, ssb = 0;
     socklen_t l = sizeof(int);
-    ASSERT_EQ(0, getsockopt(kl_udp_fd(&def),   SOL_SOCKET, SO_RCVBUF, &drb, &l));
-    ASSERT_EQ(0, getsockopt(kl_udp_fd(&small), SOL_SOCKET, SO_RCVBUF, &srb, &l));
-    ASSERT_EQ(0, getsockopt(kl_udp_fd(&def),   SOL_SOCKET, SO_SNDBUF, &dsb, &l));
-    ASSERT_EQ(0, getsockopt(kl_udp_fd(&small), SOL_SOCKET, SO_SNDBUF, &ssb, &l));
+    ASSERT_EQ(0, getsockopt(kl_udp_fd(&def),   SOL_SOCKET, SO_RCVBUF, (char *)&drb, &l));
+    ASSERT_EQ(0, getsockopt(kl_udp_fd(&small), SOL_SOCKET, SO_RCVBUF, (char *)&srb, &l));
+    ASSERT_EQ(0, getsockopt(kl_udp_fd(&def),   SOL_SOCKET, SO_SNDBUF, (char *)&dsb, &l));
+    ASSERT_EQ(0, getsockopt(kl_udp_fd(&small), SOL_SOCKET, SO_SNDBUF, (char *)&ssb, &l));
 
     ASSERT_TRUE(srb > 0 && srb < drb);   /* rcvbuf knob shrank the buffer */
     ASSERT_TRUE(ssb > 0 && ssb < dsb);   /* sndbuf knob shrank the buffer */

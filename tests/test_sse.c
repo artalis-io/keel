@@ -2,7 +2,7 @@
 #include <keel/sse.h>
 #include <keel/allocator.h>
 #include <string.h>
-#include <unistd.h>
+#include "net_compat.h"
 
 /* ── Mock write function ─────────────────────────────────────────────── */
 
@@ -117,7 +117,7 @@ UTEST(sse, begin_sets_headers) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    pipe(pipefd);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
     res.conn_fd = pipefd[1];
 
     KlSse sse;
@@ -130,8 +130,8 @@ UTEST(sse, begin_sets_headers) {
     ASSERT_TRUE(sse.res == &res);
 
     kl_response_end_stream(&res);
-    close(pipefd[0]);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[0]);
+    kl_test_closesock(pipefd[1]);
     kl_response_free(&res);
 }
 

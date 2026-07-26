@@ -1,9 +1,8 @@
 #include "utest.h"
 #include <keel/response.h>
-#include <unistd.h>
+#include "net_compat.h"
 #include <string.h>
 #include <fcntl.h>
-#include <sys/socket.h>
 #include <errno.h>
 
 UTEST(response, init_and_free) {
@@ -72,20 +71,20 @@ UTEST(response, send_to_pipe) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    ASSERT_EQ(pipe(pipefd), 0);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
 
     res.conn_fd = pipefd[1];
     kl_response_json(&res, 200, "{\"ok\":true}", 11);
 
     int r = kl_response_send(&res);
     ASSERT_EQ(r, 0);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[1]);
 
     char buf[1024];
-    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
-    close(pipefd[0]);
+    kl_test_closesock(pipefd[0]);
 
     /* Verify HTTP response format */
     ASSERT_TRUE(strstr(buf, "HTTP/1.1 200 OK\r\n") != NULL);
@@ -102,7 +101,7 @@ UTEST(response, head_suppresses_body) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    ASSERT_EQ(pipe(pipefd), 0);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
 
     res.conn_fd = pipefd[1];
     res.head_request = 1;
@@ -110,13 +109,13 @@ UTEST(response, head_suppresses_body) {
 
     int r = kl_response_send(&res);
     ASSERT_EQ(r, 0);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[1]);
 
     char buf[1024];
-    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
-    close(pipefd[0]);
+    kl_test_closesock(pipefd[0]);
 
     /* Headers should be present including Content-Length */
     ASSERT_TRUE(strstr(buf, "HTTP/1.1 200 OK\r\n") != NULL);
@@ -137,7 +136,7 @@ UTEST(response, keep_alive_conditional) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    ASSERT_EQ(pipe(pipefd), 0);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
 
     res.conn_fd = pipefd[1];
     res.keep_alive = 0;
@@ -145,13 +144,13 @@ UTEST(response, keep_alive_conditional) {
 
     int r = kl_response_send(&res);
     ASSERT_EQ(r, 0);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[1]);
 
     char buf[1024];
-    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
-    close(pipefd[0]);
+    kl_test_closesock(pipefd[0]);
 
     /* No keep-alive header when flag is 0 */
     ASSERT_TRUE(strstr(buf, "Connection: keep-alive") == NULL);
@@ -159,19 +158,19 @@ UTEST(response, keep_alive_conditional) {
     /* Now test with keep_alive = 1 */
     kl_response_free(&res);
     kl_response_init(&res, &a);
-    ASSERT_EQ(pipe(pipefd), 0);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
     res.conn_fd = pipefd[1];
     res.keep_alive = 1;
     kl_response_body_borrow(&res, "hi", 2);
 
     r = kl_response_send(&res);
     ASSERT_EQ(r, 0);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[1]);
 
-    n = read(pipefd[0], buf, sizeof(buf) - 1);
+    n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
-    close(pipefd[0]);
+    kl_test_closesock(pipefd[0]);
 
     ASSERT_TRUE(strstr(buf, "Connection: keep-alive") != NULL);
 
@@ -184,7 +183,7 @@ UTEST(response, streaming_chunked) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    ASSERT_EQ(pipe(pipefd), 0);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
 
     res.conn_fd = pipefd[1];
     kl_response_header(&res, "Content-Type", "text/plain");
@@ -197,13 +196,13 @@ UTEST(response, streaming_chunked) {
     write_fn(write_ctx, " world", 6);
 
     ASSERT_EQ(kl_response_end_stream(&res), 0);
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[1]);
 
     char buf[2048];
-    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
-    close(pipefd[0]);
+    kl_test_closesock(pipefd[0]);
 
     /* Verify chunked encoding */
     ASSERT_TRUE(strstr(buf, "Transfer-Encoding: chunked\r\n") != NULL);
@@ -401,17 +400,16 @@ UTEST(response, buffer_send_returns_1_on_eagain) {
 
     /* Use a socketpair so we can fill the send buffer */
     int sv[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    ASSERT_EQ(kl_test_socketpair(sv), 0);
 
     /* Set non-blocking */
-    int flags = fcntl(sv[0], F_GETFL, 0);
-    fcntl(sv[0], F_SETFL, flags | O_NONBLOCK);
+    kl_test_set_nonblock(sv[0]);
 
     /* Fill the send buffer to trigger EAGAIN */
     char fill[65536];
     memset(fill, 'X', sizeof(fill));
     while (1) {
-        ssize_t w = write(sv[0], fill, sizeof(fill));
+        ssize_t w = kl_test_sockwrite(sv[0], fill, sizeof(fill));
         if (w < 0) break;
     }
 
@@ -422,8 +420,8 @@ UTEST(response, buffer_send_returns_1_on_eagain) {
     /* Should return 1 (partial) or 0 (if EAGAIN returned 0 bytes, offset stays 0) */
     ASSERT_TRUE(r == 0 || r == 1);
 
-    close(sv[0]);
-    close(sv[1]);
+    kl_test_closesock(sv[0]);
+    kl_test_closesock(sv[1]);
     kl_response_free(&res);
 }
 
@@ -433,7 +431,7 @@ UTEST(response, buffer_send_resumes_from_offset) {
     kl_response_init(&res, &a);
 
     int pipefd[2];
-    ASSERT_EQ(pipe(pipefd), 0);
+    ASSERT_EQ(kl_test_socketpair(pipefd), 0);
 
     res.conn_fd = pipefd[1];
     kl_response_body_borrow(&res, "hello world", 11);
@@ -449,14 +447,14 @@ UTEST(response, buffer_send_resumes_from_offset) {
     /* send_offset should equal total size */
     ASSERT_TRUE(res.send_offset > 0);
 
-    close(pipefd[1]);
+    kl_test_closesock(pipefd[1]);
 
     /* Verify output */
     char buf[1024];
-    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    ssize_t n = kl_test_sockread(pipefd[0], buf, sizeof(buf) - 1);
     ASSERT_TRUE(n > 0);
     buf[n] = '\0';
-    close(pipefd[0]);
+    kl_test_closesock(pipefd[0]);
 
     ASSERT_TRUE(strstr(buf, "HTTP/1.1 200 OK\r\n") != NULL);
     ASSERT_TRUE(strstr(buf, "hello world") != NULL);

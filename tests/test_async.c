@@ -1,20 +1,14 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <keel/async.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "net_compat.h"
 #include <string.h>
-#include <fcntl.h>
 #include <pthread.h>
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
 static int set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    return kl_test_set_nonblock(fd);
 }
 
 /* Minimal server init: event loop + pool, no listen socket */
@@ -91,7 +85,7 @@ UTEST(async, watcher_add_fires_on_read) {
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     ASSERT_EQ(set_nonblocking(fds[0]), 0);
     ASSERT_EQ(set_nonblocking(fds[1]), 0);
 
@@ -99,7 +93,7 @@ UTEST(async, watcher_add_fires_on_read) {
     ASSERT_EQ(kl_watcher_add(&s.ev, fds[0], KL_EVENT_READ, test_watcher_cb, &ctx), 0);
 
     /* Write to fds[1] → fds[0] becomes readable */
-    (void)write(fds[1], "x", 1);
+    (void)kl_test_sockwrite(fds[1], "x", 1);
 
     KlEvent events[8];
     int n = kl_event_wait(&s.ev.loop, events, 8, 100);
@@ -112,8 +106,8 @@ UTEST(async, watcher_add_fires_on_read) {
     ASSERT_TRUE(ctx.got_mask & KL_EVENT_READ);
 
     kl_watcher_del(&s.ev, fds[0]);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
 }
 
@@ -123,7 +117,7 @@ UTEST(async, watcher_mod_changes_interest) {
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     ASSERT_EQ(set_nonblocking(fds[0]), 0);
     ASSERT_EQ(set_nonblocking(fds[1]), 0);
 
@@ -144,8 +138,8 @@ UTEST(async, watcher_mod_changes_interest) {
     ASSERT_TRUE(ctx.got_mask & KL_EVENT_WRITE);
 
     kl_watcher_del(&s.ev, fds[0]);
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
 }
 
@@ -155,7 +149,7 @@ UTEST(async, watcher_del_stops_events) {
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     ASSERT_EQ(set_nonblocking(fds[0]), 0);
     ASSERT_EQ(set_nonblocking(fds[1]), 0);
 
@@ -166,7 +160,7 @@ UTEST(async, watcher_del_stops_events) {
     kl_watcher_del(&s.ev, fds[0]);
 
     /* Write to fds[1] — should NOT fire callback */
-    (void)write(fds[1], "x", 1);
+    (void)kl_test_sockwrite(fds[1], "x", 1);
 
     KlEvent events[8];
     int n = kl_event_wait(&s.ev.loop, events, 8, 50);
@@ -175,8 +169,8 @@ UTEST(async, watcher_del_stops_events) {
 
     ASSERT_EQ(ctx.called, 0);
 
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
 }
 
@@ -186,9 +180,9 @@ UTEST(async, watcher_multiple_fds) {
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
     int fds1[2], fds2[2], fds3[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds1), 0);
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds2), 0);
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds3), 0);
+    ASSERT_EQ(kl_test_socketpair(fds1), 0);
+    ASSERT_EQ(kl_test_socketpair(fds2), 0);
+    ASSERT_EQ(kl_test_socketpair(fds3), 0);
     for (int i = 0; i < 2; i++) {
         set_nonblocking(fds1[i]);
         set_nonblocking(fds2[i]);
@@ -201,9 +195,9 @@ UTEST(async, watcher_multiple_fds) {
     ASSERT_EQ(kl_watcher_add(&s.ev, fds3[0], KL_EVENT_READ, test_watcher_cb, &ctx3), 0);
 
     /* Write to all three */
-    (void)write(fds1[1], "a", 1);
-    (void)write(fds2[1], "b", 1);
-    (void)write(fds3[1], "c", 1);
+    (void)kl_test_sockwrite(fds1[1], "a", 1);
+    (void)kl_test_sockwrite(fds2[1], "b", 1);
+    (void)kl_test_sockwrite(fds3[1], "c", 1);
 
     /* May need multiple waits on level-triggered backends */
     KlEvent events[16];
@@ -221,9 +215,9 @@ UTEST(async, watcher_multiple_fds) {
     kl_watcher_del(&s.ev, fds2[0]);
     kl_watcher_del(&s.ev, fds3[0]);
     for (int i = 0; i < 2; i++) {
-        close(fds1[i]);
-        close(fds2[i]);
-        close(fds3[i]);
+        kl_test_closesock(fds1[i]);
+        kl_test_closesock(fds2[i]);
+        kl_test_closesock(fds3[i]);
     }
     cleanup_test_server(&s);
 }
@@ -261,7 +255,7 @@ UTEST(async, suspend_sets_state) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
@@ -297,8 +291,8 @@ UTEST(async, suspend_sets_state) {
     /* Clean up: complete the op before releasing */
     kl_async_complete(&s, &op);
     c->fd = -1;
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
 }
 
@@ -311,7 +305,7 @@ UTEST(async, complete_calls_on_resume) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
@@ -352,8 +346,8 @@ UTEST(async, complete_calls_on_resume) {
     ASSERT_TRUE(s.async_ops == NULL);
 
     c->fd = -1;
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
 }
 
@@ -366,7 +360,7 @@ UTEST(async, deadline_fires_on_timeout) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
@@ -412,8 +406,8 @@ UTEST(async, deadline_fires_on_timeout) {
     ASSERT_TRUE(s.async_ops == NULL);   /* removed from list */
 
     c->fd = -1;
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
 }
 
@@ -426,7 +420,7 @@ UTEST(async, cancel_on_server_free) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
@@ -448,8 +442,8 @@ UTEST(async, cancel_on_server_free) {
 
     /* Server free should cancel the op */
     c->fd = -1;
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
 
     /* kl_server_free cancels ops — but we use cleanup helper
      * which mirrors the same behavior */
@@ -477,7 +471,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
 
     int fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
@@ -521,8 +515,8 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
     /* Clean up */
     kl_async_complete(&s, &op);
     c->fd = -1;
-    close(fds[0]);
-    close(fds[1]);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
 }
 
@@ -540,7 +534,7 @@ static void watcher_complete_cb(KlSocketHandle fd, KlEventMask ready, void *user
 
     /* Drain the pipe */
     char buf[16];
-    (void)read(fd, buf, sizeof(buf));
+    (void)kl_test_sockread(fd, buf, sizeof(buf));
 
     /* Complete the async op — resumes the connection */
     kl_async_complete(ctx->server, ctx->op);
@@ -556,7 +550,7 @@ UTEST(async, watcher_completes_suspended_conn) {
 
     /* Create a connection with socketpair */
     int conn_fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, conn_fds), 0);
+    ASSERT_EQ(kl_test_socketpair(conn_fds), 0);
     set_nonblocking(conn_fds[0]);
     set_nonblocking(conn_fds[1]);
 
@@ -572,7 +566,7 @@ UTEST(async, watcher_completes_suspended_conn) {
 
     /* Create a pipe for the completion signal */
     int pipe_fds[2];
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, pipe_fds), 0);
+    ASSERT_EQ(kl_test_socketpair(pipe_fds), 0);
     set_nonblocking(pipe_fds[0]);
     set_nonblocking(pipe_fds[1]);
 
@@ -599,7 +593,7 @@ UTEST(async, watcher_completes_suspended_conn) {
                               watcher_complete_cb, &wctx), 0);
 
     /* Write to the pipe — signals completion */
-    (void)write(pipe_fds[1], "done", 4);
+    (void)kl_test_sockwrite(pipe_fds[1], "done", 4);
 
     /* Run event loop — watcher should fire, completing the async op */
     KlEvent events[16];
@@ -616,10 +610,10 @@ UTEST(async, watcher_completes_suspended_conn) {
 
     kl_watcher_del(&s.ev, pipe_fds[0]);
     c->fd = -1;
-    close(conn_fds[0]);
-    close(conn_fds[1]);
-    close(pipe_fds[0]);
-    close(pipe_fds[1]);
+    kl_test_closesock(conn_fds[0]);
+    kl_test_closesock(conn_fds[1]);
+    kl_test_closesock(pipe_fds[0]);
+    kl_test_closesock(pipe_fds[1]);
     cleanup_test_server(&s);
 }
 
@@ -677,10 +671,10 @@ static void sleep_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data)
     (void)ready;
     SleepCtx *ctx = user_data;
     char buf[8];
-    (void)read(fd, buf, sizeof(buf));
+    (void)kl_test_sockread(fd, buf, sizeof(buf));
     kl_watcher_del(&ctx->server->ev, fd);
-    close(ctx->pipe_fds[0]);
-    close(ctx->pipe_fds[1]);
+    kl_test_closesock(ctx->pipe_fds[0]);
+    kl_test_closesock(ctx->pipe_fds[1]);
     kl_async_complete(ctx->server, &ctx->op);
 }
 
@@ -695,7 +689,7 @@ static void handle_async_sleep(KlRequest *req, KlResponse *res, void *user_data)
     sctx.server = srv;
 
     /* Create pipe for completion signal */
-    socketpair(AF_UNIX, SOCK_STREAM, 0, sctx.pipe_fds);
+    kl_test_socketpair(sctx.pipe_fds);
     set_nonblocking(sctx.pipe_fds[0]);
     set_nonblocking(sctx.pipe_fds[1]);
 
@@ -712,7 +706,7 @@ static void handle_async_sleep(KlRequest *req, KlResponse *res, void *user_data)
     kl_async_suspend(srv, conn, &sctx.op);
 
     /* Schedule completion (write to pipe — watcher fires on next tick) */
-    (void)write(sctx.pipe_fds[1], "!", 1);
+    (void)kl_test_sockwrite(sctx.pipe_fds[1], "!", 1);
 }
 
 static int connect_to(int port) {
@@ -724,7 +718,7 @@ static int connect_to(int port) {
     };
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+        kl_test_closesock(fd);
         return -1;
     }
     return fd;
@@ -733,7 +727,7 @@ static int connect_to(int port) {
 static ssize_t read_response(int fd, char *buf, size_t buflen) {
     ssize_t total = 0;
     ssize_t n;
-    while ((n = read(fd, buf + total, buflen - (size_t)total - 1)) > 0)
+    while ((n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1)) > 0)
         total += n;
     buf[total] = '\0';
     return total;
@@ -756,11 +750,11 @@ UTEST(async, e2e_handler_suspend_resume) {
                       "Host: localhost\r\n"
                       "Connection: close\r\n"
                       "\r\n";
-    (void)write(fd, req, strlen(req));
+    (void)kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[4096];
     read_response(fd, buf, sizeof(buf));
-    close(fd);
+    kl_test_closesock(fd);
 
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "{\"slept\":true}") != NULL);

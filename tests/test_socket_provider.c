@@ -14,11 +14,7 @@
 
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "net_compat.h"
 
 /* ── Programmable mock provider ────────────────────────────────────── */
 
@@ -60,7 +56,7 @@ static ssize_t mock_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
 static ssize_t mock_writev(void *ctx, KlSocketHandle fd, const struct iovec *iov, int iovcnt) {
     MockSock *m = ctx;
     m->writev_calls++;
-    if (m->wrap) return writev((int)fd, iov, iovcnt);
+    if (m->wrap) return kl_sockdef_writev(fd, iov, iovcnt);
     ssize_t t = 0;
     for (int i = 0; i < iovcnt; i++) t += (ssize_t)iov[i].iov_len;
     return t;
@@ -102,6 +98,7 @@ static KlSocketProvider mock_provider(MockSock *m) {
 
 /* ── POSIX default / fast path ─────────────────────────────────────── */
 
+#if !defined(_WIN32)   /* kl_socket_provider_posix() lives in the POSIX-only TU */
 UTEST(sockprov, posix_identity_and_caps) {
     const KlSocketProvider *p = kl_socket_provider_posix();
     ASSERT_TRUE(p != NULL);
@@ -109,29 +106,32 @@ UTEST(sockprov, posix_identity_and_caps) {
     ASSERT_TRUE((p->capabilities & KL_SOCK_CAP_NATIVE_FD) != 0);
     ASSERT_TRUE(p->context == NULL);
 }
+#endif
 
 /* NULL provider takes the inline POSIX path and moves real bytes. */
 UTEST(sockprov, null_provider_real_io) {
     int sv[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_EQ(0, kl_test_socketpair(sv));
     ASSERT_EQ((ssize_t)5, kl_sock_send(NULL, sv[0], "hello", 5));
     char buf[8] = {0};
     ASSERT_EQ((ssize_t)5, kl_sock_recv(NULL, sv[1], buf, sizeof(buf)));
     ASSERT_STREQ("hello", buf);
-    close(sv[0]); close(sv[1]);
+    kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
 
 /* Explicit POSIX provider dispatches through its ops to the same effect. */
+#if !defined(_WIN32)   /* kl_socket_provider_posix() lives in the POSIX-only TU */
 UTEST(sockprov, explicit_posix_provider_real_io) {
     const KlSocketProvider *p = kl_socket_provider_posix();
     int sv[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_EQ(0, kl_test_socketpair(sv));
     ASSERT_EQ((ssize_t)3, kl_sock_send(p, sv[0], "abc", 3));
     char buf[4] = {0};
     ASSERT_EQ((ssize_t)3, kl_sock_recv(p, sv[1], buf, sizeof(buf)));
     ASSERT_STREQ("abc", buf);
-    close(sv[0]); close(sv[1]);
+    kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
+#endif
 
 /* ── Dispatch + fault injection ────────────────────────────────────── */
 
@@ -175,13 +175,13 @@ UTEST(sockprov, per_op_null_fallback) {
     static const KlSocketOps partial = { .name = "partial" };  /* all ops NULL */
     KlSocketProvider p = { &partial, NULL, 0 };
     int sv[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_EQ(0, kl_test_socketpair(sv));
     ASSERT_EQ((ssize_t)2, kl_sock_send(&p, sv[0], "hi", 2));   /* falls back */
     char buf[4] = {0};
     ASSERT_EQ((ssize_t)2, kl_sock_recv(&p, sv[1], buf, sizeof(buf)));
     ASSERT_STREQ("hi", buf);
     ASSERT_EQ(0, kl_sock_set_nonblocking(&p, sv[0]));          /* fallback, no crash */
-    close(sv[0]); close(sv[1]);
+    kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
 
 /* Decorator: mock wraps real I/O but caps each send — the tail still arrives
@@ -190,7 +190,7 @@ UTEST(sockprov, decorator_short_write_real_io) {
     MockSock m; memset(&m, 0, sizeof(m)); m.wrap = 1; m.short_send = 4;
     KlSocketProvider p = mock_provider(&m);
     int sv[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_EQ(0, kl_test_socketpair(sv));
 
     const char *msg = "0123456789";
     ssize_t w1 = kl_sock_send(&p, sv[0], msg, 10);
@@ -202,7 +202,7 @@ UTEST(sockprov, decorator_short_write_real_io) {
     ssize_t r = recv(sv[1], buf, sizeof(buf), 0);
     ASSERT_EQ((ssize_t)8, r);                        /* the 8 real bytes arrived */
     ASSERT_EQ(0, memcmp(buf, "01234567", 8));
-    close(sv[0]); close(sv[1]);
+    kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
 
 /* End-to-end threading: a KlUdp created on a ctx carrying the mock provider
@@ -282,7 +282,9 @@ UTEST(sockprov, mock_connect_failure) {
 UTEST(sockprov, capability_query) {
     /* NULL provider == POSIX == native-fd. */
     ASSERT_TRUE(kl_socket_provider_has_cap(NULL, KL_SOCK_CAP_NATIVE_FD));
+#if !defined(_WIN32)
     ASSERT_TRUE(kl_socket_provider_has_cap(kl_socket_provider_posix(), KL_SOCK_CAP_NATIVE_FD));
+#endif
     /* A mock with no capabilities advertises none. */
     MockSock m; memset(&m, 0, sizeof(m));
     KlSocketProvider p = mock_provider(&m);   /* capabilities = 0 */
@@ -291,7 +293,9 @@ UTEST(sockprov, capability_query) {
 
 UTEST(sockprov, native_fd_escape_hatch) {
     ASSERT_EQ(7, kl_sock_native_fd(NULL, 7));                      /* POSIX: fd is native */
+#if !defined(_WIN32)
     ASSERT_EQ(7, kl_sock_native_fd(kl_socket_provider_posix(), 7));
+#endif
     MockSock m; memset(&m, 0, sizeof(m));
     KlSocketProvider p = mock_provider(&m);                        /* no NATIVE_FD cap */
     ASSERT_EQ(-1, kl_sock_native_fd(&p, 7));                       /* not a native fd */
@@ -304,7 +308,9 @@ UTEST(sockprov, provider_destroy_lifecycle) {
     g_destroyed = 0;
     /* NULL provider and a NULL-destroy provider are both no-ops. */
     kl_socket_provider_destroy(NULL);
+#if !defined(_WIN32)
     kl_socket_provider_destroy(kl_socket_provider_posix());
+#endif
     ASSERT_EQ(0, g_destroyed);
     /* A provider with a destroy op is torn down exactly once. */
     static const KlSocketOps ops = { .destroy = mock_destroy, .name = "destroyable" };
@@ -334,7 +340,7 @@ UTEST(sockprov, writev_sendfile_op_dispatch) {
     MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1; m.wrap = 1;
     KlSocketProvider p = mock_provider(&m);
     int sv[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_EQ(0, kl_test_socketpair(sv));
 
     char a[] = "AB", b[] = "CD";
     struct iovec iov[2] = { { a, 2 }, { b, 2 } };
@@ -346,7 +352,7 @@ UTEST(sockprov, writev_sendfile_op_dispatch) {
 
     ASSERT_EQ((ssize_t)4, kl_sock_writev(NULL, sv[0], iov, 2));/* NULL → real writev */
     ASSERT_EQ((ssize_t)4, recv(sv[1], buf, sizeof(buf), 0));
-    close(sv[0]); close(sv[1]);
+    kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 
     off_t off = 0;
     ASSERT_EQ((ssize_t)100, kl_sock_sendfile(&p, 9, 9, &off, 100)); /* dispatches to op */

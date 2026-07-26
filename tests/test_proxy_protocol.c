@@ -1,8 +1,7 @@
 #include "utest.h"
 #include <keel/proxy_protocol.h>
 #include <string.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include "net_compat.h"
 
 /* ── CIDR ────────────────────────────────────────────────────────────── */
 

@@ -14,14 +14,9 @@
 #include <keel/resolver_cache.h>
 
 #include <string.h>
-#include <unistd.h>
+#include "net_compat.h"
 #include <pthread.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <errno.h>
-#include <poll.h>
-#include <fcntl.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * Shared helpers
@@ -45,7 +40,7 @@ static int connect_to(int port) {
     };
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+        kl_test_closesock(fd);
         return -1;
     }
     return fd;
@@ -53,11 +48,10 @@ static int connect_to(int port) {
 
 static ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
     ssize_t total = 0;
-    struct pollfd pfd = { .fd = fd, .events = POLLIN };
     while (total < (ssize_t)buflen - 1) {
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = kl_test_poll1(fd, 0, timeout_ms);
         if (pr <= 0) break;
-        ssize_t n = read(fd, buf + total, buflen - (size_t)total - 1);
+        ssize_t n = kl_test_sockread(fd, buf + total, buflen - (size_t)total - 1);
         if (n <= 0) break;
         total += n;
     }
@@ -66,9 +60,7 @@ static ssize_t read_response(int fd, char *buf, size_t buflen, int timeout_ms) {
 }
 
 static int set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    return kl_test_set_nonblock(fd);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -162,7 +154,7 @@ static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd) {
 static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
     (void)self;
     ssize_t r;
-    do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
+    do { r = kl_test_sockread(fd, buf, len); } while (r < 0 && errno == EINTR);
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     return r;
 }
@@ -170,7 +162,7 @@ static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
 static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
     (void)self;
     ssize_t r;
-    do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
+    do { r = kl_test_sockwrite(fd, buf, len); } while (r < 0 && errno == EINTR);
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     return r;
 }
@@ -396,10 +388,10 @@ static void tls_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_d
     (void)ready;
     TlsAsyncCtx *ctx = user_data;
     char buf[16];
-    (void)read(fd, buf, sizeof(buf));
+    (void)kl_test_sockread(fd, buf, sizeof(buf));
     kl_watcher_del(&ctx->server->ev, fd);
-    close(ctx->pipe_fds[0]);
-    close(ctx->pipe_fds[1]);
+    kl_test_closesock(ctx->pipe_fds[0]);
+    kl_test_closesock(ctx->pipe_fds[1]);
     kl_async_complete(ctx->server, &ctx->op);
 }
 
@@ -414,7 +406,7 @@ static void handle_tls_async(KlRequest *req, KlResponse *res, void *user_data) {
     tctx.op.on_resume = tls_async_resume;
     tctx.op.user_data = &tctx;
 
-    socketpair(AF_UNIX, SOCK_STREAM, 0, tctx.pipe_fds);
+    kl_test_socketpair(tctx.pipe_fds);
     set_nonblocking(tctx.pipe_fds[0]);
     set_nonblocking(tctx.pipe_fds[1]);
 
@@ -423,7 +415,7 @@ static void handle_tls_async(KlRequest *req, KlResponse *res, void *user_data) {
     kl_async_suspend(srv, conn, &tctx.op);
 
     /* Immediate completion signal */
-    (void)write(tctx.pipe_fds[1], "!", 1);
+    (void)kl_test_sockwrite(tctx.pipe_fds[1], "!", 1);
 }
 
 UTEST(cross, tls_async_suspend_resume) {
@@ -450,14 +442,14 @@ UTEST(cross, tls_async_suspend_resume) {
     const char *req = "GET /tls-async HTTP/1.1\r\n"
                       "Host: localhost\r\n"
                       "Connection: close\r\n\r\n";
-    write(fd, req, strlen(req));
+    kl_test_sockwrite(fd, req, strlen(req));
 
     char buf[2048];
     read_response(fd, buf, sizeof(buf), 2000);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "{\"async_tls\":true}") != NULL);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_server_free(&srv);
@@ -509,10 +501,10 @@ static void mw_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_da
     (void)ready;
     MwAsyncCtx *ctx = user_data;
     char buf[16];
-    (void)read(fd, buf, sizeof(buf));
+    (void)kl_test_sockread(fd, buf, sizeof(buf));
     kl_watcher_del(&ctx->server->ev, fd);
-    close(ctx->pipe_fds[0]);
-    close(ctx->pipe_fds[1]);
+    kl_test_closesock(ctx->pipe_fds[0]);
+    kl_test_closesock(ctx->pipe_fds[1]);
     kl_async_complete(ctx->server, &ctx->op);
 }
 
@@ -528,14 +520,14 @@ static void handle_mw_async(KlRequest *req, KlResponse *res, void *user_data) {
     mctx.op.on_resume = mw_async_resume;
     mctx.op.user_data = &mctx;
 
-    socketpair(AF_UNIX, SOCK_STREAM, 0, mctx.pipe_fds);
+    kl_test_socketpair(mctx.pipe_fds);
     set_nonblocking(mctx.pipe_fds[0]);
     set_nonblocking(mctx.pipe_fds[1]);
 
     kl_watcher_add(&srv->ev, mctx.pipe_fds[0], KL_EVENT_READ,
                    mw_async_watcher, &mctx);
     kl_async_suspend(srv, conn, &mctx.op);
-    (void)write(mctx.pipe_fds[1], "!", 1);
+    (void)kl_test_sockwrite(mctx.pipe_fds[1], "!", 1);
 }
 
 UTEST(cross, middleware_body_async) {
@@ -558,11 +550,11 @@ UTEST(cross, middleware_body_async) {
                           "Host: localhost\r\n"
                           "Content-Length: 5\r\n"
                           "Connection: close\r\n\r\nhello";
-        write(fd, req, strlen(req));
+        kl_test_sockwrite(fd, req, strlen(req));
         char buf[2048];
         read_response(fd, buf, sizeof(buf), 2000);
         ASSERT_TRUE(strstr(buf, "401") != NULL);
-        close(fd);
+        kl_test_closesock(fd);
     }
 
     /* Test: valid auth + body → async handler echoes body */
@@ -574,12 +566,12 @@ UTEST(cross, middleware_body_async) {
                           "X-Auth: secret\r\n"
                           "Content-Length: 11\r\n"
                           "Connection: close\r\n\r\nhello world";
-        write(fd, req, strlen(req));
+        kl_test_sockwrite(fd, req, strlen(req));
         char buf[2048];
         read_response(fd, buf, sizeof(buf), 2000);
         ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
         ASSERT_TRUE(strstr(buf, "hello world") != NULL);
-        close(fd);
+        kl_test_closesock(fd);
     }
 
     kl_server_stop(&srv);
@@ -696,11 +688,11 @@ UTEST(cross, tls_middleware_compress) {
         const char *req = "GET /compressed HTTP/1.1\r\n"
                           "Host: localhost\r\n"
                           "Connection: close\r\n\r\n";
-        write(fd, req, strlen(req));
+        kl_test_sockwrite(fd, req, strlen(req));
         char buf[2048];
         read_response(fd, buf, sizeof(buf), 2000);
         ASSERT_TRUE(strstr(buf, "401") != NULL);
-        close(fd);
+        kl_test_closesock(fd);
     }
 
     /* Authenticated → 200 with compressed body + Content-Encoding */
@@ -711,7 +703,7 @@ UTEST(cross, tls_middleware_compress) {
                           "Host: localhost\r\n"
                           "X-Auth: secret\r\n"
                           "Connection: close\r\n\r\n";
-        write(fd, req, strlen(req));
+        kl_test_sockwrite(fd, req, strlen(req));
         char buf[4096];
         read_response(fd, buf, sizeof(buf), 2000);
         ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
@@ -719,7 +711,7 @@ UTEST(cross, tls_middleware_compress) {
         ASSERT_TRUE(strstr(buf, "Vary: Accept-Encoding") != NULL);
         /* Body should be mock-compressed (input minus last byte) */
         ASSERT_TRUE(strstr(buf, "Hello, compressed world") != NULL);
-        close(fd);
+        kl_test_closesock(fd);
     }
 
     kl_server_stop(&srv);
@@ -748,7 +740,7 @@ static void hold_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) 
     (void)ready;
     TlsAsyncCtx *ctx = user_data;
     char buf[16];
-    (void)read(fd, buf, sizeof(buf));
+    (void)kl_test_sockread(fd, buf, sizeof(buf));
 
     /* Capture stats while connection is suspended */
     KlServerStats stats;
@@ -757,8 +749,8 @@ static void hold_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) 
     hold_stats_suspended = stats.async_suspended;
 
     kl_watcher_del(&ctx->server->ev, fd);
-    close(ctx->pipe_fds[0]);
-    close(ctx->pipe_fds[1]);
+    kl_test_closesock(ctx->pipe_fds[0]);
+    kl_test_closesock(ctx->pipe_fds[1]);
     kl_async_complete(ctx->server, &ctx->op);
 }
 
@@ -773,7 +765,7 @@ static void handle_hold(KlRequest *req, KlResponse *res, void *user_data) {
     hctx.op.on_resume = hold_resume;
     hctx.op.user_data = &hctx;
 
-    socketpair(AF_UNIX, SOCK_STREAM, 0, hctx.pipe_fds);
+    kl_test_socketpair(hctx.pipe_fds);
     set_nonblocking(hctx.pipe_fds[0]);
     set_nonblocking(hctx.pipe_fds[1]);
 
@@ -782,7 +774,7 @@ static void handle_hold(KlRequest *req, KlResponse *res, void *user_data) {
     kl_async_suspend(srv, conn, &hctx.op);
 
     /* Delay completion so watcher fires on next tick with conn suspended */
-    (void)write(hctx.pipe_fds[1], "!", 1);
+    (void)kl_test_sockwrite(hctx.pipe_fds[1], "!", 1);
 }
 
 UTEST(cross, stats_during_async) {
@@ -803,7 +795,7 @@ UTEST(cross, stats_during_async) {
     const char *req = "GET /hold HTTP/1.1\r\n"
                       "Host: localhost\r\n"
                       "Connection: close\r\n\r\n";
-    write(fd, req, strlen(req));
+    kl_test_sockwrite(fd, req, strlen(req));
     char buf[2048];
     read_response(fd, buf, sizeof(buf), 2000);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
@@ -812,7 +804,7 @@ UTEST(cross, stats_during_async) {
     ASSERT_TRUE(hold_stats_active >= 1);
     ASSERT_TRUE(hold_stats_suspended >= 1);
 
-    close(fd);
+    kl_test_closesock(fd);
     kl_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_server_free(&srv);
