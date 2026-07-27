@@ -46,6 +46,7 @@ else ifdef WINDOWS
   # defaults + the Winsock load constructor the IOCP provider reuses).
   ifeq ($(BACKEND),iocp)
     EVENT_SRC = src/event_iocp.c
+    IO_ENGINE_SRC =           # event_iocp.c provides kl_io_engine_run_completion
   else
     EVENT_SRC = src/event_wsapoll.c
   endif
@@ -126,6 +127,9 @@ TEST_COMPAT_SRC ?= tests/net_compat_posix.c
 # Windows branch swaps the iphlpapi sibling. dns_resolver.c itself is #ifdef-free
 # and runs over the udp + socket.h seams.
 DNS_SYS_SRC ?= src/dns_sys_posix.c
+# Completion-tick stub for the io_engine seam (PAL Phase 8). Linked on every build
+# except IOCP, where event_iocp.c provides the real kl_io_engine_run_completion.
+IO_ENGINE_SRC ?= src/io_engine.c
 CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/response.c src/router.c \
            src/connection.c src/server.c $(SERVER_PLAT_SRC) src/async.c src/timer.c \
            src/body_reader_buffer.c \
@@ -136,7 +140,7 @@ CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/respons
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(UDP_IO_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) \
            src/compress.c src/decompress.c src/drain.c \
-           $(FILE_IO_SRC) $(EVENT_SRC)
+           $(IO_ENGINE_SRC) $(FILE_IO_SRC) $(EVENT_SRC)
 
 # The built-in DNS resolver now builds on every platform: dns_resolver.c is
 # #ifdef-free (over the udp + socket.h seams) and DNS_SYS_SRC swaps the config-

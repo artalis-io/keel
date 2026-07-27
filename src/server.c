@@ -13,6 +13,7 @@
 #include "internal.h"
 #include "socket.h"       /* seam + sockcompat: sockaddr / getaddrinfo / inet_ntop / TCP opts */
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
+#include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
 #include "server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
 
 #define KL_LISTEN_BACKLOG  128
@@ -576,7 +577,19 @@ int kl_server_run(KlServer *s) {
     atomic_store(&s->draining, 0);
     KlEvent events[KL_EVENTS_PER_TICK];
 
+    /* A completion loop (IOCP) is driven by the completion tick, not the readiness
+     * wait/dispatch below. Detected once from the backend's advertised event model
+     * (PAL Phase 8 io_engine seam) — the completion concept never enters the
+     * readiness path. Never true on readiness backends, so that path is unchanged. */
+    const int completion_loop =
+        (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+
     while (atomic_load(&s->running)) {
+        if (completion_loop) {
+            if (kl_io_engine_run_completion(s, KL_POLL_TIMEOUT_MS) < 0)
+                break;
+            continue;
+        }
         /* Compute dynamic timeout based on nearest async op deadline */
         uint64_t now = kl_monotonic_ms();
         int wait_timeout = KL_POLL_TIMEOUT_MS;
