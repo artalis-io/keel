@@ -1,7 +1,26 @@
 # Phase 8b-5 — TLS over the completion loop (feed/drain BIO) — Design
 
-**Status:** designed, implementation gated. The deepest 8b increment — the design's
+**Status:** **implemented (8b-5a + 8b-5b).** The deepest 8b increment — the design's
 flagged crux. Builds on 8b-0..4 (the platform-independent completion axis + driver).
+
+- **8b-5a** — `KlTls` optional `feed_input`/`drain_output` ops + the mbedTLS memory-BIO
+  mode. Validated by `tests/smoke_tls_completion.c` (a full mbedTLS handshake +
+  bidirectional app data driven purely through the two ops, no socket) on POSIX/local
+  mbedTLS. Only `include/keel/tls.h` changed — additive optional ops.
+- **8b-5b** — the completion driver's TLS ciphertext leg. `kl_comp_post_recv` reads
+  ciphertext into a transient op buffer for TLS conns (`read_buf` stays plaintext);
+  `kl_comp_drain` hands it to the engine via the public `feed_input` op (no mbedTLS
+  knowledge in the backend) and surfaces a plain READ. The driver (`comp_tls_drive`)
+  reuses `kl_conn_on_handshake` / `comp_try_reading` / `kl_conn_ingest_body` verbatim,
+  looping on `pending()` for coalesced records; responses are encrypted via the memory
+  BIO (`comp_tls_send_response`) and flushed synchronously (same head-of-line caveat as
+  streaming). `comp_on_accept` enters the handshake state + enables memory-BIO mode.
+  Buffered HTTP/1.1 over TLS only; TLS file/stream bodies and ALPN-h2 are out of this
+  subset (they close rather than mis-serve). **Validation:** the Windows IOCP build
+  compiles clean under MinGW (`-Werror`); POSIX `make test` is byte-identical (the two
+  completion TUs are not compiled there); the TLS-over-IOCP *runtime* is a local/hull
+  gate per the BYO/out-of-CI mbedTLS decision below. Zero `include/keel/` change in
+  8b-5b — the driver drives the abstract `KlTls` vtable, never mbedTLS.
 
 **The problem.** `KlTls` does its socket I/O *internally*: `tls->read/write/handshake
 (self, fd)` drive a BIO whose `recv`/`send` call synchronous `kl_sockdef_recv/send`

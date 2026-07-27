@@ -11,6 +11,7 @@
  */
 #include <keel/server.h>
 #include <keel/connection.h>
+#include <keel/tls.h>            /* KlTls vtable ops — TLS-over-completion (8b-5b) */
 #include "internal.h"            /* kl_server_conn_release */
 #include "conn_internal.h"       /* kl_conn_dispatch_request / kl_conn_send_complete */
 #include "response_internal.h"   /* kl_response_build_iovec */
@@ -23,6 +24,9 @@
 #include <stddef.h>              /* offsetof (server_of_ctx containerof) */
 
 #define KL_COMP_MAX_EVENTS 64
+
+/* Stack chunk for draining the TLS engine's outgoing ciphertext to the socket. */
+#define KL_TLS_FLUSH_CHUNK 16384
 
 static void comp_close(struct KlServer *s, KlConn *c) {
     kl_server_conn_release(s, c);   /* closes the socket + returns the pool slot */
@@ -75,10 +79,68 @@ static void comp_send_stream(struct KlServer *s, KlConn *c) {
     }
 }
 
+/* TLS-over-completion output. In completion mode the mbedTLS BIO writes outgoing
+ * ciphertext into an in-memory ring (drain_output) rather than the socket; push that
+ * ciphertext out with a synchronous send on the (blocking) accepted socket. Bounded
+ * by the response size — same head-of-line caveat as comp_send_stream. */
+static int comp_tls_flush(KlConn *c) {
+    const KlSocketProvider *sp = c->ctx ? c->ctx->sockets : NULL;
+    unsigned char buf[KL_TLS_FLUSH_CHUNK];
+    ssize_t n;
+    while ((n = c->tls->drain_output(c->tls, buf, sizeof(buf))) > 0) {
+        size_t off = 0;
+        while (off < (size_t)n) {
+            ssize_t w = kl_sock_send(sp, c->fd, buf + off, (size_t)n - off);
+            if (w <= 0) return -1;           /* seam retries EINTR; <=0 is fatal here */
+            off += (size_t)w;
+        }
+    }
+    return (n < 0) ? -1 : 0;
+}
+
+/* Encrypt `len` plaintext bytes (tls->write appends ciphertext to the ring) and push
+ * the produced ciphertext out. WANT_WRITE (w==0) means the ring hit its cap — flush to
+ * make room and retry. */
+static int comp_tls_write(KlConn *c, const void *data, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = c->tls->write(c->tls, c->fd, (const char *)data + off, len - off);
+        if (w < 0) return -1;
+        if (w == 0) { if (comp_tls_flush(c) < 0) return -1; continue; }
+        off += (size_t)w;
+    }
+    return comp_tls_flush(c);
+}
+
+/* Encrypt + synchronously send a buffered response, then complete (keep-alive or
+ * close). TLS file/stream bodies over the completion loop are out of this subset. */
+static void comp_tls_send_response(struct KlServer *s, KlConn *c) {
+    if (c->res.body_mode == KL_BODY_STREAM || c->res.body_mode == KL_BODY_FILE) {
+        comp_close(s, c);
+        return;
+    }
+    char cl_buf[48];
+    KlIoVec iov[7];
+    size_t total = 0;
+    int n = kl_response_build_iovec(&c->res, iov, 7, cl_buf, sizeof(cl_buf), &total);
+    if (n < 0) { comp_close(s, c); return; }
+    for (int i = 0; i < n; i++)
+        if (comp_tls_write(c, iov[i].base, iov[i].len) < 0) { comp_close(s, c); return; }
+
+    KlConnState st = kl_conn_send_complete(c);   /* resets read_len for keep-alive */
+    if (st == KL_CONN_READING) {
+        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+    } else {
+        comp_close(s, c);
+    }
+}
+
 /* Act on the state a completed request produced. */
 static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
     if (st == KL_CONN_SENDING) {
-        if (c->res.body_mode == KL_BODY_STREAM)
+        if (c->tls)
+            comp_tls_send_response(s, c);      /* encrypt via the memory BIO, then send */
+        else if (c->res.body_mode == KL_BODY_STREAM)
             comp_send_stream(s, c);
         else if (comp_send_response(c) < 0)
             comp_close(s, c);
@@ -91,27 +153,92 @@ static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
     }
 }
 
-/* Run the model-blind headers core on bytes already in read_buf, then act. */
-static void comp_drive_reading(struct KlServer *s, KlConn *c) {
+/* Run the model-blind headers core on bytes already in read_buf and act. Returns 1
+ * if more header bytes are needed (caller posts the next read, per its transport), 0
+ * if the request was dispatched/acted-on (or the connection was closed). Split out so
+ * the TLS read loop can reuse it across coalesced records via pending(). */
+static int comp_try_reading(struct KlServer *s, KlConn *c) {
     size_t consumed = 0;
     KlParseResult pr = c->parser->parse(c->parser, &c->req,
                                         c->read_buf, c->read_len, &consumed);
-    if (pr == KL_PARSE_INCOMPLETE) {
-        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
-        return;
-    }
-    if (pr == KL_PARSE_ERROR) { comp_close(s, c); return; }
+    if (pr == KL_PARSE_INCOMPLETE) return 1;
+    if (pr == KL_PARSE_ERROR) { comp_close(s, c); return 0; }
 
     KlConnState st = (pr == KL_PARSE_HEADERS_OK)
         ? kl_conn_dispatch_request(c, &s->router,
                                    c->read_buf + consumed, c->read_len - consumed)
         : kl_conn_dispatch_request(c, &s->router, NULL, 0);
     comp_after_state(s, c, st);
+    return 0;
+}
+
+/* Plaintext headers path: parse what's in read_buf; on need-more, post a read. */
+static void comp_drive_reading(struct KlServer *s, KlConn *c) {
+    if (comp_try_reading(s, c) == 1 && kl_comp_post_recv(c) < 0)
+        comp_close(s, c);
 }
 
 /* Feed a completed body read through the model-blind body core, then act. */
 static void comp_drive_body(struct KlServer *s, KlConn *c) {
     comp_after_state(s, c, kl_conn_ingest_body(c, c->read_len));
+}
+
+/* Drive a TLS connection after the backend has fed newly-received ciphertext to the
+ * engine (kl_comp_drain → tls->feed_input). Handshake, then decrypt into read_buf and
+ * run the model-blind core — reusing kl_conn_on_handshake / comp_try_reading /
+ * kl_conn_ingest_body verbatim. Because TLS records can arrive coalesced in one recv,
+ * each decrypt phase loops on pending() so buffered plaintext isn't stranded waiting
+ * for the next network read. Ciphertext output is flushed synchronously. */
+static void comp_tls_drive(struct KlServer *s, KlConn *c) {
+    if (c->state == KL_CONN_TLS_HANDSHAKE) {
+        KlConnState st = kl_conn_on_handshake(c);      /* reads fed ciphertext */
+        if (comp_tls_flush(c) < 0) { comp_close(s, c); return; }   /* push HS records */
+        if (st == KL_CONN_TLS_HANDSHAKE || st == KL_CONN_READING) {
+            if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+        } else {
+            /* CLOSED, or HTTP2 (ALPN h2) — not driven over the completion subset. */
+            comp_close(s, c);
+        }
+        return;
+    }
+
+    if (c->state == KL_CONN_READING_BODY) {
+        for (;;) {
+            ssize_t p = c->tls->read(c->tls, c->fd, c->read_buf, c->read_cap);
+            if (p < 0) { comp_close(s, c); return; }
+            if (p == 0) {                              /* WANT_READ — need the network */
+                if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+                return;
+            }
+            c->read_len = (size_t)p;
+            KlConnState st = kl_conn_ingest_body(c, c->read_len);
+            if (st != KL_CONN_READING_BODY) { comp_after_state(s, c, st); return; }
+            if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
+                if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+                return;                                /* more body needs the network */
+            }
+            /* else: another record is already buffered — decrypt the next chunk */
+        }
+    }
+
+    /* Reading request headers: accumulate decrypted plaintext, parse, dispatch. */
+    for (;;) {
+        size_t off = c->read_len;
+        if (off >= c->read_cap) { comp_close(s, c); return; }   /* headers overflowed */
+        ssize_t p = c->tls->read(c->tls, c->fd, c->read_buf + off, c->read_cap - off);
+        if (p < 0) { comp_close(s, c); return; }
+        if (p == 0) {                                  /* WANT_READ — need the network */
+            if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+            return;
+        }
+        c->read_len += (size_t)p;
+        if (comp_try_reading(s, c) == 0) return;       /* dispatched / acted / closed */
+        if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
+            if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+            return;                                    /* more headers need the network */
+        }
+        /* else: more buffered — loop and decrypt the next record */
+    }
 }
 
 static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
@@ -132,6 +259,18 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
     nc->res.alloc = &s->alloc_storage;
     (void)kl_sock_set_tcp_nodelay(nc->ctx ? nc->ctx->sockets : NULL, nc->fd, 1);
 
+    /* TLS: enter the handshake state and switch the backend into completion (memory
+     * BIO) mode so handshake()/read()/write() operate on fed/drained buffers instead
+     * of the socket. Requires the backend's optional feed_input/drain_output ops. */
+    if (nc->tls) {
+        if (!nc->tls->feed_input || !nc->tls->drain_output) {
+            comp_close(s, nc);   /* backend can't do completion-mode TLS */
+            goto refill;
+        }
+        nc->state = KL_CONN_TLS_HANDSHAKE;
+        nc->tls->feed_input(nc->tls, NULL, 0);   /* enable memory-BIO mode */
+    }
+
     /* Register the accepted socket with the loop (associate) + post the first read. */
     if (kl_event_add(&s->ev.loop, nc->fd, KL_EVENT_READ, nc) < 0 ||
         kl_comp_post_recv(nc) < 0) {
@@ -145,6 +284,10 @@ refill:
 static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
     KlConn *c = ev->target;
     if (!ev->ok || ev->bytes == 0) { comp_close(s, c); return; }   /* peer closed */
+    /* TLS: the backend already fed this recv's ciphertext to the engine (bytes counts
+     * ciphertext, not plaintext); the driver handshakes / decrypts. read_buf holds
+     * plaintext and is written by comp_tls_drive, not here. */
+    if (c->tls) { comp_tls_drive(s, c); return; }
     c->read_len += ev->bytes;
     /* Body reads use a fresh sliding window (read_len was reset to 0 before the
      * post), so read_len == the bytes just received. Headers accumulate. */
