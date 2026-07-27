@@ -303,7 +303,17 @@ a future io_uring-completion / POSIX-AIO backend. Staged **8b-0** (extract the
 platform-independent completion axis from 8a's driver — pure refactor) → **8b-1**
 bodies → **8b-2** files (`TransmitFile`) → **8b-3** streaming → **8b-4** UDP →
 **8b-5** TLS (buffered BIO; deepest, last). Grep-assertable litmus enforces both
-axes; TLS is the crux/stop-condition.
+axes; TLS is the crux/stop-condition. *Increment 8b-0 — extract the
+platform-independent completion axis — done:* `src/completion.h` (the abstract axis
+— `KlCompletionEvent` + `kl_comp_post_recv`/`_send`/`_accept`/`kl_comp_drain`, no
+Win32 type) and `src/completion_driver.c` (the generic connection driver, defining
+`kl_io_engine_run_completion` over the model-blind core, zero code-level Win32/IOCP
+symbols). `event_iocp.c` reduced to the IOCP *implementation* of `completion.h`
+(port, `OVERLAPPED` pool, `AcceptEx`/`WSARecv`/`WSASend`, GQCS drain, partial-send
+handled internally). Makefile links `completion_driver.c` on completion backends
+(io_engine.c stub elsewhere). POSIX byte-identical (55 suites); MinGW `BACKEND=iocp`
+links both TUs (no double-def); the HTTP-over-IOCP smoke stays green — proving the
+axis is a faithful refactor that a future io_uring-completion/AIO backend can reuse.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
