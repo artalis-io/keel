@@ -342,6 +342,20 @@ response code, no `include/keel/*.h` (axis 1); no Win32 symbol in the driver
 (axis 2). Scope: synchronous streams; async/long-lived streams and true *overlapped*
 chunk sends (vs the synchronous send used here) are a later refinement.
 
+**Phase 8b-4 (UDP over the completion loop) designed** in
+`docs/phase8b4_udp_completion_design.md`. `KlUdp` is readiness/watcher-based, so this
+generalizes the completion axis (`KlCompletionEvent` gains a `void *target` +
+`UDP_RECV/UDP_SEND` kinds; one shared `kl_comp_run` tick routes conn *and* datagram
+completions, recovering the server via `containerof(c->ctx, KlServer, ev)` — no
+public field) and the run model (`kl_event_ctx_run` gains a completion branch so
+*standalone* `KlUdp`/DNS runs on a completion loop, not just a `udp_server` sharing
+the TCP loop). `KlUdp` picks readiness-watcher vs `WSARecvFrom`/overlapped-`WSASendTo`
+by `kl_event_caps`; the datagram delivery core is lifted model-blind so `on_recv` is
+fed identical bytes. Orthogonality held: readiness path untouched, `KlUdp` public API
+untouched (no `include/keel/*.h` change), `WSA*`/`OVERLAPPED` only in `event_iocp.c`.
+Staged 8b-4a (generalize axis, pure refactor) → 8b-4b (`kl_event_ctx_run` branch) →
+8b-4c (UDP recv) → 8b-4d (overlapped UDP send).
+
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
 
