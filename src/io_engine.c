@@ -21,3 +21,10 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
     (void)ctx; (void)max; (void)timeout_ms;
     return -1;   /* unreachable on readiness builds */
 }
+
+/* Stub for the UDP-recv completion post — udp.c only calls it on a completion loop,
+ * which no readiness backend advertises. Real primitive lives in event_iocp.c. */
+int kl_comp_post_udp_recv(struct KlUdp *udp) {
+    (void)udp;
+    return -1;   /* unreachable on readiness builds */
+}

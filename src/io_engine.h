@@ -19,6 +19,7 @@
 
 struct KlServer;
 struct KlEventCtx;
+struct KlUdp;
 
 /* Run one completion-loop tick for the server: prime accepts, then drive one
  * generic tick over its event ctx. Returns 0 to continue the run loop, <0 to stop. */
@@ -32,5 +33,11 @@ int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms);
  * io_engine.c stub is linked on readiness builds and never called (no readiness
  * backend advertises COMPLETION). Returns events processed (>= 0), or -1. */
 int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
+
+/* Post one overlapped datagram receive for a UDP socket on a completion loop (into
+ * udp->recv_buf). Called by udp.c (shared) on a completion loop, so — like
+ * kl_comp_run — it is declared here and stubbed in io_engine.c on non-completion
+ * builds (never reached there); the real primitive lives in event_iocp.c. */
+int kl_comp_post_udp_recv(struct KlUdp *udp);
 
 #endif /* KEEL_SRC_IO_ENGINE_H */

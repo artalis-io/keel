@@ -363,7 +363,16 @@ branch (`if COMPLETION → kl_comp_run(ctx)`, stubbed in io_engine.c on non-comp
 builds, real in completion_driver.c) — dead on readiness backends (byte-identical),
 so standalone `KlEventCtx` consumers (UDP/DNS, 8b-4c) can run on a completion loop
 with no `#ifdef` in shared code. Both POSIX byte-identical (55 suites); MinGW links
-BACKEND=iocp (one `kl_comp_run` def) + WSAPoll (stub) + TCP smoke.
+BACKEND=iocp (one `kl_comp_run` def) + WSAPoll (stub) + TCP smoke. *8b-4c done:* UDP
+**recv** over completion — `KlUdp.recv_start` branches on `kl_event_caps` (readiness
+watcher path untouched; completion associates the socket + posts `kl_comp_post_udp_recv`).
+The IOCP backend's `WSARecvFrom` completion surfaces a `KL_COMP_UDP_RECV` event; the
+generic driver routes it to `kl_udp_comp_on_recv`, which delivers via the *existing*
+model-blind `kl_udp_deliver` (identical to the readiness `recvmsg` path — `on_recv`
+fed identical bytes) and re-posts. `kl_comp_post_udp_recv` is shared-called (udp.c),
+so it's stubbed in io_engine.c like `kl_comp_run`. `smoke_iocp.c` adds a UDP-echo
+roundtrip. Axis 1: no `KlUdp`/`include/keel/*.h` change; axis 2: 0 Win32 symbols in
+`udp.c`/`completion_driver.c`; POSIX byte-identical. Overlapped UDP **send** is 8b-4d.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
