@@ -25,6 +25,7 @@ static void nap_ms(int ms) { Sleep(ms); }
 #define SMOKE_POST "hello-over-iocp-body"
 #define SMOKE_FILE "file-body-served-over-iocp-via-transmitfile"
 #define SMOKE_FILE_PATH "smoke_iocp_file.tmp"
+#define SMOKE_STREAM "chunk-one;chunk-two"   /* two chunks, dechunked by the client */
 
 static void handle_ok(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -53,6 +54,18 @@ static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_file(res, (KlSocketHandle)fd, (off_t)size);
 }
 
+/* GET /stream — a synchronous chunked stream produced during the handler
+ * (KL_BODY_STREAM over IOCP, 8b-3). */
+static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    KlWriteFn write = NULL;
+    void *wctx = NULL;
+    if (kl_response_begin_stream(res, 200, &write, &wctx) < 0) return;
+    write(wctx, "chunk-one;", 10);
+    write(wctx, "chunk-two", 9);
+    kl_response_end_stream(res);
+}
+
 static KlServer g_srv;
 
 static void *server_thread(void *arg) {
@@ -72,6 +85,7 @@ int main(void) {
     kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
     kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
     kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
+    kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
 
     /* Write the file the /file route serves. */
     int wfd = _open(SMOKE_FILE_PATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
@@ -154,6 +168,27 @@ int main(void) {
         }
     }
 
+    /* GET /stream — exercise the chunked/streaming path (KL_BODY_STREAM over IOCP,
+     * 8b-3). The client dechunks; the body is the concatenated chunks. */
+    int stream_ok = 0;
+    if (ok && post_ok && file_ok) {
+        KlClientResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        int rc = kl_client_request(&alloc, &ccfg, "GET",
+                                   "http://127.0.0.1:18082/stream",
+                                   NULL, 0, NULL, 0, &resp);
+        if (rc == 0) {
+            stream_ok = (resp.status == 200 &&
+                         resp.body_len == sizeof(SMOKE_STREAM) - 1 &&
+                         resp.body &&
+                         memcmp(resp.body, SMOKE_STREAM, sizeof(SMOKE_STREAM) - 1) == 0);
+            last_status = resp.status;
+            kl_client_response_free(&resp);
+        } else {
+            last_rc = rc;
+        }
+    }
+
     kl_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_server_free(&g_srv);
@@ -174,6 +209,11 @@ int main(void) {
                 last_rc, last_status);
         return 1;
     }
-    printf("smoke-iocp: HTTP-over-IOCP roundtrip OK (GET + POST body + file)\n");
+    if (!stream_ok) {
+        fprintf(stderr, "smoke-iocp: GET/stream (chunked) roundtrip FAILED (rc=%d status=%d)\n",
+                last_rc, last_status);
+        return 1;
+    }
+    printf("smoke-iocp: HTTP-over-IOCP roundtrip OK (GET + POST body + file + stream)\n");
     return 0;
 }

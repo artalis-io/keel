@@ -49,10 +49,36 @@ static void comp_start_body_read(struct KlServer *s, KlConn *c) {
     if (kl_comp_post_recv(c) < 0) comp_close(s, c);
 }
 
+/* Chunked/streaming response (KL_BODY_STREAM) over the completion loop. The
+ * streaming write path (kl_response_send → drain / kl_stream_write) routes through
+ * the socket seam, which on a completion backend is a synchronous send on the
+ * (blocking) accepted socket — so a fully-produced stream is already sent, and any
+ * drained remainder is flushed here. Then complete like any response.
+ *
+ * Scope: synchronous streams (the handler produces the whole body during dispatch).
+ * Async / long-lived streams (data over later events) are not driven over the
+ * completion loop in this subset. NOTE: the sends are synchronous — a slow client
+ * can head-of-line block; true overlapped chunk sends are a later refinement. This
+ * reuses only the existing internal kl_response_send (no platform symbol). */
+static void comp_send_stream(struct KlServer *s, KlConn *c) {
+    int r;
+    do { r = kl_response_send(&c->res); } while (r == 1 && c->res.stream_ended);
+    if (r < 0) { comp_close(s, c); return; }
+    KlConnState st = kl_conn_send_complete(c);
+    if (st == KL_CONN_READING) {
+        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+    } else {
+        comp_close(s, c);
+    }
+}
+
 /* Act on the state a completed request produced. */
 static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
     if (st == KL_CONN_SENDING) {
-        if (comp_send_response(c) < 0) comp_close(s, c);
+        if (c->res.body_mode == KL_BODY_STREAM)
+            comp_send_stream(s, c);
+        else if (comp_send_response(c) < 0)
+            comp_close(s, c);
     } else if (st == KL_CONN_READING_BODY) {
         comp_start_body_read(s, c);
     } else {
