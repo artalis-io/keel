@@ -14,6 +14,7 @@
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv over completion (8b-4c) */
+#include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext (8b-5b) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "completion.h"          /* the abstract axis this TU implements */
@@ -39,8 +40,14 @@ typedef struct {
 
 typedef enum {
     KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE,
-    KL_IOCP_UDP_RECV, KL_IOCP_UDP_SEND
+    KL_IOCP_UDP_RECV, KL_IOCP_UDP_SEND,
+    KL_IOCP_TLS_RECV                            /* WSARecv ciphertext for a TLS conn (8b-5b) */
 } KlIocpOpType;
+
+/* One overlapped TLS ciphertext read: a whole TLS record (~16 KiB max) plus a
+ * little header/MAC slack. The engine's input ring reassembles across recvs, so
+ * this only bounds one WSARecv, not a record. */
+#define KL_IOCP_CIPHER_SIZE (17u * 1024u)
 
 /* One in-flight overlapped op. `ov` MUST be first (CONTAINING_RECORD round-trip). */
 typedef struct {
@@ -140,17 +147,34 @@ static KlIocpState *state_of(KlConn *c) {
 
 int kl_comp_post_recv(KlConn *c) {
     (void)state_of(c);   /* the socket is already associated with the port */
-    size_t space = c->read_cap - c->read_len;
-    if (space == 0) return -1;   /* headers overflowed the buffer */
 
     KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
-    op->type = KL_IOCP_READ;
     op->alloc = c->alloc;
     op->conn = c;
 
-    WSABUF buf = { (ULONG)space, c->read_buf + c->read_len };
+    WSABUF buf;
+    if (c->tls) {
+        /* TLS: read raw ciphertext into a transient op buffer (kept in sendbuf so
+         * iocp_op_free reclaims it). read_buf holds *decrypted plaintext*, which
+         * accumulates across records for headers — it must not be clobbered by an
+         * inbound ciphertext read. kl_comp_drain feeds this buffer to the engine
+         * (tls->feed_input) before freeing the op. */
+        op->type = KL_IOCP_TLS_RECV;
+        op->send_total = KL_IOCP_CIPHER_SIZE;
+        op->sendbuf = kl_malloc(c->alloc, KL_IOCP_CIPHER_SIZE);
+        if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
+        buf.len = (ULONG)KL_IOCP_CIPHER_SIZE;
+        buf.buf = op->sendbuf;
+    } else {
+        size_t space = c->read_cap - c->read_len;
+        if (space == 0) { iocp_op_free(op); return -1; }   /* headers overflowed */
+        op->type = KL_IOCP_READ;
+        buf.len = (ULONG)space;
+        buf.buf = c->read_buf + c->read_len;
+    }
+
     DWORD flags = 0, received = 0;
     int rc = WSARecv((SOCKET)c->fd, &buf, 1, &received, &flags, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
@@ -378,6 +402,23 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_READ;
             out[count].target = op->conn;
+            out[count].bytes = bytes;
+            out[count].ok = 1;
+            count++;
+            iocp_op_free(op);
+        } else if (op->type == KL_IOCP_TLS_RECV) {
+            /* Hand the received ciphertext to the TLS engine via the public
+             * feed_input op (backend-agnostic — no mbedTLS knowledge here), then
+             * surface a plain READ event. The driver owns all TLS protocol logic
+             * (handshake / decrypt / encrypt); the buffer is consumed here so the
+             * op — which carries it in sendbuf — can be freed immediately. bytes==0
+             * means the peer closed: surface it so the driver tears down. */
+            KlConn *c = op->conn;
+            if (bytes > 0 && c->tls->feed_input)
+                c->tls->feed_input(c->tls, op->sendbuf, (size_t)bytes);
+            memset(&out[count], 0, sizeof(out[count]));
+            out[count].kind = KL_COMP_READ;
+            out[count].target = c;
             out[count].bytes = bytes;
             out[count].ok = 1;
             count++;
