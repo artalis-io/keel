@@ -29,9 +29,12 @@ typedef enum { KL_COMP_ACCEPT, KL_COMP_READ, KL_COMP_WRITE } KlCompKind;
 
 /* One finished async op, handed from a completion backend to the generic driver.
  * The backend has already done any platform post-processing (address extraction,
- * partial-write re-posting) — the driver sees only high-level, completed events. */
+ * partial-write re-posting) — the driver sees only high-level, completed events.
+ * `target` is the consumer the event belongs to, disambiguated by `kind`:
+ * KlConn* for READ/WRITE; UDP kinds (8b-4c/d) will use KlUdp*. ACCEPT carries no
+ * target (the generic tick recovers the server from its KlEventCtx). */
 typedef struct {
-    KlConn        *conn;       /* READ / WRITE */
+    void          *target;     /* KlConn* (READ/WRITE) — a KlUdp* for UDP kinds */
     KlCompKind     kind;
     size_t         bytes;      /* transferred (READ / WRITE) */
     int            ok;         /* 0 = failed / peer-closed */
@@ -40,12 +43,25 @@ typedef struct {
     socklen_t      peer_len;                 /* ACCEPT: 0 if unavailable */
 } KlCompletionEvent;
 
+struct KlEventCtx;
+
+/* ── Generic completion tick (platform-independent, completion_driver.c) ── */
+
+/* Drain the ctx's completion loop and route each finished op to its consumer
+ * (connection driver / — 8b-4c — datagram). One tick, shared by the server run loop
+ * and the standalone kl_event_ctx_run. Returns events processed (>= 0), or -1. */
+int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
+
 /* ── Backend contract (implemented once per completion platform) ──────── */
 
-/* Drain up to `max` finished ops into `out`, waiting at most `timeout_ms`. On the
- * first call the backend primes its accept backlog (server-scoped). Returns the
- * number of events (>= 0), or -1 on a fatal loop error. */
-int kl_comp_drain(struct KlServer *s, KlCompletionEvent *out, int max, int timeout_ms);
+/* Drain up to `max` finished ops into `out`, waiting at most `timeout_ms`. Server-
+ * agnostic (keyed on the ctx's loop); accept priming is separate (kl_comp_prime).
+ * Returns the number of events (>= 0), or -1 on a fatal loop error. */
+int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms);
+
+/* Prime the server's accept backlog on its completion loop (idempotent — the backend
+ * latches after the first call). Server-scoped; keeps kl_comp_drain server-agnostic. */
+int kl_comp_prime_accepts(struct KlServer *s);
 
 /* Post one async receive into c->read_buf (headers/body phase). */
 int kl_comp_post_recv(KlConn *c);

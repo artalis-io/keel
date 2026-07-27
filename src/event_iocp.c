@@ -32,6 +32,7 @@ typedef struct {
     LPFN_GETACCEPTEXSOCKADDRS get_sockaddrs;
     int                       started;
     int                       accept_family;
+    SOCKET                    listen_fd;   /* stored at prime — drain is ctx-scoped */
     KlAllocator              *alloc;
 } KlIocpState;
 
@@ -242,9 +243,16 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
 }
 
 /* First-drain setup: load the extension fn pointers off the listen socket, learn
- * its address family, prime the accept backlog. */
-static int iocp_start(struct KlServer *s, KlIocpState *st) {
+ * its address family, store it, and prime the accept backlog. Idempotent — latches
+ * on st->started so the server may call it every tick. Server-scoped (needs the
+ * listen socket); keeps kl_comp_drain ctx-scoped/server-agnostic. */
+int kl_comp_prime_accepts(struct KlServer *s) {
+    KlIocpState *st = s->ev.loop._backend;
+    if (st->started)
+        return 0;
+
     SOCKET lst = (SOCKET)s->listen_fd;
+    st->listen_fd = lst;
     GUID g_accept = WSAID_ACCEPTEX;
     GUID g_addrs  = WSAID_GETACCEPTEXSOCKADDRS;
     DWORD b = 0;
@@ -261,6 +269,7 @@ static int iocp_start(struct KlServer *s, KlIocpState *st) {
     if (getsockname(lst, (struct sockaddr *)&sa, &salen) == 0)
         st->accept_family = sa.ss_family;
 
+    st->started = 1;
     for (int i = 0; i < KL_IOCP_ACCEPT_BACKLOG; i++) {
         if (kl_comp_post_accept(s) < 0)
             return (i == 0) ? -1 : 0;
@@ -268,12 +277,8 @@ static int iocp_start(struct KlServer *s, KlIocpState *st) {
     return 0;
 }
 
-int kl_comp_drain(struct KlServer *s, KlCompletionEvent *out, int max, int timeout_ms) {
-    KlIocpState *st = s->ev.loop._backend;
-    if (!st->started) {
-        if (iocp_start(s, st) < 0) return -1;
-        st->started = 1;
-    }
+int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
+    KlIocpState *st = ctx->loop._backend;
 
     OVERLAPPED_ENTRY entries[64];
     ULONG got = 0;
@@ -289,7 +294,7 @@ int kl_comp_drain(struct KlServer *s, KlCompletionEvent *out, int max, int timeo
         DWORD bytes = entries[i].dwNumberOfBytesTransferred;
 
         if (op->type == KL_IOCP_ACCEPT) {
-            SOCKET lst = (SOCKET)s->listen_fd;
+            SOCKET lst = st->listen_fd;
             setsockopt(op->accept_sock, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
                        (char *)&lst, sizeof(lst));
             struct sockaddr *local = NULL, *remote = NULL;
@@ -309,7 +314,7 @@ int kl_comp_drain(struct KlServer *s, KlCompletionEvent *out, int max, int timeo
         } else if (op->type == KL_IOCP_READ) {
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_READ;
-            out[count].conn = op->conn;
+            out[count].target = op->conn;
             out[count].bytes = bytes;
             out[count].ok = 1;
             count++;
@@ -326,7 +331,7 @@ int kl_comp_drain(struct KlServer *s, KlCompletionEvent *out, int max, int timeo
                 if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
                     memset(&out[count], 0, sizeof(out[count]));
                     out[count].kind = KL_COMP_WRITE;
-                    out[count].conn = op->conn;
+                    out[count].target = op->conn;
                     out[count].ok = 0;
                     count++;
                     iocp_op_free(op);
@@ -335,7 +340,7 @@ int kl_comp_drain(struct KlServer *s, KlCompletionEvent *out, int max, int timeo
             }
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WRITE;
-            out[count].conn = op->conn;
+            out[count].target = op->conn;
             out[count].bytes = bytes;
             out[count].ok = (bytes > 0);
             count++;
@@ -344,7 +349,7 @@ int kl_comp_drain(struct KlServer *s, KlCompletionEvent *out, int max, int timeo
                   * surface it as a completed write. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WRITE;
-            out[count].conn = op->conn;
+            out[count].target = op->conn;
             out[count].bytes = bytes;
             out[count].ok = (bytes > 0);
             count++;
