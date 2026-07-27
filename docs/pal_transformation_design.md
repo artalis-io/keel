@@ -374,6 +374,22 @@ so it's stubbed in io_engine.c like `kl_comp_run`. `smoke_iocp.c` adds a UDP-ech
 roundtrip. Axis 1: no `KlUdp`/`include/keel/*.h` change; axis 2: 0 Win32 symbols in
 `udp.c`/`completion_driver.c`; POSIX byte-identical. Overlapped UDP **send** is 8b-4d. *8b-4d done:* `kl_udp_send_to` on a completion loop posts an overlapped `WSASendTo` (plain sends; source-pinned/TOS fall through to the synchronous seam path). Backpressure reuses `q_bytes` as outstanding-overlapped bytes (the readiness send queue is idle on this loop — no public field added); `on_drain` fires when the last in-flight send completes (`kl_udp_comp_on_send`, off a `KL_COMP_UDP_SEND` event). `kl_comp_post_udp_send` (`WSASendTo`) lives only in `event_iocp.c`; stubbed in io_engine.c for non-completion builds. The UDP-echo smoke now exercises the overlapped reply. Axis 1: `KlUdp`/`on_drain`/`max_send_queue` semantics unchanged, no `include/keel/*.h` change; axis 2: 0 Win32 symbols in `udp.c`/`completion_driver.c`. **Phase 8b-4 (UDP over completion) complete.**
 
+**Phase 8b-5 (TLS over the completion loop) designed** in
+`docs/phase8b5_tls_completion_design.md` — the flagged crux. `KlTls` does its socket
+I/O internally (synchronous BIO), so completion TLS inverts the transport: the "feed
+me bytes" approach. `read`/`write`/`handshake`/`pending`/`shutdown` are **reused
+unchanged**; only two **optional, nullable** vtable ops are added — `feed_input`
+(ciphertext in) / `drain_output` (ciphertext out) — following the existing
+`alpn_protocol`/`peer_cert` optional-op precedent (additive, non-breaking; a backend
+that omits them, and every readiness loop, is byte-identical). mbedTLS implements them
+via a memory-BIO mode; the completion driver adds an encrypt/decrypt leg (all through
+the vtable — no mbedTLS symbol, no Win32 outside `event_iocp.c`) around the *same*
+model-blind plaintext core. Staged 8b-5a (ops + memory BIO, POSIX/local-mbedTLS
+testable) → 8b-5b (driver TLS leg + smoke). **Honest gap:** mbedTLS is BYO/out-of-CI,
+so the Windows-IOCP TLS *runtime* is not CI-gated (as the mbedTLS backend already
+isn't) — validated by a local mbedTLS unit test + MinGW compile-gate + a local/hull
+`KEEL_TLS=mbedtls` smoke.
+
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
 
