@@ -8,6 +8,8 @@
  * CI job is its oracle. Mirrors smoke_tcp.c, with the server pinned to the IOCP
  * completion axis. GET only — request bodies over IOCP are a later increment.
  */
+#include <winsock2.h>   /* raw UDP client (socket/sendto/recvfrom) — before windows.h */
+#include <ws2tcpip.h>
 #include <keel/keel.h>
 #include "../src/socket.h"   /* internal kl_socket_provider_iocp() */
 
@@ -17,6 +19,9 @@
 #include <windows.h>
 #include <io.h>       /* _open / _lseek / _write */
 #include <fcntl.h>    /* _O_* */
+
+#define SMOKE_UDP_PORT 18083
+#define SMOKE_UDP "udp-echo-over-iocp"
 
 static void nap_ms(int ms) { Sleep(ms); }
 
@@ -66,6 +71,17 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_end_stream(res);
 }
 
+/* UDP echo over the IOCP completion loop (8b-4c): a KlUdp on the server's ctx
+ * receives via WSARecvFrom completions and echoes each datagram back to its source
+ * (synchronous sendto — overlapped UDP send is 8b-4d). */
+static KlUdp g_udp;
+static void udp_echo(KlUdp *udp, const void *data, size_t len,
+                     const struct sockaddr *src, socklen_t src_len,
+                     const struct sockaddr *local, socklen_t local_len, void *ud) {
+    (void)local; (void)local_len; (void)ud;
+    kl_udp_send_to(udp, data, len, src, src_len);
+}
+
 static KlServer g_srv;
 
 static void *server_thread(void *arg) {
@@ -96,6 +112,13 @@ int main(void) {
         return 1;
     }
     _close(wfd);
+
+    /* UDP echo on the same IOCP loop (recv via WSARecvFrom completions, 8b-4c). */
+    KlUdpConfig ucfg = { .ctx = &g_srv.ev, .bind_addr = "127.0.0.1",
+                         .bind_port = SMOKE_UDP_PORT };
+    int udp_ready = (kl_udp_init(&g_udp, &ucfg) == 0 &&
+                     kl_udp_recv_start(&g_udp, udp_echo, NULL) == 0);
+    if (!udp_ready) fprintf(stderr, "smoke-iocp: udp init/recv_start failed\n");
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
@@ -189,6 +212,35 @@ int main(void) {
         }
     }
 
+    /* UDP echo roundtrip — a raw datagram client hits the KlUdp on the IOCP loop. */
+    int udp_ok = 0;
+    if (ok && post_ok && file_ok && stream_ok && udp_ready) {
+        SOCKET cs = socket(AF_INET, SOCK_DGRAM, 0);
+        if (cs != INVALID_SOCKET) {
+            DWORD tmo = 500;
+            setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, (char *)&tmo, sizeof(tmo));
+            struct sockaddr_in to;
+            memset(&to, 0, sizeof(to));
+            to.sin_family = AF_INET;
+            to.sin_port = htons(SMOKE_UDP_PORT);
+            inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+            for (int i = 0; i < 20 && !udp_ok; i++) {
+                sendto(cs, SMOKE_UDP, sizeof(SMOKE_UDP) - 1, 0,
+                       (struct sockaddr *)&to, sizeof(to));
+                char rb[64];
+                int n = recvfrom(cs, rb, sizeof(rb), 0, NULL, NULL);
+                if (n == (int)(sizeof(SMOKE_UDP) - 1) &&
+                    memcmp(rb, SMOKE_UDP, (size_t)n) == 0)
+                    udp_ok = 1;
+                else
+                    nap_ms(50);
+            }
+            closesocket(cs);
+        }
+    }
+
+    kl_udp_recv_stop(&g_udp);
+    kl_udp_free(&g_udp);
     kl_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_server_free(&g_srv);
@@ -214,6 +266,10 @@ int main(void) {
                 last_rc, last_status);
         return 1;
     }
-    printf("smoke-iocp: HTTP-over-IOCP roundtrip OK (GET + POST body + file + stream)\n");
+    if (!udp_ok) {
+        fprintf(stderr, "smoke-iocp: UDP echo (WSARecvFrom) roundtrip FAILED\n");
+        return 1;
+    }
+    printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + stream + UDP)\n");
     return 0;
 }

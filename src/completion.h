@@ -25,7 +25,10 @@
 struct KlServer;
 
 /* Platform-independent completion op kinds. */
-typedef enum { KL_COMP_ACCEPT, KL_COMP_READ, KL_COMP_WRITE } KlCompKind;
+typedef enum {
+    KL_COMP_ACCEPT, KL_COMP_READ, KL_COMP_WRITE,   /* TCP conn (target = KlConn*) */
+    KL_COMP_UDP_RECV                               /* datagram (target = KlUdp*) */
+} KlCompKind;
 
 /* One finished async op, handed from a completion backend to the generic driver.
  * The backend has already done any platform post-processing (address extraction,
@@ -39,8 +42,9 @@ typedef struct {
     size_t         bytes;      /* transferred (READ / WRITE) */
     int            ok;         /* 0 = failed / peer-closed */
     KlSocketHandle accepted_fd;              /* ACCEPT: the new socket */
-    struct sockaddr_storage peer;            /* ACCEPT: filled by the backend */
-    socklen_t      peer_len;                 /* ACCEPT: 0 if unavailable */
+    void          *buf;                      /* UDP_RECV: the datagram buffer */
+    struct sockaddr_storage peer;            /* ACCEPT peer / UDP_RECV source addr */
+    socklen_t      peer_len;                 /* 0 if unavailable */
 } KlCompletionEvent;
 
 struct KlEventCtx;

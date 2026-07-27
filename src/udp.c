@@ -8,6 +8,8 @@
 #include "socket.h"   /* sockaddr / getaddrinfo / inet_ntop / ntohs via sockcompat.h */
 #include "udp_internal.h"
 #include "udp_io.h"
+#include "event_caps.h"   /* kl_event_caps — pick readiness vs completion recv */
+#include "io_engine.h"    /* kl_comp_post_udp_recv (completion loop) */
 
 /* Some platforms spell the IPv6 group ops the "membership" way. */
 #if !defined(IPV6_JOIN_GROUP) && defined(IPV6_ADD_MEMBERSHIP)
@@ -329,12 +331,38 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
      * where mmsg batching applies. Failure just leaves rx_batch NULL → the
      * per-datagram path is used; a no-op where batching is unavailable. */
     kl_udp_io_rx_batch_init(udp);
+
+    /* Completion loop (IOCP): a readiness watcher never fires here — associate the
+     * socket with the port and post an overlapped WSARecvFrom instead (8b-4c). The
+     * completion driver re-posts after each datagram via kl_udp_comp_on_recv. */
+    if (kl_event_caps(&udp->ctx->loop) & KL_EVENT_CAP_COMPLETION) {
+        if (kl_event_add(&udp->ctx->loop, udp->fd, KL_EVENT_READ, udp) < 0 ||
+            kl_comp_post_udp_recv(udp) < 0) {
+            udp->recv_active = 0;
+            udp->last_error = KL_ERR_IO;
+            return -1;
+        }
+        return 0;
+    }
+
     kl_udp_update_interest(udp);
     if (!(udp->want_mask & KL_EVENT_READ)) {   /* watcher registration failed */
         udp->recv_active = 0;
         return -1;
     }
     return 0;
+}
+
+/* Completion-loop datagram receive (8b-4c): deliver the finished WSARecvFrom via the
+ * model-blind kl_udp_deliver (identical to the readiness recvmsg path), then re-post
+ * the next receive. gro_seg 0 — GRO coalescing is a readiness/Linux offload. */
+void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
+                         struct sockaddr *src, socklen_t src_len) {
+    if (!udp->recv_active || !kl_handle_valid(udp->fd))
+        return;
+    kl_udp_deliver(udp, buf, len, 0, src, src_len, NULL, 0);
+    if (udp->recv_active && kl_handle_valid(udp->fd))
+        (void)kl_comp_post_udp_recv(udp);   /* arm the next datagram */
 }
 
 void kl_udp_recv_stop(KlUdp *udp) {

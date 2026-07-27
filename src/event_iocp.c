@@ -13,6 +13,7 @@
 #include <keel/event.h>
 #include <keel/server.h>
 #include <keel/connection.h>
+#include <keel/udp.h>            /* KlUdp — datagram recv over completion (8b-4c) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "completion.h"          /* the abstract axis this TU implements */
@@ -36,7 +37,9 @@ typedef struct {
     KlAllocator              *alloc;
 } KlIocpState;
 
-typedef enum { KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE } KlIocpOpType;
+typedef enum {
+    KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE, KL_IOCP_UDP_RECV
+} KlIocpOpType;
 
 /* One in-flight overlapped op. `ov` MUST be first (CONTAINING_RECORD round-trip). */
 typedef struct {
@@ -44,8 +47,11 @@ typedef struct {
     KlIocpOpType  type;
     KlAllocator  *alloc;
     KlConn       *conn;                        /* READ / WRITE */
+    KlUdp        *udp;                          /* UDP_RECV */
     SOCKET        accept_sock;                 /* ACCEPT */
     char          accept_buf[2 * KL_IOCP_ADDR_LEN];  /* ACCEPT: local+remote addr */
+    struct sockaddr_storage src;               /* UDP_RECV: source addr (WSARecvFrom) */
+    int           src_len;                     /* UDP_RECV: source addr length */
     char         *sendbuf;                     /* WRITE: contiguous response copy */
     size_t        send_total, send_done;       /* WRITE: partial-send tracking */
 } KlIocpOp;
@@ -242,6 +248,30 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
     return 0;
 }
 
+/* Post one overlapped WSARecvFrom for a UDP socket on the completion loop (8b-4c).
+ * Receives into the socket's own recv buffer and captures the source address; the
+ * completion surfaces a KL_COMP_UDP_RECV event. */
+int kl_comp_post_udp_recv(KlUdp *udp) {
+    KlIocpState *st = udp->ctx->loop._backend;
+    KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
+    if (!op) return -1;
+    memset(op, 0, sizeof(*op));
+    op->type = KL_IOCP_UDP_RECV;
+    op->alloc = st->alloc;
+    op->udp = udp;
+    op->src_len = (int)sizeof(op->src);
+
+    WSABUF buf = { (ULONG)udp->recv_buf_size, (char *)udp->recv_buf };
+    DWORD flags = 0, recvd = 0;
+    int rc = WSARecvFrom((SOCKET)udp->fd, &buf, 1, &recvd, &flags,
+                         (struct sockaddr *)&op->src, &op->src_len, &op->ov, NULL);
+    if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+        iocp_op_free(op);
+        return -1;
+    }
+    return 0;
+}
+
 /* First-drain setup: load the extension fn pointers off the listen socket, learn
  * its address family, store it, and prime the accept backlog. Idempotent — latches
  * on st->started so the server may call it every tick. Server-scoped (needs the
@@ -343,6 +373,19 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
             out[count].target = op->conn;
             out[count].bytes = bytes;
             out[count].ok = (bytes > 0);
+            count++;
+            iocp_op_free(op);
+        } else if (op->type == KL_IOCP_UDP_RECV) {
+            memset(&out[count], 0, sizeof(out[count]));
+            out[count].kind = KL_COMP_UDP_RECV;
+            out[count].target = op->udp;
+            out[count].bytes = bytes;
+            out[count].ok = 1;
+            out[count].buf = op->udp->recv_buf;
+            if (op->src_len > 0 && (size_t)op->src_len <= sizeof(out[count].peer)) {
+                memcpy(&out[count].peer, &op->src, (size_t)op->src_len);
+                out[count].peer_len = (socklen_t)op->src_len;
+            }
             count++;
             iocp_op_free(op);
         } else { /* KL_IOCP_SENDFILE — TransmitFile completes as a unit (head+file);
