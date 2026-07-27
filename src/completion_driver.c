@@ -81,8 +81,10 @@ static void comp_send_stream(struct KlServer *s, KlConn *c) {
 
 /* TLS-over-completion output. In completion mode the mbedTLS BIO writes outgoing
  * ciphertext into an in-memory ring (drain_output) rather than the socket; push that
- * ciphertext out with a synchronous send on the (blocking) accepted socket. Bounded
- * by the response size — same head-of-line caveat as comp_send_stream. */
+ * ciphertext out with a synchronous send on the (blocking) accepted socket. Used for
+ * bounded, latency-insensitive handshake records — the client is actively handshaking,
+ * not slow-reading — so no overlapped send is warranted. Response bodies go out
+ * overlapped (comp_tls_send_response) to avoid any head-of-line stall. */
 static int comp_tls_flush(KlConn *c) {
     const KlSocketProvider *sp = c->ctx ? c->ctx->sockets : NULL;
     unsigned char buf[KL_TLS_FLUSH_CHUNK];
@@ -98,22 +100,53 @@ static int comp_tls_flush(KlConn *c) {
     return (n < 0) ? -1 : 0;
 }
 
-/* Encrypt `len` plaintext bytes (tls->write appends ciphertext to the ring) and push
- * the produced ciphertext out. WANT_WRITE (w==0) means the ring hit its cap — flush to
- * make room and retry. */
-static int comp_tls_write(KlConn *c, const void *data, size_t len) {
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = c->tls->write(c->tls, c->fd, (const char *)data + off, len - off);
-        if (w < 0) return -1;
-        if (w == 0) { if (comp_tls_flush(c) < 0) return -1; continue; }
-        off += (size_t)w;
+/* Encrypt the whole plaintext response into one heap ciphertext buffer via the memory
+ * BIO, draining the engine's out ring as it fills (so a response larger than the ring
+ * cap is handled). On success returns 0 with out, outlen and outcap set — the caller
+ * frees the buffer (outlen bytes used, outcap allocated); on error frees any partial
+ * buffer and returns -1. */
+static int comp_tls_encrypt_all(KlConn *c, const KlIoVec *iov, int n,
+                                unsigned char **out, size_t *outlen, size_t *outcap) {
+    unsigned char *buf = NULL;
+    size_t cap = 0, len = 0;
+
+    for (int i = 0; i < n; i++) {
+        size_t off = 0;
+        while (off < iov[i].len) {
+            ssize_t w = c->tls->write(c->tls, c->fd,
+                                      (const char *)iov[i].base + off, iov[i].len - off);
+            if (w < 0) goto fail;
+            if (w > 0) off += (size_t)w;
+            /* Drain the ciphertext this write produced (also frees ring space, so a
+             * WANT_WRITE — w==0, ring at cap — makes progress on the next iteration). */
+            for (;;) {
+                if (len == cap) {
+                    size_t ncap = cap ? cap * 2 : 8192;
+                    unsigned char *nb = kl_realloc(c->alloc, buf, cap, ncap);
+                    if (!nb) goto fail;
+                    buf = nb;
+                    cap = ncap;
+                }
+                ssize_t d = c->tls->drain_output(c->tls, buf + len, cap - len);
+                if (d < 0) goto fail;
+                if (d == 0) break;
+                len += (size_t)d;
+            }
+        }
     }
-    return comp_tls_flush(c);
+    *out = buf;
+    *outlen = len;
+    *outcap = cap;
+    return 0;
+fail:
+    kl_free(c->alloc, buf, cap);
+    return -1;
 }
 
-/* Encrypt + synchronously send a buffered response, then complete (keep-alive or
- * close). TLS file/stream bodies over the completion loop are out of this subset. */
+/* Encrypt a buffered response and post the ciphertext as a single overlapped send.
+ * Completion arrives as KL_COMP_WRITE → comp_on_write → send_complete (keep-alive or
+ * close), so a slow client never blocks the loop. TLS file/stream bodies over the
+ * completion loop are out of this subset. */
 static void comp_tls_send_response(struct KlServer *s, KlConn *c) {
     if (c->res.body_mode == KL_BODY_STREAM || c->res.body_mode == KL_BODY_FILE) {
         comp_close(s, c);
@@ -124,15 +157,18 @@ static void comp_tls_send_response(struct KlServer *s, KlConn *c) {
     size_t total = 0;
     int n = kl_response_build_iovec(&c->res, iov, 7, cl_buf, sizeof(cl_buf), &total);
     if (n < 0) { comp_close(s, c); return; }
-    for (int i = 0; i < n; i++)
-        if (comp_tls_write(c, iov[i].base, iov[i].len) < 0) { comp_close(s, c); return; }
 
-    KlConnState st = kl_conn_send_complete(c);   /* resets read_len for keep-alive */
-    if (st == KL_CONN_READING) {
-        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
-    } else {
+    unsigned char *cipher = NULL;
+    size_t clen = 0, ccap = 0;
+    if (comp_tls_encrypt_all(c, iov, n, &cipher, &clen, &ccap) < 0) {
         comp_close(s, c);
+        return;
     }
+    /* The backend copies the buffer for the op's lifetime, so free ours after posting. */
+    KlIoVec civ = { cipher, clen };
+    int rc = kl_comp_post_send(c, &civ, 1, clen);
+    kl_free(c->alloc, cipher, ccap);
+    if (rc < 0) comp_close(s, c);
 }
 
 /* Act on the state a completed request produced. */

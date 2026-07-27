@@ -401,6 +401,20 @@ backend already isn't) — validated by the 8b-5a local mbedTLS test + MinGW com
 of the driver/backend + a local/hull `KEEL_TLS=mbedtls` Windows run. **Phase 8b-5, and
 the 8b breadth arc, complete.**
 
+**Phase 8c (close the 8b deferred TLS-over-completion gaps).** The 8b-2..5 subset
+deliberately closed rather than mis-served the harder TLS response paths; 8c fills them
+in, one increment per gap, holding both orthogonality axes (no public-API change; Win32
+confined to `event_iocp.c`). *8c-1 done:* **overlapped TLS response sends.** Buffered
+TLS responses no longer flush synchronously (the streaming head-of-line caveat) — the
+driver encrypts the whole response into one heap ciphertext buffer via the memory BIO
+(`comp_tls_encrypt_all`, draining the out ring as it fills so responses exceeding the
+ring cap are handled) and posts it as a single overlapped send through the existing
+`kl_comp_post_send`; completion flows through `comp_on_write` → `send_complete`, so a
+slow client never blocks the loop. `event_iocp.c` is **unchanged** (the ciphertext
+rides the plaintext WRITE op) — axis 2 holds with zero new Win32. Handshake records
+still flush synchronously (bounded; the client is actively handshaking). Remaining 8c:
+TLS file bodies, TLS streaming, ALPN-h2 handoff.
+
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
 
