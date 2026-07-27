@@ -15,12 +15,16 @@
 #include <string.h>
 #include <stdio.h>
 #include <windows.h>
+#include <io.h>       /* _open / _lseek / _write */
+#include <fcntl.h>    /* _O_* */
 
 static void nap_ms(int ms) { Sleep(ms); }
 
 #define SMOKE_PORT 18082
 #define SMOKE_BODY "{\"iocp\":true}"
 #define SMOKE_POST "hello-over-iocp-body"
+#define SMOKE_FILE "file-body-served-over-iocp-via-transmitfile"
+#define SMOKE_FILE_PATH "smoke_iocp_file.tmp"
 
 static void handle_ok(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -35,6 +39,18 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
     if (!br || br->len == 0) { kl_response_error(res, 400, "body required"); return; }
     kl_response_status(res, 200);
     kl_response_body_borrow(res, br->data, br->len);
+}
+
+/* GET /file — serve a file body via kl_response_file (TransmitFile over IOCP, 8b-2).
+ * Opens the pre-written temp file per request; the response owns and closes the fd. */
+static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    int fd = _open(SMOKE_FILE_PATH, _O_RDONLY | _O_BINARY);
+    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    long size = _lseek(fd, 0, SEEK_END);
+    _lseek(fd, 0, SEEK_SET);
+    kl_response_status(res, 200);
+    kl_response_file(res, (KlSocketHandle)fd, (off_t)size);
 }
 
 static KlServer g_srv;
@@ -55,6 +71,17 @@ int main(void) {
     }
     kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
     kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
+    kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
+
+    /* Write the file the /file route serves. */
+    int wfd = _open(SMOKE_FILE_PATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
+    if (wfd < 0 || _write(wfd, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) != (int)(sizeof(SMOKE_FILE) - 1)) {
+        fprintf(stderr, "smoke-iocp: temp file write failed\n");
+        if (wfd >= 0) _close(wfd);
+        kl_server_free(&g_srv);
+        return 1;
+    }
+    _close(wfd);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
@@ -107,9 +134,30 @@ int main(void) {
         }
     }
 
+    /* GET /file — exercise the file-response path (TransmitFile over IOCP, 8b-2). */
+    int file_ok = 0;
+    if (ok && post_ok) {
+        KlClientResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        int rc = kl_client_request(&alloc, &ccfg, "GET",
+                                   "http://127.0.0.1:18082/file",
+                                   NULL, 0, NULL, 0, &resp);
+        if (rc == 0) {
+            file_ok = (resp.status == 200 &&
+                       resp.body_len == sizeof(SMOKE_FILE) - 1 &&
+                       resp.body &&
+                       memcmp(resp.body, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) == 0);
+            last_status = resp.status;
+            kl_client_response_free(&resp);
+        } else {
+            last_rc = rc;
+        }
+    }
+
     kl_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_server_free(&g_srv);
+    _unlink(SMOKE_FILE_PATH);
 
     if (!ok) {
         fprintf(stderr, "smoke-iocp: GET roundtrip FAILED (rc=%d status=%d body_len=%zu err=%d)\n",
@@ -121,6 +169,11 @@ int main(void) {
                 last_rc, last_status);
         return 1;
     }
-    printf("smoke-iocp: HTTP-over-IOCP roundtrip OK (GET + POST body)\n");
+    if (!file_ok) {
+        fprintf(stderr, "smoke-iocp: GET/file (TransmitFile) roundtrip FAILED (rc=%d status=%d)\n",
+                last_rc, last_status);
+        return 1;
+    }
+    printf("smoke-iocp: HTTP-over-IOCP roundtrip OK (GET + POST body + file)\n");
     return 0;
 }

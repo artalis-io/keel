@@ -321,6 +321,15 @@ transition posts a fresh sliding-window `WSARecv`; the completed read feeds the
 core), with IOCP supplying only the unchanged `WSARecv` primitive. `smoke_iocp.c`
 adds a POST-echo roundtrip (Windows-IOCP CI). `KlBodyReader` public vtable
 unchanged (axis 1); no Win32 symbol in the driver (axis 2); POSIX byte-identical.
+*Increment 8b-2 — file responses over IOCP (`TransmitFile`) — done:* the generic
+driver's `comp_send_response` posts a `KL_BODY_FILE` response via a new abstract
+`kl_comp_post_sendfile` (head iovec + file); `kl_response_build_iovec` gained a
+FILE-mode head (Content-Length = `file_size`, no body iov — inert on POSIX, which
+never routes FILE through it). IOCP implements it with **one `TransmitFile`** (head
+as the transmit head-buffer, offset via `OVERLAPPED`, HANDLE via `_get_osfhandle`),
+surfaced as a completed write. `smoke_iocp.c` adds a `GET /file` roundtrip.
+`kl_response_file`/`KL_BODY_FILE` public API unchanged (axis 1); `TransmitFile` lives
+only in `event_iocp.c` (axis 2); POSIX byte-identical (55 suites).
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.

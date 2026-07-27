@@ -58,4 +58,12 @@ int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total);
 /* Post one async accept on the server's listen socket (refill the backlog). */
 int kl_comp_post_accept(struct KlServer *s);
 
+/* Post one async file send: the serialized response head (`head_iov`) followed by
+ * `count` bytes from `file_fd` at offset 0. On IOCP this is a single TransmitFile
+ * (head as the transmit head-buffer, offset via OVERLAPPED); a future backend uses
+ * its own zero-copy file send. Reports a KL_COMP_WRITE on completion — the driver
+ * treats it like any completed response send. */
+int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+                          size_t head_total, int file_fd, uint64_t count);
+
 #endif /* KEEL_SRC_COMPLETION_H */
