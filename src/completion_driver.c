@@ -18,6 +18,7 @@
 #include "completion.h"          /* the abstract completion axis */
 #include "io_engine.h"           /* kl_io_engine_run_completion (the seam) */
 #include "socket.h"              /* kl_sock_* (close / tcp_nodelay via the seam) */
+#include "platform.h"            /* kl_plat_file_pread — TLS file body chunks (8c-2) */
 #include <keel/udp.h>            /* KlUdp (KL_COMP_UDP_RECV target) */
 #include "udp_internal.h"        /* kl_udp_comp_on_recv */
 #include <string.h>
@@ -27,6 +28,9 @@
 
 /* Stack chunk for draining the TLS engine's outgoing ciphertext to the socket. */
 #define KL_TLS_FLUSH_CHUNK 16384
+
+/* Plaintext file bytes read + encrypted per overlapped send for a TLS file body. */
+#define KL_COMP_TLS_FILE_CHUNK 16384
 
 static void comp_close(struct KlServer *s, KlConn *c) {
     kl_server_conn_release(s, c);   /* closes the socket + returns the pool slot */
@@ -143,32 +147,54 @@ fail:
     return -1;
 }
 
-/* Encrypt a buffered response and post the ciphertext as a single overlapped send.
- * Completion arrives as KL_COMP_WRITE → comp_on_write → send_complete (keep-alive or
- * close), so a slow client never blocks the loop. TLS file/stream bodies over the
- * completion loop are out of this subset. */
+/* Encrypt an already-materialised plaintext iovec into one heap ciphertext buffer and
+ * post it as a single overlapped send. Completion arrives as KL_COMP_WRITE →
+ * comp_on_write. Returns 0 on posted, -1 on error (caller closes). */
+static int comp_tls_post_encrypted(KlConn *c, const KlIoVec *iov, int n) {
+    unsigned char *cipher = NULL;
+    size_t clen = 0, ccap = 0;
+    if (comp_tls_encrypt_all(c, iov, n, &cipher, &clen, &ccap) < 0) return -1;
+    /* The backend copies the buffer for the op's lifetime, so free ours after posting. */
+    KlIoVec civ = { cipher, clen };
+    int rc = kl_comp_post_send(c, &civ, 1, clen);
+    kl_free(c->alloc, cipher, ccap);
+    return rc;
+}
+
+/* Read the next file chunk (kl_plat_file_pread — the portable file seam, not IOCP),
+ * encrypt it and post it overlapped, advancing res->file_offset. Returns 1 if a chunk
+ * was posted, 0 if the file is fully sent, -1 on error. Sequenced by comp_on_write so
+ * memory stays bounded to one chunk regardless of file size. */
+static int comp_tls_send_file_chunk(KlConn *c) {
+    if (c->res.file_offset >= c->res.file_size) return 0;
+    size_t remaining = (size_t)(c->res.file_size - c->res.file_offset);
+    char fbuf[KL_COMP_TLS_FILE_CHUNK];
+    size_t to_read = remaining < sizeof(fbuf) ? remaining : sizeof(fbuf);
+    ssize_t nr = kl_plat_file_pread(c->res.file_fd, fbuf, to_read,
+                                    (long long)c->res.file_offset);
+    if (nr <= 0) return -1;
+    KlIoVec seg = { fbuf, (size_t)nr };
+    if (comp_tls_post_encrypted(c, &seg, 1) < 0) return -1;
+    c->res.file_offset += (off_t)nr;
+    return 1;
+}
+
+/* Encrypt a response and post it overlapped, so a slow client never blocks the loop.
+ * Buffered bodies go in one send. A file body sends the head here; its bytes stream as
+ * overlapped chunks on subsequent WRITE completions (comp_on_write → send_file_chunk).
+ * TLS streaming (KL_BODY_STREAM) is still out of this subset. */
 static void comp_tls_send_response(struct KlServer *s, KlConn *c) {
-    if (c->res.body_mode == KL_BODY_STREAM || c->res.body_mode == KL_BODY_FILE) {
+    if (c->res.body_mode == KL_BODY_STREAM) {
         comp_close(s, c);
         return;
     }
     char cl_buf[48];
     KlIoVec iov[7];
     size_t total = 0;
+    /* For FILE mode this is head-only; the file bytes follow (comp_on_write). */
     int n = kl_response_build_iovec(&c->res, iov, 7, cl_buf, sizeof(cl_buf), &total);
     if (n < 0) { comp_close(s, c); return; }
-
-    unsigned char *cipher = NULL;
-    size_t clen = 0, ccap = 0;
-    if (comp_tls_encrypt_all(c, iov, n, &cipher, &clen, &ccap) < 0) {
-        comp_close(s, c);
-        return;
-    }
-    /* The backend copies the buffer for the op's lifetime, so free ours after posting. */
-    KlIoVec civ = { cipher, clen };
-    int rc = kl_comp_post_send(c, &civ, 1, clen);
-    kl_free(c->alloc, cipher, ccap);
-    if (rc < 0) comp_close(s, c);
+    if (comp_tls_post_encrypted(c, iov, n) < 0) comp_close(s, c);
 }
 
 /* Act on the state a completed request produced. */
@@ -336,6 +362,14 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
 static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
     KlConn *c = ev->target;
     if (!ev->ok || ev->bytes == 0) { comp_close(s, c); return; }
+    /* TLS file body still streaming: the head (or the previous chunk) just went out —
+     * post the next encrypted file chunk. HEAD requests carry no body. */
+    if (c->tls && c->res.body_mode == KL_BODY_FILE && !c->res.head_request) {
+        int r = comp_tls_send_file_chunk(c);
+        if (r < 0) { comp_close(s, c); return; }
+        if (r == 1) return;                    /* another chunk now in flight */
+        /* r == 0: file fully sent — fall through to complete the response */
+    }
     /* The backend only reports a WRITE once the whole response is out (it handles
      * partial sends internally). Response fully sent: keep-alive reset or close. */
     KlConnState st = kl_conn_send_complete(c);

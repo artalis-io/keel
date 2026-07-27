@@ -412,8 +412,16 @@ ring cap are handled) and posts it as a single overlapped send through the exist
 `kl_comp_post_send`; completion flows through `comp_on_write` → `send_complete`, so a
 slow client never blocks the loop. `event_iocp.c` is **unchanged** (the ciphertext
 rides the plaintext WRITE op) — axis 2 holds with zero new Win32. Handshake records
-still flush synchronously (bounded; the client is actively handshaking). Remaining 8c:
-TLS file bodies, TLS streaming, ALPN-h2 handoff.
+still flush synchronously (bounded; the client is actively handshaking). *8c-2 done:*
+**TLS file bodies over completion.** A TLS `KL_BODY_FILE` response (which can't use
+TransmitFile — sendfile bypasses encryption) sends its head first, then streams the
+file as overlapped, encrypted chunks sequenced by WRITE completions (`comp_on_write` →
+`comp_tls_send_file_chunk`): each chunk is `kl_plat_file_pread` (the *portable* file
+seam, mirroring the readiness path — not IOCP) → `comp_tls_encrypt_all` → overlapped
+`kl_comp_post_send`, advancing the existing `res->file_offset`; memory stays bounded to
+one chunk regardless of file size. `event_iocp.c` unchanged again; no public-API change
+(`res->file_offset`/`file_size` are existing internals); non-TLS TransmitFile and the
+readiness file path are untouched. Remaining 8c: TLS streaming, ALPN-h2 handoff.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
