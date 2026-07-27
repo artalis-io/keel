@@ -18,6 +18,7 @@
 #include "io_engine.h"           /* kl_io_engine_run_completion (the seam) */
 #include "socket.h"              /* kl_sock_* (close / tcp_nodelay via the seam) */
 #include <string.h>
+#include <stddef.h>              /* offsetof (server_of_ctx containerof) */
 
 #define KL_COMP_MAX_EVENTS 64
 
@@ -140,7 +141,7 @@ refill:
 }
 
 static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
-    KlConn *c = ev->conn;
+    KlConn *c = ev->target;
     if (!ev->ok || ev->bytes == 0) { comp_close(s, c); return; }   /* peer closed */
     c->read_len += ev->bytes;
     /* Body reads use a fresh sliding window (read_len was reset to 0 before the
@@ -152,7 +153,7 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
 }
 
 static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
-    KlConn *c = ev->conn;
+    KlConn *c = ev->target;
     if (!ev->ok || ev->bytes == 0) { comp_close(s, c); return; }
     /* The backend only reports a WRITE once the whole response is out (it handles
      * partial sends internally). Response fully sent: keep-alive reset or close. */
@@ -164,19 +165,35 @@ static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
     }
 }
 
-/* The io_engine seam's completion tick — platform-independent. Drains finished ops
- * from whatever completion backend is linked and drives their connections. */
-int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
+/* Recover the server from its embedded event ctx. Every pooled connection's ctx is
+ * &server->ev, and conn/accept completions only occur on a server's loop — so this
+ * containerof is valid wherever it is used, without a public KlConn/KlServer field. */
+static inline struct KlServer *server_of_ctx(struct KlEventCtx *ctx) {
+    return (struct KlServer *)((char *)ctx - offsetof(struct KlServer, ev));
+}
+
+/* Generic completion tick — platform-independent. Drains the ctx's completion loop
+ * and routes each finished op to its consumer. Shared by the server run loop and the
+ * standalone kl_event_ctx_run (datagram routing lands in 8b-4c). */
+int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
+    if (max > KL_COMP_MAX_EVENTS) max = KL_COMP_MAX_EVENTS;
     KlCompletionEvent ev[KL_COMP_MAX_EVENTS];
-    int n = kl_comp_drain(s, ev, KL_COMP_MAX_EVENTS, timeout_ms);
+    int n = kl_comp_drain(ctx, ev, max, timeout_ms);
     if (n < 0) return -1;
 
     for (int i = 0; i < n; i++) {
         switch (ev[i].kind) {
-        case KL_COMP_ACCEPT: comp_on_accept(s, &ev[i]); break;
-        case KL_COMP_READ:   comp_on_read(s, &ev[i]);   break;
-        case KL_COMP_WRITE:  comp_on_write(s, &ev[i]);  break;
+        case KL_COMP_ACCEPT: comp_on_accept(server_of_ctx(ctx), &ev[i]); break;
+        case KL_COMP_READ:   comp_on_read(server_of_ctx(ctx), &ev[i]);   break;
+        case KL_COMP_WRITE:  comp_on_write(server_of_ctx(ctx), &ev[i]);  break;
         }
     }
-    return 0;
+    return n;
+}
+
+/* The server's io_engine seam entry: prime the accept backlog (idempotent), then run
+ * one generic tick over its shared event ctx. */
+int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
+    if (kl_comp_prime_accepts(s) < 0) return -1;
+    return kl_comp_run(&s->ev, KL_COMP_MAX_EVENTS, timeout_ms) < 0 ? -1 : 0;
 }
