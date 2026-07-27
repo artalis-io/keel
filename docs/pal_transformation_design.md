@@ -314,6 +314,13 @@ handled internally). Makefile links `completion_driver.c` on completion backends
 (io_engine.c stub elsewhere). POSIX byte-identical (55 suites); MinGW `BACKEND=iocp`
 links both TUs (no double-def); the HTTP-over-IOCP smoke stays green — proving the
 axis is a faithful refactor that a future io_uring-completion/AIO backend can reuse.
+*Increment 8b-1 — request bodies over IOCP — done:* the `READING_BODY` core lifted
+into `kl_conn_ingest_body` (conn_internal.h; `kl_conn_on_readable` calls it inline —
+byte-identical). The generic `completion_driver.c` drives it (a `READING_BODY`
+transition posts a fresh sliding-window `WSARecv`; the completed read feeds the
+core), with IOCP supplying only the unchanged `WSARecv` primitive. `smoke_iocp.c`
+adds a POST-echo roundtrip (Windows-IOCP CI). `KlBodyReader` public vtable
+unchanged (axis 1); no Win32 symbol in the driver (axis 2); POSIX byte-identical.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.

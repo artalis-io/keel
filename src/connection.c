@@ -798,8 +798,9 @@ read_more_headers: ;
     } else if (c->state == KL_CONN_READING_BODY) {
         int body_drains = 0;
 read_more_body: ;
-        /* Sliding window: read into start of buffer, parse, repeat */
-        ; /* empty statement after label before declaration */
+        /* Transport: sliding window read into the start of the buffer, then feed
+         * the model-blind body core. On TLS, drain buffered records before
+         * re-arming (the socket won't signal readable again). */
         ssize_t nr = conn_read(c, c->read_buf, c->read_cap);
         if (nr <= 0) {
             if (c->req.body_reader)
@@ -807,137 +808,11 @@ read_more_body: ;
             c->state = KL_CONN_CLOSED;
             return c->state;
         }
-
-        if (c->req.chunked) {
-            int rc = kl_chunked_decode(&c->chunked_dec,
-                        c->read_buf, (size_t)nr, c->req.body_reader);
-            if (rc < 0) {
-                if (c->req.body_reader)
-                    c->req.body_reader->on_error(c->req.body_reader);
-                /* Streaming routes: if the body-reader's on_error chain
-                 * resumed a handler that caught the parser error and
-                 * prepared a response, c->state will already be SENDING
-                 * (or CLOSED). Honor that response instead of clobbering
-                 * it with the hardcoded 413 — sibling of the v2.1.0/v2.1.1
-                 * mid-stream early-exit logic on the success-return path
-                 * (just below). Force keep-alive off: the body wasn't
-                 * drained, so unread bytes would bleed into the next
-                 * request on this conn. */
-                if (c->route && c->route->streaming_handler &&
-                    (c->state == KL_CONN_SENDING ||
-                     c->state == KL_CONN_CLOSED)) {
-                    c->req.keep_alive = 0;
-                    c->res.keep_alive = 0;
-                    return c->state;
-                }
-                best_effort_conn_write(c, kl_413_response,
-                                       sizeof(kl_413_response) - 1);
-                c->state = KL_CONN_CLOSED;
-                return c->state;
-            }
-            /* Discard-path chunked limit */
-            if (!c->req.body_reader &&
-                c->max_body_size > 0 &&
-                c->chunked_dec.total_body > c->max_body_size) {
-                best_effort_conn_write(c, kl_413_response,
-                                       sizeof(kl_413_response) - 1);
-                c->state = KL_CONN_CLOSED;
-                return c->state;
-            }
-            if (rc == 1) {
-                if (c->req.body_reader)
-                    c->req.body_reader->on_complete(c->req.body_reader);
-                /* Streaming handlers were invoked at body-reader-setup
-                 * time and have been pumped by on_data callbacks during
-                 * READING_BODY. on_complete may have triggered a final
-                 * resume inside the body reader — c->state is whatever
-                 * the handler set. */
-                if (c->route && c->route->streaming_handler)
-                    return c->state;
-                /* c->router is used (not function param) because READING_BODY
-                 * is a continuation — the original router was saved on the
-                 * connection during the READING headers phase. */
-                return conn_run_post_middleware_and_handle(c, c->router);
-            }
-            /* Mid-stream non-READING_BODY transitions from streaming
-             * handlers: honor the handler's chosen state. */
-            if (c->route && c->route->streaming_handler) {
-                if (c->state == KL_CONN_SUSPENDED) {
-                    /* Handler yielded for async I/O — kl_async_suspend
-                     * removed the FD. kl_async_complete will resume.
-                     * Keep-alive stays as-is; the async op continues
-                     * the request normally. */
-                    return c->state;
-                }
-                if (c->state == KL_CONN_SENDING ||
-                    c->state == KL_CONN_CLOSED) {
-                    /* Handler completed synchronously inside an on_data
-                     * resume. Force keep-alive off so unread body bytes
-                     * don't bleed into the next request on this conn. */
-                    c->req.keep_alive = 0;
-                    c->res.keep_alive = 0;
-                    return c->state;
-                }
-            }
-            /* TLS may buffer multiple records — drain before re-arming */
-            if (c->tls && c->tls->pending(c->tls) > 0
-                && ++body_drains < KL_TLS_DRAIN_MAX)
-                goto read_more_body;
-            return KL_CONN_READING_BODY;
-        }
-
-        /* Content-Length body — existing parser path */
-        size_t consumed = 0;
-        KlParseResult pr = c->parser->parse(c->parser, &c->req,
-                                             c->read_buf, (size_t)nr,
-                                             &consumed);
-
-        if (pr == KL_PARSE_ERROR) {
-            if (c->req.body_reader)
-                c->req.body_reader->on_error(c->req.body_reader);
-            /* Streaming routes: same handler-state-honoring logic as
-             * the chunked path's rc<0 branch above — mirrors v2.1.0/
-             * v2.1.1's mid-stream early-exit, just for the error-
-             * return path. */
-            if (c->route && c->route->streaming_handler &&
-                (c->state == KL_CONN_SENDING ||
-                 c->state == KL_CONN_CLOSED)) {
-                c->req.keep_alive = 0;
-                c->res.keep_alive = 0;
-                return c->state;
-            }
-            /* Body reader rejected (413) */
-            best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
-            c->state = KL_CONN_CLOSED;
-            return c->state;
-        }
-
-        if (pr == KL_PARSE_OK) {
-            /* Same skip-for-streaming logic as the chunked path above. */
-            if (c->route && c->route->streaming_handler)
-                return c->state;
-            /* c->router: see comment above — READING_BODY continuation */
-            return conn_run_post_middleware_and_handle(c, c->router);
-        }
-
-        /* Mid-stream non-READING_BODY transitions from streaming
-         * handlers — same logic as the chunked path above. */
-        if (c->route && c->route->streaming_handler) {
-            if (c->state == KL_CONN_SUSPENDED) {
-                return c->state;
-            }
-            if (c->state == KL_CONN_SENDING ||
-                c->state == KL_CONN_CLOSED) {
-                c->req.keep_alive = 0;
-                c->res.keep_alive = 0;
-                return c->state;
-            }
-        }
-        /* INCOMPLETE — TLS may buffer multiple records */
-        if (c->tls && c->tls->pending(c->tls) > 0
+        KlConnState bst = kl_conn_ingest_body(c, (size_t)nr);
+        if (bst == KL_CONN_READING_BODY && c->tls && c->tls->pending(c->tls) > 0
             && ++body_drains < KL_TLS_DRAIN_MAX)
             goto read_more_body;
-        return KL_CONN_READING_BODY;
+        return bst;
     }
 
     return c->state;
@@ -1112,6 +987,95 @@ KlConnState kl_conn_dispatch_request(KlConn *c, KlRouter *router,
 
 KlConnState kl_conn_run_post_body(KlConn *c, KlRouter *router) {
     return conn_run_post_middleware_and_handle(c, router);
+}
+
+/* PAL Phase 8b-1: the model-blind request-body core. Feed `nread` freshly-received
+ * bytes (already in read_buf[0..nread]) to the chunked decoder / body reader, apply
+ * limits, honor streaming-handler transitions. Returns the next state
+ * (KL_CONN_READING_BODY = need more bytes). kl_conn_on_readable calls this inline
+ * after a recv (byte-identical); the completion driver calls it after a WSARecv —
+ * same core, no event model leaked in. */
+KlConnState kl_conn_ingest_body(KlConn *c, size_t nread) {
+    if (c->req.chunked) {
+        int rc = kl_chunked_decode(&c->chunked_dec, c->read_buf, nread,
+                                   c->req.body_reader);
+        if (rc < 0) {
+            if (c->req.body_reader)
+                c->req.body_reader->on_error(c->req.body_reader);
+            /* Streaming routes: honor a response the on_error chain already set
+             * instead of clobbering it with 413. Force keep-alive off (unread body
+             * would bleed into the next request). */
+            if (c->route && c->route->streaming_handler &&
+                (c->state == KL_CONN_SENDING || c->state == KL_CONN_CLOSED)) {
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
+                return c->state;
+            }
+            best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
+            c->state = KL_CONN_CLOSED;
+            return c->state;
+        }
+        /* Discard-path chunked limit */
+        if (!c->req.body_reader && c->max_body_size > 0 &&
+            c->chunked_dec.total_body > c->max_body_size) {
+            best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
+            c->state = KL_CONN_CLOSED;
+            return c->state;
+        }
+        if (rc == 1) {
+            if (c->req.body_reader)
+                c->req.body_reader->on_complete(c->req.body_reader);
+            /* c->router (not a param): READING_BODY is a continuation of the
+             * request whose router was saved during the headers phase. */
+            if (c->route && c->route->streaming_handler)
+                return c->state;
+            return conn_run_post_middleware_and_handle(c, c->router);
+        }
+        /* Mid-stream transitions from streaming handlers: honor the chosen state. */
+        if (c->route && c->route->streaming_handler) {
+            if (c->state == KL_CONN_SUSPENDED)
+                return c->state;
+            if (c->state == KL_CONN_SENDING || c->state == KL_CONN_CLOSED) {
+                c->req.keep_alive = 0;
+                c->res.keep_alive = 0;
+                return c->state;
+            }
+        }
+        return KL_CONN_READING_BODY;
+    }
+
+    /* Content-Length body — parser path */
+    size_t consumed = 0;
+    KlParseResult pr = c->parser->parse(c->parser, &c->req,
+                                        c->read_buf, nread, &consumed);
+    if (pr == KL_PARSE_ERROR) {
+        if (c->req.body_reader)
+            c->req.body_reader->on_error(c->req.body_reader);
+        if (c->route && c->route->streaming_handler &&
+            (c->state == KL_CONN_SENDING || c->state == KL_CONN_CLOSED)) {
+            c->req.keep_alive = 0;
+            c->res.keep_alive = 0;
+            return c->state;
+        }
+        best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
+        c->state = KL_CONN_CLOSED;
+        return c->state;
+    }
+    if (pr == KL_PARSE_OK) {
+        if (c->route && c->route->streaming_handler)
+            return c->state;
+        return conn_run_post_middleware_and_handle(c, c->router);
+    }
+    if (c->route && c->route->streaming_handler) {
+        if (c->state == KL_CONN_SUSPENDED)
+            return c->state;
+        if (c->state == KL_CONN_SENDING || c->state == KL_CONN_CLOSED) {
+            c->req.keep_alive = 0;
+            c->res.keep_alive = 0;
+            return c->state;
+        }
+    }
+    return KL_CONN_READING_BODY;
 }
 
 KlConnState kl_conn_send_complete(KlConn *c) {

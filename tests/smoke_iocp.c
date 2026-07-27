@@ -20,10 +20,21 @@ static void nap_ms(int ms) { Sleep(ms); }
 
 #define SMOKE_PORT 18082
 #define SMOKE_BODY "{\"iocp\":true}"
+#define SMOKE_POST "hello-over-iocp-body"
 
 static void handle_ok(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
+}
+
+/* POST /echo — reads the request body via the buffer reader (READING_BODY over
+ * IOCP) and echoes it back, exercising the completion body path (8b-1). */
+static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    KlBufReader *br = (KlBufReader *)req->body_reader;
+    if (!br || br->len == 0) { kl_response_error(res, 400, "body required"); return; }
+    kl_response_status(res, 200);
+    kl_response_body_borrow(res, br->data, br->len);
 }
 
 static KlServer g_srv;
@@ -43,6 +54,7 @@ int main(void) {
         return 1;
     }
     kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
+    kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
@@ -75,15 +87,40 @@ int main(void) {
         }
     }
 
+    /* POST /echo — exercise the request-body path (READING_BODY over IOCP, 8b-1). */
+    int post_ok = 0;
+    if (ok) {
+        KlClientResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        int rc = kl_client_request(&alloc, &ccfg, "POST",
+                                   "http://127.0.0.1:18082/echo",
+                                   NULL, 0, SMOKE_POST, sizeof(SMOKE_POST) - 1, &resp);
+        if (rc == 0) {
+            post_ok = (resp.status == 200 &&
+                       resp.body_len == sizeof(SMOKE_POST) - 1 &&
+                       resp.body &&
+                       memcmp(resp.body, SMOKE_POST, sizeof(SMOKE_POST) - 1) == 0);
+            last_status = resp.status;
+            kl_client_response_free(&resp);
+        } else {
+            last_rc = rc;
+        }
+    }
+
     kl_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_server_free(&g_srv);
 
     if (!ok) {
-        fprintf(stderr, "smoke-iocp: roundtrip FAILED (rc=%d status=%d body_len=%zu err=%d)\n",
+        fprintf(stderr, "smoke-iocp: GET roundtrip FAILED (rc=%d status=%d body_len=%zu err=%d)\n",
                 last_rc, last_status, last_len, last_err);
         return 1;
     }
-    printf("smoke-iocp: HTTP-over-IOCP roundtrip OK\n");
+    if (!post_ok) {
+        fprintf(stderr, "smoke-iocp: POST/echo body roundtrip FAILED (rc=%d status=%d)\n",
+                last_rc, last_status);
+        return 1;
+    }
+    printf("smoke-iocp: HTTP-over-IOCP roundtrip OK (GET + POST body)\n");
     return 0;
 }

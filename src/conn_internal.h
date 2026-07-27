@@ -30,6 +30,12 @@ KlConnState kl_conn_dispatch_request(KlConn *c, KlRouter *router,
  * connection state (typically KL_CONN_SENDING). */
 KlConnState kl_conn_run_post_body(KlConn *c, KlRouter *router);
 
+/* Feed `nread` freshly-received request-body bytes (already in read_buf[0..nread])
+ * to the chunked decoder / body reader. Returns the next state (KL_CONN_READING_BODY
+ * = need more). The model-blind body core, shared by the readiness read path and the
+ * completion driver (a completed WSARecv). */
+KlConnState kl_conn_ingest_body(KlConn *c, size_t nread);
+
 /* Response fully sent: log access, then keep-alive reset (→ KL_CONN_READING) or
  * close (→ KL_CONN_CLOSED). */
 KlConnState kl_conn_send_complete(KlConn *c);

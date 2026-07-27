@@ -35,7 +35,27 @@ static int comp_send_response(KlConn *c) {
     return kl_comp_post_send(c, iov, n, total);
 }
 
-/* Run the model-blind READING core on bytes already in read_buf, then act. */
+/* Start (or continue) a request-body read: reset the sliding-window buffer and post
+ * the next receive. The body core (kl_conn_ingest_body) feeds read_buf[0..nread]. */
+static void comp_start_body_read(struct KlServer *s, KlConn *c) {
+    c->read_len = 0;
+    if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+}
+
+/* Act on the state a completed request produced. */
+static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
+    if (st == KL_CONN_SENDING) {
+        if (comp_send_response(c) < 0) comp_close(s, c);
+    } else if (st == KL_CONN_READING_BODY) {
+        comp_start_body_read(s, c);
+    } else {
+        /* CLOSED, or SUSPENDED (async handlers are not driven over IOCP in this
+         * subset) — close rather than mis-serve. */
+        comp_close(s, c);
+    }
+}
+
+/* Run the model-blind headers core on bytes already in read_buf, then act. */
 static void comp_drive_reading(struct KlServer *s, KlConn *c) {
     size_t consumed = 0;
     KlParseResult pr = c->parser->parse(c->parser, &c->req,
@@ -50,14 +70,12 @@ static void comp_drive_reading(struct KlServer *s, KlConn *c) {
         ? kl_conn_dispatch_request(c, &s->router,
                                    c->read_buf + consumed, c->read_len - consumed)
         : kl_conn_dispatch_request(c, &s->router, NULL, 0);
+    comp_after_state(s, c, st);
+}
 
-    if (st == KL_CONN_SENDING) {
-        if (comp_send_response(c) < 0) comp_close(s, c);
-    } else {
-        /* READING_BODY (request bodies: 8b-1), CLOSED, SUSPENDED, etc. — close
-         * rather than mis-serve in the 8a/8b-0 plaintext-GET/HEAD subset. */
-        comp_close(s, c);
-    }
+/* Feed a completed body read through the model-blind body core, then act. */
+static void comp_drive_body(struct KlServer *s, KlConn *c) {
+    comp_after_state(s, c, kl_conn_ingest_body(c, c->read_len));
 }
 
 static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
@@ -92,7 +110,12 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
     KlConn *c = ev->conn;
     if (!ev->ok || ev->bytes == 0) { comp_close(s, c); return; }   /* peer closed */
     c->read_len += ev->bytes;
-    comp_drive_reading(s, c);
+    /* Body reads use a fresh sliding window (read_len was reset to 0 before the
+     * post), so read_len == the bytes just received. Headers accumulate. */
+    if (c->state == KL_CONN_READING_BODY)
+        comp_drive_body(s, c);
+    else
+        comp_drive_reading(s, c);
 }
 
 static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
