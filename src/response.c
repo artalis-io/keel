@@ -383,13 +383,17 @@ static const char kl_keepalive_hdr[] = "Connection: keep-alive\r\n";
 int kl_response_build_iovec(KlResponse *res, KlIoVec *iov, int cap,
                             char *cl_buf, size_t cl_buf_cap, size_t *total_out) {
     (void)cl_buf_cap;   /* caller guarantees >= 48 (Content-Length line) */
-    if (res->body_mode != KL_BODY_BUFFER && res->body_mode != KL_BODY_NONE)
+    /* FILE mode assembles the HEAD only (Content-Length = file_size, no body iov);
+     * the caller sends the file bytes separately (TransmitFile / sendfile). */
+    int is_file = (res->body_mode == KL_BODY_FILE);
+    if (res->body_mode != KL_BODY_BUFFER && res->body_mode != KL_BODY_NONE && !is_file)
         return -1;
     if (cap < 7)
         return -1;
 
     KlStatusLine sl = status_line_for(res->status);
-    int cl_len = format_content_length(cl_buf, res->body_len);
+    size_t clen = is_file ? (size_t)res->file_size : res->body_len;
+    int cl_len = format_content_length(cl_buf, clen);
 
     int n = 0;
     size_t total = 0;
@@ -411,7 +415,7 @@ int kl_response_build_iovec(KlResponse *res, KlIoVec *iov, int cap,
     }
     iov[n].base = (void *)"\r\n"; iov[n].len = 2; total += 2; n++;
 
-    if (res->body_len > 0 && !res->head_request) {
+    if (!is_file && res->body_len > 0 && !res->head_request) {
         iov[n].base = (void *)res->body; iov[n].len = res->body_len;
         total += res->body_len; n++;
     }

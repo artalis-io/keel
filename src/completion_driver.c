@@ -25,13 +25,20 @@ static void comp_close(struct KlServer *s, KlConn *c) {
     kl_server_conn_release(s, c);   /* closes the socket + returns the pool slot */
 }
 
-/* Serialize the buffered response and post it (backend copies + owns the bytes). */
+/* Serialize the response head and post it: buffered body inline via WSASend, or a
+ * file body via the backend's zero-copy file send (TransmitFile) after the head.
+ * The backend copies + owns the head bytes for the op's lifetime. */
 static int comp_send_response(KlConn *c) {
     char cl_buf[48];
     KlIoVec iov[7];
     size_t total = 0;
     int n = kl_response_build_iovec(&c->res, iov, 7, cl_buf, sizeof(cl_buf), &total);
     if (n < 0) return -1;
+    /* FILE mode: the iovec is head-only; append the file bytes with sendfile. A HEAD
+     * request has no body, so it falls through to the plain head send. */
+    if (c->res.body_mode == KL_BODY_FILE && !c->res.head_request)
+        return kl_comp_post_sendfile(c, iov, n, total,
+                                     c->res.file_fd, (uint64_t)c->res.file_size);
     return kl_comp_post_send(c, iov, n, total);
 }
 

@@ -19,7 +19,8 @@
 
 #include "sockcompat.h"          /* winsock2.h */
 #include <windows.h>             /* IOCP */
-#include <mswsock.h>             /* AcceptEx / GetAcceptExSockaddrs / SO_UPDATE_ACCEPT_CONTEXT */
+#include <mswsock.h>             /* AcceptEx / GetAcceptExSockaddrs / TransmitFile */
+#include <io.h>                  /* _get_osfhandle (CRT fd → file HANDLE) */
 #include <string.h>
 
 #define KL_IOCP_ACCEPT_BACKLOG 8
@@ -34,7 +35,7 @@ typedef struct {
     KlAllocator              *alloc;
 } KlIocpState;
 
-typedef enum { KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE } KlIocpOpType;
+typedef enum { KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE } KlIocpOpType;
 
 /* One in-flight overlapped op. `ov` MUST be first (CONTAINING_RECORD round-trip). */
 typedef struct {
@@ -203,6 +204,43 @@ int kl_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
+int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+                          size_t head_total, int file_fd, uint64_t count) {
+    HANDLE hfile = (HANDLE)_get_osfhandle(file_fd);
+    if (hfile == INVALID_HANDLE_VALUE) return -1;
+
+    KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
+    if (!op) return -1;
+    memset(op, 0, sizeof(*op));
+    op->type = KL_IOCP_SENDFILE;
+    op->alloc = c->alloc;
+    op->conn = c;
+
+    /* Copy the response head — TransmitFile's head buffer must outlive the op. */
+    op->send_total = head_total;
+    op->sendbuf = kl_malloc(c->alloc, head_total ? head_total : 1);
+    if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
+    size_t off = 0;
+    for (int i = 0; i < head_n; i++) {
+        memcpy(op->sendbuf + off, head_iov[i].base, head_iov[i].len);
+        off += head_iov[i].len;
+    }
+
+    TRANSMIT_FILE_BUFFERS tb;
+    memset(&tb, 0, sizeof(tb));
+    tb.Head = op->sendbuf;
+    tb.HeadLength = (DWORD)head_total;
+
+    /* File offset 0 via the OVERLAPPED (op->ov is zeroed → Offset 0). One overlapped
+     * op sends head + `count` file bytes; completion arrives as KL_IOCP_SENDFILE. */
+    BOOL ok = TransmitFile((SOCKET)c->fd, hfile, (DWORD)count, 0, &op->ov, &tb, 0);
+    if (!ok && WSAGetLastError() != WSA_IO_PENDING) {
+        iocp_op_free(op);
+        return -1;
+    }
+    return 0;
+}
+
 /* First-drain setup: load the extension fn pointers off the listen socket, learn
  * its address family, prime the accept backlog. */
 static int iocp_start(struct KlServer *s, KlIocpState *st) {
@@ -276,7 +314,7 @@ int kl_comp_drain(struct KlServer *s, KlCompletionEvent *out, int max, int timeo
             out[count].ok = 1;
             count++;
             iocp_op_free(op);
-        } else { /* KL_IOCP_WRITE */
+        } else if (op->type == KL_IOCP_WRITE) {
             op->send_done += bytes;
             if (bytes > 0 && op->send_done < op->send_total) {
                 /* Partial send — re-post the remainder; do NOT surface an event
@@ -295,6 +333,15 @@ int kl_comp_drain(struct KlServer *s, KlCompletionEvent *out, int max, int timeo
                 }
                 continue;
             }
+            memset(&out[count], 0, sizeof(out[count]));
+            out[count].kind = KL_COMP_WRITE;
+            out[count].conn = op->conn;
+            out[count].bytes = bytes;
+            out[count].ok = (bytes > 0);
+            count++;
+            iocp_op_free(op);
+        } else { /* KL_IOCP_SENDFILE — TransmitFile completes as a unit (head+file);
+                  * surface it as a completed write. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WRITE;
             out[count].conn = op->conn;
