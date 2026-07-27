@@ -112,6 +112,26 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
         udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
+
+    /* Completion loop (IOCP): post an overlapped WSASendTo (8b-4d). Plain sends
+     * only — source-pinned / TOS sends fall through to the synchronous seam path,
+     * which works on a completion socket too. q_bytes tracks outstanding overlapped
+     * bytes for backpressure (the readiness send queue is unused on this loop);
+     * on_drain fires when the last in-flight send completes (kl_udp_comp_on_send). */
+    if (src == NULL && tos < 0 &&
+        (kl_event_caps(&udp->ctx->loop) & KL_EVENT_CAP_COMPLETION)) {
+        if (len > udp->max_send_queue || udp->q_bytes > udp->max_send_queue - len) {
+            udp->last_error = KL_ERR_IO;   /* backpressure cap — drop the datagram */
+            return -1;
+        }
+        if (kl_comp_post_udp_send(udp, data, len, dest, (int)dest_len) < 0) {
+            udp->last_error = KL_ERR_IO;
+            return -1;
+        }
+        udp->q_bytes += len;
+        return 0;
+    }
+
     /* Preserve ordering: if anything is queued, queue behind it. */
     if (udp->q_head)
         return udp_enqueue(udp, data, len, dest, dest_len, src, src_len, tos);
@@ -363,6 +383,15 @@ void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
     kl_udp_deliver(udp, buf, len, 0, src, src_len, NULL, 0);
     if (udp->recv_active && kl_handle_valid(udp->fd))
         (void)kl_comp_post_udp_recv(udp);   /* arm the next datagram */
+}
+
+/* An overlapped WSASendTo of `len` bytes finished (8b-4d): release its
+ * outstanding-bytes reservation; fire on_drain when nothing is left in flight
+ * (same public semantics as the readiness queue emptying). */
+void kl_udp_comp_on_send(KlUdp *udp, size_t len) {
+    udp->q_bytes = (udp->q_bytes >= len) ? udp->q_bytes - len : 0;
+    if (udp->q_bytes == 0 && udp->on_drain)
+        udp->on_drain(udp, udp->drain_ud);
 }
 
 void kl_udp_recv_stop(KlUdp *udp) {

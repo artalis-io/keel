@@ -50,4 +50,9 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
                          struct sockaddr *src, socklen_t src_len);
 
+/* Completion-loop datagram send done (PAL 8b-4d): an overlapped WSASendTo of `len`
+ * bytes finished — release its outstanding-bytes reservation and fire on_drain when
+ * nothing is left in flight. */
+void kl_udp_comp_on_send(KlUdp *udp, size_t len);
+
 #endif /* KEEL_SRC_UDP_INTERNAL_H */

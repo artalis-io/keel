@@ -17,9 +17,12 @@
 #ifndef KEEL_SRC_IO_ENGINE_H
 #define KEEL_SRC_IO_ENGINE_H
 
+#include <stddef.h>   /* size_t (kl_comp_post_udp_send) */
+
 struct KlServer;
 struct KlEventCtx;
 struct KlUdp;
+struct sockaddr;
 
 /* Run one completion-loop tick for the server: prime accepts, then drive one
  * generic tick over its event ctx. Returns 0 to continue the run loop, <0 to stop. */
@@ -39,5 +42,12 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
  * kl_comp_run — it is declared here and stubbed in io_engine.c on non-completion
  * builds (never reached there); the real primitive lives in event_iocp.c. */
 int kl_comp_post_udp_recv(struct KlUdp *udp);
+
+/* Post one overlapped datagram send (WSASendTo) on a completion loop. The backend
+ * copies the datagram + destination for the op's lifetime; the completion surfaces
+ * a KL_COMP_UDP_SEND event. Shared-called by udp.c → stubbed in io_engine.c on
+ * non-completion builds; real primitive in event_iocp.c. */
+int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+                          const struct sockaddr *dest, int dest_len);
 
 #endif /* KEEL_SRC_IO_ENGINE_H */
