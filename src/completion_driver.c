@@ -179,15 +179,11 @@ static int comp_tls_send_file_chunk(KlConn *c) {
     return 1;
 }
 
-/* Encrypt a response and post it overlapped, so a slow client never blocks the loop.
- * Buffered bodies go in one send. A file body sends the head here; its bytes stream as
- * overlapped chunks on subsequent WRITE completions (comp_on_write → send_file_chunk).
- * TLS streaming (KL_BODY_STREAM) is still out of this subset. */
+/* Encrypt a buffered/file response and post it overlapped, so a slow client never
+ * blocks the loop. Buffered bodies go in one send. A file body sends the head here; its
+ * bytes stream as overlapped chunks on subsequent WRITE completions (comp_on_write →
+ * send_file_chunk). Streaming is handled by comp_tls_send_stream. */
 static void comp_tls_send_response(struct KlServer *s, KlConn *c) {
-    if (c->res.body_mode == KL_BODY_STREAM) {
-        comp_close(s, c);
-        return;
-    }
     char cl_buf[48];
     KlIoVec iov[7];
     size_t total = 0;
@@ -197,15 +193,41 @@ static void comp_tls_send_response(struct KlServer *s, KlConn *c) {
     if (comp_tls_post_encrypted(c, iov, n) < 0) comp_close(s, c);
 }
 
+/* Chunked/streaming response (KL_BODY_STREAM) over TLS. The TLS-aware streaming write
+ * path (kl_response_send → stream_writev_all / response_drain_writer) already encrypts
+ * via tls->write, but in completion mode that only appends ciphertext to the engine's
+ * out ring — so flush the ring to the socket after each send. Mirrors comp_send_stream
+ * (same synchronous-stream subset + head-of-line caveat); a single synchronous batch is
+ * bounded by the TLS out-ring cap. Reuses only kl_response_send + the vtable — no
+ * platform symbol. */
+static void comp_tls_send_stream(struct KlServer *s, KlConn *c) {
+    int r;
+    do {
+        r = kl_response_send(&c->res);         /* encrypts chunks into the out ring */
+        if (r < 0) { comp_close(s, c); return; }
+        if (comp_tls_flush(c) < 0) { comp_close(s, c); return; }   /* ring → socket */
+    } while (r == 1 && c->res.stream_ended);
+    KlConnState st = kl_conn_send_complete(c);
+    if (st == KL_CONN_READING) {
+        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+    } else {
+        comp_close(s, c);
+    }
+}
+
 /* Act on the state a completed request produced. */
 static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
     if (st == KL_CONN_SENDING) {
-        if (c->tls)
-            comp_tls_send_response(s, c);      /* encrypt via the memory BIO, then send */
-        else if (c->res.body_mode == KL_BODY_STREAM)
+        if (c->tls) {
+            if (c->res.body_mode == KL_BODY_STREAM)
+                comp_tls_send_stream(s, c);    /* flush encrypted chunks synchronously */
+            else
+                comp_tls_send_response(s, c);  /* buffered/file: encrypt + overlapped */
+        } else if (c->res.body_mode == KL_BODY_STREAM) {
             comp_send_stream(s, c);
-        else if (comp_send_response(c) < 0)
+        } else if (comp_send_response(c) < 0) {
             comp_close(s, c);
+        }
     } else if (st == KL_CONN_READING_BODY) {
         comp_start_body_read(s, c);
     } else {

@@ -421,7 +421,15 @@ seam, mirroring the readiness path — not IOCP) → `comp_tls_encrypt_all` → 
 `kl_comp_post_send`, advancing the existing `res->file_offset`; memory stays bounded to
 one chunk regardless of file size. `event_iocp.c` unchanged again; no public-API change
 (`res->file_offset`/`file_size` are existing internals); non-TLS TransmitFile and the
-readiness file path are untouched. Remaining 8c: TLS streaming, ALPN-h2 handoff.
+readiness file path are untouched. *8c-3 done:* **TLS streaming over completion.** A TLS
+`KL_BODY_STREAM` response now flushes instead of closing: the streaming write path
+(`kl_response_send` → `stream_writev_all`/`response_drain_writer`) is *already*
+TLS-aware (`tls->write`), but in completion mode that only appends ciphertext to the
+engine's out ring — so `comp_tls_send_stream` flushes the ring to the socket after each
+`kl_response_send`. Mirrors non-TLS `comp_send_stream` (same synchronous-stream subset +
+head-of-line caveat; a single synchronous batch is bounded by the out-ring cap). Reuses
+only `kl_response_send` + the vtable — `event_iocp.c` unchanged; no public-API change;
+readiness streaming untouched. Remaining 8c: ALPN-h2 handoff.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
