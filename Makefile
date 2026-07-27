@@ -40,7 +40,15 @@ else ifdef WINDOWS
   CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 \
             -fstack-protector-strong -Iinclude -Ivendor/llhttp
   VENDOR_CFLAGS = -std=c11 -O2 -Iinclude -Ivendor/llhttp
-  EVENT_SRC = src/event_wsapoll.c
+  # Event backend: WSAPoll (readiness, default) or IOCP (completion, BACKEND=iocp).
+  # The IOCP TU is the only place the completion model lives — no #ifdef leaks into
+  # the shared/POSIX TUs. socket_winsock.c stays linked either way (kl_sockdef_*
+  # defaults + the Winsock load constructor the IOCP provider reuses).
+  ifeq ($(BACKEND),iocp)
+    EVENT_SRC = src/event_iocp.c
+  else
+    EVENT_SRC = src/event_wsapoll.c
+  endif
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
   SERVER_PLAT_SRC = src/server_plat_win.c
@@ -236,10 +244,16 @@ endif
 examples: $(EXAMPLES)
 
 # Tests — relax pedantic warnings triggered by utest.h vendor macros
-# test_file_io_iouring.c requires io_uring — exclude from default builds
-TEST_SRC = $(filter-out tests/test_file_io_iouring.c, $(wildcard tests/test_*.c))
+# test_file_io_iouring.c requires io_uring; test_iocp_engine.c requires the IOCP
+# backend (asserts COMPLETION caps + kl_socket_provider_iocp) — exclude by default,
+# add back only for their backend.
+TEST_SRC = $(filter-out tests/test_file_io_iouring.c tests/test_iocp_engine.c, \
+                        $(wildcard tests/test_*.c))
 ifeq ($(BACKEND),iouring)
   TEST_SRC += tests/test_file_io_iouring.c
+endif
+ifeq ($(BACKEND),iocp)
+  TEST_SRC += tests/test_iocp_engine.c
 endif
 TEST_BIN = $(TEST_SRC:.c=)
 
@@ -306,6 +320,22 @@ test-win: $(WIN_TEST_BIN)
 		./$$t || failed=1; \
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME WINDOWS TESTS FAILED"; exit 1; fi
+
+# Windows IOCP backend (BACKEND=iocp) test subset. Increment 2: the completion
+# connection driver does not exist yet, so a server cannot run over IOCP — this
+# runs only the IOCP backend-lifecycle + negotiation suite (no server-over-IOCP).
+# The full suite over IOCP joins once the driver lands. Build with BACKEND=iocp so
+# libkeel.a carries event_iocp.o. (test_event_caps is a *readiness*-backend suite —
+# it asserts READINESS caps — so it runs in the WSAPoll/POSIX jobs, NOT here.)
+WIN_IOCP_TEST_SUITES = iocp_engine
+WIN_IOCP_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_IOCP_TEST_SUITES)))
+test-win-iocp: $(WIN_IOCP_TEST_BIN)
+	@failed=0; \
+	for t in $(WIN_IOCP_TEST_BIN); do \
+		echo "--- $$t ---"; \
+		./$$t || failed=1; \
+	done; \
+	if [ $$failed -eq 1 ]; then echo "SOME WINDOWS IOCP TESTS FAILED"; exit 1; fi
 
 # Plaintext TCP link + roundtrip smoke test — the cross-platform link gate
 # (the Windows CI runs this to prove the TCP core links and serves). Standalone

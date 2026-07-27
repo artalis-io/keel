@@ -251,9 +251,17 @@ completion-model negotiation — done:* an internal `KL_SOCK_CAP_OVERLAPPED` bit
 negotiation generalized into a pure `kl_caps_compatible(ev_caps, provider)` with a
 completion arm (a `KL_EVENT_CAP_COMPLETION` loop requires an `OVERLAPPED` provider;
 the readiness arm is unchanged). Unit-tested on POSIX across the full matrix
-(`test_event_caps`) even without an IOCP backend. Remaining increments: the IOCP
-event backend + overlapped provider + completion connection driver + `BACKEND=iocp`
-build and the Windows-IOCP CI job.
+(`test_event_caps`) even without an IOCP backend. *Increment 2 — the IOCP event
+backend + overlapped provider + build/CI wiring — done:* `src/event_iocp.c`
+(Windows/`BACKEND=iocp` only) implements the `KlEventLoop` lifecycle over an IOCP
+port and advertises `KL_EVENT_CAP_COMPLETION | _NATIVE_FD`; `kl_socket_provider_iocp()`
+is the overlapped provider (Winsock control-plane defaults + the `OVERLAPPED` cap).
+Selected in the Makefile (no `#ifdef` in shared code); a **Windows (IOCP)** CI job
+link-gates the build and boots a real IOCP loop (`test_iocp_engine`, Windows-only).
+The readiness `kl_event_wait` is a documented no-op on this loop. *Remaining:*
+increment 3 — the internal `io_engine` seam + the completion connection driver
+(accept/read/write via `WSARecv`/`WSASend`), the server default-provider selection
+under IOCP, and the full suite over IOCP.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
