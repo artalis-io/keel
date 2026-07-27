@@ -258,10 +258,17 @@ port and advertises `KL_EVENT_CAP_COMPLETION | _NATIVE_FD`; `kl_socket_provider_
 is the overlapped provider (Winsock control-plane defaults + the `OVERLAPPED` cap).
 Selected in the Makefile (no `#ifdef` in shared code); a **Windows (IOCP)** CI job
 link-gates the build and boots a real IOCP loop (`test_iocp_engine`, Windows-only).
-The readiness `kl_event_wait` is a documented no-op on this loop. *Remaining:*
-increment 3 — the internal `io_engine` seam + the completion connection driver
-(accept/read/write via `WSARecv`/`WSASend`), the server default-provider selection
-under IOCP, and the full suite over IOCP.
+The readiness `kl_event_wait` is a documented no-op on this loop. *Increment 3 —
+the `io_engine` dispatch seam — done:* `src/io_engine.h` declares
+`kl_io_engine_run_completion()`; the server run loop detects a completion loop once
+(via `kl_event_caps`) and delegates the tick to it, leaving the readiness
+wait/dispatch path byte-identical (the branch is never taken on readiness backends).
+The symbol is defined per-backend with no `#ifdef` in shared code — a stub in
+`src/io_engine.c` (linked on every non-IOCP build, never called) and the real tick
+in `event_iocp.c` (a documented placeholder until the driver lands). *Remaining:*
+the completion connection driver (accept/read/write via `WSARecv`/`WSASend` feeding
+a lifted, model-blind `kl_conn_ingest` protocol core), the server default-provider
+selection under IOCP, and a server-over-IOCP smoke test in the Windows-IOCP job.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.

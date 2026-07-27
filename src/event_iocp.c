@@ -17,6 +17,7 @@
  */
 #include <keel/event.h>
 #include "event_caps.h"
+#include "io_engine.h"       /* kl_io_engine_run_completion (the completion tick) */
 #include "socket.h"          /* KlSocketProvider/KlSocketOps + internal KL_SOCK_CAP_OVERLAPPED */
 
 #include "sockcompat.h"      /* winsock2.h (pulls the Win32 base types IOCP needs) */
@@ -104,3 +105,14 @@ static const KlSocketProvider IOCP_PROVIDER = {
 };
 
 const KlSocketProvider *kl_socket_provider_iocp(void) { return &IOCP_PROVIDER; }
+
+/* Completion tick — the server delegates one loop iteration here when its event
+ * loop is this completion backend (io_engine seam). The accept/read/write driver
+ * (AcceptEx + WSARecv/WSASend feeding the connection protocol core) lands in the
+ * next increment; until then this reports "not yet driving" rather than silently
+ * spinning a server on an unfinished loop. Not exercised by CI yet — the
+ * Windows-IOCP job runs only the backend lifecycle/negotiation suite. */
+int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
+    (void)s; (void)timeout_ms;
+    return -1;
+}
