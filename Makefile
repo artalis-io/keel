@@ -350,6 +350,15 @@ smoke-tcp: $(SMOKE_BIN)
 $(SMOKE_BIN): tests/smoke_tcp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# End-to-end HTTP-over-IOCP roundtrip (Windows, BACKEND=iocp). The runtime gate for
+# the completion connection driver — build libkeel with BACKEND=iocp first so the
+# server runs on the IOCP completion loop.
+SMOKE_IOCP_BIN = tests/smoke_iocp$(EXE)
+smoke-iocp: $(SMOKE_IOCP_BIN)
+	./$(SMOKE_IOCP_BIN)
+$(SMOKE_IOCP_BIN): tests/smoke_iocp.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
 # Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
 # (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
 SMOKE_UDP_BIN = tests/smoke_udp$(EXE)

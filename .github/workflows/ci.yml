@@ -130,6 +130,10 @@ jobs:
         timeout-minutes: 5
         run: make OS=windows BACKEND=iocp CC=gcc test-win-iocp
 
+      - name: End-to-end HTTP-over-IOCP roundtrip smoke test
+        timeout-minutes: 3
+        run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp
+
   sanitizers:
     name: ASan + UBSan
     runs-on: ubuntu-latest

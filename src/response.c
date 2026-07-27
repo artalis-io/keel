@@ -2,6 +2,7 @@
 #include <keel/tls.h>
 #include <keel/event_ctx.h>
 #include "socket.h"
+#include "response_internal.h"
 #include "platform.h"
 #include <string.h>
 #include <unistd.h>
@@ -376,56 +377,58 @@ static int stream_writev_all(const KlSocketProvider *p, int fd, KlTls *tls,
 
 static const char kl_keepalive_hdr[] = "Connection: keep-alive\r\n";
 
+/* Assemble the buffered-response wire bytes into iov — the single source of truth
+ * for the byte layout, shared by kl_response_send (synchronous seam writev) and the
+ * IOCP completion driver (overlapped WSASend). See response_internal.h. */
+int kl_response_build_iovec(KlResponse *res, KlIoVec *iov, int cap,
+                            char *cl_buf, size_t cl_buf_cap, size_t *total_out) {
+    (void)cl_buf_cap;   /* caller guarantees >= 48 (Content-Length line) */
+    if (res->body_mode != KL_BODY_BUFFER && res->body_mode != KL_BODY_NONE)
+        return -1;
+    if (cap < 7)
+        return -1;
+
+    KlStatusLine sl = status_line_for(res->status);
+    int cl_len = format_content_length(cl_buf, res->body_len);
+
+    int n = 0;
+    size_t total = 0;
+
+    iov[n].base = (void *)sl.str;  iov[n].len = sl.len;  total += sl.len;  n++;
+
+    if (res->hdr_len > 0) {
+        iov[n].base = res->hdr_buf; iov[n].len = res->hdr_len;
+        total += res->hdr_len; n++;
+    }
+    if (cl_len > 0) {
+        iov[n].base = cl_buf; iov[n].len = (size_t)cl_len;
+        total += (size_t)cl_len; n++;
+    }
+    if (res->keep_alive) {
+        iov[n].base = (void *)kl_keepalive_hdr;
+        iov[n].len = sizeof(kl_keepalive_hdr) - 1;
+        total += sizeof(kl_keepalive_hdr) - 1; n++;
+    }
+    iov[n].base = (void *)"\r\n"; iov[n].len = 2; total += 2; n++;
+
+    if (res->body_len > 0 && !res->head_request) {
+        iov[n].base = (void *)res->body; iov[n].len = res->body_len;
+        total += res->body_len; n++;
+    }
+
+    *total_out = total;
+    return n;
+}
+
 int kl_response_send(KlResponse *res) {
     /* Buffer body path: single-attempt writev with send_offset tracking */
     if (res->body_mode == KL_BODY_BUFFER || res->body_mode == KL_BODY_NONE) {
-        KlStatusLine sl = status_line_for(res->status);
-
         char cl_buf[48];
-        int cl_len = format_content_length(cl_buf, res->body_len);
-
         KlIoVec iov[7];
-        int iovcnt = 0;
         size_t total = 0;
-
-        /* Build full iovec every call — all sources are deterministic */
-        iov[iovcnt].base = (void *)sl.str;
-        iov[iovcnt].len = sl.len;
-        total += sl.len;
-        iovcnt++;
-
-        if (res->hdr_len > 0) {
-            iov[iovcnt].base = res->hdr_buf;
-            iov[iovcnt].len = res->hdr_len;
-            total += res->hdr_len;
-            iovcnt++;
-        }
-
-        if (cl_len > 0) {
-            iov[iovcnt].base = cl_buf;
-            iov[iovcnt].len = (size_t)cl_len;
-            total += (size_t)cl_len;
-            iovcnt++;
-        }
-
-        if (res->keep_alive) {
-            iov[iovcnt].base = (void *)kl_keepalive_hdr;
-            iov[iovcnt].len = sizeof(kl_keepalive_hdr) - 1;
-            total += sizeof(kl_keepalive_hdr) - 1;
-            iovcnt++;
-        }
-
-        iov[iovcnt].base = (void *)"\r\n";
-        iov[iovcnt].len = 2;
-        total += 2;
-        iovcnt++;
-
-        if (res->body_len > 0 && !res->head_request) {
-            iov[iovcnt].base = (void *)res->body;
-            iov[iovcnt].len = res->body_len;
-            total += res->body_len;
-            iovcnt++;
-        }
+        int iovcnt = kl_response_build_iovec(res, iov, 7, cl_buf,
+                                             sizeof(cl_buf), &total);
+        if (iovcnt < 0) return -1;
 
         /* Skip past already-sent bytes (send_offset) */
         size_t skip = res->send_offset;
