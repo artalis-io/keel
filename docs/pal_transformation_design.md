@@ -272,10 +272,20 @@ thin non-static handles onto connection.c's existing static core, so the complet
 driver reuses the exact parse→route→handle→lifecycle path after a completed
 `WSARecv` without the readiness transport wrapper and without connection.c learning
 the event model. `kl_conn_on_readable` is unchanged (byte-identical, POSIX-tested).
-*Remaining (4b):* the completion connection driver in `event_iocp.c`
-(`AcceptEx`/`WSARecv`/`WSASend` posting response `hdr_buf`+`body`, calling the core
-above), the server default-provider selection under IOCP, and a server-over-IOCP
-smoke test in the Windows-IOCP job (the first end-to-end HTTP-over-IOCP validation).
+*Increment 4b — the completion connection driver — done:* `event_iocp.c` gains the
+full driver — `AcceptEx` (socket pre-create + `GetAcceptExSockaddrs` +
+`SO_UPDATE_ACCEPT_CONTEXT`) → `WSARecv` → the model-blind core
+(`kl_conn_dispatch_request`) → response serialized via `kl_response_build_iovec`
+(extracted from `kl_response_send`, shared) and posted with `WSASend` (partial-send
+tracked) → keep-alive re-post / close — all off `GetQueuedCompletionStatusEx`, per-op
+`OVERLAPPED` recovered by `CONTAINING_RECORD`. `tests/smoke_iocp.c` drives an
+end-to-end HTTP-over-IOCP roundtrip (the server pinned to the completion loop +
+overlapped provider, hit by the sync client) in the Windows-IOCP CI job — the first
+runtime proof of the completion axis. **8a scope:** plaintext GET/HEAD (no request
+body); request bodies, TLS, UDP, and streaming/file responses over IOCP remain 8b.
+Orthogonality held throughout — no `include/keel/*.h` change; the completion model
+lives only in `event_iocp.c` (Makefile-selected, no `#ifdef` in shared code); the
+readiness path is byte-identical.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
