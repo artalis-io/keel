@@ -394,6 +394,14 @@ smoke-tls: $(SMOKE_TLS_BIN)
 $(SMOKE_TLS_BIN): tests/smoke_tls.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# Buffered-BIO (completion-mode) TLS validation for 8b-5 — a full mbedTLS handshake
+# + app data via feed_input/drain_output, no socket. Local/BYO gate (KEEL_TLS=mbedtls).
+SMOKE_TLS_COMP_BIN = tests/smoke_tls_completion$(EXE)
+smoke-tls-completion: $(SMOKE_TLS_COMP_BIN)
+	./$(SMOKE_TLS_COMP_BIN)
+$(SMOKE_TLS_COMP_BIN): tests/smoke_tls_completion.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
 # Install / uninstall
 PREFIX  ?= /usr/local
 DESTDIR ?=

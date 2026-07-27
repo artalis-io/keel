@@ -125,6 +125,27 @@ struct KlTls {
      * @return 0 if a certificate was present and `*out` filled, -1 if none.
      */
     int (*peer_cert)(KlTls *self, KlPeerCert *out);
+
+    /**
+     * @brief Completion-mode transport (optional — NULL on backends that only do
+     * the synchronous socket BIO). When both feed_input and drain_output are set,
+     * the caller drives the transport: it feeds received ciphertext and drains the
+     * engine's outgoing ciphertext, and handshake()/read()/write() then operate on
+     * those buffers instead of the socket fd (their fd argument is ignored). Used by
+     * the completion event loop (IOCP); a readiness loop never calls these, so a
+     * backend that leaves them NULL — and every readiness path — is unaffected.
+     *
+     * feed_input: hand `len` bytes of received ciphertext to the engine's input.
+     *   Returns 0 on success, -1 on error (e.g. input buffer full).
+     */
+    int (*feed_input)(KlTls *self, const void *cipher, size_t len);
+
+    /**
+     * @brief Drain up to `cap` bytes of the engine's pending outgoing ciphertext
+     * into `buf` (what handshake()/write() produced). Returns bytes written (>= 0),
+     * or -1 on error. Optional — see feed_input.
+     */
+    ssize_t (*drain_output)(KlTls *self, void *buf, size_t cap);
 };
 
 /**

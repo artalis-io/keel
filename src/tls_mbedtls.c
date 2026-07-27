@@ -64,9 +64,36 @@ typedef struct {
     mbedtls_ssl_context ssl;
     KlMbedtlsCtx      *ctx;       /* shared context (not owned) */
     KlAllocator        *alloc;
-    KlSocketHandle      fd;        /* cached for BIO callbacks */
+    KlSocketHandle      fd;        /* cached for BIO callbacks (socket-BIO mode) */
     int                 handshake_done;
+    /* Completion (memory-BIO) mode — 8b-5. Active once feed_input() is first called:
+     * the BIO reads ciphertext from in_buf (fed by the caller) and appends outgoing
+     * ciphertext to out_buf (drained by the caller) instead of the socket fd. */
+    int                 comp_mode;
+    unsigned char      *in_buf;   size_t in_cap, in_len, in_pos;
+    unsigned char      *out_buf;  size_t out_cap, out_len;
 } KlMbedtlsTls;
+
+/* Cap on either completion ciphertext ring (a TLS record is <= ~16 KiB; cert-chain
+ * handshake flights are larger — 256 KiB is generous, overflow → connection error). */
+#define KL_TLS_COMP_MAX (256u * 1024u)
+
+/* Ensure *buf has capacity for `need` bytes (grow by doubling, capped). */
+static int comp_ensure(unsigned char **buf, size_t *cap, size_t need,
+                       KlAllocator *alloc) {
+    if (need <= *cap)
+        return 0;
+    if (need > KL_TLS_COMP_MAX)
+        return -1;
+    size_t nc = *cap ? *cap : 4096;
+    while (nc < need) nc = (nc > KL_TLS_COMP_MAX / 2) ? KL_TLS_COMP_MAX : nc * 2;
+    unsigned char *nb = kl_realloc(alloc, *buf, *cap, nc);
+    if (!nb)
+        return -1;
+    *buf = nb;
+    *cap = nc;
+    return 0;
+}
 
 /* ── Custom BIO callbacks (non-blocking I/O) ─────────────────────── */
 
@@ -75,11 +102,16 @@ typedef struct {
  * These translate between mbedTLS error codes and POSIX.
  */
 
-/* cppcheck-suppress constParameterCallback ; ctx must be void* to match the
- * mbedTLS f_send BIO function-pointer signature (mbedtls_ssl_set_bio) */
 static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 {
-    const KlMbedtlsTls *t = (const KlMbedtlsTls *)ctx;
+    KlMbedtlsTls *t = (KlMbedtlsTls *)ctx;
+    if (t->comp_mode) {   /* memory BIO: append to the outgoing-ciphertext ring */
+        if (comp_ensure(&t->out_buf, &t->out_cap, t->out_len + len, t->alloc) < 0)
+            return MBEDTLS_ERR_NET_SEND_FAILED;
+        memcpy(t->out_buf + t->out_len, buf, len);
+        t->out_len += len;
+        return (int)len;
+    }
     /* kl_sockdef_send suppresses SIGPIPE (MSG_NOSIGNAL) and retries EINTR on
      * POSIX; on Windows it's the Winsock send with kl_wsa_set_errno — so the
      * EAGAIN/EWOULDBLOCK check below works on both. */
@@ -94,11 +126,20 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
     return (int)ret;
 }
 
-/* cppcheck-suppress constParameterCallback ; ctx must be void* to match the
- * mbedTLS f_recv BIO function-pointer signature (mbedtls_ssl_set_bio) */
 static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 {
-    const KlMbedtlsTls *t = (const KlMbedtlsTls *)ctx;
+    KlMbedtlsTls *t = (KlMbedtlsTls *)ctx;
+    if (t->comp_mode) {   /* memory BIO: consume from the fed-ciphertext ring */
+        size_t avail = t->in_len - t->in_pos;
+        if (avail == 0)
+            return MBEDTLS_ERR_SSL_WANT_READ;   /* caller must feed_input more */
+        size_t n = len < avail ? len : avail;
+        memcpy(buf, t->in_buf + t->in_pos, n);
+        t->in_pos += n;
+        if (t->in_pos >= t->in_len)
+            t->in_pos = t->in_len = 0;
+        return (int)n;
+    }
     ssize_t ret = kl_sockdef_recv(t->fd, buf, len);
 
     if (ret < 0) {
@@ -189,18 +230,56 @@ static size_t tls_pending(KlTls *self)
     return mbedtls_ssl_get_bytes_avail(&t->ssl);
 }
 
+/* Completion mode (8b-5): feed received ciphertext to the engine's input ring. */
+static int tls_feed_input(KlTls *self, const void *cipher, size_t len)
+{
+    KlMbedtlsTls *t = (KlMbedtlsTls *)self;
+    t->comp_mode = 1;
+    if (t->in_pos > 0) {   /* compact the partially-consumed prefix */
+        memmove(t->in_buf, t->in_buf + t->in_pos, t->in_len - t->in_pos);
+        t->in_len -= t->in_pos;
+        t->in_pos = 0;
+    }
+    if (len == 0)
+        return 0;
+    if (comp_ensure(&t->in_buf, &t->in_cap, t->in_len + len, t->alloc) < 0)
+        return -1;
+    memcpy(t->in_buf + t->in_len, cipher, len);
+    t->in_len += len;
+    return 0;
+}
+
+/* Completion mode: drain the engine's pending outgoing ciphertext. */
+static ssize_t tls_drain_output(KlTls *self, void *buf, size_t cap)
+{
+    KlMbedtlsTls *t = (KlMbedtlsTls *)self;
+    size_t avail = t->out_len;
+    size_t n = (avail < cap) ? avail : cap;
+    if (n)
+        memcpy(buf, t->out_buf, n);
+    t->out_len = avail - n;               /* remaining ciphertext */
+    if (t->out_len)
+        memmove(t->out_buf, t->out_buf + n, t->out_len);
+    return (ssize_t)n;
+}
+
 static void tls_reset(KlTls *self)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     mbedtls_ssl_session_reset(&t->ssl);
     t->handshake_done = 0;
     t->fd = KL_INVALID_SOCKET;
+    /* Drop buffered ciphertext for the next request; keep the transport mode +
+     * allocated rings for reuse across keep-alive. */
+    t->in_len = t->in_pos = t->out_len = 0;
 }
 
 static void tls_destroy(KlTls *self)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     mbedtls_ssl_free(&t->ssl);
+    kl_free(t->alloc, t->in_buf, t->in_cap);
+    kl_free(t->alloc, t->out_buf, t->out_cap);
     kl_free(t->alloc, t, sizeof(*t));
 }
 
@@ -350,6 +429,14 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     t->base.alpn_protocol = tls_alpn_protocol;
     t->base.set_hostname  = kl_tls_mbedtls_set_hostname;
     t->base.peer_cert     = tls_peer_cert;
+    t->base.feed_input    = tls_feed_input;      /* completion mode (8b-5) */
+    t->base.drain_output  = tls_drain_output;
+
+    /* Completion (memory-BIO) mode starts off; feed_input() enables it. */
+    t->comp_mode = 0;
+    t->in_buf = t->out_buf = NULL;
+    t->in_cap = t->in_len = t->in_pos = 0;
+    t->out_cap = t->out_len = 0;
 
     /* Initialize SSL context */
     mbedtls_ssl_init(&t->ssl);
