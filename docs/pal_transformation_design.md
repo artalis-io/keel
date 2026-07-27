@@ -265,10 +265,17 @@ the `io_engine` dispatch seam — done:* `src/io_engine.h` declares
 wait/dispatch path byte-identical (the branch is never taken on readiness backends).
 The symbol is defined per-backend with no `#ifdef` in shared code — a stub in
 `src/io_engine.c` (linked on every non-IOCP build, never called) and the real tick
-in `event_iocp.c` (a documented placeholder until the driver lands). *Remaining:*
-the completion connection driver (accept/read/write via `WSARecv`/`WSASend` feeding
-a lifted, model-blind `kl_conn_ingest` protocol core), the server default-provider
-selection under IOCP, and a server-over-IOCP smoke test in the Windows-IOCP job.
+in `event_iocp.c` (a documented placeholder until the driver lands). *Increment 4a —
+the model-blind protocol-core exposure — done:* `src/conn_internal.h` +
+`kl_conn_dispatch_request` / `kl_conn_run_post_body` / `kl_conn_send_complete` —
+thin non-static handles onto connection.c's existing static core, so the completion
+driver reuses the exact parse→route→handle→lifecycle path after a completed
+`WSARecv` without the readiness transport wrapper and without connection.c learning
+the event model. `kl_conn_on_readable` is unchanged (byte-identical, POSIX-tested).
+*Remaining (4b):* the completion connection driver in `event_iocp.c`
+(`AcceptEx`/`WSARecv`/`WSASend` posting response `hdr_buf`+`body`, calling the core
+above), the server default-provider selection under IOCP, and a server-over-IOCP
+smoke test in the Windows-IOCP job (the first end-to-end HTTP-over-IOCP validation).
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.

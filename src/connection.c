@@ -6,6 +6,7 @@
 #include <keel/websocket_server.h>
 #include <keel/h2_server.h>
 #include <keel/proxy_protocol.h>
+#include "conn_internal.h"
 #include <assert.h>
 #include <string.h>
 #include <strings.h>
@@ -1095,4 +1096,24 @@ KlConnState kl_conn_on_writable(KlConn *c) {
     /* r > 0: more to send, stay in SENDING state */
 
     return c->state;
+}
+
+/* ── Model-blind protocol core (PAL Phase 8) ─────────────────────────
+ * Thin non-static handles onto the static helpers above, so the IOCP completion
+ * driver can reuse the exact parse→route→handle→lifecycle core after a completed
+ * WSARecv, without the readiness transport wrapper and without connection.c
+ * learning which event model produced the bytes. kl_conn_on_readable is unchanged
+ * (still calls the statics directly), so the readiness path stays byte-identical.
+ * See conn_internal.h / docs/phase8_iocp_design.md §4. */
+KlConnState kl_conn_dispatch_request(KlConn *c, KlRouter *router,
+                                     const char *leftover, size_t leftover_len) {
+    return conn_dispatch_request(c, router, leftover, leftover_len);
+}
+
+KlConnState kl_conn_run_post_body(KlConn *c, KlRouter *router) {
+    return conn_run_post_middleware_and_handle(c, router);
+}
+
+KlConnState kl_conn_send_complete(KlConn *c) {
+    return conn_send_complete(c);
 }
