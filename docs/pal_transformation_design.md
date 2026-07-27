@@ -330,6 +330,17 @@ as the transmit head-buffer, offset via `OVERLAPPED`, HANDLE via `_get_osfhandle
 surfaced as a completed write. `smoke_iocp.c` adds a `GET /file` roundtrip.
 `kl_response_file`/`KL_BODY_FILE` public API unchanged (axis 1); `TransmitFile` lives
 only in `event_iocp.c` (axis 2); POSIX byte-identical (55 suites).
+*Increment 8b-3 — streaming/chunked responses over IOCP — done:* the streaming
+write path (`kl_response_send` → drain / `kl_stream_write`) routes through the
+socket seam, which on a completion backend is a synchronous send on the (blocking)
+accepted socket — so a synchronously-produced chunked response is already sent (and
+any drained remainder flushed) by driving the existing internal `kl_response_send`
+to completion, then `kl_conn_send_complete`. `completion_driver.c` gains a
+`KL_BODY_STREAM` branch (`comp_send_stream`); `smoke_iocp.c` adds a `GET /stream`
+chunked roundtrip. **Only `completion_driver.c` + the smoke changed** — no shared/
+response code, no `include/keel/*.h` (axis 1); no Win32 symbol in the driver
+(axis 2). Scope: synchronous streams; async/long-lived streams and true *overlapped*
+chunk sends (vs the synchronous send used here) are a later refinement.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
