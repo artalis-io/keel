@@ -285,7 +285,25 @@ runtime proof of the completion axis. **8a scope:** plaintext GET/HEAD (no reque
 body); request bodies, TLS, UDP, and streaming/file responses over IOCP remain 8b.
 Orthogonality held throughout — no `include/keel/*.h` change; the completion model
 lives only in `event_iocp.c` (Makefile-selected, no `#ifdef` in shared code); the
-readiness path is byte-identical.
+readiness path is byte-identical. **Phase 8a is complete** — the plaintext GET/HEAD
+HTTP-over-IOCP foundational subset serves real requests on the Windows CI runner
+(`smoke-iocp`).
+
+**Phase 8b (completion-axis breadth) designed** in
+`docs/phase8b_iocp_breadth_design.md`. Two governing constraints, both orthogonality
+axes: (1) **non-invasive to surface public APIs** — request bodies, TLS, UDP, and
+streaming/file responses get IOCP support with **no** change to `KlBodyReader` /
+`KlTls` / `KlUdp` / `KlResponse` (a surface never learns the event model); and (2)
+**completion is a platform-independent concept, not an IOCP detail** — completion is
+an event *axis* (peer to readiness: abstract `event.h` + epoll/kqueue/… impls), so
+the generic completion **driver logic** moves to a platform-independent
+`completion.h` + `completion_driver.c`, and IOCP (`WSA*`/`OVERLAPPED`/`AcceptEx`/
+`TransmitFile`/GQCS) becomes merely one *implementation* of that axis — reusable by
+a future io_uring-completion / POSIX-AIO backend. Staged **8b-0** (extract the
+platform-independent completion axis from 8a's driver — pure refactor) → **8b-1**
+bodies → **8b-2** files (`TransmitFile`) → **8b-3** streaming → **8b-4** UDP →
+**8b-5** TLS (buffered BIO; deepest, last). Grep-assertable litmus enforces both
+axes; TLS is the crux/stop-condition.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
