@@ -45,12 +45,9 @@ typedef struct {
 
 struct KlEventCtx;
 
-/* ── Generic completion tick (platform-independent, completion_driver.c) ── */
-
-/* Drain the ctx's completion loop and route each finished op to its consumer
- * (connection driver / — 8b-4c — datagram). One tick, shared by the server run loop
- * and the standalone kl_event_ctx_run. Returns events processed (>= 0), or -1. */
-int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
+/* The generic completion tick kl_comp_run() is declared in io_engine.h (the event-
+ * model seam), so async.c's kl_event_ctx_run can reach it without pulling the whole
+ * completion backend contract. */
 
 /* ── Backend contract (implemented once per completion platform) ──────── */
 

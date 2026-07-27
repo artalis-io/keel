@@ -18,9 +18,19 @@
 #define KEEL_SRC_IO_ENGINE_H
 
 struct KlServer;
+struct KlEventCtx;
 
-/* Run one completion-loop tick: drain finished overlapped ops and drive their
- * connections. Returns 0 to continue the run loop, <0 to stop it. */
+/* Run one completion-loop tick for the server: prime accepts, then drive one
+ * generic tick over its event ctx. Returns 0 to continue the run loop, <0 to stop. */
 int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms);
+
+/* The generic completion tick: drain the ctx's completion loop and route each op to
+ * its consumer (connections; datagrams in 8b-4c). Shared by the server run loop and
+ * the standalone kl_event_ctx_run, so standalone consumers (UDP/DNS) run on a
+ * completion loop. Defined per-backend, selected by the Makefile (no #ifdef in shared
+ * code): the completion driver (completion_driver.c) provides the real tick; the
+ * io_engine.c stub is linked on readiness builds and never called (no readiness
+ * backend advertises COMPLETION). Returns events processed (>= 0), or -1. */
+int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
 
 #endif /* KEEL_SRC_IO_ENGINE_H */

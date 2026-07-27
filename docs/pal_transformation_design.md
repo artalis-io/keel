@@ -354,7 +354,16 @@ by `kl_event_caps`; the datagram delivery core is lifted model-blind so `on_recv
 fed identical bytes. Orthogonality held: readiness path untouched, `KlUdp` public API
 untouched (no `include/keel/*.h` change), `WSA*`/`OVERLAPPED` only in `event_iocp.c`.
 Staged 8b-4a (generalize axis, pure refactor) → 8b-4b (`kl_event_ctx_run` branch) →
-8b-4c (UDP recv) → 8b-4d (overlapped UDP send).
+8b-4c (UDP recv) → 8b-4d (overlapped UDP send). *8b-4a done:* `KlCompletionEvent`
+gained `void *target`, `kl_comp_drain` became ctx-scoped, and the generic
+`kl_comp_run(ctx)` tick + `kl_comp_prime_accepts(server)` split out (server recovered
+via `containerof(ctx, KlServer, ev)` — no public field); `kl_io_engine_run_completion`
+is a wrapper. *8b-4b done:* `kl_event_ctx_run` (async.c) gains a one-line completion
+branch (`if COMPLETION → kl_comp_run(ctx)`, stubbed in io_engine.c on non-completion
+builds, real in completion_driver.c) — dead on readiness backends (byte-identical),
+so standalone `KlEventCtx` consumers (UDP/DNS, 8b-4c) can run on a completion loop
+with no `#ifdef` in shared code. Both POSIX byte-identical (55 suites); MinGW links
+BACKEND=iocp (one `kl_comp_run` def) + WSAPoll (stub) + TCP smoke.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.

@@ -13,3 +13,11 @@ int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
     (void)s; (void)timeout_ms;
     return -1;   /* unreachable on readiness builds */
 }
+
+/* Stub for the generic completion tick — kl_event_ctx_run only calls it when the
+ * loop advertises KL_EVENT_CAP_COMPLETION, which no readiness backend does, so this
+ * is never invoked here. The real tick lives in completion_driver.c. */
+int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
+    (void)ctx; (void)max; (void)timeout_ms;
+    return -1;   /* unreachable on readiness builds */
+}

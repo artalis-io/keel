@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "internal.h"
 #include "event_caps.h"
+#include "io_engine.h"   /* kl_comp_run — the generic completion tick */
 
 /* ── Tagged pointer helpers ────────────────────────────────────────── */
 
@@ -172,6 +173,13 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
 
     /* Clamp timeout to next timer deadline */
     timeout_ms = kl_timer_next_timeout(ctx, timeout_ms);
+
+    /* Completion loop (IOCP): drive the generic completion tick instead of the
+     * readiness wait/dispatch, so standalone consumers (UDP/DNS in 8b-4c) run on a
+     * completion loop too. Dead on readiness backends (none advertise COMPLETION),
+     * so the path below is unchanged there (byte-identical). */
+    if (kl_event_caps(&ctx->loop) & KL_EVENT_CAP_COMPLETION)
+        return kl_comp_run(ctx, max_events, timeout_ms);
 
     KlEvent stack_buf[KL_CTX_STACK_EVENTS];
     KlEvent *events = stack_buf;
