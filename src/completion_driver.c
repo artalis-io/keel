@@ -192,6 +192,9 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
             kl_udp_comp_on_recv((KlUdp *)ev[i].target, ev[i].buf, ev[i].bytes,
                                 (struct sockaddr *)&ev[i].peer, ev[i].peer_len);
             break;
+        case KL_COMP_UDP_SEND:
+            kl_udp_comp_on_send((KlUdp *)ev[i].target, ev[i].bytes);
+            break;
         }
     }
     return n;

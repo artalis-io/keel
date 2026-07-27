@@ -27,7 +27,7 @@ struct KlServer;
 /* Platform-independent completion op kinds. */
 typedef enum {
     KL_COMP_ACCEPT, KL_COMP_READ, KL_COMP_WRITE,   /* TCP conn (target = KlConn*) */
-    KL_COMP_UDP_RECV                               /* datagram (target = KlUdp*) */
+    KL_COMP_UDP_RECV, KL_COMP_UDP_SEND             /* datagram (target = KlUdp*) */
 } KlCompKind;
 
 /* One finished async op, handed from a completion backend to the generic driver.

@@ -28,3 +28,9 @@ int kl_comp_post_udp_recv(struct KlUdp *udp) {
     (void)udp;
     return -1;   /* unreachable on readiness builds */
 }
+
+int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+                          const struct sockaddr *dest, int dest_len) {
+    (void)udp; (void)data; (void)len; (void)dest; (void)dest_len;
+    return -1;   /* unreachable on readiness builds */
+}

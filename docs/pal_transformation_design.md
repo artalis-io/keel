@@ -372,7 +372,7 @@ model-blind `kl_udp_deliver` (identical to the readiness `recvmsg` path — `on_
 fed identical bytes) and re-posts. `kl_comp_post_udp_recv` is shared-called (udp.c),
 so it's stubbed in io_engine.c like `kl_comp_run`. `smoke_iocp.c` adds a UDP-echo
 roundtrip. Axis 1: no `KlUdp`/`include/keel/*.h` change; axis 2: 0 Win32 symbols in
-`udp.c`/`completion_driver.c`; POSIX byte-identical. Overlapped UDP **send** is 8b-4d.
+`udp.c`/`completion_driver.c`; POSIX byte-identical. Overlapped UDP **send** is 8b-4d. *8b-4d done:* `kl_udp_send_to` on a completion loop posts an overlapped `WSASendTo` (plain sends; source-pinned/TOS fall through to the synchronous seam path). Backpressure reuses `q_bytes` as outstanding-overlapped bytes (the readiness send queue is idle on this loop — no public field added); `on_drain` fires when the last in-flight send completes (`kl_udp_comp_on_send`, off a `KL_COMP_UDP_SEND` event). `kl_comp_post_udp_send` (`WSASendTo`) lives only in `event_iocp.c`; stubbed in io_engine.c for non-completion builds. The UDP-echo smoke now exercises the overlapped reply. Axis 1: `KlUdp`/`on_drain`/`max_send_queue` semantics unchanged, no `include/keel/*.h` change; axis 2: 0 Win32 symbols in `udp.c`/`completion_driver.c`. **Phase 8b-4 (UDP over completion) complete.**
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.

@@ -38,7 +38,8 @@ typedef struct {
 } KlIocpState;
 
 typedef enum {
-    KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE, KL_IOCP_UDP_RECV
+    KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE,
+    KL_IOCP_UDP_RECV, KL_IOCP_UDP_SEND
 } KlIocpOpType;
 
 /* One in-flight overlapped op. `ov` MUST be first (CONTAINING_RECORD round-trip). */
@@ -272,6 +273,38 @@ int kl_comp_post_udp_recv(KlUdp *udp) {
     return 0;
 }
 
+/* Post one overlapped WSASendTo for a UDP socket (8b-4d). Copies the datagram + its
+ * destination into the op (owned until completion); surfaces KL_COMP_UDP_SEND. */
+int kl_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
+                          const struct sockaddr *dest, int dest_len) {
+    KlIocpState *st = udp->ctx->loop._backend;
+    KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
+    if (!op) return -1;
+    memset(op, 0, sizeof(*op));
+    op->type = KL_IOCP_UDP_SEND;
+    op->alloc = st->alloc;
+    op->udp = udp;
+    op->send_total = len;
+
+    op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
+    if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
+    memcpy(op->sendbuf, data, len);
+    if (dest_len > 0 && (size_t)dest_len <= sizeof(op->src)) {
+        memcpy(&op->src, dest, (size_t)dest_len);
+        op->src_len = dest_len;
+    }
+
+    WSABUF buf = { (ULONG)len, op->sendbuf };
+    DWORD sent = 0;
+    int rc = WSASendTo((SOCKET)udp->fd, &buf, 1, &sent, 0,
+                       (struct sockaddr *)&op->src, op->src_len, &op->ov, NULL);
+    if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+        iocp_op_free(op);
+        return -1;
+    }
+    return 0;
+}
+
 /* First-drain setup: load the extension fn pointers off the listen socket, learn
  * its address family, store it, and prime the accept backlog. Idempotent — latches
  * on st->started so the server may call it every tick. Server-scoped (needs the
@@ -386,6 +419,16 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
                 memcpy(&out[count].peer, &op->src, (size_t)op->src_len);
                 out[count].peer_len = (socklen_t)op->src_len;
             }
+            count++;
+            iocp_op_free(op);
+        } else if (op->type == KL_IOCP_UDP_SEND) {
+            /* Whole datagram send done — surface the original len so the driver
+             * releases exactly the reserved outstanding bytes (success or not). */
+            memset(&out[count], 0, sizeof(out[count]));
+            out[count].kind = KL_COMP_UDP_SEND;
+            out[count].target = op->udp;
+            out[count].bytes = op->send_total;
+            out[count].ok = (bytes > 0);
             count++;
             iocp_op_free(op);
         } else { /* KL_IOCP_SENDFILE — TransmitFile completes as a unit (head+file);
