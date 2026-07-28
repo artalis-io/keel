@@ -527,6 +527,73 @@ int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
     return 0;
 }
 
+/* Sweep pooled connections for idle/read/body timeouts (and WebSocket close deadlines).
+ * Runs on both event models. On the readiness path a timed-out conn is removed and
+ * released directly; on a completion loop it may hold a pending overlapped op, so we
+ * instead cancel that op (kl_comp_cancel) — the op then completes with an error and the
+ * driver releases the connection through its normal completion path (no dangling op or
+ * double release). Fixes the completion-path idle-timeout / slowloris gap. */
+static void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop) {
+    uint64_t timeout = (uint64_t)s->config.read_timeout_ms;
+    uint64_t body_timeout = s->config.body_timeout_ms > 0
+                            ? (uint64_t)s->config.body_timeout_ms
+                            : timeout;
+    for (int i = 0; i < s->pool.capacity; i++) {
+        KlConn *tc = &s->pool.conns[i];
+        if (tc->state == KL_CONN_CLOSED || tc->state == KL_CONN_PROCESSING)
+            continue;
+        /* Suspended: exempt from idle timeout — has its own deadline */
+        if (tc->state == KL_CONN_SUSPENDED)
+            continue;
+        /* WebSocket: exempt from HTTP idle timeout, check close deadline */
+        if (tc->state == KL_CONN_WEBSOCKET) {
+            kl_ws_server_auto_ping(tc, now);
+            if (kl_ws_server_check_close_timeout(tc, now)) {
+                if (completion_loop) {
+                    kl_comp_cancel(&s->ev, tc->fd);
+                } else {
+                    kl_event_del(&s->ev.loop, tc->fd);
+                    kl_server_conn_release(s, tc);
+                }
+            }
+            continue;
+        }
+        /* HTTP/2: PING keepalive is session's responsibility */
+        if (tc->state == KL_CONN_HTTP2)
+            continue;
+        /* TLS handshake time counts against read timeout */
+        int timed_out = (now - tc->last_active_ms > timeout);
+        /* Body deadline: absolute time from body start, not resettable.
+         * Catches slow-chunk attacks where 1 byte resets idle timer. */
+        if (!timed_out && tc->state == KL_CONN_READING_BODY &&
+            tc->body_start_ms > 0 &&
+            now - tc->body_start_ms > body_timeout) {
+            timed_out = 1;
+        }
+        if (timed_out) {
+            /* Cancel pending async file read before release (readiness io_uring path) */
+            if (tc->file_io_phase == 1 && tc->file_io) {
+                tc->file_io->cancel(tc->file_io, tc->fd);
+                tc->file_io_phase = 3;  /* FILE_IO_CANCELLING */
+                continue;  /* wait for cancel CQE in next tick */
+            }
+            if (tc->file_io_phase == 3)
+                continue;  /* FILE_IO_CANCELLING — still waiting */
+            /* Best-effort 408 (skip for TLS handshake — no HTTP framing yet). */
+            if (tc->state == KL_CONN_READING ||
+                tc->state == KL_CONN_READING_BODY)
+                best_effort_conn_write(tc, kl_408_response,
+                                       sizeof(kl_408_response) - 1);
+            if (completion_loop) {
+                kl_comp_cancel(&s->ev, tc->fd);   /* abort op → release via its completion */
+            } else {
+                kl_event_del(&s->ev.loop, tc->fd);
+                kl_server_conn_release(s, tc);
+            }
+        }
+    }
+}
+
 int kl_server_run(KlServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
 
@@ -589,6 +656,9 @@ int kl_server_run(KlServer *s) {
         if (completion_loop) {
             if (kl_io_engine_run_completion(s, KL_POLL_TIMEOUT_MS) < 0)
                 break;
+            /* Idle-timeout sweep on the completion loop too (slowloris defense) — the
+             * completion path never falls through to the readiness sweep below. */
+            kl_server_sweep_conn_timeouts(s, kl_monotonic_ms(), 1);
             continue;
         }
         /* Compute dynamic timeout based on nearest async op deadline */
@@ -849,59 +919,7 @@ transition:
          * complete, so connection states are stable.  Newly acquired slots
          * have fresh last_active_ms and won't be timed out. */
         now = kl_monotonic_ms();
-        uint64_t timeout = (uint64_t)s->config.read_timeout_ms;
-        uint64_t body_timeout = s->config.body_timeout_ms > 0
-                                ? (uint64_t)s->config.body_timeout_ms
-                                : timeout;
-        for (int i = 0; i < s->pool.capacity; i++) {
-            KlConn *tc = &s->pool.conns[i];
-            if (tc->state == KL_CONN_CLOSED || tc->state == KL_CONN_PROCESSING)
-                continue;
-            /* Suspended: exempt from idle timeout — has its own deadline */
-            if (tc->state == KL_CONN_SUSPENDED)
-                continue;
-            /* WebSocket: exempt from HTTP idle timeout, check close deadline */
-            if (tc->state == KL_CONN_WEBSOCKET) {
-                kl_ws_server_auto_ping(tc, now);
-                if (kl_ws_server_check_close_timeout(tc, now)) {
-                    kl_event_del(&s->ev.loop, tc->fd);
-                    kl_server_conn_release(s,tc);
-                }
-                continue;
-            }
-            /* HTTP/2: PING keepalive is session's responsibility */
-            if (tc->state == KL_CONN_HTTP2) {
-                continue;
-            }
-            /* TLS handshake time counts against read timeout */
-            int timed_out = (now - tc->last_active_ms > timeout);
-            /* Body deadline: absolute time from body start, not resettable.
-             * Catches slow-chunk attacks where 1 byte resets idle timer. */
-            if (!timed_out && tc->state == KL_CONN_READING_BODY &&
-                tc->body_start_ms > 0 &&
-                now - tc->body_start_ms > body_timeout) {
-                timed_out = 1;
-            }
-            if (timed_out) {
-                /* Cancel pending async file read before release */
-                if (tc->file_io_phase == 1 && tc->file_io) {
-                    tc->file_io->cancel(tc->file_io, tc->fd);
-                    tc->file_io_phase = 3;  /* FILE_IO_CANCELLING */
-                    continue;  /* wait for cancel CQE in next tick */
-                }
-                if (tc->file_io_phase == 3)
-                    continue;  /* FILE_IO_CANCELLING — still waiting */
-                /* Best-effort 408: small write to non-blocking socket
-                 * will almost always succeed in one call.
-                 * Skip for TLS handshake — no HTTP framing yet. */
-                if (tc->state == KL_CONN_READING ||
-                    tc->state == KL_CONN_READING_BODY)
-                    best_effort_conn_write(tc, kl_408_response,
-                                           sizeof(kl_408_response) - 1);
-                kl_event_del(&s->ev.loop, tc->fd);
-                kl_server_conn_release(s,tc);
-            }
-        }
+        kl_server_sweep_conn_timeouts(s, now, 0);
 
         /* Sweep async op deadlines */
         {

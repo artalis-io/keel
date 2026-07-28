@@ -34,3 +34,10 @@ int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
     (void)udp; (void)data; (void)len; (void)dest; (void)dest_len;
     return -1;   /* unreachable on readiness builds */
 }
+
+/* Stub for the completion-op cancel — the idle-timeout sweep only calls it on a
+ * completion loop (which no readiness backend advertises), so it is never invoked here.
+ * The real primitive lives in event_pollcomp.c / event_iocp.c. */
+void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
+    (void)ctx; (void)fd;
+}

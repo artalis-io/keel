@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/time.h>          /* struct timeval (SO_RCVTIMEO) — not guaranteed via socket.h */
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -133,6 +134,31 @@ static KlH2ServerSession *echo_factory(KlAllocator *alloc, KlH2ServerCallbacks *
     return &e->base;
 }
 
+/* Idle-timeout roundtrip (hardening): open a connection, send nothing, and confirm the
+ * server times it out and closes it (read_timeout_ms=400) — the completion-path slowloris
+ * defense. A slow/idle client must not hold a slot + overlapped read forever. */
+static int idle_timeout_closes(void) {
+    int cs = socket(AF_INET, SOCK_STREAM, 0);
+    if (cs < 0) return 0;
+    struct timeval tmo = { 3, 0 };   /* wait up to 3s for the server to close */
+    setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo));
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(SMOKE_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+    if (connect(cs, (struct sockaddr *)&to, sizeof(to)) < 0) { close(cs); return 0; }
+
+    /* Send nothing. The server should time out the idle read and close (best-effort 408
+     * then EOF). read() returns >0 (the 408) or 0 (EOF); a timeout (-1) means it did not
+     * close — the bug this test guards. */
+    char b[128];
+    ssize_t n = read(cs, b, sizeof(b));
+    if (n > 0) n = read(cs, b, sizeof(b));   /* drain the 408, then expect EOF */
+    close(cs);
+    return n == 0;
+}
+
 static KlServer g_srv;
 
 static void *server_thread(void *arg) {
@@ -224,7 +250,8 @@ static int h2_prior_knowledge_roundtrip(void) {
 int main(void) {
     static KlH2ServerConfig h2cfg = { .factory = echo_factory };
     KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
-                     .sockets = kl_socket_provider_pollcomp(), .h2 = &h2cfg };
+                     .sockets = kl_socket_provider_pollcomp(), .h2 = &h2cfg,
+                     .read_timeout_ms = 400 };   /* short, to exercise the idle sweep */
     if (kl_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-pollcomp: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
@@ -362,6 +389,9 @@ int main(void) {
         }
     }
 
+    /* Idle-timeout / slowloris defense on the completion loop (hardening). */
+    int idle_ok = h2pk_ok ? idle_timeout_closes() : 0;
+
     kl_udp_recv_stop(&g_udp);
     kl_udp_free(&g_udp);
     kl_server_stop(&g_srv);
@@ -380,7 +410,8 @@ int main(void) {
     if (!udp_ok) { fprintf(stderr, "smoke-pollcomp: UDP echo FAILED\n"); return 1; }
     if (!h2_ok) { fprintf(stderr, "smoke-pollcomp: h2c/h2-over-completion echo FAILED\n"); return 1; }
     if (!h2pk_ok) { fprintf(stderr, "smoke-pollcomp: h2 prior-knowledge echo FAILED\n"); return 1; }
+    if (!idle_ok) { fprintf(stderr, "smoke-pollcomp: idle-timeout (slowloris) close FAILED\n"); return 1; }
 
-    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST body + file + stream + UDP + h2c + h2-prior-knowledge)\n");
+    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST body + file + stream + UDP + h2c + h2-prior-knowledge + idle-timeout)\n");
     return 0;
 }
