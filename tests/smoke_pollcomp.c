@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/time.h>          /* struct timeval (SO_RCVTIMEO) — not guaranteed via socket.h */
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
