@@ -57,6 +57,14 @@ static inline void best_effort_conn_write(KlConn *c, const void *buf, size_t len
 /* Release a connection and resume listening if paused (defined in server.c) */
 void kl_server_conn_release(KlServer *s, KlConn *c);
 
+/* Drive the HTTP/2 server session with already-received plaintext: parse frames +
+ * flush produced output. Returns the next KlConnState (KL_CONN_HTTP2 / KL_CONN_CLOSED).
+ * The transport-agnostic h2 core (defined in h2.c): the readiness drive
+ * (kl_h2_server_on_readable) is conn_read + this; the completion driver reads via its
+ * own loop then calls this. Internal — the public h2 API and the KlH2ServerSession
+ * vtable are unchanged, so the event axis stays invisible to h2 users. */
+KlConnState kl_h2_server_feed(KlConn *c, const void *data, size_t len);
+
 /* Server logging helpers (defined in server.c; used by the per-platform
  * server_plat_*.c TUs too). */
 __attribute__((format(printf, 3, 4)))
