@@ -188,6 +188,39 @@ static int h2c_roundtrip(void) {
     return rlen == sizeof(SMOKE_H2) - 1 && memcmp(rb, SMOKE_H2, rlen) == 0;
 }
 
+#define SMOKE_H2PK "FRAME-VIA-PRIOR-KNOWLEDGE"
+
+/* h2 prior-knowledge roundtrip (8d-2): the client opens straight into h2 by sending the
+ * 24-byte connection preface (no HTTP/1.1 Upgrade), followed by a frame. Exercises the
+ * completion path's preface detection + comp_h2_drive. */
+static int h2_prior_knowledge_roundtrip(void) {
+    int cs = socket(AF_INET, SOCK_STREAM, 0);
+    if (cs < 0) return 0;
+    struct timeval tmo = { 1, 0 };
+    setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo));
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(SMOKE_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+    if (connect(cs, (struct sockaddr *)&to, sizeof(to)) < 0) { close(cs); return 0; }
+
+    char msg[128];
+    memcpy(msg, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24);
+    memcpy(msg + 24, SMOKE_H2PK, sizeof(SMOKE_H2PK) - 1);
+    if (write(cs, msg, 24 + sizeof(SMOKE_H2PK) - 1) < 0) { close(cs); return 0; }
+
+    char rb[128];
+    size_t rlen = 0;
+    while (rlen < sizeof(SMOKE_H2PK) - 1) {
+        ssize_t n = read(cs, rb + rlen, sizeof(rb) - rlen);
+        if (n <= 0) break;
+        rlen += (size_t)n;
+    }
+    close(cs);
+    return rlen == sizeof(SMOKE_H2PK) - 1 && memcmp(rb, SMOKE_H2PK, rlen) == 0;
+}
+
 int main(void) {
     static KlH2ServerConfig h2cfg = { .factory = echo_factory };
     KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
@@ -320,6 +353,15 @@ int main(void) {
         }
     }
 
+    /* h2 prior-knowledge (preface) → echo roundtrip (8d-2). */
+    int h2pk_ok = 0;
+    if (h2_ok) {
+        for (int i = 0; i < 20 && !h2pk_ok; i++) {
+            h2pk_ok = h2_prior_knowledge_roundtrip();
+            if (!h2pk_ok) nap_ms(50);
+        }
+    }
+
     kl_udp_recv_stop(&g_udp);
     kl_udp_free(&g_udp);
     kl_server_stop(&g_srv);
@@ -337,7 +379,8 @@ int main(void) {
     if (!stream_ok) { fprintf(stderr, "smoke-pollcomp: GET/stream FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!udp_ok) { fprintf(stderr, "smoke-pollcomp: UDP echo FAILED\n"); return 1; }
     if (!h2_ok) { fprintf(stderr, "smoke-pollcomp: h2c/h2-over-completion echo FAILED\n"); return 1; }
+    if (!h2pk_ok) { fprintf(stderr, "smoke-pollcomp: h2 prior-knowledge echo FAILED\n"); return 1; }
 
-    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST body + file + stream + UDP + h2c)\n");
+    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST body + file + stream + UDP + h2c + h2-prior-knowledge)\n");
     return 0;
 }

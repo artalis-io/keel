@@ -283,6 +283,24 @@ static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
  * if the request was dispatched/acted-on (or the connection was closed). Split out so
  * the TLS read loop can reuse it across coalesced records via pending(). */
 static int comp_try_reading(struct KlServer *s, KlConn *c) {
+    /* HTTP/2 prior-knowledge connection preface (before the HTTP/1.1 parser, 8d-2) —
+     * mirrors the readiness read loop. A client with prior knowledge opens straight
+     * into h2 by sending the 24-byte preface; upgrade and feed the leftover. */
+    if (c->h2_config != NULL) {
+        static const char h2_preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+        if (c->read_len >= 24) {
+            if (memcmp(c->read_buf, h2_preface, 24) == 0) {
+                KlConnState st = (KlConnState)kl_h2_server_upgrade(
+                    c, &s->router, c->h2_config, c->read_buf + 24, c->read_len - 24);
+                comp_after_state(s, c, st);
+                return 0;
+            }
+            /* not a preface — fall through to the HTTP/1.1 parser */
+        } else if (memcmp(c->read_buf, h2_preface, c->read_len) == 0) {
+            return 1;   /* partial preface — need more bytes */
+        }
+    }
+
     size_t consumed = 0;
     KlParseResult pr = c->parser->parse(c->parser, &c->req,
                                         c->read_buf, c->read_len, &consumed);
