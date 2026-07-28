@@ -44,6 +44,16 @@ static void handle_ok(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 
+/* GET /big — a large body (> socket send buffer) so the pollcomp WRITE op must loop
+ * over several send() calls (partial-send path). */
+#define SMOKE_BIG_LEN (256 * 1024)
+static char g_big[SMOKE_BIG_LEN];
+static void handle_big(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    kl_response_status(res, 200);
+    kl_response_body_borrow(res, g_big, SMOKE_BIG_LEN);
+}
+
 static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
@@ -159,6 +169,69 @@ static int idle_timeout_closes(void) {
     return n == 0;
 }
 
+/* Connect a blocking TCP client to the server; -1 on failure. */
+static int connect_client(void) {
+    int cs = socket(AF_INET, SOCK_STREAM, 0);
+    if (cs < 0) return -1;
+    struct timeval tmo = { 2, 0 };
+    setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo));
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(SMOKE_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+    if (connect(cs, (struct sockaddr *)&to, sizeof(to)) < 0) { close(cs); return -1; }
+    return cs;
+}
+
+/* Keep-alive churn: N sequential HTTP/1.1 requests on ONE connection, each fully read
+ * before the next. Exercises the completion keep-alive reset (send_complete → post_recv)
+ * repeatedly on a single conn. */
+static int keepalive_churn(int n) {
+    int cs = connect_client();
+    if (cs < 0) return 0;
+    const char *req = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+    for (int k = 0; k < n; k++) {
+        if (write(cs, req, strlen(req)) < 0) { close(cs); return 0; }
+        char buf[1024];
+        size_t got = 0;
+        int found = 0;
+        while (got < sizeof(buf) - 1) {
+            ssize_t r = read(cs, buf + got, sizeof(buf) - 1 - got);
+            if (r <= 0) break;
+            got += (size_t)r;
+            buf[got] = 0;
+            if (strstr(buf, SMOKE_BODY)) { found = 1; break; }  /* full body = complete */
+        }
+        if (!found) { close(cs); return 0; }
+    }
+    close(cs);
+    return 1;
+}
+
+/* Resilience: an abrupt mid-request drop and a malformed request must be cleaned up
+ * without crashing/leaking; then a normal request must still succeed (server survived).
+ * The leak/UAF signal comes from the ASan CI run over these cleanup paths. */
+static int resilience_ok(KlAllocator *alloc, KlClientConfig *ccfg) {
+    int cs = connect_client();       /* 1. partial request, then abrupt close */
+    if (cs >= 0) { (void)!write(cs, "GET / HTT", 9); close(cs); }
+    cs = connect_client();           /* 2. malformed request */
+    if (cs >= 0) {
+        (void)!write(cs, "@@@ not-http\r\n\r\n", 16);
+        char b[128];
+        (void)!read(cs, b, sizeof(b));   /* 400 or EOF — either is fine */
+        close(cs);
+    }
+    nap_ms(50);
+    KlClientResponse resp;            /* 3. server survived */
+    memset(&resp, 0, sizeof(resp));
+    int rc = kl_client_request(alloc, ccfg, "GET", "http://127.0.0.1:18092/",
+                               NULL, 0, NULL, 0, &resp);
+    int ok = (rc == 0 && resp.status == 200);
+    if (rc == 0) kl_client_response_free(&resp);
+    return ok;
+}
+
 static KlServer g_srv;
 
 static void *server_thread(void *arg) {
@@ -260,6 +333,8 @@ int main(void) {
     kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
     kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
+    kl_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
+    memset(g_big, 'A', sizeof(g_big));
 
     int wfd = open(SMOKE_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (wfd < 0 || write(wfd, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) != (ssize_t)(sizeof(SMOKE_FILE) - 1)) {
@@ -284,7 +359,7 @@ int main(void) {
     }
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig ccfg = { .timeout_ms = 1000 };
+    KlClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 2 * 1024 * 1024 };
     int ok = 0, last_rc = -1, last_status = -1, last_err = 0;
     size_t last_len = 0;
     for (int i = 0; i < 50 && !ok; i++) {
@@ -392,6 +467,19 @@ int main(void) {
     /* Idle-timeout / slowloris defense on the completion loop (hardening). */
     int idle_ok = h2pk_ok ? idle_timeout_closes() : 0;
 
+    /* Adversarial edge-case batch (hardening) — all under the ASan CI run. */
+    int churn_ok = idle_ok ? keepalive_churn(50) : 0;       /* keep-alive reset churn */
+    int resil_ok = churn_ok ? resilience_ok(&alloc, &ccfg) : 0;  /* drop + malformed cleanup */
+    int big_ok = 0;                                          /* partial-send WRITE loop */
+    if (resil_ok) {
+        KlClientResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/big",
+                                   NULL, 0, NULL, 0, &resp);
+        big_ok = (rc == 0 && resp.status == 200 && resp.body_len == SMOKE_BIG_LEN);
+        if (rc == 0) kl_client_response_free(&resp);
+    }
+
     kl_udp_recv_stop(&g_udp);
     kl_udp_free(&g_udp);
     kl_server_stop(&g_srv);
@@ -411,7 +499,10 @@ int main(void) {
     if (!h2_ok) { fprintf(stderr, "smoke-pollcomp: h2c/h2-over-completion echo FAILED\n"); return 1; }
     if (!h2pk_ok) { fprintf(stderr, "smoke-pollcomp: h2 prior-knowledge echo FAILED\n"); return 1; }
     if (!idle_ok) { fprintf(stderr, "smoke-pollcomp: idle-timeout (slowloris) close FAILED\n"); return 1; }
+    if (!churn_ok) { fprintf(stderr, "smoke-pollcomp: keep-alive churn FAILED\n"); return 1; }
+    if (!resil_ok) { fprintf(stderr, "smoke-pollcomp: resilience (drop/malformed) FAILED\n"); return 1; }
+    if (!big_ok) { fprintf(stderr, "smoke-pollcomp: large-response partial-send FAILED\n"); return 1; }
 
-    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST body + file + stream + UDP + h2c + h2-prior-knowledge + idle-timeout)\n");
+    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST + file + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large)\n");
     return 0;
 }
