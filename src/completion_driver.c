@@ -280,7 +280,9 @@ static void comp_tls_drive(struct KlServer *s, KlConn *c) {
         if (st == KL_CONN_TLS_HANDSHAKE || st == KL_CONN_READING) {
             if (kl_comp_post_recv(c) < 0) comp_close(s, c);
         } else {
-            /* CLOSED, or HTTP2 (ALPN h2) — not driven over the completion subset. */
+            /* CLOSED (handshake failure). KL_CONN_HTTP2 cannot occur here: h2_config is
+             * cleared on the completion accept path, so kl_conn_on_handshake never runs
+             * the ALPN-h2 upgrade — the completion loop serves HTTP/1.1 over TLS. */
             comp_close(s, c);
         }
         return;
@@ -342,6 +344,17 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
     }
     nc->res.alloc = &s->alloc_storage;
     (void)kl_sock_set_tcp_nodelay(nc->ctx ? nc->ctx->sockets : NULL, nc->fd, 1);
+
+    /* HTTP/2 is a full multiplexed readiness-driven session (h2.c, via conn_read/
+     * conn_write); it is not driven over the completion loop in this subset. Clear
+     * h2_config on the completion path so kl_conn_on_handshake never attempts the
+     * (doomed) ALPN-h2 upgrade — no h2 session is allocated and no stray SETTINGS/
+     * preface is written before a close. The completion loop serves HTTP/1.1 over TLS;
+     * a TLS ctx used with IOCP should not advertise the "h2" ALPN protocol (if it does
+     * and a client selects h2, the h2 preface fails HTTP/1.1 parsing and the connection
+     * closes cleanly — never mis-served as HTTP/1.1). Full h2-over-completion is a
+     * future phase. Completion-path only — the readiness h2 path is untouched. */
+    nc->h2_config = NULL;
 
     /* TLS: enter the handshake state and switch the backend into completion (memory
      * BIO) mode so handshake()/read()/write() operate on fed/drained buffers instead
