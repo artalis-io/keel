@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include "internal.h"
+#include "h2_internal.h"
 #include "socket.h"
 
 /* Socket provider for this connection's fd. NULL (POSIX default) for a

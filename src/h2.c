@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include "internal.h"
+#include "h2_internal.h"       /* KlH2ServerConn / KlH2ServerStream bodies (opaque now) */
 #include "platform.h"   /* kl_plat_file_pread */
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -428,41 +429,32 @@ static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
     h2_stream_destroy(h2c, stream);
 }
 
-static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
-    KlH2ServerConn *h2c = ud;
-    /* Completion loop (8d-3): capture produced frame bytes into out_buf instead of
-     * writing the socket, so the driver can post them as one ordered overlapped send.
-     * Driver-set; on the readiness path out_capture is 0 and this is a no-op branch. */
-    if (h2c->out_capture) {
-        if (len > SIZE_MAX - h2c->out_len) return -1;
-        if (h2c->out_len + len > h2c->out_cap) {
-            size_t ncap = h2c->out_cap ? h2c->out_cap : 4096;
-            while (ncap < h2c->out_len + len) {
-                if (ncap > SIZE_MAX / 2) return -1;
-                ncap *= 2;
-            }
-            char *nb = kl_realloc(h2c->alloc, h2c->out_buf, h2c->out_cap, ncap);
-            if (!nb) return -1;
-            h2c->out_buf = nb;
-            h2c->out_cap = ncap;
-        }
-        memcpy(h2c->out_buf + h2c->out_len, data, len);
-        h2c->out_len += len;
-        return (ssize_t)len;
-    }
+/* Default output writer: write the socket (TLS-aware conn_write). Used on the readiness
+ * path and whenever a completion driver has not installed a buffering writer. */
+static ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
+    KlH2ServerConn *h2c = ctx;
     return conn_write(h2c->conn, data, len);
 }
 
-/* Completion driver hooks (8d-3): begin capturing this feed's output into out_buf, then
- * take the captured span (and stop capturing) to post it overlapped. See internal.h. */
-void kl_h2_server_capture_begin(KlConn *c) {
-    if (c->h2) { c->h2->out_capture = 1; c->h2->out_len = 0; }
+/* The session emits produced frame bytes here; route them through the output seam
+ * (default: the socket; a completion driver can install a buffering writer — 8d-4). */
+static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
+    KlH2ServerConn *h2c = ud;
+    return h2c->out_write(h2c->out_ctx, data, len);
 }
-const char *kl_h2_server_capture_take(KlConn *c, size_t *len) {
-    if (!c->h2) { *len = 0; return NULL; }
-    c->h2->out_capture = 0;
-    *len = c->h2->out_len;
-    return c->h2->out_buf;
+
+/* Install a custom output writer (fn != NULL) or restore the default socket writer
+ * (fn == NULL). The completion driver brackets a feed with this to capture the produced
+ * frames into its own buffer for one ordered overlapped send. See internal.h. */
+void kl_h2_server_set_writer(KlConn *c, KlH2WriteFn fn, void *ctx) {
+    if (!c->h2) return;
+    if (fn) {
+        c->h2->out_write = fn;
+        c->h2->out_ctx = ctx;
+    } else {
+        c->h2->out_write = h2_out_conn_write;
+        c->h2->out_ctx = c->h2;
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -502,6 +494,8 @@ int kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
     h2c->callbacks.on_stream_end = h2_cb_on_stream_end;
     h2c->callbacks.on_stream_reset = h2_cb_on_stream_reset;
     h2c->callbacks.send = h2_cb_send;
+    h2c->out_write = h2_out_conn_write;   /* default output sink; driver may override */
+    h2c->out_ctx = h2c;
 
     h2c->session = cfg->factory(alloc, &h2c->callbacks, h2c);
     if (!h2c->session) {
@@ -624,9 +618,6 @@ void kl_h2_server_cleanup(KlConn *c) {
 
     if (h2c->session)
         h2c->session->destroy(h2c->session);
-
-    if (h2c->out_buf)
-        kl_free(h2c->alloc, h2c->out_buf, h2c->out_cap);   /* 8d-3 capture buffer */
 
     kl_free(h2c->alloc, h2c, sizeof(KlH2ServerConn));
     c->h2 = NULL;

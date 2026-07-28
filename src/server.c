@@ -11,6 +11,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include "internal.h"
+#include "h2_internal.h"
 #include "socket.h"       /* seam + sockcompat: sockaddr / getaddrinfo / inet_ntop / TCP opts */
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
