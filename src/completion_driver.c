@@ -215,6 +215,39 @@ static void comp_tls_send_stream(struct KlServer *s, KlConn *c) {
     }
 }
 
+/* Drive an established HTTP/2 connection over the completion loop (8d-1). Feed received
+ * plaintext to the h2 session via kl_h2_server_feed (which parses frames and flushes
+ * produced output through conn_write — a synchronous blocking send for plaintext, the
+ * memory-BIO ring for TLS), then read more. The h2 session vtable and kl_h2_server_feed
+ * are reused verbatim — this only inverts the transport, exactly as the HTTP/1.1 path
+ * does. For TLS the received ciphertext was already fed to the engine (kl_comp_drain);
+ * loop on pending() so coalesced records aren't stranded. */
+static void comp_h2_drive(struct KlServer *s, KlConn *c) {
+    if (c->tls) {
+        for (;;) {
+            ssize_t p = c->tls->read(c->tls, c->fd, c->read_buf, c->read_cap);
+            if (p < 0) { comp_close(s, c); return; }
+            if (p == 0) {                              /* WANT_READ — need the network */
+                if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+                return;
+            }
+            KlConnState st = kl_h2_server_feed(c, c->read_buf, (size_t)p);
+            if (comp_tls_flush(c) < 0) { comp_close(s, c); return; }   /* drain h2 output */
+            if (st != KL_CONN_HTTP2) { comp_close(s, c); return; }
+            if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
+                if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+                return;
+            }
+        }
+    }
+    /* Plaintext: the received frame bytes are already in read_buf (comp_on_read added
+     * this recv's bytes). Feed them; output was sent synchronously via conn_write. */
+    KlConnState st = kl_h2_server_feed(c, c->read_buf, c->read_len);
+    c->read_len = 0;
+    if (st != KL_CONN_HTTP2) { comp_close(s, c); return; }
+    if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+}
+
 /* Act on the state a completed request produced. */
 static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
     if (st == KL_CONN_SENDING) {
@@ -230,9 +263,17 @@ static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
         }
     } else if (st == KL_CONN_READING_BODY) {
         comp_start_body_read(s, c);
+    } else if (st == KL_CONN_HTTP2) {
+        /* Entered h2 via an h2c Upgrade (plaintext): upgrade_from_h1 already sent the
+         * 101 + initial SETTINGS through conn_write and consumed the leftover. Reset the
+         * read window so the next recv starts a fresh h2 frame buffer (the HTTP/1.1
+         * upgrade request must not be re-fed), then read h2 frames. */
+        c->read_len = 0;
+        if (c->tls && comp_tls_flush(c) < 0) { comp_close(s, c); return; }
+        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
     } else {
-        /* CLOSED, or SUSPENDED (async handlers are not driven over IOCP in this
-         * subset) — close rather than mis-serve. */
+        /* CLOSED, or SUSPENDED (async handlers are not driven over the completion loop
+         * in this subset) — close rather than mis-serve. */
         comp_close(s, c);
     }
 }
@@ -274,16 +315,18 @@ static void comp_drive_body(struct KlServer *s, KlConn *c) {
  * each decrypt phase loops on pending() so buffered plaintext isn't stranded waiting
  * for the next network read. Ciphertext output is flushed synchronously. */
 static void comp_tls_drive(struct KlServer *s, KlConn *c) {
+    if (c->state == KL_CONN_HTTP2) { comp_h2_drive(s, c); return; }   /* ALPN h2 (8d-1) */
+
     if (c->state == KL_CONN_TLS_HANDSHAKE) {
         KlConnState st = kl_conn_on_handshake(c);      /* reads fed ciphertext */
         if (comp_tls_flush(c) < 0) { comp_close(s, c); return; }   /* push HS records */
-        if (st == KL_CONN_TLS_HANDSHAKE || st == KL_CONN_READING) {
+        if (st == KL_CONN_TLS_HANDSHAKE || st == KL_CONN_READING || st == KL_CONN_HTTP2) {
+            /* HTTP2: ALPN negotiated h2; kl_conn_on_handshake ran the upgrade and its
+             * initial SETTINGS were flushed just above. Read h2 frames next. */
+            if (st == KL_CONN_HTTP2) c->read_len = 0;   /* fresh h2 frame window */
             if (kl_comp_post_recv(c) < 0) comp_close(s, c);
         } else {
-            /* CLOSED (handshake failure). KL_CONN_HTTP2 cannot occur here: h2_config is
-             * cleared on the completion accept path, so kl_conn_on_handshake never runs
-             * the ALPN-h2 upgrade — the completion loop serves HTTP/1.1 over TLS. */
-            comp_close(s, c);
+            comp_close(s, c);   /* CLOSED (handshake failure) */
         }
         return;
     }
@@ -345,16 +388,10 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
     nc->res.alloc = &s->alloc_storage;
     (void)kl_sock_set_tcp_nodelay(nc->ctx ? nc->ctx->sockets : NULL, nc->fd, 1);
 
-    /* HTTP/2 is a full multiplexed readiness-driven session (h2.c, via conn_read/
-     * conn_write); it is not driven over the completion loop in this subset. Clear
-     * h2_config on the completion path so kl_conn_on_handshake never attempts the
-     * (doomed) ALPN-h2 upgrade — no h2 session is allocated and no stray SETTINGS/
-     * preface is written before a close. The completion loop serves HTTP/1.1 over TLS;
-     * a TLS ctx used with IOCP should not advertise the "h2" ALPN protocol (if it does
-     * and a client selects h2, the h2 preface fails HTTP/1.1 parsing and the connection
-     * closes cleanly — never mis-served as HTTP/1.1). Full h2-over-completion is a
-     * future phase. Completion-path only — the readiness h2 path is untouched. */
-    nc->h2_config = NULL;
+    /* HTTP/2 over the completion loop is supported (8d-1): h2_config is left intact, so
+     * kl_conn_on_handshake may run the ALPN-h2 upgrade and comp_tls_drive / comp_after_
+     * state route KL_CONN_HTTP2 to comp_h2_drive. (8c-4 cleared h2_config here as a
+     * well-defined refusal before the driver existed; that clear is now removed.) */
 
     /* TLS: enter the handshake state and switch the backend into completion (memory
      * BIO) mode so handshake()/read()/write() operate on fed/drained buffers instead
@@ -388,7 +425,9 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
     c->read_len += ev->bytes;
     /* Body reads use a fresh sliding window (read_len was reset to 0 before the
      * post), so read_len == the bytes just received. Headers accumulate. */
-    if (c->state == KL_CONN_READING_BODY)
+    if (c->state == KL_CONN_HTTP2)
+        comp_h2_drive(s, c);           /* plaintext h2 (h2c) frames (8d-1) */
+    else if (c->state == KL_CONN_READING_BODY)
         comp_drive_body(s, c);
     else
         comp_drive_reading(s, c);

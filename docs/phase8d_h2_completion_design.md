@@ -165,7 +165,7 @@ actually testable rather than compile-gated.
 |---|---|---|
 | **8d-0** ✅ | `kl_h2_server_feed` internal seam; `on_readable` = `conn_read` + `feed` | POSIX: readiness h2 tests (mock session) — real |
 | **8d-0.5** ✅ | portable `poll()` completion backend (`event_pollcomp.c`, `BACKEND=pollcomp`) implementing `completion.h` | `smoke_pollcomp` runs the real completion driver on Linux/macOS under CI — 8b/8c now runtime-tested, not compile-gated |
-| **8d-1** | `comp_h2_drive` (TLS-ALPN); revert 8c-4 clear; route `KL_CONN_HTTP2` | POSIX via pollcomp (mock h2 session) + MinGW compile-gate |
+| **8d-1** ✅ | `comp_h2_drive`; revert 8c-4 clear; route `KL_CONN_HTTP2` (ALPN + h2c) | POSIX via pollcomp (echo h2 session, h2c Upgrade roundtrip) + MinGW compile-gate — real |
 | **8d-2** *(optional)* | plaintext h2c over completion | as 8d-1 |
 | **8d-3** *(optional)* | overlapped (non-synchronous) h2 output | as 8d-1 |
 
