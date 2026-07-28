@@ -175,13 +175,21 @@ completes (`comp_on_write`) — so **at most one h2 send is ever in flight** and
 cannot reorder (the ordering guarantee the h2 wire requires). Plaintext captures the
 session's output via an internal per-conn buffer (KEEL's `h2_cb_send` appends to it when
 the driver sets `out_capture`, instead of `conn_write`); TLS drains the memory-BIO out
-ring. **Honest concession:** this needs per-conn output state, placed as additive fields
-on the KEEL-internal `KlH2ServerConn` (documented internal, in the public header but never
-touched by the session vtable) — the only include/keel change in 8d, and the minimal way
-to invert the session's synchronous send callback without leaking IOCP into h2.c (the
-capture is keyed on a driver flag, not a platform check). Readiness is byte-identical
-(`out_capture` stays 0). Plaintext is CI-tested over pollcomp (ASan-clean); TLS is
-compile-gated. **Phase 8d complete.**
+ring. Readiness is byte-identical. Plaintext is CI-tested over pollcomp (ASan-clean); TLS
+is compile-gated.
+
+*8d-4 (cleanup) — the concession is resolved.* 8d-3 initially needed per-conn output
+state, placed as additive fields on the KEEL-internal `KlH2ServerConn`; 8d-4 removes that
+smell in two moves. (1) `KlH2ServerConn`/`KlH2ServerStream` are now **opaque** — their
+bodies moved from the public `<keel/h2_server.h>` into `src/h2_internal.h` (only
+`connection.c`/`server.c`/`h2.c` + the white-box h2 tests include it), so internal h2
+state is **no longer a public-API change** and the public header actually *shrank*. (2)
+The capture fields + the `h2_cb_send` branch are replaced by a generic **output-writer
+seam** (`KlH2WriteFn out_write`/`out_ctx`, default = a `conn_write` wrapper), symmetric
+with the WebSocket server's `kl_drain` boundary; the completion driver installs its own
+buffering writer around a feed (`kl_h2_server_set_writer`) and owns the buffer + growth
+in `completion_driver.c`. Result: **h2.c has zero completion state or logic** — just the
+seam — and 8d makes **no `include/keel/` addition** at all. **Phase 8d complete.**
 
 *8d-0.5 done:* rather than a throwaway mock, `event_pollcomp.c` is a genuine second
 completion backend — it implements the full `completion.h` contract (accept / read /

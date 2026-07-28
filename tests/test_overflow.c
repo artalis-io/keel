@@ -13,6 +13,7 @@
 #include <keel/websocket.h>
 #include <keel/h2.h>
 #include <keel/h2_server.h>
+#include "../src/h2_internal.h"
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>

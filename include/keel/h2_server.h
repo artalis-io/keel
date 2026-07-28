@@ -90,48 +90,11 @@ typedef struct KlH2ServerConfig {
     int initial_window_size;     /**< 0 = KL_H2_DEFAULT_WINDOW_SIZE */
 } KlH2ServerConfig;
 
-/* ── Per-stream state ────────────────────────────────────────────── */
-
-struct KlH2ServerStream {
-    uint32_t stream_id;         /**< HTTP/2 stream identifier. */
-    KlRequest req;              /**< Parsed request for this stream. */
-    KlResponse res;             /**< Response builder for this stream. */
-    KlBodyReader *body_reader;  /**< Body reader (route-provided or NULL). */
-    KlRoute *route;             /**< Matched route (NULL if no match). */
-    KlParam params[KL_MAX_PARAMS]; /**< Extracted route parameters. */
-    int num_params;             /**< Number of extracted parameters. */
-    int route_result;           /**< Route match result code. */
-    int headers_done;           /**< Non-zero after HEADERS frame received. */
-    int body_done;              /**< Non-zero after END_STREAM received. */
-    size_t body_received;       /**< Total body bytes received so far. */
-    int response_submitted;     /**< Non-zero after response submitted. */
-    char *hdr_storage;          /**< Contiguous header name/value storage. */
-    size_t hdr_storage_len;     /**< Length of hdr_storage in bytes. */
-};
-
-/* ── Per-connection HTTP/2 state ─────────────────────────────────── */
-
-struct KlH2ServerConn {
-    KlH2ServerSession *session;    /**< Active HTTP/2 session (user-provided vtable). */
-    KlH2ServerCallbacks callbacks; /**< Callbacks wired to KEEL internals. */
-    KlConn *conn;                  /**< Underlying TCP connection. */
-    KlRouter *router;              /**< Router for dispatching streams. */
-    KlAllocator *alloc;            /**< Allocator for stream/header storage. */
-    KlH2ServerStream *streams;     /**< Array of active streams. */
-    int num_streams;               /**< Number of active streams. */
-    int max_streams;               /**< Maximum concurrent streams allowed. */
-    int goaway_sent;               /**< Non-zero after GOAWAY sent. */
-    /* Completion-loop output capture (PAL 8d-3). When out_capture is set, KEEL's send
-     * callback appends produced frame bytes to out_buf instead of writing the socket,
-     * so the completion driver can post them as one ordered overlapped send (frames must
-     * not reorder). Driver-driven; unused and zero-cost on the readiness path
-     * (out_capture stays 0 → output goes straight to conn_write, unchanged). Internal —
-     * the session vtable never sees these. */
-    char  *out_buf;                /**< Captured outgoing frame bytes (completion). */
-    size_t out_len;                /**< Bytes captured. */
-    size_t out_cap;                /**< out_buf capacity. */
-    int    out_capture;            /**< 1 = capture to out_buf instead of conn_write. */
-};
+/* Per-stream (KlH2ServerStream) and per-connection (KlH2ServerConn) state are opaque —
+ * their bodies are internal (src/h2_internal.h). Users interact with HTTP/2 only through
+ * the KlH2ServerSession vtable + KlH2ServerConfig above; the connection is passed to the
+ * session callbacks as an opaque void*. Keeping the bodies out of this public header lets
+ * KEEL evolve internal h2 state (buffering seams, etc.) without a public-API change. */
 
 /* ── Internal functions (used by connection.c, server.c) ─────────── */
 

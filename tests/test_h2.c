@@ -2,6 +2,7 @@
 #include <keel/keel.h>
 #include <keel/h2.h>
 #include <keel/h2_server.h>
+#include "../src/h2_internal.h"
 #include <keel/connection.h>
 #include <keel/router.h>
 #include <keel/body_reader.h>

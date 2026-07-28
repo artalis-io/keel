@@ -23,6 +23,7 @@
 #include "udp_internal.h"        /* kl_udp_comp_on_recv */
 #include <string.h>
 #include <stddef.h>              /* offsetof (server_of_ctx containerof) */
+#include <stdint.h>              /* SIZE_MAX (h2 output capture growth guard) */
 
 #define KL_COMP_MAX_EVENTS 64
 
@@ -240,6 +241,31 @@ static void comp_tls_send_stream(struct KlServer *s, KlConn *c) {
     }
 }
 
+/* Driver-owned h2 output capture (8d-4): the completion driver installs this writer via
+ * the h2 output seam (kl_h2_server_set_writer) around a feed, so the session's produced
+ * frames land in one buffer the driver posts as a single overlapped send. The buffer +
+ * grow logic live here, not h2.c — h2.c only exposes the generic writer seam. */
+typedef struct { KlAllocator *alloc; char *buf; size_t len, cap; int err; } CompH2Cap;
+static ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len) {
+    CompH2Cap *cp = ctx;
+    if (cp->err) return -1;
+    if (len > SIZE_MAX - cp->len) { cp->err = 1; return -1; }
+    if (cp->len + len > cp->cap) {
+        size_t ncap = cp->cap ? cp->cap : 4096;
+        while (ncap < cp->len + len) {
+            if (ncap > SIZE_MAX / 2) { cp->err = 1; return -1; }
+            ncap *= 2;
+        }
+        char *nb = kl_realloc(cp->alloc, cp->buf, cp->cap, ncap);
+        if (!nb) { cp->err = 1; return -1; }
+        cp->buf = nb;
+        cp->cap = ncap;
+    }
+    memcpy(cp->buf + cp->len, data, len);
+    cp->len += len;
+    return (ssize_t)len;
+}
+
 /* Drive an established HTTP/2 connection over the completion loop (8d-1). Feed received
  * plaintext to the h2 session via kl_h2_server_feed (which parses frames and flushes
  * produced output through conn_write — a synchronous blocking send for plaintext, the
@@ -281,17 +307,24 @@ static void comp_h2_drive(struct KlServer *s, KlConn *c) {
      * this feed go out as ONE ordered overlapped send; defer the next recv until that
      * send completes (comp_on_write) so at most one h2 send is ever in flight — frames
      * must not reorder. */
-    kl_h2_server_capture_begin(c);
+    CompH2Cap cap = { c->alloc, NULL, 0, 0, 0 };
+    kl_h2_server_set_writer(c, comp_h2_capture_write, &cap);
     KlConnState st = kl_h2_server_feed(c, c->read_buf, c->read_len);
+    kl_h2_server_set_writer(c, NULL, NULL);       /* restore the default socket writer */
     c->read_len = 0;
-    size_t outlen = 0;
-    const char *out = kl_h2_server_capture_take(c, &outlen);
-    if (st != KL_CONN_HTTP2) { comp_close(s, c); return; }
-    if (outlen > 0) {
-        KlIoVec iov = { (void *)out, outlen };
-        if (kl_comp_post_send(c, &iov, 1, outlen) < 0) comp_close(s, c);
-    } else if (kl_comp_post_recv(c) < 0) {
-        comp_close(s, c);   /* no output this frame — read more */
+    if (st != KL_CONN_HTTP2 || cap.err) {
+        kl_free(c->alloc, cap.buf, cap.cap);
+        comp_close(s, c);
+        return;
+    }
+    if (cap.len > 0) {
+        KlIoVec iov = { cap.buf, cap.len };
+        int rc = kl_comp_post_send(c, &iov, 1, cap.len);
+        kl_free(c->alloc, cap.buf, cap.cap);
+        if (rc < 0) comp_close(s, c);
+    } else {
+        kl_free(c->alloc, cap.buf, cap.cap);
+        if (kl_comp_post_recv(c) < 0) comp_close(s, c);   /* no output — read more */
     }
 }
 
