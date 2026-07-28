@@ -80,9 +80,16 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=pollcomp smoke-pollcomp
 
-      # Linux ASan has leak detection (macOS does not) — run the completion driver, the
-      # pollcomp op-table, and the TLS/h2 buffers under ASan+UBSan with leak checking.
-      - name: Completion roundtrip under ASan+UBSan (leak detection)
+      # TLS-over-completion via the identity mock TLS (no mbedTLS): runs comp_tls_drive,
+      # the memory-BIO feed/drain plumbing, and comp_tls_send_response/file/stream for real.
+      - name: TLS-over-completion roundtrip smoke test
+        timeout-minutes: 5
+        run: make BACKEND=pollcomp smoke-pollcomp-tls
+
+      # Linux ASan has leak detection (macOS does not) — run BOTH completion smokes
+      # (plaintext + TLS-via-mock), the pollcomp op-table, and the TLS/h2 buffers under
+      # ASan+UBSan with leak checking.
+      - name: Completion roundtrips under ASan+UBSan (leak detection)
         if: runner.os == 'Linux'
         timeout-minutes: 5
         run: make smoke-pollcomp-asan
