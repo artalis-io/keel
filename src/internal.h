@@ -65,6 +65,15 @@ void kl_server_conn_release(KlServer *s, KlConn *c);
  * vtable are unchanged, so the event axis stays invisible to h2 users. */
 KlConnState kl_h2_server_feed(KlConn *c, const void *data, size_t len);
 
+/* Completion-loop h2 output capture (8d-3, defined in h2.c). Between capture_begin and
+ * capture_take, KEEL's h2 send callback appends produced frame bytes to an internal
+ * per-connection buffer instead of writing the socket; the completion driver then posts
+ * that span as one ordered overlapped send (frames must not reorder), deferring the next
+ * recv until it completes. Internal — the readiness path never calls these, and the h2
+ * session vtable is unchanged, so the event axis stays invisible to h2 users. */
+void        kl_h2_server_capture_begin(KlConn *c);
+const char *kl_h2_server_capture_take(KlConn *c, size_t *len);
+
 /* Server logging helpers (defined in server.c; used by the per-platform
  * server_plat_*.c TUs too). */
 __attribute__((format(printf, 3, 4)))

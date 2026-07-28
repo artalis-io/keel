@@ -167,7 +167,21 @@ actually testable rather than compile-gated.
 | **8d-0.5** ✅ | portable `poll()` completion backend (`event_pollcomp.c`, `BACKEND=pollcomp`) implementing `completion.h` | `smoke_pollcomp` runs the real completion driver on Linux/macOS under CI — 8b/8c now runtime-tested, not compile-gated |
 | **8d-1** ✅ | `comp_h2_drive`; revert 8c-4 clear; route `KL_CONN_HTTP2` (ALPN + h2c) | POSIX via pollcomp (echo h2 session, h2c Upgrade roundtrip) + MinGW compile-gate — real |
 | **8d-2** ✅ | h2 prior-knowledge preface over completion | POSIX via pollcomp (preface roundtrip) — real |
-| **8d-3** *(optional)* | overlapped (non-synchronous) h2 output | as 8d-1 |
+| **8d-3** ✅ | overlapped h2 output (send-ordering: one send in flight) — plaintext + TLS | POSIX via pollcomp (plaintext, ASan) + MinGW compile-gate (TLS) |
+
+*8d-3 done:* h2 output is now overlapped, not synchronous. A single feed's produced frames
+go out as **one ordered overlapped send**, and the next recv is deferred until that send
+completes (`comp_on_write`) — so **at most one h2 send is ever in flight** and frames
+cannot reorder (the ordering guarantee the h2 wire requires). Plaintext captures the
+session's output via an internal per-conn buffer (KEEL's `h2_cb_send` appends to it when
+the driver sets `out_capture`, instead of `conn_write`); TLS drains the memory-BIO out
+ring. **Honest concession:** this needs per-conn output state, placed as additive fields
+on the KEEL-internal `KlH2ServerConn` (documented internal, in the public header but never
+touched by the session vtable) — the only include/keel change in 8d, and the minimal way
+to invert the session's synchronous send callback without leaking IOCP into h2.c (the
+capture is keyed on a driver flag, not a platform check). Readiness is byte-identical
+(`out_capture` stays 0). Plaintext is CI-tested over pollcomp (ASan-clean); TLS is
+compile-gated. **Phase 8d complete.**
 
 *8d-0.5 done:* rather than a throwaway mock, `event_pollcomp.c` is a genuine second
 completion backend — it implements the full `completion.h` contract (accept / read /

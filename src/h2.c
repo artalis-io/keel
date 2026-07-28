@@ -430,7 +430,39 @@ static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
 
 static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
     KlH2ServerConn *h2c = ud;
+    /* Completion loop (8d-3): capture produced frame bytes into out_buf instead of
+     * writing the socket, so the driver can post them as one ordered overlapped send.
+     * Driver-set; on the readiness path out_capture is 0 and this is a no-op branch. */
+    if (h2c->out_capture) {
+        if (len > SIZE_MAX - h2c->out_len) return -1;
+        if (h2c->out_len + len > h2c->out_cap) {
+            size_t ncap = h2c->out_cap ? h2c->out_cap : 4096;
+            while (ncap < h2c->out_len + len) {
+                if (ncap > SIZE_MAX / 2) return -1;
+                ncap *= 2;
+            }
+            char *nb = kl_realloc(h2c->alloc, h2c->out_buf, h2c->out_cap, ncap);
+            if (!nb) return -1;
+            h2c->out_buf = nb;
+            h2c->out_cap = ncap;
+        }
+        memcpy(h2c->out_buf + h2c->out_len, data, len);
+        h2c->out_len += len;
+        return (ssize_t)len;
+    }
     return conn_write(h2c->conn, data, len);
+}
+
+/* Completion driver hooks (8d-3): begin capturing this feed's output into out_buf, then
+ * take the captured span (and stop capturing) to post it overlapped. See internal.h. */
+void kl_h2_server_capture_begin(KlConn *c) {
+    if (c->h2) { c->h2->out_capture = 1; c->h2->out_len = 0; }
+}
+const char *kl_h2_server_capture_take(KlConn *c, size_t *len) {
+    if (!c->h2) { *len = 0; return NULL; }
+    c->h2->out_capture = 0;
+    *len = c->h2->out_len;
+    return c->h2->out_buf;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -592,6 +624,9 @@ void kl_h2_server_cleanup(KlConn *c) {
 
     if (h2c->session)
         h2c->session->destroy(h2c->session);
+
+    if (h2c->out_buf)
+        kl_free(h2c->alloc, h2c->out_buf, h2c->out_cap);   /* 8d-3 capture buffer */
 
     kl_free(h2c->alloc, h2c, sizeof(KlH2ServerConn));
     c->h2 = NULL;

@@ -147,6 +147,31 @@ fail:
     return -1;
 }
 
+/* Drain the TLS engine's pending outgoing ciphertext into one heap buffer (grow as it
+ * fills). On success returns 0 with out/outlen/outcap set (caller frees outcap bytes),
+ * -1 on error. Used to post h2 output overlapped (8d-3) instead of a synchronous flush. */
+static int comp_tls_drain_output(KlConn *c, unsigned char **out, size_t *outlen, size_t *outcap) {
+    unsigned char *buf = NULL;
+    size_t cap = 0, len = 0;
+    for (;;) {
+        if (len == cap) {
+            size_t ncap = cap ? cap * 2 : 8192;
+            unsigned char *nb = kl_realloc(c->alloc, buf, cap, ncap);
+            if (!nb) { kl_free(c->alloc, buf, cap); return -1; }
+            buf = nb;
+            cap = ncap;
+        }
+        ssize_t d = c->tls->drain_output(c->tls, buf + len, cap - len);
+        if (d < 0) { kl_free(c->alloc, buf, cap); return -1; }
+        if (d == 0) break;
+        len += (size_t)d;
+    }
+    *out = buf;
+    *outlen = len;
+    *outcap = cap;
+    return 0;
+}
+
 /* Encrypt an already-materialised plaintext iovec into one heap ciphertext buffer and
  * post it as a single overlapped send. Completion arrives as KL_COMP_WRITE →
  * comp_on_write. Returns 0 on posted, -1 on error (caller closes). */
@@ -224,28 +249,50 @@ static void comp_tls_send_stream(struct KlServer *s, KlConn *c) {
  * loop on pending() so coalesced records aren't stranded. */
 static void comp_h2_drive(struct KlServer *s, KlConn *c) {
     if (c->tls) {
+        /* Decrypt + feed every currently-available record (the h2 session writes its
+         * output ciphertext into the memory-BIO out ring via conn_write→tls->write),
+         * then drain that ring and post it as ONE ordered overlapped send (8d-3) —
+         * deferring the next recv to comp_on_write, so at most one h2 send is in flight
+         * and frames cannot reorder. */
         for (;;) {
             ssize_t p = c->tls->read(c->tls, c->fd, c->read_buf, c->read_cap);
             if (p < 0) { comp_close(s, c); return; }
-            if (p == 0) {                              /* WANT_READ — need the network */
-                if (kl_comp_post_recv(c) < 0) comp_close(s, c);
-                return;
-            }
+            if (p == 0) break;                         /* WANT_READ — batch done */
             KlConnState st = kl_h2_server_feed(c, c->read_buf, (size_t)p);
-            if (comp_tls_flush(c) < 0) { comp_close(s, c); return; }   /* drain h2 output */
             if (st != KL_CONN_HTTP2) { comp_close(s, c); return; }
-            if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
-                if (kl_comp_post_recv(c) < 0) comp_close(s, c);
-                return;
-            }
+            if (!c->tls->pending || c->tls->pending(c->tls) == 0) break;
         }
+        unsigned char *cipher = NULL;
+        size_t clen = 0, ccap = 0;
+        if (comp_tls_drain_output(c, &cipher, &clen, &ccap) < 0) { comp_close(s, c); return; }
+        if (clen > 0) {
+            KlIoVec iov = { cipher, clen };
+            int rc = kl_comp_post_send(c, &iov, 1, clen);
+            kl_free(c->alloc, cipher, ccap);
+            if (rc < 0) comp_close(s, c);
+        } else {
+            kl_free(c->alloc, cipher, ccap);
+            if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+        }
+        return;
     }
     /* Plaintext: the received frame bytes are already in read_buf (comp_on_read added
-     * this recv's bytes). Feed them; output was sent synchronously via conn_write. */
+     * this recv's bytes). Capture the session's output (8d-3) so all frames it produces
+     * this feed go out as ONE ordered overlapped send; defer the next recv until that
+     * send completes (comp_on_write) so at most one h2 send is ever in flight — frames
+     * must not reorder. */
+    kl_h2_server_capture_begin(c);
     KlConnState st = kl_h2_server_feed(c, c->read_buf, c->read_len);
     c->read_len = 0;
+    size_t outlen = 0;
+    const char *out = kl_h2_server_capture_take(c, &outlen);
     if (st != KL_CONN_HTTP2) { comp_close(s, c); return; }
-    if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+    if (outlen > 0) {
+        KlIoVec iov = { (void *)out, outlen };
+        if (kl_comp_post_send(c, &iov, 1, outlen) < 0) comp_close(s, c);
+    } else if (kl_comp_post_recv(c) < 0) {
+        comp_close(s, c);   /* no output this frame — read more */
+    }
 }
 
 /* Act on the state a completed request produced. */
@@ -454,6 +501,13 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
 static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
     KlConn *c = ev->target;
     if (!ev->ok || ev->bytes == 0) { comp_close(s, c); return; }
+    /* h2 output send completed (8d-3): the frames produced by the last feed are out —
+     * read the next frames. Deferring the recv until here means at most one h2 send is
+     * in flight, so overlapped output cannot reorder frames. */
+    if (c->state == KL_CONN_HTTP2) {
+        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+        return;
+    }
     /* TLS file body still streaming: the head (or the previous chunk) just went out —
      * post the next encrypted file chunk. HEAD requests carry no body. */
     if (c->tls && c->res.body_mode == KL_BODY_FILE && !c->res.head_request) {

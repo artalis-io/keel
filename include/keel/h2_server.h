@@ -121,6 +121,16 @@ struct KlH2ServerConn {
     int num_streams;               /**< Number of active streams. */
     int max_streams;               /**< Maximum concurrent streams allowed. */
     int goaway_sent;               /**< Non-zero after GOAWAY sent. */
+    /* Completion-loop output capture (PAL 8d-3). When out_capture is set, KEEL's send
+     * callback appends produced frame bytes to out_buf instead of writing the socket,
+     * so the completion driver can post them as one ordered overlapped send (frames must
+     * not reorder). Driver-driven; unused and zero-cost on the readiness path
+     * (out_capture stays 0 → output goes straight to conn_write, unchanged). Internal —
+     * the session vtable never sees these. */
+    char  *out_buf;                /**< Captured outgoing frame bytes (completion). */
+    size_t out_len;                /**< Bytes captured. */
+    size_t out_cap;                /**< out_buf capacity. */
+    int    out_capture;            /**< 1 = capture to out_buf instead of conn_write. */
 };
 
 /* ── Internal functions (used by connection.c, server.c) ─────────── */
