@@ -364,6 +364,15 @@ int kl_comp_prime_accepts(struct KlServer *s) {
     return 0;
 }
 
+/* Cancel outstanding overlapped ops on `fd` (idle-timeout sweep). CancelIoEx aborts the
+ * pending WSARecv/WSASend; each aborted op still completes via GetQueuedCompletionStatus
+ * with an error, so the driver releases the connection through its normal completion path
+ * (no dangling op, no double release). */
+void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
+    (void)ctx;
+    CancelIoEx((HANDLE)(uintptr_t)fd, NULL);
+}
+
 int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlIocpState *st = ctx->loop._backend;
 

@@ -18,6 +18,7 @@
 #define KEEL_SRC_IO_ENGINE_H
 
 #include <stddef.h>   /* size_t (kl_comp_post_udp_send) */
+#include <keel/handle.h>   /* KlSocketHandle (kl_comp_cancel) */
 
 struct KlServer;
 struct KlEventCtx;
@@ -36,6 +37,15 @@ int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms);
  * io_engine.c stub is linked on readiness builds and never called (no readiness
  * backend advertises COMPLETION). Returns events processed (>= 0), or -1. */
 int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
+
+/* Cancel any pending completion ops on `fd` (PAL hardening — completion-path idle
+ * timeout). On a completion loop a conn waiting on an overlapped read holds that op
+ * indefinitely; the server's idle-timeout sweep calls this to abort it. The op then
+ * completes with an error, and the driver releases the connection through its normal
+ * completion path (so there is never a dangling op or a double release). Backend-defined
+ * (event_pollcomp.c removes the ops; event_iocp.c CancelIoEx's them); stubbed in
+ * io_engine.c on readiness builds, where it is never called. */
+void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd);
 
 /* Post one overlapped datagram receive for a UDP socket on a completion loop (into
  * udp->recv_buf). Called by udp.c (shared) on a completion loop, so — like

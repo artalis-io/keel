@@ -390,6 +390,18 @@ smoke-pollcomp: $(SMOKE_POLLCOMP_BIN)
 $(SMOKE_POLLCOMP_BIN): tests/smoke_pollcomp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# Completion roundtrip under ASan+UBSan with leak detection (Linux CI). Builds the
+# pollcomp lib + the smoke WITH sanitizer flags (so the smoke links the ASan runtime the
+# instrumented lib needs), then runs it — leak/UAF/overflow coverage of the completion
+# driver, the pollcomp op-table, and the TLS/h2 buffers that the plain smoke can't give.
+smoke-pollcomp-asan:
+	$(MAKE) clean
+	$(MAKE) BACKEND=pollcomp debug
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	      -o $(SMOKE_POLLCOMP_BIN) tests/smoke_pollcomp.c -L. -lkeel -lpthread
+	# LeakSanitizer runs by default under ASan on Linux (CI); macOS ASan runs without it.
+	./$(SMOKE_POLLCOMP_BIN)
+
 # Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
 # (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
 SMOKE_UDP_BIN = tests/smoke_udp$(EXE)

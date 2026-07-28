@@ -80,6 +80,13 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=pollcomp smoke-pollcomp
 
+      # Linux ASan has leak detection (macOS does not) — run the completion driver, the
+      # pollcomp op-table, and the TLS/h2 buffers under ASan+UBSan with leak checking.
+      - name: Completion roundtrip under ASan+UBSan (leak detection)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: make smoke-pollcomp-asan
+
   windows:
     name: Windows (MinGW, full core)
     runs-on: windows-latest

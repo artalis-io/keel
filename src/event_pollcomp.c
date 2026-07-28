@@ -60,6 +60,7 @@ typedef struct KlPcOp {
     uint64_t       file_count, file_off;  /* SENDFILE: file bytes + progress */
     struct sockaddr_storage dest;         /* UDP_SEND destination */
     socklen_t      dest_len;
+    int            aborted;               /* cancelled (idle timeout) — deliver as error */
 } KlPcOp;
 
 typedef struct {
@@ -292,7 +293,32 @@ int kl_comp_prime_accepts(struct KlServer *s) {
     return kl_comp_post_accept(s);
 }
 
+/* Cancel pending ops on `fd` (idle-timeout sweep): mark them aborted so the next drain
+ * delivers an error completion, driving the driver's normal release. We mark rather than
+ * remove so the invariant "a conn is released only from a completion" holds — the driver
+ * expects the op it's waiting on to complete before the conn slot is reused. */
+void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
+    KlPcState *st = ctx->loop._backend;
+    for (KlPcOp *o = st->ops; o; o = o->next)
+        if (o->fd == fd) o->aborted = 1;
+}
+
 /* ── drain: poll the pending ops, complete the ready ones ─────────────── */
+
+/* Fill an error completion for a cancelled op. Returns 1 if an event was written
+ * (a connection/UDP target exists), 0 for an accept op (no target — just drop it). */
+static int pc_emit_abort(const KlPcOp *op, KlCompletionEvent *ev) {
+    memset(ev, 0, sizeof(*ev));
+    ev->ok = 0;
+    switch (op->type) {
+    case PC_READ: case PC_TLS_RECV:  ev->kind = KL_COMP_READ;  ev->target = op->conn; return 1;
+    case PC_WRITE: case PC_SENDFILE: ev->kind = KL_COMP_WRITE; ev->target = op->conn; return 1;
+    case PC_UDP_RECV:                ev->kind = KL_COMP_UDP_RECV; ev->target = op->udp; return 1;
+    case PC_UDP_SEND:                ev->kind = KL_COMP_UDP_SEND; ev->target = op->udp; return 1;
+    case PC_ACCEPT:                  return 0;
+    }
+    return 0;
+}
 
 static void pc_set_blocking(KlSocketHandle fd) {
     int fl = fcntl(fd, F_GETFL, 0);
@@ -421,13 +447,26 @@ static short pc_poll_events(PcOpType t) {
 
 int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlPcState *st = ctx->loop._backend;
+    int count = 0;
+
+    /* Deliver cancelled ops (kl_comp_cancel) as error completions first, so the driver
+     * releases the idle-timed-out connection through its normal completion path. */
+    KlPcOp **link = &st->ops;
+    while (*link && count < max) {
+        KlPcOp *op = *link;
+        if (!op->aborted) { link = &op->next; continue; }
+        if (pc_emit_abort(op, &out[count])) count++;
+        *link = op->next;
+        pc_op_free(op);
+    }
+    if (count >= max) return count;
 
     /* Count pending ops, then build a parallel pollfd array. */
     size_t nops = 0;
     for (KlPcOp *o = st->ops; o; o = o->next) nops++;
     if (nops == 0) {
-        if (timeout_ms != 0) poll(NULL, 0, timeout_ms);
-        return 0;
+        if (count == 0 && timeout_ms != 0) poll(NULL, 0, timeout_ms);
+        return count;
     }
 
     struct pollfd *pfds = kl_malloc(st->alloc, nops * sizeof(*pfds));
@@ -444,7 +483,6 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
     }
 
     int pr = poll(pfds, (nfds_t)nops, timeout_ms);
-    int count = 0;
     if (pr > 0) {
         for (i = 0; i < nops && count < max; i++) {
             KlPcOp *op = oref[i];
@@ -456,9 +494,9 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
             if (r == 0) continue;                 /* partial/spurious — keep the op */
             count++;                              /* r == 1 (done) or -1 (failed) */
             /* Unlink and free the completed op. */
-            KlPcOp **link = &st->ops;
-            while (*link && *link != op) link = &(*link)->next;
-            if (*link) *link = op->next;
+            KlPcOp **ulink = &st->ops;
+            while (*ulink && *ulink != op) ulink = &(*ulink)->next;
+            if (*ulink) *ulink = op->next;
             pc_op_free(op);
         }
     }
