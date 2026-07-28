@@ -521,9 +521,27 @@ int kl_h2_server_upgrade_from_h1(KlConn *c, KlRouter *router,
     return kl_h2_server_upgrade(c, router, cfg, leftover, leftover_len);
 }
 
-int kl_h2_server_on_readable(KlConn *c) {
+/* Transport-agnostic h2 core: feed already-received plaintext to the session (parse
+ * frames + flush produced output). Shared by the readiness drive below and the
+ * completion driver — see internal.h. */
+KlConnState kl_h2_server_feed(KlConn *c, const void *data, size_t len) {
     KlH2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return KL_CONN_CLOSED;
+
+    c->last_active_ms = kl_monotonic_ms();
+
+    ssize_t consumed = h2c->session->recv(h2c->session, data, len);
+    if (consumed < 0) return KL_CONN_CLOSED;
+
+    if (h2c->session->want_write(h2c->session)) {
+        if (h2c->session->flush(h2c->session) < 0)
+            return KL_CONN_CLOSED;
+    }
+    return KL_CONN_HTTP2;
+}
+
+int kl_h2_server_on_readable(KlConn *c) {
+    if (!c->h2 || !c->h2->session) return KL_CONN_CLOSED;
 
     int drains = 0;
 read_more:
@@ -531,15 +549,8 @@ read_more:
     ssize_t nr = conn_read(c, c->read_buf, c->read_cap);
     if (nr <= 0) return KL_CONN_CLOSED;
 
-    c->last_active_ms = kl_monotonic_ms();
-
-    ssize_t consumed = h2c->session->recv(h2c->session, c->read_buf, (size_t)nr);
-    if (consumed < 0) return KL_CONN_CLOSED;
-
-    if (h2c->session->want_write(h2c->session)) {
-        if (h2c->session->flush(h2c->session) < 0)
-            return KL_CONN_CLOSED;
-    }
+    KlConnState st = kl_h2_server_feed(c, c->read_buf, (size_t)nr);
+    if (st != KL_CONN_HTTP2) return (int)st;
 
     if (c->tls && c->tls->pending(c->tls) > 0 && ++drains < 256)
         goto read_more;
