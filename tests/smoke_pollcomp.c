@@ -79,6 +79,60 @@ static void udp_echo(KlUdp *udp, const void *data, size_t len,
     kl_udp_send_to(udp, data, len, src, src_len);
 }
 
+/* Minimal echo HTTP/2 server session (no nghttp2/HPACK): it echoes whatever bytes the
+ * peer sends back through the send callback. Enough to exercise the h2 completion driver
+ * (comp_h2_drive) end-to-end over pollcomp — feed received bytes → session → drain output
+ * → send — without a real h2 stack. Entered via an h2c Upgrade (8d-1). */
+typedef struct {
+    KlH2ServerSession   base;
+    KlH2ServerCallbacks cb;
+    void               *cb_ud;
+    KlAllocator        *alloc;
+    char                pending[256];
+    size_t              pending_len;
+} EchoH2;
+
+static ssize_t echo_recv(KlH2ServerSession *self, const void *data, size_t len) {
+    EchoH2 *e = (EchoH2 *)self;
+    if (len > 0) {
+        size_t n = len < sizeof(e->pending) ? len : sizeof(e->pending);
+        memcpy(e->pending, data, n);
+        e->pending_len = n;
+    }
+    return (ssize_t)len;
+}
+static int echo_want_write(KlH2ServerSession *self) { return ((EchoH2 *)self)->pending_len > 0; }
+static int echo_flush(KlH2ServerSession *self) {
+    EchoH2 *e = (EchoH2 *)self;
+    if (e->pending_len > 0) { e->cb.send(e->cb_ud, e->pending, e->pending_len); e->pending_len = 0; }
+    return 0;
+}
+static int echo_submit(KlH2ServerSession *self, uint32_t sid, int status,
+                       const char **hn, const char **hv, int nh, const void *body, size_t bl) {
+    (void)self; (void)sid; (void)status; (void)hn; (void)hv; (void)nh; (void)body; (void)bl;
+    return 0;
+}
+static int echo_shutdown(KlH2ServerSession *self) { (void)self; return 0; }
+static void echo_destroy(KlH2ServerSession *self) {
+    EchoH2 *e = (EchoH2 *)self;
+    kl_free(e->alloc, e, sizeof(*e));
+}
+static KlH2ServerSession *echo_factory(KlAllocator *alloc, KlH2ServerCallbacks *cb, void *ud) {
+    EchoH2 *e = kl_malloc(alloc, sizeof(*e));
+    if (!e) return NULL;
+    memset(e, 0, sizeof(*e));
+    e->base.recv = echo_recv;
+    e->base.submit_response = echo_submit;
+    e->base.want_write = echo_want_write;
+    e->base.flush = echo_flush;
+    e->base.shutdown = echo_shutdown;
+    e->base.destroy = echo_destroy;
+    e->cb = *cb;
+    e->cb_ud = ud;
+    e->alloc = alloc;
+    return &e->base;
+}
+
 static KlServer g_srv;
 
 static void *server_thread(void *arg) {
@@ -87,9 +141,57 @@ static void *server_thread(void *arg) {
     return NULL;
 }
 
+#define SMOKE_H2 "PING-OVER-H2C-COMPLETION"
+
+/* Raw h2c roundtrip: HTTP/1.1 request with Upgrade: h2c → server 101 → then the echo
+ * h2 session round-trips a frame. Exercises comp_h2_drive over the completion loop
+ * (8d-1), plaintext, no nghttp2. */
+static int h2c_roundtrip(void) {
+    int cs = socket(AF_INET, SOCK_STREAM, 0);
+    if (cs < 0) return 0;
+    struct timeval tmo = { 1, 0 };
+    setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo));
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(SMOKE_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+    if (connect(cs, (struct sockaddr *)&to, sizeof(to)) < 0) { close(cs); return 0; }
+
+    const char *req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                      "Upgrade: h2c\r\nConnection: Upgrade\r\n\r\n";
+    if (write(cs, req, strlen(req)) < 0) { close(cs); return 0; }
+
+    /* Read the 101 Switching Protocols (headers only, ends at CRLFCRLF). */
+    char buf[512];
+    size_t got = 0;
+    int have_101 = 0;
+    while (got < sizeof(buf) - 1) {
+        ssize_t n = read(cs, buf + got, sizeof(buf) - 1 - got);
+        if (n <= 0) break;
+        got += (size_t)n;
+        buf[got] = 0;
+        if (strstr(buf, "\r\n\r\n")) { have_101 = (strstr(buf, " 101 ") != NULL); break; }
+    }
+    if (!have_101) { close(cs); return 0; }
+
+    /* Send an h2 "frame" and expect the echo session to bounce it back. */
+    if (write(cs, SMOKE_H2, sizeof(SMOKE_H2) - 1) < 0) { close(cs); return 0; }
+    char rb[128];
+    size_t rlen = 0;
+    while (rlen < sizeof(SMOKE_H2) - 1) {
+        ssize_t n = read(cs, rb + rlen, sizeof(rb) - rlen);
+        if (n <= 0) break;
+        rlen += (size_t)n;
+    }
+    close(cs);
+    return rlen == sizeof(SMOKE_H2) - 1 && memcmp(rb, SMOKE_H2, rlen) == 0;
+}
+
 int main(void) {
+    static KlH2ServerConfig h2cfg = { .factory = echo_factory };
     KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
-                     .sockets = kl_socket_provider_pollcomp() };
+                     .sockets = kl_socket_provider_pollcomp(), .h2 = &h2cfg };
     if (kl_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-pollcomp: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
@@ -209,6 +311,15 @@ int main(void) {
         }
     }
 
+    /* h2c Upgrade → h2-over-completion echo roundtrip (comp_h2_drive, 8d-1). */
+    int h2_ok = 0;
+    if (ok && post_ok && file_ok && stream_ok) {
+        for (int i = 0; i < 20 && !h2_ok; i++) {
+            h2_ok = h2c_roundtrip();
+            if (!h2_ok) nap_ms(50);
+        }
+    }
+
     kl_udp_recv_stop(&g_udp);
     kl_udp_free(&g_udp);
     kl_server_stop(&g_srv);
@@ -225,7 +336,8 @@ int main(void) {
     if (!file_ok) { fprintf(stderr, "smoke-pollcomp: GET/file (sendfile) FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!stream_ok) { fprintf(stderr, "smoke-pollcomp: GET/stream FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!udp_ok) { fprintf(stderr, "smoke-pollcomp: UDP echo FAILED\n"); return 1; }
+    if (!h2_ok) { fprintf(stderr, "smoke-pollcomp: h2c/h2-over-completion echo FAILED\n"); return 1; }
 
-    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST body + file + stream + UDP)\n");
+    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST body + file + stream + UDP + h2c)\n");
     return 0;
 }
