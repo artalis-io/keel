@@ -163,11 +163,19 @@ actually testable rather than compile-gated.
 
 | Increment | Content | Validation |
 |---|---|---|
-| **8d-0** | `kl_h2_server_feed` internal seam; `on_readable` = `conn_read` + `feed` | POSIX: readiness h2 tests (mock session) — real |
-| **8d-0.5** *(recommended)* | mock/loopback completion backend implementing `completion.h` | makes 8b/8c/8d runtime-testable under `make test`/CI |
-| **8d-1** | `comp_h2_drive` (TLS-ALPN); revert 8c-4 clear; route `KL_CONN_HTTP2` | MinGW compile-gate; runtime via 8d-0.5 or local BYO×2 |
+| **8d-0** ✅ | `kl_h2_server_feed` internal seam; `on_readable` = `conn_read` + `feed` | POSIX: readiness h2 tests (mock session) — real |
+| **8d-0.5** ✅ | portable `poll()` completion backend (`event_pollcomp.c`, `BACKEND=pollcomp`) implementing `completion.h` | `smoke_pollcomp` runs the real completion driver on Linux/macOS under CI — 8b/8c now runtime-tested, not compile-gated |
+| **8d-1** | `comp_h2_drive` (TLS-ALPN); revert 8c-4 clear; route `KL_CONN_HTTP2` | POSIX via pollcomp (mock h2 session) + MinGW compile-gate |
 | **8d-2** *(optional)* | plaintext h2c over completion | as 8d-1 |
 | **8d-3** *(optional)* | overlapped (non-synchronous) h2 output | as 8d-1 |
 
-8d-0 is a real, POSIX-tested, additive refactor regardless of what follows. Whether
-8d-1+ is worth building **before** a runtime harness (8d-0.5) is the open decision.
+*8d-0.5 done:* rather than a throwaway mock, `event_pollcomp.c` is a genuine second
+completion backend — it implements the full `completion.h` contract (accept / read /
+TLS-recv / write / sendfile / udp-recv / udp-send + drain + prime) as a completion
+facade over `poll()`, the mirror image of `event_iouring.c` adapting completion to the
+readiness interface. `completion_driver.c` is reused **verbatim** (the proof the axis is
+platform-independent, not IOCP-specific), and `smoke_pollcomp` — a full GET + POST body
++ file (sendfile) + chunked stream + UDP echo roundtrip — now runs it on Linux/macOS in
+CI (the "Completion (poll)" job) and clean under ASan/UBSan. Every completion increment
+since 8a is now genuinely runtime-validated on POSIX, not just compile-gated. 8d-1 (the
+h2 completion driver) can now be tested the same way with the mock h2 session.

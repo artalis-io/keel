@@ -93,6 +93,15 @@ else
     else ifeq ($(BACKEND),poll)
       EVENT_SRC = src/event_poll.c
       FILE_IO_SRC = src/file_io.c
+    else ifeq ($(BACKEND),pollcomp)
+      # Portable completion backend over poll() (PAL 8d-0.5): the completion axis
+      # (completion.h) + driver (completion_driver.c) on POSIX, so the completion
+      # model is runtime-testable off Windows. IO_ENGINE_SRC empty — the driver
+      # provides kl_io_engine_run_completion over event_pollcomp.c's backend.
+      EVENT_SRC = src/event_pollcomp.c
+      FILE_IO_SRC = src/file_io.c
+      IO_ENGINE_SRC =
+      COMPLETION_SRC = src/completion_driver.c
     else
       EVENT_SRC = src/event_epoll.c
       FILE_IO_SRC = src/file_io.c
@@ -106,6 +115,11 @@ else
   else
     ifeq ($(BACKEND),poll)
       EVENT_SRC = src/event_poll.c
+    else ifeq ($(BACKEND),pollcomp)
+      # Portable completion backend over poll() (PAL 8d-0.5) — see the Linux branch.
+      EVENT_SRC = src/event_pollcomp.c
+      IO_ENGINE_SRC =
+      COMPLETION_SRC = src/completion_driver.c
     else
       EVENT_SRC = src/event_kqueue.c
     endif
@@ -366,6 +380,16 @@ smoke-iocp: $(SMOKE_IOCP_BIN)
 $(SMOKE_IOCP_BIN): tests/smoke_iocp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# End-to-end HTTP-over-completion roundtrip on POSIX (BACKEND=pollcomp). The runtime
+# gate for the platform-independent completion driver off Windows — build libkeel with
+# BACKEND=pollcomp first so the server runs on the poll() completion loop. Proves the
+# completion axis is portable (driver reused verbatim) and makes it CI-testable.
+SMOKE_POLLCOMP_BIN = tests/smoke_pollcomp$(EXE)
+smoke-pollcomp: $(SMOKE_POLLCOMP_BIN)
+	./$(SMOKE_POLLCOMP_BIN)
+$(SMOKE_POLLCOMP_BIN): tests/smoke_pollcomp.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
 # Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
 # (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
 SMOKE_UDP_BIN = tests/smoke_udp$(EXE)
@@ -428,6 +452,12 @@ clean:
 	      tests/smoke_dns tests/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
+	# Completion-backend objects are conditional (COMPLETION_SRC/EVENT_SRC only set
+	# under BACKEND=iocp|pollcomp), so they escape $(CORE_OBJ) on a default clean —
+	# remove them unconditionally to prevent a stale cross-toolchain object (e.g. a
+	# MinGW completion_driver.o) surviving into a later native build.
+	rm -f src/event_iocp.o src/event_pollcomp.o src/completion_driver.o
+	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f src/file_io.o src/file_io_iouring.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64

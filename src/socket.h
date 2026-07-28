@@ -39,6 +39,13 @@
  * defined/called in the IOCP build. */
 const KlSocketProvider *kl_socket_provider_iocp(void);
 
+/* The overlapped socket provider that pairs with the portable poll() completion
+ * backend (defined in event_pollcomp.c, BACKEND=pollcomp only). Reuses the POSIX
+ * control-plane ops + the OVERLAPPED capability the Phase 7 negotiation keys on, so
+ * the completion driver can run — and be tested — on Linux/macOS. Internal; declared
+ * unconditionally, defined/called only in the pollcomp build. */
+const KlSocketProvider *kl_socket_provider_pollcomp(void);
+
 /*
  * Platform default socket ops — the raw syscall for each operation, DEFINED
  * per-platform in the provider TU (socket_posix.c: POSIX; socket_winsock.c:
