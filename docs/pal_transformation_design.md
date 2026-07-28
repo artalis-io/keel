@@ -429,7 +429,31 @@ engine's out ring — so `comp_tls_send_stream` flushes the ring to the socket a
 `kl_response_send`. Mirrors non-TLS `comp_send_stream` (same synchronous-stream subset +
 head-of-line caveat; a single synchronous batch is bounded by the out-ring cap). Reuses
 only `kl_response_send` + the vtable — `event_iocp.c` unchanged; no public-API change;
-readiness streaming untouched. Remaining 8c: ALPN-h2 handoff.
+readiness streaming untouched.
+
+**Phase 8c *completion* work ends at 8c-3.** The three data-path gaps — buffered, file,
+and streaming TLS responses — now genuinely run over the completion loop with
+overlapped/bounded sends. That is the extent of TLS-over-completion parity delivered
+here.
+
+*8c-4 is a correctness fix, not a completion feature — HTTP/2 is not served over the
+completion loop.* HTTP/2 is a full multiplexed readiness-driven session (`h2.c`, via
+`conn_read`/`conn_write`); running it over completion means inverting *its* transport
+too (feed bytes → drive the session → drain multiplexed stream output overlapped),
+against the h2 state machine + flow control + HPACK — a substantial driver in its own
+right, deferred to **future Phase 8d**. What 8c-4 does is make the *out-of-subset* path
+well-defined: the completion accept path clears `h2_config`, so `kl_conn_on_handshake`
+never attempts the doomed ALPN-h2 upgrade (nor h2c Upgrade) — no h2 session is allocated
+and no stray SETTINGS/preface is written before the close. The prior behavior
+half-initialized the session then abruptly closed on `KL_CONN_HTTP2`; now the connection
+is cleanly refused. The completion loop serves HTTP/1.1 over TLS; a TLS ctx used with
+IOCP should not advertise "h2" — if it does and a client selects h2, the h2 preface
+fails HTTP/1.1 parsing and the connection closes cleanly, never mis-served.
+Completion-path only; readiness h2 untouched; no public-API change.
+
+**Future Phase 8d (candidates):** h2-over-completion (the real thing, above), and/or a
+second completion backend (io_uring-completion reusing `completion_driver.c` verbatim)
+to prove the completion axis is platform-independent rather than IOCP-specific.
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
