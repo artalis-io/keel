@@ -481,6 +481,25 @@ smoke-iouring-async: $(SMOKE_IOURING_ASYNC_BIN)
 $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# Phase 8f-3 survey (one-shot): build+run every unit-test suite over the io_uring
+# completion backend with a per-suite timeout, printing PASS/FAIL/TIMEOUT. Exit 0 (data
+# gathering — categorises which suites run over the completion backend vs. which are
+# inherently readiness-specific). Backend-specific suites are skipped. Run under
+# `make BACKEND=iouringcomp iouringcomp-survey`.
+iouringcomp-survey: $(LIB) $(TEST_COMPAT_OBJ)
+	@pass=; fail=; tmo=; skip=; \
+	for f in $(wildcard tests/test_*.c); do \
+	  b=$${f%.c}; n=$$(basename $$b); \
+	  case $$n in test_file_io_iouring|test_iocp_engine) skip="$$skip $$n"; continue;; esac; \
+	  if ! $(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor \
+	        -o $$b $$f $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS) >/dev/null 2>&1; then \
+	    fail="$$fail $$n(build)"; continue; fi; \
+	  if timeout 30 ./$$b >/dev/null 2>&1; then pass="$$pass $$n"; \
+	  else rc=$$?; if [ $$rc -eq 124 ]; then tmo="$$tmo $$n"; else fail="$$fail $$n(rc=$$rc)"; fi; fi; \
+	done; \
+	echo "=== iouringcomp survey ==="; \
+	echo; echo "PASS:$$pass"; echo; echo "FAIL:$$fail"; echo; echo "TIMEOUT:$$tmo"; echo; echo "SKIP:$$skip"
+
 # Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
 # (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
 SMOKE_UDP_BIN = tests/smoke_udp$(EXE)

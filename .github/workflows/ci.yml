@@ -135,6 +135,24 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=iouringcomp smoke-iouring-async
 
+  completion-iouring-survey:
+    # Phase 8f-3 one-shot survey: run every unit-test suite over the io_uring completion
+    # backend to categorise which run (vs. which are inherently readiness-specific). Exits
+    # 0 (data gathering); the results select the permanent suite job. TEMPORARY.
+    name: Completion (io_uring) suite survey
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Install liburing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev
+      - name: Build completion backend (io_uring)
+        run: make BACKEND=iouringcomp
+      - name: Survey unit-test suites over io_uring completion
+        timeout-minutes: 15
+        run: make BACKEND=iouringcomp iouringcomp-survey
+
   windows:
     name: Windows (MinGW, full core)
     runs-on: windows-latest
