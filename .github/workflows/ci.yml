@@ -135,11 +135,13 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=iouringcomp smoke-iouring-async
 
-  completion-iouring-survey:
-    # Phase 8f-3 one-shot survey: run every unit-test suite over the io_uring completion
-    # backend to categorise which run (vs. which are inherently readiness-specific). Exits
-    # 0 (data gathering); the results select the permanent suite job. TEMPORARY.
-    name: Completion (io_uring) suite survey
+  completion-iouring-suite:
+    # Phase 8f-3: the unit-test suites that run over the io_uring completion backend — a
+    # regression gate alongside the smokes (backend-agnostic logic + protocol/loop suites
+    # driven through kl_server_run / kl_event_ctx_run). Readiness-model-coupled suites are
+    # excluded (see the IOURINGCOMP_TEST_SUITES comment in the Makefile — those need a
+    # per-test overlapped-provider opt-in, not a backend fix).
+    name: Completion (io_uring) unit suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -149,23 +151,9 @@ jobs:
           sudo apt-get install -y liburing-dev
       - name: Build completion backend (io_uring)
         run: make BACKEND=iouringcomp
-      - name: Survey unit-test suites over io_uring completion
-        timeout-minutes: 15
-        run: make BACKEND=iouringcomp iouringcomp-survey
-
-      - name: Backtrace the SEGV suites under ASan
-        timeout-minutes: 15
-        run: |
-          make clean
-          make BACKEND=iouringcomp debug
-          for n in test_integration test_client_stream test_redirect test_async; do
-            echo "======================== $n ========================"
-            cc -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Ivendor \
-               -Wno-pedantic -Wno-sign-compare -Wno-unused-result \
-               -o tests/$n.asan tests/$n.c tests/net_compat_posix.c -L. -lkeel -lpthread -luring 2>&1 | tail -3 || true
-            ASAN_OPTIONS=abort_on_error=0:detect_leaks=0 timeout 40 ./tests/$n.asan 2>&1 \
-              | grep -aA30 -iE "ERROR: AddressSanitizer|runtime error|SEGV|SUMMARY:|#[0-9]+ 0x" | head -45 || true
-          done
+      - name: Unit-test suites over io_uring completion
+        timeout-minutes: 10
+        run: make BACKEND=iouringcomp test-iouringcomp
 
   windows:
     name: Windows (MinGW, full core)
