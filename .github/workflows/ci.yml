@@ -91,6 +91,11 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=pollcomp smoke-pollcomp-ws
 
+      # Async/thread-pool handler over completion — the watcher relay + async resume (8e-2).
+      - name: Async/thread-pool-over-completion roundtrip smoke test
+        timeout-minutes: 5
+        run: make BACKEND=pollcomp smoke-pollcomp-async
+
       # Linux ASan has leak detection (macOS does not) — run BOTH completion smokes
       # (plaintext + TLS-via-mock), the pollcomp op-table, and the TLS/h2 buffers under
       # ASan+UBSan with leak checking.

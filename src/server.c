@@ -654,11 +654,32 @@ int kl_server_run(KlServer *s) {
 
     while (atomic_load(&s->running)) {
         if (completion_loop) {
-            if (kl_io_engine_run_completion(s, KL_POLL_TIMEOUT_MS) < 0)
+            /* Bound the tick by the nearest async-op deadline / timer so they fire on
+             * time — the completion loop is a full event loop now (watchers relayed via
+             * KL_COMP_WATCHER; timers + async deadlines serviced here, 8e-2). */
+            uint64_t cnow = kl_monotonic_ms();
+            int cwait = KL_POLL_TIMEOUT_MS;
+            for (KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
+                if (aop->deadline_ms > 0) {
+                    if (cnow >= aop->deadline_ms) { cwait = 0; break; }
+                    uint64_t rem = aop->deadline_ms - cnow;
+                    if (rem < (uint64_t)cwait) cwait = (int)rem;
+                }
+            }
+            cwait = kl_timer_next_timeout(&s->ev, cwait);
+            if (kl_io_engine_run_completion(s, cwait) < 0)
                 break;
+            cnow = kl_monotonic_ms();
             /* Idle-timeout sweep on the completion loop too (slowloris defense) — the
              * completion path never falls through to the readiness sweep below. */
-            kl_server_sweep_conn_timeouts(s, kl_monotonic_ms(), 1);
+            kl_server_sweep_conn_timeouts(s, cnow, 1);
+            for (KlAsyncOp *aop = s->async_ops; aop; ) {   /* async-op deadlines */
+                KlAsyncOp *next_aop = aop->next;
+                if (aop->deadline_ms > 0 && cnow >= aop->deadline_ms && aop->on_deadline)
+                    aop->on_deadline(aop, aop->user_data);
+                aop = next_aop;
+            }
+            kl_timer_fire(&s->ev);                          /* due one-shot timers */
             continue;
         }
         /* Compute dynamic timeout based on nearest async op deadline */
