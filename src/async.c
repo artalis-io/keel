@@ -255,6 +255,16 @@ void kl_async_complete(KlServer *s, KlAsyncOp *op) {
     if (conn->state == KL_CONN_SUSPENDED)
         return;
 
+    /* On a completion loop, drive the completion send path instead of re-arming the fd —
+     * the readiness re-register + kl_conn_on_writable below is a no-op there (kl_event_add
+     * is inert, kl_conn_on_writable does readiness socket writes). Branch on the abstract
+     * event axis (not the backend); the completion send lives behind an io_engine seam so
+     * async.c stays free of completion internals (8e-2). */
+    if (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) {
+        kl_io_engine_resume_completion(s, conn);
+        return;
+    }
+
     /* Handler completed — re-register FD and drive state machine */
     KlConnState new_state = conn->state;
 

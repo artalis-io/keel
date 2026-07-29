@@ -27,7 +27,13 @@ struct KlServer;
 /* Platform-independent completion op kinds. */
 typedef enum {
     KL_COMP_ACCEPT, KL_COMP_READ, KL_COMP_WRITE,   /* TCP conn (target = KlConn*) */
-    KL_COMP_UDP_RECV, KL_COMP_UDP_SEND             /* datagram (target = KlUdp*) */
+    KL_COMP_UDP_RECV, KL_COMP_UDP_SEND,            /* datagram (target = KlUdp*) */
+    KL_COMP_WATCHER   /* a readiness FD watch fired (target = the tagged KlWatcher udata,
+                       * `bytes` carries the ready KlEventMask) — 8e-2. Lets a completion
+                       * loop relay generic FD watchers (thread-pool wakeup, timers) through
+                       * the same abstract axis; the driver routes it to kl_event_dispatch.
+                       * How a backend watches a readiness fd alongside its completions is
+                       * the backend's business, not part of this abstract contract. */
 } KlCompKind;
 
 /* One finished async op, handed from a completion backend to the generic driver.

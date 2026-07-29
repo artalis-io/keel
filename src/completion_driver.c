@@ -13,6 +13,7 @@
 #include <keel/connection.h>
 #include <keel/tls.h>            /* KlTls vtable ops — TLS-over-completion (8b-5b) */
 #include <keel/websocket_server.h> /* kl_ws_server_on_readable_data — WS over completion (8e-1) */
+#include <keel/event_ctx.h>      /* kl_event_dispatch — relay watcher completions (8e-2) */
 #include "internal.h"            /* kl_server_conn_release */
 #include "conn_internal.h"       /* kl_conn_dispatch_request / kl_conn_send_complete */
 #include "response_internal.h"   /* kl_response_build_iovec */
@@ -397,10 +398,13 @@ static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
         c->read_len = 0;
         if (c->tls && comp_tls_flush(c) < 0) { comp_close(s, c); return; }
         if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+    } else if (st == KL_CONN_SUSPENDED) {
+        /* Handler suspended for async I/O (8e-2): leave the connection parked — it holds
+         * no pending op and is exempt from the idle sweep. kl_async_complete resumes it
+         * (via kl_io_engine_resume_completion) once the async op finishes. Do nothing. */
     } else {
-        /* CLOSED, or SUSPENDED (async handlers are not driven over the completion loop
-         * in this subset). A TLS streaming response that finished during dispatch reports
-         * CLOSED (the handler "already sent" it), but on a completion loop its chunks were
+        /* CLOSED. A TLS streaming response that finished during dispatch reports CLOSED
+         * (the handler "already sent" it), but on a completion loop its chunks were
          * written into the memory-BIO out ring rather than the socket — flush them before
          * closing so the response is actually delivered. */
         if (c->tls && c->res.body_mode == KL_BODY_STREAM)
@@ -647,9 +651,31 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         case KL_COMP_UDP_SEND:
             kl_udp_comp_on_send((KlUdp *)ev[i].target, ev[i].bytes);
             break;
+        case KL_COMP_WATCHER: {
+            /* A readiness FD watch fired (thread-pool wakeup, timer, generic watcher).
+             * Route it through the SAME watcher-dispatch the readiness loop uses — the
+             * backend relayed it as a completion, but the driver stays platform-agnostic
+             * (8e-2). target = the tagged KlWatcher udata; bytes = the ready mask. */
+            KlEvent we = { ev[i].target, (KlEventMask)ev[i].bytes };
+            kl_event_dispatch(ctx, &we);
+            break;
+        }
         }
     }
     return n;
+}
+
+/* Resume a suspended connection on a completion loop after an async op completed (8e-2):
+ * drive the completion send path for the state on_resume produced — the same path a
+ * normal request's dispatch takes. The io_engine seam kl_async_complete calls (only on a
+ * completion loop). Keeps the async runtime free of completion knowledge. */
+void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn) {
+    if (conn->state == KL_CONN_READING) {   /* handler yielded without a response — read on */
+        conn->read_len = 0;
+        if (kl_comp_post_recv(conn) < 0) comp_close(s, conn);
+        return;
+    }
+    comp_after_state(s, conn, conn->state);
 }
 
 /* The server's io_engine seam entry: prime the accept backlog (idempotent), then run

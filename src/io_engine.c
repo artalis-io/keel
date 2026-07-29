@@ -41,3 +41,10 @@ int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     (void)ctx; (void)fd;
 }
+
+/* Stub for the completion-loop async resume — kl_async_complete only calls it when the
+ * loop advertises KL_EVENT_CAP_COMPLETION, which no readiness backend does. The real
+ * resume lives in completion_driver.c. */
+void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn) {
+    (void)s; (void)conn;
+}

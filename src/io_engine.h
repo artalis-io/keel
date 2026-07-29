@@ -47,6 +47,15 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
  * io_engine.c on readiness builds, where it is never called. */
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd);
 
+/* Resume a suspended connection on a completion loop after an async op completed (8e-2).
+ * kl_async_complete's readiness path re-arms the fd + drives kl_conn_on_writable; on a
+ * completion loop the resume instead drives the completion send path. Defined in
+ * completion_driver.c (runs comp_after_state on the conn's post-resume state); stubbed in
+ * io_engine.c on readiness builds, where kl_async_complete never calls it (it branches on
+ * KL_EVENT_CAP_COMPLETION). Keeps the async API free of any event-axis awareness. */
+struct KlConn;
+void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn);
+
 /* Post one overlapped datagram receive for a UDP socket on a completion loop (into
  * udp->recv_buf). Called by udp.c (shared) on a completion loop, so — like
  * kl_comp_run — it is declared here and stubbed in io_engine.c on non-completion
