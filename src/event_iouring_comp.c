@@ -29,12 +29,20 @@
  * (8e-2), re-armed on each fire; how a completion backend watches readiness fds alongside
  * its completions is its own business, per the abstract contract.
  *
+ * 8f-2 adds two refinements: zero-copy sendfile via IORING_OP_SPLICE (file → pipe →
+ * socket, no userspace copy of the body) and a registered send-buffer pool (small responses
+ * go out via IORING_OP_WRITE_FIXED from kernel-pinned buffers, avoiding a per-send malloc).
+ * Both degrade gracefully — a kernel without SPLICE falls back to pread+SEND, and a failed
+ * buffer registration falls back to malloc+SEND.
+ *
  * Kernel-feature note: single-shot accept + single-shot poll (re-armed) are used so the
  * backend runs on older kernels (multishot accept 5.19+, multishot poll 5.13+); prep_recv/
- * send/accept/cancel are 5.5–5.6+. Zero-copy file send (splice) is a Phase-8f-2 refinement
- * — the file body is currently pread into the send buffer. See
+ * send/accept/cancel are 5.5–5.6+, splice 5.7+, registered buffers 5.1+. See
  * docs/phase8f_iouring_completion_design.md.
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE               /* pipe2 / splice (8f-2 zero-copy sendfile) */
+#endif
 #include <keel/event.h>
 #include <keel/server.h>
 #include <keel/connection.h>
@@ -49,6 +57,8 @@
 #include <poll.h>                /* POLLIN/POLLOUT — poll-add mask + CQE revents */
 #include <sys/socket.h>          /* struct msghdr — UDP recvmsg/sendmsg */
 #include <sys/uio.h>             /* struct iovec */
+#include <fcntl.h>               /* pipe2, O_NONBLOCK — 8f-2 splice pipe */
+#include <unistd.h>              /* close — 8f-2 splice pipe */
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>              /* SIZE_MAX — sendfile buffer overflow guard */
@@ -57,10 +67,17 @@
 #define KL_IOU_RING_SIZE  2048                /* SQ/CQ depth: 256 conns × a few ops + slack */
 #define KL_IOU_CIPHER_SIZE (17u * 1024u)      /* one TLS record + slack (mirrors IOCP/pollcomp) */
 
+/* Registered send-buffer pool (8f-2): small responses copy into a pre-registered,
+ * kernel-pinned buffer and go out via IORING_OP_WRITE_FIXED — no per-send malloc, no
+ * per-op buffer mapping. Larger responses fall back to a malloc'd buffer + IORING_OP_SEND. */
+#define KL_IOU_REG_BUFS    32u                /* number of fixed send buffers */
+#define KL_IOU_REG_BUFSZ   (64u * 1024u)      /* size of each fixed send buffer */
+#define KL_IOU_SPLICE_CHUNK (64u * 1024u)     /* file→pipe splice chunk (default pipe capacity) */
+
 /* Op kind. The FIRST field of both KlIouOp and KlIouWatch is this enum, so a CQE's
  * user_data can be discriminated by reading *(IouOpType*). IOU_WATCH tags a poll-add. */
 typedef enum {
-    IOU_ACCEPT, IOU_READ, IOU_TLS_RECV, IOU_WRITE,
+    IOU_ACCEPT, IOU_READ, IOU_TLS_RECV, IOU_WRITE, IOU_SENDFILE,
     IOU_UDP_RECV, IOU_UDP_SEND, IOU_WATCH
 } IouOpType;
 
@@ -74,9 +91,18 @@ typedef struct KlIouOp {
     KlUdp         *udp;                   /* UDP_RECV / UDP_SEND */
     void          *buf;                   /* READ: recv target (read_buf slice / cipher) */
     size_t         buflen;
-    char          *sendbuf;               /* WRITE/UDP_SEND: owned copy; TLS_RECV: cipher */
-    size_t         sendcap;               /* allocated size of sendbuf (for the sized free) */
+    char          *sendbuf;               /* WRITE/UDP_SEND: owned copy; TLS_RECV: cipher.
+                                           * With reg_idx >= 0 it borrows a registered buffer. */
+    size_t         sendcap;               /* malloc'd size of sendbuf (0 if borrowed/registered) */
     size_t         send_total, send_done; /* partial-send tracking (<= sendcap) */
+    int            reg_idx;               /* registered send-buffer index, or -1 (8f-2) */
+    /* SENDFILE splice state (8f-2): head SEND, then file→pipe→socket zero-copy. */
+    int            sf_stage;              /* 0 = head, 1 = splice-in, 2 = splice-out */
+    int            file_fd;               /* borrowed (response owns/closes it) */
+    int            pipe_rd, pipe_wr;      /* per-op pipe (-1 until first splice) */
+    uint64_t       file_count, file_off;  /* file bytes total + progress */
+    size_t         pipe_len;              /* bytes currently buffered in the pipe */
+    size_t         sent_total;            /* total bytes to report on WRITE completion */
     struct msghdr  msgh;                  /* UDP: recvmsg/sendmsg header */
     struct iovec   msgiov;                /* UDP: single iovec */
     struct sockaddr_storage peer;         /* ACCEPT peer / UDP addr (msg_name) */
@@ -104,6 +130,13 @@ typedef struct {
     KlSocketHandle  listen_fd;
     int             accept_pending;        /* one accept op outstanding at a time */
     int             primed;
+    /* Registered send-buffer pool (8f-2) — WRITE_FIXED for small responses. */
+    unsigned char  *reg_block;             /* one contiguous KL_IOU_REG_BUFS × BUFSZ block */
+    struct iovec    reg_iov[KL_IOU_REG_BUFS];
+    int             reg_free[KL_IOU_REG_BUFS];  /* free-list stack of buffer indices */
+    int             reg_free_count;
+    int             reg_ok;                /* buffers registered — else always malloc+SEND */
+    int             has_splice;            /* IORING_OP_SPLICE supported — else pread+SEND */
 } KlIouState;
 
 /* ── SQE helper: flush the SQ if it is full, then retry once. ─────────── */
@@ -125,6 +158,30 @@ static unsigned iou_poll_mask(KlEventMask mask) {
 
 /* ── KlEventLoop lifecycle ───────────────────────────────────────────── */
 
+/* Register the fixed send-buffer pool + probe splice support (8f-2). Best-effort: on
+ * failure the backend falls back to malloc+SEND / pread+SEND, so this never fails init. */
+static void iou_init_optim(KlIouState *st) {
+    st->reg_block = kl_malloc(st->alloc, (size_t)KL_IOU_REG_BUFS * KL_IOU_REG_BUFSZ);
+    if (st->reg_block) {
+        for (unsigned i = 0; i < KL_IOU_REG_BUFS; i++) {
+            st->reg_iov[i].iov_base = st->reg_block + (size_t)i * KL_IOU_REG_BUFSZ;
+            st->reg_iov[i].iov_len  = KL_IOU_REG_BUFSZ;
+        }
+        if (io_uring_register_buffers(&st->ring, st->reg_iov, KL_IOU_REG_BUFS) == 0) {
+            st->reg_ok = 1;
+            for (unsigned i = 0; i < KL_IOU_REG_BUFS; i++)
+                st->reg_free[i] = (int)(KL_IOU_REG_BUFS - 1 - i);   /* stack: pop 0 first */
+            st->reg_free_count = (int)KL_IOU_REG_BUFS;
+        } else {
+            kl_free(st->alloc, st->reg_block, (size_t)KL_IOU_REG_BUFS * KL_IOU_REG_BUFSZ);
+            st->reg_block = NULL;
+        }
+    }
+    struct io_uring_probe *probe = io_uring_get_probe_ring(&st->ring);
+    st->has_splice = probe && io_uring_opcode_supported(probe, IORING_OP_SPLICE);
+    if (probe) io_uring_free_probe(probe);
+}
+
 int kl_event_init(KlEventLoop *loop) {
     KlIouState *st = kl_malloc(loop->alloc, sizeof(*st));
     if (!st) return -1;
@@ -135,6 +192,7 @@ int kl_event_init(KlEventLoop *loop) {
         kl_free(loop->alloc, st, sizeof(*st));
         return -1;
     }
+    iou_init_optim(st);
     loop->_backend = st;
     loop->fd = -1;
     return 0;
@@ -227,18 +285,58 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
 }
 
 static void iou_op_free(KlIouOp *op) {
-    if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->sendcap);
+    /* A registered send buffer (reg_idx >= 0) is borrowed — its index is returned to the
+     * pool at the completion/error site, not here; only a malloc'd sendbuf is freed. */
+    if (op->sendbuf && op->reg_idx < 0) kl_free(op->alloc, op->sendbuf, op->sendcap);
+    if (op->pipe_rd >= 0) close(op->pipe_rd);
+    if (op->pipe_wr >= 0) close(op->pipe_wr);
     kl_free(op->alloc, op, sizeof(*op));
+}
+
+/* Allocate a zeroed op with the sentinel fields set (reg_idx / pipe / file fds are all
+ * "unset" = -1, distinct from the valid 0 that memset would leave). */
+static KlIouOp *iou_op_alloc(KlAllocator *alloc) {
+    KlIouOp *op = kl_malloc(alloc, sizeof(*op));
+    if (!op) return NULL;
+    memset(op, 0, sizeof(*op));
+    op->alloc = alloc;
+    op->reg_idx = -1;
+    op->pipe_rd = op->pipe_wr = -1;
+    op->file_fd = -1;
+    return op;
+}
+
+/* Registered send-buffer pool (8f-2): pop/push a buffer index, or -1 if none free. */
+static int iou_reg_acquire(KlIouState *st) {
+    if (!st->reg_ok || st->reg_free_count == 0) return -1;
+    return st->reg_free[--st->reg_free_count];
+}
+static void iou_reg_release(KlIouState *st, int idx) {
+    if (idx >= 0 && st->reg_free_count < (int)KL_IOU_REG_BUFS)
+        st->reg_free[st->reg_free_count++] = idx;
+}
+
+/* Relinquish an op's send buffer — return a registered buffer to the pool, or free a
+ * malloc'd one — and null it so iou_op_free won't touch it. Idempotent. Called when a
+ * send finishes (WRITE/SENDFILE) or when the SENDFILE head is done and the file phase
+ * begins (the head buffer isn't needed during the splice). */
+static void iou_send_release(KlIouState *st, KlIouOp *op) {
+    if (op->reg_idx >= 0) { iou_reg_release(st, op->reg_idx); op->reg_idx = -1; }
+    else if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->sendcap);
+    op->sendbuf = NULL;
+    op->sendcap = 0;
 }
 
 void kl_event_close(KlEventLoop *loop) {
     KlIouState *st = loop->_backend;
     if (!st) return;
-    io_uring_queue_exit(&st->ring);        /* kernel drops in-flight ops; free our records */
+    io_uring_queue_exit(&st->ring);        /* kernel drops in-flight ops + registered bufs */
     KlIouOp *op = st->ops;
     while (op) { KlIouOp *n = op->next; iou_op_free(op); op = n; }
     KlIouWatch *w = st->watches;
     while (w) { KlIouWatch *n = w->next; kl_free(st->alloc, w, sizeof(*w)); w = n; }
+    if (st->reg_block) kl_free(st->alloc, st->reg_block,
+                               (size_t)KL_IOU_REG_BUFS * KL_IOU_REG_BUFSZ);
     kl_free(st->alloc, st, sizeof(*st));
     loop->_backend = NULL;
     loop->fd = -1;
@@ -281,10 +379,8 @@ static KlIouState *iou_state(KlConn *c) { return c->ctx->loop._backend; }
 
 int kl_comp_post_recv(KlConn *c) {
     KlIouState *st = iou_state(c);
-    KlIouOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlIouOp *op = iou_op_alloc(c->alloc);
     if (!op) return -1;
-    memset(op, 0, sizeof(*op));
-    op->alloc = c->alloc;
     op->conn = c;
     op->fd = c->fd;
 
@@ -313,28 +409,74 @@ int kl_comp_post_recv(KlConn *c) {
     return 0;
 }
 
-/* Prepare a send SQE for the unsent tail of a WRITE op. */
+/* Prepare a send SQE for the unsent tail of a WRITE op. A registered send buffer
+ * (reg_idx >= 0) goes out via WRITE_FIXED (kernel-pinned, zero per-op mapping); a malloc'd
+ * buffer via plain SEND. Both handle partial sends by re-prep from send_done (8f-2). */
 static void iou_prep_send_tail(KlIouState *st, KlIouOp *op) {
     struct io_uring_sqe *sqe = iou_sqe(st);
     if (!sqe) { op->aborted = 1; return; }   /* no slot — surface as error next drain */
-    io_uring_prep_send(sqe, op->fd, op->sendbuf + op->send_done,
-                       op->send_total - op->send_done, 0);
+    void *p = op->sendbuf + op->send_done;
+    size_t n = op->send_total - op->send_done;
+    if (op->reg_idx >= 0)
+        io_uring_prep_write_fixed(sqe, op->fd, p, (unsigned)n, 0, op->reg_idx);
+    else
+        io_uring_prep_send(sqe, op->fd, p, n, 0);
     io_uring_sqe_set_data(sqe, op);
+}
+
+/* ── 8f-2 zero-copy sendfile via splice (file → pipe → socket) ────────── */
+
+static int iou_open_pipe(KlIouOp *op) {
+    int pfd[2];
+    if (pipe2(pfd, O_NONBLOCK) < 0) return -1;
+    op->pipe_rd = pfd[0];
+    op->pipe_wr = pfd[1];
+    return 0;
+}
+
+/* Phase 1: splice file_fd (at file_off) → pipe_wr, up to one pipe-capacity chunk. flags=0
+ * so io_uring waits asynchronously if the pipe is momentarily full (no busy error). */
+static void iou_prep_splice_in(KlIouState *st, KlIouOp *op) {
+    uint64_t chunk = op->file_count - op->file_off;
+    if (chunk > KL_IOU_SPLICE_CHUNK) chunk = KL_IOU_SPLICE_CHUNK;
+    struct io_uring_sqe *sqe = iou_sqe(st);
+    if (!sqe) { op->aborted = 1; return; }
+    io_uring_prep_splice(sqe, op->file_fd, (int64_t)op->file_off, op->pipe_wr, -1,
+                         (unsigned)chunk, 0);
+    io_uring_sqe_set_data(sqe, op);
+    op->sf_stage = 1;
+}
+
+/* Phase 2: splice pipe_rd → socket, up to the bytes currently buffered in the pipe.
+ * flags=0 so io_uring waits for socket writability instead of returning EAGAIN. */
+static void iou_prep_splice_out(KlIouState *st, KlIouOp *op) {
+    struct io_uring_sqe *sqe = iou_sqe(st);
+    if (!sqe) { op->aborted = 1; return; }
+    io_uring_prep_splice(sqe, op->pipe_rd, -1, op->fd, -1, (unsigned)op->pipe_len, 0);
+    io_uring_sqe_set_data(sqe, op);
+    op->sf_stage = 2;
 }
 
 int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     KlIouState *st = iou_state(c);
-    KlIouOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlIouOp *op = iou_op_alloc(c->alloc);
     if (!op) return -1;
-    memset(op, 0, sizeof(*op));
     op->type = IOU_WRITE;
-    op->alloc = c->alloc;
     op->conn = c;
     op->fd = c->fd;
     op->send_total = total;
-    op->sendcap = total ? total : 1;
-    op->sendbuf = kl_malloc(c->alloc, op->sendcap);
-    if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }
+
+    /* Small response → a registered, kernel-pinned buffer + WRITE_FIXED (no per-send
+     * malloc). Larger than a pooled buffer, or pool exhausted → malloc + SEND. */
+    int idx = (total <= KL_IOU_REG_BUFSZ) ? iou_reg_acquire(st) : -1;
+    if (idx >= 0) {
+        op->reg_idx = idx;
+        op->sendbuf = (char *)st->reg_iov[idx].iov_base;   /* borrowed */
+    } else {
+        op->sendcap = total ? total : 1;
+        op->sendbuf = kl_malloc(c->alloc, op->sendcap);
+        if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }
+    }
     size_t off = 0;
     for (int i = 0; i < iovcnt; i++) {
         memcpy(op->sendbuf + off, iov[i].base, iov[i].len);
@@ -345,21 +487,14 @@ int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     return 0;
 }
 
-/* Post a response-head + file-body send. Phase-8f-1: the file bytes are pread into the
- * send buffer after the head, so this becomes a plain WRITE (partial sends handled by the
- * drain re-prep). Zero-copy splice is the 8f-2 refinement — the response owns file_fd and
- * closes it (response.c), so pread here is ownership-neutral. */
-int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
-                          size_t head_total, int file_fd, uint64_t count) {
-    KlIouState *st = iou_state(c);
-    if (count > (uint64_t)(SIZE_MAX / 2) || head_total > SIZE_MAX / 2 ||
-        head_total + (size_t)count > SIZE_MAX / 2)
-        return -1;                                   /* overflow guard */
-    KlIouOp *op = kl_malloc(c->alloc, sizeof(*op));
+/* Fallback for kernels without IORING_OP_SPLICE: pread the file body into a malloc'd send
+ * buffer after the head, and send it as a plain WRITE (the 8f-1 mechanism). The response
+ * owns file_fd and closes it (response.c), so pread is ownership-neutral. */
+static int iou_post_sendfile_copy(KlConn *c, KlIouState *st, const KlIoVec *head_iov,
+                                  int head_n, size_t head_total, int file_fd, uint64_t count) {
+    KlIouOp *op = iou_op_alloc(c->alloc);
     if (!op) return -1;
-    memset(op, 0, sizeof(*op));
     op->type = IOU_WRITE;
-    op->alloc = c->alloc;
     op->conn = c;
     op->fd = c->fd;
     op->send_total = head_total + (size_t)count;
@@ -371,7 +506,6 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
         memcpy(op->sendbuf + off, head_iov[i].base, head_iov[i].len);
         off += head_iov[i].len;
     }
-    /* Read the whole file body into the buffer (offset 0). */
     size_t got = 0;
     while (got < (size_t)count) {
         ssize_t nr = kl_plat_file_pread(file_fd, op->sendbuf + head_total + got,
@@ -386,14 +520,51 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
     return 0;
 }
 
+/* Post a response-head + file-body send. 8f-2: zero-copy via splice — send the head, then
+ * loop file → pipe → socket (no userspace copy of the file bytes). Falls back to
+ * iou_post_sendfile_copy when the kernel lacks IORING_OP_SPLICE. */
+int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+                          size_t head_total, int file_fd, uint64_t count) {
+    KlIouState *st = iou_state(c);
+    if (count > (uint64_t)(SIZE_MAX / 2) || head_total > SIZE_MAX / 2)
+        return -1;                                   /* overflow guard */
+    if (!st->has_splice)
+        return iou_post_sendfile_copy(c, st, head_iov, head_n, head_total, file_fd, count);
+
+    KlIouOp *op = iou_op_alloc(c->alloc);
+    if (!op) return -1;
+    op->type = IOU_SENDFILE;
+    op->conn = c;
+    op->fd = c->fd;
+    op->file_fd = file_fd;
+    op->file_count = count;
+    op->sf_stage = 0;                                /* head first */
+
+    /* The head rides a registered/malloc buffer as a normal partial-capable send. */
+    op->send_total = head_total;
+    int idx = (head_total <= KL_IOU_REG_BUFSZ) ? iou_reg_acquire(st) : -1;
+    if (idx >= 0) { op->reg_idx = idx; op->sendbuf = (char *)st->reg_iov[idx].iov_base; }
+    else {
+        op->sendcap = head_total ? head_total : 1;
+        op->sendbuf = kl_malloc(c->alloc, op->sendcap);
+        if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }
+    }
+    size_t off = 0;
+    for (int i = 0; i < head_n; i++) {
+        memcpy(op->sendbuf + off, head_iov[i].base, head_iov[i].len);
+        off += head_iov[i].len;
+    }
+    iou_op_push(st, op);
+    iou_prep_send_tail(st, op);                      /* stage 0: send the head */
+    return 0;
+}
+
 int kl_comp_post_accept(struct KlServer *s) {
     KlIouState *st = s->ev.loop._backend;
     if (st->accept_pending) return 0;                /* one accept outstanding is enough */
-    KlIouOp *op = kl_malloc(st->alloc, sizeof(*op));
+    KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
-    memset(op, 0, sizeof(*op));
     op->type = IOU_ACCEPT;
-    op->alloc = st->alloc;
     op->fd = st->listen_fd;
     op->peer_len = sizeof(op->peer);
     struct io_uring_sqe *sqe = iou_sqe(st);
@@ -407,11 +578,9 @@ int kl_comp_post_accept(struct KlServer *s) {
 
 int kl_comp_post_udp_recv(struct KlUdp *udp) {
     KlIouState *st = udp->ctx->loop._backend;
-    KlIouOp *op = kl_malloc(st->alloc, sizeof(*op));
+    KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
-    memset(op, 0, sizeof(*op));
     op->type = IOU_UDP_RECV;
-    op->alloc = st->alloc;
     op->udp = udp;
     op->fd = udp->fd;
     op->peer_len = sizeof(op->peer);
@@ -432,11 +601,9 @@ int kl_comp_post_udp_recv(struct KlUdp *udp) {
 int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
                           const struct sockaddr *dest, int dest_len) {
     KlIouState *st = udp->ctx->loop._backend;
-    KlIouOp *op = kl_malloc(st->alloc, sizeof(*op));
+    KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
-    memset(op, 0, sizeof(*op));
     op->type = IOU_UDP_SEND;
-    op->alloc = st->alloc;
     op->udp = udp;
     op->fd = udp->fd;
     op->send_total = len;
@@ -521,6 +688,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
 
     case IOU_WRITE:
         if (op->aborted || res < 0) {
+            iou_send_release(st, op);
             ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 0;
             return 1;
         }
@@ -529,8 +697,53 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
             iou_prep_send_tail(st, op);
             return 0;                                 /* still in flight, no event */
         }
+        iou_send_release(st, op);                     /* return the registered buffer */
         ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 1;
         ev->bytes = op->send_total;
+        return 1;
+
+    case IOU_SENDFILE:
+        if (op->aborted || res < 0) {
+            iou_send_release(st, op);                 /* free head buf if error hit in stage 0 */
+            ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 0;
+            return 1;
+        }
+        if (op->sf_stage == 0) {                      /* head SEND (partial-capable) */
+            op->send_done += (size_t)res;
+            if (op->send_done < op->send_total) { iou_prep_send_tail(st, op); return 0; }
+            op->sent_total = op->send_total;          /* head bytes accounted */
+            iou_send_release(st, op);                 /* head done — release its buffer */
+            if (op->file_off >= op->file_count) {     /* empty body — response complete */
+                ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 1;
+                ev->bytes = op->sent_total; return 1;
+            }
+            if (iou_open_pipe(op) < 0) {              /* splice pipe */
+                ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 0; return 1;
+            }
+            iou_prep_splice_in(st, op);               /* → stage 1 */
+            return 0;
+        }
+        if (op->sf_stage == 1) {                      /* file → pipe (res = bytes buffered) */
+            if (res == 0) {                           /* short/empty file — done */
+                ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 1;
+                ev->bytes = op->sent_total; return 1;
+            }
+            op->file_off += (uint64_t)res;
+            op->pipe_len = (size_t)res;
+            iou_prep_splice_out(st, op);              /* → stage 2 */
+            return 0;
+        }
+        /* sf_stage == 2: pipe → socket (res = bytes delivered to the socket) */
+        if (res == 0) {                               /* socket closed mid-transfer — stop */
+            ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 1;
+            ev->bytes = op->sent_total; return 1;
+        }
+        op->pipe_len -= (size_t)res;
+        op->sent_total += (size_t)res;
+        if (op->pipe_len > 0) { iou_prep_splice_out(st, op); return 0; }  /* drain the pipe */
+        if (op->file_off < op->file_count) { iou_prep_splice_in(st, op); return 0; }  /* next chunk */
+        ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 1;     /* file fully sent */
+        ev->bytes = op->sent_total;
         return 1;
 
     case IOU_UDP_RECV:

@@ -95,16 +95,26 @@ default io_uring path, but that is a separate decision; 8f only *adds* it.
 
 ## 4. Staging
 
-| Increment | Content | Test (Linux CI, ASan) |
-|---|---|---|
-| **8f-1** | ring lifecycle + provider + accept/recv/send + drain → HTTP/1.1 GET/POST | a `smoke_iouring` roundtrip (or run the pollcomp smokes under `BACKEND=iouringcomp`) |
-| **8f-2** | `SPLICE` sendfile + `RECVMSG`/`SENDMSG` UDP | file + UDP stages |
-| **8f-3** | `POLL_ADD` watcher relay + `ASYNC_CANCEL` (idle timeout) + timers | the async/thread-pool + idle-timeout smokes |
-| **8f-4** | (falls out for free) TLS / h2 / WebSocket over io_uring completion | the TLS/mock, WS, h2c smokes — the driver is reused, so these just need to be run |
+| Increment | Content | Test (Linux CI, ASan) | Status |
+|---|---|---|---|
+| **8f-1** | ring lifecycle + provider + accept/recv/send + drain → GET/POST; `RECVMSG`/`SENDMSG` UDP; `POLL_ADD` watcher relay; `ASYNC_CANCEL` idle timeout; TLS/h2/WS ride the reused driver | `smoke_iouring` + `smoke_iouring_async` | ✅ landed (#101) |
+| **8f-2** | zero-copy `SPLICE` sendfile (file → pipe → socket) + registered send-buffer pool (`WRITE_FIXED` for small responses) | `smoke_iouring` `/bigfile` (multi-chunk splice) + small responses (registered path) | ✅ landed |
 
-Because the driver is reused verbatim, the existing completion smokes
-(`smoke_pollcomp*`) can be pointed at `BACKEND=iouringcomp` to validate 8f end to end —
-the same double-duty pollcomp served, now on a production engine.
+The original 8f-3/8f-4 rows (watcher relay, TLS/h2/WS) folded into 8f-1: because the driver
+is reused verbatim, TLS/h2/WS/async all rode io_uring the moment the backend existed, so
+they were validated in 8f-1's smokes rather than split out. Because the driver is reused
+verbatim, the completion smokes could also be pointed at `BACKEND=iouringcomp` — the same
+double-duty pollcomp served, now on a production engine.
+
+**8f-2 notes.** Splice uses a per-op pipe (created lazily at the head→file transition) and
+`flags=0` so io_uring waits asynchronously for socket writability rather than erroring on a
+full buffer; short splice-outs re-submit the pipe remainder. The registered pool is a fixed
+2 MB block (32 × 64 KiB) registered once at loop init; a response ≤ 64 KiB borrows a slot
+and sends via `WRITE_FIXED` (no per-send malloc), returning the slot on completion; larger
+responses or an exhausted pool fall back to malloc + `SEND`. Both degrade gracefully on old
+kernels (no `SPLICE` → pread+`SEND`; failed registration → malloc+`SEND`). Whether these
+win in practice is the benchmark's job (the next migration step); they are correctness-safe
+regardless.
 
 ---
 
