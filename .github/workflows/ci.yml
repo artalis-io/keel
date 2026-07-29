@@ -104,6 +104,37 @@ jobs:
         timeout-minutes: 5
         run: make smoke-pollcomp-asan
 
+  completion-iouring:
+    # The completion-NATIVE io_uring backend (BACKEND=iouringcomp, PAL 8f): io_uring
+    # driving the SAME completion driver (completion_driver.c) via SQE/CQE — the third
+    # completion backend after IOCP + pollcomp, and the first production Linux one. Proves
+    # the axis on a real, completion-native kernel engine (io_uring is completion by
+    # construction). Linux-only (io_uring is a Linux facility).
+    name: Completion (io_uring)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install liburing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev
+
+      - name: Build completion backend (io_uring)
+        run: make BACKEND=iouringcomp
+
+      # Full completion driver over io_uring: GET + POST + sendfile + stream + UDP + h2c +
+      # h2 prior-knowledge + idle-timeout + keep-alive + resilience + large partial-send.
+      - name: End-to-end HTTP-over-io_uring-completion roundtrip smoke test
+        timeout-minutes: 5
+        run: make BACKEND=iouringcomp smoke-iouring
+
+      # Async/thread-pool over the completion loop — the watcher relay via single-shot
+      # IORING_OP_POLL_ADD (the io_uring way to meet the same KL_COMP_WATCHER contract).
+      - name: Async/thread-pool-over-io_uring-completion roundtrip smoke test
+        timeout-minutes: 5
+        run: make BACKEND=iouringcomp smoke-iouring-async
+
   windows:
     name: Windows (MinGW, full core)
     runs-on: windows-latest
