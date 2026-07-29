@@ -407,11 +407,18 @@ smoke-pollcomp-tls: $(SMOKE_POLLCOMP_TLS_BIN)
 $(SMOKE_POLLCOMP_TLS_BIN): tests/smoke_pollcomp_tls.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# Completion roundtrips (plaintext AND TLS-via-mock) under ASan+UBSan with leak detection
-# (Linux CI). Builds the pollcomp lib + the smokes WITH sanitizer flags (so they link the
-# ASan runtime the instrumented lib needs), then runs them — leak/UAF/overflow coverage of
-# the completion driver, the pollcomp op-table, and the TLS/h2 buffers the plain build
-# can't give.
+# WebSocket-over-completion roundtrip on POSIX via pollcomp — runs comp_ws_drive (8e-1).
+SMOKE_POLLCOMP_WS_BIN = tests/smoke_pollcomp_ws$(EXE)
+smoke-pollcomp-ws: $(SMOKE_POLLCOMP_WS_BIN)
+	./$(SMOKE_POLLCOMP_WS_BIN)
+$(SMOKE_POLLCOMP_WS_BIN): tests/smoke_pollcomp_ws.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
+# Completion roundtrips (plaintext, TLS-via-mock, and WebSocket) under ASan+UBSan with
+# leak detection (Linux CI). Builds the pollcomp lib + the smokes WITH sanitizer flags (so
+# they link the ASan runtime the instrumented lib needs), then runs them — leak/UAF/
+# overflow coverage of the completion driver, the pollcomp op-table, and the TLS/h2/WS
+# buffers the plain build can't give.
 smoke-pollcomp-asan:
 	$(MAKE) clean
 	$(MAKE) BACKEND=pollcomp debug
@@ -419,9 +426,12 @@ smoke-pollcomp-asan:
 	      -o $(SMOKE_POLLCOMP_BIN) tests/smoke_pollcomp.c -L. -lkeel -lpthread
 	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_TLS_BIN) tests/smoke_pollcomp_tls.c -L. -lkeel -lpthread
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	      -o $(SMOKE_POLLCOMP_WS_BIN) tests/smoke_pollcomp_ws.c -L. -lkeel -lpthread
 	# LeakSanitizer runs by default under ASan on Linux (CI); macOS ASan runs without it.
 	./$(SMOKE_POLLCOMP_BIN)
 	./$(SMOKE_POLLCOMP_TLS_BIN)
+	./$(SMOKE_POLLCOMP_WS_BIN)
 
 # Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
 # (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
@@ -492,6 +502,7 @@ clean:
 	rm -f src/event_iocp.o src/event_pollcomp.o src/completion_driver.o
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
+	rm -f tests/smoke_pollcomp_ws tests/smoke_pollcomp_ws.exe
 	rm -f src/file_io.o src/file_io_iouring.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
