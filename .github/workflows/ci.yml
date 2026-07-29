@@ -186,6 +186,12 @@ jobs:
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-tls
 
+      # The IOCP watcher relay (overlapped WSARecv on the thread-pool wakeup socket surfaces
+      # KL_COMP_WATCHER) — async/thread-pool handlers over the completion loop (8e-2c).
+      - name: End-to-end async/thread-pool-over-IOCP roundtrip smoke test
+        timeout-minutes: 3
+        run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-async
+
   sanitizers:
     name: ASan + UBSan
     runs-on: ubuntu-latest

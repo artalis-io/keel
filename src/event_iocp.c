@@ -28,6 +28,17 @@
 #define KL_IOCP_ACCEPT_BACKLOG 8
 #define KL_IOCP_ADDR_LEN       (sizeof(struct sockaddr_storage) + 16)
 
+struct KlIocpOp;
+/* A registered readiness watch (8e-2c). The completion port cannot readiness-watch an
+ * arbitrary fd, but the KlWatcher fds KEEL uses (the thread-pool wakeup) are loopback
+ * sockets, so we post a persistent overlapped WSARecv: the wakeup write completes it,
+ * surfacing a KL_COMP_WATCHER. Tracked so kl_event_del can cancel it. */
+typedef struct KlIocpWatch {
+    struct KlIocpWatch *next;
+    SOCKET              fd;
+    struct KlIocpOp    *op;   /* the pending WSARecv op */
+} KlIocpWatch;
+
 typedef struct {
     HANDLE                    port;
     LPFN_ACCEPTEX             acceptex;
@@ -35,13 +46,15 @@ typedef struct {
     int                       started;
     int                       accept_family;
     SOCKET                    listen_fd;   /* stored at prime — drain is ctx-scoped */
+    KlIocpWatch              *watches;     /* registered readiness watches (8e-2c) */
     KlAllocator              *alloc;
 } KlIocpState;
 
 typedef enum {
     KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE,
     KL_IOCP_UDP_RECV, KL_IOCP_UDP_SEND,
-    KL_IOCP_TLS_RECV                            /* WSARecv ciphertext for a TLS conn (8b-5b) */
+    KL_IOCP_TLS_RECV,                          /* WSARecv ciphertext for a TLS conn (8b-5b) */
+    KL_IOCP_WATCHER                            /* WSARecv on a KlWatcher socket (8e-2c) */
 } KlIocpOpType;
 
 /* One overlapped TLS ciphertext read: a whole TLS record (~16 KiB max) plus a
@@ -50,7 +63,7 @@ typedef enum {
 #define KL_IOCP_CIPHER_SIZE (17u * 1024u)
 
 /* One in-flight overlapped op. `ov` MUST be first (CONTAINING_RECORD round-trip). */
-typedef struct {
+typedef struct KlIocpOp {
     OVERLAPPED    ov;
     KlIocpOpType  type;
     KlAllocator  *alloc;
@@ -62,6 +75,8 @@ typedef struct {
     int           src_len;                     /* UDP_RECV: source addr length */
     char         *sendbuf;                     /* WRITE: contiguous response copy */
     size_t        send_total, send_done;       /* WRITE: partial-send tracking */
+    void         *watcher_udata;               /* WATCHER: the tagged KlWatcher pointer */
+    int           watcher_removed;             /* WATCHER: kl_event_del'd — free, don't re-post */
 } KlIocpOp;
 
 /* ── KlEventLoop lifecycle over an IOCP port ─────────────────────────── */
@@ -80,24 +95,76 @@ int kl_event_init(KlEventLoop *loop) {
     return 0;
 }
 
+static void iocp_op_free(KlIocpOp *op);
+
+/* Post (or re-post) the persistent WSARecv for a watcher socket (8e-2c). */
+static int iocp_watch_post(KlIocpOp *op) {
+    WSABUF b = { (ULONG)sizeof(op->accept_buf), op->accept_buf };
+    DWORD flags = 0, recvd = 0;
+    memset(&op->ov, 0, sizeof(op->ov));
+    int rc = WSARecv(op->accept_sock, &b, 1, &recvd, &flags, &op->ov, NULL);
+    return (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) ? -1 : 0;
+}
+
 int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     (void)mask;   /* completion model: no readiness mask — I/O is posted, not armed */
     if (!kl_handle_valid(fd))
         return -1;
     KlIocpState *st = loop->_backend;
+
+    /* A TAGGED udata is a KlWatcher (thread-pool wakeup etc.). Associate its socket with
+     * the port and post a persistent WSARecv, so the wakeup write surfaces a completion
+     * the driver relays as KL_COMP_WATCHER (8e-2c). Untagged = a connection: its posted
+     * overlapped ops complete on the port; no watch op. Keys on the shared LSB watcher
+     * tag, not on any IOCP specific. */
+    if ((uintptr_t)udata & 1) {
+        for (KlIocpWatch *w = st->watches; w; w = w->next)
+            if (w->fd == (SOCKET)fd) { w->op->watcher_udata = udata; return 0; }  /* idempotent */
+        if (!CreateIoCompletionPort((HANDLE)(uintptr_t)fd, st->port, (ULONG_PTR)udata, 0))
+            return -1;
+        KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
+        if (!op) return -1;
+        memset(op, 0, sizeof(*op));
+        op->type = KL_IOCP_WATCHER;
+        op->alloc = st->alloc;
+        op->accept_sock = (SOCKET)fd;
+        op->watcher_udata = udata;
+        if (iocp_watch_post(op) < 0) { iocp_op_free(op); return -1; }
+        KlIocpWatch *w = kl_malloc(st->alloc, sizeof(*w));
+        if (!w) { op->watcher_removed = 1; CancelIoEx((HANDLE)(uintptr_t)fd, &op->ov); return -1; }
+        w->fd = (SOCKET)fd;
+        w->op = op;
+        w->next = st->watches;
+        st->watches = w;
+        return 0;
+    }
+
     HANDLE h = CreateIoCompletionPort((HANDLE)(uintptr_t)fd, st->port,
                                       (ULONG_PTR)udata, 0);
     return h ? 0 : -1;
 }
 
 int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
-    (void)loop; (void)fd; (void)mask; (void)udata;   /* no readiness re-arm */
+    (void)mask;   /* no readiness re-arm; a watcher just updates its tag */
+    if (!((uintptr_t)udata & 1)) return 0;
+    KlIocpState *st = loop->_backend;
+    for (KlIocpWatch *w = st->watches; w; w = w->next)
+        if (w->fd == (SOCKET)fd) { w->op->watcher_udata = udata; return 0; }
     return 0;
 }
 
 int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
-    (void)loop; (void)fd;   /* a socket leaves the port when closed */
-    return 0;
+    KlIocpState *st = loop->_backend;
+    for (KlIocpWatch **link = &st->watches; *link; link = &(*link)->next)
+        if ((*link)->fd == (SOCKET)fd) {
+            KlIocpWatch *w = *link;
+            *link = w->next;
+            w->op->watcher_removed = 1;   /* on the (aborted) completion: free, don't re-post */
+            CancelIoEx((HANDLE)(uintptr_t)fd, &w->op->ov);
+            kl_free(st->alloc, w, sizeof(*w));
+            return 0;
+        }
+    return 0;   /* a connection socket leaves the port when closed */
 }
 
 int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
@@ -112,6 +179,13 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
 void kl_event_close(KlEventLoop *loop) {
     KlIocpState *st = loop->_backend;
     if (st) {
+        KlIocpWatch *w = st->watches;   /* free watch ops (shutdown; the loop is stopped) */
+        while (w) {
+            KlIocpWatch *n = w->next;
+            iocp_op_free(w->op);
+            kl_free(st->alloc, w, sizeof(*w));
+            w = n;
+        }
         if (st->port) CloseHandle(st->port);
         kl_free(st->alloc, st, sizeof(*st));
         loop->_backend = NULL;
@@ -481,6 +555,20 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
             out[count].ok = (bytes > 0);
             count++;
             iocp_op_free(op);
+        } else if (op->type == KL_IOCP_WATCHER) {
+            /* A watcher socket became readable (wakeup write). Surface KL_COMP_WATCHER for
+             * the driver to route to kl_event_dispatch, then re-post the WSARecv to keep
+             * watching. If kl_event_del'd it (watcher_removed), this is the aborted
+             * completion — just free the op. (8e-2c) */
+            if (op->watcher_removed) { iocp_op_free(op); continue; }
+            memset(&out[count], 0, sizeof(out[count]));
+            out[count].kind = KL_COMP_WATCHER;
+            out[count].target = op->watcher_udata;
+            out[count].bytes = (size_t)KL_EVENT_READ;
+            out[count].ok = 1;
+            count++;
+            if (iocp_watch_post(op) < 0)
+                op->watcher_removed = 1;   /* re-post failed — freed at kl_event_close */
         } else { /* KL_IOCP_SENDFILE — TransmitFile completes as a unit (head+file);
                   * surface it as a completed write. */
             memset(&out[count], 0, sizeof(out[count]));

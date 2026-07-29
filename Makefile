@@ -389,6 +389,14 @@ smoke-iocp-tls: $(SMOKE_IOCP_TLS_BIN)
 $(SMOKE_IOCP_TLS_BIN): tests/smoke_iocp_tls.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# Async/thread-pool over IOCP (Windows, BACKEND=iocp) — runtime gate for the IOCP watcher
+# relay (overlapped WSARecv on the loopback wakeup surfaces KL_COMP_WATCHER). 8e-2c.
+SMOKE_IOCP_ASYNC_BIN = tests/smoke_iocp_async$(EXE)
+smoke-iocp-async: $(SMOKE_IOCP_ASYNC_BIN)
+	./$(SMOKE_IOCP_ASYNC_BIN)
+$(SMOKE_IOCP_ASYNC_BIN): tests/smoke_iocp_async.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
 # End-to-end HTTP-over-completion roundtrip on POSIX (BACKEND=pollcomp). The runtime
 # gate for the platform-independent completion driver off Windows — build libkeel with
 # BACKEND=pollcomp first so the server runs on the poll() completion loop. Proves the
@@ -513,6 +521,7 @@ clean:
 	rm -f src/event_iocp.o src/event_pollcomp.o src/completion_driver.o
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
+	rm -f tests/smoke_iocp_async tests/smoke_iocp_async.exe
 	rm -f tests/smoke_pollcomp_ws tests/smoke_pollcomp_ws.exe
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
 	rm -f src/file_io.o src/file_io_iouring.o
