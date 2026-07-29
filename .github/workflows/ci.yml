@@ -169,6 +169,13 @@ jobs:
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp
 
+      # Runtime-test event_iocp.c's IOCP-specific TLS mechanics (KL_IOCP_TLS_RECV,
+      # feed-in-drain, overlapped ciphertext WSASend) via the portable identity mock TLS
+      # — no mbedTLS on the runner. This is the last compile-gated-only path on Windows.
+      - name: End-to-end TLS-over-IOCP roundtrip smoke test (mock TLS)
+        timeout-minutes: 3
+        run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-tls
+
   sanitizers:
     name: ASan + UBSan
     runs-on: ubuntu-latest
