@@ -46,6 +46,13 @@ const KlSocketProvider *kl_socket_provider_iocp(void);
  * unconditionally, defined/called only in the pollcomp build. */
 const KlSocketProvider *kl_socket_provider_pollcomp(void);
 
+/* The overlapped socket provider that pairs with the completion-native io_uring backend
+ * (defined in event_iouring_comp.c, Linux/BACKEND=iouringcomp only). Like the pollcomp
+ * provider it reuses the POSIX control-plane ops + the OVERLAPPED capability; io_uring
+ * performs the async I/O over real fds. Internal; declared unconditionally, defined/called
+ * only in the iouringcomp build. */
+const KlSocketProvider *kl_socket_provider_iouringcomp(void);
+
 /*
  * Platform default socket ops — the raw syscall for each operation, DEFINED
  * per-platform in the provider TU (socket_posix.c: POSIX; socket_winsock.c:

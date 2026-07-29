@@ -90,6 +90,16 @@ else
       EVENT_SRC = src/event_iouring.c
       FILE_IO_SRC = src/file_io_iouring.c
       LDFLAGS += -luring
+    else ifeq ($(BACKEND),iouringcomp)
+      # Completion-native io_uring backend (PAL 8f): io_uring driving the completion axis
+      # (completion.h) + driver (completion_driver.c) via SQE/CQE — the third completion
+      # backend after IOCP + pollcomp, and the first production Linux one. Distinct from
+      # BACKEND=iouring, which adapts the same engine to the readiness interface.
+      EVENT_SRC = src/event_iouring_comp.c
+      FILE_IO_SRC = src/file_io.c
+      IO_ENGINE_SRC =
+      COMPLETION_SRC = src/completion_driver.c
+      LDFLAGS += -luring
     else ifeq ($(BACKEND),poll)
       EVENT_SRC = src/event_poll.c
       FILE_IO_SRC = src/file_io.c
@@ -452,6 +462,25 @@ smoke-pollcomp-asan:
 	./$(SMOKE_POLLCOMP_WS_BIN)
 	./$(SMOKE_POLLCOMP_ASYNC_BIN)
 
+# End-to-end HTTP-over-completion roundtrip on the completion-native io_uring backend
+# (Linux, BACKEND=iouringcomp). The runtime gate for event_iouring_comp.c — build libkeel
+# with BACKEND=iouringcomp first so the server runs on the io_uring completion loop. The
+# THIRD completion backend proving the driver is reused verbatim (after IOCP + pollcomp),
+# and the first production Linux one.
+SMOKE_IOURING_BIN = tests/smoke_iouring$(EXE)
+smoke-iouring: $(SMOKE_IOURING_BIN)
+	./$(SMOKE_IOURING_BIN)
+$(SMOKE_IOURING_BIN): tests/smoke_iouring.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
+# Async/thread-pool over the io_uring completion loop — the watcher relay via a single-shot
+# IORING_OP_POLL_ADD (a thread-pool wakeup fires on the completion loop and resumes).
+SMOKE_IOURING_ASYNC_BIN = tests/smoke_iouring_async$(EXE)
+smoke-iouring-async: $(SMOKE_IOURING_ASYNC_BIN)
+	./$(SMOKE_IOURING_ASYNC_BIN)
+$(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
 # Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
 # (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
 SMOKE_UDP_BIN = tests/smoke_udp$(EXE)
@@ -518,7 +547,8 @@ clean:
 	# under BACKEND=iocp|pollcomp), so they escape $(CORE_OBJ) on a default clean —
 	# remove them unconditionally to prevent a stale cross-toolchain object (e.g. a
 	# MinGW completion_driver.o) surviving into a later native build.
-	rm -f src/event_iocp.o src/event_pollcomp.o src/completion_driver.o
+	rm -f src/event_iocp.o src/event_pollcomp.o src/event_iouring_comp.o src/completion_driver.o
+	rm -f tests/smoke_iouring tests/smoke_iouring_async
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
 	rm -f tests/smoke_iocp_async tests/smoke_iocp_async.exe
