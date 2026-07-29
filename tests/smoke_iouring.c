@@ -34,6 +34,8 @@
 #define SMOKE_POST "hello-over-iouring-completion-body"
 #define SMOKE_FILE "file-body-served-over-io_uring-completion-via-sendfile"
 #define SMOKE_FILE_PATH "smoke_iouring_file.tmp"
+#define SMOKE_BIGFILE_PATH "smoke_iouring_bigfile.tmp"
+#define SMOKE_BIGFILE_LEN (200 * 1024)   /* > pipe capacity → multi-chunk splice + short-out */
 #define SMOKE_STREAM "chunk-one;chunk-two"
 #define SMOKE_UDP "udp-echo-over-iouring"
 
@@ -66,6 +68,18 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
 static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = open(SMOKE_FILE_PATH, O_RDONLY);
+    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    off_t size = lseek(fd, 0, SEEK_END);
+    lseek(fd, 0, SEEK_SET);
+    kl_response_status(res, 200);
+    kl_response_file(res, (KlSocketHandle)fd, size);
+}
+
+/* GET /bigfile — a >pipe-capacity file so the splice sendfile loops over multiple
+ * file→pipe→socket chunks and exercises the short-splice-out re-submit path (8f-2). */
+static void handle_bigfile(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    int fd = open(SMOKE_BIGFILE_PATH, O_RDONLY);
     if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
     off_t size = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);
@@ -318,6 +332,7 @@ int main(void) {
     kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
+    kl_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
     memset(g_big, 'A', sizeof(g_big));
 
     int wfd = open(SMOKE_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -328,6 +343,24 @@ int main(void) {
         return 1;
     }
     close(wfd);
+
+    /* A >pipe-capacity file for the multi-chunk splice path (8f-2). */
+    int bfd = open(SMOKE_BIGFILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int bigfile_ok = (bfd >= 0);
+    for (int w = 0; bigfile_ok && w < SMOKE_BIGFILE_LEN; ) {
+        char blk[4096];
+        memset(blk, 'A', sizeof(blk));
+        int chunk = (SMOKE_BIGFILE_LEN - w) < (int)sizeof(blk) ? (SMOKE_BIGFILE_LEN - w) : (int)sizeof(blk);
+        if (write(bfd, blk, (size_t)chunk) != chunk) { bigfile_ok = 0; break; }
+        w += chunk;
+    }
+    if (bfd >= 0) close(bfd);
+    if (!bigfile_ok) {
+        fprintf(stderr, "smoke-iouring: big temp file write failed\n");
+        unlink(SMOKE_FILE_PATH);
+        kl_server_free(&g_srv);
+        return 1;
+    }
 
     KlUdpConfig ucfg = { .ctx = &g_srv.ev, .bind_addr = "127.0.0.1",
                          .bind_port = SMOKE_UDP_PORT };
@@ -391,8 +424,24 @@ int main(void) {
         } else { last_rc = rc; }
     }
 
-    int stream_ok = 0;
+    /* Large file → multi-chunk splice sendfile + short-splice-out re-submit (8f-2). */
+    int bigfile_dl_ok = 0;
     if (ok && post_ok && file_ok) {
+        KlClientResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/bigfile",
+                                   NULL, 0, NULL, 0, &resp);
+        if (rc == 0) {
+            bigfile_dl_ok = (resp.status == 200 && resp.body_len == SMOKE_BIGFILE_LEN &&
+                             resp.body && resp.body[0] == 'A' &&
+                             resp.body[SMOKE_BIGFILE_LEN - 1] == 'A');
+            last_status = resp.status;
+            kl_client_response_free(&resp);
+        } else { last_rc = rc; }
+    }
+
+    int stream_ok = 0;
+    if (ok && post_ok && file_ok && bigfile_dl_ok) {
         KlClientResponse resp;
         memset(&resp, 0, sizeof(resp));
         int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/stream",
@@ -406,7 +455,7 @@ int main(void) {
     }
 
     int udp_ok = 0;
-    if (ok && post_ok && file_ok && stream_ok && udp_ready) {
+    if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok && udp_ready) {
         int cs = socket(AF_INET, SOCK_DGRAM, 0);
         if (cs >= 0) {
             struct timeval tmo = { 0, 500000 };
@@ -431,7 +480,7 @@ int main(void) {
     }
 
     int h2_ok = 0;
-    if (ok && post_ok && file_ok && stream_ok) {
+    if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok) {
         for (int i = 0; i < 20 && !h2_ok; i++) {
             h2_ok = h2c_roundtrip();
             if (!h2_ok) nap_ms(50);
@@ -465,6 +514,7 @@ int main(void) {
     pthread_join(th, NULL);
     kl_server_free(&g_srv);
     unlink(SMOKE_FILE_PATH);
+    unlink(SMOKE_BIGFILE_PATH);
 
     if (!ok) {
         fprintf(stderr, "smoke-iouring: GET roundtrip FAILED (rc=%d status=%d body_len=%zu err=%d)\n",
@@ -473,6 +523,7 @@ int main(void) {
     }
     if (!post_ok) { fprintf(stderr, "smoke-iouring: POST/echo FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!file_ok) { fprintf(stderr, "smoke-iouring: GET/file (sendfile) FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
+    if (!bigfile_dl_ok) { fprintf(stderr, "smoke-iouring: GET/bigfile (multi-chunk splice) FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!stream_ok) { fprintf(stderr, "smoke-iouring: GET/stream FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!udp_ok) { fprintf(stderr, "smoke-iouring: UDP echo FAILED\n"); return 1; }
     if (!h2_ok) { fprintf(stderr, "smoke-iouring: h2c/h2-over-completion echo FAILED\n"); return 1; }
@@ -482,6 +533,6 @@ int main(void) {
     if (!resil_ok) { fprintf(stderr, "smoke-iouring: resilience (drop/malformed) FAILED\n"); return 1; }
     if (!big_ok) { fprintf(stderr, "smoke-iouring: large-response partial-send FAILED\n"); return 1; }
 
-    printf("smoke-iouring: over-completion roundtrip OK (GET + POST + file + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large)\n");
+    printf("smoke-iouring: over-completion roundtrip OK (GET + POST + file + bigfile-splice + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large)\n");
     return 0;
 }
