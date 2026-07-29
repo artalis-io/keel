@@ -12,6 +12,7 @@
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/tls.h>            /* KlTls vtable ops — TLS-over-completion (8b-5b) */
+#include <keel/websocket_server.h> /* kl_ws_server_on_readable_data — WS over completion (8e-1) */
 #include "internal.h"            /* kl_server_conn_release */
 #include "conn_internal.h"       /* kl_conn_dispatch_request / kl_conn_send_complete */
 #include "response_internal.h"   /* kl_response_build_iovec */
@@ -328,6 +329,44 @@ static void comp_h2_drive(struct KlServer *s, KlConn *c) {
     }
 }
 
+/* Drive an established WebSocket connection over the completion loop (8e-1). Feed
+ * received bytes to the transport-agnostic WS frame core (kl_ws_server_on_readable_data,
+ * the analogue of kl_h2_server_feed); its callbacks emit frames through conn_write — the
+ * memory-BIO out ring for TLS — which we flush (plus any drain-buffered output). Reuses
+ * the WS core + KlTls vtable verbatim: no WebSocket-protocol code and no IOCP/pollcomp
+ * symbol appears here, so the completion axis stays out of the WS layer entirely. */
+static void comp_ws_drive(struct KlServer *s, KlConn *c) {
+    if (c->tls) {
+        for (;;) {
+            ssize_t p = c->tls->read(c->tls, c->fd, c->read_buf, c->read_cap);
+            if (p < 0) { comp_close(s, c); return; }
+            if (p == 0) {                              /* WANT_READ — need the network */
+                if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+                return;
+            }
+            KlConnState st = (KlConnState)kl_ws_server_on_readable_data(
+                                 c, (uint8_t *)c->read_buf, (size_t)p);
+            if (st == KL_CONN_WEBSOCKET && kl_ws_server_drain_pending(c))
+                st = (KlConnState)kl_ws_server_on_writable(c);   /* flush buffered frames */
+            if (comp_tls_flush(c) < 0) { comp_close(s, c); return; }   /* ring → socket */
+            if (st != KL_CONN_WEBSOCKET) { comp_close(s, c); return; }
+            if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
+                if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+                return;
+            }
+        }
+    }
+    /* Plaintext: the received frame bytes are already in read_buf; the callbacks emit
+     * through conn_write (a synchronous blocking send on this loop). */
+    KlConnState st = (KlConnState)kl_ws_server_on_readable_data(
+                         c, (uint8_t *)c->read_buf, c->read_len);
+    c->read_len = 0;
+    if (st == KL_CONN_WEBSOCKET && kl_ws_server_drain_pending(c))
+        st = (KlConnState)kl_ws_server_on_writable(c);
+    if (st != KL_CONN_WEBSOCKET) { comp_close(s, c); return; }
+    if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+}
+
 /* Act on the state a completed request produced. */
 static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
     if (st == KL_CONN_SENDING) {
@@ -348,6 +387,13 @@ static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
          * 101 + initial SETTINGS through conn_write and consumed the leftover. Reset the
          * read window so the next recv starts a fresh h2 frame buffer (the HTTP/1.1
          * upgrade request must not be re-fed), then read h2 frames. */
+        c->read_len = 0;
+        if (c->tls && comp_tls_flush(c) < 0) { comp_close(s, c); return; }
+        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+    } else if (st == KL_CONN_WEBSOCKET) {
+        /* WS upgrade done during dispatch — kl_ws_server_upgrade wrote the 101 handshake
+         * (and processed any leftover frames) through conn_write; for TLS that ciphertext
+         * is in the out ring. Flush it, reset the read window, then read WS frames. */
         c->read_len = 0;
         if (c->tls && comp_tls_flush(c) < 0) { comp_close(s, c); return; }
         if (kl_comp_post_recv(c) < 0) comp_close(s, c);
@@ -419,6 +465,7 @@ static void comp_drive_body(struct KlServer *s, KlConn *c) {
  * for the next network read. Ciphertext output is flushed synchronously. */
 static void comp_tls_drive(struct KlServer *s, KlConn *c) {
     if (c->state == KL_CONN_HTTP2) { comp_h2_drive(s, c); return; }   /* ALPN h2 (8d-1) */
+    if (c->state == KL_CONN_WEBSOCKET) { comp_ws_drive(s, c); return; }   /* WS/TLS (8e-1) */
 
     if (c->state == KL_CONN_TLS_HANDSHAKE) {
         KlConnState st = kl_conn_on_handshake(c);      /* reads fed ciphertext */
@@ -536,6 +583,8 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
      * post), so read_len == the bytes just received. Headers accumulate. */
     if (c->state == KL_CONN_HTTP2)
         comp_h2_drive(s, c);           /* plaintext h2 (h2c) frames (8d-1) */
+    else if (c->state == KL_CONN_WEBSOCKET)
+        comp_ws_drive(s, c);           /* plaintext WebSocket frames (8e-1) */
     else if (c->state == KL_CONN_READING_BODY)
         comp_drive_body(s, c);
     else
