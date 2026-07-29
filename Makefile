@@ -380,6 +380,15 @@ smoke-iocp: $(SMOKE_IOCP_BIN)
 $(SMOKE_IOCP_BIN): tests/smoke_iocp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# TLS-over-IOCP roundtrip (Windows, BACKEND=iocp) via the identity mock TLS — runtime
+# gate for event_iocp.c's IOCP-specific TLS mechanics (KL_IOCP_TLS_RECV, feed-in-drain,
+# overlapped ciphertext WSASend). No mbedTLS needed.
+SMOKE_IOCP_TLS_BIN = tests/smoke_iocp_tls$(EXE)
+smoke-iocp-tls: $(SMOKE_IOCP_TLS_BIN)
+	./$(SMOKE_IOCP_TLS_BIN)
+$(SMOKE_IOCP_TLS_BIN): tests/smoke_iocp_tls.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
 # End-to-end HTTP-over-completion roundtrip on POSIX (BACKEND=pollcomp). The runtime
 # gate for the platform-independent completion driver off Windows — build libkeel with
 # BACKEND=pollcomp first so the server runs on the poll() completion loop. Proves the
@@ -482,6 +491,7 @@ clean:
 	# MinGW completion_driver.o) surviving into a later native build.
 	rm -f src/event_iocp.o src/event_pollcomp.o src/completion_driver.o
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
+	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
 	rm -f src/file_io.o src/file_io_iouring.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
