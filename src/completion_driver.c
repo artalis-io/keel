@@ -353,7 +353,12 @@ static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
         if (kl_comp_post_recv(c) < 0) comp_close(s, c);
     } else {
         /* CLOSED, or SUSPENDED (async handlers are not driven over the completion loop
-         * in this subset) — close rather than mis-serve. */
+         * in this subset). A TLS streaming response that finished during dispatch reports
+         * CLOSED (the handler "already sent" it), but on a completion loop its chunks were
+         * written into the memory-BIO out ring rather than the socket — flush them before
+         * closing so the response is actually delivered. */
+        if (c->tls && c->res.body_mode == KL_BODY_STREAM)
+            (void)comp_tls_flush(c);
         comp_close(s, c);
     }
 }
@@ -418,15 +423,21 @@ static void comp_tls_drive(struct KlServer *s, KlConn *c) {
     if (c->state == KL_CONN_TLS_HANDSHAKE) {
         KlConnState st = kl_conn_on_handshake(c);      /* reads fed ciphertext */
         if (comp_tls_flush(c) < 0) { comp_close(s, c); return; }   /* push HS records */
-        if (st == KL_CONN_TLS_HANDSHAKE || st == KL_CONN_READING || st == KL_CONN_HTTP2) {
-            /* HTTP2: ALPN negotiated h2; kl_conn_on_handshake ran the upgrade and its
-             * initial SETTINGS were flushed just above. Read h2 frames next. */
-            if (st == KL_CONN_HTTP2) c->read_len = 0;   /* fresh h2 frame window */
+        if (st == KL_CONN_TLS_HANDSHAKE) {             /* still handshaking — read more */
             if (kl_comp_post_recv(c) < 0) comp_close(s, c);
-        } else {
-            comp_close(s, c);   /* CLOSED (handshake failure) */
+            return;
         }
-        return;
+        if (st == KL_CONN_HTTP2) {                     /* ALPN h2 — SETTINGS flushed above */
+            c->read_len = 0;
+            comp_h2_drive(s, c);                       /* process any buffered h2 frames */
+            return;
+        }
+        if (st != KL_CONN_READING) { comp_close(s, c); return; }   /* CLOSED */
+        /* Handshake complete. Fall through to the read logic below to process any
+         * application data already buffered with the handshake (TLS 1.3 0-RTT / a
+         * client's Finished coalesced with its first request) rather than blindly
+         * waiting for another network read; a plain WANT_READ still posts a recv. */
+        c->read_len = 0;
     }
 
     if (c->state == KL_CONN_READING_BODY) {
