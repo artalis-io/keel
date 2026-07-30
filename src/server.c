@@ -635,6 +635,25 @@ static void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int complet
     }
 }
 
+/* Graceful-drain progress for one run-loop tick: once draining, nudge WebSocket/HTTP-2 conns
+ * toward close, then stop the loop when all connections are idle or the drain deadline passes.
+ * Shared by the readiness and completion run-loop branches — the completion branch omitted this
+ * before, so a server on a completion loop with drain_timeout_ms never exited drain mode. */
+static void kl_server_drain_progress(KlServer *s, uint64_t now) {
+    if (!atomic_load(&s->draining)) return;
+    for (int j = 0; j < s->pool.capacity; j++) {
+        if (s->pool.conns[j].state == KL_CONN_WEBSOCKET)
+            kl_ws_server_drain_close(&s->pool.conns[j]);
+        if (s->pool.conns[j].state == KL_CONN_HTTP2)
+            kl_h2_server_drain_shutdown(&s->pool.conns[j]);
+    }
+    int active = 0;
+    for (int j = 0; j < s->pool.capacity; j++)
+        if (s->pool.conns[j].state != KL_CONN_CLOSED) active++;
+    if (active == 0 || now >= s->drain_deadline_ms)
+        atomic_store(&s->running, 0);
+}
+
 int kl_server_run(KlServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
 
@@ -721,6 +740,7 @@ int kl_server_run(KlServer *s) {
                 aop = next_aop;
             }
             kl_timer_fire(&s->ev);                          /* due one-shot timers */
+            kl_server_drain_progress(s, cnow);              /* graceful drain (completion loop) */
             continue;
         }
         /* Compute dynamic timeout based on nearest async op deadline */
@@ -999,24 +1019,8 @@ transition:
         /* Fire expired timers */
         kl_timer_fire(&s->ev);
 
-        /* Graceful drain: stop when all connections are idle or deadline hit */
-        if (atomic_load(&s->draining)) {
-            /* Send close 1001 to active WebSocket connections */
-            for (int j = 0; j < s->pool.capacity; j++) {
-                if (s->pool.conns[j].state == KL_CONN_WEBSOCKET)
-                    kl_ws_server_drain_close(&s->pool.conns[j]);
-                if (s->pool.conns[j].state == KL_CONN_HTTP2)
-                    kl_h2_server_drain_shutdown(&s->pool.conns[j]);
-            }
-            int active = 0;
-            for (int j = 0; j < s->pool.capacity; j++) {
-                if (s->pool.conns[j].state != KL_CONN_CLOSED)
-                    active++;
-            }
-            if (active == 0 || now >= s->drain_deadline_ms) {
-                atomic_store(&s->running, 0);
-            }
-        }
+        /* Graceful drain: stop when all connections are idle or the deadline hits. */
+        kl_server_drain_progress(s, now);
     }
 
     kl_srv_signals_restore(s);
