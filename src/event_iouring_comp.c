@@ -64,14 +64,18 @@
 #include <stdint.h>              /* SIZE_MAX — sendfile buffer overflow guard */
 #include <time.h>
 
-#define KL_IOU_RING_SIZE  2048                /* SQ/CQ depth: 256 conns × a few ops + slack */
+#define KL_IOU_RING_SIZE  1024                /* SQ/CQ depth: 256 conns × ~1 in-flight op + slack */
 #define KL_IOU_CIPHER_SIZE (17u * 1024u)      /* one TLS record + slack (mirrors IOCP/pollcomp) */
 
 /* Registered send-buffer pool (8f-2): small responses copy into a pre-registered,
  * kernel-pinned buffer and go out via IORING_OP_WRITE_FIXED — no per-send malloc, no
- * per-op buffer mapping. Larger responses fall back to a malloc'd buffer + IORING_OP_SEND. */
-#define KL_IOU_REG_BUFS    32u                /* number of fixed send buffers */
-#define KL_IOU_REG_BUFSZ   (64u * 1024u)      /* size of each fixed send buffer */
+ * per-op buffer mapping. Larger responses fall back to a malloc'd buffer + IORING_OP_SEND.
+ * The pool is pinned memlock (RLIMIT_MEMLOCK), so keep it modest — 256 KiB covers the common
+ * small-response hot path without starving a process that spins up many loops (the 8f-3
+ * survey showed an oversized pool made io_uring_queue_init fail for later loops in a test
+ * process). Registration failure degrades to malloc + SEND. */
+#define KL_IOU_REG_BUFS    16u                /* number of fixed send buffers */
+#define KL_IOU_REG_BUFSZ   (16u * 1024u)      /* size of each fixed send buffer (→ 256 KiB pool) */
 #define KL_IOU_SPLICE_CHUNK (64u * 1024u)     /* file→pipe splice chunk (default pipe capacity) */
 
 /* Op kind. The FIRST field of both KlIouOp and KlIouWatch is this enum, so a CQE's

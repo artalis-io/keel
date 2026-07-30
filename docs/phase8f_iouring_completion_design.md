@@ -109,7 +109,8 @@ double-duty pollcomp served, now on a production engine.
 **8f-2 notes.** Splice uses a per-op pipe (created lazily at the head→file transition) and
 `flags=0` so io_uring waits asynchronously for socket writability rather than erroring on a
 full buffer; short splice-outs re-submit the pipe remainder. The registered pool is a fixed
-2 MB block (32 × 64 KiB) registered once at loop init; a response ≤ 64 KiB borrows a slot
+256 KiB block (16 × 16 KiB — kept modest since it is pinned memlock; see Step 3) registered
+once at loop init; a response ≤ 16 KiB borrows a slot
 and sends via `WRITE_FIXED` (no per-send malloc), returning the slot on completion; larger
 responses or an exhausted pool fall back to malloc + `SEND`. Both degrade gracefully on old
 kernels (no `SPLICE` → pread+`SEND`; failed registration → malloc+`SEND`). Whether these
