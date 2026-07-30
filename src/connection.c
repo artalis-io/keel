@@ -434,6 +434,13 @@ static void conn_null_terminate_headers(KlConn *c) {
 static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
                                           const char *leftover_buf,
                                           size_t leftover_len) {
+    /* Null-terminate the parsed request fields in read_buf so handlers get valid
+     * C strings. Done here in the shared core (not at the call sites) so the
+     * readiness and completion paths can't drift — the completion driver reaches
+     * this via kl_conn_dispatch_request. Idempotent + confined to the header
+     * region (before any leftover body at read_buf + consumed). */
+    conn_null_terminate_headers(c);
+
     /* Route match */
     c->route_result = kl_router_match(router,
                                        c->req.method, c->req.method_len,
@@ -783,7 +790,6 @@ read_more_headers: ;
         }
 
         if (pr == KL_PARSE_HEADERS_OK) {
-            conn_null_terminate_headers(c);
             return conn_dispatch_request(c, router,
                                           c->read_buf + consumed,
                                           c->read_len - consumed);
