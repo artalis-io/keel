@@ -493,27 +493,29 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # backend-neutral kl_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
-# 34 suites (8f-5b: the 5a provider auto-wire moved client_happy_eyeballs, client_pool,
-# error, server_stats, timeout in — a default-provider server/client now auto-adopts the
-# completion loop's overlapped provider instead of being rejected at kl_server_init).
+# 36 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
+# client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
+# server/client now auto-adopts the completion loop's overlapped provider instead of being
+# rejected at kl_server_init) → +2 (integration, server_integration) once the completion
+# run loop got prompt teardown (kl_server_stop self-pipe wakeup) and graceful-drain progress
+# (kl_server_drain_progress ran in the completion branch too — it previously never exited
+# drain mode, hanging server_integration's drain tests).
 #
-# Still excluded (see docs/phase8f_iouring_completion_design.md §"Step 3"/"Step 5b"), NOT
-# blocked by backend bugs: raw kl_event_wait drivers (event, event_ctx, async — a completion
-# loop has no readiness kl_event_wait, only kl_comp_run) and readiness-cap / provider-
-# negotiation assertions (event_caps, socket_provider) are inherently readiness-axis. The
-# remaining default-provider integration suites (integration, server_integration [slow
-# teardown under the survey cap — the 1s tick-based stop is shared with epoll, not a
-# completion deadlock], client, client_stream, redirect, peer_addr, peer_cert,
+# Still excluded, NOT blocked by backend bugs (see docs/phase8f5 §3): raw kl_event_wait
+# drivers (event, event_ctx, async — a completion loop has no readiness kl_event_wait, only
+# kl_comp_run; async also builds a conn with no ctx) and readiness-cap / provider-negotiation
+# assertions (event_caps, socket_provider) are inherently readiness-axis. The remaining
+# default-provider suites (client, client_stream, redirect, peer_addr, peer_cert,
 # tls_integration, udp, udp_server, udp_multicast, udp_offload, unix_socket, dns_resolver,
-# request, cross_module) now init over completion (5a) but still have per-suite behavioural
-# gaps to triage — incremental work, not a correctness prerequisite (the smokes cover the
-# full protocol surface). Backend-specific: iocp_engine.
+# request, cross_module) init over completion (5a) but have per-suite behavioural gaps left to
+# triage — incremental, not a correctness prerequisite (the smokes cover the full protocol
+# surface). Backend-specific: iocp_engine.
 IOURING_TEST_SUITES = allocator body_reader chunked client_happy_eyeballs client_pool \
                           compress connection cors decompress drain error file_io h2 \
-                          h2_client multipart_stream overflow parser proxy proxy_protocol \
-                          resolver_cache response response_parser router server_stats sse \
-                          thread_pool timeout timer tls udp_batching udp_tos url \
-                          websocket websocket_client
+                          h2_client integration multipart_stream overflow parser proxy \
+                          proxy_protocol resolver_cache response response_parser router \
+                          server_integration server_stats sse thread_pool timeout timer tls \
+                          udp_batching udp_tos url websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \

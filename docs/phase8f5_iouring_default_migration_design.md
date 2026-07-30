@@ -97,19 +97,26 @@ the 29-suite gate. Expected remaining exclusions shrink to the *inherently* read
 **Result (re-survey with 5a in place).** The gate grew 29 → **34**: 5a's auto-wire moved
 `client_happy_eyeballs`, `client_pool`, `error`, `server_stats`, `timeout` from fail to pass
 (a default-provider server/client now auto-adopts the overlapped provider instead of being
-rejected at `kl_server_init`). The **inherently-readiness** suites above stay excluded as
-expected. The remaining default-provider integration suites (`integration`,
-`server_integration`, `client`, `client_stream`, `redirect`, `peer_addr`, `peer_cert`,
-`tls_integration`, `udp`, `udp_server`, `udp_multicast`, `udp_offload`, `unix_socket`,
-`dns_resolver`, `request`, `cross_module`) now **init** over completion (5a did its job) but
-still have **per-suite behavioural gaps** to triage incrementally — not a correctness
-prerequisite (the smokes cover the full protocol surface, and 34 unit suites + the benchmark
-back the backend). `integration`/`server_integration` merely *time out under the survey's 30 s
-cap* — slow teardown, since `kl_server_stop` is noticed only on the next ≤1 s tick
-(`KL_POLL_TIMEOUT_MS`), a latency **shared with epoll**, not a completion deadlock. That flags
-a real 5d-adjacent enhancement: have `kl_server_stop` actively wake the loop (eventfd/self-
-pipe) so teardown is prompt on both axes. Finishing the per-suite triage retires the step-3
-"readiness-coupled harness" caveat fully; it can proceed independently of the 5d flip.
+rejected at `kl_server_init`). The **inherently-readiness** suites stay excluded as expected.
+
+**Post-flip triage (2026-07-30): gate grown to 36.** `test_integration` and
+`test_server_integration` now pass over completion and joined the gate, once two real
+completion-run-loop bugs were fixed:
+1. **Prompt teardown** — `kl_server_stop` gained a self-pipe wakeup (the `KlPlatWakeup` the
+   thread pool uses), so a cross-thread stop wakes the loop immediately instead of waiting out
+   the ≤1 s tick. This alone turned `test_integration`'s >30 s timeout into 2 s.
+2. **Graceful drain over completion** — the completion run-loop branch never ran the
+   drain-progress step (`draining` → close idle conns / stop at deadline), so a server with
+   `drain_timeout_ms` on a completion loop *never exited drain mode* — a genuine completion
+   deadlock (not "slow teardown," as first suspected), hanging `test_server_integration`'s
+   drain tests. Fixed by factoring `kl_server_drain_progress` and calling it from **both** the
+   readiness and completion branches.
+
+The remaining default-provider suites (`client`, `client_stream`, `redirect`, `peer_addr`,
+`peer_cert`, `tls_integration`, `udp`, `udp_server`, `udp_multicast`, `udp_offload`,
+`unix_socket`, `dns_resolver`, `request`, `cross_module`) init over completion (5a) but have
+per-suite behavioural gaps left to triage incrementally — not a correctness prerequisite (the
+smokes + 36 unit suites + the benchmark back the backend).
 
 ---
 
@@ -176,10 +183,10 @@ backend and `make BACKEND=iouring smoke-iouring` passes the full roundtrip surfa
 sendfile-via-splice/stream/UDP/h2c/h2-pk/idle/keepalive/resilience/large). Native (macOS)
 default build stays clean.
 
-**Note (per §3 triage):** ~12 default-provider integration suites still have per-suite
-behavioural gaps over completion and are not yet in the unit-suite gate. They now *init*
-(5a), so finishing that triage — plus the `kl_server_stop` active-wakeup enhancement flagged
-in §3 — is follow-up work, independent of this flip.
+**Note (per §3 triage):** the `kl_server_stop` active-wakeup + the completion graceful-drain
+fix landed (§3), bringing `integration` + `server_integration` into the gate (36 suites). ~14
+default-provider suites still have per-suite behavioural gaps over completion and are not yet
+gated; they now *init* (5a), so finishing that triage is follow-up work, independent of this flip.
 
 ---
 
@@ -195,10 +202,11 @@ in §3 — is follow-up work, independent of this flip.
 5a is the linchpin and lands first (independently useful — it makes IOCP and pollcomp
 drop-in too). 5d is the irreversible one and lands last, behind 5c's confirmation.
 
-**Status: 5a–5d all landed.** io_uring is now completion-native; the readiness adapter is
-retired. Remaining follow-up (independent of the flip): finish the §3 per-suite triage of the
-~12 default-provider integration suites over completion, and the `kl_server_stop` active-
-wakeup enhancement.
+**Status: 5a–5d all landed**; io_uring is completion-native, the readiness adapter retired.
+Post-flip: the `kl_server_stop` wakeup + completion graceful-drain fix landed and grew the
+unit-suite gate to 36 (`integration` + `server_integration` now pass over completion).
+Remaining follow-up (independent of the flip): the per-suite triage of the ~14 remaining
+default-provider suites over completion.
 
 ---
 
