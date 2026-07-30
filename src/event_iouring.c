@@ -1,5 +1,5 @@
 /*
- * event_iouring_comp.c — a COMPLETION-native io_uring backend (PAL Phase 8f).
+ * event_iouring.c — a COMPLETION-native io_uring backend (PAL Phase 8f).
  *
  * The completion event axis (completion.h) is natively a completion engine's home:
  * post an async op, drain finished ops. io_uring is a completion engine by construction
@@ -12,12 +12,11 @@
  * into the driver — a third proof the axis is genuinely implementation-independent, and
  * the first PRODUCTION (not test-facade) completion backend that is CI-testable on Linux.
  *
- * It coexists with event_iouring.c, which drives the SAME engine but ADAPTED to the
- * readiness interface (io_uring as a poll-multiplexer: prep_poll_add, loop.fd=-1,
- * advertises KL_EVENT_CAP_READINESS). That backend's own comment noted a
- * KL_EVENT_CAP_COMPLETION variant "is Phase 8"; this TU is it. The Makefile selects one
- * via BACKEND=iouring (readiness) vs BACKEND=iouringcomp (this, completion). Nothing is
- * removed.
+ * This is the ONLY io_uring backend: BACKEND=iouring selects it. An earlier readiness-
+ * adapted io_uring backend (io_uring as a poll-multiplexer: prep_poll_add, loop.fd=-1,
+ * advertising KL_EVENT_CAP_READINESS) was retired in 8f-5d — benchmarks put it ~2–2.3×
+ * slower than this completion-native path on both x86 and ARM (see
+ * docs/phase8f5_iouring_default_migration_design.md).
  *
  * Model: each kl_comp_post_* prepares an SQE (recv/send/accept/…) with the op pointer as
  * user_data and queues it; kl_comp_drain submits the batch and waits, then for each CQE
@@ -347,8 +346,8 @@ void kl_event_close(KlEventLoop *loop) {
 }
 
 /* A completion loop over native fds — COMPLETION makes the Phase 7 negotiation require an
- * OVERLAPPED provider (kl_socket_provider_iouringcomp). This is the distinction from
- * event_iouring.c, which advertises READINESS. */
+ * OVERLAPPED provider (kl_socket_provider_iouring), which kl_event_native_provider auto-
+ * wires so a default-provider server/client is a drop-in (8f-5a). */
 unsigned kl_event_caps(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
@@ -358,14 +357,14 @@ unsigned kl_event_caps(const KlEventLoop *loop) {
  * configured no provider auto-wires it and a completion backend is a drop-in. */
 const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
     (void)loop;
-    return kl_socket_provider_iouringcomp();
+    return kl_socket_provider_iouring();
 }
 
 /* The overlapped socket provider: reuse the POSIX control-plane ops (close, the direct
  * send comp_tls_flush uses, tcp_nodelay, …) and add the OVERLAPPED capability the
  * negotiation keys on — so completion_driver.c's kl_sock_* calls behave normally while the
  * loop advertises completion. io_uring uses real fds + the POSIX control plane. */
-const KlSocketProvider *kl_socket_provider_iouringcomp(void) {
+const KlSocketProvider *kl_socket_provider_iouring(void) {
     static KlSocketProvider prov;
     const KlSocketProvider *posix = kl_socket_provider_posix();
     prov.ops = posix->ops;

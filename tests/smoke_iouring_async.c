@@ -3,7 +3,7 @@
  * (PAL Phase 8f, the watcher relay).
  *
  * Runtime-tests the io_uring watcher relay end to end: a KlServer on the io_uring
- * completion loop (BACKEND=iouringcomp), a KlThreadPool whose wakeup pipe is a kl_watcher
+ * completion loop (BACKEND=iouring), a KlThreadPool whose wakeup pipe is a kl_watcher
  * on the server ctx, and a handler that offloads blocking work and suspends the connection.
  * The worker finishes → writes the wakeup pipe → the single-shot IORING_OP_POLL_ADD armed
  * for that watch completes → kl_comp_drain surfaces a KL_COMP_WATCHER → the driver routes

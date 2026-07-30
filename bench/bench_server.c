@@ -15,13 +15,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* A completion event loop (BACKEND=iouringcomp) requires an overlapped socket provider —
- * the Phase-7 negotiation rejects the default POSIX provider on a completion loop. The
- * bench harness (bench/bench_compare.sh) defines KEEL_BENCH_OVERLAPPED when building against
- * the io_uring completion backend so the same bench_server.c serves all backends. */
-#ifdef KEEL_BENCH_OVERLAPPED
-#include "../src/socket.h"   /* internal kl_socket_provider_iouringcomp() */
-#endif
+/* Backend-agnostic: over a completion loop (BACKEND=iouring) kl_server_init auto-adopts the
+ * backend's overlapped provider (8f-5a), so this default-provider server serves every backend
+ * unchanged — no explicit provider needed. */
 
 static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
     (void)req; (void)ctx;
@@ -71,9 +67,6 @@ int main(int argc, char **argv) {
 
     KlServer s;
     KlConfig cfg = {.port = port, .install_signal_handlers = 1};
-#ifdef KEEL_BENCH_OVERLAPPED
-    cfg.sockets = kl_socket_provider_iouringcomp();   /* completion loop needs overlapped */
-#endif
     if (kl_server_init(&s, &cfg) < 0) return 1;
 
     kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);

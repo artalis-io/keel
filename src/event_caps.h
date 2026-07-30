@@ -26,14 +26,14 @@
 #define KL_EVENT_CAP_COMPLETION (1u << 2)  /* RESERVED — no backend yet (Phase 8) */
 
 /* Implemented once per event backend TU (event_epoll.c, event_kqueue.c,
- * event_poll.c, event_wsapoll.c, event_iouring_comp.c). Returns a compile-time-constant
+ * event_poll.c, event_wsapoll.c, event_iouring.c). Returns a compile-time-constant
  * set; `loop` is accepted for a future per-loop-mode backend (io_uring readiness
  * vs completion) but is unused by today's readiness backends. */
 unsigned kl_event_caps(const KlEventLoop *loop);
 
 /* The socket provider this loop needs but the default POSIX provider can't satisfy, or NULL
  * if the loop runs on the default (readiness) provider (PAL 8f step 5a). A completion backend
- * returns its overlapped provider (kl_socket_provider_iocp/pollcomp/iouringcomp); every
+ * returns its overlapped provider (kl_socket_provider_iocp/pollcomp/iouring); every
  * readiness backend returns NULL. Lets the server/client auto-wire the matching provider on a
  * completion loop when the caller configured none (or an incompatible one), so a completion
  * backend is a source-compatible drop-in — the event axis stays masked above the build flag.

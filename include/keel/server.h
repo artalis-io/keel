@@ -128,6 +128,13 @@ typedef struct KlServer {
     _Atomic int running;        /**< Server is running */
     _Atomic int draining;       /**< Graceful shutdown in progress */
     uint64_t drain_deadline_ms; /**< Drain timeout deadline */
+    /* Self-pipe/loopback wakeup so kl_server_stop() wakes the run loop immediately
+     * instead of waiting up to KL_POLL_TIMEOUT_MS for the current wait/drain to
+     * return. The two handles are a KlPlatWakeup (internal type kept out of this
+     * public header); server.c constructs the wrapper from them. KL_INVALID_SOCKET
+     * if the pair couldn't be opened (falls back to tick-timeout latency). */
+    KlSocketHandle stop_wake_rd; /**< wakeup read end (registered as a run-loop watcher) */
+    KlSocketHandle stop_wake_wr; /**< wakeup write end (kl_server_stop signals it) */
     KlAsyncOp *async_ops;       /**< active async ops list */
     KlFileIO *file_io;          /**< async file I/O (auto-created if backend supports it) */
     KlError last_error;         /**< diagnostic: set at point of return -1 */

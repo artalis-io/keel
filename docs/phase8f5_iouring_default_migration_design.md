@@ -154,27 +154,27 @@ VM is a far faster host than a shared CI runner — the site's headline peak ref
 
 ## 5. The flip + retirement (5d) — **done**
 
-- **Makefile:** `BACKEND=iouring` now builds `event_iouring_comp.c` + `file_io.c` +
-  `completion_driver.c` + `-luring` (the `iouring`/`iouringcomp` branch is unified via
-  `$(filter iouring iouringcomp,$(BACKEND))`). `BACKEND=iouringcomp` is a retained **alias**
-  for one release.
-- **Removed** `src/event_iouring.c`, `src/file_io_iouring.c`, `src/iouring_internal.h`, and
-  `tests/test_file_io_iouring.c`. File responses ride zero-copy `splice` (8f-2); the completion
-  path never calls `KlFileIO.submit` (it uses `kl_comp_post_sendfile`), so the io_uring async-
-  read backend was dead — `kl_file_io_create` is the POSIX NULL stub in `file_io.c`.
+- **Makefile:** `BACKEND=iouring` builds `src/event_iouring.c` (the completion TU — the old
+  readiness TU's name was reclaimed) + `file_io.c` + `completion_driver.c` + `-luring`. The
+  transitional `iouringcomp` alias was **dropped** in the same pass — `iouring` everywhere.
+- **Removed** the readiness `event_iouring.c`, `src/file_io_iouring.c`, `src/iouring_internal.h`,
+  and `tests/test_file_io_iouring.c`. File responses ride zero-copy `splice` (8f-2); the
+  completion path never calls `KlFileIO.submit` (it uses `kl_comp_post_sendfile`), so the
+  io_uring async-read backend was dead — `kl_file_io_create` is the POSIX NULL stub in
+  `file_io.c`. The completion backend's provider is `kl_socket_provider_iouring()`.
 - **CI:** the "Linux (io_uring)" *full-suite matrix entry was removed* — a completion backend
   can't run the whole `make test` (the readiness-shaped suites are excluded; see §3), and it
-  is fully covered by the dedicated **Completion (io_uring)** (smoke, built with
-  `BACKEND=iouring` to validate the flip) + **Completion (io_uring) unit suite** (built with
-  the `iouringcomp` alias) jobs. `test_file_io_iouring` is gone from `TEST_SRC`.
+  is fully covered by the dedicated **Completion (io_uring)** smoke job + **Completion
+  (io_uring) unit suite** (`make BACKEND=iouring test-iouring`). `test_file_io_iouring` is gone
+  from `TEST_SRC`.
 - **Docs:** README, `CLAUDE.md` module list, and this doc updated — `BACKEND=iouring` is
   completion-native (SQE/CQE, splice, registered buffers); the readiness POLL_ADD adapter is
   retired.
 
 **Validation:** in an Apple `container` Linux VM, `make BACKEND=iouring` builds the completion
 backend and `make BACKEND=iouring smoke-iouring` passes the full roundtrip surface (GET/POST/
-sendfile-via-splice/stream/UDP/h2c/h2-pk/idle/keepalive/resilience/large); the `iouringcomp`
-alias still builds. Native (macOS) default build stays clean.
+sendfile-via-splice/stream/UDP/h2c/h2-pk/idle/keepalive/resilience/large). Native (macOS)
+default build stays clean.
 
 **Note (per §3 triage):** ~12 default-provider integration suites still have per-suite
 behavioural gaps over completion and are not yet in the unit-suite gate. They now *init*
@@ -216,9 +216,10 @@ wakeup enhancement.
 ## 8. Risks
 
 - **Flipping a default is user-visible.** `BACKEND=iouring` changes meaning. Mitigated by:
-  the completion backend is a strict superset behaviourally (same protocols, faster), 5a
-  makes it source-compatible (no consumer change), and the `iouringcomp` alias eases any
-  transition. The readiness backend remains in git history if ever needed.
+  the completion backend is a strict superset behaviourally (same protocols, faster), and 5a
+  makes it source-compatible (no consumer change — a default-provider server just works). The
+  transitional `iouringcomp` alias was dropped once the flip settled; the readiness backend
+  remains in git history if ever needed.
 - **Kernel-feature floor.** The completion backend needs io_uring recv/send/accept/cancel
   (5.5–5.6+), splice (5.7+), and — for full speed — is happiest on 5.13+/5.19+ (multishot).
   The readiness backend worked on any io_uring kernel. Document the floor; the graceful

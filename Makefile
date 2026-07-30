@@ -86,15 +86,14 @@ else
 
   # Platform event loop backend
   ifeq ($(UNAME_S),Linux)
-    ifneq (,$(filter iouring iouringcomp,$(BACKEND)))
-      # io_uring is completion-native (PAL 8f-5d): BACKEND=iouring builds the completion
-      # backend (event_iouring_comp.c driving completion.h via SQE/CQE + completion_driver.c);
-      # iouringcomp is a retained alias for one release. The readiness-adapted event_iouring.c
-      # + file_io_iouring.c were retired — benchmarks put the readiness POLL_ADD adapter
-      # ~2–2.3× slower than completion on both x86 and ARM (docs/phase8f5_iouring_default_
-      # migration_design.md). File responses ride zero-copy splice (8f-2), so the io_uring
-      # file backend is no longer needed; FILE_IO_SRC is the POSIX file_io.c.
-      EVENT_SRC = src/event_iouring_comp.c
+    ifeq ($(BACKEND),iouring)
+      # io_uring is completion-native (PAL 8f): BACKEND=iouring builds the completion backend
+      # (event_iouring.c driving completion.h via SQE/CQE + completion_driver.c). The old
+      # readiness-adapted io_uring TU + file_io_iouring.c were retired (8f-5d) — benchmarks put
+      # the readiness POLL_ADD adapter ~2–2.3× slower than completion on both x86 and ARM
+      # (docs/phase8f5_iouring_default_migration_design.md). File responses ride zero-copy
+      # splice (8f-2), so the io_uring file backend is gone; FILE_IO_SRC is the POSIX file_io.c.
+      EVENT_SRC = src/event_iouring.c
       FILE_IO_SRC = src/file_io.c
       IO_ENGINE_SRC =
       COMPLETION_SRC = src/completion_driver.c
@@ -457,8 +456,8 @@ smoke-pollcomp-asan:
 	./$(SMOKE_POLLCOMP_ASYNC_BIN)
 
 # End-to-end HTTP-over-completion roundtrip on the completion-native io_uring backend
-# (Linux, BACKEND=iouringcomp). The runtime gate for event_iouring_comp.c — build libkeel
-# with BACKEND=iouringcomp first so the server runs on the io_uring completion loop. The
+# (Linux, BACKEND=iouring). The runtime gate for event_iouring.c — build libkeel
+# with BACKEND=iouring first so the server runs on the io_uring completion loop. The
 # THIRD completion backend proving the driver is reused verbatim (after IOCP + pollcomp),
 # and the first production Linux one.
 SMOKE_IOURING_BIN = tests/smoke_iouring$(EXE)
@@ -479,7 +478,7 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # regression gate alongside the smokes. Two groups: backend-agnostic logic suites (they
 # don't touch the event loop) + protocol/loop suites that drive the loop through the
 # backend-neutral kl_server_run / kl_event_ctx_run path. Run under
-# `make BACKEND=iouringcomp test-iouringcomp`.
+# `make BACKEND=iouring test-iouring`.
 #
 # 34 suites (8f-5b: the 5a provider auto-wire moved client_happy_eyeballs, client_pool,
 # error, server_stats, timeout in — a default-provider server/client now auto-adopts the
@@ -496,20 +495,20 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # request, cross_module) now init over completion (5a) but still have per-suite behavioural
 # gaps to triage — incremental work, not a correctness prerequisite (the smokes cover the
 # full protocol surface). Backend-specific: iocp_engine.
-IOURINGCOMP_TEST_SUITES = allocator body_reader chunked client_happy_eyeballs client_pool \
+IOURING_TEST_SUITES = allocator body_reader chunked client_happy_eyeballs client_pool \
                           compress connection cors decompress drain error file_io h2 \
                           h2_client multipart_stream overflow parser proxy proxy_protocol \
                           resolver_cache response response_parser router server_stats sse \
                           thread_pool timeout timer tls udp_batching udp_tos url \
                           websocket websocket_client
-IOURINGCOMP_TEST_BIN = $(addprefix tests/test_,$(IOURINGCOMP_TEST_SUITES))
-test-iouringcomp: $(IOURINGCOMP_TEST_BIN)
+IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
+test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
-	for t in $(IOURINGCOMP_TEST_BIN); do \
+	for t in $(IOURING_TEST_BIN); do \
 		echo "--- $$t ---"; \
 		./$$t || failed=1; \
 	done; \
-	if [ $$failed -eq 1 ]; then echo "SOME iouringcomp TESTS FAILED"; exit 1; fi
+	if [ $$failed -eq 1 ]; then echo "SOME iouring TESTS FAILED"; exit 1; fi
 
 # Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
 # (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
@@ -577,7 +576,7 @@ clean:
 	# under BACKEND=iocp|pollcomp), so they escape $(CORE_OBJ) on a default clean —
 	# remove them unconditionally to prevent a stale cross-toolchain object (e.g. a
 	# MinGW completion_driver.o) surviving into a later native build.
-	rm -f src/event_iocp.o src/event_pollcomp.o src/event_iouring_comp.o src/completion_driver.o
+	rm -f src/event_iocp.o src/event_pollcomp.o src/event_iouring.o src/completion_driver.o
 	rm -f tests/smoke_iouring tests/smoke_iouring_async
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
