@@ -117,20 +117,20 @@ pipe) so teardown is prompt on both axes. Finishing the per-suite triage retires
 
 Step 4's numbers came from a shared x86 CI VM. A second run on different hardware — an Apple
 M1 Max (ARM64) in a dedicated Apple `container` VM, kernel 6.18, `io_uring_disabled=0`,
-`wrk -t4 -c100 -d8s`, loopback — gives a **materially different picture**, which is exactly
-why this gate exists:
+`wrk -t4 -c100 -d8s`, loopback, **build-once + 5 sample rounds per backend** (median below) —
+gives a **materially different picture**, which is exactly why this gate exists:
 
-| backend | `GET /hello` (x86 CI) | `GET /hello` (ARM M1) |
+| backend | `GET /hello` (x86 CI) | `GET /hello` (ARM M1, median of 5) |
 |---|---|---|
-| epoll | 73,312 | ~320–360K |
-| io_uring readiness | 64,951 | ~140K |
-| io_uring completion | 95,418 | ~270–320K |
+| epoll | 73,312 | **~347K** (310–351K) |
+| io_uring readiness | 64,951 | **~149K** (137–151K) |
+| io_uring completion | 95,418 | **~310K** (297–341K) |
 
 **The x86 ordering does not replicate on ARM.** On x86 CI, completion was +30 % over epoll;
-on the M1, completion is **roughly tied with epoll** (marginally behind on throughput,
-occasionally better on p99). What *does* hold on **both** arches — and strongly — is that
-**readiness-adapted io_uring is by far the worst** (below epoll on x86; ~2× slower than both
-on ARM).
+on the M1 (5 rounds, tight spread), **epoll is ~10–12 % *ahead* of completion**. What *does*
+hold on **both** arches — and strongly, on every one of the 5 ARM rounds — is that
+**readiness-adapted io_uring is by far the worst**: below epoll on x86, and ~2.3× slower than
+both epoll and completion on ARM (completion is ~2.1× faster than readiness).
 
 **Implications for 5d (revised, honest):**
 
@@ -138,12 +138,14 @@ on ARM).
   backend on every host measured. This is the solid, arch-independent conclusion.
 - **"Completion is the fastest" is x86-specific, not universal.** So 5d should frame the flip
   as *"completion-native is the right io_uring backend (readiness-io_uring is retired)"*, not
-  *"completion beats epoll."* On ARM, io_uring completion and epoll are peers; the default
-  Linux backend stays **epoll** (io_uring is opt-in via `BACKEND=iouring`), so the flip only
-  changes which *io_uring* backend you get, and both benchmarks agree that should be the
-  completion one.
+  *"completion beats epoll."* On ARM, epoll is ~10–12 % ahead of completion; on x86 completion
+  is +30 % ahead of epoll. The default Linux backend therefore **stays epoll** (io_uring is
+  opt-in via `BACKEND=iouring`) — a safe choice on both arches — so the flip only changes
+  which *io_uring* backend you get, and both hosts agree that should be the completion one
+  (2–2.3× over readiness).
 - A dedicated bare-metal box (not a laptop VM) would sharpen absolutes further, but two
-  independent hosts already agree on the decision-relevant ordering.
+  independent hosts, 5 rounds each, already agree on the decision-relevant ordering
+  (readiness ≪ {epoll, completion}), so 5c is satisfied as a gate.
 
 (Absolute M1 throughput is ~3–4× the x86 CI VM simply because the M1 Max in a clean dedicated
 VM is a far faster host than a shared CI runner — the site's headline peak reflects this.)
