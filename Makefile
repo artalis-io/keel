@@ -719,6 +719,11 @@ $(BENCH_SERVER): bench/bench_server.c $(LIB)
 bench: $(BENCH_SERVER)
 	./bench/bench.sh
 
+# Compare the Linux event backends (epoll / io_uring readiness / io_uring completion) on
+# one host — PAL 8f step 4. Builds + benchmarks each in turn; see bench/bench_compare.sh.
+bench-compare:
+	./bench/bench_compare.sh
+
 # Smoke test all examples end-to-end
 smoke: examples
 	sh tests/e2e_examples.sh
