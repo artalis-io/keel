@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Keel. Hull's default event and transport substrate</title>
-  <meta name="description" content="Keel is Hull's default swappable C11 event loop and transport layer for HTTP, WebSocket, SSE, async clients, timers, file descriptors, and sandboxed side-car native binaries.">
+  <title>Keel — a portable async networking runtime for C</title>
+  <meta name="description" content="Keel is a portable, dependency-free C11 networking runtime: an async I/O core (epoll, kqueue, WSAPoll, io_uring, IOCP), TCP and UDP transports, and pluggable protocol stacks — HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.">
   <meta name="theme-color" content="#0a0a0a">
 
-  <meta property="og:title" content="Keel. Hull's default event and transport substrate">
-  <meta property="og:description" content="Minimal C11 event loop and transport layer for Hull, OTTO, side-car native binaries, and local-first agent systems. HTTP, WebSocket, SSE, epoll, kqueue, io_uring, poll.">
+  <meta property="og:title" content="Keel — a portable async networking runtime for C">
+  <meta property="og:description" content="An async I/O core, TCP/UDP transports, and a growing family of pluggable protocol stacks. Readiness and completion (epoll/kqueue/WSAPoll + io_uring/IOCP). Portable across Linux, macOS, Windows, and Cosmopolitan. No forced dependencies.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
   <meta property="og:image:type" content="image/svg+xml">
@@ -25,9 +25,9 @@
     "@type": "SoftwareApplication",
     "name": "Keel",
     "applicationCategory": "DeveloperApplication",
-    "applicationSubCategory": "NetworkingLibrary",
-    "operatingSystem": "Linux, macOS, BSD, POSIX",
-    "description": "Hull's default swappable C11 event loop and transport layer: HTTP client/server, WebSocket, SSE, async clients, timers, file descriptor watchers, and side-car native binary transport over epoll, kqueue, io_uring, and poll. Also used across Artalis projects such as OTTO.",
+    "applicationSubCategory": "NetworkingRuntime",
+    "operatingSystem": "Linux, macOS, Windows, BSD, Cosmopolitan (APE)",
+    "description": "A portable, dependency-free C11 networking runtime: an async I/O core over readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP) engines behind a platform-neutral socket seam (POSIX/Winsock), with TCP and UDP transports and pluggable protocol stacks — HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.",
     "url": "https://github.com/artalis-io/keel",
     "codeRepository": "https://github.com/artalis-io/keel",
     "programmingLanguage": ["C"],
@@ -128,6 +128,9 @@
     .stat-num small { font-size: .875rem; color: #a1a1aa; margin-left: .125rem; }
     .stat-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: #a1a1aa; margin-top: .5rem; }
     .stat-foot  { font-size: .75rem; color: #a1a1aa; margin-top: .375rem; line-height: 1.4; }
+    .layer-card { border: 1px solid rgba(255,255,255,0.08); border-radius: .625rem; background: rgba(255,255,255,0.015); overflow: hidden; }
+    .layer-card header { padding: .625rem .875rem; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; gap: .5rem; }
+    .layer-tag { font-size: .625rem; text-transform: uppercase; letter-spacing: .08em; color: #71717a; margin-left: auto; }
     @media (max-width: 640px) {
       .code-block pre { padding: .75rem .875rem; font-size: .75rem; }
       .cmp-table th, .cmp-table td { padding: .5rem .625rem; font-size: .75rem; }
@@ -155,14 +158,13 @@
       </a>
 
       <nav class="hidden md:flex items-center gap-x-6 text-sm">
-        <a href="#scope" class="link">Scope</a>
+        <a href="#layers" class="link">Layers</a>
         <a href="#principles" class="link">Principles</a>
-        <a href="#substrate" class="link">Substrate</a>
         <a href="#protocols" class="link">Protocols</a>
         <a href="#compare" class="link">Compare</a>
-        <a href="#how" class="link">How</a>
+        <a href="#performance" class="link">Performance</a>
+        <a href="#roadmap" class="link">Roadmap</a>
         <a href="#security" class="link">Security</a>
-        <a href="#trust" class="link">Trust</a>
         <a href="https://github.com/artalis-io/keel#readme" class="link">Docs</a>
       </nav>
 
@@ -180,22 +182,22 @@
     <div class="relative max-w-6xl mx-auto px-6 pt-12 pb-16 md:pt-28 md:pb-32">
       <div class="grid lg:grid-cols-12 gap-10 lg:gap-16 items-start">
         <div class="lg:col-span-7">
-          <a href="#substrate" class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/[0.025] hover:bg-white/[0.05] hover:border-white/20 transition text-[11px] text-mute-400 hover:text-paper-100 mb-6">
-            <i data-lucide="route" class="w-3 h-3 shrink-0"></i>
-            <span>Hull's default event loop and transport layer</span>
+          <a href="#layers" class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/[0.025] hover:bg-white/[0.05] hover:border-white/20 transition text-[11px] text-mute-400 hover:text-paper-100 mb-6">
+            <i data-lucide="layers" class="w-3 h-3 shrink-0"></i>
+            <span>An I/O core, TCP/UDP transports, and pluggable protocol stacks</span>
             <i data-lucide="arrow-right" class="w-3 h-3 shrink-0"></i>
           </a>
 
           <h1 class="text-[2rem] sm:text-4xl md:text-5xl lg:text-6xl font-semibold leading-[1.05] tracking-tight text-paper-50">
-            Built for events
-            you need to trust.
+            One runtime.
+            Every layer of the stack.
           </h1>
 
           <p class="mt-6 text-base md:text-lg text-mute-400 max-w-xl leading-relaxed">
-            Keel is the default event loop and transport layer for Hull. It is
-            swappable, but it is the first-class path for HTTP, WebSocket, SSE,
-            async clients, file descriptors, timers, and worker wakeups over
-            epoll, kqueue, io_uring, or poll.
+            Keel is a portable, dependency-free C11 networking runtime — an async
+            I/O core (readiness <em>and</em> completion), TCP and UDP transports,
+            and a growing family of pluggable protocol stacks. HTTP is the
+            flagship, not the definition.
           </p>
 
           <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -216,15 +218,15 @@
             </div>
             <div class="flex items-center gap-2">
               <i data-lucide="cpu" class="w-3.5 h-3.5"></i>
-              <span>epoll &middot; kqueue &middot; io_uring &middot; poll</span>
+              <span>Readiness &amp; completion I/O</span>
             </div>
             <div class="flex items-center gap-2">
-              <i data-lucide="plug" class="w-3.5 h-3.5"></i>
-              <span>Pluggable TLS &middot; parser &middot; allocator</span>
+              <i data-lucide="network" class="w-3.5 h-3.5"></i>
+              <span>TCP &middot; UDP &middot; HTTP &middot; WS &middot; DNS</span>
             </div>
             <div class="flex items-center gap-2">
-              <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
-              <span>pledge/unveil-friendly init/run split</span>
+              <i data-lucide="package-open" class="w-3.5 h-3.5"></i>
+              <span>No forced dependencies</span>
             </div>
           </div>
         </div>
@@ -233,7 +235,7 @@
           <div class="code-block shadow-xl shadow-black/40">
             <header>
               <i data-lucide="file-code-2" class="w-3.5 h-3.5"></i>
-              <span>keel server</span>
+              <span>the flagship stack</span>
               <span class="ml-auto text-[10px] text-mute-500">compilable C11</span>
             </header>
 <pre><span class="tk-kw">#include</span> <span class="tk-str">&lt;keel/keel.h&gt;</span>
@@ -245,7 +247,7 @@
     (<span class="tk-kw">void</span>)ctx;
 
     <span class="tk-kw">static const char</span> body[] =
-        <span class="tk-str">"{\"ok\":true,\"transport\":\"keel\"}"</span>;
+        <span class="tk-str">"{\"ok\":true,\"runtime\":\"keel\"}"</span>;
     <span class="tk-fn">kl_response_json</span>(res, <span class="tk-num">200</span>, body,
         <span class="tk-kw">sizeof</span>(body) - <span class="tk-num">1</span>);
 }
@@ -262,11 +264,11 @@
 }</pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
-            Keel does not replace Hull's capability boundary. It is the default
-            event and transport substrate beneath Hull: a narrow, auditable path
-            to sockets, timers, local native services, side-car binaries, device
-            bridges, and high-throughput protocol edges. OTTO and other Artalis
-            systems use the same substrate where C eventing and transport matter.
+            The HTTP server is one protocol stack riding the runtime. The same
+            event loop, socket seam, and transports carry the UDP datagram
+            server, the WebSocket and SSE stacks, and Keel's own from-scratch
+            async DNS resolver — swap the event backend without changing a line
+            of protocol code.
           </p>
         </div>
       </div>
@@ -280,12 +282,13 @@
           <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Build &amp; test</div>
           <h2 class="text-xl md:text-2xl font-semibold text-paper-50 tracking-tight">
             One library.
-            Four event backends.
+            Two I/O models.
           </h2>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            Keel builds as a static C library. Use kqueue on macOS and BSD,
-            epoll on Linux, io_uring where it makes sense, and poll when
-            portability matters more than edge-triggered performance.
+            Keel builds as a static C library. Pick a <strong>readiness</strong>
+            engine (epoll, kqueue, WSAPoll, poll) or a <strong>completion</strong>
+            engine (io_uring, IOCP) at build time — the protocol stacks above
+            never change.
           </p>
         </div>
 
@@ -296,13 +299,13 @@
               <span>shell</span>
               <span class="ml-auto text-[10px] text-mute-500">local build</span>
             </header>
-<pre><span class="tk-com"># Build libkeel.a with the platform default backend.</span>
+<pre><span class="tk-com"># Build libkeel.a with the platform default (epoll / kqueue).</span>
 $ make
 
-<span class="tk-com"># Linux 5.6+: readiness events through io_uring.</span>
+<span class="tk-com"># Linux 5.6+: completion-native I/O over io_uring (SQE/CQE, splice).</span>
 $ make BACKEND=iouring
 
-<span class="tk-com"># Universal POSIX fallback.</span>
+<span class="tk-com"># Universal POSIX fallback; also enables Cosmopolitan APE builds.</span>
 $ make BACKEND=poll
 
 <span class="tk-com"># Run the test suite and example programs.</span>
@@ -319,23 +322,23 @@ $ make examples</pre>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
         <div>
           <div class="stat-num">339K</div>
-          <div class="stat-label">req/s</div>
-          <div class="stat-foot">Peak on an Apple M1 Max (repo benchmark suite).</div>
+          <div class="stat-label">req/s peak</div>
+          <div class="stat-foot">Apple M1 Max, repo benchmark suite &mdash; sub-millisecond p99.</div>
         </div>
         <div>
-          <div class="stat-num">671</div>
+          <div class="stat-num">863</div>
           <div class="stat-label">tests</div>
-          <div class="stat-foot">40 suites with ASan/UBSan.</div>
+          <div class="stat-foot">56 suites under ASan/UBSan, plus 8 fuzz targets.</div>
         </div>
         <div>
-          <div class="stat-num">4</div>
-          <div class="stat-label">backends</div>
-          <div class="stat-foot">epoll, kqueue, io_uring, poll.</div>
+          <div class="stat-num">7</div>
+          <div class="stat-label">event backends</div>
+          <div class="stat-foot">epoll, kqueue, WSAPoll, poll, io_uring, IOCP (+ a portable completion double).</div>
         </div>
         <div>
-          <div class="stat-num">1</div>
-          <div class="stat-label">vendored dep</div>
-          <div class="stat-foot">llhttp parser by default.</div>
+          <div class="stat-num">0</div>
+          <div class="stat-label">forced deps</div>
+          <div class="stat-foot">BYO allocator, TLS, parser, compression. One vendored parser by default.</div>
         </div>
       </div>
       <p class="mt-6 text-[11px] text-mute-500 leading-relaxed">
@@ -345,56 +348,76 @@ $ make examples</pre>
         latency reporting. Defaults are 4 threads, 100 connections, and 10s
         duration; the
         <a href="https://github.com/artalis-io/keel/blob/main/.github/workflows/benchmark.yml" class="link">benchmark workflow</a>
-        also runs Linux epoll, Linux io_uring, and macOS kqueue with 2 threads,
-        50 connections, and 5s duration.
+        also runs Linux epoll, Linux io_uring, and macOS kqueue on CI.
       </p>
     </div>
   </section>
 
-  <section id="scope" class="hairline-t">
+  <section id="layers" class="hairline-t">
     <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
       <div class="grid md:grid-cols-12 gap-10">
         <div class="md:col-span-4">
-          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Scope</div>
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Architecture</div>
           <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
-            Keel is Hull's default event loop and transport layer.
+            Three layers, cleanly separated.
           </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            Keel is not an HTTP library with an event loop bolted on. It is an
+            I/O runtime with protocols on top — and the axes stay orthogonal:
+            the event model and the socket implementation are independent, and
+            every protocol sits above both without knowing which is in use.
+          </p>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            The tell is DNS: Keel ships its <em>own</em> async resolver, built
+            from scratch on the UDP layer. A runtime that already hosts a
+            non-HTTP protocol is a runtime, not a web server.
+          </p>
         </div>
-        <div class="md:col-span-8 grid sm:grid-cols-2 gap-5">
-          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-            <h3 class="font-medium text-paper-50">What it is</h3>
-            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              A minimal C11 event loop and protocol substrate with async server
-              handlers, sync/async clients, WebSocket, SSE, timers,
-              thread-pool wakeups, body readers, streaming, and connection
-              pooling. Hull uses it by default; OTTO and other Artalis systems
-              reuse it where they need the same C-level eventing and transport.
-            </p>
+
+        <div class="md:col-span-8 space-y-5">
+          <div class="layer-card">
+            <header>
+              <i data-lucide="boxes" class="w-4 h-4 text-accent"></i>
+              <span class="text-paper-50 font-medium text-sm">Protocol stacks</span>
+              <span class="layer-tag">pluggable, above both axes</span>
+            </header>
+            <div class="p-5 text-sm text-mute-400 leading-relaxed">
+              HTTP/1.1, HTTP/2, WebSocket (RFC 6455), Server-Sent Events, and a
+              built-in async DNS resolver — dual A+AAAA, EDNS0, DNS cookies, TCP
+              fallback, <code class="text-paper-200">/etc/hosts</code>. Sync and
+              async HTTP clients, connection pooling, redirects, compression, and
+              PROXY-protocol recovery ride the same core.
+            </div>
           </div>
-          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-            <h3 class="font-medium text-paper-50">What it is not</h3>
-            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              Not a web framework, not an application runtime, not a policy
-              engine, not an RPC religion. Hull owns capabilities. Keel is the
-              default byte-moving layer, and remains replaceable at the boundary.
-            </p>
+          <div class="layer-card">
+            <header>
+              <i data-lucide="network" class="w-4 h-4 text-accent"></i>
+              <span class="text-paper-50 font-medium text-sm">Transports</span>
+              <span class="layer-tag">first-class &amp; symmetric</span>
+            </header>
+            <div class="p-5 text-sm text-mute-400 leading-relaxed">
+              TCP and UDP as peers, not an afterthought. A datagram server
+              symmetric with the TCP server (shared event loop), source/dest
+              addressing, multicast join/leave, GSO/GRO segmentation offload,
+              <code class="text-paper-200">recvmmsg</code>/<code class="text-paper-200">sendmmsg</code>
+              batching, and ECN/DSCP marking.
+            </div>
           </div>
-          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-            <h3 class="font-medium text-paper-50">Why it exists</h3>
-            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              Local-first and embedded systems need a predictable event loop and
-              network edge that can be compiled, audited, fuzzed, sandboxed, and
-              carried into constrained deployments.
-            </p>
-          </div>
-          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
-            <h3 class="font-medium text-paper-50">Where it fits</h3>
-            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              Beneath Hull's capability-limited orchestration layer, in
-              native Artalis services, and between Hull and side-cars that
-              perform routing, optimization, inference, device IO, or other
-              compute-heavy work.
-            </p>
+          <div class="layer-card">
+            <header>
+              <i data-lucide="cpu" class="w-4 h-4 text-accent"></i>
+              <span class="text-paper-50 font-medium text-sm">I/O runtime</span>
+              <span class="layer-tag">a libuv-class foundation</span>
+            </header>
+            <div class="p-5 text-sm text-mute-400 leading-relaxed">
+              An orthogonal event core — <strong>readiness</strong>
+              (epoll/kqueue/WSAPoll/poll) and <strong>completion</strong>
+              (io_uring/IOCP) — over a platform-neutral socket seam
+              (POSIX/Winsock). Single-threaded per worker, with timers, async
+              connection suspension, thread-pool offload, backpressure, and
+              zero-copy <code class="text-paper-200">splice</code> file sends.
+              Scale horizontally with <code class="text-paper-200">SO_REUSEPORT</code>.
+            </div>
           </div>
         </div>
       </div>
@@ -414,11 +437,13 @@ $ make examples</pre>
         <div>
           <div class="flex items-center gap-2 text-paper-50 font-medium">
             <i data-lucide="split" class="w-4 h-4 text-accent"></i>
-            Orthogonal modules
+            Orthogonal axes
           </div>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-            Allocator, parser, body reader, TLS, resolver, router, client, and
-            server modules are independently testable and replaceable.
+            The event model and the socket implementation are independent axes;
+            allocator, parser, body reader, TLS, resolver, and compression are
+            replaceable vtables. An audit confirmed protocol code contains no
+            platform event or socket logic.
           </p>
         </div>
         <div>
@@ -433,95 +458,14 @@ $ make examples</pre>
         </div>
         <div>
           <div class="flex items-center gap-2 text-paper-50 font-medium">
-            <i data-lucide="lock-keyhole" class="w-4 h-4 text-accent"></i>
-            Sandbox-shaped
+            <i data-lucide="package-open" class="w-4 h-4 text-accent"></i>
+            Batteries optional
           </div>
           <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-            The init/run split, fixed resource limits, explicit vtables, and
-            narrow file descriptor model make syscall lockdown natural.
+            No mandatory OpenSSL, no forced runtime. Bring your own allocator,
+            TLS, parser, and compression backend, or use the defaults. One
+            vendored parser (llhttp), 2-second clean builds.
           </p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="substrate" class="hairline-t">
-    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
-      <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
-        <div class="lg:col-span-5">
-          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Hull + OTTO + side-cars</div>
-          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
-            The default event and transport substrate for constrained systems.
-          </h2>
-          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            Hull should not need to embed every native capability directly into
-            the scripting runtime. Keel is the default event loop and local
-            transport path to native binaries that can be sandboxed, restarted,
-            versioned, audited, and replaced independently.
-          </p>
-          <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-            The important architectural point is the seam: Keel is the standard
-            substrate, but Hull does not hard-code trust into it. Capability
-            checks stay above; side-car process isolation stays below. The same
-            eventing and transport layer can be reused directly by native
-            services that do not need the Hull scripting runtime.
-          </p>
-          <div class="mt-5 grid sm:grid-cols-2 gap-3 text-xs text-mute-400">
-            <div class="flex items-start gap-2">
-              <i data-lucide="server" class="w-3.5 h-3.5 text-accent mt-0.5 shrink-0"></i>
-              <span>Hull HTTP server, routing, middleware, and static-file edge.</span>
-            </div>
-            <div class="flex items-start gap-2">
-              <i data-lucide="timer" class="w-3.5 h-3.5 text-accent mt-0.5 shrink-0"></i>
-              <span>Hull timers, SSE, async requests, and thread-pool wakeups.</span>
-            </div>
-            <div class="flex items-start gap-2">
-              <i data-lucide="cpu" class="w-3.5 h-3.5 text-accent mt-0.5 shrink-0"></i>
-              <span>Native optimizer, router, and inference side-car gateways.</span>
-            </div>
-            <div class="flex items-start gap-2">
-              <i data-lucide="boxes" class="w-3.5 h-3.5 text-accent mt-0.5 shrink-0"></i>
-              <span>Reusable C service substrate for OTTO-style systems.</span>
-            </div>
-          </div>
-          <p class="mt-4 text-[11px] text-mute-500 leading-relaxed">
-            In Hull, Keel is wired into server startup, route dispatch, middleware,
-            timers, SSE, async work, and static-file serving. See Hull's
-            <a href="https://github.com/artalis-io/hull/blob/main/docs/architecture.md#1-keel-http-server" class="link">architecture notes</a>
-            and
-            <a href="https://github.com/artalis-io/hull/blob/main/README.md#dependencies" class="link">dependency table</a>.
-          </p>
-        </div>
-
-        <div class="lg:col-span-7">
-          <div class="code-block">
-            <header>
-              <i data-lucide="network" class="w-3.5 h-3.5"></i>
-              <span>layers</span>
-              <span class="ml-auto text-[10px] text-mute-500">local system boundary</span>
-            </header>
-<pre>+-------------------------------------------------------+
-| Hull app code                                         |
-| Lua / JS orchestration, routes, workflows             |
-+--------------------------+----------------------------+
-                           |
-                           | manifest-declared calls
-                           v
-+-------------------------------------------------------+
-| Hull runtime boundary                                 |
-| capabilities, audit, sandbox, WASM compute            |
-|                                                       |
-|   Keel default event + transport layer                |
-|   HTTP / WS / SSE / clients / timers / watchers       |
-+--------------------------+----------------------------+
-                           |
-                           | explicit local transport
-                           v
-+-------------------------------------------------------+
-| Sandboxed native side-car                             |
-| optimizer, router, inference, device bridge           |
-+-------------------------------------------------------+</pre>
-          </div>
         </div>
       </div>
     </div>
@@ -532,11 +476,13 @@ $ make examples</pre>
       <div class="max-w-2xl">
         <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Compare</div>
         <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
-          Less framework. More substrate.
+          One runtime, not three libraries.
         </h2>
         <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-          Keel is deliberately closer to the metal than application servers,
-          but more protocol-aware than a generic event loop.
+          A typical C stack assembles an I/O loop, an HTTP server, and a DNS
+          resolver from separate projects with separate build systems and
+          dependency trees. Keel unifies that surface under one orthogonal,
+          dependency-free architecture.
         </p>
       </div>
 
@@ -547,49 +493,69 @@ $ make examples</pre>
               <th>Capability</th>
               <th class="cmp-keel-col">Keel</th>
               <th>libuv</th>
-              <th>Nginx</th>
-              <th>gRPC</th>
+              <th>h2o</th>
+              <th>c-ares</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td>Embeddable C library</td>
+              <td>Async I/O loop &mdash; readiness <em>and</em> completion</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-yes">yes</td>
+              <td class="cmp-part">via libuv</td>
+              <td class="cmp-no">no</td>
+            </tr>
+            <tr>
+              <td>TCP <em>and</em> UDP transports</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-yes">yes</td>
+              <td class="cmp-part">tcp</td>
+              <td class="cmp-no">no</td>
+            </tr>
+            <tr>
+              <td>HTTP/1.1 + HTTP/2 stack</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-no">no</td>
+              <td class="cmp-yes">yes</td>
+              <td class="cmp-no">no</td>
+            </tr>
+            <tr>
+              <td>WebSocket &amp; SSE</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-no">no</td>
+              <td class="cmp-part">ws</td>
+              <td class="cmp-no">no</td>
+            </tr>
+            <tr>
+              <td>Built-in async DNS resolver</td>
+              <td class="cmp-keel-col cmp-yes">yes</td>
+              <td class="cmp-part">sync</td>
+              <td class="cmp-no">no</td>
+              <td class="cmp-yes">yes</td>
+            </tr>
+            <tr>
+              <td>Dependency-free (BYO TLS/parser/alloc)</td>
               <td class="cmp-keel-col cmp-yes">yes</td>
               <td class="cmp-yes">yes</td>
               <td class="cmp-no">no</td>
-              <td class="cmp-part">part</td>
+              <td class="cmp-yes">yes</td>
             </tr>
             <tr>
-              <td>HTTP server and client in one substrate</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-no">no</td>
-              <td class="cmp-no">server</td>
-              <td class="cmp-part">rpc</td>
-            </tr>
-            <tr>
-              <td>Pluggable TLS/parser/allocator/body reader</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-part">part</td>
-              <td class="cmp-no">no</td>
-              <td class="cmp-no">no</td>
-            </tr>
-            <tr>
-              <td>Designed for side-car sandbox boundaries</td>
-              <td class="cmp-keel-col cmp-yes">yes</td>
-              <td class="cmp-part">generic</td>
-              <td class="cmp-part">edge</td>
-              <td class="cmp-part">service</td>
-            </tr>
-            <tr>
-              <td>Single small static-library deployment</td>
+              <td>Portable incl. Windows &amp; Cosmopolitan</td>
               <td class="cmp-keel-col cmp-yes">yes</td>
               <td class="cmp-yes">yes</td>
-              <td class="cmp-no">no</td>
-              <td class="cmp-no">heavy</td>
+              <td class="cmp-part">part</td>
+              <td class="cmp-yes">yes</td>
             </tr>
           </tbody>
         </table>
       </div>
+      <p class="mt-4 text-[11px] text-mute-500 leading-relaxed">
+        A rough map, not a scoreboard: each of these projects is excellent at its
+        job. The point is architectural — Keel spans the I/O core (libuv), the
+        HTTP stack (h2o), and DNS (c-ares) behind one seam, so an alternate event
+        engine or socket stack drops in below <em>every</em> layer at once.
+      </p>
     </div>
   </section>
 
@@ -599,13 +565,13 @@ $ make examples</pre>
         <div class="lg:col-span-4">
           <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Protocols &amp; maturity</div>
         <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
-          A mature HTTP core, with protocol edges around it.
+          What's shipped, and how solid it is.
         </h2>
         <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            Keel's center of gravity is event-loop integration plus HTTP/1.1
-            transport. WebSocket, SSE, client pooling, compression, proxying,
-            redirects, generic FD watchers, timers, and HTTP/2 hooks extend that
-            core without turning Keel into a monolithic application server.
+            An honest status per surface. The I/O core, transports, and the
+            HTTP/1.1 + WebSocket + SSE + DNS stacks are the mature center; HTTP/2
+            and TLS are deliberately pluggable so you choose the backend and
+            threat model.
         </p>
         </div>
 
@@ -621,29 +587,34 @@ $ make examples</pre>
               </thead>
               <tbody>
                 <tr>
-                  <td>Event loop core</td>
+                  <td>I/O event core</td>
                   <td class="cmp-yes">stable</td>
-                  <td>epoll, kqueue, io_uring poll-add, and POSIX poll behind one small API; exercised by server, client, timers, and watcher tests.</td>
+                  <td>Readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP) behind one small API over a POSIX/Winsock socket seam; an orthogonality audit confirms the axes stay independent.</td>
                 </tr>
                 <tr>
-                  <td>Timers and worker wakeups</td>
+                  <td>Timers &amp; worker wakeups</td>
                   <td class="cmp-yes">stable</td>
-                  <td>One-shot timers, thread-pool resume, and pipe-based event-loop wakeup with public examples.</td>
+                  <td>One-shot timers, async connection suspend/resume, thread-pool offload, and cross-thread event-loop wakeup.</td>
                 </tr>
                 <tr>
-                  <td>HTTP/1.1 server</td>
+                  <td>TCP server &amp; client</td>
                   <td class="cmp-yes">stable</td>
-                  <td>Routing, middleware, keep-alive, timeouts, buffered/file/stream responses; covered by the main test and example suite.</td>
+                  <td>Connection pool + state machine, keep-alive, timeouts, backpressure drain; blocking and async clients with pooling and redirects.</td>
                 </tr>
                 <tr>
-                  <td>HTTP/1.1 client</td>
+                  <td>UDP datagram server</td>
                   <td class="cmp-yes">stable</td>
-                  <td>Blocking and async APIs, TLS hooks, proxy support, redirects, connection pooling, and decompression support.</td>
+                  <td>Symmetric with the TCP server on a shared loop; source/dest addressing, multicast, GSO/GRO, recvmmsg/sendmmsg batching, ECN/DSCP.</td>
+                </tr>
+                <tr>
+                  <td>HTTP/1.1</td>
+                  <td class="cmp-yes">stable</td>
+                  <td>Routing, middleware, keep-alive, buffered/file/stream responses; server and client covered by the main test and example suite.</td>
                 </tr>
                 <tr>
                   <td>WebSocket</td>
                   <td class="cmp-yes">tested</td>
-                  <td>RFC 6455 server and client, shared frame parser, masked client frames, and dedicated fuzz corpus.</td>
+                  <td>RFC 6455 server and client, shared frame parser, masked client frames, dedicated fuzz corpus.</td>
                 </tr>
                 <tr>
                   <td>Server-Sent Events</td>
@@ -651,49 +622,34 @@ $ make examples</pre>
                   <td>Zero-alloc SSE framing over chunked streaming responses.</td>
                 </tr>
                 <tr>
-                  <td>Multipart form-data</td>
-                  <td class="cmp-yes">tested</td>
-                  <td>RFC 2046 parser with part, total-size, and part-count limits plus dedicated fuzz targets.</td>
+                  <td>Async DNS resolver</td>
+                  <td class="cmp-yes">built-in</td>
+                  <td>From-scratch resolver over UDP: dual A+AAAA (RFC 8305), EDNS0, DNS cookies, resolv.conf search/ndots, TCP fallback; response parser is fuzzed. Pluggable vtable + caching decorator too.</td>
                 </tr>
                 <tr>
                   <td>Compression / decompression</td>
                   <td class="cmp-yes">stable</td>
-                  <td>Pluggable vtables; miniz gzip backend ships in-tree.</td>
+                  <td>Pluggable vtables; miniz gzip/deflate backend ships in-tree.</td>
                 </tr>
                 <tr>
-                  <td>HTTP proxy / CONNECT</td>
+                  <td>HTTP proxy / PROXY protocol</td>
                   <td class="cmp-yes">stable</td>
-                  <td>HTTP forwarding and HTTPS tunneling for client-side transport.</td>
+                  <td>Client HTTP forwarding + HTTPS tunneling; PROXY v1/v2 parsing with CIDR trust to recover the real client behind an L4 balancer.</td>
                 </tr>
                 <tr>
                   <td>HTTP/2</td>
                   <td class="cmp-part">pluggable</td>
-                  <td>Server and client surfaces use session vtables; backend choice remains explicit.</td>
+                  <td>Server and client surfaces use session vtables; backend choice (e.g. nghttp2) stays explicit.</td>
                 </tr>
                 <tr>
                   <td>TLS</td>
                   <td class="cmp-part">bring your own</td>
-                  <td>Keel defines the transport vtable and avoids vendoring TLS policy.</td>
+                  <td>Keel defines the transport vtable and avoids vendoring TLS policy; mTLS peer-cert identity is surfaced.</td>
                 </tr>
                 <tr>
-                  <td>Async DNS</td>
-                  <td class="cmp-part">bring your own</td>
-                  <td>Resolver vtable plus caching decorator; c-ares or thread-pool wrappers fit here.</td>
-                </tr>
-                <tr>
-                  <td>Generic FD watchers</td>
-                  <td class="cmp-yes">stable</td>
-                  <td>Register arbitrary file descriptors for callbacks on the same event context.</td>
-                </tr>
-                <tr>
-                  <td>Side-car local transport</td>
-                  <td class="cmp-yes">default</td>
-                  <td>Hull's default route to sandboxed native binaries; replaceable at explicit boundaries.</td>
-                </tr>
-                <tr>
-                  <td>OTTO/native service substrate</td>
-                  <td class="cmp-yes">in use</td>
-                  <td>Reusable event loop and transport library for C services that sit outside Hull.</td>
+                  <td>Socket provider</td>
+                  <td class="cmp-part">pluggable</td>
+                  <td>Capability-gated vtable — Winsock built in, lwIP/AF_XDP-ready — selectable per server or client.</td>
                 </tr>
               </tbody>
             </table>
@@ -703,7 +659,123 @@ $ make examples</pre>
     </div>
   </section>
 
-  <section id="how" class="hairline-t">
+  <section id="performance" class="hairline-t bg-ink-900">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
+        <div class="lg:col-span-5">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Performance</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+            Fast because there's nothing in the way.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            No GC pauses, no async runtime, no goroutine scheduler — just
+            <code class="text-paper-200">accept</code> &rarr;
+            <code class="text-paper-200">read</code> &rarr;
+            <code class="text-paper-200">write</code> with zero-copy pointers into
+            read buffers and <code class="text-paper-200">splice</code>/<code class="text-paper-200">sendfile</code>
+            on the file path. Route params, middleware, and body reading land
+            within ~2% of the baseline.
+          </p>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            On the completion axis, the io_uring backend runs the same
+            platform-independent driver as IOCP — measured 2&ndash;2.3&times;
+            faster than the retired readiness-io_uring adapter. epoll remains the
+            safe default on Linux; io_uring is one build flag away.
+          </p>
+        </div>
+
+        <div class="lg:col-span-7">
+          <div class="grid sm:grid-cols-3 gap-5">
+            <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+              <div class="stat-num">339K<small> req/s</small></div>
+              <div class="stat-label">peak throughput</div>
+              <div class="stat-foot">GET /hello, Apple M1 Max, repo bench suite.</div>
+            </div>
+            <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+              <div class="stat-num">&lt;1<small> ms</small></div>
+              <div class="stat-label">p99 latency</div>
+              <div class="stat-foot">Sub-millisecond tail at 100 connections.</div>
+            </div>
+            <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+              <div class="stat-num">~2<small> %</small></div>
+              <div class="stat-label">feature overhead</div>
+              <div class="stat-foot">Route params + middleware + body reading vs baseline.</div>
+            </div>
+          </div>
+          <div class="mt-5 code-block">
+            <header>
+              <i data-lucide="gauge" class="w-3.5 h-3.5"></i>
+              <span>benchmark</span>
+              <span class="ml-auto text-[10px] text-mute-500">wrk, 4t / 100c / 10s</span>
+            </header>
+<pre>$ make bench
+
+<span class="tk-com"># GET /hello        peak throughput, sub-ms p99</span>
+<span class="tk-com"># GET /users/:id    route params — within ~2% of baseline</span>
+<span class="tk-com"># GET /mw/hello     middleware chain — within ~2%</span>
+<span class="tk-com"># POST /echo        body reading  — within ~2%</span></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="roadmap" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">What's next</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
+            The architecture predicts the roadmap.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            Because protocols ride the runtime and the axes stay orthogonal, the
+            next steps are additive — a new stack on the existing core, or a new
+            provider below every stack — not a rewrite.
+          </p>
+        </div>
+
+        <div class="lg:col-span-8 grid sm:grid-cols-3 gap-5">
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <div class="flex items-center gap-2 text-paper-50 font-medium">
+              <i data-lucide="zap" class="w-4 h-4 text-accent"></i>
+              QUIC / HTTP-3
+            </div>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              A protocol stack over UDP + TLS. The async UDP datagram layer, the
+              completion backends, and the TLS vtable already exist — HTTP/3 is
+              "another stack," exactly like HTTP/2 was. Prerequisite:
+              UDP pktinfo/GSO/GRO parity on the completion path.
+            </p>
+          </div>
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <div class="flex items-center gap-2 text-paper-50 font-medium">
+              <i data-lucide="radio" class="w-4 h-4 text-accent"></i>
+              MQTT
+            </div>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              A TCP pub/sub protocol that drops straight onto the existing
+              connection core as a peer to the HTTP stack. No runtime changes
+              needed.
+            </p>
+          </div>
+          <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
+            <div class="flex items-center gap-2 text-paper-50 font-medium">
+              <i data-lucide="layers-2" class="w-4 h-4 text-accent"></i>
+              Alternate net stacks
+            </div>
+            <p class="mt-3 text-sm text-mute-400 leading-relaxed">
+              lwIP, AF_XDP, DPDK, or UEFI SNP providers slot in <em>below</em>
+              every protocol stack via the socket seam — none of them know. An
+              architectural capability HTTP libraries simply don't have.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how" class="hairline-t bg-ink-900/50">
     <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
       <div class="grid lg:grid-cols-12 gap-10 lg:gap-12 items-start">
         <div class="lg:col-span-4">
@@ -713,9 +785,9 @@ $ make examples</pre>
             Protocols around it.
           </h2>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            The composable event context owns readiness, watchers, timers, and
-            allocator state. Server, client, thread pool, SSE, WebSocket, and
-            side-car bridges sit on top of that same loop.
+            A composable event context owns the loop, watchers, timers, and
+            allocator state. Server, client, thread pool, SSE, WebSocket, UDP,
+            and the DNS resolver all sit on that same loop.
           </p>
         </div>
 
@@ -723,11 +795,12 @@ $ make examples</pre>
           <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
             <div class="flex items-center gap-2 text-paper-50 font-medium">
               <i data-lucide="radio-receiver" class="w-4 h-4 text-accent"></i>
-              Event backends
+              Two I/O models, one API
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              Edge-triggered epoll/kqueue, io_uring poll-add, and POSIX poll
-              expose the same small event API to higher layers.
+              Readiness (epoll/kqueue/WSAPoll/poll) and completion
+              (io_uring/IOCP) expose the same small contract to higher layers —
+              the same generic driver runs across every completion backend.
             </p>
           </div>
           <div class="border hairline rounded-lg p-5 bg-white/[0.015]">
@@ -757,7 +830,7 @@ $ make examples</pre>
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
               Chunked responses, SSE, WebSocket frames, backpressure drain
-              buffers, and client pools keep long-lived local services cheap.
+              buffers, and client pools keep long-lived connections cheap.
             </p>
           </div>
         </div>
@@ -771,12 +844,12 @@ $ make examples</pre>
         <div class="lg:col-span-5">
           <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Security model</div>
           <h2 class="text-2xl md:text-3xl font-semibold text-paper-50">
-            Narrow transport makes sandboxing practical.
+            A narrow surface, built to be constrained.
           </h2>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            Keel is not the authorization layer. Hull decides what an app can do.
-            Keel keeps the local transport path small enough to test, fuzz,
-            constrain, and place behind kernel sandboxing.
+            Keel keeps the byte-moving path small enough to test, fuzz, bound,
+            and place behind kernel sandboxing. The init/run split and explicit
+            resource limits make lockdown natural.
           </p>
         </div>
 
@@ -798,8 +871,9 @@ $ make examples</pre>
             <div>
               <h3 class="text-paper-50 font-medium">Fuzzed protocol surfaces</h3>
               <p class="mt-1 text-sm text-mute-400 leading-relaxed">
-                Parser, response parser, multipart, and WebSocket paths have
-                dedicated fuzz targets and corpus fixtures.
+                Eight libFuzzer targets cover the untrusted-input attack surface:
+                the HTTP parser, response parser, multipart, WebSocket, DNS
+                responses, PROXY protocol, and URL parsing — with ASan/UBSan.
               </p>
             </div>
           </div>
@@ -830,8 +904,8 @@ $ make examples</pre>
           </h2>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
             Keel is intentionally boring in the places that matter: C11, static
-            library, CI, sanitizers, fuzzing, OpenSSF checks, and examples that
-            compile against the public API.
+            library, a wide CI matrix, sanitizers, fuzzing, static analysis, and
+            examples that compile against the public API.
           </p>
         </div>
 
@@ -843,11 +917,16 @@ $ make examples</pre>
               <span class="ml-auto text-[10px] text-mute-500">repo workflow</span>
             </header>
 <pre>$ make debug      <span class="tk-com"># ASan + UBSan</span>
-$ make test       <span class="tk-com"># unit and integration suites</span>
+$ make test       <span class="tk-com"># 863 tests across 56 suites</span>
 $ make analyze    <span class="tk-com"># clang static analyzer</span>
 $ make cppcheck   <span class="tk-com"># static analysis</span>
-$ make fuzz       <span class="tk-com"># parser and protocol fuzz targets</span></pre>
+$ make fuzz       <span class="tk-com"># 8 parser and protocol fuzz targets</span></pre>
           </div>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            CI runs the suite across Linux (epoll, poll, musl), macOS (kqueue),
+            Windows (WSAPoll + IOCP), the io_uring completion backend, and
+            Cosmopolitan APE builds.
+          </p>
         </div>
       </div>
     </div>
@@ -867,7 +946,7 @@ $ make fuzz       <span class="tk-com"># parser and protocol fuzz targets</span>
         </div>
         <div class="flex items-center gap-2 text-xs text-mute-500 leading-relaxed">
           <i data-lucide="shield-check" class="w-3.5 h-3.5 text-accent shrink-0"></i>
-          <span>MIT licensed C transport substrate for local-first systems.</span>
+          <span>MIT-licensed C networking runtime.</span>
         </div>
       </div>
 
@@ -890,8 +969,9 @@ $ make fuzz       <span class="tk-com"># parser and protocol fuzz targets</span>
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Page last updated <time datetime="2026-05">May&nbsp;2026</time>.
-        Keel is the event loop and transport substrate; Hull remains the capability-secure runtime.
+        Page last updated <time datetime="2026-07">July&nbsp;2026</time>.
+        A portable async networking runtime for C — I/O core, TCP/UDP transports,
+        and pluggable protocol stacks.
       </p>
     </div>
   </footer>
