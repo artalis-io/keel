@@ -2,8 +2,8 @@
  * smoke_iouring.c — end-to-end HTTP-over-completion roundtrip on the completion-native
  * io_uring backend (PAL Phase 8f).
  *
- * The runtime validation of the THIRD completion backend (event_iouring_comp.c): a
- * KlServer pinned to the io_uring completion loop (BACKEND=iouringcomp, the overlapped
+ * The runtime validation of the THIRD completion backend (event_iouring.c): a
+ * KlServer pinned to the io_uring completion loop (BACKEND=iouring, the overlapped
  * provider), served by the SAME completion driver (completion_driver.c) the IOCP and
  * pollcomp backends drive — reused verbatim — hit by the sync KlClient over loopback. It
  * proves the completion axis is genuinely platform-independent on a real, completion-native
@@ -15,7 +15,7 @@
  * idle-timeout + keep-alive churn + resilience, all over the io_uring completion loop.
  */
 #include <keel/keel.h>
-#include "../src/socket.h"   /* internal kl_socket_provider_iouringcomp() */
+#include "../src/socket.h"   /* internal kl_socket_provider_iouring() */
 
 #include <pthread.h>
 #include <string.h>
@@ -321,7 +321,7 @@ static int h2_prior_knowledge_roundtrip(void) {
 int main(void) {
     static KlH2ServerConfig h2cfg = { .factory = echo_factory };
     KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
-                     .sockets = kl_socket_provider_iouringcomp(), .h2 = &h2cfg,
+                     .sockets = kl_socket_provider_iouring(), .h2 = &h2cfg,
                      .read_timeout_ms = 400 };
     if (kl_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-iouring: server init failed (err=%d)\n", g_srv.last_error);

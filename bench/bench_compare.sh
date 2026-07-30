@@ -1,12 +1,11 @@
 #!/bin/sh
-# bench_compare.sh — compare KEEL's Linux event backends on ONE machine (PAL 8f step 4).
+# bench_compare.sh — compare KEEL's Linux event backends on ONE machine.
 #
-# Builds the library + bench_server for each of epoll (readiness, default), io_uring
-# readiness-adapted (BACKEND=iouring), and io_uring completion-native (BACKEND=iouringcomp),
-# then runs the SAME wrk workload against each and prints a comparison. Running all three
-# back-to-back on one host keeps the comparison RELATIVE-fair (same CPU, same noise floor) —
-# absolute numbers from a shared CI VM are not publishable, but the ordering (does the
-# completion backend match/beat readiness?) is the step-4 question.
+# Builds the library + bench_server for epoll (default) and io_uring (completion-native,
+# BACKEND=iouring), then runs the SAME wrk workload against each and prints a comparison.
+# Back-to-back on one host keeps it RELATIVE-fair (same CPU, same noise floor). (The
+# readiness-adapted io_uring backend was retired in 8f-5d — it benchmarked ~2–2.3× slower
+# than completion; see docs/phase8f5_iouring_default_migration_design.md.)
 #
 # Usage:  bench/bench_compare.sh          (needs wrk, curl, liburing-dev, gcc)
 #         DURATION=8s CONNECTIONS=100 THREADS=4 bench/bench_compare.sh
@@ -62,9 +61,8 @@ bench_backend() {
     wait $pid 2>/dev/null || true
 }
 
-bench_backend ""                   "epoll (readiness)"        ""
-bench_backend "BACKEND=iouring"    "io_uring (readiness)"     ""
-bench_backend "BACKEND=iouringcomp" "io_uring (completion)"   "-DKEEL_BENCH_OVERLAPPED"
+bench_backend ""                "epoll"                 ""
+bench_backend "BACKEND=iouring" "io_uring (completion)" ""
 
 echo ""
 echo "=== KEEL backend comparison (relative; single host) ==="

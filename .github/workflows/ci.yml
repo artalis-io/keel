@@ -20,7 +20,7 @@ jobs:
             backend: ""
             deps: ""
           # io_uring is completion-native (8f-5d) and can't run the full `make test`
-          # (some readiness-shaped suites are excluded — see IOURINGCOMP_TEST_SUITES); it is
+          # (some readiness-shaped suites are excluded — see IOURING_TEST_SUITES); it is
           # covered end-to-end by the dedicated "Completion (io_uring)" + unit-suite jobs
           # below, so it is not a full-suite matrix entry.
           - name: Linux (poll fallback)
@@ -105,10 +105,10 @@ jobs:
         run: make smoke-pollcomp-asan
 
   completion-iouring:
-    # io_uring is completion-native (8f-5d): BACKEND=iouring now builds event_iouring_comp.c
-    # (SQE/CQE completion + completion_driver.c), the readiness POLL_ADD adapter having been
-    # retired. This job builds with BACKEND=iouring to validate the flipped default; the
-    # unit-suite job below builds with the retained iouringcomp alias. Linux-only.
+    # io_uring is completion-native: BACKEND=iouring builds event_iouring.c (SQE/CQE
+    # completion + completion_driver.c); the readiness POLL_ADD adapter was retired (8f-5d)
+    # and the iouringcomp alias dropped. This job runs the end-to-end smokes; the unit-suite
+    # job below runs the curated regression suite. Linux-only.
     name: Completion (io_uring)
     runs-on: ubuntu-latest
     steps:
@@ -138,7 +138,7 @@ jobs:
     # Phase 8f-3: the unit-test suites that run over the io_uring completion backend — a
     # regression gate alongside the smokes (backend-agnostic logic + protocol/loop suites
     # driven through kl_server_run / kl_event_ctx_run). Readiness-model-coupled suites are
-    # excluded (see the IOURINGCOMP_TEST_SUITES comment in the Makefile — those need a
+    # excluded (see the IOURING_TEST_SUITES comment in the Makefile — those need a
     # per-test overlapped-provider opt-in, not a backend fix).
     name: Completion (io_uring) unit suite
     runs-on: ubuntu-latest
@@ -149,10 +149,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y liburing-dev
       - name: Build completion backend (io_uring)
-        run: make BACKEND=iouringcomp
+        run: make BACKEND=iouring
       - name: Unit-test suites over io_uring completion
         timeout-minutes: 10
-        run: make BACKEND=iouringcomp test-iouringcomp
+        run: make BACKEND=iouring test-iouring
 
   windows:
     name: Windows (MinGW, full core)
