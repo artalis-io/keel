@@ -113,13 +113,40 @@ pipe) so teardown is prompt on both axes. Finishing the per-suite triage retires
 
 ---
 
-## 4. Bare-metal benchmark confirmation (5c)
+## 4. Second-host benchmark confirmation (5c)
 
-Step 4's numbers came from a shared CI VM over loopback — a *relative* ordering, not
-publishable absolutes. Before flipping a default, re-run `make bench-compare` on bare metal
-(or a dedicated instance) to confirm the +30 %/+47 % ordering holds. The margin is large and
-consistent, so a reversal is unlikely, but flipping a default on CI-VM numbers alone would be
-hasty. This is a gate, not code.
+Step 4's numbers came from a shared x86 CI VM. A second run on different hardware — an Apple
+M1 Max (ARM64) in a dedicated Apple `container` VM, kernel 6.18, `io_uring_disabled=0`,
+`wrk -t4 -c100 -d8s`, loopback — gives a **materially different picture**, which is exactly
+why this gate exists:
+
+| backend | `GET /hello` (x86 CI) | `GET /hello` (ARM M1) |
+|---|---|---|
+| epoll | 73,312 | ~320–360K |
+| io_uring readiness | 64,951 | ~140K |
+| io_uring completion | 95,418 | ~270–320K |
+
+**The x86 ordering does not replicate on ARM.** On x86 CI, completion was +30 % over epoll;
+on the M1, completion is **roughly tied with epoll** (marginally behind on throughput,
+occasionally better on p99). What *does* hold on **both** arches — and strongly — is that
+**readiness-adapted io_uring is by far the worst** (below epoll on x86; ~2× slower than both
+on ARM).
+
+**Implications for 5d (revised, honest):**
+
+- **Retiring the readiness `event_iouring.c` is justified everywhere** — it is the weakest
+  backend on every host measured. This is the solid, arch-independent conclusion.
+- **"Completion is the fastest" is x86-specific, not universal.** So 5d should frame the flip
+  as *"completion-native is the right io_uring backend (readiness-io_uring is retired)"*, not
+  *"completion beats epoll."* On ARM, io_uring completion and epoll are peers; the default
+  Linux backend stays **epoll** (io_uring is opt-in via `BACKEND=iouring`), so the flip only
+  changes which *io_uring* backend you get, and both benchmarks agree that should be the
+  completion one.
+- A dedicated bare-metal box (not a laptop VM) would sharpen absolutes further, but two
+  independent hosts already agree on the decision-relevant ordering.
+
+(Absolute M1 throughput is ~3–4× the x86 CI VM simply because the M1 Max in a clean dedicated
+VM is a far faster host than a shared CI runner — the site's headline peak reflects this.)
 
 ---
 
