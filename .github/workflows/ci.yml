@@ -19,10 +19,10 @@ jobs:
             os: ubuntu-latest
             backend: ""
             deps: ""
-          - name: Linux (io_uring)
-            os: ubuntu-latest
-            backend: "BACKEND=iouring"
-            deps: "liburing-dev"
+          # io_uring is completion-native (8f-5d) and can't run the full `make test`
+          # (some readiness-shaped suites are excluded — see IOURINGCOMP_TEST_SUITES); it is
+          # covered end-to-end by the dedicated "Completion (io_uring)" + unit-suite jobs
+          # below, so it is not a full-suite matrix entry.
           - name: Linux (poll fallback)
             os: ubuntu-latest
             backend: "BACKEND=poll"
@@ -105,11 +105,10 @@ jobs:
         run: make smoke-pollcomp-asan
 
   completion-iouring:
-    # The completion-NATIVE io_uring backend (BACKEND=iouringcomp, PAL 8f): io_uring
-    # driving the SAME completion driver (completion_driver.c) via SQE/CQE — the third
-    # completion backend after IOCP + pollcomp, and the first production Linux one. Proves
-    # the axis on a real, completion-native kernel engine (io_uring is completion by
-    # construction). Linux-only (io_uring is a Linux facility).
+    # io_uring is completion-native (8f-5d): BACKEND=iouring now builds event_iouring_comp.c
+    # (SQE/CQE completion + completion_driver.c), the readiness POLL_ADD adapter having been
+    # retired. This job builds with BACKEND=iouring to validate the flipped default; the
+    # unit-suite job below builds with the retained iouringcomp alias. Linux-only.
     name: Completion (io_uring)
     runs-on: ubuntu-latest
     steps:
@@ -120,20 +119,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y liburing-dev
 
-      - name: Build completion backend (io_uring)
-        run: make BACKEND=iouringcomp
+      - name: Build io_uring backend (BACKEND=iouring → completion)
+        run: make BACKEND=iouring
 
       # Full completion driver over io_uring: GET + POST + sendfile + stream + UDP + h2c +
       # h2 prior-knowledge + idle-timeout + keep-alive + resilience + large partial-send.
-      - name: End-to-end HTTP-over-io_uring-completion roundtrip smoke test
+      - name: End-to-end HTTP-over-io_uring roundtrip smoke test
         timeout-minutes: 5
-        run: make BACKEND=iouringcomp smoke-iouring
+        run: make BACKEND=iouring smoke-iouring
 
       # Async/thread-pool over the completion loop — the watcher relay via single-shot
       # IORING_OP_POLL_ADD (the io_uring way to meet the same KL_COMP_WATCHER contract).
-      - name: Async/thread-pool-over-io_uring-completion roundtrip smoke test
+      - name: Async/thread-pool-over-io_uring roundtrip smoke test
         timeout-minutes: 5
-        run: make BACKEND=iouringcomp smoke-iouring-async
+        run: make BACKEND=iouring smoke-iouring-async
 
   completion-iouring-suite:
     # Phase 8f-3: the unit-test suites that run over the io_uring completion backend — a
