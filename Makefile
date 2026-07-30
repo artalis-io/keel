@@ -455,6 +455,19 @@ smoke-pollcomp-asan:
 	./$(SMOKE_POLLCOMP_WS_BIN)
 	./$(SMOKE_POLLCOMP_ASYNC_BIN)
 
+# Same, for the io_uring completion backend (Linux only — needs io_uring). LeakSanitizer here
+# covers the io_uring op/registered-buffer/splice/watcher lifecycle the plain smoke can't —
+# the gap that let an 8f-5d/teardown watch leak reach main before this target existed.
+smoke-iouring-asan:
+	$(MAKE) clean
+	$(MAKE) BACKEND=iouring debug
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	      -o $(SMOKE_IOURING_BIN) tests/smoke_iouring.c -L. -lkeel -lpthread -luring
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	      -o $(SMOKE_IOURING_ASYNC_BIN) tests/smoke_iouring_async.c -L. -lkeel -lpthread -luring
+	./$(SMOKE_IOURING_BIN)
+	./$(SMOKE_IOURING_ASYNC_BIN)
+
 # End-to-end HTTP-over-completion roundtrip on the completion-native io_uring backend
 # (Linux, BACKEND=iouring). The runtime gate for event_iouring.c — build libkeel
 # with BACKEND=iouring first so the server runs on the io_uring completion loop. The

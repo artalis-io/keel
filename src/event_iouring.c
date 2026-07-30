@@ -224,7 +224,7 @@ int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     if (!((uintptr_t)udata & 1)) return 0;   /* connection — posted ops, no readiness watch */
     KlIouState *st = loop->_backend;
     for (KlIouWatch *w = st->watches; w; w = w->next)
-        if (w->fd == fd) { w->mask = mask; w->udata = udata; return 0; }   /* idempotent */
+        if (w->fd == fd && !w->removed) { w->mask = mask; w->udata = udata; return 0; }  /* idempotent */
     KlIouWatch *w = kl_malloc(st->alloc, sizeof(*w));
     if (!w) return -1;
     memset(w, 0, sizeof(*w));
@@ -242,7 +242,7 @@ int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     if (!((uintptr_t)udata & 1)) return 0;
     KlIouState *st = loop->_backend;
     for (KlIouWatch *w = st->watches; w; w = w->next)
-        if (w->fd == fd) {
+        if (w->fd == fd && !w->removed) {
             w->mask = mask; w->udata = udata;
             /* The in-flight poll is single-shot with the old mask; re-arm with the new
              * one. The old poll's CQE (if it fires) just re-arms again — harmless. */
@@ -255,21 +255,23 @@ int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
     KlIouState *st = loop->_backend;
     for (KlIouWatch *w = st->watches; w; w = w->next)
         if (w->fd == fd && !w->removed) {
-            w->removed = 1;
-            for (KlIouWatch **link = &st->watches; *link; link = &(*link)->next)
-                if (*link == w) { *link = w->next; break; }   /* unlink — re-add is fresh */
-            w->next = NULL;
+            w->removed = 1;   /* add/mod skip it; a re-add of this fd allocates a fresh watch */
             if (w->armed) {
                 /* A POLL_ADD is in the kernel — cancel it; the poll's –ECANCELED CQE
-                 * (data = w) frees the watch. Freeing here would leave the kernel writing
-                 * a CQE against freed memory. */
+                 * (data = w) unlinks + frees the watch in the drain. Freeing here would leave
+                 * the kernel writing a CQE against freed memory. The watch stays LINKED so
+                 * that if that CQE never arrives (kl_event_close → io_uring_queue_exit at
+                 * shutdown drops it), kl_event_close still frees it — no leak. */
                 struct io_uring_sqe *sqe = iou_sqe(st);
                 if (sqe) {
                     io_uring_prep_poll_remove(sqe, (__u64)(uintptr_t)w);
                     io_uring_sqe_set_data(sqe, NULL);   /* sentinel — ignore this CQE */
                 }
             } else {
-                kl_free(st->alloc, w, sizeof(*w));      /* no poll outstanding — free now */
+                /* No poll outstanding — unlink + free now. */
+                for (KlIouWatch **link = &st->watches; *link; link = &(*link)->next)
+                    if (*link == w) { *link = w->next; break; }
+                kl_free(st->alloc, w, sizeof(*w));
             }
             return 0;
         }
@@ -814,7 +816,12 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
         if (*(IouOpType *)data == IOU_WATCH) {
             KlIouWatch *w = data;
             w->armed = 0;                             /* this single-shot poll is consumed */
-            if (w->removed) { kl_free(st->alloc, w, sizeof(*w)); continue; }  /* del completed */
+            if (w->removed) {                         /* del's poll-cancel CQE — unlink + free */
+                for (KlIouWatch **link = &st->watches; *link; link = &(*link)->next)
+                    if (*link == w) { *link = w->next; break; }
+                kl_free(st->alloc, w, sizeof(*w));
+                continue;
+            }
             if (res > 0) {                            /* poll fired — surface a watcher event */
                 KlEventMask ready = 0;
                 if (res & (POLLIN | POLLHUP | POLLERR)) ready |= KL_EVENT_READ;
