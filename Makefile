@@ -493,13 +493,15 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # backend-neutral kl_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
-# 36 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
+# 37 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
 # client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
 # server/client now auto-adopts the completion loop's overlapped provider instead of being
 # rejected at kl_server_init) → +2 (integration, server_integration) once the completion
 # run loop got prompt teardown (kl_server_stop self-pipe wakeup) and graceful-drain progress
 # (kl_server_drain_progress ran in the completion branch too — it previously never exited
-# drain mode, hanging server_integration's drain tests).
+# drain mode, hanging server_integration's drain tests) → +1 (request) once the completion
+# path null-terminated parsed request fields: that was done at the shared conn_dispatch_request
+# core (not the readiness call site), so both event models get it and can't drift.
 #
 # Still excluded, NOT blocked by backend bugs (see docs/phase8f5 §3): raw kl_event_wait
 # drivers (event, event_ctx, async — a completion loop has no readiness kl_event_wait, only
@@ -507,13 +509,13 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # assertions (event_caps, socket_provider) are inherently readiness-axis. The remaining
 # default-provider suites (client, client_stream, redirect, peer_addr, peer_cert,
 # tls_integration, udp, udp_server, udp_multicast, udp_offload, unix_socket, dns_resolver,
-# request, cross_module) init over completion (5a) but have per-suite behavioural gaps left to
+# cross_module) init over completion (5a) but have per-suite behavioural gaps left to
 # triage — incremental, not a correctness prerequisite (the smokes cover the full protocol
 # surface). Backend-specific: iocp_engine.
 IOURING_TEST_SUITES = allocator body_reader chunked client_happy_eyeballs client_pool \
                           compress connection cors decompress drain error file_io h2 \
                           h2_client integration multipart_stream overflow parser proxy \
-                          proxy_protocol resolver_cache response response_parser router \
+                          proxy_protocol request resolver_cache response response_parser router \
                           server_integration server_stats sse thread_pool timeout timer tls \
                           udp_batching udp_tos url websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
