@@ -13,7 +13,7 @@
  * runs it. Sibling of smoke_pollcomp_async.c.
  */
 #include <keel/keel.h>
-#include "../src/socket.h"     /* internal kl_socket_provider_iouringcomp() */
+/* No internal socket.h: this smoke sets no provider — it proves the 8f-5a auto-wire. */
 
 #include <pthread.h>
 #include <string.h>
@@ -76,8 +76,12 @@ static void handle_async(KlRequest *req, KlResponse *res, void *ud) {
 static void *server_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }
 
 int main(void) {
-    KlConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
-                     .sockets = kl_socket_provider_iouringcomp() };
+    /* No .sockets set on purpose (8f-5a): a completion loop rejects the default provider,
+     * so kl_server_init must adopt the backend's native overlapped provider automatically
+     * (kl_event_native_provider). This proves the completion backend is a source-compatible
+     * drop-in — the whole async/thread-pool/watcher-relay surface then runs over the
+     * auto-wired provider, no explicit provider anywhere. */
+    KlConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1" };
     if (kl_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-iouring-async: server init failed (err=%d)\n", g_srv.last_error);
         return 1;

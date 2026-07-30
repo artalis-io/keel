@@ -465,6 +465,18 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
      * provider; NULL = built-in default. */
     s->ev.sockets = s->config.sockets;
 
+    /* PAL 8f-5a: a completion loop needs an overlapped provider, which the default (or a
+     * readiness) provider is not. If the configured provider is incompatible with the loop,
+     * adopt the backend's own native provider (kl_event_native_provider — NULL on readiness
+     * backends, the overlapped provider on completion backends). This makes a completion
+     * backend a source-compatible drop-in: a server written for epoll works unchanged, the
+     * event axis stays masked above the build flag. An explicitly-configured compatible
+     * provider is kept; a still-incompatible pairing is rejected below. */
+    if (!kl_event_ctx_sockets_compatible(&s->ev)) {
+        const struct KlSocketProvider *np = kl_event_native_provider(&s->ev.loop);
+        if (np) s->ev.sockets = np;
+    }
+
     /* PAL Phase 7: negotiate the event loop against the socket provider now that
      * both are wired onto the ctx. The server's readiness loop must be able to
      * watch the provider's handles (native fds); a non-native provider (e.g. raw

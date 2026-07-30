@@ -282,3 +282,10 @@ unsigned kl_event_caps(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }
+
+/* Readiness-adapted loop — the default POSIX provider works; nothing to auto-wire (5a).
+ * (The completion-native io_uring backend, event_iouring_comp.c, returns its provider.) */
+const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
+    (void)loop;
+    return NULL;
+}
