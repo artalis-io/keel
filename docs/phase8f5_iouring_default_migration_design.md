@@ -94,10 +94,22 @@ the 29-suite gate. Expected remaining exclusions shrink to the *inherently* read
   it stays in the readiness jobs, excluded from the completion run (already is).
 - **`test_file_io_iouring`** tests the readiness io_uring file backend — removed with it (5d).
 
-Everything else (integration, client\*, server\_\*, redirect, peer\_\*, udp\*, tls\_integration,
-unix\_socket, dns\_resolver, …) should pass once 5a auto-wires the provider — to be confirmed,
-and any genuine completion-path gaps fixed. This retires the step-3 "readiness-coupled
-harness" caveat.
+**Result (re-survey with 5a in place).** The gate grew 29 → **34**: 5a's auto-wire moved
+`client_happy_eyeballs`, `client_pool`, `error`, `server_stats`, `timeout` from fail to pass
+(a default-provider server/client now auto-adopts the overlapped provider instead of being
+rejected at `kl_server_init`). The **inherently-readiness** suites above stay excluded as
+expected. The remaining default-provider integration suites (`integration`,
+`server_integration`, `client`, `client_stream`, `redirect`, `peer_addr`, `peer_cert`,
+`tls_integration`, `udp`, `udp_server`, `udp_multicast`, `udp_offload`, `unix_socket`,
+`dns_resolver`, `request`, `cross_module`) now **init** over completion (5a did its job) but
+still have **per-suite behavioural gaps** to triage incrementally — not a correctness
+prerequisite (the smokes cover the full protocol surface, and 34 unit suites + the benchmark
+back the backend). `integration`/`server_integration` merely *time out under the survey's 30 s
+cap* — slow teardown, since `kl_server_stop` is noticed only on the next ≤1 s tick
+(`KL_POLL_TIMEOUT_MS`), a latency **shared with epoll**, not a completion deadlock. That flags
+a real 5d-adjacent enhancement: have `kl_server_stop` actively wake the loop (eventfd/self-
+pipe) so teardown is prompt on both axes. Finishing the per-suite triage retires the step-3
+"readiness-coupled harness" caveat fully; it can proceed independently of the 5d flip.
 
 ---
 

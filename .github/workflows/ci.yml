@@ -154,9 +154,6 @@ jobs:
       - name: Unit-test suites over io_uring completion
         timeout-minutes: 10
         run: make BACKEND=iouringcomp test-iouringcomp
-      - name: Re-survey full suite over completion (8f-5b, temporary)
-        timeout-minutes: 15
-        run: make BACKEND=iouringcomp iouringcomp-survey
 
   windows:
     name: Windows (MinGW, full core)
