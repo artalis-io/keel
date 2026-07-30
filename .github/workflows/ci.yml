@@ -155,22 +155,6 @@ jobs:
         timeout-minutes: 10
         run: make BACKEND=iouringcomp test-iouringcomp
 
-  backend-benchmark:
-    # PAL 8f step 4 (one-shot): compare epoll / io_uring-readiness / io_uring-completion on
-    # one runner. CI VM numbers are noisy + not bare metal — this gives a RELATIVE ordering
-    # (does completion match/beat readiness?), not publishable absolutes. TEMPORARY.
-    name: Backend benchmark (io_uring)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Install deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wrk liburing-dev
-      - name: Compare backends
-        timeout-minutes: 15
-        run: make bench-compare
-
   windows:
     name: Windows (MinGW, full core)
     runs-on: windows-latest

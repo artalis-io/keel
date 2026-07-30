@@ -163,6 +163,37 @@ completion would mean opting each into the overlapped provider and the `kl_comp_
 prerequisite. That effort belongs with step 5 (making `iouringcomp` the default), after the
 step-4 benchmark justifies it.
 
+## Step 4 — benchmark (epoll vs io_uring-readiness vs io_uring-completion)
+
+`bench/bench_compare.sh` (`make bench-compare`) builds the library + `bench_server` against
+each Linux backend and runs the same `wrk` workload against each on one host. A first run on
+a GitHub Actions runner (AMD EPYC 9V74, `wrk -t4 -c100 -d8s`, loopback):
+
+| backend | `GET /hello` req/s | p99 | `POST /echo` req/s | p99 |
+|---|---|---|---|---|
+| epoll (readiness) | 73,312 | 1.49 ms | 72,479 | 1.50 ms |
+| io_uring (readiness-adapted) | 64,951 | 1.66 ms | 63,082 | 1.73 ms |
+| **io_uring (completion-native)** | **95,418** | **1.24 ms** | **90,872** | **1.31 ms** |
+
+**Ordering (consistent across both endpoints):** completion-io_uring > epoll > readiness-io_uring.
+The completion backend is **~30 % faster than epoll and ~47 % faster than readiness-io_uring**,
+with the lowest tail latency. The readiness-adapted io_uring backend is *slower than epoll* —
+expected, since it drives io_uring as a `poll_add` multiplexer (readiness overhead without the
+completion payoff) and then does the actual I/O through the readiness `conn_read`/`conn_write`
+path. Completion-native io_uring lets the kernel do the I/O (batched submit, `WRITE_FIXED`,
+splice), which is where the win comes from.
+
+**Caveats.** A shared CI VM with `wrk` contending on the same host over loopback is noisy and
+not bare metal — treat these as a *relative* ordering, not publishable absolutes. The margin
+(+30–47 %) is large and consistent enough that the ordering is unlikely to reverse on real
+hardware, but a bare-metal re-run belongs with the step-5 decision to flip the default.
+
+**Conclusion for "do we still need the readiness io_uring backend?"** On this evidence, the
+readiness-adapted `event_iouring.c` is the *weakest* of the three (below plain epoll), and the
+completion-native backend is the one worth making the default io_uring path. Step 5 (flip the
+default; retire `event_iouring.c` + `file_io_iouring.c`) is now justified — pending a
+bare-metal confirmation run and the per-test overlapped-provider opt-in noted in Step 3.
+
 ## 5. Orthogonality litmus
 
 | Axis | How 8f holds it |
