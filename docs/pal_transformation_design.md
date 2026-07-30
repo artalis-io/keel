@@ -661,6 +661,34 @@ real alternative provider or a detailed prototype.
 - Local-transport abstraction (named pipes etc.) — deferred to a real second
   local transport.
 - QUIC/HTTP-3 — out of scope; only keep the UDP seam clean.
+- **Completion-backend gaps (io_uring / IOCP / pollcomp)** — the server stream +
+  datagram op surface is complete and symmetric across all three; the deferred work
+  is client-side + UDP parity + throughput tuning. See Appendix G for the full
+  analysis. In priority order:
+  1. **Native async connect + client-over-completion** (functional). No
+     `ConnectEx` / `IORING_OP_CONNECT` / `kl_comp_post_connect` and no
+     `KL_COMP_CONNECT`; `client.c` connects via non-blocking `connect()` +
+     `EINPROGRESS` + a readiness writability watcher and uses raw `write()`/`read()`,
+     so over a completion loop the client only works through the `KL_COMP_WATCHER`
+     relay. This is why the ~14 client/redirect/tls-integration suites are not yet
+     gated over completion. Highest leverage; matters most on Windows/IOCP.
+  2. **UDP advanced-feature parity on completion** (functional; QUIC prerequisite).
+     The readiness UDP path has `IP_PKTINFO` (src+dest), `recvmmsg`/`sendmmsg`
+     batching, GSO/GRO offload, and TOS/ECN/DSCP; the completion path does correct
+     *basic* per-datagram I/O but wires **no `cmsg`/`CMSG`** — dest-addr, batching,
+     GSO/GRO, and TOS-read are not honored on completion loops. Close before
+     QUIC/HTTP-3.
+  3. **io_uring throughput** (perf, kernel-gated). Single-shot accept + one recv
+     per conn today; multishot accept (5.19+), multishot recv + provided buffer
+     rings (`buf_ring`, 5.19+), and `register_files` are unused.
+  4. **IOCP `AcceptEx` depth** (perf). One outstanding accept re-posted on
+     completion; a pool of outstanding `AcceptEx` calls avoids dropping accepts
+     under connection bursts.
+  5. **IOCP polish** (robustness). `kl_comp_drain` returns 0 on any
+     `GetQueuedCompletionStatusEx == FALSE`, conflating a real wait error
+     (`ERROR_ABANDONED_WAIT_0`) with a timeout; `CancelIoEx(handle, NULL)` cancels
+     all I/O on the handle (safe only because ≤1 op is in flight per conn — assert
+     it); `TransmitFile`'s ~2GB per-call cap needs chunking for very large files.
 
 ## 10. Stop conditions (report instead of continuing)
 
@@ -851,3 +879,39 @@ no-op paths, and the errno→KlError mapping incl. errno-preservation.
 **Not done (Phase 4+):** public `KlConfig.sockets` selection API + custom-provider
 example; finer public error codes; server hot-path adoption; connect/bind ops
 already exist but the server still passes NULL.
+
+## Appendix G — Completion-backend gap analysis (2026-07-30)
+
+Grounded review of the three completion backends after the 8f io_uring-default
+migration. Verdict: the **server** stream + datagram op surface is **complete and
+symmetric** — no stubs; every backend implements the full `completion.h` contract.
+Remaining work is client-side, UDP parity, and throughput. Recorded in §9.
+
+**Op-surface coverage (all present, no stubs):**
+
+| Op | `event_iouring.c` | `event_iocp.c` | `event_pollcomp.c` |
+|---|---|---|---|
+| `kl_comp_post_recv` / `_send` | `prep_recv`/`prep_send` (+ registered send-buf pool, `WRITE_FIXED`) | `WSARecv` / `WSASend` | `poll()` facade |
+| `kl_comp_post_accept` | `prep_accept` | `AcceptEx` | ✅ |
+| `kl_comp_post_sendfile` (zero-copy) | `splice` file→pipe→socket (`pread`+SEND fallback) | `TransmitFile` | ✅ |
+| `kl_comp_post_udp_recv` / `_send` | `prep_recvmsg` / `prep_sendmsg` | `WSARecvFrom` / `WSASendTo` | ✅ |
+| `kl_comp_cancel` | `ASYNC_CANCEL` + `aborted` sentinel | `CancelIoEx` | ✅ |
+| `kl_comp_drain` | `submit_and_wait_timeout`, CQE reap | `GetQueuedCompletionStatusEx` | `poll()` |
+| `KL_COMP_WATCHER` relay (readiness FD on a completion loop) | single-shot `POLL_ADD` | loopback wakeup socket | `poll()` set |
+
+**Gaps (priority order — full text in §9):**
+
+1. **Native async connect + client-over-completion** (functional, highest leverage).
+   No native connect op / `KL_COMP_CONNECT`; the whole client stack is
+   readiness/relay-only over a completion loop → the ~14 default-provider suites stay
+   ungated over completion. Matters most on Windows/IOCP (no clean readiness connect).
+2. **UDP pktinfo / batching / GSO-GRO / TOS parity on completion** (functional; blocks
+   QUIC/HTTP-3). Completion backends wire no `cmsg`.
+3. **io_uring** multishot accept/recv + provided buffer rings + `register_files`
+   (perf, kernel-gated).
+4. **IOCP `AcceptEx`** outstanding-pool depth (perf; burst accept-drop).
+5. **IOCP polish:** drain error-vs-timeout, `CancelIoEx` whole-handle assumption,
+   `TransmitFile` ~2GB chunking (robustness).
+
+None are correctness bugs in the server fast path; (1) and (2) are the functional
+items, (2) gates the HTTP-3 roadmap.

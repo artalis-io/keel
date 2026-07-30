@@ -1,0 +1,220 @@
+# KEEL Networking Architecture Axis Audit
+
+## First pass — event / socket / protocol orthogonality (2026-07-30)
+
+**Verdict: architecturally sound.** The event axis (readiness + completion), the socket/
+platform axis, and the protocol layer are genuinely orthogonal. The mechanical litmus tests
+pass, both event models are represented honestly, and every supported backend combination is
+CI-tested (not merely present). No critical/high findings. The two real defects that a
+lifetime/semantics audit would surface — an io_uring watch leak and a completion graceful-drain
+hang — were already found + fixed earlier the same day (PRs #111, #113); they are recorded here
+as resolved. Remaining items are test-coverage gaps (low) and one informational API note.
+
+**Method:** repo map + mechanical grep litmus (protocol TUs vs platform headers/event symbols;
+backend vs protocol symbols; public-header leak scan; Winsock-parity scan) + end-to-end path
+traces over a readiness backend and a completion backend + review of ownership/lifetime,
+partial-I/O, backpressure, cancellation, error-normalization, and CI backend coverage. Drew on
+the just-completed 8d–8f completion migration + `/c-audit` fifth pass.
+
+---
+
+## 1. Current architecture map
+
+**Event axis** (`BACKEND=` selects one at build time):
+- Interface: `include/keel/event.h` (readiness: `kl_event_init/add/mod/del/wait/close` over
+  `KlEventLoop` + `KlEvent{void *udata; KlEventMask ready;}`). Capability surface (internal):
+  `src/event_caps.h` (`KL_EVENT_CAP_READINESS | _NATIVE_FD | _COMPLETION`, `kl_event_caps`,
+  `kl_caps_compatible`, `kl_event_ctx_sockets_compatible`).
+- Completion axis (peer to readiness): `src/completion.h` (abstract `KlCompletionEvent{target,
+  kind, bytes, ok, accepted_fd, buf, peer}`, `kl_comp_post_recv/send/accept/sendfile/udp_*`,
+  `kl_comp_drain`) + `src/completion_driver.c` (the platform-independent connection driver +
+  `kl_io_engine_run_completion`) + `src/io_engine.h` (run-loop dispatch seam).
+- Readiness backends: `event_epoll.c`, `event_kqueue.c`, `event_wsapoll.c`, `event_poll.c`.
+- Completion backends: `event_iouring.c` (Linux, SQE/CQE), `event_iocp.c` (Windows), and
+  `event_pollcomp.c` (portable `poll()` facade — the CI/ASan test double). Each implements
+  `kl_event_caps` + `kl_event_native_provider` + the `completion.h` post/drain contract.
+
+**Socket axis:** `src/socket.h` — `KlSocketProvider {const KlSocketOps *ops; void *context;
+unsigned capabilities;}` (`KL_SOCK_CAP_NATIVE_FD | _OVERLAPPED`). Providers: `socket_posix.c`,
+`socket_winsock.c`; overlapped providers (`kl_socket_provider_iouring/iocp/pollcomp`) live in
+their event TUs. Native handle: `KlSocketHandle = intptr_t` (`include/keel/handle.h`),
+`KL_INVALID_SOCKET = (KlSocketHandle)-1`, tested via `kl_handle_valid()` (never `< 0`). Selected
+on `KlEventCtx.sockets` + public `KlConfig.sockets` / `KlClientConfig.sockets`. Error taxonomy:
+`kl_sock_errno_to_error` (+ `kl_wsa_set_errno` on the Winsock seam).
+
+**Protocol layer:** `connection.c` + `conn_internal.h` model-blind core (`kl_conn_dispatch_request`,
+`kl_conn_ingest_body`, `kl_conn_send_complete`, `kl_conn_on_readable`), `h2.c`, `websocket.c`,
+`response.c`, body readers, `chunked.c`, `cors.c`, `sse.c`, client transports (`client.c`,
+`h2_client.c`, `websocket_client.c`), `KlTls` vtable. All server I/O flows through
+`conn_read`/`conn_write` (`internal.h`) which branch TLS-or-plain and call the socket seam.
+
+**How they connect:** the server run loop (`kl_server_run`) detects the axis once via
+`kl_event_caps` → readiness branch (`kl_event_wait` + `kl_event_dispatch`) or completion branch
+(`kl_io_engine_run_completion` → `kl_comp_run`). Both drive the *same* model-blind protocol core.
+`kl_server_init` negotiates the loop against the provider (`kl_event_ctx_sockets_compatible`) and,
+since 8f-5a, auto-adopts the backend's overlapped provider (`kl_event_native_provider`) when a
+completion loop is paired with the default provider — so protocols/consumers never name the axis.
+
+---
+
+## 2. Execution-path traces
+
+**Readiness receive (epoll/kqueue):** `kl_server_run` → `kl_event_wait` reports `KL_EVENT_READ`
+→ `kl_event_dispatch` (untagged udata = conn) → `kl_conn_on_readable` → `conn_read` (`tls->read`
+or `kl_sockdef_recv`) → `kl_conn_ingest_body`/`kl_conn_dispatch_request` → handler → response →
+`kl_event_mod` re-arms interest / keep-alive. EAGAIN → return, wait again.
+
+**Completion receive (io_uring/pollcomp):** driver posts `kl_comp_post_recv` (io_uring:
+`io_uring_prep_recv` into `read_buf` slice with the op as `user_data`; TLS: into a cipher buffer)
+→ `kl_comp_drain` (`io_uring_submit_and_wait_timeout`, reap CQE, skip the `LIBURING_UDATA_TIMEOUT`
++ cancel sentinels) → `iou_complete` maps `cqe->res` → `KL_COMP_READ{target=conn, bytes, ok}` →
+`kl_comp_run` → `comp_on_read` → (TLS: `feed_input` then `comp_tls_drive`) → the *same*
+`kl_conn_dispatch_request`/`ingest_body` core → `kl_comp_post_recv` (next) or pause. No synthetic
+readiness; bytes are real kernel-delivered data.
+
+**Accept:** readiness — `kl_event_wait` on the listen fd → `accept` via the seam →
+`kl_conn_acquire`. Completion — `kl_comp_post_accept` (`io_uring_prep_accept` / `AcceptEx`) →
+CQE → `KL_COMP_ACCEPT{accepted_fd, peer}` → `comp_on_accept` → `kl_conn_acquire` +
+`kl_comp_post_recv` + `kl_comp_post_accept` (refill; single accept outstanding).
+
+**Send + backpressure:** readiness — `kl_response_send`/`try_writev` with `send_offset` for
+partial writes; on EAGAIN the remainder buffers in `KlDrain` (bounded, `on_drain` callback);
+listen paused (`listen_paused`) when the pool is full. Completion — `kl_comp_post_send` copies the
+iovec into an owned buffer (or a registered pool buffer, io_uring 8f-2); a short `cqe->res` re-preps
+the tail (`iou_prep_send_tail`) so only a fully-completed send surfaces a `KL_COMP_WRITE`; UDP send
+queue caps outstanding overlapped bytes. Equivalent Keel-level semantics, different mechanism.
+
+**Close with outstanding work:** idle sweep `kl_server_sweep_conn_timeouts` → `kl_comp_cancel`
+(io_uring `prep_cancel` by `user_data` + `aborted` flag) → the op completes `-ECANCELED`/error →
+`comp_close` releases the conn through its normal completion (invariant: a conn is released only
+from a completion — no dangling op, no double release). A removed readiness watch is kept LINKED in
+`st->watches` until its poll-cancel CQE frees it, or `kl_event_close` frees it at shutdown
+(the #111 fix — otherwise it leaked). Graceful drain runs in *both* run-loop branches via
+`kl_server_drain_progress` (the #113 fix — the completion branch previously never exited drain).
+
+---
+
+## 3. Findings
+
+| # | Sev | Files/symbols | Principle | Assessment | Smallest fix |
+|---|-----|---------------|-----------|------------|--------------|
+| F1 | **Informational** | `include/keel/event.h` `KlEventLoop.fd` (public `int`, "epoll_fd or kqueue_fd, -1 for io_uring") | G3 (no event-model leak) | Not a real leak: `KlEventLoop` is the loop object, not consumed by protocols; the field is documented backend-internal and frozen (PAL Appendix A). No protocol reads it. A future non-fd backend (lwIP raw) would want a portable handle here. | None now; revisit at Phase 9 (lwIP raw) with a `KlSocketHandle`-style widening if needed. |
+| F2 | **Low** | `IOURING_TEST_SUITES` (Makefile) vs the ~14 default-provider suites (`client`, `client_stream`, `redirect`, `peer_*`, `tls_integration`, `udp*`, `unix_socket`, `dns_resolver`, `request`, `cross_module`) | Decision std: combos *tested*, not assumed | Test-coverage gap, not an architecture defect. These init over completion (5a) but have per-suite behavioural gaps; the completion backend is covered by 36 unit suites + full smokes + benchmark. | Incremental per-suite triage (deferred, documented in `phase8f5` §3). |
+| F3 | **Low** | Windows + IOCP + **real mbedTLS** TLS runtime (BYO, out of CI) | Decision std: tested | The IOCP TLS *code path* is exercised via the identity mock-TLS (`smoke-iocp-tls`); real mbedTLS-over-IOCP is not CI-gated (mbedTLS is BYO everywhere). Consistent with the mbedTLS policy, but the combo's production-readiness is asserted, not proven. | A local/self-hosted `KEEL_TLS=mbedtls` Windows-IOCP smoke, or document the gap explicitly (already noted in `phase6_winsock_design.md`). |
+| F4 | **Informational** | `tests/test_async` over completion (manual `KlConn` with NULL `ctx`) | G6 (lifetime) / testing | Crashes over completion because the test hand-builds a conn without `ctx` and drives the resume path — a test-harness artifact (would equally hit pollcomp/IOCP), not a backend bug. | A completion-aware async test fixture (or exclude, as now). |
+| R1 | **Resolved (this session)** | `event_iouring.c` `kl_event_del` | G6 (lifetime) | A removed watch with an in-flight `POLL_ADD` was unlinked + its free deferred to a CQE dropped at `io_uring_queue_exit` → 48 B leak/server. Fixed (#111): keep linked, free in CQE or `kl_event_close`. LSan-clean. | Done. |
+| R2 | **Resolved (this session)** | `server.c` completion run-loop branch | G2/G7 (semantics) | Graceful drain (`draining` → close-idle/deadline → stop) ran only in the readiness path, so a completion-loop server with `drain_timeout_ms` never exited drain → deadlock. Fixed (#113): shared `kl_server_drain_progress` in both branches. | Done. |
+
+**Clean (verified, no finding):**
+- **G1** — event backends reference zero protocol symbols; socket providers reference zero event
+  engines/protocols (only a descriptive comment). No `#ifdef` merges the two axes (Makefile
+  selects `EVENT_SRC` and `SOCKET_SRC` independently; POSIX socket TU builds under every POSIX
+  event backend).
+- **G4** — protocol TUs import **no** platform net/event headers, make **no** direct
+  epoll/kqueue/io_uring/WSA/OVERLAPPED calls, and do **no** raw socket syscalls (all via
+  `conn_read`/`conn_write` + the seam). Mechanically grep-clean.
+- **G2** — completion delivers real kernel bytes (never synthetic readiness); readiness handles
+  EAGAIN and never claims completion on mere readability. The event.h `kl_event_wait` on a
+  completion loop is a documented no-op (the loop uses `kl_comp_run`).
+- **G3** — no event-model mechanics in `include/keel/` consumable types; `KL_EVENT_CAP_COMPLETION`
+  / `KL_SOCK_CAP_OVERLAPPED` are internal. Readiness/completion are explicit *internal* axis
+  concepts; protocols consume the stable `KlConn`/`conn_read`/`conn_write` contract.
+- **G5** — `KlSocketHandle = intptr_t`, `KL_INVALID_SOCKET`, `kl_handle_valid()` (never `<0`);
+  `closesocket`/`WSAGetLastError` are confined to `event_iocp.c` + the `*_win` TUs; the seam has
+  real `writev`/`sendfile` ops (POSIX + `WSASend`/`TransmitFile`). Winsock is first-class.
+- **G6/G7** — single in-flight op per conn (driver invariant); partial send re-prep in every
+  backend; sentinels handled; release-only-from-completion. (R1/R2 were the exceptions, now fixed.)
+- **G8** — `KlDrain` (bounded write buffer + `on_drain`), `listen_paused` accept gating, capped
+  UDP send queue, growable-but-capped read buffer (`max_header_size`) — model-independent.
+- **G9** — `kl_sock_errno_to_error` maps to stable `KlError`; the Winsock seam translates
+  `WSAGetLastError` → errno first. Equivalent errors across axes.
+- **G10** — `kl_comp_cancel` (native `ASYNC_CANCEL` + `aborted` sentinel) vs readiness
+  registration teardown; idle/read timeouts in both branches; release only from a terminal
+  completion.
+- **G11** — single-threaded event loop per worker (Node/Redis/Nginx model); cross-thread work via
+  `KlThreadPool` + a `KlPlatWakeup` self-pipe relayed as `KL_COMP_WATCHER`/watcher; `kl_server_stop`
+  wakes the loop from any thread/signal (async-signal-safe write).
+- **G12** — registration vs submission preserved: readiness `kl_event_add` = persistent interest;
+  completion `kl_comp_post_*` = one op with its own buffer/`user_data`; the `KL_COMP_WATCHER` relay
+  bridges a readiness watch onto a completion loop without conflating the two.
+- **G13** — `BACKEND=` selection; `kl_event_caps` observable; `io_uring_queue_init` failure → init
+  `-1` (no silent bad combo); the negotiation rejects incompatible loop×provider pairings.
+
+---
+
+## 4. Compatibility matrix
+
+| Combination | Implemented | Buildable | Tested (CI) | Production-ready |
+|---|---|---|---|---|
+| Linux sockets + epoll | ✅ | ✅ | ✅ full suite + smoke | ✅ (default Linux) |
+| Linux sockets + poll (fallback) | ✅ | ✅ | ✅ full suite | ✅ |
+| Linux sockets + io_uring (completion) | ✅ | ✅ | ✅ 36-suite gate + smokes + **LSan** | ✅ (default io_uring path, 8f-5) |
+| Darwin sockets + kqueue | ✅ | ✅ | ✅ full suite (macOS CI) | ✅ (default macOS) |
+| Winsock + WSAPoll | ✅ | ✅ | ✅ 47-suite subset (Windows CI) | ✅ |
+| Winsock + IOCP (completion) | ✅ | ✅ | ✅ lifecycle + smokes (plaintext, TLS-via-mock) | ⚠️ prod-ready plaintext; real-mbedTLS TLS is BYO/out-of-CI (F3) |
+| pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + tls/ws/async + ASan/LSan | n/a — **test double**, not a production backend |
+
+Not built (by design / future): Winsock+io_uring (N/A), IOCP+non-Winsock (N/A), lwIP-raw
+(Phase 9), UEFI (Phase 10).
+
+---
+
+## 5. Proposed internal contract (from the existing design)
+
+- **Socket ownership** — a `KlConn`/`KlUdp` owns its `KlSocketHandle` for its lifetime; the
+  `KlSocketProvider` is *borrowed* (must outlive its transports; owner calls
+  `kl_socket_provider_destroy` after). Close routes through `kl_sock_close` (→ `closesocket` on
+  Winsock).
+- **Event-loop affinity** — one `KlEventCtx` per thread; a socket/op/watcher belongs to the loop
+  it was registered/posted on. Cross-thread work enters via `KlThreadPool` + `KlPlatWakeup`; no
+  op is submitted or completed off-loop.
+- **Readiness notification** — level/edge interest via `kl_event_add/mod`; the consumer performs
+  the op and handles EAGAIN; re-arm via `kl_watcher_rearm`/`kl_event_mod`.
+- **Completion delivery** — one `kl_comp_post_*` = one op owning its buffer + `user_data`;
+  `kl_comp_drain` surfaces exactly one `KlCompletionEvent` per finished op (partial sends re-prep
+  internally; only whole-op completion surfaces).
+- **Operation lifetime** — a conn holds ≤1 in-flight op; the op is freed when its completion is
+  reaped; a conn is released **only** from a completion (cancel makes the op complete with error).
+- **Cancellation** — `kl_comp_cancel` (native `ASYNC_CANCEL` / `poll_remove` + an `aborted`/
+  `removed` sentinel); exactly one terminal result per op; late/duplicate CQEs are discarded via
+  the sentinel; a removed watch is freed by its cancel CQE or by `kl_event_close`.
+- **Timeout races** — idle/read timeouts cancel the pending op; the cancellation completion is the
+  single terminal event (a datum arriving first just completes normally).
+- **Error normalization** — platform error → `kl_sock_errno_to_error` → stable `KlError`, native
+  detail retained; equivalent across axes.
+- **Close semantics** — `comp_close`/`kl_conn_release` after the terminal completion; no I/O after
+  close; `kl_event_close` tears down the loop + frees any watch whose cancel CQE never arrived.
+- **Backpressure** — bounded write buffer (`KlDrain`), accept gating (`listen_paused`), capped
+  read/send buffers; identical Keel-level limits regardless of axis.
+
+---
+
+## 6. Recommended incremental roadmap
+
+- **Immediate correctness:** none open (R1/R2 fixed this session; nothing else surfaced).
+- **Test coverage:** finish the F2 per-suite triage so the default-provider integration suites run
+  over completion; add a completion-aware async fixture (F4); consider a self-hosted mbedTLS
+  Windows-IOCP TLS smoke (F3).
+- **Small architectural cleanup:** none warranted — the axes are clean; do not refactor.
+- **Deferred:** Phase 9 (lwIP raw — a third event model; would revisit F1's `KlEventLoop.fd` as a
+  portable handle), Phase 10 (UEFI). QUIC/HTTP-3 rides the existing UDP + completion groundwork.
+
+---
+
+## 7. Changes made
+
+**None.** This pass is report-only — the decision standard is met and no clear, low-risk fix was
+outstanding (the two real defects were already fixed under PRs #111 and #113 the same day). The
+findings are a test-coverage gap (F2/F3), a test-harness artifact (F4), and one informational
+API note (F1); none justify a code change under the "narrow, low-risk, design-clear" bar.
+
+---
+
+## Decision standard — met
+
+Socket + event providers are separately replaceable ✅ · readiness + completion keep native
+semantics ✅ · higher layers get consistent Keel-level behavior ✅ · protocols contain no
+platform event/socket logic ✅ (grep-clean) · op/buffer/conn lifetimes safe ✅ (LSan-clean after
+#111) · cancellation/close/partial-I/O/errors/backpressure explicitly defined ✅ · supported
+combos tested, not assumed ✅ (matrix §4). **KEEL's networking architecture is orthogonal and
+sound.**
