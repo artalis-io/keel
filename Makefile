@@ -513,6 +513,23 @@ test-iouringcomp: $(IOURINGCOMP_TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME iouringcomp TESTS FAILED"; exit 1; fi
 
+# 8f-5b re-survey (one-shot): with the 5a provider auto-wire in place, re-run EVERY unit
+# suite over the completion backend to see which previously-excluded default-provider suites
+# now pass. Exit 0 (data gathering); results expand IOURINGCOMP_TEST_SUITES. TEMPORARY.
+iouringcomp-survey: $(LIB) $(TEST_COMPAT_OBJ)
+	@pass=; fail=; tmo=; skip=; \
+	for f in $(wildcard tests/test_*.c); do \
+	  b=$${f%.c}; n=$$(basename $$b); \
+	  case $$n in test_file_io_iouring|test_iocp_engine) skip="$$skip $$n"; continue;; esac; \
+	  if ! $(CC) $(CFLAGS) -Wno-pedantic -Wno-sign-compare -Wno-unused-result -Ivendor \
+	        -o $$b $$f $(TEST_COMPAT_OBJ) -L. -lkeel $(LDFLAGS) >/dev/null 2>&1; then \
+	    fail="$$fail $$n(build)"; continue; fi; \
+	  if timeout 30 ./$$b >/dev/null 2>&1; then pass="$$pass $$n"; \
+	  else rc=$$?; if [ $$rc -eq 124 ]; then tmo="$$tmo $$n"; else fail="$$fail $$n(rc=$$rc)"; fi; fi; \
+	done; \
+	echo "=== iouringcomp re-survey (with 5a auto-wire) ==="; \
+	echo; echo "PASS:$$pass"; echo; echo "FAIL:$$fail"; echo; echo "TIMEOUT:$$tmo"; echo; echo "SKIP:$$skip"
+
 # Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
 # (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
 SMOKE_UDP_BIN = tests/smoke_udp$(EXE)
