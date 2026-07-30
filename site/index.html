@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Keel — a portable async networking runtime for C</title>
-  <meta name="description" content="Keel is a portable, dependency-free C11 networking runtime: an async I/O core (epoll, kqueue, WSAPoll, io_uring, IOCP), TCP and UDP transports, and pluggable protocol stacks — HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.">
+  <title>Keel: a portable async networking runtime for C</title>
+  <meta name="description" content="Keel is a portable, dependency-free C11 networking runtime: an async I/O core (epoll, kqueue, WSAPoll, io_uring, IOCP), TCP and UDP transports, and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.">
   <meta name="theme-color" content="#0a0a0a">
 
-  <meta property="og:title" content="Keel — a portable async networking runtime for C">
+  <meta property="og:title" content="Keel: a portable async networking runtime for C">
   <meta property="og:description" content="An async I/O core, TCP/UDP transports, and a growing family of pluggable protocol stacks. Readiness and completion (epoll/kqueue/WSAPoll + io_uring/IOCP). Portable across Linux, macOS, Windows, and Cosmopolitan. No forced dependencies.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
@@ -27,7 +27,7 @@
     "applicationCategory": "DeveloperApplication",
     "applicationSubCategory": "NetworkingRuntime",
     "operatingSystem": "Linux, macOS, Windows, BSD, Cosmopolitan (APE)",
-    "description": "A portable, dependency-free C11 networking runtime: an async I/O core over readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP) engines behind a platform-neutral socket seam (POSIX/Winsock), with TCP and UDP transports and pluggable protocol stacks — HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.",
+    "description": "A portable, dependency-free C11 networking runtime: an async I/O core over readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP) engines behind a platform-neutral socket seam (POSIX/Winsock), with TCP and UDP transports and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.",
     "url": "https://github.com/artalis-io/keel",
     "codeRepository": "https://github.com/artalis-io/keel",
     "programmingLanguage": ["C"],
@@ -194,7 +194,7 @@
           </h1>
 
           <p class="mt-6 text-base md:text-lg text-mute-400 max-w-xl leading-relaxed">
-            Keel is a portable, dependency-free C11 networking runtime — an async
+            Keel is a portable, dependency-free C11 networking runtime: an async
             I/O core (readiness <em>and</em> completion), TCP and UDP transports,
             and a growing family of pluggable protocol stacks. HTTP is the
             flagship, not the definition.
@@ -267,7 +267,7 @@
             The HTTP server is one protocol stack riding the runtime. The same
             event loop, socket seam, and transports carry the UDP datagram
             server, the WebSocket and SSE stacks, and Keel's own from-scratch
-            async DNS resolver — swap the event backend without changing a line
+            async DNS resolver. Swap the event backend without changing a line
             of protocol code.
           </p>
         </div>
@@ -287,7 +287,7 @@
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
             Keel builds as a static C library. Pick a <strong>readiness</strong>
             engine (epoll, kqueue, WSAPoll, poll) or a <strong>completion</strong>
-            engine (io_uring, IOCP) at build time — the protocol stacks above
+            engine (io_uring, IOCP) at build time; the protocol stacks above
             never change.
           </p>
         </div>
@@ -323,7 +323,7 @@ $ make examples</pre>
         <div>
           <div class="stat-num">339K</div>
           <div class="stat-label">req/s peak</div>
-          <div class="stat-foot">Apple M1 Max, repo benchmark suite &mdash; sub-millisecond p99.</div>
+          <div class="stat-foot">Apple M1 Max, repo benchmark suite. Sub-millisecond p99.</div>
         </div>
         <div>
           <div class="stat-num">863</div>
@@ -363,7 +363,7 @@ $ make examples</pre>
           </h2>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
             Keel is not an HTTP library with an event loop bolted on. It is an
-            I/O runtime with protocols on top — and the axes stay orthogonal:
+            I/O runtime with protocols on top, and the axes stay orthogonal:
             the event model and the socket implementation are independent, and
             every protocol sits above both without knowing which is in use.
           </p>
@@ -383,7 +383,7 @@ $ make examples</pre>
             </header>
             <div class="p-5 text-sm text-mute-400 leading-relaxed">
               HTTP/1.1, HTTP/2, WebSocket (RFC 6455), Server-Sent Events, and a
-              built-in async DNS resolver — dual A+AAAA, EDNS0, DNS cookies, TCP
+              built-in async DNS resolver: dual A+AAAA, EDNS0, DNS cookies, TCP
               fallback, <code class="text-paper-200">/etc/hosts</code>. Sync and
               async HTTP clients, connection pooling, redirects, compression, and
               PROXY-protocol recovery ride the same core.
@@ -410,9 +410,9 @@ $ make examples</pre>
               <span class="layer-tag">a libuv-class foundation</span>
             </header>
             <div class="p-5 text-sm text-mute-400 leading-relaxed">
-              An orthogonal event core — <strong>readiness</strong>
+              An orthogonal event core: <strong>readiness</strong>
               (epoll/kqueue/WSAPoll/poll) and <strong>completion</strong>
-              (io_uring/IOCP) — over a platform-neutral socket seam
+              (io_uring/IOCP), over a platform-neutral socket seam
               (POSIX/Winsock). Single-threaded per worker, with timers, async
               connection suspension, thread-pool offload, backpressure, and
               zero-copy <code class="text-paper-200">splice</code> file sends.
@@ -499,7 +499,7 @@ $ make examples</pre>
           </thead>
           <tbody>
             <tr>
-              <td>Async I/O loop &mdash; readiness <em>and</em> completion</td>
+              <td>Async I/O loop: readiness <em>and</em> completion</td>
               <td class="cmp-keel-col cmp-yes">yes</td>
               <td class="cmp-yes">yes</td>
               <td class="cmp-part">via libuv</td>
@@ -552,7 +552,7 @@ $ make examples</pre>
       </div>
       <p class="mt-4 text-[11px] text-mute-500 leading-relaxed">
         A rough map, not a scoreboard: each of these projects is excellent at its
-        job. The point is architectural — Keel spans the I/O core (libuv), the
+        job. The point is architectural: Keel spans the I/O core (libuv), the
         HTTP stack (h2o), and DNS (c-ares) behind one seam, so an alternate event
         engine or socket stack drops in below <em>every</em> layer at once.
       </p>
@@ -649,7 +649,7 @@ $ make examples</pre>
                 <tr>
                   <td>Socket provider</td>
                   <td class="cmp-part">pluggable</td>
-                  <td>Capability-gated vtable — Winsock built in, lwIP/AF_XDP-ready — selectable per server or client.</td>
+                  <td>Capability-gated vtable (Winsock built in, lwIP/AF_XDP-ready), selectable per server or client.</td>
                 </tr>
               </tbody>
             </table>
@@ -668,7 +668,7 @@ $ make examples</pre>
             Fast because there's nothing in the way.
           </h2>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            No GC pauses, no async runtime, no goroutine scheduler — just
+            No GC pauses, no async runtime, no goroutine scheduler. Just
             <code class="text-paper-200">accept</code> &rarr;
             <code class="text-paper-200">read</code> &rarr;
             <code class="text-paper-200">write</code> with zero-copy pointers into
@@ -678,7 +678,7 @@ $ make examples</pre>
           </p>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
             On the completion axis, the io_uring backend runs the same
-            platform-independent driver as IOCP — measured 2&ndash;2.3&times;
+            platform-independent driver as IOCP, measured 2 to 2.3&times;
             faster than the retired readiness-io_uring adapter. epoll remains the
             safe default on Linux; io_uring is one build flag away.
           </p>
@@ -711,9 +711,9 @@ $ make examples</pre>
 <pre>$ make bench
 
 <span class="tk-com"># GET /hello        peak throughput, sub-ms p99</span>
-<span class="tk-com"># GET /users/:id    route params — within ~2% of baseline</span>
-<span class="tk-com"># GET /mw/hello     middleware chain — within ~2%</span>
-<span class="tk-com"># POST /echo        body reading  — within ~2%</span></pre>
+<span class="tk-com"># GET /users/:id    route params: within ~2% of baseline</span>
+<span class="tk-com"># GET /mw/hello     middleware chain: within ~2%</span>
+<span class="tk-com"># POST /echo        body reading: within ~2%</span></pre>
           </div>
         </div>
       </div>
@@ -730,8 +730,8 @@ $ make examples</pre>
           </h2>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
             Because protocols ride the runtime and the axes stay orthogonal, the
-            next steps are additive — a new stack on the existing core, or a new
-            provider below every stack — not a rewrite.
+            next steps are additive: a new stack on the existing core, or a new
+            provider below every stack, never a rewrite.
           </p>
         </div>
 
@@ -743,7 +743,7 @@ $ make examples</pre>
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
               A protocol stack over UDP + TLS. The async UDP datagram layer, the
-              completion backends, and the TLS vtable already exist — HTTP/3 is
+              completion backends, and the TLS vtable already exist, so HTTP/3 is
               "another stack," exactly like HTTP/2 was. Prerequisite:
               UDP pktinfo/GSO/GRO parity on the completion path.
             </p>
@@ -766,7 +766,7 @@ $ make examples</pre>
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
               lwIP, AF_XDP, DPDK, or UEFI SNP providers slot in <em>below</em>
-              every protocol stack via the socket seam — none of them know. An
+              every protocol stack via the socket seam, and none of them know. An
               architectural capability HTTP libraries simply don't have.
             </p>
           </div>
@@ -799,7 +799,7 @@ $ make examples</pre>
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
               Readiness (epoll/kqueue/WSAPoll/poll) and completion
-              (io_uring/IOCP) expose the same small contract to higher layers —
+              (io_uring/IOCP) expose the same small contract to higher layers;
               the same generic driver runs across every completion backend.
             </p>
           </div>
@@ -873,7 +873,7 @@ $ make examples</pre>
               <p class="mt-1 text-sm text-mute-400 leading-relaxed">
                 Eight libFuzzer targets cover the untrusted-input attack surface:
                 the HTTP parser, response parser, multipart, WebSocket, DNS
-                responses, PROXY protocol, and URL parsing — with ASan/UBSan.
+                responses, PROXY protocol, and URL parsing, all under ASan/UBSan.
               </p>
             </div>
           </div>
@@ -970,7 +970,7 @@ $ make fuzz       <span class="tk-com"># 8 parser and protocol fuzz targets</spa
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
         Page last updated <time datetime="2026-07">July&nbsp;2026</time>.
-        A portable async networking runtime for C — I/O core, TCP/UDP transports,
+        A portable async networking runtime for C: I/O core, TCP/UDP transports,
         and pluggable protocol stacks.
       </p>
     </div>
