@@ -86,15 +86,14 @@ else
 
   # Platform event loop backend
   ifeq ($(UNAME_S),Linux)
-    ifeq ($(BACKEND),iouring)
-      EVENT_SRC = src/event_iouring.c
-      FILE_IO_SRC = src/file_io_iouring.c
-      LDFLAGS += -luring
-    else ifeq ($(BACKEND),iouringcomp)
-      # Completion-native io_uring backend (PAL 8f): io_uring driving the completion axis
-      # (completion.h) + driver (completion_driver.c) via SQE/CQE — the third completion
-      # backend after IOCP + pollcomp, and the first production Linux one. Distinct from
-      # BACKEND=iouring, which adapts the same engine to the readiness interface.
+    ifneq (,$(filter iouring iouringcomp,$(BACKEND)))
+      # io_uring is completion-native (PAL 8f-5d): BACKEND=iouring builds the completion
+      # backend (event_iouring_comp.c driving completion.h via SQE/CQE + completion_driver.c);
+      # iouringcomp is a retained alias for one release. The readiness-adapted event_iouring.c
+      # + file_io_iouring.c were retired — benchmarks put the readiness POLL_ADD adapter
+      # ~2–2.3× slower than completion on both x86 and ARM (docs/phase8f5_iouring_default_
+      # migration_design.md). File responses ride zero-copy splice (8f-2), so the io_uring
+      # file backend is no longer needed; FILE_IO_SRC is the POSIX file_io.c.
       EVENT_SRC = src/event_iouring_comp.c
       FILE_IO_SRC = src/file_io.c
       IO_ENGINE_SRC =
@@ -279,14 +278,9 @@ endif
 examples: $(EXAMPLES)
 
 # Tests — relax pedantic warnings triggered by utest.h vendor macros
-# test_file_io_iouring.c requires io_uring; test_iocp_engine.c requires the IOCP
-# backend (asserts COMPLETION caps + kl_socket_provider_iocp) — exclude by default,
-# add back only for their backend.
-TEST_SRC = $(filter-out tests/test_file_io_iouring.c tests/test_iocp_engine.c, \
-                        $(wildcard tests/test_*.c))
-ifeq ($(BACKEND),iouring)
-  TEST_SRC += tests/test_file_io_iouring.c
-endif
+# test_iocp_engine.c requires the IOCP backend (asserts COMPLETION caps +
+# kl_socket_provider_iocp) — exclude by default, add back only for that backend.
+TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
 endif
@@ -321,7 +315,7 @@ test: $(TEST_BIN)
 #
 # 8 not listed. 6 are genuinely POSIX/Linux-only: udp_batching (recvmmsg),
 # udp_offload (UDP GSO), udp_tos (Windows restricts IP_TOS/DSCP setsockopt),
-# unix_socket (SO_PEERCRED), file_io + file_io_iouring (io_uring / POSIX file-path
+# unix_socket (SO_PEERCRED), file_io (POSIX file-path
 # assumptions). 2 build clean but have runtime failures needing Windows-native
 # iteration, deferred for now: dns_resolver (mock-UDP-nameserver + hosts/resolv.conf
 # harness) and proxy (CONNECT tunnel timing) — both still covered on Windows by
@@ -501,7 +495,7 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # tls_integration, udp, udp_server, udp_multicast, udp_offload, unix_socket, dns_resolver,
 # request, cross_module) now init over completion (5a) but still have per-suite behavioural
 # gaps to triage — incremental work, not a correctness prerequisite (the smokes cover the
-# full protocol surface). Backend-specific: file_io_iouring (readiness io_uring), iocp_engine.
+# full protocol surface). Backend-specific: iocp_engine.
 IOURINGCOMP_TEST_SUITES = allocator body_reader chunked client_happy_eyeballs client_pool \
                           compress connection cors decompress drain error file_io h2 \
                           h2_client multipart_stream overflow parser proxy proxy_protocol \
@@ -578,7 +572,7 @@ clean:
 	rm -f tests/smoke_tcp tests/smoke_tcp.exe tests/smoke_udp tests/smoke_udp.exe \
 	      tests/smoke_dns tests/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
-	rm -f src/event_epoll.o src/event_kqueue.o src/event_iouring.o src/event_poll.o
+	rm -f src/event_epoll.o src/event_kqueue.o src/event_poll.o
 	# Completion-backend objects are conditional (COMPLETION_SRC/EVENT_SRC only set
 	# under BACKEND=iocp|pollcomp), so they escape $(CORE_OBJ) on a default clean —
 	# remove them unconditionally to prevent a stale cross-toolchain object (e.g. a
@@ -590,11 +584,10 @@ clean:
 	rm -f tests/smoke_iocp_async tests/smoke_iocp_async.exe
 	rm -f tests/smoke_pollcomp_ws tests/smoke_pollcomp_ws.exe
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
-	rm -f src/file_io.o src/file_io_iouring.o
+	rm -f src/file_io.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/custom_socket_provider examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
-	rm -f tests/test_file_io_iouring
 	rm -f $(BENCH_SERVER)
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns fuzz/fuzz_proxy fuzz/fuzz_url fuzz/fuzz_decompress
 	rm -f $(FUZZ_LIB) src/*.fuzz.o parsers/*.fuzz.o vendor/llhttp/*.fuzz.o

@@ -35,7 +35,7 @@ make clean        # remove all build artifacts
 35 orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
-2. **event** — epoll (Linux) / kqueue (macOS) / io_uring / poll (universal POSIX fallback) / WSAPoll (Windows) event loop abstraction
+2. **event** — epoll (Linux) / kqueue (macOS) / io_uring (completion-native, SQE/CQE) / poll (universal POSIX fallback) / WSAPoll (Windows) event loop abstraction
 3. **event_ctx** — Composable event loop context (KlEventCtx: loop + allocator + watcher list)
 4. **request** — Parsed HTTP request struct (header-only, zero alloc)
 5. **parser** — Pluggable request/response parser vtables (ships with llhttp backend)
@@ -63,7 +63,7 @@ make clean        # remove all build artifacts
 27. **compress** — Pluggable response compression vtable: single-shot buffer + streaming chunked, with KlCompressConfig on KlConfig for server-wide use
 28. **decompress** — Pluggable response decompression vtable: single-shot buffer + streaming, with KlDecompressConfig on KlClientConfig for client-side use
 29. **drain** — Backpressure write buffer: buffers unsent data on would-block, flushes on write-readiness, with on_drain callback and max_size cap
-30. **file_io** — Pluggable async file I/O vtable: submit/cancel/tick lifecycle, io_uring backend for true async reads (non-TLS file responses)
+30. **file_io** — Pluggable async file I/O vtable: submit/cancel/tick lifecycle. Its io_uring async-read backend was retired; file responses now ride zero-copy `splice` on the io_uring completion backend (`kl_file_io_create` is a NULL stub)
 31. **resolver_cache** — Caching DNS resolver decorator: wraps any KlResolver, caches successful results with configurable TTL/capacity, transparent to consumers
 32. **proxy_protocol** — PROXY protocol v1/v2 header parser + CIDR trust matching (recover the real client address behind an L4 load balancer; gated by `proxy_trusted_cidrs`)
 33. **udp** — Non-blocking UDP datagram socket over `KlEventCtx`: async per-datagram receive with source + local (dest) address via `IP_PKTINFO`, capped whole-datagram send queue (backpressure), source-pinned sends (`kl_udp_send_to_from`), multicast/broadcast — any-source group join/leave (`kl_udp_multicast_join`/`leave`, interface by index) + `SO_BROADCAST`, `IP_MULTICAST_TTL`/`LOOP`/`IF` config knobs (mDNS/SSDP/discovery) — transparent `recvmmsg`/`sendmmsg` batching (Linux; `mmsg_batch` knob), UDP GSO/GRO segmentation offload (`kl_udp_send_gso`, `recv_gro` with transparent split or `kl_udp_recv_segments` coalesced callback), and ECN/TOS/DSCP marking (`tos` config + `kl_udp_set_tos` + per-packet `kl_udp_send_to_tos`; `recv_tos` + `kl_udp_recv_tos` to read; `KL_TOS()`/DSCP defines) — Linux-only offload with per-datagram/plain fallbacks elsewhere. Foundation for a future async DNS resolver and QUIC/HTTP-3 (see `docs/udp_design.md`, `docs/udp_multicast_design.md`, `docs/udp_batching_design.md`)

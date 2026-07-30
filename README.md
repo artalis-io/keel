@@ -12,7 +12,7 @@ Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll/W
 
 ```bash
 make                    # build libkeel.a (epoll on Linux, kqueue on macOS)
-make BACKEND=iouring    # build with io_uring backend (Linux 5.6+, requires liburing-dev)
+make BACKEND=iouring    # build with completion-native io_uring backend (Linux 5.6+, requires liburing-dev)
 make BACKEND=poll       # build with poll() backend (universal POSIX fallback)
 make CC=cosmocc         # build with Cosmopolitan C (Actually Portable Executable)
 make test               # run unit tests
@@ -226,7 +226,7 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 
 ## Features
 
-- **Five event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (POLL_ADD), poll (universal POSIX fallback), WSAPoll (Windows/Winsock)
+- **Five event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (completion, SQE/CQE), poll (universal POSIX fallback), WSAPoll (Windows/Winsock)
 - **TCP or UNIX socket servers** — same HTTP stack over TCP/IP or `AF_UNIX/SOCK_STREAM`
 - **Pluggable HTTP parser** — ships with llhttp, swap via `KlConfig.parser`
 - **Pluggable TLS** — bring your own BearSSL/LibreSSL/OpenSSL via vtable, zero vendored TLS code
@@ -299,7 +299,7 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 | **compress** | `compress.h` | Pluggable response compression vtable (buffer + streaming) |
 | **decompress** | `decompress.h` | Pluggable response decompression vtable (client-side) |
 | **drain** | `drain.h` | Backpressure write buffer with on_drain callback |
-| **file_io** | `file_io.h` | Pluggable async file I/O vtable (io_uring backend) |
+| **file_io** | `file_io.h` | Pluggable async file I/O vtable |
 | **resolver_cache** | `resolver_cache.h` | Caching DNS resolver decorator with configurable TTL/capacity |
 
 **Deliberate design choices:**
@@ -780,13 +780,13 @@ Route params, middleware, and body reading add no measurable overhead — all wi
 |----------|---------|-------|
 | macOS / BSD | kqueue (edge-triggered) | `make` |
 | Linux | epoll (edge-triggered) | `make` |
-| Linux 5.6+ | io_uring (POLL_ADD) | `make BACKEND=iouring` |
+| Linux 5.6+ | io_uring (completion, SQE/CQE) | `make BACKEND=iouring` |
 | Any POSIX | poll (level-triggered) | `make BACKEND=poll` |
 | Linux (musl/Alpine) | epoll (edge-triggered) | `make` |
 | Cosmopolitan (APE) | poll (auto-selected) | `make CC=cosmocc` |
 | Bare-metal + lwIP | poll (via lwIP sockets) | `make BACKEND=poll` + `-DKL_NO_SIGNAL` |
 
-The io_uring backend uses `IORING_OP_POLL_ADD` for readiness notification — a drop-in replacement for epoll with io_uring's batched submission advantage. Requires `liburing-dev`.
+The io_uring backend is completion-native: it submits SQEs and reaps CQEs (zero-copy `splice` for file responses, registered send buffers), rather than polling for readiness. The earlier `IORING_OP_POLL_ADD` readiness adapter was retired after benchmarks showed it ~2–2.3× slower than the completion backend. Requires `liburing-dev`.
 
 The poll backend is a universal POSIX fallback that works on any platform with `poll(2)`. It enables Cosmopolitan C support (Actually Portable Executables that run on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary). When `CC=cosmocc` is detected, the Makefile automatically selects the poll backend.
 
@@ -794,7 +794,7 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 
 ## Testing
 
-676 tests across 41 test suites, covering every module (683 on io_uring builds):
+676 tests across 40 test suites, covering every module:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -816,7 +816,6 @@ For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — th
 | `test_event` | 8 | Event loop init/close, add/wait, del, multiple FDs, timeout, mod mask |
 | `test_event_ctx` | 7 | Standalone event context init/free, watcher lifecycle, dispatch helpers |
 | `test_file_io` | 14 | Async file I/O vtable: mock submit/cancel/tick, state machine, EAGAIN, TLS fallback |
-| `test_file_io_iouring` | 7 | io_uring integration: real IORING_OP_READ submissions, CQE routing, offset/EOF (io_uring builds only) |
 | `test_h2` | 29 | HTTP/2 sessions, streams, routing, ALPN, goaway, body limits |
 | `test_h2_client` | 18 | Mock session vtable, stream tracking, response free, API validation |
 | `test_integration` | 27 | Full server: hello, POST, keepalive, multipart, chunked, middleware |

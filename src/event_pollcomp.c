@@ -19,8 +19,8 @@
  * builds a pollfd set from the pending ops, polls once, and for each ready op performs
  * the single syscall it represents (accept / recv / send / sendfile / recvfrom /
  * sendto), synthesising a platform-independent KlCompletionEvent. It is the completion
- * facade over readiness — the mirror image of event_iouring.c adapting completion to
- * the readiness interface.
+ * facade over readiness — the mirror image of a readiness backend adapting a completion
+ * source to the readiness interface.
  */
 #include <keel/event.h>
 #include <keel/server.h>

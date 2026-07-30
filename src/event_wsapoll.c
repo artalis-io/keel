@@ -2,7 +2,7 @@
  * event_wsapoll.c — Windows event backend (WSAPoll).
  *
  * An INDEPENDENT backend TU, sibling to event_epoll.c / event_kqueue.c /
- * event_poll.c / event_iouring.c — one is selected by the Makefile per build.
+ * event_poll.c — one is selected by the Makefile per build.
  * There is NO cross-platform #ifdef here or in the POSIX backends: this file is
  * compiled only on Windows (see the Makefile OS=windows branch).
  *
