@@ -16,6 +16,7 @@
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
 #include "server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
+#include "platform.h"     /* KlPlatWakeup — self-pipe so kl_server_stop wakes the run loop */
 
 #define KL_LISTEN_BACKLOG  128
 #define KL_EVENTS_PER_TICK 64
@@ -307,6 +308,30 @@ void kl_server_conn_release(KlServer *s, KlConn *c) {
     }
 }
 
+/* Run-loop wakeup watcher: drains the byte kl_server_stop() wrote. Its only job is to
+ * make the current kl_event_wait / kl_comp_drain return so the loop re-checks `running`
+ * (and the drain deadline) immediately instead of after up to KL_POLL_TIMEOUT_MS. */
+static void kl_server_on_wakeup(KlSocketHandle fd, KlEventMask ready, void *user_data) {
+    (void)ready; (void)user_data;
+    kl_plat_wakeup_drain(fd);
+}
+
+/* Open the stop-wakeup self-pipe and register its read end as a run-loop watcher. Best-
+ * effort: on failure the loop simply falls back to tick-timeout stop latency. Called at the
+ * end of kl_server_init, after the event ctx + provider are wired (so the watcher registers
+ * correctly on both readiness and completion loops). */
+static void kl_server_wakeup_init(KlServer *s) {
+    s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+    KlPlatWakeup w;
+    if (kl_plat_wakeup_open(&w) < 0) return;
+    if (kl_watcher_add(&s->ev, w.rd, KL_EVENT_READ, kl_server_on_wakeup, s) < 0) {
+        kl_plat_wakeup_close(&w);
+        return;
+    }
+    s->stop_wake_rd = w.rd;
+    s->stop_wake_wr = w.wr;
+}
+
 int kl_server_init(KlServer *s, const KlConfig *config) {
     if (!s || !config) {
         if (s) s->last_error = KL_ERR_INVALID_ARG;
@@ -314,6 +339,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     }
     memset(s, 0, sizeof(*s));
     s->listen_fd = KL_INVALID_SOCKET;
+    s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
 
     /* Apply defaults */
     s->config = *config;
@@ -495,6 +521,9 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     s->file_io = kl_file_io_create(&s->ev.loop, alloc);
     for (int i = 0; i < s->pool.capacity; i++)
         s->pool.conns[i].file_io = s->file_io;
+
+    /* Self-pipe wakeup so kl_server_stop() wakes the run loop promptly (both axes). */
+    kl_server_wakeup_init(s);
 
     return 0;
 }
@@ -1004,6 +1033,15 @@ void kl_server_stop(KlServer *s) {
     } else {
         atomic_store(&s->running, 0);
     }
+    /* Wake the run loop so it re-checks running/drain now instead of after the current
+     * wait/drain tick. write() is async-signal-safe + thread-safe, so this is valid both
+     * from the SIGTERM/SIGINT handler and from another thread (the common test pattern:
+     * server on a worker thread, stop from main). Falls back to tick-timeout latency if the
+     * wakeup pair couldn't be opened. */
+    if (kl_handle_valid(s->stop_wake_wr)) {
+        KlPlatWakeup w = { s->stop_wake_rd, s->stop_wake_wr };
+        kl_plat_wakeup_signal(&w);
+    }
 }
 
 void kl_server_stats(const KlServer *s, KlServerStats *out) {
@@ -1038,6 +1076,14 @@ void kl_server_free(KlServer *s) {
         s->file_io = NULL;
     }
     kl_server_close_listener(s);
+    /* Tear down the stop-wakeup: deregister its watcher (needs the live loop) before
+     * closing the fds, then close both ends. */
+    if (kl_handle_valid(s->stop_wake_rd)) {
+        kl_watcher_del(&s->ev, s->stop_wake_rd);
+        KlPlatWakeup w = { s->stop_wake_rd, s->stop_wake_wr };
+        kl_plat_wakeup_close(&w);
+        s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+    }
     kl_event_ctx_free(&s->ev);
     if (s->proxy_cidrs) {
         kl_free(&s->alloc_storage, s->proxy_cidrs,
