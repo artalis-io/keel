@@ -1,8 +1,15 @@
 # Keel Platform Abstraction — Incremental Transformation Plan
 
-Status: **design / roadmap (2026-07-19).** No code changes in this document.
+Status: **design / roadmap (last updated 2026-07-30).** No code changes in this document.
 Scope: a staged plan to let Keel select an **event engine** and a **socket /
-network-stack provider** independently, without a big-bang PAL rewrite. Each
+network-stack provider** independently, without a big-bang PAL rewrite.
+
+**Progress at a glance:** Phases 0–8 done. The completion event axis is complete across
+three interchangeable backends — IOCP (Windows), pollcomp (portable poll facade), and
+io_uring (now the default `BACKEND=iouring`, readiness adapter retired) — over one shared
+`completion_driver.c`, covering TCP/TLS/HTTP-2/WebSocket/UDP/async (Phases 8a–8f; see §3).
+**Remaining: Phase 9 (lwIP raw callback provider — a third event model) and Phase 10 (UEFI
+feasibility), plus a completion-suite per-test triage follow-up.** Each
 phase is a small, tested, reviewable change that leaves Keel buildable, keeps
 public behavior, and opens a clean seam for the next phase.
 
@@ -30,14 +37,20 @@ selected at build time via `BACKEND=` in the Makefile:
 |---|---|---|
 | epoll (Linux default) | `src/event_epoll.c` (1.7 KB) | readiness / level |
 | kqueue (macOS default) | `src/event_kqueue.c` (2.9 KB) | readiness |
-| io_uring (opt-in) | `src/event_iouring.c` (7.9 KB) | completion, **adapted** to the readiness interface (`loop.fd = -1`) |
+| io_uring (opt-in) | `src/event_iouring.c` | **completion-native** (SQE→CQE); flipped from a readiness adapter in Phase 8f-5, readiness TU retired |
 | poll (universal fallback) | `src/event_poll.c` (6.6 KB) | readiness / level |
 
-**Assessment:** this is already a clean, cache-friendly, compile-time-specialized
-abstraction with no per-op dispatch. It is *readiness-shaped*, and io_uring is
-already shoe-horned into it. This is the axis that a future **IOCP** (completion)
-backend will stress — see Phase 7/8. **Do not redesign it until a concrete
-completion backend exposes a real limitation.**
+*(Since superseded by Phases 7–8: the interface gained an internal capability axis
+(`event_caps.h`, `READINESS`/`NATIVE_FD`/`COMPLETION`) and a peer **completion** axis
+(`completion.h` + `completion_driver.c`) with three backends — IOCP, pollcomp, io_uring. The
+readiness-shaped `event.h` was NOT redesigned; completion is a separate, coexisting axis.)*
+
+**Assessment (as-of the original 2026-07-19 review):** this is already a clean, cache-friendly,
+compile-time-specialized abstraction with no per-op dispatch. It is *readiness-shaped*, and
+io_uring was originally shoe-horned into it. This was the axis a future **IOCP** (completion)
+backend would stress — see Phase 7/8. The recommendation "**do not redesign it until a concrete
+completion backend exposes a real limitation**" held: Phase 8 added a *separate* `completion.h`
+axis rather than reshaping `event.h`, and the readiness path stayed byte-identical throughout.
 
 `KlEventCtx` (`event_ctx.h`) composes a loop + allocator + watcher list and adds
 the generic-FD `KlWatcher` layer (tagged-pointer dispatch) used by all clients,
@@ -151,19 +164,19 @@ Per the task's required classification:
 
 ## 3. Staged roadmap (dependencies + risk)
 
-| Phase | Goal | Depends on | Risk | Public API change? |
-|---|---|---|---|---|
-| **0** | Baseline & characterization | — | none | no |
-| **1** | Internal socket-ops seam (POSIX only) | 0 | low | no |
-| **2** | Mock provider + failure-injection tests | 1 | low | no |
-| **3** | Explicit internal `KlSocketProvider` object | 1,2 | med | no (internal) |
-| **4** | Public provider selection in `KlConfig` | 3 | med | additive |
-| **5** | Portable addresses/handles (only what next provider needs) | 4 | high | evolutionary |
-| **6** | First non-POSIX provider (Winsock **or** lwIP sockets) | 4,5 | high | additive |
-| **7** | Event/socket capability negotiation | 6 | med | additive |
-| **8** | IOCP completion backend | 6(Winsock),7 | very high | additive |
-| **9** | lwIP raw provider | 6(lwIP),7 | very high | additive |
-| **10** | UEFI feasibility + optional prototype | 5,7 | very high | additive/subset |
+| Phase | Goal | Depends on | Risk | Public API change? | Status |
+|---|---|---|---|---|---|
+| **0** | Baseline & characterization | — | none | no | ✅ done |
+| **1** | Internal socket-ops seam (POSIX only) | 0 | low | no | ✅ done |
+| **2** | Mock provider + failure-injection tests | 1 | low | no | ✅ done |
+| **3** | Explicit internal `KlSocketProvider` object | 1,2 | med | no (internal) | ✅ done |
+| **4** | Public provider selection in `KlConfig` | 3 | med | additive | ✅ done |
+| **5** | Portable addresses/handles (only what next provider needs) | 4 | high | evolutionary | ✅ done (`KlSocketHandle`) |
+| **6** | First non-POSIX provider (Winsock **or** lwIP sockets) | 4,5 | high | additive | ✅ done (Winsock + lwIP-socket BYO) |
+| **7** | Event/socket capability negotiation | 6 | med | additive | ✅ done |
+| **8** | Completion axis: IOCP + pollcomp + io_uring (TCP/TLS/h2/WS/UDP/async); 8a–8f | 6(Winsock),7 | very high | additive | ✅ done |
+| **9** | lwIP raw provider (3rd event model — callback) | 6(lwIP),7 | very high | additive | ⬜ next |
+| **10** | UEFI feasibility + optional prototype | 5,7 | very high | additive/subset | ⬜ deferred |
 
 **Status:** Phase 0 done (`f29ed15`, baseline in Appendix A). **Phase 1 + 1b done**
 — `src/socket.{h,c}` landed; client transports, DNS resolver, server, and udp
@@ -451,9 +464,46 @@ IOCP should not advertise "h2" — if it does and a client selects h2, the h2 pr
 fails HTTP/1.1 parsing and the connection closes cleanly, never mis-served.
 Completion-path only; readiness h2 untouched; no public-API change.
 
-**Future Phase 8d (candidates):** h2-over-completion (the real thing, above), and/or a
-second completion backend (io_uring-completion reusing `completion_driver.c` verbatim)
-to prove the completion axis is platform-independent rather than IOCP-specific.
+**Phase 8d (HTTP/2 over completion) complete** — designed in
+`docs/phase8d_h2_completion_design.md`. The real thing: h2's transport is inverted like TLS
+(feed bytes → drive the multiplexed session → drain stream output), against the h2 state
+machine + flow control + HPACK, via `comp_h2_drive` in the generic driver reusing the
+readiness `kl_h2_server_feed` frame core verbatim. Covers h2c Upgrade and h2 prior-knowledge
+(preface). Axis 1: no `include/keel/*.h` change; axis 2: no Win32/nghttp2 in the driver.
+
+**Phase 8e (WebSocket + async handlers over completion) complete** — designed in
+`docs/phase8e_completion_subset_design.md` + `docs/phase8e2_async_completion_design.md`.
+8e-1: WebSocket over completion (`comp_ws_drive`) reusing the transport-agnostic
+`kl_ws_server_on_readable_data` (websocket.c unchanged). 8e-2: async/thread-pool handlers
+over the completion loop — the completion loop became a *full* event loop, relaying generic
+FD watchers (thread-pool wakeup, timers) as a new `KL_COMP_WATCHER` kind routed through
+`kl_event_dispatch`, with `kl_async_complete` resuming via `kl_io_engine_resume_completion`.
+The mock-TLS test double (`tests/mock_tls.h`) + the portable **pollcomp** backend
+(`event_pollcomp.c`, `BACKEND=pollcomp`) landed here — a completion facade over `poll()` that
+makes the whole axis CI-runnable + ASan-testable off Windows.
+
+**Phase 8f (io_uring completion backend) complete + made the default** — designed in
+`docs/phase8f_iouring_completion_design.md` and `docs/phase8f5_iouring_default_migration_design.md`.
+The second production completion backend (`event_iouring.c`, `BACKEND=iouring`) — io_uring is
+completion by construction (SQE→CQE), reusing `completion_driver.c` verbatim (a third
+impl-independence proof after IOCP + pollcomp). 8f-1 core (accept/recv/send/UDP/watcher/cancel
++ TLS/h2/WS via the reused driver) → 8f-2 zero-copy `splice` sendfile + registered send buffers
+→ 8f-3 unit-suite gate over completion → 8f-4 benchmark → **8f-5 the flip**: `kl_event_native_provider`
+auto-wires the overlapped provider so a default-provider server is a source-compatible drop-in
+(the founding "public API masks the axis" principle, now true for the provider too), then
+`BACKEND=iouring` was switched to the completion backend and the **readiness-adapted io_uring
+TU + `file_io_iouring.c` retired** — benchmarks put the readiness POLL_ADD adapter ~2–2.3×
+slower than completion on both x86 and ARM, below plain epoll. The default *Linux* backend
+stays epoll (io_uring is opt-in); completion-vs-epoll flips by arch (completion +30% on x86,
+epoll ~10% ahead on ARM), so the flip only changes *which io_uring backend* you get.
+Follow-up (independent of the flip): per-suite triage of the default-provider integration
+suites over completion; a `kl_server_stop` self-pipe wakeup for prompt teardown landed with 8f.
+
+**Completion axis: essentially complete** — three interchangeable backends (IOCP / pollcomp /
+io_uring) over one shared `completion_driver.c`, covering TCP/TLS/h2/WebSocket/UDP/async. The
+readiness↔completion event-model split held throughout (the model-blind protocol core is shared
+verbatim; no completion concept in the public API or the POSIX/readiness paths). The next
+genuinely-new event model is the lwIP **raw** callback provider (Phase 9).
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
