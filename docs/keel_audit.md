@@ -1,5 +1,43 @@
 # C Audit Report: KEEL
 
+## Fifth pass — io_uring completion backend + provider auto-wire + stop-wakeup (2026-07-30)
+
+**Scope:** the code added/changed across the io_uring-completion migration (PRs #101–#110):
+`src/event_iouring.c` (the new ~750-line completion backend — hand-written op/registered-
+buffer/splice/watcher lifecycle, the highest-risk new C), the 5a provider auto-wire
+(`kl_event_native_provider` in every event backend + `kl_server_init`/client), the
+`kl_server_stop` self-pipe wakeup (`src/server.c`), and the `iouringcomp`→`iouring` rename.
+
+**Method:** mechanical sweeps (unsafe string/parse funcs, raw `malloc`/`free`, VLAs, `kl_malloc`
+NULL-check discipline, integer-overflow guards) across `src/`; `cppcheck` on the new TUs; and —
+the decisive step — an **ASan + UBSan + LeakSanitizer** run of the io_uring smokes on Linux
+(Apple `container` VM, kernel 6.18), which the plain CI smokes don't provide.
+
+**Issues found: 1** (Critical: 0, **High: 1**, Medium: 0, Low: 0) — **fixed + verified.**
+
+### High
+
+| # | File | Issue | Fix |
+|---|------|-------|-----|
+| H1 | `src/event_iouring.c` (`kl_event_del`) | **Memory leak** — a readiness watch (`KlIouWatch`) removed while its `IORING_OP_POLL_ADD` was in flight was *unlinked* from `st->watches` with its free *deferred* to the poll-cancel CQE. At shutdown `kl_event_close`→`io_uring_queue_exit` drops that CQE, so the unlinked watch was never freed (and `kl_event_close`, freeing `st->watches`, no longer saw it). Surfaced as the `kl_server_stop` self-pipe watch leaking 48 B per server (2× in the async smoke). LeakSanitizer-confirmed; missed by CI because the io_uring backend was never run under LSan (only pollcomp was). | Keep the removed watch **linked** (skipped by `add`/`mod` via `!w->removed`); free it in the drain CQE (unlink+free) on the normal path, or in `kl_event_close` if the CQE never arrives (shutdown). Re-verified: both io_uring smokes pass under ASan+UBSan+LSan with **zero leaks**. |
+
+**Systemic fix:** added `make smoke-iouring-asan` + a CI step in the *Completion (io_uring)*
+job, so the io_uring op/buffer/splice/watcher lifecycle is now under LeakSanitizer in CI (the
+gap that let H1 reach `main`).
+
+### Clean (verified)
+
+- **No unsafe functions** (`strcpy`/`strcat`/`sprintf`/`gets`/`atoi`/`atol`/`atof`) anywhere in
+  `src/`+`parsers/`; raw `malloc`/`free` only in the default allocator wrapper (`allocator.c`).
+- **`event_iouring.c` allocations** — all `kl_malloc` sites NULL-checked (registered pool is
+  best-effort with malloc+SEND fallback; the rest fail cleanly via `iou_op_free`+`-1`).
+- **Integer overflow** — `kl_comp_post_sendfile` guards `count`/`head_total` against `SIZE_MAX/2`;
+  `sendcap` tracks the exact allocation for a correctly-sized free.
+- **`cppcheck`** clean on the new TUs. **Hardening** intact (`-Werror -Wall -Wextra -Wpedantic
+  -Wshadow -Wformat=2 -fstack-protector-strong -D_FORTIFY_SOURCE=3`; ASan/UBSan debug build).
+- `LIBURING_UDATA_TIMEOUT` / cancel sentinels handled in the drain (no `(void*)-1` deref);
+  single in-flight op per conn (driver invariant); idle-timeout cancel via `ASYNC_CANCEL` + abort.
+
 ## Fourth pass — mbedTLS backend + test shim + parser re-audit (2026-07-26)
 
 **Scope:** the surface that changed since the third pass — `src/tls_mbedtls.c`

@@ -134,6 +134,12 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=iouring smoke-iouring-async
 
+      # LeakSanitizer over the io_uring op/registered-buffer/splice/watcher lifecycle — the
+      # coverage the plain smokes lack (a watch leak once reached main without it).
+      - name: io_uring smokes under ASan+UBSan (leak detection)
+        timeout-minutes: 8
+        run: make smoke-iouring-asan
+
   completion-iouring-suite:
     # Phase 8f-3: the unit-test suites that run over the io_uring completion backend — a
     # regression gate alongside the smokes (backend-agnostic logic + protocol/loop suites
