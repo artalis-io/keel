@@ -354,6 +354,13 @@ unsigned kl_event_caps(const KlEventLoop *loop) {
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
 }
 
+/* The overlapped provider this completion loop needs (5a) — so a server/client that
+ * configured no provider auto-wires it and a completion backend is a drop-in. */
+const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
+    (void)loop;
+    return kl_socket_provider_iouringcomp();
+}
+
 /* The overlapped socket provider: reuse the POSIX control-plane ops (close, the direct
  * send comp_tls_flush uses, tcp_nodelay, …) and add the OVERLAPPED capability the
  * negotiation keys on — so completion_driver.c's kl_sock_* calls behave normally while the

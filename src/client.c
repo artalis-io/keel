@@ -2232,6 +2232,13 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
     if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
+    /* PAL 8f-5a: on a completion loop, adopt the backend's native overlapped provider when
+     * the configured one is incompatible — so a completion backend is a drop-in for the
+     * client too (the event axis stays masked). */
+    if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
+        const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
+        if (np) c->ev_ctx->sockets = np;
+    }
     /* PAL Phase 7: the async client's readiness loop must be able to watch the
      * provider's handles (native fds). Reject an incoherent pairing up front. */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
@@ -2755,6 +2762,13 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     c->fd = KL_INVALID_SOCKET;
     c->ev_ctx = ev_ctx;
     if (cfg && cfg->sockets) c->ev_ctx->sockets = cfg->sockets;  /* provider selection */
+    /* PAL 8f-5a: on a completion loop, adopt the backend's native overlapped provider when
+     * the configured one is incompatible — so a completion backend is a drop-in for the
+     * client too (the event axis stays masked). */
+    if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
+        const struct KlSocketProvider *np = kl_event_native_provider(&c->ev_ctx->loop);
+        if (np) c->ev_ctx->sockets = np;
+    }
     /* PAL Phase 7: the async client's readiness loop must be able to watch the
      * provider's handles (native fds). Reject an incoherent pairing up front. */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {

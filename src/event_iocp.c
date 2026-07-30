@@ -200,6 +200,13 @@ unsigned kl_event_caps(const KlEventLoop *loop) {
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
 }
 
+/* The overlapped provider this completion loop needs (5a) — auto-wired by the server/client
+ * when the caller configured none, so the IOCP backend is a source-compatible drop-in. */
+const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
+    (void)loop;
+    return kl_socket_provider_iocp();
+}
+
 /* The overlapped socket provider: Winsock control-plane defaults (NULL ops) + the
  * OVERLAPPED capability the negotiation keys on. */
 static const KlSocketOps IOCP_OPS = { .name = "iocp" };

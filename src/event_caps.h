@@ -31,6 +31,16 @@
  * vs completion) but is unused by today's readiness backends. */
 unsigned kl_event_caps(const KlEventLoop *loop);
 
+/* The socket provider this loop needs but the default POSIX provider can't satisfy, or NULL
+ * if the loop runs on the default (readiness) provider (PAL 8f step 5a). A completion backend
+ * returns its overlapped provider (kl_socket_provider_iocp/pollcomp/iouringcomp); every
+ * readiness backend returns NULL. Lets the server/client auto-wire the matching provider on a
+ * completion loop when the caller configured none (or an incompatible one), so a completion
+ * backend is a source-compatible drop-in — the event axis stays masked above the build flag.
+ * Implemented once per event backend TU (like kl_event_caps); the return type is the opaque
+ * provider (F3: event_caps.h still pulls no socket-seam header). */
+const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop);
+
 /* Pure negotiation over the two axes — takes the event-loop caps explicitly (so it
  * is unit-testable without a real backend). Returns 1 if the loop can drive the
  * provider, 0 if not. A NULL provider is the built-in POSIX (native-fd) default.
