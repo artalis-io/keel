@@ -109,7 +109,8 @@ double-duty pollcomp served, now on a production engine.
 **8f-2 notes.** Splice uses a per-op pipe (created lazily at the head→file transition) and
 `flags=0` so io_uring waits asynchronously for socket writability rather than erroring on a
 full buffer; short splice-outs re-submit the pipe remainder. The registered pool is a fixed
-2 MB block (32 × 64 KiB) registered once at loop init; a response ≤ 64 KiB borrows a slot
+256 KiB block (16 × 16 KiB — kept modest since it is pinned memlock; see Step 3) registered
+once at loop init; a response ≤ 16 KiB borrows a slot
 and sends via `WRITE_FIXED` (no per-send malloc), returning the slot on completion; larger
 responses or an exhausted pool fall back to malloc + `SEND`. Both degrade gracefully on old
 kernels (no `SPLICE` → pread+`SEND`; failed registration → malloc+`SEND`). Whether these
@@ -117,6 +118,50 @@ win in practice is the benchmark's job (the next migration step); they are corre
 regardless.
 
 ---
+
+## Step 3 — the unit-test suite over `BACKEND=iouringcomp`
+
+Toward eventually retiring the readiness `event_iouring.c`, the full unit-test suite was run
+over the completion backend (`make BACKEND=iouringcomp test-iouringcomp`; a one-shot survey
+selected the set). Result: **29 suites pass; the rest are coupled to the readiness model,
+not blocked by backend defects — the survey found zero completion-driver/protocol bugs.**
+
+**Pass (29, the permanent CI gate):** the backend-agnostic logic suites (allocator,
+parser, router, url, chunked, overflow, response, response_parser, cors, drain,
+multipart_stream, proxy, proxy_protocol, resolver_cache, body_reader, compress, decompress)
+plus the protocol/loop suites that drive the loop through the backend-neutral
+`kl_server_run` / `kl_event_ctx_run` path (connection, thread_pool, timer, h2, h2_client,
+websocket, websocket_client, sse, tls, file_io, udp_batching, udp_tos).
+
+**Excluded — readiness-model coupling (why each fails, verified by ASan):**
+
+- **Raw `kl_event_wait` drivers** — `test_async`, `test_event`, `test_event_ctx` tick the
+  loop with `kl_event_wait`, which a completion backend deliberately implements as a no-op
+  (its analogue is `kl_comp_run`, reached via `kl_event_ctx_run`/`kl_server_run`). The
+  smokes exercise the real async path (`smoke_iouring_async`), so async-over-completion *is*
+  covered — just not through these readiness-shaped unit harnesses. (`test_async` also
+  drives the completion resume path with a hand-built conn whose `ctx` is NULL — a test
+  artifact that would equally crash IOCP/pollcomp.)
+- **Default-provider integration harnesses** — `test_integration`, `test_client*`,
+  `test_server_integration`, `test_redirect`, `test_peer_*`, `test_timeout`,
+  `test_tls_integration`, `test_udp*`, `test_unix_socket`, `test_dns_resolver`,
+  `test_request`, `test_error`, `test_cross_module`, `test_server_stats` build a server with
+  the **default (non-overlapped) socket provider**, which a completion loop **correctly
+  rejects** at `kl_server_init` (the Phase-7 `kl_event_ctx_sockets_compatible` negotiation).
+  The suites ignore the documented `-1` return and then crash/assert — a pre-existing
+  test-robustness gap, exposed by (not caused by) the completion backend. The smokes use the
+  overlapped provider and pass the full surface.
+- **Readiness-cap / provider assertions** — `test_event_caps` asserts `KL_EVENT_CAP_READINESS`;
+  `test_socket_provider` asserts readiness negotiation. Inherently readiness-axis suites.
+- **Backend-specific** — `test_file_io_iouring` (readiness io_uring file I/O),
+  `test_iocp_engine` (Windows).
+
+**Takeaway.** The completion backend's *logic* is validated (29 suites + the full smoke
+surface). The excluded suites are readiness-shaped test harnesses; running them over
+completion would mean opting each into the overlapped provider and the `kl_comp_run` drive
+(and fixing the ignored-`init`-return crashes) — a test-refactor effort, **not** a backend
+prerequisite. That effort belongs with step 5 (making `iouringcomp` the default), after the
+step-4 benchmark justifies it.
 
 ## 5. Orthogonality litmus
 

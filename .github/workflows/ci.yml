@@ -135,6 +135,26 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=iouringcomp smoke-iouring-async
 
+  completion-iouring-suite:
+    # Phase 8f-3: the unit-test suites that run over the io_uring completion backend — a
+    # regression gate alongside the smokes (backend-agnostic logic + protocol/loop suites
+    # driven through kl_server_run / kl_event_ctx_run). Readiness-model-coupled suites are
+    # excluded (see the IOURINGCOMP_TEST_SUITES comment in the Makefile — those need a
+    # per-test overlapped-provider opt-in, not a backend fix).
+    name: Completion (io_uring) unit suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Install liburing
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev
+      - name: Build completion backend (io_uring)
+        run: make BACKEND=iouringcomp
+      - name: Unit-test suites over io_uring completion
+        timeout-minutes: 10
+        run: make BACKEND=iouringcomp test-iouringcomp
+
   windows:
     name: Windows (MinGW, full core)
     runs-on: windows-latest

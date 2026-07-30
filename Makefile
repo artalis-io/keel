@@ -481,6 +481,38 @@ smoke-iouring-async: $(SMOKE_IOURING_ASYNC_BIN)
 $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# Phase 8f-3: unit-test suites that run over the io_uring completion backend — a
+# regression gate alongside the smokes. Two groups: backend-agnostic logic suites (they
+# don't touch the event loop) + protocol/loop suites that drive the loop through the
+# backend-neutral kl_server_run / kl_event_ctx_run path. Run under
+# `make BACKEND=iouringcomp test-iouringcomp`.
+#
+# Excluded suites are coupled to the readiness model, not blocked by backend bugs (see
+# docs/phase8f_iouring_completion_design.md §"Step 3"): raw kl_event_wait drivers
+# (event, event_ctx, async — a completion loop has no readiness kl_event_wait, only
+# kl_comp_run); readiness-cap / provider-negotiation assertions (event_caps,
+# socket_provider); and server/client integration harnesses that build a server with the
+# default (non-overlapped) socket provider, which a completion loop correctly rejects at
+# kl_server_init (integration, client*, server_integration, server_stats, redirect,
+# peer_addr, peer_cert, timeout, tls_integration, udp, udp_server, udp_multicast,
+# udp_offload, unix_socket, dns_resolver, request, error, cross_module). Each of those
+# would need to opt into the overlapped provider to run over completion — a separate
+# effort, and NOT a correctness prerequisite (the smokes cover the full protocol surface).
+# Backend-specific: file_io_iouring (readiness io_uring), iocp_engine (Windows).
+IOURINGCOMP_TEST_SUITES = allocator body_reader chunked compress connection cors \
+                          decompress drain file_io h2 h2_client multipart_stream overflow \
+                          parser proxy proxy_protocol resolver_cache response \
+                          response_parser router sse thread_pool timer tls \
+                          udp_batching udp_tos url websocket websocket_client
+IOURINGCOMP_TEST_BIN = $(addprefix tests/test_,$(IOURINGCOMP_TEST_SUITES))
+test-iouringcomp: $(IOURINGCOMP_TEST_BIN)
+	@failed=0; \
+	for t in $(IOURINGCOMP_TEST_BIN); do \
+		echo "--- $$t ---"; \
+		./$$t || failed=1; \
+	done; \
+	if [ $$failed -eq 1 ]; then echo "SOME iouringcomp TESTS FAILED"; exit 1; fi
+
 # Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
 # (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
 SMOKE_UDP_BIN = tests/smoke_udp$(EXE)
