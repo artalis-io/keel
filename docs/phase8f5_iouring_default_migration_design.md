@@ -1,0 +1,178 @@
+# Phase 8f step 5 — make io_uring-completion the default io_uring backend — Design
+
+**Status:** designed (step 5 of the io_uring-completion migration). Steps 1–4 landed the
+completion-native backend (`event_iouring_comp.c`), splice + registered buffers, the
+unit-suite gate, and the benchmark. Step 4's data is decisive:
+
+| backend | `GET /hello` | `POST /echo` |
+|---|---|---|
+| epoll (readiness) | 73,312 req/s | 72,479 |
+| io_uring (readiness-adapted) | 64,951 req/s | 63,082 |
+| **io_uring (completion-native)** | **95,418 req/s** | **90,872** |
+
+Completion-native io_uring is ~30 % faster than epoll and ~47 % faster than the readiness-
+adapted `event_iouring.c` — which is itself *slower than plain epoll* (a `poll_add`
+multiplexer paying readiness overhead with no completion payoff). So `BACKEND=iouring`
+should mean the **completion** backend, and the readiness `event_iouring.c` +
+`file_io_iouring.c` should be retired.
+
+---
+
+## 1. The one real blocker: the overlapped provider
+
+`event_iouring_comp.c` advertises `KL_EVENT_CAP_COMPLETION`, and the Phase-7 negotiation
+(`kl_event_ctx_sockets_compatible`, enforced at `kl_server_init` server.c:474 and the two
+client entry points client.c:2237/2760) requires an **overlapped** socket provider on a
+completion loop. Every consumer — examples, the test suite, Hull — creates servers/clients
+with the **default** POSIX provider. So naively flipping `BACKEND=iouring` to the completion
+backend would make `kl_server_init` reject them all (exactly the step-3 crashes: init
+returns −1, callers that ignore it fault). Today only the smokes work over completion
+because they explicitly pass `kl_socket_provider_iouringcomp()`.
+
+**This is the whole problem step 5 must solve.** The rest (removing files, CI, docs) is
+mechanical once it is solved.
+
+---
+
+## 2. The enabler (5a): auto-select the backend's overlapped provider
+
+The founding orthogonality principle is that *the public API masks the two event
+philosophies* — a user configures the same server whether the drive is readiness or
+completion; the server picks the mechanism from `kl_event_caps`. Provider selection is the
+last place that isn't yet true. Make it true:
+
+**A new backend hook** (internal, `event.h` / `event_caps.h`):
+
+```c
+/* The overlapped socket provider this loop needs, or NULL if it runs on the default
+ * (readiness) provider. A completion backend returns its provider; readiness backends
+ * return NULL. Lets the server/client auto-wire the matching provider without naming any
+ * backend — the axis stays masked. */
+const KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop);
+```
+
+- `event_iouring_comp.c` (and `event_iocp.c`, `event_pollcomp.c`) return their overlapped
+  provider (`kl_socket_provider_iouringcomp()` etc.); every readiness backend returns `NULL`
+  (a one-line stub, like `kl_event_caps`).
+- `kl_server_init` / the client, right before the compatibility check: **if no provider was
+  configured (or the configured one is incompatible) and the loop offers a native provider,
+  adopt it.** Only then run `kl_event_ctx_sockets_compatible`. Pseudocode at server.c:466:
+
+  ```c
+  s->ev.sockets = s->config.sockets;
+  if (!s->ev.sockets || !kl_event_ctx_sockets_compatible(&s->ev)) {
+      const KlSocketProvider *np = kl_event_native_provider(&s->ev.loop);
+      if (np) s->ev.sockets = np;          /* completion loop → its overlapped provider */
+  }
+  if (!kl_event_ctx_sockets_compatible(&s->ev)) { /* still bad → reject as today */ }
+  ```
+
+**Effect:** a server/client built with `BACKEND=iouring` (completion) and the default
+provider now *just works* — the loop auto-wires its overlapped provider. No consumer change,
+no public API change, no `#ifdef` in shared code (the hook is backend-selected by the
+Makefile, like `kl_event_caps`). An explicitly-configured, compatible provider is still
+honoured; an explicitly-configured *incompatible* one is still rejected (a real
+misconfiguration). This is the orthogonality principle finally complete: **the axis is
+invisible above the build flag.**
+
+Independently valuable + low-risk + mergeable on its own — and it retroactively fixes most
+of the step-3 exclusions (the default-provider integration suites now init cleanly over
+completion).
+
+---
+
+## 3. Full suite over completion (5b)
+
+With 5a in place, `make BACKEND=iouring test` (completion) runs the whole suite, not just
+the 29-suite gate. Expected remaining exclusions shrink to the *inherently* readiness ones:
+
+- **Raw `kl_event_wait` drivers** — `test_event`, `test_event_ctx`, and the `kl_event_wait`
+  cases of `test_async`. A completion loop has no readiness `kl_event_wait`; these assert the
+  readiness API itself. Keep excluded (or split the readiness-API cases out).
+- **`test_event_caps`** asserts `CAP_READINESS && !CAP_COMPLETION` for the backend — true for
+  epoll (its job), false for a completion `BACKEND=iouring`. It is a per-backend cap suite;
+  it stays in the readiness jobs, excluded from the completion run (already is).
+- **`test_file_io_iouring`** tests the readiness io_uring file backend — removed with it (5d).
+
+Everything else (integration, client\*, server\_\*, redirect, peer\_\*, udp\*, tls\_integration,
+unix\_socket, dns\_resolver, …) should pass once 5a auto-wires the provider — to be confirmed,
+and any genuine completion-path gaps fixed. This retires the step-3 "readiness-coupled
+harness" caveat.
+
+---
+
+## 4. Bare-metal benchmark confirmation (5c)
+
+Step 4's numbers came from a shared CI VM over loopback — a *relative* ordering, not
+publishable absolutes. Before flipping a default, re-run `make bench-compare` on bare metal
+(or a dedicated instance) to confirm the +30 %/+47 % ordering holds. The margin is large and
+consistent, so a reversal is unlikely, but flipping a default on CI-VM numbers alone would be
+hasty. This is a gate, not code.
+
+---
+
+## 5. The flip + retirement (5d)
+
+Once 5a–5c are green:
+
+- **Makefile:** `BACKEND=iouring` → `event_iouring_comp.c` + `file_io.c` +
+  `completion_driver.c` + `-luring` (i.e. what `iouringcomp` builds today). Keep
+  `BACKEND=iouringcomp` as a documented **alias** for one release, then drop it.
+- **Remove** `src/event_iouring.c`, `src/file_io_iouring.c`, `src/iouring_internal.h` — dead
+  once nothing selects the readiness io_uring path. File responses on the completion backend
+  already go through zero-copy `splice` (8f-2), so `file_io_iouring.c`'s async-read role is
+  covered; `KlFileIO` on this backend is the POSIX `file_io.c` (used by non-completion file
+  paths only). Verify no completion path calls `KlFileIO.submit` for file bodies (it uses
+  `kl_comp_post_sendfile`) before deletion.
+- **CI:** the "Linux (io_uring)" matrix job now exercises the completion backend end-to-end
+  (it already builds + runs `make test` — which, with 5a, passes over completion). The
+  dedicated "Completion (io_uring)" smoke + unit-suite jobs fold into it (or stay as the
+  explicit completion signal). `test_file_io_iouring` drops from `BACKEND=iouring` TEST_SRC.
+- **Docs:** README / module list / this doc — `BACKEND=iouring` is completion-native;
+  readiness io_uring is retired.
+
+---
+
+## 6. Staging
+
+| Increment | Content | Gate |
+|---|---|---|
+| **5a** | `kl_event_native_provider` hook + auto-wire in server/client | existing suites stay green; a new test: default-provider server over `iouringcomp` now inits + serves |
+| **5b** | full suite over `BACKEND=iouringcomp`; fix/triage remainder | `make BACKEND=iouringcomp test` green bar the inherent-readiness few |
+| **5c** | bare-metal `bench-compare` confirmation | ordering holds (gate, not code) |
+| **5d** | flip `BACKEND=iouring` → completion; remove readiness io_uring TUs; CI/docs | all jobs green; `event_iouring.c`/`file_io_iouring.c` gone |
+
+5a is the linchpin and lands first (independently useful — it makes IOCP and pollcomp
+drop-in too). 5d is the irreversible one and lands last, behind 5c's confirmation.
+
+---
+
+## 7. Orthogonality litmus
+
+| Axis | How step 5 holds it |
+|---|---|
+| Public API masks the axis | 5a *completes* this — provider selection becomes automatic; a completion `BACKEND=iouring` server is written exactly like an epoll one. No public API change. |
+| Abstract axis vs implementation | the new hook is on the abstract `event.h` seam; each backend answers it (`NULL` or its provider) — no backend named in shared code, no `#ifdef`. |
+| No protocol percolation | unchanged — h2/WS/async already ride the reused driver. |
+| No `include/keel/` change | the hook is internal (`event.h` is internal? — if public, additive-only: a new internal-use function, not part of the documented API). |
+
+---
+
+## 8. Risks
+
+- **Flipping a default is user-visible.** `BACKEND=iouring` changes meaning. Mitigated by:
+  the completion backend is a strict superset behaviourally (same protocols, faster), 5a
+  makes it source-compatible (no consumer change), and the `iouringcomp` alias eases any
+  transition. The readiness backend remains in git history if ever needed.
+- **Kernel-feature floor.** The completion backend needs io_uring recv/send/accept/cancel
+  (5.5–5.6+), splice (5.7+), and — for full speed — is happiest on 5.13+/5.19+ (multishot).
+  The readiness backend worked on any io_uring kernel. Document the floor; the graceful
+  fallbacks (single-shot, pread+SEND, malloc+SEND) keep older kernels correct if slower.
+- **`file_io_iouring` async-read parity.** Its true-async file reads are replaced by splice
+  for file bodies; confirm no other consumer relied on `KlFileIO` async reads over the
+  io_uring backend before deleting.
+- **Memlock footprint.** Already addressed in 8f-3 (256 KiB pool); a completion loop is a
+  touch heavier than an epoll fd but within normal limits.
+
+**Recommendation:** implement **5a first** (the provider-auto-wire — small, high-leverage,
+independently valuable), then 5b, gate on 5c, and only then 5d.
