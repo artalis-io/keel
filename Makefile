@@ -493,7 +493,7 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # backend-neutral kl_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
-# 44 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
+# 48 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
 # client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
 # server/client now auto-adopts the completion loop's overlapped provider instead of being
 # rejected at kl_server_init) → +2 (integration, server_integration) once the completion
@@ -513,24 +513,29 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # → +4 (client, client_stream, redirect, dns_resolver) once kl_comp_run fired due timers
 # (kl_timer_fire) like the readiness kl_event_ctx_run does — without it every timer-driven async
 # op stalled over completion (client Happy-Eyeballs delay + request deadline, DNS timeout /
-# retransmit / deferred completion, redirect chains). The TLS-over-completion suites
-# (tls_integration, peer_cert, cross_module) + peer_addr remain — a separate root cause.
+# retransmit / deferred completion, redirect chains).
+# → +4 (tls_integration, peer_cert, cross_module, unix_socket) once their per-file readiness-only
+# mock TLS was replaced by the shared completion-capable tests/mock_tls.h (feed_input/drain_output),
+# so comp_on_accept accepts the TLS conn and comp_tls_drive runs — the TLS-over-completion path the
+# smokes already cover, now at unit granularity too (peer_cert installs its canned cert via the
+# mock's mock_tls_peer_cert_fn hook). See docs/keel_axis_audit.md third pass.
 #
-# Still excluded, NOT blocked by backend bugs (see docs/phase8f5 §3): raw kl_event_wait
-# drivers (event, event_ctx, async — a completion loop has no readiness kl_event_wait, only
-# kl_comp_run; async also builds a conn with no ctx) and readiness-cap / provider-negotiation
-# assertions (event_caps, socket_provider) are inherently readiness-axis. The remaining
-# default-provider suites (peer_addr, peer_cert, tls_integration, udp_multicast, unix_socket,
-# cross_module) init over completion (5a) but have per-suite behavioural gaps left to
-# triage — incremental, not a correctness prerequisite (the smokes cover the full protocol
-# surface). Backend-specific: iocp_engine.
+# Still excluded, NOT blocked by backend bugs (see docs/phase8f5 §3 + the axis-audit third pass):
+# raw kl_event_wait drivers (event, event_ctx, async — a completion loop has no readiness
+# kl_event_wait, only kl_comp_run; async also builds a conn with no ctx) and readiness-cap /
+# provider-negotiation assertions (event_caps, socket_provider) are inherently readiness-axis.
+# peer_addr: its proxy_v1/v2_trusted tests need proxy_trusted_cidrs, which kl_server_init now
+# rejects on a completion loop (PROXY has no completion driver — #134). udp_multicast:
+# broadcast_flag_gates_send asserts a *synchronous* EACCES that only holds for readiness (completion
+# sends are queued async). Backend-specific: iocp_engine.
 IOURING_TEST_SUITES = allocator body_reader chunked client client_happy_eyeballs client_pool \
-                          client_stream compress connection cors decompress dns_resolver drain \
-                          error file_io h2 h2_client integration multipart_stream overflow parser \
-                          proxy proxy_protocol redirect request resolver_cache response \
-                          response_parser router server_integration server_stats sse thread_pool \
-                          timeout timer tls udp udp_batching udp_offload udp_server udp_tos url \
-                          websocket websocket_client
+                          client_stream compress connection cors cross_module decompress \
+                          dns_resolver drain error file_io h2 h2_client integration \
+                          multipart_stream overflow parser peer_cert proxy proxy_protocol \
+                          redirect request resolver_cache response response_parser router \
+                          server_integration server_stats sse thread_pool timeout timer tls \
+                          tls_integration udp udp_batching udp_offload udp_server udp_tos \
+                          unix_socket url websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \

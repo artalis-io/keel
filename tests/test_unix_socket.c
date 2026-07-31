@@ -1,5 +1,6 @@
 #include "utest.h"
 #include <keel/keel.h>
+#include "mock_tls.h"   /* shared completion-capable identity TLS mock */
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
@@ -154,45 +155,11 @@ static void ws_cli_on_close(KlWsClientConn *ws, uint16_t code, const char *r,
     ((WsCliCtx *)ud)->closed = 1;
 }
 
-/* Passthrough TLS: routes I/O through the KlTls vtable without encryption, so
- * the full https+unix code path (handshake state, SNI, TLS read/write) is
- * exercised without a real crypto backend. */
-typedef struct { KlTls base; KlAllocator *alloc; } PtTls;
-
-static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd) { (void)self; (void)fd; return KL_TLS_OK; }
-static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
-    (void)self; ssize_t r;
-    do { r = read(fd, buf, len); } while (r < 0 && errno == EINTR);
-    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
-    return r;
-}
-static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
-    (void)self; ssize_t r;
-    do { r = write(fd, buf, len); } while (r < 0 && errno == EINTR);
-    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
-    return r;
-}
-static KlTlsResult pt_shutdown(KlTls *self, KlSocketHandle fd) { (void)self; (void)fd; return KL_TLS_OK; }
-static size_t pt_pending(KlTls *self) { (void)self; return 0; }
-static void pt_reset(KlTls *self) { (void)self; }
-static void pt_destroy(KlTls *self) { PtTls *p = (PtTls *)self; kl_free(p->alloc, p, sizeof(*p)); }
-static KlTls *pt_factory(KlTlsCtx *ctx, KlAllocator *alloc) {
-    (void)ctx;
-    PtTls *p = kl_malloc(alloc, sizeof(*p));
-    if (!p) return NULL;
-    memset(p, 0, sizeof(*p));
-    p->alloc = alloc;
-    p->base.handshake = pt_handshake;
-    p->base.read = pt_read;
-    p->base.write = pt_write;
-    p->base.shutdown = pt_shutdown;
-    p->base.pending = pt_pending;
-    p->base.reset = pt_reset;
-    p->base.destroy = pt_destroy;
-    p->base.alpn_protocol = NULL;
-    p->base.set_hostname = NULL;
-    return &p->base;
-}
+/* Passthrough TLS: routes I/O through the KlTls vtable without encryption, so the full
+ * https+unix code path (handshake state, SNI, TLS read/write) is exercised without a real
+ * crypto backend. The mock is the shared tests/mock_tls.h (mock_tls_create), which implements
+ * the completion-mode ops (feed_input/drain_output) too, so tls_over_https_unix runs over the
+ * completion backend as well as readiness. */
 
 static void test_sock_path(char *buf, size_t buflen, const char *name) {
     snprintf(buf, buflen, "./keel-%ld-%s.sock", (long)getpid(), name);
@@ -785,7 +752,7 @@ UTEST(unix_socket, tls_over_https_unix) {
     test_sock_path(path, sizeof(path), "tlsunix");
     unlink(path);
 
-    KlTlsConfig srv_tls = { .factory = pt_factory };
+    KlTlsConfig srv_tls = { .factory = mock_tls_create };
     KlServer srv;
     KlConfig cfg = {
         .unix_socket_path = path,
@@ -809,7 +776,7 @@ UTEST(unix_socket, tls_over_https_unix) {
 
     /* Client speaks TLS (passthrough) over the UNIX socket; SNI defaults to
      * "localhost". Exercises the https+unix connect + handshake path. */
-    KlTlsConfig cli_tls = { .factory = pt_factory };
+    KlTlsConfig cli_tls = { .factory = mock_tls_create };
     KlClientConfig ccfg;
     memset(&ccfg, 0, sizeof(ccfg));
     ccfg.tls = &cli_tls;

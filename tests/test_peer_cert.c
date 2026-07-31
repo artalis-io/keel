@@ -2,6 +2,7 @@
 #include <keel/keel.h>
 #include <keel/tls.h>
 #include "net_compat.h"
+#include "mock_tls.h"   /* shared completion-capable identity TLS mock */
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
@@ -24,40 +25,10 @@ typedef enum {
 static PtCertMode g_cert_mode = PT_CERT_PRESENT;
 static const uint8_t g_der[] = { 0x30, 0x82, 0x01, 0x0a };  /* fake DER prefix */
 
-typedef struct {
-    KlTls        base;
-    KlAllocator *alloc;
-    int          handshake_done;
-} PtTls;
-
-static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd) {
-    PtTls *pt = (PtTls *)self;
-    (void)fd;
-    pt->handshake_done = 1;
-    return KL_TLS_OK;
-}
-static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
-    (void)self;
-    ssize_t r;
-    do { r = kl_test_sockread(fd, buf, len); } while (r < 0 && errno == EINTR);
-    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
-    return r;
-}
-static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
-    (void)self;
-    ssize_t r;
-    do { r = kl_test_sockwrite(fd, buf, len); } while (r < 0 && errno == EINTR);
-    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
-    return r;
-}
-static KlTlsResult pt_shutdown(KlTls *self, KlSocketHandle fd) { (void)self; (void)fd; return KL_TLS_OK; }
-static size_t pt_pending(KlTls *self) { (void)self; return 0; }
-static void pt_reset(KlTls *self) { ((PtTls *)self)->handshake_done = 0; }
-static void pt_destroy(KlTls *self) {
-    PtTls *pt = (PtTls *)self;
-    kl_free(pt->alloc, pt, sizeof(*pt));
-}
-
+/* The passthrough (identity) TLS mock is the shared tests/mock_tls.h (mock_tls_create), which
+ * implements the completion-mode ops too so this suite runs over the completion backend. Only
+ * the peer_cert behaviour is suite-specific: pt_peer_cert (below) is installed via the mock's
+ * mock_tls_peer_cert_fn hook (or left NULL for the "no vtable slot" case). */
 static int pt_peer_cert(KlTls *self, KlPeerCert *out) {
     (void)self;
     if (g_cert_mode == PT_CERT_NONE)
@@ -75,23 +46,10 @@ static int pt_peer_cert(KlTls *self, KlPeerCert *out) {
     return 0;
 }
 
-static KlTls *pt_factory(KlTlsCtx *ctx, KlAllocator *alloc) {
-    (void)ctx;
-    PtTls *pt = kl_malloc(alloc, sizeof(*pt));
-    if (!pt) return NULL;
-    memset(pt, 0, sizeof(*pt));
-    pt->alloc             = alloc;
-    pt->base.handshake    = pt_handshake;
-    pt->base.read         = pt_read;
-    pt->base.write        = pt_write;
-    pt->base.shutdown     = pt_shutdown;
-    pt->base.pending      = pt_pending;
-    pt->base.reset        = pt_reset;
-    pt->base.destroy      = pt_destroy;
-    pt->base.alpn_protocol = NULL;
-    pt->base.set_hostname  = NULL;
-    pt->base.peer_cert     = (g_cert_mode == PT_CERT_NOSLOT) ? NULL : pt_peer_cert;
-    return &pt->base;
+/* Install the peer_cert hook (into the shared mock) for the current cert mode: PRESENT/NONE
+ * use pt_peer_cert; NOSLOT leaves the vtable slot NULL. Call before creating the server. */
+static void pt_install_peer_cert(void) {
+    mock_tls_peer_cert_fn = (g_cert_mode == PT_CERT_NOSLOT) ? NULL : pt_peer_cert;
 }
 
 /* ── Captured handler results ────────────────────────────────────────── */
@@ -133,6 +91,7 @@ static void drain(int fd) {
  * so it uses plain error handling rather than ASSERT_* macros. */
 static int run_once(KlConfig *cfg) {
     g_rc = -2;
+    pt_install_peer_cert();   /* wire the shared mock's peer_cert hook for g_cert_mode */
     KlServer srv;
     if (kl_server_init(&srv, cfg) != 0)
         return -1;
@@ -167,7 +126,7 @@ static int run_once(KlConfig *cfg) {
 
 UTEST(peer_cert, present_over_tls) {
     g_cert_mode = PT_CERT_PRESENT;
-    KlTlsConfig tls = { .ctx = (KlTlsCtx *)1, .factory = pt_factory, .ctx_destroy = NULL };
+    KlTlsConfig tls = { .ctx = (KlTlsCtx *)1, .factory = mock_tls_create, .ctx_destroy = NULL };
     KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4, .tls = &tls };
     ASSERT_EQ(0, run_once(&cfg));
 
@@ -186,7 +145,7 @@ UTEST(peer_cert, present_over_tls) {
 UTEST(peer_cert, none_presented) {
     /* TLS connection, but the client sent no certificate → -1. */
     g_cert_mode = PT_CERT_NONE;
-    KlTlsConfig tls = { .ctx = (KlTlsCtx *)1, .factory = pt_factory, .ctx_destroy = NULL };
+    KlTlsConfig tls = { .ctx = (KlTlsCtx *)1, .factory = mock_tls_create, .ctx_destroy = NULL };
     KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4, .tls = &tls };
     ASSERT_EQ(0, run_once(&cfg));
     ASSERT_EQ(-1, g_rc);
@@ -195,7 +154,7 @@ UTEST(peer_cert, none_presented) {
 UTEST(peer_cert, backend_without_support) {
     /* TLS backend that leaves the peer_cert vtable slot NULL → -1. */
     g_cert_mode = PT_CERT_NOSLOT;
-    KlTlsConfig tls = { .ctx = (KlTlsCtx *)1, .factory = pt_factory, .ctx_destroy = NULL };
+    KlTlsConfig tls = { .ctx = (KlTlsCtx *)1, .factory = mock_tls_create, .ctx_destroy = NULL };
     KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4, .tls = &tls };
     ASSERT_EQ(0, run_once(&cfg));
     ASSERT_EQ(-1, g_rc);
