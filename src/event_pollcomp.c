@@ -26,6 +26,7 @@
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
+#include "udp_internal.h"        /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr */
 #include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
@@ -455,20 +456,31 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
     }
     case PC_UDP_RECV: {
         struct sockaddr_storage ss;
-        socklen_t slen = sizeof(ss);
-        ssize_t n = recvfrom(op->fd, op->udp->recv_buf, op->udp->recv_buf_size, 0,
-                             (struct sockaddr *)&ss, &slen);
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+        unsigned char ctrl[KL_UDP_RX_CTRL_SIZE];
+        struct iovec iov = { .iov_base = op->udp->recv_buf, .iov_len = op->udp->recv_buf_size };
+        struct msghdr msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_name = &ss;
+        msg.msg_namelen = sizeof(ss);
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = ctrl;                    /* capture pktinfo (local addr) cmsg */
+        msg.msg_controllen = sizeof(ctrl);
+        ssize_t n;
+        do { n = recvmsg(op->fd, &msg, 0); } while (n < 0 && errno == EINTR);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             return 0;
         ev->kind = KL_COMP_UDP_RECV;
         ev->target = op->udp;
         ev->ok = (n >= 0);
         ev->bytes = (n > 0) ? (size_t)n : 0;
         ev->buf = op->udp->recv_buf;
-        if (n >= 0 && slen > 0 && (size_t)slen <= sizeof(ev->peer)) {
-            memcpy(&ev->peer, &ss, (size_t)slen);
-            ev->peer_len = slen;
+        if (n >= 0 && msg.msg_namelen > 0 && (size_t)msg.msg_namelen <= sizeof(ev->peer)) {
+            memcpy(&ev->peer, &ss, (size_t)msg.msg_namelen);
+            ev->peer_len = msg.msg_namelen;
         }
+        if (n >= 0 && op->udp->pktinfo)            /* local (dest) addr via pktinfo cmsg */
+            ev->local_len = kl_udp_parse_local(&msg, &ev->local);
         return 1;
     }
     case PC_UDP_SEND: {

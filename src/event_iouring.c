@@ -46,6 +46,7 @@
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
+#include "udp_internal.h"        /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr */
 #include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
@@ -108,6 +109,7 @@ typedef struct KlIouOp {
     size_t         sent_total;            /* total bytes to report on WRITE completion */
     struct msghdr  msgh;                  /* UDP: recvmsg/sendmsg header */
     struct iovec   msgiov;                /* UDP: single iovec */
+    unsigned char  udp_ctrl[KL_UDP_RX_CTRL_SIZE]; /* UDP_RECV: cmsg buffer (pktinfo local addr) */
     struct sockaddr_storage peer;         /* ACCEPT peer / UDP addr (msg_name) */
     socklen_t      peer_len;
     int            aborted;               /* cancelled (idle timeout) — deliver as error */
@@ -602,6 +604,8 @@ int kl_comp_post_udp_recv(struct KlUdp *udp) {
     op->msgh.msg_namelen = sizeof(op->peer);
     op->msgh.msg_iov = &op->msgiov;
     op->msgh.msg_iovlen = 1;
+    op->msgh.msg_control = op->udp_ctrl;          /* capture pktinfo (local addr) cmsg */
+    op->msgh.msg_controllen = sizeof(op->udp_ctrl);
     struct io_uring_sqe *sqe = iou_sqe(st);
     if (!sqe) { iou_op_free(op); return -1; }
     io_uring_prep_recvmsg(sqe, op->fd, &op->msgh, 0);
@@ -769,6 +773,8 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
             memcpy(&ev->peer, &op->peer, (size_t)op->msgh.msg_namelen);
             ev->peer_len = op->msgh.msg_namelen;
         }
+        if (res >= 0 && op->udp->pktinfo)         /* local (dest) addr via pktinfo cmsg */
+            ev->local_len = kl_udp_parse_local(&op->msgh, &ev->local);
         return 1;
 
     case IOU_UDP_SEND:

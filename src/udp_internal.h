@@ -43,12 +43,27 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
                     struct sockaddr *src, socklen_t src_len,
                     struct sockaddr *local, socklen_t local_len);
 
-/* Completion-loop datagram receive (PAL 8b-4c): a WSARecvFrom finished with `len`
- * bytes in udp->recv_buf from `src` — deliver it (kl_udp_deliver) then re-post the
- * next receive. The completion driver calls this for a KL_COMP_UDP_RECV event; the
- * model-blind delivery is identical to the readiness recvmsg path. */
+/* Control-message buffer size for a completion-loop UDP recvmsg — generously sized
+ * for the RX cmsgs the kernel may attach (pktinfo local addr + GRO + TOS). Kept as a
+ * plain constant here (not tied to the pktinfo struct sizes, which are glibc-gated in
+ * udp_io_posix.c) so the completion backends can carry a control buffer without
+ * pulling in those platform structs. */
+#define KL_UDP_RX_CTRL_SIZE 256
+
+/* Extract the datagram's local (destination) address from a received message's
+ * pktinfo control data into `*out`. Returns the sockaddr length written, or 0 if no
+ * pktinfo cmsg was present. Shared by the readiness recv (udp_io_posix.c) and the
+ * completion backends so the two event models parse it identically (no drift). */
+socklen_t kl_udp_parse_local(struct msghdr *msg, struct sockaddr_storage *out);
+
+/* Completion-loop datagram receive (PAL 8b-4c): a recv finished with `len` bytes in
+ * udp->recv_buf from `src`, arriving on local address `local` (or NULL/0 when pktinfo
+ * is disabled/unavailable, e.g. a backend without cmsg support). Deliver it
+ * (kl_udp_deliver) then re-post the next receive. The completion driver calls this for
+ * a KL_COMP_UDP_RECV event; the model-blind delivery matches the readiness recvmsg path. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
-                         struct sockaddr *src, socklen_t src_len);
+                         struct sockaddr *src, socklen_t src_len,
+                         struct sockaddr *local, socklen_t local_len);
 
 /* Completion-loop datagram send done (PAL 8b-4d): an overlapped WSASendTo of `len`
  * bytes finished — release its outstanding-bytes reservation and fire on_drain when

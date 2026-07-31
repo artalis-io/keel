@@ -356,7 +356,15 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
 
 /* Post one overlapped WSARecvFrom for a UDP socket on the completion loop (8b-4c).
  * Receives into the socket's own recv buffer and captures the source address; the
- * completion surfaces a KL_COMP_UDP_RECV event. */
+ * completion surfaces a KL_COMP_UDP_RECV event.
+ *
+ * NOTE: this captures the SOURCE address only. The datagram's local (destination)
+ * address (KlCompletionEvent.local, used by kl_udp_send_to_from reply-from) needs a
+ * pktinfo control message, which WSARecvFrom does not deliver — that requires the
+ * WSARecvMsg extension (WSAID_WSARECVMSG) with an IP_PKTINFO control buffer, the
+ * Winsock analogue of the io_uring/pollcomp recvmsg path. Until then IOCP leaves
+ * ev->local_len = 0 (the event is memset), so the driver delivers a NULL local —
+ * the same graceful degradation as pktinfo being disabled. Follow-up. */
 int kl_comp_post_udp_recv(KlUdp *udp) {
     KlIocpState *st = udp->ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
