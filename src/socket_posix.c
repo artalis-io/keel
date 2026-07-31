@@ -13,6 +13,9 @@
  * §B.0.
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE          /* accept4() — fold nonblock+cloexec into accept (Linux/BSD) */
+#endif
 #include "socket.h"
 
 #include <fcntl.h>
@@ -100,8 +103,23 @@ int kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
 int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
     return listen((int)fd, backlog);
 }
+/* The default accept returns a non-blocking, close-on-exec socket. On Linux/BSD accept4
+ * folds both flags into the accept syscall (two fewer per-connection syscalls on the
+ * accept hot path — meaningful under connection churn); elsewhere (macOS) fall back to
+ * accept + fcntl. Callers that use this default may skip the separate nonblock/cloexec
+ * setup; a custom provider's accept op must honor the same contract or the caller applies
+ * them itself. */
 KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    return (KlSocketHandle)accept((int)fd, a, l);
+#if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
+    return (KlSocketHandle)accept4((int)fd, a, l, SOCK_NONBLOCK | SOCK_CLOEXEC);
+#else
+    int c = accept((int)fd, a, l);
+    if (c >= 0) {
+        kl_sockdef_set_nonblocking((KlSocketHandle)c);
+        kl_sockdef_set_cloexec((KlSocketHandle)c);
+    }
+    return (KlSocketHandle)c;
+#endif
 }
 int kl_sockdef_close(KlSocketHandle fd) {
     return close((int)fd);

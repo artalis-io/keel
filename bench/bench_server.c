@@ -14,6 +14,7 @@
 #include <keel/keel.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>   /* fork, getpid — multi-worker (SO_REUSEPORT) mode */
 
 /* Backend-agnostic: over a completion loop (BACKEND=iouring) kl_server_init auto-adopts the
  * backend's overlapped provider (8f-5a), so this default-provider server serves every backend
@@ -55,14 +56,34 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
 
 int main(int argc, char **argv) {
     int port = 9090;
+    int workers = 1;
     if (argc > 1) {
         char *end;
         long val = strtol(argv[1], &end, 10);
         if (end == argv[1] || *end != '\0' || val < 1 || val > 65535) {
-            fprintf(stderr, "usage: %s [port]\n", argv[0]);
+            fprintf(stderr, "usage: %s [port] [workers]\n", argv[0]);
             return 1;
         }
         port = (int)val;
+    }
+    if (argc > 2) {
+        char *end;
+        long val = strtol(argv[2], &end, 10);
+        if (end == argv[2] || *end != '\0' || val < 1 || val > 256) {
+            fprintf(stderr, "usage: %s [port] [workers]\n", argv[0]);
+            return 1;
+        }
+        workers = (int)val;
+    }
+
+    /* Multi-worker: fork (workers-1) children; every process runs its own KlServer on the
+     * same port. Each listen socket sets SO_REUSEPORT (server.c), so the kernel load-balances
+     * incoming connections across the workers — Keel's horizontal-scaling model (one
+     * single-threaded accept loop per core), demonstrated here for the connection-churn bench. */
+    for (int w = 1; w < workers; w++) {
+        pid_t pid = fork();
+        if (pid == 0) break;              /* child: stop forking, run a server */
+        if (pid < 0) perror("fork");      /* parent: keep going with fewer workers */
     }
 
     KlServer s;
@@ -78,7 +99,8 @@ int main(int argc, char **argv) {
 
     kl_server_route(&s, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
 
-    printf("bench server listening on :%d\n", port);
+    printf("bench server listening on :%d (worker pid %d of %d)\n",
+           port, (int)getpid(), workers);
     kl_server_run(&s);
     kl_server_free(&s);
     return 0;

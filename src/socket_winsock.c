@@ -154,9 +154,16 @@ int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
     if (listen((SOCKET)fd, backlog) == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return 0;
 }
+/* Return a non-blocking, non-inheritable socket — the Winsock analog of the POSIX
+ * accept4(SOCK_NONBLOCK|SOCK_CLOEXEC) default. There is no accept4 on Winsock, so fold the
+ * two steps in here (accepted sockets inherit the listener's blocking mode, i.e. blocking).
+ * Keeps the seam's accept contract identical across platforms so shared callers can rely on
+ * it and skip the separate nonblock/cloexec setup. */
 KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
     SOCKET c = accept((SOCKET)fd, a, l);
-    if (c == INVALID_SOCKET) kl_wsa_set_errno();
+    if (c == INVALID_SOCKET) { kl_wsa_set_errno(); return (KlSocketHandle)c; }
+    kl_sockdef_set_nonblocking((KlSocketHandle)c);
+    kl_sockdef_set_cloexec((KlSocketHandle)c);
     return (KlSocketHandle)c;
 }
 int kl_sockdef_close(KlSocketHandle fd) {

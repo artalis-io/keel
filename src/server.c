@@ -814,12 +814,19 @@ int kl_server_run(KlServer *s) {
                         break;
                     }
 
-                    if (kl_sock_set_nonblocking(s->ev.sockets, client_fd) < 0) {
-                        kl_sock_close(s->ev.sockets, client_fd);
-                        continue;
+                    /* The default provider's accept (kl_sockdef_accept) already returns a
+                     * non-blocking, close-on-exec socket (accept4 on Linux/BSD) — skip the two
+                     * redundant per-connection syscalls on the accept hot path. A custom
+                     * provider's accept op may not fold them, so apply them for a non-default
+                     * (non-NULL) provider. */
+                    if (s->ev.sockets) {
+                        if (kl_sock_set_nonblocking(s->ev.sockets, client_fd) < 0) {
+                            kl_sock_close(s->ev.sockets, client_fd);
+                            continue;
+                        }
+                        /* Don't leak client connections into child processes. */
+                        kl_sock_set_cloexec(s->ev.sockets, client_fd);
                     }
-                    /* Don't leak client connections into child processes. */
-                    kl_sock_set_cloexec(s->ev.sockets, client_fd);
                     if (s->config.transport == KL_TRANSPORT_TCP)
                         (void)kl_sock_set_tcp_nodelay(s->ev.sockets, client_fd, 1);
 
