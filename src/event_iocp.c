@@ -27,6 +27,9 @@
 
 #define KL_IOCP_ACCEPT_BACKLOG 8
 #define KL_IOCP_ADDR_LEN       (sizeof(struct sockaddr_storage) + 16)
+/* TransmitFile's documented maximum bytes per single call (~2 GiB, MSDN). A larger file
+ * body would need chunked, offset-advancing TransmitFile re-posts (not yet implemented). */
+#define KL_IOCP_TRANSMITFILE_MAX 0x7FFFFFFEu
 
 struct KlIocpOp;
 /* A registered readiness watch (8e-2c). The completion port cannot readiness-watch an
@@ -339,6 +342,13 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
         off += head_iov[i].len;
     }
 
+    /* TransmitFile's byte count is a DWORD and its documented per-call maximum is
+     * ~2 GiB (TF_MAX). A larger file body needs chunked TransmitFile (offset-advancing
+     * re-posts across several completions) — not yet implemented. Rather than silently
+     * truncate via the (DWORD)count cast (or fail opaquely inside TransmitFile), reject
+     * it cleanly here so the caller closes the connection instead of sending wrong bytes. */
+    if (count > KL_IOCP_TRANSMITFILE_MAX) { iocp_op_free(op); return -1; }
+
     TRANSMIT_FILE_BUFFERS tb;
     memset(&tb, 0, sizeof(tb));
     tb.Head = op->sendbuf;
@@ -456,7 +466,13 @@ int kl_comp_prime_accepts(struct KlServer *s) {
 /* Cancel outstanding overlapped ops on `fd` (idle-timeout sweep). CancelIoEx aborts the
  * pending WSARecv/WSASend; each aborted op still completes via GetQueuedCompletionStatus
  * with an error, so the driver releases the connection through its normal completion path
- * (no dangling op, no double release). */
+ * (no dangling op, no double release).
+ *
+ * The NULL OVERLAPPED cancels ALL outstanding I/O the loop thread issued on `fd` — which is
+ * exactly what we want when tearing a connection down (recv and, if any, an in-flight send).
+ * Each cancelled op posts its own completion, and the driver releases the conn from the last
+ * one; the ≤N-completions-then-release accounting lives in the driver, so cancelling all of a
+ * dying fd's ops here is safe. Single-loop-thread, so no cross-thread cancel race. */
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     (void)ctx;
     CancelIoEx((HANDLE)(uintptr_t)fd, NULL);
@@ -470,8 +486,13 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
     ULONG want = (max < 64) ? (ULONG)max : 64;
     BOOL ok = GetQueuedCompletionStatusEx(st->port, entries, want, &got,
                                           (DWORD)timeout_ms, FALSE);
-    if (!ok)
-        return 0;   /* WAIT_TIMEOUT — nothing this tick */
+    if (!ok) {
+        /* Distinguish an idle tick from a fatal loop error. WAIT_TIMEOUT is the normal
+         * "no completions this tick" case → 0. Anything else (e.g. ERROR_ABANDONED_WAIT_0
+         * or ERROR_INVALID_HANDLE if the port is closed during shutdown) is a real error →
+         * -1, so the run loop stops instead of silently spinning on a dead port. */
+        return (GetLastError() == WAIT_TIMEOUT) ? 0 : -1;
+    }
 
     int count = 0;
     for (ULONG i = 0; i < got && count < max; i++) {
