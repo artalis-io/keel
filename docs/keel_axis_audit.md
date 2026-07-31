@@ -1,5 +1,61 @@
 # KEEL Networking Architecture Axis Audit
 
+## Second pass — completion-axis parity + robustness follow-up (2026-07-31)
+
+**Verdict: unchanged — architecturally sound.** No new architectural findings; the orthogonality
+map, honest-model-representation, and grep litmus from the first pass all still hold. This pass
+records two completion-axis items closed since 2026-07-30 and one Windows-IOCP robustness fix, and
+re-confirms the remaining gaps are the same low/informational items (no criticals).
+
+**Closed since the first pass:**
+
+- **Async / long-lived streaming over the completion loop is proven, not assumed (#127, Phase
+  8g-2).** `tests/smoke_iouring.c` gained an `/astream` handler that begins a chunked stream,
+  writes a chunk, `kl_async_suspend`s on a `kl_timer_add` deadline, then resumes on the completion
+  loop to write the tail + end. It exercises begin-stream → suspend → timer-fire → resume →
+  end-stream entirely over io_uring, closing the open question from the 8g scoping (the outbound
+  stream buffer was wired by default in #126/8g-0). What remains is only the *bounded* head-of-line
+  concern (8g-1: multiple queued stream writes serialised behind one in-flight overlapped write),
+  which is a throughput refinement, not a correctness or orthogonality gap.
+
+- **UDP datagram local (dest) address parity on the completion backends is complete (#128).** IOCP
+  now captures the datagram's local address via an overlapped `WSARecvMsg` + `IP_PKTINFO` control
+  message (`kl_udp_win_get_recvmsg` / `kl_udp_win_parse_local` in the Windows-only, include-scoped
+  `src/udp_cmsg_win.h`, shared byte-for-byte with the readiness recv), matching io_uring and
+  pollcomp (#118/#119). Previously `kl_comp_post_udp_recv` used `WSARecvFrom` (source only), so
+  `kl_udp_send_to_from` reply-from delivered a NULL local over IOCP. The Keel-level `KlUdpRxMeta`
+  contract (source + local + gro_seg + truncated) is now honoured identically across all three
+  completion backends — a parity win *above* the axis, with the platform mechanics staying in the
+  Windows TUs + the include-scoped header (no `#ifdef` in cross-platform code, no public-API change).
+
+**Robustness fix made this pass (unlike the report-only first pass):** the overlapped `WSARecvMsg`
+posted for UDP recv over IOCP leaves an outstanding op that `closesocket` cancels at teardown; it
+completes with `bytes == 0` and an *unfilled* (zeroed) `WSAMSG` control buffer. The completion path
+parsed that buffer unconditionally, and the cmsg walk spun forever (`WSA_CMSG_NXTHDR` advances by
+`WSA_CMSG_ALIGN(cmsg_len)`, so `cmsg_len == 0` yields the same pointer), wedging the loop thread so
+`kl_server_run` never returned. `WSARecvFrom` never read control data, so this only surfaced once
+`WSARecvMsg` landed. Fixed two ways: `kl_udp_win_parse_local`/`udp_parse_tos` now stop the walk on
+a runt cmsg (`cmsg_len < sizeof(WSACMSGHDR)`) — a general loop-safety fix that also hardens the
+readiness path — and the IOCP `KL_IOCP_UDP_RECV` handler only parses source + pktinfo metadata when
+`bytes > 0` (a cancelled/failed op carries no valid name/control). This maps to Goal 6 (op
+lifetime: close-while-outstanding) and Goal 7 (partial/zero-length completions handled honestly):
+a completion event is not a received datagram. Validated by the Windows-IOCP `smoke-iocp` job,
+which now prints `... + UDP + udp-local` after enabling `recv_pktinfo` and asserting the local
+address is delivered.
+
+**Matrix delta:** Winsock + IOCP (completion) UDP now has full datagram-metadata parity (source +
+local/pktinfo + truncation), matching io_uring/pollcomp; the §4 row is otherwise unchanged
+(plaintext prod-ready; real-mbedTLS TLS remains BYO/out-of-CI, F3).
+
+**Still open (unchanged, all low/informational — see §3/§6):** F2 (per-suite triage so the
+default-provider integration suites run over completion), F3 (a self-hosted mbedTLS Windows-IOCP
+TLS smoke, or document the BYO gap), F4 (a completion-aware async test fixture). Non-functional,
+explicitly deferred: completion-streaming HOL (8g-1, overlapped-write pipelining), io_uring
+multishot recv / registered buf-rings (benchmark showed no current need), and `TransmitFile`
+chunking for >2 GiB file bodies.
+
+---
+
 ## First pass — event / socket / protocol orthogonality (2026-07-30)
 
 **Verdict: architecturally sound.** The event axis (readiness + completion), the socket/
