@@ -2,84 +2,14 @@
 #include <keel/keel.h>
 #include <keel/tls.h>
 #include "net_compat.h"
+#include "mock_tls.h"   /* shared identity TLS mock — completion-capable (feed_input/drain_output) */
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
 
-/* ═══════════════════════════════════════════════════════════════════
- * Passthrough TLS mock
- *
- * Wraps real socket I/O through the KlTls vtable without encryption.
- * This validates the full server TLS code path: handshake state
- * transitions, conn_read/conn_write via vtable, and TLS shutdown.
- * ═══════════════════════════════════════════════════════════════════ */
-
-typedef struct {
-    KlTls        base;
-    KlAllocator *alloc;
-    int          handshake_done;
-} PassthroughTls;
-
-static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd) {
-    PassthroughTls *pt = (PassthroughTls *)self;
-    (void)fd;
-    pt->handshake_done = 1;
-    return KL_TLS_OK;
-}
-
-static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
-    (void)self;
-    ssize_t r;
-    do { r = kl_test_sockread(fd, buf, len); } while (r < 0 && errno == EINTR);
-    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
-    return r;
-}
-
-static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
-    (void)self;
-    ssize_t r;
-    do { r = kl_test_sockwrite(fd, buf, len); } while (r < 0 && errno == EINTR);
-    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
-    return r;
-}
-
-static KlTlsResult pt_shutdown(KlTls *self, KlSocketHandle fd) {
-    (void)self; (void)fd;
-    return KL_TLS_OK;
-}
-
-static size_t pt_pending(KlTls *self) {
-    (void)self;
-    return 0;
-}
-
-static void pt_reset(KlTls *self) {
-    PassthroughTls *pt = (PassthroughTls *)self;
-    pt->handshake_done = 0;
-}
-
-static void pt_destroy(KlTls *self) {
-    PassthroughTls *pt = (PassthroughTls *)self;
-    kl_free(pt->alloc, pt, sizeof(*pt));
-}
-
-static KlTls *pt_factory(KlTlsCtx *ctx, KlAllocator *alloc) {
-    (void)ctx;
-    PassthroughTls *pt = kl_malloc(alloc, sizeof(*pt));
-    if (!pt) return NULL;
-    memset(pt, 0, sizeof(*pt));
-    pt->alloc             = alloc;
-    pt->base.handshake    = pt_handshake;
-    pt->base.read         = pt_read;
-    pt->base.write        = pt_write;
-    pt->base.shutdown     = pt_shutdown;
-    pt->base.pending      = pt_pending;
-    pt->base.reset        = pt_reset;
-    pt->base.destroy      = pt_destroy;
-    pt->base.alpn_protocol = NULL;
-    pt->base.set_hostname  = NULL;
-    return &pt->base;
-}
+/* The passthrough TLS mock (identity, no crypto) now lives in tests/mock_tls.h and implements
+ * the completion-mode ops too (feed_input/drain_output), so this suite runs over the completion
+ * backend as well as readiness. The factory is mock_tls_create. */
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -156,7 +86,7 @@ static ssize_t read_one_response(int fd, char *buf, size_t buflen, int timeout_m
 UTEST(tls_integration, hello_request) {
     KlTlsConfig tls_cfg = {
         .ctx     = NULL,
-        .factory = pt_factory,
+        .factory = mock_tls_create,
     };
     KlConfig cfg = {
         .port = 0,
@@ -193,7 +123,7 @@ UTEST(tls_integration, hello_request) {
 UTEST(tls_integration, keep_alive) {
     KlTlsConfig tls_cfg = {
         .ctx     = NULL,
-        .factory = pt_factory,
+        .factory = mock_tls_create,
     };
     KlConfig cfg = {
         .port = 0,
@@ -237,7 +167,7 @@ UTEST(tls_integration, keep_alive) {
 UTEST(tls_integration, concurrent) {
     KlTlsConfig tls_cfg = {
         .ctx     = NULL,
-        .factory = pt_factory,
+        .factory = mock_tls_create,
     };
     KlConfig cfg = {
         .port = 0,

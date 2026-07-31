@@ -116,6 +116,12 @@ static int mock_tls_set_hostname(KlTls *self, const char *hostname) {
     return 0;
 }
 
+/* Optional peer-cert hook. Default NULL → the peer_cert vtable slot is left NULL (unchanged
+ * for callers that don't set it). A test that exercises kl_request_peer_cert() installs its own
+ * implementation (supplying the cert values) before creating the mock. Static-per-TU, so it
+ * doesn't affect other includers. */
+static int (*mock_tls_peer_cert_fn)(KlTls *self, KlPeerCert *out) = NULL;
+
 /* KlTlsFactory: usable as both KlConfig.tls->factory and KlClientConfig.tls->factory. */
 static KlTls *mock_tls_create(KlTlsCtx *ctx, KlAllocator *alloc) {
     (void)ctx;
@@ -132,7 +138,7 @@ static KlTls *mock_tls_create(KlTlsCtx *ctx, KlAllocator *alloc) {
     m->base.destroy       = mock_tls_destroy;
     m->base.alpn_protocol = NULL;
     m->base.set_hostname  = mock_tls_set_hostname;
-    m->base.peer_cert     = NULL;
+    m->base.peer_cert     = mock_tls_peer_cert_fn;
     m->base.feed_input    = mock_tls_feed_input;
     m->base.drain_output  = mock_tls_drain_output;
     return &m->base;
