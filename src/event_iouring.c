@@ -795,6 +795,12 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         }
         if (res >= 0 && op->udp->pktinfo)         /* local (dest) addr via pktinfo cmsg */
             ev->local_len = kl_udp_parse_local(&op->msgh, &ev->local);
+        if (res >= 0) {
+            if (op->udp->recv_gro)                /* GRO coalesced segment size */
+                ev->gro_seg = kl_udp_parse_gro(&op->msgh);
+            if (op->msgh.msg_flags & MSG_TRUNC)   /* datagram truncated to recv_buf */
+                ev->truncated = 1;
+        }
         return 1;
 
     case IOU_UDP_SEND:

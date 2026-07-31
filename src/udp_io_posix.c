@@ -361,9 +361,10 @@ socklen_t kl_udp_parse_local(struct msghdr *msg, struct sockaddr_storage *out) {
     return 0;
 }
 
-/* Read the UDP_GRO segment size from a coalesced datagram's control messages,
- * or 0 if none present (or GRO unsupported at build time). */
-static int udp_parse_gro(struct msghdr *msg) {
+/* Read the UDP_GRO segment size from a coalesced datagram's control messages, or 0 if
+ * none present (or GRO unsupported at build time). Shared with the POSIX completion
+ * backends via udp_cmsg.h so both event models parse GRO identically. */
+int kl_udp_parse_gro(struct msghdr *msg) {
 #if defined(__linux__) && defined(UDP_GRO)
     for (struct cmsghdr *cm = CMSG_FIRSTHDR(msg); cm; cm = CMSG_NXTHDR(msg, cm)) {
         if (cm->cmsg_level == IPPROTO_UDP && cm->cmsg_type == UDP_GRO &&
@@ -450,7 +451,7 @@ static void udp_recv_drain_batched(KlUdp *udp) {
             if (m->msg_flags & MSG_TRUNC)
                 udp->truncated++;
             socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(m, &udp->recv_local) : 0;
-            int gro = udp->recv_gro ? udp_parse_gro(m) : 0;
+            int gro = udp->recv_gro ? kl_udp_parse_gro(m) : 0;
             udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(m) : -1;
             kl_udp_deliver(udp, b->iov[i].iov_base, (size_t)b->msgs[i].msg_len, gro,
                            (struct sockaddr *)&b->src[i], m->msg_namelen,
@@ -501,7 +502,7 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
             udp->truncated++;
 
         socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(&msg, &udp->recv_local) : 0;
-        int gro = udp->recv_gro ? udp_parse_gro(&msg) : 0;
+        int gro = udp->recv_gro ? kl_udp_parse_gro(&msg) : 0;
         udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(&msg) : -1;
 
         kl_udp_deliver(udp, udp->recv_buf, (size_t)n, gro,

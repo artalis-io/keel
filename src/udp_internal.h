@@ -47,14 +47,26 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
  * POSIX-only udp_cmsg.h, included by the POSIX recv TUs — kept out of this cross-platform
  * header so no platform #ifdef leaks in (struct msghdr has no Winsock equivalent). */
 
+/* Per-datagram receive metadata a completion backend extracts from the recv (control
+ * messages + flags), handed to kl_udp_comp_on_recv alongside the payload. All fields are
+ * cross-platform (no msghdr): a backend that can't obtain a value leaves it zeroed, which
+ * the delivery treats as "not present" — the same graceful degradation as the option being
+ * off. Extensible (e.g. a future recv-TOS) without churning the function signature. */
+typedef struct {
+    struct sockaddr *local;      /* local (dest) addr via pktinfo, or NULL */
+    socklen_t        local_len;  /* 0 when local is NULL */
+    int              gro_seg;    /* GRO coalesced segment size, 0 = none */
+    int              truncated;  /* 1 if the datagram was truncated (MSG_TRUNC) */
+} KlUdpRxMeta;
+
 /* Completion-loop datagram receive (PAL 8b-4c): a recv finished with `len` bytes in
- * udp->recv_buf from `src`, arriving on local address `local` (or NULL/0 when pktinfo
- * is disabled/unavailable, e.g. a backend without cmsg support). Deliver it
- * (kl_udp_deliver) then re-post the next receive. The completion driver calls this for
- * a KL_COMP_UDP_RECV event; the model-blind delivery matches the readiness recvmsg path. */
+ * udp->recv_buf from `src`, with per-datagram `meta` (local addr / GRO / truncation).
+ * Deliver it (kl_udp_deliver) then re-post the next receive. The completion driver calls
+ * this for a KL_COMP_UDP_RECV event; the model-blind delivery matches the readiness
+ * recvmsg path. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
                          struct sockaddr *src, socklen_t src_len,
-                         struct sockaddr *local, socklen_t local_len);
+                         const KlUdpRxMeta *meta);
 
 /* Completion-loop datagram send done (PAL 8b-4d): an overlapped WSASendTo of `len`
  * bytes finished — release its outstanding-bytes reservation and fire on_drain when
