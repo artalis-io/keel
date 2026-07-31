@@ -517,6 +517,24 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         return -1;
     }
 
+    /* PROXY protocol is driven only by the readiness run loop: a trusted-source connection
+     * enters KL_CONN_PROXY_HEADER and kl_conn_read_proxy_header() peeks + consumes the header
+     * (before HTTP/TLS). The completion driver has no PROXY-header phase, so the header would
+     * be misparsed as HTTP. Reject proxy_trusted_cidrs on a completion loop at init rather than
+     * silently mis-serving — an explicit, documented unsupported combination (see
+     * docs/keel_axis_audit.md; full PROXY-over-completion support is future work). */
+    if (s->proxy_cidr_count > 0 &&
+        (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION)) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        kl_free(alloc, s->proxy_cidrs, (size_t)s->proxy_cidr_count * sizeof(KlCidr));
+        s->proxy_cidrs = NULL;
+        s->proxy_cidr_count = 0;
+        kl_event_ctx_free(&s->ev);
+        kl_conn_pool_free(&s->pool);
+        kl_router_free(&s->router);
+        return -1;
+    }
+
     /* Create async file I/O backend (NULL if backend doesn't support it) */
     s->file_io = kl_file_io_create(&s->ev.loop, alloc);
     for (int i = 0; i < s->pool.capacity; i++)
