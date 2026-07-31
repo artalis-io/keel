@@ -14,12 +14,10 @@ examples/*
 # Test binaries
 tests/test_*
 !tests/test_*.c
-tests/smoke_tcp
-tests/smoke_tcp.exe
-tests/smoke_udp
-tests/smoke_udp.exe
-tests/smoke_dns
-tests/smoke_dns.exe
+# Smoke binaries (all backends: tcp/udp/dns + pollcomp/iocp/iouring + their tls/ws/async
+# variants), incl. .exe and macOS .dSYM bundles. Sources (.c) stay tracked.
+tests/smoke_*
+!tests/smoke_*.c
 
 # Benchmark binary
 bench/bench_server
