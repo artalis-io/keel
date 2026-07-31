@@ -722,4 +722,56 @@ UTEST(drain, ws_drain_pending_check) {
     c.ws = NULL;
 }
 
+/* kl_drain_data / kl_drain_consume — the peek + front-drop accessors a transport uses to
+ * flush the buffer itself (e.g. the completion loop posting an overlapped send, 8g-1). */
+UTEST(drain, data_and_consume) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    w.mode = 2;   /* would-block → everything buffers */
+
+    ASSERT_TRUE(kl_drain_data(&d) == NULL);   /* empty */
+    ASSERT_EQ(kl_drain_buffered(&d), (size_t)0);
+
+    kl_drain_write(&d, "hello world", 11);
+    ASSERT_EQ(kl_drain_buffered(&d), (size_t)11);
+    const char *p = kl_drain_data(&d);
+    ASSERT_TRUE(p != NULL);
+    ASSERT_EQ(memcmp(p, "hello world", 11), 0);
+
+    /* Drop the first 6 bytes ("hello ") — the rest shifts to the front. */
+    kl_drain_consume(&d, 6);
+    ASSERT_EQ(kl_drain_buffered(&d), (size_t)5);
+    ASSERT_EQ(memcmp(kl_drain_data(&d), "world", 5), 0);
+
+    /* Consuming more than buffered clamps to empty. */
+    kl_drain_consume(&d, 999);
+    ASSERT_EQ(kl_drain_buffered(&d), (size_t)0);
+    ASSERT_TRUE(kl_drain_data(&d) == NULL);
+
+    kl_drain_free(&d);
+}
+
+/* kl_drain_consume fires on_drain when it empties the buffer (parity with kl_drain_flush). */
+UTEST(drain, consume_fires_on_drain) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w;
+    mock_init(&w);
+    DrainCbCtx cb = { 0 };
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    kl_drain_on_drain(&d, drain_cb, &cb);
+    w.mode = 2;
+
+    kl_drain_write(&d, "abcd", 4);
+    kl_drain_consume(&d, 2);          /* partial — not empty yet, no callback */
+    ASSERT_EQ(cb.count, 0);
+    kl_drain_consume(&d, 2);          /* now empty → callback fires once */
+    ASSERT_EQ(cb.count, 1);
+
+    kl_drain_free(&d);
+}
+
 UTEST_MAIN();
