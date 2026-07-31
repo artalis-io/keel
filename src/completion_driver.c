@@ -644,12 +644,17 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         case KL_COMP_ACCEPT: comp_on_accept(server_of_ctx(ctx), &ev[i]); break;
         case KL_COMP_READ:   comp_on_read(server_of_ctx(ctx), &ev[i]);   break;
         case KL_COMP_WRITE:  comp_on_write(server_of_ctx(ctx), &ev[i]);  break;
-        case KL_COMP_UDP_RECV:   /* datagram — the target is a KlUdp*, no server */
+        case KL_COMP_UDP_RECV: {  /* datagram — the target is a KlUdp*, no server */
+            KlUdpRxMeta meta = {
+                .local     = ev[i].local_len ? (struct sockaddr *)&ev[i].local : NULL,
+                .local_len = ev[i].local_len,
+                .gro_seg   = ev[i].gro_seg,
+                .truncated = ev[i].truncated,
+            };
             kl_udp_comp_on_recv((KlUdp *)ev[i].target, ev[i].buf, ev[i].bytes,
-                                (struct sockaddr *)&ev[i].peer, ev[i].peer_len,
-                                ev[i].local_len ? (struct sockaddr *)&ev[i].local : NULL,
-                                ev[i].local_len);
+                                (struct sockaddr *)&ev[i].peer, ev[i].peer_len, &meta);
             break;
+        }
         case KL_COMP_UDP_SEND:
             kl_udp_comp_on_send((KlUdp *)ev[i].target, ev[i].bytes);
             break;

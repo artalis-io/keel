@@ -481,6 +481,12 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         }
         if (n >= 0 && op->udp->pktinfo)            /* local (dest) addr via pktinfo cmsg */
             ev->local_len = kl_udp_parse_local(&msg, &ev->local);
+        if (n >= 0) {
+            if (op->udp->recv_gro)                 /* GRO coalesced segment size */
+                ev->gro_seg = kl_udp_parse_gro(&msg);
+            if (msg.msg_flags & MSG_TRUNC)         /* datagram truncated to recv_buf */
+                ev->truncated = 1;
+        }
         return 1;
     }
     case PC_UDP_SEND: {

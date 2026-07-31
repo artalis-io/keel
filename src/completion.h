@@ -53,6 +53,8 @@ typedef struct {
     socklen_t      peer_len;                 /* 0 if unavailable */
     struct sockaddr_storage local;           /* UDP_RECV: local (dest) addr via pktinfo */
     socklen_t      local_len;                /* 0 if unavailable (pktinfo off / backend lacks it) */
+    int            gro_seg;                  /* UDP_RECV: GRO coalesced segment size, 0 = none */
+    int            truncated;                /* UDP_RECV: 1 if the datagram was truncated (MSG_TRUNC) */
 } KlCompletionEvent;
 
 struct KlEventCtx;

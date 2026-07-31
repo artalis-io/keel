@@ -27,4 +27,8 @@
  * was present. Shared by the readiness recv and the POSIX completion backends. */
 socklen_t kl_udp_parse_local(struct msghdr *msg, struct sockaddr_storage *out);
 
+/* Read the UDP_GRO coalesced segment size from a received message's control data, or 0 if
+ * none present (or GRO unsupported at build time). Shared by readiness + completion. */
+int kl_udp_parse_gro(struct msghdr *msg);
+
 #endif /* KEEL_SRC_UDP_CMSG_H */
