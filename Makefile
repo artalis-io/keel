@@ -493,7 +493,7 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # backend-neutral kl_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
-# 40 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
+# 44 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
 # client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
 # server/client now auto-adopts the completion loop's overlapped provider instead of being
 # rejected at kl_server_init) → +2 (integration, server_integration) once the completion
@@ -510,23 +510,27 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # KlUdpRxMeta to kl_udp_comp_on_recv. (udp_multicast's broadcast_flag_gates_send stays excluded:
 # it asserts a *synchronous* send EACCES, which only holds for readiness — completion sends are
 # queued async, so the error surfaces on the send completion, not the post call.)
+# → +4 (client, client_stream, redirect, dns_resolver) once kl_comp_run fired due timers
+# (kl_timer_fire) like the readiness kl_event_ctx_run does — without it every timer-driven async
+# op stalled over completion (client Happy-Eyeballs delay + request deadline, DNS timeout /
+# retransmit / deferred completion, redirect chains). The TLS-over-completion suites
+# (tls_integration, peer_cert, cross_module) + peer_addr remain — a separate root cause.
 #
 # Still excluded, NOT blocked by backend bugs (see docs/phase8f5 §3): raw kl_event_wait
 # drivers (event, event_ctx, async — a completion loop has no readiness kl_event_wait, only
 # kl_comp_run; async also builds a conn with no ctx) and readiness-cap / provider-negotiation
 # assertions (event_caps, socket_provider) are inherently readiness-axis. The remaining
-# default-provider suites (client, client_stream, redirect, peer_addr, peer_cert,
-# tls_integration, udp_multicast, unix_socket, dns_resolver,
+# default-provider suites (peer_addr, peer_cert, tls_integration, udp_multicast, unix_socket,
 # cross_module) init over completion (5a) but have per-suite behavioural gaps left to
 # triage — incremental, not a correctness prerequisite (the smokes cover the full protocol
 # surface). Backend-specific: iocp_engine.
-IOURING_TEST_SUITES = allocator body_reader chunked client_happy_eyeballs client_pool \
-                          compress connection cors decompress drain error file_io h2 \
-                          h2_client integration multipart_stream overflow parser proxy \
-                          proxy_protocol request resolver_cache response response_parser router \
-                          server_integration server_stats sse thread_pool timeout timer tls \
-                          udp udp_batching udp_offload udp_server udp_tos url websocket \
-                          websocket_client
+IOURING_TEST_SUITES = allocator body_reader chunked client client_happy_eyeballs client_pool \
+                          client_stream compress connection cors decompress dns_resolver drain \
+                          error file_io h2 h2_client integration multipart_stream overflow parser \
+                          proxy proxy_protocol redirect request resolver_cache response \
+                          response_parser router server_integration server_stats sse thread_pool \
+                          timeout timer tls udp udp_batching udp_offload udp_server udp_tos url \
+                          websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \

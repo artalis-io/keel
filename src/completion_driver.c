@@ -14,6 +14,7 @@
 #include <keel/tls.h>            /* KlTls vtable ops — TLS-over-completion (8b-5b) */
 #include <keel/websocket_server.h> /* kl_ws_server_on_readable_data — WS over completion (8e-1) */
 #include <keel/event_ctx.h>      /* kl_event_dispatch — relay watcher completions (8e-2) */
+#include <keel/timer.h>          /* kl_timer_fire — due timers on the completion tick */
 #include "internal.h"            /* kl_server_conn_release */
 #include "conn_internal.h"       /* kl_conn_dispatch_request / kl_conn_send_complete */
 #include "response_internal.h"   /* kl_response_build_iovec */
@@ -669,6 +670,16 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         }
         }
     }
+
+    /* Fire expired timers — the completion tick's counterpart to the readiness
+     * kl_event_ctx_run's kl_timer_fire(). Without this, timer-driven async work stalls
+     * over a completion loop: the client's Happy-Eyeballs attempt-delay and request
+     * deadline, the DNS resolver's per-query timeout / retransmit and deferred
+     * (shortcut) completion, redirect chains, etc. The caller clamps the drain timeout
+     * to the next timer deadline, so the wait already wakes for due timers — this fires
+     * them. (Server loops fire timers in their own run loop; this covers standalone
+     * consumers driven via kl_event_ctx_run → kl_comp_run.) */
+    kl_timer_fire(ctx);
     return n;
 }
 
