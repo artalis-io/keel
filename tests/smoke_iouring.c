@@ -20,6 +20,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>            /* calloc / free — async-stream handler ctx */
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
@@ -240,6 +241,47 @@ static int resilience_ok(KlAllocator *alloc, KlClientConfig *ccfg) {
 
 static KlServer g_srv;
 
+/* Async / long-lived streaming over the completion loop (Phase 8g): begin a stream and
+ * write the first chunk during dispatch, then SUSPEND on a one-shot timer. The timer fires
+ * on the loop thread, writes the second chunk, ends the stream, and resumes — so the body is
+ * produced across multiple event-loop ticks, not synchronously in the handler. Verifies the
+ * async-suspend/resume + streaming path drives correctly over a completion backend. */
+typedef struct {
+    KlAsyncOp op;
+    KlResponse *res;
+    KlWriteFn write_fn;
+    void *wctx;
+} AsyncStreamCtx;
+
+static void astream_resume(KlAsyncOp *op, void *ud) {
+    (void)op;
+    AsyncStreamCtx *a = ud;
+    /* On a completion loop the accepted socket is blocking, so each stream write flushes
+     * inline (through the 8g-0 drain); the second chunk + terminator go out here, and the
+     * driver closes the connection once the resume returns. */
+    a->write_fn(a->wctx, "chunk-two", 9);
+    kl_response_end_stream(a->res);
+}
+
+static void astream_timer(void *ud) {
+    AsyncStreamCtx *a = ud;
+    kl_async_complete(&g_srv, &a->op);
+    free(a);
+}
+
+static void handle_astream(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    AsyncStreamCtx *a = calloc(1, sizeof(*a));
+    if (!a) { kl_response_error(res, 500, "oom"); return; }
+    a->res = res;
+    if (kl_response_begin_stream(res, 200, &a->write_fn, &a->wctx) < 0) { free(a); return; }
+    a->write_fn(a->wctx, "chunk-one;", 10);
+    a->op.on_resume = astream_resume;
+    a->op.user_data = a;
+    kl_async_suspend(&g_srv, kl_request_conn(req), &a->op);
+    kl_timer_add(&g_srv.ev, 20, astream_timer, a);   /* resume after 20 ms */
+}
+
 static void *server_thread(void *arg) {
     (void)arg;
     kl_server_run(&g_srv);
@@ -331,6 +373,7 @@ int main(void) {
     kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
     kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
+    kl_server_route(&g_srv, "GET", "/astream", handle_astream, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
     memset(g_big, 'A', sizeof(g_big));
@@ -454,8 +497,23 @@ int main(void) {
         } else { last_rc = rc; }
     }
 
+    /* Async / long-lived streaming over completion (8g): body produced across ticks. */
+    int astream_ok = 0;
+    if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok) {
+        KlClientResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18094/astream",
+                                   NULL, 0, NULL, 0, &resp);
+        if (rc == 0) {
+            astream_ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_STREAM) - 1 &&
+                          resp.body && memcmp(resp.body, SMOKE_STREAM, sizeof(SMOKE_STREAM) - 1) == 0);
+            last_status = resp.status;
+            kl_client_response_free(&resp);
+        } else { last_rc = rc; }
+    }
+
     int udp_ok = 0;
-    if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok && udp_ready) {
+    if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok && astream_ok && udp_ready) {
         int cs = socket(AF_INET, SOCK_DGRAM, 0);
         if (cs >= 0) {
             struct timeval tmo = { 0, 500000 };
@@ -525,6 +583,7 @@ int main(void) {
     if (!file_ok) { fprintf(stderr, "smoke-iouring: GET/file (sendfile) FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!bigfile_dl_ok) { fprintf(stderr, "smoke-iouring: GET/bigfile (multi-chunk splice) FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!stream_ok) { fprintf(stderr, "smoke-iouring: GET/stream FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
+    if (!astream_ok) { fprintf(stderr, "smoke-iouring: GET/astream (async stream over completion) FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!udp_ok) { fprintf(stderr, "smoke-iouring: UDP echo FAILED\n"); return 1; }
     if (!h2_ok) { fprintf(stderr, "smoke-iouring: h2c/h2-over-completion echo FAILED\n"); return 1; }
     if (!h2pk_ok) { fprintf(stderr, "smoke-iouring: h2 prior-knowledge echo FAILED\n"); return 1; }
@@ -533,6 +592,6 @@ int main(void) {
     if (!resil_ok) { fprintf(stderr, "smoke-iouring: resilience (drop/malformed) FAILED\n"); return 1; }
     if (!big_ok) { fprintf(stderr, "smoke-iouring: large-response partial-send FAILED\n"); return 1; }
 
-    printf("smoke-iouring: over-completion roundtrip OK (GET + POST + file + bigfile-splice + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large)\n");
+    printf("smoke-iouring: over-completion roundtrip OK (GET + POST + file + bigfile-splice + stream + astream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large)\n");
     return 0;
 }
