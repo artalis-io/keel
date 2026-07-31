@@ -598,15 +598,23 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
             out[count].bytes = bytes;
             out[count].ok = 1;
             out[count].buf = op->udp->recv_buf;
-            /* WSARecvMsg fills umsg.namelen (source); WSARecvFrom fills src_len. */
-            int slen = op->via_recvmsg ? (int)op->umsg.namelen : op->src_len;
-            if (slen > 0 && (size_t)slen <= sizeof(out[count].peer)) {
-                memcpy(&out[count].peer, &op->src, (size_t)slen);
-                out[count].peer_len = (socklen_t)slen;
+            /* Only a completion that actually received a datagram (bytes > 0) carries a
+             * valid source address + pktinfo control message. A cancelled/failed overlapped
+             * recv — e.g. the outstanding WSARecvMsg completing when the socket is closed at
+             * teardown — arrives here with bytes == 0 and an unfilled name/control buffer, so
+             * its metadata must not be parsed. (kl_udp_win_parse_local is itself hardened
+             * against a zeroed control buffer, so this is belt-and-suspenders.) */
+            if (bytes > 0) {
+                /* WSARecvMsg fills umsg.namelen (source); WSARecvFrom fills src_len. */
+                int slen = op->via_recvmsg ? (int)op->umsg.namelen : op->src_len;
+                if (slen > 0 && (size_t)slen <= sizeof(out[count].peer)) {
+                    memcpy(&out[count].peer, &op->src, (size_t)slen);
+                    out[count].peer_len = (socklen_t)slen;
+                }
+                /* Local (dest) address from the pktinfo control message (WSARecvMsg path). */
+                if (op->via_recvmsg && op->udp->pktinfo)
+                    out[count].local_len = kl_udp_win_parse_local(&op->umsg, &out[count].local);
             }
-            /* Local (dest) address from the pktinfo control message (WSARecvMsg path). */
-            if (op->via_recvmsg && op->udp->pktinfo)
-                out[count].local_len = kl_udp_win_parse_local(&op->umsg, &out[count].local);
             count++;
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_UDP_SEND) {

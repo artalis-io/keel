@@ -238,6 +238,11 @@ void kl_udp_io_flush_queue(KlUdp *udp) {
  * parse it identically (no drift). */
 socklen_t kl_udp_win_parse_local(WSAMSG *msg, struct sockaddr_storage *out) {
     for (WSACMSGHDR *cm = WSA_CMSG_FIRSTHDR(msg); cm; cm = WSA_CMSG_NXTHDR(msg, cm)) {
+        /* A runt/zeroed cmsg (cmsg_len < the header size) can't advance: WSA_CMSG_NXTHDR
+         * steps by WSA_CMSG_ALIGN(cmsg_len), so cmsg_len 0 yields the same pointer forever.
+         * This happens on a control buffer that was never filled by a real recv — e.g. a
+         * cancelled overlapped WSARecvMsg completing at teardown. Stop the walk. */
+        if (cm->cmsg_len < sizeof(WSACMSGHDR)) break;
         if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_PKTINFO &&
             cm->cmsg_len >= WSA_CMSG_LEN(sizeof(IN_PKTINFO))) {
             IN_PKTINFO pi;
@@ -267,6 +272,7 @@ socklen_t kl_udp_win_parse_local(WSAMSG *msg, struct sockaddr_storage *out) {
 static int udp_parse_tos(WSAMSG *msg) {
 #if defined(IP_TOS) || defined(IPV6_TCLASS)
     for (WSACMSGHDR *cm = WSA_CMSG_FIRSTHDR(msg); cm; cm = WSA_CMSG_NXTHDR(msg, cm)) {
+        if (cm->cmsg_len < sizeof(WSACMSGHDR)) break;   /* runt cmsg — see kl_udp_win_parse_local */
         int is_tos = 0;
 #if defined(IP_TOS)
         if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_TOS)
