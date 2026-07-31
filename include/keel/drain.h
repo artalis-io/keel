@@ -115,6 +115,31 @@ int kl_drain_pending(const KlDrain *d);
 size_t kl_drain_buffered(const KlDrain *d);
 
 /**
+ * @brief Peek at the pending bytes (no copy).
+ *
+ * Returns a pointer to the contiguous buffered bytes (length = kl_drain_buffered()).
+ * Valid until the next kl_drain_write/flush/consume/free. Used by a transport that
+ * flushes the buffer itself (e.g. the completion loop posting an overlapped send) rather
+ * than via the write_fn. Returns NULL if empty.
+ *
+ * @param d Drain handle.
+ * @return Pointer to pending bytes, or NULL.
+ */
+const char *kl_drain_data(const KlDrain *d);
+
+/**
+ * @brief Drop @p n bytes from the front of the buffer (they were sent by other means).
+ *
+ * The counterpart to kl_drain_data(): after a transport flushes some/all pending bytes
+ * itself, it consumes them here. Clamped to the buffered count; fires the on_drain
+ * callback if the buffer becomes empty (parity with kl_drain_flush).
+ *
+ * @param d Drain handle.
+ * @param n Bytes to drop from the front.
+ */
+void kl_drain_consume(KlDrain *d, size_t n);
+
+/**
  * @brief Free drain buffer.
  *
  * Frees the internal buffer. Does not free the drain struct itself

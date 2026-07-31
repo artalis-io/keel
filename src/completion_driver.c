@@ -64,18 +64,47 @@ static void comp_start_body_read(struct KlServer *s, KlConn *c) {
     if (kl_comp_post_recv(c) < 0) comp_close(s, c);
 }
 
-/* Chunked/streaming response (KL_BODY_STREAM) over the completion loop. The
- * streaming write path (kl_response_send → drain / kl_stream_write) routes through
- * the socket seam, which on a completion backend is a synchronous send on the
- * (blocking) accepted socket — so a fully-produced stream is already sent, and any
- * drained remainder is flushed here. Then complete like any response.
- *
- * Scope: synchronous streams (the handler produces the whole body during dispatch).
- * Async / long-lived streams (data over later events) are not driven over the
- * completion loop in this subset. NOTE: the sends are synchronous — a slow client
- * can head-of-line block; true overlapped chunk sends are a later refinement. This
- * reuses only the existing internal kl_response_send (no platform symbol). */
+/* Drive a plaintext streaming connection over the completion loop (8g-1). Post the
+ * outbound buffer's pending bytes as ONE overlapped send — bounded, at most one in flight
+ * — instead of busy-spinning a blocking flush on a slow client (the head-of-line defect:
+ * a full socket send buffer made the old kl_drain_flush spin stall the whole loop thread).
+ * kl_comp_post_send copies the bytes (so the buffer is released immediately) and the
+ * backend surfaces one KL_COMP_WRITE when the whole chunk is out, at which point
+ * comp_on_write pumps again — posting freshly-produced bytes (async producer) or completing
+ * the response once the stream ended and the buffer drained. */
+static void comp_stream_pump(struct KlServer *s, KlConn *c) {
+    if (c->res.stream_inflight)
+        return;   /* a send is already in flight — its completion pumps the next */
+
+    KlDrain *d = &c->res.drain;
+    size_t pending = kl_drain_buffered(d);
+    if (pending > 0) {
+        KlIoVec iov = { .base = (void *)kl_drain_data(d), .len = pending };
+        int rc = kl_comp_post_send(c, &iov, 1, pending);
+        kl_drain_consume(d, pending);   /* post_send copied — release the buffer */
+        if (rc < 0) { comp_close(s, c); return; }
+        c->res.stream_inflight = 1;
+        return;
+    }
+    if (!c->res.stream_ended)
+        return;   /* async producer will write more and resume (kl_async_complete) */
+
+    /* Fully sent + ended: keep-alive read or close. */
+    KlConnState st = kl_conn_send_complete(c);
+    if (st == KL_CONN_READING) {
+        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+    } else {
+        comp_close(s, c);
+    }
+}
+
 static void comp_send_stream(struct KlServer *s, KlConn *c) {
+    if (c->res.drain_enabled) {   /* 8g-1: overlapped, non-blocking flush (no HOL) */
+        comp_stream_pump(s, c);
+        return;
+    }
+    /* No outbound buffer (no allocator at begin_stream): the legacy synchronous spin-write.
+     * Only reachable when kl_response_enable_drain was skipped, so a fully-produced stream. */
     int r;
     do { r = kl_response_send(&c->res); } while (r == 1 && c->res.stream_ended);
     if (r < 0) { comp_close(s, c); return; }
@@ -613,6 +642,14 @@ static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
         if (r < 0) { comp_close(s, c); return; }
         if (r == 1) return;                    /* another chunk now in flight */
         /* r == 0: file fully sent — fall through to complete the response */
+    }
+    /* Plaintext streaming (8g-1): the posted stream chunk is out. Pump the next buffered
+     * chunk (a slow client's remainder, or bytes an async producer wrote meanwhile), else
+     * complete once the stream ended and the buffer drained. */
+    if (!c->tls && c->res.body_mode == KL_BODY_STREAM && c->res.drain_enabled) {
+        c->res.stream_inflight = 0;
+        comp_stream_pump(s, c);
+        return;
     }
     /* The backend only reports a WRITE once the whole response is out (it handles
      * partial sends internally). Response fully sent: keep-alive reset or close. */

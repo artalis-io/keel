@@ -136,6 +136,23 @@ size_t kl_drain_buffered(const KlDrain *d) {
     return d->buf_len;
 }
 
+const char *kl_drain_data(const KlDrain *d) {
+    if (!d || d->buf_len == 0) return NULL;
+    return d->buf;
+}
+
+void kl_drain_consume(KlDrain *d, size_t n) {
+    if (!d || n == 0) return;
+    if (n >= d->buf_len) {
+        d->buf_len = 0;
+    } else {
+        d->buf_len -= n;
+        memmove(d->buf, d->buf + n, d->buf_len);
+    }
+    if (d->buf_len == 0 && d->on_drain)
+        d->on_drain(d->drain_ctx);
+}
+
 void kl_drain_free(KlDrain *d) {
     if (!d) return;
     if (d->buf) {

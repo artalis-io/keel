@@ -98,6 +98,24 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_end_stream(res);
 }
 
+/* GET /bigstream — a chunked stream far larger than a slow client's receive window, so the
+ * outbound buffer fills and the io_uring loop must flush it as overlapped sends (8g-1) rather
+ * than busy-spin a blocking send (the head-of-line defect). Each chunk is a run of 'S'. */
+#define SMOKE_BS_CHUNK   1024
+#define SMOKE_BS_CHUNKS  256
+#define SMOKE_BS_LEN     (SMOKE_BS_CHUNK * SMOKE_BS_CHUNKS)   /* 256 KiB payload */
+static void handle_bigstream(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    KlWriteFn write_fn = NULL;
+    void *wctx = NULL;
+    if (kl_response_begin_stream(res, 200, &write_fn, &wctx) < 0) return;
+    static char chunk[SMOKE_BS_CHUNK];
+    memset(chunk, 'S', sizeof(chunk));
+    for (int i = 0; i < SMOKE_BS_CHUNKS; i++)
+        write_fn(wctx, chunk, sizeof(chunk));
+    kl_response_end_stream(res);
+}
+
 static KlUdp g_udp;
 static void udp_echo(KlUdp *udp, const void *data, size_t len,
                      const struct sockaddr *src, socklen_t src_len,
@@ -282,6 +300,87 @@ static void handle_astream(KlRequest *req, KlResponse *res, void *ctx) {
     kl_timer_add(&g_srv.ev, 20, astream_timer, a);   /* resume after 20 ms */
 }
 
+/* 8g-1 head-of-line: a slow client requests the big stream and stalls (tiny receive window,
+ * no reads). The server's outbound buffer fills and it must post overlapped sends and move on
+ * — NOT busy-spin a blocking flush. We prove the loop stayed free by driving a *second*,
+ * normal request to completion while the first is stalled, then drain the first fully and
+ * verify every byte of the 256 KiB stream arrived (dechunked). Before 8g-1 comp_send_stream
+ * spin-flushed the blocked socket and starved the second client. */
+static size_t dechunk_body_len(const char *buf, size_t n) {
+    const char *end = buf + n;
+    const char *p = NULL;
+    for (const char *q = buf; q + 4 <= end; q++) {   /* find end of response headers */
+        if (q[0] == '\r' && q[1] == '\n' && q[2] == '\r' && q[3] == '\n') { p = q + 4; break; }
+    }
+    if (!p) return 0;
+    size_t payload = 0;
+    while (p < end) {
+        char *stop = NULL;
+        long sz = strtol(p, &stop, 16);              /* chunk-size line (hex) */
+        if (stop == p) break;
+        while (stop < end && *stop != '\n') stop++;
+        if (stop >= end) break;
+        p = stop + 1;
+        if (sz == 0) break;                          /* terminating chunk */
+        if (p + sz > end) break;
+        payload += (size_t)sz;
+        p += sz + 2;                                 /* skip data + trailing CRLF */
+    }
+    return payload;
+}
+
+static int bigstream_no_hol_ok(void) {
+    int a = socket(AF_INET, SOCK_STREAM, 0);
+    if (a < 0) return 0;
+    int rcv = 2048;
+    setsockopt(a, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv));
+    struct timeval tmo = { 3, 0 };
+    setsockopt(a, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo));
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(SMOKE_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+    if (connect(a, (struct sockaddr *)&to, sizeof(to)) < 0) { close(a); return 0; }
+    const char *reqa = "GET /bigstream HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    if (write(a, reqa, strlen(reqa)) < 0) { close(a); return 0; }
+
+    nap_ms(150);   /* let the server dispatch, fill A's window, post the overlapped send */
+
+    /* Conn B — a normal request must complete promptly while A is stalled (the HOL check). */
+    int b = connect_client();
+    if (b < 0) { close(a); return 0; }
+    const char *reqb = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    int b_ok = 0;
+    if (write(b, reqb, strlen(reqb)) >= 0) {
+        char bb[1024]; size_t got = 0;
+        while (got < sizeof(bb) - 1) {
+            ssize_t r = read(b, bb + got, sizeof(bb) - 1 - got);
+            if (r <= 0) break;
+            got += (size_t)r; bb[got] = 0;
+            if (strstr(bb, SMOKE_BODY)) { b_ok = 1; break; }
+        }
+    }
+    close(b);
+
+    /* Drain A fully and confirm the whole stream arrived intact. */
+    char *acc = malloc(SMOKE_BS_LEN * 2);
+    size_t alen = 0;
+    int a_ok = 0;
+    if (acc) {
+        for (;;) {
+            ssize_t r = read(a, acc + alen, (SMOKE_BS_LEN * 2) - alen);
+            if (r <= 0) break;
+            alen += (size_t)r;
+            if (alen >= SMOKE_BS_LEN * 2) break;
+        }
+        a_ok = (dechunk_body_len(acc, alen) == SMOKE_BS_LEN);
+        free(acc);
+    }
+    close(a);
+    return b_ok && a_ok;
+}
+
 static void *server_thread(void *arg) {
     (void)arg;
     kl_server_run(&g_srv);
@@ -374,6 +473,7 @@ int main(void) {
     kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/astream", handle_astream, NULL, NULL);
+    kl_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
     memset(g_big, 'A', sizeof(g_big));
@@ -512,8 +612,14 @@ int main(void) {
         } else { last_rc = rc; }
     }
 
+    /* 8g-1: overlapped streaming flush — a stalled slow reader must not block the loop, and
+     * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
+    int bigstream_ok = 0;
+    if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok && astream_ok)
+        bigstream_ok = bigstream_no_hol_ok();
+
     int udp_ok = 0;
-    if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok && astream_ok && udp_ready) {
+    if (ok && post_ok && file_ok && bigfile_dl_ok && stream_ok && astream_ok && bigstream_ok && udp_ready) {
         int cs = socket(AF_INET, SOCK_DGRAM, 0);
         if (cs >= 0) {
             struct timeval tmo = { 0, 500000 };
@@ -584,6 +690,7 @@ int main(void) {
     if (!bigfile_dl_ok) { fprintf(stderr, "smoke-iouring: GET/bigfile (multi-chunk splice) FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!stream_ok) { fprintf(stderr, "smoke-iouring: GET/stream FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
     if (!astream_ok) { fprintf(stderr, "smoke-iouring: GET/astream (async stream over completion) FAILED (rc=%d status=%d)\n", last_rc, last_status); return 1; }
+    if (!bigstream_ok) { fprintf(stderr, "smoke-iouring: bigstream overlapped flush / HOL FAILED\n"); return 1; }
     if (!udp_ok) { fprintf(stderr, "smoke-iouring: UDP echo FAILED\n"); return 1; }
     if (!h2_ok) { fprintf(stderr, "smoke-iouring: h2c/h2-over-completion echo FAILED\n"); return 1; }
     if (!h2pk_ok) { fprintf(stderr, "smoke-iouring: h2 prior-knowledge echo FAILED\n"); return 1; }
@@ -592,6 +699,6 @@ int main(void) {
     if (!resil_ok) { fprintf(stderr, "smoke-iouring: resilience (drop/malformed) FAILED\n"); return 1; }
     if (!big_ok) { fprintf(stderr, "smoke-iouring: large-response partial-send FAILED\n"); return 1; }
 
-    printf("smoke-iouring: over-completion roundtrip OK (GET + POST + file + bigfile-splice + stream + astream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large)\n");
+    printf("smoke-iouring: over-completion roundtrip OK (GET + POST + file + bigfile-splice + stream + astream + bigstream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large)\n");
     return 0;
 }

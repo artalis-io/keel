@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>   /* malloc / free / strtol — bigstream dechunk */
 #include <windows.h>
 #include <io.h>       /* _open / _lseek / _write */
 #include <fcntl.h>    /* _O_* */
@@ -71,6 +72,24 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_end_stream(res);
 }
 
+/* GET /bigstream — a chunked stream far larger than a slow client's receive window, so the
+ * outbound buffer fills and the IOCP loop must flush it as overlapped WSASend chunks (8g-1)
+ * rather than busy-spin a blocking send (the head-of-line defect). Each chunk is a run of 'S'. */
+#define SMOKE_BS_CHUNK   1024
+#define SMOKE_BS_CHUNKS  256
+#define SMOKE_BS_LEN     (SMOKE_BS_CHUNK * SMOKE_BS_CHUNKS)   /* 256 KiB payload */
+static void handle_bigstream(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    KlWriteFn write = NULL;
+    void *wctx = NULL;
+    if (kl_response_begin_stream(res, 200, &write, &wctx) < 0) return;
+    static char chunk[SMOKE_BS_CHUNK];
+    memset(chunk, 'S', sizeof(chunk));
+    for (int i = 0; i < SMOKE_BS_CHUNKS; i++)
+        write(wctx, chunk, sizeof(chunk));
+    kl_response_end_stream(res);
+}
+
 /* UDP echo over the IOCP completion loop (8b-4c): a KlUdp on the server's ctx
  * receives via WSARecvFrom completions and echoes each datagram back to its source
  * (synchronous sendto — overlapped UDP send is 8b-4d). */
@@ -94,6 +113,93 @@ static void *server_thread(void *arg) {
     return NULL;
 }
 
+/* 8g-1 head-of-line: a slow client requests the big stream and stalls (tiny receive window,
+ * no reads). The server's outbound buffer fills and it must post overlapped WSASend chunks and
+ * move on — NOT busy-spin a blocking flush. We prove the loop stayed free by driving a second,
+ * normal request to completion while the first is stalled, then drain the first fully and
+ * verify every byte of the 256 KiB stream arrived (dechunked). */
+static size_t dechunk_body_len(const char *buf, size_t n) {
+    const char *end = buf + n;
+    const char *p = NULL;
+    for (const char *q = buf; q + 4 <= end; q++) {   /* find end of response headers */
+        if (q[0] == '\r' && q[1] == '\n' && q[2] == '\r' && q[3] == '\n') { p = q + 4; break; }
+    }
+    if (!p) return 0;
+    size_t payload = 0;
+    while (p < end) {
+        char *stop = NULL;
+        long sz = strtol(p, &stop, 16);              /* chunk-size line (hex) */
+        if (stop == p) break;
+        while (stop < end && *stop != '\n') stop++;
+        if (stop >= end) break;
+        p = stop + 1;
+        if (sz == 0) break;                          /* terminating chunk */
+        if (p + sz > end) break;
+        payload += (size_t)sz;
+        p += sz + 2;                                 /* skip data + trailing CRLF */
+    }
+    return payload;
+}
+
+static int bigstream_no_hol_ok(void) {
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(SMOKE_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+
+    /* Conn A — slow reader: tiny receive window, request the big stream, then DON'T read. */
+    SOCKET a = socket(AF_INET, SOCK_STREAM, 0);
+    if (a == INVALID_SOCKET) return 0;
+    int rcv = 2048;
+    DWORD tmo = 3000;
+    setsockopt(a, SOL_SOCKET, SO_RCVBUF, (char *)&rcv, sizeof(rcv));
+    setsockopt(a, SOL_SOCKET, SO_RCVTIMEO, (char *)&tmo, sizeof(tmo));
+    if (connect(a, (struct sockaddr *)&to, sizeof(to)) != 0) { closesocket(a); return 0; }
+    const char *reqa = "GET /bigstream HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    if (send(a, reqa, (int)strlen(reqa), 0) < 0) { closesocket(a); return 0; }
+
+    nap_ms(150);   /* let the server dispatch, fill A's window, post the overlapped send */
+
+    /* Conn B — a normal request must complete promptly while A is stalled (the HOL check). */
+    int b_ok = 0;
+    SOCKET b = socket(AF_INET, SOCK_STREAM, 0);
+    if (b != INVALID_SOCKET) {
+        DWORD tb = 2000;
+        setsockopt(b, SOL_SOCKET, SO_RCVTIMEO, (char *)&tb, sizeof(tb));
+        if (connect(b, (struct sockaddr *)&to, sizeof(to)) == 0) {
+            const char *reqb = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+            if (send(b, reqb, (int)strlen(reqb), 0) >= 0) {
+                char bb[1024]; int got = 0;
+                while (got < (int)sizeof(bb) - 1) {
+                    int r = recv(b, bb + got, (int)sizeof(bb) - 1 - got, 0);
+                    if (r <= 0) break;
+                    got += r; bb[got] = 0;
+                    if (strstr(bb, SMOKE_BODY)) { b_ok = 1; break; }
+                }
+            }
+        }
+        closesocket(b);
+    }
+
+    /* Drain A fully and confirm the whole stream arrived intact. */
+    char *acc = malloc(SMOKE_BS_LEN * 2);
+    size_t alen = 0;
+    int a_ok = 0;
+    if (acc) {
+        for (;;) {
+            int r = recv(a, acc + alen, (int)((SMOKE_BS_LEN * 2) - alen), 0);
+            if (r <= 0) break;
+            alen += (size_t)r;
+            if (alen >= SMOKE_BS_LEN * 2) break;
+        }
+        a_ok = (dechunk_body_len(acc, alen) == SMOKE_BS_LEN);
+        free(acc);
+    }
+    closesocket(a);
+    return b_ok && a_ok;
+}
+
 int main(void) {
     /* Pin the server to the IOCP completion loop + overlapped provider. */
     KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
@@ -106,6 +212,7 @@ int main(void) {
     kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
     kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
+    kl_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
 
     /* Write the file the /file route serves. */
     int wfd = _open(SMOKE_FILE_PATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
@@ -218,9 +325,13 @@ int main(void) {
         }
     }
 
+    /* 8g-1: overlapped streaming flush — a stalled slow reader must not block the loop, and
+     * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
+    int bigstream_ok = (ok && post_ok && file_ok && stream_ok) ? bigstream_no_hol_ok() : 0;
+
     /* UDP echo roundtrip — a raw datagram client hits the KlUdp on the IOCP loop. */
     int udp_ok = 0;
-    if (ok && post_ok && file_ok && stream_ok && udp_ready) {
+    if (ok && post_ok && file_ok && stream_ok && bigstream_ok && udp_ready) {
         SOCKET cs = socket(AF_INET, SOCK_DGRAM, 0);
         if (cs != INVALID_SOCKET) {
             DWORD tmo = 500;
@@ -281,6 +392,10 @@ int main(void) {
                         "(WSARecvMsg/IP_PKTINFO) FAILED\n");
         return 1;
     }
-    printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + stream + UDP + udp-local)\n");
+    if (!bigstream_ok) {
+        fprintf(stderr, "smoke-iocp: bigstream overlapped flush / HOL FAILED\n");
+        return 1;
+    }
+    printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + stream + bigstream + UDP + udp-local)\n");
     return 0;
 }
