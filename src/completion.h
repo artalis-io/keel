@@ -51,6 +51,8 @@ typedef struct {
     void          *buf;                      /* UDP_RECV: the datagram buffer */
     struct sockaddr_storage peer;            /* ACCEPT peer / UDP_RECV source addr */
     socklen_t      peer_len;                 /* 0 if unavailable */
+    struct sockaddr_storage local;           /* UDP_RECV: local (dest) addr via pktinfo */
+    socklen_t      local_len;                /* 0 if unavailable (pktinfo off / backend lacks it) */
 } KlCompletionEvent;
 
 struct KlEventCtx;

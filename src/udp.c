@@ -377,10 +377,11 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
  * model-blind kl_udp_deliver (identical to the readiness recvmsg path), then re-post
  * the next receive. gro_seg 0 — GRO coalescing is a readiness/Linux offload. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
-                         struct sockaddr *src, socklen_t src_len) {
+                         struct sockaddr *src, socklen_t src_len,
+                         struct sockaddr *local, socklen_t local_len) {
     if (!udp->recv_active || !kl_handle_valid(udp->fd))
         return;
-    kl_udp_deliver(udp, buf, len, 0, src, src_len, NULL, 0);
+    kl_udp_deliver(udp, buf, len, 0, src, src_len, local, local_len);
     if (udp->recv_active && kl_handle_valid(udp->fd))
         (void)kl_comp_post_udp_recv(udp);   /* arm the next datagram */
 }

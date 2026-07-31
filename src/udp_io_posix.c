@@ -9,6 +9,7 @@
 #endif
 
 #include "udp_internal.h"
+#include "udp_cmsg.h"        /* kl_udp_parse_local — shared with the POSIX completion backends */
 #include "udp_io.h"
 
 #include <errno.h>
@@ -329,16 +330,17 @@ void kl_udp_io_flush_queue(KlUdp *udp) {
 
 /* ── Receive path ─────────────────────────────────────────────────────── */
 
-/* Extract the datagram's local (destination) address from pktinfo control
- * messages into udp->recv_local. Returns its length, or 0 if none present. */
-static socklen_t udp_parse_local(KlUdp *udp, struct msghdr *msg) {
+/* Extract the datagram's local (destination) address from pktinfo control messages
+ * into `*out`. Returns its length, or 0 if none present. Shared with the completion
+ * backends (declared in udp_cmsg.h) so both event models parse pktinfo identically. */
+socklen_t kl_udp_parse_local(struct msghdr *msg, struct sockaddr_storage *out) {
     for (struct cmsghdr *cm = CMSG_FIRSTHDR(msg); cm; cm = CMSG_NXTHDR(msg, cm)) {
 #if defined(IP_PKTINFO)
         if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_PKTINFO &&
             cm->cmsg_len >= CMSG_LEN(sizeof(struct in_pktinfo))) {
             struct in_pktinfo pi;
             memcpy(&pi, CMSG_DATA(cm), sizeof(pi));
-            struct sockaddr_in *s4 = (struct sockaddr_in *)&udp->recv_local;
+            struct sockaddr_in *s4 = (struct sockaddr_in *)out;
             memset(s4, 0, sizeof(*s4));
             s4->sin_family = AF_INET;
             s4->sin_addr = pi.ipi_addr;
@@ -349,7 +351,7 @@ static socklen_t udp_parse_local(KlUdp *udp, struct msghdr *msg) {
             cm->cmsg_len >= CMSG_LEN(sizeof(struct in6_pktinfo))) {
             struct in6_pktinfo pi;
             memcpy(&pi, CMSG_DATA(cm), sizeof(pi));
-            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&udp->recv_local;
+            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)out;
             memset(s6, 0, sizeof(*s6));
             s6->sin6_family = AF_INET6;
             s6->sin6_addr = pi.ipi6_addr;
@@ -447,7 +449,7 @@ static void udp_recv_drain_batched(KlUdp *udp) {
             struct msghdr *m = &b->msgs[i].msg_hdr;
             if (m->msg_flags & MSG_TRUNC)
                 udp->truncated++;
-            socklen_t local_len = udp->pktinfo ? udp_parse_local(udp, m) : 0;
+            socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(m, &udp->recv_local) : 0;
             int gro = udp->recv_gro ? udp_parse_gro(m) : 0;
             udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(m) : -1;
             kl_udp_deliver(udp, b->iov[i].iov_base, (size_t)b->msgs[i].msg_len, gro,
@@ -498,7 +500,7 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
         if (msg.msg_flags & MSG_TRUNC)
             udp->truncated++;
 
-        socklen_t local_len = udp->pktinfo ? udp_parse_local(udp, &msg) : 0;
+        socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(&msg, &udp->recv_local) : 0;
         int gro = udp->recv_gro ? udp_parse_gro(&msg) : 0;
         udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(&msg) : -1;
 

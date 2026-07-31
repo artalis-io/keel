@@ -43,12 +43,18 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
                     struct sockaddr *src, socklen_t src_len,
                     struct sockaddr *local, socklen_t local_len);
 
-/* Completion-loop datagram receive (PAL 8b-4c): a WSARecvFrom finished with `len`
- * bytes in udp->recv_buf from `src` — deliver it (kl_udp_deliver) then re-post the
- * next receive. The completion driver calls this for a KL_COMP_UDP_RECV event; the
- * model-blind delivery is identical to the readiness recvmsg path. */
+/* The POSIX cmsg parser (kl_udp_parse_local) + its RX control-buffer size live in the
+ * POSIX-only udp_cmsg.h, included by the POSIX recv TUs — kept out of this cross-platform
+ * header so no platform #ifdef leaks in (struct msghdr has no Winsock equivalent). */
+
+/* Completion-loop datagram receive (PAL 8b-4c): a recv finished with `len` bytes in
+ * udp->recv_buf from `src`, arriving on local address `local` (or NULL/0 when pktinfo
+ * is disabled/unavailable, e.g. a backend without cmsg support). Deliver it
+ * (kl_udp_deliver) then re-post the next receive. The completion driver calls this for
+ * a KL_COMP_UDP_RECV event; the model-blind delivery matches the readiness recvmsg path. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
-                         struct sockaddr *src, socklen_t src_len);
+                         struct sockaddr *src, socklen_t src_len,
+                         struct sockaddr *local, socklen_t local_len);
 
 /* Completion-loop datagram send done (PAL 8b-4d): an overlapped WSASendTo of `len`
  * bytes finished — release its outstanding-bytes reservation and fire on_drain when
