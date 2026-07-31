@@ -46,7 +46,7 @@
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
-#include "udp_internal.h"        /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr */
+#include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */

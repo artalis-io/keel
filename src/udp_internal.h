@@ -43,22 +43,9 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
                     struct sockaddr *src, socklen_t src_len,
                     struct sockaddr *local, socklen_t local_len);
 
-/* Control-message buffer size for a completion-loop UDP recvmsg — generously sized
- * for the RX cmsgs the kernel may attach (pktinfo local addr + GRO + TOS). Kept as a
- * plain constant here (not tied to the pktinfo struct sizes, which are glibc-gated in
- * udp_io_posix.c) so the completion backends can carry a control buffer without
- * pulling in those platform structs. */
-#define KL_UDP_RX_CTRL_SIZE 256
-
-/* Extract the datagram's local (destination) address from a received message's
- * pktinfo control data into `*out`. Returns the sockaddr length written, or 0 if no
- * pktinfo cmsg was present. Shared by the readiness recv (udp_io_posix.c) and the
- * POSIX completion backends (io_uring/pollcomp) so the two event models parse it
- * identically (no drift). POSIX-only: `struct msghdr` has no Winsock equivalent (the
- * Windows recv path uses WSAMSG in udp_io_win.c), and no Windows TU calls this. */
-#ifndef _WIN32
-socklen_t kl_udp_parse_local(struct msghdr *msg, struct sockaddr_storage *out);
-#endif
+/* The POSIX cmsg parser (kl_udp_parse_local) + its RX control-buffer size live in the
+ * POSIX-only udp_cmsg.h, included by the POSIX recv TUs — kept out of this cross-platform
+ * header so no platform #ifdef leaks in (struct msghdr has no Winsock equivalent). */
 
 /* Completion-loop datagram receive (PAL 8b-4c): a recv finished with `len` bytes in
  * udp->recv_buf from `src`, arriving on local address `local` (or NULL/0 when pktinfo

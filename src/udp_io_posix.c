@@ -9,6 +9,7 @@
 #endif
 
 #include "udp_internal.h"
+#include "udp_cmsg.h"        /* kl_udp_parse_local — shared with the POSIX completion backends */
 #include "udp_io.h"
 
 #include <errno.h>
@@ -331,7 +332,7 @@ void kl_udp_io_flush_queue(KlUdp *udp) {
 
 /* Extract the datagram's local (destination) address from pktinfo control messages
  * into `*out`. Returns its length, or 0 if none present. Shared with the completion
- * backends (declared in udp_internal.h) so both event models parse pktinfo identically. */
+ * backends (declared in udp_cmsg.h) so both event models parse pktinfo identically. */
 socklen_t kl_udp_parse_local(struct msghdr *msg, struct sockaddr_storage *out) {
     for (struct cmsghdr *cm = CMSG_FIRSTHDR(msg); cm; cm = CMSG_NXTHDR(msg, cm)) {
 #if defined(IP_PKTINFO)
