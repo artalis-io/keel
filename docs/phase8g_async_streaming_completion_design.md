@@ -15,12 +15,20 @@ last **functional** gap in the completion backends (see `docs/keel_axis_audit.md
 > `smoke-iouring` (ASan/LSan-clean on the async-ctx lifecycle). The async-suspend/resume
 > completion infra (`kl_io_engine_resume_completion` + `comp_after_state(SUSPENDED)`), the
 > #121 timer-fire fix, and 8g-0's drain together already make async streaming work over
-> completion. So no `KL_CONN_STREAMING` lifecycle rewrite is needed. The **only remaining
-> item is head-of-line blocking**: completion stream sends are still synchronous (blocking on
-> the accepted socket), which a slow client can stall. Making them overlapped is the bounded,
-> optional 8g-1 optimization (capture + `kl_comp_post_send`), with the synchronous-handler
-> memory tension in §7 — a perf/robustness nicety, not a functional gap. Recommend deferring
-> it until a slow-client-over-completion workload justifies the added complexity.
+> completion. So no `KL_CONN_STREAMING` lifecycle rewrite is needed.
+>
+> **8g-1 shipped (#130): head-of-line blocking is fixed.** Completion stream sends were
+> synchronous (busy-spinning `kl_drain_flush` on the accepted socket), so a slow client stalled
+> the loop thread. They are now overlapped: `comp_send_stream`/`comp_stream_pump` post the
+> outbound buffer via `kl_comp_post_send` (bounded, ≤1 send in flight via
+> `KlResponse.stream_inflight`), and `comp_on_write` re-pumps the next chunk or completes when
+> the stream ended and the buffer drained — using the same overlapped drive as buffered/file
+> responses, over the two new `KlDrain` peek/consume accessors (`kl_drain_data`/
+> `kl_drain_consume`). A `/bigstream` slow-reader + concurrent-fast-client HOL test on all three
+> completion smokes guards it. This closes the last **functional** gap in the completion backends
+> (see `docs/keel_axis_audit.md`); the §7 synchronous-handler memory tension is unchanged (a
+> bounded-synchronous stream must fit the drain cap). Only non-functional refinements remain
+> (io_uring multishot/buf-rings, `TransmitFile` >2 GiB chunking).
 
 > **Revision note.** Rev 1 assumed streaming was `KlDrain`-buffered and framed 8g-1 as
 > "post the first chunk, drain the rest in `comp_on_write`". Reading the actual wiring

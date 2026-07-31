@@ -14,9 +14,22 @@ re-confirms the remaining gaps are the same low/informational items (no critical
   writes a chunk, `kl_async_suspend`s on a `kl_timer_add` deadline, then resumes on the completion
   loop to write the tail + end. It exercises begin-stream → suspend → timer-fire → resume →
   end-stream entirely over io_uring, closing the open question from the 8g scoping (the outbound
-  stream buffer was wired by default in #126/8g-0). What remains is only the *bounded* head-of-line
-  concern (8g-1: multiple queued stream writes serialised behind one in-flight overlapped write),
-  which is a throughput refinement, not a correctness or orthogonality gap.
+  stream buffer was wired by default in #126/8g-0).
+
+- **Streaming head-of-line blocking over the completion loop is fixed (#130, Phase 8g-1) — the
+  last *functional* gap in the completion backends is now closed.** `comp_send_stream` used to
+  flush a streaming response by busy-spinning `kl_drain_flush`; on a slow client whose socket send
+  buffer is full, the non-blocking send returned would-block while `stream_ended`, spinning the
+  loop thread and starving every other connection. Streaming now rides the same overlapped drive as
+  buffered/file responses: `comp_stream_pump` posts the outbound buffer as one overlapped send
+  (`kl_comp_post_send` copies it; the backend surfaces one `KL_COMP_WRITE` when it is fully out) and
+  `comp_on_write` re-pumps — posting freshly-produced bytes or completing once the stream ended and
+  the buffer drained. At most one send is in flight (`KlResponse.stream_inflight`), memory stays
+  bounded by the drain cap, and the loop is free between sends. Purely completion-side
+  (`completion_driver.c` + two `KlDrain` peek/consume accessors); readiness, protocols, and the
+  public streaming API are untouched. A `/bigstream` slow-reader-plus-concurrent-fast-client HOL
+  test on all three completion smokes (pollcomp/iouring/iocp) guards it; validated on pollcomp+ASan,
+  io_uring+LSan (container), and the Windows-IOCP CI job.
 
 - **UDP datagram local (dest) address parity on the completion backends is complete (#128).** IOCP
   now captures the datagram's local address via an overlapped `WSARecvMsg` + `IP_PKTINFO` control
@@ -47,12 +60,12 @@ address is delivered.
 local/pktinfo + truncation), matching io_uring/pollcomp; the §4 row is otherwise unchanged
 (plaintext prod-ready; real-mbedTLS TLS remains BYO/out-of-CI, F3).
 
-**Still open (unchanged, all low/informational — see §3/§6):** F2 (per-suite triage so the
-default-provider integration suites run over completion), F3 (a self-hosted mbedTLS Windows-IOCP
-TLS smoke, or document the BYO gap), F4 (a completion-aware async test fixture). Non-functional,
-explicitly deferred: completion-streaming HOL (8g-1, overlapped-write pipelining), io_uring
-multishot recv / registered buf-rings (benchmark showed no current need), and `TransmitFile`
-chunking for >2 GiB file bodies.
+**Still open (all low/informational — see §3/§6):** F2 (per-suite triage so the default-provider
+integration suites run over completion), F3 (a self-hosted mbedTLS Windows-IOCP TLS smoke, or
+document the BYO gap), F4 (a completion-aware async test fixture). Non-functional, explicitly
+deferred: io_uring multishot recv / registered buf-rings (benchmark showed no current need), and
+`TransmitFile` chunking for >2 GiB file bodies. (The completion-streaming HOL item is no longer
+open — closed by #130 / 8g-1, above.)
 
 ---
 
