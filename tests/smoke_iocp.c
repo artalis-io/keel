@@ -60,6 +60,22 @@ static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_file(res, (KlSocketHandle)fd, (off_t)size);
 }
 
+/* GET /bigfile — serve a file larger than the (test-lowered, KEEL_IOCP_TF_CHUNK) TransmitFile
+ * per-call cap, so the body is transmitted as several offset-advancing TransmitFile chunks.
+ * The payload is a byte pattern (i & 0xFF) so the client can verify every chunk landed at the
+ * right file offset (a wrong offset would scramble/repeat bytes). */
+#define SMOKE_BIGFILE_PATH "smoke_iocp_bigfile.tmp"
+#define SMOKE_BIGFILE_LEN  (256 * 1024)
+static void handle_bigfile(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)req; (void)ctx;
+    int fd = _open(SMOKE_BIGFILE_PATH, _O_RDONLY | _O_BINARY);
+    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    long size = _lseek(fd, 0, SEEK_END);
+    _lseek(fd, 0, SEEK_SET);
+    kl_response_status(res, 200);
+    kl_response_file(res, (KlSocketHandle)fd, (off_t)size);
+}
+
 /* GET /stream — a synchronous chunked stream produced during the handler
  * (KL_BODY_STREAM over IOCP, 8b-3). */
 static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
@@ -201,6 +217,11 @@ static int bigstream_no_hol_ok(void) {
 }
 
 int main(void) {
+    /* Lower TransmitFile's per-call cap so a modest /bigfile splits into several chunks —
+     * exercises the offset-advancing multi-chunk TransmitFile path without a >2 GiB fixture.
+     * Must be set before the first sendfile post (the cap is read + cached once). */
+    _putenv_s("KEEL_IOCP_TF_CHUNK", "16384");
+
     /* Pin the server to the IOCP completion loop + overlapped provider. */
     KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_iocp() };
@@ -213,6 +234,7 @@ int main(void) {
     kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
     kl_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
+    kl_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
 
     /* Write the file the /file route serves. */
     int wfd = _open(SMOKE_FILE_PATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
@@ -223,6 +245,21 @@ int main(void) {
         return 1;
     }
     _close(wfd);
+
+    /* Write the /bigfile payload — a byte pattern so the client can verify chunk offsets. */
+    int bfd = _open(SMOKE_BIGFILE_PATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
+    if (bfd < 0) { fprintf(stderr, "smoke-iocp: bigfile create failed\n"); kl_server_free(&g_srv); return 1; }
+    {
+        static unsigned char bfbuf[SMOKE_BIGFILE_LEN];
+        for (int i = 0; i < SMOKE_BIGFILE_LEN; i++) bfbuf[i] = (unsigned char)(i & 0xFF);
+        int wr = _write(bfd, bfbuf, SMOKE_BIGFILE_LEN);
+        _close(bfd);
+        if (wr != SMOKE_BIGFILE_LEN) {
+            fprintf(stderr, "smoke-iocp: bigfile write failed\n");
+            kl_server_free(&g_srv);
+            return 1;
+        }
+    }
 
     /* UDP echo on the same IOCP loop (recv via overlapped WSARecvMsg). recv_pktinfo asks
      * for the datagram's local (dest) address so the WSARecvMsg + IP_PKTINFO capture is
@@ -325,13 +362,37 @@ int main(void) {
         }
     }
 
+    /* GET /bigfile — chunked TransmitFile (>cap file split into offset-advancing chunks).
+     * Verify the whole 256 KiB arrived AND matches the i&0xFF pattern (a wrong chunk offset
+     * would scramble/repeat bytes). KEEL_IOCP_TF_CHUNK=16384 → 16 chunks. */
+    int bigfile_ok = 0;
+    if (ok && post_ok && file_ok && stream_ok) {
+        KlClientResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        int rc = kl_client_request(&alloc, &ccfg, "GET",
+                                   "http://127.0.0.1:18082/bigfile",
+                                   NULL, 0, NULL, 0, &resp);
+        if (rc == 0) {
+            bigfile_ok = (resp.status == 200 && resp.body_len == SMOKE_BIGFILE_LEN && resp.body);
+            if (bigfile_ok) {
+                const unsigned char *b = (const unsigned char *)resp.body;
+                for (size_t i = 0; i < SMOKE_BIGFILE_LEN; i++)
+                    if (b[i] != (unsigned char)(i & 0xFF)) { bigfile_ok = 0; break; }
+            }
+            last_status = resp.status;
+            kl_client_response_free(&resp);
+        } else {
+            last_rc = rc;
+        }
+    }
+
     /* 8g-1: overlapped streaming flush — a stalled slow reader must not block the loop, and
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
-    int bigstream_ok = (ok && post_ok && file_ok && stream_ok) ? bigstream_no_hol_ok() : 0;
+    int bigstream_ok = (ok && post_ok && file_ok && stream_ok && bigfile_ok) ? bigstream_no_hol_ok() : 0;
 
     /* UDP echo roundtrip — a raw datagram client hits the KlUdp on the IOCP loop. */
     int udp_ok = 0;
-    if (ok && post_ok && file_ok && stream_ok && bigstream_ok && udp_ready) {
+    if (ok && post_ok && file_ok && stream_ok && bigfile_ok && bigstream_ok && udp_ready) {
         SOCKET cs = socket(AF_INET, SOCK_DGRAM, 0);
         if (cs != INVALID_SOCKET) {
             DWORD tmo = 500;
@@ -362,6 +423,7 @@ int main(void) {
     pthread_join(th, NULL);
     kl_server_free(&g_srv);
     _unlink(SMOKE_FILE_PATH);
+    _unlink(SMOKE_BIGFILE_PATH);
 
     if (!ok) {
         fprintf(stderr, "smoke-iocp: GET roundtrip FAILED (rc=%d status=%d body_len=%zu err=%d)\n",
@@ -383,6 +445,11 @@ int main(void) {
                 last_rc, last_status);
         return 1;
     }
+    if (!bigfile_ok) {
+        fprintf(stderr, "smoke-iocp: GET/bigfile (chunked TransmitFile >cap) roundtrip FAILED (rc=%d status=%d)\n",
+                last_rc, last_status);
+        return 1;
+    }
     if (!udp_ok) {
         fprintf(stderr, "smoke-iocp: UDP echo (WSARecvMsg) roundtrip FAILED\n");
         return 1;
@@ -396,6 +463,6 @@ int main(void) {
         fprintf(stderr, "smoke-iocp: bigstream overlapped flush / HOL FAILED\n");
         return 1;
     }
-    printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + stream + bigstream + UDP + udp-local)\n");
+    printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + bigfile-chunked + stream + bigstream + UDP + udp-local)\n");
     return 0;
 }
