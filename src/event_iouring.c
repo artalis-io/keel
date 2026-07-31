@@ -57,6 +57,7 @@
 #include <poll.h>                /* POLLIN/POLLOUT — poll-add mask + CQE revents */
 #include <sys/socket.h>          /* struct msghdr — UDP recvmsg/sendmsg */
 #include <sys/uio.h>             /* struct iovec */
+#include <sys/resource.h>        /* getrlimit(RLIMIT_MEMLOCK) — gate the registered pool */
 #include <fcntl.h>               /* pipe2, O_NONBLOCK — 8f-2 splice pipe */
 #include <unistd.h>              /* close — 8f-2 splice pipe */
 #include <string.h>
@@ -76,6 +77,10 @@
  * process). Registration failure degrades to malloc + SEND. */
 #define KL_IOU_REG_BUFS    16u                /* number of fixed send buffers */
 #define KL_IOU_REG_BUFSZ   (16u * 1024u)      /* size of each fixed send buffer (→ 256 KiB pool) */
+/* Register the pinned send-buffer pool only when RLIMIT_MEMLOCK is at least this generous
+ * (or unlimited). Below it, the environment is memlock-constrained (containers/k8s/CI) and
+ * pinning would risk io_uring_queue_init ENOMEM across many loops — skip the pool instead. */
+#define KL_IOU_REGBUF_MIN_MEMLOCK  (64u * 1024u * 1024u)   /* 64 MiB */
 #define KL_IOU_SPLICE_CHUNK (64u * 1024u)     /* file→pipe splice chunk (default pipe capacity) */
 
 /* Op kind. The FIRST field of both KlIouOp and KlIouWatch is this enum, so a CQE's
@@ -164,9 +169,24 @@ static unsigned iou_poll_mask(KlEventMask mask) {
 /* ── KlEventLoop lifecycle ───────────────────────────────────────────── */
 
 /* Register the fixed send-buffer pool + probe splice support (8f-2). Best-effort: on
- * failure the backend falls back to malloc+SEND / pread+SEND, so this never fails init. */
+ * failure the backend falls back to malloc+SEND / pread+SEND, so this never fails init.
+ *
+ * The registered pool (WRITE_FIXED fast path for small responses) pins
+ * RLIMIT_MEMLOCK-accounted memory. In memlock-constrained environments (containers,
+ * Kubernetes, and CI commonly cap it at a few MB) that pinning — multiplied across many
+ * short-lived event loops, e.g. a test suite that builds a fresh KlEventCtx per case —
+ * exhausts the limit, and since io_uring teardown reclaims memlock asynchronously, later
+ * io_uring_queue_init() calls fail with ENOMEM. So only register the pool when memlock is
+ * generous (unlimited, or comfortably above the pool); otherwise skip it and use the
+ * malloc+SEND fallback (identical behavior, minus the WRITE_FIXED micro-optimization). */
 static void iou_init_optim(KlIouState *st) {
-    st->reg_block = kl_malloc(st->alloc, (size_t)KL_IOU_REG_BUFS * KL_IOU_REG_BUFSZ);
+    struct rlimit ml;
+    int memlock_ample = getrlimit(RLIMIT_MEMLOCK, &ml) == 0 &&
+                        (ml.rlim_cur == RLIM_INFINITY ||
+                         ml.rlim_cur >= KL_IOU_REGBUF_MIN_MEMLOCK);
+    st->reg_block = memlock_ample
+        ? kl_malloc(st->alloc, (size_t)KL_IOU_REG_BUFS * KL_IOU_REG_BUFSZ)
+        : NULL;
     if (st->reg_block) {
         for (unsigned i = 0; i < KL_IOU_REG_BUFS; i++) {
             st->reg_iov[i].iov_base = st->reg_block + (size_t)i * KL_IOU_REG_BUFSZ;
