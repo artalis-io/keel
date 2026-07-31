@@ -1,5 +1,43 @@
 # KEEL Networking Architecture Axis Audit
 
+## Third pass — completion test-coverage-gap triage (2026-08-01)
+
+**Verdict: no hidden backend bug.** This pass triaged the low/informational test-coverage gaps
+from §3 (F2/F3/F4) — the default-provider unit suites *excluded* from the completion test set
+(`IOURING_TEST_SUITES`) — by running each over the completion backend (pollcomp, the shared
+`completion_driver.c` double) and root-causing every failure. All but one are fixture limitations
+or inherent axis-semantics differences, not backend defects; the one real functional gap (PROXY
+protocol over a completion loop) is now made safe (fail-loud at init) rather than silently
+mis-served.
+
+**Per-suite triage (excluded default-provider suites, run over pollcomp):**
+
+| Suite | Over completion | Root cause | Disposition |
+|---|---|---|---|
+| `tls_integration`, `peer_cert` | all TLS tests fail | Each defines its **own per-file passthrough mock TLS** that implements only the *readiness* vtable (`read`/`write` on the socket), not the completion-mode `feed_input`/`drain_output`; `comp_on_accept` correctly rejects a TLS conn whose backend can't do memory-BIO mode. **Not a backend bug.** | Excluded. The completion TLS path *is* covered end-to-end by `smoke-pollcomp-tls` / `smoke-iocp-tls`, which use the shared completion-capable `tests/mock_tls.h`. Enabling the unit suites over completion = port them to `tests/mock_tls.h` (future incremental). |
+| `cross_module` | 5/7 pass; 2 TLS tests fail | Same readiness-only mock as above (the 2 failures are `tls_async_suspend_resume`, `tls_middleware_compress`). Non-TLS cross-module tests pass over completion. | Excluded (same fixture reason). |
+| `unix_socket` | 18/19 pass; only `tls_over_https_unix` fails | Same readiness-only mock. Everything else works over completion. | Excluded (same fixture reason). |
+| `peer_addr` | 4/6 pass; `proxy_v1/v2_trusted` fail | **Real gap:** PROXY-protocol header handling (`KL_CONN_PROXY_HEADER` → `kl_conn_read_proxy_header`, a synchronous peek+consume) lives only in the readiness run loop; the completion driver has no PROXY-header phase, so a trusted-source PROXY header was misparsed as HTTP (mis-serve/close, no crash). | **Fixed (safe):** `kl_server_init` now rejects `proxy_trusted_cidrs` on a completion loop (`KL_ERR_INVALID_ARG`) instead of silently mis-serving — an explicit unsupported combination. Regression-tested in `smoke-pollcomp` (`proxy-reject`). Full PROXY-over-completion support (a model-blind header phase parsing from `read_buf`) is future work. |
+| `udp_multicast` | 4/5 pass; `broadcast_flag_gates_send` fails | Inherent axis semantics: the test asserts a *synchronous* `EACCES` on a broadcast send without `SO_BROADCAST`, which only holds for readiness; completion sends are queued async, so the error surfaces on the send completion, not the post. **Not a backend bug.** | Excluded by design (already documented in the Makefile). |
+| `async`, `event`, `event_ctx`, `event_caps`, `socket_provider` | n/a | Inherently readiness-axis: raw `kl_event_wait` drivers / readiness-cap + provider-negotiation assertions (a completion loop has no `kl_event_wait`, only `kl_comp_run`); `async` also hand-builds a `KlConn` with a NULL `ctx`. | Excluded by design (not applicable to a completion loop). |
+
+**F3 (mbedTLS-over-IOCP, real TLS):** unchanged — BYO / out-of-CI. The IOCP TLS *code path* is
+exercised by `smoke-iocp-tls` (the completion-mode `tests/mock_tls.h`); real mbedTLS-over-IOCP is
+a bring-your-own concern consistent with the mbedTLS policy. Accepted, not a gap to close in CI.
+
+**F4 (`test_async` over completion):** confirmed a test-harness artifact (a hand-built conn with
+NULL `ctx` driven through the resume path — would equally hit any completion backend), not a
+backend bug. The async-over-completion path itself *is* covered: `smoke-pollcomp-async` and the
+io_uring `/astream` case (#127) drive `kl_async_suspend`/resume + timer over the completion loop.
+`test_async` stays excluded (a completion-aware async fixture would be the enabling work).
+
+**Net:** one real gap closed safely (PROXY fail-loud), everything else root-caused as a fixture or
+axis-semantics limitation with the real code path covered by the completion smokes. Remaining
+incremental (not correctness) work: port the TLS unit suites to `tests/mock_tls.h`, and full
+PROXY-over-completion support.
+
+---
+
 ## Second pass — completion-axis parity + robustness follow-up (2026-07-31)
 
 **Verdict: unchanged — architecturally sound.** No new architectural findings; the orthogonality
