@@ -16,6 +16,10 @@
 #define KL_HDR_INIT_CAP 512
 #define KL_FILE_BUF_SIZE 8192   /* stack buffer for pread+write fallback */
 #define KL_WRITE_SPIN_MAX 256  /* max retries on EAGAIN/WANT_WRITE before giving up */
+/* Default backpressure bound for streaming responses (SSE / chunked): the outbound stream
+ * buffer holds unsent bytes when the client can't keep up. Bounded so a slow reader applies
+ * backpressure to the producer instead of growing memory unboundedly (8g-0). */
+#define KL_STREAM_DRAIN_MAX (1u << 20)   /* 1 MiB */
 
 /* ── Pre-built status lines — no snprintf in the hot path ─────────── */
 
@@ -661,6 +665,15 @@ int kl_response_begin_stream(KlResponse *res, int status,
     if (kl_response_header(res, "Transfer-Encoding", "chunked") < 0)
         return -1;
 
+    /* Wire the transport-neutral outbound stream buffer by default (8g-0): stream writes
+     * go through KlDrain — a non-blocking inline send with the would-block remainder
+     * buffered (bounded, backpressure), flushed by the transport (readiness:
+     * kl_conn_on_writable; completion: kl_response_send in comp_send_stream, and 8g-1's
+     * overlapped drive). This replaces the busy-spin-then-drop behavior of stream_writev_all
+     * on a slow client. If no allocator is available, fall back to the spin-write path. */
+    if (!res->drain_enabled && res->alloc)
+        (void)kl_response_enable_drain(res, res->alloc, KL_STREAM_DRAIN_MAX);
+
     KlStatusLine sl = status_line_for(res->status);
 
     KlIoVec iov[3];
@@ -680,7 +693,16 @@ int kl_response_begin_stream(KlResponse *res, int status,
     iov[iovcnt].len = 2;
     iovcnt++;
 
-    if (stream_writev_all(res_provider(res), res->conn_fd, res->tls, iov, iovcnt) < 0) return -1;
+    if (res->drain_enabled) {
+        for (int i = 0; i < iovcnt; i++) {
+            if (kl_drain_write(&res->drain, iov[i].base, iov[i].len) < 0) {
+                res->stream_error = 1;
+                return -1;
+            }
+        }
+    } else if (stream_writev_all(res_provider(res), res->conn_fd, res->tls, iov, iovcnt) < 0) {
+        return -1;
+    }
 
     res->headers_sent = 1;
     *out_write = kl_stream_write;
