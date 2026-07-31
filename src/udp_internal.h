@@ -53,8 +53,12 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
 /* Extract the datagram's local (destination) address from a received message's
  * pktinfo control data into `*out`. Returns the sockaddr length written, or 0 if no
  * pktinfo cmsg was present. Shared by the readiness recv (udp_io_posix.c) and the
- * completion backends so the two event models parse it identically (no drift). */
+ * POSIX completion backends (io_uring/pollcomp) so the two event models parse it
+ * identically (no drift). POSIX-only: `struct msghdr` has no Winsock equivalent (the
+ * Windows recv path uses WSAMSG in udp_io_win.c), and no Windows TU calls this. */
+#ifndef _WIN32
 socklen_t kl_udp_parse_local(struct msghdr *msg, struct sockaddr_storage *out);
+#endif
 
 /* Completion-loop datagram receive (PAL 8b-4c): a recv finished with `len` bytes in
  * udp->recv_buf from `src`, arriving on local address `local` (or NULL/0 when pktinfo
