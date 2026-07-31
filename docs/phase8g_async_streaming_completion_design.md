@@ -7,6 +7,21 @@ produced bodies) a transport-neutral outbound path so they drive correctly — a
 pollcomp), while also fixing streaming backpressure on the readiness backends. This is the
 last **functional** gap in the completion backends (see `docs/keel_axis_audit.md`).
 
+> **Implementation status (2026-07-31).** 8g-0 shipped (#126: the outbound `KlDrain` seam
+> wired by default + readiness backpressure fix). **8g-2's functional goal is already met and
+> now proven:** an async / long-lived streaming handler (write a chunk → `kl_async_suspend` on
+> a one-shot timer → resume → write the next chunk → end, i.e. body produced across event-loop
+> ticks) drives correctly over io_uring — verified by a new `/astream` case in
+> `smoke-iouring` (ASan/LSan-clean on the async-ctx lifecycle). The async-suspend/resume
+> completion infra (`kl_io_engine_resume_completion` + `comp_after_state(SUSPENDED)`), the
+> #121 timer-fire fix, and 8g-0's drain together already make async streaming work over
+> completion. So no `KL_CONN_STREAMING` lifecycle rewrite is needed. The **only remaining
+> item is head-of-line blocking**: completion stream sends are still synchronous (blocking on
+> the accepted socket), which a slow client can stall. Making them overlapped is the bounded,
+> optional 8g-1 optimization (capture + `kl_comp_post_send`), with the synchronous-handler
+> memory tension in §7 — a perf/robustness nicety, not a functional gap. Recommend deferring
+> it until a slow-client-over-completion workload justifies the added complexity.
+
 > **Revision note.** Rev 1 assumed streaming was `KlDrain`-buffered and framed 8g-1 as
 > "post the first chunk, drain the rest in `comp_on_write`". Reading the actual wiring
 > corrected that: `kl_response_enable_drain` has **no in-tree callers** — the drain is
