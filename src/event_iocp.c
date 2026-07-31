@@ -25,11 +25,13 @@
 #include "udp_cmsg_win.h"        /* WSARecvMsg fetch + pktinfo parse — UDP local addr (shared) */
 #include <io.h>                  /* _get_osfhandle (CRT fd → file HANDLE) */
 #include <string.h>
+#include <stdlib.h>              /* getenv / strtol — TransmitFile chunk-cap test seam */
 
 #define KL_IOCP_ACCEPT_BACKLOG 8
 #define KL_IOCP_ADDR_LEN       (sizeof(struct sockaddr_storage) + 16)
-/* TransmitFile's documented maximum bytes per single call (~2 GiB, MSDN). A larger file
- * body would need chunked, offset-advancing TransmitFile re-posts (not yet implemented). */
+/* TransmitFile's documented maximum bytes per single call (~2 GiB, MSDN). A larger file body
+ * is sent as several offset-advancing TransmitFile chunks capped at this size, re-posted from
+ * the KL_IOCP_SENDFILE completion (iocp_post_transmitfile_chunk). */
 #define KL_IOCP_TRANSMITFILE_MAX 0x7FFFFFFEu
 
 struct KlIocpOp;
@@ -81,8 +83,11 @@ typedef struct KlIocpOp {
     WSABUF        ubuf;                         /* UDP_RECV: single recv iovec into udp->recv_buf */
     char          uctrl[KL_UDP_WIN_RX_CMSG_SPACE]; /* UDP_RECV: pktinfo control buffer (local addr) */
     int           via_recvmsg;                 /* UDP_RECV: 1 = WSARecvMsg (has control), 0 = WSARecvFrom */
-    char         *sendbuf;                     /* WRITE: contiguous response copy */
-    size_t        send_total, send_done;       /* WRITE: partial-send tracking */
+    char         *sendbuf;                     /* WRITE/SENDFILE: contiguous response (head) copy */
+    size_t        send_total, send_done;       /* WRITE: partial-send tracking; SENDFILE: head len */
+    HANDLE        file_h;                       /* SENDFILE: file handle for chunked re-posts */
+    uint64_t      file_total, file_done;        /* SENDFILE: total file bytes / bytes transmitted */
+    uint64_t      file_chunk;                   /* SENDFILE: bytes in the in-flight TransmitFile */
     void         *watcher_udata;               /* WATCHER: the tagged KlWatcher pointer */
     int           watcher_removed;             /* WATCHER: kl_event_del'd — free, don't re-post */
 } KlIocpOp;
@@ -325,6 +330,48 @@ int kl_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
+/* TransmitFile's per-call byte cap. Defaults to the documented ~2 GiB maximum; a test may
+ * lower it via KEEL_IOCP_TF_CHUNK to exercise the chunked (offset-advancing) path on a small
+ * file without a >2 GiB fixture. Read + cached once (single-threaded loop; same value across
+ * servers in a process). */
+static DWORD iocp_tf_chunk_cap(void) {
+    static long cap = 0;
+    if (cap == 0) {
+        const char *e = getenv("KEEL_IOCP_TF_CHUNK");
+        long v = e ? strtol(e, NULL, 10) : 0;
+        cap = (v > 0 && (unsigned long)v <= KL_IOCP_TRANSMITFILE_MAX)
+                  ? v : (long)KL_IOCP_TRANSMITFILE_MAX;
+    }
+    return (DWORD)cap;
+}
+
+/* Post one chunk of a (possibly multi-chunk) TransmitFile: file bytes
+ * [file_done, file_done+chunk) at the OVERLAPPED file offset, with the response head
+ * prepended only on the first chunk. Re-armed by the KL_IOCP_SENDFILE completion until the
+ * whole file is out, so the driver still sees ONE KL_COMP_WRITE (head+file as a unit) and
+ * memory stays bounded (one op, ≤1 in flight). Returns 0 on posted/pending, -1 on error. */
+static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
+    uint64_t remaining = op->file_total - op->file_done;
+    DWORD    cap = iocp_tf_chunk_cap();
+    DWORD    chunk = (remaining < (uint64_t)cap) ? (DWORD)remaining : cap;
+    op->file_chunk = chunk;
+
+    memset(&op->ov, 0, sizeof(op->ov));   /* fresh op state; carry the file offset in it */
+    op->ov.Offset     = (DWORD)(op->file_done & 0xFFFFFFFFu);
+    op->ov.OffsetHigh = (DWORD)(op->file_done >> 32);
+
+    TRANSMIT_FILE_BUFFERS tb;
+    memset(&tb, 0, sizeof(tb));
+    if (op->file_done == 0 && op->send_total > 0) {   /* head rides only the first chunk */
+        tb.Head = op->sendbuf;
+        tb.HeadLength = (DWORD)op->send_total;
+    }
+    BOOL ok = TransmitFile((SOCKET)op->conn->fd, op->file_h, chunk, 0, &op->ov, &tb, 0);
+    if (!ok && WSAGetLastError() != WSA_IO_PENDING)
+        return -1;
+    return 0;
+}
+
 int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     HANDLE hfile = (HANDLE)_get_osfhandle(file_fd);
@@ -336,6 +383,9 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
     op->type = KL_IOCP_SENDFILE;
     op->alloc = c->alloc;
     op->conn = c;
+    op->file_h = hfile;
+    op->file_total = count;
+    op->file_done = 0;
 
     /* Copy the response head — TransmitFile's head buffer must outlive the op. */
     op->send_total = head_total;
@@ -347,25 +397,10 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
         off += head_iov[i].len;
     }
 
-    /* TransmitFile's byte count is a DWORD and its documented per-call maximum is
-     * ~2 GiB (TF_MAX). A larger file body needs chunked TransmitFile (offset-advancing
-     * re-posts across several completions) — not yet implemented. Rather than silently
-     * truncate via the (DWORD)count cast (or fail opaquely inside TransmitFile), reject
-     * it cleanly here so the caller closes the connection instead of sending wrong bytes. */
-    if (count > KL_IOCP_TRANSMITFILE_MAX) { iocp_op_free(op); return -1; }
-
-    TRANSMIT_FILE_BUFFERS tb;
-    memset(&tb, 0, sizeof(tb));
-    tb.Head = op->sendbuf;
-    tb.HeadLength = (DWORD)head_total;
-
-    /* File offset 0 via the OVERLAPPED (op->ov is zeroed → Offset 0). One overlapped
-     * op sends head + `count` file bytes; completion arrives as KL_IOCP_SENDFILE. */
-    BOOL ok = TransmitFile((SOCKET)c->fd, hfile, (DWORD)count, 0, &op->ov, &tb, 0);
-    if (!ok && WSAGetLastError() != WSA_IO_PENDING) {
-        iocp_op_free(op);
-        return -1;
-    }
+    /* A file larger than TransmitFile's ~2 GiB per-call cap is sent as several
+     * offset-advancing chunks, each re-posted from the KL_IOCP_SENDFILE completion (the
+     * head rides only the first). Post the first chunk here. */
+    if (iocp_post_transmitfile_chunk(op) < 0) { iocp_op_free(op); return -1; }
     return 0;
 }
 
@@ -641,8 +676,23 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
             count++;
             if (iocp_watch_post(op) < 0)
                 op->watcher_removed = 1;   /* re-post failed — freed at kl_event_close */
-        } else { /* KL_IOCP_SENDFILE — TransmitFile completes as a unit (head+file);
-                  * surface it as a completed write. */
+        } else { /* KL_IOCP_SENDFILE — one chunk of a (possibly multi-chunk) TransmitFile. */
+            op->file_done += op->file_chunk;
+            if (bytes > 0 && op->file_done < op->file_total) {
+                /* More file to send — re-post the next offset-advancing chunk (file-only);
+                 * do NOT surface until the whole head+file is out (the driver sees full
+                 * writes). On a re-post error, surface a failed write so the conn closes. */
+                if (iocp_post_transmitfile_chunk(op) < 0) {
+                    memset(&out[count], 0, sizeof(out[count]));
+                    out[count].kind = KL_COMP_WRITE;
+                    out[count].target = op->conn;
+                    out[count].ok = 0;
+                    count++;
+                    iocp_op_free(op);
+                }
+                continue;
+            }
+            /* Whole file out (or a failed/short completion) — surface the completed write. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WRITE;
             out[count].target = op->conn;

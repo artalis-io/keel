@@ -60,12 +60,19 @@ address is delivered.
 local/pktinfo + truncation), matching io_uring/pollcomp; the §4 row is otherwise unchanged
 (plaintext prod-ready; real-mbedTLS TLS remains BYO/out-of-CI, F3).
 
+**Also closed since the first pass:** IOCP file bodies larger than TransmitFile's ~2 GiB per-call
+cap are now sent as several offset-advancing `TransmitFile` chunks re-posted from the
+`KL_IOCP_SENDFILE` completion (`iocp_post_transmitfile_chunk`), transparent to the driver (one
+`KL_COMP_WRITE` when the whole head+file is out; ≤1 op in flight). Previously such a body was
+rejected. A `/bigfile` smoke case with a test-lowered per-call cap (`KEEL_IOCP_TF_CHUNK`) verifies
+the multi-chunk path delivers every byte at the right offset without needing a >2 GiB fixture.
+
 **Still open (all low/informational — see §3/§6):** F2 (per-suite triage so the default-provider
 integration suites run over completion), F3 (a self-hosted mbedTLS Windows-IOCP TLS smoke, or
 document the BYO gap), F4 (a completion-aware async test fixture). Non-functional, explicitly
-deferred: io_uring multishot recv / registered buf-rings (benchmark showed no current need), and
-`TransmitFile` chunking for >2 GiB file bodies. (The completion-streaming HOL item is no longer
-open — closed by #130 / 8g-1, above.)
+deferred: io_uring multishot recv / registered buf-rings (benchmark showed no current need). (The
+completion-streaming HOL and TransmitFile >2 GiB items are no longer open — closed by #130 / 8g-1
+and the TransmitFile chunking above.)
 
 ---
 
