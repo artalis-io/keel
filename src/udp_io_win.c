@@ -30,13 +30,14 @@
 #include <windows.h>
 #include <mswsock.h>      /* WSAID_WSARECVMSG / WSAID_WSASENDMSG, LPFN_WSARECVMSG/SENDMSG */
 #include <ws2tcpip.h>     /* IN_PKTINFO / IN6_PKTINFO / WSA_CMSG_* */
+#include "udp_cmsg_win.h" /* shared WSARecvMsg fetch + pktinfo parse (reused by event_iocp.c) */
 
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
 
 /* RX control buffer: pktinfo (local address) + TOS cmsgs (no GRO on Windows). */
-#define UDP_RX_CMSG_SPACE (WSA_CMSG_SPACE(sizeof(IN6_PKTINFO)) + WSA_CMSG_SPACE(sizeof(int)))
+#define UDP_RX_CMSG_SPACE KL_UDP_WIN_RX_CMSG_SPACE
 /* TX control buffer: a source-pin pktinfo cmsg + a TOS/Traffic-Class cmsg. */
 #define UDP_TX_CMSG_SPACE (WSA_CMSG_SPACE(sizeof(IN6_PKTINFO)) + WSA_CMSG_SPACE(sizeof(int)))
 
@@ -49,7 +50,7 @@
 static LPFN_WSARECVMSG udp_fn_recvmsg = NULL;
 static LPFN_WSASENDMSG udp_fn_sendmsg = NULL;
 
-static LPFN_WSARECVMSG udp_get_recvmsg(SOCKET s) {
+LPFN_WSARECVMSG kl_udp_win_get_recvmsg(SOCKET s) {
     if (udp_fn_recvmsg)
         return udp_fn_recvmsg;
     GUID guid = WSAID_WSARECVMSG;
@@ -232,13 +233,21 @@ void kl_udp_io_flush_queue(KlUdp *udp) {
 
 /* Extract the datagram's local (destination) address from pktinfo control
  * messages into udp->recv_local. Returns its length, or 0 if none present. */
-static socklen_t udp_parse_local(KlUdp *udp, WSAMSG *msg) {
+/* Shared with the IOCP completion backend via udp_cmsg_win.h — writes the pktinfo local
+ * (destination) address into `*out`, so the readiness and completion Windows recv paths
+ * parse it identically (no drift). */
+socklen_t kl_udp_win_parse_local(WSAMSG *msg, struct sockaddr_storage *out) {
     for (WSACMSGHDR *cm = WSA_CMSG_FIRSTHDR(msg); cm; cm = WSA_CMSG_NXTHDR(msg, cm)) {
+        /* A runt/zeroed cmsg (cmsg_len < the header size) can't advance: WSA_CMSG_NXTHDR
+         * steps by WSA_CMSG_ALIGN(cmsg_len), so cmsg_len 0 yields the same pointer forever.
+         * This happens on a control buffer that was never filled by a real recv — e.g. a
+         * cancelled overlapped WSARecvMsg completing at teardown. Stop the walk. */
+        if (cm->cmsg_len < sizeof(WSACMSGHDR)) break;
         if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_PKTINFO &&
             cm->cmsg_len >= WSA_CMSG_LEN(sizeof(IN_PKTINFO))) {
             IN_PKTINFO pi;
             memcpy(&pi, WSA_CMSG_DATA(cm), sizeof(pi));
-            struct sockaddr_in *s4 = (struct sockaddr_in *)&udp->recv_local;
+            struct sockaddr_in *s4 = (struct sockaddr_in *)out;
             memset(s4, 0, sizeof(*s4));
             s4->sin_family = AF_INET;
             s4->sin_addr = pi.ipi_addr;
@@ -248,7 +257,7 @@ static socklen_t udp_parse_local(KlUdp *udp, WSAMSG *msg) {
             cm->cmsg_len >= WSA_CMSG_LEN(sizeof(IN6_PKTINFO))) {
             IN6_PKTINFO pi;
             memcpy(&pi, WSA_CMSG_DATA(cm), sizeof(pi));
-            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&udp->recv_local;
+            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)out;
             memset(s6, 0, sizeof(*s6));
             s6->sin6_family = AF_INET6;
             s6->sin6_addr = pi.ipi6_addr;
@@ -263,6 +272,7 @@ static socklen_t udp_parse_local(KlUdp *udp, WSAMSG *msg) {
 static int udp_parse_tos(WSAMSG *msg) {
 #if defined(IP_TOS) || defined(IPV6_TCLASS)
     for (WSACMSGHDR *cm = WSA_CMSG_FIRSTHDR(msg); cm; cm = WSA_CMSG_NXTHDR(msg, cm)) {
+        if (cm->cmsg_len < sizeof(WSACMSGHDR)) break;   /* runt cmsg — see kl_udp_win_parse_local */
         int is_tos = 0;
 #if defined(IP_TOS)
         if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_TOS)
@@ -292,7 +302,7 @@ static int udp_parse_tos(WSAMSG *msg) {
 
 void kl_udp_io_recv_drain(KlUdp *udp) {
     SOCKET s = (SOCKET)udp->fd;
-    LPFN_WSARECVMSG fn = udp_get_recvmsg(s);
+    LPFN_WSARECVMSG fn = kl_udp_win_get_recvmsg(s);
 
     union {
         WSACMSGHDR    align;
@@ -367,7 +377,7 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
             }
         }
 
-        socklen_t local_len = (have_control && udp->pktinfo) ? udp_parse_local(udp, &msg) : 0;
+        socklen_t local_len = (have_control && udp->pktinfo) ? kl_udp_win_parse_local(&msg, &udp->recv_local) : 0;
         udp->recv_tos_val = (have_control && udp->recv_tos) ? udp_parse_tos(&msg) : -1;
 
         /* Windows has no UDP GRO → gro_seg is always 0. */

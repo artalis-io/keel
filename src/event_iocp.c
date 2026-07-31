@@ -22,6 +22,7 @@
 #include "sockcompat.h"          /* winsock2.h */
 #include <windows.h>             /* IOCP */
 #include <mswsock.h>             /* AcceptEx / GetAcceptExSockaddrs / TransmitFile */
+#include "udp_cmsg_win.h"        /* WSARecvMsg fetch + pktinfo parse — UDP local addr (shared) */
 #include <io.h>                  /* _get_osfhandle (CRT fd → file HANDLE) */
 #include <string.h>
 
@@ -74,8 +75,12 @@ typedef struct KlIocpOp {
     KlUdp        *udp;                          /* UDP_RECV */
     SOCKET        accept_sock;                 /* ACCEPT */
     char          accept_buf[2 * KL_IOCP_ADDR_LEN];  /* ACCEPT: local+remote addr */
-    struct sockaddr_storage src;               /* UDP_RECV: source addr (WSARecvFrom) */
+    struct sockaddr_storage src;               /* UDP_RECV: source addr (WSARecvMsg name) */
     int           src_len;                     /* UDP_RECV: source addr length */
+    WSAMSG        umsg;                         /* UDP_RECV: WSARecvMsg header (name + buf + control) */
+    WSABUF        ubuf;                         /* UDP_RECV: single recv iovec into udp->recv_buf */
+    char          uctrl[KL_UDP_WIN_RX_CMSG_SPACE]; /* UDP_RECV: pktinfo control buffer (local addr) */
+    int           via_recvmsg;                 /* UDP_RECV: 1 = WSARecvMsg (has control), 0 = WSARecvFrom */
     char         *sendbuf;                     /* WRITE: contiguous response copy */
     size_t        send_total, send_done;       /* WRITE: partial-send tracking */
     void         *watcher_udata;               /* WATCHER: the tagged KlWatcher pointer */
@@ -364,17 +369,13 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
     return 0;
 }
 
-/* Post one overlapped WSARecvFrom for a UDP socket on the completion loop (8b-4c).
- * Receives into the socket's own recv buffer and captures the source address; the
- * completion surfaces a KL_COMP_UDP_RECV event.
- *
- * NOTE: this captures the SOURCE address only. The datagram's local (destination)
- * address (KlCompletionEvent.local, used by kl_udp_send_to_from reply-from) needs a
- * pktinfo control message, which WSARecvFrom does not deliver — that requires the
- * WSARecvMsg extension (WSAID_WSARECVMSG) with an IP_PKTINFO control buffer, the
- * Winsock analogue of the io_uring/pollcomp recvmsg path. Until then IOCP leaves
- * ev->local_len = 0 (the event is memset), so the driver delivers a NULL local —
- * the same graceful degradation as pktinfo being disabled. Follow-up. */
+/* Post one overlapped UDP receive on the completion loop (8b-4c). Prefers WSARecvMsg
+ * (WSAID_WSARECVMSG) so an IP_PKTINFO control message yields the datagram's local
+ * (destination) address (KlCompletionEvent.local, used by kl_udp_send_to_from reply-from) —
+ * the Winsock analogue of the io_uring/pollcomp recvmsg path, sharing the fetch + parse with
+ * the readiness Windows recv (udp_cmsg_win.h). Falls back to WSARecvFrom (source address
+ * only, local left 0) if the extension is unavailable. Either way the completion surfaces a
+ * KL_COMP_UDP_RECV event. */
 int kl_comp_post_udp_recv(KlUdp *udp) {
     KlIocpState *st = udp->ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
@@ -385,6 +386,28 @@ int kl_comp_post_udp_recv(KlUdp *udp) {
     op->udp = udp;
     op->src_len = (int)sizeof(op->src);
 
+    LPFN_WSARECVMSG recvmsg = kl_udp_win_get_recvmsg((SOCKET)udp->fd);
+    if (recvmsg) {
+        op->via_recvmsg = 1;
+        op->ubuf.len = (ULONG)udp->recv_buf_size;
+        op->ubuf.buf = (char *)udp->recv_buf;
+        op->umsg.name = (SOCKADDR *)&op->src;
+        op->umsg.namelen = (INT)sizeof(op->src);
+        op->umsg.lpBuffers = &op->ubuf;
+        op->umsg.dwBufferCount = 1;
+        op->umsg.Control.len = (ULONG)sizeof(op->uctrl);
+        op->umsg.Control.buf = op->uctrl;
+        op->umsg.dwFlags = 0;
+        DWORD recvd = 0;
+        int rc = recvmsg((SOCKET)udp->fd, &op->umsg, &recvd, &op->ov, NULL);
+        if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+            iocp_op_free(op);
+            return -1;
+        }
+        return 0;
+    }
+
+    /* Fallback: no WSARecvMsg extension — source address only. */
     WSABUF buf = { (ULONG)udp->recv_buf_size, (char *)udp->recv_buf };
     DWORD flags = 0, recvd = 0;
     int rc = WSARecvFrom((SOCKET)udp->fd, &buf, 1, &recvd, &flags,
@@ -575,9 +598,22 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
             out[count].bytes = bytes;
             out[count].ok = 1;
             out[count].buf = op->udp->recv_buf;
-            if (op->src_len > 0 && (size_t)op->src_len <= sizeof(out[count].peer)) {
-                memcpy(&out[count].peer, &op->src, (size_t)op->src_len);
-                out[count].peer_len = (socklen_t)op->src_len;
+            /* Only a completion that actually received a datagram (bytes > 0) carries a
+             * valid source address + pktinfo control message. A cancelled/failed overlapped
+             * recv — e.g. the outstanding WSARecvMsg completing when the socket is closed at
+             * teardown — arrives here with bytes == 0 and an unfilled name/control buffer, so
+             * its metadata must not be parsed. (kl_udp_win_parse_local is itself hardened
+             * against a zeroed control buffer, so this is belt-and-suspenders.) */
+            if (bytes > 0) {
+                /* WSARecvMsg fills umsg.namelen (source); WSARecvFrom fills src_len. */
+                int slen = op->via_recvmsg ? (int)op->umsg.namelen : op->src_len;
+                if (slen > 0 && (size_t)slen <= sizeof(out[count].peer)) {
+                    memcpy(&out[count].peer, &op->src, (size_t)slen);
+                    out[count].peer_len = (socklen_t)slen;
+                }
+                /* Local (dest) address from the pktinfo control message (WSARecvMsg path). */
+                if (op->via_recvmsg && op->udp->pktinfo)
+                    out[count].local_len = kl_udp_win_parse_local(&op->umsg, &out[count].local);
             }
             count++;
             iocp_op_free(op);

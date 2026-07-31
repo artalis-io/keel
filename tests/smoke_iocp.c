@@ -75,10 +75,14 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
  * receives via WSARecvFrom completions and echoes each datagram back to its source
  * (synchronous sendto — overlapped UDP send is 8b-4d). */
 static KlUdp g_udp;
+/* Set when a received datagram carried its local (destination) address — proves the IOCP
+ * WSARecvMsg + IP_PKTINFO path captures it (parity with io_uring/pollcomp). */
+static int g_udp_local_ok = 0;
 static void udp_echo(KlUdp *udp, const void *data, size_t len,
                      const struct sockaddr *src, socklen_t src_len,
                      const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)local; (void)local_len; (void)ud;
+    (void)ud;
+    if (local && local_len > 0) g_udp_local_ok = 1;
     kl_udp_send_to(udp, data, len, src, src_len);
 }
 
@@ -113,9 +117,11 @@ int main(void) {
     }
     _close(wfd);
 
-    /* UDP echo on the same IOCP loop (recv via WSARecvFrom completions, 8b-4c). */
+    /* UDP echo on the same IOCP loop (recv via overlapped WSARecvMsg). recv_pktinfo asks
+     * for the datagram's local (dest) address so the WSARecvMsg + IP_PKTINFO capture is
+     * exercised (udp_echo asserts local was delivered). */
     KlUdpConfig ucfg = { .ctx = &g_srv.ev, .bind_addr = "127.0.0.1",
-                         .bind_port = SMOKE_UDP_PORT };
+                         .bind_port = SMOKE_UDP_PORT, .recv_pktinfo = 1 };
     int udp_ready = (kl_udp_init(&g_udp, &ucfg) == 0 &&
                      kl_udp_recv_start(&g_udp, udp_echo, NULL) == 0);
     if (!udp_ready) fprintf(stderr, "smoke-iocp: udp init/recv_start failed\n");
@@ -267,9 +273,14 @@ int main(void) {
         return 1;
     }
     if (!udp_ok) {
-        fprintf(stderr, "smoke-iocp: UDP echo (WSARecvFrom) roundtrip FAILED\n");
+        fprintf(stderr, "smoke-iocp: UDP echo (WSARecvMsg) roundtrip FAILED\n");
         return 1;
     }
-    printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + stream + UDP)\n");
+    if (!g_udp_local_ok) {
+        fprintf(stderr, "smoke-iocp: UDP local (dest) address not captured over IOCP "
+                        "(WSARecvMsg/IP_PKTINFO) FAILED\n");
+        return 1;
+    }
+    printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + stream + UDP + udp-local)\n");
     return 0;
 }
