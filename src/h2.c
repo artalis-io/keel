@@ -563,6 +563,17 @@ KlConnState kl_h2_server_feed(KlConn *c, const void *data, size_t len) {
         if (h2c->session->flush(h2c->session) < 0)
             return KL_CONN_CLOSED;
     }
+
+    /* Session-done close: once the session (if it can report readiness) wants
+     * neither read nor write, it has terminated — e.g. it sent a GOAWAY for a
+     * protocol violation, or finished a graceful shutdown. Close now rather than
+     * lingering until the peer times out. Flushed above, so the GOAWAY is on the
+     * wire. want_read is optional (NULL → legacy: stay open until peer closes). */
+    if (h2c->session->want_read &&
+        !h2c->session->want_read(h2c->session) &&
+        !h2c->session->want_write(h2c->session))
+        return KL_CONN_CLOSED;
+
     return KL_CONN_HTTP2;
 }
 

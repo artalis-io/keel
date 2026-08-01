@@ -80,8 +80,47 @@ interop-curl: $(LIB)
 	  echo "$$out" | grep -q "hello h2 e2e" || { echo "body mismatch"; exit 1; }; \
 	  echo "integrations/nghttp2: curl --http2-prior-knowledge interop OK"
 
+# HTTP/2 protocol conformance: run h2spec (https://github.com/summerwind/h2spec)
+# against the KEEL nghttp2 server (h2c). Reports pass/fail; informational — the
+# residual failures are shared with nghttp2's own reference server (nghttpd), see
+# README. Requires h2spec on PATH (brew install h2spec).
+INTEROP_PORT ?= 18478
+h2spec: $(LIB)
+	@command -v h2spec >/dev/null || { echo "h2spec not found (brew install h2spec)"; exit 1; }
+	$(CC) $(CFLAGS) -o e2e/interop_server e2e/interop_server.c \
+	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	./e2e/interop_server & echo $$! > /tmp/keel_h2_h2spec.pid; sleep 1; \
+	  h2spec -h 127.0.0.1 -p $(INTEROP_PORT); rc=$$?; \
+	  kill $$(cat /tmp/keel_h2_h2spec.pid) 2>/dev/null; rm -f /tmp/keel_h2_h2spec.pid; \
+	  echo "integrations/nghttp2: h2spec run complete (see summary above)"; \
+	  exit $$rc
+
+# Concurrency/load interop: h2load (nghttp2's load tool) drives many multiplexed
+# streams at the KEEL server. Requires h2load on PATH (brew install nghttp2).
+h2load: $(LIB)
+	@command -v h2load >/dev/null || { echo "h2load not found (brew install nghttp2)"; exit 1; }
+	$(CC) $(CFLAGS) -o e2e/interop_server e2e/interop_server.c \
+	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	./e2e/interop_server & echo $$! > /tmp/keel_h2_load.pid; sleep 1; \
+	  h2load -n 10000 -c 8 -m 20 http://127.0.0.1:$(INTEROP_PORT)/hello; rc=$$?; \
+	  kill $$(cat /tmp/keel_h2_load.pid) 2>/dev/null; rm -f /tmp/keel_h2_load.pid; \
+	  exit $$rc
+
+# Last interop quadrant: the KEEL nghttp2 *client* against a third-party server
+# (nghttpd, h2c). Requires nghttpd on PATH (brew install nghttp2).
+interop-nghttpd: $(LIB)
+	@command -v nghttpd >/dev/null || { echo "nghttpd not found (brew install nghttp2)"; exit 1; }
+	$(CC) $(CFLAGS) -o e2e/client_probe e2e/client_probe.c \
+	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	@d=$$(mktemp -d); echo '{"ok":true}' > $$d/index.html; \
+	  nghttpd --no-tls -d $$d 18479 & echo $$! > /tmp/keel_ngd.pid; sleep 1; \
+	  ./e2e/client_probe 127.0.0.1 18479 /; rc=$$?; \
+	  kill $$(cat /tmp/keel_ngd.pid) 2>/dev/null; rm -rf $$d /tmp/keel_ngd.pid; \
+	  test $$rc -eq 0 && echo "integrations/nghttp2: KEEL client <-> nghttpd interop OK"; \
+	  exit $$rc
+
 clean:
 	rm -f $(LIB) $(OBJ) h2_nghttp2_client.d h2_nghttp2_server.d \
-	      e2e/test_roundtrip e2e/e2e_socket e2e/interop_server link_smoke
+	      e2e/test_roundtrip e2e/e2e_socket e2e/interop_server e2e/client_probe link_smoke
 
-.PHONY: all test clean
+.PHONY: all test e2e interop-curl h2spec h2load interop-nghttpd clean

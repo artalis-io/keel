@@ -21,6 +21,7 @@ int main(void) {
     KlServer s;
     if (kl_server_init(&s, &cfg) < 0) { fprintf(stderr, "server init failed\n"); return 1; }
     kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_server_route(&s, "GET", "/", handle_hello, NULL, NULL);   /* h2spec default path */
     fprintf(stderr, "interop_server: h2c on 127.0.0.1:%d\n", INTEROP_PORT);
     kl_server_run(&s);
     kl_server_free(&s);
