@@ -145,6 +145,20 @@ KlConnState kl_conn_on_handshake(KlConn *c);
 int kl_conn_read_proxy_header(KlConn *c);
 
 /**
+ * @brief Ingest a PROXY header from bytes already in read_buf (completion path).
+ *
+ * The completion counterpart of kl_conn_read_proxy_header(): the header bytes arrived via an
+ * overlapped recv into read_buf[0..len] rather than a socket peek. On a real header, sets
+ * peer_addr from it (KL_PEER_PROXY).
+ *
+ * @param c   Connection (parses read_buf[0..len]).
+ * @param len Bytes available in read_buf.
+ * @return Header bytes to consume (0 = not a PROXY header, proceed), -1 = malformed/close,
+ *         -2 = need more bytes.
+ */
+int kl_conn_ingest_proxy(KlConn *c, size_t len);
+
+/**
  * @brief Process readable data on a connection (parse headers/body, invoke handler).
  * @return New connection state.
  */

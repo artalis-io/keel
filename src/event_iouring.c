@@ -418,7 +418,7 @@ int kl_comp_post_recv(KlConn *c) {
     op->conn = c;
     op->fd = c->fd;
 
-    if (c->tls) {
+    if (c->tls && c->state != KL_CONN_PROXY_HEADER) {  /* PROXY header is plaintext, pre-TLS */
         /* TLS: recv ciphertext into a transient buffer; read_buf holds plaintext.
          * kl_comp_drain feeds this to the engine (feed_input) before completing. */
         op->type = IOU_TLS_RECV;

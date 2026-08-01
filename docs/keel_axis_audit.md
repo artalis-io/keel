@@ -15,7 +15,7 @@ mis-served.
 | Suite | Over completion | Root cause | Disposition |
 |---|---|---|---|
 | `tls_integration`, `peer_cert`, `cross_module`, `unix_socket` | TLS tests failed | Each defined its **own per-file passthrough mock TLS** that implemented only the *readiness* vtable (`read`/`write` on the socket), not the completion-mode `feed_input`/`drain_output`; `comp_on_accept` correctly rejects a TLS conn whose backend can't do memory-BIO mode. **Not a backend bug.** | **Now enabled (2026-08-01 follow-up):** ported all four to the shared completion-capable `tests/mock_tls.h` (the same mock `smoke-pollcomp-tls`/`smoke-iocp-tls` use; `peer_cert` installs its canned cert via the new `mock_tls_peer_cert_fn` hook). They now pass over readiness *and* completion (pollcomp + real io_uring) and are in `IOURING_TEST_SUITES` (44 → 48). Unit-level TLS-over-completion coverage, complementing the smokes. |
-| `peer_addr` | 4/6 pass; `proxy_v1/v2_trusted` fail | **Real gap:** PROXY-protocol header handling (`KL_CONN_PROXY_HEADER` → `kl_conn_read_proxy_header`, a synchronous peek+consume) lives only in the readiness run loop; the completion driver has no PROXY-header phase, so a trusted-source PROXY header was misparsed as HTTP (mis-serve/close, no crash). | **Fixed (safe):** `kl_server_init` now rejects `proxy_trusted_cidrs` on a completion loop (`KL_ERR_INVALID_ARG`) instead of silently mis-serving — an explicit unsupported combination. Regression-tested in `smoke-pollcomp` (`proxy-reject`). Full PROXY-over-completion support (a model-blind header phase parsing from `read_buf`) is future work. |
+| `peer_addr` | 4/6 pass; `proxy_v1/v2_trusted` fail | **Real gap (now fixed):** PROXY-protocol header handling (`KL_CONN_PROXY_HEADER`) originally lived only in the readiness run loop; the completion driver had no PROXY-header phase, so a trusted-source PROXY header was misparsed as HTTP. | **Fully supported (2026-08-01 follow-up):** the completion driver grew a PROXY-header phase — `comp_on_accept` enters `KL_CONN_PROXY_HEADER` for a trusted peer, `comp_drive_proxy` parses the plaintext header from `read_buf` via the model-blind `kl_conn_ingest_proxy` and then enters the real initial state (TLS handshake feeding the buffered ClientHello, or HTTP read). The header recv is plaintext even for a TLS conn (`post_recv` skips the TLS branch while `state == KL_CONN_PROXY_HEADER`, all three backends). `peer_addr` now passes 6/6 over completion and is in `IOURING_TEST_SUITES`; a PROXY-v1 roundtrip is in `smoke-pollcomp` + `smoke-iocp`. The #134 fail-loud init guard was removed. |
 | `udp_multicast` | 4/5 pass; `broadcast_flag_gates_send` fails | Inherent axis semantics: the test asserts a *synchronous* `EACCES` on a broadcast send without `SO_BROADCAST`, which only holds for readiness; completion sends are queued async, so the error surfaces on the send completion, not the post. **Not a backend bug.** | Excluded by design (already documented in the Makefile). |
 | `async`, `event`, `event_ctx`, `event_caps`, `socket_provider` | n/a | Inherently readiness-axis: raw `kl_event_wait` drivers / readiness-cap + provider-negotiation assertions (a completion loop has no `kl_event_wait`, only `kl_comp_run`); `async` also hand-builds a `KlConn` with a NULL `ctx`. | Excluded by design (not applicable to a completion loop). |
 
@@ -29,12 +29,14 @@ backend bug. The async-over-completion path itself *is* covered: `smoke-pollcomp
 io_uring `/astream` case (#127) drive `kl_async_suspend`/resume + timer over the completion loop.
 `test_async` stays excluded (a completion-aware async fixture would be the enabling work).
 
-**Net:** one real gap closed safely (PROXY fail-loud); the four TLS-touching suites are now ported
-to the shared completion mock and run over completion (`IOURING_TEST_SUITES` 44 → 48); everything
-else root-caused as an inherent axis-semantics limitation (`udp_multicast` async send; the
-readiness-axis driver suites). The only remaining completion-axis item is a genuine feature —
-full PROXY-over-completion support (a model-blind header phase parsing from `read_buf`) — plus the
-accepted BYO mbedTLS-over-IOCP limitation (F3).
+**Net:** the completion backends are now at functional **and** test parity with readiness. The
+TLS-touching suites were ported to the shared completion mock, and PROXY-over-completion was
+implemented (`comp_drive_proxy` + `kl_conn_ingest_proxy`), so `IOURING_TEST_SUITES` grew 44 → 49
+(the four TLS suites + `peer_addr`). The only remaining excludes are inherent axis-semantics or
+readiness-axis tests: `udp_multicast`'s `broadcast_flag_gates_send` (asserts a synchronous EACCES;
+completion sends are async) and the raw-`kl_event_wait` / provider-negotiation driver suites
+(`async`, `event`, `event_ctx`, `event_caps`, `socket_provider`). The one accepted limitation is
+BYO mbedTLS-over-IOCP (F3, out-of-CI by policy).
 
 ---
 

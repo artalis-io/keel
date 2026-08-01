@@ -129,6 +129,64 @@ static void *server_thread(void *arg) {
     return NULL;
 }
 
+/* PROXY-over-IOCP: a trusted-source connection sends a plaintext PROXY v1 header before its
+ * HTTP request; the completion driver's PROXY-header phase (comp_drive_proxy) must parse it and
+ * the handler must see the real client address (1.2.3.4), not the socket's 127.0.0.1. Exercises
+ * accept → KL_CONN_PROXY_HEADER → parse → READING → handler over the IOCP loop (the header recv
+ * is plaintext even though this is a completion backend). */
+#define SMOKE_PROXY_PORT 18084
+static char g_proxy_ip[64];
+static void handle_proxy_probe(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    uint16_t port = 0;
+    g_proxy_ip[0] = '\0';
+    kl_request_peer_addr(req, g_proxy_ip, sizeof(g_proxy_ip), &port);
+    kl_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
+}
+static KlServer g_proxy_srv;
+static void *proxy_server_thread(void *arg) { (void)arg; kl_server_run(&g_proxy_srv); return NULL; }
+static int proxy_over_completion_ok(void) {
+    KlConfig cfg = { .port = SMOKE_PROXY_PORT, .bind_addr = "127.0.0.1",
+                     .sockets = kl_socket_provider_iocp(),
+                     .proxy_trusted_cidrs = "127.0.0.1/32" };
+    if (kl_server_init(&g_proxy_srv, &cfg) != 0) return 0;   /* now supported, not rejected */
+    kl_server_route(&g_proxy_srv, "GET", "/p", handle_proxy_probe, NULL, NULL);
+    pthread_t th;
+    if (pthread_create(&th, NULL, proxy_server_thread, NULL) != 0) { kl_server_free(&g_proxy_srv); return 0; }
+    for (int i = 0; i < 200 && g_proxy_srv.bound_port == 0; i++) nap_ms(5);
+
+    int ok = 0;
+    SOCKET cs = socket(AF_INET, SOCK_STREAM, 0);
+    if (cs != INVALID_SOCKET) {
+        DWORD tmo = 2000;
+        setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, (char *)&tmo, sizeof(tmo));
+        struct sockaddr_in to;
+        memset(&to, 0, sizeof(to));
+        to.sin_family = AF_INET;
+        to.sin_port = htons(SMOKE_PROXY_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+        if (connect(cs, (struct sockaddr *)&to, sizeof(to)) == 0) {
+            const char *msg = "PROXY TCP4 1.2.3.4 5.6.7.8 1111 2222\r\n"
+                              "GET /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+            if (send(cs, msg, (int)strlen(msg), 0) == (int)strlen(msg)) {
+                char buf[1024]; int got = 0;
+                while (got < (int)sizeof(buf) - 1) {
+                    int n = recv(cs, buf + got, (int)sizeof(buf) - 1 - got, 0);
+                    if (n <= 0) break;
+                    got += n; buf[got] = 0;
+                    if (strstr(buf, SMOKE_BODY)) break;
+                }
+                ok = (strstr(buf, "200 OK") != NULL && strcmp(g_proxy_ip, "1.2.3.4") == 0);
+            }
+        }
+        closesocket(cs);
+    }
+    kl_server_stop(&g_proxy_srv);
+    pthread_join(th, NULL);
+    kl_server_free(&g_proxy_srv);
+    return ok;
+}
+
 /* 8g-1 head-of-line: a slow client requests the big stream and stalls (tiny receive window,
  * no reads). The server's outbound buffer fills and it must post overlapped WSASend chunks and
  * move on — NOT busy-spin a blocking flush. We prove the loop stayed free by driving a second,
@@ -390,6 +448,10 @@ int main(void) {
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
     int bigstream_ok = (ok && post_ok && file_ok && stream_ok && bigfile_ok) ? bigstream_no_hol_ok() : 0;
 
+    /* PROXY protocol over the IOCP loop — trusted-source header parsed, handler sees the real IP. */
+    int proxy_ok = (ok && post_ok && file_ok && stream_ok && bigfile_ok && bigstream_ok)
+                       ? proxy_over_completion_ok() : 0;
+
     /* UDP echo roundtrip — a raw datagram client hits the KlUdp on the IOCP loop. */
     int udp_ok = 0;
     if (ok && post_ok && file_ok && stream_ok && bigfile_ok && bigstream_ok && udp_ready) {
@@ -463,6 +525,10 @@ int main(void) {
         fprintf(stderr, "smoke-iocp: bigstream overlapped flush / HOL FAILED\n");
         return 1;
     }
-    printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + bigfile-chunked + stream + bigstream + UDP + udp-local)\n");
+    if (!proxy_ok) {
+        fprintf(stderr, "smoke-iocp: PROXY-over-IOCP roundtrip FAILED\n");
+        return 1;
+    }
+    printf("smoke-iocp: over-IOCP roundtrip OK (GET + POST body + file + bigfile-chunked + stream + bigstream + proxy + UDP + udp-local)\n");
     return 0;
 }
