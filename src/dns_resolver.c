@@ -973,7 +973,10 @@ static void dns_tcp_send_leg(KlDnsResolver *r, KlDnsLeg *leg, int ns_idx) {
     size_t need = t->wlen + 2 + qlen;
     if (need > t->wcap) {
         size_t ncap = t->wcap ? t->wcap : 2048;
-        while (ncap < need) ncap *= 2;
+        while (ncap < need) {
+            if (ncap > SIZE_MAX / 2) { ncap = need; break; }   /* doubling-overflow guard (uniform w/ the rest) */
+            ncap *= 2;
+        }
         unsigned char *nb = kl_realloc(r->alloc, t->wbuf, t->wcap, ncap);
         if (!nb) { leg->naddrs = 0; dns_leg_settle(r, q, leg); return; }
         t->wbuf = nb; t->wcap = ncap;

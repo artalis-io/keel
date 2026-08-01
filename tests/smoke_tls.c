@@ -15,6 +15,9 @@
 
 #include <keel/keel.h>
 #include <keel/tls_mbedtls.h>
+#ifdef SMOKE_TLS_COMPLETION
+#include "../src/event_caps.h"   /* kl_event_caps — assert the server runs on a completion loop */
+#endif
 #include <pthread.h>
 #include <string.h>
 #include <stdio.h>
@@ -85,6 +88,11 @@ int main(void) {
         .ctx = srv_ctx, .factory = kl_tls_mbedtls_create,
         .ctx_destroy = kl_tls_mbedtls_ctx_destroy,
     };
+    /* Default provider: on a completion backend (BACKEND=pollcomp|iouring) the server auto-adopts
+     * the overlapped provider (5a), so this same smoke drives real mbedTLS over comp_tls_drive /
+     * the memory-BIO feed_input/drain_output path on an actual event loop + socket — the full e2e
+     * counterpart to the in-memory smoke-tls-completion. The SMOKE_TLS_COMPLETION build asserts the
+     * loop really is completion (below). */
     KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1", .tls = &srv_tls };
     if (kl_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-tls: server init failed\n");
@@ -92,6 +100,17 @@ int main(void) {
         return 1;
     }
     kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
+
+#ifdef SMOKE_TLS_COMPLETION
+    /* Guard: this gate is meaningless unless the loop really is completion — fail loudly if built
+     * against a readiness backend (build with BACKEND=pollcomp or BACKEND=iouring). */
+    if (!(kl_event_caps(&g_srv.ev.loop) & KL_EVENT_CAP_COMPLETION)) {
+        fprintf(stderr, "smoke-tls: not a completion loop — build with BACKEND=pollcomp|iouring\n");
+        kl_server_free(&g_srv);
+        kl_tls_mbedtls_ctx_destroy(srv_ctx);
+        return 1;
+    }
+#endif
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
@@ -140,6 +159,10 @@ int main(void) {
                 last_rc, last_status, last_len, last_err);
         return 1;
     }
+#ifdef SMOKE_TLS_COMPLETION
+    printf("smoke-tls: HTTPS handshake + roundtrip OK (over the completion loop)\n");
+#else
     printf("smoke-tls: HTTPS handshake + roundtrip OK\n");
+#endif
     return 0;
 }
