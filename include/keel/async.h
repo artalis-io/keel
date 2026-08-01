@@ -25,6 +25,17 @@ typedef void (*KlAsyncFn)(KlAsyncOp *op, void *user_data);
  * - Sleep:  on_deadline = success (timer fired)
  * - HTTP:   on_deadline = error (timeout)
  * - Gather: on_deadline = cancel remaining sub-ops, return partial results
+ *
+ * **Exactly-one-terminal contract.** An op is *pending* from kl_async_suspend()
+ * until exactly one terminal transition retires it:
+ *   - resume  — kl_async_complete() (fires on_resume), or
+ *   - cancel  — kl_async_cancel()   (fires on_cancel).
+ * on_deadline is a *trigger*, not a terminal: the deadline callback must resolve
+ * the op by calling kl_async_complete() (deadline-as-success, e.g. sleep) or
+ * kl_async_cancel() (deadline-as-failure, e.g. HTTP timeout). It fires at most
+ * once. All three entry points are idempotent — a second call on an
+ * already-retired op is a no-op — so a cancel racing a completion (or a double
+ * completion) can never double-fire a callback, double-release, or use-after-free.
  */
 struct KlAsyncOp {
     KlConn *conn;              /**< Suspended connection */
@@ -34,6 +45,7 @@ struct KlAsyncOp {
     KlAsyncFn on_cancel;       /**< Called if connection dies while suspended */
     void *user_data;           /**< Opaque (e.g. HlAsyncCtx*) */
     struct KlAsyncOp *next;    /**< Active ops list (server-owned) */
+    int _terminal;             /**< Internal: 1 once retired (do not set). */
 };
 
 /**
@@ -65,5 +77,21 @@ int  kl_async_suspend(KlServer *s, KlConn *conn, KlAsyncOp *op);
  * @param op Async op to complete (removed from active list).
  */
 void kl_async_complete(KlServer *s, KlAsyncOp *op);
+
+/**
+ * @brief Cancel an async operation without resuming the connection.
+ *
+ * The abnormal-termination terminal: fires op->on_cancel (so the caller can free
+ * its async context), removes the op from the active list, and clears the
+ * connection's async_op. Does NOT re-arm the fd or drive the state machine — the
+ * caller is expected to be tearing the connection down. Idempotent: a no-op if
+ * the op was already retired by kl_async_complete() or a prior cancel.
+ *
+ * Use for deadline-as-failure (HTTP timeout) and connection-death paths.
+ *
+ * @param s  Server instance.
+ * @param op Async op to cancel.
+ */
+void kl_async_cancel(KlServer *s, KlAsyncOp *op);
 
 #endif

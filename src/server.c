@@ -735,8 +735,11 @@ int kl_server_run(KlServer *s) {
             kl_server_sweep_conn_timeouts(s, cnow, 1);
             for (KlAsyncOp *aop = s->async_ops; aop; ) {   /* async-op deadlines */
                 KlAsyncOp *next_aop = aop->next;
-                if (aop->deadline_ms > 0 && cnow >= aop->deadline_ms && aop->on_deadline)
-                    aop->on_deadline(aop, aop->user_data);
+                if (!aop->_terminal && aop->deadline_ms > 0 && cnow >= aop->deadline_ms) {
+                    aop->deadline_ms = 0;   /* fire on_deadline at most once */
+                    if (aop->on_deadline)
+                        aop->on_deadline(aop, aop->user_data);
+                }
                 aop = next_aop;
             }
             kl_timer_fire(&s->ev);                          /* due one-shot timers */
@@ -1019,7 +1022,8 @@ transition:
             KlAsyncOp *aop = s->async_ops;
             while (aop) {
                 KlAsyncOp *next_aop = aop->next;
-                if (aop->deadline_ms > 0 && now >= aop->deadline_ms) {
+                if (!aop->_terminal && aop->deadline_ms > 0 && now >= aop->deadline_ms) {
+                    aop->deadline_ms = 0;   /* fire on_deadline at most once */
                     if (aop->on_deadline)
                         aop->on_deadline(aop, aop->user_data);
                 }
@@ -1101,15 +1105,10 @@ void kl_server_stats(const KlServer *s, KlServerStats *out) {
 }
 
 void kl_server_free(KlServer *s) {
-    /* Cancel all active async ops */
-    while (s->async_ops) {
-        KlAsyncOp *op = s->async_ops;
-        s->async_ops = op->next;
-        if (op->on_cancel)
-            op->on_cancel(op, op->user_data);
-        if (op->conn)
-            op->conn->async_op = NULL;
-    }
+    /* Cancel all active async ops (idempotent terminal: fires on_cancel once,
+     * removes each op from the list so the loop makes progress). */
+    while (s->async_ops)
+        kl_async_cancel(s, s->async_ops);
 
     if (s->file_io) {
         s->file_io->destroy(s->file_io);

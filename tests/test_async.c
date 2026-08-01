@@ -764,4 +764,90 @@ UTEST(async, e2e_handler_suspend_resume) {
     kl_server_free(&async_server);
 }
 
+/* ── Exactly-one-terminal guarantees (Phase 4) ─────────────────────────
+ * These test the terminal *guard* in async.c, not the post-resume state drive:
+ * the resume callback only counts and leaves conn->state as PROCESSING, so
+ * kl_async_complete takes no SENDING/READING/CLOSED branch (no socket I/O, no
+ * release) — keeping the op + conn valid for the idempotency assertions. */
+static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
+    (void)op; ((AsyncCtx *)ud)->resume_called++;
+}
+#define RFC_TERMINAL_SETUP()                                                   \
+    KlServer s; init_test_server(&s);                                          \
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);                  \
+    ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);             \
+    for (int i = 0; i < 4; i++)                                                \
+        s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);          \
+    int fds[2]; ASSERT_EQ(kl_test_socketpair(fds), 0);                         \
+    set_nonblocking(fds[0]); set_nonblocking(fds[1]);                          \
+    KlConn *c = kl_conn_acquire(&s.pool, fds[1]);                              \
+    ASSERT_TRUE(c != NULL);                                                    \
+    ASSERT_EQ(kl_event_add(&s.ev.loop, fds[1], KL_EVENT_READ, c), 0);          \
+    AsyncCtx actx = {0};                                                       \
+    KlAsyncOp op = { .conn = c, .on_resume = terminal_resume_cb,              \
+                     .on_cancel = test_cancel_cb, .user_data = &actx };        \
+    ASSERT_EQ(kl_async_suspend(&s, c, &op), 0)
+
+#define RFC_TERMINAL_TEARDOWN()                                                \
+    c->fd = -1; kl_test_closesock(fds[0]); kl_test_closesock(fds[1]);          \
+    cleanup_test_server(&s)
+
+/* A — double complete fires on_resume exactly once. */
+UTEST(async, complete_twice_is_idempotent) {
+    RFC_TERMINAL_SETUP();
+    kl_async_complete(&s, &op);
+    kl_async_complete(&s, &op);                 /* second call: no-op */
+    ASSERT_EQ(actx.resume_called, 1);
+    ASSERT_EQ(actx.cancel_called, 0);
+    ASSERT_TRUE(s.async_ops == NULL);
+    ASSERT_TRUE(op._terminal == 1);
+    RFC_TERMINAL_TEARDOWN();
+}
+
+/* Cancel is idempotent — on_cancel fires exactly once. */
+UTEST(async, cancel_twice_is_idempotent) {
+    RFC_TERMINAL_SETUP();
+    kl_async_cancel(&s, &op);
+    kl_async_cancel(&s, &op);                   /* second call: no-op */
+    ASSERT_EQ(actx.cancel_called, 1);
+    ASSERT_EQ(actx.resume_called, 0);
+    ASSERT_TRUE(s.async_ops == NULL);
+    ASSERT_TRUE(c->async_op == NULL);
+    RFC_TERMINAL_TEARDOWN();
+}
+
+/* C — cancel racing a completion: complete wins, later cancel is a no-op. */
+UTEST(async, cancel_after_complete_is_noop) {
+    RFC_TERMINAL_SETUP();
+    kl_async_complete(&s, &op);
+    kl_async_cancel(&s, &op);                   /* already terminal → no-op */
+    ASSERT_EQ(actx.resume_called, 1);
+    ASSERT_EQ(actx.cancel_called, 0);
+    RFC_TERMINAL_TEARDOWN();
+}
+
+/* C (other order) — cancel wins, later completion is a no-op (no resume). */
+UTEST(async, complete_after_cancel_is_noop) {
+    RFC_TERMINAL_SETUP();
+    kl_async_cancel(&s, &op);
+    kl_async_complete(&s, &op);                 /* already terminal → no-op */
+    ASSERT_EQ(actx.cancel_called, 1);
+    ASSERT_EQ(actx.resume_called, 0);
+    RFC_TERMINAL_TEARDOWN();
+}
+
+/* Op reuse: after a terminal transition, a fresh suspend makes it pending again. */
+UTEST(async, resuspend_after_terminal_is_pending) {
+    RFC_TERMINAL_SETUP();
+    kl_async_complete(&s, &op);
+    ASSERT_EQ(actx.resume_called, 1);
+    ASSERT_TRUE(op._terminal == 1);
+    /* Reuse the same op struct for a new suspension (conn is back to PROCESSING). */
+    ASSERT_EQ(kl_async_suspend(&s, c, &op), 0);
+    ASSERT_TRUE(op._terminal == 0);             /* suspend re-armed it */
+    kl_async_complete(&s, &op);
+    ASSERT_EQ(actx.resume_called, 2);           /* fired again on reuse */
+    RFC_TERMINAL_TEARDOWN();
+}
+
 UTEST_MAIN();
