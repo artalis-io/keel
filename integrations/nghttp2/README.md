@@ -79,14 +79,42 @@ h2c cleartext is out of scope for this adapter).
 
 ```sh
 make integration-nghttp2 NGHTTP2_DIR=... && \
-  (cd integrations/nghttp2 && make test NGHTTP2_DIR=...)
+  (cd integrations/nghttp2 && make test NGHTTP2_DIR=...)   # roundtrip + e2e
 ```
 
-`test_roundtrip.c` pairs the client and server sessions **in memory** — no
-sockets, no Keel event loop — feeding each side's `on_send` output into the
-other's `recv`, so a full `GET / → 200` with a body is exercised through real
-nghttp2 framing. It validates both adapters against each other. Run under
-ASan+UBSan+LSan in the Linux container for leak/UAF coverage:
+Three levels of coverage, all under [`e2e/`](e2e/):
+
+1. **`e2e/test_roundtrip.c`** — pairs the client and server sessions **in memory**
+   (no sockets, no Keel event loop), feeding each side's `on_send` output into the
+   other's `recv`, so a full `GET / → 200`+body is exercised through real nghttp2
+   framing. Validates both adapters against each other.
+2. **`e2e/e2e_socket.c`** (`make e2e`) — end-to-end over a **real loopback socket +
+   Keel event loop**: the Keel nghttp2 **client** (`kl_h2_client_connect`,
+   cleartext h2c) against the Keel nghttp2 **server** (`KlConfig.h2`, entered via
+   h2c prior-knowledge). Drives both adapters through the actual Keel driver paths.
+3. **`make interop-curl`** (`e2e/interop_server.c`) — third-party interop: stands
+   up the Keel nghttp2 server and hits it with `curl --http2-prior-knowledge`.
+   Requires a curl built with HTTP2 (`curl -V`).
+
+> **Maintainer note — client connection preface.** The server session is created
+> with `nghttp2_option_set_no_recv_client_magic`: Keel's h2c prior-knowledge path
+> (`connection.c`) consumes the 24-byte `PRI * HTTP/2.0...` magic *before* feeding
+> the session, and the h2c-Upgrade / ALPN paths never send it. Without this the
+> session stalls waiting for the magic and resets the connection. `test_roundtrip`
+> mirrors this by stripping the leading 24 bytes on its first server feed.
+
+> **Client submit timing.** `kl_h2_client_request` returns `-1` until the async
+> connect reaches its ACTIVE state (no connection-ready callback is exposed), so
+> a caller submitting immediately after `kl_h2_client_connect` must retry until it
+> succeeds — see the loop in `e2e_socket.c`.
+
+Further third-party interop (needs the `nghttp2` CLI tools — `brew install
+nghttp2` — separate from the `libnghttp2` library formula): `h2load` for
+concurrent-stream load against the Keel server, `nghttpd --no-tls` as a peer for
+the Keel client, and `h2spec` for protocol conformance.
+
+Run the in-memory + e2e tests under ASan+UBSan+LSan in the Linux container for
+leak/UAF coverage:
 
 ```sh
 container run --rm -v "$PWD:/src" ubuntu:24.04 bash -c '
@@ -94,7 +122,7 @@ container run --rm -v "$PWD:/src" ubuntu:24.04 bash -c '
   cd /src && cc -g -O1 -fsanitize=address,undefined \
     -Iinclude -Iintegrations/nghttp2 $(pkg-config --cflags libnghttp2) \
     integrations/nghttp2/h2_nghttp2_client.c integrations/nghttp2/h2_nghttp2_server.c \
-    integrations/nghttp2/test_roundtrip.c src/allocator.c \
+    integrations/nghttp2/e2e/test_roundtrip.c src/allocator.c \
     $(pkg-config --libs libnghttp2) -o /tmp/rt && ASAN_OPTIONS=detect_leaks=1 /tmp/rt'
 ```
 
