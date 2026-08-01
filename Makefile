@@ -583,6 +583,17 @@ smoke-tls-completion: $(SMOKE_TLS_COMP_BIN)
 $(SMOKE_TLS_COMP_BIN): tests/smoke_tls_completion.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# End-to-end real-mbedTLS over a completion event loop + real socket (broadens the in-memory
+# smoke-tls-completion above): smoke_tls.c with the server pinned to the completion provider.
+# Build against a completion backend so kl_socket_provider_pollcomp() links:
+#   make BACKEND=pollcomp KEEL_TLS=mbedtls MBEDTLS_DIR=$(brew --prefix mbedtls) smoke-tls-completion-e2e
+# Local/BYO gate (mbedTLS out of CI).
+SMOKE_TLS_E2E_BIN = tests/smoke_tls_completion_e2e$(EXE)
+smoke-tls-completion-e2e: $(SMOKE_TLS_E2E_BIN)
+	./$(SMOKE_TLS_E2E_BIN)
+$(SMOKE_TLS_E2E_BIN): tests/smoke_tls.c $(LIB)
+	$(CC) $(CFLAGS) -DSMOKE_TLS_COMPLETION -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
 # Install / uninstall
 PREFIX  ?= /usr/local
 DESTDIR ?=
