@@ -398,3 +398,63 @@ jobs:
       - name: Smoke test examples
         timeout-minutes: 5
         run: make smoke CC=cosmocc
+
+  # Optional first-party integrations + external conformance. Keeps the mbedTLS +
+  # nghttp2 adapters (and the ALPN / h2spec / interop work) from silently rotting,
+  # while the ordinary core build above stays dependency-light. mbedTLS is built
+  # from source (Ubuntu ships 2.28, incompatible with the 3.x adapter); nghttp2 is
+  # the system package via pkg-config.
+  integrations:
+    name: Integrations (mbedTLS + nghttp2)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install deps (nghttp2, tools, mbedTLS build prereqs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libnghttp2-dev \
+            curl openssl python3-jinja2 python3-jsonschema \
+            nghttp2-client nghttp2-server
+
+      - name: Install h2spec
+        run: |
+          curl -sSL https://github.com/summerwind/h2spec/releases/download/v2.6.0/h2spec_linux_amd64.tar.gz \
+            | sudo tar xz -C /usr/local/bin
+
+      - name: Build mbedTLS 3.6.x from source
+        timeout-minutes: 6
+        run: |
+          git clone --depth 1 -b v3.6.2 --recurse-submodules --shallow-submodules \
+            https://github.com/Mbed-TLS/mbedtls.git "$HOME/mbedtls"
+          make -C "$HOME/mbedtls" -j"$(nproc)" lib
+
+      - name: Build core (dependency-light — no TLS/HTTP2 libs)
+        run: make
+
+      - name: nghttp2 adapter — roundtrip + real-socket e2e
+        timeout-minutes: 5
+        run: make -C integrations/nghttp2 test
+
+      - name: nghttp2 conformance — h2spec
+        timeout-minutes: 5
+        run: make -C integrations/nghttp2 h2spec
+
+      - name: nghttp2 load — h2load
+        timeout-minutes: 5
+        run: make -C integrations/nghttp2 h2load
+
+      - name: nghttp2 interop — curl + nghttpd
+        timeout-minutes: 5
+        run: |
+          make -C integrations/nghttp2 interop-curl
+          PATH="$PATH:/usr/sbin" make -C integrations/nghttp2 interop-nghttpd
+
+      - name: ALPN e2e — mbedTLS + nghttp2 + openssl + curl + Keel client
+        timeout-minutes: 5
+        run: make -C integrations/nghttp2 alpn-interop MBEDTLS_DIR="$HOME/mbedtls"
+
+      - name: mbedTLS adapter — real TLS handshake (folds mbedTLS into libkeel.a; runs last)
+        timeout-minutes: 5
+        run: make KEEL_TLS=mbedtls MBEDTLS_DIR="$HOME/mbedtls" smoke-tls
