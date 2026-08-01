@@ -48,3 +48,10 @@ void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
 void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn) {
     (void)s; (void)conn;
 }
+
+/* Stub for the completion body-read re-arm — kl_request_resume_body only calls it when the
+ * loop advertises KL_EVENT_CAP_COMPLETION (no readiness backend does); the readiness resume
+ * re-arms READ interest directly. The real post lives in completion_driver.c. */
+void kl_io_engine_post_read(struct KlConn *conn) {
+    (void)conn;
+}
