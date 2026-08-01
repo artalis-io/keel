@@ -77,8 +77,9 @@ static inline KlConn *kl_request_conn(const KlRequest *req) {
  *  - Pausing before/outside KL_CONN_READING_BODY is a no-op-safe state set; resume only re-arms
  *    when a pause is in effect.
  */
-void kl_request_pause_body(KlRequest *req);
-void kl_request_resume_body(KlRequest *req);
+/* const: they mutate the *connection's* read state (via kl_request_conn), not the KlRequest. */
+void kl_request_pause_body(const KlRequest *req);
+void kl_request_resume_body(const KlRequest *req);
 
 /** @brief Find header by name (case-insensitive).
  *  @return Null-terminated value pointer, or NULL if not found. */

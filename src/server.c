@@ -1064,7 +1064,7 @@ void kl_server_stop(KlServer *s) {
  * interest (kl_event_mod; the READING_BODY re-arm above honors read_paused so a pause from
  * inside on_data is not immediately undone). Completion stops posting / re-posts the recv via
  * the io_engine seam. Both idempotent; loop-thread only. */
-void kl_request_pause_body(KlRequest *req) {
+void kl_request_pause_body(const KlRequest *req) {
     KlConn *c = req ? kl_request_conn(req) : NULL;
     if (!c || c->read_paused) return;                 /* idempotent */
     c->read_paused = 1;
@@ -1074,7 +1074,7 @@ void kl_request_pause_body(KlRequest *req) {
      * more chunk before the pause takes hold (bounded). */
 }
 
-void kl_request_resume_body(KlRequest *req) {
+void kl_request_resume_body(const KlRequest *req) {
     KlConn *c = req ? kl_request_conn(req) : NULL;
     if (!c || !c->read_paused) return;                /* idempotent */
     c->read_paused = 0;
