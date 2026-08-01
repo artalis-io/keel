@@ -108,10 +108,44 @@ Three levels of coverage, all under [`e2e/`](e2e/):
 > a caller submitting immediately after `kl_h2_client_connect` must retry until it
 > succeeds — see the loop in `e2e_socket.c`.
 
-Further third-party interop (needs the `nghttp2` CLI tools — `brew install
-nghttp2` — separate from the `libnghttp2` library formula): `h2load` for
-concurrent-stream load against the Keel server, `nghttpd --no-tls` as a peer for
-the Keel client, and `h2spec` for protocol conformance.
+### Conformance + third-party interop
+
+Needs the `nghttp2` CLI tools + `h2spec` (`brew install nghttp2 h2spec`; the
+`nghttp2` formula is the tools, separate from the `libnghttp2` library formula):
+
+```sh
+make h2spec          NGHTTP2_DIR=...   # HTTP/2 protocol conformance vs KEEL server
+make h2load          NGHTTP2_DIR=...   # concurrent-stream load vs KEEL server
+make interop-nghttpd NGHTTP2_DIR=...   # KEEL client vs a third-party nghttpd
+make interop-curl    NGHTTP2_DIR=...   # curl --http2-prior-knowledge vs KEEL server
+```
+
+All four interop directions pass: KEEL client ⇄ KEEL server (`e2e`), curl →
+KEEL server, **h2load → KEEL server (10 000 requests × 8 conns × 20 streams, 0
+failed, all 2xx)**, and **KEEL client → nghttpd (HTTP/2 200)**.
+
+**h2spec conformance.** KEEL scores **~137/146** (a few `Timeout`-based cases are
+timing-sensitive and jitter 135–137). The residual failures are **shared with
+nghttp2's own reference server** — `nghttpd` itself scores **138/146**, failing
+the same `STREAM_CLOSED`/`PROTOCOL_ERROR` cases (nghttp2 ignores late frames on
+closed streams, which RFC 7540 §5.1 permits; h2spec's strict expectation is not
+met by nghttp2 either). So KEEL is at reference-server parity within jitter. The
+one KEEL-specific delta is an abortive close (RST) where the reference does a
+graceful FIN — a core connection-teardown behavior, out of scope for the adapter.
+
+Getting there fixed three real adapter/integration bugs, all in
+`h2_nghttp2_server.c` (+ a `want_read` vtable method in `h2_server.h`):
+- **`no_recv_client_magic`** (above) — the initial connect fix.
+- **`want_read`** → KEEL (`h2.c`) closes once the session wants neither read nor
+  write (a terminated session, e.g. after a GOAWAY), instead of lingering until
+  the peer times out.
+- **deferred flush while inside `recv`** — KEEL's `h2.c` flushes from inside
+  `on_stream_end` (invoked within `nghttp2_session_mem_recv`); calling
+  `nghttp2_session_send` re-entrantly there corrupted processing of later frames
+  in the same batch. The adapter defers the flush; `h2.c` flushes again right
+  after `mem_recv` returns.
+- **flush-on-fatal** — a fatal `mem_recv` queues a GOAWAY; flush it before
+  reporting close so the peer sees the GOAWAY, not a bare reset.
 
 Run the in-memory + e2e tests under ASan+UBSan+LSan in the Linux container for
 leak/UAF coverage:

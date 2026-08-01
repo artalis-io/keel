@@ -73,6 +73,15 @@ struct KlH2ServerSession {
     int (*flush)(KlH2ServerSession *self);         /**< Flush pending output via send callback. */
     int (*shutdown)(KlH2ServerSession *self);      /**< Initiate graceful GOAWAY. */
     void (*destroy)(KlH2ServerSession *self);      /**< Free session resources. */
+    /**
+     * Optional (may be NULL): returns non-zero while the session still wants to
+     * read more input. When a session provides it, KEEL closes the connection
+     * once the session wants neither read nor write — i.e. it has terminated
+     * (e.g. sent a GOAWAY for a protocol error, or completed a graceful
+     * shutdown). A NULL want_read keeps the connection open until the peer
+     * closes (legacy behavior).
+     */
+    int (*want_read)(KlH2ServerSession *self);
 };
 
 /* ── Factory ─────────────────────────────────────────────────────── */

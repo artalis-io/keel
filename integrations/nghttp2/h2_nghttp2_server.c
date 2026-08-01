@@ -29,6 +29,7 @@ typedef struct {
     nghttp2_session     *ng;
     KlH2ServerCallbacks *cbs;        /* KEEL-provided (borrowed) */
     void                *ud;         /* KEEL user_data for cbs */
+    int                  in_recv;    /* 1 while inside nghttp2_session_mem_recv */
 } NgServerSession;
 
 typedef struct {
@@ -226,8 +227,24 @@ static ssize_t ng_resp_body_read_cb(nghttp2_session *ng, int32_t stream_id,
 
 static ssize_t ng_server_recv(KlH2ServerSession *self, const void *data, size_t len) {
     NgServerSession *s = (NgServerSession *)self;
+    /* Guard against re-entrant send: KEEL's h2.c submits a response + flushes
+     * from within on_stream_end, which nghttp2 invokes inside mem_recv. Calling
+     * nghttp2_session_send() re-entrantly there corrupts processing of later
+     * frames in the same batch (an illegal trailing DATA/HEADERS would be missed).
+     * Deferring the flush (see ng_server_flush) lets nghttp2 finish the whole
+     * batch — generating the correct STREAM_CLOSED/PROTOCOL_ERROR — before KEEL's
+     * post-recv flush (kl_h2_server_feed) sends everything in order. */
+    s->in_recv = 1;
     ssize_t r = nghttp2_session_mem_recv(s->ng, (const uint8_t *)data, len);
-    return r < 0 ? -1 : (ssize_t)r;
+    s->in_recv = 0;
+    if (r < 0) {
+        /* Fatal connection error: nghttp2 has queued a GOAWAY with the error
+         * code. Flush it before we report -1 (KEEL closes on -1 without another
+         * flush), so the peer sees the GOAWAY rather than a bare reset/timeout. */
+        nghttp2_session_send(s->ng);
+        return -1;
+    }
+    return (ssize_t)r;
 }
 
 static int ng_server_submit_response(KlH2ServerSession *self, uint32_t stream_id,
@@ -281,8 +298,16 @@ static int ng_server_want_write(KlH2ServerSession *self) {
     return nghttp2_session_want_write(s->ng);
 }
 
+static int ng_server_want_read(KlH2ServerSession *self) {
+    NgServerSession *s = (NgServerSession *)self;
+    return nghttp2_session_want_read(s->ng);
+}
+
 static int ng_server_flush(KlH2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
+    /* Defer while inside recv (see ng_server_recv); KEEL flushes again right
+     * after mem_recv returns, so nothing is lost. */
+    if (s->in_recv) return 0;
     return nghttp2_session_send(s->ng) == 0 ? 0 : -1;
 }
 
@@ -317,6 +342,7 @@ KlH2ServerSession *kl_h2_nghttp2_server_session(KlAllocator *alloc,
     s->base.flush = ng_server_flush;
     s->base.shutdown = ng_server_shutdown;
     s->base.destroy = ng_server_destroy;
+    s->base.want_read = ng_server_want_read;
 
     nghttp2_session_callbacks *cbs = NULL;
     if (nghttp2_session_callbacks_new(&cbs) != 0) {
