@@ -791,9 +791,13 @@ read_more_headers: ;
                 "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
             if (c->read_len >= 24) {
                 if (memcmp(c->read_buf, h2_preface, 24) == 0) {
+                    /* Hand the session the FULL preface (magic included) — the
+                     * session's HTTP/2 engine consumes the client connection
+                     * preface itself, matching the ALPN-h2 and h2c-Upgrade paths
+                     * where the magic arrives on the stream normally. */
                     c->state = (KlConnState)kl_h2_server_upgrade(
                         c, router, c->h2_config,
-                        c->read_buf + 24, c->read_len - 24);
+                        c->read_buf, c->read_len);
                     return c->state;
                 }
                 /* Not a preface — fall through to HTTP/1.1 parser */

@@ -132,18 +132,14 @@ int main(void) {
     int32_t sid = cs->submit_request(cs, "GET", "/", "example.com", NULL, 0, NULL, 0);
     if (sid < 0) { cs->destroy(cs); ss->destroy(ss); return fail("submit_request"); }
 
-    /* Pump until quiescent: move client->server and server->client bytes.
-     * The server session is created with no_recv_client_magic (KEEL's h2c path
-     * consumes the 24-byte client preface before feeding the session), so mirror
-     * that here: strip the leading "PRI * HTTP/2.0..." magic on the first feed. */
-    int magic_stripped = 0;
+    /* Pump until quiescent: move client->server and server->client bytes. The
+     * server session consumes the client connection preface itself (nghttp2
+     * default), so feed the client's bytes through verbatim — magic included. */
     for (int iter = 0; iter < 100; iter++) {
         int moved = 0;
         if (cs->flush(cs) < 0) { cs->destroy(cs); ss->destroy(ss); return fail("client flush"); }
         if (c.c2s_len) {
-            const unsigned char *cp = c.c2s; size_t cl = c.c2s_len;
-            if (!magic_stripped && cl >= 24) { cp += 24; cl -= 24; magic_stripped = 1; }
-            if (cl && ss->recv(ss, cp, cl) < 0) { cs->destroy(cs); ss->destroy(ss); return fail("server recv"); }
+            if (ss->recv(ss, c.c2s, c.c2s_len) < 0) { cs->destroy(cs); ss->destroy(ss); return fail("server recv"); }
             c.c2s_len = 0; moved = 1;
         }
         if (ss->want_write(ss)) ss->flush(ss);

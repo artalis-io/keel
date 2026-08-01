@@ -55,6 +55,11 @@ typedef struct {
     KlAllocator           *alloc;     /* allocator used to create this context */
     int                    is_server;  /* 1 = server, 0 = client */
     int                    has_ca;     /* 1 = ca_cert loaded */
+    /* ALPN: ctx-owned copy of the advertised (server) / offered (client) protocol
+     * list. mbedTLS stores the pointer (does not copy), so it must outlive the
+     * config — hence the backing buffer here. NULL-terminated `alpn` array. */
+    const char            *alpn[8];
+    char                   alpn_buf[256];
 } KlMbedtlsCtx;
 
 /* ── Per-connection TLS session ──────────────────────────────────── */
@@ -464,6 +469,28 @@ int kl_tls_mbedtls_set_hostname(KlTls *tls, const char *hostname)
     KlMbedtlsTls *t = (KlMbedtlsTls *)tls;
     int ret = mbedtls_ssl_set_hostname(&t->ssl, hostname);
     return (ret == 0) ? 0 : -1;
+}
+
+int kl_tls_mbedtls_ctx_set_alpn(KlTlsCtx *c, const char **protos)
+{
+    KlMbedtlsCtx *ctx = (KlMbedtlsCtx *)c;
+    if (!ctx || !protos) return -1;
+
+    /* Copy the protocol strings into ctx-owned storage (mbedTLS keeps the
+     * pointer, not a copy) so a caller may pass a transient array. */
+    size_t off = 0;
+    int n = 0;
+    for (int i = 0; protos[i]; i++) {
+        if (n >= (int)(sizeof(ctx->alpn) / sizeof(ctx->alpn[0])) - 1) return -1;
+        size_t l = strlen(protos[i]);
+        if (off + l + 1 > sizeof(ctx->alpn_buf)) return -1;
+        memcpy(ctx->alpn_buf + off, protos[i], l + 1);
+        ctx->alpn[n++] = ctx->alpn_buf + off;
+        off += l + 1;
+    }
+    ctx->alpn[n] = NULL;
+    return mbedtls_ssl_conf_alpn_protocols(&ctx->conf, (const char **)ctx->alpn) == 0
+               ? 0 : -1;
 }
 
 /* ── Helper: read entire file into buffer ────────────────────────── */

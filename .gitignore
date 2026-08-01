@@ -10,6 +10,8 @@ integrations/nghttp2/e2e/test_roundtrip
 integrations/nghttp2/e2e/e2e_socket
 integrations/nghttp2/e2e/interop_server
 integrations/nghttp2/e2e/client_probe
+integrations/nghttp2/e2e/alpn_server
+integrations/nghttp2/e2e/alpn_client
 
 # Example binaries (extensionless; sources are .c, docs are .md)
 examples/*

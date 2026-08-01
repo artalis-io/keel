@@ -151,4 +151,25 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc);
  */
 int kl_tls_mbedtls_set_hostname(KlTls *tls, const char *hostname);
 
+/**
+ * @brief Configure the ALPN protocol list for a context (server or client).
+ *
+ * Server context: the protocols advertised in the TLS ServerHello ALPN
+ * extension (mbedTLS selects the server's first entry that the client also
+ * offers). Client context: the protocols offered in the ClientHello.
+ *
+ * Pass a NULL-terminated array, most-preferred first, e.g.
+ * `const char *p[] = {"h2","http/1.1",NULL};`. The strings are copied into the
+ * context, so the array need not outlive this call. Call once, after
+ * kl_tls_mbedtls_ctx_create*() / _client_ctx_create*().
+ *
+ * The negotiated result is read back via the KlTls `alpn_protocol()` vtable
+ * method after the handshake completes. See docs/alpn_policy.md.
+ *
+ * @param ctx    Server or client context.
+ * @param protos NULL-terminated, preference-ordered protocol names.
+ * @return 0 on success, -1 on error (NULL args, too many/long protocols).
+ */
+int kl_tls_mbedtls_ctx_set_alpn(KlTlsCtx *ctx, const char **protos);
+
 #endif /* KEEL_TLS_MBEDTLS_H */
