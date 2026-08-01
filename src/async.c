@@ -219,6 +219,7 @@ int kl_async_suspend(KlServer *s, KlConn *conn, KlAsyncOp *op) {
     conn->async_op = op;
     conn->suspend_start_ms = kl_monotonic_ms();
     op->conn = conn;
+    op->_terminal = 0;         /* fresh suspension → pending (allows op reuse) */
 
     /* Add to server's active ops list */
     op->next = s->async_ops;
@@ -227,22 +228,32 @@ int kl_async_suspend(KlServer *s, KlConn *conn, KlAsyncOp *op) {
     return 0;
 }
 
-void kl_async_complete(KlServer *s, KlAsyncOp *op) {
-    if (!s || !op || !op->conn) return;
+/* Idempotently retire an op: remove it from the active list, clear the
+ * connection's back-pointer, and mark it terminal. Returns the connection it was
+ * attached to on the first (pending→terminal) call, or NULL if the op was already
+ * retired — the exactly-one-terminal guard shared by complete and cancel. */
+static KlConn *async_retire(KlServer *s, KlAsyncOp *op) {
+    if (op->_terminal) return NULL;
+    op->_terminal = 1;
 
-    KlConn *conn = op->conn;
-
-    /* Remove from active ops list */
     KlAsyncOp **pp = &s->async_ops;
     while (*pp) {
-        if (*pp == op) {
-            *pp = op->next;
-            break;
-        }
+        if (*pp == op) { *pp = op->next; break; }
         pp = &(*pp)->next;
     }
+    KlConn *conn = op->conn;
+    if (conn && conn->async_op == op)
+        conn->async_op = NULL;
+    return conn;
+}
 
-    conn->async_op = NULL;
+void kl_async_complete(KlServer *s, KlAsyncOp *op) {
+    if (!s || !op) return;
+
+    /* Exactly-one-terminal: a second complete (or a complete racing a cancel)
+     * is a no-op — no double on_resume, no double release. */
+    KlConn *conn = async_retire(s, op);
+    if (!conn) return;
 
     /* Transition back from SUSPENDED so on_resume can set the final state */
     conn->state = KL_CONN_PROCESSING;
@@ -282,4 +293,15 @@ void kl_async_complete(KlServer *s, KlAsyncOp *op) {
     } else if (new_state == KL_CONN_CLOSED) {
         kl_server_conn_release(s, conn);
     }
+}
+
+void kl_async_cancel(KlServer *s, KlAsyncOp *op) {
+    if (!s || !op) return;
+
+    /* Exactly-one-terminal: a cancel racing a completion (or a double cancel) is
+     * a no-op — on_cancel fires at most once, and never after on_resume. */
+    if (async_retire(s, op) == NULL) return;
+
+    if (op->on_cancel)
+        op->on_cancel(op, op->user_data);
 }
