@@ -201,9 +201,12 @@ static void pc_op_push(KlPcState *st, KlPcOp *op) {
 }
 
 static void pc_op_free(KlPcOp *op) {
+    /* send_total is set to the sendbuf allocation size on every path that allocates one
+     * (PC_TLS_RECV = KL_PC_CIPHER_SIZE; WRITE/SENDFILE/UDP = total, or 1 when total==0 since
+     * the alloc is `total ? total : 1`). Fall back to 1 — NOT KL_PC_CIPHER_SIZE — for a
+     * zero-length send, else a sized custom allocator mis-buckets the freed 1-byte block. */
     if (op->sendbuf)
-        kl_free(op->alloc, op->sendbuf,
-                op->send_total ? op->send_total : KL_PC_CIPHER_SIZE);
+        kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total : 1);
     kl_free(op->alloc, op, sizeof(*op));
 }
 

@@ -1,5 +1,79 @@
 # KEEL Networking Architecture Axis Audit
 
+## Fourth pass — PROXY / streaming / TransmitFile over completion; full parity (2026-08-01)
+
+**Verdict: architecturally sound — the completion axis is now at full functional AND test parity
+with readiness, with no new coupling violations.** This pass re-runs the orthogonality litmus and
+assesses the code added since the third pass (PRs #130 streaming HOL, #133 TransmitFile chunking,
+#136 PROXY-over-completion; #135 TLS suites over completion). All three axes remain separately
+replaceable; protocols contain no platform/event logic; the new completion features reuse the
+model-blind core rather than duplicating it.
+
+**Mechanical litmus (all clean):** grep of the protocol TUs (`connection.c`, `h2.c`, `websocket.c`,
+`response.c`, `sse.c`, `client.c`, `h2_client.c`, `websocket_client.c`, `router.c`, `cors.c`,
+`redirect.c`, `chunked.c`, `body_reader_multipart.c`, `parsers/*.c`) finds **no** platform
+networking / event headers (`sys/epoll`, `sys/event`, `liburing`, `winsock2`, `windows`,
+`mswsock`, `io_uring.h`), **no** engine symbols (`epoll_*`, `kevent`, `io_uring_*`, `WSARecv/Send`,
+`OVERLAPPED`, `GetQueuedCompletion*`), and **no** `completion.h` / `kl_comp_*` / `KL_COMP_*` leak.
+Protocols stay above both axes.
+
+**New-code orthogonality (assessed correct):**
+- **PROXY-over-completion (#136).** The model-blind parse (`kl_proxy_parse`) is shared; only the
+  I/O wrapper is axis-specific — readiness `kl_conn_read_proxy_header` (socket peek+consume) vs.
+  completion `kl_conn_ingest_proxy` (parse from `read_buf`). This is the *correct* axis split (same
+  shape as recv itself: shared parser, per-axis I/O), not duplication of a state machine. The
+  accept gate (`comp_on_accept` → `kl_cidr_match`) and the header phase (`comp_drive_proxy`) live in
+  `completion_driver.c` — the integration layer — mirroring the readiness gate in `server.c`; no
+  protocol TU is touched.
+- **Streaming HOL fix (#130).** `comp_stream_pump` drives the transport-neutral `KlDrain` via
+  `kl_comp_post_send`; producers (SSE / chunked / response) write to the drain, never a socket or
+  engine. Backpressure is the drain cap + `stream_inflight` (≤1 send), model-independent. The two
+  new `KlDrain` accessors (`kl_drain_data`/`kl_drain_consume`) are generic buffer ops.
+- **TransmitFile chunking (#133).** Entirely inside `event_iocp.c`; the offset-advancing re-post is
+  internal and surfaces a single `KL_COMP_WRITE` to the driver — the completion abstraction (one
+  op = one whole-transfer completion) is preserved. IOCP-only; io_uring (splice) / pollcomp
+  (pread+send) have no DWORD limit.
+
+**Finding (Informational — I1):** the completion backends' `kl_comp_post_recv`
+(`event_pollcomp.c:224`, `event_iouring.c:421`, `event_iocp.c:255`) now branch on
+`c->state != KL_CONN_PROXY_HEADER` to recv plaintext before TLS, extending the pre-existing
+`c->tls` branch. This has the backend read a protocol/connection state enum. It is **consistent
+with the established, deliberate coupling** — the completion backends are not pure socket providers;
+they are the completion-axis connection drivers that already operate on `KlConn` (8–11 field refs
+each: `c->tls`, `c->read_buf`, `c->read_len`, `c->read_cap`). So this is not a new axis violation.
+An optional future cleanup would replace both conditions with one driver-owned boolean (e.g.
+`c->tls_active`, false during the PROXY header) so the backend needn't name a protocol state; not
+worth a change now. No fix applied.
+
+**Changes made this pass:** none to the axis (report-only — orthogonality is sound). Separately,
+the concurrent c-audit sixth pass fixed two Low allocator free-size mismatches on a zero-length
+completion send (`pc_op_free`, `iocp_op_free`); see `docs/keel_audit.md`.
+
+**Exercised:** `make debug-test` (55 suites, ASan+UBSan, 0 failures / 0 sanitizer hits);
+`smoke-pollcomp` + `-asan` (GET/POST/file/stream/**bigstream**/UDP/h2/**proxy**); real io_uring in
+the Apple container (`test-iouring` incl. `peer_addr` 6/6 + the four TLS suites; `smoke-iouring`);
+`cppcheck` clean; MinGW compile-gate on the Windows TUs. IOCP is exercised by the Windows CI
+`smoke-iocp` (GET/POST/file/**bigfile-chunked**/stream/**bigstream**/**proxy**/UDP/udp-local) +
+`smoke-iocp-tls`.
+
+### Compatibility matrix (updated)
+
+| Combination | Implemented | Buildable | Tested (CI) | Production-ready |
+|---|---|---|---|---|
+| Linux sockets + epoll | ✅ | ✅ | ✅ full suite + smoke | ✅ (default Linux) |
+| Linux sockets + poll (fallback) | ✅ | ✅ | ✅ full suite | ✅ |
+| Linux sockets + io_uring (completion) | ✅ | ✅ | ✅ 49-suite gate (incl. TLS mock + PROXY) + smokes + **LSan** | ✅ (default io_uring, 8f-5) |
+| Darwin sockets + kqueue | ✅ | ✅ | ✅ full suite (macOS CI) | ✅ (default macOS) |
+| Winsock + WSAPoll | ✅ | ✅ | ✅ 47-suite subset (Windows CI) | ✅ |
+| Winsock + IOCP (completion) | ✅ | ✅ | ✅ lifecycle + smokes: plaintext, **TLS-via-mock**, **PROXY**, **chunked TransmitFile**, UDP-local | ⚠️ prod-ready plaintext + PROXY; real-mbedTLS TLS is BYO/out-of-CI (F3) |
+| pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + tls/ws/async + **proxy** + **bigstream**, ASan/LSan | n/a — **test double** |
+
+Net vs. the third pass: the completion row's *Tested* column now covers TLS (mock), PROXY, and
+chunked file bodies — the earlier "per-suite behavioural gaps" are closed. The only standing
+limitation is real-mbedTLS-over-IOCP (F3, BYO/out-of-CI by policy).
+
+---
+
 ## Third pass — completion test-coverage-gap triage (2026-08-01)
 
 **Verdict: no hidden backend bug.** This pass triaged the low/informational test-coverage gaps
