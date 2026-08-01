@@ -8,8 +8,17 @@
 # passes MBEDTLS_DIR / NGHTTP2_DIR through. Each leaf Makefile's default
 # KEEL_ROOT=../.. resolves to the repo root under `-C`, so no override is needed.
 
-all: mbedtls nghttp2
+all: mbedtls nghttp2 lwip
 test: mbedtls-test nghttp2-test
+
+# lwIP: build-gate only (compile the providers against your lwIP). A running Keel
+# server on lwIP needs a PLATFORM=lwip build of libkeel — see lwip/README.md.
+lwip:
+ifndef LWIP_DIR
+	@echo "integrations: skipping lwip (set LWIP_DIR to build-gate)"
+else
+	$(MAKE) -C lwip check LWIP_DIR=$(LWIP_DIR)
+endif
 
 mbedtls:
 ifndef MBEDTLS_DIR
@@ -43,4 +52,4 @@ clean:
 	-$(MAKE) -C mbedtls clean
 	-$(MAKE) -C nghttp2 clean
 
-.PHONY: all test clean mbedtls mbedtls-test nghttp2 nghttp2-test
+.PHONY: all test clean mbedtls mbedtls-test nghttp2 nghttp2-test lwip
