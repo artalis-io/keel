@@ -70,6 +70,22 @@ typedef struct KlEventCtx {
 int  kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc);
 
 /**
+ * @brief Initialize an event context on a runtime event backend.
+ *
+ * Like kl_event_ctx_init, but installs @p event_provider (e.g. lwIP) as the
+ * loop's backend instead of the compiled-in default. A NULL provider is
+ * identical to kl_event_ctx_init. The provider must be paired with a compatible
+ * socket provider (KlEventCtx.sockets / KlConfig.sockets) that it can poll.
+ *
+ * @param ctx            Event context to initialize.
+ * @param alloc          Allocator (borrowed — must outlive ctx).
+ * @param event_provider Runtime event backend, or NULL for the default.
+ * @return 0 on success, -1 on failure.
+ */
+int  kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
+                          const KlEventProvider *event_provider);
+
+/**
  * @brief Free all watchers and close the event loop.
  */
 void kl_event_ctx_free(KlEventCtx *ctx);

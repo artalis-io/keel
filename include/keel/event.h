@@ -50,6 +50,16 @@ struct KlEventOps {
     const struct KlSocketProvider *(*native_provider)(const KlEventLoop *loop);
 };
 
+/* Event-backend capability bits returned by KlEventOps.caps() — the provider
+ * describes how it reports work and what handles it can watch, so the wire-up can
+ * check it against a socket provider. Two orthogonal axes:
+ *   model  — KL_EVENT_CAP_READINESS (report readiness) / _COMPLETION (deliver
+ *            completions; build-time backends only, not runtime-injectable today)
+ *   handle — KL_EVENT_CAP_NATIVE_FD (watches OS descriptors) */
+#define KL_EVENT_CAP_READINESS  (1u << 0)
+#define KL_EVENT_CAP_NATIVE_FD  (1u << 1)
+#define KL_EVENT_CAP_COMPLETION (1u << 2)
+
 /** @brief A named event-backend provider handed to KlEventCtx.event_provider. */
 typedef struct KlEventProvider {
     const KlEventOps *ops;

@@ -92,6 +92,9 @@ typedef struct KlConfig {
                                       *   NULL = built-in POSIX/Winsock default. Must advertise
                                       *   KL_SOCK_CAP_NATIVE_FD — the readiness event loop needs a
                                       *   pollable OS descriptor (rejected at init otherwise). */
+    const KlEventProvider *event_provider; /**< custom event backend (bring-your-own readiness
+                                      *   loop, e.g. lwIP); NULL = compiled-in default. Pair it
+                                      *   with a `sockets` provider whose handles it can poll. */
 } KlConfig;
 
 /**

@@ -15,7 +15,8 @@ static void *watcher_tag(KlWatcher *w) {
 
 /* ── KlEventCtx ───────────────────────────────────────────────────── */
 
-int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
+int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
+                         const KlEventProvider *event_provider) {
     if (!ctx || !alloc) {
         if (ctx) ctx->last_error = KL_ERR_INVALID_ARG;
         return -1;
@@ -30,12 +31,20 @@ int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
     ctx->timer_next_id = 0;
     ctx->sockets = NULL;              /* POSIX by default (internal seam) */
     ctx->loop.alloc = alloc;
-    ctx->loop.ops = NULL;             /* compiled-in backend (no runtime provider) */
-    if (kl_event_init(&ctx->loop) < 0) {
+    ctx->loop.ops = NULL;             /* set by kl_event_init[_provider] below */
+    /* A runtime provider (e.g. lwIP) supplies its own event backend; NULL uses
+     * the compiled-in default. Both leave the rest of the ctx identical. */
+    int r = event_provider ? kl_event_init_provider(&ctx->loop, event_provider)
+                           : kl_event_init(&ctx->loop);
+    if (r < 0) {
         ctx->last_error = KL_ERR_EVENT_INIT;
         return -1;
     }
     return 0;
+}
+
+int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
+    return kl_event_ctx_init_ex(ctx, alloc, NULL);
 }
 
 void kl_event_ctx_free(KlEventCtx *ctx) {

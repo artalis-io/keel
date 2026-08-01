@@ -18,12 +18,9 @@
 
 #include <keel/event.h>
 
-/* Two orthogonal axes, bit flags (mirroring KL_SOCK_CAP_* style):
- *   event model  — how the loop reports work (READINESS now; COMPLETION reserved)
- *   handle domain — what handle the loop can watch (NATIVE_FD now) */
-#define KL_EVENT_CAP_READINESS  (1u << 0)  /* reports read/write readiness */
-#define KL_EVENT_CAP_NATIVE_FD  (1u << 1)  /* watches OS-native descriptors */
-#define KL_EVENT_CAP_COMPLETION (1u << 2)  /* RESERVED — no backend yet (Phase 8) */
+/* The KL_EVENT_CAP_* bits are now public (keel/event.h) — part of the
+ * KlEventOps.caps() provider contract. This header keeps only the negotiation
+ * helpers below. */
 
 /* Implemented once per event backend TU (event_epoll.c, event_kqueue.c,
  * event_poll.c, event_wsapoll.c, event_iouring.c). Returns a compile-time-constant
