@@ -253,6 +253,19 @@ static void h2c_on_stream_close(KlH2ClientSession *s, int32_t stream_id,
 
 /* ── State handlers ─────────────────────────────────────────────── */
 
+/* After the TLS handshake, verify ALPN did not select a non-h2 protocol. This
+ * client speaks HTTP/2; if the server negotiated something else (e.g. http/1.1)
+ * we must fail rather than send an HTTP/2 preface it cannot parse — no silent
+ * protocol switch. A NULL result (the server sent no ALPN) is accepted as
+ * prior-knowledge h2, the documented client policy (see docs/alpn_policy.md). */
+static int h2c_alpn_ok(KlH2ClientConn *c)
+{
+    if (!c->tls || !c->tls->alpn_protocol) return 1;   /* no ALPN → prior knowledge */
+    const char *p = c->tls->alpn_protocol(c->tls);
+    if (!p) return 1;                                   /* server sent no ALPN */
+    return (p[0] == 'h' && p[1] == '2' && p[2] == '\0');
+}
+
 static void h2c_handle_connecting(KlH2ClientConn *c)
 {
     int err = 0;
@@ -280,6 +293,7 @@ static void h2c_handle_connecting(KlH2ClientConn *c)
         c->state = H2C_TLS_HANDSHAKE;
         KlTlsResult r = c->tls->handshake(c->tls, c->fd);
         if (r == KL_TLS_OK) {
+            if (!h2c_alpn_ok(c)) { h2c_error(c, "ALPN did not negotiate h2"); return; }
             c->state = H2C_H2_INIT;
             /* Fall through to H2 init below */
         } else if (r == KL_TLS_WANT_READ) {
@@ -323,6 +337,7 @@ static void h2c_handle_tls_handshake(KlH2ClientConn *c)
 {
     KlTlsResult r = c->tls->handshake(c->tls, c->fd);
     if (r == KL_TLS_OK) {
+        if (!h2c_alpn_ok(c)) { h2c_error(c, "ALPN did not negotiate h2"); return; }
         c->state = H2C_H2_INIT;
         /* Create session — reuse the init path */
         if (!c->cfg.session) {

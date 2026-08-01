@@ -122,6 +122,15 @@ static int mock_tls_set_hostname(KlTls *self, const char *hostname) {
  * doesn't affect other includers. */
 static int (*mock_tls_peer_cert_fn)(KlTls *self, KlPeerCert *out) = NULL;
 
+/* Configurable negotiated ALPN protocol: a test sets this before the handshake to
+ * simulate the protocol a real TLS server would have selected. NULL = no ALPN
+ * negotiated (returns NULL, exactly as before this hook existed). Static-per-TU. */
+static const char *mock_tls_alpn = NULL;
+static const char *mock_tls_alpn_protocol(KlTls *self) {
+    (void)self;
+    return mock_tls_alpn;
+}
+
 /* KlTlsFactory: usable as both KlConfig.tls->factory and KlClientConfig.tls->factory. */
 static KlTls *mock_tls_create(KlTlsCtx *ctx, KlAllocator *alloc) {
     (void)ctx;
@@ -136,7 +145,7 @@ static KlTls *mock_tls_create(KlTlsCtx *ctx, KlAllocator *alloc) {
     m->base.pending       = mock_tls_pending;
     m->base.reset         = mock_tls_reset;
     m->base.destroy       = mock_tls_destroy;
-    m->base.alpn_protocol = NULL;
+    m->base.alpn_protocol = mock_tls_alpn_protocol;
     m->base.set_hostname  = mock_tls_set_hostname;
     m->base.peer_cert     = mock_tls_peer_cert_fn;
     m->base.feed_input    = mock_tls_feed_input;

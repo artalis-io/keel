@@ -119,8 +119,46 @@ interop-nghttpd: $(LIB)
 	  test $$rc -eq 0 && echo "integrations/nghttp2: KEEL client <-> nghttpd interop OK"; \
 	  exit $$rc
 
+# End-to-end ALPN over real TLS: a Keel server advertising {h2,http/1.1}
+# (mbedTLS ALPN) + nghttp2 h2, verified with external clients. Proves the two
+# server-side matrix rows: external client --ALPN h2--> h2 adapter, and
+# --ALPN http/1.1--> http/1.1 adapter, both on one shared handler. Requires BOTH
+# NGHTTP2_DIR and MBEDTLS_DIR, plus openssl + curl (BYO, out of CI).
+alpn-interop: $(LIB)
+	@test -n "$(MBEDTLS_DIR)" || { echo "set MBEDTLS_DIR (and NGHTTP2_DIR)"; exit 1; }
+	@command -v openssl >/dev/null || { echo "openssl not found"; exit 1; }
+	@command -v curl >/dev/null && curl -V | grep -q HTTP2 || { echo "curl with HTTP2 not found"; exit 1; }
+	$(MAKE) -C ../mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+	$(CC) $(CFLAGS) -I../mbedtls -I$(MBEDTLS_DIR)/include -o e2e/alpn_server e2e/alpn_server.c \
+	  -L. -lkeel_h2_nghttp2 -L../mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
+	  $(NGHTTP2_LIBS) -L$(MBEDTLS_DIR)/lib -L$(MBEDTLS_DIR)/library \
+	  -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
+	$(CC) $(CFLAGS) -I../mbedtls -I$(MBEDTLS_DIR)/include -o e2e/alpn_client e2e/alpn_client.c \
+	  -L. -lkeel_h2_nghttp2 -L../mbedtls -lkeel_mbedtls -L$(KEEL_ROOT) -lkeel \
+	  $(NGHTTP2_LIBS) -L$(MBEDTLS_DIR)/lib -L$(MBEDTLS_DIR)/library \
+	  -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
+	./e2e/alpn_server & echo $$! >/tmp/keel_alpn.pid; sleep 1; \
+	  ha=$$(echo | openssl s_client -alpn h2 -connect 127.0.0.1:18443 2>/dev/null | grep -i "ALPN protocol"); \
+	  hb=$$(echo | openssl s_client -alpn http/1.1 -connect 127.0.0.1:18443 2>/dev/null | grep -i "ALPN protocol"); \
+	  c2=$$(curl -s -k --http2 https://127.0.0.1:18443/ 2>/dev/null); \
+	  c1=$$(curl -s -k --http1.1 https://127.0.0.1:18443/ 2>/dev/null); \
+	  kc=$$(./e2e/alpn_client https://127.0.0.1:18443 2>/dev/null); kcrc=$$?; \
+	  kill $$(cat /tmp/keel_alpn.pid) 2>/dev/null; rm -f /tmp/keel_alpn.pid; \
+	  echo "openssl -alpn h2       -> $$ha"; \
+	  echo "openssl -alpn http/1.1 -> $$hb"; \
+	  echo "curl --http2   -> $$c2"; \
+	  echo "curl --http1.1 -> $$c1"; \
+	  echo "keel client    -> $$kc"; \
+	  echo "$$ha" | grep -qi "ALPN protocol: h2"       || { echo "FAIL: server did not select h2";       exit 1; }; \
+	  echo "$$hb" | grep -qi "ALPN protocol: http/1.1" || { echo "FAIL: server did not select http/1.1"; exit 1; }; \
+	  echo "$$c2" | grep -q '"http":2' || { echo "FAIL: curl --http2 not served by h2 adapter";   exit 1; }; \
+	  echo "$$c1" | grep -q '"http":1' || { echo "FAIL: curl --http1.1 not served by h1 adapter"; exit 1; }; \
+	  test $$kcrc -eq 0 || { echo "FAIL: KEEL client did not complete h2 over TLS"; exit 1; }; \
+	  echo "integrations/nghttp2: ALPN interop OK (external + KEEL client, h2 + http/1.1, one shared handler)"
+
 clean:
 	rm -f $(LIB) $(OBJ) h2_nghttp2_client.d h2_nghttp2_server.d \
-	      e2e/test_roundtrip e2e/e2e_socket e2e/interop_server e2e/client_probe link_smoke
+	      e2e/test_roundtrip e2e/e2e_socket e2e/interop_server e2e/client_probe \
+	      e2e/alpn_server e2e/alpn_client link_smoke
 
-.PHONY: all test e2e interop-curl h2spec h2load interop-nghttpd clean
+.PHONY: all test e2e interop-curl h2spec h2load interop-nghttpd alpn-interop clean

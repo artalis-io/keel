@@ -202,8 +202,6 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
                              const size_t *hdr_value_lens,
                              int num_headers) {
     KlH2ServerConn *h2c = ud;
-    (void)authority;
-    (void)authority_len;
 
     KlH2ServerStream *stream = h2_stream_create(h2c, stream_id);
     if (!stream) return -1;
@@ -212,9 +210,24 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     if (num_headers > KL_MAX_HEADERS)
         num_headers = KL_MAX_HEADERS;
 
+    /* Converge :authority (HTTP/2) with Host (HTTP/1.1): the shared request model
+     * exposes authority via a "host" header, so handlers read it the same way over
+     * both protocols. Inject a synthetic host header from :authority unless the
+     * peer already sent one (it should not, in HTTP/2). */
+    int has_host = 0;
+    for (int i = 0; i < num_headers; i++) {
+        if (hdr_name_lens[i] == 4 && strncasecmp(hdr_names[i], "host", 4) == 0) {
+            has_host = 1;
+            break;
+        }
+    }
+    int inject_host = (authority && authority_len > 0 && !has_host &&
+                       num_headers < KL_MAX_HEADERS);
+
     /* Calculate total header storage needed */
     size_t total = method_len + 1 + path_len + 1;
-    if (method_len > SIZE_MAX / 2 || path_len > SIZE_MAX / 2) {
+    if (method_len > SIZE_MAX / 2 || path_len > SIZE_MAX / 2 ||
+        authority_len > SIZE_MAX / 2) {
         h2_stream_destroy(h2c, stream);
         return -1;
     }
@@ -226,6 +239,14 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
             return -1;
         }
         total += entry;
+    }
+    if (inject_host) {
+        size_t host_entry = 4 + 1 + authority_len + 1;   /* "host" + authority */
+        if (host_entry > SIZE_MAX - total) {
+            h2_stream_destroy(h2c, stream);
+            return -1;
+        }
+        total += host_entry;
     }
 
     stream->hdr_storage = kl_malloc(h2c->alloc, total);
@@ -296,6 +317,22 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
 
         hdr_count++;
     }
+
+    /* Synthetic host header from :authority (converges with HTTP/1.1 Host). */
+    if (inject_host && hdr_count < KL_MAX_HEADERS) {
+        memcpy(p, "host", 4);
+        p[4] = '\0';
+        req->headers[hdr_count].name = p;
+        req->headers[hdr_count].name_len = 4;
+        p += 5;
+        memcpy(p, authority, authority_len);
+        p[authority_len] = '\0';
+        req->headers[hdr_count].value = p;
+        req->headers[hdr_count].value_len = authority_len;
+        /* host is the last thing written into hdr_storage — no further p advance. */
+        hdr_count++;
+    }
+
     req->num_headers = hdr_count;
     req->content_length = content_length;
     req->version_major = 2;

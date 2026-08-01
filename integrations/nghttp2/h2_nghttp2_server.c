@@ -356,19 +356,12 @@ KlH2ServerSession *kl_h2_nghttp2_server_session(KlAllocator *alloc,
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, ng_on_data_chunk_cb);
     nghttp2_session_callbacks_set_on_stream_close_callback(cbs, ng_on_stream_close_cb);
 
-    /* KEEL's h2c prior-knowledge path (connection.c) consumes the 24-byte client
-     * connection preface ("PRI * HTTP/2.0...") before feeding the session, and the
-     * h2c-Upgrade / ALPN paths never send it at all. So the session must NOT expect
-     * the client magic — otherwise nghttp2 stalls waiting for it and resets. */
-    nghttp2_option *opt = NULL;
-    if (nghttp2_option_new(&opt) != 0) {
-        nghttp2_session_callbacks_del(cbs);
-        kl_free(alloc, s, sizeof(*s));
-        return NULL;
-    }
-    nghttp2_option_set_no_recv_client_magic(opt, 1);
-    int rc = nghttp2_session_server_new2(&s->ng, cbs, s, opt);
-    nghttp2_option_del(opt);
+    /* Expect the client connection preface ("PRI * HTTP/2.0...") on the stream —
+     * nghttp2's default. KEEL feeds the full preface through for all three h2
+     * server entry paths (ALPN-negotiated h2 over TLS, h2c Upgrade, and h2c
+     * prior-knowledge — connection.c hands over the whole buffer, magic included),
+     * so nghttp2 consumes it itself. */
+    int rc = nghttp2_session_server_new(&s->ng, cbs, s);
     nghttp2_session_callbacks_del(cbs);
     if (rc != 0) {
         kl_free(alloc, s, sizeof(*s));
