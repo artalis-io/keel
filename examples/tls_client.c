@@ -13,7 +13,7 @@
  */
 
 #include <keel/keel.h>
-#include <keel/tls_mbedtls.h>
+#include <keel_tls_mbedtls.h>
 #include <stdio.h>
 
 int main(int argc, char **argv) {

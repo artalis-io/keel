@@ -180,14 +180,19 @@ CORE_SRC = src/allocator.c src/error.c $(SOCKET_SRC) $(PLATFORM_SRC) src/respons
 LLHTTP_SRC = parsers/parser_llhttp.c parsers/response_parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
-# Optional mbedTLS backend (bring-your-own — mbedTLS is not vendored). Portable:
-# the same src/tls_mbedtls.c builds on POSIX and Windows (its BIO I/O goes through
-# the socket seam). Point MBEDTLS_DIR at a source tree (include/ + library/) OR a
-# system prefix (include/ + lib/, e.g. `MBEDTLS_DIR=$(brew --prefix mbedtls)`); if
-# unset, the compiler's default search paths are used (e.g. MSYS2 /mingw64).
+# Optional mbedTLS backend (bring-your-own — mbedTLS is not vendored). The adapter
+# now lives in integrations/mbedtls/ (out of the dependency-light core); it still
+# builds on POSIX and Windows (its BIO I/O goes through the socket seam). Point
+# MBEDTLS_DIR at a source tree (include/ + library/) OR a system prefix (include/ +
+# lib/, e.g. `MBEDTLS_DIR=$(brew --prefix mbedtls)`); if unset, the compiler's
+# default search paths are used (e.g. MSYS2 /mingw64).
 #   make KEEL_TLS=mbedtls [MBEDTLS_DIR=/path]
+# `make integration-mbedtls` builds the adapter standalone (integrations/mbedtls/).
 ifdef KEEL_TLS
 ifeq ($(KEEL_TLS),mbedtls)
+  # -Isrc: the adapter includes the internal socket seam ("socket.h").
+  # -Iintegrations/mbedtls: its public header <keel_tls_mbedtls.h>.
+  CFLAGS  += -Isrc -Iintegrations/mbedtls
   ifdef MBEDTLS_DIR
     CFLAGS  += -I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library
     LDFLAGS += -L$(MBEDTLS_DIR)/library -L$(MBEDTLS_DIR)/lib
@@ -196,8 +201,8 @@ ifeq ($(KEEL_TLS),mbedtls)
     CFLAGS += -I$(MBEDTLS_DIR) -DMBEDTLS_CONFIG_FILE='"$(MBEDTLS_CONFIG_FILE)"'
   endif
   LDFLAGS += -lmbedtls -lmbedx509 -lmbedcrypto   # after -lkeel in the link line
-  TLS_MBEDTLS_SRC = src/tls_mbedtls.c
-  TLS_MBEDTLS_OBJ = src/tls_mbedtls.o
+  TLS_MBEDTLS_SRC = integrations/mbedtls/tls_mbedtls.c
+  TLS_MBEDTLS_OBJ = integrations/mbedtls/tls_mbedtls.o
 endif
 endif
 TLS_MBEDTLS_OBJ ?=
@@ -594,6 +599,24 @@ smoke-tls-completion-e2e: $(SMOKE_TLS_E2E_BIN)
 $(SMOKE_TLS_E2E_BIN): tests/smoke_tls.c $(LIB)
 	$(CC) $(CFLAGS) -DSMOKE_TLS_COMPLETION -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# Optional first-party integrations (integrations/) — bring-your-own libraries,
+# never required by `make` / `make test`. Each target skips with a notice when
+# its BYO library var is unset (MBEDTLS_DIR / NGHTTP2_DIR), so `integrations` and
+# `integration-test` are safe with only some libraries present.
+#   make integration-mbedtls MBEDTLS_DIR=$(brew --prefix mbedtls)
+#   make integration-nghttp2 NGHTTP2_DIR=$(brew --prefix nghttp2)
+#   make integrations        MBEDTLS_DIR=... NGHTTP2_DIR=...
+#   make integration-test    MBEDTLS_DIR=... NGHTTP2_DIR=...
+integration-mbedtls:
+	$(MAKE) -C integrations mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+integration-nghttp2:
+	$(MAKE) -C integrations nghttp2 NGHTTP2_DIR=$(NGHTTP2_DIR)
+integrations:
+	$(MAKE) -C integrations all MBEDTLS_DIR=$(MBEDTLS_DIR) NGHTTP2_DIR=$(NGHTTP2_DIR)
+integration-test:
+	$(MAKE) -C integrations test MBEDTLS_DIR=$(MBEDTLS_DIR) NGHTTP2_DIR=$(NGHTTP2_DIR)
+.PHONY: integration-mbedtls integration-nghttp2 integrations integration-test
+
 # Install / uninstall
 PREFIX  ?= /usr/local
 DESTDIR ?=
@@ -632,11 +655,12 @@ clean:
 	rm -f tests/smoke_pollcomp_ws tests/smoke_pollcomp_ws.exe
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
 	rm -f src/file_io.o
-	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
+	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/custom_socket_provider examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
 	rm -f $(BENCH_SERVER)
 	rm -f fuzz/fuzz_parser fuzz/fuzz_multipart fuzz/fuzz_websocket fuzz/fuzz_response_parser fuzz/fuzz_dns fuzz/fuzz_proxy fuzz/fuzz_url fuzz/fuzz_decompress
+	-$(MAKE) -C integrations clean
 	rm -f $(FUZZ_LIB) src/*.fuzz.o parsers/*.fuzz.o vendor/llhttp/*.fuzz.o
 	find . -name '*.d' -delete
 	rm -f keel.pc

@@ -4,6 +4,9 @@
 *.so
 *.dylib
 
+# Integration link smokes (integrations/*/link_smoke)
+integrations/*/link_smoke
+
 # Example binaries (extensionless; sources are .c, docs are .md)
 examples/*
 !examples/*.c
