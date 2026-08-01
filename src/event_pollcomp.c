@@ -23,6 +23,7 @@
  * source to the readiness interface.
  */
 #include <keel/event.h>
+#include "event_builtin.h"
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
@@ -87,7 +88,7 @@ typedef struct {
 
 /* ── KlEventLoop lifecycle ───────────────────────────────────────────── */
 
-int kl_event_init(KlEventLoop *loop) {
+int kl_event_init_builtin(KlEventLoop *loop) {
     KlPcState *st = kl_malloc(loop->alloc, sizeof(*st));
     if (!st) return -1;
     memset(st, 0, sizeof(*st));
@@ -103,7 +104,7 @@ int kl_event_init(KlEventLoop *loop) {
  * wakeup, timer, generic FD watcher); register it so kl_comp_drain relays its readiness as
  * a KL_COMP_WATCHER event (8e-2). This keys on the shared LSB watcher tag, not on any
  * pollcomp/IOCP specific — the same convention kl_event_dispatch uses. */
-int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     if (!((uintptr_t)udata & 1)) return 0;   /* connection — posted ops, no readiness watch */
     KlPcState *st = loop->_backend;
     for (KlPcWatch *w = st->watches; w; w = w->next)
@@ -117,14 +118,14 @@ int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     st->watches = w;
     return 0;
 }
-int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     if (!((uintptr_t)udata & 1)) return 0;
     KlPcState *st = loop->_backend;
     for (KlPcWatch *w = st->watches; w; w = w->next)
         if (w->fd == fd) { w->mask = mask; w->udata = udata; return 0; }
-    return kl_event_add(loop, fd, mask, udata);   /* not yet watched — add it */
+    return kl_event_add_builtin(loop, fd, mask, udata);   /* not yet watched — add it */
 }
-int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
+int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
     KlPcState *st = loop->_backend;
     for (KlPcWatch **link = &st->watches; *link; link = &(*link)->next)
         if ((*link)->fd == fd) {
@@ -136,7 +137,7 @@ int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
     return 0;   /* not watched (a connection fd) — nothing to do */
 }
 
-int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
+int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     /* The server drives a completion loop via kl_comp_drain (io_engine seam), not this
      * readiness call. Defined because the KlEventLoop API requires it. */
     (void)loop; (void)out; (void)max;
@@ -144,7 +145,7 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     return 0;
 }
 
-void kl_event_close(KlEventLoop *loop) {
+void kl_event_close_builtin(KlEventLoop *loop) {
     KlPcState *st = loop->_backend;
     if (!st) return;
     KlPcOp *op = st->ops;
@@ -168,14 +169,14 @@ void kl_event_close(KlEventLoop *loop) {
 
 /* A completion loop over native fds. COMPLETION makes the Phase 7 negotiation require
  * an OVERLAPPED provider (kl_socket_provider_pollcomp, below). */
-unsigned kl_event_caps(const KlEventLoop *loop) {
+unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
 }
 
 /* The overlapped provider this completion loop needs (5a) — auto-wired by the server/client
  * when the caller configured none, so the pollcomp backend is a source-compatible drop-in. */
-const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
+const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
     return kl_socket_provider_pollcomp();
 }

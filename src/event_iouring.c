@@ -43,6 +43,7 @@
 #define _GNU_SOURCE               /* pipe2 / splice (8f-2 zero-copy sendfile) */
 #endif
 #include <keel/event.h>
+#include "event_builtin.h"
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
@@ -207,7 +208,7 @@ static void iou_init_optim(KlIouState *st) {
     if (probe) io_uring_free_probe(probe);
 }
 
-int kl_event_init(KlEventLoop *loop) {
+int kl_event_init_builtin(KlEventLoop *loop) {
     KlIouState *st = kl_malloc(loop->alloc, sizeof(*st));
     if (!st) return -1;
     memset(st, 0, sizeof(*st));
@@ -242,7 +243,7 @@ static int iou_arm_watch(KlIouState *st, KlIouWatch *w) {
     return 0;
 }
 
-int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     if (!((uintptr_t)udata & 1)) return 0;   /* connection — posted ops, no readiness watch */
     KlIouState *st = loop->_backend;
     for (KlIouWatch *w = st->watches; w; w = w->next)
@@ -260,7 +261,7 @@ int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     return 0;
 }
 
-int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     if (!((uintptr_t)udata & 1)) return 0;
     KlIouState *st = loop->_backend;
     for (KlIouWatch *w = st->watches; w; w = w->next)
@@ -270,10 +271,10 @@ int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
              * one. The old poll's CQE (if it fires) just re-arms again — harmless. */
             return iou_arm_watch(st, w);
         }
-    return kl_event_add(loop, fd, mask, udata);   /* not yet watched — add it */
+    return kl_event_add_builtin(loop, fd, mask, udata);   /* not yet watched — add it */
 }
 
-int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
+int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
     KlIouState *st = loop->_backend;
     for (KlIouWatch *w = st->watches; w; w = w->next)
         if (w->fd == fd && !w->removed) {
@@ -300,7 +301,7 @@ int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
     return 0;   /* not watched (a connection fd) — nothing to do */
 }
 
-int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
+int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     /* The server drives a completion loop via kl_comp_drain (io_engine seam), not this
      * readiness call. Defined because the KlEventLoop API requires it. */
     (void)loop; (void)out; (void)max;
@@ -354,7 +355,7 @@ static void iou_send_release(KlIouState *st, KlIouOp *op) {
     op->sendcap = 0;
 }
 
-void kl_event_close(KlEventLoop *loop) {
+void kl_event_close_builtin(KlEventLoop *loop) {
     KlIouState *st = loop->_backend;
     if (!st) return;
     io_uring_queue_exit(&st->ring);        /* kernel drops in-flight ops + registered bufs */
@@ -372,14 +373,14 @@ void kl_event_close(KlEventLoop *loop) {
 /* A completion loop over native fds — COMPLETION makes the Phase 7 negotiation require an
  * OVERLAPPED provider (kl_socket_provider_iouring), which kl_event_native_provider auto-
  * wires so a default-provider server/client is a drop-in (8f-5a). */
-unsigned kl_event_caps(const KlEventLoop *loop) {
+unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
 }
 
 /* The overlapped provider this completion loop needs (5a) — so a server/client that
  * configured no provider auto-wires it and a completion backend is a drop-in. */
-const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
+const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
     return kl_socket_provider_iouring();
 }
