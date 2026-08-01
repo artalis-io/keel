@@ -231,7 +231,10 @@ const KlSocketProvider *kl_socket_provider_iocp(void) { return &IOCP_PROVIDER; }
 /* ── completion.h implementation (the overlapped mechanics) ──────────── */
 
 static void iocp_op_free(KlIocpOp *op) {
-    if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->send_total);
+    /* send_total is the sendbuf allocation size (KL_IOCP_CIPHER_SIZE for TLS_RECV; the send
+     * total, or 1 when total==0, for WRITE/SENDFILE — the alloc is `total ? total : 1`). Fall
+     * back to 1 for a zero-length send so a sized custom allocator frees the right bucket. */
+    if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total : 1);
     kl_free(op->alloc, op, sizeof(*op));
 }
 

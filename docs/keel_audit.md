@@ -1,5 +1,58 @@
 # C Audit Report: KEEL
 
+## Sixth pass — completion-axis feature work (PROXY / streaming / TransmitFile / TLS) (2026-08-01)
+
+**Scope:** everything added/changed since the fifth pass — the completion-backend feature run
+(PRs #128, #130, #133, #134, #135, #136): the completion driver's PROXY-header phase
+(`comp_drive_proxy` + `kl_conn_ingest_proxy`) and overlapped streaming flush (`comp_stream_pump`,
+8g-1); `event_iocp.c` (overlapped `WSARecvMsg` UDP local-addr, chunked `TransmitFile`, the
+`post_recv` plaintext-during-PROXY guard); the three backends' `post_recv` guard; `drain.c`'s new
+`kl_drain_data`/`kl_drain_consume`; `response.c` streaming-drain wiring; the TLS unit suites ported
+to the shared completion-capable `tests/mock_tls.h`; and verification of the (already-landed)
+platform-neutral mbedTLS backend on Windows.
+
+**Method:** two parallel deep-review agents (completion axis; protocol/support + broad re-scan)
+tracing op/buffer/connection lifetime, integer/offset math, and bounds; mechanical sweeps across
+`src/`+`parsers/` (no `strcpy`/`sprintf`/`gets`, no `atoi`/`atol`/`atof`, raw `malloc`/`free` only
+in the allocator wrapper, `kl_malloc` NULL-check + free-size discipline); `cppcheck` (clean on the
+changed TUs); the **full 55-suite unit test under ASan+UBSan (`make debug-test`) — 0 failures, 0
+sanitizer hits**; and a MinGW compile-gate on the touched Windows TUs.
+
+**Verdict: clean.** No Critical/High/Medium findings. Two **Low** allocator-discipline defects
+(free-size mismatch on a zero-length completion send, latent under a bring-your-own *sized*
+allocator; harmless under the default stdlib allocator) were found **and fixed this pass**.
+
+### Low — fixed this pass
+
+| # | File | Issue | Fix |
+|---|------|-------|-----|
+| L1 | `src/event_pollcomp.c` `pc_op_free` | A zero-length WRITE/SENDFILE/UDP op allocs `sendbuf` as `total ? total : 1` (1 byte) but `pc_op_free` freed it as `send_total ? send_total : KL_PC_CIPHER_SIZE` → frees a 1-byte block as **17408 bytes**. Reachable via a 0-length TLS-ciphertext send. A size-classed/arena `KlAllocator` mis-buckets the free. | Fall back to `1`, not `KL_PC_CIPHER_SIZE` (mirrors the alloc; `send_total` is set to the real size on every alloc path). |
+| L2 | `src/event_iocp.c` `iocp_op_free` | Same shape: a zero-length WRITE frees a 1-byte `sendbuf` with `send_total == 0`. | Free `send_total ? send_total : 1`. |
+
+### Informational (no action required)
+
+- **I1** `event_iocp.c` `KL_IOCP_SENDFILE` completion advances `file_done` by the *requested*
+  `file_chunk`, not bytes actually transferred. Correct because overlapped `TransmitFile` is
+  all-or-nothing per chunk; a short success (never observed) would garble (not OOB) the body.
+- **I2** `event_iouring.c` `kl_comp_cancel` leaves an op in-flight if the SQ is full at cancel
+  time (liveness edge under SQ pressure, not a safety bug).
+- **I3** `dns_resolver.c:976` write-buffer growth omits the project's `SIZE_MAX/2` doubling idiom;
+  safe today (values bounded to a few KB) — add the guard for uniformity.
+
+### Verified correct (explicitly not findings)
+
+Drain peek/consume is safe because `kl_comp_post_send` **copies** the buffer synchronously in all
+three backends (so `kl_drain_consume` after posting is not a UAF); the PROXY `memmove` never
+underflows (`kl_proxy_parse`'s `consumed ∈ [0,len]`, and `read_cap` 8192 ≫ `KL_PROXY_HEADER_MAX`
+536, bounded by the `-1` guard); the ≤1-in-flight invariant (recv XOR send per conn, posted only
+from a completion) means `kl_comp_cancel` yields exactly one aborting completion → one release, no
+double-free; every `kl_comp_post_*` frees its op on all error paths; the Windows cmsg walks
+(`kl_udp_win_parse_local`/`udp_parse_tos`) stop on a runt cmsg; `response.c` fixed stack buffers
+(`cl_buf[48]`, `hdr[24]`) are correctly sized; CRLF header-injection + CL/TE smuggling (llhttp)
+guards intact.
+
+---
+
 ## Fifth pass — io_uring completion backend + provider auto-wire + stop-wakeup (2026-07-30)
 
 **Scope:** the code added/changed across the io_uring-completion migration (PRs #101–#110):
