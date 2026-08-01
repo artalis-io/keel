@@ -493,7 +493,7 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # backend-neutral kl_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
-# 48 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
+# 49 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
 # client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
 # server/client now auto-adopts the completion loop's overlapped provider instead of being
 # rejected at kl_server_init) → +2 (integration, server_integration) once the completion
@@ -524,18 +524,20 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # raw kl_event_wait drivers (event, event_ctx, async — a completion loop has no readiness
 # kl_event_wait, only kl_comp_run; async also builds a conn with no ctx) and readiness-cap /
 # provider-negotiation assertions (event_caps, socket_provider) are inherently readiness-axis.
-# peer_addr: its proxy_v1/v2_trusted tests need proxy_trusted_cidrs, which kl_server_init now
-# rejects on a completion loop (PROXY has no completion driver — #134). udp_multicast:
-# broadcast_flag_gates_send asserts a *synchronous* EACCES that only holds for readiness (completion
-# sends are queued async). Backend-specific: iocp_engine.
+# udp_multicast: broadcast_flag_gates_send asserts a *synchronous* EACCES that only holds for
+# readiness (completion sends are queued async). Backend-specific: iocp_engine.
+# → +1 (peer_addr) once the completion driver grew a PROXY-header phase (comp_drive_proxy +
+# kl_conn_ingest_proxy): a trusted-source PROXY header is now parsed over the completion loop (the
+# recv is plaintext during KL_CONN_PROXY_HEADER even for a TLS conn), so its proxy_v1/v2_trusted
+# tests pass. (This replaced the #134 fail-loud init rejection.)
 IOURING_TEST_SUITES = allocator body_reader chunked client client_happy_eyeballs client_pool \
                           client_stream compress connection cors cross_module decompress \
                           dns_resolver drain error file_io h2 h2_client integration \
-                          multipart_stream overflow parser peer_cert proxy proxy_protocol \
-                          redirect request resolver_cache response response_parser router \
-                          server_integration server_stats sse thread_pool timeout timer tls \
-                          tls_integration udp udp_batching udp_offload udp_server udp_tos \
-                          unix_socket url websocket websocket_client
+                          multipart_stream overflow parser peer_addr peer_cert proxy \
+                          proxy_protocol redirect request resolver_cache response \
+                          response_parser router server_integration server_stats sse thread_pool \
+                          timeout timer tls tls_integration udp udp_batching udp_offload \
+                          udp_server udp_tos unix_socket url websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \

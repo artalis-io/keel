@@ -422,21 +422,68 @@ static int h2_prior_knowledge_roundtrip(void) {
     return rlen == sizeof(SMOKE_H2PK) - 1 && memcmp(rb, SMOKE_H2PK, rlen) == 0;
 }
 
-/* PROXY protocol has no completion-loop driver (the header phase is readiness-only), so
- * kl_server_init must reject proxy_trusted_cidrs on a completion loop rather than silently
- * mis-serving the header as HTTP. Returns 1 if correctly rejected. */
-static int proxy_rejected_over_completion(void) {
-    KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1",
+/* PROXY-over-completion: a trusted-source connection sends a plaintext PROXY v1 header before
+ * its HTTP request; the completion driver's PROXY-header phase (comp_drive_proxy) must parse it
+ * and the handler must see the real client address (1.2.3.4), not the socket's 127.0.0.1 —
+ * exercising accept → KL_CONN_PROXY_HEADER → parse → READING → handler over the completion loop.
+ * Returns 1 on success. */
+#define SMOKE_PROXY_PORT 18097
+static char g_proxy_ip[64];
+static void handle_proxy_probe(KlRequest *req, KlResponse *res, void *ctx) {
+    (void)ctx;
+    uint16_t port = 0;
+    g_proxy_ip[0] = '\0';
+    kl_request_peer_addr(req, g_proxy_ip, sizeof(g_proxy_ip), &port);
+    kl_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
+}
+static void *run_server_arg(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+static int proxy_over_completion_ok(void) {
+    KlServer srv;
+    KlConfig cfg = { .port = SMOKE_PROXY_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_pollcomp(),
                      .proxy_trusted_cidrs = "127.0.0.1/32" };
-    KlServer s;
-    if (kl_server_init(&s, &cfg) == 0) { kl_server_free(&s); return 0; }
-    return 1;
+    if (kl_server_init(&srv, &cfg) != 0) return 0;   /* must NOT be rejected — now supported */
+    kl_server_route(&srv, "GET", "/p", handle_proxy_probe, NULL, NULL);
+    pthread_t th;
+    if (pthread_create(&th, NULL, run_server_arg, &srv) != 0) { kl_server_free(&srv); return 0; }
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) nap_ms(5);
+
+    int ok = 0;
+    int cs = socket(AF_INET, SOCK_STREAM, 0);
+    if (cs >= 0) {
+        struct timeval tmo = { 2, 0 };
+        setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo));
+        struct sockaddr_in to;
+        memset(&to, 0, sizeof(to));
+        to.sin_family = AF_INET;
+        to.sin_port = htons(SMOKE_PROXY_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+        if (connect(cs, (struct sockaddr *)&to, sizeof(to)) == 0) {
+            /* PROXY v1 header (real client 1.2.3.4) + the HTTP request, one write. */
+            const char *msg = "PROXY TCP4 1.2.3.4 5.6.7.8 1111 2222\r\n"
+                              "GET /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+            if (write(cs, msg, strlen(msg)) == (ssize_t)strlen(msg)) {
+                char buf[1024]; size_t got = 0;
+                while (got < sizeof(buf) - 1) {
+                    ssize_t n = read(cs, buf + got, sizeof(buf) - 1 - got);
+                    if (n <= 0) break;
+                    got += (size_t)n; buf[got] = 0;
+                    if (strstr(buf, SMOKE_BODY)) break;
+                }
+                ok = (strstr(buf, "200 OK") != NULL && strcmp(g_proxy_ip, "1.2.3.4") == 0);
+            }
+        }
+        close(cs);
+    }
+    kl_server_stop(&srv);
+    pthread_join(th, NULL);
+    kl_server_free(&srv);
+    return ok;
 }
 
 int main(void) {
     /* PROXY-over-completion is rejected at init (no completion PROXY-header driver). */
-    int proxy_reject_ok = proxy_rejected_over_completion();
+    int proxy_ok = proxy_over_completion_ok();
 
     static KlH2ServerConfig h2cfg = { .factory = echo_factory };
     KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
@@ -624,8 +671,8 @@ int main(void) {
     if (!resil_ok) { fprintf(stderr, "smoke-pollcomp: resilience (drop/malformed) FAILED\n"); return 1; }
     if (!big_ok) { fprintf(stderr, "smoke-pollcomp: large-response partial-send FAILED\n"); return 1; }
     if (!bigstream_ok) { fprintf(stderr, "smoke-pollcomp: bigstream overlapped flush / HOL FAILED\n"); return 1; }
-    if (!proxy_reject_ok) { fprintf(stderr, "smoke-pollcomp: proxy_trusted_cidrs not rejected over completion FAILED\n"); return 1; }
+    if (!proxy_ok) { fprintf(stderr, "smoke-pollcomp: PROXY-over-completion roundtrip FAILED\n"); return 1; }
 
-    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST + file + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large + bigstream + proxy-reject)\n");
+    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST + file + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large + bigstream + proxy)\n");
     return 0;
 }

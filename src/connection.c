@@ -410,6 +410,38 @@ int kl_conn_read_proxy_header(KlConn *c) {
     return 1;
 }
 
+/* Model-blind PROXY-header ingest for the completion path: parse a PROXY header from bytes
+ * already received into read_buf[0..len] (an overlapped recv, not a socket peek — the readiness
+ * counterpart above peeks + consumes on the socket). On a real header sets c->peer_addr as
+ * KL_PEER_PROXY. Returns the number of leading header bytes to consume (0 = not a PROXY header,
+ * proceed with all bytes as HTTP/TLS), -1 on malformed/oversized, or -2 if more bytes are needed
+ * (the caller posts another recv). */
+int kl_conn_ingest_proxy(KlConn *c, size_t len) {
+    struct sockaddr_storage peer;
+    socklen_t peer_len = 0;
+    size_t consumed = 0;
+    KlProxyResult r = kl_proxy_parse((const uint8_t *)c->read_buf, len,
+                                     &consumed, &peer, &peer_len);
+    switch (r) {
+        case KL_PROXY_NEED_MORE:
+            /* A PROXY header can't exceed KL_PROXY_HEADER_MAX; still incomplete past that is
+             * malformed (also bounds the wait against a slow/withholding sender). */
+            return (len >= KL_PROXY_HEADER_MAX) ? -1 : -2;
+        case KL_PROXY_INVALID:
+            return -1;
+        case KL_PROXY_NONE:
+            return 0;   /* not a PROXY header — proceed with all buffered bytes */
+        case KL_PROXY_OK:
+            if (peer_len > 0 && (size_t)peer_len <= sizeof(c->peer_addr)) {
+                memcpy(&c->peer_addr, &peer, peer_len);
+                c->peer_addr_len = peer_len;
+                c->peer_source = KL_PEER_PROXY;
+            }
+            return (int)consumed;
+    }
+    return -1;
+}
+
 /*
  * Null-terminate method, path, query, and all header name/value strings
  * in-place in read_buf.  The byte after each string is an HTTP syntax

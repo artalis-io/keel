@@ -249,7 +249,7 @@ int kl_comp_post_recv(KlConn *c) {
     op->conn = c;
 
     WSABUF buf;
-    if (c->tls) {
+    if (c->tls && c->state != KL_CONN_PROXY_HEADER) {  /* PROXY header is plaintext, pre-TLS */
         /* TLS: read raw ciphertext into a transient op buffer (kept in sendbuf so
          * iocp_op_free reclaims it). read_buf holds *decrypted plaintext*, which
          * accumulates across records for headers — it must not be clobbered by an

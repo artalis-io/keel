@@ -23,6 +23,7 @@
 #include "socket.h"              /* kl_sock_* (close / tcp_nodelay via the seam) */
 #include "platform.h"            /* kl_plat_file_pread — TLS file body chunks (8c-2) */
 #include <keel/udp.h>            /* KlUdp (KL_COMP_UDP_RECV target) */
+#include <keel/proxy_protocol.h> /* kl_cidr_match — PROXY-over-completion accept gate */
 #include "udp_internal.h"        /* kl_udp_comp_on_recv */
 #include <string.h>
 #include <stddef.h>              /* offsetof (server_of_ctx containerof) */
@@ -583,14 +584,24 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
      * state route KL_CONN_HTTP2 to comp_h2_drive. (8c-4 cleared h2_config here as a
      * well-defined refusal before the driver existed; that clear is now removed.) */
 
-    /* TLS: enter the handshake state and switch the backend into completion (memory
-     * BIO) mode so handshake()/read()/write() operate on fed/drained buffers instead
-     * of the socket. Requires the backend's optional feed_input/drain_output ops. */
-    if (nc->tls) {
-        if (!nc->tls->feed_input || !nc->tls->drain_output) {
-            comp_close(s, nc);   /* backend can't do completion-mode TLS */
-            goto refill;
-        }
+    /* TLS needs the backend's memory-BIO ops (feed_input/drain_output) on a completion loop —
+     * reject a backend that lacks them before doing anything else. */
+    if (nc->tls && (!nc->tls->feed_input || !nc->tls->drain_output)) {
+        comp_close(s, nc);   /* backend can't do completion-mode TLS */
+        goto refill;
+    }
+
+    /* PROXY protocol: a trusted-source connection sends a plaintext PROXY header before any
+     * TLS/HTTP. Read it first (KL_CONN_PROXY_HEADER, a plaintext recv); comp_drive_proxy enters
+     * the real initial state (TLS handshake or HTTP read) once the header is consumed. Mirrors
+     * the readiness accept gate (server.c). */
+    if (s->proxy_cidr_count > 0 && nc->peer_addr_len > 0 &&
+        kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count,
+                      (struct sockaddr *)&nc->peer_addr)) {
+        nc->state = KL_CONN_PROXY_HEADER;   /* TLS memory-BIO enabled later, after the header */
+    } else if (nc->tls) {
+        /* TLS: enter the handshake state and switch the backend into completion (memory BIO)
+         * mode so handshake()/read()/write() operate on fed/drained buffers, not the socket. */
         nc->state = KL_CONN_TLS_HANDSHAKE;
         nc->tls->feed_input(nc->tls, NULL, 0);   /* enable memory-BIO mode */
     }
@@ -605,9 +616,53 @@ refill:
     (void)kl_comp_post_accept(s);   /* keep the accept backlog topped up */
 }
 
+/* PROXY protocol header phase over the completion loop: the plaintext header arrived in
+ * read_buf via an overlapped recv. Parse it (kl_conn_ingest_proxy), then enter the real
+ * initial state — TLS handshake (enable the memory-BIO, feed the buffered ClientHello) or HTTP
+ * read — processing any bytes that followed the header this tick. The header recv is plaintext
+ * even for a TLS conn (post_recv skips the TLS branch while state == KL_CONN_PROXY_HEADER). */
+static void comp_drive_proxy(struct KlServer *s, KlConn *c) {
+    int consumed = kl_conn_ingest_proxy(c, c->read_len);
+    if (consumed == -1) { comp_close(s, c); return; }       /* malformed / oversized */
+    if (consumed == -2) {                                    /* need more header bytes */
+        if (kl_comp_post_recv(c) < 0) comp_close(s, c);
+        return;
+    }
+    if (consumed > 0) {                                      /* drop the header, keep remainder */
+        c->read_len -= (size_t)consumed;
+        if (c->read_len > 0)
+            memmove(c->read_buf, c->read_buf + consumed, c->read_len);
+    }
+
+    if (c->tls) {
+        c->state = KL_CONN_TLS_HANDSHAKE;
+        c->tls->feed_input(c->tls, NULL, 0);                /* enable memory-BIO mode */
+        if (c->read_len > 0) {                              /* buffered ClientHello ciphertext */
+            if (c->tls->feed_input(c->tls, c->read_buf, c->read_len) < 0) {
+                comp_close(s, c); return;
+            }
+            c->read_len = 0;
+        }
+        comp_tls_drive(s, c);
+    } else {
+        c->state = KL_CONN_READING;
+        if (c->read_len > 0)
+            comp_drive_reading(s, c);                       /* parse buffered HTTP bytes */
+        else if (kl_comp_post_recv(c) < 0)
+            comp_close(s, c);
+    }
+}
+
 static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
     KlConn *c = ev->target;
     if (!ev->ok || ev->bytes == 0) { comp_close(s, c); return; }   /* peer closed */
+    /* PROXY header phase (plaintext, before TLS/HTTP) — must run before the TLS branch since a
+     * PROXY+TLS conn has c->tls set but hasn't started the handshake yet. */
+    if (c->state == KL_CONN_PROXY_HEADER) {
+        c->read_len += ev->bytes;
+        comp_drive_proxy(s, c);
+        return;
+    }
     /* TLS: the backend already fed this recv's ciphertext to the engine (bytes counts
      * ciphertext, not plaintext); the driver handshakes / decrypts. read_buf holds
      * plaintext and is written by comp_tls_drive, not here. */
