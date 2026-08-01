@@ -47,6 +47,19 @@
 /** @brief Version string ("major.minor.patch"). */
 #define KL_VERSION_STRING "2.9.0"
 
+/** @brief Packed version: major*10000 + minor*100 + patch (e.g. 20900). Suitable
+ *  for `#if KL_VERSION_NUMBER >= 20900` compile-time gating. */
+#define KL_VERSION_NUMBER \
+    ((KL_VERSION_MAJOR) * 10000 + (KL_VERSION_MINOR) * 100 + (KL_VERSION_PATCH))
+
+/** @brief Version string of the *linked* library ("major.minor.patch").
+ *  Compile-time macros describe the headers; this reports the compiled library,
+ *  so a consumer that static-relinks a newer Keel can verify it at runtime. */
+const char *kl_version(void);
+
+/** @brief Packed version (@ref KL_VERSION_NUMBER) of the *linked* library. */
+int kl_version_number(void);
+
 /** @} */
 
 #include <keel/error.h>
