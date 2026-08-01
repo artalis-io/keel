@@ -56,6 +56,9 @@ typedef struct KlConn {
     size_t read_len;            /**< Bytes in read buffer */
     size_t read_cap;            /**< Read buffer capacity */
     size_t max_header_size;     /**< Max header size (from KlConfig) */
+    int read_paused;            /**< Read-side flow control: 1 = body reads paused
+                                     (kl_request_pause_body). Readiness drops READ interest;
+                                     completion stops posting the next recv. */
 
     KlRequest req;              /**< Current request */
     KlResponse res;             /**< Current response */

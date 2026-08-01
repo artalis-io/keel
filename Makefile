@@ -493,7 +493,7 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # backend-neutral kl_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
-# 49 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
+# 50 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
 # client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
 # server/client now auto-adopts the completion loop's overlapped provider instead of being
 # rejected at kl_server_init) → +2 (integration, server_integration) once the completion
@@ -534,10 +534,10 @@ IOURING_TEST_SUITES = allocator body_reader chunked client client_happy_eyeballs
                           client_stream compress connection cors cross_module decompress \
                           dns_resolver drain error file_io h2 h2_client integration \
                           multipart_stream overflow parser peer_addr peer_cert proxy \
-                          proxy_protocol redirect request resolver_cache response \
-                          response_parser router server_integration server_stats sse thread_pool \
-                          timeout timer tls tls_integration udp udp_batching udp_offload \
-                          udp_server udp_tos unix_socket url websocket websocket_client
+                          proxy_protocol read_flow_control redirect request resolver_cache \
+                          response response_parser router server_integration server_stats sse \
+                          thread_pool timeout timer tls tls_integration udp udp_batching \
+                          udp_offload udp_server udp_tos unix_socket url websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \

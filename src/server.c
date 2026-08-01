@@ -989,8 +989,12 @@ transition:
             } else if (new_state == KL_CONN_READING ||
                        new_state == KL_CONN_READING_BODY ||
                        new_state == KL_CONN_PROXY_HEADER) {
-                if (kl_event_mod(&s->ev.loop, c->fd,
-                                 KL_EVENT_READ, c) < 0) {
+                /* Read-side flow control: a paused body consumer keeps READ interest OFF (0)
+                 * so the level-triggered loop stops delivering body bytes; kl_request_resume_body
+                 * re-arms READ. Only READING_BODY pauses. */
+                KlEventMask rm = (new_state == KL_CONN_READING_BODY && c->read_paused)
+                                     ? 0 : KL_EVENT_READ;
+                if (kl_event_mod(&s->ev.loop, c->fd, rm, c) < 0) {
                     kl_event_del(&s->ev.loop, c->fd);
                     kl_server_conn_release(s,c);
                 }
@@ -1053,6 +1057,31 @@ void kl_server_stop(KlServer *s) {
         KlPlatWakeup w = { s->stop_wake_rd, s->stop_wake_wr };
         kl_plat_wakeup_signal(&w);
     }
+}
+
+/* ── Read-side body flow control (Phase 1) ───────────────────────────────
+ * Event-axis-agnostic pause/resume for request-body reading. Readiness drops/re-arms READ
+ * interest (kl_event_mod; the READING_BODY re-arm above honors read_paused so a pause from
+ * inside on_data is not immediately undone). Completion stops posting / re-posts the recv via
+ * the io_engine seam. Both idempotent; loop-thread only. */
+void kl_request_pause_body(KlRequest *req) {
+    KlConn *c = req ? kl_request_conn(req) : NULL;
+    if (!c || c->read_paused) return;                 /* idempotent */
+    c->read_paused = 1;
+    if (!(kl_event_caps(&c->ctx->loop) & KL_EVENT_CAP_COMPLETION))
+        (void)kl_event_mod(&c->ctx->loop, c->fd, 0, c);   /* readiness: stop READ now */
+    /* completion: comp_start_body_read skips the next recv; the in-flight recv may deliver ≤1
+     * more chunk before the pause takes hold (bounded). */
+}
+
+void kl_request_resume_body(KlRequest *req) {
+    KlConn *c = req ? kl_request_conn(req) : NULL;
+    if (!c || !c->read_paused) return;                /* idempotent */
+    c->read_paused = 0;
+    if (kl_event_caps(&c->ctx->loop) & KL_EVENT_CAP_COMPLETION)
+        kl_io_engine_post_read(c);                    /* completion: re-post the body recv */
+    else
+        (void)kl_event_mod(&c->ctx->loop, c->fd, KL_EVENT_READ, c);   /* readiness: re-arm READ */
 }
 
 void kl_server_stats(const KlServer *s, KlServerStats *out) {

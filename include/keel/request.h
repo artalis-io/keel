@@ -59,6 +59,27 @@ static inline KlConn *kl_request_conn(const KlRequest *req) {
     return (KlConn *)req->_server_ctx;
 }
 
+/**
+ * @brief Read-side body flow control — pause / resume request-body reading.
+ *
+ * A streamed-body consumer whose downstream sink is full calls kl_request_pause_body() to stop
+ * Keel reading more body bytes off the connection, bounding accumulation without aborting the
+ * body. It re-enables reading with kl_request_resume_body() once the sink drains. Both are
+ * idempotent and must be called on the event-loop thread (e.g. from the body reader's on_data,
+ * or later from a watcher/timer/thread-pool completion that drives the sink).
+ *
+ * Semantics:
+ *  - Readiness: pause drops READ interest immediately; resume re-arms it.
+ *  - Completion: pause stops posting the next recv; the one already-submitted recv may still
+ *    deliver a final chunk (bounded to ≤1 in flight); resume posts a fresh recv.
+ *  - A conn that stays paused is NOT exempt from the idle-read timeout — an indefinitely paused
+ *    consumer is eventually timed out (slowloris/backpressure defense).
+ *  - Pausing before/outside KL_CONN_READING_BODY is a no-op-safe state set; resume only re-arms
+ *    when a pause is in effect.
+ */
+void kl_request_pause_body(KlRequest *req);
+void kl_request_resume_body(KlRequest *req);
+
 /** @brief Find header by name (case-insensitive).
  *  @return Null-terminated value pointer, or NULL if not found. */
 static inline const char *kl_request_header(const KlRequest *req,
