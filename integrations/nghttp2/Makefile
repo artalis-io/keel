@@ -28,7 +28,9 @@ endif
 
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
           -fstack-protector-strong
-CFLAGS += -I$(KEEL_ROOT)/include -I. $(NGHTTP2_CFLAGS)
+# _DEFAULT_SOURCE: e2e_socket.c uses nanosleep(), which needs a feature-test
+# macro under -std=c11 on glibc (Apple libc exposes it without one).
+CFLAGS += -D_DEFAULT_SOURCE -I$(KEEL_ROOT)/include -I. $(NGHTTP2_CFLAGS)
 
 LIB = libkeel_h2_nghttp2.a
 OBJ = h2_nghttp2_client.o h2_nghttp2_server.o
@@ -46,14 +48,40 @@ h2_nghttp2_server.o: h2_nghttp2_server.c keel_h2_nghttp2.h
 # Functional roundtrip: pairs the client + server sessions in memory (no sockets,
 # no KEEL driver), feeding each other's on_send output through recv, and asserts a
 # GET request + 200 response with body survive real nghttp2 framing end to end.
-test: $(LIB)
+test: $(LIB) e2e
 	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
-	$(CC) $(CFLAGS) -o test_roundtrip test_roundtrip.c \
+	$(CC) $(CFLAGS) -o e2e/test_roundtrip e2e/test_roundtrip.c \
 	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
-	./test_roundtrip
+	./e2e/test_roundtrip
 	@echo "integrations/nghttp2: roundtrip OK"
 
+# End-to-end over a real loopback socket + KEEL event loop: KEEL nghttp2 client
+# (kl_h2_client_connect, cleartext h2c) <-> KEEL nghttp2 server (KlConfig.h2,
+# h2c prior-knowledge). Exercises both adapters through the real driver paths.
+e2e: $(LIB)
+	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
+	$(CC) $(CFLAGS) -o e2e/e2e_socket e2e/e2e_socket.c \
+	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	./e2e/e2e_socket
+	@echo "integrations/nghttp2: e2e (real socket) OK"
+
+# Third-party interop: run the KEEL nghttp2 server (h2c prior-knowledge) and hit
+# it with curl's HTTP/2 client. Requires a curl built with HTTP2 (curl -V).
+interop-curl: $(LIB)
+	@command -v curl >/dev/null || { echo "curl not found"; exit 1; }
+	@curl -V | grep -q HTTP2 || { echo "curl lacks HTTP2 support"; exit 1; }
+	$(CC) $(CFLAGS) -o e2e/interop_server e2e/interop_server.c \
+	  -L. -lkeel_h2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	./e2e/interop_server & echo $$! > /tmp/keel_h2_interop.pid; sleep 1; \
+	  out=$$(curl -s --http2-prior-knowledge http://127.0.0.1:18478/hello); rc=$$?; \
+	  kill $$(cat /tmp/keel_h2_interop.pid) 2>/dev/null; rm -f /tmp/keel_h2_interop.pid; \
+	  echo "curl body: $$out"; \
+	  test $$rc -eq 0 || { echo "curl failed rc=$$rc"; exit 1; }; \
+	  echo "$$out" | grep -q "hello h2 e2e" || { echo "body mismatch"; exit 1; }; \
+	  echo "integrations/nghttp2: curl --http2-prior-knowledge interop OK"
+
 clean:
-	rm -f $(LIB) $(OBJ) h2_nghttp2_client.d h2_nghttp2_server.d test_roundtrip link_smoke
+	rm -f $(LIB) $(OBJ) h2_nghttp2_client.d h2_nghttp2_server.d \
+	      e2e/test_roundtrip e2e/e2e_socket e2e/interop_server link_smoke
 
 .PHONY: all test clean
