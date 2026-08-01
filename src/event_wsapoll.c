@@ -14,6 +14,7 @@
  */
 
 #include <keel/event.h>
+#include "event_builtin.h"
 #include "event_caps.h"
 
 #include "sockcompat.h"   /* winsock2.h + kl_wsa_set_errno() */
@@ -75,7 +76,7 @@ static int grow_arrays(KlWsaPollState *st) {
     return 0;
 }
 
-int kl_event_init(KlEventLoop *loop) {
+int kl_event_init_builtin(KlEventLoop *loop) {
     KlAllocator *alloc = loop->alloc;
     KlWsaPollState *st = kl_malloc(alloc, sizeof(*st));
     if (!st)
@@ -103,7 +104,7 @@ int kl_event_init(KlEventLoop *loop) {
     return 0;
 }
 
-int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlWsaPollState *st = loop->_backend;
 
     /* Reject an invalid socket handle up front (matches the epoll/kqueue/poll
@@ -133,7 +134,7 @@ int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     return 0;
 }
 
-int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlWsaPollState *st = loop->_backend;
     int idx = find_slot(st, fd);
     if (idx < 0)
@@ -143,7 +144,7 @@ int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     return 0;
 }
 
-int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
+int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
     KlWsaPollState *st = loop->_backend;
     int idx = find_slot(st, fd);
     if (idx < 0)
@@ -159,7 +160,7 @@ int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
     return 0;
 }
 
-int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
+int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     KlWsaPollState *st = loop->_backend;
 
     if (st->count == 0) {
@@ -199,7 +200,7 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     return count;
 }
 
-void kl_event_close(KlEventLoop *loop) {
+void kl_event_close_builtin(KlEventLoop *loop) {
     KlWsaPollState *st = loop->_backend;
     if (!st)
         return;
@@ -213,13 +214,13 @@ void kl_event_close(KlEventLoop *loop) {
 }
 
 /* PAL Phase 7: WSAPoll is a readiness poller of native OS descriptors (SOCKETs). */
-unsigned kl_event_caps(const KlEventLoop *loop) {
+unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }
 
 /* Readiness loop — the default Winsock provider works; nothing to auto-wire (5a). */
-const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
+const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
     return NULL;
 }

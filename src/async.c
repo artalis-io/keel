@@ -30,6 +30,7 @@ int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
     ctx->timer_next_id = 0;
     ctx->sockets = NULL;              /* POSIX by default (internal seam) */
     ctx->loop.alloc = alloc;
+    ctx->loop.ops = NULL;             /* compiled-in backend (no runtime provider) */
     if (kl_event_init(&ctx->loop) < 0) {
         ctx->last_error = KL_ERR_EVENT_INIT;
         return -1;

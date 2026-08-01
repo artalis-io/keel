@@ -14,14 +14,57 @@ typedef struct {
     KlEventMask ready;  /**< Bitmask of ready events */
 } KlEvent;
 
+/** @brief Forward declaration — the socket-provider seam (keel/socket.h). */
+struct KlSocketProvider;
+
+typedef struct KlEventOps KlEventOps;
+
 typedef struct {
     int fd;             /**< epoll_fd or kqueue_fd, -1 for io_uring */
     void *_backend;     /**< reserved for backend-specific state */
     KlAllocator *alloc; /**< set before kl_event_init; used by io_uring backend */
+    /** Optional runtime event backend (NULL = the compiled-in default). When set
+     *  before kl_event_init, all kl_event_* calls dispatch through it — this is how
+     *  a bring-your-own event backend (e.g. lwIP) is injected without recompiling
+     *  the core. Install it via KlEventCtx.event_provider. */
+    const KlEventOps *ops;
 } KlEventLoop;
 
-/** @brief Initialize the platform event loop (epoll/kqueue/io_uring). */
+/**
+ * @brief A runtime-pluggable event backend (parallel to KlSocketProvider).
+ *
+ * The core dispatches every kl_event_* call to these ops when a provider is
+ * installed on the loop; otherwise it uses the compiled-in backend directly (no
+ * indirection on the default path). A backend and its socket provider must agree
+ * on what "pollable handle" means — a provider that watches non-OS handles (lwIP
+ * socket indices) pairs with a socket provider whose native handles it can poll.
+ */
+struct KlEventOps {
+    int  (*init)(KlEventLoop *loop);
+    int  (*add)(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata);
+    int  (*mod)(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata);
+    int  (*del)(KlEventLoop *loop, KlSocketHandle fd);
+    int  (*wait)(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms);
+    void (*close)(KlEventLoop *loop);
+    unsigned (*caps)(const KlEventLoop *loop);
+    const struct KlSocketProvider *(*native_provider)(const KlEventLoop *loop);
+};
+
+/** @brief A named event-backend provider handed to KlEventCtx.event_provider. */
+typedef struct KlEventProvider {
+    const KlEventOps *ops;
+    const char       *name;
+} KlEventProvider;
+
+/** @brief Initialize the compiled-in platform event loop (epoll/kqueue/io_uring/
+ *  poll/…). Sets loop->ops = NULL (the builtin path). */
 int  kl_event_init(KlEventLoop *loop);
+
+/** @brief Initialize the loop on a runtime-supplied event backend instead of the
+ *  compiled-in one. Installs provider->ops on the loop and runs its init. A NULL
+ *  provider falls back to kl_event_init(). Used by KlEventCtx when an
+ *  event_provider is configured (e.g. lwIP). */
+int  kl_event_init_provider(KlEventLoop *loop, const KlEventProvider *provider);
 
 /** @brief Register a file descriptor for events. */
 int  kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata);

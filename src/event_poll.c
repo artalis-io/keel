@@ -1,4 +1,5 @@
 #include <keel/event.h>
+#include "event_builtin.h"
 #include "event_caps.h"
 #include <limits.h>
 #include <poll.h>
@@ -79,7 +80,7 @@ static int grow_arrays(KlPollState *st) {
     return 0;
 }
 
-int kl_event_init(KlEventLoop *loop) {
+int kl_event_init_builtin(KlEventLoop *loop) {
     KlAllocator *alloc = loop->alloc;
     KlPollState *st = kl_malloc(alloc, sizeof(*st));
     if (!st)
@@ -120,7 +121,7 @@ int kl_event_init(KlEventLoop *loop) {
     return 0;
 }
 
-int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlPollState *st = loop->_backend;
 
     if (ensure_fd_cap(st, fd) < 0)
@@ -153,7 +154,7 @@ int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     return 0;
 }
 
-int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlPollState *st = loop->_backend;
 
     if (fd < 0 || fd >= st->fd_to_idx_cap)
@@ -167,7 +168,7 @@ int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     return 0;
 }
 
-int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
+int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
     KlPollState *st = loop->_backend;
 
     if (fd < 0 || fd >= st->fd_to_idx_cap)
@@ -189,7 +190,7 @@ int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
     return 0;
 }
 
-int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
+int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     KlPollState *st = loop->_backend;
 
     int n = poll(st->fds, (nfds_t)st->count, timeout_ms);
@@ -218,7 +219,7 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     return count;
 }
 
-void kl_event_close(KlEventLoop *loop) {
+void kl_event_close_builtin(KlEventLoop *loop) {
     KlPollState *st = loop->_backend;
     if (!st)
         return;
@@ -233,13 +234,13 @@ void kl_event_close(KlEventLoop *loop) {
 }
 
 /* PAL Phase 7: poll() is a readiness poller of native OS descriptors. */
-unsigned kl_event_caps(const KlEventLoop *loop) {
+unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD;
 }
 
 /* Readiness loop — the default POSIX provider works; nothing to auto-wire (5a). */
-const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
+const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
     return NULL;
 }

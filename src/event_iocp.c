@@ -11,6 +11,7 @@
  * same completion.h and reuses the driver unchanged. See docs/phase8b_iocp_breadth_design.md.
  */
 #include <keel/event.h>
+#include "event_builtin.h"
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv over completion (8b-4c) */
@@ -94,7 +95,7 @@ typedef struct KlIocpOp {
 
 /* ── KlEventLoop lifecycle over an IOCP port ─────────────────────────── */
 
-int kl_event_init(KlEventLoop *loop) {
+int kl_event_init_builtin(KlEventLoop *loop) {
     HANDLE port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
     if (port == NULL)
         return -1;
@@ -119,7 +120,7 @@ static int iocp_watch_post(KlIocpOp *op) {
     return (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) ? -1 : 0;
 }
 
-int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     (void)mask;   /* completion model: no readiness mask — I/O is posted, not armed */
     if (!kl_handle_valid(fd))
         return -1;
@@ -157,7 +158,7 @@ int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     return h ? 0 : -1;
 }
 
-int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     (void)mask;   /* no readiness re-arm; a watcher just updates its tag */
     if (!((uintptr_t)udata & 1)) return 0;
     KlIocpState *st = loop->_backend;
@@ -166,7 +167,7 @@ int kl_event_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *u
     return 0;
 }
 
-int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
+int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
     KlIocpState *st = loop->_backend;
     for (KlIocpWatch **link = &st->watches; *link; link = &(*link)->next)
         if ((*link)->fd == (SOCKET)fd) {
@@ -180,7 +181,7 @@ int kl_event_del(KlEventLoop *loop, KlSocketHandle fd) {
     return 0;   /* a connection socket leaves the port when closed */
 }
 
-int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
+int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     /* Driven by the completion tick (completion_driver.c) via kl_comp_drain, not
      * this readiness call. Defined because the KlEventLoop API requires it. */
     (void)loop; (void)out; (void)max;
@@ -189,7 +190,7 @@ int kl_event_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     return 0;
 }
 
-void kl_event_close(KlEventLoop *loop) {
+void kl_event_close_builtin(KlEventLoop *loop) {
     KlIocpState *st = loop->_backend;
     if (st) {
         KlIocpWatch *w = st->watches;   /* free watch ops (shutdown; the loop is stopped) */
@@ -208,14 +209,14 @@ void kl_event_close(KlEventLoop *loop) {
 
 /* A completion loop over native OS handles (SOCKETs on the port). COMPLETION makes
  * the Phase 7 negotiation require an OVERLAPPED provider (kl_caps_compatible). */
-unsigned kl_event_caps(const KlEventLoop *loop) {
+unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
 }
 
 /* The overlapped provider this completion loop needs (5a) — auto-wired by the server/client
  * when the caller configured none, so the IOCP backend is a source-compatible drop-in. */
-const struct KlSocketProvider *kl_event_native_provider(const KlEventLoop *loop) {
+const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
     (void)loop;
     return kl_socket_provider_iocp();
 }

@@ -169,7 +169,7 @@ CORE_SRC = src/allocator.c src/error.c src/version.c $(SOCKET_SRC) $(PLATFORM_SR
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(UDP_IO_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) \
            src/compress.c src/decompress.c src/drain.c \
-           $(IO_ENGINE_SRC) $(COMPLETION_SRC) $(FILE_IO_SRC) $(EVENT_SRC)
+           $(IO_ENGINE_SRC) $(COMPLETION_SRC) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
 # The built-in DNS resolver now builds on every platform: dns_resolver.c is
 # #ifdef-free (over the udp + socket.h seams) and DNS_SYS_SRC swaps the config-
