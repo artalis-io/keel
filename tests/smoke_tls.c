@@ -14,7 +14,7 @@
  */
 
 #include <keel/keel.h>
-#include <keel/tls_mbedtls.h>
+#include <keel_tls_mbedtls.h>
 #ifdef SMOKE_TLS_COMPLETION
 #include "../src/event_caps.h"   /* kl_event_caps — assert the server runs on a completion loop */
 #endif

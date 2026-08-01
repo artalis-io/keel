@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <keel/tls_mbedtls.h>
+#include "keel_tls_mbedtls.h"
 
 /* The socket seam: BIO I/O goes through kl_sockdef_send/recv (POSIX + Winsock,
  * with EINTR-retry, SIGPIPE suppression, and errno translation), and this also

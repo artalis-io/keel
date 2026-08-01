@@ -13,7 +13,7 @@
  * on those buffers (their fd argument is ignored in completion mode).
  */
 #include <keel/keel.h>
-#include <keel/tls_mbedtls.h>
+#include <keel_tls_mbedtls.h>
 #include <keel/tls.h>
 #include <string.h>
 #include <stdio.h>
