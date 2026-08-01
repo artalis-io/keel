@@ -480,8 +480,9 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         }
     }
 
-    /* Init event context — must happen before thread pool / watcher registration */
-    if (kl_event_ctx_init(&s->ev, alloc) < 0) {
+    /* Init event context — must happen before thread pool / watcher registration.
+     * A configured event_provider (e.g. lwIP) installs its own readiness backend. */
+    if (kl_event_ctx_init_ex(&s->ev, alloc, s->config.event_provider) < 0) {
         s->last_error = KL_ERR_EVENT_INIT;
         kl_conn_pool_free(&s->pool);
         kl_router_free(&s->router);
