@@ -329,7 +329,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         p[authority_len] = '\0';
         req->headers[hdr_count].value = p;
         req->headers[hdr_count].value_len = authority_len;
-        p += authority_len + 1;
+        /* host is the last thing written into hdr_storage — no further p advance. */
         hdr_count++;
     }
 
