@@ -159,7 +159,7 @@ DNS_SYS_SRC ?= src/dns_sys_posix.c
 IO_ENGINE_SRC ?= src/io_engine.c
 # The platform-independent completion driver (empty except on completion backends).
 COMPLETION_SRC ?=
-CORE_SRC = src/allocator.c src/error.c src/version.c $(SOCKET_SRC) $(PLATFORM_SRC) src/response.c src/router.c \
+CORE_SRC = src/allocator.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) src/response.c src/router.c \
            src/connection.c src/server.c $(SERVER_PLAT_SRC) src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
