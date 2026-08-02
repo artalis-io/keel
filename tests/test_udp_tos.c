@@ -16,18 +16,14 @@ static int g_got;
 static int g_tos;
 
 static void on_recv(KlUdp *udp, const void *data, size_t len,
-                    const struct sockaddr *src, socklen_t src_len,
-                    const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)data; (void)len; (void)src; (void)src_len; (void)local; (void)local_len; (void)ud;
+                    const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)data; (void)len; (void)src; (void)local; (void)ud;
     g_tos = kl_udp_recv_tos(udp);
     g_got++;
 }
 
-static void dest_v4(struct sockaddr_in *a, uint16_t port) {
-    memset(a, 0, sizeof(*a));
-    a->sin_family = AF_INET;
-    a->sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &a->sin_addr);
+static void dest_v4(KlSockAddr *a, uint16_t port) {
+    unsigned char _ipb[4]; inet_pton(AF_INET, "127.0.0.1", _ipb); kl_sockaddr_from_ipv4(a, _ipb, port);
 }
 
 static void pump(KlEventCtx *ctx, int ticks) {
@@ -52,13 +48,13 @@ UTEST(tos, validation) {
     KlUdp u;
     KlUdpConfig c = { .ctx = &ctx };
     ASSERT_EQ(0, kl_udp_init(&u, &c));
-    struct sockaddr_in d; dest_v4(&d, 9999);
-    struct sockaddr *dp = (struct sockaddr *)&d; socklen_t dl = sizeof(d);
+    KlSockAddr d; dest_v4(&d, 9999);
+    KlSockAddr *dp = &d;
     static char buf[16];
 
-    ASSERT_EQ(-1, kl_udp_send_to_tos(&u, buf, sizeof(buf), dp, dl, -1));   /* tos < 0 */
-    ASSERT_EQ(-1, kl_udp_send_to_tos(&u, buf, sizeof(buf), dp, dl, 256));  /* tos > 255 */
-    ASSERT_EQ(-1, kl_udp_send_to_tos(&u, buf, sizeof(buf), NULL, 0, 40));  /* no dest */
+    ASSERT_EQ(-1, kl_udp_send_to_tos(&u, buf, sizeof(buf), dp, -1));   /* tos < 0 */
+    ASSERT_EQ(-1, kl_udp_send_to_tos(&u, buf, sizeof(buf), dp, 256));  /* tos > 255 */
+    ASSERT_EQ(-1, kl_udp_send_to_tos(&u, buf, sizeof(buf), NULL, 40));  /* no dest */
     ASSERT_EQ(-1, kl_udp_set_tos(&u, -1));
     ASSERT_EQ(-1, kl_udp_set_tos(&u, 256));
     ASSERT_EQ(-1, kl_udp_recv_tos(NULL));
@@ -95,10 +91,10 @@ UTEST(tos, socket_level_marking) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_in d; dest_v4(&d, port);
+    KlSockAddr d; dest_v4(&d, port);
 
     g_got = 0; g_tos = -1;
-    int rc2 = kl_udp_send_to(&tx, "x", 1, (struct sockaddr *)&d, sizeof(d));
+    int rc2 = kl_udp_send_to(&tx, "x", 1, &d);
     int dscp = send_and_read_dscp(rc2, &ctx);
     if (dscp < 0) {
         kl_udp_free(&tx); kl_udp_free(&rx); kl_event_ctx_free(&ctx);
@@ -125,11 +121,11 @@ UTEST(tos, per_packet_marking) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_in d; dest_v4(&d, port);
+    KlSockAddr d; dest_v4(&d, port);
 
     /* First per-packet mark: CS6 */
     g_got = 0; g_tos = -1;
-    int r1 = kl_udp_send_to_tos(&tx, "a", 1, (struct sockaddr *)&d, sizeof(d),
+    int r1 = kl_udp_send_to_tos(&tx, "a", 1, &d,
                                 KL_TOS(KL_DSCP_CS6, KL_ECN_ECT0));
     int dscp1 = send_and_read_dscp(r1, &ctx);
     if (dscp1 < 0) {
@@ -140,7 +136,7 @@ UTEST(tos, per_packet_marking) {
 
     /* A different per-packet mark on the next datagram: CS3 */
     g_got = 0; g_tos = -1;
-    int r2 = kl_udp_send_to_tos(&tx, "b", 1, (struct sockaddr *)&d, sizeof(d),
+    int r2 = kl_udp_send_to_tos(&tx, "b", 1, &d,
                                 KL_TOS(KL_DSCP_CS3, KL_ECN_NOT_ECT));
     int dscp2 = send_and_read_dscp(r2, &ctx);
     ASSERT_EQ(KL_DSCP_CS3, dscp2);   /* per-packet override changed the mark */
@@ -165,10 +161,10 @@ UTEST(tos, runtime_set_tos) {
     ASSERT_EQ(0, kl_udp_set_tos(&tx, KL_TOS(KL_DSCP_CS4, KL_ECN_NOT_ECT)));
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_in d; dest_v4(&d, port);
+    KlSockAddr d; dest_v4(&d, port);
 
     g_got = 0; g_tos = -1;
-    int rc2 = kl_udp_send_to(&tx, "x", 1, (struct sockaddr *)&d, sizeof(d));
+    int rc2 = kl_udp_send_to(&tx, "x", 1, &d);
     int dscp = send_and_read_dscp(rc2, &ctx);
     if (dscp < 0) {
         kl_udp_free(&tx); kl_udp_free(&rx); kl_event_ctx_free(&ctx);

@@ -41,17 +41,15 @@ static void note_segment(const uint8_t *p, size_t len) {
 }
 
 static void on_recv(KlUdp *udp, const void *data, size_t len,
-                    const struct sockaddr *src, socklen_t src_len,
-                    const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)udp; (void)src; (void)src_len; (void)local; (void)local_len; (void)ud;
+                    const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)udp; (void)src; (void)local; (void)ud;
     note_segment(data, len);
 }
 
 /* Coalesced-GRO callback: split the buffer and note each segment. */
 static void on_segments(KlUdp *udp, const void *data, size_t len, size_t seg,
-                        const struct sockaddr *src, socklen_t src_len,
-                        const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)udp; (void)src; (void)src_len; (void)local; (void)local_len; (void)ud;
+                        const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)udp; (void)src; (void)local; (void)ud;
     size_t off = 0;
     while (off < len) {
         size_t c = (len - off < seg) ? (len - off) : seg;
@@ -67,11 +65,8 @@ static void pump_until(KlEventCtx *ctx, int want, int ticks) {
         kl_event_ctx_run(ctx, 16, 10);
 }
 
-static void dest_v4(struct sockaddr_in *a, uint16_t port) {
-    memset(a, 0, sizeof(*a));
-    a->sin_family = AF_INET;
-    a->sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &a->sin_addr);
+static void dest_v4(KlSockAddr *a, uint16_t port) {
+    unsigned char _ipb[4]; inet_pton(AF_INET, "127.0.0.1", _ipb); kl_sockaddr_from_ipv4(a, _ipb, port);
 }
 
 /* ── GSO ─────────────────────────────────────────────────────────────── */
@@ -91,11 +86,11 @@ UTEST(gso, roundtrip) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_in d; dest_v4(&d, port);
+    KlSockAddr d; dest_v4(&d, port);
 
     reset_capture();
     ASSERT_EQ(0, kl_udp_send_gso(&tx, g_sendbuf, NSEG * SEGSZ, SEGSZ,
-                                 (struct sockaddr *)&d, sizeof(d)));
+                                 &d));
     pump_until(&ctx, NSEG, 300);
 
     ASSERT_EQ(NSEG, g_count);   /* all segments delivered as distinct datagrams */
@@ -120,12 +115,12 @@ UTEST(gso, single_segment) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_in d; dest_v4(&d, port);
+    KlSockAddr d; dest_v4(&d, port);
 
     reset_capture();
     /* segment_size == total_len → exactly one datagram */
     ASSERT_EQ(0, kl_udp_send_gso(&tx, g_sendbuf, SEGSZ, SEGSZ,
-                                 (struct sockaddr *)&d, sizeof(d)));
+                                 &d));
     pump_until(&ctx, 1, 100);
     ASSERT_EQ(1, g_count);
     ASSERT_EQ(0, g_bad);
@@ -142,16 +137,15 @@ UTEST(gso, validation) {
     KlUdp tx;
     KlUdpConfig tc = { .ctx = &ctx };
     ASSERT_EQ(0, kl_udp_init(&tx, &tc));
-    struct sockaddr_in d; dest_v4(&d, 9999);
-    struct sockaddr *dp = (struct sockaddr *)&d;
-    socklen_t dl = sizeof(d);
+    KlSockAddr d; dest_v4(&d, 9999);
+    KlSockAddr *dp = &d;
     static uint8_t buf[64];
 
-    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 0, 10, dp, dl));        /* total 0 */
-    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 64, 0, dp, dl));        /* seg 0 */
-    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 64, 65, dp, dl));       /* seg > total */
-    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 70000, 100, dp, dl));   /* total > 65507 */
-    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 64, 10, NULL, 0));      /* no dest */
+    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 0, 10, dp));        /* total 0 */
+    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 64, 0, dp));        /* seg 0 */
+    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 64, 65, dp));       /* seg > total */
+    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 70000, 100, dp));   /* total > 65507 */
+    ASSERT_EQ(-1, kl_udp_send_gso(&tx, buf, 64, 10, NULL));      /* no dest */
     ASSERT_EQ(KL_ERR_INVALID_ARG, kl_udp_last_error(&tx));
 
     kl_udp_free(&tx);
@@ -176,11 +170,11 @@ UTEST(gro, transparent_split) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_in d; dest_v4(&d, port);
+    KlSockAddr d; dest_v4(&d, port);
 
     reset_capture();
     ASSERT_EQ(0, kl_udp_send_gso(&tx, g_sendbuf, NSEG * SEGSZ, SEGSZ,
-                                 (struct sockaddr *)&d, sizeof(d)));
+                                 &d));
     pump_until(&ctx, NSEG, 300);
 
     ASSERT_EQ(NSEG, g_count);
@@ -209,11 +203,11 @@ UTEST(gro, coalesced_callback) {
     kl_udp_recv_segments(&rx, on_segments, NULL);   /* coalesced buffers → on_segments */
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_in d; dest_v4(&d, port);
+    KlSockAddr d; dest_v4(&d, port);
 
     reset_capture();
     ASSERT_EQ(0, kl_udp_send_gso(&tx, g_sendbuf, NSEG * SEGSZ, SEGSZ,
-                                 (struct sockaddr *)&d, sizeof(d)));
+                                 &d));
     pump_until(&ctx, NSEG, 300);
 
     ASSERT_EQ(NSEG, g_count);

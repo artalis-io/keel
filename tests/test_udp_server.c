@@ -12,14 +12,14 @@ static int g_srv_hits;
 static char g_srv_src_ip[INET6_ADDRSTRLEN];
 
 static void echo_handler(KlUdpServer *s, const void *data, size_t len,
-                         const struct sockaddr *src, socklen_t src_len, void *ud) {
+                         const KlSockAddr *src, void *ud) {
     (void)ud;
     g_srv_hits++;
     g_srv_src_ip[0] = '\0';
-    if (src && src->sa_family == AF_INET)
-        inet_ntop(AF_INET, &((const struct sockaddr_in *)src)->sin_addr,
+    if (src && kl_sockaddr_family(src) == KL_AF_INET)
+        inet_ntop(AF_INET, src->u.ip,
                   g_srv_src_ip, sizeof(g_srv_src_ip));
-    kl_udp_server_reply(s, data, len, src, src_len);
+    kl_udp_server_reply(s, data, len, src);
 }
 
 /* ── Client side: capture ────────────────────────────────────────────── */
@@ -30,15 +30,14 @@ static int    g_cli_got;
 static char   g_cli_src_ip[INET6_ADDRSTRLEN];
 
 static void cli_recv(KlUdp *u, const void *data, size_t len,
-                     const struct sockaddr *src, socklen_t src_len,
-                     const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)u; (void)src_len; (void)local; (void)local_len; (void)ud;
+                     const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)u; (void)local; (void)ud;
     if (len > sizeof(g_cli_buf)) len = sizeof(g_cli_buf);
     memcpy(g_cli_buf, data, len);
     g_cli_len = len;
     g_cli_src_ip[0] = '\0';
-    if (src && src->sa_family == AF_INET)
-        inet_ntop(AF_INET, &((const struct sockaddr_in *)src)->sin_addr,
+    if (src && kl_sockaddr_family(src) == KL_AF_INET)
+        inet_ntop(AF_INET, src->u.ip,
                   g_cli_src_ip, sizeof(g_cli_src_ip));
     g_cli_got++;
 }
@@ -54,11 +53,8 @@ static void pump_until(KlEventCtx *ctx, int *flag, int want, int ticks) {
         kl_event_ctx_run(ctx, 16, 10);
 }
 
-static void dest_v4(struct sockaddr_in *a, uint16_t port) {
-    memset(a, 0, sizeof(*a));
-    a->sin_family = AF_INET;
-    a->sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &a->sin_addr);
+static void dest_v4(KlSockAddr *a, uint16_t port) {
+    unsigned char _ipb[4]; inet_pton(AF_INET, "127.0.0.1", _ipb); kl_sockaddr_from_ipv4(a, _ipb, port);
 }
 
 /* ── Tests ───────────────────────────────────────────────────────────── */
@@ -80,11 +76,11 @@ UTEST(udp_server, echo_roundtrip) {
     ASSERT_EQ(0, kl_udp_init(&cli, &cc));
     ASSERT_EQ(0, kl_udp_recv_start(&cli, cli_recv, NULL));
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     dest_v4(&dst, port);
     const char *msg = "discover";
     ASSERT_EQ(0, kl_udp_send_to(&cli, msg, strlen(msg),
-                                (struct sockaddr *)&dst, sizeof(dst)));
+                                &dst));
 
     /* client -> server (handler) -> reply -> client */
     pump_until(&ctx, &g_cli_got, 1, 300);
@@ -118,9 +114,9 @@ UTEST(udp_server, shared_loop_two_servers) {
     ASSERT_EQ(0, kl_udp_init(&cli, &cc));
     ASSERT_EQ(0, kl_udp_recv_start(&cli, cli_recv, NULL));
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     dest_v4(&dst, kl_udp_server_local_port(&b));   /* hit server B */
-    ASSERT_EQ(0, kl_udp_send_to(&cli, "hi", 2, (struct sockaddr *)&dst, sizeof(dst)));
+    ASSERT_EQ(0, kl_udp_send_to(&cli, "hi", 2, &dst));
     pump_until(&ctx, &g_cli_got, 1, 300);
 
     ASSERT_EQ(1, g_srv_hits);        /* exactly one server handled it */
@@ -135,7 +131,7 @@ UTEST(udp_server, shared_loop_two_servers) {
 
 UTEST(udp_server, null_and_arg_guards) {
     ASSERT_EQ(-1, kl_udp_server_init(NULL, NULL, NULL, NULL, NULL));
-    ASSERT_EQ(-1, kl_udp_server_reply(NULL, "x", 1, NULL, 0));
+    ASSERT_EQ(-1, kl_udp_server_reply(NULL, "x", 1, NULL));
     ASSERT_EQ((uint16_t)0, kl_udp_server_local_port(NULL));
     ASSERT_EQ(-1, kl_udp_server_fd(NULL));
 
@@ -177,12 +173,9 @@ UTEST(udp_server, reply_from_hit_address) {
     ASSERT_EQ(0, kl_udp_init(&cli, &cc));
     ASSERT_EQ(0, kl_udp_recv_start(&cli, cli_recv, NULL));
 
-    struct sockaddr_in dst;
-    memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.2", &dst.sin_addr);   /* hit a non-primary loopback */
-    ASSERT_EQ(0, kl_udp_send_to(&cli, "ping", 4, (struct sockaddr *)&dst, sizeof(dst)));
+    KlSockAddr dst;
+    unsigned char _ipb[4]; inet_pton(AF_INET, "127.0.0.2", _ipb); kl_sockaddr_from_ipv4(&dst, _ipb, port);   /* hit a non-primary loopback */
+    ASSERT_EQ(0, kl_udp_send_to(&cli, "ping", 4, &dst));
     pump_until(&ctx, &g_cli_got, 1, 300);
 
     ASSERT_EQ(1, g_cli_got);

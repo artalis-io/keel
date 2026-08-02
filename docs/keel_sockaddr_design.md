@@ -182,11 +182,21 @@ Provider / completion (keep platform sockaddr internally, marshal at boundary):
   `server.c`/`client.c` internal callers. Readiness backends green.
 - **C. Resolver.** `KlResolveResult` → `KlSockAddr`; `dns_resolver.c`
   construct-from-wire; drop its `<arpa/inet.h>` etc. (fuzz_dns still green).
-- **D. Datagram + proxy public API.** `udp*`, `proxy_protocol` signatures →
-  `KlSockAddr`; migrate examples. (fuzz_proxy green.)
-- **E. Completion backends.** `event_iouring`/`event_iocp`/`event_pollcomp`
-  marshal accept/connect peer to `KlSockAddr` at delivery. Container io_uring +
-  pollcomp-asan green.
+- **D. Datagram public API (udp).** `udp.h`/`udp_server.h` callbacks + send/
+  connect/reply signatures → `KlSockAddr`; the marshalling concentrates in
+  `udp.c` at the io-seam boundary (the intricate `udp_io_posix.c`/`_win.c` mmsg/
+  cmsg engines + the completion backends keep sockaddr internally). `dns_resolver`
+  updated as a udp consumer. udp suites + smoke-pollcomp green.
+  - **Revised (coupling found):** `proxy_protocol` moved out of D into the accept
+    phase — `kl_proxy_parse` writes `KlConn.peer_addr`, which is filled by BOTH
+    the readiness accept (`server.c`) AND the completion accept
+    (`event_iouring`/`event_iocp`), so proxy/accept/completion-accept migrate
+    together (below) rather than splitting readiness from completion.
+- **E. Accept-peer + proxy + completion delivery.** Flip the `accept` vtable op +
+  `KlConn.peer_addr` + `kl_request_peer_*` + `proxy_protocol`/`kl_cidr_match` to
+  `KlSockAddr`, and have `event_iouring`/`event_iocp`/`event_pollcomp` marshal the
+  accepted peer to `KlSockAddr` at completion delivery. Container io_uring +
+  pollcomp-asan + fuzz_proxy green.
 - **F. Purge + gate.** Remove the inline `sockaddr_un` from `websocket_client.c`/
   `h2_client.c`; add a grep-gate: no core protocol TU includes a platform socket
   header or names `struct sockaddr` (mechanical audit, mirrors axis-audit Goal 4).

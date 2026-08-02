@@ -114,11 +114,10 @@ static KlUdp g_udp;
  * WSARecvMsg + IP_PKTINFO path captures it (parity with io_uring/pollcomp). */
 static int g_udp_local_ok = 0;
 static void udp_echo(KlUdp *udp, const void *data, size_t len,
-                     const struct sockaddr *src, socklen_t src_len,
-                     const struct sockaddr *local, socklen_t local_len, void *ud) {
+                     const KlSockAddr *src, const KlSockAddr *local, void *ud) {
     (void)ud;
     if (local && local_len > 0) g_udp_local_ok = 1;
-    kl_udp_send_to(udp, data, len, src, src_len);
+    kl_udp_send_to(udp, data, len, src);
 }
 
 static KlServer g_srv;
@@ -465,8 +464,7 @@ int main(void) {
             to.sin_port = htons(SMOKE_UDP_PORT);
             inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
             for (int i = 0; i < 20 && !udp_ok; i++) {
-                sendto(cs, SMOKE_UDP, sizeof(SMOKE_UDP) - 1, 0,
-                       (struct sockaddr *)&to, sizeof(to));
+                sendto(cs, SMOKE_UDP, sizeof(SMOKE_UDP) - 1, 0, (struct sockaddr *)&to, sizeof(to));
                 char rb[64];
                 int n = recvfrom(cs, rb, sizeof(rb), 0, NULL, NULL);
                 if (n == (int)(sizeof(SMOKE_UDP) - 1) &&

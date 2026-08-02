@@ -22,9 +22,8 @@ static size_t g_len;
 static int    g_got;
 
 static void on_recv(KlUdp *udp, const void *data, size_t len,
-                    const struct sockaddr *src, socklen_t src_len,
-                    const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)udp; (void)src; (void)src_len; (void)local; (void)local_len; (void)ud;
+                    const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)udp; (void)src; (void)local; (void)ud;
     if (len > sizeof(g_buf)) len = sizeof(g_buf);
     memcpy(g_buf, data, len);
     g_len = len;
@@ -38,21 +37,14 @@ static void pump_until(KlEventCtx *ctx, int want, int ticks) {
         kl_event_ctx_run(ctx, 16, 10);
 }
 
-static void group_dest(struct sockaddr_storage *ss, socklen_t *len,
-                       int family, const char *group, uint16_t port) {
-    memset(ss, 0, sizeof(*ss));
+static void group_dest(KlSockAddr *out, int family, const char *group, uint16_t port) {
+    unsigned char b[16];
     if (family == AF_INET) {
-        struct sockaddr_in *a = (struct sockaddr_in *)ss;
-        a->sin_family = AF_INET;
-        a->sin_port = htons(port);
-        inet_pton(AF_INET, group, &a->sin_addr);
-        *len = sizeof(*a);
+        inet_pton(AF_INET, group, b);
+        kl_sockaddr_from_ipv4(out, b, port);
     } else {
-        struct sockaddr_in6 *a = (struct sockaddr_in6 *)ss;
-        a->sin6_family = AF_INET6;
-        a->sin6_port = htons(port);
-        inet_pton(AF_INET6, group, &a->sin6_addr);
-        *len = sizeof(*a);
+        inet_pton(AF_INET6, group, b);
+        kl_sockaddr_from_ipv6(out, b, port, 0);
     }
 }
 
@@ -134,19 +126,16 @@ UTEST(mc, broadcast_flag_gates_send) {
     ASSERT_EQ(0, kl_udp_init(&b, &bc));
     ASSERT_EQ(0, kl_udp_init(&n, &nc));
 
-    struct sockaddr_in dst;
-    memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(9999);
-    inet_pton(AF_INET, "255.255.255.255", &dst.sin_addr);
+    KlSockAddr dst;
+    unsigned char _ipb[4]; inet_pton(AF_INET, "255.255.255.255", _ipb); kl_sockaddr_from_ipv4(&dst, _ipb, 9999);
     const char *m = "beacon";
 
-    int with = kl_udp_send_to(&b, m, strlen(m), (struct sockaddr *)&dst, sizeof(dst));
+    int with = kl_udp_send_to(&b, m, strlen(m), &dst);
     if (with != 0) {
         kl_udp_free(&b); kl_udp_free(&n); kl_event_ctx_free(&ctx);
         UTEST_SKIP("no broadcast-capable interface");
     }
-    int without = kl_udp_send_to(&n, m, strlen(m), (struct sockaddr *)&dst, sizeof(dst));
+    int without = kl_udp_send_to(&n, m, strlen(m), &dst);
     ASSERT_EQ(0, with);          /* SO_BROADCAST set → accepted */
     ASSERT_EQ(-1, without);      /* no flag → EACCES */
 
@@ -171,12 +160,12 @@ UTEST(mc, v4_loopback_roundtrip) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_storage dst; socklen_t dlen;
-    group_dest(&dst, &dlen, AF_INET, GROUP_V4, port);
+    KlSockAddr dst;
+    group_dest(&dst, AF_INET, GROUP_V4, port);
 
     reset_capture();
     const char *m = "hello-group";
-    if (kl_udp_send_to(&tx, m, strlen(m), (struct sockaddr *)&dst, dlen) != 0) {
+    if (kl_udp_send_to(&tx, m, strlen(m), &dst) != 0) {
         kl_udp_free(&tx); kl_udp_free(&rx); kl_event_ctx_free(&ctx);
         UTEST_SKIP("multicast egress unavailable in this environment");
     }
@@ -210,12 +199,12 @@ UTEST(mc, leave_stops_delivery) {
     ASSERT_EQ(0, kl_udp_multicast_join(&rx, GROUP_V4, 0));   /* runtime join */
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_storage dst; socklen_t dlen;
-    group_dest(&dst, &dlen, AF_INET, GROUP_V4, port);
+    KlSockAddr dst;
+    group_dest(&dst, AF_INET, GROUP_V4, port);
     const char *m = "x";
 
     reset_capture();
-    if (kl_udp_send_to(&tx, m, strlen(m), (struct sockaddr *)&dst, dlen) != 0) {
+    if (kl_udp_send_to(&tx, m, strlen(m), &dst) != 0) {
         kl_udp_free(&tx); kl_udp_free(&rx); kl_event_ctx_free(&ctx);
         UTEST_SKIP("multicast egress unavailable in this environment");
     }
@@ -227,7 +216,7 @@ UTEST(mc, leave_stops_delivery) {
 
     ASSERT_EQ(0, kl_udp_multicast_leave(&rx, GROUP_V4, 0));
     reset_capture();
-    ASSERT_EQ(0, kl_udp_send_to(&tx, m, strlen(m), (struct sockaddr *)&dst, dlen));
+    ASSERT_EQ(0, kl_udp_send_to(&tx, m, strlen(m), &dst));
     pump_until(&ctx, 1, 30);
     ASSERT_EQ(0, g_got);     /* after leaving, no delivery */
 
@@ -258,12 +247,12 @@ UTEST(mc, v6_loopback_roundtrip) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_storage dst; socklen_t dlen;
-    group_dest(&dst, &dlen, AF_INET6, GROUP_V6, port);
+    KlSockAddr dst;
+    group_dest(&dst, AF_INET6, GROUP_V6, port);
 
     reset_capture();
     const char *m = "v6-group";
-    if (kl_udp_send_to(&tx, m, strlen(m), (struct sockaddr *)&dst, dlen) != 0) {
+    if (kl_udp_send_to(&tx, m, strlen(m), &dst) != 0) {
         kl_udp_free(&tx); kl_udp_free(&rx); kl_event_ctx_free(&ctx);
         UTEST_SKIP("v6 multicast egress unavailable in this environment");
     }
@@ -283,8 +272,8 @@ UTEST(mc, v6_loopback_roundtrip) {
 /* ── Server passthrough ──────────────────────────────────────────────── */
 
 static void srv_handler(KlUdpServer *s, const void *data, size_t len,
-                        const struct sockaddr *src, socklen_t src_len, void *ud) {
-    (void)s; (void)src; (void)src_len; (void)ud;
+                        const KlSockAddr *src, void *ud) {
+    (void)s; (void)src; (void)ud;
     if (len > sizeof(g_buf)) len = sizeof(g_buf);
     memcpy(g_buf, data, len);
     g_len = len;
@@ -306,8 +295,8 @@ UTEST(mc, server_config_group_join) {
     ASSERT_EQ(0, kl_udp_init(&tx, &tc));
 
     uint16_t port = kl_udp_server_local_port(&srv);
-    struct sockaddr_storage dst; socklen_t dlen;
-    group_dest(&dst, &dlen, AF_INET, GROUP_V4, port);
+    KlSockAddr dst;
+    group_dest(&dst, AF_INET, GROUP_V4, port);
 
     /* Dynamic passthrough join/leave: deterministic (setsockopt), env-independent. */
     ASSERT_EQ(0, kl_udp_server_multicast_join(&srv, "239.255.42.100", 0));
@@ -316,7 +305,7 @@ UTEST(mc, server_config_group_join) {
 
     reset_capture();
     const char *m = "srv-mc";
-    if (kl_udp_send_to(&tx, m, strlen(m), (struct sockaddr *)&dst, dlen) != 0) {
+    if (kl_udp_send_to(&tx, m, strlen(m), &dst) != 0) {
         kl_udp_free(&tx); kl_udp_server_free(&srv); kl_event_ctx_free(&ctx);
         UTEST_SKIP("multicast egress unavailable in this environment");
     }

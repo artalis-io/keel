@@ -15,26 +15,24 @@ static char     g_local_ip[INET6_ADDRSTRLEN];
 static int      g_has_local;
 
 static void on_recv(KlUdp *udp, const void *data, size_t len,
-                    const struct sockaddr *src, socklen_t src_len,
-                    const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)udp; (void)ud; (void)src_len; (void)local_len;
-    if (len > sizeof(g_buf)) len = sizeof(g_buf);
+                    const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)udp; (void)ud; if (len > sizeof(g_buf)) len = sizeof(g_buf);
     memcpy(g_buf, data, len);
     g_len = len;
     g_src_ip[0] = '\0';
-    if (src && src->sa_family == AF_INET)
-        inet_ntop(AF_INET, &((const struct sockaddr_in *)src)->sin_addr,
+    if (src && kl_sockaddr_family(src) == KL_AF_INET)
+        inet_ntop(AF_INET, src->u.ip,
                   g_src_ip, sizeof(g_src_ip));
-    else if (src && src->sa_family == AF_INET6)
-        inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)src)->sin6_addr,
+    else if (src && kl_sockaddr_family(src) == KL_AF_INET6)
+        inet_ntop(AF_INET6, src->u.ip,
                   g_src_ip, sizeof(g_src_ip));
     g_local_ip[0] = '\0';
     g_has_local = (local != NULL);
-    if (local && local->sa_family == AF_INET)
-        inet_ntop(AF_INET, &((const struct sockaddr_in *)local)->sin_addr,
+    if (local && kl_sockaddr_family(local) == KL_AF_INET)
+        inet_ntop(AF_INET, local->u.ip,
                   g_local_ip, sizeof(g_local_ip));
-    else if (local && local->sa_family == AF_INET6)
-        inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)local)->sin6_addr,
+    else if (local && kl_sockaddr_family(local) == KL_AF_INET6)
+        inet_ntop(AF_INET6, local->u.ip,
                   g_local_ip, sizeof(g_local_ip));
     g_got++;
 }
@@ -50,11 +48,9 @@ static void pump_until(KlEventCtx *ctx, int want, int ticks) {
         kl_event_ctx_run(ctx, 16, 10);
 }
 
-static void dest_v4(struct sockaddr_in *a, uint16_t port) {
-    memset(a, 0, sizeof(*a));
-    a->sin_family = AF_INET;
-    a->sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &a->sin_addr);
+static void dest_v4(KlSockAddr *a, uint16_t port) {
+    const uint8_t lo[4] = { 127, 0, 0, 1 };
+    kl_sockaddr_from_ipv4(a, lo, port);
 }
 
 /* ── Tests ───────────────────────────────────────────────────────────── */
@@ -75,11 +71,11 @@ UTEST(udp, echo_v4) {
     uint16_t port = kl_udp_local_port(&rx);
     ASSERT_TRUE(port > 0);
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     dest_v4(&dst, port);
     const char *msg = "hello udp";
     ASSERT_EQ(0, kl_udp_send_to(&tx, msg, strlen(msg),
-                                (struct sockaddr *)&dst, sizeof(dst)));
+                                &dst));
 
     pump_until(&ctx, 1, 200);
     ASSERT_EQ(1, g_got);
@@ -112,15 +108,14 @@ UTEST(udp, echo_v6) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
     uint16_t port = kl_udp_local_port(&rx);
-    struct sockaddr_in6 dst;
-    memset(&dst, 0, sizeof(dst));
-    dst.sin6_family = AF_INET6;
-    dst.sin6_port = htons(port);
-    inet_pton(AF_INET6, "::1", &dst.sin6_addr);
+    KlSockAddr dst;
+    uint8_t v6[16];
+    inet_pton(AF_INET6, "::1", v6);
+    kl_sockaddr_from_ipv6(&dst, v6, port, 0);
 
     const char *msg = "v6 datagram";
     ASSERT_EQ(0, kl_udp_send_to(&tx, msg, strlen(msg),
-                                (struct sockaddr *)&dst, sizeof(dst)));
+                                &dst));
     pump_until(&ctx, 1, 200);
 
     ASSERT_EQ(1, g_got);
@@ -150,9 +145,9 @@ UTEST(udp, connected_send) {
     ASSERT_EQ(-1, kl_udp_send(&tx, "x", 1));
     ASSERT_EQ(KL_ERR_INVALID_ARG, kl_udp_last_error(&tx));
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     dest_v4(&dst, kl_udp_local_port(&rx));
-    ASSERT_EQ(0, kl_udp_connect(&tx, (struct sockaddr *)&dst, sizeof(dst)));
+    ASSERT_EQ(0, kl_udp_connect(&tx, &dst));
 
     const char *msg = "connected";
     ASSERT_EQ(0, kl_udp_send(&tx, msg, strlen(msg)));
@@ -179,10 +174,10 @@ UTEST(udp, truncation_counted) {
     ASSERT_EQ(0, kl_udp_init(&tx, &tc));
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     dest_v4(&dst, kl_udp_local_port(&rx));
     ASSERT_EQ(0, kl_udp_send_to(&tx, "abcdefgh", 8,
-                                (struct sockaddr *)&dst, sizeof(dst)));
+                                &dst));
     pump_until(&ctx, 1, 200);
 
     ASSERT_EQ(1, g_got);
@@ -208,10 +203,10 @@ UTEST(udp, recv_stop) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
     kl_udp_recv_stop(&rx);
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     dest_v4(&dst, kl_udp_local_port(&rx));
     ASSERT_EQ(0, kl_udp_send_to(&tx, "ping", 4,
-                                (struct sockaddr *)&dst, sizeof(dst)));
+                                &dst));
     pump_until(&ctx, 1, 30);                        /* short pump */
     ASSERT_EQ(0, g_got);                            /* not delivered while stopped */
 
@@ -245,14 +240,14 @@ UTEST(udp, backpressure_best_effort) {
     int sndbuf = 2048;
     (void)setsockopt(kl_udp_fd(&tx), SOL_SOCKET, SO_SNDBUF, (char *)&sndbuf, sizeof(sndbuf));
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     dest_v4(&dst, kl_udp_local_port(&rx));
 
     char payload[1400];
     memset(payload, 'z', sizeof(payload));
     for (int i = 0; i < 500; i++)
         (void)kl_udp_send_to(&tx, payload, sizeof(payload),
-                             (struct sockaddr *)&dst, sizeof(dst));
+                             &dst);
 
     size_t queued_peak = kl_udp_send_queued(&tx);
     /* Drain whatever queued. */
@@ -284,9 +279,9 @@ UTEST(udp, pktinfo_captures_local_addr) {
     ASSERT_EQ(0, kl_udp_init(&tx, &tc));
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     dest_v4(&dst, kl_udp_local_port(&rx));    /* send to 127.0.0.1 */
-    ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, (struct sockaddr *)&dst, sizeof(dst)));
+    ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, &dst));
     pump_until(&ctx, 1, 200);
 
     ASSERT_EQ(1, g_got);
@@ -314,15 +309,14 @@ UTEST(udp, send_to_from_loopback) {
     ASSERT_EQ(0, kl_udp_init(&tx, &tc));
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
-    struct sockaddr_in dst, src;
+    KlSockAddr dst, src;
     dest_v4(&dst, kl_udp_local_port(&rx));
-    memset(&src, 0, sizeof(src));
-    src.sin_family = AF_INET;
-    inet_pton(AF_INET, "127.0.0.1", &src.sin_addr);
+    const uint8_t lo[4] = { 127, 0, 0, 1 };
+    kl_sockaddr_from_ipv4(&src, lo, 0);
 
     /* Must not crash constructing the control message (the bug this guards). */
-    (void)kl_udp_send_to_from(&tx, "hi", 2, (struct sockaddr *)&dst, sizeof(dst),
-                              (struct sockaddr *)&src, sizeof(src));
+    (void)kl_udp_send_to_from(&tx, "hi", 2, &dst,
+                              &src);
     pump_until(&ctx, 1, 200);
     if (g_got)                                    /* delivered → pinned source honored */
         ASSERT_STREQ("127.0.0.1", g_src_ip);
@@ -346,9 +340,9 @@ UTEST(udp, pktinfo_off_no_local) {
     ASSERT_EQ(0, kl_udp_init(&tx, &tc));
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     dest_v4(&dst, kl_udp_local_port(&rx));
-    ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, (struct sockaddr *)&dst, sizeof(dst)));
+    ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, &dst));
     pump_until(&ctx, 1, 200);
 
     ASSERT_EQ(1, g_got);
@@ -375,12 +369,12 @@ UTEST(udp, pktinfo_multihomed_local) {
     ASSERT_EQ(0, kl_udp_init(&tx, &tc));
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
-    struct sockaddr_in dst;
+    KlSockAddr dst;
     memset(&dst, 0, sizeof(dst));
     dst.sin_family = AF_INET;
     dst.sin_port = htons(kl_udp_local_port(&rx));
     inet_pton(AF_INET, "127.0.0.2", &dst.sin_addr);
-    ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, (struct sockaddr *)&dst, sizeof(dst)));
+    ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, &dst));
     pump_until(&ctx, 1, 200);
 
     ASSERT_EQ(1, g_got);
@@ -424,7 +418,7 @@ UTEST(udp, so_bufsize_applied) {
 UTEST(udp, null_and_arg_guards) {
     ASSERT_EQ(-1, kl_udp_init(NULL, NULL));
     ASSERT_EQ(-1, kl_udp_send(NULL, "x", 1));
-    ASSERT_EQ(-1, kl_udp_send_to(NULL, "x", 1, NULL, 0));
+    ASSERT_EQ(-1, kl_udp_send_to(NULL, "x", 1, NULL));
     ASSERT_EQ((int)-1, kl_udp_fd(NULL));
     ASSERT_EQ((uint16_t)0, kl_udp_local_port(NULL));
     ASSERT_EQ((size_t)0, kl_udp_send_queued(NULL));
@@ -435,8 +429,10 @@ UTEST(udp, null_and_arg_guards) {
     KlUdp u;
     KlUdpConfig c = { .ctx = &ctx };
     ASSERT_EQ(0, kl_udp_init(&u, &c));
-    /* bad dest_len */
-    ASSERT_EQ(-1, kl_udp_send_to(&u, "x", 1, (struct sockaddr *)&c, 0));
+    /* unset/invalid dest (family AF_UNSPEC → no native mapping) */
+    KlSockAddr bad;
+    memset(&bad, 0, sizeof(bad));
+    ASSERT_EQ(-1, kl_udp_send_to(&u, "x", 1, &bad));
     ASSERT_EQ(KL_ERR_INVALID_ARG, kl_udp_last_error(&u));
     kl_udp_free(&u);
     kl_udp_free(&u);   /* double-free must be safe */

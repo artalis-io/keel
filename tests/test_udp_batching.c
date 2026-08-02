@@ -23,9 +23,8 @@ static int     g_count;
 static int     g_bad;
 
 static void on_recv(KlUdp *udp, const void *data, size_t len,
-                    const struct sockaddr *src, socklen_t src_len,
-                    const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)udp; (void)src; (void)src_len; (void)local; (void)local_len; (void)ud;
+                    const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)udp; (void)src; (void)local; (void)ud;
     if (len != 3) { g_bad++; return; }            /* payload = { seq, 0xAB, seq^0xFF } */
     const uint8_t *p = data;
     uint8_t seq = p[0];
@@ -40,20 +39,17 @@ static void pump_until(KlEventCtx *ctx, int want, int ticks) {
         kl_event_ctx_run(ctx, 16, 10);
 }
 
-static void dest_v4(struct sockaddr_in *a, uint16_t port) {
-    memset(a, 0, sizeof(*a));
-    a->sin_family = AF_INET;
-    a->sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &a->sin_addr);
+static void dest_v4(KlSockAddr *a, uint16_t port) {
+    unsigned char _ipb[4]; inet_pton(AF_INET, "127.0.0.1", _ipb); kl_sockaddr_from_ipv4(a, _ipb, port);
 }
 
 /* Send NSEND sequenced datagrams from tx to (127.0.0.1:port). */
 static void blast(KlUdp *tx, uint16_t port) {
-    struct sockaddr_in d;
+    KlSockAddr d;
     dest_v4(&d, port);
     for (int i = 0; i < NSEND; i++) {
         uint8_t buf[3] = { (uint8_t)i, 0xAB, (uint8_t)(i ^ 0xFF) };
-        kl_udp_send_to(tx, buf, sizeof(buf), (struct sockaddr *)&d, sizeof(d));
+        kl_udp_send_to(tx, buf, sizeof(buf), &d);
     }
 }
 
@@ -126,9 +122,9 @@ UTEST(bat, send_queue_drains_all) {
 
 /* Batching composes with the server dispatch surface. */
 static void srv_handler(KlUdpServer *s, const void *data, size_t len,
-                        const struct sockaddr *src, socklen_t src_len, void *ud) {
+                        const KlSockAddr *src, void *ud) {
     (void)s; (void)ud;
-    on_recv(NULL, data, len, src, src_len, NULL, 0, NULL);
+    on_recv(NULL, data, len, src, NULL, NULL);
 }
 
 UTEST(bat, server_batch) {
