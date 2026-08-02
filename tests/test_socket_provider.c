@@ -74,11 +74,11 @@ static ssize_t mock_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64
 static KlSocketHandle mock_socket(void *ctx, int domain, int type, int protocol) {
     MockSock *m = ctx; m->socket_calls++; return (KlSocketHandle)socket(domain, type, protocol);
 }
-static int mock_connect(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+static int mock_connect(void *ctx, KlSocketHandle fd, const KlSockAddr *a) {
     MockSock *m = ctx;
     m->connect_calls++;
     if (m->force_connect_err) { int e = m->force_connect_err; m->force_connect_err = 0; errno = e; return -1; }
-    return connect((int)fd, a, l);
+    return kl_sockdef_connect(fd, a);   /* marshals KlSockAddr -> native */
 }
 
 static const KlSocketOps MOCK_OPS = {
@@ -238,18 +238,20 @@ UTEST(sockprov, udp_transport_threads_provider) {
 UTEST(sockprov, lifecycle_posix_loopback) {
     int lfd = kl_sock_socket(NULL, AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(lfd >= 0);
-    struct sockaddr_in a; memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    ASSERT_EQ(0, kl_sock_bind(NULL, lfd, (struct sockaddr *)&a, sizeof(a)));
+    const uint8_t lo[4] = { 127, 0, 0, 1 };
+    KlSockAddr a;
+    kl_sockaddr_from_ipv4(&a, lo, 0);        /* ephemeral port */
+    ASSERT_EQ(0, kl_sock_bind(NULL, lfd, &a));
     ASSERT_EQ(0, kl_sock_listen(NULL, lfd, 8));
-    socklen_t al = sizeof(a);
-    ASSERT_EQ(0, getsockname(lfd, (struct sockaddr *)&a, &al));
+    KlSockAddr bound;
+    ASSERT_EQ(0, kl_sock_get_local_addr(NULL, lfd, &bound));
+    ASSERT_GT((int)kl_sockaddr_port(&bound), 0);
 
     int cfd = kl_sock_socket(NULL, AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(cfd >= 0);
-    ASSERT_EQ(0, kl_sock_connect(NULL, cfd, (struct sockaddr *)&a, sizeof(a)));
+    KlSockAddr target;
+    kl_sockaddr_from_ipv4(&target, lo, kl_sockaddr_port(&bound));
+    ASSERT_EQ(0, kl_sock_connect(NULL, cfd, &target));
 
     struct sockaddr_storage pa; socklen_t pl = sizeof(pa);
     int sfd = kl_sock_accept(NULL, lfd, (struct sockaddr *)&pa, &pl);
@@ -274,9 +276,11 @@ UTEST(sockprov, mock_socket_dispatch) {
 UTEST(sockprov, mock_connect_failure) {
     MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1; m.force_connect_err = ECONNREFUSED;
     KlSocketProvider p = mock_provider(&m);
-    struct sockaddr_in a; memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
+    const uint8_t lo[4] = { 127, 0, 0, 1 };
+    KlSockAddr a;
+    kl_sockaddr_from_ipv4(&a, lo, 9);
     errno = 0;
-    ASSERT_EQ(-1, kl_sock_connect(&p, 9, (struct sockaddr *)&a, sizeof(a)));
+    ASSERT_EQ(-1, kl_sock_connect(&p, 9, &a));
     ASSERT_EQ(ECONNREFUSED, errno);
     ASSERT_EQ(1, m.connect_calls);
 }
@@ -381,9 +385,9 @@ static KlSocketHandle deco_accept(void *ctx, KlSocketHandle fd, struct sockaddr 
     ((Deco *)ctx)->accept_calls++;
     return kl_sockdef_accept(fd, a, l);
 }
-static int deco_connect(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
+static int deco_connect(void *ctx, KlSocketHandle fd, const KlSockAddr *a) {
     ((Deco *)ctx)->connect_calls++;
-    return kl_sockdef_connect(fd, a, l);
+    return kl_sockdef_connect(fd, a);
 }
 static const KlSocketOps deco_ops = {
     .socket = deco_socket, .accept = deco_accept, .connect = deco_connect, .name = "deco",

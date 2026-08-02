@@ -14,6 +14,7 @@
 #include "server_plat.h"
 #include "internal.h"   /* kl_log_errno + KlServer; pulls socket.h -> winsock2/afunix */
 #include "socket.h"
+#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind currency) */
 
 #include <windows.h>
 #include <string.h>
@@ -92,7 +93,9 @@ int kl_srv_bind_unix(KlServer *s) {
     socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
                                      path_len + 1);
 
-    if (kl_sock_bind(s->ev.sockets, s->listen_fd, (struct sockaddr *)&addr, addr_len) < 0) {
+    KlSockAddr bind_sa;
+    kl_sockaddr_from_native(&bind_sa, (struct sockaddr *)&addr, addr_len);
+    if (kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
         kl_sock_close(s->ev.sockets, s->listen_fd);

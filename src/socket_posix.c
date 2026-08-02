@@ -17,6 +17,7 @@
 #define _GNU_SOURCE          /* accept4() — fold nonblock+cloexec into accept (Linux/BSD) */
 #endif
 #include "socket.h"
+#include "sockaddr_native.h"   /* KlSockAddr <-> struct sockaddr marshalling */
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -94,11 +95,17 @@ int kl_sockdef_set_cork(KlSocketHandle fd, int on) {
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
     return (KlSocketHandle)socket(domain, type, protocol);
 }
-int kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    return connect((int)fd, a, l);
+int kl_sockdef_connect(KlSocketHandle fd, const KlSockAddr *a) {
+    struct sockaddr_storage ss;
+    socklen_t l = kl_sockaddr_to_native(a, &ss);
+    if (l == 0) { errno = EAFNOSUPPORT; return -1; }
+    return connect((int)fd, (struct sockaddr *)&ss, l);
 }
-int kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    return bind((int)fd, a, l);
+int kl_sockdef_bind(KlSocketHandle fd, const KlSockAddr *a) {
+    struct sockaddr_storage ss;
+    socklen_t l = kl_sockaddr_to_native(a, &ss);
+    if (l == 0) { errno = EAFNOSUPPORT; return -1; }
+    return bind((int)fd, (struct sockaddr *)&ss, l);
 }
 int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
     return listen((int)fd, backlog);
@@ -124,8 +131,11 @@ KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_
 int kl_sockdef_close(KlSocketHandle fd) {
     return close((int)fd);
 }
-int kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    return getsockname((int)fd, a, l);
+int kl_sockdef_get_local_addr(KlSocketHandle fd, KlSockAddr *out) {
+    struct sockaddr_storage ss;
+    socklen_t l = sizeof(ss);
+    if (getsockname((int)fd, (struct sockaddr *)&ss, &l) != 0) return -1;
+    return kl_sockaddr_from_native(out, (struct sockaddr *)&ss, l);
 }
 int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
     int err = 0;
@@ -239,11 +249,11 @@ static int psx_set_cork(void *ctx, KlSocketHandle fd, int on) {
 static KlSocketHandle psx_socket(void *ctx, int domain, int type, int protocol) {
     (void)ctx; return kl_sockdef_socket(domain, type, protocol);
 }
-static int psx_connect(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    (void)ctx; return kl_sockdef_connect(fd, a, l);
+static int psx_connect(void *ctx, KlSocketHandle fd, const KlSockAddr *a) {
+    (void)ctx; return kl_sockdef_connect(fd, a);
 }
-static int psx_bind(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    (void)ctx; return kl_sockdef_bind(fd, a, l);
+static int psx_bind(void *ctx, KlSocketHandle fd, const KlSockAddr *a) {
+    (void)ctx; return kl_sockdef_bind(fd, a);
 }
 static int psx_listen(void *ctx, KlSocketHandle fd, int backlog) {
     (void)ctx; return kl_sockdef_listen(fd, backlog);
@@ -254,8 +264,8 @@ static KlSocketHandle psx_accept(void *ctx, KlSocketHandle fd, struct sockaddr *
 static int psx_close(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_close(fd);
 }
-static int psx_get_local_addr(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    (void)ctx; return kl_sockdef_get_local_addr(fd, a, l);
+static int psx_get_local_addr(void *ctx, KlSocketHandle fd, KlSockAddr *a) {
+    (void)ctx; return kl_sockdef_get_local_addr(fd, a);
 }
 static int psx_get_so_error(void *ctx, KlSocketHandle fd, int *out_err) {
     (void)ctx; return kl_sockdef_get_so_error(fd, out_err);

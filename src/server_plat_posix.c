@@ -15,6 +15,7 @@
 #include "server_plat.h"
 #include "internal.h"        /* kl_log / kl_log_errno + KlServer */
 #include "socket.h"
+#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind currency) */
 #include <keel/allocator.h>
 
 #include <string.h>
@@ -192,7 +193,9 @@ int kl_srv_bind_unix(KlServer *s) {
         old_umask = umask(0777 & ~(mode_t)s->config.unix_socket_mode);
         umask_set = 1;
     }
-    int bind_rc = kl_sock_bind(s->ev.sockets, s->listen_fd, (struct sockaddr *)&addr, addr_len);
+    KlSockAddr bind_sa;
+    kl_sockaddr_from_native(&bind_sa, (struct sockaddr *)&addr, addr_len);
+    int bind_rc = kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa);
     if (umask_set)
         umask(old_umask);
     if (bind_rc < 0) {

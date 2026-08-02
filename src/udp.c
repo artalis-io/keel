@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "socket.h"   /* sockaddr / getaddrinfo / inet_ntop / ntohs via sockcompat.h */
+#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind/connect/get_local_addr) */
 #include "udp_internal.h"
 #include "udp_io.h"
 #include "event_caps.h"   /* kl_event_caps — pick readiness vs completion recv */
@@ -259,7 +260,9 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     kl_udp_io_setup_recv_opts(udp, cfg);
 
     if (ai) {
-        if (kl_sock_bind(udp->ctx->sockets, udp->fd, ai->ai_addr, ai->ai_addrlen) < 0) {
+        KlSockAddr bind_sa;
+        kl_sockaddr_from_native(&bind_sa, ai->ai_addr, ai->ai_addrlen);
+        if (kl_sock_bind(udp->ctx->sockets, udp->fd, &bind_sa) < 0) {
             udp->last_error = KL_ERR_BIND;
             goto fail;
         }
@@ -331,7 +334,9 @@ int kl_udp_connect(KlUdp *udp, const struct sockaddr *peer, socklen_t peer_len) 
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    if (kl_sock_connect(udp->ctx->sockets, udp->fd, peer, peer_len) < 0) {
+    KlSockAddr peer_sa;
+    kl_sockaddr_from_native(&peer_sa, peer, peer_len);
+    if (kl_sock_connect(udp->ctx->sockets, udp->fd, &peer_sa) < 0) {
         udp->last_error = KL_ERR_CONNECT;
         return -1;
     }
@@ -535,14 +540,8 @@ KlError  kl_udp_last_error(const KlUdp *udp)  { return udp ? udp->last_error : K
 uint16_t kl_udp_local_port(const KlUdp *udp) {
     if (!udp || !kl_handle_valid(udp->fd))
         return 0;
-    struct sockaddr_storage sa;
-    memset(&sa, 0, sizeof(sa));
-    socklen_t len = sizeof(sa);
-    if (kl_sock_get_local_addr(udp->ctx->sockets, udp->fd, (struct sockaddr *)&sa, &len) != 0)
+    KlSockAddr la;
+    if (kl_sock_get_local_addr(udp->ctx->sockets, udp->fd, &la) != 0)
         return 0;
-    if (sa.ss_family == AF_INET)
-        return ntohs(((struct sockaddr_in *)&sa)->sin_port);
-    if (sa.ss_family == AF_INET6)
-        return ntohs(((struct sockaddr_in6 *)&sa)->sin6_port);
-    return 0;
+    return kl_sockaddr_port(&la);
 }
