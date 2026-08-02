@@ -22,36 +22,45 @@ A clean compile **is** the validation: it proves Keel's public `KlSocketProvider
 + `KlEventProvider` API is sufficient to author an lwIP platform using **only**
 public Keel headers — no internal Keel or host-POSIX types.
 
-## The runtime boundary (important)
+## Pure runtime provider (finding dissolved)
 
-A *running* Keel server on lwIP needs more than these two runtime providers,
-because part of the socket layer is **compile-time, not runtime-swappable**:
+lwIP now runs against a **stock `libkeel.a`** — no `-DKEEL_PLATFORM_LWIP` library
+build. It is a pure drop-in like the mbedTLS/nghttp2 vtable integrations.
 
-- **`struct sockaddr` layout is compile-time.** lwIP uses the BSD layout (with
-  `sin_len`); Linux does not. A host-built `libkeel.a` fills a host-layout
-  `sockaddr` and hands it to `lwip_bind`, which misreads it (`bind: EIO`). The
-  address types are baked in at compile time via `keel/net.h`.
-- **Address resolution is compile-time.** `server.c` calls `getaddrinfo`; on lwIP
-  that must be `lwip_getaddrinfo`.
-- **The stop/wakeup fd is a host pipe** that `lwip_poll` cannot watch; on lwIP it
-  must be a loopback socket (`platform_lwip`).
+An earlier pass found a real boundary: `struct sockaddr`'s layout is compile-time
+(lwIP has `sin_len`, Linux doesn't), so a host-built libkeel filled a host-layout
+`sockaddr` that `lwip_bind` misread (`bind: EIO`), and `getaddrinfo` was baked in.
+The **KlSockAddr address-ABI neutralization** (`docs/keel_sockaddr_design.md`)
+dissolved it:
 
-So the **event backend is cleanly runtime-injectable** (`KlEventProvider`, done),
-but the **socket/address ABI is not** — it requires compiling Keel with
-`-DKEEL_PLATFORM_LWIP` (`keel/net.h` → `lwip/sockets.h`) across the library, i.e.
-a `PLATFORM=lwip` build (see `docs/lwip_platform_design.md` §2/§7). lwIP is
-therefore a **hybrid**: a runtime event provider + a compile-time socket ABI, not
-a pure drop-in `.a` like the mbedTLS/nghttp2 vtable integrations.
+- Core speaks the Keel-owned, fixed-layout **`KlSockAddr`** everywhere; a platform
+  `struct sockaddr` exists only inside socket providers. `socket_lwip.c` marshals
+  `KlSockAddr` ↔ lwIP `sockaddr` at the boundary, so **no host-layout sockaddr
+  ever reaches lwIP**.
+- Server bind parses the numeric address with the pure `kl_sockaddr_parse` (no
+  `getaddrinfo`); the clients' blocking name resolution is confined to a
+  platform-swappable `resolve_sync` TU.
 
-`lwip_loopback_test.c` is the runtime proof (a real Keel server + client over
-lwIP loopback); it runs only against a `KEEL_PLATFORM_LWIP` build of `libkeel`.
-lwIP loopback itself is confirmed working headless (`tcpip_init` + `LWIP_HAVE_LOOPIF`).
+So **both axes are runtime-injectable**: the event backend (`KlEventProvider`) and
+the socket/address provider (`KlSocketProvider` + `KlSockAddr`). No library
+recompile.
+
+`lwip_loopback_test.c` is the proof — a real Keel HTTP server on the lwIP
+providers answering `200 OK` to an lwIP client over loopback, linked against a
+**stock** `libkeel`:
+
+```sh
+make -C ../..                       # stock libkeel.a (any backend)
+make loopback LWIP_DIR=/path/to/lwip
+# -> keel: listening on 127.0.0.1:8080
+#    lwIP loopback: Keel server on lwIP replied 200 OK (correct)
+```
 
 ## Tested versions
 
 | lwIP | Status |
 |------|--------|
-| STABLE-2.2.0 | Build-gate verified (providers compile; loopback confirmed) |
+| STABLE-2.2.0 | **Loopback runtime verified** (200 OK on stock libkeel) + build-gate |
 | 2.1.x | Expected to work (same `lwip_poll` + BSD socket API) |
 
 ## Scope
