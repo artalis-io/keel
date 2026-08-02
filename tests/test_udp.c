@@ -370,10 +370,8 @@ UTEST(udp, pktinfo_multihomed_local) {
     ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
 
     KlSockAddr dst;
-    memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(kl_udp_local_port(&rx));
-    inet_pton(AF_INET, "127.0.0.2", &dst.sin_addr);
+    const uint8_t lo2[4] = { 127, 0, 0, 2 };
+    kl_sockaddr_from_ipv4(&dst, lo2, kl_udp_local_port(&rx));
     ASSERT_EQ(0, kl_udp_send_to(&tx, "hi", 2, &dst));
     pump_until(&ctx, 1, 200);
 
