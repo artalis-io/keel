@@ -20,7 +20,11 @@ build against your own lwIP (`LWIP_DIR`) + `lwipopts.h`.
 - `platform_wakeup_lwip.c` — self-connected lwIP UDP wakeup (responsive
   `kl_server_stop`; overrides the generic `src/platform_wakeup_*` seam).
 - `keel_lwip.h` — `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`.
-- `lwipopts.h` — a **sample** host/loopback config (not blessed for production).
+- `lwipopts.h` — a **production-oriented baseline** config (Keel provider
+  requirements + security hardening + a documented sizing block to TUNE per
+  deployment). It is what the loopback + HTTPS tests run against, so the
+  provider-critical settings are CI-exercised. Copy + tune for your target, and
+  replace the placeholder `LWIP_RAND` with a CSPRNG (see the header's warning).
 
 ## Build-gate (what CI runs)
 
@@ -94,8 +98,9 @@ make loopback-tls LWIP_DIR=/path/to/lwip MBEDTLS_DIR=/path/to/mbedtls
 # -> lwIP loopback: Keel HTTPS (mbedTLS) on lwIP handshake + roundtrip OK (correct)
 ```
 
-**Not yet on lwIP:** `lwipopts.h` is a sample, not production-blessed. (udp is on
-lwIP via `udp_io_lwip.c`; TLS via the provider-routed mbedTLS BIO.)
+**Complete on lwIP:** server + client + UDP + TLS all run on a stock `libkeel.a`.
+`lwipopts.h` is a production-oriented baseline (tune the sizing block + supply a
+CSPRNG for `LWIP_RAND` per deployment).
 
 ## Tested versions
 
