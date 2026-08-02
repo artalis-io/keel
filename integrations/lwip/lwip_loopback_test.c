@@ -3,10 +3,12 @@
  * (no kernel sockets), proving the socket + event providers end to end.
  *
  * Brings up lwIP (tcpip_init + loopback netif), starts a KlServer configured with
- * kl_socket_provider_lwip() + kl_event_provider_lwip(), then connects an lwIP
- * client to it over 127.0.0.1 and does an HTTP/1.1 GET. The handler runs and
- * returns 200 — driven entirely by lwIP sockets + lwip_poll, with no core
- * recompile. Exit 0 on success.
+ * kl_socket_provider_lwip() + kl_event_provider_lwip(), then:
+ *   (1) a raw lwIP client GETs it (proves the server axis), and
+ *   (2) a Keel ASYNC CLIENT on the lwIP providers GETs it (proves the outbound
+ *       client axis: connect + blocking name resolution via resolve_sync_lwip).
+ * Both driven entirely by lwIP sockets + lwip_poll, linked against a STOCK
+ * libkeel — no core recompile. Exit 0 on success.
  */
 #include <keel/keel.h>
 #include "keel_lwip.h"
@@ -32,6 +34,43 @@ static void handler(KlRequest *req, KlResponse *res, void *ud) {
 
 static KlServer g_srv;
 static void *srv_thread(void *a) { (void)a; kl_server_run(&g_srv); return NULL; }
+
+static volatile int g_cli_done;
+static void cli_done(KlClient *c, void *ud) { (void)c; (void)ud; g_cli_done = 1; }
+
+/* Phase 2: a Keel async HTTP client on the lwIP providers → the server.
+ * Proves the outbound axis (connect + resolve_sync_lwip name resolution). */
+static int keel_client_on_lwip(uint16_t port) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx cev;
+    if (kl_event_ctx_init_ex(&cev, &alloc, kl_event_provider_lwip()) != 0)
+        return 0;
+    cev.sockets = kl_socket_provider_lwip();
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", (unsigned)port);
+    KlClientConfig ccfg = {
+        .sockets    = kl_socket_provider_lwip(),
+        .system_dns = 1,        /* blocking resolve → resolve_sync_lwip (lwip_getaddrinfo) */
+        .timeout_ms = 5000,
+    };
+    g_cli_done = 0;
+    KlClient *cli = kl_client_start(&cev, &alloc, &ccfg, "GET", url,
+                                    NULL, 0, NULL, 0, cli_done, NULL);
+    int ok = 0;
+    if (cli) {
+        for (int i = 0; i < 500 && !g_cli_done; i++)
+            kl_event_ctx_run(&cev, 16, 20);
+        if (g_cli_done && kl_client_error(cli) == 0) {
+            const KlClientResponse *r = kl_client_response(cli);
+            ok = (r && r->status == 200 && r->body &&
+                  strstr(r->body, "\"stack\":\"lwip\"") != NULL);
+        }
+        kl_client_free(cli);
+    }
+    kl_event_ctx_free(&cev);
+    return ok;
+}
 
 int main(void) {
     /* Bring up lwIP: tcpip thread + loopback netif (LWIP_HAVE_LOOPIF → 127.0.0.1). */
@@ -73,10 +112,16 @@ int main(void) {
     lwip_close(c);
 
     int ok = (strstr(buf, "200 OK") != NULL) && (strstr(buf, "\"stack\":\"lwip\"") != NULL);
-    printf("lwIP loopback: Keel server on lwIP replied %s\n", ok ? "200 OK (correct)" : "UNEXPECTED");
+    printf("lwIP loopback: raw client -> Keel server replied %s\n",
+           ok ? "200 OK (correct)" : "UNEXPECTED");
+
+    /* Phase 2: a Keel async client on lwIP → the same server. */
+    int client_ok = keel_client_on_lwip((uint16_t)g_srv.bound_port);
+    printf("lwIP loopback: Keel client on lwIP got %s\n",
+           client_ok ? "200 (correct)" : "UNEXPECTED");
 
     kl_server_stop(&g_srv);          /* loop wakes on its poll timeout, sees stop */
     pthread_join(tid, NULL);
     kl_server_free(&g_srv);
-    return ok ? 0 : 2;
+    return (ok && client_ok) ? 0 : 2;
 }

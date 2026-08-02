@@ -9,6 +9,8 @@ build against your own lwIP (`LWIP_DIR`) + `lwipopts.h`.
 - `event_lwip.c` — `KlEventProvider` over `lwip_poll` (the runtime event-backend
   seam; its `native_provider()` returns the lwIP socket provider, so installing
   `event_provider` auto-wires the matched `sockets`).
+- `resolve_sync_lwip.c` — blocking name resolution over `lwip_getaddrinfo` (the
+  client-axis seam; overrides the stock host `kl_resolve_sync` at link time).
 - `keel_lwip.h` — `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`.
 - `lwipopts.h` — a **sample** host/loopback config (not blessed for production).
 
@@ -45,22 +47,32 @@ So **both axes are runtime-injectable**: the event backend (`KlEventProvider`) a
 the socket/address provider (`KlSocketProvider` + `KlSockAddr`). No library
 recompile.
 
-`lwip_loopback_test.c` is the proof — a real Keel HTTP server on the lwIP
-providers answering `200 OK` to an lwIP client over loopback, linked against a
-**stock** `libkeel`:
+`lwip_loopback_test.c` is the proof — both the server and the client axis on lwIP,
+linked against a **stock** `libkeel`:
+- a raw lwIP client → the Keel **server** (`200 OK`), and
+- a Keel async **client** on the lwIP providers → the same server (`200`), with
+  name resolution via `resolve_sync_lwip.c` (`lwip_getaddrinfo`, linked ahead of
+  the stock lib so it overrides the host `kl_resolve_sync`).
 
 ```sh
 make -C ../..                       # stock libkeel.a (any backend)
 make loopback LWIP_DIR=/path/to/lwip
 # -> keel: listening on 127.0.0.1:8080
-#    lwIP loopback: Keel server on lwIP replied 200 OK (correct)
+#    lwIP loopback: raw client -> Keel server replied 200 OK (correct)
+#    lwIP loopback: Keel client on lwIP got 200 (correct)
 ```
+
+**Remaining:** responsive `kl_server_stop` — `lwip_poll` can't watch the host
+self-pipe wakeup, so stop is currently noticed on the next poll tick (the built-in
+tick-timeout fallback; correct, just latent). A true lwIP wakeup (a loopback-
+socket `platform_wakeup_lwip`) needs the core `kl_plat_wakeup_*` extracted into an
+overridable TU — a small follow-up.
 
 ## Tested versions
 
 | lwIP | Status |
 |------|--------|
-| STABLE-2.2.0 | **Loopback runtime verified** (200 OK on stock libkeel) + build-gate |
+| STABLE-2.2.0 | **Loopback verified: server + client** (200 OK on stock libkeel) + build-gate |
 | 2.1.x | Expected to work (same `lwip_poll` + BSD socket API) |
 
 ## Scope
