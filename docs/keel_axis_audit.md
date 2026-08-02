@@ -61,8 +61,8 @@ Winsock — the strongest possible evidence the socket/event axes are genuinely 
 | # | Severity | Area | Finding | Status |
 |---|----------|------|---------|--------|
 | A1 | Medium | `sockaddr_native.h` marshalling boundary | The neutralization concentrates all untrusted host→neutral conversion into one seam — which makes that seam's robustness load-bearing. Two defects there (missing `len` lower-bound before the `sockaddr_in{,6}` cast → OOB read; uninitialised `KlSockAddr` delivered when `from_native` fails) were the highest-value issues of the companion C audit. | **Fixed** in the 7th C-audit pass (`docs/keel_audit.md`, commit this session). Architecturally, the fix reinforces the boundary contract: *the marshalling seam must reject/deflect any address it cannot represent, never emit garbage upward.* |
-| A2 | Informational | `udp_io` seam vs runtime providers | `udp_io` is a **compile/link** seam (Makefile `UDP_IO_SRC`; a foreign stack link-overrides `udp_io_*.o`, as `integrations/lwip/udp_io_lwip.c` does), whereas the socket + event axes are **runtime** vtables. This asymmetry is fine today (link-override is proven), but a pure-runtime foreign UDP stack would want a `KlUdpIoProvider` vtable to match. Do not build speculatively — note for when a second foreign UDP stack appears. | Accepted (by design). |
-| A3 | Informational | TLS provider-routing generality | Socket-provider routing is opt-in **per TLS backend** (mbedTLS ctx config), not a generic `KlTls` hook. Correct for now (mbedTLS is the only shipped backend, and keeping it out of the vtable avoids leaking a socket concept into the protocol contract). If a second TLS backend ships, a shared `KlTls`-level convention would standardize it. | Accepted. |
+| A2 | Informational | `udp_io` injection is link-time, not a runtime vtable | **UDP fully works on lwIP** (`udp_io_lwip.c`, CI-tested loopback echo) — this is **not** a functional gap. The only asymmetry: the socket + event axes are **runtime** vtables (one binary can hold both the posix and lwIP providers and choose per-`KlEventCtx`), whereas `udp_io` is **link-selected** (the linker resolves `kl_udp_io_*` once; a foreign stack link-overrides `udp_io_*.o`, as lwIP does). A runtime `KlUdpIoProvider` would only add *per-socket mixed-stack UDP within one process* (some datagrams on the kernel, some on lwIP simultaneously) — not a real use case, since a process runs on one network stack. **No action needed.** | Accepted — justified no-action. |
+| A3 | Low | TLS provider-routing should be a generic `KlTls` hook | Socket-provider routing is currently opt-in **per TLS backend** (`kl_tls_mbedtls_ctx_set_socket_provider`), so (a) each future backend must reinvent it and (b) the app must manually match the TLS ctx's provider to the connection's `KlConfig.sockets`/`KlClientConfig.sockets` — a footgun: forget it and TLS silently falls back to **host** sockets on a foreign stack. Better: an optional `KlTls.set_socket_provider` vtable method that `connection.c`/`client.c` **auto-wire** from the connection's own provider, so TLS-over-any-provider works with zero per-backend / per-app config (and the generic contract still doesn't force a socket concept on backends that leave it NULL). | **Recommended — implemented in the immediate follow-up** (see §6). |
 | A4 | Informational | completion UDP backpressure accounting | `udp.c` reserves `q_bytes` on `kl_comp_post_udp_send` and releases it in `kl_udp_comp_on_send`. This relies on every posted overlapped send surfacing exactly one completion (incl. cancellation-via-close). The backends honor that (a cancelled/failed `WSASendTo`/`sendmsg` still surfaces `KL_COMP_UDP_SEND` with the reserved `len`), so the reservation cannot leak — but the invariant is contract-enforced, not structurally guaranteed. | Accepted; documented in the contract (§5, "completion delivery"). |
 | A5 | Informational | error normalization across providers | The Winsock `EAGAIN != EWOULDBLOCK` split (`kl_wsa_set_errno`) is safe only because every would-block test ORs both codes. Cross-provider error normalization otherwise routes through `kl_sock_errno_to_error` → `KlError`. | Accepted (see C-audit R1); keep the OR convention. |
 
@@ -90,10 +90,13 @@ API remains out of scope. Still not built (by design): Winsock+io_uring (N/A), I
 ### Roadmap delta
 
 - **Immediate correctness:** none open (A1 fixed this session in the C-audit pass).
-- **Symmetry (deferred, only if a use case appears):** a runtime `KlUdpIoProvider` vtable (A2) and a
-  generic `KlTls` socket-provider hook (A3) would make UDP and TLS as runtime-injectable as the
-  socket/event axes are today. Not justified by current code — lwIP's link-override + per-ctx
-  config both work.
+- **A3 — implemented next:** add an optional `KlTls.set_socket_provider` vtable method and auto-wire
+  it from the connection's provider in `connection.c`/`client.c`; mbedTLS implements it. This makes
+  the TLS transport socket-provider-agnostic *by the framework* rather than by per-app config, and
+  removes the host-socket-fallback footgun on a foreign stack.
+- **A2 — no action:** a runtime `KlUdpIoProvider` vtable is **not** pursued. UDP-on-lwIP already
+  works via the link-override; the only thing a runtime vtable would add (mixed-stack UDP within one
+  process) is not a real use case.
 - **Everything else** from the prior passes' roadmaps stands unchanged.
 
 ---

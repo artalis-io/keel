@@ -734,6 +734,7 @@ cppcheck:
 	  --suppress=unusedFunction --suppress=checkersReport \
 	  --suppress=toomanyconfigs --suppress=staticFunction \
 	  --suppress=normalCheckLevelMaxBranches \
+	  --suppress=unmatchedSuppression \
 	  -UKEEL_PLATFORM_LWIP \
 	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
 
