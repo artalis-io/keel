@@ -65,6 +65,15 @@ int kl_sockaddr_from_ipv6(KlSockAddr *out, const uint8_t ip6[16], uint16_t port,
 /** Build an AF_UNIX address from a filesystem path. Returns -1 if too long. */
 int kl_sockaddr_from_unix(KlSockAddr *out, const char *path);
 
+/**
+ * Parse a NUMERIC address literal (no DNS) into @p out with host-order @p port:
+ * dotted-quad IPv4 ("127.0.0.1", "0.0.0.0") or IPv6 ("::1", "::", "2001:db8::1",
+ * with RFC 4291 "::" compression and an optional embedded-IPv4 tail). Returns 0
+ * on success, -1 if @p host is not a valid numeric literal. Pure — no getaddrinfo,
+ * no platform headers (works identically on every platform, incl. lwIP).
+ */
+int kl_sockaddr_parse(KlSockAddr *out, const char *host, uint16_t port);
+
 /* ── accessors (core reads these rather than struct fields directly) ───────── */
 
 /** Family of @p a as a KlAddrFamily. */
@@ -92,5 +101,12 @@ int kl_sockaddr_is_loopback(const KlSockAddr *a);
  * family. Use KL_SOCKADDR_STRLEN for a never-truncating buffer.
  */
 int kl_sockaddr_format(const KlSockAddr *a, char *buf, size_t n);
+
+/**
+ * Format only the host part of @p a (no port, no brackets): "192.168.0.1",
+ * "2001:db8::1" (RFC 5952), or the AF_UNIX path. Writes at most @p n bytes incl.
+ * NUL. Returns the length written (excl. NUL), or -1 on truncation / bad family.
+ */
+int kl_sockaddr_format_ip(const KlSockAddr *a, char *buf, size_t n);
 
 #endif /* KEEL_SOCKADDR_H */

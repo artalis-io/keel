@@ -320,6 +320,9 @@ jobs:
       - name: cppcheck
         run: make cppcheck
 
+      - name: Address-neutrality gate (protocol TUs are KlSockAddr-only)
+        run: make check-sockaddr-neutral
+
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
 

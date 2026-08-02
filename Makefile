@@ -167,7 +167,7 @@ CORE_SRC = src/allocator.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC
            src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client.c src/client_pool.c src/redirect.c src/sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(UDP_IO_SRC) src/udp_server.c \
-           src/dns_resolver.c $(DNS_SYS_SRC) \
+           src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c \
            $(IO_ENGINE_SRC) $(COMPLETION_SRC) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
@@ -708,6 +708,25 @@ coverage:
 analyze:
 	scan-build --status-bugs $(MAKE) clean all
 
+# Address-neutrality gate (PAL: KlSockAddr). The HTTP/connection protocol layer
+# must speak KlSockAddr only — no platform struct sockaddr, no getaddrinfo/inet_*,
+# no direct socket-header include. Address<->platform marshalling is confined to
+# the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
+# backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
+AXIS_PROTO_TUS = src/client.c src/h2_client.c src/websocket_client.c \
+                 src/connection.c src/server.c src/h2.c src/websocket.c \
+                 src/sse.c src/response.c src/redirect.c src/client_pool.c \
+                 src/resolver_cache.c
+check-sockaddr-neutral:
+	@bad=0; \
+	for f in $(AXIS_PROTO_TUS); do \
+	  if grep -nE 'struct sockaddr|\bgetaddrinfo[[:space:]]*\(|\bfreeaddrinfo[[:space:]]*\(|\binet_(pton|ntop)[[:space:]]*\(|#[[:space:]]*include[[:space:]]*<(netdb\.h|netinet/|arpa/inet|sys/socket|sys/un\.h)>' "$$f"; then \
+	    echo "AXIS VIOLATION: $$f names a platform socket address type/call"; bad=1; \
+	  fi; \
+	done; \
+	if [ $$bad -ne 0 ]; then echo "check-sockaddr-neutral: FAILED"; exit 1; fi; \
+	echo "check-sockaddr-neutral: OK ($(words $(AXIS_PROTO_TUS)) protocol TUs are KlSockAddr-only)"
+
 cppcheck:
 	cppcheck --enable=all --inline-suppr --suppress=missingIncludeSystem \
 	  --suppress=unusedFunction --suppress=checkersReport \
@@ -798,5 +817,6 @@ bench-compare:
 smoke: examples
 	sh tests/e2e_examples.sh
 
+.PHONY: check-sockaddr-neutral
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench

@@ -43,6 +43,95 @@ int kl_sockaddr_from_unix(KlSockAddr *out, const char *path) {
     return 0;
 }
 
+/* ── numeric literal parsing (pure — no inet_pton / getaddrinfo) ──────────── */
+
+/* Parse dotted-quad IPv4 into out[4]. Returns 0 on success, -1 otherwise. */
+static int parse_ipv4(const char *s, uint8_t out[4]) {
+    for (int i = 0; i < 4; i++) {
+        if (*s < '0' || *s > '9') return -1;
+        int v = 0, digits = 0;
+        while (*s >= '0' && *s <= '9') {
+            v = v * 10 + (*s - '0');
+            if (++digits > 3 || v > 255) return -1;
+            s++;
+        }
+        out[i] = (uint8_t)v;
+        if (i < 3) { if (*s != '.') return -1; s++; }
+    }
+    return (*s == '\0') ? 0 : -1;
+}
+
+/* Parse an IPv6 literal (RFC 4291: hextets, one "::" run, optional embedded IPv4
+ * tail) into out[16]. Returns 0 on success, -1 otherwise. */
+static int parse_ipv6(const char *s, uint8_t out[16]) {
+    uint8_t buf[16] = {0};
+    int gap = -1;      /* byte index where "::" was seen, -1 = none */
+    int n = 0;         /* bytes filled so far */
+
+    if (s[0] == ':') { if (s[1] != ':') return -1; s += 2; gap = 0; if (*s == '\0') { memset(out, 0, 16); return 0; } }
+
+    for (;;) {
+        /* embedded IPv4 tail (contains a '.') */
+        const char *dot = s;
+        while (*dot && *dot != ':' && *dot != '.') dot++;
+        if (*dot == '.') {
+            if (n > 12) return -1;
+            if (parse_ipv4(s, buf + n) != 0) return -1;
+            n += 4;
+            s = "";  /* consumed to end */
+            break;
+        }
+        /* a hextet: 1-4 hex digits */
+        int v = 0, digits = 0;
+        while (1) {
+            char c = *s; int d;
+            if (c >= '0' && c <= '9') d = c - '0';
+            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+            else break;
+            v = (v << 4) | d;
+            if (++digits > 4) return -1;
+            s++;
+        }
+        if (digits == 0) return -1;
+        if (n > 14) return -1;
+        buf[n++] = (uint8_t)(v >> 8);
+        buf[n++] = (uint8_t)(v & 0xff);
+        if (*s == '\0') break;
+        if (*s != ':') return -1;
+        s++;
+        if (*s == ':') {                 /* start of "::" run */
+            if (gap >= 0) return -1;      /* only one "::" allowed */
+            gap = n;
+            s++;
+            if (*s == '\0') break;        /* trailing "::" */
+        }
+    }
+    if (*s != '\0') return -1;
+
+    if (gap >= 0) {
+        if (n >= 16) return -1;          /* "::" must stand for >=1 zero group */
+        int tail = n - gap;
+        memmove(buf + (16 - tail), buf + gap, (size_t)tail);
+        memset(buf + gap, 0, (size_t)(16 - tail - gap));
+    } else if (n != 16) {
+        return -1;
+    }
+    memcpy(out, buf, 16);
+    return 0;
+}
+
+int kl_sockaddr_parse(KlSockAddr *out, const char *host, uint16_t port) {
+    if (!out || !host) return -1;
+    uint8_t v4[4];
+    if (parse_ipv4(host, v4) == 0)
+        return kl_sockaddr_from_ipv4(out, v4, port);
+    uint8_t v6[16];
+    if (parse_ipv6(host, v6) == 0)
+        return kl_sockaddr_from_ipv6(out, v6, port, 0);
+    return -1;
+}
+
 KlAddrFamily kl_sockaddr_family(const KlSockAddr *a) {
     return a ? (KlAddrFamily)a->family : KL_AF_UNSPEC;
 }
@@ -135,24 +224,39 @@ static int fmt_ipv6(const uint8_t ip[16], char *buf, size_t n) {
     return (int)off;
 }
 
-int kl_sockaddr_format(const KlSockAddr *a, char *buf, size_t n) {
+int kl_sockaddr_format_ip(const KlSockAddr *a, char *buf, size_t n) {
     if (!a || !buf || n == 0) return -1;
 
     if (a->family == KL_AF_INET) {
-        int r = snprintf(buf, n, "%u.%u.%u.%u:%u",
-                         a->u.ip[0], a->u.ip[1], a->u.ip[2], a->u.ip[3],
-                         (unsigned)a->port);
+        int r = snprintf(buf, n, "%u.%u.%u.%u",
+                         a->u.ip[0], a->u.ip[1], a->u.ip[2], a->u.ip[3]);
         return (r < 0 || (size_t)r >= n) ? -1 : r;
     }
-    if (a->family == KL_AF_INET6) {
-        char ip[46];
-        if (fmt_ipv6(a->u.ip, ip, sizeof ip) < 0) return -1;
-        int r = snprintf(buf, n, "[%s]:%u", ip, (unsigned)a->port);
-        return (r < 0 || (size_t)r >= n) ? -1 : r;
-    }
+    if (a->family == KL_AF_INET6)
+        return fmt_ipv6(a->u.ip, buf, n);
     if (a->family == KL_AF_UNIX) {
         int r = snprintf(buf, n, "%.*s", (int)a->addr_len, a->u.path);
         return (r < 0 || (size_t)r >= n) ? -1 : r;
     }
+    return -1;
+}
+
+int kl_sockaddr_format(const KlSockAddr *a, char *buf, size_t n) {
+    if (!a || !buf || n == 0) return -1;
+
+    if (a->family == KL_AF_INET) {
+        char ip[16];
+        if (kl_sockaddr_format_ip(a, ip, sizeof ip) < 0) return -1;
+        int r = snprintf(buf, n, "%s:%u", ip, (unsigned)a->port);
+        return (r < 0 || (size_t)r >= n) ? -1 : r;
+    }
+    if (a->family == KL_AF_INET6) {
+        char ip[46];
+        if (kl_sockaddr_format_ip(a, ip, sizeof ip) < 0) return -1;
+        int r = snprintf(buf, n, "[%s]:%u", ip, (unsigned)a->port);
+        return (r < 0 || (size_t)r >= n) ? -1 : r;
+    }
+    if (a->family == KL_AF_UNIX)
+        return kl_sockaddr_format_ip(a, buf, n);
     return -1;
 }

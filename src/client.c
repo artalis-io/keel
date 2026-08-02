@@ -23,8 +23,8 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-#include "socket.h"     /* seam + sockcompat: sockaddr / getaddrinfo / sys_un / SO_ERROR op */
-#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (connect currency) */
+#include "socket.h"     /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
+#include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
 #include "platform.h"   /* kl_plat_poll1 — sync readiness wait (poll/WSAPoll) */
 #include "event_caps.h" /* PAL Phase 7: event↔socket capability negotiation */
 
@@ -76,25 +76,19 @@ static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
     memcpy(host_buf, host, host_len);
     host_buf[host_len] = '\0';
 
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", port);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host_buf, port_str, &hints, &res);
-    if (rc != 0 || !res) {
+    KlSockAddr addrs[KL_RESOLVE_MAX_ADDRS];
+    int naddr = 0;
+    if (kl_resolve_sync(host_buf, (uint16_t)port, SOCK_STREAM,
+                        addrs, KL_RESOLVE_MAX_ADDRS, &naddr) != 0) {
         if (out_err) *out_err = KL_ERR_DNS;
         return -1;
     }
+    const KlSockAddr *csa = &addrs[0];
+    int family = (kl_sockaddr_family(csa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
 
-    KlSocketHandle fd = kl_sock_socket(sockets, res->ai_family, res->ai_socktype, res->ai_protocol);
+    KlSocketHandle fd = kl_sock_socket(sockets, family, SOCK_STREAM, 0);
     if (!kl_handle_valid(fd)) {
         if (out_err) *out_err = KL_ERR_SOCKET;
-        freeaddrinfo(res);
         return -1;
     }
 
@@ -104,14 +98,10 @@ static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
     if (kl_sock_set_nonblocking(sockets, fd) < 0) {
         if (out_err) *out_err = KL_ERR_SOCKET;
         kl_sock_close(sockets, fd);
-        freeaddrinfo(res);
         return -1;
     }
 
-    KlSockAddr csa;
-    kl_sockaddr_from_native(&csa, res->ai_addr, res->ai_addrlen);
-    rc = kl_sock_connect(sockets, fd, &csa);
-    freeaddrinfo(res);
+    int rc = kl_sock_connect(sockets, fd, csa);
 
     if (rc < 0 && errno != EINPROGRESS) {
         if (out_err) *out_err = KL_ERR_CONNECT;
@@ -143,29 +133,12 @@ static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
 
 /* ── UNIX socket address + connect ───────────────────────────────── */
 
-/*
- * Fill a sockaddr_un for `path`. Returns the address length, or 0 if the
- * path is empty or too long for sun_path. Shared by the sync and async
- * connect paths.
- */
-static socklen_t fill_sockaddr_un(struct sockaddr_un *addr, const char *path)
-{
-    size_t path_len = strlen(path);
-    if (path_len == 0 || path_len >= sizeof(addr->sun_path))
-        return 0;
-    memset(addr, 0, sizeof(*addr));
-    addr->sun_family = AF_UNIX;
-    memcpy(addr->sun_path, path, path_len + 1);
-    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + path_len + 1);
-}
-
 static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms,
                                      const KlSocketProvider *sockets,
                                      KlError *out_err)
 {
-    struct sockaddr_un addr;
-    socklen_t addr_len = fill_sockaddr_un(&addr, path);
-    if (addr_len == 0) {
+    KlSockAddr usa;
+    if (kl_sockaddr_from_unix(&usa, path) != 0) {
         if (out_err) *out_err = KL_ERR_INVALID_ARG;
         return -1;
     }
@@ -185,8 +158,6 @@ static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms
         return -1;
     }
 
-    KlSockAddr usa;
-    kl_sockaddr_from_native(&usa, (struct sockaddr *)&addr, addr_len);
     int rc = kl_sock_connect(sockets, fd, &usa);
     if (rc < 0 && errno != EINPROGRESS) {
         if (out_err) *out_err = KL_ERR_CONNECT;
@@ -1057,14 +1028,14 @@ struct KlClient {
     KlTlsConfig       *tls_cfg;
     char               host_buf[KL_CLIENT_HOSTNAME_MAX];
 
-    /* Async DNS resolver (NULL = sync getaddrinfo was used) */
+    /* Async DNS resolver (NULL = sync sync name resolution was used) */
     KlResolver        *resolver;
     KlResolveReq      *resolve_req;
     int                owns_resolver;   /* 1 = auto-created, destroy on teardown */
 
     /* Happy Eyeballs — racing connect over the resolved address list (RFC 8305).
      * Only active on the async resolver path (conn_racing=1); the UNIX and sync
-     * getaddrinfo paths stay single-fd. */
+     * sync name resolution paths stay single-fd. */
     KlConnAttempt      conn_attempts[KL_RESOLVE_MAX_ADDRS];
     KlResolveResult    conn_addrs;      /* full list, copied from the resolver */
     int                conn_next;       /* index of next address to dial */
@@ -1121,9 +1092,7 @@ static void async_handle_tls_handshake(KlClient *c);
 static void async_handle_sending_stream(KlClient *c);
 static void async_handle_proxy_connecting(KlClient *c);
 static void async_handle_proxy_handshake(KlClient *c);
-static int  start_connect(KlClient *c, const struct sockaddr *addr,
-                           socklen_t addrlen, int family, int socktype,
-                           int protocol);
+static int  start_connect(KlClient *c, const KlSockAddr *addr);
 /* Happy Eyeballs helpers (defined below start_connect) */
 static void he_proceed_after_connect(KlClient *c);
 static void he_start_next(KlClient *c);
@@ -1304,11 +1273,11 @@ static int build_connect_request(KlClient *c, const char *host,
 
 /* ── Post-DNS: create socket, connect, register watcher ──────────── */
 
-static int start_connect(KlClient *c, const struct sockaddr *addr,
-                          socklen_t addrlen, int family, int socktype,
-                          int protocol)
+static int start_connect(KlClient *c, const KlSockAddr *addr)
 {
-    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, family, socktype, protocol);
+    int family = (kl_sockaddr_family(addr) == KL_AF_INET6) ? AF_INET6 :
+                 (kl_sockaddr_family(addr) == KL_AF_UNIX)  ? AF_UNIX : AF_INET;
+    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, family, SOCK_STREAM, 0);
     if (!kl_handle_valid(fd))
         return -1;
 
@@ -1318,9 +1287,7 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
         return -1;
     }
 
-    KlSockAddr csa;
-    kl_sockaddr_from_native(&csa, addr, addrlen);
-    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, &csa);
+    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, addr);
     if (rc < 0 && errno != EINPROGRESS) {
         kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
@@ -1549,9 +1516,9 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
 }
 
 /* Select the resolver for an async request. Precedence: explicit cfg->resolver
- * (borrowed) → cfg->system_dns (NULL → blocking getaddrinfo) → auto-created
+ * (borrowed) → cfg->system_dns (NULL → blocking sync name resolution) → auto-created
  * built-in async resolver (owned; *owned = 1). Returns NULL to fall back to
- * getaddrinfo (also on auto-create failure — better than failing the request). */
+ * sync name resolution (also on auto-create failure — better than failing the request). */
 static KlResolver *client_pick_resolver(const KlClientConfig *cfg,
                                         KlEventCtx *ev_ctx, int *owned) {
     *owned = 0;
@@ -1567,7 +1534,7 @@ static KlResolver *client_pick_resolver(const KlClientConfig *cfg,
 
 /* ── State: CONNECTING ───────────────────────────────────────────── */
 
-/* Single-fd connect completion (UNIX socket + sync getaddrinfo paths). The
+/* Single-fd connect completion (UNIX socket + sync sync name resolution paths). The
  * Happy Eyeballs path uses he_on_writable instead. */
 static void async_handle_connecting(KlClient *c)
 {
@@ -1582,7 +1549,7 @@ static void async_handle_connecting(KlClient *c)
 }
 
 /* Shared post-connect path: c->fd is a connected socket (Happy Eyeballs winner,
- * or the single-fd UNIX / sync-getaddrinfo connect). Advances to the proxy /
+ * or the single-fd UNIX / sync-sync name resolution connect). Advances to the proxy /
  * TLS / sending state. */
 static void he_proceed_after_connect(KlClient *c)
 {
@@ -1987,7 +1954,7 @@ static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data
         break;  /* DNS resolution handled by resolver callback, not watcher */
     case KL_HCLIENT_CONNECTING:
         /* Happy Eyeballs races several fds — dispatch by the fd that fired.
-         * The single-fd UNIX / sync-getaddrinfo path uses c->fd directly. */
+         * The single-fd UNIX / sync-sync name resolution path uses c->fd directly. */
         if (c->conn_racing)
             he_on_writable(c, fd);
         else
@@ -2335,11 +2302,9 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
 
     /* UNIX socket: connect directly, bypassing DNS resolution entirely. */
     if (parsed.is_unix) {
-        struct sockaddr_un un;
-        socklen_t un_len = fill_sockaddr_un(&un, parsed.unix_path);
-        if (un_len == 0 ||
-            start_connect(c, (const struct sockaddr *)&un, un_len,
-                          AF_UNIX, SOCK_STREAM, 0) < 0) {
+        KlSockAddr un;
+        if (kl_sockaddr_from_unix(&un, parsed.unix_path) != 0 ||
+            start_connect(c, &un) < 0) {
             c->parser->destroy(c->parser);
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
@@ -2355,7 +2320,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     const char *resolve_host = is_proxied ? proxy->host : host_buf;
     int resolve_port = is_proxied ? proxy->port : parsed.port;
 
-    /* Async DNS resolver path (explicit, built-in default, or getaddrinfo). */
+    /* Async DNS resolver path (explicit, built-in default, or sync name resolution). */
     int res_owned = 0;
     KlResolver *resolver = client_pick_resolver(cfg, ev_ctx, &res_owned);
     if (resolver) {
@@ -2389,7 +2354,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return c;
     }
 
-    /* Sync DNS fallback (blocking getaddrinfo) */
+    /* Sync DNS fallback (blocking sync name resolution) */
     char dns_host_buf[KL_CLIENT_HOSTNAME_MAX];
     if (is_proxied) {
         size_t phl = strlen(proxy->host);
@@ -2406,17 +2371,10 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         memcpy(dns_host_buf, host_buf, parsed.host_len + 1);
     }
 
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", resolve_port);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(dns_host_buf, port_str, &hints, &res);
-    if (rc != 0 || !res) {
+    KlSockAddr addrs[KL_RESOLVE_MAX_ADDRS];
+    int naddr = 0;
+    if (kl_resolve_sync(dns_host_buf, (uint16_t)resolve_port, SOCK_STREAM,
+                        addrs, KL_RESOLVE_MAX_ADDRS, &naddr) != 0) {
         if (c->decomp_wrap)
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
@@ -2425,10 +2383,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return NULL;
     }
 
-    if (start_connect(c, res->ai_addr, res->ai_addrlen,
-                       res->ai_family, res->ai_socktype,
-                       res->ai_protocol) < 0) {
-        freeaddrinfo(res);
+    if (start_connect(c, &addrs[0]) < 0) {
         if (c->decomp_wrap)
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
@@ -2436,7 +2391,6 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         kl_free(alloc, c, sizeof(KlClient));
         return NULL;
     }
-    freeaddrinfo(res);
 
     he_arm_deadline(c);   /* bound the connect/send/recv (single-fd path) */
     return c;
@@ -2860,18 +2814,11 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
         return c;
     }
 
-    /* Sync DNS fallback */
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", parsed.port);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host_buf, port_str, &hints, &res);
-    if (rc != 0 || !res) {
+    /* Sync DNS fallback (blocking name resolution → KlSockAddr) */
+    KlSockAddr addrs[KL_RESOLVE_MAX_ADDRS];
+    int naddr = 0;
+    if (kl_resolve_sync(host_buf, (uint16_t)parsed.port, SOCK_STREAM,
+                        addrs, KL_RESOLVE_MAX_ADDRS, &naddr) != 0) {
         if (c->decomp_wrap)
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
@@ -2880,10 +2827,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
         return NULL;
     }
 
-    if (start_connect(c, res->ai_addr, res->ai_addrlen,
-                       res->ai_family, res->ai_socktype,
-                       res->ai_protocol) < 0) {
-        freeaddrinfo(res);
+    if (start_connect(c, &addrs[0]) < 0) {
         if (c->decomp_wrap)
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
@@ -2891,7 +2835,6 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
         kl_free(alloc, c, sizeof(KlClient));
         return NULL;
     }
-    freeaddrinfo(res);
 
     return c;
 }

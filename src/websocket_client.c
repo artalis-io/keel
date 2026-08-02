@@ -27,7 +27,7 @@
 #include "base64.h"
 #include "utf8.h"
 #include "socket.h"
-#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (connect currency) */
+#include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
 #include "platform.h"
 
 /* ── Connection states ──────────────────────────────────────────── */
@@ -921,15 +921,9 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
     int rc = -1;
     if (parsed.is_unix) {
         /* Connect directly to the UNIX socket, bypassing DNS. */
-        struct sockaddr_un un;
-        size_t plen = strlen(parsed.unix_path);
-        if (plen == 0 || plen >= sizeof(un.sun_path))
+        KlSockAddr usa;
+        if (kl_sockaddr_from_unix(&usa, parsed.unix_path) != 0)
             return NULL;
-        memset(&un, 0, sizeof(un));
-        un.sun_family = AF_UNIX;
-        memcpy(un.sun_path, parsed.unix_path, plen + 1);
-        socklen_t un_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
-                                       plen + 1);
 
         fd = kl_sock_socket(ev->sockets, AF_UNIX, SOCK_STREAM, 0);
         if (!kl_handle_valid(fd))
@@ -939,46 +933,33 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             kl_sock_close(ev->sockets, fd);
             return NULL;
         }
-        KlSockAddr usa;
-        kl_sockaddr_from_native(&usa, (struct sockaddr *)&un, un_len);
         rc = kl_sock_connect(ev->sockets, fd, &usa);
         if (rc < 0 && errno != EINPROGRESS) {
             kl_sock_close(ev->sockets, fd);
             return NULL;
         }
     } else {
-        /* DNS resolve */
-        char port_str[8];
-        snprintf(port_str, sizeof(port_str), "%d", parsed.port);
-
-        struct addrinfo hints;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-
-        struct addrinfo *res = NULL;
-        rc = getaddrinfo(host_buf, port_str, &hints, &res);
-        if (rc != 0 || !res)
+        /* DNS resolve → KlSockAddr (blocking; async client owns the resolver) */
+        KlSockAddr addrs[KL_RESOLVE_MAX_ADDRS];
+        int naddr = 0;
+        if (kl_resolve_sync(host_buf, (uint16_t)parsed.port, SOCK_STREAM,
+                            addrs, KL_RESOLVE_MAX_ADDRS, &naddr) != 0)
             return NULL;
+        const KlSockAddr *csa = &addrs[0];
+        int family = (kl_sockaddr_family(csa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
 
         /* Create non-blocking socket */
-        fd = kl_sock_socket(ev->sockets, res->ai_family, res->ai_socktype, res->ai_protocol);
-        if (!kl_handle_valid(fd)) {
-            freeaddrinfo(res);
+        fd = kl_sock_socket(ev->sockets, family, SOCK_STREAM, 0);
+        if (!kl_handle_valid(fd))
             return NULL;
-        }
 
         kl_sock_set_nosigpipe(ev->sockets, fd);
         if (kl_sock_set_nonblocking(ev->sockets, fd) < 0) {
             kl_sock_close(ev->sockets, fd);
-            freeaddrinfo(res);
             return NULL;
         }
 
-        KlSockAddr csa;
-        kl_sockaddr_from_native(&csa, res->ai_addr, res->ai_addrlen);
-        rc = kl_sock_connect(ev->sockets, fd, &csa);
-        freeaddrinfo(res);
+        rc = kl_sock_connect(ev->sockets, fd, csa);
 
         if (rc < 0 && errno != EINPROGRESS) {
             kl_sock_close(ev->sockets, fd);
