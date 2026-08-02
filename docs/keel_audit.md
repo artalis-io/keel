@@ -1,5 +1,84 @@
 # C Audit Report: KEEL
 
+## Seventh pass — KlSockAddr address-ABI neutralization + lwIP platform (2026-08-02)
+
+**Scope:** everything added/changed since the sixth pass — the runtime event-provider seam
+(#150/#151), the **KlSockAddr address-ABI neutralization** series (#153–#159: canonical type +
+pure helpers, socket-vtable currency, resolver, udp public API, accept + proxy_protocol + peer
+addr, protocol-TU purge + grep-gate, lwIP payoff), and the **lwIP platform** (#152, #160–#165:
+socket + event providers, client axis via `resolve_sync_lwip`, responsive stop via
+`platform_wakeup_lwip`, `udp_io_lwip` + the `udp_io` seam→KlSockAddr flip, TLS-over-lwIP via the
+provider-routed mbedTLS BIO, production `lwipopts.h`). Files: `sockaddr.{h,c}`,
+`sockaddr_native.h`, `socket.h` + `socket_{posix,winsock}.c`, `udp.c` +
+`udp_io_{posix,win}.c` + `udp_internal.h`, `resolver_cache.c`, `dns_resolver.c`,
+`dns_sys_{posix,win}.c`, `completion_driver.c` + `event_{pollcomp,iouring,iocp}.c` (UDP
+marshalling), `integrations/lwip/*`, and the `integrations/mbedtls` socket-provider routing.
+
+**Method:** five parallel deep-review agents (sockaddr core; udp seam + I/O; lwIP integration;
+completion-backend UDP marshalling; resolver + socket providers) tracing marshalling bounds,
+op/buffer/node lifetime, integer math, and untrusted-input parsing; mechanical sweeps
+(`src/`+`parsers/`: no `strcpy`/`sprintf`/`gets`, no `atoi`/`atol`/`atof`, raw `malloc`/`free`
+only in the allocator wrapper); **scan-build — "No bugs found"**; **cppcheck — clean**; the
+**full unit suite under ASan+UBSan (`make debug` + `make test`) — 891 tests, 0 failures, 0
+sanitizer hits**; gcc-14 + cosmocc + MinGW (IOCP/WSAPoll) compile gates; and the Apple container
+for Linux epoll/io_uring + the lwIP loopback/HTTPS runtime tests.
+
+**Verdict: clean after fixes.** No Critical or High findings. Four **Medium** memory-safety
+defects on untrusted-input (network) paths were found **and fixed this pass**, plus one Low
+hardening fix and the cppcheck gate made version-robust. The KlSockAddr marshalling boundary is
+the right place to have caught these — the neutralization concentrated all host↔neutral address
+conversion into one reviewed seam.
+
+### Medium — fixed this pass
+
+| # | File(s) | Issue | Concrete risk | Fix |
+|---|---------|-------|---------------|-----|
+| M1 | `src/sockaddr_native.h` `kl_sockaddr_from_native` | AF_INET/AF_INET6 cases cast an **untrusted** `struct sockaddr` (from `accept`/`recvfrom`) to `sockaddr_in`/`sockaddr_in6` and `memcpy`'d the address **without a lower-bound `len` check** (only AF_UNIX checked `len`). | A short/garbage `socklen` from the kernel or a foreign provider → up to 16-byte out-of-bounds read past the caller's address buffer. | Added `if (len < sizeof(struct sockaddr_in{,6})) return -1;` before each cast/`memcpy`. |
+| M2 | `src/udp_io_posix.c` (batched + single recv), `src/udp_io_win.c`, `src/completion_driver.c` (`KL_COMP_UDP_RECV`) | The four datagram-recv paths passed `&ksrc` to the `on_recv` callback **unconditionally**. When `kl_sockaddr_from_native` fails (unrecognised family, or `peer_len == 0` on a connected socket) it leaves the scratch **untouched** → an **uninitialised `KlSockAddr` (stack garbage) delivered as the datagram source** to application code. | Info-leak of stack contents into the app's source-address logic / reply targeting, reachable from network input. | Honor the return value: pass `NULL` (unknown source) instead of uninitialised stack; guard the local (pktinfo) address the same way. |
+| M3 | `integrations/lwip/event_lwip.c` `lwev_mod` / `lwev_del` | Negative-fd guard used `!kl_handle_valid(fd)`, which only rejects `-1`; an `fd <= -2` passed and indexed `fd_to_idx[(int)fd]` — a **negative-index OOB** read (and an OOB write in `del`). `src/event_poll.c` guards the full negative range. | Memory corruption from a bogus/underflowed lwIP descriptor reaching mod/del. | `(int)fd < 0 || (int)fd >= cap`, matching `event_poll.c`. |
+
+(M2 is one defect across four sites. Its readiness-posix instance predates this series but shares
+the marshalling pattern introduced here and was fixed for completeness.)
+
+### Low / tooling — fixed this pass
+
+| # | File(s) | Issue | Fix |
+|---|---------|-------|-----|
+| L1 | `src/resolver_cache.c` `cache_insert` | Fixed `host[]` buffer filled via `memcpy(strlen+1)` with no self-check (callers bound it, but the function wasn't self-defending). | `strlen(host) >= KL_CLIENT_HOSTNAME_MAX` early return. |
+| L2 | `Makefile` `cppcheck` | A newer cppcheck than CI's failed `make cppcheck` on `staticFunction` **false-positives** (public-API `kl_*` functions flagged should-be-static because cppcheck can't see the header consumers) and `normalCheckLevelMaxBranches` **informational** notes. | Added `--suppress=staticFunction --suppress=normalCheckLevelMaxBranches` — keeps the gate green across cppcheck versions without hiding real defects. |
+| L3 | `src/async.c`, `src/dns_resolver.c`, `src/server.c` (×2), `src/body_reader_buffer.c` | Newer-cppcheck `constParameterPointer`/`constVariablePointer` on read-only pointers/params. | Added `const` (4 sites). The `kl_body_reader_buffer` factory param stays `void*` to match the `KlBodyReaderFactory` typedef — inline-suppressed with justification. |
+
+### Reported, not changed (accepted / by design)
+
+| # | File | Note |
+|---|------|------|
+| R1 | `src/socket_winsock.c` `kl_wsa_set_errno` | On Windows `EAGAIN != EWOULDBLOCK`; the mapping emits `EWOULDBLOCK`. Safe because every would-block test in-tree ORs **both** codes (verified across `dns_resolver.c` + the socket-seam callers). A contract, not a bug; keep the OR convention (a `KL_EWOULDBLOCK()` helper would make it self-enforcing). |
+| R2 | `src/dns_resolver.c` `dns_resolve` | An over-long hostname (`> DNS_NAME_MAX`) is `snprintf`-truncated before `dns_build_candidates` rejects it, so a truncated name could be queried rather than hard-failed. No memory-safety impact. Optional: reject `strlen(host) >= DNS_NAME_MAX` up front. |
+| R3 | `src/event_iocp.c` | A UDP send with an UNSPEC destination on an *unconnected* socket fails silently at completion (`ok=0`) rather than up-front; unreachable in practice because `kl_udp_send_to_from` validates `dest` at the public API. |
+| R4 | `integrations/lwip/{socket_lwip,platform_wakeup_lwip}.c` | `set_reuseport`/`set_cork` return `-1` without setting `errno` (cosmetic diagnostic); the wakeup ignores `lwip_send`'s return (idempotent wakeup, recovered on the next poll tick). |
+
+### Areas audited clean (no findings)
+
+- **DNS response parser** (`kl_dns_parse_response`, `dns_skip_name`, `dns_extract_opt`,
+  `dns_question_matches`): no compression-pointer following loop (names are terminated in place),
+  label / RDATA / RR-header / address-size (`rdlen==4/16`) / multi-address-array bounds all tight.
+  Also fuzzed (`fuzz_dns`).
+- **`sockaddr.c`** parsers/formatters (`parse_ipv4`/`parse_ipv6`, `kl_sockaddr_format*`): bounded,
+  no overflow; every builder `memset`s the union (no uninitialised-field leak in the round-trip).
+- **UDP queue node** (flexible array): alloc-size overflow guard, matching free size on every
+  path (send / EAGAIN-requeue / hard-error-drop / free); send-queue byte-cap underflow-guarded;
+  GRO-split loop + cmsg build/parse bounds (runt-cmsg underflow guarded); recvmmsg/sendmmsg batch
+  alloc/index/partial-free.
+- **Completion backends** (pollcomp / io_uring / IOCP): op sockaddr-buffer sizes vs the socklen
+  used in send/recv, recv name/control-buffer bounds, and op alloc/free lifetime — including the
+  immediate-failure early-return paths and cancelled / zero-byte completions (no stale-buffer
+  parse, no double-free/leak).
+- **mbedTLS socket-provider routing**: NULL `sp` is byte-for-byte the prior behaviour
+  (`kl_sockdef_*` fallback); per-session inheritance from the ctx; borrowed (not owned) provider
+  pointer — no leak, no dangling copy; the completion memory-BIO path is unaffected.
+- **socket_posix/winsock accept marshalling**: untrusted-peer `socklen` bounded before
+  `kl_sockaddr_from_native`; `writev` iovcnt bounded before the stack `iovec[]`.
+
 ## Sixth pass — completion-axis feature work (PROXY / streaming / TransmitFile / TLS) (2026-08-01)
 
 **Scope:** everything added/changed since the fifth pass — the completion-backend feature run

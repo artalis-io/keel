@@ -1,5 +1,106 @@
 # KEEL Networking Architecture Axis Audit
 
+## Fifth pass — address-ABI neutralization, event-provider seam, lwIP as a third stack (2026-08-03)
+
+**Verdict: architecturally sound — the recent work *strengthened* the three-axis separation rather
+than eroding it, and empirically validated it.** This pass reviews everything since the fourth pass
+(PRs #150–#165): the runtime **event-provider** seam, the **KlSockAddr address-ABI
+neutralization**, the `udp_io` seam flip to KlSockAddr, **TLS-over-`KlSocketProvider`** routing,
+and the **lwIP platform** (server + client + UDP + TLS on a stock `libkeel.a`). The headline: the
+"future provider compatibility" goal (Goal 14) that prior passes could only reason about
+hypothetically is now **realized and CI-tested** by a real third stack that is neither POSIX nor
+Winsock — the strongest possible evidence the socket/event axes are genuinely independent.
+
+### What changed in the axis structure (all improvements)
+
+1. **Socket/address axis fully neutralized.** Core + protocol layers now speak a Keel-owned,
+   fixed-layout `KlSockAddr` (`include/keel/sockaddr.h`); a platform `struct sockaddr` exists
+   **only** inside socket providers, marshalled at the single `src/sockaddr_native.h` boundary.
+   This *dissolved* the compile-time-socket-ABI coupling a stricter reading of Goal 5 would have
+   flagged before (a host-layout `sockaddr` baked into `KlConn`/`KlUdp`/resolver structs). It is
+   **mechanically enforced**: `make check-sockaddr-neutral` confirms 12 protocol TUs are
+   KlSockAddr-only, and `sockaddr_native.h` is `#include`d **only** by the marshalling boundary
+   (socket providers, the `udp_io` TUs, the completion backends, the resolver seam, server bind) —
+   never by a protocol/core TU (verified this pass).
+
+2. **Event axis is now runtime-injectable**, symmetric with the socket axis: `KlEventProvider`
+   (#150/#151) installs a backend via `KlEventCtx`/`KlConfig`, and a backend's
+   `native_provider()` auto-wires its matched socket provider. Previously the event backend was
+   compile-time-only.
+
+3. **The `udp_io` seam speaks KlSockAddr** (this session): the datagram-I/O boundary and the
+   queued-datagram node carry `KlSockAddr`; each platform `udp_io` TU marshals its own host
+   layout, exactly mirroring the socket vtable. `KlUdp` no longer embeds a host `sockaddr_storage`
+   (recv scratch moved to stack locals) — the struct is now layout-neutral, which is what lets a
+   foreign stack share its ABI.
+
+4. **TLS transport is socket-axis-agnostic.** The mbedTLS socket-BIO now routes ciphertext through
+   `kl_sock_send`/`kl_sock_recv(t->sp, …)` (opt-in via `kl_tls_mbedtls_ctx_set_socket_provider`),
+   so TLS composes with **any** socket provider. Crucially this is a clean axis split: `bio_send`/
+   `bio_recv` check `comp_mode` **first** and return on the memory-BIO path, so the provider (`sp`)
+   only ever affects the readiness/socket-BIO path — the completion (`feed_input`/`drain_output`)
+   transport is untouched. The generic `KlTls` vtable is **unchanged** (the provider is
+   integration-config, not a vtable field), so no event/socket model leaks into the protocol
+   contract.
+
+### Execution-path re-trace (address marshalling, both axes)
+
+- **Readiness UDP receive:** `kl_udp_io_recv_drain` (udp_io_posix/win) `recvmsg`/`recvfrom` into a
+  stack `sockaddr_storage` scratch → `kl_sockaddr_from_native` → `kl_udp_deliver(src: KlSockAddr)`
+  → `on_recv`. Host sockaddr never escapes the TU.
+- **Completion UDP receive:** backend (`event_iouring`/`iocp`/`pollcomp`) fills the host `peer`
+  into `KlCompletionEvent` → `completion_driver.c` `KL_COMP_UDP_RECV` marshals **once** via
+  `kl_sockaddr_from_native` → `kl_udp_comp_on_recv(src: KlSockAddr)` → same `kl_udp_deliver`. The
+  neutral address is the single currency the model-blind delivery shares across axes.
+- **TLS over a foreign socket provider:** `connection.c` `conn_read/write` → `KlTls.read/write`
+  → mbedTLS `bio_recv/bio_send` → `kl_sock_recv/send(t->sp=lwIP)` → `lwip_recv/lwip_send`. No host
+  fd assumption anywhere on the path.
+
+### Findings
+
+| # | Severity | Area | Finding | Status |
+|---|----------|------|---------|--------|
+| A1 | Medium | `sockaddr_native.h` marshalling boundary | The neutralization concentrates all untrusted host→neutral conversion into one seam — which makes that seam's robustness load-bearing. Two defects there (missing `len` lower-bound before the `sockaddr_in{,6}` cast → OOB read; uninitialised `KlSockAddr` delivered when `from_native` fails) were the highest-value issues of the companion C audit. | **Fixed** in the 7th C-audit pass (`docs/keel_audit.md`, commit this session). Architecturally, the fix reinforces the boundary contract: *the marshalling seam must reject/deflect any address it cannot represent, never emit garbage upward.* |
+| A2 | Informational | `udp_io` injection is link-time, not a runtime vtable | **UDP fully works on lwIP** (`udp_io_lwip.c`, CI-tested loopback echo) — this is **not** a functional gap. The only asymmetry: the socket + event axes are **runtime** vtables (one binary can hold both the posix and lwIP providers and choose per-`KlEventCtx`), whereas `udp_io` is **link-selected** (the linker resolves `kl_udp_io_*` once; a foreign stack link-overrides `udp_io_*.o`, as lwIP does). A runtime `KlUdpIoProvider` would only add *per-socket mixed-stack UDP within one process* (some datagrams on the kernel, some on lwIP simultaneously) — not a real use case, since a process runs on one network stack. **No action needed.** | Accepted — justified no-action. |
+| A3 | Low | TLS provider-routing should be a generic `KlTls` hook | Socket-provider routing is currently opt-in **per TLS backend** (`kl_tls_mbedtls_ctx_set_socket_provider`), so (a) each future backend must reinvent it and (b) the app must manually match the TLS ctx's provider to the connection's `KlConfig.sockets`/`KlClientConfig.sockets` — a footgun: forget it and TLS silently falls back to **host** sockets on a foreign stack. Better: an optional `KlTls.set_socket_provider` vtable method that `connection.c`/`client.c` **auto-wire** from the connection's own provider, so TLS-over-any-provider works with zero per-backend / per-app config (and the generic contract still doesn't force a socket concept on backends that leave it NULL). | **Recommended — implemented in the immediate follow-up** (see §6). |
+| A4 | Informational | completion UDP backpressure accounting | `udp.c` reserves `q_bytes` on `kl_comp_post_udp_send` and releases it in `kl_udp_comp_on_send`. This relies on every posted overlapped send surfacing exactly one completion (incl. cancellation-via-close). The backends honor that (a cancelled/failed `WSASendTo`/`sendmsg` still surfaces `KL_COMP_UDP_SEND` with the reserved `len`), so the reservation cannot leak — but the invariant is contract-enforced, not structurally guaranteed. | Accepted; documented in the contract (§5, "completion delivery"). |
+| A5 | Informational | error normalization across providers | The Winsock `EAGAIN != EWOULDBLOCK` split (`kl_wsa_set_errno`) is safe only because every would-block test ORs both codes. Cross-provider error normalization otherwise routes through `kl_sock_errno_to_error` → `KlError`. | Accepted (see C-audit R1); keep the OR convention. |
+
+No Critical/High. No new coupling violations: the mechanical protocol-independence grep is clean
+(protocol TUs reference `WSARecv`/`WSASend` only in doc comments; no platform-net headers, no
+event-engine symbols), and the address-neutrality grep-gate passes.
+
+### Compatibility matrix (updated — lwIP added)
+
+| Combination | Implemented | Buildable | Tested | Production-ready |
+|---|---|---|---|---|
+| Linux sockets + epoll | ✅ | ✅ | ✅ full suite | ✅ (default Linux) |
+| Linux sockets + poll (fallback) | ✅ | ✅ | ✅ full suite | ✅ |
+| Linux sockets + io_uring | ✅ | ✅ | ✅ gate + smokes + LSan | ✅ |
+| Darwin sockets + kqueue | ✅ | ✅ | ✅ full suite (891) | ✅ (default macOS) |
+| Winsock + WSAPoll | ✅ | ✅ | ✅ Windows CI subset | ✅ |
+| Winsock + IOCP | ✅ | ✅ | ✅ lifecycle + smokes | ⚠️ plaintext prod; real-mbedTLS BYO/out-of-CI |
+| pollcomp (portable completion double) | ✅ | ✅ | ✅ smoke + ASan/LSan | n/a — test double |
+| **lwIP + lwip_poll (readiness) — server + client + UDP + TLS** | ✅ | ✅ | ✅ **loopback + HTTPS runtime test in CI** (Integration (lwIP), stock libkeel) | ⚠️ reference/BYO — sample-tunable `lwipopts.h`, CSPRNG-for-`LWIP_RAND` required per deployment |
+
+lwIP is **readiness-only** (its sockets layer is `lwip_poll`); the lwIP *raw* callback (completion)
+API remains out of scope. Still not built (by design): Winsock+io_uring (N/A), IOCP+non-Winsock
+(N/A), UEFI SNP (future).
+
+### Roadmap delta
+
+- **Immediate correctness:** none open (A1 fixed this session in the C-audit pass).
+- **A3 — implemented next:** add an optional `KlTls.set_socket_provider` vtable method and auto-wire
+  it from the connection's provider in `connection.c`/`client.c`; mbedTLS implements it. This makes
+  the TLS transport socket-provider-agnostic *by the framework* rather than by per-app config, and
+  removes the host-socket-fallback footgun on a foreign stack.
+- **A2 — no action:** a runtime `KlUdpIoProvider` vtable is **not** pursued. UDP-on-lwIP already
+  works via the link-override; the only thing a runtime vtable would add (mixed-stack UDP within one
+  process) is not a real use case.
+- **Everything else** from the prior passes' roadmaps stands unchanged.
+
+---
+
 ## Fourth pass — PROXY / streaming / TransmitFile over completion; full parity (2026-08-01)
 
 **Verdict: architecturally sound — the completion axis is now at full functional AND test parity

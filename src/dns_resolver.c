@@ -719,9 +719,9 @@ static ssize_t dns_tcp_read(KlDnsTcp *t, void *b, size_t n) {
 }
 
 /* Number of legs still awaiting a response on this nameserver's connection. */
-static int dns_tcp_pending_on(KlDnsResolver *r, int ns_idx) {
+static int dns_tcp_pending_on(const KlDnsResolver *r, int ns_idx) {
     int n = 0;
-    for (KlDnsReq *q = r->inflight; q; q = q->next)
+    for (const KlDnsReq *q = r->inflight; q; q = q->next)
         for (int i = 0; i < 2; i++)
             if (q->legs[i].tcp_pending && q->legs[i].tcp_ns == ns_idx)
                 n++;

@@ -72,12 +72,16 @@ static inline int kl_sockaddr_from_native(KlSockAddr *out,
      * which trips GCC -Werror=switch-outside-range on the wider AF_* labels. */
     switch ((int)sa->sa_family) {
     case AF_INET: {
+        /* `len` is untrusted (accept/recvfrom peer): reject a short sockaddr
+         * before reading sin_addr/sin_port past the caller's buffer. */
+        if (len < (socklen_t)sizeof(struct sockaddr_in)) return -1;
         const struct sockaddr_in *in = (const struct sockaddr_in *)sa;
         uint8_t ip[4];
         memcpy(ip, &in->sin_addr, 4);
         return kl_sockaddr_from_ipv4(out, ip, ntohs(in->sin_port));
     }
     case AF_INET6: {
+        if (len < (socklen_t)sizeof(struct sockaddr_in6)) return -1;
         const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)sa;
         uint8_t ip[16];
         memcpy(ip, &in6->sin6_addr, 16);

@@ -9,7 +9,7 @@
 
 /* ── Tagged pointer helpers ────────────────────────────────────────── */
 
-static void *watcher_tag(KlWatcher *w) {
+static void *watcher_tag(const KlWatcher *w) {
     return (void *)((uintptr_t)w | 1);
 }
 
@@ -149,7 +149,7 @@ int kl_watcher_mod(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask) {
 int kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd) {
     if (!ctx || !kl_handle_valid(fd)) return -1;
 
-    KlWatcher *w = ctx->watchers;
+    const KlWatcher *w = ctx->watchers;
     while (w && w->fd != fd) w = w->next;
     if (!w) return 0;  /* removed during callback — safe no-op */
 

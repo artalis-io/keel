@@ -98,6 +98,11 @@ static const KlResolveResult *cache_lookup(KlResolverCache *c,
 static void cache_insert(KlResolverCache *c, const char *host, int port,
                            const KlResolveResult *result)
 {
+    /* Self-defend the fixed host[] buffer: callers already bound host length, but
+     * keep the memcpy(strlen+1) copies below safe regardless of caller. */
+    if (strlen(host) >= KL_CLIENT_HOSTNAME_MAX)
+        return;
+
     uint64_t now = kl_monotonic_ms();
     uint64_t deadline = (c->ttl_ms > UINT64_MAX / 2) ? UINT64_MAX
                                                        : now + c->ttl_ms;

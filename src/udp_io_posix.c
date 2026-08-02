@@ -470,13 +470,16 @@ static void udp_recv_drain_batched(KlUdp *udp) {
             socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(m, &recv_local) : 0;
             int gro = udp->recv_gro ? kl_udp_parse_gro(m) : 0;
             udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(m) : -1;
-            /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary. */
+            /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary.
+             * On a family the marshaller doesn't recognise, from_native leaves the
+             * scratch untouched — pass NULL rather than uninitialised stack. */
             KlSockAddr ksrc, klocal;
-            kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&b->src[i], m->msg_namelen);
-            if (local_len)
-                kl_sockaddr_from_native(&klocal, (struct sockaddr *)&recv_local, local_len);
+            const KlSockAddr *ksrc_p =
+                kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&b->src[i], m->msg_namelen) == 0 ? &ksrc : NULL;
+            const KlSockAddr *klocal_p =
+                (local_len && kl_sockaddr_from_native(&klocal, (struct sockaddr *)&recv_local, local_len) == 0) ? &klocal : NULL;
             kl_udp_deliver(udp, b->iov[i].iov_base, (size_t)b->msgs[i].msg_len, gro,
-                           &ksrc, local_len ? &klocal : NULL);
+                           ksrc_p, klocal_p);
             /* The callback may have called recv_stop() or free() — re-check. */
             if (!udp->recv_active || udp->fd < 0)
                 return;
@@ -526,13 +529,15 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
         int gro = udp->recv_gro ? kl_udp_parse_gro(&msg) : 0;
         udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(&msg) : -1;
 
-        /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary. */
+        /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary.
+         * On an unrecognised family, from_native leaves the scratch untouched —
+         * pass NULL rather than uninitialised stack. */
         KlSockAddr ksrc, klocal;
-        kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&recv_src, msg.msg_namelen);
-        if (local_len)
-            kl_sockaddr_from_native(&klocal, (struct sockaddr *)&recv_local, local_len);
-        kl_udp_deliver(udp, udp->recv_buf, (size_t)n, gro,
-                       &ksrc, local_len ? &klocal : NULL);
+        const KlSockAddr *ksrc_p =
+            kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&recv_src, msg.msg_namelen) == 0 ? &ksrc : NULL;
+        const KlSockAddr *klocal_p =
+            (local_len && kl_sockaddr_from_native(&klocal, (struct sockaddr *)&recv_local, local_len) == 0) ? &klocal : NULL;
+        kl_udp_deliver(udp, udp->recv_buf, (size_t)n, gro, ksrc_p, klocal_p);
 
         /* The callback may have called recv_stop() or free() — re-check. */
         if (!udp->recv_active || udp->fd < 0)

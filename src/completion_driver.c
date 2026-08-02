@@ -743,10 +743,13 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         case KL_COMP_WRITE:  comp_on_write(server_of_ctx(ctx), &ev[i]);  break;
         case KL_COMP_UDP_RECV: {  /* datagram — the target is a KlUdp*, no server */
             /* Marshal the backend's native src/local (still host sockaddr in the
-             * KlCompletionEvent) to the neutral KlSockAddr at the seam boundary. */
+             * KlCompletionEvent) to the neutral KlSockAddr at the seam boundary.
+             * A recv without a source name (peer_len 0, e.g. a connected socket) or
+             * an unrecognised family passes NULL rather than uninitialised stack. */
             KlSockAddr ksrc, klocal;
-            kl_sockaddr_from_native(&ksrc, (const struct sockaddr *)&ev[i].peer,
-                                    ev[i].peer_len);
+            int have_src = ev[i].peer_len &&
+                kl_sockaddr_from_native(&ksrc, (const struct sockaddr *)&ev[i].peer,
+                                        ev[i].peer_len) == 0;
             int have_local = ev[i].local_len &&
                 kl_sockaddr_from_native(&klocal, (const struct sockaddr *)&ev[i].local,
                                         ev[i].local_len) == 0;
@@ -756,7 +759,7 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
                 .truncated = ev[i].truncated,
             };
             kl_udp_comp_on_recv((KlUdp *)ev[i].target, ev[i].buf, ev[i].bytes,
-                                &ksrc, &meta);
+                                have_src ? &ksrc : NULL, &meta);
             break;
         }
         case KL_COMP_UDP_SEND:
