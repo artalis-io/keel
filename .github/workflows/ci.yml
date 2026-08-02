@@ -471,3 +471,32 @@ jobs:
       - name: mbedTLS adapter — real TLS handshake (folds mbedTLS into libkeel.a; runs last)
         timeout-minutes: 5
         run: make KEEL_TLS=mbedtls MBEDTLS_DIR="$HOME/mbedtls" smoke-tls
+
+  lwip:
+    name: Integration (lwIP)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git
+
+      - name: Fetch lwIP + contrib (BYO — not vendored)
+        timeout-minutes: 5
+        run: |
+          git clone --depth 1 -b STABLE-2_2_0_RELEASE \
+            https://github.com/lwip-tcpip/lwip "$HOME/lwip"
+          # lwip-contrib (unix port) is on Savannah; the GitHub mirror is gone.
+          rm -rf "$HOME/lwip/contrib"
+          git clone --depth 1 \
+            https://git.savannah.nongnu.org/git/lwip/lwip-contrib.git "$HOME/lwip/contrib"
+
+      - name: Build core (stock libkeel — no KEEL_PLATFORM_LWIP)
+        run: make
+
+      - name: lwIP loopback — stock libkeel + lwIP providers (server + client, 200 OK)
+        timeout-minutes: 5
+        run: make -C integrations/lwip loopback LWIP_DIR="$HOME/lwip"
