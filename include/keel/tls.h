@@ -26,6 +26,11 @@ typedef enum {
  */
 typedef struct KlTls KlTls;
 
+/* A KlSocketProvider (keel/socket.h) — forward-declared so the optional
+ * set_socket_provider hook can route the transport's socket I/O without this
+ * public header depending on the socket seam. */
+struct KlSocketProvider;
+
 /**
  * @brief Verified peer (client) certificate identity from an mTLS handshake.
  *
@@ -146,6 +151,23 @@ struct KlTls {
      * or -1 on error. Optional — see feed_input.
      */
     ssize_t (*drain_output)(KlTls *self, void *buf, size_t cap);
+
+    /**
+     * @brief Route the transport's socket I/O through a KlSocketProvider (optional).
+     *
+     * On the synchronous socket-BIO path (readiness loops), the backend does its
+     * ciphertext send/recv on the socket `fd`. By default that uses the built-in
+     * host socket ops; when this hook is set, KEEL's server/client call it before
+     * the handshake with the *connection's own* provider (`KlConfig.sockets` /
+     * `KlClientConfig.sockets`), so TLS I/O automatically matches the connection's
+     * socket provider — e.g. a non-kernel stack (lwIP) whose descriptors are not
+     * host fds. Passing NULL selects the host default.
+     *
+     * Optional — set to NULL if the backend only ever runs on host sockets. It has
+     * no effect on the completion (memory-BIO feed_input/drain_output) path, which
+     * never touches the socket fd. Idempotent; safe to call on every handshake.
+     */
+    void (*set_socket_provider)(KlTls *self, const struct KlSocketProvider *sp);
 };
 
 /**

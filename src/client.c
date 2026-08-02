@@ -189,7 +189,8 @@ static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms
 
 static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
                                  const char *host, size_t host_len,
-                                 int timeout_ms, KlAllocator *alloc)
+                                 int timeout_ms, KlAllocator *alloc,
+                                 const KlSocketProvider *sockets)
 {
     if (!tls_cfg || !tls_cfg->factory)
         return NULL;
@@ -197,6 +198,11 @@ static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
     KlTls *tls = tls_cfg->factory(tls_cfg->ctx, alloc);
     if (!tls)
         return NULL;
+
+    /* Route the TLS socket-BIO through the client's socket provider (e.g. lwIP),
+     * so TLS I/O matches the connection's stack without per-app config. */
+    if (tls->set_socket_provider)
+        tls->set_socket_provider(tls, sockets);
 
     /* Set SNI hostname via vtable (backend-agnostic) */
     if (tls->set_hostname) {
@@ -824,14 +830,14 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
             goto cleanup;
         }
         tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
-                                timeout_ms, alloc);
+                                timeout_ms, alloc, sockets);
         if (!tls) {
             resp->error = KL_ERR_TLS_HANDSHAKE;
             goto cleanup;
         }
     } else if (parsed.is_https) {
         tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
-                                timeout_ms, alloc);
+                                timeout_ms, alloc, sockets);
         if (!tls) {
             resp->error = KL_ERR_TLS_HANDSHAKE;
             goto cleanup;
@@ -1581,6 +1587,9 @@ static void he_proceed_after_connect(KlClient *c)
             return;
         }
 
+        /* Route the TLS socket-BIO through the client's socket provider (e.g. lwIP). */
+        if (c->tls->set_socket_provider)
+            c->tls->set_socket_provider(c->tls, c->ev_ctx->sockets);
         if (c->tls->set_hostname && c->host_buf[0])
             c->tls->set_hostname(c->tls, c->host_buf);
 
@@ -1700,6 +1709,9 @@ static void async_handle_proxy_handshake(KlClient *c)
             return;
         }
 
+        /* Route the TLS socket-BIO through the client's socket provider (e.g. lwIP). */
+        if (c->tls->set_socket_provider)
+            c->tls->set_socket_provider(c->tls, c->ev_ctx->sockets);
         if (c->tls->set_hostname && c->host_buf[0])
             c->tls->set_hostname(c->tls, c->host_buf);
 
@@ -2606,7 +2618,7 @@ int kl_client_request_pooled(KlClientPool *pool,
 
         if (is_tls) {
             tls = do_tls_handshake(fd, tls_cfg, parsed.host, parsed.host_len,
-                                    timeout_ms, alloc);
+                                    timeout_ms, alloc, sockets);
             if (!tls) {
                 resp->error = KL_ERR_TLS_HANDSHAKE;
                 kl_sock_close(sockets, fd);
