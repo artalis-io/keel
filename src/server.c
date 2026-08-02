@@ -12,8 +12,7 @@
 #include <stddef.h>
 #include "internal.h"
 #include "h2_internal.h"
-#include "socket.h"       /* seam + sockcompat: sockaddr / getaddrinfo / inet_ntop / TCP opts */
-#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind/get_local_addr currency) */
+#include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
 #include "server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
@@ -47,29 +46,19 @@ void kl_log_errno(KlServer *s, int level, const char *msg) {
 }
 
 static int kl_server_bind_tcp(KlServer *s) {
-    /* Resolve bind address (supports IPv4, IPv6, and hostnames) */
-    struct addrinfo hints, *ai = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
-
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%d", s->config.port);
-
-    int gai_rc = getaddrinfo(s->config.bind_addr, port_str, &hints, &ai);
-    if (gai_rc != 0 || !ai) {
-        kl_log(s, KL_LOG_ERROR, "invalid bind address '%s': %s",
-               s->config.bind_addr, gai_strerror(gai_rc));
-        s->last_error = KL_ERR_DNS;
+    /* Parse the numeric bind address (IPv4/IPv6 literal) — no DNS. */
+    KlSockAddr bind_sa;
+    if (kl_sockaddr_parse(&bind_sa, s->config.bind_addr, (uint16_t)s->config.port) != 0) {
+        kl_log(s, KL_LOG_ERROR, "invalid bind address '%s'", s->config.bind_addr);
+        s->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
+    int family = (kl_sockaddr_family(&bind_sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
 
-    s->listen_fd = kl_sock_socket(s->ev.sockets, ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    s->listen_fd = kl_sock_socket(s->ev.sockets, family, SOCK_STREAM, 0);
     if (!kl_handle_valid(s->listen_fd)) {
         kl_log_errno(s, KL_LOG_ERROR, "socket");
         s->last_error = KL_ERR_SOCKET;
-        freeaddrinfo(ai);
         return -1;
     }
     kl_sock_set_cloexec(s->ev.sockets, s->listen_fd);
@@ -78,20 +67,16 @@ static int kl_server_bind_tcp(KlServer *s) {
     (void)kl_sock_set_reuseport(s->ev.sockets, s->listen_fd, 1);   /* best-effort */
 
     /* IPv6 dual-stack: accept both IPv4 and IPv6 on :: */
-    if (ai->ai_family == AF_INET6)
+    if (family == AF_INET6)
         (void)kl_sock_set_ipv6only(s->ev.sockets, s->listen_fd, 0);
 
-    KlSockAddr bind_sa;
-    kl_sockaddr_from_native(&bind_sa, ai->ai_addr, ai->ai_addrlen);
     if (kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
-        freeaddrinfo(ai);
         return -1;
     }
-    freeaddrinfo(ai);
 
     /* Retrieve OS-assigned port (useful when config.port == 0) */
     {
@@ -178,16 +163,11 @@ int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
         return -1;
 
     const KlSockAddr *a = &conn->peer_addr;
-    /* u.ip holds the network-order address bytes — feed inet_ntop directly. */
-    if (kl_sockaddr_family(a) == KL_AF_INET) {
-        if (!inet_ntop(AF_INET, a->u.ip, ip, (socklen_t)iplen))
-            return -1;
-    } else if (kl_sockaddr_family(a) == KL_AF_INET6) {
-        if (!inet_ntop(AF_INET6, a->u.ip, ip, (socklen_t)iplen))
-            return -1;
-    } else {
+    KlAddrFamily fam = kl_sockaddr_family(a);
+    if (fam != KL_AF_INET && fam != KL_AF_INET6)
         return -1;  /* UNSPEC / AF_UNIX — no IP address (use peer credentials) */
-    }
+    if (kl_sockaddr_format_ip(a, ip, iplen) < 0)
+        return -1;
     if (port)
         *port = kl_sockaddr_port(a);
     return 0;
