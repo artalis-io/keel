@@ -54,8 +54,7 @@ typedef struct {
     int              done;         /* 1 = settled (answered / empty / exhausted) */
     uint8_t          question[DNS_NAME_MAX + 8]; /* transmitted question (name+type+class) */
     size_t           question_len;
-    struct sockaddr_storage addrs[KL_RESOLVE_MAX_ADDRS]; /* collected addresses */
-    socklen_t        addrlens[KL_RESOLVE_MAX_ADDRS];
+    KlSockAddr       addrs[KL_RESOLVE_MAX_ADDRS]; /* collected addresses */
     int              naddrs;
     int              tcp_pending;  /* 1 = awaiting a DNS-over-TCP response */
     int              tcp_ns;       /* nameserver index of the TCP connection, or -1 */
@@ -241,18 +240,11 @@ int kl_dns_parse_response(const uint8_t *pkt, size_t len, uint16_t expect_id,
             return out->naddrs > 0 ? 0 : -1;
 
         if (rtype == want_qtype && want_qtype == KL_DNS_TYPE_A && rdlen == 4) {
-            struct sockaddr_in *s4 = (struct sockaddr_in *)&out->addrs[out->naddrs];
-            memset(s4, 0, sizeof(*s4));
-            s4->sin_family = AF_INET;
-            memcpy(&s4->sin_addr, pkt + off, 4);
-            out->addrlens[out->naddrs] = sizeof(*s4);
+            /* port 0 here; dns_set_port() stamps the real port after parsing */
+            kl_sockaddr_from_ipv4(&out->addrs[out->naddrs], pkt + off, 0);
             out->naddrs++;
         } else if (rtype == want_qtype && want_qtype == KL_DNS_TYPE_AAAA && rdlen == 16) {
-            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&out->addrs[out->naddrs];
-            memset(s6, 0, sizeof(*s6));
-            s6->sin6_family = AF_INET6;
-            memcpy(&s6->sin6_addr, pkt + off, 16);
-            out->addrlens[out->naddrs] = sizeof(*s6);
+            kl_sockaddr_from_ipv6(&out->addrs[out->naddrs], pkt + off, 0, 0);
             out->naddrs++;
         }
         off += rdlen;
@@ -411,12 +403,8 @@ static void dns_complete(KlDnsResolver *r, KlDnsReq *q,
 }
 
 static void dns_set_port(KlResolveResult *res, int port) {
-    for (int i = 0; i < res->naddrs; i++) {
-        if (res->addrs[i].ss_family == AF_INET)
-            ((struct sockaddr_in *)&res->addrs[i])->sin_port = htons((uint16_t)port);
-        else if (res->addrs[i].ss_family == AF_INET6)
-            ((struct sockaddr_in6 *)&res->addrs[i])->sin6_port = htons((uint16_t)port);
-    }
+    for (int i = 0; i < res->naddrs; i++)
+        kl_sockaddr_set_port(&res->addrs[i], (uint16_t)port);
 }
 
 /* ── Two-leg (dual-family) state machine ─────────────────────────────── */
@@ -484,13 +472,11 @@ static void dns_finalize(KlDnsResolver *r, KlDnsReq *q) {
     while ((i0 < q->legs[0].naddrs || i1 < q->legs[1].naddrs) &&
            res->naddrs < KL_RESOLVE_MAX_ADDRS) {
         if (i0 < q->legs[0].naddrs) {
-            res->addrs[res->naddrs]   = q->legs[0].addrs[i0];
-            res->addrlens[res->naddrs] = q->legs[0].addrlens[i0];
+            res->addrs[res->naddrs] = q->legs[0].addrs[i0];
             res->naddrs++; i0++;
         }
         if (res->naddrs < KL_RESOLVE_MAX_ADDRS && i1 < q->legs[1].naddrs) {
-            res->addrs[res->naddrs]   = q->legs[1].addrs[i1];
-            res->addrlens[res->naddrs] = q->legs[1].addrlens[i1];
+            res->addrs[res->naddrs] = q->legs[1].addrs[i1];
             res->naddrs++; i1++;
         }
     }
@@ -879,10 +865,8 @@ static void dns_tcp_deliver(KlDnsResolver *r, KlDnsTcp *t) {
             if (kl_dns_parse_response(msg, mlen, id, leg->qtype,
                                       leg->question, leg->question_len, &scr) == 0) {
                 leg->naddrs = scr.naddrs;
-                for (int i = 0; i < scr.naddrs; i++) {
+                for (int i = 0; i < scr.naddrs; i++)
                     leg->addrs[i] = scr.addrs[i];
-                    leg->addrlens[i] = scr.addrlens[i];
-                }
             } else {
                 leg->naddrs = 0;
             }
@@ -1072,10 +1056,8 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
                               leg->question, leg->question_len, &scratch) == 0) {
         /* Collect this leg's addresses; arm the resolution delay on first data. */
         leg->naddrs = scratch.naddrs;
-        for (int i = 0; i < scratch.naddrs; i++) {
+        for (int i = 0; i < scratch.naddrs; i++)
             leg->addrs[i] = scratch.addrs[i];
-            leg->addrlens[i] = scratch.addrlens[i];
-        }
         dns_leg_settle(r, q, leg);
         return;
     }
@@ -1095,21 +1077,13 @@ static int dns_is_literal(const char *host, int port, KlResolveResult *out) {
     struct in_addr a4;
     struct in6_addr a6;
     if (inet_pton(AF_INET, host, &a4) == 1) {
-        struct sockaddr_in *s4 = (struct sockaddr_in *)&out->addrs[0];
-        s4->sin_family = AF_INET;
-        s4->sin_addr = a4;
-        s4->sin_port = htons((uint16_t)port);
-        out->addrlens[0] = sizeof(*s4);
+        kl_sockaddr_from_ipv4(&out->addrs[0], (const uint8_t *)&a4, (uint16_t)port);
         out->naddrs = 1;
         out->ai_socktype = SOCK_STREAM;
         return 1;
     }
     if (inet_pton(AF_INET6, host, &a6) == 1) {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&out->addrs[0];
-        s6->sin6_family = AF_INET6;
-        s6->sin6_addr = a6;
-        s6->sin6_port = htons((uint16_t)port);
-        out->addrlens[0] = sizeof(*s6);
+        kl_sockaddr_from_ipv6(&out->addrs[0], (const uint8_t *)&a6, (uint16_t)port, 0);
         out->naddrs = 1;
         out->ai_socktype = SOCK_STREAM;
         return 1;
@@ -1176,19 +1150,10 @@ static int dns_hosts_lookup(const char *path, const char *host, int port,
         return 0;
 
     memset(out, 0, sizeof(*out));
-    if ((prefer_ipv6 && have_v6) || (!have_v4 && have_v6)) {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&out->addrs[0];
-        s6->sin6_family = AF_INET6;
-        s6->sin6_addr = a6;
-        s6->sin6_port = htons((uint16_t)port);
-        out->addrlens[0] = sizeof(*s6);
-    } else {
-        struct sockaddr_in *s4 = (struct sockaddr_in *)&out->addrs[0];
-        s4->sin_family = AF_INET;
-        s4->sin_addr = a4;
-        s4->sin_port = htons((uint16_t)port);
-        out->addrlens[0] = sizeof(*s4);
-    }
+    if ((prefer_ipv6 && have_v6) || (!have_v4 && have_v6))
+        kl_sockaddr_from_ipv6(&out->addrs[0], (const uint8_t *)&a6, (uint16_t)port, 0);
+    else
+        kl_sockaddr_from_ipv4(&out->addrs[0], (const uint8_t *)&a4, (uint16_t)port);
     out->naddrs = 1;
     out->ai_socktype = SOCK_STREAM;
     return 1;

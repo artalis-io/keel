@@ -11,7 +11,7 @@
 #define KEEL_RESOLVER_H
 
 #include <keel/allocator.h>
-#include <keel/net.h>
+#include <keel/sockaddr.h>
 
 /* Forward declarations */
 typedef struct KlEventCtx KlEventCtx;
@@ -24,16 +24,16 @@ typedef struct KlResolveReq KlResolveReq;
 /**
  * @brief Result passed to the completion callback.
  *
- * Carries an ordered address list (preferred first). Each address's family is
- * its `ss_family`; `addrs[0]` is the primary/preferred address. `ai_socktype`
- * and `ai_protocol` are shared across all entries.
+ * Carries an ordered address list (preferred first). Each address is a
+ * self-describing KlSockAddr (family via kl_sockaddr_family(), no separate
+ * length); `addrs[0]` is the primary/preferred address. `ai_socktype` and
+ * `ai_protocol` are shared across all entries.
  */
 typedef struct {
-    struct sockaddr_storage addrs[KL_RESOLVE_MAX_ADDRS]; /**< Resolved addresses, preferred first */
-    socklen_t addrlens[KL_RESOLVE_MAX_ADDRS];            /**< Length of each address */
-    int naddrs;                                          /**< Number of addresses (>= 1 on success) */
-    int ai_socktype;                                     /**< Socket type (shared) */
-    int ai_protocol;                                     /**< Protocol (shared) */
+    KlSockAddr addrs[KL_RESOLVE_MAX_ADDRS];  /**< Resolved addresses, preferred first */
+    int naddrs;                              /**< Number of addresses (>= 1 on success) */
+    int ai_socktype;                         /**< Socket type (shared) */
+    int ai_protocol;                         /**< Protocol (shared) */
 } KlResolveResult;
 
 /** @brief Completion callback — called on the event loop thread. */
