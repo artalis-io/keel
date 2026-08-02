@@ -55,6 +55,10 @@ typedef struct {
     KlAllocator           *alloc;     /* allocator used to create this context */
     int                    is_server;  /* 1 = server, 0 = client */
     int                    has_ca;     /* 1 = ca_cert loaded */
+    /* Optional socket provider the socket-BIO routes ciphertext through (NULL =
+     * host kl_sockdef_*). Set via kl_tls_mbedtls_ctx_set_socket_provider so TLS can
+     * run over a non-kernel stack (e.g. lwIP). Inherited by each session. */
+    const KlSocketProvider *sp;
     /* ALPN: ctx-owned copy of the advertised (server) / offered (client) protocol
      * list. mbedTLS stores the pointer (does not copy), so it must outlive the
      * config — hence the backing buffer here. NULL-terminated `alpn` array. */
@@ -70,6 +74,7 @@ typedef struct {
     KlMbedtlsCtx      *ctx;       /* shared context (not owned) */
     KlAllocator        *alloc;
     KlSocketHandle      fd;        /* cached for BIO callbacks (socket-BIO mode) */
+    const KlSocketProvider *sp;    /* socket provider for BIO I/O (NULL = host default) */
     int                 handshake_done;
     /* Completion (memory-BIO) mode — 8b-5. Active once feed_input() is first called:
      * the BIO reads ciphertext from in_buf (fed by the caller) and appends outgoing
@@ -117,10 +122,12 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
         t->out_len += len;
         return (int)len;
     }
-    /* kl_sockdef_send suppresses SIGPIPE (MSG_NOSIGNAL) and retries EINTR on
-     * POSIX; on Windows it's the Winsock send with kl_wsa_set_errno — so the
-     * EAGAIN/EWOULDBLOCK check below works on both. */
-    ssize_t ret = kl_sockdef_send(t->fd, buf, len);
+    /* kl_sock_send routes through the configured provider (t->sp) — or, when NULL,
+     * kl_sockdef_send: SIGPIPE-suppressed (MSG_NOSIGNAL) + EINTR-retried on POSIX,
+     * Winsock send with kl_wsa_set_errno on Windows — so the EAGAIN/EWOULDBLOCK
+     * check below works on both. A non-host provider (e.g. lwIP) supplies its own
+     * would-block errno. */
+    ssize_t ret = kl_sock_send(t->sp, t->fd, buf, len);
 
     if (ret < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -145,7 +152,7 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
             t->in_pos = t->in_len = 0;
         return (int)n;
     }
-    ssize_t ret = kl_sockdef_recv(t->fd, buf, len);
+    ssize_t ret = kl_sock_recv(t->sp, t->fd, buf, len);
 
     if (ret < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -422,6 +429,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     t->alloc = alloc;
     t->ctx = mctx;
     t->fd = KL_INVALID_SOCKET;
+    t->sp = mctx->sp;   /* inherit the ctx's socket provider (NULL = host default) */
 
     /* Set up vtable */
     t->base.handshake    = tls_handshake;
@@ -491,6 +499,14 @@ int kl_tls_mbedtls_ctx_set_alpn(KlTlsCtx *c, const char **protos)
     ctx->alpn[n] = NULL;
     return mbedtls_ssl_conf_alpn_protocols(&ctx->conf, (const char **)ctx->alpn) == 0
                ? 0 : -1;
+}
+
+int kl_tls_mbedtls_ctx_set_socket_provider(KlTlsCtx *c, const struct KlSocketProvider *sp)
+{
+    KlMbedtlsCtx *ctx = (KlMbedtlsCtx *)c;
+    if (!ctx) return -1;
+    ctx->sp = (const KlSocketProvider *)sp;   /* NULL restores the host default */
+    return 0;
 }
 
 /* ── Helper: read entire file into buffer ────────────────────────── */

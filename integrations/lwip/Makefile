@@ -71,7 +71,28 @@ loopback: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o 
 	./lwip_loopback_test
 	@echo "integrations/lwip: loopback runtime test OK (stock libkeel + lwIP provider)"
 
+# ── optional HTTPS phase: TLS over lwIP (mbedTLS BIO → lwIP socket provider) ───
+# Builds the mbedTLS adapter (../mbedtls) and links it into the loopback with
+# -DLWT_TLS, so the test adds a genuine TLS handshake + request over lwIP — proving
+# the mbedTLS socket-BIO routed through kl_socket_provider_lwip() (no lwIP-specific
+# TLS code). BYO mbedTLS via MBEDTLS_DIR (a source tree or a system prefix):
+#     make loopback-tls LWIP_DIR=/path/to/lwip MBEDTLS_DIR=/path/to/mbedtls
+MBEDTLS_DIR ?=
+MBEDTLS_INC  = $(if $(MBEDTLS_DIR),-I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library,)
+MBEDTLS_LIB  = $(if $(MBEDTLS_DIR),-L$(MBEDTLS_DIR)/library -L$(MBEDTLS_DIR)/lib,) \
+               -lmbedtls -lmbedx509 -lmbedcrypto
+
+loopback-tls: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o udp_io_lwip.o liblwip.a
+	@test -f "$(KEEL_LIB)" || { echo "build the stock lib first: make -C $(KEEL_ROOT)"; exit 1; }
+	$(MAKE) -C ../mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+	$(CC) $(CFLAGS) -DLWT_TLS -I../mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/src \
+	  -o lwip_loopback_test lwip_loopback_test.c \
+	  socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o udp_io_lwip.o \
+	  ../mbedtls/libkeel_mbedtls.a liblwip.a "$(KEEL_LIB)" $(MBEDTLS_LIB) -lpthread
+	./lwip_loopback_test
+	@echo "integrations/lwip: loopback + HTTPS runtime test OK (stock libkeel + lwIP + mbedTLS)"
+
 clean:
 	rm -f *.o *.a lwip_loopback_test
 
-.PHONY: check loopback clean
+.PHONY: check loopback loopback-tls clean

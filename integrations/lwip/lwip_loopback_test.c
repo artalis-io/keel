@@ -13,6 +13,9 @@
 #include <keel/keel.h>
 #include <keel/udp.h>
 #include "keel_lwip.h"
+#ifdef LWT_TLS
+#include <keel_tls_mbedtls.h>   /* Phase 4: HTTPS over lwIP (mbedTLS BIO → lwIP provider) */
+#endif
 
 #include "lwip/tcpip.h"
 #include "lwip/sockets.h"
@@ -25,6 +28,7 @@
 
 #define LWT_PORT      8080
 #define LWT_UDP_PORT  8081
+#define LWT_TLS_PORT  8443
 
 static sys_sem_t g_ready;
 static void tcpip_done(void *a) { (void)a; sys_sem_signal(&g_ready); }
@@ -129,6 +133,104 @@ static int keel_udp_on_lwip(void) {
     return ok;
 }
 
+#ifdef LWT_TLS
+/* Phase 4: HTTPS on lwIP. A Keel TLS server (mbedTLS) + a Keel async TLS client,
+ * both on the lwIP providers, with the mbedTLS socket-BIO routed through the lwIP
+ * socket provider (kl_tls_mbedtls_ctx_set_socket_provider) — so a genuine TLS
+ * handshake + request runs over lwIP with zero lwIP-specific TLS code. Embedded
+ * self-signed EC cert (CN=127.0.0.1); the client skips CA verification. Certs are
+ * the same test-only material as tests/smoke_tls.c. */
+static const char CERT_PEM[] =
+"-----BEGIN CERTIFICATE-----\n"
+"MIIBmjCCAUGgAwIBAgIUOugIDeF4cZCY5f4MN+sk1xFwncIwCgYIKoZIzj0EAwIw\n"
+"FDESMBAGA1UEAwwJMTI3LjAuMC4xMCAXDTI2MDcyNjA5MDEwMVoYDzIxMjYwNzAy\n"
+"MDkwMTAxWjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwWTATBgcqhkjOPQIBBggqhkjO\n"
+"PQMBBwNCAAQaZEdp4OpJZgbYIuvQiCDZE86uRuj+HQSP88xCcQ17ZSg3dWoDMRGH\n"
+"DXznyJNlQ0vtbNr9Wcg4+/DAC/SLNu7Io28wbTAdBgNVHQ4EFgQUUW6CpMp5FGyE\n"
+"eHRZT3D2XQUkJwowHwYDVR0jBBgwFoAUUW6CpMp5FGyEeHRZT3D2XQUkJwowDwYD\n"
+"VR0TAQH/BAUwAwEB/zAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwCgYIKoZI\n"
+"zj0EAwIDRwAwRAIga5AdkBoyr0QJLwDzXXBKl/S4T7aplF32UlZDC3bkuusCIBNM\n"
+"md2wiK5Cszs6q1wjkLLKoGtsrtjkNcFnKFdAw+zB\n"
+"-----END CERTIFICATE-----\n";
+static const char KEY_PEM[] =
+"-----BEGIN PRIVATE KEY-----\n"
+"MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgZKkZoDmfdcTJNMty\n"
+"gSicJ0RHBVOrlx0ISej/z1cGczKhRANCAAQaZEdp4OpJZgbYIuvQiCDZE86uRuj+\n"
+"HQSP88xCcQ17ZSg3dWoDMRGHDXznyJNlQ0vtbNr9Wcg4+/DAC/SLNu7I\n"
+"-----END PRIVATE KEY-----\n";
+
+static void https_handler(KlRequest *req, KlResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_response_json(res, 200, "{\"tls\":\"lwip\"}", 15);
+}
+static KlServer g_tls_srv;
+static void *tls_srv_thread(void *a) { (void)a; kl_server_run(&g_tls_srv); return NULL; }
+
+static int keel_https_on_lwip(void) {
+    KlAllocator alloc = kl_allocator_default();
+
+    /* HTTPS server on the lwIP providers; mbedTLS BIO routed through lwIP. */
+    KlTlsCtx *sctx = kl_tls_mbedtls_ctx_create_from_buf(
+        (const unsigned char *)CERT_PEM, sizeof(CERT_PEM),
+        (const unsigned char *)KEY_PEM,  sizeof(KEY_PEM),
+        NULL, 0, KL_MTLS_NONE, &alloc);
+    if (!sctx) return 0;
+    kl_tls_mbedtls_ctx_set_socket_provider(sctx, kl_socket_provider_lwip());
+    KlTlsConfig stls = { .ctx = sctx, .factory = kl_tls_mbedtls_create };  /* destroy manually */
+    KlConfig cfg = {
+        .port = LWT_TLS_PORT, .bind_addr = "127.0.0.1",
+        .sockets = kl_socket_provider_lwip(), .event_provider = kl_event_provider_lwip(),
+        .tls = &stls,
+    };
+    if (kl_server_init(&g_tls_srv, &cfg) < 0) { kl_tls_mbedtls_ctx_destroy(sctx); return 0; }
+    kl_server_route(&g_tls_srv, "GET", "/", https_handler, NULL, NULL);
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, tls_srv_thread, NULL) != 0) {
+        kl_server_free(&g_tls_srv); kl_tls_mbedtls_ctx_destroy(sctx); return 0;
+    }
+    for (int i = 0; i < 400 && g_tls_srv.bound_port == 0; i++) usleep(5000);
+
+    /* Keel async HTTPS client on the lwIP providers; mbedTLS BIO routed through lwIP. */
+    KlEventCtx cev;
+    int ok = 0;
+    if (kl_event_ctx_init_ex(&cev, &alloc, kl_event_provider_lwip()) == 0) {
+        cev.sockets = kl_socket_provider_lwip();
+        KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);  /* NULL CA = skip verify */
+        if (cctx) {
+            kl_tls_mbedtls_ctx_set_socket_provider(cctx, kl_socket_provider_lwip());
+            KlTlsConfig ctls = { .ctx = cctx, .factory = kl_tls_mbedtls_create };
+            char url[64];
+            snprintf(url, sizeof(url), "https://127.0.0.1:%u/", (unsigned)g_tls_srv.bound_port);
+            KlClientConfig ccfg = {
+                .sockets = kl_socket_provider_lwip(), .system_dns = 1,
+                .timeout_ms = 5000, .tls = &ctls,
+            };
+            g_cli_done = 0;
+            KlClient *cli = kl_client_start(&cev, &alloc, &ccfg, "GET", url,
+                                            NULL, 0, NULL, 0, cli_done, NULL);
+            if (cli) {
+                for (int i = 0; i < 500 && !g_cli_done; i++)
+                    kl_event_ctx_run(&cev, 16, 20);
+                if (g_cli_done && kl_client_error(cli) == 0) {
+                    const KlClientResponse *r = kl_client_response(cli);
+                    ok = (r && r->status == 200 && r->body &&
+                          strstr(r->body, "\"tls\":\"lwip\"") != NULL);
+                }
+                kl_client_free(cli);
+            }
+            kl_tls_mbedtls_ctx_destroy(cctx);
+        }
+        kl_event_ctx_free(&cev);
+    }
+
+    kl_server_stop(&g_tls_srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&g_tls_srv);
+    kl_tls_mbedtls_ctx_destroy(sctx);
+    return ok;
+}
+#endif /* LWT_TLS */
+
 int main(void) {
     /* Bring up lwIP: tcpip thread + loopback netif (LWIP_HAVE_LOOPIF → 127.0.0.1). */
     sys_sem_new(&g_ready, 0);
@@ -182,8 +284,17 @@ int main(void) {
     printf("lwIP loopback: Keel UDP echo on lwIP %s\n",
            udp_ok ? "round-tripped (correct)" : "UNEXPECTED");
 
+    /* Phase 4 (optional, LWT_TLS): HTTPS on lwIP — Keel TLS server + client, mbedTLS
+     * BIO routed through the lwIP socket provider. */
+    int tls_ok = 1;
+#ifdef LWT_TLS
+    tls_ok = keel_https_on_lwip();
+    printf("lwIP loopback: Keel HTTPS (mbedTLS) on lwIP %s\n",
+           tls_ok ? "handshake + roundtrip OK (correct)" : "UNEXPECTED");
+#endif
+
     kl_server_stop(&g_srv);          /* loop wakes on its poll timeout, sees stop */
     pthread_join(tid, NULL);
     kl_server_free(&g_srv);
-    return (ok && client_ok && udp_ok) ? 0 : 2;
+    return (ok && client_ok && udp_ok && tls_ok) ? 0 : 2;
 }

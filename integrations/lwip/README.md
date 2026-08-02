@@ -83,15 +83,25 @@ libkeel, `make loopback`), so the payoff is regression-protected.
 lwIP UDP wakeup (overriding the generic `src/platform_wakeup_*` seam at link time),
 so `kl_server_stop` wakes `lwip_poll` immediately rather than on the next tick.
 
-**Not yet on lwIP:** TLS-over-lwIP; `lwipopts.h` is a sample, not
-production-blessed. (udp is now on lwIP via `udp_io_lwip.c` — the base for
-`udp_server` + the built-in async DNS resolver.)
+**TLS over lwIP** needs **no lwIP-specific TLS code**: the mbedTLS integration's
+socket-BIO can be routed through a `KlSocketProvider`
+(`kl_tls_mbedtls_ctx_set_socket_provider(ctx, kl_socket_provider_lwip())`), so a
+genuine TLS handshake + HTTPS request runs over lwIP with the *existing*
+`socket_lwip.c`. The loopback's optional Phase 4 proves it end to end:
+
+```sh
+make loopback-tls LWIP_DIR=/path/to/lwip MBEDTLS_DIR=/path/to/mbedtls
+# -> lwIP loopback: Keel HTTPS (mbedTLS) on lwIP handshake + roundtrip OK (correct)
+```
+
+**Not yet on lwIP:** `lwipopts.h` is a sample, not production-blessed. (udp is on
+lwIP via `udp_io_lwip.c`; TLS via the provider-routed mbedTLS BIO.)
 
 ## Tested versions
 
 | lwIP | Status |
 |------|--------|
-| STABLE-2.2.0 | **Loopback verified: server + client + UDP** (200 OK + UDP echo on stock libkeel) + build-gate |
+| STABLE-2.2.0 | **Loopback verified: server + client + UDP + HTTPS** (200 OK + UDP echo + mbedTLS handshake on stock libkeel) + build-gate |
 | 2.1.x | Expected to work (same `lwip_poll` + BSD socket API) |
 
 ## Scope

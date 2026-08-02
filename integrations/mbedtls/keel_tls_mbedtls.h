@@ -172,4 +172,27 @@ int kl_tls_mbedtls_set_hostname(KlTls *tls, const char *hostname);
  */
 int kl_tls_mbedtls_ctx_set_alpn(KlTlsCtx *ctx, const char **protos);
 
+/**
+ * @brief Route the TLS transport's socket I/O through a KlSocketProvider.
+ *
+ * By default the socket-BIO does its ciphertext send/recv through the built-in
+ * host socket ops (`kl_sockdef_*` — plain POSIX/Winsock). Set a provider here to
+ * send/recv through it instead (`kl_sock_send`/`kl_sock_recv`), so TLS runs over a
+ * non-kernel stack whose descriptors are not host fds — e.g. lwIP
+ * (`kl_socket_provider_lwip()`), matching the socket/event providers the server or
+ * client is already configured with. Passing NULL restores the default.
+ *
+ * Optional: leave unset for a normal host build (behaviour is identical). Set once
+ * on the context, before any connection's handshake; every KlTls the factory
+ * creates from this context inherits it. Applies only to the synchronous socket-BIO
+ * path — the completion (memory-BIO) mode does its own I/O and ignores this.
+ *
+ * @param ctx Server or client context.
+ * @param sp  Socket provider to route through, or NULL for the host default.
+ * @return 0 on success, -1 on error (NULL ctx).
+ */
+struct KlSocketProvider;
+int kl_tls_mbedtls_ctx_set_socket_provider(KlTlsCtx *ctx,
+                                           const struct KlSocketProvider *sp);
+
 #endif /* KEEL_TLS_MBEDTLS_H */

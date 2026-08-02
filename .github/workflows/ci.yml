@@ -482,7 +482,7 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential git
+          sudo apt-get install -y build-essential git python3-jinja2 python3-jsonschema
 
       - name: Fetch lwIP + contrib (BYO — not vendored)
         timeout-minutes: 5
@@ -494,9 +494,20 @@ jobs:
           git clone --depth 1 \
             https://git.savannah.nongnu.org/git/lwip/lwip-contrib.git "$HOME/lwip/contrib"
 
+      - name: Build mbedTLS 3.6.x from source (for the HTTPS-over-lwIP phase)
+        timeout-minutes: 6
+        run: |
+          git clone --depth 1 -b v3.6.2 --recurse-submodules --shallow-submodules \
+            https://github.com/Mbed-TLS/mbedtls.git "$HOME/mbedtls"
+          make -C "$HOME/mbedtls" -j"$(nproc)" lib
+
       - name: Build core (stock libkeel — no KEEL_PLATFORM_LWIP)
         run: make
 
       - name: lwIP loopback — stock libkeel + lwIP providers (server + client + UDP echo)
         timeout-minutes: 5
         run: make -C integrations/lwip loopback LWIP_DIR="$HOME/lwip"
+
+      - name: lwIP HTTPS loopback — mbedTLS BIO routed through the lwIP socket provider
+        timeout-minutes: 5
+        run: make -C integrations/lwip loopback-tls LWIP_DIR="$HOME/lwip" MBEDTLS_DIR="$HOME/mbedtls"
