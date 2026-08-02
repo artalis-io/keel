@@ -99,7 +99,16 @@ static int lw_bind(void *c, KlSocketHandle fd, const KlSockAddr *a) {
     return lwip_bind((int)fd, (struct sockaddr *)&ss, l);
 }
 static int lw_listen(void *c, KlSocketHandle fd, int backlog)   { (void)c; return lwip_listen((int)fd, backlog); }
-static KlSocketHandle lw_accept(void *c, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) { (void)c; return (KlSocketHandle)lwip_accept((int)fd, a, l); }
+static KlSocketHandle lw_accept(void *c, KlSocketHandle fd, KlSockAddr *peer) {
+    (void)c;
+    struct sockaddr_storage ss; socklen_t sl = sizeof ss;
+    struct sockaddr *sa = peer ? (struct sockaddr *)&ss : NULL;
+    socklen_t *slp = peer ? &sl : NULL;
+    KlSocketHandle cfd = (KlSocketHandle)lwip_accept((int)fd, sa, slp);
+    if (kl_handle_valid(cfd) && peer && lw_from_native(peer, sa) != 0)
+        memset(peer, 0, sizeof(*peer));
+    return cfd;
+}
 static int lw_close(void *c, KlSocketHandle fd) { (void)c; return lwip_close((int)fd); }
 static int lw_get_local_addr(void *c, KlSocketHandle fd, KlSockAddr *out) {
     (void)c;

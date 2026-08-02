@@ -116,17 +116,24 @@ int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
  * accept + fcntl. Callers that use this default may skip the separate nonblock/cloexec
  * setup; a custom provider's accept op must honor the same contract or the caller applies
  * them itself. */
-KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, KlSockAddr *peer) {
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof(ss);
+    struct sockaddr *sa = peer ? (struct sockaddr *)&ss : NULL;
+    socklen_t *slp = peer ? &sl : NULL;
+    int c;
 #if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
-    return (KlSocketHandle)accept4((int)fd, a, l, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    c = (int)accept4((int)fd, sa, slp, SOCK_NONBLOCK | SOCK_CLOEXEC);
 #else
-    int c = accept((int)fd, a, l);
+    c = accept((int)fd, sa, slp);
     if (c >= 0) {
         kl_sockdef_set_nonblocking((KlSocketHandle)c);
         kl_sockdef_set_cloexec((KlSocketHandle)c);
     }
-    return (KlSocketHandle)c;
 #endif
+    if (c >= 0 && peer && kl_sockaddr_from_native(peer, sa, sl) != 0)
+        memset(peer, 0, sizeof(*peer));   /* unknown family → mark unavailable */
+    return (KlSocketHandle)c;
 }
 int kl_sockdef_close(KlSocketHandle fd) {
     return close((int)fd);
@@ -258,8 +265,8 @@ static int psx_bind(void *ctx, KlSocketHandle fd, const KlSockAddr *a) {
 static int psx_listen(void *ctx, KlSocketHandle fd, int backlog) {
     (void)ctx; return kl_sockdef_listen(fd, backlog);
 }
-static KlSocketHandle psx_accept(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    (void)ctx; return kl_sockdef_accept(fd, a, l);
+static KlSocketHandle psx_accept(void *ctx, KlSocketHandle fd, KlSockAddr *peer) {
+    (void)ctx; return kl_sockdef_accept(fd, peer);
 }
 static int psx_close(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_close(fd);

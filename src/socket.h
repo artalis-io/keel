@@ -75,7 +75,7 @@ KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol);
 int            kl_sockdef_connect(KlSocketHandle fd, const KlSockAddr *addr);
 int            kl_sockdef_bind(KlSocketHandle fd, const KlSockAddr *addr);
 int            kl_sockdef_listen(KlSocketHandle fd, int backlog);
-KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
+KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, KlSockAddr *peer);
 int            kl_sockdef_close(KlSocketHandle fd);
 int            kl_sockdef_get_local_addr(KlSocketHandle fd, KlSockAddr *addr);
 int            kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err);
@@ -173,9 +173,9 @@ static inline int kl_sock_listen(const KlSocketProvider *p, KlSocketHandle fd, i
 }
 
 static inline KlSocketHandle kl_sock_accept(const KlSocketProvider *p, KlSocketHandle fd,
-                                            struct sockaddr *addr, socklen_t *len) {
-    if (p && p->ops->accept) return p->ops->accept(p->context, fd, addr, len);
-    return kl_sockdef_accept(fd, addr, len);
+                                            KlSockAddr *peer) {
+    if (p && p->ops->accept) return p->ops->accept(p->context, fd, peer);
+    return kl_sockdef_accept(fd, peer);
 }
 
 static inline int kl_sock_close(const KlSocketProvider *p, KlSocketHandle fd) {

@@ -160,16 +160,13 @@ int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
     return kl_srv_peer_label_fd(conn->fd, buf, buflen);
 }
 
-const struct sockaddr *kl_request_peer_sockaddr(const KlRequest *req,
-                                                socklen_t *len) {
+const KlSockAddr *kl_request_peer_sockaddr(const KlRequest *req) {
     if (!req)
         return NULL;
     const KlConn *conn = kl_request_conn(req);
-    if (!conn || conn->peer_addr_len == 0)
+    if (!conn || kl_sockaddr_family(&conn->peer_addr) == KL_AF_UNSPEC)
         return NULL;
-    if (len)
-        *len = conn->peer_addr_len;
-    return (const struct sockaddr *)&conn->peer_addr;
+    return &conn->peer_addr;
 }
 
 int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
@@ -177,27 +174,23 @@ int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
     if (!req || !ip || iplen == 0)
         return -1;
     const KlConn *conn = kl_request_conn(req);
-    if (!conn || conn->peer_addr_len == 0)
+    if (!conn)
         return -1;
 
-    const struct sockaddr *sa = (const struct sockaddr *)&conn->peer_addr;
-    if (sa->sa_family == AF_INET) {
-        const struct sockaddr_in *s4 = (const struct sockaddr_in *)sa;
-        if (!inet_ntop(AF_INET, &s4->sin_addr, ip, (socklen_t)iplen))
+    const KlSockAddr *a = &conn->peer_addr;
+    /* u.ip holds the network-order address bytes — feed inet_ntop directly. */
+    if (kl_sockaddr_family(a) == KL_AF_INET) {
+        if (!inet_ntop(AF_INET, a->u.ip, ip, (socklen_t)iplen))
             return -1;
-        if (port)
-            *port = ntohs(s4->sin_port);
-        return 0;
-    }
-    if (sa->sa_family == AF_INET6) {
-        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)sa;
-        if (!inet_ntop(AF_INET6, &s6->sin6_addr, ip, (socklen_t)iplen))
+    } else if (kl_sockaddr_family(a) == KL_AF_INET6) {
+        if (!inet_ntop(AF_INET6, a->u.ip, ip, (socklen_t)iplen))
             return -1;
-        if (port)
-            *port = ntohs(s6->sin6_port);
-        return 0;
+    } else {
+        return -1;  /* UNSPEC / AF_UNIX — no IP address (use peer credentials) */
     }
-    return -1;  /* AF_UNIX or other — no IP address (use peer credentials) */
+    if (port)
+        *port = kl_sockaddr_port(a);
+    return 0;
 }
 
 int kl_request_peer_cert(const KlRequest *req, KlPeerCert *out) {
@@ -800,10 +793,9 @@ int kl_server_run(KlServer *s) {
                 /* Listen socket — accept new connections */
                 if (atomic_load(&s->draining)) goto rearm_listen;
                 while (1) {
-                    struct sockaddr_storage peer;
-                    socklen_t peer_len = sizeof(peer);
+                    KlSockAddr peer;
                     KlSocketHandle client_fd = kl_sock_accept(s->ev.sockets, s->listen_fd,
-                                           (struct sockaddr *)&peer, &peer_len);
+                                                              &peer);
                     if (!kl_handle_valid(client_fd)) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                         kl_log_errno(s, KL_LOG_ERROR, "accept");
@@ -836,14 +828,10 @@ int kl_server_run(KlServer *s) {
                         break;
                     }
 
-                    /* Record the client address for kl_request_peer_addr(). */
+                    /* Record the client address for kl_request_peer_addr()
+                     * (peer is KL_AF_UNSPEC if the provider couldn't supply it). */
                     nc->peer_source = KL_PEER_SOCKET;
-                    if (peer_len > 0 && (size_t)peer_len <= sizeof(nc->peer_addr)) {
-                        memcpy(&nc->peer_addr, &peer, peer_len);
-                        nc->peer_addr_len = peer_len;
-                    } else {
-                        nc->peer_addr_len = 0;
-                    }
+                    nc->peer_addr = peer;
 
                     /* Set allocator on connection's response.
                      * This is set once on accept; response reuses it across keep-alive. */
@@ -857,9 +845,9 @@ int kl_server_run(KlServer *s) {
 
                     /* PROXY protocol: from a trusted source, read the header
                      * first (before TLS/HTTP). Overrides the state above. */
-                    if (s->proxy_cidr_count > 0 && peer_len > 0 &&
-                        kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count,
-                                      (struct sockaddr *)&peer)) {
+                    if (s->proxy_cidr_count > 0 &&
+                        kl_sockaddr_family(&peer) != KL_AF_UNSPEC &&
+                        kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &peer)) {
                         nc->state = KL_CONN_PROXY_HEADER;
                     }
 

@@ -166,11 +166,17 @@ int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
  * two steps in here (accepted sockets inherit the listener's blocking mode, i.e. blocking).
  * Keeps the seam's accept contract identical across platforms so shared callers can rely on
  * it and skip the separate nonblock/cloexec setup. */
-KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    SOCKET c = accept((SOCKET)fd, a, l);
+KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, KlSockAddr *peer) {
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof(ss);
+    struct sockaddr *sa = peer ? (struct sockaddr *)&ss : NULL;
+    socklen_t *slp = peer ? &sl : NULL;
+    SOCKET c = accept((SOCKET)fd, sa, slp);
     if (c == INVALID_SOCKET) { kl_wsa_set_errno(); return (KlSocketHandle)c; }
     kl_sockdef_set_nonblocking((KlSocketHandle)c);
     kl_sockdef_set_cloexec((KlSocketHandle)c);
+    if (peer && kl_sockaddr_from_native(peer, sa, sl) != 0)
+        memset(peer, 0, sizeof(*peer));
     return (KlSocketHandle)c;
 }
 int kl_sockdef_close(KlSocketHandle fd) {
@@ -310,8 +316,8 @@ static int wsk_bind(void *ctx, KlSocketHandle fd, const KlSockAddr *a) {
 static int wsk_listen(void *ctx, KlSocketHandle fd, int backlog) {
     (void)ctx; return kl_sockdef_listen(fd, backlog);
 }
-static KlSocketHandle wsk_accept(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    (void)ctx; return kl_sockdef_accept(fd, a, l);
+static KlSocketHandle wsk_accept(void *ctx, KlSocketHandle fd, KlSockAddr *peer) {
+    (void)ctx; return kl_sockdef_accept(fd, peer);
 }
 static int wsk_close(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_close(fd);

@@ -17,13 +17,11 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <sys/socket.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     size_t consumed = 0;
-    struct sockaddr_storage peer;
-    socklen_t peer_len = 0;
-    kl_proxy_parse(data, size, &consumed, &peer, &peer_len);
+    KlSockAddr peer;
+    kl_proxy_parse(data, size, &consumed, &peer);
 
     /* CIDR list parser (config-format, NUL-terminated). */
     char s[512];

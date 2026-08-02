@@ -21,6 +21,7 @@
 #include "completion.h"          /* the abstract completion axis */
 #include "io_engine.h"           /* kl_io_engine_run_completion (the seam) */
 #include "socket.h"              /* kl_sock_* (close / tcp_nodelay via the seam) */
+#include "sockaddr_native.h"     /* kl_sockaddr_from_native (accept peer marshalling) */
 #include "platform.h"            /* kl_plat_file_pread — TLS file body chunks (8c-2) */
 #include <keel/udp.h>            /* KlUdp (KL_COMP_UDP_RECV target) */
 #include <keel/proxy_protocol.h> /* kl_cidr_match — PROXY-over-completion accept gate */
@@ -573,12 +574,12 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
         goto refill;
     }
     nc->peer_source = KL_PEER_SOCKET;
-    if (ev->peer_len > 0 && (size_t)ev->peer_len <= sizeof(nc->peer_addr)) {
-        memcpy(&nc->peer_addr, &ev->peer, (size_t)ev->peer_len);
-        nc->peer_addr_len = ev->peer_len;
-    } else {
-        nc->peer_addr_len = 0;
-    }
+    /* Marshal the backend's native accept peer (still sockaddr in KlCompletionEvent)
+     * into the neutral KlSockAddr; KL_AF_UNSPEC = unavailable. */
+    if (ev->peer_len == 0 ||
+        kl_sockaddr_from_native(&nc->peer_addr, (const struct sockaddr *)&ev->peer,
+                                ev->peer_len) != 0)
+        memset(&nc->peer_addr, 0, sizeof(nc->peer_addr));
     nc->res.alloc = &s->alloc_storage;
     (void)kl_sock_set_tcp_nodelay(nc->ctx ? nc->ctx->sockets : NULL, nc->fd, 1);
 
@@ -598,9 +599,9 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
      * TLS/HTTP. Read it first (KL_CONN_PROXY_HEADER, a plaintext recv); comp_drive_proxy enters
      * the real initial state (TLS handshake or HTTP read) once the header is consumed. Mirrors
      * the readiness accept gate (server.c). */
-    if (s->proxy_cidr_count > 0 && nc->peer_addr_len > 0 &&
-        kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count,
-                      (struct sockaddr *)&nc->peer_addr)) {
+    if (s->proxy_cidr_count > 0 &&
+        kl_sockaddr_family(&nc->peer_addr) != KL_AF_UNSPEC &&
+        kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &nc->peer_addr)) {
         nc->state = KL_CONN_PROXY_HEADER;   /* TLS memory-BIO enabled later, after the header */
     } else if (nc->tls) {
         /* TLS: enter the handshake state and switch the backend into completion (memory BIO)

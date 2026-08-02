@@ -12,7 +12,7 @@ static const uint8_t V2SIG[12] = {
 static const char V1SIG[6] = { 'P', 'R', 'O', 'X', 'Y', ' ' };
 
 static KlProxyResult parse_v1(const uint8_t *buf, size_t len, size_t *consumed,
-                              struct sockaddr_storage *peer, socklen_t *peer_len) {
+                              KlSockAddr *peer) {
     /* Locate CRLF within the 107-byte cap. */
     size_t max = len < 107 ? len : 107;
     size_t nl = 0;
@@ -36,7 +36,7 @@ static KlProxyResult parse_v1(const uint8_t *buf, size_t len, size_t *consumed,
     if (!proto) return KL_PROXY_INVALID;
 
     if (strcmp(proto, "UNKNOWN") == 0) {
-        *peer_len = 0;   /* keep the real socket address */
+        memset(peer, 0, sizeof(*peer));   /* KL_AF_UNSPEC → keep the real socket address */
         return KL_PROXY_OK;
     }
     int family;
@@ -56,27 +56,22 @@ static KlProxyResult parse_v1(const uint8_t *buf, size_t len, size_t *consumed,
     if (end == sport || *end != '\0' || p < 0 || p > 65535)
         return KL_PROXY_INVALID;
 
-    memset(peer, 0, sizeof(*peer));
     if (family == AF_INET) {
-        struct sockaddr_in *s4 = (struct sockaddr_in *)peer;
-        if (inet_pton(AF_INET, src, &s4->sin_addr) != 1)
+        uint8_t b[4];
+        if (inet_pton(AF_INET, src, b) != 1)
             return KL_PROXY_INVALID;
-        s4->sin_family = AF_INET;
-        s4->sin_port = htons((uint16_t)p);
-        *peer_len = sizeof(*s4);
+        kl_sockaddr_from_ipv4(peer, b, (uint16_t)p);
     } else {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)peer;
-        if (inet_pton(AF_INET6, src, &s6->sin6_addr) != 1)
+        uint8_t b[16];
+        if (inet_pton(AF_INET6, src, b) != 1)
             return KL_PROXY_INVALID;
-        s6->sin6_family = AF_INET6;
-        s6->sin6_port = htons((uint16_t)p);
-        *peer_len = sizeof(*s6);
+        kl_sockaddr_from_ipv6(peer, b, (uint16_t)p, 0);
     }
     return KL_PROXY_OK;
 }
 
 static KlProxyResult parse_v2(const uint8_t *buf, size_t len, size_t *consumed,
-                              struct sockaddr_storage *peer, socklen_t *peer_len) {
+                              KlSockAddr *peer) {
     uint8_t ver_cmd = buf[12];
     if ((ver_cmd >> 4) != 0x2)
         return KL_PROXY_INVALID;         /* version must be 2 */
@@ -90,41 +85,33 @@ static KlProxyResult parse_v2(const uint8_t *buf, size_t len, size_t *consumed,
         return KL_PROXY_NEED_MORE;
 
     *consumed = total;
-    if (cmd == 0x0) {                    /* LOCAL — health check, no address */
-        *peer_len = 0;
+    memset(peer, 0, sizeof(*peer));      /* default KL_AF_UNSPEC → keep socket address */
+    if (cmd == 0x0)                      /* LOCAL — health check, no address */
         return KL_PROXY_OK;
-    }
     if (cmd != 0x1)                      /* only LOCAL or PROXY */
         return KL_PROXY_INVALID;
 
     const uint8_t *a = buf + 16;
     if (fam == 0x1) {                    /* AF_INET: src4 dst4 sport2 dport2 */
         if (blocklen < 12) return KL_PROXY_INVALID;
-        struct sockaddr_in *s4 = (struct sockaddr_in *)peer;
-        memset(s4, 0, sizeof(*s4));
-        s4->sin_family = AF_INET;
-        memcpy(&s4->sin_addr, a, 4);
-        memcpy(&s4->sin_port, a + 8, 2); /* already network order */
-        *peer_len = sizeof(*s4);
+        uint16_t port;
+        memcpy(&port, a + 8, 2);         /* network order */
+        kl_sockaddr_from_ipv4(peer, a, ntohs(port));
         return KL_PROXY_OK;
     }
     if (fam == 0x2) {                    /* AF_INET6: src16 dst16 sport2 dport2 */
         if (blocklen < 36) return KL_PROXY_INVALID;
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)peer;
-        memset(s6, 0, sizeof(*s6));
-        s6->sin6_family = AF_INET6;
-        memcpy(&s6->sin6_addr, a, 16);
-        memcpy(&s6->sin6_port, a + 32, 2);
-        *peer_len = sizeof(*s6);
+        uint16_t port;
+        memcpy(&port, a + 32, 2);
+        kl_sockaddr_from_ipv6(peer, a, ntohs(port), 0);
         return KL_PROXY_OK;
     }
-    *peer_len = 0;   /* AF_UNSPEC / AF_UNIX — keep socket address */
-    return KL_PROXY_OK;
+    return KL_PROXY_OK;                  /* AF_UNSPEC / AF_UNIX — keep socket address */
 }
 
 KlProxyResult kl_proxy_parse(const uint8_t *buf, size_t len, size_t *consumed,
-                             struct sockaddr_storage *peer, socklen_t *peer_len) {
-    if (!buf || !consumed || !peer || !peer_len)
+                             KlSockAddr *peer) {
+    if (!buf || !consumed || !peer)
         return KL_PROXY_INVALID;
     if (len == 0)
         return KL_PROXY_NEED_MORE;
@@ -132,12 +119,12 @@ KlProxyResult kl_proxy_parse(const uint8_t *buf, size_t len, size_t *consumed,
     size_t v2cmp = len < 12 ? len : 12;
     if (memcmp(buf, V2SIG, v2cmp) == 0) {
         if (len < 16) return KL_PROXY_NEED_MORE;
-        return parse_v2(buf, len, consumed, peer, peer_len);
+        return parse_v2(buf, len, consumed, peer);
     }
     size_t v1cmp = len < 6 ? len : 6;
     if (memcmp(buf, V1SIG, v1cmp) == 0) {
         if (len < 6) return KL_PROXY_NEED_MORE;
-        return parse_v1(buf, len, consumed, peer, peer_len);
+        return parse_v1(buf, len, consumed, peer);
     }
     return KL_PROXY_NONE;
 }
@@ -201,22 +188,17 @@ static int prefix_match(const uint8_t *a, const uint8_t *b, int bits, int alen) 
     return 1;
 }
 
-int kl_cidr_match(const KlCidr *list, int count, const struct sockaddr *sa) {
+int kl_cidr_match(const KlCidr *list, int count, const KlSockAddr *sa) {
     if (!sa || !list)
         return 0;
-    const uint8_t *a;
-    int alen;
-    if (sa->sa_family == AF_INET) {
-        a = (const uint8_t *)&((const struct sockaddr_in *)sa)->sin_addr;
-        alen = 4;
-    } else if (sa->sa_family == AF_INET6) {
-        a = (const uint8_t *)&((const struct sockaddr_in6 *)sa)->sin6_addr;
-        alen = 16;
-    } else {
-        return 0;
-    }
+    int fam, alen;
+    if (kl_sockaddr_family(sa) == KL_AF_INET)      { fam = AF_INET;  alen = 4; }
+    else if (kl_sockaddr_family(sa) == KL_AF_INET6) { fam = AF_INET6; alen = 16; }
+    else return 0;
+
+    const uint8_t *a = sa->u.ip;   /* network-order address bytes */
     for (int i = 0; i < count; i++) {
-        if (list[i].family != sa->sa_family) continue;
+        if (list[i].family != fam) continue;
         if (prefix_match(a, list[i].addr, list[i].bits, alen)) return 1;
     }
     return 0;

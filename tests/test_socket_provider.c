@@ -253,9 +253,10 @@ UTEST(sockprov, lifecycle_posix_loopback) {
     kl_sockaddr_from_ipv4(&target, lo, kl_sockaddr_port(&bound));
     ASSERT_EQ(0, kl_sock_connect(NULL, cfd, &target));
 
-    struct sockaddr_storage pa; socklen_t pl = sizeof(pa);
-    int sfd = kl_sock_accept(NULL, lfd, (struct sockaddr *)&pa, &pl);
+    KlSockAddr pa;
+    int sfd = kl_sock_accept(NULL, lfd, &pa);
     ASSERT_TRUE(sfd >= 0);
+    ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&pa));   /* peer captured */
 
     ASSERT_EQ(0, kl_sock_close(NULL, sfd));
     ASSERT_EQ(0, kl_sock_close(NULL, cfd));
@@ -381,9 +382,9 @@ static KlSocketHandle deco_socket(void *ctx, int d, int t, int p) {
     ((Deco *)ctx)->socket_calls++;
     return kl_sockdef_socket(d, t, p);
 }
-static KlSocketHandle deco_accept(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+static KlSocketHandle deco_accept(void *ctx, KlSocketHandle fd, KlSockAddr *peer) {
     ((Deco *)ctx)->accept_calls++;
-    return kl_sockdef_accept(fd, a, l);
+    return kl_sockdef_accept(fd, peer);
 }
 static int deco_connect(void *ctx, KlSocketHandle fd, const KlSockAddr *a) {
     ((Deco *)ctx)->connect_calls++;
