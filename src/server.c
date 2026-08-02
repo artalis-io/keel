@@ -13,6 +13,7 @@
 #include "internal.h"
 #include "h2_internal.h"
 #include "socket.h"       /* seam + sockcompat: sockaddr / getaddrinfo / inet_ntop / TCP opts */
+#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind/get_local_addr currency) */
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
 #include "server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
@@ -80,7 +81,9 @@ static int kl_server_bind_tcp(KlServer *s) {
     if (ai->ai_family == AF_INET6)
         (void)kl_sock_set_ipv6only(s->ev.sockets, s->listen_fd, 0);
 
-    if (kl_sock_bind(s->ev.sockets, s->listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) {
+    KlSockAddr bind_sa;
+    kl_sockaddr_from_native(&bind_sa, ai->ai_addr, ai->ai_addrlen);
+    if (kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa) < 0) {
         kl_log_errno(s, KL_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
         kl_sock_close(s->ev.sockets, s->listen_fd);
@@ -92,15 +95,9 @@ static int kl_server_bind_tcp(KlServer *s) {
 
     /* Retrieve OS-assigned port (useful when config.port == 0) */
     {
-        struct sockaddr_storage sa;
-        memset(&sa, 0, sizeof(sa));
-        socklen_t sa_len = sizeof(sa);
-        if (kl_sock_get_local_addr(s->ev.sockets, s->listen_fd, (struct sockaddr *)&sa, &sa_len) == 0) {
-            if (sa.ss_family == AF_INET)
-                s->bound_port = ntohs(((struct sockaddr_in *)&sa)->sin_port);
-            else if (sa.ss_family == AF_INET6)
-                s->bound_port = ntohs(((struct sockaddr_in6 *)&sa)->sin6_port);
-        }
+        KlSockAddr la;
+        if (kl_sock_get_local_addr(s->ev.sockets, s->listen_fd, &la) == 0)
+            s->bound_port = kl_sockaddr_port(&la);
     }
 
     return 0;
@@ -114,25 +111,20 @@ static int kl_server_bind_tcp(KlServer *s) {
 static int kl_server_adopt_fd(KlServer *s) {
     s->listen_fd = s->config.listen_fd;
 
-    struct sockaddr_storage sa;
-    memset(&sa, 0, sizeof(sa));
-    socklen_t sa_len = sizeof(sa);
-    if (kl_sock_get_local_addr(s->ev.sockets, s->listen_fd, (struct sockaddr *)&sa, &sa_len) != 0) {
+    KlSockAddr la;
+    if (kl_sock_get_local_addr(s->ev.sockets, s->listen_fd, &la) != 0) {
         kl_log_errno(s, KL_LOG_ERROR, "getsockname on adopted fd");
         s->last_error = KL_ERR_SOCKET;
         s->listen_fd = KL_INVALID_SOCKET;
         return -1;
     }
 
-    if (sa.ss_family == AF_UNIX) {
+    if (kl_sockaddr_family(&la) == KL_AF_UNIX) {
         s->config.transport = KL_TRANSPORT_UNIX;
         s->bound_port = 0;
     } else {
         s->config.transport = KL_TRANSPORT_TCP;
-        if (sa.ss_family == AF_INET)
-            s->bound_port = ntohs(((struct sockaddr_in *)&sa)->sin_port);
-        else if (sa.ss_family == AF_INET6)
-            s->bound_port = ntohs(((struct sockaddr_in6 *)&sa)->sin6_port);
+        s->bound_port = kl_sockaddr_port(&la);
     }
     /* Adopted fd is never unlinked — the supervisor owns the socket path. */
     s->unix_socket_owned = 0;

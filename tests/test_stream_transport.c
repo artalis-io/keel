@@ -148,10 +148,10 @@ static int st_listen(KlEventCtx *ev) {
     if (!kl_handle_valid(lfd)) return -1;
     sp->ops->set_reuseaddr(sp->context, lfd, 1);
     sp->ops->set_nonblocking(sp->context, lfd);
-    struct sockaddr_in a; memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET; a.sin_port = htons(ST_PORT);
-    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-    if (sp->ops->bind(sp->context, lfd, (struct sockaddr *)&a, sizeof(a)) < 0) return -1;
+    const uint8_t lo[4] = { 127, 0, 0, 1 };
+    KlSockAddr a;
+    kl_sockaddr_from_ipv4(&a, lo, ST_PORT);
+    if (sp->ops->bind(sp->context, lfd, &a) < 0) return -1;
     if (sp->ops->listen(sp->context, lfd, 16) < 0) return -1;
     g_listener = lfd;
     return kl_watcher_add(ev, lfd, KL_EVENT_READ, st_on_accept, ev);

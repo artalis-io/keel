@@ -27,6 +27,7 @@
 #include "base64.h"
 #include "utf8.h"
 #include "socket.h"
+#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (connect currency) */
 #include "platform.h"
 
 /* ── Connection states ──────────────────────────────────────────── */
@@ -938,7 +939,9 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             kl_sock_close(ev->sockets, fd);
             return NULL;
         }
-        rc = kl_sock_connect(ev->sockets, fd, (struct sockaddr *)&un, un_len);
+        KlSockAddr usa;
+        kl_sockaddr_from_native(&usa, (struct sockaddr *)&un, un_len);
+        rc = kl_sock_connect(ev->sockets, fd, &usa);
         if (rc < 0 && errno != EINPROGRESS) {
             kl_sock_close(ev->sockets, fd);
             return NULL;
@@ -972,7 +975,9 @@ KlWsClientConn *kl_ws_client_connect(KlEventCtx *ev, KlAllocator *alloc,
             return NULL;
         }
 
-        rc = kl_sock_connect(ev->sockets, fd, res->ai_addr, res->ai_addrlen);
+        KlSockAddr csa;
+        kl_sockaddr_from_native(&csa, res->ai_addr, res->ai_addrlen);
+        rc = kl_sock_connect(ev->sockets, fd, &csa);
         freeaddrinfo(res);
 
         if (rc < 0 && errno != EINPROGRESS) {

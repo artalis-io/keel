@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "socket.h"      /* sockaddr / inet_pton / htons / ntohs via sockcompat.h */
+#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (connect currency) */
 #include "platform.h"
 #include "dns_sys.h"     /* platform config discovery (nameservers/hosts/search) */
 
@@ -836,7 +837,9 @@ static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
     }
     kl_sock_set_cloexec(r->ctx->sockets, fd);
 
-    int rc = kl_sock_connect(r->ctx->sockets, fd, nsa, nsl);
+    KlSockAddr ns_sa;
+    kl_sockaddr_from_native(&ns_sa, nsa, nsl);
+    int rc = kl_sock_connect(r->ctx->sockets, fd, &ns_sa);
     if (rc < 0 && errno != EINPROGRESS) {
         kl_sock_close(r->ctx->sockets, fd); return -1;
     }

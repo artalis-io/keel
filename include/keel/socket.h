@@ -14,10 +14,13 @@
  *
  * Portability contract: this header exposes NO platform-only types. Sizes are
  * kl_ssize_t (pointer-width signed); scatter-gather is the Keel-owned KlIoVec;
- * the sendfile offset is uint64_t. The one standard type is struct sockaddr /
- * socklen_t (the cross-platform BSD-sockets address ABI), resolved through the
- * public keel/net.h boundary. A provider translates these to its native shapes
- * (POSIX struct iovec/off_t, Winsock WSABUF, …) inside its own implementation.
+ * the sendfile offset is uint64_t; addresses are the Keel-owned KlSockAddr
+ * (keel/sockaddr.h), so a provider never sees a platform struct sockaddr on the
+ * connect/bind/get_local_addr ops — it marshals KlSockAddr to its native address
+ * shape inside its own implementation (see src/sockaddr_native.h for the built-in
+ * providers). A provider likewise translates KlIoVec to its native vector (POSIX
+ * struct iovec, Winsock WSABUF, …). (accept still delivers a raw struct sockaddr
+ * peer for now; its KlSockAddr migration lands with the proxy/completion axes.)
  *
  * The `kl_sock_*` consumer wrappers and `kl_sockdef_*` platform defaults are NOT
  * here — they are Keel's internal consumers of a provider (src/socket.h), not
@@ -29,7 +32,8 @@
 #include <stdint.h>            /* intptr_t, uint64_t */
 
 #include <keel/handle.h>       /* KlSocketHandle, KL_INVALID_SOCKET, kl_handle_valid */
-#include <keel/net.h>          /* struct sockaddr / socklen_t (public boundary) */
+#include <keel/sockaddr.h>     /* KlSockAddr (connect/bind/get_local_addr currency) */
+#include <keel/net.h>          /* struct sockaddr / socklen_t (accept peer, for now) */
 #include <keel/error.h>        /* KlError */
 
 #ifdef __cplusplus
@@ -76,13 +80,13 @@ typedef struct KlSocketOps {
     /* lifecycle. `socket`/`accept` return a KlSocketHandle (KL_INVALID_SOCKET on
      * failure). */
     KlSocketHandle (*socket)(void *ctx, int domain, int type, int protocol);
-    int     (*connect)(void *ctx, KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
-    int     (*bind)(void *ctx, KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
+    int     (*connect)(void *ctx, KlSocketHandle fd, const KlSockAddr *addr);
+    int     (*bind)(void *ctx, KlSocketHandle fd, const KlSockAddr *addr);
     int     (*listen)(void *ctx, KlSocketHandle fd, int backlog);
     KlSocketHandle (*accept)(void *ctx, KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
     int     (*close)(void *ctx, KlSocketHandle fd);
-    /* Read the local (bound) address — getsockname. */
-    int     (*get_local_addr)(void *ctx, KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
+    /* Read the local (bound) address — getsockname — into a KlSockAddr. */
+    int     (*get_local_addr)(void *ctx, KlSocketHandle fd, KlSockAddr *addr);
     /* Read + clear the pending socket error — getsockopt(SO_ERROR). Writes it to
      * *out_err (0 = none) and returns 0, or returns -1 if the query itself fails.
      * Used for async-connect completion. The value is a platform error code;

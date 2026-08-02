@@ -45,13 +45,68 @@ static int lw_set_ipv6only(void *c, KlSocketHandle fd, int on) {
 static int lw_set_tcp_nodelay(void *c, KlSocketHandle fd, int on) { (void)c; return lw_setopt_int((int)fd, IPPROTO_TCP, TCP_NODELAY, on); }
 static int lw_set_cork(void *c, KlSocketHandle fd, int on)        { (void)c; (void)fd; (void)on; return -1; }  /* no TCP_CORK */
 
+/* KlSockAddr <-> lwIP sockaddr — the lwIP-local counterpart of the built-in
+ * providers' src/sockaddr_native.h (which resolves host sockaddr and so cannot be
+ * reused here). This is where, and the only where, lwIP's address layout lives. */
+static socklen_t lw_to_native(const KlSockAddr *a, struct sockaddr_storage *ss) {
+    memset(ss, 0, sizeof *ss);
+    if (a->family == KL_AF_INET) {
+        struct sockaddr_in *in = (struct sockaddr_in *)ss;
+        in->sin_family = AF_INET;
+        in->sin_port = lwip_htons(a->port);
+        memcpy(&in->sin_addr, a->u.ip, 4);
+        return (socklen_t)sizeof(*in);
+    }
+#if LWIP_IPV6
+    if (a->family == KL_AF_INET6) {
+        struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)ss;
+        in6->sin6_family = AF_INET6;
+        in6->sin6_port = lwip_htons(a->port);
+        in6->sin6_scope_id = a->scope_id;
+        memcpy(&in6->sin6_addr, a->u.ip, 16);
+        return (socklen_t)sizeof(*in6);
+    }
+#endif
+    return 0;
+}
+static int lw_from_native(KlSockAddr *out, const struct sockaddr *sa) {
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)sa;
+        uint8_t ip[4]; memcpy(ip, &in->sin_addr, 4);
+        return kl_sockaddr_from_ipv4(out, ip, lwip_ntohs(in->sin_port));
+    }
+#if LWIP_IPV6
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)sa;
+        uint8_t ip[16]; memcpy(ip, &in6->sin6_addr, 16);
+        return kl_sockaddr_from_ipv6(out, ip, lwip_ntohs(in6->sin6_port), in6->sin6_scope_id);
+    }
+#endif
+    return -1;
+}
+
 static KlSocketHandle lw_socket(void *c, int d, int t, int p) { (void)c; return (KlSocketHandle)lwip_socket(d, t, p); }
-static int lw_connect(void *c, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) { (void)c; return lwip_connect((int)fd, a, l); }
-static int lw_bind(void *c, KlSocketHandle fd, const struct sockaddr *a, socklen_t l)    { (void)c; return lwip_bind((int)fd, a, l); }
+static int lw_connect(void *c, KlSocketHandle fd, const KlSockAddr *a) {
+    (void)c;
+    struct sockaddr_storage ss; socklen_t l = lw_to_native(a, &ss);
+    if (l == 0) { errno = EAFNOSUPPORT; return -1; }
+    return lwip_connect((int)fd, (struct sockaddr *)&ss, l);
+}
+static int lw_bind(void *c, KlSocketHandle fd, const KlSockAddr *a) {
+    (void)c;
+    struct sockaddr_storage ss; socklen_t l = lw_to_native(a, &ss);
+    if (l == 0) { errno = EAFNOSUPPORT; return -1; }
+    return lwip_bind((int)fd, (struct sockaddr *)&ss, l);
+}
 static int lw_listen(void *c, KlSocketHandle fd, int backlog)   { (void)c; return lwip_listen((int)fd, backlog); }
 static KlSocketHandle lw_accept(void *c, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) { (void)c; return (KlSocketHandle)lwip_accept((int)fd, a, l); }
 static int lw_close(void *c, KlSocketHandle fd) { (void)c; return lwip_close((int)fd); }
-static int lw_get_local_addr(void *c, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) { (void)c; return lwip_getsockname((int)fd, a, l); }
+static int lw_get_local_addr(void *c, KlSocketHandle fd, KlSockAddr *out) {
+    (void)c;
+    struct sockaddr_storage ss; socklen_t l = sizeof ss;
+    if (lwip_getsockname((int)fd, (struct sockaddr *)&ss, &l) != 0) return -1;
+    return lw_from_native(out, (struct sockaddr *)&ss);
+}
 static int lw_get_so_error(void *c, KlSocketHandle fd, int *out_err) {
     (void)c;
     socklen_t l = sizeof(int);

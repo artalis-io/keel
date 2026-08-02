@@ -15,6 +15,7 @@
  */
 
 #include "socket.h"
+#include "sockaddr_native.h"   /* KlSockAddr <-> struct sockaddr marshalling */
 
 #include <windows.h>
 #include <mswsock.h>   /* TransmitFile prototype (linked via -lws2_32 / mswsock) */
@@ -136,8 +137,11 @@ KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol) {
     if (s == INVALID_SOCKET) kl_wsa_set_errno();
     return (KlSocketHandle)s;
 }
-int kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    if (connect((SOCKET)fd, a, l) == SOCKET_ERROR) {
+int kl_sockdef_connect(KlSocketHandle fd, const KlSockAddr *addr) {
+    struct sockaddr_storage ss;
+    socklen_t l = kl_sockaddr_to_native(addr, &ss);
+    if (l == 0) { errno = EAFNOSUPPORT; return -1; }
+    if (connect((SOCKET)fd, (struct sockaddr *)&ss, l) == SOCKET_ERROR) {
         /* A non-blocking connect that can't finish immediately reports
          * WSAEWOULDBLOCK on Winsock, but POSIX callers expect EINPROGRESS. */
         if (WSAGetLastError() == WSAEWOULDBLOCK) errno = EINPROGRESS;
@@ -146,8 +150,11 @@ int kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *a, socklen_t l)
     }
     return 0;
 }
-int kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    if (bind((SOCKET)fd, a, l) == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
+int kl_sockdef_bind(KlSocketHandle fd, const KlSockAddr *addr) {
+    struct sockaddr_storage ss;
+    socklen_t l = kl_sockaddr_to_native(addr, &ss);
+    if (l == 0) { errno = EAFNOSUPPORT; return -1; }
+    if (bind((SOCKET)fd, (struct sockaddr *)&ss, l) == SOCKET_ERROR) { kl_wsa_set_errno(); return -1; }
     return 0;
 }
 int kl_sockdef_listen(KlSocketHandle fd, int backlog) {
@@ -169,9 +176,11 @@ KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *a, socklen_
 int kl_sockdef_close(KlSocketHandle fd) {
     return closesocket((SOCKET)fd);
 }
-int kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    if (getsockname((SOCKET)fd, a, l) != 0) { kl_wsa_set_errno(); return -1; }
-    return 0;
+int kl_sockdef_get_local_addr(KlSocketHandle fd, KlSockAddr *out) {
+    struct sockaddr_storage ss;
+    socklen_t l = sizeof(ss);
+    if (getsockname((SOCKET)fd, (struct sockaddr *)&ss, &l) != 0) { kl_wsa_set_errno(); return -1; }
+    return kl_sockaddr_from_native(out, (struct sockaddr *)&ss, l);
 }
 int kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err) {
     int err = 0;
@@ -292,11 +301,11 @@ static int wsk_set_cork(void *ctx, KlSocketHandle fd, int on) {
 static KlSocketHandle wsk_socket(void *ctx, int domain, int type, int protocol) {
     (void)ctx; return kl_sockdef_socket(domain, type, protocol);
 }
-static int wsk_connect(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    (void)ctx; return kl_sockdef_connect(fd, a, l);
+static int wsk_connect(void *ctx, KlSocketHandle fd, const KlSockAddr *a) {
+    (void)ctx; return kl_sockdef_connect(fd, a);
 }
-static int wsk_bind(void *ctx, KlSocketHandle fd, const struct sockaddr *a, socklen_t l) {
-    (void)ctx; return kl_sockdef_bind(fd, a, l);
+static int wsk_bind(void *ctx, KlSocketHandle fd, const KlSockAddr *a) {
+    (void)ctx; return kl_sockdef_bind(fd, a);
 }
 static int wsk_listen(void *ctx, KlSocketHandle fd, int backlog) {
     (void)ctx; return kl_sockdef_listen(fd, backlog);
@@ -307,8 +316,8 @@ static KlSocketHandle wsk_accept(void *ctx, KlSocketHandle fd, struct sockaddr *
 static int wsk_close(void *ctx, KlSocketHandle fd) {
     (void)ctx; return kl_sockdef_close(fd);
 }
-static int wsk_get_local_addr(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
-    (void)ctx; return kl_sockdef_get_local_addr(fd, a, l);
+static int wsk_get_local_addr(void *ctx, KlSocketHandle fd, KlSockAddr *a) {
+    (void)ctx; return kl_sockdef_get_local_addr(fd, a);
 }
 static int wsk_get_so_error(void *ctx, KlSocketHandle fd, int *out_err) {
     (void)ctx; return kl_sockdef_get_so_error(fd, out_err);

@@ -24,6 +24,7 @@
 #include <sys/types.h>
 
 #include "socket.h"     /* seam + sockcompat: sockaddr / getaddrinfo / sys_un / SO_ERROR op */
+#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (connect currency) */
 #include "platform.h"   /* kl_plat_poll1 — sync readiness wait (poll/WSAPoll) */
 #include "event_caps.h" /* PAL Phase 7: event↔socket capability negotiation */
 
@@ -107,7 +108,9 @@ static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
         return -1;
     }
 
-    rc = kl_sock_connect(sockets, fd, res->ai_addr, res->ai_addrlen);
+    KlSockAddr csa;
+    kl_sockaddr_from_native(&csa, res->ai_addr, res->ai_addrlen);
+    rc = kl_sock_connect(sockets, fd, &csa);
     freeaddrinfo(res);
 
     if (rc < 0 && errno != EINPROGRESS) {
@@ -182,7 +185,9 @@ static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms
         return -1;
     }
 
-    int rc = kl_sock_connect(sockets, fd, (struct sockaddr *)&addr, addr_len);
+    KlSockAddr usa;
+    kl_sockaddr_from_native(&usa, (struct sockaddr *)&addr, addr_len);
+    int rc = kl_sock_connect(sockets, fd, &usa);
     if (rc < 0 && errno != EINPROGRESS) {
         if (out_err) *out_err = KL_ERR_CONNECT;
         kl_sock_close(sockets, fd);
@@ -1313,7 +1318,9 @@ static int start_connect(KlClient *c, const struct sockaddr *addr,
         return -1;
     }
 
-    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, addr, addrlen);
+    KlSockAddr csa;
+    kl_sockaddr_from_native(&csa, addr, addrlen);
+    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, &csa);
     if (rc < 0 && errno != EINPROGRESS) {
         kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
@@ -1408,7 +1415,9 @@ static int he_new_attempt(KlClient *c, int idx)
         return -1;
     }
 
-    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, sa, sl);
+    KlSockAddr csa;
+    kl_sockaddr_from_native(&csa, sa, sl);
+    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, &csa);
     if (rc < 0 && errno != EINPROGRESS) {
         c->conn_last_err = KL_ERR_CONNECT;
         kl_sock_close(c->ev_ctx->sockets, fd);

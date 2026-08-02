@@ -72,12 +72,12 @@ int            kl_sockdef_set_ipv6only(KlSocketHandle fd, int on);
 int            kl_sockdef_set_tcp_nodelay(KlSocketHandle fd, int on);
 int            kl_sockdef_set_cork(KlSocketHandle fd, int on);
 KlSocketHandle kl_sockdef_socket(int domain, int type, int protocol);
-int            kl_sockdef_connect(KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
-int            kl_sockdef_bind(KlSocketHandle fd, const struct sockaddr *addr, socklen_t len);
+int            kl_sockdef_connect(KlSocketHandle fd, const KlSockAddr *addr);
+int            kl_sockdef_bind(KlSocketHandle fd, const KlSockAddr *addr);
 int            kl_sockdef_listen(KlSocketHandle fd, int backlog);
 KlSocketHandle kl_sockdef_accept(KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
 int            kl_sockdef_close(KlSocketHandle fd);
-int            kl_sockdef_get_local_addr(KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
+int            kl_sockdef_get_local_addr(KlSocketHandle fd, KlSockAddr *addr);
 int            kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err);
 ssize_t        kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len);
 ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
@@ -156,15 +156,15 @@ static inline KlSocketHandle kl_sock_socket(const KlSocketProvider *p, int domai
 }
 
 static inline int kl_sock_connect(const KlSocketProvider *p, KlSocketHandle fd,
-                                  const struct sockaddr *addr, socklen_t len) {
-    if (p && p->ops->connect) return p->ops->connect(p->context, fd, addr, len);
-    return kl_sockdef_connect(fd, addr, len);
+                                  const KlSockAddr *addr) {
+    if (p && p->ops->connect) return p->ops->connect(p->context, fd, addr);
+    return kl_sockdef_connect(fd, addr);
 }
 
 static inline int kl_sock_bind(const KlSocketProvider *p, KlSocketHandle fd,
-                               const struct sockaddr *addr, socklen_t len) {
-    if (p && p->ops->bind) return p->ops->bind(p->context, fd, addr, len);
-    return kl_sockdef_bind(fd, addr, len);
+                               const KlSockAddr *addr) {
+    if (p && p->ops->bind) return p->ops->bind(p->context, fd, addr);
+    return kl_sockdef_bind(fd, addr);
 }
 
 static inline int kl_sock_listen(const KlSocketProvider *p, KlSocketHandle fd, int backlog) {
@@ -184,9 +184,9 @@ static inline int kl_sock_close(const KlSocketProvider *p, KlSocketHandle fd) {
 }
 
 static inline int kl_sock_get_local_addr(const KlSocketProvider *p, KlSocketHandle fd,
-                                         struct sockaddr *addr, socklen_t *len) {
-    if (p && p->ops->get_local_addr) return p->ops->get_local_addr(p->context, fd, addr, len);
-    return kl_sockdef_get_local_addr(fd, addr, len);
+                                         KlSockAddr *addr) {
+    if (p && p->ops->get_local_addr) return p->ops->get_local_addr(p->context, fd, addr);
+    return kl_sockdef_get_local_addr(fd, addr);
 }
 
 static inline int kl_sock_get_so_error(const KlSocketProvider *p, KlSocketHandle fd, int *out_err) {
