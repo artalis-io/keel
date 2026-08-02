@@ -116,7 +116,7 @@ static int g_udp_local_ok = 0;
 static void udp_echo(KlUdp *udp, const void *data, size_t len,
                      const KlSockAddr *src, const KlSockAddr *local, void *ud) {
     (void)ud;
-    if (local && local_len > 0) g_udp_local_ok = 1;
+    if (local) g_udp_local_ok = 1;
     kl_udp_send_to(udp, data, len, src);
 }
 
