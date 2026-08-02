@@ -62,11 +62,15 @@ make loopback LWIP_DIR=/path/to/lwip
 #    lwIP loopback: Keel client on lwIP got 200 (correct)
 ```
 
-**Remaining:** responsive `kl_server_stop` — `lwip_poll` can't watch the host
-self-pipe wakeup, so stop is currently noticed on the next poll tick (the built-in
-tick-timeout fallback; correct, just latent). A true lwIP wakeup (a loopback-
-socket `platform_wakeup_lwip`) needs the core `kl_plat_wakeup_*` extracted into an
-overridable TU — a small follow-up.
+Run in CI by the **Integration (lwIP)** job (clones lwIP + lwip-contrib, stock
+libkeel, `make loopback`), so the payoff is regression-protected.
+
+**Responsive stop** is wired: `platform_wakeup_lwip.c` provides a self-connected
+lwIP UDP wakeup (overriding the generic `src/platform_wakeup_*` seam at link time),
+so `kl_server_stop` wakes `lwip_poll` immediately rather than on the next tick.
+
+**Not yet on lwIP:** udp (`udp_io_lwip` → `udp_server` + the built-in async DNS
+resolver) and TLS-over-lwIP; `lwipopts.h` is a sample, not production-blessed.
 
 ## Tested versions
 
