@@ -1,9 +1,12 @@
 # KlSockAddr — a platform-neutral address type (design groundwork)
 
-**Status:** design / not yet implemented
+**Status:** IMPLEMENTED (Phases A–G) — the compile-time socket-ABI finding is dissolved.
 **Date:** 2026-08-02
 **Motivates / dissolves:** the compile-time socket-ABI finding in
-`integrations/lwip/README.md` ("The runtime boundary")
+`integrations/lwip/README.md` ("The runtime boundary"). Proven: a **stock
+`libkeel.a`** + the lwIP socket/event providers runs a Keel HTTP server on the
+lwIP stack answering `200 OK` over loopback — no `KEEL_PLATFORM_LWIP` recompile.
+lwIP is now a pure runtime provider (both event and socket/address axes).
 
 ## 1. Problem
 

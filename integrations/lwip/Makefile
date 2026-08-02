@@ -37,12 +37,12 @@ event_lwip.o: event_lwip.c keel_lwip.h lwipopts.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ── loopback runtime test: a real Keel server + client over lwIP loopback ─────
-# NOTE: requires KEEL_LIB to point at a libkeel.a built with -DKEEL_PLATFORM_LWIP
-# (a PLATFORM=lwip build). A stock host libkeel does NOT work: it emits host-layout
-# sockaddr / calls host getaddrinfo, which lwip_bind rejects (bind: EIO). See
-# README.md ("The runtime boundary") + docs/lwip_platform_design.md. lwIP loopback
-# itself is confirmed working; this target is the proof once a platform libkeel
-# exists. Builds a minimal lwIP (core + IPv4 + api + unix sys port) into liblwip.a.
+# Runs against a STOCK libkeel.a — no -DKEEL_PLATFORM_LWIP library build. Since the
+# KlSockAddr neutralization (docs/keel_sockaddr_design.md) core speaks KlSockAddr
+# only; socket_lwip.c marshals KlSockAddr <-> lwIP sockaddr at the provider
+# boundary and server bind parses the numeric address via kl_sockaddr_parse, so no
+# host-layout sockaddr ever reaches lwIP. `make -C ../.. && make loopback LWIP_DIR=...`
+# builds the stock lib, a minimal lwIP (core+IPv4+api+unix port), and runs the test.
 KEEL_LIB ?= $(KEEL_ROOT)/libkeel.a
 LWIP_SRCS = $(wildcard $(LWIP_DIR)/src/core/*.c) \
             $(wildcard $(LWIP_DIR)/src/core/ipv4/*.c) \
@@ -51,15 +51,15 @@ LWIP_SRCS = $(wildcard $(LWIP_DIR)/src/core/*.c) \
             $(LWIP_DIR)/contrib/ports/unix/port/sys_arch.c
 liblwip.a: $(LWIP_SRCS)
 	@echo "building lwIP ($(words $(LWIP_SRCS)) files) ..."
-	@$(CC) -w -std=c11 -O2 -I. $(LWIP_INC) -c $(LWIP_SRCS)
+	@$(CC) -w -std=c11 -O2 -D_GNU_SOURCE -I. $(LWIP_INC) -c $(LWIP_SRCS)
 	@$(AR) rcs $@ $(notdir $(LWIP_SRCS:.c=.o))
 
 loopback: socket_lwip.o event_lwip.o liblwip.a
-	@test -f "$(KEEL_LIB)" || { echo "set KEEL_LIB to a KEEL_PLATFORM_LWIP-built libkeel.a (see README)"; exit 1; }
+	@test -f "$(KEEL_LIB)" || { echo "build the stock lib first: make -C $(KEEL_ROOT)"; exit 1; }
 	$(CC) $(CFLAGS) -o lwip_loopback_test lwip_loopback_test.c \
 	  socket_lwip.o event_lwip.o liblwip.a "$(KEEL_LIB)" -lpthread
 	./lwip_loopback_test
-	@echo "integrations/lwip: loopback runtime test OK"
+	@echo "integrations/lwip: loopback runtime test OK (stock libkeel + lwIP provider)"
 
 clean:
 	rm -f *.o *.a lwip_loopback_test
