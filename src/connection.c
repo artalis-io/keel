@@ -328,6 +328,11 @@ KlConnState kl_conn_on_handshake(KlConn *c) {
         c->state = KL_CONN_CLOSED;
         return c->state;
     }
+    /* Route the TLS socket-BIO through the connection's own socket provider, so
+     * TLS I/O matches the connection's stack (e.g. lwIP) without per-app config.
+     * Idempotent — a pointer store the backend consults on the readiness path. */
+    if (c->tls->set_socket_provider)
+        c->tls->set_socket_provider(c->tls, conn_sp(c));
     KlTlsResult r = c->tls->handshake(c->tls, c->fd);
     c->last_active_ms = kl_monotonic_ms();
     switch (r) {

@@ -136,8 +136,10 @@ static int keel_udp_on_lwip(void) {
 #ifdef LWT_TLS
 /* Phase 4: HTTPS on lwIP. A Keel TLS server (mbedTLS) + a Keel async TLS client,
  * both on the lwIP providers, with the mbedTLS socket-BIO routed through the lwIP
- * socket provider (kl_tls_mbedtls_ctx_set_socket_provider) — so a genuine TLS
- * handshake + request runs over lwIP with zero lwIP-specific TLS code. Embedded
+ * socket provider — which the framework auto-wires from KlConfig.sockets /
+ * KlClientConfig.sockets via the KlTls.set_socket_provider hook (no explicit
+ * per-ctx call needed) — so a genuine TLS handshake + request runs over lwIP with
+ * zero lwIP-specific TLS code. Embedded
  * self-signed EC cert (CN=127.0.0.1); the client skips CA verification. Certs are
  * the same test-only material as tests/smoke_tls.c. */
 static const char CERT_PEM[] =
@@ -175,7 +177,7 @@ static int keel_https_on_lwip(void) {
         (const unsigned char *)KEY_PEM,  sizeof(KEY_PEM),
         NULL, 0, KL_MTLS_NONE, &alloc);
     if (!sctx) return 0;
-    kl_tls_mbedtls_ctx_set_socket_provider(sctx, kl_socket_provider_lwip());
+    /* No explicit provider call — the server auto-wires it from KlConfig.sockets. */
     KlTlsConfig stls = { .ctx = sctx, .factory = kl_tls_mbedtls_create };  /* destroy manually */
     KlConfig cfg = {
         .port = LWT_TLS_PORT, .bind_addr = "127.0.0.1",
@@ -197,7 +199,7 @@ static int keel_https_on_lwip(void) {
         cev.sockets = kl_socket_provider_lwip();
         KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);  /* NULL CA = skip verify */
         if (cctx) {
-            kl_tls_mbedtls_ctx_set_socket_provider(cctx, kl_socket_provider_lwip());
+            /* No explicit provider call — the client auto-wires it from KlClientConfig.sockets. */
             KlTlsConfig ctls = { .ctx = cctx, .factory = kl_tls_mbedtls_create };
             char url[64];
             snprintf(url, sizeof(url), "https://127.0.0.1:%u/", (unsigned)g_tls_srv.bound_port);

@@ -412,6 +412,14 @@ static int tls_peer_cert(KlTls *self, KlPeerCert *out)
     return 0;
 }
 
+/* KlTls.set_socket_provider — the framework (connection.c/client.c) calls this
+ * before the handshake with the connection's provider, overriding any ctx default
+ * so the socket-BIO uses the same stack as the connection. */
+static void tls_set_socket_provider(KlTls *self, const struct KlSocketProvider *sp)
+{
+    ((KlMbedtlsTls *)self)->sp = (const KlSocketProvider *)sp;
+}
+
 /* ── Factory ─────────────────────────────────────────────────────── */
 
 KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
@@ -444,6 +452,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     t->base.peer_cert     = tls_peer_cert;
     t->base.feed_input    = tls_feed_input;      /* completion mode (8b-5) */
     t->base.drain_output  = tls_drain_output;
+    t->base.set_socket_provider = tls_set_socket_provider;  /* framework auto-wires the provider */
 
     /* Completion (memory-BIO) mode starts off; feed_input() enables it. */
     t->comp_mode = 0;

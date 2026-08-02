@@ -182,10 +182,13 @@ int kl_tls_mbedtls_ctx_set_alpn(KlTlsCtx *ctx, const char **protos);
  * (`kl_socket_provider_lwip()`), matching the socket/event providers the server or
  * client is already configured with. Passing NULL restores the default.
  *
- * Optional: leave unset for a normal host build (behaviour is identical). Set once
- * on the context, before any connection's handshake; every KlTls the factory
- * creates from this context inherits it. Applies only to the synchronous socket-BIO
- * path — the completion (memory-BIO) mode does its own I/O and ignores this.
+ * Optional and usually unnecessary with a KlServer/KlClient: the framework
+ * auto-wires each session's provider from `KlConfig.sockets`/`KlClientConfig.sockets`
+ * via the `KlTls.set_socket_provider` vtable hook (which overrides this ctx default
+ * at handshake time). Use this setter for **standalone** KlTls use — driving the
+ * vtable directly without connection.c/client.c. Set once on the context, before
+ * any handshake; every KlTls the factory creates inherits it. Applies only to the
+ * synchronous socket-BIO path — the completion (memory-BIO) mode ignores it.
  *
  * @param ctx Server or client context.
  * @param sp  Socket provider to route through, or NULL for the host default.
