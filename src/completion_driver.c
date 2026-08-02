@@ -742,14 +742,21 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         case KL_COMP_READ:   comp_on_read(server_of_ctx(ctx), &ev[i]);   break;
         case KL_COMP_WRITE:  comp_on_write(server_of_ctx(ctx), &ev[i]);  break;
         case KL_COMP_UDP_RECV: {  /* datagram — the target is a KlUdp*, no server */
+            /* Marshal the backend's native src/local (still host sockaddr in the
+             * KlCompletionEvent) to the neutral KlSockAddr at the seam boundary. */
+            KlSockAddr ksrc, klocal;
+            kl_sockaddr_from_native(&ksrc, (const struct sockaddr *)&ev[i].peer,
+                                    ev[i].peer_len);
+            int have_local = ev[i].local_len &&
+                kl_sockaddr_from_native(&klocal, (const struct sockaddr *)&ev[i].local,
+                                        ev[i].local_len) == 0;
             KlUdpRxMeta meta = {
-                .local     = ev[i].local_len ? (struct sockaddr *)&ev[i].local : NULL,
-                .local_len = ev[i].local_len,
+                .local     = have_local ? &klocal : NULL,
                 .gro_seg   = ev[i].gro_seg,
                 .truncated = ev[i].truncated,
             };
             kl_udp_comp_on_recv((KlUdp *)ev[i].target, ev[i].buf, ev[i].bytes,
-                                (struct sockaddr *)&ev[i].peer, ev[i].peer_len, &meta);
+                                &ksrc, &meta);
             break;
         }
         case KL_COMP_UDP_SEND:

@@ -41,16 +41,14 @@ void kl_udp_io_batch_free(KlUdp *udp);
  * tos >= 0). Returns the raw syscall result (bytes sent, or -1 with errno set) —
  * udp.c decides queue-on-EAGAIN vs error from it. */
 ssize_t kl_udp_io_raw_send(KlUdp *udp, const void *data, size_t len,
-                           const struct sockaddr *dest, socklen_t dest_len,
-                           const struct sockaddr *src, socklen_t src_len, int tos);
+                           const KlSockAddr *dest, const KlSockAddr *src, int tos);
 
 /* One-syscall UDP GSO send: a single sendmsg carrying a UDP_SEGMENT cmsg so the
  * kernel splits `data` into `seg`-byte datagrams on the wire. Returns the sendmsg
  * result, or -1 with errno == EOPNOTSUPP where GSO is unavailable at build time
  * (udp.c then falls back to per-segment sends). */
 ssize_t kl_udp_io_send_gso(KlUdp *udp, const void *data, size_t len,
-                           uint16_t seg, const struct sockaddr *dest,
-                           socklen_t dest_len);
+                           uint16_t seg, const KlSockAddr *dest);
 
 /* Drain the send queue: sendmmsg batches when a tx batch is present, else one
  * sendmsg/sendto per node. Drops nodes as they are sent (or on a hard error),

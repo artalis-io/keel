@@ -18,6 +18,7 @@
 #include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext (8b-5b) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
+#include "sockaddr_native.h"     /* KlSockAddr -> Winsock sockaddr for the overlapped UDP send */
 #include "completion.h"          /* the abstract axis this TU implements */
 
 #include "sockcompat.h"          /* winsock2.h */
@@ -461,7 +462,7 @@ int kl_comp_post_udp_recv(KlUdp *udp) {
 /* Post one overlapped WSASendTo for a UDP socket (8b-4d). Copies the datagram + its
  * destination into the op (owned until completion); surfaces KL_COMP_UDP_SEND. */
 int kl_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
-                          const struct sockaddr *dest, int dest_len) {
+                          const KlSockAddr *dest) {
     KlIocpState *st = udp->ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
     if (!op) return -1;
@@ -474,10 +475,9 @@ int kl_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
     op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
     memcpy(op->sendbuf, data, len);
-    if (dest_len > 0 && (size_t)dest_len <= sizeof(op->src)) {
-        memcpy(&op->src, dest, (size_t)dest_len);
-        op->src_len = dest_len;
-    }
+    /* Marshal the neutral dest to a Winsock sockaddr for the overlapped WSASendTo. */
+    if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC)
+        op->src_len = (int)kl_sockaddr_to_native(dest, &op->src);
 
     WSABUF buf = { (ULONG)len, op->sendbuf };
     DWORD sent = 0;

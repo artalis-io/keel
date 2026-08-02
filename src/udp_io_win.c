@@ -26,6 +26,7 @@
 #include "udp_io.h"
 
 #include "socket.h"       /* sockcompat.h -> winsock2.h / ws2tcpip.h, KlSocketHandle */
+#include "sockaddr_native.h" /* KlSockAddr <-> Winsock sockaddr at the seam boundary */
 
 #include <windows.h>
 #include <mswsock.h>      /* WSAID_WSARECVMSG / WSAID_WSASENDMSG, LPFN_WSARECVMSG/SENDMSG */
@@ -185,17 +186,25 @@ static ssize_t udp_send_msg(KlUdp *udp, const void *data, size_t len,
 }
 
 ssize_t kl_udp_io_raw_send(KlUdp *udp, const void *data, size_t len,
-                           const struct sockaddr *dest, socklen_t dest_len,
-                           const struct sockaddr *src, socklen_t src_len, int tos) {
-    if ((src && src_len) || tos >= 0)
-        return udp_send_msg(udp, data, len, dest, dest_len,
-                            (src && src_len) ? src : NULL, tos);
+                           const KlSockAddr *dest, const KlSockAddr *src, int tos) {
+    /* Marshal the neutral addresses to Winsock sockaddr at the seam boundary; the
+     * internal send path (udp_send_msg / build_control) stays in host sockaddr. */
+    struct sockaddr_storage ds, ss;
+    socklen_t dest_len = (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC)
+                         ? kl_sockaddr_to_native(dest, &ds) : 0;
+    socklen_t src_len  = (src && kl_sockaddr_family(src) != KL_AF_UNSPEC)
+                         ? kl_sockaddr_to_native(src, &ss) : 0;
+    const struct sockaddr *dsa = dest_len ? (const struct sockaddr *)&ds : NULL;
+    const struct sockaddr *ssa = src_len  ? (const struct sockaddr *)&ss : NULL;
+
+    if (ssa || tos >= 0)
+        return udp_send_msg(udp, data, len, dsa, dest_len, ssa, tos);
     SOCKET s = (SOCKET)udp->fd;
     int n;
     if (dest_len == 0)
         n = send(s, (const char *)data, (int)len, 0);
     else
-        n = sendto(s, (const char *)data, (int)len, 0, dest, (int)dest_len);
+        n = sendto(s, (const char *)data, (int)len, 0, dsa, (int)dest_len);
     if (n == SOCKET_ERROR) {
         udp_set_errno_from_wsa();
         return -1;
@@ -208,10 +217,7 @@ void kl_udp_io_flush_queue(KlUdp *udp) {
     while (udp->q_head) {
         KlUdpDatagram *node = udp->q_head;
         ssize_t n = kl_udp_io_raw_send(udp, node->data, node->len,
-                                       node->dest_len ? (struct sockaddr *)&node->dest : NULL,
-                                       node->dest_len,
-                                       node->src_len ? (struct sockaddr *)&node->src : NULL,
-                                       node->src_len, node->tos);
+                                       &node->dest, &node->src, node->tos);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 break;                 /* socket buffer still full — retry later */
@@ -308,6 +314,7 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
         WSACMSGHDR    align;
         unsigned char buf[UDP_RX_CMSG_SPACE];
     } control;
+    struct sockaddr_storage recv_src, recv_local;   /* per-datagram scratch (host layout) */
 
     for (;;) {
         int want_control = (udp->pktinfo || udp->recv_tos);
@@ -327,8 +334,8 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
 
         if (want_control) {
             memset(&msg, 0, sizeof(msg));
-            msg.name = (LPSOCKADDR)&udp->recv_src;
-            msg.namelen = (INT)sizeof(udp->recv_src);
+            msg.name = (LPSOCKADDR)&recv_src;
+            msg.namelen = (INT)sizeof(recv_src);
             msg.lpBuffers = &iov;
             msg.dwBufferCount = 1;
             msg.Control.buf = (CHAR *)control.buf;
@@ -357,9 +364,9 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
                     udp->truncated++;
             }
         } else {
-            int fromlen = (int)sizeof(udp->recv_src);
+            int fromlen = (int)sizeof(recv_src);
             int r = recvfrom(s, (char *)udp->recv_buf, (int)udp->recv_buf_size, 0,
-                             (struct sockaddr *)&udp->recv_src, &fromlen);
+                             (struct sockaddr *)&recv_src, &fromlen);
             if (r == SOCKET_ERROR) {
                 int e = WSAGetLastError();
                 if (e == WSAEMSGSIZE) {   /* datagram truncated to the buffer */
@@ -377,14 +384,17 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
             }
         }
 
-        socklen_t local_len = (have_control && udp->pktinfo) ? kl_udp_win_parse_local(&msg, &udp->recv_local) : 0;
+        socklen_t local_len = (have_control && udp->pktinfo) ? kl_udp_win_parse_local(&msg, &recv_local) : 0;
         udp->recv_tos_val = (have_control && udp->recv_tos) ? udp_parse_tos(&msg) : -1;
 
+        /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary. */
+        KlSockAddr ksrc, klocal;
+        kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&recv_src, src_len);
+        if (local_len)
+            kl_sockaddr_from_native(&klocal, (struct sockaddr *)&recv_local, local_len);
         /* Windows has no UDP GRO → gro_seg is always 0. */
         kl_udp_deliver(udp, udp->recv_buf, (size_t)n, 0,
-                       (struct sockaddr *)&udp->recv_src, src_len,
-                       local_len ? (struct sockaddr *)&udp->recv_local : NULL,
-                       local_len);
+                       &ksrc, local_len ? &klocal : NULL);
 
         /* The callback may have called recv_stop() or free() — re-check. */
         if (!udp->recv_active || !kl_handle_valid(udp->fd))
@@ -395,9 +405,8 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
 /* ── UDP GSO (unavailable on Windows) ─────────────────────────────────── */
 
 ssize_t kl_udp_io_send_gso(KlUdp *udp, const void *data, size_t len,
-                           uint16_t seg, const struct sockaddr *dest,
-                           socklen_t dest_len) {
-    (void)udp; (void)data; (void)len; (void)seg; (void)dest; (void)dest_len;
+                           uint16_t seg, const KlSockAddr *dest) {
+    (void)udp; (void)data; (void)len; (void)seg; (void)dest;
     /* No UDP GSO on Winsock. Return -1 with a non-would-block errno so udp.c
      * rules GSO unsupported (gso_disabled) and falls back to per-segment sends. */
     errno = EIO;

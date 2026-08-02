@@ -19,13 +19,13 @@
 
 #include "socket.h"          /* sockaddr types via sockcompat.h */
 
-/* Whole-datagram FIFO node: header + inline payload (single allocation). */
+/* Whole-datagram FIFO node: header + inline payload (single allocation).
+ * Addresses are the Keel-neutral KlSockAddr; each platform udp_io TU marshals to
+ * its own sockaddr layout at the seam (family KL_AF_UNSPEC = "unset"). */
 struct KlUdpDatagram {
     struct KlUdpDatagram   *next;
-    struct sockaddr_storage dest;      /* destination for sendto */
-    socklen_t               dest_len;  /* 0 = connected send (use send()) */
-    struct sockaddr_storage src;       /* pinned source address, or unset */
-    socklen_t               src_len;   /* 0 = no source cmsg */
+    KlSockAddr              dest;      /* destination; UNSPEC = connected send() */
+    KlSockAddr              src;       /* pinned source, or UNSPEC = none */
     int                     tos;       /* per-packet TOS byte, or -1 */
     size_t                  len;       /* payload length */
     unsigned char           data[];    /* payload */
@@ -40,8 +40,7 @@ void kl_udp_update_interest(KlUdp *udp);
 /* Deliver one received buffer to the on_recv / on_recv_segments callbacks,
  * splitting a GRO-coalesced buffer per segment when needed. */
 void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
-                    const struct sockaddr *src, socklen_t src_len,
-                    const struct sockaddr *local, socklen_t local_len);
+                    const KlSockAddr *src, const KlSockAddr *local);
 
 /* The POSIX cmsg parser (kl_udp_parse_local) + its RX control-buffer size live in the
  * POSIX-only udp_cmsg.h, included by the POSIX recv TUs — kept out of this cross-platform
@@ -53,8 +52,7 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
  * the delivery treats as "not present" — the same graceful degradation as the option being
  * off. Extensible (e.g. a future recv-TOS) without churning the function signature. */
 typedef struct {
-    struct sockaddr *local;      /* local (dest) addr via pktinfo, or NULL */
-    socklen_t        local_len;  /* 0 when local is NULL */
+    const KlSockAddr *local;     /* local (dest) addr via pktinfo, or NULL */
     int              gro_seg;    /* GRO coalesced segment size, 0 = none */
     int              truncated;  /* 1 if the datagram was truncated (MSG_TRUNC) */
 } KlUdpRxMeta;
@@ -65,8 +63,7 @@ typedef struct {
  * this for a KL_COMP_UDP_RECV event; the model-blind delivery matches the readiness
  * recvmsg path. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
-                         const struct sockaddr *src, socklen_t src_len,
-                         const KlUdpRxMeta *meta);
+                         const KlSockAddr *src, const KlUdpRxMeta *meta);
 
 /* Completion-loop datagram send done (PAL 8b-4d): an overlapped WSASendTo of `len`
  * bytes finished — release its outstanding-bytes reservation and fire on_drain when

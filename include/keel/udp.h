@@ -9,7 +9,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <keel/sockaddr.h>   /* KlSockAddr — the public address currency */
-#include <keel/net.h>        /* struct sockaddr_storage — internal recv scratch */
 
 /**
  * udp.h — Non-blocking UDP datagram socket over KlEventCtx.
@@ -134,8 +133,10 @@ struct KlUdp {
     int            recv_active;
     unsigned char *recv_buf;
     size_t         recv_buf_size;
-    struct sockaddr_storage recv_src; /**< Scratch for the current datagram's source. */
-    struct sockaddr_storage recv_local; /**< Scratch for the current datagram's local (dest) address. */
+    /* The per-datagram source + local (dest) address are stack scratch inside the
+     * platform udp_io recv path (marshalled to KlSockAddr before delivery), so no
+     * host sockaddr lives on this struct — KlUdp is layout-neutral (an lwIP udp_io
+     * TU can share its ABI without host-sockaddr size skew). */
     int            pktinfo;          /**< 1 = local-address capture enabled. */
     uint64_t       truncated;        /**< Count of oversized (truncated) datagrams. */
     /* Send queue (whole-datagram FIFO) */

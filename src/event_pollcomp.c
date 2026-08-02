@@ -31,6 +31,7 @@
 #include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
+#include "sockaddr_native.h"     /* KlSockAddr <-> host sockaddr at the seam boundary */
 #include "completion.h"          /* the abstract axis this TU implements */
 
 #include <poll.h>
@@ -317,7 +318,7 @@ int kl_comp_post_udp_recv(struct KlUdp *udp) {
 }
 
 int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
-                          const struct sockaddr *dest, int dest_len) {
+                          const KlSockAddr *dest) {
     KlPcState *st = udp->ctx->loop._backend;
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
     if (!op) return -1;
@@ -330,10 +331,9 @@ int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
     op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
     if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
     memcpy(op->sendbuf, data, len);
-    if (dest_len > 0 && (size_t)dest_len <= sizeof(op->dest)) {
-        memcpy(&op->dest, dest, (size_t)dest_len);
-        op->dest_len = (socklen_t)dest_len;
-    }
+    /* Marshal the neutral dest to a host sockaddr for the sendto at drain time. */
+    if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC)
+        op->dest_len = kl_sockaddr_to_native(dest, &op->dest);
     pc_op_push(st, op);
     return 0;
 }

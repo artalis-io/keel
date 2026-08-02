@@ -19,6 +19,7 @@
 
 #include <stddef.h>   /* size_t (kl_comp_post_udp_send) */
 #include <keel/handle.h>   /* KlSocketHandle (kl_comp_cancel) */
+#include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_udp_send) */
 
 struct KlServer;
 struct KlEventCtx;
@@ -74,6 +75,6 @@ int kl_comp_post_udp_recv(struct KlUdp *udp);
  * a KL_COMP_UDP_SEND event. Shared-called by udp.c → stubbed in io_engine.c on
  * non-completion builds; real primitive in event_iocp.c. */
 int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
-                          const struct sockaddr *dest, int dest_len);
+                          const KlSockAddr *dest);
 
 #endif /* KEEL_SRC_IO_ENGINE_H */

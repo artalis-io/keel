@@ -11,6 +11,7 @@
  * libkeel — no core recompile. Exit 0 on success.
  */
 #include <keel/keel.h>
+#include <keel/udp.h>
 #include "keel_lwip.h"
 
 #include "lwip/tcpip.h"
@@ -22,7 +23,8 @@
 #include <string.h>
 #include <unistd.h>
 
-#define LWT_PORT 8080
+#define LWT_PORT      8080
+#define LWT_UDP_PORT  8081
 
 static sys_sem_t g_ready;
 static void tcpip_done(void *a) { (void)a; sys_sem_signal(&g_ready); }
@@ -69,6 +71,61 @@ static int keel_client_on_lwip(uint16_t port) {
         kl_client_free(cli);
     }
     kl_event_ctx_free(&cev);
+    return ok;
+}
+
+/* Phase 3: a Keel KlUdp echo server on the lwIP providers, exercised by a raw lwIP
+ * UDP client. Proves the datagram axis (udp_io_lwip: recv_drain + raw_send) — the
+ * foundation for udp_server and the built-in async DNS resolver on lwIP. */
+static void udp_echo(KlUdp *udp, const void *data, size_t len,
+                     const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)local; (void)ud;
+    if (src) (void)kl_udp_send_to(udp, data, len, src);   /* bounce it back */
+}
+
+static int keel_udp_on_lwip(void) {
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx uev;
+    if (kl_event_ctx_init_ex(&uev, &alloc, kl_event_provider_lwip()) != 0)
+        return 0;
+    uev.sockets = kl_socket_provider_lwip();
+
+    KlUdp echo;
+    KlUdpConfig ucfg = {
+        .ctx = &uev, .family = AF_INET,
+        .bind_addr = "127.0.0.1", .bind_port = LWT_UDP_PORT,
+        .alloc = &alloc,
+    };
+    if (kl_udp_init(&echo, &ucfg) != 0) { kl_event_ctx_free(&uev); return 0; }
+    if (kl_udp_recv_start(&echo, udp_echo, NULL) != 0) {
+        kl_udp_free(&echo); kl_event_ctx_free(&uev); return 0;
+    }
+
+    /* Raw lwIP UDP client: send a datagram, expect it echoed back. */
+    int c = lwip_socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in to; memset(&to, 0, sizeof to);
+    to.sin_family = AF_INET;
+    to.sin_port = lwip_htons(LWT_UDP_PORT);
+    to.sin_addr.s_addr = lwip_htonl(INADDR_LOOPBACK);
+    const char *msg = "ping-lwip";
+    lwip_sendto(c, msg, strlen(msg), 0, (struct sockaddr *)&to, sizeof to);
+
+    /* Make the client non-blocking so we can interleave draining the echo ctx. */
+    lwip_fcntl(c, F_SETFL, O_NONBLOCK);
+
+    int ok = 0;
+    char buf[64];
+    for (int i = 0; i < 500 && !ok; i++) {
+        kl_event_ctx_run(&uev, 16, 20);       /* echo: recv the ping, send it back */
+        int n = lwip_recvfrom(c, buf, sizeof(buf) - 1, 0, NULL, NULL);
+        if (n > 0) {
+            buf[n] = 0;
+            ok = (strcmp(buf, msg) == 0);
+        }
+    }
+    lwip_close(c);
+    kl_udp_free(&echo);
+    kl_event_ctx_free(&uev);
     return ok;
 }
 
@@ -120,8 +177,13 @@ int main(void) {
     printf("lwIP loopback: Keel client on lwIP got %s\n",
            client_ok ? "200 (correct)" : "UNEXPECTED");
 
+    /* Phase 3: a Keel KlUdp echo on lwIP, exercised by a raw lwIP UDP client. */
+    int udp_ok = keel_udp_on_lwip();
+    printf("lwIP loopback: Keel UDP echo on lwIP %s\n",
+           udp_ok ? "round-tripped (correct)" : "UNEXPECTED");
+
     kl_server_stop(&g_srv);          /* loop wakes on its poll timeout, sees stop */
     pthread_join(tid, NULL);
     kl_server_free(&g_srv);
-    return (ok && client_ok) ? 0 : 2;
+    return (ok && client_ok && udp_ok) ? 0 : 2;
 }

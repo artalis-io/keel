@@ -497,6 +497,6 @@ jobs:
       - name: Build core (stock libkeel — no KEEL_PLATFORM_LWIP)
         run: make
 
-      - name: lwIP loopback — stock libkeel + lwIP providers (server + client, 200 OK)
+      - name: lwIP loopback — stock libkeel + lwIP providers (server + client + UDP echo)
         timeout-minutes: 5
         run: make -C integrations/lwip loopback LWIP_DIR="$HOME/lwip"
