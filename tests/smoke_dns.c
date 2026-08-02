@@ -66,17 +66,7 @@ int main(void) {
 
     int ok = (g_done == 1 && g_err == 0 && g_res.naddrs >= 1);
     /* "localhost" → loopback; confirm the primary address is a loopback IP. */
-    int loopback = 0;
-    if (ok) {
-        struct sockaddr *sa = (struct sockaddr *)&g_res.addrs[0];
-        if (sa->sa_family == AF_INET) {
-            struct sockaddr_in *s4 = (struct sockaddr_in *)sa;
-            loopback = (s4->sin_addr.s_addr == htonl(INADDR_LOOPBACK));
-        } else if (sa->sa_family == AF_INET6) {
-            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)sa;
-            loopback = IN6_IS_ADDR_LOOPBACK(&s6->sin6_addr);
-        }
-    }
+    int loopback = ok && kl_sockaddr_is_loopback(&g_res.addrs[0]);
 
     r->destroy(r);
     kl_event_ctx_free(&ctx);

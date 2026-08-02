@@ -32,14 +32,10 @@ static int          g_res_ports[KL_RESOLVE_MAX_ADDRS];
 static int          g_res_n;
 static KlResolveReq g_mock_req;
 
-static void fill_v4(struct sockaddr_storage *ss, socklen_t *len,
-                    const char *ip, int port) {
-    struct sockaddr_in *sin = (struct sockaddr_in *)ss;
-    memset(sin, 0, sizeof(*sin));
-    sin->sin_family = AF_INET;
-    sin->sin_port = htons((uint16_t)port);
-    inet_pton(AF_INET, ip, &sin->sin_addr);
-    *len = sizeof(*sin);
+static void fill_v4(KlSockAddr *a, const char *ip, int port) {
+    uint8_t b[4];
+    inet_pton(AF_INET, ip, b);
+    kl_sockaddr_from_ipv4(a, b, (uint16_t)port);
 }
 
 static KlResolveReq *he_resolve(KlResolver *self, KlEventCtx *ctx,
@@ -53,7 +49,7 @@ static KlResolveReq *he_resolve(KlResolver *self, KlEventCtx *ctx,
     r.ai_protocol = 0;
     r.naddrs = g_res_n;
     for (int i = 0; i < g_res_n; i++)
-        fill_v4(&r.addrs[i], &r.addrlens[i],
+        fill_v4(&r.addrs[i],
                 g_res_ip[i] ? g_res_ip[i] : "127.0.0.1", g_res_ports[i]);
     done_fn(&g_mock_req, &r, 0, ud);       /* synchronous completion */
     return &g_mock_req;

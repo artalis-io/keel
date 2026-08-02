@@ -1401,9 +1401,8 @@ static void he_arm_delay(KlClient *c)
  * now in flight (or already won), -1 on a hard local failure (try the next). */
 static int he_new_attempt(KlClient *c, int idx)
 {
-    const struct sockaddr *sa = (const struct sockaddr *)&c->conn_addrs.addrs[idx];
-    socklen_t sl = c->conn_addrs.addrlens[idx];
-    int fam = c->conn_addrs.addrs[idx].ss_family;
+    const KlSockAddr *sa = &c->conn_addrs.addrs[idx];
+    int fam = (kl_sockaddr_family(sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
 
     KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, fam, c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
     if (!kl_handle_valid(fd))
@@ -1415,9 +1414,7 @@ static int he_new_attempt(KlClient *c, int idx)
         return -1;
     }
 
-    KlSockAddr csa;
-    kl_sockaddr_from_native(&csa, sa, sl);
-    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, &csa);
+    int rc = kl_sock_connect(c->ev_ctx->sockets, fd, sa);
     if (rc < 0 && errno != EINPROGRESS) {
         c->conn_last_err = KL_ERR_CONNECT;
         kl_sock_close(c->ev_ctx->sockets, fd);
