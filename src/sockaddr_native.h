@@ -68,7 +68,9 @@ static inline int kl_sockaddr_from_native(KlSockAddr *out,
                                           socklen_t len) {
     if (!out || !sa) return -1;
 
-    switch (sa->sa_family) {
+    /* Cast to int: some platforms (cosmo) type sa_family narrowly (uint8_t),
+     * which trips GCC -Werror=switch-outside-range on the wider AF_* labels. */
+    switch ((int)sa->sa_family) {
     case AF_INET: {
         const struct sockaddr_in *in = (const struct sockaddr_in *)sa;
         uint8_t ip[4];
