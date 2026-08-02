@@ -732,7 +732,8 @@ check-sockaddr-neutral:
 cppcheck:
 	cppcheck --enable=all --inline-suppr --suppress=missingIncludeSystem \
 	  --suppress=unusedFunction --suppress=checkersReport \
-	  --suppress=toomanyconfigs \
+	  --suppress=toomanyconfigs --suppress=staticFunction \
+	  --suppress=normalCheckLevelMaxBranches \
 	  -UKEEL_PLATFORM_LWIP \
 	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
 

@@ -685,7 +685,7 @@ int kl_server_run(KlServer *s) {
              * KL_COMP_WATCHER; timers + async deadlines serviced here, 8e-2). */
             uint64_t cnow = kl_monotonic_ms();
             int cwait = KL_POLL_TIMEOUT_MS;
-            for (KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
+            for (const KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
                 if (aop->deadline_ms > 0) {
                     if (cnow >= aop->deadline_ms) { cwait = 0; break; }
                     uint64_t rem = aop->deadline_ms - cnow;
@@ -715,7 +715,7 @@ int kl_server_run(KlServer *s) {
         /* Compute dynamic timeout based on nearest async op deadline */
         uint64_t now = kl_monotonic_ms();
         int wait_timeout = KL_POLL_TIMEOUT_MS;
-        for (KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
+        for (const KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
             if (aop->deadline_ms > 0) {
                 if (now >= aop->deadline_ms) {
                     wait_timeout = 0;

@@ -127,7 +127,9 @@ static int lwev_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void
 
 static int lwev_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     KlLwipPollState *st = loop->_backend;
-    if (!kl_handle_valid(fd) || (int)fd >= st->fd_to_idx_cap) return -1;
+    /* Reject the full negative range (kl_handle_valid only rejects -1), not just
+     * the upper bound — else fd <= -2 indexes fd_to_idx[] out of bounds. */
+    if ((int)fd < 0 || (int)fd >= st->fd_to_idx_cap) return -1;
     int idx = st->fd_to_idx[(int)fd];
     if (idx < 0) return -1;
     st->fds[idx].events = mask_to_poll(mask);
@@ -137,7 +139,8 @@ static int lwev_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void
 
 static int lwev_del(KlEventLoop *loop, KlSocketHandle fd) {
     KlLwipPollState *st = loop->_backend;
-    if (!kl_handle_valid(fd) || (int)fd >= st->fd_to_idx_cap) return -1;
+    /* Reject the full negative range (see lwev_mod), not just the upper bound. */
+    if ((int)fd < 0 || (int)fd >= st->fd_to_idx_cap) return -1;
     int idx = st->fd_to_idx[(int)fd];
     if (idx < 0) return -1;
     st->fd_to_idx[(int)fd] = -1;
