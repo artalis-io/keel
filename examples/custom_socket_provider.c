@@ -75,7 +75,7 @@ int main(void) {
     /* Server through a counting decorator over the built-in provider. It must
      * advertise KL_SOCK_CAP_NATIVE_FD — the readiness event loop polls real fds. */
     CountingCtx srv = { .base = kl_socket_provider_posix(), 0, 0, 0, 0 };
-    KlSocketProvider srv_prov = { &counting_ops, &srv, KL_SOCK_CAP_NATIVE_FD };
+    KlSocketProvider srv_prov = { &counting_ops, &srv, KL_SOCK_CAP_NATIVE_FD, NULL };
 
     KlServer s;
     KlConfig cfg = { .port = DEMO_PORT, .bind_addr = "127.0.0.1", .sockets = &srv_prov };
@@ -93,7 +93,7 @@ int main(void) {
 
     /* Client through its OWN counting decorator, selected via KlClientConfig. */
     CountingCtx cli = { .base = kl_socket_provider_posix(), 0, 0, 0, 0 };
-    KlSocketProvider cli_prov = { &counting_ops, &cli, KL_SOCK_CAP_NATIVE_FD };
+    KlSocketProvider cli_prov = { &counting_ops, &cli, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlAllocator alloc = kl_allocator_default();
 
     int ok = 0;

@@ -157,6 +157,7 @@ static const KlSocketOps lwip_ops = {
  * (event_lwip.c, lwip_poll). WRITEV: lwip_writev is available. No SENDFILE. */
 static const KlSocketProvider lwip_provider = {
     &lwip_ops, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV,
+    NULL,   /* dgram — datagram ops added in the lwIP datagram-provider stage */
 };
 
 const KlSocketProvider *kl_socket_provider_lwip(void) { return &lwip_provider; }

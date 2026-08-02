@@ -227,6 +227,7 @@ const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoo
 static const KlSocketOps IOCP_OPS = { .name = "iocp" };
 static const KlSocketProvider IOCP_PROVIDER = {
     &IOCP_OPS, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED,
+    NULL,   /* dgram — completion loop uses kl_comp_post_udp_*, not the readiness dgram ops */
 };
 const KlSocketProvider *kl_socket_provider_iocp(void) { return &IOCP_PROVIDER; }
 
