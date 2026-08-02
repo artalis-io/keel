@@ -11,6 +11,14 @@ build against your own lwIP (`LWIP_DIR`) + `lwipopts.h`.
   `event_provider` auto-wires the matched `sockets`).
 - `resolve_sync_lwip.c` — blocking name resolution over `lwip_getaddrinfo` (the
   client-axis seam; overrides the stock host `kl_resolve_sync` at link time).
+- `udp_io_lwip.c` — the datagram-I/O seam (`kl_udp_io_*`) over lwIP sockets
+  (`lwip_sendto`/`lwip_recvfrom`), so `KlUdp` — hence `udp_server` and the built-in
+  async DNS resolver — runs on lwIP. Unlike the runtime-injected socket/event
+  providers, `udp_io` is a build/link seam, so this TU includes Keel's *internal*
+  headers (`-I../../src`) and overrides the stock `udp_io_posix.o` at link time.
+  Per-datagram only (lwIP has no recvmmsg/GSO/GRO/pktinfo).
+- `platform_wakeup_lwip.c` — self-connected lwIP UDP wakeup (responsive
+  `kl_server_stop`; overrides the generic `src/platform_wakeup_*` seam).
 - `keel_lwip.h` — `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`.
 - `lwipopts.h` — a **sample** host/loopback config (not blessed for production).
 
@@ -47,12 +55,14 @@ So **both axes are runtime-injectable**: the event backend (`KlEventProvider`) a
 the socket/address provider (`KlSocketProvider` + `KlSockAddr`). No library
 recompile.
 
-`lwip_loopback_test.c` is the proof — both the server and the client axis on lwIP,
-linked against a **stock** `libkeel`:
-- a raw lwIP client → the Keel **server** (`200 OK`), and
+`lwip_loopback_test.c` is the proof — the server, client, and datagram axes on
+lwIP, linked against a **stock** `libkeel`:
+- a raw lwIP client → the Keel **server** (`200 OK`),
 - a Keel async **client** on the lwIP providers → the same server (`200`), with
   name resolution via `resolve_sync_lwip.c` (`lwip_getaddrinfo`, linked ahead of
-  the stock lib so it overrides the host `kl_resolve_sync`).
+  the stock lib so it overrides the host `kl_resolve_sync`), and
+- a Keel **`KlUdp` echo** on the lwIP providers, bounced by a raw lwIP UDP client
+  (`udp_io_lwip.c` overriding the stock `udp_io_posix.o`).
 
 ```sh
 make -C ../..                       # stock libkeel.a (any backend)
@@ -60,7 +70,11 @@ make loopback LWIP_DIR=/path/to/lwip
 # -> keel: listening on 127.0.0.1:8080
 #    lwIP loopback: raw client -> Keel server replied 200 OK (correct)
 #    lwIP loopback: Keel client on lwIP got 200 (correct)
+#    lwIP loopback: Keel UDP echo on lwIP round-tripped (correct)
 ```
+
+A third phase runs a Keel `KlUdp` echo on the lwIP providers (`udp_io_lwip.c`),
+exercised by a raw lwIP UDP client — proving the datagram axis end to end.
 
 Run in CI by the **Integration (lwIP)** job (clones lwIP + lwip-contrib, stock
 libkeel, `make loopback`), so the payoff is regression-protected.
@@ -69,14 +83,15 @@ libkeel, `make loopback`), so the payoff is regression-protected.
 lwIP UDP wakeup (overriding the generic `src/platform_wakeup_*` seam at link time),
 so `kl_server_stop` wakes `lwip_poll` immediately rather than on the next tick.
 
-**Not yet on lwIP:** udp (`udp_io_lwip` → `udp_server` + the built-in async DNS
-resolver) and TLS-over-lwIP; `lwipopts.h` is a sample, not production-blessed.
+**Not yet on lwIP:** TLS-over-lwIP; `lwipopts.h` is a sample, not
+production-blessed. (udp is now on lwIP via `udp_io_lwip.c` — the base for
+`udp_server` + the built-in async DNS resolver.)
 
 ## Tested versions
 
 | lwIP | Status |
 |------|--------|
-| STABLE-2.2.0 | **Loopback verified: server + client** (200 OK on stock libkeel) + build-gate |
+| STABLE-2.2.0 | **Loopback verified: server + client + UDP** (200 OK + UDP echo on stock libkeel) + build-gate |
 | 2.1.x | Expected to work (same `lwip_poll` + BSD socket API) |
 
 ## Scope

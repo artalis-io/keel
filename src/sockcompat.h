@@ -46,6 +46,18 @@
    * signal would-block/EINTR the same way the socket seam ops do — callers that
    * branch on errno after a -1 return depend on it. */
   void kl_wsa_set_errno(void);
+#elif defined(KEEL_PLATFORM_LWIP)
+  /* lwIP target: the stack provides its own BSD socket types (struct sockaddr{,_
+   * storage}, socklen_t, struct iovec) via lwip/sockets.h — do NOT pull the host
+   * <sys/socket.h>, which would clash. The internal counterpart of net.h's lwIP
+   * branch, so an internal TU built with -DKEEL_PLATFORM_LWIP (e.g.
+   * integrations/lwip/udp_io_lwip.c) resolves socket types to lwIP's, not the
+   * host's. Inert unless a provider defines KEEL_PLATFORM_LWIP. ssize_t comes
+   * from the host libc <sys/types.h> (no sockaddr), which the lwIP unix port
+   * already builds against. */
+  #include <sys/types.h>
+  #include <errno.h>
+  #include "lwip/sockets.h"
 #else
   #include <sys/types.h>
   #include <sys/socket.h>
