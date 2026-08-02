@@ -466,14 +466,15 @@ static void udp_recv_drain_batched(KlUdp *udp) {
             struct msghdr *m = &b->msgs[i].msg_hdr;
             if (m->msg_flags & MSG_TRUNC)
                 udp->truncated++;
-            socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(m, &udp->recv_local) : 0;
+            struct sockaddr_storage recv_local;   /* per-datagram pktinfo scratch */
+            socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(m, &recv_local) : 0;
             int gro = udp->recv_gro ? kl_udp_parse_gro(m) : 0;
             udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(m) : -1;
             /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary. */
             KlSockAddr ksrc, klocal;
             kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&b->src[i], m->msg_namelen);
             if (local_len)
-                kl_sockaddr_from_native(&klocal, (struct sockaddr *)&udp->recv_local, local_len);
+                kl_sockaddr_from_native(&klocal, (struct sockaddr *)&recv_local, local_len);
             kl_udp_deliver(udp, b->iov[i].iov_base, (size_t)b->msgs[i].msg_len, gro,
                            &ksrc, local_len ? &klocal : NULL);
             /* The callback may have called recv_stop() or free() — re-check. */
@@ -494,6 +495,7 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
         struct cmsghdr align;
         unsigned char  buf[UDP_RX_CMSG_SPACE];
     } control;
+    struct sockaddr_storage recv_src, recv_local;   /* per-datagram scratch (host layout) */
 
     for (;;) {
         struct msghdr msg;
@@ -503,8 +505,8 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
         iov.iov_len  = udp->recv_buf_size;
         msg.msg_iov = &iov;
         msg.msg_iovlen = 1;
-        msg.msg_name = &udp->recv_src;
-        msg.msg_namelen = sizeof(udp->recv_src);
+        msg.msg_name = &recv_src;
+        msg.msg_namelen = sizeof(recv_src);
         if (udp->pktinfo || udp->recv_gro || udp->recv_tos) {
             msg.msg_control = control.buf;
             msg.msg_controllen = sizeof(control.buf);
@@ -520,15 +522,15 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
         if (msg.msg_flags & MSG_TRUNC)
             udp->truncated++;
 
-        socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(&msg, &udp->recv_local) : 0;
+        socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(&msg, &recv_local) : 0;
         int gro = udp->recv_gro ? kl_udp_parse_gro(&msg) : 0;
         udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(&msg) : -1;
 
         /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary. */
         KlSockAddr ksrc, klocal;
-        kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&udp->recv_src, msg.msg_namelen);
+        kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&recv_src, msg.msg_namelen);
         if (local_len)
-            kl_sockaddr_from_native(&klocal, (struct sockaddr *)&udp->recv_local, local_len);
+            kl_sockaddr_from_native(&klocal, (struct sockaddr *)&recv_local, local_len);
         kl_udp_deliver(udp, udp->recv_buf, (size_t)n, gro,
                        &ksrc, local_len ? &klocal : NULL);
 

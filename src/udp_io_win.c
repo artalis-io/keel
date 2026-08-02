@@ -314,6 +314,7 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
         WSACMSGHDR    align;
         unsigned char buf[UDP_RX_CMSG_SPACE];
     } control;
+    struct sockaddr_storage recv_src, recv_local;   /* per-datagram scratch (host layout) */
 
     for (;;) {
         int want_control = (udp->pktinfo || udp->recv_tos);
@@ -333,8 +334,8 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
 
         if (want_control) {
             memset(&msg, 0, sizeof(msg));
-            msg.name = (LPSOCKADDR)&udp->recv_src;
-            msg.namelen = (INT)sizeof(udp->recv_src);
+            msg.name = (LPSOCKADDR)&recv_src;
+            msg.namelen = (INT)sizeof(recv_src);
             msg.lpBuffers = &iov;
             msg.dwBufferCount = 1;
             msg.Control.buf = (CHAR *)control.buf;
@@ -363,9 +364,9 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
                     udp->truncated++;
             }
         } else {
-            int fromlen = (int)sizeof(udp->recv_src);
+            int fromlen = (int)sizeof(recv_src);
             int r = recvfrom(s, (char *)udp->recv_buf, (int)udp->recv_buf_size, 0,
-                             (struct sockaddr *)&udp->recv_src, &fromlen);
+                             (struct sockaddr *)&recv_src, &fromlen);
             if (r == SOCKET_ERROR) {
                 int e = WSAGetLastError();
                 if (e == WSAEMSGSIZE) {   /* datagram truncated to the buffer */
@@ -383,14 +384,14 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
             }
         }
 
-        socklen_t local_len = (have_control && udp->pktinfo) ? kl_udp_win_parse_local(&msg, &udp->recv_local) : 0;
+        socklen_t local_len = (have_control && udp->pktinfo) ? kl_udp_win_parse_local(&msg, &recv_local) : 0;
         udp->recv_tos_val = (have_control && udp->recv_tos) ? udp_parse_tos(&msg) : -1;
 
         /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary. */
         KlSockAddr ksrc, klocal;
-        kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&udp->recv_src, src_len);
+        kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&recv_src, src_len);
         if (local_len)
-            kl_sockaddr_from_native(&klocal, (struct sockaddr *)&udp->recv_local, local_len);
+            kl_sockaddr_from_native(&klocal, (struct sockaddr *)&recv_local, local_len);
         /* Windows has no UDP GRO → gro_seg is always 0. */
         kl_udp_deliver(udp, udp->recv_buf, (size_t)n, 0,
                        &ksrc, local_len ? &klocal : NULL);
