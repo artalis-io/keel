@@ -19,8 +19,8 @@
  * connect/bind/get_local_addr ops — it marshals KlSockAddr to its native address
  * shape inside its own implementation (see src/sockaddr_native.h for the built-in
  * providers). A provider likewise translates KlIoVec to its native vector (POSIX
- * struct iovec, Winsock WSABUF, …). (accept still delivers a raw struct sockaddr
- * peer for now; its KlSockAddr migration lands with the proxy/completion axes.)
+ * struct iovec, Winsock WSABUF, …). All address ops — connect/bind/accept/
+ * get_local_addr — are KlSockAddr; no platform struct sockaddr crosses this API.
  *
  * The `kl_sock_*` consumer wrappers and `kl_sockdef_*` platform defaults are NOT
  * here — they are Keel's internal consumers of a provider (src/socket.h), not
@@ -83,7 +83,7 @@ typedef struct KlSocketOps {
     int     (*connect)(void *ctx, KlSocketHandle fd, const KlSockAddr *addr);
     int     (*bind)(void *ctx, KlSocketHandle fd, const KlSockAddr *addr);
     int     (*listen)(void *ctx, KlSocketHandle fd, int backlog);
-    KlSocketHandle (*accept)(void *ctx, KlSocketHandle fd, struct sockaddr *addr, socklen_t *len);
+    KlSocketHandle (*accept)(void *ctx, KlSocketHandle fd, KlSockAddr *peer);
     int     (*close)(void *ctx, KlSocketHandle fd);
     /* Read the local (bound) address — getsockname — into a KlSockAddr. */
     int     (*get_local_addr)(void *ctx, KlSocketHandle fd, KlSockAddr *addr);

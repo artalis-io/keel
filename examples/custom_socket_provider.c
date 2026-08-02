@@ -33,10 +33,10 @@ static KlSocketHandle c_socket(void *ctx, int domain, int type, int protocol) {
     c->sockets++;
     return c->base->ops->socket(c->base->context, domain, type, protocol);
 }
-static KlSocketHandle c_accept(void *ctx, KlSocketHandle fd, struct sockaddr *a, socklen_t *l) {
+static KlSocketHandle c_accept(void *ctx, KlSocketHandle fd, KlSockAddr *peer) {
     CountingCtx *c = ctx;
     c->accepts++;
-    return c->base->ops->accept(c->base->context, fd, a, l);
+    return c->base->ops->accept(c->base->context, fd, peer);
 }
 static kl_ssize_t c_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
     CountingCtx *c = ctx;

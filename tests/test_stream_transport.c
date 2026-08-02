@@ -121,7 +121,7 @@ static void st_on_accept(KlSocketHandle lfd, KlEventMask ready, void *ud) {
     KlEventCtx *ev = ud;
     const KlSocketProvider *sp = ev->sockets ? ev->sockets : kl_socket_provider_posix();
     for (;;) {
-        KlSocketHandle cfd = sp->ops->accept(sp->context, lfd, NULL, NULL);
+        KlSocketHandle cfd = sp->ops->accept(sp->context, lfd, NULL);
         if (!kl_handle_valid(cfd)) break;            /* drained (would-block) */
         sp->ops->set_nonblocking(sp->context, cfd);
         FrameConn *fc = kl_malloc(ev->alloc, sizeof(*fc));

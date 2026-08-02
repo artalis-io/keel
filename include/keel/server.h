@@ -345,15 +345,14 @@ int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
                          uint16_t *port);
 
 /**
- * @brief Raw client socket address for a request (for advanced use).
+ * @brief Client address for a request as a Keel-neutral KlSockAddr (advanced use).
  *
  * @param req  The request.
- * @param len  Receives the address length; may be NULL.
  * @return Pointer to the address (owned by the connection), or NULL if
- *         unavailable. Valid until the request completes.
+ *         unavailable. Valid until the request completes. Format it with
+ *         kl_sockaddr_format(), or read family/port via kl_sockaddr_family/port().
  */
-const struct sockaddr *kl_request_peer_sockaddr(const KlRequest *req,
-                                                socklen_t *len);
+const KlSockAddr *kl_request_peer_sockaddr(const KlRequest *req);
 
 /**
  * @brief Extract the verified mTLS client certificate for a request.

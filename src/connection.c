@@ -373,10 +373,9 @@ int kl_conn_read_proxy_header(KlConn *c) {
     if (n == 0)
         return -1;   /* peer closed before sending a header */
 
-    struct sockaddr_storage peer;
-    socklen_t peer_len = 0;
+    KlSockAddr peer;
     size_t consumed = 0;
-    KlProxyResult r = kl_proxy_parse(buf, (size_t)n, &consumed, &peer, &peer_len);
+    KlProxyResult r = kl_proxy_parse(buf, (size_t)n, &consumed, &peer);
 
     switch (r) {
         case KL_PROXY_NEED_MORE:
@@ -401,12 +400,11 @@ int kl_conn_read_proxy_header(KlConn *c) {
         left -= (size_t)rd;
     }
 
-    if (peer_len > 0 && (size_t)peer_len <= sizeof(c->peer_addr)) {
-        memcpy(&c->peer_addr, &peer, peer_len);
-        c->peer_addr_len = peer_len;
+    if (kl_sockaddr_family(&peer) != KL_AF_UNSPEC) {
+        c->peer_addr = peer;
         c->peer_source = KL_PEER_PROXY;
     }
-    /* LOCAL/UNKNOWN (peer_len == 0): keep the socket address. */
+    /* LOCAL/UNKNOWN (KL_AF_UNSPEC): keep the socket address. */
     return 1;
 }
 
@@ -417,11 +415,10 @@ int kl_conn_read_proxy_header(KlConn *c) {
  * proceed with all bytes as HTTP/TLS), -1 on malformed/oversized, or -2 if more bytes are needed
  * (the caller posts another recv). */
 int kl_conn_ingest_proxy(KlConn *c, size_t len) {
-    struct sockaddr_storage peer;
-    socklen_t peer_len = 0;
+    KlSockAddr peer;
     size_t consumed = 0;
     KlProxyResult r = kl_proxy_parse((const uint8_t *)c->read_buf, len,
-                                     &consumed, &peer, &peer_len);
+                                     &consumed, &peer);
     switch (r) {
         case KL_PROXY_NEED_MORE:
             /* A PROXY header can't exceed KL_PROXY_HEADER_MAX; still incomplete past that is
@@ -432,9 +429,8 @@ int kl_conn_ingest_proxy(KlConn *c, size_t len) {
         case KL_PROXY_NONE:
             return 0;   /* not a PROXY header — proceed with all buffered bytes */
         case KL_PROXY_OK:
-            if (peer_len > 0 && (size_t)peer_len <= sizeof(c->peer_addr)) {
-                memcpy(&c->peer_addr, &peer, peer_len);
-                c->peer_addr_len = peer_len;
+            if (kl_sockaddr_family(&peer) != KL_AF_UNSPEC) {
+                c->peer_addr = peer;
                 c->peer_source = KL_PEER_PROXY;
             }
             return (int)consumed;
