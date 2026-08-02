@@ -11,6 +11,7 @@
 #include "udp_internal.h"
 #include "udp_cmsg.h"        /* kl_udp_parse_local — shared with the POSIX completion backends */
 #include "udp_io.h"
+#include "sockaddr_native.h" /* KlSockAddr <-> host sockaddr at the seam boundary */
 
 #include <errno.h>
 #include <stdint.h>
@@ -56,11 +57,12 @@ typedef struct {
 /* TX batch: N msghdrs for one sendmmsg call; payloads live in the queue nodes,
  * each slot carries its own control buffer for a source-pinning pktinfo cmsg. */
 typedef struct {
-    struct mmsghdr *msgs;
-    struct iovec   *iov;
-    unsigned char  *ctrl;     /* n * ctrl_sz */
-    size_t          ctrl_sz;
-    int             n;
+    struct mmsghdr          *msgs;
+    struct iovec            *iov;
+    struct sockaddr_storage *dst;      /* per-msg dest (msg_name must persist to sendmmsg) */
+    unsigned char           *ctrl;     /* n * ctrl_sz */
+    size_t                   ctrl_sz;
+    int                      n;
 } UdpTxBatch;
 
 static void udp_rx_batch_free(KlAllocator *a, UdpRxBatch *b) {
@@ -96,6 +98,7 @@ static void udp_tx_batch_free(KlAllocator *a, UdpTxBatch *b) {
     if (!b) return;
     kl_free(a, b->msgs, (size_t)b->n * sizeof(struct mmsghdr));
     kl_free(a, b->iov,  (size_t)b->n * sizeof(struct iovec));
+    kl_free(a, b->dst,  (size_t)b->n * sizeof(struct sockaddr_storage));
     kl_free(a, b->ctrl, (size_t)b->n * b->ctrl_sz);
     kl_free(a, b, sizeof(*b));
 }
@@ -108,8 +111,9 @@ static UdpTxBatch *udp_tx_batch_new(KlAllocator *a, int n) {
     b->ctrl_sz = UDP_TX_CMSG_SPACE;   /* pktinfo + TOS */
     b->msgs = kl_malloc(a, (size_t)n * sizeof(struct mmsghdr));
     b->iov  = kl_malloc(a, (size_t)n * sizeof(struct iovec));
+    b->dst  = kl_malloc(a, (size_t)n * sizeof(struct sockaddr_storage));
     b->ctrl = kl_malloc(a, (size_t)n * b->ctrl_sz);
-    if (!b->msgs || !b->iov || !b->ctrl) {
+    if (!b->msgs || !b->iov || !b->dst || !b->ctrl) {
         udp_tx_batch_free(a, b);
         return NULL;
     }
@@ -212,17 +216,25 @@ static ssize_t udp_send_msg(KlUdp *udp, const void *data, size_t len,
 }
 
 ssize_t kl_udp_io_raw_send(KlUdp *udp, const void *data, size_t len,
-                           const struct sockaddr *dest, socklen_t dest_len,
-                           const struct sockaddr *src, socklen_t src_len, int tos) {
-    if ((src && src_len) || tos >= 0)
-        return udp_send_msg(udp, data, len, dest, dest_len,
-                            (src && src_len) ? src : NULL, tos);
+                           const KlSockAddr *dest, const KlSockAddr *src, int tos) {
+    /* Marshal the neutral addresses to host sockaddr at the seam boundary; the
+     * internal send path (udp_send_msg / build_control) stays in host sockaddr. */
+    struct sockaddr_storage ds, ss;
+    socklen_t dest_len = (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC)
+                         ? kl_sockaddr_to_native(dest, &ds) : 0;
+    socklen_t src_len  = (src && kl_sockaddr_family(src) != KL_AF_UNSPEC)
+                         ? kl_sockaddr_to_native(src, &ss) : 0;
+    const struct sockaddr *dsa = dest_len ? (const struct sockaddr *)&ds : NULL;
+    const struct sockaddr *ssa = src_len  ? (const struct sockaddr *)&ss : NULL;
+
+    if (ssa || tos >= 0)
+        return udp_send_msg(udp, data, len, dsa, dest_len, ssa, tos);
     ssize_t n;
     do {
         if (dest_len == 0)
             n = send(udp->fd, data, len, 0);
         else
-            n = sendto(udp->fd, data, len, 0, dest, dest_len);
+            n = sendto(udp->fd, data, len, 0, dsa, dest_len);
     } while (n < 0 && errno == EINTR);
     return n;
 }
@@ -257,16 +269,23 @@ static void udp_flush_queue_batched(KlUdp *udp) {
             memset(m, 0, sizeof(*m));
             m->msg_iov = &b->iov[cnt];
             m->msg_iovlen = 1;
-            if (node->dest_len) {
-                m->msg_name = &node->dest;
-                m->msg_namelen = node->dest_len;
+            /* Marshal the neutral dest into the batch's per-msg scratch (its
+             * lifetime must span the sendmmsg call). */
+            socklen_t dest_len = (kl_sockaddr_family(&node->dest) != KL_AF_UNSPEC)
+                                 ? kl_sockaddr_to_native(&node->dest, &b->dst[cnt]) : 0;
+            if (dest_len) {
+                m->msg_name = &b->dst[cnt];
+                m->msg_namelen = dest_len;
             }
-            if (node->src_len || node->tos >= 0) {
+            int have_src = (kl_sockaddr_family(&node->src) != KL_AF_UNSPEC);
+            if (have_src || node->tos >= 0) {
+                struct sockaddr_storage src_ss;
+                socklen_t src_len = have_src ? kl_sockaddr_to_native(&node->src, &src_ss) : 0;
                 unsigned char *ctrl = b->ctrl + (size_t)cnt * b->ctrl_sz;
-                int fam = node->dest_len ? node->dest.ss_family : udp->family;
+                int fam = dest_len ? (int)b->dst[cnt].ss_family : udp->family;
                 size_t clen = udp_build_control(
                     ctrl, b->ctrl_sz,
-                    node->src_len ? (struct sockaddr *)&node->src : NULL,
+                    src_len ? (struct sockaddr *)&src_ss : NULL,
                     node->tos, fam);
                 if (clen) { m->msg_control = ctrl; m->msg_controllen = clen; }
             }
@@ -307,10 +326,7 @@ void kl_udp_io_flush_queue(KlUdp *udp) {
     while (udp->q_head) {
         KlUdpDatagram *node = udp->q_head;
         ssize_t n = kl_udp_io_raw_send(udp, node->data, node->len,
-                                       node->dest_len ? (struct sockaddr *)&node->dest : NULL,
-                                       node->dest_len,
-                                       node->src_len ? (struct sockaddr *)&node->src : NULL,
-                                       node->src_len, node->tos);
+                                       &node->dest, &node->src, node->tos);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 break;                 /* socket buffer still full — retry later */
@@ -453,10 +469,13 @@ static void udp_recv_drain_batched(KlUdp *udp) {
             socklen_t local_len = udp->pktinfo ? kl_udp_parse_local(m, &udp->recv_local) : 0;
             int gro = udp->recv_gro ? kl_udp_parse_gro(m) : 0;
             udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(m) : -1;
+            /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary. */
+            KlSockAddr ksrc, klocal;
+            kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&b->src[i], m->msg_namelen);
+            if (local_len)
+                kl_sockaddr_from_native(&klocal, (struct sockaddr *)&udp->recv_local, local_len);
             kl_udp_deliver(udp, b->iov[i].iov_base, (size_t)b->msgs[i].msg_len, gro,
-                           (struct sockaddr *)&b->src[i], m->msg_namelen,
-                           local_len ? (struct sockaddr *)&udp->recv_local : NULL,
-                           local_len);
+                           &ksrc, local_len ? &klocal : NULL);
             /* The callback may have called recv_stop() or free() — re-check. */
             if (!udp->recv_active || udp->fd < 0)
                 return;
@@ -505,10 +524,13 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
         int gro = udp->recv_gro ? kl_udp_parse_gro(&msg) : 0;
         udp->recv_tos_val = udp->recv_tos ? udp_parse_tos(&msg) : -1;
 
+        /* Marshal host sockaddr -> neutral KlSockAddr at the seam boundary. */
+        KlSockAddr ksrc, klocal;
+        kl_sockaddr_from_native(&ksrc, (struct sockaddr *)&udp->recv_src, msg.msg_namelen);
+        if (local_len)
+            kl_sockaddr_from_native(&klocal, (struct sockaddr *)&udp->recv_local, local_len);
         kl_udp_deliver(udp, udp->recv_buf, (size_t)n, gro,
-                       (struct sockaddr *)&udp->recv_src, msg.msg_namelen,
-                       local_len ? (struct sockaddr *)&udp->recv_local : NULL,
-                       local_len);
+                       &ksrc, local_len ? &klocal : NULL);
 
         /* The callback may have called recv_stop() or free() — re-check. */
         if (!udp->recv_active || udp->fd < 0)
@@ -519,9 +541,11 @@ void kl_udp_io_recv_drain(KlUdp *udp) {
 /* ── UDP GSO (Linux) ──────────────────────────────────────────────────── */
 
 ssize_t kl_udp_io_send_gso(KlUdp *udp, const void *data, size_t len,
-                           uint16_t seg, const struct sockaddr *dest,
-                           socklen_t dest_len) {
+                           uint16_t seg, const KlSockAddr *dest) {
 #if defined(__linux__) && defined(UDP_SEGMENT)
+    struct sockaddr_storage ds;
+    socklen_t dest_len = (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC)
+                         ? kl_sockaddr_to_native(dest, &ds) : 0;
     union {
         struct cmsghdr align;
         unsigned char  buf[CMSG_SPACE(sizeof(uint16_t))];
@@ -530,7 +554,7 @@ ssize_t kl_udp_io_send_gso(KlUdp *udp, const void *data, size_t len,
     struct iovec iov = { .iov_base = (void *)data, .iov_len = len };
     struct msghdr msg;
     memset(&msg, 0, sizeof(msg));
-    msg.msg_name = (void *)dest;
+    msg.msg_name = dest_len ? (void *)&ds : NULL;
     msg.msg_namelen = dest_len;
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
@@ -549,7 +573,7 @@ ssize_t kl_udp_io_send_gso(KlUdp *udp, const void *data, size_t len,
     do { n = sendmsg(udp->fd, &msg, 0); } while (n < 0 && errno == EINTR);
     return n;
 #else
-    (void)udp; (void)data; (void)len; (void)seg; (void)dest; (void)dest_len;
+    (void)udp; (void)data; (void)len; (void)seg; (void)dest;
     errno = EOPNOTSUPP;
     return -1;   /* GSO unavailable at build time — caller uses the fallback */
 #endif

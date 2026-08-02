@@ -48,6 +48,7 @@
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
+#include "sockaddr_native.h"     /* KlSockAddr -> host sockaddr for the overlapped UDP send */
 #include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
@@ -636,7 +637,7 @@ int kl_comp_post_udp_recv(struct KlUdp *udp) {
 }
 
 int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
-                          const struct sockaddr *dest, int dest_len) {
+                          const KlSockAddr *dest) {
     KlIouState *st = udp->ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
@@ -648,11 +649,13 @@ int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
     op->sendbuf = kl_malloc(st->alloc, op->sendcap);
     if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }
     memcpy(op->sendbuf, data, len);
-    if (dest_len > 0 && (size_t)dest_len <= sizeof(op->peer)) {
-        memcpy(&op->peer, dest, (size_t)dest_len);
-        op->peer_len = (socklen_t)dest_len;
-        op->msgh.msg_name = &op->peer;
-        op->msgh.msg_namelen = op->peer_len;
+    /* Marshal the neutral dest to a host sockaddr for the overlapped sendmsg. */
+    if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC) {
+        op->peer_len = kl_sockaddr_to_native(dest, &op->peer);
+        if (op->peer_len) {
+            op->msgh.msg_name = &op->peer;
+            op->msgh.msg_namelen = op->peer_len;
+        }
     }
     op->msgiov.iov_base = op->sendbuf;
     op->msgiov.iov_len = len;

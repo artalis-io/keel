@@ -5,8 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "socket.h"   /* sockaddr / getaddrinfo / inet_ntop / ntohs via sockcompat.h */
-#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind/connect/get_local_addr) */
+#include "socket.h"   /* seam: kl_sock_* + KlSockAddr (udp_io owns sockaddr marshalling) */
 #include "udp_internal.h"
 #include "udp_io.h"
 #include "event_caps.h"   /* kl_event_caps — pick readiness vs completion recv */
@@ -59,8 +58,7 @@ void kl_udp_update_interest(KlUdp *udp) {
 /* ── Send path ────────────────────────────────────────────────────────── */
 
 static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
-                       const struct sockaddr *dest, socklen_t dest_len,
-                       const struct sockaddr *src, socklen_t src_len, int tos) {
+                       const KlSockAddr *dest, const KlSockAddr *src, int tos) {
     /* Backpressure cap (avoids max_send_queue - len underflow). */
     if (len > udp->max_send_queue || udp->q_bytes > udp->max_send_queue - len) {
         udp->dropped++;
@@ -81,18 +79,9 @@ static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
     }
     node->next = NULL;
     node->len = len;
-    if (dest && dest_len) {
-        memcpy(&node->dest, dest, dest_len);
-        node->dest_len = dest_len;
-    } else {
-        node->dest_len = 0;
-    }
-    if (src && src_len) {
-        memcpy(&node->src, src, src_len);
-        node->src_len = src_len;
-    } else {
-        node->src_len = 0;
-    }
+    /* KL_AF_UNSPEC (zeroed) = "unset": connected send / no source pin. */
+    if (dest) node->dest = *dest; else memset(&node->dest, 0, sizeof(node->dest));
+    if (src)  node->src  = *src;  else memset(&node->src,  0, sizeof(node->src));
     node->tos = tos;
     if (len)
         memcpy(node->data, data, len);
@@ -107,8 +96,7 @@ static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
 }
 
 static int udp_send_common(KlUdp *udp, const void *data, size_t len,
-                           const struct sockaddr *dest, socklen_t dest_len,
-                           const struct sockaddr *src, socklen_t src_len, int tos) {
+                           const KlSockAddr *dest, const KlSockAddr *src, int tos) {
     if (!kl_handle_valid(udp->fd)) {
         udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
@@ -125,7 +113,7 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
             udp->last_error = KL_ERR_IO;   /* backpressure cap — drop the datagram */
             return -1;
         }
-        if (kl_comp_post_udp_send(udp, data, len, dest, (int)dest_len) < 0) {
+        if (kl_comp_post_udp_send(udp, data, len, dest) < 0) {
             udp->last_error = KL_ERR_IO;
             return -1;
         }
@@ -135,13 +123,13 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
 
     /* Preserve ordering: if anything is queued, queue behind it. */
     if (udp->q_head)
-        return udp_enqueue(udp, data, len, dest, dest_len, src, src_len, tos);
+        return udp_enqueue(udp, data, len, dest, src, tos);
 
-    ssize_t n = kl_udp_io_raw_send(udp, data, len, dest, dest_len, src, src_len, tos);
+    ssize_t n = kl_udp_io_raw_send(udp, data, len, dest, src, tos);
     if (n >= 0)
         return 0;   /* UDP send is all-or-nothing — no short-send handling */
     if (errno == EAGAIN || errno == EWOULDBLOCK)
-        return udp_enqueue(udp, data, len, dest, dest_len, src, src_len, tos);
+        return udp_enqueue(udp, data, len, dest, src, tos);
 
     udp->last_error = KL_ERR_IO;
     return -1;
@@ -153,21 +141,13 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
  * len > gro_seg) goes whole to on_recv_segments when set, else is split into
  * per-segment on_recv calls; a plain datagram goes to on_recv. */
 void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
-                    const struct sockaddr *src, socklen_t src_len,
-                    const struct sockaddr *local, socklen_t local_len) {
-    /* Marshal the platform recv addresses to the neutral KlSockAddr the public
-     * callbacks speak (the io/completion layers below still work in sockaddr). */
-    KlSockAddr ksrc, klocal;
-    const KlSockAddr *ksrc_p = NULL, *klocal_p = NULL;
-    if (src && src_len && kl_sockaddr_from_native(&ksrc, src, src_len) == 0)
-        ksrc_p = &ksrc;
-    if (local && local_len && kl_sockaddr_from_native(&klocal, local, local_len) == 0)
-        klocal_p = &klocal;
-
+                    const KlSockAddr *src, const KlSockAddr *local) {
+    /* Addresses arrive already marshalled to KlSockAddr by the platform udp_io
+     * layer (which owns its sockaddr layout). Here we just fan out to callbacks. */
     if (gro_seg > 0 && len > (size_t)gro_seg) {
         if (udp->on_recv_segments) {
             udp->on_recv_segments(udp, data, len, (size_t)gro_seg,
-                                  ksrc_p, klocal_p, udp->recv_seg_ud);
+                                  src, local, udp->recv_seg_ud);
             return;
         }
         size_t seg = (size_t)gro_seg, off = 0;
@@ -175,7 +155,7 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
             size_t chunk = (len - off < seg) ? (len - off) : seg;
             if (udp->on_recv)
                 udp->on_recv(udp, (const char *)data + off, chunk,
-                             ksrc_p, klocal_p, udp->recv_ud);
+                             src, local, udp->recv_ud);
             if (!udp->recv_active || !kl_handle_valid(udp->fd))
                 return;   /* callback stopped/freed mid-split */
             off += chunk;
@@ -183,7 +163,7 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
         return;
     }
     if (udp->on_recv)
-        udp->on_recv(udp, data, len, ksrc_p, klocal_p, udp->recv_ud);
+        udp->on_recv(udp, data, len, src, local, udp->recv_ud);
 }
 
 static void udp_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data) {
@@ -226,21 +206,16 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     udp->mmsg_batch = batch;
 
     int family = cfg->family;
-    struct addrinfo *ai = NULL;
+    KlSockAddr bind_sa;
+    int have_bind = 0;
     if (cfg->bind_addr) {
-        struct addrinfo hints;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = (family == AF_INET || family == AF_INET6) ? family : AF_UNSPEC;
-        hints.ai_socktype = SOCK_DGRAM;
-        hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
-        char port_str[8];
-        snprintf(port_str, sizeof(port_str), "%u", (unsigned)cfg->bind_port);
-        int rc = getaddrinfo(cfg->bind_addr, port_str, &hints, &ai);
-        if (rc != 0 || !ai) {
-            udp->last_error = KL_ERR_DNS;
+        /* Numeric bind address (no DNS) — pure, works on lwIP too. */
+        if (kl_sockaddr_parse(&bind_sa, cfg->bind_addr, cfg->bind_port) != 0) {
+            udp->last_error = KL_ERR_INVALID_ARG;
             return -1;
         }
-        family = ai->ai_family;
+        family = (kl_sockaddr_family(&bind_sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
+        have_bind = 1;
     } else if (family != AF_INET && family != AF_INET6) {
         family = AF_INET;
     }
@@ -268,15 +243,11 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
      * pktinfo/platform-specific — lives behind the datagram-I/O seam). */
     kl_udp_io_setup_recv_opts(udp, cfg);
 
-    if (ai) {
-        KlSockAddr bind_sa;
-        kl_sockaddr_from_native(&bind_sa, ai->ai_addr, ai->ai_addrlen);
+    if (have_bind) {
         if (kl_sock_bind(udp->ctx->sockets, udp->fd, &bind_sa) < 0) {
             udp->last_error = KL_ERR_BIND;
             goto fail;
         }
-        freeaddrinfo(ai);
-        ai = NULL;
     }
 
     /* Optional init-time multicast join (requires a bound socket). */
@@ -301,7 +272,6 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     return 0;
 
 fail:
-    if (ai) freeaddrinfo(ai);
     if (kl_handle_valid(udp->fd)) {
         kl_sock_close(udp->ctx->sockets, udp->fd);
         udp->fd = KL_INVALID_SOCKET;
@@ -389,13 +359,12 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
  * model-blind kl_udp_deliver (identical to the readiness recvmsg path), then re-post
  * the next receive. gro_seg 0 — GRO coalescing is a readiness/Linux offload. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
-                         const struct sockaddr *src, socklen_t src_len,
-                         const KlUdpRxMeta *meta) {
+                         const KlSockAddr *src, const KlUdpRxMeta *meta) {
     if (!udp->recv_active || !kl_handle_valid(udp->fd))
         return;
     if (meta->truncated)
         udp->truncated++;
-    kl_udp_deliver(udp, buf, len, meta->gro_seg, src, src_len, meta->local, meta->local_len);
+    kl_udp_deliver(udp, buf, len, meta->gro_seg, src, meta->local);
     if (udp->recv_active && kl_handle_valid(udp->fd))
         (void)kl_comp_post_udp_recv(udp);   /* arm the next datagram */
 }
@@ -423,31 +392,22 @@ int kl_udp_send_to(KlUdp *udp, const void *data, size_t len,
 
 int kl_udp_send_to_from(KlUdp *udp, const void *data, size_t len,
                         const KlSockAddr *dest, const KlSockAddr *src) {
-    if (!udp || (!data && len) || !dest) {
+    if (!udp || (!data && len) || !dest ||
+        kl_sockaddr_family(dest) == KL_AF_UNSPEC) {
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    struct sockaddr_storage ds, ss;
-    socklen_t dl = kl_sockaddr_to_native(dest, &ds);
-    socklen_t sl = src ? kl_sockaddr_to_native(src, &ss) : 0;
-    if (dl == 0 || (src && sl == 0)) {
-        udp->last_error = KL_ERR_INVALID_ARG;
-        return -1;
-    }
-    return udp_send_common(udp, data, len, (struct sockaddr *)&ds, dl,
-                           src ? (struct sockaddr *)&ss : NULL, sl, -1);
+    return udp_send_common(udp, data, len, dest, src, -1);
 }
 
 int kl_udp_send_to_tos(KlUdp *udp, const void *data, size_t len,
                        const KlSockAddr *dest, int tos) {
-    if (!udp || (!data && len) || !dest || tos < 0 || tos > 255) {
+    if (!udp || (!data && len) || !dest ||
+        kl_sockaddr_family(dest) == KL_AF_UNSPEC || tos < 0 || tos > 255) {
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    struct sockaddr_storage ds;
-    socklen_t dl = kl_sockaddr_to_native(dest, &ds);
-    if (dl == 0) { udp->last_error = KL_ERR_INVALID_ARG; return -1; }
-    return udp_send_common(udp, data, len, (struct sockaddr *)&ds, dl, NULL, 0, tos);
+    return udp_send_common(udp, data, len, dest, NULL, tos);
 }
 
 int kl_udp_set_tos(KlUdp *udp, int tos) {
@@ -474,19 +434,18 @@ int kl_udp_send(KlUdp *udp, const void *data, size_t len) {
         udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    return udp_send_common(udp, data, len, NULL, 0, NULL, 0, -1);
+    return udp_send_common(udp, data, len, NULL, NULL, -1);
 }
 
 /* Portable GSO fallback: send each segment individually via the normal path
  * (immediate send, or queued under backpressure — order preserved). */
 static int udp_send_segments(KlUdp *udp, const void *buf, size_t total_len,
-                             size_t seg, const struct sockaddr *dest,
-                             socklen_t dest_len) {
+                             size_t seg, const KlSockAddr *dest) {
     size_t off = 0;
     while (off < total_len) {
         size_t chunk = (total_len - off < seg) ? (total_len - off) : seg;
         if (udp_send_common(udp, (const char *)buf + off, chunk,
-                            dest, dest_len, NULL, 0, -1) != 0)
+                            dest, NULL, -1) != 0)
             return -1;   /* over-cap / hard error — remaining segments dropped */
         off += chunk;
     }
@@ -496,27 +455,23 @@ static int udp_send_segments(KlUdp *udp, const void *buf, size_t total_len,
 int kl_udp_send_gso(KlUdp *udp, const void *buf, size_t total_len,
                     size_t segment_size, const KlSockAddr *dest) {
     if (!udp || (!buf && total_len) || total_len == 0 || segment_size == 0 ||
-        segment_size > total_len || total_len > 65507 || !dest) {
+        segment_size > total_len || total_len > 65507 || !dest ||
+        kl_sockaddr_family(dest) == KL_AF_UNSPEC) {
         if (udp) udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    struct sockaddr_storage ds;
-    socklen_t dest_len = kl_sockaddr_to_native(dest, &ds);
-    if (dest_len == 0) { udp->last_error = KL_ERR_INVALID_ARG; return -1; }
-    const struct sockaddr *dest_sa = (const struct sockaddr *)&ds;
     /* Single-syscall GSO when there is more than one segment, nothing is already
      * queued (preserve ordering), and GSO hasn't been ruled unsupported. The
      * seam returns -1/EOPNOTSUPP where GSO is unavailable at build time. */
     if (segment_size < total_len && !udp->q_head && !udp->gso_disabled) {
-        ssize_t n = kl_udp_io_send_gso(udp, buf, total_len, (uint16_t)segment_size,
-                                       dest_sa, dest_len);
+        ssize_t n = kl_udp_io_send_gso(udp, buf, total_len, (uint16_t)segment_size, dest);
         if (n >= 0)
             return 0;
         if (errno != EAGAIN && errno != EWOULDBLOCK)
             udp->gso_disabled = 1;   /* GSO unsupported here — stop trying */
         /* EAGAIN or unsupported: fall through and send/queue per-segment. */
     }
-    return udp_send_segments(udp, buf, total_len, segment_size, dest_sa, dest_len);
+    return udp_send_segments(udp, buf, total_len, segment_size, dest);
 }
 
 void kl_udp_recv_segments(KlUdp *udp, KlUdpRecvSegmentsFn cb, void *user_data) {
