@@ -56,6 +56,7 @@ else ifdef WINDOWS
   endif
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
+  PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
   SERVER_PLAT_SRC = src/server_plat_win.c
   UDP_IO_SRC = src/udp_io_win.c
   DNS_SYS_SRC = src/dns_sys_win.c
@@ -144,6 +145,7 @@ VENDOR_CFLAGS += -MMD -MP
 # the socket_winsock.c / platform_win.c siblings.
 SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
+PLATFORM_WAKEUP_SRC ?= src/platform_wakeup_posix.c
 SERVER_PLAT_SRC ?= src/server_plat_posix.c
 UDP_IO_SRC ?= src/udp_io_posix.c
 # Test-harness network helpers: per-platform sibling TU (mirrors SOCKET_SRC), so
@@ -159,7 +161,7 @@ DNS_SYS_SRC ?= src/dns_sys_posix.c
 IO_ENGINE_SRC ?= src/io_engine.c
 # The platform-independent completion driver (empty except on completion backends).
 COMPLETION_SRC ?=
-CORE_SRC = src/allocator.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) src/response.c src/router.c \
+CORE_SRC = src/allocator.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/response.c src/router.c \
            src/connection.c src/server.c $(SERVER_PLAT_SRC) src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
