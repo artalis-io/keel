@@ -8,7 +8,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <keel/net.h>
+#include <keel/sockaddr.h>   /* KlSockAddr — the public address currency */
+#include <keel/net.h>        /* struct sockaddr_storage — internal recv scratch */
 
 /**
  * udp.h — Non-blocking UDP datagram socket over KlEventCtx.
@@ -58,16 +59,13 @@ typedef struct KlUdpDatagram KlUdpDatagram;
  * @param data      Datagram payload (borrowed — valid only for this call).
  * @param len       Payload length in bytes.
  * @param src       Sender address (borrowed — copy to retain).
- * @param src_len   Length of @p src.
  * @param local     Local (destination) address the datagram arrived on, or NULL
  *                  when pktinfo is disabled/unavailable. Borrowed. Useful on a
  *                  wildcard-bound multi-homed socket to reply from the right IP.
- * @param local_len Length of @p local (0 when @p local is NULL).
  * @param user_data Opaque pointer from kl_udp_recv_start.
  */
 typedef void (*KlUdpRecvFn)(KlUdp *udp, const void *data, size_t len,
-                            const struct sockaddr *src, socklen_t src_len,
-                            const struct sockaddr *local, socklen_t local_len,
+                            const KlSockAddr *src, const KlSockAddr *local,
                             void *user_data);
 
 /**
@@ -85,8 +83,7 @@ typedef void (*KlUdpDrainFn)(KlUdp *udp, void *user_data);
  */
 typedef void (*KlUdpRecvSegmentsFn)(KlUdp *udp, const void *data, size_t len,
                                     size_t segment_size,
-                                    const struct sockaddr *src, socklen_t src_len,
-                                    const struct sockaddr *local, socklen_t local_len,
+                                    const KlSockAddr *src, const KlSockAddr *local,
                                     void *user_data);
 
 /**
@@ -178,7 +175,7 @@ void kl_udp_free(KlUdp *udp);
  *        datagrams to that peer.
  * @return 0 on success, -1 on failure (last_error set).
  */
-int kl_udp_connect(KlUdp *udp, const struct sockaddr *peer, socklen_t peer_len);
+int kl_udp_connect(KlUdp *udp, const KlSockAddr *peer);
 
 /**
  * @brief Begin receiving. Registers READ interest; on_recv fires per datagram.
@@ -196,7 +193,7 @@ void kl_udp_recv_stop(KlUdp *udp);
  * @return 0 if sent or queued, -1 on error or over-cap (last_error set).
  */
 int kl_udp_send_to(KlUdp *udp, const void *data, size_t len,
-                   const struct sockaddr *dest, socklen_t dest_len);
+                   const KlSockAddr *dest);
 
 /**
  * @brief Send a datagram to @p dest FROM a specific local source address.
@@ -207,8 +204,7 @@ int kl_udp_send_to(KlUdp *udp, const void *data, size_t len,
  * @return 0 if sent or queued, -1 on error or over-cap (last_error set).
  */
 int kl_udp_send_to_from(KlUdp *udp, const void *data, size_t len,
-                        const struct sockaddr *dest, socklen_t dest_len,
-                        const struct sockaddr *src, socklen_t src_len);
+                        const KlSockAddr *dest, const KlSockAddr *src);
 
 /**
  * @brief Send a datagram to the connected peer (requires kl_udp_connect).
@@ -248,8 +244,7 @@ int kl_udp_multicast_leave(KlUdp *udp, const char *group, unsigned iface_index);
  * @return 0 if all segments were sent or queued, -1 on invalid args / over-cap.
  */
 int kl_udp_send_gso(KlUdp *udp, const void *buf, size_t total_len,
-                    size_t segment_size, const struct sockaddr *dest,
-                    socklen_t dest_len);
+                    size_t segment_size, const KlSockAddr *dest);
 
 /**
  * @brief Register a coalesced-GRO receive callback (NULL to clear).
@@ -276,7 +271,7 @@ int kl_udp_set_tos(KlUdp *udp, int tos);
  * @return 0 if sent or queued, -1 on error / over-cap (last_error set).
  */
 int kl_udp_send_to_tos(KlUdp *udp, const void *data, size_t len,
-                       const struct sockaddr *dest, socklen_t dest_len, int tos);
+                       const KlSockAddr *dest, int tos);
 
 /**
  * @brief The TOS/Traffic-Class byte of the datagram currently being delivered,

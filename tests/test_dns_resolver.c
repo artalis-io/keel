@@ -155,7 +155,7 @@ static size_t dns_write_response(const uint8_t *q, size_t qend, int qtype,
 
 /* Parse qtype from the question and emit a canned response. */
 static void mock_ns(KlUdpServer *s, const void *data, size_t len,
-                    const struct sockaddr *src, socklen_t src_len, void *ud) {
+                    const KlSockAddr *src, void *ud) {
     (void)ud;
     if (len < 12) return;
     g_queries++;
@@ -250,7 +250,7 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
         memcpy(resp + n, cli, 8); n += 8;         /* echo client cookie */
         memcpy(resp + n, g_srv_cookie, 8); n += 8;/* add server cookie */
     }
-    kl_udp_server_reply(s, resp, n, src, src_len);
+    kl_udp_server_reply(s, resp, n, src);
 }
 
 /* ── Mock DNS-over-TCP server (event-loop driven, RFC 7766 framing) ─────── */
@@ -713,8 +713,8 @@ static const char *write_resolv(const char *content) {
 /* A nameserver that receives but never replies (to exercise failover). */
 static int g_silent_hits;
 static void silent_ns(KlUdpServer *s, const void *data, size_t len,
-                      const struct sockaddr *src, socklen_t src_len, void *ud) {
-    (void)s; (void)data; (void)len; (void)src; (void)src_len; (void)ud;
+                      const KlSockAddr *src, void *ud) {
+    (void)s; (void)data; (void)len; (void)src; (void)ud;
     g_silent_hits++;
 }
 

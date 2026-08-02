@@ -35,12 +35,10 @@ typedef struct KlUdpServer KlUdpServer;
  * @param data      Datagram payload (borrowed — valid only for this call).
  * @param len       Payload length.
  * @param src       Sender address (borrowed — copy to retain).
- * @param src_len   Length of @p src.
  * @param user_data Opaque pointer from kl_udp_server_init.
  */
 typedef void (*KlUdpHandlerFn)(KlUdpServer *s, const void *data, size_t len,
-                               const struct sockaddr *src, socklen_t src_len,
-                               void *user_data);
+                               const KlSockAddr *src, void *user_data);
 
 /**
  * @brief UDP server configuration.
@@ -73,8 +71,8 @@ struct KlUdpServer {
     KlUdpHandlerFn handler;
     void          *user_data;
     KlError        last_error;
-    struct sockaddr_storage local;   /* current datagram's local (dest) addr, if pktinfo */
-    socklen_t      local_len;        /* 0 = unknown (reply uses the socket default) */
+    KlSockAddr     local;            /* current datagram's local (dest) addr, if pktinfo */
+    int            have_local;       /* 0 = unknown (reply uses the socket default) */
 };
 
 /**
@@ -90,7 +88,7 @@ int kl_udp_server_init(KlUdpServer *s, KlEventCtx *ctx,
  * @return 0 if sent or queued, -1 on error / over-cap (last_error set).
  */
 int kl_udp_server_reply(KlUdpServer *s, const void *data, size_t len,
-                        const struct sockaddr *dest, socklen_t dest_len);
+                        const KlSockAddr *dest);
 
 /**
  * @brief Join / leave an any-source multicast group on the server socket.

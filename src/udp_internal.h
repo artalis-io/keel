@@ -40,8 +40,8 @@ void kl_udp_update_interest(KlUdp *udp);
 /* Deliver one received buffer to the on_recv / on_recv_segments callbacks,
  * splitting a GRO-coalesced buffer per segment when needed. */
 void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
-                    struct sockaddr *src, socklen_t src_len,
-                    struct sockaddr *local, socklen_t local_len);
+                    const struct sockaddr *src, socklen_t src_len,
+                    const struct sockaddr *local, socklen_t local_len);
 
 /* The POSIX cmsg parser (kl_udp_parse_local) + its RX control-buffer size live in the
  * POSIX-only udp_cmsg.h, included by the POSIX recv TUs — kept out of this cross-platform
@@ -65,7 +65,7 @@ typedef struct {
  * this for a KL_COMP_UDP_RECV event; the model-blind delivery matches the readiness
  * recvmsg path. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
-                         struct sockaddr *src, socklen_t src_len,
+                         const struct sockaddr *src, socklen_t src_len,
                          const KlUdpRxMeta *meta);
 
 /* Completion-loop datagram send done (PAL 8b-4d): an overlapped WSASendTo of `len`

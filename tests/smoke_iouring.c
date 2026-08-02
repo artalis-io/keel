@@ -118,10 +118,9 @@ static void handle_bigstream(KlRequest *req, KlResponse *res, void *ctx) {
 
 static KlUdp g_udp;
 static void udp_echo(KlUdp *udp, const void *data, size_t len,
-                     const struct sockaddr *src, socklen_t src_len,
-                     const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)local; (void)local_len; (void)ud;
-    kl_udp_send_to(udp, data, len, src, src_len);
+                     const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)local; (void)ud;
+    kl_udp_send_to(udp, data, len, src);
 }
 
 /* Minimal echo HTTP/2 server session (no nghttp2/HPACK) — echoes bytes through the send
@@ -630,8 +629,7 @@ int main(void) {
             to.sin_port = htons(SMOKE_UDP_PORT);
             inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
             for (int i = 0; i < 20 && !udp_ok; i++) {
-                sendto(cs, SMOKE_UDP, sizeof(SMOKE_UDP) - 1, 0,
-                       (struct sockaddr *)&to, sizeof(to));
+                sendto(cs, SMOKE_UDP, sizeof(SMOKE_UDP) - 1, 0, (struct sockaddr *)&to, sizeof(to));
                 char rb[64];
                 ssize_t n = recvfrom(cs, rb, sizeof(rb), 0, NULL, NULL);
                 if (n == (ssize_t)(sizeof(SMOKE_UDP) - 1) && memcmp(rb, SMOKE_UDP, (size_t)n) == 0)

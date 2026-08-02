@@ -450,10 +450,11 @@ static int dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLeg *leg) 
     memcpy(leg->question, buf + q_off, q_len);
     leg->question_len = q_len;
 
-    const struct sockaddr *nsa = (const struct sockaddr *)&r->ns[leg->ns_idx];
-    socklen_t nsl = r->ns_len[leg->ns_idx];
+    KlSockAddr ns_ksa;
+    kl_sockaddr_from_native(&ns_ksa, (const struct sockaddr *)&r->ns[leg->ns_idx],
+                            r->ns_len[leg->ns_idx]);
     leg->ns_idx = (leg->ns_idx + 1) % r->nns;
-    if (kl_udp_send_to(&r->sock, buf, qlen, nsa, nsl) != 0)
+    if (kl_udp_send_to(&r->sock, buf, qlen, &ns_ksa) != 0)
         return -1;
 
     if (leg->timer_id >= 0)
@@ -689,24 +690,14 @@ static int dns_extract_opt(const uint8_t *pkt, size_t len, uint8_t *ext_rcode,
 
 /* The index of the configured nameserver `src` matches, or -1. (The socket is
  * unconnected for multi-NS, so this replaces the kernel peer filter.) */
-static int dns_ns_index(const KlDnsResolver *r, const struct sockaddr *src) {
+static int dns_ns_index(const KlDnsResolver *r, const KlSockAddr *src) {
     for (int i = 0; i < r->nns; i++) {
-        const struct sockaddr *ns = (const struct sockaddr *)&r->ns[i];
-        if (src->sa_family != ns->sa_family)
+        KlSockAddr ns;
+        if (kl_sockaddr_from_native(&ns, (const struct sockaddr *)&r->ns[i],
+                                    r->ns_len[i]) != 0)
             continue;
-        if (src->sa_family == AF_INET) {
-            const struct sockaddr_in *a = (const struct sockaddr_in *)src;
-            const struct sockaddr_in *b = (const struct sockaddr_in *)ns;
-            if (a->sin_port == b->sin_port &&
-                a->sin_addr.s_addr == b->sin_addr.s_addr)
-                return i;
-        } else if (src->sa_family == AF_INET6) {
-            const struct sockaddr_in6 *a = (const struct sockaddr_in6 *)src;
-            const struct sockaddr_in6 *b = (const struct sockaddr_in6 *)ns;
-            if (a->sin6_port == b->sin6_port &&
-                memcmp(&a->sin6_addr, &b->sin6_addr, sizeof(a->sin6_addr)) == 0)
-                return i;
-        }
+        if (kl_sockaddr_equal(src, &ns))   /* family + address + port */
+            return i;
     }
     return -1;
 }
@@ -987,9 +978,8 @@ static void dns_tcp_send_leg(KlDnsResolver *r, KlDnsLeg *leg, int ns_idx) {
 }
 
 static void dns_on_recv(KlUdp *u, const void *data, size_t len,
-                        const struct sockaddr *src, socklen_t src_len,
-                        const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)u; (void)src_len; (void)local; (void)local_len;
+                        const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)u; (void)local;
     KlDnsResolver *r = ud;
     if (len < 12)
         return;

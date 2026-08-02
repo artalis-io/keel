@@ -5,18 +5,17 @@
 /* Trampoline: KlUdp recv callback → user datagram handler. Captures the local
  * (destination) address so kl_udp_server_reply can answer from it. */
 static void udp_server_on_recv(KlUdp *udp, const void *data, size_t len,
-                               const struct sockaddr *src, socklen_t src_len,
-                               const struct sockaddr *local, socklen_t local_len,
+                               const KlSockAddr *src, const KlSockAddr *local,
                                void *user_data) {
     (void)udp;
     KlUdpServer *s = user_data;
-    if (local && local_len && (size_t)local_len <= sizeof(s->local)) {
-        memcpy(&s->local, local, local_len);
-        s->local_len = local_len;
+    if (local) {
+        s->local = *local;
+        s->have_local = 1;
     } else {
-        s->local_len = 0;
+        s->have_local = 0;
     }
-    s->handler(s, data, len, src, src_len, s->user_data);
+    s->handler(s, data, len, src, s->user_data);
 }
 
 /* A wildcard bind (INADDR_ANY / in6addr_any) is where the reply source is
@@ -75,13 +74,12 @@ int kl_udp_server_init(KlUdpServer *s, KlEventCtx *ctx,
 }
 
 int kl_udp_server_reply(KlUdpServer *s, const void *data, size_t len,
-                        const struct sockaddr *dest, socklen_t dest_len) {
+                        const KlSockAddr *dest) {
     if (!s)
         return -1;
     /* Reply from the address the client hit (multi-homed correctness). */
-    int rc = kl_udp_send_to_from(&s->udp, data, len, dest, dest_len,
-                                 s->local_len ? (struct sockaddr *)&s->local : NULL,
-                                 s->local_len);
+    int rc = kl_udp_send_to_from(&s->udp, data, len, dest,
+                                 s->have_local ? &s->local : NULL);
     if (rc != 0)
         s->last_error = kl_udp_last_error(&s->udp);
     return rc;

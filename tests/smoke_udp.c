@@ -31,9 +31,8 @@ static size_t g_len;
 static int    g_has_local;
 
 static void on_recv(KlUdp *udp, const void *data, size_t len,
-                    const struct sockaddr *src, socklen_t src_len,
-                    const struct sockaddr *local, socklen_t local_len, void *ud) {
-    (void)udp; (void)src; (void)src_len; (void)local_len; (void)ud;
+                    const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)udp; (void)src; (void)ud;
     if (len > sizeof(g_buf)) len = sizeof(g_buf);
     memcpy(g_buf, data, len);
     g_len = len;
@@ -68,14 +67,11 @@ int main(void) {
         return 1;
     }
 
-    struct sockaddr_in dst;
-    memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
+    KlSockAddr dst;
+    unsigned char _ipb[4]; inet_pton(AF_INET, "127.0.0.1", _ipb); kl_sockaddr_from_ipv4(&dst, _ipb, port);
 
     if (kl_udp_send_to(&tx, SMOKE_MSG, sizeof(SMOKE_MSG) - 1,
-                       (struct sockaddr *)&dst, sizeof(dst)) != 0) {
+                       &dst) != 0) {
         fprintf(stderr, "smoke-udp: send_to failed\n");
         return 1;
     }
