@@ -95,10 +95,35 @@ void kl_lwr_conn_status(void *pcb, int *has_data, int *closed);
  * event (staging → c->read_buf). tcp_recved was already issued in the recv callback. */
 size_t kl_lwr_take_staged(void *pcb, void *dst, size_t cap);
 
-/* tcp_write(pcb, buf, len, COPY) + tcp_output(). Returns bytes accepted (<= len; bounded
- * by tcp_sndbuf), or -1 on a hard error. P9-2: the small single-segment response fits, so
- * a WRITE record follows via tcp_sent. P9-3 handles partial sends / tcp_sndbuf backpressure. */
-long  kl_lwr_send(void *pcb, const void *buf, size_t len);
+/* ── P9-3: full-payload send with backpressure + file send ────────────────────
+ * The completion contract (src/completion.h) says the backend OWNS the bytes for an
+ * op's lifetime (copies) and surfaces a SINGLE fully-completed WRITE — never a partial.
+ * So a payload larger than tcp_sndbuf must be buffered in the glue and pumped across
+ * many tcp_sent rounds; only when the LAST byte is acked does a KL_LWR_WRITE record
+ * appear. These functions implement that per-pcb send-buffer state machine.
+ *
+ * kl_lwr_send_begin(pcb, buf, len): copy `buf`/`len` into the pcb's owned send buffer
+ * (replacing any prior — one send in flight per conn, per the completion contract) and
+ * kick the first tcp_write round. Returns 0 on success, -1 on error (no send state /
+ * OOM / no owning slot). The tcp_sent callback advances the acked offset and pumps the
+ * tail; when acked == total, a single KL_LWR_WRITE (owner + total) is enqueued and the
+ * send buffer released. Handles tcp_write ERR_MEM (sndbuf full) as backpressure: the
+ * round stops and the next tcp_sent resumes it. Works for a many-segment response. */
+int   kl_lwr_send_begin(void *pcb, const void *buf, size_t len);
+
+/* kl_lwr_sendfile_begin(pcb, head, head_len, file_fd, count): send `head_len` head
+ * bytes followed by `count` bytes read from `file_fd` (at offset 0). P9-3 approach (a):
+ * pread the whole file into the same owned send buffer after the head, then reuse the
+ * send-pump — bounded by head_len+count (fine for the test's temp file). The glue owns
+ * ONLY the read of file_fd; it does NOT close file_fd (the response layer owns that —
+ * kl_response_reset/kl_response_free close res->file_fd). Surfaces one KL_LWR_WRITE when
+ * the whole head+file is acked. Returns 0 on success, -1 on error (OOM / pread short). */
+int   kl_lwr_sendfile_begin(void *pcb, const void *head, size_t head_len,
+                            int file_fd, uint64_t count);
+
+/* Release any per-pcb send buffer for `pcb` (P9-4 hook: called on close/abort so a
+ * conn torn down mid-send does not leak its owned send buffer). Idempotent. */
+void  kl_lwr_send_release(void *pcb);
 
 /* ── client (raw-API test peer, like the spike) ────────────────────────────── */
 
@@ -107,9 +132,23 @@ long  kl_lwr_send(void *pcb, const void *buf, size_t len);
  * kl_lwr_client_response(). Returns 0 on the connect being issued, -1 on failure. */
 int   kl_lwr_client_start(const uint8_t ip4[4], uint16_t port,
                           const void *req, size_t req_len);
+/* Same, but with an explicit response-accumulator capacity (large bodies — P9-3). */
+int   kl_lwr_client_start_cap(const uint8_t ip4[4], uint16_t port,
+                              const void *req, size_t req_len, size_t cap);
 /* Copy the client's captured response so far into `dst` (NUL-terminated if room);
- * returns the byte count. */
+ * returns the byte count copied (capped at cap-1). */
 size_t kl_lwr_client_response(char *dst, size_t cap);
+/* Total bytes accumulated so far (headers + body), uncapped by a copy buffer. */
+size_t kl_lwr_client_len(void);
+/* Body length after the CRLFCRLF header terminator (0 if not seen yet). Also reports an
+ * additive checksum over the body + its first/last byte (any out ptr may be NULL) — the
+ * P9-3 tests use these to verify a large/file body arrived intact. */
+size_t kl_lwr_client_body(size_t *out_checksum, unsigned char *first, unsigned char *last);
+/* Free the client accumulator (test teardown; avoids an at-exit leak under LSan). */
+void  kl_lwr_client_release(void);
+/* DEBUG: copy up to `cap` body bytes (after the CRLFCRLF) from body offset `off` into `dst`;
+ * returns the count copied. Used by the P9-3 file case to pinpoint a content mismatch. */
+size_t kl_lwr_client_body_peek(size_t off, unsigned char *dst, size_t cap);
 
 /* ── drain ─────────────────────────────────────────────────────────────────── */
 

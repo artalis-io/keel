@@ -30,8 +30,16 @@
  * P9-2 SCOPE: listen/accept + recv/send completion — a raw-backed KlServer answers one
  * request over loopback. The socket-provider primitives (tcp_new/bind/listen/close) now
  * operate on real tcp_pcb handles via the glue; the tcp_accept/tcp_recv/tcp_sent callbacks
- * surface KL_COMP_ACCEPT/READ/WRITE. Backpressure / large+partial sends / sendfile /
- * close-cancel-lifetime are P9-3..P9-5.
+ * surface KL_COMP_ACCEPT/READ/WRITE.
+ *
+ * P9-3 SCOPE (this stage): full-payload send + backpressure + file send. kl_comp_post_send
+ * no longer bails on responses larger than a small cap — it concatenates the response iovec
+ * and hands it to the glue's send-pump (kl_lwr_send_begin), which buffers the whole payload
+ * and pumps it across many tcp_write/tcp_sent rounds honouring tcp_sndbuf (ERR_MEM =
+ * backpressure, resumed on tcp_sent). kl_comp_post_sendfile is implemented via
+ * kl_lwr_sendfile_begin (pread the file after the head into the same owned buffer, reuse the
+ * pump). Either way the driver sees a SINGLE fully-completed KL_COMP_WRITE. close-cancel-
+ * lifetime is P9-4; KlEventLoop.fd assessment is P9-5.
  *
  * Header-clash seam discipline (P9-1, preserved): this TU includes NO lwIP header — lwIP's
  * def.h redefines htons/ntohs and its arch.h typedefs ssize_t, which clash with the host
@@ -316,36 +324,67 @@ int kl_comp_post_recv(KlConn *c) {
     return 0;
 }
 
-/* Post one async send of the (already-serialized) response iovec. Concatenate the iovec
- * into a stack buffer and hand it to the glue (tcp_write COPY + tcp_output). The tcp_sent
- * callback surfaces a KL_COMP_WRITE via drain when the bytes are acknowledged.
- * P9-2: the response is a single small segment that fits tcp_sndbuf, so one send completes
- * it. P9-3 handles partial sends / tcp_sndbuf backpressure (send what fits, resume on
- * tcp_sent for the remainder). */
-#define KL_LWR_SEND_MAX 2048   /* P9-2 responses (small JSON/text) fit comfortably */
+/* Post one async send of the (already-serialized) response iovec (P9-3). Concatenate the
+ * iovec into a heap staging buffer and hand it to the glue's send-pump (kl_lwr_send_begin),
+ * which copies it into a per-pcb owned buffer and pumps it across as many tcp_write/tcp_sent
+ * rounds as tcp_sndbuf backpressure requires. The driver sees a SINGLE KL_COMP_WRITE (via
+ * drain) only once the WHOLE payload is acknowledged — arbitrary `total` works, bounded only
+ * by KL_LWR_POST_SEND_MAX (a sanity cap; the glue additionally bounds by heap availability).
+ *
+ * Removes the P9-2 small-response bailout: no fixed stack buffer, no "must fit tcp_sndbuf"
+ * limit. A 64 KB response now spans many segments + hits sndbuf-full (ERR_MEM) backpressure,
+ * resumed on tcp_sent — and still completes as one WRITE. */
+#define KL_LWR_POST_SEND_MAX (16u * 1024u * 1024u)   /* 16 MiB response sanity cap */
 int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     if (!kl_handle_valid(c->fd)) return -1;
-    if (total > KL_LWR_SEND_MAX) return -1;   /* P9-3: larger responses / partial sends */
-    char buf[KL_LWR_SEND_MAX];
+    if (total > KL_LWR_POST_SEND_MAX) return -1;
+    /* Concatenate the iovec into one contiguous staging buffer; the glue copies it into its
+     * own per-pcb send buffer (kl_lwr_send_begin), so this staging buffer is freed here. */
+    unsigned char *buf = kl_malloc(c->alloc, total ? total : 1);
+    if (!buf) return -1;
     size_t off = 0;
     for (int i = 0; i < iovcnt; i++) {
-        if (off + iov[i].len > sizeof(buf)) return -1;
+        if (off + iov[i].len > total) { kl_free(c->alloc, buf, total ? total : 1); return -1; }
         memcpy(buf + off, iov[i].base, iov[i].len);
         off += iov[i].len;
     }
-    long sent = kl_lwr_send((void *)c->fd, buf, off);
-    if (sent < 0 || (size_t)sent != off) return -1;   /* P9-3: partial send resume */
-    return 0;
+    int rc = kl_lwr_send_begin((void *)c->fd, buf, off);
+    kl_free(c->alloc, buf, total ? total : 1);
+    return rc;
 }
 
+/* Post one async file send (P9-3): the serialized response head (`head_iov`) followed by
+ * `count` bytes from file_fd. The glue preads the file into its per-pcb send buffer after
+ * the head and reuses the send-pump (approach (a) — see lwip_raw_glue.h). One KL_COMP_WRITE
+ * follows when the whole head+file is acked. fd OWNERSHIP: the glue only READS file_fd; the
+ * response layer closes res->file_fd (kl_response_reset/free) — we do NOT close it here. */
 int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    (void)c; (void)head_iov; (void)head_n; (void)head_total; (void)file_fd; (void)count;
-    return -1;   /* P9-3: head via tcp_write, file bytes chunked (no lwIP zero-copy file send) */
+    if (!kl_handle_valid(c->fd)) return -1;
+    if (count > KL_LWR_POST_SEND_MAX || head_total > KL_LWR_POST_SEND_MAX) return -1;
+    /* Concatenate the head into a staging buffer; the glue copies head + file into its own
+     * per-pcb send buffer, so this staging buffer is freed here. */
+    unsigned char *head = kl_malloc(c->alloc, head_total ? head_total : 1);
+    if (!head) return -1;
+    size_t off = 0;
+    for (int i = 0; i < head_n; i++) {
+        if (off + head_iov[i].len > head_total) {
+            kl_free(c->alloc, head, head_total ? head_total : 1); return -1;
+        }
+        memcpy(head + off, head_iov[i].base, head_iov[i].len);
+        off += head_iov[i].len;
+    }
+    int rc = kl_lwr_sendfile_begin((void *)c->fd, head, off, file_fd, count);
+    kl_free(c->alloc, head, head_total ? head_total : 1);
+    return rc;
 }
 
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
-    (void)ctx; (void)fd;   /* P9-4: abort the conn's pending op (tcp_abort / mark aborted) */
+    (void)ctx;
+    /* Release any in-flight send buffer for this conn (P9-4 will add the full
+     * tcp_abort/close-with-outstanding lifetime; freeing the owned send copy here already
+     * prevents a leak if a conn is cancelled mid-send). */
+    if (kl_handle_valid(fd)) kl_lwr_send_release((void *)fd);
 }
 
 int kl_comp_post_udp_recv(struct KlUdp *udp) { (void)udp; return -1; }   /* raw UDP: future */

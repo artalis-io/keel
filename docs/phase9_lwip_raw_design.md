@@ -129,9 +129,21 @@ The spike replaces its `for`-loop with KEEL's event loop; the real work is a `Kl
   client's lwIP calls are marshalled onto it via KEEL timers (no data race). `tcp_listen` relocates
   the pcb — `kl_comp_prime_accepts` adopts the relocated LISTEN handle so close targets a live pcb.
   Seam split kept ironclad (no `struct sockaddr` or lwIP type crosses `lwip_raw_glue.h`).
-- **P9-3 — send + backpressure.** `kl_comp_post_send` → `tcp_write`+`tcp_output`; `tcp_sent`
-  callback → send completion + drain; honour `tcp_sndbuf` for backpressure. Test: a response
-  larger than one segment; partial-send resume.
+- **P9-3 — send + backpressure + file send. DONE.** A per-pcb owned copy of the full response +
+  `written`/`acked` offsets: `lwr_send_pump` loops `tcp_write(COPY)` in chunks bounded by
+  `tcp_sndbuf(pcb)` and `KL_LWR_TCP_WRITE_MAX` (0xffff), then `tcp_output`; `tcp_write`→`ERR_MEM`
+  (queue full) stops the round (backpressure); `tcp_sent(pcb,len)` advances `acked` and re-pumps the
+  tail, and only at `acked==total` is the **single** terminal `KL_COMP_WRITE` surfaced (the driver
+  never sees a partial write, per the completion.h contract) and the buffer released.
+  `kl_comp_post_sendfile` (was a stub) pread's the file after the head into the same buffer and
+  reuses the pump (approach (a)); the glue only reads `file_fd` — the response layer owns closing it
+  (matches `event_pollcomp.c`, no double-close). Cap `KL_LWR_POST_SEND_MAX` = 16 MiB. Test: a 64 KB
+  buffered response (spans many `tcp_sent` rounds + real `ERR_MEM` stalls; length+checksum+first/last
+  byte verified) and a file response → `P9-3 PASS (buffered)` + `(file)`. **ASan+UBSan+LSan-clean**
+  (fixed a real 64-bit alignment issue by setting `MEM_ALIGNMENT=8` in `lwipopts_raw.h`, not by
+  suppressing). `completion_driver.c` + `src/` + root Makefile unchanged. *P9-4 hooks:* the per-conn
+  send buffer is freed on close/abort (`lwr_conn_free`→`lwr_send_reset`) and by `kl_comp_cancel`
+  (`kl_lwr_send_release`); the `tcp_err`/RST-mid-send path should also free-by-owner.
 - **P9-4 — close/cancel/lifetime.** `tcp_err`/`tcp_close`, close-with-outstanding, idle timeout via
   `sys_check_timeouts`. Test under ASan/UBSan (pcb + pbuf ownership; no leak/UAF).
 - **P9-5 — KlEventLoop.fd widening (axis-audit F1).** A raw provider has no pollable fd; revisit

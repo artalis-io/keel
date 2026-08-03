@@ -15,8 +15,17 @@
  * data is safely copied out), then enqueues a READ record carrying the byte count; the
  * backend copies staging → c->read_buf when it builds the KL_COMP_READ event.
  *
- * Backpressure / partial sends / sendfile / close-with-outstanding are P9-3..P9-5; here
- * kl_lwr_send assumes the (small) response fits tcp_sndbuf.
+ * P9-3 adds the full-payload send-pump: a per-pcb owned copy of the whole response +
+ * written/acked offsets. kl_lwr_send_begin copies the payload and kicks the first
+ * tcp_write round; lwr_send_pump writes as much as tcp_sndbuf allows (chunked by
+ * tcp_sndbuf and 0xffff), tcp_output, advancing "written"; tcp_sent advances "acked"
+ * and resumes the pump (this is the ERR_MEM/full-sndbuf backpressure resume path), and
+ * enqueues the SINGLE terminal KL_LWR_WRITE only when acked == total. kl_lwr_sendfile_begin
+ * preads the file into the same owned buffer after the head, then reuses the pump. This
+ * makes a many-segment (>tcp_sndbuf) response transfer correctly end to end.
+ *
+ * close-with-outstanding / cancel lifetime is P9-4; the send buffer is released on close
+ * (lwr_conn_free → lwr_send_reset) and via kl_lwr_send_release (the P9-4 hook).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -32,6 +41,10 @@
 
 #include <string.h>
 #include <time.h>
+#include <stdlib.h>   /* malloc/free for the per-pcb send buffer (this TU is a standalone
+                       * lwIP-only integration, not part of core libkeel's allocator axis) */
+#include <stdint.h>   /* SIZE_MAX (sendfile size overflow guard) */
+#include <unistd.h>   /* pread + off_t for the file-send path */
 
 /* ── NO_SYS=1 requires the port to supply sys_now() (u32 ms, monotonic) ──────────
  * Same source as the spike: clock_gettime(CLOCK_MONOTONIC). lwIP calls this from
@@ -81,6 +94,17 @@ typedef struct {
     unsigned char   stage[KL_LWR_STAGE_CAP];
     size_t          stage_len;
     int             closed;   /* peer closed / errored — surface a zero-length READ */
+
+    /* ── P9-3 outgoing send state (owned copy of the full response) ──────────────
+     * `send_buf`/`send_total` hold the whole payload the driver posted (the backend
+     * owns the bytes for the op's lifetime). `send_written` = bytes handed to
+     * tcp_write so far; `send_acked` = bytes the peer has acknowledged (tcp_sent).
+     * When send_acked == send_total the terminal KL_LWR_WRITE is enqueued and the
+     * buffer released. send_buf == NULL means no send in flight. */
+    unsigned char  *send_buf;
+    size_t          send_total;
+    size_t          send_written;
+    size_t          send_acked;
 } KlLwrConn;
 
 static KlLwrConn g_conns[KL_LWR_MAX_CONNS];
@@ -94,6 +118,10 @@ static KlLwrConn *lwr_conn_find(const struct tcp_pcb *pcb) {
         if (g_conns[i].pcb == pcb) return &g_conns[i];
     return NULL;
 }
+static void lwr_send_reset(KlLwrConn *c) {
+    if (c->send_buf) { free(c->send_buf); c->send_buf = NULL; }
+    c->send_total = c->send_written = c->send_acked = 0;
+}
 static KlLwrConn *lwr_conn_alloc(struct tcp_pcb *pcb) {
     for (int i = 0; i < KL_LWR_MAX_CONNS; i++)
         if (g_conns[i].pcb == NULL) {
@@ -101,13 +129,18 @@ static KlLwrConn *lwr_conn_alloc(struct tcp_pcb *pcb) {
             g_conns[i].owner = NULL;
             g_conns[i].stage_len = 0;
             g_conns[i].closed = 0;
+            g_conns[i].send_buf = NULL;
+            g_conns[i].send_total = g_conns[i].send_written = g_conns[i].send_acked = 0;
             return &g_conns[i];
         }
     return NULL;
 }
 static void lwr_conn_free(const struct tcp_pcb *pcb) {
     KlLwrConn *c = lwr_conn_find(pcb);
-    if (c) { c->pcb = NULL; c->owner = NULL; c->stage_len = 0; c->closed = 0; }
+    if (c) {
+        lwr_send_reset(c);
+        c->pcb = NULL; c->owner = NULL; c->stage_len = 0; c->closed = 0;
+    }
 }
 
 /* ── lifecycle / mainloop ──────────────────────────────────────────────────── */
@@ -173,14 +206,52 @@ static err_t lwr_srv_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
     return ERR_OK;
 }
 
-/* sent callback: `len` bytes of a posted send were acknowledged. Enqueue a WRITE record.
- * P9-2 sends the whole (small) response in one tcp_write, so one WRITE record completes it. */
+/* ── P9-3 send-pump ──────────────────────────────────────────────────────────
+ * Push as much of the owned send buffer's unwritten tail as tcp_sndbuf allows, in
+ * chunks bounded by both tcp_sndbuf(pcb) and 0xffff (tcp_write's u16 length limit),
+ * then tcp_output(). Advances send_written. Stops on ERR_MEM (send queue full —
+ * backpressure): the next tcp_sent callback (an ack frees queue space) resumes the
+ * round. Any other tcp_write error aborts the connection. NOT called once fully
+ * written; the terminal WRITE record is enqueued from tcp_sent when acked catches up. */
+#define KL_LWR_TCP_WRITE_MAX 0xffffu   /* tcp_write's u16_t len ceiling */
+static void lwr_send_pump(struct tcp_pcb *pcb, KlLwrConn *cs) {
+    if (!cs || !cs->send_buf) return;
+    int wrote_any = 0;
+    while (cs->send_written < cs->send_total) {
+        u16_t sndbuf = tcp_sndbuf(pcb);
+        if (sndbuf == 0) break;                       /* no headroom — wait for tcp_sent */
+        size_t remain = cs->send_total - cs->send_written;
+        size_t chunk = remain;
+        if (chunk > sndbuf) chunk = sndbuf;
+        if (chunk > KL_LWR_TCP_WRITE_MAX) chunk = KL_LWR_TCP_WRITE_MAX;
+        err_t w = tcp_write(pcb, cs->send_buf + cs->send_written, (u16_t)chunk,
+                            TCP_WRITE_FLAG_COPY);
+        if (w == ERR_MEM) break;                      /* queue full — backpressure, resume later */
+        if (w != ERR_OK) { tcp_abort(pcb); return; }  /* hard error — abort the conn */
+        cs->send_written += chunk;
+        wrote_any = 1;
+    }
+    if (wrote_any) tcp_output(pcb);                   /* flush the freshly-queued segments */
+}
+
+/* sent callback: `len` bytes of a posted send were acknowledged. Advance the acked
+ * offset, pump more of the tail (the ack freed send-queue space — this is where the
+ * ERR_MEM backpressure path resumes), and only when the WHOLE payload is acknowledged
+ * enqueue the single terminal KL_LWR_WRITE record and release the send buffer. This is
+ * the completion contract: the driver sees ONE fully-completed WRITE, never a partial. */
 static err_t lwr_srv_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
     (void)arg;
     KlLwrConn *cs = lwr_conn_find(tpcb);
-    KlLwrRecord r = { .kind = KL_LWR_WRITE, .pcb = tpcb,
-                      .owner = cs ? cs->owner : NULL, .nbytes = len, .ok = 1 };
-    lwr_rec_push(&r);
+    if (!cs || !cs->send_buf) return ERR_OK;          /* stray ack (no send in flight) */
+    cs->send_acked += len;
+    if (cs->send_acked >= cs->send_total) {
+        KlLwrRecord r = { .kind = KL_LWR_WRITE, .pcb = tpcb,
+                          .owner = cs->owner, .nbytes = cs->send_total, .ok = 1 };
+        lwr_rec_push(&r);
+        lwr_send_reset(cs);                           /* release the owned copy */
+        return ERR_OK;
+    }
+    lwr_send_pump(tpcb, cs);                          /* push more of the tail */
     return ERR_OK;
 }
 
@@ -289,23 +360,74 @@ size_t kl_lwr_take_staged(void *pcb, void *dst, size_t cap) {
     return n;
 }
 
-long kl_lwr_send(void *pcb, const void *buf, size_t len) {
-    struct tcp_pcb *p = (struct tcp_pcb *)pcb;
-    u16_t sndbuf = tcp_sndbuf(p);
-    /* P9-2: small single-segment response — send what fits (bounded by tcp_sndbuf).
-     * P9-3 will loop on tcp_sent for partial sends + honour backpressure. */
-    size_t want = len;
-    if (want > sndbuf) want = sndbuf;
-    if (want == 0) return 0;
-    err_t w = tcp_write(p, buf, (u16_t)want, TCP_WRITE_FLAG_COPY);
-    if (w != ERR_OK) return -1;
-    if (tcp_output(p) != ERR_OK) return -1;
-    return (long)want;
+/* ── P9-3: full-payload send + file send (owned copy + pump) ─────────────────── */
+
+/* Install `total` bytes into the pcb's owned send buffer and kick the first pump round.
+ * Caller (kl_lwr_send_begin / kl_lwr_sendfile_begin) has already allocated + filled
+ * `buf` (which becomes the owned buffer — ownership transfers here). */
+static int lwr_send_install(struct tcp_pcb *p, unsigned char *buf, size_t total) {
+    KlLwrConn *cs = lwr_conn_find(p);
+    if (!cs) { free(buf); return -1; }
+    lwr_send_reset(cs);              /* one send in flight per conn (completion contract) */
+    cs->send_buf     = buf;
+    cs->send_total   = total;
+    cs->send_written = 0;
+    cs->send_acked   = 0;
+    if (total == 0) {               /* nothing to send — synthesize an immediate completion */
+        KlLwrRecord r = { .kind = KL_LWR_WRITE, .pcb = p, .owner = cs->owner,
+                          .nbytes = 0, .ok = 1 };
+        lwr_rec_push(&r);
+        lwr_send_reset(cs);
+        return 0;
+    }
+    lwr_send_pump(p, cs);
+    return 0;
 }
 
-/* ── raw-API test client (mirrors raw_loopback_spike.c) ────────────────────── */
+int kl_lwr_send_begin(void *pcb, const void *buf, size_t len) {
+    struct tcp_pcb *p = (struct tcp_pcb *)pcb;
+    unsigned char *copy = malloc(len ? len : 1);
+    if (!copy) return -1;
+    if (len) memcpy(copy, buf, len);
+    return lwr_send_install(p, copy, len);
+}
 
-static char g_cli_buf[1024];
+int kl_lwr_sendfile_begin(void *pcb, const void *head, size_t head_len,
+                          int file_fd, uint64_t count) {
+    struct tcp_pcb *p = (struct tcp_pcb *)pcb;
+    /* P9-3 approach (a): buffer head + the whole file into one owned copy, then reuse the
+     * send-pump. Simplest, bounded by head_len+count (fine for the test's temp file). The
+     * glue reads file_fd but does NOT close it — the response layer owns res->file_fd. */
+    if (count > (uint64_t)(SIZE_MAX - head_len)) return -1;   /* overflow guard */
+    size_t total = head_len + (size_t)count;
+    unsigned char *copy = malloc(total ? total : 1);
+    if (!copy) return -1;
+    if (head_len) memcpy(copy, head, head_len);
+    /* pread the file bytes after the head (offset 0, looping for short reads). */
+    size_t off = 0;
+    while (off < (size_t)count) {
+        ssize_t nr = pread(file_fd, copy + head_len + off, (size_t)count - off,
+                           (off_t)off);
+        if (nr < 0) { free(copy); return -1; }
+        if (nr == 0) break;                       /* unexpected EOF — send what we have */
+        off += (size_t)nr;
+    }
+    if (off != (size_t)count) { free(copy); return -1; }   /* file shorter than declared */
+    return lwr_send_install(p, copy, total);
+}
+
+void kl_lwr_send_release(void *pcb) {
+    KlLwrConn *cs = lwr_conn_find((struct tcp_pcb *)pcb);
+    if (cs) lwr_send_reset(cs);
+}
+
+/* ── raw-API test client (mirrors raw_loopback_spike.c) ──────────────────────
+ * P9-3 responses can be large (a 64 KB body + headers), so the client accumulates
+ * into a heap buffer sized on start (owned here; freed on the next start / release).
+ * All client calls run on the single lwIP tick thread (marshalled via KEEL timers in
+ * the test), so plain non-atomic state is safe. */
+static unsigned char *g_cli_buf;    /* heap accumulator (NUL-terminated for strstr) */
+static size_t g_cli_cap;
 static size_t g_cli_len;
 static const void *g_cli_req;
 static size_t g_cli_req_len;
@@ -318,11 +440,12 @@ static err_t lwr_cli_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
         return ERR_OK;
     }
     for (struct pbuf *q = p; q != NULL; q = q->next) {
-        size_t room = sizeof(g_cli_buf) - 1 - g_cli_len;
+        if (!g_cli_buf) break;
+        size_t room = (g_cli_cap > g_cli_len + 1) ? g_cli_cap - 1 - g_cli_len : 0;
         size_t take = q->len < room ? q->len : room;
         if (take > 0) { memcpy(g_cli_buf + g_cli_len, q->payload, take); g_cli_len += take; }
     }
-    g_cli_buf[g_cli_len] = '\0';
+    if (g_cli_buf) g_cli_buf[g_cli_len] = '\0';
     tcp_recved(tpcb, p->tot_len);
     pbuf_free(p);
     return ERR_OK;
@@ -338,8 +461,14 @@ static err_t lwr_cli_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
     return ERR_OK;
 }
 
-int kl_lwr_client_start(const uint8_t ip4[4], uint16_t port,
-                        const void *req, size_t req_len) {
+/* Start a fresh request; `cap` sizes the response accumulator (large enough for the
+ * expected body + headers). Returns 0 on the connect being issued, -1 on failure. */
+int kl_lwr_client_start_cap(const uint8_t ip4[4], uint16_t port,
+                            const void *req, size_t req_len, size_t cap) {
+    free(g_cli_buf);
+    g_cli_buf = malloc(cap ? cap : 1);
+    if (!g_cli_buf) return -1;
+    g_cli_cap = cap ? cap : 1;
     g_cli_len = 0;
     g_cli_buf[0] = '\0';
     g_cli_req = req;
@@ -356,9 +485,66 @@ int kl_lwr_client_start(const uint8_t ip4[4], uint16_t port,
     return 0;
 }
 
+/* P9-2 convenience: small default accumulator (1 KB). */
+int kl_lwr_client_start(const uint8_t ip4[4], uint16_t port,
+                        const void *req, size_t req_len) {
+    return kl_lwr_client_start_cap(ip4, port, req, req_len, 1024);
+}
+
 size_t kl_lwr_client_response(char *dst, size_t cap) {
+    if (cap == 0) return 0;
     size_t n = g_cli_len < cap - 1 ? g_cli_len : cap - 1;
-    memcpy(dst, g_cli_buf, n);
+    if (g_cli_buf) memcpy(dst, g_cli_buf, n);
     dst[n] = '\0';
+    return n;
+}
+
+size_t kl_lwr_client_len(void) { return g_cli_len; }
+
+/* Locate the response body (after the CRLFCRLF header terminator) and return its length
+ * + a simple additive checksum over the body bytes (0 if no terminator yet). Used by the
+ * P9-3 tests to verify a large/file body arrived intact without copying it all out. */
+size_t kl_lwr_client_body(size_t *out_checksum, unsigned char *first, unsigned char *last) {
+    if (out_checksum) *out_checksum = 0;
+    if (first) *first = 0;
+    if (last) *last = 0;
+    if (!g_cli_buf || g_cli_len < 4) return 0;
+    unsigned char *hdr_end = NULL;
+    for (size_t i = 0; i + 3 < g_cli_len; i++) {
+        if (g_cli_buf[i] == '\r' && g_cli_buf[i+1] == '\n' &&
+            g_cli_buf[i+2] == '\r' && g_cli_buf[i+3] == '\n') {
+            hdr_end = g_cli_buf + i + 4;
+            break;
+        }
+    }
+    if (!hdr_end) return 0;
+    size_t body_len = g_cli_len - (size_t)(hdr_end - g_cli_buf);
+    if (body_len == 0) return 0;
+    size_t sum = 0;
+    for (size_t i = 0; i < body_len; i++) sum += hdr_end[i];
+    if (out_checksum) *out_checksum = sum;
+    if (first) *first = hdr_end[0];
+    if (last) *last = hdr_end[body_len - 1];
+    return body_len;
+}
+
+void kl_lwr_client_release(void) {
+    free(g_cli_buf);
+    g_cli_buf = NULL;
+    g_cli_cap = g_cli_len = 0;
+}
+
+/* DEBUG: copy up to `cap` body bytes (after CRLFCRLF) starting at body offset `off`. */
+size_t kl_lwr_client_body_peek(size_t off, unsigned char *dst, size_t cap) {
+    if (!g_cli_buf) return 0;
+    unsigned char *hdr_end = NULL;
+    for (size_t i = 0; i + 3 < g_cli_len; i++)
+        if (g_cli_buf[i]=='\r'&&g_cli_buf[i+1]=='\n'&&g_cli_buf[i+2]=='\r'&&g_cli_buf[i+3]=='\n')
+            { hdr_end = g_cli_buf + i + 4; break; }
+    if (!hdr_end) return 0;
+    size_t body_len = g_cli_len - (size_t)(hdr_end - g_cli_buf);
+    if (off >= body_len) return 0;
+    size_t n = body_len - off; if (n > cap) n = cap;
+    memcpy(dst, hdr_end + off, n);
     return n;
 }
