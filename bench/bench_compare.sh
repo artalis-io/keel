@@ -63,6 +63,12 @@ bench_backend() {
 
 bench_backend ""                "epoll"                 ""
 bench_backend "BACKEND=iouring" "io_uring (completion)" ""
+# pollcomp is the poll()-facade completion double (the CI/ASan test backend, not a
+# production one). Included as a reference: it runs completion_driver.c WITHOUT
+# io_uring's kernel offload, so its delta from epoll isolates the completion-driver
+# cost and io_uring's delta from it isolates the kernel-offload win. Skip with
+# NO_POLLCOMP=1 (no extra deps — plain poll()).
+[ "${NO_POLLCOMP:-0}" = 1 ] || bench_backend "BACKEND=pollcomp" "pollcomp (completion double)" ""
 
 echo ""
 echo "=== KEEL backend comparison (relative; single host) ==="

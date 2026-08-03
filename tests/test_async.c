@@ -855,4 +855,49 @@ UTEST(async, resuspend_after_terminal_is_pending) {
     RFC_TERMINAL_TEARDOWN();
 }
 
+/* ── Watcher-mask re-arm (poll_update) churn soak ────────────────────────
+ * Hammers kl_event_mod's re-arm-to-a-new-mask path under heavy churn. Over
+ * BACKEND=iouring every mod on an armed watch drives io_uring_prep_poll_update
+ * (the fix that made watcher_mod_changes_interest work); on readiness backends it
+ * is plain kl_event_mod. Each round retargets the SAME armed watch READ↔WRITE
+ * (the watch is armed at every mod, so the poll_update branch is taken, not a
+ * fresh arm). The point is resource lifetime under churn — run under ASan/LSan
+ * this proves the thousands of re-arms leak no CQE/SQE/watch and never UAF a
+ * retired poll; exact fire timing is edge-triggered and intentionally NOT asserted
+ * (functional correctness is covered by watcher_mod_changes_interest). No normal
+ * HTTP path mods a watcher's mask over io_uring, so this is the dedicated stress
+ * for that path (see docs/phase8f5 §4). */
+#define SOAK_ROUNDS 3000
+UTEST(async, watcher_mask_churn_soak) {
+    KlServer s;
+    init_test_server(&s);
+    ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
+
+    int fds[2];
+    ASSERT_EQ(kl_test_socketpair(fds), 0);
+    set_nonblocking(fds[0]);
+    set_nonblocking(fds[1]);
+
+    /* fds[0] stays writable (send buffer not full) and non-readable (nothing
+     * queued), so WRITE interest can fire and READ interest does not. */
+    WatcherCtx ctx = {0};
+    ASSERT_EQ(kl_watcher_add(&s.ev, fds[0], KL_EVENT_READ, test_watcher_cb, &ctx), 0);
+
+    for (int i = 0; i < SOAK_ROUNDS; i++) {
+        ASSERT_EQ(kl_watcher_mod(&s.ev, fds[0], KL_EVENT_WRITE), 0);  /* poll_update → WRITE */
+        (void)kl_event_ctx_run(&s.ev, 16, 0);                        /* WRITE may fire */
+        ASSERT_EQ(kl_watcher_mod(&s.ev, fds[0], KL_EVENT_READ), 0);  /* poll_update → READ */
+        (void)kl_event_ctx_run(&s.ev, 16, 0);                        /* READ must not fire */
+    }
+    /* poll_update actually delivered interest changes — the WRITE interest fired. */
+    ASSERT_TRUE(ctx.called > 0);
+
+    kl_watcher_del(&s.ev, fds[0]);
+    for (int k = 0; k < 8; k++)                 /* drain the del's poll-cancel CQE → frees the watch */
+        (void)kl_event_ctx_run(&s.ev, 16, 0);
+    kl_test_closesock(fds[0]);
+    kl_test_closesock(fds[1]);
+    cleanup_test_server(&s);
+}
+
 UTEST_MAIN();
