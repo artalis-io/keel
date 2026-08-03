@@ -421,6 +421,7 @@ static int pdg_mcast(void *ctx, KlSocketHandle fd, int family,
                      const char *group, unsigned iface_index, int join) {
     (void)ctx;
     int s = (int)fd;
+    (void)s;   /* used only inside the IP_ADD_MEMBERSHIP / IPV6_JOIN_GROUP blocks */
     if (family == AF_INET) {
         struct in_addr maddr;
         if (inet_pton(AF_INET, group, &maddr) != 1 || (ntohl(maddr.s_addr) >> 28) != 0xE)

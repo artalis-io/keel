@@ -209,7 +209,7 @@ static void udp_flush_dgram(KlUdp *udp, const KlDatagramOps *dg) {
         KlDgramTxDesc descs[UDP_MMSG_MAX];
         while (udp->q_head) {
             int cnt = 0;
-            for (KlUdpDatagram *node = udp->q_head;
+            for (const KlUdpDatagram *node = udp->q_head;
                  node && cnt < udp->mmsg_batch && cnt < UDP_MMSG_MAX;
                  node = node->next, cnt++) {
                 descs[cnt].data = node->data; descs[cnt].len = node->len;
