@@ -225,9 +225,12 @@ const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoo
 /* The overlapped socket provider: Winsock control-plane defaults (NULL ops) + the
  * OVERLAPPED capability the negotiation keys on. */
 static const KlSocketOps IOCP_OPS = { .name = "iocp" };
+/* The Winsock datagram ops (socket_dgram_win.c) — reused for UDP config/opts on the
+ * completion loop; the readiness dgram send/recv are unused here (comp path drives). */
+extern const struct KlDatagramOps kl_socket_winsock_dgram_ops;
 static const KlSocketProvider IOCP_PROVIDER = {
     &IOCP_OPS, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED,
-    NULL,   /* dgram — completion loop uses kl_comp_post_udp_*, not the readiness dgram ops */
+    &kl_socket_winsock_dgram_ops,
 };
 const KlSocketProvider *kl_socket_provider_iocp(void) { return &IOCP_PROVIDER; }
 

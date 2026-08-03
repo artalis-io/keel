@@ -192,6 +192,7 @@ const KlSocketProvider *kl_socket_provider_pollcomp(void) {
     prov.ops = posix->ops;
     prov.context = posix->context;
     prov.capabilities = posix->capabilities | KL_SOCK_CAP_OVERLAPPED;
+    prov.dgram = posix->dgram;   /* UDP config/opts (readiness dgram data-plane unused on this loop) */
     return &prov;
 }
 

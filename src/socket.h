@@ -81,6 +81,11 @@ int            kl_sockdef_get_local_addr(KlSocketHandle fd, KlSockAddr *addr);
 int            kl_sockdef_get_so_error(KlSocketHandle fd, int *out_err);
 ssize_t        kl_sockdef_send(KlSocketHandle fd, const void *buf, size_t len);
 ssize_t        kl_sockdef_recv(KlSocketHandle fd, void *buf, size_t len);
+/* The built-in provider's datagram ops (POSIX / Winsock per platform) — the default
+ * datagram data-plane when KlEventCtx.sockets is NULL, mirroring the kl_sockdef_*
+ * stream fallback. Defined in socket_posix.c / socket_winsock.c. */
+struct KlDatagramOps;
+const struct KlDatagramOps *kl_sockdef_dgram(void);
 ssize_t        kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len);
 ssize_t        kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
 ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count);
