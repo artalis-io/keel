@@ -18,6 +18,10 @@
 #endif
 #include "socket.h"
 #include "sockaddr_native.h"   /* KlSockAddr <-> struct sockaddr marshalling */
+#include <keel/datagram.h>     /* the POSIX datagram ops (socket_dgram_posix.c) */
+
+/* Datagram data-plane for this provider (defined in socket_dgram_posix.c). */
+extern const KlDatagramOps kl_socket_posix_dgram_ops;
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -321,8 +325,8 @@ static const KlSocketOps POSIX_OPS = {
 
 static const KlSocketProvider POSIX_PROVIDER = {
     &POSIX_OPS, NULL,
-    KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | KL_SOCK_CAP_SENDFILE,
-    NULL,   /* dgram — datagram ops added in the datagram-provider stage */
+    KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | KL_SOCK_CAP_SENDFILE | KL_SOCK_CAP_DATAGRAM,
+    &kl_socket_posix_dgram_ops,
 };
 
 const KlSocketProvider *kl_socket_provider_posix(void) {

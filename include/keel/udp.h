@@ -88,7 +88,7 @@ typedef void (*KlUdpRecvSegmentsFn)(KlUdp *udp, const void *data, size_t len,
 /**
  * @brief UDP socket configuration.
  */
-typedef struct {
+typedef struct KlUdpConfig {      /* named tag: the datagram provider ops (keel/datagram.h) reference it by struct tag */
     KlEventCtx  *ctx;             /**< Event loop (borrowed — must outlive udp). */
     int          family;         /**< AF_INET / AF_INET6 / AF_UNSPEC (auto from bind_addr). */
     const char  *bind_addr;      /**< Numeric bind address, or NULL for an unbound socket. */
