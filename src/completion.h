@@ -20,6 +20,8 @@
 #include <keel/connection.h>   /* KlConn */
 #include <keel/socket.h>       /* KlIoVec, KlSocketHandle */
 #include <keel/net.h>          /* struct sockaddr_storage, socklen_t */
+#include <keel/sockaddr.h>     /* KlSockAddr (KlCompletionOps.post_udp_send) */
+#include <stdint.h>            /* uint64_t (KlCompletionOps.post_sendfile) */
 #include <stddef.h>
 
 struct KlServer;
@@ -58,10 +60,44 @@ typedef struct {
 } KlCompletionEvent;
 
 struct KlEventCtx;
+struct KlUdp;
 
 /* The generic completion tick kl_comp_run() is declared in io_engine.h (the event-
  * model seam), so async.c's kl_event_ctx_run can reach it without pulling the whole
  * completion backend contract. */
+
+/* ── Completion sub-vtable (RC-1: runtime-injectable completion axis) ──────
+ *
+ * The per-backend completion primitives, grouped so they can be reached through a
+ * runtime-installed event provider (loop->ops->completion) exactly as the readiness
+ * primitives are reached through loop->ops (event_dispatch.c). On the compiled-in path
+ * (loop->ops == NULL) the dispatchers in completion_dispatch.c fall back to
+ * kl_comp_ops_builtin() — the backend's own table — so that path stays a single,
+ * perfectly-predicted branch with no behavioral change. RC-2 proves runtime injection;
+ * RC-1 only relocates the primitives behind this vtable, leaving the default identical.
+ *
+ * The `kl_comp_*` free functions below remain the call surface used by callers + the
+ * generic driver; completion_dispatch.c OWNS those names and routes each through this
+ * vtable. Each completion backend renames its impls (static, e.g. iou_post_recv) and
+ * exposes them via kl_comp_ops_builtin(). See docs/event_provider_design.md. */
+typedef struct KlCompletionOps {
+    int  (*drain)(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms);
+    int  (*prime_accepts)(struct KlServer *s);
+    int  (*post_recv)(KlConn *c);
+    int  (*post_send)(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total);
+    int  (*post_accept)(struct KlServer *s);
+    int  (*post_sendfile)(KlConn *c, const KlIoVec *head_iov, int head_n,
+                          size_t head_total, int file_fd, uint64_t count);
+    void (*cancel)(struct KlEventCtx *ctx, KlSocketHandle fd);
+    int  (*post_udp_recv)(struct KlUdp *udp);
+    int  (*post_udp_send)(struct KlUdp *udp, const void *data, size_t len,
+                          const KlSockAddr *dest);
+} KlCompletionOps;
+
+/* The compiled-in completion backend's vtable (one per completion backend TU). A
+ * readiness build links a stub returning NULL (never dereferenced — a readiness loop
+ * lacks KL_EVENT_CAP_COMPLETION so the server never enters the completion branch). */
+const KlCompletionOps *kl_comp_ops_builtin(void);
 
 /* ── Backend contract (implemented once per completion platform) ──────── */
 

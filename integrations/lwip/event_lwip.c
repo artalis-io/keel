@@ -197,8 +197,10 @@ static const KlSocketProvider *lwev_native_provider(const KlEventLoop *loop) {
 }
 
 static const KlEventOps lwip_event_ops = {
-    lwev_init, lwev_add, lwev_mod, lwev_del, lwev_wait, lwev_close,
-    lwev_caps, lwev_native_provider,
+    .init = lwev_init, .add = lwev_add, .mod = lwev_mod, .del = lwev_del,
+    .wait = lwev_wait, .close = lwev_close, .caps = lwev_caps,
+    .native_provider = lwev_native_provider,
+    .completion = NULL,   /* readiness provider — no completion axis (RC-1) */
 };
 
 static const KlEventProvider lwip_event_provider = { &lwip_event_ops, "lwip" };

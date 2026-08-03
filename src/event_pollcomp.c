@@ -215,7 +215,7 @@ static void pc_op_free(KlPcOp *op) {
 
 static KlPcState *pc_state(KlConn *c) { return c->ctx->loop._backend; }
 
-int kl_comp_post_recv(KlConn *c) {
+static int pc_comp_post_recv(KlConn *c) {
     KlPcState *st = pc_state(c);
     KlPcOp *op = kl_malloc(c->alloc, sizeof(*op));
     if (!op) return -1;
@@ -244,7 +244,7 @@ int kl_comp_post_recv(KlConn *c) {
     return 0;
 }
 
-int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
+static int pc_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     KlPcState *st = pc_state(c);
     KlPcOp *op = kl_malloc(c->alloc, sizeof(*op));
     if (!op) return -1;
@@ -265,7 +265,7 @@ int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     return 0;
 }
 
-int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int pc_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     KlPcState *st = pc_state(c);
     KlPcOp *op = kl_malloc(c->alloc, sizeof(*op));
@@ -289,7 +289,7 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
     return 0;
 }
 
-int kl_comp_post_accept(struct KlServer *s) {
+static int pc_comp_post_accept(struct KlServer *s) {
     KlPcState *st = s->ev.loop._backend;
     /* One accept op suffices: on completion the driver refills. Avoid stacking
      * duplicate accept ops on the same listen fd (they would just spin on EAGAIN). */
@@ -305,7 +305,7 @@ int kl_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-int kl_comp_post_udp_recv(struct KlUdp *udp) {
+static int pc_comp_post_udp_recv(struct KlUdp *udp) {
     KlPcState *st = udp->ctx->loop._backend;
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
     if (!op) return -1;
@@ -318,7 +318,7 @@ int kl_comp_post_udp_recv(struct KlUdp *udp) {
     return 0;
 }
 
-int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+static int pc_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
                           const KlSockAddr *dest) {
     KlPcState *st = udp->ctx->loop._backend;
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
@@ -339,20 +339,20 @@ int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
     return 0;
 }
 
-int kl_comp_prime_accepts(struct KlServer *s) {
+static int pc_comp_prime_accepts(struct KlServer *s) {
     KlPcState *st = s->ev.loop._backend;
     if (st->primed) return 0;
     st->listen_fd = s->listen_fd;
     st->server = s;
     st->primed = 1;
-    return kl_comp_post_accept(s);
+    return pc_comp_post_accept(s);
 }
 
 /* Cancel pending ops on `fd` (idle-timeout sweep): mark them aborted so the next drain
  * delivers an error completion, driving the driver's normal release. We mark rather than
  * remove so the invariant "a conn is released only from a completion" holds — the driver
  * expects the op it's waiting on to complete before the conn slot is reused. */
-void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
+static void pc_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     KlPcState *st = ctx->loop._backend;
     for (KlPcOp *o = st->ops; o; o = o->next)
         if (o->fd == fd) o->aborted = 1;
@@ -524,7 +524,7 @@ static short pc_watch_events(KlEventMask mask) {
     return e;
 }
 
-int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
+static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlPcState *st = ctx->loop._backend;
     int count = 0;
 
@@ -612,3 +612,15 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
     if (oref) kl_free(st->alloc, oref, nops * sizeof(*oref));
     return count;
 }
+
+/* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
+ * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
+ * can reach them on the compiled-in path (kl_comp_ops_builtin) or through a runtime
+ * provider (loop->ops->completion). No behavior change — the same funcs, one hop away. */
+static const KlCompletionOps pc_completion_ops = {
+    pc_comp_drain, pc_comp_prime_accepts, pc_comp_post_recv, pc_comp_post_send,
+    pc_comp_post_accept, pc_comp_post_sendfile, pc_comp_cancel,
+    pc_comp_post_udp_recv, pc_comp_post_udp_send,
+};
+
+const KlCompletionOps *kl_comp_ops_builtin(void) { return &pc_completion_ops; }

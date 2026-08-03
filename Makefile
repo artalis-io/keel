@@ -46,11 +46,10 @@ else ifdef WINDOWS
   # defaults + the Winsock load constructor the IOCP provider reuses).
   ifeq ($(BACKEND),iocp)
     EVENT_SRC = src/event_iocp.c
-    # Completion axis: the platform-independent driver (completion_driver.c)
-    # provides kl_io_engine_run_completion over the completion.h backend that
-    # event_iocp.c implements — so the io_engine.c stub is not linked here.
-    IO_ENGINE_SRC =
-    COMPLETION_SRC = src/completion_driver.c
+    # Completion axis: event_iocp.c implements the completion backend (completion.h
+    # primitives + kl_comp_ops_builtin). The generic driver + dispatch (COMPLETION_CORE)
+    # are always linked; this flag suppresses the readiness kl_comp_ops_builtin stub.
+    COMPLETION_BACKEND = 1
   else
     EVENT_SRC = src/event_wsapoll.c
   endif
@@ -90,10 +89,11 @@ else
   ifeq ($(UNAME_S),Linux)
     ifeq ($(BACKEND),lwipraw)
       # Phase 9 lwIP raw-API COMPLETION backend over NO_SYS=1 lwIP (BYO — LWIP_DIR).
-      # Like BACKEND=iouring/pollcomp this is a completion build: the platform-independent
+      # Like BACKEND=iouring/pollcomp this is a completion build: the always-linked
       # driver (completion_driver.c) provides kl_io_engine_run_completion over the
       # completion.h backend that integrations/lwip/event_lwip_raw.c implements (raw tcp_*
-      # callbacks driven by KEEL's loop as the lwIP mainloop). io_engine.c stub NOT linked.
+      # callbacks driven by KEEL's loop as the lwIP mainloop); COMPLETION_BACKEND=1
+      # suppresses the readiness kl_comp_ops_builtin stub.
       # The event backend TU needs lwIP's NO_SYS=1 headers + the raw_build scratch dir
       # (the lwipopts.h forwarder + arch/cc.h, created by integrations/lwip/Makefile) +
       # the internal src/ seams (completion.h/socket.h/event_caps.h) — hence -Isrc and the
@@ -105,8 +105,7 @@ else
       # clash with the host socket headers the KEEL socket seam pulls into event_lwip_raw.c.
       LWIP_GLUE_SRC = integrations/lwip/lwip_raw_glue.c
       FILE_IO_SRC = src/file_io.c
-      IO_ENGINE_SRC =
-      COMPLETION_SRC = src/completion_driver.c
+      COMPLETION_BACKEND = 1
       LWIPRAW_BUILD ?= integrations/lwip/raw_build
       # event_lwip_raw.c needs the internal src/ seams + keel_lwip_raw.h; it does NOT include
       # lwIP (only lwip_raw_glue.c does). The lwIP include dirs are harmless to the other TUs.
@@ -120,21 +119,19 @@ else
       # splice (8f-2), so the io_uring file backend is gone; FILE_IO_SRC is the POSIX file_io.c.
       EVENT_SRC = src/event_iouring.c
       FILE_IO_SRC = src/file_io.c
-      IO_ENGINE_SRC =
-      COMPLETION_SRC = src/completion_driver.c
+      COMPLETION_BACKEND = 1
       LDFLAGS += -luring
     else ifeq ($(BACKEND),poll)
       EVENT_SRC = src/event_poll.c
       FILE_IO_SRC = src/file_io.c
     else ifeq ($(BACKEND),pollcomp)
-      # Portable completion backend over poll() (PAL 8d-0.5): the completion axis
-      # (completion.h) + driver (completion_driver.c) on POSIX, so the completion
-      # model is runtime-testable off Windows. IO_ENGINE_SRC empty — the driver
-      # provides kl_io_engine_run_completion over event_pollcomp.c's backend.
+      # Portable completion backend over poll() (PAL 8d-0.5): event_pollcomp.c implements
+      # the completion backend on POSIX, so the completion model is runtime-testable off
+      # Windows. The generic driver + dispatch (COMPLETION_CORE) are always linked; this
+      # flag suppresses the readiness kl_comp_ops_builtin stub.
       EVENT_SRC = src/event_pollcomp.c
       FILE_IO_SRC = src/file_io.c
-      IO_ENGINE_SRC =
-      COMPLETION_SRC = src/completion_driver.c
+      COMPLETION_BACKEND = 1
     else
       EVENT_SRC = src/event_epoll.c
       FILE_IO_SRC = src/file_io.c
@@ -151,8 +148,7 @@ else
     else ifeq ($(BACKEND),pollcomp)
       # Portable completion backend over poll() (PAL 8d-0.5) — see the Linux branch.
       EVENT_SRC = src/event_pollcomp.c
-      IO_ENGINE_SRC =
-      COMPLETION_SRC = src/completion_driver.c
+      COMPLETION_BACKEND = 1
     else
       EVENT_SRC = src/event_kqueue.c
     endif
@@ -182,12 +178,23 @@ TEST_COMPAT_SRC ?= tests/net_compat_posix.c
 # Windows branch swaps the iphlpapi sibling. dns_resolver.c itself is #ifdef-free
 # and runs over the udp + socket.h seams.
 DNS_SYS_SRC ?= src/dns_sys_posix.c
-# Completion-tick stub for the io_engine seam (PAL Phase 8). Linked on every build
-# except a completion backend, where completion_driver.c provides the real
-# kl_io_engine_run_completion over the completion.h axis.
-IO_ENGINE_SRC ?= src/io_engine.c
-# The platform-independent completion driver (empty except on completion backends).
-COMPLETION_SRC ?=
+# Completion axis core (RC-1). The generic driver (completion_driver.c: kl_comp_run /
+# kl_io_engine_*) + the runtime-dispatch surface (completion_dispatch.c: the kl_comp_*
+# primitives, routed to the compiled-in backend or a runtime provider) are linked on
+# EVERY build. On a readiness build they are never called (gated by KL_EVENT_CAP_
+# COMPLETION); on a completion build the dispatch reaches the backend's kl_comp_ops_builtin.
+# KEEL_NO_COMPLETION swaps in aborting stubs (completion_absent.c) — the axis is compiled out.
+ifdef KEEL_NO_COMPLETION
+  COMPLETION_CORE = src/completion_absent.c
+else
+  COMPLETION_CORE = src/completion_driver.c src/completion_dispatch.c
+  # A readiness EVENT_SRC (epoll/kqueue/poll/wsapoll) has no completion backend, so it
+  # needs the kl_comp_ops_builtin→NULL stub the dispatch falls back to (never dereferenced).
+  # A completion backend (COMPLETION_BACKEND=1) provides its own kl_comp_ops_builtin.
+  ifndef COMPLETION_BACKEND
+    COMPLETION_CORE += src/completion_readiness_stub.c
+  endif
+endif
 # lwIP-only glue TU (empty except on BACKEND=lwipraw) — see the lwipraw BACKEND block.
 LWIP_GLUE_SRC ?=
 CORE_SRC = src/allocator.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/response.c src/router.c \
@@ -200,7 +207,7 @@ CORE_SRC = src/allocator.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c \
-           $(IO_ENGINE_SRC) $(COMPLETION_SRC) $(LWIP_GLUE_SRC) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
+           $(COMPLETION_CORE) $(LWIP_GLUE_SRC) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
 # The built-in DNS resolver now builds on every platform: dns_resolver.c is
 # #ifdef-free (over the udp + socket.h seams) and DNS_SYS_SRC swaps the config-
@@ -708,11 +715,13 @@ clean:
 	      tests/smoke_dns tests/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_poll.o
-	# Completion-backend objects are conditional (COMPLETION_SRC/EVENT_SRC only set
-	# under BACKEND=iocp|pollcomp), so they escape $(CORE_OBJ) on a default clean —
-	# remove them unconditionally to prevent a stale cross-toolchain object (e.g. a
-	# MinGW completion_driver.o) surviving into a later native build.
+	# Completion-backend + completion-axis objects are build-conditional (EVENT_SRC per
+	# BACKEND; the readiness-stub / KEEL_NO_COMPLETION absent TU per config), so they
+	# escape $(CORE_OBJ) on a default clean — remove them unconditionally to prevent a
+	# stale cross-toolchain object (e.g. a MinGW completion_driver.o) surviving into a
+	# later native build.
 	rm -f src/event_iocp.o src/event_pollcomp.o src/event_iouring.o src/completion_driver.o
+	rm -f src/completion_dispatch.o src/completion_readiness_stub.o src/completion_absent.o
 	rm -f tests/smoke_iouring tests/smoke_iouring_async
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
