@@ -92,7 +92,78 @@ loopback-tls: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwi
 	./lwip_loopback_test
 	@echo "integrations/lwip: loopback + HTTPS runtime test OK (stock libkeel + lwIP + mbedTLS)"
 
-clean:
-	rm -f *.o *.a lwip_loopback_test
+# ── Phase 9 spike: raw (tcp_*) callback API, NO_SYS=1, over loopback ──────────
+# Proves the raw+loopback+NO_SYS mainloop works in-process (no tap, no root) —
+# the foundation a KEEL raw/completion provider would build on. This is a
+# STANDALONE spike: it does NOT link libkeel, only a NO_SYS=1 lwIP built from
+# lwipopts_raw.h.
+#
+# The trick to make the raw build pick up lwipopts_raw.h (lwIP's opt.h does an
+# unconditional `#include "lwipopts.h"`): compile in a scratch dir (raw_build/)
+# that contains a one-line lwipopts.h forwarding to ../lwipopts_raw.h, and put
+# that dir FIRST on the include path — so it wins over the NO_SYS=0 lwipopts.h
+# in `.`. Raw build uses ONLY src/core + src/core/ipv4 (+ netif/loopif when it
+# exists as a .c; in STABLE-2_2_0 the loopif lives in core/netif.c under
+# LWIP_HAVE_LOOPIF, so no extra netif file is needed). No src/api, no sys_arch.
+# A self-contained arch port for NO_SYS=1: we deliberately do NOT use lwIP's
+# contrib unix port (that's the threaded sys_arch — it defines LWIP_RAND() to
+# lwip_port_rand() and drags in sys_arch.c). NO_SYS=1 needs only cc.h (compiler
+# abstraction: byte order + printf format defines) and a trivial sys_arch.h.
+RAW_BUILD  = raw_build
+RAW_SRCS   = $(wildcard $(LWIP_DIR)/src/core/*.c) \
+             $(wildcard $(LWIP_DIR)/src/core/ipv4/*.c)
+RAW_INC    = -I$(RAW_BUILD) -I$(LWIP_DIR)/src/include
 
-.PHONY: check loopback loopback-tls clean
+$(RAW_BUILD)/lwipopts.h:
+	@mkdir -p $(RAW_BUILD)/arch
+	@echo '#include "../lwipopts_raw.h"' > $@
+
+# Minimal compiler-abstraction header (cc.h) — no contrib port needed.
+$(RAW_BUILD)/arch/cc.h: $(RAW_BUILD)/lwipopts.h
+	@printf '%s\n' \
+	  '#ifndef LWIP_ARCH_CC_H' \
+	  '#define LWIP_ARCH_CC_H' \
+	  '#include <sys/time.h>' \
+	  '#define LWIP_TIMEVAL_PRIVATE 0' \
+	  '#define LWIP_ERRNO_STDINCLUDE 1' \
+	  '#include <endian.h>' \
+	  '#ifndef BYTE_ORDER' \
+	  '#define BYTE_ORDER LITTLE_ENDIAN' \
+	  '#endif' \
+	  '#include <inttypes.h>' \
+	  '#define X8_F  "02" PRIx8' \
+	  '#define U16_F PRIu16' \
+	  '#define S16_F PRId16' \
+	  '#define X16_F PRIx16' \
+	  '#define U32_F PRIu32' \
+	  '#define S32_F PRId32' \
+	  '#define X32_F PRIx32' \
+	  '#define SZT_F "zu"' \
+	  '#endif' > $@
+
+# Trivial sys_arch.h — NO_SYS=1 uses none of the sys_* prototypes, but lwIP still
+# #includes this header. Empty guard is enough.
+$(RAW_BUILD)/arch/sys_arch.h: $(RAW_BUILD)/lwipopts.h
+	@printf '%s\n' \
+	  '#ifndef LWIP_ARCH_SYS_ARCH_H' \
+	  '#define LWIP_ARCH_SYS_ARCH_H' \
+	  '#endif' > $@
+
+RAW_ARCH = $(RAW_BUILD)/arch/cc.h $(RAW_BUILD)/arch/sys_arch.h
+
+liblwip_raw.a: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) $(RAW_SRCS)
+	@echo "building NO_SYS=1 lwIP ($(words $(RAW_SRCS)) files) ..."
+	@$(CC) -w -std=c11 -O2 -D_DEFAULT_SOURCE $(RAW_INC) -c $(RAW_SRCS)
+	@$(AR) rcs $@ $(notdir $(RAW_SRCS:.c=.o))
+
+raw-spike: liblwip_raw.a $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
+	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE $(RAW_INC) \
+	  -o raw_loopback_spike raw_loopback_spike.c liblwip_raw.a
+	./raw_loopback_spike
+	@echo "integrations/lwip: raw+loopback+NO_SYS spike OK"
+
+clean:
+	rm -f *.o *.a lwip_loopback_test raw_loopback_spike
+	rm -rf $(RAW_BUILD)
+
+.PHONY: check loopback loopback-tls raw-spike clean
