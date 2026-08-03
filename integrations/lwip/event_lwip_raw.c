@@ -1,5 +1,5 @@
 /*
- * event_lwip_raw.c — Phase 9 lwIP raw-API COMPLETION event backend (P9-1 skeleton).
+ * event_lwip_raw.c — Phase 9 lwIP raw-API COMPLETION event backend.
  *
  * This is the completion-model counterpart of the shipped *readiness* lwIP provider
  * (event_lwip.c, which polls lwIP's sockets layer via lwip_poll). It drives lwIP's
@@ -18,11 +18,6 @@
  * this backend requires a libkeel BUILT for the completion axis — completion_driver.c
  * linked in, the io_engine.c stub NOT — because the connection state machine that runs
  * over completions lives in the driver, selected at build time (Makefile BACKEND).
- * So this TU is compiled INTO a lwipraw libkeel (Makefile BACKEND=lwipraw): it defines
- * both the compile-time backend entry points (kl_event_*_builtin) AND the runtime
- * KlEventProvider (kl_event_provider_lwip_raw), which are the same implementation — a
- * lwipraw libkeel's compiled-in default backend IS lwIP-raw, and the ctx also accepts
- * the named provider so callers can init explicitly.
  *
  * Division of labour (mirrors event_pollcomp.c — the SIMPLEST completion backend):
  *   - THIS TU defines the completion.h/io_engine.h BACKEND primitives:
@@ -31,29 +26,31 @@
  *   - completion_driver.c defines the GENERIC tick + seam entry points on top of them:
  *       kl_comp_run / kl_io_engine_run_completion / kl_io_engine_resume_completion /
  *       kl_io_engine_post_read
- *     — do NOT redefine those here.
  *
- * P9-1 SCOPE: skeleton + loop drive only. accept/recv/send/close (mapping tcp_accept/
- * tcp_recv/tcp_write/tcp_sent callbacks to KL_COMP_ACCEPT/READ/WRITE) land in P9-2..P9-5.
- * Here kl_comp_drain does ONE lwIP tick and returns 0 events; the post_* primitives are
- * stubs that link but do nothing yet (each flagged "P9-2+").
+ * P9-2 SCOPE: listen/accept + recv/send completion — a raw-backed KlServer answers one
+ * request over loopback. The socket-provider primitives (tcp_new/bind/listen/close) now
+ * operate on real tcp_pcb handles via the glue; the tcp_accept/tcp_recv/tcp_sent callbacks
+ * surface KL_COMP_ACCEPT/READ/WRITE. Backpressure / large+partial sends / sendfile /
+ * close-cancel-lifetime are P9-3..P9-5.
+ *
+ * Header-clash seam discipline (P9-1, preserved): this TU includes NO lwIP header — lwIP's
+ * def.h redefines htons/ntohs and its arch.h typedefs ssize_t, which clash with the host
+ * <sys/socket.h>/<netinet/in.h> that the KEEL socket seam below pulls in. All lwIP contact
+ * goes through lwip_raw_glue.h (opaque void* pcb/netif + neutral KlLwrRecord), whose
+ * implementation (lwip_raw_glue.c) is the lwIP-only TU.
  *
  * BYO lwIP (LWIP_DIR), NO_SYS=1 build (lwipopts_raw.h). See integrations/lwip/Makefile.
  *
  * SPDX-License-Identifier: MIT
  */
-
-/* Keel internal completion-backend contract (a completion backend is inherently a
- * consumer of these internal seams, exactly as event_pollcomp.c / event_iocp.c are).
- * NOTE: this TU deliberately includes NO lwIP header — lwIP's def.h redefines htons/ntohs
- * and its arch.h typedefs ssize_t, which clash with the host <sys/socket.h>/<netinet/in.h>
- * that the KEEL socket seam below pulls in. All lwIP contact goes through lwip_raw_glue.h
- * (opaque void* netif), whose implementation (lwip_raw_glue.c) is the lwIP-only TU. */
 #include <keel/event.h>
 #include <keel/event_ctx.h>    /* KlEventCtx — kl_comp_drain reaches loop._backend */
+#include <keel/connection.h>   /* KlConn — read_buf / fd / ctx */
+#include <keel/server.h>       /* KlServer — listen_fd (prime accepts) */
 #include <keel/allocator.h>    /* kl_malloc / kl_free */
+#include <keel/sockaddr.h>     /* KlSockAddr marshalling at the seam boundary */
 #include "keel_lwip_raw.h"     /* kl_event_provider_lwip_raw / kl_socket_provider_lwip_raw */
-#include "lwip_raw_glue.h"     /* kl_lwr_lwip_up / kl_lwr_lwip_tick (lwIP seam, no lwIP types) */
+#include "lwip_raw_glue.h"     /* the lwIP seam (no lwIP types) */
 #include "event_builtin.h"     /* kl_event_*_builtin entry points (src/) */
 #include "event_caps.h"        /* KL_EVENT_CAP_* + kl_event_native_provider_builtin (src/) */
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
@@ -70,20 +67,55 @@
 #define KL_LWR_TICK_SLEEP_NS  1000000L
 #define KL_LWR_NS_PER_MS      1000000L
 
-/* Per-loop backend state stashed in loop->_backend. In P9-1 it holds only the opaque
- * loopback netif we tick each drain; P9-2+ adds the pending-op list + accept target. */
+/* Max concurrently recv-armed conns tracked by the backend. A conn is armed by
+ * kl_comp_post_recv and disarmed when its READ completion is surfaced (single in-flight
+ * recv per conn, matching the completion contract). Sized for the P9-2 loopback roundtrip
+ * plus slack. */
+#define KL_LWR_MAX_ARMED  8
+
+/* Stack buffer size for one drain's worth of glue records (bounded by the caller's `max`,
+ * which completion_driver.c caps at KL_COMP_MAX_EVENTS = 64). */
+#define KL_LWR_MAX_DRAIN  64
+
+/* Per-loop backend state stashed in loop->_backend. */
 typedef struct {
     KlAllocator     *alloc;
-    void            *loopif;     /* opaque lwIP loop netif (kl_lwr_lwip_up) */
-    struct KlServer *server;     /* accept target (set at prime) — P9-2+ */
-    int              primed;     /* accept backlog primed — P9-2+ */
+    void            *loopif;                    /* opaque lwIP loop netif (kl_lwr_lwip_up) */
+    struct KlServer *server;                    /* accept target (set at prime) */
+    int              primed;                    /* accept backlog primed (idempotent latch) */
+    KlConn          *armed[KL_LWR_MAX_ARMED];   /* conns with a pending recv posted */
+    int              armed_count;
 } KlLwrState;
+
+/* ── recv-arming bookkeeping ───────────────────────────────────────────────────
+ * lwIP recv is passive: the tcp_recv callback stages bytes + enqueues a READ record in the
+ * glue whenever data arrives. But the completion contract is pull-shaped — the driver posts
+ * one recv (kl_comp_post_recv) and expects exactly one READ. So the backend gates: a READ
+ * record is surfaced to the driver only when the owning conn is recv-armed, and arming is
+ * consumed on delivery. (The driver posts the recv synchronously in comp_on_accept, before
+ * any data can arrive — a tick is required — so arming always precedes the first READ.) */
+static int lwr_is_armed(KlLwrState *st, const KlConn *c) {
+    for (int i = 0; i < st->armed_count; i++)
+        if (st->armed[i] == c) return 1;
+    return 0;
+}
+static void lwr_arm(KlLwrState *st, KlConn *c) {
+    if (lwr_is_armed(st, c)) return;
+    if (st->armed_count < KL_LWR_MAX_ARMED)
+        st->armed[st->armed_count++] = c;
+}
+static void lwr_disarm(KlLwrState *st, const KlConn *c) {
+    for (int i = 0; i < st->armed_count; i++)
+        if (st->armed[i] == c) {
+            st->armed[i] = st->armed[--st->armed_count];
+            return;
+        }
+}
 
 /* ── KlEventLoop lifecycle ─────────────────────────────────────────────
  * Named *_builtin because a lwipraw-built libkeel selects this TU as its compile-time
  * backend (Makefile BACKEND=lwipraw); event_dispatch.c calls these on the NULL-ops
- * (default) path. The runtime provider below wraps the SAME functions, so an explicit
- * kl_event_provider_lwip_raw() init and the default init behave identically. */
+ * (default) path. The runtime provider below wraps the SAME functions. */
 
 int kl_event_init_builtin(KlEventLoop *loop) {
     KlLwrState *st = kl_malloc(loop->alloc, sizeof(*st));
@@ -97,10 +129,10 @@ int kl_event_init_builtin(KlEventLoop *loop) {
     return 0;
 }
 
-/* P9-1 has no watchers: connection I/O is driven by posted overlapped ops (P9-2+),
- * not readiness watches, so add/mod/del are inert here — matching the IOCP model. A
- * tagged-udata watcher relay (thread-pool wakeup / timers, as in event_pollcomp.c's
- * KL_COMP_WATCHER path) is a later stage; P9-1 needs none. */
+/* Connection I/O is driven by posted completions (recv/send via the tcp_* callbacks), not
+ * readiness watches, so add/mod/del are inert — matching the IOCP model. (A tagged-udata
+ * watcher relay for thread-pool wakeup / timers, as in event_pollcomp.c, is a later stage;
+ * P9-2's single-request loopback roundtrip needs none.) */
 int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     (void)loop; (void)fd; (void)mask; (void)udata;
     return 0;
@@ -149,11 +181,7 @@ const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoo
     return kl_socket_provider_lwip_raw();
 }
 
-/* ── Runtime KlEventProvider packaging (parallel to event_lwip.c) ──────────────
- * So a caller can init the ctx explicitly with this backend:
- *   kl_event_ctx_init_ex(&ctx, &alloc, kl_event_provider_lwip_raw());
- * The ops just forward to the *_builtin functions above (event_dispatch.c routes
- * through loop->ops when a provider is installed). Same implementation either way. */
+/* ── Runtime KlEventProvider packaging (parallel to event_lwip.c) ────────────── */
 static const KlEventOps lwip_raw_event_ops = {
     kl_event_init_builtin, kl_event_add_builtin, kl_event_mod_builtin,
     kl_event_del_builtin, kl_event_wait_builtin, kl_event_close_builtin,
@@ -164,38 +192,66 @@ static const KlEventProvider lwip_raw_event_provider = { &lwip_raw_event_ops, "l
 const KlEventProvider *kl_event_provider_lwip_raw(void) { return &lwip_raw_event_provider; }
 
 /* ── Overlapped socket provider (KlSocketHandle == tcp_pcb *) ───────────────────
- * P9-1: minimal stubs that carry the OVERLAPPED capability so
- * kl_event_ctx_sockets_compatible() passes for a completion loop (kl_caps_compatible
- * keys on KL_SOCK_CAP_OVERLAPPED). The real raw-PCB ops (tcp_new/bind/listen/close as
- * the socket lifecycle; recv/send driven by the completion path, not these) land in
- * P9-2..P9-5. The handle will be a `struct tcp_pcb *` cast to KlSocketHandle (intptr_t;
- * handle.h already anticipates "lwIP raw tcp_pcb *"). None of these are reached in P9-1
- * (the tick test posts no ops and creates no sockets). */
+ * The socket lifecycle (tcp_new/bind/listen/close as socket/bind/listen/close;
+ * get_local_addr for the bound-port readback) rides real tcp_pcb handles via the glue.
+ * Data-plane I/O (recv/send) goes through the completion post path, not these ops — so
+ * send/recv/accept/connect stay stubbed. Control-plane no-ops (set_nonblocking etc.)
+ * succeed because a raw pcb needs no fcntl-style setup. The handle is a `struct tcp_pcb *`
+ * cast to KlSocketHandle (intptr_t). */
 static int lwr_sock_noop_fd(void *c, KlSocketHandle fd) { (void)c; (void)fd; return 0; }
 static void lwr_sock_void_fd(void *c, KlSocketHandle fd) { (void)c; (void)fd; }
-static int lwr_sock_opt(void *c, KlSocketHandle fd, int on) { (void)c; (void)fd; (void)on; return -1; }
+static int lwr_sock_opt(void *c, KlSocketHandle fd, int on) { (void)c; (void)fd; (void)on; return 0; }
+
 static KlSocketHandle lwr_sock_socket(void *c, int d, int t, int p) {
     (void)c; (void)d; (void)t; (void)p;
-    return KL_INVALID_SOCKET;   /* P9-2+: tcp_new() → (KlSocketHandle)pcb */
+    void *pcb = kl_lwr_tcp_new();
+    return pcb ? (KlSocketHandle)pcb : KL_INVALID_SOCKET;
 }
-static int lwr_sock_addr(void *c, KlSocketHandle fd, const KlSockAddr *a) {
-    (void)c; (void)fd; (void)a; return -1;   /* P9-2+: tcp_bind / tcp_connect */
+
+/* bind: marshal the neutral KlSockAddr's IPv4 bytes + port to the glue (which builds an
+ * lwIP ip_addr_t). IPv6 is out of scope for P9-2 (loopback IPv4). */
+static int lwr_sock_bind(void *c, KlSocketHandle fd, const KlSockAddr *a) {
+    (void)c;
+    if (!a || kl_sockaddr_family(a) != KL_AF_INET) return -1;
+    return kl_lwr_tcp_bind((void *)fd, a->u.ip, kl_sockaddr_port(a));
 }
+
+static int lwr_sock_connect(void *c, KlSocketHandle fd, const KlSockAddr *a) {
+    (void)c; (void)fd; (void)a;
+    return -1;   /* server-side only for P9-2; the test client uses the glue directly */
+}
+
+/* listen: tcp_listen relocates the pcb (frees the passed-in one, returns a smaller LISTEN
+ * pcb) and the glue arms the accept callback + tracks the relocated handle. server.c still
+ * holds the freed handle in s->listen_fd; kl_comp_prime_accepts adopts the relocated one
+ * (kl_lwr_listen_pcb) so close() later targets a live pcb, not the dangling original. */
 static int lwr_sock_listen(void *c, KlSocketHandle fd, int backlog) {
-    (void)c; (void)fd; (void)backlog; return -1;   /* P9-2+: tcp_listen */
+    (void)c; (void)backlog;
+    return kl_lwr_tcp_listen((void *)fd) ? 0 : -1;
 }
+
 static KlSocketHandle lwr_sock_accept(void *c, KlSocketHandle fd, KlSockAddr *peer) {
     (void)c; (void)fd; (void)peer;
-    return KL_INVALID_SOCKET;   /* P9-2+: accept arrives via the tcp_accept callback */
+    return KL_INVALID_SOCKET;   /* accept arrives via the tcp_accept callback → drain */
 }
+
 static int lwr_sock_close(void *c, KlSocketHandle fd) {
-    (void)c; (void)fd; return -1;   /* P9-4+: tcp_close(pcb) */
+    (void)c;
+    if (kl_handle_valid(fd)) kl_lwr_tcp_close((void *)fd);
+    return 0;
 }
+
 static int lwr_sock_getaddr(void *c, KlSocketHandle fd, KlSockAddr *out) {
-    (void)c; (void)fd; (void)out; return -1;   /* P9-2+: pcb->local_ip/local_port */
+    (void)c;
+    if (!out || !kl_handle_valid(fd)) return -1;
+    uint16_t port = kl_lwr_tcp_local_port((void *)fd);
+    /* Loopback IPv4 — the address family/port is all server.c reads (bound_port). */
+    static const uint8_t lo[4] = { 127, 0, 0, 1 };
+    return kl_sockaddr_from_ipv4(out, lo, port);
 }
+
 static int lwr_sock_soerror(void *c, KlSocketHandle fd, int *out_err) {
-    (void)c; (void)fd; if (out_err) *out_err = 0; return -1;
+    (void)c; (void)fd; if (out_err) *out_err = 0; return 0;
 }
 static kl_ssize_t lwr_sock_io(void *c, KlSocketHandle fd, void *b, size_t n) {
     (void)c; (void)fd; (void)b; (void)n; return -1;   /* I/O rides the completion path */
@@ -210,7 +266,7 @@ static const KlSocketOps lwip_raw_sock_ops = {
     .set_reuseaddr = lwr_sock_opt, .set_reuseport = lwr_sock_opt,
     .set_ipv6only = lwr_sock_opt, .set_tcp_nodelay = lwr_sock_opt,
     .set_cork = lwr_sock_opt,
-    .socket = lwr_sock_socket, .connect = lwr_sock_addr, .bind = lwr_sock_addr,
+    .socket = lwr_sock_socket, .connect = lwr_sock_connect, .bind = lwr_sock_bind,
     .listen = lwr_sock_listen, .accept = lwr_sock_accept, .close = lwr_sock_close,
     .get_local_addr = lwr_sock_getaddr, .get_so_error = lwr_sock_soerror,
     .send = lwr_sock_io_const, .recv = lwr_sock_io, .recv_peek = lwr_sock_io,
@@ -218,34 +274,166 @@ static const KlSocketOps lwip_raw_sock_ops = {
     .name = "lwip-raw",
 };
 
-/* OVERLAPPED (not native-fd): the raw loop drives I/O through the completion post
- * path, exactly like the pollcomp/iocp/iouring overlapped providers. */
 static const KlSocketProvider lwip_raw_provider = {
     &lwip_raw_sock_ops, NULL, KL_SOCK_CAP_OVERLAPPED, NULL,
 };
 
 const KlSocketProvider *kl_socket_provider_lwip_raw(void) { return &lwip_raw_provider; }
 
-/* ── completion.h backend primitives ───────────────────────────────────────────
- * P9-1: kl_comp_drain does ONE lwIP mainloop tick and reports 0 events. The post_*
- * primitives link but do nothing yet — the tick test posts none. P9-2 wires the
- * tcp_accept/tcp_recv callbacks into KL_COMP_ACCEPT/READ events here. */
+/* ── completion.h backend primitives ─────────────────────────────────────────── */
 
+static KlLwrState *lwr_state(KlConn *c) { return c->ctx->loop._backend; }
+
+int kl_comp_prime_accepts(struct KlServer *s) {
+    KlLwrState *st = s->ev.loop._backend;
+    if (st->primed) return 0;
+    st->server = s;
+    st->primed = 1;
+    /* tcp_listen relocated the listen pcb (freeing the one server.c bound); adopt the live
+     * handle so s->listen_fd is valid for the eventual close (kl_server_close_listener). */
+    void *lp = kl_lwr_listen_pcb();
+    if (lp) s->listen_fd = (KlSocketHandle)lp;
+    /* The accept callback was armed by tcp_listen; accepts enqueue KL_LWR_ACCEPT records the
+     * drain surfaces. Nothing more to post (passive raw accept). */
+    return 0;
+}
+
+int kl_comp_post_accept(struct KlServer *s) {
+    /* Passive raw accept: the tcp_accept callback keeps the backlog filled on its own —
+     * no per-accept op to re-post (unlike pollcomp's one accept op). Idempotent no-op. */
+    (void)s;
+    return 0;
+}
+
+/* Post one async receive: raw recv is passive (the tcp_recv callback stages bytes + enqueues
+ * a READ record), so "posting" just associates the owning conn with its pcb (first call) and
+ * arms it — the READ surfaces via drain when data (or peer-close) arrives. */
+int kl_comp_post_recv(KlConn *c) {
+    KlLwrState *st = lwr_state(c);
+    if (!kl_handle_valid(c->fd)) return -1;
+    kl_lwr_set_owner((void *)c->fd, c);   /* recv/sent callbacks tag records with this conn */
+    lwr_arm(st, c);
+    return 0;
+}
+
+/* Post one async send of the (already-serialized) response iovec. Concatenate the iovec
+ * into a stack buffer and hand it to the glue (tcp_write COPY + tcp_output). The tcp_sent
+ * callback surfaces a KL_COMP_WRITE via drain when the bytes are acknowledged.
+ * P9-2: the response is a single small segment that fits tcp_sndbuf, so one send completes
+ * it. P9-3 handles partial sends / tcp_sndbuf backpressure (send what fits, resume on
+ * tcp_sent for the remainder). */
+#define KL_LWR_SEND_MAX 2048   /* P9-2 responses (small JSON/text) fit comfortably */
+int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
+    if (!kl_handle_valid(c->fd)) return -1;
+    if (total > KL_LWR_SEND_MAX) return -1;   /* P9-3: larger responses / partial sends */
+    char buf[KL_LWR_SEND_MAX];
+    size_t off = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (off + iov[i].len > sizeof(buf)) return -1;
+        memcpy(buf + off, iov[i].base, iov[i].len);
+        off += iov[i].len;
+    }
+    long sent = kl_lwr_send((void *)c->fd, buf, off);
+    if (sent < 0 || (size_t)sent != off) return -1;   /* P9-3: partial send resume */
+    return 0;
+}
+
+int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+                          size_t head_total, int file_fd, uint64_t count) {
+    (void)c; (void)head_iov; (void)head_n; (void)head_total; (void)file_fd; (void)count;
+    return -1;   /* P9-3: head via tcp_write, file bytes chunked (no lwIP zero-copy file send) */
+}
+
+void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
+    (void)ctx; (void)fd;   /* P9-4: abort the conn's pending op (tcp_abort / mark aborted) */
+}
+
+int kl_comp_post_udp_recv(struct KlUdp *udp) { (void)udp; return -1; }   /* raw UDP: future */
+int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+                          const KlSockAddr *dest) {
+    (void)udp; (void)data; (void)len; (void)dest; return -1;
+}
+
+/* ── drain: one lwIP tick, then translate glue records into completion events ── */
 int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
-    (void)out; (void)max;
     KlLwrState *st = ctx->loop._backend;
 
-    /* One lwIP mainloop tick — the whole point of P9-1 (docs §P9-1): sys_check_timeouts()
-     * (lwIP timers: retransmit, TCP fast/slow, TIME-WAIT) + netif_poll(loopif) (drain the
-     * loopback TX queue into RX so raw callbacks fire). Both go through the lwIP-only glue
-     * TU so this backend TU stays free of lwIP's clashing headers. */
+    /* One lwIP mainloop tick (docs §P9-1): sys_check_timeouts() (retransmit, TCP fast/slow,
+     * TIME-WAIT) + netif_poll(loopif) (drain the loopback TX queue so raw callbacks fire).
+     * The tcp_accept/tcp_recv/tcp_sent callbacks run inline here and enqueue glue records. */
     kl_lwr_lwip_tick(st ? st->loopif : NULL);
 
-    /* No fd to block on in NO_SYS=1; honour a positive timeout as a bounded sleep so a
-     * caller's kl_event_ctx_run(&ctx, n, timeout_ms) doesn't busy-spin. timeout_ms == 0
-     * is a non-blocking poll (return immediately); -1 (infinite) sleeps one tick and
-     * returns so the loop re-ticks (a raw loop must keep turning to make progress). */
-    if (timeout_ms != 0) {
+    /* Pull the finished raw-API records and translate each into a KlCompletionEvent. */
+    KlLwrRecord recs[KL_LWR_MAX_DRAIN];
+    int rmax = max < KL_LWR_MAX_DRAIN ? max : KL_LWR_MAX_DRAIN;
+    int nr = kl_lwr_drain(recs, rmax);
+
+    int count = 0;
+    for (int i = 0; i < nr && count < max; i++) {
+        KlLwrRecord *r = &recs[i];
+        KlCompletionEvent *ev = &out[count];
+        memset(ev, 0, sizeof(*ev));
+
+        if (r->kind == KL_LWR_ACCEPT) {
+            ev->kind = KL_COMP_ACCEPT;
+            ev->ok = 1;
+            ev->accepted_fd = (KlSocketHandle)r->accepted;
+            /* completion_driver.c's comp_on_accept marshals ev->peer (a host struct sockaddr)
+             * via kl_sockaddr_from_native, keyed by ev->peer_len. peer_len 0 = "unavailable",
+             * which the driver handles by zeroing the conn's peer_addr. For P9-2 (loopback,
+             * peer address unused by the handler) we leave it 0 rather than pulling a host
+             * socket header in to synthesize a sockaddr_in. P9-4 can fill it if needed. */
+            ev->peer_len = 0;
+            count++;
+            continue;
+        }
+
+        if (r->kind == KL_LWR_WRITE) {
+            KlConn *c = r->owner;
+            if (!c) continue;
+            ev->kind = KL_COMP_WRITE;
+            ev->target = c;
+            ev->ok = r->ok;
+            ev->bytes = r->nbytes;
+            count++;
+            continue;
+        }
+    }
+
+    /* Surface READs for armed conns whose staging has data (or whose peer closed). Raw recv
+     * is passive — bytes accumulate in the glue's per-pcb staging independent of when the
+     * driver posts a recv — so a READ is delivered here once the conn is armed
+     * (kl_comp_post_recv), consuming the arming. This also handles the fast-client race where
+     * data arrived in the same tick as the accept, before the recv was posted: the READ is
+     * simply picked up on the next drain once comp_on_accept has posted it. */
+    for (int i = 0; i < st->armed_count && count < max; ) {
+        KlConn *c = st->armed[i];
+        int has_data = 0, closed = 0;
+        kl_lwr_conn_status((void *)c->fd, &has_data, &closed);
+        if (!has_data && !closed) { i++; continue; }   /* nothing yet — keep armed */
+
+        KlCompletionEvent *ev = &out[count];
+        memset(ev, 0, sizeof(*ev));
+        ev->kind = KL_COMP_READ;
+        ev->target = c;
+        if (has_data) {
+            size_t space = c->read_cap - c->read_len;
+            size_t got = kl_lwr_take_staged((void *)c->fd, c->read_buf + c->read_len, space);
+            ev->ok = 1;
+            ev->bytes = got;
+        } else {                       /* closed with no pending data — zero-length READ */
+            ev->ok = 0;
+            ev->bytes = 0;
+        }
+        lwr_disarm(st, c);             /* consumed the recv (swaps armed[i] with the last) */
+        count++;
+        /* do not i++: armed[i] now holds a different conn (disarm swapped) — re-check it */
+    }
+
+    /* No fd to block on in NO_SYS=1; if nothing completed, honour a positive timeout as a
+     * bounded sleep so a caller's run loop doesn't busy-spin. When events fired, return
+     * immediately so the loop processes them promptly. */
+    if (count == 0 && timeout_ms != 0) {
         long ns = (timeout_ms > 0)
                     ? (long)(timeout_ms % 1000) * KL_LWR_NS_PER_MS
                     : KL_LWR_TICK_SLEEP_NS;
@@ -254,33 +442,5 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
         nanosleep(&sl, NULL);
     }
 
-    /* P9-2+: report accept/recv/send completions collected from the tcp_* callbacks. */
-    return 0;
-}
-
-int kl_comp_prime_accepts(struct KlServer *s) {
-    /* P9-2: tcp_new/tcp_bind/tcp_listen + tcp_accept(cb) on the server's listen addr,
-     * then post the first accept. P9-1 drives no server (the tick test runs the loop
-     * standalone), so this simply latches and no-ops. */
-    (void)s;
-    return 0;
-}
-
-int kl_comp_post_recv(KlConn *c) { (void)c; return -1; }   /* P9-2: tcp_recv callback → KL_COMP_READ */
-int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
-    (void)c; (void)iov; (void)iovcnt; (void)total; return -1;   /* P9-3: tcp_write + tcp_output */
-}
-int kl_comp_post_accept(struct KlServer *s) { (void)s; return 0; }   /* P9-2: refill accept backlog */
-int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
-                          size_t head_total, int file_fd, uint64_t count) {
-    (void)c; (void)head_iov; (void)head_n; (void)head_total; (void)file_fd; (void)count;
-    return -1;   /* P9-3: head via tcp_write, file bytes chunked (no lwIP zero-copy file send) */
-}
-void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
-    (void)ctx; (void)fd;   /* P9-4: abort the conn's pending op (tcp_abort / mark aborted) */
-}
-int kl_comp_post_udp_recv(struct KlUdp *udp) { (void)udp; return -1; }   /* raw UDP: future */
-int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
-                          const KlSockAddr *dest) {
-    (void)udp; (void)data; (void)len; (void)dest; return -1;
+    return count;
 }

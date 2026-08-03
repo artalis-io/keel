@@ -114,9 +114,21 @@ The spike replaces its `for`-loop with KEEL's event loop; the real work is a `Kl
   `make -C integrations/lwip loopback-raw` builds the completion libkeel over NO_SYS=1 lwIP and
   ticks an lwIP-raw `KlEventCtx` (no server) → `P9-1 PASS`; CI-gated in the `lwip` job. Default
   epoll + `BACKEND=iouring` builds verified unaffected.
-- **P9-2 — listen/accept + recv completion.** Map `tcp_accept`/`tcp_recv` → `KL_COMP_ACCEPT`/
-  `KL_COMP_RECV` into `completion_driver.c`; a raw-backed `KlServer` answers one request over
-  loopback (the spike, but through the real server path). Test: `GET /` → 200 in-process.
+- **P9-2 — listen/accept + recv completion + minimal send. DONE.** `tcp_accept`/`tcp_recv`/
+  `tcp_sent` (in `lwip_raw_glue.c`) surface `KL_COMP_ACCEPT`/`KL_COMP_READ`/`KL_COMP_WRITE` to the
+  **unchanged** `completion_driver.c`, which drives the roundtrip verbatim (no driver contract gap
+  found). A raw-backed `KlServer` answers `GET /` → 200 `{"ok":true}` over loopback to a raw-API
+  test client. Test: `make -C integrations/lwip loopback-raw` → `P9-2 PASS` (ASan-clean; CI-gated).
+  Key mechanics: **pcb↔KlConn** via the pcb's `tcp_arg` (+ a glue per-pcb slot) so recv/sent/err
+  callbacks tag their owner; `KlSocketHandle` carries the `tcp_pcb *`. **recv ordering / fast-client
+  race:** a client can deliver its request in the *same* tick as the accept, before the driver posts
+  a recv — so `tcp_recv` copies the (chained) pbuf into a per-pcb staging buffer and calls
+  `tcp_recved` immediately; `kl_comp_drain` surfaces `KL_COMP_READ` (staging→`c->read_buf`) only for
+  *armed* conns (those the driver has `kl_comp_post_recv`'d), picking up the raced request on the
+  next drain. **NO_SYS=1 single-thread:** `kl_server_run` owns the lwIP tick on one thread; the test
+  client's lwIP calls are marshalled onto it via KEEL timers (no data race). `tcp_listen` relocates
+  the pcb — `kl_comp_prime_accepts` adopts the relocated LISTEN handle so close targets a live pcb.
+  Seam split kept ironclad (no `struct sockaddr` or lwIP type crosses `lwip_raw_glue.h`).
 - **P9-3 — send + backpressure.** `kl_comp_post_send` → `tcp_write`+`tcp_output`; `tcp_sent`
   callback → send completion + drain; honour `tcp_sndbuf` for backpressure. Test: a response
   larger than one segment; partial-send resume.
