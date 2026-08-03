@@ -515,3 +515,7 @@ jobs:
       - name: lwIP raw-API spike — NO_SYS=1 tcp_* callbacks over loopback (Phase 9 foundation)
         timeout-minutes: 5
         run: make -C integrations/lwip raw-spike LWIP_DIR="$HOME/lwip"
+
+      - name: lwIP raw completion backend — P9-1 tick test (BACKEND=lwipraw + completion_driver)
+        timeout-minutes: 5
+        run: make -C integrations/lwip loopback-raw LWIP_DIR="$HOME/lwip"

@@ -162,8 +162,39 @@ raw-spike: liblwip_raw.a $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
 	./raw_loopback_spike
 	@echo "integrations/lwip: raw+loopback+NO_SYS spike OK"
 
+# ── Phase 9 P9-1: lwIP raw COMPLETION backend — build a lwipraw libkeel + tick test ──
+# The completion counterpart of `loopback` (which rides a STOCK libkeel over the
+# readiness lwIP provider). This backend is a COMPLETION build: it needs a libkeel BUILT
+# with BACKEND=lwipraw (completion_driver.c linked, io_engine.c stub not) — see
+# docs/phase9_lwip_raw_design.md "it's a completion BACKEND, not a runtime drop-in".
+#
+# Steps:
+#   1. Build the NO_SYS=1 lwIP archive (liblwip_raw.a) + the raw_build scratch dir
+#      (lwipopts.h forwarder + arch/cc.h) — reusing the raw-spike mechanism.
+#   2. Build libkeel with BACKEND=lwipraw (root Makefile), passing LWIP_DIR +
+#      LWIPRAW_BUILD so event_lwip_raw.c finds lwIP's NO_SYS=1 headers + our lwipopts.
+#   3. Compile + link + run raw_tick_test against that lwipraw libkeel + liblwip_raw.a.
+#
+# The test proves the completion loop drives lwIP (sys_check_timeouts + netif_poll each
+# tick) with no server — the P9-1 bar. Existing readiness targets are untouched (they
+# build their own liblwip.a from lwipopts.h / NO_SYS=0 and a STOCK libkeel).
+LWIPRAW_KEEL_LIB = $(KEEL_ROOT)/libkeel.a
+# raw_tick_test uses the public API + one internal seam (event_caps.h, the
+# compatibility negotiation) — hence -Isrc alongside -I. for keel_lwip_raw.h.
+loopback-raw: liblwip_raw.a $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
+	@echo "building lwipraw libkeel (BACKEND=lwipraw) ..."
+	$(MAKE) -C $(KEEL_ROOT) clean
+	$(MAKE) -C $(KEEL_ROOT) BACKEND=lwipraw LWIP_DIR=$(abspath $(LWIP_DIR)) \
+	  LWIPRAW_BUILD=$(abspath $(RAW_BUILD))
+	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o raw_tick_test raw_tick_test.c \
+	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
+	./raw_tick_test
+	@echo "integrations/lwip: P9-1 lwIP raw completion tick test OK"
+
 clean:
-	rm -f *.o *.a lwip_loopback_test raw_loopback_spike
+	rm -f *.o *.a lwip_loopback_test raw_loopback_spike raw_tick_test
 	rm -rf $(RAW_BUILD)
 
-.PHONY: check loopback loopback-tls raw-spike clean
+.PHONY: check loopback loopback-tls raw-spike loopback-raw clean
