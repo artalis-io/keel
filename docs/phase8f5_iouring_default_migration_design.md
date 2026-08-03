@@ -183,6 +183,40 @@ both epoll and completion on ARM (completion is ~2.1× faster than readiness).
 (Absolute M1 throughput is ~3–4× the x86 CI VM simply because the M1 Max in a clean dedicated
 VM is a far faster host than a shared CI runner — the site's headline peak reflects this.)
 
+### Consolidation re-run (2026-08-03) — + pollcomp reference
+
+Re-ran `bench/bench_compare.sh` (now with a **pollcomp** reference round) on the M1 Max Apple
+`container` VM, `wrk -t4 -c100 -d6s`, loopback, 3 rounds; medians:
+
+| backend | GET /hello req/s | POST /echo req/s | p99 |
+|---|---|---|---|
+| epoll (readiness) | **337,709** | **329,756** | ~475 µs |
+| io_uring (completion) | 310,428 (−8%) | 291,020 (−12%) | ~477 µs |
+| pollcomp (completion double) | 257,288 (−24%) | 244,072 (−26%) | **600–960 ms** |
+
+- **Confirms the M1 ordering above:** epoll edges io_uring completion by ~8–12% req/s on a
+  localhost tiny-response micro-bench, at **comparable sub-ms p99**. io_uring's SQE/CQE +
+  buffer-copy overhead isn't repaid when there's no real I/O latency to hide; the completion
+  backend's wins are elsewhere (splice zero-copy file responses, cancellation, IOCP-parity
+  uniform model, behaviour under real network latency / syscall batching). The default Linux
+  backend staying **epoll** (io_uring opt-in) remains the right call on both arches.
+- **pollcomp is a test double, never a production backend.** Throughput is ~24–26% below epoll
+  and, decisively, its p99 is **sub-second** (600–960 ms) — the poll()-facade batches completions
+  against poll timeouts, so tail latency is catastrophic. It exists to run `completion_driver.c`
+  under ASan on any POSIX host (CI gate), not to serve traffic. This is now explicit in the
+  benchmark output so the number is never mistaken for a production data point.
+
+### poll_update churn soak (watcher mask re-arm)
+
+`test_async.watcher_mask_churn_soak` hammers the io_uring watcher mask re-arm path
+(`io_uring_prep_poll_update`, added in PR #176) 3,000 rounds × 2 mods = **6,000 `poll_update`s**,
+retargeting one armed watch READ↔WRITE. It exists because **no normal HTTP path mods a watcher's
+mask over io_uring** (thread-pool/async pipes are READ-only; the client uses completion connect),
+so `wrk` never exercises `poll_update` — this is its dedicated stress. Over `BACKEND=iouring` it
+passes normal and under **ASan+UBSan+LSan with 0 findings** (Apple container, kernel 6.18) — the
+churn leaks no CQE/SQE/watch and never UAFs a retired poll. It rides in the `test_async` suite,
+which is in the io_uring gate, so the path is covered on every completion CI run.
+
 ---
 
 ## 5. The flip + retirement (5d) — **done**
