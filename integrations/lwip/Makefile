@@ -28,21 +28,21 @@ CFLAGS  += -DKEEL_PLATFORM_LWIP=1 -I. -I$(KEEL_ROOT)/include $(LWIP_INC)
 CFLAGS  += -D_DEFAULT_SOURCE
 
 # ── build-gate: providers compile against public Keel API + lwIP headers ──────
-check: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o udp_io_lwip.o
+check: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o
 	@echo "integrations/lwip: providers compile against $(LWIP_DIR) (public API sufficient)"
 
+# socket_lwip now carries the datagram data-plane too (KlDatagramOps folded onto the
+# provider — Stage 3 of the A2 refactor), so it uses only public Keel headers; there
+# is no separate udp_io_lwip link artifact.
 socket_lwip.o: socket_lwip.c keel_lwip.h lwipopts.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 event_lwip.o: event_lwip.c keel_lwip.h lwipopts.h
 	$(CC) $(CFLAGS) -c -o $@ $<
-# resolve_sync_lwip / platform_wakeup_lwip / udp_io_lwip override internal Keel
-# seams, so they need internal headers (-Isrc: resolve_sync.h, platform.h,
-# udp_internal.h/udp_io.h) alongside lwIP's netdb/sockets.
+# resolve_sync_lwip / platform_wakeup_lwip override internal Keel seams, so they need
+# internal headers (-Isrc: resolve_sync.h, platform.h) alongside lwIP's netdb/sockets.
 resolve_sync_lwip.o: resolve_sync_lwip.c lwipopts.h
 	$(CC) $(CFLAGS) -I$(KEEL_ROOT)/src -c -o $@ $<
 platform_wakeup_lwip.o: platform_wakeup_lwip.c lwipopts.h
-	$(CC) $(CFLAGS) -I$(KEEL_ROOT)/src -c -o $@ $<
-udp_io_lwip.o: udp_io_lwip.c lwipopts.h
 	$(CC) $(CFLAGS) -I$(KEEL_ROOT)/src -c -o $@ $<
 
 # ── loopback runtime test: a real Keel server + client over lwIP loopback ─────
@@ -63,10 +63,10 @@ liblwip.a: $(LWIP_SRCS)
 	@$(CC) -w -std=c11 -O2 -D_GNU_SOURCE -I. $(LWIP_INC) -c $(LWIP_SRCS)
 	@$(AR) rcs $@ $(notdir $(LWIP_SRCS:.c=.o))
 
-loopback: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o udp_io_lwip.o liblwip.a
+loopback: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o liblwip.a
 	@test -f "$(KEEL_LIB)" || { echo "build the stock lib first: make -C $(KEEL_ROOT)"; exit 1; }
 	$(CC) $(CFLAGS) -I$(KEEL_ROOT)/src -o lwip_loopback_test lwip_loopback_test.c \
-	  socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o udp_io_lwip.o \
+	  socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o \
 	  liblwip.a "$(KEEL_LIB)" -lpthread
 	./lwip_loopback_test
 	@echo "integrations/lwip: loopback runtime test OK (stock libkeel + lwIP provider)"
@@ -82,12 +82,12 @@ MBEDTLS_INC  = $(if $(MBEDTLS_DIR),-I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/lib
 MBEDTLS_LIB  = $(if $(MBEDTLS_DIR),-L$(MBEDTLS_DIR)/library -L$(MBEDTLS_DIR)/lib,) \
                -lmbedtls -lmbedx509 -lmbedcrypto
 
-loopback-tls: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o udp_io_lwip.o liblwip.a
+loopback-tls: socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o liblwip.a
 	@test -f "$(KEEL_LIB)" || { echo "build the stock lib first: make -C $(KEEL_ROOT)"; exit 1; }
 	$(MAKE) -C ../mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
 	$(CC) $(CFLAGS) -DLWT_TLS -I../mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/src \
 	  -o lwip_loopback_test lwip_loopback_test.c \
-	  socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o udp_io_lwip.o \
+	  socket_lwip.o event_lwip.o resolve_sync_lwip.o platform_wakeup_lwip.o \
 	  ../mbedtls/libkeel_mbedtls.a liblwip.a "$(KEEL_LIB)" $(MBEDTLS_LIB) -lpthread
 	./lwip_loopback_test
 	@echo "integrations/lwip: loopback + HTTPS runtime test OK (stock libkeel + lwIP + mbedTLS)"

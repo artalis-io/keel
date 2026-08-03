@@ -50,9 +50,10 @@
   /* lwIP target: the stack provides its own BSD socket types (struct sockaddr{,_
    * storage}, socklen_t, struct iovec) via lwip/sockets.h — do NOT pull the host
    * <sys/socket.h>, which would clash. The internal counterpart of net.h's lwIP
-   * branch, so an internal TU built with -DKEEL_PLATFORM_LWIP (e.g.
-   * integrations/lwip/udp_io_lwip.c) resolves socket types to lwIP's, not the
-   * host's. Inert unless a provider defines KEEL_PLATFORM_LWIP. ssize_t comes
+   * branch, so an internal TU built with -DKEEL_PLATFORM_LWIP (e.g. the -Isrc lwIP
+   * seam overrides resolve_sync_lwip.c / platform_wakeup_lwip.c) resolves socket
+   * types to lwIP's, not the host's. Inert unless a provider defines
+   * KEEL_PLATFORM_LWIP. ssize_t comes
    * from the host libc <sys/types.h> (no sockaddr), which the lwIP unix port
    * already builds against. */
   #include <sys/types.h>
