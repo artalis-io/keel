@@ -497,18 +497,12 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
     udp->on_recv = on_recv;
     udp->recv_ud = user_data;
     udp->recv_active = 1;
-    /* Lazily allocate the recvmmsg batch (large: mmsg_batch × recv_buf_size)
-     * where mmsg batching applies. Failure just leaves rx_batch NULL → the
-     * per-datagram path is used; a no-op where batching is unavailable. */
-    {
-        const KlDatagramOps *dg = udp_dg(udp);
-        if (udp->mmsg_batch > 1 && dg->rx_batch_new && !udp->rx_batch)
-            udp->rx_batch = dg->rx_batch_new(udp->alloc, udp->mmsg_batch, udp->recv_buf_size);
-    }
 
     /* Completion loop (IOCP): a readiness watcher never fires here — associate the
      * socket with the port and post an overlapped WSARecvFrom instead (8b-4c). The
-     * completion driver re-posts after each datagram via kl_udp_comp_on_recv. */
+     * completion driver re-posts after each datagram via kl_udp_comp_on_recv. The
+     * recvmmsg batch below is not allocated here: the completion path never runs the
+     * readiness recv loop that consumes it. */
     if (kl_event_caps(&udp->ctx->loop) & KL_EVENT_CAP_COMPLETION) {
         if (kl_event_add(&udp->ctx->loop, udp->fd, KL_EVENT_READ, udp) < 0 ||
             kl_comp_post_udp_recv(udp) < 0) {
@@ -517,6 +511,15 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
             return -1;
         }
         return 0;
+    }
+
+    /* Readiness path only: lazily allocate the recvmmsg batch (large: mmsg_batch ×
+     * recv_buf_size) where mmsg batching applies. Failure just leaves rx_batch NULL
+     * → the per-datagram path is used; a no-op where batching is unavailable. */
+    {
+        const KlDatagramOps *dg = udp_dg(udp);
+        if (udp->mmsg_batch > 1 && dg->rx_batch_new && !udp->rx_batch)
+            udp->rx_batch = dg->rx_batch_new(udp->alloc, udp->mmsg_batch, udp->recv_buf_size);
     }
 
     kl_udp_update_interest(udp);
