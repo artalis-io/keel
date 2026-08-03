@@ -4,14 +4,14 @@
 
 ### Status
 
-Keel is **production-ready for embedded/edge workloads**. 31 orthogonal modules with clean vtable-based pluggability. 671 tests (40 suites), 4 fuzz targets, ASan+UBSan+static analysis in CI. The architecture, module design, and security posture are professional-grade. Test coverage (11K+ lines of tests vs ~14K of implementation) is well above average for C projects this size.
+Keel is **production-ready for embedded/edge workloads**. 35 orthogonal modules with clean vtable-based pluggability. 837 tests (62 suites), 7 fuzz targets, ASan+UBSan+static analysis in CI. The architecture, module design, and security posture are professional-grade. Test coverage (11K+ lines of tests vs ~14K of implementation) is well above average for C projects this size.
 
 ### Strengths
 
-- **Architecture**: 31 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
+- **Architecture**: 35 orthogonal modules with clean vtable-based pluggability (allocator, parser, TLS, body reader, H2 session, DNS resolver). `KlEventCtx` composition pattern is well-designed — embeddable in `KlServer` but usable standalone.
 - **Zero-allocation hot path**: Pre-allocated connection pool, zero-copy header parsing into `read_buf`, `writev` scatter-gather, `sendfile` with `TCP_CORK`, pre-built status lines.
 - **Security posture**: CRLF injection guards, `SIZE_MAX/2` overflow checks throughout, dual-layer body timeouts (idle + absolute deadline to defeat slow-chunk attacks), TLS vtable validation, WebSocket frame validation, `FORTIFY_SOURCE + stack-protector-strong`, ASan+UBSan+fuzz in CI.
-- **Testing**: 40 suites, 671 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, cross-module integration tests, 4 fuzz targets.
+- **Testing**: 62 suites, 837 tests, dedicated overflow boundary tests, end-to-end async suspend/resume tests, cross-module integration tests, 7 fuzz targets.
 - **Two-phase middleware**: Pre-body and post-body middleware with correct keep-alive semantics is a design not found in other C HTTP libraries.
 
 ### What's in 1.0.0

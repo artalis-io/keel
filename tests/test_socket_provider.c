@@ -10,6 +10,7 @@
 
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
+#include <keel/datagram.h>
 #include <keel/udp.h>
 #include <keel/server.h>
 #include <keel/client.h>
@@ -230,6 +231,127 @@ UTEST(sockprov, udp_transport_threads_provider) {
 
     ASSERT_TRUE(m.nb_calls >= 1);                    /* set_nonblocking went through the mock */
     ASSERT_TRUE(m.cloexec_calls >= 1);               /* set_cloexec too */
+
+    kl_udp_free(&udp);
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── Mock datagram data-plane (KlDatagramOps) ──────────────────────── */
+
+/* A programmable KlDatagramOps hung off a provider, proving that udp.c drives the
+ * datagram machine (configure cap negotiation, send → enqueue-on-EAGAIN) purely
+ * through the provider vtable — no real UDP syscalls, deterministic. The ops read
+ * a file-static state (the provider ctx carries the *stream* MockSock). */
+typedef struct {
+    uint32_t configure_caps;   /* bitmask configure() reports as accepted */
+    int      configure_calls;
+    int      send_calls;
+    int      force_send_err;   /* errno to fail the NEXT send with (0 = succeed) */
+    size_t   last_send_len;
+} MockDgram;
+
+static MockDgram g_mdg;
+
+static kl_ssize_t mdg_send(void *ctx, KlSocketHandle fd, const void *data, size_t len,
+                           const KlSockAddr *dest, const KlSockAddr *src, int tos) {
+    (void)ctx; (void)fd; (void)data; (void)dest; (void)src; (void)tos;
+    g_mdg.send_calls++;
+    g_mdg.last_send_len = len;
+    if (g_mdg.force_send_err) { errno = g_mdg.force_send_err; return -1; }
+    return (kl_ssize_t)len;              /* UDP send is all-or-nothing */
+}
+static kl_ssize_t mdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t buflen,
+                           KlSockAddr *src, KlDgramRxMeta *meta) {
+    (void)ctx; (void)fd; (void)buf; (void)buflen; (void)src;
+    memset(meta, 0, sizeof(*meta)); meta->tos = -1;
+    errno = EAGAIN; return -1;           /* always "drained" */
+}
+static uint32_t mdg_configure(void *ctx, KlSocketHandle fd, int family,
+                              const struct KlUdpConfig *cfg) {
+    (void)ctx; (void)fd; (void)family; (void)cfg;
+    g_mdg.configure_calls++;
+    return g_mdg.configure_caps;
+}
+static int mdg_set_tos(void *ctx, KlSocketHandle fd, int family, int tos) {
+    (void)ctx; (void)fd; (void)family; (void)tos; return 0;
+}
+static int mdg_mcast(void *ctx, KlSocketHandle fd, int family,
+                     const char *group, unsigned iface, int join) {
+    (void)ctx; (void)fd; (void)family; (void)group; (void)iface; (void)join; return 0;
+}
+static const KlDatagramOps MOCK_DGRAM_OPS = {
+    .send = mdg_send, .recv = mdg_recv, .configure = mdg_configure,
+    .set_tos = mdg_set_tos, .mcast_membership = mdg_mcast,
+    /* send_gso + batch ops NULL → udp.c uses the per-datagram path */
+};
+
+/* A provider whose stream ops are the built-in defaults (NULL ops → kl_sockdef_*
+ * for the real socket()/bind() a KlUdp needs) but whose datagram data-plane is the
+ * mock above. */
+static const KlSocketOps DGRAM_STREAM_OPS = { .name = "dgram-mock" }; /* all NULL → POSIX */
+
+static KlSocketProvider mock_dgram_provider(void) {
+    KlSocketProvider p = { &DGRAM_STREAM_OPS, NULL, KL_SOCK_CAP_DATAGRAM, &MOCK_DGRAM_OPS };
+    return p;
+}
+
+/* configure() reports the accepted RX-capture bitmask; udp.c stores exactly those
+ * flags (pktinfo/tos on, gro off here) — the capability handshake across the seam. */
+UTEST(dgramprov, configure_caps_negotiated) {
+    memset(&g_mdg, 0, sizeof(g_mdg));
+    g_mdg.configure_caps = KL_DGRAM_RX_PKTINFO | KL_DGRAM_RX_TOS;   /* no GRO */
+    KlSocketProvider p = mock_dgram_provider();
+
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    ctx.sockets = &p;
+
+    KlUdp udp;
+    KlUdpConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
+    ASSERT_EQ(0, kl_udp_init(&udp, &cfg));
+
+    ASSERT_EQ(1, g_mdg.configure_calls);
+    ASSERT_EQ(1, udp.pktinfo);    /* KL_DGRAM_RX_PKTINFO accepted → stored */
+    ASSERT_EQ(0, udp.recv_gro);   /* not reported → off */
+    ASSERT_EQ(1, udp.recv_tos);   /* KL_DGRAM_RX_TOS accepted → stored */
+
+    kl_udp_free(&udp);
+    kl_event_ctx_free(&ctx);
+}
+
+/* A successful provider send retires the datagram; an EAGAIN send makes udp.c
+ * QUEUE it (backpressure) rather than drop it — both decisions live in udp.c and
+ * are driven entirely off the provider send()'s return. */
+UTEST(dgramprov, send_success_then_eagain_enqueues) {
+    memset(&g_mdg, 0, sizeof(g_mdg));
+    KlSocketProvider p = mock_dgram_provider();
+
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    ctx.sockets = &p;
+
+    KlUdp udp;
+    KlUdpConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
+    ASSERT_EQ(0, kl_udp_init(&udp, &cfg));
+
+    const uint8_t lo[4] = { 127, 0, 0, 1 };
+    KlSockAddr dest;
+    kl_sockaddr_from_ipv4(&dest, lo, 9999);
+
+    /* Success: provider accepts the datagram; nothing left queued. */
+    ASSERT_EQ(0, kl_udp_send_to(&udp, "hello", 5, &dest));
+    ASSERT_EQ(1, g_mdg.send_calls);
+    ASSERT_EQ((size_t)5, g_mdg.last_send_len);
+    ASSERT_EQ((size_t)0, kl_udp_send_queued(&udp));
+
+    /* EAGAIN: udp.c queues the datagram for a later writable flush, not a drop. */
+    g_mdg.force_send_err = EWOULDBLOCK;
+    ASSERT_EQ(0, kl_udp_send_to(&udp, "world!!", 7, &dest));
+    ASSERT_EQ(2, g_mdg.send_calls);
+    ASSERT_EQ((size_t)7, kl_udp_send_queued(&udp));   /* queued behind backpressure */
+    ASSERT_EQ((uint64_t)0, kl_udp_dropped(&udp));     /* not dropped */
 
     kl_udp_free(&udp);
     kl_event_ctx_free(&ctx);

@@ -90,10 +90,12 @@ Core TUs (`server.c`, `connection.c`, `client.c`, `udp.c`, `dns_resolver.c`,
   Fine for POSIX/Winsock/lwIP-socket; a non-BSD address world (UEFI, some raw
   stacks) would want an address abstraction. Consistent with "add address types
   only when a real provider needs them." No action now.
-- **F5 — `udp_io_posix.c` carries within-POSIX-family conditionals. ACCEPTED.**
-  All are `__linux__`/`__APPLE__`/feature-macro (`IP_PKTINFO`/`UDP_GRO`/
-  `UDP_SEGMENT`), i.e. the POSIX TU owning its own dialects — not cross-platform
-  leakage. POSIX dialects living in the POSIX PAL TU is by design.
+- **F5 — the POSIX datagram TU carries within-POSIX-family conditionals. ACCEPTED.**
+  Now `socket_dgram_posix.c` (the datagram data-plane folded onto `KlSocketProvider`;
+  the old `udp_io_posix.c` seam was deleted in the A2 refactor). All are
+  `__linux__`/`__APPLE__`/feature-macro (`IP_PKTINFO`/`UDP_GRO`/`UDP_SEGMENT`), i.e.
+  the POSIX TU owning its own dialects — not cross-platform leakage. POSIX dialects
+  living in the POSIX PAL TU is by design.
 
 ## lwIP readiness (summary)
 
