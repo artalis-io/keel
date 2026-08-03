@@ -167,6 +167,37 @@ endif
 (`BACKEND=` still sets `EVENT_SRC` as today; it no longer sets `COMPLETION_SRC`/`IO_ENGINE_SRC`.
 `io_engine.c` is retired — its stub role splits into the readiness stub + the absent stub.)
 
+## Backend dual-role structure (RC-2 refinement — for actually injecting a completion backend)
+
+RC-1 made the *mechanism* runtime-dispatchable (the dispatchers honor `loop->ops->completion`), but
+the existing completion backends (`event_pollcomp.c`, `event_iouring.c`, `event_iocp.c`, and
+`event_lwip_raw.c`) are still authored **compiled-in-only**: they define the `kl_event_*_builtin`
+free functions + `kl_comp_ops_builtin` and expose **no `KlEventProvider` factory**. To *inject* such
+a backend into a `libkeel` that already has a compiled-in backend, its `_builtin` symbols would
+**clash** (both define `kl_event_add_builtin`, `kl_comp_ops_builtin`, …). So a completion backend
+must be expressible in **two roles** without duplicate symbols — exactly how the readiness lwIP
+provider (`event_lwip.c`) already is (static `lwev_*` ops + a `KlEventProvider`, **no** `_builtin`).
+
+The structure (established on `pollcomp` in RC-2, applied to the others in RC-3+):
+
+- **Provider TU** (`event_<x>.c`): the ops as **static** functions grouped into a
+  `static const KlEventOps <x>_event_ops = { …, .completion = &<x>_completion_ops }`, plus the
+  `static const KlCompletionOps`, the overlapped `kl_socket_provider_<x>()`, and a factory
+  `const KlEventProvider *kl_event_provider_<x>(void)`. **No `_builtin` symbols** → links cleanly
+  alongside any other backend, injectable at runtime.
+- **Builtin-glue TU** (`event_<x>_builtin.c`, linked **only** when `BACKEND=<x>`): the thin
+  compiled-in adapters — `kl_event_*_builtin(...) → <x>_*(...)` and
+  `kl_comp_ops_builtin() → &<x>_completion_ops` — over an internal `event_<x>_internal.h` that
+  exposes the provider TU's ops. This is what the `loop->ops == NULL` compiled-in path binds to; it
+  replaces the readiness stub for that backend. No `#ifdef` — the Makefile links the glue only for
+  that `BACKEND`.
+
+A completion backend is then usable BOTH as the compiled-in default (`BACKEND=<x>` → provider TU +
+glue TU) and as a **runtime provider** linked next to a different default (provider TU only, injected
+via `kl_event_provider_<x>()`). `pollcomp` is the RC-2 subject (portable, POSIX, the test double);
+`event_lwip_raw.c` gets the same treatment in RC-3 (then it drops onto a stock `libkeel`, retiring
+`BACKEND=lwipraw`); `iouring`/`iocp` can follow opportunistically.
+
 ## What this buys (and the lwipraw clarification)
 
 - Any completion `KlEventProvider` can be installed at runtime on a **stock** `libkeel` — the driver
