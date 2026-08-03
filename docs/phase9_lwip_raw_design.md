@@ -1,6 +1,14 @@
 # Phase 9 — lwIP raw-API completion event provider — Design + go decision
 
-**Status (2026-08-03): GO, gated on testability — testability PROVEN by a spike.**
+**Status (2026-08-04): COMPLETE. P9-1..P9-5 all merged.** A working lwIP raw-API (`tcp_*`)
+**completion** event backend (`BACKEND=lwipraw`): a raw-backed `KlServer` serves HTTP over the
+loopback netif — accept/recv/send, backpressure, file responses, and full close/cancel/idle-timeout
+lifetime — all in-process, CI-gated (`loopback-raw` in the `lwip` job), and ASan+UBSan+LSan-clean.
+The headline architectural result: **`completion_driver.c` and all of `src/` needed ZERO changes**
+across every stage — a third completion backend (beyond io_uring/IOCP) dropped onto the model-blind
+completion axis verbatim, the strongest possible evidence that axis is sound.
+
+*(Originally: GO gated on testability, PROVEN by a spike — see below.)*
 
 This is the last event-axis frontier from `docs/pal_review.md` (the "one true extensibility
 boundary") and `docs/lwip_platform_design.md`: a completion-model event provider driven by lwIP's
@@ -177,9 +185,17 @@ The spike replaces its `for`-loop with KEEL's event loop; the real work is a `Kl
   run under `-fsanitize=address,undefined -fno-sanitize-recover=all` with `ASAN_OPTIONS=detect_leaks=1`
   → ZERO findings. `completion_driver.c` + `src/` + root Makefile unchanged (no driver contract
   gap found — the terminal-completion-then-normal-release contract fits lwIP-raw verbatim).
-- **P9-5 — KlEventLoop.fd widening (axis-audit F1).** A raw provider has no pollable fd; revisit
-  the public `KlEventLoop.fd` (currently "epoll_fd/kqueue_fd, -1 for io_uring") toward a portable
-  handle if the loop object must expose one. Assess; only widen if forced.
+- **P9-5 — KlEventLoop.fd widening (axis-audit F1). DONE — assessed, no change needed.** Finding:
+  `KlEventLoop.fd` is read **only** by the backend TU that owns it (`event_epoll.c` uses it as the
+  epoll_fd, `event_kqueue.c` as the kqueue_fd) — grepped every consumer; **no core / protocol /
+  shared TU reads `loop->fd`**. It is backend-private scratch, and `-1` already means "no pollable
+  fd" (io_uring set it so before lwipraw). The lwipraw loop's `loop->fd = -1` is therefore fully
+  consistent and forces nothing: a foreign completion backend with no fd needs no widening, and no
+  caller can misinterpret `-1`. Axis-audit F1 was flagged *informational* ("a future non-fd backend
+  *would want* a portable handle here") — this pass confirms the field never escapes its owning
+  backend, so the concern does not materialize. **No code change**; the public `KlEventLoop` shape is
+  unchanged. If a future backend ever needs the loop object to expose a non-fd handle to *shared*
+  code (none does today), widen then — YAGNI until a real consumer appears.
 
 Each stage rides `make -C integrations/lwip <target>` in the `lwip` CI job, in-process over
 loopback — no new test infrastructure.

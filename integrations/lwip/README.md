@@ -111,12 +111,20 @@ CSPRNG for `LWIP_RAND` per deployment).
 
 ## Scope
 
-The shipped lwIP providers are **readiness** (the sockets layer via `lwip_poll`).
-The lwIP *raw* `tcp_*` callback API (a completion-model event provider, "Phase 9")
-is the next frontier — and its **foundation is proven and CI-tested**: `make
-raw-spike LWIP_DIR=...` builds a `NO_SYS=1` lwIP (`lwipopts_raw.h`) and runs a
-raw-API TCP roundtrip over the loopback netif entirely in-process (no tap, no
-root) — the exact model a KEEL-driven raw/completion provider will use (KEEL's loop
-calls `sys_check_timeouts()` + `netif_poll()` and the raw callbacks feed the
-completion driver). See `docs/phase9_lwip_raw_design.md` for the go decision +
-staged plan and `docs/lwip_platform_design.md` for the full platform-port shape.
+Two lwIP integrations ship:
+
+1. **Readiness** (the sockets layer via `lwip_poll`) — `kl_socket_provider_lwip()` +
+   `kl_event_provider_lwip()`, runtime-injected into a **stock** `libkeel.a` (`NO_SYS=0`).
+   Server + client + UDP + TLS, verified on loopback (see above).
+2. **Completion — the raw `tcp_*` callback API** (`NO_SYS=1`, "Phase 9", COMPLETE): a
+   `BACKEND=lwipraw` build links `event_lwip_raw.c` + `completion_driver.c` over BYO lwIP so
+   KEEL's event loop *is* the lwIP mainloop (`sys_check_timeouts()` + `netif_poll()`; raw
+   `tcp_*` callbacks feed the completion driver). A raw-backed `KlServer` serves HTTP over the
+   loopback netif — accept/recv/send, backpressure, file responses, and full
+   close/cancel/idle-timeout lifetime — all in-process (no tap, no root), CI-gated
+   (`make -C integrations/lwip loopback-raw`) and ASan+UBSan+LSan-clean. `make raw-spike` is the
+   minimal foundation spike. Notably this needed **zero** changes to `completion_driver.c` or any
+   `src/` — a third completion backend (beyond io_uring/IOCP) on the model-blind completion axis.
+
+See `docs/phase9_lwip_raw_design.md` for the full design + staged record (P9-1..P9-5) and
+`docs/lwip_platform_design.md` for the platform-port shape.
