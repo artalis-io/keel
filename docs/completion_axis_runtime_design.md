@@ -229,14 +229,19 @@ via `kl_event_provider_<x>()`). `pollcomp` is the RC-2 subject (portable, POSIX,
 
 ## Staged rollout (each stage green before the next)
 
-- **RC-1 — introduce the sub-vtable + dispatch, no behavior change.** Add `KlCompletionOps`, the
+- **RC-1 — DONE (#184).** Add `KlCompletionOps`, the
   opaque `KlEventOps.completion`, `completion_dispatch.c` with `kl_comp_ops()` +
   `kl_comp_ops_builtin()`, the readiness stub, and the `completion_absent.c` opt-out. Migrate the
   compiled-in completion backends to provide `kl_comp_ops_builtin` + the vtable. `completion_driver.c`
   always-linked. Retire `io_engine.c`. **Gate:** the whole existing matrix stays green (pure
   refactor; `loop->ops==NULL` path identical to today).
-- **RC-2 — prove runtime injection (pollcomp).** The new inject-into-default-libkeel test/smoke.
-  **Gate:** it serves a request on a default build.
+- **RC-2 — DONE.** Restructured `pollcomp` into the provider-TU + builtin-glue-TU split
+  (`event_pollcomp.c` = pure provider, no `_builtin`; `event_pollcomp_builtin.c` = glue, linked only
+  for `BACKEND=pollcomp`; `event_pollcomp_internal.h`). New `smoke-completion-inject[-asan]`:
+  a DEFAULT (readiness) libkeel + `event_pollcomp.o` (extra object) serves `GET /` over the
+  runtime-injected `kl_event_provider_pollcomp()` → `COMPLETION-INJECT PASS`, ASan-clean, CI-gated.
+  The direct proof the axis is runtime-injectable. Regressions green (default / `BACKEND=pollcomp` /
+  iouring gate / `KEEL_NO_COMPLETION`).
 - **RC-3 — lwIP-raw as a runtime provider.** Rework `loopback-raw` to stock-libkeel-+-inject; retire
   or demote `BACKEND=lwipraw`. **Gate:** P9 cases pass via runtime injection, ASan-clean.
 - **RC-4 — docs + `KEEL_NO_COMPLETION` CI cell.** Update `phase9`/`event_provider`/`pal_review`

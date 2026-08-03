@@ -104,6 +104,14 @@ jobs:
         timeout-minutes: 5
         run: make smoke-pollcomp-asan
 
+      # RC-2: runtime injection — a DEFAULT (readiness-compiled) libkeel serves a request
+      # over a pollcomp completion backend injected via KlEventCtx.event_provider (the
+      # completion axis is now runtime-injectable, not only link-time BACKEND=).
+      - name: Runtime-injected completion backend (default libkeel + pollcomp)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: make smoke-completion-inject-asan
+
   completion-iouring:
     # io_uring is completion-native: BACKEND=iouring builds event_iouring.c (SQE/CQE
     # completion + completion_driver.c); the readiness POLL_ADD adapter was retired (8f-5d)
