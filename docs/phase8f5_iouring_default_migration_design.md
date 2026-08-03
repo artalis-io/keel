@@ -118,6 +118,24 @@ The remaining default-provider suites (`client`, `client_stream`, `redirect`, `p
 per-suite behavioural gaps left to triage incrementally — not a correctness prerequisite (the
 smokes + 36 unit suites + the benchmark back the backend).
 
+**Triage complete (2026-08-03): gate at 55.** The "~14 remaining" above were enrolled across
+subsequent completion-parity fixes (timer firing in `kl_comp_run`, shared completion-capable
+`mock_tls.h`, completion PROXY-header phase, UDP cmsg parity — each documented in the
+`IOURING_TEST_SUITES` comment). A final coverage sweep then added the 5 backend-agnostic
+unit/seam suites (`alpn`, `event_provider`, `sockaddr`, `stream_transport`, `version`), verified
+green via `make BACKEND=iouring test-iouring` in the Apple container (kernel 6.18) on a real
+ext4 checkout. The **final** exclusion set is now only:
+- **Inherently readiness-axis** — `event`, `event_ctx` (raw `kl_event_wait` drivers; a completion
+  loop has only `kl_comp_run`), `event_caps`, `socket_provider` (readiness cap / provider-
+  negotiation assertions — the latter also holds the readiness-path mock `KlDatagramOps` tests).
+- **`udp_multicast`** — `broadcast_flag_gates_send` asserts a *synchronous* `EACCES`, which only
+  holds on readiness (completion sends are queued async; the error surfaces on the send completion).
+- **`async`** — over io_uring its synthetic conn (built with no `ctx`) segfaults in
+  `kl_comp_post_send` on the resume-posts-a-send path. An async-over-completion *test-harness* gap
+  (the suspend/resume suite needs a completion-capable conn fixture), tracked as follow-up; the
+  real async-over-completion server path is covered by the smokes + `integration` suites.
+- **`iocp_engine`** — Windows-only (won't build on Linux).
+
 ---
 
 ## 4. Second-host benchmark confirmation (5c)
