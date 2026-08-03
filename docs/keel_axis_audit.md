@@ -1,5 +1,153 @@
 # KEEL Networking Architecture Axis Audit
 
+## Sixth pass — datagram data-plane folded onto the socket provider (2026-08-03)
+
+**Verdict: architecturally sound — this pass *removed the last link-time coupling on the socket
+axis*.** The fifth pass (same day) reviewed the `udp_io` seam once it spoke `KlSockAddr`. Since
+then the datagram data-plane has been **folded onto `KlSocketProvider`** (PRs #169–#172, the A2
+refactor): the `kl_udp_io_*` seam and its per-platform TUs (`udp_io_posix.c`, `udp_io_win.c`,
+`udp_io_lwip.c`, `udp_io.h`) are **deleted**, replaced by an optional `KlDatagramOps` vtable hung
+off the provider (`KlSocketProvider.dgram`, present iff `capabilities & KL_SOCK_CAP_DATAGRAM`).
+One runtime object now owns *all* of a stack's socket I/O — stream **and** datagram. This directly
+dissolves the asymmetry that motivated the work: previously TCP was runtime-injected via the
+provider while UDP was paired at *link time* with a matching `udp_io_*.o`. Both planes are now
+selected by the same runtime `KlEventCtx.sockets` pointer.
+
+### What changed in the axis structure (all improvements)
+
+1. **The socket axis is now fully runtime-injectable for both I/O planes.** `include/keel/datagram.h`
+   defines `KlDatagramOps` — a **primitive-only** vtable whose every op takes `(void *ctx,
+   KlSocketHandle fd, …)` + `KlSockAddr` and **never `KlUdp`**. The provider therefore holds no UDP
+   machine state. Ops: `send`/`recv`/`send_gso`/`configure` (folds all socket-option setup —
+   reuse/bufs/broadcast/TOS/multicast/pktinfo/GRO — and returns the accepted `KL_DGRAM_RX_*`
+   capability bitmask)/`set_tos`/`mcast_membership`, plus a **data-oriented** batch surface
+   (`rx_batch_new`/`tx_batch_new`/`recv_batch` filling `KlDgramRxSlot[]` / `send_batch` taking
+   `KlDgramTxDesc[]`) — no thunks, so `recvmmsg`/`sendmmsg` batching survives the fold intact.
+
+2. **All datagram machine logic stays in `udp.c`** (the model-blind layer): the send-queue walk +
+   ordering (`udp_send_common`/`udp_enqueue`/`udp_flush_dgram`), delivery + GRO split
+   (`kl_udp_deliver`), interest tracking, on-drain backpressure, drop accounting, and the
+   multicast-group validation (`udp_group_ok`, preserving the public `KL_ERR_INVALID_ARG` contract).
+   `udp.c` dispatches through `udp_dg(udp)` → `sp->dgram`. Mechanical check this pass: `udp.c`
+   contains **zero** non-comment platform net/event symbols (`epoll`/`kqueue`/`io_uring`/`WSA`/
+   `recvmsg`/`sendto`/…) — every match is explanatory prose.
+
+3. **Readiness vs completion is chosen honestly, via the event-caps abstraction, not platform
+   mechanics.** `udp.c` branches on `kl_event_caps(&loop) & KL_EVENT_CAP_COMPLETION`: a completion
+   loop posts an overlapped recv (`kl_comp_post_udp_recv`) and its readiness watcher never fires
+   (verified at `udp.c:509–520`); a readiness loop drives `udp_recv_dgram` → `dg->recv`. **Both**
+   funnel into the *same* model-blind `kl_udp_deliver` (`udp.c:156`). No synthetic readiness, no
+   "readable ⇒ completed" pretense. Plain sends on a completion loop post overlapped
+   (`kl_comp_post_udp_send`); source-pinned / TOS sends fall through to the synchronous `dg->send`
+   seam (documented, works on a completion socket) — an explicit, narrow, honest deviation.
+
+4. **Shared cmsg parsers extracted to always-linked TUs.** The pktinfo/GRO parsers the *completion*
+   backends still need (`event_iouring.c`, `event_pollcomp.c`, `event_iocp.c`) moved from the
+   deleted seam into `src/udp_cmsg.c` (`kl_udp_parse_local`/`kl_udp_parse_gro`) and
+   `src/udp_cmsg_win.c` (`kl_udp_win_get_recvmsg`/`kl_udp_win_parse_local`). The readiness datagram
+   provider (`socket_dgram_posix.c`/`socket_dgram_win.c`) keeps its **own** static copies so a
+   foreign stack can link-override the entire data-plane with no residual seam dependency.
+
+5. **The default + completion-inheritance cases are wired symmetrically with the stream axis.**
+   `kl_sockdef_dgram()` returns the built-in datagram ops when `KlEventCtx.sockets == NULL`
+   (mirroring the `kl_sockdef_*` stream fallback); the overlapped completion providers inherit the
+   base plane (`event_iouring.c`/`event_pollcomp.c`: `prov.dgram = posix->dgram`; `event_iocp.c`:
+   `.dgram = &kl_socket_winsock_dgram_ops`) so `configure()`/socket-opts work identically while
+   recv/send route through the completion post. lwIP supplies its own `lwip_dgram_ops` using only
+   public headers (`integrations/lwip/socket_lwip.c`), no `udp_io_lwip.c`.
+
+### Execution-path re-trace (new datagram structure)
+
+- **Readiness UDP receive:** `udp_on_ready` → `udp_recv_dgram(udp, dg)` → `dg->recv(ctx, fd, buf,
+  size, &src, &meta)` (the provider `recvmsg`s into a stack `sockaddr_storage`, marshals via
+  `kl_sockaddr_from_native`, parses pktinfo/GRO/TOS cmsgs opportunistically into `KlDgramRxMeta`)
+  → `kl_udp_deliver(src: KlSockAddr, …)` → `on_recv`. Host sockaddr never escapes the provider TU.
+- **Completion UDP receive:** `kl_udp_recv_start` sees `KL_EVENT_CAP_COMPLETION` → `kl_event_add` +
+  `kl_comp_post_udp_recv` (overlapped `WSARecvFrom` / io_uring recv) → backend fills host `peer` +
+  cmsgs into the completion event → `completion_driver.c` `KL_COMP_UDP_RECV` marshals once via
+  `kl_sockaddr_from_native` → `kl_udp_comp_on_recv` → **same** `kl_udp_deliver` → re-post.
+- **Send + backpressure:** readiness — `dg->send`; on `EAGAIN` → `udp_enqueue`, `q_bytes` grows,
+  interest gains `KL_EVENT_WRITE`, `udp_flush_dgram` drains on writability, `on_drain` at empty.
+  Completion — `kl_comp_post_udp_send`, `q_bytes` tracks outstanding overlapped bytes against
+  `max_send_queue`, `kl_udp_comp_on_send` releases + fires `on_drain`. Same Keel-level semantics.
+- **Close with outstanding work:** `kl_udp_free` frees the send queue, rx/tx batch blocks (via
+  `dg->rx_batch_free`/`tx_batch_free`), and unregisters interest; `recv_active`/`kl_handle_valid`
+  guards in `kl_udp_deliver` + `kl_udp_comp_on_recv` stop re-arm after a mid-callback free.
+
+### Findings
+
+- **[Low — FIXED this pass, via /c-audit 8th pass] TOS control-message family guess.** In
+  `pdg_send` (`socket_dgram_posix.c`) and `wdg_send` (`socket_dgram_win.c`) a source-pinned/TOS
+  send on a *connected* socket (dest `UNSPEC`) hard-coded `AF_INET` when building the TOS cmsg,
+  which would attach an `IP_TOS` cmsg to an IPv6 flow. Fixed to derive the family from dest, else
+  the pinned source, else v4: `family = dest_len ? dest->family : (src_len ? src->family : AF_INET)`.
+
+- **[Informational] Unused rx-batch allocation on a completion loop.** `kl_udp_recv_start`
+  (`udp.c:503–507`) allocates the `recvmmsg` batch via the inherited `posix->dgram` whenever
+  `mmsg_batch > 1`, but a completion loop consumes recv through `kl_comp_post_udp_recv`, never the
+  batch. The block is config-gated (off by default) and correctly freed at teardown, so this is a
+  small transient over-allocation, not a leak or correctness bug. Left as-is to avoid churn; a
+  one-line `!(caps & KL_EVENT_CAP_COMPLETION)` guard would remove it if ever measured.
+
+- **[Informational — FIXED this pass] Stale seam references in comments.** With `udp_io_*` deleted,
+  several comments still named it (`udp.c:20/29/158`, `socket_dgram_posix.c`, `include/keel/udp.h`).
+  Corrected to reference the datagram provider / `socket_dgram_posix.c`. A stray untracked build
+  artifact (`src/udp_io_win.o`) was removed.
+
+- **[Informational] No new axis leak introduced.** Re-ran the mechanical protocol-independence
+  greps: `datagram.h` includes no platform networking headers (only `allocator`/`handle`/`sockaddr`
+  + `stddef`/`stdint`/`sys/types` for `ssize_t`, matching `socket.h`); it references `KlUdp` only in
+  prose and `struct KlUdpConfig` only as a borrowed forward-declared config pointer. The
+  `check-sockaddr-neutral` invariant from the fifth pass is unaffected — the fold happens *inside*
+  the provider boundary that was already permitted to see host sockaddrs.
+
+### Compatibility matrix (datagram plane, updated)
+
+| Socket × Event                | Stream | Datagram plane | Notes |
+|-------------------------------|--------|----------------|-------|
+| Linux sockets + epoll         | ✅ prod | ✅ `kl_socket_posix_dgram_ops` (mmsg/GSO/GRO/TOS) | readiness `dg->recv`/`send` |
+| Linux sockets + io_uring      | ✅ prod | ✅ inherits `posix->dgram` for opts; recv/send via completion post | `configure` + overlapped I/O |
+| Darwin sockets + kqueue       | ✅ prod | ✅ `posix` dgram (per-datagram; no mmsg/GSO) | readiness |
+| Winsock + WSAPoll             | ✅ build | ✅ `kl_socket_winsock_dgram_ops` (WSARecvMsg pktinfo) | readiness; no mmsg/GSO/GRO |
+| Winsock + IOCP                | ✅ build | ✅ `.dgram = winsock`; recv/send via overlapped post | cross-compiled (MinGW) |
+| pollcomp double (POSIX)       | ✅ test | ✅ inherits `posix->dgram`; completion post path | ASan gate |
+| lwIP (foreign stack)          | ✅ test | ✅ `lwip_dgram_ops` (public headers only) | loopback CI |
+
+### Contract clarified this pass — the datagram data-plane
+
+- **Ownership split:** the provider supplies **primitives** (`send`/`recv`/`configure`/`set_tos`/
+  `mcast_membership`/`send_gso` + optional data-oriented batch), taking only `(ctx, fd, KlSockAddr,
+  buffers, meta)`; `udp.c` owns **all** machine state (queue, ordering, interest, drop accounting,
+  delivery, multicast validation). A provider is stateless per-socket beyond the fd.
+- **Capability handshake:** a provider advertises `KL_SOCK_CAP_DATAGRAM` and sets `.dgram`;
+  `kl_udp_init` rejects a provider without `.dgram`. `configure()` returns the *accepted*
+  `KL_DGRAM_RX_*` bitmask so `udp.c` learns which cmsg captures the stack actually enabled.
+- **recv contract:** the recv op always attaches a control buffer and parses cmsgs
+  opportunistically (kernel fills only what `configure` enabled), so no per-socket capture flags
+  cross the seam; truncation/local/GRO/TOS surface via `KlDgramRxMeta`.
+- **Model-agnostic delivery:** both readiness (`dg->recv`) and completion (`kl_comp_post_udp_recv`)
+  paths deliver through the single `kl_udp_deliver`; a completion event ≠ a whole coalesced buffer
+  is split identically to the readiness GRO path.
+
+### Recommended roadmap
+
+- *Correctness:* none outstanding (L1 fixed).
+- *Coverage:* add a mock `KlDatagramOps` provider test (mirroring `test_socket_provider.c`) that
+  exercises `configure` cap-bitmask negotiation + a short/failing `send` → enqueue path without a
+  real socket, to pin the machine/provider contract deterministically.
+- *Cleanup (deferred, optional):* the completion-loop `rx_batch` guard above.
+
+### Changes made this pass
+
+- `src/udp.c`, `src/socket_dgram_posix.c`, `include/keel/udp.h` — corrected stale `udp_io`
+  comments to reference the datagram provider (comment-only; no code change).
+- `src/socket_dgram_posix.c`, `src/socket_dgram_win.c` — L1 TOS-family fix (from the /c-audit pass).
+- Removed stray untracked `src/udp_io_win.o`.
+- Verified: `make` (kqueue) clean; 61 test suites pass; `make smoke-pollcomp-asan` (completion
+  axis) clean; `make cppcheck` clean.
+
+---
+
 ## Fifth pass — address-ABI neutralization, event-provider seam, lwIP as a third stack (2026-08-03)
 
 **Verdict: architecturally sound — the recent work *strengthened* the three-axis separation rather

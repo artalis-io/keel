@@ -149,7 +149,9 @@ static kl_ssize_t wdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
         if (!fn) { errno = EIO; return -1; }
         unsigned char control[DGRAM_TX_CMSG_SPACE];
         memset(control, 0, sizeof(control));
-        int family = dest_len ? ((struct sockaddr *)&ds)->sa_family : AF_INET;
+        /* Family for the TOS cmsg level: from the dest, else the source-pin, else v4. */
+        int family = dest_len ? ((struct sockaddr *)&ds)->sa_family
+                   : (src_len ? ((struct sockaddr *)&ss)->sa_family : AF_INET);
         ULONG clen = dgram_build_control(control, sizeof(control),
                                          src_len ? (struct sockaddr *)&ss : NULL, tos, family);
         WSABUF buf = { (ULONG)len, (CHAR *)data };

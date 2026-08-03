@@ -134,9 +134,9 @@ struct KlUdp {
     unsigned char *recv_buf;
     size_t         recv_buf_size;
     /* The per-datagram source + local (dest) address are stack scratch inside the
-     * platform udp_io recv path (marshalled to KlSockAddr before delivery), so no
-     * host sockaddr lives on this struct — KlUdp is layout-neutral (an lwIP udp_io
-     * TU can share its ABI without host-sockaddr size skew). */
+     * datagram provider's recv op (marshalled to KlSockAddr before delivery), so no
+     * host sockaddr lives on this struct — KlUdp is layout-neutral (a foreign-stack
+     * datagram provider can share its ABI without host-sockaddr size skew). */
     int            pktinfo;          /**< 1 = local-address capture enabled. */
     uint64_t       truncated;        /**< Count of oversized (truncated) datagrams. */
     /* Send queue (whole-datagram FIFO) */

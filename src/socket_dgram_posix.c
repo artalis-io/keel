@@ -22,8 +22,8 @@
 #include <keel/udp.h>          /* KlUdpConfig */
 #include "sockaddr_native.h"   /* KlSockAddr <-> host sockaddr at the boundary */
 /* Self-contained: the pktinfo/GRO cmsg parsers are dup'd static below rather than
- * shared from udp_io_posix.c, so this TU has no cross-dependency on the (soon to be
- * removed) seam — important for a foreign stack that link-overrides udp_io_*. */
+ * shared through a separate seam TU, so a foreign stack can link-override the whole
+ * datagram data-plane by supplying its own KlSocketProvider.dgram. */
 
 #include <errno.h>
 #include <stdint.h>
@@ -210,9 +210,9 @@ static kl_ssize_t pdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
     if (src_len || tos >= 0) {
         unsigned char control[DGRAM_TX_CMSG_SPACE];
         memset(control, 0, sizeof(control));
-        /* When a cmsg is needed the caller always supplies a dest (src-pin/TOS
-         * ride kl_udp_send_to_from/_tos), so the family comes from it. */
-        int family = dest_len ? dsa->sa_family : AF_INET;
+        /* Family for the TOS cmsg level: from the dest, else the source-pin, else v4. */
+        int family = dest_len ? dsa->sa_family
+                   : (src_len ? ((struct sockaddr *)&ss)->sa_family : AF_INET);
         size_t clen = dgram_build_control(control, sizeof(control),
                                           src_len ? (struct sockaddr *)&ss : NULL, tos, family);
         struct iovec iov = { .iov_base = (void *)data, .iov_len = len };
