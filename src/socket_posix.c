@@ -23,6 +23,9 @@
 /* Datagram data-plane for this provider (defined in socket_dgram_posix.c). */
 extern const KlDatagramOps kl_socket_posix_dgram_ops;
 
+/* The default datagram ops when no provider is set (KlEventCtx.sockets == NULL). */
+const struct KlDatagramOps *kl_sockdef_dgram(void) { return &kl_socket_posix_dgram_ops; }
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <netinet/tcp.h>   /* IPPROTO_TCP / TCP_NODELAY */

@@ -58,8 +58,8 @@ else ifdef WINDOWS
   PLATFORM_SRC = src/platform_win.c
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
   SERVER_PLAT_SRC = src/server_plat_win.c
-  UDP_IO_SRC = src/udp_io_win.c
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
+  UDP_CMSG_SRC = src/udp_cmsg_win.c    # shared WSARecvMsg fetch + pktinfo parse (IOCP + dgram)
   DNS_SYS_SRC = src/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
   TEST_COMPAT_SRC = tests/net_compat_win.c
@@ -148,10 +148,10 @@ SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
 PLATFORM_WAKEUP_SRC ?= src/platform_wakeup_posix.c
 SERVER_PLAT_SRC ?= src/server_plat_posix.c
-UDP_IO_SRC ?= src/udp_io_posix.c
-# The POSIX datagram data-plane (KlDatagramOps) for the POSIX socket provider.
-# Winsock sets DGRAM_SRC empty (Stage 2); lwIP provides its own in-tree.
+# The POSIX datagram data-plane (KlDatagramOps) for the POSIX socket provider, and
+# the shared cmsg parsers the POSIX completion backends (io_uring/pollcomp) reuse.
 DGRAM_SRC ?= src/socket_dgram_posix.c
+UDP_CMSG_SRC ?= src/udp_cmsg.c
 # Test-harness network helpers: per-platform sibling TU (mirrors SOCKET_SRC), so
 # tests/net_compat.h stays logic-#ifdef-free. Linked into each test binary.
 TEST_COMPAT_SRC ?= tests/net_compat_posix.c
@@ -172,7 +172,7 @@ CORE_SRC = src/allocator.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC
            src/websocket.c src/websocket_client.c \
            src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client.c src/client_pool.c src/redirect.c src/sse.c \
-           src/resolver_cache.c src/proxy_protocol.c src/udp.c $(UDP_IO_SRC) $(DGRAM_SRC) src/udp_server.c \
+           src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c \
            $(IO_ENGINE_SRC) $(COMPLETION_SRC) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)

@@ -96,7 +96,10 @@ static const KlSocketOps MOCK_OPS = {
 };
 
 static KlSocketProvider mock_provider(MockSock *m) {
-    KlSocketProvider p = { &MOCK_OPS, m, 0, NULL };
+    /* Decorate the stream ops (counted via MockSock); delegate the datagram
+     * data-plane to the built-in default so a KlUdp can run on this provider (its
+     * socket lifecycle still threads the mock). */
+    KlSocketProvider p = { &MOCK_OPS, m, KL_SOCK_CAP_DATAGRAM, kl_sockdef_dgram() };
     return p;
 }
 

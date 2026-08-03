@@ -8,7 +8,6 @@
 #include "socket.h"   /* seam: kl_sock_* + KlSockAddr + KlSocketProvider.dgram */
 #include <keel/datagram.h>   /* KlDatagramOps — the provider datagram data-plane */
 #include "udp_internal.h"
-#include "udp_io.h"   /* kl_udp_io_* — fallback for providers without dgram ops */
 #include "event_caps.h"   /* kl_event_caps — pick readiness vs completion recv */
 #include "io_engine.h"    /* kl_comp_post_udp_recv (completion loop) */
 
@@ -30,7 +29,9 @@ static void udp_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data);
  * kl_udp_io_* seam fallback. See the dispatch block below udp_on_ready. */
 static inline const KlDatagramOps *udp_dg(const KlUdp *u) {
     const KlSocketProvider *sp = u->ctx ? u->ctx->sockets : NULL;
-    return sp ? sp->dgram : NULL;
+    /* NULL sockets = the built-in default provider (mirrors the kl_sockdef_* stream
+     * fallback) → its default datagram ops. A concrete provider must supply .dgram. */
+    return sp ? sp->dgram : kl_sockdef_dgram();
 }
 static inline void *udp_sp_ctx(const KlUdp *u) {
     const KlSocketProvider *sp = u->ctx ? u->ctx->sockets : NULL;
@@ -137,9 +138,7 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
     if (udp->q_head)
         return udp_enqueue(udp, data, len, dest, src, tos);
 
-    const KlDatagramOps *dg = udp_dg(udp);
-    ssize_t n = dg ? dg->send(udp_sp_ctx(udp), udp->fd, data, len, dest, src, tos)
-                   : kl_udp_io_raw_send(udp, data, len, dest, src, tos);
+    ssize_t n = udp_dg(udp)->send(udp_sp_ctx(udp), udp->fd, data, len, dest, src, tos);
     if (n >= 0)
         return 0;   /* UDP send is all-or-nothing — no short-send handling */
     if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -185,7 +184,8 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
  * onto the socket provider, so one runtime provider owns stream + datagram I/O.
  * The provider supplies primitives (send/recv/configure/batch); the send-queue
  * walk, delivery, and interest tracking (the machine) live here. A provider
- * without dgram ops falls back to the compile/link kl_udp_io_* seam.
+ * without dgram ops cannot do datagrams — kl_udp_init rejects it, so udp_dg() is
+ * non-NULL on every live KlUdp.
  * (udp_dg / udp_sp_ctx are declared near the top — used by the send path too.) */
 
 /* Dequeue+free the first `k` queued datagrams from the front (sent or dropped). */
@@ -290,28 +290,39 @@ static void udp_recv_dgram(KlUdp *udp, const KlDatagramOps *dg) {
     }
 }
 
-/* Join/leave a multicast group through the provider ops, or the seam fallback. */
+/* Is `group` a numeric multicast address of `family` (IPv4 224.0.0.0/4, IPv6
+ * ff00::/8)? Validated here (platform-neutral) so the public API reports
+ * KL_ERR_INVALID_ARG for a bad group vs KL_ERR_SOCKET for a setsockopt failure. */
+static int udp_group_ok(int family, const char *group) {
+    KlSockAddr a;
+    if (kl_sockaddr_parse(&a, group, 0) != 0) return 0;
+    if (family == AF_INET  && kl_sockaddr_family(&a) == KL_AF_INET)
+        return (a.u.ip[0] & 0xF0) == 0xE0;
+    if (family == AF_INET6 && kl_sockaddr_family(&a) == KL_AF_INET6)
+        return a.u.ip[0] == 0xff;
+    return 0;
+}
+
+/* Join/leave a multicast group through the provider datagram ops. */
 static int udp_mcast_dispatch(KlUdp *udp, const char *group, unsigned iface, int join) {
-    const KlDatagramOps *dg = udp_dg(udp);
-    if (dg) {
-        int rc = dg->mcast_membership(udp_sp_ctx(udp), udp->fd, udp->family,
-                                      group, iface, join);
-        if (rc != 0) udp->last_error = KL_ERR_SOCKET;
-        return rc;
+    if (!udp_group_ok(udp->family, group)) {
+        udp->last_error = KL_ERR_INVALID_ARG;   /* not a multicast addr / family mismatch */
+        return -1;
     }
-    return kl_udp_io_mcast_membership(udp, group, iface, join);
+    int rc = udp_dg(udp)->mcast_membership(udp_sp_ctx(udp), udp->fd, udp->family,
+                                           group, iface, join);
+    if (rc != 0) udp->last_error = KL_ERR_SOCKET;
+    return rc;
 }
 
 static void udp_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)fd;
     KlUdp *udp = user_data;
     const KlDatagramOps *dg = udp_dg(udp);
-    if (ready & KL_EVENT_WRITE) {
-        if (dg) udp_flush_dgram(udp, dg); else kl_udp_io_flush_queue(udp);
-    }
-    if (kl_handle_valid(udp->fd) && udp->recv_active && (ready & KL_EVENT_READ)) {
-        if (dg) udp_recv_dgram(udp, dg); else kl_udp_io_recv_drain(udp);
-    }
+    if (ready & KL_EVENT_WRITE)
+        udp_flush_dgram(udp, dg);
+    if (kl_handle_valid(udp->fd) && udp->recv_active && (ready & KL_EVENT_READ))
+        udp_recv_dgram(udp, dg);
 }
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -329,6 +340,12 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     udp->ctx = cfg->ctx;
     udp->alloc = cfg->alloc ? cfg->alloc : cfg->ctx->alloc;
     if (!udp->alloc) {
+        udp->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    /* Datagram I/O is the socket provider's datagram vtable — a provider without it
+     * (no KL_SOCK_CAP_DATAGRAM) cannot back a KlUdp. */
+    if (!udp_dg(udp)) {
         udp->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
@@ -373,21 +390,13 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     }
 
     /* Datagram socket-option setup (reuse/bufs, broadcast/TOS/multicast, and
-     * per-datagram pktinfo/GRO/TOS capture). The provider's configure() folds all
-     * three and reports the capture options the kernel accepted; a provider without
-     * dgram ops uses the kl_udp_io_* seam. */
+     * per-datagram pktinfo/GRO/TOS capture): the provider's configure() folds all
+     * three and reports the capture options the kernel accepted. */
     {
-        const KlDatagramOps *dg = udp_dg(udp);
-        if (dg) {
-            uint32_t caps = dg->configure(udp_sp_ctx(udp), udp->fd, family, cfg);
-            udp->pktinfo  = (caps & KL_DGRAM_RX_PKTINFO) ? 1 : 0;
-            udp->recv_gro = (caps & KL_DGRAM_RX_GRO) ? 1 : 0;
-            udp->recv_tos = (caps & KL_DGRAM_RX_TOS) ? 1 : 0;
-        } else {
-            kl_udp_io_apply_socket_opts(udp->fd, cfg);
-            kl_udp_io_apply_tx_options(udp->fd, family, cfg);
-            kl_udp_io_setup_recv_opts(udp, cfg);
-        }
+        uint32_t caps = udp_dg(udp)->configure(udp_sp_ctx(udp), udp->fd, family, cfg);
+        udp->pktinfo  = (caps & KL_DGRAM_RX_PKTINFO) ? 1 : 0;
+        udp->recv_gro = (caps & KL_DGRAM_RX_GRO) ? 1 : 0;
+        udp->recv_tos = (caps & KL_DGRAM_RX_TOS) ? 1 : 0;
     }
 
     if (have_bind) {
@@ -416,12 +425,8 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
      * optimization) — a no-op where batching is unavailable. */
     {
         const KlDatagramOps *dg = udp_dg(udp);
-        if (dg) {
-            if (udp->mmsg_batch > 1 && dg->tx_batch_new && !udp->tx_batch)
-                udp->tx_batch = dg->tx_batch_new(udp->alloc, udp->mmsg_batch);
-        } else {
-            kl_udp_io_tx_batch_init(udp);
-        }
+        if (udp->mmsg_batch > 1 && dg->tx_batch_new && !udp->tx_batch)
+            udp->tx_batch = dg->tx_batch_new(udp->alloc, udp->mmsg_batch);
     }
     return 0;
 
@@ -456,14 +461,14 @@ void kl_udp_free(KlUdp *udp) {
         udp->recv_buf = NULL;
     }
     {
+        /* dg may be NULL here if init failed before the provider check (free is
+         * called on the half-built udp) — guard it. */
         const KlDatagramOps *dg = udp_dg(udp);
         if (dg) {
-            if (udp->rx_batch && dg->rx_batch_free) { dg->rx_batch_free(udp->alloc, udp->rx_batch); }
-            if (udp->tx_batch && dg->tx_batch_free) { dg->tx_batch_free(udp->alloc, udp->tx_batch); }
-            udp->rx_batch = udp->tx_batch = NULL;
-        } else {
-            kl_udp_io_batch_free(udp);
+            if (udp->rx_batch && dg->rx_batch_free) dg->rx_batch_free(udp->alloc, udp->rx_batch);
+            if (udp->tx_batch && dg->tx_batch_free) dg->tx_batch_free(udp->alloc, udp->tx_batch);
         }
+        udp->rx_batch = udp->tx_batch = NULL;
     }
     if (kl_handle_valid(udp->fd)) {
         kl_sock_close(udp->ctx->sockets, udp->fd);
@@ -497,12 +502,8 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
      * per-datagram path is used; a no-op where batching is unavailable. */
     {
         const KlDatagramOps *dg = udp_dg(udp);
-        if (dg) {
-            if (udp->mmsg_batch > 1 && dg->rx_batch_new && !udp->rx_batch)
-                udp->rx_batch = dg->rx_batch_new(udp->alloc, udp->mmsg_batch, udp->recv_buf_size);
-        } else {
-            kl_udp_io_rx_batch_init(udp);
-        }
+        if (udp->mmsg_batch > 1 && dg->rx_batch_new && !udp->rx_batch)
+            udp->rx_batch = dg->rx_batch_new(udp->alloc, udp->mmsg_batch, udp->recv_buf_size);
     }
 
     /* Completion loop (IOCP): a readiness watcher never fires here — associate the
@@ -587,8 +588,7 @@ int kl_udp_set_tos(KlUdp *udp, int tos) {
         return -1;
     }
     const KlDatagramOps *dg = udp_dg(udp);
-    int rc = (dg && dg->set_tos) ? dg->set_tos(udp_sp_ctx(udp), udp->fd, udp->family, tos)
-                                 : kl_udp_io_set_tos(udp->fd, udp->family, tos);
+    int rc = dg->set_tos ? dg->set_tos(udp_sp_ctx(udp), udp->fd, udp->family, tos) : -1;
     if (rc == 0)
         return 0;
     udp->last_error = KL_ERR_SOCKET;
@@ -639,9 +639,12 @@ int kl_udp_send_gso(KlUdp *udp, const void *buf, size_t total_len,
      * seam returns -1/EOPNOTSUPP where GSO is unavailable at build time. */
     if (segment_size < total_len && !udp->q_head && !udp->gso_disabled) {
         const KlDatagramOps *dg = udp_dg(udp);
-        ssize_t n = (dg && dg->send_gso)
-            ? dg->send_gso(udp_sp_ctx(udp), udp->fd, buf, total_len, (uint16_t)segment_size, dest)
-            : kl_udp_io_send_gso(udp, buf, total_len, (uint16_t)segment_size, dest);
+        ssize_t n;
+        if (dg->send_gso) {
+            n = dg->send_gso(udp_sp_ctx(udp), udp->fd, buf, total_len, (uint16_t)segment_size, dest);
+        } else {
+            n = -1; errno = EOPNOTSUPP;   /* no GSO op — fall through to per-segment */
+        }
         if (n >= 0)
             return 0;
         if (errno != EAGAIN && errno != EWOULDBLOCK)

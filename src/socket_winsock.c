@@ -21,6 +21,9 @@
 /* Datagram data-plane for this provider (defined in socket_dgram_win.c). */
 extern const KlDatagramOps kl_socket_winsock_dgram_ops;
 
+/* The default datagram ops when no provider is set (KlEventCtx.sockets == NULL). */
+const struct KlDatagramOps *kl_sockdef_dgram(void) { return &kl_socket_winsock_dgram_ops; }
+
 #include <windows.h>
 #include <mswsock.h>   /* TransmitFile prototype (linked via -lws2_32 / mswsock) */
 #include <io.h>        /* _read, _lseeki64, _get_osfhandle */

@@ -104,8 +104,20 @@ link seam.
    so the A2 pairing is dissolved: a foreign stack supplies one provider with both
    stream + datagram, no separate link artifact. Proven by the container loopback
    (UDP echo + HTTPS) with no `udp_io_lwip`.
-4. **Remove the seam** — delete the `kl_udp_io_*` fallback, `udp_io_posix.c`,
-   `udp_io_win.c`, and `Makefile UDP_IO_SRC`.
+4. **Remove the seam** — ✅ **done.** Deleted the `kl_udp_io_*` fallback,
+   `udp_io_posix.c`, `udp_io_win.c`, `udp_io.h`, and `Makefile UDP_IO_SRC`. The
+   shared cmsg parsers the *completion* backends still need moved to standalone
+   `udp_cmsg.c` (POSIX) / `udp_cmsg_win.c` (Winsock). `udp.c` now requires the
+   provider to carry `.dgram` (`kl_udp_init` fails otherwise); `udp_dg()` resolves a
+   NULL `KlEventCtx.sockets` to the built-in default via `kl_sockdef_dgram()`
+   (mirroring the `kl_sockdef_*` stream fallback), and the overlapped completion
+   providers (io_uring/IOCP/pollcomp) inherit the underlying provider's `.dgram` so
+   UDP config/opts work on a completion loop (the data-plane there stays on the
+   `kl_comp_post_udp_*` path).
+
+**Refactor complete.** One runtime provider now owns all of a stack's socket I/O
+(stream + datagram) on POSIX, Winsock, and lwIP; there is no separate `udp_io`
+build/link artifact, and the A2 provider↔`udp_io` pairing is gone.
 
 ## Why this is the right end state (not false symmetry)
 
