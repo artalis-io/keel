@@ -380,9 +380,186 @@ static int run_p9_3(void) {
     return 1;
 }
 
+/* ── P9-4 — close / cancel / idle-timeout LIFETIME + MEMORY SAFETY ──────────────
+ * All four cases run inside ONE kl_server_run over ONE lwIP-raw loop (a raw NO_SYS=1 loop +
+ * the glue's listen pcb + test client are process singletons — like P9-3). A state machine in
+ * the poll callback drives them sequentially on the tick thread. Cases:
+ *   C1 many-short-lived  — N (>> 8) sequential open/serve/close roundtrips to GET / : all get
+ *                          200, slots recycle, no leak / overflow of the bounded slot table.
+ *   C2 close-with-outstanding — GET /big (64 KB); client reads a little then FIN (mode 2). The
+ *                          server tears down the in-flight send cleanly (send buffer freed).
+ *   C3 reset-mid-send    — GET /big; client reads a little then RST (mode 1) → server tcp_err →
+ *                          free-by-owner (pcb already dead) + exactly-one close, no UAF.
+ *   C4 idle-timeout      — a raw client connects, sends a partial request (no CRLFCRLF) and
+ *                          never completes it; the server's idle sweep (short read_timeout_ms)
+ *                          calls kl_comp_cancel → tcp_abort → terminal completion → one release.
+ * Each case prints "P9-4 PASS (...)". The whole run is under ASan/UBSan/LSan in CI. */
+#define P9_4_PORT           7782
+#define P9_4_REQ_ROOT       "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+#define P9_4_REQ_BIG        "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+/* A deliberately INCOMPLETE request (no terminating CRLFCRLF) so the server never routes it and
+ * the idle sweep fires. */
+#define P9_4_REQ_PARTIAL    "GET / HTTP/1.1\r\nHost: x\r\n"
+#define P9_4_MANY_CONNS     50            /* N >> KL_LWR_MAX_CONNS (8/32) — forces recycling */
+#define P9_4_PARTIAL_READ   2048u         /* bytes the partial-read client takes before tearing down */
+#define P9_4_CLI_CAP        (P9_3_BODY_LEN + 4096u)
+
+static KlServer g_srv4;
+enum { P4_MANY = 0, P4_CWO = 1, P4_RST = 2, P4_IDLE = 3, P4_DONE = 4 };
+static atomic_int g_p4_stage;
+static atomic_int g_p4_pass;            /* bitmask of passed cases */
+static atomic_int g_p4_fail;
+static atomic_int g_p4_finished;
+static int        g_p4_many_started;    /* how many roundtrips in C1 have been kicked */
+
+static void handle4_root(KlRequest *req, KlResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
+}
+static void handle4_big(KlRequest *req, KlResponse *res, void *ud) {
+    (void)req; (void)ud;
+    static unsigned char body[P9_3_BODY_LEN];
+    fill_pattern(body, sizeof(body));
+    kl_response_status(res, 200);
+    kl_response_header(res, "Content-Type", "application/octet-stream");
+    kl_response_body_copy(res, (const char *)body, sizeof(body));
+}
+
+static const uint8_t g_lo4[4] = { 127, 0, 0, 1 };
+
+static void p4_pass(int stage, const char *name) {
+    atomic_fetch_or(&g_p4_pass, 1 << stage);
+    printf("P9-4 PASS (%s)\n", name);
+}
+
+static void p4_poll_cb(void *ud) {
+    KlServer *s = ud;
+    int stage = atomic_load(&g_p4_stage);
+
+    if (stage == P4_MANY) {
+        /* Kick roundtrips one at a time; advance only when the previous one resolved. */
+        if (g_p4_many_started == 0) {
+            g_p4_many_started = 1;
+            kl_lwr_lc_reset_counter();
+            kl_lwr_lc_start(g_lo4, P9_4_PORT, P9_4_REQ_ROOT, sizeof(P9_4_REQ_ROOT) - 1,
+                            0 /*full*/, 0);
+        } else if (kl_lwr_lc_done()) {
+            int completed = kl_lwr_lc_completed();
+            if (!kl_lwr_lc_saw_200()) { atomic_store(&g_p4_fail, 1); goto stop; }
+            if (completed >= P9_4_MANY_CONNS) {
+                p4_pass(P4_MANY, "many-short-lived");
+                atomic_store(&g_p4_stage, P4_CWO);
+                g_p4_many_started = 0;
+            } else {
+                kl_lwr_lc_start(g_lo4, P9_4_PORT, P9_4_REQ_ROOT, sizeof(P9_4_REQ_ROOT) - 1,
+                                0, 0);
+            }
+        }
+    } else if (stage == P4_CWO) {
+        if (!g_p4_many_started) {
+            g_p4_many_started = 1;
+            kl_lwr_lc_start(g_lo4, P9_4_PORT, P9_4_REQ_BIG, sizeof(P9_4_REQ_BIG) - 1,
+                            2 /*partial+FIN*/, P9_4_PARTIAL_READ);
+        } else if (kl_lwr_lc_done()) {
+            p4_pass(P4_CWO, "close-with-outstanding");
+            atomic_store(&g_p4_stage, P4_RST);
+            g_p4_many_started = 0;
+        }
+    } else if (stage == P4_RST) {
+        if (!g_p4_many_started) {
+            g_p4_many_started = 1;
+            kl_lwr_lc_start(g_lo4, P9_4_PORT, P9_4_REQ_BIG, sizeof(P9_4_REQ_BIG) - 1,
+                            1 /*partial+RST*/, P9_4_PARTIAL_READ);
+        } else if (kl_lwr_lc_done()) {
+            p4_pass(P4_RST, "reset-mid-send");
+            atomic_store(&g_p4_stage, P4_IDLE);
+            g_p4_many_started = 0;
+        }
+    } else if (stage == P4_IDLE) {
+        /* Send a partial (never-completed) request; the server's short read_timeout_ms drives
+         * the idle sweep → kl_comp_cancel → tcp_abort → terminal completion → one release. The
+         * client's lc_err resolves when the server RSTs it. */
+        if (!g_p4_many_started) {
+            g_p4_many_started = 1;
+            /* mode 0 but the request never completes, so the server never responds; the idle
+             * sweep tears it down and RSTs us → lc_err resolves g_lc_done. */
+            kl_lwr_lc_start(g_lo4, P9_4_PORT, P9_4_REQ_PARTIAL, sizeof(P9_4_REQ_PARTIAL) - 1,
+                            0, 0);
+        } else if (kl_lwr_lc_done()) {
+            p4_pass(P4_IDLE, "idle-timeout/kl_comp_cancel");
+            atomic_store(&g_p4_stage, P4_DONE);
+            atomic_store(&g_p4_finished, 1);
+            kl_server_stop(s);
+            return;
+        }
+    }
+
+    if (atomic_load(&g_p4_finished)) return;
+    kl_timer_add(&s->ev, 5, p4_poll_cb, s);
+    return;
+stop:
+    atomic_store(&g_p4_finished, 1);
+    kl_server_stop(s);
+}
+
+static void *p4_server_thread(void *arg) {
+    (void)arg;
+    kl_timer_add(&g_srv4.ev, 40, p4_poll_cb, &g_srv4);
+    kl_server_run(&g_srv4);
+    return NULL;
+}
+
+static int run_p9_4(void) {
+    /* Short read timeout so the idle-timeout case (C4) fires quickly. */
+    KlConfig cfg = { .port = P9_4_PORT, .bind_addr = "127.0.0.1",
+                     .read_timeout_ms = 200,
+                     .sockets = kl_socket_provider_lwip_raw() };
+    if (kl_server_init(&g_srv4, &cfg) != 0) {
+        printf("P9-4 FAIL: kl_server_init (err=%d)\n", g_srv4.last_error);
+        return 1;
+    }
+    kl_server_route(&g_srv4, "GET", "/",    handle4_root, NULL, NULL);
+    kl_server_route(&g_srv4, "GET", "/big", handle4_big,  NULL, NULL);
+
+    atomic_store(&g_p4_stage, P4_MANY);
+    atomic_store(&g_p4_pass, 0);
+    atomic_store(&g_p4_fail, 0);
+    atomic_store(&g_p4_finished, 0);
+    g_p4_many_started = 0;
+
+    pthread_t th;
+    if (pthread_create(&th, NULL, p4_server_thread, NULL) != 0) {
+        printf("P9-4 FAIL: pthread_create\n");
+        kl_server_free(&g_srv4);
+        return 1;
+    }
+    /* Watchdog: ~30s for all four cases (many-conns dominates). */
+    for (int i = 0; i < 3000 && !atomic_load(&g_p4_finished); i++) {
+        struct timespec sl = { 0, 10 * 1000000L };
+        nanosleep(&sl, NULL);
+    }
+    if (!atomic_load(&g_p4_finished)) {
+        atomic_store(&g_p4_finished, 1);
+        kl_server_stop(&g_srv4);
+    }
+    pthread_join(th, NULL);
+    kl_server_free(&g_srv4);
+
+    int pass = atomic_load(&g_p4_pass);
+    int all = (1 << P4_MANY) | (1 << P4_CWO) | (1 << P4_RST) | (1 << P4_IDLE);
+    if ((pass & all) == all && !atomic_load(&g_p4_fail)) return 0;
+
+    printf("P9-4 FAIL: stage=%d pass_mask=0x%x fail=%d (last roundtrip: completed=%d recv=%zu"
+           " saw200=%d)\n",
+           atomic_load(&g_p4_stage), pass, atomic_load(&g_p4_fail),
+           kl_lwr_lc_completed(), kl_lwr_lc_recv(), kl_lwr_lc_saw_200());
+    return 1;
+}
+
 int main(void) {
     if (run_p9_1() != 0) return 1;
     if (run_p9_2() != 0) return 1;
     if (run_p9_3() != 0) return 1;
+    if (run_p9_4() != 0) return 1;
     return 0;
 }

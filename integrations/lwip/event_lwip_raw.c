@@ -379,12 +379,17 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
     return rc;
 }
 
+/* Cancel pending ops on `fd` (idle-timeout sweep). Semantics mirror event_pollcomp.c: the
+ * conn is released ONLY through a completion event, so we do NOT free the KlConn here. Instead
+ * we abort the underlying pcb (kl_lwr_tcp_abort: frees its owned send buffer + slot by owner,
+ * detaches callbacks so lwIP's internal tcp_err isn't re-entered, RSTs the peer, and marks the
+ * slot `closed`). The abort marks the slot closed, so the NEXT kl_comp_drain surfaces a single
+ * terminal zero-length READ for this (armed) conn → the driver runs comp_close exactly once,
+ * releasing the KlConn through its normal completion path. Idempotent + safe if the conn
+ * already closed (kl_lwr_tcp_abort is a no-op on a dead/free slot). */
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     (void)ctx;
-    /* Release any in-flight send buffer for this conn (P9-4 will add the full
-     * tcp_abort/close-with-outstanding lifetime; freeing the owned send copy here already
-     * prevents a leak if a conn is cancelled mid-send). */
-    if (kl_handle_valid(fd)) kl_lwr_send_release((void *)fd);
+    if (kl_handle_valid(fd)) kl_lwr_tcp_abort((void *)fd);
 }
 
 int kl_comp_post_udp_recv(struct KlUdp *udp) { (void)udp; return -1; }   /* raw UDP: future */
@@ -434,6 +439,13 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
             ev->target = c;
             ev->ok = r->ok;
             ev->bytes = r->nbytes;
+            /* P9-4 exactly-one-close: a terminal (ok=0) WRITE record — pushed by the glue on
+             * tcp_err / kl_comp_cancel / close-with-outstanding — drives the driver to release
+             * this conn. If it happened to be recv-armed (idle cancel, or a mid-op RST), remove
+             * it from the armed table NOW so the armed-READ loop below (and future drains) never
+             * touch the about-to-be-released KlConn. This is what prevents a dangling armed[]
+             * entry aliasing a freed/reused conn slot. */
+            if (!r->ok) lwr_disarm(st, c);
             count++;
             continue;
         }
@@ -463,6 +475,12 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
         } else {                       /* closed with no pending data — zero-length READ */
             ev->ok = 0;
             ev->bytes = 0;
+            /* Exactly-one-close: mark the terminal READ consumed so a re-check can never
+             * surface a second terminal event (which would drive a double comp_close). The
+             * driver's comp_on_read turns ok=0 into comp_close → conn release → sock.close
+             * → kl_lwr_tcp_close, freeing the slot (or, for a dead/tcp_err slot, just the
+             * slot — no UAF on the freed pcb). */
+            kl_lwr_mark_terminated((void *)c->fd);
         }
         lwr_disarm(st, c);             /* consumed the recv (swaps armed[i] with the last) */
         count++;

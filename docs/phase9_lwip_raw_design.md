@@ -144,8 +144,39 @@ The spike replaces its `for`-loop with KEEL's event loop; the real work is a `Kl
   suppressing). `completion_driver.c` + `src/` + root Makefile unchanged. *P9-4 hooks:* the per-conn
   send buffer is freed on close/abort (`lwr_conn_free`→`lwr_send_reset`) and by `kl_comp_cancel`
   (`kl_lwr_send_release`); the `tcp_err`/RST-mid-send path should also free-by-owner.
-- **P9-4 — close/cancel/lifetime.** `tcp_err`/`tcp_close`, close-with-outstanding, idle timeout via
-  `sys_check_timeouts`. Test under ASan/UBSan (pcb + pbuf ownership; no leak/UAF).
+- **P9-4 — close/cancel/lifetime. DONE.** `tcp_err`/`tcp_close`/`tcp_abort` lifetime + memory
+  safety, hardened + ASan+UBSan+LSan-clean. Mechanics:
+  - **`tcp_err` (RST/OOM/abort) — pcb ALREADY freed by lwIP.** `lwr_srv_err` keys the slot BY
+    OWNER (`tcp_arg` == the `KlConn*`), never touches the freed pcb: it frees the owned send
+    buffer + staging *by owner*, marks the slot `dead` (so the driver's later close is a no-op
+    on the freed pointer) and pushes a SINGLE terminal completion record (a failed WRITE,
+    owner-keyed) so the driver closes the `KlConn` exactly once — whether it was awaiting a READ
+    or a WRITE (a mid-send RST leaves the conn NOT recv-armed, so the armed-READ gate alone
+    would never fire). `lwr_push_terminal` sets `terminated`, suppressing any second terminal.
+  - **Exactly-one-close.** Every terminal path routes through `comp_close` → `kl_server_conn_release`
+    → `sock.close(fd)` → `kl_lwr_tcp_close`. A `dead` slot's close ONLY clears the slot (no
+    deref of the freed pcb). The backend disarms a conn from its `armed[]` table on any terminal
+    (ok=0) WRITE record, so a released conn can never be re-touched by the armed-READ loop.
+  - **Close-with-outstanding-send.** `kl_lwr_tcp_close` frees the owned send buffer first, then
+    `tcp_close`; if data is still queued `tcp_close` fails and we `tcp_abort` (lwIP requires the
+    fallback). A peer FIN mid-send (`lwr_srv_recv` NULL pbuf with a send in flight) drops the
+    send copy + pushes the terminal record so the conn is torn down promptly.
+  - **`kl_comp_cancel` (idle timeout).** Now aborts the live pcb via `kl_lwr_tcp_abort`: detaches
+    callbacks first (so lwIP's internal `tcp_err` is not re-entered against a slot being cleared),
+    frees the slot + send buffer by owner, RSTs the peer, marks `dead`+`closed` and pushes the
+    terminal record. Idempotent + safe on an already-dead/free slot. Mirrors `event_pollcomp.c`:
+    the conn is released ONLY through the surfaced completion, never directly in cancel.
+  - **Slot-table robustness.** `KL_LWR_MAX_CONNS` bumped 8 → 32 (bounded, embedded-friendly);
+    accept gracefully REJECTS (`tcp_abort` the new pcb + `ERR_ABRT`) when full rather than
+    overflowing; every close/err/abort clears the slot (`pcb=NULL`) so it recycles for the next
+    accept and a dead pointer can never alias a live slot.
+  Test (`raw_tick_test.c` / `loopback-raw`): four cases — many-short-lived (50 sequential conns,
+  all 200, slots recycle), close-with-outstanding (64 KB, client FINs after a partial read),
+  reset-mid-send (client RSTs after a partial read → `tcp_err`), idle-timeout (partial request
+  never completed → server idle sweep → `kl_comp_cancel`). Each prints `P9-4 PASS (...)`. Built +
+  run under `-fsanitize=address,undefined -fno-sanitize-recover=all` with `ASAN_OPTIONS=detect_leaks=1`
+  → ZERO findings. `completion_driver.c` + `src/` + root Makefile unchanged (no driver contract
+  gap found — the terminal-completion-then-normal-release contract fits lwIP-raw verbatim).
 - **P9-5 — KlEventLoop.fd widening (axis-audit F1).** A raw provider has no pollable fd; revisit
   the public `KlEventLoop.fd` (currently "epoll_fd/kqueue_fd, -1 for io_uring") toward a portable
   handle if the loop object must expose one. Assess; only widen if forced.

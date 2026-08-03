@@ -24,8 +24,23 @@
  * preads the file into the same owned buffer after the head, then reuses the pump. This
  * makes a many-segment (>tcp_sndbuf) response transfer correctly end to end.
  *
- * close-with-outstanding / cancel lifetime is P9-4; the send buffer is released on close
- * (lwr_conn_free → lwr_send_reset) and via kl_lwr_send_release (the P9-4 hook).
+ * P9-4 (this stage) hardens close/cancel/error LIFETIME + MEMORY SAFETY:
+ *   - tcp_err (RST/OOM/abort): lwIP has ALREADY freed the pcb when this fires, so the
+ *     callback must NOT touch it. lwr_srv_err now fully releases the owning slot BY OWNER
+ *     (frees the send buffer + staging), marks the slot `dead` (pcb freed by lwIP) so the
+ *     backend's later close is a no-op on the dead pointer, and marks it `closed` so the
+ *     backend surfaces exactly ONE terminal READ → the driver closes the KlConn once.
+ *   - close-with-outstanding-send: kl_lwr_tcp_close frees the owned send buffer first, then
+ *     tcp_close; if data is still queued tcp_close returns != ERR_OK and we tcp_abort (lwIP
+ *     requires this) — never leaving a half-torn pcb or leaking the send copy.
+ *   - kl_comp_cancel (idle timeout): kl_lwr_tcp_abort aborts the live pcb (→ tcp_err path is
+ *     suppressed for a self-initiated abort by detaching callbacks first), releases the slot,
+ *     and marks it closed so the backend surfaces the terminal READ. Idempotent: a second
+ *     abort/close on an already-dead/closed slot does nothing.
+ *   - slot recycling: KL_LWR_MAX_CONNS bumped to a bounded cap; accept gracefully REJECTS
+ *     (tcp_abort the new pcb) when full rather than overflowing, and every close/err frees
+ *     the slot so it is reused for the next accept. A dead pcb pointer can never alias a live
+ *     slot because the slot is cleared (pcb=NULL) on release.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -82,10 +97,14 @@ int kl_lwr_drain(KlLwrRecord *out, int max) {
 }
 
 /* ── per-pcb connection state (owner + received-byte staging) ────────────────────
- * A tiny fixed table keyed by pcb. P9-2 serves one connection over loopback at a time;
- * the table is sized for a handful. Each accepted pcb gets a slot at kl_lwr_set_owner;
- * the recv callback stages bytes here so the backend can copy them into c->read_buf. */
-#define KL_LWR_MAX_CONNS 8
+ * A fixed table keyed by pcb. Sized for a bounded number of concurrent connections; the
+ * many-short-lived-conns P9-4 test drives >8 conns SEQUENTIALLY, so with correct recycling
+ * (free on close/err → reuse for the next accept) a small cap suffices. A burst that would
+ * exceed the cap is gracefully REJECTED at accept (tcp_abort the new pcb) — an embedded
+ * target prefers a bounded table + reject over unbounded growth. Each accepted pcb gets a
+ * slot in lwr_srv_accept; the recv callback stages bytes here so the backend can copy them
+ * into c->read_buf. */
+#define KL_LWR_MAX_CONNS 32
 #define KL_LWR_STAGE_CAP 8192   /* matches KEEL's KL_READ_BUF_SIZE headers window */
 
 typedef struct {
@@ -94,6 +113,8 @@ typedef struct {
     unsigned char   stage[KL_LWR_STAGE_CAP];
     size_t          stage_len;
     int             closed;   /* peer closed / errored — surface a zero-length READ */
+    int             dead;     /* pcb was freed by lwIP (tcp_err) — never deref it again */
+    int             terminated;/* a terminal READ was already surfaced — no double close */
 
     /* ── P9-3 outgoing send state (owned copy of the full response) ──────────────
      * `send_buf`/`send_total` hold the whole payload the driver posted (the backend
@@ -113,7 +134,11 @@ static KlLwrConn g_conns[KL_LWR_MAX_CONNS];
  * so close() can distinguish the listener from a connection pcb. */
 static struct tcp_pcb *g_listen_pcb = NULL;
 
+/* Find a slot by pcb pointer. NOTE this matches by POINTER VALUE only — a `dead` slot still
+ * carries the (freed) pointer for owner/close correlation, but callers must consult ->dead
+ * before dereferencing ->pcb. A free slot has pcb==NULL and never matches a live pcb. */
 static KlLwrConn *lwr_conn_find(const struct tcp_pcb *pcb) {
+    if (pcb == NULL) return NULL;
     for (int i = 0; i < KL_LWR_MAX_CONNS; i++)
         if (g_conns[i].pcb == pcb) return &g_conns[i];
     return NULL;
@@ -129,18 +154,25 @@ static KlLwrConn *lwr_conn_alloc(struct tcp_pcb *pcb) {
             g_conns[i].owner = NULL;
             g_conns[i].stage_len = 0;
             g_conns[i].closed = 0;
+            g_conns[i].dead = 0;
+            g_conns[i].terminated = 0;
             g_conns[i].send_buf = NULL;
             g_conns[i].send_total = g_conns[i].send_written = g_conns[i].send_acked = 0;
             return &g_conns[i];
         }
     return NULL;
 }
+/* Fully clear a slot back to free (pcb=NULL) after releasing owned resources. Used by the
+ * close/abort/err paths — recycling: a freed slot is immediately reusable by the next
+ * accept, and its NULL pcb can never alias a new pcb's pointer. */
+static void lwr_slot_clear(KlLwrConn *c) {
+    lwr_send_reset(c);
+    c->pcb = NULL; c->owner = NULL; c->stage_len = 0;
+    c->closed = 0; c->dead = 0; c->terminated = 0;
+}
 static void lwr_conn_free(const struct tcp_pcb *pcb) {
     KlLwrConn *c = lwr_conn_find(pcb);
-    if (c) {
-        lwr_send_reset(c);
-        c->pcb = NULL; c->owner = NULL; c->stage_len = 0; c->closed = 0;
-    }
+    if (c) lwr_slot_clear(c);
 }
 
 /* ── lifecycle / mainloop ──────────────────────────────────────────────────── */
@@ -178,6 +210,8 @@ void kl_lwr_lwip_tick(void *loopif) {
 
 /* ── raw tcp_* callbacks → completion records ──────────────────────────────── */
 
+static void lwr_push_terminal(KlLwrConn *slot);   /* fwd: single terminal completion record */
+
 /* recv callback for an accepted (server-side) connection. A NULL pbuf = peer closed. Copies
  * the (possibly chained) pbuf into the per-pcb staging buffer and issues tcp_recved for the
  * bytes accepted (safe once copied out — see the ordering note in the design), then frees the
@@ -189,8 +223,20 @@ static err_t lwr_srv_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
     KlLwrConn *cs = lwr_conn_find(tpcb);
     if (err != ERR_OK || p == NULL) {
         if (p) pbuf_free(p);
-        if (cs) cs->closed = 1;   /* backend surfaces a zero-length READ → driver closes */
-        return ERR_OK;
+        if (cs) {
+            cs->closed = 1;
+            /* P9-4: if a send is in flight when the peer closes (close-with-outstanding: the
+             * client read part of a large body then FIN'd), the conn is NOT recv-armed, so the
+             * armed-READ close gate would never fire. Push a terminal completion record + drop
+             * the owned send buffer so the driver tears the conn down promptly (no leak, no
+             * further writes to a closing pcb). A plain idle keep-alive close (no send in
+             * flight) keeps the original armed-READ path (a fresh recv IS posted post-response). */
+            if (cs->send_buf) {
+                lwr_send_reset(cs);
+                lwr_push_terminal(cs);
+            }
+        }
+        return ERR_OK;   /* keep the pcb; the driver's close (tcp_close/abort) tears it down */
     }
     if (cs) {
         for (struct pbuf *q = p; q != NULL; q = q->next) {
@@ -255,18 +301,40 @@ static err_t lwr_srv_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
     return ERR_OK;
 }
 
-/* err callback: the pcb was aborted by the stack (RST, OOM, …). lwIP has already freed the
- * pcb by the time this fires, so we cannot key by pcb. arg is the KlConn* owner we set via
- * tcp_arg; find its slot, invalidate the dangling pcb pointer, and mark it closed so the
- * backend surfaces a zero-length READ (the driver then releases the conn). */
+/* P9-4: push a SINGLE terminal "connection dead" record for a conn, keyed by owner. Surfaced
+ * as a failed WRITE (ok=0) — the driver's completion path turns any ok=0 TCP completion into
+ * comp_close, so this releases the KlConn exactly once regardless of whether it was awaiting a
+ * READ or a WRITE. Sets `terminated` so the armed-READ gate cannot ALSO surface a terminal
+ * event for the same conn (exactly-one-close). Only pushes if not already terminated and an
+ * owner is known (the backend needs a target). */
+static void lwr_push_terminal(KlLwrConn *slot) {
+    if (!slot || slot->terminated || slot->owner == NULL) return;
+    KlLwrRecord r = { .kind = KL_LWR_WRITE, .pcb = slot->pcb,
+                      .owner = slot->owner, .nbytes = 0, .ok = 0 };
+    lwr_rec_push(&r);
+    slot->terminated = 1;
+}
+
+/* err callback (P9-4): the pcb was aborted by the stack (RST, OOM, self-initiated tcp_abort).
+ * lwIP has ALREADY FREED the pcb by the time this fires — we MUST NOT dereference it. Key the
+ * slot by owner (arg == the KlConn* set via tcp_arg), free its owned send buffer + staging
+ * BY OWNER (the pcb can't reach them), mark it `dead` (so the backend's later close is a no-op
+ * on the freed pointer) and `closed` (so the backend surfaces exactly one terminal zero-length
+ * READ → the driver releases the KlConn exactly once). The freed pcb pointer value is retained
+ * ONLY so the backend's close path can correlate c->fd → slot; it is never dereferenced. */
 static void lwr_srv_err(void *arg, err_t err) {
     (void)err;
-    /* Mark the owning slot closed (keyed by owner, not pcb — the pcb is being freed). The pcb
-     * pointer value is retained only for status matching by value (never dereferenced after
-     * this); the backend's close path frees the slot. P9-2's clean loopback never hits this. */
     for (int i = 0; i < KL_LWR_MAX_CONNS; i++)
         if (g_conns[i].owner == arg && g_conns[i].pcb != NULL) {
+            lwr_send_reset(&g_conns[i]);   /* free-by-owner: pcb is dead, can't reach the buf */
+            g_conns[i].stage_len = 0;
+            g_conns[i].dead = 1;           /* never deref g_conns[i].pcb again */
             g_conns[i].closed = 1;
+            /* Surface the single terminal completion via a record (owner-keyed), so the driver
+             * closes the KlConn exactly once whether it was awaiting a READ or a WRITE (a
+             * mid-send RST leaves the conn NOT recv-armed — the armed-READ gate alone would
+             * never fire). lwr_push_terminal sets `terminated`, suppressing the armed path. */
+            lwr_push_terminal(&g_conns[i]);
             break;
         }
 }
@@ -320,19 +388,63 @@ uint16_t kl_lwr_tcp_local_port(void *pcb) {
 
 void kl_lwr_tcp_close(void *pcb) {
     struct tcp_pcb *p = (struct tcp_pcb *)pcb;
+    if (p == NULL) return;
+
+    /* P9-4: if this pcb was already freed by lwIP (tcp_err marked its slot `dead`), the
+     * driver is closing the KlConn whose c->fd still holds the dead pointer. Free ONLY the
+     * slot — never touch the freed pcb. This is what makes close-after-err safe (no UAF). */
+    KlLwrConn *slot = lwr_conn_find(p);
+    if (slot && slot->dead) {
+        lwr_slot_clear(slot);
+        return;
+    }
+
     if (p == g_listen_pcb) g_listen_pcb = NULL;
-    lwr_conn_free(p);
+    lwr_conn_free(p);              /* frees the owned send buffer (close-with-outstanding) */
     tcp_arg(p, NULL);
-    /* tcp_recv/tcp_sent assert against a LISTEN pcb — only a connection pcb has these
+    /* tcp_recv/tcp_sent/tcp_err assert against a LISTEN pcb — only a connection pcb has these
      * callbacks. A LISTEN pcb (the listener being torn down) just needs tcp_close, which
-     * calls tcp_accept(NULL) internally. */
+     * calls tcp_accept(NULL) internally. Detaching the callbacks first also means a
+     * self-initiated abort below won't re-enter lwr_srv_err for an already-freed slot. */
     if (p->state != LISTEN) {
         tcp_recv(p, NULL);
         tcp_sent(p, NULL);
         tcp_err(p, NULL);
     }
+    /* tcp_close may fail (return != ERR_OK) when data is still queued on the pcb — e.g. a
+     * close mid-send with unacked/unsent segments. lwIP REQUIRES a tcp_abort fallback in
+     * that case (tcp_close left the pcb intact). tcp_abort frees the pcb + sends a RST. */
     if (tcp_close(p) != ERR_OK)
         tcp_abort(p);
+}
+
+/* P9-4: forcibly abort a LIVE connection pcb (idle-timeout cancel path). Detach the callbacks
+ * FIRST so lwIP's tcp_abort (which invokes tcp_err internally) does not re-enter lwr_srv_err
+ * against a slot we are about to clear, then free the slot by owner + send buffer, then abort
+ * (frees the pcb + RSTs the peer). Idempotent: a NULL/dead/free slot is a no-op — safe to call
+ * on a conn that already closed. Marks the slot `closed` so the backend still surfaces the
+ * single terminal READ that drives the driver's exactly-one release of the KlConn. */
+void kl_lwr_tcp_abort(void *pcb) {
+    struct tcp_pcb *p = (struct tcp_pcb *)pcb;
+    if (p == NULL || p == g_listen_pcb) return;
+    KlLwrConn *slot = lwr_conn_find(p);
+    if (!slot || slot->dead) return;   /* already gone — idempotent no-op */
+
+    lwr_send_reset(slot);              /* release the in-flight send copy (no leak) */
+    slot->stage_len = 0;
+    slot->closed = 1;
+    slot->dead = 1;                    /* pcb about to be freed — never deref again */
+    /* Surface the single terminal completion via a record (owner-keyed) so the driver closes
+     * the KlConn once whether it was awaiting a READ (idle) or a WRITE (mid-send cancel). */
+    lwr_push_terminal(slot);
+
+    tcp_arg(p, NULL);
+    if (p->state != LISTEN) {
+        tcp_recv(p, NULL);
+        tcp_sent(p, NULL);
+        tcp_err(p, NULL);
+    }
+    tcp_abort(p);                      /* frees the pcb + RST */
 }
 
 void kl_lwr_set_owner(void *pcb, void *owner) {
@@ -344,8 +456,19 @@ void kl_lwr_set_owner(void *pcb, void *owner) {
 
 void kl_lwr_conn_status(void *pcb, int *has_data, int *closed) {
     KlLwrConn *cs = lwr_conn_find((struct tcp_pcb *)pcb);
-    if (has_data) *has_data = (cs && cs->stage_len > 0) ? 1 : 0;
-    if (closed)   *closed   = (cs && cs->closed) ? 1 : 0;
+    /* A `dead` (tcp_err-freed) slot never has usable staged data — only report the terminal
+     * close. `terminated` suppresses re-reporting once the backend consumed the terminal READ
+     * (defence-in-depth against a double terminal → double comp_close). */
+    if (has_data) *has_data = (cs && !cs->dead && !cs->terminated && cs->stage_len > 0) ? 1 : 0;
+    if (closed)   *closed   = (cs && !cs->terminated && cs->closed) ? 1 : 0;
+}
+
+/* P9-4: the backend calls this right after it surfaces a terminal (zero-length) READ for a
+ * closed conn, so a re-check (e.g. if the conn is somehow re-armed) will not surface a second
+ * terminal event. Idempotent; a NULL/unknown pcb is ignored. */
+void kl_lwr_mark_terminated(void *pcb) {
+    KlLwrConn *cs = lwr_conn_find((struct tcp_pcb *)pcb);
+    if (cs) cs->terminated = 1;
 }
 
 size_t kl_lwr_take_staged(void *pcb, void *dst, size_t cap) {
@@ -548,3 +671,118 @@ size_t kl_lwr_client_body_peek(size_t off, unsigned char *dst, size_t cap) {
     memcpy(dst, hdr_end + off, n);
     return n;
 }
+
+/* ── P9-4 lifetime test client ────────────────────────────────────────────────
+ * A separate, minimal raw-API client used ONLY by the P9-4 close/cancel/err cases. It is
+ * deliberately independent of the P9-2/P9-3 accumulator so those cases stay untouched. It
+ * tracks its own pcb (so a case can RST or FIN mid-read), counts received bytes + whether it
+ * saw an HTTP "200", and increments a completed-roundtrip counter. All calls run on the single
+ * lwIP tick thread (marshalled via KEEL timers), so plain non-atomic state is safe. */
+enum { KLW_MODE_FULL = 0, KLW_MODE_PARTIAL_ABORT = 1, KLW_MODE_PARTIAL_CLOSE = 2 };
+
+static struct tcp_pcb *g_lc_pcb;          /* current test client pcb (NULL = none live) */
+static const void     *g_lc_req;
+static size_t          g_lc_req_len;
+static int             g_lc_mode;
+static size_t          g_lc_abort_after;   /* bytes to receive before RST/FIN (partial modes) */
+static size_t          g_lc_recv;          /* bytes received so far this roundtrip */
+static int             g_lc_saw_200;       /* status line contained "200" */
+static int             g_lc_done;          /* this roundtrip resolved (200 seen or torn down) */
+static int             g_lc_completed;      /* count of resolved roundtrips (many-conns test) */
+static char            g_lc_head[64];      /* first bytes, to scan the status line for "200" */
+static size_t          g_lc_head_len;
+
+static void lc_teardown(struct tcp_pcb *tpcb, int abort_it) {
+    tcp_recv(tpcb, NULL);
+    tcp_err(tpcb, NULL);
+    tcp_arg(tpcb, NULL);
+    if (abort_it) {
+        tcp_abort(tpcb);                   /* RST — exercises the server's tcp_err path */
+    } else {
+        if (tcp_close(tpcb) != ERR_OK) tcp_abort(tpcb);   /* FIN (fallback to abort) */
+    }
+    if (g_lc_pcb == tpcb) g_lc_pcb = NULL;
+}
+
+static void lc_err(void *arg, err_t err) {
+    (void)arg; (void)err;
+    /* The server RST'd us (or the stack aborted the pcb): pcb is freed — just resolve. */
+    g_lc_pcb = NULL;
+    if (!g_lc_done) { g_lc_done = 1; g_lc_completed++; }
+}
+
+static err_t lc_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    (void)arg;
+    if (err != ERR_OK || p == NULL) {      /* server closed / error */
+        if (p) pbuf_free(p);
+        lc_teardown(tpcb, 0);
+        if (!g_lc_done) { g_lc_done = 1; g_lc_completed++; }
+        return ERR_OK;
+    }
+    /* Capture the head for status scanning. */
+    for (struct pbuf *q = p; q != NULL; q = q->next) {
+        size_t room = sizeof(g_lc_head) - 1 - g_lc_head_len;
+        size_t take = q->len < room ? q->len : room;
+        if (take) { memcpy(g_lc_head + g_lc_head_len, q->payload, take); g_lc_head_len += take; }
+    }
+    g_lc_head[g_lc_head_len] = '\0';
+    if (!g_lc_saw_200 && strstr(g_lc_head, " 200 ")) g_lc_saw_200 = 1;
+
+    g_lc_recv += p->tot_len;
+    tcp_recved(tpcb, p->tot_len);
+    pbuf_free(p);
+
+    /* Partial modes: once we've read enough, RST or FIN mid-stream (the server still has a
+     * large send in flight → exercises close-with-outstanding / reset-mid-send). */
+    if ((g_lc_mode == KLW_MODE_PARTIAL_ABORT || g_lc_mode == KLW_MODE_PARTIAL_CLOSE) &&
+        g_lc_recv >= g_lc_abort_after) {
+        lc_teardown(tpcb, g_lc_mode == KLW_MODE_PARTIAL_ABORT);
+        if (!g_lc_done) { g_lc_done = 1; g_lc_completed++; }
+        return ERR_OK;
+    }
+    /* Full mode: a small response completing counts as a resolved roundtrip. */
+    if (g_lc_mode == KLW_MODE_FULL && g_lc_saw_200) {
+        lc_teardown(tpcb, 0);
+        if (!g_lc_done) { g_lc_done = 1; g_lc_completed++; }
+    }
+    return ERR_OK;
+}
+
+static err_t lc_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
+    (void)arg;
+    if (err != ERR_OK) return err;
+    tcp_recv(tpcb, lc_recv);
+    tcp_err(tpcb, lc_err);
+    err_t w = tcp_write(tpcb, g_lc_req, (u16_t)g_lc_req_len, TCP_WRITE_FLAG_COPY);
+    if (w != ERR_OK) return w;
+    tcp_output(tpcb);
+    return ERR_OK;
+}
+
+/* Start ONE P9-4 lifetime roundtrip. mode: 0 full-read, 1 partial-then-RST, 2 partial-then-FIN.
+ * abort_after = bytes to receive before the RST/FIN (partial modes). Resets per-roundtrip state
+ * but NOT g_lc_completed (the many-conns test polls the running total). Returns 0/-1. */
+int kl_lwr_lc_start(const uint8_t ip4[4], uint16_t port, const void *req, size_t req_len,
+                    int mode, size_t abort_after) {
+    g_lc_req = req; g_lc_req_len = req_len;
+    g_lc_mode = mode; g_lc_abort_after = abort_after;
+    g_lc_recv = 0; g_lc_saw_200 = 0; g_lc_done = 0;
+    g_lc_head_len = 0; g_lc_head[0] = '\0';
+    struct tcp_pcb *cli = tcp_new();
+    if (!cli) return -1;
+    g_lc_pcb = cli;
+    ip_addr_t dst;
+    IP_ADDR4(&dst, ip4[0], ip4[1], ip4[2], ip4[3]);
+    if (tcp_connect(cli, &dst, port, lc_connected) != ERR_OK) {
+        tcp_abort(cli);
+        g_lc_pcb = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+int    kl_lwr_lc_done(void)      { return g_lc_done; }
+int    kl_lwr_lc_saw_200(void)   { return g_lc_saw_200; }
+int    kl_lwr_lc_completed(void) { return g_lc_completed; }
+size_t kl_lwr_lc_recv(void)      { return g_lc_recv; }
+void   kl_lwr_lc_reset_counter(void) { g_lc_completed = 0; }

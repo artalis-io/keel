@@ -78,8 +78,23 @@ uint16_t kl_lwr_tcp_local_port(void *pcb);
 /* The current LISTEN pcb (the relocated handle from the last kl_lwr_tcp_listen), or NULL.
  * Lets the backend adopt the relocated listen handle after tcp_listen freed the original. */
 void *kl_lwr_listen_pcb(void);
-/* tcp_close(pcb); best-effort tcp_abort on failure. Detaches callbacks + owner first. */
+/* tcp_close(pcb); best-effort tcp_abort on failure (data still queued). Detaches callbacks +
+ * owner + frees the owned send buffer first (close-with-outstanding). If the pcb's slot was
+ * marked `dead` by a prior tcp_err (lwIP already freed the pcb), this ONLY clears the slot and
+ * never dereferences the freed pointer (P9-4: no use-after-free on close-after-err). Safe on a
+ * NULL pcb. */
 void  kl_lwr_tcp_close(void *pcb);
+
+/* P9-4: forcibly abort a LIVE connection pcb (idle-timeout / kl_comp_cancel). Detaches
+ * callbacks first (so lwIP's internal tcp_err is not re-entered against the slot), frees the
+ * slot + owned send buffer by owner, marks it closed so the backend surfaces the single
+ * terminal READ, then tcp_abort (frees the pcb + RSTs the peer). Idempotent + safe on an
+ * already-dead/closed/NULL pcb. */
+void  kl_lwr_tcp_abort(void *pcb);
+
+/* P9-4: mark a conn's terminal (close) READ as already surfaced, so a subsequent status check
+ * cannot yield a second terminal event (defence against a double comp_close). Idempotent. */
+void  kl_lwr_mark_terminated(void *pcb);
 
 /* Associate a KlConn* (opaque owner) with an accepted pcb so recv/sent callbacks tag
  * their records with it, and arm tcp_recv/tcp_sent/tcp_err on that pcb. */
@@ -121,8 +136,9 @@ int   kl_lwr_send_begin(void *pcb, const void *buf, size_t len);
 int   kl_lwr_sendfile_begin(void *pcb, const void *head, size_t head_len,
                             int file_fd, uint64_t count);
 
-/* Release any per-pcb send buffer for `pcb` (P9-4 hook: called on close/abort so a
- * conn torn down mid-send does not leak its owned send buffer). Idempotent. */
+/* Release any per-pcb send buffer for `pcb` (frees the owned copy so a conn torn down mid-send
+ * does not leak). Idempotent. Retained for completeness; the P9-4 close/abort paths
+ * (kl_lwr_tcp_close / kl_lwr_tcp_abort / lwr_srv_err) already free the send buffer by owner. */
 void  kl_lwr_send_release(void *pcb);
 
 /* ── client (raw-API test peer, like the spike) ────────────────────────────── */
@@ -149,6 +165,23 @@ void  kl_lwr_client_release(void);
 /* DEBUG: copy up to `cap` body bytes (after the CRLFCRLF) from body offset `off` into `dst`;
  * returns the count copied. Used by the P9-3 file case to pinpoint a content mismatch. */
 size_t kl_lwr_client_body_peek(size_t off, unsigned char *dst, size_t cap);
+
+/* ── P9-4 lifetime test client (separate from the P9-2/P9-3 accumulator) ───────
+ * Drives the close/cancel/error cases. Each start runs ONE roundtrip; the mode controls how
+ * the client tears down (exercising the server's close/err lifetime paths):
+ *   mode 0 (full)          — read the whole small response, then FIN (normal short-lived conn).
+ *   mode 1 (partial+RST)   — after `abort_after` received bytes, tcp_abort → RST (server tcp_err;
+ *                            reset-mid-send when the server still has a large body queued).
+ *   mode 2 (partial+FIN)   — after `abort_after` bytes, tcp_close → FIN (close-with-outstanding).
+ * Returns 0 on the connect being issued, -1 on failure. Per-roundtrip state resets each start;
+ * the completed-roundtrip counter accumulates (reset with kl_lwr_lc_reset_counter). */
+int    kl_lwr_lc_start(const uint8_t ip4[4], uint16_t port, const void *req, size_t req_len,
+                       int mode, size_t abort_after);
+int    kl_lwr_lc_done(void);          /* this roundtrip resolved (200 seen or torn down) */
+int    kl_lwr_lc_saw_200(void);       /* the response status line contained "200" */
+int    kl_lwr_lc_completed(void);     /* running count of resolved roundtrips */
+size_t kl_lwr_lc_recv(void);          /* bytes received this roundtrip */
+void   kl_lwr_lc_reset_counter(void); /* zero the completed-roundtrip counter */
 
 /* ── drain ─────────────────────────────────────────────────────────────────── */
 
