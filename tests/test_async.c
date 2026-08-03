@@ -46,6 +46,15 @@ static void test_watcher_cb(KlSocketHandle fd, KlEventMask ready, void *user_dat
     ctx->got_mask = ready;
 }
 
+/* Pump the event loop until *flag reaches `want` (or attempts run out). Uses
+ * kl_event_ctx_run — the portable tick (wait + dispatch watchers) that works on
+ * BOTH the readiness and completion event models, so these watcher/async tests are
+ * backend-agnostic instead of hard-coding a readiness kl_event_wait loop. */
+static void pump_until(KlEventCtx *ev, const int *flag, int want) {
+    for (int a = 0; a < 20 && *flag < want; a++)
+        kl_event_ctx_run(ev, 16, 50);
+}
+
 /* ── Async callback context ───────────────────────────────────────── */
 
 typedef struct {
@@ -95,11 +104,7 @@ UTEST(async, watcher_add_fires_on_read) {
     /* Write to fds[1] → fds[0] becomes readable */
     (void)kl_test_sockwrite(fds[1], "x", 1);
 
-    KlEvent events[8];
-    int n = kl_event_wait(&s.ev.loop, events, 8, 100);
-    ASSERT_TRUE(n > 0);
-    for (int di = 0; di < n; di++)
-        kl_event_dispatch(&s.ev, &events[di]);
+    pump_until(&s.ev, &ctx.called, 1);
 
     ASSERT_EQ(ctx.called, 1);
     ASSERT_EQ(ctx.got_fd, fds[0]);
@@ -127,11 +132,7 @@ UTEST(async, watcher_mod_changes_interest) {
     /* Mod to WRITE interest — socket should be writable immediately */
     ASSERT_EQ(kl_watcher_mod(&s.ev, fds[0], KL_EVENT_WRITE), 0);
 
-    KlEvent events[8];
-    int n = kl_event_wait(&s.ev.loop, events, 8, 100);
-    ASSERT_TRUE(n > 0);
-    for (int di = 0; di < n; di++)
-        kl_event_dispatch(&s.ev, &events[di]);
+    pump_until(&s.ev, &ctx.called, 1);
 
     ASSERT_EQ(ctx.called, 1);
     ASSERT_EQ(ctx.got_fd, fds[0]);
@@ -162,10 +163,7 @@ UTEST(async, watcher_del_stops_events) {
     /* Write to fds[1] — should NOT fire callback */
     (void)kl_test_sockwrite(fds[1], "x", 1);
 
-    KlEvent events[8];
-    int n = kl_event_wait(&s.ev.loop, events, 8, 50);
-    for (int di = 0; di < n; di++)
-        kl_event_dispatch(&s.ev, &events[di]);
+    kl_event_ctx_run(&s.ev, 8, 50);   /* one tick; the deleted watcher must not fire */
 
     ASSERT_EQ(ctx.called, 0);
 
@@ -199,13 +197,10 @@ UTEST(async, watcher_multiple_fds) {
     (void)kl_test_sockwrite(fds2[1], "b", 1);
     (void)kl_test_sockwrite(fds3[1], "c", 1);
 
-    /* May need multiple waits on level-triggered backends */
-    KlEvent events[16];
-    for (int attempt = 0; attempt < 3; attempt++) {
-        int n = kl_event_wait(&s.ev.loop, events, 16, 100);
-        for (int di = 0; di < n; di++)
-        kl_event_dispatch(&s.ev, &events[di]);
-    }
+    /* Pump until each fd's watcher fires (portable across both event models). */
+    pump_until(&s.ev, &ctx1.called, 1);
+    pump_until(&s.ev, &ctx2.called, 1);
+    pump_until(&s.ev, &ctx3.called, 1);
 
     ASSERT_TRUE(ctx1.called >= 1);
     ASSERT_TRUE(ctx2.called >= 1);
@@ -251,8 +246,10 @@ UTEST(async, suspend_sets_state) {
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+    }
 
     int fds[2];
     ASSERT_EQ(kl_test_socketpair(fds), 0);
@@ -301,8 +298,10 @@ UTEST(async, complete_calls_on_resume) {
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+    }
 
     int fds[2];
     ASSERT_EQ(kl_test_socketpair(fds), 0);
@@ -356,8 +355,10 @@ UTEST(async, deadline_fires_on_timeout) {
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+    }
 
     int fds[2];
     ASSERT_EQ(kl_test_socketpair(fds), 0);
@@ -416,8 +417,10 @@ UTEST(async, cancel_on_server_free) {
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+    }
 
     int fds[2];
     ASSERT_EQ(kl_test_socketpair(fds), 0);
@@ -467,8 +470,10 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+    }
 
     int fds[2];
     ASSERT_EQ(kl_test_socketpair(fds), 0);
@@ -545,8 +550,10 @@ UTEST(async, watcher_completes_suspended_conn) {
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+    }
 
     /* Create a connection with socketpair */
     int conn_fds[2];
@@ -595,12 +602,8 @@ UTEST(async, watcher_completes_suspended_conn) {
     /* Write to the pipe — signals completion */
     (void)kl_test_sockwrite(pipe_fds[1], "done", 4);
 
-    /* Run event loop — watcher should fire, completing the async op */
-    KlEvent events[16];
-    int n = kl_event_wait(&s.ev.loop, events, 16, 100);
-    ASSERT_TRUE(n > 0);
-    for (int di = 0; di < n; di++)
-        kl_event_dispatch(&s.ev, &events[di]);
+    /* Run the loop until the watcher fires + completes the async op (portable). */
+    pump_until(&s.ev, &actx.resume_called, 1);
 
     /* Verify the async op completed */
     ASSERT_EQ(actx.resume_called, 1);
@@ -776,8 +779,10 @@ static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
     KlServer s; init_test_server(&s);                                          \
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);                  \
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);             \
-    for (int i = 0; i < 4; i++)                                                \
+    for (int i = 0; i < 4; i++) {                                              \
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);          \
+        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 */               \
+    }                                                                          \
     int fds[2]; ASSERT_EQ(kl_test_socketpair(fds), 0);                         \
     set_nonblocking(fds[0]); set_nonblocking(fds[1]);                          \
     KlConn *c = kl_conn_acquire(&s.pool, fds[1]);                              \

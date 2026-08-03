@@ -267,10 +267,27 @@ int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     KlIouState *st = loop->_backend;
     for (KlIouWatch *w = st->watches; w; w = w->next)
         if (w->fd == fd && !w->removed) {
+            KlEventMask old = w->mask;
             w->mask = mask; w->udata = udata;
-            /* The in-flight poll is single-shot with the old mask; re-arm with the new
-             * one. The old poll's CQE (if it fires) just re-arms again — harmless. */
-            return iou_arm_watch(st, w);
+            if (!w->armed)                       /* no poll in flight — just arm the new mask */
+                return iou_arm_watch(st, w);
+            if (old == mask)                     /* mask unchanged — nothing to re-arm */
+                return 0;
+            /* An in-flight single-shot poll carries the OLD mask; iou_arm_watch() would
+             * no-op (its `if (w->armed) return 0`), leaving the new interest inert until
+             * the old condition happens to fire — which for e.g. READ→WRITE on a
+             * not-readable-but-writable fd is never. Atomically retarget the poll's event
+             * mask (IORING_POLL_UPDATE_EVENTS, kernel ≥5.13): the poll keeps user_data = w
+             * and will fire with the NEW mask. The update op's own CQE is tagged NULL so the
+             * drain skips it (ud == 0). On an older kernel the update SQE is rejected with a
+             * NULL-data (ignored) CQE and the poll keeps its old mask — the prior behaviour,
+             * no regression. */
+            struct io_uring_sqe *sqe = iou_sqe(st);
+            if (!sqe) return -1;
+            io_uring_prep_poll_update(sqe, (__u64)(uintptr_t)w, 0,
+                                      iou_poll_mask(mask), IORING_POLL_UPDATE_EVENTS);
+            io_uring_sqe_set_data(sqe, NULL);    /* sentinel — ignore the update's completion */
+            return 0;
         }
     return kl_event_add_builtin(loop, fd, mask, udata);   /* not yet watched — add it */
 }
