@@ -504,7 +504,7 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # backend-neutral kl_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
-# 55 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
+# 56 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
 # client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
 # server/client now auto-adopts the completion loop's overlapped provider instead of being
 # rejected at kl_server_init) → +2 (integration, server_integration) once the completion
@@ -532,11 +532,11 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # mock's mock_tls_peer_cert_fn hook). See docs/keel_axis_audit.md third pass.
 #
 # Still excluded, NOT blocked by backend bugs (see docs/phase8f5 §3 + the axis-audit third pass):
-# raw kl_event_wait drivers (event, event_ctx, async — a completion loop has no readiness
-# kl_event_wait, only kl_comp_run; async also builds a conn with no ctx) and readiness-cap /
-# provider-negotiation assertions (event_caps, socket_provider) are inherently readiness-axis.
-# udp_multicast: broadcast_flag_gates_send asserts a *synchronous* EACCES that only holds for
-# readiness (completion sends are queued async). Backend-specific: iocp_engine.
+# raw kl_event_wait drivers (event, event_ctx — a completion loop has no readiness kl_event_wait,
+# only kl_comp_run) and readiness-cap / provider-negotiation assertions (event_caps,
+# socket_provider) are inherently readiness-axis. udp_multicast: broadcast_flag_gates_send asserts
+# a *synchronous* EACCES that only holds for readiness (completion sends are queued async).
+# Backend-specific: iocp_engine.
 # → +1 (peer_addr) once the completion driver grew a PROXY-header phase (comp_drive_proxy +
 # kl_conn_ingest_proxy): a trusted-source PROXY header is now parsed over the completion loop (the
 # recv is plaintext during KL_CONN_PROXY_HEADER even for a TLS conn), so its proxy_v1/v2_trusted
@@ -548,13 +548,17 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # event_ctx below). Verified passing under `make BACKEND=iouring test-iouring` in the Apple
 # container (kernel 6.18) on an ext4 checkout. See docs/phase8f5_iouring_default_migration_design.md §3.
 #
-# Enrollment triage note (2026-08-03): async STAYS excluded — over io_uring its synthetic conn
-# (built with no ctx) segfaults in kl_comp_post_send when the resume path posts a send on a conn
-# the completion backend never fully wired. That is an async-over-completion test-harness gap (the
-# suspend/resume suite needs a completion-capable conn fixture), tracked separately from this
-# coverage work; it is NOT a product regression on the real server path (the smokes + integration
-# suites exercise async-over-completion end to end).
-IOURING_TEST_SUITES = allocator alpn body_reader chunked client client_happy_eyeballs client_pool \
+# → +1 (async) once two fixes landed (2026-08-03): (a) a TEST-FIXTURE gap — the suspend/resume
+# tests acquired a bare conn and left conn->ctx NULL, so the completion resume path NULL-derefed in
+# kl_comp_post_send (iou_state = c->ctx->loop._backend); now the fixtures set conn->ctx = &s.ev
+# mirroring server.c:419, and the watcher/loop tests drive kl_event_ctx_run (the portable wait+
+# dispatch tick) instead of a raw readiness kl_event_wait; and (b) a real io_uring BACKEND bug —
+# kl_event_mod re-arming an already-armed watch to a new mask no-op'd (iou_arm_watch's
+# `if (w->armed) return 0`), so READ→WRITE interest never fired when the old condition couldn't
+# occur; kl_event_mod_builtin now retargets the in-flight poll atomically via
+# io_uring_prep_poll_update (IORING_POLL_UPDATE_EVENTS). test_async is 19/19 over io_uring (verified
+# under ASan+UBSan in the Apple container).
+IOURING_TEST_SUITES = allocator alpn async body_reader chunked client client_happy_eyeballs client_pool \
                           client_stream compress connection cors cross_module decompress \
                           dns_resolver drain error event_provider file_io h2 h2_client integration \
                           multipart_stream overflow parser peer_addr peer_cert proxy \
