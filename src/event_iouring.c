@@ -431,7 +431,7 @@ static void iou_op_unlink(KlIouState *st, KlIouOp *op) {
 
 static KlIouState *iou_state(KlConn *c) { return c->ctx->loop._backend; }
 
-int kl_comp_post_recv(KlConn *c) {
+static int iou_comp_post_recv(KlConn *c) {
     KlIouState *st = iou_state(c);
     KlIouOp *op = iou_op_alloc(c->alloc);
     if (!op) return -1;
@@ -511,7 +511,7 @@ static void iou_prep_splice_out(KlIouState *st, KlIouOp *op) {
     op->sf_stage = 2;
 }
 
-int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
+static int iou_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     KlIouState *st = iou_state(c);
     KlIouOp *op = iou_op_alloc(c->alloc);
     if (!op) return -1;
@@ -577,7 +577,7 @@ static int iou_post_sendfile_copy(KlConn *c, KlIouState *st, const KlIoVec *head
 /* Post a response-head + file-body send. 8f-2: zero-copy via splice — send the head, then
  * loop file → pipe → socket (no userspace copy of the file bytes). Falls back to
  * iou_post_sendfile_copy when the kernel lacks IORING_OP_SPLICE. */
-int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int iou_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     KlIouState *st = iou_state(c);
     if (count > (uint64_t)(SIZE_MAX / 2) || head_total > SIZE_MAX / 2)
@@ -613,7 +613,7 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
     return 0;
 }
 
-int kl_comp_post_accept(struct KlServer *s) {
+static int iou_comp_post_accept(struct KlServer *s) {
     KlIouState *st = s->ev.loop._backend;
     if (st->accept_pending) return 0;                /* one accept outstanding is enough */
     KlIouOp *op = iou_op_alloc(st->alloc);
@@ -630,7 +630,7 @@ int kl_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-int kl_comp_post_udp_recv(struct KlUdp *udp) {
+static int iou_comp_post_udp_recv(struct KlUdp *udp) {
     KlIouState *st = udp->ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
@@ -654,7 +654,7 @@ int kl_comp_post_udp_recv(struct KlUdp *udp) {
     return 0;
 }
 
-int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+static int iou_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
                           const KlSockAddr *dest) {
     KlIouState *st = udp->ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
@@ -687,12 +687,12 @@ int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
     return 0;
 }
 
-int kl_comp_prime_accepts(struct KlServer *s) {
+static int iou_comp_prime_accepts(struct KlServer *s) {
     KlIouState *st = s->ev.loop._backend;
     if (st->primed) return 0;
     st->listen_fd = s->listen_fd;
     st->primed = 1;
-    return kl_comp_post_accept(s);
+    return iou_comp_post_accept(s);
 }
 
 /* Cancel pending ops on `fd` (idle-timeout sweep): mark aborted + prep_cancel so the
@@ -700,7 +700,7 @@ int kl_comp_prime_accepts(struct KlServer *s) {
  * through its normal completion path. Marking (not freeing) preserves the invariant that
  * a conn is released only from a completion — the op the driver waits on still completes,
  * and the kernel is done with its buffer before we free it. */
-void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
+static void iou_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     KlIouState *st = ctx->loop._backend;
     for (KlIouOp *o = st->ops; o; o = o->next)
         if (o->fd == fd && !o->aborted) {
@@ -838,7 +838,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
     return 0;
 }
 
-int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
+static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlIouState *st = ctx->loop._backend;
 
     struct __kernel_timespec ts, *tsp = NULL;
@@ -903,3 +903,15 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
     io_uring_cq_advance(&st->ring, seen);
     return count;
 }
+
+/* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
+ * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
+ * reaches them on the compiled-in path (kl_comp_ops_builtin) or through a runtime
+ * provider (loop->ops->completion). No behavior change — same funcs, one hop away. */
+static const KlCompletionOps iou_completion_ops = {
+    iou_comp_drain, iou_comp_prime_accepts, iou_comp_post_recv, iou_comp_post_send,
+    iou_comp_post_accept, iou_comp_post_sendfile, iou_comp_cancel,
+    iou_comp_post_udp_recv, iou_comp_post_udp_send,
+};
+
+const KlCompletionOps *kl_comp_ops_builtin(void) { return &iou_completion_ops; }

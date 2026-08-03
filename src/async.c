@@ -71,7 +71,11 @@ void kl_event_ctx_free(KlEventCtx *ctx) {
 int kl_caps_compatible(unsigned ev_caps, const struct KlSocketProvider *sockets) {
     if (ev_caps & KL_EVENT_CAP_COMPLETION) {
         /* Completion model (Phase 8, IOCP): the provider must route I/O through the
-         * loop's overlapped submit path rather than synchronous send/recv. */
+         * loop's overlapped submit path rather than synchronous send/recv. Also reject it
+         * fail-loud when the completion axis was compiled out (KEEL_NO_COMPLETION): the
+         * driver/dispatch are absent, so a completion loop cannot be driven. Keeps that
+         * build knob out of the shared negotiation — the axis TU reports its presence. */
+        if (!kl_completion_axis_available()) return 0;
         return kl_socket_provider_has_cap(sockets, KL_SOCK_CAP_OVERLAPPED);
     }
     /* Readiness model (shipped): provider exposes native fds AND the loop is a

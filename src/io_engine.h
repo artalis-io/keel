@@ -26,6 +26,14 @@ struct KlEventCtx;
 struct KlUdp;
 struct sockaddr;
 
+/* Is the completion axis compiled into this build? 1 when the driver + dispatch are
+ * linked (any completion or readiness build), 0 under KEEL_NO_COMPLETION (the axis is
+ * stubbed out). Defined by the axis TU selected by the Makefile: completion_dispatch.c
+ * (present) → 1; completion_absent.c → 0. The capability negotiation (async.c) consults
+ * it to reject a KL_EVENT_CAP_COMPLETION provider fail-loud when the axis is absent,
+ * keeping that #ifdef out of the shared negotiation code (F3 / no-#ifdef-in-shared). */
+int kl_completion_axis_available(void);
+
 /* Run one completion-loop tick for the server: prime accepts, then drive one
  * generic tick over its event ctx. Returns 0 to continue the run loop, <0 to stop. */
 int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms);

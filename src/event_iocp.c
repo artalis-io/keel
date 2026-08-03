@@ -248,7 +248,7 @@ static KlIocpState *state_of(KlConn *c) {
     return c->ctx->loop._backend;   /* c->ctx == &server->ev */
 }
 
-int kl_comp_post_recv(KlConn *c) {
+static int iocp_comp_post_recv(KlConn *c) {
     (void)state_of(c);   /* the socket is already associated with the port */
 
     KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
@@ -287,7 +287,7 @@ int kl_comp_post_recv(KlConn *c) {
     return 0;
 }
 
-int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
+static int iocp_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
@@ -314,7 +314,7 @@ int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     return 0;
 }
 
-int kl_comp_post_accept(struct KlServer *s) {
+static int iocp_comp_post_accept(struct KlServer *s) {
     KlIocpState *st = s->ev.loop._backend;
     SOCKET a = WSASocketW(st->accept_family, SOCK_STREAM, IPPROTO_TCP,
                           NULL, 0, WSA_FLAG_OVERLAPPED);
@@ -381,7 +381,7 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
     return 0;
 }
 
-int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     HANDLE hfile = (HANDLE)_get_osfhandle(file_fd);
     if (hfile == INVALID_HANDLE_VALUE) return -1;
@@ -420,7 +420,7 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
  * the readiness Windows recv (udp_cmsg_win.h). Falls back to WSARecvFrom (source address
  * only, local left 0) if the extension is unavailable. Either way the completion surfaces a
  * KL_COMP_UDP_RECV event. */
-int kl_comp_post_udp_recv(KlUdp *udp) {
+static int iocp_comp_post_udp_recv(KlUdp *udp) {
     KlIocpState *st = udp->ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
     if (!op) return -1;
@@ -465,7 +465,7 @@ int kl_comp_post_udp_recv(KlUdp *udp) {
 
 /* Post one overlapped WSASendTo for a UDP socket (8b-4d). Copies the datagram + its
  * destination into the op (owned until completion); surfaces KL_COMP_UDP_SEND. */
-int kl_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
+static int iocp_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
                           const KlSockAddr *dest) {
     KlIocpState *st = udp->ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
@@ -498,7 +498,7 @@ int kl_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
  * its address family, store it, and prime the accept backlog. Idempotent — latches
  * on st->started so the server may call it every tick. Server-scoped (needs the
  * listen socket); keeps kl_comp_drain ctx-scoped/server-agnostic. */
-int kl_comp_prime_accepts(struct KlServer *s) {
+static int iocp_comp_prime_accepts(struct KlServer *s) {
     KlIocpState *st = s->ev.loop._backend;
     if (st->started)
         return 0;
@@ -523,7 +523,7 @@ int kl_comp_prime_accepts(struct KlServer *s) {
 
     st->started = 1;
     for (int i = 0; i < KL_IOCP_ACCEPT_BACKLOG; i++) {
-        if (kl_comp_post_accept(s) < 0)
+        if (iocp_comp_post_accept(s) < 0)
             return (i == 0) ? -1 : 0;
     }
     return 0;
@@ -539,12 +539,12 @@ int kl_comp_prime_accepts(struct KlServer *s) {
  * Each cancelled op posts its own completion, and the driver releases the conn from the last
  * one; the ≤N-completions-then-release accounting lives in the driver, so cancelling all of a
  * dying fd's ops here is safe. Single-loop-thread, so no cross-thread cancel race. */
-void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
+static void iocp_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     (void)ctx;
     CancelIoEx((HANDLE)(uintptr_t)fd, NULL);
 }
 
-int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
+static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlIocpState *st = ctx->loop._backend;
 
     OVERLAPPED_ENTRY entries[64];
@@ -712,3 +712,15 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
     }
     return count;
 }
+
+/* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
+ * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
+ * reaches them on the compiled-in path (kl_comp_ops_builtin) or through a runtime
+ * provider (loop->ops->completion). No behavior change — same funcs, one hop away. */
+static const KlCompletionOps iocp_completion_ops = {
+    iocp_comp_drain, iocp_comp_prime_accepts, iocp_comp_post_recv, iocp_comp_post_send,
+    iocp_comp_post_accept, iocp_comp_post_sendfile, iocp_comp_cancel,
+    iocp_comp_post_udp_recv, iocp_comp_post_udp_send,
+};
+
+const KlCompletionOps *kl_comp_ops_builtin(void) { return &iocp_completion_ops; }

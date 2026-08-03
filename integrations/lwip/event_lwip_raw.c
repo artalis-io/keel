@@ -190,10 +190,15 @@ const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoo
 }
 
 /* ── Runtime KlEventProvider packaging (parallel to event_lwip.c) ────────────── */
+/* The completion sub-vtable is defined below (after the completion primitives) — forward-
+ * declare it so the KlEventOps literal can carry it (RC-1): a runtime-injected lwip-raw
+ * provider then advertises the completion axis too, which RC-2 exercises. */
+static const KlCompletionOps lwip_raw_completion_ops;
 static const KlEventOps lwip_raw_event_ops = {
-    kl_event_init_builtin, kl_event_add_builtin, kl_event_mod_builtin,
-    kl_event_del_builtin, kl_event_wait_builtin, kl_event_close_builtin,
-    kl_event_caps_builtin, kl_event_native_provider_builtin,
+    .init = kl_event_init_builtin, .add = kl_event_add_builtin, .mod = kl_event_mod_builtin,
+    .del = kl_event_del_builtin, .wait = kl_event_wait_builtin, .close = kl_event_close_builtin,
+    .caps = kl_event_caps_builtin, .native_provider = kl_event_native_provider_builtin,
+    .completion = &lwip_raw_completion_ops,
 };
 static const KlEventProvider lwip_raw_event_provider = { &lwip_raw_event_ops, "lwip-raw" };
 
@@ -292,7 +297,7 @@ const KlSocketProvider *kl_socket_provider_lwip_raw(void) { return &lwip_raw_pro
 
 static KlLwrState *lwr_state(KlConn *c) { return c->ctx->loop._backend; }
 
-int kl_comp_prime_accepts(struct KlServer *s) {
+static int lwr_comp_prime_accepts(struct KlServer *s) {
     KlLwrState *st = s->ev.loop._backend;
     if (st->primed) return 0;
     st->server = s;
@@ -306,7 +311,7 @@ int kl_comp_prime_accepts(struct KlServer *s) {
     return 0;
 }
 
-int kl_comp_post_accept(struct KlServer *s) {
+static int lwr_comp_post_accept(struct KlServer *s) {
     /* Passive raw accept: the tcp_accept callback keeps the backlog filled on its own —
      * no per-accept op to re-post (unlike pollcomp's one accept op). Idempotent no-op. */
     (void)s;
@@ -316,7 +321,7 @@ int kl_comp_post_accept(struct KlServer *s) {
 /* Post one async receive: raw recv is passive (the tcp_recv callback stages bytes + enqueues
  * a READ record), so "posting" just associates the owning conn with its pcb (first call) and
  * arms it — the READ surfaces via drain when data (or peer-close) arrives. */
-int kl_comp_post_recv(KlConn *c) {
+static int lwr_comp_post_recv(KlConn *c) {
     KlLwrState *st = lwr_state(c);
     if (!kl_handle_valid(c->fd)) return -1;
     kl_lwr_set_owner((void *)c->fd, c);   /* recv/sent callbacks tag records with this conn */
@@ -335,7 +340,7 @@ int kl_comp_post_recv(KlConn *c) {
  * limit. A 64 KB response now spans many segments + hits sndbuf-full (ERR_MEM) backpressure,
  * resumed on tcp_sent — and still completes as one WRITE. */
 #define KL_LWR_POST_SEND_MAX (16u * 1024u * 1024u)   /* 16 MiB response sanity cap */
-int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
+static int lwr_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     if (!kl_handle_valid(c->fd)) return -1;
     if (total > KL_LWR_POST_SEND_MAX) return -1;
     /* Concatenate the iovec into one contiguous staging buffer; the glue copies it into its
@@ -358,7 +363,7 @@ int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
  * the head and reuses the send-pump (approach (a) — see lwip_raw_glue.h). One KL_COMP_WRITE
  * follows when the whole head+file is acked. fd OWNERSHIP: the glue only READS file_fd; the
  * response layer closes res->file_fd (kl_response_reset/free) — we do NOT close it here. */
-int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int lwr_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     if (!kl_handle_valid(c->fd)) return -1;
     if (count > KL_LWR_POST_SEND_MAX || head_total > KL_LWR_POST_SEND_MAX) return -1;
@@ -387,19 +392,19 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
  * terminal zero-length READ for this (armed) conn → the driver runs comp_close exactly once,
  * releasing the KlConn through its normal completion path. Idempotent + safe if the conn
  * already closed (kl_lwr_tcp_abort is a no-op on a dead/free slot). */
-void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
+static void lwr_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     (void)ctx;
     if (kl_handle_valid(fd)) kl_lwr_tcp_abort((void *)fd);
 }
 
-int kl_comp_post_udp_recv(struct KlUdp *udp) { (void)udp; return -1; }   /* raw UDP: future */
-int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+static int lwr_comp_post_udp_recv(struct KlUdp *udp) { (void)udp; return -1; }   /* raw UDP: future */
+static int lwr_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
                           const KlSockAddr *dest) {
     (void)udp; (void)data; (void)len; (void)dest; return -1;
 }
 
 /* ── drain: one lwIP tick, then translate glue records into completion events ── */
-int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
+static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlLwrState *st = ctx->loop._backend;
 
     /* One lwIP mainloop tick (docs §P9-1): sys_check_timeouts() (retransmit, TCP fast/slow,
@@ -501,3 +506,17 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
 
     return count;
 }
+
+/* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
+ * This backend's completion primitives, grouped so the dispatch (completion_dispatch.c)
+ * reaches them on the compiled-in path (kl_comp_ops_builtin) or through the runtime
+ * lwip-raw provider (loop->ops->completion — the way BACKEND=lwipraw actually runs, as an
+ * injected provider). Forward-declared above so the KlEventOps literal carries it; no
+ * behavior change — the same funcs, one hop away. */
+static const KlCompletionOps lwip_raw_completion_ops = {
+    lwr_comp_drain, lwr_comp_prime_accepts, lwr_comp_post_recv, lwr_comp_post_send,
+    lwr_comp_post_accept, lwr_comp_post_sendfile, lwr_comp_cancel,
+    lwr_comp_post_udp_recv, lwr_comp_post_udp_send,
+};
+
+const KlCompletionOps *kl_comp_ops_builtin(void) { return &lwip_raw_completion_ops; }

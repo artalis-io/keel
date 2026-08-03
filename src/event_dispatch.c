@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include "event_caps.h"
 #include "event_builtin.h"
+#include "io_engine.h"   /* kl_completion_axis_available (KEEL_NO_COMPLETION guard) */
 
 int kl_event_init(KlEventLoop *loop) {
     /* Default entry: the compiled-in backend. Zero ops first so a stack-allocated
@@ -26,7 +27,19 @@ int kl_event_init(KlEventLoop *loop) {
 int kl_event_init_provider(KlEventLoop *loop, const KlEventProvider *provider) {
     if (!provider || !provider->ops) return kl_event_init(loop);
     loop->ops = provider->ops;
-    return loop->ops->init(loop);
+    int r = loop->ops->init(loop);
+    if (r < 0) return r;
+    /* Reject a completion provider fail-loud when the completion axis was compiled out
+     * (KEEL_NO_COMPLETION): the driver/dispatch that would drive it are absent, so an
+     * installed completion loop could only abort() later. Fail at install instead. The
+     * axis TU reports its presence, keeping this build knob out of the shared code. */
+    if ((loop->ops->caps(loop) & KL_EVENT_CAP_COMPLETION) &&
+        !kl_completion_axis_available()) {
+        loop->ops->close(loop);
+        loop->ops = NULL;
+        return -1;
+    }
+    return r;
 }
 
 int kl_event_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {

@@ -79,7 +79,9 @@ static unsigned ep_caps(const KlEventLoop *l) { (void)l; return KL_EVENT_CAP_REA
 static const struct KlSocketProvider *ep_native(const KlEventLoop *l) { (void)l; return NULL; }
 
 static const KlEventOps EP_OPS = {
-    ep_init, ep_add, ep_mod, ep_del, ep_wait, ep_close, ep_caps, ep_native,
+    .init = ep_init, .add = ep_add, .mod = ep_mod, .del = ep_del, .wait = ep_wait,
+    .close = ep_close, .caps = ep_caps, .native_provider = ep_native,
+    .completion = NULL,   /* readiness test backend — no completion axis (RC-1) */
 };
 static const KlEventProvider EP_PROVIDER = { &EP_OPS, "test-poll" };
 
