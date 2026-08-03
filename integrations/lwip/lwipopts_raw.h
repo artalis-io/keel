@@ -47,7 +47,8 @@
 #define LWIP_NETIF_LOOPBACK               1
 #define LWIP_HAVE_LOOPIF                  1
 #define LWIP_NETIF_LOOPBACK_MULTITHREADING 0
-#define LWIP_LOOPBACK_MAX_PBUFS          16
+#define LWIP_LOOPBACK_MAX_PBUFS          64   /* a full send window of segments may queue on
+                                              * loopback TX before netif_poll drains it (P9-3) */
 
 /* Loopback netif does not need link-layer callbacks / status callbacks. */
 #define LWIP_NETIF_STATUS_CALLBACK  0
@@ -63,22 +64,33 @@
 #define LWIP_STATS                  0
 #define LWIP_STATS_DISPLAY          0
 
-/* ── Memory / pools: small — this is loopback echo, a handful of PCBs ─────────*/
+/* ── Memory / pools ──────────────────────────────────────────────────────────
+ * P9-3 pushes a 64 KB response over loopback to force many tcp_sent rounds + hit
+ * tcp_sndbuf-full (ERR_MEM) backpressure. The send WINDOW (TCP_SND_BUF = 8*TCP_MSS
+ * ≈ 11-12 KB) is deliberately far smaller than the 64 KB body so the send-pump
+ * stalls and resumes repeatedly — pbuf/segment demand is bounded by the window, not
+ * the whole body. The pools + MEM_SIZE below comfortably cover one window's worth of
+ * in-flight segments plus the loopback TX queue. */
 #define MEM_LIBC_MALLOC             0
 #define MEMP_MEM_MALLOC             0
-#define MEM_ALIGNMENT               4
-#define MEM_SIZE                    (64 * 1024)
+/* 8-byte alignment: on a 64-bit host lwIP's struct pbuf / struct memp want 8-byte
+ * alignment (pointer members). MEM_ALIGNMENT=8 makes lwIP align its pool allocations
+ * accordingly — matching the host ABI and keeping the raw backend clean under UBSan's
+ * alignment checker (a MEM_ALIGNMENT=4 build trips -fsanitize=alignment on aarch64). */
+#define MEM_ALIGNMENT               8
+#define MEM_SIZE                    (128 * 1024)
 
 #define MEMP_NUM_TCP_PCB            8
 #define MEMP_NUM_TCP_PCB_LISTEN     4
 #define MEMP_NUM_UDP_PCB            4
 #define MEMP_NUM_RAW_PCB            4
-#define MEMP_NUM_TCP_SEG            32
+#define MEMP_NUM_TCP_SEG            64
 
 #define TCP_MSS                     1460
-#define TCP_SND_BUF                 (4 * TCP_MSS)
-#define TCP_WND                     (4 * TCP_MSS)
-#define PBUF_POOL_SIZE              32
+#define TCP_SND_BUF                 (8 * TCP_MSS)
+#define TCP_SND_QUEUELEN            (4 * TCP_SND_BUF / TCP_MSS)   /* enough segs for the window */
+#define TCP_WND                     (8 * TCP_MSS)
+#define PBUF_POOL_SIZE              64
 
 /* Checksums: loopback bypasses the wire, but keep them on to exercise the real
  * TCP path (cheap at this scale). */

@@ -6,11 +6,21 @@
  * drives it ~20 times via kl_event_ctx_run (each run = one lwIP mainloop tick), and frees
  * cleanly. Prints "P9-1 PASS".
  *
- * P9-2 (this stage): a RAW-BACKED KlServer answers GET / over loopback. A real KlServer is
+ * P9-2 (retained): a RAW-BACKED KlServer answers GET / over loopback. A real KlServer is
  * pinned to the lwIP-raw completion backend + its overlapped socket provider; the connection
  * state machine runs over the tcp_accept/tcp_recv/tcp_sent callbacks surfaced as
  * KL_COMP_ACCEPT/READ/WRITE. A raw-API test client (in the glue, like raw_loopback_spike.c)
  * connects to 127.0.0.1:PORT, writes "GET / HTTP/1.1...", and captures the response.
+ *
+ * P9-3 (this stage): full-payload send + backpressure + file send. Two cases FORCE multi-
+ * round send (a response WELL larger than tcp_sndbuf ≈ 8*TCP_MSS ≈ 11-12 KB):
+ *   (buffered) GET /big → a 64 KB body built with a known byte pattern. The client reads
+ *              until it has the full Content-Length, then asserts body length + an additive
+ *              checksum + first/last byte match. This spans many tcp_sent rounds and hits
+ *              tcp_sndbuf-full (ERR_MEM) backpressure, resumed on tcp_sent. → "P9-3 PASS (buffered)"
+ *   (file)     GET /file → a temp file (64 KB, same pattern) served via kl_response_file
+ *              (FILE mode → kl_comp_post_sendfile → the glue preads it into the send buffer +
+ *              reuses the send-pump). Client verifies the whole file body. → "P9-3 PASS (file)"
  *
  * SINGLE-THREADED lwIP discipline: NO_SYS=1 raw lwIP is not thread-safe and must run on ONE
  * thread. kl_server_run() blocks, so the server runs on a pthread that owns the lwIP tick —
@@ -33,9 +43,13 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 /* ── P9-1 ─────────────────────────────────────────────────────────────────── */
 #define TICK_ITERATIONS  20
@@ -67,6 +81,20 @@ static int run_p9_1(void) {
     kl_event_ctx_free(&ctx);
     printf("P9-1 PASS\n");
     return 0;
+}
+
+/* ── shared large-body pattern (P9-3) ────────────────────────────────────────
+ * A deterministic, non-trivial byte pattern so a checksum + first/last byte proves the
+ * bytes arrived intact and in order (not just the right count). */
+#define P9_3_BODY_LEN  (64u * 1024u)   /* WELL larger than tcp_sndbuf (~11-12 KB) */
+static unsigned char pattern_byte(size_t i) { return (unsigned char)(i * 31u + 7u); }
+static void fill_pattern(unsigned char *buf, size_t len) {
+    for (size_t i = 0; i < len; i++) buf[i] = pattern_byte(i);
+}
+static size_t pattern_checksum(size_t len) {
+    size_t sum = 0;
+    for (size_t i = 0; i < len; i++) sum += pattern_byte(i);
+    return sum;
 }
 
 /* ── P9-2 ─────────────────────────────────────────────────────────────────── */
@@ -150,12 +178,211 @@ static int run_p9_2(void) {
                " (client got %zu bytes: \"%s\")\n", n, buf);
         return 1;
     }
+    kl_lwr_client_release();
     printf("P9-2 PASS\n");
     return 0;
+}
+
+/* ── P9-3 ─────────────────────────────────────────────────────────────────────
+ * One server, two routes (/big buffered, /file). Each case runs the same
+ * server-thread + marshalled-client machinery as P9-2, parameterised by request +
+ * verification. */
+#define P9_3_PORT           7781
+#define P9_3_REQ_BIG        "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+#define P9_3_REQ_FILE       "GET /file HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+#define P9_3_CLI_CAP        (P9_3_BODY_LEN + 4096u)   /* body + headers headroom */
+
+static KlServer g_srv3;
+/* Two cases run inside ONE kl_server_run (a single lwIP-raw loop can't be re-run cleanly,
+ * and the glue's listen pcb + test client are process singletons). A small state machine
+ * in the poll callback drives: buffered → file → done. */
+enum { P3_BUFFERED = 0, P3_FILE = 1, P3_DONE = 2 };
+static atomic_int g_p3_stage;   /* current case */
+static atomic_int g_p3_pass;    /* bitmask: bit0 buffered ok, bit1 file ok */
+static atomic_int g_p3_fail;    /* a case's body arrived but mismatched */
+static atomic_int g_p3_finished;/* both cases resolved (pass or fail) */
+
+static char g_file_path[256];   /* temp file path for the /file route (created in main) */
+
+static void handle_big(KlRequest *req, KlResponse *res, void *ud) {
+    (void)req; (void)ud;
+    /* Build the 64 KB body on the stack; kl_response_body_copy takes an owned copy. */
+    static unsigned char body[P9_3_BODY_LEN];   /* static: 64 KB is large for a stack frame */
+    fill_pattern(body, sizeof(body));
+    kl_response_status(res, 200);
+    kl_response_header(res, "Content-Type", "application/octet-stream");
+    kl_response_body_copy(res, (const char *)body, sizeof(body));
+}
+
+static void handle_file(KlRequest *req, KlResponse *res, void *ud) {
+    (void)req; (void)ud;
+    int fd = open(g_file_path, O_RDONLY);
+    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    off_t sz = (off_t)P9_3_BODY_LEN;
+    kl_response_status(res, 200);
+    kl_response_header(res, "Content-Type", "application/octet-stream");
+    /* FILE mode → the completion driver posts kl_comp_post_sendfile. The response layer
+     * OWNS closing fd (kl_response_reset/free) — we do NOT close it here. */
+    kl_response_file(res, fd, sz);
+}
+
+/* Verify the accumulated response body against the known pattern. Runs on the tick thread. */
+static int verify_body(void) {
+    size_t chk = 0; unsigned char first = 0, last = 0;
+    size_t body_len = kl_lwr_client_body(&chk, &first, &last);
+    if (body_len < P9_3_BODY_LEN) return 0;   /* not all here yet */
+    if (body_len == P9_3_BODY_LEN &&
+        chk == pattern_checksum(P9_3_BODY_LEN) &&
+        first == pattern_byte(0) &&
+        last == pattern_byte(P9_3_BODY_LEN - 1)) {
+        return 1;   /* verified */
+    }
+    return -1;      /* wrong length/content */
+}
+
+/* Start the client for the current stage's request/route (runs on the tick thread). */
+static void p3_start_stage(void) {
+    static const uint8_t lo[4] = { 127, 0, 0, 1 };
+    int stage = atomic_load(&g_p3_stage);
+    if (stage == P3_BUFFERED)
+        kl_lwr_client_start_cap(lo, P9_3_PORT, P9_3_REQ_BIG, sizeof(P9_3_REQ_BIG) - 1,
+                                P9_3_CLI_CAP);
+    else
+        kl_lwr_client_start_cap(lo, P9_3_PORT, P9_3_REQ_FILE, sizeof(P9_3_REQ_FILE) - 1,
+                                P9_3_CLI_CAP);
+}
+
+static void p3_poll_cb(void *ud) {
+    KlServer *s = ud;
+    int v = verify_body();
+    if (v == 1) {
+        int stage = atomic_load(&g_p3_stage);
+        atomic_fetch_or(&g_p3_pass, 1 << stage);
+        printf("P9-3 PASS (%s)\n", stage == P3_BUFFERED ? "buffered" : "file");
+        if (stage == P3_BUFFERED) {
+            atomic_store(&g_p3_stage, P3_FILE);
+            p3_start_stage();                 /* kick the next case's connection */
+        } else {
+            atomic_store(&g_p3_finished, 1);
+            kl_server_stop(s);
+            return;
+        }
+    } else if (v < 0) {
+        atomic_store(&g_p3_fail, 1);
+        atomic_store(&g_p3_finished, 1);
+        kl_server_stop(s);
+        return;
+    }
+    if (atomic_load(&g_p3_finished)) return;
+    kl_timer_add(&s->ev, 5, p3_poll_cb, s);
+}
+
+static void p3_start_cb(void *ud) {
+    (void)ud;
+    p3_start_stage();
+}
+
+static void *p3_server_thread(void *arg) {
+    (void)arg;
+    kl_timer_add(&g_srv3.ev, 20, p3_start_cb, NULL);
+    kl_timer_add(&g_srv3.ev, 40, p3_poll_cb, &g_srv3);
+    kl_server_run(&g_srv3);
+    return NULL;
+}
+
+static int write_temp_file(void) {
+    snprintf(g_file_path, sizeof(g_file_path), "/tmp/keel_p9_3_XXXXXX");
+    int fd = mkstemp(g_file_path);
+    if (fd < 0) return -1;
+    unsigned char *body = malloc(P9_3_BODY_LEN);
+    if (!body) { close(fd); return -1; }
+    fill_pattern(body, P9_3_BODY_LEN);
+    size_t off = 0;
+    while (off < P9_3_BODY_LEN) {
+        ssize_t w = write(fd, body + off, P9_3_BODY_LEN - off);
+        if (w <= 0) { free(body); close(fd); return -1; }
+        off += (size_t)w;
+    }
+    free(body);
+    close(fd);
+    return 0;
+}
+
+static int run_p9_3(void) {
+    if (write_temp_file() != 0) {
+        printf("P9-3 FAIL: could not create temp file\n");
+        return 1;
+    }
+
+    KlConfig cfg = { .port = P9_3_PORT, .bind_addr = "127.0.0.1",
+                     .sockets = kl_socket_provider_lwip_raw() };
+    if (kl_server_init(&g_srv3, &cfg) != 0) {
+        printf("P9-3 FAIL: kl_server_init (err=%d)\n", g_srv3.last_error);
+        unlink(g_file_path);
+        return 1;
+    }
+    kl_server_route(&g_srv3, "GET", "/big",  handle_big,  NULL, NULL);
+    kl_server_route(&g_srv3, "GET", "/file", handle_file, NULL, NULL);
+
+    atomic_store(&g_p3_stage, P3_BUFFERED);
+    atomic_store(&g_p3_pass, 0);
+    atomic_store(&g_p3_fail, 0);
+    atomic_store(&g_p3_finished, 0);
+
+    pthread_t th;
+    if (pthread_create(&th, NULL, p3_server_thread, NULL) != 0) {
+        printf("P9-3 FAIL: pthread_create\n");
+        kl_server_free(&g_srv3);
+        unlink(g_file_path);
+        return 1;
+    }
+    /* Watchdog: ~15s for both cases to complete over loopback. */
+    for (int i = 0; i < 1500 && !atomic_load(&g_p3_finished); i++) {
+        struct timespec sl = { 0, 10 * 1000000L };
+        nanosleep(&sl, NULL);
+    }
+    if (!atomic_load(&g_p3_finished)) {
+        atomic_store(&g_p3_finished, 1);
+        kl_server_stop(&g_srv3);
+    }
+    pthread_join(th, NULL);
+
+    kl_server_free(&g_srv3);
+    kl_lwr_client_release();
+    unlink(g_file_path);
+
+    int pass = atomic_load(&g_p3_pass);
+    int both = (1 << P3_BUFFERED) | (1 << P3_FILE);
+    if ((pass & both) == both && !atomic_load(&g_p3_fail)) return 0;
+
+    /* Report which stage failed + a content diff to aid debugging. */
+    int stage = atomic_load(&g_p3_stage);
+    size_t dchk = 0; unsigned char dfirst = 0, dlast = 0;
+    size_t body_len = kl_lwr_client_body(&dchk, &dfirst, &dlast);
+    printf("P9-3 FAIL (%s): expected %u body bytes, got %zu (total recv %zu); "
+           "chk got %zu want %zu; first got 0x%02x want 0x%02x; last got 0x%02x want 0x%02x\n",
+           stage == P3_BUFFERED ? "buffered" : "file",
+           P9_3_BODY_LEN, body_len, kl_lwr_client_len(),
+           dchk, pattern_checksum(P9_3_BODY_LEN),
+           dfirst, pattern_byte(0), dlast, pattern_byte(P9_3_BODY_LEN - 1));
+    for (size_t off = 0; off < body_len; ) {
+        unsigned char chunk[4096];
+        size_t n = kl_lwr_client_body_peek(off, chunk, sizeof(chunk));
+        if (n == 0) break;
+        for (size_t j = 0; j < n; j++)
+            if (chunk[j] != pattern_byte(off + j)) {
+                printf("  first mismatch at body[%zu]: got 0x%02x expected 0x%02x\n",
+                       off + j, chunk[j], pattern_byte(off + j));
+                return 1;
+            }
+        off += n;
+    }
+    return 1;
 }
 
 int main(void) {
     if (run_p9_1() != 0) return 1;
     if (run_p9_2() != 0) return 1;
+    if (run_p9_3() != 0) return 1;
     return 0;
 }
