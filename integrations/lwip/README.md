@@ -5,18 +5,17 @@ A bring-your-own **lwIP platform** for Keel: a matched pair of a `KlSocketProvid
 runs on an lwIP TCP/IP stack with no kernel sockets. lwIP is **not vendored** —
 build against your own lwIP (`LWIP_DIR`) + `lwipopts.h`.
 
-- `socket_lwip.c` — `KlSocketProvider` mapping `KlSocketOps` → `lwip_*`.
+- `socket_lwip.c` — `KlSocketProvider` mapping `KlSocketOps` → `lwip_*`, **and** the
+  datagram data-plane (`KlDatagramOps` — `lwip_sendto`/`lwip_recvfrom`) folded onto
+  the same provider, so `KlUdp` (hence `udp_server` and the built-in async DNS
+  resolver) runs on lwIP with no separate link artifact. One runtime provider owns
+  both stream + datagram I/O (axis-audit A2), using **only public Keel headers**.
+  Per-datagram only (lwIP has no recvmmsg/GSO/GRO/pktinfo).
 - `event_lwip.c` — `KlEventProvider` over `lwip_poll` (the runtime event-backend
   seam; its `native_provider()` returns the lwIP socket provider, so installing
   `event_provider` auto-wires the matched `sockets`).
 - `resolve_sync_lwip.c` — blocking name resolution over `lwip_getaddrinfo` (the
   client-axis seam; overrides the stock host `kl_resolve_sync` at link time).
-- `udp_io_lwip.c` — the datagram-I/O seam (`kl_udp_io_*`) over lwIP sockets
-  (`lwip_sendto`/`lwip_recvfrom`), so `KlUdp` — hence `udp_server` and the built-in
-  async DNS resolver — runs on lwIP. Unlike the runtime-injected socket/event
-  providers, `udp_io` is a build/link seam, so this TU includes Keel's *internal*
-  headers (`-I../../src`) and overrides the stock `udp_io_posix.o` at link time.
-  Per-datagram only (lwIP has no recvmmsg/GSO/GRO/pktinfo).
 - `platform_wakeup_lwip.c` — self-connected lwIP UDP wakeup (responsive
   `kl_server_stop`; overrides the generic `src/platform_wakeup_*` seam).
 - `keel_lwip.h` — `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`.
@@ -66,7 +65,7 @@ lwIP, linked against a **stock** `libkeel`:
   name resolution via `resolve_sync_lwip.c` (`lwip_getaddrinfo`, linked ahead of
   the stock lib so it overrides the host `kl_resolve_sync`), and
 - a Keel **`KlUdp` echo** on the lwIP providers, bounced by a raw lwIP UDP client
-  (`udp_io_lwip.c` overriding the stock `udp_io_posix.o`).
+  (the datagram ops on `socket_lwip.c`).
 
 ```sh
 make -C ../..                       # stock libkeel.a (any backend)
@@ -77,8 +76,9 @@ make loopback LWIP_DIR=/path/to/lwip
 #    lwIP loopback: Keel UDP echo on lwIP round-tripped (correct)
 ```
 
-A third phase runs a Keel `KlUdp` echo on the lwIP providers (`udp_io_lwip.c`),
-exercised by a raw lwIP UDP client — proving the datagram axis end to end.
+A third phase runs a Keel `KlUdp` echo on the lwIP providers (the datagram ops
+folded onto `socket_lwip.c`), exercised by a raw lwIP UDP client — proving the
+datagram axis end to end.
 
 Run in CI by the **Integration (lwIP)** job (clones lwIP + lwip-contrib, stock
 libkeel, `make loopback`), so the payoff is regression-protected.

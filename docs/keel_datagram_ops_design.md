@@ -98,9 +98,12 @@ link seam.
    implement the POSIX primitives on `socket_posix`, keep the seam fallback.
    (kqueue + epoll/io_uring green.)
 2. **Winsock** — `socket_winsock` datagram primitives.
-3. **lwIP** — `socket_lwip` datagram primitives; delete `udp_io_lwip.c` (its logic
-   moves into `socket_lwip`, so lwIP UDP now rides the same provider it already sets
-   — the A2 pairing is dissolved).
+3. **lwIP** — ✅ **done.** The datagram ops are folded onto `socket_lwip.c` (public
+   headers only — the `(ctx, fd)` primitives need no internal Keel types) and
+   `udp_io_lwip.c` is deleted. lwIP UDP now rides the same provider it already sets,
+   so the A2 pairing is dissolved: a foreign stack supplies one provider with both
+   stream + datagram, no separate link artifact. Proven by the container loopback
+   (UDP echo + HTTPS) with no `udp_io_lwip`.
 4. **Remove the seam** — delete the `kl_udp_io_*` fallback, `udp_io_posix.c`,
    `udp_io_win.c`, and `Makefile UDP_IO_SRC`.
 

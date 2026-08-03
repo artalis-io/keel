@@ -79,8 +79,8 @@ static int keel_client_on_lwip(uint16_t port) {
 }
 
 /* Phase 3: a Keel KlUdp echo server on the lwIP providers, exercised by a raw lwIP
- * UDP client. Proves the datagram axis (udp_io_lwip: recv_drain + raw_send) — the
- * foundation for udp_server and the built-in async DNS resolver on lwIP. */
+ * UDP client. Proves the datagram axis (socket_lwip's KlDatagramOps: recv/send) —
+ * the foundation for udp_server and the built-in async DNS resolver on lwIP. */
 static void udp_echo(KlUdp *udp, const void *data, size_t len,
                      const KlSockAddr *src, const KlSockAddr *local, void *ud) {
     (void)local; (void)ud;
