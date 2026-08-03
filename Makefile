@@ -504,7 +504,7 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # backend-neutral kl_server_run / kl_event_ctx_run path. Run under
 # `make BACKEND=iouring test-iouring`.
 #
-# 50 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
+# 55 suites. Grown incrementally: 8f-3 baseline (29) → 8f-5b +5 (the 5a provider auto-wire —
 # client_happy_eyeballs, client_pool, error, server_stats, timeout — a default-provider
 # server/client now auto-adopts the completion loop's overlapped provider instead of being
 # rejected at kl_server_init) → +2 (integration, server_integration) once the completion
@@ -541,14 +541,27 @@ $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 # kl_conn_ingest_proxy): a trusted-source PROXY header is now parsed over the completion loop (the
 # recv is plaintext during KL_CONN_PROXY_HEADER even for a TLS conn), so its proxy_v1/v2_trusted
 # tests pass. (This replaced the #134 fail-loud init rejection.)
-IOURING_TEST_SUITES = allocator body_reader chunked client client_happy_eyeballs client_pool \
+# → +5 (alpn, event_provider, sockaddr, stream_transport, version) — backend-agnostic unit/seam
+# suites with no readiness kl_event_wait driver: pure value tests (sockaddr, version), the ALPN
+# selection + stream-transport vtables (mock-TLS / in-memory, no event model), and the event-
+# PROVIDER injection seam (which is backend-neutral — unlike the readiness-axis event/event_caps/
+# event_ctx below). Verified passing under `make BACKEND=iouring test-iouring` in the Apple
+# container (kernel 6.18) on an ext4 checkout. See docs/phase8f5_iouring_default_migration_design.md §3.
+#
+# Enrollment triage note (2026-08-03): async STAYS excluded — over io_uring its synthetic conn
+# (built with no ctx) segfaults in kl_comp_post_send when the resume path posts a send on a conn
+# the completion backend never fully wired. That is an async-over-completion test-harness gap (the
+# suspend/resume suite needs a completion-capable conn fixture), tracked separately from this
+# coverage work; it is NOT a product regression on the real server path (the smokes + integration
+# suites exercise async-over-completion end to end).
+IOURING_TEST_SUITES = allocator alpn body_reader chunked client client_happy_eyeballs client_pool \
                           client_stream compress connection cors cross_module decompress \
-                          dns_resolver drain error file_io h2 h2_client integration \
+                          dns_resolver drain error event_provider file_io h2 h2_client integration \
                           multipart_stream overflow parser peer_addr peer_cert proxy \
                           proxy_protocol read_flow_control redirect request resolver_cache \
-                          response response_parser router server_integration server_stats sse \
-                          thread_pool timeout timer tls tls_integration udp udp_batching \
-                          udp_offload udp_server udp_tos unix_socket url websocket websocket_client
+                          response response_parser router server_integration server_stats sockaddr sse \
+                          stream_transport thread_pool timeout timer tls tls_integration udp udp_batching \
+                          udp_offload udp_server udp_tos unix_socket url version websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
