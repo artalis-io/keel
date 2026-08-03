@@ -16,6 +16,10 @@
 
 #include "socket.h"
 #include "sockaddr_native.h"   /* KlSockAddr <-> struct sockaddr marshalling */
+#include <keel/datagram.h>     /* the Winsock datagram ops (socket_dgram_win.c) */
+
+/* Datagram data-plane for this provider (defined in socket_dgram_win.c). */
+extern const KlDatagramOps kl_socket_winsock_dgram_ops;
 
 #include <windows.h>
 #include <mswsock.h>   /* TransmitFile prototype (linked via -lws2_32 / mswsock) */
@@ -376,8 +380,8 @@ static const KlSocketOps WINSOCK_OPS = {
 
 static const KlSocketProvider WINSOCK_PROVIDER = {
     &WINSOCK_OPS, NULL,
-    KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | KL_SOCK_CAP_SENDFILE,
-    NULL,   /* dgram — datagram ops added in the datagram-provider stage */
+    KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | KL_SOCK_CAP_SENDFILE | KL_SOCK_CAP_DATAGRAM,
+    &kl_socket_winsock_dgram_ops,
 };
 
 const KlSocketProvider *kl_socket_provider_winsock(void) {

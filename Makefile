@@ -59,7 +59,7 @@ else ifdef WINDOWS
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
   SERVER_PLAT_SRC = src/server_plat_win.c
   UDP_IO_SRC = src/udp_io_win.c
-  DGRAM_SRC =            # Winsock datagram ops: Stage 2 (provider->dgram stays NULL → seam)
+  DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
   DNS_SYS_SRC = src/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
   TEST_COMPAT_SRC = tests/net_compat_win.c
