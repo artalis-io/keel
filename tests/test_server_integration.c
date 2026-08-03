@@ -37,7 +37,7 @@ static ssize_t noviv_recv(void *c, KlSocketHandle fd, void *b, size_t n) {
 }
 static const KlSocketOps NOVIV_OPS = { .send = noviv_send, .recv = noviv_recv,
                                        .name = "noviv" };
-static const KlSocketProvider g_noviv = { &NOVIV_OPS, NULL, KL_SOCK_CAP_NATIVE_FD };
+static const KlSocketProvider g_noviv = { &NOVIV_OPS, NULL, KL_SOCK_CAP_NATIVE_FD, NULL };
 
 /* Serve a fixed file (sendfile path) from a global path. Used only by the
  * sendfile_fallback test, which is POSIX-only (hardcoded /tmp + CRT file I/O). */

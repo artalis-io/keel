@@ -24,18 +24,21 @@ static const KlSocketOps stub_ops = { .name = "stub" };
 
 static const KlSocketProvider native_provider = {
     &stub_ops, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV,
+    NULL,
 };
 
 /* No NATIVE_FD — models a completion/raw provider (e.g. lwIP raw tcp_pcb*) that a
  * readiness loop cannot watch. */
 static const KlSocketProvider non_native_provider = {
     &stub_ops, NULL, KL_SOCK_CAP_WRITEV,
+    NULL,
 };
 
 /* Overlapped provider (Phase 8 / IOCP): native SOCKET handles whose I/O is driven
  * by the completion loop's submit path. */
 static const KlSocketProvider overlapped_provider = {
     &stub_ops, NULL, KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_OVERLAPPED,
+    NULL,
 };
 
 UTEST(event_caps, backend_advertises_readiness_native_fd) {

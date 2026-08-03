@@ -322,6 +322,7 @@ static const KlSocketOps POSIX_OPS = {
 static const KlSocketProvider POSIX_PROVIDER = {
     &POSIX_OPS, NULL,
     KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | KL_SOCK_CAP_SENDFILE,
+    NULL,   /* dgram — datagram ops added in the datagram-provider stage */
 };
 
 const KlSocketProvider *kl_socket_provider_posix(void) {

@@ -377,6 +377,7 @@ static const KlSocketOps WINSOCK_OPS = {
 static const KlSocketProvider WINSOCK_PROVIDER = {
     &WINSOCK_OPS, NULL,
     KL_SOCK_CAP_NATIVE_FD | KL_SOCK_CAP_WRITEV | KL_SOCK_CAP_SENDFILE,
+    NULL,   /* dgram — datagram ops added in the datagram-provider stage */
 };
 
 const KlSocketProvider *kl_socket_provider_winsock(void) {

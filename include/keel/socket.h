@@ -113,6 +113,11 @@ typedef struct KlSocketProvider {
     const KlSocketOps *ops;
     void              *context;
     uint64_t           capabilities;
+    /* Optional datagram data-plane (keel/datagram.h), or NULL for a stream-only
+     * provider. Present iff capabilities & KL_SOCK_CAP_DATAGRAM. Folding datagram
+     * I/O onto the provider means one runtime object owns all of a stack's socket
+     * I/O (no separately-linked udp_io artifact to keep in sync). */
+    const struct KlDatagramOps *dgram;
 } KlSocketProvider;
 
 /* Capability flags. A provider advertises what it supports; Keel falls back for
@@ -122,6 +127,7 @@ typedef struct KlSocketProvider {
 #define KL_SOCK_CAP_NATIVE_FD  (1ull << 0)  /* fd is a real OS descriptor */
 #define KL_SOCK_CAP_WRITEV     (1ull << 1)  /* vectored writev usable on this fd */
 #define KL_SOCK_CAP_SENDFILE   (1ull << 2)  /* zero-copy sendfile usable on this fd */
+#define KL_SOCK_CAP_DATAGRAM   (1ull << 3)  /* provider->dgram datagram ops present */
 
 /* Built-in provider factories (static storage, no allocation). POSIX is defined
  * everywhere; the Winsock factory is defined only on Windows (the declaration is

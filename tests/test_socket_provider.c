@@ -96,7 +96,7 @@ static const KlSocketOps MOCK_OPS = {
 };
 
 static KlSocketProvider mock_provider(MockSock *m) {
-    KlSocketProvider p = { &MOCK_OPS, m, 0 };
+    KlSocketProvider p = { &MOCK_OPS, m, 0, NULL };
     return p;
 }
 
@@ -177,7 +177,7 @@ UTEST(sockprov, mock_recv_econnreset) {
 /* A provider whose send/recv ops are NULL falls back to the POSIX path. */
 UTEST(sockprov, per_op_null_fallback) {
     static const KlSocketOps partial = { .name = "partial" };  /* all ops NULL */
-    KlSocketProvider p = { &partial, NULL, 0 };
+    KlSocketProvider p = { &partial, NULL, 0, NULL };
     int sv[2];
     ASSERT_EQ(0, kl_test_socketpair(sv));
     ASSERT_EQ((ssize_t)2, kl_sock_send(&p, sv[0], "hi", 2));   /* falls back */
@@ -323,7 +323,7 @@ UTEST(sockprov, provider_destroy_lifecycle) {
     ASSERT_EQ(0, g_destroyed);
     /* A provider with a destroy op is torn down exactly once. */
     static const KlSocketOps ops = { .destroy = mock_destroy, .name = "destroyable" };
-    KlSocketProvider p = { &ops, NULL, 0 };
+    KlSocketProvider p = { &ops, NULL, 0, NULL };
     kl_socket_provider_destroy(&p);
     ASSERT_EQ(1, g_destroyed);
 }
@@ -407,14 +407,14 @@ static void *deco_server_thread(void *arg) { kl_server_run((KlServer *)arg); ret
 /* #1 — the native-fd guard: a non-native provider is rejected at init; a native
  * one (and NULL = built-in) is accepted. */
 UTEST(sockprov, select_native_fd_guard) {
-    KlSocketProvider nonnative = { &nonnative_ops, NULL, 0 };  /* no NATIVE_FD */
+    KlSocketProvider nonnative = { &nonnative_ops, NULL, 0, NULL };  /* no NATIVE_FD */
     KlServer s;
     KlConfig bad = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &nonnative };
     ASSERT_EQ(-1, kl_server_init(&s, &bad));
     ASSERT_EQ(KL_ERR_SOCKET, s.last_error);
 
     Deco d = {0,0,0};
-    KlSocketProvider native = { &deco_ops, &d, KL_SOCK_CAP_NATIVE_FD };
+    KlSocketProvider native = { &deco_ops, &d, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlServer s2;
     KlConfig good = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &native };
     ASSERT_EQ(0, kl_server_init(&s2, &good));
@@ -429,7 +429,7 @@ UTEST(sockprov, select_native_fd_guard) {
  * Fixed port, like the smoke tests, to avoid a cross-thread bound_port read.) */
 UTEST(sockprov, provider_selection_end_to_end) {
     Deco sd = {0,0,0}, cd = {0,0,0};
-    KlSocketProvider sprov = { &deco_ops, &sd, KL_SOCK_CAP_NATIVE_FD };
+    KlSocketProvider sprov = { &deco_ops, &sd, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlServer s;
     KlConfig scfg = { .port = 19099, .bind_addr = "127.0.0.1", .sockets = &sprov };
     ASSERT_EQ(0, kl_server_init(&s, &scfg));
@@ -437,7 +437,7 @@ UTEST(sockprov, provider_selection_end_to_end) {
     pthread_t th;
     ASSERT_EQ(0, pthread_create(&th, NULL, deco_server_thread, &s));
 
-    KlSocketProvider cprov = { &deco_ops, &cd, KL_SOCK_CAP_NATIVE_FD };
+    KlSocketProvider cprov = { &deco_ops, &cd, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlAllocator a = kl_allocator_default();
     int ok = 0;
     for (int i = 0; i < 50 && !ok; i++) {
