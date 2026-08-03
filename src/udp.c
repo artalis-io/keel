@@ -17,7 +17,7 @@
 #define IPV6_LEAVE_GROUP IPV6_DROP_MEMBERSHIP
 #endif
 
-/* recv/sendmmsg batch size defaults (the batch engines live in udp_io_posix.c). */
+/* recv/sendmmsg batch size defaults (the batch engines live in socket_dgram_posix.c). */
 #define UDP_MMSG_DEFAULT 16
 #define UDP_MMSG_MAX      64
 
@@ -25,8 +25,8 @@
 
 static void udp_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data);
 
-/* The provider's datagram data-plane (KlSocketProvider.dgram), or NULL → the
- * kl_udp_io_* seam fallback. See the dispatch block below udp_on_ready. */
+/* The provider's datagram data-plane (KlSocketProvider.dgram). NULL sockets =
+ * the built-in default provider → its default datagram ops (kl_sockdef_dgram). */
 static inline const KlDatagramOps *udp_dg(const KlUdp *u) {
     const KlSocketProvider *sp = u->ctx ? u->ctx->sockets : NULL;
     /* NULL sockets = the built-in default provider (mirrors the kl_sockdef_* stream
@@ -155,8 +155,8 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
  * per-segment on_recv calls; a plain datagram goes to on_recv. */
 void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
                     const KlSockAddr *src, const KlSockAddr *local) {
-    /* Addresses arrive already marshalled to KlSockAddr by the platform udp_io
-     * layer (which owns its sockaddr layout). Here we just fan out to callbacks. */
+    /* Addresses arrive already marshalled to KlSockAddr by the datagram provider
+     * (KlDatagramOps, which owns its sockaddr layout). Here we just fan out. */
     if (gro_seg > 0 && len > (size_t)gro_seg) {
         if (udp->on_recv_segments) {
             udp->on_recv_segments(udp, data, len, (size_t)gro_seg,

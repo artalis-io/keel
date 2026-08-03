@@ -1,5 +1,84 @@
 # C Audit Report: KEEL
 
+## Eighth pass — datagram data-plane folded onto the socket provider (2026-08-03)
+
+**Scope:** the four-stage "datagram provider" refactor (#168–#172) that resolves
+axis-audit **A2** — the UDP datagram data-plane moves from the compile/link
+`udp_io_*` seam onto an optional `KlDatagramOps` vtable on `KlSocketProvider`, so
+one runtime provider owns stream **and** datagram I/O. Files: `include/keel/datagram.h`
+(the new vtable + `KlDgramRxSlot`/`KlDgramTxDesc`/`KlDgramRxMeta`), `src/socket_dgram_posix.c`
++ `src/socket_dgram_win.c` (the POSIX/Winsock datagram primitives, ~1000 lines),
+`src/udp_cmsg.c` + `src/udp_cmsg_win.c` (shared cmsg parsers the completion
+backends reuse), `src/udp.c` (the send-queue flush + recv drain **machine loops
+moved up here**, provider dispatch, `udp_group_ok` mcast validation, batch
+lifecycle, dgram-required init), the `socket.h`/`socket_posix.c`/`socket_winsock.c`
+provider wiring + `kl_sockdef_dgram()`, the completion backends' `.dgram`
+inheritance, and `integrations/lwip/socket_lwip.c`'s datagram ops. `udp_io_posix.c`,
+`udp_io_win.c`, `udp_io.h` were deleted.
+
+**Method:** three parallel deep-review agents (POSIX dgram + udp_cmsg; Winsock dgram
++ udp_cmsg_win; udp.c machine rework + lwIP + provider wiring) tracing cmsg
+build/parse bounds, mmsg-batch alloc/index/free symmetry, the data-oriented
+recv_batch/send_batch slot/descriptor arrays, address marshalling on untrusted
+recv addresses, callback re-entrancy in the machine loops, and the dgram-default
+resolution; mechanical sweeps (no `strcpy`/`sprintf`/`atoi`, no raw `malloc`/`free`
+in the new TUs); and the Stage-4 gate — **cppcheck + scan-build clean, the full unit
+suite under ASan+UBSan (891 tests, 0 failures, 0 sanitizer hits)**, gcc-14 +
+cosmocc + MinGW (iocp/wsapoll), and the Apple container: epoll (0 fails, UDP
+batching 5/5 via real `recvmmsg`/`sendmmsg`), io_uring (`smoke-iouring-asan`
+UDP-over-completion), and the lwIP loopback + HTTPS.
+
+**Verdict: clean.** No Critical or High findings. The memory-safety surface of the
+refactor — cmsg bounds, the mmsg batch blocks, the data-oriented slot/descriptor
+arrays, address marshalling, and machine-loop callback re-entrancy — is sound. One
+**Low** correctness item was **fixed this pass**; the rest are Low/Informational,
+pre-existing or unreachable via the public API.
+
+### Low — fixed this pass
+
+| # | File(s) | Issue | Fix |
+|---|---------|-------|-----|
+| L1 | `src/socket_dgram_posix.c` / `src/socket_dgram_win.c` (`pdg_send`/`wdg_send`) | On a source-pinned/TOS send with **no destination** (a connected socket), the TOS control-message's IP level was guessed `AF_INET`, so a TOS mark on a connected **IPv6** socket would build an `IP_TOS` (v4) cmsg → kernel ignores/rejects it. Unreachable via the public API today (`kl_udp_send_to_tos`/`_from` always pass a dest; `kl_udp_send` uses tos −1), so defense-in-depth. | Derive the family from the dest, else the **source-pin** address, else v4. |
+
+### Reported, not changed (accepted / by design)
+
+| # | Area | Note |
+|---|------|------|
+| R1 | `src/udp.c` completion-loop src-pin/TOS send | A source-pinned or per-packet-TOS send on a **completion** loop skips the overlapped `kl_comp_post_udp_send` branch (which is plain-send only) and takes the synchronous provider `send()`; on `EAGAIN` it `udp_enqueue`s, which arms a **readiness** WRITE watcher that a completion loop never drives → the datagram stalls. **Pre-existing** (the pre-refactor path did the same via `kl_udp_io_raw_send` + `udp_enqueue`); IOCP-only, and only under transient send-buffer pressure on a source-pinned/marked datagram. Fix would be an overlapped `WSASendMsg` path for src/TOS — deferred as its own change. |
+| R2 | `src/udp.c` batch machine loops | `udp_recv_dgram`/`udp_flush_dgram` put a `KlDgramRxSlot[64]`/`KlDgramTxDesc[64]` (~17 KB) on the stack **inside the batch branch only** (mmsg batching is Linux + opt-in `mmsg_batch>1`); the per-datagram path (lwIP/embedded) never allocates them. Fine on host stacks; noted for tiny-stack targets. Optionally cap `UDP_MMSG_MAX` or heap the arrays. |
+| R3 | `src/socket_dgram_posix.c` `configure` (macOS IPv4) | Sets `IP_PKTINFO`/`IP_RECVPKTINFO` and reports `KL_DGRAM_RX_PKTINFO`, but macOS delivers the IPv4 local address via `IP_RECVDSTADDR` (not `IP_PKTINFO`), so `meta.has_local` stays 0 there — graceful degradation, but the cap bit overstates. Pre-existing (matches the old `setup_recv_opts`). |
+| R4 | Winsock length casts (`wdg_send`/`wdg_recv`) | `size_t len`/`buflen` cast to `ULONG`/`int` without a guard; unreachable for UDP (≤65507 B). |
+| R5 | `cfg->tos == 0` in `configure` | `if (cfg->tos)` treats 0 as "OS default / unset" (documented in `udp.h`), so 0 can't be an explicit clear — by design. |
+
+### Areas audited clean (no findings)
+
+- **cmsg build/parse** (posix + win): every parse `memcpy` is length-gated
+  (`CMSG_LEN`/`WSA_CMSG_LEN`), the Winsock parsers stop on a runt cmsg
+  (`cmsg_len < sizeof(WSACMSGHDR)`), and `dgram_build_control` writes at most the
+  `DGRAM_TX_CMSG_SPACE` the buffers are sized to.
+- **mmsg batch** (`socket_dgram_posix.c`): `rx/tx_batch_new`/`free` use matching
+  `(size_t)n * sizeof/bufsz/ctrl_sz` for every member, sizes set before the
+  sub-allocs so a mid-alloc NULL frees cleanly (no partial leak); `recv_batch`/
+  `send_batch` clamp to `min(b->n, max/n)`; all per-slot indexing is `< n <= b->n`.
+- **data-oriented slots**: `KlDgramRxSlot.data` points into the batch payload and is
+  delivered synchronously before the next `recv_batch` — lifetime honored by
+  `udp_recv_dgram`.
+- **machine loops** (`udp.c`): batch fill double-bounded (`cnt < mmsg_batch && cnt <
+  UDP_MMSG_MAX`); `udp_drop_front(sent)` drops exactly what was sent; EAGAIN vs
+  hard-error-drop correct; recv loops re-check `recv_active`/`kl_handle_valid` after
+  every deliver (no callback-reentrancy UAF); no uninitialised `KlSockAddr` reaches
+  `on_recv` (the `family != UNSPEC ? &src : NULL` guard).
+- **dgram resolution + lifetime**: `udp_dg()` maps NULL sockets → `kl_sockdef_dgram()`;
+  `kl_udp_init` rejects a provider without `.dgram` before opening the fd (no leak);
+  the completion providers inherit the underlying `.dgram` for config/opts only (the
+  data-plane stays on `kl_comp_post_udp_*`, gated by `KL_EVENT_CAP_COMPLETION`).
+- **`udp_group_ok`**: `kl_sockaddr_parse` + first-octet multicast range check
+  (IPv4 224/4, IPv6 ff00::/8), family cross-checked; a bad group string rejects
+  cleanly (`KL_ERR_INVALID_ARG`).
+- **lwIP datagram ops**: send/recv/gso/configure/set_tos/mcast bounds + family
+  guards correct; batch NULL → per-datagram; no leak.
+- scan-build: clean. cppcheck: clean. ASan+UBSan unit suite: 891 tests, 0 failures.
+
 ## Seventh pass — KlSockAddr address-ABI neutralization + lwIP platform (2026-08-02)
 
 **Scope:** everything added/changed since the sixth pass — the runtime event-provider seam
