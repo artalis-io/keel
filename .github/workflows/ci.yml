@@ -511,3 +511,7 @@ jobs:
       - name: lwIP HTTPS loopback — mbedTLS BIO routed through the lwIP socket provider
         timeout-minutes: 5
         run: make -C integrations/lwip loopback-tls LWIP_DIR="$HOME/lwip" MBEDTLS_DIR="$HOME/mbedtls"
+
+      - name: lwIP raw-API spike — NO_SYS=1 tcp_* callbacks over loopback (Phase 9 foundation)
+        timeout-minutes: 5
+        run: make -C integrations/lwip raw-spike LWIP_DIR="$HOME/lwip"

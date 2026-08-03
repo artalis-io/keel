@@ -111,6 +111,12 @@ CSPRNG for `LWIP_RAND` per deployment).
 
 ## Scope
 
-lwIP is **readiness-only** (its sockets layer is `lwip_poll`); the lwIP *raw*
-callback API (completion model) is out of scope. See
-`docs/lwip_platform_design.md` for the full platform-port shape + promotion path.
+The shipped lwIP providers are **readiness** (the sockets layer via `lwip_poll`).
+The lwIP *raw* `tcp_*` callback API (a completion-model event provider, "Phase 9")
+is the next frontier — and its **foundation is proven and CI-tested**: `make
+raw-spike LWIP_DIR=...` builds a `NO_SYS=1` lwIP (`lwipopts_raw.h`) and runs a
+raw-API TCP roundtrip over the loopback netif entirely in-process (no tap, no
+root) — the exact model a KEEL-driven raw/completion provider will use (KEEL's loop
+calls `sys_check_timeouts()` + `netif_poll()` and the raw callbacks feed the
+completion driver). See `docs/phase9_lwip_raw_design.md` for the go decision +
+staged plan and `docs/lwip_platform_design.md` for the full platform-port shape.
