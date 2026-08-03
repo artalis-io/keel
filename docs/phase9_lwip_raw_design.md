@@ -64,14 +64,56 @@ So a raw/completion lwIP provider is testable exactly like the existing socket+p
    loopif by scanning `NETIF_FOREACH` for the `127.0.0.1` address, then `netif_set_up`/
    `set_link_up`/`set_default`.
 
+## Architectural shape (finding, 2026-08-03): it's a completion BACKEND, not a runtime drop-in
+
+The shipped **readiness** lwIP provider is a pure runtime drop-in: `kl_event_provider_lwip()` +
+`kl_socket_provider_lwip()` injected via `KlEventCtx`/`KlConfig` into a **stock** `libkeel.a`,
+because the readiness path (`kl_event_wait` → dispatch → `conn_read/write`) is already in every
+build.
+
+The **completion** path is different: `completion_driver.c` and the `kl_comp_*` primitives
+(`kl_comp_run`/`kl_comp_drain`/`kl_comp_post_recv/send/accept/sendfile`, `io_engine.h`) are
+**link-time backend selections** — the Makefile `BACKEND` block compiles them only for
+`iouring`/`iocp`/`pollcomp`; a readiness build links the `io_engine.c` **stubs** and contains no
+completion driver. So a runtime-injected lwIP-raw `KlEventProvider` alone would find `kl_comp_run`
+resolved to the do-nothing stub. Therefore Phase 9 is a **completion backend build**, analogous to
+`BACKEND=iouring` (which needs `liburing`): it links `completion_driver.c` + `event_lwip_raw.c`
+(which provides the `kl_comp_*` primitives, the `KlEventOps`, `kl_event_caps`=COMPLETION,
+`kl_event_native_provider`, **and** an overlapped-capable socket provider whose `KlSocketHandle`
+is a `tcp_pcb *`). Because lwIP is BYO, the build requires `LWIP_DIR` (like `iouring` needs
+liburing headers). Concretely: a `BACKEND=lwipraw` (or an `integrations/lwip` target) that builds
+the core sources with `EVENT_SRC=event_lwip_raw.c` + `COMPLETION_SRC=completion_driver.c` against
+BYO lwIP, then runs the loopback test.
+
+*Alternative (not chosen now):* first refactor the completion axis to be **runtime-injectable**
+(promote `kl_comp_*` to vtable methods on the completion `KlEventProvider`, put `completion_driver.c`
+in every build) — then lwIP-raw would be a runtime drop-in like the readiness one, matching the
+socket/event/datagram axes that already went runtime. That is a larger, separate PAL refactor; the
+BACKEND approach ships Phase 9 without it and is consistent with today's completion backends. Revisit
+if a second out-of-tree completion backend ever wants runtime injection.
+
+`completion_driver.c` itself is model-blind (consumes `KlCompletionEvent` + calls the `kl_comp_*`
+primitives), so it is **reused unchanged** — Phase 9 supplies only the lwIP-raw backend TU.
+
 ## Staged implementation plan (each stage independently tested)
 
 The spike replaces its `for`-loop with KEEL's event loop; the real work is a `KlEventProvider`:
 
-- **P9-1 — provider skeleton + loop drive.** `event_lwip_raw.c` exposing `kl_event_provider_lwip_raw()`
-  (completion caps). `kl_event_wait`-equivalent tick = `sys_check_timeouts()` + `netif_poll()` +
-  a bounded sleep; wire `KlEventCtx.event_provider`. Test: an lwIP-raw KlEventCtx ticks without a
-  server.
+- **P9-1 — provider skeleton + loop drive. DONE.** `integrations/lwip/event_lwip_raw.c` (+ the
+  lwIP-only `lwip_raw_glue.c` seam TU, `keel_lwip_raw.h`) exposes `kl_event_provider_lwip_raw()` +
+  `kl_socket_provider_lwip_raw()` (completion caps / `KL_SOCK_CAP_OVERLAPPED`), and implements the
+  `completion.h` backend primitives — `kl_comp_drain` = one lwIP tick (`sys_check_timeouts()` +
+  `netif_poll()`) returning 0 events; `kl_comp_post_*`/`kl_comp_cancel` are P9-2+ stubs that link.
+  Built via a `BACKEND=lwipraw` root-Makefile case (mirrors `iouring`: `EVENT_SRC=event_lwip_raw.c`
+  + `COMPLETION_SRC=completion_driver.c`, gated on `LWIP_DIR`); `completion_driver.c` reused
+  unchanged. **Header-clash note:** lwIP's `def.h` (`htons`/`ntohs` macros) + `arch.h` (`ssize_t`)
+  clash with the host socket headers the KEEL socket seam pulls into `event_lwip_raw.c`, so all lwIP
+  contact is confined to `lwip_raw_glue.c` (lwIP headers, no KEEL socket headers), meeting the
+  backend across `lwip_raw_glue.h` with neutral/opaque types — **P9-2+ must keep this split** (the
+  `tcp_accept`/`tcp_recv` callbacks + pcb handling live in the glue TU). Test:
+  `make -C integrations/lwip loopback-raw` builds the completion libkeel over NO_SYS=1 lwIP and
+  ticks an lwIP-raw `KlEventCtx` (no server) → `P9-1 PASS`; CI-gated in the `lwip` job. Default
+  epoll + `BACKEND=iouring` builds verified unaffected.
 - **P9-2 — listen/accept + recv completion.** Map `tcp_accept`/`tcp_recv` → `KL_COMP_ACCEPT`/
   `KL_COMP_RECV` into `completion_driver.c`; a raw-backed `KlServer` answers one request over
   loopback (the spike, but through the real server path). Test: `GET /` → 200 in-process.
