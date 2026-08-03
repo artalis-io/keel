@@ -180,6 +180,7 @@ static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
     meta->tos = -1;
     memset(src, 0, sizeof(*src));
     struct sockaddr_storage from;
+    memset(&from, 0, sizeof(from));   /* kernel fills it; zero-init keeps analyzers happy */
     LPFN_WSARECVMSG fn = kl_udp_win_get_recvmsg(s);
 
     if (fn) {
@@ -288,7 +289,7 @@ static uint32_t wdg_configure(void *ctx, KlSocketHandle fd, int family,
 
     /* Per-datagram capture (no UDP GRO on Windows). */
     if (cfg->recv_pktinfo) {
-        DWORD o = 1;
+        DWORD o = 1; (void)o;   /* used only inside the IP_PKTINFO/IPV6_PKTINFO blocks */
         if (family == AF_INET) {
 #if defined(IP_PKTINFO)
             if (setsockopt(s, IPPROTO_IP, IP_PKTINFO, (char *)&o, sizeof(o)) == 0) caps |= KL_DGRAM_RX_PKTINFO;
