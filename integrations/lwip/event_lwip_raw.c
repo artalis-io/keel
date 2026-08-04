@@ -32,23 +32,28 @@
  *       kl_comp_run / kl_io_engine_run_completion / kl_io_engine_resume_completion /
  *       kl_io_engine_post_read
  *
- * P9-2 SCOPE: listen/accept + recv/send completion — a raw-backed KlServer answers one
- * request over loopback. The socket-provider primitives (tcp_new/bind/listen/close) now
- * operate on real tcp_pcb handles via the glue; the tcp_accept/tcp_recv/tcp_sent callbacks
- * surface KL_COMP_ACCEPT/READ/WRITE.
+ * CAPABILITIES (server-only, IPv4 TCP): listen/accept + recv/send/sendfile completion — a
+ * raw-backed KlServer serves HTTP over the loopback netif. The socket-provider primitives
+ * (tcp_new/bind/listen/close) operate on real tcp_pcb handles via the glue; the
+ * tcp_accept/tcp_recv/tcp_sent callbacks surface KL_COMP_ACCEPT/READ/WRITE. Unsupported
+ * operations fail EARLY and CLEARLY (see the socket ops below): outbound connect returns
+ * -1/ENOTSUP (server-only), non-IPv4 bind returns -1 (IPv4-only loopif), and no datagram ops
+ * are provided (.dgram == NULL, so kl_udp_init on this provider fails). See the Supported /
+ * Unsupported matrix in keel_lwip_raw.h.
  *
- * SEND SCOPE (Stage B): BOUNDED, zero-allocation send + backpressure + file send. kl_comp_post_
- * send translates the response iovec into the seam-neutral KlLwrIoVec and hands it to the glue,
- * which stores a bounded COPY of the iov ARRAY (data referenced in place — small transient
- * segments snapshotted) and pumps it through a fixed PREALLOCATED per-conn TX window (KL_LWR_TX_
- * WIN) across many tcp_write/tcp_sent rounds honouring tcp_sndbuf (ERR_MEM = backpressure,
- * resumed on tcp_sent). kl_comp_post_sendfile passes the head the same way and the glue preads
- * the file body chunk-by-chunk into that same window — never reading the file into memory whole.
- * Transmit memory is bounded by conn_cap * KL_LWR_TX_WIN, INDEPENDENT of response/file size, so
- * response size is unbounded-by-design. Either way the driver sees a SINGLE fully-completed
- * KL_COMP_WRITE. close-cancel-lifetime is handled below; KlEventLoop.fd assessment is P9-5.
+ * SEND: BOUNDED, zero-allocation send + backpressure + file send. kl_comp_post_send translates
+ * the response iovec into the seam-neutral KlLwrIoVec and hands it to the glue, which stores a
+ * bounded COPY of the iov ARRAY (data referenced in place — small transient segments snapshotted)
+ * and pumps it through a fixed PREALLOCATED per-conn TX window (KL_LWR_TX_WIN) across many
+ * tcp_write/tcp_sent rounds honouring tcp_sndbuf (ERR_MEM = backpressure, resumed on tcp_sent).
+ * kl_comp_post_sendfile passes the head the same way and the glue preads the file body
+ * chunk-by-chunk into that same window — never reading the file into memory whole. Transmit
+ * memory is bounded by conn_cap * KL_LWR_TX_WIN, INDEPENDENT of response/file size, so response
+ * size is unbounded-by-design. Either way the driver sees a SINGLE fully-completed KL_COMP_WRITE.
+ * The NO_SYS=1 raw loop has no pollable OS fd, so KlEventLoop.fd is -1 (backend-private; no
+ * shared code reads it).
  *
- * Header-clash seam discipline (P9-1, preserved): this TU includes NO lwIP header — lwIP's
+ * Header-clash seam discipline (preserved): this TU includes NO lwIP header — lwIP's
  * def.h redefines htons/ntohs and its arch.h typedefs ssize_t, which clash with the host
  * <sys/socket.h>/<netinet/in.h> that the KEEL socket seam below pulls in. All lwIP contact
  * goes through lwip_raw_glue.h (opaque void* pcb/netif + neutral KlLwrRecord), whose
@@ -72,6 +77,7 @@
 
 #include <string.h>
 #include <time.h>
+#include <errno.h>       /* ENOTSUP / EOPNOTSUPP for the fail-early connect */
 
 /* One lwIP tick's bounded idle wait when no completions are ready, in nanoseconds.
  * The mainloop must keep turning to drive sys_check_timeouts()/netif_poll() even with
@@ -113,8 +119,8 @@ typedef struct {
  * surface — the backend is reached at runtime via loop->ops, never the compiled-in
  * default path. Mirrors event_lwip.c. */
 
-/* Default per-conn slot capacity when the loop is created without a server (P9-1 standalone
- * tick). A server sizes it AUTHORITATIVELY to KlConfig.max_connections at prime
+/* Default per-conn slot capacity when the loop is created without a server (a standalone
+ * KlEventCtx tick). A server sizes it AUTHORITATIVELY to KlConfig.max_connections at prime
  * (kl_lwr_ctx_ensure_cap). Matches KEEL's default max_connections so a default server needs no
  * regrow. */
 #define KL_LWR_DEFAULT_CONN_CAP 256
@@ -131,14 +137,14 @@ static int lwr_ev_init(KlEventLoop *loop) {
     if (!st->lwrctx) { kl_free(loop->alloc, st, sizeof(*st)); return -1; }
     st->loopif = kl_lwr_ctx_loopif(st->lwrctx);
     loop->_backend = st;
-    loop->fd = -1;   /* NO_SYS=1 raw loop has no pollable fd (axis-audit F1, P9-5) */
+    loop->fd = -1;   /* NO_SYS=1 raw loop has no pollable fd (backend-private; no shared code reads it) */
     return 0;
 }
 
 /* Connection I/O is driven by posted completions (recv/send via the tcp_* callbacks), not
- * readiness watches, so add/mod/del are inert — matching the IOCP model. (A tagged-udata
- * watcher relay for thread-pool wakeup / timers, as in event_pollcomp.c, is a later stage;
- * P9-2's single-request loopback roundtrip needs none.) */
+ * readiness watches, so add/mod/del are inert — matching the IOCP model. The server path this
+ * backend supports (accept/recv/send/sendfile over the completion driver) needs no readiness
+ * watch registration; timers ride the KlEventCtx timer heap the drain checks each tick. */
 static int lwr_ev_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     (void)loop; (void)fd; (void)mask; (void)udata;
     return 0;
@@ -179,7 +185,7 @@ static void lwr_ev_close(KlEventLoop *loop) {
 
 /* Completion loop over lwIP-raw. COMPLETION makes the Phase 7 negotiation
  * (kl_caps_compatible) require an OVERLAPPED socket provider — kl_socket_provider_lwip_raw
- * below. NOT native-fd: the raw loop has no OS descriptor to poll (F1/P9-5). */
+ * below. NOT native-fd: the raw loop has no OS descriptor to poll. */
 static unsigned lwr_ev_caps(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION;
@@ -206,12 +212,15 @@ static const KlEventProvider lwip_raw_event_provider = { &lwip_raw_event_ops, "l
 const KlEventProvider *kl_event_provider_lwip_raw(void) { return &lwip_raw_event_provider; }
 
 /* ── Overlapped socket provider (KlSocketHandle == tcp_pcb *) ───────────────────
- * The socket lifecycle (tcp_new/bind/listen/close as socket/bind/listen/close;
- * get_local_addr for the bound-port readback) rides real tcp_pcb handles via the glue.
- * Data-plane I/O (recv/send) goes through the completion post path, not these ops — so
- * send/recv/accept/connect stay stubbed. Control-plane no-ops (set_nonblocking etc.)
- * succeed because a raw pcb needs no fcntl-style setup. The handle is a `struct tcp_pcb *`
- * cast to KlSocketHandle (intptr_t). */
+ * SERVER-ONLY, IPv4-only. The socket lifecycle (tcp_new/bind/listen/close as
+ * socket/bind/listen/close; get_local_addr for the bound-port readback) rides real tcp_pcb
+ * handles via the glue. Data-plane I/O (recv/send) goes through the completion post path, not
+ * these ops — so send/recv are no-op errors. Two ops fail EARLY + CLEARLY because this backend
+ * cannot support them: `connect` (outbound client — server-only, returns -1/ENOTSUP) and a
+ * non-IPv4 `bind` (the loopif is IPv4, returns -1). `accept` returns KL_INVALID_SOCKET because
+ * accepts arrive via the tcp_accept callback → drain, not this pull op. Control-plane no-ops
+ * (set_nonblocking etc.) succeed because a raw pcb needs no fcntl-style setup. The handle is a
+ * `struct tcp_pcb *` cast to KlSocketHandle (intptr_t). */
 static int lwr_sock_noop_fd(void *c, KlSocketHandle fd) { (void)c; (void)fd; return 0; }
 static void lwr_sock_void_fd(void *c, KlSocketHandle fd) { (void)c; (void)fd; }
 static int lwr_sock_opt(void *c, KlSocketHandle fd, int on) { (void)c; (void)fd; (void)on; return 0; }
@@ -223,16 +232,27 @@ static KlSocketHandle lwr_sock_socket(void *c, int d, int t, int p) {
 }
 
 /* bind: marshal the neutral KlSockAddr's IPv4 bytes + port to the glue (which builds an
- * lwIP ip_addr_t). IPv6 is out of scope for P9-2 (loopback IPv4). */
+ * lwIP ip_addr_t). IPv4-ONLY: a non-IPv4 (e.g. IPv6) address is REJECTED with -1 — the raw
+ * backend's loopback netif is IPv4, so there is no IPv6 to bind. This is the explicit
+ * unsupported-family fail-early gate. */
 static int lwr_sock_bind(void *c, KlSocketHandle fd, const KlSockAddr *a) {
     (void)c;
-    if (!a || kl_sockaddr_family(a) != KL_AF_INET) return -1;
+    if (!a || kl_sockaddr_family(a) != KL_AF_INET) return -1;   /* IPv6 unsupported */
     return kl_lwr_tcp_bind((void *)fd, a->u.ip, kl_sockaddr_port(a));
 }
 
+/* connect: UNSUPPORTED. lwip-raw is a SERVER-ONLY backend — no outbound connect. Fail EARLY
+ * and CLEARLY (errno = ENOTSUP + return -1) so a KlClient on this provider aborts deterministically
+ * at connect rather than silently hanging. For an lwIP CLIENT, use the readiness socket-API lwIP
+ * integration (kl_socket_provider_lwip / kl_event_provider_lwip in keel_lwip.h). */
 static int lwr_sock_connect(void *c, KlSocketHandle fd, const KlSockAddr *a) {
     (void)c; (void)fd; (void)a;
-    return -1;   /* server-side only for P9-2; the test client uses the glue directly */
+#ifdef ENOTSUP
+    errno = ENOTSUP;
+#else
+    errno = EOPNOTSUPP;   /* nearest portable equivalent */
+#endif
+    return -1;
 }
 
 /* listen: tcp_listen relocates the pcb (frees the passed-in one, returns a smaller LISTEN
@@ -340,7 +360,7 @@ static int lwr_comp_post_recv(KlConn *c) {
     return 0;
 }
 
-/* Post one async send of the (already-serialized) response iovec (Stage B). NO allocation, NO
+/* Post one async send of the (already-serialized) response iovec. NO allocation, NO
  * whole-payload copy: translate the driver's KlIoVec array into the seam-neutral KlLwrIoVec and
  * hand it to the glue, which stores a BOUNDED copy of the iov ARRAY and pumps the referenced-in-
  * place segments through a fixed preallocated per-conn TX window across many tcp_write/tcp_sent
@@ -366,7 +386,7 @@ static int lwr_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t 
     return kl_lwr_send_begin(lwr_state(c)->lwrctx, (void *)c->fd, lv, iovcnt);
 }
 
-/* Post one async file send (Stage B): the serialized response head (`head_iov`) followed by
+/* Post one async file send: the serialized response head (`head_iov`) followed by
  * `count` bytes pread from file_fd. NO allocation, NO whole-file read: the head iov is passed
  * seam-neutrally (referenced in place / snapshotted like a buffered send) and the glue preads the
  * file body chunk-by-chunk into the same preallocated TX window (constant memory regardless of
@@ -396,7 +416,12 @@ static void lwr_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     if (st && kl_handle_valid(fd)) kl_lwr_tcp_abort(st->lwrctx, (void *)fd);
 }
 
-static int lwr_comp_post_udp_recv(struct KlUdp *udp) { (void)udp; return -1; }   /* raw UDP: future */
+/* UDP/datagram is UNSUPPORTED on lwip-raw: the paired socket provider advertises no
+ * KL_SOCK_CAP_DATAGRAM and its .dgram is NULL, so kl_udp_init on this provider fails before any
+ * post — these completion primitives return -1 as a belt-and-braces fail-early. For UDP over lwIP
+ * (KlUdp / udp_server / the built-in DNS resolver) use the readiness socket-API integration
+ * (kl_socket_provider_lwip), which folds the datagram data-plane onto the provider. */
+static int lwr_comp_post_udp_recv(struct KlUdp *udp) { (void)udp; return -1; }
 static int lwr_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
                           const KlSockAddr *dest) {
     (void)udp; (void)data; (void)len; (void)dest; return -1;
@@ -411,7 +436,7 @@ static int lwr_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t le
 static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlLwrState *st = ctx->loop._backend;
 
-    /* One lwIP mainloop tick (docs §P9-1): sys_check_timeouts() (retransmit, TCP fast/slow,
+    /* One lwIP mainloop tick: sys_check_timeouts() (retransmit, TCP fast/slow,
      * TIME-WAIT) + netif_poll(loopif) (drain the loopback TX queue so raw callbacks fire).
      * The tcp_accept/tcp_recv/tcp_sent callbacks run inline here and update per-slot state. */
     kl_lwr_lwip_tick(st ? st->loopif : NULL);

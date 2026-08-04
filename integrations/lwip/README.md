@@ -116,15 +116,66 @@ Two lwIP integrations ship:
 1. **Readiness** (the sockets layer via `lwip_poll`) — `kl_socket_provider_lwip()` +
    `kl_event_provider_lwip()`, runtime-injected into a **stock** `libkeel.a` (`NO_SYS=0`).
    Server + client + UDP + TLS, verified on loopback (see above).
-2. **Completion — the raw `tcp_*` callback API** (`NO_SYS=1`, "Phase 9", COMPLETE): a
-   `BACKEND=lwipraw` build links `event_lwip_raw.c` + `completion_driver.c` over BYO lwIP so
-   KEEL's event loop *is* the lwIP mainloop (`sys_check_timeouts()` + `netif_poll()`; raw
-   `tcp_*` callbacks feed the completion driver). A raw-backed `KlServer` serves HTTP over the
-   loopback netif — accept/recv/send, backpressure, file responses, and full
-   close/cancel/idle-timeout lifetime — all in-process (no tap, no root), CI-gated
-   (`make -C integrations/lwip loopback-raw`) and ASan+UBSan+LSan-clean. `make raw-spike` is the
-   minimal foundation spike. Notably this needed **zero** changes to `completion_driver.c` or any
-   `src/` — a third completion backend (beyond io_uring/IOCP) on the model-blind completion axis.
+2. **Completion — the raw `tcp_*` callback API** (`NO_SYS=1`, "Phase 9", COMPLETE): a pure
+   **runtime provider** (`kl_event_provider_lwip_raw()` + `kl_socket_provider_lwip_raw()`)
+   injected into a **stock** `libkeel.a` — the always-linked completion driver + dispatch reach
+   it via `loop->ops->completion` (`BACKEND=lwipraw` is retired). KEEL's event loop *is* the lwIP
+   mainloop (`sys_check_timeouts()` + `netif_poll()`; raw `tcp_*` callbacks feed the completion
+   driver). A raw-backed `KlServer` serves HTTP over the loopback netif — accept/recv/send,
+   backpressure, file responses, and full close/cancel/idle-timeout lifetime — all in-process (no
+   tap, no root), CI-gated (`make -C integrations/lwip loopback-raw`) and ASan+UBSan+LSan-clean.
+   `make raw-spike` is the minimal foundation spike. Notably this needed **zero** changes to
+   `completion_driver.c` or any `src/` — a third completion backend (beyond io_uring/IOCP) on the
+   model-blind completion axis. **Server-only, IPv4, no TLS/UDP/client** — see the capability
+   matrix below.
 
 See `docs/phase9_lwip_raw_design.md` for the full design + staged record (P9-1..P9-5) and
 `docs/lwip_platform_design.md` for the platform-port shape.
+
+## Raw completion backend — capabilities, limits, and memory
+
+The raw (`NO_SYS=1`, `tcp_*` completion) backend is a deliberately narrow, embedded-friendly
+**server**. What it does and does not support:
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| IPv4 TCP **server** (`KlServer`) | **Supported** | accept/recv/send over the loopback netif |
+| HTTP/1.1 incl. keep-alive | **Supported** | rides `KlServer` |
+| Buffered / streaming / file responses | **Supported** | **unbounded** response size; bounded transmit memory |
+| Request bodies | **Supported** | bounded per-conn receive flow-control (`ERR_MEM` backpressure) |
+| Router, middleware, CORS, SSE, body readers, compression | **Supported** | the server-path modules that ride `KlServer` |
+| Multiple **sequential** event contexts | **Supported** | create → destroy → create |
+| Outbound **client** / `connect` | **Unsupported (fails early)** | server-only — `connect` returns `-1` / `ENOTSUP` |
+| **UDP** / `udp_server` | **Unsupported (fails early)** | no datagram ops (`.dgram == NULL`) — `kl_udp_init` fails |
+| **IPv6** | **Unsupported (fails early)** | `bind` rejects a non-IPv4 address (the loopif is IPv4) |
+| **TLS-over-raw** | **Unsupported** | TLS rides the socket-BIO, which the completion path does not use — not wired |
+| **DNS**, client-side WebSocket / HTTP-2 | **Unsupported** | need the client path |
+| A **second simultaneous** raw context | **Rejected at create** | `NO_SYS=1` lwIP core is process-global |
+| Server-side WebSocket / HTTP-2 | **Not specifically demonstrated** | rides the generic completion driver (branches exist for any completion backend) but is not lwip-raw-specifically tested — no claim of tested support |
+
+For a **client**, **UDP**, **TLS/HTTPS**, or **DNS** on lwIP, use the readiness integration
+above (`keel_lwip.h`: `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`; HTTPS via the
+mbedTLS socket-BIO routed through `kl_socket_provider_lwip()`).
+
+### Max connections + per-connection memory
+
+`conn_cap = KlConfig.max_connections` is the **one authoritative capacity** — the same value
+sizes the `KlConn` pool and the backend's raw slot table (`kl_lwr_ctx_ensure_cap` at prime).
+Over-capacity accepts are rejected (`tcp_abort`), never queued.
+
+Per-connection backend memory is fixed and independent of response/request size:
+
+- **`KL_LWR_RX_MAX` = 64 KiB** — the per-conn receive bound (retained un-delivered pbuf bytes).
+- **`KL_LWR_TX_WIN` = 32 KiB + `KL_LWR_TX_HEAD` = 2 KiB = 34 KiB** — the fixed per-conn transmit
+  window (+ head-snapshot buffer) the send path pumps through.
+
+So per connection ≈ **64 KiB + 34 KiB ≈ 98 KiB**, and per-backend ≈ **`conn_cap × 98 KiB`** plus
+the ctx/slot array, **plus lwIP's own pools** (`lwipopts_raw.h`: `MEM_SIZE`, `PBUF_POOL_SIZE`,
+`MEMP_NUM_TCP_PCB`). Response/file sizes are **unbounded by design** (bounded transmit memory);
+request receive is bounded (the `ERR_MEM` backpressure gate at `KL_LWR_RX_MAX`).
+
+### Runtime constraints
+
+- **`NO_SYS=1`, single-thread** — KEEL's loop *is* the lwIP mainloop; there is **no separate lwIP
+  thread**. The thread-pool `done_fn` still runs on the loop thread, as always.
+- **One active raw context per process** (a second simultaneous context is rejected at create).

@@ -1,12 +1,60 @@
 # Phase 9 — lwIP raw-API completion event provider — Design + go decision
 
-**Status (2026-08-04): COMPLETE. P9-1..P9-5 all merged.** A working lwIP raw-API (`tcp_*`)
+**Status (2026-08-04): COMPLETE. P9-1..P9-5 all merged; hardening Stages A/B/C all done.** The
+P9-1..P9-5 record below is the original staged build; a later hardening pass added Stage A
+(per-context data model + receive/arm/completion), Stage B (bounded send + file response), and
+Stage C (capability honesty + docs — fail-early `connect`/`bind`/UDP, the Supported/Unsupported
+matrix, and the memory formula, both below). All merged. A working lwIP raw-API (`tcp_*`)
 **completion** event backend: a raw-backed `KlServer` serves HTTP over the loopback netif —
 accept/recv/send, backpressure, file responses, and full close/cancel/idle-timeout lifetime — all
 in-process, CI-gated (`loopback-raw` in the `lwip` job), and ASan+UBSan+LSan-clean. The headline
 architectural result: **`completion_driver.c` and all of `src/` needed ZERO changes** across every
 stage — a third completion backend (beyond io_uring/IOCP) dropped onto the model-blind completion
 axis verbatim, the strongest possible evidence that axis is sound.
+
+## Capabilities, limits, and memory (Stage C)
+
+The raw backend is a deliberately narrow, embedded-friendly **server**. Unsupported operations
+fail **early and clearly** at the provider seam so a caller never silently hangs; this is the
+API-facing statement (also in `integrations/lwip/keel_lwip_raw.h`), regression-tested by
+`integrations/lwip/raw_caps_test.c` (`RAW-CAPS PASS`).
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| IPv4 TCP **server** (`KlServer`) | **Supported** | accept/recv/send over the loopback netif |
+| HTTP/1.1 incl. keep-alive | **Supported** | rides `KlServer` |
+| Buffered / streaming / file responses | **Supported** | **unbounded** response size; bounded transmit memory |
+| Request bodies | **Supported** | bounded per-conn receive flow-control (`ERR_MEM` backpressure) |
+| Router, middleware, CORS, SSE, body readers, compression | **Supported** | server-path modules that ride `KlServer` |
+| Multiple **sequential** event contexts | **Supported** | create → destroy → create |
+| Outbound **client** / `connect` | **Unsupported (fails early)** | server-only — `connect` returns `-1` / `ENOTSUP` |
+| **UDP** / `udp_server` | **Unsupported (fails early)** | no datagram ops (`.dgram == NULL`) — `kl_udp_init` fails |
+| **IPv6** | **Unsupported (fails early)** | `bind` rejects a non-IPv4 address (the loopif is IPv4) |
+| **TLS-over-raw** | **Unsupported** | TLS rides the socket-BIO, which the completion path does not use — not wired |
+| **DNS**, client-side WebSocket / HTTP-2 | **Unsupported** | need the client path |
+| A **second simultaneous** raw context | **Rejected at create** | `NO_SYS=1` lwIP core is process-global |
+| Server-side WebSocket / HTTP-2 | **Not specifically demonstrated** | rides the generic completion driver (branches exist for any completion backend) but is not lwip-raw-specifically tested — no claim of tested support |
+
+For a **client**, **UDP**, **TLS/HTTPS**, or **DNS** on lwIP, use the readiness integration
+(`keel_lwip.h`: `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`; HTTPS via the mbedTLS
+socket-BIO routed through `kl_socket_provider_lwip()`).
+
+**Max connections + memory.** `conn_cap = KlConfig.max_connections` is the **one authoritative
+capacity** — the same value sizes the `KlConn` pool and the backend raw slot table
+(`kl_lwr_ctx_ensure_cap` at prime). Over-capacity accepts are rejected (`tcp_abort`), never queued.
+Per-connection backend memory is fixed, independent of response/request size:
+
+- `KL_LWR_RX_MAX` = **64 KiB** — per-conn receive bound (retained un-delivered pbuf bytes).
+- `KL_LWR_TX_WIN` + `KL_LWR_TX_HEAD` = **32 KiB + 2 KiB = 34 KiB** — the fixed per-conn transmit
+  window (+ head-snapshot buffer) the send path pumps through.
+
+So per connection ≈ **64 KiB + 34 KiB ≈ 98 KiB**; per-backend ≈ **`conn_cap × 98 KiB`** + the
+ctx/slot array, **plus lwIP's own pools** (`lwipopts_raw.h`: `MEM_SIZE`, `PBUF_POOL_SIZE`,
+`MEMP_NUM_TCP_PCB`). Response/file sizes are **unbounded by design** (bounded transmit memory);
+request receive is bounded by the `ERR_MEM` backpressure gate at `KL_LWR_RX_MAX`.
+
+**Constraints.** `NO_SYS=1`, single-thread — KEEL's loop *is* the lwIP mainloop; no separate lwIP
+thread (the thread-pool `done_fn` still runs on the loop thread). One active raw context per process.
 
 **Superseded delivery (2026-08-04, RC-3):** lwIP-raw was originally shipped as a compiled-in
 `BACKEND=lwipraw` build (P9-1..P9-5). Once the completion axis was made **runtime-injectable**
