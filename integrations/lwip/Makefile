@@ -324,8 +324,48 @@ loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	ASAN_OPTIONS=detect_leaks=1 ./raw_dns_test
 	@echo "integrations/lwip: P9/LC-1/LC-2/LC-3a/LC-3 lwIP raw completion tests OK under ASan+UBSan+LSan"
 
+# ── LC-4: HTTPS (TLS) over the lwIP-raw COMPLETION backend (BYO mbedTLS, out of CI) ──
+# The TLS counterpart of loopback-raw. Combines how loopback-tls (non-raw) links the mbedTLS adapter
+# (../mbedtls/libkeel_mbedtls.a + $(MBEDTLS_LIB)) with how loopback-raw builds the raw provider
+# objects ($(LWIPRAW_OBJS) + liblwip_raw.a on a STOCK libkeel). No lwip-raw TLS code exists — TLS
+# rides two existing generic legs (client socket-BIO through the raw socket provider; server
+# memory-BIO through completion_driver.c). See docs/phase10_lwip_raw_client_design.md §6 + §8 LC-4.
+#
+# Opt-in / out of standard CI (BYO mbedTLS), same posture as loopback-tls:
+#     make loopback-raw-tls LWIP_DIR=/path/to/lwip MBEDTLS_DIR=<prefix>
+loopback-raw-tls: $(LWIPRAW_OBJS) liblwip_raw.a
+	@echo "building STOCK libkeel (default readiness backend + completion driver/dispatch) ..."
+	$(MAKE) -C $(KEEL_ROOT)
+	$(MAKE) -C ../mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
+	  -I. -I../mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o raw_tls_test raw_tls_test.c \
+	  $(LWIPRAW_OBJS) \
+	  ../mbedtls/libkeel_mbedtls.a "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a $(MBEDTLS_LIB) -lpthread
+	./raw_tls_test
+	@echo "integrations/lwip: LC-4 HTTPS over lwIP raw completion OK (stock libkeel + lwIP raw + mbedTLS)"
+
+# ASan+UBSan+LSan variant — the TLS handshake + memory-BIO drain path is the new memory surface.
+loopback-raw-tls-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
+	@echo "building STOCK DEBUG libkeel (ASan+UBSan) ..."
+	$(MAKE) -C $(KEEL_ROOT) debug
+	$(MAKE) -C ../mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra -Werror \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -c -o event_lwip_raw.o event_lwip_raw.c
+	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -Iintegrations/lwip -I. -I$(KEEL_ROOT)/include \
+	  -c -o lwip_raw_glue.o lwip_raw_glue.c
+	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -Iintegrations/lwip -I. -c -o lwip_raw_testclient.o \
+	  lwip_raw_testclient.c
+	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
+	  -I. -I../mbedtls $(MBEDTLS_INC) -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o raw_tls_test raw_tls_test.c \
+	  $(LWIPRAW_OBJS) \
+	  ../mbedtls/libkeel_mbedtls.a "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a $(MBEDTLS_LIB) -lpthread
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./raw_tls_test
+	@echo "integrations/lwip: LC-4 HTTPS over lwIP raw completion OK under ASan+UBSan+LSan"
+
 clean:
-	rm -f *.o *.a lwip_loopback_test raw_loopback_spike raw_tick_test raw_recv_test raw_send_test raw_caps_test raw_client_test raw_he_test raw_udp_test raw_dns_test
+	rm -f *.o *.a lwip_loopback_test raw_loopback_spike raw_tick_test raw_recv_test raw_send_test raw_caps_test raw_client_test raw_he_test raw_udp_test raw_dns_test raw_tls_test
 	rm -rf $(RAW_BUILD)
 
-.PHONY: check loopback loopback-tls raw-spike loopback-raw loopback-raw-asan clean
+.PHONY: check loopback loopback-tls raw-spike loopback-raw loopback-raw-asan loopback-raw-tls loopback-raw-tls-asan clean
