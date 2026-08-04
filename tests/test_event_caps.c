@@ -13,6 +13,7 @@
 #include "utest.h"
 #include "../src/event_caps.h"
 #include "../src/socket.h"   /* internal KL_SOCK_CAP_OVERLAPPED (Phase 8) */
+#include "../src/io_engine.h"   /* kl_completion_axis_available() — 0 under KEEL_NO_COMPLETION */
 
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
@@ -103,6 +104,15 @@ UTEST(event_caps, negotiation_matrix_readiness) {
 
 UTEST(event_caps, negotiation_matrix_completion) {
     unsigned completion = KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
+    if (!kl_completion_axis_available()) {
+        /* KEEL_NO_COMPLETION: the completion axis is compiled out (completion_absent.c),
+         * so a completion loop is fail-loud INCOMPATIBLE with every provider — there is
+         * no driver to run it. */
+        ASSERT_FALSE(kl_caps_compatible(completion, &overlapped_provider));
+        ASSERT_FALSE(kl_caps_compatible(completion, &native_provider));
+        ASSERT_FALSE(kl_caps_compatible(completion, NULL));
+        return;
+    }
     /* A completion loop needs a provider that routes I/O through its submit path. */
     ASSERT_TRUE(kl_caps_compatible(completion, &overlapped_provider));   /* OVERLAPPED */
     ASSERT_FALSE(kl_caps_compatible(completion, &native_provider));      /* sync send/recv only */

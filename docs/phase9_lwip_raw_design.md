@@ -1,12 +1,19 @@
 # Phase 9 — lwIP raw-API completion event provider — Design + go decision
 
 **Status (2026-08-04): COMPLETE. P9-1..P9-5 all merged.** A working lwIP raw-API (`tcp_*`)
-**completion** event backend (`BACKEND=lwipraw`): a raw-backed `KlServer` serves HTTP over the
-loopback netif — accept/recv/send, backpressure, file responses, and full close/cancel/idle-timeout
-lifetime — all in-process, CI-gated (`loopback-raw` in the `lwip` job), and ASan+UBSan+LSan-clean.
-The headline architectural result: **`completion_driver.c` and all of `src/` needed ZERO changes**
-across every stage — a third completion backend (beyond io_uring/IOCP) dropped onto the model-blind
-completion axis verbatim, the strongest possible evidence that axis is sound.
+**completion** event backend: a raw-backed `KlServer` serves HTTP over the loopback netif —
+accept/recv/send, backpressure, file responses, and full close/cancel/idle-timeout lifetime — all
+in-process, CI-gated (`loopback-raw` in the `lwip` job), and ASan+UBSan+LSan-clean. The headline
+architectural result: **`completion_driver.c` and all of `src/` needed ZERO changes** across every
+stage — a third completion backend (beyond io_uring/IOCP) dropped onto the model-blind completion
+axis verbatim, the strongest possible evidence that axis is sound.
+
+**Superseded delivery (2026-08-04, RC-3):** lwIP-raw was originally shipped as a compiled-in
+`BACKEND=lwipraw` build (P9-1..P9-5). Once the completion axis was made **runtime-injectable**
+(`docs/completion_axis_runtime_design.md`), lwIP-raw became a **pure runtime provider**
+(`kl_event_provider_lwip_raw()`) injected on a **stock `libkeel`**, and `BACKEND=lwipraw` was
+retired. The P9 cases now run via runtime injection (`integrations/lwip loopback-raw`); the design +
+mechanics below are unchanged, only the packaging (BACKEND → runtime provider).
 
 *(Originally: GO gated on testability, PROVEN by a spike — see below.)*
 

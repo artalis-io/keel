@@ -86,6 +86,12 @@ Core TUs (`server.c`, `connection.c`, `client.c`, `udp.c`, `dns_resolver.c`,
   readiness seam already accepts a descriptor-based provider (lwIP **socket** API +
   its `poll` shim) with no core change; the completion model is the one scoped
   future extension (see `pal_transformation_design.md`, "event-axis").
+  **Realized (2026-08-04):** both the completion consumers this anticipated exist and
+  the completion axis is now itself **runtime-injectable** (an internal `KlCompletionOps`
+  sub-vtable off `KlEventOps`, dispatched like the readiness ops) — IOCP + io_uring
+  (Phase 8) and lwIP-raw (Phase 9, now a runtime provider on a stock `libkeel`). The
+  event↔socket decoupling this invariant protects is what let all three land with no
+  core rework. See `docs/completion_axis_runtime_design.md`.
 - **F4 — `struct sockaddr` is baked into `KlSocketOps`. DEFERRED (revisit later).**
   Fine for POSIX/Winsock/lwIP-socket; a non-BSD address world (UEFI, some raw
   stacks) would want an address abstraction. Consistent with "add address types

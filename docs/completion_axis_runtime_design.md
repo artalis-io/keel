@@ -1,6 +1,14 @@
 # Making the completion axis runtime-injectable — Design
 
-**Status (2026-08-04): DRAFT for review.** Goal: let a completion event backend be installed at
+**Status (2026-08-04): COMPLETE. RC-1..RC-4 all merged (PRs #184–#187).** The completion axis is
+now runtime-injectable: a completion backend installs via `KlEventCtx.event_provider` on a **stock**
+`libkeel` — proven by pollcomp serving `GET /` on a default readiness build (RC-2) and lwIP-raw
+running the full P9 suite as a runtime provider on a stock libkeel (RC-3, retiring `BACKEND=lwipraw`).
+`BACKEND=` remains the compiled-in default-selector; `KEEL_NO_COMPLETION` is the readiness-only
+opt-out (CI-gated). `completion_driver.c`/`src` primitives' logic never changed — only their
+plumbing (RC-1).
+
+Goal: let a completion event backend be installed at
 **runtime** via `KlEventCtx.event_provider` (like the readiness lwIP provider is today), instead of
 only at **link time** via `BACKEND=`. This is the deferred alternative from
 `docs/phase9_lwip_raw_design.md` ("Architectural shape"): once landed, `event_lwip_raw.c` (and any
@@ -250,8 +258,11 @@ via `kl_event_provider_<x>()`). `pollcomp` is the RC-2 subject (portable, POSIX,
   (P9-1 tick → P9-4 lifetime) pass via injection on a stock libkeel, ASan+UBSan+LSan-clean. The
   `BACKEND=lwipraw` root-Makefile case is removed. Regressions green (default / pollcomp-inject /
   iouring gate).
-- **RC-4 — docs + `KEEL_NO_COMPLETION` CI cell.** Update `phase9`/`event_provider`/`pal_review`
-  docs; add a `KEEL_NO_COMPLETION` build to CI.
+- **RC-4 — DONE.** `KEEL_NO_COMPLETION` added as a CI matrix cell (build + full readiness suite +
+  smoke); `test_event_caps.negotiation_matrix_completion` made correct under the opt-out (branches
+  on the runtime `kl_completion_axis_available()` — a completion loop is fail-loud incompatible when
+  the axis is compiled out). Cross-ref docs updated (`phase9_lwip_raw_design`, `event_provider_design`,
+  `pal_review`). Effort COMPLETE.
 
 ## Risks / notes
 
