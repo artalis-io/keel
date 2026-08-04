@@ -237,12 +237,18 @@ loopback-raw: $(LWIPRAW_OBJS) liblwip_raw.a
 	  -o raw_client_test raw_client_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
+	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o raw_he_test raw_he_test.c \
+	  $(LWIPRAW_OBJS) \
+	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	./raw_tick_test
 	./raw_recv_test
 	./raw_send_test
 	./raw_caps_test
 	./raw_client_test
-	@echo "integrations/lwip: P9/LC-1 lwIP raw completion tests OK (runtime injection on stock libkeel)"
+	./raw_he_test
+	@echo "integrations/lwip: P9/LC-1/LC-2 lwIP raw completion tests OK (runtime injection on stock libkeel)"
 
 # ASan+UBSan+LSan variant — the lifetime/close/cancel + Stage-A receive/context cases need it.
 # Builds a STOCK DEBUG libkeel (make -C .. debug) + sanitizer-instrumented provider objects + tests.
@@ -281,15 +287,21 @@ loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	  -o raw_client_test raw_client_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
+	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o raw_he_test raw_he_test.c \
+	  $(LWIPRAW_OBJS) \
+	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	ASAN_OPTIONS=detect_leaks=1 ./raw_tick_test
 	ASAN_OPTIONS=detect_leaks=1 ./raw_recv_test
 	ASAN_OPTIONS=detect_leaks=1 ./raw_send_test
 	ASAN_OPTIONS=detect_leaks=1 ./raw_caps_test
 	ASAN_OPTIONS=detect_leaks=1 ./raw_client_test
-	@echo "integrations/lwip: P9/LC-1 lwIP raw completion tests OK under ASan+UBSan+LSan"
+	ASAN_OPTIONS=detect_leaks=1 ./raw_he_test
+	@echo "integrations/lwip: P9/LC-1/LC-2 lwIP raw completion tests OK under ASan+UBSan+LSan"
 
 clean:
-	rm -f *.o *.a lwip_loopback_test raw_loopback_spike raw_tick_test raw_recv_test raw_send_test raw_caps_test raw_client_test
+	rm -f *.o *.a lwip_loopback_test raw_loopback_spike raw_tick_test raw_recv_test raw_send_test raw_caps_test raw_client_test raw_he_test
 	rm -rf $(RAW_BUILD)
 
 .PHONY: check loopback loopback-tls raw-spike loopback-raw loopback-raw-asan clean
