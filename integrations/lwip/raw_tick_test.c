@@ -144,8 +144,11 @@ static void *server_thread(void *arg) {
 }
 
 static int run_p9_2(void) {
+    /* RC-3: inject the lwip-raw completion backend at runtime on a STOCK libkeel. Setting
+     * only event_provider lets the server auto-wire the paired overlapped socket provider
+     * from the loop's native_provider() (kl_socket_provider_lwip_raw). */
     KlConfig cfg = { .port = P9_2_PORT, .bind_addr = "127.0.0.1",
-                     .sockets = kl_socket_provider_lwip_raw() };
+                     .event_provider = kl_event_provider_lwip_raw() };
     if (kl_server_init(&g_srv, &cfg) != 0) {
         printf("P9-2 FAIL: kl_server_init (err=%d)\n", g_srv.last_error);
         return 1;
@@ -315,7 +318,7 @@ static int run_p9_3(void) {
     }
 
     KlConfig cfg = { .port = P9_3_PORT, .bind_addr = "127.0.0.1",
-                     .sockets = kl_socket_provider_lwip_raw() };
+                     .event_provider = kl_event_provider_lwip_raw() };   /* RC-3 runtime inject */
     if (kl_server_init(&g_srv3, &cfg) != 0) {
         printf("P9-3 FAIL: kl_server_init (err=%d)\n", g_srv3.last_error);
         unlink(g_file_path);
@@ -513,7 +516,7 @@ static int run_p9_4(void) {
     /* Short read timeout so the idle-timeout case (C4) fires quickly. */
     KlConfig cfg = { .port = P9_4_PORT, .bind_addr = "127.0.0.1",
                      .read_timeout_ms = 200,
-                     .sockets = kl_socket_provider_lwip_raw() };
+                     .event_provider = kl_event_provider_lwip_raw() };   /* RC-3 runtime inject */
     if (kl_server_init(&g_srv4, &cfg) != 0) {
         printf("P9-4 FAIL: kl_server_init (err=%d)\n", g_srv4.last_error);
         return 1;

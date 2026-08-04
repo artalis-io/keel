@@ -524,6 +524,10 @@ jobs:
         timeout-minutes: 5
         run: make -C integrations/lwip raw-spike LWIP_DIR="$HOME/lwip"
 
-      - name: lwIP raw completion backend — P9-1 tick test (BACKEND=lwipraw + completion_driver)
+      - name: lwIP raw completion backend — P9 cases via runtime injection on STOCK libkeel (RC-3)
         timeout-minutes: 5
         run: make -C integrations/lwip loopback-raw LWIP_DIR="$HOME/lwip"
+
+      - name: lwIP raw completion backend — P9 cases under ASan+UBSan+LSan (RC-3, P9-4 lifetime)
+        timeout-minutes: 8
+        run: make -C integrations/lwip loopback-raw-asan LWIP_DIR="$HOME/lwip"
