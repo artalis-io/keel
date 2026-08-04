@@ -189,6 +189,26 @@ typedef struct {
     size_t          pend_write_bytes; /* bytes acked for the pending WRITE */
     int             pend_terminal;    /* a terminal (ok=0) completion waiting to be surfaced */
 
+    /* ── outbound client state (LC-1) ─────────────────────────────────────────────
+     * A client slot is created by kl_lwr_connect for a client pcb (tcp_connect). It reuses the
+     * SAME retained-recv queue (rx_head/rx_queued) for the RESPONSE (lwr_srv_recv is direction-
+     * agnostic). But its completions do NOT flow through the server-side KL_COMP_ACCEPT/READ/WRITE/
+     * terminal path (those need a KlConn target the driver owns). Instead:
+     *   - the connect result surfaces as KL_LWR_CONNECT (pend_connect + connect_ok), routed to the
+     *     client's tagged watcher as KL_COMP_CONNECT;
+     *   - the data plane rides the client's readiness watcher: the backend records the armed watcher
+     *     (watcher_udata + watcher_mask, captured at lwr_ev_add/mod) and the drain relays it as
+     *     KL_COMP_WATCHER when the pcb is writable (sndbuf headroom) or readable (rx queued/closed).
+     *     The client's kl_sock_send/kl_sock_recv on the pcb are real (kl_lwr_client_send/_recv).
+     * No KlConn, no server-side completion path — the seam holds. The request send does NOT use the
+     * Stage-B pump (that surfaces a server KL_COMP_WRITE); the client writes via kl_lwr_client_send. */
+    int             is_client;        /* 1 = an outbound client pcb (kl_lwr_connect) */
+    int             connected;        /* client: TCP connected (connected_cb fired ERR_OK) */
+    int             pend_connect;     /* client: a connect completion is waiting to be surfaced */
+    int             connect_ok;       /* client: 1 = connected, 0 = failed (with pend_connect) */
+    void           *watcher_udata;    /* client: the tagged KlWatcher udata (connect + data plane) */
+    unsigned        watcher_mask;     /* client: armed readiness mask (KL_LWR_EV_READ/WRITE) */
+
     /* ── Stage B outgoing send state (BOUNDED, PREALLOCATED — no whole-payload copy) ──
      * A send references its source in place (the live KlResponse segments) and pumps THROUGH a
      * fixed preallocated window. `send_active` = a send is in flight (replaces the old
@@ -705,6 +725,179 @@ static err_t lwr_srv_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
     return ERR_OK;
 }
 
+/* ── outbound client (LC-1): tcp_connect + connected_cb + client teardown ─────────
+ * A client slot reuses the retained-recv queue (lwr_srv_recv) for the response. Its request send
+ * is a direct real kl_lwr_client_send (NOT the Stage-B pump) and its completions surface via the
+ * client's tagged watcher (KL_LWR_CONNECT for connect; KL_COMP_WATCHER relay for the data plane) —
+ * never the server-side KL_LWR_WRITE/terminal path (which needs a KlConn the driver owns). So the
+ * client uses its OWN err callback (lwr_cli_err), keyed by tcp_arg == the watcher udata. */
+
+/* Find a client slot by its tagged-watcher udata (the err callback's arg after the pcb is freed). */
+static KlLwrConn *lwr_client_by_watcher(KlLwrCtx *ctx, const void *watcher) {
+    if (!ctx || watcher == NULL) return NULL;
+    for (int i = 0; i < ctx->conn_cap; i++)
+        if (ctx->conns[i].is_client && ctx->conns[i].watcher_udata == watcher &&
+            (ctx->conns[i].pcb != NULL || ctx->conns[i].dead))
+            return &ctx->conns[i];
+    return NULL;
+}
+
+/* client err callback: lwIP has already freed the pcb. Key the slot by the watcher udata (tcp_arg).
+ * If the connect had not yet completed, this is a CONNECT FAILURE → surface a failed connect
+ * completion (pend_connect, connect_ok=0). If already connected, it is a mid-stream RST → mark the
+ * slot closed+dead so the client's next readable relay + kl_lwr_client_recv return EOF (0). Frees
+ * the rx chain by owner; clears the live handle so find() can't alias a reused address. */
+static void lwr_cli_err(void *arg, err_t err) {
+    (void)err;
+    KlLwrCtx *ctx = lwr_ctx();
+    KlLwrConn *c = lwr_client_by_watcher(ctx, arg);
+    if (!c) return;
+    lwr_rx_free(c);
+    c->dead_fd = c->pcb;
+    c->pcb = NULL;
+    c->dead = 1;
+    c->closed = 1;
+    if (!c->connected && !c->pend_connect) {   /* connect failed before connected_cb succeeded */
+        c->pend_connect = 1;
+        c->connect_ok = 0;
+    }
+    /* If already connected, the closed+dead flags drive the client's readable relay → recv EOF. */
+}
+
+/* connected callback: on ERR_OK mark the slot connected, wire recv/sent, and surface a SUCCESS
+ * connect completion. On any error surface a FAILED connect completion (the pcb is torn down by
+ * lwIP after we return the error, and lwr_cli_err may also fire — pend_connect is set at most once). */
+static err_t lwr_cli_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
+    (void)arg;
+    KlLwrCtx *ctx = lwr_ctx();
+    KlLwrConn *c = lwr_conn_find(ctx, tpcb);
+    if (!c) return ERR_ABRT;   /* no slot (should not happen) — abort the pcb */
+    if (err != ERR_OK) {
+        if (!c->pend_connect) { c->pend_connect = 1; c->connect_ok = 0; }
+        return err;
+    }
+    c->connected = 1;
+    tcp_recv(tpcb, lwr_srv_recv);   /* the retained-recv path is direction-agnostic (response) */
+    tcp_sent(tpcb, lwr_srv_sent);   /* harmless for the client (send_active is never set) */
+    if (!c->pend_connect) { c->pend_connect = 1; c->connect_ok = 1; }
+    return ERR_OK;
+}
+
+int kl_lwr_connect(void *lwrctx, void *pcb, const uint8_t ip4[4], uint16_t port,
+                   void *owner_watcher) {
+    KlLwrCtx *ctx = lwrctx;
+    struct tcp_pcb *p = (struct tcp_pcb *)pcb;
+    if (!ctx || p == NULL || !ip4) return -1;
+
+    /* Reserve a slot for the client pcb (reuse the accepted-pcb slot machinery). */
+    KlLwrConn *c = lwr_conn_alloc(ctx, p);
+    if (!c) return -1;                 /* table full — caller closes the pcb */
+    c->is_client     = 1;
+    c->watcher_udata = owner_watcher;  /* tagged KlWatcher udata — connect + data-plane relay */
+    c->owner         = NULL;           /* client slots never carry a KlConn owner */
+
+    tcp_arg(p, owner_watcher);         /* lwr_cli_err receives this (owner-keyed teardown) */
+    tcp_err(p, lwr_cli_err);
+
+    ip_addr_t dst;
+    IP_ADDR4(&dst, ip4[0], ip4[1], ip4[2], ip4[3]);
+    err_t rc = tcp_connect(p, &dst, port, lwr_cli_connected);
+    if (rc != ERR_OK) {
+        /* Local failure (out of memory / bad args): detach + abort, free the slot. The caller owns
+         * closing on -1, but the pcb is already unusable — abort here and clear the slot so no
+         * dangling completion is surfaced. */
+        tcp_arg(p, NULL);
+        tcp_err(p, NULL);
+        lwr_slot_clear(c);
+        tcp_abort(p);
+        return -1;
+    }
+    return 0;
+}
+
+/* ── client data-plane: watcher recording + readiness relay + real send/recv (LC-1) ──────── */
+
+void kl_lwr_client_watch(void *lwrctx, void *pcb, unsigned mask, void *watcher_udata) {
+    KlLwrCtx *ctx = lwrctx;
+    KlLwrConn *c = lwr_conn_find(ctx, (struct tcp_pcb *)pcb);
+    if (!c || !c->is_client) return;
+    c->watcher_mask  = mask;
+    c->watcher_udata = watcher_udata;
+}
+
+void kl_lwr_client_unwatch(void *lwrctx, void *pcb) {
+    KlLwrCtx *ctx = lwrctx;
+    KlLwrConn *c = lwr_conn_find(ctx, (struct tcp_pcb *)pcb);
+    if (c && c->is_client) c->watcher_mask = 0;
+}
+
+int kl_lwr_next_client_ready(void *lwrctx, int *cursor, void **watcher_udata, unsigned *mask) {
+    KlLwrCtx *ctx = lwrctx;
+    if (!ctx || !cursor) return 0;
+    for (int i = *cursor; i < ctx->conn_cap; i++) {
+        KlLwrConn *c = &ctx->conns[i];
+        if (!c->is_client || !c->watcher_mask || c->watcher_udata == NULL) continue;
+        unsigned ready = 0;
+        /* Readable: rx data queued OR the peer closed/errored (EOF the client must observe). */
+        if ((c->watcher_mask & KL_LWR_EV_READ) &&
+            (c->rx_queued > 0 || c->closed || c->dead))
+            ready |= KL_LWR_EV_READ;
+        /* Writable: connected + live + tcp_sndbuf headroom (the client can queue more request). */
+        if ((c->watcher_mask & KL_LWR_EV_WRITE) && c->connected && !c->dead && c->pcb != NULL &&
+            tcp_sndbuf(c->pcb) > 0)
+            ready |= KL_LWR_EV_WRITE;
+        if (!ready) continue;
+        *cursor = i + 1;
+        if (watcher_udata) *watcher_udata = c->watcher_udata;
+        if (mask)          *mask          = ready;
+        return 1;
+    }
+    *cursor = ctx->conn_cap;
+    return 0;
+}
+
+long kl_lwr_client_send(void *lwrctx, void *pcb, const void *buf, size_t len, int *would_block) {
+    KlLwrCtx *ctx = lwrctx;
+    struct tcp_pcb *p = (struct tcp_pcb *)pcb;
+    KlLwrConn *c = lwr_conn_find(ctx, p);
+    if (would_block) *would_block = 0;
+    if (!c || !c->is_client || !c->connected || c->dead || p == NULL) return -1;
+    if (len == 0) return 0;
+
+    u16_t sndbuf = tcp_sndbuf(p);
+    if (sndbuf == 0) { if (would_block) *would_block = 1; return 0; }   /* EAGAIN — re-arm WRITE */
+    size_t chunk = len;
+    if (chunk > sndbuf) chunk = sndbuf;
+    if (chunk > KL_LWR_TCP_WRITE_MAX) chunk = KL_LWR_TCP_WRITE_MAX;
+
+    err_t w = tcp_write(p, buf, (u16_t)chunk, TCP_WRITE_FLAG_COPY);
+    if (w == ERR_MEM) { if (would_block) *would_block = 1; return 0; }  /* queue full — EAGAIN */
+    if (w != ERR_OK) return -1;                                         /* hard error */
+    tcp_output(p);
+    return (long)chunk;
+}
+
+long kl_lwr_client_recv(void *lwrctx, void *pcb, void *dst, size_t cap, int *would_block) {
+    KlLwrCtx *ctx = lwrctx;
+    struct tcp_pcb *p = (struct tcp_pcb *)pcb;
+    KlLwrConn *c = lwr_conn_find(ctx, p);
+    if (would_block) *would_block = 0;
+    /* A dead/closed slot with no queued data = EOF (0). find() returns NULL for a dead slot (pcb
+     * cleared), so look it up by the fd handle too so a post-RST recv reports EOF, not an error. */
+    if (!c) {
+        KlLwrConn *d = lwr_slot_by_fd(ctx, pcb);
+        if (d && d->is_client && (d->closed || d->dead)) return 0;   /* EOF */
+        return -1;
+    }
+    if (!c->is_client) return -1;
+    if (c->rx_queued > 0)
+        return (long)kl_lwr_take_staged(ctx, p, dst, cap);
+    if (c->closed || c->dead) return 0;                              /* peer closed — EOF */
+    if (c->connected) { if (would_block) *would_block = 1; return -1; }  /* no data yet — EAGAIN */
+    if (would_block) *would_block = 1;
+    return -1;
+}
+
 /* ── socket-provider primitives on tcp_pcb ─────────────────────────────────── */
 
 void *kl_lwr_tcp_new(void) {
@@ -998,6 +1191,22 @@ int kl_lwr_drain(void *lwrctx, KlLwrRecord *out, int max) {
     for (int i = 0; i < ctx->conn_cap && n < max; i++) {
         KlLwrConn *c = &ctx->conns[i];
         if (c->pcb == NULL && !c->dead) continue;   /* free slot */
+
+        /* Client slots (LC-1) surface ONLY the connect completion here; their data plane rides the
+         * watcher relay (kl_lwr_next_client_ready) + real send/recv, never the server-side
+         * ACCEPT/WRITE/terminal path (which needs a KlConn target). */
+        if (c->is_client) {
+            if (c->pend_connect && n < max) {
+                KlLwrRecord *r = &out[n++];
+                memset(r, 0, sizeof(*r));
+                r->kind  = KL_LWR_CONNECT;
+                r->pcb   = c->pcb;              /* may be NULL if a pre-connect err freed it */
+                r->owner = c->watcher_udata;    /* the tagged KlWatcher udata → KL_COMP_CONNECT */
+                r->ok    = c->connect_ok;
+                c->pend_connect = 0;
+            }
+            continue;
+        }
 
         if (c->pend_accept && n < max) {
             KlLwrRecord *r = &out[n++];

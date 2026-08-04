@@ -141,20 +141,37 @@ static int lwr_ev_init(KlEventLoop *loop) {
     return 0;
 }
 
-/* Connection I/O is driven by posted completions (recv/send via the tcp_* callbacks), not
- * readiness watches, so add/mod/del are inert — matching the IOCP model. The server path this
- * backend supports (accept/recv/send/sendfile over the completion driver) needs no readiness
- * watch registration; timers ride the KlEventCtx timer heap the drain checks each tick. */
+/* SERVER connection I/O is driven by posted completions (recv/send via the tcp_* callbacks), not
+ * readiness watches, so for server conns add/mod/del are inert — matching the IOCP model.
+ *
+ * CLIENT data plane (LC-1), however, rides a readiness watcher: the async KlClient arms a
+ * KL_EVENT_WRITE/READ watcher on its connect pcb for the send/recv phase (it has no KlConn, so it
+ * cannot use the server-side completion post path). Since a NO_SYS=1 raw loop has no pollable fd,
+ * add/mod RECORD the armed watcher (fd == the client pcb; udata == the tagged KlWatcher) into the
+ * glue's client slot, and lwr_comp_drain relays it as KL_COMP_WATCHER when the pcb is writable/
+ * readable. The recording is a no-op for a non-client (server) pcb. This keeps the client's
+ * readiness-shaped I/O working over the raw loop without any lwIP type reaching client.c — the
+ * design doc's "reach the backend only through the completion contract + the tagged watcher". The
+ * mask is passed through as KlEventMask (numerically == the KL_LWR_EV_* seam bits, asserted below). */
+_Static_assert((unsigned)KL_EVENT_READ  == KL_LWR_EV_READ,  "KlEventMask READ must match seam bit");
+_Static_assert((unsigned)KL_EVENT_WRITE == KL_LWR_EV_WRITE, "KlEventMask WRITE must match seam bit");
+
 static int lwr_ev_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
-    (void)loop; (void)fd; (void)mask; (void)udata;
+    KlLwrState *st = loop ? loop->_backend : NULL;
+    if (st && kl_handle_valid(fd))
+        kl_lwr_client_watch(st->lwrctx, (void *)fd, (unsigned)mask, udata);
     return 0;
 }
 static int lwr_ev_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
-    (void)loop; (void)fd; (void)mask; (void)udata;
+    KlLwrState *st = loop ? loop->_backend : NULL;
+    if (st && kl_handle_valid(fd))
+        kl_lwr_client_watch(st->lwrctx, (void *)fd, (unsigned)mask, udata);
     return 0;
 }
 static int lwr_ev_del(KlEventLoop *loop, KlSocketHandle fd) {
-    (void)loop; (void)fd;
+    KlLwrState *st = loop ? loop->_backend : NULL;
+    if (st && kl_handle_valid(fd))
+        kl_lwr_client_unwatch(st->lwrctx, (void *)fd);
     return 0;
 }
 
@@ -287,10 +304,45 @@ static int lwr_sock_getaddr(void *c, KlSocketHandle fd, KlSockAddr *out) {
 static int lwr_sock_soerror(void *c, KlSocketHandle fd, int *out_err) {
     (void)c; (void)fd; if (out_err) *out_err = 0; return 0;
 }
-static kl_ssize_t lwr_sock_io(void *c, KlSocketHandle fd, void *b, size_t n) {
-    (void)c; (void)fd; (void)b; (void)n; return -1;   /* I/O rides the completion path */
+
+/* Return -1 with errno = EAGAIN — the client's io_read/io_write treat EAGAIN as "re-arm the
+ * readiness watcher" (which, on the raw loop, means the drain relays it again when ready). */
+static kl_ssize_t lwr_io_eagain(void) {
+#ifdef EAGAIN
+    errno = EAGAIN;
+#else
+    errno = EWOULDBLOCK;
+#endif
+    return -1;
 }
-static kl_ssize_t lwr_sock_io_const(void *c, KlSocketHandle fd, const void *b, size_t n) {
+
+/* CLIENT send (LC-1): route to the glue's real client send. Server conns never call this (server
+ * I/O rides the completion post path), so a non-client pcb falls through to a hard error. `would_
+ * block` (no tcp_sndbuf headroom / ERR_MEM) maps to EAGAIN so the client re-arms the WRITE watcher.
+ * A short write (chunk < n) is a normal partial send — the client loops. */
+static kl_ssize_t lwr_sock_send(void *c, KlSocketHandle fd, const void *b, size_t n) {
+    (void)c;
+    if (!kl_handle_valid(fd)) return -1;
+    int wb = 0;
+    long r = kl_lwr_client_send(kl_lwr_active_ctx(), (void *)fd, b, n, &wb);
+    if (r < 0) return -1;                 /* hard error / not a connected client */
+    if (r == 0 && wb) return lwr_io_eagain();
+    return (kl_ssize_t)r;
+}
+
+/* CLIENT recv (LC-1): route to the glue's real client recv (drains the retained rx queue). Returns
+ * 0 on peer close (EOF), >0 bytes, or EAGAIN when connected with no data yet. */
+static kl_ssize_t lwr_sock_recv(void *c, KlSocketHandle fd, void *b, size_t n) {
+    (void)c;
+    if (!kl_handle_valid(fd)) return -1;
+    int wb = 0;
+    long r = kl_lwr_client_recv(kl_lwr_active_ctx(), (void *)fd, b, n, &wb);
+    if (r < 0) return wb ? lwr_io_eagain() : (kl_ssize_t)-1;
+    return (kl_ssize_t)r;   /* 0 = EOF, >0 = bytes */
+}
+
+/* recv_peek is unused by the async client (io_read uses .recv). Keep it a hard error. */
+static kl_ssize_t lwr_sock_io(void *c, KlSocketHandle fd, void *b, size_t n) {
     (void)c; (void)fd; (void)b; (void)n; return -1;
 }
 
@@ -303,7 +355,7 @@ static const KlSocketOps lwip_raw_sock_ops = {
     .socket = lwr_sock_socket, .connect = lwr_sock_connect, .bind = lwr_sock_bind,
     .listen = lwr_sock_listen, .accept = lwr_sock_accept, .close = lwr_sock_close,
     .get_local_addr = lwr_sock_getaddr, .get_so_error = lwr_sock_soerror,
-    .send = lwr_sock_io_const, .recv = lwr_sock_io, .recv_peek = lwr_sock_io,
+    .send = lwr_sock_send, .recv = lwr_sock_recv, .recv_peek = lwr_sock_io,
     .writev = NULL, .sendfile = NULL, .destroy = NULL,
     .name = "lwip-raw",
 };
@@ -466,6 +518,20 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             continue;
         }
 
+        if (r->kind == KL_LWR_CONNECT) {
+            /* An outbound client connect finished (LC-1). The consumer is the async KlClient, not
+             * the server driver — route it exactly like KL_COMP_WATCHER (the driver dispatches it
+             * via kl_event_dispatch to the client's tagged connect watcher). r->owner carries the
+             * tagged KlWatcher udata; the result is mask-encoded (KL_EVENT_WRITE = connected, 0 =
+             * failed) matching pollcomp/io_uring, so client.c's connect branch is unchanged. */
+            ev->kind = KL_COMP_CONNECT;
+            ev->target = r->owner;
+            ev->ok = r->ok;
+            ev->bytes = r->ok ? (size_t)KL_EVENT_WRITE : 0;
+            count++;
+            continue;
+        }
+
         /* KL_LWR_WRITE — a completed send (ok=1) OR a terminal close (ok=0). */
         KlConn *c = r->owner;
         if (!c) continue;
@@ -515,6 +581,25 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         count++;
     }
 
+    /* (c) CLIENT data-plane readiness relay (LC-1): the async KlClient armed a KL_EVENT_WRITE/READ
+     * watcher on its connect pcb (recorded via lwr_ev_add/mod). Surface KL_COMP_WATCHER for each
+     * client pcb whose armed condition is met (writable = sndbuf headroom; readable = rx queued or
+     * peer-closed). The driver routes it via kl_event_dispatch to the client's watcher (async_on_
+     * event → send/recv over the real client send/recv ops). Bounded by conn_cap. */
+    int ccursor = 0;
+    void *cwatcher = NULL;
+    unsigned cmask = 0;
+    while (count < max &&
+           kl_lwr_next_client_ready(st->lwrctx, &ccursor, &cwatcher, &cmask)) {
+        KlCompletionEvent *ev = &out[count];
+        memset(ev, 0, sizeof(*ev));
+        ev->kind = KL_COMP_WATCHER;
+        ev->target = cwatcher;          /* tagged KlWatcher udata → kl_event_dispatch */
+        ev->ok = 1;
+        ev->bytes = (size_t)cmask;       /* the ready readiness mask (KL_EVENT_READ/WRITE) */
+        count++;
+    }
+
     /* No fd to block on in NO_SYS=1; if nothing completed, honour a positive timeout as a
      * bounded sleep so a caller's run loop doesn't busy-spin. When events fired, return
      * immediately so the loop processes them promptly. */
@@ -537,13 +622,19 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
  * so the KlEventOps literal carries it. Static: there is NO kl_comp_ops_builtin here — a
  * pure runtime provider never binds the compiled-in default path, so it links cleanly
  * next to a stock libkeel (whose readiness kl_comp_ops_builtin stub owns that symbol). */
-/* Outbound connect (LC-0 completion CONNECT contract): the raw backend is SERVER-ONLY —
- * outbound client connect is not implemented until LC-1 (tcp_connect + connected_cb). Fail
- * early + clearly so an async KlClient on this backend cannot silently hang. */
+/* Outbound connect (LC-0 completion CONNECT contract; LC-1 raw impl): drive tcp_connect via the
+ * glue. `fd` is the client pcb the client created (lwr_sock_socket == tcp_new); marshal the
+ * KlSockAddr's IPv4 bytes + port and hand the tagged watcher udata to the glue, which reserves a
+ * per-conn slot, tags tcp_arg + tcp_err, and issues tcp_connect(pcb, ip, port, connected_cb). On
+ * the later tick the connected_cb enqueues a per-slot pend_connect that lwr_comp_drain surfaces as
+ * KL_COMP_CONNECT to `watcher_udata` (mask-encoded win/fail). IPv4-only (the loopif is IPv4). */
 static int lwr_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
                                  const KlSockAddr *addr, void *watcher_udata) {
-    (void)ctx; (void)fd; (void)addr; (void)watcher_udata;
-    return -1;   /* server-only; LC-1 will implement raw client connect */
+    KlLwrState *st = ctx ? ctx->loop._backend : NULL;
+    if (!st || !addr || !kl_handle_valid(fd)) return -1;
+    if (kl_sockaddr_family(addr) != KL_AF_INET) return -1;   /* IPv6 unsupported (loopif is IPv4) */
+    return kl_lwr_connect(st->lwrctx, (void *)fd, addr->u.ip, kl_sockaddr_port(addr),
+                          watcher_udata);
 }
 
 static const KlCompletionOps lwip_raw_completion_ops = {
