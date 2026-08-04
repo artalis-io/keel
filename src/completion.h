@@ -113,9 +113,19 @@ int kl_comp_prime_accepts(struct KlServer *s);
 /* Post one async receive into c->read_buf (headers/body phase). */
 int kl_comp_post_recv(KlConn *c);
 
-/* Post one async send of the (already-serialized) response iovec. The backend owns
- * the bytes for the op's lifetime (it copies) and handles partial completion
- * internally, so the driver sees only a fully-completed WRITE event. */
+/* Post one async send of the (already-serialized) response iovec. The backend handles
+ * partial completion internally, so the driver sees only a fully-completed WRITE event.
+ *
+ * RESPONSE-SEGMENT LIFETIME CONTRACT. A backend MAY defensively copy the iov bytes for
+ * the op's lifetime (IOCP/io_uring/pollcomp do), OR it MAY reference the iov segments in
+ * place until the KL_COMP_WRITE is delivered (lwip-raw does, to keep transmit memory
+ * bounded). The latter is safe because the generic driver keeps the response's serialized
+ * segments valid until the completion: comp_send_response() builds the iovec from the LIVE
+ * c->res (res->hdr_buf, res->body) + static literals + a small stack Content-Length scratch,
+ * and the driver does NOT reset or reuse c->res between kl_comp_post_send() and comp_on_write()
+ * (it only resets in kl_conn_send_complete, which runs FROM comp_on_write). The one transient
+ * segment (the stack Content-Length scratch) is tiny; a backend that references in place must
+ * snapshot small segments itself. Copying backends are unaffected by this note. */
 int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total);
 
 /* Post one async accept on the server's listen socket (refill the backlog). */

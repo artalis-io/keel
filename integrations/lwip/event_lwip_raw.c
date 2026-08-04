@@ -37,14 +37,16 @@
  * operate on real tcp_pcb handles via the glue; the tcp_accept/tcp_recv/tcp_sent callbacks
  * surface KL_COMP_ACCEPT/READ/WRITE.
  *
- * P9-3 SCOPE (this stage): full-payload send + backpressure + file send. kl_comp_post_send
- * no longer bails on responses larger than a small cap — it concatenates the response iovec
- * and hands it to the glue's send-pump (kl_lwr_send_begin), which buffers the whole payload
- * and pumps it across many tcp_write/tcp_sent rounds honouring tcp_sndbuf (ERR_MEM =
- * backpressure, resumed on tcp_sent). kl_comp_post_sendfile is implemented via
- * kl_lwr_sendfile_begin (pread the file after the head into the same owned buffer, reuse the
- * pump). Either way the driver sees a SINGLE fully-completed KL_COMP_WRITE. close-cancel-
- * lifetime is P9-4; KlEventLoop.fd assessment is P9-5.
+ * SEND SCOPE (Stage B): BOUNDED, zero-allocation send + backpressure + file send. kl_comp_post_
+ * send translates the response iovec into the seam-neutral KlLwrIoVec and hands it to the glue,
+ * which stores a bounded COPY of the iov ARRAY (data referenced in place — small transient
+ * segments snapshotted) and pumps it through a fixed PREALLOCATED per-conn TX window (KL_LWR_TX_
+ * WIN) across many tcp_write/tcp_sent rounds honouring tcp_sndbuf (ERR_MEM = backpressure,
+ * resumed on tcp_sent). kl_comp_post_sendfile passes the head the same way and the glue preads
+ * the file body chunk-by-chunk into that same window — never reading the file into memory whole.
+ * Transmit memory is bounded by conn_cap * KL_LWR_TX_WIN, INDEPENDENT of response/file size, so
+ * response size is unbounded-by-design. Either way the driver sees a SINGLE fully-completed
+ * KL_COMP_WRITE. close-cancel-lifetime is handled below; KlEventLoop.fd assessment is P9-5.
  *
  * Header-clash seam discipline (P9-1, preserved): this TU includes NO lwIP header — lwIP's
  * def.h redefines htons/ntohs and its arch.h typedefs ssize_t, which clash with the host
@@ -338,59 +340,47 @@ static int lwr_comp_post_recv(KlConn *c) {
     return 0;
 }
 
-/* Post one async send of the (already-serialized) response iovec (P9-3). Concatenate the
- * iovec into a heap staging buffer and hand it to the glue's send-pump (kl_lwr_send_begin),
- * which copies it into a per-pcb owned buffer and pumps it across as many tcp_write/tcp_sent
- * rounds as tcp_sndbuf backpressure requires. The driver sees a SINGLE KL_COMP_WRITE (via
- * drain) only once the WHOLE payload is acknowledged — arbitrary `total` works, bounded only
- * by KL_LWR_POST_SEND_MAX (a sanity cap; the glue additionally bounds by heap availability).
+/* Post one async send of the (already-serialized) response iovec (Stage B). NO allocation, NO
+ * whole-payload copy: translate the driver's KlIoVec array into the seam-neutral KlLwrIoVec and
+ * hand it to the glue, which stores a BOUNDED copy of the iov ARRAY and pumps the referenced-in-
+ * place segments through a fixed preallocated per-conn TX window across many tcp_write/tcp_sent
+ * rounds (tcp_sndbuf backpressure). The driver sees a SINGLE KL_COMP_WRITE only once the WHOLE
+ * payload is acknowledged — response size is UNBOUNDED-by-design (bounded transmit memory; the
+ * old 16 MiB KL_LWR_POST_SEND_MAX cap is gone).
  *
- * Removes the P9-2 small-response bailout: no fixed stack buffer, no "must fit tcp_sndbuf"
- * limit. A 64 KB response now spans many segments + hits sndbuf-full (ERR_MEM) backpressure,
- * resumed on tcp_sent — and still completes as one WRITE. */
-#define KL_LWR_POST_SEND_MAX (16u * 1024u * 1024u)   /* 16 MiB response sanity cap */
+ * The iov DATA is referenced in place and MUST stay valid until the KL_COMP_WRITE. That holds:
+ * comp_send_response (completion_driver.c) builds the iovec from the live c->res segments
+ * (res->hdr_buf, res->body) + static literals + a small stack Content-Length scratch (`cl_buf`);
+ * the driver cannot reset c->res until comp_on_write. The glue snapshots any segment <= 256 B
+ * (which covers cl_buf) into a preallocated head buffer, so even the transient scratch is safe.
+ *
+ * The translation array is a fixed KL_LWR_MAX_SEND_IOV stack buffer (the driver caps the iovec
+ * at 7); no heap, no per-send allocation. */
+#define KL_LWR_MAX_SEND_IOV 8
 static int lwr_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
+    (void)total;
     if (!kl_handle_valid(c->fd)) return -1;
-    if (total > KL_LWR_POST_SEND_MAX) return -1;
-    /* Concatenate the iovec into one contiguous staging buffer; the glue copies it into its
-     * own per-pcb send buffer (kl_lwr_send_begin), so this staging buffer is freed here. */
-    unsigned char *buf = kl_malloc(c->alloc, total ? total : 1);
-    if (!buf) return -1;
-    size_t off = 0;
-    for (int i = 0; i < iovcnt; i++) {
-        if (off + iov[i].len > total) { kl_free(c->alloc, buf, total ? total : 1); return -1; }
-        memcpy(buf + off, iov[i].base, iov[i].len);
-        off += iov[i].len;
-    }
-    int rc = kl_lwr_send_begin(lwr_state(c)->lwrctx, (void *)c->fd, buf, off);
-    kl_free(c->alloc, buf, total ? total : 1);
-    return rc;
+    if (iovcnt < 0 || iovcnt > KL_LWR_MAX_SEND_IOV) return -1;
+    KlLwrIoVec lv[KL_LWR_MAX_SEND_IOV];
+    for (int i = 0; i < iovcnt; i++) { lv[i].base = iov[i].base; lv[i].len = iov[i].len; }
+    return kl_lwr_send_begin(lwr_state(c)->lwrctx, (void *)c->fd, lv, iovcnt);
 }
 
-/* Post one async file send (P9-3): the serialized response head (`head_iov`) followed by
- * `count` bytes from file_fd. The glue preads the file into its per-pcb send buffer after
- * the head and reuses the send-pump (approach (a) — see lwip_raw_glue.h). One KL_COMP_WRITE
- * follows when the whole head+file is acked. fd OWNERSHIP: the glue only READS file_fd; the
- * response layer closes res->file_fd (kl_response_reset/free) — we do NOT close it here. */
+/* Post one async file send (Stage B): the serialized response head (`head_iov`) followed by
+ * `count` bytes pread from file_fd. NO allocation, NO whole-file read: the head iov is passed
+ * seam-neutrally (referenced in place / snapshotted like a buffered send) and the glue preads the
+ * file body chunk-by-chunk into the same preallocated TX window (constant memory regardless of
+ * file size). One KL_COMP_WRITE follows when the whole head+file is acked; a file read error
+ * surfaces a FAILED terminal (ok=0) so the driver closes. fd OWNERSHIP: the glue only READS
+ * file_fd; the response layer closes res->file_fd (kl_response_reset/free) — not here. */
 static int lwr_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
+    (void)head_total;
     if (!kl_handle_valid(c->fd)) return -1;
-    if (count > KL_LWR_POST_SEND_MAX || head_total > KL_LWR_POST_SEND_MAX) return -1;
-    /* Concatenate the head into a staging buffer; the glue copies head + file into its own
-     * per-pcb send buffer, so this staging buffer is freed here. */
-    unsigned char *head = kl_malloc(c->alloc, head_total ? head_total : 1);
-    if (!head) return -1;
-    size_t off = 0;
-    for (int i = 0; i < head_n; i++) {
-        if (off + head_iov[i].len > head_total) {
-            kl_free(c->alloc, head, head_total ? head_total : 1); return -1;
-        }
-        memcpy(head + off, head_iov[i].base, head_iov[i].len);
-        off += head_iov[i].len;
-    }
-    int rc = kl_lwr_sendfile_begin(lwr_state(c)->lwrctx, (void *)c->fd, head, off, file_fd, count);
-    kl_free(c->alloc, head, head_total ? head_total : 1);
-    return rc;
+    if (head_n < 0 || head_n > KL_LWR_MAX_SEND_IOV) return -1;
+    KlLwrIoVec lv[KL_LWR_MAX_SEND_IOV];
+    for (int i = 0; i < head_n; i++) { lv[i].base = head_iov[i].base; lv[i].len = head_iov[i].len; }
+    return kl_lwr_sendfile_begin(lwr_state(c)->lwrctx, (void *)c->fd, lv, head_n, file_fd, count);
 }
 
 /* Cancel pending ops on `fd` (idle-timeout sweep). Semantics mirror event_pollcomp.c: the

@@ -169,15 +169,35 @@ int kl_lwr_next_readable(void *lwrctx, int *cursor, void **owner, void **pcb, in
  * a READ event (rx queue → c->read_buf). */
 size_t kl_lwr_take_staged(void *lwrctx, void *pcb, void *dst, size_t cap);
 
-/* ── full-payload send with backpressure + file send (Stage B — unchanged logic) ─────
- * The completion contract (src/completion.h) says the backend OWNS the bytes for an op's
- * lifetime (copies) and surfaces a SINGLE fully-completed WRITE. A payload larger than
- * tcp_sndbuf is buffered in the glue and pumped across many tcp_sent rounds; only when the
- * LAST byte is acked does a WRITE completion appear. */
-int   kl_lwr_send_begin(void *lwrctx, void *pcb, const void *buf, size_t len);
-int   kl_lwr_sendfile_begin(void *lwrctx, void *pcb, const void *head, size_t head_len,
+/* ── bounded, zero-allocation send with backpressure + file send (Stage B) ───────────
+ * The completion contract (src/completion.h) surfaces a SINGLE fully-completed WRITE per send.
+ * Stage B streams a payload of ANY size through a fixed PREALLOCATED per-connection transmit
+ * window (KL_LWR_TX_WIN) — NO per-response malloc, NO whole-payload copy, NO whole-file read:
+ *   - The slot stores a bounded COPY of the iov ARRAY; the DATA is referenced in PLACE, relying
+ *     on the driver keeping the response's serialized segments valid until the KL_COMP_WRITE.
+ *     Small (possibly transient) segments are snapshotted into a tiny preallocated head buffer.
+ *   - The pump copies min(tcp_sndbuf, KL_LWR_TX_WIN, remaining) bytes into the window and
+ *     tcp_write(COPY)s them; tcp_sent advances + re-pumps; ERR_MEM = backpressure.
+ *   - A file send preads the file body chunk-by-chunk into the same window (never into memory
+ *     whole); a file read error surfaces a FAILED terminal WRITE so the driver closes.
+ * Transmit memory is bounded by conn_cap * KL_LWR_TX_WIN, INDEPENDENT of response/file size, so
+ * response size is unbounded-by-design.
+ *
+ * KlLwrIoVec is a type-neutral mirror of the driver's KlIoVec (pointer + length) so the seam
+ * pulls in no KEEL socket type — the backend translates KlIoVec -> KlLwrIoVec at the boundary.
+ * The `base` pointers must remain valid until the KL_COMP_WRITE (the response-segment lifetime
+ * contract) EXCEPT for segments the glue snapshots (any segment <= 256 bytes is snapshotted
+ * regardless, covering the driver's transient stack Content-Length scratch). */
+typedef struct { const void *base; size_t len; } KlLwrIoVec;
+
+/* Begin a buffered send: `iov`/`iovcnt` (<= 8) describe the already-serialized response. Returns
+ * 0 on installed, -1 on failure (no slot / iov-count over the bound / snapshot overflow). */
+int   kl_lwr_send_begin(void *lwrctx, void *pcb, const KlLwrIoVec *iov, int iovcnt);
+/* Begin a file send: `head`/`head_n` (<= 8) is the serialized response head; then `count` bytes
+ * are pread from `file_fd` (borrowed — the response layer owns closing it). Returns 0 / -1. */
+int   kl_lwr_sendfile_begin(void *lwrctx, void *pcb, const KlLwrIoVec *head, int head_n,
                             int file_fd, uint64_t count);
-/* Release any per-pcb send buffer for `pcb` (idempotent). */
+/* Reset any in-flight send offsets for `pcb` (idempotent). No heap to release (Stage B). */
 void  kl_lwr_send_release(void *lwrctx, void *pcb);
 
 /* ── drain ─────────────────────────────────────────────────────────────────── */
