@@ -126,36 +126,38 @@ Two lwIP integrations ship:
    tap, no root), CI-gated (`make -C integrations/lwip loopback-raw`) and ASan+UBSan+LSan-clean.
    `make raw-spike` is the minimal foundation spike. Notably this needed **zero** changes to
    `completion_driver.c` or any `src/` — a third completion backend (beyond io_uring/IOCP) on the
-   model-blind completion axis. **Server-only, IPv4, no TLS/UDP/client** — see the capability
-   matrix below.
+   model-blind completion axis. The raw backend now also does the full **client** axis (plaintext
+   + Happy-Eyeballs + DNS + HTTPS) and **UDP** — **IPv4-only** — see the capability matrix below.
 
-See `docs/phase9_lwip_raw_design.md` for the full design + staged record (P9-1..P9-5) and
+See `docs/phase9_lwip_raw_design.md` for the full design + staged record (P9-1..P9-5),
+`docs/phase10_lwip_raw_client_design.md` for the client axis (LC-0..LC-5), and
 `docs/lwip_platform_design.md` for the platform-port shape.
 
 ## Raw completion backend — capabilities, limits, and memory
 
 The raw (`NO_SYS=1`, `tcp_*` completion) backend is a deliberately narrow, embedded-friendly
-**server**. What it does and does not support:
+**server + client** (IPv4-only, in-process over the loopback netif). What it does and does not
+support:
 
 | Capability | Status | Notes |
 |------------|--------|-------|
 | IPv4 TCP **server** (`KlServer`) | **Supported** | accept/recv/send over the loopback netif |
-| HTTP/1.1 incl. keep-alive | **Supported** | rides `KlServer` |
+| IPv4 TCP **client** (`KlClient`) | **Supported** (LC-1/2) | outbound connect via the **completion** connect primitive (`kl_comp_post_connect` → `tcp_connect`) + Happy-Eyeballs address racing; send/recv on an emulated readiness watcher |
+| HTTP/1.1 incl. keep-alive | **Supported** | rides `KlServer` / `KlClient` |
+| **HTTPS** (client + server) | **Supported** (LC-4) | client over the mbedTLS socket-BIO routed through `kl_socket_provider_lwip_raw()`; server over the generic memory-BIO completion-TLS leg. Buffered HTTP/1.1 over TLS (no ALPN-h2, no TLS file/stream body). BYO mbedTLS |
+| **UDP** / `udp_server` | **Supported** (LC-3a) | provider exposes datagram ops (`.dgram != NULL`); `kl_udp_init` runs `KlUdp` over the raw completion loop |
+| **DNS** | **Supported** (LC-3) | KEEL's built-in async resolver (`src/dns_resolver.c`) over `KlUdp`-on-raw — one DNS path, no lwIP `dns_gethostbyname` |
 | Buffered / streaming / file responses | **Supported** | **unbounded** response size; bounded transmit memory |
 | Request bodies | **Supported** | bounded per-conn receive flow-control (`ERR_MEM` backpressure) |
 | Router, middleware, CORS, SSE, body readers, compression | **Supported** | the server-path modules that ride `KlServer` |
 | Multiple **sequential** event contexts | **Supported** | create → destroy → create |
-| Outbound **client** / `connect` | **Unsupported (fails early)** | server-only — `connect` returns `-1` / `ENOTSUP` |
-| **UDP** / `udp_server` | **Unsupported (fails early)** | no datagram ops (`.dgram == NULL`) — `kl_udp_init` fails |
+| The **synchronous** socket-provider `connect` op | **Unsupported by design** | returns `-1` / `ENOTSUP` — a blocking connect is nonsensical on `NO_SYS=1`; the client connects via the **completion** primitive above |
 | **IPv6** | **Unsupported (fails early)** | `bind` rejects a non-IPv4 address (the loopif is IPv4) |
-| **TLS-over-raw** | **Unsupported** | TLS rides the socket-BIO, which the completion path does not use — not wired |
-| **DNS**, client-side WebSocket / HTTP-2 | **Unsupported** | need the client path |
 | A **second simultaneous** raw context | **Rejected at create** | `NO_SYS=1` lwIP core is process-global |
-| Server-side WebSocket / HTTP-2 | **Not specifically demonstrated** | rides the generic completion driver (branches exist for any completion backend) but is not lwip-raw-specifically tested — no claim of tested support |
+| WebSocket / HTTP-2 (server **and** client), ALPN-h2 over raw TLS | **Not specifically demonstrated** | ride the generic completion driver / client machine (branches exist for any completion backend) but are not lwip-raw-specifically tested — no claim of tested support |
 
-For a **client**, **UDP**, **TLS/HTTPS**, or **DNS** on lwIP, use the readiness integration
-above (`keel_lwip.h`: `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`; HTTPS via the
-mbedTLS socket-BIO routed through `kl_socket_provider_lwip()`).
+For **IPv6** or the BSD-socket lwIP model, use the readiness integration above
+(`keel_lwip.h`: `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`).
 
 ### Max connections + per-connection memory
 

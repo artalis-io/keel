@@ -26,7 +26,19 @@
  *
  * SUPPORTED:
  *   - IPv4 TCP *server* (KlServer): accept/recv/send over the loopback netif.
+ *   - IPv4 TCP *client* (KlClient): outbound connect via the COMPLETION connect primitive
+ *     (kl_comp_post_connect → tcp_connect), plaintext HTTP/1.1 (LC-1), Happy-Eyeballs address
+ *     racing (LC-2), and HTTPS (LC-4). The client's send/recv ride an emulated readiness
+ *     watcher over the raw loop.
  *   - HTTP/1.1 including keep-alive.
+ *   - HTTPS — both directions (LC-4): the client over the mbedTLS socket-BIO routed through
+ *     kl_socket_provider_lwip_raw() (kl_sock_send/recv → tcp_write/read), and the server over
+ *     the generic memory-BIO completion-TLS leg. Buffered HTTP/1.1 over TLS (no ALPN-h2, no
+ *     TLS file/stream body). BYO mbedTLS.
+ *   - UDP (KlUdp / udp_server): the provider exposes datagram ops (.dgram != NULL), so
+ *     kl_udp_init() over the raw completion loop succeeds (LC-3a).
+ *   - DNS: KEEL's built-in async resolver (src/dns_resolver.c) over KlUdp-on-raw (LC-3) —
+ *     one DNS path, no lwIP dns_gethostbyname.
  *   - Buffered, streaming, and file responses of UNBOUNDED size (transmit memory is bounded
  *     by a fixed per-conn window — the response/file size is not).
  *   - Request bodies with bounded per-conn receive flow-control (ERR_MEM backpressure).
@@ -35,25 +47,24 @@
  *   - Multiple SEQUENTIAL event contexts (create → destroy → create).
  *
  * UNSUPPORTED (fail early + clearly):
- *   - Outbound CLIENT / connect — server-only; connect() returns -1 with errno = ENOTSUP.
- *   - UDP / udp_server — no datagram ops (.dgram == NULL), so kl_udp_init() on this provider
- *     fails.
+ *   - The SYNCHRONOUS socket-provider connect op (p->ops->connect) — returns -1 / ENOTSUP
+ *     BY DESIGN: a blocking connect is nonsensical on a NO_SYS=1 single-loop target. Outbound
+ *     client connects go through the COMPLETION connect primitive (see SUPPORTED), not this op.
  *   - IPv6 — bind() rejects a non-IPv4 address (the loopif is IPv4).
- *   - TLS-over-raw — TLS rides the socket-BIO, which the completion path does not use; not wired.
- *   - DNS, and client-side WebSocket / HTTP-2 — all need the client path.
  *   - A SECOND SIMULTANEOUS raw context — rejected at create (NO_SYS=1 lwIP core is
  *     process-global); sequential contexts are fine.
  *
- * NOT SPECIFICALLY DEMONSTRATED (honest disclosure): server-side WebSocket / HTTP-2 ride the
- *   generic completion driver (branches exist for any completion backend) but are not
- *   lwip-raw-specifically tested — no claim of tested support is made.
+ * NOT SPECIFICALLY DEMONSTRATED (honest disclosure): server- AND client-side WebSocket /
+ *   HTTP-2 ride the generic completion driver / client machine (branches exist for any
+ *   completion backend) but are not lwip-raw-specifically tested — no claim of tested support
+ *   is made. ALPN-h2 over raw TLS is explicitly out of the LC-4 subset.
  *
  * CONSTRAINTS:
  *   - NO_SYS=1, single-thread: KEEL's event loop IS the lwIP mainloop (no separate lwIP
  *     thread). The thread-pool done_fn still runs on the loop thread, as always.
  *   - One active raw context per process.
  *
- * For a CLIENT, UDP, TLS, or DNS on lwIP, use the readiness socket-API integration
+ * For IPv6 or the BSD-socket lwIP model, use the readiness socket-API integration
  * (keel_lwip.h: kl_socket_provider_lwip() + kl_event_provider_lwip()).
  *
  * SPDX-License-Identifier: MIT

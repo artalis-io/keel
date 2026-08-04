@@ -341,6 +341,16 @@ and the provider advertises `KL_SOCK_CAP_OVERLAPPED` only. Client support change
 Each stage is green (build + loopback test + ASan/UBSan/LSan) before the next. Mirrors the
 P9-1..P9-5 and RC-1..RC-4 discipline.
 
+> **STATUS: COMPLETE.** LC-0 (PR #191) → LC-1/LC-2 (PR #192/#193) → **LC-3a** (PR #194, KlUdp
+> over lwip-raw — inserted before DNS so the resolver rides KEEL's own UDP) → LC-3 (PR #195,
+> DNS via KEEL's `src/dns_resolver.c` on KlUdp-over-raw) → LC-4 (PR #196, HTTPS client + server)
+> → LC-5 (this doc + caps/README). **LC-3 shipped differently from the bullet below:** on user
+> direction it uses KEEL's own `dns_resolver.c` over the LC-3a `KlUdp`-on-raw — NOT lwIP's
+> `dns_gethostbyname` — so there is ONE DNS/UDP path everywhere (`src/dns_resolver.c`/`src/udp.c`
+> unchanged; they run verbatim over the lwIP transport). LC-4 required two backend-only fixes to
+> honor the cross-backend completion-TLS contract (feed ciphertext to `feed_input`; a synchronous
+> send on server-accepted pcbs for `comp_tls_flush`) — `src/` untouched.
+
 - **LC-0 — completion CONNECT contract (CROSS-BACKEND, foundational).** Add `KL_COMP_CONNECT`
   + `kl_comp_post_connect` to `completion.h`/`completion_dispatch.c`/`io_engine.h`/
   `completion_absent.c`; a `comp_on_connect` handler in `completion_driver.c`; the
@@ -361,11 +371,20 @@ P9-1..P9-5 and RC-1..RC-4 discipline.
   (§4). **Test:** a resolved 2-address list (both loopback, one to a closed port) — the client
   fails over / races and still gets 200; deadline-timeout case aborts pcbs cleanly. →
   `LC-2 PASS`. ASan-clean.
-- **LC-3 — raw-DNS `KlResolver`.** `resolve_dns_lwip_raw.c` over `dns_gethostbyname`
-  (sync-completion contract, §5). **Test:** resolve a name served by a local raw DNS responder
-  (or a literal via `dns_gethostbyname`'s fast path), then connect + `GET` → `LC-3 PASS`. Also
-  exercise the synchronous-completion path (cached/literal) under the sentinel contract.
-  ASan-clean.
+- **LC-3a — `KlUdp` over lwip-raw (SHIPPED, inserted before LC-3).** The raw socket provider
+  routes `SOCK_DGRAM → udp_new`; `kl_comp_post_udp_recv/send → udp_recv/udp_sendto` over a
+  glue udp-slot table. KEEL's `src/udp.c` runs verbatim over the raw completion loop. This is
+  the foundation for LC-3 so DNS rides KEEL's own UDP, not lwIP's. → `LC-3a PASS`. ASan-clean.
+- **LC-3 — DNS via KEEL's `dns_resolver.c` on `KlUdp`-over-raw (SHIPPED — supersedes the
+  `dns_gethostbyname` sketch below).** `kl_dns_resolver_create(ctx, cfg)` on a ctx with
+  `ctx.sockets = kl_socket_provider_lwip_raw()` resolves over lwIP with ZERO `src/` changes:
+  the resolver's `kl_udp_init`/send/recv become `udp_new`/`udp_sendto`/`udp_recv`, replies parse
+  through `kl_dns_parse_response`, TCP-fallback rides the LC-1 `SOCK_STREAM` connect. One DNS
+  path everywhere — no lwIP `dns_gethostbyname`, no second UDP stack. **Test:** an in-process
+  DNS responder that is itself a `KlUdp` answers `A test.local`, the resolver returns it, and a
+  full `KlClient GET http://test.local/` → 200; plus the resolver's deferred-literal fast path.
+  → `LC-3 PASS`. ASan-clean. *(Original sketch — resolve_dns_lwip_raw.c over dns_gethostbyname —
+  was rejected in review to avoid two separate UDP/DNS paths.)*
 - **LC-4 — TLS over raw completion.** Reuse the 8b-5 memory-BIO leg (§6); no TLS code in the
   backend. **Test (local/hull, BYO mbedTLS — out of standard CI, like `smoke_tls_completion`):**
   a raw HTTPS `GET` to a raw TLS server in-process → handshake + 200. → `LC-4 PASS`.
@@ -463,5 +482,7 @@ No new test infrastructure beyond a client-side counterpart to the existing raw 
 
 ---
 
-*Proposal only. No code, no build, no commit. Doc path:
-`docs/phase10_lwip_raw_client_design.md`.*
+*Implemented — LC-0..LC-5 shipped (PRs #191–#196; LC-3a #194). See the STATUS banner in §8 for
+the per-stage record and the LC-3 design change (KEEL `dns_resolver.c` over `KlUdp`-on-raw
+instead of lwIP `dns_gethostbyname`). Authoritative capability matrix:
+`integrations/lwip/keel_lwip_raw.h` + `integrations/lwip/README.md`.*

@@ -14,30 +14,36 @@ axis verbatim, the strongest possible evidence that axis is sound.
 
 ## Capabilities, limits, and memory (Stage C)
 
-The raw backend is a deliberately narrow, embedded-friendly **server**. Unsupported operations
-fail **early and clearly** at the provider seam so a caller never silently hangs; this is the
-API-facing statement (also in `integrations/lwip/keel_lwip_raw.h`), regression-tested by
-`integrations/lwip/raw_caps_test.c` (`RAW-CAPS PASS`).
+> **SUPERSEDED by Phase 10 (LC-1..LC-5).** The rows below were the Phase-9 (server-only) state.
+> The raw backend now also does the **client** axis (plaintext, Happy-Eyeballs, DNS, HTTPS) and
+> **UDP** — the client/UDP/DNS/TLS rows have since flipped to **Supported**. See
+> `docs/phase10_lwip_raw_client_design.md` and the authoritative current matrix in
+> `integrations/lwip/keel_lwip_raw.h` / `integrations/lwip/README.md`. The updated rows below
+> reflect the post-Phase-10 state.
+
+Unsupported operations fail **early and clearly** at the provider seam so a caller never silently
+hangs; this is the API-facing statement (also in `integrations/lwip/keel_lwip_raw.h`),
+regression-tested by `integrations/lwip/raw_caps_test.c` (`RAW-CAPS PASS`).
 
 | Capability | Status | Notes |
 |------------|--------|-------|
 | IPv4 TCP **server** (`KlServer`) | **Supported** | accept/recv/send over the loopback netif |
-| HTTP/1.1 incl. keep-alive | **Supported** | rides `KlServer` |
+| IPv4 TCP **client** (`KlClient`) | **Supported** (LC-1/2) | outbound connect via the **completion** connect primitive (`kl_comp_post_connect` → `tcp_connect`) + Happy-Eyeballs |
+| HTTP/1.1 incl. keep-alive | **Supported** | rides `KlServer` / `KlClient` |
+| **HTTPS** (client + server) | **Supported** (LC-4) | client via socket-BIO through the raw provider; server via the generic memory-BIO completion-TLS leg. Buffered HTTP/1.1 over TLS; BYO mbedTLS |
+| **UDP** / `udp_server` | **Supported** (LC-3a) | provider exposes datagram ops; `KlUdp` runs over the raw completion loop |
+| **DNS** | **Supported** (LC-3) | KEEL's `src/dns_resolver.c` over `KlUdp`-on-raw — one DNS path |
 | Buffered / streaming / file responses | **Supported** | **unbounded** response size; bounded transmit memory |
 | Request bodies | **Supported** | bounded per-conn receive flow-control (`ERR_MEM` backpressure) |
 | Router, middleware, CORS, SSE, body readers, compression | **Supported** | server-path modules that ride `KlServer` |
 | Multiple **sequential** event contexts | **Supported** | create → destroy → create |
-| Outbound **client** / `connect` | **Unsupported (fails early)** | server-only — `connect` returns `-1` / `ENOTSUP` |
-| **UDP** / `udp_server` | **Unsupported (fails early)** | no datagram ops (`.dgram == NULL`) — `kl_udp_init` fails |
+| The **synchronous** socket-provider `connect` op | **Unsupported by design** | `-1` / `ENOTSUP` — blocking connect is nonsensical on `NO_SYS=1`; the client uses the completion primitive above |
 | **IPv6** | **Unsupported (fails early)** | `bind` rejects a non-IPv4 address (the loopif is IPv4) |
-| **TLS-over-raw** | **Unsupported** | TLS rides the socket-BIO, which the completion path does not use — not wired |
-| **DNS**, client-side WebSocket / HTTP-2 | **Unsupported** | need the client path |
 | A **second simultaneous** raw context | **Rejected at create** | `NO_SYS=1` lwIP core is process-global |
-| Server-side WebSocket / HTTP-2 | **Not specifically demonstrated** | rides the generic completion driver (branches exist for any completion backend) but is not lwip-raw-specifically tested — no claim of tested support |
+| WebSocket / HTTP-2 (server + client), ALPN-h2 over raw TLS | **Not specifically demonstrated** | ride the generic completion driver / client machine but are not lwip-raw-specifically tested — no claim of tested support |
 
-For a **client**, **UDP**, **TLS/HTTPS**, or **DNS** on lwIP, use the readiness integration
-(`keel_lwip.h`: `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`; HTTPS via the mbedTLS
-socket-BIO routed through `kl_socket_provider_lwip()`).
+For **IPv6** or the BSD-socket lwIP model, use the readiness integration
+(`keel_lwip.h`: `kl_socket_provider_lwip()` + `kl_event_provider_lwip()`).
 
 **Max connections + memory.** `conn_cap = KlConfig.max_connections` is the **one authoritative
 capacity** — the same value sizes the `KlConn` pool and the backend raw slot table
