@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Keel: a portable async networking runtime for C</title>
-  <meta name="description" content="Keel is a portable, dependency-free C11 networking runtime: an async I/O core (epoll, kqueue, WSAPoll, io_uring, IOCP), TCP and UDP transports, and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.">
+  <meta name="description" content="Keel is a portable, dependency-free C11 networking runtime: an async I/O core (epoll, kqueue, WSAPoll, io_uring, IOCP, and a bare-metal lwIP raw provider with no OS sockets), TCP and UDP transports, and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.">
   <meta name="theme-color" content="#0a0a0a">
 
   <meta property="og:title" content="Keel: a portable async networking runtime for C">
-  <meta property="og:description" content="An async I/O core, TCP/UDP transports, and a growing family of pluggable protocol stacks. Readiness and completion (epoll/kqueue/WSAPoll + io_uring/IOCP). Portable across Linux, macOS, Windows, and Cosmopolitan. No forced dependencies.">
+  <meta property="og:description" content="An async I/O core, TCP/UDP transports, and a growing family of pluggable protocol stacks. Readiness and completion (epoll/kqueue/WSAPoll + io_uring/IOCP), plus an lwIP raw provider that runs the whole stack with no OS sockets. Portable across Linux, macOS, Windows, and Cosmopolitan. No forced dependencies.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
   <meta property="og:image:type" content="image/svg+xml">
@@ -27,7 +27,7 @@
     "applicationCategory": "DeveloperApplication",
     "applicationSubCategory": "NetworkingRuntime",
     "operatingSystem": "Linux, macOS, Windows, BSD, Cosmopolitan (APE)",
-    "description": "A portable, dependency-free C11 networking runtime: an async I/O core over readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP) engines behind a platform-neutral socket seam (POSIX/Winsock), with TCP and UDP transports and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.",
+    "description": "A portable, dependency-free C11 networking runtime: an async I/O core over readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP, and an lwIP raw NO_SYS callback provider that needs no OS sockets) engines behind a platform-neutral socket seam (POSIX/Winsock/lwIP), with TCP and UDP transports and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.",
     "url": "https://github.com/artalis-io/keel",
     "codeRepository": "https://github.com/artalis-io/keel",
     "programmingLanguage": ["C"],
@@ -328,12 +328,12 @@ $ make examples</pre>
         <div>
           <div class="stat-num">863</div>
           <div class="stat-label">tests</div>
-          <div class="stat-foot">56 suites under ASan/UBSan, plus 8 fuzz targets.</div>
+          <div class="stat-foot">61 suites under ASan/UBSan, plus 8 fuzz targets.</div>
         </div>
         <div>
-          <div class="stat-num">7</div>
+          <div class="stat-num">8</div>
           <div class="stat-label">event backends</div>
-          <div class="stat-foot">epoll, kqueue, WSAPoll, poll, io_uring, IOCP (+ a portable completion double).</div>
+          <div class="stat-foot">epoll, kqueue, WSAPoll, poll, io_uring, IOCP, an lwIP raw callback provider (NO_SYS, no OS sockets), and a portable completion double.</div>
         </div>
         <div>
           <div class="stat-num">0</div>
@@ -649,7 +649,7 @@ $ make examples</pre>
                 <tr>
                   <td>Socket provider</td>
                   <td class="cmp-part">pluggable</td>
-                  <td>Capability-gated vtable (Winsock built in, lwIP/AF_XDP-ready), selectable per server or client.</td>
+                  <td>Capability-gated vtable (POSIX and Winsock built in; lwIP shipped &mdash; both BSD-socket and a raw NO_SYS stack; AF_XDP-ready), selectable per server or client.</td>
                 </tr>
               </tbody>
             </table>
@@ -765,8 +765,12 @@ $ make examples</pre>
               Alternate net stacks
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              lwIP, AF_XDP, DPDK, or UEFI SNP providers slot in <em>below</em>
-              every protocol stack via the socket seam, and none of them know. An
+              Already proven: the full stack &mdash; server, client, UDP, DNS, and
+              HTTPS &mdash; runs on a stock <code>libkeel.a</code> over a bare
+              <strong>lwIP</strong> TCP/IP stack with <em>no OS sockets</em>
+              (<code>NO_SYS</code> raw callbacks). AF_XDP, DPDK, or a
+              <strong>UEFI</strong> firmware provider slot in the same way,
+              <em>below</em> every protocol stack, and none of them know. An
               architectural capability HTTP libraries simply don't have.
             </p>
           </div>
