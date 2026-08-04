@@ -22,6 +22,40 @@
  * lwIP is NOT vendored — build against your own lwIP (LWIP_DIR) with the NO_SYS=1
  * lwipopts_raw.h. See integrations/lwip/Makefile (loopback-raw target).
  *
+ * ── Supported / Unsupported (this is the API-facing capability statement) ──────────────
+ *
+ * SUPPORTED:
+ *   - IPv4 TCP *server* (KlServer): accept/recv/send over the loopback netif.
+ *   - HTTP/1.1 including keep-alive.
+ *   - Buffered, streaming, and file responses of UNBOUNDED size (transmit memory is bounded
+ *     by a fixed per-conn window — the response/file size is not).
+ *   - Request bodies with bounded per-conn receive flow-control (ERR_MEM backpressure).
+ *   - The server-path modules that ride KlServer: router, middleware, CORS, SSE, body
+ *     readers, compression.
+ *   - Multiple SEQUENTIAL event contexts (create → destroy → create).
+ *
+ * UNSUPPORTED (fail early + clearly):
+ *   - Outbound CLIENT / connect — server-only; connect() returns -1 with errno = ENOTSUP.
+ *   - UDP / udp_server — no datagram ops (.dgram == NULL), so kl_udp_init() on this provider
+ *     fails.
+ *   - IPv6 — bind() rejects a non-IPv4 address (the loopif is IPv4).
+ *   - TLS-over-raw — TLS rides the socket-BIO, which the completion path does not use; not wired.
+ *   - DNS, and client-side WebSocket / HTTP-2 — all need the client path.
+ *   - A SECOND SIMULTANEOUS raw context — rejected at create (NO_SYS=1 lwIP core is
+ *     process-global); sequential contexts are fine.
+ *
+ * NOT SPECIFICALLY DEMONSTRATED (honest disclosure): server-side WebSocket / HTTP-2 ride the
+ *   generic completion driver (branches exist for any completion backend) but are not
+ *   lwip-raw-specifically tested — no claim of tested support is made.
+ *
+ * CONSTRAINTS:
+ *   - NO_SYS=1, single-thread: KEEL's event loop IS the lwIP mainloop (no separate lwIP
+ *     thread). The thread-pool done_fn still runs on the loop thread, as always.
+ *   - One active raw context per process.
+ *
+ * For a CLIENT, UDP, TLS, or DNS on lwIP, use the readiness socket-API integration
+ * (keel_lwip.h: kl_socket_provider_lwip() + kl_event_provider_lwip()).
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef KEEL_LWIP_RAW_H
