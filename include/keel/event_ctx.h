@@ -141,6 +141,19 @@ static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
     if (!(tag & 1))
         return 0;  /* not a watcher — caller handles */
     KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
+    /* A prior event in the SAME drain batch may already have freed this watcher.
+     * kl_comp_run (and kl_event_ctx_run) drain a batch of events, then dispatch
+     * them one by one; dispatching event i can retire watcher j>i. The canonical
+     * case is Happy-Eyeballs: the winning connect's KL_COMP_CONNECT runs
+     * he_close_attempts → kl_watcher_del, freeing the losing attempts' nodes,
+     * whose own KL_COMP_CONNECT may still sit later in this batch. Confirm the
+     * node is still linked before touching it — we compare pointer identity
+     * against the live list and NEVER dereference a possibly-freed node. */
+    int w_live = 0;
+    for (KlWatcher *it = ctx->watchers; it; it = it->next)
+        if (it == w) { w_live = 1; break; }
+    if (!w_live)
+        return 1;  /* watcher retired earlier in this batch — stale event, consumed */
     KlSocketHandle wfd = w->fd;   /* full handle width: intptr_t, NOT int — a completion backend
                                    * whose handle is a pointer (lwip-raw: a tcp_pcb*) would be
                                    * truncated + sign-extended by an int, breaking watcher rearm. */

@@ -74,6 +74,11 @@ static int is_cross_origin(const KlUrl *a, const KlUrl *b)
         return 1;
     if (a->host_len != b->host_len)
         return 1;
+    /* Equal lengths; if both are empty (degenerate/relative URL) the hosts may be
+     * NULL, and passing NULL to strncasecmp (declared nonnull) is UB even at
+     * length 0. Two empty hosts are the same origin by host. */
+    if (a->host_len == 0)
+        return 0;
     if (strncasecmp(a->host, b->host, a->host_len) != 0)
         return 1;
     return 0;
