@@ -8,15 +8,16 @@
  *   K1  connect()  -> -1 (server-only; no outbound client), errno = ENOTSUP/EOPNOTSUPP.
  *   K2  bind() with a non-IPv4 (IPv6) address -> -1 (the loopif is IPv4; IPv6 unsupported).
  *   K3  bind() with an IPv4 address -> 0 (the supported family still works — a control case).
- *   K4  UDP is unsupported: the raw socket provider has NO datagram ops (.dgram == NULL), so
- *         kl_udp_init() on a ctx wired to this provider FAILS (no datagram data-plane).
+ *   K4  UDP is SUPPORTED (LC-3a): the raw socket provider now exposes datagram ops
+ *         (.dgram != NULL), so kl_udp_init() on a ctx wired to this provider SUCCEEDS — KlUdp runs
+ *         over the raw completion loop. (This FLIPPED at LC-3a; previously UDP was unsupported.)
  *
  * (The second-simultaneous-ctx rejection + sequential-ctx cases are covered in raw_recv_test.c;
  * they are not duplicated here.)
  *
  * These are pure provider-seam assertions — no server, no lwIP mainloop thread. K4 wires a
  * KlEventCtx's sockets to the raw provider (the same auto-wire a KlServer does via the loop's
- * native_provider()) and confirms kl_udp_init rejects it.
+ * native_provider()) and confirms kl_udp_init accepts it.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -85,18 +86,20 @@ static int test_bind_family(void) {
     return 0;
 }
 
-/* K4 — UDP is unsupported: the raw provider has no datagram ops, so kl_udp_init fails.
+/* K4 — UDP is SUPPORTED (LC-3a): the raw provider exposes datagram ops, so kl_udp_init succeeds.
  * `ctx` is a LIVE raw ctx (lwIP already up); we wire its sockets to the raw provider exactly as a
- * KlServer does via the loop's native_provider(). kl_udp_init rejects before creating a socket
- * because the provider's datagram data-plane (udp_dg()) is NULL. */
-static int test_udp_unsupported(KlEventCtx *ctx) {
+ * KlServer does via the loop's native_provider(). kl_udp_init now creates a udp_pcb through the
+ * provider's datagram data-plane (udp_dg() non-NULL). */
+static int test_udp_supported(KlEventCtx *ctx) {
     const KlSocketProvider *p = kl_socket_provider_lwip_raw();
     if (!p) return fail("no raw provider");
 
-    /* The unsupported-ness is structural: no datagram data-plane on the provider. */
-    if (p->dgram != NULL)
-        return fail("raw provider unexpectedly exposes datagram ops (.dgram != NULL)");
-    printf("PASS K4a (raw provider .dgram == NULL — no datagram data-plane)\n");
+    /* The support is structural: the provider now advertises a datagram data-plane. */
+    if (p->dgram == NULL)
+        return fail("raw provider missing datagram ops (.dgram == NULL — LC-3a should expose them)");
+    if (!(p->capabilities & KL_SOCK_CAP_DATAGRAM))
+        return fail("raw provider missing KL_SOCK_CAP_DATAGRAM");
+    printf("PASS K4a (raw provider .dgram != NULL + KL_SOCK_CAP_DATAGRAM — datagram data-plane)\n");
 
     ctx->sockets = kl_socket_provider_lwip_raw();
     KlUdp udp;
@@ -104,11 +107,10 @@ static int test_udp_unsupported(KlEventCtx *ctx) {
     memset(&ucfg, 0, sizeof(ucfg));
     ucfg.ctx = ctx;
     int rc = kl_udp_init(&udp, &ucfg);
-    if (rc == 0) {
-        kl_udp_free(&udp);
-        return fail("kl_udp_init succeeded on the raw provider (UDP must be unsupported)");
-    }
-    printf("PASS K4b (kl_udp_init rejected on the raw provider)\n");
+    if (rc != 0)
+        return fail("kl_udp_init failed on the raw provider (UDP must be supported at LC-3a)");
+    kl_udp_free(&udp);
+    printf("PASS K4b (kl_udp_init accepted on the raw provider)\n");
     return 0;
 }
 
@@ -128,7 +130,7 @@ int main(void) {
     int rc = 0;
     if (rc == 0) rc = test_connect_rejected();
     if (rc == 0) rc = test_bind_family();
-    if (rc == 0) rc = test_udp_unsupported(&ctx);
+    if (rc == 0) rc = test_udp_supported(&ctx);
 
     kl_event_ctx_free(&ctx);
     if (rc != 0) return 1;
