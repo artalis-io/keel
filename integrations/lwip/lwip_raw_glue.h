@@ -211,6 +211,14 @@ int kl_lwr_next_client_ready(void *lwrctx, int *cursor, void **watcher_udata, un
  *     no data yet (caller re-arms READ = EAGAIN). */
 long kl_lwr_client_send(void *lwrctx, void *pcb, const void *buf, size_t len, int *would_block);
 long kl_lwr_client_recv(void *lwrctx, void *pcb, void *dst, size_t cap, int *would_block);
+/* Synchronous send on a SERVER-accepted (non-client) live pcb — the completion-TLS handshake flush
+ * (completion_driver.c comp_tls_flush) pushes handshake ciphertext via the socket send op, which on
+ * a completion loop with a real fd is a blocking send. The raw backend has no blocking send, so this
+ * mirrors kl_lwr_client_send for an accepted pcb: tcp_write(COPY) bounded by tcp_sndbuf + tcp_output.
+ * Returns bytes queued (> 0), 0 with *would_block=1 if no sndbuf headroom, or -1 on a hard error /
+ * dead pcb / not a server slot. Used ONLY for the small handshake flush (the HTTP response body
+ * rides the async completion send-pump). LC-4. */
+long kl_lwr_srv_sync_send(void *lwrctx, void *pcb, const void *buf, size_t len, int *would_block);
 /* tcp_bind(pcb, ip4, port). ip4 NULL / all-zero = IP_ADDR_ANY. Returns 0 / -1. */
 int   kl_lwr_tcp_bind(void *pcb, const uint8_t ip4[4], uint16_t port);
 /* tcp_listen(pcb) on `lwrctx`: returns the (possibly relocated) listen pcb, or NULL. Also

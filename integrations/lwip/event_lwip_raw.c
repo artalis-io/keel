@@ -65,7 +65,8 @@
  */
 #include <keel/event.h>
 #include <keel/event_ctx.h>    /* KlEventCtx — kl_comp_drain reaches loop._backend */
-#include <keel/connection.h>   /* KlConn — read_buf / fd / ctx */
+#include <keel/connection.h>   /* KlConn — read_buf / fd / ctx / tls / state */
+#include <keel/tls.h>          /* KlTls.feed_input — completion-TLS memory-BIO input (LC-4) */
 #include <keel/server.h>       /* KlServer — listen_fd (prime accepts) */
 #include <keel/allocator.h>    /* kl_malloc / kl_free */
 #include <keel/sockaddr.h>     /* KlSockAddr marshalling at the seam boundary */
@@ -92,6 +93,15 @@
 /* Stack buffer size for one drain's worth of glue records (bounded by the caller's `max`,
  * which completion_driver.c caps at KL_COMP_MAX_EVENTS = 64). */
 #define KL_LWR_MAX_DRAIN  64
+
+/* LC-4 (completion-TLS): upper bound on ciphertext fed to the TLS engine from ONE conn's retained
+ * rx queue in a single drain round, before yielding back to the driver. A TLS handshake flight
+ * (cert chain) can be tens of KiB; 64 KiB matches KL_LWR_RX_MAX (the per-conn rx bound) so a whole
+ * retained flight is fed in one round, while the cap keeps the take-then-feed loop bounded. */
+#define KL_LWR_TLS_FEED_MAX  (64u * 1024u)
+/* Per-round stack scratch for take-then-feed of received ciphertext (one TLS record's header +
+ * payload fits comfortably; the take-then-feed loop covers a larger flight in multiple rounds). */
+#define KL_LWR_TLS_FEED_SCRATCH  4096u
 
 /* Per-loop backend state stashed in loop->_backend. All connection state — including the
  * recv-arm flag and the per-conn pending completions — lives in the glue's per-context/
@@ -339,9 +349,16 @@ static kl_ssize_t lwr_io_eagain(void) {
 static kl_ssize_t lwr_sock_send(void *c, KlSocketHandle fd, const void *b, size_t n) {
     (void)c;
     if (!kl_handle_valid(fd)) return -1;
+    void *lctx = kl_lwr_active_ctx();
     int wb = 0;
-    long r = kl_lwr_client_send(kl_lwr_active_ctx(), (void *)fd, b, n, &wb);
-    if (r < 0) return -1;                 /* hard error / not a connected client */
+    long r = kl_lwr_client_send(lctx, (void *)fd, b, n, &wb);
+    /* r<0 = not a connected CLIENT pcb. The completion-TLS handshake flush (comp_tls_flush) sends
+     * server ciphertext through this same socket send op on a SERVER-accepted pcb — route that to
+     * the server sync-send (LC-4). If neither claims the pcb it is a genuine hard error. */
+    if (r < 0) {
+        r = kl_lwr_srv_sync_send(lctx, (void *)fd, b, n, &wb);
+        if (r < 0) return -1;
+    }
     if (r == 0 && wb) return lwr_io_eagain();
     return (kl_ssize_t)r;
 }
@@ -628,10 +645,36 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         ev->kind = KL_COMP_READ;
         ev->target = c;
         if (!closed) {
-            size_t space = c->read_cap - c->read_len;
-            size_t got = kl_lwr_take_staged(st->lwrctx, pcb, c->read_buf + c->read_len, space);
-            ev->ok = 1;
-            ev->bytes = got;
+            /* Completion-TLS contract (mirrors event_pollcomp.c PC_TLS_RECV / event_iouring): for a
+             * TLS conn the received bytes are CIPHERTEXT — the backend must hand them to the engine's
+             * memory BIO via tls->feed_input, NOT copy them into read_buf (which holds PLAINTEXT,
+             * written only by the driver's comp_tls_drive). comp_on_read then handshakes/decrypts
+             * off the fed input; it uses ev->bytes only as a non-zero "data arrived" signal for a TLS
+             * conn (it does not add ev->bytes to read_len). The plaintext PROXY header phase is
+             * pre-TLS, so it still lands in read_buf. Drain the whole retained rx queue this tick
+             * (a handshake flight can exceed one scratch chunk) via take-then-feed rounds. */
+            if (c->tls && c->state != KL_CONN_PROXY_HEADER) {
+                unsigned char scratch[KL_LWR_TLS_FEED_SCRATCH];
+                size_t fed = 0;
+                int feed_err = 0;
+                do {
+                    size_t took = kl_lwr_take_staged(st->lwrctx, pcb, scratch, sizeof(scratch));
+                    if (took == 0) break;
+                    if (!c->tls->feed_input ||
+                        c->tls->feed_input(c->tls, scratch, took) < 0) {
+                        feed_err = 1;
+                        break;
+                    }
+                    fed += took;
+                } while (fed < KL_LWR_TLS_FEED_MAX);
+                ev->ok = feed_err ? 0 : 1;   /* feed overflow → surface a failed READ (driver closes) */
+                ev->bytes = feed_err ? 0 : fed;
+            } else {
+                size_t space = c->read_cap - c->read_len;
+                size_t got = kl_lwr_take_staged(st->lwrctx, pcb, c->read_buf + c->read_len, space);
+                ev->ok = 1;
+                ev->bytes = got;
+            }
         } else {                       /* closed with no pending data — zero-length READ */
             ev->ok = 0;
             ev->bytes = 0;

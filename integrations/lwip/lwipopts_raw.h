@@ -78,7 +78,12 @@
  * accordingly — matching the host ABI and keeping the raw backend clean under UBSan's
  * alignment checker (a MEM_ALIGNMENT=4 build trips -fsanitize=alignment on aarch64). */
 #define MEM_ALIGNMENT               8
-#define MEM_SIZE                    (512 * 1024)
+/* LC-4 (TLS over raw): a TLS record is up to 16 KiB, and in the loopback test BOTH ends live in the
+ * SAME lwIP stack, so a handshake round has ciphertext in flight on the client pcb AND the server
+ * pcb (plus each side's retained rx) concurrently. 1 MiB gives comfortable slack for both
+ * directions' segments + the loopback TX queue during the handshake burst. (P9/LC-1..LC-3 pass at
+ * 512 KiB; this only raises the ceiling.) */
+#define MEM_SIZE                    (1024 * 1024)
 
 /* MEMP_NUM_TCP_PCB caps how many active TCP pcbs lwIP can hold. The Stage-A concurrency tests
  * (raw_recv_test) open many SIMULTANEOUS connections IN-PROCESS — both the server pcb AND the raw
@@ -90,15 +95,27 @@
 #define MEMP_NUM_TCP_PCB_LISTEN     4
 #define MEMP_NUM_UDP_PCB            4
 #define MEMP_NUM_RAW_PCB            4
-#define MEMP_NUM_TCP_SEG            96
+/* LC-4: a 16 KiB TLS record is ~12 segments at TCP_MSS=1460; with both ends in one stack and
+ * multiple handshake records + the request/response in flight, segment demand rises. Raise the
+ * segment pool so a full TLS record can be queued in both directions without ERR_MEM stalling the
+ * handshake. (P9-3's 64 KiB SEND test is still window-bounded, not seg-pool-bounded.) */
+#define MEMP_NUM_TCP_SEG            192
 
 #define TCP_MSS                     1460
-/* Keep the SEND window well under a big (64 KB) response so the P9-3 send-pump still stalls +
- * resumes on tcp_sent (ERR_MEM backpressure on the SEND side). */
-#define TCP_SND_BUF                 (8 * TCP_MSS)
+/* LC-4 (TLS over raw): the RECEIVE window (TCP_WND) must admit a full 16 KiB TLS record in one
+ * window so the peer can push a whole handshake/application record without the window closing
+ * mid-record and deadlocking (the receiver only advances the window as the completion driver
+ * feed_input's + drains). 12*TCP_MSS ≈ 17.5 KiB > 16 KiB covers the largest record with slack.
+ *
+ * The SEND buffer (TCP_SND_BUF) is DELIBERATELY kept smaller than a big (64 KB) plaintext response
+ * so the P9-3 send-pump still stalls + resumes on tcp_sent (ERR_MEM backpressure on the SEND side)
+ * — but it must still admit a full 16 KiB TLS record so a single tls->write of one record does not
+ * itself deadlock. 12*TCP_MSS satisfies both (>16 KiB record, <64 KiB body). */
+#define TCP_SND_BUF                 (12 * TCP_MSS)
 #define TCP_SND_QUEUELEN            (4 * TCP_SND_BUF / TCP_MSS)   /* enough segs for the window */
-#define TCP_WND                     (8 * TCP_MSS)
-#define PBUF_POOL_SIZE              96
+#define TCP_WND                     (12 * TCP_MSS)
+/* LC-4: more pbufs for concurrent in-flight TLS records on both pcbs + retained rx. */
+#define PBUF_POOL_SIZE              128
 
 /* Checksums: loopback bypasses the wire, but keep them on to exercise the real
  * TCP path (cheap at this scale). */

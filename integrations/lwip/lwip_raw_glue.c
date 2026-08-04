@@ -976,6 +976,31 @@ long kl_lwr_client_recv(void *lwrctx, void *pcb, void *dst, size_t cap, int *wou
     return -1;
 }
 
+/* Synchronous send on a server-accepted (non-client) live pcb — see the header. An accepted pcb is
+ * already established (post-3WHS), so no `connected` flag is set/needed; require a live slot with a
+ * driver-owned KlConn (owner != NULL) that is NOT a client and NOT already running the async send-
+ * pump (send_active), so a handshake flush never races the response body pump on the same pcb. */
+long kl_lwr_srv_sync_send(void *lwrctx, void *pcb, const void *buf, size_t len, int *would_block) {
+    KlLwrCtx *ctx = lwrctx;
+    struct tcp_pcb *p = (struct tcp_pcb *)pcb;
+    KlLwrConn *c = lwr_conn_find(ctx, p);
+    if (would_block) *would_block = 0;
+    if (!c || c->is_client || c->dead || c->send_active || c->owner == NULL || p == NULL) return -1;
+    if (len == 0) return 0;
+
+    u16_t sndbuf = tcp_sndbuf(p);
+    if (sndbuf == 0) { if (would_block) *would_block = 1; return 0; }   /* no headroom — would-block */
+    size_t chunk = len;
+    if (chunk > sndbuf) chunk = sndbuf;
+    if (chunk > KL_LWR_TCP_WRITE_MAX) chunk = KL_LWR_TCP_WRITE_MAX;
+
+    err_t w = tcp_write(p, buf, (u16_t)chunk, TCP_WRITE_FLAG_COPY);
+    if (w == ERR_MEM) { if (would_block) *would_block = 1; return 0; }  /* queue full — would-block */
+    if (w != ERR_OK) return -1;                                         /* hard error */
+    tcp_output(p);
+    return (long)chunk;
+}
+
 /* ── LC-3a: UDP datagram glue (udp_pcb ↔ KlUdp) ───────────────────────────────────
  * A udp slot is created by kl_lwr_udp_new (lwr_sock_socket for SOCK_DGRAM), bound by
  * kl_lwr_udp_bind, associated with a KlUdp* + recv-armed by kl_lwr_udp_post_recv, and closed by
