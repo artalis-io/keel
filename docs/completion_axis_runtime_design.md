@@ -242,8 +242,14 @@ via `kl_event_provider_<x>()`). `pollcomp` is the RC-2 subject (portable, POSIX,
   runtime-injected `kl_event_provider_pollcomp()` → `COMPLETION-INJECT PASS`, ASan-clean, CI-gated.
   The direct proof the axis is runtime-injectable. Regressions green (default / `BACKEND=pollcomp` /
   iouring gate / `KEEL_NO_COMPLETION`).
-- **RC-3 — lwIP-raw as a runtime provider.** Rework `loopback-raw` to stock-libkeel-+-inject; retire
-  or demote `BACKEND=lwipraw`. **Gate:** P9 cases pass via runtime injection, ASan-clean.
+- **RC-3 — DONE.** `integrations/lwip/event_lwip_raw.c` is now a **pure runtime provider** (static
+  ops + `kl_event_provider_lwip_raw()` + `.completion`, **no `_builtin`** — `nm`-verified; no glue TU
+  needed since `BACKEND=lwipraw` is retired). `loopback-raw` builds a **stock libkeel** + the lwip-raw
+  provider objects and injects at runtime (`KlConfig.event_provider = kl_event_provider_lwip_raw()`;
+  the server auto-wires the paired overlapped socket provider from `native_provider()`). All P9 cases
+  (P9-1 tick → P9-4 lifetime) pass via injection on a stock libkeel, ASan+UBSan+LSan-clean. The
+  `BACKEND=lwipraw` root-Makefile case is removed. Regressions green (default / pollcomp-inject /
+  iouring gate).
 - **RC-4 — docs + `KEEL_NO_COMPLETION` CI cell.** Update `phase9`/`event_provider`/`pal_review`
   docs; add a `KEEL_NO_COMPLETION` build to CI.
 

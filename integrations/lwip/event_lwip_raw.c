@@ -13,11 +13,16 @@
  * raw tcp_* callbacks fire inline on that one thread — so no locking is needed and
  * they map cleanly onto the completion driver (completion_driver.c).
  *
- * "It's a completion BACKEND, not a runtime drop-in" (the CRUCIAL finding): unlike
- * event_lwip.c (a runtime-injectable readiness provider that rides a STOCK libkeel),
- * this backend requires a libkeel BUILT for the completion axis — completion_driver.c
- * linked in, the io_engine.c stub NOT — because the connection state machine that runs
- * over completions lives in the driver, selected at build time (Makefile BACKEND).
+ * RUNTIME PROVIDER over a STOCK libkeel (RC-3): originally this was authored as a
+ * compiled-in completion BACKEND (BACKEND=lwipraw). Since RC-1 made the completion axis
+ * runtime-dispatchable (completion_dispatch.c honours loop->ops->completion) and RC-2
+ * proved the injection path on pollcomp, this TU is now a PURE runtime provider — exactly
+ * like the readiness event_lwip.c: static ops grouped in a KlEventProvider, NO
+ * kl_event_*_builtin / kl_comp_ops_builtin symbols. It links cleanly next to a STOCK
+ * libkeel (whose default backend already defines those _builtin symbols) and is installed
+ * at runtime via kl_event_provider_lwip_raw() (KlConfig.event_provider /
+ * kl_event_ctx_init_ex). The always-linked driver+dispatch in the stock lib reach this
+ * backend's primitives through loop->ops->completion. BACKEND=lwipraw is retired.
  *
  * Division of labour (mirrors event_pollcomp.c — the SIMPLEST completion backend):
  *   - THIS TU defines the completion.h/io_engine.h BACKEND primitives:
@@ -59,8 +64,6 @@
 #include <keel/sockaddr.h>     /* KlSockAddr marshalling at the seam boundary */
 #include "keel_lwip_raw.h"     /* kl_event_provider_lwip_raw / kl_socket_provider_lwip_raw */
 #include "lwip_raw_glue.h"     /* the lwIP seam (no lwIP types) */
-#include "event_builtin.h"     /* kl_event_*_builtin entry points (src/) */
-#include "event_caps.h"        /* KL_EVENT_CAP_* + kl_event_native_provider_builtin (src/) */
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
 #include "completion.h"        /* the abstract completion axis this TU implements (src/) */
 #include "io_engine.h"         /* kl_comp_post_udp_* decls (forward-declares struct KlUdp) */
@@ -121,11 +124,12 @@ static void lwr_disarm(KlLwrState *st, const KlConn *c) {
 }
 
 /* ── KlEventLoop lifecycle ─────────────────────────────────────────────
- * Named *_builtin because a lwipraw-built libkeel selects this TU as its compile-time
- * backend (Makefile BACKEND=lwipraw); event_dispatch.c calls these on the NULL-ops
- * (default) path. The runtime provider below wraps the SAME functions. */
+ * Pure-provider form (RC-3): these are static lwr_ev_* ops referenced only by the
+ * KlEventOps literal below (which the KlEventProvider hangs off). No kl_event_*_builtin
+ * surface — the backend is reached at runtime via loop->ops, never the compiled-in
+ * default path. Mirrors event_lwip.c. */
 
-int kl_event_init_builtin(KlEventLoop *loop) {
+static int lwr_ev_init(KlEventLoop *loop) {
     KlLwrState *st = kl_malloc(loop->alloc, sizeof(*st));
     if (!st) return -1;
     memset(st, 0, sizeof(*st));
@@ -141,15 +145,15 @@ int kl_event_init_builtin(KlEventLoop *loop) {
  * readiness watches, so add/mod/del are inert — matching the IOCP model. (A tagged-udata
  * watcher relay for thread-pool wakeup / timers, as in event_pollcomp.c, is a later stage;
  * P9-2's single-request loopback roundtrip needs none.) */
-int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+static int lwr_ev_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     (void)loop; (void)fd; (void)mask; (void)udata;
     return 0;
 }
-int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+static int lwr_ev_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     (void)loop; (void)fd; (void)mask; (void)udata;
     return 0;
 }
-int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
+static int lwr_ev_del(KlEventLoop *loop, KlSocketHandle fd) {
     (void)loop; (void)fd;
     return 0;
 }
@@ -157,7 +161,7 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
 /* A completion loop drives via kl_comp_drain (the io_engine seam), not this readiness
  * wait — defined only because the KlEventLoop API requires it (same as event_pollcomp).
  * A NO_SYS=1 raw loop cannot block on an fd, so a positive timeout is a coarse sleep. */
-int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
+static int lwr_ev_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     (void)loop; (void)out; (void)max;
     if (timeout_ms > 0) {
         struct timespec sl = { timeout_ms / 1000, (long)(timeout_ms % 1000) * KL_LWR_NS_PER_MS };
@@ -166,7 +170,7 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
     return 0;
 }
 
-void kl_event_close_builtin(KlEventLoop *loop) {
+static void lwr_ev_close(KlEventLoop *loop) {
     KlLwrState *st = loop->_backend;
     if (!st) return;
     /* lwIP itself is a process-global singleton (no lwip_deinit in NO_SYS=1); we free
@@ -179,12 +183,12 @@ void kl_event_close_builtin(KlEventLoop *loop) {
 /* Completion loop over lwIP-raw. COMPLETION makes the Phase 7 negotiation
  * (kl_caps_compatible) require an OVERLAPPED socket provider — kl_socket_provider_lwip_raw
  * below. NOT native-fd: the raw loop has no OS descriptor to poll (F1/P9-5). */
-unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
+static unsigned lwr_ev_caps(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION;
 }
 
-const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
+static const struct KlSocketProvider *lwr_ev_native_provider(const KlEventLoop *loop) {
     (void)loop;
     return kl_socket_provider_lwip_raw();
 }
@@ -195,9 +199,9 @@ const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoo
  * provider then advertises the completion axis too, which RC-2 exercises. */
 static const KlCompletionOps lwip_raw_completion_ops;
 static const KlEventOps lwip_raw_event_ops = {
-    .init = kl_event_init_builtin, .add = kl_event_add_builtin, .mod = kl_event_mod_builtin,
-    .del = kl_event_del_builtin, .wait = kl_event_wait_builtin, .close = kl_event_close_builtin,
-    .caps = kl_event_caps_builtin, .native_provider = kl_event_native_provider_builtin,
+    .init = lwr_ev_init, .add = lwr_ev_add, .mod = lwr_ev_mod,
+    .del = lwr_ev_del, .wait = lwr_ev_wait, .close = lwr_ev_close,
+    .caps = lwr_ev_caps, .native_provider = lwr_ev_native_provider,
     .completion = &lwip_raw_completion_ops,
 };
 static const KlEventProvider lwip_raw_event_provider = { &lwip_raw_event_ops, "lwip-raw" };
@@ -507,16 +511,15 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
     return count;
 }
 
-/* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
+/* ── Completion sub-vtable (RC-1/RC-3) ─────────────────────────────────────
  * This backend's completion primitives, grouped so the dispatch (completion_dispatch.c)
- * reaches them on the compiled-in path (kl_comp_ops_builtin) or through the runtime
- * lwip-raw provider (loop->ops->completion — the way BACKEND=lwipraw actually runs, as an
- * injected provider). Forward-declared above so the KlEventOps literal carries it; no
- * behavior change — the same funcs, one hop away. */
+ * reaches them exclusively through the runtime lwip-raw provider
+ * (loop->ops->completion — the only way this backend runs, RC-3). Forward-declared above
+ * so the KlEventOps literal carries it. Static: there is NO kl_comp_ops_builtin here — a
+ * pure runtime provider never binds the compiled-in default path, so it links cleanly
+ * next to a stock libkeel (whose readiness kl_comp_ops_builtin stub owns that symbol). */
 static const KlCompletionOps lwip_raw_completion_ops = {
     lwr_comp_drain, lwr_comp_prime_accepts, lwr_comp_post_recv, lwr_comp_post_send,
     lwr_comp_post_accept, lwr_comp_post_sendfile, lwr_comp_cancel,
     lwr_comp_post_udp_recv, lwr_comp_post_udp_send,
 };
-
-const KlCompletionOps *kl_comp_ops_builtin(void) { return &lwip_raw_completion_ops; }

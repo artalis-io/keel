@@ -162,39 +162,71 @@ raw-spike: liblwip_raw.a $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
 	./raw_loopback_spike
 	@echo "integrations/lwip: raw+loopback+NO_SYS spike OK"
 
-# ── Phase 9 P9-1: lwIP raw COMPLETION backend — build a lwipraw libkeel + tick test ──
-# The completion counterpart of `loopback` (which rides a STOCK libkeel over the
-# readiness lwIP provider). This backend is a COMPLETION build: it needs a libkeel BUILT
-# with BACKEND=lwipraw (completion_driver.c linked, io_engine.c stub not) — see
-# docs/phase9_lwip_raw_design.md "it's a completion BACKEND, not a runtime drop-in".
+# ── Phase 9 / RC-3: lwIP raw COMPLETION backend as a RUNTIME PROVIDER on a STOCK libkeel ──
+# The completion counterpart of `loopback` (which rides a STOCK libkeel over the readiness
+# lwIP provider) — and now built the SAME way. RC-3 retired BACKEND=lwipraw: event_lwip_raw.c
+# is a pure runtime KlEventProvider (no kl_event_*_builtin / kl_comp_ops_builtin), so it drops
+# onto a STOCK libkeel whose always-linked completion driver + dispatch (completion_driver.c /
+# completion_dispatch.c, present since RC-1) reach it via loop->ops->completion. See
+# docs/completion_axis_runtime_design.md (RC-3) + docs/phase9_lwip_raw_design.md.
 #
 # Steps:
 #   1. Build the NO_SYS=1 lwIP archive (liblwip_raw.a) + the raw_build scratch dir
 #      (lwipopts.h forwarder + arch/cc.h) — reusing the raw-spike mechanism.
-#   2. Build libkeel with BACKEND=lwipraw (root Makefile), passing LWIP_DIR +
-#      LWIPRAW_BUILD so event_lwip_raw.c finds lwIP's NO_SYS=1 headers + our lwipopts.
-#   3. Compile + link + run raw_tick_test against that lwipraw libkeel + liblwip_raw.a.
+#   2. Build a STOCK libkeel (the DEFAULT readiness backend — epoll/kqueue; always carries
+#      the completion driver + dispatch from RC-1). NO BACKEND= override.
+#   3. Compile the lwip-raw PROVIDER objects (event_lwip_raw.o + lwip_raw_glue.o) against
+#      the raw lwIP includes + the internal src/ seams.
+#   4. Link + run raw_tick_test against those objects + the stock libkeel + liblwip_raw.a.
 #
-# The test proves the completion loop drives lwIP (sys_check_timeouts + netif_poll each
-# tick) with no server — the P9-1 bar. Existing readiness targets are untouched (they
-# build their own liblwip.a from lwipopts.h / NO_SYS=0 and a STOCK libkeel).
+# raw_tick_test injects the provider at runtime: kl_event_ctx_init_ex(.., kl_event_provider_
+# lwip_raw()) for P9-1, and KlConfig.event_provider = kl_event_provider_lwip_raw() for the
+# server cases (P9-2/3/4) — the server auto-wires the paired overlapped socket provider from
+# the loop's native_provider(). Existing readiness targets (loopback/loopback-tls/raw-spike)
+# are untouched.
 LWIPRAW_KEEL_LIB = $(KEEL_ROOT)/libkeel.a
-# raw_tick_test uses the public API + one internal seam (event_caps.h, the
-# compatibility negotiation) — hence -Isrc alongside -I. for keel_lwip_raw.h.
-loopback-raw: liblwip_raw.a $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
-	@echo "building lwipraw libkeel (BACKEND=lwipraw) ..."
-	$(MAKE) -C $(KEEL_ROOT) clean
-	$(MAKE) -C $(KEEL_ROOT) BACKEND=lwipraw LWIP_DIR=$(abspath $(LWIP_DIR)) \
-	  LWIPRAW_BUILD=$(abspath $(RAW_BUILD))
+# The lwip-raw provider objects. event_lwip_raw.c is OUR code (no lwIP headers) — build it
+# -Wall -Wextra -Werror against the internal src/ seams (completion.h/socket.h) + keel_lwip_raw.h.
+# lwip_raw_glue.c is the lwIP-only TU — relaxed warnings (-w) against the NO_SYS=1 lwIP headers.
+event_lwip_raw.o: event_lwip_raw.c keel_lwip_raw.h lwip_raw_glue.h
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_DEFAULT_SOURCE \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -c -o $@ $<
+
+lwip_raw_glue.o: lwip_raw_glue.c lwip_raw_glue.h $(RAW_BUILD)/lwipopts.h $(RAW_ARCH)
+	$(CC) -std=c11 -O2 -w -D_DEFAULT_SOURCE $(RAW_INC) -Iintegrations/lwip -I. -c -o $@ $<
+
+# raw_tick_test uses the public API + two internal seams (event_caps.h for the compatibility
+# negotiation; the glue header) — hence -Isrc alongside -I. for keel_lwip_raw.h.
+loopback-raw: event_lwip_raw.o lwip_raw_glue.o liblwip_raw.a
+	@echo "building STOCK libkeel (default readiness backend + completion driver/dispatch) ..."
+	$(MAKE) -C $(KEEL_ROOT)
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
 	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
 	  -o raw_tick_test raw_tick_test.c \
+	  event_lwip_raw.o lwip_raw_glue.o \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	./raw_tick_test
-	@echo "integrations/lwip: P9-1 lwIP raw completion tick test OK"
+	@echo "integrations/lwip: P9 lwIP raw completion tests OK (runtime injection on stock libkeel)"
+
+# ASan+UBSan+LSan variant — the P9-4 lifetime/close/cancel cases need it. Builds a STOCK
+# DEBUG libkeel (make -C .. debug) + sanitizer-instrumented provider objects + test.
+LWIPRAW_ASAN = -std=c11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -D_DEFAULT_SOURCE
+loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
+	@echo "building STOCK DEBUG libkeel (ASan+UBSan) ..."
+	$(MAKE) -C $(KEEL_ROOT) debug
+	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra -Werror \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -c -o event_lwip_raw.o event_lwip_raw.c
+	$(CC) $(LWIPRAW_ASAN) -w $(RAW_INC) -Iintegrations/lwip -I. -c -o lwip_raw_glue.o lwip_raw_glue.c
+	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o raw_tick_test raw_tick_test.c \
+	  event_lwip_raw.o lwip_raw_glue.o \
+	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
+	ASAN_OPTIONS=detect_leaks=1 ./raw_tick_test
+	@echo "integrations/lwip: P9 lwIP raw completion tests OK under ASan+UBSan+LSan"
 
 clean:
 	rm -f *.o *.a lwip_loopback_test raw_loopback_spike raw_tick_test
 	rm -rf $(RAW_BUILD)
 
-.PHONY: check loopback loopback-tls raw-spike loopback-raw clean
+.PHONY: check loopback loopback-tls raw-spike loopback-raw loopback-raw-asan clean

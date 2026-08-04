@@ -87,30 +87,7 @@ else
 
   # Platform event loop backend
   ifeq ($(UNAME_S),Linux)
-    ifeq ($(BACKEND),lwipraw)
-      # Phase 9 lwIP raw-API COMPLETION backend over NO_SYS=1 lwIP (BYO — LWIP_DIR).
-      # Like BACKEND=iouring/pollcomp this is a completion build: the always-linked
-      # driver (completion_driver.c) provides kl_io_engine_run_completion over the
-      # completion.h backend that integrations/lwip/event_lwip_raw.c implements (raw tcp_*
-      # callbacks driven by KEEL's loop as the lwIP mainloop); COMPLETION_BACKEND=1
-      # suppresses the readiness kl_comp_ops_builtin stub.
-      # The event backend TU needs lwIP's NO_SYS=1 headers + the raw_build scratch dir
-      # (the lwipopts.h forwarder + arch/cc.h, created by integrations/lwip/Makefile) +
-      # the internal src/ seams (completion.h/socket.h/event_caps.h) — hence -Isrc and the
-      # lwIP include dirs. Only event_lwip_raw.c actually includes lwIP; the other TUs
-      # ignore the extra -I paths. Gated on LWIP_DIR (set by integrations/lwip/Makefile).
-      EVENT_SRC = integrations/lwip/event_lwip_raw.c
-      # The lwIP-only glue TU (sys_now + init/tick over lwIP raw headers). Kept a SEPARATE
-      # TU from event_lwip_raw.c because lwIP's def.h (htons/ntohs macros) + arch.h (ssize_t)
-      # clash with the host socket headers the KEEL socket seam pulls into event_lwip_raw.c.
-      LWIP_GLUE_SRC = integrations/lwip/lwip_raw_glue.c
-      FILE_IO_SRC = src/file_io.c
-      COMPLETION_BACKEND = 1
-      LWIPRAW_BUILD ?= integrations/lwip/raw_build
-      # event_lwip_raw.c needs the internal src/ seams + keel_lwip_raw.h; it does NOT include
-      # lwIP (only lwip_raw_glue.c does). The lwIP include dirs are harmless to the other TUs.
-      CFLAGS += -Isrc -Iintegrations/lwip -I$(LWIPRAW_BUILD) -I$(LWIP_DIR)/src/include
-    else ifeq ($(BACKEND),iouring)
+    ifeq ($(BACKEND),iouring)
       # io_uring is completion-native (PAL 8f): BACKEND=iouring builds the completion backend
       # (event_iouring.c driving completion.h via SQE/CQE + completion_driver.c). The old
       # readiness-adapted io_uring TU + file_io_iouring.c were retired (8f-5d) — benchmarks put
@@ -201,8 +178,6 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
-# lwIP-only glue TU (empty except on BACKEND=lwipraw) — see the lwipraw BACKEND block.
-LWIP_GLUE_SRC ?=
 CORE_SRC = src/allocator.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/response.c src/router.c \
            src/connection.c src/server.c $(SERVER_PLAT_SRC) src/async.c src/timer.c \
            src/body_reader_buffer.c \
@@ -213,7 +188,7 @@ CORE_SRC = src/allocator.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c \
-           $(COMPLETION_CORE) $(LWIP_GLUE_SRC) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
+           $(COMPLETION_CORE) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
 # The built-in DNS resolver now builds on every platform: dns_resolver.c is
 # #ifdef-free (over the udp + socket.h seams) and DNS_SYS_SRC swaps the config-
@@ -289,20 +264,10 @@ endif
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# Phase 9 lwIP raw completion backend TU (BACKEND=lwipraw). event_lwip_raw.c is OUR code
-# (no lwIP headers) — keep -Wall -Wextra -Werror; drop only -Wpedantic to match the
-# readiness event_lwip.o posture (the internal seams it pulls are not ISO-pedantic-clean
-# under -Wformat=2 either, but our code is warning-clean at -Wall -Wextra).
-integrations/lwip/event_lwip_raw.o: integrations/lwip/event_lwip_raw.c
-	$(CC) $(filter-out -Wpedantic,$(CFLAGS)) -c -o $@ $<
-
-# The lwIP-only glue TU: compile against lwIP's NO_SYS=1 headers with relaxed warnings
-# (lwIP headers are not -Wall/-Wextra/-Werror clean — vendor posture) + -D_DEFAULT_SOURCE
-# so <limits.h> exposes SSIZE_MAX and lwIP's arch.h reuses the host ssize_t (else it
-# typedefs ssize_t=int, clashing). No KEEL socket header is included here by design.
-integrations/lwip/lwip_raw_glue.o: integrations/lwip/lwip_raw_glue.c
-	$(CC) -std=c11 -O2 -w -D_DEFAULT_SOURCE -fPIE \
-	  -I$(LWIPRAW_BUILD) -I$(LWIP_DIR)/src/include -Iintegrations/lwip -c -o $@ $<
+# The lwIP-raw completion backend (integrations/lwip/event_lwip_raw.o +
+# lwip_raw_glue.o) is a RUNTIME PROVIDER built next to a STOCK libkeel, NOT compiled into
+# the core lib (BACKEND=lwipraw was retired in RC-3). Its object build rules live in
+# integrations/lwip/Makefile (loopback-raw), which supplies the BYO lwIP include dirs.
 
 # Vendor code — relaxed warnings
 vendor/llhttp/llhttp.o: vendor/llhttp/llhttp.c

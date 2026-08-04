@@ -5,16 +5,19 @@
  * This backend drives lwIP's native raw `tcp_*` callback API in NO_SYS=1 mode: no
  * tcpip thread, no sockets/netconn — KEEL's event loop IS the lwIP mainloop.
  *
- * CRUCIAL (docs/phase9_lwip_raw_design.md): unlike kl_event_provider_lwip() (a
- * runtime-injectable READINESS provider that rides a STOCK libkeel), this is a
- * COMPLETION backend — it requires a libkeel BUILT for the completion axis
- * (Makefile BACKEND=lwipraw links completion_driver.c). Install it via:
+ * RUNTIME PROVIDER over a STOCK libkeel (RC-3): like kl_event_provider_lwip() (the
+ * readiness lwIP provider), this completion backend rides a STOCK libkeel — no bespoke
+ * library build. The always-linked completion driver + dispatch (completion_driver.c /
+ * completion_dispatch.c, present on every default build since RC-1) reach this backend's
+ * primitives through the injected loop->ops->completion. BACKEND=lwipraw is retired.
+ * Install it via:
  *
  *   KlEventCtx ctx;
  *   kl_event_ctx_init_ex(&ctx, &alloc, kl_event_provider_lwip_raw());
  *
- * (Its native_provider() returns kl_socket_provider_lwip_raw(), so the ctx
- * auto-wires the matching overlapped socket provider on a completion loop.)
+ * or, for a KlServer, KlConfig.event_provider = kl_event_provider_lwip_raw(). Its
+ * native_provider() returns kl_socket_provider_lwip_raw(), so the ctx/server auto-wires
+ * the matching overlapped socket provider on the completion loop.
  *
  * lwIP is NOT vendored — build against your own lwIP (LWIP_DIR) with the NO_SYS=1
  * lwipopts_raw.h. See integrations/lwip/Makefile (loopback-raw target).
