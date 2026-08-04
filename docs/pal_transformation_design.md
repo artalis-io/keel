@@ -185,7 +185,7 @@ Per the task's required classification:
 | **7** | Event/socket capability negotiation | 6 | med | additive | ✅ done |
 | **8** | Completion axis: IOCP + pollcomp + io_uring (TCP/TLS/h2/WS/UDP/async); 8a–8f | 6(Winsock),7 | very high | additive | ✅ done |
 | **9** | lwIP raw provider (3rd event model — callback) | 6(lwIP),7 | very high | additive | ✅ done (server P9-1..P9-5 + client/UDP/DNS/TLS LC-0..LC-5, PRs #179–#183, #191–#196) |
-| **10** | UEFI feasibility + optional prototype | 5,7 | very high | additive/subset | ⬜ deferred (frontier) |
+| **10** | UEFI feasibility + optional prototype | 5,7 | very high | additive/subset | ⬜ deferred (frontier) — feasibility designed in `docs/phase10_uefi_feasibility_design.md` (spike-gated go/no-go) |
 
 **Status:** Phase 0 done (`f29ed15`, baseline in Appendix A). **Phase 1 + 1b done**
 — `src/socket.{h,c}` landed; client transports, DNS resolver, server, and udp

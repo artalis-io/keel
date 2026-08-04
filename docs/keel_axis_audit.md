@@ -1,5 +1,130 @@
 # KEEL Networking Architecture Axis Audit
 
+## Seventh pass — the lwIP-raw CLIENT axis validates the third event model end to end (2026-08-05)
+
+**Verdict: architecturally sound.** The completion-native lwIP-raw provider — the third event
+model (Phase 9) — now carries the full **client** axis (plaintext, Happy-Eyeballs, DNS, HTTPS)
+in addition to the server, and it did so with **zero `src/` changes** for the UDP/DNS transport
+(LC-3a/LC-3: `src/udp.c` and `src/dns_resolver.c` run verbatim over the raw completion loop) and
+only **backend-conforming** fixes for TLS (LC-4: the raw backend was made to satisfy the existing
+cross-backend completion-TLS contract, not the reverse). This is the strongest possible evidence
+that the event axis, socket axis, and protocol layer are genuinely independent: KEEL's own
+datagram machine, DNS resolver, HTTP client, and TLS driver were all reused unchanged over a
+socketless, fd-less, `NO_SYS=1` callback stack.
+
+### What the LC-0..LC-5 work added to the axes
+
+1. **A new completion primitive, honestly modeled: `KL_COMP_CONNECT` + `KlCompletionOps.post_connect`**
+   (`src/completion.h`). This is the **outbound counterpart of `KL_COMP_ACCEPT`** — construct a
+   connect op on a client-owned nonblocking socket, submit, receive completion, interpret win/fail.
+   It is a genuine completion concept (not synthetic readiness): the result is carried in the
+   delivered event mask (`KL_EVENT_WRITE`=connected, `0`=failed), *not* re-derived from
+   `getsockopt(SO_ERROR)` on the client side — deliberately, because io_uring drops `SO_ERROR`
+   after a failed `IORING_OP_CONNECT`. Implemented on all three completion backends
+   (`event_pollcomp.c` PC_CONNECT, `event_iouring.c` IOU_CONNECT, `event_iocp.c` ConnectEx — the
+   latter also fixed the previously-broken IOCP async client). **Goal 2 (honest semantics): PASS.**
+2. **The client's completion-vs-readiness connect branch** (`src/client.c`
+   `client_comp_connect`/`he_proceed_after_connect`) + `kl_watcher_add_detached` (`src/async.c`):
+   a ctx-owned watcher node with no readiness arm, so a completion loop can carry the connect
+   result to the client without the client thinking in either event model. **Goal 3 (no model
+   leak): PASS** — the client never sees SQEs/CQEs/OVERLAPPED/POLLOUT; it registers a tagged
+   watcher and receives a Keel-level connect result.
+3. **`KlUdp` over the raw loop (LC-3a)** — the raw socket provider gained `KlDatagramOps`
+   (`SOCK_DGRAM → udp_new`; `post_udp_recv/send → udp_recv/udp_sendto`), so `src/udp.c`'s machine
+   runs unchanged. **DNS (LC-3)** then rides that KlUdp via `kl_dns_resolver_create` on a ctx whose
+   `sockets = kl_socket_provider_lwip_raw()` — one DNS path, no lwIP `dns_gethostbyname`.
+4. **HTTPS (LC-4)** — client TLS is socket-BIO routed through the provider (`t->sp =
+   ev_ctx->sockets` → `lwr_sock_send/recv`); server TLS is the generic memory-BIO
+   completion-TLS leg. Both reuse existing legs; the backend only moves bytes.
+
+### Mechanical independence checks (Goal 4) — PASS
+
+- **No protocol TU** (`connection.c`, `h2.c`, `websocket.c`, `client.c`, `h2_client.c`,
+  `websocket_client.c`, `sse.c`, `response.c`, `router.c`, `redirect.c`, `client_pool.c`,
+  `dns_resolver.c`) includes a platform networking/event header or calls `epoll_*`/`kevent`/
+  `io_uring_*`/`WSA*`/`OVERLAPPED`/`GetQueuedCompletion*` directly (only `client.c` pulls
+  `platform.h` for the abstracted `kl_plat_poll1` sync wait; the remaining hits are comments).
+- **The raw completion backend `event_lwip_raw.c` is lwIP-free** — it includes only the neutral
+  seam headers (`keel_lwip_raw.h`, `lwip_raw_glue.h`); **no `<lwip/*>`**. Every `tcp_*`/`udp_*`
+  call is confined to `lwip_raw_glue.c`. No `<lwip/*>` appears anywhere in `src/` (the sole
+  `sockcompat.h` `#include "lwip/sockets.h"` is the guarded non-raw lwIP-*socket* ABI seam,
+  by-design and unrelated to the raw/completion path).
+- Addresses cross the seam as `KlSockAddr` / raw IPv4 bytes + host-order port; handles as
+  `KlSocketHandle` (`intptr_t`) carrying a `tcp_pcb*`/`udp_pcb*`, never an `int`.
+
+### Execution-path traces (completion, lwIP-raw)
+
+- **Connect:** `client_comp_connect` → `kl_watcher_add_detached(fd)` → `kl_comp_post_connect` →
+  `lwr_comp_post_connect` → `kl_lwr_connect`/`tcp_connect` → `lwr_cli_connected` (connected_cb) →
+  `KL_COMP_CONNECT` (mask-encoded) → `kl_comp_run` → `kl_event_dispatch` → the client's tagged
+  connect watcher → `he_on_connect_result` → SENDING.
+- **Receive:** `lwr_srv_recv` (tcp_recv, retained-rx pbuf on `ERR_MEM` backpressure) →
+  `kl_lwr_take_staged` (issues `tcp_recved` as bytes are delivered) → `KL_COMP_READ` →
+  `comp_on_read` → `kl_conn_ingest_body` (model-blind core).
+- **Send + backpressure:** `kl_conn_send_complete` → `post_send` → `kl_lwr_send_begin`/
+  `lwr_send_pump` (`tcp_write`+`tcp_output`, window-bounded `conn_cap × KL_LWR_TX_WIN`; `ERR_MEM`
+  → EAGAIN → re-arm) → `lwr_srv_sent` (tcp_sent) → `KL_COMP_WRITE`.
+- **Close-with-outstanding:** `kl_lwr_tcp_abort`/`lwr_srv_err` → mark slot `dead` + `->pcb=NULL`
+  (prevents freed-pcb aliasing in `lwr_conn_find`) → terminal completion exactly once
+  (`terminated`/`pend_terminal` cross-guard).
+
+### Findings
+
+- **HIGH (axis lifetime) — same-batch Happy-Eyeballs connect UAF.** `kl_comp_run`
+  (`src/completion_driver.c`) drains a *batch* of completions and dispatches them sequentially;
+  `kl_event_dispatch` (`include/keel/event_ctx.h`) derefs the tagged `KlWatcher*` with **no
+  liveness check**. Dispatching a winning `KL_COMP_CONNECT` frees the losing attempts' watcher
+  nodes (`he_close_attempts → kl_watcher_del`), so a loser's still-batched `KL_COMP_CONNECT`
+  then reads freed memory. This is the axis-relevant instance of Goal 6/10 (op lifetime + cancel
+  racing completion within one drain). Architectural principle: **a completion driver that
+  batch-dispatches must tolerate a target being retired earlier in the same batch.** Smallest
+  fix: validate the tagged watcher is still linked in `ctx->watchers` before deref (backend-
+  agnostic). Same latent shape exists for `KL_COMP_WATCHER`; the guard covers both. (Mirrors the
+  c-audit H1; see `docs/keel_audit.md` ninth pass.)
+- **MEDIUM — lwip-raw accept→post_recv dangling-pcb** (`lwip_raw_glue.c`): a stack abort in the
+  pre-owner window is misrouted; the driver can adopt a freed pcb. Goal 6 lifetime. Fix:
+  `tcp_arg(newpcb, slot)` at accept. (c-audit M1.)
+- **INFORMATIONAL — stale `SO_ERROR` comments** in `completion_driver.c`/`event_pollcomp.c`/
+  `event_iouring.c` describe a connect win/fail mechanism the client no longer uses (it trusts
+  the mask). Comment-only; correct them. (c-audit L3.)
+
+Everything else — honest readiness vs completion semantics, no model leak in the public API,
+protocol platform-independence, error normalization at the seam, model-independent backpressure
+(the raw retained-rx ERR_MEM flow-control is the completion analog of readiness interest
+reduction), registration-vs-submission distinction — holds.
+
+### Compatibility matrix (updated)
+
+| Combination | Status |
+|-------------|--------|
+| Linux sockets + epoll | production (default) |
+| Darwin sockets + kqueue | production (default) |
+| Linux sockets + io_uring | production (default `BACKEND=iouring`) |
+| Winsock + WSAPoll | buildable + MinGW-gated |
+| Winsock + IOCP | buildable + MinGW-gated; async client fixed (LC-0 ConnectEx) |
+| pollcomp (portable completion double) | CI/ASan gate |
+| **lwIP-raw completion — server** | loopback-verified, ASan+UBSan+LSan, CI-gated |
+| **lwIP-raw completion — client (plaintext + HE)** | loopback-verified (LC-1/LC-2), ASan-clean; **H1 fix pending** for racing dual-stack connect |
+| **lwIP-raw completion — UDP + DNS** | loopback-verified (LC-3a/LC-3), ASan-clean, `src/` unchanged |
+| **lwIP-raw completion — HTTPS (client + server)** | loopback-verified (LC-4), ASan-clean, BYO mbedTLS (local/hull gate) |
+
+### Future-provider compatibility (Goal 14) — UEFI
+
+The lwip-raw client axis is a near-exact precedent for a UEFI provider (completion-native,
+socketless, fd-less, single-loop, pointer-handle). The concrete blockers are now only the
+freestanding toolchain + the EFI event/token lifecycle — assessed in the new
+`docs/phase10_uefi_feasibility_design.md` (roadmap Phase 10). No new abstraction is needed; the
+`KlCompletionOps` + `KlSocketProvider` seams map directly onto `EFI_TCP4` tokens/events.
+
+### Automated gate
+
+cppcheck 0, scan-build "No bugs found," 60 suites under ASan+UBSan (`make debug-test`), the
+loopback-raw + raw-tls ASan runs, epoll + io_uring (56-suite) gates — all green (one UBSan
+finding, `redirect.c:77` NULL-to-`strncasecmp`, is a protocol-layer nit tracked as c-audit L1,
+not an axis issue).
+
+---
+
 ## Sixth pass — datagram data-plane folded onto the socket provider (2026-08-03)
 
 **Verdict: architecturally sound — this pass *removed the last link-time coupling on the socket

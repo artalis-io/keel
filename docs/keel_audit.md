@@ -1,5 +1,60 @@
 # C Audit Report: KEEL
 
+## Ninth pass — lwIP-raw client axis (LC-0..LC-5) + full re-sweep (2026-08-05)
+
+**Scope:** the completion-native lwIP-raw **client** work merged since the eighth pass —
+LC-0 completion-CONNECT contract (`KL_COMP_CONNECT` + `post_connect` across `completion.h`/
+`completion_dispatch.c`/`completion_driver.c`/`event_pollcomp.c`/`event_iouring.c`/
+`event_iocp.c`/`src/client.c`/`src/async.c`), LC-1/LC-2 plaintext + Happy-Eyeballs raw client,
+LC-3a `KlUdp` over lwip-raw, LC-3 DNS via KEEL's `dns_resolver.c` on `KlUdp`-over-raw, LC-4
+HTTPS (client socket-BIO through the raw provider + server memory-BIO completion-TLS leg, two
+backend fixes), LC-5 caps/docs (PRs #191–#197). Files centered on `integrations/lwip/`
+(`event_lwip_raw.c`, `lwip_raw_glue.c/.h`, `lwipopts_raw.h`) + the cross-backend LC-0 seam.
+
+**Method:** two parallel deep-review agents (the lwip-raw backend/glue lifetime + the LC-0
+cross-backend connect primitive), each tracing recv/send/connect/close-with-outstanding paths;
+plus mechanical sweeps (no `strcpy`/`sprintf`/`atoi`, no raw `malloc`/`free` outside test
+harnesses) and the automated gate in the Apple container: **cppcheck 0 errors/warnings,
+scan-build "No bugs found," 60 suites passing under ASan+UBSan** (`make debug-test`,
+`detect_leaks=1`), and the loopback-raw + raw-tls ASan runs. Build hardening confirmed
+unchanged (`-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 -fstack-protector-strong
+-fPIE -D_FORTIFY_SOURCE=3`; SIGPIPE fully handled).
+
+**Automated tools: CLEAN.** cppcheck (0), scan-build (No bugs), no unsafe libc calls in
+`src/`+`parsers/` (only `allocator.c`'s stdlib wrapper legitimately wraps `realloc`), no VLAs,
+allocator discipline intact in the new backend (all Keel-owned memory via `KlAllocator`, no
+hot-path allocation — TX window pre-allocated, only lwIP's own `pbuf_alloc` for a UDP send).
+
+### High
+
+| # | File:Line | Issue | Fix |
+|---|-----------|-------|-----|
+| H1 | `include/keel/event_ctx.h:140` (`kl_event_dispatch`) + `src/completion_driver.c` (`kl_comp_run` batch) + `src/client.c` (`he_close_attempts`/`client_drop_connect_fd`) | **Same-batch Happy-Eyeballs connect use-after-free.** `kl_comp_run` drains multiple completions into one batch and dispatches them sequentially; `kl_event_dispatch` derefs the tagged `KlWatcher*` with **no liveness check**. When two racing connect attempts (dual-stack A+AAAA) both complete in one drain, dispatching the winner's `KL_COMP_CONNECT` runs `he_win → he_close_attempts → client_drop_connect_fd → kl_watcher_del`, which **synchronously frees the loser's watcher node**; dispatching the loser's still-batched `KL_COMP_CONNECT` then reads freed memory. The default `connect_attempt_delay_ms=250` shields the loopback happy path (only one attempt in flight), so tests pass; a genuinely-racing dual-stack connect (both in flight, both completing in one wait) hits it. Confirmed by direct trace on pollcomp + io_uring. **Fix:** in the `KL_COMP_CONNECT`/`KL_COMP_WATCHER` dispatch, validate the tagged watcher is still linked in `ctx->watchers` before deref (small, backend-agnostic guard); skip if it was freed earlier in the same batch. |
+
+### Medium
+
+| # | File:Line | Issue | Fix |
+|---|-----------|-------|-----|
+| M1 | `integrations/lwip/lwip_raw_glue.c:766-804` (`lwr_srv_accept`/`lwr_srv_err`) | **Dangling-pcb UAF in the accept→post_recv window.** `lwr_srv_err` keys on `c->owner == arg`, but `owner` is set only later (first `post_recv`), and `lwr_srv_accept` never `tcp_arg`s the new pcb (it inherits the listener's arg). If lwIP aborts the accepted pcb (peer RST / OOM) before the driver's `post_recv`, the err is dropped, the slot keeps `dead=0` + a dangling `->pcb`, and the pending ACCEPT still surfaces → the driver adopts a freed pcb (UAF). Narrow timing (needs a stack-initiated abort in that window; rare on loopback). **Fix:** `tcp_arg(newpcb, slot)` at accept and resolve `lwr_srv_err` by the slot pointer, so a pre-owner abort still marks its slot `dead`. |
+
+### Low
+
+| # | File:Line | Issue | Fix |
+|---|-----------|-------|-----|
+| L1 | `src/redirect.c:77` (`is_cross_origin`) | **UBSan: NULL passed to `strncasecmp` (declared nonnull).** When both URLs have `host_len==0`, the equal-length guard falls through to `strncasecmp(a->host, b->host, 0)` with NULL hosts — defined-behavior-pedantic UB (0 length, no actual read), but it trips `UBSAN_OPTIONS=halt_on_error=1`. CI stays green only because its UBSan job runs recover-mode (prints, doesn't fail). **Fix:** `if (a->host_len == 0) return 0;` (or guard `a->host && b->host`) before the `strncasecmp`. |
+| L2 | `integrations/lwip/event_lwip_raw.c:672-677` | **False EOF vs explicit overflow on a full non-TLS `read_buf`.** When `space==0` with `rx_queued>0`, the drain surfaces `bytes=0` → the driver reads it as peer-close (EOF), where the readiness backend (`event_pollcomp.c:248`) deliberately signals a header-overflow failure. Converges to a close either way — cosmetic (wrong reason). **Fix:** surface a failed READ when `space==0`. |
+| L3 | `src/completion_driver.c:768`, `event_pollcomp.c:358`, `event_iouring.c:695` | **Stale comments** claim the client re-reads `SO_ERROR` for `KL_COMP_CONNECT`; the actual path (`he_on_connect_result`, `client.c`) trusts the mask-carried win/fail and does **not** read `SO_ERROR` (correct for io_uring, which drops it). Comment-only. **Fix:** correct the comments to reference `he_on_connect_result` + the mask. |
+
+### Verdict
+The new code is disciplined on overflow, allocation, backpressure, and the neutral seam
+(`event_lwip_raw.c` stays lwIP-free; all `tcp_*`/`udp_*` in the glue), and the automated tools
+are clean. Two real use-after-frees (H1 same-batch HE connect race; M1 accept-window pcb) are
+edge-timing bugs a happy-path sanitizer run misses — both warrant fixes; H1 is the priority as
+it sits on the outbound connect path for any completion backend. L1 is a trivial UBSan fix. The
+underlying feature (raw client + HE + DNS + HTTPS) is functionally sound and end-to-end verified.
+
+---
+
 ## Eighth pass — datagram data-plane folded onto the socket provider (2026-08-03)
 
 **Scope:** the four-stage "datagram provider" refactor (#168–#172) that resolves
