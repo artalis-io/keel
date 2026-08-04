@@ -38,8 +38,8 @@
 #include <keel/timer.h>
 
 #include "keel_lwip_raw.h"
-#include "lwip_raw_glue.h"   /* the raw-API test client (glue-owned, runs on the tick thread) */
-#include "event_caps.h"      /* kl_event_ctx_sockets_compatible (internal negotiation) */
+#include "lwip_raw_testclient.h"   /* the raw-API test client (test-only TU, tick-thread calls) */
+#include "event_caps.h"           /* kl_event_ctx_sockets_compatible (internal negotiation) */
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -255,8 +255,25 @@ static void p3_start_stage(void) {
                                 P9_3_CLI_CAP);
 }
 
+static int g_p3_awaiting_close;   /* /big passed; waiting for its conn to fully close before /file */
+
 static void p3_poll_cb(void *ud) {
     KlServer *s = ud;
+
+    /* Between the two cases: the accumulating client is a single-slot peer, so /file must not
+     * open until the /big connection is FULLY closed (server FIN seen) — otherwise the two
+     * roundtrips overlap on the shared accumulator AND a mid-send teardown of /big churns the
+     * loopback pcb pool. Once closed, kick /file. */
+    if (g_p3_awaiting_close) {
+        if (kl_lwr_client_closed()) {
+            g_p3_awaiting_close = 0;
+            p3_start_stage();
+        }
+        if (atomic_load(&g_p3_finished)) return;
+        kl_timer_add(&s->ev, 5, p3_poll_cb, s);
+        return;
+    }
+
     int v = verify_body();
     if (v == 1) {
         int stage = atomic_load(&g_p3_stage);
@@ -264,7 +281,7 @@ static void p3_poll_cb(void *ud) {
         printf("P9-3 PASS (%s)\n", stage == P3_BUFFERED ? "buffered" : "file");
         if (stage == P3_BUFFERED) {
             atomic_store(&g_p3_stage, P3_FILE);
-            p3_start_stage();                 /* kick the next case's connection */
+            g_p3_awaiting_close = 1;          /* wait for /big to close, then start /file */
         } else {
             atomic_store(&g_p3_finished, 1);
             kl_server_stop(s);

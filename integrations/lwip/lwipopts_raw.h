@@ -78,19 +78,27 @@
  * accordingly — matching the host ABI and keeping the raw backend clean under UBSan's
  * alignment checker (a MEM_ALIGNMENT=4 build trips -fsanitize=alignment on aarch64). */
 #define MEM_ALIGNMENT               8
-#define MEM_SIZE                    (128 * 1024)
+#define MEM_SIZE                    (512 * 1024)
 
-#define MEMP_NUM_TCP_PCB            8
+/* MEMP_NUM_TCP_PCB caps how many active TCP pcbs lwIP can hold. The Stage-A concurrency tests
+ * (raw_recv_test) open many SIMULTANEOUS connections IN-PROCESS — both the server pcb AND the raw
+ * test-client pcb live in the same lwIP stack — so this must cover ~2*N plus the listener and a
+ * few pcbs lingering in TIME-WAIT. 40 comfortably covers the tests' bursts with slack; the small
+ * per-conn responses keep segment demand low. (P9-1..P9-4 pass at any value >= 8; the exactly-
+ * once close discipline that made rapid churn safe is in the glue, not the pool size.) */
+#define MEMP_NUM_TCP_PCB            40
 #define MEMP_NUM_TCP_PCB_LISTEN     4
 #define MEMP_NUM_UDP_PCB            4
 #define MEMP_NUM_RAW_PCB            4
-#define MEMP_NUM_TCP_SEG            64
+#define MEMP_NUM_TCP_SEG            96
 
 #define TCP_MSS                     1460
+/* Keep the SEND window well under a big (64 KB) response so the P9-3 send-pump still stalls +
+ * resumes on tcp_sent (ERR_MEM backpressure on the SEND side). */
 #define TCP_SND_BUF                 (8 * TCP_MSS)
 #define TCP_SND_QUEUELEN            (4 * TCP_SND_BUF / TCP_MSS)   /* enough segs for the window */
 #define TCP_WND                     (8 * TCP_MSS)
-#define PBUF_POOL_SIZE              64
+#define PBUF_POOL_SIZE              96
 
 /* Checksums: loopback bypasses the wire, but keep them on to exercise the real
  * TCP path (cheap at this scale). */

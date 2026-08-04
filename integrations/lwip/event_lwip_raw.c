@@ -78,50 +78,32 @@
 #define KL_LWR_TICK_SLEEP_NS  1000000L
 #define KL_LWR_NS_PER_MS      1000000L
 
-/* Max concurrently recv-armed conns tracked by the backend. A conn is armed by
- * kl_comp_post_recv and disarmed when its READ completion is surfaced (single in-flight
- * recv per conn, matching the completion contract). Sized for the P9-2 loopback roundtrip
- * plus slack. */
-#define KL_LWR_MAX_ARMED  8
-
 /* Stack buffer size for one drain's worth of glue records (bounded by the caller's `max`,
  * which completion_driver.c caps at KL_COMP_MAX_EVENTS = 64). */
 #define KL_LWR_MAX_DRAIN  64
 
-/* Per-loop backend state stashed in loop->_backend. */
+/* Per-loop backend state stashed in loop->_backend. All connection state — including the
+ * recv-arm flag and the per-conn pending completions — lives in the glue's per-context/
+ * per-conn slots (fix #2: ONE authoritative capacity, conn_cap == max_connections). The
+ * backend no longer carries a separate armed table. `lwrctx` is the opaque KlLwrCtx the glue
+ * owns; the backend threads it through every glue call so no lwIP state is global here. */
 typedef struct {
     KlAllocator     *alloc;
-    void            *loopif;                    /* opaque lwIP loop netif (kl_lwr_lwip_up) */
-    struct KlServer *server;                    /* accept target (set at prime) */
-    int              primed;                    /* accept backlog primed (idempotent latch) */
-    KlConn          *armed[KL_LWR_MAX_ARMED];   /* conns with a pending recv posted */
-    int              armed_count;
+    void            *lwrctx;   /* opaque KlLwrCtx (glue-owned; carries loopif + conn slots) */
+    void            *loopif;   /* cached loop netif (kl_lwr_ctx_loopif) for the tick */
+    struct KlServer *server;   /* accept target (set at prime) */
+    int              primed;   /* accept backlog primed (idempotent latch) */
 } KlLwrState;
 
-/* ── recv-arming bookkeeping ───────────────────────────────────────────────────
- * lwIP recv is passive: the tcp_recv callback stages bytes + enqueues a READ record in the
- * glue whenever data arrives. But the completion contract is pull-shaped — the driver posts
- * one recv (kl_comp_post_recv) and expects exactly one READ. So the backend gates: a READ
- * record is surfaced to the driver only when the owning conn is recv-armed, and arming is
- * consumed on delivery. (The driver posts the recv synchronously in comp_on_accept, before
- * any data can arrive — a tick is required — so arming always precedes the first READ.) */
-static int lwr_is_armed(KlLwrState *st, const KlConn *c) {
-    for (int i = 0; i < st->armed_count; i++)
-        if (st->armed[i] == c) return 1;
-    return 0;
-}
-static void lwr_arm(KlLwrState *st, KlConn *c) {
-    if (lwr_is_armed(st, c)) return;
-    if (st->armed_count < KL_LWR_MAX_ARMED)
-        st->armed[st->armed_count++] = c;
-}
-static void lwr_disarm(KlLwrState *st, const KlConn *c) {
-    for (int i = 0; i < st->armed_count; i++)
-        if (st->armed[i] == c) {
-            st->armed[i] = st->armed[--st->armed_count];
-            return;
-        }
-}
+/* ── recv-arming ───────────────────────────────────────────────────────────────
+ * lwIP recv is passive: the tcp_recv callback retains received pbufs in the owning conn's slot
+ * whenever data arrives. But the completion contract is pull-shaped — the driver posts one recv
+ * (kl_comp_post_recv) and expects exactly one READ. So the backend gates: a READ is surfaced to
+ * the driver only when the owning conn is recv-armed (a per-conn slot flag, kl_lwr_conn_arm),
+ * and arming is consumed on delivery (kl_lwr_conn_disarm). Because the arm flag lives in the
+ * slot (fix #2), its capacity IS the slot capacity — no second, smaller limit. The drain
+ * enumerates armed-and-ready conns by asking the glue (kl_lwr_next_readable), so the backend
+ * needs no conn list of its own and stays lwIP-free. */
 
 /* ── KlEventLoop lifecycle ─────────────────────────────────────────────
  * Pure-provider form (RC-3): these are static lwr_ev_* ops referenced only by the
@@ -129,13 +111,23 @@ static void lwr_disarm(KlLwrState *st, const KlConn *c) {
  * surface — the backend is reached at runtime via loop->ops, never the compiled-in
  * default path. Mirrors event_lwip.c. */
 
+/* Default per-conn slot capacity when the loop is created without a server (P9-1 standalone
+ * tick). A server sizes it AUTHORITATIVELY to KlConfig.max_connections at prime
+ * (kl_lwr_ctx_ensure_cap). Matches KEEL's default max_connections so a default server needs no
+ * regrow. */
+#define KL_LWR_DEFAULT_CONN_CAP 256
+
 static int lwr_ev_init(KlEventLoop *loop) {
     KlLwrState *st = kl_malloc(loop->alloc, sizeof(*st));
     if (!st) return -1;
     memset(st, 0, sizeof(*st));
     st->alloc = loop->alloc;
-    st->loopif = kl_lwr_lwip_up();   /* NO_SYS=1 lwip_init + attach loopback netif */
-    if (!st->loopif) { kl_free(loop->alloc, st, sizeof(*st)); return -1; }
+    /* Create the glue's per-context state (fix #5: no global lwIP state in the backend). This
+     * brings up NO_SYS=1 lwIP + the loopback netif and allocates the conn-slot table through
+     * KlAllocator. Rejects a 2nd simultaneous ctx (NO_SYS=1 single-stack invariant). */
+    st->lwrctx = kl_lwr_ctx_create(loop->alloc, KL_LWR_DEFAULT_CONN_CAP);
+    if (!st->lwrctx) { kl_free(loop->alloc, st, sizeof(*st)); return -1; }
+    st->loopif = kl_lwr_ctx_loopif(st->lwrctx);
     loop->_backend = st;
     loop->fd = -1;   /* NO_SYS=1 raw loop has no pollable fd (axis-audit F1, P9-5) */
     return 0;
@@ -173,8 +165,11 @@ static int lwr_ev_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms)
 static void lwr_ev_close(KlEventLoop *loop) {
     KlLwrState *st = loop->_backend;
     if (!st) return;
-    /* lwIP itself is a process-global singleton (no lwip_deinit in NO_SYS=1); we free
-     * only our per-loop state. The loop netif persists for a subsequent ctx. */
+    /* Destroy the glue ctx: frees every per-conn rx pbuf chain + send buffer, closes the
+     * listener, and CLEARS the single-active-ctx guard so a subsequent (sequential) ctx can be
+     * created. The lwIP core (loop netif + timer wheel) persists process-globally (no
+     * lwip_deinit in NO_SYS=1) but carries no per-ctx state. */
+    kl_lwr_ctx_destroy(st->lwrctx);
     kl_free(st->alloc, st, sizeof(*st));
     loop->_backend = NULL;
     loop->fd = -1;
@@ -244,7 +239,7 @@ static int lwr_sock_connect(void *c, KlSocketHandle fd, const KlSockAddr *a) {
  * (kl_lwr_listen_pcb) so close() later targets a live pcb, not the dangling original. */
 static int lwr_sock_listen(void *c, KlSocketHandle fd, int backlog) {
     (void)c; (void)backlog;
-    return kl_lwr_tcp_listen((void *)fd) ? 0 : -1;
+    return kl_lwr_tcp_listen(kl_lwr_active_ctx(), (void *)fd) ? 0 : -1;
 }
 
 static KlSocketHandle lwr_sock_accept(void *c, KlSocketHandle fd, KlSockAddr *peer) {
@@ -254,7 +249,7 @@ static KlSocketHandle lwr_sock_accept(void *c, KlSocketHandle fd, KlSockAddr *pe
 
 static int lwr_sock_close(void *c, KlSocketHandle fd) {
     (void)c;
-    if (kl_handle_valid(fd)) kl_lwr_tcp_close((void *)fd);
+    if (kl_handle_valid(fd)) kl_lwr_tcp_close(kl_lwr_active_ctx(), (void *)fd);
     return 0;
 }
 
@@ -305,13 +300,20 @@ static int lwr_comp_prime_accepts(struct KlServer *s) {
     KlLwrState *st = s->ev.loop._backend;
     if (st->primed) return 0;
     st->server = s;
+    /* fix #2: unify capacity on the AUTHORITATIVE Keel limit. Size the glue's per-conn slot
+     * table to max_connections (the same value that sizes s->pool) so arm/slot/accept capacity
+     * are ONE number — no second, smaller limit. Grown here (before any accept); a default
+     * server needs no regrow (both default to KL_DEFAULT_MAX_CONNS). Fails init with a clear
+     * error if the slot table can't be sized to the requested capacity. */
+    int cap = s->config.max_connections;
+    if (cap > 0 && kl_lwr_ctx_ensure_cap(st->lwrctx, cap) < 0) return -1;
     st->primed = 1;
     /* tcp_listen relocated the listen pcb (freeing the one server.c bound); adopt the live
      * handle so s->listen_fd is valid for the eventual close (kl_server_close_listener). */
-    void *lp = kl_lwr_listen_pcb();
+    void *lp = kl_lwr_listen_pcb(st->lwrctx);
     if (lp) s->listen_fd = (KlSocketHandle)lp;
-    /* The accept callback was armed by tcp_listen; accepts enqueue KL_LWR_ACCEPT records the
-     * drain surfaces. Nothing more to post (passive raw accept). */
+    /* The accept callback was armed by tcp_listen; accepts surface KL_LWR_ACCEPT via the drain's
+     * per-slot scan. Nothing more to post (passive raw accept). */
     return 0;
 }
 
@@ -322,14 +324,17 @@ static int lwr_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-/* Post one async receive: raw recv is passive (the tcp_recv callback stages bytes + enqueues
- * a READ record), so "posting" just associates the owning conn with its pcb (first call) and
- * arms it — the READ surfaces via drain when data (or peer-close) arrives. */
+/* Post one async receive: raw recv is passive (the tcp_recv callback retains received pbufs in
+ * the conn's slot), so "posting" associates the owning conn with its pcb (first call) and arms
+ * the slot — the READ surfaces via drain when data (or peer-close) arrives. fix #2: arming is a
+ * per-conn slot flag; kl_lwr_conn_arm returns non-zero if the pcb has NO slot (a conn that was
+ * accepted must always have a slot — if not, the driver closes it rather than leaving it
+ * accepted-but-unable-to-receive). */
 static int lwr_comp_post_recv(KlConn *c) {
     KlLwrState *st = lwr_state(c);
     if (!kl_handle_valid(c->fd)) return -1;
-    kl_lwr_set_owner((void *)c->fd, c);   /* recv/sent callbacks tag records with this conn */
-    lwr_arm(st, c);
+    kl_lwr_set_owner(st->lwrctx, (void *)c->fd, c);   /* recv/sent/err callbacks tag this conn */
+    if (kl_lwr_conn_arm(st->lwrctx, (void *)c->fd) != 0) return -1;
     return 0;
 }
 
@@ -357,7 +362,7 @@ static int lwr_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t 
         memcpy(buf + off, iov[i].base, iov[i].len);
         off += iov[i].len;
     }
-    int rc = kl_lwr_send_begin((void *)c->fd, buf, off);
+    int rc = kl_lwr_send_begin(lwr_state(c)->lwrctx, (void *)c->fd, buf, off);
     kl_free(c->alloc, buf, total ? total : 1);
     return rc;
 }
@@ -383,7 +388,7 @@ static int lwr_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n
         memcpy(head + off, head_iov[i].base, head_iov[i].len);
         off += head_iov[i].len;
     }
-    int rc = kl_lwr_sendfile_begin((void *)c->fd, head, off, file_fd, count);
+    int rc = kl_lwr_sendfile_begin(lwr_state(c)->lwrctx, (void *)c->fd, head, off, file_fd, count);
     kl_free(c->alloc, head, head_total ? head_total : 1);
     return rc;
 }
@@ -397,8 +402,8 @@ static int lwr_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n
  * releasing the KlConn through its normal completion path. Idempotent + safe if the conn
  * already closed (kl_lwr_tcp_abort is a no-op on a dead/free slot). */
 static void lwr_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
-    (void)ctx;
-    if (kl_handle_valid(fd)) kl_lwr_tcp_abort((void *)fd);
+    KlLwrState *st = ctx ? ctx->loop._backend : NULL;
+    if (st && kl_handle_valid(fd)) kl_lwr_tcp_abort(st->lwrctx, (void *)fd);
 }
 
 static int lwr_comp_post_udp_recv(struct KlUdp *udp) { (void)udp; return -1; }   /* raw UDP: future */
@@ -407,21 +412,26 @@ static int lwr_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t le
     (void)udp; (void)data; (void)len; (void)dest; return -1;
 }
 
-/* ── drain: one lwIP tick, then translate glue records into completion events ── */
+/* ── drain: one lwIP tick, then translate per-slot pending state into completion events ──
+ * fix #4: there is no global completion ring. First tick lwIP (so the tcp_* callbacks update
+ * per-slot state), then (a) drain per-slot ACCEPT/WRITE/terminal completions via kl_lwr_drain,
+ * and (b) surface READs by scanning armed-and-ready slots via kl_lwr_next_readable. Both are
+ * bounded by conn_cap, so nothing can overflow / be silently dropped, and a terminal (a
+ * per-slot flag) is always deliverable. */
 static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlLwrState *st = ctx->loop._backend;
 
     /* One lwIP mainloop tick (docs §P9-1): sys_check_timeouts() (retransmit, TCP fast/slow,
      * TIME-WAIT) + netif_poll(loopif) (drain the loopback TX queue so raw callbacks fire).
-     * The tcp_accept/tcp_recv/tcp_sent callbacks run inline here and enqueue glue records. */
+     * The tcp_accept/tcp_recv/tcp_sent callbacks run inline here and update per-slot state. */
     kl_lwr_lwip_tick(st ? st->loopif : NULL);
 
-    /* Pull the finished raw-API records and translate each into a KlCompletionEvent. */
+    int count = 0;
+
+    /* (a) ACCEPT / WRITE / terminal completions from the per-slot scan. */
     KlLwrRecord recs[KL_LWR_MAX_DRAIN];
     int rmax = max < KL_LWR_MAX_DRAIN ? max : KL_LWR_MAX_DRAIN;
-    int nr = kl_lwr_drain(recs, rmax);
-
-    int count = 0;
+    int nr = kl_lwr_drain(st->lwrctx, recs, rmax);
     for (int i = 0; i < nr && count < max; i++) {
         KlLwrRecord *r = &recs[i];
         KlCompletionEvent *ev = &out[count];
@@ -433,67 +443,61 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             ev->accepted_fd = (KlSocketHandle)r->accepted;
             /* completion_driver.c's comp_on_accept marshals ev->peer (a host struct sockaddr)
              * via kl_sockaddr_from_native, keyed by ev->peer_len. peer_len 0 = "unavailable",
-             * which the driver handles by zeroing the conn's peer_addr. For P9-2 (loopback,
-             * peer address unused by the handler) we leave it 0 rather than pulling a host
-             * socket header in to synthesize a sockaddr_in. P9-4 can fill it if needed. */
+             * which the driver handles by zeroing the conn's peer_addr. For loopback (peer
+             * address unused by the handler) we leave it 0 rather than pulling a host socket
+             * header in to synthesize a sockaddr_in. */
             ev->peer_len = 0;
             count++;
             continue;
         }
 
-        if (r->kind == KL_LWR_WRITE) {
-            KlConn *c = r->owner;
-            if (!c) continue;
-            ev->kind = KL_COMP_WRITE;
-            ev->target = c;
-            ev->ok = r->ok;
-            ev->bytes = r->nbytes;
-            /* P9-4 exactly-one-close: a terminal (ok=0) WRITE record — pushed by the glue on
-             * tcp_err / kl_comp_cancel / close-with-outstanding — drives the driver to release
-             * this conn. If it happened to be recv-armed (idle cancel, or a mid-op RST), remove
-             * it from the armed table NOW so the armed-READ loop below (and future drains) never
-             * touch the about-to-be-released KlConn. This is what prevents a dangling armed[]
-             * entry aliasing a freed/reused conn slot. */
-            if (!r->ok) lwr_disarm(st, c);
-            count++;
-            continue;
-        }
+        /* KL_LWR_WRITE — a completed send (ok=1) OR a terminal close (ok=0). */
+        KlConn *c = r->owner;
+        if (!c) continue;
+        ev->kind = KL_COMP_WRITE;
+        ev->target = c;
+        ev->ok = r->ok;
+        ev->bytes = r->nbytes;
+        /* Exactly-one-close: a terminal (ok=0) completion — surfaced by the glue on
+         * tcp_err / kl_comp_cancel / close-with-outstanding — drives the driver to release this
+         * conn. Disarm it NOW so the armed-READ scan below (and future drains) never touch the
+         * about-to-be-released KlConn (no dangling armed slot aliasing a freed/reused conn). */
+        if (!r->ok) kl_lwr_conn_disarm(st->lwrctx, (void *)c->fd);
+        count++;
     }
 
-    /* Surface READs for armed conns whose staging has data (or whose peer closed). Raw recv
-     * is passive — bytes accumulate in the glue's per-pcb staging independent of when the
-     * driver posts a recv — so a READ is delivered here once the conn is armed
-     * (kl_comp_post_recv), consuming the arming. This also handles the fast-client race where
-     * data arrived in the same tick as the accept, before the recv was posted: the READ is
-     * simply picked up on the next drain once comp_on_accept has posted it. */
-    for (int i = 0; i < st->armed_count && count < max; ) {
-        KlConn *c = st->armed[i];
-        int has_data = 0, closed = 0;
-        kl_lwr_conn_status((void *)c->fd, &has_data, &closed);
-        if (!has_data && !closed) { i++; continue; }   /* nothing yet — keep armed */
-
+    /* (b) READs for armed conns whose retained rx queue has data (or whose peer closed). Raw
+     * recv is passive — bytes accumulate in the glue's per-conn slot independent of when the
+     * driver posts a recv — so a READ is delivered here once the conn is armed (kl_comp_post_
+     * recv), consuming the arming. Also handles the fast-client race where data arrived in the
+     * same tick as the accept, before the recv was posted: picked up on the next drain once
+     * comp_on_accept has posted it. */
+    int cursor = 0;
+    void *owner = NULL, *pcb = NULL;
+    int closed = 0;
+    while (count < max && kl_lwr_next_readable(st->lwrctx, &cursor, &owner, &pcb, &closed)) {
+        KlConn *c = owner;
         KlCompletionEvent *ev = &out[count];
         memset(ev, 0, sizeof(*ev));
         ev->kind = KL_COMP_READ;
         ev->target = c;
-        if (has_data) {
+        if (!closed) {
             size_t space = c->read_cap - c->read_len;
-            size_t got = kl_lwr_take_staged((void *)c->fd, c->read_buf + c->read_len, space);
+            size_t got = kl_lwr_take_staged(st->lwrctx, pcb, c->read_buf + c->read_len, space);
             ev->ok = 1;
             ev->bytes = got;
         } else {                       /* closed with no pending data — zero-length READ */
             ev->ok = 0;
             ev->bytes = 0;
-            /* Exactly-one-close: mark the terminal READ consumed so a re-check can never
-             * surface a second terminal event (which would drive a double comp_close). The
-             * driver's comp_on_read turns ok=0 into comp_close → conn release → sock.close
-             * → kl_lwr_tcp_close, freeing the slot (or, for a dead/tcp_err slot, just the
-             * slot — no UAF on the freed pcb). */
-            kl_lwr_mark_terminated((void *)c->fd);
+            /* Exactly-one-close: mark the terminal READ consumed so a re-check can never surface
+             * a second terminal event (which would drive a double comp_close). The driver's
+             * comp_on_read turns ok=0 into comp_close → conn release → sock.close →
+             * kl_lwr_tcp_close, freeing the slot (or, for a dead/tcp_err slot, just the slot —
+             * no UAF on the freed pcb). */
+            kl_lwr_mark_terminated(st->lwrctx, pcb);
         }
-        lwr_disarm(st, c);             /* consumed the recv (swaps armed[i] with the last) */
+        kl_lwr_conn_disarm(st->lwrctx, pcb);   /* consumed the recv */
         count++;
-        /* do not i++: armed[i] now holds a different conn (disarm swapped) — re-check it */
     }
 
     /* No fd to block on in NO_SYS=1; if nothing completed, honour a positive timeout as a
