@@ -1,11 +1,15 @@
 /*
  * raw_caps_test.c — Stage C fail-early capability contract for the lwIP-raw completion backend.
  *
- * lwip-raw is a SERVER-ONLY, IPv4-only, TCP completion backend. This test asserts that the
- * operations it does NOT support fail EARLY and CLEARLY at the provider seam, so a caller never
- * silently hangs on an unsupported op:
+ * lwip-raw is an IPv4-only TCP+UDP completion backend that now does server AND client
+ * (plaintext + HTTPS + DNS — see raw_client_test/raw_he_test/raw_dns_test/raw_tls_test for the
+ * positive end-to-end proofs). This test asserts that the operations it does NOT support fail
+ * EARLY and CLEARLY at the provider seam, so a caller never silently hangs on an unsupported op:
  *
- *   K1  connect()  -> -1 (server-only; no outbound client), errno = ENOTSUP/EOPNOTSUPP.
+ *   K1  the SYNCHRONOUS socket-provider connect op -> -1 / ENOTSUP BY DESIGN. Outbound client
+ *         connects ride the COMPLETION connect primitive (kl_comp_post_connect → tcp_connect),
+ *         NOT this blocking op, which is nonsensical on a NO_SYS=1 single-loop target. So this
+ *         op staying ENOTSUP is correct even though the client is fully supported (LC-1/2/4).
  *   K2  bind() with a non-IPv4 (IPv6) address -> -1 (the loopif is IPv4; IPv6 unsupported).
  *   K3  bind() with an IPv4 address -> 0 (the supported family still works — a control case).
  *   K4  UDP is SUPPORTED (LC-3a): the raw socket provider now exposes datagram ops

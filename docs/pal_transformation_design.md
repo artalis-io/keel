@@ -1,17 +1,26 @@
 # Keel Platform Abstraction — Incremental Transformation Plan
 
-Status: **design / roadmap (last updated 2026-07-30).** No code changes in this document.
+Status: **design / roadmap (last updated 2026-08-05).** No code changes in this document.
 Scope: a staged plan to let Keel select an **event engine** and a **socket /
 network-stack provider** independently, without a big-bang PAL rewrite.
 
-**Progress at a glance:** Phases 0–8 done. The completion event axis is complete across
+**Progress at a glance:** Phases 0–9 done. The completion event axis is complete across
 three interchangeable backends — IOCP (Windows), pollcomp (portable poll facade), and
 io_uring (now the default `BACKEND=iouring`, readiness adapter retired) — over one shared
 `completion_driver.c`, covering TCP/TLS/HTTP-2/WebSocket/UDP/async (Phases 8a–8f; see §3).
-**Remaining: Phase 9 (lwIP raw callback provider — a third event model) and Phase 10 (UEFI
-feasibility), plus a completion-suite per-test triage follow-up.** Each
+**Phase 9 (lwIP raw callback provider — the third event model) is complete:** a `NO_SYS=1`
+`tcp_*`/`udp_*` completion backend injected into a stock `libkeel.a`, covering the **server**
+(P9-1..P9-5) and the **client** axis — plaintext, Happy-Eyeballs, DNS (via KEEL's own
+`dns_resolver.c` over `KlUdp`-on-raw), and HTTPS — as the LC-0..LC-5 series (PRs #191–#196;
+see `docs/phase9_lwip_raw_design.md` + `docs/phase10_lwip_raw_client_design.md`). **Remaining:
+Phase 10 (UEFI feasibility), plus a completion-suite per-test triage follow-up.** Each
 phase is a small, tested, reviewable change that leaves Keel buildable, keeps
 public behavior, and opens a clean seam for the next phase.
+
+> **Doc-numbering note:** `docs/phase10_lwip_raw_client_design.md` uses a local "Phase 10"
+> label for the lwIP-raw **client axis**, which is really the completion of the roadmap's
+> **Phase 9** (lwIP raw provider). The roadmap's **Phase 10 is UEFI** (still deferred) — not
+> the lwIP client work.
 
 **This is not a PAL rewrite.** The abstractions below are extracted from real
 existing code (cited by `file:line`) and near-term platform needs, not from a
@@ -175,8 +184,8 @@ Per the task's required classification:
 | **6** | First non-POSIX provider (Winsock **or** lwIP sockets) | 4,5 | high | additive | ✅ done (Winsock + lwIP-socket BYO) |
 | **7** | Event/socket capability negotiation | 6 | med | additive | ✅ done |
 | **8** | Completion axis: IOCP + pollcomp + io_uring (TCP/TLS/h2/WS/UDP/async); 8a–8f | 6(Winsock),7 | very high | additive | ✅ done |
-| **9** | lwIP raw provider (3rd event model — callback) | 6(lwIP),7 | very high | additive | ⬜ next |
-| **10** | UEFI feasibility + optional prototype | 5,7 | very high | additive/subset | ⬜ deferred |
+| **9** | lwIP raw provider (3rd event model — callback) | 6(lwIP),7 | very high | additive | ✅ done (server P9-1..P9-5 + client/UDP/DNS/TLS LC-0..LC-5, PRs #179–#183, #191–#196) |
+| **10** | UEFI feasibility + optional prototype | 5,7 | very high | additive/subset | ⬜ deferred (frontier) |
 
 **Status:** Phase 0 done (`f29ed15`, baseline in Appendix A). **Phase 1 + 1b done**
 — `src/socket.{h,c}` landed; client transports, DNS resolver, server, and udp
@@ -502,8 +511,10 @@ suites over completion; a `kl_server_stop` self-pipe wakeup for prompt teardown 
 **Completion axis: essentially complete** — three interchangeable backends (IOCP / pollcomp /
 io_uring) over one shared `completion_driver.c`, covering TCP/TLS/h2/WebSocket/UDP/async. The
 readiness↔completion event-model split held throughout (the model-blind protocol core is shared
-verbatim; no completion concept in the public API or the POSIX/readiness paths). The next
-genuinely-new event model is the lwIP **raw** callback provider (Phase 9).
+verbatim; no completion concept in the public API or the POSIX/readiness paths). The third
+genuinely-new event model — the lwIP **raw** callback provider (Phase 9) — is now also complete
+(server + client + UDP + DNS + HTTPS over `NO_SYS=1` `tcp_*`/`udp_*`, on a stock `libkeel.a`).
+The remaining frontier is UEFI (Phase 10).
 
 Event-backend work (IOCP, UEFI events, RTOS loops) stays a **separate axis** from
 socket providers and is not merged with it.
