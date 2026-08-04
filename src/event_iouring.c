@@ -89,7 +89,8 @@
  * user_data can be discriminated by reading *(IouOpType*). IOU_WATCH tags a poll-add. */
 typedef enum {
     IOU_ACCEPT, IOU_READ, IOU_TLS_RECV, IOU_WRITE, IOU_SENDFILE,
-    IOU_UDP_RECV, IOU_UDP_SEND, IOU_WATCH
+    IOU_UDP_RECV, IOU_UDP_SEND, IOU_WATCH,
+    IOU_CONNECT   /* outbound connect (LC-0): IORING_OP_CONNECT */
 } IouOpType;
 
 /* One in-flight async op — its buffers stay valid until the CQE arrives. */
@@ -117,8 +118,9 @@ typedef struct KlIouOp {
     struct msghdr  msgh;                  /* UDP: recvmsg/sendmsg header */
     struct iovec   msgiov;                /* UDP: single iovec */
     unsigned char  udp_ctrl[KL_UDP_RX_CTRL_SIZE]; /* UDP_RECV: cmsg buffer (pktinfo local addr) */
-    struct sockaddr_storage peer;         /* ACCEPT peer / UDP addr (msg_name) */
+    struct sockaddr_storage peer;         /* ACCEPT peer / UDP addr (msg_name) / CONNECT dest */
     socklen_t      peer_len;
+    void          *watcher_udata;         /* CONNECT: the client's tagged KlWatcher */
     int            aborted;               /* cancelled (idle timeout) — deliver as error */
 } KlIouOp;
 
@@ -687,6 +689,30 @@ static int iou_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t le
     return 0;
 }
 
+/* Post an outbound connect (LC-0) via IORING_OP_CONNECT. The dest is marshalled into the op's
+ * peer storage (kernel reads it until the CQE), which must stay valid — it lives in the op, so
+ * it does. On completion iou_complete surfaces KL_COMP_CONNECT against the client's tagged
+ * watcher; the client's he_on_writable re-checks SO_ERROR (getsockopt works after a connect
+ * CQE regardless of success). Returns 0 on posted, -1 on a hard local failure. */
+static int iou_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
+                                 const KlSockAddr *addr, void *watcher_udata) {
+    KlIouState *st = ctx->loop._backend;
+    KlIouOp *op = iou_op_alloc(st->alloc);
+    if (!op) return -1;
+    op->type = IOU_CONNECT;
+    op->fd = fd;
+    op->watcher_udata = watcher_udata;
+    op->peer_len = (addr && kl_sockaddr_family(addr) != KL_AF_UNSPEC)
+                       ? kl_sockaddr_to_native(addr, &op->peer) : 0;
+    if (op->peer_len == 0) { iou_op_free(op); return -1; }
+    struct io_uring_sqe *sqe = iou_sqe(st);
+    if (!sqe) { iou_op_free(op); return -1; }
+    io_uring_prep_connect(sqe, fd, (struct sockaddr *)&op->peer, op->peer_len);
+    io_uring_sqe_set_data(sqe, op);
+    iou_op_push(st, op);
+    return 0;
+}
+
 static int iou_comp_prime_accepts(struct KlServer *s) {
     KlIouState *st = s->ev.loop._backend;
     if (st->primed) return 0;
@@ -832,6 +858,19 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         ev->bytes = (res > 0) ? (size_t)res : 0;
         return 1;
 
+    case IOU_CONNECT:
+        /* Connect finished (LC-0). res == 0 → connected; res < 0 → -errno (e.g. -ECONNREFUSED).
+         * Surface KL_COMP_CONNECT against the client's tagged watcher (aborted ops are dropped
+         * in the drain loop, before this). io_uring reports the result in `res`, and SO_ERROR is
+         * NOT reliably preserved after a failed IORING_OP_CONNECT — so encode the result in the
+         * delivered mask (KL_EVENT_WRITE = connected, 0 = failed); the client's connect watcher
+         * trusts this rather than re-reading SO_ERROR. */
+        ev->kind = KL_COMP_CONNECT;
+        ev->target = op->watcher_udata;
+        ev->ok = (res == 0);
+        ev->bytes = ev->ok ? (size_t)KL_EVENT_WRITE : 0;
+        return 1;
+
     case IOU_WATCH:                                   /* handled in the drain loop */
         return 0;
     }
@@ -893,6 +932,15 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         }
 
         KlIouOp *op = data;
+        /* An aborted outbound connect (LC-0): the client dropped this attempt (loser / failure
+         * / deadline / cancel) via kl_comp_cancel, which marked it aborted + prep_cancel; its
+         * (detached) watcher is already gone. This is the -ECANCELED CQE — free the op WITHOUT
+         * dispatching against the freed watcher. (The kernel is done with op->peer now.) */
+        if (op->type == IOU_CONNECT && op->aborted) {
+            iou_op_unlink(st, op);
+            iou_op_free(op);
+            continue;
+        }
         if (iou_complete(st, op, res, &out[count])) {  /* op finished → emit + free */
             count++;
             iou_op_unlink(st, op);
@@ -911,7 +959,7 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
 static const KlCompletionOps iou_completion_ops = {
     iou_comp_drain, iou_comp_prime_accepts, iou_comp_post_recv, iou_comp_post_send,
     iou_comp_post_accept, iou_comp_post_sendfile, iou_comp_cancel,
-    iou_comp_post_udp_recv, iou_comp_post_udp_send,
+    iou_comp_post_udp_recv, iou_comp_post_udp_send, iou_comp_post_connect,
 };
 
 const KlCompletionOps *kl_comp_ops_builtin(void) { return &iou_completion_ops; }

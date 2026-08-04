@@ -61,6 +61,11 @@ int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
     (void)udp; (void)data; (void)len; (void)dest; abort();
 }
 
+int kl_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
+                         const KlSockAddr *addr, void *watcher_udata) {
+    (void)ctx; (void)fd; (void)addr; (void)watcher_udata; abort();
+}
+
 /* ── generic entry points (normally in completion_driver.c) ────────────────── */
 
 int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {

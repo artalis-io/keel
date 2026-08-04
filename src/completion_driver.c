@@ -765,6 +765,13 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         case KL_COMP_UDP_SEND:
             kl_udp_comp_on_send((KlUdp *)ev[i].target, ev[i].bytes);
             break;
+        case KL_COMP_CONNECT:
+            /* An outbound connect finished (LC-0). The consumer is the async KlClient, not
+             * the server driver — so route it exactly like KL_COMP_WATCHER: the backend has
+             * done the native connect and left the socket so getsockopt(SO_ERROR) reports
+             * the truth, then relayed the result against the client's tagged connect watcher.
+             * Dispatch it to that watcher (he_on_writable), which does the SO_ERROR win/fail
+             * check unchanged. target = the tagged KlWatcher; bytes = KL_EVENT_WRITE. */
         case KL_COMP_WATCHER: {
             /* A readiness FD watch fired (thread-pool wakeup, timer, generic watcher).
              * Route it through the SAME watcher-dispatch the readiness loop uses — the

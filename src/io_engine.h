@@ -85,4 +85,19 @@ int kl_comp_post_udp_recv(struct KlUdp *udp);
 int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
                           const KlSockAddr *dest);
 
+/* Post one outbound connect on a completion loop (LC-0). `fd` is a nonblocking socket the
+ * async KlClient created and owns; `addr` is the destination; `watcher_udata` is the tagged
+ * KlWatcher the client already registered on `fd` (kl_watcher_add). The backend performs the
+ * native connect (pollcomp: connect()+POLLOUT+SO_ERROR; io_uring: IORING_OP_CONNECT; IOCP:
+ * ConnectEx) and, on completion, surfaces a KL_COMP_CONNECT event targeting `watcher_udata`
+ * (bytes = KL_EVENT_WRITE, ok = success), which the driver routes to the client's connect
+ * watcher via kl_event_dispatch — leaving the socket so getsockopt(SO_ERROR) reports the
+ * truth, so the client's Happy-Eyeballs win/fail logic is unchanged. The client branches to
+ * this only when the loop advertises KL_EVENT_CAP_COMPLETION; the readiness path uses a
+ * KL_EVENT_WRITE watcher directly. Declared here (the shared seam) and stubbed in
+ * completion_absent.c under KEEL_NO_COMPLETION, where it is never reached. Returns 0 on
+ * posted, -1 on a hard local failure (caller closes the fd + tries the next address). */
+int kl_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
+                         const KlSockAddr *addr, void *watcher_udata);
+
 #endif /* KEEL_SRC_IO_ENGINE_H */

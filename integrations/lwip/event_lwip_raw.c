@@ -537,8 +537,17 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
  * so the KlEventOps literal carries it. Static: there is NO kl_comp_ops_builtin here — a
  * pure runtime provider never binds the compiled-in default path, so it links cleanly
  * next to a stock libkeel (whose readiness kl_comp_ops_builtin stub owns that symbol). */
+/* Outbound connect (LC-0 completion CONNECT contract): the raw backend is SERVER-ONLY —
+ * outbound client connect is not implemented until LC-1 (tcp_connect + connected_cb). Fail
+ * early + clearly so an async KlClient on this backend cannot silently hang. */
+static int lwr_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
+                                 const KlSockAddr *addr, void *watcher_udata) {
+    (void)ctx; (void)fd; (void)addr; (void)watcher_udata;
+    return -1;   /* server-only; LC-1 will implement raw client connect */
+}
+
 static const KlCompletionOps lwip_raw_completion_ops = {
     lwr_comp_drain, lwr_comp_prime_accepts, lwr_comp_post_recv, lwr_comp_post_send,
     lwr_comp_post_accept, lwr_comp_post_sendfile, lwr_comp_cancel,
-    lwr_comp_post_udp_recv, lwr_comp_post_udp_send,
+    lwr_comp_post_udp_recv, lwr_comp_post_udp_send, lwr_comp_post_connect,
 };

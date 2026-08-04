@@ -53,7 +53,8 @@
 #define KL_PC_CIPHER_SIZE (17u * 1024u)   /* one TLS record + slack (mirrors IOCP) */
 
 typedef enum {
-    PC_ACCEPT, PC_READ, PC_TLS_RECV, PC_WRITE, PC_SENDFILE, PC_UDP_RECV, PC_UDP_SEND
+    PC_ACCEPT, PC_READ, PC_TLS_RECV, PC_WRITE, PC_SENDFILE, PC_UDP_RECV, PC_UDP_SEND,
+    PC_CONNECT   /* outbound connect (LC-0): real connect()+POLLOUT+SO_ERROR */
 } PcOpType;
 
 /* One pending async op — polled, then completed by the single syscall it names. */
@@ -70,8 +71,9 @@ typedef struct KlPcOp {
     size_t         send_total, send_done; /* partial-send tracking */
     int            file_fd;               /* SENDFILE */
     uint64_t       file_count, file_off;  /* SENDFILE: file bytes + progress */
-    struct sockaddr_storage dest;         /* UDP_SEND destination */
+    struct sockaddr_storage dest;         /* UDP_SEND / CONNECT destination */
     socklen_t      dest_len;
+    void          *watcher_udata;         /* CONNECT: the client's tagged KlWatcher */
     int            aborted;               /* cancelled (idle timeout) — deliver as error */
 } KlPcOp;
 
@@ -348,6 +350,34 @@ static int pc_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len
     return 0;
 }
 
+/* Post an outbound connect (LC-0): issue the real nonblocking connect() now (the client
+ * already made the fd nonblocking), then poll POLLOUT and read SO_ERROR on completion — a
+ * genuine, portable connect completion (not a fake readiness relay). On connect() returning
+ * 0 (immediate loopback success) the op still completes on the next drain (POLLOUT is
+ * immediately ready), keeping the completion single + deferred. The result surfaces as
+ * KL_COMP_CONNECT against the client's tagged watcher; the driver routes it to
+ * he_on_writable, which re-reads SO_ERROR (0 → win, else fail). */
+static int pc_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
+                                const KlSockAddr *addr, void *watcher_udata) {
+    KlPcState *st = ctx->loop._backend;
+    KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
+    if (!op) return -1;
+    memset(op, 0, sizeof(*op));
+    op->type = PC_CONNECT;
+    op->alloc = st->alloc;
+    op->fd = fd;
+    op->watcher_udata = watcher_udata;
+
+    int rc = kl_sock_connect(ctx->sockets, fd, addr);
+    if (rc < 0 && errno != EINPROGRESS) {
+        pc_op_free(op);
+        return -1;                 /* hard local failure — caller closes fd + tries next */
+    }
+    /* rc == 0 (connected immediately) or EINPROGRESS: complete via POLLOUT on the drain. */
+    pc_op_push(st, op);
+    return 0;
+}
+
 static int pc_comp_prime_accepts(struct KlServer *s) {
     KlPcState *st = s->ev.loop._backend;
     if (st->primed) return 0;
@@ -357,14 +387,26 @@ static int pc_comp_prime_accepts(struct KlServer *s) {
     return pc_comp_post_accept(s);
 }
 
-/* Cancel pending ops on `fd` (idle-timeout sweep): mark them aborted so the next drain
- * delivers an error completion, driving the driver's normal release. We mark rather than
- * remove so the invariant "a conn is released only from a completion" holds — the driver
- * expects the op it's waiting on to complete before the conn slot is reused. */
+/* Cancel pending ops on `fd`. Server conn ops (idle-timeout sweep): mark aborted so the next
+ * drain delivers an error completion, driving the driver's normal release — we mark rather
+ * than remove so the invariant "a conn is released only from a completion" holds. A PC_CONNECT
+ * op is different: the async client owns the connect fd + its (detached) watcher and tears both
+ * down synchronously (he_close_attempts / he_fail_attempt), so its pending op is DROPPED here
+ * (freed, no completion) — surfacing an aborted KL_COMP_CONNECT would dispatch against the
+ * just-freed watcher. (LC-0) */
 static void pc_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     KlPcState *st = ctx->loop._backend;
-    for (KlPcOp *o = st->ops; o; o = o->next)
+    KlPcOp **link = &st->ops;
+    while (*link) {
+        KlPcOp *o = *link;
+        if (o->fd == fd && o->type == PC_CONNECT) {
+            *link = o->next;
+            pc_op_free(o);
+            continue;
+        }
         if (o->fd == fd) o->aborted = 1;
+        link = &o->next;
+    }
 }
 
 /* ── drain: poll the pending ops, complete the ready ones ─────────────── */
@@ -379,6 +421,9 @@ static int pc_emit_abort(const KlPcOp *op, KlCompletionEvent *ev) {
     case PC_WRITE: case PC_SENDFILE: ev->kind = KL_COMP_WRITE; ev->target = op->conn; return 1;
     case PC_UDP_RECV:                ev->kind = KL_COMP_UDP_RECV; ev->target = op->udp; return 1;
     case PC_UDP_SEND:                ev->kind = KL_COMP_UDP_SEND; ev->target = op->udp; return 1;
+    case PC_CONNECT:                 /* never reached: cancelled connect ops are freed in
+                                      * pc_comp_cancel, not delivered as aborts. */
+                                     return 0;
     case PC_ACCEPT:                  return 0;
     }
     return 0;
@@ -515,6 +560,20 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         ev->bytes = (n > 0) ? (size_t)n : 0;
         return 1;
     }
+    case PC_CONNECT: {
+        /* POLLOUT fired: the nonblocking connect settled. Read SO_ERROR to decide win/fail.
+         * Surface KL_COMP_CONNECT against the client's tagged watcher, encoding the result in
+         * the delivered mask: KL_EVENT_WRITE = connected, 0 = failed. (The client's connect
+         * watcher trusts the delivered result rather than re-reading SO_ERROR, so this is
+         * uniform with io_uring where SO_ERROR is not preserved after a failed connect.) */
+        int soerr = 0;
+        (void)getsockopt(op->fd, SOL_SOCKET, SO_ERROR, &soerr, &(socklen_t){ sizeof(soerr) });
+        ev->kind = KL_COMP_CONNECT;
+        ev->target = op->watcher_udata;
+        ev->ok = (soerr == 0);
+        ev->bytes = ev->ok ? (size_t)KL_EVENT_WRITE : 0;
+        return 1;
+    }
     }
     return 0;
 }
@@ -631,7 +690,7 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
 const KlCompletionOps kl_pollcomp_completion_ops = {
     pc_comp_drain, pc_comp_prime_accepts, pc_comp_post_recv, pc_comp_post_send,
     pc_comp_post_accept, pc_comp_post_sendfile, pc_comp_cancel,
-    pc_comp_post_udp_recv, pc_comp_post_udp_send,
+    pc_comp_post_udp_recv, pc_comp_post_udp_send, pc_comp_post_connect,
 };
 
 /* ── Runtime event provider (RC-2) ────────────────────────────────────────

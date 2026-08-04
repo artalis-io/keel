@@ -462,6 +462,21 @@ smoke-pollcomp-async: $(SMOKE_POLLCOMP_ASYNC_BIN)
 $(SMOKE_POLLCOMP_ASYNC_BIN): tests/smoke_pollcomp_async.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
+# LC-0 PROOF: async KlClient connect+GET over the pollcomp completion loop — the completion
+# CONNECT contract (KL_COMP_CONNECT / kl_comp_post_connect) driving the client's connect over
+# the completion axis instead of the readiness WRITE-watcher shim. Build with BACKEND=pollcomp
+# first so both the server and the client's KlEventCtx run on the poll() completion loop.
+SMOKE_POLLCOMP_CLIENT_BIN = tests/smoke_pollcomp_client$(EXE)
+# The async KlClient connect+GET over a pollcomp COMPLETION loop — the LC-0 proof. The smoke
+# wires kl_socket_provider_pollcomp() + the compiled-in ctx, so it is built BACKEND=pollcomp
+# (the completion backend compiled in), mirroring smoke-pollcomp-asan.
+smoke-pollcomp-client:
+	$(MAKE) clean
+	$(MAKE) BACKEND=pollcomp $(LIB)
+	$(CC) $(CFLAGS) -Isrc -o $(SMOKE_POLLCOMP_CLIENT_BIN) tests/smoke_pollcomp_client.c \
+	      -L. -lkeel -lpthread $(LDFLAGS)
+	./$(SMOKE_POLLCOMP_CLIENT_BIN)
+
 # Completion roundtrips (plaintext, TLS-via-mock, and WebSocket) under ASan+UBSan with
 # leak detection (Linux CI). Builds the pollcomp lib + the smokes WITH sanitizer flags (so
 # they link the ASan runtime the instrumented lib needs), then runs them — leak/UAF/
@@ -478,11 +493,14 @@ smoke-pollcomp-asan:
 	      -o $(SMOKE_POLLCOMP_WS_BIN) tests/smoke_pollcomp_ws.c -L. -lkeel -lpthread
 	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_POLLCOMP_ASYNC_BIN) tests/smoke_pollcomp_async.c -L. -lkeel -lpthread
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	      -o $(SMOKE_POLLCOMP_CLIENT_BIN) tests/smoke_pollcomp_client.c -L. -lkeel -lpthread
 	# LeakSanitizer runs by default under ASan on Linux (CI); macOS ASan runs without it.
 	./$(SMOKE_POLLCOMP_BIN)
 	./$(SMOKE_POLLCOMP_TLS_BIN)
 	./$(SMOKE_POLLCOMP_WS_BIN)
 	./$(SMOKE_POLLCOMP_ASYNC_BIN)
+	./$(SMOKE_POLLCOMP_CLIENT_BIN)
 
 # RC-2 PROOF: a DEFAULT (epoll/kqueue, readiness-compiled) libkeel serving GET / over a
 # RUNTIME-INJECTED pollcomp completion backend — impossible before the provider/glue split.
@@ -524,8 +542,11 @@ smoke-iouring-asan:
 	      -o $(SMOKE_IOURING_BIN) tests/smoke_iouring.c -L. -lkeel -lpthread -luring
 	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
 	      -o $(SMOKE_IOURING_ASYNC_BIN) tests/smoke_iouring_async.c -L. -lkeel -lpthread -luring
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp \
+	      -o $(SMOKE_IOURING_CLIENT_BIN) tests/smoke_iouring_client.c -L. -lkeel -lpthread -luring
 	./$(SMOKE_IOURING_BIN)
 	./$(SMOKE_IOURING_ASYNC_BIN)
+	./$(SMOKE_IOURING_CLIENT_BIN)
 
 # End-to-end HTTP-over-completion roundtrip on the completion-native io_uring backend
 # (Linux, BACKEND=iouring). The runtime gate for event_iouring.c — build libkeel
@@ -544,6 +565,15 @@ SMOKE_IOURING_ASYNC_BIN = tests/smoke_iouring_async$(EXE)
 smoke-iouring-async: $(SMOKE_IOURING_ASYNC_BIN)
 	./$(SMOKE_IOURING_ASYNC_BIN)
 $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
+
+# LC-0: async KlClient connect+GET over the io_uring completion loop — connect driven via
+# IORING_OP_CONNECT (kl_comp_post_connect → KL_COMP_CONNECT → he_on_writable). Build with
+# BACKEND=iouring first.
+SMOKE_IOURING_CLIENT_BIN = tests/smoke_iouring_client$(EXE)
+smoke-iouring-client: $(SMOKE_IOURING_CLIENT_BIN)
+	./$(SMOKE_IOURING_CLIENT_BIN)
+$(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
 # Phase 8f-3: unit-test suites that run over the io_uring completion backend — a
@@ -723,7 +753,8 @@ clean:
 	# later native build.
 	rm -f src/event_iocp.o src/event_pollcomp.o src/event_pollcomp_builtin.o src/event_iouring.o src/completion_driver.o
 	rm -f src/completion_dispatch.o src/completion_readiness_stub.o src/completion_absent.o
-	rm -f tests/smoke_iouring tests/smoke_iouring_async
+	rm -f tests/smoke_iouring tests/smoke_iouring_async tests/smoke_iouring_client
+	rm -f tests/smoke_pollcomp_client tests/smoke_pollcomp_client.exe
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
 	rm -f tests/smoke_iocp_tls tests/smoke_iocp_tls.exe tests/smoke_pollcomp_tls tests/smoke_pollcomp_tls.exe
 	rm -f tests/smoke_iocp_async tests/smoke_iocp_async.exe
