@@ -91,6 +91,10 @@ void kl_lwr_lwip_tick(void *loopif);
 typedef enum {
     KL_LWR_ACCEPT,   /* a new connection was accepted */
     KL_LWR_WRITE,    /* a posted send completed (ok=1) OR a terminal close (ok=0, nbytes=0) */
+    KL_LWR_CONNECT,  /* an outbound connect finished (LC-1): ok=1 connected, ok=0 failed. `owner`
+                      * carries the tagged KlWatcher udata the client registered (NOT a KlConn*);
+                      * the backend routes it to KL_COMP_CONNECT against that watcher, mask-encoded
+                      * (KL_EVENT_WRITE = connected, 0 = failed). See docs/phase10_...design.md LC-1. */
 } KlLwrKind;
 
 /* One finished ACCEPT/WRITE (or terminal) op, emitted by kl_lwr_drain and translated into a
@@ -111,6 +115,56 @@ typedef struct {
 
 /* tcp_new() → opaque listen/conn pcb, or NULL on failure. */
 void *kl_lwr_tcp_new(void);
+
+/* ── outbound connect (LC-1) ──────────────────────────────────────────────────
+ * Begin an outbound connect for a CLIENT pcb (the one the client created via kl_lwr_tcp_new /
+ * lwr_sock_socket). Reserves a per-conn slot for `pcb` (reusing the accepted-pcb slot machinery
+ * so the response rides the SAME retained-recv path and the request the SAME bounded-TX pump),
+ * tags tcp_arg with `owner_watcher` (the tagged KlWatcher udata the client registered — carried
+ * through the connect callback + err teardown), sets tcp_err, and issues tcp_connect(pcb, &ip4,
+ * port, connected_cb). On the later mainloop tick the connected_cb fires:
+ *   - err==ERR_OK: mark the slot connected, wire tcp_recv/tcp_sent, enqueue a per-slot
+ *     pend_connect (ok=1) — surfaced by kl_lwr_drain as a KL_LWR_CONNECT record.
+ *   - err!=ERR_OK (or tcp_err before connect): the pcb is freed by lwIP; enqueue a FAILED
+ *     connect completion (ok=0) keyed by owner.
+ * `owner_watcher` is an opaque void* (the tagged KlWatcher udata) — no lwIP/KEEL type crosses.
+ * Returns 0 if the connect was issued, -1 on a hard failure (no slot / tcp_connect refused) — in
+ * which case the caller owns closing the pcb. */
+int kl_lwr_connect(void *lwrctx, void *pcb, const uint8_t ip4[4], uint16_t port,
+                   void *owner_watcher);
+
+/* Neutral readiness-mask bits crossing the seam for the client data-plane watcher relay (LC-1).
+ * They mirror KEEL's KlEventMask (KL_EVENT_READ=1, KL_EVENT_WRITE=2) numerically — a stable public
+ * ABI — so the backend can pass a KlEventMask straight through as `unsigned` without pulling a KEEL
+ * type into the glue and the glue can test the bits without a KEEL header. Asserted equal to the
+ * KlEventMask values on the backend side. */
+#define KL_LWR_EV_READ   1u
+#define KL_LWR_EV_WRITE  2u
+
+/* Record the armed readiness watcher for a CLIENT pcb (captured by the backend at kl_event add/mod).
+ * `mask` is KL_LWR_EV_READ|WRITE; `watcher_udata` is the tagged KlWatcher udata the drain relays as
+ * KL_COMP_WATCHER. A no-op (returns without effect) if `pcb` has no slot or is not a client slot —
+ * server conns drive I/O via the completion post path, not readiness watchers. */
+void kl_lwr_client_watch(void *lwrctx, void *pcb, unsigned mask, void *watcher_udata);
+/* Drop the recorded watcher for `pcb` (kl_event del). Idempotent. */
+void kl_lwr_client_unwatch(void *lwrctx, void *pcb);
+
+/* Scan client slots for one whose armed readiness watcher condition is met (writable = connected +
+ * sndbuf headroom; readable = rx queued or peer-closed). Starts at *cursor (advanced past the hit).
+ * Returns 1 and fills *watcher_udata + *mask (the ready subset of the armed mask) for a ready client,
+ * or 0 when none remain this pass. The backend relays each as KL_COMP_WATCHER to that watcher. */
+int kl_lwr_next_client_ready(void *lwrctx, int *cursor, void **watcher_udata, unsigned *mask);
+
+/* Client data-plane I/O on a connected client pcb (real send/recv, unlike the server's completion
+ * post path). Both are non-blocking:
+ *   kl_lwr_client_send: tcp_write(COPY) up to `len` bytes bounded by tcp_sndbuf + tcp_output; returns
+ *     bytes queued (> 0), 0 if no sndbuf headroom (caller re-arms WRITE = EAGAIN), or -1 on a hard
+ *     error / not-connected. Sets *would_block=1 for the 0 (no-headroom) case.
+ *   kl_lwr_client_recv: copy up to `cap` bytes from the retained rx queue (tcp_recved acks them);
+ *     returns bytes copied (> 0), 0 on peer close/EOF, or -1 with *would_block=1 when connected but
+ *     no data yet (caller re-arms READ = EAGAIN). */
+long kl_lwr_client_send(void *lwrctx, void *pcb, const void *buf, size_t len, int *would_block);
+long kl_lwr_client_recv(void *lwrctx, void *pcb, void *dst, size_t cap, int *would_block);
 /* tcp_bind(pcb, ip4, port). ip4 NULL / all-zero = IP_ADDR_ANY. Returns 0 / -1. */
 int   kl_lwr_tcp_bind(void *pcb, const uint8_t ip4[4], uint16_t port);
 /* tcp_listen(pcb) on `lwrctx`: returns the (possibly relocated) listen pcb, or NULL. Also

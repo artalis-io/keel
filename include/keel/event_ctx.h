@@ -141,7 +141,9 @@ static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
     if (!(tag & 1))
         return 0;  /* not a watcher — caller handles */
     KlWatcher *w = (KlWatcher *)(tag & ~(uintptr_t)1);
-    int wfd = w->fd;
+    KlSocketHandle wfd = w->fd;   /* full handle width: intptr_t, NOT int — a completion backend
+                                   * whose handle is a pointer (lwip-raw: a tcp_pcb*) would be
+                                   * truncated + sign-extended by an int, breaking watcher rearm. */
     ctx->dispatch_dirty = 0;
     w->on_ready(wfd, event->ready, w->user_data);
     // cppcheck-suppress knownConditionTrueFalse
