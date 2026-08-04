@@ -31,6 +31,14 @@ jobs:
             os: macos-latest
             backend: ""
             deps: ""
+          # The readiness-only opt-out: KEEL_NO_COMPLETION drops completion_driver.c +
+          # completion_dispatch.c (links completion_absent.c instead), so a completion
+          # provider is fail-loud rejected at init. Proves the smallest-footprint build
+          # links + the full readiness suite passes without the completion axis.
+          - name: Linux (no completion)
+            os: ubuntu-latest
+            backend: "KEEL_NO_COMPLETION=1"
+            deps: ""
 
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
