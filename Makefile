@@ -129,7 +129,11 @@ else
       # the completion backend on POSIX, so the completion model is runtime-testable off
       # Windows. The generic driver + dispatch (COMPLETION_CORE) are always linked; this
       # flag suppresses the readiness kl_comp_ops_builtin stub.
-      EVENT_SRC = src/event_pollcomp.c
+      # event_pollcomp.c is now a PURE runtime provider (no kl_event_*_builtin /
+      # kl_comp_ops_builtin — so it can be injected into a default libkeel, RC-2); the
+      # compiled-in-default glue (kl_event_*_builtin + kl_comp_ops_builtin, forwarding to
+      # the provider ops) lives in event_pollcomp_builtin.c, linked ONLY for this BACKEND.
+      EVENT_SRC = src/event_pollcomp.c src/event_pollcomp_builtin.c
       FILE_IO_SRC = src/file_io.c
       COMPLETION_BACKEND = 1
     else
@@ -147,7 +151,9 @@ else
       EVENT_SRC = src/event_poll.c
     else ifeq ($(BACKEND),pollcomp)
       # Portable completion backend over poll() (PAL 8d-0.5) — see the Linux branch.
-      EVENT_SRC = src/event_pollcomp.c
+      # event_pollcomp.c = pure runtime provider; event_pollcomp_builtin.c = the compiled-in
+      # glue (kl_event_*_builtin + kl_comp_ops_builtin). See the Linux pollcomp block (RC-2).
+      EVENT_SRC = src/event_pollcomp.c src/event_pollcomp_builtin.c
       COMPLETION_BACKEND = 1
     else
       EVENT_SRC = src/event_kqueue.c
@@ -513,6 +519,36 @@ smoke-pollcomp-asan:
 	./$(SMOKE_POLLCOMP_WS_BIN)
 	./$(SMOKE_POLLCOMP_ASYNC_BIN)
 
+# RC-2 PROOF: a DEFAULT (epoll/kqueue, readiness-compiled) libkeel serving GET / over a
+# RUNTIME-INJECTED pollcomp completion backend — impossible before the provider/glue split.
+# Build the default lib (NO BACKEND=), compile event_pollcomp.c as an EXTRA object (the pure
+# provider form: no kl_event_*_builtin / kl_comp_ops_builtin → no clash with the default
+# backend's _builtin or the readiness kl_comp_ops_builtin stub already in libkeel.a), then
+# link smoke_completion_inject.c against libkeel.a + that one object. The smoke sets
+# KlConfig.event_provider = kl_event_provider_pollcomp() so the server runs on the injected
+# completion loop. Proves the completion axis is genuinely runtime-injectable (RC-2).
+SMOKE_INJECT_BIN = tests/smoke_completion_inject$(EXE)
+SMOKE_INJECT_OBJ = src/event_pollcomp.inject.o
+smoke-completion-inject:
+	$(MAKE) clean
+	$(MAKE) $(LIB)
+	# The injected provider TU — compiled against the SAME CFLAGS as the default lib.
+	$(CC) $(CFLAGS) -Isrc -c -o $(SMOKE_INJECT_OBJ) src/event_pollcomp.c
+	$(CC) $(CFLAGS) -Isrc -o $(SMOKE_INJECT_BIN) tests/smoke_completion_inject.c \
+	      $(SMOKE_INJECT_OBJ) -L. -lkeel -lpthread $(LDFLAGS)
+	./$(SMOKE_INJECT_BIN)
+
+# ASan+UBSan variant of the RC-2 proof (leak detection on the injected-completion path).
+smoke-completion-inject-asan:
+	$(MAKE) clean
+	$(MAKE) debug
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
+	      -c -o $(SMOKE_INJECT_OBJ) src/event_pollcomp.c
+	$(CC) -std=c11 -g -O0 -fsanitize=address,undefined -Iinclude -Ivendor/llhttp -Isrc \
+	      -o $(SMOKE_INJECT_BIN) tests/smoke_completion_inject.c \
+	      $(SMOKE_INJECT_OBJ) -L. -lkeel -lpthread
+	ASAN_OPTIONS=detect_leaks=1 ./$(SMOKE_INJECT_BIN)
+
 # Same, for the io_uring completion backend (Linux only — needs io_uring). LeakSanitizer here
 # covers the io_uring op/registered-buffer/splice/watcher lifecycle the plain smoke can't —
 # the gap that let an 8f-5d/teardown watch leak reach main before this target existed.
@@ -720,7 +756,7 @@ clean:
 	# escape $(CORE_OBJ) on a default clean — remove them unconditionally to prevent a
 	# stale cross-toolchain object (e.g. a MinGW completion_driver.o) surviving into a
 	# later native build.
-	rm -f src/event_iocp.o src/event_pollcomp.o src/event_iouring.o src/completion_driver.o
+	rm -f src/event_iocp.o src/event_pollcomp.o src/event_pollcomp_builtin.o src/event_iouring.o src/completion_driver.o
 	rm -f src/completion_dispatch.o src/completion_readiness_stub.o src/completion_absent.o
 	rm -f tests/smoke_iouring tests/smoke_iouring_async
 	rm -f tests/smoke_iocp tests/smoke_iocp.exe tests/smoke_pollcomp tests/smoke_pollcomp.exe
@@ -728,6 +764,7 @@ clean:
 	rm -f tests/smoke_iocp_async tests/smoke_iocp_async.exe
 	rm -f tests/smoke_pollcomp_ws tests/smoke_pollcomp_ws.exe
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
+	rm -f tests/smoke_completion_inject tests/smoke_completion_inject.exe src/event_pollcomp.inject.o
 	rm -f src/file_io.o
 	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
@@ -893,4 +930,5 @@ smoke: examples
 
 .PHONY: check-sockaddr-neutral
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
-        smoke-tcp smoke-udp smoke-dns install uninstall coverage bench
+        smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
+        smoke-completion-inject smoke-completion-inject-asan

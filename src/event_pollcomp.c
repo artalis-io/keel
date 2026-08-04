@@ -21,9 +21,18 @@
  * sendto), synthesising a platform-independent KlCompletionEvent. It is the completion
  * facade over readiness — the mirror image of a readiness backend adapting a completion
  * source to the readiness interface.
+ *
+ * DUAL ROLE (RC-2): this TU is a PURE runtime provider — static KlEventOps +
+ * KlCompletionOps hung off a KlEventProvider (kl_event_provider_pollcomp), with NO
+ * kl_event_*_builtin / kl_comp_ops_builtin (which would clash with a default backend's
+ * own _builtin when pollcomp is injected into a default libkeel at runtime). Its event
+ * ops + completion table are named (non-static, kl_pollcomp_*) and declared in
+ * event_pollcomp_internal.h so the compiled-in glue (event_pollcomp_builtin.c, linked
+ * only for BACKEND=pollcomp) can wrap them as the _builtin symbols the default-path
+ * dispatch expects. See event_lwip.c (the pure-provider template) + event_dispatch.c.
  */
 #include <keel/event.h>
-#include "event_builtin.h"
+#include "event_pollcomp_internal.h"
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
@@ -87,9 +96,9 @@ typedef struct {
     int             primed;
 } KlPcState;
 
-/* ── KlEventLoop lifecycle ───────────────────────────────────────────── */
+/* ── KlEventLoop lifecycle (provider ops; the glue wraps these as *_builtin) ── */
 
-int kl_event_init_builtin(KlEventLoop *loop) {
+int kl_pollcomp_ev_init(KlEventLoop *loop) {
     KlPcState *st = kl_malloc(loop->alloc, sizeof(*st));
     if (!st) return -1;
     memset(st, 0, sizeof(*st));
@@ -105,7 +114,7 @@ int kl_event_init_builtin(KlEventLoop *loop) {
  * wakeup, timer, generic FD watcher); register it so kl_comp_drain relays its readiness as
  * a KL_COMP_WATCHER event (8e-2). This keys on the shared LSB watcher tag, not on any
  * pollcomp/IOCP specific — the same convention kl_event_dispatch uses. */
-int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_pollcomp_ev_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     if (!((uintptr_t)udata & 1)) return 0;   /* connection — posted ops, no readiness watch */
     KlPcState *st = loop->_backend;
     for (KlPcWatch *w = st->watches; w; w = w->next)
@@ -119,14 +128,14 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
     st->watches = w;
     return 0;
 }
-int kl_event_mod_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+int kl_pollcomp_ev_mod(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
     if (!((uintptr_t)udata & 1)) return 0;
     KlPcState *st = loop->_backend;
     for (KlPcWatch *w = st->watches; w; w = w->next)
         if (w->fd == fd) { w->mask = mask; w->udata = udata; return 0; }
-    return kl_event_add_builtin(loop, fd, mask, udata);   /* not yet watched — add it */
+    return kl_pollcomp_ev_add(loop, fd, mask, udata);   /* not yet watched — add it */
 }
-int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
+int kl_pollcomp_ev_del(KlEventLoop *loop, KlSocketHandle fd) {
     KlPcState *st = loop->_backend;
     for (KlPcWatch **link = &st->watches; *link; link = &(*link)->next)
         if ((*link)->fd == fd) {
@@ -138,7 +147,7 @@ int kl_event_del_builtin(KlEventLoop *loop, KlSocketHandle fd) {
     return 0;   /* not watched (a connection fd) — nothing to do */
 }
 
-int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
+int kl_pollcomp_ev_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
     /* The server drives a completion loop via kl_comp_drain (io_engine seam), not this
      * readiness call. Defined because the KlEventLoop API requires it. */
     (void)loop; (void)out; (void)max;
@@ -146,7 +155,7 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
     return 0;
 }
 
-void kl_event_close_builtin(KlEventLoop *loop) {
+void kl_pollcomp_ev_close(KlEventLoop *loop) {
     KlPcState *st = loop->_backend;
     if (!st) return;
     KlPcOp *op = st->ops;
@@ -170,14 +179,14 @@ void kl_event_close_builtin(KlEventLoop *loop) {
 
 /* A completion loop over native fds. COMPLETION makes the Phase 7 negotiation require
  * an OVERLAPPED provider (kl_socket_provider_pollcomp, below). */
-unsigned kl_event_caps_builtin(const KlEventLoop *loop) {
+unsigned kl_pollcomp_ev_caps(const KlEventLoop *loop) {
     (void)loop;
     return KL_EVENT_CAP_COMPLETION | KL_EVENT_CAP_NATIVE_FD;
 }
 
 /* The overlapped provider this completion loop needs (5a) — auto-wired by the server/client
  * when the caller configured none, so the pollcomp backend is a source-compatible drop-in. */
-const struct KlSocketProvider *kl_event_native_provider_builtin(const KlEventLoop *loop) {
+const struct KlSocketProvider *kl_pollcomp_ev_native_provider(const KlEventLoop *loop) {
     (void)loop;
     return kl_socket_provider_pollcomp();
 }
@@ -615,12 +624,29 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
 
 /* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
  * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
- * can reach them on the compiled-in path (kl_comp_ops_builtin) or through a runtime
- * provider (loop->ops->completion). No behavior change — the same funcs, one hop away. */
-static const KlCompletionOps pc_completion_ops = {
+ * can reach them through a runtime provider (loop->ops->completion, the injected path)
+ * or, on the compiled-in BACKEND=pollcomp path, via the glue's kl_comp_ops_builtin()
+ * (event_pollcomp_builtin.c) — which just returns this same table. Named (non-static)
+ * so the glue can reference it; declared in event_pollcomp_internal.h. */
+const KlCompletionOps kl_pollcomp_completion_ops = {
     pc_comp_drain, pc_comp_prime_accepts, pc_comp_post_recv, pc_comp_post_send,
     pc_comp_post_accept, pc_comp_post_sendfile, pc_comp_cancel,
     pc_comp_post_udp_recv, pc_comp_post_udp_send,
 };
 
-const KlCompletionOps *kl_comp_ops_builtin(void) { return &pc_completion_ops; }
+/* ── Runtime event provider (RC-2) ────────────────────────────────────────
+ * The pure-runtime form: KlEventOps carrying the completion sub-vtable via .completion,
+ * wrapped in a named KlEventProvider. Handed to KlConfig.event_provider to INJECT the
+ * pollcomp completion axis into an otherwise-default (epoll/kqueue) libkeel — the RC-2
+ * proof. No kl_event_*_builtin / kl_comp_ops_builtin appear in THIS TU, so it never
+ * clashes with the default backend's compiled-in symbols. Mirrors event_lwip.c. */
+static const KlEventOps pollcomp_event_ops = {
+    .init = kl_pollcomp_ev_init, .add = kl_pollcomp_ev_add, .mod = kl_pollcomp_ev_mod,
+    .del = kl_pollcomp_ev_del, .wait = kl_pollcomp_ev_wait, .close = kl_pollcomp_ev_close,
+    .caps = kl_pollcomp_ev_caps, .native_provider = kl_pollcomp_ev_native_provider,
+    .completion = &kl_pollcomp_completion_ops,   /* carry the completion axis (RC-2) */
+};
+
+static const KlEventProvider pollcomp_event_provider = { &pollcomp_event_ops, "pollcomp" };
+
+const KlEventProvider *kl_event_provider_pollcomp(void) { return &pollcomp_event_provider; }
