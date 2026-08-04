@@ -591,7 +591,7 @@ static int iocp_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
 }
 
 /* Unlink + free the connect tracker for `op` (if present). Returns whether it was aborted. */
-static int iocp_connect_untrack(KlIocpState *st, KlIocpOp *op) {
+static int iocp_connect_untrack(KlIocpState *st, const KlIocpOp *op) {
     int aborted = 0;
     for (KlIocpConnect **link = &st->connects; *link; link = &(*link)->next)
         if ((*link)->op == op) {
