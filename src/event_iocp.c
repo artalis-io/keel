@@ -47,6 +47,17 @@ typedef struct KlIocpWatch {
     struct KlIocpOp    *op;   /* the pending WSARecv op */
 } KlIocpWatch;
 
+/* A tracked in-flight ConnectEx op (LC-0). Tracked so iocp_comp_cancel(fd) can mark the
+ * client's connect op aborted before the client frees its (detached) watcher + closes the
+ * socket — the aborted completion is then dropped in the drain instead of dispatching
+ * against freed memory. (The IOCP backend doesn't otherwise track conn ops; connect is the
+ * one op with no KlConn owner.) */
+typedef struct KlIocpConnect {
+    struct KlIocpConnect *next;
+    SOCKET                fd;
+    struct KlIocpOp      *op;
+} KlIocpConnect;
+
 typedef struct {
     HANDLE                    port;
     LPFN_ACCEPTEX             acceptex;
@@ -55,6 +66,7 @@ typedef struct {
     int                       accept_family;
     SOCKET                    listen_fd;   /* stored at prime — drain is ctx-scoped */
     KlIocpWatch              *watches;     /* registered readiness watches (8e-2c) */
+    KlIocpConnect            *connects;    /* in-flight ConnectEx ops (LC-0) */
     KlAllocator              *alloc;
 } KlIocpState;
 
@@ -62,7 +74,8 @@ typedef enum {
     KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE,
     KL_IOCP_UDP_RECV, KL_IOCP_UDP_SEND,
     KL_IOCP_TLS_RECV,                          /* WSARecv ciphertext for a TLS conn (8b-5b) */
-    KL_IOCP_WATCHER                            /* WSARecv on a KlWatcher socket (8e-2c) */
+    KL_IOCP_WATCHER,                           /* WSARecv on a KlWatcher socket (8e-2c) */
+    KL_IOCP_CONNECT                            /* ConnectEx outbound connect (LC-0) */
 } KlIocpOpType;
 
 /* One overlapped TLS ciphertext read: a whole TLS record (~16 KiB max) plus a
@@ -200,6 +213,13 @@ void kl_event_close_builtin(KlEventLoop *loop) {
             iocp_op_free(w->op);
             kl_free(st->alloc, w, sizeof(*w));
             w = n;
+        }
+        KlIocpConnect *tr = st->connects;   /* free any leftover connect trackers + their ops */
+        while (tr) {
+            KlIocpConnect *n = tr->next;
+            iocp_op_free(tr->op);
+            kl_free(st->alloc, tr, sizeof(*tr));
+            tr = n;
         }
         if (st->port) CloseHandle(st->port);
         kl_free(st->alloc, st, sizeof(*st));
@@ -494,6 +514,96 @@ static int iocp_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
     return 0;
 }
 
+/* Fetch the ConnectEx extension pointer for `s` (per-socket WSAIoctl, as MSDN requires). */
+static LPFN_CONNECTEX iocp_get_connectex(SOCKET s) {
+    LPFN_CONNECTEX fn = NULL;
+    GUID guid = WSAID_CONNECTEX;
+    DWORD b = 0;
+    if (WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid),
+                 &fn, sizeof(fn), &b, NULL, NULL) == SOCKET_ERROR)
+        return NULL;
+    return fn;
+}
+
+/* Post an outbound connect via ConnectEx (LC-0). ConnectEx requires: (1) the socket bound
+ * (to the wildcard address of the dest's family), (2) the socket associated with the IOCP
+ * port so its completion is delivered, and (3) SO_UPDATE_CONNECT_CONTEXT set after success
+ * (done in the drain). The dest is marshalled into the op's `src` storage; the completion
+ * surfaces KL_COMP_CONNECT against the client's tagged watcher (he_on_writable re-checks
+ * SO_ERROR, which is valid after SO_UPDATE_CONNECT_CONTEXT). Returns 0 posted, -1 on failure. */
+static int iocp_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
+                                  const KlSockAddr *addr, void *watcher_udata) {
+    KlIocpState *st = ctx->loop._backend;
+    SOCKET s = (SOCKET)fd;
+
+    struct sockaddr_storage dst;
+    int dstlen = (addr && kl_sockaddr_family(addr) != KL_AF_UNSPEC)
+                     ? (int)kl_sockaddr_to_native(addr, &dst) : 0;
+    if (dstlen == 0) return -1;
+
+    /* ConnectEx requires an explicitly-bound socket. Bind to the wildcard addr of the same
+     * family (port 0 = ephemeral). */
+    struct sockaddr_storage any;
+    memset(&any, 0, sizeof(any));
+    any.ss_family = dst.ss_family;
+    int anylen = (dst.ss_family == AF_INET6)
+                     ? (int)sizeof(struct sockaddr_in6) : (int)sizeof(struct sockaddr_in);
+    if (bind(s, (struct sockaddr *)&any, anylen) == SOCKET_ERROR &&
+        WSAGetLastError() != WSAEINVAL)   /* WSAEINVAL = already bound — fine */
+        return -1;
+
+    LPFN_CONNECTEX connectex = iocp_get_connectex(s);
+    if (!connectex) return -1;
+
+    /* Associate the connecting socket with the port (untagged key is fine — dispatch is by
+     * OVERLAPPED/CONTAINING_RECORD, not key; use the watcher for symmetry). */
+    if (!CreateIoCompletionPort((HANDLE)(uintptr_t)s, st->port,
+                                (ULONG_PTR)watcher_udata, 0))
+        return -1;
+
+    KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
+    if (!op) return -1;
+    memset(op, 0, sizeof(*op));
+    op->type = KL_IOCP_CONNECT;
+    op->alloc = st->alloc;
+    op->accept_sock = s;                 /* the connecting socket */
+    op->watcher_udata = watcher_udata;
+    memcpy(&op->src, &dst, (size_t)dstlen);
+    op->src_len = dstlen;
+
+    /* Track the op so a later iocp_comp_cancel(fd) can mark it aborted. */
+    KlIocpConnect *tr = kl_malloc(st->alloc, sizeof(*tr));
+    if (!tr) { iocp_op_free(op); return -1; }
+    tr->fd = s;
+    tr->op = op;
+    tr->next = st->connects;
+    st->connects = tr;
+
+    DWORD sent = 0;
+    BOOL ok = connectex(s, (struct sockaddr *)&op->src, dstlen, NULL, 0, &sent, &op->ov);
+    if (!ok && WSAGetLastError() != WSA_IO_PENDING) {
+        st->connects = tr->next;
+        kl_free(st->alloc, tr, sizeof(*tr));
+        iocp_op_free(op);
+        return -1;
+    }
+    return 0;
+}
+
+/* Unlink + free the connect tracker for `op` (if present). Returns whether it was aborted. */
+static int iocp_connect_untrack(KlIocpState *st, KlIocpOp *op) {
+    int aborted = 0;
+    for (KlIocpConnect **link = &st->connects; *link; link = &(*link)->next)
+        if ((*link)->op == op) {
+            KlIocpConnect *tr = *link;
+            *link = tr->next;
+            aborted = op->watcher_removed;   /* set by iocp_comp_cancel */
+            kl_free(st->alloc, tr, sizeof(*tr));
+            break;
+        }
+    return aborted;
+}
+
 /* First-drain setup: load the extension fn pointers off the listen socket, learn
  * its address family, store it, and prime the accept backlog. Idempotent — latches
  * on st->started so the server may call it every tick. Server-scoped (needs the
@@ -540,7 +650,12 @@ static int iocp_comp_prime_accepts(struct KlServer *s) {
  * one; the ≤N-completions-then-release accounting lives in the driver, so cancelling all of a
  * dying fd's ops here is safe. Single-loop-thread, so no cross-thread cancel race. */
 static void iocp_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
-    (void)ctx;
+    KlIocpState *st = ctx->loop._backend;
+    /* A tracked ConnectEx op on this fd (LC-0): mark it aborted so its (CancelIoEx-forced)
+     * completion is DROPPED in the drain — the client frees the detached watcher + closes the
+     * socket right after this, so the completion must not dispatch against freed memory. */
+    for (KlIocpConnect *tr = st->connects; tr; tr = tr->next)
+        if (tr->fd == (SOCKET)fd) tr->op->watcher_removed = 1;
     CancelIoEx((HANDLE)(uintptr_t)fd, NULL);
 }
 
@@ -684,6 +799,37 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             count++;
             if (iocp_watch_post(op) < 0)
                 op->watcher_removed = 1;   /* re-post failed — freed at kl_event_close */
+        } else if (op->type == KL_IOCP_CONNECT) {
+            /* ConnectEx finished (LC-0). Untrack it; if the client aborted the attempt
+             * (watcher_removed, set by iocp_comp_cancel) drop it silently — the detached
+             * watcher is gone. Otherwise apply SO_UPDATE_CONNECT_CONTEXT (required after
+             * ConnectEx so getsockopt/shutdown work) and surface KL_COMP_CONNECT against the
+             * client's tagged watcher; he_on_writable re-checks SO_ERROR. A non-successful
+             * overlapped completion (ok field) also reports via SO_ERROR to the client. */
+            int aborted = iocp_connect_untrack(st, op);
+            if (aborted) { iocp_op_free(op); continue; }
+            SOCKET cs = op->accept_sock;
+            /* ConnectEx signals failure via the overlapped completion status (bytes==0 +
+             * error); on success apply SO_UPDATE_CONNECT_CONTEXT. Decide the result from the
+             * OVERLAPPED status (GetOverlappedResult) — SO_ERROR is checked as a backstop.
+             * Encode it in the delivered mask (KL_EVENT_WRITE = connected, 0 = failed); the
+             * client's connect watcher trusts the mask, uniform with io_uring. */
+            DWORD xfer = 0, flags = 0;
+            BOOL cok = WSAGetOverlappedResult(cs, &op->ov, &xfer, FALSE, &flags);
+            int connected = cok ? 1 : 0;
+            if (connected) {
+                setsockopt(cs, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
+                int soerr = 0, slen = (int)sizeof(soerr);
+                if (getsockopt(cs, SOL_SOCKET, SO_ERROR, (char *)&soerr, &slen) == 0 && soerr != 0)
+                    connected = 0;
+            }
+            memset(&out[count], 0, sizeof(out[count]));
+            out[count].kind = KL_COMP_CONNECT;
+            out[count].target = op->watcher_udata;
+            out[count].ok = connected;
+            out[count].bytes = connected ? (size_t)KL_EVENT_WRITE : 0;
+            count++;
+            iocp_op_free(op);
         } else { /* KL_IOCP_SENDFILE — one chunk of a (possibly multi-chunk) TransmitFile. */
             op->file_done += op->file_chunk;
             if (bytes > 0 && op->file_done < op->file_total) {
@@ -720,7 +866,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 static const KlCompletionOps iocp_completion_ops = {
     iocp_comp_drain, iocp_comp_prime_accepts, iocp_comp_post_recv, iocp_comp_post_send,
     iocp_comp_post_accept, iocp_comp_post_sendfile, iocp_comp_cancel,
-    iocp_comp_post_udp_recv, iocp_comp_post_udp_send,
+    iocp_comp_post_udp_recv, iocp_comp_post_udp_send, iocp_comp_post_connect,
 };
 
 const KlCompletionOps *kl_comp_ops_builtin(void) { return &iocp_completion_ops; }

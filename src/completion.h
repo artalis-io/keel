@@ -30,6 +30,18 @@ struct KlServer;
 typedef enum {
     KL_COMP_ACCEPT, KL_COMP_READ, KL_COMP_WRITE,   /* TCP conn (target = KlConn*) */
     KL_COMP_UDP_RECV, KL_COMP_UDP_SEND,            /* datagram (target = KlUdp*) */
+    KL_COMP_CONNECT,  /* an outbound connect finished (LC-0). The completion mirror of
+                       * KL_COMP_ACCEPT for the OUTBOUND direction: pollcomp does a real
+                       * connect()+POLLOUT+SO_ERROR, io_uring an IORING_OP_CONNECT, IOCP a
+                       * ConnectEx, lwip-raw a tcp_connect+connected_cb (LC-1). The consumer is
+                       * the async KlClient, NOT the server driver — so, like KL_COMP_WATCHER,
+                       * the result is routed to a tagged KlWatcher (target = the tagged
+                       * KlWatcher udata the client registered; `bytes` carries KL_EVENT_WRITE,
+                       * `ok` reflects connect success) and dispatched via kl_event_dispatch to
+                       * the client's connect watcher (he_on_writable). The backend leaves the
+                       * socket so getsockopt(SO_ERROR) reports the truth, so the client's
+                       * existing win/fail logic is unchanged. See
+                       * docs/phase10_lwip_raw_client_design.md §3 / §8 LC-0. */
     KL_COMP_WATCHER   /* a readiness FD watch fired (target = the tagged KlWatcher udata,
                        * `bytes` carries the ready KlEventMask) — 8e-2. Lets a completion
                        * loop relay generic FD watchers (thread-pool wakeup, timers) through
@@ -92,6 +104,12 @@ typedef struct KlCompletionOps {
     int  (*post_udp_recv)(struct KlUdp *udp);
     int  (*post_udp_send)(struct KlUdp *udp, const void *data, size_t len,
                           const KlSockAddr *dest);
+    /* Post one outbound connect on `fd` (a nonblocking socket the client created + owns)
+     * to `addr`; its completion is surfaced as KL_COMP_CONNECT targeting `watcher_udata`
+     * (the tagged KlWatcher the client registered on `fd`). LC-0 — the client-side
+     * outbound counterpart of post_accept. See completion.h KL_COMP_CONNECT + client.c. */
+    int  (*post_connect)(struct KlEventCtx *ctx, KlSocketHandle fd,
+                         const KlSockAddr *addr, void *watcher_udata);
 } KlCompletionOps;
 
 /* The compiled-in completion backend's vtable (one per completion backend TU). A
@@ -138,5 +156,9 @@ int kl_comp_post_accept(struct KlServer *s);
  * treats it like any completed response send. */
 int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count);
+
+/* Post one outbound connect (LC-0). Declared in io_engine.h (the shared event-model seam)
+ * so the async client reaches it without pulling the whole backend contract, mirroring
+ * kl_comp_run / kl_comp_post_udp_*. See io_engine.h + KL_COMP_CONNECT above. */
 
 #endif /* KEEL_SRC_COMPLETION_H */

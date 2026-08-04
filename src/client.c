@@ -27,6 +27,8 @@
 #include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
 #include "platform.h"   /* kl_plat_poll1 — sync readiness wait (poll/WSAPoll) */
 #include "event_caps.h" /* PAL Phase 7: event↔socket capability negotiation */
+#include "io_engine.h"  /* kl_comp_post_connect / kl_comp_cancel — completion connect (LC-0) */
+#include "watcher_internal.h" /* kl_watcher_add_detached — completion connect (LC-0) */
 
 /* ── Proxy constants ─────────────────────────────────────────────── */
 
@@ -1279,6 +1281,44 @@ static int build_connect_request(KlClient *c, const char *host,
 
 /* ── Post-DNS: create socket, connect, register watcher ──────────── */
 
+/* True when the client's loop is a completion loop (IOCP / io_uring / pollcomp): connect is
+ * driven over the completion axis (kl_comp_post_connect) instead of a readiness WRITE watcher.
+ * Readiness loops (epoll/kqueue/poll) return 0 → the existing watcher path is used unchanged. */
+static int client_loop_is_completion(const KlClient *c)
+{
+    return (kl_event_caps(&c->ev_ctx->loop) & KL_EVENT_CAP_COMPLETION) != 0;
+}
+
+/* Arm one nonblocking connect on a completion loop (LC-0): register a DETACHED watcher (so the
+ * connect completion's tagged pointer resolves to async_on_event, without a parallel readiness
+ * watch on the connecting fd), then post the connect. On completion the backend fires
+ * KL_COMP_CONNECT → the driver → async_on_event (CONNECTING), which reads the win/fail result
+ * the backend encoded in the delivered mask (KL_EVENT_WRITE = connected). Returns 0 if posted,
+ * -1 on a hard local failure. */
+static int client_comp_connect(KlClient *c, KlSocketHandle fd, const KlSockAddr *addr)
+{
+    void *tag = kl_watcher_add_detached(c->ev_ctx, fd, async_on_event, c);
+    if (!tag)
+        return -1;
+    if (kl_comp_post_connect(c->ev_ctx, fd, addr, tag) != 0) {
+        kl_watcher_del(c->ev_ctx, fd);
+        return -1;
+    }
+    return 0;
+}
+
+/* Tear down one racing connect fd (loser/failure/deadline). On a completion loop a pending
+ * connect op still references the fd — drop it (kl_comp_cancel frees the PC_CONNECT op) before
+ * removing the (detached) watcher + closing the fd, so no stale completion dispatches against
+ * the freed watcher. On a readiness loop this is just watcher_del + close. */
+static void client_drop_connect_fd(KlClient *c, KlSocketHandle fd)
+{
+    if (client_loop_is_completion(c))
+        kl_comp_cancel(c->ev_ctx, fd);
+    kl_watcher_del(c->ev_ctx, fd);
+    kl_sock_close(c->ev_ctx->sockets, fd);
+}
+
 static int start_connect(KlClient *c, const KlSockAddr *addr)
 {
     int family = (kl_sockaddr_family(addr) == KL_AF_INET6) ? AF_INET6 :
@@ -1291,6 +1331,18 @@ static int start_connect(KlClient *c, const KlSockAddr *addr)
     if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
         kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
+    }
+
+    /* Completion loop: drive connect over the completion axis (no readiness WRITE watcher). */
+    if (client_loop_is_completion(c)) {
+        c->fd = fd;
+        c->state = KL_HCLIENT_CONNECTING;   /* the connect completion advances us */
+        if (client_comp_connect(c, fd, addr) != 0) {
+            kl_sock_close(c->ev_ctx->sockets, fd);
+            c->fd = KL_INVALID_SOCKET;
+            return -1;
+        }
+        return 0;
     }
 
     int rc = kl_sock_connect(c->ev_ctx->sockets, fd, addr);
@@ -1331,8 +1383,7 @@ static void he_close_attempts(KlClient *c, KlSocketHandle keep_fd)
 {
     for (int i = 0; i < c->conn_next; i++) {
         if (c->conn_attempts[i].active && c->conn_attempts[i].fd != keep_fd) {
-            kl_watcher_del(c->ev_ctx, c->conn_attempts[i].fd);
-            kl_sock_close(c->ev_ctx->sockets, c->conn_attempts[i].fd);
+            client_drop_connect_fd(c, c->conn_attempts[i].fd);
             c->conn_attempts[i].active = 0;
         }
     }
@@ -1385,6 +1436,23 @@ static int he_new_attempt(KlClient *c, int idx)
     if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
         kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
+    }
+
+    /* Completion loop: post the connect over the completion axis. Several client connect
+     * ops can be outstanding at once (Happy Eyeballs races them natively); the first
+     * KL_COMP_CONNECT that reports connected wins (he_on_connect_result → he_win), losers are
+     * dropped by client_drop_connect_fd. No immediate-success shortcut — the completion always
+     * arrives on a subsequent drain (loopback POLLOUT is ready at once). */
+    if (client_loop_is_completion(c)) {
+        if (client_comp_connect(c, fd, sa) != 0) {
+            c->conn_last_err = KL_ERR_CONNECT;
+            kl_sock_close(c->ev_ctx->sockets, fd);
+            return -1;
+        }
+        c->conn_attempts[idx].fd = fd;
+        c->conn_attempts[idx].active = 1;
+        c->conn_pending++;
+        return 0;
     }
 
     int rc = kl_sock_connect(c->ev_ctx->sockets, fd, sa);
@@ -1456,8 +1524,7 @@ static void he_fail_attempt(KlClient *c, KlSocketHandle fd)
 {
     for (int i = 0; i < c->conn_next; i++) {
         if (c->conn_attempts[i].active && c->conn_attempts[i].fd == fd) {
-            kl_watcher_del(c->ev_ctx, fd);
-            kl_sock_close(c->ev_ctx->sockets, fd);
+            client_drop_connect_fd(c, fd);
             c->conn_attempts[i].active = 0;
             c->conn_pending--;
             break;
@@ -1479,6 +1546,18 @@ static void he_on_writable(KlClient *c, KlSocketHandle fd)
     int err = 0;
     kl_sock_get_so_error(c->ev_ctx->sockets, fd, &err);
     if (err == 0)
+        he_win(c, fd);
+    else
+        he_fail_attempt(c, fd);
+}
+
+/* Completion-loop connect result (LC-0). The backend delivered the connect outcome in the
+ * watcher mask (KL_EVENT_WRITE = connected, else failed) rather than via SO_ERROR — io_uring
+ * does not preserve SO_ERROR after a failed IORING_OP_CONNECT, so the client trusts the
+ * delivered result. Mirrors he_on_writable's win/fail branch. */
+static void he_on_connect_result(KlClient *c, KlSocketHandle fd, KlEventMask ready)
+{
+    if (ready & KL_EVENT_WRITE)
         he_win(c, fd);
     else
         he_fail_attempt(c, fd);
@@ -1959,18 +2038,27 @@ static void async_handle_receiving(KlClient *c)
 static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
     KlClient *c = user_data;
-    (void)ready;
 
     switch (c->state) {
     case KL_HCLIENT_RESOLVING:
         break;  /* DNS resolution handled by resolver callback, not watcher */
     case KL_HCLIENT_CONNECTING:
         /* Happy Eyeballs races several fds — dispatch by the fd that fired.
-         * The single-fd UNIX / sync-sync name resolution path uses c->fd directly. */
-        if (c->conn_racing)
+         * The single-fd UNIX / sync-sync name resolution path uses c->fd directly.
+         * On a completion loop the connect result is carried in `ready` (KL_EVENT_WRITE =
+         * connected) — the backend already resolved win/fail (SO_ERROR isn't preserved after a
+         * failed io_uring connect), so trust the delivered result instead of re-reading it. */
+        if (client_loop_is_completion(c)) {
+            if (c->conn_racing)
+                he_on_connect_result(c, fd, ready);
+            else if (ready & KL_EVENT_WRITE)
+                he_proceed_after_connect(c);
+            else { c->error = KL_ERR_CONNECT; async_complete_error(c); }
+        } else if (c->conn_racing) {
             he_on_writable(c, fd);
-        else
+        } else {
             async_handle_connecting(c);
+        }
         break;
     case KL_HCLIENT_PROXY_CONNECTING:
         async_handle_proxy_connecting(c);
@@ -2457,6 +2545,10 @@ void kl_client_cancel(KlClient *client)
     he_close_attempts(client, KL_INVALID_SOCKET);
 
     if (kl_handle_valid(client->fd)) {
+        /* Single-fd completion connect still in flight: drop its pending connect op before the
+         * watcher/fd go away (HE attempts were already dropped by he_close_attempts above). */
+        if (client->state == KL_HCLIENT_CONNECTING && client_loop_is_completion(client))
+            kl_comp_cancel(client->ev_ctx, client->fd);
         kl_watcher_del(client->ev_ctx, client->fd);
 
         if (client->pool) {

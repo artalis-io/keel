@@ -72,3 +72,8 @@ int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
                           const KlSockAddr *dest) {
     return kl_comp_ops(&udp->ctx->loop)->post_udp_send(udp, data, len, dest);
 }
+
+int kl_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
+                         const KlSockAddr *addr, void *watcher_udata) {
+    return kl_comp_ops(&ctx->loop)->post_connect(ctx, fd, addr, watcher_udata);
+}

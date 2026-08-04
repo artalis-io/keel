@@ -6,6 +6,7 @@
 #include "internal.h"
 #include "event_caps.h"
 #include "io_engine.h"   /* kl_comp_run — the generic completion tick */
+#include "watcher_internal.h"   /* kl_watcher_add_detached — completion connect (LC-0) */
 
 /* ── Tagged pointer helpers ────────────────────────────────────────── */
 
@@ -136,6 +137,37 @@ int kl_watcher_add(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask,
     }
 
     return 0;
+}
+
+/* Detached watcher (LC-0): the ctx-owned node without a kl_event_add. See watcher_internal.h.
+ * The mask is stored (KL_EVENT_WRITE — the connect result) but no readiness watch is armed;
+ * the completion connect fires the tagged pointer directly. A later kl_watcher_mod arms the
+ * real readiness relay for the send/recv phase. Idempotent per fd. */
+void *kl_watcher_add_detached(KlEventCtx *ctx, KlSocketHandle fd,
+                              KlWatcherFn on_ready, void *user_data)
+{
+    if (!ctx || !kl_handle_valid(fd) || !on_ready) return NULL;
+
+    for (KlWatcher *e = ctx->watchers; e; e = e->next) {
+        if (e->fd == fd) {
+            e->mask = KL_EVENT_WRITE;
+            e->on_ready = on_ready;
+            e->user_data = user_data;
+            return watcher_tag(e);
+        }
+    }
+
+    KlAllocator *a = ctx->alloc;
+    KlWatcher *w = kl_malloc(a, sizeof(KlWatcher));
+    if (!w) return NULL;
+
+    w->fd = fd;
+    w->mask = KL_EVENT_WRITE;
+    w->on_ready = on_ready;
+    w->user_data = user_data;
+    w->next = ctx->watchers;
+    ctx->watchers = w;
+    return watcher_tag(w);
 }
 
 int kl_watcher_mod(KlEventCtx *ctx, KlSocketHandle fd, KlEventMask mask) {
