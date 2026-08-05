@@ -24,12 +24,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* ── sync DNS (U-5) — fail-closed ─────────────────────────────────────────── */
+/* ── sync DNS (U-5) — fail-closed ───────────────────────────────────────────
+ * U-3 links resolve_uefi.c (a real numeric-only kl_resolve_sync) and compiles this
+ * TU with -DKEEL_UEFI_HAVE_RESOLVE so the two definitions don't collide; the U-1
+ * self-test (no resolver) keeps this fail-closed stub. */
+#ifndef KEEL_UEFI_HAVE_RESOLVE
 int kl_resolve_sync(const char *host, uint16_t port, int socktype,
                     KlSockAddr *out, int max, int *n) {
     (void)host; (void)port; (void)socktype; (void)out; (void)max; (void)n;
     return -1;
 }
+#endif
 
 /* ── socket provider fallbacks (U-2) — never reached; fail-closed ─────────── */
 KlSocketHandle kl_sockdef_socket(int d, int t, int p) { (void)d;(void)t;(void)p; return KL_INVALID_SOCKET; }

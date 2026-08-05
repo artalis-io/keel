@@ -96,4 +96,29 @@ const KlSocketProvider *kl_uefi_socket_provider(EFI_BOOT_SERVICES *bs, EFI_HANDL
  * un-created provider (no-op). */
 void kl_uefi_socket_provider_reset(void);
 
+/* ── U-3 async-connect primitives (driven by the EFI completion backend) ────────
+ *
+ * The completion path (event_efi.c) splits connect into three NON-BLOCKING steps
+ * its drain can pump, instead of the all-in-one blocking kl_uefi_socket_connect_now
+ * the U-2 selftest used:
+ *   configure     → Configure() (active/DHCP/remote). May block briefly settling
+ *                   DHCP (EFI_NO_MAPPING retry, U-0 #4). 0 = configured, -1 = failed
+ *                   (conn io_status carries the class). Idempotent once configured.
+ *   connect_post  → issue tcp->Connect(&conn_tok) WITHOUT pumping — returns as soon
+ *                   as the token is accepted. 0 = posted, -1 = immediate error.
+ *   connect_poll  → Poll()+CheckEvent(conn_tok): 1 = terminal (*out_ok = connected),
+ *                   0 = still pending (keep pumping), -1 = invalid handle.
+ * All three operate on the KlUefiConn behind @fd. */
+int kl_uefi_socket_configure(KlSocketHandle fd, const KlSockAddr *a);
+int kl_uefi_socket_connect_post(KlSocketHandle fd);
+int kl_uefi_socket_connect_poll(KlSocketHandle fd, int *out_ok);
+
+/* Handle-based stale-completion guard for the completion backend (which holds a
+ * KlSocketHandle + a captured generation, not the opaque KlUefiConn*). A completion
+ * delivered after the conn was closed (generation bumped) or its memory reused
+ * (magic cleared) is rejected. kl_uefi_conn_generation_h reads the live generation
+ * to capture at post time; 0 if @fd is not a live conn. */
+unsigned long long kl_uefi_conn_generation_h(KlSocketHandle fd);
+int kl_uefi_conn_valid_h(KlSocketHandle fd, unsigned long long generation);
+
 #endif /* KEEL_UEFI_SOCKET_EFI_TCP4_H */

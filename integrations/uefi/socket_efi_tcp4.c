@@ -290,10 +290,14 @@ static KlSocketHandle efi_sock_socket(void *cx, int domain, int type, int protoc
  * (via last_status = EFI_NOT_READY), telling the caller "connect is in progress,
  * drive it on the completion loop", not "connect failed".
  */
-static int efi_sock_connect(void *cx, KlSocketHandle fd, const KlSockAddr *a) {
-    (void)cx;
+/* kl_uefi_socket_configure — the Configure half of connect (active/DHCP/remote),
+ * factored out so both the sync socket op (efi_sock_connect) and the async
+ * completion backend (event_efi.c post_connect) share it. 0 = configured, -1 =
+ * failed (c->last_status carries the class). Idempotent once configured. */
+int kl_uefi_socket_configure(KlSocketHandle fd, const KlSockAddr *a) {
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead) return -1;
+    if (c->configured) return 0;
     if (!a || kl_sockaddr_family(a) != KL_AF_INET) {   /* IPv6 unsupported (EFI_TCP6 later) */
         c->last_status = EFI_INVALID_PARAMETER;
         return -1;
@@ -332,11 +336,62 @@ static int efi_sock_connect(void *cx, KlSocketHandle fd, const KlSockAddr *a) {
         c->last_status = st;   /* NO_MAPPING → WOULD_BLOCK; other → fatal */
         return -1;
     }
+    return 0;
+}
 
-    /* Configure done; the connect token is U-3's job. Report "pending" so the caller
-     * drives it on the completion loop (KL_IO_PENDING). */
+static int efi_sock_connect(void *cx, KlSocketHandle fd, const KlSockAddr *a) {
+    (void)cx;
+    KlUefiConn *c = conn_of(fd);
+    if (!c || c->dead) return -1;
+
+    if (kl_uefi_socket_configure(fd, a) != 0)
+        return -1;   /* c->last_status already set (invalid arg / DHCP fatal) */
+
+    /* Configure done; the connect token is the completion backend's job. Report
+     * "pending" so the caller drives it on the completion loop (KL_IO_PENDING). */
     c->last_status = EFI_NOT_READY;   /* NOT_READY → KL_IO_WOULD_BLOCK; see io_status note */
     return -1;
+}
+
+/* connect_post — issue the Connect token WITHOUT pumping (the async counterpart of
+ * kl_uefi_socket_connect_now's issue step). 0 = posted, -1 = immediate error. */
+int kl_uefi_socket_connect_post(KlSocketHandle fd) {
+    KlUefiConn *c = conn_of(fd);
+    if (!c || c->dead || !c->configured) return -1;
+    if (c->connected) return 0;
+    EFI_TCP4_PROTOCOL *tcp = c->tcp;
+    c->conn_tok.CompletionToken.Status = EFI_NOT_READY;
+    EFI_STATUS st = tcp->Connect(tcp, &c->conn_tok);
+    if (EFI_ERROR(st)) { c->last_status = st; return -1; }
+    return 0;
+}
+
+/* connect_poll — pump once + test the Connect token. 1 = terminal (*out_ok set),
+ * 0 = still pending, -1 = invalid handle. The async counterpart of the pump loop
+ * inside kl_uefi_socket_connect_now. */
+int kl_uefi_socket_connect_poll(KlSocketHandle fd, int *out_ok) {
+    KlUefiConn *c = conn_of(fd);
+    if (!c || c->dead) return -1;
+    if (c->connected) { if (out_ok) *out_ok = 1; return 1; }
+    EFI_TCP4_PROTOCOL *tcp = c->tcp;
+    tcp->Poll(tcp);
+    if (c->bs->CheckEvent(c->conn_tok.CompletionToken.Event) != EFI_SUCCESS)
+        return 0;   /* not signaled yet */
+    EFI_STATUS st = c->conn_tok.CompletionToken.Status;
+    c->last_status = st;
+    int ok = !EFI_ERROR(st);
+    if (ok) c->connected = 1;
+    if (out_ok) *out_ok = ok;
+    return 1;
+}
+
+/* Handle-based generation helpers for the completion backend's stale guard. */
+unsigned long long kl_uefi_conn_generation_h(KlSocketHandle fd) {
+    KlUefiConn *c = conn_of(fd);
+    return c ? (unsigned long long)c->generation : 0ULL;
+}
+int kl_uefi_conn_valid_h(KlSocketHandle fd, unsigned long long generation) {
+    return kl_uefi_conn_valid(conn_of(fd), (UINT64)generation);
 }
 
 /*
