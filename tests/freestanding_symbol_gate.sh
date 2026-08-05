@@ -9,7 +9,11 @@
 # payoff of the freestanding phase and the launch point for the UEFI spike
 # (docs/phase10_uefi_feasibility_design.md, F-0).
 #
-# Usage: freestanding_symbol_gate.sh <archive> <nm>
+# Usage: freestanding_symbol_gate.sh <archive> <nm> [mode]
+#   mode = default        — mem*/strlen may be undefined (platform/EDK2 supplies them)
+#   mode = selfcontained  — mem*/strlen must be DEFINED (kl_cstr_builtin.c provides them);
+#                           the ONLY undefined symbols allowed are the KEEL hooks +
+#                           the vendored-llhttp residual (bare target, no libc/EDK2).
 # Exits 0 if every undefined symbol is whitelisted, 1 (with the offending list)
 # otherwise. Portable across macOS (leading '_' / '___*_chk') and ELF nm.
 
@@ -17,6 +21,7 @@ set -eu
 
 ARCHIVE="${1:?archive path}"
 NM="${2:-nm}"
+MODE="${3:-default}"
 
 # ── Compute the archive's unresolved-symbol set (undefined minus defined) ──────
 "$NM" "$ARCHIVE" 2>/dev/null \
@@ -29,12 +34,23 @@ comm -23 /tmp/keel_fs_undef.txt /tmp/keel_fs_defined.txt > /tmp/keel_fs_unresolv
 # Each pattern is matched against the symbol with a single leading '_' stripped
 # (macOS mangling) and the FORTIFY '__<fn>_chk' wrapper normalized to '<fn>'.
 #
-# 1. C-runtime memory/string surface actually required by the archive:
-#      memcpy memmove memset memcmp strlen strcmp strncmp strcasecmp strchr
-#      strstr strtol snprintf   (+ their __*_chk FORTIFY wrappers)
-#    and the stdlib allocator + minimal error/abort path the default stdlib
-#    allocator wrapper and assert/format-diagnostic paths pull:
-#      malloc free realloc   fprintf abort stderr(__stderrp)
+# 1. C-runtime memory/string surface actually required by the archive.
+#    After F-4 (formatted-I/O + locale elimination) this shrank to the minimal
+#    freestanding surface — mem* + strlen (+ their __*_chk FORTIFY wrappers):
+#      memcpy memmove memset memcmp strlen
+#    The formatted-I/O + locale calls (snprintf / strtol / strcasecmp / strncmp /
+#    strcmp / strstr / strchr) were replaced by bounded, locale-free kl_cstr.*
+#    helpers, and the stdlib default allocator (malloc/free/realloc + the
+#    fprintf/abort/stderr diagnostic path it pulled) was dropped from the
+#    manifest — a freestanding client always takes an EXPLICIT KlAllocator*.
+#    Any of those symbols reappearing in the undefined set now FAILS the gate.
+# 1b. VENDORED-llhttp residual (documented, NOT KEEL code): vendor/llhttp/api.c
+#    references abort() in unreachable switch-defaults and fprintf(stderr,...) in
+#    its llhttp_pretty_print debug dumper (never called on the client path). We do
+#    not modify vendored code (AGENTS.md), so abort/fprintf/stderr(__stderrp)
+#    remain a residual of llhttp itself — not of any KEEL TU. A real UEFI build
+#    stubs these (an abort() -> CpuDeadLoop, no stdio). They are whitelisted
+#    explicitly here as the vendored residual, kept separate from the KEEL surface.
 # 2. KEEL platform + resolution hooks (a freestanding build supplies these —
 #    a tiny platform seam, per the UEFI design §6): kl_plat_* kl_monotonic_ms
 #    kl_resolve_sync (numeric/cfg->resolver-first; blocking getaddrinfo seam).
@@ -50,10 +66,13 @@ whitelisted() {
   # ___memcpy_chk -> memcpy and _strlen -> strlen and ___stderrp -> stderrp.
   s=$(printf '%s' "$sym" | sed -E 's/^_+//; s/_chk$//')
   case "$s" in
-    # 1. C-runtime memory/string
-    memcpy|memmove|memset|memcmp|strlen|strcmp|strncmp|strcasecmp|strchr|strstr|strtol|snprintf) return 0 ;;
-    # 1. stdlib allocator + diagnostic path (stderrp is macOS's stdio __stderrp)
-    malloc|free|realloc|fprintf|abort|stderr|stderrp) return 0 ;;
+    # 1. C-runtime memory/string — the minimal freestanding surface (F-4).
+    #    In selfcontained mode these must be DEFINED (kl_cstr_builtin.c), so they
+    #    are NOT whitelisted-undefined here — an undefined mem*/strlen then FAILs.
+    memcpy|memmove|memset|memcmp|strlen)
+      [ "$MODE" = selfcontained ] && return 1 || return 0 ;;
+    # 1b. vendored-llhttp residual (api.c abort()/debug fprintf — not KEEL code)
+    abort|fprintf|stderr|stderrp) return 0 ;;
     # 2. KEEL platform + resolution hooks
     kl_plat_*|kl_monotonic_ms|kl_resolve_sync) return 0 ;;
     # 3. provider ops (socket / event / completion) filled by the injected provider
@@ -74,9 +93,26 @@ while IFS= read -r sym; do
   fi
 done < /tmp/keel_fs_unresolved.txt
 
+# Self-contained: assert the mem*/strlen surface is DEFINED in the archive (provided
+# by kl_cstr_builtin.c), so a bare target needs NO external C runtime at all.
+if [ "$MODE" = selfcontained ]; then
+  for fn in memcpy memmove memset memcmp strlen; do
+    if grep -Eq "^_?${fn}$" /tmp/keel_fs_defined.txt; then
+      printf '  [def] %s (self-contained: provided by kl_cstr_builtin.c)\n' "$fn"
+    else
+      printf '  [BAD] %s is NOT defined — self-contained archive still needs an external %s\n' "$fn" "$fn"
+      bad=1
+    fi
+  done
+fi
+
 rm -f /tmp/keel_fs_defined.txt /tmp/keel_fs_undef.txt /tmp/keel_fs_unresolved.txt
 if [ "$bad" -ne 0 ]; then
-  echo "freestanding-lib: FAILED — a forbidden symbol leaked into the client archive"
+  echo "freestanding-lib${MODE:+ ($MODE)}: FAILED — a forbidden symbol leaked / a required symbol is missing"
   exit 1
 fi
-echo "freestanding-lib: OK — every undefined symbol is within the documented whitelist"
+if [ "$MODE" = selfcontained ]; then
+  echo "freestanding-lib (self-contained): OK — mem*/strlen defined in-archive; undefined = KEEL hooks + vendored residual only"
+else
+  echo "freestanding-lib: OK — every undefined symbol is within the documented whitelist"
+fi

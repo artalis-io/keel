@@ -1,6 +1,16 @@
 # Phase 10 — UEFI network provider — Feasibility + design (spike-gated go decision)
 
-Status: **feasibility / design (2026-08-05). No code, no build, no commit in this document.**
+Status: **feasibility / design (2026-08-05).**
+
+> **IMPLEMENTATION STATUS — the freestanding portability phase is COMPLETE (2026-08-05).**
+> The review's prerequisite — *"a client-only, completion-only, errno-free, POSIX-type-free,
+> CRT-minimal `libkeel_freestanding.a`"* — is delivered (PRs #199–#208): allocator split (A1),
+> `completion.h`→`KlSockAddr` (A2), freestanding public headers + `kl_ssize_t`/off_t + header gate
+> (A3/#206), `completion_driver.c` + `client.c` splits behind `KlEventCtx` hooks (B2a/B2b),
+> `errno`→`KlIoStatus` across the client family (B1/#205), F-0 archive + symbol gate (#206), F-4
+> formatted-I/O/locale elimination (`kl_cstr.*`), F-5 platform hooks + F-7 host mock harness (#207).
+> Corrections to this doc's original optimistic prose are flagged inline below with **[resolved]**.
+> The remaining work is F-8 (the EFI provider + QEMU/OVMF spike) itself.
 This is the roadmap's real **Phase 10** (`docs/pal_transformation_design.md`, phase table) —
 UEFI feasibility + an optional prototype. It is *not* the lwIP-raw client work in
 `docs/phase10_lwip_raw_client_design.md` (that doc uses a local "Phase 10" label but is the
@@ -29,7 +39,10 @@ before an OS kernel exists — over firmware-native networking. Concrete motivat
   pointer-handle provider could drop in. UEFI is the acid test that the axes are genuinely
   independent.
 - **Zero new core.** The success criterion mirrors Phase 9: a UEFI provider should ride a
-  **stock `libkeel.a`** (protocol layer + `completion_driver.c` + `completion_dispatch.c`
+  a **stock freestanding source profile** — `libkeel_freestanding.a`, a client-only,
+  completion-only archive built from the `FREESTANDING_CLIENT_SRC` manifest **[resolved:
+  not the same bytes as the POSIX `libkeel.a`; a reduced archive, per the review]** (protocol
+  layer + `completion_driver.c` + `completion_dispatch.c`
   unchanged), injected via `KlEventCtx.event_provider` / `KlConfig.event_provider`.
 
 Non-motivation: this is **not** a UEFI DXE network *driver* (we consume firmware's stack, not
@@ -80,7 +93,7 @@ firmware's handle database via `LocateProtocol` / `OpenProtocol`:
 |------|--------------|----------------------|
 | **No fd / no sockets** | I/O is via `EFI_TCP4_PROTOCOL*` + tokens, not descriptors. | `KlSocketHandle = intptr_t` (`handle.h`) carries an `EFI_TCP4_PROTOCOL*` (or a heap `KlUefiConn*`) exactly as lwip-raw carries `tcp_pcb*`. `KL_INVALID_SOCKET = (KlSocketHandle)-1`; `kl_handle_valid()` is the only test. **Solved in Phase 5.** |
 | **Completion, not readiness** | Token event signaled on completion; no `POLLIN`. | The completion axis (`KlCompletionOps` + `completion_driver.c`) is model-blind; io_uring/IOCP/lwip-raw already inject it via `loop->ops->completion`. `KlEventLoop.fd = -1` for a loop with no pollable OS fd (lwip-raw sets this today). **Solved in Phases 8–9.** |
-| **Freestanding (no libc)** | No `errno`/`malloc`/`fd`/`stdio`/threads/`time()`. | `KlAllocator` already funnels *all* Keel allocation (→ `AllocatePool`/`FreePool`). Error handling is normalized at the socket seam to Keel categories (not raw `errno`). Single-loop, no threads is already the model. Remaining libc gaps are a small `string.h`/`stdint` subset — a freestanding shim, not a core change. |
+| **Freestanding (no libc)** | No `errno`/`malloc`/`fd`/`stdio`/threads/`time()`. | `KlAllocator` funnels *all* Keel allocation; the stdlib default was split out (A1) so the freestanding archive takes an **explicit** allocator (no `malloc`/`free` in-archive). **[resolved]** The `errno`-based classification the client actually read is gone — replaced by `KlIoStatus`/`kl_sock_io_status` (B1). **[resolved]** The libc surface was *not* "a small `string.h` subset": it required `snprintf`/`strtol`/`str*`; F-4 replaced those with bounded, locale-free `kl_cstr.*` helpers, shrinking the archive's C-runtime dependency to **`mem*` + `strlen`** (optionally provided in-archive by `kl_cstr_builtin.c` for a bare target). Single-loop, no threads is already the model. |
 
 The residual novelty vs lwip-raw is **only the freestanding toolchain + the EFI event/token
 lifecycle**. Everything above the socket seam is unchanged from Phase 9.
@@ -260,7 +273,11 @@ decision standard.
   model; `KlThreadPool` is unavailable in UEFI and simply not used).
 - **Subset first** — buffered HTTP/1.1, IPv4, client. h2/WebSocket/ALPN-h2, TLS file/stream
   bodies inherit the LC-4 subset caveats.
-- **No public API change** expected — additive `event_provider`/`sockets` injection, as every
+- **Additive/evolutionary public API changes** — **[resolved: the original "no public API change"
+  was wrong]** the freestanding work made small, source-compatible public changes: `ssize_t`→
+  `kl_ssize_t` (pointer-width identical), `off_t`→`uint64_t` on the file-response API, and the
+  additive `KlIoStatus` enum + optional `io_status` op. Still additive `event_provider`/`sockets`
+  injection for the provider itself, as every
   prior PAL phase.
 
 ---
@@ -389,6 +406,49 @@ malloc indices), 10 completion-after-cancel / stale completion (exercises the `k
 watcher-liveness guard). Result: **57/57 checks PASS**, ASan/UBSan clean, zero leaks. **No real
 freestanding defect was exposed** — the archive's async client runs correctly over fully mocked,
 non-hosted hooks, which retires the host-side risk before the U-0 QEMU/OVMF spike.
+
+## F-4 — drop formatted-I/O + locale: the archive's C-runtime surface is now mem* + strlen
+
+F-0 shipped the archive but whitelisted a broad C-runtime surface (`snprintf`, `strtol`,
+`strcasecmp`, `strncmp`, `strstr`, `strchr` + the stdlib default allocator's `malloc`/`free`/
+`realloc` + `fprintf`/`abort`). **F-4 removes that surface**: the formatted-I/O + locale calls in
+the shared client/URL/sockaddr TUs are replaced by bounded, locale-free internal helpers, and the
+stdlib default allocator is dropped from the manifest (a freestanding client always takes an
+**explicit** `KlAllocator *` — verified: no freestanding TU calls `kl_allocator_default()`).
+
+**The helpers** (`src/kl_cstr.{h,c}`, in the manifest) — every one ASCII-only, bounds-checked,
+overflow-guarded, and behavior-identical to the libc call it displaces (the hosted url/sockaddr/
+client/pool suites + the url/dns fuzzers are the guardrail, since these TUs are shared with the
+hosted server + sync client):
+
+| Helper | Replaces | Notes |
+|--------|----------|-------|
+| `kl_ascii_strcasecmp` / `kl_ascii_strncasecmp` | `strcasecmp` / `strncasecmp` | ASCII case-fold, no locale; header-name matching |
+| `kl_parse_u16_decimal` | `strtol` (URL port) | bounded decimal → uint16, rejects overflow/non-digits/empty; port 0 still rejected |
+| `kl_u64_to_dec` / `kl_u64_to_hex` + `kl_buf_append{,_n,_u64,_hex}` | `snprintf` request/CONNECT/chunk-header/abs-URL construction | offset-tracking bounded builders |
+| `kl_fmt` path in `sockaddr.c` | `snprintf("%u.%u.%u.%u"/"%x"/"%.*s"/"%s:%u"/"[%s]:%u")` | **byte-identical** dotted-quad / RFC 5952 IPv6 / UNIX / port output |
+| `kl_streq` / `kl_str_startswith` | `strcmp` (pool host key) / `strncmp` (URL scheme) | case-**sensitive** exact/prefix — preserves existing acceptance |
+| `kl_strstr` / `kl_strchr` | `strstr` / `strchr` | bounded finds |
+
+Fixed-length, both-non-NUL compares (the proxy `HTTP/1.` status check) became `memcmp`. The
+`FORTIFY __*_chk` wrappers (`memcpy`/`memmove`/`memset`) stay — they resolve to the same mem*.
+
+**The shrunk whitelist** (the archive's full undefined-symbol closure now):
+
+| Class | Symbols |
+|-------|---------|
+| C-runtime memory/string (the minimal freestanding surface) | `memcpy` `memmove` `memset` `memcmp` `strlen` (+ `__*_chk` FORTIFY wrappers) |
+| **Vendored-llhttp residual** (documented, not KEEL code) | `abort` (unreachable switch-defaults in `vendor/llhttp/api.c`) + `fprintf`/`stderr` (llhttp's `pretty_print` debug dumper, never called on the client path) |
+| KEEL platform + resolution hooks | `kl_monotonic_ms` `kl_resolve_sync` |
+| Socket provider ops (vtable) | `kl_sockdef_*` |
+| Event/completion backend hooks | `kl_event_*_builtin` `kl_comp_ops_builtin` |
+
+The gate (`tests/freestanding_symbol_gate.sh`) now **FAILS** if `snprintf`/`strtol`/`strcasecmp`/
+`strncmp`/`strcmp`/`strstr`/`strchr` or `malloc`/`free`/`realloc` ever reappear. The only residual
+beyond mem*/strlen + KEEL hooks is **vendored llhttp's own** `abort`/`fprintf`/`stderr` (we do not
+modify vendored code, per AGENTS.md); a real UEFI build stubs these (`abort` → `CpuDeadLoop`, no
+stdio). `make freestanding-harness` still passes **57/57** over the mocks with the always-explicit
+allocator; hosted `make test` is byte-identical (no behavioral change).
 
 ---
 

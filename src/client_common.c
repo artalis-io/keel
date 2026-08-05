@@ -16,14 +16,13 @@
 
 #include <limits.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
-#include <strings.h>   /* strcasecmp (no longer pulled transitively via request.h) */
 #include <stddef.h>
 #include <sys/types.h>
 
 #include "socket.h"     /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "client_internal.h"
+#include "kl_cstr.h"    /* locale-free append builders + ASCII case compare */
 
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
@@ -82,39 +81,38 @@ char *kl_client_build_request(KlAllocator *alloc,
     }
 
     char buf[KL_CLIENT_REQ_BUF_SIZE];
-    int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
-                       method,
-                       target_len, target,
-                       (int)url->host_len, url->host);
-
-    if (off < 0 || (size_t)off >= sizeof(buf))
+    size_t off = 0;
+    if (kl_buf_append(buf, sizeof(buf), &off, method) != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &off, " ", 1) != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &off, target, (size_t)target_len) != 0 ||
+        kl_buf_append(buf, sizeof(buf), &off, " HTTP/1.1\r\nHost: ") != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &off, url->host, url->host_len) != 0 ||
+        kl_buf_append(buf, sizeof(buf), &off, "\r\n") != 0)
         return NULL;
 
     for (int i = 0; i < num_headers; i++) {
         if (kl_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
             kl_client_has_crlf(headers[i].value, strlen(headers[i].value)))
             return NULL;
-        int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
-                         "%s: %s\r\n", headers[i].name, headers[i].value);
-        if (n < 0 || (size_t)(off + n) >= sizeof(buf))
+        if (kl_buf_append(buf, sizeof(buf), &off, headers[i].name) != 0 ||
+            kl_buf_append_n(buf, sizeof(buf), &off, ": ", 2) != 0 ||
+            kl_buf_append(buf, sizeof(buf), &off, headers[i].value) != 0 ||
+            kl_buf_append(buf, sizeof(buf), &off, "\r\n") != 0)
             return NULL;
-        off += n;
     }
 
     if (body && body_len > 0) {
-        int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
-                         "Content-Length: %zu\r\n", body_len);
-        if (n < 0 || (size_t)(off + n) >= sizeof(buf))
+        if (kl_buf_append(buf, sizeof(buf), &off, "Content-Length: ") != 0 ||
+            kl_buf_append_u64(buf, sizeof(buf), &off, body_len) != 0 ||
+            kl_buf_append(buf, sizeof(buf), &off, "\r\n") != 0)
             return NULL;
-        off += n;
     }
 
-    int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
-                     "Connection: %s\r\n\r\n",
-                     keep_alive ? "keep-alive" : "close");
-    if (n < 0 || (size_t)(off + n) >= sizeof(buf))
+    if (kl_buf_append(buf, sizeof(buf), &off, "Connection: ") != 0 ||
+        kl_buf_append(buf, sizeof(buf), &off,
+                      keep_alive ? "keep-alive" : "close") != 0 ||
+        kl_buf_append(buf, sizeof(buf), &off, "\r\n\r\n") != 0)
         return NULL;
-    off += n;
 
     if (body_len > SIZE_MAX - (size_t)off)
         return NULL;
@@ -159,31 +157,32 @@ char *kl_client_build_request_headers_only(KlAllocator *alloc,
     }
 
     char buf[KL_CLIENT_REQ_BUF_SIZE];
-    int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
-                       method,
-                       target_len, target,
-                       (int)url->host_len, url->host);
-
-    if (off < 0 || (size_t)off >= sizeof(buf))
+    size_t off = 0;
+    if (kl_buf_append(buf, sizeof(buf), &off, method) != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &off, " ", 1) != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &off, target, (size_t)target_len) != 0 ||
+        kl_buf_append(buf, sizeof(buf), &off, " HTTP/1.1\r\nHost: ") != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &off, url->host, url->host_len) != 0 ||
+        kl_buf_append(buf, sizeof(buf), &off, "\r\n") != 0)
         return NULL;
 
     for (int i = 0; i < num_headers; i++) {
         if (kl_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
             kl_client_has_crlf(headers[i].value, strlen(headers[i].value)))
             return NULL;
-        int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
-                         "%s: %s\r\n", headers[i].name, headers[i].value);
-        if (n < 0 || (size_t)(off + n) >= sizeof(buf))
+        if (kl_buf_append(buf, sizeof(buf), &off, headers[i].name) != 0 ||
+            kl_buf_append_n(buf, sizeof(buf), &off, ": ", 2) != 0 ||
+            kl_buf_append(buf, sizeof(buf), &off, headers[i].value) != 0 ||
+            kl_buf_append(buf, sizeof(buf), &off, "\r\n") != 0)
             return NULL;
-        off += n;
     }
 
-    int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
-                     "Transfer-Encoding: chunked\r\nConnection: %s\r\n\r\n",
-                     keep_alive ? "keep-alive" : "close");
-    if (n < 0 || (size_t)(off + n) >= sizeof(buf))
+    if (kl_buf_append(buf, sizeof(buf), &off,
+                      "Transfer-Encoding: chunked\r\nConnection: ") != 0 ||
+        kl_buf_append(buf, sizeof(buf), &off,
+                      keep_alive ? "keep-alive" : "close") != 0 ||
+        kl_buf_append(buf, sizeof(buf), &off, "\r\n\r\n") != 0)
         return NULL;
-    off += n;
 
     char *req = kl_malloc(alloc, (size_t)off);
     if (!req)
@@ -199,7 +198,7 @@ const char *kl_client_find_header_value(const KlClientResponse *resp,
                                         const char *name)
 {
     for (int i = 0; i < resp->num_headers; i++) {
-        if (strcasecmp(resp->headers[i].name, name) == 0)
+        if (kl_ascii_strcasecmp(resp->headers[i].name, name) == 0)
             return resp->headers[i].value;
     }
     return NULL;
@@ -208,7 +207,7 @@ const char *kl_client_find_header_value(const KlClientResponse *resp,
 void kl_client_remove_header(KlClientResponse *resp, const char *name)
 {
     for (int i = 0; i < resp->num_headers; i++) {
-        if (strcasecmp(resp->headers[i].name, name) == 0) {
+        if (kl_ascii_strcasecmp(resp->headers[i].name, name) == 0) {
             /* Free the header strings */
             kl_free(&resp->alloc, (char *)resp->headers[i].name,
                     strlen(resp->headers[i].name) + 1);
@@ -226,8 +225,8 @@ void kl_client_remove_header(KlClientResponse *resp, const char *name)
 int kl_client_server_wants_close(const KlClientResponse *resp)
 {
     for (int i = 0; i < resp->num_headers; i++) {
-        if (strcasecmp(resp->headers[i].name, "Connection") == 0 &&
-            strcasecmp(resp->headers[i].value, "close") == 0)
+        if (kl_ascii_strcasecmp(resp->headers[i].name, "Connection") == 0 &&
+            kl_ascii_strcasecmp(resp->headers[i].value, "close") == 0)
             return 1;
     }
     return 0;
@@ -257,7 +256,7 @@ int kl_client_decompress_response_body(KlClientResponse *resp,
         return -1;
 
     const char *supported = decomp->encoding(decomp);
-    if (strcasecmp(enc, supported) != 0) {
+    if (kl_ascii_strcasecmp(enc, supported) != 0) {
         decomp->destroy(decomp);
         return 0;  /* encoding mismatch — leave body as-is */
     }
@@ -300,13 +299,13 @@ int kl_client_decomp_on_headers(int status, const KlClientHeader *headers,
 
     /* Check if Content-Encoding matches our decompressor */
     for (int i = 0; i < num_headers; i++) {
-        if (strcasecmp(headers[i].name, "Content-Encoding") == 0) {
+        if (kl_ascii_strcasecmp(headers[i].name, "Content-Encoding") == 0) {
             /* Create session and check encoding */
             KlDecompress *decomp = w->dcfg->factory(w->dcfg->ctx,
                                                       w->ds.alloc);
             if (decomp) {
                 const char *supported = decomp->encoding(decomp);
-                if (strcasecmp(headers[i].value, supported) == 0) {
+                if (kl_ascii_strcasecmp(headers[i].value, supported) == 0) {
                     w->ds.decomp = decomp;
                     w->ds.error = 0;
                     w->active = 1;

@@ -20,9 +20,7 @@
 
 #include <limits.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
-#include <strings.h>   /* strcasecmp (no longer pulled transitively via request.h) */
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -32,6 +30,7 @@
 #include "io_engine.h"  /* kl_comp_post_connect / kl_comp_cancel — completion connect (LC-0) */
 #include "watcher_internal.h" /* kl_watcher_add_detached — completion connect (LC-0) */
 #include "client_internal.h"
+#include "kl_cstr.h"    /* locale-free append builders + bounded find (no snprintf) */
 
 /* Forward declarations */
 static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data);
@@ -58,18 +57,27 @@ static int build_connect_request(KlClient *c, const char *host,
                                    uint16_t port, const char *auth)
 {
     char buf[KL_PROXY_RESPONSE_MAX];
-    int n;
-    if (auth)
-        n = snprintf(buf, sizeof(buf),
-                     "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n"
-                     "Proxy-Authorization: %s\r\n\r\n",
-                     host, port, host, port, auth);
-    else
-        n = snprintf(buf, sizeof(buf),
-                     "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n\r\n",
-                     host, port, host, port);
-
-    if (n < 0 || (size_t)n >= sizeof(buf))
+    size_t n = 0;
+    /* "CONNECT <host>:<port> HTTP/1.1\r\nHost: <host>:<port>\r\n"
+     * [ "Proxy-Authorization: <auth>\r\n" ] "\r\n" — byte-identical to the
+     * former snprintf, built with bounded, locale-free append helpers. */
+    if (kl_buf_append(buf, sizeof(buf), &n, "CONNECT ") != 0 ||
+        kl_buf_append(buf, sizeof(buf), &n, host) != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &n, ":", 1) != 0 ||
+        kl_buf_append_u64(buf, sizeof(buf), &n, port) != 0 ||
+        kl_buf_append(buf, sizeof(buf), &n, " HTTP/1.1\r\nHost: ") != 0 ||
+        kl_buf_append(buf, sizeof(buf), &n, host) != 0 ||
+        kl_buf_append_n(buf, sizeof(buf), &n, ":", 1) != 0 ||
+        kl_buf_append_u64(buf, sizeof(buf), &n, port) != 0 ||
+        kl_buf_append(buf, sizeof(buf), &n, "\r\n") != 0)
+        return -1;
+    if (auth) {
+        if (kl_buf_append(buf, sizeof(buf), &n, "Proxy-Authorization: ") != 0 ||
+            kl_buf_append(buf, sizeof(buf), &n, auth) != 0 ||
+            kl_buf_append(buf, sizeof(buf), &n, "\r\n") != 0)
+            return -1;
+    }
+    if (kl_buf_append(buf, sizeof(buf), &n, "\r\n") != 0)
         return -1;
 
     c->connect_buf = kl_malloc(c->alloc, (size_t)n);
@@ -576,12 +584,13 @@ static void async_handle_proxy_handshake(KlClient *c)
         c->proxy_recv[c->proxy_recv_len] = '\0';
 
         /* Check for end of headers */
-        if (!strstr(c->proxy_recv, "\r\n\r\n"))
+        if (!kl_strstr(c->proxy_recv, "\r\n\r\n"))
             continue;
 
-        /* Verify HTTP/1.x 200 status */
+        /* Verify HTTP/1.x 200 status (len>=12 guarantees >=7 bytes present, so
+         * a fixed-length memcmp is safe here). */
         if (c->proxy_recv_len < 12 ||
-            strncmp(c->proxy_recv, "HTTP/1.", 7) != 0 ||
+            memcmp(c->proxy_recv, "HTTP/1.", 7) != 0 ||
             c->proxy_recv[9] != '2' || c->proxy_recv[10] != '0' ||
             c->proxy_recv[11] != '0') {
             c->error = KL_ERR_PROXY;
@@ -702,14 +711,16 @@ static void async_handle_sending_stream(KlClient *c)
             }
             c->chunk_len = (size_t)nr;
             c->chunk_sent = 0;
-            /* Format chunk header */
-            int hl = snprintf(c->chunk_hdr, sizeof(c->chunk_hdr),
-                               "%zx\r\n", (size_t)nr);
-            if (hl < 0) {
+            /* Format chunk header: lowercase-hex size + CRLF (was "%zx\r\n") */
+            size_t hoff = 0;
+            if (kl_buf_append_hex(c->chunk_hdr, sizeof(c->chunk_hdr), &hoff,
+                                  (uint64_t)nr) != 0 ||
+                kl_buf_append_n(c->chunk_hdr, sizeof(c->chunk_hdr), &hoff,
+                                "\r\n", 2) != 0) {
                 async_complete_error(c);
                 return;
             }
-            c->chunk_hdr_len = (size_t)hl;
+            c->chunk_hdr_len = hoff;
             c->chunk_hdr_sent = 0;
             c->chunk_phase = 1;
         }
@@ -1066,15 +1077,20 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         const char *path = (parsed.path_len > 0) ? parsed.path : "/";
         int path_len = (parsed.path_len > 0) ? (int)parsed.path_len : 1;
 
-        int n;
-        if (parsed.port == 80)
-            n = snprintf(abs_url_buf, sizeof(abs_url_buf),
-                         "http://%s%.*s", host_z, path_len, path);
-        else
-            n = snprintf(abs_url_buf, sizeof(abs_url_buf),
-                         "http://%s:%d%.*s", host_z, parsed.port,
-                         path_len, path);
-        if (n < 0 || (size_t)n >= sizeof(abs_url_buf))
+        /* "http://<host>[:<port>]<path>" — byte-identical to the former
+         * snprintf, built with bounded, locale-free append helpers. */
+        size_t n = 0;
+        if (kl_buf_append(abs_url_buf, sizeof(abs_url_buf), &n, "http://") != 0 ||
+            kl_buf_append(abs_url_buf, sizeof(abs_url_buf), &n, host_z) != 0)
+            return NULL;
+        if (parsed.port != 80) {
+            if (kl_buf_append_n(abs_url_buf, sizeof(abs_url_buf), &n, ":", 1) != 0 ||
+                kl_buf_append_u64(abs_url_buf, sizeof(abs_url_buf), &n,
+                                  (uint64_t)parsed.port) != 0)
+                return NULL;
+        }
+        if (kl_buf_append_n(abs_url_buf, sizeof(abs_url_buf), &n, path,
+                            (size_t)path_len) != 0)
             return NULL;
         absolute_url = abs_url_buf;
     }
