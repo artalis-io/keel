@@ -70,4 +70,12 @@ void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
  * nothing is left in flight. */
 void kl_udp_comp_on_send(KlUdp *udp, size_t len);
 
+/* The comp_udp_dispatch hook (completion_core.c → here): route a datagram completion
+ * (KL_COMP_UDP_RECV / KL_COMP_UDP_SEND) to kl_udp_comp_on_recv / kl_udp_comp_on_send.
+ * Registered on the ctx by kl_udp_init, so the generic tick reaches the UDP stack
+ * without a static reference — a client-only build links neither udp.c nor these.
+ * `evp` is a const KlCompletionEvent* (opaque const void* at the hook seam). */
+struct KlEventCtx;
+void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp);
+
 #endif /* KEEL_SRC_UDP_INTERNAL_H */
