@@ -13,7 +13,25 @@ Status: **feasibility / design (2026-08-05).**
 > PE targets), B2 adds a CRT-less **PE/COFF link** (`make freestanding-link` → `keel_freestanding.efi`),
 > plus a `keel/freestanding.h` client-subset umbrella — see the **B1 / B2** sections below.
 > Corrections to this doc's original optimistic prose are flagged inline below with **[resolved]**.
-> The remaining work is F-8 (the EFI provider + QEMU/OVMF spike) itself.
+>
+> **F-8 IS NOW UNDERWAY AND GOING — U-0..U-3 SHIPPED (2026-08-05).** The go/no-go gate returned
+> **GO** and the client stack is built + proven on real firmware:
+> - **U-0** (#211) — raw EFI_TCP4 `GET / → 200 OK` under QEMU + **stock Ubuntu OVMF** (the predicted
+>   "OVMF lacks a TCP4 stack" blocker did not happen). Six lifecycle findings fed U-1..U-3.
+> - **U-1** (#213) — `allocator_uefi.c` (AllocatePool/FreePool) + `platform_uefi.c`
+>   (EVT_TIMER monotonic clock, EFI_RNG fail-closed) + `u1_link_stubs.c` (incl. a spec-correct asm
+>   `__chkstk` for llhttp's >4 KiB frame).
+> - **U-2** (#214) — `socket_efi_tcp4.c`: a `KlSocketProvider` over EFI_TCP4 (child/token/**generation**
+>   lifecycle; no-errno `EFI_STATUS`→`KlIoStatus`), proven send/recv → 200 in QEMU.
+> - **U-3** (#215) — **the culmination**: `event_efi.c` is a completion `KlEventProvider` injected on
+>   the STOCK `libkeel_freestanding.a`; an unmodified async `KlClient` does
+>   `GET http://<numeric>/ → 200` on bare firmware. Its `KlCompletionOps` (post_connect + drain
+>   emitting `KL_COMP_CONNECT`/`KL_COMP_WATCHER` + cancel) is the 1:1 real-firmware analogue of the
+>   F-7 mock harness. `KlClient` needed **zero** code changes (model-blind across io_uring/pollcomp/EFI).
+>
+> Remaining F-8: **U-4** TLS (mbedTLS adapter over the EFI socket-BIO), **U-5** DNS (real `KlResolver`
+> over EFI_UDP4/EFI_DNS4, replacing the numeric `resolve_uefi.c`), **U-6** non-blocking token recv,
+> **U-7** ExitBootServices lifetime.
 This is the roadmap's real **Phase 10** (`docs/pal_transformation_design.md`, phase table) —
 UEFI feasibility + an optional prototype. It is *not* the lwIP-raw client work in
 `docs/phase10_lwip_raw_client_design.md` (that doc uses a local "Phase 10" label but is the
@@ -254,11 +272,11 @@ switch (`EFI_TCP6`).
 
 | Combination | Status |
 |-------------|--------|
-| EFI_TCP4 + EFI completion loop (client, plaintext) | *design; proven by U-0/U-3* |
+| EFI_TCP4 + EFI completion loop (client, plaintext) | **PROVEN — `KlClient GET → 200` in QEMU/OVMF (U-3, #215)** |
 | EFI_TCP4 + EFI completion loop (client, HTTPS) | *design; U-4* |
-| EFI_UDP4 + EFI completion loop (DNS) | *design; U-5* |
-| EFI_TCP4 + EFI completion loop (server) | *stretch; U-6* |
-| Host EFI_TCP4 **mock** + completion driver (ASan gate) | *design; U-0/U-2* |
+| EFI_UDP4 + EFI completion loop (DNS) | *design; U-5 (numeric `resolve_uefi.c` ships pre-DNS)* |
+| EFI_TCP4 + EFI completion loop (server) | *stretch; deferred (client-first)* |
+| Host EFI_TCP4 **mock** + completion driver (ASan gate) | **PROVEN — F-7 harness 57/57 (mock socket + completion provider)** |
 | IPv6 (`EFI_TCP6`) | *out of first cut (family switch)* |
 
 Nothing is marked production-ready by existence — only by a passing gate, per the axis-audit
