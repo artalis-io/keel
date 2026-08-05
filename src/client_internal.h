@@ -161,11 +161,12 @@ struct KlClient {
 /* CRLF injection guard: 1 if s[0..len) contains CR or LF. */
 int kl_client_has_crlf(const char *s, size_t len);
 
-/* Plain-or-TLS I/O abstraction over the socket provider. */
-ssize_t kl_client_io_write(const KlSocketProvider *p, KlSocketHandle fd,
-                           KlTls *tls, const void *buf, size_t len);
-ssize_t kl_client_io_read(const KlSocketProvider *p, KlSocketHandle fd,
-                          KlTls *tls, void *buf, size_t len);
+/* Plain-or-TLS I/O abstraction over the socket provider. Returns kl_ssize_t
+ * (pointer-width, freestanding) so the async client's I/O locals stay errno-free. */
+kl_ssize_t kl_client_io_write(const KlSocketProvider *p, KlSocketHandle fd,
+                              KlTls *tls, const void *buf, size_t len);
+kl_ssize_t kl_client_io_read(const KlSocketProvider *p, KlSocketHandle fd,
+                             KlTls *tls, void *buf, size_t len);
 
 /* Heap request formatting (buffered + chunked-headers-only forms). */
 char *kl_client_build_request(KlAllocator *alloc,

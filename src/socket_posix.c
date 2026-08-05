@@ -386,3 +386,30 @@ KlError kl_sock_errno_to_error(int err) {
             return KL_ERR_IO;        /* transient / reset / generic I/O */
     }
 }
+
+/* Hosted default I/O-result classifier: map the current `errno` (set by the last
+ * failing send/recv/connect on this POSIX provider) to a portable KlIoStatus.
+ * The ONLY errno read on the seam's I/O-result path — the inline kl_sock_io_status
+ * dispatcher routes NULL-io_status providers here, so freestanding consumers never
+ * touch errno themselves. errno==0 is treated as a clean peer close (a 0-length
+ * read maps to KL_IO_CLOSED at the call site; -1 with errno==0 is degenerate). */
+KlIoStatus kl_sockdef_io_status(void) {
+    switch (errno) {
+        case EAGAIN:
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+        case EWOULDBLOCK:
+#endif
+            return KL_IO_WOULD_BLOCK;
+        case EINTR:
+            return KL_IO_INTERRUPTED;
+        case EINPROGRESS:
+            return KL_IO_PENDING;
+        case 0:
+        case EPIPE:
+            return KL_IO_CLOSED;
+        case ECONNRESET:
+            return KL_IO_RESET;
+        default:
+            return KL_IO_FATAL;
+    }
+}

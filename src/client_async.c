@@ -18,13 +18,11 @@
 #include <keel/parser.h>
 #include <keel/timer.h>
 
-#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>   /* strcasecmp (no longer pulled transitively via request.h) */
-#include <unistd.h>
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -150,7 +148,7 @@ static int start_connect(KlClient *c, const KlSockAddr *addr)
     }
 
     int rc = kl_sock_connect(c->ev_ctx->sockets, fd, addr);
-    if (rc < 0 && errno != EINPROGRESS) {
+    if (rc < 0 && kl_sock_io_status(c->ev_ctx->sockets) != KL_IO_PENDING) {
         kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
     }
@@ -260,7 +258,7 @@ static int he_new_attempt(KlClient *c, int idx)
     }
 
     int rc = kl_sock_connect(c->ev_ctx->sockets, fd, sa);
-    if (rc < 0 && errno != EINPROGRESS) {
+    if (rc < 0 && kl_sock_io_status(c->ev_ctx->sockets) != KL_IO_PENDING) {
         c->conn_last_err = KL_ERR_CONNECT;
         kl_sock_close(c->ev_ctx->sockets, fd);
         return -1;
@@ -489,14 +487,18 @@ static void he_proceed_after_connect(KlClient *c)
 static void async_handle_proxy_connecting(KlClient *c)
 {
     while (c->connect_sent < c->connect_len) {
-        ssize_t w = write(c->fd, c->connect_buf + c->connect_sent,
-                           c->connect_len - c->connect_sent);
+        /* Send the CONNECT request over the provider (not raw write) so the proxy
+         * path also works over a non-OS-fd provider; classify -1 via io_status. */
+        kl_ssize_t w = kl_sock_send(c->ev_ctx->sockets, c->fd,
+                                    c->connect_buf + c->connect_sent,
+                                    c->connect_len - c->connect_sent);
         if (w < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            KlIoStatus st = kl_sock_io_status(c->ev_ctx->sockets);
+            if (st == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
-            if (errno == EINTR)
+            if (st == KL_IO_INTERRUPTED)
                 continue;
             c->error = KL_ERR_IO;
             async_complete_error(c);
@@ -538,14 +540,17 @@ static void async_handle_proxy_handshake(KlClient *c)
             return;
         }
 
-        ssize_t r = read(c->fd, c->proxy_recv + c->proxy_recv_len,
-                          KL_PROXY_RESPONSE_MAX - 1 - c->proxy_recv_len);
+        /* Read the proxy response over the provider (not raw read); classify -1. */
+        kl_ssize_t r = kl_sock_recv(c->ev_ctx->sockets, c->fd,
+                                    c->proxy_recv + c->proxy_recv_len,
+                                    KL_PROXY_RESPONSE_MAX - 1 - c->proxy_recv_len);
         if (r < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            KlIoStatus st = kl_sock_io_status(c->ev_ctx->sockets);
+            if (st == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
-            if (errno == EINTR)
+            if (st == KL_IO_INTERRUPTED)
                 continue;
             c->error = KL_ERR_IO;
             async_complete_error(c);
@@ -631,11 +636,11 @@ static void async_handle_tls_handshake(KlClient *c)
 static void async_handle_sending(KlClient *c)
 {
     while (c->request_sent < c->request_len) {
-        ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+        kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                               c->request_buf + c->request_sent,
                               c->request_len - c->request_sent);
         if (w < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
@@ -703,11 +708,11 @@ static void async_handle_sending_stream(KlClient *c)
         case 1:
             /* Send chunk header */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -723,11 +728,11 @@ static void async_handle_sending_stream(KlClient *c)
         case 2:
             /* Send chunk data */
             while (c->chunk_sent < c->chunk_len) {
-                ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_buf + c->chunk_sent,
                                       c->chunk_len - c->chunk_sent);
                 if (w < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -748,11 +753,11 @@ static void async_handle_sending_stream(KlClient *c)
         case 3:
             /* Send trailing \r\n */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -769,11 +774,11 @@ static void async_handle_sending_stream(KlClient *c)
         case 4:
             /* Send final chunk (0\r\n\r\n) */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                         kl_watcher_rearm(c->ev_ctx, c->fd);
                         return;
                     }
@@ -802,9 +807,9 @@ static void async_handle_receiving(KlClient *c)
     char buf[KL_CLIENT_RECV_BUF_SIZE];
 
     for (;;) {
-        ssize_t nread = kl_client_io_read(c->ev_ctx->sockets, c->fd, c->tls, buf, sizeof(buf));
+        kl_ssize_t nread = kl_client_io_read(c->ev_ctx->sockets, c->fd, c->tls, buf, sizeof(buf));
         if (nread < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
