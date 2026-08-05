@@ -10,6 +10,7 @@
 #include <keel/connection.h>  /* kl_monotonic_ms */
 #include <keel/timer.h>
 #include "socket.h"
+#include "kl_cstr.h"   /* kl_streq — locale-free exact host-key compare */
 
 #include <string.h>
 
@@ -25,13 +26,13 @@ static int entry_matches(const KlClientPoolEntry *e,
                           const char *proxy_host, int proxy_port)
 {
     if (!kl_handle_valid(e->fd) || e->port != port || e->is_tls != is_tls ||
-        strcmp(e->host, host) != 0)
+        !kl_streq(e->host, host))
         return 0;
 
-    /* Proxy key comparison */
+    /* Proxy key comparison (host keys are exact/case-sensitive) */
     if (proxy_host)
         return e->proxy_port == proxy_port &&
-               strcmp(e->proxy_host, proxy_host) == 0;
+               kl_streq(e->proxy_host, proxy_host);
 
     /* Direct: match only direct entries */
     return e->proxy_host[0] == '\0';

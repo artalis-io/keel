@@ -8,7 +8,8 @@
 #include <keel/sockaddr.h>
 
 #include <string.h>
-#include <stdio.h>
+
+#include "kl_cstr.h"   /* locale-free bounded formatters (no snprintf) */
 
 int kl_sockaddr_from_ipv4(KlSockAddr *out, const uint8_t ip4[4], uint16_t port) {
     if (!out || !ip4) return -1;
@@ -211,9 +212,12 @@ static int fmt_ipv6(const uint8_t ip[16], char *buf, size_t n) {
             if (off >= n) return -1;
             buf[off++] = ':';
         }
-        int r = snprintf(buf + off, n - off, "%x", g[i]);
-        if (r < 0 || (size_t)r >= n - off) return -1;
-        off += (size_t)r;
+        char hx[4];   /* a 16-bit group is at most 4 hex digits */
+        size_t r = kl_u64_to_hex(hx, sizeof(hx), g[i]);
+        /* require the digits to fit AND leave >=1 byte for the closing NUL */
+        if (r == 0 || r >= n - off) return -1;
+        memcpy(buf + off, hx, r);
+        off += r;
     }
     if (best != -1 && best + best_len == 8) {
         if (off >= n) return -1;
@@ -228,15 +232,21 @@ int kl_sockaddr_format_ip(const KlSockAddr *a, char *buf, size_t n) {
     if (!a || !buf || n == 0) return -1;
 
     if (a->family == KL_AF_INET) {
-        int r = snprintf(buf, n, "%u.%u.%u.%u",
-                         a->u.ip[0], a->u.ip[1], a->u.ip[2], a->u.ip[3]);
-        return (r < 0 || (size_t)r >= n) ? -1 : r;
+        /* canonical dotted-quad, byte-identical to "%u.%u.%u.%u" */
+        size_t off = 0;
+        for (int i = 0; i < 4; i++) {
+            if (i != 0 && kl_buf_append_n(buf, n, &off, ".", 1) != 0) return -1;
+            if (kl_buf_append_u64(buf, n, &off, a->u.ip[i]) != 0) return -1;
+        }
+        return (int)off;
     }
     if (a->family == KL_AF_INET6)
         return fmt_ipv6(a->u.ip, buf, n);
     if (a->family == KL_AF_UNIX) {
-        int r = snprintf(buf, n, "%.*s", (int)a->addr_len, a->u.path);
-        return (r < 0 || (size_t)r >= n) ? -1 : r;
+        size_t off = 0;
+        if (kl_buf_append_n(buf, n, &off, a->u.path, a->addr_len) != 0)
+            return -1;
+        return (int)off;
     }
     return -1;
 }
@@ -246,15 +256,24 @@ int kl_sockaddr_format(const KlSockAddr *a, char *buf, size_t n) {
 
     if (a->family == KL_AF_INET) {
         char ip[16];
-        if (kl_sockaddr_format_ip(a, ip, sizeof ip) < 0) return -1;
-        int r = snprintf(buf, n, "%s:%u", ip, (unsigned)a->port);
-        return (r < 0 || (size_t)r >= n) ? -1 : r;
+        int iplen = kl_sockaddr_format_ip(a, ip, sizeof ip);
+        if (iplen < 0) return -1;
+        size_t off = 0;
+        if (kl_buf_append_n(buf, n, &off, ip, (size_t)iplen) != 0) return -1;
+        if (kl_buf_append_n(buf, n, &off, ":", 1) != 0) return -1;
+        if (kl_buf_append_u64(buf, n, &off, a->port) != 0) return -1;
+        return (int)off;
     }
     if (a->family == KL_AF_INET6) {
         char ip[46];
-        if (kl_sockaddr_format_ip(a, ip, sizeof ip) < 0) return -1;
-        int r = snprintf(buf, n, "[%s]:%u", ip, (unsigned)a->port);
-        return (r < 0 || (size_t)r >= n) ? -1 : r;
+        int iplen = kl_sockaddr_format_ip(a, ip, sizeof ip);
+        if (iplen < 0) return -1;
+        size_t off = 0;
+        if (kl_buf_append_n(buf, n, &off, "[", 1) != 0) return -1;
+        if (kl_buf_append_n(buf, n, &off, ip, (size_t)iplen) != 0) return -1;
+        if (kl_buf_append_n(buf, n, &off, "]:", 2) != 0) return -1;
+        if (kl_buf_append_u64(buf, n, &off, a->port) != 0) return -1;
+        return (int)off;
     }
     if (a->family == KL_AF_UNIX)
         return kl_sockaddr_format_ip(a, buf, n);

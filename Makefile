@@ -184,7 +184,7 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
-CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/response.c src/router.c \
+CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/response.c src/router.c \
            src/connection.c src/server.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
@@ -1001,7 +1001,7 @@ freestanding-headers:
 # deliberately NOT in the manifest — a freestanding build supplies its own
 # provider, so the kl_sockdef_* ops are legitimately undefined (whitelisted).
 FREESTANDING_CLIENT_SRC = \
-    src/error.c src/version.c src/allocator.c src/allocator_default_stdlib.c \
+    src/error.c src/version.c src/allocator.c src/kl_cstr.c \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
     src/client_common.c src/client_async.c src/client_pool.c src/decompress.c \
@@ -1035,6 +1035,34 @@ freestanding-lib:
 	@echo "== symbol gate: undefined closure must be within the whitelist =="
 	@sh tests/freestanding_symbol_gate.sh $(FREESTANDING_LIB) $(NM)
 	@rm -f $(FREESTANDING_LIB_OBJ)
+
+# ── Self-contained freestanding archive (optional; bare target, no libc/EDK2) ──
+# The default archive leaves mem*/strlen undefined for the platform to supply
+# (libc / EDK2 BaseMemoryLib). This variant ALSO links the optional reference
+# impls (src/kl_cstr_builtin.c) so the archive provides them itself — for a bare
+# target that has neither. The gate runs in "selfcontained" mode: mem*/strlen must
+# be DEFINED (not undefined) and the ONLY undefined symbols are the KEEL platform/
+# provider hooks + the vendored-llhttp residual. -fno-builtin +
+# -fno-tree-loop-distribute-patterns stop the compiler lowering kl_cstr_builtin.c's
+# byte loops back into self-calls; -D_FORTIFY_SOURCE=0 avoids __*_chk.
+FREESTANDING_SC_SRC = $(FREESTANDING_CLIENT_SRC) src/kl_cstr_builtin.c
+FREESTANDING_SC_LIB = libkeel_freestanding_selfcontained.a
+FREESTANDING_SC_NOLOWER := $(shell echo 'int x;' | $(FREESTANDING_LIB_CC) -fno-tree-loop-distribute-patterns -x c -c -o /dev/null - >/dev/null 2>&1 && echo -fno-tree-loop-distribute-patterns)
+FREESTANDING_SC_CFLAGS = $(FREESTANDING_LIB_CFLAGS) -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 $(FREESTANDING_SC_NOLOWER)
+FREESTANDING_SC_OBJ = $(FREESTANDING_SC_SRC:.c=.sc.o)
+
+freestanding-lib-selfcontained:
+	@echo "== self-contained freestanding archive: toolchain = $(FREESTANDING_LIB_CC) =="
+	@rm -f $(FREESTANDING_SC_OBJ) $(FREESTANDING_SC_LIB)
+	@for f in $(FREESTANDING_SC_SRC); do \
+	  o=$${f%.c}.sc.o; \
+	  echo "  CC(freestanding/self-contained) $$f"; \
+	  $(FREESTANDING_LIB_CC) $(FREESTANDING_SC_CFLAGS) -w -c -o $$o $$f || exit 1; \
+	done
+	$(AR) rcs $(FREESTANDING_SC_LIB) $(FREESTANDING_SC_OBJ)
+	@echo "== symbol gate (self-contained): mem*/strlen DEFINED; undefined = KEEL hooks + vendored residual only =="
+	@sh tests/freestanding_symbol_gate.sh $(FREESTANDING_SC_LIB) $(NM) selfcontained
+	@rm -f $(FREESTANDING_SC_OBJ)
 
 # ── Freestanding host mock harness (F-7) ──────────────────────────────────────
 # Proves libkeel_freestanding.a's async client actually RUNS end-to-end on the
@@ -1071,7 +1099,7 @@ freestanding-harness:
 	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_HARNESS_BIN)
 	@rm -f $(FREESTANDING_HARNESS_BIN)
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-harness
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-selfcontained freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

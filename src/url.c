@@ -8,8 +8,9 @@
 
 #include <keel/url.h>
 
-#include <stdlib.h>
 #include <string.h>
+
+#include "kl_cstr.h"   /* locale-free port parse + bounded find (no strtol) */
 
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
@@ -72,32 +73,32 @@ int kl_url_parse(const char *url, KlUrl *out)
     memset(out, 0, sizeof(*out));
 
     /* Scheme (check the longer "+unix" variants before the plain ones) */
-    if (strncmp(url, "https+unix://", 13) == 0) {
+    if (kl_str_startswith(url, "https+unix://")) {
         out->is_https = 1;
         out->is_unix = 1;
         url += 13;
-    } else if (strncmp(url, "http+unix://", 12) == 0) {
+    } else if (kl_str_startswith(url, "http+unix://")) {
         out->is_unix = 1;
         url += 12;
-    } else if (strncmp(url, "https://", 8) == 0) {
+    } else if (kl_str_startswith(url, "https://")) {
         out->is_https = 1;
         url += 8;
-    } else if (strncmp(url, "http://", 7) == 0) {
+    } else if (kl_str_startswith(url, "http://")) {
         url += 7;
-    } else if (strncmp(url, "wss+unix://", 11) == 0) {
+    } else if (kl_str_startswith(url, "wss+unix://")) {
         out->is_https = 1;
         out->is_ws = 1;
         out->is_unix = 1;
         url += 11;
-    } else if (strncmp(url, "ws+unix://", 10) == 0) {
+    } else if (kl_str_startswith(url, "ws+unix://")) {
         out->is_ws = 1;
         out->is_unix = 1;
         url += 10;
-    } else if (strncmp(url, "wss://", 6) == 0) {
+    } else if (kl_str_startswith(url, "wss://")) {
         out->is_https = 1;
         out->is_ws = 1;
         url += 6;
-    } else if (strncmp(url, "ws://", 5) == 0) {
+    } else if (kl_str_startswith(url, "ws://")) {
         out->is_ws = 1;
         url += 5;
     } else {
@@ -142,7 +143,7 @@ int kl_url_parse(const char *url, KlUrl *out)
 
     /* Handle IPv6 addresses in brackets: [::1]:8080 */
     if (*url == '[') {
-        const char *bracket = strchr(url, ']');
+        const char *bracket = kl_strchr(url, ']');
         if (!bracket)
             return -1;
         out->host = url + 1;
@@ -163,15 +164,19 @@ int kl_url_parse(const char *url, KlUrl *out)
     if (has_crlf(out->host, out->host_len))
         return -1;
 
-    /* Port (optional) */
+    /* Port (optional) — bounded decimal, locale-free (no strtol) */
     if (*url == ':') {
         url++;
-        char *end;
-        long p = strtol(url, &end, 10);
-        if (end == url || p < 1 || p > 65535)
+        const char *pstart = url;
+        while (*url >= '0' && *url <= '9')
+            url++;
+        uint16_t p;
+        /* kl_parse_u16_decimal rejects empty span, non-digits, and > 65535;
+         * an explicit port of 0 is also invalid (matches the old p < 1). */
+        if (kl_parse_u16_decimal(pstart, (size_t)(url - pstart), &p) != 0 ||
+            p == 0)
             return -1;
         out->port = (int)p;
-        url = end;
     } else {
         out->port = out->is_https ? 443 : 80;
     }
@@ -217,8 +222,8 @@ int kl_url_resolve(const char *base_url, const char *location,
         return -1;
 
     /* 1. Absolute URL — starts with http:// or https:// */
-    if (strncmp(location, "http://", 7) == 0 ||
-        strncmp(location, "https://", 8) == 0) {
+    if (kl_str_startswith(location, "http://") ||
+        kl_str_startswith(location, "https://")) {
         size_t n = strip_fragment(location, loc_len);
         if (n >= out_size)
             return -1;
@@ -230,7 +235,7 @@ int kl_url_resolve(const char *base_url, const char *location,
     /* 2. Protocol-relative — starts with // */
     if (location[0] == '/' && location[1] == '/') {
         /* Extract scheme from base_url */
-        const char *colon = strchr(base_url, ':');
+        const char *colon = kl_strchr(base_url, ':');
         if (!colon)
             return -1;
         size_t scheme_len = (size_t)(colon - base_url);
@@ -247,7 +252,7 @@ int kl_url_resolve(const char *base_url, const char *location,
     /* 3. Absolute path — starts with / */
     if (location[0] == '/') {
         /* Extract scheme://host[:port] from base_url */
-        const char *auth = strstr(base_url, "://");
+        const char *auth = kl_strstr(base_url, "://");
         if (!auth)
             return -1;
         auth += 3; /* past "://" */
