@@ -24,7 +24,7 @@ typedef struct {
     KlAllocator *alloc;
 } StubH2Session;
 
-static ssize_t stub_recv(KlH2ServerSession *self, const void *data, size_t len) {
+static kl_ssize_t stub_recv(KlH2ServerSession *self, const void *data, size_t len) {
     (void)self; (void)data;
     /* A real implementation would parse HTTP/2 frames here */
     return (ssize_t)len;

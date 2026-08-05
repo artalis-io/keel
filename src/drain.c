@@ -78,7 +78,7 @@ int kl_drain_write(KlDrain *d, const char *data, size_t len) {
     }
 
     /* Try direct write */
-    ssize_t n = d->write_fn(data, len, d->write_ctx);
+    kl_ssize_t n = d->write_fn(data, len, d->write_ctx);
     if (n < 0) {
         d->error = 1;
         return -1;
@@ -103,7 +103,7 @@ int kl_drain_flush(KlDrain *d) {
     if (d->buf_len == 0) return 0;
 
     while (d->buf_len > 0) {
-        ssize_t n = d->write_fn(d->buf, d->buf_len, d->write_ctx);
+        kl_ssize_t n = d->write_fn(d->buf, d->buf_len, d->write_ctx);
         if (n < 0) {
             d->error = 1;
             return -1;

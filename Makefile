@@ -924,7 +924,48 @@ bench-compare:
 smoke: examples
 	sh tests/e2e_examples.sh
 
-.PHONY: check-sockaddr-neutral
+# ── Freestanding public-header gate (step A3) ──────────────────────────────
+# Proves the client/protocol subset of the public headers compiles with NO
+# hosted libc — -ffreestanding, full -Werror — and that none of them pull a
+# POSIX socket/system header. The in-gate vs out-of-gate header list (and why
+# response.h / file_io.h / resolver.h / udp*.h stay out) is documented at the
+# top of tests/freestanding_headers.c.
+#
+# The dep proof matches the FORBIDDEN header paths *exactly at a leaf boundary*
+# (e.g. .../sys/socket.h, .../strings.h) so it flags only headers our code
+# actually includes — never the C-standard-header machinery a libc's <stddef.h>/
+# <stdint.h> legitimately uses (macOS pulls sys/_types/_size_t.h; glibc pulls
+# bits/*). That keeps the gate portable across libc implementations.
+FREESTANDING_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
+                      -ffreestanding -DKEEL_FREESTANDING -Iinclude -Ivendor/llhttp
+# POSIX/system headers that MUST NOT appear as a dependency leaf.
+FREESTANDING_FORBIDDEN = sys/socket.h sys/types.h sys/uio.h sys/un.h strings.h \
+                         netinet/in.h netinet/ip.h netinet/tcp.h arpa/inet.h \
+                         netdb.h poll.h sys/poll.h unistd.h sys/epoll.h \
+                         sys/event.h winsock2.h ws2tcpip.h
+
+freestanding-headers:
+	@echo "== compile: freestanding public-header subset (-ffreestanding -Werror) =="
+	$(CC) $(FREESTANDING_CFLAGS) -c tests/freestanding_headers.c -o /tmp/keel_freestanding.o
+	@rm -f /tmp/keel_freestanding.o
+	@echo "== dep proof: no POSIX/system header may be pulled =="
+	@$(CC) -ffreestanding -DKEEL_FREESTANDING -Iinclude -Ivendor/llhttp -M \
+	    tests/freestanding_headers.c 2>/dev/null \
+	  | tr ' \\' '\n\n' | sed '/^$$/d' > /tmp/keel_freestanding.deps
+	@bad=0; \
+	for h in $(FREESTANDING_FORBIDDEN); do \
+	  if grep -E "(^|/)$$h$$" /tmp/keel_freestanding.deps >/dev/null 2>&1; then \
+	    echo "  FREESTANDING LEAK: a gate header pulls <$$h>"; \
+	    grep -E "(^|/)$$h$$" /tmp/keel_freestanding.deps; bad=1; \
+	  fi; \
+	done; \
+	if [ $$bad -ne 0 ]; then echo "freestanding-headers: FAILED"; rm -f /tmp/keel_freestanding.deps; exit 1; fi; \
+	echo "  zero POSIX headers pulled — gate deps (keel + C-standard only):"; \
+	grep -E 'include/keel/' /tmp/keel_freestanding.deps | sed 's/^/    /'; \
+	rm -f /tmp/keel_freestanding.deps; \
+	echo "freestanding-headers: OK"
+
+.PHONY: check-sockaddr-neutral freestanding-headers
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

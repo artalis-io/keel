@@ -51,7 +51,7 @@ typedef struct {
     void *cb_user_data;
 } MockH2Session;
 
-static ssize_t mock_recv(KlH2ServerSession *self, const void *data, size_t len) {
+static kl_ssize_t mock_recv(KlH2ServerSession *self, const void *data, size_t len) {
     MockH2Session *m = (MockH2Session *)self;
     m->recv_count++;
     (void)data;

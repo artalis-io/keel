@@ -33,9 +33,9 @@ typedef struct {
 
 static KlTlsResult pt_handshake(KlTls *self, KlSocketHandle fd)
     { (void)self; (void)fd; return KL_TLS_OK; }
-static ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len)
+static kl_ssize_t pt_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len)
     { (void)self; return read(fd, buf, len); }
-static ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len)
+static kl_ssize_t pt_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len)
     { (void)self; return write(fd, buf, len); }
 static KlTlsResult pt_shutdown(KlTls *self, KlSocketHandle fd)
     { (void)self; (void)fd; return KL_TLS_OK; }

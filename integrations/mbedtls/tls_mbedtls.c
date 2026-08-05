@@ -187,7 +187,7 @@ static KlTlsResult tls_handshake(KlTls *self, KlSocketHandle fd)
     return KL_TLS_ERROR;
 }
 
-static ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len)
+static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     t->fd = fd;
@@ -204,7 +204,7 @@ static ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len)
     return -1;  /* error */
 }
 
-static ssize_t tls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len)
+static kl_ssize_t tls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     t->fd = fd;
@@ -262,7 +262,7 @@ static int tls_feed_input(KlTls *self, const void *cipher, size_t len)
 }
 
 /* Completion mode: drain the engine's pending outgoing ciphertext. */
-static ssize_t tls_drain_output(KlTls *self, void *buf, size_t cap)
+static kl_ssize_t tls_drain_output(KlTls *self, void *buf, size_t cap)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     size_t avail = t->out_len;

@@ -114,7 +114,7 @@ typedef int (*KlClientHeadersFn)(int status, const KlClientHeader *headers,
  * @param user_data  User context from KlClientStreamCfg.
  * @return >0 bytes produced, 0 = EOF, -1 = error.
  */
-typedef ssize_t (*KlClientReadFn)(char *buf, size_t buf_len, void *user_data);
+typedef kl_ssize_t (*KlClientReadFn)(char *buf, size_t buf_len, void *user_data);
 
 /**
  * @brief Per-request streaming configuration.

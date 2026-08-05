@@ -31,18 +31,13 @@
 #include <stddef.h>            /* size_t */
 #include <stdint.h>            /* intptr_t, uint64_t */
 
-#include <keel/handle.h>       /* KlSocketHandle, KL_INVALID_SOCKET, kl_handle_valid */
-#include <keel/sockaddr.h>     /* KlSockAddr (connect/bind/get_local_addr currency) */
-#include <keel/net.h>          /* struct sockaddr / socklen_t (accept peer, for now) */
+#include <keel/handle.h>       /* KlSocketHandle, KL_INVALID_SOCKET, kl_handle_valid, kl_ssize_t */
+#include <keel/sockaddr.h>     /* KlSockAddr (connect/bind/accept/get_local_addr currency) */
 #include <keel/error.h>        /* KlError */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* Pointer-width signed size — the return type for the byte-count I/O ops (the
- * portable stand-in for POSIX ssize_t, which is not exposed publicly). */
-typedef intptr_t kl_ssize_t;
 
 /* Keel-owned scatter-gather vector — the seam's I/O-vector currency. A provider
  * translates it to its native vector (POSIX struct iovec / Winsock WSABUF) inside

@@ -2,10 +2,9 @@
 #define KEEL_TLS_H
 
 #include <keel/allocator.h>
-#include <keel/handle.h>
+#include <keel/handle.h>   /* KlSocketHandle, kl_ssize_t */
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>
 
 /**
  * @brief Result codes for non-blocking TLS operations.
@@ -70,13 +69,13 @@ struct KlTls {
      * @brief Decrypt: read up to len bytes of plaintext into buf.
      * @return Bytes read (>0), 0 for WANT_READ, -1 for error.
      */
-    ssize_t (*read)(KlTls *self, KlSocketHandle fd, void *buf, size_t len);
+    kl_ssize_t (*read)(KlTls *self, KlSocketHandle fd, void *buf, size_t len);
 
     /**
      * @brief Encrypt: write up to len bytes of plaintext from buf.
      * @return Bytes written (>0), 0 for WANT_WRITE, -1 for error.
      */
-    ssize_t (*write)(KlTls *self, KlSocketHandle fd, const void *buf, size_t len);
+    kl_ssize_t (*write)(KlTls *self, KlSocketHandle fd, const void *buf, size_t len);
 
     /**
      * @brief Initiate TLS shutdown (close_notify).
@@ -150,7 +149,7 @@ struct KlTls {
      * into `buf` (what handshake()/write() produced). Returns bytes written (>= 0),
      * or -1 on error. Optional — see feed_input.
      */
-    ssize_t (*drain_output)(KlTls *self, void *buf, size_t cap);
+    kl_ssize_t (*drain_output)(KlTls *self, void *buf, size_t cap);
 
     /**
      * @brief Route the transport's socket I/O through a KlSocketProvider (optional).

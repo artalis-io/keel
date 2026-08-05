@@ -597,7 +597,7 @@ int kl_response_send(KlResponse *res) {
 
 /* ── Drain writer — wraps raw write/TLS for KlDrainWriteFn ───────── */
 
-static ssize_t response_drain_writer(const char *data, size_t len, void *ctx) {
+static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx) {
     KlResponse *res = ctx;
     ssize_t nw;
     if (res->tls) {

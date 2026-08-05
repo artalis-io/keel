@@ -134,7 +134,7 @@ typedef struct {
     size_t              pending_len;
 } EchoH2;
 
-static ssize_t echo_recv(KlH2ServerSession *self, const void *data, size_t len) {
+static kl_ssize_t echo_recv(KlH2ServerSession *self, const void *data, size_t len) {
     EchoH2 *e = (EchoH2 *)self;
     if (len > 0) {
         size_t n = len < sizeof(e->pending) ? len : sizeof(e->pending);

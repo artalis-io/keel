@@ -150,7 +150,7 @@ static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
      * node is still linked before touching it — we compare pointer identity
      * against the live list and NEVER dereference a possibly-freed node. */
     int w_live = 0;
-    for (KlWatcher *it = ctx->watchers; it; it = it->next)
+    for (const KlWatcher *it = ctx->watchers; it; it = it->next)
         if (it == w) { w_live = 1; break; }
     if (!w_live)
         return 1;  /* watcher retired earlier in this batch — stale event, consumed */

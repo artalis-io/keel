@@ -96,7 +96,7 @@ static int srv_on_stream_end(void *ud, uint32_t sid) {
 static void srv_on_stream_reset(void *ud, uint32_t sid, uint32_t ec) {
     (void)ud; (void)sid; (void)ec;
 }
-static ssize_t srv_send(void *ud, const void *data, size_t len) {
+static kl_ssize_t srv_send(void *ud, const void *data, size_t len) {
     Ctx *c = ud;
     if (c->s2c_len + len > BUF_CAP) return -1;
     memcpy(c->s2c + c->s2c_len, data, len);

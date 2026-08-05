@@ -31,7 +31,7 @@ static KlTlsResult mock_handshake(KlTls *self, KlSocketHandle fd) {
     }
 }
 
-static ssize_t mock_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
+static kl_ssize_t mock_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
     (void)fd;
     MockTls *m = (MockTls *)self;
     if (m->read_len == 0) return 0;  /* WANT_READ */
@@ -44,7 +44,7 @@ static ssize_t mock_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) 
     return (ssize_t)to_copy;
 }
 
-static ssize_t mock_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
+static kl_ssize_t mock_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
     (void)fd;
     MockTls *m = (MockTls *)self;
     size_t space = sizeof(m->write_buf) - m->write_len;

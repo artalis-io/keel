@@ -52,7 +52,7 @@ typedef struct {
 } FrameConn;
 
 /* Drain writer: send() over the provider; 0 = would-block (drain buffers). */
-static ssize_t fc_write(const char *data, size_t len, void *ctx) {
+static kl_ssize_t fc_write(const char *data, size_t len, void *ctx) {
     FrameConn *fc = ctx;
     kl_ssize_t n = fc->sp->ops->send(fc->sp->context, fc->fd, data, len);
     if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;

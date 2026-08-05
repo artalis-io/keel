@@ -225,7 +225,7 @@ static ssize_t ng_resp_body_read_cb(nghttp2_session *ng, int32_t stream_id,
 
 /* ── KEEL vtable ────────────────────────────────────────────────────── */
 
-static ssize_t ng_server_recv(KlH2ServerSession *self, const void *data, size_t len) {
+static kl_ssize_t ng_server_recv(KlH2ServerSession *self, const void *data, size_t len) {
     NgServerSession *s = (NgServerSession *)self;
     /* Guard against re-entrant send: KEEL's h2.c submits a response + flushes
      * from within on_stream_end, which nghttp2 invokes inside mem_recv. Calling

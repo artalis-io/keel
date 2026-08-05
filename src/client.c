@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp (no longer pulled transitively via request.h) */
 #include <unistd.h>
 #include <stddef.h>
 #include <sys/types.h>
