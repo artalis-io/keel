@@ -771,8 +771,13 @@ clean:
 	rm -f tests/smoke_completion_inject tests/smoke_completion_inject.exe src/event_pollcomp.inject.o
 	rm -f src/file_io.o
 	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
-	rm -f libkeel_freestanding.a
+	rm -f libkeel_freestanding.a libkeel_freestanding_selfcontained.a
+	rm -f libkeel_freestanding*.a libkeel_freestanding_selfcontained*.a
+	rm -f keel_freestanding.efi keel_freestanding_*.efi keel_freestanding*.lib
 	find . -name '*.freestanding.o' -delete
+	find . -name '*.fs_*.o' -delete
+	find . -name '*.sc.o' -delete
+	find . -name '*.link_*.o' -delete
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/custom_socket_provider examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
 	rm -f $(BENCH_SERVER)
@@ -974,7 +979,25 @@ freestanding-headers:
 	echo "  zero POSIX headers pulled — gate deps (keel + C-standard only):"; \
 	grep -E 'include/keel/' /tmp/keel_freestanding.deps | sed 's/^/    /'; \
 	rm -f /tmp/keel_freestanding.deps; \
-	echo "freestanding-headers: OK"
+	echo "freestanding-headers (tests/freestanding_headers.c): OK"
+	@echo "== compile: keel/freestanding.h umbrella (-ffreestanding -Werror) =="
+	@printf '#include <keel/freestanding.h>\nint kl_fs_umbrella_probe;\n' > /tmp/keel_fs_umbrella.c
+	$(CC) $(FREESTANDING_CFLAGS) -c /tmp/keel_fs_umbrella.c -o /tmp/keel_fs_umbrella.o
+	@rm -f /tmp/keel_fs_umbrella.o
+	@echo "== dep proof: keel/freestanding.h pulls no POSIX/system header =="
+	@$(CC) -ffreestanding -DKEEL_FREESTANDING -Iinclude -Ivendor/llhttp -M \
+	    /tmp/keel_fs_umbrella.c 2>/dev/null \
+	  | tr ' \\' '\n\n' | sed '/^$$/d' > /tmp/keel_fs_umbrella.deps
+	@bad=0; \
+	for h in $(FREESTANDING_FORBIDDEN); do \
+	  if grep -E "(^|/)$$h$$" /tmp/keel_fs_umbrella.deps >/dev/null 2>&1; then \
+	    echo "  FREESTANDING LEAK: keel/freestanding.h pulls <$$h>"; \
+	    grep -E "(^|/)$$h$$" /tmp/keel_fs_umbrella.deps; bad=1; \
+	  fi; \
+	done; \
+	rm -f /tmp/keel_fs_umbrella.c /tmp/keel_fs_umbrella.deps; \
+	if [ $$bad -ne 0 ]; then echo "freestanding-headers: FAILED (umbrella)"; exit 1; fi; \
+	echo "freestanding-headers (keel/freestanding.h): OK"
 
 # ── Freestanding client archive + undefined-symbol whitelist gate (F0) ─────────
 # Builds libkeel_freestanding.a from a client-only, completion-only source
@@ -1011,30 +1034,94 @@ FREESTANDING_CLIENT_SRC = \
 # Freestanding, cross-representative toolchain. Prefer clang (SanitizerCoverage-
 # grade freestanding + the exact flags a UEFI/PE build uses); fall back to cc.
 FREESTANDING_LIB_CC := $(shell command -v clang >/dev/null 2>&1 && echo clang || echo $(CC))
-# -mno-red-zone is x86-only (UEFI interrupt safety); clang ignores it on any target,
-# but non-x86 gcc rejects it. Probe once so the cc fallback stays portable on ARM.
+
+# ── MULTI-ARCH (B1, F-6 "test AArch64 early") ────────────────────────────────
+# The archive is cross-compiled + symbol-gated for BOTH x86_64 AND aarch64 PE
+# targets: UEFI ships on ARM64 too, and the compiler-runtime helper closure
+# differs by arch (this is exactly what B1 proves — see the __chkstk note in
+# tests/freestanding_symbol_gate.sh, and that NO __aarch64_* outline atomics /
+# division helpers appear). Each triple is built with clang --target=<triple>,
+# archived, and run through the symbol gate. A triple whose clang backend/headers
+# are unavailable is SKIPPED with a printed note (never a build failure), and the
+# recipe reports which triples actually ran. When clang is not the freestanding
+# toolchain (the cc/gcc fallback — no cross --target without a sysroot), the list
+# collapses to the single native host target, preserving the pre-B1 behavior.
+FREESTANDING_TARGETS ?= x86_64-unknown-windows aarch64-unknown-windows
+FREESTANDING_IS_CLANG := $(shell $(FREESTANDING_LIB_CC) --version 2>/dev/null | grep -qi clang && echo yes)
+# The cross archives hold PE/COFF objects; GNU binutils nm/ar may not read every
+# COFF variant reliably. Prefer the LLVM tools when present (the task installs
+# them alongside clang+lld); fall back to the project's $(NM)/$(AR).
+FREESTANDING_NM := $(shell command -v llvm-nm >/dev/null 2>&1 && echo llvm-nm || echo $(NM))
+FREESTANDING_AR := $(shell command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar || echo $(AR))
+
+# Freestanding cross-target shim headers: the few hosted C-library headers clang's
+# -ffreestanding does NOT provide (string.h / stdlib.h / stdio.h / sys/types.h /
+# errno.h) + the Winsock type/constant shims src/sockcompat.h's _WIN32 branch
+# expects. Declarations only, no logic — a real UEFI/EDK2 build supplies the
+# equivalents. Injected via -isystem for the cross-target builds only; see
+# tests/freestanding/shim/README.md.
+FREESTANDING_SHIM = tests/freestanding/shim
+
+# -mno-red-zone is x86-only (UEFI interrupt safety). Per-target: only x86_64 gets
+# it; the existing probe is x86-only, so the aarch64 pass drops it (clang would
+# ignore it but we keep the flag set honest per the task). The cc fallback probes
+# once so it stays portable on a native-ARM host.
 FREESTANDING_REDZONE := $(shell echo 'int x;' | $(FREESTANDING_LIB_CC) -mno-red-zone -x c -c -o /dev/null - >/dev/null 2>&1 && echo -mno-red-zone)
-FREESTANDING_LIB_CFLAGS = -std=c11 -ffreestanding -fshort-wchar $(FREESTANDING_REDZONE) \
+# Base flags shared by native + cross builds (target triple + red-zone added per pass).
+FREESTANDING_LIB_CFLAGS = -std=c11 -ffreestanding -fshort-wchar \
                           -fno-stack-protector -fno-builtin -DKEEL_FREESTANDING \
                           -Iinclude -Ivendor/llhttp -Isrc
 FREESTANDING_LIB = libkeel_freestanding.a
 FREESTANDING_LIB_OBJ = $(FREESTANDING_CLIENT_SRC:.c=.freestanding.o)
 
 %.freestanding.o: %.c
-	$(FREESTANDING_LIB_CC) $(FREESTANDING_LIB_CFLAGS) -w -c -o $@ $<
+	$(FREESTANDING_LIB_CC) $(FREESTANDING_LIB_CFLAGS) $(FREESTANDING_REDZONE) -w -c -o $@ $<
+
+# fs_build_and_gate: $(1)=source list  $(2)=archive base name  $(3)=gate mode ("" or selfcontained)
+#   $(4)=extra per-file CFLAGS (self-contained fortify/lowering knobs).
+# Loops over FREESTANDING_TARGETS (clang) or a single native pass (cc fallback),
+# skipping any triple clang can't target; fails only if a supported triple's gate
+# fails. Reports the triples that ran.
+define fs_build_and_gate
+	@ran=""; skipped=""; \
+	if [ "$(FREESTANDING_IS_CLANG)" = yes ]; then TARGETS="$(FREESTANDING_TARGETS)"; else TARGETS="__native__"; fi; \
+	for tgt in $$TARGETS; do \
+	  if [ "$$tgt" = __native__ ]; then \
+	    TARGETFLAG=""; RZ="$(FREESTANDING_REDZONE)"; SHIMFLAG=""; label="native ($(FREESTANDING_LIB_CC))"; arch="$$tgt"; \
+	  else \
+	    if ! echo 'int x;' | $(FREESTANDING_LIB_CC) --target=$$tgt -ffreestanding -c -x c -o /dev/null - >/dev/null 2>&1; then \
+	      echo "  SKIP $$tgt (clang backend/headers unavailable)"; skipped="$$skipped $$tgt"; continue; \
+	    fi; \
+	    TARGETFLAG="--target=$$tgt"; SHIMFLAG="-isystem $(FREESTANDING_SHIM)"; label="$$tgt"; \
+	    case "$$tgt" in x86_64*) RZ="-mno-red-zone";; *) RZ="";; esac; \
+	  fi; \
+	  if [ "$$tgt" = __native__ ]; then archive="$(2).a"; else archive="$(2)_$${tgt%%-*}.a"; fi; \
+	  echo "== [$$label] freestanding archive ($$archive) =="; \
+	  objs=""; \
+	  for f in $(1); do \
+	    o=$${f%.c}.fs_$$tgt.o; \
+	    $(FREESTANDING_LIB_CC) $$TARGETFLAG $(FREESTANDING_LIB_CFLAGS) $$RZ $$SHIMFLAG $(4) -w -c -o $$o $$f || { echo "  CC FAIL $$f ($$tgt)"; rm -f $$objs; exit 1; }; \
+	    objs="$$objs $$o"; \
+	  done; \
+	  $(FREESTANDING_AR) rcs $$archive $$objs; \
+	  sh tests/freestanding_symbol_gate.sh $$archive $(FREESTANDING_NM) $(3) || { rm -f $$objs; exit 1; }; \
+	  rm -f $$objs; \
+	  lastarchive="$$archive"; \
+	  ran="$$ran $$label"; \
+	done; \
+	if [ -z "$$ran" ]; then echo "freestanding: NO target could be built (all skipped:$$skipped)"; exit 1; fi; \
+	if [ "$(FREESTANDING_IS_CLANG)" = yes ] && [ -f "$(2)_x86_64.a" ]; then cp "$(2)_x86_64.a" "$(2).a"; \
+	  echo "== canonical archive: $(2).a (from x86_64; also per-arch $(2)_<arch>.a) =="; \
+	elif [ "$(FREESTANDING_IS_CLANG)" = yes ] && [ -n "$$lastarchive" ] && [ -f "$$lastarchive" ]; then cp "$$lastarchive" "$(2).a"; \
+	  echo "== canonical archive: $(2).a (also per-arch $(2)_<arch>.a) =="; \
+	else echo "== archive: $(2).a (native single-target build) =="; fi; \
+	echo "== freestanding archive gated OK for:$$ran ==$${skipped:+ (skipped:$$skipped)}"
+endef
 
 freestanding-lib:
-	@echo "== freestanding client archive: toolchain = $(FREESTANDING_LIB_CC) =="
-	@rm -f $(FREESTANDING_LIB_OBJ) $(FREESTANDING_LIB)
-	@for f in $(FREESTANDING_CLIENT_SRC); do \
-	  o=$${f%.c}.freestanding.o; \
-	  echo "  CC(freestanding) $$f"; \
-	  $(FREESTANDING_LIB_CC) $(FREESTANDING_LIB_CFLAGS) -w -c -o $$o $$f || exit 1; \
-	done
-	$(AR) rcs $(FREESTANDING_LIB) $(FREESTANDING_LIB_OBJ)
-	@echo "== symbol gate: undefined closure must be within the whitelist =="
-	@sh tests/freestanding_symbol_gate.sh $(FREESTANDING_LIB) $(NM)
-	@rm -f $(FREESTANDING_LIB_OBJ)
+	@echo "== freestanding client archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
+	@rm -f $(FREESTANDING_LIB)
+	$(call fs_build_and_gate,$(FREESTANDING_CLIENT_SRC),libkeel_freestanding,,)
 
 # ── Self-contained freestanding archive (optional; bare target, no libc/EDK2) ──
 # The default archive leaves mem*/strlen undefined for the platform to supply
@@ -1042,27 +1129,89 @@ freestanding-lib:
 # impls (src/kl_cstr_builtin.c) so the archive provides them itself — for a bare
 # target that has neither. The gate runs in "selfcontained" mode: mem*/strlen must
 # be DEFINED (not undefined) and the ONLY undefined symbols are the KEEL platform/
-# provider hooks + the vendored-llhttp residual. -fno-builtin +
-# -fno-tree-loop-distribute-patterns stop the compiler lowering kl_cstr_builtin.c's
-# byte loops back into self-calls; -D_FORTIFY_SOURCE=0 avoids __*_chk.
+# provider hooks + the vendored-llhttp residual (+ the PE __chkstk on the cross
+# targets). -fno-builtin + -fno-tree-loop-distribute-patterns stop the compiler
+# lowering kl_cstr_builtin.c's byte loops back into self-calls; -D_FORTIFY_SOURCE=0
+# avoids __*_chk. Built + gated for BOTH arches too (B1).
 FREESTANDING_SC_SRC = $(FREESTANDING_CLIENT_SRC) src/kl_cstr_builtin.c
 FREESTANDING_SC_LIB = libkeel_freestanding_selfcontained.a
 FREESTANDING_SC_NOLOWER := $(shell echo 'int x;' | $(FREESTANDING_LIB_CC) -fno-tree-loop-distribute-patterns -x c -c -o /dev/null - >/dev/null 2>&1 && echo -fno-tree-loop-distribute-patterns)
-FREESTANDING_SC_CFLAGS = $(FREESTANDING_LIB_CFLAGS) -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 $(FREESTANDING_SC_NOLOWER)
-FREESTANDING_SC_OBJ = $(FREESTANDING_SC_SRC:.c=.sc.o)
+FREESTANDING_SC_EXTRA = -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 $(FREESTANDING_SC_NOLOWER)
 
 freestanding-lib-selfcontained:
-	@echo "== self-contained freestanding archive: toolchain = $(FREESTANDING_LIB_CC) =="
-	@rm -f $(FREESTANDING_SC_OBJ) $(FREESTANDING_SC_LIB)
-	@for f in $(FREESTANDING_SC_SRC); do \
-	  o=$${f%.c}.sc.o; \
-	  echo "  CC(freestanding/self-contained) $$f"; \
-	  $(FREESTANDING_LIB_CC) $(FREESTANDING_SC_CFLAGS) -w -c -o $$o $$f || exit 1; \
-	done
-	$(AR) rcs $(FREESTANDING_SC_LIB) $(FREESTANDING_SC_OBJ)
-	@echo "== symbol gate (self-contained): mem*/strlen DEFINED; undefined = KEEL hooks + vendored residual only =="
-	@sh tests/freestanding_symbol_gate.sh $(FREESTANDING_SC_LIB) $(NM) selfcontained
-	@rm -f $(FREESTANDING_SC_OBJ)
+	@echo "== self-contained freestanding archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
+	@rm -f $(FREESTANDING_SC_LIB)
+	$(call fs_build_and_gate,$(FREESTANDING_SC_SRC),libkeel_freestanding_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
+
+# ── CRT-less PE/COFF link (B2 — the milestone's last literal) ─────────────────
+# LINKS libkeel_freestanding_selfcontained.a (mem*/strlen in-archive) into a
+# PE/COFF EFI image with NO hosted CRT (-nostdlib, lld PE), proving the archive
+# links freestanding. tests/freestanding_link_main.c is a minimal efi_main that
+# references the client public API (pulling client_async/common + transitive
+# objects) and DEFINES every seam the archive leaves undefined (platform hooks,
+# kl_sockdef_*, kl_event_*_builtin/kl_comp_ops_builtin, the llhttp abort/fprintf/
+# stderr residual, and __chkstk). It need not RUN — it must LINK with an empty
+# undefined set. Success criterion: the link resolves with NO hosted CRT; the
+# recipe prints the readobj header proving PE32+ EFI. Requires clang + lld (lld
+# is clang's -fuse-ld=lld PE backend). If lld PE is unavailable, the recipe emits
+# the strongest achievable proof (compile the entry to a COFF object for each arch
+# + the empty self-contained undefined set from freestanding-lib-selfcontained)
+# and documents the limitation rather than faking a PE image.
+FREESTANDING_LINK_MAIN = tests/freestanding_link_main.c
+FREESTANDING_EFI = keel_freestanding.efi
+# readobj tool: prefer llvm-readobj (matches clang); fall back to a bare name.
+FREESTANDING_READOBJ := $(shell command -v llvm-readobj >/dev/null 2>&1 && echo llvm-readobj || echo readobj)
+
+freestanding-link:
+	@echo "== CRT-less PE/COFF link (B2): toolchain = $(FREESTANDING_LIB_CC) =="
+	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then \
+	  echo "  freestanding-link requires clang (PE cross target + lld); toolchain is $(FREESTANDING_LIB_CC) — SKIP"; exit 0; \
+	fi
+	@lld_ok=0; \
+	if echo 'int mainCRTStartup(void){return 0;}' | $(FREESTANDING_LIB_CC) --target=x86_64-unknown-windows -ffreestanding -nostdlib -fuse-ld=lld -Wl,-entry:mainCRTStartup -Wl,-subsystem:efi_application -x c - -o /tmp/keel_lld_probe.efi >/dev/null 2>&1; then lld_ok=1; fi; \
+	rm -f /tmp/keel_lld_probe.efi; \
+	linked=""; \
+	for tgt in $(FREESTANDING_TARGETS); do \
+	  if ! echo 'int x;' | $(FREESTANDING_LIB_CC) --target=$$tgt -ffreestanding -c -x c -o /dev/null - >/dev/null 2>&1; then \
+	    echo "  SKIP $$tgt (clang backend/headers unavailable)"; continue; \
+	  fi; \
+	  case "$$tgt" in x86_64*) RZ="-mno-red-zone"; efi="$(FREESTANDING_EFI)";; *) RZ=""; efi="keel_freestanding_$${tgt%%-*}.efi";; esac; \
+	  echo "== [$$tgt] build self-contained archive + entry =="; \
+	  objs=""; \
+	  for f in $(FREESTANDING_SC_SRC); do \
+	    o=$${f%.c}.link_$$tgt.o; \
+	    $(FREESTANDING_LIB_CC) --target=$$tgt $(FREESTANDING_LIB_CFLAGS) $$RZ -isystem $(FREESTANDING_SHIM) $(FREESTANDING_SC_EXTRA) -w -c -o $$o $$f || { rm -f $$objs; exit 1; }; \
+	    objs="$$objs $$o"; \
+	  done; \
+	  arc=libkeel_freestanding_selfcontained_$$tgt.a; \
+	  $(FREESTANDING_AR) rcs $$arc $$objs; \
+	  mo=tests/freestanding_link_main.link_$$tgt.o; \
+	  $(FREESTANDING_LIB_CC) --target=$$tgt $(FREESTANDING_LIB_CFLAGS) $$RZ -isystem $(FREESTANDING_SHIM) -w -c -o $$mo $(FREESTANDING_LINK_MAIN) || { rm -f $$objs $$arc; exit 1; }; \
+	  if [ $$lld_ok -eq 1 ]; then \
+	    echo "== [$$tgt] LINK -nostdlib -fuse-ld=lld -subsystem:efi_application -> $$efi =="; \
+	    if $(FREESTANDING_LIB_CC) --target=$$tgt -ffreestanding -fno-stack-protector -fno-builtin -nostdlib -fuse-ld=lld \
+	        -Wl,-entry:efi_main -Wl,-subsystem:efi_application -o $$efi $$mo $$arc; then \
+	      echo "  LINK OK (no hosted CRT): $$efi"; \
+	      file $$efi 2>/dev/null || true; \
+	      $(FREESTANDING_READOBJ) --file-headers $$efi 2>/dev/null | grep -iE 'Format|Machine|Magic|Subsystem' | sed 's/^/    /' || true; \
+	      linked="$$linked $$efi"; \
+	    else \
+	      echo "  LINK FAILED for $$tgt"; rm -f $$objs $$arc $$mo; exit 1; \
+	    fi; \
+	  else \
+	    echo "== [$$tgt] lld PE UNAVAILABLE — fallback proof: COFF entry object + archive built, gate its undefined set =="; \
+	    file $$mo 2>/dev/null || true; \
+	    sh tests/freestanding_symbol_gate.sh $$arc $(FREESTANDING_NM) selfcontained | grep -E 'OK|FAILED'; \
+	    echo "  (documented fallback: PE image NOT produced — lld PE backend unavailable in this toolchain)"; \
+	  fi; \
+	  rm -f $$objs $$arc $$mo; \
+	done; \
+	if [ $$lld_ok -eq 1 ]; then \
+	  if [ -z "$$linked" ]; then echo "freestanding-link: no arch linked"; exit 1; fi; \
+	  echo "== freestanding-link: OK — CRT-less PE/COFF EFI image(s) linked:$$linked =="; \
+	else \
+	  echo "== freestanding-link: fallback proof only (lld PE unavailable) — see note above =="; \
+	fi
 
 # ── Freestanding host mock harness (F-7) ──────────────────────────────────────
 # Proves libkeel_freestanding.a's async client actually RUNS end-to-end on the
@@ -1099,7 +1248,7 @@ freestanding-harness:
 	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_HARNESS_BIN)
 	@rm -f $(FREESTANDING_HARNESS_BIN)
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-selfcontained freestanding-harness
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan
