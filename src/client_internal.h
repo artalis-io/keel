@@ -1,0 +1,204 @@
+/*
+ * client_internal.h — shared internals for the split HTTP/1.1 client TUs
+ *
+ * src/client.c was split (freestanding step B2b) into three translation units
+ * so a freestanding *async* client links without dragging in the blocking /
+ * hosted sync path (poll()/read()/write()/blocking DNS):
+ *
+ *   - client_common.c — shared by sync + async: CRLF guard, plain/TLS I/O
+ *     abstraction, heap request formatting, header helpers, response
+ *     decompression, response free.
+ *   - client_sync.c   — the blocking hosted API only (connect_with_timeout,
+ *     recv_response_sync, kl_client_request[_s], kl_client_request_pooled).
+ *   - client_async.c  — the event-driven client (Happy Eyeballs, the state
+ *     machine, completion connect, kl_client_start[_s], kl_client_start_pooled).
+ *
+ * This header is src/-internal (never installed). It carries only the surface
+ * that now crosses a TU boundary: the KlClient struct, the streaming
+ * decompression wrapper, and declarations for the former-static helpers shared
+ * across the split. Keep it minimal.
+ */
+#ifndef KEEL_CLIENT_INTERNAL_H
+#define KEEL_CLIENT_INTERNAL_H
+
+#include <keel/client.h>
+#include <keel/client_pool.h>
+#include <keel/decompress.h>
+#include <keel/parser.h>
+#include <keel/resolver.h>
+#include <keel/tls.h>
+#include <keel/url.h>
+
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+#include "socket.h"   /* KlSocketProvider / KlSocketHandle / KlSockAddr */
+
+/* ── Proxy constants ─────────────────────────────────────────────── */
+
+#define KL_PROXY_RESPONSE_MAX 4096
+
+/* ── Streaming decompression wrapper (shared: sync + async) ──────────
+ * Wraps the user's streaming callbacks so a matching Content-Encoding is
+ * transparently inflated before reaching the user. Embedded by value in the
+ * sync path and heap-allocated on the async path. */
+typedef struct {
+    /* User's original callbacks */
+    KlClientBodyFn     user_on_body;
+    KlClientHeadersFn  user_on_headers;
+    void             (*user_on_complete)(void *user_data);
+    void              *user_data;
+
+    /* Decompression state */
+    KlDecompressStream  ds;
+    int                 active;  /* 1 if decompression is active */
+    KlDecompressConfig *dcfg;
+} DecompStreamWrap;
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Async client state machine (client_async.c) — struct exposed here so the
+ * async-only helper build_connect_request (which mutates a KlClient) and the
+ * async TU share one definition.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+typedef enum {
+    KL_HCLIENT_RESOLVING,
+    KL_HCLIENT_CONNECTING,
+    KL_HCLIENT_PROXY_CONNECTING,   /* sending CONNECT request */
+    KL_HCLIENT_PROXY_HANDSHAKE,    /* reading proxy 200 response */
+    KL_HCLIENT_TLS_HANDSHAKE,
+    KL_HCLIENT_SENDING,
+    KL_HCLIENT_SENDING_STREAM,  /* chunked body from body_read callback */
+    KL_HCLIENT_RECEIVING,
+    KL_HCLIENT_DONE
+} KlClientState;
+
+/* One in-flight racing connect socket (Happy Eyeballs). */
+typedef struct { KlSocketHandle fd; int active; } KlConnAttempt;
+
+struct KlClient {
+    KlSocketHandle     fd;
+    KlClientState      state;
+    KlEventCtx        *ev_ctx;
+    KlAllocator       *alloc;
+
+    /* Request (heap-copied, owned) */
+    char              *request_buf;
+    size_t             request_len;
+    size_t             request_sent;
+
+    /* Response */
+    KlClientResponse   resp;
+    KlResponseParser  *parser;
+    KlError            error;
+
+    /* TLS (NULL if plain HTTP) */
+    KlTls             *tls;
+    KlTlsConfig       *tls_cfg;
+    char               host_buf[KL_CLIENT_HOSTNAME_MAX];
+
+    /* Async DNS resolver (NULL = sync sync name resolution was used) */
+    KlResolver        *resolver;
+    KlResolveReq      *resolve_req;
+    int                owns_resolver;   /* 1 = auto-created, destroy on teardown */
+
+    /* Happy Eyeballs — racing connect over the resolved address list (RFC 8305).
+     * Only active on the async resolver path (conn_racing=1); the UNIX and sync
+     * sync name resolution paths stay single-fd. */
+    KlConnAttempt      conn_attempts[KL_RESOLVE_MAX_ADDRS];
+    KlResolveResult    conn_addrs;      /* full list, copied from the resolver */
+    int                conn_next;       /* index of next address to dial */
+    int                conn_pending;    /* number of in-flight attempts */
+    int                conn_racing;     /* 1 = HE attempts in conn_attempts[] */
+    int64_t            conn_delay_timer;/* Connection Attempt Delay timer (-1) */
+    int64_t            deadline_timer;  /* overall request deadline timer (-1) */
+    int                timeout_ms;      /* overall deadline (0 = none) */
+    int                connect_delay_ms;/* Connection Attempt Delay */
+    KlError            conn_last_err;   /* last connect error, for the all-fail case */
+
+    /* Completion callback */
+    KlClientDoneFn     on_done;
+    void              *user_data;
+
+    /* Request streaming (chunked body send) */
+    KlClientReadFn     body_read;
+    void              *stream_user_data;
+    char               chunk_buf[KL_CLIENT_CHUNK_BUF_SIZE];
+    size_t             chunk_len;    /* bytes in chunk_buf to send */
+    size_t             chunk_sent;   /* bytes of chunk_buf already sent */
+    int                chunk_phase;  /* 0=read, 1=send hdr, 2=send data, 3=send crlf, 4=eof */
+    char               chunk_hdr[KL_CLIENT_CHUNK_HDR_SIZE];
+    size_t             chunk_hdr_len;
+    size_t             chunk_hdr_sent;
+
+    /* Pool integration (NULL = legacy close-on-complete) */
+    KlClientPool      *pool;
+    KlClientPoolConn   pool_conn;
+    int                pool_port;
+    int                pool_is_tls;
+
+    /* Response decompression */
+    KlDecompressConfig *decompress_cfg;
+    DecompStreamWrap   *decomp_wrap;     /* heap-allocated for streaming */
+
+    /* Proxy state */
+    int             is_proxied;     /* connected via proxy */
+    int             is_tunnel;      /* CONNECT tunnel (HTTPS through proxy) */
+    char           *connect_buf;    /* CONNECT request buffer (heap) */
+    size_t          connect_len;
+    size_t          connect_sent;
+    char           *proxy_recv;     /* CONNECT response buffer (heap) */
+    size_t          proxy_recv_len;
+    const char     *proxy_auth;     /* borrowed from config */
+    uint16_t        target_port;    /* original target port for CONNECT */
+};
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Shared helpers (client_common.c) — used by both sync + async TUs.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* CRLF injection guard: 1 if s[0..len) contains CR or LF. */
+int kl_client_has_crlf(const char *s, size_t len);
+
+/* Plain-or-TLS I/O abstraction over the socket provider. */
+ssize_t kl_client_io_write(const KlSocketProvider *p, KlSocketHandle fd,
+                           KlTls *tls, const void *buf, size_t len);
+ssize_t kl_client_io_read(const KlSocketProvider *p, KlSocketHandle fd,
+                          KlTls *tls, void *buf, size_t len);
+
+/* Heap request formatting (buffered + chunked-headers-only forms). */
+char *kl_client_build_request(KlAllocator *alloc,
+                              const char *method, const KlUrl *url,
+                              const KlClientHeader *headers, int num_headers,
+                              const char *body, size_t body_len,
+                              size_t *out_len, int keep_alive,
+                              const char *absolute_url);
+char *kl_client_build_request_headers_only(KlAllocator *alloc,
+                                           const char *method, const KlUrl *url,
+                                           const KlClientHeader *headers,
+                                           int num_headers, size_t *out_len,
+                                           int keep_alive,
+                                           const char *absolute_url);
+
+/* Response header helpers. */
+const char *kl_client_find_header_value(const KlClientResponse *resp,
+                                        const char *name);
+void kl_client_remove_header(KlClientResponse *resp, const char *name);
+
+/* 1 if the response carries "Connection: close". */
+int kl_client_server_wants_close(const KlClientResponse *resp);
+
+/* Post-process a buffered response: inflate the body if Content-Encoding
+ * matches the decompressor. Returns 0 on success / no-op, -1 on error. */
+int kl_client_decompress_response_body(KlClientResponse *resp,
+                                       KlDecompressConfig *dcfg);
+
+/* Streaming decompression wrapper callbacks (installed on the response parser
+ * so a matching Content-Encoding is inflated transparently). */
+int  kl_client_decomp_on_body(const char *data, size_t len, void *user_data);
+int  kl_client_decomp_on_headers(int status, const KlClientHeader *headers,
+                                 int num_headers, void *user_data);
+void kl_client_decomp_on_complete(void *user_data);
+
+#endif /* KEEL_CLIENT_INTERNAL_H */
