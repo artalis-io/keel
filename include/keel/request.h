@@ -2,11 +2,48 @@
 #define KEEL_REQUEST_H
 
 #include <stddef.h>
-#include <string.h>
-#include <strings.h>
 
 /** @brief Maximum number of request headers. */
 #define KL_MAX_HEADERS 64
+
+/*
+ * request.h is a header-only, zero-allocation part of the public API and is in
+ * the freestanding gate (tests/freestanding_headers.c). To stay hosted-libc-free
+ * it uses these tiny inline primitives instead of <string.h>/<strings.h>:
+ * kl_ascii_strncasecmp for the (ASCII, locale-free) header-name match, and
+ * kl_req_strlen/kl_req_memeq for the name-length and byte-compare. Behavior is
+ * identical to strlen/memcmp==0; names stay short and match RFC 7230 tokens.
+ */
+
+/**
+ * @brief ASCII-only, locale-independent case-insensitive compare of the first
+ *        @p n bytes of two buffers. Returns 0 when the two @p n-byte spans are
+ *        equal ignoring ASCII A-Z/a-z case (header-name matching, RFC 7230).
+ */
+static inline int kl_ascii_strncasecmp(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
+        if (ca != cb) return (int)ca - (int)cb;
+    }
+    return 0;
+}
+
+/** @brief Length of a NUL-terminated C string (freestanding strlen). */
+static inline size_t kl_req_strlen(const char *s) {
+    size_t n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+/** @brief 1 iff the first @p n bytes of @p a and @p b are equal (freestanding). */
+static inline int kl_req_memeq(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (a[i] != b[i]) return 0;
+    return 1;
+}
 
 /** @brief Forward declaration — full definition in body_reader.h. */
 typedef struct KlBodyReader KlBodyReader;
@@ -85,10 +122,10 @@ void kl_request_resume_body(const KlRequest *req);
  *  @return Null-terminated value pointer, or NULL if not found. */
 static inline const char *kl_request_header(const KlRequest *req,
                                             const char *name) {
-    size_t nlen = strlen(name);
+    size_t nlen = kl_req_strlen(name);
     for (int i = 0; i < req->num_headers; i++) {
         if (req->headers[i].name_len == nlen &&
-            strncasecmp(req->headers[i].name, name, nlen) == 0) {
+            kl_ascii_strncasecmp(req->headers[i].name, name, nlen) == 0) {
             return req->headers[i].value;
         }
     }
@@ -100,10 +137,10 @@ static inline const char *kl_request_header(const KlRequest *req,
 static inline const char *kl_request_header_len(const KlRequest *req,
                                                 const char *name,
                                                 size_t *out_len) {
-    size_t nlen = strlen(name);
+    size_t nlen = kl_req_strlen(name);
     for (int i = 0; i < req->num_headers; i++) {
         if (req->headers[i].name_len == nlen &&
-            strncasecmp(req->headers[i].name, name, nlen) == 0) {
+            kl_ascii_strncasecmp(req->headers[i].name, name, nlen) == 0) {
             if (out_len) *out_len = req->headers[i].value_len;
             return req->headers[i].value;
         }
@@ -116,10 +153,10 @@ static inline const char *kl_request_header_len(const KlRequest *req,
 static inline const char *kl_request_param(const KlRequest *req,
                                             const char *name,
                                             size_t *out_len) {
-    size_t nlen = strlen(name);
+    size_t nlen = kl_req_strlen(name);
     for (int i = 0; i < req->num_params; i++) {
         if (req->params[i].name_len == nlen &&
-            memcmp(req->params[i].name, name, nlen) == 0) {
+            kl_req_memeq(req->params[i].name, name, nlen)) {
             if (out_len) *out_len = req->params[i].value_len;
             return req->params[i].value;
         }

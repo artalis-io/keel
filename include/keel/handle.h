@@ -27,6 +27,19 @@
  */
 typedef intptr_t KlSocketHandle;
 
+/**
+ * kl_ssize_t — pointer-width signed size, the SINGLE definition for the whole
+ * tree. It is the return type of every byte-count I/O op/callback in the public
+ * API (socket/datagram send/recv, TLS read/write, drain writer, client body
+ * pull, file-I/O result, h2 send/recv). `intptr_t` is exactly as wide as POSIX
+ * `ssize_t` (both pointer-width signed), so this is source- and ABI-compatible
+ * with the old `ssize_t`-based signatures — but it needs no `<sys/types.h>`, so
+ * the public headers stay freestanding (no hosted libc types). Defined here,
+ * next to KlSocketHandle, because handle.h already pulls only <stdint.h> and is
+ * the natural home for the pointer-width integer types the seam speaks.
+ */
+typedef intptr_t kl_ssize_t;
+
 #define KL_INVALID_SOCKET ((KlSocketHandle)-1)
 
 static inline int kl_handle_valid(KlSocketHandle h) {

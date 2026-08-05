@@ -11,7 +11,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>
+#include <keel/handle.h>   /* kl_ssize_t */
 #include <keel/h2.h>
 #include <keel/request.h>
 #include <keel/response.h>
@@ -56,14 +56,14 @@ struct KlH2ServerCallbacks {
      * @ref kl_drain — there's no analogous helper for HTTP/2 yet;
      * the session library is expected to manage its own send queue.)
      */
-    ssize_t (*send)(void *ud, const void *data, size_t len);
+    kl_ssize_t (*send)(void *ud, const void *data, size_t len);
 };
 
 /* ── KlH2ServerSession — user-provided vtable ───────────────────── */
 
 struct KlH2ServerSession {
-    ssize_t (*recv)(KlH2ServerSession *self, const void *data,
-                    size_t len);                   /**< Feed received network data. */
+    kl_ssize_t (*recv)(KlH2ServerSession *self, const void *data,
+                       size_t len);                /**< Feed received network data. */
     int (*submit_response)(KlH2ServerSession *self, uint32_t stream_id,
                            int status, const char **hdr_names,
                            const char **hdr_values, int num_headers,

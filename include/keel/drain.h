@@ -2,8 +2,8 @@
 #define KEEL_DRAIN_H
 
 #include <keel/allocator.h>
+#include <keel/handle.h>   /* kl_ssize_t */
 #include <stddef.h>
-#include <sys/types.h>
 
 /**
  * @brief Write function for KlDrain.
@@ -13,7 +13,7 @@
  * @param ctx  Writer context.
  * @return >0 bytes written, 0 would-block, -1 error.
  */
-typedef ssize_t (*KlDrainWriteFn)(const char *data, size_t len, void *ctx);
+typedef kl_ssize_t (*KlDrainWriteFn)(const char *data, size_t len, void *ctx);
 
 /**
  * @brief Drain callback — fired when buffer transitions non-empty → empty.

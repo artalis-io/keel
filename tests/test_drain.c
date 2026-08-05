@@ -23,7 +23,7 @@ static void mock_init(MockWriter *w) {
     w->switch_after = -1;
 }
 
-static ssize_t mock_write(const char *data, size_t len, void *ctx) {
+static kl_ssize_t mock_write(const char *data, size_t len, void *ctx) {
     MockWriter *w = ctx;
     w->call_count++;
 

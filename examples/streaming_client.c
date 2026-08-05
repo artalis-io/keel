@@ -75,7 +75,7 @@ typedef struct {
     size_t      pos;
 } UploadCtx;
 
-static ssize_t upload_read(char *buf, size_t buf_len, void *user_data)
+static kl_ssize_t upload_read(char *buf, size_t buf_len, void *user_data)
 {
     UploadCtx *ctx = user_data;
     if (ctx->pos >= ctx->len)

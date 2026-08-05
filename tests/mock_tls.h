@@ -44,7 +44,7 @@ static KlTlsResult mock_tls_handshake(KlTls *self, KlSocketHandle fd) {
     return KL_TLS_OK;   /* 0-RTT identity handshake — no bytes exchanged */
 }
 
-static ssize_t mock_tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
+static kl_ssize_t mock_tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
     MockTls *m = (MockTls *)self;
     if (m->comp_mode) {
         size_t avail = m->in_len - m->in_pos;
@@ -58,7 +58,7 @@ static ssize_t mock_tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t l
     return kl_sockdef_recv(fd, buf, len);
 }
 
-static ssize_t mock_tls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
+static kl_ssize_t mock_tls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
     MockTls *m = (MockTls *)self;
     if (m->comp_mode) {
         if (mock_tls_grow(m->alloc, &m->out, &m->out_cap, m->out_len + len) < 0) return -1;
@@ -84,7 +84,7 @@ static int mock_tls_feed_input(KlTls *self, const void *cipher, size_t len) {
     return 0;
 }
 
-static ssize_t mock_tls_drain_output(KlTls *self, void *buf, size_t cap) {
+static kl_ssize_t mock_tls_drain_output(KlTls *self, void *buf, size_t cap) {
     MockTls *m = (MockTls *)self;
     size_t n = m->out_len < cap ? m->out_len : cap;
     if (n) memcpy(buf, m->out, n);

@@ -180,7 +180,7 @@ KlConnState kl_conn_on_writable(KlConn *c);
  * @param zero_copy 1 if data was spliced directly to socket (no WRITING phase).
  * @return New connection state.
  */
-KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result, int zero_copy);
+KlConnState kl_conn_on_file_complete(KlConn *c, kl_ssize_t result, int zero_copy);
 
 /** @brief Monotonic clock in milliseconds (for timeout tracking). */
 uint64_t kl_monotonic_ms(void);

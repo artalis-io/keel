@@ -125,7 +125,7 @@ static ssize_t wsc_read(KlWsClientConn *ws, void *buf, size_t len)
  * and TLS WANT_READ/WANT_WRITE (which wsc_write returns as 0) map to
  * would-block, so the drain buffers the unsent tail instead of the frame
  * being truncated or the connection aborted. */
-static ssize_t wsc_drain_write_fn(const char *data, size_t len, void *ctx)
+static kl_ssize_t wsc_drain_write_fn(const char *data, size_t len, void *ctx)
 {
     KlWsClientConn *ws = ctx;
     ssize_t r = wsc_write(ws, data, len);

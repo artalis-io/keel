@@ -179,7 +179,7 @@ static void ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4],
 
 /* ── Drain writer — wraps conn_write for KlDrainWriteFn ──────────── */
 
-static ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
+static kl_ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
     KlWsServerConn *ws = ctx;
     ssize_t nw = conn_write(ws->conn, data, len);
     if (nw < 0) {

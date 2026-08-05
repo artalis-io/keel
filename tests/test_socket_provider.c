@@ -42,7 +42,7 @@ static void mock_set_cloexec(void *ctx, KlSocketHandle fd) {
 static void mock_set_nosigpipe(void *ctx, KlSocketHandle fd) {
     MockSock *m = ctx; (void)fd; m->nosig_calls++;
 }
-static ssize_t mock_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
+static kl_ssize_t mock_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
     MockSock *m = ctx;
     m->send_calls++;
     if (m->force_send_err) { int e = m->force_send_err; m->force_send_err = 0; errno = e; return -1; }
@@ -51,14 +51,14 @@ static ssize_t mock_send(void *ctx, KlSocketHandle fd, const void *buf, size_t l
     if (m->wrap) return send((int)fd, buf, n, 0);
     return (ssize_t)n;
 }
-static ssize_t mock_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
+static kl_ssize_t mock_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     MockSock *m = ctx;
     m->recv_calls++;
     if (m->force_recv_err) { int e = m->force_recv_err; m->force_recv_err = 0; errno = e; return -1; }
     if (m->wrap) return recv((int)fd, buf, len, 0);
     return 0;
 }
-static ssize_t mock_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
+static kl_ssize_t mock_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     MockSock *m = ctx;
     m->writev_calls++;
     if (m->wrap) return kl_sockdef_writev(fd, iov, iovcnt);
@@ -66,7 +66,7 @@ static ssize_t mock_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int
     for (int i = 0; i < iovcnt; i++) t += (ssize_t)iov[i].len;
     return t;
 }
-static ssize_t mock_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
+static kl_ssize_t mock_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     MockSock *m = ctx; (void)out_fd; (void)in_fd;
     m->sendfile_calls++;
     *offset += (uint64_t)count;              /* pretend fully sent */

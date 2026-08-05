@@ -368,7 +368,7 @@ typedef struct {
     size_t      chunk_size;  /* max bytes per read */
 } MockReader;
 
-static ssize_t mock_body_read(char *buf, size_t buf_len, void *user_data)
+static kl_ssize_t mock_body_read(char *buf, size_t buf_len, void *user_data)
 {
     MockReader *r = user_data;
     if (r->pos >= r->len)
@@ -382,13 +382,13 @@ static ssize_t mock_body_read(char *buf, size_t buf_len, void *user_data)
     return (ssize_t)to_copy;
 }
 
-static ssize_t mock_body_read_eof(char *buf, size_t buf_len, void *user_data)
+static kl_ssize_t mock_body_read_eof(char *buf, size_t buf_len, void *user_data)
 {
     (void)buf; (void)buf_len; (void)user_data;
     return 0;  /* immediate EOF */
 }
 
-static ssize_t mock_body_read_error(char *buf, size_t buf_len, void *user_data)
+static kl_ssize_t mock_body_read_error(char *buf, size_t buf_len, void *user_data)
 {
     (void)buf; (void)buf_len; (void)user_data;
     return -1;  /* error */
@@ -775,7 +775,7 @@ typedef struct {
     StreamCtx   stream;
 } BiDiCtx;
 
-static ssize_t bidi_body_read(char *buf, size_t buf_len, void *user_data)
+static kl_ssize_t bidi_body_read(char *buf, size_t buf_len, void *user_data)
 {
     BiDiCtx *ctx = user_data;
     return mock_body_read(buf, buf_len, &ctx->reader);

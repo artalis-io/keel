@@ -2,15 +2,15 @@
 #define KEEL_FILE_IO_H
 
 #include <keel/allocator.h>
-#include <keel/handle.h>
+#include <keel/handle.h>   /* KlSocketHandle, kl_ssize_t */
 #include <keel/event.h>
-#include <sys/types.h>
+#include <sys/types.h>     /* off_t (submit offset) — this header is host-side, out of the freestanding gate */
 
 typedef struct KlFileIO KlFileIO;
 
 typedef struct {
     void *udata;       /**< connection pointer (opaque to file I/O backend) */
-    ssize_t result;    /**< bytes read/transferred, or negative error */
+    kl_ssize_t result; /**< bytes read/transferred, or negative error */
     int zero_copy;     /**< 1 = data already sent to socket (splice path) */
 } KlFileIOResult;
 

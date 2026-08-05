@@ -335,19 +335,19 @@ static int wsk_get_local_addr(void *ctx, KlSocketHandle fd, KlSockAddr *a) {
 static int wsk_get_so_error(void *ctx, KlSocketHandle fd, int *out_err) {
     (void)ctx; return kl_sockdef_get_so_error(fd, out_err);
 }
-static ssize_t wsk_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
+static kl_ssize_t wsk_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)ctx; return kl_sockdef_send(fd, buf, len);
 }
-static ssize_t wsk_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
+static kl_ssize_t wsk_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx; return kl_sockdef_recv(fd, buf, len);
 }
-static ssize_t wsk_recv_peek(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
+static kl_ssize_t wsk_recv_peek(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx; return kl_sockdef_recv_peek(fd, buf, len);
 }
-static ssize_t wsk_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
+static kl_ssize_t wsk_writev(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt) {
     (void)ctx; return kl_sockdef_writev(fd, iov, iovcnt);
 }
-static ssize_t wsk_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
+static kl_ssize_t wsk_sendfile(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count) {
     (void)ctx; return kl_sockdef_sendfile(out_fd, in_fd, offset, count);
 }
 static void wsk_destroy(void *ctx) {

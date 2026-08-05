@@ -2,11 +2,10 @@
 #define KEEL_DATAGRAM_H
 
 #include <keel/allocator.h>
-#include <keel/handle.h>
+#include <keel/handle.h>   /* KlSocketHandle, kl_ssize_t */
 #include <keel/sockaddr.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>   /* ssize_t via kl_ssize_t below */
 
 /*
  * datagram.h — the datagram data-plane a KlSocketProvider optionally provides.
@@ -24,11 +23,6 @@
  * never KlUdp — so the provider holds no UDP machine state; the send-queue walk,
  * delivery, backpressure, and interest tracking all stay in udp.c.
  */
-
-#ifndef KL_SSIZE_T_DEFINED
-#define KL_SSIZE_T_DEFINED
-typedef ssize_t kl_ssize_t;
-#endif
 
 struct KlUdpConfig;   /* keel/udp.h — datagram socket-option config (borrowed) */
 
