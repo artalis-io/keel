@@ -760,25 +760,37 @@ static err_t lwr_srv_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
 }
 
 /* err callback: the pcb was aborted by the stack (RST/OOM/self-initiated). lwIP has ALREADY
- * FREED the pcb — we MUST NOT dereference it. Key the slot by owner (arg == the KlConn* set via
- * tcp_arg), free its rx chain + reset its send offsets BY OWNER (nothing to free — the TX window
- * is preallocated), mark it dead + closed, and surface the single terminal completion. */
+ * FREED the pcb — we MUST NOT dereference it. `arg` is the accepted SLOT (tcp_arg set in
+ * lwr_srv_accept, and NOT overwritten by kl_lwr_set_owner), so we resolve the slot directly —
+ * even in the accept->post_recv window before the driver adopts the conn. This is the M1 fix:
+ * the previous owner-keyed scan dropped the err when owner was still NULL, leaving a dangling
+ * pcb + pend_accept that the driver would then adopt (a use-after-free). We free the rx chain +
+ * reset the (preallocated) send offsets, mark the slot dead + closed, then either recycle it
+ * (aborted before adoption — no KlConn exists to notify) or surface the single terminal. */
 static void lwr_srv_err(void *arg, err_t err) {
     (void)err;
     KlLwrCtx *ctx = lwr_ctx();
-    if (!ctx) return;
-    for (int i = 0; i < ctx->conn_cap; i++) {
-        KlLwrConn *c = &ctx->conns[i];
-        if (c->owner == arg && c->pcb != NULL) {
-            lwr_rx_free(c);                /* free-by-owner: pcb is dead, can't reach the chain */
-            lwr_send_reset(c);
-            c->dead_fd = c->pcb;           /* keep the freed pointer for close correlation only */
-            c->pcb = NULL;                 /* clear the LIVE handle → find() can't alias a reuse */
-            c->dead = 1;
-            c->closed = 1;
-            lwr_mark_terminal(c);
-            break;
-        }
+    if (!ctx || !arg) return;
+    KlLwrConn *c = (KlLwrConn *)arg;
+    /* Defensive: arg must be one of this ctx's slots (never a client watcher — clients use
+     * lwr_cli_err). Reject anything out of range or already torn down (idempotent on a double err). */
+    if (c < ctx->conns || c >= ctx->conns + ctx->conn_cap) return;
+    if (c->dead || c->pcb == NULL) return;
+
+    lwr_rx_free(c);                /* free-by-slot: pcb is dead, can't reach the chain */
+    lwr_send_reset(c);
+    c->dead_fd = c->pcb;           /* keep the freed pointer for close correlation only */
+    c->pcb = NULL;                 /* clear the LIVE handle → find() can't alias a reuse */
+    c->dead = 1;
+    c->closed = 1;
+
+    if (c->pend_accept && c->owner == NULL) {
+        /* Aborted in the accept->post_recv window: the ACCEPT was never surfaced to the driver,
+         * so there is no KlConn to notify — recycle the slot silently rather than surfacing a
+         * bogus ACCEPT on a freed pcb. */
+        lwr_slot_clear(c);
+    } else {
+        lwr_mark_terminal(c);      /* owner known — surface the single terminal completion */
     }
 }
 
@@ -796,6 +808,12 @@ static err_t lwr_srv_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
     tcp_recv(newpcb, lwr_srv_recv);
     tcp_sent(newpcb, lwr_srv_sent);
     tcp_err(newpcb, lwr_srv_err);
+    /* Key the server callbacks on the SLOT from accept onward (M1 fix): lwr_srv_err
+     * resolves the slot directly from `arg`, so an abort (RST/OOM) in the window BEFORE
+     * the driver adopts the conn (kl_lwr_set_owner) is still routed to its slot instead
+     * of being dropped — which previously left a dangling pcb the driver would then adopt
+     * (a use-after-free). lwr_srv_recv/sent ignore `arg` (they find the slot by pcb). */
+    tcp_arg(newpcb, cs);
 
     cs->pend_accept = 1;
     memcpy(cs->peer_ip, &newpcb->remote_ip.addr, 4);   /* network order (ip4 addr) */
@@ -1316,7 +1334,10 @@ void kl_lwr_set_owner(void *lwrctx, void *pcb, void *owner) {
     struct tcp_pcb *p = (struct tcp_pcb *)pcb;
     KlLwrConn *cs = lwr_conn_find(ctx, p);
     if (cs) cs->owner = owner;
-    tcp_arg(p, owner);   /* the err callback receives this as arg (owner-keyed teardown) */
+    /* Do NOT tcp_arg(p, owner): the server pcb's arg stays the SLOT (set in lwr_srv_accept),
+     * so lwr_srv_err always resolves its slot even before the owner is set (M1 fix). The
+     * terminal-completion target is cs->owner, tracked here; the err callback no longer needs
+     * arg to be the owner. */
 }
 
 int kl_lwr_conn_arm(void *lwrctx, void *pcb) {
