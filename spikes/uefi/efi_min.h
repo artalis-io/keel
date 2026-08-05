@@ -38,7 +38,16 @@ typedef VOID     *EFI_EVENT;
 #define NULL ((void *)0)
 #endif
 
+/* EFIAPI: the UEFI calling convention. x86_64 UEFI uses the MS x64 convention
+ * (ms_abi); aarch64 UEFI uses AAPCS (no attribute). ms_abi is an x86-only
+ * attribute — applying it elsewhere (e.g. a native aarch64 host compiling the
+ * pure-mapping unit tests) is "ignored" and trips -Werror=attributes, so gate
+ * it on the target arch. */
+#if defined(__x86_64__)
 #define EFIAPI __attribute__((ms_abi))
+#else
+#define EFIAPI
+#endif
 
 /* High bit set == error (64-bit). */
 #define EFI_ERROR_BIT     ((UINTN)1 << 63)

@@ -8,3 +8,5 @@ esp.img
 vars_rw.fd
 # freestanding archive is built in the repo root, not here, but guard anyway
 libkeel_freestanding*.a
+# U-2 harness artifacts
+wwwroot/
