@@ -59,6 +59,13 @@ typedef struct KlEventCtx {
     /* Internal: socket provider for transports created on this ctx (opaque;
      * NULL = POSIX). Set by tests / future providers, not public API. */
     const struct KlSocketProvider *sockets;
+    /* Internal completion-dispatch hooks (opaque; set by the server / kl_udp_init when
+     * those features are used, NULL otherwise). kl_comp_run routes the non-generic
+     * completion kinds through these so a client-only build links neither the server nor
+     * the UDP stack. The event arg is a const KlCompletionEvent* (opaque here, exactly as
+     * KlEventOps.completion). Additive — appended after `sockets`, do not reorder. */
+    void (*comp_conn_dispatch)(struct KlEventCtx *ctx, const void *ev);  /* ACCEPT/READ/WRITE → server */
+    void (*comp_udp_dispatch)(struct KlEventCtx *ctx, const void *ev);   /* UDP_RECV/UDP_SEND → udp */
 } KlEventCtx;
 
 /**

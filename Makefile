@@ -161,16 +161,21 @@ TEST_COMPAT_SRC ?= tests/net_compat_posix.c
 # Windows branch swaps the iphlpapi sibling. dns_resolver.c itself is #ifdef-free
 # and runs over the udp + socket.h seams.
 DNS_SYS_SRC ?= src/dns_sys_posix.c
-# Completion axis core (RC-1). The generic driver (completion_driver.c: kl_comp_run /
-# kl_io_engine_*) + the runtime-dispatch surface (completion_dispatch.c: the kl_comp_*
-# primitives, routed to the compiled-in backend or a runtime provider) are linked on
-# EVERY build. On a readiness build they are never called (gated by KL_EVENT_CAP_
-# COMPLETION); on a completion build the dispatch reaches the backend's kl_comp_ops_builtin.
-# KEEL_NO_COMPLETION swaps in aborting stubs (completion_absent.c) — the axis is compiled out.
+# Completion axis core (RC-1; split in freestanding B2a). The generic tick
+# (completion_core.c: kl_comp_run — routes non-generic completion kinds through the two
+# opaque KlEventCtx hooks so it references neither the server nor UDP handlers) + the
+# server/TLS leg (completion_server.c: the KlConn state machine + kl_io_engine_*) + the
+# h2/ws legs (completion_h2.c / completion_ws.c) + the runtime-dispatch surface
+# (completion_dispatch.c: the kl_comp_* primitives, routed to the compiled-in backend or a
+# runtime provider) are linked on EVERY build. On a readiness build they are never called
+# (gated by KL_EVENT_CAP_COMPLETION); on a completion build the dispatch reaches the
+# backend's kl_comp_ops_builtin. KEEL_NO_COMPLETION swaps in aborting stubs
+# (completion_absent.c) — the axis is compiled out.
 ifdef KEEL_NO_COMPLETION
   COMPLETION_CORE = src/completion_absent.c
 else
-  COMPLETION_CORE = src/completion_driver.c src/completion_dispatch.c
+  COMPLETION_CORE = src/completion_core.c src/completion_server.c \
+                    src/completion_h2.c src/completion_ws.c src/completion_dispatch.c
   # A readiness EVENT_SRC (epoll/kqueue/poll/wsapoll) has no completion backend, so it
   # needs the kl_comp_ops_builtin→NULL stub the dispatch falls back to (never dereferenced).
   # A completion backend (COMPLETION_BACKEND=1) provides its own kl_comp_ops_builtin.
@@ -752,6 +757,7 @@ clean:
 	# stale cross-toolchain object (e.g. a MinGW completion_driver.o) surviving into a
 	# later native build.
 	rm -f src/event_iocp.o src/event_pollcomp.o src/event_pollcomp_builtin.o src/event_iouring.o src/completion_driver.o
+	rm -f src/completion_core.o src/completion_server.o src/completion_h2.o src/completion_ws.o
 	rm -f src/completion_dispatch.o src/completion_readiness_stub.o src/completion_absent.o
 	rm -f tests/smoke_iouring tests/smoke_iouring_async tests/smoke_iouring_client
 	rm -f tests/smoke_pollcomp_client tests/smoke_pollcomp_client.exe

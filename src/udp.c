@@ -10,6 +10,9 @@
 #include "udp_internal.h"
 #include "event_caps.h"   /* kl_event_caps — pick readiness vs completion recv */
 #include "io_engine.h"    /* kl_comp_post_udp_recv (completion loop) */
+#include "completion.h"   /* KlCompletionEvent — the comp_udp_dispatch hook */
+#include <keel/event_ctx.h>  /* KlEventCtx (comp_udp_dispatch hook + kl_sockaddr_family) */
+#include <keel/sockaddr.h>   /* kl_sockaddr_family — neutral src/local from the event */
 
 /* Some platforms spell the IPv6 group ops the "membership" way. */
 #if !defined(IPV6_JOIN_GROUP) && defined(IPV6_ADD_MEMBERSHIP)
@@ -338,6 +341,10 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         return -1;
     }
     udp->ctx = cfg->ctx;
+    /* Route datagram completions on this ctx to the UDP stack (set once; harmless if
+     * set repeatedly by multiple UDP sockets sharing a ctx). On a readiness loop this
+     * hook is simply never consulted. */
+    cfg->ctx->comp_udp_dispatch = kl_udp_comp_dispatch;
     udp->alloc = cfg->alloc ? cfg->alloc : cfg->ctx->alloc;
     if (!udp->alloc) {
         udp->last_error = KL_ERR_INVALID_ARG;
@@ -551,6 +558,37 @@ void kl_udp_comp_on_send(KlUdp *udp, size_t len) {
     udp->q_bytes = (udp->q_bytes >= len) ? udp->q_bytes - len : 0;
     if (udp->q_bytes == 0 && udp->on_drain)
         udp->on_drain(udp, udp->drain_ud);
+}
+
+/* The comp_udp_dispatch hook (completion_core.c → here): route a datagram completion to
+ * kl_udp_comp_on_recv / kl_udp_comp_on_send. Registered on the ctx by kl_udp_init so the
+ * generic tick reaches the UDP stack without a static reference (a client-only build
+ * links neither). The src/local KlSockAddr + GRO/truncation meta logic moved here from
+ * the old kl_comp_run UDP branch. */
+void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp) {
+    (void)ctx;
+    const KlCompletionEvent *ev = evp;
+    switch (ev->kind) {
+    case KL_COMP_UDP_RECV: {  /* datagram — the target is a KlUdp*, no server */
+        /* The backend already converted src/local to the neutral KlSockAddr once at
+         * its seam. A recv without a source name (family KL_AF_UNSPEC, e.g. a
+         * connected socket) or without pktinfo passes NULL, not a zeroed address. */
+        int have_src   = kl_sockaddr_family(&ev->peer)  != KL_AF_UNSPEC;
+        int have_local = kl_sockaddr_family(&ev->local) != KL_AF_UNSPEC;
+        KlUdpRxMeta meta = {
+            .local     = have_local ? &ev->local : NULL,
+            .gro_seg   = ev->gro_seg,
+            .truncated = ev->truncated,
+        };
+        kl_udp_comp_on_recv((KlUdp *)ev->target, ev->buf, ev->bytes,
+                            have_src ? &ev->peer : NULL, &meta);
+        break;
+    }
+    case KL_COMP_UDP_SEND:
+        kl_udp_comp_on_send((KlUdp *)ev->target, ev->bytes);
+        break;
+    default: break;   /* core routes only UDP kinds here */
+    }
 }
 
 void kl_udp_recv_stop(KlUdp *udp) {
