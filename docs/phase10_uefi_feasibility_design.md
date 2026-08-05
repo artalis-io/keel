@@ -9,6 +9,9 @@ Status: **feasibility / design (2026-08-05).**
 > (A3/#206), `completion_driver.c` + `client.c` splits behind `KlEventCtx` hooks (B2a/B2b),
 > `errno`→`KlIoStatus` across the client family (B1/#205), F-0 archive + symbol gate (#206), F-4
 > formatted-I/O/locale elimination (`kl_cstr.*`), F-5 platform hooks + F-7 host mock harness (#207).
+> **The acceptance milestone is now FULLY MET:** B1 adds a multi-arch gate (x86_64 **and** aarch64
+> PE targets), B2 adds a CRT-less **PE/COFF link** (`make freestanding-link` → `keel_freestanding.efi`),
+> plus a `keel/freestanding.h` client-subset umbrella — see the **B1 / B2** sections below.
 > Corrections to this doc's original optimistic prose are flagged inline below with **[resolved]**.
 > The remaining work is F-8 (the EFI provider + QEMU/OVMF spike) itself.
 This is the roadmap's real **Phase 10** (`docs/pal_transformation_design.md`, phase table) —
@@ -449,6 +452,102 @@ beyond mem*/strlen + KEEL hooks is **vendored llhttp's own** `abort`/`fprintf`/`
 modify vendored code, per AGENTS.md); a real UEFI build stubs these (`abort` → `CpuDeadLoop`, no
 stdio). `make freestanding-harness` still passes **57/57** over the mocks with the always-explicit
 allocator; hosted `make test` is byte-identical (no behavioral change).
+
+---
+
+## B1 — multi-arch gate: x86_64 AND aarch64 PE targets (F-6 "test AArch64 early")
+
+`make freestanding-lib` (and `freestanding-lib-selfcontained`) now cross-compile + symbol-gate the
+manifest for **both** `x86_64-unknown-windows` **and** `aarch64-unknown-windows` — UEFI ships on
+ARM64 too, and the compiler-runtime helper closure differs by arch. Each triple is built with
+`clang --target=<triple> -ffreestanding -fshort-wchar -fno-stack-protector -fno-builtin
+-DKEEL_FREESTANDING` (`-mno-red-zone` **only** on x86_64 — it is the x86 UEFI interrupt-safety flag;
+the aarch64 pass drops it), archived to `libkeel_freestanding_<arch>.a`, and run through the gate.
+The canonical `libkeel_freestanding.a` is the x86_64 copy. A triple whose clang backend/headers are
+unavailable is **SKIPPED** with a printed note (never a build failure); the recipe reports which
+triples ran. With the `cc`/gcc fallback (no cross `--target`), the list collapses to a single native
+pass — the pre-B1 behavior. `FREESTANDING_TARGETS` is override-able.
+
+**Cross-target shim (`tests/freestanding/shim/`, `-isystem`).** Clang's `-ffreestanding` provides
+`stddef.h`/`stdint.h`/`stdarg.h`/`limits.h`/`stdbool.h`/`stdatomic.h` but **not** `string.h`/
+`stdlib.h`/`stdio.h`/`sys/types.h`/`errno.h`, and a `*-unknown-windows` triple defines `_WIN32`, so
+the internal `src/sockcompat.h` `_WIN32` branch also reaches for `winsock2.h`/`ws2tcpip.h`. The shim
+supplies **declaration-only** stand-ins for exactly those (the freestanding client passes addresses
+as the neutral `KlSockAddr` and never touches a native `struct sockaddr`, so the Winsock shims only
+need the `AF_*`/`SOCK_*` constants `client_async.c` maps to). A real UEFI/EDK2 build supplies the
+equivalents (BaseMemoryLib, the EFI socket protocols). The shim carries no logic, so the archive's
+undefined closure is unchanged. This is Makefile+shim only — **no `src/` change**; the native host
+build (and the F-7 harness) still use the host libc headers unchanged.
+
+**The aarch64 vs x86_64 closure — identical except one PE compiler-runtime helper.** Both arches'
+undefined closures are byte-for-byte identical (mem*/strlen + the KEEL seams + the llhttp residual)
+**plus `__chkstk`** — the Windows-ABI stack-probe helper the PE target emits for functions with
+large stack frames. It appears on **both** arches (it is a PE-ABI thing, not arch-specific) and is
+part of the PE **compiler runtime** (supplied by the CRT / EDK2 on a real target), **not** KEEL code
+and **not** a hosted-CRT dependency; it never appears on the host ELF/Mach-O archive. It is added to
+the whitelist as the documented PE compiler-runtime residual. **Notably absent:** no `__aarch64_*`
+outline atomics and no integer-division helpers — so the multi-arch surface is exactly the same seam
+on both. Any *other* `__*` compiler-runtime symbol is **not** whitelisted (a real finding).
+
+## B2 — CRT-less PE/COFF link: the milestone's last literal
+
+`make freestanding-link` **links** `libkeel_freestanding_selfcontained.a` (mem-family + strlen
+in-archive) into a **PE/COFF EFI image with NO hosted CRT** — the last literal of the acceptance
+milestone. `tests/freestanding_link_main.c` is a minimal `efi_main` that references the client
+public API (pulling `client_async`/`client_common` + their transitive archive objects) and
+**defines** every seam the archive leaves undefined — the platform hooks (`kl_monotonic_ms`/
+`kl_plat_random`/`kl_resolve_sync`), the `kl_sockdef_*` fallbacks, the `kl_event_*_builtin`/
+`kl_comp_ops_builtin` hooks, the llhttp `abort`/`fprintf`/`stderr` residual, and `__chkstk` — as
+minimal fail-closed stubs. It is freestanding (`-DKEEL_FREESTANDING`, no libc includes, the shim
+`-isystem`) and does **not run** — it must **link** with an empty undefined set under `-nostdlib`.
+
+The link is:
+
+```
+clang --target=x86_64-unknown-windows -ffreestanding -fno-stack-protector -fno-builtin \
+      -nostdlib -fuse-ld=lld -Wl,-entry:efi_main -Wl,-subsystem:efi_application \
+      -o keel_freestanding.efi <main.o> libkeel_freestanding_selfcontained_x86_64.a
+```
+
+Result: a `PE32+ executable (EFI application)` — `Magic 0x20B`, `Subsystem
+IMAGE_SUBSYSTEM_EFI_APPLICATION (0xA)`, `Machine IMAGE_FILE_MACHINE_AMD64` — linked with **no hosted
+CRT** (`-nostdlib`, empty undefined set). The **aarch64** variant links the same way
+(`--target=aarch64-unknown-windows`, `Machine IMAGE_FILE_MACHINE_ARM64`, `Subsystem EFI_APPLICATION`)
+→ `keel_freestanding_aarch64.efi`. The recipe prints the `llvm-readobj --file-headers` proof for
+each. If lld's PE backend is unavailable in the toolchain, the recipe emits the strongest achievable
+proof instead (COFF entry object for each arch + the empty self-contained undefined set from the
+gate) and **documents the limitation** — it does not fake a PE image. `freestanding-link` requires
+clang; the `cc` fallback SKIPs it.
+
+## `keel/freestanding.h` — the freestanding client-subset umbrella
+
+`include/keel/freestanding.h` is a small umbrella that `#include`s **exactly** the client + protocol
+public headers proven freestanding-clean by the header gate (the same 19-header set as
+`tests/freestanding_headers.c`), plus the linked-library version macros/accessors. A freestanding
+consumer gets **one** entry point instead of the full `<keel/keel.h>` (which drags in the server /
+UDP / DNS / thread-pool / native-socket surfaces a freestanding build excludes, and via `net.h` the
+platform socket headers). `make freestanding-headers` now compiles the umbrella too and dep-proves it
+pulls **zero** POSIX/system headers.
+
+## Acceptance milestone — FULLY MET
+
+The freestanding phase's first acceptance milestone — *"links as PE/COFF without a hosted CRT,
+documented undefined-symbol whitelist, passes host sanitizer tests, performs an HTTP/1.1 GET over a
+mock completion provider"* — is now met in full:
+
+| Clause | Where |
+|--------|-------|
+| documented undefined-symbol whitelist | `tests/freestanding_symbol_gate.sh` (F-0/F-4) |
+| passes host sanitizer tests | `make freestanding-harness` — 57/57 under ASan+UBSan+LSan (F-7) |
+| performs an HTTP/1.1 GET over a mock completion provider | `tests/freestanding_harness.c` scenario 1 (F-7) |
+| **links as PE/COFF without a hosted CRT** | `make freestanding-link` → `keel_freestanding.efi` (**B2**) |
+| **multi-arch** (x86_64 + aarch64) | `make freestanding-lib` gates both; `freestanding-link` links both (**B1**) |
+
+Note on the manifest: `src/decompress.c` is **kept** in `FREESTANDING_CLIENT_SRC` — the freestanding
+client genuinely references it (`kl_client_decompress_response_body` + the streaming
+`kl_decompress_stream_*` wrapper in `client_common.c`/`client_async.c`). It is **vtable dispatch
+only** (no miniz/zlib backend in the archive); an embedder that wants actual gzip/deflate injects a
+`KlDecompress` backend via `KlClientConfig.decompress`, exactly like the socket/event providers.
 
 ---
 

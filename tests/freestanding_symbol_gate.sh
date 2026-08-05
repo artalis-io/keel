@@ -73,6 +73,18 @@ whitelisted() {
       [ "$MODE" = selfcontained ] && return 1 || return 0 ;;
     # 1b. vendored-llhttp residual (api.c abort()/debug fprintf — not KEEL code)
     abort|fprintf|stderr|stderrp) return 0 ;;
+    # 1c. PE/COFF COMPILER-RUNTIME residual (only on the *-unknown-windows cross
+    #    targets, both x86_64 AND aarch64): __chkstk is the Windows-ABI stack-probe
+    #    helper the PE target emits for functions with large stack frames. It is
+    #    part of the PE compiler runtime (supplied by the CRT / EDK2 on a real
+    #    target — e.g. a __chkstk that touches guard pages, or a no-op on a stack
+    #    that never faults), NOT KEEL code and NOT a hosted-CRT dependency. It never
+    #    appears on the host (ELF/Mach-O) archive; it is the documented, expected
+    #    compiler-runtime residual of a freestanding PE build. No __aarch64_* outline
+    #    atomics / division helpers appear — the two arch closures are otherwise
+    #    identical. Any OTHER __* compiler-runtime symbol is NOT whitelisted (a real
+    #    finding). See docs/phase10_uefi_feasibility_design.md (B1).
+    __chkstk|chkstk) return 0 ;;
     # 2. KEEL platform + resolution hooks
     kl_plat_*|kl_monotonic_ms|kl_resolve_sync) return 0 ;;
     # 3. provider ops (socket / event / completion) filled by the injected provider

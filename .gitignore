@@ -4,6 +4,10 @@
 *.so
 *.dylib
 
+# Freestanding PE/COFF link artifacts (make freestanding-link)
+keel_freestanding*.efi
+keel_freestanding*.lib
+
 # Integration test/smoke binaries (extensionless; sources are .c)
 integrations/*/link_smoke
 integrations/nghttp2/e2e/test_roundtrip
