@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# run_u4.sh — U-4 harness. Runs inside the Ubuntu 24.04 container.
+#   1. obtain a freestanding mbedTLS SOURCE tree (release tarball, cached)
+#   2. build the freestanding self-contained archive (make freestanding-lib-selfcontained)
+#   3. build BOOTX64.EFI (build_u4.sh)
+#   4. build a FAT ESP image with EFI/BOOT/BOOTX64.EFI + startup.nsh
+#   5. start a TLS responder (openssl s_server -www) on the host; guest reaches it at 10.0.2.2:PORT
+#   6. boot QEMU x86_64 + OVMF (TCG, no KVM), e1000 NIC, SLIRP user-net, serial to stdout
+#   7. capture serial, grep for U-4: markers / the status line / HTTP/1
+#
+# Env:
+#   KEEL_ROOT     repo root (default: ../..)
+#   TARGET_PORT   host TLS responder port (default 18443)
+#   MBEDTLS_VER   mbedTLS release version (default 3.6.2)
+#   OVMF_CODE / OVMF_VARS   override OVMF fds
+#   BOOT_TIMEOUT  qemu timeout seconds (default 240 — TLS handshake under TCG is slow)
+set -uo pipefail
+cd "$(dirname "$0")"
+
+: "${KEEL_ROOT:=../..}"
+TARGET_PORT="${TARGET_PORT:-18443}"
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-240}"
+MBEDTLS_VER="${MBEDTLS_VER:-3.6.2}"
+export TARGET_PORT
+
+echo "=== U-4 run harness (HTTPS over EFI_TCP4 + freestanding mbedTLS) ==="
+
+# ---- 1. mbedTLS release tarball (source tree only; we compile it ourselves) ----
+CACHE="${MBEDTLS_CACHE:-/tmp/mbedtls_cache}"
+mkdir -p "$CACHE"
+MBEDTLS_SRC="$CACHE/mbedtls-$MBEDTLS_VER"
+if [ ! -d "$MBEDTLS_SRC/library" ]; then
+  TARBALL="$CACHE/mbedtls-$MBEDTLS_VER.tar.bz2"
+  URL="https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$MBEDTLS_VER/mbedtls-$MBEDTLS_VER.tar.bz2"
+  echo "downloading mbedTLS $MBEDTLS_VER release tarball ..."
+  curl -fsSL -o "$TARBALL" "$URL" || { echo "mbedTLS download FAILED ($URL)"; exit 2; }
+  echo "extracting ..."
+  tar -xf "$TARBALL" -C "$CACHE" || { echo "mbedTLS extract FAILED"; exit 2; }
+fi
+[ -d "$MBEDTLS_SRC/library" ] || { echo "ERROR: $MBEDTLS_SRC/library missing after extract"; exit 2; }
+export MBEDTLS_SRC
+echo "mbedTLS source: $MBEDTLS_SRC"
+
+# ---- 2. freestanding self-contained archive (x86_64), COFF-aware nm/ar ----
+pick() { for c in "$@"; do command -v "$c" >/dev/null 2>&1 && { echo "$c"; return; }; done; }
+LLVM_NM="$(pick llvm-nm llvm-nm-18 llvm-nm-17 llvm-nm-16)"
+LLVM_AR="$(pick llvm-ar llvm-ar-18 llvm-ar-17 llvm-ar-16)"
+ARCHIVE_ARGS=()
+[ -n "$LLVM_NM" ] && ARCHIVE_ARGS+=( "NM=$LLVM_NM" )
+[ -n "$LLVM_AR" ] && ARCHIVE_ARGS+=( "AR=$LLVM_AR" )
+echo "building libkeel_freestanding_selfcontained.a (${ARCHIVE_ARGS[*]:-default tools}) ..."
+( cd "$KEEL_ROOT" && make freestanding-lib-selfcontained "${ARCHIVE_ARGS[@]}" ) \
+  || { echo "ARCHIVE BUILD FAILED"; exit 2; }
+
+# ---- 3. build the EFI app ----
+TARGET_PORT="$TARGET_PORT" MBEDTLS_SRC="$MBEDTLS_SRC" ./build_u4.sh || { echo "BUILD FAILED"; exit 2; }
+
+# ---- 4. ESP FAT image ----
+ESP=esp.img
+rm -f "$ESP"
+dd if=/dev/zero of="$ESP" bs=1M count=64 status=none
+mformat -i "$ESP" -F ::
+mmd    -i "$ESP" ::/EFI
+mmd    -i "$ESP" ::/EFI/BOOT
+mcopy  -i "$ESP" BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
+mcopy  -i "$ESP" startup.nsh ::/startup.nsh
+echo "ESP image built:"
+mdir -i "$ESP" ::/EFI/BOOT/
+
+# ---- 5. host TLS responder: a Python TLS server sending a Content-Length'd HTTP/1.1
+# 200. NOTE: openssl s_server -www replies HTTP/1.0 with NO Content-Length (body
+# delimited by connection close). KEEL's async client + mbedTLS adapter surface a TLS
+# EOF/close_notify as tls_read()==-1, which async_handle_receiving treats as KL_ERR_IO
+# — so a close-delimited HTTPS body is dropped even though it fully arrived (a general
+# Keel client+TLS-adapter interaction, NOT EFI-specific; the U-4 diag proves the whole
+# encrypted response is received + decrypted over EFI_TCP4). Real servers send
+# Content-Length, so the parser completes on the body BEFORE EOF and the client
+# succeeds. This responder does exactly that. ----
+CERTDIR="$(mktemp -d)"
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout "$CERTDIR/k.pem" -out "$CERTDIR/c.pem" \
+  -subj "/CN=test" -days 1 >/dev/null 2>&1 || { echo "openssl cert gen FAILED"; exit 2; }
+cat > "$CERTDIR/tlsd.py" <<'PY'
+import ssl, socket, sys, threading
+port = int(sys.argv[1]); cert = sys.argv[2]; key = sys.argv[3]
+body = b"U-4 KlClient HTTPS responder OK\n"
+resp = (b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body)) + body
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(cert, key)
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("0.0.0.0", port)); srv.listen(16)
+print("python TLS responder on 0.0.0.0:%d (HTTP/1.1 + Content-Length)" % port, flush=True)
+def serve(raw):
+    try:
+        s = ctx.wrap_socket(raw, server_side=True)
+        s.recv(8192)                 # consume the request
+        s.sendall(resp)
+        try: s.unwrap()              # send close_notify then FIN
+        except Exception: pass
+    except Exception:
+        pass
+    finally:
+        try: raw.close()
+        except Exception: pass
+while True:
+    c, _ = srv.accept()
+    threading.Thread(target=serve, args=(c,), daemon=True).start()
+PY
+echo "starting python TLS responder on 0.0.0.0:$TARGET_PORT ..."
+python3 "$CERTDIR/tlsd.py" "$TARGET_PORT" "$CERTDIR/c.pem" "$CERTDIR/k.pem" >/tmp/tlsd_u4.log 2>&1 &
+SS_PID=$!
+sleep 1
+cat /tmp/tlsd_u4.log 2>/dev/null || true
+echo "python TLS responder pid=$SS_PID on 0.0.0.0:$TARGET_PORT"
+# sanity: can the host itself reach it over TLS?
+echo -e "GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n" | \
+  openssl s_client -connect "127.0.0.1:$TARGET_PORT" -quiet 2>/dev/null | head -1 || true
+cleanup() { kill "$SS_PID" 2>/dev/null || true; rm -rf "$CERTDIR"; }
+trap cleanup EXIT
+
+# ---- 6. locate OVMF ----
+find_ovmf() {
+  for c in "${OVMF_CODE:-}" \
+    /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd ; do
+    [ -n "$c" ] && [ -f "$c" ] && { echo "$c"; return; }
+  done
+}
+find_vars() {
+  for v in "${OVMF_VARS:-}" \
+    /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd ; do
+    [ -n "$v" ] && [ -f "$v" ] && { echo "$v"; return; }
+  done
+}
+OVMF_CODE_FD="$(find_ovmf)"
+OVMF_VARS_FD="$(find_vars)"
+if [ -z "$OVMF_CODE_FD" ]; then echo "ERROR: no OVMF code fd found"; exit 3; fi
+echo "OVMF code: $OVMF_CODE_FD"
+echo "OVMF vars: ${OVMF_VARS_FD:-<none>}"
+VARS_RW=vars_rw.fd
+if [ -n "$OVMF_VARS_FD" ]; then cp "$OVMF_VARS_FD" "$VARS_RW"; fi
+
+# ---- 7. boot QEMU (TCG; no KVM in container) ----
+QEMU_ARGS=(
+  -machine q35
+  -m 512
+  -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE_FD"
+)
+[ -n "$OVMF_VARS_FD" ] && QEMU_ARGS+=( -drive if=pflash,format=raw,file="$VARS_RW" )
+QEMU_ARGS+=(
+  -drive format=raw,file="$ESP"
+  -netdev "user,id=n0"
+  -device e1000,netdev=n0
+  -serial stdio
+  -display none
+  -monitor none
+  -no-reboot
+)
+
+echo "=== qemu cmd ==="
+echo "timeout ${BOOT_TIMEOUT} qemu-system-x86_64 ${QEMU_ARGS[*]}"
+echo "=== serial output begin ==="
+timeout "${BOOT_TIMEOUT}" qemu-system-x86_64 "${QEMU_ARGS[@]}" 2>&1 | tee /tmp/serial_u4.log
+echo "=== serial output end ==="
+
+echo "=== grep markers ==="
+grep -E 'U-4:|HTTP/1\.[01]' /tmp/serial_u4.log || echo "(no U-4 markers found)"
+echo "=== s_server log tail ==="
+tail -5 /tmp/sserver_u4.log 2>/dev/null || true
