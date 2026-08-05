@@ -47,6 +47,23 @@ typedef struct KlIoVec {
     size_t len;
 } KlIoVec;
 
+/* Portable classification of the most recent -1 I/O result, so a consumer never
+ * reads a hosted `errno` to decide would-block / re-arm / connect-pending / fail.
+ * This keeps the readiness/completion control flow freestanding: a non-POSIX or
+ * freestanding stack (UEFI, lwIP) has no hosted errno, so classification lives on
+ * the provider (KlSocketOps.io_status, additive/optional). The built-in POSIX /
+ * Winsock providers leave that op NULL and Keel falls back to its hosted errno
+ * mapping — behaviour-neutral for every current provider. */
+typedef enum {
+    KL_IO_OK = 0,        /* no error (the last op succeeded) */
+    KL_IO_WOULD_BLOCK,   /* EAGAIN / EWOULDBLOCK — retry when ready (re-arm) */
+    KL_IO_INTERRUPTED,   /* EINTR — retry immediately (loop continue) */
+    KL_IO_PENDING,       /* EINPROGRESS — async connect in progress */
+    KL_IO_CLOSED,        /* peer closed / EPIPE */
+    KL_IO_RESET,         /* ECONNRESET — peer reset */
+    KL_IO_FATAL          /* any other error */
+} KlIoStatus;
+
 /* Upper bound on scatter-gather segments a provider must handle in one writev.
  * Response assembly uses <= 7 (status line + headers + body); a provider
  * translates into a stack vector of this size and fails EINVAL beyond it. */
@@ -99,6 +116,20 @@ typedef struct KlSocketOps {
      * `sendfile` advances `*offset` (byte offset into the file). */
     kl_ssize_t (*writev)(void *ctx, KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
     kl_ssize_t (*sendfile)(void *ctx, KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count);
+    /* Classify the most recent -1 I/O result on this provider into a portable
+     * KlIoStatus (would-block / interrupted / connect-pending / closed / reset /
+     * fatal). Valid immediately after a send/recv/connect on this provider
+     * returned -1 — the provider reports how that failure should be handled
+     * WITHOUT the consumer reading a hosted `errno`, so the client's
+     * would-block/re-arm/connect-pending control flow stays freestanding.
+     *
+     * OPTIONAL (may be NULL). When NULL, Keel falls back to its hosted errno
+     * mapping (kl_sockdef_io_status). A provider that already translates its
+     * native errors into `errno` (the built-in POSIX/Winsock providers, and
+     * lwIP which maps ERR_MEM→EAGAIN) needs no io_status op; a freestanding
+     * provider with no hosted errno MUST supply it. Appended to the ops table
+     * (additive ABI): older ops tables leave it zero-initialized (NULL). */
+    KlIoStatus (*io_status)(void *ctx);
     /* Release provider-owned context. May be NULL (nothing to free). */
     void    (*destroy)(void *ctx);
     const char *name;                 /* provider identity, for diagnostics */

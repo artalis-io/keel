@@ -89,6 +89,11 @@ const struct KlDatagramOps *kl_sockdef_dgram(void);
 ssize_t        kl_sockdef_recv_peek(KlSocketHandle fd, void *buf, size_t len);
 ssize_t        kl_sockdef_writev(KlSocketHandle fd, const KlIoVec *iov, int iovcnt);
 ssize_t        kl_sockdef_sendfile(KlSocketHandle out_fd, int in_fd, uint64_t *offset, size_t count);
+/* The hosted default I/O-result classifier: maps the current `errno` to a
+ * KlIoStatus. This is the ONLY place the errno mapping lives — the inline
+ * dispatcher below never reads errno itself, so this header stays freestanding.
+ * Defined per-platform in the provider TU (socket_posix.c / socket_winsock.c). */
+KlIoStatus     kl_sockdef_io_status(void);
 
 /*
  * Provider-aware wrappers. Inline dispatch: a non-NULL provider whose op is set
@@ -197,6 +202,16 @@ static inline int kl_sock_get_local_addr(const KlSocketProvider *p, KlSocketHand
 static inline int kl_sock_get_so_error(const KlSocketProvider *p, KlSocketHandle fd, int *out_err) {
     if (p && p->ops->get_so_error) return p->ops->get_so_error(p->context, fd, out_err);
     return kl_sockdef_get_so_error(fd, out_err);
+}
+
+/* Classify the provider's most recent -1 I/O result. Op-or-sockdef dispatch,
+ * exactly like kl_sock_get_so_error: a provider that supplies io_status reports
+ * the category itself; otherwise the hosted errno mapping (kl_sockdef_io_status).
+ * This inline reads NO errno of its own — the errno mapping is confined to
+ * kl_sockdef_io_status — so it compiles freestanding. */
+static inline KlIoStatus kl_sock_io_status(const KlSocketProvider *p) {
+    if (p && p->ops->io_status) return p->ops->io_status(p->context);
+    return kl_sockdef_io_status();
 }
 
 static inline ssize_t kl_sock_recv_peek(const KlSocketProvider *p, KlSocketHandle fd,

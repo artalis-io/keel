@@ -38,16 +38,16 @@ int kl_client_has_crlf(const char *s, size_t len)
 
 /* ── I/O abstraction (plain or TLS) ──────────────────────────────── */
 
-ssize_t kl_client_io_write(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
-                           const void *buf, size_t len)
+kl_ssize_t kl_client_io_write(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
+                              const void *buf, size_t len)
 {
     if (tls)
         return tls->write(tls, fd, buf, len);
     return kl_sock_send(p, fd, buf, len);
 }
 
-ssize_t kl_client_io_read(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
-                          void *buf, size_t len)
+kl_ssize_t kl_client_io_read(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
+                             void *buf, size_t len)
 {
     if (tls)
         return tls->read(tls, fd, buf, len);

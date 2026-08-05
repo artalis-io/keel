@@ -431,3 +431,28 @@ KlError kl_sock_errno_to_error(int err) {
             return KL_ERR_IO;
     }
 }
+
+/* Hosted default I/O-result classifier (Winsock). kl_wsa_set_errno() has already
+ * translated the last WSAGetLastError() into `errno` on the seam (per the winsock
+ * errno contract), so the mapping is the SAME errno-based one as POSIX — a
+ * NULL-io_status provider on Windows classifies identically. */
+KlIoStatus kl_sockdef_io_status(void) {
+    switch (errno) {
+        case EAGAIN:
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+        case EWOULDBLOCK:
+#endif
+            return KL_IO_WOULD_BLOCK;
+        case EINTR:
+            return KL_IO_INTERRUPTED;
+        case EINPROGRESS:
+            return KL_IO_PENDING;
+        case 0:
+        case EPIPE:
+            return KL_IO_CLOSED;
+        case ECONNRESET:
+            return KL_IO_RESET;
+        default:
+            return KL_IO_FATAL;
+    }
+}

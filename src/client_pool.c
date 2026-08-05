@@ -11,7 +11,6 @@
 #include <keel/timer.h>
 #include "socket.h"
 
-#include <errno.h>
 #include <string.h>
 
 /* Socket provider for pooled fds (NULL -> POSIX default close). */
@@ -162,8 +161,10 @@ int kl_cpool_acquire(KlClientPool *pool, const char *host, int port,
          * Winsock lacks. */
         (void)kl_sock_set_nonblocking(cpool_sp(pool), e->fd);
         char peek;
-        ssize_t r = kl_sock_recv_peek(cpool_sp(pool), e->fd, &peek, 1);
-        if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        kl_ssize_t r = kl_sock_recv_peek(cpool_sp(pool), e->fd, &peek, 1);
+        /* r==0 → peer closed; r<0 that is not would-block → real error: both stale.
+         * Classify via the seam (portable, no errno read). */
+        if (r == 0 || (r < 0 && kl_sock_io_status(cpool_sp(pool)) != KL_IO_WOULD_BLOCK)) {
             /* Stale connection — close and skip */
             if (pool->ev_ctx && e->timer_id >= 0)
                 kl_timer_cancel(pool->ev_ctx, e->timer_id);
