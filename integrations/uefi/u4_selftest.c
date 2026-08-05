@@ -58,10 +58,22 @@
 #define TARGET_HOST "10.0.2.2"      /* SLIRP host/gateway from the guest */
 #endif
 
-/* Build the numeric HTTPS URL literal at compile time. */
+/* Build the HTTPS URL literal at compile time. */
 #define STR2(x) #x
 #define STR(x) STR2(x)
+
+#ifdef KL_U4_PROD
+/* Production TLS mode: CA-verified server cert (dNSName SAN) + real EFI_RNG. The
+ * client dials a HOSTNAME (resolved to the responder IP by resolve_uefi.c's static
+ * hosts entry), so mbedTLS verifies the cert against the dNSName SAN. */
+#include "u4_ca_embed.h"          /* g_u4_ca_pem[] + g_u4_ca_pem_len (generated) */
+#ifndef KL_U4_PROD_HOST
+#define KL_U4_PROD_HOST "server.keel.test"
+#endif
+#define TARGET_URL "https://" KL_U4_PROD_HOST ":" STR(TARGET_PORT) "/"
+#else
 #define TARGET_URL "https://" TARGET_HOST ":" STR(TARGET_PORT) "/"
+#endif
 
 /* ── tiny ASCII console (no libc) ─────────────────────────────────────────────── */
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_out;
@@ -181,7 +193,11 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("");
     print_line("=== U-4 KlClient HTTPS GET over EFI_TCP4 + mbedTLS (freestanding) ===");
     print("U-4: target = "); print_line(TARGET_URL);
+#ifdef KL_U4_PROD
+    print_line("U-4: PROD mode — CA-verified TLS (dNSName SAN) + real EFI_RNG required");
+#else
     print_line("U-4: *** SPIKE: TLS verify-none (self-signed server, no CA check) ***");
+#endif
 
     if (kl_uefi_platform_init(bs, st) != 0)
         print_line("U-4: (warn) platform_init failed — clock stuck, continuing");
@@ -190,8 +206,17 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         print_line("U-4: mbedtls platform init failed (calloc/free registration)");
         goto park;
     }
-    if (!kl_uefi_have_entropy())
+    if (!kl_uefi_have_entropy()) {
+#ifdef KL_U4_PROD
+        /* Production is fail-closed: no real entropy => no handshake. Provision it in
+         * QEMU with `-device virtio-rng-pci` (run_u4.sh U4_VIRTIO_RNG=1). */
+        print_line("U-4: PROD requires EFI_RNG_PROTOCOL — none present (add virtio-rng)");
+        print_line("U-4: NO-GO-YET (no hardware entropy)");
+        goto park;
+#else
         print_line("U-4: *** WARN: no EFI_RNG — using WEAK entropy fallback (INSECURE) ***");
+#endif
+    }
 
     /* Inject the EFI completion provider on the stock freestanding archive. */
     const KlEventProvider *ep = kl_uefi_event_provider(bs, image_handle);
@@ -207,6 +232,19 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
     print_line("U-4: event ctx up (efi-tcp4-completion)");
 
+#ifdef KL_U4_PROD
+    /* Production: verify-REQUIRED against the embedded CA (the responder's self-signed
+     * cert, whose dNSName SAN is KL_U4_PROD_HOST). The client dials KL_U4_PROD_HOST —
+     * resolved to the responder IP by resolve_uefi.c's static hosts entry — so mbedTLS
+     * checks the cert hostname (SNI + SAN) as a real HTTPS client does. */
+    KlTlsCtx *tctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+        g_u4_ca_pem, g_u4_ca_pem_len, &alloc);
+    if (!tctx) {
+        print_line("U-4: PROD TLS client ctx create failed (CA parse / entropy)");
+        kl_event_ctx_free(&ev);
+        goto park;
+    }
+#else
     /* Verify-none client TLS context. NOTE: the *_from_buf(NULL,0) entry point REJECTS
      * a NULL buffer (it requires an in-memory CA bundle); the verify-none path is the
      * FILE-path variant with a NULL path — kl_tls_mbedtls_client_ctx_create(NULL,...)
@@ -218,12 +256,17 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         kl_event_ctx_free(&ev);
         goto park;
     }
+#endif
     KlTlsConfig tls;
     { unsigned char *p = (unsigned char *)&tls; for (size_t i = 0; i < sizeof(tls); i++) p[i] = 0; }
     tls.ctx         = tctx;
     tls.factory     = kl_tls_mbedtls_create;
     tls.ctx_destroy = kl_tls_mbedtls_ctx_destroy;
+#ifdef KL_U4_PROD
+    print_line("U-4: TLS client ctx up (mbedtls, CA-verified)");
+#else
     print_line("U-4: TLS client ctx up (mbedtls, verify-none)");
+#endif
 
 #ifdef U4_MANUAL_DIAG
     manual_diag(bs, image_handle, tctx, &alloc);

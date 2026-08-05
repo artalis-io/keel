@@ -71,6 +71,10 @@
 /* ── X.509 (parse the server certificate chain) ─────────────────────────────*/
 #define MBEDTLS_X509_USE_C
 #define MBEDTLS_X509_CRT_PARSE_C
+/* PEM + base64: the handshake's server cert arrives as DER (no PEM needed), but a
+ * caller-supplied CA bundle (production TLS verify — U-4 prod) is PEM, so decode it. */
+#define MBEDTLS_PEM_PARSE_C
+#define MBEDTLS_BASE64_C
 
 /* ── Public-key + asymmetric crypto ─────────────────────────────────────────*/
 #define MBEDTLS_PK_C

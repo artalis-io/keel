@@ -10,3 +10,5 @@ vars_rw.fd
 libkeel_freestanding*.a
 # U-2 harness artifacts
 wwwroot/
+u4_ca_embed.h
+u4_prod_cert/
