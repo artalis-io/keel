@@ -246,8 +246,8 @@ UTEST(response, file_mode) {
     kl_response_file(&res, 42, 1024);
     ASSERT_EQ(res.body_mode, KL_BODY_FILE);
     ASSERT_EQ(res.file_fd, 42);
-    ASSERT_EQ(res.file_size, (off_t)1024);
-    ASSERT_EQ(res.file_offset, (off_t)0);
+    ASSERT_EQ(res.file_size, (uint64_t)1024);
+    ASSERT_EQ(res.file_offset, (uint64_t)0);
 
     /* Prevent close(42) from hitting a real fd */
     res.file_fd = -1;

@@ -4,7 +4,8 @@
 #include <keel/allocator.h>
 #include <keel/handle.h>   /* KlSocketHandle, kl_ssize_t */
 #include <keel/event.h>
-#include <sys/types.h>     /* off_t (submit offset) — this header is host-side, out of the freestanding gate */
+#include <stdint.h>        /* uint64_t (submit offset) — file offsets are non-negative,
+                              same neutral type as the sendfile seam (src/socket.h) */
 
 typedef struct KlFileIO KlFileIO;
 
@@ -19,7 +20,7 @@ struct KlFileIO {
      *  sock_fd is an opaque key for routing/cancellation.
      *  Returns 0 on success, -1 on error. */
     int (*submit)(KlFileIO *fio, int file_fd, void *buf,
-                  size_t len, off_t offset, KlSocketHandle sock_fd, void *udata);
+                  size_t len, uint64_t offset, KlSocketHandle sock_fd, void *udata);
 
     /** Cancel pending read keyed by sock_fd. Best-effort. */
     int (*cancel)(KlFileIO *fio, KlSocketHandle sock_fd);

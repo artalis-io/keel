@@ -369,7 +369,7 @@ UTEST(tls, response_file_through_mock) {
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_file(&res, tmpfd, (off_t)file_len);
+    kl_response_file(&res, tmpfd, (uint64_t)file_len);
 
     /* Send headers + file */
     int r = kl_response_send(&res);
@@ -410,7 +410,7 @@ UTEST(tls, file_send_yields_on_want_write) {
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_file(&res, tmpfd, (off_t)data_len);
+    kl_response_file(&res, tmpfd, (uint64_t)data_len);
 
     /* First send: headers go through, file send starts */
     int r = kl_response_send(&res);
@@ -418,7 +418,7 @@ UTEST(tls, file_send_yields_on_want_write) {
     ASSERT_EQ(r, 0);
 
     /* Verify file was fully sent */
-    ASSERT_EQ(res.file_offset, (off_t)data_len);
+    ASSERT_EQ(res.file_offset, (uint64_t)data_len);
 
     close(pipefd[0]);
     close(pipefd[1]);

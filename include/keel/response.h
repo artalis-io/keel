@@ -5,7 +5,7 @@
 #include <keel/handle.h>
 #include <keel/drain.h>
 #include <stddef.h>
-#include <sys/types.h>
+#include <stdint.h>
 
 typedef struct KlTls KlTls;
 /* Back-pointer to the owning event ctx (for the internal socket provider,
@@ -41,8 +41,8 @@ typedef struct KlResponse {
     size_t body_owned_size; /**< Owned body copy size */
 
     int file_fd;            /**< File descriptor for sendfile */
-    off_t file_size;        /**< File size in bytes */
-    off_t file_offset;      /**< File offset for sendfile resume */
+    uint64_t file_size;     /**< File size in bytes */
+    uint64_t file_offset;   /**< File offset for sendfile resume */
 
     int stream_error;       /**< Streaming error flag */
     int stream_ended;       /**< 1 = end_stream called, drain flush will close */
@@ -110,7 +110,7 @@ int kl_response_body_copy(KlResponse *res, const char *data, size_t len);
  * @param fd   Open file descriptor (ownership transferred to response).
  * @param size File size in bytes.
  */
-void kl_response_file(KlResponse *res, KlSocketHandle fd, off_t size);
+void kl_response_file(KlResponse *res, KlSocketHandle fd, uint64_t size);
 
 /** @brief Free response resources (header buffer, close file fd). */
 void kl_response_free(KlResponse *res);

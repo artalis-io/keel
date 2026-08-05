@@ -413,10 +413,20 @@ static KlResolver *client_pick_resolver(const KlClientConfig *cfg,
         return cfg->resolver;
     if (cfg && cfg->system_dns)
         return NULL;
+#ifdef KEEL_FREESTANDING
+    /* Freestanding (F0 / UEFI): the built-in DNS-over-UDP resolver pulls the UDP +
+     * dns_resolver stack, which is out of the minimal completion-client archive
+     * (docs/phase10_uefi_feasibility_design.md §8 — IPv4/numeric first, DNS is U-5).
+     * A freestanding consumer supplies cfg->resolver or a numeric address; here we
+     * fall back to sync name resolution (kl_resolve_sync), same as cfg->system_dns. */
+    (void)ev_ctx;
+    return NULL;
+#else
     KlResolver *r = kl_dns_resolver_create(ev_ctx, NULL);
     if (r)
         *owned = 1;
     return r;
+#endif
 }
 
 /* ── State: CONNECTING ───────────────────────────────────────────── */

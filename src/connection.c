@@ -950,7 +950,7 @@ static KlConnState conn_file_flush(KlConn *c) {
     }
 
     /* Buffer fully sent */
-    c->res.file_offset += (off_t)c->file_io_len;
+    c->res.file_offset += (uint64_t)c->file_io_len;
     c->file_io_phase = FILE_IO_IDLE;
     return conn_file_submit_read(c);  /* next chunk or finish */
 }
@@ -972,7 +972,7 @@ KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result, int zero_copy) {
 
     if (zero_copy) {
         /* Data already sent to socket via splice — advance offset, next chunk */
-        c->res.file_offset += (off_t)result;
+        c->res.file_offset += (uint64_t)result;
         c->file_io_phase = FILE_IO_IDLE;
         return conn_file_submit_read(c);
     }

@@ -280,7 +280,52 @@ OVMF as the local/hull confidence run — the same discipline that carried Phase
 
 ---
 
-*Feasibility + design only. No code, no build, no commit. Doc path:
+---
+
+## F0 — freestanding archive: shipped
+
+The freestanding phase's first acceptance milestone — a **freestanding client archive with a
+documented undefined-symbol whitelist** — is now in the tree (ahead of the U-0 spike; it is the
+host-side, no-firmware groundwork the spike builds on).
+
+- **`off_t` neutralized.** `KlResponse.file_size`/`file_offset`, `kl_response_file(...)`, and the
+  `KlFileIO` submit offset moved from the hosted `off_t` to `uint64_t` (non-negative domain, same
+  neutral type as the internal sendfile seam). `response.h` + `file_io.h` dropped `<sys/types.h>`
+  and joined the `make freestanding-headers` gate (zero POSIX deps).
+- **`make freestanding-lib`** builds `libkeel_freestanding.a` from a client-only, completion-only
+  manifest (`FREESTANDING_CLIENT_SRC`) with `clang -ffreestanding -fshort-wchar -mno-red-zone
+  -fno-stack-protector -fno-builtin -DKEEL_FREESTANDING` and asserts, via
+  `tests/freestanding_symbol_gate.sh` over `nm`, that every undefined symbol is whitelisted.
+- **Two decoupling gaps found + fixed to keep the manifest server/udp/dns-free:**
+  1. `async.c` bundled the client-usable `KlEventCtx`/`KlWatcher` API with the server-side
+     `kl_async_suspend`/`complete`/`cancel` machinery (which pulls `kl_conn_on_writable` /
+     `kl_server_conn_release` / `kl_io_engine_resume_completion`). Split the client half into
+     `event_ctx.c`; the server-suspend half stays in `async.c` and is excluded.
+  2. `client_async.c` unconditionally auto-created the built-in DNS-over-UDP resolver
+     (`kl_dns_resolver_create`), dragging in the DNS + UDP stack. Gated out under
+     `KEEL_FREESTANDING` (a freestanding client resolves via `cfg->resolver` or a numeric
+     address — the §8 IPv4/numeric-first shape; DNS is U-5).
+
+**The enforced whitelist** (the archive's full undefined-symbol closure):
+
+| Class | Symbols |
+|-------|---------|
+| C-runtime memory/string | `memcpy` `memmove` `memset` `memcmp` `strlen` `strcmp` `strncmp` `strcasecmp` `strchr` `strstr` `strtol` `snprintf` (+ `__*_chk` FORTIFY wrappers) |
+| C-runtime alloc + diagnostic | `malloc` `free` `realloc` `fprintf` `abort` `stderr`/`__stderrp` |
+| KEEL platform + resolution hooks | `kl_monotonic_ms` `kl_resolve_sync` (`kl_plat_*` reserved) |
+| Socket provider ops (vtable) | `kl_sockdef_socket/connect/recv/recv_peek/send/close/get_so_error/io_status/set_nonblocking/set_nosigpipe` |
+| Event/completion backend hooks | `kl_event_{init,add,mod,del,wait,close,caps,native_provider}_builtin` `kl_comp_ops_builtin` |
+
+The socket/event/completion entries are the **provider injection points** — a freestanding build
+supplies its own (EFI_TCP4 socket provider + EFI-token completion backend), exactly the U-2/U-3
+seams §4 maps. `kl_monotonic_ms`/`kl_resolve_sync` are the tiny platform seams §6 flags. No
+server, thread_pool, `kl_udp_*`, `kl_dns_*`, file_io, or OS-syscall/errno symbol appears — the
+gate FAILS loud if one ever does. Toolchain used: **clang** (falls back to `cc` where clang is
+absent).
+
+---
+
+*Feasibility + design only for §§1–11. No firmware code/build/commit in this document. Doc path:
 `docs/phase10_uefi_feasibility_design.md`. This is the roadmap's Phase 10; the lwIP-raw client
 work lives in `docs/phase10_lwip_raw_client_design.md` (roadmap Phase 9). Cross-referenced from
 `docs/pal_transformation_design.md`.*

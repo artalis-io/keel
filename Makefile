@@ -1,5 +1,6 @@
 CC      = cc
 AR      = ar
+NM      = nm
 UNAME_S := $(shell uname -s)
 LDFLAGS =
 
@@ -184,7 +185,7 @@ else
   endif
 endif
 CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/response.c src/router.c \
-           src/connection.c src/server.c $(SERVER_PLAT_SRC) src/async.c src/timer.c \
+           src/connection.c src/server.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
            src/websocket.c src/websocket_client.c \
@@ -769,7 +770,9 @@ clean:
 	rm -f tests/smoke_pollcomp_async tests/smoke_pollcomp_async.exe
 	rm -f tests/smoke_completion_inject tests/smoke_completion_inject.exe src/event_pollcomp.inject.o
 	rm -f src/file_io.o
-	rm -f src/async.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
+	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
+	rm -f libkeel_freestanding.a
+	find . -name '*.freestanding.o' -delete
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/custom_socket_provider examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
 	rm -f $(BENCH_SERVER)
@@ -935,9 +938,9 @@ smoke: examples
 # ── Freestanding public-header gate (step A3) ──────────────────────────────
 # Proves the client/protocol subset of the public headers compiles with NO
 # hosted libc — -ffreestanding, full -Werror — and that none of them pull a
-# POSIX socket/system header. The in-gate vs out-of-gate header list (and why
-# response.h / file_io.h / resolver.h / udp*.h stay out) is documented at the
-# top of tests/freestanding_headers.c.
+# POSIX socket/system header. The in-gate vs out-of-gate header list (response.h
+# and file_io.h are now in-gate after off_t→uint64_t; why resolver.h / udp*.h /
+# server.h stay out) is documented at the top of tests/freestanding_headers.c.
 #
 # The dep proof matches the FORBIDDEN header paths *exactly at a leaf boundary*
 # (e.g. .../sys/socket.h, .../strings.h) so it flags only headers our code
@@ -973,7 +976,67 @@ freestanding-headers:
 	rm -f /tmp/keel_freestanding.deps; \
 	echo "freestanding-headers: OK"
 
-.PHONY: check-sockaddr-neutral freestanding-headers
+# ── Freestanding client archive + undefined-symbol whitelist gate (F0) ─────────
+# Builds libkeel_freestanding.a from a client-only, completion-only source
+# manifest and proves — via nm + tests/freestanding_symbol_gate.sh — that the
+# archive's undefined-symbol closure is within a documented whitelist: the
+# C-runtime memory/string surface (memcpy/memmove/memset/memcmp/strlen/strcmp/
+# strncmp/strcasecmp/strchr/strstr/strtol/snprintf + their FORTIFY __*_chk
+# wrappers, + malloc/free/realloc + fprintf/abort/stderr), the KEEL platform +
+# resolution hooks (kl_plat_* / kl_monotonic_ms / kl_resolve_sync), and the
+# socket/event/completion PROVIDER ops reached via vtable (kl_sockdef_* /
+# kl_event_*_builtin / kl_comp_ops_builtin) — the injection points a freestanding
+# build fills with its own provider. It contains NO server (kl_conn_*/kl_server_*/
+# comp_on_*/router), thread_pool/pthread, kl_udp_*, kl_dns_*, file_io, or
+# OS-syscall/errno symbol; the gate FAILS if any appears. This is the concrete
+# payoff of the freestanding phase and the launch point for the UEFI spike
+# (docs/phase10_uefi_feasibility_design.md, F-0).
+#
+# The manifest is genuinely client + completion only: the KlEventCtx/watcher half
+# of async.c was split into event_ctx.c (the server-suspend half — which pulls the
+# server connection driver — stays in async.c and is EXCLUDED), and the built-in
+# DNS auto-create in client_async.c is #ifdef'd out under KEEL_FREESTANDING (a
+# freestanding client resolves via cfg->resolver or a numeric address; DNS/UDP is
+# out of the minimal archive). socket_posix.c (the hosted socket PROVIDER) is
+# deliberately NOT in the manifest — a freestanding build supplies its own
+# provider, so the kl_sockdef_* ops are legitimately undefined (whitelisted).
+FREESTANDING_CLIENT_SRC = \
+    src/error.c src/version.c src/allocator.c src/allocator_default_stdlib.c \
+    src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
+    src/completion_dispatch.c src/completion_core.c \
+    src/client_common.c src/client_async.c src/client_pool.c src/decompress.c \
+    parsers/response_parser_llhttp.c \
+    vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
+
+# Freestanding, cross-representative toolchain. Prefer clang (SanitizerCoverage-
+# grade freestanding + the exact flags a UEFI/PE build uses); fall back to cc.
+FREESTANDING_LIB_CC := $(shell command -v clang >/dev/null 2>&1 && echo clang || echo $(CC))
+# -mno-red-zone is x86-only (UEFI interrupt safety); clang ignores it on any target,
+# but non-x86 gcc rejects it. Probe once so the cc fallback stays portable on ARM.
+FREESTANDING_REDZONE := $(shell echo 'int x;' | $(FREESTANDING_LIB_CC) -mno-red-zone -x c -c -o /dev/null - >/dev/null 2>&1 && echo -mno-red-zone)
+FREESTANDING_LIB_CFLAGS = -std=c11 -ffreestanding -fshort-wchar $(FREESTANDING_REDZONE) \
+                          -fno-stack-protector -fno-builtin -DKEEL_FREESTANDING \
+                          -Iinclude -Ivendor/llhttp -Isrc
+FREESTANDING_LIB = libkeel_freestanding.a
+FREESTANDING_LIB_OBJ = $(FREESTANDING_CLIENT_SRC:.c=.freestanding.o)
+
+%.freestanding.o: %.c
+	$(FREESTANDING_LIB_CC) $(FREESTANDING_LIB_CFLAGS) -w -c -o $@ $<
+
+freestanding-lib:
+	@echo "== freestanding client archive: toolchain = $(FREESTANDING_LIB_CC) =="
+	@rm -f $(FREESTANDING_LIB_OBJ) $(FREESTANDING_LIB)
+	@for f in $(FREESTANDING_CLIENT_SRC); do \
+	  o=$${f%.c}.freestanding.o; \
+	  echo "  CC(freestanding) $$f"; \
+	  $(FREESTANDING_LIB_CC) $(FREESTANDING_LIB_CFLAGS) -w -c -o $$o $$f || exit 1; \
+	done
+	$(AR) rcs $(FREESTANDING_LIB) $(FREESTANDING_LIB_OBJ)
+	@echo "== symbol gate: undefined closure must be within the whitelist =="
+	@sh tests/freestanding_symbol_gate.sh $(FREESTANDING_LIB) $(NM)
+	@rm -f $(FREESTANDING_LIB_OBJ)
+
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

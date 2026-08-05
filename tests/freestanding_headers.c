@@ -17,14 +17,16 @@
  * already address-ABI-neutral (KlSockAddr) and byte-count-neutral (kl_ssize_t):
  *
  *   error, allocator, handle, sockaddr, socket, event, event_ctx, timer, url,
- *   parser, request, body_reader, chunked, drain, tls, h2, h2_client
+ *   parser, request, body_reader, chunked, drain, tls, h2, h2_client,
+ *   response, file_io
+ *
+ * response.h / file_io.h joined the gate in the off_t-neutralization step: the
+ * file size/offset types (KlResponse.file_size/offset, kl_response_file, the
+ * KlFileIO submit offset) are now uint64_t — non-negative, same neutral type as
+ * the internal sendfile seam (src/socket.h) — so neither header needs the hosted
+ * <sys/types.h> off_t any more.
  *
  * OUT-OF-GATE (deliberately NOT included here) and WHY:
- *   - response.h   — exposes off_t (KlResponse.file_size/offset, kl_response_file);
- *                    off_t is a hosted type. Neutralizing the file-offset type is
- *                    a later phase (the internal sendfile op already speaks
- *                    uint64_t), so response.h keeps <sys/types.h> for now.
- *   - file_io.h    — same off_t (submit offset); host-side backend header.
  *   - resolver.h, udp.h, udp_server.h, server.h, client.h, client_pool.h,
  *     proxy_protocol.h, connection.h, net.h — legitimately expose native socket
  *     addresses (sockaddr_storage / struct sockaddr) for EXCLUDED features; their
@@ -48,6 +50,8 @@
 #include <keel/tls.h>
 #include <keel/h2.h>
 #include <keel/h2_client.h>
+#include <keel/response.h>
+#include <keel/file_io.h>
 
 /* Compile-time assertions that the neutral integer types are the intended
  * pointer-width shapes (and thus need no hosted <sys/types.h>). */
