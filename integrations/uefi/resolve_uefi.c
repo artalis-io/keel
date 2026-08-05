@@ -33,11 +33,31 @@ static int parse_ipv4(const char *host, uint8_t out[4]) {
     return oct == 4 ? 0 : -1;
 }
 
+#ifdef KL_U4_STATIC_HOST
+/* Freestanding string compare (no libc guaranteed in this TU). */
+static int streq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+#endif
+
 int kl_resolve_sync(const char *host, uint16_t port, int socktype,
                     KlSockAddr *out, int max, int *n) {
     (void)socktype;
     if (!host || !out || max <= 0 || !n) return -1;
     uint8_t ip[4];
+#ifdef KL_U4_STATIC_HOST
+    /* Optional compile-time single-entry /etc/hosts: a name→IPv4 mapping so a
+     * pre-DNS (U-5) client can dial a HOSTNAME — needed so TLS verifies the server
+     * cert against a dNSName SAN (production TLS) rather than a bare IP. Set via
+     * -DKL_U4_STATIC_HOST="name" -DKL_U4_STATIC_IP="a.b.c.d". */
+    if (streq(host, KL_U4_STATIC_HOST)) {
+        if (parse_ipv4(KL_U4_STATIC_IP, ip) != 0) return -1;
+        if (kl_sockaddr_from_ipv4(&out[0], ip, port) != 0) return -1;
+        *n = 1;
+        return 0;
+    }
+#endif
     if (parse_ipv4(host, ip) != 0) return -1;
     if (kl_sockaddr_from_ipv4(&out[0], ip, port) != 0) return -1;
     *n = 1;
