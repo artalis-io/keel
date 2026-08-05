@@ -23,15 +23,24 @@ Status: **feasibility / design (2026-08-05).**
 >   `__chkstk` for llhttp's >4 KiB frame).
 > - **U-2** (#214) — `socket_efi_tcp4.c`: a `KlSocketProvider` over EFI_TCP4 (child/token/**generation**
 >   lifecycle; no-errno `EFI_STATUS`→`KlIoStatus`), proven send/recv → 200 in QEMU.
-> - **U-3** (#215) — **the culmination**: `event_efi.c` is a completion `KlEventProvider` injected on
->   the STOCK `libkeel_freestanding.a`; an unmodified async `KlClient` does
+> - **U-3** (#215) — **the plaintext culmination**: `event_efi.c` is a completion `KlEventProvider`
+>   injected on the STOCK `libkeel_freestanding.a`; an unmodified async `KlClient` does
 >   `GET http://<numeric>/ → 200` on bare firmware. Its `KlCompletionOps` (post_connect + drain
 >   emitting `KL_COMP_CONNECT`/`KL_COMP_WATCHER` + cancel) is the 1:1 real-firmware analogue of the
 >   F-7 mock harness. `KlClient` needed **zero** code changes (model-blind across io_uring/pollcomp/EFI).
+> - **U-4** (#216) — **HTTPS** `GET → 200` on bare firmware: mbedTLS 3.6.2 built **freestanding** for
+>   the EFI target, records over the U-3 completion backend. Still **zero** core change — the client
+>   already wires TLS via `cfg.tls` + `set_socket_provider(ev_ctx->sockets)`, so the mbedTLS socket-BIO
+>   rides EFI Transmit/Receive. `mbedtls_platform_uefi.c` supplies `mbedtls_hardware_poll`→EFI_RNG +
+>   `AllocatePool`/`FreePool` calloc/free + the errno/str/snprintf seams. Spike shortcuts: verify-none
+>   + weak-entropy fallback (OVMF has no EFI_RNG). Finding: the async client + mbedTLS adapter drop
+>   **close-delimited** (HTTP/1.0, no Content-Length) HTTPS responses (`tls_read` EOF→-1 → `KL_ERR_IO`);
+>   general, not EFI-specific — a `src/`/adapter follow-up. The `-DU4_MANUAL_DIAG` trace proved the
+>   full encrypted 200 arrives + decrypts over EFI_TCP4.
 >
-> Remaining F-8: **U-4** TLS (mbedTLS adapter over the EFI socket-BIO), **U-5** DNS (real `KlResolver`
-> over EFI_UDP4/EFI_DNS4, replacing the numeric `resolve_uefi.c`), **U-6** non-blocking token recv,
-> **U-7** ExitBootServices lifetime.
+> Remaining F-8: **U-5** DNS (real `KlResolver` over EFI_UDP4/EFI_DNS4, replacing the numeric
+> `resolve_uefi.c`), **U-6** non-blocking token recv, **U-7** ExitBootServices lifetime; plus the
+> close-delimited-HTTPS fix and production TLS (CA bundle + real EFI_RNG).
 This is the roadmap's real **Phase 10** (`docs/pal_transformation_design.md`, phase table) —
 UEFI feasibility + an optional prototype. It is *not* the lwIP-raw client work in
 `docs/phase10_lwip_raw_client_design.md` (that doc uses a local "Phase 10" label but is the
@@ -273,7 +282,7 @@ switch (`EFI_TCP6`).
 | Combination | Status |
 |-------------|--------|
 | EFI_TCP4 + EFI completion loop (client, plaintext) | **PROVEN — `KlClient GET → 200` in QEMU/OVMF (U-3, #215)** |
-| EFI_TCP4 + EFI completion loop (client, HTTPS) | *design; U-4* |
+| EFI_TCP4 + EFI completion loop (client, HTTPS) | **PROVEN — freestanding mbedTLS `GET → 200` in QEMU/OVMF (U-4, #216); verify-none + weak-entropy spike** |
 | EFI_UDP4 + EFI completion loop (DNS) | *design; U-5 (numeric `resolve_uefi.c` ships pre-DNS)* |
 | EFI_TCP4 + EFI completion loop (server) | *stretch; deferred (client-first)* |
 | Host EFI_TCP4 **mock** + completion driver (ASan gate) | **PROVEN — F-7 harness 57/57 (mock socket + completion provider)** |
