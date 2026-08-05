@@ -167,6 +167,26 @@ struct KlTls {
      * never touches the socket fd. Idempotent; safe to call on every handshake.
      */
     void (*set_socket_provider)(KlTls *self, const struct KlSocketProvider *sp);
+
+    /**
+     * @brief Did the peer cleanly close the TLS session? (optional)
+     *
+     * The read() contract has no distinct EOF code — a clean close and a fatal
+     * error both surface as -1 (0 means WANT_READ). That is fine for a length-
+     * delimited body, but a *close-delimited* response (HTTP/1.0, or `Connection:
+     * close` with no `Content-Length`) is finalized precisely by the peer closing,
+     * so the reader must tell a clean shutdown apart from an error.
+     *
+     * After read() returns -1, a caller may consult at_eof(): it returns 1 iff that
+     * -1 was a clean TLS shutdown (peer sent close_notify / graceful transport EOF),
+     * 0 otherwise. Lets the client treat a clean TLS EOF like a socket recv() of 0
+     * (finalize an in-flight response) instead of reporting KL_ERR_IO.
+     *
+     * Optional — NULL if the backend cannot report it; callers must treat a NULL
+     * hook as "unknown", preserving the pre-existing error behavior.
+     * @return 1 if the peer cleanly closed the session, else 0.
+     */
+    int (*at_eof)(KlTls *self);
 };
 
 /**

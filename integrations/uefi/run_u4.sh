@@ -107,9 +107,19 @@ while True:
     c, _ = srv.accept()
     threading.Thread(target=serve, args=(c,), daemon=True).start()
 PY
-echo "starting python TLS responder on 0.0.0.0:$TARGET_PORT ..."
-python3 "$CERTDIR/tlsd.py" "$TARGET_PORT" "$CERTDIR/c.pem" "$CERTDIR/k.pem" >/tmp/tlsd_u4.log 2>&1 &
-SS_PID=$!
+# U4_RESPONDER=close uses openssl s_server -www: HTTP/1.0, NO Content-Length (body
+# delimited by connection close) — the regression case for the close-delimited HTTPS
+# fix (KlTls.at_eof). Default (clen) = the Python Content-Length responder above.
+if [ "${U4_RESPONDER:-clen}" = "close" ]; then
+  echo "starting CLOSE-DELIMITED responder (openssl s_server -www, HTTP/1.0 no Content-Length) ..."
+  openssl s_server -accept "$TARGET_PORT" -cert "$CERTDIR/c.pem" -key "$CERTDIR/k.pem" \
+    -www -quiet -naccept 20 >/tmp/tlsd_u4.log 2>&1 &
+  SS_PID=$!
+else
+  echo "starting python TLS responder on 0.0.0.0:$TARGET_PORT ..."
+  python3 "$CERTDIR/tlsd.py" "$TARGET_PORT" "$CERTDIR/c.pem" "$CERTDIR/k.pem" >/tmp/tlsd_u4.log 2>&1 &
+  SS_PID=$!
+fi
 sleep 1
 cat /tmp/tlsd_u4.log 2>/dev/null || true
 echo "python TLS responder pid=$SS_PID on 0.0.0.0:$TARGET_PORT"

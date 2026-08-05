@@ -76,6 +76,7 @@ typedef struct {
     KlSocketHandle      fd;        /* cached for BIO callbacks (socket-BIO mode) */
     const KlSocketProvider *sp;    /* socket provider for BIO I/O (NULL = host default) */
     int                 handshake_done;
+    int                 eof_seen;  /* set when read() hit a clean close_notify/EOF (at_eof) */
     /* Completion (memory-BIO) mode — 8b-5. Active once feed_input() is first called:
      * the BIO reads ciphertext from in_buf (fed by the caller) and appends outgoing
      * ciphertext to out_buf (drained by the caller) instead of the socket fd. */
@@ -196,12 +197,23 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
 
     if (ret > 0)
         return ret;
-    if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
-        return -1;  /* clean shutdown or EOF */
+    if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
+        t->eof_seen = 1;  /* clean shutdown / EOF — at_eof() reports it */
+        return -1;
+    }
     if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
         return 0;   /* retry */
 
     return -1;  /* error */
+}
+
+/* at_eof: was the last read() -1 a clean TLS shutdown (close_notify/EOF)? See
+ * KlTls.at_eof — lets a caller finalize a close-delimited response instead of
+ * treating the -1 as an I/O error. */
+static int tls_at_eof(KlTls *self)
+{
+    KlMbedtlsTls *t = (KlMbedtlsTls *)self;
+    return t->eof_seen;
 }
 
 static kl_ssize_t tls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len)
@@ -280,6 +292,7 @@ static void tls_reset(KlTls *self)
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     mbedtls_ssl_session_reset(&t->ssl);
     t->handshake_done = 0;
+    t->eof_seen = 0;
     t->fd = KL_INVALID_SOCKET;
     /* Drop buffered ciphertext for the next request; keep the transport mode +
      * allocated rings for reuse across keep-alive. */
@@ -453,6 +466,7 @@ KlTls *kl_tls_mbedtls_create(KlTlsCtx *ctx, KlAllocator *alloc)
     t->base.feed_input    = tls_feed_input;      /* completion mode (8b-5) */
     t->base.drain_output  = tls_drain_output;
     t->base.set_socket_provider = tls_set_socket_provider;  /* framework auto-wires the provider */
+    t->base.at_eof        = tls_at_eof;          /* close-delimited response finalization */
 
     /* Completion (memory-BIO) mode starts off; feed_input() enables it. */
     t->comp_mode = 0;
