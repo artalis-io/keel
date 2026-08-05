@@ -4,9 +4,11 @@
  * Freestanding step B2b: the blocking poll()-based request/response path lives
  * here — connect_with_timeout, the sync TLS handshake, sync proxy CONNECT, the
  * send_*_sync / recv_response_sync loops, and the public kl_client_request[_s]
- * + kl_client_request_pooled (blocking) entry points. This is the only client
- * TU that uses read()/write()/kl_plat_poll1()/errno and blocking DNS, so a
- * freestanding async build links client_common + client_async without it.
+ * + kl_client_request_pooled (blocking) entry points. All I/O routes through the
+ * socket-provider seam (kl_sock_send/recv + kl_sock_io_status — no raw read()/
+ * write()/errno); the only hosted dependencies are the blocking wait
+ * (kl_plat_poll1) and blocking DNS, so a freestanding async build links
+ * client_common + client_async without this TU.
  *
  * All allocation through KlAllocator. No Hull dependencies.
  */
@@ -16,7 +18,6 @@
 #include <keel/decompress.h>
 #include <keel/parser.h>
 
-#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -73,7 +74,7 @@ static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
 
     int rc = kl_sock_connect(sockets, fd, csa);
 
-    if (rc < 0 && errno != EINPROGRESS) {
+    if (rc < 0 && kl_sock_io_status(sockets) != KL_IO_PENDING) {
         if (out_err) *out_err = KL_ERR_CONNECT;
         kl_sock_close(sockets, fd);
         return -1;
@@ -129,7 +130,7 @@ static KlSocketHandle unix_connect_with_timeout(const char *path, int timeout_ms
     }
 
     int rc = kl_sock_connect(sockets, fd, &usa);
-    if (rc < 0 && errno != EINPROGRESS) {
+    if (rc < 0 && kl_sock_io_status(sockets) != KL_IO_PENDING) {
         if (out_err) *out_err = KL_ERR_CONNECT;
         kl_sock_close(sockets, fd);
         return -1;
@@ -213,7 +214,8 @@ static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
 
 /* ── Proxy CONNECT handshake (sync) ──────────────────────────────── */
 
-static int proxy_connect_sync(KlSocketHandle fd, const char *host, uint16_t port,
+static int proxy_connect_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
+                                const char *host, uint16_t port,
                                 const char *proxy_auth, int timeout_ms)
 {
     char buf[KL_PROXY_RESPONSE_MAX];
@@ -238,9 +240,9 @@ static int proxy_connect_sync(KlSocketHandle fd, const char *host, uint16_t port
         if (pr <= 0)
             return -1;
 
-        ssize_t w = write(fd, buf + sent, (size_t)n - sent);
+        kl_ssize_t w = kl_sock_send(sockets, fd, buf + sent, (size_t)n - sent);
         if (w <= 0) {
-            if (w < 0 && errno == EINTR)
+            if (w < 0 && kl_sock_io_status(sockets) == KL_IO_INTERRUPTED)
                 continue;
             return -1;
         }
@@ -257,9 +259,9 @@ static int proxy_connect_sync(KlSocketHandle fd, const char *host, uint16_t port
         if (pr <= 0)
             return -1;
 
-        ssize_t r = read(fd, buf + recv_len, sizeof(buf) - 1 - recv_len);
+        kl_ssize_t r = kl_sock_recv(sockets, fd, buf + recv_len, sizeof(buf) - 1 - recv_len);
         if (r <= 0) {
-            if (r < 0 && errno == EINTR)
+            if (r < 0 && kl_sock_io_status(sockets) == KL_IO_INTERRUPTED)
                 continue;
             return -1;
         }
@@ -636,7 +638,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
         memcpy(target_host, parsed.host, parsed.host_len);
         target_host[parsed.host_len] = '\0';
 
-        if (proxy_connect_sync(fd, target_host, (uint16_t)parsed.port,
+        if (proxy_connect_sync(sockets, fd, target_host, (uint16_t)parsed.port,
                                  proxy->auth, timeout_ms) != 0) {
             resp->error = KL_ERR_PROXY;
             goto cleanup;
