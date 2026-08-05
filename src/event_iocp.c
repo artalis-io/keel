@@ -692,10 +692,9 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             out[count].kind = KL_COMP_ACCEPT;
             out[count].ok = 1;
             out[count].accepted_fd = (KlSocketHandle)op->accept_sock;
-            if (rlen > 0 && (size_t)rlen <= sizeof(out[count].peer)) {
-                memcpy(&out[count].peer, remote, (size_t)rlen);
-                out[count].peer_len = (socklen_t)rlen;
-            }
+            if (rlen > 0 && remote)              /* native → neutral once, at the seam */
+                (void)kl_sockaddr_from_native(&out[count].peer, remote,
+                                              (socklen_t)rlen);
             count++;
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_READ) {
@@ -765,13 +764,19 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             if (bytes > 0) {
                 /* WSARecvMsg fills umsg.namelen (source); WSARecvFrom fills src_len. */
                 int slen = op->via_recvmsg ? (int)op->umsg.namelen : op->src_len;
-                if (slen > 0 && (size_t)slen <= sizeof(out[count].peer)) {
-                    memcpy(&out[count].peer, &op->src, (size_t)slen);
-                    out[count].peer_len = (socklen_t)slen;
-                }
+                if (slen > 0)                    /* source: native → neutral at the seam */
+                    (void)kl_sockaddr_from_native(&out[count].peer,
+                                                  (struct sockaddr *)&op->src,
+                                                  (socklen_t)slen);
                 /* Local (dest) address from the pktinfo control message (WSARecvMsg path). */
-                if (op->via_recvmsg && op->udp->pktinfo)
-                    out[count].local_len = kl_udp_win_parse_local(&op->umsg, &out[count].local);
+                if (op->via_recvmsg && op->udp->pktinfo) {
+                    struct sockaddr_storage local_ss;
+                    socklen_t local_len = kl_udp_win_parse_local(&op->umsg, &local_ss);
+                    if (local_len)
+                        (void)kl_sockaddr_from_native(&out[count].local,
+                                                      (struct sockaddr *)&local_ss,
+                                                      local_len);
+                }
             }
             count++;
             iocp_op_free(op);

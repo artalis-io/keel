@@ -449,10 +449,8 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         ev->kind = KL_COMP_ACCEPT;
         ev->ok = 1;
         ev->accepted_fd = a;
-        if (slen > 0 && (size_t)slen <= sizeof(ev->peer)) {
-            memcpy(&ev->peer, &ss, (size_t)slen);
-            ev->peer_len = slen;
-        }
+        if (slen > 0)                            /* native → neutral once, at the seam */
+            (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&ss, slen);
         return 1;
     }
     case PC_READ:
@@ -534,12 +532,16 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         ev->ok = (n >= 0);
         ev->bytes = (n > 0) ? (size_t)n : 0;
         ev->buf = op->udp->recv_buf;
-        if (n >= 0 && msg.msg_namelen > 0 && (size_t)msg.msg_namelen <= sizeof(ev->peer)) {
-            memcpy(&ev->peer, &ss, (size_t)msg.msg_namelen);
-            ev->peer_len = msg.msg_namelen;
+        if (n >= 0 && msg.msg_namelen > 0)         /* source: native → neutral at the seam */
+            (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&ss,
+                                          msg.msg_namelen);
+        if (n >= 0 && op->udp->pktinfo) {          /* local (dest) addr via pktinfo cmsg */
+            struct sockaddr_storage local_ss;
+            socklen_t local_len = kl_udp_parse_local(&msg, &local_ss);
+            if (local_len)
+                (void)kl_sockaddr_from_native(&ev->local,
+                                              (struct sockaddr *)&local_ss, local_len);
         }
-        if (n >= 0 && op->udp->pktinfo)            /* local (dest) addr via pktinfo cmsg */
-            ev->local_len = kl_udp_parse_local(&msg, &ev->local);
         if (n >= 0) {
             if (op->udp->recv_gro)                 /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&msg);
