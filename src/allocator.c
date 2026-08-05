@@ -1,31 +1,13 @@
+/*
+ * allocator.c — allocator DISPATCH only (no default implementation).
+ *
+ * This TU is pure vtable dispatch over KlAllocator and pulls in NO libc: a
+ * bring-your-own-allocator build (and a future freestanding/UEFI profile) links
+ * this without dragging in a hosted heap. The stdlib default allocator lives in
+ * its own TU (allocator_default_stdlib.c) so it can be excluded, and alternate
+ * defaults (e.g. a UEFI AllocatePool backing) can be swapped in at link time.
+ */
 #include <keel/allocator.h>
-#include <stdlib.h>
-
-static void *stdlib_malloc(void *ctx, size_t size) {
-    (void)ctx;
-    return malloc(size);
-}
-
-static void *stdlib_realloc(void *ctx, void *ptr, size_t old_size, size_t new_size) {
-    (void)ctx;
-    (void)old_size;
-    return realloc(ptr, new_size);
-}
-
-static void stdlib_free(void *ctx, void *ptr, size_t size) {
-    (void)ctx;
-    (void)size;
-    free(ptr);
-}
-
-KlAllocator kl_allocator_default(void) {
-    return (KlAllocator){
-        .malloc  = stdlib_malloc,
-        .realloc = stdlib_realloc,
-        .free    = stdlib_free,
-        .ctx     = NULL,
-    };
-}
 
 void *kl_malloc(KlAllocator *a, size_t size) {
     return a->malloc(a->ctx, size);
