@@ -249,7 +249,7 @@ static int comp_tls_send_file_chunk(KlConn *c) {
     if (nr <= 0) return -1;
     KlIoVec seg = { fbuf, (size_t)nr };
     if (comp_tls_post_encrypted(c, &seg, 1) < 0) return -1;
-    c->res.file_offset += (off_t)nr;
+    c->res.file_offset += (uint64_t)nr;
     return 1;
 }
 

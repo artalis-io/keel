@@ -255,7 +255,7 @@ int kl_response_body_copy(KlResponse *res, const char *data, size_t len) {
     return 0;
 }
 
-void kl_response_file(KlResponse *res, KlSocketHandle fd, off_t size) {
+void kl_response_file(KlResponse *res, KlSocketHandle fd, uint64_t size) {
     res->body_mode = KL_BODY_FILE;
     res->file_fd = fd;
     res->file_size = size;
@@ -540,7 +540,7 @@ int kl_response_send(KlResponse *res) {
                 p += nw;
                 left -= (size_t)nw;
             }
-            res->file_offset += (off_t)((size_t)nr - left);
+            res->file_offset += (uint64_t)((size_t)nr - left);
             return (res->file_offset < res->file_size) ? 1 : 0;
         }
 
@@ -567,7 +567,7 @@ int kl_response_send(KlResponse *res) {
                 p += nw;
                 left -= (size_t)nw;
             }
-            res->file_offset += (off_t)((size_t)nr - left);
+            res->file_offset += (uint64_t)((size_t)nr - left);
             return (res->file_offset < res->file_size) ? 1 : 0;
         }
 
@@ -575,12 +575,10 @@ int kl_response_send(KlResponse *res) {
         (void)kl_sock_set_cork(sp, res->conn_fd, 1);
         size_t remaining = (size_t)(res->file_size - res->file_offset);
         while (remaining > 0) {
-            /* The seam offset is uint64_t (no off_t on the public API); convert
-             * around the call and write the advanced offset back to file_offset. */
-            uint64_t off = (uint64_t)res->file_offset;
+            /* file_offset is uint64_t end to end, matching the sendfile seam op —
+             * the kernel advances it in place, no off_t conversion needed. */
             ssize_t sent = kl_sock_sendfile(sp, res->conn_fd, res->file_fd,
-                                            &off, remaining);
-            res->file_offset = (off_t)off;
+                                            &res->file_offset, remaining);
             if (sent < 0) {
                 if (errno == EAGAIN) return 1;
                 return -1;

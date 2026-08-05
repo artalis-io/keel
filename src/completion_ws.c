@@ -11,6 +11,8 @@
 #include "completion.h"          /* kl_comp_post_recv */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_flush */
 #include <stdint.h>
+#include <sys/types.h>           /* ssize_t (TLS read return) — previously pulled
+                                    transitively via response.h before off_t neutralization */
 
 /* Drive an established WebSocket connection over the completion loop (8e-1). Feed
  * received bytes to the transport-agnostic WS frame core (kl_ws_server_on_readable_data,
