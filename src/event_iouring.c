@@ -753,10 +753,9 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         if (op->aborted || res < 0) { ev->ok = 0; return 1; }   /* driver just refills */
         ev->ok = 1;
         ev->accepted_fd = res;
-        if (op->peer_len > 0 && (size_t)op->peer_len <= sizeof(ev->peer)) {
-            memcpy(&ev->peer, &op->peer, (size_t)op->peer_len);
-            ev->peer_len = op->peer_len;
-        }
+        if (op->peer_len > 0)                    /* native → neutral once, at the seam */
+            (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&op->peer,
+                                          op->peer_len);
         return 1;
 
     case IOU_READ:
@@ -836,13 +835,16 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
         ev->buf = op->udp->recv_buf;
-        if (res >= 0 && op->msgh.msg_namelen > 0 &&
-            (size_t)op->msgh.msg_namelen <= sizeof(ev->peer)) {
-            memcpy(&ev->peer, &op->peer, (size_t)op->msgh.msg_namelen);
-            ev->peer_len = op->msgh.msg_namelen;
+        if (res >= 0 && op->msgh.msg_namelen > 0) /* source: native → neutral at the seam */
+            (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&op->peer,
+                                          op->msgh.msg_namelen);
+        if (res >= 0 && op->udp->pktinfo) {       /* local (dest) addr via pktinfo cmsg */
+            struct sockaddr_storage local_ss;
+            socklen_t local_len = kl_udp_parse_local(&op->msgh, &local_ss);
+            if (local_len)
+                (void)kl_sockaddr_from_native(&ev->local,
+                                              (struct sockaddr *)&local_ss, local_len);
         }
-        if (res >= 0 && op->udp->pktinfo)         /* local (dest) addr via pktinfo cmsg */
-            ev->local_len = kl_udp_parse_local(&op->msgh, &ev->local);
         if (res >= 0) {
             if (op->udp->recv_gro)                /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&op->msgh);

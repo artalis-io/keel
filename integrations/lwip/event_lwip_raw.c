@@ -71,7 +71,6 @@
 #include <keel/allocator.h>    /* kl_malloc / kl_free */
 #include <keel/sockaddr.h>     /* KlSockAddr marshalling at the seam boundary */
 #include <keel/datagram.h>     /* KlDatagramOps (LC-3a datagram data-plane) */
-#include "sockaddr_native.h"   /* kl_sockaddr_to_native — fill KL_COMP_UDP_RECV ev->peer */
 #include "keel_lwip_raw.h"     /* kl_event_provider_lwip_raw / kl_socket_provider_lwip_raw */
 #include "lwip_raw_glue.h"     /* the lwIP seam (no lwIP types) */
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
@@ -590,12 +589,9 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             ev->kind = KL_COMP_ACCEPT;
             ev->ok = 1;
             ev->accepted_fd = (KlSocketHandle)r->accepted;
-            /* completion_driver.c's comp_on_accept marshals ev->peer (a host struct sockaddr)
-             * via kl_sockaddr_from_native, keyed by ev->peer_len. peer_len 0 = "unavailable",
-             * which the driver handles by zeroing the conn's peer_addr. For loopback (peer
-             * address unused by the handler) we leave it 0 rather than pulling a host socket
-             * header in to synthesize a sockaddr_in. */
-            ev->peer_len = 0;
+            /* ev->peer is left zeroed (KL_AF_UNSPEC = "unavailable"); the driver keys on
+             * kl_sockaddr_family(&ev->peer). For loopback the peer address is unused by the
+             * handler, so we don't synthesize one. */
             count++;
             continue;
         }
@@ -710,9 +706,9 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
 
     /* (d) UDP datagram completions (LC-3a): the glue's udp slots surface inbound datagrams
      * (KL_LWR_UDP_RECV) + completed sends (KL_LWR_UDP_SEND). Translate each into KL_COMP_UDP_RECV /
-     * KL_COMP_UDP_SEND targeting the KlUdp* the machine posted. For a RECV, marshal the raw source
-     * IPv4 bytes + port into a native sockaddr in ev->peer (the driver re-marshals to KlSockAddr),
-     * and point ev->buf at the glue's staged payload (valid until the next udp drain). */
+     * KL_COMP_UDP_SEND targeting the KlUdp* the machine posted. For a RECV, store the raw source
+     * IPv4 bytes + port directly as the neutral KlSockAddr ev->peer (no native round-trip), and
+     * point ev->buf at the glue's staged payload (valid until the next udp drain). */
     KlLwrUdpRecord urecs[KL_LWR_MAX_DRAIN];
     int urmax = (max - count) < KL_LWR_MAX_DRAIN ? (max - count) : KL_LWR_MAX_DRAIN;
     if (urmax > 0) {
@@ -728,15 +724,8 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
                 ev->bytes = u->len;
                 ev->buf = (void *)u->data;
                 ev->truncated = u->truncated;
-                KlSockAddr src;
-                if (kl_sockaddr_from_ipv4(&src, u->src_ip, u->src_port) == 0) {
-                    struct sockaddr_storage ss;
-                    socklen_t sl = kl_sockaddr_to_native(&src, &ss);
-                    if (sl > 0 && (size_t)sl <= sizeof(ev->peer)) {
-                        memcpy(&ev->peer, &ss, (size_t)sl);
-                        ev->peer_len = sl;
-                    }
-                }
+                /* ev->peer is the neutral KlSockAddr directly — no native round-trip. */
+                (void)kl_sockaddr_from_ipv4(&ev->peer, u->src_ip, u->src_port);
             } else {   /* KL_LWR_UDP_SEND */
                 ev->kind = KL_COMP_UDP_SEND;
                 ev->ok = 1;

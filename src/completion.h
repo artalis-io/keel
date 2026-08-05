@@ -19,8 +19,7 @@
 
 #include <keel/connection.h>   /* KlConn */
 #include <keel/socket.h>       /* KlIoVec, KlSocketHandle */
-#include <keel/net.h>          /* struct sockaddr_storage, socklen_t */
-#include <keel/sockaddr.h>     /* KlSockAddr (KlCompletionOps.post_udp_send) */
+#include <keel/sockaddr.h>     /* KlSockAddr (event addrs + KlCompletionOps.post_udp_send) */
 #include <stdint.h>            /* uint64_t (KlCompletionOps.post_sendfile) */
 #include <stddef.h>
 
@@ -63,10 +62,11 @@ typedef struct {
     int            ok;         /* 0 = failed / peer-closed */
     KlSocketHandle accepted_fd;              /* ACCEPT: the new socket */
     void          *buf;                      /* UDP_RECV: the datagram buffer */
-    struct sockaddr_storage peer;            /* ACCEPT peer / UDP_RECV source addr */
-    socklen_t      peer_len;                 /* 0 if unavailable */
-    struct sockaddr_storage local;           /* UDP_RECV: local (dest) addr via pktinfo */
-    socklen_t      local_len;                /* 0 if unavailable (pktinfo off / backend lacks it) */
+    KlSockAddr     peer;                      /* ACCEPT peer / UDP_RECV source; family
+                                              * KL_AF_UNSPEC = unavailable. The backend
+                                              * converts its native address once at the seam. */
+    KlSockAddr     local;                     /* UDP_RECV local (dest) addr via pktinfo;
+                                              * family KL_AF_UNSPEC = unavailable. */
     int            gro_seg;                  /* UDP_RECV: GRO coalesced segment size, 0 = none */
     int            truncated;                /* UDP_RECV: 1 if the datagram was truncated (MSG_TRUNC) */
 } KlCompletionEvent;

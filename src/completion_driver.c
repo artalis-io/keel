@@ -21,7 +21,7 @@
 #include "completion.h"          /* the abstract completion axis */
 #include "io_engine.h"           /* kl_io_engine_run_completion (the seam) */
 #include "socket.h"              /* kl_sock_* (close / tcp_nodelay via the seam) */
-#include "sockaddr_native.h"     /* kl_sockaddr_from_native (accept peer marshalling) */
+#include <keel/sockaddr.h>       /* kl_sockaddr_family — neutral accept/UDP addrs from the event */
 #include "platform.h"            /* kl_plat_file_pread — TLS file body chunks (8c-2) */
 #include <keel/udp.h>            /* KlUdp (KL_COMP_UDP_RECV target) */
 #include <keel/proxy_protocol.h> /* kl_cidr_match — PROXY-over-completion accept gate */
@@ -574,12 +574,9 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
         goto refill;
     }
     nc->peer_source = KL_PEER_SOCKET;
-    /* Marshal the backend's native accept peer (still sockaddr in KlCompletionEvent)
-     * into the neutral KlSockAddr; KL_AF_UNSPEC = unavailable. */
-    if (ev->peer_len == 0 ||
-        kl_sockaddr_from_native(&nc->peer_addr, (const struct sockaddr *)&ev->peer,
-                                ev->peer_len) != 0)
-        memset(&nc->peer_addr, 0, sizeof(nc->peer_addr));
+    /* The backend already converted the native accept peer to the neutral KlSockAddr
+     * once at its seam; copy it straight in. KL_AF_UNSPEC = unavailable. */
+    nc->peer_addr = ev->peer;
     nc->res.alloc = &s->alloc_storage;
     (void)kl_sock_set_tcp_nodelay(nc->ctx ? nc->ctx->sockets : NULL, nc->fd, 1);
 
@@ -742,24 +739,18 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         case KL_COMP_READ:   comp_on_read(server_of_ctx(ctx), &ev[i]);   break;
         case KL_COMP_WRITE:  comp_on_write(server_of_ctx(ctx), &ev[i]);  break;
         case KL_COMP_UDP_RECV: {  /* datagram — the target is a KlUdp*, no server */
-            /* Marshal the backend's native src/local (still host sockaddr in the
-             * KlCompletionEvent) to the neutral KlSockAddr at the seam boundary.
-             * A recv without a source name (peer_len 0, e.g. a connected socket) or
-             * an unrecognised family passes NULL rather than uninitialised stack. */
-            KlSockAddr ksrc, klocal;
-            int have_src = ev[i].peer_len &&
-                kl_sockaddr_from_native(&ksrc, (const struct sockaddr *)&ev[i].peer,
-                                        ev[i].peer_len) == 0;
-            int have_local = ev[i].local_len &&
-                kl_sockaddr_from_native(&klocal, (const struct sockaddr *)&ev[i].local,
-                                        ev[i].local_len) == 0;
+            /* The backend already converted src/local to the neutral KlSockAddr once at
+             * its seam. A recv without a source name (family KL_AF_UNSPEC, e.g. a
+             * connected socket) or without pktinfo passes NULL, not a zeroed address. */
+            int have_src   = kl_sockaddr_family(&ev[i].peer)  != KL_AF_UNSPEC;
+            int have_local = kl_sockaddr_family(&ev[i].local) != KL_AF_UNSPEC;
             KlUdpRxMeta meta = {
-                .local     = have_local ? &klocal : NULL,
+                .local     = have_local ? &ev[i].local : NULL,
                 .gro_seg   = ev[i].gro_seg,
                 .truncated = ev[i].truncated,
             };
             kl_udp_comp_on_recv((KlUdp *)ev[i].target, ev[i].buf, ev[i].bytes,
-                                have_src ? &ksrc : NULL, &meta);
+                                have_src ? &ev[i].peer : NULL, &meta);
             break;
         }
         case KL_COMP_UDP_SEND:
