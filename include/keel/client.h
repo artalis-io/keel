@@ -39,7 +39,7 @@
 /** @brief Chunked encoding buffer size. */
 #define KL_CLIENT_CHUNK_BUF_SIZE     4096
 /** @brief Chunked header size. */
-#define KL_CLIENT_CHUNK_HDR_SIZE     16    /**< Fits "FFFFFFFFFFFFFFFF\\r\\n" */
+#define KL_CLIENT_CHUNK_HDR_SIZE     24    /**< Chunk-size line: up to 16 hex digits + "\r\n" + NUL (18+1); 24 = margin. Real chunks are <= chunk_buf so <= 3 hex digits. */
 /** @brief Final chunk length. */
 #define KL_CLIENT_FINAL_CHUNK_LEN    5     /**< "0\\r\\n\\r\\n" */
 /** @brief Default Happy Eyeballs Connection Attempt Delay, ms (RFC 8305 §5). */
