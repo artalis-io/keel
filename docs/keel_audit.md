@@ -1,5 +1,55 @@
 # C Audit Report: KEEL
 
+## Tenth pass — freestanding portability phase (2026-08-05)
+
+**Scope:** the freestanding phase merged since the ninth pass (PRs #199–#210): the allocator split
+(A1), `completion.h`→`KlSockAddr` (A2), freestanding public headers + `kl_ssize_t`/off_t (A3/F0),
+`errno`→`KlIoStatus` (B1) + sync-proxy neutrality, the `completion_driver.c`→core/server/h2/ws and
+`client.c`→common/sync/async **TU splits** (B2a/B2b) behind `KlEventCtx` hooks + `src/event_ctx.c`,
+F-4 formatted-I/O elimination (`src/kl_cstr.c`) + the optional reference mem*/strlen
+(`src/kl_cstr_builtin.c`), and the multi-arch + PE-link gates (B1+B2). The lwip-raw accept-window
+UAF (M1, #208) was the ninth pass's M1 — now **fixed**.
+
+**Method:** the TU splits are pure code movement (nm-proven client_async.o/completion_core.o have
+no cross-stack deps; full suite + harness green) — not re-audited. A focused reviewer took the
+genuinely-NEW hand-written logic — `kl_cstr.c` (bounded parsers/formatters on **untrusted** URL/
+response input), `kl_cstr_builtin.c` (reference mem*), `event_ctx.c` (the split watcher API) — plus
+mechanical sweeps and the automated gate in the Apple container.
+
+**Automated tools + mechanical: CLEAN.** cppcheck **0 err/warn**; scan-build **"No bugs found"**;
+**64 suites** under ASan+UBSan (incl the new `test_kl_cstr` 6/6 + `test_kl_cstr_builtin` 5/5); the
+url parser (which now routes through `kl_strchr`/`kl_strstr`/`kl_parse_u16_decimal`) is fuzzed; no
+unsafe libc funcs, no raw malloc/free, no VLAs in the new TUs; hardening unchanged.
+
+### Findings
+
+| # | File:Line | Sev | Issue | Fix |
+|---|-----------|-----|-------|-----|
+| L1 | `include/keel/client.h:42` | Low (cosmetic) | `KL_CLIENT_CHUNK_HDR_SIZE 16` commented "Fits `FFFFFFFFFFFFFFFF\r\n`" — that line is 18B+NUL, doesn't fit 16. **No overflow**: `chunk_buf`=4096 → real chunk sizes ≤3 hex digits, and `kl_buf_append_hex` is bounded (returns -1→error) even adversarially. **Fixed**: bumped to 24 + accurate comment. |
+
+### Verdict (verified clean)
+- **`kl_cstr.c`** — the append builders never compute `off+len` directly (guard order `o>cap` →
+  `len>cap-o`), so no additive overflow and no NUL off-by-one; `kl_u64_to_dec/hex` bound the
+  `tmp[20]`/`tmp[16]` reversal + reject `n>cap`; `kl_parse_u16_decimal` rejects at the exact u16
+  boundary before any uint32 overflow; `kl_strstr`/`kl_strchr`/`kl_streq`/`kl_str_startswith` match
+  libc (empty needle, NUL, short strings). Every caller (sockaddr/url/client_common/client_async)
+  passes `sizeof(buf)` as cap and aborts on append failure — an adversarial oversized host/path/
+  header yields a clean failure, not an overflow. `kl_u64_to_*` don't NUL-terminate; the one raw
+  caller (`sockaddr.c` v6 formatter) memcpys exactly `r` + terminates itself; all others go through
+  `kl_buf_append_*` which write the NUL. **Clean.**
+- **`kl_cstr_builtin.c`** — memmove both directions + `d==s`/`n==0` early-out; unsigned memcmp
+  ordering; the self-referential-lowering foot-gun is disarmed (`-fno-builtin` base +
+  `-fno-tree-loop-distribute-patterns` on the self-contained target, probe-gated); out of CORE_SRC
+  so no duplicate-def on hosted/EDK2. **Clean.**
+- **`event_ctx.c`** — the split preserved the watcher-list invariants + the **H1 liveness guard**
+  (which lives in the `event_ctx.h` inline, so both `kl_event_ctx_run` and the completion driver
+  see it); add-failure unlinks+frees; `kl_event_ctx_run` heap path SIZE_MAX-guarded. **Clean.**
+
+Overall: **Low** risk — one cosmetic comment (fixed), no Critical/High/Medium. The new
+freestanding logic is correctly bounded, overflow-guarded, and NUL-termination-correct.
+
+---
+
 ## Ninth pass — lwIP-raw client axis (LC-0..LC-5) + full re-sweep (2026-08-05)
 
 **Scope:** the completion-native lwIP-raw **client** work merged since the eighth pass —

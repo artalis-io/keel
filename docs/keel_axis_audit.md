@@ -1,5 +1,79 @@
 # KEEL Networking Architecture Axis Audit
 
+## Eighth pass — the freestanding portability phase strengthens all three axes (2026-08-05)
+
+**Verdict: architecturally sound — every change in the freestanding phase (PRs #199–#211) either
+preserved or *improved* the axis separation.** No new findings; three concrete improvements + one
+future-provider validation. This pass reviews the phase's axis impact (the TU splits are movement,
+nm-proven; the new mechanisms are what matter).
+
+### Improvements to the axes
+
+1. **The completion driver is now genuinely feature-agnostic (Goal 3/4).** `completion_driver.c`
+   split into `completion_core.c` (the generic tick `kl_comp_run`: drain → WATCHER/CONNECT via
+   `kl_event_dispatch`, ACCEPT/READ/WRITE + UDP routed out, then timers) / `completion_server.c`
+   (KlConn/HTTP-1 + TLS memory-BIO) / `completion_h2.c` / `completion_ws.c`, decoupled via **two
+   opaque `KlEventCtx` hooks** — `comp_conn_dispatch` (set by the server) and `comp_udp_dispatch`
+   (set by `kl_udp_init`). The hooks take `const void *ev` so `KlCompletionEvent` (internal
+   `src/completion.h`) never reaches the public header — no backend-internal type leaks upward
+   (avoids the "generic event object exposing backend unions" smell). They're **per-loop fields,
+   not file-scope globals** (avoids "hidden global event-loop state"). nm-proven: `completion_core.o`
+   has no static ref to `comp_on_accept/read/write` or `kl_udp_comp_on_recv/send` — a client-only
+   completion link (the freestanding archive) pulls neither the server nor UDP. This is the cleanest
+   possible expression of "protocols/features sit above the generic completion axis."
+2. **Error classification is now a first-class SEAM op, not an errno leak (Goal 9 — the big win).**
+   B1 added `KlIoStatus` + `kl_sock_io_status(p)` (`src/socket.h`): the socket provider classifies
+   the last -1 (WOULD_BLOCK/INTERRUPTED/PENDING/CLOSED/RESET/FATAL); the errno mapping lives in
+   ONE place (`kl_sockdef_io_status`, the POSIX/Winsock seam), reached via the op-or-sockdef inline
+   exactly like `kl_sock_get_so_error`. The client (`client_async/sync/pool`, 16 sites) now reads
+   `kl_sock_io_status` — **NOT `errno`** (client_async.c: 0 errno). Previously the protocol/client
+   read `errno`, a platform detail, on every would-block/connect-pending — a real axis leak. Now a
+   non-errno provider (EFI, a pure mock) classifies natively; hosted providers fall back to the
+   errno map with zero behavior change. U-0 confirmed `EFI_STATUS → KlIoStatus` is a clean switch.
+3. **The completion event carries only `KlSockAddr` (Goal 5).** A2 removed `<keel/net.h>` +
+   `struct sockaddr_storage` from `src/completion.h`; backends convert native→Keel once at their
+   seam. One fewer host-ABI seam in the core event; benefits lwIP + EFI alike.
+
+### Mechanical independence (Goal 4) — PASS
+The new client TUs (`client_common/async/sync.c`) + `completion_core.c` + `event_ctx.c` include NO
+platform networking/event header and call no `epoll_*`/`kevent`/`io_uring_*`/`WSA*`/`OVERLAPPED`
+(the sole hit is `event_ctx.c`'s `kl_socket_provider_has_cap` — a capability query through the
+seam). `event_lwip_raw.c` remains lwIP-free (7th pass). The H1 watcher-liveness guard (9th c-audit
+/ #198) survived the `async.c`→`event_ctx.c` split intact — it lives in the `event_ctx.h` inline,
+so both `kl_event_ctx_run` and the completion driver see it.
+
+### Goal 14 (future providers) — VALIDATED, not just assessed
+U-0 (#211) ran a **raw EFI_TCP4 GET → 200 under QEMU/OVMF**, empirically confirming the completion
++ pointer-handle model maps onto EFI tokens. The 6 lifecycle findings (type-0 token events;
+`Poll()`+`CheckEvent()` pump = "the loop IS the firmware pump"; opened-child-protocol; DHCP async;
+`EFI_STATUS`→KlIoStatus clean switch; teardown ordering) show the existing `KlCompletionOps`
+contract (`post_connect`/`cancel`/`drain`) needs no new abstraction for EFI_TCP4 — a client-driving
+backend uses only `post_connect` + `cancel` + a `drain` emitting `KL_COMP_CONNECT`/`WATCHER`. The
+UEFI blocker is now the freestanding LIBC surface (delivered: mem*/strlen, self-contained archive),
+not the axis model.
+
+### Automated gate
+cppcheck 0; scan-build "No bugs found"; 64 suites under ASan+UBSan (incl the split TUs + the new
+`test_kl_cstr`/`test_kl_cstr_builtin`); the freestanding archive symbol-gated for x86_64 + aarch64;
+the freestanding harness runs the client over a mock completion provider 57/57 (ASan+UBSan+LSan) —
+the "equivalent protocol behavior over a mock event/socket provider" this skill asks for; io_uring
+(56) + loopback-raw gates green across the phase's PRs.
+
+### Compatibility matrix (unchanged from 7th pass + one addition)
+| Combination | Status |
+|-------------|--------|
+| Linux epoll / Darwin kqueue / Linux io_uring (default) | production |
+| Winsock + WSAPoll / IOCP | buildable + MinGW-gated |
+| pollcomp double | CI/ASan gate |
+| lwIP-raw (server + client + UDP + DNS + HTTPS) | loopback-verified, ASan-clean |
+| **Freestanding client archive (mock completion provider)** | **host harness 57/57 (ASan+UBSan+LSan); CRT-less PE/COFF link x86_64+aarch64; U-0 raw EFI_TCP4 GET in QEMU** |
+| EFI_TCP4 provider (real KlClient over EFI) | designed + U-0-validated; U-1..U-3 pending |
+
+No changes made in this pass (review-only; the one code touch this session — `KL_CLIENT_CHUNK_HDR_SIZE`
+— is a cosmetic c-audit L1, not an axis issue).
+
+---
+
 ## Seventh pass — the lwIP-raw CLIENT axis validates the third event model end to end (2026-08-05)
 
 **Verdict: architecturally sound.** The completion-native lwIP-raw provider — the third event
