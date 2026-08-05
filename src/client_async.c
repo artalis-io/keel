@@ -834,8 +834,16 @@ static void async_handle_receiving(KlClient *c)
                 kl_watcher_rearm(c->ev_ctx, c->fd);
                 return;
             }
-            async_complete_error(c);
-            return;
+            /* A clean TLS shutdown surfaces as read()==-1 (the vtable read contract
+             * has no distinct EOF code). Treat it like a socket EOF so a close-
+             * delimited response (HTTP/1.0 / Connection: close, no Content-Length)
+             * is finalized rather than reported as KL_ERR_IO. */
+            if (c->tls && c->tls->at_eof && c->tls->at_eof(c->tls))
+                nread = 0;  /* fall through to EOF finalization */
+            else {
+                async_complete_error(c);
+                return;
+            }
         }
         if (nread == 0) {
             if (c->resp.status > 0)

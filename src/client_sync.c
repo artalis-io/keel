@@ -528,8 +528,13 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
             break;
 
         ssize_t nread = kl_client_io_read(sockets, fd, tls, buf, sizeof(buf));
-        if (nread < 0)
+        if (nread < 0) {
+            /* A clean TLS shutdown surfaces as read()==-1 (no distinct EOF code);
+             * finalize a close-delimited response rather than failing it. */
+            if (tls && tls->at_eof && tls->at_eof(tls) && resp->status > 0)
+                ret = 0;
             break;
+        }
         if (nread == 0) {
             if (resp->status > 0)
                 ret = 0;
