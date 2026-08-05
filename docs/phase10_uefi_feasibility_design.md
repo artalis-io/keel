@@ -38,9 +38,19 @@ Status: **feasibility / design (2026-08-05).**
 >   general, not EFI-specific — a `src/`/adapter follow-up. The `-DU4_MANUAL_DIAG` trace proved the
 >   full encrypted 200 arrives + decrypts over EFI_TCP4.
 >
-> Remaining F-8: **U-5** DNS (real `KlResolver` over EFI_UDP4/EFI_DNS4, replacing the numeric
-> `resolve_uefi.c`), **U-6** non-blocking token recv, **U-7** ExitBootServices lifetime; plus the
-> close-delimited-HTTPS fix and production TLS (CA bundle + real EFI_RNG).
+> - **close-delimited-HTTPS fix** (#217) — general async+sync client bug (TLS EOF → `KL_ERR_IO`
+>   dropped an HTTP/1.0 body); fixed additively via an optional `KlTls.at_eof()` hook, proven e2e
+>   over EFI_TCP4.
+> - **U-4 production TLS** (#218, `U4_MODE=prod`) — CA-verified server cert (dNSName SAN + embedded
+>   CA → `VERIFY_REQUIRED`; client dials a hostname mapped by a compile-time hosts entry) + **real
+>   EFI_RNG** (fail-closed; QEMU `virtio-rng-pci` makes stock OVMF publish `EFI_RNG_PROTOCOL`).
+> - **U-5** (#219) — **DNS over EFI_UDP4**: a stock freestanding `KlClient` resolves a real hostname
+>   (`keel.test`) via an A-query over EFI_UDP4 (`spikes/uefi/efi_udp4.h` + `dns_uefi.c`, wired into
+>   `kl_resolve_sync`), then connects (EFI_TCP4) + GET → 200 on bare firmware. Bounds-safe DNS parse.
+>
+> **The EFI client is functionally complete on bare firmware: plaintext + HTTPS (CA-verified, real
+> RNG) + DNS.** Remaining F-8: **U-6** non-blocking token recv (drop the internal send/recv pump for
+> a fully-async drain — needed for an EFI *server*), **U-7** ExitBootServices lifetime.
 This is the roadmap's real **Phase 10** (`docs/pal_transformation_design.md`, phase table) —
 UEFI feasibility + an optional prototype. It is *not* the lwIP-raw client work in
 `docs/phase10_lwip_raw_client_design.md` (that doc uses a local "Phase 10" label but is the
@@ -283,7 +293,7 @@ switch (`EFI_TCP6`).
 |-------------|--------|
 | EFI_TCP4 + EFI completion loop (client, plaintext) | **PROVEN — `KlClient GET → 200` in QEMU/OVMF (U-3, #215)** |
 | EFI_TCP4 + EFI completion loop (client, HTTPS) | **PROVEN — freestanding mbedTLS `GET → 200` in QEMU/OVMF (U-4, #216); verify-none + weak-entropy spike** |
-| EFI_UDP4 + EFI completion loop (DNS) | *design; U-5 (numeric `resolve_uefi.c` ships pre-DNS)* |
+| EFI_UDP4 DNS (A-query resolve) | **PROVEN — `resolve keel.test → GET → 200` in QEMU/OVMF (U-5, #219); bounds-safe parse, sync** |
 | EFI_TCP4 + EFI completion loop (server) | *stretch; deferred (client-first)* |
 | Host EFI_TCP4 **mock** + completion driver (ASan gate) | **PROVEN — F-7 harness 57/57 (mock socket + completion provider)** |
 | IPv6 (`EFI_TCP6`) | *out of first cut (family switch)* |
