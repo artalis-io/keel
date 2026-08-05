@@ -1036,7 +1036,42 @@ freestanding-lib:
 	@sh tests/freestanding_symbol_gate.sh $(FREESTANDING_LIB) $(NM)
 	@rm -f $(FREESTANDING_LIB_OBJ)
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib
+# ── Freestanding host mock harness (F-7) ──────────────────────────────────────
+# Proves libkeel_freestanding.a's async client actually RUNS end-to-end on the
+# host over MOCKED platform hooks + socket provider + completion event provider —
+# no real syscalls, no loopback socket, deterministic (advanceable mock clock).
+# The acceptance milestone from docs/phase10_uefi_feasibility_design.md ("performs
+# an HTTP/1.1 GET over a mock completion provider") before any UEFI work.
+#
+# TOOLCHAIN CHOICE (documented, per the task): rather than linking the
+# clang-freestanding ARCHIVE (whose objects are not ASan-instrumented), we compile
+# the SAME FREESTANDING_CLIENT_SRC manifest with the HOST ASan/UBSan toolchain +
+# -DKEEL_FREESTANDING into the harness. That way ASan/UBSan instrument the LIBRARY
+# code too (not just the harness), so a use-after-free / leak inside the client's
+# completion state machine — the whole point of F-7 — is actually caught. The
+# archive's link closure is still enforced separately by `make freestanding-lib`.
+FREESTANDING_HARNESS_BIN = tests/freestanding_harness$(EXE)
+FREESTANDING_HARNESS_SAN = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
+# Freestanding client TUs + the F-5 host platform TU + the harness, all one CC pass.
+FREESTANDING_HARNESS_SRC = $(FREESTANDING_CLIENT_SRC) \
+                           tests/freestanding_host_platform.c \
+                           tests/freestanding_harness.c
+FREESTANDING_HARNESS_CFLAGS = -std=c11 -DKEEL_FREESTANDING \
+                              -Iinclude -Ivendor/llhttp -Isrc -Itests \
+                              $(FREESTANDING_HARNESS_SAN)
+freestanding-harness:
+	@echo "== freestanding host mock harness (ASan+UBSan+LSan, -DKEEL_FREESTANDING) =="
+	$(CC) $(FREESTANDING_HARNESS_CFLAGS) -w -o $(FREESTANDING_HARNESS_BIN) \
+	    $(FREESTANDING_HARNESS_SRC)
+	@echo "== run =="
+	@# LSan (detect_leaks) is Linux-only; macOS ASan aborts at startup if asked for it.
+	@# On macOS the harness's own counting allocator asserts live==0 per scenario, so
+	@# leaks are still caught. In the Linux container both LSan AND the counter run.
+	@LEAKS=$$(uname -s | grep -qi linux && echo detect_leaks=1 || echo detect_leaks=0); \
+	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_HARNESS_BIN)
+	@rm -f $(FREESTANDING_HARNESS_BIN)
+
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan
