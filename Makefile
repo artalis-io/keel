@@ -189,7 +189,8 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/error.c src/versio
            src/body_reader_multipart.c src/chunked.c src/cors.c \
            src/websocket.c src/websocket_client.c \
            src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
-           src/client.c src/client_pool.c src/redirect.c src/sse.c \
+           src/client_common.c src/client_sync.c src/client_async.c \
+           src/client_pool.c src/redirect.c src/sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c \
@@ -824,7 +825,8 @@ analyze:
 # no direct socket-header include. Address<->platform marshalling is confined to
 # the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
-AXIS_PROTO_TUS = src/client.c src/h2_client.c src/websocket_client.c \
+AXIS_PROTO_TUS = src/client_common.c src/client_sync.c src/client_async.c \
+                 src/h2_client.c src/websocket_client.c \
                  src/connection.c src/server.c src/h2.c src/websocket.c \
                  src/sse.c src/response.c src/redirect.c src/client_pool.c \
                  src/resolver_cache.c
