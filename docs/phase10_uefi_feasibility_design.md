@@ -325,6 +325,73 @@ absent).
 
 ---
 
+## F-5 — platform hooks: the freestanding embedder contract
+
+The F-0 archive names the symbols it leaves undefined; **F-5** pins down what an embedder must
+actually *implement* to satisfy that closure, and provides a **host reference implementation** for
+the F-7 harness (`tests/freestanding_host_platform.c`).
+
+**The minimal platform seam (plaintext HTTP/1.1 client):**
+
+| Hook | Purpose | Freestanding note |
+|------|---------|-------------------|
+| `uint64_t kl_monotonic_ms(void)` | Monotonic millisecond clock. Backs `kl_timer` deadlines, the Happy-Eyeballs attempt delay, and the request deadline. | UEFI: an `EFI_TIMER` tick counter / `GetTime`. The harness uses a **mock, advanceable** clock (`fs_clock_set`/`fs_clock_advance`) so timeouts are deterministic with no sleeps. |
+| `void kl_plat_random(void *, size_t)` | Randomness (DNS query-id / cookie / TLS entropy). | **Reserved** — the plaintext client archive does not pull it (no DNS/TLS in the manifest). A REAL freestanding build MUST fail-closed or use `EFI_RNG_PROTOCOL`; the harness's deterministic PRNG is **test-only** and cryptographically worthless. |
+| `int kl_resolve_sync(...)` | Blocking name→`KlSockAddr`. | See below — a numeric-only reference, never blocking DNS. |
+| a `KlSocketProvider` | socket/connect/send/recv/close/get_so_error/io_status/set_nonblocking/set_nosigpipe, advertising `KL_SOCK_CAP_OVERLAPPED` for a completion loop. | U-2 (EFI_TCP4). Fills the `kl_sockdef_*` fallbacks so the built-in defaults are never reached. |
+| a `KlEventProvider` + `KlCompletionOps` | `drain` + `post_connect` + `cancel` (+ `add`/`mod`/`del`/`caps`/`native_provider`). | U-3 (EFI tokens/events). Injected via `kl_event_ctx_init_ex`, so the `kl_event_*_builtin`/`kl_comp_ops_builtin` fallbacks are never reached. |
+
+Nothing more for a plaintext client. TLS/ws add a `KlTls` backend + its entropy (`kl_plat_random`
+/ EFI_RNG); DNS (U-5) adds a `KlResolver` or a real `kl_resolve_sync` over EFI_UDP4/EFI_DNS4.
+
+**`kl_resolve_sync`: MOCKED, not trimmed (finding).** The archive genuinely *references*
+`kl_resolve_sync` — `client_async.c`'s sync-DNS *fallback* (reached when `client_pick_resolver`
+returns NULL, which under `KEEL_FREESTANDING` it always does) still calls it, and numeric address
+literals also flow through that fallback. Trimming would mean `#ifdef`-ing out both call sites
+*and* their surrounding blocks (a real `src/` change) and would leave a freestanding client unable
+to dial even a numeric literal without a resolver. The design already whitelists it as "the tiny
+platform seam", so the correct move is to **provide a numeric-only reference** (dotted-quad IPv4
+parse; any non-numeric host fails — a freestanding client with no resolver *cannot* resolve names).
+That is exactly what a minimal embedder ships pre-DNS (U-5). The F-7 harness itself drives the
+client via `cfg->resolver`, so it never *executes* `kl_resolve_sync` — but the symbol stays a link
+dependency, hence the mock. **No `src/` change was required for F-5/F-7.**
+
+## F-7 — host mock harness: the client RUNS on injected hooks + mocks
+
+`tests/freestanding_harness.c` (+ `make freestanding-harness`) is the acceptance milestone: the
+F-0 client archive's async state machine **runs an HTTP/1.1 GET end-to-end** on the host over a
+**mock socket provider** + **mock completion event provider** + **mock resolver** + the F-5 host
+platform hooks — **no real syscalls, no `errno`, no loopback socket** — under ASan+UBSan (+LSan on
+Linux) with a per-scenario counting-allocator leak check.
+
+**The emulated-readiness shape (the reusable model, and a UEFI-readiness finding).** A pure mock
+*is* sufficient — but only because the client's completion path is **connect-over-completion,
+send/recv-over-synchronous-ops**, identical to the shipped pollcomp/lwip-raw backends: the client
+posts `kl_comp_post_connect` (→ `KL_COMP_CONNECT`), then for I/O it arms `KL_EVENT_WRITE`/`READ`
+watchers and calls `kl_sock_send`/`recv`, re-arming on `KL_IO_WOULD_BLOCK`; the backend's `drain`
+relays each armed watch as a `KL_COMP_WATCHER`. So a completion backend (EFI_TCP4 included) that
+wants to drive KEEL's client needs **only** `post_connect` + `cancel` + a `drain` that emits
+`KL_COMP_CONNECT` and relays armed watches — it does **not** need `post_recv`/`post_send` for the
+client (those are the *server* driver's path). This is the concrete U-3 client contract, now
+exercised on the host.
+
+**Toolchain choice:** the harness compiles the `FREESTANDING_CLIENT_SRC` manifest with the **host
+ASan/UBSan toolchain** + `-DKEEL_FREESTANDING` (rather than linking the clang-freestanding
+*archive*, whose objects are not instrumented), so ASan/UBSan cover the **library** code — a
+use-after-free inside the client's completion state machine is the whole point of F-7. The
+archive's link closure is still enforced independently by `make freestanding-lib`.
+
+**Scenarios (all deterministic; each asserts result AND zero leak):** 1 happy path (200 + body),
+2 connect refused, 3 partial send + `WOULD_BLOCK` re-arm, 4 fragmented recv (3 chunks +
+`WOULD_BLOCK`), 5 peer close mid-response, 6 timeout (advance mock clock past the deadline),
+7 cancel mid-flight (no UAF), 8 response-size cap exceeded, 9 allocation failure (sweep early
+malloc indices), 10 completion-after-cancel / stale completion (exercises the `kl_event_dispatch`
+watcher-liveness guard). Result: **57/57 checks PASS**, ASan/UBSan clean, zero leaks. **No real
+freestanding defect was exposed** — the archive's async client runs correctly over fully mocked,
+non-hosted hooks, which retires the host-side risk before the U-0 QEMU/OVMF spike.
+
+---
+
 *Feasibility + design only for §§1–11. No firmware code/build/commit in this document. Doc path:
 `docs/phase10_uefi_feasibility_design.md`. This is the roadmap's Phase 10; the lwIP-raw client
 work lives in `docs/phase10_lwip_raw_client_design.md` (roadmap Phase 9). Cross-referenced from
