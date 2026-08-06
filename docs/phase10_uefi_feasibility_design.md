@@ -47,10 +47,23 @@ Status: **feasibility / design (2026-08-05).**
 > - **U-5** (#219) — **DNS over EFI_UDP4**: a stock freestanding `KlClient` resolves a real hostname
 >   (`keel.test`) via an A-query over EFI_UDP4 (`spikes/uefi/efi_udp4.h` + `dns_uefi.c`, wired into
 >   `kl_resolve_sync`), then connects (EFI_TCP4) + GET → 200 on bare firmware. Bounds-safe DNS parse.
+> - **U-6** (#221) — **non-blocking, drain-polled EFI_TCP4 recv** (was a blocking internal pump): a
+>   provider-owned rx buffer + `kl_uefi_socket_recv_ready()`; the drain relays READ only when data is
+>   ready. Removes the per-op event-loop block (timers fire mid-receive; the foundation for an EFI
+>   *server*). Coordinated fixes kept TLS working over a would-block-mid-record: `errno=EAGAIN` on the
+>   provider's would-block, and an additive `client_async.c` fix (a TLS `read()==0` is WANT_READ, not
+>   EOF; real EOF is `-1`+`at_eof`).
+> - **U-7** (#222) — **ExitBootServices lifetime**: `kl_uefi_shutdown()` releases the whole stack
+>   (socket → event → platform timer/EBS event); an `EVT_SIGNAL_EXIT_BOOT_SERVICES` notify fail-closes
+>   the providers after EBS. Teardown proven observably — the monotonic clock freezes once its timer is
+>   released.
 >
-> **The EFI client is functionally complete on bare firmware: plaintext + HTTPS (CA-verified, real
-> RNG) + DNS.** Remaining F-8: **U-6** non-blocking token recv (drop the internal send/recv pump for
-> a fully-async drain — needed for an EFI *server*), **U-7** ExitBootServices lifetime.
+> **F-8 IS COMPLETE. The EFI network client is functionally complete AND lifetime-clean on bare
+> firmware: plaintext + HTTPS (CA-verified, real EFI_RNG) + DNS, non-blocking recv, boot-services-
+> correct teardown.** Beyond F-8 (future, out of the client scope): an EFI *server* (needs a
+> freestanding server archive — a separate effort; U-6's non-blocking recv is its prerequisite),
+> EFI_TCP6/IPv6, firmware `EFI_DNS4` (vs the U-5 raw resolver), and completion-mode TLS for a
+> fully-async HTTPS server.
 This is the roadmap's real **Phase 10** (`docs/pal_transformation_design.md`, phase table) —
 UEFI feasibility + an optional prototype. It is *not* the lwIP-raw client work in
 `docs/phase10_lwip_raw_client_design.md` (that doc uses a local "Phase 10" label but is the
