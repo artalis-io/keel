@@ -158,12 +158,15 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
     print_line("U-2: --- response begin ---");
     static char rxbuf[4096];
-    for (int loop = 0; loop < 400; loop++) {
+    /* U-6: recv() is now NON-BLOCKING — WOULD_BLOCK means "no data yet". Pump the
+     * stack ourselves via a short Stall between spins (the provider no longer loops
+     * internally), bounded so a wedged connection fails rather than hangs. */
+    for (int loop = 0; loop < 60000; loop++) {
         kl_ssize_t n = ops->recv(cx, fd, rxbuf, sizeof(rxbuf));
         if (n == 0) break;                 /* FIN / EOF */
         if (n < 0) {
             KlIoStatus s = ops->io_status(cx);
-            if (s == KL_IO_WOULD_BLOCK) continue;   /* keep pumping */
+            if (s == KL_IO_WOULD_BLOCK) { bs->Stall(1000); continue; }  /* pump + retry */
             if (s == KL_IO_CLOSED) break;
             print_line("\nU-2: recv() error");
             break;

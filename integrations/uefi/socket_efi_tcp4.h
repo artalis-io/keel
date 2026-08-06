@@ -121,4 +121,13 @@ int kl_uefi_socket_connect_poll(KlSocketHandle fd, int *out_ok);
 unsigned long long kl_uefi_conn_generation_h(KlSocketHandle fd);
 int kl_uefi_conn_valid_h(KlSocketHandle fd, unsigned long long generation);
 
+/* ── U-6 non-blocking-recv readiness probe ──────────────────────────────────
+ * The completion drain's READ-readiness test: return 1 iff recv() on @fd can
+ * return something NOW (buffered data, EOF, or a latched error), else 0. A
+ * single call is non-blocking — it posts a Receive token if none is outstanding
+ * and Polls+CheckEvents it exactly once; it never pumps/Stalls. This is what
+ * turns the old blocking recv pump into a drain-polled receive so the completion
+ * loop is never stalled for a whole recv (timers fire, ops interleave). */
+int kl_uefi_socket_recv_ready(KlSocketHandle fd);
+
 #endif /* KEEL_UEFI_SOCKET_EFI_TCP4_H */
