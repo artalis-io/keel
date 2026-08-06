@@ -194,6 +194,76 @@ static void gen_cert_ip_san(const char *ip_asc,
     X509_free(crt);
 }
 
+/* Push one dNSName SAN of exactly `len` bytes (may contain NUL/control) onto a
+ * GENERAL_NAMES stack. Used to build hostile SAN entries the adapter must omit. */
+static void push_dns_san(GENERAL_NAMES *gens, const unsigned char *bytes, int len)
+{
+    GENERAL_NAME   *gn  = GENERAL_NAME_new();
+    ASN1_IA5STRING *ia5 = ASN1_IA5STRING_new();
+    assert(gn && ia5);
+    assert(ASN1_STRING_set(ia5, bytes, len) == 1);
+    GENERAL_NAME_set0_value(gn, GEN_DNS, ia5);       /* gn takes ownership of ia5 */
+    assert(sk_GENERAL_NAME_push(gens, gn) > 0);
+}
+
+/* Generate a CA-signed leaf whose textual identity fields are HOSTILE:
+ *   - CN carries an embedded NUL ("trusted-user\0attacker")
+ *   - SANs: one clean ("good.example") + one with a comma+control byte + one
+ *     with an embedded NUL.
+ * The cert is otherwise valid and chains to the CA, so it passes verification;
+ * only the exposed KlPeerCert text must be canonicalized. */
+static void gen_cert_evil(EVP_PKEY *ca_key, X509 *ca_crt, PemPair *out)
+{
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+    assert(kctx);
+    assert(EVP_PKEY_keygen_init(kctx) == 1);
+    assert(EVP_PKEY_CTX_set_ec_paramgen_curve_nid(kctx, NID_X9_62_prime256v1) == 1);
+    assert(EVP_PKEY_keygen(kctx, &pkey) == 1);
+    EVP_PKEY_CTX_free(kctx);
+    assert(pkey);
+
+    X509 *crt = X509_new();
+    assert(crt);
+    X509_set_version(crt, 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(crt), (long)(rand() | 1));
+    X509_gmtime_adj(X509_getm_notBefore(crt), -3600);
+    X509_gmtime_adj(X509_getm_notAfter(crt), 3600 * 24 * 365);
+    X509_set_pubkey(crt, pkey);
+
+    /* CN with an embedded NUL. UTF8String stores 0x00 verbatim; the length is
+     * explicit so it is not treated as a C terminator. */
+    static const unsigned char evil_cn[] = "trusted-user\0attacker";
+    X509_NAME *name = X509_get_subject_name(crt);
+    assert(X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_UTF8,
+                                      evil_cn, (int)(sizeof(evil_cn) - 1), -1, 0) == 1);
+    X509_set_issuer_name(crt, X509_get_subject_name(ca_crt));
+
+    GENERAL_NAMES *gens = sk_GENERAL_NAME_new_null();
+    assert(gens);
+    push_dns_san(gens, (const unsigned char *)"good.example", 12);
+    static const unsigned char comma_ctrl[] = "evil,inj\x01" "ected";
+    push_dns_san(gens, comma_ctrl, (int)(sizeof(comma_ctrl) - 1));
+    static const unsigned char nul_dns[] = "a\0b";
+    push_dns_san(gens, nul_dns, (int)(sizeof(nul_dns) - 1));
+    assert(X509_add1_ext_i2d(crt, NID_subject_alt_name, gens, 0, 0) == 1);
+    GENERAL_NAMES_free(gens);
+
+    assert(X509_sign(crt, ca_key, EVP_sha256()) > 0);
+
+    BIO *cb = BIO_new(BIO_s_mem());
+    assert(PEM_write_bio_X509(cb, crt) == 1);
+    out->cert_pem = bio_to_str(cb);
+    BIO_free(cb);
+    BIO *kb = BIO_new(BIO_s_mem());
+    assert(PEM_write_bio_PrivateKey(kb, pkey, NULL, NULL, 0, NULL, NULL) == 1);
+    out->key_pem = bio_to_str(kb);
+    BIO_free(kb);
+
+    EVP_PKEY_free(pkey);
+    X509_free(crt);
+}
+
 /* ── Axis 1: socket-BIO handshake + round-trip ───────────────────── */
 
 static int nonblock(int fd) {
@@ -1047,6 +1117,83 @@ static void test_alloc_failure_injection(PemPair *ca, PemPair *server, PemPair *
     printf("  PASS: alloc-failure sweep completed without crash/UAF (ASan)\n");
 }
 
+/* Round-4 finding: textual peer-cert identities must be canonicalized. A client
+ * cert whose CN embeds a NUL ("trusted-user\0attacker") and whose SANs include
+ * comma/control/NUL bytes must NOT surface those bytes to the application: the CN
+ * is omitted (empty) and the hostile SANs are dropped, leaving only the clean one.
+ * Proves the fail-closed identity handling over a real mTLS handshake. */
+static void test_identity_canonicalization(KlAllocator *alloc, EVP_PKEY *ca_key,
+                                           X509 *ca_crt, PemPair *ca, PemPair *server)
+{
+    printf("== Finding (r4): CN/SAN identity canonicalization ==\n");
+    PemPair evil = {0};
+    gen_cert_evil(ca_key, ca_crt, &evil);
+
+    /* Server REQUIRES a client cert; the client presents the crafted 'evil' one. */
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem),
+        KL_MTLS_REQUIRED, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+    assert(kl_tls_openssl_client_ctx_set_cert(cctx,
+        (const unsigned char *)evil.cert_pem, strlen(evil.cert_pem),
+        (const unsigned char *)evil.key_pem, strlen(evil.key_pem)) == 0);
+
+    KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+    KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+    assert(srv && cli);
+    assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    int cfd = fds[0], sfd = fds[1];
+
+    /* Two safe outcomes are acceptable, both fail-closed:
+     *   (a) the backend rejects the malformed CN/SAN at the TLS layer outright
+     *       (e.g. LibreSSL parses the hostile SAN strictly and aborts), or
+     *   (b) the handshake completes and the adapter canonicalizes the identity —
+     *       CN omitted, hostile SANs dropped (OpenSSL/BoringSSL).
+     * What must NEVER happen is (b) surfacing the spoofable bytes. The normal-cert
+     * mTLS path in axis1_socket_bio proves a well-formed client cert DOES complete
+     * and yields its real identity, so a rejection here is specific to the hostile
+     * content — not a handshake defect. */
+    int hs = drive_handshake(cli, cfd, srv, sfd);
+    if (hs != 0) {
+        printf("  PASS: hostile-identity cert rejected at handshake (fail closed)\n");
+    } else {
+        KlPeerCert pc;
+        memset(&pc, 0, sizeof(pc));
+        assert(srv->peer_cert(srv, &pc) == 0);
+        assert(pc.verified == 1);               /* still chains to the CA */
+
+        printf("  subject_cn='%s' san='%s'\n", pc.subject_cn, pc.san);
+        /* CN carried an embedded NUL -> rejected, surfaced empty (fail closed). */
+        assert(pc.subject_cn[0] == '\0');
+        /* Only the clean DNS SAN survives; comma/control/NUL entries are dropped. */
+        assert(strstr(pc.san, "DNS:good.example") != NULL);
+        assert(strstr(pc.san, "evil") == NULL);
+        assert(strstr(pc.san, "inj") == NULL);
+        assert(strchr(pc.san, ',') == NULL);    /* no ambiguous unescaped comma */
+        /* The DER identity remains complete regardless of text canonicalization. */
+        assert(pc.der_len > 0 && pc.der != NULL);
+        assert(strlen(pc.fingerprint_sha256) == 64);
+        printf("  PASS: embedded-NUL CN rejected; malformed SANs omitted\n");
+    }
+
+    close(cfd);
+    close(sfd);
+    cli->destroy(cli);
+    srv->destroy(srv);
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+    pem_pair_free(&evil);
+}
+
 /* Round-3 finding 1: prove the TLS 1.2 minimum floor is actually enforced — a raw
  * client capped at an obsolete protocol (TLS 1.1) must NOT negotiate with the
  * adapter server. The adapter's SSL_CTX_set_min_proto_version(TLS1_2) return is now
@@ -1147,6 +1294,7 @@ int main(void) {
     test_truncation_modes(&alloc, &ca, &server);
     test_alloc_failure_injection(&ca, &server, &client);
     test_obsolete_protocol_rejected(&alloc, &server);
+    test_identity_canonicalization(&alloc, ca_key, ca_crt, &ca, &server);
 
     EVP_PKEY_free(ca_key);
     X509_free(ca_crt);

@@ -463,7 +463,48 @@ static const char *tls_alpn_protocol(KlTls *self)
 
 /* ── mTLS peer-certificate extraction ────────────────────────────── */
 
-/* Copy the CN of an X509_NAME into a NUL-terminated buffer. */
+/*
+ * Textual certificate identities (CN, DNS SAN) reach application authorization
+ * code as C strings, so they must be canonicalized before exposure. A value like
+ * "trusted-user\0attacker" would otherwise compare equal to "trusted-user" under
+ * strcmp() and read that way in logs — a spoofing vector. We therefore FAIL CLOSED:
+ * a field carrying an embedded NUL or a control character is omitted (left empty /
+ * dropped) rather than truncated or sanitized in place. The DER certificate and its
+ * SHA-256 fingerprint remain the canonical identity for exact matching.
+ */
+
+/* True if [p,p+len) is safe to surface as a textual identity: no NUL, no C0
+ * control char, no DEL. Multi-byte UTF-8 (bytes >= 0x80) is allowed. */
+static int identity_bytes_safe(const unsigned char *p, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        if (p[i] < 0x20 || p[i] == 0x7f)
+            return 0;
+    return 1;
+}
+
+/* True if [p,p+len) is a syntactically plausible DNS name: non-empty and made of
+ * LDH characters plus '.', '_', and a '*' wildcard. This rejects embedded NUL /
+ * control chars AND any byte (notably ',') that would make the comma-joined SAN
+ * list ambiguous, so no escaping of the joined representation is required. */
+static int dns_san_bytes_safe(const unsigned char *p, size_t len)
+{
+    if (len == 0)
+        return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = p[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') ||
+                 c == '-' || c == '.' || c == '_' || c == '*';
+        if (!ok)
+            return 0;
+    }
+    return 1;
+}
+
+/* Copy the CN of an X509_NAME into a NUL-terminated buffer. A CN carrying an
+ * embedded NUL or control char is rejected (buffer left empty) — see the
+ * canonicalization note above. */
 static void x509_name_cn(X509_NAME *name, char *out, size_t outlen)
 {
     if (outlen == 0)
@@ -484,6 +525,11 @@ static void x509_name_cn(X509_NAME *name, char *out, size_t outlen)
     int len = ASN1_STRING_to_UTF8(&utf8, s);
     if (len < 0 || !utf8)
         return;
+    /* Fail closed: omit an identity that could spoof a strcmp() authorization. */
+    if (!identity_bytes_safe(utf8, (size_t)len)) {
+        OPENSSL_free(utf8);
+        return;
+    }
     size_t n = (size_t)len < outlen - 1 ? (size_t)len : outlen - 1;
     memcpy(out, utf8, n);
     out[n] = '\0';
@@ -506,7 +552,8 @@ static void x509_extract_san(X509 *crt, char *out, size_t outlen)
         GENERAL_NAME *gn = sk_GENERAL_NAME_value(sans, i);
         if (!gn)
             continue;
-        char item[INET6_ADDRSTRLEN + 8];
+        /* Sized to hold "DNS:" + a maximum-length (253-byte) DNS name + NUL. */
+        char item[sizeof("DNS:") + 253];
         item[0] = '\0';
 
         if (gn->type == GEN_DNS) {
@@ -515,8 +562,10 @@ static void x509_extract_san(X509 *crt, char *out, size_t outlen)
             if (dlen < 0)
                 continue;
             size_t dl = (size_t)dlen;
-            if (dl > sizeof(item) - 5)
-                dl = sizeof(item) - 5;
+            /* Omit (don't truncate) a malformed or over-long DNS SAN — surfacing a
+             * partial/ambiguous name would defeat the canonicalization guarantee. */
+            if (!dns_san_bytes_safe(dns, dl) || dl > sizeof(item) - 5)
+                continue;
             memcpy(item, "DNS:", 4);
             memcpy(item + 4, dns, dl);
             item[4 + dl] = '\0';
