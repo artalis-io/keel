@@ -433,8 +433,14 @@ static void wsc_handle_connecting(KlWsClientConn *ws)
             wsc_error(ws, "TLS factory failed");
             return;
         }
-        if (ws->tls->set_hostname && ws->host_buf[0])
-            ws->tls->set_hostname(ws->tls, ws->host_buf);
+        /* FAIL CLOSED on set_hostname failure: without hostname verification a
+         * cert for the wrong host would verify against the CA chain alone.
+         * wsc_error -> wsc_close_connection destroys ws->tls and the fd. */
+        if (ws->tls->set_hostname && ws->host_buf[0] &&
+            ws->tls->set_hostname(ws->tls, ws->host_buf) != 0) {
+            wsc_error(ws, "TLS set_hostname failed");
+            return;
+        }
 
         ws->state = WSC_TLS_HANDSHAKE;
         /* Fall through to TLS handshake */

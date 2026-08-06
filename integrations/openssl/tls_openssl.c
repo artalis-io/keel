@@ -33,6 +33,7 @@
 
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
+#include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
@@ -42,7 +43,6 @@
 
 #include <errno.h>
 #include <limits.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -59,6 +59,7 @@ static void kl_secure_zero(void *ptr, size_t len) {
 
 typedef struct {
     SSL_CTX               *ssl_ctx;
+    BIO_METHOD            *bio_method;  /* ctx-owned custom BIO_METHOD (no global) */
     KlAllocator           *alloc;
     int                    is_server;
     /* When set, a bare transport EOF (no close_notify) counts as a clean EOF
@@ -131,8 +132,6 @@ static int comp_ensure(unsigned char **buf, size_t *cap, size_t need,
  * mapping would-block to BIO_set_retry_read/write + return -1 (which OpenSSL
  * surfaces as SSL_ERROR_WANT_READ/WRITE), and a 0-byte recv to a clean EOF.
  */
-
-static BIO_METHOD *kl_bio_method; /* created lazily, process-lifetime */
 
 static int kl_bio_write(BIO *bio, const char *buf, int len)
 {
@@ -232,33 +231,30 @@ static int kl_bio_destroy(BIO *bio)
     return 1;
 }
 
-/* Create the process-wide custom BIO_METHOD exactly once, thread-safely (via
- * pthread_once). Every BIO_meth_set_*() return is checked; on any failure the
- * partial method is freed and the global left NULL, so callers fail the session
- * create. */
-static pthread_once_t g_bio_once = PTHREAD_ONCE_INIT;
-
-static void kl_bio_method_init(void)
+/* Build a fresh custom BIO_METHOD. The method is CONTEXT-OWNED (created in
+ * ctx-create, freed in ctx-destroy) rather than a lazily-initialized process
+ * global — that removes the init race entirely with NO once primitive, NO
+ * libpthread, and NO OS/library #ifdef (the once APIs are not portable across the
+ * OpenSSL/LibreSSL/BoringSSL family), and keeps the adapter free of mutable global
+ * state. Every BIO_meth_set_*() return is checked; on any failure the partial
+ * method is freed and NULL returned, so ctx-create fails cleanly. A ctx is a
+ * long-lived, few-per-process object (one per server/client config), so the
+ * per-ctx BIO type index from BIO_get_new_index() is not a concern. */
+static BIO_METHOD *kl_bio_method_new(void)
 {
     int type = BIO_get_new_index() | BIO_TYPE_SOURCE_SINK;
     BIO_METHOD *m = BIO_meth_new(type, "keel-tls-bio");
     if (!m)
-        return;
+        return NULL;
     if (BIO_meth_set_write(m, kl_bio_write) != 1 ||
         BIO_meth_set_read(m, kl_bio_read) != 1 ||
         BIO_meth_set_ctrl(m, kl_bio_ctrl) != 1 ||
         BIO_meth_set_create(m, kl_bio_create) != 1 ||
         BIO_meth_set_destroy(m, kl_bio_destroy) != 1) {
         BIO_meth_free(m);
-        return;   /* leave kl_bio_method NULL — session create will fail cleanly */
+        return NULL;
     }
-    kl_bio_method = m;
-}
-
-static BIO_METHOD *kl_bio_get_method(void)
-{
-    pthread_once(&g_bio_once, kl_bio_method_init);
-    return kl_bio_method;
+    return m;
 }
 
 /* ── KlTls vtable implementation ─────────────────────────────────── */
@@ -300,20 +296,34 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
     }
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
         return 0;   /* retry */
-    if (err == SSL_ERROR_SYSCALL) {
-        /* A transport EOF without a close_notify surfaces here with ret==0 and no
-         * queued error. STRICT (default): this is a truncation — return -1 with
-         * eof_seen staying 0, so a truncated close-delimited response is NOT
-         * accepted as complete. Only when allow_truncation is opted in do we treat
-         * a clean transport EOF as at_eof(). A real close_notify goes through
-         * SSL_ERROR_ZERO_RETURN above and always sets eof_seen. */
-        if (ret == 0 && ERR_peek_error() == 0 && t->allow_truncation) {
+
+    /* A transport EOF WITHOUT a close_notify is a truncation. How it surfaces
+     * depends on the library version (and timing):
+     *   - OpenSSL 1.1.x / LibreSSL / BoringSSL: SSL_ERROR_SYSCALL with an EMPTY
+     *     error queue (SSL_read returns 0 or -1 depending on the code path).
+     *   - OpenSSL 3.x: usually SSL_ERROR_SSL with reason
+     *     SSL_R_UNEXPECTED_EOF_WHILE_READING, but a socket-BIO recv()==0 can also
+     *     surface as SSL_ERROR_SYSCALL with an empty error queue.
+     * STRICT (default): return -1 with eof_seen staying 0, so a truncated close-
+     * delimited response is NOT accepted as complete. Only when allow_truncation
+     * is opted in do we report at_eof() for a bare transport EOF. A real
+     * close_notify goes through SSL_ERROR_ZERO_RETURN above and always sets eof_seen.
+     * The empty-error-queue check keeps a genuine protocol error (which leaves an
+     * error queued) on the -1/at_eof()==0 path. */
+    if (t->allow_truncation) {
+        if (err == SSL_ERROR_SYSCALL && ERR_peek_error() == 0) {
             t->eof_seen = 1;
             return -1;
         }
-        return -1;
+#if defined(SSL_R_UNEXPECTED_EOF_WHILE_READING)
+        if (err == SSL_ERROR_SSL &&
+            ERR_GET_REASON(ERR_peek_error()) == SSL_R_UNEXPECTED_EOF_WHILE_READING) {
+            t->eof_seen = 1;
+            return -1;
+        }
+#endif
     }
-    return -1;   /* error */
+    return -1;   /* error (truncation under strict policy, or a genuine failure) */
 }
 
 /* at_eof: was the last read() -1 a clean TLS shutdown (close_notify/EOF)? */
@@ -571,7 +581,7 @@ static int64_t asn1_time_to_unix(const ASN1_TIME *at)
 static int tls_peer_cert(KlTls *self, KlPeerCert *out)
 {
     KlOpensslTls *t = (KlOpensslTls *)self;
-    if (!t->handshake_done)
+    if (!out || !t->handshake_done)
         return -1;
 
     /* SSL_get1_peer_certificate is the OpenSSL 3.0 rename; OpenSSL 1.1.x, BoringSSL,
@@ -607,19 +617,24 @@ static int tls_peer_cert(KlTls *self, KlPeerCert *out)
             }
         }
         if (t->der_buf && (size_t)der_len <= t->der_cap) {
+            /* Serialize into our buffer. Check THIS i2d_X509 too: only publish
+             * out->der / der_len / fingerprint once the DER is actually written,
+             * so a failed second call never exposes a partial/stale buffer. */
             unsigned char *p = t->der_buf;
-            i2d_X509(crt, &p);
-            t->der_len = (size_t)der_len;
-            unsigned char hash[SHA256_DIGEST_LENGTH];
-            SHA256(t->der_buf, (size_t)der_len, hash);
-            static const char hex[] = "0123456789abcdef";
-            for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-                out->fingerprint_sha256[i * 2]     = hex[hash[i] >> 4];
-                out->fingerprint_sha256[i * 2 + 1] = hex[hash[i] & 0x0F];
+            int wrote = i2d_X509(crt, &p);
+            if (wrote > 0) {
+                t->der_len = (size_t)wrote;
+                unsigned char hash[SHA256_DIGEST_LENGTH];
+                SHA256(t->der_buf, (size_t)wrote, hash);
+                static const char hex[] = "0123456789abcdef";
+                for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+                    out->fingerprint_sha256[i * 2]     = hex[hash[i] >> 4];
+                    out->fingerprint_sha256[i * 2 + 1] = hex[hash[i] & 0x0F];
+                }
+                out->fingerprint_sha256[SHA256_DIGEST_LENGTH * 2] = '\0';
+                out->der = t->der_buf;
+                out->der_len = (size_t)wrote;
             }
-            out->fingerprint_sha256[SHA256_DIGEST_LENGTH * 2] = '\0';
-            out->der = t->der_buf;
-            out->der_len = (size_t)der_len;
         }
     }
 
@@ -646,7 +661,7 @@ KlTls *kl_tls_openssl_create(KlTlsCtx *ctx, KlAllocator *alloc)
 
     KlOpensslCtx *octx = (KlOpensslCtx *)ctx;
 
-    BIO_METHOD *meth = kl_bio_get_method();
+    BIO_METHOD *meth = octx->bio_method;   /* ctx-owned; created at ctx-create */
     if (!meth)
         return NULL;
 
@@ -707,13 +722,37 @@ KlTls *kl_tls_openssl_create(KlTlsCtx *ctx, KlAllocator *alloc)
 
 /* ── Hostname for SNI + verification (client mode) ───────────────── */
 
+/* Is `s` a numeric IPv4 or IPv6 literal? inet_pton (via the socket seam) is the
+ * authoritative test — no ambiguous digit/dot heuristics. */
+static int hostname_is_ip_literal(const char *s)
+{
+    unsigned char v4[4];
+    unsigned char v6[16];
+    if (inet_pton(AF_INET, s, v4) == 1)
+        return 1;
+    if (inet_pton(AF_INET6, s, v6) == 1)
+        return 1;
+    return 0;
+}
+
 int kl_tls_openssl_set_hostname(KlTls *tls, const char *hostname)
 {
     if (!tls || !hostname)
         return -1;
     KlOpensslTls *t = (KlOpensslTls *)tls;
 
-    /* SNI server_name extension. */
+    if (hostname_is_ip_literal(hostname)) {
+        /* Numeric IP literal: RFC 6066 forbids an IP in the SNI server_name, so
+         * DON'T set SNI. Verify against iPAddress SANs via the IP param —
+         * SSL_set1_host does DNS-name matching only and won't match IP SANs on
+         * all versions. */
+        X509_VERIFY_PARAM *vp = SSL_get0_param(t->ssl);
+        if (!vp || X509_VERIFY_PARAM_set1_ip_asc(vp, hostname) != 1)
+            return -1;
+        return 0;
+    }
+
+    /* DNS name: SNI server_name extension. */
     if (SSL_set_tlsext_host_name(t->ssl, hostname) != 1)
         return -1;
 
@@ -966,6 +1005,9 @@ static KlTlsCtx *server_ctx_from_mem(const unsigned char *cert_buf, size_t cert_
     ctx->ssl_ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx->ssl_ctx)
         goto fail;
+    ctx->bio_method = kl_bio_method_new();   /* ctx-owned; freed in ctx_destroy/fail */
+    if (!ctx->bio_method)
+        goto fail;
 
     SSL_CTX_set_min_proto_version(ctx->ssl_ctx, TLS1_2_VERSION);
 
@@ -996,6 +1038,8 @@ static KlTlsCtx *server_ctx_from_mem(const unsigned char *cert_buf, size_t cert_
     return (KlTlsCtx *)ctx;
 
 fail:
+    if (ctx->bio_method)
+        BIO_meth_free(ctx->bio_method);
     if (ctx->ssl_ctx)
         SSL_CTX_free(ctx->ssl_ctx);
     kl_free(alloc, ctx, sizeof(*ctx));
@@ -1071,6 +1115,9 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf, size_t 
     ctx->ssl_ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx->ssl_ctx)
         goto fail;
+    ctx->bio_method = kl_bio_method_new();   /* ctx-owned; freed in ctx_destroy/fail */
+    if (!ctx->bio_method)
+        goto fail;
 
     SSL_CTX_set_min_proto_version(ctx->ssl_ctx, TLS1_2_VERSION);
 
@@ -1093,6 +1140,8 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf, size_t 
     return (KlTlsCtx *)ctx;
 
 fail:
+    if (ctx->bio_method)
+        BIO_meth_free(ctx->bio_method);
     if (ctx->ssl_ctx)
         SSL_CTX_free(ctx->ssl_ctx);
     kl_free(alloc, ctx, sizeof(*ctx));
@@ -1155,5 +1204,7 @@ void kl_tls_openssl_ctx_destroy(KlTlsCtx *raw_ctx)
     KlOpensslCtx *ctx = (KlOpensslCtx *)raw_ctx;
     if (ctx->ssl_ctx)
         SSL_CTX_free(ctx->ssl_ctx);
+    if (ctx->bio_method)
+        BIO_meth_free(ctx->bio_method);   /* ctx-owned custom BIO_METHOD */
     kl_free(ctx->alloc, ctx, sizeof(*ctx));
 }

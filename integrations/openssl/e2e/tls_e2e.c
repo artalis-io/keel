@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 
 /* ── tiny cert factory (library API) ─────────────────────────────── */
@@ -129,6 +130,68 @@ static void gen_cert(const char *cn, int is_ca,
 }
 
 static void pem_pair_free(PemPair *p) { free(p->cert_pem); free(p->key_pem); }
+
+/* Generate a leaf cert signed by (issuer_key/issuer_crt) whose ONLY SAN is an
+ * iPAddress (`ip_asc`, an IPv4/IPv6 literal). Used to prove IP-SAN verification
+ * (finding 4). Subject CN is set to `ip_asc` for readability. */
+static void gen_cert_ip_san(const char *ip_asc,
+                            EVP_PKEY *issuer_key, X509 *issuer_crt,
+                            PemPair *out)
+{
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+    assert(kctx);
+    assert(EVP_PKEY_keygen_init(kctx) == 1);
+    assert(EVP_PKEY_CTX_set_ec_paramgen_curve_nid(kctx, NID_X9_62_prime256v1) == 1);
+    assert(EVP_PKEY_keygen(kctx, &pkey) == 1);
+    EVP_PKEY_CTX_free(kctx);
+    assert(pkey);
+
+    X509 *crt = X509_new();
+    assert(crt);
+    X509_set_version(crt, 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(crt), (long)(rand() | 1));
+    X509_gmtime_adj(X509_getm_notBefore(crt), -3600);
+    X509_gmtime_adj(X509_getm_notAfter(crt), 3600 * 24 * 365);
+    X509_set_pubkey(crt, pkey);
+
+    X509_NAME *name = X509_get_subject_name(crt);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               (const unsigned char *)ip_asc, -1, -1, 0);
+    X509_set_issuer_name(crt, issuer_crt ? X509_get_subject_name(issuer_crt) : name);
+
+    /* iPAddress SAN: pack the literal into 4 (v4) or 16 (v6) octets. */
+    unsigned char raw[16];
+    int rawlen = 0;
+    if (inet_pton(AF_INET, ip_asc, raw) == 1) rawlen = 4;
+    else if (inet_pton(AF_INET6, ip_asc, raw) == 1) rawlen = 16;
+    assert(rawlen != 0);
+
+    GENERAL_NAME   *gn  = GENERAL_NAME_new();
+    ASN1_OCTET_STRING *os = ASN1_OCTET_STRING_new();
+    assert(gn && os);
+    assert(ASN1_OCTET_STRING_set(os, raw, rawlen) == 1);
+    GENERAL_NAME_set0_value(gn, GEN_IPADD, os);   /* gn takes ownership of os */
+    GENERAL_NAMES *gens = sk_GENERAL_NAME_new_null();
+    assert(gens && sk_GENERAL_NAME_push(gens, gn) > 0);
+    assert(X509_add1_ext_i2d(crt, NID_subject_alt_name, gens, 0, 0) == 1);
+    GENERAL_NAMES_free(gens);                      /* frees gn + os */
+
+    EVP_PKEY *signer = issuer_key ? issuer_key : pkey;
+    assert(X509_sign(crt, signer, EVP_sha256()) > 0);
+
+    BIO *cb = BIO_new(BIO_s_mem());
+    assert(PEM_write_bio_X509(cb, crt) == 1);
+    out->cert_pem = bio_to_str(cb);
+    BIO_free(cb);
+    BIO *kb = BIO_new(BIO_s_mem());
+    assert(PEM_write_bio_PrivateKey(kb, pkey, NULL, NULL, 0, NULL, NULL) == 1);
+    out->key_pem = bio_to_str(kb);
+    BIO_free(kb);
+
+    EVP_PKEY_free(pkey);
+    X509_free(crt);
+}
 
 /* ── Axis 1: socket-BIO handshake + round-trip ───────────────────── */
 
@@ -698,6 +761,291 @@ static void test_insecure_client(KlAllocator *alloc, PemPair *server)
     kl_tls_openssl_ctx_destroy(cctx);
 }
 
+/* Finding 3: peer_cert(NULL) must return -1 (no crash, no write through NULL). */
+static void test_peer_cert_null(KlAllocator *alloc, PemPair *ca, PemPair *server,
+                                PemPair *client)
+{
+    printf("== Finding 3: peer_cert(NULL) returns -1 ==\n");
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem),
+        KL_MTLS_REQUIRED, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+    assert(kl_tls_openssl_client_ctx_set_cert(cctx,
+        (const unsigned char *)client->cert_pem, strlen(client->cert_pem),
+        (const unsigned char *)client->key_pem, strlen(client->key_pem)) == 0);
+
+    KlTls *srv, *cli;
+    mem_handshake(alloc, sctx, cctx, "server.local", &srv, &cli);
+    /* Handshake complete, a client cert is present, yet NULL out → -1. */
+    assert(srv->peer_cert(srv, NULL) == -1);
+    /* Sanity: with a real out it still succeeds. */
+    KlPeerCert pc;
+    assert(srv->peer_cert(srv, &pc) == 0);
+    printf("  PASS: peer_cert(NULL) -> -1 (and non-NULL still works)\n");
+
+    cli->destroy(cli); srv->destroy(srv);
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+}
+
+/* Finding 5: a second full handshake after reset() on the SAME sessions round-trips. */
+static void test_second_handshake_after_reset(KlAllocator *alloc, PemPair *ca,
+                                               PemPair *server)
+{
+    printf("== Finding 5: second handshake after reset() round-trips ==\n");
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+
+    KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+    KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+    assert(srv && cli);
+
+    /* First handshake + round-trip over sockets (socket-BIO axis). */
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+    assert(drive_handshake(cli, fds[0], srv, fds[1]) == 0);
+    roundtrip(cli, fds[0], srv, fds[1], "first handshake payload");
+    printf("  first handshake OK\n");
+
+    /* reset() both, close the old fds, and handshake again on fresh sockets. */
+    cli->reset(cli);
+    srv->reset(srv);
+    close(fds[0]); close(fds[1]);
+
+    int fds2[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds2) == 0);
+    assert(nonblock(fds2[0]) == 0 && nonblock(fds2[1]) == 0);
+    assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+    assert(drive_handshake(cli, fds2[0], srv, fds2[1]) == 0);
+    roundtrip(cli, fds2[0], srv, fds2[1], "second handshake payload");
+    printf("  PASS: second handshake after reset() round-trips\n");
+
+    close(fds2[0]); close(fds2[1]);
+    cli->destroy(cli); srv->destroy(srv);
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+}
+
+/* Finding 4: numeric-IP SAN — matching IP verifies, wrong IP fails. */
+static void test_ip_san(KlAllocator *alloc, EVP_PKEY *ca_key, X509 *ca_crt,
+                        PemPair *ca)
+{
+    printf("== Finding 4: numeric-IP SAN verification ==\n");
+    /* A server leaf whose ONLY SAN is the IP 127.0.0.1, signed by the CA. */
+    PemPair ipsrv = {0};
+    gen_cert_ip_san("127.0.0.1", ca_key, ca_crt, &ipsrv);
+
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)ipsrv.cert_pem, strlen(ipsrv.cert_pem),
+        (const unsigned char *)ipsrv.key_pem, strlen(ipsrv.key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+
+    /* Positive: verify against the matching IP literal. */
+    int ok = mem_handshake_ok(alloc, sctx, cctx, "127.0.0.1");
+    assert(ok == 1);
+    printf("  PASS: matching IP-SAN verifies\n");
+
+    /* Negative: a different IP literal must fail (IP-SAN mismatch). */
+    ok = mem_handshake_ok(alloc, sctx, cctx, "127.0.0.2");
+    assert(ok == 0);
+    printf("  PASS: wrong IP-SAN fails verification\n");
+
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+    pem_pair_free(&ipsrv);
+}
+
+/* Finding 5: strict vs lenient truncation over the REAL socket-BIO readiness
+ * path. The peer fd is closed WITHOUT a TLS close_notify (abrupt transport EOF).
+ *   strict (default):     read() == -1 && at_eof() == 0  (truncation is an error)
+ *   lenient (allow=1):    read() == -1 && at_eof() == 1  (treated as clean EOF)
+ */
+static void run_truncation_case(KlAllocator *alloc, PemPair *ca, PemPair *server,
+                                int allow_truncation)
+{
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+    /* The truncation policy is a CLIENT-side reader concern; set it on the
+     * client ctx so the client session inherits it. */
+    assert(kl_tls_openssl_ctx_set_allow_truncation(cctx, allow_truncation) == 0);
+
+    KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+    KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+    assert(srv && cli);
+    assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    int cfd = fds[0], sfd = fds[1];
+    assert(drive_handshake(cli, cfd, srv, sfd) == 0);
+
+    /* Server writes one payload, then ABRUPTLY closes its fd — no shutdown(). */
+    const char *msg = "pre-truncation body";
+    size_t mlen = strlen(msg), sent = 0;
+    for (int i = 0; i < 200 && sent < mlen; i++) {
+        kl_ssize_t n = srv->write(srv, sfd, msg + sent, mlen - sent);
+        if (n > 0) sent += (size_t)n;
+    }
+    assert(sent == mlen);
+    close(sfd);                    /* abrupt transport EOF, no close_notify */
+    srv->destroy(srv);             /* server session gone */
+
+    /* Client drains the payload, then the next read hits the abrupt EOF. */
+    char buf[256]; size_t got = 0; int saw_eof_result = 0;
+    for (int i = 0; i < 400; i++) {
+        kl_ssize_t n = cli->read(cli, cfd, buf + got, sizeof(buf) - got);
+        if (n > 0) { got += (size_t)n; continue; }
+        if (n == 0) continue;      /* WANT_READ (readiness) — retry */
+        /* n < 0: terminal. Consult at_eof(). */
+        saw_eof_result = 1;
+        if (allow_truncation) {
+            assert(cli->at_eof(cli) == 1);
+        } else {
+            assert(cli->at_eof(cli) == 0);
+        }
+        break;
+    }
+    assert(got == mlen && memcmp(buf, msg, mlen) == 0);
+    assert(saw_eof_result == 1);
+
+    close(cfd);
+    cli->destroy(cli);
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+}
+
+static void test_truncation_modes(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== Finding 5: truncation (strict vs lenient) over socket-BIO ==\n");
+    run_truncation_case(alloc, ca, server, 0);
+    printf("  PASS: strict — abrupt EOF is read()==-1 && at_eof()==0\n");
+    run_truncation_case(alloc, ca, server, 1);
+    printf("  PASS: lenient — abrupt EOF is read()==-1 && at_eof()==1\n");
+}
+
+/* ── Finding 5: allocation-failure injection ─────────────────────── */
+
+typedef struct {
+    KlAllocator base;   /* forwards to real allocator */
+    int fail_after;     /* number of successful allocs before failures begin */
+    int count;
+} FailAlloc;
+
+static void *fa_malloc(void *ctx, size_t size) {
+    FailAlloc *f = ctx;
+    if (f->count++ >= f->fail_after) return NULL;
+    return malloc(size);
+}
+static void *fa_realloc(void *ctx, void *ptr, size_t old, size_t nsz) {
+    FailAlloc *f = ctx; (void)old;
+    if (f->count++ >= f->fail_after) return NULL;
+    return realloc(ptr, nsz);
+}
+static void fa_free(void *ctx, void *ptr, size_t size) { (void)ctx; (void)size; free(ptr); }
+
+static KlAllocator fail_alloc_make(FailAlloc *f, int fail_after) {
+    f->fail_after = fail_after;
+    f->count = 0;
+    KlAllocator a = { .malloc = fa_malloc, .realloc = fa_realloc, .free = fa_free, .ctx = f };
+    return a;
+}
+
+/* Drive a handshake + peer-cert extraction under an allocator that starts failing
+ * after N allocations, for a sweep of N. Each iteration must fail gracefully
+ * (no crash / no UAF under ASan); some N will complete, some won't — either is
+ * acceptable, the point is memory-safety on the failure paths (DER-buffer growth
+ * in peer_cert, completion in/out ring growth in feed_input/drain). */
+static void test_alloc_failure_injection(PemPair *ca, PemPair *server, PemPair *client)
+{
+    printf("== Finding 5: allocation-failure injection (graceful, ASan-clean) ==\n");
+    for (int n = 0; n < 40; n++) {
+        FailAlloc f;
+        KlAllocator a = fail_alloc_make(&f, n);
+
+        KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+            (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+            (const unsigned char *)server->key_pem, strlen(server->key_pem),
+            (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem),
+            KL_MTLS_REQUIRED, &a);
+        KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+            (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), &a);
+        if (cctx)
+            (void)kl_tls_openssl_client_ctx_set_cert(cctx,
+                (const unsigned char *)client->cert_pem, strlen(client->cert_pem),
+                (const unsigned char *)client->key_pem, strlen(client->key_pem));
+
+        if (sctx && cctx) {
+            KlTls *srv = kl_tls_openssl_create(sctx, &a);
+            KlTls *cli = kl_tls_openssl_create(cctx, &a);
+            if (srv && cli) {
+                if (kl_tls_openssl_set_hostname(cli, "server.local") == 0 &&
+                    cli->feed_input(cli, NULL, 0) == 0 &&
+                    srv->feed_input(srv, NULL, 0) == 0) {
+                    int cdone = 0, sdone = 0, failed = 0;
+                    for (int it = 0; it < 200 && (!cdone || !sdone) && !failed; it++) {
+                        if (!cdone) {
+                            KlTlsResult r = cli->handshake(cli, KL_INVALID_SOCKET);
+                            if (r == KL_TLS_OK) cdone = 1; else if (r == KL_TLS_ERROR) failed = 1;
+                        }
+                        if (!sdone) {
+                            KlTlsResult r = srv->handshake(srv, KL_INVALID_SOCKET);
+                            if (r == KL_TLS_OK) sdone = 1; else if (r == KL_TLS_ERROR) failed = 1;
+                        }
+                        /* pump — feed/drain ring growth exercises comp_ensure under failure */
+                        unsigned char pb[4096];
+                        for (;;) {
+                            kl_ssize_t k = cli->drain_output(cli, pb, sizeof(pb));
+                            if (k <= 0) break;
+                            if (srv->feed_input(srv, pb, (size_t)k) != 0) { failed = 1; break; }
+                            if ((size_t)k < sizeof(pb)) break;
+                        }
+                        for (;;) {
+                            kl_ssize_t k = srv->drain_output(srv, pb, sizeof(pb));
+                            if (k <= 0) break;
+                            if (cli->feed_input(cli, pb, (size_t)k) != 0) { failed = 1; break; }
+                            if ((size_t)k < sizeof(pb)) break;
+                        }
+                    }
+                    if (cdone && sdone && !failed) {
+                        /* peer_cert exercises DER-buffer growth under failure. */
+                        KlPeerCert pc;
+                        (void)srv->peer_cert(srv, &pc);
+                    }
+                }
+            }
+            if (cli) cli->destroy(cli);
+            if (srv) srv->destroy(srv);
+        }
+        if (sctx) kl_tls_openssl_ctx_destroy(sctx);
+        if (cctx) kl_tls_openssl_ctx_destroy(cctx);
+    }
+    printf("  PASS: alloc-failure sweep completed without crash/UAF (ASan)\n");
+}
+
 int main(void) {
     srand(1234);
     KlAllocator alloc = kl_allocator_default();
@@ -722,6 +1070,13 @@ int main(void) {
     test_feed_input_boundary(&alloc, &ca);
     test_from_buf_boundary(&alloc, &server, &ca);
     test_insecure_client(&alloc, &server);
+
+    /* Finding 5 coverage additions. */
+    test_peer_cert_null(&alloc, &ca, &server, &client);
+    test_second_handshake_after_reset(&alloc, &ca, &server);
+    test_ip_san(&alloc, ca_key, ca_crt, &ca);
+    test_truncation_modes(&alloc, &ca, &server);
+    test_alloc_failure_injection(&ca, &server, &client);
 
     EVP_PKEY_free(ca_key);
     X509_free(ca_crt);

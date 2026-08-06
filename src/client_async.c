@@ -489,8 +489,15 @@ static void he_proceed_after_connect(KlClient *c)
         /* Route the TLS socket-BIO through the client's socket provider (e.g. lwIP). */
         if (c->tls->set_socket_provider)
             c->tls->set_socket_provider(c->tls, c->ev_ctx->sockets);
-        if (c->tls->set_hostname && c->host_buf[0])
-            c->tls->set_hostname(c->tls, c->host_buf);
+        /* FAIL CLOSED on set_hostname failure: without hostname verification a
+         * cert for the wrong host would verify against the CA chain alone.
+         * async_complete_error owns c->tls teardown (incl. the pool-discard path). */
+        if (c->tls->set_hostname && c->host_buf[0] &&
+            c->tls->set_hostname(c->tls, c->host_buf) != 0) {
+            c->error = KL_ERR_TLS_INIT;
+            async_complete_error(c);
+            return;
+        }
 
         c->state = KL_HCLIENT_TLS_HANDSHAKE;
         async_handle_tls_handshake(c);
@@ -619,8 +626,14 @@ static void async_handle_proxy_handshake(KlClient *c)
         /* Route the TLS socket-BIO through the client's socket provider (e.g. lwIP). */
         if (c->tls->set_socket_provider)
             c->tls->set_socket_provider(c->tls, c->ev_ctx->sockets);
-        if (c->tls->set_hostname && c->host_buf[0])
-            c->tls->set_hostname(c->tls, c->host_buf);
+        /* FAIL CLOSED on set_hostname failure (see the direct-connect path);
+         * async_complete_error owns c->tls teardown. */
+        if (c->tls->set_hostname && c->host_buf[0] &&
+            c->tls->set_hostname(c->tls, c->host_buf) != 0) {
+            c->error = KL_ERR_TLS_INIT;
+            async_complete_error(c);
+            return;
+        }
 
         c->state = KL_HCLIENT_TLS_HANDSHAKE;
         async_handle_tls_handshake(c);

@@ -111,9 +111,14 @@ static void mock_tls_destroy(KlTls *self) {
     kl_free(m->alloc, m->out, m->out_cap);
     kl_free(m->alloc, m, sizeof(*m));
 }
+/* When set to 1, mock_tls_set_hostname returns -1 — simulating an SNI /
+ * hostname-verification setup failure. Clients MUST fail closed (abort the
+ * connection) rather than handshake without hostname verification. Static-per-TU,
+ * default 0 (success), so it doesn't affect includers that don't opt in. */
+static int mock_tls_set_hostname_fail = 0;
 static int mock_tls_set_hostname(KlTls *self, const char *hostname) {
     (void)self; (void)hostname;
-    return 0;
+    return mock_tls_set_hostname_fail ? -1 : 0;
 }
 
 /* Optional peer-cert hook. Default NULL → the peer_cert vtable slot is left NULL (unchanged

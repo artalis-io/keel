@@ -175,13 +175,20 @@ static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
     if (tls->set_socket_provider)
         tls->set_socket_provider(tls, sockets);
 
-    /* Set SNI hostname via vtable (backend-agnostic) */
+    /* Set SNI hostname via vtable (backend-agnostic). FAIL CLOSED: if the host
+     * does not fit the buffer, or set_hostname() reports failure, abort — a
+     * missing hostname check would let a cert for the wrong host verify. */
     if (tls->set_hostname) {
         char host_buf[KL_CLIENT_HOSTNAME_MAX];
-        if (host_len < sizeof(host_buf)) {
-            memcpy(host_buf, host, host_len);
-            host_buf[host_len] = '\0';
-            tls->set_hostname(tls, host_buf);
+        if (host_len >= sizeof(host_buf)) {
+            tls->destroy(tls);
+            return NULL;
+        }
+        memcpy(host_buf, host, host_len);
+        host_buf[host_len] = '\0';
+        if (tls->set_hostname(tls, host_buf) != 0) {
+            tls->destroy(tls);
+            return NULL;
         }
     }
 
