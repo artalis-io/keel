@@ -1,5 +1,47 @@
 # C Audit Report: KEEL
 
+## Eleventh pass — Phase 10 UEFI provider (F-8) + the TLS/client deltas (2026-08-06)
+
+**Scope:** everything merged since the tenth pass — the EFI network provider F-8 (U-0..U-7:
+PRs #211/#213/#214/#215/#216/#219/#221/#222) in `integrations/uefi/` + `spikes/uefi/`, plus the two
+general `src/`/adapter changes it surfaced: the close-delimited-HTTPS fix (`KlTls.at_eof`, #217) and
+the non-blocking-recv `WANT_READ`≠EOF fix (#221), and the U-4 production-TLS config (#218).
+
+**Method:** pattern scans over `src/`/`parsers/` (re-confirmation — mature, 10× audited) + the new
+`integrations/uefi`/`spikes/uefi` TUs; a focused manual review of the one new **untrusted-input**
+surface (the DNS response parser) and the touched shared code (TLS vtable + client receive loop);
+warning-clean rebuild (`-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2
+-fstack-protector-strong`, **0 warnings**) + full unit suite (**64/64**).
+
+**Result: no Critical / High / Medium findings.** The core stays clean; the new EFI code is
+memory-/resource-clean and the shared changes are additive + null-safe.
+
+### Verified clean
+| Area | Result |
+|------|--------|
+| Unsafe fns (`strcpy/strcat/sprintf/gets/atoi/atol/atof`) in `src/`/`parsers/` | none |
+| Direct `malloc/free/calloc/realloc` | only `allocator_default_stdlib.c` (the intentional stdlib wrapper) |
+| Build hardening (prod CFLAGS) | `-fstack-protector-strong` + full `-W…-Werror`; **0 warnings** |
+| Unit suite | 64/64 PASSED |
+| `src/client_async.c` `at_eof`/`WANT_READ` change | null-safe (short-circuit `c->tls && c->tls->at_eof && …`); EOF finalizes via `goto eof`, WANT_READ re-arms — no EOF/error confusion |
+| `include/keel/tls.h` `at_eof` vtable growth | additive at the struct tail; `test_tls.vtable_struct_size` updated to 14; NULL-guarded at every call site (other backends unaffected) |
+| **DNS response parser** (`dns_uefi.c`, untrusted network input) | **bounds-safe** — every offset checked vs `len`; QNAME/label walk capped (`DNS_MAX_LABELS`); `0xC0` compression pointers terminate in-place (never followed → no OOB/infinite loop); response coalesced into a fixed buffer with a write cap; id/QR/RCODE validated |
+| EFI resource lifetime | `dns_uefi` frees the `LocateHandleBuffer` result on both paths + `SignalEvent(RecycleSignal)` + `DestroyChild`; `socket_efi_tcp4` close = Close→CloseEvent→CloseProtocol→DestroyChild→`kl_free` (generation-guarded); `platform_uefi` timer + EBS event cancelled/closed by `kl_uefi_platform_shutdown`; `kl_uefi_shutdown` (U-7) releases the whole stack — teardown observably proven (monotonic clock freezes, `dt=0`) |
+| EFI integer/overflow | fixed buffers (`rx_buf[KL_EFI_RXBUF]`, `qbuf[DNS_QUERY_CAP]`); UINT32 fragment lengths bounded; no attacker-controlled size arithmetic into an allocation |
+| errno contract (U-6) | `errno` defined exactly once (`u1_link_stubs.c`); provider sets `EAGAIN`/`EIO` on the would-block/error seam so the mbedTLS bio classifies correctly |
+
+### Low / informational
+| # | File | Note |
+|---|------|------|
+| I1 | `integrations/uefi/mbedtls_platform_uefi.c` | Defines `strcpy`/`strncpy`/`memchr`/… — these are the freestanding **libc-shim implementations** mbedTLS needs (no libc on the EFI target), not unsafe call sites (mbedTLS calls them with its own bounded buffers). Acceptable by construction, exactly like the `mem*`/`strlen` shims. Not a defect. |
+| I2 | `integrations/uefi/dns_uefi.c` | The minimal DNS parser is the one new untrusted-input surface and — unlike the core `kl_dns_parse_response` (fuzzed via `fuzz_dns`) — is **not fuzzed**. It is bounds-reviewed and spike-scoped (A/IPv4-only, single nameserver). RECOMMENDATION when it graduates from spike to production: either add a libFuzzer target for it, or (better) reuse the fuzzed `kl_dns_parse_response` over a `KlUdp`-over-EFI_UDP4 transport (already the documented production path). |
+| I3 | `integrations/uefi/*` U-4 spike / U-5 | Documented spike shortcuts (U-4 verify-none + weak-entropy default mode; U-5 A-only/single-NS). All are `#ifdef`/`U*_MODE`-gated, loudly warned at runtime, and the production paths (U-4 `U4_MODE=prod` CA+EFI_RNG) exist. No action. |
+
+**Bottom line:** F-8 and the accompanying `src/` deltas introduce no memory-safety, resource, or
+overflow defects; the sole hardening follow-up is fuzzing the spike DNS parser (I2) if/when it
+leaves spike status. Everything is `integrations/uefi`/`spikes/uefi`-scoped except the two additive,
+test-green shared fixes.
+
 ## Tenth pass — freestanding portability phase (2026-08-05)
 
 **Scope:** the freestanding phase merged since the ninth pass (PRs #199–#210): the allocator split

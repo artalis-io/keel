@@ -1,5 +1,54 @@
 # KEEL Networking Architecture Axis Audit
 
+## Ninth pass — the UEFI provider REALIZES the axis thesis (Phase 10 F-8, 2026-08-06)
+
+**Verdict: architecturally sound — the strongest validation of the three-axis design to date.**
+Phase 10 F-8 (U-0..U-7: PRs #211/#213/#214/#215/#216/#219/#221/#222, + the shared fixes #217/#218)
+added a **completion-native, socket-less, pointer-handle network provider that runs on bare UEFI
+firmware** — precisely the provider shape the whole PAL refactor was aimed at (`handle.h` cites
+"UEFI protocol pointers" as the reason `KlSocketHandle` is `intptr_t`). It dropped in with **ZERO
+generic-axis changes**: the entire EFI stack is a matched provider pair in `integrations/uefi/` +
+`spikes/uefi/`, injected at runtime via `kl_event_ctx_init_ex`. No new findings; Goal 14
+(future-provider compatibility) moves from *assessed* to *realized*.
+
+### What was added, and where it sits on the axes
+| Component | Axis | Coupling |
+|-----------|------|----------|
+| `socket_efi_tcp4.c` — `KlSocketProvider` over EFI_TCP4 (handle = `KlUefiConn*` via `intptr_t`; `KL_SOCK_CAP_OVERLAPPED`) | **socket** | no event-model, no protocol knowledge (grep-clean; the "drain"/"readiness" hits are comments) |
+| `event_efi.c` — `KlEventProvider` (`KL_EVENT_CAP_COMPLETION`) + `KlCompletionOps` (post_connect/drain/cancel) | **event** | **no protocol knowledge** (grep-clean: no KlRequest/KlResponse/http/parser/KlConn); `native_provider()` returns the EFI socket provider so `kl_event_ctx_sockets_compatible` passes |
+| `dns_uefi.c` over EFI_UDP4 | socket/transport | a synchronous resolver behind `kl_resolve_sync`; no event/protocol coupling |
+| the generic protocol layer + `completion_core.c`/`completion_dispatch.c` | protocol/event | **unchanged** — the model-blind driver drove EFI with no edits |
+
+### Traces (completion path, EFI)
+- **Connect:** `client_async` → `kl_comp_post_connect(ctx, fd, addr, tag)` → `event_efi el_post_connect` (Configure + issue Connect token) → `el_drain` polls the token → `KL_COMP_CONNECT` → `kl_event_dispatch` → `he_on_connect_result`. Identical shape to pollcomp/lwip-raw; the client is model-blind.
+- **Receive (U-6, non-blocking):** `el_drain` calls `kl_uefi_socket_recv_ready(fd)` (posts an EFI Receive into a provider-owned buffer + `Poll()`+`CheckEvent` **once**, no pump) and relays `KL_COMP_WATCHER(READ)` **only when data is genuinely ready** → client `kl_sock_recv` drains the buffer. This is **honest completion→readiness adaptation** (Goal 2): the backend never fabricates readiness — it reflects a real completed Receive token.
+- **Close-with-outstanding:** `efi_sock_close` = Close→CloseEvent→CloseProtocol→DestroyChild→`kl_free`, with a **generation** bump; a late completion on a reused handle is rejected by `kl_uefi_conn_valid_h` (Goal 6 — stale-completion-after-reuse guard, structural).
+
+### Findings
+| # | Sev | Finding |
+|---|-----|---------|
+| A9-1 | informational | **`recv_ready` is a socket↔completion coupling — but EFI-internal + correct-direction.** The EFI completion drain calls a readiness probe on the EFI socket provider. This is the *event axis consuming a socket-axis primitive* (the right direction), scoped to the matched EFI provider pair (exactly like lwip-raw's `lwr_sock_*`). The **generic** driver (`completion_core.c`) never calls it. No leak into `src/`. |
+| A9-2 | informational | **The TLS socket-BIO detects would-block via `errno`, not `KlIoStatus`.** U-6 made the EFI provider set `errno=EAGAIN`/`EIO` on its would-block/error seam so `bio_recv`/`bio_send` classify correctly (matching the lwip provider). This is a pre-existing socket-seam convention of the mbedTLS adapter, now conformed to; a fully axis-pure TLS bio would read `kl_sock_io_status`. Documented in the completion-TLS contract; not new, not blocking. |
+| A9-3 | informational | **U-6 `src/client_async.c` change is protocol-layer, not an axis leak.** `nread==0 && c->tls → re-arm` (TLS WANT_READ ≠ EOF) branches on `c->tls` (a protocol concern). Correct across **all** completion backends (verified: #221 CI green on io_uring/pollcomp/IOCP + `make test` 64/64), not EFI-specific. |
+
+No Critical/High/Medium. The event × socket × protocol axes remain separately replaceable; EFI
+preserves completion's native token semantics while giving the client the same Keel-level behavior
+as io_uring/pollcomp/IOCP.
+
+### Compatibility matrix (delta rows)
+| Combination | Status |
+|-------------|--------|
+| EFI_TCP4 + EFI completion provider (client, plaintext) | **PROVEN** — U-3/U-6, QEMU/OVMF `GET → 200`, non-blocking recv |
+| EFI_TCP4 + EFI completion (client, HTTPS, CA-verified + real EFI_RNG) | **PROVEN** — U-4/#218 |
+| EFI_UDP4 (DNS A-query) | **PROVEN** — U-5 |
+| EFI provider lifetime (ExitBootServices teardown) | **PROVEN** — U-7, timer-freeze observable |
+| Linux epoll / io_uring, Darwin kqueue, Winsock WSAPoll/IOCP, pollcomp | unchanged since the 8th pass (the EFI work touches none of them; the one shared `client_async.c` fix is CI-green across all) |
+
+### Recommended (deferred, not blocking)
+1. If `dns_uefi.c`'s parser leaves spike status, fuzz it or reuse the fuzzed `kl_dns_parse_response` over a `KlUdp`-over-EFI_UDP4 transport (mirrors the axis-audit's "reuse the tested core over a new transport" pattern). *(Also raised in c-audit 11th pass, I2.)*
+2. A future axis-purity nicety: a `KlIoStatus`-based TLS bio (drop the `errno` seam) — a cross-cutting adapter change, low priority.
+3. An EFI **server** (accept path) would exercise the completion ACCEPT axis on EFI; U-6's non-blocking recv is its prerequisite. Out of the current client scope.
+
 ## Eighth pass — the freestanding portability phase strengthens all three axes (2026-08-05)
 
 **Verdict: architecturally sound — every change in the freestanding phase (PRs #199–#211) either
