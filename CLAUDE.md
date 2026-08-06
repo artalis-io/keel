@@ -3,10 +3,14 @@
 ## Build
 
 ```bash
-make              # build libkeel.a (epoll on Linux, kqueue on macOS)
-make BACKEND=poll # build with poll() backend (universal POSIX fallback)
-make CC=cosmocc   # build with Cosmopolitan C (APE, auto-selects poll backend)
-make test         # build and run all 837 unit tests
+make                 # build libkeel.a (epoll on Linux, kqueue on macOS)
+make BACKEND=poll    # readiness: poll() (universal POSIX fallback)
+make BACKEND=iouring # completion: io_uring (Linux 5.6+, SQE/CQE + splice; needs liburing)
+make BACKEND=iocp    # completion: IOCP (Windows)
+make BACKEND=pollcomp# completion: portable poll()-based double (test the completion driver on any POSIX host)
+make BACKEND=wsapoll # readiness: WSAPoll (Windows)
+make CC=cosmocc      # build with Cosmopolitan C (APE, auto-selects poll backend)
+make test            # build and run all unit tests (65 suites, 920+ cases)
 make examples     # build all 23 example programs (25 with TLS, 27 with compression)
 make bench        # build bench server + run 4-endpoint wrk benchmark suite
 make debug        # debug build with ASan + UBSan (recompiles from clean)
@@ -32,10 +36,18 @@ make clean        # remove all build artifacts
 
 ## Architecture
 
-35 orthogonal modules, each independently testable:
+**Three orthogonal axes** (see `docs/keel_axis_audit.md`), each independently replaceable:
+
+- **Event axis** — `event.h` (readiness) + `completion.h` + the completion driver (platform-independent). Readiness backends: `event_epoll.c` / `event_kqueue.c` / `event_wsapoll.c` / `event_poll.c`. Completion backends: `event_iouring.c` (Linux SQE/CQE + splice), `event_iocp.c` (Windows), `event_pollcomp.c` (a portable `poll()` completion double for CI/ASan). Capability negotiation (`src/event_caps.h`: `KL_EVENT_CAP_READINESS | _NATIVE_FD | _COMPLETION`) matches a loop to a compatible socket provider.
+- **Socket axis** — `src/socket.h` (`KlSocketProvider` vtable + pointer-width `KlSocketHandle`, `include/keel/handle.h`). Providers: `socket_posix.c`, `socket_winsock.c`; overlapped providers live in their event TUs (iouring/iocp/pollcomp). lwIP (BSD + raw NO_SYS) and UEFI EFI_TCP4/UDP4 ship under `integrations/`. Selected on `KlEventCtx.sockets` / `KlConfig.sockets` / `KlClientConfig.sockets`.
+- **Protocol axis** — `connection.c`, `h2.c`, `websocket.c`, `client.c`, `h2_client.c`, `sse.c`, the `KlTls` vtable, body readers, `response.c`. These sit above both axes and go through `conn_read`/`conn_write` + the socket seam; they never include a platform networking header or call an event engine directly.
+
+`integrations/` holds bring-your-own adapters that keep core `libkeel` unchanged: `lwip/` (BSD sockets + a raw NO_SYS completion provider), `uefi/` (a freestanding EFI_TCP4/UDP4 provider — stock async `KlClient` on bare firmware; see `docs/phase10_uefi_feasibility_design.md`), `mbedtls/` (TLS), `nghttp2/` (HTTP/2 session).
+
+Below the axes, orthogonal modules, each independently testable:
 
 1. **allocator** — Bring-your-own allocator interface + default stdlib wrapper
-2. **event** — epoll (Linux) / kqueue (macOS) / io_uring (completion-native, SQE/CQE) / poll (universal POSIX fallback) / WSAPoll (Windows) event loop abstraction
+2. **event** — Readiness (epoll / kqueue / WSAPoll / poll) + completion (io_uring SQE/CQE + splice / IOCP / a portable pollcomp double) behind one `KlEventLoop` interface; capability-negotiated against the socket provider
 3. **event_ctx** — Composable event loop context (KlEventCtx: loop + allocator + watcher list)
 4. **request** — Parsed HTTP request struct (header-only, zero alloc)
 5. **parser** — Pluggable request/response parser vtables (ships with llhttp backend)

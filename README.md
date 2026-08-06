@@ -4,9 +4,9 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/artalis-io/keel/badge)](https://scorecard.dev/viewer/?uri=github.com/artalis-io/keel)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12186/badge)](https://www.bestpractices.dev/projects/12186)
 
-Minimal C11 HTTP client/server library built on raw epoll/kqueue/io_uring/poll/WSAPoll. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
+Minimal C11 HTTP client/server library over an async I/O core that spans **both** the readiness axis (epoll, kqueue, WSAPoll, poll) and the completion axis (io_uring, IOCP) behind one small event interface, on a platform-neutral socket seam (POSIX, Winsock, lwIP). The event model, the socket/platform implementation, and the protocol stack are three orthogonal axes — swap the event backend or the socket provider without touching a line of protocol code. Both the server and client support sync and async operation — sync handlers return immediately, async handlers suspend and resume via the event loop; the client offers both a blocking API and an event-driven API. Pluggable allocator, pluggable HTTP parser, pluggable TLS, pluggable body readers, per-route middleware, streaming responses, multipart uploads, connection timeouts, thread pool, zero forced buffering.
 
-**101K req/s** on a single thread. **676 tests** (41 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
+**101K req/s** on a single thread. **920+ tests** (65 suites) with ASan/UBSan. **One vendored dependency** (llhttp).
 
 ## Build
 
@@ -226,7 +226,8 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 
 ## Features
 
-- **Five event loop backends** — epoll (edge-triggered), kqueue (edge-triggered), io_uring (completion, SQE/CQE), poll (universal POSIX fallback), WSAPoll (Windows/Winsock)
+- **Two event axes, six backends** — **readiness** (epoll edge-triggered, kqueue edge-triggered, WSAPoll, poll universal fallback) and **completion** (io_uring SQE/CQE, IOCP) behind one small `KlEventLoop` interface, plus a portable `poll()`-based completion double for testing the completion driver on any POSIX host. Each backend honors its native semantics; the protocol layer sees a stable Keel-level contract, not epoll flags or CQEs.
+- **Three orthogonal axes** — the event model, the socket/platform implementation, and the protocol stack are independent and separately replaceable; an orthogonality audit (`docs/keel_axis_audit.md`) mechanically confirms protocols never touch a platform socket API or event engine directly
 - **TCP or UNIX socket servers** — same HTTP stack over TCP/IP or `AF_UNIX/SOCK_STREAM`
 - **Pluggable HTTP parser** — ships with llhttp, swap via `KlConfig.parser`
 - **Pluggable TLS** — bring your own BearSSL/LibreSSL/OpenSSL via vtable, zero vendored TLS code
@@ -258,18 +259,25 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 - **Server load introspection** — `kl_server_stats()` for connection counts, enabling user-space load-shedding middleware
 - **Pre-allocated connection pool** — no per-request malloc, no fragmentation under load
 - **Pluggable allocator** — bring your own arena/pool/tracking allocator
-- **Pluggable socket provider** — bring your own socket stack (Winsock built in, lwIP-ready) via a capability-gated vtable; select per server/client. See [Custom socket provider](#custom-socket-provider)
+- **Pluggable socket provider** — a platform-neutral socket seam (`KlSocketProvider`): POSIX and Winsock built in, lwIP shipped (both a BSD-socket layer and a raw NO_SYS callback stack with no OS sockets), and a freestanding EFI_TCP4/UDP4 provider for UEFI firmware. Capability-gated (readiness vs overlapped), selectable per server/client. See [Custom socket provider](#custom-socket-provider) and [Frontier providers](#frontier-providers-bare-metal--firmware)
 - **pledge/unveil sandboxing** — init/run split makes syscall lockdown natural
 - **Zero-copy techniques** — header pointers into read buffer, sendfile, writev batching
 
 ## Architecture
 
-31 orthogonal modules, each independently testable:
+Keel is organized along **three orthogonal axes**, so any one can be replaced without disturbing the others:
+
+- **Event axis** (`event.h` + `completion.h`) — how the loop learns work is ready. **Readiness** backends (epoll, kqueue, WSAPoll, poll) register interest and react to EAGAIN; **completion** backends (io_uring, IOCP) submit operations and reap completions. A capability negotiation (`KL_EVENT_CAP_READINESS | _COMPLETION`) matches a loop to a compatible socket provider; each backend keeps its native low-level semantics.
+- **Socket axis** (`socket.h` — the `KlSocketProvider` vtable + pointer-width `KlSocketHandle`) — where the bytes actually go. POSIX and Winsock built in; lwIP and a freestanding UEFI EFI_TCP4/UDP4 provider ship as integrations. Error translation, address conversion, and handle ownership live here, never above it.
+- **Protocol axis** (`connection.c`, `h2.c`, `websocket.c`, `client.c`, the `KlTls` vtable, body readers, `response.c`) — HTTP/1.1, HTTP/2, WebSocket, SSE, DNS. Protocol code goes through the connection/stream + event abstractions only; it never includes a platform networking header or calls an event engine directly. `docs/keel_axis_audit.md` audits this separation mechanically.
+
+Below the axes sit orthogonal, independently testable modules:
 
 | Module | Header | Description |
 |--------|--------|-------------|
 | **allocator** | `allocator.h` | Bring-your-own allocator interface |
-| **event** | `event.h` | epoll / kqueue / io_uring / poll / WSAPoll abstraction |
+| **event** | `event.h` + `completion.h` | Readiness (epoll / kqueue / WSAPoll / poll) + completion (io_uring / IOCP) behind one interface |
+| **socket** | `socket.h` | Platform-neutral socket seam (`KlSocketProvider`): POSIX / Winsock built in, lwIP + UEFI shipped |
 | **event_ctx** | `event_ctx.h` | Composable event loop context (watchers + allocator) |
 | **request** | `request.h` | Parsed HTTP request struct (header-only, zero alloc) |
 | **parser** | `parser.h` | Pluggable request/response parser vtables |
@@ -782,19 +790,35 @@ Route params, middleware, and body reading add no measurable overhead — all wi
 | Linux | epoll (edge-triggered) | `make` |
 | Linux 5.6+ | io_uring (completion, SQE/CQE) | `make BACKEND=iouring` |
 | Any POSIX | poll (level-triggered) | `make BACKEND=poll` |
+| Windows | WSAPoll (readiness) or IOCP (completion) | `make BACKEND=wsapoll` / `BACKEND=iocp` |
+| Any POSIX host | pollcomp (portable completion double) | `make BACKEND=pollcomp` |
 | Linux (musl/Alpine) | epoll (edge-triggered) | `make` |
 | Cosmopolitan (APE) | poll (auto-selected) | `make CC=cosmocc` |
-| Bare-metal + lwIP | poll (via lwIP sockets) | `make BACKEND=poll` + `-DKL_NO_SIGNAL` |
+| Bare-metal + lwIP | poll (via lwIP BSD sockets) | `make BACKEND=poll` + `-DKL_NO_SIGNAL` |
+| Bare-metal, no OS sockets | lwIP raw NO_SYS callback provider | see [Frontier providers](#frontier-providers-bare-metal--firmware) |
+| UEFI firmware (pre-boot) | EFI_TCP4/UDP4 completion provider (freestanding) | see [Frontier providers](#frontier-providers-bare-metal--firmware) |
 
 The io_uring backend is completion-native: it submits SQEs and reaps CQEs (zero-copy `splice` for file responses, registered send buffers), rather than polling for readiness. The earlier `IORING_OP_POLL_ADD` readiness adapter was retired after benchmarks showed it ~2–2.3× slower than the completion backend. Requires `liburing-dev`.
 
 The poll backend is a universal POSIX fallback that works on any platform with `poll(2)`. It enables Cosmopolitan C support (Actually Portable Executables that run on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary). When `CC=cosmocc` is detected, the Makefile automatically selects the poll backend.
 
-For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — their BSD socket compatibility layers provide all the POSIX functions Keel uses (`accept`, `read`, `write`, `close`, `poll`, `getaddrinfo`). Compile with `-DKL_NO_SIGNAL` to disable POSIX signal handling, and exclude `thread_pool.c` from the build if no RTOS is available. See [docs/comparison.md](docs/comparison.md#bare-metal--mcu-support) for details.
+For bare-metal targets (STM32, ESP32, etc.), link against lwIP or picoTCP — their BSD socket compatibility layers provide all the POSIX functions Keel uses (`accept`, `read`, `write`, `close`, `poll`, `getaddrinfo`). Compile with `-DKL_NO_SIGNAL` to disable POSIX signal handling, and exclude `thread_pool.c` from the build if no RTOS is available. See [docs/comparison.md](docs/comparison.md#bare-metal--mcu-support) for details. For environments with **no OS sockets at all** — a raw lwIP `NO_SYS` stack, or UEFI firmware before an OS exists — see [Frontier providers](#frontier-providers-bare-metal--firmware).
+
+## Frontier providers (bare-metal / firmware)
+
+The socket + completion axes are abstract enough to host stacks that have **no OS sockets and no libc**. These providers live under `integrations/` as bring-your-own adapters — the core `libkeel` (or a freestanding archive) is unchanged; you inject the provider at runtime. They are more experimental than the mainstream backends and are labeled with their exact maturity.
+
+| Provider | What it is | Maturity |
+|----------|-----------|----------|
+| **lwIP BSD sockets** | Keel over lwIP's POSIX-compatible socket layer (`integrations/lwip`, `event_lwip.c`) | Shipped, BYO |
+| **lwIP raw (`NO_SYS`)** | Keel over lwIP's raw callback API — a completion provider (`event_lwip_raw.c`) that runs the whole HTTP stack with **no OS sockets, no threads**. Serves HTTP over loopback, ASan/UBSan/LSan-clean, CI-gated | Shipped, BYO |
+| **UEFI EFI_TCP4/UDP4** | A freestanding completion provider (`integrations/uefi`) that runs a stock async `KlClient` inside **UEFI firmware, before any OS** — no epoll, no OS sockets, no errno, no libc. Plaintext + HTTPS (CA + hostname + certificate-validity-time verified over EFI Runtime Services `GetTime`, real EFI_RNG entropy) + DNS over EFI_UDP4, with ExitBootServices-clean teardown | **Client proven + hardened on QEMU/OVMF** (adversarially reviewed for EFI completion-token lifetime; see `docs/phase10_uefi_feasibility_design.md`). A UEFI **server** is scoped but not built (`docs/phase10_uefi_server_design.md`) |
+
+The through-line: `KlClient` is genuinely model-blind — the **same** client code runs unchanged over io_uring, IOCP, the pollcomp double, lwIP raw, and EFI tokens (including TLS via the socket-BIO seam and DNS via the built-in resolver). Adding a provider is a socket-axis + completion-axis exercise; the protocol code does not change. This validates the axis separation the way nothing else can — by hosting the stack somewhere with no operating system underneath it.
 
 ## Testing
 
-676 tests across 40 test suites, covering every module:
+920+ tests across 65 test suites, covering every module and both event axes:
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -895,19 +919,19 @@ Three embedded C HTTP libraries compared. See [docs/comparison.md](docs/comparis
 |---|------|----------|---------------|
 | **License** | MIT | GPLv2 / Commercial | LGPLv2.1+ |
 | **LOC** | ~14K | ~33K | ~19K |
-| **Architecture** | 31 independent modules | Monolithic amalgam | Monolithic |
+| **Architecture** | 35+ independent modules on 3 orthogonal axes | Monolithic amalgam | Monolithic |
 | **Maturity** | New (2025–2026) | 20+ years (NASA, Siemens, Samsung) | GNU project, 18+ years (NASA, Sony, systemd) |
 | **HTTP/2** | Server + client | No | No |
-| **Event backends** | epoll, kqueue, io_uring, poll, WSAPoll | select/poll only | select, poll, epoll |
+| **Event backends** | readiness (epoll, kqueue, WSAPoll, poll) + completion (io_uring, IOCP) | select/poll only | select, poll, epoll |
 | **Router + middleware** | Built-in with `:param` capture | None (DIY if/else) | None (single callback) |
 | **HTTP client** | Sync + async + streaming + H2 | Basic client | Server only |
 | **Allocator** | Runtime vtable (bring-your-own) | Compile-time macros | None (raw malloc) |
 | **TLS** | Pluggable vtable — any backend | Built-in TLS 1.3 + pluggable | GnuTLS only |
 | **Compression** | Pluggable vtable (gzip + extensible) | No | No |
 | **Threading** | Single-threaded + thread pool | Single-threaded | 4 modes incl. thread-per-connection |
-| **Bare-metal MCU** | Via lwIP/picoTCP (BSD sockets) | Built-in TCP/IP stack | Requires OS networking |
+| **Bare-metal MCU** | lwIP BSD sockets, lwIP raw (no OS sockets), or UEFI firmware | Built-in TCP/IP stack | Requires OS networking |
 | **Cosmopolitan C** | Supported (APE binaries) | No | No |
-| **Tests** | 676 (41 suites) | ~4K LOC tests | Fewer relative to size |
+| **Tests** | 920+ (65 suites) | ~4K LOC tests | Fewer relative to size |
 
 **Choose Keel** when you want MIT licensing, HTTP/2, a built-in router/middleware/client, and pluggable everything. **Choose Mongoose** when you're targeting bare-metal MCUs with no OS, need a built-in TCP/IP stack, or need battle-tested maturity. **Choose libmicrohttpd** when you need multi-threaded request handling, independently audited security, or wide distro packaging.
 
