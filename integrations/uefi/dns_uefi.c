@@ -64,13 +64,23 @@ static EFI_HANDLE         g_image;
 static uint8_t            g_last_ip[4];
 static int                g_have_last;
 
-/* F1 (UDP): a DNS query token references the transmit descriptor + query buffer until it
- * completes. If a Transmit/Receive cannot be cancel-drained, the firmware may reference
- * that storage forever — so the descriptor + query buffer live in STABLE file scope (not
- * the stack), the leaked UDP child/events are retained until EBS, and `g_dns_quarantined`
- * fail-closes every subsequent resolve (a firmware that can't cancel is unusable). */
-static uint8_t                 g_dns_qbuf[DNS_QUERY_CAP];
-static EFI_UDP4_TRANSMIT_DATA  g_dns_tx;
+/* F1 (UDP): a submitted DNS token has the firmware referencing EVERYTHING reachable from it
+ * until it reaches a terminal state — the completion token itself (firmware writes Status +
+ * Packet.RxData/TxData into it), the transmit descriptor, and the query buffer. If a Transmit/
+ * Receive cannot be cancel-drained, the firmware may reference that storage forever. So the
+ * whole one-shot operation's firmware-visible state lives in ONE STABLE file-scope struct (not
+ * the stack): if a token can't be confirmed retired, the resolve returns via `quarantine`
+ * WITHOUT freeing any of it (child/events leaked until EBS), and `g_dns_quarantined` fail-closes
+ * every subsequent resolve (a firmware that can't cancel is unusable). The op is strictly
+ * one-shot and serialized — kl_resolve_sync runs to completion before the next call — so a single
+ * static instance is safe. The invariant is then obvious: nothing a submitted token can reach
+ * ever lives on the stack. */
+static struct {
+    uint8_t                   qbuf[DNS_QUERY_CAP];   /* the A-query wire bytes (tx fragment)   */
+    EFI_UDP4_TRANSMIT_DATA    tx;                    /* transmit descriptor → qbuf             */
+    EFI_UDP4_COMPLETION_TOKEN tx_tok;               /* firmware writes tx Status here          */
+    EFI_UDP4_COMPLETION_TOKEN rx_tok;               /* firmware writes rx Status + RxData here */
+} g_dns_op;
 static int                     g_dns_quarantined;
 static uint16_t           g_qid_counter;    /* fallback query-id source */
 
@@ -331,7 +341,7 @@ int kl_uefi_dns_resolve(const char *host, uint16_t port, KlSockAddr *out) {
 
     /* Build the A-query into the STABLE (file-scope) query buffer so a token that cannot
      * be cancel-drained never references freed stack storage. */
-    uint8_t *qbuf = g_dns_qbuf;
+    uint8_t *qbuf = g_dns_op.qbuf;
     uint16_t qid = u5_query_id();
     size_t qlen = 0;
     if (u5_build_query(qbuf, DNS_QUERY_CAP, qid, host, &qlen) < 0) goto teardown;
@@ -343,8 +353,8 @@ int kl_uefi_dns_resolve(const char *host, uint16_t port, KlSockAddr *out) {
     st = bs->CreateEvent(KL_U5_EVT_TOKEN, TPL_CALLBACK, NULL, NULL, &rx_ev);
     if (EFI_ERROR(st)) { bs->CloseEvent(tx_ev); goto teardown; }
 
-    /* Transmit the query — descriptor in STABLE file scope (see g_dns_tx). */
-    EFI_UDP4_TRANSMIT_DATA *tx = &g_dns_tx;
+    /* Transmit the query — descriptor + token in STABLE file scope (see g_dns_op). */
+    EFI_UDP4_TRANSMIT_DATA *tx = &g_dns_op.tx;
     u5_zero(tx, sizeof(*tx));
     tx->UdpSessionData = NULL;             /* use Configure()d remote (ns:53) */
     tx->GatewayAddress = NULL;
@@ -353,39 +363,39 @@ int kl_uefi_dns_resolve(const char *host, uint16_t port, KlSockAddr *out) {
     tx->FragmentTable[0].FragmentLength = (UINT32)qlen;
     tx->FragmentTable[0].FragmentBuffer = qbuf;
 
-    EFI_UDP4_COMPLETION_TOKEN tx_tok;
-    u5_zero(&tx_tok, sizeof(tx_tok));
-    tx_tok.Event = tx_ev;
-    tx_tok.Status = EFI_NOT_READY;
-    tx_tok.Packet.TxData = tx;
+    EFI_UDP4_COMPLETION_TOKEN *tx_tok = &g_dns_op.tx_tok;
+    u5_zero(tx_tok, sizeof(*tx_tok));
+    tx_tok->Event = tx_ev;
+    tx_tok->Status = EFI_NOT_READY;
+    tx_tok->Packet.TxData = tx;
 
-    st = udp->Transmit(udp, &tx_tok);
+    st = udp->Transmit(udp, tx_tok);
     if (EFI_ERROR(st)) goto close_events;
     /* F1: Cancel+drain on timeout. If the cancel-drain CANNOT confirm the token retired,
-     * the firmware may still own g_dns_tx/g_dns_qbuf + the events + child — QUARANTINE:
-     * leak them (retain until EBS) and fail-close further DNS. */
-    if (!u5_pump_or_cancel(bs, udp, &tx_tok)) goto quarantine;
-    if (EFI_ERROR(tx_tok.Status)) goto close_events;
+     * the firmware may still own g_dns_op (token/descriptor/buffer) + the events + child —
+     * QUARANTINE: leak them (retain until EBS) and fail-close further DNS. */
+    if (!u5_pump_or_cancel(bs, udp, tx_tok)) goto quarantine;
+    if (EFI_ERROR(tx_tok->Status)) goto close_events;
 
     /* Receive the response. The firmware allocates RxData; we SignalEvent its
      * RecycleSignal when done. */
-    EFI_UDP4_COMPLETION_TOKEN rx_tok;
-    u5_zero(&rx_tok, sizeof(rx_tok));
-    rx_tok.Event = rx_ev;
-    rx_tok.Status = EFI_NOT_READY;
-    rx_tok.Packet.RxData = NULL;
+    EFI_UDP4_COMPLETION_TOKEN *rx_tok = &g_dns_op.rx_tok;
+    u5_zero(rx_tok, sizeof(*rx_tok));
+    rx_tok->Event = rx_ev;
+    rx_tok->Status = EFI_NOT_READY;
+    rx_tok->Packet.RxData = NULL;
 
-    st = udp->Receive(udp, &rx_tok);
+    st = udp->Receive(udp, rx_tok);
     if (EFI_ERROR(st)) goto close_events;
     /* F1: Cancel+drain on timeout. Uncan­cellable → QUARANTINE (leak, fail-close). */
-    if (!u5_pump_or_cancel(bs, udp, &rx_tok)) goto quarantine;
+    if (!u5_pump_or_cancel(bs, udp, rx_tok)) goto quarantine;
 
     /* The firmware may have produced an RxData buffer (firmware-owned) even on the
      * aborted/error path. Only PARSE it on a clean status, but ALWAYS recycle it if
      * present so the buffer is returned to the driver (F1: no leak on the abort path). */
-    EFI_UDP4_RECEIVE_DATA *rx = rx_tok.Packet.RxData;
+    EFI_UDP4_RECEIVE_DATA *rx = rx_tok->Packet.RxData;
     if (rx) {
-        if (!EFI_ERROR(rx_tok.Status)) {
+        if (!EFI_ERROR(rx_tok->Status)) {
             /* Coalesce the fragment(s) into a flat buffer (usually 1 fragment). */
             uint8_t resp[DNS_RESP_CAP];
             size_t rlen = 0;
@@ -421,10 +431,11 @@ teardown:
     return rc;
 
 quarantine:
-    /* A UDP token could not be confirmed retired — the firmware may still reference
-     * g_dns_tx / g_dns_qbuf / tx_ev / rx_ev / the child. Do NOT close events, reset,
-     * CloseProtocol, or DestroyChild: leak them (retain until EBS) and fail-close all
-     * further DNS. (A bounded wait is fine; freeing afterward defeats the guarantee.) */
+    /* A UDP token could not be confirmed retired — the firmware may still reference the
+     * whole g_dns_op (token + descriptor + query buffer) + tx_ev / rx_ev / the child. Do
+     * NOT close events, reset, CloseProtocol, or DestroyChild: leak them (retain until EBS)
+     * and fail-close all further DNS. (A bounded wait is fine; freeing afterward defeats the
+     * guarantee — g_dns_op is stable file-scope storage precisely so this leak is safe.) */
     g_dns_quarantined = 1;
     return -1;
 }

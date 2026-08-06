@@ -365,12 +365,19 @@ static EFI_STATUS EFIAPI m_udp_Routes(EFI_UDP4_PROTOCOL *This, BOOLEAN d, EFI_IP
 static unsigned char g_udp_resp[512];
 static EFI_UDP4_RECEIVE_DATA g_udp_rxdata;
 static MockEvent g_udp_recycle_ev;
+/* The last UDP token the firmware ACCEPTED but did not complete (a TOK_HANG). The test uses
+ * it to model a DELAYED firmware write into the token AFTER kl_uefi_dns_resolve() returns —
+ * the exact condition that catches a stack-local token (write into a returned frame =
+ * ASan stack-use-after-return) vs the stable g_dns_op storage (safe). */
+static EFI_UDP4_COMPLETION_TOKEN *g_udp_hung_tok;
 static EFI_STATUS EFIAPI m_udp_Transmit(EFI_UDP4_PROTOCOL *This, EFI_UDP4_COMPLETION_TOKEN *t) {
     (void)This; FW();
     MockEvent *e = (MockEvent *)t->Event;
     tok_submit(t, e);
     if (g_udp_transmit_mode == TOK_COMPLETE_OK) {
         t->Status = EFI_SUCCESS; if (e) e->signaled = 1; tok_terminal(t);
+    } else {
+        g_udp_hung_tok = t;   /* firmware keeps this token address (will "write late") */
     }
     return EFI_SUCCESS;
 }
@@ -389,6 +396,8 @@ static EFI_STATUS EFIAPI m_udp_Receive(EFI_UDP4_PROTOCOL *This, EFI_UDP4_COMPLET
         g_udp_rxdata.FragmentTable[0].FragmentBuffer = g_udp_resp;
         t->Packet.RxData = &g_udp_rxdata;
         t->Status = EFI_SUCCESS; if (e) e->signaled = 1; tok_terminal(t);
+    } else {
+        g_udp_hung_tok = t;   /* firmware keeps this token address (will "write late") */
     }
     return EFI_SUCCESS;
 }
@@ -685,12 +694,13 @@ static void t_after_ebs_refuses(void) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
- * TEST 8 — entropy fail-closed (separate tiny check, no full mock needed).
+ * TEST 8 — entropy fail-closed (F4). Links the REAL mbedtls_hardware_poll from the
+ * mbedTLS-free entropy_uefi.c (split out precisely so this runs without the mbedTLS
+ * adapter's libc-clashing residuals). No MOCK_WITH_MBEDTLS gate — always runs.
  * ───────────────────────────────────────────────────────────────────────────── */
-#ifdef MOCK_WITH_MBEDTLS
 int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len, size_t *olen);
-/* kl_uefi_have_entropy is referenced by mbedtls_platform_uefi.c; provide a stub that
- * reports NO entropy so we exercise the fail-closed / insecure-fallback branch. */
+/* entropy_uefi.c references kl_uefi_have_entropy; stub it to report NO entropy so we
+ * exercise the fail-closed (default) / insecure-fallback (macro) branch. */
 int kl_uefi_have_entropy(void);
 int kl_uefi_have_entropy(void) { return 0; }
 static void t_entropy_fail_closed(void) {
@@ -704,7 +714,6 @@ static void t_entropy_fail_closed(void) {
     CHECK(r != 0 && olen == 0, "without macro: FAILS CLOSED (r!=0, olen=0)");
 #endif
 }
-#endif /* MOCK_WITH_MBEDTLS */
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * TEST 9 — stale-guard no-UAF: create a conn, queue a connect op in event_efi with its
@@ -848,9 +857,24 @@ static void t_dns_cancel_fails_quarantine(void) {
     g_cancel_signals    = 0;             /* UDP Cancel is a no-op — token stays live */
     kl_uefi_dns_init(&g_bs, (EFI_HANDLE)0x1);
     KlSockAddr out;
+    g_udp_hung_tok = NULL;
     int r = kl_uefi_dns_resolve("example.com", 80, &out);
     CHECK(r == -1, "dns_resolve -1 on tx hang + failed cancel");
     CHECK(g_destroy_child_calls == 0, "F1/UDP: child NOT destroyed while token live (leaked, safe)");
+
+    /* THE bug this guards: the live token the firmware still owns must NOT be stack-local.
+     * Model a DELAYED firmware write into it AFTER dns_resolve() has returned (the firmware
+     * eventually completes the "hung" Transmit, writing Status + Packet into the token). If
+     * the token lived on dns_resolve's stack, this write hits a returned frame — ASan
+     * stack-use-after-return. With the g_dns_op fix it lands in stable static storage. */
+    CHECK(g_udp_hung_tok != NULL, "F1/UDP: firmware retained the live token address");
+    if (g_udp_hung_tok) {
+        g_udp_hung_tok->Status = EFI_ABORTED;      /* late write — must be safe */
+        g_udp_hung_tok->Packet.RxData = NULL;
+        CHECK(g_udp_hung_tok->Status == EFI_ABORTED,
+              "F1/UDP: late firmware write lands in STABLE token storage (no stack-UAR)");
+    }
+
     /* A subsequent resolve must fail-close (quarantined). */
     int r2 = kl_uefi_dns_resolve("example.com", 80, &out);
     CHECK(r2 == -1, "F1/UDP: subsequent resolve fails-closed after quarantine");
@@ -869,9 +893,7 @@ int main(void) {
     t_cancel_racing_completion();
     t_close_token_timeout();
     t_after_ebs_refuses();
-#ifdef MOCK_WITH_MBEDTLS   /* entropy test pulls mbedtls_platform_uefi.c (needs mbedTLS) */
-    t_entropy_fail_closed();
-#endif
+    t_entropy_fail_closed();           /* links entropy_uefi.c (mbedTLS-free) */
     t_stale_guard_no_uaf();
     t_cancel_fails_quarantine();
     t_close_no_spin_on_consumed_connect();

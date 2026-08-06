@@ -125,6 +125,13 @@ echo "compiling mbedtls_platform_uefi.c ..."
 "$CC" "${ADAPTER_CFLAGS[@]}" -c -o mbedtls_platform_uefi.obj mbedtls_platform_uefi.c
 OBJS+=( mbedtls_platform_uefi.obj )
 
+# entropy_uefi.c = mbedtls_hardware_poll, split out of the platform TU so the host mock
+# harness can test the fail-closed contract without the libc-clashing residuals. Needs the
+# entropy defines (spike → insecure fallback; prod → fail-closed) but NOT the mbedTLS include.
+echo "compiling entropy_uefi.c ..."
+"$CC" "${ADAPTER_CFLAGS[@]}" -c -o entropy_uefi.obj entropy_uefi.c
+OBJS+=( entropy_uefi.obj )
+
 # ---- 3. U-1/U-2/U-3 Keel UEFI TUs + u4_selftest.c ----
 # U4_MODE=prod: production TLS — CA-verified server cert (dNSName SAN = KL_U4_PROD_HOST,
 # mapped to KL_U4_STATIC_IP by resolve_uefi.c's static hosts entry) + real EFI_RNG

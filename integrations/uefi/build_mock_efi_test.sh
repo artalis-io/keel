@@ -24,9 +24,18 @@ CFLAGS=(
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/src" -I. -I"$KEEL_ROOT/spikes/uefi"
   -Wall -Wextra
 )
-SRCS=( mock_efi_test.c socket_efi_tcp4.c dns_uefi.c event_efi.c allocator_uefi.c )
+SRCS=( mock_efi_test.c socket_efi_tcp4.c dns_uefi.c event_efi.c allocator_uefi.c entropy_uefi.c )
 
 echo "building mock_efi_test (host, ASan+UBSan) ..."
 "$CC" "${CFLAGS[@]}" "${SRCS[@]}" "$KEEL_ROOT/libkeel.a" -o mock_efi_test
-echo "running ..."
-ASAN_OPTIONS=detect_leaks=1 ./mock_efi_test
+
+# LSan (detect_leaks) is unsupported by Apple's ASan runtime on Darwin — it aborts before
+# running any test. Enable it on Linux (the container gate does the real leak check); disable
+# it on macOS. The quarantine tests deliberately "leak" into static pools, which are reachable
+# and thus not reported by LSan anyway, so disabling on Darwin loses no coverage.
+case "$(uname -s)" in
+  Darwin) LEAKS=0 ;;
+  *)      LEAKS=1 ;;
+esac
+echo "running (detect_leaks=$LEAKS) ..."
+ASAN_OPTIONS="detect_leaks=$LEAKS" ./mock_efi_test

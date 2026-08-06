@@ -58,30 +58,43 @@ Status: **feasibility / design (2026-08-05).**
 >   `after_ebs`. Orderly-teardown proven observably (the monotonic clock freezes once its timer is
 >   released).
 >
-> **STATUS — the HAPPY PATH is proven; the FAILURE PATHS are being hardened (2026-08-06).** An
-> external adversarial-lifecycle review found real **EFI token-lifetime** bugs that QEMU happy-path
-> runs (and the happy-path-focused audits) did not expose. **F-8 is NOT production-ready yet.** The
-> EFI client is *functional* on bare firmware — plaintext + HTTPS (CA + hostname verified, but see
-> below) + DNS, non-blocking recv, orderly pre-EBS teardown — but the following are open and tracked
-> in the **F-8 hardening** pass (`docs/keel_axis_audit.md` / `docs/keel_audit.md` newest passes):
->   1. *(Critical)* a timed-out `Transmit`/`Connect`/DNS token was returned WITHOUT `Cancel`+drain —
->      the firmware could still reference caller/stack storage. Every submitted token needs one
->      terminal path (completion **or** `Cancel`→drain-to-`EFI_ABORTED`).
->   2. *(Critical)* `close()` did not cancel+drain outstanding connect/recv/tx tokens (esp. the
->      normally-posted U-6 Receive) before freeing.
->   3. *(High)* the EBS fail-closed guard covered new-socket creation but NOT continued use of
->      existing connections (drain/send/recv still called Boot Services after EBS); the U-7 test
->      exercised orderly shutdown, not a real post-EBS transition.
->   4. *(High)* the reusable `mbedtls_hardware_poll` still returned weak counter/pointer entropy when
->      EFI_RNG was absent instead of failing closed (only the self-test's separate check gated it).
->   5. *(Medium)* "production TLS" verifies CA chain + hostname but, with `MBEDTLS_HAVE_TIME` off,
->      does **not** reject expired / not-yet-valid certs — it is "CA + hostname verified, without
->      certificate-time validation," not fully production TLS. (EFI `GetTime` is the path.)
->   6. *(Medium)* the connect stale-guard dereferenced the (possibly-freed) `KlUefiConn` to read its
->      magic/generation — a UAF; fix via provider-owned stable slots/IDs.
->   7. host-side **mock-EFI failure-path tests** (timeout→close, cancel-racing-completion, post-EBS,
->      entropy-unavailable, …) are needed — QEMU happy-path cannot expose these. (Also: the
->      host-map-test link regressed on `kl_uefi_after_ebs`.)
+> **STATUS (2026-08-06) — EFI transport lifecycle: hardened + mock-tested. HTTPS: pending
+> cert-time validation.** Distinguish three things:
+>   - **Token / lifecycle hardening — COMPLETE and host-mock-tested.** Two rounds of adversarial-
+>     lifecycle review found real **EFI token-lifetime** bugs QEMU happy-path runs (and the happy-
+>     path-focused audits) never exposed. All are now fixed and covered by a host mock-EFI harness
+>     (`mock_efi_test.c`, 13 scenarios: the real provider TUs against a scriptable fake EFI under
+>     ASan+UBSan; see the newest passes in `docs/keel_audit.md` / `docs/keel_axis_audit.md`).
+>   - **Certificate validity-time enforcement — STILL OPEN.** With `MBEDTLS_HAVE_TIME` off, TLS
+>     verifies the CA chain + hostname but does **not** reject expired / not-yet-valid certs. EFI
+>     `GetTime` is the path.
+>   - **Therefore full production-TLS status — STILL PENDING** (blocked solely on the cert-time item).
+>
+> The EFI transport (plaintext + DNS + the TLS *transport*, non-blocking recv, orderly pre-EBS
+> teardown) is functional on bare firmware and its failure paths are now hardened. Fixed in the F-8
+> hardening pass:
+>   1. *(Critical — FIXED)* a timed-out `Transmit`/`Connect`/DNS token returned WITHOUT
+>      `Cancel`+drain could leave the firmware referencing caller/stack storage → **quarantine
+>      model**: stable provider-owned slots (`g_conns[]`) and a single stable DNS-op struct
+>      (`g_dns_op`: tokens + descriptor + query buffer) are never reclaimed once a token can't be
+>      confirmed retired. Every submitted token reaches one terminal path (completion **or**
+>      `Cancel`→drain-to-`EFI_ABORTED`) before any storage is freed. (The mock models a *delayed
+>      firmware write into a quarantined token after the call returns* — with stack-local tokens
+>      that is an ASan stack-use-after-return; the stable storage makes it safe.)
+>   2. *(Critical — FIXED)* `close()` now cancels + drains outstanding connect/recv/tx tokens (via
+>      explicit `*_posted` state) before freeing; a failed drain quarantines instead of tearing down.
+>   3. *(High — FIXED)* the EBS fail-closed guard now covers continued use of existing connections
+>      (send/recv/drain/configure/connect) + the mbedTLS heap, not just new-socket creation.
+>   4. *(High — FIXED)* `mbedtls_hardware_poll` fails closed when EFI_RNG is absent (weak fallback is
+>      opt-in only, `-DKL_UEFI_INSECURE_TEST_ENTROPY`); split into `entropy_uefi.c` so the mock
+>      harness tests the fail-closed contract directly.
+>   5. *(Medium — OPEN)* certificate-time validation — see the STATUS bullets above.
+>   6. *(Medium — FIXED)* the connect stale-guard no longer dereferences freed memory: the
+>      generation lives in the stable slot (`g_conns[]`), read via handle, not through a freed conn.
+>   7. *(FIXED)* host-side **mock-EFI failure-path tests** now exist (`mock_efi_test.c`: timeout→
+>      close, cancel-racing-completion, cancel-failure→quarantine, consumed-connect close, impossible
+>      recv length, post-EBS, entropy-unavailable, delayed-write-into-quarantined-token); the
+>      host-map-test link regression is fixed.
 >
 > Beyond F-8 (future): an EFI *server* (needs a freestanding server archive; U-6's non-blocking recv
 > is its prerequisite), EFI_TCP6/IPv6, firmware `EFI_DNS4`, completion-mode TLS.
