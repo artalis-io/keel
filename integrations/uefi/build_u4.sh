@@ -162,6 +162,11 @@ KEEL_CFLAGS=(
   -DKEEL_FREESTANDING
   -DTARGET_PORT="$TARGET_PORT"
   -DTARGET_HOST="\"$TARGET_HOST\""
+  # OVMF/QEMU reports UTC with an UNSPECIFIED timezone; this TEST/OVMF flag lets the cert clock
+  # treat an unspecified zone as already-UTC. It is a test accommodation — a real-firmware
+  # production build omits it, so unspecified-zone (local) time is rejected unless the app
+  # declares an offset via kl_uefi_set_unspecified_tz(). See wallclock_uefi.h.
+  -DKL_UEFI_ASSUME_UNSPECIFIED_UTC
   "${PROD_DEFS[@]}"
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src"
   -I"$MBEDTLS_ADAPTER"            # u4_selftest.c includes keel_tls_mbedtls.h
@@ -170,8 +175,8 @@ KEEL_CFLAGS=(
 )
 declare -A EXTRA=( [u1_link_stubs.c]="-DKEEL_UEFI_HAVE_RESOLVE"
                    [u4_selftest.c]="${U4_SELFTEST_DEFS:-}" )
-KEEL_SRCS=( allocator_uefi.c platform_uefi.c civil_time.c socket_efi_tcp4.c event_efi.c
-            resolve_uefi.c u1_link_stubs.c u4_selftest.c )
+KEEL_SRCS=( allocator_uefi.c platform_uefi.c civil_time.c wallclock_uefi.c clock_snapshot.c
+            socket_efi_tcp4.c event_efi.c resolve_uefi.c u1_link_stubs.c u4_selftest.c )
 for s in "${KEEL_SRCS[@]}"; do
   o="${s%.c}.obj"
   echo "compiling $s ..."

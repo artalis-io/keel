@@ -48,7 +48,7 @@ one terminal result") name — and they are now fixed and host-test-covered.
    EBS (`kl_uefi_after_ebs()`), so no post-teardown firmware call is made — the selected backend's
    unavailability is observable and safe, never a silent partial.
 
-**Method:** the same 14-scenario host mock-EFI harness (`mock_efi_test.c`) that drives the C-audit
+**Method:** the same 16-scenario host mock-EFI harness (`mock_efi_test.c`) that drives the C-audit
 pass exercises these axis paths directly — cancel-succeeds/fails/races, close-with-outstanding-
 receive, consumed-connect-event-during-close, post-EBS — under ASan+UBSan. See the eleventh C-audit
 pass for the finding table.

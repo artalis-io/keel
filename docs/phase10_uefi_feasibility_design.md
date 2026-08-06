@@ -66,13 +66,26 @@ Status: **feasibility / design (2026-08-05).**
 >     (`mock_efi_test.c`, 14 scenarios: the real provider TUs against a scriptable fake EFI under
 >     ASan+UBSan; see the newest passes in `docs/keel_audit.md` / `docs/keel_axis_audit.md`).
 >   - **Certificate validity-time enforcement — DONE (U-8).** `MBEDTLS_HAVE_TIME` + `HAVE_TIME_DATE`
->     are enabled, backed by Runtime Services `GetTime` (`kl_uefi_wallclock` → `time_uefi.c`), so TLS
->     now rejects expired / not-yet-valid certs in addition to CA chain + hostname. **Fail-closed +
->     sanity floor**: no trustworthy clock (GetTime error or year < `KL_UEFI_TIME_FLOOR_YEAR`) → the
->     time reads epoch 0 → every real cert fails `notBefore` → no HTTPS. Proven in QEMU: a **valid**
->     cert → `status 200`; an **expired** cert (minted for 2020 via faketime) → `status -1`,
->     `KL_ERR_TLS_HANDSHAKE`, no 200. The date math + fail-closed policy are unit-tested in the mock
->     harness (`t_civil_time`, vs libc `timegm`).
+>     are enabled, backed by Runtime Services `GetTime`, so TLS now rejects expired / not-yet-valid
+>     certs in addition to CA chain + hostname. The trust boundary is handled carefully:
+>       - **Per-session SNAPSHOT (`clock_snapshot.c`), not per-verification GetTime.**
+>         `kl_uefi_clock_snapshot()` validates + captures UTC ONCE at session creation (the app
+>         refuses the session if it fails); `mbedtls_time()` returns that snapshot advanced by the
+>         monotonic clock and **never calls GetTime mid-handshake** — so a GetTime that fails after
+>         setup cannot fall back to epoch 0 and admit a 1970-spanning cert.
+>       - **Structural fail-closed gate**, not just an epoch-0 return: no trustworthy clock ⇒ TLS
+>         session is refused (`kl_uefi_have_trustworthy_wallclock`), independent of cert dates.
+>       - **`EFI_TIME` field validation** (`kl_civil_valid`): malformed firmware (month 13, Feb 30,
+>         hour 25, sec 60, bad TZ/Daylight) is rejected before conversion, not normalised.
+>       - **Unspecified-timezone policy** (UEFI §8.3: an unspecified zone is LOCAL, not UTC):
+>         **rejected by default**; an app may declare its offset (`kl_uefi_set_unspecified_tz`); the
+>         `KL_UEFI_ASSUME_UNSPECIFIED_UTC` flag (build_u4/OVMF **test only**, never production) treats
+>         it as UTC. Timezone sign is UEFI's `UTC = local + TimeZone` (PST = +480).
+>     Proven in QEMU: **valid** cert + good clock → `status 200`; valid cert + **bad clock (RTC=2000)**
+>     → TLS refused, no 200; **expired** cert (minted for 2020 via faketime) → `status -1`,
+>     `KL_ERR_TLS_HANDSHAKE`, no 200. The conversion (vs libc `timegm`), fail-closed floor, unspecified-
+>     TZ policy, field validation, and the snapshot (incl. post-snapshot-GetTime-failure) are all
+>     unit-tested in the mock harness.
 >   - **Full production-TLS status — cert validation complete** (CA + hostname + validity-time). Any
 >     remaining hardening is operational (e.g. real-firmware RTC quality), not a missing check.
 >

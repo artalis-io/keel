@@ -1,34 +1,21 @@
 /*
- * time_uefi.c — mbedTLS clock hooks over EFI Runtime Services GetTime (U-8).
+ * time_uefi.c — the mbedTLS gmtime_r + ms_time hooks for the freestanding UEFI build (U-8).
  *
- * Split out of the mbedTLS adapter (like entropy_uefi.c) so it carries no mbedTLS
- * dependency beyond the two well-known ALT hook names. Certificate validity-time
- * (notBefore/notAfter) is enforced through:
- *
- *   kl_uefi_mbedtls_time()        registered via mbedtls_platform_set_time() — returns the
- *                                 current UTC time (Unix seconds) from kl_uefi_wallclock(),
- *                                 or 0 (epoch 1970) when the RTC is untrustworthy so every
- *                                 real cert fails notBefore (FAIL-CLOSED HTTPS).
+ * The wall-clock time source (mbedtls_time == MBEDTLS_PLATFORM_TIME_MACRO) is the per-session
+ * SNAPSHOT in clock_snapshot.c (which never calls GetTime from the verification callback).
+ * This TU provides the other two hooks:
  *   mbedtls_platform_gmtime_r()   MBEDTLS_PLATFORM_GMTIME_R_ALT — breaks a Unix time down to
  *                                 struct tm via the pure civil_time math (no libc gmtime).
+ *   mbedtls_ms_time()             MBEDTLS_PLATFORM_MS_TIME_ALT — a monotonic ms timer.
  */
 #include "time_uefi.h"
-#include "platform_uefi.h"       /* kl_uefi_wallclock */
 #include "civil_time.h"          /* kl_unix_to_civil */
 #include "../../src/platform.h"  /* kl_monotonic_ms (for mbedtls_ms_time) */
 
 #include <time.h>            /* struct tm (mbedtls_shim/time.h) */
 #include <stdint.h>
 
-long long kl_uefi_mbedtls_time(long long *t) {
-    int64_t u = 0;                                  /* fail-closed default: epoch */
-    if (kl_uefi_wallclock(&u) != 0) u = 0;          /* untrustworthy clock → 1970 → certs fail */
-    long long r = (long long)u;
-    if (t) *t = r;
-    return r;
-}
-
-/* mbedtls_time_t is `long long` (MBEDTLS_PLATFORM_TIME_TYPE_MACRO). */
+/* mbedtls_time_t is `long long` (from the shim <time.h>). */
 struct tm *mbedtls_platform_gmtime_r(const long long *tt, struct tm *tm_buf);
 struct tm *mbedtls_platform_gmtime_r(const long long *tt, struct tm *tm_buf) {
     if (!tt || !tm_buf) return NULL;

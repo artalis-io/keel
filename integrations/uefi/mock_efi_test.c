@@ -25,6 +25,8 @@
 #include "dns_uefi.h"
 #include "event_efi.h"
 #include "civil_time.h"                   /* cert validity-time conversion (U-8) */
+#include "wallclock_uefi.h"               /* EFI_TIME decode + unspecified-TZ policy (U-8) */
+#include "clock_snapshot.h"               /* per-session snapshot clock gate (U-8) */
 
 #include <keel/sockaddr.h>
 #include "../../src/socket.h"        /* KlSocketProvider, KlSocketOps, kl_handle_valid */
@@ -57,14 +59,25 @@ static int g_after_ebs = 0;
 int kl_uefi_after_ebs(void);
 int kl_uefi_after_ebs(void) { return g_after_ebs; }
 
-/* dns_uefi.c draws a query id via kl_plat_random (src/platform.h); libkeel.a does not
- * define the freestanding platform hook, so the harness provides a deterministic one. */
 #include <stddef.h>
-void kl_plat_random(void *buf, size_t len);
-void kl_plat_random(void *buf, size_t len) { memset(buf, 0x5a, len); }
+/* kl_plat_random + kl_monotonic_ms (src/platform.h) are provided by libkeel.a's host platform
+ * TU — pulled in once clock_snapshot.c references kl_monotonic_ms. We do NOT stub them here
+ * (that would duplicate the symbols); the DNS query id being host-random is fine (the DNS mock
+ * tests exercise timeout/quarantine, not a successful id-matched parse). */
 
-/* dns_uefi.c draws a query id via kl_plat_random (src/platform.h) — libkeel.a defines
- * it; nothing to stub. */
+/* ── controllable kl_uefi_wallclock (U-8) ───────────────────────────────────────
+ * clock_snapshot.c calls the REAL kl_uefi_wallclock (platform_uefi.c, GetTime) — not linked
+ * here — so the harness provides a scriptable one to drive the snapshot gate: a successful
+ * clock (g_wc_fail=0 → returns g_wc_val) or an untrustworthy one (g_wc_fail=1 → -1). This lets
+ * the mock exercise snapshot-succeeds and snapshot-refuses end-to-end. */
+static int     g_wc_fail = 0;
+static int64_t g_wc_val  = 1780272000LL;   /* 2026-06-01T00:00:00Z */
+int kl_uefi_wallclock(int64_t *out_unix);
+int kl_uefi_wallclock(int64_t *out_unix) {
+    if (g_wc_fail) return -1;
+    if (out_unix) *out_unix = g_wc_val;
+    return 0;
+}
 
 /* ── mock event objects ─────────────────────────────────────────────────────────
  * An EFI_EVENT in the mock is a pointer to MockEvent. CheckEvent(EFI_SUCCESS) iff
@@ -745,12 +758,99 @@ static void t_civil_time(void) {
     KlCivil good = {2026, 6, 1, 0, 0, 0};
     CHECK(kl_wallclock_from_fields(&good, 0, 0, 2025, &out) == 0 && out == 1780272000LL,
           "U-8: valid year -> UTC seconds");
-    /* timezone normalisation: local + specified offset -> UTC (UEFI §8.3: UTC=local-tz). */
-    int64_t utc_from_local = 0;
+    /* timezone normalisation: UEFI §8.3 UTC = LocalTime + TimeZone. PST = +480. */
+    int64_t utc_pst = 0;
     KlCivil local = {2026, 6, 1, 0, 0, 0};
-    kl_wallclock_from_fields(&local, -480, 1, 2025, &utc_from_local); /* PST tz=-480 */
-    CHECK(utc_from_local == 1780272000LL + 480 * 60,
-          "U-8: local+TimeZone normalises to UTC");
+    kl_wallclock_from_fields(&local, 480, 1, 2025, &utc_pst);     /* PST tz=+480 */
+    CHECK(utc_pst == 1780272000LL + 480 * 60,
+          "U-8: PST (+480) normalises UTC = local + TimeZone");
+    int64_t utc_east = 0;
+    kl_wallclock_from_fields(&local, -120, 1, 2025, &utc_east);   /* UTC+2 zone tz=-120 */
+    CHECK(utc_east == 1780272000LL - 120 * 60,
+          "U-8: -120 normalises UTC = local + TimeZone");
+
+    /* EFI_TIME field validation (malformed firmware must be REJECTED, not normalised). */
+    KlCivil v = {2026, 6, 15, 12, 30, 30};
+    CHECK(kl_civil_valid(&v, 0, 0, 0, 0) == 0, "U-8: well-formed EFI_TIME accepted");
+    KlCivil m0  = {2026, 0, 1, 0, 0, 0};   CHECK(kl_civil_valid(&m0,  0,0,0,0) == -1, "U-8: month 0 rejected");
+    KlCivil m13 = {2026,13, 1, 0, 0, 0};   CHECK(kl_civil_valid(&m13, 0,0,0,0) == -1, "U-8: month 13 rejected");
+    KlCivil f30 = {2026, 2,30, 0, 0, 0};   CHECK(kl_civil_valid(&f30, 0,0,0,0) == -1, "U-8: Feb 30 rejected");
+    KlCivil f29n= {2023, 2,29, 0, 0, 0};   CHECK(kl_civil_valid(&f29n,0,0,0,0) == -1, "U-8: Feb 29 (non-leap) rejected");
+    KlCivil f29l= {2024, 2,29, 0, 0, 0};   CHECK(kl_civil_valid(&f29l,0,0,0,0) ==  0, "U-8: Feb 29 (leap) accepted");
+    KlCivil h25 = {2026, 6, 1,25, 0, 0};   CHECK(kl_civil_valid(&h25, 0,0,0,0) == -1, "U-8: hour 25 rejected");
+    KlCivil s60 = {2026, 6, 1, 0, 0,60};   CHECK(kl_civil_valid(&s60, 0,0,0,0) == -1, "U-8: second 60 rejected");
+    CHECK(kl_civil_valid(&v, 1000000000u, 0, 0, 0) == -1, "U-8: nanosecond > 1e9 rejected");
+    CHECK(kl_civil_valid(&v, 0, 1441, 1, 0) == -1, "U-8: TimeZone > 1440 rejected");
+    CHECK(kl_civil_valid(&v, 0, -1441, 1, 0) == -1, "U-8: TimeZone < -1440 rejected");
+    CHECK(kl_civil_valid(&v, 0, 0, 0, 0x04) == -1, "U-8: reserved Daylight bit rejected");
+    CHECK(kl_civil_valid(&v, 0, 0, 0, 0x03) == 0,  "U-8: Daylight ADJUST|IN accepted");
+}
+
+/* Build an EFI_TIME for the decode tests. */
+static EFI_TIME mk_efi_time(UINT16 y, UINT8 mo, UINT8 d, UINT8 h, UINT8 mi, UINT8 s,
+                            INT16 tz, UINT8 dl) {
+    EFI_TIME t; memset(&t, 0, sizeof(t));
+    t.Year = y; t.Month = mo; t.Day = d; t.Hour = h; t.Minute = mi; t.Second = s;
+    t.TimeZone = tz; t.Daylight = dl;
+    return t;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * TEST — EFI_TIME decode + the unspecified-timezone POLICY (U-8, finding 1). The mock is
+ * built WITHOUT KL_UEFI_ASSUME_UNSPECIFIED_UTC, i.e. the production default: an unspecified
+ * zone (local time, unknown offset) must be REJECTED unless the app declares an offset.
+ * ───────────────────────────────────────────────────────────────────────────── */
+static void t_wallclock_decode(void) {
+    T_CASE("EFI_TIME decode + unspecified-TZ policy (U-8)");
+    int64_t out = 0;
+    /* GetTime failed -> fail-closed regardless of the (garbage) EFI_TIME. */
+    EFI_TIME any = mk_efi_time(2026, 6, 1, 0, 0, 0, 0, 0);
+    CHECK(kl_uefi_wallclock_from_efi(0, &any, &out) == -1, "U-8: GetTime failure -> -1");
+    /* Explicit UTC zone (TimeZone=0, specified) -> convert. */
+    EFI_TIME utc = mk_efi_time(2026, 6, 1, 0, 0, 0, 0, 0);
+    CHECK(kl_uefi_wallclock_from_efi(1, &utc, &out) == 0 && out == 1780272000LL,
+          "U-8: explicit UTC zone converts");
+    /* Unspecified zone, no configured offset -> REJECT (finding 1, production default). */
+    EFI_TIME unspec = mk_efi_time(2026, 6, 1, 0, 0, 0, (INT16)EFI_UNSPECIFIED_TIMEZONE, 0);
+    CHECK(kl_uefi_wallclock_from_efi(1, &unspec, &out) == -1,
+          "U-8: unspecified TZ REJECTED by default (local time, unknown offset)");
+    /* App declares the local offset (PST +480) -> unspecified now resolves: UTC = local + 480. */
+    kl_uefi_set_unspecified_tz(480);
+    CHECK(kl_uefi_wallclock_from_efi(1, &unspec, &out) == 0 && out == 1780272000LL + 480 * 60,
+          "U-8: configured unspecified-TZ offset applied");
+    kl_uefi_clear_unspecified_tz();
+    CHECK(kl_uefi_wallclock_from_efi(1, &unspec, &out) == -1, "U-8: cleared -> rejects again");
+    /* Malformed fields via the decode path are rejected. */
+    EFI_TIME bad = mk_efi_time(2026, 13, 1, 0, 0, 0, 0, 0);
+    CHECK(kl_uefi_wallclock_from_efi(1, &bad, &out) == -1, "U-8: malformed EFI_TIME -> -1");
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * TEST — the per-session snapshot clock (U-8, finding 2). mbedtls_time reads a SNAPSHOT taken
+ * at session creation (advanced by the monotonic clock), never GetTime — so a GetTime that
+ * fails AFTER a good snapshot cannot reopen the epoch-0 loophole. Driven via the scriptable
+ * kl_uefi_wallclock stub above.
+ * ───────────────────────────────────────────────────────────────────────────── */
+static void t_clock_snapshot(void) {
+    T_CASE("per-session snapshot clock gate (U-8)");
+    kl_uefi_clock_snapshot_reset();
+    /* No snapshot yet -> fail-closed epoch. */
+    CHECK(kl_uefi_mbedtls_time(NULL) == 0, "U-8: no snapshot -> mbedtls_time == epoch 0");
+    /* Trustworthy clock -> snapshot succeeds; mbedtls_time ~ snapshot (advanced by monotonic). */
+    g_wc_fail = 0; g_wc_val = 1780272000LL;
+    CHECK(kl_uefi_clock_snapshot() == 0, "U-8: snapshot succeeds with a trustworthy clock");
+    long long now = kl_uefi_mbedtls_time(NULL);
+    CHECK(now >= 1780272000LL && now <= 1780272000LL + 5,
+          "U-8: mbedtls_time reads the snapshot (monotonic-advanced), not GetTime");
+    /* A later GetTime FAILURE is irrelevant: the callback still uses the snapshot, never GetTime. */
+    g_wc_fail = 1;
+    CHECK(kl_uefi_mbedtls_time(NULL) >= 1780272000LL,
+          "U-8: post-snapshot GetTime failure does NOT reopen the epoch-0 loophole");
+    /* A REFRESH that fails invalidates the snapshot -> session must refuse (fail-closed). */
+    CHECK(kl_uefi_clock_snapshot() == -1, "U-8: snapshot refresh refuses when clock untrustworthy");
+    CHECK(kl_uefi_mbedtls_time(NULL) == 0, "U-8: failed refresh invalidates snapshot -> epoch 0");
+    g_wc_fail = 0;   /* restore */
+    kl_uefi_clock_snapshot_reset();
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -933,6 +1033,8 @@ int main(void) {
     t_after_ebs_refuses();
     t_entropy_fail_closed();           /* links entropy_uefi.c (mbedTLS-free) */
     t_civil_time();                    /* cert validity-time conversion + fail-closed (U-8) */
+    t_wallclock_decode();              /* EFI_TIME decode + unspecified-TZ policy (U-8) */
+    t_clock_snapshot();                /* per-session snapshot clock gate (U-8) */
     t_stale_guard_no_uaf();
     t_cancel_fails_quarantine();
     t_close_no_spin_on_consumed_connect();

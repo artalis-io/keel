@@ -212,6 +212,14 @@ QEMU_ARGS+=(
 if [ "${U4_VIRTIO_RNG:-0}" = "1" ]; then
   QEMU_ARGS+=( -object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0 )
 fi
+# U4_CLOCK=bad (U-8 negative test): set the emulated RTC to the year 2000 so OVMF GetTime
+# returns a year below KL_UEFI_TIME_FLOOR_YEAR. The clock gate must then REFUSE TLS init —
+# no handshake, no 200 — even with a currently-VALID cert, proving fail-closed is structural
+# (not merely epoch-0-vs-cert-dates). Default keeps the host clock.
+if [ "${U4_CLOCK:-host}" = "bad" ]; then
+  QEMU_ARGS+=( -rtc "base=2000-01-01T00:00:00" )
+  echo "U4_CLOCK=bad: emulated RTC set to 2000 (below the trust floor) — TLS must refuse"
+fi
 
 echo "=== qemu cmd ==="
 echo "timeout ${BOOT_TIMEOUT} qemu-system-x86_64 ${QEMU_ARGS[*]}"

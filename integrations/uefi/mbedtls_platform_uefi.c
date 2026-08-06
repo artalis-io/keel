@@ -22,12 +22,10 @@
  */
 
 #include "mbedtls_platform_uefi.h"
-#include "platform_uefi.h"          /* kl_uefi_have_entropy */
-#include "time_uefi.h"              /* kl_uefi_mbedtls_time (cert validity clock) */
+#include "platform_uefi.h"          /* kl_uefi_have_entropy / kl_uefi_have_trustworthy_wallclock */
 #include "../../src/platform.h"     /* kl_plat_random (freestanding platform hook) */
 
-#include <mbedtls/platform.h>       /* mbedtls_platform_set_calloc_free / set_time */
-#include <mbedtls/platform_time.h>  /* mbedtls_platform_set_time (PLATFORM_TIME_ALT) */
+#include <mbedtls/platform.h>       /* mbedtls_platform_set_calloc_free */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -90,15 +88,26 @@ static void uefi_mbed_free(void *ptr) {
 
 int kl_uefi_mbedtls_platform_init(EFI_BOOT_SERVICES *bs) {
     if (g_bs) return 0;         /* idempotent */
+
+    /* U-8 clock FAIL-FAST (not the authoritative gate): refuse to bring up the TLS platform if
+     * no trustworthy wall clock is available at all, so an obviously clockless firmware fails
+     * early with a clear signal. The AUTHORITATIVE per-session enforcement is
+     * kl_uefi_clock_snapshot() (clock_snapshot.c), which the app must call before creating each
+     * TLS session and which refuses the session if the clock is untrustworthy at that moment;
+     * mbedtls_time() then reads that snapshot, never GetTime. This early check is platform-global
+     * bring-up, NOT a per-handshake chokepoint. (kl_uefi_platform_init must run first so Runtime
+     * Services GetTime is available.) */
+    if (!kl_uefi_have_trustworthy_wallclock())
+        return -1;
+
     g_bs = bs;
     if (mbedtls_platform_set_calloc_free(uefi_mbed_calloc, uefi_mbed_free) != 0) {
         g_bs = NULL;
         return -1;
     }
-    /* U-8: the cert-validity clock (Runtime Services GetTime, fail-closed) is bound at
-     * compile time via MBEDTLS_PLATFORM_TIME_MACRO (mbedtls_config_uefi.h) + our
-     * mbedtls_platform_gmtime_r (time_uefi.c), so no runtime registration is needed here.
-     * With MBEDTLS_HAVE_TIME_DATE this makes x509 enforce notBefore/notAfter. */
+    /* The cert-validity clock (Runtime Services GetTime, fail-closed) is bound at compile time
+     * via MBEDTLS_PLATFORM_TIME_MACRO (mbedtls_config_uefi.h) + our mbedtls_platform_gmtime_r
+     * (time_uefi.c). With MBEDTLS_HAVE_TIME_DATE this makes x509 enforce notBefore/notAfter. */
     return 0;
 }
 

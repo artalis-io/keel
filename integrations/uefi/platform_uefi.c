@@ -32,7 +32,7 @@
  */
 
 #include "platform_uefi.h"
-#include "civil_time.h"          /* kl_civil_to_unix (cert validity-time) */
+#include "wallclock_uefi.h"      /* kl_uefi_wallclock_from_efi (cert validity-time) */
 #include "../../src/platform.h"  /* kl_monotonic_ms / kl_plat_random signatures */
 
 /* ── Module state (installed once by kl_uefi_platform_init) ──────────────────
@@ -160,14 +160,17 @@ int kl_uefi_after_ebs(void) {
  * UTC); we normalise to UTC. OVMF/QEMU report UTC with an UNSPECIFIED zone, so the
  * adjustment is a no-op there and matters only on real firmware that reports local time. */
 int kl_uefi_wallclock(int64_t *out_unix) {
-    if (!g_rt || !g_rt->GetTime) return -1;
     EFI_TIME t;
-    if (EFI_ERROR(g_rt->GetTime(&t, NULL))) return -1;
-    KlCivil c = { (int)t.Year, (int)t.Month, (int)t.Day,
-                  (int)t.Hour, (int)t.Minute, (int)t.Second };
-    int spec = (t.TimeZone != (INT16)EFI_UNSPECIFIED_TIMEZONE);
-    /* floor + local→UTC + convert, fail-closed on an untrustworthy year (see civil_time.c) */
-    return kl_wallclock_from_fields(&c, (int)t.TimeZone, spec, KL_UEFI_TIME_FLOOR_YEAR, out_unix);
+    ZeroMem(&t, sizeof(t));
+    int ok = (g_rt && g_rt->GetTime && !EFI_ERROR(g_rt->GetTime(&t, NULL)));
+    /* All the trust logic (field validation, unspecified-TZ policy, sanity floor, local→UTC)
+     * lives in the host-testable kl_uefi_wallclock_from_efi; here we only make the GetTime call. */
+    return kl_uefi_wallclock_from_efi(ok, &t, out_unix);
+}
+
+int kl_uefi_have_trustworthy_wallclock(void) {
+    int64_t t;
+    return kl_uefi_wallclock(&t) == 0;
 }
 
 /* U-7: release the platform's boot-services resources (the periodic timer + the EBS

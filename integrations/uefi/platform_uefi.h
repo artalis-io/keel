@@ -62,6 +62,13 @@ int kl_uefi_after_ebs(void);
  * clock (time_uefi.c) so TLS enforces certificate notBefore/notAfter. */
 int kl_uefi_wallclock(int64_t *out_unix);
 
+/* Cert-clock gate (U-8, fail-closed): 1 iff kl_uefi_wallclock() currently yields a trustworthy
+ * UTC time (GetTime present + succeeds, fields valid, year >= floor). TLS bring-up
+ * (kl_uefi_mbedtls_platform_init) calls this and REFUSES to initialise when it returns 0, so
+ * HTTPS cannot start without a trustworthy clock — independent of any certificate's dates
+ * (a returned epoch-0 fallback alone could still admit a cert whose window spans 1970). */
+int kl_uefi_have_trustworthy_wallclock(void);
+
 /* Release the platform's boot-services resources (periodic timer + EBS event). Call
  * BEFORE ExitBootServices for a clean teardown; idempotent. Afterwards
  * kl_monotonic_ms freezes and kl_plat_random fail-closes. See kl_uefi_shutdown()

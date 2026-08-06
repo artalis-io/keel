@@ -51,7 +51,34 @@ int kl_wallclock_from_fields(const KlCivil *c, int tz_minutes, int tz_specified,
                              int floor_year, int64_t *out_unix) {
     if (c->year < floor_year) return -1;             /* fail-closed: untrustworthy RTC */
     int64_t u = kl_civil_to_unix(c);
-    if (tz_specified) u -= (int64_t)tz_minutes * 60; /* local → UTC (UEFI §8.3) */
+    /* UEFI §8.3: UTC = LocalTime + TimeZone (TimeZone is the offset from UTC in minutes,
+     * e.g. PST = +480). So ADD it to recover UTC from the stored local time. */
+    if (tz_specified) u += (int64_t)tz_minutes * 60;
     if (out_unix) *out_unix = u;
+    return 0;
+}
+
+static int days_in_month(int year, int mon) {
+    static const int d[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (mon < 1 || mon > 12) return 0;
+    if (mon == 2) {
+        int leap = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+        return leap ? 29 : 28;
+    }
+    return d[mon - 1];
+}
+
+int kl_civil_valid(const KlCivil *c, uint32_t nanosecond,
+                   int tz_minutes, int tz_specified, unsigned daylight) {
+    if (c->year < 1900 || c->year > 9999) return -1;
+    int dim = days_in_month(c->year, c->mon);          /* 0 if month out of range */
+    if (dim == 0) return -1;
+    if (c->day  < 1 || c->day  > dim) return -1;        /* leap-year-aware */
+    if (c->hour < 0 || c->hour > 23)  return -1;
+    if (c->min  < 0 || c->min  > 59)  return -1;
+    if (c->sec  < 0 || c->sec  > 59)  return -1;        /* UEFI §8.3: Second 0..59 */
+    if (nanosecond > 999999999u)      return -1;
+    if (tz_specified && (tz_minutes < -1440 || tz_minutes > 1440)) return -1;
+    if (daylight & ~0x03u)            return -1;        /* only ADJUST_DAYLIGHT|IN_DAYLIGHT */
     return 0;
 }
