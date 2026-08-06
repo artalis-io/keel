@@ -28,6 +28,7 @@
 #include <openssl/x509v3.h>
 #include <openssl/pem.h>
 #include <openssl/bio.h>
+#include <openssl/ssl.h>
 
 #include <assert.h>
 #include <errno.h>
@@ -1046,6 +1047,74 @@ static void test_alloc_failure_injection(PemPair *ca, PemPair *server, PemPair *
     printf("  PASS: alloc-failure sweep completed without crash/UAF (ASan)\n");
 }
 
+/* Round-3 finding 1: prove the TLS 1.2 minimum floor is actually enforced — a raw
+ * client capped at an obsolete protocol (TLS 1.1) must NOT negotiate with the
+ * adapter server. The adapter's SSL_CTX_set_min_proto_version(TLS1_2) return is now
+ * fatal at ctx-create; this asserts the resulting floor holds on the wire. */
+static void test_obsolete_protocol_rejected(KlAllocator *alloc, PemPair *server)
+{
+#ifdef TLS1_1_VERSION
+    printf("== Finding (r3): TLS 1.1 client -> rejected by 1.2 floor ==\n");
+
+    /* Adapter server (code under test) with its default TLS 1.2 minimum. */
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+    KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+    assert(srv);
+
+    /* Raw OpenSSL client forced to offer at most TLS 1.1. Best-effort widen the
+     * lower bound so it emits a genuine <=1.1 ClientHello; capping the max at 1.1
+     * is the assertion that matters (a known constant, so this must succeed). If
+     * the library lacks TLS 1.1 entirely the empty version range still fails the
+     * handshake — the same outcome we assert. */
+    SSL_CTX *rctx = SSL_CTX_new(TLS_client_method());
+    assert(rctx);
+    SSL_CTX_set_verify(rctx, SSL_VERIFY_NONE, NULL);
+    SSL_CTX_set_min_proto_version(rctx, TLS1_VERSION);
+    assert(SSL_CTX_set_max_proto_version(rctx, TLS1_1_VERSION) == 1);
+    SSL *ssl = SSL_new(rctx);
+    assert(ssl);
+
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    int cfd = fds[0], sfd = fds[1];
+    SSL_set_fd(ssl, cfd);            /* BIO_NOCLOSE — we close cfd ourselves */
+    SSL_set_connect_state(ssl);
+
+    int cfail = 0, sfail = 0, sdone = 0;
+    for (int iter = 0; iter < 400 && !cfail && !sfail && !sdone; iter++) {
+        KlTlsResult r = srv->handshake(srv, sfd);
+        if (r == KL_TLS_OK) sdone = 1;              /* must never happen */
+        else if (r == KL_TLS_ERROR) sfail = 1;
+
+        int rc = SSL_do_handshake(ssl);
+        if (rc != 1) {
+            int e = SSL_get_error(ssl, rc);
+            if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) cfail = 1;
+        }
+    }
+    /* The obsolete protocol must be rejected: the adapter server never completes,
+     * and the negotiation fails on at least one side. */
+    assert(sdone == 0);
+    assert(sfail == 1 || cfail == 1);
+    printf("  PASS: obsolete-protocol (TLS 1.1) client rejected by 1.2 floor\n");
+
+    SSL_free(ssl);
+    SSL_CTX_free(rctx);
+    close(cfd);
+    close(sfd);
+    srv->destroy(srv);
+    kl_tls_openssl_ctx_destroy(sctx);
+#else
+    (void)alloc; (void)server;
+    printf("== Finding (r3): TLS1_1_VERSION unavailable, skipping floor test ==\n");
+#endif
+}
+
 int main(void) {
     srand(1234);
     KlAllocator alloc = kl_allocator_default();
@@ -1077,6 +1146,7 @@ int main(void) {
     test_ip_san(&alloc, ca_key, ca_crt, &ca);
     test_truncation_modes(&alloc, &ca, &server);
     test_alloc_failure_injection(&ca, &server, &client);
+    test_obsolete_protocol_rejected(&alloc, &server);
 
     EVP_PKEY_free(ca_key);
     X509_free(ca_crt);

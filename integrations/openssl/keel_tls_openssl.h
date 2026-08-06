@@ -37,6 +37,16 @@
 #include <keel/tls.h>
 #include <keel/allocator.h>
 
+/*
+ * LIFECYCLE: a KlTlsCtx is a LONG-LIVED, reusable object — create it ONCE (per
+ * server, or per client configuration/connection-pool) and make many KlTls sessions
+ * from it via the factory. Do NOT create and destroy a context per request. Besides
+ * the cost of rebuilding the SSL_CTX, each context allocates its own custom
+ * BIO_METHOD via BIO_get_new_index(), whose process-global type index is not
+ * recycled on destroy; churning contexts per request would slowly consume indices.
+ * The intended usage (one context, many sessions) has no such concern.
+ */
+
 /**
  * @brief Client authentication mode for mTLS.
  */

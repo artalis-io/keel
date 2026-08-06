@@ -1009,7 +1009,9 @@ static KlTlsCtx *server_ctx_from_mem(const unsigned char *cert_buf, size_t cert_
     if (!ctx->bio_method)
         goto fail;
 
-    SSL_CTX_set_min_proto_version(ctx->ssl_ctx, TLS1_2_VERSION);
+    /* Enforce TLS 1.2 minimum. A security setting must not silently fail to apply. */
+    if (SSL_CTX_set_min_proto_version(ctx->ssl_ctx, TLS1_2_VERSION) != 1)
+        goto fail;
 
     if (load_cert_chain_pem(ctx->ssl_ctx, cert_buf, cert_len) != 0)
         goto fail;
@@ -1119,7 +1121,9 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf, size_t 
     if (!ctx->bio_method)
         goto fail;
 
-    SSL_CTX_set_min_proto_version(ctx->ssl_ctx, TLS1_2_VERSION);
+    /* Enforce TLS 1.2 minimum. A security setting must not silently fail to apply. */
+    if (SSL_CTX_set_min_proto_version(ctx->ssl_ctx, TLS1_2_VERSION) != 1)
+        goto fail;
 
     if (insecure) {
         /* WARNING: verify-none — encrypted but MITM-vulnerable. Explicit opt-in

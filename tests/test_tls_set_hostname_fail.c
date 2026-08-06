@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 /* ── Loopback accept-only listener ─────────────────────────────────── */
 
@@ -34,8 +35,10 @@ typedef struct {
     int      listen_fd;
     int      port;
     pthread_t tid;
-    int      stop;
+    _Atomic int stop;      /* written by the test thread, read by the listener */
     int      reply_http;   /* 1 = write a canned HTTP/1.1 200 to each conn */
+    /* accepted[]/n_accepted are written only by the listener and read only AFTER
+     * pthread_join (a synchronization point), so they need no atomics. */
     int      accepted[16];
     int      n_accepted;
 } Listener;
