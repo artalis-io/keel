@@ -29,20 +29,9 @@
 #define EFI_UDP4_PROTOCOL_GUID \
     { 0x3ad9df29, 0x4501, 0x478d, {0xb1, 0xf8, 0x7f, 0x7f, 0xe7, 0x0e, 0x50, 0xf3} }
 
-/* ---- EFI_TIME (UEFI 2.10 §8.3 — RxData TimeStamp; layout only, unused here) ---- */
-typedef struct {
-    UINT16 Year;
-    UINT8  Month;
-    UINT8  Day;
-    UINT8  Hour;
-    UINT8  Minute;
-    UINT8  Second;
-    UINT8  Pad1;
-    UINT32 Nanosecond;
-    INT16  TimeZone;
-    UINT8  Daylight;
-    UINT8  Pad2;
-} EFI_TIME;
+/* EFI_TIME (UEFI 2.10 §8.3 — RxData TimeStamp; unused here) now comes from efi_min.h
+ * (included via efi_tcp4.h) — it is core UEFI and also the cert-validity clock source
+ * via Runtime Services GetTime, so it lives in the base header, defined once. */
 
 /* ---- UDP4 config data (UEFI 2.10 §30.2.5, EFI_UDP4_CONFIG_DATA) ----
  * Field order is per-spec — a wrong layout silently corrupts Configure(). */

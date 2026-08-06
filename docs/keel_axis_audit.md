@@ -48,15 +48,23 @@ one terminal result") name — and they are now fixed and host-test-covered.
    EBS (`kl_uefi_after_ebs()`), so no post-teardown firmware call is made — the selected backend's
    unavailability is observable and safe, never a silent partial.
 
-**Method:** the same 13-scenario host mock-EFI harness (`mock_efi_test.c`) that drives the C-audit
+**Method:** the same 14-scenario host mock-EFI harness (`mock_efi_test.c`) that drives the C-audit
 pass exercises these axis paths directly — cancel-succeeds/fails/races, close-with-outstanding-
 receive, consumed-connect-event-during-close, post-EBS — under ASan+UBSan. See the eleventh C-audit
 pass for the finding table.
 
 **Compatibility-matrix delta:** `EFI_TCP4 + EFI completion backend` moves from *buildable/
-happy-path-tested* to *failure-path host-tested* (cancel/close/timeout/post-EBS). Still **not**
-production-ready: TLS lacks certificate validity-time enforcement (no clock wired). No change to the
-POSIX/io_uring/IOCP/pollcomp rows.
+happy-path-tested* to *failure-path host-tested* (cancel/close/timeout/post-EBS) **plus full TLS
+cert validation** (CA + hostname + validity-time over Runtime Services GetTime, fail-closed; proven
+by a valid/expired QEMU pair — U-8). No change to the POSIX/io_uring/IOCP/pollcomp rows.
+
+**U-8 postscript (2026-08-06) — certificate validity-time (the last open item).** Enabling
+`MBEDTLS_HAVE_TIME_DATE` bound mbedTLS's clock to Runtime Services `GetTime` via a small pure
+conversion (`civil_time.c`) + glue (`time_uefi.c`). Axis note: this touched only the socket/platform
+side — the *protocol* layer (KlClient, the TLS vtable contract) is unchanged (Goal 4 holds), and the
+clock is fail-closed (Goal 9/13: an unavailable/implausible RTC degrades safely to "reject all
+certs", never silently accepts). `GetTime` is a Runtime Service (valid across ExitBootServices), so
+it does not reintroduce a boot-services dependency in the post-EBS window.
 
 ## Eighth pass — the freestanding portability phase strengthens all three axes (2026-08-05)
 

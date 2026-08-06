@@ -32,6 +32,7 @@
  */
 
 #include "platform_uefi.h"
+#include "civil_time.h"          /* kl_civil_to_unix (cert validity-time) */
 #include "../../src/platform.h"  /* kl_monotonic_ms / kl_plat_random signatures */
 
 /* ── Module state (installed once by kl_uefi_platform_init) ──────────────────
@@ -40,6 +41,7 @@
  * reads) and read by kl_monotonic_ms. `volatile` so the compiler reloads it on
  * every read rather than caching the value across the notify. */
 static EFI_BOOT_SERVICES *g_bs;
+static EFI_RUNTIME_SERVICES *g_rt;        /* GetTime (cert clock); valid pre- AND post-EBS */
 static EFI_RNG_PROTOCOL  *g_rng;          /* NULL => fail-closed */
 static EFI_EVENT          g_timer_event;
 static EFI_EVENT          g_ebs_event;    /* EVT_SIGNAL_EXIT_BOOT_SERVICES (U-7) */
@@ -92,9 +94,9 @@ static VOID EFIAPI uefi_exit_boot_services(EFI_EVENT event, VOID *context) {
 }
 
 int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st) {
-    (void)st; /* reserved — clock/rng come from boot services + a protocol */
     if (g_inited) return 0;
     g_bs = bs;
+    g_rt = st ? st->RuntimeServices : NULL;   /* GetTime for cert validity-time */
     g_ticks_ms = 0;
 
     /* ---- monotonic clock: periodic 10 ms EVT_TIMER + NOTIFY_SIGNAL callback --
@@ -143,6 +145,29 @@ int kl_uefi_have_entropy(void) {
  * boot services (the TCP4/UDP4 protocols + AllocatePool/events are gone). */
 int kl_uefi_after_ebs(void) {
     return g_after_ebs;
+}
+
+/* Cert validity-time clock (U-8): read the RTC via Runtime Services GetTime and return
+ * UTC seconds since the Unix epoch. GetTime is a RUNTIME service — valid before AND after
+ * ExitBootServices — so this is deliberately NOT gated on kl_uefi_after_ebs().
+ *
+ * FAIL-CLOSED (policy: fail-closed + sanity floor): returns -1 (and leaves *out_unix
+ * untouched) if there is no RuntimeServices/GetTime, GetTime errors, or the returned year
+ * is below KL_UEFI_TIME_FLOOR_YEAR (an unset/stuck RTC — e.g. 1970/2000 — must not be
+ * trusted to validate certificate expiry). A -1 here makes the mbedTLS clock read epoch 0,
+ * so every real certificate fails its notBefore check — no HTTPS without a trustworthy
+ * clock. EFI_TIME is wall-clock and may carry a TimeZone (minutes that local is offset from
+ * UTC); we normalise to UTC. OVMF/QEMU report UTC with an UNSPECIFIED zone, so the
+ * adjustment is a no-op there and matters only on real firmware that reports local time. */
+int kl_uefi_wallclock(int64_t *out_unix) {
+    if (!g_rt || !g_rt->GetTime) return -1;
+    EFI_TIME t;
+    if (EFI_ERROR(g_rt->GetTime(&t, NULL))) return -1;
+    KlCivil c = { (int)t.Year, (int)t.Month, (int)t.Day,
+                  (int)t.Hour, (int)t.Minute, (int)t.Second };
+    int spec = (t.TimeZone != (INT16)EFI_UNSPECIFIED_TIMEZONE);
+    /* floor + local→UTC + convert, fail-closed on an untrustworthy year (see civil_time.c) */
+    return kl_wallclock_from_fields(&c, (int)t.TimeZone, spec, KL_UEFI_TIME_FLOOR_YEAR, out_unix);
 }
 
 /* U-7: release the platform's boot-services resources (the periodic timer + the EBS

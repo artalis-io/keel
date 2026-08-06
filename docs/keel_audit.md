@@ -11,12 +11,12 @@ self-tests.
 **This is NOT a "clean" pass.** Two rounds of adversarial *lifetime* review found **real,
 release-blocking EFI completion-token bugs** that QEMU happy-path testing (and the happy-path-focused
 earlier passes) never exercised. Every finding below was FOUND, FIXED, and — the load-bearing part —
-**covered by a host mock-EFI harness** (`mock_efi_test.c`, 13 scenarios) that compiles the *real*
+**covered by a host mock-EFI harness** (`mock_efi_test.c`, 14 scenarios) that compiles the *real*
 provider TUs against a scriptable fake `EFI_BOOT_SERVICES`/`EFI_TCP4`/`EFI_UDP4` under ASan+UBSan.
 The lesson recorded: **a QEMU happy-path GO ≠ correct**; completion-token providers demand
 adversarial timeout/close/cancel/post-EBS host tests before any "production" claim.
 
-**Method.** Host mock-EFI harness (13 scenarios, ASan+UBSan+LSan, `detect_leaks=1`) — the deliberate
+**Method.** Host mock-EFI harness (14 scenarios, ASan+UBSan+LSan (`detect_leaks=1` on Linux; `=0` on Darwin)) — the deliberate
 quarantine "leak" is clean because backing storage is the static `g_conns`/`g_dns_*` pools
 (reachable, not leaked). All touched freestanding TUs cross-compiled `--target=x86_64-unknown-windows
 -ffreestanding -Wall -Wextra -Werror`. Core `make test` green. QEMU U-7 (plaintext send/recv/close
@@ -33,16 +33,19 @@ over real EFI_TCP4) re-run as a happy-path regression guard.
 | U4 | **High** | `socket_efi_tcp4.c` `kl_uefi_socket_recv_ready` | Received `rx_data.DataLength` (and `FragmentTable[0].FragmentLength`) trusted without validating `<= KL_EFI_RXBUF` → OOB read on a malicious/buggy stack. | Validate both against `KL_EFI_RXBUF`; on violation latch `rx_err = EFI_DEVICE_ERROR` and surface a fatal `recv` -1. | `t_bad_rx_length` (recv -1, no OOB under ASan) |
 | U5 | **Medium** | `socket_efi_tcp4.c` `kl_uefi_socket_configure`/`_connect_post`; `mbedtls_platform_uefi.c` heap | Post-EBS coverage incomplete: two data-path entries unguarded; mbedTLS heap retained the Boot Services pointer with no shutdown hook (TLS teardown after EBS could `FreePool` torn-down firmware). | `kl_uefi_after_ebs()` guard on the two entries; `uefi_mbed_calloc`/`_free` fail closed post-EBS; new `kl_uefi_mbedtls_platform_shutdown()` drops `g_bs` — U-4 calls it after destroying every TLS object, before EBS. | `calls after simulated EBS` (zero firmware calls across all entries) |
 | U6 | **Medium** | `socket_efi_tcp4.c` `kl_uefi_socket_provider_reset` | Reset assumed all conns closed and blanket-zeroed the pool — corrupting quarantined/live firmware-owned slots. | Reset no longer zeroes the pool (preserves quarantined + live slots; only already-free slots are reused). New `kl_uefi_socket_provider_live_count()` exposes the "all-closed-before-shutdown" contract; U-7 asserts it observably. | `stale-guard no-UAF` + U-7 live-count line |
-| U7 | **Medium** (load-bearing) | `mock_efi_test.c` (new) | The adversarial host harness itself was missing — the earlier passes could not have caught U1–U6. | Added the 13-scenario mock-EFI harness (cancel succeeds/fails/races, consumed connect event during close, receive outstanding during close, impossible receive length, post-EBS, slot reuse with stale generation, delayed firmware write into a quarantined DNS token). | itself |
+| U7 | **Medium** (load-bearing) | `mock_efi_test.c` (new) | The adversarial host harness itself was missing — the earlier passes could not have caught U1–U6. | Added the 14-scenario mock-EFI harness (cancel succeeds/fails/races, consumed connect event during close, receive outstanding during close, impossible receive length, post-EBS, slot reuse with stale generation, delayed firmware write into a quarantined DNS token). | itself |
 | U9 | **Medium** | `build_mock_efi_test.sh` / `mbedtls_platform_uefi.c` (2nd review) | The advertised 13th (entropy fail-closed) test was gated behind `MOCK_WITH_MBEDTLS`, which the build never set — the harness silently ran 12, and the entropy path was "verified by inspection" only. Also: script not executable (0644); `detect_leaks=1` aborts under Apple ASan on Darwin. | Split `mbedtls_hardware_poll` into a mbedTLS-free `entropy_uefi.c` so the harness links + runs the fail-closed test **unconditionally** (genuinely 13). `chmod +x`; select `detect_leaks=0` on Darwin (Linux container keeps the real leak check). | `t_entropy_fail_closed` (now always runs: `r!=0, olen=0` without the insecure macro) |
 | U8 | Low (tooling) | `build_u{3,4,5,7}.sh` | `declare -A` fails silently on macOS Bash 3. | Explicit `BASH_VERSINFO < 4` guard with a clear error. | n/a |
+| U10 | **Medium** | `mbedtls_config_uefi.h`; new `civil_time.{c,h}`, `time_uefi.{c,h}`; `platform_uefi.c`; `spikes/uefi/efi_min.h` | Certificate **validity-time was not enforced** (`MBEDTLS_HAVE_TIME` off) — TLS accepted expired / not-yet-valid certs (CA + hostname only). | Enable `HAVE_TIME`/`HAVE_TIME_DATE`; bind mbedTLS's clock (`TIME_MACRO` + `GMTIME_R_ALT`, `MS_TIME_ALT`) to Runtime Services **GetTime** via `kl_uefi_wallclock` → pure `civil_time` math. **Fail-closed + sanity floor**: no trustworthy clock (GetTime error / year < `KL_UEFI_TIME_FLOOR_YEAR`) ⇒ time reads epoch 0 ⇒ every real cert fails `notBefore` ⇒ no HTTPS. `EFI_TIME`/`EFI_RUNTIME_SERVICES` added to `efi_min.h`. | `t_civil_time` (conversion vs libc `timegm` + round-trip; fail-closed floor; local→UTC). **QEMU U-4 prod: valid cert → 200; expired cert (2020, via faketime) → `status -1` / `KL_ERR_TLS_HANDSHAKE` / no 200.** |
 
-**Still open (documented, not a regression):** TLS validates CA + hostname but **not** certificate
-validity-time (no clock source wired). Recorded in `docs/phase10_uefi_feasibility_design.md`; F-8 is
-**not** marked production-ready.
+**No open findings from this pass.** Certificate validation is now complete (CA chain + hostname +
+validity-time); the previously-documented cert-time gap (U10) is closed. Remaining items are
+operational (real-firmware RTC quality), not missing checks.
 
-**Status:** the happy path is proven end-to-end in QEMU; the failure paths are now hardened and
-host-test-covered under ASan+UBSan. The two originally-Critical token-lifetime findings are closed.
+**Status:** the happy path is proven end-to-end in QEMU; the failure paths are hardened and
+host-test-covered under ASan+UBSan; cert-time enforcement is proven with a valid/expired QEMU pair.
+The two originally-Critical token-lifetime findings (and the 2nd-review DNS-token + entropy-test
+gaps) are closed.
 
 ## Tenth pass — freestanding portability phase (2026-08-05)
 

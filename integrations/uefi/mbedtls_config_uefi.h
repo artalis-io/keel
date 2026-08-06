@@ -12,12 +12,12 @@
  *                               (tls_mbedtls.c), which routes ciphertext through
  *                               the U-2 EFI_TCP4 socket provider. mbedTLS never
  *                               touches a host socket or file.
- *  - NO HAVE_TIME / TIMING_C  : no wall clock in UEFI pre-boot. Cert validity
- *                               (not-before/not-after) is therefore NOT checked.
- *                               That is acceptable here ONLY because we also run
- *                               verify-none (see the client-ctx path in
- *                               tls_mbedtls.c: NULL CA => MBEDTLS_SSL_VERIFY_NONE).
- *                               *** SPIKE SHORTCUT — NOT production-safe. ***
+ *  - HAVE_TIME / HAVE_TIME_DATE : ENABLED (U-8). Cert validity (notBefore/notAfter)
+ *                               IS enforced, over a registered time function backed by
+ *                               Runtime Services GetTime (time_uefi.c), fail-closed on an
+ *                               untrustworthy RTC. TIMING_C stays off (that is the delay/
+ *                               benchmark helper, not needed).
+ *  - NO NET_C / FS_IO         : (see above) all BIO I/O goes through Keel's socket BIO.
  *  - NO THREADING_C           : single-threaded pre-boot environment.
  *  - NO PSA / TLS 1.3         : stay on the classic TLS 1.2 stack — PSA drags in
  *                               a much larger surface and its own entropy/driver
@@ -48,6 +48,27 @@
  * (mbedtls_hardware_poll) over EFI_RNG. */
 #define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ENTROPY_HARDWARE_ALT
+
+/* ── Certificate validity-time (U-8) ────────────────────────────────────────
+ * Enforce notBefore/notAfter. There is no libc wall clock, so mbedtls_time is a compile-
+ * time MACRO bound to our time_uefi.c function (kl_uefi_mbedtls_time over Runtime Services
+ * GetTime, fail-closed on an untrustworthy RTC), and mbedtls_platform_gmtime_r is our ALT
+ * (time_uefi.c). `mbedtls_time_t` and `struct tm` come from the freestanding shim's
+ * <time.h> (time_t = long long). We use TIME_MACRO rather than PLATFORM_TIME_ALT because
+ * ALT makes platform.c define a runtime pointer defaulting to libc `time`, which does not
+ * exist freestanding; the MACRO form compiles no platform.c time code at all. Without a
+ * trustworthy clock the time fn returns epoch 0, so every real cert fails notBefore —
+ * HTTPS is fail-closed. The prototype below must be visible to every mbedTLS TU that
+ * expands the macro (this config is included first). */
+long long kl_uefi_mbedtls_time(long long *t);   /* time_uefi.c; mbedtls_time_t == long long */
+#define MBEDTLS_HAVE_TIME
+#define MBEDTLS_HAVE_TIME_DATE
+#define MBEDTLS_PLATFORM_TIME_MACRO        kl_uefi_mbedtls_time
+#define MBEDTLS_PLATFORM_GMTIME_R_ALT
+/* mbedtls_ms_time() (a MONOTONIC ms timer, distinct from the wall clock above) defaults to a
+ * platform branch that, on the windows clang target, calls Win32 GetSystemTimeAsFileTime — absent
+ * freestanding. Override it (MS_TIME_ALT) with our monotonic tick (time_uefi.c → kl_monotonic_ms). */
+#define MBEDTLS_PLATFORM_MS_TIME_ALT
 
 /* ── Protocol: TLS 1.2 client only ──────────────────────────────────────────*/
 #define MBEDTLS_SSL_TLS_C
@@ -119,8 +140,8 @@
 
 /* ── Explicitly DISABLED (documented above) ─────────────────────────────────
  * We do NOT define: MBEDTLS_NET_C, MBEDTLS_FS_IO, MBEDTLS_TIMING_C,
- * MBEDTLS_HAVE_TIME, MBEDTLS_HAVE_TIME_DATE, MBEDTLS_THREADING_C,
- * MBEDTLS_SELF_TEST, MBEDTLS_ERROR_C, MBEDTLS_DEBUG_C, MBEDTLS_PSA_CRYPTO_C,
- * MBEDTLS_SSL_PROTO_TLS1_3. Leaving them undefined is how mbedTLS disables them. */
+ * MBEDTLS_THREADING_C, MBEDTLS_SELF_TEST, MBEDTLS_ERROR_C, MBEDTLS_DEBUG_C,
+ * MBEDTLS_PSA_CRYPTO_C, MBEDTLS_SSL_PROTO_TLS1_3. Leaving them undefined is how mbedTLS
+ * disables them. (HAVE_TIME / HAVE_TIME_DATE are now ENABLED — see the cert-time block.) */
 
 #endif /* MBEDTLS_CONFIG_UEFI_H */

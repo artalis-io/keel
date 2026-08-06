@@ -23,9 +23,11 @@
 
 #include "mbedtls_platform_uefi.h"
 #include "platform_uefi.h"          /* kl_uefi_have_entropy */
+#include "time_uefi.h"              /* kl_uefi_mbedtls_time (cert validity clock) */
 #include "../../src/platform.h"     /* kl_plat_random (freestanding platform hook) */
 
-#include <mbedtls/platform.h>       /* mbedtls_platform_set_calloc_free */
+#include <mbedtls/platform.h>       /* mbedtls_platform_set_calloc_free / set_time */
+#include <mbedtls/platform_time.h>  /* mbedtls_platform_set_time (PLATFORM_TIME_ALT) */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -93,6 +95,10 @@ int kl_uefi_mbedtls_platform_init(EFI_BOOT_SERVICES *bs) {
         g_bs = NULL;
         return -1;
     }
+    /* U-8: the cert-validity clock (Runtime Services GetTime, fail-closed) is bound at
+     * compile time via MBEDTLS_PLATFORM_TIME_MACRO (mbedtls_config_uefi.h) + our
+     * mbedtls_platform_gmtime_r (time_uefi.c), so no runtime registration is needed here.
+     * With MBEDTLS_HAVE_TIME_DATE this makes x509 enforce notBefore/notAfter. */
     return 0;
 }
 

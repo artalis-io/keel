@@ -58,17 +58,23 @@ Status: **feasibility / design (2026-08-05).**
 >   `after_ebs`. Orderly-teardown proven observably (the monotonic clock freezes once its timer is
 >   released).
 >
-> **STATUS (2026-08-06) — EFI transport lifecycle: hardened + mock-tested. HTTPS: pending
-> cert-time validation.** Distinguish three things:
+> **STATUS (2026-08-06) — EFI transport lifecycle hardened + mock-tested; HTTPS cert validation
+> now includes validity-time.** Both prior blockers are closed:
 >   - **Token / lifecycle hardening — COMPLETE and host-mock-tested.** Two rounds of adversarial-
 >     lifecycle review found real **EFI token-lifetime** bugs QEMU happy-path runs (and the happy-
 >     path-focused audits) never exposed. All are now fixed and covered by a host mock-EFI harness
->     (`mock_efi_test.c`, 13 scenarios: the real provider TUs against a scriptable fake EFI under
+>     (`mock_efi_test.c`, 14 scenarios: the real provider TUs against a scriptable fake EFI under
 >     ASan+UBSan; see the newest passes in `docs/keel_audit.md` / `docs/keel_axis_audit.md`).
->   - **Certificate validity-time enforcement — STILL OPEN.** With `MBEDTLS_HAVE_TIME` off, TLS
->     verifies the CA chain + hostname but does **not** reject expired / not-yet-valid certs. EFI
->     `GetTime` is the path.
->   - **Therefore full production-TLS status — STILL PENDING** (blocked solely on the cert-time item).
+>   - **Certificate validity-time enforcement — DONE (U-8).** `MBEDTLS_HAVE_TIME` + `HAVE_TIME_DATE`
+>     are enabled, backed by Runtime Services `GetTime` (`kl_uefi_wallclock` → `time_uefi.c`), so TLS
+>     now rejects expired / not-yet-valid certs in addition to CA chain + hostname. **Fail-closed +
+>     sanity floor**: no trustworthy clock (GetTime error or year < `KL_UEFI_TIME_FLOOR_YEAR`) → the
+>     time reads epoch 0 → every real cert fails `notBefore` → no HTTPS. Proven in QEMU: a **valid**
+>     cert → `status 200`; an **expired** cert (minted for 2020 via faketime) → `status -1`,
+>     `KL_ERR_TLS_HANDSHAKE`, no 200. The date math + fail-closed policy are unit-tested in the mock
+>     harness (`t_civil_time`, vs libc `timegm`).
+>   - **Full production-TLS status — cert validation complete** (CA + hostname + validity-time). Any
+>     remaining hardening is operational (e.g. real-firmware RTC quality), not a missing check.
 >
 > The EFI transport (plaintext + DNS + the TLS *transport*, non-blocking recv, orderly pre-EBS
 > teardown) is functional on bare firmware and its failure paths are now hardened. Fixed in the F-8
@@ -88,7 +94,8 @@ Status: **feasibility / design (2026-08-05).**
 >   4. *(High — FIXED)* `mbedtls_hardware_poll` fails closed when EFI_RNG is absent (weak fallback is
 >      opt-in only, `-DKL_UEFI_INSECURE_TEST_ENTROPY`); split into `entropy_uefi.c` so the mock
 >      harness tests the fail-closed contract directly.
->   5. *(Medium — OPEN)* certificate-time validation — see the STATUS bullets above.
+>   5. *(Medium — FIXED, U-8)* certificate validity-time is now enforced over Runtime Services
+>      GetTime (fail-closed + sanity floor) — see the STATUS bullets above.
 >   6. *(Medium — FIXED)* the connect stale-guard no longer dereferences freed memory: the
 >      generation lives in the stable slot (`g_conns[]`), read via handle, not through a freed conn.
 >   7. *(FIXED)* host-side **mock-EFI failure-path tests** now exist (`mock_efi_test.c`: timeout→

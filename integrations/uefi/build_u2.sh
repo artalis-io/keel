@@ -48,7 +48,7 @@ CFLAGS=(
   -c
 )
 
-SRCS=( allocator_uefi.c platform_uefi.c socket_efi_tcp4.c u2_selftest.c )
+SRCS=( allocator_uefi.c platform_uefi.c civil_time.c socket_efi_tcp4.c u2_selftest.c )
 OBJS=()
 for s in "${SRCS[@]}"; do
   o="${s%.c}.obj"

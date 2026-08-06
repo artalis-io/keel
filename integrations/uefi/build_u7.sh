@@ -61,7 +61,7 @@ CFLAGS=(
 # in favor of resolve_uefi.c's numeric one.
 declare -A EXTRA=( [u1_link_stubs.c]="-DKEEL_UEFI_HAVE_RESOLVE" )
 
-SRCS=( allocator_uefi.c platform_uefi.c socket_efi_tcp4.c event_efi.c
+SRCS=( allocator_uefi.c platform_uefi.c civil_time.c socket_efi_tcp4.c event_efi.c
        resolve_uefi.c lifecycle_uefi.c u1_link_stubs.c u7_selftest.c )
 OBJS=()
 for s in "${SRCS[@]}"; do

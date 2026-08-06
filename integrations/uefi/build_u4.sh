@@ -132,6 +132,13 @@ echo "compiling entropy_uefi.c ..."
 "$CC" "${ADAPTER_CFLAGS[@]}" -c -o entropy_uefi.obj entropy_uefi.c
 OBJS+=( entropy_uefi.obj )
 
+# time_uefi.c = the mbedTLS cert-validity clock hooks (kl_uefi_mbedtls_time +
+# mbedtls_platform_gmtime_r) over Runtime Services GetTime. Needs struct tm from the local
+# mbedtls_shim <time.h>, so it uses the ADAPTER_CFLAGS (which carry -isystem LOCAL_SHIM).
+echo "compiling time_uefi.c ..."
+"$CC" "${ADAPTER_CFLAGS[@]}" -c -o time_uefi.obj time_uefi.c
+OBJS+=( time_uefi.obj )
+
 # ---- 3. U-1/U-2/U-3 Keel UEFI TUs + u4_selftest.c ----
 # U4_MODE=prod: production TLS — CA-verified server cert (dNSName SAN = KL_U4_PROD_HOST,
 # mapped to KL_U4_STATIC_IP by resolve_uefi.c's static hosts entry) + real EFI_RNG
@@ -163,7 +170,7 @@ KEEL_CFLAGS=(
 )
 declare -A EXTRA=( [u1_link_stubs.c]="-DKEEL_UEFI_HAVE_RESOLVE"
                    [u4_selftest.c]="${U4_SELFTEST_DEFS:-}" )
-KEEL_SRCS=( allocator_uefi.c platform_uefi.c socket_efi_tcp4.c event_efi.c
+KEEL_SRCS=( allocator_uefi.c platform_uefi.c civil_time.c socket_efi_tcp4.c event_efi.c
             resolve_uefi.c u1_link_stubs.c u4_selftest.c )
 for s in "${KEEL_SRCS[@]}"; do
   o="${s%.c}.obj"

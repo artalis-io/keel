@@ -24,6 +24,7 @@
 #include "../../spikes/uefi/efi_udp4.h"   /* EFI_UDP4_* types for the UDP mock */
 #include "dns_uefi.h"
 #include "event_efi.h"
+#include "civil_time.h"                   /* cert validity-time conversion (U-8) */
 
 #include <keel/sockaddr.h>
 #include "../../src/socket.h"        /* KlSocketProvider, KlSocketOps, kl_handle_valid */
@@ -716,6 +717,43 @@ static void t_entropy_fail_closed(void) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+ * TEST — cert validity-time conversion + fail-closed clock policy (U-8). The
+ * error-prone civil-date math + the fail-closed floor back mbedTLS's notBefore/
+ * notAfter enforcement; the QEMU RTC is always valid, so the bad-clock rejection
+ * is only ever exercised here.
+ * ───────────────────────────────────────────────────────────────────────────── */
+static void t_civil_time(void) {
+    T_CASE("cert validity-time: civil<->unix + fail-closed clock (U-8)");
+    /* known UTC vectors */
+    KlCivil a = {2026, 8, 6, 12, 0, 0};
+    CHECK(kl_civil_to_unix(&a) == 1786017600LL, "civil->unix 2026-08-06T12:00:00Z");
+    KlCivil e = {1970, 1, 1, 0, 0, 0};
+    CHECK(kl_civil_to_unix(&e) == 0, "civil->unix epoch");
+    /* round-trip over a wide range (leap years, pre-epoch) */
+    int rt_ok = 1;
+    for (int64_t t = -2000000000LL; t < 4000000000LL; t += 1500007) {
+        KlCivil c; kl_unix_to_civil(t, &c);
+        if (kl_civil_to_unix(&c) != t) { rt_ok = 0; break; }
+    }
+    CHECK(rt_ok, "unix->civil->unix round-trips exactly");
+
+    /* fail-closed policy: year below the floor is rejected (untrustworthy RTC). */
+    int64_t out = 12345;
+    KlCivil stuck = {2000, 1, 1, 0, 0, 0};   /* an unset RTC */
+    CHECK(kl_wallclock_from_fields(&stuck, 0, 0, 2025, &out) == -1 && out == 12345,
+          "U-8: year < floor -> FAIL CLOSED (out untouched)");
+    KlCivil good = {2026, 6, 1, 0, 0, 0};
+    CHECK(kl_wallclock_from_fields(&good, 0, 0, 2025, &out) == 0 && out == 1780272000LL,
+          "U-8: valid year -> UTC seconds");
+    /* timezone normalisation: local + specified offset -> UTC (UEFI §8.3: UTC=local-tz). */
+    int64_t utc_from_local = 0;
+    KlCivil local = {2026, 6, 1, 0, 0, 0};
+    kl_wallclock_from_fields(&local, -480, 1, 2025, &utc_from_local); /* PST tz=-480 */
+    CHECK(utc_from_local == 1780272000LL + 480 * 60,
+          "U-8: local+TimeZone normalises to UTC");
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
  * TEST 9 — stale-guard no-UAF: create a conn, queue a connect op in event_efi with its
  * (handle, gen), close() the conn (slot freed + gen bumped), then el_drain — assert the
  * stale op is dropped and NOTHING dereferences freed memory (F6: stable slot pool).
@@ -894,6 +932,7 @@ int main(void) {
     t_close_token_timeout();
     t_after_ebs_refuses();
     t_entropy_fail_closed();           /* links entropy_uefi.c (mbedTLS-free) */
+    t_civil_time();                    /* cert validity-time conversion + fail-closed (U-8) */
     t_stale_guard_no_uaf();
     t_cancel_fails_quarantine();
     t_close_no_spin_on_consumed_connect();
