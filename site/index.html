@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Keel: a portable async networking runtime for C</title>
-  <meta name="description" content="Keel is a portable, dependency-free C11 networking runtime: an async I/O core (epoll, kqueue, WSAPoll, io_uring, IOCP, and a bare-metal lwIP raw provider with no OS sockets), TCP and UDP transports, and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.">
+  <meta name="description" content="Keel is a portable, dependency-free C11 networking runtime: an async I/O core (epoll, kqueue, WSAPoll, io_uring, IOCP, a bare-metal lwIP raw provider with no OS sockets, and a freestanding UEFI firmware provider), TCP and UDP transports, and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.">
   <meta name="theme-color" content="#0a0a0a">
 
   <meta property="og:title" content="Keel: a portable async networking runtime for C">
-  <meta property="og:description" content="An async I/O core, TCP/UDP transports, and a growing family of pluggable protocol stacks. Readiness and completion (epoll/kqueue/WSAPoll + io_uring/IOCP), plus an lwIP raw provider that runs the whole stack with no OS sockets. Portable across Linux, macOS, Windows, and Cosmopolitan. No forced dependencies.">
+  <meta property="og:description" content="An async I/O core, TCP/UDP transports, and a growing family of pluggable protocol stacks. Readiness and completion (epoll/kqueue/WSAPoll + io_uring/IOCP), plus an lwIP raw provider and a UEFI firmware provider that run the whole stack with no OS sockets. Portable across Linux, macOS, Windows, and Cosmopolitan. No forced dependencies.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://raw.githubusercontent.com/artalis-io/keel/main/site/og-card.svg">
   <meta property="og:image:type" content="image/svg+xml">
@@ -27,7 +27,7 @@
     "applicationCategory": "DeveloperApplication",
     "applicationSubCategory": "NetworkingRuntime",
     "operatingSystem": "Linux, macOS, Windows, BSD, Cosmopolitan (APE)",
-    "description": "A portable, dependency-free C11 networking runtime: an async I/O core over readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP, and an lwIP raw NO_SYS callback provider that needs no OS sockets) engines behind a platform-neutral socket seam (POSIX/Winsock/lwIP), with TCP and UDP transports and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.",
+    "description": "A portable, dependency-free C11 networking runtime: an async I/O core over readiness (epoll, kqueue, WSAPoll, poll) and completion (io_uring, IOCP, an lwIP raw NO_SYS callback provider, and a freestanding UEFI EFI_TCP4/UDP4 provider that need no OS sockets) engines behind a platform-neutral socket seam (POSIX/Winsock/lwIP/UEFI), with TCP and UDP transports and pluggable protocol stacks: HTTP/1.1, HTTP/2, WebSocket, SSE, and a built-in async DNS resolver.",
     "url": "https://github.com/artalis-io/keel",
     "codeRepository": "https://github.com/artalis-io/keel",
     "programmingLanguage": ["C"],
@@ -326,14 +326,14 @@ $ make examples</pre>
           <div class="stat-foot">Apple M1 Max, repo benchmark suite. Sub-millisecond p99.</div>
         </div>
         <div>
-          <div class="stat-num">863</div>
+          <div class="stat-num">920+</div>
           <div class="stat-label">tests</div>
-          <div class="stat-foot">61 suites under ASan/UBSan, plus 8 fuzz targets.</div>
+          <div class="stat-foot">65 suites under ASan/UBSan, plus 8 fuzz targets.</div>
         </div>
         <div>
-          <div class="stat-num">8</div>
+          <div class="stat-num">9</div>
           <div class="stat-label">event backends</div>
-          <div class="stat-foot">epoll, kqueue, WSAPoll, poll, io_uring, IOCP, an lwIP raw callback provider (NO_SYS, no OS sockets), and a portable completion double.</div>
+          <div class="stat-foot">epoll, kqueue, WSAPoll, poll, io_uring, IOCP, a portable completion double, an lwIP raw callback provider (NO_SYS), and a UEFI EFI_TCP4/UDP4 provider (firmware, no OS sockets).</div>
         </div>
         <div>
           <div class="stat-num">0</div>
@@ -649,7 +649,7 @@ $ make examples</pre>
                 <tr>
                   <td>Socket provider</td>
                   <td class="cmp-part">pluggable</td>
-                  <td>Capability-gated vtable (POSIX and Winsock built in; lwIP shipped &mdash; both BSD-socket and a raw NO_SYS stack; AF_XDP-ready), selectable per server or client.</td>
+                  <td>Capability-gated vtable, selectable per server or client. POSIX and Winsock built in; lwIP shipped (both a BSD-socket layer and a raw NO_SYS stack); a freestanding UEFI EFI_TCP4/UDP4 provider for firmware; AF_XDP-ready.</td>
                 </tr>
               </tbody>
             </table>
@@ -765,13 +765,16 @@ $ make examples</pre>
               Alternate net stacks
             </div>
             <p class="mt-3 text-sm text-mute-400 leading-relaxed">
-              Already proven: the full stack &mdash; server, client, UDP, DNS, and
-              HTTPS &mdash; runs on a stock <code>libkeel.a</code> over a bare
-              <strong>lwIP</strong> TCP/IP stack with <em>no OS sockets</em>
-              (<code>NO_SYS</code> raw callbacks). AF_XDP, DPDK, or a
-              <strong>UEFI</strong> firmware provider slot in the same way,
-              <em>below</em> every protocol stack, and none of them know. An
-              architectural capability HTTP libraries simply don't have.
+              Already proven in two places with no OS sockets underneath. The full
+              stack (server, client, UDP, DNS, HTTPS) runs on a stock
+              <code>libkeel.a</code> over a bare <strong>lwIP</strong> TCP/IP stack
+              (<code>NO_SYS</code> raw callbacks). And a stock async client runs
+              inside <strong>UEFI firmware, before any OS exists</strong>, over
+              EFI_TCP4/UDP4 tokens: plaintext, HTTPS (CA, hostname, and
+              certificate-validity-time verified), and DNS, proven and hardened on
+              QEMU/OVMF. AF_XDP or DPDK slot in the same way, <em>below</em> every
+              protocol stack, and none of them know. An architectural capability
+              HTTP libraries simply don't have.
             </p>
           </div>
         </div>
