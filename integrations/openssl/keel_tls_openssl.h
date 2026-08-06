@@ -53,14 +53,16 @@ typedef enum {
  * @param key_path    Path to PEM-encoded server private key.
  * @param ca_path     Path to PEM-encoded CA cert for client verification (mTLS).
  *                    NULL to disable client authentication.
- * @param client_auth Client authentication mode (KlMtlsMode).
+ * @param client_auth Client authentication mode (KlMtlsMode). When OPTIONAL or
+ *                    REQUIRED, ca_path must name a non-empty CA bundle (else the
+ *                    call fails). An out-of-range mode value is rejected.
  * @param alloc       Allocator for context storage (borrowed — must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_openssl_ctx_create(const char *cert_path,
                                     const char *key_path,
                                     const char *ca_path,
-                                    int client_auth,
+                                    KlMtlsMode client_auth,
                                     KlAllocator *alloc);
 
 /**
@@ -75,23 +77,30 @@ KlTlsCtx *kl_tls_openssl_ctx_create(const char *cert_path,
  * @param key_buf     Private key bytes (PEM). Must be non-NULL.
  * @param key_len     Length of key_buf.
  * @param ca_buf      mTLS CA bytes (PEM), or NULL to disable client authentication.
+ *                    Required (non-NULL, non-empty) when client_auth is OPTIONAL
+ *                    or REQUIRED. ca_buf/ca_len must agree (both set or both zero).
  * @param ca_len      CA length (0 when ca_buf is NULL).
- * @param client_auth Client authentication mode (KlMtlsMode).
+ * @param client_auth Client authentication mode (KlMtlsMode). Out-of-range values
+ *                    are rejected.
  * @param alloc       Allocator for context storage (borrowed — must outlive it).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_openssl_ctx_create_from_buf(const unsigned char *cert_buf, size_t cert_len,
                                              const unsigned char *key_buf, size_t key_len,
                                              const unsigned char *ca_buf, size_t ca_len,
-                                             int client_auth, KlAllocator *alloc);
+                                             KlMtlsMode client_auth, KlAllocator *alloc);
 
 /**
  * @brief Create a client-side TLS context (for outbound connections).
  *
+ * Verification is ON by default (SSL_VERIFY_PEER + hostname matching via
+ * kl_tls_openssl_set_hostname()).
+ *
  * @param ca_path  Path to PEM-encoded CA cert bundle for server verification.
- *                 NULL skips certificate verification (verify-none) — encrypted
- *                 but MITM-vulnerable; production deployments should always
- *                 provide a valid CA bundle path.
+ *                 NULL uses the system default trust store
+ *                 (SSL_CTX_set_default_verify_paths) — still verifying. To skip
+ *                 verification entirely (tests / cert-pinning done elsewhere),
+ *                 use kl_tls_openssl_client_ctx_create_insecure().
  * @param alloc    Allocator for context storage (borrowed — must outlive context).
  * @return Opaque context, or NULL on error.
  */
@@ -103,16 +112,32 @@ KlTlsCtx *kl_tls_openssl_client_ctx_create(const char *ca_path,
  *
  * Same as kl_tls_openssl_client_ctx_create() but reads the CA bundle from a
  * buffer. The buffer is parsed and copied internally; the caller may free it
- * immediately after this call returns.
+ * immediately after this call returns. Verification is ON.
  *
- * @param ca_buf  PEM CA bundle bytes. Must be non-NULL.
- * @param ca_len  Length in bytes.
+ * @param ca_buf  PEM CA bundle bytes. NULL uses the system default trust store
+ *                (still verifying); to disable verification use
+ *                kl_tls_openssl_client_ctx_create_insecure().
+ * @param ca_len  Length in bytes (0 when ca_buf is NULL).
  * @param alloc   Allocator for context storage (borrowed — must outlive context).
  * @return Opaque context, or NULL on error.
  */
 KlTlsCtx *kl_tls_openssl_client_ctx_create_from_buf(const unsigned char *ca_buf,
                                                     size_t ca_len,
                                                     KlAllocator *alloc);
+
+/**
+ * @brief Create a client TLS context with certificate verification DISABLED.
+ *
+ * WARNING: verify-none. The connection is encrypted but MITM-vulnerable — the
+ * server certificate is NOT checked against any CA and the hostname is NOT
+ * matched. Use ONLY for tests or when peer authenticity is guaranteed by some
+ * other means (e.g. certificate pinning performed by the caller). Production
+ * code must use kl_tls_openssl_client_ctx_create() / _from_buf() instead.
+ *
+ * @param alloc  Allocator for context storage (borrowed — must outlive context).
+ * @return Opaque context, or NULL on error.
+ */
+KlTlsCtx *kl_tls_openssl_client_ctx_create_insecure(KlAllocator *alloc);
 
 /**
  * @brief Attach a client certificate + key to a client context (mTLS).
@@ -193,5 +218,23 @@ int kl_tls_openssl_ctx_set_alpn(KlTlsCtx *ctx, const char **protos);
 struct KlSocketProvider;
 int kl_tls_openssl_ctx_set_socket_provider(KlTlsCtx *ctx,
                                            const struct KlSocketProvider *sp);
+
+/**
+ * @brief Allow a bare transport EOF (no TLS close_notify) to count as a clean EOF.
+ *
+ * By default (allow == 0) the adapter is STRICT: only a real close_notify
+ * (SSL_ERROR_ZERO_RETURN) marks at_eof(); a transport EOF without close_notify is
+ * an error (read() returns -1 and at_eof() stays 0). This prevents a truncated
+ * close-delimited HTTPS response from being silently accepted as complete.
+ *
+ * Setting allow != 0 restores the lenient behavior: a clean transport EOF with no
+ * queued TLS error is treated as at_eof(). Sessions inherit this from the context
+ * at creation. Applies to the readiness (socket-BIO) path.
+ *
+ * @param ctx    Server or client context.
+ * @param allow  0 = strict (default), non-zero = allow truncation.
+ * @return 0 on success, -1 on error (NULL ctx).
+ */
+int kl_tls_openssl_ctx_set_allow_truncation(KlTlsCtx *ctx, int allow);
 
 #endif /* KEEL_TLS_OPENSSL_H */

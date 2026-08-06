@@ -42,6 +42,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -60,6 +61,9 @@ typedef struct {
     SSL_CTX               *ssl_ctx;
     KlAllocator           *alloc;
     int                    is_server;
+    /* When set, a bare transport EOF (no close_notify) counts as a clean EOF
+     * (lenient). Default 0 = strict. Inherited by each session. */
+    int                    allow_truncation;
     /* Optional socket provider the socket-BIO routes ciphertext through (NULL =
      * host kl_sockdef_*). Inherited by each session. */
     const KlSocketProvider *sp;
@@ -81,12 +85,19 @@ typedef struct {
     const KlSocketProvider *sp;    /* socket provider for BIO I/O (NULL = host default) */
     int                 handshake_done;
     int                 eof_seen;  /* set when read() hit a clean close_notify/EOF */
+    int                 allow_truncation;  /* inherited from ctx (strict EOF policy) */
     /* Completion (memory-BIO) mode. Active once feed_input() is first called:
      * the BIO reads ciphertext from in_buf (fed by the caller) and appends
      * outgoing ciphertext to out_buf (drained by the caller). */
     int                 comp_mode;
     unsigned char      *in_buf;   size_t in_cap, in_len, in_pos;
     unsigned char      *out_buf;  size_t out_cap, out_len;
+    /* Session-owned peer-cert DER (peer_cert()); valid until this session's next
+     * reset()/destroy() per the KlPeerCert contract. Not shared across sessions. */
+    unsigned char      *der_buf;  size_t der_cap, der_len;
+    /* Session-owned NUL-terminated negotiated ALPN name (alpn_protocol()); an
+     * ALPN protocol name is <= 255 bytes by the wire format. */
+    char                alpn[256];
 } KlOpensslTls;
 
 /* Cap on either completion ciphertext ring (a TLS record is <= ~16 KiB; cert-
@@ -132,6 +143,9 @@ static int kl_bio_write(BIO *bio, const char *buf, int len)
     size_t n = (size_t)len;
 
     if (t->comp_mode) {   /* memory BIO: append to the outgoing-ciphertext ring */
+        /* Overflow-safe cap check BEFORE the add: n > MAX - out_len ⇒ over cap. */
+        if (n > KL_TLS_COMP_MAX - t->out_len)
+            return -1;   /* buffer full — fatal (no retry flag) */
         if (comp_ensure(&t->out_buf, &t->out_cap, t->out_len + n, t->alloc) < 0)
             return -1;   /* buffer full — fatal (no retry flag) */
         memcpy(t->out_buf + t->out_len, buf, n);
@@ -218,24 +232,33 @@ static int kl_bio_destroy(BIO *bio)
     return 1;
 }
 
-/* Lazily create the process-wide custom BIO_METHOD. Not thread-safe against a
- * racing first handshake on two threads, but Keel is single-threaded per loop
- * and ctxs are created at init before any worker runs. */
-static BIO_METHOD *kl_bio_get_method(void)
+/* Create the process-wide custom BIO_METHOD exactly once, thread-safely (via
+ * pthread_once). Every BIO_meth_set_*() return is checked; on any failure the
+ * partial method is freed and the global left NULL, so callers fail the session
+ * create. */
+static pthread_once_t g_bio_once = PTHREAD_ONCE_INIT;
+
+static void kl_bio_method_init(void)
 {
-    if (kl_bio_method)
-        return kl_bio_method;
     int type = BIO_get_new_index() | BIO_TYPE_SOURCE_SINK;
     BIO_METHOD *m = BIO_meth_new(type, "keel-tls-bio");
     if (!m)
-        return NULL;
-    BIO_meth_set_write(m, kl_bio_write);
-    BIO_meth_set_read(m, kl_bio_read);
-    BIO_meth_set_ctrl(m, kl_bio_ctrl);
-    BIO_meth_set_create(m, kl_bio_create);
-    BIO_meth_set_destroy(m, kl_bio_destroy);
+        return;
+    if (BIO_meth_set_write(m, kl_bio_write) != 1 ||
+        BIO_meth_set_read(m, kl_bio_read) != 1 ||
+        BIO_meth_set_ctrl(m, kl_bio_ctrl) != 1 ||
+        BIO_meth_set_create(m, kl_bio_create) != 1 ||
+        BIO_meth_set_destroy(m, kl_bio_destroy) != 1) {
+        BIO_meth_free(m);
+        return;   /* leave kl_bio_method NULL — session create will fail cleanly */
+    }
     kl_bio_method = m;
-    return m;
+}
+
+static BIO_METHOD *kl_bio_get_method(void)
+{
+    pthread_once(&g_bio_once, kl_bio_method_init);
+    return kl_bio_method;
 }
 
 /* ── KlTls vtable implementation ─────────────────────────────────── */
@@ -278,10 +301,13 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
         return 0;   /* retry */
     if (err == SSL_ERROR_SYSCALL) {
-        /* A transport EOF without a close_notify surfaces here with ret==0 and
-         * no queued error — treat it as a (best-effort) clean EOF so a close-
-         * delimited response can finalize instead of reporting KL_ERR_IO. */
-        if (ret == 0 && ERR_peek_error() == 0) {
+        /* A transport EOF without a close_notify surfaces here with ret==0 and no
+         * queued error. STRICT (default): this is a truncation — return -1 with
+         * eof_seen staying 0, so a truncated close-delimited response is NOT
+         * accepted as complete. Only when allow_truncation is opted in do we treat
+         * a clean transport EOF as at_eof(). A real close_notify goes through
+         * SSL_ERROR_ZERO_RETURN above and always sets eof_seen. */
+        if (ret == 0 && ERR_peek_error() == 0 && t->allow_truncation) {
             t->eof_seen = 1;
             return -1;
         }
@@ -341,6 +367,8 @@ static size_t tls_pending(KlTls *self)
 static int tls_feed_input(KlTls *self, const void *cipher, size_t len)
 {
     KlOpensslTls *t = (KlOpensslTls *)self;
+    if (!cipher && len != 0)
+        return -1;   /* NULL buffer with a non-zero length is a caller bug */
     t->comp_mode = 1;
     if (t->in_pos > 0) {   /* compact the partially-consumed prefix */
         memmove(t->in_buf, t->in_buf + t->in_pos, t->in_len - t->in_pos);
@@ -348,7 +376,10 @@ static int tls_feed_input(KlTls *self, const void *cipher, size_t len)
         t->in_pos = 0;
     }
     if (len == 0)
-        return 0;
+        return 0;   /* no-op success (also the mode-enable call) */
+    /* Overflow-safe cap check BEFORE the add: len > MAX - in_len ⇒ over cap. */
+    if (len > KL_TLS_COMP_MAX - t->in_len)
+        return -1;
     if (comp_ensure(&t->in_buf, &t->in_cap, t->in_len + len, t->alloc) < 0)
         return -1;
     memcpy(t->in_buf + t->in_len, cipher, len);
@@ -360,6 +391,10 @@ static int tls_feed_input(KlTls *self, const void *cipher, size_t len)
 static kl_ssize_t tls_drain_output(KlTls *self, void *buf, size_t cap)
 {
     KlOpensslTls *t = (KlOpensslTls *)self;
+    if (!buf && cap != 0)
+        return -1;   /* NULL buffer with a non-zero cap is a caller bug */
+    if (cap == 0)
+        return 0;    /* no-op success */
     size_t avail = t->out_len;
     size_t n = (avail < cap) ? avail : cap;
     if (n)
@@ -380,6 +415,10 @@ static void tls_reset(KlTls *self)
     t->fd = KL_INVALID_SOCKET;
     /* Drop buffered ciphertext; keep transport mode + allocated rings. */
     t->in_len = t->in_pos = t->out_len = 0;
+    /* Invalidate any previously-returned peer-cert DER (contract: valid only
+     * until reset()); keep the buffer allocated for reuse. */
+    t->der_len = 0;
+    t->alpn[0] = '\0';
 }
 
 static void tls_destroy(KlTls *self)
@@ -389,6 +428,7 @@ static void tls_destroy(KlTls *self)
         SSL_free(t->ssl);   /* frees the attached BIO too (SSL_set_bio ownership) */
     kl_free(t->alloc, t->in_buf, t->in_cap);
     kl_free(t->alloc, t->out_buf, t->out_cap);
+    kl_free(t->alloc, t->der_buf, t->der_cap);
     kl_free(t->alloc, t, sizeof(*t));
 }
 
@@ -402,13 +442,13 @@ static const char *tls_alpn_protocol(KlTls *self)
     SSL_get0_alpn_selected(t->ssl, &proto, &plen);
     if (!proto || plen == 0)
         return NULL;
-    /* Return a NUL-terminated copy in a session-owned scratch (ALPN names are
-     * short, <= 255 bytes by the wire format). */
-    static _Thread_local char scratch[256];
-    unsigned int n = plen < sizeof(scratch) - 1 ? plen : (unsigned int)sizeof(scratch) - 1;
-    memcpy(scratch, proto, n);
-    scratch[n] = '\0';
-    return scratch;
+    /* Return a NUL-terminated copy in this SESSION's own buffer (not a shared
+     * thread-local), so a second session on the same thread never clobbers it.
+     * ALPN names are <= 255 bytes by the wire format. */
+    unsigned int n = plen < sizeof(t->alpn) - 1 ? plen : (unsigned int)sizeof(t->alpn) - 1;
+    memcpy(t->alpn, proto, n);
+    t->alpn[n] = '\0';
+    return t->alpn;
 }
 
 /* ── mTLS peer-certificate extraction ────────────────────────────── */
@@ -552,26 +592,35 @@ static int tls_peer_cert(KlTls *self, KlPeerCert *out)
     x509_name_cn(X509_get_issuer_name(crt), out->issuer_cn, sizeof(out->issuer_cn));
     x509_extract_san(crt, out->san, sizeof(out->san));
 
-    /* DER + SHA-256 fingerprint. We stash the DER in a session-owned buffer so
-     * `der` stays valid until the next reset()/destroy() per the KlPeerCert
-     * contract; reuse the in_buf slot only if not in completion mode — simplest
-     * is a dedicated static thread-local scratch (a cert is a few KiB). */
-    static _Thread_local unsigned char der_scratch[8192];
-    unsigned char *dp = der_scratch;
+    /* DER + SHA-256 fingerprint. Stash the DER in THIS session's own buffer (not a
+     * shared thread-local) so `der` stays valid until this session's next
+     * reset()/destroy() per the KlPeerCert contract — a second session on the same
+     * thread never clobbers it. */
     int der_len = i2d_X509(crt, NULL);
-    if (der_len > 0 && (size_t)der_len <= sizeof(der_scratch)) {
-        unsigned char *p = dp;
-        i2d_X509(crt, &p);
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        SHA256(dp, (size_t)der_len, hash);
-        static const char hex[] = "0123456789abcdef";
-        for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-            out->fingerprint_sha256[i * 2]     = hex[hash[i] >> 4];
-            out->fingerprint_sha256[i * 2 + 1] = hex[hash[i] & 0x0F];
+    if (der_len > 0) {
+        if ((size_t)der_len > t->der_cap) {
+            unsigned char *nb = kl_realloc(t->alloc, t->der_buf, t->der_cap,
+                                           (size_t)der_len);
+            if (nb) {
+                t->der_buf = nb;
+                t->der_cap = (size_t)der_len;
+            }
         }
-        out->fingerprint_sha256[SHA256_DIGEST_LENGTH * 2] = '\0';
-        out->der = dp;
-        out->der_len = (size_t)der_len;
+        if (t->der_buf && (size_t)der_len <= t->der_cap) {
+            unsigned char *p = t->der_buf;
+            i2d_X509(crt, &p);
+            t->der_len = (size_t)der_len;
+            unsigned char hash[SHA256_DIGEST_LENGTH];
+            SHA256(t->der_buf, (size_t)der_len, hash);
+            static const char hex[] = "0123456789abcdef";
+            for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+                out->fingerprint_sha256[i * 2]     = hex[hash[i] >> 4];
+                out->fingerprint_sha256[i * 2 + 1] = hex[hash[i] & 0x0F];
+            }
+            out->fingerprint_sha256[SHA256_DIGEST_LENGTH * 2] = '\0';
+            out->der = t->der_buf;
+            out->der_len = (size_t)der_len;
+        }
     }
 
     out->not_before = asn1_time_to_unix(X509_get0_notBefore(crt));
@@ -610,6 +659,7 @@ KlTls *kl_tls_openssl_create(KlTlsCtx *ctx, KlAllocator *alloc)
     t->ctx = octx;
     t->fd = KL_INVALID_SOCKET;
     t->sp = octx->sp;   /* inherit the ctx's socket provider (NULL = host) */
+    t->allow_truncation = octx->allow_truncation;   /* inherit strict-EOF policy */
 
     t->base.handshake     = tls_handshake;
     t->base.read          = tls_read;
@@ -748,6 +798,15 @@ int kl_tls_openssl_ctx_set_socket_provider(KlTlsCtx *c, const struct KlSocketPro
     return 0;
 }
 
+int kl_tls_openssl_ctx_set_allow_truncation(KlTlsCtx *c, int allow)
+{
+    KlOpensslCtx *ctx = (KlOpensslCtx *)c;
+    if (!ctx)
+        return -1;
+    ctx->allow_truncation = allow ? 1 : 0;
+    return 0;
+}
+
 /* ── Helper: read entire file into buffer ────────────────────────── */
 
 static unsigned char *read_file(const char *path, size_t *out_len, KlAllocator *alloc)
@@ -776,10 +835,22 @@ static unsigned char *read_file(const char *path, size_t *out_len, KlAllocator *
 
 /* ── Cert/key/CA loading from PEM buffers ────────────────────────── */
 
+/* Safe wrapper around BIO_new_mem_buf: BIO_new_mem_buf takes an `int` length, so
+ * reject anything that would narrow badly BEFORE the cast — empty/NULL buffers and
+ * lengths that overflow int. Returns NULL on bad args (callers then fail cleanly). */
+static BIO *bio_new_mem_checked(const void *buf, size_t len)
+{
+    if (len == 0 || len > INT_MAX)
+        return NULL;
+    if (!buf)
+        return NULL;
+    return BIO_new_mem_buf(buf, (int)len);
+}
+
 /* Load a PEM certificate chain into ssl_ctx (leaf + intermediates). */
 static int load_cert_chain_pem(SSL_CTX *sc, const unsigned char *pem, size_t len)
 {
-    BIO *bio = BIO_new_mem_buf(pem, (int)len);
+    BIO *bio = bio_new_mem_checked(pem, len);
     if (!bio)
         return -1;
     int rc = -1;
@@ -809,7 +880,7 @@ out:
 
 static int load_private_key_pem(SSL_CTX *sc, const unsigned char *pem, size_t len)
 {
-    BIO *bio = BIO_new_mem_buf(pem, (int)len);
+    BIO *bio = bio_new_mem_checked(pem, len);
     if (!bio)
         return -1;
     EVP_PKEY *pk = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
@@ -828,7 +899,7 @@ static int load_ca_store_pem(SSL_CTX *sc, const unsigned char *pem, size_t len)
     X509_STORE *store = SSL_CTX_get_cert_store(sc);
     if (!store)
         return -1;
-    BIO *bio = BIO_new_mem_buf(pem, (int)len);
+    BIO *bio = bio_new_mem_checked(pem, len);
     if (!bio)
         return -1;
     int added = 0, rc = -1;
@@ -848,7 +919,7 @@ static int load_ca_store_pem(SSL_CTX *sc, const unsigned char *pem, size_t len)
 /* For a server doing mTLS, also advertise the acceptable client-CA names. */
 static void load_client_ca_names(SSL_CTX *sc, const unsigned char *pem, size_t len)
 {
-    BIO *bio = BIO_new_mem_buf(pem, (int)len);
+    BIO *bio = bio_new_mem_checked(pem, len);
     if (!bio)
         return;
     X509 *ca;
@@ -867,9 +938,22 @@ static void load_client_ca_names(SSL_CTX *sc, const unsigned char *pem, size_t l
 static KlTlsCtx *server_ctx_from_mem(const unsigned char *cert_buf, size_t cert_len,
                                      const unsigned char *key_buf, size_t key_len,
                                      const unsigned char *ca_buf, size_t ca_len,
-                                     int client_auth, KlAllocator *alloc)
+                                     KlMtlsMode client_auth, KlAllocator *alloc)
 {
     if (!cert_buf || !key_buf || !alloc)
+        return NULL;
+
+    /* Validate the mTLS mode + CA arguments before touching OpenSSL. */
+    if (client_auth != KL_MTLS_NONE &&
+        client_auth != KL_MTLS_OPTIONAL &&
+        client_auth != KL_MTLS_REQUIRED)
+        return NULL;   /* out-of-range mode */
+    /* ca_buf/ca_len must agree (both present or both absent). */
+    if ((ca_buf == NULL) != (ca_len == 0))
+        return NULL;
+    /* OPTIONAL / REQUIRED client auth is meaningless without a CA to verify. */
+    if ((client_auth == KL_MTLS_OPTIONAL || client_auth == KL_MTLS_REQUIRED) &&
+        (ca_buf == NULL || ca_len == 0))
         return NULL;
 
     KlOpensslCtx *ctx = kl_malloc(alloc, sizeof(*ctx));
@@ -919,7 +1003,7 @@ fail:
 }
 
 KlTlsCtx *kl_tls_openssl_ctx_create(const char *cert_path, const char *key_path,
-                                    const char *ca_path, int client_auth,
+                                    const char *ca_path, KlMtlsMode client_auth,
                                     KlAllocator *alloc)
 {
     if (!cert_path || !key_path || !alloc)
@@ -959,7 +1043,7 @@ KlTlsCtx *kl_tls_openssl_ctx_create(const char *cert_path, const char *key_path,
 KlTlsCtx *kl_tls_openssl_ctx_create_from_buf(const unsigned char *cert_buf, size_t cert_len,
                                              const unsigned char *key_buf, size_t key_len,
                                              const unsigned char *ca_buf, size_t ca_len,
-                                             int client_auth, KlAllocator *alloc)
+                                             KlMtlsMode client_auth, KlAllocator *alloc)
 {
     return server_ctx_from_mem(cert_buf, cert_len, key_buf, key_len,
                                ca_buf, ca_len, client_auth, alloc);
@@ -967,8 +1051,12 @@ KlTlsCtx *kl_tls_openssl_ctx_create_from_buf(const unsigned char *cert_buf, size
 
 /* ── Client context creation ─────────────────────────────────────── */
 
+/* Create a client ctx. Verification policy:
+ *   insecure != 0            → SSL_VERIFY_NONE (explicit opt-out).
+ *   ca_buf/ca_len provided   → load that CA bundle + SSL_VERIFY_PEER.
+ *   ca_buf == NULL (secure)  → system default trust store + SSL_VERIFY_PEER. */
 static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf, size_t ca_len,
-                                            KlAllocator *alloc)
+                                            int insecure, KlAllocator *alloc)
 {
     if (!alloc)
         return NULL;
@@ -986,14 +1074,20 @@ static KlTlsCtx *client_ctx_create_from_mem(const unsigned char *ca_buf, size_t 
 
     SSL_CTX_set_min_proto_version(ctx->ssl_ctx, TLS1_2_VERSION);
 
-    if (ca_buf && ca_len > 0) {
+    if (insecure) {
+        /* WARNING: verify-none — encrypted but MITM-vulnerable. Explicit opt-in
+         * via kl_tls_openssl_client_ctx_create_insecure(). */
+        SSL_CTX_set_verify(ctx->ssl_ctx, SSL_VERIFY_NONE, NULL);
+    } else if (ca_buf && ca_len > 0) {
+        /* Verify against the caller-supplied CA bundle. */
         if (load_ca_store_pem(ctx->ssl_ctx, ca_buf, ca_len) != 0)
             goto fail;
         SSL_CTX_set_verify(ctx->ssl_ctx, SSL_VERIFY_PEER, NULL);
     } else {
-        /* WARNING: no CA — certificate verification DISABLED. Encrypted but
-         * MITM-vulnerable. Production must provide a CA bundle. */
-        SSL_CTX_set_verify(ctx->ssl_ctx, SSL_VERIFY_NONE, NULL);
+        /* Secure default: verify against the system trust store. */
+        if (SSL_CTX_set_default_verify_paths(ctx->ssl_ctx) != 1)
+            goto fail;
+        SSL_CTX_set_verify(ctx->ssl_ctx, SSL_VERIFY_PEER, NULL);
     }
 
     return (KlTlsCtx *)ctx;
@@ -1009,14 +1103,14 @@ KlTlsCtx *kl_tls_openssl_client_ctx_create(const char *ca_path, KlAllocator *all
 {
     if (!alloc)
         return NULL;
-    if (!ca_path)
-        return client_ctx_create_from_mem(NULL, 0, alloc);
+    if (!ca_path)   /* system default trust store, still verifying */
+        return client_ctx_create_from_mem(NULL, 0, 0, alloc);
 
     size_t ca_len = 0;
     unsigned char *ca_buf = read_file(ca_path, &ca_len, alloc);
     if (!ca_buf)
         return NULL;
-    KlTlsCtx *ctx = client_ctx_create_from_mem(ca_buf, ca_len, alloc);
+    KlTlsCtx *ctx = client_ctx_create_from_mem(ca_buf, ca_len, 0, alloc);
     kl_free(alloc, ca_buf, ca_len + 1);
     return ctx;
 }
@@ -1024,9 +1118,18 @@ KlTlsCtx *kl_tls_openssl_client_ctx_create(const char *ca_path, KlAllocator *all
 KlTlsCtx *kl_tls_openssl_client_ctx_create_from_buf(const unsigned char *ca_buf,
                                                     size_t ca_len, KlAllocator *alloc)
 {
-    if (!ca_buf || ca_len == 0 || !alloc)
+    if (!alloc)
         return NULL;
-    return client_ctx_create_from_mem(ca_buf, ca_len, alloc);
+    if (ca_buf == NULL)   /* system default trust store, still verifying */
+        return client_ctx_create_from_mem(NULL, 0, 0, alloc);
+    if (ca_len == 0)
+        return NULL;      /* non-NULL buffer must be non-empty */
+    return client_ctx_create_from_mem(ca_buf, ca_len, 0, alloc);
+}
+
+KlTlsCtx *kl_tls_openssl_client_ctx_create_insecure(KlAllocator *alloc)
+{
+    return client_ctx_create_from_mem(NULL, 0, 1, alloc);
 }
 
 int kl_tls_openssl_client_ctx_set_cert(KlTlsCtx *c,

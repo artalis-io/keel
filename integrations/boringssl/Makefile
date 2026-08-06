@@ -60,7 +60,18 @@ test: $(LIB)
 	./link_smoke
 	@echo "integrations/boringssl: link smoke OK"
 
-clean:
-	rm -f $(LIB) $(OBJ) link_smoke
+# Full both-axes end-to-end handshake + hardening suite (reuses the OpenSSL e2e —
+# pure OpenSSL API). BoringSSL is C++, so add BORINGSSL_EXTRA_LIBS (-lstdc++).
+E2E_CFLAGS := -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
+              -fsanitize=address,undefined -fno-sanitize-recover=all \
+              -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -I../openssl $(BORINGSSL_INC)
+e2e:
+	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
+	$(CC) $(E2E_CFLAGS) -o e2e_boringssl ../openssl/e2e/tls_e2e.c $(ADAPTER_SRC) \
+	  -L$(KEEL_ROOT) -lkeel -L$(BORINGSSL_LIBDIR) -lssl -lcrypto -lpthread $(BORINGSSL_EXTRA_LIBS)
+	./e2e_boringssl
 
-.PHONY: all test clean
+clean:
+	rm -f $(LIB) $(OBJ) link_smoke e2e_boringssl
+
+.PHONY: all test e2e clean

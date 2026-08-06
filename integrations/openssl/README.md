@@ -81,8 +81,34 @@ KlConfig config = {
 };
 ```
 
+### Client (verifying by default)
+
+Client contexts **verify the server certificate by default**. Pass a CA bundle
+path (or `NULL` to use the system trust store — still verifying), then set the
+expected hostname before the handshake:
+
+```c
+KlTlsCtx *ctx = kl_tls_openssl_client_ctx_create("/etc/ssl/certs/ca-bundle.crt",
+                                                 &alloc);            /* verifies */
+/* or kl_tls_openssl_client_ctx_create(NULL, &alloc) for the system trust store */
+KlTls *tls = kl_tls_openssl_create(ctx, &alloc);
+kl_tls_openssl_set_hostname(tls, "example.com");   /* SNI + hostname match */
+```
+
+To **disable** verification (tests, or cert-pinning done elsewhere) you must opt
+in explicitly — this is encrypted but MITM-vulnerable:
+
+```c
+KlTlsCtx *ctx = kl_tls_openssl_client_ctx_create_insecure(&alloc);  /* verify-none */
+```
+
 For a client that must present a cert to an mTLS server, load it onto the client
 ctx: `kl_tls_openssl_client_ctx_set_cert(ctx, cert, clen, key, klen)`.
+
+By default a transport EOF without a TLS `close_notify` is treated as an error
+(strict — a truncated close-delimited HTTPS response is not silently accepted).
+Opt into the lenient legacy behavior with
+`kl_tls_openssl_ctx_set_allow_truncation(ctx, 1)`.
 
 ## Test
 
