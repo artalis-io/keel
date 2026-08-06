@@ -36,4 +36,20 @@ void kl_uefi_platform_trace(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out);
  * when it returns 0. */
 int kl_uefi_have_entropy(void);
 
+/* ── ExitBootServices lifetime (U-7) ─────────────────────────────────────────
+ * The EFI network provider is BOOT-SERVICES-ONLY: EFI_TCP4/UDP4, AllocatePool, and
+ * events all vanish at ExitBootServices(). kl_uefi_platform_init registers an
+ * EVT_SIGNAL_EXIT_BOOT_SERVICES notify so KEEL degrades fail-closed the instant the
+ * app leaves boot services. */
+
+/* 1 once ExitBootServices() has fired; KEEL's EFI providers then refuse boot-service
+ * I/O. kl_uefi_have_entropy() also returns 0 after EBS. */
+int kl_uefi_after_ebs(void);
+
+/* Release the platform's boot-services resources (periodic timer + EBS event). Call
+ * BEFORE ExitBootServices for a clean teardown; idempotent. Afterwards
+ * kl_monotonic_ms freezes and kl_plat_random fail-closes. See kl_uefi_shutdown()
+ * (lifecycle_uefi.h) for the full net-stack teardown. */
+void kl_uefi_platform_shutdown(void);
+
 #endif /* KEEL_UEFI_PLATFORM_UEFI_H */

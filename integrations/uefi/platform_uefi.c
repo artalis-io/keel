@@ -42,7 +42,9 @@
 static EFI_BOOT_SERVICES *g_bs;
 static EFI_RNG_PROTOCOL  *g_rng;          /* NULL => fail-closed */
 static EFI_EVENT          g_timer_event;
+static EFI_EVENT          g_ebs_event;    /* EVT_SIGNAL_EXIT_BOOT_SERVICES (U-7) */
 static volatile UINT64    g_ticks_ms;     /* monotonic millisecond counter */
+static volatile int       g_after_ebs;    /* set by the EBS notify — degrade fail-closed */
 static int                g_inited;
 
 /* Optional ConOut trace sink (set by kl_uefi_platform_trace) so init can report
@@ -77,6 +79,18 @@ static VOID EFIAPI uefi_timer_tick(EFI_EVENT event, VOID *context) {
     g_ticks_ms += UEFI_TICK_MS;
 }
 
+/* ExitBootServices notify (U-7): fires once, while boot services are still
+ * momentarily usable, when the app calls ExitBootServices(). MUST be minimal — no
+ * allocation, no protocol calls — so just latch the degraded state: mark post-EBS
+ * (kl_uefi_after_ebs) and drop the RNG pointer (its driver is going away). After
+ * this, KEEL's EFI providers refuse further boot-service I/O (fail-closed) and
+ * kl_plat_random zeroes. EFIAPI (ms_abi) because the firmware calls it. */
+static VOID EFIAPI uefi_exit_boot_services(EFI_EVENT event, VOID *context) {
+    (void)event; (void)context;
+    g_after_ebs = 1;
+    g_rng = NULL;
+}
+
 int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st) {
     (void)st; /* reserved — clock/rng come from boot services + a protocol */
     if (g_inited) return 0;
@@ -107,6 +121,14 @@ int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st) {
         g_rng = (EFI_RNG_PROTOCOL *)iface;
     else
         g_rng = NULL; /* fail-closed */
+
+    /* ---- ExitBootServices lifetime (U-7): register the EBS notify so networking
+     * degrades fail-closed the moment the app leaves boot services. Non-fatal if it
+     * can't be created (the shutdown/teardown path is the primary guard). ---- */
+    trace("  [plat] CreateEvent(EBS)...\r\n");
+    s = bs->CreateEvent(EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_CALLBACK,
+                        (EFI_EVENT_NOTIFY)uefi_exit_boot_services, NULL, &g_ebs_event);
+    if (EFI_ERROR(s)) { g_ebs_event = NULL; trace("  [plat] EBS event (warn) not registered\r\n"); }
     trace("  [plat] init done\r\n");
 
     g_inited = 1;
@@ -114,7 +136,31 @@ int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st) {
 }
 
 int kl_uefi_have_entropy(void) {
-    return g_rng != NULL;
+    return g_rng != NULL && !g_after_ebs;
+}
+
+/* U-7: 1 once ExitBootServices() has fired — KEEL's EFI providers must stop calling
+ * boot services (the TCP4/UDP4 protocols + AllocatePool/events are gone). */
+int kl_uefi_after_ebs(void) {
+    return g_after_ebs;
+}
+
+/* U-7: release the platform's boot-services resources (the periodic timer + the EBS
+ * event). Call BEFORE ExitBootServices for a clean teardown; idempotent. After this,
+ * kl_monotonic_ms freezes at its last value and kl_plat_random fail-closes. */
+void kl_uefi_platform_shutdown(void) {
+    if (g_bs) {
+        if (g_timer_event) {
+            g_bs->SetTimer(g_timer_event, TimerCancel, 0);
+            g_bs->CloseEvent(g_timer_event);
+        }
+        if (g_ebs_event)
+            g_bs->CloseEvent(g_ebs_event);
+    }
+    g_timer_event = NULL;
+    g_ebs_event = NULL;
+    g_rng = NULL;
+    g_inited = 0;
 }
 
 /* ── kl_monotonic_ms (src/platform.h contract) ──────────────────────────────

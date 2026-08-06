@@ -81,6 +81,9 @@ typedef struct {
 #define EVT_NOTIFY_WAIT   0x00000100
 #define EVT_NOTIFY_SIGNAL 0x00000200
 #define EVT_TIMER         0x80000000
+/* Fires once when ExitBootServices() is called (UEFI 2.10 §7.1). The notify runs
+ * while boot services are still momentarily usable; keep it minimal (a flag write). */
+#define EVT_SIGNAL_EXIT_BOOT_SERVICES 0x00000201
 #define TPL_APPLICATION   4
 #define TPL_CALLBACK      8
 #define TPL_NOTIFY        16

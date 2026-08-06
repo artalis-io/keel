@@ -14,6 +14,7 @@
 
 #include "socket_efi_tcp4.h"
 #include "allocator_uefi.h"           /* kl_uefi_allocator */
+#include "platform_uefi.h"            /* kl_uefi_after_ebs (U-7 boot-services guard) */
 #include "../../src/socket.h"         /* KL_SOCK_CAP_OVERLAPPED (internal cap bit) */
 
 /* ── errno (WRITE-only) ──────────────────────────────────────────────────────
@@ -268,6 +269,10 @@ static KlSocketHandle efi_sock_socket(void *cx, int domain, int type, int protoc
     KlUefiSockCtx *ctx = (KlUefiSockCtx *)cx;
     (void)protocol;
     if (!ctx || !ctx->created || !ctx->sb) return KL_INVALID_SOCKET;
+    /* U-7: refuse new sockets once boot services are gone — EFI_TCP4/CreateChild are
+     * invalid after ExitBootServices. The lifetime discipline is kl_uefi_shutdown()
+     * BEFORE EBS; this is the fail-closed safety net if that was skipped. */
+    if (kl_uefi_after_ebs()) return KL_INVALID_SOCKET;
     /* IPv4 + STREAM only. The seam passes the POSIX numeric domain (AF_INET=2) and
      * type (SOCK_STREAM=1); reject anything but a stream socket. Family enforcement
      * on the address happens at connect() (the neutral KlSockAddr carries it). */
