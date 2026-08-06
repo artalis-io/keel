@@ -185,16 +185,25 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         op->in_use = 0;   /* retire: exactly-once terminal result */
     }
 
-    /* Emulated-readiness relay: each armed watch → a KL_COMP_WATCHER carrying its
-     * mask. The client's send/recv handlers consume it, calling the U-2 provider's
-     * SYNC send/recv (which pump the token internally); WOULD_BLOCK re-arms the watch
-     * and the next drain relays it again. */
+    /* Drain-driven readiness relay (U-6): for each armed watch, emit a
+     * KL_COMP_WATCHER ONLY when it is actually ready. WRITE stays always-ready —
+     * send is a short synchronous Transmit. READ is relayed only when the
+     * provider's non-blocking recv can return something now
+     * (kl_uefi_socket_recv_ready posts/polls a Receive without pumping) — no more
+     * busy-relay that spun a blocking recv, and the loop is never stalled for a
+     * whole recv (timers fire, other ops interleave). */
     for (int i = 0; i < KL_EFI_MAX_WATCHES && count < max; i++) {
         if (!g_efi.watches[i].in_use) continue;
+        KlEventMask mask = g_efi.watches[i].mask;
+        int ready = 0;
+        if (mask & KL_EVENT_WRITE) ready |= KL_EVENT_WRITE;
+        if ((mask & KL_EVENT_READ) && kl_uefi_socket_recv_ready(g_efi.watches[i].fd))
+            ready |= KL_EVENT_READ;
+        if (ready == 0) continue;   /* nothing ready → don't relay (no spin) */
         for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
         out[count].kind   = KL_COMP_WATCHER;
         out[count].target = g_efi.watches[i].udata;
-        out[count].bytes  = (size_t)g_efi.watches[i].mask;
+        out[count].bytes  = (size_t)ready;
         out[count].ok     = 1;
         count++;
     }

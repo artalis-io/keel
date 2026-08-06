@@ -837,15 +837,26 @@ static void async_handle_receiving(KlClient *c)
             /* A clean TLS shutdown surfaces as read()==-1 (the vtable read contract
              * has no distinct EOF code). Treat it like a socket EOF so a close-
              * delimited response (HTTP/1.0 / Connection: close, no Content-Length)
-             * is finalized rather than reported as KL_ERR_IO. */
+             * is finalized rather than reported as KL_ERR_IO. This is the REAL TLS
+             * EOF signal — finalize here directly (do NOT fall through to the
+             * nread==0 rearm below, which is for the WANT_READ 0 only). */
             if (c->tls && c->tls->at_eof && c->tls->at_eof(c->tls))
-                nread = 0;  /* fall through to EOF finalization */
-            else {
-                async_complete_error(c);
-                return;
-            }
+                goto eof;
+            async_complete_error(c);
+            return;
         }
         if (nread == 0) {
+            if (c->tls) {
+                /* Over TLS, read()==0 means the vtable returned WANT_READ (mbedTLS
+                 * WANT_READ maps to 0), NOT end-of-stream — e.g. a non-blocking recv
+                 * returned would-block mid-record. Re-arm and wait for more ciphertext.
+                 * A real TLS EOF arrives via read()==-1 + at_eof() (handled above),
+                 * never via 0. (Latent bug pre-U-6: masked only because the old EFI
+                 * sync pump never returned WANT_READ.) */
+                kl_watcher_rearm(c->ev_ctx, c->fd);
+                return;
+            }
+        eof:
             if (c->resp.status > 0)
                 async_complete_success(c);
             else {

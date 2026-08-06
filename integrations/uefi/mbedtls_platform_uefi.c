@@ -29,8 +29,11 @@
 #include <stdio.h>                  /* FILE, fopen/... prototypes (local shim) */
 #include <ws2tcpip.h>               /* socklen_t (local shim) for inet_ntop */
 
-/* ── (c) errno global (referenced by tls_mbedtls.c's BIO; never read on EFI) ─── */
-int errno;
+/* ── (c) errno global ────────────────────────────────────────────────────────
+ * MOVED to u1_link_stubs.c (linked by U-3/U-4/U-5): the EFI socket provider now
+ * WRITES errno=EAGAIN/EIO on its would-block/error -1 returns (U-6), which the
+ * plaintext U-3/U-5 builds — that do NOT link this TU — reference too. Defining
+ * it in the shared u1_link_stubs.c gives exactly one `errno` per link set. */
 
 /* ── (c) inert <stdio.h> FILE ops ───────────────────────────────────────────
  * tls_mbedtls.c's read_file (file-based cert loader) references these. U-4 uses the

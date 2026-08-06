@@ -16,6 +16,27 @@
 #include "allocator_uefi.h"           /* kl_uefi_allocator */
 #include "../../src/socket.h"         /* KL_SOCK_CAP_OVERLAPPED (internal cap bit) */
 
+/* ── errno (WRITE-only) ──────────────────────────────────────────────────────
+ * U-6 makes recv non-blocking; the mbedTLS BIO (tls_mbedtls.c) detects a
+ * would-block by reading errno==EAGAIN, so the provider MUST set it on the
+ * would-block/error -1 paths (matching the lwip provider contract). We only
+ * WRITE errno here; the definition lives in u1_link_stubs.c (linked by every
+ * U-3/U-4/U-5 build). No libc errno.h — the freestanding shim may lack it —
+ * so declare the global + the two codes locally. */
+extern int errno;
+#ifndef EAGAIN
+#define EAGAIN 11
+#endif
+#ifndef EIO
+#define EIO 5
+#endif
+
+/* Provider-owned receive buffer: big enough to usually hold a whole TCP segment
+ * so a single posted Receive satisfies most recv() calls (U-6). */
+#ifndef KL_EFI_RXBUF
+#define KL_EFI_RXBUF 8192
+#endif
+
 /* ── EFI_TCP4_PROTOCOL_GUID / ServiceBinding GUID (file-scope, mutable per the
  * EFI ABI which takes EFI_GUID* non-const) ─────────────────────────────────────── */
 static EFI_GUID g_tcp4_sb_guid = EFI_TCP4_SERVICE_BINDING_PROTOCOL_GUID;
@@ -75,6 +96,23 @@ typedef struct KlUefiConn {
     int                   dead;         /* closed / torn down — no further I/O */
 
     EFI_STATUS            last_status;  /* most-recent op's raw EFI_STATUS (io_status) */
+
+    /* ── U-6 non-blocking receive state ──────────────────────────────────────
+     * A Receive token posted into rx_buf is polled (not pumped) by
+     * kl_uefi_socket_recv_ready; efi_sock_recv drains rx_buf without blocking.
+     *   rx_posted  — a Receive token is outstanding (awaiting completion)
+     *   rx_ready   — rx_buf holds [rx_off,rx_len) unconsumed bytes
+     *   rx_eof     — peer sent FIN (orderly EOF, sticky)
+     *   rx_err     — a fatal receive error latched (rx_err_status carries it)
+     */
+    int                       rx_posted;
+    int                       rx_ready;
+    int                       rx_eof;
+    EFI_STATUS                rx_err;      /* latched fatal status (0 == none) */
+    size_t                    rx_len;      /* bytes in rx_buf */
+    size_t                    rx_off;      /* consume cursor into rx_buf */
+    EFI_TCP4_RECEIVE_DATA     rx_data;     /* the posted Receive's descriptor */
+    unsigned char             rx_buf[KL_EFI_RXBUF];
 
     KlAllocator           alloc;        /* by-value copy of the provider's allocator */
 } KlUefiConn;
@@ -424,6 +462,15 @@ int kl_uefi_socket_connect_now(KlSocketHandle fd) {
     return 0;
 }
 
+/* Classify a send-path EFI_STATUS into a POSIX-ish errno for the mbedTLS BIO:
+ * WOULD_BLOCK-class (NOT_READY/TIMEOUT/NO_MAPPING) → EAGAIN, else EIO. */
+static int send_errno(EFI_STATUS st) {
+    switch (kl_efi_status_to_io(st)) {
+        case KL_IO_WOULD_BLOCK: return EAGAIN;
+        default:                return EIO;
+    }
+}
+
 /*
  * send(): Transmit one fragment + pump. Returns bytes accepted (== len on success),
  * or -1 with last_status set. Mirrors lwr_sock_send: the emulated-readiness data
@@ -433,8 +480,8 @@ int kl_uefi_socket_connect_now(KlSocketHandle fd) {
 static kl_ssize_t efi_sock_send(void *cx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)cx;
     KlUefiConn *c = conn_of(fd);
-    if (!c || c->dead) return -1;
-    if (!c->connected) { c->last_status = EFI_NOT_READY; return -1; }  /* connect first */
+    if (!c || c->dead) { errno = EIO; return -1; }
+    if (!c->connected) { c->last_status = EFI_NOT_READY; errno = EAGAIN; return -1; }  /* connect first */
     if (len == 0) { c->last_status = EFI_SUCCESS; return 0; }
     /* EFI_TCP4 DataLength / FragmentLength are UINT32 — bound the single fragment. */
     if (len > 0xFFFFFFFFu) len = 0xFFFFFFFFu;
@@ -452,52 +499,140 @@ static kl_ssize_t efi_sock_send(void *cx, KlSocketHandle fd, const void *buf, si
     c->tx_tok.CompletionToken.Status = EFI_NOT_READY;
 
     EFI_STATUS st = tcp->Transmit(tcp, &c->tx_tok);
-    if (EFI_ERROR(st)) { c->last_status = st; return -1; }   /* NOT_READY → would-block */
+    if (EFI_ERROR(st)) { c->last_status = st; errno = send_errno(st); return -1; }
     if (!pump_until(c, c->tx_tok.CompletionToken.Event)) {
         c->last_status = EFI_TIMEOUT;
+        errno = EAGAIN;   /* pump deadline == retry, not fatal (WOULD_BLOCK class) */
         return -1;
     }
     st = c->tx_tok.CompletionToken.Status;
     c->last_status = st;
-    if (EFI_ERROR(st)) return -1;
+    if (EFI_ERROR(st)) { errno = send_errno(st); return -1; }
     return (kl_ssize_t)len;
 }
 
 /*
- * recv(): Receive one buffer + pump. Returns bytes (>0), 0 on FIN (EOF), or -1 with
- * last_status set (EFI_NOT_READY → would-block). Mirrors lwr_sock_recv.
+ * kl_uefi_socket_recv_ready — the U-6 non-blocking READ-readiness probe the
+ * completion drain calls. Returns 1 iff recv() can return something now
+ * (buffered data, EOF, or a latched error), 0 if still pending. Never pumps.
+ *
+ * State machine (per KlUefiConn):
+ *   - Already have unconsumed buffered data / EOF / error  → 1 immediately.
+ *   - No Receive posted → post one into rx_buf. If Receive() returns
+ *     EFI_CONNECTION_FIN synchronously, latch rx_eof → 1; another error →
+ *     latch rx_err → 1; success → rx_posted=1 (token outstanding).
+ *   - A Receive is outstanding → Poll() once + CheckEvent(rx_tok):
+ *       not signaled → 0 (still pending);
+ *       signaled     → rx_posted=0, read rx_tok.Status:
+ *                        FIN   → rx_eof=1 → 1
+ *                        error → rx_err=status → 1
+ *                        else  → rx_len=rx_data.DataLength, rx_off=0,
+ *                                rx_ready=1 → 1.
+ */
+int kl_uefi_socket_recv_ready(KlSocketHandle fd) {
+    KlUefiConn *c = conn_of(fd);
+    if (!c || c->dead) return 0;
+
+    /* Anything already available to hand back? */
+    if ((c->rx_ready && c->rx_off < c->rx_len) || c->rx_eof || c->rx_err)
+        return 1;
+    /* rx_ready but fully drained — clear the stale flag before deciding. */
+    if (c->rx_ready && c->rx_off >= c->rx_len) c->rx_ready = 0;
+
+    if (!c->connected) return 0;   /* nothing to receive before connect */
+
+    EFI_TCP4_PROTOCOL *tcp = c->tcp;
+
+    if (!c->rx_posted) {
+        /* Post a Receive into the provider-owned buffer. */
+        EFI_TCP4_RECEIVE_DATA *rx = &c->rx_data;
+        { unsigned char *p = (unsigned char *)rx; for (size_t i = 0; i < sizeof(*rx); i++) p[i] = 0; }
+        rx->DataLength = (UINT32)KL_EFI_RXBUF;
+        rx->FragmentCount = 1;
+        rx->FragmentTable[0].FragmentLength = (UINT32)KL_EFI_RXBUF;
+        rx->FragmentTable[0].FragmentBuffer = c->rx_buf;
+
+        c->rx_tok.Packet.RxData = rx;
+        c->rx_tok.CompletionToken.Status = EFI_NOT_READY;
+        EFI_STATUS st = tcp->Receive(tcp, &c->rx_tok);
+        if (st == EFI_CONNECTION_FIN) { c->rx_eof = 1; c->last_status = st; return 1; }
+        if (EFI_ERROR(st)) { c->rx_err = st; c->last_status = st; return 1; }
+        c->rx_posted = 1;
+    }
+
+    /* Poll the stack once and test the outstanding Receive token — no pump. */
+    tcp->Poll(tcp);
+    if (c->bs->CheckEvent(c->rx_tok.CompletionToken.Event) != EFI_SUCCESS)
+        return 0;   /* still pending */
+
+    c->rx_posted = 0;
+    EFI_STATUS st = c->rx_tok.CompletionToken.Status;
+    c->last_status = st;
+    if (st == EFI_CONNECTION_FIN) { c->rx_eof = 1; return 1; }
+    if (EFI_ERROR(st)) { c->rx_err = st; return 1; }
+    c->rx_len = (size_t)c->rx_data.DataLength;
+    c->rx_off = 0;
+    c->rx_ready = 1;
+    return 1;
+}
+
+/* Copy up to @len buffered bytes out of rx_buf into @dst (byte loop, no libc
+ * memcpy), advancing rx_off; clears rx_ready when the buffer is drained. */
+static kl_ssize_t rx_consume(KlUefiConn *c, void *dst, size_t len) {
+    size_t avail = c->rx_len - c->rx_off;
+    size_t n = len < avail ? len : avail;
+    unsigned char *d = (unsigned char *)dst;
+    for (size_t i = 0; i < n; i++) d[i] = c->rx_buf[c->rx_off + i];
+    c->rx_off += n;
+    if (c->rx_off >= c->rx_len) { c->rx_ready = 0; c->rx_len = c->rx_off = 0; }
+    c->last_status = EFI_SUCCESS;
+    return (kl_ssize_t)n;
+}
+
+/*
+ * recv(): NON-BLOCKING (U-6). Serves buffered data first; otherwise probes
+ * readiness ONCE (kl_uefi_socket_recv_ready, which posts + polls a Receive
+ * without pumping). Returns bytes (>0), 0 on FIN (EOF), or -1 would-block/error.
+ * On a would-block -1 sets errno=EAGAIN (mbedTLS BIO would-block detection); on a
+ * fatal error -1 sets errno=EIO. NO internal pump loop — the drain drives it.
  */
 static kl_ssize_t efi_sock_recv(void *cx, KlSocketHandle fd, void *buf, size_t len) {
     (void)cx;
     KlUefiConn *c = conn_of(fd);
-    if (!c || c->dead) return -1;
-    if (!c->connected) { c->last_status = EFI_NOT_READY; return -1; }
+    if (!c || c->dead) { if (c) c->last_status = EFI_INVALID_PARAMETER; errno = EIO; return -1; }
+    if (!c->connected) { c->last_status = EFI_NOT_READY; errno = EAGAIN; return -1; }
     if (len == 0) { c->last_status = EFI_SUCCESS; return 0; }
-    if (len > 0xFFFFFFFFu) len = 0xFFFFFFFFu;
 
-    EFI_TCP4_RECEIVE_DATA rx;
-    { unsigned char *p = (unsigned char *)&rx; for (size_t i = 0; i < sizeof(rx); i++) p[i] = 0; }
-    rx.DataLength = (UINT32)len;
-    rx.FragmentCount = 1;
-    rx.FragmentTable[0].FragmentLength = (UINT32)len;
-    rx.FragmentTable[0].FragmentBuffer = buf;
+    /* 1. Buffered data from an earlier posted Receive. */
+    if (c->rx_ready && c->rx_off < c->rx_len)
+        return rx_consume(c, buf, len);
 
-    EFI_TCP4_PROTOCOL *tcp = c->tcp;
-    c->rx_tok.Packet.RxData = &rx;
-    c->rx_tok.CompletionToken.Status = EFI_NOT_READY;
-
-    EFI_STATUS st = tcp->Receive(tcp, &c->rx_tok);
-    if (st == EFI_CONNECTION_FIN) { c->last_status = st; return 0; }  /* EOF at submit */
-    if (EFI_ERROR(st)) { c->last_status = st; return -1; }
-    if (!pump_until(c, c->rx_tok.CompletionToken.Event)) {
-        c->last_status = EFI_TIMEOUT;
+    /* 2. Sticky EOF / latched error. */
+    if (c->rx_eof) { c->last_status = EFI_CONNECTION_FIN; return 0; }
+    if (c->rx_err) {
+        c->last_status = c->rx_err;
+        c->rx_err = EFI_SUCCESS;   /* consume the latch */
+        errno = EIO;
         return -1;
     }
-    st = c->rx_tok.CompletionToken.Status;
-    c->last_status = st;
-    if (st == EFI_CONNECTION_FIN) return 0;   /* orderly EOF */
-    if (EFI_ERROR(st)) return -1;
-    return (kl_ssize_t)rx.DataLength;
+
+    /* 3. Probe once (posts/polls a Receive, no pump). */
+    if (kl_uefi_socket_recv_ready(fd)) {
+        if (c->rx_ready && c->rx_off < c->rx_len)
+            return rx_consume(c, buf, len);
+        if (c->rx_eof) { c->last_status = EFI_CONNECTION_FIN; return 0; }
+        if (c->rx_err) {
+            c->last_status = c->rx_err;
+            c->rx_err = EFI_SUCCESS;
+            errno = EIO;
+            return -1;
+        }
+    }
+
+    /* 4. Still pending → would-block. */
+    c->last_status = EFI_NOT_READY;
+    errno = EAGAIN;
+    return -1;
 }
 
 /*
