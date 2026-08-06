@@ -8,6 +8,7 @@
 
 #include "event_efi.h"
 #include "socket_efi_tcp4.h"          /* kl_uefi_socket_provider + async-connect prims */
+#include "platform_uefi.h"            /* kl_uefi_after_ebs (F3 boot-services guard) */
 
 #include <keel/event.h>
 #include <keel/sockaddr.h>
@@ -157,6 +158,9 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
  * keeps ticking without a 100%-CPU spin. */
 static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     (void)ctx; (void)timeout_ms;
+    /* F3: once boot services are gone, the EFI_TCP4 Poll/CheckEvent/connect_poll paths
+     * are all invalid — stop driving the loop (fail-closed, no firmware calls). */
+    if (kl_uefi_after_ebs()) return 0;
     int count = 0;
 
     /* Connect completions — one terminal edge each, then retire the op. */

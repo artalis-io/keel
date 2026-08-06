@@ -53,17 +53,38 @@ Status: **feasibility / design (2026-08-05).**
 >   *server*). Coordinated fixes kept TLS working over a would-block-mid-record: `errno=EAGAIN` on the
 >   provider's would-block, and an additive `client_async.c` fix (a TLS `read()==0` is WANT_READ, not
 >   EOF; real EOF is `-1`+`at_eof`).
-> - **U-7** (#222) — **ExitBootServices lifetime**: `kl_uefi_shutdown()` releases the whole stack
->   (socket → event → platform timer/EBS event); an `EVT_SIGNAL_EXIT_BOOT_SERVICES` notify fail-closes
->   the providers after EBS. Teardown proven observably — the monotonic clock freezes once its timer is
->   released.
+> - **U-7** (#222) — **ExitBootServices pre-EBS teardown**: `kl_uefi_shutdown()` releases the whole
+>   stack (socket → event → platform timer/EBS event); an `EVT_SIGNAL_EXIT_BOOT_SERVICES` notify sets
+>   `after_ebs`. Orderly-teardown proven observably (the monotonic clock freezes once its timer is
+>   released).
 >
-> **F-8 IS COMPLETE. The EFI network client is functionally complete AND lifetime-clean on bare
-> firmware: plaintext + HTTPS (CA-verified, real EFI_RNG) + DNS, non-blocking recv, boot-services-
-> correct teardown.** Beyond F-8 (future, out of the client scope): an EFI *server* (needs a
-> freestanding server archive — a separate effort; U-6's non-blocking recv is its prerequisite),
-> EFI_TCP6/IPv6, firmware `EFI_DNS4` (vs the U-5 raw resolver), and completion-mode TLS for a
-> fully-async HTTPS server.
+> **STATUS — the HAPPY PATH is proven; the FAILURE PATHS are being hardened (2026-08-06).** An
+> external adversarial-lifecycle review found real **EFI token-lifetime** bugs that QEMU happy-path
+> runs (and the happy-path-focused audits) did not expose. **F-8 is NOT production-ready yet.** The
+> EFI client is *functional* on bare firmware — plaintext + HTTPS (CA + hostname verified, but see
+> below) + DNS, non-blocking recv, orderly pre-EBS teardown — but the following are open and tracked
+> in the **F-8 hardening** pass (`docs/keel_axis_audit.md` / `docs/keel_audit.md` newest passes):
+>   1. *(Critical)* a timed-out `Transmit`/`Connect`/DNS token was returned WITHOUT `Cancel`+drain —
+>      the firmware could still reference caller/stack storage. Every submitted token needs one
+>      terminal path (completion **or** `Cancel`→drain-to-`EFI_ABORTED`).
+>   2. *(Critical)* `close()` did not cancel+drain outstanding connect/recv/tx tokens (esp. the
+>      normally-posted U-6 Receive) before freeing.
+>   3. *(High)* the EBS fail-closed guard covered new-socket creation but NOT continued use of
+>      existing connections (drain/send/recv still called Boot Services after EBS); the U-7 test
+>      exercised orderly shutdown, not a real post-EBS transition.
+>   4. *(High)* the reusable `mbedtls_hardware_poll` still returned weak counter/pointer entropy when
+>      EFI_RNG was absent instead of failing closed (only the self-test's separate check gated it).
+>   5. *(Medium)* "production TLS" verifies CA chain + hostname but, with `MBEDTLS_HAVE_TIME` off,
+>      does **not** reject expired / not-yet-valid certs — it is "CA + hostname verified, without
+>      certificate-time validation," not fully production TLS. (EFI `GetTime` is the path.)
+>   6. *(Medium)* the connect stale-guard dereferenced the (possibly-freed) `KlUefiConn` to read its
+>      magic/generation — a UAF; fix via provider-owned stable slots/IDs.
+>   7. host-side **mock-EFI failure-path tests** (timeout→close, cancel-racing-completion, post-EBS,
+>      entropy-unavailable, …) are needed — QEMU happy-path cannot expose these. (Also: the
+>      host-map-test link regressed on `kl_uefi_after_ebs`.)
+>
+> Beyond F-8 (future): an EFI *server* (needs a freestanding server archive; U-6's non-blocking recv
+> is its prerequisite), EFI_TCP6/IPv6, firmware `EFI_DNS4`, completion-mode TLS.
 This is the roadmap's real **Phase 10** (`docs/pal_transformation_design.md`, phase table) —
 UEFI feasibility + an optional prototype. It is *not* the lwIP-raw client work in
 `docs/phase10_lwip_raw_client_design.md` (that doc uses a local "Phase 10" label but is the
@@ -305,14 +326,17 @@ switch (`EFI_TCP6`).
 | Combination | Status |
 |-------------|--------|
 | EFI_TCP4 + EFI completion loop (client, plaintext) | **PROVEN — `KlClient GET → 200` in QEMU/OVMF (U-3, #215)** |
-| EFI_TCP4 + EFI completion loop (client, HTTPS) | **PROVEN — freestanding mbedTLS `GET → 200` in QEMU/OVMF (U-4, #216); verify-none + weak-entropy spike** |
+| EFI_TCP4 + EFI completion loop (client, HTTPS) | **HAPPY PATH PROVEN — freestanding mbedTLS `GET → 200` in QEMU/OVMF (U-4, #216). Prod mode = CA + hostname verified, real EFI_RNG — but NO cert-time validation (`HAVE_TIME` off) and the reusable entropy adapter was not fail-closed (F-8 hardening).** |
 | EFI_UDP4 DNS (A-query resolve) | **PROVEN — `resolve keel.test → GET → 200` in QEMU/OVMF (U-5, #219); bounds-safe parse, sync** |
 | EFI_TCP4 + EFI completion loop (server) | *stretch; deferred (client-first)* |
 | Host EFI_TCP4 **mock** + completion driver (ASan gate) | **PROVEN — F-7 harness 57/57 (mock socket + completion provider)** |
 | IPv6 (`EFI_TCP6`) | *out of first cut (family switch)* |
 
 Nothing is marked production-ready by existence — only by a passing gate, per the axis-audit
-decision standard.
+decision standard. **"PROVEN" above means the HAPPY PATH is demonstrated in QEMU/OVMF.** The
+adversarial FAILURE paths (token-timeout Cancel+drain, close-with-outstanding, post-EBS use,
+entropy-unavailable, cert-time) are NOT yet gated — see the STATUS banner at the top; F-8 is not
+production-ready until those are fixed and covered by host-side mock-EFI failure-path tests.
 
 ---
 

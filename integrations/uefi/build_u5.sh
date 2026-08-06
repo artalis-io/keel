@@ -21,6 +21,7 @@
 #   KL_U5_HOSTNAME    hostname the client resolves (default keel.test)
 #   KL_U5_NAMESERVER  DNS server the guest queries (default 10.0.2.2)
 set -euo pipefail
+if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then echo "ERROR: this script needs bash 4+ (uses associative arrays); on macOS run: brew install bash, or run it in the container." >&2; exit 3; fi
 cd "$(dirname "$0")"
 
 : "${CC:=clang}"

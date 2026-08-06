@@ -317,7 +317,9 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
 
     kl_client_free(c);
-    kl_tls_mbedtls_ctx_destroy(tctx);
+    kl_tls_mbedtls_ctx_destroy(tctx);   /* destroy every TLS object FIRST ... */
+    kl_uefi_mbedtls_platform_shutdown();/* F5: ... then drop the Boot Services heap ptr so
+                                         * no later mbedTLS calloc/free can touch firmware */
     kl_event_ctx_free(&ev);
 
     if (d.done && d.status == 200)

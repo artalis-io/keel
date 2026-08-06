@@ -1,5 +1,63 @@
 # KEEL Networking Architecture Axis Audit
 
+## Ninth pass — the UEFI completion provider validates the operation-lifetime contract (2026-08-06)
+
+**Verdict: architecturally sound — and the F-8 hardening is a direct, positive stress-test of
+the completion axis's *operation-lifetime* contract (Goals 6 & 10).** The EFI provider is a
+completion-native backend of exactly the shape the axis model anticipates (`event_efi.c` posts
+EFI tokens ≈ SQEs/OVERLAPPEDs; `socket_efi_tcp4.c` is the socket axis; the protocol layer above
+is unchanged and platform-blind). No axis-separation regressions; the review found real *lifetime*
+bugs in the new provider — precisely the class Goal 6 ("operation ownership and lifetime correct —
+completion makes these dangerous: close-while-outstanding, cancellation, timeout races, stale
+completion after handle reuse, UAF/double-free") and Goal 10 ("cancel racing completion → exactly-
+one terminal result") name — and they are now fixed and host-test-covered.
+
+### What this pass confirms about the axes
+
+1. **Protocol layer stayed above both axes (Goal 4).** None of U1–U8 required a change above the
+   socket/completion seam. The `KlClient` HTTP path, the parser, and the DNS `KlResolver` consumer
+   are byte-identical to the POSIX build; the fixes live entirely in the EFI socket provider + its
+   completion backend + the mbedTLS platform TU. A completion provider's token-lifetime bug did not
+   leak upward — the abstraction held.
+
+2. **The completion lifetime contract is now honored by a third backend (Goal 6/10).** io_uring and
+   IOCP already encode "every submitted op reaches exactly one terminal state (completion or
+   cancel→drain) before its buffers/state are freed." The EFI provider originally violated this on
+   the *failed-cancel* edge (a token that refuses to drain was freed anyway). The **quarantine
+   model** — stable provider-owned slot storage (`static KlUefiConn g_conns[]`) that is never
+   reclaimed once a token cannot be confirmed retired — is the EFI-specific realization of the same
+   contract, mirroring io_uring's cancel-sentinel discipline. Explicit per-token state
+   (`conn_posted`/`tx_posted`/`rx_posted`/`close_posted`) is the registration-vs-submission
+   distinction (Goal 12) made concrete: each flag is one in-flight submission, set on submit,
+   cleared on the observed terminal.
+
+3. **Close-with-outstanding-work is correct under the completion model (Goal 6, required trace).**
+   `efi_sock_close` now cancels, drains **only** posted tokens, and — critically — if any drain
+   fails, quarantines instead of tearing down. This is the EFI analogue of the io_uring
+   close-with-pending-CQE path, and it fixed a real ~60 s stall rooted in `CheckEvent` consuming the
+   signal (a completion-delivery honesty issue, Goal 2: readiness/completion semantics represented
+   honestly — the code must not treat a consumed event as still-signalled).
+
+4. **Error normalization + bounds at the seam (Goal 9, security).** The impossible-`DataLength`
+   validation (U4) is the completion-axis instance of "platform error/length values treated as byte
+   counts" — a completion event's reported length is untrusted and now bounds-checked against
+   `KL_EFI_RXBUF` before any copy.
+
+5. **Backend selection / post-EBS fail-closed (Goal 13).** ExitBootServices is the EFI equivalent of
+   "the event engine went away." The provider now fails closed on every data-path + heap entry after
+   EBS (`kl_uefi_after_ebs()`), so no post-teardown firmware call is made — the selected backend's
+   unavailability is observable and safe, never a silent partial.
+
+**Method:** the same 13-scenario host mock-EFI harness (`mock_efi_test.c`) that drives the C-audit
+pass exercises these axis paths directly — cancel-succeeds/fails/races, close-with-outstanding-
+receive, consumed-connect-event-during-close, post-EBS — under ASan+UBSan. See the eleventh C-audit
+pass for the finding table.
+
+**Compatibility-matrix delta:** `EFI_TCP4 + EFI completion backend` moves from *buildable/
+happy-path-tested* to *failure-path host-tested* (cancel/close/timeout/post-EBS). Still **not**
+production-ready: TLS lacks certificate validity-time enforcement (no clock wired). No change to the
+POSIX/io_uring/IOCP/pollcomp rows.
+
 ## Eighth pass — the freestanding portability phase strengthens all three axes (2026-08-05)
 
 **Verdict: architecturally sound — every change in the freestanding phase (PRs #199–#211) either

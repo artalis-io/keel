@@ -22,6 +22,7 @@
 #   TARGET_PORT  responder port compiled into the URL (default 18443)
 #   TARGET_HOST  responder host compiled into the URL (default 10.0.2.2)
 set -euo pipefail
+if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then echo "ERROR: this script needs bash 4+ (uses associative arrays); on macOS run: brew install bash, or run it in the container." >&2; exit 3; fi
 cd "$(dirname "$0")"
 
 : "${CC:=clang}"
@@ -89,12 +90,25 @@ for src in "$MBEDTLS_SRC"/library/*.c; do
 done
 echo "  compiled $(ls mbedtls_obj/*.obj | wc -l) mbedTLS objects"
 
+# F4: entropy policy. SPIKE mode (default: verify-none, no virtio-rng) opts into the
+# INSECURE weak-entropy fallback so the demo can proceed over weak entropy (matching the
+# loud runtime warning). PROD mode (U4_MODE=prod) does NOT define it — it requires real
+# EFI_RNG via virtio-rng, and mbedtls_hardware_poll fails closed without it.
+ENTROPY_DEFS=()
+if [ "${U4_MODE:-spike}" != "prod" ]; then
+  ENTROPY_DEFS=( -DKL_UEFI_INSECURE_TEST_ENTROPY )
+  echo "entropy policy:    INSECURE test fallback (spike; -DKL_UEFI_INSECURE_TEST_ENTROPY)"
+else
+  echo "entropy policy:    FAIL-CLOSED (prod; real EFI_RNG required)"
+fi
+
 # ---- 2. the Keel mbedTLS adapter + U-4 platform TU ----
 # tls_mbedtls.c needs the adapter header + src/ (socket.h) + mbedtls include.
 ADAPTER_CFLAGS=(
   "${BASE_TARGET[@]}"
   -DKEEL_FREESTANDING
   "${MBEDTLS_DEFS[@]}"
+  "${ENTROPY_DEFS[@]}"            # F4: spike → insecure fallback; prod → fail-closed
   -I"$MBEDTLS_ADAPTER"
   -I"$MBEDTLS_SRC/include"
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/src"

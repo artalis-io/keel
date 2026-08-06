@@ -96,6 +96,12 @@ const KlSocketProvider *kl_uefi_socket_provider(EFI_BOOT_SERVICES *bs, EFI_HANDL
  * un-created provider (no-op). */
 void kl_uefi_socket_provider_reset(void);
 
+/* F6: how many connection slots are still LIVE (opened, not yet closed). The lifecycle
+ * contract (lifecycle_uefi.h) is that this MUST be 0 before kl_uefi_shutdown()/
+ * ExitBootServices — every socket the app opened must be closed first. kl_uefi_shutdown()
+ * reads this to detect a contract violation. Pure; reads the stable slot pool. */
+int kl_uefi_socket_provider_live_count(void);
+
 /* ── U-3 async-connect primitives (driven by the EFI completion backend) ────────
  *
  * The completion path (event_efi.c) splits connect into three NON-BLOCKING steps

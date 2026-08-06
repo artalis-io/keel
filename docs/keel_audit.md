@@ -1,5 +1,47 @@
 # C Audit Report: KEEL
 
+## Eleventh pass — Phase 10 UEFI provider failure-path hardening (2026-08-06)
+
+**Scope:** the EFI network provider under `integrations/uefi/` + `spikes/uefi/` (F-8): the
+EFI_TCP4 socket provider (`socket_efi_tcp4.c`), the built-in DNS resolver over EFI_UDP4
+(`dns_uefi.c`), the completion backend (`event_efi.c`), the mbedTLS platform backing
+(`mbedtls_platform_uefi.c`), the lifecycle teardown (`lifecycle_uefi.c`), and the U-4/U-7
+self-tests.
+
+**This is NOT a "clean" pass.** Two rounds of adversarial *lifetime* review found **real,
+release-blocking EFI completion-token bugs** that QEMU happy-path testing (and the happy-path-focused
+earlier passes) never exercised. Every finding below was FOUND, FIXED, and — the load-bearing part —
+**covered by a host mock-EFI harness** (`mock_efi_test.c`, 13 scenarios) that compiles the *real*
+provider TUs against a scriptable fake `EFI_BOOT_SERVICES`/`EFI_TCP4`/`EFI_UDP4` under ASan+UBSan.
+The lesson recorded: **a QEMU happy-path GO ≠ correct**; completion-token providers demand
+adversarial timeout/close/cancel/post-EBS host tests before any "production" claim.
+
+**Method.** Host mock-EFI harness (13 scenarios, ASan+UBSan+LSan, `detect_leaks=1`) — the deliberate
+quarantine "leak" is clean because backing storage is the static `g_conns`/`g_dns_*` pools
+(reachable, not leaked). All touched freestanding TUs cross-compiled `--target=x86_64-unknown-windows
+-ffreestanding -Wall -Wextra -Werror`. Core `make test` green. QEMU U-7 (plaintext send/recv/close
+over real EFI_TCP4) re-run as a happy-path regression guard.
+
+### Findings (all fixed + test-covered)
+
+| # | Severity | File:symbol | Bug | Fix | Test |
+|---|----------|-------------|-----|-----|------|
+| U1 | **Critical** | `socket_efi_tcp4.c` `efi_sock_send`/`efi_sock_close`; `dns_uefi.c` `kl_uefi_dns_resolve` | A **failed** `Cancel`+drain (token never reaches a terminal state) was still followed by ordinary cleanup — `CloseEvent`/`DestroyChild`/`kl_free` — releasing storage the firmware may still write into (UAF / firmware-write-after-free). | **Quarantine model.** On a drain that does not confirm the token retired, set `c->quarantined` (DNS: `g_dns_quarantined`): never `CloseEvent`/`DestroyChild`/reclaim the slot; its **stable, provider-owned** storage (`static KlUefiConn g_conns[]`; `static g_dns_qbuf`/`g_dns_tx`) is deliberately leaked until ExitBootServices. DNS fails closed on every subsequent `resolve`. | `t_cancel_fails_quarantine`, `t_dns_cancel_fails_quarantine` (child NOT destroyed; slot not reused; resolve fails-closed) |
+| U2 | **High** | `socket_efi_tcp4.c` `efi_sock_close` | Close used `configured && !connected` as a proxy for "connect token outstanding"; because `CheckEvent` **consumes** the signal, close could wait ~60 s on an already-consumed event. | **Explicit token-state**: `conn_posted`/`tx_posted`/`close_posted` (+ existing `rx_posted`), set only after a successful submit, cleared only after the terminal event is observed. Close drains **only** flagged tokens. | `t_close_no_spin_on_consumed_connect` (`g_tcp_poll_calls` bounded; the mock models `CheckEvent` de-signalling) |
+| U3 | **High** | `socket_efi_tcp4.c` `efi_sock_close` | Close ignored failed receive/connect cancellation drains (same root as U1 for the non-tx tokens). | Close tracks `drained_ok` across every posted token; `!drained_ok` → quarantine + early return (no teardown). | covered by U1 close paths + `receive pending during close` |
+| U4 | **High** | `socket_efi_tcp4.c` `kl_uefi_socket_recv_ready` | Received `rx_data.DataLength` (and `FragmentTable[0].FragmentLength`) trusted without validating `<= KL_EFI_RXBUF` → OOB read on a malicious/buggy stack. | Validate both against `KL_EFI_RXBUF`; on violation latch `rx_err = EFI_DEVICE_ERROR` and surface a fatal `recv` -1. | `t_bad_rx_length` (recv -1, no OOB under ASan) |
+| U5 | **Medium** | `socket_efi_tcp4.c` `kl_uefi_socket_configure`/`_connect_post`; `mbedtls_platform_uefi.c` heap | Post-EBS coverage incomplete: two data-path entries unguarded; mbedTLS heap retained the Boot Services pointer with no shutdown hook (TLS teardown after EBS could `FreePool` torn-down firmware). | `kl_uefi_after_ebs()` guard on the two entries; `uefi_mbed_calloc`/`_free` fail closed post-EBS; new `kl_uefi_mbedtls_platform_shutdown()` drops `g_bs` — U-4 calls it after destroying every TLS object, before EBS. | `calls after simulated EBS` (zero firmware calls across all entries) |
+| U6 | **Medium** | `socket_efi_tcp4.c` `kl_uefi_socket_provider_reset` | Reset assumed all conns closed and blanket-zeroed the pool — corrupting quarantined/live firmware-owned slots. | Reset no longer zeroes the pool (preserves quarantined + live slots; only already-free slots are reused). New `kl_uefi_socket_provider_live_count()` exposes the "all-closed-before-shutdown" contract; U-7 asserts it observably. | `stale-guard no-UAF` + U-7 live-count line |
+| U7 | **Medium** (load-bearing) | `mock_efi_test.c` (new) | The adversarial host harness itself was missing — the earlier passes could not have caught U1–U6. | Added the 13-scenario mock-EFI harness (cancel succeeds/fails/races, consumed connect event during close, receive outstanding during close, impossible receive length, post-EBS, slot reuse with stale generation). | itself |
+| U8 | Low (tooling) | `build_u{3,4,5,7}.sh` | `declare -A` fails silently on macOS Bash 3. | Explicit `BASH_VERSINFO < 4` guard with a clear error. | n/a |
+
+**Still open (documented, not a regression):** TLS validates CA + hostname but **not** certificate
+validity-time (no clock source wired). Recorded in `docs/phase10_uefi_feasibility_design.md`; F-8 is
+**not** marked production-ready.
+
+**Status:** the happy path is proven end-to-end in QEMU; the failure paths are now hardened and
+host-test-covered under ASan+UBSan. The two originally-Critical token-lifetime findings are closed.
+
 ## Tenth pass — freestanding portability phase (2026-08-05)
 
 **Scope:** the freestanding phase merged since the ninth pass (PRs #199–#210): the allocator split
