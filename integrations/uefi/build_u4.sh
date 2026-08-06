@@ -175,7 +175,7 @@ KEEL_CFLAGS=(
 )
 declare -A EXTRA=( [u1_link_stubs.c]="-DKEEL_UEFI_HAVE_RESOLVE"
                    [u4_selftest.c]="${U4_SELFTEST_DEFS:-}" )
-KEEL_SRCS=( allocator_uefi.c platform_uefi.c civil_time.c wallclock_uefi.c clock_snapshot.c
+KEEL_SRCS=( allocator_uefi.c errno_uefi.c platform_uefi.c civil_time.c wallclock_uefi.c clock_snapshot.c
             socket_efi_tcp4.c event_efi.c resolve_uefi.c u1_link_stubs.c u4_selftest.c )
 for s in "${KEEL_SRCS[@]}"; do
   o="${s%.c}.obj"

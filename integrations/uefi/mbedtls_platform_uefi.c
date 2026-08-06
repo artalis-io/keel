@@ -23,6 +23,7 @@
 
 #include "mbedtls_platform_uefi.h"
 #include "platform_uefi.h"          /* kl_uefi_have_entropy / kl_uefi_have_trustworthy_wallclock */
+#include "clock_snapshot.h"         /* kl_uefi_clock_snapshot[_reset] (cert clock, lifetime) */
 #include "../../src/platform.h"     /* kl_plat_random (freestanding platform hook) */
 
 #include <mbedtls/platform.h>       /* mbedtls_platform_set_calloc_free */
@@ -88,21 +89,21 @@ static void uefi_mbed_free(void *ptr) {
 
 int kl_uefi_mbedtls_platform_init(EFI_BOOT_SERVICES *bs) {
     if (g_bs) return 0;         /* idempotent */
+    if (!bs) return -1;         /* the EFI heap needs a valid Boot Services table */
 
-    /* U-8 clock FAIL-FAST (not the authoritative gate): refuse to bring up the TLS platform if
-     * no trustworthy wall clock is available at all, so an obviously clockless firmware fails
-     * early with a clear signal. The AUTHORITATIVE per-session enforcement is
-     * kl_uefi_clock_snapshot() (clock_snapshot.c), which the app must call before creating each
-     * TLS session and which refuses the session if the clock is untrustworthy at that moment;
-     * mbedtls_time() then reads that snapshot, never GetTime. This early check is platform-global
-     * bring-up, NOT a per-handshake chokepoint. (kl_uefi_platform_init must run first so Runtime
-     * Services GetTime is available.) */
-    if (!kl_uefi_have_trustworthy_wallclock())
+    /* U-8 clock gate + capture (fail-closed, enforced HERE so it never depends on application
+     * choreography): validate + snapshot UTC once, for the whole TLS-platform lifetime. If the
+     * clock is untrustworthy, TLS platform init FAILS → no KlTlsCtx can be created. mbedtls_time()
+     * then reads this one snapshot (monotonic-advanced), never GetTime, and it is never refreshed
+     * while TLS is active — concurrency-safe across interleaved sessions and immune to a later
+     * GetTime failure. (kl_uefi_platform_init must run first so Runtime Services GetTime exists.) */
+    if (kl_uefi_clock_snapshot() != 0)
         return -1;
 
     g_bs = bs;
     if (mbedtls_platform_set_calloc_free(uefi_mbed_calloc, uefi_mbed_free) != 0) {
         g_bs = NULL;
+        kl_uefi_clock_snapshot_reset();   /* roll back the snapshot — init did not complete */
         return -1;
     }
     /* The cert-validity clock (Runtime Services GetTime, fail-closed) is bound at compile time
@@ -117,6 +118,7 @@ void kl_uefi_mbedtls_platform_shutdown(void) {
      * and uefi_mbed_free is a no-op. Call from the app's shutdown path AFTER every
      * KlTlsCtx/KlTls has been destroyed and BEFORE ExitBootServices. Idempotent. */
     g_bs = NULL;
+    kl_uefi_clock_snapshot_reset();   /* U-8: clear the cert-clock snapshot (lifetime ends here) */
 }
 
 /* mbedTLS's platform.c initializes its default heap function pointers to `calloc`

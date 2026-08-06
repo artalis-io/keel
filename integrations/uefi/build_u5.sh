@@ -62,7 +62,7 @@ CFLAGS=(
 # favor of resolve_uefi.c's (which now has the DNS path).
 declare -A EXTRA=( [u1_link_stubs.c]="-DKEEL_UEFI_HAVE_RESOLVE" )
 
-SRCS=( allocator_uefi.c platform_uefi.c civil_time.c wallclock_uefi.c socket_efi_tcp4.c event_efi.c
+SRCS=( allocator_uefi.c errno_uefi.c platform_uefi.c civil_time.c wallclock_uefi.c socket_efi_tcp4.c event_efi.c
        dns_uefi.c resolve_uefi.c u1_link_stubs.c u5_selftest.c )
 OBJS=()
 for s in "${SRCS[@]}"; do

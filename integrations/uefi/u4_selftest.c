@@ -35,7 +35,6 @@
 
 #include "efi_uefi.h"
 #include "platform_uefi.h"
-#include "clock_snapshot.h"       /* kl_uefi_clock_snapshot (per-session U-8 clock gate) */
 #include "mbedtls_platform_uefi.h"
 #include "socket_efi_tcp4.h"
 #include "event_efi.h"
@@ -200,19 +199,22 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("U-4: *** SPIKE: TLS verify-none (self-signed server, no CA check) ***");
 #endif
 
-    if (kl_uefi_platform_init(bs, st) != 0)
-        print_line("U-4: (warn) platform_init failed — clock stuck, continuing");
-
-    /* U-8 clock gate: TLS refuses to initialise without a trustworthy wall clock, so cert
-     * validity-time can actually be enforced. Report that case distinctly (it is the
-     * fail-closed path exercised by run_u4.sh U4_CLOCK=bad, independent of cert dates). */
-    if (!kl_uefi_have_trustworthy_wallclock()) {
-        print_line("U-4: no trustworthy wall clock (EFI GetTime) — TLS refused (fail-closed)");
-        print_line("U-4: NO-GO-YET (untrustworthy clock; cert validity-time cannot be enforced)");
+    /* FATAL, not a warning: a failed platform_init means the monotonic timer is not armed, so the
+     * TLS cert clock would be frozen (accepting expired certs). platform_init tears its state down
+     * on failure, so TLS bring-up would refuse anyway — stop here with a clear signal. */
+    if (kl_uefi_platform_init(bs, st) != 0) {
+        print_line("U-4: platform_init FAILED (monotonic clock unavailable) — cannot run TLS");
+        print_line("U-4: NO-GO-YET (no monotonic clock; cert validity-time cannot advance)");
         goto park;
     }
+
+    /* U-8: the cert-clock gate is INSIDE kl_uefi_mbedtls_platform_init() — it validates + snapshots
+     * the wall clock and FAILS if the clock is untrustworthy, so TLS cannot come up without one and
+     * the app cannot bypass it. We deliberately do NOT pre-check the clock here: run_u4.sh
+     * U4_CLOCK=bad must reach this mandatory gate to prove it rejects the bad clock. */
     if (kl_uefi_mbedtls_platform_init(bs) != 0) {
-        print_line("U-4: mbedtls platform init failed (clock gate or calloc/free registration)");
+        print_line("U-4: mbedtls platform init FAILED — untrustworthy wall clock or heap registration");
+        print_line("U-4: NO-GO-YET (TLS refused: cert validity-time cannot be enforced)");
         goto park;
     }
     if (!kl_uefi_have_entropy()) {
@@ -241,16 +243,9 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
     print_line("U-4: event ctx up (efi-tcp4-completion)");
 
-    /* U-8 per-session clock gate: capture + validate UTC ONCE, before creating the TLS session.
-     * mbedtls_time() then reads this snapshot (advanced by the monotonic clock) during the
-     * handshake — GetTime is never consulted mid-verification. Refuse the session if the clock
-     * is untrustworthy NOW (fail-closed, independent of any certificate's dates). */
-    if (kl_uefi_clock_snapshot() != 0) {
-        print_line("U-4: no trustworthy wall clock at session start — TLS refused (fail-closed)");
-        print_line("U-4: NO-GO-YET (untrustworthy clock; cert validity-time cannot be enforced)");
-        kl_event_ctx_free(&ev);
-        goto park;
-    }
+    /* U-8: the cert-clock snapshot + fail-closed gate were already taken INSIDE
+     * kl_uefi_mbedtls_platform_init() above (no per-session choreography); mbedtls_time() reads
+     * that lifetime snapshot during the handshake, never GetTime. Nothing to do here. */
 
 #ifdef KL_U4_PROD
     /* Production: verify-REQUIRED against the embedded CA (the responder's self-signed

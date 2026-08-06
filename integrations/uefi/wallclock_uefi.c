@@ -13,7 +13,9 @@ void kl_uefi_set_unspecified_tz(int minutes) { g_unspec_tz_min = minutes; g_unsp
 void kl_uefi_clear_unspecified_tz(void)      { g_unspec_tz_min = 0;       g_unspec_tz_set = 0; }
 
 int kl_uefi_wallclock_from_efi(int gettime_ok, const EFI_TIME *t, int64_t *out_unix) {
-    if (!gettime_ok) return -1;
+    /* Defensive: a reusable API must not dereference NULL, and its contract is to PRODUCE a
+     * result — reject a NULL out rather than reporting success without one. */
+    if (!gettime_ok || !t || !out_unix) return -1;
 
     KlCivil c = { (int)t->Year, (int)t->Month, (int)t->Day,
                   (int)t->Hour, (int)t->Minute, (int)t->Second };

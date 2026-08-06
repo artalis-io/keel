@@ -34,6 +34,12 @@
  */
 int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st);
 
+/* 1 iff kl_uefi_platform_init() FULLY succeeded (the periodic monotonic timer is armed, so
+ * kl_monotonic_ms advances). 0 after a failed or not-yet-run init — in which case the module
+ * has torn down its installed state (GetTime unreachable), so the TLS cert clock (a snapshot
+ * advanced by the monotonic tick) cannot be captured and TLS bring-up refuses. */
+int kl_uefi_platform_ready(void);
+
 /* Optional bring-up aid: route kl_uefi_platform_init's step trace to @out (a
  * console). Pass NULL to silence. Call before kl_uefi_platform_init. */
 void kl_uefi_platform_trace(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out);

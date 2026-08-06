@@ -50,17 +50,20 @@
 #define MBEDTLS_ENTROPY_HARDWARE_ALT
 
 /* ── Certificate validity-time (U-8) ────────────────────────────────────────
- * Enforce notBefore/notAfter. There is no libc wall clock, so mbedtls_time is a compile-
- * time MACRO bound to our time_uefi.c function (kl_uefi_mbedtls_time over Runtime Services
- * GetTime, fail-closed on an untrustworthy RTC), and mbedtls_platform_gmtime_r is our ALT
- * (time_uefi.c). `mbedtls_time_t` and `struct tm` come from the freestanding shim's
- * <time.h> (time_t = long long). We use TIME_MACRO rather than PLATFORM_TIME_ALT because
- * ALT makes platform.c define a runtime pointer defaulting to libc `time`, which does not
- * exist freestanding; the MACRO form compiles no platform.c time code at all. Without a
- * trustworthy clock the time fn returns epoch 0, so every real cert fails notBefore —
- * HTTPS is fail-closed. The prototype below must be visible to every mbedTLS TU that
- * expands the macro (this config is included first). */
-long long kl_uefi_mbedtls_time(long long *t);   /* time_uefi.c; mbedtls_time_t == long long */
+ * Enforce notBefore/notAfter. There is no libc wall clock, so mbedtls_time is a compile-time
+ * MACRO bound to kl_uefi_mbedtls_time (clock_snapshot.c). That returns ONE TLS-platform-lifetime
+ * UTC snapshot — captured + validated once INSIDE kl_uefi_mbedtls_platform_init(), shared by all
+ * sessions, advanced by the monotonic clock, never refreshed while TLS is active, cleared at
+ * platform shutdown. It NEVER calls GetTime from the verification callback (so a later GetTime
+ * failure cannot affect verification, and concurrent sessions share one basis). mbedtls_platform_
+ * gmtime_r is our ALT (time_uefi.c). `mbedtls_time_t`/`struct tm` come from the freestanding
+ * shim's <time.h> (time_t = long long). We use TIME_MACRO rather than PLATFORM_TIME_ALT because
+ * ALT makes platform.c define a runtime pointer defaulting to libc `time`, absent freestanding;
+ * the MACRO form compiles no platform.c time code at all. With no valid snapshot the time fn
+ * returns epoch 0 (fail-closed), but the authoritative guard is platform-init refusing to bring
+ * up TLS at all without a trustworthy clock. The prototype below must be visible to every mbedTLS
+ * TU that expands the macro (this config is included first). */
+long long kl_uefi_mbedtls_time(long long *t);   /* clock_snapshot.c; mbedtls_time_t == long long */
 #define MBEDTLS_HAVE_TIME
 #define MBEDTLS_HAVE_TIME_DATE
 #define MBEDTLS_PLATFORM_TIME_MACRO        kl_uefi_mbedtls_time

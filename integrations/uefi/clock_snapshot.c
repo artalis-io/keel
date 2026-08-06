@@ -1,8 +1,10 @@
 /*
- * clock_snapshot.c — see clock_snapshot.h. The per-session UTC snapshot + monotonic advance
- * that backs mbedTLS's clock, so GetTime is consulted exactly once (at snapshot), never from
- * the verification callback. No mbedTLS / <time.h> dependency, so the host mock harness links
- * and exercises this directly (with a fake kl_uefi_wallclock).
+ * clock_snapshot.c — see clock_snapshot.h. ONE TLS-platform-lifetime UTC snapshot + monotonic
+ * advance that backs mbedTLS's clock. GetTime is consulted exactly once (captured inside
+ * kl_uefi_mbedtls_platform_init()), never from the verification callback; the snapshot is shared
+ * by all sessions, never refreshed while TLS is active, and cleared only at platform shutdown.
+ * No mbedTLS / <time.h> dependency, so the host mock harness links and exercises this directly
+ * (with a fake kl_uefi_wallclock).
  */
 #include "clock_snapshot.h"
 #include "platform_uefi.h"       /* kl_uefi_wallclock */
@@ -15,9 +17,17 @@ static uint64_t g_snap_mono;   /* monotonic tick (ms) at capture */
 static int      g_snap_valid;
 
 int kl_uefi_clock_snapshot(void) {
+    /* The snapshot is only meaningful if the monotonic clock ADVANCES (kl_uefi_mbedtls_time
+     * advances the snapshot by it). If kl_uefi_platform_init() did not fully succeed, the timer
+     * is not armed and the monotonic clock is frozen — capturing a snapshot then would freeze
+     * cert time for the TLS-platform lifetime (accepting expired certs). Refuse. */
+    if (!kl_uefi_platform_ready()) {
+        g_snap_valid = 0;
+        return -1;
+    }
     int64_t utc;
     if (kl_uefi_wallclock(&utc) != 0) {   /* validates + floors + tz-normalises, fail-closed */
-        g_snap_valid = 0;                 /* an untrustworthy refresh invalidates the snapshot */
+        g_snap_valid = 0;                 /* an untrustworthy capture invalidates the snapshot */
         return -1;
     }
     g_snap_utc  = utc;

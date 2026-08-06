@@ -68,13 +68,24 @@ Status: **feasibility / design (2026-08-05).**
 >   - **Certificate validity-time enforcement — DONE (U-8).** `MBEDTLS_HAVE_TIME` + `HAVE_TIME_DATE`
 >     are enabled, backed by Runtime Services `GetTime`, so TLS now rejects expired / not-yet-valid
 >     certs in addition to CA chain + hostname. The trust boundary is handled carefully:
->       - **Per-session SNAPSHOT (`clock_snapshot.c`), not per-verification GetTime.**
->         `kl_uefi_clock_snapshot()` validates + captures UTC ONCE at session creation (the app
->         refuses the session if it fails); `mbedtls_time()` returns that snapshot advanced by the
->         monotonic clock and **never calls GetTime mid-handshake** — so a GetTime that fails after
->         setup cannot fall back to epoch 0 and admit a 1970-spanning cert.
->       - **Structural fail-closed gate**, not just an epoch-0 return: no trustworthy clock ⇒ TLS
->         session is refused (`kl_uefi_have_trustworthy_wallclock`), independent of cert dates.
+>       - **One TLS-platform-lifetime SNAPSHOT (`clock_snapshot.c`), not per-verification GetTime.**
+>         `kl_uefi_clock_snapshot()` validates + captures UTC ONCE, **inside
+>         `kl_uefi_mbedtls_platform_init()`** (not per session — mbedTLS's time callback is global and
+>         has no session context, so a per-session snapshot would let concurrent sessions clobber each
+>         other's basis). The single snapshot is shared by all sessions, advanced by the monotonic
+>         clock, never refreshed while TLS is active, and cleared only at `kl_uefi_mbedtls_platform_
+>         shutdown()`. `mbedtls_time()` **never calls GetTime mid-handshake** — so a GetTime that fails
+>         after setup cannot fall back to epoch 0 and admit a 1970-spanning cert.
+>       - **Structural fail-closed gate**, not just an epoch-0 return: the snapshot capture is the
+>         gate — if the clock is untrustworthy, `kl_uefi_mbedtls_platform_init()` FAILS, so no
+>         `KlTlsCtx` can be created. Enforced inside the mandatory initializer (no app choreography),
+>         independent of cert dates.
+>       - **Requires a live monotonic clock.** The snapshot is advanced by `kl_monotonic_ms`, so a
+>         failed `kl_uefi_platform_init()` (timer not armed → frozen monotonic) must not yield a
+>         "valid" frozen cert clock. `kl_uefi_platform_init()` tears down all its state on failure
+>         (clearing GetTime), exposes `kl_uefi_platform_ready()`, and the snapshot refuses unless
+>         ready — so a frozen clock cannot silently accept an expired cert. U-4 treats
+>         `platform_init` failure as fatal.
 >       - **`EFI_TIME` field validation** (`kl_civil_valid`): malformed firmware (month 13, Feb 30,
 >         hour 25, sec 60, bad TZ/Daylight) is rejected before conversion, not normalised.
 >       - **Unspecified-timezone policy** (UEFI §8.3: an unspecified zone is LOCAL, not UTC):

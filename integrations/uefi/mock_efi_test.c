@@ -26,7 +26,7 @@
 #include "event_efi.h"
 #include "civil_time.h"                   /* cert validity-time conversion (U-8) */
 #include "wallclock_uefi.h"               /* EFI_TIME decode + unspecified-TZ policy (U-8) */
-#include "clock_snapshot.h"               /* per-session snapshot clock gate (U-8) */
+#include "clock_snapshot.h"               /* TLS-platform-lifetime snapshot clock gate (U-8) */
 
 #include <keel/sockaddr.h>
 #include "../../src/socket.h"        /* KlSocketProvider, KlSocketOps, kl_handle_valid */
@@ -78,6 +78,13 @@ int kl_uefi_wallclock(int64_t *out_unix) {
     if (out_unix) *out_unix = g_wc_val;
     return 0;
 }
+
+/* clock_snapshot.c refuses to capture unless the platform is READY (monotonic timer armed) —
+ * kl_uefi_platform_ready() lives in platform_uefi.c (not linked here), so the harness provides a
+ * scriptable one to drive the "timer failed -> snapshot must fail" case. Default: ready. */
+static int g_plat_ready = 1;
+int kl_uefi_platform_ready(void);
+int kl_uefi_platform_ready(void) { return g_plat_ready; }
 
 /* ── mock event objects ─────────────────────────────────────────────────────────
  * An EFI_EVENT in the mock is a pointer to MockEvent. CheckEvent(EFI_SUCCESS) iff
@@ -823,16 +830,33 @@ static void t_wallclock_decode(void) {
     /* Malformed fields via the decode path are rejected. */
     EFI_TIME bad = mk_efi_time(2026, 13, 1, 0, 0, 0, 0, 0);
     CHECK(kl_uefi_wallclock_from_efi(1, &bad, &out) == -1, "U-8: malformed EFI_TIME -> -1");
+    /* Defensive NULL guards (reusable API): NULL t or NULL out -> -1, never a deref/false OK. */
+    CHECK(kl_uefi_wallclock_from_efi(1, NULL, &out) == -1, "U-8: NULL EFI_TIME -> -1");
+    CHECK(kl_uefi_wallclock_from_efi(1, &utc, NULL) == -1, "U-8: NULL out_unix -> -1");
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
- * TEST — the per-session snapshot clock (U-8, finding 2). mbedtls_time reads a SNAPSHOT taken
- * at session creation (advanced by the monotonic clock), never GetTime — so a GetTime that
- * fails AFTER a good snapshot cannot reopen the epoch-0 loophole. Driven via the scriptable
- * kl_uefi_wallclock stub above.
+ * TEST — the TLS-lifetime snapshot clock (U-8, finding 2). mbedtls_time reads ONE SNAPSHOT
+ * (captured once inside platform init, advanced by the monotonic clock), never GetTime — so a
+ * GetTime that fails AFTER capture cannot reopen the epoch-0 loophole, and concurrent sessions
+ * share one forward-moving basis. Driven via the scriptable kl_uefi_wallclock stub above.
  * ───────────────────────────────────────────────────────────────────────────── */
+/* The platform-readiness gate on the cert snapshot (U-8): a not-ready platform (frozen monotonic
+ * timer) must make the snapshot REFUSE even with a good wall clock — else cert time freezes and
+ * accepts expired certs. Its own scenario so the count reflects it. */
+static void t_platform_ready_gate(void) {
+    T_CASE("platform-readiness gate on the cert snapshot (U-8)");
+    kl_uefi_clock_snapshot_reset();
+    g_wc_fail = 0;         /* wall clock is fine ... */
+    g_plat_ready = 0;      /* ... but the platform (monotonic timer) is NOT ready */
+    CHECK(kl_uefi_clock_snapshot() == -1, "U-8: platform-not-ready (frozen timer) -> snapshot REFUSED");
+    CHECK(kl_uefi_mbedtls_time(NULL) == 0, "U-8: no snapshot after refusal -> epoch 0");
+    g_plat_ready = 1;      /* restore for later tests */
+}
+
 static void t_clock_snapshot(void) {
-    T_CASE("per-session snapshot clock gate (U-8)");
+    T_CASE("TLS-lifetime snapshot clock gate (U-8)");
+    g_plat_ready = 1;
     kl_uefi_clock_snapshot_reset();
     /* No snapshot yet -> fail-closed epoch. */
     CHECK(kl_uefi_mbedtls_time(NULL) == 0, "U-8: no snapshot -> mbedtls_time == epoch 0");
@@ -1034,7 +1058,8 @@ int main(void) {
     t_entropy_fail_closed();           /* links entropy_uefi.c (mbedTLS-free) */
     t_civil_time();                    /* cert validity-time conversion + fail-closed (U-8) */
     t_wallclock_decode();              /* EFI_TIME decode + unspecified-TZ policy (U-8) */
-    t_clock_snapshot();                /* per-session snapshot clock gate (U-8) */
+    t_platform_ready_gate();           /* frozen-monotonic-timer gate on the snapshot (U-8) */
+    t_clock_snapshot();                /* TLS-platform-lifetime snapshot clock gate (U-8) */
     t_stale_guard_no_uaf();
     t_cancel_fails_quarantine();
     t_close_no_spin_on_consumed_connect();

@@ -95,7 +95,10 @@ static VOID EFIAPI uefi_exit_boot_services(EFI_EVENT event, VOID *context) {
 
 int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st) {
     if (g_inited) return 0;
+    if (!bs) return -1;         /* Boot Services table is required (timer/RNG/events) */
     g_bs = bs;
+    /* @st may be NULL: non-TLS use runs without Runtime Services GetTime (no cert clock).
+     * TLS bring-up then fails closed later (kl_uefi_mbedtls_platform_init snapshots the clock). */
     g_rt = st ? st->RuntimeServices : NULL;   /* GetTime for cert validity-time */
     g_ticks_ms = 0;
 
@@ -110,10 +113,10 @@ int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st) {
                                    (EFI_EVENT_NOTIFY)uefi_timer_tick,
                                    NULL,
                                    &g_timer_event);
-    if (EFI_ERROR(s)) { trace("  [plat] CreateEvent FAILED\r\n"); g_timer_event = NULL; return -1; }
+    if (EFI_ERROR(s)) { trace("  [plat] CreateEvent FAILED\r\n"); g_timer_event = NULL; goto fail; }
     trace("  [plat] SetTimer...\r\n");
     s = bs->SetTimer(g_timer_event, TimerPeriodic, UEFI_TIMER_PERIOD);
-    if (EFI_ERROR(s)) { trace("  [plat] SetTimer FAILED\r\n"); bs->CloseEvent(g_timer_event); g_timer_event = NULL; return -1; }
+    if (EFI_ERROR(s)) { trace("  [plat] SetTimer FAILED\r\n"); goto fail; }
 
     /* ---- randomness: locate EFI_RNG_PROTOCOL (optional; fail-closed) ---- */
     trace("  [plat] LocateProtocol(RNG)...\r\n");
@@ -135,6 +138,29 @@ int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st) {
 
     g_inited = 1;
     return 0;
+
+fail:
+    /* A failed init must NOT leave a half-installed platform that LOOKS usable: the monotonic
+     * timer is what advances kl_monotonic_ms, and the TLS cert clock (a snapshot advanced by the
+     * monotonic tick) depends on it. If the timer could not be created/armed, GetTime might still
+     * work (g_rt is set) and a snapshot would look valid but FROZEN — accepting a cert past its
+     * expiry for the whole lifetime. So tear down every installed handle + pointer; after this
+     * kl_uefi_platform_ready() is 0, GetTime is unreachable (g_rt cleared), and TLS bring-up
+     * (which snapshots the clock) refuses. */
+    if (g_timer_event) { bs->SetTimer(g_timer_event, TimerCancel, 0); bs->CloseEvent(g_timer_event); }
+    g_timer_event = NULL;
+    g_bs = NULL;
+    g_rt = NULL;
+    g_rng = NULL;
+    g_inited = 0;
+    return -1;
+}
+
+/* 1 iff kl_uefi_platform_init() FULLY succeeded (monotonic timer armed, so kl_monotonic_ms
+ * advances). TLS bring-up requires this because the cert clock is a snapshot advanced by the
+ * monotonic tick — a frozen clock would silently accept expired certs. */
+int kl_uefi_platform_ready(void) {
+    return g_inited;
 }
 
 int kl_uefi_have_entropy(void) {
@@ -147,18 +173,22 @@ int kl_uefi_after_ebs(void) {
     return g_after_ebs;
 }
 
-/* Cert validity-time clock (U-8): read the RTC via Runtime Services GetTime and return
- * UTC seconds since the Unix epoch. GetTime is a RUNTIME service — valid before AND after
+/* Cert validity-time clock (U-8): read the RTC via Runtime Services GetTime and return UTC
+ * seconds since the Unix epoch. GetTime is a RUNTIME service — valid before AND after
  * ExitBootServices — so this is deliberately NOT gated on kl_uefi_after_ebs().
  *
- * FAIL-CLOSED (policy: fail-closed + sanity floor): returns -1 (and leaves *out_unix
- * untouched) if there is no RuntimeServices/GetTime, GetTime errors, or the returned year
- * is below KL_UEFI_TIME_FLOOR_YEAR (an unset/stuck RTC — e.g. 1970/2000 — must not be
- * trusted to validate certificate expiry). A -1 here makes the mbedTLS clock read epoch 0,
- * so every real certificate fails its notBefore check — no HTTPS without a trustworthy
- * clock. EFI_TIME is wall-clock and may carry a TimeZone (minutes that local is offset from
- * UTC); we normalise to UTC. OVMF/QEMU report UTC with an UNSPECIFIED zone, so the
- * adjustment is a no-op there and matters only on real firmware that reports local time. */
+ * Returns 0 with *out_unix set, or -1 FAIL-CLOSED. The trust policy lives in
+ * kl_uefi_wallclock_from_efi (wallclock_uefi.c): -1 if there is no RuntimeServices/GetTime,
+ * GetTime errors, the EFI_TIME fields are malformed, the year is below KL_UEFI_TIME_FLOOR_YEAR
+ * (an unset/stuck RTC — e.g. 1970/2000), or the TimeZone is UNSPECIFIED (which per UEFI §8.3 means
+ * LOCAL time with an unknown offset) with no configured offset and no KL_UEFI_ASSUME_UNSPECIFIED_UTC
+ * test flag. On a specified zone we normalise local→UTC (UTC = local + TimeZone).
+ *
+ * How -1 is CONSUMED (do not weaken this): a -1 at kl_uefi_clock_snapshot() (called inside
+ * kl_uefi_mbedtls_platform_init) makes TLS platform init FAIL — no KlTlsCtx can be created, so
+ * HTTPS is refused up front. mbedtls_time() then reads the captured lifetime SNAPSHOT (advanced by
+ * the monotonic clock), NOT GetTime — the epoch-0 return of an *empty* snapshot is only a
+ * defence-in-depth backstop, not the primary guard. */
 int kl_uefi_wallclock(int64_t *out_unix) {
     EFI_TIME t;
     ZeroMem(&t, sizeof(t));

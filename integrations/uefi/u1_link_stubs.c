@@ -25,13 +25,10 @@
 #include <stdint.h>
 
 /* ── errno global (U-6) ──────────────────────────────────────────────────────
- * The EFI socket provider (socket_efi_tcp4.c, U-6) WRITES errno=EAGAIN on a
- * would-block recv/send and errno=EIO on error, matching the lwip provider
- * contract so tls_mbedtls.c's BIO detects would-block correctly. This TU is
- * linked by ALL of U-3/U-4/U-5, so defining `errno` here gives every link set
- * exactly one definition (moved from mbedtls_platform_uefi.c, which only U-4
- * links). Nothing here READS it — the provider is the sole writer. */
-int errno;
+ * `errno` (which socket_efi_tcp4.c WRITES) is defined in the minimal shared TU
+ * errno_uefi.c, linked by EVERY freestanding build — including U-2, which links the
+ * socket provider but NOT this stubs TU. (It previously lived here, which broke the
+ * U-2 link once the provider started writing errno.) */
 
 /* ── sync DNS (U-5) — fail-closed ───────────────────────────────────────────
  * U-3 links resolve_uefi.c (a real numeric-only kl_resolve_sync) and compiles this
