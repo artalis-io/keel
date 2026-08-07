@@ -1,7 +1,7 @@
 # Phase 10 — UEFI HTTP(S) **server** on bare firmware (scoping plan)
 
-**Status: S-1..S-5 done; S-4 build complete + firmware-validated (boot-to-200 pending a
-network-enabled OVMF).** The Phase 10 client (U-0..U-8) serves a hardened `KlClient`
+**Status: S-1..S-5 done; S-4 COMPLETE — serves `GET / → 200` over EFI_TCP4 on bare
+firmware (QEMU/OVMF).** The Phase 10 client (U-0..U-8) serves a hardened `KlClient`
 (plaintext + HTTPS + DNS) on bare UEFI firmware. This doc scopes the *inbound* direction — a
 `KlServer` that `bind`/`listen`/`accept`s over EFI_TCP4 and answers `GET / → 200` —
 deliberately structured to preserve the three-axis separation that `/axis-audit` enforces.
@@ -105,7 +105,7 @@ demand. **Backpressure:** when the `KlConn` pool is full, stop re-priming Accept
 into a drop) — the Keel-level equivalent of reducing readiness interest (Goal 8).
 *Axis:* completion. *Goals 2, 3, 8* (honest completion accept; no model leak upward; backpressure).
 
-### S-4 — **Plaintext** HTTP server GO — *build complete + firmware-validated*
+### S-4 — **Plaintext** HTTP server GO — *COMPLETE (serves GET / → 200 on QEMU/OVMF)*
 `s4_selftest.c`: stock freestanding `KlServer` on the EFI completion backend answers
 `GET / → 200` to a host client (QEMU SLIRP `hostfwd`), over real EFI_TCP4. Acceptance = the
 model-blind server core runs with **zero** protocol edits (the whole point). Prove accept →
@@ -130,16 +130,17 @@ executes freestanding + negotiates the provider — validating the carve on bare
 **Network-OVMF boot result (Ubuntu 24.04 container, `run_s4.sh`, `OVMF_CODE_4M.fd`):**
 `kl_server_init` **succeeds** and `bind`/`listen` **succeed** ("server up" -> "listening on
 :80") — the freestanding `KlServer` construction + EFI_TCP4 passive open both work on real
-network firmware. Serving the host `curl` hits a firmware `#UD` (RIP -> `0xB0000`). **Root
-cause (confirmed):** the EFI `KlCompletionOps` (`event_efi.c` `EFI_COMP_OPS`) leaves
-`.post_recv`/`.post_send`/`.post_sendfile` **NULL** — the *client* rides the `KL_COMP_WATCHER`
-drain-relay + sync socket provider and never calls them, but the *server* completion driver
-(`completion_server.c`) calls `kl_comp_post_recv`/`post_send` directly, so post-accept it calls
-a NULL op. **Remaining S-4 work:** implement EFI `post_recv`/`post_send` mirroring
-`event_pollcomp.c` (record the op; in `el_drain`, on read/write readiness do
-`efi_sock_recv`/`efi_sock_send` and emit `KL_COMP_READ`/`KL_COMP_WRITE`), gated natively first
-by extending the mock-EFI harness (`mock_efi_test.c`) with a full serve roundtrip, then the
-container 200.
+network firmware. The first boot hit a firmware `#UD` (RIP -> `0xB0000`) on serve. **Root cause:** the EFI
+`KlCompletionOps` (`event_efi.c` `EFI_COMP_OPS`) left `.post_recv`/`.post_send` **NULL** — the
+*client* rides the `KL_COMP_WATCHER` drain-relay + sync socket provider and never calls them,
+but the *server* completion driver (`completion_server.c`) calls `kl_comp_post_recv`/`post_send`
+directly, so post-accept it called a NULL op. **Fixed** by implementing EFI `post_recv`/`post_send`
+mirroring `event_pollcomp.c`: the op is queued; `el_drain`, on the U-6 non-blocking read-readiness
+probe, does `efi_sock_recv` into `conn->read_buf` and emits `KL_COMP_READ`; sends flatten the
+response iovec into a private buffer and `efi_sock_send` it in bounded Transmit fragments, emitting
+one `KL_COMP_WRITE` (generation-stale-guarded; freed on completion/cancel). **Result: PASS** —
+`server up → listening on :80 → GO`, `curl` returns **200** with body
+`hello from KEEL on UEFI (EFI_TCP4 server)`. `post_sendfile` stays NULL (file responses are S-6).
 
 (This run's homebrew OVMF on the macOS host has no EFI_TCP4 stack -> `kl_server_init` returns
 `KL_ERR_SOCKET`, the documented graceful-degradation path; the network boot needs Ubuntu's
