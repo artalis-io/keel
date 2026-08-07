@@ -5,7 +5,10 @@ BOOTX64.lib
 *.o
 *.so
 esp.img
+esp_s4.img
+esp_s4_dir/
 vars_rw.fd
+vars_rw_s4.fd
 # freestanding archive is built in the repo root, not here, but guard anyway
 libkeel_freestanding*.a
 # U-2 harness artifacts
