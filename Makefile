@@ -188,8 +188,8 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/connection.c src/server.c src/server_core.c src/proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
-           src/websocket.c src/websocket_client.c \
-           src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
+           src/websocket.c src/server_ws.c src/websocket_client.c \
+           src/server_h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client_common.c src/client_sync.c src/client_async.c \
            src/client_pool.c src/redirect.c src/sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
@@ -841,7 +841,7 @@ analyze:
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
 AXIS_PROTO_TUS = src/client_common.c src/client_sync.c src/client_async.c \
                  src/h2_client.c src/websocket_client.c \
-                 src/connection.c src/server.c src/h2.c src/websocket.c \
+                 src/connection.c src/server.c src/server_h2.c src/websocket.c src/server_ws.c \
                  src/sse.c src/response.c src/redirect.c src/client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:
