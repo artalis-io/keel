@@ -173,6 +173,39 @@ static int outstanding_count(void) {
 }
 static void tok_reset(void) { g_tok_count = 0; }
 
+/* ── S-5 server accept: armed Accept (listen) tokens + inbound-connection delivery ──
+ * m_tcp_Accept ARMS a listen token (records it, leaves it pending) — a connection
+ * "arrives" only when a test calls mock_deliver_connection(), which signals one armed
+ * token with a fresh distinct child handle (mirroring the real async accept). */
+#define MAX_ACCEPT_TOKS 8
+static EFI_TCP4_LISTEN_TOKEN *g_accept_toks[MAX_ACCEPT_TOKS];
+static int g_accept_tok_count;
+static int g_accept_child_seq;                 /* fresh child-handle generator */
+static int g_accept_child_objs[MAX_ACCEPT_TOKS + 8];  /* backing storage for child EFI_HANDLEs */
+
+static void accept_reset(void) {
+    for (int i = 0; i < MAX_ACCEPT_TOKS; i++) g_accept_toks[i] = NULL;
+    g_accept_tok_count = 0;
+    g_accept_child_seq = 0;
+}
+
+/* Simulate one inbound connection: signal the first armed-but-undelivered Accept
+ * token with a fresh child handle. Returns 1 if a connection was delivered. */
+static int mock_deliver_connection(void) {
+    for (int i = 0; i < g_accept_tok_count; i++) {
+        EFI_TCP4_LISTEN_TOKEN *lt = g_accept_toks[i];
+        if (!lt) continue;
+        MockEvent *e = (MockEvent *)lt->CompletionToken.Event;
+        if (!e || e->signaled) continue;   /* already delivered / not yet consumed */
+        lt->NewChildHandle = (EFI_HANDLE)&g_accept_child_objs[g_accept_child_seq++];
+        lt->CompletionToken.Status = EFI_SUCCESS;
+        e->signaled = 1;
+        tok_terminal(&lt->CompletionToken);
+        return 1;
+    }
+    return 0;
+}
+
 /* ── EFIAPI is empty on the host (non-x86 or gated); use plain funcs ───────────── */
 
 /* ── mock boot services ─────────────────────────────────────────────────────────
@@ -287,7 +320,14 @@ static EFI_STATUS EFIAPI m_udp_DestroyChild(EFI_SERVICE_BINDING_PROTOCOL *This, 
 static EFI_STATUS EFIAPI m_tcp_GetModeData(EFI_TCP4_PROTOCOL *This, VOID *s, EFI_TCP4_CONFIG_DATA *cd,
                                            VOID *ip, VOID *mnp, VOID *snp) {
     (void)This; (void)s; (void)ip; (void)mnp; (void)snp; FW();
-    if (cd) memset(cd, 0, sizeof(*cd));
+    if (cd) {
+        memset(cd, 0, sizeof(*cd));
+        /* Fake accepted-peer so accept()'s GetModeData peer extraction yields a real
+         * neutral KlSockAddr (10.0.0.9:5555). */
+        cd->AccessPoint.RemoteAddress.Addr[0] = 10;
+        cd->AccessPoint.RemoteAddress.Addr[3] = 9;
+        cd->AccessPoint.RemotePort = 5555;
+    }
     return EFI_SUCCESS;
 }
 static EFI_STATUS EFIAPI m_tcp_Configure(EFI_TCP4_PROTOCOL *This, EFI_TCP4_CONFIG_DATA *cd) {
@@ -308,7 +348,17 @@ static EFI_STATUS EFIAPI m_tcp_Connect(EFI_TCP4_PROTOCOL *This, EFI_TCP4_CONNECT
     }
     return EFI_SUCCESS;   /* submitted */
 }
-static EFI_STATUS EFIAPI m_tcp_Accept(EFI_TCP4_PROTOCOL *This, VOID *t) { (void)This; (void)t; FW(); return EFI_UNSUPPORTED; }
+static EFI_STATUS EFIAPI m_tcp_Accept(EFI_TCP4_PROTOCOL *This, VOID *t) {
+    (void)This; FW();
+    EFI_TCP4_LISTEN_TOKEN *lt = (EFI_TCP4_LISTEN_TOKEN *)t;
+    MockEvent *e = (MockEvent *)lt->CompletionToken.Event;
+    lt->NewChildHandle = NULL;
+    tok_submit(&lt->CompletionToken, e);   /* armed, pending — delivery is explicit */
+    for (int i = 0; i < g_accept_tok_count; i++)
+        if (g_accept_toks[i] == lt) return EFI_SUCCESS;   /* dedup re-arms of the same token */
+    if (g_accept_tok_count < MAX_ACCEPT_TOKS) g_accept_toks[g_accept_tok_count++] = lt;
+    return EFI_SUCCESS;
+}
 static EFI_STATUS EFIAPI m_tcp_Transmit(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKEN *t) {
     (void)This; FW();
     MockEvent *e = (MockEvent *)t->CompletionToken.Event;
@@ -481,6 +531,7 @@ static void reset_counters(void) {
     g_configure_null_calls = g_recycle_signals = g_firmware_calls = 0;
     g_cancel_signals = 1; g_tcp_poll_calls = 0; g_tcp_rx_datalen_override = 0;
     tok_reset();
+    accept_reset();
     g_event_count = 0;
     for (int i = 0; i < MAX_EVENTS; i++) memset(&g_events[i], 0, sizeof(g_events[i]));
 }
@@ -1043,6 +1094,168 @@ static void t_dns_cancel_fails_quarantine(void) {
     g_cancel_signals = 1;
 }
 
+/* ═════════════════════════════════════════════════════════════════════════════
+ * S-5 — server accept-lifetime scenarios (the runtime verification of S-2 + S-3).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Basic passive open: bind + listen arm the Accept pool; accept is would-block until
+ * a connection is delivered, then returns a child conn with the neutral peer; the
+ * child is an ordinary conn (recv works); listener close drains the pool cleanly. */
+static void t_accept_basic(void) {
+    T_CASE("accept: bind/listen/accept -> child conn + neutral peer (S-2/S-3)");
+    reset_counters();
+    g_tcp_receive_mode = TOK_COMPLETE_OK; g_tcp_close_mode = TOK_COMPLETE_OK;
+    const KlSocketProvider *p = fresh_provider();
+    KlSockAddr ba; mk_addr(&ba);
+    KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(kl_handle_valid(lfd), "listener socket claimed a slot");
+    CHECK(p->ops->bind(p->context, lfd, &ba) == 0, "bind ok");
+    CHECK(p->ops->listen(p->context, lfd, 2) == 0, "listen ok");
+    CHECK(g_accept_tok_count >= 1, "listen armed the Accept-token pool");
+
+    KlSockAddr peer;
+    KlSocketHandle a = p->ops->accept(p->context, lfd, &peer);
+    CHECK(!kl_handle_valid(a), "accept would-block before a connection arrives");
+
+    CHECK(mock_deliver_connection() == 1, "one inbound connection delivered");
+    a = p->ops->accept(p->context, lfd, &peer);
+    CHECK(kl_handle_valid(a), "accept returns the child conn");
+    CHECK(kl_sockaddr_family(&peer) == KL_AF_INET, "peer is a neutral IPv4 KlSockAddr");
+
+    char buf[8];
+    kl_ssize_t n = p->ops->recv(p->context, a, buf, sizeof buf);
+    CHECK(n >= 0, "recv on the accepted child does not error (it is a real conn)");
+
+    p->ops->close(p->context, a);
+    p->ops->close(p->context, lfd);
+    CHECK(outstanding_count() == 0, "no token outstanding after child + listener close");
+}
+
+/* Closing a listener with N outstanding Accept tokens drains them all (Cancel signals
+ * them) — no leak, events closed, listener child destroyed. */
+static void t_accept_listener_close_drains(void) {
+    T_CASE("accept: close listener with N outstanding Accept tokens -> all drained");
+    reset_counters();
+    g_cancel_signals = 1;   /* firmware Cancel retires the tokens */
+    const KlSocketProvider *p = fresh_provider();
+    KlSockAddr ba; mk_addr(&ba);
+    KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(p->ops->listen(p->context, lfd, 4) == 0, "listen armed 4 Accept tokens");
+    CHECK(outstanding_count() >= 4, "4 Accept tokens outstanding");
+    p->ops->close(p->context, lfd);
+    CHECK(outstanding_count() == 0, "all Accept tokens drained on listener close");
+    CHECK(g_destroy_child_calls == 1, "listener child destroyed (clean teardown)");
+}
+
+/* THE load-bearing test: an Accept-token cancel FAILS -> the listener is quarantined,
+ * NEVER DestroyChild'd (the firmware may still write those tokens via its tcp). */
+static void t_accept_cancel_fail_quarantine(void) {
+    T_CASE("accept: Accept-token cancel FAILS -> quarantine listener (F1)");
+    reset_counters();
+    g_cancel_signals = 0;   /* firmware cannot retire the Accept tokens */
+    const KlSocketProvider *p = fresh_provider();
+    KlSockAddr ba; mk_addr(&ba);
+    KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(p->ops->listen(p->context, lfd, 4) == 0, "listen armed Accept tokens");
+    int before = g_destroy_child_calls;
+    p->ops->close(p->context, lfd);   /* cancel fails -> can't drain -> quarantine */
+    CHECK(g_tcp_cancel_all_calls >= 1, "F1: Cancel(NULL) attempted on the Accept pool");
+    CHECK(g_destroy_child_calls == before,
+          "F1: listener child NOT destroyed while Accept tokens may be live (quarantined)");
+    CHECK(outstanding_count() > 0, "F1: the un-retired Accept tokens are leaked, not freed");
+    /* fail-closed: a new socket must still work (the quarantined slot is not reused). */
+    KlSocketHandle s2 = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(kl_handle_valid(s2), "a fresh socket still available after quarantine");
+    p->ops->close(p->context, s2);   /* the quarantined listener stays leaked (intentional) */
+}
+
+/* An accepted child with a receive outstanding closes cleanly (cancel+drain) — the
+ * child reuses efi_sock_close's per-conn token discipline verbatim. */
+static void t_accepted_child_close_recv(void) {
+    T_CASE("accept: accepted-child close-while-recv-outstanding (cancel+drain)");
+    reset_counters();
+    g_tcp_receive_mode = TOK_HANG;   /* the child's Receive will not complete */
+    g_tcp_close_mode = TOK_COMPLETE_OK;
+    const KlSocketProvider *p = fresh_provider();
+    KlSockAddr ba; mk_addr(&ba);
+    KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
+    p->ops->listen(p->context, lfd, 2);
+    mock_deliver_connection();
+    KlSockAddr peer;
+    KlSocketHandle a = p->ops->accept(p->context, lfd, &peer);
+    CHECK(kl_handle_valid(a), "accepted a child");
+    char buf[8];
+    (void)p->ops->recv(p->context, a, buf, sizeof buf);   /* posts a Receive that hangs */
+    p->ops->close(p->context, a);
+    CHECK(outstanding_count() == 0, "child recv token cancel+drained on close");
+    CHECK(g_destroy_child_calls >= 1, "accepted child destroyed on close");
+    p->ops->close(p->context, lfd);
+}
+
+/* Post-ExitBootServices: bind/listen/accept all refuse, touching no boot service. */
+static void t_accept_post_ebs_refuse(void) {
+    T_CASE("accept: post-EBS bind/listen/accept refuse (fail-closed)");
+    reset_counters();
+    const KlSocketProvider *p = fresh_provider();
+    KlSockAddr ba; mk_addr(&ba);
+    KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
+    CHECK(kl_handle_valid(lfd), "socket before EBS");
+    g_after_ebs = 1;
+    CHECK(p->ops->bind(p->context, lfd, &ba) == -1, "bind refuses post-EBS");
+    CHECK(p->ops->listen(p->context, lfd, 2) == -1, "listen refuses post-EBS");
+    KlSockAddr peer;
+    CHECK(!kl_handle_valid(p->ops->accept(p->context, lfd, &peer)), "accept refuses post-EBS");
+    g_after_ebs = 0;
+    p->ops->close(p->context, lfd);   /* reclaim the slot now that EBS is cleared */
+}
+
+/* Pool-full: with every conn slot occupied, an accepted child cannot be adopted —
+ * accept returns would-block and the orphan child is destroyed (no accept-into-leak). */
+static void t_accept_pool_full(void) {
+    T_CASE("accept: conn-pool full -> child not orphaned (backpressure floor)");
+    reset_counters();
+    const KlSocketProvider *p = fresh_provider();
+    KlSockAddr ba; mk_addr(&ba);
+    KlSocketHandle fds[64]; int nf = 0;
+    KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
+    fds[nf++] = lfd;
+    p->ops->listen(p->context, lfd, 2);
+    /* Occupy every remaining slot with plain sockets. */
+    for (int i = 0; i < 64; i++) {
+        KlSocketHandle s = p->ops->socket(p->context, 2, 1, 0);
+        if (!kl_handle_valid(s)) break;   /* pool exhausted */
+        fds[nf++] = s;
+    }
+    mock_deliver_connection();
+    int before = g_destroy_child_calls;
+    KlSockAddr peer;
+    KlSocketHandle a = p->ops->accept(p->context, lfd, &peer);
+    CHECK(!kl_handle_valid(a), "accept fails when the conn pool is full");
+    CHECK(g_destroy_child_calls > before, "the un-adoptable child was destroyed, not orphaned");
+    for (int i = 0; i < nf; i++) p->ops->close(p->context, fds[i]);   /* reclaim the pool */
+}
+
+/* Stale generation: a closed accepted-child slot bumps its generation, so a captured
+ * {handle,gen} is rejected — no stale completion can touch a reused slot. */
+static void t_accept_stale_generation(void) {
+    T_CASE("accept: stale generation on a reused accepted-child slot");
+    reset_counters();
+    g_tcp_close_mode = TOK_COMPLETE_OK;
+    const KlSocketProvider *p = fresh_provider();
+    KlSockAddr ba; mk_addr(&ba);
+    KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
+    p->ops->listen(p->context, lfd, 2);
+    mock_deliver_connection();
+    KlSockAddr peer;
+    KlSocketHandle a = p->ops->accept(p->context, lfd, &peer);
+    CHECK(kl_handle_valid(a), "accepted a child");
+    unsigned long long gen = kl_uefi_conn_generation_h(a);
+    CHECK(kl_uefi_conn_valid_h(a, gen) == 1, "child valid at its live generation");
+    p->ops->close(p->context, a);
+    CHECK(kl_uefi_conn_valid_h(a, gen) == 0, "stale {handle,gen} rejected after close");
+    p->ops->close(p->context, lfd);
+}
+
 int main(void) {
     printf("=== mock-EFI failure-path harness (F7b) ===\n");
     mock_init();
@@ -1064,6 +1277,16 @@ int main(void) {
     t_cancel_fails_quarantine();
     t_close_no_spin_on_consumed_connect();
     t_bad_rx_length();
+    /* S-5: server accept-lifetime (verifies S-2 bind/listen/accept + S-3 post_accept).
+     * The cancel-fail quarantine case permanently leaks its listener slot (by design),
+     * so it runs after the pool-sensitive cases (each of which reclaims its slots). */
+    t_accept_basic();
+    t_accept_listener_close_drains();
+    t_accepted_child_close_recv();
+    t_accept_post_ebs_refuse();
+    t_accept_pool_full();
+    t_accept_stale_generation();
+    t_accept_cancel_fail_quarantine();   /* last: intentional permanent slot leak */
     t_dns_cancel_fails_quarantine();   /* last: sets the sticky DNS quarantine */
 
     printf(g_fail ? "\nmock-EFI harness: FAIL\n" : "\nmock-EFI harness: PASS\n");
