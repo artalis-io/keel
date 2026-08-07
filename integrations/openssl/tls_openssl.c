@@ -86,6 +86,7 @@ typedef struct {
     const KlSocketProvider *sp;    /* socket provider for BIO I/O (NULL = host default) */
     int                 handshake_done;
     int                 eof_seen;  /* set when read() hit a clean close_notify/EOF */
+    int                 reset_failed;  /* SSL_clear() failed → refuse the next handshake */
     int                 allow_truncation;  /* inherited from ctx (strict EOF policy) */
     /* Completion (memory-BIO) mode. Active once feed_input() is first called:
      * the BIO reads ciphertext from in_buf (fed by the caller) and appends
@@ -264,6 +265,11 @@ static KlTlsResult tls_handshake(KlTls *self, KlSocketHandle fd)
     KlOpensslTls *t = (KlOpensslTls *)self;
     t->fd = fd;
 
+    /* A failed reset() left this session in an indeterminate state; refuse to
+     * handshake on it rather than risk carrying state across connections. */
+    if (t->reset_failed)
+        return KL_TLS_ERROR;
+
     /* Clear the thread-local error queue first: SSL_get_error() below only
      * classifies correctly against an empty queue, so a stale error left by
      * another session or app code on this event-loop thread cannot leak in. */
@@ -287,6 +293,10 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
     t->fd = fd;
     if (len == 0)
         return 0;
+
+    /* at_eof() must describe THIS read, not a prior one — clear the sticky flag at
+     * the start of every substantive read (it is re-set below only on a real EOF). */
+    t->eof_seen = 0;
 
     /* Empty the error queue before the op (see tls_handshake). This also makes the
      * empty-error-queue truncation check below reliable: a stale error would
@@ -429,8 +439,11 @@ static kl_ssize_t tls_drain_output(KlTls *self, void *buf, size_t cap)
 static void tls_reset(KlTls *self)
 {
     KlOpensslTls *t = (KlOpensslTls *)self;
-    /* SSL_clear resets the session for reuse; the BIO stays attached. */
-    SSL_clear(t->ssl);
+    /* SSL_clear resets the session for reuse; the BIO stays attached. reset() is
+     * void, so on failure we latch a flag and fail the next handshake closed rather
+     * than reuse a half-reset SSL that could carry state across connections. */
+    if (SSL_clear(t->ssl) != 1)
+        t->reset_failed = 1;
     t->handshake_done = 0;
     t->eof_seen = 0;
     t->fd = KL_INVALID_SOCKET;

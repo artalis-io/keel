@@ -462,6 +462,7 @@ static void axis2_memory_bio(KlAllocator *alloc, PemPair *ca, PemPair *server)
         if (n > 0) got += (size_t)n;
     }
     assert(got == mlen && memcmp(buf, msg, mlen) == 0);
+    assert(srv->at_eof(srv) == 0);   /* a successful read is NOT at_eof */
     printf("  PASS: memory-BIO round-trip (client->server)\n");
 
     /* And server → client. */
@@ -479,9 +480,12 @@ static void axis2_memory_bio(KlAllocator *alloc, PemPair *ca, PemPair *server)
         if (n > 0) got += (size_t)n;
     }
     assert(got == m2 && memcmp(buf, msg2, m2) == 0);
+    assert(cli->at_eof(cli) == 0);   /* a successful read is NOT at_eof */
     printf("  PASS: memory-BIO round-trip (server->client)\n");
 
-    /* Clean shutdown from server → client's read() must report at_eof(). */
+    /* Clean shutdown from server → client's read() must report at_eof(). Because
+     * at_eof() reflects the LATEST read, the successful read just above cleared it
+     * and this EOF read sets it — it is not sticky from an earlier state. */
     srv->shutdown(srv, KL_INVALID_SOCKET);
     pump(srv, cli);
     kl_ssize_t rn = cli->read(cli, KL_INVALID_SOCKET, buf, sizeof(buf));
