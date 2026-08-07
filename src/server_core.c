@@ -76,6 +76,16 @@ int kl_server_run_completion_loop(KlServer *s) {
  * in-archive. WebSocket/HTTP-2 are reached only through the upgrade seam, so these
  * name no ws/h2 symbol; a freestanding HTTP/1.1 build leaves the hooks NULL. */
 
+/* Release a connection and resume the listen socket if it was paused due to pool
+ * exhaustion. Called from the event loop, timeout sweep, and async completion. */
+void kl_server_conn_release(KlServer *s, KlConn *c) {
+    kl_conn_release(&s->pool, c);
+    if (s->listen_paused && s->pool.free_list) {
+        kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL);
+        s->listen_paused = 0;
+    }
+}
+
 static const char kl_408_response[] =
     "HTTP/1.1 408 Request Timeout\r\n"
     "Content-Length: 0\r\n"

@@ -85,6 +85,14 @@ whitelisted() {
     #    identical. Any OTHER __* compiler-runtime symbol is NOT whitelisted (a real
     #    finding). See docs/phase10_uefi_feasibility_design.md (B1).
     __chkstk|chkstk) return 0 ;;
+    # 1d. PE FLOATING-POINT compiler-runtime residual (server core: connection.c's
+    #    access-log computes a double duration). _fltused is the MSVC/PE marker the
+    #    backend emits when a TU uses floating point — it tells the CRT to pull the
+    #    FP support; the CRT/EDK2 (or a `int _fltused = 0;` in the EFI entry) supplies
+    #    it. NOT KEEL code, NOT a hosted-CRT dependency — the FP analogue of __chkstk,
+    #    and (like it) only on the PE cross targets. Any OTHER float helper is NOT
+    #    whitelisted.
+    _fltused|fltused) return 0 ;;
     # 2. KEEL platform + resolution hooks
     kl_plat_*|kl_monotonic_ms|kl_resolve_sync) return 0 ;;
     # 3. provider ops (socket / event / completion) filled by the injected provider

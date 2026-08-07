@@ -10,12 +10,9 @@
 #include "proto_hooks.h"        /* ws/h2 upgrade seam — core never names ws/h2 directly */
 #include <assert.h>
 #include <string.h>
-#include <errno.h>            /* freestanding: supplied by the UEFI/cross shim */
 #include "kl_cstr.h"          /* kl_ascii_strncasecmp — freestanding-safe, locale-free */
-#ifndef KEEL_FREESTANDING
-#include <strings.h>          /* strncasecmp (hosted only; freestanding uses kl_cstr) */
-#include <unistd.h>
-#endif
+/* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
+ * raw errno, so this TU carries no errno symbol into the freestanding archive. */
 #include <stdint.h>
 #include "internal.h"
 #include "h2_internal.h"
@@ -381,9 +378,9 @@ int kl_conn_read_proxy_header(KlConn *c) {
     ssize_t n;
     do {
         n = kl_sock_recv_peek(conn_sp(c), c->fd, buf, sizeof(buf));
-    } while (n < 0 && errno == EINTR);
+    } while (n < 0 && kl_sock_io_status(conn_sp(c)) == KL_IO_INTERRUPTED);
     if (n < 0)
-        return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+        return (kl_sock_io_status(conn_sp(c)) == KL_IO_WOULD_BLOCK) ? 0 : -1;
     if (n == 0)
         return -1;   /* peer closed before sending a header */
 
@@ -951,11 +948,12 @@ static KlConnState conn_file_flush(KlConn *c) {
         ssize_t nw = kl_sock_send(conn_sp(c), c->fd, c->read_buf + c->file_io_sent,
                                   c->file_io_len - c->file_io_sent);
         if (nw < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            KlIoStatus st = kl_sock_io_status(conn_sp(c));
+            if (st == KL_IO_WOULD_BLOCK) {
                 c->state = KL_CONN_SENDING;
                 return c->state;  /* wait for WRITE event */
             }
-            if (errno == EINTR) continue;
+            if (st == KL_IO_INTERRUPTED) continue;
             c->file_io_phase = FILE_IO_IDLE;
             c->state = KL_CONN_CLOSED;
             return c->state;

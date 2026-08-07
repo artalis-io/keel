@@ -256,18 +256,8 @@ static void kl_server_close_listener(KlServer *s) {
     kl_srv_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
 }
 
-/*
- * Release a connection and resume the listen socket if it was paused
- * due to pool exhaustion.  Called from the event loop, timeout sweep,
- * and async completion.
- */
-void kl_server_conn_release(KlServer *s, KlConn *c) {
-    kl_conn_release(&s->pool, c);
-    if (s->listen_paused && s->pool.free_list) {
-        kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL);
-        s->listen_paused = 0;
-    }
-}
+/* kl_server_conn_release moved to the freestanding-safe server core (server_core.c)
+ * — the completion sweeps there call it, so the archive needs it in-core. */
 
 /* Run-loop wakeup watcher: drains the byte kl_server_stop() wrote. Its only job is to
  * make the current kl_event_wait / kl_comp_drain return so the loop re-checks `running`
