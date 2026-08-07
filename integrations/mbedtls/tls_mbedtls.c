@@ -270,6 +270,8 @@ static size_t tls_pending(KlTls *self)
 static int tls_feed_input(KlTls *self, const void *cipher, size_t len)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
+    if (!cipher && len != 0)
+        return -1;   /* NULL buffer with a non-zero length is a caller bug */
     t->comp_mode = 1;
     if (t->in_pos > 0) {   /* compact the partially-consumed prefix */
         memmove(t->in_buf, t->in_buf + t->in_pos, t->in_len - t->in_pos);
@@ -410,7 +412,7 @@ static int64_t x509_time_to_unix(const mbedtls_x509_time *t)
 static int tls_peer_cert(KlTls *self, KlPeerCert *out)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
-    if (!t->handshake_done)
+    if (!out || !t->handshake_done)
         return -1;
 
     const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&t->ssl);
