@@ -779,6 +779,7 @@ clean:
 	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -f libkeel_freestanding.a libkeel_freestanding_selfcontained.a
 	rm -f libkeel_freestanding*.a libkeel_freestanding_selfcontained*.a
+	rm -f libkeel_freestanding_server*.a
 	rm -f keel_freestanding.efi keel_freestanding_*.efi keel_freestanding*.lib
 	find . -name '*.freestanding.o' -delete
 	find . -name '*.fs_*.o' -delete
@@ -1175,6 +1176,20 @@ freestanding-lib-selfcontained:
 	@rm -f $(FREESTANDING_SC_LIB)
 	$(call fs_build_and_gate,$(FREESTANDING_SC_SRC),libkeel_freestanding_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
 
+# Self-contained SERVER archive (Phase 10 UEFI server, S-4): the server core +
+# protocol layer + in-archive mem*/strlen (kl_cstr_builtin.c), for a bare EFI target
+# with no libc/EDK2 BaseMemoryLib. Same selfcontained gate as the client variant —
+# mem*/strlen must be DEFINED; the only undefined symbols are the KEEL platform/
+# provider hooks + the vendored-llhttp residual (+ PE __chkstk/_fltused). This is
+# what build_s4.sh links the EFI_TCP4 plaintext HTTP server against.
+FREESTANDING_SERVER_SC_SRC = $(FREESTANDING_SERVER_SRC) src/kl_cstr_builtin.c
+FREESTANDING_SERVER_SC_LIB = libkeel_freestanding_server_selfcontained.a
+
+freestanding-lib-server-selfcontained:
+	@echo "== self-contained freestanding SERVER archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
+	@rm -f $(FREESTANDING_SERVER_SC_LIB)
+	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SC_SRC),libkeel_freestanding_server_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
+
 # ── CRT-less PE/COFF link (B2 — the milestone's last literal) ─────────────────
 # LINKS libkeel_freestanding_selfcontained.a (mem*/strlen in-archive) into a
 # PE/COFF EFI image with NO hosted CRT (-nostdlib, lld PE), proving the archive
@@ -1280,7 +1295,7 @@ freestanding-harness:
 	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_HARNESS_BIN)
 	@rm -f $(FREESTANDING_HARNESS_BIN)
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan
