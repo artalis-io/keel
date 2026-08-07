@@ -22,6 +22,7 @@
 #   TARGET_PORT  responder port compiled into the URL (default 18443)
 #   TARGET_HOST  responder host compiled into the URL (default 10.0.2.2)
 set -euo pipefail
+if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then echo "ERROR: this script needs bash 4+ (uses associative arrays); on macOS run: brew install bash, or run it in the container." >&2; exit 3; fi
 cd "$(dirname "$0")"
 
 : "${CC:=clang}"
@@ -89,12 +90,25 @@ for src in "$MBEDTLS_SRC"/library/*.c; do
 done
 echo "  compiled $(ls mbedtls_obj/*.obj | wc -l) mbedTLS objects"
 
+# F4: entropy policy. SPIKE mode (default: verify-none, no virtio-rng) opts into the
+# INSECURE weak-entropy fallback so the demo can proceed over weak entropy (matching the
+# loud runtime warning). PROD mode (U4_MODE=prod) does NOT define it — it requires real
+# EFI_RNG via virtio-rng, and mbedtls_hardware_poll fails closed without it.
+ENTROPY_DEFS=()
+if [ "${U4_MODE:-spike}" != "prod" ]; then
+  ENTROPY_DEFS=( -DKL_UEFI_INSECURE_TEST_ENTROPY )
+  echo "entropy policy:    INSECURE test fallback (spike; -DKL_UEFI_INSECURE_TEST_ENTROPY)"
+else
+  echo "entropy policy:    FAIL-CLOSED (prod; real EFI_RNG required)"
+fi
+
 # ---- 2. the Keel mbedTLS adapter + U-4 platform TU ----
 # tls_mbedtls.c needs the adapter header + src/ (socket.h) + mbedtls include.
 ADAPTER_CFLAGS=(
   "${BASE_TARGET[@]}"
   -DKEEL_FREESTANDING
   "${MBEDTLS_DEFS[@]}"
+  "${ENTROPY_DEFS[@]}"            # F4: spike → insecure fallback; prod → fail-closed
   -I"$MBEDTLS_ADAPTER"
   -I"$MBEDTLS_SRC/include"
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/src"
@@ -110,6 +124,20 @@ OBJS+=( tls_mbedtls.obj )
 echo "compiling mbedtls_platform_uefi.c ..."
 "$CC" "${ADAPTER_CFLAGS[@]}" -c -o mbedtls_platform_uefi.obj mbedtls_platform_uefi.c
 OBJS+=( mbedtls_platform_uefi.obj )
+
+# entropy_uefi.c = mbedtls_hardware_poll, split out of the platform TU so the host mock
+# harness can test the fail-closed contract without the libc-clashing residuals. Needs the
+# entropy defines (spike → insecure fallback; prod → fail-closed) but NOT the mbedTLS include.
+echo "compiling entropy_uefi.c ..."
+"$CC" "${ADAPTER_CFLAGS[@]}" -c -o entropy_uefi.obj entropy_uefi.c
+OBJS+=( entropy_uefi.obj )
+
+# time_uefi.c = the mbedTLS cert-validity clock hooks (kl_uefi_mbedtls_time +
+# mbedtls_platform_gmtime_r) over Runtime Services GetTime. Needs struct tm from the local
+# mbedtls_shim <time.h>, so it uses the ADAPTER_CFLAGS (which carry -isystem LOCAL_SHIM).
+echo "compiling time_uefi.c ..."
+"$CC" "${ADAPTER_CFLAGS[@]}" -c -o time_uefi.obj time_uefi.c
+OBJS+=( time_uefi.obj )
 
 # ---- 3. U-1/U-2/U-3 Keel UEFI TUs + u4_selftest.c ----
 # U4_MODE=prod: production TLS — CA-verified server cert (dNSName SAN = KL_U4_PROD_HOST,
@@ -134,6 +162,11 @@ KEEL_CFLAGS=(
   -DKEEL_FREESTANDING
   -DTARGET_PORT="$TARGET_PORT"
   -DTARGET_HOST="\"$TARGET_HOST\""
+  # OVMF/QEMU reports UTC with an UNSPECIFIED timezone; this TEST/OVMF flag lets the cert clock
+  # treat an unspecified zone as already-UTC. It is a test accommodation — a real-firmware
+  # production build omits it, so unspecified-zone (local) time is rejected unless the app
+  # declares an offset via kl_uefi_set_unspecified_tz(). See wallclock_uefi.h.
+  -DKL_UEFI_ASSUME_UNSPECIFIED_UTC
   "${PROD_DEFS[@]}"
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src"
   -I"$MBEDTLS_ADAPTER"            # u4_selftest.c includes keel_tls_mbedtls.h
@@ -142,8 +175,8 @@ KEEL_CFLAGS=(
 )
 declare -A EXTRA=( [u1_link_stubs.c]="-DKEEL_UEFI_HAVE_RESOLVE"
                    [u4_selftest.c]="${U4_SELFTEST_DEFS:-}" )
-KEEL_SRCS=( allocator_uefi.c platform_uefi.c socket_efi_tcp4.c event_efi.c
-            resolve_uefi.c u1_link_stubs.c u4_selftest.c )
+KEEL_SRCS=( allocator_uefi.c errno_uefi.c platform_uefi.c civil_time.c wallclock_uefi.c clock_snapshot.c
+            socket_efi_tcp4.c event_efi.c resolve_uefi.c u1_link_stubs.c u4_selftest.c )
 for s in "${KEEL_SRCS[@]}"; do
   o="${s%.c}.obj"
   echo "compiling $s ..."

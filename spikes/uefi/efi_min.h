@@ -198,6 +198,43 @@ typedef struct {
 /* Memory pool types for AllocatePool */
 #define EfiLoaderData 2
 
+/* ---- EFI_TIME (UEFI 2.10 §8.3) — wall-clock, for cert validity-time (GetTime) ---- */
+typedef struct {
+    UINT16 Year;        /* 1900 .. 9999 */
+    UINT8  Month;       /* 1 .. 12 */
+    UINT8  Day;         /* 1 .. 31 */
+    UINT8  Hour;        /* 0 .. 23 */
+    UINT8  Minute;      /* 0 .. 59 */
+    UINT8  Second;      /* 0 .. 59 */
+    UINT8  Pad1;
+    UINT32 Nanosecond;  /* 0 .. 999,999,999 */
+    INT16  TimeZone;    /* -1440 .. 1440 or EFI_UNSPECIFIED_TIMEZONE */
+    UINT8  Daylight;
+    UINT8  Pad2;
+} EFI_TIME;
+
+#define EFI_UNSPECIFIED_TIMEZONE 0x07FF   /* GetTime returned local/unknown TZ */
+
+typedef struct {                          /* §8.3 — opaque here (we pass NULL) */
+    UINT32  Resolution;
+    UINT32  Accuracy;
+    BOOLEAN SetsToZero;
+} EFI_TIME_CAPABILITIES;
+
+/* ---- Runtime Services (UEFI 2.10 §8) — only GetTime is modelled. GetTime is valid
+ * both before AND after ExitBootServices, so it is the cert-validity clock source.
+ * Layout: the 24-byte EFI_TABLE_HEADER, then GetTime is the FIRST runtime function. -- */
+typedef struct {
+    UINT64 Signature;
+    UINT32 Revision;
+    UINT32 HeaderSize;
+    UINT32 CRC32;
+    UINT32 Reserved;
+
+    EFI_STATUS (EFIAPI *GetTime)(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities);
+    /* remaining runtime services (SetTime, GetWakeupTime, …) intentionally omitted */
+} EFI_RUNTIME_SERVICES;
+
 /* ---- System Table (UEFI 2.10 §4.3, partial) ---- */
 typedef struct {
     UINT64 Signature;
@@ -214,7 +251,7 @@ typedef struct {
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
     EFI_HANDLE                       StandardErrorHandle;
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *StdErr;
-    VOID                            *RuntimeServices;
+    EFI_RUNTIME_SERVICES            *RuntimeServices;
     EFI_BOOT_SERVICES               *BootServices;
     UINTN                            NumberOfTableEntries;
     VOID                            *ConfigurationTable;

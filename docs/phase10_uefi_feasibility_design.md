@@ -53,17 +53,82 @@ Status: **feasibility / design (2026-08-05).**
 >   *server*). Coordinated fixes kept TLS working over a would-block-mid-record: `errno=EAGAIN` on the
 >   provider's would-block, and an additive `client_async.c` fix (a TLS `read()==0` is WANT_READ, not
 >   EOF; real EOF is `-1`+`at_eof`).
-> - **U-7** (#222) — **ExitBootServices lifetime**: `kl_uefi_shutdown()` releases the whole stack
->   (socket → event → platform timer/EBS event); an `EVT_SIGNAL_EXIT_BOOT_SERVICES` notify fail-closes
->   the providers after EBS. Teardown proven observably — the monotonic clock freezes once its timer is
->   released.
+> - **U-7** (#222) — **ExitBootServices pre-EBS teardown**: `kl_uefi_shutdown()` releases the whole
+>   stack (socket → event → platform timer/EBS event); an `EVT_SIGNAL_EXIT_BOOT_SERVICES` notify sets
+>   `after_ebs`. Orderly-teardown proven observably (the monotonic clock freezes once its timer is
+>   released).
 >
-> **F-8 IS COMPLETE. The EFI network client is functionally complete AND lifetime-clean on bare
-> firmware: plaintext + HTTPS (CA-verified, real EFI_RNG) + DNS, non-blocking recv, boot-services-
-> correct teardown.** Beyond F-8 (future, out of the client scope): an EFI *server* (needs a
-> freestanding server archive — a separate effort; U-6's non-blocking recv is its prerequisite),
-> EFI_TCP6/IPv6, firmware `EFI_DNS4` (vs the U-5 raw resolver), and completion-mode TLS for a
-> fully-async HTTPS server.
+> **STATUS (2026-08-06) — EFI transport lifecycle hardened + mock-tested; HTTPS cert validation
+> now includes validity-time.** Both prior blockers are closed:
+>   - **Token / lifecycle hardening — COMPLETE and host-mock-tested.** Two rounds of adversarial-
+>     lifecycle review found real **EFI token-lifetime** bugs QEMU happy-path runs (and the happy-
+>     path-focused audits) never exposed. All are now fixed and covered by a host mock-EFI harness
+>     (`mock_efi_test.c`, 14 scenarios: the real provider TUs against a scriptable fake EFI under
+>     ASan+UBSan; see the newest passes in `docs/keel_audit.md` / `docs/keel_axis_audit.md`).
+>   - **Certificate validity-time enforcement — DONE (U-8).** `MBEDTLS_HAVE_TIME` + `HAVE_TIME_DATE`
+>     are enabled, backed by Runtime Services `GetTime`, so TLS now rejects expired / not-yet-valid
+>     certs in addition to CA chain + hostname. The trust boundary is handled carefully:
+>       - **One TLS-platform-lifetime SNAPSHOT (`clock_snapshot.c`), not per-verification GetTime.**
+>         `kl_uefi_clock_snapshot()` validates + captures UTC ONCE, **inside
+>         `kl_uefi_mbedtls_platform_init()`** (not per session — mbedTLS's time callback is global and
+>         has no session context, so a per-session snapshot would let concurrent sessions clobber each
+>         other's basis). The single snapshot is shared by all sessions, advanced by the monotonic
+>         clock, never refreshed while TLS is active, and cleared only at `kl_uefi_mbedtls_platform_
+>         shutdown()`. `mbedtls_time()` **never calls GetTime mid-handshake** — so a GetTime that fails
+>         after setup cannot fall back to epoch 0 and admit a 1970-spanning cert.
+>       - **Structural fail-closed gate**, not just an epoch-0 return: the snapshot capture is the
+>         gate — if the clock is untrustworthy, `kl_uefi_mbedtls_platform_init()` FAILS, so no
+>         `KlTlsCtx` can be created. Enforced inside the mandatory initializer (no app choreography),
+>         independent of cert dates.
+>       - **Requires a live monotonic clock.** The snapshot is advanced by `kl_monotonic_ms`, so a
+>         failed `kl_uefi_platform_init()` (timer not armed → frozen monotonic) must not yield a
+>         "valid" frozen cert clock. `kl_uefi_platform_init()` tears down all its state on failure
+>         (clearing GetTime), exposes `kl_uefi_platform_ready()`, and the snapshot refuses unless
+>         ready — so a frozen clock cannot silently accept an expired cert. U-4 treats
+>         `platform_init` failure as fatal.
+>       - **`EFI_TIME` field validation** (`kl_civil_valid`): malformed firmware (month 13, Feb 30,
+>         hour 25, sec 60, bad TZ/Daylight) is rejected before conversion, not normalised.
+>       - **Unspecified-timezone policy** (UEFI §8.3: an unspecified zone is LOCAL, not UTC):
+>         **rejected by default**; an app may declare its offset (`kl_uefi_set_unspecified_tz`); the
+>         `KL_UEFI_ASSUME_UNSPECIFIED_UTC` flag (build_u4/OVMF **test only**, never production) treats
+>         it as UTC. Timezone sign is UEFI's `UTC = local + TimeZone` (PST = +480).
+>     Proven in QEMU: **valid** cert + good clock → `status 200`; valid cert + **bad clock (RTC=2000)**
+>     → TLS refused, no 200; **expired** cert (minted for 2020 via faketime) → `status -1`,
+>     `KL_ERR_TLS_HANDSHAKE`, no 200. The conversion (vs libc `timegm`), fail-closed floor, unspecified-
+>     TZ policy, field validation, and the snapshot (incl. post-snapshot-GetTime-failure) are all
+>     unit-tested in the mock harness.
+>   - **Full production-TLS status — cert validation complete** (CA + hostname + validity-time). Any
+>     remaining hardening is operational (e.g. real-firmware RTC quality), not a missing check.
+>
+> The EFI transport (plaintext + DNS + the TLS *transport*, non-blocking recv, orderly pre-EBS
+> teardown) is functional on bare firmware and its failure paths are now hardened. Fixed in the F-8
+> hardening pass:
+>   1. *(Critical — FIXED)* a timed-out `Transmit`/`Connect`/DNS token returned WITHOUT
+>      `Cancel`+drain could leave the firmware referencing caller/stack storage → **quarantine
+>      model**: stable provider-owned slots (`g_conns[]`) and a single stable DNS-op struct
+>      (`g_dns_op`: tokens + descriptor + query buffer) are never reclaimed once a token can't be
+>      confirmed retired. Every submitted token reaches one terminal path (completion **or**
+>      `Cancel`→drain-to-`EFI_ABORTED`) before any storage is freed. (The mock models a *delayed
+>      firmware write into a quarantined token after the call returns* — with stack-local tokens
+>      that is an ASan stack-use-after-return; the stable storage makes it safe.)
+>   2. *(Critical — FIXED)* `close()` now cancels + drains outstanding connect/recv/tx tokens (via
+>      explicit `*_posted` state) before freeing; a failed drain quarantines instead of tearing down.
+>   3. *(High — FIXED)* the EBS fail-closed guard now covers continued use of existing connections
+>      (send/recv/drain/configure/connect) + the mbedTLS heap, not just new-socket creation.
+>   4. *(High — FIXED)* `mbedtls_hardware_poll` fails closed when EFI_RNG is absent (weak fallback is
+>      opt-in only, `-DKL_UEFI_INSECURE_TEST_ENTROPY`); split into `entropy_uefi.c` so the mock
+>      harness tests the fail-closed contract directly.
+>   5. *(Medium — FIXED, U-8)* certificate validity-time is now enforced over Runtime Services
+>      GetTime (fail-closed + sanity floor) — see the STATUS bullets above.
+>   6. *(Medium — FIXED)* the connect stale-guard no longer dereferences freed memory: the
+>      generation lives in the stable slot (`g_conns[]`), read via handle, not through a freed conn.
+>   7. *(FIXED)* host-side **mock-EFI failure-path tests** now exist (`mock_efi_test.c`: timeout→
+>      close, cancel-racing-completion, cancel-failure→quarantine, consumed-connect close, impossible
+>      recv length, post-EBS, entropy-unavailable, delayed-write-into-quarantined-token); the
+>      host-map-test link regression is fixed.
+>
+> Beyond F-8 (future): an EFI *server* (needs a freestanding server archive; U-6's non-blocking recv
+> is its prerequisite), EFI_TCP6/IPv6, firmware `EFI_DNS4`, completion-mode TLS.
 This is the roadmap's real **Phase 10** (`docs/pal_transformation_design.md`, phase table) —
 UEFI feasibility + an optional prototype. It is *not* the lwIP-raw client work in
 `docs/phase10_lwip_raw_client_design.md` (that doc uses a local "Phase 10" label but is the
@@ -305,14 +370,17 @@ switch (`EFI_TCP6`).
 | Combination | Status |
 |-------------|--------|
 | EFI_TCP4 + EFI completion loop (client, plaintext) | **PROVEN — `KlClient GET → 200` in QEMU/OVMF (U-3, #215)** |
-| EFI_TCP4 + EFI completion loop (client, HTTPS) | **PROVEN — freestanding mbedTLS `GET → 200` in QEMU/OVMF (U-4, #216); verify-none + weak-entropy spike** |
+| EFI_TCP4 + EFI completion loop (client, HTTPS) | **HAPPY PATH PROVEN — freestanding mbedTLS `GET → 200` in QEMU/OVMF (U-4, #216). Prod mode = CA + hostname verified, real EFI_RNG — but NO cert-time validation (`HAVE_TIME` off) and the reusable entropy adapter was not fail-closed (F-8 hardening).** |
 | EFI_UDP4 DNS (A-query resolve) | **PROVEN — `resolve keel.test → GET → 200` in QEMU/OVMF (U-5, #219); bounds-safe parse, sync** |
 | EFI_TCP4 + EFI completion loop (server) | *stretch; deferred (client-first)* |
 | Host EFI_TCP4 **mock** + completion driver (ASan gate) | **PROVEN — F-7 harness 57/57 (mock socket + completion provider)** |
 | IPv6 (`EFI_TCP6`) | *out of first cut (family switch)* |
 
 Nothing is marked production-ready by existence — only by a passing gate, per the axis-audit
-decision standard.
+decision standard. **"PROVEN" above means the HAPPY PATH is demonstrated in QEMU/OVMF.** The
+adversarial FAILURE paths (token-timeout Cancel+drain, close-with-outstanding, post-EBS use,
+entropy-unavailable, cert-time) are NOT yet gated — see the STATUS banner at the top; F-8 is not
+production-ready until those are fixed and covered by host-side mock-EFI failure-path tests.
 
 ---
 

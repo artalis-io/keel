@@ -24,6 +24,7 @@
 #   TARGET_PORT  responder port compiled into the URL (default 18080)
 #   TARGET_HOST  responder host compiled into the URL (default 10.0.2.2)
 set -euo pipefail
+if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then echo "ERROR: this script needs bash 4+ (uses associative arrays); on macOS run: brew install bash, or run it in the container." >&2; exit 3; fi
 cd "$(dirname "$0")"
 
 : "${CC:=clang}"
@@ -60,7 +61,7 @@ CFLAGS=(
 # in favor of resolve_uefi.c's numeric one.
 declare -A EXTRA=( [u1_link_stubs.c]="-DKEEL_UEFI_HAVE_RESOLVE" )
 
-SRCS=( allocator_uefi.c platform_uefi.c socket_efi_tcp4.c event_efi.c
+SRCS=( allocator_uefi.c errno_uefi.c platform_uefi.c civil_time.c wallclock_uefi.c socket_efi_tcp4.c event_efi.c
        resolve_uefi.c lifecycle_uefi.c u1_link_stubs.c u7_selftest.c )
 OBJS=()
 for s in "${SRCS[@]}"; do

@@ -60,7 +60,18 @@ PRODDIR="$(pwd)/u4_prod_cert"
 if [ "${U4_MODE:-spike}" = "prod" ]; then
   export U4_VIRTIO_RNG=1
   mkdir -p "$PRODDIR"
-  openssl req -x509 -newkey rsa:2048 -nodes \
+  # U4_CERT=expired (U-8 negative test): mint the responder cert in the PAST via faketime so
+  # it is already expired. With cert validity-time enforcement live, the client MUST reject it
+  # (CERT_EXPIRED) — i.e. NO 200. U4_CERT=valid (default) mints a currently-valid cert (→ 200).
+  # GENPFX is an ARRAY so the faketime timestamp (which contains a space) stays a single
+  # argument; empty in the valid case (expands to nothing).
+  GENPFX=()
+  if [ "${U4_CERT:-valid}" = "expired" ]; then
+    command -v faketime >/dev/null || { echo "U4_CERT=expired needs faketime (apt install faketime)"; exit 2; }
+    GENPFX=(faketime -f '2020-01-01 00:00:00')   # faketime format: 'YYYY-MM-DD HH:MM:SS'
+    echo "prod: minting an EXPIRED cert (valid 2020-01-01..02) to test cert-time enforcement"
+  fi
+  "${GENPFX[@]}" openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "$PRODDIR/k.pem" -out "$PRODDIR/c.pem" \
     -subj "/CN=$PROD_HOST" -addext "subjectAltName=DNS:$PROD_HOST" -days 2 >/dev/null 2>&1 \
     || { echo "prod cert gen FAILED"; exit 2; }
@@ -200,6 +211,14 @@ QEMU_ARGS+=(
 # fallback). Default off keeps the plain spike run unchanged.
 if [ "${U4_VIRTIO_RNG:-0}" = "1" ]; then
   QEMU_ARGS+=( -object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0 )
+fi
+# U4_CLOCK=bad (U-8 negative test): set the emulated RTC to the year 2000 so OVMF GetTime
+# returns a year below KL_UEFI_TIME_FLOOR_YEAR. The clock gate must then REFUSE TLS init —
+# no handshake, no 200 — even with a currently-VALID cert, proving fail-closed is structural
+# (not merely epoch-0-vs-cert-dates). Default keeps the host clock.
+if [ "${U4_CLOCK:-host}" = "bad" ]; then
+  QEMU_ARGS+=( -rtc "base=2000-01-01T00:00:00" )
+  echo "U4_CLOCK=bad: emulated RTC set to 2000 (below the trust floor) — TLS must refuse"
 fi
 
 echo "=== qemu cmd ==="

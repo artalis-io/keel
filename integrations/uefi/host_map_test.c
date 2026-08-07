@@ -21,6 +21,14 @@
 #include <stdio.h>
 #include <string.h>
 
+/* F7a: socket_efi_tcp4.c now references kl_uefi_after_ebs() (the F3 fail-closed guard),
+ * whose real definition lives in platform_uefi.c — a TU we do NOT link here (it would
+ * collide with libkeel.a's kl_monotonic_ms/kl_plat_random). This host harness only
+ * exercises the PURE mapping functions (firmware never runs), so a trivial stub that
+ * reports "boot services still present" resolves the link. */
+int kl_uefi_after_ebs(void);
+int kl_uefi_after_ebs(void) { return 0; }
+
 static int g_fail = 0;
 
 #define CHECK(cond, msg) do {                                   \

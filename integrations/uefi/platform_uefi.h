@@ -16,6 +16,15 @@
 #define KEEL_UEFI_PLATFORM_UEFI_H
 
 #include "efi_uefi.h"
+#include <stdint.h>
+
+/* Cert validity-time sanity floor (U-8): a GetTime year below this is treated as an
+ * unset/stuck RTC and rejected (fail-closed) rather than trusted to validate cert expiry.
+ * Bump at/above the build year; certs minted before this are vanishingly rare in practice
+ * and a too-old clock is the failure mode we are guarding against. */
+#ifndef KL_UEFI_TIME_FLOOR_YEAR
+#define KL_UEFI_TIME_FLOOR_YEAR 2025
+#endif
 
 /* Install the UEFI backing for kl_monotonic_ms / kl_plat_random. Creates the
  * periodic 1 ms EVT_TIMER that drives the monotonic tick counter and locates
@@ -24,6 +33,12 @@
  * created (the clock would then be stuck at 0). Idempotent after first success.
  */
 int kl_uefi_platform_init(EFI_BOOT_SERVICES *bs, EFI_SYSTEM_TABLE *st);
+
+/* 1 iff kl_uefi_platform_init() FULLY succeeded (the periodic monotonic timer is armed, so
+ * kl_monotonic_ms advances). 0 after a failed or not-yet-run init — in which case the module
+ * has torn down its installed state (GetTime unreachable), so the TLS cert clock (a snapshot
+ * advanced by the monotonic tick) cannot be captured and TLS bring-up refuses. */
+int kl_uefi_platform_ready(void);
 
 /* Optional bring-up aid: route kl_uefi_platform_init's step trace to @out (a
  * console). Pass NULL to silence. Call before kl_uefi_platform_init. */
@@ -45,6 +60,20 @@ int kl_uefi_have_entropy(void);
 /* 1 once ExitBootServices() has fired; KEEL's EFI providers then refuse boot-service
  * I/O. kl_uefi_have_entropy() also returns 0 after EBS. */
 int kl_uefi_after_ebs(void);
+
+/* Cert validity-time clock (U-8): fill *out_unix with the current UTC time in seconds since
+ * the Unix epoch, read from Runtime Services GetTime. Returns 0 on success, -1 FAIL-CLOSED
+ * (no GetTime, GetTime error, or year < KL_UEFI_TIME_FLOOR_YEAR — an untrustworthy RTC). Valid
+ * before AND after ExitBootServices (GetTime is a runtime service). This backs the mbedTLS
+ * clock (time_uefi.c) so TLS enforces certificate notBefore/notAfter. */
+int kl_uefi_wallclock(int64_t *out_unix);
+
+/* Cert-clock gate (U-8, fail-closed): 1 iff kl_uefi_wallclock() currently yields a trustworthy
+ * UTC time (GetTime present + succeeds, fields valid, year >= floor). TLS bring-up
+ * (kl_uefi_mbedtls_platform_init) calls this and REFUSES to initialise when it returns 0, so
+ * HTTPS cannot start without a trustworthy clock — independent of any certificate's dates
+ * (a returned epoch-0 fallback alone could still admit a cert whose window spans 1970). */
+int kl_uefi_have_trustworthy_wallclock(void);
 
 /* Release the platform's boot-services resources (periodic timer + EBS event). Call
  * BEFORE ExitBootServices for a clean teardown; idempotent. Afterwards

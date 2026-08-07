@@ -21,6 +21,7 @@
 #   KL_U5_HOSTNAME    hostname the client resolves (default keel.test)
 #   KL_U5_NAMESERVER  DNS server the guest queries (default 10.0.2.2)
 set -euo pipefail
+if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then echo "ERROR: this script needs bash 4+ (uses associative arrays); on macOS run: brew install bash, or run it in the container." >&2; exit 3; fi
 cd "$(dirname "$0")"
 
 : "${CC:=clang}"
@@ -61,7 +62,7 @@ CFLAGS=(
 # favor of resolve_uefi.c's (which now has the DNS path).
 declare -A EXTRA=( [u1_link_stubs.c]="-DKEEL_UEFI_HAVE_RESOLVE" )
 
-SRCS=( allocator_uefi.c platform_uefi.c socket_efi_tcp4.c event_efi.c
+SRCS=( allocator_uefi.c errno_uefi.c platform_uefi.c civil_time.c wallclock_uefi.c socket_efi_tcp4.c event_efi.c
        dns_uefi.c resolve_uefi.c u1_link_stubs.c u5_selftest.c )
 OBJS=()
 for s in "${SRCS[@]}"; do

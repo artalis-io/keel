@@ -11,15 +11,19 @@
  * No hosted libc is pulled in; every symbol here is a small freestanding impl or
  * an EFI Boot Services call.
  *
- * SPIKE SHORTCUTS (documented; NOT production-safe):
- *   - When EFI_RNG_PROTOCOL is absent (kl_uefi_have_entropy()==0), (a) falls back
- *     to a WEAK, INSECURE seed (a counter mixed with a boot-services pointer) so the
- *     handshake can still proceed. This proves the TRANSPORT, not security. The
- *     selftest prints a loud warning in this case.
+ * ENTROPY POLICY (F4 — fail closed by default):
+ *   - With EFI_RNG_PROTOCOL present, (a) draws real randomness.
+ *   - Without it, (a) FAILS CLOSED (returns nonzero, *olen=0) so the CTR_DRBG seed
+ *     fails and NO TLS context is created — UNLESS the build explicitly defines
+ *     -DKL_UEFI_INSECURE_TEST_ENTROPY, in which case it falls back to a WEAK, INSECURE
+ *     seed (a counter mixed with a boot-services pointer) so a SPIKE demo can proceed
+ *     over weak entropy. That macro proves the TRANSPORT, not security; the selftest
+ *     prints a loud warning. The reusable adapter (no macro) never fabricates entropy.
  */
 
 #include "mbedtls_platform_uefi.h"
-#include "platform_uefi.h"          /* kl_uefi_have_entropy */
+#include "platform_uefi.h"          /* kl_uefi_have_entropy / kl_uefi_have_trustworthy_wallclock */
+#include "clock_snapshot.h"         /* kl_uefi_clock_snapshot[_reset] (cert clock, lifetime) */
 #include "../../src/platform.h"     /* kl_plat_random (freestanding platform hook) */
 
 #include <mbedtls/platform.h>       /* mbedtls_platform_set_calloc_free */
@@ -53,6 +57,10 @@ static EFI_BOOT_SERVICES *g_bs;   /* borrowed; set by kl_uefi_mbedtls_platform_i
 
 static void *uefi_mbed_calloc(size_t nmemb, size_t size) {
     if (!g_bs) return NULL;
+    /* F5: after ExitBootServices the Boot Services heap is gone — AllocatePool must
+     * never be called. Fail closed so any post-EBS TLS allocation returns NULL rather
+     * than dereferencing g_bs->AllocatePool against a torn-down firmware. */
+    if (kl_uefi_after_ebs()) return NULL;
     /* overflow guard on nmemb*size */
     size_t total;
     if (size != 0 && nmemb > (size_t)-1 / size) return NULL;
@@ -68,17 +76,49 @@ static void *uefi_mbed_calloc(size_t nmemb, size_t size) {
 }
 
 static void uefi_mbed_free(void *ptr) {
-    if (g_bs && ptr) g_bs->FreePool(ptr);   /* FreePool needs no size */
+    if (!ptr) return;
+    /* F5: post-EBS FreePool is undefined — the heap it managed no longer exists.
+     * Skip it. Any live mbedTLS object destroyed after ExitBootServices (e.g. a TLS
+     * ctx torn down on the shutdown path) thus becomes a deliberate no-op leak rather
+     * than a call into torn-down firmware. The correct contract is to destroy all TLS
+     * objects BEFORE kl_uefi_shutdown()/ExitBootServices; this guard only makes a
+     * contract violation safe instead of fatal. */
+    if (kl_uefi_after_ebs()) return;
+    if (g_bs) g_bs->FreePool(ptr);   /* FreePool needs no size */
 }
 
 int kl_uefi_mbedtls_platform_init(EFI_BOOT_SERVICES *bs) {
     if (g_bs) return 0;         /* idempotent */
+    if (!bs) return -1;         /* the EFI heap needs a valid Boot Services table */
+
+    /* U-8 clock gate + capture (fail-closed, enforced HERE so it never depends on application
+     * choreography): validate + snapshot UTC once, for the whole TLS-platform lifetime. If the
+     * clock is untrustworthy, TLS platform init FAILS → no KlTlsCtx can be created. mbedtls_time()
+     * then reads this one snapshot (monotonic-advanced), never GetTime, and it is never refreshed
+     * while TLS is active — concurrency-safe across interleaved sessions and immune to a later
+     * GetTime failure. (kl_uefi_platform_init must run first so Runtime Services GetTime exists.) */
+    if (kl_uefi_clock_snapshot() != 0)
+        return -1;
+
     g_bs = bs;
     if (mbedtls_platform_set_calloc_free(uefi_mbed_calloc, uefi_mbed_free) != 0) {
         g_bs = NULL;
+        kl_uefi_clock_snapshot_reset();   /* roll back the snapshot — init did not complete */
         return -1;
     }
+    /* The cert-validity clock (Runtime Services GetTime, fail-closed) is bound at compile time
+     * via MBEDTLS_PLATFORM_TIME_MACRO (mbedtls_config_uefi.h) + our mbedtls_platform_gmtime_r
+     * (time_uefi.c). With MBEDTLS_HAVE_TIME_DATE this makes x509 enforce notBefore/notAfter. */
     return 0;
+}
+
+void kl_uefi_mbedtls_platform_shutdown(void) {
+    /* F5: drop the borrowed Boot Services pointer so no later mbedTLS calloc/free can
+     * reach firmware. After this, uefi_mbed_calloc returns NULL (no new TLS objects)
+     * and uefi_mbed_free is a no-op. Call from the app's shutdown path AFTER every
+     * KlTlsCtx/KlTls has been destroyed and BEFORE ExitBootServices. Idempotent. */
+    g_bs = NULL;
+    kl_uefi_clock_snapshot_reset();   /* U-8: clear the cert-clock snapshot (lifetime ends here) */
 }
 
 /* mbedTLS's platform.c initializes its default heap function pointers to `calloc`
@@ -91,38 +131,10 @@ void *calloc(size_t nmemb, size_t size) { return uefi_mbed_calloc(nmemb, size); 
 void free(void *ptr);
 void free(void *ptr) { uefi_mbed_free(ptr); }
 
-/* ── (a) entropy: mbedtls_hardware_poll over EFI_RNG (with weak fallback) ────── */
-
-int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len,
-                          size_t *olen);
-
-int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len,
-                          size_t *olen) {
-    (void)data;
-    if (kl_uefi_have_entropy()) {
-        /* Real EFI_RNG-backed randomness. */
-        kl_plat_random(output, len);
-    } else {
-        /* *** SPIKE SHORTCUT — WEAK, INSECURE SEED ***
-         * No EFI_RNG in this firmware. kl_plat_random would fail-closed (zero the
-         * buffer), which would make the CTR_DRBG deterministic-but-known. To let the
-         * handshake proceed for a TRANSPORT proof, mix a monotonic counter with a
-         * pointer value (ASLR-ish) so the bytes at least vary run-to-run. This is
-         * NOT cryptographically secure and MUST NOT ship. The selftest warns loudly
-         * when kl_uefi_have_entropy() is 0. */
-        static uint64_t ctr;
-        uintptr_t p = (uintptr_t)(void *)&ctr;   /* address-derived variability */
-        for (size_t i = 0; i < len; i++) {
-            uint64_t x = ++ctr;
-            x ^= p + (uint64_t)i * 0x9E3779B97F4A7C15ULL;
-            x *= 0xD1B54A32D192ED03ULL;           /* splitmix-ish diffusion */
-            x ^= x >> 31;
-            output[i] = (unsigned char)(x & 0xFF);
-        }
-    }
-    if (olen) *olen = len;
-    return 0;
-}
+/* ── (a) entropy: mbedtls_hardware_poll over EFI_RNG (with weak fallback) ──────
+ * MOVED to entropy_uefi.c so the host mock-EFI harness can link + test the fail-closed
+ * contract WITHOUT this TU's libc-clashing residuals (calloc/free/strcmp/snprintf/…).
+ * entropy_uefi.c has no mbedTLS dependency; both TUs are compiled by build_u4.sh. */
 
 /* ── (c) libc string helpers mbedTLS uses that kl_cstr_builtin does not define ─
  * kl_cstr_builtin.c (in the self-contained archive) provides memcpy/memmove/

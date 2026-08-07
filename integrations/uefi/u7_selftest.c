@@ -122,6 +122,12 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     kl_event_ctx_free(&ev);
 
     /* ── the U-7 payload: clean boot-services teardown, observably proven ── */
+    /* F6: the lifecycle contract is that every opened socket is closed before shutdown.
+     * The async client closes its fd on completion, so this must read 0 here — prove it. */
+    int live = kl_uefi_socket_provider_live_count();
+    print("U-7: live socket slots before shutdown = "); print_int(live);
+    print_line(live == 0 ? " (contract OK — all closed)"
+                         : " (WARN: contract violation — slots preserved, not reclaimed)");
     print_line("U-7: releasing EFI network stack (kl_uefi_shutdown)...");
     uint64_t t0 = kl_monotonic_ms();
     kl_uefi_shutdown();                 /* socket provider + event provider + platform */
