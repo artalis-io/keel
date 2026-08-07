@@ -55,6 +55,12 @@ int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset)
     return _read(fd, buf, n);
 }
 
+void kl_plat_file_close(int fd)
+{
+    if (fd >= 0)
+        _close(fd);
+}
+
 int kl_plat_poll1(KlSocketHandle fd, int events, int timeout_ms)
 {
     WSAPOLLFD pfd;

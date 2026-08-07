@@ -10,9 +10,12 @@
 #include "proto_hooks.h"        /* ws/h2 upgrade seam — core never names ws/h2 directly */
 #include <assert.h>
 #include <string.h>
-#include <strings.h>
+#include <errno.h>            /* freestanding: supplied by the UEFI/cross shim */
+#include "kl_cstr.h"          /* kl_ascii_strncasecmp — freestanding-safe, locale-free */
+#ifndef KEEL_FREESTANDING
+#include <strings.h>          /* strncasecmp (hosted only; freestanding uses kl_cstr) */
 #include <unistd.h>
-#include <errno.h>
+#endif
 #include <stdint.h>
 #include "internal.h"
 #include "h2_internal.h"
@@ -526,7 +529,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
             &c->req, "Upgrade", &ug_len);
         const KlH2ServerHooks *h2h = kl_h2_server_hooks();
         if (ug && ug_len == 3 &&
-            strncasecmp(ug, "h2c", 3) == 0 && h2h && h2h->upgrade_from_h1) {
+            kl_ascii_strncasecmp(ug, "h2c", 3) == 0 && h2h && h2h->upgrade_from_h1) {
             c->state = (KlConnState)h2h->upgrade_from_h1(
                 c, router, c->h2_config,
                 leftover_buf, leftover_len);
@@ -554,7 +557,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         const char *expect = kl_request_header_len(
             &c->req, "Expect", &expect_len);
         if (expect && expect_len == 12 &&
-            strncasecmp(expect, "100-continue", 12) == 0) {
+            kl_ascii_strncasecmp(expect, "100-continue", 12) == 0) {
             best_effort_conn_write(c, kl_100_continue,
                                    sizeof(kl_100_continue) - 1);
         }

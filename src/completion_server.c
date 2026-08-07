@@ -482,11 +482,18 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
      * TLS/HTTP. Read it first (KL_CONN_PROXY_HEADER, a plaintext recv); comp_drive_proxy enters
      * the real initial state (TLS handshake or HTTP read) once the header is consumed. Mirrors
      * the readiness accept gate (server.c). */
+#ifndef KEEL_FREESTANDING
+    /* PROXY protocol is an L4-load-balancer feature (proxy_protocol.c: strtok_r /
+     * inet_pton / ntohs) — out of scope for a freestanding firmware server, which
+     * never sets proxy_trusted_cidrs. Gated so the freestanding archive omits
+     * proxy_protocol.c and its hosted address-parsing surface. */
     if (s->proxy_cidr_count > 0 &&
         kl_sockaddr_family(&nc->peer_addr) != KL_AF_UNSPEC &&
         kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &nc->peer_addr)) {
         nc->state = KL_CONN_PROXY_HEADER;   /* TLS memory-BIO enabled later, after the header */
-    } else if (nc->tls) {
+    } else
+#endif
+    if (nc->tls) {
         /* TLS: enter the handshake state and switch the backend into completion (memory BIO)
          * mode so handshake()/read()/write() operate on fed/drained buffers, not the socket. */
         nc->state = KL_CONN_TLS_HANDSHAKE;

@@ -4,8 +4,12 @@
 #include <keel/connection.h>
 #include <keel/server.h>
 #include <keel/tls.h>
+#include <errno.h>            /* freestanding: supplied by the UEFI/cross shim */
+#ifdef KEEL_FREESTANDING
+#include <sys/types.h>        /* ssize_t (no <unistd.h> in a freestanding build) */
+#else
 #include <unistd.h>
-#include <errno.h>
+#endif
 
 #include "socket.h"
 

@@ -5,8 +5,10 @@
 #include "response_internal.h"
 #include "platform.h"
 #include <string.h>
+#include <errno.h>            /* freestanding: supplied by the UEFI/cross shim */
+#ifndef KEEL_FREESTANDING
 #include <unistd.h>
-#include <errno.h>
+#endif
 #include <stdint.h>
 /* KlIoVec + the socket seam come from socket.h; sockaddr/TCP_NODELAY via
  * socket.h -> sockcompat.h. No raw net headers, and no platform iovec here —
@@ -140,7 +142,7 @@ int kl_response_init(KlResponse *res, KlAllocator *alloc) {
 void kl_response_reset(KlResponse *res) {
     /* Close file descriptor if one was set for sendfile */
     if (res->file_fd >= 0) {
-        close(res->file_fd);
+        kl_plat_file_close(res->file_fd);
     }
     /* Free owned body copy if any */
     if (res->body_owned) {
@@ -172,7 +174,7 @@ void kl_response_reset(KlResponse *res) {
 
 void kl_response_free(KlResponse *res) {
     if (res->file_fd >= 0) {
-        close(res->file_fd);
+        kl_plat_file_close(res->file_fd);
         res->file_fd = -1;
     }
     if (res->body_owned) {
