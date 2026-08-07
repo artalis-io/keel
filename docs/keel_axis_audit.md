@@ -39,6 +39,30 @@ from itself) — a build-axis guard, not a platform `#ifdef` in a dispatch path.
 **Compatibility-matrix delta:** `EFI_TCP4 server (plaintext + HTTPS)` moves from *not-started* to
 **firmware-verified (QEMU/OVMF, container): S-4 plaintext + S-6 HTTPS + S-7 clean teardown**.
 
+### Review round (post-S-7) — three seam fixes, one documented boundary
+
+A follow-up server-side review found three concrete implementation bugs at the inbound seam
+(all now fixed + verified; commit `71573dd`):
+- **Accept backpressure (Goal 8) is now REAL, not just claimed.** The socket layer had auto-
+  re-armed every consumed Accept token, so EFI kept a full armed pool and accepted into
+  firmware children Keel couldn't service. Fixed by splitting the accept lifecycle: `listen`
+  arms none; `accept` harvests without re-arming; `kl_uefi_socket_accept_arm(fd, want)` arms
+  capacity-gated (`want` = free Keel slots), driven every tick by `el_prime_accepts`. New mock
+  test `t_accept_backpressure` proves excess connections are not accepted.
+- **Alloc-free send (op/buffer lifetime, Goal 6).** `post_send` had `kl_malloc`'d per response;
+  it now copies into an inline per-op buffer. NB: the copy is *mandatory* — `comp_tls_post_encrypted`
+  frees its ciphertext right after posting, so a "reference stable segments" optimization is a
+  use-after-free on the TLS path (caught in the container as HTTPS-000; a good reminder the send
+  contract is copy-required across all completion backends).
+- **`el_close` teardown.** Now retires all connect/watch/server-I/O records + clears latched
+  state before the ctx is freed (the inline send buffer also removes the former leak window).
+
+**Documented boundary (not a regression):** on the server recv path the EFI backend peeks
+`c->tls` to route ciphertext to `feed_input` vs plaintext to `read_buf`. This is the *existing*
+completion-mode TLS contract for every backend (IOCP/pollcomp too), not a UEFI-specific leak;
+removing protocol knowledge from all completion backends (a neutral post_recv destination spec)
+is deferred cross-backend work, recorded here and in `event_efi.h`.
+
 ---
 
 ## Ninth pass — the UEFI completion provider validates the operation-lifetime contract (2026-08-06)
