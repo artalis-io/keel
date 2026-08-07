@@ -1110,8 +1110,9 @@ static void t_accept_basic(void) {
     KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
     CHECK(kl_handle_valid(lfd), "listener socket claimed a slot");
     CHECK(p->ops->bind(p->context, lfd, &ba) == 0, "bind ok");
-    CHECK(p->ops->listen(p->context, lfd, 2) == 0, "listen ok");
-    CHECK(g_accept_tok_count >= 1, "listen armed the Accept-token pool");
+    CHECK(p->ops->listen(p->context, lfd, 2) == 0, "listen ok (creates Accept-token pool)");
+    CHECK(kl_uefi_socket_accept_arm(lfd, 2) == 2, "accept_arm(2) arms 2 tokens (capacity-gated)");
+    CHECK(g_accept_tok_count >= 1, "Accept-token pool armed");
 
     KlSockAddr peer;
     KlSocketHandle a = p->ops->accept(p->context, lfd, &peer);
@@ -1140,7 +1141,8 @@ static void t_accept_listener_close_drains(void) {
     const KlSocketProvider *p = fresh_provider();
     KlSockAddr ba; mk_addr(&ba);
     KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
-    CHECK(p->ops->listen(p->context, lfd, 4) == 0, "listen armed 4 Accept tokens");
+    CHECK(p->ops->listen(p->context, lfd, 4) == 0, "listen ok (Accept-token pool created)");
+    CHECK(kl_uefi_socket_accept_arm(lfd, 4) == 4, "accept_arm(4) arms 4 Accept tokens");
     CHECK(outstanding_count() >= 4, "4 Accept tokens outstanding");
     p->ops->close(p->context, lfd);
     CHECK(outstanding_count() == 0, "all Accept tokens drained on listener close");
@@ -1156,7 +1158,8 @@ static void t_accept_cancel_fail_quarantine(void) {
     const KlSocketProvider *p = fresh_provider();
     KlSockAddr ba; mk_addr(&ba);
     KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
-    CHECK(p->ops->listen(p->context, lfd, 4) == 0, "listen armed Accept tokens");
+    CHECK(p->ops->listen(p->context, lfd, 4) == 0, "listen ok (Accept-token pool created)");
+    CHECK(kl_uefi_socket_accept_arm(lfd, 4) == 4, "accept_arm(4) arms Accept tokens");
     int before = g_destroy_child_calls;
     p->ops->close(p->context, lfd);   /* cancel fails -> can't drain -> quarantine */
     CHECK(g_tcp_cancel_all_calls >= 1, "F1: Cancel(NULL) attempted on the Accept pool");
@@ -1180,6 +1183,7 @@ static void t_accepted_child_close_recv(void) {
     KlSockAddr ba; mk_addr(&ba);
     KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
     p->ops->listen(p->context, lfd, 2);
+    kl_uefi_socket_accept_arm(lfd, 2);   /* listen no longer auto-arms — arm explicitly */
     mock_deliver_connection();
     KlSockAddr peer;
     KlSocketHandle a = p->ops->accept(p->context, lfd, &peer);
@@ -1220,6 +1224,7 @@ static void t_accept_pool_full(void) {
     KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
     fds[nf++] = lfd;
     p->ops->listen(p->context, lfd, 2);
+    kl_uefi_socket_accept_arm(lfd, 2);   /* arm 2 tokens (backpressure floor: adoption still fails when full) */
     /* Occupy every remaining slot with plain sockets. */
     for (int i = 0; i < 64; i++) {
         KlSocketHandle s = p->ops->socket(p->context, 2, 1, 0);
@@ -1235,6 +1240,45 @@ static void t_accept_pool_full(void) {
     for (int i = 0; i < nf; i++) p->ops->close(p->context, fds[i]);   /* reclaim the pool */
 }
 
+/* THE backpressure test (S-7 review): listen arms NO Accept tokens; kl_uefi_socket_accept_arm
+ * bounds the armed-token count to the free-capacity `want` the event layer passes. With only
+ * `want` tokens armed, only `want` connections can be accepted into firmware children — the
+ * rest wait in the TCP backlog (never orphaned in a child Keel can't service). This is real
+ * backpressure (Goal 8), not just the "unadoptable child destroyed" cleanup floor. */
+static void t_accept_backpressure(void) {
+    T_CASE("accept: capacity-gated arming bounds armed tokens (Goal 8 backpressure)");
+    reset_counters();
+    g_tcp_receive_mode = TOK_COMPLETE_OK; g_tcp_close_mode = TOK_COMPLETE_OK;
+    const KlSocketProvider *p = fresh_provider();
+    KlSockAddr ba; mk_addr(&ba);
+    KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
+    p->ops->bind(p->context, lfd, &ba);
+    CHECK(p->ops->listen(p->context, lfd, 4) == 0, "listen ok (backlog 4)");
+    CHECK(g_accept_tok_count == 0, "listen arms ZERO tokens (capacity-gated — the fix)");
+    CHECK(outstanding_count() == 0, "no Accept tokens outstanding after listen");
+
+    /* Free capacity = 2 -> exactly 2 tokens armed, never the full backlog of 4. */
+    CHECK(kl_uefi_socket_accept_arm(lfd, 2) == 2, "accept_arm(2) arms exactly 2");
+    CHECK(kl_uefi_socket_accept_arm(lfd, 2) == 2, "accept_arm(2) is idempotent (still 2)");
+    CHECK(outstanding_count() == 2, "only 2 Accept tokens outstanding (not 4) — bounded by capacity");
+
+    /* Three connections arrive; only the 2 armed tokens can take one each. */
+    CHECK(mock_deliver_connection() == 1, "conn 1 taken (armed token)");
+    CHECK(mock_deliver_connection() == 1, "conn 2 taken (armed token)");
+    CHECK(mock_deliver_connection() == 0, "conn 3 NOT taken — no armed token (backpressure holds)");
+
+    KlSockAddr peer;
+    KlSocketHandle a1 = p->ops->accept(p->context, lfd, &peer);
+    KlSocketHandle a2 = p->ops->accept(p->context, lfd, &peer);
+    CHECK(kl_handle_valid(a1) && kl_handle_valid(a2), "both armed connections accepted");
+    CHECK(!kl_handle_valid(p->ops->accept(p->context, lfd, &peer)),
+          "no 3rd child — the excess connection was never accepted into firmware");
+
+    p->ops->close(p->context, a1);
+    p->ops->close(p->context, a2);
+    p->ops->close(p->context, lfd);
+}
+
 /* Stale generation: a closed accepted-child slot bumps its generation, so a captured
  * {handle,gen} is rejected — no stale completion can touch a reused slot. */
 static void t_accept_stale_generation(void) {
@@ -1245,6 +1289,7 @@ static void t_accept_stale_generation(void) {
     KlSockAddr ba; mk_addr(&ba);
     KlSocketHandle lfd = p->ops->socket(p->context, 2, 1, 0);
     p->ops->listen(p->context, lfd, 2);
+    kl_uefi_socket_accept_arm(lfd, 2);   /* listen no longer auto-arms — arm explicitly */
     mock_deliver_connection();
     KlSockAddr peer;
     KlSocketHandle a = p->ops->accept(p->context, lfd, &peer);
@@ -1285,6 +1330,7 @@ int main(void) {
     t_accepted_child_close_recv();
     t_accept_post_ebs_refuse();
     t_accept_pool_full();
+    t_accept_backpressure();
     t_accept_stale_generation();
     t_accept_cancel_fail_quarantine();   /* last: intentional permanent slot leak */
     t_dns_cancel_fails_quarantine();   /* last: sets the sticky DNS quarantine */

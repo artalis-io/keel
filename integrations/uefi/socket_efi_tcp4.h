@@ -119,6 +119,16 @@ int kl_uefi_socket_configure(KlSocketHandle fd, const KlSockAddr *a);
 int kl_uefi_socket_connect_post(KlSocketHandle fd);
 int kl_uefi_socket_connect_poll(KlSocketHandle fd, int *out_ok);
 
+/* Capacity-gated Accept-token arming — the server-side analogue of connect_post (S-3
+ * backpressure, Goal 8). listen() creates the Accept-token pool events but arms NONE;
+ * the completion event layer calls this every tick with @want = the number of FREE Keel
+ * connection slots, so the number of armed EFI Accept tokens never exceeds Keel's spare
+ * capacity (a connection Keel can't service waits in the TCP backlog, not in a firmware
+ * child handle). accept() harvests a completed token WITHOUT re-arming; this is the only
+ * re-arm path. Returns the resulting posted (armed-or-completed-unharvested) token count.
+ * Idempotent. */
+int kl_uefi_socket_accept_arm(KlSocketHandle fd, int want);
+
 /* Handle-based stale-completion guard for the completion backend (which holds a
  * KlSocketHandle + a captured generation, not the opaque KlUefiConn*). A completion
  * delivered after the conn was closed (generation bumped) or its memory reused
