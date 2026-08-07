@@ -153,6 +153,14 @@ typedef struct KlUefiConn {
      * socket(). Its stable storage is deliberately leaked until ExitBootServices. */
     int                       quarantined;
 
+    /* ── S-2 server (passive) state ──────────────────────────────────────────
+     * A listener conn is Configure()d with ActiveFlag=FALSE; bind() records the
+     * station port here, listen() arms the Accept-token pool (g_listener). An
+     * accepted child is an ordinary KlUefiConn (adopted from the Accept token's
+     * NewChildHandle) that reuses send/recv/close verbatim. */
+    int                       is_listener;   /* this conn is a passive listener */
+    UINT16                    station_port;   /* bind() port (0 = any) */
+
     KlAllocator           alloc;        /* by-value copy of the provider's allocator */
 } KlUefiConn;
 
@@ -176,6 +184,22 @@ static KlUefiSockCtx g_ctx;
  * dereference freed memory (the old design freed the conn, so a late completion's read
  * was a UAF). Single-threaded pre-boot env → no locking. */
 static KlUefiConn g_conns[KL_EFI_MAX_CONNS];
+
+/* ── S-2 listener: a single passive Accept-token pool (UEFI is single-threaded pre-boot,
+ * so one listener / one loop; horizontal scaling is not a pre-boot concern). Each token
+ * is armed via EFI_TCP4_PROTOCOL.Accept and, on completion, yields a NewChildHandle. The
+ * pool storage is file-scope-stable so a firmware write into a hung Accept token after a
+ * failed cancel lands in valid memory (the client's DNS-token lesson); a token that can't
+ * be confirmed retired is quarantined (its event never CloseEvent'd, leaked to EBS). */
+#define KL_EFI_ACCEPT_BACKLOG 4
+typedef struct {
+    KlSocketHandle fd;                                  /* listener conn handle (0 = none) */
+    EFI_TCP4_LISTEN_TOKEN tok[KL_EFI_ACCEPT_BACKLOG];
+    int            posted[KL_EFI_ACCEPT_BACKLOG];       /* token armed, awaiting completion */
+    int            quarantined[KL_EFI_ACCEPT_BACKLOG];  /* failed cancel — event leaked, never reused */
+    int            n;                                   /* number of pool slots created */
+} KlUefiListener;
+static KlUefiListener g_listener;
 
 /* ── pure mappings (host-testable) ─────────────────────────────────────────────── */
 
@@ -813,6 +837,31 @@ static kl_ssize_t efi_sock_recv(void *cx, KlSocketHandle fd, void *buf, size_t l
  * generation bumped even) but NEVER frees the storage, so a late completion's
  * {handle,gen} read is safe (stable storage).
  */
+/* Tear down the Accept-token pool when its listener closes: cancel outstanding
+ * Accept tokens, drain each to a terminal signal, then CloseEvent it — quarantining
+ * (leaking) any that can't be confirmed retired (the firmware may still write the
+ * token / NewChildHandle). Mirrors efi_sock_close's per-conn token discipline. */
+static void listener_teardown(KlUefiConn *lc) {
+    EFI_TCP4_PROTOCOL *tcp = lc->tcp;
+    if (tcp) tcp->Cancel(tcp, NULL);   /* abort all outstanding Accept tokens */
+    for (int i = 0; i < g_listener.n; i++) {
+        if (g_listener.quarantined[i]) continue;   /* already leaked */
+        if (g_listener.posted[i]) {
+            if (!pump_until(lc, g_listener.tok[i].CompletionToken.Event)) {
+                g_listener.quarantined[i] = 1;      /* hung — leak the event, never close */
+                continue;
+            }
+            g_listener.posted[i] = 0;
+        }
+        if (g_listener.tok[i].CompletionToken.Event) {
+            lc->bs->CloseEvent(g_listener.tok[i].CompletionToken.Event);
+            g_listener.tok[i].CompletionToken.Event = NULL;
+        }
+    }
+    g_listener.fd = 0;
+    g_listener.n  = 0;
+}
+
 static int efi_sock_close(void *cx, KlSocketHandle fd) {
     (void)cx;
     KlUefiConn *c = conn_of(fd);
@@ -831,6 +880,11 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
     /* F1: a quarantined conn already leaked its (still-firmware-owned) tokens/buffers.
      * Do NOT touch them again; leave the slot occupied-but-dead (never reclaimed). */
     if (c->quarantined) return 0;
+
+    /* S-2: a listener also owns the Accept-token pool — drain/quarantine it before
+     * the conn's own teardown (its 4 per-op token events + child). */
+    if (c->is_listener && g_listener.fd == fd)
+        listener_teardown(c);
 
     EFI_BOOT_SERVICES *bs = c->bs;
     EFI_TCP4_PROTOCOL *tcp = c->tcp;
@@ -917,16 +971,166 @@ static int  efi_noop_fd(void *cx, KlSocketHandle fd)          { (void)cx; (void)
 static void efi_void_fd(void *cx, KlSocketHandle fd)          { (void)cx; (void)fd; }
 static int  efi_opt(void *cx, KlSocketHandle fd, int on)      { (void)cx; (void)fd; (void)on; return 0; }
 
-/* bind / listen / accept: client-only provider (like lwip-raw's client path).
- * bind → -1 (ENOTSUP-equivalent, no errno on UEFI); listen/accept unsupported. */
+/* ── S-2 server: passive open (bind / listen / accept) ─────────────────────────── */
+
+/* Adopt an Accept token's NewChildHandle into a fresh KlUefiConn slot: OpenProtocol
+ * the child's EFI_TCP4, create its per-op token events, mark it connected/configured
+ * (Accept already established + configured the child). Returns the conn (magic live)
+ * or NULL on failure — in which case the child is destroyed so it isn't orphaned. */
+static KlUefiConn *adopt_child(EFI_HANDLE child) {
+    KlUefiSockCtx *ctx = &g_ctx;
+    if (!ctx->created || !child) return NULL;
+    int idx = -1;
+    for (int i = 0; i < KL_EFI_MAX_CONNS; i++)
+        if (g_conns[i].magic == 0) { idx = i; break; }
+    if (idx < 0) {                                   /* pool full — destroy the child */
+        ctx->sb->DestroyChild(ctx->sb, child);
+        return NULL;
+    }
+    KlUefiConn *c = &g_conns[idx];
+    UINT64 prev_gen = c->generation;
+    { unsigned char *p = (unsigned char *)c; for (size_t i = 0; i < sizeof(*c); i++) p[i] = 0; }
+    c->bs = ctx->bs; c->image = ctx->image; c->sb = ctx->sb; c->alloc = ctx->alloc;
+    c->generation = prev_gen + 1;                    /* odd == live */
+    c->child = child;
+
+    EFI_STATUS st = ctx->bs->OpenProtocol(child, &g_tcp4_guid, (VOID **)&c->tcp,
+                                          ctx->image, child, EFI_OPEN_PROTOCOL_BY_DRIVER);
+    if (EFI_ERROR(st) || !c->tcp)
+        st = ctx->bs->OpenProtocol(child, &g_tcp4_guid, (VOID **)&c->tcp,
+                                   ctx->image, child, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+    if (EFI_ERROR(st) || !c->tcp) {
+        c->last_status = st; c->generation++; c->magic = 0;
+        ctx->sb->DestroyChild(ctx->sb, child);
+        return NULL;
+    }
+    if (create_events(c) != 0) {
+        ctx->bs->CloseProtocol(child, &g_tcp4_guid, ctx->image, child);
+        c->generation++; c->magic = 0;
+        ctx->sb->DestroyChild(ctx->sb, child);
+        return NULL;
+    }
+    c->configured = 1;   /* Accept configured + connected the child */
+    c->connected  = 1;
+    c->magic = KL_EFI_CONN_MAGIC;
+    c->last_status = EFI_SUCCESS;
+    return c;
+}
+
+/* Arm (or re-arm) Accept token `i` on the listener. Returns 0 on success. On a
+ * submit failure the token stays un-posted (accept() simply has one fewer in flight). */
+static int listener_arm_token(KlUefiConn *lc, int i) {
+    if (g_listener.quarantined[i]) return -1;        /* never touch a leaked token */
+    g_listener.tok[i].CompletionToken.Status = EFI_NOT_READY;
+    g_listener.tok[i].NewChildHandle = NULL;
+    EFI_STATUS st = lc->tcp->Accept(lc->tcp, &g_listener.tok[i]);
+    if (EFI_ERROR(st)) { lc->last_status = st; g_listener.posted[i] = 0; return -1; }
+    g_listener.posted[i] = 1;
+    return 0;
+}
+
+/* bind(): record the listen port on the conn (station address is UseDefaultAddress /
+ * DHCP). The passive Configure happens in listen(). */
 static int efi_sock_bind(void *cx, KlSocketHandle fd, const KlSockAddr *a) {
-    (void)cx; (void)fd; (void)a; g_last_ctx_status = EFI_UNSUPPORTED; return -1;
+    (void)cx;
+    if (kl_uefi_after_ebs()) return -1;
+    KlUefiConn *c = conn_of(fd);
+    if (!c || c->dead) return -1;
+    UINT16 port = 0;
+    if (a && kl_sockaddr_family(a) == KL_AF_INET) {
+        EFI_IPv4_ADDRESS ip;
+        if (kl_efi_sockaddr_to_ipv4(a, &ip, &port) != 0) {
+            c->last_status = EFI_INVALID_PARAMETER;
+            return -1;
+        }
+    }
+    c->station_port = port;
+    c->is_listener  = 1;
+    c->last_status  = EFI_SUCCESS;
+    return 0;
 }
+
+/* listen(): passive Configure (ActiveFlag=FALSE, StationPort) + prime the Accept-token
+ * pool (backlog clamped to KL_EFI_ACCEPT_BACKLOG). */
 static int efi_sock_listen(void *cx, KlSocketHandle fd, int backlog) {
-    (void)cx; (void)fd; (void)backlog; g_last_ctx_status = EFI_UNSUPPORTED; return -1;
+    (void)cx;
+    if (kl_uefi_after_ebs()) return -1;
+    KlUefiConn *c = conn_of(fd);
+    if (!c || c->dead) return -1;
+
+    EFI_TCP4_CONFIG_DATA *cfg = &c->config;
+    { unsigned char *p = (unsigned char *)cfg; for (size_t i = 0; i < sizeof(*cfg); i++) p[i] = 0; }
+    cfg->TimeToLive = 64;
+    cfg->AccessPoint.UseDefaultAddress = TRUE;
+    cfg->AccessPoint.ActiveFlag        = FALSE;   /* passive open */
+    cfg->AccessPoint.StationPort       = c->station_port;
+
+    EFI_TCP4_PROTOCOL *tcp = c->tcp;
+    EFI_STATUS st = EFI_NOT_READY;
+    for (int i = 0; i < KL_EFI_DHCP_RETRIES; i++) {
+        st = tcp->Configure(tcp, cfg);
+        if (!EFI_ERROR(st)) { c->configured = 1; break; }
+        if (st == EFI_NO_MAPPING) { tcp->Poll(tcp); c->bs->Stall(KL_EFI_DHCP_STALL_US); continue; }
+        break;
+    }
+    if (!c->configured) { c->last_status = st; return -1; }
+
+    /* Prime the Accept-token pool: create one event per slot, then arm it. */
+    int n = backlog;
+    if (n < 1) n = 1;
+    if (n > KL_EFI_ACCEPT_BACKLOG) n = KL_EFI_ACCEPT_BACKLOG;
+    { unsigned char *p = (unsigned char *)&g_listener; for (size_t i = 0; i < sizeof(g_listener); i++) p[i] = 0; }
+    g_listener.fd = fd;
+    for (int i = 0; i < n; i++) {
+        st = c->bs->CreateEvent(EFI_TCP4_EVT_TOKEN, TPL_CALLBACK, NULL, NULL,
+                                &g_listener.tok[i].CompletionToken.Event);
+        if (EFI_ERROR(st)) { c->last_status = st; break; }
+        g_listener.n = i + 1;
+        (void)listener_arm_token(c, i);   /* best-effort; accept() re-arms too */
+    }
+    if (g_listener.n == 0) { c->last_status = st; return -1; }
+    return 0;
 }
+
+/* accept(): non-blocking. Poll the listener, hand back the first completed Accept
+ * token's child as a fresh KlUefiConn (peer via GetModeData), re-arm that token.
+ * KL_INVALID_SOCKET + EFI_NOT_READY (would-block) when none is ready. */
 static KlSocketHandle efi_sock_accept(void *cx, KlSocketHandle fd, KlSockAddr *peer) {
-    (void)cx; (void)fd; (void)peer; g_last_ctx_status = EFI_UNSUPPORTED; return KL_INVALID_SOCKET;
+    (void)cx;
+    if (kl_uefi_after_ebs()) return KL_INVALID_SOCKET;
+    KlUefiConn *lc = conn_of(fd);
+    if (!lc || lc->dead || g_listener.fd != fd) return KL_INVALID_SOCKET;
+
+    lc->tcp->Poll(lc->tcp);
+    for (int i = 0; i < g_listener.n; i++) {
+        if (!g_listener.posted[i]) continue;
+        if (lc->bs->CheckEvent(g_listener.tok[i].CompletionToken.Event) != EFI_SUCCESS)
+            continue;   /* still pending */
+        g_listener.posted[i] = 0;
+        EFI_STATUS st = g_listener.tok[i].CompletionToken.Status;
+        EFI_HANDLE child = g_listener.tok[i].NewChildHandle;
+        if (EFI_ERROR(st) || !child) {
+            lc->last_status = st;
+            (void)listener_arm_token(lc, i);   /* failed accept — re-arm the slot */
+            continue;
+        }
+        KlUefiConn *nc = adopt_child(child);
+        (void)listener_arm_token(lc, i);       /* re-arm regardless (S-3 adds backpressure) */
+        if (!nc) { lc->last_status = EFI_OUT_OF_RESOURCES; return KL_INVALID_SOCKET; }
+
+        if (peer) {
+            EFI_TCP4_CONFIG_DATA cd;
+            { unsigned char *p = (unsigned char *)&cd; for (size_t k = 0; k < sizeof(cd); k++) p[k] = 0; }
+            EFI_STATUS gm = nc->tcp->GetModeData(nc->tcp, NULL, &cd, NULL, NULL, NULL);
+            if (!EFI_ERROR(gm))
+                (void)kl_efi_ipv4_to_sockaddr(&cd.AccessPoint.RemoteAddress,
+                                              cd.AccessPoint.RemotePort, peer);
+        }
+        lc->last_status = EFI_SUCCESS;
+        return handle_of_slot((int)(nc - g_conns));
+    }
+    lc->last_status = EFI_NOT_READY;   /* would-block */
+    return KL_INVALID_SOCKET;
 }
 static int efi_sock_get_so_error(void *cx, KlSocketHandle fd, int *out_err) {
     (void)cx; (void)fd; if (out_err) *out_err = 0; return 0;
