@@ -26,11 +26,20 @@
  * the internal sendfile seam (src/socket.h) — so neither header needs the hosted
  * <sys/types.h> off_t any more.
  *
+ * The SERVER protocol surface joined the gate in the Phase 10 UEFI *server* step
+ * (docs/phase10_uefi_server_design.md, S-1): router, compress, proxy_protocol,
+ * h2_server, connection, server. Their peer/PROXY addresses are already the
+ * neutral KlSockAddr (kl_request_peer_sockaddr, kl_proxy_protocol_parse,
+ * kl_cidr_match) and their file size/offset the uint64_t sendfile seam — so a
+ * freestanding UEFI server can compile the whole protocol-layer public API with
+ * no POSIX socket/type header. (server.h's AF_UNIX / peer-cred references are
+ * feature flags + a path string, not a native sockaddr in the ABI.)
+ *
  * OUT-OF-GATE (deliberately NOT included here) and WHY:
- *   - resolver.h, udp.h, udp_server.h, server.h, client.h, client_pool.h,
- *     proxy_protocol.h, connection.h, net.h — legitimately expose native socket
- *     addresses (sockaddr_storage / struct sockaddr) for EXCLUDED features; their
- *     native->KlSockAddr conversion is a later phase.
+ *   - resolver.h, udp.h, udp_server.h, client.h, client_pool.h, net.h —
+ *     legitimately expose native socket addresses (sockaddr_storage / struct
+ *     sockaddr) for EXCLUDED features; their native->KlSockAddr conversion is a
+ *     later phase.
  */
 
 #include <keel/error.h>
@@ -52,6 +61,13 @@
 #include <keel/h2_client.h>
 #include <keel/response.h>
 #include <keel/file_io.h>
+/* Server protocol surface (S-1): the whole inbound public API, freestanding-clean. */
+#include <keel/router.h>
+#include <keel/compress.h>
+#include <keel/proxy_protocol.h>
+#include <keel/h2_server.h>
+#include <keel/connection.h>
+#include <keel/server.h>
 
 /* Compile-time assertions that the neutral integer types are the intended
  * pointer-width shapes (and thus need no hosted <sys/types.h>). */
