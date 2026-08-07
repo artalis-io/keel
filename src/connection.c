@@ -386,7 +386,9 @@ int kl_conn_read_proxy_header(KlConn *c) {
 
     KlSockAddr peer;
     size_t consumed = 0;
-    KlProxyResult r = kl_proxy_parse(buf, (size_t)n, &consumed, &peer);
+    const KlProxyHooks *ph = kl_proxy_hooks();
+    if (!ph || !ph->parse) return 1;   /* PROXY module not linked — treat as no header */
+    KlProxyResult r = ph->parse(buf, (size_t)n, &consumed, &peer);
 
     switch (r) {
         case KL_PROXY_NEED_MORE:
@@ -428,8 +430,10 @@ int kl_conn_read_proxy_header(KlConn *c) {
 int kl_conn_ingest_proxy(KlConn *c, size_t len) {
     KlSockAddr peer;
     size_t consumed = 0;
-    KlProxyResult r = kl_proxy_parse((const uint8_t *)c->read_buf, len,
-                                     &consumed, &peer);
+    const KlProxyHooks *ph = kl_proxy_hooks();
+    if (!ph || !ph->parse) return 0;   /* PROXY module not linked — no header */
+    KlProxyResult r = ph->parse((const uint8_t *)c->read_buf, len,
+                                &consumed, &peer);
     switch (r) {
         case KL_PROXY_NEED_MORE:
             /* A PROXY header can't exceed KL_PROXY_HEADER_MAX; still incomplete past that is

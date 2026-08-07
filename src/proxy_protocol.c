@@ -1,4 +1,5 @@
 #include <keel/proxy_protocol.h>
+#include "proto_hooks.h"  /* PROXY seam registration */
 
 #include <string.h>
 #include <stdlib.h>
@@ -202,4 +203,18 @@ int kl_cidr_match(const KlCidr *list, int count, const KlSockAddr *sa) {
         if (prefix_match(a, list[i].addr, list[i].bits, alen)) return 1;
     }
     return 0;
+}
+
+/* PROXY seam registration (proto_hooks.h): the server core parses PROXY headers +
+ * CIDR-matches trusted sources only through this table. Installing it (from
+ * kl_server_init) also pulls proxy_protocol.o out of the static archive. A
+ * freestanding server links no proxy_protocol.c, so the hooks stay NULL and no
+ * PROXY handling occurs. */
+static const KlProxyHooks kl_proxy_hooks_table = {
+    .parse      = kl_proxy_parse,
+    .cidr_match = kl_cidr_match,
+};
+
+void kl_proxy_hooks_install(void) {
+    kl_proxy_hooks_set(&kl_proxy_hooks_table);
 }

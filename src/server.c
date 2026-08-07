@@ -298,6 +298,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
      * NULL and the core runs pure HTTP/1.1. */
     kl_ws_server_hooks_install();
     kl_h2_server_hooks_install();
+    kl_proxy_hooks_install();   /* PROXY parser + CIDR match (proxy_protocol.c) */
 
     /* Apply defaults */
     s->config = *config;

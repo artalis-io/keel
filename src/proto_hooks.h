@@ -26,6 +26,7 @@
 #include <keel/connection.h>   /* KlConn */
 #include <keel/router.h>       /* KlRouter */
 #include <keel/h2_server.h>    /* KlH2ServerConfig */
+#include <keel/proxy_protocol.h> /* KlProxyResult / KlCidr / KlSockAddr (PROXY seam) */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -57,5 +58,45 @@ typedef struct KlH2ServerHooks {
 const KlH2ServerHooks *kl_h2_server_hooks(void);      /* NULL if server_h2.c absent */
 void kl_h2_server_hooks_set(const KlH2ServerHooks *hooks);
 void kl_h2_server_hooks_install(void);                /* defined in server_h2.c */
+
+/* ── Completion-mode drive seam ─────────────────────────────────────────────
+ * Once a connection has upgraded, the completion server driver (completion_server.c)
+ * pumps its frames through the ws/h2 COMPLETION handlers (completion_ws.c /
+ * completion_h2.c). Registered from the COMPLETION axis — not server_ws.c/server_h2.c
+ * — because those completion TUs share completion_server.c's build axis: a readiness
+ * build compiles none of them (so nothing references the drives), and a freestanding
+ * HTTP/1.1 server leaves the tables NULL (no upgrade ever occurs). completion_server.c
+ * calls the installers, which also pull the completion TUs out of the static archive. */
+struct KlServer;
+
+typedef struct KlWsCompHooks {
+    void (*drive)(struct KlServer *s, KlConn *c);
+} KlWsCompHooks;
+const KlWsCompHooks *kl_ws_comp_hooks(void);
+void kl_ws_comp_hooks_set(const KlWsCompHooks *hooks);
+void kl_ws_comp_hooks_install(void);                  /* defined in completion_ws.c */
+
+typedef struct KlH2CompHooks {
+    void (*drive)(struct KlServer *s, KlConn *c);
+} KlH2CompHooks;
+const KlH2CompHooks *kl_h2_comp_hooks(void);
+void kl_h2_comp_hooks_set(const KlH2CompHooks *hooks);
+void kl_h2_comp_hooks_install(void);                  /* defined in completion_h2.c */
+
+/* ── PROXY-protocol seam ────────────────────────────────────────────────────
+ * Recovering the real client address behind an L4 load balancer (proxy_protocol.c:
+ * strtok_r / inet_pton / ntohs) is optional and hosted-only. The server core parses
+ * the PROXY header and CIDR-matches the trusted source through this table; a
+ * freestanding firmware server links no proxy_protocol.c, so the hooks are NULL and
+ * no PROXY handling occurs. Unlike the completion drives, proxy_protocol.c is always
+ * compiled in a hosted build, so kl_server_init installs this with no build-axis #ifdef. */
+typedef struct KlProxyHooks {
+    KlProxyResult (*parse)(const uint8_t *buf, size_t len, size_t *consumed,
+                           KlSockAddr *peer);
+    int (*cidr_match)(const KlCidr *list, int count, const KlSockAddr *sa);
+} KlProxyHooks;
+const KlProxyHooks *kl_proxy_hooks(void);
+void kl_proxy_hooks_set(const KlProxyHooks *hooks);
+void kl_proxy_hooks_install(void);                    /* defined in proxy_protocol.c */
 
 #endif /* KEEL_PROTO_HOOKS_H */
