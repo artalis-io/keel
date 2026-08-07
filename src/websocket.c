@@ -6,6 +6,7 @@
 #include <strings.h>
 #include <stdio.h>
 #include "internal.h"
+#include "proto_hooks.h"   /* WS server upgrade seam — registered for the core */
 #include "sha1.h"
 #include "base64.h"
 #include "utf8.h"
@@ -759,4 +760,27 @@ int kl_ws_server_auto_ping(KlConn *c, uint64_t now) {
     kl_ws_server_send_ping(c->ws, NULL, 0);
     c->ws->next_ping_ms = now + (uint64_t)c->ws->config->ping_interval_ms;
     return 1;
+}
+
+/* ── WebSocket server upgrade seam registration (proto_hooks.h) ──────────────
+ * The shared server core reaches WebSocket only through this table; installing it
+ * both wires the core and forces server_ws.o out of the static archive. */
+static const KlWsServerHooks kl_ws_server_hooks_table = {
+    .upgrade             = kl_ws_server_upgrade,
+    .cleanup             = kl_ws_server_cleanup,
+    .auto_ping           = kl_ws_server_auto_ping,
+    .check_close_timeout = kl_ws_server_check_close_timeout,
+    .drain_close         = kl_ws_server_drain_close,
+};
+
+void kl_ws_server_hooks_install(void) {
+    kl_ws_server_hooks_set(&kl_ws_server_hooks_table);
+}
+
+/* Also self-install at load, so a consumer driving connection.c's dispatch directly
+ * (without kl_server_init — e.g. the unit tests) has the seam wired. Runs only if
+ * this object is linked (a direct kl_ws_server_* reference pulls it in). */
+__attribute__((constructor))
+static void kl_ws_server_hooks_autoinstall(void) {
+    kl_ws_server_hooks_install();
 }

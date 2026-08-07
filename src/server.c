@@ -17,6 +17,7 @@
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
 #include "server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
 #include "platform.h"     /* KlPlatWakeup — self-pipe so kl_server_stop wakes the run loop */
+#include "proto_hooks.h"  /* ws/h2 upgrade seam — install the hosted tables at init */
 
 #define KL_LISTEN_BACKLOG  128
 #define KL_EVENTS_PER_TICK 64
@@ -306,6 +307,13 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     s->listen_fd = KL_INVALID_SOCKET;
     s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
 
+    /* Register the WebSocket / HTTP-2 upgrade tables so connection.c's dispatch is
+     * wired (idempotent; also pulls server_ws.o / server_h2.o out of the static
+     * archive). A freestanding HTTP/1.1 server never calls these — the seam stays
+     * NULL and the core runs pure HTTP/1.1. */
+    kl_ws_server_hooks_install();
+    kl_h2_server_hooks_install();
+
     /* Apply defaults */
     s->config = *config;
     if (s->config.transport != KL_TRANSPORT_TCP &&
@@ -525,15 +533,20 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
         /* Suspended: exempt from idle timeout — has its own deadline */
         if (tc->state == KL_CONN_SUSPENDED)
             continue;
-        /* WebSocket: exempt from HTTP idle timeout, check close deadline */
+        /* WebSocket: exempt from HTTP idle timeout, check close deadline. Via the
+         * upgrade seam — a conn only reaches KL_CONN_WEBSOCKET if ws is linked, so
+         * the hooks are non-NULL here, but guard defensively. */
         if (tc->state == KL_CONN_WEBSOCKET) {
-            kl_ws_server_auto_ping(tc, now);
-            if (kl_ws_server_check_close_timeout(tc, now)) {
-                if (completion_loop) {
-                    kl_comp_cancel(&s->ev, tc->fd);
-                } else {
-                    kl_event_del(&s->ev.loop, tc->fd);
-                    kl_server_conn_release(s, tc);
+            const KlWsServerHooks *wsh = kl_ws_server_hooks();
+            if (wsh) {
+                if (wsh->auto_ping) wsh->auto_ping(tc, now);
+                if (wsh->check_close_timeout && wsh->check_close_timeout(tc, now)) {
+                    if (completion_loop) {
+                        kl_comp_cancel(&s->ev, tc->fd);
+                    } else {
+                        kl_event_del(&s->ev.loop, tc->fd);
+                        kl_server_conn_release(s, tc);
+                    }
                 }
             }
             continue;
@@ -580,11 +593,13 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
  * before, so a server on a completion loop with drain_timeout_ms never exited drain mode. */
 void kl_server_drain_progress(KlServer *s, uint64_t now) {
     if (!atomic_load(&s->draining)) return;
+    const KlWsServerHooks *wsh = kl_ws_server_hooks();
+    const KlH2ServerHooks *h2h = kl_h2_server_hooks();
     for (int j = 0; j < s->pool.capacity; j++) {
-        if (s->pool.conns[j].state == KL_CONN_WEBSOCKET)
-            kl_ws_server_drain_close(&s->pool.conns[j]);
-        if (s->pool.conns[j].state == KL_CONN_HTTP2)
-            kl_h2_server_drain_shutdown(&s->pool.conns[j]);
+        if (wsh && wsh->drain_close && s->pool.conns[j].state == KL_CONN_WEBSOCKET)
+            wsh->drain_close(&s->pool.conns[j]);
+        if (h2h && h2h->drain_shutdown && s->pool.conns[j].state == KL_CONN_HTTP2)
+            h2h->drain_shutdown(&s->pool.conns[j]);
     }
     int active = 0;
     for (int j = 0; j < s->pool.capacity; j++)

@@ -7,6 +7,7 @@
 #include <keel/h2_server.h>
 #include <keel/proxy_protocol.h>
 #include "conn_internal.h"
+#include "proto_hooks.h"        /* ws/h2 upgrade seam — core never names ws/h2 directly */
 #include <assert.h>
 #include <string.h>
 #include <strings.h>
@@ -119,10 +120,12 @@ static void conn_cleanup_body_reader(KlConn *c) {
 }
 
 void kl_conn_release(KlConnPool *pool, KlConn *c) {
-    /* WebSocket cleanup — notify on_close if needed, free state */
-    kl_ws_server_cleanup(c);
-    /* HTTP/2 cleanup — destroy streams, session, free state */
-    kl_h2_server_cleanup(c);
+    /* WebSocket / HTTP-2 cleanup via the per-protocol upgrade seam (no-op when the
+     * module isn't linked — e.g. a freestanding HTTP/1.1 server). */
+    const KlWsServerHooks *wsh = kl_ws_server_hooks();
+    const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+    if (wsh && wsh->cleanup) wsh->cleanup(c);
+    if (h2h && h2h->cleanup) h2h->cleanup(c);
 
     /* TLS shutdown before close(fd) — best-effort close_notify.
      * Retry on WANT_WRITE to flush the close_notify record.
@@ -155,9 +158,11 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
 void kl_conn_pool_free(KlConnPool *pool) {
     if (pool->conns) {
         /* Close any active connections */
+        const KlWsServerHooks *wsh = kl_ws_server_hooks();
+        const KlH2ServerHooks *h2h = kl_h2_server_hooks();
         for (int i = 0; i < pool->capacity; i++) {
-            kl_ws_server_cleanup(&pool->conns[i]);
-            kl_h2_server_cleanup(&pool->conns[i]);
+            if (wsh && wsh->cleanup) wsh->cleanup(&pool->conns[i]);
+            if (h2h && h2h->cleanup) h2h->cleanup(&pool->conns[i]);
             if (pool->conns[i].req.body_reader) {
                 pool->conns[i].req.body_reader->destroy(
                     pool->conns[i].req.body_reader);
@@ -341,10 +346,11 @@ KlConnState kl_conn_on_handshake(KlConn *c) {
             /* Check ALPN for HTTP/2 negotiation */
             if (c->h2_config && c->tls->alpn_protocol) {
                 const char *proto = c->tls->alpn_protocol(c->tls);
+                const KlH2ServerHooks *h2h = kl_h2_server_hooks();
                 if (proto && proto[0] == 'h' && proto[1] == '2' &&
-                    proto[2] == '\0') {
-                    int hr = kl_h2_server_upgrade(c, c->router, c->h2_config,
-                                           NULL, 0);
+                    proto[2] == '\0' && h2h && h2h->upgrade) {
+                    int hr = h2h->upgrade(c, c->router, c->h2_config,
+                                          NULL, 0);
                     if (hr == KL_CONN_HTTP2) {
                         c->state = KL_CONN_HTTP2;
                         return c->state;
@@ -505,9 +511,10 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
     }
 
     /* WebSocket upgrade — branch before body reading */
+    const KlWsServerHooks *wsh = kl_ws_server_hooks();
     if (c->route_result == 200 && c->route &&
-        c->route->ws_config) {
-        c->state = (KlConnState)kl_ws_server_upgrade(
+        c->route->ws_config && wsh && wsh->upgrade) {
+        c->state = (KlConnState)wsh->upgrade(
             c, leftover_buf, leftover_len);
         return c->state;
     }
@@ -517,9 +524,10 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         size_t ug_len;
         const char *ug = kl_request_header_len(
             &c->req, "Upgrade", &ug_len);
+        const KlH2ServerHooks *h2h = kl_h2_server_hooks();
         if (ug && ug_len == 3 &&
-            strncasecmp(ug, "h2c", 3) == 0) {
-            c->state = (KlConnState)kl_h2_server_upgrade_from_h1(
+            strncasecmp(ug, "h2c", 3) == 0 && h2h && h2h->upgrade_from_h1) {
+            c->state = (KlConnState)h2h->upgrade_from_h1(
                 c, router, c->h2_config,
                 leftover_buf, leftover_len);
             return c->state;
@@ -796,7 +804,10 @@ read_more_headers: ;
                      * session's HTTP/2 engine consumes the client connection
                      * preface itself, matching the ALPN-h2 and h2c-Upgrade paths
                      * where the magic arrives on the stream normally. */
-                    c->state = (KlConnState)kl_h2_server_upgrade(
+                    const KlH2ServerHooks *h2hp = kl_h2_server_hooks();
+                    if (!h2hp || !h2hp->upgrade)
+                        return c->state;   /* HTTP/2 not linked — stay HTTP/1.1 */
+                    c->state = (KlConnState)h2hp->upgrade(
                         c, router, c->h2_config,
                         c->read_buf, c->read_len);
                     return c->state;
