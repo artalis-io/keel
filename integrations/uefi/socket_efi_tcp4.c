@@ -841,14 +841,16 @@ static kl_ssize_t efi_sock_recv(void *cx, KlSocketHandle fd, void *buf, size_t l
  * Accept tokens, drain each to a terminal signal, then CloseEvent it — quarantining
  * (leaking) any that can't be confirmed retired (the firmware may still write the
  * token / NewChildHandle). Mirrors efi_sock_close's per-conn token discipline. */
-static void listener_teardown(KlUefiConn *lc) {
+static int listener_teardown(KlUefiConn *lc) {
     EFI_TCP4_PROTOCOL *tcp = lc->tcp;
+    int drained_ok = 1;
     if (tcp) tcp->Cancel(tcp, NULL);   /* abort all outstanding Accept tokens */
     for (int i = 0; i < g_listener.n; i++) {
-        if (g_listener.quarantined[i]) continue;   /* already leaked */
+        if (g_listener.quarantined[i]) { drained_ok = 0; continue; }   /* already leaked */
         if (g_listener.posted[i]) {
             if (!pump_until(lc, g_listener.tok[i].CompletionToken.Event)) {
                 g_listener.quarantined[i] = 1;      /* hung — leak the event, never close */
+                drained_ok = 0;
                 continue;
             }
             g_listener.posted[i] = 0;
@@ -860,6 +862,9 @@ static void listener_teardown(KlUefiConn *lc) {
     }
     g_listener.fd = 0;
     g_listener.n  = 0;
+    /* If any Accept token couldn't be confirmed retired, the firmware may still write
+     * it via the listener's tcp — the CHILD must not be destroyed (caller quarantines). */
+    return drained_ok;
 }
 
 static int efi_sock_close(void *cx, KlSocketHandle fd) {
@@ -881,10 +886,13 @@ static int efi_sock_close(void *cx, KlSocketHandle fd) {
      * Do NOT touch them again; leave the slot occupied-but-dead (never reclaimed). */
     if (c->quarantined) return 0;
 
-    /* S-2: a listener also owns the Accept-token pool — drain/quarantine it before
-     * the conn's own teardown (its 4 per-op token events + child). */
-    if (c->is_listener && g_listener.fd == fd)
-        listener_teardown(c);
+    /* S-2: a listener also owns the Accept-token pool — drain/quarantine it before the
+     * conn's own teardown. If any Accept token couldn't be retired, the firmware may
+     * still write it via this listener's tcp: QUARANTINE the whole conn (never
+     * CloseEvent/Configure(NULL)/DestroyChild) — its stable storage is leaked to EBS. */
+    if (c->is_listener && g_listener.fd == fd) {
+        if (!listener_teardown(c)) { c->quarantined = 1; return 0; }
+    }
 
     EFI_BOOT_SERVICES *bs = c->bs;
     EFI_TCP4_PROTOCOL *tcp = c->tcp;
@@ -1074,6 +1082,7 @@ static int efi_sock_listen(void *cx, KlSocketHandle fd, int backlog) {
         break;
     }
     if (!c->configured) { c->last_status = st; return -1; }
+    c->is_listener = 1;   /* a socket that listened is a listener (bind optional) */
 
     /* Prime the Accept-token pool: create one event per slot, then arm it. */
     int n = backlog;
