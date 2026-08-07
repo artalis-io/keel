@@ -77,6 +77,7 @@ typedef struct {
     const KlSocketProvider *sp;    /* socket provider for BIO I/O (NULL = host default) */
     int                 handshake_done;
     int                 eof_seen;  /* set when read() hit a clean close_notify/EOF (at_eof) */
+    int                 reset_failed;  /* session_reset() failed → refuse next handshake */
     /* Completion (memory-BIO) mode — 8b-5. Active once feed_input() is first called:
      * the BIO reads ciphertext from in_buf (fed by the caller) and appends outgoing
      * ciphertext to out_buf (drained by the caller) instead of the socket fd. */
@@ -174,6 +175,11 @@ static KlTlsResult tls_handshake(KlTls *self, KlSocketHandle fd)
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     t->fd = fd;
 
+    /* A failed reset() left this session indeterminate; refuse to handshake on it
+     * rather than risk carrying state across connections. */
+    if (t->reset_failed)
+        return KL_TLS_ERROR;
+
     int ret = mbedtls_ssl_handshake(&t->ssl);
 
     if (ret == 0) {
@@ -192,6 +198,12 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
     t->fd = fd;
+    if (len == 0)
+        return 0;
+
+    /* at_eof() must describe THIS read, not a prior one — clear the sticky flag at
+     * the start of every substantive read (it is re-set below only on a real EOF). */
+    t->eof_seen = 0;
 
     int ret = mbedtls_ssl_read(&t->ssl, (unsigned char *)buf, len);
 
@@ -290,7 +302,10 @@ static kl_ssize_t tls_drain_output(KlTls *self, void *buf, size_t cap)
 static void tls_reset(KlTls *self)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)self;
-    mbedtls_ssl_session_reset(&t->ssl);
+    /* reset() is void, so on failure latch a flag and fail the next handshake
+     * closed rather than reuse a half-reset context across connections. */
+    if (mbedtls_ssl_session_reset(&t->ssl) != 0)
+        t->reset_failed = 1;
     t->handshake_done = 0;
     t->eof_seen = 0;
     t->fd = KL_INVALID_SOCKET;
