@@ -29,6 +29,7 @@
 #include <openssl/pem.h>
 #include <openssl/bio.h>
 #include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #include <assert.h>
 #include <errno.h>
@@ -1117,6 +1118,107 @@ static void test_alloc_failure_injection(PemPair *ca, PemPair *server, PemPair *
     printf("  PASS: alloc-failure sweep completed without crash/UAF (ASan)\n");
 }
 
+/* Leave an unrelated error in OpenSSL's thread-local queue. Parsing garbage as
+ * DER X.509 fails and queues an ASN.1 error on every OpenSSL-family library —
+ * simulating a stale error left by app code or another session on this thread. */
+static void poison_error_queue(void)
+{
+    static const unsigned char garbage[] = { 0x30, 0x01, 0xff };
+    const unsigned char *p = garbage;
+    X509 *x = d2i_X509(NULL, &p, (long)sizeof(garbage));
+    assert(x == NULL);
+    assert(ERR_peek_error() != 0);   /* the queue is now non-empty */
+}
+
+/* Round-6 finding: OpenSSL's error queue is thread-local and SSL_get_error() only
+ * classifies correctly against an EMPTY queue. The adapter must ERR_clear_error()
+ * before every SSL op so a stale error (from another session sharing the event
+ * loop) cannot change the result. Proven two ways:
+ *   (a) a bare transport EOF under lenient truncation must still classify as a
+ *       clean EOF even with the queue poisoned (WITHOUT the fix the stale error
+ *       makes SSL_get_error report SSL_ERROR_SSL and at_eof() would be 0), and
+ *   (b) an independent session completes a full handshake + round-trip with the
+ *       queue poisoned before each op — no cross-session contamination. */
+static void test_error_queue_discipline(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== Finding (r6): OpenSSL error-queue discipline ==\n");
+
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+    assert(kl_tls_openssl_ctx_set_allow_truncation(sctx, 1) == 0);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+    assert(kl_tls_openssl_ctx_set_allow_truncation(cctx, 1) == 0);
+
+    /* (a) bare transport EOF under a poisoned queue → still a clean EOF. */
+    {
+        KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+        KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+        assert(srv && cli);
+        assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+        int fds[2];
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+        assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+        assert(drive_handshake(cli, fds[0], srv, fds[1]) == 0);
+
+        close(fds[1]);          /* abrupt close: transport EOF, no close_notify */
+        char b[16];
+        kl_ssize_t n = 0;
+        for (int i = 0; i < 20 && n == 0; i++) {
+            poison_error_queue();               /* stale error before each read */
+            n = cli->read(cli, fds[0], b, sizeof b);
+        }
+        assert(n < 0 && cli->at_eof(cli) == 1); /* clean EOF despite the poison */
+        printf("  PASS: bare EOF classified clean despite a poisoned queue\n");
+        close(fds[0]);
+        cli->destroy(cli);
+        srv->destroy(srv);
+    }
+
+    /* (b) an independent session, poisoned before every op, still handshakes and
+     * round-trips — the stale error does not leak across sessions. */
+    {
+        KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+        KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+        assert(srv && cli);
+        assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+        int fds[2];
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+        assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+
+        int cdone = 0, sdone = 0;
+        for (int it = 0; it < 200 && (!cdone || !sdone); it++) {
+            poison_error_queue();
+            if (!cdone) {
+                KlTlsResult r = cli->handshake(cli, fds[0]);
+                assert(r != KL_TLS_ERROR);
+                if (r == KL_TLS_OK) cdone = 1;
+            }
+            poison_error_queue();
+            if (!sdone) {
+                KlTlsResult r = srv->handshake(srv, fds[1]);
+                assert(r != KL_TLS_ERROR);
+                if (r == KL_TLS_OK) sdone = 1;
+            }
+        }
+        assert(cdone && sdone);
+        poison_error_queue();
+        roundtrip(cli, fds[0], srv, fds[1], "poisoned but fine");
+        printf("  PASS: independent session unaffected by a poisoned queue\n");
+        close(fds[0]);
+        close(fds[1]);
+        cli->destroy(cli);
+        srv->destroy(srv);
+    }
+
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+}
+
 /* Round-5 finding: KlPeerCert.verified must mean the chain was ACTUALLY verified,
  * not merely that a stored result reads X509_V_OK. A verifying client sees
  * verified==1 for a trusted server; an insecure (verify-none) client completes the
@@ -1420,6 +1522,7 @@ int main(void) {
     test_identity_canonicalization(&alloc, ca_key, ca_crt, &ca, &server);
     test_client_verified_flag(&alloc, &ca, &server);
     test_overlong_cn_omitted(&alloc, ca_key, ca_crt, &ca, &server);
+    test_error_queue_discipline(&alloc, &ca, &server);
 
     EVP_PKEY_free(ca_key);
     X509_free(ca_crt);

@@ -264,6 +264,10 @@ static KlTlsResult tls_handshake(KlTls *self, KlSocketHandle fd)
     KlOpensslTls *t = (KlOpensslTls *)self;
     t->fd = fd;
 
+    /* Clear the thread-local error queue first: SSL_get_error() below only
+     * classifies correctly against an empty queue, so a stale error left by
+     * another session or app code on this event-loop thread cannot leak in. */
+    ERR_clear_error();
     int ret = SSL_do_handshake(t->ssl);
     if (ret == 1) {
         t->handshake_done = 1;
@@ -284,6 +288,11 @@ static kl_ssize_t tls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len
     if (len == 0)
         return 0;
 
+    /* Empty the error queue before the op (see tls_handshake). This also makes the
+     * empty-error-queue truncation check below reliable: a stale error would
+     * otherwise make ERR_peek_error() non-zero and misclassify a bare transport
+     * EOF as a genuine protocol failure. */
+    ERR_clear_error();
     int want = len > INT_MAX ? INT_MAX : (int)len;
     int ret = SSL_read(t->ssl, buf, want);
     if (ret > 0)
@@ -339,6 +348,7 @@ static kl_ssize_t tls_write(KlTls *self, KlSocketHandle fd, const void *buf, siz
     if (len == 0)
         return 0;
 
+    ERR_clear_error();   /* empty the error queue before the op (see tls_handshake) */
     int want = len > INT_MAX ? INT_MAX : (int)len;
     int ret = SSL_write(t->ssl, buf, want);
     if (ret > 0)
@@ -355,6 +365,7 @@ static KlTlsResult tls_shutdown(KlTls *self, KlSocketHandle fd)
     KlOpensslTls *t = (KlOpensslTls *)self;
     t->fd = fd;
 
+    ERR_clear_error();   /* empty the error queue before the op (see tls_handshake) */
     int ret = SSL_shutdown(t->ssl);
     if (ret >= 0)
         return KL_TLS_OK;   /* 0 = close_notify sent (peer's pending), 1 = done */
