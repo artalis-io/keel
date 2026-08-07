@@ -502,9 +502,11 @@ static int dns_san_bytes_safe(const unsigned char *p, size_t len)
     return 1;
 }
 
-/* Copy the CN of an X509_NAME into a NUL-terminated buffer. A CN carrying an
- * embedded NUL or control char is rejected (buffer left empty) — see the
- * canonicalization note above. */
+/* Copy the CN of an X509_NAME into a NUL-terminated buffer. Fail closed (buffer
+ * left empty) when the CN could yield an ambiguous or spoofable identity — see the
+ * canonicalization note above: an embedded NUL/control char, a value that would
+ * not fit (truncation is itself ambiguous), or more than one CN attribute (which
+ * one is authoritative is undefined). */
 static void x509_name_cn(X509_NAME *name, char *out, size_t outlen)
 {
     if (outlen == 0)
@@ -514,6 +516,9 @@ static void x509_name_cn(X509_NAME *name, char *out, size_t outlen)
         return;
     int idx = X509_NAME_get_index_by_NID(name, NID_commonName, -1);
     if (idx < 0)
+        return;
+    /* Multiple CN attributes → ambiguous; omit rather than pick the first. */
+    if (X509_NAME_get_index_by_NID(name, NID_commonName, idx) >= 0)
         return;
     X509_NAME_ENTRY *e = X509_NAME_get_entry(name, idx);
     if (!e)
@@ -525,14 +530,15 @@ static void x509_name_cn(X509_NAME *name, char *out, size_t outlen)
     int len = ASN1_STRING_to_UTF8(&utf8, s);
     if (len < 0 || !utf8)
         return;
-    /* Fail closed: omit an identity that could spoof a strcmp() authorization. */
-    if (!identity_bytes_safe(utf8, (size_t)len)) {
+    /* Fail closed: omit an identity that could spoof a strcmp() authorization,
+     * or one that would be truncated (two long CNs sharing a prefix must not
+     * collapse to the same exposed string, and a cut UTF-8 tail is invalid). */
+    if (!identity_bytes_safe(utf8, (size_t)len) || (size_t)len >= outlen) {
         OPENSSL_free(utf8);
         return;
     }
-    size_t n = (size_t)len < outlen - 1 ? (size_t)len : outlen - 1;
-    memcpy(out, utf8, n);
-    out[n] = '\0';
+    memcpy(out, utf8, (size_t)len);
+    out[len] = '\0';
     OPENSSL_free(utf8);
 }
 
@@ -646,7 +652,12 @@ static int tls_peer_cert(KlTls *self, KlPeerCert *out)
         return -1;   /* no client certificate presented */
 
     memset(out, 0, sizeof(*out));
-    out->verified = (SSL_get_verify_result(t->ssl) == X509_V_OK) ? 1 : 0;
+    /* verified == 1 must mean the chain was actually checked AND passed. With
+     * SSL_VERIFY_NONE (e.g. an insecure client ctx) SSL_get_verify_result() still
+     * returns X509_V_OK — it reports the stored result, not that verification ran —
+     * so require SSL_VERIFY_PEER to be in effect too. Otherwise report unverified. */
+    out->verified = ((SSL_get_verify_mode(t->ssl) & SSL_VERIFY_PEER) != 0 &&
+                     SSL_get_verify_result(t->ssl) == X509_V_OK) ? 1 : 0;
     x509_name_cn(X509_get_subject_name(crt), out->subject_cn, sizeof(out->subject_cn));
     x509_name_cn(X509_get_issuer_name(crt), out->issuer_cn, sizeof(out->issuer_cn));
     x509_extract_san(crt, out->san, sizeof(out->san));

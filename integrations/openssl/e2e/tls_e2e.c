@@ -1117,6 +1117,129 @@ static void test_alloc_failure_injection(PemPair *ca, PemPair *server, PemPair *
     printf("  PASS: alloc-failure sweep completed without crash/UAF (ASan)\n");
 }
 
+/* Round-5 finding: KlPeerCert.verified must mean the chain was ACTUALLY verified,
+ * not merely that a stored result reads X509_V_OK. A verifying client sees
+ * verified==1 for a trusted server; an insecure (verify-none) client completes the
+ * handshake but must report verified==0. (Untrusted-server / mTLS-verified paths
+ * are covered by test_untrusted_ca and axis1_socket_bio.) */
+static void test_client_verified_flag(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== Finding (r5): client peer_cert.verified honesty ==\n");
+
+    /* Plain-TLS server (no mTLS). Reused for both client sessions. */
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+
+    /* (a) verifying client trusting the CA → verified == 1. */
+    {
+        KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+            (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+        assert(cctx);
+        KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+        KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+        assert(srv && cli);
+        assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+        int fds[2];
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+        assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+        assert(drive_handshake(cli, fds[0], srv, fds[1]) == 0);
+
+        KlPeerCert pc;
+        memset(&pc, 0, sizeof(pc));
+        assert(cli->peer_cert(cli, &pc) == 0);
+        assert(pc.verified == 1);
+        assert(strcmp(pc.subject_cn, "server.local") == 0);
+        printf("  PASS: verifying client + trusted server -> verified==1\n");
+        close(fds[0]); close(fds[1]);
+        cli->destroy(cli); srv->destroy(srv);
+        kl_tls_openssl_ctx_destroy(cctx);
+    }
+
+    /* (b) insecure client (SSL_VERIFY_NONE) → handshake OK but verified == 0. */
+    {
+        KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_insecure(alloc);
+        assert(cctx);
+        KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+        KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+        assert(srv && cli);
+        int fds[2];
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+        assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+        assert(drive_handshake(cli, fds[0], srv, fds[1]) == 0);
+
+        KlPeerCert pc;
+        memset(&pc, 0, sizeof(pc));
+        assert(cli->peer_cert(cli, &pc) == 0);   /* cert is present … */
+        assert(pc.verified == 0);                /* … but was NOT verified */
+        assert(pc.der_len > 0 && pc.der != NULL);
+        printf("  PASS: insecure client -> handshake OK, verified==0\n");
+        close(fds[0]); close(fds[1]);
+        cli->destroy(cli); srv->destroy(srv);
+        kl_tls_openssl_ctx_destroy(cctx);
+    }
+
+    kl_tls_openssl_ctx_destroy(sctx);
+}
+
+/* Round-5 finding 2: a CN that would not fit KlPeerCert.subject_cn[256] must be
+ * OMITTED, not truncated — two long CNs sharing a 255-byte prefix must never
+ * collapse to the same exposed string. The issuer CN (short) is unaffected. */
+static void test_overlong_cn_omitted(KlAllocator *alloc, EVP_PKEY *ca_key,
+                                     X509 *ca_crt, PemPair *ca, PemPair *server)
+{
+    printf("== Finding (r5): overlong CN omitted (not truncated) ==\n");
+
+    char long_cn[300];
+    memset(long_cn, 'a', sizeof(long_cn) - 1);
+    long_cn[sizeof(long_cn) - 1] = '\0';        /* 299 'a's > subject_cn[256] */
+    PemPair leaf = {0};
+    gen_cert(long_cn, 0, ca_key, ca_crt, &leaf, NULL, NULL);
+
+    /* mTLS: present the long-CN cert as the client cert to a REQUIRED server. */
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem),
+        KL_MTLS_REQUIRED, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+    assert(kl_tls_openssl_client_ctx_set_cert(cctx,
+        (const unsigned char *)leaf.cert_pem, strlen(leaf.cert_pem),
+        (const unsigned char *)leaf.key_pem, strlen(leaf.key_pem)) == 0);
+
+    KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+    KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+    assert(srv && cli);
+    assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+
+    /* Accept both fail-closed outcomes (some backends cap CN length at the TLS
+     * layer). Where the handshake completes, the overlong CN must be empty. */
+    if (drive_handshake(cli, fds[0], srv, fds[1]) != 0) {
+        printf("  PASS: overlong-CN cert rejected at handshake (fail closed)\n");
+    } else {
+        KlPeerCert pc;
+        memset(&pc, 0, sizeof(pc));
+        assert(srv->peer_cert(srv, &pc) == 0);
+        assert(pc.subject_cn[0] == '\0');               /* omitted, not truncated */
+        assert(strcmp(pc.issuer_cn, "Keel Test CA") == 0); /* short CN still shown */
+        printf("  PASS: overlong CN omitted; short issuer CN preserved\n");
+    }
+
+    close(fds[0]); close(fds[1]);
+    cli->destroy(cli); srv->destroy(srv);
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+    pem_pair_free(&leaf);
+}
+
 /* Round-4 finding: textual peer-cert identities must be canonicalized. A client
  * cert whose CN embeds a NUL ("trusted-user\0attacker") and whose SANs include
  * comma/control/NUL bytes must NOT surface those bytes to the application: the CN
@@ -1295,6 +1418,8 @@ int main(void) {
     test_alloc_failure_injection(&ca, &server, &client);
     test_obsolete_protocol_rejected(&alloc, &server);
     test_identity_canonicalization(&alloc, ca_key, ca_crt, &ca, &server);
+    test_client_verified_flag(&alloc, &ca, &server);
+    test_overlong_cn_omitted(&alloc, ca_key, ca_crt, &ca, &server);
 
     EVP_PKEY_free(ca_key);
     X509_free(ca_crt);
