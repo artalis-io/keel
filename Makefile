@@ -717,15 +717,21 @@ $(SMOKE_TLS_E2E_BIN): tests/smoke_tls.c $(LIB)
 #   make integration-test    MBEDTLS_DIR=... NGHTTP2_DIR=...
 integration-mbedtls:
 	$(MAKE) -C integrations mbedtls MBEDTLS_DIR=$(MBEDTLS_DIR)
+integration-openssl:
+	$(MAKE) -C integrations openssl OPENSSL_DIR=$(OPENSSL_DIR)
+integration-boringssl:
+	$(MAKE) -C integrations boringssl BORINGSSL_DIR=$(BORINGSSL_DIR)
+integration-libressl:
+	$(MAKE) -C integrations libressl LIBRESSL_DIR=$(LIBRESSL_DIR)
 integration-nghttp2:
 	$(MAKE) -C integrations nghttp2 NGHTTP2_DIR=$(NGHTTP2_DIR)
 integration-lwip:
 	$(MAKE) -C integrations lwip LWIP_DIR=$(LWIP_DIR)
 integrations:
-	$(MAKE) -C integrations all MBEDTLS_DIR=$(MBEDTLS_DIR) NGHTTP2_DIR=$(NGHTTP2_DIR) LWIP_DIR=$(LWIP_DIR)
+	$(MAKE) -C integrations all MBEDTLS_DIR=$(MBEDTLS_DIR) OPENSSL_DIR=$(OPENSSL_DIR) LIBRESSL_DIR=$(LIBRESSL_DIR) NGHTTP2_DIR=$(NGHTTP2_DIR) LWIP_DIR=$(LWIP_DIR)
 integration-test:
-	$(MAKE) -C integrations test MBEDTLS_DIR=$(MBEDTLS_DIR) NGHTTP2_DIR=$(NGHTTP2_DIR)
-.PHONY: integration-mbedtls integration-nghttp2 integration-lwip integrations integration-test
+	$(MAKE) -C integrations test MBEDTLS_DIR=$(MBEDTLS_DIR) OPENSSL_DIR=$(OPENSSL_DIR) LIBRESSL_DIR=$(LIBRESSL_DIR) NGHTTP2_DIR=$(NGHTTP2_DIR)
+.PHONY: integration-mbedtls integration-openssl integration-boringssl integration-libressl integration-nghttp2 integration-lwip integrations integration-test
 
 # Install / uninstall
 PREFIX  ?= /usr/local

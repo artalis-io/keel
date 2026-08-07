@@ -16,6 +16,10 @@ integrations/nghttp2/e2e/interop_server
 integrations/nghttp2/e2e/client_probe
 integrations/nghttp2/e2e/alpn_server
 integrations/nghttp2/e2e/alpn_client
+integrations/openssl/e2e/tls_e2e
+integrations/libressl/e2e_libressl
+integrations/boringssl/e2e_boringssl
+integrations/*/*.dSYM
 
 # Example binaries (extensionless; sources are .c, docs are .md)
 examples/*

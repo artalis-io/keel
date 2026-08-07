@@ -288,8 +288,14 @@ static void h2c_handle_connecting(KlH2ClientConn *c)
             h2c_error(c, "TLS factory failed");
             return;
         }
-        if (c->tls->set_hostname && c->host_buf[0])
-            c->tls->set_hostname(c->tls, c->host_buf);
+        /* FAIL CLOSED on set_hostname failure: without hostname verification a
+         * cert for the wrong host would verify against the CA chain alone.
+         * h2c_error -> h2c_close_connection destroys c->tls and the fd. */
+        if (c->tls->set_hostname && c->host_buf[0] &&
+            c->tls->set_hostname(c->tls, c->host_buf) != 0) {
+            h2c_error(c, "TLS set_hostname failed");
+            return;
+        }
 
         c->state = H2C_TLS_HANDSHAKE;
         KlTlsResult r = c->tls->handshake(c->tls, c->fd);
