@@ -10,6 +10,7 @@
 #include "internal.h"            /* kl_h2_server_feed / kl_h2_server_set_writer */
 #include "completion.h"          /* kl_comp_post_send / post_recv */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_drain_output */
+#include "proto_hooks.h"         /* completion-drive seam registration */
 #include <string.h>
 #include <stdint.h>              /* SIZE_MAX (h2 output capture growth guard) */
 
@@ -98,4 +99,13 @@ void kl_comp_h2_drive(struct KlServer *s, KlConn *c) {
         kl_free(c->alloc, cap.buf, cap.cap);
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);   /* no output — read more */
     }
+}
+
+/* Completion-drive seam registration (proto_hooks.h): completion_server.c reaches
+ * HTTP/2-over-completion only through this table. The installer (called by
+ * completion_server.c) registers it and pulls this object out of the archive. */
+static const KlH2CompHooks kl_h2_comp_hooks_table = { .drive = kl_comp_h2_drive };
+
+void kl_h2_comp_hooks_install(void) {
+    kl_h2_comp_hooks_set(&kl_h2_comp_hooks_table);
 }

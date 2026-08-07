@@ -185,11 +185,11 @@ else
   endif
 endif
 CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/response.c src/router.c \
-           src/connection.c src/server.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
+           src/connection.c src/server.c src/server_core.c src/proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
-           src/websocket.c src/websocket_client.c \
-           src/h2.c src/h2_client.c src/thread_pool.c src/url.c \
+           src/websocket.c src/server_ws.c src/websocket_client.c \
+           src/server_h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client_common.c src/client_sync.c src/client_async.c \
            src/client_pool.c src/redirect.c src/sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
@@ -841,7 +841,7 @@ analyze:
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
 AXIS_PROTO_TUS = src/client_common.c src/client_sync.c src/client_async.c \
                  src/h2_client.c src/websocket_client.c \
-                 src/connection.c src/server.c src/h2.c src/websocket.c \
+                 src/connection.c src/server.c src/server_h2.c src/websocket.c src/server_ws.c \
                  src/sse.c src/response.c src/redirect.c src/client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:
@@ -1128,6 +1128,32 @@ freestanding-lib:
 	@echo "== freestanding client archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
 	@rm -f $(FREESTANDING_LIB)
 	$(call fs_build_and_gate,$(FREESTANDING_CLIENT_SRC),libkeel_freestanding,,)
+
+# ── Freestanding SERVER archive (Phase 10 UEFI server, S-1) ───────────────────
+# The model-blind HTTP/1.1 server core (server_core.c) + the completion server
+# driver (completion_server.c over completion_core.c) + protocol layer
+# (connection.c, response.c, router.c, chunked.c, drain.c, body_reader_buffer.c,
+# the request parser, proxy_protocol.c) + the ws/h2 upgrade-seam storage
+# (proto_hooks.c, tables NOT installed → HTTP/1.1 only). NO server.c (hosted:
+# bind/listen/systemd/signals/readiness loop), NO server_ws.c/server_h2.c
+# (WebSocket/HTTP-2 out of scope), NO OS sockets — a freestanding build injects its
+# own socket + completion providers (EFI_TCP4 + the EFI completion backend). The
+# symbol gate proves the undefined closure is the SAME documented whitelist as the
+# client archive (C-runtime mem*/str* + kl_plat_*/kl_monotonic_ms + provider ops):
+# a freestanding server pulls no OS-syscall/errno/thread/udp/dns/file_io symbol.
+FREESTANDING_SERVER_SRC = \
+    src/error.c src/version.c src/allocator.c src/kl_cstr.c src/sockaddr.c \
+    src/timer.c src/event_ctx.c src/event_dispatch.c \
+    src/completion_dispatch.c src/completion_core.c src/completion_server.c \
+    src/connection.c src/response.c src/router.c src/chunked.c src/drain.c \
+    src/body_reader_buffer.c src/server_core.c src/proto_hooks.c \
+    parsers/parser_llhttp.c \
+    vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
+
+freestanding-lib-server:
+	@echo "== freestanding SERVER archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
+	@rm -f libkeel_freestanding_server.a
+	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SRC),libkeel_freestanding_server,,)
 
 # ── Self-contained freestanding archive (optional; bare target, no libc/EDK2) ──
 # The default archive leaves mem*/strlen undefined for the platform to supply

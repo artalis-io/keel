@@ -10,6 +10,7 @@
 #include <keel/websocket_server.h> /* kl_ws_server_on_readable_data — WS over completion */
 #include "completion.h"          /* kl_comp_post_recv */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_flush */
+#include "proto_hooks.h"         /* completion-drive seam registration */
 #include <stdint.h>
 #include <sys/types.h>           /* ssize_t (TLS read return) — previously pulled
                                     transitively via response.h before off_t neutralization */
@@ -50,4 +51,13 @@ void kl_comp_ws_drive(struct KlServer *s, KlConn *c) {
         st = (KlConnState)kl_ws_server_on_writable(c);
     if (st != KL_CONN_WEBSOCKET) { kl_comp_close(s, c); return; }
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+}
+
+/* Completion-drive seam registration (proto_hooks.h): completion_server.c reaches
+ * WebSocket-over-completion only through this table. The installer (called by
+ * completion_server.c) registers it and pulls this object out of the archive. */
+static const KlWsCompHooks kl_ws_comp_hooks_table = { .drive = kl_comp_ws_drive };
+
+void kl_ws_comp_hooks_install(void) {
+    kl_ws_comp_hooks_set(&kl_ws_comp_hooks_table);
 }

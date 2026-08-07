@@ -5,8 +5,8 @@
 #include "response_internal.h"
 #include "platform.h"
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
+/* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
+ * raw errno, so this TU carries no errno symbol into the freestanding archive. */
 #include <stdint.h>
 /* KlIoVec + the socket seam come from socket.h; sockaddr/TCP_NODELAY via
  * socket.h -> sockcompat.h. No raw net headers, and no platform iovec here —
@@ -140,7 +140,7 @@ int kl_response_init(KlResponse *res, KlAllocator *alloc) {
 void kl_response_reset(KlResponse *res) {
     /* Close file descriptor if one was set for sendfile */
     if (res->file_fd >= 0) {
-        close(res->file_fd);
+        kl_plat_file_close(res->file_fd);
     }
     /* Free owned body copy if any */
     if (res->body_owned) {
@@ -172,7 +172,7 @@ void kl_response_reset(KlResponse *res) {
 
 void kl_response_free(KlResponse *res) {
     if (res->file_fd >= 0) {
-        close(res->file_fd);
+        kl_plat_file_close(res->file_fd);
         res->file_fd = -1;
     }
     if (res->body_owned) {
@@ -312,8 +312,10 @@ static ssize_t try_writev(const KlSocketProvider *p, int fd, KlTls *tls,
                           KlIoVec *iov, int iovcnt) {
     if (!tls) {
         ssize_t nw = seam_writev(p, fd, iov, iovcnt);
-        if (nw < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
-        if (nw < 0 && errno == EINTR) return 0;
+        if (nw < 0) {
+            KlIoStatus st = kl_sock_io_status(p);
+            if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED) return 0;
+        }
         return nw;
     }
     /* TLS: write first non-empty segment */
@@ -336,8 +338,9 @@ static int stream_writev_all(const KlSocketProvider *p, int fd, KlTls *tls,
         while (iovcnt > 0) {
             ssize_t nw = seam_writev(p, fd, iov, iovcnt);
             if (nw < 0) {
-                if (errno == EINTR) continue;
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                KlIoStatus st = kl_sock_io_status(p);
+                if (st == KL_IO_INTERRUPTED) continue;
+                if (st == KL_IO_WOULD_BLOCK) {
                     if (++spins > KL_WRITE_SPIN_MAX) return -1;
                     continue;
                 }
@@ -560,7 +563,7 @@ int kl_response_send(KlResponse *res) {
             while (left > 0) {
                 ssize_t nw = kl_sock_send(sp, res->conn_fd, p, left);
                 if (nw < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    if (kl_sock_io_status(sp) == KL_IO_WOULD_BLOCK) break;
                     return -1;
                 }
                 if (nw == 0) break;
@@ -580,7 +583,7 @@ int kl_response_send(KlResponse *res) {
             ssize_t sent = kl_sock_sendfile(sp, res->conn_fd, res->file_fd,
                                             &res->file_offset, remaining);
             if (sent < 0) {
-                if (errno == EAGAIN) return 1;
+                if (kl_sock_io_status(sp) == KL_IO_WOULD_BLOCK) return 1;
                 return -1;
             }
             if (sent == 0) break;
@@ -605,7 +608,8 @@ static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx)
     }
     nw = kl_sock_send(res_provider(res), res->conn_fd, data, len);
     if (nw < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+        KlIoStatus st = kl_sock_io_status(res_provider(res));
+        if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED)
             return 0;
         return -1;
     }

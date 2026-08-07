@@ -7,11 +7,12 @@
 #include <keel/h2_server.h>
 #include <keel/proxy_protocol.h>
 #include "conn_internal.h"
+#include "proto_hooks.h"        /* ws/h2 upgrade seam — core never names ws/h2 directly */
 #include <assert.h>
 #include <string.h>
-#include <strings.h>
-#include <unistd.h>
-#include <errno.h>
+#include "kl_cstr.h"          /* kl_ascii_strncasecmp — freestanding-safe, locale-free */
+/* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
+ * raw errno, so this TU carries no errno symbol into the freestanding archive. */
 #include <stdint.h>
 #include "internal.h"
 #include "h2_internal.h"
@@ -119,10 +120,12 @@ static void conn_cleanup_body_reader(KlConn *c) {
 }
 
 void kl_conn_release(KlConnPool *pool, KlConn *c) {
-    /* WebSocket cleanup — notify on_close if needed, free state */
-    kl_ws_server_cleanup(c);
-    /* HTTP/2 cleanup — destroy streams, session, free state */
-    kl_h2_server_cleanup(c);
+    /* WebSocket / HTTP-2 cleanup via the per-protocol upgrade seam (no-op when the
+     * module isn't linked — e.g. a freestanding HTTP/1.1 server). */
+    const KlWsServerHooks *wsh = kl_ws_server_hooks();
+    const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+    if (wsh && wsh->cleanup) wsh->cleanup(c);
+    if (h2h && h2h->cleanup) h2h->cleanup(c);
 
     /* TLS shutdown before close(fd) — best-effort close_notify.
      * Retry on WANT_WRITE to flush the close_notify record.
@@ -155,9 +158,11 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
 void kl_conn_pool_free(KlConnPool *pool) {
     if (pool->conns) {
         /* Close any active connections */
+        const KlWsServerHooks *wsh = kl_ws_server_hooks();
+        const KlH2ServerHooks *h2h = kl_h2_server_hooks();
         for (int i = 0; i < pool->capacity; i++) {
-            kl_ws_server_cleanup(&pool->conns[i]);
-            kl_h2_server_cleanup(&pool->conns[i]);
+            if (wsh && wsh->cleanup) wsh->cleanup(&pool->conns[i]);
+            if (h2h && h2h->cleanup) h2h->cleanup(&pool->conns[i]);
             if (pool->conns[i].req.body_reader) {
                 pool->conns[i].req.body_reader->destroy(
                     pool->conns[i].req.body_reader);
@@ -341,10 +346,11 @@ KlConnState kl_conn_on_handshake(KlConn *c) {
             /* Check ALPN for HTTP/2 negotiation */
             if (c->h2_config && c->tls->alpn_protocol) {
                 const char *proto = c->tls->alpn_protocol(c->tls);
+                const KlH2ServerHooks *h2h = kl_h2_server_hooks();
                 if (proto && proto[0] == 'h' && proto[1] == '2' &&
-                    proto[2] == '\0') {
-                    int hr = kl_h2_server_upgrade(c, c->router, c->h2_config,
-                                           NULL, 0);
+                    proto[2] == '\0' && h2h && h2h->upgrade) {
+                    int hr = h2h->upgrade(c, c->router, c->h2_config,
+                                          NULL, 0);
                     if (hr == KL_CONN_HTTP2) {
                         c->state = KL_CONN_HTTP2;
                         return c->state;
@@ -372,15 +378,17 @@ int kl_conn_read_proxy_header(KlConn *c) {
     ssize_t n;
     do {
         n = kl_sock_recv_peek(conn_sp(c), c->fd, buf, sizeof(buf));
-    } while (n < 0 && errno == EINTR);
+    } while (n < 0 && kl_sock_io_status(conn_sp(c)) == KL_IO_INTERRUPTED);
     if (n < 0)
-        return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+        return (kl_sock_io_status(conn_sp(c)) == KL_IO_WOULD_BLOCK) ? 0 : -1;
     if (n == 0)
         return -1;   /* peer closed before sending a header */
 
     KlSockAddr peer;
     size_t consumed = 0;
-    KlProxyResult r = kl_proxy_parse(buf, (size_t)n, &consumed, &peer);
+    const KlProxyHooks *ph = kl_proxy_hooks();
+    if (!ph || !ph->parse) return 1;   /* PROXY module not linked — treat as no header */
+    KlProxyResult r = ph->parse(buf, (size_t)n, &consumed, &peer);
 
     switch (r) {
         case KL_PROXY_NEED_MORE:
@@ -422,8 +430,10 @@ int kl_conn_read_proxy_header(KlConn *c) {
 int kl_conn_ingest_proxy(KlConn *c, size_t len) {
     KlSockAddr peer;
     size_t consumed = 0;
-    KlProxyResult r = kl_proxy_parse((const uint8_t *)c->read_buf, len,
-                                     &consumed, &peer);
+    const KlProxyHooks *ph = kl_proxy_hooks();
+    if (!ph || !ph->parse) return 0;   /* PROXY module not linked — no header */
+    KlProxyResult r = ph->parse((const uint8_t *)c->read_buf, len,
+                                &consumed, &peer);
     switch (r) {
         case KL_PROXY_NEED_MORE:
             /* A PROXY header can't exceed KL_PROXY_HEADER_MAX; still incomplete past that is
@@ -505,9 +515,10 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
     }
 
     /* WebSocket upgrade — branch before body reading */
+    const KlWsServerHooks *wsh = kl_ws_server_hooks();
     if (c->route_result == 200 && c->route &&
-        c->route->ws_config) {
-        c->state = (KlConnState)kl_ws_server_upgrade(
+        c->route->ws_config && wsh && wsh->upgrade) {
+        c->state = (KlConnState)wsh->upgrade(
             c, leftover_buf, leftover_len);
         return c->state;
     }
@@ -517,9 +528,10 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         size_t ug_len;
         const char *ug = kl_request_header_len(
             &c->req, "Upgrade", &ug_len);
+        const KlH2ServerHooks *h2h = kl_h2_server_hooks();
         if (ug && ug_len == 3 &&
-            strncasecmp(ug, "h2c", 3) == 0) {
-            c->state = (KlConnState)kl_h2_server_upgrade_from_h1(
+            kl_ascii_strncasecmp(ug, "h2c", 3) == 0 && h2h && h2h->upgrade_from_h1) {
+            c->state = (KlConnState)h2h->upgrade_from_h1(
                 c, router, c->h2_config,
                 leftover_buf, leftover_len);
             return c->state;
@@ -546,7 +558,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         const char *expect = kl_request_header_len(
             &c->req, "Expect", &expect_len);
         if (expect && expect_len == 12 &&
-            strncasecmp(expect, "100-continue", 12) == 0) {
+            kl_ascii_strncasecmp(expect, "100-continue", 12) == 0) {
             best_effort_conn_write(c, kl_100_continue,
                                    sizeof(kl_100_continue) - 1);
         }
@@ -796,7 +808,10 @@ read_more_headers: ;
                      * session's HTTP/2 engine consumes the client connection
                      * preface itself, matching the ALPN-h2 and h2c-Upgrade paths
                      * where the magic arrives on the stream normally. */
-                    c->state = (KlConnState)kl_h2_server_upgrade(
+                    const KlH2ServerHooks *h2hp = kl_h2_server_hooks();
+                    if (!h2hp || !h2hp->upgrade)
+                        return c->state;   /* HTTP/2 not linked — stay HTTP/1.1 */
+                    c->state = (KlConnState)h2hp->upgrade(
                         c, router, c->h2_config,
                         c->read_buf, c->read_len);
                     return c->state;
@@ -937,11 +952,12 @@ static KlConnState conn_file_flush(KlConn *c) {
         ssize_t nw = kl_sock_send(conn_sp(c), c->fd, c->read_buf + c->file_io_sent,
                                   c->file_io_len - c->file_io_sent);
         if (nw < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            KlIoStatus st = kl_sock_io_status(conn_sp(c));
+            if (st == KL_IO_WOULD_BLOCK) {
                 c->state = KL_CONN_SENDING;
                 return c->state;  /* wait for WRITE event */
             }
-            if (errno == EINTR) continue;
+            if (st == KL_IO_INTERRUPTED) continue;
             c->file_io_phase = FILE_IO_IDLE;
             c->state = KL_CONN_CLOSED;
             return c->state;

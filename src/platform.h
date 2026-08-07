@@ -74,6 +74,12 @@ int kl_plat_cpu_count(void);
  * descriptor; @count is bounded by the caller's buffer (fits in int). */
 int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset);
 
+/* Close a file-body descriptor opened for a KL_BODY_FILE response. A platform
+ * seam (not a raw close()) so response.c stays freestanding: POSIX/Windows close
+ * the CRT fd; a freestanding build (no filesystem) supplies its own — typically a
+ * no-op. Ignores a negative fd. */
+void kl_plat_file_close(int fd);
+
 /* Single-socket readiness wait (the blocking poll(&pfd,1,timeout) idiom used by
  * the sync client). @events is a mask of KL_POLL_IN / KL_POLL_OUT. Returns >0 if
  * ready (requested event or an error/hangup event), 0 on timeout, -1 on failure.

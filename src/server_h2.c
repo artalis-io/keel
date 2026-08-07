@@ -13,6 +13,7 @@
 #include "internal.h"
 #include "h2_internal.h"       /* KlH2ServerConn / KlH2ServerStream bodies (opaque now) */
 #include "platform.h"   /* kl_plat_file_pread */
+#include "proto_hooks.h"       /* H2 server upgrade seam — registered for the core */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Stream management (static helpers)
@@ -669,4 +670,26 @@ void kl_h2_server_cleanup(KlConn *c) {
 
     kl_free(h2c->alloc, h2c, sizeof(KlH2ServerConn));
     c->h2 = NULL;
+}
+
+/* ── HTTP/2 server upgrade seam registration (proto_hooks.h) ─────────────────
+ * The shared server core reaches HTTP/2 only through this table; installing it
+ * both wires the core and forces server_h2.o out of the static archive. */
+static const KlH2ServerHooks kl_h2_server_hooks_table = {
+    .upgrade         = kl_h2_server_upgrade,
+    .upgrade_from_h1 = kl_h2_server_upgrade_from_h1,
+    .cleanup         = kl_h2_server_cleanup,
+    .drain_shutdown  = kl_h2_server_drain_shutdown,
+};
+
+void kl_h2_server_hooks_install(void) {
+    kl_h2_server_hooks_set(&kl_h2_server_hooks_table);
+}
+
+/* Also self-install at load, so a consumer driving connection.c's dispatch directly
+ * (without kl_server_init — e.g. the unit tests) has the seam wired. Runs only if
+ * this object is linked (a direct kl_h2_server_* reference pulls it in). */
+__attribute__((constructor))
+static void kl_h2_server_hooks_autoinstall(void) {
+    kl_h2_server_hooks_install();
 }

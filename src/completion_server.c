@@ -33,6 +33,7 @@
 #include <keel/sockaddr.h>       /* kl_sockaddr_family — neutral accept addrs from the event */
 #include "platform.h"            /* kl_plat_file_pread — TLS file body chunks (8c-2) */
 #include <keel/proxy_protocol.h> /* kl_cidr_match — PROXY-over-completion accept gate */
+#include "proto_hooks.h"         /* ws/h2 upgrade + completion-drive seams */
 #include <string.h>
 #include <stddef.h>              /* offsetof (server_of_ctx containerof) */
 #include <stdint.h>              /* SIZE_MAX */
@@ -344,9 +345,10 @@ static int comp_try_reading(struct KlServer *s, KlConn *c) {
      * into h2 by sending the 24-byte preface; upgrade and feed the leftover. */
     if (c->h2_config != NULL) {
         static const char h2_preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        if (c->read_len >= 24) {
+        const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+        if (c->read_len >= 24 && h2h && h2h->upgrade) {
             if (memcmp(c->read_buf, h2_preface, 24) == 0) {
-                KlConnState st = (KlConnState)kl_h2_server_upgrade(
+                KlConnState st = (KlConnState)h2h->upgrade(
                     c, &s->router, c->h2_config, c->read_buf + 24, c->read_len - 24);
                 comp_after_state(s, c, st);
                 return 0;
@@ -389,8 +391,18 @@ static void comp_drive_body(struct KlServer *s, KlConn *c) {
  * each decrypt phase loops on pending() so buffered plaintext isn't stranded waiting
  * for the next network read. Ciphertext output is flushed synchronously. */
 static void comp_tls_drive(struct KlServer *s, KlConn *c) {
-    if (c->state == KL_CONN_HTTP2) { kl_comp_h2_drive(s, c); return; }   /* ALPN h2 (8d-1) */
-    if (c->state == KL_CONN_WEBSOCKET) { kl_comp_ws_drive(s, c); return; }   /* WS/TLS (8e-1) */
+    /* Upgraded connections drive through the completion-drive seam (NULL in a
+     * freestanding HTTP/1.1 build, which never reaches these states). */
+    if (c->state == KL_CONN_HTTP2) {
+        const KlH2CompHooks *h2c = kl_h2_comp_hooks();
+        if (h2c && h2c->drive) h2c->drive(s, c);       /* ALPN h2 (8d-1) */
+        return;
+    }
+    if (c->state == KL_CONN_WEBSOCKET) {
+        const KlWsCompHooks *wsc = kl_ws_comp_hooks();
+        if (wsc && wsc->drive) wsc->drive(s, c);       /* WS/TLS (8e-1) */
+        return;
+    }
 
     if (c->state == KL_CONN_TLS_HANDSHAKE) {
         KlConnState st = kl_conn_on_handshake(c);      /* reads fed ciphertext */
@@ -401,7 +413,8 @@ static void comp_tls_drive(struct KlServer *s, KlConn *c) {
         }
         if (st == KL_CONN_HTTP2) {                     /* ALPN h2 — SETTINGS flushed above */
             c->read_len = 0;
-            kl_comp_h2_drive(s, c);                    /* process any buffered h2 frames */
+            const KlH2CompHooks *h2c = kl_h2_comp_hooks();
+            if (h2c && h2c->drive) h2c->drive(s, c);   /* process any buffered h2 frames */
             return;
         }
         if (st != KL_CONN_READING) { kl_comp_close(s, c); return; }   /* CLOSED */
@@ -452,6 +465,21 @@ static void comp_tls_drive(struct KlServer *s, KlConn *c) {
 }
 
 static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
+#ifndef KEEL_FREESTANDING
+    /* Register the completion-mode ws/h2 drive tables once, and (the reason this is
+     * an explicit installer call, not a constructor) pull completion_ws.o /
+     * completion_h2.o out of the static archive — the seam's function-pointer
+     * dispatch above references no completion-TU symbol, so nothing else would.
+     * Guarded because a freestanding HTTP/1.1 archive links neither completion TU
+     * (nor their installers); it never upgrades, so the dispatch sees NULL hooks.
+     * This is the one irreducible build-axis line the pure seam can't absorb. */
+    static int comp_hooks_done = 0;
+    if (!comp_hooks_done) {
+        kl_ws_comp_hooks_install();
+        kl_h2_comp_hooks_install();
+        comp_hooks_done = 1;
+    }
+#endif
     if (!ev->ok || !kl_handle_valid(ev->accepted_fd)) goto refill;
 
     KlConn *nc = kl_conn_acquire(&s->pool, ev->accepted_fd);
@@ -482,9 +510,14 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
      * TLS/HTTP. Read it first (KL_CONN_PROXY_HEADER, a plaintext recv); comp_drive_proxy enters
      * the real initial state (TLS handshake or HTTP read) once the header is consumed. Mirrors
      * the readiness accept gate (server.c). */
-    if (s->proxy_cidr_count > 0 &&
+    /* PROXY protocol: a trusted-source connection sends a plaintext PROXY header
+     * before any TLS/HTTP. Reached only through the PROXY seam — NULL in a
+     * freestanding firmware server (proxy_protocol.c not linked; proxy_trusted_cidrs
+     * never set), so this is skipped and the archive omits the hosted PROXY parser. */
+    const KlProxyHooks *ph = kl_proxy_hooks();
+    if (s->proxy_cidr_count > 0 && ph && ph->cidr_match &&
         kl_sockaddr_family(&nc->peer_addr) != KL_AF_UNSPEC &&
-        kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &nc->peer_addr)) {
+        ph->cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &nc->peer_addr)) {
         nc->state = KL_CONN_PROXY_HEADER;   /* TLS memory-BIO enabled later, after the header */
     } else if (nc->tls) {
         /* TLS: enter the handshake state and switch the backend into completion (memory BIO)
@@ -557,10 +590,14 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
     c->read_len += ev->bytes;
     /* Body reads use a fresh sliding window (read_len was reset to 0 before the
      * post), so read_len == the bytes just received. Headers accumulate. */
-    if (c->state == KL_CONN_HTTP2)
-        kl_comp_h2_drive(s, c);        /* plaintext h2 (h2c) frames (8d-1) */
-    else if (c->state == KL_CONN_WEBSOCKET)
-        kl_comp_ws_drive(s, c);        /* plaintext WebSocket frames (8e-1) */
+    if (c->state == KL_CONN_HTTP2) {
+        const KlH2CompHooks *h2c = kl_h2_comp_hooks();
+        if (h2c && h2c->drive) h2c->drive(s, c);   /* plaintext h2 (h2c) frames (8d-1) */
+    }
+    else if (c->state == KL_CONN_WEBSOCKET) {
+        const KlWsCompHooks *wsc = kl_ws_comp_hooks();
+        if (wsc && wsc->drive) wsc->drive(s, c);   /* plaintext WebSocket frames (8e-1) */
+    }
     else if (c->state == KL_CONN_READING_BODY)
         comp_drive_body(s, c);
     else

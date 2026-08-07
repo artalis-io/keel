@@ -4,8 +4,12 @@
 #include <keel/connection.h>
 #include <keel/server.h>
 #include <keel/tls.h>
+#include <errno.h>            /* freestanding: supplied by the UEFI/cross shim */
+#ifdef KEEL_FREESTANDING
+#include <sys/types.h>        /* ssize_t (no <unistd.h> in a freestanding build) */
+#else
 #include <unistd.h>
-#include <errno.h>
+#endif
 
 #include "socket.h"
 
@@ -56,6 +60,13 @@ static inline void best_effort_conn_write(KlConn *c, const void *buf, size_t len
 
 /* Release a connection and resume listening if paused (defined in server.c) */
 void kl_server_conn_release(KlServer *s, KlConn *c);
+
+/* Server bisection (S-1): the completion run-loop tick lives in the freestanding-safe
+ * server core (server_core.c); the idle/drain sweeps stay in server.c (they own
+ * kl_408_response). One completion iteration; returns 0 to continue, -1 to break. */
+int  kl_server_run_completion_loop(KlServer *s);
+void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop);
+void kl_server_drain_progress(KlServer *s, uint64_t now);
 
 /* Drive the HTTP/2 server session with already-received plaintext: parse frames +
  * flush produced output. Returns the next KlConnState (KL_CONN_HTTP2 / KL_CONN_CLOSED).
