@@ -127,9 +127,23 @@ native EFI provider), routes `GET /`, drives the socket seam for `bind`/`listen`
 sendfile/cork/nodelay/accept fallbacks, file-response platform hooks, `_fltused`). The EFI
 image links (198 KB PE32+) and **boots on QEMU/OVMF**: `efi_main` runs, `kl_server_init`
 executes freestanding + negotiates the provider — validating the carve on bare firmware.
-The boot-to-200 needs a network-enabled OVMF (this run's homebrew OVMF has no EFI_TCP4
-stack → `kl_server_init` returns `KL_ERR_SOCKET`, the documented graceful-degradation path);
-`run_s4.sh` runs it in the Ubuntu container. `kl_server_free`/teardown stays hosted-only — S-7.
+**Network-OVMF boot result (Ubuntu 24.04 container, `run_s4.sh`, `OVMF_CODE_4M.fd`):**
+`kl_server_init` **succeeds** and `bind`/`listen` **succeed** ("server up" -> "listening on
+:80") — the freestanding `KlServer` construction + EFI_TCP4 passive open both work on real
+network firmware. Serving the host `curl` hits a firmware `#UD` (RIP -> `0xB0000`). **Root
+cause (confirmed):** the EFI `KlCompletionOps` (`event_efi.c` `EFI_COMP_OPS`) leaves
+`.post_recv`/`.post_send`/`.post_sendfile` **NULL** — the *client* rides the `KL_COMP_WATCHER`
+drain-relay + sync socket provider and never calls them, but the *server* completion driver
+(`completion_server.c`) calls `kl_comp_post_recv`/`post_send` directly, so post-accept it calls
+a NULL op. **Remaining S-4 work:** implement EFI `post_recv`/`post_send` mirroring
+`event_pollcomp.c` (record the op; in `el_drain`, on read/write readiness do
+`efi_sock_recv`/`efi_sock_send` and emit `KL_COMP_READ`/`KL_COMP_WRITE`), gated natively first
+by extending the mock-EFI harness (`mock_efi_test.c`) with a full serve roundtrip, then the
+container 200.
+
+(This run's homebrew OVMF on the macOS host has no EFI_TCP4 stack -> `kl_server_init` returns
+`KL_ERR_SOCKET`, the documented graceful-degradation path; the network boot needs Ubuntu's
+OVMF.) `kl_server_free`/teardown stays hosted-only — S-7.
 
 ### S-5 — Lifetime hardening + mock-EFI accept tests
 Extend the F7b host mock (`mock_efi_test.c`) with the **server** lifetime scenarios the QEMU happy
