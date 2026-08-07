@@ -1,7 +1,8 @@
 # Phase 10 — UEFI HTTP(S) **server** on bare firmware (scoping plan)
 
-**Status: S-1..S-5 done; S-4 COMPLETE — serves `GET / → 200` over EFI_TCP4 on bare
-firmware (QEMU/OVMF).** The Phase 10 client (U-0..U-8) serves a hardened `KlClient`
+**Status: S-1..S-6 done — serves `GET / → 200` (plaintext, S-4) and **HTTPS** (S-6) over
+EFI_TCP4 on bare firmware (QEMU/OVMF). S-7 (teardown/audit/ship) remains.** The Phase 10
+client (U-0..U-8) serves a hardened `KlClient`
 (plaintext + HTTPS + DNS) on bare UEFI firmware. This doc scopes the *inbound* direction — a
 `KlServer` that `bind`/`listen`/`accept`s over EFI_TCP4 and answers `GET / → 200` —
 deliberately structured to preserve the three-axis separation that `/axis-audit` enforces.
@@ -157,14 +158,27 @@ path can't expose — the load-bearing acceptance, mirroring the client work:
 - Stale generation on a reused accepted-child slot.
 *Axis:* socket + completion lifetime. *Goals 6, 8, 10, 13.* ASan+UBSan; `detect_leaks` per-OS.
 
-### S-6 — **HTTPS** server (completion-mode TLS)
-The hard TLS lift: server-side memory-BIO. Implement the [[keel-completion-tls-backend-contract]]
-obligations for the EFI backend — feed received **ciphertext** to `tls->feed_input` (not `read_buf`)
-and provide a **synchronous send** on the server-accepted socket (`comp_tls_flush` blocks). Reuse
-`entropy_uefi` (fail-closed EFI_RNG) + `clock_snapshot` (U-8 cert clock) unchanged. `s6_selftest.c`:
-HTTPS `GET / → 200` with a server cert; verify handshake + close-notify + the U-8 clock gate applies
-to the server too.
-*Axis:* completion + TLS-vtable (extend additively, per the client's `at_eof` precedent).
+### S-6 — **HTTPS** server (completion-mode TLS) — *COMPLETE (serves HTTPS GET / → 200 on QEMU/OVMF)*
+The hard TLS lift landed with a **remarkably small** backend delta — the completion-mode TLS
+server is entirely in the model-blind core (`completion_server.c`: `comp_tls_drive` /
+`kl_comp_tls_flush` / `comp_tls_send_response`), so the EFI backend supplied only the two
+[[keel-completion-tls-backend-contract]] obligations:
+1. **post_recv feeds ciphertext** (`event_efi.c`): a TLS conn's socket carries ciphertext, so the
+   recv reads it into a transient scratch buffer and calls `tls->feed_input`; `comp_tls_drive` then
+   handshakes/decrypts into `read_buf`. (The plaintext S-4 recv path is unchanged — one `if (c->tls)`.)
+2. **synchronous send** on the accepted socket for `kl_comp_tls_flush` — already satisfied by
+   `efi_sock_send`; the response ciphertext rides the same S-4 `post_send` (content-agnostic).
+
+The one config fix: **`MBEDTLS_SSL_SRV_C`** was missing from `mbedtls_config_uefi.h` (the U-4 client
+config), so the server ctx parsed but its handshake never progressed — enabling it (additive; the
+client is unaffected) fixed the stall. `s6_selftest.c` builds the server ctx from an embedded PEM
+cert+key (`kl_tls_mbedtls_ctx_create_from_buf`), binds `:443`; `build_s6.sh`/`run_s6.sh` mirror the
+U-4 mbedTLS recipe against the server archive. **Result: PASS** — `server up → listening on :443 →
+GO`, host `curl -k` returns **200** with body `hello from KEEL on UEFI (HTTPS over EFI_TCP4)`.
+(Spike entropy = the insecure weak fallback, no virtio-rng; a production build requires real EFI_RNG
+fail-closed, per U-4. `post_sendfile` still NULL — file responses are a later step.)
+*Axis:* completion + TLS-vtable — no vtable change needed; the client's `feed_input`/`drain_output`
+memory-BIO ops served the server verbatim.
 
 ### S-7 — Docs, audit passes, EBS lifecycle, ship
 `kl_uefi_shutdown()` also tears down the listener + Accept-token pool (order: children → listener →
