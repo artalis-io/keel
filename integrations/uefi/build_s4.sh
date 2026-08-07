@@ -65,4 +65,4 @@ echo "linking BOOTX64.EFI (lld PE, subsystem=efi_application, -nostdlib)..."
   -o BOOTX64.EFI "${OBJS[@]}" "$ARCHIVE"
 
 echo "built: $(stat -c%s BOOTX64.EFI 2>/dev/null || stat -f%z BOOTX64.EFI) bytes -> BOOTX64.EFI"
-file BOOTX64.EFI || true
+command -v file >/dev/null 2>&1 && file BOOTX64.EFI || true
