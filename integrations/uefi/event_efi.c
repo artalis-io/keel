@@ -12,8 +12,9 @@
 
 #include <keel/event.h>
 #include <keel/sockaddr.h>
-#include "../../src/socket.h"          /* KlSocketProvider, KlSocketHandle, kl_handle_valid */
+#include "../../src/socket.h"          /* KlSocketProvider, kl_sock_accept, kl_handle_valid */
 #include "../../src/completion.h"      /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
+#include <keel/server.h>               /* KlServer.pool — accept backpressure (S-3) */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -50,6 +51,11 @@ typedef struct {
     int                created;
     EfiConnOp          conns[KL_EFI_MAX_CONN_OPS];
     EfiWatch           watches[KL_EFI_MAX_WATCHES];
+    /* S-3 server accept: latched by prime_accepts; drain hands back each ready child
+     * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlConn-pool backpressure. */
+    struct KlServer   *server;
+    KlSocketHandle     listen_fd;
+    int                accept_primed;
 } EfiLoop;
 
 static EfiLoop g_efi;
@@ -152,12 +158,29 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
             g_efi.watches[i].in_use = 0;
 }
 
+/* prime_accepts: latch the server + its passive listen fd so drain can hand back
+ * accepted children. The S-2 listen() already armed the Accept-token pool; this only
+ * records what drain needs. Idempotent. */
+static int el_prime_accepts(struct KlServer *s) {
+    if (!s) return -1;
+    g_efi.server = s;
+    g_efi.listen_fd = s->listen_fd;
+    g_efi.accept_primed = 1;
+    return 0;
+}
+
+/* post_accept: the EFI Accept-token pool self-refills inside efi_sock_accept (it
+ * re-arms each consumed token), so a refill is a no-op beyond staying primed. */
+static int el_post_accept(struct KlServer *s) {
+    return el_prime_accepts(s);
+}
+
 /* drain: surface completed Connect tokens (stale-guarded) as KL_COMP_CONNECT, then
  * relay each armed watch as a KL_COMP_WATCHER (level-triggered — the client re-arms
  * while it still needs to send/recv). If nothing fired, Stall briefly so the firmware
  * keeps ticking without a 100%-CPU spin. */
 static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
-    (void)ctx; (void)timeout_ms;
+    (void)timeout_ms;
     /* F3: once boot services are gone, the EFI_TCP4 Poll/CheckEvent/connect_poll paths
      * are all invalid — stop driving the loop (fail-closed, no firmware calls). */
     if (kl_uefi_after_ebs()) return 0;
@@ -212,6 +235,26 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         count++;
     }
 
+    /* Accept relay (S-3): hand back each child the S-2 Accept-token pool has ready as
+     * KL_COMP_ACCEPT (peer already neutralized by efi_sock_accept via GetModeData).
+     * Backpressure — stop when the server's KlConn pool is full (don't accept into a
+     * drop; the completion analogue of reducing readiness interest, Goal 8). The
+     * socket-axis efi_sock_accept re-arms each consumed Accept token internally. */
+    if (g_efi.accept_primed && g_efi.server && kl_handle_valid(g_efi.listen_fd)) {
+        while (count < max && g_efi.server->pool.free_list) {
+            KlSockAddr peer;
+            for (size_t b = 0; b < sizeof(peer); b++) ((unsigned char *)&peer)[b] = 0;
+            KlSocketHandle a = kl_sock_accept(ctx->sockets, g_efi.listen_fd, &peer);
+            if (!kl_handle_valid(a)) break;   /* none ready (would-block) */
+            for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
+            out[count].kind        = KL_COMP_ACCEPT;
+            out[count].ok          = 1;
+            out[count].accepted_fd = a;
+            out[count].peer        = peer;
+            count++;
+        }
+    }
+
     if (count == 0 && g_efi.bs)
         g_efi.bs->Stall(1000);   /* 1 ms — idle tick while a connect settles / no work */
     return count;
@@ -221,8 +264,10 @@ static const KlCompletionOps EFI_COMP_OPS = {
     .drain = el_drain,
     .post_connect = el_post_connect,
     .cancel = el_cancel,
-    /* prime_accepts/post_recv/post_send/post_accept/post_sendfile/post_udp_* = NULL:
-     * unreached by the client-only completion path. */
+    .prime_accepts = el_prime_accepts,   /* S-3: inbound server accept */
+    .post_accept = el_post_accept,
+    /* post_recv/post_send/post_sendfile/post_udp_* = NULL: EFI drives send/recv via
+     * the SYNC socket provider relayed as KL_COMP_WATCHER, not as posted ops. */
 };
 
 static const KlEventOps EFI_EVENT_OPS = {
