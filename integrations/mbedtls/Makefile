@@ -49,7 +49,20 @@ test: $(LIB)
 	./link_smoke
 	@echo "integrations/mbedtls: link smoke OK"
 
-clean:
-	rm -f $(LIB) $(OBJ) tls_mbedtls.d link_smoke
+# End-to-end: both transport axes (socket-BIO + memory-BIO), ALPN, peer_cert,
+# clean-shutdown at_eof, plus a hardening/regression suite. Built with ASan+UBSan;
+# links the adapter source + core libkeel.a + mbedTLS.
+E2E_CFLAGS = -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror \
+             -fsanitize=address,undefined -fno-sanitize-recover=all \
+             -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src -I. $(MBEDTLS_INC)
+e2e: $(OBJ)
+	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
+	$(CC) $(E2E_CFLAGS) -o e2e/tls_e2e e2e/tls_e2e.c tls_mbedtls.c \
+	  -L$(KEEL_ROOT) -lkeel $(MBEDTLS_LDPATH) -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
+	./e2e/tls_e2e
 
-.PHONY: all test clean
+clean:
+	rm -f $(LIB) $(OBJ) tls_mbedtls.d link_smoke e2e/tls_e2e
+	rm -rf e2e/tls_e2e.dSYM
+
+.PHONY: all test e2e clean
