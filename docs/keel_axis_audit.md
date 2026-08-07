@@ -1,5 +1,46 @@
 # KEEL Networking Architecture Axis Audit
 
+## Tenth pass — the UEFI HTTP(S) **server** validates the model-blind server core (2026-08-08)
+
+**Verdict: architecturally sound — the inbound direction is the mirror of the ninth pass and,
+if anything, a stronger validation of the axis model.** A STOCK freestanding `KlServer` serves
+`GET / → 200` — **plaintext (S-4) and HTTPS (S-6)** — and tears down cleanly (S-7) over EFI_TCP4
+on bare UEFI firmware (QEMU/OVMF, verified in an Ubuntu 24.04 container), with **zero protocol
+edits**. The whole S-1..S-7 effort added no platform coupling to `src/`.
+
+### What this pass confirms about the axes
+
+1. **Protocol + server core stayed above both axes (Goal 4) — mechanical PASS.** The core server
+   TUs (`src/server_core.c`, `src/server.c`) contain no platform-networking or event-engine code
+   (`grep` for `sys/epoll`/`sys/event`/`io_uring_`/`epoll_`/`kevent(`/`WSA`/`EFI_TCP4_PROTOCOL`/
+   `efi_sock_` finds only comment prose). No EFI/UEFI TU lives in `src/`; every EFI symbol is under
+   `integrations/uefi/`. The server core serves over EFI_TCP4 byte-identically to epoll/io_uring.
+2. **The `KlCompletionOps` vtable hosts a SERVER backend, not just a client (Goals 1, 12).** S-3/S-4
+   added `prime_accepts`/`post_accept` + the completion-native `post_recv`/`post_send` to the EFI
+   backend (`event_efi.c`), surfaced as `KL_COMP_ACCEPT`/`KL_COMP_READ`/`KL_COMP_WRITE` and consumed
+   by the model-blind `completion_server.c` — the exact shape io_uring/IOCP/pollcomp use. The client
+   rode the watcher relay and never needed these; adding them left the client path untouched.
+3. **Completion-mode server TLS needed nothing below the axis (Goals 4, 9).** S-6 required only the
+   two documented completion-TLS obligations in the backend — feed received *ciphertext* to
+   `tls->feed_input` and a synchronous send for `kl_comp_tls_flush` (already `efi_sock_send`). The
+   `KlTls` memory-BIO ops (`feed_input`/`drain_output`) served the server verbatim — **no
+   TLS-vtable change**. The one fix was a client-only mbedTLS config missing `MBEDTLS_SSL_SRV_C`.
+4. **Server operation-lifetime + teardown (Goals 6, 10) — clean.** S-7 carved a freestanding
+   `kl_server_free`; `kl_conn_pool_free` closes every accepted-child socket (draining its EFI
+   tokens), so `kl_uefi_socket_provider_live_count() == 0` after teardown — the precondition for
+   `kl_uefi_shutdown()` / ExitBootServices. Firmware-verified: served → clean teardown, 0 live
+   sockets, providers released. The `post_recv`/`post_send` ops are generation-stale-guarded (an
+   accepted child that closes mid-op is dropped, never delivered) and freed on completion/cancel.
+
+The only core deltas were the `KEEL_FREESTANDING`-guarded `kl_server_init`/`kl_server_free` carve
+into `server_core.c` (the freestanding server archive now constructs + tears down a `KlServer`
+from itself) — a build-axis guard, not a platform `#ifdef` in a dispatch path.
+
+**Compatibility-matrix delta:** `EFI_TCP4 server (plaintext + HTTPS)` moves from *not-started* to
+**firmware-verified (QEMU/OVMF, container): S-4 plaintext + S-6 HTTPS + S-7 clean teardown**.
+
+---
+
 ## Ninth pass — the UEFI completion provider validates the operation-lifetime contract (2026-08-06)
 
 **Verdict: architecturally sound — and the F-8 hardening is a direct, positive stress-test of

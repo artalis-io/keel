@@ -1,8 +1,10 @@
 # Phase 10 — UEFI HTTP(S) **server** on bare firmware (scoping plan)
 
-**Status: S-1..S-6 done — serves `GET / → 200` (plaintext, S-4) and **HTTPS** (S-6) over
-EFI_TCP4 on bare firmware (QEMU/OVMF). S-7 (teardown/audit/ship) remains.** The Phase 10
-client (U-0..U-8) serves a hardened `KlClient`
+**Status: S-1..S-7 COMPLETE — the arc is done.** A stock freestanding `KlServer` serves
+`GET / → 200` (plaintext, S-4) and **HTTPS** (S-6) over EFI_TCP4 on bare firmware
+(QEMU/OVMF, container-verified) and tears down cleanly (S-7: `kl_server_free` →
+0 live sockets → `kl_uefi_shutdown`). Axis-audit tenth pass: no core coupling, model-blind
+core validated. The Phase 10 client (U-0..U-8) serves a hardened `KlClient`
 (plaintext + HTTPS + DNS) on bare UEFI firmware. This doc scopes the *inbound* direction — a
 `KlServer` that `bind`/`listen`/`accept`s over EFI_TCP4 and answers `GET / → 200` —
 deliberately structured to preserve the three-axis separation that `/axis-audit` enforces.
@@ -180,11 +182,22 @@ fail-closed, per U-4. `post_sendfile` still NULL — file responses are a later 
 *Axis:* completion + TLS-vtable — no vtable change needed; the client's `feed_input`/`drain_output`
 memory-BIO ops served the server verbatim.
 
-### S-7 — Docs, audit passes, EBS lifecycle, ship
-`kl_uefi_shutdown()` also tears down the listener + Accept-token pool (order: children → listener →
-providers → platform). Fresh `/c-audit` + `/axis-audit` passes (the axis pass should record that the
-server **validates the audit's "future provider: UEFI SNP + polling" claim** — Goal 14). Compatibility
-matrix row: `EFI_TCP4 server + EFI completion backend`.
+### S-7 — Docs, audit passes, EBS lifecycle, ship — *COMPLETE*
+Carved a **freestanding `kl_server_free`** into `server_core.c` (mirroring the S-4 init carve, hosted-only
+bits under `#ifndef KEEL_FREESTANDING`: async-op cancel, the AF_UNIX unlink) so a freestanding server
+tears itself down from the archive alone. `kl_conn_pool_free` closes every accepted-child socket
+(draining its EFI tokens), so `kl_uefi_socket_provider_live_count() == 0` after teardown — the
+precondition for `kl_uefi_shutdown()` (which releases the EFI_TCP4 socket provider + completion event
+provider + platform timer/EBS event, U-7) / ExitBootServices. `s7_selftest.c` proves the sequence on
+firmware (mirroring U-7, without the real ExitBootServices since there is no serial after it):
+serve `GET / → 200` → `kl_server_free` → assert 0 live sockets → `kl_uefi_shutdown()` → show the
+`kl_uefi_after_ebs()` fail-closed guard. **Result: PASS** in the container.
+
+Axis pass recorded: `docs/keel_axis_audit.md` **tenth pass (2026-08-08)** — the server validates the
+audit's "future provider (Goal 14)" claim in the *inbound* direction; mechanical Goal-4 check clean
+(no platform/EFI code in `src/`); the `KlCompletionOps` vtable hosts a server backend; completion-mode
+server TLS needed no vtable change. Compatibility-matrix row added: `EFI_TCP4 server (plaintext + HTTPS)
+— firmware-verified`.
 
 ---
 
