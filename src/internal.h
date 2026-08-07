@@ -57,6 +57,13 @@ static inline void best_effort_conn_write(KlConn *c, const void *buf, size_t len
 /* Release a connection and resume listening if paused (defined in server.c) */
 void kl_server_conn_release(KlServer *s, KlConn *c);
 
+/* Server bisection (S-1): the completion run-loop tick lives in the freestanding-safe
+ * server core (server_core.c); the idle/drain sweeps stay in server.c (they own
+ * kl_408_response). One completion iteration; returns 0 to continue, -1 to break. */
+int  kl_server_run_completion_loop(KlServer *s);
+void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop);
+void kl_server_drain_progress(KlServer *s, uint64_t now);
+
 /* Drive the HTTP/2 server session with already-received plaintext: parse frames +
  * flush produced output. Returns the next KlConnState (KL_CONN_HTTP2 / KL_CONN_CLOSED).
  * The transport-agnostic h2 core (defined in h2.c): the readiness drive

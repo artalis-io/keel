@@ -185,7 +185,7 @@ else
   endif
 endif
 CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/response.c src/router.c \
-           src/connection.c src/server.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
+           src/connection.c src/server.c src/server_core.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
            src/websocket.c src/websocket_client.c \

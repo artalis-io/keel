@@ -494,38 +494,11 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     return 0;
 }
 
-int kl_server_route(KlServer *s, const char *method, const char *pattern,
-                    KlHandler handler, void *user_data,
-                    KlBodyReaderFactory body_reader) {
-    return kl_router_add(&s->router, method, pattern, handler, user_data,
-                         body_reader);
-}
-
-int kl_server_route_streaming(KlServer *s, const char *method, const char *pattern,
-                               KlHandler handler, void *user_data,
-                               KlBodyReaderFactory body_reader) {
-    return kl_router_add_streaming(&s->router, method, pattern, handler,
-                                    user_data, body_reader);
-}
-
-int kl_server_route_streaming_async(KlServer *s, const char *method,
-                                       const char *pattern,
-                                       KlHandler handler, void *user_data,
-                                       KlBodyReaderFactory body_reader) {
-    return kl_router_add_streaming_async(&s->router, method, pattern, handler,
-                                            user_data, body_reader);
-}
-
-int kl_server_use(KlServer *s, const char *method, const char *pattern,
-                  KlMiddleware fn, void *user_data) {
-    return kl_router_use(&s->router, method, pattern, fn, user_data);
-}
-
-int kl_server_use_post(KlServer *s, const char *method, const char *pattern,
-                       KlMiddleware fn, void *user_data) {
-    return kl_router_use_post(&s->router, method, pattern, fn, user_data);
-}
-
+/* Route + middleware registration (the kl_server_route / kl_server_use family) and
+ * the read-side body flow control (kl_request_pause_body / resume_body) plus
+ * kl_server_stats moved to the freestanding-safe server core (server_core.c) in the
+ * S-1 bisection. kl_server_ws stays here: WebSocket is out of the freestanding EFI
+ * server's scope (HTTP/1.1 only). */
 int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
     /* Register as a GET route with no handler — ws_config triggers upgrade */
     if (kl_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
@@ -540,7 +513,7 @@ int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
  * instead cancel that op (kl_comp_cancel) — the op then completes with an error and the
  * driver releases the connection through its normal completion path (no dangling op or
  * double release). Fixes the completion-path idle-timeout / slowloris gap. */
-static void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop) {
+void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop) {
     uint64_t timeout = (uint64_t)s->config.read_timeout_ms;
     uint64_t body_timeout = s->config.body_timeout_ms > 0
                             ? (uint64_t)s->config.body_timeout_ms
@@ -605,7 +578,7 @@ static void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int complet
  * toward close, then stop the loop when all connections are idle or the drain deadline passes.
  * Shared by the readiness and completion run-loop branches — the completion branch omitted this
  * before, so a server on a completion loop with drain_timeout_ms never exited drain mode. */
-static void kl_server_drain_progress(KlServer *s, uint64_t now) {
+void kl_server_drain_progress(KlServer *s, uint64_t now) {
     if (!atomic_load(&s->draining)) return;
     for (int j = 0; j < s->pool.capacity; j++) {
         if (s->pool.conns[j].state == KL_CONN_WEBSOCKET)
@@ -680,36 +653,10 @@ int kl_server_run(KlServer *s) {
 
     while (atomic_load(&s->running)) {
         if (completion_loop) {
-            /* Bound the tick by the nearest async-op deadline / timer so they fire on
-             * time — the completion loop is a full event loop now (watchers relayed via
-             * KL_COMP_WATCHER; timers + async deadlines serviced here, 8e-2). */
-            uint64_t cnow = kl_monotonic_ms();
-            int cwait = KL_POLL_TIMEOUT_MS;
-            for (const KlAsyncOp *aop = s->async_ops; aop; aop = aop->next) {
-                if (aop->deadline_ms > 0) {
-                    if (cnow >= aop->deadline_ms) { cwait = 0; break; }
-                    uint64_t rem = aop->deadline_ms - cnow;
-                    if (rem < (uint64_t)cwait) cwait = (int)rem;
-                }
-            }
-            cwait = kl_timer_next_timeout(&s->ev, cwait);
-            if (kl_io_engine_run_completion(s, cwait) < 0)
+            /* One completion-loop tick — factored into the freestanding-safe server
+             * core (server_core.c) so a freestanding EFI server shares it verbatim. */
+            if (kl_server_run_completion_loop(s) < 0)
                 break;
-            cnow = kl_monotonic_ms();
-            /* Idle-timeout sweep on the completion loop too (slowloris defense) — the
-             * completion path never falls through to the readiness sweep below. */
-            kl_server_sweep_conn_timeouts(s, cnow, 1);
-            for (KlAsyncOp *aop = s->async_ops; aop; ) {   /* async-op deadlines */
-                KlAsyncOp *next_aop = aop->next;
-                if (!aop->_terminal && aop->deadline_ms > 0 && cnow >= aop->deadline_ms) {
-                    aop->deadline_ms = 0;   /* fire on_deadline at most once */
-                    if (aop->on_deadline)
-                        aop->on_deadline(aop, aop->user_data);
-                }
-                aop = next_aop;
-            }
-            kl_timer_fire(&s->ev);                          /* due one-shot timers */
-            kl_server_drain_progress(s, cnow);              /* graceful drain (completion loop) */
             continue;
         }
         /* Compute dynamic timeout based on nearest async op deadline */
@@ -1024,46 +971,8 @@ void kl_server_stop(KlServer *s) {
     }
 }
 
-/* ── Read-side body flow control (Phase 1) ───────────────────────────────
- * Event-axis-agnostic pause/resume for request-body reading. Readiness drops/re-arms READ
- * interest (kl_event_mod; the READING_BODY re-arm above honors read_paused so a pause from
- * inside on_data is not immediately undone). Completion stops posting / re-posts the recv via
- * the io_engine seam. Both idempotent; loop-thread only. */
-void kl_request_pause_body(const KlRequest *req) {
-    KlConn *c = req ? kl_request_conn(req) : NULL;
-    if (!c || c->read_paused) return;                 /* idempotent */
-    c->read_paused = 1;
-    if (!(kl_event_caps(&c->ctx->loop) & KL_EVENT_CAP_COMPLETION))
-        (void)kl_event_mod(&c->ctx->loop, c->fd, 0, c);   /* readiness: stop READ now */
-    /* completion: comp_start_body_read skips the next recv; the in-flight recv may deliver ≤1
-     * more chunk before the pause takes hold (bounded). */
-}
-
-void kl_request_resume_body(const KlRequest *req) {
-    KlConn *c = req ? kl_request_conn(req) : NULL;
-    if (!c || !c->read_paused) return;                /* idempotent */
-    c->read_paused = 0;
-    if (kl_event_caps(&c->ctx->loop) & KL_EVENT_CAP_COMPLETION)
-        kl_io_engine_post_read(c);                    /* completion: re-post the body recv */
-    else
-        (void)kl_event_mod(&c->ctx->loop, c->fd, KL_EVENT_READ, c);   /* readiness: re-arm READ */
-}
-
-void kl_server_stats(const KlServer *s, KlServerStats *out) {
-    if (!out) return;
-    memset(out, 0, sizeof(*out));
-    if (!s) return;
-
-    out->active_connections = s->pool.active_count;
-    out->max_connections    = s->pool.capacity;
-    out->listen_paused      = s->listen_paused;
-
-    /* Count suspended connections by walking the async ops list */
-    int suspended = 0;
-    for (const KlAsyncOp *op = s->async_ops; op; op = op->next)
-        suspended++;
-    out->async_suspended = suspended;
-}
+/* kl_request_pause_body / kl_request_resume_body / kl_server_stats moved to the
+ * freestanding-safe server core (server_core.c) in the S-1 bisection. */
 
 void kl_server_free(KlServer *s) {
     /* Cancel all active async ops (idempotent terminal: fires on_cancel once,
