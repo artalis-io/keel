@@ -248,7 +248,9 @@ int kl_systemd_listen_fd_by_name(const char *name) {
     return result;
 }
 
-static void kl_server_close_listener(KlServer *s) {
+/* Non-static so the freestanding kl_server_free (server_core.c) can call it on the
+ * hosted path (it needs the AF_UNIX unlink); declared in internal.h. */
+void kl_server_close_listener(KlServer *s) {
     if (kl_handle_valid(s->listen_fd)) {
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
@@ -660,38 +662,9 @@ void kl_server_stop(KlServer *s) {
 /* kl_request_pause_body / kl_request_resume_body / kl_server_stats moved to the
  * freestanding-safe server core (server_core.c) in the S-1 bisection. */
 
-void kl_server_free(KlServer *s) {
-    /* Cancel all active async ops (idempotent terminal: fires on_cancel once,
-     * removes each op from the list so the loop makes progress). */
-    while (s->async_ops)
-        kl_async_cancel(s, s->async_ops);
-
-    if (s->file_io) {
-        s->file_io->destroy(s->file_io);
-        s->file_io = NULL;
-    }
-    kl_server_close_listener(s);
-    /* Tear down the stop-wakeup: deregister its watcher (needs the live loop) before
-     * closing the fds, then close both ends. */
-    if (kl_handle_valid(s->stop_wake_rd)) {
-        kl_watcher_del(&s->ev, s->stop_wake_rd);
-        KlPlatWakeup w = { s->stop_wake_rd, s->stop_wake_wr };
-        kl_plat_wakeup_close(&w);
-        s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
-    }
-    kl_event_ctx_free(&s->ev);
-    if (s->proxy_cidrs) {
-        kl_free(&s->alloc_storage, s->proxy_cidrs,
-                (size_t)s->proxy_cidr_count * sizeof(KlCidr));
-        s->proxy_cidrs = NULL;
-        s->proxy_cidr_count = 0;
-    }
-    kl_conn_pool_free(&s->pool);
-    kl_router_free(&s->router);
-    if (s->config.tls && s->config.tls->ctx_destroy) {
-        s->config.tls->ctx_destroy(s->config.tls->ctx);
-    }
-    if (s->config.compress && s->config.compress->ctx_destroy) {
-        s->config.compress->ctx_destroy(s->config.compress->ctx);
-    }
-}
+/* kl_server_free moved to the freestanding-safe server core (server_core.c) in the
+ * Phase 10 UEFI server S-7 teardown carve — a freestanding EFI server tears itself down
+ * (close listener + accepted children, free pool/router, destroy TLS ctx) from the
+ * archive alone, then kl_uefi_shutdown() releases the EFI providers before
+ * ExitBootServices. The hosted-only bits (async-op cancel, AF_UNIX unlink) are
+ * #ifndef KEEL_FREESTANDING there. */

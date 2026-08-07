@@ -292,6 +292,62 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     return 0;
 }
 
+/* ── Server teardown (model-blind: close sockets, free pool/router, destroy ctx) ──
+ * Moved from server.c in the S-7 teardown carve so a freestanding EFI server can tear
+ * itself down from the archive alone (then kl_uefi_shutdown() releases the EFI providers
+ * before ExitBootServices). kl_conn_pool_free closes every accepted child's socket
+ * (draining its EFI tokens), so after this the socket provider's live count is 0 — the
+ * precondition for a clean ExitBootServices. Hosted-only pieces (async-op cancel, the
+ * self-pipe, the AF_UNIX unlink) are compiled out under KEEL_FREESTANDING. */
+void kl_server_free(KlServer *s) {
+#ifndef KEEL_FREESTANDING
+    /* Cancel all active async ops (idempotent terminal: fires on_cancel once, removes
+     * each op from the list). Freestanding has no async suspend (no thread pool). */
+    while (s->async_ops)
+        kl_async_cancel(s, s->async_ops);
+#endif
+
+    if (s->file_io) {                 /* NULL on freestanding (kl_file_io_create guarded) */
+        s->file_io->destroy(s->file_io);
+        s->file_io = NULL;
+    }
+
+    /* Close the listen socket. Hosted also unlinks an owned AF_UNIX path; a freestanding
+     * EFI server has only the TCP listener, so close it directly. */
+#ifndef KEEL_FREESTANDING
+    kl_server_close_listener(s);
+#else
+    if (kl_handle_valid(s->listen_fd)) {
+        kl_sock_close(s->ev.sockets, s->listen_fd);
+        s->listen_fd = KL_INVALID_SOCKET;
+    }
+#endif
+
+    /* Tear down the stop-wakeup self-pipe (never opened on freestanding — stop_wake_rd
+     * stays KL_INVALID_SOCKET, so this is skipped). */
+    if (kl_handle_valid(s->stop_wake_rd)) {
+        kl_watcher_del(&s->ev, s->stop_wake_rd);
+        KlPlatWakeup w = { s->stop_wake_rd, s->stop_wake_wr };
+        kl_plat_wakeup_close(&w);
+        s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+    }
+    kl_event_ctx_free(&s->ev);
+    if (s->proxy_cidrs) {             /* NULL on freestanding (PROXY block guarded in init) */
+        kl_free(&s->alloc_storage, s->proxy_cidrs,
+                (size_t)s->proxy_cidr_count * sizeof(KlCidr));
+        s->proxy_cidrs = NULL;
+        s->proxy_cidr_count = 0;
+    }
+    kl_conn_pool_free(&s->pool);      /* closes every live accepted-child socket */
+    kl_router_free(&s->router);
+    if (s->config.tls && s->config.tls->ctx_destroy) {
+        s->config.tls->ctx_destroy(s->config.tls->ctx);
+    }
+    if (s->config.compress && s->config.compress->ctx_destroy) {
+        s->config.compress->ctx_destroy(s->config.compress->ctx);
+    }
+}
+
 /* ── Completion run-loop tick (the freestanding server's whole loop body) ──────
  * One iteration of the completion event loop, factored out of kl_server_run so
  * BOTH the hosted completion backends (io_uring/IOCP/pollcomp) and a freestanding

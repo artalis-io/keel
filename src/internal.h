@@ -65,6 +65,9 @@ void kl_server_conn_release(KlServer *s, KlConn *c);
  * server core (server_core.c); the idle/drain sweeps stay in server.c (they own
  * kl_408_response). One completion iteration; returns 0 to continue, -1 to break. */
 int  kl_server_run_completion_loop(KlServer *s);
+/* Close the listen socket (+ unlink an owned AF_UNIX path, hosted). Non-static so the
+ * freestanding kl_server_free (server_core.c) reaches it on the hosted path (S-7). */
+void kl_server_close_listener(KlServer *s);
 void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop);
 void kl_server_drain_progress(KlServer *s, uint64_t now);
 
