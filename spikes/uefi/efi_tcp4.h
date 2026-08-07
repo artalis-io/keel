@@ -91,6 +91,14 @@ typedef struct {
     EFI_TCP4_COMPLETION_TOKEN CompletionToken;
 } EFI_TCP4_CONNECTION_TOKEN;
 
+/* Passive-open listen token (UEFI 2.10 §28.5.4): Accept() signals CompletionToken
+ * and, on EFI_SUCCESS, fills NewChildHandle with a freshly-created EFI_TCP4 child
+ * (its own protocol instance) bound to the accepted connection. */
+typedef struct {
+    EFI_TCP4_COMPLETION_TOKEN CompletionToken;
+    EFI_HANDLE                NewChildHandle;
+} EFI_TCP4_LISTEN_TOKEN;
+
 /* Fragment table entries (§28.5.5 Transmit / §28.5.6 Receive) */
 typedef struct {
     UINT32 FragmentLength;
