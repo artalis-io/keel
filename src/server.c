@@ -23,11 +23,6 @@
 #define KL_EVENTS_PER_TICK 64
 #define KL_POLL_TIMEOUT_MS 1000
 
-static const char kl_408_response[] =
-    "HTTP/1.1 408 Request Timeout\r\n"
-    "Content-Length: 0\r\n"
-    "Connection: close\r\n"
-    "\r\n";
 
 void kl_log(KlServer *s, int level, const char *fmt, ...) {
     va_list ap;
@@ -515,98 +510,6 @@ int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
     return 0;
 }
 
-/* Sweep pooled connections for idle/read/body timeouts (and WebSocket close deadlines).
- * Runs on both event models. On the readiness path a timed-out conn is removed and
- * released directly; on a completion loop it may hold a pending overlapped op, so we
- * instead cancel that op (kl_comp_cancel) — the op then completes with an error and the
- * driver releases the connection through its normal completion path (no dangling op or
- * double release). Fixes the completion-path idle-timeout / slowloris gap. */
-void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop) {
-    uint64_t timeout = (uint64_t)s->config.read_timeout_ms;
-    uint64_t body_timeout = s->config.body_timeout_ms > 0
-                            ? (uint64_t)s->config.body_timeout_ms
-                            : timeout;
-    for (int i = 0; i < s->pool.capacity; i++) {
-        KlConn *tc = &s->pool.conns[i];
-        if (tc->state == KL_CONN_CLOSED || tc->state == KL_CONN_PROCESSING)
-            continue;
-        /* Suspended: exempt from idle timeout — has its own deadline */
-        if (tc->state == KL_CONN_SUSPENDED)
-            continue;
-        /* WebSocket: exempt from HTTP idle timeout, check close deadline. Via the
-         * upgrade seam — a conn only reaches KL_CONN_WEBSOCKET if ws is linked, so
-         * the hooks are non-NULL here, but guard defensively. */
-        if (tc->state == KL_CONN_WEBSOCKET) {
-            const KlWsServerHooks *wsh = kl_ws_server_hooks();
-            if (wsh) {
-                if (wsh->auto_ping) wsh->auto_ping(tc, now);
-                if (wsh->check_close_timeout && wsh->check_close_timeout(tc, now)) {
-                    if (completion_loop) {
-                        kl_comp_cancel(&s->ev, tc->fd);
-                    } else {
-                        kl_event_del(&s->ev.loop, tc->fd);
-                        kl_server_conn_release(s, tc);
-                    }
-                }
-            }
-            continue;
-        }
-        /* HTTP/2: PING keepalive is session's responsibility */
-        if (tc->state == KL_CONN_HTTP2)
-            continue;
-        /* TLS handshake time counts against read timeout */
-        int timed_out = (now - tc->last_active_ms > timeout);
-        /* Body deadline: absolute time from body start, not resettable.
-         * Catches slow-chunk attacks where 1 byte resets idle timer. */
-        if (!timed_out && tc->state == KL_CONN_READING_BODY &&
-            tc->body_start_ms > 0 &&
-            now - tc->body_start_ms > body_timeout) {
-            timed_out = 1;
-        }
-        if (timed_out) {
-            /* Cancel pending async file read before release (readiness io_uring path) */
-            if (tc->file_io_phase == 1 && tc->file_io) {
-                tc->file_io->cancel(tc->file_io, tc->fd);
-                tc->file_io_phase = 3;  /* FILE_IO_CANCELLING */
-                continue;  /* wait for cancel CQE in next tick */
-            }
-            if (tc->file_io_phase == 3)
-                continue;  /* FILE_IO_CANCELLING — still waiting */
-            /* Best-effort 408 (skip for TLS handshake — no HTTP framing yet). */
-            if (tc->state == KL_CONN_READING ||
-                tc->state == KL_CONN_READING_BODY)
-                best_effort_conn_write(tc, kl_408_response,
-                                       sizeof(kl_408_response) - 1);
-            if (completion_loop) {
-                kl_comp_cancel(&s->ev, tc->fd);   /* abort op → release via its completion */
-            } else {
-                kl_event_del(&s->ev.loop, tc->fd);
-                kl_server_conn_release(s, tc);
-            }
-        }
-    }
-}
-
-/* Graceful-drain progress for one run-loop tick: once draining, nudge WebSocket/HTTP-2 conns
- * toward close, then stop the loop when all connections are idle or the drain deadline passes.
- * Shared by the readiness and completion run-loop branches — the completion branch omitted this
- * before, so a server on a completion loop with drain_timeout_ms never exited drain mode. */
-void kl_server_drain_progress(KlServer *s, uint64_t now) {
-    if (!atomic_load(&s->draining)) return;
-    const KlWsServerHooks *wsh = kl_ws_server_hooks();
-    const KlH2ServerHooks *h2h = kl_h2_server_hooks();
-    for (int j = 0; j < s->pool.capacity; j++) {
-        if (wsh && wsh->drain_close && s->pool.conns[j].state == KL_CONN_WEBSOCKET)
-            wsh->drain_close(&s->pool.conns[j]);
-        if (h2h && h2h->drain_shutdown && s->pool.conns[j].state == KL_CONN_HTTP2)
-            h2h->drain_shutdown(&s->pool.conns[j]);
-    }
-    int active = 0;
-    for (int j = 0; j < s->pool.capacity; j++)
-        if (s->pool.conns[j].state != KL_CONN_CLOSED) active++;
-    if (active == 0 || now >= s->drain_deadline_ms)
-        atomic_store(&s->running, 0);
-}
 
 int kl_server_run(KlServer *s) {
     KlAllocator *alloc = &s->alloc_storage;

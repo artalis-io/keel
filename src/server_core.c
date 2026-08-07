@@ -19,11 +19,13 @@
 #include <keel/timer.h>
 #include <keel/request.h>
 #include "internal.h"
-#include "io_engine.h"    /* kl_io_engine_run_completion / kl_io_engine_post_read */
+#include "io_engine.h"    /* kl_io_engine_run_completion / kl_io_engine_post_read / kl_comp_cancel */
 #include "event_caps.h"   /* kl_event_caps — completion vs readiness pause/resume */
 #include "platform.h"     /* kl_monotonic_ms */
+#include "proto_hooks.h"  /* ws/h2 upgrade seam — sweep/drain reach ws/h2 through it */
 #include <string.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 /* Same tick bound server.c's readiness loop uses; a local copy keeps this TU
  * independent of server.c (both are plain compile-time constants). */
@@ -67,6 +69,97 @@ int kl_server_run_completion_loop(KlServer *s) {
     kl_timer_fire(&s->ev);                          /* due one-shot timers */
     kl_server_drain_progress(s, cnow);              /* graceful drain (completion loop) */
     return 0;
+}
+
+/* ── Idle-timeout sweep + graceful-drain (shared by both run-loop branches) ────
+ * Moved here from server.c so the freestanding completion server has them
+ * in-archive. WebSocket/HTTP-2 are reached only through the upgrade seam, so these
+ * name no ws/h2 symbol; a freestanding HTTP/1.1 build leaves the hooks NULL. */
+
+static const char kl_408_response[] =
+    "HTTP/1.1 408 Request Timeout\r\n"
+    "Content-Length: 0\r\n"
+    "Connection: close\r\n"
+    "\r\n";
+
+void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop) {
+    uint64_t timeout = (uint64_t)s->config.read_timeout_ms;
+    uint64_t body_timeout = s->config.body_timeout_ms > 0
+                            ? (uint64_t)s->config.body_timeout_ms
+                            : timeout;
+    for (int i = 0; i < s->pool.capacity; i++) {
+        KlConn *tc = &s->pool.conns[i];
+        if (tc->state == KL_CONN_CLOSED || tc->state == KL_CONN_PROCESSING)
+            continue;
+        /* Suspended: exempt from idle timeout — has its own deadline */
+        if (tc->state == KL_CONN_SUSPENDED)
+            continue;
+        /* WebSocket: exempt from HTTP idle timeout, check close deadline (seam). */
+        if (tc->state == KL_CONN_WEBSOCKET) {
+            const KlWsServerHooks *wsh = kl_ws_server_hooks();
+            if (wsh) {
+                if (wsh->auto_ping) wsh->auto_ping(tc, now);
+                if (wsh->check_close_timeout && wsh->check_close_timeout(tc, now)) {
+                    if (completion_loop) {
+                        kl_comp_cancel(&s->ev, tc->fd);
+                    } else {
+                        kl_event_del(&s->ev.loop, tc->fd);
+                        kl_server_conn_release(s, tc);
+                    }
+                }
+            }
+            continue;
+        }
+        /* HTTP/2: PING keepalive is session's responsibility */
+        if (tc->state == KL_CONN_HTTP2)
+            continue;
+        /* TLS handshake time counts against read timeout */
+        int timed_out = (now - tc->last_active_ms > timeout);
+        /* Body deadline: absolute time from body start, not resettable. */
+        if (!timed_out && tc->state == KL_CONN_READING_BODY &&
+            tc->body_start_ms > 0 &&
+            now - tc->body_start_ms > body_timeout) {
+            timed_out = 1;
+        }
+        if (timed_out) {
+            /* Cancel pending async file read before release (readiness io_uring path) */
+            if (tc->file_io_phase == 1 && tc->file_io) {
+                tc->file_io->cancel(tc->file_io, tc->fd);
+                tc->file_io_phase = 3;  /* FILE_IO_CANCELLING */
+                continue;  /* wait for cancel CQE in next tick */
+            }
+            if (tc->file_io_phase == 3)
+                continue;  /* FILE_IO_CANCELLING — still waiting */
+            /* Best-effort 408 (skip for TLS handshake — no HTTP framing yet). */
+            if (tc->state == KL_CONN_READING ||
+                tc->state == KL_CONN_READING_BODY)
+                best_effort_conn_write(tc, kl_408_response,
+                                       sizeof(kl_408_response) - 1);
+            if (completion_loop) {
+                kl_comp_cancel(&s->ev, tc->fd);   /* abort op → release via its completion */
+            } else {
+                kl_event_del(&s->ev.loop, tc->fd);
+                kl_server_conn_release(s, tc);
+            }
+        }
+    }
+}
+
+void kl_server_drain_progress(KlServer *s, uint64_t now) {
+    if (!atomic_load(&s->draining)) return;
+    const KlWsServerHooks *wsh = kl_ws_server_hooks();
+    const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+    for (int j = 0; j < s->pool.capacity; j++) {
+        if (wsh && wsh->drain_close && s->pool.conns[j].state == KL_CONN_WEBSOCKET)
+            wsh->drain_close(&s->pool.conns[j]);
+        if (h2h && h2h->drain_shutdown && s->pool.conns[j].state == KL_CONN_HTTP2)
+            h2h->drain_shutdown(&s->pool.conns[j]);
+    }
+    int active = 0;
+    for (int j = 0; j < s->pool.capacity; j++)
+        if (s->pool.conns[j].state != KL_CONN_CLOSED) active++;
+    if (active == 0 || now >= s->drain_deadline_ms)
+        atomic_store(&s->running, 0);
 }
 
 /* ── Route + middleware registration (thin router wrappers, seam-only) ───────── */
