@@ -1,10 +1,20 @@
 # Phase 10 — UEFI HTTP(S) **server** on bare firmware (scoping plan)
 
-**Status: PLAN / not started.** The Phase 10 client (U-0..U-8) serves a hardened `KlClient`
+**Status: S-1..S-5 done; S-4 build complete + firmware-validated (boot-to-200 pending a
+network-enabled OVMF).** The Phase 10 client (U-0..U-8) serves a hardened `KlClient`
 (plaintext + HTTPS + DNS) on bare UEFI firmware. This doc scopes the *inbound* direction — a
-`KlServer` that `bind`/`listen`/`accept`s over EFI_TCP4 and answers `GET / → 200` — as a distinct
-follow-on effort, deliberately structured to preserve the three-axis separation that
-`/axis-audit` enforces.
+`KlServer` that `bind`/`listen`/`accept`s over EFI_TCP4 and answers `GET / → 200` —
+deliberately structured to preserve the three-axis separation that `/axis-audit` enforces.
+
+Progress: S-1 (freestanding server archive) and S-2/S-3/S-5 (EFI_TCP4 passive open +
+completion accept + mock-EFI lifetime suite) are merged. S-4 (this build) carved a
+freestanding `kl_server_init` into `server_core.c`, added the self-contained server
+archive + `s4_selftest.c`/`s4_link_stubs.c`/`build_s4.sh`/`run_s4.sh`, and the EFI image
+links + **boots on real UEFI firmware** (QEMU/OVMF): `efi_main` runs, `kl_server_init`
+executes freestanding and negotiates the socket provider. On a network-less OVMF it
+degrades gracefully (`native_provider()` → NULL → `KL_ERR_SOCKET`, the documented path);
+the boot-to-200 needs a network-enabled OVMF (Ubuntu's, via `run_s4.sh` in the container).
+Remaining: S-6 (HTTPS), S-7 (teardown / EBS / audit / ship).
 
 Companion: `docs/phase10_uefi_feasibility_design.md` (client), `docs/keel_axis_audit.md` (the axis
 contract this plan must not violate).
@@ -95,13 +105,31 @@ demand. **Backpressure:** when the `KlConn` pool is full, stop re-priming Accept
 into a drop) — the Keel-level equivalent of reducing readiness interest (Goal 8).
 *Axis:* completion. *Goals 2, 3, 8* (honest completion accept; no model leak upward; backpressure).
 
-### S-4 — **Plaintext** HTTP server GO
+### S-4 — **Plaintext** HTTP server GO — *build complete + firmware-validated*
 `s4_selftest.c`: stock freestanding `KlServer` on the EFI completion backend answers
 `GET / → 200` to a host client (QEMU SLIRP `hostfwd`), over real EFI_TCP4. Acceptance = the
 model-blind server core runs with **zero** protocol edits (the whole point). Prove accept →
 serve → keep-alive → close, and accept-burst (pool refill).
 *Axis:* all three, integrated. *Required trace* (axis-audit): accept path end-to-end + close-with-
 outstanding-accept.
+
+**Done in this build:** the S-4 prerequisite was carving a freestanding `kl_server_init`
+into `server_core.c` (the archive had the completion run loop but init was hosted-only —
+it pulled the ws/h2/proxy hook installers, the PROXY CIDR allowlist, `kl_file_io_create`,
+the stop self-pipe, and the stdlib default allocator; all now `#ifndef KEEL_FREESTANDING`).
+Behavior-preserving on hosted (65 test suites, gcc-14 clean); the self-contained server
+archive gates for x86_64 + aarch64 PE **with init in it**. `s4_selftest.c` constructs the
+server from the archive alone (`cfg.event_provider` set, `cfg.sockets` NULL → adopts the
+native EFI provider), routes `GET /`, drives the socket seam for `bind`/`listen` (the hosted
+`kl_server_bind_listener` is archive-excluded), then loops `kl_server_run_completion_loop`
+(auto-primes accepts → drains `KL_COMP_ACCEPT` → `comp_on_accept`, all model-blind).
+`s4_link_stubs.c` supplies the server-only link residuals (bind/listen/reuseaddr/writev/
+sendfile/cork/nodelay/accept fallbacks, file-response platform hooks, `_fltused`). The EFI
+image links (198 KB PE32+) and **boots on QEMU/OVMF**: `efi_main` runs, `kl_server_init`
+executes freestanding + negotiates the provider — validating the carve on bare firmware.
+The boot-to-200 needs a network-enabled OVMF (this run's homebrew OVMF has no EFI_TCP4
+stack → `kl_server_init` returns `KL_ERR_SOCKET`, the documented graceful-degradation path);
+`run_s4.sh` runs it in the Ubuntu container. `kl_server_free`/teardown stays hosted-only — S-7.
 
 ### S-5 — Lifetime hardening + mock-EFI accept tests
 Extend the F7b host mock (`mock_efi_test.c`) with the **server** lifetime scenarios the QEMU happy
