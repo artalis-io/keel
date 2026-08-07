@@ -73,9 +73,15 @@ long long kl_uefi_mbedtls_time(long long *t);   /* clock_snapshot.c; mbedtls_tim
  * freestanding. Override it (MS_TIME_ALT) with our monotonic tick (time_uefi.c → kl_monotonic_ms). */
 #define MBEDTLS_PLATFORM_MS_TIME_ALT
 
-/* ── Protocol: TLS 1.2 client only ──────────────────────────────────────────*/
+/* ── Protocol: TLS 1.2, client + server ─────────────────────────────────────*/
 #define MBEDTLS_SSL_TLS_C
 #define MBEDTLS_SSL_CLI_C
+/* Phase 10 UEFI *server* (S-6): the server-side handshake state machine. Additive —
+ * the client (U-4) is unaffected; enabling it lets the same freestanding mbedTLS drive
+ * an inbound HTTPS KlServer (ServerHello/Certificate/ServerKeyExchange + the RSA key
+ * operations, all pure crypto — no OS). Without it a server ctx parses but its handshake
+ * never progresses. */
+#define MBEDTLS_SSL_SRV_C
 #define MBEDTLS_SSL_PROTO_TLS1_2
 
 /* Handshake robustness extensions a modern server may require / prefer. */

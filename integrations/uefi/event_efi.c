@@ -29,6 +29,10 @@
  * (8) and the server completion driver keeps at most one recv OR one send outstanding
  * per conn, so 16 slots leave headroom without allocation in the loop. */
 #define KL_EFI_MAX_IO_OPS   16
+/* Transient ciphertext scratch for TLS post_recv (S-6): one TLS record max (~16 KiB).
+ * A file-scope static (zero-alloc, single-threaded drain) — read ciphertext into it and
+ * feed_input consumes it before the next recv op reuses it. */
+#define KL_EFI_TLS_CIPHER   16384
 
 /* A queued outbound connect (post_connect). Its terminal result is surfaced as a
  * KL_COMP_CONNECT on a later drain (once the Connect token fires), then retired. The
@@ -372,9 +376,23 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         if (!op->is_send) {
             /* RECV: only when the provider can return something now. */
             if (!kl_uefi_socket_recv_ready(op->fd)) continue;
-            void  *buf = c->read_buf + c->read_len;      /* live: read_len unchanged since post */
-            size_t cap = c->read_cap - c->read_len;
-            ssize_t n = kl_sock_recv(ctx->sockets, op->fd, buf, cap);
+            ssize_t n;
+            if (c->tls && c->state != KL_CONN_PROXY_HEADER) {
+                /* TLS (S-6): the socket carries CIPHERTEXT. Read it into a transient
+                 * scratch buffer and feed it to the engine's input BIO; the completion
+                 * server's comp_tls_drive then handshakes / decrypts into read_buf.
+                 * bytes counts ciphertext (comp_on_read routes c->tls to comp_tls_drive,
+                 * which ignores the count beyond ok/!=0). The scratch is consumed by
+                 * feed_input before the next op reuses it (single-threaded drain). */
+                static unsigned char g_tls_cipher[KL_EFI_TLS_CIPHER];
+                n = kl_sock_recv(ctx->sockets, op->fd, g_tls_cipher, sizeof(g_tls_cipher));
+                if (n > 0 && c->tls->feed_input)
+                    c->tls->feed_input(c->tls, g_tls_cipher, (size_t)n);
+            } else {
+                void  *buf = c->read_buf + c->read_len;   /* live: read_len unchanged since post */
+                size_t cap = c->read_cap - c->read_len;
+                n = kl_sock_recv(ctx->sockets, op->fd, buf, cap);
+            }
             for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
             out[count].kind   = KL_COMP_READ;
             out[count].target = c;

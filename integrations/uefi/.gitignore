@@ -15,3 +15,7 @@ libkeel_freestanding*.a
 wwwroot/
 u4_ca_embed.h
 u4_prod_cert/
+esp_s6.img
+vars_rw_s6.fd
+s6_cert_embed.h
+mbedtls_obj/
