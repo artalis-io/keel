@@ -200,6 +200,8 @@ typedef struct {
     size_t          rx_queued;
 
     int             armed;      /* a recv is posted (single in-flight recv per conn) */
+    void           *recv_buf;   /* armed recv: caller-chosen destination buffer (raw bytes) */
+    size_t          recv_cap;   /* armed recv: destination capacity */
     int             closed;     /* peer closed / errored — surface a terminal after rx drains */
     int             dead;       /* pcb freed by lwIP (tcp_err) — ->pcb is NULL, use ->dead_fd */
     void           *dead_fd;    /* the (freed) pcb pointer, kept ONLY for the backend's close
@@ -1340,11 +1342,13 @@ void kl_lwr_set_owner(void *lwrctx, void *pcb, void *owner) {
      * arg to be the owner. */
 }
 
-int kl_lwr_conn_arm(void *lwrctx, void *pcb) {
+int kl_lwr_conn_arm(void *lwrctx, void *pcb, void *buf, size_t cap) {
     KlLwrCtx *ctx = lwrctx;
     KlLwrConn *cs = lwr_conn_find(ctx, (struct tcp_pcb *)pcb);
     if (!cs) return -1;   /* no slot — the backend must not leave this conn accepted-but-mute */
-    cs->armed = 1;
+    cs->armed    = 1;
+    cs->recv_buf = buf;   /* raw destination the completion driver chose for this recv */
+    cs->recv_cap = cap;
     return 0;
 }
 
@@ -1364,7 +1368,8 @@ void kl_lwr_conn_status(void *lwrctx, void *pcb, int *has_data, int *closed) {
     if (closed)   *closed   = (cs && !cs->terminated && cs->closed) ? 1 : 0;
 }
 
-int kl_lwr_next_readable(void *lwrctx, int *cursor, void **owner, void **pcb, int *closed) {
+int kl_lwr_next_readable(void *lwrctx, int *cursor, void **owner, void **pcb,
+                         void **recv_buf, size_t *recv_cap, int *closed) {
     KlLwrCtx *ctx = lwrctx;
     if (!ctx || !cursor) return 0;
     for (int i = *cursor; i < ctx->conn_cap; i++) {
@@ -1374,9 +1379,11 @@ int kl_lwr_next_readable(void *lwrctx, int *cursor, void **owner, void **pcb, in
         int is_closed = (!c->terminated && c->closed);
         if (!has_data && !is_closed) continue;
         *cursor = i + 1;   /* advance past this slot for the next call */
-        if (owner)  *owner  = c->owner;
-        if (pcb)    *pcb    = c->pcb;
-        if (closed) *closed = (!has_data && is_closed) ? 1 : 0;
+        if (owner)    *owner    = c->owner;
+        if (pcb)      *pcb      = c->pcb;
+        if (recv_buf) *recv_buf = c->recv_buf;   /* the driver-chosen raw destination */
+        if (recv_cap) *recv_cap = c->recv_cap;
+        if (closed)   *closed   = (!has_data && is_closed) ? 1 : 0;
         return 1;
     }
     *cursor = ctx->conn_cap;

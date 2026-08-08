@@ -287,6 +287,25 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         return -1;
     }
 
+    /* Preallocate the completion-mode TLS ciphertext scratch (one stable buffer per slot) at
+     * init — NEVER in the event-loop hot path (Step-2 review). Only for TLS + a completion event
+     * model: the HTTP completion adapter reads ciphertext into it, and readiness TLS decrypts
+     * straight from the socket so needs none. The event model is only known now (post event-ctx
+     * init). Unwinds like the negotiation failure above; pool_free reclaims any already set. */
+    if (s->config.tls && (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION)) {
+        for (int i = 0; i < s->pool.capacity; i++) {
+            s->pool.conns[i].comp_cipher = kl_malloc(alloc, KL_COMP_CIPHER_SIZE);
+            if (!s->pool.conns[i].comp_cipher) {
+                s->last_error = KL_ERR_ALLOC;
+                kl_event_ctx_free(&s->ev);
+                kl_conn_pool_free(&s->pool);
+                kl_router_free(&s->router);
+                return -1;
+            }
+            s->pool.conns[i].comp_cipher_cap = KL_COMP_CIPHER_SIZE;
+        }
+    }
+
     /* Create async file I/O backend (NULL if backend doesn't support it). Freestanding
      * has no async file I/O — file_io.c is not in the archive; s->file_io stays NULL. */
 #ifndef KEEL_FREESTANDING

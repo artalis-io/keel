@@ -15,7 +15,6 @@
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv over completion (8b-4c) */
-#include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext (8b-5b) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "sockaddr_native.h"     /* KlSockAddr -> Winsock sockaddr for the overlapped UDP send */
@@ -73,22 +72,16 @@ typedef struct {
 typedef enum {
     KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE,
     KL_IOCP_UDP_RECV, KL_IOCP_UDP_SEND,
-    KL_IOCP_TLS_RECV,                          /* WSARecv ciphertext for a TLS conn (8b-5b) */
     KL_IOCP_WATCHER,                           /* WSARecv on a KlWatcher socket (8e-2c) */
     KL_IOCP_CONNECT                            /* ConnectEx outbound connect (LC-0) */
 } KlIocpOpType;
-
-/* One overlapped TLS ciphertext read: a whole TLS record (~16 KiB max) plus a
- * little header/MAC slack. The engine's input ring reassembles across recvs, so
- * this only bounds one WSARecv, not a record. */
-#define KL_IOCP_CIPHER_SIZE (17u * 1024u)
 
 /* One in-flight overlapped op. `ov` MUST be first (CONTAINING_RECORD round-trip). */
 typedef struct KlIocpOp {
     OVERLAPPED    ov;
     KlIocpOpType  type;
     KlAllocator  *alloc;
-    KlConn       *conn;                        /* READ / WRITE */
+    KlStream     *stream;                      /* READ / WRITE / SENDFILE target (raw transport) */
     KlUdp        *udp;                          /* UDP_RECV */
     SOCKET        accept_sock;                 /* ACCEPT */
     char          accept_buf[2 * KL_IOCP_ADDR_LEN];  /* ACCEPT: local+remote addr */
@@ -257,49 +250,31 @@ const KlSocketProvider *kl_socket_provider_iocp(void) { return &IOCP_PROVIDER; }
 /* ── completion.h implementation (the overlapped mechanics) ──────────── */
 
 static void iocp_op_free(KlIocpOp *op) {
-    /* send_total is the sendbuf allocation size (KL_IOCP_CIPHER_SIZE for TLS_RECV; the send
-     * total, or 1 when total==0, for WRITE/SENDFILE — the alloc is `total ? total : 1`). Fall
-     * back to 1 for a zero-length send so a sized custom allocator frees the right bucket. */
+    /* send_total is the sendbuf allocation size for WRITE/SENDFILE (the send total, or 1 when
+     * total==0 — the alloc is `total ? total : 1`). Fall back to 1 for a zero-length send so a
+     * sized custom allocator frees the right bucket. Receives no longer own a buffer. */
     if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total : 1);
     kl_free(op->alloc, op, sizeof(*op));
 }
 
-static KlIocpState *state_of(KlConn *c) {
-    return c->stream.ctx->loop._backend;   /* c->stream.ctx == &server->ev */
-}
-
-static int iocp_comp_post_recv(KlConn *c) {
-    (void)state_of(c);   /* the socket is already associated with the port */
-
-    KlIocpOp *op = kl_malloc(c->stream.alloc, sizeof(*op));
+/* Raw receive: WSARecv up to `cap` bytes into the caller-supplied `buf` on `stream`. No TLS /
+ * connection-state knowledge — the HTTP adapter chose the buffer. */
+static int iocp_comp_post_recv(KlStream *stream, void *buf_in, size_t cap) {
+    if (!buf_in || cap == 0) return -1;
+    if (cap > (size_t)0xFFFFFFFFu) cap = 0xFFFFFFFFu;   /* clamp to WSABUF ULONG len */
+    KlIocpOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
-    op->alloc = c->stream.alloc;
-    op->conn = c;
+    op->alloc = stream->alloc;
+    op->stream = stream;
+    op->type = KL_IOCP_READ;
 
     WSABUF buf;
-    if (c->tls && c->state != KL_CONN_PROXY_HEADER) {  /* PROXY header is plaintext, pre-TLS */
-        /* TLS: read raw ciphertext into a transient op buffer (kept in sendbuf so
-         * iocp_op_free reclaims it). read_buf holds *decrypted plaintext*, which
-         * accumulates across records for headers — it must not be clobbered by an
-         * inbound ciphertext read. kl_comp_drain feeds this buffer to the engine
-         * (tls->feed_input) before freeing the op. */
-        op->type = KL_IOCP_TLS_RECV;
-        op->send_total = KL_IOCP_CIPHER_SIZE;
-        op->sendbuf = kl_malloc(c->stream.alloc, KL_IOCP_CIPHER_SIZE);
-        if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
-        buf.len = (ULONG)KL_IOCP_CIPHER_SIZE;
-        buf.buf = op->sendbuf;
-    } else {
-        size_t space = c->stream.read_cap - c->stream.read_len;
-        if (space == 0) { iocp_op_free(op); return -1; }   /* headers overflowed */
-        op->type = KL_IOCP_READ;
-        buf.len = (ULONG)space;
-        buf.buf = c->stream.read_buf + c->stream.read_len;
-    }
+    buf.len = (ULONG)cap;
+    buf.buf = (char *)buf_in;
 
     DWORD flags = 0, received = 0;
-    int rc = WSARecv((SOCKET)c->stream.fd, &buf, 1, &received, &flags, &op->ov, NULL);
+    int rc = WSARecv((SOCKET)stream->fd, &buf, 1, &received, &flags, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);
         return -1;
@@ -307,16 +282,16 @@ static int iocp_comp_post_recv(KlConn *c) {
     return 0;
 }
 
-static int iocp_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
-    KlIocpOp *op = kl_malloc(c->stream.alloc, sizeof(*op));
+static int iocp_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total) {
+    KlIocpOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_WRITE;
-    op->alloc = c->stream.alloc;
-    op->conn = c;
+    op->alloc = stream->alloc;
+    op->stream = stream;
     op->send_total = total;
 
-    op->sendbuf = kl_malloc(c->stream.alloc, total ? total : 1);
+    op->sendbuf = kl_malloc(stream->alloc, total ? total : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < iovcnt; i++) {
@@ -326,7 +301,7 @@ static int iocp_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t
 
     WSABUF buf = { (ULONG)total, op->sendbuf };
     DWORD sent = 0;
-    int rc = WSASend((SOCKET)c->stream.fd, &buf, 1, &sent, 0, &op->ov, NULL);
+    int rc = WSASend((SOCKET)stream->fd, &buf, 1, &sent, 0, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);
         return -1;
@@ -395,7 +370,7 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
         tb.Head = op->sendbuf;
         tb.HeadLength = (DWORD)op->send_total;
     }
-    BOOL ok = TransmitFile((SOCKET)op->conn->stream.fd, op->file_h, chunk, 0, &op->ov, &tb, 0);
+    BOOL ok = TransmitFile((SOCKET)op->stream->fd, op->file_h, chunk, 0, &op->ov, &tb, 0);
     if (!ok && WSAGetLastError() != WSA_IO_PENDING)
         return -1;
     return 0;
@@ -403,22 +378,23 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
 
 static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
     HANDLE hfile = (HANDLE)_get_osfhandle(file_fd);
     if (hfile == INVALID_HANDLE_VALUE) return -1;
 
-    KlIocpOp *op = kl_malloc(c->stream.alloc, sizeof(*op));
+    KlIocpOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_SENDFILE;
-    op->alloc = c->stream.alloc;
-    op->conn = c;
+    op->alloc = stream->alloc;
+    op->stream = stream;
     op->file_h = hfile;
     op->file_total = count;
     op->file_done = 0;
 
     /* Copy the response head — TransmitFile's head buffer must outlive the op. */
     op->send_total = head_total;
-    op->sendbuf = kl_malloc(c->stream.alloc, head_total ? head_total : 1);
+    op->sendbuf = kl_malloc(stream->alloc, head_total ? head_total : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < head_n; i++) {
@@ -698,26 +674,12 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             count++;
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_READ) {
+            /* Raw bytes landed in the caller's buffer. For a TLS conn that buffer is the
+             * HTTP adapter's per-conn ciphertext scratch; the adapter (comp_on_read) feeds
+             * it to the engine. The backend has no TLS knowledge. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_READ;
-            out[count].target = op->conn;
-            out[count].bytes = bytes;
-            out[count].ok = 1;
-            count++;
-            iocp_op_free(op);
-        } else if (op->type == KL_IOCP_TLS_RECV) {
-            /* Hand the received ciphertext to the TLS engine via the public
-             * feed_input op (backend-agnostic — no mbedTLS knowledge here), then
-             * surface a plain READ event. The driver owns all TLS protocol logic
-             * (handshake / decrypt / encrypt); the buffer is consumed here so the
-             * op — which carries it in sendbuf — can be freed immediately. bytes==0
-             * means the peer closed: surface it so the driver tears down. */
-            KlConn *c = op->conn;
-            if (bytes > 0 && c->tls->feed_input)
-                c->tls->feed_input(c->tls, op->sendbuf, (size_t)bytes);
-            memset(&out[count], 0, sizeof(out[count]));
-            out[count].kind = KL_COMP_READ;
-            out[count].target = c;
+            out[count].target = op->stream;
             out[count].bytes = bytes;
             out[count].ok = 1;
             count++;
@@ -730,11 +692,11 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                 WSABUF buf = { (ULONG)(op->send_total - op->send_done),
                                op->sendbuf + op->send_done };
                 DWORD sent = 0;
-                int rc = WSASend((SOCKET)op->conn->stream.fd, &buf, 1, &sent, 0, &op->ov, NULL);
+                int rc = WSASend((SOCKET)op->stream->fd, &buf, 1, &sent, 0, &op->ov, NULL);
                 if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
                     memset(&out[count], 0, sizeof(out[count]));
                     out[count].kind = KL_COMP_WRITE;
-                    out[count].target = op->conn;
+                    out[count].target = op->stream;
                     out[count].ok = 0;
                     count++;
                     iocp_op_free(op);
@@ -743,7 +705,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             }
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WRITE;
-            out[count].target = op->conn;
+            out[count].target = op->stream;
             out[count].bytes = bytes;
             out[count].ok = (bytes > 0);
             count++;
@@ -844,7 +806,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                 if (iocp_post_transmitfile_chunk(op) < 0) {
                     memset(&out[count], 0, sizeof(out[count]));
                     out[count].kind = KL_COMP_WRITE;
-                    out[count].target = op->conn;
+                    out[count].target = op->stream;
                     out[count].ok = 0;
                     count++;
                     iocp_op_free(op);
@@ -854,7 +816,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             /* Whole file out (or a failed/short completion) — surface the completed write. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WRITE;
-            out[count].target = op->conn;
+            out[count].target = op->stream;
             out[count].bytes = bytes;
             out[count].ok = (bytes > 0);
             count++;

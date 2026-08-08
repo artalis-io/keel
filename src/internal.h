@@ -16,6 +16,12 @@
 /* Max retries on zero-byte write before giving up (conn_write_all, writev_all) */
 #define KL_CONN_WRITE_SPIN_MAX 256
 
+/* Completion-mode TLS ciphertext scratch size (one TLS record + slack). The HTTP completion
+ * adapter hands a per-connection buffer of this size (KlConn.comp_cipher, preallocated at
+ * server init for TLS+completion slots) to the raw receive; the backend does raw I/O into it
+ * with no TLS knowledge. Internal — not a public API (was briefly in connection.h). */
+#define KL_COMP_CIPHER_SIZE (17u * 1024u)
+
 /* ── Transport helpers — TLS-aware read/write ────────────────────── */
 
 /* The socket provider for a connection (ctx->sockets; NULL = POSIX fast path). */

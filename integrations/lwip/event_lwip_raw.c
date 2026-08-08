@@ -65,8 +65,7 @@
  */
 #include <keel/event.h>
 #include <keel/event_ctx.h>    /* KlEventCtx — kl_comp_drain reaches loop._backend */
-#include <keel/connection.h>   /* KlConn — read_buf / fd / ctx / tls / state */
-#include <keel/tls.h>          /* KlTls.feed_input — completion-TLS memory-BIO input (LC-4) */
+#include <keel/connection.h>   /* KlStream — fd / ctx / alloc (raw transport target) */
 #include <keel/server.h>       /* KlServer — listen_fd (prime accepts) */
 #include <keel/allocator.h>    /* kl_malloc / kl_free */
 #include <keel/sockaddr.h>     /* KlSockAddr marshalling at the seam boundary */
@@ -92,15 +91,6 @@
 /* Stack buffer size for one drain's worth of glue records (bounded by the caller's `max`,
  * which completion_driver.c caps at KL_COMP_MAX_EVENTS = 64). */
 #define KL_LWR_MAX_DRAIN  64
-
-/* LC-4 (completion-TLS): upper bound on ciphertext fed to the TLS engine from ONE conn's retained
- * rx queue in a single drain round, before yielding back to the driver. A TLS handshake flight
- * (cert chain) can be tens of KiB; 64 KiB matches KL_LWR_RX_MAX (the per-conn rx bound) so a whole
- * retained flight is fed in one round, while the cap keeps the take-then-feed loop bounded. */
-#define KL_LWR_TLS_FEED_MAX  (64u * 1024u)
-/* Per-round stack scratch for take-then-feed of received ciphertext (one TLS record's header +
- * payload fits comfortably; the take-then-feed loop covers a larger flight in multiple rounds). */
-#define KL_LWR_TLS_FEED_SCRATCH  4096u
 
 /* Per-loop backend state stashed in loop->_backend. All connection state — including the
  * recv-arm flag and the per-conn pending completions — lives in the glue's per-context/
@@ -435,7 +425,6 @@ const KlSocketProvider *kl_socket_provider_lwip_raw(void) { return &lwip_raw_pro
 
 /* ── completion.h backend primitives ─────────────────────────────────────────── */
 
-static KlLwrState *lwr_state(KlConn *c) { return c->stream.ctx->loop._backend; }
 
 static int lwr_comp_prime_accepts(struct KlServer *s) {
     KlLwrState *st = s->ev.loop._backend;
@@ -471,11 +460,12 @@ static int lwr_comp_post_accept(struct KlServer *s) {
  * per-conn slot flag; kl_lwr_conn_arm returns non-zero if the pcb has NO slot (a conn that was
  * accepted must always have a slot — if not, the driver closes it rather than leaving it
  * accepted-but-unable-to-receive). */
-static int lwr_comp_post_recv(KlConn *c) {
-    KlLwrState *st = lwr_state(c);
-    if (!kl_handle_valid(c->stream.fd)) return -1;
-    kl_lwr_set_owner(st->lwrctx, (void *)c->stream.fd, c);   /* recv/sent/err callbacks tag this conn */
-    if (kl_lwr_conn_arm(st->lwrctx, (void *)c->stream.fd) != 0) return -1;
+static int lwr_comp_post_recv(KlStream *stream, void *buf, size_t cap) {
+    if (!buf || cap == 0) return -1;
+    KlLwrState *st = stream->ctx->loop._backend;
+    if (!kl_handle_valid(stream->fd)) return -1;
+    kl_lwr_set_owner(st->lwrctx, (void *)stream->fd, stream);   /* recv/sent/err callbacks tag this stream */
+    if (kl_lwr_conn_arm(st->lwrctx, (void *)stream->fd, buf, cap) != 0) return -1;
     return 0;
 }
 
@@ -496,13 +486,14 @@ static int lwr_comp_post_recv(KlConn *c) {
  * The translation array is a fixed KL_LWR_MAX_SEND_IOV stack buffer (the driver caps the iovec
  * at 7); no heap, no per-send allocation. */
 #define KL_LWR_MAX_SEND_IOV 8
-static int lwr_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
+static int lwr_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total) {
     (void)total;
-    if (!kl_handle_valid(c->stream.fd)) return -1;
+    if (!kl_handle_valid(stream->fd)) return -1;
     if (iovcnt < 0 || iovcnt > KL_LWR_MAX_SEND_IOV) return -1;
     KlLwrIoVec lv[KL_LWR_MAX_SEND_IOV];
     for (int i = 0; i < iovcnt; i++) { lv[i].base = iov[i].base; lv[i].len = iov[i].len; }
-    return kl_lwr_send_begin(lwr_state(c)->lwrctx, (void *)c->stream.fd, lv, iovcnt);
+    KlLwrState *st = stream->ctx->loop._backend;
+    return kl_lwr_send_begin(st->lwrctx, (void *)stream->fd, lv, iovcnt);
 }
 
 /* Post one async file send: the serialized response head (`head_iov`) followed by
@@ -514,12 +505,14 @@ static int lwr_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t 
  * file_fd; the response layer closes res->file_fd (kl_response_reset/free) — not here. */
 static int lwr_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
     (void)head_total;
-    if (!kl_handle_valid(c->stream.fd)) return -1;
+    if (!kl_handle_valid(stream->fd)) return -1;
     if (head_n < 0 || head_n > KL_LWR_MAX_SEND_IOV) return -1;
     KlLwrIoVec lv[KL_LWR_MAX_SEND_IOV];
     for (int i = 0; i < head_n; i++) { lv[i].base = head_iov[i].base; lv[i].len = head_iov[i].len; }
-    return kl_lwr_sendfile_begin(lwr_state(c)->lwrctx, (void *)c->stream.fd, lv, head_n, file_fd, count);
+    KlLwrState *st = stream->ctx->loop._backend;
+    return kl_lwr_sendfile_begin(st->lwrctx, (void *)stream->fd, lv, head_n, file_fd, count);
 }
 
 /* Cancel pending ops on `fd` (idle-timeout sweep). Semantics mirror event_pollcomp.c: the
@@ -632,45 +625,24 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
      * same tick as the accept, before the recv was posted: picked up on the next drain once
      * comp_on_accept has posted it. */
     int cursor = 0;
-    void *owner = NULL, *pcb = NULL;
+    void *owner = NULL, *pcb = NULL, *recv_buf = NULL;
+    size_t recv_cap = 0;
     int closed = 0;
-    while (count < max && kl_lwr_next_readable(st->lwrctx, &cursor, &owner, &pcb, &closed)) {
-        KlConn *c = owner;
+    while (count < max && kl_lwr_next_readable(st->lwrctx, &cursor, &owner, &pcb,
+                                               &recv_buf, &recv_cap, &closed)) {
+        KlStream *stream = owner;
         KlCompletionEvent *ev = &out[count];
         memset(ev, 0, sizeof(*ev));
         ev->kind = KL_COMP_READ;
-        ev->target = c;
+        ev->target = stream;
         if (!closed) {
-            /* Completion-TLS contract (mirrors event_pollcomp.c PC_TLS_RECV / event_iouring): for a
-             * TLS conn the received bytes are CIPHERTEXT — the backend must hand them to the engine's
-             * memory BIO via tls->feed_input, NOT copy them into read_buf (which holds PLAINTEXT,
-             * written only by the driver's comp_tls_drive). comp_on_read then handshakes/decrypts
-             * off the fed input; it uses ev->bytes only as a non-zero "data arrived" signal for a TLS
-             * conn (it does not add ev->bytes to read_len). The plaintext PROXY header phase is
-             * pre-TLS, so it still lands in read_buf. Drain the whole retained rx queue this tick
-             * (a handshake flight can exceed one scratch chunk) via take-then-feed rounds. */
-            if (c->tls && c->state != KL_CONN_PROXY_HEADER) {
-                unsigned char scratch[KL_LWR_TLS_FEED_SCRATCH];
-                size_t fed = 0;
-                int feed_err = 0;
-                do {
-                    size_t took = kl_lwr_take_staged(st->lwrctx, pcb, scratch, sizeof(scratch));
-                    if (took == 0) break;
-                    if (!c->tls->feed_input ||
-                        c->tls->feed_input(c->tls, scratch, took) < 0) {
-                        feed_err = 1;
-                        break;
-                    }
-                    fed += took;
-                } while (fed < KL_LWR_TLS_FEED_MAX);
-                ev->ok = feed_err ? 0 : 1;   /* feed overflow → surface a failed READ (driver closes) */
-                ev->bytes = feed_err ? 0 : fed;
-            } else {
-                size_t space = c->stream.read_cap - c->stream.read_len;
-                size_t got = kl_lwr_take_staged(st->lwrctx, pcb, c->stream.read_buf + c->stream.read_len, space);
-                ev->ok = 1;
-                ev->bytes = got;
-            }
+            /* Raw recv: copy up to `recv_cap` retained bytes into the caller-chosen `recv_buf`
+             * (the HTTP adapter picked it — plaintext read_buf slice or the TLS ciphertext
+             * scratch). No TLS/state knowledge here; comp_on_read feeds the ciphertext to the
+             * engine for a TLS conn. Remaining staged bytes surface on the next armed recv. */
+            size_t got = kl_lwr_take_staged(st->lwrctx, pcb, recv_buf, recv_cap);
+            ev->ok = 1;
+            ev->bytes = got;
         } else {                       /* closed with no pending data — zero-length READ */
             ev->ok = 0;
             ev->bytes = 0;

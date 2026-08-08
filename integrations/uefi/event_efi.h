@@ -27,11 +27,11 @@
  * post_accept, post_recv, post_send (server). post_sendfile + post_udp_* stay NULL — file
  * responses and UDP are not yet wired for the EFI server.
  *
- * NOTE (abstraction boundary, matches IOCP/pollcomp): on the SERVER recv path the backend
- * peeks c->tls to know whether the socket bytes are TLS ciphertext (→ tls->feed_input) or
- * plaintext (→ read_buf). This mirrors the existing completion-mode TLS contract for every
- * completion backend, not a UEFI-specific leak; a future refactor could hand post_recv a
- * neutral destination spec so no backend interprets protocol state.
+ * NOTE (abstraction boundary, matches IOCP/pollcomp): the SERVER recv path is now
+ * protocol-blind — post_recv(KlStream*, buf, cap) does raw transport I/O into a caller-chosen
+ * buffer and never peeks TLS/connection state. The HTTP completion adapter picks the buffer
+ * (plaintext read_buf vs the per-conn TLS ciphertext scratch) and feeds ciphertext to
+ * tls->feed_input; the backend interprets no protocol state (Phase-A receive-boundary move).
  *
  * BYO integration: nothing under src/ or include/ or the root Makefile references it.
  * The native socket provider (kl_uefi_socket_provider) is created lazily and returned

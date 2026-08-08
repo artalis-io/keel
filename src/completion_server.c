@@ -52,6 +52,38 @@ void kl_comp_close(struct KlServer *s, KlConn *c) {
     kl_server_conn_release(s, c);   /* closes the socket + returns the pool slot */
 }
 
+/* Recover the containing KlConn from a completion event's KlStream target. KlStream is the
+ * leading member of KlConn (Phase A), so this is address-preserving; offsetof keeps it robust
+ * to any future reordering. Only the HTTP adapter does this — a backend never holds a KlConn. */
+static inline KlConn *conn_of_stream(KlStream *st) {
+    return (KlConn *)((char *)st - offsetof(KlConn, stream));
+}
+
+/* ── HTTP-adapter completion helpers (KlConn form) ────────────────────────
+ * These own ALL the TLS/PROXY/connection-state knowledge for posting transport I/O; the
+ * raw backend (kl_comp_post_*_raw → the vtable) sees only (stream, buffer). */
+
+/* Choose the receive buffer for the connection's current phase, then post the raw recv:
+ *   - PROXY header phase → plaintext read_buf (even on a TLS conn — the header is pre-TLS);
+ *   - TLS phase          → the per-conn ciphertext scratch (preallocated at server init, stable until
+ *                          the recv completes; comp_on_read feeds it to the engine);
+ *   - ordinary plaintext → the read_buf sliding window. */
+int kl_comp_post_recv(KlConn *c) {
+    if (c->tls && c->state != KL_CONN_PROXY_HEADER) {
+        /* comp_cipher is preallocated at server init for TLS+completion slots (kl_server_init);
+         * a NULL here is a misconfiguration, not a runtime allocation — fail the recv. */
+        if (!c->comp_cipher) return -1;
+        return kl_comp_post_recv_raw(&c->stream, c->comp_cipher, c->comp_cipher_cap);
+    }
+    size_t space = c->stream.read_cap - c->stream.read_len;
+    if (space == 0) return -1;   /* headers overflowed */
+    return kl_comp_post_recv_raw(&c->stream, c->stream.read_buf + c->stream.read_len, space);
+}
+
+int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
+    return kl_comp_post_send_raw(&c->stream, iov, iovcnt, total);
+}
+
 /* Serialize the response head and post it: buffered body inline via WSASend, or a
  * file body via the backend's zero-copy file send (TransmitFile) after the head.
  * The backend copies + owns the head bytes for the op's lifetime. */
@@ -574,19 +606,24 @@ static void comp_drive_proxy(struct KlServer *s, KlConn *c) {
 }
 
 static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
-    KlConn *c = ev->target;
+    KlConn *c = conn_of_stream(ev->target);
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }   /* peer closed */
     /* PROXY header phase (plaintext, before TLS/HTTP) — must run before the TLS branch since a
-     * PROXY+TLS conn has c->tls set but hasn't started the handshake yet. */
+     * PROXY+TLS conn has c->tls set but hasn't started the handshake yet. The recv used the
+     * plaintext read_buf (kl_comp_post_recv picks it while state == PROXY_HEADER). */
     if (c->state == KL_CONN_PROXY_HEADER) {
         c->stream.read_len += ev->bytes;
         comp_drive_proxy(s, c);
         return;
     }
-    /* TLS: the backend already fed this recv's ciphertext to the engine (bytes counts
-     * ciphertext, not plaintext); the driver handshakes / decrypts. read_buf holds
-     * plaintext and is written by comp_tls_drive, not here. */
-    if (c->tls) { comp_tls_drive(s, c); return; }
+    /* TLS: this recv's ciphertext landed in c->comp_cipher (ev->bytes counts ciphertext). Feed
+     * it to the engine HERE — the backend does raw I/O only and no longer knows about TLS — then
+     * handshake / decrypt. read_buf holds plaintext and is written by comp_tls_drive, not here. */
+    if (c->tls) {
+        if (c->tls->feed_input(c->tls, c->comp_cipher, ev->bytes) < 0) { kl_comp_close(s, c); return; }
+        comp_tls_drive(s, c);
+        return;
+    }
     c->stream.read_len += ev->bytes;
     /* Body reads use a fresh sliding window (read_len was reset to 0 before the
      * post), so read_len == the bytes just received. Headers accumulate. */
@@ -605,7 +642,7 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
 }
 
 static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
-    KlConn *c = ev->target;
+    KlConn *c = conn_of_stream(ev->target);
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }
     /* h2 output send completed (8d-3): the frames produced by the last feed are out —
      * read the next frames. Deferring the recv until here means at most one h2 send is

@@ -196,6 +196,10 @@ void kl_conn_pool_free(KlConnPool *pool) {
                 kl_free(pool->alloc, pool->conns[i].stream.read_buf,
                         pool->conns[i].stream.read_cap);
             }
+            if (pool->conns[i].comp_cipher) {   /* Phase-A interim completion TLS scratch */
+                kl_free(pool->alloc, pool->conns[i].comp_cipher,
+                        pool->conns[i].comp_cipher_cap);
+            }
         }
         kl_free(pool->alloc, pool->conns,
                 sizeof(KlConn) * (size_t)pool->capacity);

@@ -100,6 +100,14 @@ typedef struct KlConn {
 
     KlTls *tls;                 /**< TLS session (NULL for plaintext) */
     int tls_want;               /**< KL_EVENT_READ or KL_EVENT_WRITE during handshake */
+    char *comp_cipher;          /**< Completion-mode TLS ciphertext scratch: driver-owned,
+                                     stable until the async recv completes. Preallocated at server
+                                     init for TLS + completion slots (never in the event-loop hot
+                                     path); NULL otherwise. Interim Phase-A TLS orchestration
+                                     (→ KlTlsStream in Phase C). Freed in pool free.
+                                     INTERNAL/UNSTABLE. */
+    size_t comp_cipher_cap;     /**< Allocated size of comp_cipher (0 if unallocated) — so
+                                     alloc/free need no completion-internal size macro. */
 
     KlWsServerConn *ws;         /**< WebSocket state (NULL until upgrade) */
 

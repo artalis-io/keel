@@ -255,7 +255,7 @@ void  kl_lwr_set_owner(void *lwrctx, void *pcb, void *owner);
 /* Arm a conn for a single pending recv (the completion contract's one-in-flight recv). Returns
  * 0 on success, non-zero if the pcb has no slot (a slot-less conn must never be left
  * accepted-but-unable-to-receive; the backend closes it). A conn that HAS a slot always arms. */
-int   kl_lwr_conn_arm(void *lwrctx, void *pcb);
+int   kl_lwr_conn_arm(void *lwrctx, void *pcb, void *buf, size_t cap);
 /* Disarm a conn (its READ was surfaced, or it is being torn down). Idempotent. */
 void  kl_lwr_conn_disarm(void *lwrctx, void *pcb);
 
@@ -269,7 +269,8 @@ void kl_lwr_conn_status(void *lwrctx, void *pcb, int *has_data, int *closed);
  * *closed for a ready conn, or 0 when none remain this pass. Lets the backend surface READs by
  * scanning the glue's per-conn slots without seeing any lwIP type — replacing the old
  * backend-side armed table (fix #2, fix #4: bounded by conn_cap, cannot lose a READ). */
-int kl_lwr_next_readable(void *lwrctx, int *cursor, void **owner, void **pcb, int *closed);
+int kl_lwr_next_readable(void *lwrctx, int *cursor, void **owner, void **pcb,
+                         void **recv_buf, size_t *recv_cap, int *closed);
 
 /* Copy up to `cap` received bytes for `pcb` into `dst` from the retained pbuf queue; returns
  * the count copied. tcp_recved() is issued HERE (as whole head pbufs are consumed) — never
