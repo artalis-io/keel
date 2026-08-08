@@ -101,7 +101,7 @@ typedef struct {
     KlAllocator     *alloc;
     void            *lwrctx;   /* opaque KlLwrCtx (glue-owned; carries loopif + conn slots) */
     void            *loopif;   /* cached loop netif (kl_lwr_ctx_loopif) for the tick */
-    struct KlServer *server;   /* accept target (set at prime) */
+    struct KlAcceptTarget *accept_target;  /* accept target (set at prime; KL_COMP_ACCEPT.target) */
     int              primed;   /* accept backlog primed (idempotent latch) */
 } KlLwrState;
 
@@ -426,10 +426,12 @@ const KlSocketProvider *kl_socket_provider_lwip_raw(void) { return &lwip_raw_pro
 /* ── completion.h backend primitives ─────────────────────────────────────────── */
 
 
-static int lwr_comp_prime_accepts(struct KlServer *s) {
+static int lwr_comp_prime_accepts(struct KlAcceptTarget *l) {
+    if (!l || !l->server) return -1;
+    struct KlServer *s = l->server;
     KlLwrState *st = s->ev.loop._backend;
     if (st->primed) return 0;
-    st->server = s;
+    st->accept_target = l;
     /* fix #2: unify capacity on the AUTHORITATIVE Keel limit. Size the glue's per-conn slot
      * table to max_connections (the same value that sizes s->pool) so arm/slot/accept capacity
      * are ONE number — no second, smaller limit. Grown here (before any accept); a default
@@ -447,10 +449,10 @@ static int lwr_comp_prime_accepts(struct KlServer *s) {
     return 0;
 }
 
-static int lwr_comp_post_accept(struct KlServer *s) {
+static int lwr_comp_post_accept(struct KlAcceptTarget *l) {
     /* Passive raw accept: the tcp_accept callback keeps the backlog filled on its own —
      * no per-accept op to re-post (unlike pollcomp's one accept op). Idempotent no-op. */
-    (void)s;
+    (void)l;
     return 0;
 }
 
@@ -580,6 +582,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
 
         if (r->kind == KL_LWR_ACCEPT) {
             ev->kind = KL_COMP_ACCEPT;
+            ev->target = st->accept_target;   /* Phase-A: KL_COMP_ACCEPT carries the listener */
             ev->ok = 1;
             ev->accepted_fd = (KlSocketHandle)r->accepted;
             /* ev->peer is left zeroed (KL_AF_UNSPEC = "unavailable"); the driver keys on

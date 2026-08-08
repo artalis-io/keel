@@ -568,7 +568,10 @@ no `on_accept`.
 ### 8.2 Listener seam (the generic accept carve — Phase A/B)
 
 - **Retyped ops:** `prime_accepts(KlListener*)` / `post_accept(KlListener*)`; the completion event
-  identifies its target as `KL_COMP_ACCEPT.target = KlListener*` (today it reaches `KlServer`).
+  identifies its target as `KL_COMP_ACCEPT.target = KlListener*`. *(Phase A implemented this retype
+  with a transitional server-owned `KlAcceptTarget` — a `{ KlServer *server; }` accept-routing
+  adapter embedded in `KlServer`; Phase B renames it to the real `KlListener` once its lifecycle,
+  credit/reservation, and callback contract exist.)*
 - **Multiple listeners share one `KlEventCtx`** — each carries its own target + credit; the drain
   routes each `KL_COMP_ACCEPT` to the listener named in `target`.
 - **Arming RESERVES a concrete slot; credit is not an advisory count (Finding 3).** The listener owns

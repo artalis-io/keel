@@ -24,6 +24,7 @@
 #include <stddef.h>
 
 struct KlServer;
+struct KlAcceptTarget;   /* internal accept target (embedded in KlServer); KL_COMP_ACCEPT.target */
 
 /* KL_COMP_CIPHER_SIZE (the interim completion-mode TLS ciphertext scratch size) is an internal
  * detail defined in "internal.h", used at the allocation site (kl_server_init). The buffer's
@@ -31,7 +32,7 @@ struct KlServer;
 
 /* Platform-independent completion op kinds. */
 typedef enum {
-    KL_COMP_ACCEPT,                                /* TCP accept (server recovered via ctx) */
+    KL_COMP_ACCEPT,                                /* TCP accept (target = KlAcceptTarget*) */
     KL_COMP_READ, KL_COMP_WRITE,                   /* TCP conn (target = KlStream*) */
     KL_COMP_UDP_RECV, KL_COMP_UDP_SEND,            /* datagram (target = KlUdp*) */
     KL_COMP_CONNECT,  /* an outbound connect finished (LC-0). The completion mirror of
@@ -101,13 +102,15 @@ struct KlUdp;
  * exposes them via kl_comp_ops_builtin(). See docs/event_provider_design.md. */
 typedef struct KlCompletionOps {
     int  (*drain)(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms);
-    int  (*prime_accepts)(struct KlServer *s);
+    /* Accept ops take the internal KlAcceptTarget (Phase-A retype of KlServer* accept targeting);
+     * the listener back-points to its server, so pool/capacity/fd behavior is unchanged. */
+    int  (*prime_accepts)(struct KlAcceptTarget *l);
     /* Raw transport I/O — the backend gets a KlStream and a caller-chosen buffer; it does
      * NOT inspect TLS/HTTP/connection state (that lives in the HTTP adapter). READ/WRITE
      * completions target the KlStream. */
     int  (*post_recv)(KlStream *stream, void *buf, size_t cap);
     int  (*post_send)(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total);
-    int  (*post_accept)(struct KlServer *s);
+    int  (*post_accept)(struct KlAcceptTarget *l);
     /* post_sendfile stays KlConn-typed and HTTP/file-transfer-specific — NOT part of the
      * generic stream seam in Phase A (file transfer is an Optional capability; the generic
      * KlStream promises byte reads/writes only). See docs/generic_transport_audit.md §8. */

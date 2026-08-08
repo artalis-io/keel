@@ -692,11 +692,24 @@ static inline struct KlServer *server_of_ctx(struct KlEventCtx *ctx) {
  * exactly as KlEventOps.completion). */
 static void comp_server_conn_dispatch(struct KlEventCtx *ctx, const void *evp) {
     const KlCompletionEvent *ev = evp;
-    struct KlServer *s = server_of_ctx(ctx);
     switch (ev->kind) {
-    case KL_COMP_ACCEPT: comp_on_accept(s, ev); break;
-    case KL_COMP_READ:   comp_on_read(s, ev);   break;
-    case KL_COMP_WRITE:  comp_on_write(s, ev);  break;
+    case KL_COMP_ACCEPT: {
+        /* ACCEPT recovers the server from the accept target (Phase-A retype). The completion
+         * vtable is a backend interface: fail closed on a malformed target rather than crash —
+         * close the just-accepted fd (if any) and drop the event. */
+        const KlAcceptTarget *at = ev->target;
+        if (!at || !at->server) {
+            if (kl_handle_valid(ev->accepted_fd))
+                kl_sock_close(ctx->sockets, ev->accepted_fd);
+            break;
+        }
+        comp_on_accept(at->server, ev);
+        break;
+    }
+    /* READ/WRITE recover the server from the ctx (their target is the KlStream, which
+     * comp_on_read/write resolve to a conn). */
+    case KL_COMP_READ:   comp_on_read(server_of_ctx(ctx), ev);   break;
+    case KL_COMP_WRITE:  comp_on_write(server_of_ctx(ctx), ev);  break;
     default: break;   /* core routes only ACCEPT/READ/WRITE here */
     }
 }

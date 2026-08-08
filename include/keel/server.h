@@ -113,6 +113,21 @@ typedef struct {
 
 typedef struct KlAsyncOp KlAsyncOp;
 
+/**
+ * @brief Internal accept target (Phase-A retype of KlServer* accept targeting).
+ *
+ * A thin, server-owned, embedded object that names the completion accept target so a
+ * KL_COMP_ACCEPT event can carry it (target = KlAcceptTarget*) and the completion accept ops
+ * (prime_accepts/post_accept) take it instead of KlServer*. It holds only a back-pointer to
+ * its owning server — accept arming reads the server's pool/capacity exactly as before, and
+ * teardown is unchanged. NO standalone lifetime, NO credit/lease/reservation/liveness token,
+ * NO public API (those are Phase B). INTERNAL / UNSTABLE.
+ */
+typedef struct KlAcceptTarget {
+    struct KlServer *server;   /**< Owning server (set at init); the accept path reaches the
+                                    pool/listen fd/event ctx through it — behavior unchanged. */
+} KlAcceptTarget;
+
 typedef struct KlServer {
     KlConfig config;
     KlAllocator alloc_storage;  /**< owned copy if user didn't provide one */
@@ -122,6 +137,8 @@ typedef struct KlServer {
     KlRouter router;            /**< Route table */
     KlConnPool pool;            /**< Connection pool */
     KlEventCtx ev;              /**< event loop + watcher list */
+    KlAcceptTarget accept_target;        /**< Internal accept target (KL_COMP_ACCEPT.target); server-owned,
+                                     back-points here. Phase-A retype — INTERNAL/UNSTABLE. */
     KlSocketHandle listen_fd;              /**< Listening socket fd */
     int bound_port;             /**< actual port after bind (useful with port=0) */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */

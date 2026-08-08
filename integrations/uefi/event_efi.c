@@ -93,6 +93,7 @@ typedef struct {
     /* S-3 server accept: latched by prime_accepts; drain hands back each ready child
      * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlConn-pool backpressure. */
     struct KlServer   *server;
+    struct KlAcceptTarget *accept_target;   /* KL_COMP_ACCEPT.target (Phase-A accept-target retype) */
     KlSocketHandle     listen_fd;
     int                accept_primed;
 } EfiLoop;
@@ -166,6 +167,7 @@ static void el_close(KlEventLoop *loop) {
     for (int i = 0; i < KL_EFI_MAX_WATCHES; i++)      g_efi.watches[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++)       g_efi.io[i].in_use = 0;
     g_efi.server        = NULL;
+    g_efi.accept_target      = NULL;
     g_efi.listen_fd     = KL_INVALID_SOCKET;
     g_efi.accept_primed = 0;
 }
@@ -225,9 +227,11 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
 /* prime_accepts: latch the server + its passive listen fd so drain can hand back
  * accepted children. The S-2 listen() already armed the Accept-token pool; this only
  * records what drain needs. Idempotent. */
-static int el_prime_accepts(struct KlServer *s) {
-    if (!s) return -1;
+static int el_prime_accepts(struct KlAcceptTarget *l) {
+    if (!l || !l->server) return -1;
+    struct KlServer *s = l->server;
     g_efi.server = s;
+    g_efi.accept_target = l;   /* KL_COMP_ACCEPT.target (Phase-A) */
     g_efi.listen_fd = s->listen_fd;
     g_efi.accept_primed = 1;
     /* Capacity-gated arming (Goal 8 backpressure): arm at most as many EFI Accept tokens
@@ -245,8 +249,8 @@ static int el_prime_accepts(struct KlServer *s) {
 
 /* post_accept: re-arm after the generic server consumed a slot. Identical to prime — the
  * arming is capacity-gated, so this just re-evaluates free capacity and tops up. */
-static int el_post_accept(struct KlServer *s) {
-    return el_prime_accepts(s);
+static int el_post_accept(struct KlAcceptTarget *l) {
+    return el_prime_accepts(l);
 }
 
 static EfiIoOp *io_op_alloc(void) {
@@ -379,6 +383,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             if (!kl_handle_valid(a)) break;   /* none ready (would-block) */
             for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
             out[count].kind        = KL_COMP_ACCEPT;
+            out[count].target      = g_efi.accept_target;   /* Phase-A: KL_COMP_ACCEPT carries the listener */
             out[count].ok          = 1;
             out[count].accepted_fd = a;
             out[count].peer        = peer;

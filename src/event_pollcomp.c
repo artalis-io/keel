@@ -70,7 +70,10 @@ typedef struct KlPcOp {
     uint64_t       file_count, file_off;  /* SENDFILE: file bytes + progress */
     struct sockaddr_storage dest;         /* UDP_SEND / CONNECT destination */
     socklen_t      dest_len;
-    void          *watcher_udata;         /* CONNECT: the client's tagged KlWatcher */
+    union {
+        void              *watcher_udata;   /* CONNECT: the client's tagged KlWatcher */
+        struct KlAcceptTarget *accept_target;   /* ACCEPT: KL_COMP_ACCEPT.target */
+    };
     int            aborted;               /* cancelled (idle timeout) — deliver as error */
 } KlPcOp;
 
@@ -90,7 +93,6 @@ typedef struct {
     KlAllocator   *alloc;
     KlPcOp        *ops;                    /* singly-linked pending-op list */
     KlPcWatch     *watches;                /* registered readiness watches (8e-2) */
-    struct KlServer *server;              /* accept target (set at prime) */
     KlSocketHandle  listen_fd;
     int             primed;
 } KlPcState;
@@ -284,8 +286,9 @@ static int pc_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
     return 0;
 }
 
-static int pc_comp_post_accept(struct KlServer *s) {
-    KlPcState *st = s->ev.loop._backend;
+static int pc_comp_post_accept(struct KlAcceptTarget *l) {
+    if (!l || !l->server) return -1;
+    KlPcState *st = l->server->ev.loop._backend;
     /* One accept op suffices: on completion the driver refills. Avoid stacking
      * duplicate accept ops on the same listen fd (they would just spin on EAGAIN). */
     for (const KlPcOp *o = st->ops; o; o = o->next)
@@ -296,6 +299,7 @@ static int pc_comp_post_accept(struct KlServer *s) {
     op->type = PC_ACCEPT;
     op->alloc = st->alloc;
     op->fd = st->listen_fd;
+    op->accept_target = l;   /* carry the accept target so pc_complete sets KL_COMP_ACCEPT.target */
     pc_op_push(st, op);
     return 0;
 }
@@ -362,13 +366,13 @@ static int pc_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
     return 0;
 }
 
-static int pc_comp_prime_accepts(struct KlServer *s) {
-    KlPcState *st = s->ev.loop._backend;
+static int pc_comp_prime_accepts(struct KlAcceptTarget *l) {
+    if (!l || !l->server) return -1;
+    KlPcState *st = l->server->ev.loop._backend;
     if (st->primed) return 0;
-    st->listen_fd = s->listen_fd;
-    st->server = s;
+    st->listen_fd = l->server->listen_fd;
     st->primed = 1;
-    return pc_comp_post_accept(s);
+    return pc_comp_post_accept(l);
 }
 
 /* Cancel pending ops on `fd`. Server conn ops (idle-timeout sweep): mark aborted so the next
@@ -431,6 +435,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         if (a < 0) return 0;                 /* EAGAIN/spurious — keep the accept op */
         pc_set_blocking(a);
         ev->kind = KL_COMP_ACCEPT;
+        ev->target = op->accept_target;   /* Phase-A: the accept target, stashed at post_accept */
         ev->ok = 1;
         ev->accepted_fd = a;
         if (slen > 0)                            /* native → neutral once, at the seam */

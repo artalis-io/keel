@@ -79,6 +79,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     }
     memset(s, 0, sizeof(*s));
     s->listen_fd = KL_INVALID_SOCKET;
+    s->accept_target.server = s;   /* embedded accept target back-points to its owner (Phase-A) */
     s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
 
 #ifndef KEEL_FREESTANDING
