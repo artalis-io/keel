@@ -1,5 +1,65 @@
 # KEEL Networking Architecture Axis Audit
 
+## Eleventh pass — orchestration-layer refactors re-verify the three-axis separation (2026-08-08)
+
+**Verdict: architecturally sound — the client/server orchestration refactors (this session's
+review rounds) STRENGTHENED axis separation; no regressions.** Fresh `/axis-audit` after the
+Finding-1 dispatch unification, the `client_proxy.c` extraction, the `server_activation.c`
+split, and the EFI server data-plane fixes.
+
+### Mechanical independence (Goal 4) — PASS
+
+- **Protocol-layer TUs name no platform networking header or event-engine symbol.** grep over
+  `connection.c`, `response.c`, `client_{common,sync,async,proxy}.c`, `h2_client.c`,
+  `websocket{,_client}.c`, `server_{ws,h2}.c`, `sse.c`, `router.c`, `chunked.c`, `parsers/*` for
+  `<sys/epoll.h>`/`<sys/event.h>`/`<sys/socket.h>`/`netinet`/`arpa`/`io_uring`/`epoll_*`/`kevent`/
+  `WSA*`/`OVERLAPPED`/`CreateIoCompletionPort` → **clean**. The new `client_proxy.c` (shared proxy
+  CONNECT) is a pure protocol-layer TU (bounded `kl_buf_append_*` + `memcmp`); it is in
+  `AXIS_PROTO_TUS` so the gate keeps it clean.
+- **The readiness server (`server.c`) now names NO optional-protocol symbol** (grep for
+  `kl_ws_server_*`/`kl_h2_server_*`/`kl_cidr_match`/`c->h2->`/`c->ws->` → only the `_hooks()`
+  getters). Finding 1 (this session) routed the readiness data plane through the same
+  `proto_hooks.h` seam the completion driver already used, so **both event models now dispatch
+  WebSocket/HTTP-2/PROXY identically** — the asymmetry the review flagged is closed. This is a
+  positive axis result: `server.c` (readiness) and `completion_server.c` (completion) are now
+  peers above the protocol seam, neither owning protocol internals.
+
+### Axis-relevant refactors this session (all confirmed non-regressive)
+
+- **Finding 1 — readiness ws/h2/proxy via hooks.** Extended `KlWsServerHooks`/`KlH2ServerHooks`
+  with the readiness data-plane entrypoints; `server.c` dispatches through them (NULL-guarded,
+  symmetric with `completion_server.c`). `kl_server_ws` moved to `server_ws.c`. server.c dropped
+  `websocket_server.h`/`h2_server.h`/`h2_internal.h`.
+- **`client_proxy.c`** — the sync/async proxy CONNECT is now one transport-independent module;
+  the two event models differ only in byte movement (blocking vs the async state machine) — the
+  same "protocol above the axis" principle, applied to the client.
+- **`server_activation.c`** — the systemd socket-activation surface is its own TU. It reads
+  `LISTEN_*` env + `getpid` (platform, hosted) — that is the *activation* responsibility, not a
+  protocol or event-model concern; it names no event engine.
+- **EFI server data plane** — accept backpressure (capacity-gated arming), alloc-free send, and
+  `el_close` teardown live entirely in the EFI socket/completion provider (`integrations/uefi/`),
+  below the axis; the server core is unchanged. See the review-round subsection of the tenth pass.
+
+### Sanitizer / driver checks
+
+- Completion-axis driver under ASan (`make smoke-pollcomp-asan`): async/thread-pool over-completion
+  roundtrip + async `KlClient` connect+GET over the completion loop — **both OK**.
+- Full suite under ASan+UBSan (`make debug-test`): **65/65, 0 leaks/UB** (see c-audit twelfth pass).
+- mock-EFI failure-path harness (ASan/UBSan): PASS incl. the new backpressure test.
+
+### Compatibility matrix (reaffirmed)
+
+Unchanged from the tenth pass; `EFI_TCP4 server (plaintext + HTTPS)` remains **firmware-verified
+(QEMU/OVMF, container): S-4 + S-6 + S-7**. All other rows unchanged.
+
+**One documented boundary (unchanged, cross-backend):** on the completion server recv path every
+backend (IOCP/pollcomp/EFI) peeks `c->tls` to route ciphertext to `feed_input` vs plaintext to
+`read_buf`. This is the existing completion-mode TLS contract, not a UEFI-specific leak; a neutral
+`post_recv` destination spec that removes protocol knowledge from all completion backends is
+deferred cross-backend work (recorded in `event_efi.h` + the review triage).
+
+---
+
 ## Tenth pass — the UEFI HTTP(S) **server** validates the model-blind server core (2026-08-08)
 
 **Verdict: architecturally sound — the inbound direction is the mirror of the ninth pass and,
