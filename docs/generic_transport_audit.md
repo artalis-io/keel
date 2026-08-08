@@ -155,10 +155,14 @@ already honors this. `KlDatagram`/`KlEndpoint` for UDP would be a thin rename/fo
 not HTTP: socket-BIO mode uses `t->sp = ctx->sockets`; completion mode feeds ciphertext via
 `feed_input`. `conn_read`/`conn_write` already dispatch `tls ? tls->op : sock_op`.
 
-**Assessment:** TLS is already "wrap a transport," but the transport it wraps is expressed as
-`(KlSocketHandle fd, KlSocketProvider *sp)` + the `KlConn`-scoped memory-BIO. Pointing it at a
-`KlStream` is a retype, not a redesign. (The recent completion-TLS review confirmed the memory-BIO
-recv contract — every completion backend feeds ciphertext — which a `KlStream` can own.)
+**Assessment (corrected):** the **`KlTls` vtable is reusable substrate**, but lifting its HTTP
+completion driver into a generic TLS-wrapped stream is **new orchestration machinery, not a
+retype** — the wrapper is a state machine over cross-direction wants (WANT_READ from a write /
+WANT_WRITE from a read), handshake-before-delivery, `pending()` plaintext drain without another
+event, memory-BIO ciphertext ownership, and close-notify vs FIN (see the stream contract §6bis).
+So the vtable is reused as-is; its generic-stream integration is a **Phase C** build, not Phase A.
+(The recent completion-TLS review confirmed the memory-BIO recv contract — every completion backend
+feeds ciphertext — which the wrapped stream will own.)
 
 ---
 
@@ -273,89 +277,117 @@ stay internal; the stream API is the protocol-author-facing layer above it.
 
 ---
 
-## 8. Recommended consolidation — work split into three tiers (review reset)
+## 8. Recommended consolidation — IMPLEMENTATION PHASES (review reset v2)
 
-> **Correction (review):** an earlier draft framed the whole job as "extraction + retyping." That
-> understates it. Only some of it is extraction; some is genuinely **new machinery**; some is
-> **optional capability** that must not be smuggled into the first cut. The work is therefore
-> split into three explicit tiers, and `docs/stream_contract.md` is downgraded to **DRAFT** until
-> the Tier-2 choices are resolved.
+> **Correction (review):** an earlier draft used one "Tier 1/2/3" axis for *both* "how simple the
+> capability is" and "what to build first," which wrongly made **Tier 1 look like pure extraction
+> that's safe to implement now** — when it actually depends on new machinery (reservation, listener
+> carve, deferred close). Those are **two different axes.** This section is the **implementation
+> order** (Phase A → B → C → Optional); the *capability tiers* in `docs/stream_contract.md` describe
+> what the contract promises. Phase A is the only "pure extraction"; the baseline public surface is
+> **Phase B** and requires the new foundations before it can ship.
 
-### Tier 1 — pure extraction / retyping (low risk, evolve existing code)
-- **`KlStream`** = the transport subset of `KlConn`, **embedded** (see below), carrying
-  handle + `KlEventCtx*` (→ provider+loop) + `KlSockAddr` peer/local + read buffer + `read_paused`
-  + a `KlDrain`. Plaintext-only at first (TLS is Tier 2).
+### Phase A — structural extraction (pure; no new semantics; ships internally)
+- **`KlStream`** = the transport subset of `KlConn`, **embedded** (below): handle + `KlEventCtx*` +
+  `KlSockAddr` peer/local + read buffer + `read_paused` + a `KlDrain`. Plaintext only.
 - Retype **only the generic byte-transfer** completion target — `KlCompletionOps.post_recv` /
   `post_send` and the readiness `conn_read`/`conn_write` — from `KlConn*` to the generic stream
-  handle, behind the existing `completion_dispatch.c` seam (no backend logic change).
-  **`post_sendfile(KlConn*)` stays HTTP-specific** (it's file transfer — Tier 3); do not retype it
-  onto `KlStream` in Tier 1. File transfer can later target `KlStream` via an optional extension.
-- Generic read/write **delivery callbacks** and **stream-level** `pause`/`resume` (rename
-  `read_paused`; keep the existing mechanism).
-- Existing close semantics (recv≤0 → close) exposed as `kl_stream_close`.
-- **Embed, do not pointer-ize:** `KlConn { KlStream stream; <HTTP state> }` (rename the HTTP object
-  to `KlHttpConn` internally; container-of where needed). Keel preallocates connection + TLS slots;
-  a separately-allocated `KlStream` would add per-accept allocation or a second pool. Embedding
-  preserves locality + the allocation-free accept path.
+  handle, behind the existing `completion_dispatch.c` seam (**no backend logic change**).
+  **`post_sendfile(KlConn*)` stays HTTP-specific** (file transfer — Optional); not retyped in Phase A.
+- Retype the **listener** accept target: `prime_accepts` / `post_accept` from `KlServer*` to a
+  `KlListener*`, and add `KL_COMP_ACCEPT.target = KlListener*`, behind the same dispatch. The server
+  embeds/owns a `KlListener` and supplies its existing connection pool through the listener's
+  acquire/release seam (no new pool, no new allocation).
+- Generic read/write **delivery callbacks**; **stream-level** `pause`/`resume` (rename `read_paused`).
+- **Coarse internal close only** — preserve today's `recv≤0 → close` behavior. Do NOT ship the
+  public graceful `kl_stream_close` here (that's Phase B).
+- **Embed, do not pointer-ize:** `KlHttpConn { KlStream stream; <HTTP state> }` (rename `KlConn`;
+  container-of where needed). Preserves the preallocated-slot, allocation-free accept path.
 
-### Tier 2 — required NEW machinery (must be designed before it can be normative)
-- **Write-result / backpressure API** — a concrete result type (status + accepted-count +
-  `KlIoStatus`), and a chosen policy (atomic-accept vs prefix-accept). `KlDrain` today is
-  0/-1 atomic-accept with a sticky cap and empty-only drain callback — it needs an extension or an
-  explicit atomic-accept wrapper, plus separate high/low-water if the writable signal is low-water.
-- **Operation identity + cancellation** — `KlAsyncOp` is HTTP-suspension and `kl_comp_cancel` is
-  by-handle (§2.5), so per-op cancel does not exist. Build either a small transport-op lifecycle
-  (per-stream one-read + one-write op record with generation + terminal flag; separately
-  cancellable connect/accept handles) OR ship a coarser **stream-level** cancel first.
-- **Deferred-destruction ownership** — a normative UAF boundary (§ stream_contract close section):
-  who frees the stream, whether `close` is sync or deferred, how the caller learns teardown
-  finished (an `on_close`/`closed` terminal), whether pending callbacks are suppressed or delivered
-  as cancellation. Must interoperate with the EFI quarantine (retirement is *confirmed*, not
-  "immediate").
-- **TLS-wrapped stream state machine** — plaintext ships first; TLS wrapping is a later phase with
-  its own contract (handshake-before-delivery, WANT_READ-from-write / WANT_WRITE-from-read, drain
-  `tls->pending()` without another event, memory-BIO ciphertext ownership, close-notify vs FIN,
-  handshake deadline). Keep TLS depending on the generic stream, not on `KlConn`.
+### Phase B — baseline public contract (needs NEW machinery; this is the shippable API)
+This is the "target public surface." It is NOT pure extraction — each item below is new work:
+- **Atomic write + reservation** — the `KlStreamWriteResult` API with all-or-none acceptance, built
+  on a `KlDrain` **reservation** op (reserve remainder-capacity before any provider send; see the
+  fast-path note below). New `KlDrain` extension.
+- **High/low-water writable notification** — one `on_writable` at low-water (extends `KlDrain`'s
+  empty-only `on_drain`).
+- **Strict pause** — hold an already-outstanding completion recv's bytes until resume.
+- **Graceful close + detachment + `on_close`** — deferred close (flush accepted output within a
+  close deadline; degrade to discard on timeout), and the DETACHMENT-based `on_close` terminal
+  (confirmed non-reference to caller storage, NOT physical token retirement — EFI-safe). New
+  lifecycle machinery.
+- **Cancellable `KlConnectOp` / `KlAcceptOp`** handles (caller-owned, deferred terminal) + a coarse
+  **stream-level** cancel (stop delivery, cancel-by-handle, detach, `on_close`).
+- **Listener credit + acquire/release** — the listener returns an accept credit when a stream
+  closes; listener close detaches outstanding accepts. Capacity is listener-intrinsic, not
+  `KlServer`-scoped.
 
-### Tier 3 — optional capabilities (NOT in the initial contract)
-- **Half-close (`shutdown_write`)** — `KlSocketOps` has **no** `shutdown` op today; this is new
-  provider work (POSIX/Winsock/lwIP-raw/EFI impls or explicit UNSUPPORTED) + separate
-  read-open/write-open state + completion error-info changes + new lifecycle tests. Add later as an
-  optional capability, or promote to Tier 2 with the new-work acknowledged — do not assume it.
+> **Write fast-path (review Finding 3):** copying is NOT unconditional. Reserve enough queue
+> capacity for a possible remainder, then attempt the direct send; if the provider consumes **all**
+> bytes inline (readiness fast path), **no snapshot** is made; if it consumes a prefix, copy only the
+> remainder into the already-reserved stream-owned queue; completion submissions always reference
+> stream-owned stable storage, never caller memory. This keeps atomic caller-visible acceptance +
+> immediate caller-buffer release + Keel's zero-copy small-write fast path.
+
+### Phase C — advanced semantics (later)
+- **Per-stream-operation terminals** — read-op / write-op operation identity records so cancel/
+  timeout deliver exactly one terminal *per op* (Phase B only has coarse stream-level cancel).
+- **Model-neutral EOF vs RST** — requires extending `KlCompletionEvent` (today only `bytes`+`ok`,
+  no `KlIoStatus` category) so completion backends distinguish orderly FIN from reset like the
+  readiness seam.
+- **TLS-wrapped stream** — `KlTls` is reusable substrate, but lifting its HTTP completion driver
+  into a generic TLS-wrapped stream is NEW orchestration machinery: handshake-before-delivery,
+  WANT_READ-from-write / WANT_WRITE-from-read, drain `tls->pending()` without another event,
+  memory-BIO ciphertext ownership, close-notify vs FIN, handshake deadline.
+
+### Optional — capabilities that are NOT in the baseline contract
+- **Half-close (`shutdown_write`)** — `KlSocketOps` has **no** `shutdown` op today; new provider work
+  (POSIX/Winsock/lwIP-raw/EFI impls or explicit UNSUPPORTED) + separate read-open/write-open state +
+  completion error-info changes + new lifecycle tests. Not assumed.
 - **Abort / RST** — likewise no `abort` op exists; new provider work.
 - **Tagged `KlEndpoint` union** — for a real non-socket address (named pipe / vsock) only.
-- **File-transfer extensions** (`sendfile`/`KlFileIO`) — optional, never core stream contract.
+- **File-transfer extensions** (`sendfile`/`KlFileIO`) — never core stream contract.
 
 ### Endpoint + datagram + sync-client corrections
 - **`KlEndpoint`:** start as **`KlSockAddr` directly** (already neutral: IPv4/IPv6/Unix). Do NOT
   add `TCP`/`Unix`/`lwIP`/`EFI` "kinds" — provider selection stays in `KlEventCtx`/config; mixing
   provider identity into the endpoint would violate the very axis separation this project
-  established. A tagged union comes only when a genuinely non-socket address type appears (Tier 3).
+  established. A tagged union comes only when a genuinely non-socket address type appears (Optional).
 - **`KlDatagram`/UDP:** leave `KlUdp` as-is; keep separate from streams.
 - **Sync client:** a push-only `KlStream` cannot literally replace `client_sync.c`'s blocking loop.
   The consolidation makes the **sync client an adapter that drives the generic async core**
   (runs/polls it to completion), not "the sync transport loop disappears."
-- **`KlListener` capacity:** define a precise ownership model — listener-owned accepted-stream pool
-  + a capacity credit (the "configured capacity" today is *server-pool* policy, not intrinsic to a
-  listener). Accept is capacity-gated via that credit, not by reaching into `KlServer`.
+- **`KlListener` capacity:** listener-intrinsic accept credit (the "configured capacity" today is
+  *server-pool* policy) — accept is gated by that credit, the accepted stream is drawn from the
+  caller-supplied pool via the listener's acquire/release seam, and the credit is returned when a
+  stream closes. Not by reaching into `KlServer`.
 
-**Migration order (test-driven):** (a) Phase-8 length-prefixed echo test against the Tier-1
-`KlStream`/`KlListener` (plaintext, TCP + pollcomp) to lock the contract; (b) client transport →
-`KlStream` (+ sync adapter); (c) server transport (`KlHttpConn { KlStream stream; … }`);
-(d) TLS wrapping (Tier 2); (e) WS/H2 reuse. Each step green + sanitizer-clean.
+**Migration order (test-driven):** (a) **Phase A** structural extraction (embedded `KlStream`,
+retyped recv/send + listener accept, coarse close) — internal, no API; (b) **Phase B** ship the
+baseline API (atomic write+reservation, strict pause, graceful close/detachment, connect/accept
+handles, listener credits) and lock it with the Phase-8 length-prefixed echo test over TCP +
+pollcomp; (c) client transport → `KlStream` (+ sync adapter); (d) server transport
+(`KlHttpConn { KlStream stream; … }`); (e) **Phase C** EOF/RST taxonomy + TLS wrapping; (f) WS/H2
+reuse. Each step green + sanitizer-clean.
 
 ---
 
-## 9. Phase-1 conclusion (corrected)
+## 9. Phase-1 conclusion (corrected v2)
 
-The consolidation is **mostly extraction, partly new machinery, and some optional capability** —
-not "extraction + retyping" wholesale:
+The consolidation is **structural extraction (Phase A) + a baseline-contract build that needs new
+machinery (Phase B) + advanced semantics (Phase C) + optional capabilities** — NOT "extraction +
+retyping" wholesale, and Phase A alone is not the shippable API:
 - The **substrate** (socket provider, sockaddr, handle, event/completion negotiation) is generic
   and model-negotiated — reuse unchanged.
-- The **transport object** is missing (dissolved in `KlConn`, re-implemented in the client) — Tier 1
-  carves it out, embedding it and retyping `KlCompletionOps` onto the stream handle.
-- But **per-op cancellation, a real write-result/backpressure API, deferred-destruction ownership,
-  and TLS-wrapped-stream semantics do NOT exist today** — Tier 2 must design them before the
-  contract is normative. **Half-close/abort are new provider work** — Tier 3.
-- Accordingly `docs/stream_contract.md` is marked **DRAFT** (not normative) until the Tier-2 choices
-  land, and its over-promised capabilities are demoted to their correct tier.
+- **Phase A** (pure extraction): carve the embedded `KlStream` + `KlListener` out of `KlConn`/
+  `KlServer` and retype `KlCompletionOps` recv/send/accept onto them behind the existing dispatch —
+  no new semantics, preserves the allocation-free accept path.
+- **Phase B** (the shippable public surface) is NOT free: atomic write + `KlDrain` reservation,
+  low-water writable, strict pause, graceful close + DETACHMENT-based `on_close`, cancellable
+  connect/accept handles + listener credits — all new work.
+- **Phase C**: model-neutral EOF-vs-RST (needs an extended completion event), per-op terminals, and
+  the TLS-wrapped-stream state machine (`KlTls` is reusable substrate, but its generic integration is
+  new orchestration, not a retype). **Half-close/abort/file-transfer/non-socket endpoints are
+  Optional.**
+- Accordingly `docs/stream_contract.md` stays **DRAFT** (not normative) until the Phase-B foundations
+  land; its capability tiers map to these phases (Tier-1 capabilities = Phase B surface, etc.).

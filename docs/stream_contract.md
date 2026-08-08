@@ -10,9 +10,18 @@ only after the Tier-2 machinery lands (see `docs/generic_transport_audit.md` §8
 
 ### Capability tiers (which parts of this doc are real *today* vs. new work)
 
-- **Tier 1 (extraction — safe to implement now):** push read-delivery callback; `kl_stream_write`
-  with an **atomic-accept** result; stream-level `pause`/`resume`; `kl_stream_close`; **plaintext
-  only**. Tier 1 delivers **EOF** as a terminal (recv≤0), matching today's readiness/HTTP behavior.
+> **Tiers describe capability levels, NOT implementation order.** The build order is the
+> **Phase A/B/C/Optional** plan in `docs/generic_transport_audit.md` §8. Crucially, the Tier-1
+> *capabilities* below are the **baseline public surface = Phase B**, which is **not** pure
+> extraction — it needs new machinery (write reservation, the listener carve, deferred close +
+> detachment) built first (Phase A is the pure-extraction step, internal, no public API). So Tier 1
+> is the shippable target, **not** "safe to implement immediately."
+
+- **Tier 1 (baseline public surface — built in Phase B):** push read-delivery callback;
+  `kl_stream_write` with an **atomic-accept** result (over `KlDrain` reservation); low-water
+  writable notification; stream-level strict `pause`/`resume`; graceful `kl_stream_close` +
+  detachment `on_close`; cancellable `KlConnectOp`/`KlAcceptOp`; listener credits; **plaintext
+  only**. Delivers **EOF** as a terminal (recv≤0), matching today's readiness/HTTP behavior.
 - **Tier 2 also owns model-neutral EOF-vs-RST.** The distinction is only reliable on the
   synchronous/readiness seam today; the completion event (`KlCompletionEvent`) currently carries
   just `bytes`+`ok` and **no `KlIoStatus` category**, so completion drivers cannot distinguish
@@ -136,18 +145,25 @@ readers and the completion `comp_on_read` → dispatch.)
 
 ## 2. Write semantics (ATOMIC acceptance — decision #1)
 
-- **Ownership chain (decision #3): the stream snapshots accepted bytes into stream-owned stable
-  storage; the caller buffer is only borrowed for the call.**
+- **Ownership chain (decision #3): the caller buffer is borrowed for the call only; anything that
+  outlives the call lives in stream-owned stable storage — but a fully-inline write copies nothing.**
   ```
-  caller buffer  --copied during kl_stream_write-->  stream-owned queue storage  --copy or pin-->  provider op
+  caller buffer --(reserve remainder cap; try direct send)-->
+     • all consumed inline  -> nothing retained, no snapshot (zero-copy readiness fast path)
+     • prefix consumed / completion submit -> remainder copied into the RESERVED stream-owned queue
+                                              -> provider op copies or pins the STREAM storage
   ```
   - **After `kl_stream_write*` returns, the caller may reuse/free its buffer** — unconditionally.
+  - Copying is **not** mandatory: a readiness send that consumes the whole buffer synchronously
+    keeps Keel's zero-copy fast path (no snapshot). Only a remainder (partial send) or a completion
+    submission is copied into the pre-reserved stream-owned queue.
   - A provider (e.g. lwIP-raw) may **pin the *stream-owned* storage** for the op lifetime; it may
     **never** pin the original caller buffer past the call. (Completion backends that copy — e.g.
-    the TLS ciphertext path — copy from the stream-owned storage.) The pin/copy choice is below the
-    contract; the caller only sees "valid for the call."
-  - A later explicit `write_owned` API can transfer caller ownership for true zero-copy; it is not
-    the default.
+    the TLS ciphertext path — copy from the stream-owned storage.) Pin/copy is below the contract.
+  - Reservation-before-send is what makes this atomic (§ reservation requirement below): the
+    remainder's queue space is secured *before* the direct send, so a prefix send can never strand
+    bytes it cannot buffer.
+  - A later explicit `write_owned` API can transfer caller ownership for true zero-copy; not default.
 - **Atomic acceptance.** `kl_stream_write`/`writev` accept **all** the bytes or **none** — there is
   no caller-visible partial write. Return is a result struct (not a bare enum):
   ```c
@@ -351,6 +367,12 @@ ExitBootServices).
   for their `on_close` before releasing the pool.
 - "Retirement is confirmed, not immediate" — `abort` (Tier 3) obeys the same deferred `on_close`;
   it never assumes synchronous op retirement (EFI cannot guarantee it).
+- **`on_close` is a DESTRUCTIVE TAIL callback.** It is the *final* action the implementation takes
+  involving that stream: after invoking `on_close` the implementation must **never** touch the
+  `KlStream` again — no field read, no logging through it, no list removal referencing it, no further
+  callback. The caller may free the stream (or the parent object containing it) *inside* `on_close`.
+  The same destructive-tail rule applies to the terminal callback of a caller-owned `KlConnectOp`/
+  `KlAcceptOp` (§8).
 
 ---
 
@@ -368,6 +390,34 @@ ExitBootServices).
   never accepts beyond that credit (this generalizes today's server-pool backpressure floor + the
   EFI capacity-gated arming, which are currently `KlServer`-scoped). `cancel` before/racing an
   accept, and listener close with a pending accept, follow §6/§7 (deferred `on_close`).
+
+### 8.1 Pre-stream operation handles — `KlConnectOp` / `KlAcceptOp` (ownership)
+
+These precede a live `KlStream`, so they have their own records with the same ownership model as
+streams:
+- **Caller-owned** storage (embedded or pooled); Keel does not allocate them behind the caller's
+  back. Each must remain valid until its terminal callback fires.
+- **Exactly one terminal callback** (connected/refused/timed-out/cancelled, per §6.3), which is a
+  **destructive tail** (§7) — no access to the handle afterward; the caller may reuse its storage in
+  the callback.
+- **Cancellation is deferred**, not synchronous: `cancel` requests it; the terminal still arrives
+  exactly once (as `cancelled`, unless a real result already won per §6.3).
+- **Stream transfer:** a successful `connect`/`accept` hands the resulting `KlStream` to the caller
+  **in** the terminal callback (the stream is live for the duration of that call and beyond, owned
+  per §7); it is not delivered before the terminal.
+
+### 8.2 Listener seam (the generic accept carve — Phase A/B)
+
+- **Retyped ops:** `prime_accepts(KlListener*)` / `post_accept(KlListener*)`; the completion event
+  identifies its target as `KL_COMP_ACCEPT.target = KlListener*` (today it reaches `KlServer`).
+- **Multiple listeners share one `KlEventCtx`** — each carries its own target + credit; the drain
+  routes each `KL_COMP_ACCEPT` to the listener named in `target`.
+- **Acquire/release seam:** the listener draws the accepted `KlStream` from a **caller-supplied
+  pool** via an acquire hook (the HTTP server passes its existing connection pool — no new pool, no
+  per-accept allocation) and **returns the accept credit when that stream closes** (its `on_close`,
+  §7). Accept never exceeds the outstanding credit.
+- **Listener close** detaches outstanding accepts under §7 (deferred `on_close`), draining/
+  quarantining any posted accept op the same way streams do.
 
 ---
 
