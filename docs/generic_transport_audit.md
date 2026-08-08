@@ -285,9 +285,11 @@ stay internal; the stream API is the protocol-author-facing layer above it.
 - **`KlStream`** = the transport subset of `KlConn`, **embedded** (see below), carrying
   handle + `KlEventCtx*` (→ provider+loop) + `KlSockAddr` peer/local + read buffer + `read_paused`
   + a `KlDrain`. Plaintext-only at first (TLS is Tier 2).
-- Retype the completion I/O target: `KlCompletionOps.post_recv`/`post_send`/`post_sendfile` and the
-  readiness `conn_read`/`conn_write` from `KlConn*` to the generic stream handle, behind the
-  existing `completion_dispatch.c` seam (no backend logic change).
+- Retype **only the generic byte-transfer** completion target — `KlCompletionOps.post_recv` /
+  `post_send` and the readiness `conn_read`/`conn_write` — from `KlConn*` to the generic stream
+  handle, behind the existing `completion_dispatch.c` seam (no backend logic change).
+  **`post_sendfile(KlConn*)` stays HTTP-specific** (it's file transfer — Tier 3); do not retype it
+  onto `KlStream` in Tier 1. File transfer can later target `KlStream` via an optional extension.
 - Generic read/write **delivery callbacks** and **stream-level** `pause`/`resume` (rename
   `read_paused`; keep the existing mechanism).
 - Existing close semantics (recv≤0 → close) exposed as `kl_stream_close`.
