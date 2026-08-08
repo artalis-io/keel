@@ -191,6 +191,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/websocket.c src/server_ws.c src/websocket_client.c \
            src/server_h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client_common.c src/client_sync.c src/client_async.c \
+           src/client_proxy.c \
            src/client_pool.c src/redirect.c src/sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
@@ -841,6 +842,7 @@ analyze:
 # the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
 AXIS_PROTO_TUS = src/client_common.c src/client_sync.c src/client_async.c \
+                 src/client_proxy.c \
                  src/h2_client.c src/websocket_client.c \
                  src/connection.c src/server.c src/server_h2.c src/websocket.c src/server_ws.c \
                  src/sse.c src/response.c src/redirect.c src/client_pool.c \
@@ -1034,7 +1036,7 @@ FREESTANDING_CLIENT_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
-    src/client_common.c src/client_async.c src/client_pool.c src/decompress.c \
+    src/client_common.c src/client_async.c src/client_proxy.c src/client_pool.c src/decompress.c \
     parsers/response_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 

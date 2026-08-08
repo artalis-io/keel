@@ -31,6 +31,7 @@
 #include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
 #include "platform.h"     /* kl_plat_poll1 — sync readiness wait (poll/WSAPoll) */
 #include "client_internal.h"
+#include "client_proxy.h"   /* shared CONNECT serialization + status (no sync/async drift) */
 
 /* ── Connect with timeout ────────────────────────────────────────── */
 
@@ -226,19 +227,11 @@ static int proxy_connect_sync(const KlSocketProvider *sockets, KlSocketHandle fd
                                 const char *proxy_auth, int timeout_ms)
 {
     char buf[KL_PROXY_RESPONSE_MAX];
-    int n;
-    if (proxy_auth)
-        n = snprintf(buf, sizeof(buf),
-                     "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n"
-                     "Proxy-Authorization: %s\r\n\r\n",
-                     host, port, host, port, proxy_auth);
-    else
-        n = snprintf(buf, sizeof(buf),
-                     "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n\r\n",
-                     host, port, host, port);
-
-    if (n < 0 || (size_t)n >= sizeof(buf))
+    size_t req_len = 0;
+    /* Shared serialization (client_proxy.c) — identical bytes to the async client. */
+    if (kl_proxy_build_connect(buf, sizeof(buf), &req_len, host, port, proxy_auth) != 0)
         return -1;
+    int n = (int)req_len;
 
     /* Send CONNECT request */
     size_t sent = 0;
@@ -275,17 +268,10 @@ static int proxy_connect_sync(const KlSocketProvider *sockets, KlSocketHandle fd
         recv_len += (size_t)r;
         buf[recv_len] = '\0';
 
-        /* Check for end of headers */
-        if (strstr(buf, "\r\n\r\n")) {
-            /* Verify 200 status */
-            if (recv_len < 12)
-                return -1;
-            if (strncmp(buf, "HTTP/1.", 7) != 0)
-                return -1;
-            if (buf[9] != '2' || buf[10] != '0' || buf[11] != '0')
-                return -1;
-            return 0;
-        }
+        /* Shared status check (client_proxy.c): 1 = tunnel up, 0 = need more, -1 = error. */
+        int st = kl_proxy_connect_status(buf, recv_len);
+        if (st != 0)
+            return st == 1 ? 0 : -1;
     }
 }
 

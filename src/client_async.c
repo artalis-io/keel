@@ -30,6 +30,7 @@
 #include "io_engine.h"  /* kl_comp_post_connect / kl_comp_cancel — completion connect (LC-0) */
 #include "watcher_internal.h" /* kl_watcher_add_detached — completion connect (LC-0) */
 #include "client_internal.h"
+#include "client_proxy.h" /* shared CONNECT serialization + status (no sync/async drift) */
 #include "kl_cstr.h"    /* locale-free append builders + bounded find (no snprintf) */
 
 /* Forward declarations */
@@ -58,26 +59,8 @@ static int build_connect_request(KlClient *c, const char *host,
 {
     char buf[KL_PROXY_RESPONSE_MAX];
     size_t n = 0;
-    /* "CONNECT <host>:<port> HTTP/1.1\r\nHost: <host>:<port>\r\n"
-     * [ "Proxy-Authorization: <auth>\r\n" ] "\r\n" — byte-identical to the
-     * former snprintf, built with bounded, locale-free append helpers. */
-    if (kl_buf_append(buf, sizeof(buf), &n, "CONNECT ") != 0 ||
-        kl_buf_append(buf, sizeof(buf), &n, host) != 0 ||
-        kl_buf_append_n(buf, sizeof(buf), &n, ":", 1) != 0 ||
-        kl_buf_append_u64(buf, sizeof(buf), &n, port) != 0 ||
-        kl_buf_append(buf, sizeof(buf), &n, " HTTP/1.1\r\nHost: ") != 0 ||
-        kl_buf_append(buf, sizeof(buf), &n, host) != 0 ||
-        kl_buf_append_n(buf, sizeof(buf), &n, ":", 1) != 0 ||
-        kl_buf_append_u64(buf, sizeof(buf), &n, port) != 0 ||
-        kl_buf_append(buf, sizeof(buf), &n, "\r\n") != 0)
-        return -1;
-    if (auth) {
-        if (kl_buf_append(buf, sizeof(buf), &n, "Proxy-Authorization: ") != 0 ||
-            kl_buf_append(buf, sizeof(buf), &n, auth) != 0 ||
-            kl_buf_append(buf, sizeof(buf), &n, "\r\n") != 0)
-            return -1;
-    }
-    if (kl_buf_append(buf, sizeof(buf), &n, "\r\n") != 0)
+    /* Shared serialization (client_proxy.c) — one definition for sync + async. */
+    if (kl_proxy_build_connect(buf, sizeof(buf), &n, host, port, auth) != 0)
         return -1;
 
     c->connect_buf = kl_malloc(c->alloc, (size_t)n);
@@ -590,16 +573,11 @@ static void async_handle_proxy_handshake(KlClient *c)
         c->proxy_recv_len += (size_t)r;
         c->proxy_recv[c->proxy_recv_len] = '\0';
 
-        /* Check for end of headers */
-        if (!kl_strstr(c->proxy_recv, "\r\n\r\n"))
+        /* Shared status check (client_proxy.c): 0 = need more, 1 = tunnel up, -1 = error. */
+        int st = kl_proxy_connect_status(c->proxy_recv, c->proxy_recv_len);
+        if (st == 0)
             continue;
-
-        /* Verify HTTP/1.x 200 status (len>=12 guarantees >=7 bytes present, so
-         * a fixed-length memcmp is safe here). */
-        if (c->proxy_recv_len < 12 ||
-            memcmp(c->proxy_recv, "HTTP/1.", 7) != 0 ||
-            c->proxy_recv[9] != '2' || c->proxy_recv[10] != '0' ||
-            c->proxy_recv[11] != '0') {
+        if (st < 0) {
             c->error = KL_ERR_PROXY;
             async_complete_error(c);
             return;
