@@ -40,6 +40,25 @@ split, and the EFI server data-plane fixes.
   `el_close` teardown live entirely in the EFI socket/completion provider (`integrations/uefi/`),
   below the axis; the server core is unchanged. See the review-round subsection of the tenth pass.
 
+### Protocol-hook registry: capability-global, enablement per-server (clarification)
+
+The `proto_hooks.h` tables are **process-wide install-once registrations of compiled-in
+capabilities** (which protocol *implementation* to dispatch to), guarded by `hooks_set_once`
+(commit `61bddb1`: idempotent same-table install / NULL reset allowed; a different live
+replacement rejected). This is NOT global *configuration*: protocol **enablement is per-server**
+and orthogonal to the registry —
+- WebSocket fires only when the matched route has `ws_config` (`connection.c:520`), set per
+  server via `kl_server_ws`;
+- HTTP/2 is gated by per-connection `h2_config` (`connection.c:347/527/799`), copied from that
+  server's `cfg.h2` (`server_core.c:213`);
+- PROXY by that server's `cfg.proxy_trusted_cidrs` → `s->proxy_cidr_count`.
+
+So two `KlServer`s in one process **can** run different *enabled* protocol sets today (e.g. A =
+ws+h2, B = plain HTTP/1.1 — B never sets `ws_config`, so the global ws table is never consulted
+for it). The only thing the global registry precludes is two *different implementations of the
+same protocol* selected per-server — exotic and unneeded. This is why de-globalizing the tables
+into per-`KlServer` state (the review's declined Finding 2) buys ~nothing for real Keel usage.
+
 ### Sanitizer / driver checks
 
 - Completion-axis driver under ASan (`make smoke-pollcomp-asan`): async/thread-pool over-completion
