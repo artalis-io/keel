@@ -334,22 +334,30 @@ stay internal; the stream API is the protocol-author-facing layer above it.
 - Generic read/write **delivery callbacks**; **stream-level** `pause`/`resume` (rename `read_paused`).
 - **Coarse internal close only** — preserve today's behavior. Do NOT ship the public graceful
   `kl_stream_close` here (Phase B).
-- **DECISION — embed `KlStream` in `KlConn`, keep the public name, migrate internal field access to
-  `conn->stream.*` (Finding 6).** `KlConn`'s struct is defined in a public header
-  (`include/keel/connection.h`), but a survey of the tree shows **no public/example/test code reads its
-  transport fields** — the only public surface is the *type name* `KlConn`, the `kl_request_conn()`
-  accessor (returns `KlConn*`), and one doc comment mentioning `peer_addr`. Nothing does `conn->fd`
-  outside libkeel's own TUs. So the source-compatibility surface that must be preserved is narrow, and
-  the decision is concrete:
+- **DECISION — embed `KlStream` in `KlConn`, keep the public name; this is a NARROW SOURCE BREAK at
+  the field level, not "no break" (Finding 6 + Finding 3).** `KlConn`'s struct is **fully defined in a
+  public header** (`include/keel/connection.h`) with fields `fd` / `peer_addr` / `read_buf` / `tls` /
+  … — so moving them under `conn->stream.*` **breaks any external source that reads those fields**,
+  whether or not *this* repo does. Be honest about the compatibility surface rather than claiming none
+  is broken:
+  - **Type/API compatibility IS preserved:** the type **name** `KlConn`, `sizeof(KlConn)`
+    embeddability, and the documented accessor `kl_request_conn()` (returns `KlConn*`) — all unchanged.
+  - **ABI is NOT promised** — Keel is statically relinked; struct layout may change between versions.
+  - **Direct field-level source compatibility IS intentionally broken** — `conn->fd` becomes
+    `conn->stream.fd`, etc. This is acceptable **only because the transport fields are hereby
+    classified as internal/unstable** (a survey of `include/`/`examples/`/`tests/` finds no external
+    reader — the only mention is one `peer_addr` doc comment). Phase A must **document that
+    classification** in `connection.h` (mark the transport subset internal/unstable) so the break is
+    declared, not silent.
   - **Ships:** keep the public struct **name** `KlConn`; move the transport subset into an embedded
-    `KlStream stream;` leading member; migrate the ~internal references from `conn->fd` / `conn->ctx` /
+    `KlStream stream;` leading member; migrate references from `conn->fd` / `conn->ctx` /
     `conn->peer_addr` / `conn->read_buf|read_len|read_cap` / `conn->read_paused` / `conn->tls` /
     `conn->tls_want` to `conn->stream.fd` (etc.). The HTTP fields (`req`/`res`/`parser`/`ws`/`h2`/
-    `router`/`file_io`/`access_log`) stay top-level on `KlConn`.
-  - **Source compatibility preserved:** the type name, `sizeof(KlConn)` embeddability, and
-    `kl_request_conn()` — all unchanged. The one `peer_addr` doc-comment reference is updated to
-    `conn->stream.peer_addr`; if any public accessor for it is ever wanted, add
-    `kl_conn_peer_addr(KlConn*)` rather than re-aliasing the field.
+    `router`/`file_io`/`access_log`) stay top-level on `KlConn`. Add `kl_conn_peer_addr(KlConn*)` (and
+    any other accessor genuinely needed) so external users have a *stable* path that survives the move.
+  - **If true field-level source compatibility is later required** (a downstream turns out to read the
+    fields): retain thin `#define`/accessor aliases through a deprecation cycle rather than reverting
+    the embed. Not planned, since the fields are classified internal.
   - **Rejected:** field-level aliasing (a) (duplicated members / macro aliases — ugly, collision-prone,
     and unnecessary since nothing external reads the fields); `typedef KlHttpConn KlConn` (b) (a rename
     in disguise that still wouldn't preserve `conn->fd` field access, which we don't need anyway); a

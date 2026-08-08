@@ -347,11 +347,23 @@ wraps the socket seam (socket-BIO: `t->sp = ctx->sockets`; or completion memory-
 and are not normative. When TLS wrapping lands it must specify — so the wrapped stream stays
 model-neutral and does not accidentally become readiness-shaped:
 
-- **Handshake-before-delivery:** a newly connected/accepted TLS stream is delivered to the protocol
-  only *after* a successful handshake (no app bytes before). Handshake **failure** and **deadline** on
-  the client side resolve the `KlConnectOp` terminal (§8.1); on an accepted TLS stream they surface as
-  an immediate close/`on_close` before any `on_accept`-delivered bytes (§8.2) — distinct from a
-  plaintext connect/accept.
+- **Handshake-before-delivery, and its failure ownership (Finding 2):** a newly connected/accepted TLS
+  stream is delivered to the protocol only *after* a successful handshake (no app bytes before). The
+  ownership terminal for a **failed/timed-out handshake** differs by side, and critically an accepted
+  stream that never handshook is **never owned by the protocol**, so it must NOT receive the protocol's
+  `on_close`:
+  - **Client:** handshake failure/deadline resolves the `KlConnectOp` terminal as `refused`/`timed-out`
+    (§8.1) — the caller owns the `KlConnectOp`, not a stream, so this is coherent; no stream `on_close`
+    (the stream was never handed over).
+  - **Accepted (server/listener):** the listener/TLS wrapper still owns the **half-built** stream. On
+    handshake failure it performs **internal teardown only** — DETACHMENT per §7, then **credit-lease
+    release** (§8.2) — and does **not** fire the public `on_close` (there was no `on_accept`, so the
+    protocol never took ownership; a public `on_close` would break the "an accepted stream is
+    application-ready" promise). The listener MAY expose an optional listener-level
+    **`on_accept_error(listener, cause)`** for observability, which never conveys stream ownership.
+    `on_accept` fires **only** on handshake success. This preserves the invariant that every stream
+    delivered by `on_accept` is application-ready, and that `on_close` is paired 1:1 with a prior
+    ownership handoff (`on_accept` or a `connect` terminal).
 - **Cross-direction wants:** a `write` may need to read (`WANT_READ`) and a `read` may need to write
   (`WANT_WRITE`); the wrapped stream drives the underlying transport for the opposite direction
   without surfacing it to the protocol.
@@ -390,29 +402,40 @@ ExitBootServices).
   works toward **detachment** (cancel-by-handle; on a failed cancel it moves the op record into
   stable backend-owned/quarantined storage so a late event lands there, not in caller memory — the
   EFI discipline generalized).
-- **DETACHMENT depends on where a submitted read's kernel-/firmware-visible buffer lives — this is a
-  normative constraint on backends, not a free choice (Finding 1).** Invalidating a generation or
-  quarantining an *operation record* protects the callback pointer; it does **not** reclaim memory an
-  external agent still holds a writable pointer into. So a submitted read falls into one of two
-  classes, and a backend must know which it is:
-  - **Backend-owned read storage.** The in-flight read targets stable storage the *backend* owns —
-    never the caller's `KlStream`. Examples in today's tree: all TLS ciphertext reads
-    (`IOU_TLS_RECV`/`KL_IOCP_TLS_RECV`/`PC_TLS_RECV` land in a transient `op->sendbuf`/`g_tls_cipher`
-    scratch, then `feed_input`), and EFI plaintext (the firmware `ReceiveData` runs *synchronously
-    inside drain*, so no firmware op holds `read_buf` between ticks). Here force-detach at the close
-    deadline is safe — invalidate the generation, quarantine the record, **synchronously ack
-    `DETACHED`** — because the external writer never had a pointer into `KlStream` storage.
-  - **Caller-stream read storage.** The in-flight read targets the caller's stream buffer directly —
-    today `IOU_READ` (`op->buf = c->read_buf + c->read_len`) and `KL_IOCP_READ`
-    (`buf.buf = c->read_buf + c->read_len`). The kernel may write into that buffer at any time until
-    the op **retires**. Here detachment **requires the read's cancellation to actually complete** (the
-    CQE / completion packet for the cancelled recv is dequeued). The close deadline may escalate
-    graceful→cancel, but the parent may **not** free/reuse the stream on a timer alone, and there is
-    **no synchronous-ack shortcut** — freeing `read_buf` with a kernel recv still posted into it is a
-    UAF the quarantine cannot prevent.
-  A backend that cannot guarantee backend-owned read storage (io_uring, IOCP) is in the second class
-  and must drive cancel-to-completion (below); backends with backend-owned/synchronous reads (EFI,
-  the TLS ciphertext path) may take the synchronous-ack path.
+- **The DETACHMENT rule covers EVERY external reference into stream storage — reads AND writes, not
+  just kernel recv buffers (Finding 1).** The general invariant is:
+  > **DETACHMENT requires that no external agent (kernel, firmware, or an in-provider stack such as
+  > lwIP) retain any pointer into caller-owned `KlStream` storage — whether for reading OR writing.**
+
+  Invalidating a generation or quarantining an *operation record* protects the callback pointer; it
+  does **not** reclaim memory an external agent still reads from or writes into. So a backend must
+  classify **each in-flight op** (read *or* write) into one of three cases and know which it is:
+  - **(1) Backend-owned copy/scratch.** The op references stable storage the *backend* owns — never the
+    caller's `KlStream`. Reads: all TLS ciphertext (`IOU_TLS_RECV`/`KL_IOCP_TLS_RECV`/`PC_TLS_RECV`
+    land in a transient `op->sendbuf`/`g_tls_cipher` scratch, then `feed_input`) + EFI plaintext (the
+    firmware `ReceiveData` runs *synchronously inside drain*, so no firmware op holds `read_buf`
+    between ticks). Writes: every backend that **copies** the send payload into a backend-owned op
+    buffer before submitting (EFI's inline `sndbuf`; io_uring/IOCP `WRITE` copies the remainder). Here
+    force-detach at the close deadline is safe — invalidate the generation, quarantine the record,
+    **synchronously ack `DETACHED`** — because no external agent ever held a pointer into `KlStream`.
+  - **(2) External op referencing caller-stream storage.** The op hands an external agent a pointer
+    **into the `KlStream`'s own read or write storage.** Reads: `IOU_READ`
+    (`op->buf = c->read_buf + c->read_len`), `KL_IOCP_READ` (`buf.buf = c->read_buf + c->read_len`) —
+    the kernel may write there until the op retires. Writes: any provider that **pins the stream-owned
+    queue storage** for the op lifetime (§2 permits this — e.g. lwIP-raw referencing the send buffer)
+    — the stack may read there until the op retires. Here detachment **requires that op's
+    cancellation/retirement to actually complete** (the CQE / completion packet is dequeued, or the
+    provider's release/ack callback fires). The close deadline may escalate graceful→cancel, but the
+    parent may **not** free/reuse the stream on a timer alone, and there is **no synchronous-ack
+    shortcut** — freeing the buffer with a live kernel/stack op still referencing it is a UAF the
+    quarantine cannot prevent.
+  - **(3) Provider pin with an explicit release.** A special case of (2): a provider that pins
+    stream storage but delivers a **release/acknowledgement callback** (lwIP `tcp_sent`-style) — that
+    callback firing **is part of detachment**. `on_close` may not fire until every such release has
+    landed for the stream.
+  A backend in case (1) for all its outstanding ops may take the synchronous-ack path; a backend with
+  **any** outstanding case-(2)/(3) op (io_uring/IOCP plaintext read, lwIP write pin) must drive
+  cancel-/release-to-completion (below) before `on_close`.
 - **`on_close(stream)` fires exactly once, when DETACHMENT is confirmed** — which may be *before*
   physical token retirement. Only then may the caller free/reuse the (embedded/pooled) storage;
   **no callback of any kind fires afterward.** A backend signals this via a `DETACHED`
@@ -425,15 +448,28 @@ ExitBootServices).
   `close` is deferred, but `kl_server_free`/`kl_listener_free`/any parent destructor is a *blocking*
   call that must not return while a stream can still reference the pool it is about to release. It
   reconciles the two by **driving** detachment to completion rather than passively waiting:
-  - **Caller-stream read backends (io_uring, IOCP)** — it `close`s every live stream (submitting the
-    cancels), then **runs a completion-drain loop** — dequeue completions, matching each cancelled
-    read to its `on_close` — until every stream has confirmed DETACHMENT. "Bounded" here bounds the
-    *graceful flush* (the close deadline escalates graceful→cancel) and the *submission* work — it
-    does **not** license freeing a stream whose read cancel has not yet completed. The parent blocks
-    until the last cancel-completion is observed; a kernel op still owning `read_buf` is waited out,
-    not force-detached on a timer (Finding 1). This terminates because a submitted cancel always
-    yields a completion.
-  - **Backend-owned / synchronous read backends** — a provider whose `close` can **synchronously
+  - **Backends with outstanding case-(2)/(3) ops (io_uring/IOCP plaintext reads; lwIP write pins)** —
+    it `close`s every live stream (submitting the cancels), then **runs a completion-drain loop** —
+    dequeue completions/releases, matching each retiring **read *or* write** op to its stream — until
+    every stream has confirmed DETACHMENT. "Bounded" here bounds the *graceful flush* (the close
+    deadline escalates graceful→cancel) and the *submission* work — it does **not** license freeing a
+    stream whose read cancel, write cancel, or write-pin release has not yet completed. The parent
+    blocks until every op's **retirement observation** lands (a kernel recv into `read_buf`, or a
+    stack still reading a pinned write buffer, is waited out — not force-detached on a timer;
+    Finding 1).
+    - **Termination is per-op, not "cancel always completes" (Finding 4).** The guarantee is:
+      > **every *successfully submitted* op eventually produces — or has already produced — exactly one
+      > retirement observation, whether natural or cancelled.**
+      The drain loop must therefore handle, per op: (i) **cancel submission failing** (SQE/alloc
+      exhaustion) → the op is still live, so retry the cancel or wait for its natural completion,
+      never treat the stream as detached; (ii) **natural completion winning the race** with the
+      cancel → that natural completion *is* the one retirement observation (a following "cancel
+      not-found" is discarded, not a second terminal); (iii) **"operation not found"** because
+      retirement is already queued → also discarded; (iv) **event-loop/backend failure during
+      destructor draining** → the destructor cannot silently free; it must surface the failure
+      (an op whose retirement can no longer be observed keeps the stream quarantined rather than
+      freed). A stream detaches only when each of its submitted ops has hit exactly one of these.
+  - **Backends whose outstanding ops are all case-(1)** — a provider whose `close` can **synchronously
     acknowledge detachment** (invalidate the generation, move any in-flight op record into
     provider-owned/quarantined storage, then return `DETACHED` from the close call itself) lets the
     parent detach without a drain loop at all. **EFI takes exactly this path**: it cannot guarantee
@@ -516,6 +552,13 @@ no `on_accept`.
   it, then invoke `on_accept(listener, stream)` (a destructive-handoff for that record; §7 rules
   govern the stream from there). If a slot cannot be acquired the accept is not armed in the first
   place (credit rule above), so `on_accept` never fires without backing storage.
+- **`on_accept` conveys ownership; a stream that fails before `on_accept` is never handed over
+  (Finding 2).** For a **TLS listener**, the handshake runs on the half-built stream *before*
+  `on_accept`. On handshake failure/deadline the listener does internal teardown (§7 DETACHMENT +
+  credit-lease release) and fires the optional listener-level **`on_accept_error`** — but **no
+  `on_accept` and no stream `on_close`**, because the protocol never took ownership. `on_close` is
+  paired 1:1 with a prior `on_accept` (or `connect` terminal); it never fires for a stream the caller
+  never received. (Plaintext accept has no pre-handoff failure window — the stream is ready at accept.)
 - **Credit is an internal lease, not a raw back-pointer (Finding 3 + Finding 4).** Each accepted
   stream carries an internal **credit lease** — a small Keel-owned record naming the listener's credit
   accounting, not the public `KlListener` storage. On stream close it is released in **step 2** of the
@@ -596,6 +639,14 @@ completion and across TCP/Unix/lwIP where available.
   embedded/pooled storage after `on_close`; no UAF / double-callback / leak.
 - `on_close` fires on **detachment**, not physical token retirement (server destruction does not
   block on EFI-quarantined tokens).
+- **Detachment covers writes, not just reads (Finding 1):** `close`/parent-teardown **while an
+  outstanding write** pins stream-owned queue storage (and, where available, an lwIP-style write-pin
+  release) waits out that op's retirement before `on_close` — under ASan, no send buffer is freed
+  while an op still references it. The matrix runs this for *both* a posted receive and an outstanding
+  write.
+- **Cancel-vs-completion race (Finding 4):** cancel racing a natural completion yields **exactly one**
+  retirement (natural wins; the late "cancel not-found" is discarded — no second terminal, no missed
+  `on_close`); a failed cancel submission does not detach the stream.
 
 **Tier-2 gate (once the new machinery lands):**
 - EOF **vs** RST distinguishable identically across models (requires the extended completion event).
@@ -603,6 +654,11 @@ completion and across TCP/Unix/lwIP where available.
 - Write reservation guarantees atomicity even when the direct send takes a prefix and the cap is hit.
 - TLS-wrapped stream (§6bis): handshake-before-delivery, cross-direction wants, `pending()` drain,
   memory-BIO ownership, close-notify vs FIN, handshake deadline.
+- **Accepted-TLS handshake failure ownership (Finding 2):** a failed/timed-out accepted handshake fires
+  **no `on_accept` and no stream `on_close`** — only internal teardown + credit-lease return (+ the
+  optional `on_accept_error`); the credit is reclaimed so the listener can arm the next accept. Assert
+  `on_close` is 1:1 with a prior `on_accept`/`connect` handoff (never for a stream the caller never
+  received).
 
 **Tier-3 gate (optional capabilities, when implemented):**
 - `shutdown_write` then writes → `CLOSED` while reads continue (half-open); `abort`/RST; tagged
