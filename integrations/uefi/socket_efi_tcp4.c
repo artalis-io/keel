@@ -1084,7 +1084,11 @@ static int efi_sock_listen(void *cx, KlSocketHandle fd, int backlog) {
     if (!c->configured) { c->last_status = st; return -1; }
     c->is_listener = 1;   /* a socket that listened is a listener (bind optional) */
 
-    /* Prime the Accept-token pool: create one event per slot, then arm it. */
+    /* Create the Accept-token pool events (backlog clamped to KL_EFI_ACCEPT_BACKLOG) but
+     * do NOT arm them here. Arming is capacity-gated (Goal 8 backpressure): the event
+     * layer calls kl_uefi_socket_accept_arm(fd, free_keel_slots) each completion tick, so
+     * EFI never has more armed Accept tokens than Keel has free connection slots — a
+     * connection Keel can't service waits in the TCP backlog, not in a firmware child. */
     int n = backlog;
     if (n < 1) n = 1;
     if (n > KL_EFI_ACCEPT_BACKLOG) n = KL_EFI_ACCEPT_BACKLOG;
@@ -1094,11 +1098,35 @@ static int efi_sock_listen(void *cx, KlSocketHandle fd, int backlog) {
         st = c->bs->CreateEvent(EFI_TCP4_EVT_TOKEN, TPL_CALLBACK, NULL, NULL,
                                 &g_listener.tok[i].CompletionToken.Event);
         if (EFI_ERROR(st)) { c->last_status = st; break; }
-        g_listener.n = i + 1;
-        (void)listener_arm_token(c, i);   /* best-effort; accept() re-arms too */
+        g_listener.n = i + 1;   /* event created; posted[i] stays 0 until accept_arm */
     }
     if (g_listener.n == 0) { c->last_status = st; return -1; }
     return 0;
+}
+
+/* Capacity-gated Accept-token arming (S-3 backpressure, the "post_accept" half of the
+ * accept lifecycle, symmetric with kl_uefi_socket_connect_post). Arm unposted,
+ * non-quarantined token slots until the posted count reaches min(pool size, `want`),
+ * where `want` is the number of FREE Keel connection slots the event layer passes in.
+ * Never un-arms (an outstanding EFI token cannot be cheaply cancelled) — but because
+ * `want` tracks free capacity and each completion is harvested (posted -> 0) as its slot
+ * is consumed, the posted count stays <= free capacity. Returns the resulting posted
+ * count. Idempotent; safe to call every tick. */
+int kl_uefi_socket_accept_arm(KlSocketHandle fd, int want) {
+    if (kl_uefi_after_ebs()) return 0;
+    KlUefiConn *lc = conn_of(fd);
+    if (!lc || lc->dead || g_listener.fd != fd) return 0;
+    if (want < 0) want = 0;
+    if (want > g_listener.n) want = g_listener.n;
+
+    int posted = 0;
+    for (int i = 0; i < g_listener.n; i++)
+        if (g_listener.posted[i]) posted++;          /* armed OR completed-unharvested */
+    for (int i = 0; i < g_listener.n && posted < want; i++) {
+        if (g_listener.posted[i] || g_listener.quarantined[i]) continue;
+        if (listener_arm_token(lc, i) == 0) posted++;
+    }
+    return posted;
 }
 
 /* accept(): non-blocking. Poll the listener, hand back the first completed Accept
@@ -1115,16 +1143,16 @@ static KlSocketHandle efi_sock_accept(void *cx, KlSocketHandle fd, KlSockAddr *p
         if (!g_listener.posted[i]) continue;
         if (lc->bs->CheckEvent(g_listener.tok[i].CompletionToken.Event) != EFI_SUCCESS)
             continue;   /* still pending */
-        g_listener.posted[i] = 0;
+        g_listener.posted[i] = 0;   /* harvest only — NO re-arm here (capacity-gated
+                                     * re-arm is kl_uefi_socket_accept_arm, called by the
+                                     * event layer with the free-slot count: backpressure). */
         EFI_STATUS st = g_listener.tok[i].CompletionToken.Status;
         EFI_HANDLE child = g_listener.tok[i].NewChildHandle;
         if (EFI_ERROR(st) || !child) {
             lc->last_status = st;
-            (void)listener_arm_token(lc, i);   /* failed accept — re-arm the slot */
-            continue;
+            continue;   /* failed accept — slot is now unposted; accept_arm re-arms it */
         }
         KlUefiConn *nc = adopt_child(child);
-        (void)listener_arm_token(lc, i);       /* re-arm regardless (S-3 adds backpressure) */
         if (!nc) { lc->last_status = EFI_OUT_OF_RESOURCES; return KL_INVALID_SOCKET; }
 
         if (peer) {

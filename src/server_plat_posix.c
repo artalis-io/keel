@@ -45,7 +45,7 @@ static void kl_signal_handler(int sig) {
 }
 #endif
 
-void kl_srv_signals_install(KlServer *s) {
+void kl_server_plat_signals_install(KlServer *s) {
 #if !defined(KL_NO_SIGNAL)
     signal(SIGPIPE, SIG_IGN);
     if (s->config.install_signal_handlers) {
@@ -63,8 +63,8 @@ void kl_srv_signals_install(KlServer *s) {
 #endif
 }
 
-/* cppcheck-suppress constParameterPointer ; symmetric with kl_srv_signals_install */
-void kl_srv_signals_restore(KlServer *s) {
+/* cppcheck-suppress constParameterPointer ; symmetric with kl_server_plat_signals_install */
+void kl_server_plat_signals_restore(KlServer *s) {
 #if !defined(KL_NO_SIGNAL)
     if (s->config.install_signal_handlers) {
         sigaction(SIGTERM, &kl_old_term, NULL);
@@ -147,7 +147,7 @@ static int resolve_gid(KlServer *s, const char *name, gid_t *out) {
     }
 }
 
-int kl_srv_bind_unix(KlServer *s) {
+int kl_server_plat_bind_unix(KlServer *s) {
     const char *path = s->config.unix_socket_path;
     if (!path || path[0] == '\0') {
         s->last_error = KL_ERR_INVALID_ARG;
@@ -263,7 +263,7 @@ fail:
     return -1;
 }
 
-void kl_srv_unlink_owned_unix(KlServer *s) {
+void kl_server_plat_unlink_owned_unix(KlServer *s) {
     if (s->unix_socket_owned && s->config.unix_socket_unlink &&
         s->config.unix_socket_path) {
         /* Re-check that the path is still a socket before unlinking, so a
@@ -337,11 +337,11 @@ unsigned kl_platform_caps(void) {
     return caps;
 }
 
-void kl_srv_unsetenv(const char *name) {
+void kl_server_plat_unsetenv(const char *name) {
     unsetenv(name);
 }
 
-int kl_srv_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen) {
+int kl_server_plat_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen) {
 #if defined(__linux__) && defined(SO_PEERSEC)
     socklen_t len = (socklen_t)buflen;
     if (getsockopt((int)fd, SOL_SOCKET, SO_PEERSEC, buf, &len) != 0)

@@ -1,5 +1,149 @@
 # KEEL Networking Architecture Axis Audit
 
+## Eleventh pass — orchestration-layer refactors re-verify the three-axis separation (2026-08-08)
+
+**Verdict: architecturally sound — the client/server orchestration refactors (this session's
+review rounds) STRENGTHENED axis separation; no regressions.** Fresh `/axis-audit` after the
+Finding-1 dispatch unification, the `client_proxy.c` extraction, the `server_activation.c`
+split, and the EFI server data-plane fixes.
+
+### Mechanical independence (Goal 4) — PASS
+
+- **Protocol-layer TUs name no platform networking header or event-engine symbol.** grep over
+  `connection.c`, `response.c`, `client_{common,sync,async,proxy}.c`, `h2_client.c`,
+  `websocket{,_client}.c`, `server_{ws,h2}.c`, `sse.c`, `router.c`, `chunked.c`, `parsers/*` for
+  `<sys/epoll.h>`/`<sys/event.h>`/`<sys/socket.h>`/`netinet`/`arpa`/`io_uring`/`epoll_*`/`kevent`/
+  `WSA*`/`OVERLAPPED`/`CreateIoCompletionPort` → **clean**. The new `client_proxy.c` (shared proxy
+  CONNECT) is a pure protocol-layer TU (bounded `kl_buf_append_*` + `memcmp`); it is in
+  `AXIS_PROTO_TUS` so the gate keeps it clean.
+- **The readiness server (`server.c`) now names NO optional-protocol symbol** (grep for
+  `kl_ws_server_*`/`kl_h2_server_*`/`kl_cidr_match`/`c->h2->`/`c->ws->` → only the `_hooks()`
+  getters). Finding 1 (this session) routed the readiness data plane through the same
+  `proto_hooks.h` seam the completion driver already used, so **both event models now dispatch
+  WebSocket/HTTP-2/PROXY identically** — the asymmetry the review flagged is closed. This is a
+  positive axis result: `server.c` (readiness) and `completion_server.c` (completion) are now
+  peers above the protocol seam, neither owning protocol internals.
+
+### Axis-relevant refactors this session (all confirmed non-regressive)
+
+- **Finding 1 — readiness ws/h2/proxy via hooks.** Extended `KlWsServerHooks`/`KlH2ServerHooks`
+  with the readiness data-plane entrypoints; `server.c` dispatches through them (NULL-guarded,
+  symmetric with `completion_server.c`). `kl_server_ws` moved to `server_ws.c`. server.c dropped
+  `websocket_server.h`/`h2_server.h`/`h2_internal.h`.
+- **`client_proxy.c`** — the sync/async proxy CONNECT is now one transport-independent module;
+  the two event models differ only in byte movement (blocking vs the async state machine) — the
+  same "protocol above the axis" principle, applied to the client.
+- **`server_activation.c`** — the systemd socket-activation surface is its own TU. It reads
+  `LISTEN_*` env + `getpid` (platform, hosted) — that is the *activation* responsibility, not a
+  protocol or event-model concern; it names no event engine.
+- **EFI server data plane** — accept backpressure (capacity-gated arming), alloc-free send, and
+  `el_close` teardown live entirely in the EFI socket/completion provider (`integrations/uefi/`),
+  below the axis; the server core is unchanged. See the review-round subsection of the tenth pass.
+
+### Protocol-hook registry: capability-global, enablement per-server (clarification)
+
+The `proto_hooks.h` tables are **process-wide install-once registrations of compiled-in
+capabilities** (which protocol *implementation* to dispatch to), guarded by `hooks_set_once`
+(commit `61bddb1`: idempotent same-table install / NULL reset allowed; a different live
+replacement rejected). This is NOT global *configuration*: protocol **enablement is per-server**
+and orthogonal to the registry —
+- WebSocket fires only when the matched route has `ws_config` (`connection.c:520`), set per
+  server via `kl_server_ws`;
+- HTTP/2 is gated by per-connection `h2_config` (`connection.c:347/527/799`), copied from that
+  server's `cfg.h2` (`server_core.c:213`);
+- PROXY by that server's `cfg.proxy_trusted_cidrs` → `s->proxy_cidr_count`.
+
+So two `KlServer`s in one process **can** run different *enabled* protocol sets today (e.g. A =
+ws+h2, B = plain HTTP/1.1 — B never sets `ws_config`, so the global ws table is never consulted
+for it). The only thing the global registry precludes is two *different implementations of the
+same protocol* selected per-server — exotic and unneeded. This is why de-globalizing the tables
+into per-`KlServer` state (the review's declined Finding 2) buys ~nothing for real Keel usage.
+
+### Sanitizer / driver checks
+
+- Completion-axis driver under ASan (`make smoke-pollcomp-asan`): async/thread-pool over-completion
+  roundtrip + async `KlClient` connect+GET over the completion loop — **both OK**.
+- Full suite under ASan+UBSan (`make debug-test`): **65/65, 0 leaks/UB** (see c-audit twelfth pass).
+- mock-EFI failure-path harness (ASan/UBSan): PASS incl. the new backpressure test.
+
+### Compatibility matrix (reaffirmed)
+
+Unchanged from the tenth pass; `EFI_TCP4 server (plaintext + HTTPS)` remains **firmware-verified
+(QEMU/OVMF, container): S-4 + S-6 + S-7**. All other rows unchanged.
+
+**One documented boundary (unchanged, cross-backend):** on the completion server recv path every
+backend (IOCP/pollcomp/EFI) peeks `c->tls` to route ciphertext to `feed_input` vs plaintext to
+`read_buf`. This is the existing completion-mode TLS contract, not a UEFI-specific leak; a neutral
+`post_recv` destination spec that removes protocol knowledge from all completion backends is
+deferred cross-backend work (recorded in `event_efi.h` + the review triage).
+
+---
+
+## Tenth pass — the UEFI HTTP(S) **server** validates the model-blind server core (2026-08-08)
+
+**Verdict: architecturally sound — the inbound direction is the mirror of the ninth pass and,
+if anything, a stronger validation of the axis model.** A STOCK freestanding `KlServer` serves
+`GET / → 200` — **plaintext (S-4) and HTTPS (S-6)** — and tears down cleanly (S-7) over EFI_TCP4
+on bare UEFI firmware (QEMU/OVMF, verified in an Ubuntu 24.04 container), with **zero protocol
+edits**. The whole S-1..S-7 effort added no platform coupling to `src/`.
+
+### What this pass confirms about the axes
+
+1. **Protocol + server core stayed above both axes (Goal 4) — mechanical PASS.** The core server
+   TUs (`src/server_core.c`, `src/server.c`) contain no platform-networking or event-engine code
+   (`grep` for `sys/epoll`/`sys/event`/`io_uring_`/`epoll_`/`kevent(`/`WSA`/`EFI_TCP4_PROTOCOL`/
+   `efi_sock_` finds only comment prose). No EFI/UEFI TU lives in `src/`; every EFI symbol is under
+   `integrations/uefi/`. The server core serves over EFI_TCP4 byte-identically to epoll/io_uring.
+2. **The `KlCompletionOps` vtable hosts a SERVER backend, not just a client (Goals 1, 12).** S-3/S-4
+   added `prime_accepts`/`post_accept` + the completion-native `post_recv`/`post_send` to the EFI
+   backend (`event_efi.c`), surfaced as `KL_COMP_ACCEPT`/`KL_COMP_READ`/`KL_COMP_WRITE` and consumed
+   by the model-blind `completion_server.c` — the exact shape io_uring/IOCP/pollcomp use. The client
+   rode the watcher relay and never needed these; adding them left the client path untouched.
+3. **Completion-mode server TLS needed nothing below the axis (Goals 4, 9).** S-6 required only the
+   two documented completion-TLS obligations in the backend — feed received *ciphertext* to
+   `tls->feed_input` and a synchronous send for `kl_comp_tls_flush` (already `efi_sock_send`). The
+   `KlTls` memory-BIO ops (`feed_input`/`drain_output`) served the server verbatim — **no
+   TLS-vtable change**. The one fix was a client-only mbedTLS config missing `MBEDTLS_SSL_SRV_C`.
+4. **Server operation-lifetime + teardown (Goals 6, 10) — clean.** S-7 carved a freestanding
+   `kl_server_free`; `kl_conn_pool_free` closes every accepted-child socket (draining its EFI
+   tokens), so `kl_uefi_socket_provider_live_count() == 0` after teardown — the precondition for
+   `kl_uefi_shutdown()` / ExitBootServices. Firmware-verified: served → clean teardown, 0 live
+   sockets, providers released. The `post_recv`/`post_send` ops are generation-stale-guarded (an
+   accepted child that closes mid-op is dropped, never delivered) and freed on completion/cancel.
+
+The only core deltas were the `KEEL_FREESTANDING`-guarded `kl_server_init`/`kl_server_free` carve
+into `server_core.c` (the freestanding server archive now constructs + tears down a `KlServer`
+from itself) — a build-axis guard, not a platform `#ifdef` in a dispatch path.
+
+**Compatibility-matrix delta:** `EFI_TCP4 server (plaintext + HTTPS)` moves from *not-started* to
+**firmware-verified (QEMU/OVMF, container): S-4 plaintext + S-6 HTTPS + S-7 clean teardown**.
+
+### Review round (post-S-7) — three seam fixes, one documented boundary
+
+A follow-up server-side review found three concrete implementation bugs at the inbound seam
+(all now fixed + verified; commit `71573dd`):
+- **Accept backpressure (Goal 8) is now REAL, not just claimed.** The socket layer had auto-
+  re-armed every consumed Accept token, so EFI kept a full armed pool and accepted into
+  firmware children Keel couldn't service. Fixed by splitting the accept lifecycle: `listen`
+  arms none; `accept` harvests without re-arming; `kl_uefi_socket_accept_arm(fd, want)` arms
+  capacity-gated (`want` = free Keel slots), driven every tick by `el_prime_accepts`. New mock
+  test `t_accept_backpressure` proves excess connections are not accepted.
+- **Alloc-free send (op/buffer lifetime, Goal 6).** `post_send` had `kl_malloc`'d per response;
+  it now copies into an inline per-op buffer. NB: the copy is *mandatory* — `comp_tls_post_encrypted`
+  frees its ciphertext right after posting, so a "reference stable segments" optimization is a
+  use-after-free on the TLS path (caught in the container as HTTPS-000; a good reminder the send
+  contract is copy-required across all completion backends).
+- **`el_close` teardown.** Now retires all connect/watch/server-I/O records + clears latched
+  state before the ctx is freed (the inline send buffer also removes the former leak window).
+
+**Documented boundary (not a regression):** on the server recv path the EFI backend peeks
+`c->tls` to route ciphertext to `feed_input` vs plaintext to `read_buf`. This is the *existing*
+completion-mode TLS contract for every backend (IOCP/pollcomp too), not a UEFI-specific leak;
+removing protocol knowledge from all completion backends (a neutral post_recv destination spec)
+is deferred cross-backend work, recorded here and in `event_efi.h`.
+
+---
+
 ## Ninth pass — the UEFI completion provider validates the operation-lifetime contract (2026-08-06)
 
 **Verdict: architecturally sound — and the F-8 hardening is a direct, positive stress-test of

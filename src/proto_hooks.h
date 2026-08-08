@@ -34,6 +34,13 @@
 typedef struct KlWsServerHooks {
     /* HTTP/1.1 -> WebSocket upgrade (returns the next KlConnState as int). */
     int  (*upgrade)(KlConn *c, const char *leftover, size_t leftover_len);
+    /* Readiness data plane (KL_CONN_WEBSOCKET): drive a read/write-ready frame pump;
+     * each returns the next KlConnState as int. The completion path uses .drive
+     * (KlWsCompHooks); this is its readiness counterpart so server.c dispatches through
+     * the same seam instead of naming kl_ws_server_* directly. */
+    int  (*on_readable)(KlConn *c);
+    int  (*on_writable)(KlConn *c);
+    int  (*drain_pending)(const KlConn *c);           /* readiness: want WRITE interest? */
     void (*cleanup)(KlConn *c);                       /* per-connection teardown */
     int  (*auto_ping)(KlConn *c, uint64_t now);       /* idle-sweep keepalive */
     int  (*check_close_timeout)(const KlConn *c, uint64_t now);
@@ -51,6 +58,11 @@ typedef struct KlH2ServerHooks {
                     const char *data, size_t len);
     int  (*upgrade_from_h1)(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
                             const char *leftover, size_t leftover_len);
+    /* Readiness data plane (KL_CONN_HTTP2): drive a read/write-ready frame pump; each
+     * returns the next KlConnState as int (readiness counterpart of KlH2CompHooks.drive). */
+    int  (*on_readable)(KlConn *c);
+    int  (*on_writable)(KlConn *c);
+    int  (*want_write)(const KlConn *c);              /* readiness: arm WRITE interest? */
     void (*cleanup)(KlConn *c);                       /* per-connection teardown */
     void (*drain_shutdown)(KlConn *c);                /* graceful-drain GOAWAY */
 } KlH2ServerHooks;

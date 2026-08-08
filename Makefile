@@ -185,12 +185,13 @@ else
   endif
 endif
 CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/response.c src/router.c \
-           src/connection.c src/server.c src/server_core.c src/proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
+           src/connection.c src/server.c src/server_core.c src/server_activation.c src/proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
            src/body_reader_multipart.c src/chunked.c src/cors.c \
            src/websocket.c src/server_ws.c src/websocket_client.c \
            src/server_h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client_common.c src/client_sync.c src/client_async.c \
+           src/client_proxy.c \
            src/client_pool.c src/redirect.c src/sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
@@ -779,6 +780,7 @@ clean:
 	rm -f src/async.o src/event_ctx.o src/error.o src/timer.o src/thread_pool.o src/drain.o src/tls_mbedtls.o integrations/mbedtls/tls_mbedtls.o src/compress_miniz.o src/decompress_miniz.o
 	rm -f libkeel_freestanding.a libkeel_freestanding_selfcontained.a
 	rm -f libkeel_freestanding*.a libkeel_freestanding_selfcontained*.a
+	rm -f libkeel_freestanding_server*.a
 	rm -f keel_freestanding.efi keel_freestanding_*.efi keel_freestanding*.lib
 	find . -name '*.freestanding.o' -delete
 	find . -name '*.fs_*.o' -delete
@@ -840,6 +842,7 @@ analyze:
 # the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
 AXIS_PROTO_TUS = src/client_common.c src/client_sync.c src/client_async.c \
+                 src/client_proxy.c \
                  src/h2_client.c src/websocket_client.c \
                  src/connection.c src/server.c src/server_h2.c src/websocket.c src/server_ws.c \
                  src/sse.c src/response.c src/redirect.c src/client_pool.c \
@@ -1033,7 +1036,7 @@ FREESTANDING_CLIENT_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
-    src/client_common.c src/client_async.c src/client_pool.c src/decompress.c \
+    src/client_common.c src/client_async.c src/client_proxy.c src/client_pool.c src/decompress.c \
     parsers/response_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
@@ -1175,6 +1178,20 @@ freestanding-lib-selfcontained:
 	@rm -f $(FREESTANDING_SC_LIB)
 	$(call fs_build_and_gate,$(FREESTANDING_SC_SRC),libkeel_freestanding_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
 
+# Self-contained SERVER archive (Phase 10 UEFI server, S-4): the server core +
+# protocol layer + in-archive mem*/strlen (kl_cstr_builtin.c), for a bare EFI target
+# with no libc/EDK2 BaseMemoryLib. Same selfcontained gate as the client variant —
+# mem*/strlen must be DEFINED; the only undefined symbols are the KEEL platform/
+# provider hooks + the vendored-llhttp residual (+ PE __chkstk/_fltused). This is
+# what build_s4.sh links the EFI_TCP4 plaintext HTTP server against.
+FREESTANDING_SERVER_SC_SRC = $(FREESTANDING_SERVER_SRC) src/kl_cstr_builtin.c
+FREESTANDING_SERVER_SC_LIB = libkeel_freestanding_server_selfcontained.a
+
+freestanding-lib-server-selfcontained:
+	@echo "== self-contained freestanding SERVER archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
+	@rm -f $(FREESTANDING_SERVER_SC_LIB)
+	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SC_SRC),libkeel_freestanding_server_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
+
 # ── CRT-less PE/COFF link (B2 — the milestone's last literal) ─────────────────
 # LINKS libkeel_freestanding_selfcontained.a (mem*/strlen in-archive) into a
 # PE/COFF EFI image with NO hosted CRT (-nostdlib, lld PE), proving the archive
@@ -1280,7 +1297,7 @@ freestanding-harness:
 	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_HARNESS_BIN)
 	@rm -f $(FREESTANDING_HARNESS_BIN)
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

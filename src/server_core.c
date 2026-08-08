@@ -23,6 +23,12 @@
 #include "event_caps.h"   /* kl_event_caps — completion vs readiness pause/resume */
 #include "platform.h"     /* kl_monotonic_ms */
 #include "proto_hooks.h"  /* ws/h2 upgrade seam — sweep/drain reach ws/h2 through it */
+#include <keel/parser.h>       /* kl_parser_llhttp (default request parser) */
+#include <keel/event_ctx.h>    /* kl_event_ctx_init_ex / kl_watcher_add */
+#ifndef KEEL_FREESTANDING
+#include <keel/proxy_protocol.h> /* KlCidr / kl_cidr_parse_list (PROXY allowlist) */
+#include <keel/file_io.h>        /* kl_file_io_create (async file I/O backend) */
+#endif
 #include <string.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -30,6 +36,317 @@
 /* Same tick bound server.c's readiness loop uses; a local copy keeps this TU
  * independent of server.c (both are plain compile-time constants). */
 #define KL_POLL_TIMEOUT_MS 1000
+
+/* ── Stop-wakeup self-pipe (hosted only) ──────────────────────────────────────
+ * kl_server_stop() writes a byte to wake the run loop promptly. A freestanding EFI
+ * server has no self-pipe (no OS pipe/socketpair, no kl_server_stop caller) — it
+ * runs the completion loop directly — so both the helpers and their init call are
+ * compiled out under KEEL_FREESTANDING. */
+#ifndef KEEL_FREESTANDING
+static void kl_server_on_wakeup(KlSocketHandle fd, KlEventMask ready, void *user_data) {
+    (void)ready; (void)user_data;
+    kl_plat_wakeup_drain(fd);
+}
+
+/* Open the stop-wakeup self-pipe and register its read end as a run-loop watcher. Best-
+ * effort: on failure the loop simply falls back to tick-timeout stop latency. Called at the
+ * end of kl_server_init, after the event ctx + provider are wired (so the watcher registers
+ * correctly on both readiness and completion loops). */
+static void kl_server_wakeup_init(KlServer *s) {
+    s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+    KlPlatWakeup w;
+    if (kl_plat_wakeup_open(&w) < 0) return;
+    if (kl_watcher_add(&s->ev, w.rd, KL_EVENT_READ, kl_server_on_wakeup, s) < 0) {
+        kl_plat_wakeup_close(&w);
+        return;
+    }
+    s->stop_wake_rd = w.rd;
+    s->stop_wake_wr = w.wr;
+}
+#endif /* !KEEL_FREESTANDING */
+
+/* ── Server construction (model-blind: pool + router + event ctx + provider) ───
+ * Moved from server.c in the Phase 10 UEFI server carve so the freestanding EFI
+ * server can construct a KlServer from the archive alone. The hosted-only pieces —
+ * the ws/h2/proxy upgrade-hook installers, the PROXY-protocol CIDR allowlist, the
+ * async file-I/O backend, and the stop self-pipe — are compiled out under
+ * KEEL_FREESTANDING (a freestanding server is pure HTTP/1.1, no PROXY, no async
+ * file I/O, no self-pipe). Everything else is platform-neutral. */
+int kl_server_init(KlServer *s, const KlConfig *config) {
+    if (!s || !config) {
+        if (s) s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    memset(s, 0, sizeof(*s));
+    s->listen_fd = KL_INVALID_SOCKET;
+    s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+
+#ifndef KEEL_FREESTANDING
+    /* Register the WebSocket / HTTP-2 upgrade tables so connection.c's dispatch is
+     * wired (idempotent; also pulls server_ws.o / server_h2.o out of the static
+     * archive). A freestanding HTTP/1.1 server never links these — the seam stays
+     * NULL and the core runs pure HTTP/1.1. */
+    kl_ws_server_hooks_install();
+    kl_h2_server_hooks_install();
+    kl_proxy_hooks_install();   /* PROXY parser + CIDR match (proxy_protocol.c) */
+#endif
+
+    /* Apply defaults */
+    s->config = *config;
+    if (s->config.transport != KL_TRANSPORT_TCP &&
+        s->config.transport != KL_TRANSPORT_UNIX) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    if (s->config.unix_socket_path &&
+        s->config.transport == KL_TRANSPORT_TCP) {
+        s->config.transport = KL_TRANSPORT_UNIX;
+    }
+    /* listen_fd: 0 = disabled, > 0 = adopt (fds 0-2 are stdio, not listeners).
+     * Reject a negative value rather than silently ignoring it. */
+    if (s->config.listen_fd < 0) {
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    if (s->config.bind_addr == NULL)
+        s->config.bind_addr = "0.0.0.0";
+    if (s->config.max_connections <= 0)
+        s->config.max_connections = KL_DEFAULT_MAX_CONNS;
+    if (s->config.read_timeout_ms <= 0)
+        s->config.read_timeout_ms = KL_DEFAULT_READ_TIMEOUT;
+    if (s->config.parser == NULL)
+        s->config.parser = kl_parser_llhttp;
+    if (s->config.max_body_size == 0)
+        s->config.max_body_size = KL_DEFAULT_MAX_BODY_SIZE;
+    if (s->config.max_header_size == 0)
+        s->config.max_header_size = KL_READ_BUF_SIZE;
+    if (s->config.max_header_size > SIZE_MAX / 2) {
+        s->last_error = KL_ERR_OVERFLOW;
+        return -1;
+    }
+
+    /* Set up allocator. A freestanding server (like the freestanding client) has no
+     * stdlib default allocator in the archive — the caller MUST supply one (the EFI
+     * pool allocator on UEFI); falling back to kl_allocator_default() would drag
+     * malloc/free/stdio into the freestanding closure. */
+    if (s->config.alloc) {
+        s->alloc_storage = *s->config.alloc;
+    } else {
+#ifndef KEEL_FREESTANDING
+        s->alloc_storage = kl_allocator_default();
+#else
+        s->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+#endif
+    }
+    KlAllocator *alloc = &s->alloc_storage;
+
+    /* Init subsystems */
+    if (kl_router_init(&s->router, alloc) < 0) {
+        s->last_error = KL_ERR_ALLOC;
+        return -1;
+    }
+    if (kl_conn_pool_init(&s->pool, s->config.max_connections, alloc) < 0) {
+        s->last_error = KL_ERR_ALLOC;
+        kl_router_free(&s->router);
+        return -1;
+    }
+
+    /* Copy TLS config if provided */
+    if (s->config.tls) {
+        s->tls_storage = *s->config.tls;
+        s->config.tls = &s->tls_storage;
+    }
+
+    /* Copy HTTP/2 config if provided */
+    if (s->config.h2) {
+        s->h2_storage = *s->config.h2;
+        s->config.h2 = &s->h2_storage;
+    }
+
+    /* Copy compress config if provided */
+    if (s->config.compress) {
+        s->compress_storage = *s->config.compress;
+        s->config.compress = &s->compress_storage;
+    }
+
+    /* Parse the PROXY protocol trusted-source CIDR allowlist (if any). Freestanding
+     * has no PROXY support — proxy_protocol.c is not in the archive. */
+    s->proxy_cidrs = NULL;
+    s->proxy_cidr_count = 0;
+#ifndef KEEL_FREESTANDING
+    if (s->config.proxy_trusted_cidrs) {
+        KlCidr tmp[64];
+        int cn = kl_cidr_parse_list(s->config.proxy_trusted_cidrs, tmp,
+                                    (int)(sizeof(tmp) / sizeof(tmp[0])));
+        if (cn < 0) {
+            s->last_error = KL_ERR_INVALID_ARG;
+            kl_conn_pool_free(&s->pool);
+            kl_router_free(&s->router);
+            return -1;
+        }
+        if (cn > 0) {
+            s->proxy_cidrs = kl_malloc(alloc, (size_t)cn * sizeof(KlCidr));
+            if (!s->proxy_cidrs) {
+                s->last_error = KL_ERR_ALLOC;
+                kl_conn_pool_free(&s->pool);
+                kl_router_free(&s->router);
+                return -1;
+            }
+            memcpy(s->proxy_cidrs, tmp, (size_t)cn * sizeof(KlCidr));
+            s->proxy_cidr_count = cn;
+        }
+    }
+#endif
+
+    /* Create parsers and propagate config for each connection slot */
+    for (int i = 0; i < s->pool.capacity; i++) {
+        s->pool.conns[i].parser = s->config.parser(alloc);
+        if (!s->pool.conns[i].parser) {
+            s->last_error = KL_ERR_ALLOC;
+            kl_conn_pool_free(&s->pool);
+            kl_router_free(&s->router);
+            return -1;
+        }
+        s->pool.conns[i].access_log = s->config.access_log;
+        s->pool.conns[i].access_log_data = s->config.access_log_data;
+        s->pool.conns[i].h2_config = s->config.h2;  /* NULL if disabled */
+        s->pool.conns[i].router = &s->router;
+        s->pool.conns[i].ctx = &s->ev;   /* for the socket provider (ctx->sockets) */
+        s->pool.conns[i].max_body_size = s->config.max_body_size;
+        s->pool.conns[i].max_header_size = s->config.max_header_size;
+    }
+
+    /* Pre-allocate TLS sessions (one per connection slot) */
+    if (s->config.tls) {
+        for (int i = 0; i < s->pool.capacity; i++) {
+            s->pool.conns[i].tls = s->config.tls->factory(
+                s->config.tls->ctx, alloc);
+            if (!s->pool.conns[i].tls) {
+                s->last_error = KL_ERR_TLS_INIT;
+                kl_conn_pool_free(&s->pool);
+                kl_router_free(&s->router);
+                return -1;
+            }
+            /* Validate vtable — all 7 required pointers must be set
+             * (alpn_protocol is optional, NULL if not supported) */
+            const KlTls *t = s->pool.conns[i].tls;
+            if (!t->handshake || !t->read || !t->write ||
+                !t->shutdown || !t->pending || !t->reset || !t->destroy) {
+                s->last_error = KL_ERR_TLS_VTABLE;
+                kl_conn_pool_free(&s->pool);
+                kl_router_free(&s->router);
+                return -1;
+            }
+        }
+    }
+
+    /* Init event context — must happen before thread pool / watcher registration.
+     * A configured event_provider (e.g. lwIP / EFI) installs its own backend. */
+    if (kl_event_ctx_init_ex(&s->ev, alloc, s->config.event_provider) < 0) {
+        s->last_error = KL_ERR_EVENT_INIT;
+        kl_conn_pool_free(&s->pool);
+        kl_router_free(&s->router);
+        return -1;
+    }
+    /* Route all socket ops (listen socket + accepted conns) through the selected
+     * provider; NULL = built-in default. */
+    s->ev.sockets = s->config.sockets;
+
+    /* A completion loop needs an overlapped provider, which the default (or a
+     * readiness) provider is not. If the configured provider is incompatible with the
+     * loop, adopt the backend's own native provider (kl_event_native_provider — NULL on
+     * readiness backends, the overlapped provider on completion backends). This makes a
+     * completion backend a source-compatible drop-in: a server written for epoll works
+     * unchanged. An explicitly-configured compatible provider is kept; a still-
+     * incompatible pairing is rejected below. */
+    if (!kl_event_ctx_sockets_compatible(&s->ev)) {
+        const struct KlSocketProvider *np = kl_event_native_provider(&s->ev.loop);
+        if (np) s->ev.sockets = np;
+    }
+
+    /* Negotiate the event loop against the socket provider now that both are wired
+     * onto the ctx. Reject an incoherent pairing here rather than failing obscurely at
+     * add-to-loop. */
+    if (!kl_event_ctx_sockets_compatible(&s->ev)) {
+        s->last_error = KL_ERR_SOCKET;
+        kl_event_ctx_free(&s->ev);
+        kl_conn_pool_free(&s->pool);
+        kl_router_free(&s->router);
+        return -1;
+    }
+
+    /* Create async file I/O backend (NULL if backend doesn't support it). Freestanding
+     * has no async file I/O — file_io.c is not in the archive; s->file_io stays NULL. */
+#ifndef KEEL_FREESTANDING
+    s->file_io = kl_file_io_create(&s->ev.loop, alloc);
+#endif
+    for (int i = 0; i < s->pool.capacity; i++)
+        s->pool.conns[i].file_io = s->file_io;
+
+    /* Self-pipe wakeup so kl_server_stop() wakes the run loop promptly (both axes). */
+#ifndef KEEL_FREESTANDING
+    kl_server_wakeup_init(s);
+#endif
+
+    return 0;
+}
+
+/* ── Server teardown (model-blind: close sockets, free pool/router, destroy ctx) ──
+ * Moved from server.c in the S-7 teardown carve so a freestanding EFI server can tear
+ * itself down from the archive alone (then kl_uefi_shutdown() releases the EFI providers
+ * before ExitBootServices). kl_conn_pool_free closes every accepted child's socket
+ * (draining its EFI tokens), so after this the socket provider's live count is 0 — the
+ * precondition for a clean ExitBootServices. Hosted-only pieces (async-op cancel, the
+ * self-pipe, the AF_UNIX unlink) are compiled out under KEEL_FREESTANDING. */
+void kl_server_free(KlServer *s) {
+#ifndef KEEL_FREESTANDING
+    /* Cancel all active async ops (idempotent terminal: fires on_cancel once, removes
+     * each op from the list). Freestanding has no async suspend (no thread pool). */
+    while (s->async_ops)
+        kl_async_cancel(s, s->async_ops);
+#endif
+
+    if (s->file_io) {                 /* NULL on freestanding (kl_file_io_create guarded) */
+        s->file_io->destroy(s->file_io);
+        s->file_io = NULL;
+    }
+
+    /* Close the listen socket. Hosted also unlinks an owned AF_UNIX path; a freestanding
+     * EFI server has only the TCP listener, so close it directly. */
+#ifndef KEEL_FREESTANDING
+    kl_server_close_listener(s);
+#else
+    if (kl_handle_valid(s->listen_fd)) {
+        kl_sock_close(s->ev.sockets, s->listen_fd);
+        s->listen_fd = KL_INVALID_SOCKET;
+    }
+#endif
+
+    /* Tear down the stop-wakeup self-pipe (never opened on freestanding — stop_wake_rd
+     * stays KL_INVALID_SOCKET, so this is skipped). */
+    if (kl_handle_valid(s->stop_wake_rd)) {
+        kl_watcher_del(&s->ev, s->stop_wake_rd);
+        KlPlatWakeup w = { s->stop_wake_rd, s->stop_wake_wr };
+        kl_plat_wakeup_close(&w);
+        s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
+    }
+    kl_event_ctx_free(&s->ev);
+    if (s->proxy_cidrs) {             /* NULL on freestanding (PROXY block guarded in init) */
+        kl_free(&s->alloc_storage, s->proxy_cidrs,
+                (size_t)s->proxy_cidr_count * sizeof(KlCidr));
+        s->proxy_cidrs = NULL;
+        s->proxy_cidr_count = 0;
+    }
+    kl_conn_pool_free(&s->pool);      /* closes every live accepted-child socket */
+    kl_router_free(&s->router);
+    if (s->config.tls && s->config.tls->ctx_destroy) {
+        s->config.tls->ctx_destroy(s->config.tls->ctx);
+    }
+    if (s->config.compress && s->config.compress->ctx_destroy) {
+        s->config.compress->ctx_destroy(s->config.compress->ctx);
+    }
+}
 
 /* ── Completion run-loop tick (the freestanding server's whole loop body) ──────
  * One iteration of the completion event loop, factored out of kl_server_run so

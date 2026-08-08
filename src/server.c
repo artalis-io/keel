@@ -2,8 +2,6 @@
 #include <keel/async.h>
 #include <keel/timer.h>
 #include <keel/tls.h>
-#include <keel/websocket_server.h>
-#include <keel/h2_server.h>
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
@@ -11,13 +9,15 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include "internal.h"
-#include "h2_internal.h"
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
 #include "server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
 #include "platform.h"     /* KlPlatWakeup — self-pipe so kl_server_stop wakes the run loop */
-#include "proto_hooks.h"  /* ws/h2 upgrade seam — install the hosted tables at init */
+/* No websocket_server.h / h2_server.h / h2_internal.h: the readiness data plane now
+ * dispatches ws/h2 (and PROXY) through proto_hooks.h — the same seam the completion
+ * driver uses — so this TU names no optional-protocol type or symbol (Finding 1). */
+#include "proto_hooks.h"  /* ws/h2/proxy readiness + upgrade seam */
 
 #define KL_LISTEN_BACKLOG  128
 #define KL_EVENTS_PER_TICK 64
@@ -118,7 +118,7 @@ static int kl_server_bind_listener(KlServer *s) {
     if (s->config.listen_fd > 0)
         return kl_server_adopt_fd(s);
     if (s->config.transport == KL_TRANSPORT_UNIX)
-        return kl_srv_bind_unix(s);
+        return kl_server_plat_bind_unix(s);
     return kl_server_bind_tcp(s);
 }
 
@@ -138,7 +138,7 @@ int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
     if (!conn || !kl_handle_valid(conn->fd))
         return -1;
 
-    return kl_srv_peer_label_fd(conn->fd, buf, buflen);
+    return kl_server_plat_peer_label_fd(conn->fd, buf, buflen);
 }
 
 const KlSockAddr *kl_request_peer_sockaddr(const KlRequest *req) {
@@ -179,327 +179,34 @@ int kl_request_peer_cert(const KlRequest *req, KlPeerCert *out) {
     return conn->tls->peer_cert(conn->tls, out);
 }
 
-int kl_systemd_listen_fds(int *count) {
-    const char *pid_s = getenv("LISTEN_PID");
-    const char *fds_s = getenv("LISTEN_FDS");
-    int first = -1;
-    int n = 0;
+/* Socket-activation (systemd LISTEN_* fd inheritance) moved to server_activation.c
+ * (Finding 6): a self-contained responsibility, separate from the readiness loop,
+ * TCP listener construction, and peer accessors. */
 
-    if (pid_s && fds_s) {
-        char *end;
-        long lpid = strtol(pid_s, &end, 10);
-        if (end != pid_s && *end == '\0' && (long)getpid() == lpid) {
-            long nfds = strtol(fds_s, &end, 10);
-            if (end != fds_s && *end == '\0' && nfds >= 1 && nfds <= 4096) {
-                n = (int)nfds;
-                first = 3;  /* SD_LISTEN_FDS_START; the fds are 3 .. 3+n-1 */
-            }
-        }
-    }
-
-    /* Clear so the variables are not inherited by child processes. */
-    kl_srv_unsetenv("LISTEN_PID");
-    kl_srv_unsetenv("LISTEN_FDS");
-    kl_srv_unsetenv("LISTEN_FDNAMES");
-    if (count)
-        *count = n;
-    return first;
-}
-
-int kl_systemd_listen_fd(void) {
-    return kl_systemd_listen_fds(NULL);
-}
-
-int kl_systemd_listen_fd_by_name(const char *name) {
-    if (!name)
-        return -1;
-    const char *pid_s = getenv("LISTEN_PID");
-    const char *fds_s = getenv("LISTEN_FDS");
-    const char *names = getenv("LISTEN_FDNAMES");
-    int result = -1;
-
-    if (pid_s && fds_s && names) {
-        char *end;
-        long lpid = strtol(pid_s, &end, 10);
-        long nfds = 0;
-        if (end != pid_s && *end == '\0' && (long)getpid() == lpid) {
-            nfds = strtol(fds_s, &end, 10);
-            if (!(end != fds_s && *end == '\0' && nfds >= 1 && nfds <= 4096))
-                nfds = 0;
-        }
-        /* LISTEN_FDNAMES is a colon-separated list, one name per passed fd in
-         * fd order starting at SD_LISTEN_FDS_START (3). */
-        size_t namelen = strlen(name);
-        const char *p = names;
-        for (long idx = 0; idx < nfds && p; idx++) {
-            const char *colon = strchr(p, ':');
-            size_t seglen = colon ? (size_t)(colon - p) : strlen(p);
-            if (seglen == namelen && memcmp(p, name, namelen) == 0) {
-                result = 3 + (int)idx;
-                break;
-            }
-            p = colon ? colon + 1 : NULL;
-        }
-    }
-
-    kl_srv_unsetenv("LISTEN_PID");
-    kl_srv_unsetenv("LISTEN_FDS");
-    kl_srv_unsetenv("LISTEN_FDNAMES");
-    return result;
-}
-
-static void kl_server_close_listener(KlServer *s) {
+/* Non-static so the freestanding kl_server_free (server_core.c) can call it on the
+ * hosted path (it needs the AF_UNIX unlink); declared in internal.h. */
+void kl_server_close_listener(KlServer *s) {
     if (kl_handle_valid(s->listen_fd)) {
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
     }
-    kl_srv_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
+    kl_server_plat_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
 }
 
 /* kl_server_conn_release moved to the freestanding-safe server core (server_core.c)
- * — the completion sweeps there call it, so the archive needs it in-core. */
+ * — the completion sweeps there call it, so the archive needs it in-core.
+ *
+ * kl_server_init (+ its stop-wakeup self-pipe helpers) also moved to server_core.c in
+ * the Phase 10 UEFI server carve (S-4): a freestanding EFI server constructs its
+ * KlServer from the archive alone. The hosted-only pieces (ws/h2/proxy hook installers,
+ * PROXY CIDR allowlist, async file I/O, self-pipe) are #ifndef KEEL_FREESTANDING there. */
 
-/* Run-loop wakeup watcher: drains the byte kl_server_stop() wrote. Its only job is to
- * make the current kl_event_wait / kl_comp_drain return so the loop re-checks `running`
- * (and the drain deadline) immediately instead of after up to KL_POLL_TIMEOUT_MS. */
-static void kl_server_on_wakeup(KlSocketHandle fd, KlEventMask ready, void *user_data) {
-    (void)ready; (void)user_data;
-    kl_plat_wakeup_drain(fd);
-}
-
-/* Open the stop-wakeup self-pipe and register its read end as a run-loop watcher. Best-
- * effort: on failure the loop simply falls back to tick-timeout stop latency. Called at the
- * end of kl_server_init, after the event ctx + provider are wired (so the watcher registers
- * correctly on both readiness and completion loops). */
-static void kl_server_wakeup_init(KlServer *s) {
-    s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
-    KlPlatWakeup w;
-    if (kl_plat_wakeup_open(&w) < 0) return;
-    if (kl_watcher_add(&s->ev, w.rd, KL_EVENT_READ, kl_server_on_wakeup, s) < 0) {
-        kl_plat_wakeup_close(&w);
-        return;
-    }
-    s->stop_wake_rd = w.rd;
-    s->stop_wake_wr = w.wr;
-}
-
-int kl_server_init(KlServer *s, const KlConfig *config) {
-    if (!s || !config) {
-        if (s) s->last_error = KL_ERR_INVALID_ARG;
-        return -1;
-    }
-    memset(s, 0, sizeof(*s));
-    s->listen_fd = KL_INVALID_SOCKET;
-    s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
-
-    /* Register the WebSocket / HTTP-2 upgrade tables so connection.c's dispatch is
-     * wired (idempotent; also pulls server_ws.o / server_h2.o out of the static
-     * archive). A freestanding HTTP/1.1 server never calls these — the seam stays
-     * NULL and the core runs pure HTTP/1.1. */
-    kl_ws_server_hooks_install();
-    kl_h2_server_hooks_install();
-    kl_proxy_hooks_install();   /* PROXY parser + CIDR match (proxy_protocol.c) */
-
-    /* Apply defaults */
-    s->config = *config;
-    if (s->config.transport != KL_TRANSPORT_TCP &&
-        s->config.transport != KL_TRANSPORT_UNIX) {
-        s->last_error = KL_ERR_INVALID_ARG;
-        return -1;
-    }
-    if (s->config.unix_socket_path &&
-        s->config.transport == KL_TRANSPORT_TCP) {
-        s->config.transport = KL_TRANSPORT_UNIX;
-    }
-    /* listen_fd: 0 = disabled, > 0 = adopt (fds 0-2 are stdio, not listeners).
-     * Reject a negative value rather than silently ignoring it. */
-    if (s->config.listen_fd < 0) {
-        s->last_error = KL_ERR_INVALID_ARG;
-        return -1;
-    }
-    if (s->config.bind_addr == NULL)
-        s->config.bind_addr = "0.0.0.0";
-    if (s->config.max_connections <= 0)
-        s->config.max_connections = KL_DEFAULT_MAX_CONNS;
-    if (s->config.read_timeout_ms <= 0)
-        s->config.read_timeout_ms = KL_DEFAULT_READ_TIMEOUT;
-    if (s->config.parser == NULL)
-        s->config.parser = kl_parser_llhttp;
-    if (s->config.max_body_size == 0)
-        s->config.max_body_size = KL_DEFAULT_MAX_BODY_SIZE;
-    if (s->config.max_header_size == 0)
-        s->config.max_header_size = KL_READ_BUF_SIZE;
-    if (s->config.max_header_size > SIZE_MAX / 2) {
-        s->last_error = KL_ERR_OVERFLOW;
-        return -1;
-    }
-
-    /* Set up allocator */
-    if (s->config.alloc) {
-        s->alloc_storage = *s->config.alloc;
-    } else {
-        s->alloc_storage = kl_allocator_default();
-    }
-    KlAllocator *alloc = &s->alloc_storage;
-
-    /* Init subsystems */
-    if (kl_router_init(&s->router, alloc) < 0) {
-        s->last_error = KL_ERR_ALLOC;
-        return -1;
-    }
-    if (kl_conn_pool_init(&s->pool, s->config.max_connections, alloc) < 0) {
-        s->last_error = KL_ERR_ALLOC;
-        kl_router_free(&s->router);
-        return -1;
-    }
-
-    /* Copy TLS config if provided */
-    if (s->config.tls) {
-        s->tls_storage = *s->config.tls;
-        s->config.tls = &s->tls_storage;
-    }
-
-    /* Copy HTTP/2 config if provided */
-    if (s->config.h2) {
-        s->h2_storage = *s->config.h2;
-        s->config.h2 = &s->h2_storage;
-    }
-
-    /* Copy compress config if provided */
-    if (s->config.compress) {
-        s->compress_storage = *s->config.compress;
-        s->config.compress = &s->compress_storage;
-    }
-
-    /* Parse the PROXY protocol trusted-source CIDR allowlist (if any). */
-    s->proxy_cidrs = NULL;
-    s->proxy_cidr_count = 0;
-    if (s->config.proxy_trusted_cidrs) {
-        KlCidr tmp[64];
-        int cn = kl_cidr_parse_list(s->config.proxy_trusted_cidrs, tmp,
-                                    (int)(sizeof(tmp) / sizeof(tmp[0])));
-        if (cn < 0) {
-            s->last_error = KL_ERR_INVALID_ARG;
-            kl_conn_pool_free(&s->pool);
-            kl_router_free(&s->router);
-            return -1;
-        }
-        if (cn > 0) {
-            s->proxy_cidrs = kl_malloc(alloc, (size_t)cn * sizeof(KlCidr));
-            if (!s->proxy_cidrs) {
-                s->last_error = KL_ERR_ALLOC;
-                kl_conn_pool_free(&s->pool);
-                kl_router_free(&s->router);
-                return -1;
-            }
-            memcpy(s->proxy_cidrs, tmp, (size_t)cn * sizeof(KlCidr));
-            s->proxy_cidr_count = cn;
-        }
-    }
-
-    /* Create parsers and propagate config for each connection slot */
-    for (int i = 0; i < s->pool.capacity; i++) {
-        s->pool.conns[i].parser = s->config.parser(alloc);
-        if (!s->pool.conns[i].parser) {
-            s->last_error = KL_ERR_ALLOC;
-            kl_conn_pool_free(&s->pool);
-            kl_router_free(&s->router);
-            return -1;
-        }
-        s->pool.conns[i].access_log = s->config.access_log;
-        s->pool.conns[i].access_log_data = s->config.access_log_data;
-        s->pool.conns[i].h2_config = s->config.h2;  /* NULL if disabled */
-        s->pool.conns[i].router = &s->router;
-        s->pool.conns[i].ctx = &s->ev;   /* for the socket provider (ctx->sockets) */
-        s->pool.conns[i].max_body_size = s->config.max_body_size;
-        s->pool.conns[i].max_header_size = s->config.max_header_size;
-    }
-
-    /* Pre-allocate TLS sessions (one per connection slot) */
-    if (s->config.tls) {
-        for (int i = 0; i < s->pool.capacity; i++) {
-            s->pool.conns[i].tls = s->config.tls->factory(
-                s->config.tls->ctx, alloc);
-            if (!s->pool.conns[i].tls) {
-                s->last_error = KL_ERR_TLS_INIT;
-                kl_conn_pool_free(&s->pool);
-                kl_router_free(&s->router);
-                return -1;
-            }
-            /* Validate vtable — all 7 required pointers must be set
-             * (alpn_protocol is optional, NULL if not supported) */
-            const KlTls *t = s->pool.conns[i].tls;
-            if (!t->handshake || !t->read || !t->write ||
-                !t->shutdown || !t->pending || !t->reset || !t->destroy) {
-                s->last_error = KL_ERR_TLS_VTABLE;
-                kl_conn_pool_free(&s->pool);
-                kl_router_free(&s->router);
-                return -1;
-            }
-        }
-    }
-
-    /* Init event context — must happen before thread pool / watcher registration.
-     * A configured event_provider (e.g. lwIP) installs its own readiness backend. */
-    if (kl_event_ctx_init_ex(&s->ev, alloc, s->config.event_provider) < 0) {
-        s->last_error = KL_ERR_EVENT_INIT;
-        kl_conn_pool_free(&s->pool);
-        kl_router_free(&s->router);
-        return -1;
-    }
-    /* Route all socket ops (listen socket + accepted conns) through the selected
-     * provider; NULL = built-in default. */
-    s->ev.sockets = s->config.sockets;
-
-    /* PAL 8f-5a: a completion loop needs an overlapped provider, which the default (or a
-     * readiness) provider is not. If the configured provider is incompatible with the loop,
-     * adopt the backend's own native provider (kl_event_native_provider — NULL on readiness
-     * backends, the overlapped provider on completion backends). This makes a completion
-     * backend a source-compatible drop-in: a server written for epoll works unchanged, the
-     * event axis stays masked above the build flag. An explicitly-configured compatible
-     * provider is kept; a still-incompatible pairing is rejected below. */
-    if (!kl_event_ctx_sockets_compatible(&s->ev)) {
-        const struct KlSocketProvider *np = kl_event_native_provider(&s->ev.loop);
-        if (np) s->ev.sockets = np;
-    }
-
-    /* PAL Phase 7: negotiate the event loop against the socket provider now that
-     * both are wired onto the ctx. The server's readiness loop must be able to
-     * watch the provider's handles (native fds); a non-native provider (e.g. raw
-     * lwIP) is a completion-axis concern (Phase 8/9), not a server socket
-     * provider. Reject an incoherent pairing here rather than failing obscurely at
-     * add-to-loop. */
-    if (!kl_event_ctx_sockets_compatible(&s->ev)) {
-        s->last_error = KL_ERR_SOCKET;
-        kl_event_ctx_free(&s->ev);
-        kl_conn_pool_free(&s->pool);
-        kl_router_free(&s->router);
-        return -1;
-    }
-
-    /* Create async file I/O backend (NULL if backend doesn't support it) */
-    s->file_io = kl_file_io_create(&s->ev.loop, alloc);
-    for (int i = 0; i < s->pool.capacity; i++)
-        s->pool.conns[i].file_io = s->file_io;
-
-    /* Self-pipe wakeup so kl_server_stop() wakes the run loop promptly (both axes). */
-    kl_server_wakeup_init(s);
-
-    return 0;
-}
 
 /* Route + middleware registration (the kl_server_route / kl_server_use family) and
  * the read-side body flow control (kl_request_pause_body / resume_body) plus
  * kl_server_stats moved to the freestanding-safe server core (server_core.c) in the
- * S-1 bisection. kl_server_ws stays here: WebSocket is out of the freestanding EFI
- * server's scope (HTTP/1.1 only). */
-int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
-    /* Register as a GET route with no handler — ws_config triggers upgrade */
-    if (kl_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
-        return -1;
-    s->router.routes[s->router.count - 1].ws_config = config;
-    return 0;
-}
+ * S-1 bisection. kl_server_ws moved to server_ws.c (Finding 1): the WebSocket type +
+ * registration belong to the ws module, so this readiness TU owns no protocol type. */
 
 
 int kl_server_run(KlServer *s) {
@@ -547,7 +254,7 @@ int kl_server_run(KlServer *s) {
     /* Ignore SIGPIPE + install SIGTERM/SIGINT graceful-stop handlers (POSIX) or
      * a console Ctrl handler (Windows). Done here — past the setup early-returns
      * — so a failed bind never leaves handlers installed without a restore. */
-    kl_srv_signals_install(s);
+    kl_server_plat_signals_install(s);
 
     atomic_store(&s->running, 1);
     atomic_store(&s->draining, 0);
@@ -679,11 +386,14 @@ int kl_server_run(KlServer *s) {
                         nc->tls_want = KL_EVENT_READ;
                     }
 
-                    /* PROXY protocol: from a trusted source, read the header
-                     * first (before TLS/HTTP). Overrides the state above. */
-                    if (s->proxy_cidr_count > 0 &&
+                    /* PROXY protocol: from a trusted source, read the header first (before
+                     * TLS/HTTP). Overrides the state above. Through the PROXY seam
+                     * (kl_proxy_hooks) — symmetric with completion_server.c; NULL when
+                     * proxy_protocol.c is not linked. */
+                    const KlProxyHooks *ph = kl_proxy_hooks();
+                    if (s->proxy_cidr_count > 0 && ph && ph->cidr_match &&
                         kl_sockaddr_family(&peer) != KL_AF_UNSPEC &&
-                        kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &peer)) {
+                        ph->cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &peer)) {
                         nc->state = KL_CONN_PROXY_HEADER;
                     }
 
@@ -739,23 +449,29 @@ rearm_listen:
                 goto transition;
             }
 
-            /* WebSocket — handle read/write events */
+            /* WebSocket — handle read/write events through the ws seam (symmetric with
+             * the completion path's KlWsCompHooks; the conn only reached this state via a
+             * ws upgrade, so the hooks are installed). */
             if (c->state == KL_CONN_WEBSOCKET) {
+                const KlWsServerHooks *wsh = kl_ws_server_hooks();
+                if (!wsh) { new_state = KL_CONN_CLOSED; goto transition; }
                 if (events[i].ready & KL_EVENT_READ)
-                    new_state = (KlConnState)kl_ws_server_on_readable(c);
+                    new_state = (KlConnState)wsh->on_readable(c);
                 if (new_state == KL_CONN_WEBSOCKET &&
                     (events[i].ready & KL_EVENT_WRITE))
-                    new_state = (KlConnState)kl_ws_server_on_writable(c);
+                    new_state = (KlConnState)wsh->on_writable(c);
                 goto transition;
             }
 
-            /* HTTP/2 — handle read/write events */
+            /* HTTP/2 — handle read/write events through the h2 seam. */
             if (c->state == KL_CONN_HTTP2) {
+                const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+                if (!h2h) { new_state = KL_CONN_CLOSED; goto transition; }
                 if (events[i].ready & KL_EVENT_READ)
-                    new_state = (KlConnState)kl_h2_server_on_readable(c);
+                    new_state = (KlConnState)h2h->on_readable(c);
                 if (new_state == KL_CONN_HTTP2 &&
                     (events[i].ready & KL_EVENT_WRITE))
-                    new_state = (KlConnState)kl_h2_server_on_writable(c);
+                    new_state = (KlConnState)h2h->on_writable(c);
                 goto transition;
             }
 
@@ -791,7 +507,8 @@ transition:
                 }
             } else if (new_state == KL_CONN_WEBSOCKET) {
                 KlEventMask ws_mask = KL_EVENT_READ;
-                if (kl_ws_server_drain_pending(c))
+                const KlWsServerHooks *wsh = kl_ws_server_hooks();
+                if (wsh && wsh->drain_pending && wsh->drain_pending(c))
                     ws_mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
                 if (kl_event_mod(&s->ev.loop, c->fd, ws_mask, c) < 0) {
                     kl_event_del(&s->ev.loop, c->fd);
@@ -799,8 +516,8 @@ transition:
                 }
             } else if (new_state == KL_CONN_HTTP2) {
                 KlEventMask mask = KL_EVENT_READ;
-                if (c->h2 && c->h2->session &&
-                    c->h2->session->want_write(c->h2->session))
+                const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+                if (h2h && h2h->want_write && h2h->want_write(c))
                     mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
                 if (kl_event_mod(&s->ev.loop, c->fd, mask, c) < 0) {
                     kl_event_del(&s->ev.loop, c->fd);
@@ -855,7 +572,7 @@ transition:
         kl_server_drain_progress(s, now);
     }
 
-    kl_srv_signals_restore(s);
+    kl_server_plat_signals_restore(s);
 
     return 0;
 }
@@ -883,38 +600,9 @@ void kl_server_stop(KlServer *s) {
 /* kl_request_pause_body / kl_request_resume_body / kl_server_stats moved to the
  * freestanding-safe server core (server_core.c) in the S-1 bisection. */
 
-void kl_server_free(KlServer *s) {
-    /* Cancel all active async ops (idempotent terminal: fires on_cancel once,
-     * removes each op from the list so the loop makes progress). */
-    while (s->async_ops)
-        kl_async_cancel(s, s->async_ops);
-
-    if (s->file_io) {
-        s->file_io->destroy(s->file_io);
-        s->file_io = NULL;
-    }
-    kl_server_close_listener(s);
-    /* Tear down the stop-wakeup: deregister its watcher (needs the live loop) before
-     * closing the fds, then close both ends. */
-    if (kl_handle_valid(s->stop_wake_rd)) {
-        kl_watcher_del(&s->ev, s->stop_wake_rd);
-        KlPlatWakeup w = { s->stop_wake_rd, s->stop_wake_wr };
-        kl_plat_wakeup_close(&w);
-        s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
-    }
-    kl_event_ctx_free(&s->ev);
-    if (s->proxy_cidrs) {
-        kl_free(&s->alloc_storage, s->proxy_cidrs,
-                (size_t)s->proxy_cidr_count * sizeof(KlCidr));
-        s->proxy_cidrs = NULL;
-        s->proxy_cidr_count = 0;
-    }
-    kl_conn_pool_free(&s->pool);
-    kl_router_free(&s->router);
-    if (s->config.tls && s->config.tls->ctx_destroy) {
-        s->config.tls->ctx_destroy(s->config.tls->ctx);
-    }
-    if (s->config.compress && s->config.compress->ctx_destroy) {
-        s->config.compress->ctx_destroy(s->config.compress->ctx);
-    }
-}
+/* kl_server_free moved to the freestanding-safe server core (server_core.c) in the
+ * Phase 10 UEFI server S-7 teardown carve — a freestanding EFI server tears itself down
+ * (close listener + accepted children, free pool/router, destroy TLS ctx) from the
+ * archive alone, then kl_uefi_shutdown() releases the EFI providers before
+ * ExitBootServices. The hosted-only bits (async-op cancel, AF_UNIX unlink) are
+ * #ifndef KEEL_FREESTANDING there. */

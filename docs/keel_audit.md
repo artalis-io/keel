@@ -1,5 +1,47 @@
 # C Audit Report: KEEL
 
+## Twelfth pass — Phase 10 UEFI server (S-1..S-7) + client/server orchestration refactors (2026-08-08)
+
+**Scope:** the code added/changed since the eleventh pass — the freestanding UEFI HTTP(S)
+**server** (S-1..S-7) and the two review-driven orchestration refactors: `src/server_core.c`
+(freestanding `kl_server_init`/`kl_server_free` carves), `src/client_proxy.c` (shared proxy
+CONNECT), `src/server_activation.c` (systemd socket-activation split), the readiness→hook
+dispatch unification (`src/server.c`, `src/server_ws.c`, `src/server_h2.c`, `src/proto_hooks.h`),
+and the EFI provider data-plane (`integrations/uefi/event_efi.c`, `socket_efi_tcp4.c`).
+
+**Verdict: CLEAN.** No new Critical/High/Medium findings. This pass is corroborated by the
+strongest available checks rather than inspection alone:
+
+| Check | Result |
+|-------|--------|
+| Unsafe fns (`strcpy`/`strcat`/`sprintf`/`gets`/`atoi`/`atof`) in `src/` + `parsers/` | none |
+| Direct `malloc`/`free`/`realloc` in `src/` (allocator discipline) | none — all via `kl_*` |
+| `kl_malloc` NULL-check discipline (new code) | the one new call site (server_core.c proxy_cidrs) is checked; client_proxy.c / server_activation.c are alloc-free |
+| Full test suite under **ASan + UBSan** (`make debug-test`) | **65/65 suites, 0 leaks, 0 UB, 0 errors** |
+| mock-EFI failure-path harness (ASan/UBSan) | PASS incl. the new `t_accept_backpressure` |
+| Build hardening (prod CFLAGS) | `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -O2 -fstack-protector-strong` |
+| Dead code (`-Wunused` via `-Werror`) | clean build |
+| Cross-compile: gcc-14 (all touched TUs) + MinGW (server_activation/server_plat_win/server.c) | clean |
+| Freestanding archives (client + server) symbol-closure gate, x86_64 + aarch64 | gated OK |
+
+**Bounds/injection spot-checks (session's new attack surface):**
+- EFI server send copies into a fixed inline `sndbuf` with a `total > KL_EFI_SNDBUF` guard
+  **and** a per-iovec `off + iov[i].len > KL_EFI_SNDBUF` guard (fail-closed → conn closed).
+- EFI server recv is bounded by `read_cap - read_len`; the TLS-recv scratch is a fixed
+  `KL_EFI_TLS_CIPHER` buffer consumed by `feed_input` each drain.
+- Response header CRLF-injection guard (`contains_crlf`) unchanged in `response.c`.
+- Accept backpressure bounds armed EFI tokens to free Keel pool slots (no accept-into-drop).
+
+**Informational (not a finding):** `integrations/uefi/mbedtls_platform_uefi.c` *defines*
+`strcpy` (and other libc primitives) — it is the freestanding libc backing the vendored
+mbedTLS build needs on bare firmware, not an unsafe *call* on untrusted input in KEEL code.
+A grep for unsafe-function *names* flags the definition; it is benign by construction.
+
+**Prior findings:** all eleventh-pass EFI lifetime bugs remain fixed (verified live on the
+branch, commit `71573dd` — see the axis-audit tenth pass and the S-7 review round).
+
+---
+
 ## Eleventh pass — Phase 10 UEFI provider failure-path hardening (2026-08-06)
 
 **Scope:** the EFI network provider under `integrations/uefi/` + `spikes/uefi/` (F-8): the

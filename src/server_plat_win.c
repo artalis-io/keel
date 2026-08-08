@@ -41,7 +41,7 @@ static BOOL WINAPI kl_ctrl_handler(DWORD type) {
     }
 }
 
-void kl_srv_signals_install(KlServer *s) {
+void kl_server_plat_signals_install(KlServer *s) {
     /* No SIGPIPE on Windows — send() never raises it. */
     if (s->config.install_signal_handlers) {
         atomic_store(&kl_signal_server, s);
@@ -49,8 +49,8 @@ void kl_srv_signals_install(KlServer *s) {
     }
 }
 
-/* cppcheck-suppress constParameterPointer ; symmetric with kl_srv_signals_install */
-void kl_srv_signals_restore(KlServer *s) {
+/* cppcheck-suppress constParameterPointer ; symmetric with kl_server_plat_signals_install */
+void kl_server_plat_signals_restore(KlServer *s) {
     if (s->config.install_signal_handlers) {
         SetConsoleCtrlHandler(kl_ctrl_handler, FALSE);
         atomic_store(&kl_signal_server, (KlServer *)NULL);
@@ -59,7 +59,7 @@ void kl_srv_signals_restore(KlServer *s) {
 
 /* ── AF_UNIX node lifecycle ──────────────────────────────────────────── */
 
-int kl_srv_bind_unix(KlServer *s) {
+int kl_server_plat_bind_unix(KlServer *s) {
     const char *path = s->config.unix_socket_path;
     if (!path || path[0] == '\0') {
         s->last_error = KL_ERR_INVALID_ARG;
@@ -109,7 +109,7 @@ int kl_srv_bind_unix(KlServer *s) {
     return 0;
 }
 
-void kl_srv_unlink_owned_unix(KlServer *s) {
+void kl_server_plat_unlink_owned_unix(KlServer *s) {
     if (s->unix_socket_owned && s->config.unix_socket_unlink &&
         s->config.unix_socket_path) {
         (void)DeleteFileA(s->config.unix_socket_path);
@@ -119,7 +119,7 @@ void kl_srv_unlink_owned_unix(KlServer *s) {
 
 /* ── Peer credentials (unsupported on Windows AF_UNIX) ───────────────── */
 
-void kl_srv_unsetenv(const char *name) {
+void kl_server_plat_unsetenv(const char *name) {
     (void)SetEnvironmentVariableA(name, NULL);   /* NULL value removes it */
 }
 
@@ -132,7 +132,7 @@ unsigned kl_platform_caps(void) {
     return 0;   /* no SO_PEERCRED, no systemd socket activation on Windows */
 }
 
-int kl_srv_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen) {
+int kl_server_plat_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen) {
     (void)fd; (void)buf; (void)buflen;
     return -1;
 }

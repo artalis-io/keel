@@ -1,10 +1,23 @@
 # Phase 10 — UEFI HTTP(S) **server** on bare firmware (scoping plan)
 
-**Status: PLAN / not started.** The Phase 10 client (U-0..U-8) serves a hardened `KlClient`
+**Status: S-1..S-7 COMPLETE — the arc is done.** A stock freestanding `KlServer` serves
+`GET / → 200` (plaintext, S-4) and **HTTPS** (S-6) over EFI_TCP4 on bare firmware
+(QEMU/OVMF, container-verified) and tears down cleanly (S-7: `kl_server_free` →
+0 live sockets → `kl_uefi_shutdown`). Axis-audit tenth pass: no core coupling, model-blind
+core validated. The Phase 10 client (U-0..U-8) serves a hardened `KlClient`
 (plaintext + HTTPS + DNS) on bare UEFI firmware. This doc scopes the *inbound* direction — a
-`KlServer` that `bind`/`listen`/`accept`s over EFI_TCP4 and answers `GET / → 200` — as a distinct
-follow-on effort, deliberately structured to preserve the three-axis separation that
-`/axis-audit` enforces.
+`KlServer` that `bind`/`listen`/`accept`s over EFI_TCP4 and answers `GET / → 200` —
+deliberately structured to preserve the three-axis separation that `/axis-audit` enforces.
+
+Progress: S-1 (freestanding server archive) and S-2/S-3/S-5 (EFI_TCP4 passive open +
+completion accept + mock-EFI lifetime suite) are merged. S-4 (this build) carved a
+freestanding `kl_server_init` into `server_core.c`, added the self-contained server
+archive + `s4_selftest.c`/`s4_link_stubs.c`/`build_s4.sh`/`run_s4.sh`, and the EFI image
+links + **boots on real UEFI firmware** (QEMU/OVMF): `efi_main` runs, `kl_server_init`
+executes freestanding and negotiates the socket provider. On a network-less OVMF it
+degrades gracefully (`native_provider()` → NULL → `KL_ERR_SOCKET`, the documented path);
+the boot-to-200 needs a network-enabled OVMF (Ubuntu's, via `run_s4.sh` in the container).
+Remaining: S-6 (HTTPS), S-7 (teardown / EBS / audit / ship).
 
 Companion: `docs/phase10_uefi_feasibility_design.md` (client), `docs/keel_axis_audit.md` (the axis
 contract this plan must not violate).
@@ -95,13 +108,46 @@ demand. **Backpressure:** when the `KlConn` pool is full, stop re-priming Accept
 into a drop) — the Keel-level equivalent of reducing readiness interest (Goal 8).
 *Axis:* completion. *Goals 2, 3, 8* (honest completion accept; no model leak upward; backpressure).
 
-### S-4 — **Plaintext** HTTP server GO
+### S-4 — **Plaintext** HTTP server GO — *COMPLETE (serves GET / → 200 on QEMU/OVMF)*
 `s4_selftest.c`: stock freestanding `KlServer` on the EFI completion backend answers
 `GET / → 200` to a host client (QEMU SLIRP `hostfwd`), over real EFI_TCP4. Acceptance = the
 model-blind server core runs with **zero** protocol edits (the whole point). Prove accept →
 serve → keep-alive → close, and accept-burst (pool refill).
 *Axis:* all three, integrated. *Required trace* (axis-audit): accept path end-to-end + close-with-
 outstanding-accept.
+
+**Done in this build:** the S-4 prerequisite was carving a freestanding `kl_server_init`
+into `server_core.c` (the archive had the completion run loop but init was hosted-only —
+it pulled the ws/h2/proxy hook installers, the PROXY CIDR allowlist, `kl_file_io_create`,
+the stop self-pipe, and the stdlib default allocator; all now `#ifndef KEEL_FREESTANDING`).
+Behavior-preserving on hosted (65 test suites, gcc-14 clean); the self-contained server
+archive gates for x86_64 + aarch64 PE **with init in it**. `s4_selftest.c` constructs the
+server from the archive alone (`cfg.event_provider` set, `cfg.sockets` NULL → adopts the
+native EFI provider), routes `GET /`, drives the socket seam for `bind`/`listen` (the hosted
+`kl_server_bind_listener` is archive-excluded), then loops `kl_server_run_completion_loop`
+(auto-primes accepts → drains `KL_COMP_ACCEPT` → `comp_on_accept`, all model-blind).
+`s4_link_stubs.c` supplies the server-only link residuals (bind/listen/reuseaddr/writev/
+sendfile/cork/nodelay/accept fallbacks, file-response platform hooks, `_fltused`). The EFI
+image links (198 KB PE32+) and **boots on QEMU/OVMF**: `efi_main` runs, `kl_server_init`
+executes freestanding + negotiates the provider — validating the carve on bare firmware.
+**Network-OVMF boot result (Ubuntu 24.04 container, `run_s4.sh`, `OVMF_CODE_4M.fd`):**
+`kl_server_init` **succeeds** and `bind`/`listen` **succeed** ("server up" -> "listening on
+:80") — the freestanding `KlServer` construction + EFI_TCP4 passive open both work on real
+network firmware. The first boot hit a firmware `#UD` (RIP -> `0xB0000`) on serve. **Root cause:** the EFI
+`KlCompletionOps` (`event_efi.c` `EFI_COMP_OPS`) left `.post_recv`/`.post_send` **NULL** — the
+*client* rides the `KL_COMP_WATCHER` drain-relay + sync socket provider and never calls them,
+but the *server* completion driver (`completion_server.c`) calls `kl_comp_post_recv`/`post_send`
+directly, so post-accept it called a NULL op. **Fixed** by implementing EFI `post_recv`/`post_send`
+mirroring `event_pollcomp.c`: the op is queued; `el_drain`, on the U-6 non-blocking read-readiness
+probe, does `efi_sock_recv` into `conn->read_buf` and emits `KL_COMP_READ`; sends flatten the
+response iovec into a private buffer and `efi_sock_send` it in bounded Transmit fragments, emitting
+one `KL_COMP_WRITE` (generation-stale-guarded; freed on completion/cancel). **Result: PASS** —
+`server up → listening on :80 → GO`, `curl` returns **200** with body
+`hello from KEEL on UEFI (EFI_TCP4 server)`. `post_sendfile` stays NULL (file responses are S-6).
+
+(This run's homebrew OVMF on the macOS host has no EFI_TCP4 stack -> `kl_server_init` returns
+`KL_ERR_SOCKET`, the documented graceful-degradation path; the network boot needs Ubuntu's
+OVMF.) `kl_server_free`/teardown stays hosted-only — S-7.
 
 ### S-5 — Lifetime hardening + mock-EFI accept tests
 Extend the F7b host mock (`mock_efi_test.c`) with the **server** lifetime scenarios the QEMU happy
@@ -114,20 +160,44 @@ path can't expose — the load-bearing acceptance, mirroring the client work:
 - Stale generation on a reused accepted-child slot.
 *Axis:* socket + completion lifetime. *Goals 6, 8, 10, 13.* ASan+UBSan; `detect_leaks` per-OS.
 
-### S-6 — **HTTPS** server (completion-mode TLS)
-The hard TLS lift: server-side memory-BIO. Implement the [[keel-completion-tls-backend-contract]]
-obligations for the EFI backend — feed received **ciphertext** to `tls->feed_input` (not `read_buf`)
-and provide a **synchronous send** on the server-accepted socket (`comp_tls_flush` blocks). Reuse
-`entropy_uefi` (fail-closed EFI_RNG) + `clock_snapshot` (U-8 cert clock) unchanged. `s6_selftest.c`:
-HTTPS `GET / → 200` with a server cert; verify handshake + close-notify + the U-8 clock gate applies
-to the server too.
-*Axis:* completion + TLS-vtable (extend additively, per the client's `at_eof` precedent).
+### S-6 — **HTTPS** server (completion-mode TLS) — *COMPLETE (serves HTTPS GET / → 200 on QEMU/OVMF)*
+The hard TLS lift landed with a **remarkably small** backend delta — the completion-mode TLS
+server is entirely in the model-blind core (`completion_server.c`: `comp_tls_drive` /
+`kl_comp_tls_flush` / `comp_tls_send_response`), so the EFI backend supplied only the two
+[[keel-completion-tls-backend-contract]] obligations:
+1. **post_recv feeds ciphertext** (`event_efi.c`): a TLS conn's socket carries ciphertext, so the
+   recv reads it into a transient scratch buffer and calls `tls->feed_input`; `comp_tls_drive` then
+   handshakes/decrypts into `read_buf`. (The plaintext S-4 recv path is unchanged — one `if (c->tls)`.)
+2. **synchronous send** on the accepted socket for `kl_comp_tls_flush` — already satisfied by
+   `efi_sock_send`; the response ciphertext rides the same S-4 `post_send` (content-agnostic).
 
-### S-7 — Docs, audit passes, EBS lifecycle, ship
-`kl_uefi_shutdown()` also tears down the listener + Accept-token pool (order: children → listener →
-providers → platform). Fresh `/c-audit` + `/axis-audit` passes (the axis pass should record that the
-server **validates the audit's "future provider: UEFI SNP + polling" claim** — Goal 14). Compatibility
-matrix row: `EFI_TCP4 server + EFI completion backend`.
+The one config fix: **`MBEDTLS_SSL_SRV_C`** was missing from `mbedtls_config_uefi.h` (the U-4 client
+config), so the server ctx parsed but its handshake never progressed — enabling it (additive; the
+client is unaffected) fixed the stall. `s6_selftest.c` builds the server ctx from an embedded PEM
+cert+key (`kl_tls_mbedtls_ctx_create_from_buf`), binds `:443`; `build_s6.sh`/`run_s6.sh` mirror the
+U-4 mbedTLS recipe against the server archive. **Result: PASS** — `server up → listening on :443 →
+GO`, host `curl -k` returns **200** with body `hello from KEEL on UEFI (HTTPS over EFI_TCP4)`.
+(Spike entropy = the insecure weak fallback, no virtio-rng; a production build requires real EFI_RNG
+fail-closed, per U-4. `post_sendfile` still NULL — file responses are a later step.)
+*Axis:* completion + TLS-vtable — no vtable change needed; the client's `feed_input`/`drain_output`
+memory-BIO ops served the server verbatim.
+
+### S-7 — Docs, audit passes, EBS lifecycle, ship — *COMPLETE*
+Carved a **freestanding `kl_server_free`** into `server_core.c` (mirroring the S-4 init carve, hosted-only
+bits under `#ifndef KEEL_FREESTANDING`: async-op cancel, the AF_UNIX unlink) so a freestanding server
+tears itself down from the archive alone. `kl_conn_pool_free` closes every accepted-child socket
+(draining its EFI tokens), so `kl_uefi_socket_provider_live_count() == 0` after teardown — the
+precondition for `kl_uefi_shutdown()` (which releases the EFI_TCP4 socket provider + completion event
+provider + platform timer/EBS event, U-7) / ExitBootServices. `s7_selftest.c` proves the sequence on
+firmware (mirroring U-7, without the real ExitBootServices since there is no serial after it):
+serve `GET / → 200` → `kl_server_free` → assert 0 live sockets → `kl_uefi_shutdown()` → show the
+`kl_uefi_after_ebs()` fail-closed guard. **Result: PASS** in the container.
+
+Axis pass recorded: `docs/keel_axis_audit.md` **tenth pass (2026-08-08)** — the server validates the
+audit's "future provider (Goal 14)" claim in the *inbound* direction; mechanical Goal-4 check clean
+(no platform/EFI code in `src/`); the `KlCompletionOps` vtable hosts a server backend; completion-mode
+server TLS needed no vtable change. Compatibility-matrix row added: `EFI_TCP4 server (plaintext + HTTPS)
+— firmware-verified`.
 
 ---
 
