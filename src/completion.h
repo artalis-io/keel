@@ -128,7 +128,7 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
  * latches after the first call). Server-scoped; keeps kl_comp_drain server-agnostic. */
 int kl_comp_prime_accepts(struct KlServer *s);
 
-/* Post one async receive into c->read_buf (headers/body phase). */
+/* Post one async receive into c->stream.read_buf (headers/body phase). */
 int kl_comp_post_recv(KlConn *c);
 
 /* Post one async send of the (already-serialized) response iovec. The backend handles

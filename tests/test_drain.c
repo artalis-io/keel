@@ -695,8 +695,8 @@ UTEST(drain, ws_drain_pending_check) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.fd = -1;
-    c.alloc = &a;
+    c.stream.fd = -1;
+    c.stream.alloc = &a;
 
     /* No WS state → not pending */
     ASSERT_EQ(kl_ws_server_drain_pending(&c), 0);

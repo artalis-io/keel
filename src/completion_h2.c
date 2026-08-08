@@ -54,10 +54,10 @@ void kl_comp_h2_drive(struct KlServer *s, KlConn *c) {
          * deferring the next recv to comp_on_write, so at most one h2 send is in flight
          * and frames cannot reorder. */
         for (;;) {
-            ssize_t p = c->tls->read(c->tls, c->fd, c->read_buf, c->read_cap);
+            ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
             if (p == 0) break;                         /* WANT_READ — batch done */
-            KlConnState st = kl_h2_server_feed(c, c->read_buf, (size_t)p);
+            KlConnState st = kl_h2_server_feed(c, c->stream.read_buf, (size_t)p);
             if (st != KL_CONN_HTTP2) { kl_comp_close(s, c); return; }
             if (!c->tls->pending || c->tls->pending(c->tls) == 0) break;
         }
@@ -67,10 +67,10 @@ void kl_comp_h2_drive(struct KlServer *s, KlConn *c) {
         if (clen > 0) {
             KlIoVec iov = { cipher, clen };
             int rc = kl_comp_post_send(c, &iov, 1, clen);
-            kl_free(c->alloc, cipher, ccap);
+            kl_free(c->stream.alloc, cipher, ccap);
             if (rc < 0) kl_comp_close(s, c);
         } else {
-            kl_free(c->alloc, cipher, ccap);
+            kl_free(c->stream.alloc, cipher, ccap);
             if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         }
         return;
@@ -80,23 +80,23 @@ void kl_comp_h2_drive(struct KlServer *s, KlConn *c) {
      * this feed go out as ONE ordered overlapped send; defer the next recv until that
      * send completes (comp_on_write) so at most one h2 send is ever in flight — frames
      * must not reorder. */
-    CompH2Cap cap = { c->alloc, NULL, 0, 0, 0 };
+    CompH2Cap cap = { c->stream.alloc, NULL, 0, 0, 0 };
     kl_h2_server_set_writer(c, comp_h2_capture_write, &cap);
-    KlConnState st = kl_h2_server_feed(c, c->read_buf, c->read_len);
+    KlConnState st = kl_h2_server_feed(c, c->stream.read_buf, c->stream.read_len);
     kl_h2_server_set_writer(c, NULL, NULL);       /* restore the default socket writer */
-    c->read_len = 0;
+    c->stream.read_len = 0;
     if (st != KL_CONN_HTTP2 || cap.err) {
-        kl_free(c->alloc, cap.buf, cap.cap);
+        kl_free(c->stream.alloc, cap.buf, cap.cap);
         kl_comp_close(s, c);
         return;
     }
     if (cap.len > 0) {
         KlIoVec iov = { cap.buf, cap.len };
         int rc = kl_comp_post_send(c, &iov, 1, cap.len);
-        kl_free(c->alloc, cap.buf, cap.cap);
+        kl_free(c->stream.alloc, cap.buf, cap.cap);
         if (rc < 0) kl_comp_close(s, c);
     } else {
-        kl_free(c->alloc, cap.buf, cap.cap);
+        kl_free(c->stream.alloc, cap.buf, cap.cap);
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);   /* no output — read more */
     }
 }

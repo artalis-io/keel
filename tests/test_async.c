@@ -248,7 +248,7 @@ UTEST(async, suspend_sets_state) {
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -287,7 +287,7 @@ UTEST(async, suspend_sets_state) {
 
     /* Clean up: complete the op before releasing */
     kl_async_complete(&s, &op);
-    c->fd = -1;
+    c->stream.fd = -1;
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
@@ -300,7 +300,7 @@ UTEST(async, complete_calls_on_resume) {
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -344,7 +344,7 @@ UTEST(async, complete_calls_on_resume) {
     /* Op should be removed from active list */
     ASSERT_TRUE(s.async_ops == NULL);
 
-    c->fd = -1;
+    c->stream.fd = -1;
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
@@ -357,7 +357,7 @@ UTEST(async, deadline_fires_on_timeout) {
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -406,7 +406,7 @@ UTEST(async, deadline_fires_on_timeout) {
     ASSERT_EQ(actx.resume_called, 1);  /* complete calls on_resume */
     ASSERT_TRUE(s.async_ops == NULL);   /* removed from list */
 
-    c->fd = -1;
+    c->stream.fd = -1;
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
@@ -419,7 +419,7 @@ UTEST(async, cancel_on_server_free) {
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -444,7 +444,7 @@ UTEST(async, cancel_on_server_free) {
     ASSERT_EQ(kl_async_suspend(&s, c, &op), 0);
 
     /* Server free should cancel the op */
-    c->fd = -1;
+    c->stream.fd = -1;
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
 
@@ -472,7 +472,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
     int fds[2];
@@ -519,7 +519,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
 
     /* Clean up */
     kl_async_complete(&s, &op);
-    c->fd = -1;
+    c->stream.fd = -1;
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
     cleanup_test_server(&s);
@@ -552,7 +552,7 @@ UTEST(async, watcher_completes_suspended_conn) {
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
-        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
     /* Create a connection with socketpair */
@@ -612,7 +612,7 @@ UTEST(async, watcher_completes_suspended_conn) {
     ASSERT_TRUE(s.async_ops == NULL);
 
     kl_watcher_del(&s.ev, pipe_fds[0]);
-    c->fd = -1;
+    c->stream.fd = -1;
     kl_test_closesock(conn_fds[0]);
     kl_test_closesock(conn_fds[1]);
     kl_test_closesock(pipe_fds[0]);
@@ -640,7 +640,7 @@ UTEST(async, server_ctx_set_on_request) {
     ASSERT_TRUE(c->async_op == NULL);
     ASSERT_EQ(c->suspend_start_ms, (uint64_t)0);
 
-    c->fd = -1;
+    c->stream.fd = -1;
     kl_conn_pool_free(&pool);
 }
 
@@ -781,7 +781,7 @@ static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
     ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);             \
     for (int i = 0; i < 4; i++) {                                              \
         s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);          \
-        s.pool.conns[i].ctx = &s.ev;   /* mirror server.c:419 */               \
+        s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 */               \
     }                                                                          \
     int fds[2]; ASSERT_EQ(kl_test_socketpair(fds), 0);                         \
     set_nonblocking(fds[0]); set_nonblocking(fds[1]);                          \
@@ -794,7 +794,7 @@ static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
     ASSERT_EQ(kl_async_suspend(&s, c, &op), 0)
 
 #define RFC_TERMINAL_TEARDOWN()                                                \
-    c->fd = -1; kl_test_closesock(fds[0]); kl_test_closesock(fds[1]);          \
+    c->stream.fd = -1; kl_test_closesock(fds[0]); kl_test_closesock(fds[1]);          \
     cleanup_test_server(&s)
 
 /* A — double complete fires on_resume exactly once. */

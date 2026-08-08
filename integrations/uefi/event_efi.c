@@ -258,18 +258,18 @@ static EfiIoOp *io_op_alloc(void) {
 }
 
 /* post_recv (S-4): queue a server-side receive on an accepted child. The bytes land in
- * conn->read_buf at the live read_len (computed in drain, unchanged between post and
+ * conn->stream.read_buf at the live read_len (computed in drain, unchanged between post and
  * completion — the conn parks with no other op), surfaced as KL_COMP_READ. */
 static int el_post_recv(KlConn *c) {
     if (!c) return -1;
-    if (c->read_cap <= c->read_len) return -1;   /* no header/body space — caller closes */
+    if (c->stream.read_cap <= c->stream.read_len) return -1;   /* no header/body space — caller closes */
     EfiIoOp *op = io_op_alloc();
     if (!op) return -1;
     for (size_t b = 0; b < sizeof(*op); b++) ((unsigned char *)op)[b] = 0;
     op->kind       = EFI_IO_RECV;
     op->conn       = c;
-    op->fd         = c->fd;
-    op->generation = (uint64_t)kl_uefi_conn_generation_h(c->fd);
+    op->fd         = c->stream.fd;
+    op->generation = (uint64_t)kl_uefi_conn_generation_h(c->stream.fd);
     op->in_use     = 1;   /* set last */
     return 0;
 }
@@ -298,8 +298,8 @@ static int el_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total)
     if (off != total) return -1;   /* declared total must equal the bytes actually framed */
     op->kind       = EFI_IO_SEND;
     op->conn       = c;
-    op->fd         = c->fd;
-    op->generation = (uint64_t)kl_uefi_conn_generation_h(c->fd);
+    op->fd         = c->stream.fd;
+    op->generation = (uint64_t)kl_uefi_conn_generation_h(c->stream.fd);
     op->send_total = off;
     op->send_done  = 0;
     op->in_use     = 1;        /* set last: a mid-loop return -1 leaves the slot free */
@@ -418,8 +418,8 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
                 if (n > 0 && c->tls->feed_input)
                     c->tls->feed_input(c->tls, g_tls_cipher, (size_t)n);
             } else {
-                void  *buf = c->read_buf + c->read_len;   /* live: read_len unchanged since post */
-                size_t cap = c->read_cap - c->read_len;
+                void  *buf = c->stream.read_buf + c->stream.read_len;   /* live: read_len unchanged since post */
+                size_t cap = c->stream.read_cap - c->stream.read_len;
                 n = kl_sock_recv(ctx->sockets, op->fd, buf, cap);
             }
             for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;

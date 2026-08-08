@@ -265,16 +265,16 @@ static void iocp_op_free(KlIocpOp *op) {
 }
 
 static KlIocpState *state_of(KlConn *c) {
-    return c->ctx->loop._backend;   /* c->ctx == &server->ev */
+    return c->stream.ctx->loop._backend;   /* c->stream.ctx == &server->ev */
 }
 
 static int iocp_comp_post_recv(KlConn *c) {
     (void)state_of(c);   /* the socket is already associated with the port */
 
-    KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlIocpOp *op = kl_malloc(c->stream.alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
-    op->alloc = c->alloc;
+    op->alloc = c->stream.alloc;
     op->conn = c;
 
     WSABUF buf;
@@ -286,20 +286,20 @@ static int iocp_comp_post_recv(KlConn *c) {
          * (tls->feed_input) before freeing the op. */
         op->type = KL_IOCP_TLS_RECV;
         op->send_total = KL_IOCP_CIPHER_SIZE;
-        op->sendbuf = kl_malloc(c->alloc, KL_IOCP_CIPHER_SIZE);
+        op->sendbuf = kl_malloc(c->stream.alloc, KL_IOCP_CIPHER_SIZE);
         if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
         buf.len = (ULONG)KL_IOCP_CIPHER_SIZE;
         buf.buf = op->sendbuf;
     } else {
-        size_t space = c->read_cap - c->read_len;
+        size_t space = c->stream.read_cap - c->stream.read_len;
         if (space == 0) { iocp_op_free(op); return -1; }   /* headers overflowed */
         op->type = KL_IOCP_READ;
         buf.len = (ULONG)space;
-        buf.buf = c->read_buf + c->read_len;
+        buf.buf = c->stream.read_buf + c->stream.read_len;
     }
 
     DWORD flags = 0, received = 0;
-    int rc = WSARecv((SOCKET)c->fd, &buf, 1, &received, &flags, &op->ov, NULL);
+    int rc = WSARecv((SOCKET)c->stream.fd, &buf, 1, &received, &flags, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);
         return -1;
@@ -308,15 +308,15 @@ static int iocp_comp_post_recv(KlConn *c) {
 }
 
 static int iocp_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
-    KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlIocpOp *op = kl_malloc(c->stream.alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_WRITE;
-    op->alloc = c->alloc;
+    op->alloc = c->stream.alloc;
     op->conn = c;
     op->send_total = total;
 
-    op->sendbuf = kl_malloc(c->alloc, total ? total : 1);
+    op->sendbuf = kl_malloc(c->stream.alloc, total ? total : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < iovcnt; i++) {
@@ -326,7 +326,7 @@ static int iocp_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t
 
     WSABUF buf = { (ULONG)total, op->sendbuf };
     DWORD sent = 0;
-    int rc = WSASend((SOCKET)c->fd, &buf, 1, &sent, 0, &op->ov, NULL);
+    int rc = WSASend((SOCKET)c->stream.fd, &buf, 1, &sent, 0, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);
         return -1;
@@ -395,7 +395,7 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
         tb.Head = op->sendbuf;
         tb.HeadLength = (DWORD)op->send_total;
     }
-    BOOL ok = TransmitFile((SOCKET)op->conn->fd, op->file_h, chunk, 0, &op->ov, &tb, 0);
+    BOOL ok = TransmitFile((SOCKET)op->conn->stream.fd, op->file_h, chunk, 0, &op->ov, &tb, 0);
     if (!ok && WSAGetLastError() != WSA_IO_PENDING)
         return -1;
     return 0;
@@ -406,11 +406,11 @@ static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_
     HANDLE hfile = (HANDLE)_get_osfhandle(file_fd);
     if (hfile == INVALID_HANDLE_VALUE) return -1;
 
-    KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlIocpOp *op = kl_malloc(c->stream.alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_SENDFILE;
-    op->alloc = c->alloc;
+    op->alloc = c->stream.alloc;
     op->conn = c;
     op->file_h = hfile;
     op->file_total = count;
@@ -418,7 +418,7 @@ static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_
 
     /* Copy the response head — TransmitFile's head buffer must outlive the op. */
     op->send_total = head_total;
-    op->sendbuf = kl_malloc(c->alloc, head_total ? head_total : 1);
+    op->sendbuf = kl_malloc(c->stream.alloc, head_total ? head_total : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < head_n; i++) {
@@ -730,7 +730,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                 WSABUF buf = { (ULONG)(op->send_total - op->send_done),
                                op->sendbuf + op->send_done };
                 DWORD sent = 0;
-                int rc = WSASend((SOCKET)op->conn->fd, &buf, 1, &sent, 0, &op->ov, NULL);
+                int rc = WSASend((SOCKET)op->conn->stream.fd, &buf, 1, &sent, 0, &op->ov, NULL);
                 if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
                     memset(&out[count], 0, sizeof(out[count]));
                     out[count].kind = KL_COMP_WRITE;

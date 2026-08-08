@@ -212,7 +212,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->pool.conns[i].access_log_data = s->config.access_log_data;
         s->pool.conns[i].h2_config = s->config.h2;  /* NULL if disabled */
         s->pool.conns[i].router = &s->router;
-        s->pool.conns[i].ctx = &s->ev;   /* for the socket provider (ctx->sockets) */
+        s->pool.conns[i].stream.ctx = &s->ev;   /* for the socket provider (ctx->sockets) */
         s->pool.conns[i].max_body_size = s->config.max_body_size;
         s->pool.conns[i].max_header_size = s->config.max_header_size;
     }
@@ -439,9 +439,9 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
                 if (wsh->auto_ping) wsh->auto_ping(tc, now);
                 if (wsh->check_close_timeout && wsh->check_close_timeout(tc, now)) {
                     if (completion_loop) {
-                        kl_comp_cancel(&s->ev, tc->fd);
+                        kl_comp_cancel(&s->ev, tc->stream.fd);
                     } else {
-                        kl_event_del(&s->ev.loop, tc->fd);
+                        kl_event_del(&s->ev.loop, tc->stream.fd);
                         kl_server_conn_release(s, tc);
                     }
                 }
@@ -462,7 +462,7 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
         if (timed_out) {
             /* Cancel pending async file read before release (readiness io_uring path) */
             if (tc->file_io_phase == 1 && tc->file_io) {
-                tc->file_io->cancel(tc->file_io, tc->fd);
+                tc->file_io->cancel(tc->file_io, tc->stream.fd);
                 tc->file_io_phase = 3;  /* FILE_IO_CANCELLING */
                 continue;  /* wait for cancel CQE in next tick */
             }
@@ -474,9 +474,9 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
                 best_effort_conn_write(tc, kl_408_response,
                                        sizeof(kl_408_response) - 1);
             if (completion_loop) {
-                kl_comp_cancel(&s->ev, tc->fd);   /* abort op → release via its completion */
+                kl_comp_cancel(&s->ev, tc->stream.fd);   /* abort op → release via its completion */
             } else {
-                kl_event_del(&s->ev.loop, tc->fd);
+                kl_event_del(&s->ev.loop, tc->stream.fd);
                 kl_server_conn_release(s, tc);
             }
         }
@@ -539,22 +539,22 @@ int kl_server_use_post(KlServer *s, const char *method, const char *pattern,
  * re-posts the recv via the io_engine seam. Both idempotent; loop-thread only. */
 void kl_request_pause_body(const KlRequest *req) {
     KlConn *c = req ? kl_request_conn(req) : NULL;
-    if (!c || c->read_paused) return;                 /* idempotent */
-    c->read_paused = 1;
-    if (!(kl_event_caps(&c->ctx->loop) & KL_EVENT_CAP_COMPLETION))
-        (void)kl_event_mod(&c->ctx->loop, c->fd, 0, c);   /* readiness: stop READ now */
+    if (!c || c->stream.read_paused) return;                 /* idempotent */
+    c->stream.read_paused = 1;
+    if (!(kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION))
+        (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, 0, c);   /* readiness: stop READ now */
     /* completion: comp_start_body_read skips the next recv; the in-flight recv may
      * deliver <=1 more chunk before the pause takes hold (bounded). */
 }
 
 void kl_request_resume_body(const KlRequest *req) {
     KlConn *c = req ? kl_request_conn(req) : NULL;
-    if (!c || !c->read_paused) return;                /* idempotent */
-    c->read_paused = 0;
-    if (kl_event_caps(&c->ctx->loop) & KL_EVENT_CAP_COMPLETION)
+    if (!c || !c->stream.read_paused) return;                /* idempotent */
+    c->stream.read_paused = 0;
+    if (kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION)
         kl_io_engine_post_read(c);                    /* completion: re-post the body recv */
     else
-        (void)kl_event_mod(&c->ctx->loop, c->fd, KL_EVENT_READ, c);   /* readiness: re-arm READ */
+        (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, KL_EVENT_READ, c);   /* readiness: re-arm READ */
 }
 
 /* ── Read-only load snapshot ──────────────────────────────────────────────── */

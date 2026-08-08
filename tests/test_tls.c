@@ -124,7 +124,7 @@ UTEST(tls, mock_handshake_ok) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.fd = -1;
+    c.stream.fd = -1;
     c.tls = &m.base;
     c.state = KL_CONN_TLS_HANDSHAKE;
 
@@ -140,7 +140,7 @@ UTEST(tls, mock_handshake_want_read) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.fd = -1;
+    c.stream.fd = -1;
     c.tls = &m.base;
     c.state = KL_CONN_TLS_HANDSHAKE;
 
@@ -156,7 +156,7 @@ UTEST(tls, mock_handshake_want_write) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.fd = -1;
+    c.stream.fd = -1;
     c.tls = &m.base;
     c.state = KL_CONN_TLS_HANDSHAKE;
 
@@ -172,7 +172,7 @@ UTEST(tls, mock_handshake_error) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.fd = -1;
+    c.stream.fd = -1;
     c.tls = &m.base;
     c.state = KL_CONN_TLS_HANDSHAKE;
 
@@ -184,7 +184,7 @@ UTEST(tls, handshake_null_tls_closes) {
     /* kl_conn_on_handshake with tls=NULL should return CLOSED */
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.fd = -1;
+    c.stream.fd = -1;
     c.tls = NULL;
     c.state = KL_CONN_TLS_HANDSHAKE;
 
@@ -535,7 +535,7 @@ UTEST(tls, pool_free_calls_shutdown_and_destroy) {
      * because the check is fd >= 0.  So use a dup'd /dev/null. */
     int devnull = open("/dev/null", 0);
     ASSERT_TRUE(devnull >= 0);
-    pool.conns[0].fd = devnull;
+    pool.conns[0].stream.fd = devnull;
     pool.conns[0].state = KL_CONN_READING;
 
     kl_conn_pool_free(&pool);

@@ -435,7 +435,7 @@ const KlSocketProvider *kl_socket_provider_lwip_raw(void) { return &lwip_raw_pro
 
 /* ── completion.h backend primitives ─────────────────────────────────────────── */
 
-static KlLwrState *lwr_state(KlConn *c) { return c->ctx->loop._backend; }
+static KlLwrState *lwr_state(KlConn *c) { return c->stream.ctx->loop._backend; }
 
 static int lwr_comp_prime_accepts(struct KlServer *s) {
     KlLwrState *st = s->ev.loop._backend;
@@ -473,9 +473,9 @@ static int lwr_comp_post_accept(struct KlServer *s) {
  * accepted-but-unable-to-receive). */
 static int lwr_comp_post_recv(KlConn *c) {
     KlLwrState *st = lwr_state(c);
-    if (!kl_handle_valid(c->fd)) return -1;
-    kl_lwr_set_owner(st->lwrctx, (void *)c->fd, c);   /* recv/sent/err callbacks tag this conn */
-    if (kl_lwr_conn_arm(st->lwrctx, (void *)c->fd) != 0) return -1;
+    if (!kl_handle_valid(c->stream.fd)) return -1;
+    kl_lwr_set_owner(st->lwrctx, (void *)c->stream.fd, c);   /* recv/sent/err callbacks tag this conn */
+    if (kl_lwr_conn_arm(st->lwrctx, (void *)c->stream.fd) != 0) return -1;
     return 0;
 }
 
@@ -498,11 +498,11 @@ static int lwr_comp_post_recv(KlConn *c) {
 #define KL_LWR_MAX_SEND_IOV 8
 static int lwr_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     (void)total;
-    if (!kl_handle_valid(c->fd)) return -1;
+    if (!kl_handle_valid(c->stream.fd)) return -1;
     if (iovcnt < 0 || iovcnt > KL_LWR_MAX_SEND_IOV) return -1;
     KlLwrIoVec lv[KL_LWR_MAX_SEND_IOV];
     for (int i = 0; i < iovcnt; i++) { lv[i].base = iov[i].base; lv[i].len = iov[i].len; }
-    return kl_lwr_send_begin(lwr_state(c)->lwrctx, (void *)c->fd, lv, iovcnt);
+    return kl_lwr_send_begin(lwr_state(c)->lwrctx, (void *)c->stream.fd, lv, iovcnt);
 }
 
 /* Post one async file send: the serialized response head (`head_iov`) followed by
@@ -515,11 +515,11 @@ static int lwr_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t 
 static int lwr_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     (void)head_total;
-    if (!kl_handle_valid(c->fd)) return -1;
+    if (!kl_handle_valid(c->stream.fd)) return -1;
     if (head_n < 0 || head_n > KL_LWR_MAX_SEND_IOV) return -1;
     KlLwrIoVec lv[KL_LWR_MAX_SEND_IOV];
     for (int i = 0; i < head_n; i++) { lv[i].base = head_iov[i].base; lv[i].len = head_iov[i].len; }
-    return kl_lwr_sendfile_begin(lwr_state(c)->lwrctx, (void *)c->fd, lv, head_n, file_fd, count);
+    return kl_lwr_sendfile_begin(lwr_state(c)->lwrctx, (void *)c->stream.fd, lv, head_n, file_fd, count);
 }
 
 /* Cancel pending ops on `fd` (idle-timeout sweep). Semantics mirror event_pollcomp.c: the
@@ -621,7 +621,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
          * tcp_err / kl_comp_cancel / close-with-outstanding — drives the driver to release this
          * conn. Disarm it NOW so the armed-READ scan below (and future drains) never touch the
          * about-to-be-released KlConn (no dangling armed slot aliasing a freed/reused conn). */
-        if (!r->ok) kl_lwr_conn_disarm(st->lwrctx, (void *)c->fd);
+        if (!r->ok) kl_lwr_conn_disarm(st->lwrctx, (void *)c->stream.fd);
         count++;
     }
 
@@ -666,8 +666,8 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
                 ev->ok = feed_err ? 0 : 1;   /* feed overflow → surface a failed READ (driver closes) */
                 ev->bytes = feed_err ? 0 : fed;
             } else {
-                size_t space = c->read_cap - c->read_len;
-                size_t got = kl_lwr_take_staged(st->lwrctx, pcb, c->read_buf + c->read_len, space);
+                size_t space = c->stream.read_cap - c->stream.read_len;
+                size_t got = kl_lwr_take_staged(st->lwrctx, pcb, c->stream.read_buf + c->stream.read_len, space);
                 ev->ok = 1;
                 ev->bytes = got;
             }

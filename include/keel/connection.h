@@ -30,6 +30,34 @@ typedef struct KlH2ServerConfig KlH2ServerConfig;
  * header. */
 struct KlEventCtx;
 
+/**
+ * @brief Raw-transport subset of a connection (Phase A structural extraction).
+ *
+ * INTERNAL / UNSTABLE: these fields were formerly top-level `KlConn` members and
+ * are NOT a stable public API — they may move or change without notice. External
+ * code must use accessors (e.g. kl_conn_peer_addr()), not `conn->stream.*`.
+ *
+ * This carries RAW transport state only. TLS-wrapper orchestration (`tls`,
+ * `tls_want`) and HTTP policy deliberately stay on `KlConn`; a generic TLS
+ * wrapper (`KlTlsStream`) arrives in a later phase.
+ */
+typedef struct KlStream {
+    KlSocketHandle fd;          /**< Socket handle */
+    KlAllocator *alloc;         /**< Allocator (set once on pool init) */
+    struct KlEventCtx *ctx;     /**< Back-pointer to event ctx (set once at pool init;
+                                     hot path reads ctx->sockets for the provider) */
+
+    KlSockAddr peer_addr;       /**< Client address (captured at accept);
+                                     family KL_AF_UNSPEC = unavailable */
+
+    char *read_buf;             /**< Read buffer */
+    size_t read_len;            /**< Bytes in read buffer */
+    size_t read_cap;            /**< Read buffer capacity */
+    int read_paused;            /**< Read-side flow control: 1 = body reads paused
+                                     (kl_request_pause_body). Readiness drops READ interest;
+                                     completion stops posting the next recv. */
+} KlStream;
+
 typedef enum {
     KL_CONN_PROXY_HEADER,    /**< Reading a PROXY protocol header (pre-TLS) */
     KL_CONN_TLS_HANDSHAKE,   /**< TLS handshake in progress */
@@ -44,21 +72,15 @@ typedef enum {
 } KlConnState;
 
 typedef struct KlConn {
-    KlSocketHandle fd;                     /**< Socket file descriptor */
-    KlConnState state;          /**< Connection state */
-    KlAllocator *alloc;         /**< Allocator (set once on pool init) */
+    KlStream stream;            /**< Raw-transport subset (fd, alloc, ctx, peer_addr,
+                                     read_buf/len/cap, read_paused). Phase A extraction —
+                                     INTERNAL/UNSTABLE, not a stable field-level API. */
 
-    KlSockAddr peer_addr;               /**< Client address (captured at accept);
-                                         *   family KL_AF_UNSPEC = unavailable */
+    KlConnState state;          /**< Connection state */
+
     uint8_t peer_source;                /**< KL_PEER_SOCKET | KL_PEER_PROXY */
 
-    char *read_buf;             /**< Read buffer */
-    size_t read_len;            /**< Bytes in read buffer */
-    size_t read_cap;            /**< Read buffer capacity */
     size_t max_header_size;     /**< Max header size (from KlConfig) */
-    int read_paused;            /**< Read-side flow control: 1 = body reads paused
-                                     (kl_request_pause_body). Readiness drops READ interest;
-                                     completion stops posting the next recv. */
 
     KlRequest req;              /**< Current request */
     KlResponse res;             /**< Current response */
@@ -84,8 +106,6 @@ typedef struct KlConn {
     KlH2ServerConn *h2;         /**< HTTP/2 state (NULL until upgrade) */
     KlH2ServerConfig *h2_config; /**< HTTP/2 config (set once at pool init) */
     KlRouter *router;           /**< Back-pointer to server router */
-    struct KlEventCtx *ctx;     /**< Back-pointer to event ctx (set once at pool init;
-                                     hot path reads ctx->sockets for the provider) */
     size_t max_body_size;       /**< Discard-path body limit (from KlConfig) */
 
     struct KlAsyncOp *async_op; /**< Active async op (non-NULL when SUSPENDED) */
@@ -141,7 +161,7 @@ KlConnState kl_conn_on_handshake(KlConn *c);
  *
  * Uses MSG_PEEK to inspect the leading bytes without consuming the following
  * TLS/HTTP stream; on a valid header it consumes exactly the header bytes and
- * overwrites conn->peer_addr with the real client address.
+ * overwrites conn->stream.peer_addr with the real client address.
  *
  * @return 1 = done (proceed to TLS/read), 0 = need more bytes, -1 = close.
  */
@@ -184,5 +204,14 @@ KlConnState kl_conn_on_file_complete(KlConn *c, kl_ssize_t result, int zero_copy
 
 /** @brief Monotonic clock in milliseconds (for timeout tracking). */
 uint64_t kl_monotonic_ms(void);
+
+/**
+ * @brief Peer (client) address for a connection — stable accessor.
+ *
+ * Returns a pointer to the connection's peer address (family KL_AF_UNSPEC when
+ * unavailable). Prefer this over reaching into `conn->stream.*`, which is
+ * internal/unstable.
+ */
+const KlSockAddr *kl_conn_peer_addr(const KlConn *c);
 
 #endif

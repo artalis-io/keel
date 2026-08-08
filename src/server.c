@@ -128,26 +128,26 @@ int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
     const KlConn *conn = kl_request_conn(req);
     if (!conn)
         return -1;
-    return kl_peer_cred_fd(conn->fd, out);
+    return kl_peer_cred_fd(conn->stream.fd, out);
 }
 
 int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
     if (!req || !buf || buflen == 0)
         return -1;
     const KlConn *conn = kl_request_conn(req);
-    if (!conn || !kl_handle_valid(conn->fd))
+    if (!conn || !kl_handle_valid(conn->stream.fd))
         return -1;
 
-    return kl_server_plat_peer_label_fd(conn->fd, buf, buflen);
+    return kl_server_plat_peer_label_fd(conn->stream.fd, buf, buflen);
 }
 
 const KlSockAddr *kl_request_peer_sockaddr(const KlRequest *req) {
     if (!req)
         return NULL;
     const KlConn *conn = kl_request_conn(req);
-    if (!conn || kl_sockaddr_family(&conn->peer_addr) == KL_AF_UNSPEC)
+    if (!conn || kl_sockaddr_family(&conn->stream.peer_addr) == KL_AF_UNSPEC)
         return NULL;
-    return &conn->peer_addr;
+    return &conn->stream.peer_addr;
 }
 
 int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
@@ -158,7 +158,7 @@ int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
     if (!conn)
         return -1;
 
-    const KlSockAddr *a = &conn->peer_addr;
+    const KlSockAddr *a = &conn->stream.peer_addr;
     KlAddrFamily fam = kl_sockaddr_family(a);
     if (fam != KL_AF_INET && fam != KL_AF_INET6)
         return -1;  /* UNSPEC / AF_UNIX — no IP address (use peer credentials) */
@@ -313,13 +313,13 @@ int kl_server_run(KlServer *s) {
                     if (fc->file_io_phase == 1) {
                         /* FILE_IO_READING — async read pending, no WRITE reg */
                     } else {
-                        kl_event_mod(&s->ev.loop, fc->fd,
+                        kl_event_mod(&s->ev.loop, fc->stream.fd,
                                      KL_EVENT_WRITE, fc);
                     }
                 } else if (fstate == KL_CONN_READING) {
-                    kl_event_mod(&s->ev.loop, fc->fd, KL_EVENT_READ, fc);
+                    kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, fc);
                 } else if (fstate == KL_CONN_CLOSED) {
-                    kl_event_del(&s->ev.loop, fc->fd);
+                    kl_event_del(&s->ev.loop, fc->stream.fd);
                     kl_server_conn_release(s, fc);
                 }
             }
@@ -374,7 +374,7 @@ int kl_server_run(KlServer *s) {
                     /* Record the client address for kl_request_peer_addr()
                      * (peer is KL_AF_UNSPEC if the provider couldn't supply it). */
                     nc->peer_source = KL_PEER_SOCKET;
-                    nc->peer_addr = peer;
+                    nc->stream.peer_addr = peer;
 
                     /* Set allocator on connection's response.
                      * This is set once on accept; response reuses it across keep-alive. */
@@ -439,7 +439,7 @@ rearm_listen:
                  * triggered backends don't re-deliver the consumed readiness,
                  * but newly-arriving bytes always trigger). */
                 uint8_t probe;
-                if (kl_sock_recv_peek(s->ev.sockets, c->fd, &probe, 1) <= 0)
+                if (kl_sock_recv_peek(s->ev.sockets, c->stream.fd, &probe, 1) <= 0)
                     goto transition;
             }
 
@@ -492,17 +492,17 @@ rearm_listen:
 transition:
             /* Transition */
             if (new_state == KL_CONN_TLS_HANDSHAKE) {
-                if (kl_event_mod(&s->ev.loop, c->fd,
+                if (kl_event_mod(&s->ev.loop, c->stream.fd,
                                  (KlEventMask)c->tls_want, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_SENDING) {
                 if (c->file_io_phase == 1) {
                     /* FILE_IO_READING — async read pending, no WRITE event */
-                } else if (kl_event_mod(&s->ev.loop, c->fd,
+                } else if (kl_event_mod(&s->ev.loop, c->stream.fd,
                                  KL_EVENT_WRITE, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_WEBSOCKET) {
@@ -510,8 +510,8 @@ transition:
                 const KlWsServerHooks *wsh = kl_ws_server_hooks();
                 if (wsh && wsh->drain_pending && wsh->drain_pending(c))
                     ws_mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
-                if (kl_event_mod(&s->ev.loop, c->fd, ws_mask, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, ws_mask, c) < 0) {
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_HTTP2) {
@@ -519,8 +519,8 @@ transition:
                 const KlH2ServerHooks *h2h = kl_h2_server_hooks();
                 if (h2h && h2h->want_write && h2h->want_write(c))
                     mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
-                if (kl_event_mod(&s->ev.loop, c->fd, mask, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, mask, c) < 0) {
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_READING ||
@@ -529,17 +529,17 @@ transition:
                 /* Read-side flow control: a paused body consumer keeps READ interest OFF (0)
                  * so the level-triggered loop stops delivering body bytes; kl_request_resume_body
                  * re-arms READ. Only READING_BODY pauses. */
-                KlEventMask rm = (new_state == KL_CONN_READING_BODY && c->read_paused)
+                KlEventMask rm = (new_state == KL_CONN_READING_BODY && c->stream.read_paused)
                                      ? 0 : KL_EVENT_READ;
-                if (kl_event_mod(&s->ev.loop, c->fd, rm, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, rm, c) < 0) {
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_SUSPENDED) {
                 /* Handler suspended for async I/O — FD already removed
                  * from event loop by kl_async_suspend. */
             } else if (new_state == KL_CONN_CLOSED) {
-                kl_event_del(&s->ev.loop, c->fd);
+                kl_event_del(&s->ev.loop, c->stream.fd);
                 kl_server_conn_release(s,c);
             }
         }

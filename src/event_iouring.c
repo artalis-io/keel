@@ -431,29 +431,29 @@ static void iou_op_unlink(KlIouState *st, KlIouOp *op) {
         if (*link == op) { *link = op->next; return; }
 }
 
-static KlIouState *iou_state(KlConn *c) { return c->ctx->loop._backend; }
+static KlIouState *iou_state(KlConn *c) { return c->stream.ctx->loop._backend; }
 
 static int iou_comp_post_recv(KlConn *c) {
     KlIouState *st = iou_state(c);
-    KlIouOp *op = iou_op_alloc(c->alloc);
+    KlIouOp *op = iou_op_alloc(c->stream.alloc);
     if (!op) return -1;
     op->conn = c;
-    op->fd = c->fd;
+    op->fd = c->stream.fd;
 
     if (c->tls && c->state != KL_CONN_PROXY_HEADER) {  /* PROXY header is plaintext, pre-TLS */
         /* TLS: recv ciphertext into a transient buffer; read_buf holds plaintext.
          * kl_comp_drain feeds this to the engine (feed_input) before completing. */
         op->type = IOU_TLS_RECV;
-        op->sendbuf = kl_malloc(c->alloc, KL_IOU_CIPHER_SIZE);
+        op->sendbuf = kl_malloc(c->stream.alloc, KL_IOU_CIPHER_SIZE);
         if (!op->sendbuf) { iou_op_free(op); return -1; }
         op->sendcap = KL_IOU_CIPHER_SIZE;
         op->buf = op->sendbuf;
         op->buflen = KL_IOU_CIPHER_SIZE;
     } else {
-        size_t space = c->read_cap - c->read_len;
+        size_t space = c->stream.read_cap - c->stream.read_len;
         if (space == 0) { iou_op_free(op); return -1; }   /* headers overflowed */
         op->type = IOU_READ;
-        op->buf = c->read_buf + c->read_len;
+        op->buf = c->stream.read_buf + c->stream.read_len;
         op->buflen = space;
     }
 
@@ -515,11 +515,11 @@ static void iou_prep_splice_out(KlIouState *st, KlIouOp *op) {
 
 static int iou_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     KlIouState *st = iou_state(c);
-    KlIouOp *op = iou_op_alloc(c->alloc);
+    KlIouOp *op = iou_op_alloc(c->stream.alloc);
     if (!op) return -1;
     op->type = IOU_WRITE;
     op->conn = c;
-    op->fd = c->fd;
+    op->fd = c->stream.fd;
     op->send_total = total;
 
     /* Small response → a registered, kernel-pinned buffer + WRITE_FIXED (no per-send
@@ -530,7 +530,7 @@ static int iou_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t 
         op->sendbuf = (char *)st->reg_iov[idx].iov_base;   /* borrowed */
     } else {
         op->sendcap = total ? total : 1;
-        op->sendbuf = kl_malloc(c->alloc, op->sendcap);
+        op->sendbuf = kl_malloc(c->stream.alloc, op->sendcap);
         if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }
     }
     size_t off = 0;
@@ -548,14 +548,14 @@ static int iou_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t 
  * owns file_fd and closes it (response.c), so pread is ownership-neutral. */
 static int iou_post_sendfile_copy(KlConn *c, KlIouState *st, const KlIoVec *head_iov,
                                   int head_n, size_t head_total, int file_fd, uint64_t count) {
-    KlIouOp *op = iou_op_alloc(c->alloc);
+    KlIouOp *op = iou_op_alloc(c->stream.alloc);
     if (!op) return -1;
     op->type = IOU_WRITE;
     op->conn = c;
-    op->fd = c->fd;
+    op->fd = c->stream.fd;
     op->send_total = head_total + (size_t)count;
     op->sendcap = op->send_total ? op->send_total : 1;
-    op->sendbuf = kl_malloc(c->alloc, op->sendcap);
+    op->sendbuf = kl_malloc(c->stream.alloc, op->sendcap);
     if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < head_n; i++) {
@@ -587,11 +587,11 @@ static int iou_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n
     if (!st->has_splice)
         return iou_post_sendfile_copy(c, st, head_iov, head_n, head_total, file_fd, count);
 
-    KlIouOp *op = iou_op_alloc(c->alloc);
+    KlIouOp *op = iou_op_alloc(c->stream.alloc);
     if (!op) return -1;
     op->type = IOU_SENDFILE;
     op->conn = c;
-    op->fd = c->fd;
+    op->fd = c->stream.fd;
     op->file_fd = file_fd;
     op->file_count = count;
     op->sf_stage = 0;                                /* head first */
@@ -602,7 +602,7 @@ static int iou_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n
     if (idx >= 0) { op->reg_idx = idx; op->sendbuf = (char *)st->reg_iov[idx].iov_base; }
     else {
         op->sendcap = head_total ? head_total : 1;
-        op->sendbuf = kl_malloc(c->alloc, op->sendcap);
+        op->sendbuf = kl_malloc(c->stream.alloc, op->sendcap);
         if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }
     }
     size_t off = 0;

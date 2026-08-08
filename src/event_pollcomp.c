@@ -224,31 +224,31 @@ static void pc_op_free(KlPcOp *op) {
     kl_free(op->alloc, op, sizeof(*op));
 }
 
-static KlPcState *pc_state(KlConn *c) { return c->ctx->loop._backend; }
+static KlPcState *pc_state(KlConn *c) { return c->stream.ctx->loop._backend; }
 
 static int pc_comp_post_recv(KlConn *c) {
     KlPcState *st = pc_state(c);
-    KlPcOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlPcOp *op = kl_malloc(c->stream.alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
-    op->alloc = c->alloc;
+    op->alloc = c->stream.alloc;
     op->conn = c;
-    op->fd = c->fd;
+    op->fd = c->stream.fd;
 
     if (c->tls && c->state != KL_CONN_PROXY_HEADER) {  /* PROXY header is plaintext, pre-TLS */
         /* TLS: read ciphertext into a transient buffer; read_buf holds plaintext.
          * kl_comp_drain feeds this to the engine (feed_input) before completing. */
         op->type = PC_TLS_RECV;
         op->send_total = KL_PC_CIPHER_SIZE;   /* reuse send_total as the free size */
-        op->sendbuf = kl_malloc(c->alloc, KL_PC_CIPHER_SIZE);
+        op->sendbuf = kl_malloc(c->stream.alloc, KL_PC_CIPHER_SIZE);
         if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
         op->buf = op->sendbuf;
         op->buflen = KL_PC_CIPHER_SIZE;
     } else {
-        size_t space = c->read_cap - c->read_len;
+        size_t space = c->stream.read_cap - c->stream.read_len;
         if (space == 0) { pc_op_free(op); return -1; }   /* headers overflowed */
         op->type = PC_READ;
-        op->buf = c->read_buf + c->read_len;
+        op->buf = c->stream.read_buf + c->stream.read_len;
         op->buflen = space;
     }
     pc_op_push(st, op);
@@ -257,15 +257,15 @@ static int pc_comp_post_recv(KlConn *c) {
 
 static int pc_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     KlPcState *st = pc_state(c);
-    KlPcOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlPcOp *op = kl_malloc(c->stream.alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = PC_WRITE;
-    op->alloc = c->alloc;
+    op->alloc = c->stream.alloc;
     op->conn = c;
-    op->fd = c->fd;
+    op->fd = c->stream.fd;
     op->send_total = total;
-    op->sendbuf = kl_malloc(c->alloc, total ? total : 1);
+    op->sendbuf = kl_malloc(c->stream.alloc, total ? total : 1);
     if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < iovcnt; i++) {
@@ -279,17 +279,17 @@ static int pc_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t t
 static int pc_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     KlPcState *st = pc_state(c);
-    KlPcOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlPcOp *op = kl_malloc(c->stream.alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = PC_SENDFILE;
-    op->alloc = c->alloc;
+    op->alloc = c->stream.alloc;
     op->conn = c;
-    op->fd = c->fd;
+    op->fd = c->stream.fd;
     op->file_fd = file_fd;
     op->file_count = count;
     op->send_total = head_total;
-    op->sendbuf = kl_malloc(c->alloc, head_total ? head_total : 1);
+    op->sendbuf = kl_malloc(c->stream.alloc, head_total ? head_total : 1);
     if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < head_n; i++) {

@@ -355,9 +355,9 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         h2_stream_destroy(h2c, stream);
         return -1;
     }
-    stream->res.conn_fd = h2c->conn->fd;
+    stream->res.conn_fd = h2c->conn->stream.fd;
     stream->res.tls = h2c->conn->tls;
-    stream->res.ctx = h2c->conn->ctx;
+    stream->res.ctx = h2c->conn->stream.ctx;
     stream->res.keep_alive = 1;
     stream->res.head_request = (req->method_len == 4 &&
                                  memcmp(req->method, "HEAD", 4) == 0);
@@ -501,7 +501,7 @@ void kl_h2_server_set_writer(KlConn *c, KlH2WriteFn fn, void *ctx) {
 
 int kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
                           const char *leftover, size_t leftover_len) {
-    KlAllocator *alloc = c->alloc;
+    KlAllocator *alloc = c->stream.alloc;
 
     KlH2ServerConn *h2c = kl_malloc(alloc, sizeof(KlH2ServerConn));
     if (!h2c) return KL_CONN_CLOSED;
@@ -621,10 +621,10 @@ int kl_h2_server_on_readable(KlConn *c) {
     int drains = 0;
 read_more:
     ;
-    ssize_t nr = conn_read(c, c->read_buf, c->read_cap);
+    ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
     if (nr <= 0) return KL_CONN_CLOSED;
 
-    KlConnState st = kl_h2_server_feed(c, c->read_buf, (size_t)nr);
+    KlConnState st = kl_h2_server_feed(c, c->stream.read_buf, (size_t)nr);
     if (st != KL_CONN_HTTP2) return (int)st;
 
     if (c->tls && c->tls->pending(c->tls) > 0 && ++drains < 256)

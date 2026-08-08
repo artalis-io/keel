@@ -20,17 +20,17 @@
 
 /* The socket provider for a connection (ctx->sockets; NULL = POSIX fast path). */
 static inline const KlSocketProvider *conn_provider(const KlConn *c) {
-    return c->ctx ? c->ctx->sockets : NULL;
+    return c->stream.ctx ? c->stream.ctx->sockets : NULL;
 }
 
 static inline ssize_t conn_read(KlConn *c, void *buf, size_t len) {
-    if (c->tls) return c->tls->read(c->tls, c->fd, buf, len);
-    return kl_sock_recv(conn_provider(c), c->fd, buf, len);
+    if (c->tls) return c->tls->read(c->tls, c->stream.fd, buf, len);
+    return kl_sock_recv(conn_provider(c), c->stream.fd, buf, len);
 }
 
 static inline ssize_t conn_write(KlConn *c, const void *buf, size_t len) {
-    if (c->tls) return c->tls->write(c->tls, c->fd, buf, len);
-    return kl_sock_send(conn_provider(c), c->fd, buf, len);
+    if (c->tls) return c->tls->write(c->tls, c->stream.fd, buf, len);
+    return kl_sock_send(conn_provider(c), c->stream.fd, buf, len);
 }
 
 /* Write all bytes, retrying on short writes (TLS WANT_WRITE, etc.) */

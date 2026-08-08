@@ -74,8 +74,8 @@ static int comp_send_response(KlConn *c) {
  * Read-side flow control (kl_request_pause_body): while paused, do NOT post the next recv —
  * the conn parks with no outstanding op until kl_request_resume_body re-posts it. */
 static void comp_start_body_read(struct KlServer *s, KlConn *c) {
-    c->read_len = 0;
-    if (c->read_paused) return;   /* paused — resume re-posts via kl_io_engine_post_read */
+    c->stream.read_len = 0;
+    if (c->stream.read_paused) return;   /* paused — resume re-posts via kl_io_engine_post_read */
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
 }
 
@@ -139,13 +139,13 @@ static void comp_send_stream(struct KlServer *s, KlConn *c) {
  * overlapped (comp_tls_send_response) to avoid any head-of-line stall.
  * Exported (completion_internal.h): called by the h2/ws drives. */
 int kl_comp_tls_flush(KlConn *c) {
-    const KlSocketProvider *sp = c->ctx ? c->ctx->sockets : NULL;
+    const KlSocketProvider *sp = c->stream.ctx ? c->stream.ctx->sockets : NULL;
     unsigned char buf[KL_TLS_FLUSH_CHUNK];
     ssize_t n;
     while ((n = c->tls->drain_output(c->tls, buf, sizeof(buf))) > 0) {
         size_t off = 0;
         while (off < (size_t)n) {
-            ssize_t w = kl_sock_send(sp, c->fd, buf + off, (size_t)n - off);
+            ssize_t w = kl_sock_send(sp, c->stream.fd, buf + off, (size_t)n - off);
             if (w <= 0) return -1;           /* seam retries EINTR; <=0 is fatal here */
             off += (size_t)w;
         }
@@ -166,7 +166,7 @@ static int comp_tls_encrypt_all(KlConn *c, const KlIoVec *iov, int n,
     for (int i = 0; i < n; i++) {
         size_t off = 0;
         while (off < iov[i].len) {
-            ssize_t w = c->tls->write(c->tls, c->fd,
+            ssize_t w = c->tls->write(c->tls, c->stream.fd,
                                       (const char *)iov[i].base + off, iov[i].len - off);
             if (w < 0) goto fail;
             if (w > 0) off += (size_t)w;
@@ -175,7 +175,7 @@ static int comp_tls_encrypt_all(KlConn *c, const KlIoVec *iov, int n,
             for (;;) {
                 if (len == cap) {
                     size_t ncap = cap ? cap * 2 : 8192;
-                    unsigned char *nb = kl_realloc(c->alloc, buf, cap, ncap);
+                    unsigned char *nb = kl_realloc(c->stream.alloc, buf, cap, ncap);
                     if (!nb) goto fail;
                     buf = nb;
                     cap = ncap;
@@ -192,7 +192,7 @@ static int comp_tls_encrypt_all(KlConn *c, const KlIoVec *iov, int n,
     *outcap = cap;
     return 0;
 fail:
-    kl_free(c->alloc, buf, cap);
+    kl_free(c->stream.alloc, buf, cap);
     return -1;
 }
 
@@ -206,13 +206,13 @@ int kl_comp_tls_drain_output(KlConn *c, unsigned char **out, size_t *outlen, siz
     for (;;) {
         if (len == cap) {
             size_t ncap = cap ? cap * 2 : 8192;
-            unsigned char *nb = kl_realloc(c->alloc, buf, cap, ncap);
-            if (!nb) { kl_free(c->alloc, buf, cap); return -1; }
+            unsigned char *nb = kl_realloc(c->stream.alloc, buf, cap, ncap);
+            if (!nb) { kl_free(c->stream.alloc, buf, cap); return -1; }
             buf = nb;
             cap = ncap;
         }
         ssize_t d = c->tls->drain_output(c->tls, buf + len, cap - len);
-        if (d < 0) { kl_free(c->alloc, buf, cap); return -1; }
+        if (d < 0) { kl_free(c->stream.alloc, buf, cap); return -1; }
         if (d == 0) break;
         len += (size_t)d;
     }
@@ -232,7 +232,7 @@ static int comp_tls_post_encrypted(KlConn *c, const KlIoVec *iov, int n) {
     /* The backend copies the buffer for the op's lifetime, so free ours after posting. */
     KlIoVec civ = { cipher, clen };
     int rc = kl_comp_post_send(c, &civ, 1, clen);
-    kl_free(c->alloc, cipher, ccap);
+    kl_free(c->stream.alloc, cipher, ccap);
     return rc;
 }
 
@@ -310,14 +310,14 @@ static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
          * 101 + initial SETTINGS through conn_write and consumed the leftover. Reset the
          * read window so the next recv starts a fresh h2 frame buffer (the HTTP/1.1
          * upgrade request must not be re-fed), then read h2 frames. */
-        c->read_len = 0;
+        c->stream.read_len = 0;
         if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
     } else if (st == KL_CONN_WEBSOCKET) {
         /* WS upgrade done during dispatch — kl_ws_server_upgrade wrote the 101 handshake
          * (and processed any leftover frames) through conn_write; for TLS that ciphertext
          * is in the out ring. Flush it, reset the read window, then read WS frames. */
-        c->read_len = 0;
+        c->stream.read_len = 0;
         if (c->tls && kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
     } else if (st == KL_CONN_SUSPENDED) {
@@ -346,28 +346,28 @@ static int comp_try_reading(struct KlServer *s, KlConn *c) {
     if (c->h2_config != NULL) {
         static const char h2_preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
         const KlH2ServerHooks *h2h = kl_h2_server_hooks();
-        if (c->read_len >= 24 && h2h && h2h->upgrade) {
-            if (memcmp(c->read_buf, h2_preface, 24) == 0) {
+        if (c->stream.read_len >= 24 && h2h && h2h->upgrade) {
+            if (memcmp(c->stream.read_buf, h2_preface, 24) == 0) {
                 KlConnState st = (KlConnState)h2h->upgrade(
-                    c, &s->router, c->h2_config, c->read_buf + 24, c->read_len - 24);
+                    c, &s->router, c->h2_config, c->stream.read_buf + 24, c->stream.read_len - 24);
                 comp_after_state(s, c, st);
                 return 0;
             }
             /* not a preface — fall through to the HTTP/1.1 parser */
-        } else if (memcmp(c->read_buf, h2_preface, c->read_len) == 0) {
+        } else if (memcmp(c->stream.read_buf, h2_preface, c->stream.read_len) == 0) {
             return 1;   /* partial preface — need more bytes */
         }
     }
 
     size_t consumed = 0;
     KlParseResult pr = c->parser->parse(c->parser, &c->req,
-                                        c->read_buf, c->read_len, &consumed);
+                                        c->stream.read_buf, c->stream.read_len, &consumed);
     if (pr == KL_PARSE_INCOMPLETE) return 1;
     if (pr == KL_PARSE_ERROR) { kl_comp_close(s, c); return 0; }
 
     KlConnState st = (pr == KL_PARSE_HEADERS_OK)
         ? kl_conn_dispatch_request(c, &s->router,
-                                   c->read_buf + consumed, c->read_len - consumed)
+                                   c->stream.read_buf + consumed, c->stream.read_len - consumed)
         : kl_conn_dispatch_request(c, &s->router, NULL, 0);
     comp_after_state(s, c, st);
     return 0;
@@ -381,7 +381,7 @@ static void comp_drive_reading(struct KlServer *s, KlConn *c) {
 
 /* Feed a completed body read through the model-blind body core, then act. */
 static void comp_drive_body(struct KlServer *s, KlConn *c) {
-    comp_after_state(s, c, kl_conn_ingest_body(c, c->read_len));
+    comp_after_state(s, c, kl_conn_ingest_body(c, c->stream.read_len));
 }
 
 /* Drive a TLS connection after the backend has fed newly-received ciphertext to the
@@ -412,7 +412,7 @@ static void comp_tls_drive(struct KlServer *s, KlConn *c) {
             return;
         }
         if (st == KL_CONN_HTTP2) {                     /* ALPN h2 — SETTINGS flushed above */
-            c->read_len = 0;
+            c->stream.read_len = 0;
             const KlH2CompHooks *h2c = kl_h2_comp_hooks();
             if (h2c && h2c->drive) h2c->drive(s, c);   /* process any buffered h2 frames */
             return;
@@ -422,19 +422,19 @@ static void comp_tls_drive(struct KlServer *s, KlConn *c) {
          * application data already buffered with the handshake (TLS 1.3 0-RTT / a
          * client's Finished coalesced with its first request) rather than blindly
          * waiting for another network read; a plain WANT_READ still posts a recv. */
-        c->read_len = 0;
+        c->stream.read_len = 0;
     }
 
     if (c->state == KL_CONN_READING_BODY) {
         for (;;) {
-            ssize_t p = c->tls->read(c->tls, c->fd, c->read_buf, c->read_cap);
+            ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
             if (p == 0) {                              /* WANT_READ — need the network */
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
                 return;
             }
-            c->read_len = (size_t)p;
-            KlConnState st = kl_conn_ingest_body(c, c->read_len);
+            c->stream.read_len = (size_t)p;
+            KlConnState st = kl_conn_ingest_body(c, c->stream.read_len);
             if (st != KL_CONN_READING_BODY) { comp_after_state(s, c, st); return; }
             if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
@@ -446,15 +446,15 @@ static void comp_tls_drive(struct KlServer *s, KlConn *c) {
 
     /* Reading request headers: accumulate decrypted plaintext, parse, dispatch. */
     for (;;) {
-        size_t off = c->read_len;
-        if (off >= c->read_cap) { kl_comp_close(s, c); return; }   /* headers overflowed */
-        ssize_t p = c->tls->read(c->tls, c->fd, c->read_buf + off, c->read_cap - off);
+        size_t off = c->stream.read_len;
+        if (off >= c->stream.read_cap) { kl_comp_close(s, c); return; }   /* headers overflowed */
+        ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf + off, c->stream.read_cap - off);
         if (p < 0) { kl_comp_close(s, c); return; }
         if (p == 0) {                                  /* WANT_READ — need the network */
             if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
             return;
         }
-        c->read_len += (size_t)p;
+        c->stream.read_len += (size_t)p;
         if (comp_try_reading(s, c) == 0) return;       /* dispatched / acted / closed */
         if (!c->tls->pending || c->tls->pending(c->tls) == 0) {
             if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
@@ -490,9 +490,9 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
     nc->peer_source = KL_PEER_SOCKET;
     /* The backend already converted the native accept peer to the neutral KlSockAddr
      * once at its seam; copy it straight in. KL_AF_UNSPEC = unavailable. */
-    nc->peer_addr = ev->peer;
+    nc->stream.peer_addr = ev->peer;
     nc->res.alloc = &s->alloc_storage;
-    (void)kl_sock_set_tcp_nodelay(nc->ctx ? nc->ctx->sockets : NULL, nc->fd, 1);
+    (void)kl_sock_set_tcp_nodelay(nc->stream.ctx ? nc->stream.ctx->sockets : NULL, nc->stream.fd, 1);
 
     /* HTTP/2 over the completion loop is supported (8d-1): h2_config is left intact, so
      * kl_conn_on_handshake may run the ALPN-h2 upgrade and comp_tls_drive / comp_after_
@@ -516,8 +516,8 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
      * never set), so this is skipped and the archive omits the hosted PROXY parser. */
     const KlProxyHooks *ph = kl_proxy_hooks();
     if (s->proxy_cidr_count > 0 && ph && ph->cidr_match &&
-        kl_sockaddr_family(&nc->peer_addr) != KL_AF_UNSPEC &&
-        ph->cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &nc->peer_addr)) {
+        kl_sockaddr_family(&nc->stream.peer_addr) != KL_AF_UNSPEC &&
+        ph->cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &nc->stream.peer_addr)) {
         nc->state = KL_CONN_PROXY_HEADER;   /* TLS memory-BIO enabled later, after the header */
     } else if (nc->tls) {
         /* TLS: enter the handshake state and switch the backend into completion (memory BIO)
@@ -527,7 +527,7 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
     }
 
     /* Register the accepted socket with the loop (associate) + post the first read. */
-    if (kl_event_add(&s->ev.loop, nc->fd, KL_EVENT_READ, nc) < 0 ||
+    if (kl_event_add(&s->ev.loop, nc->stream.fd, KL_EVENT_READ, nc) < 0 ||
         kl_comp_post_recv(nc) < 0) {
         kl_comp_close(s, nc);
     }
@@ -542,31 +542,31 @@ refill:
  * read — processing any bytes that followed the header this tick. The header recv is plaintext
  * even for a TLS conn (post_recv skips the TLS branch while state == KL_CONN_PROXY_HEADER). */
 static void comp_drive_proxy(struct KlServer *s, KlConn *c) {
-    int consumed = kl_conn_ingest_proxy(c, c->read_len);
+    int consumed = kl_conn_ingest_proxy(c, c->stream.read_len);
     if (consumed == -1) { kl_comp_close(s, c); return; }       /* malformed / oversized */
     if (consumed == -2) {                                    /* need more header bytes */
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         return;
     }
     if (consumed > 0) {                                      /* drop the header, keep remainder */
-        c->read_len -= (size_t)consumed;
-        if (c->read_len > 0)
-            memmove(c->read_buf, c->read_buf + consumed, c->read_len);
+        c->stream.read_len -= (size_t)consumed;
+        if (c->stream.read_len > 0)
+            memmove(c->stream.read_buf, c->stream.read_buf + consumed, c->stream.read_len);
     }
 
     if (c->tls) {
         c->state = KL_CONN_TLS_HANDSHAKE;
         c->tls->feed_input(c->tls, NULL, 0);                /* enable memory-BIO mode */
-        if (c->read_len > 0) {                              /* buffered ClientHello ciphertext */
-            if (c->tls->feed_input(c->tls, c->read_buf, c->read_len) < 0) {
+        if (c->stream.read_len > 0) {                              /* buffered ClientHello ciphertext */
+            if (c->tls->feed_input(c->tls, c->stream.read_buf, c->stream.read_len) < 0) {
                 kl_comp_close(s, c); return;
             }
-            c->read_len = 0;
+            c->stream.read_len = 0;
         }
         comp_tls_drive(s, c);
     } else {
         c->state = KL_CONN_READING;
-        if (c->read_len > 0)
+        if (c->stream.read_len > 0)
             comp_drive_reading(s, c);                       /* parse buffered HTTP bytes */
         else if (kl_comp_post_recv(c) < 0)
             kl_comp_close(s, c);
@@ -579,7 +579,7 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
     /* PROXY header phase (plaintext, before TLS/HTTP) — must run before the TLS branch since a
      * PROXY+TLS conn has c->tls set but hasn't started the handshake yet. */
     if (c->state == KL_CONN_PROXY_HEADER) {
-        c->read_len += ev->bytes;
+        c->stream.read_len += ev->bytes;
         comp_drive_proxy(s, c);
         return;
     }
@@ -587,7 +587,7 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
      * ciphertext, not plaintext); the driver handshakes / decrypts. read_buf holds
      * plaintext and is written by comp_tls_drive, not here. */
     if (c->tls) { comp_tls_drive(s, c); return; }
-    c->read_len += ev->bytes;
+    c->stream.read_len += ev->bytes;
     /* Body reads use a fresh sliding window (read_len was reset to 0 before the
      * post), so read_len == the bytes just received. Headers accumulate. */
     if (c->state == KL_CONN_HTTP2) {
@@ -670,7 +670,7 @@ static void comp_server_conn_dispatch(struct KlEventCtx *ctx, const void *evp) {
  * completion loop). Keeps the async runtime free of completion knowledge. */
 void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn) {
     if (conn->state == KL_CONN_READING) {   /* handler yielded without a response — read on */
-        conn->read_len = 0;
+        conn->stream.read_len = 0;
         if (kl_comp_post_recv(conn) < 0) kl_comp_close(s, conn);
         return;
     }
@@ -683,7 +683,7 @@ void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn) {
  * started; the next recv appends into read_buf as usual). */
 void kl_io_engine_post_read(struct KlConn *c) {
     if (kl_comp_post_recv(c) < 0)
-        kl_comp_close(server_of_ctx(c->ctx), c);
+        kl_comp_close(server_of_ctx(c->stream.ctx), c);
 }
 
 /* The server's io_engine seam entry: install the conn-dispatch hook (idempotent, the

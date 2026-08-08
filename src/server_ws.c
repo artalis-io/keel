@@ -92,7 +92,7 @@ static kl_ssize_t ws_drain_writer(const char *data, size_t len, void *ctx) {
 int kl_ws_server_peer_cred(const KlWsServerConn *ws, KlPeerCred *out) {
     if (!ws || !ws->conn)
         return -1;
-    return kl_peer_cred_fd(ws->conn->fd, out);
+    return kl_peer_cred_fd(ws->conn->stream.fd, out);
 }
 
 int kl_ws_server_enable_drain(KlWsServerConn *ws, size_t max_size) {
@@ -317,13 +317,13 @@ int kl_ws_server_upgrade(KlConn *c, const char *leftover,
     }
 
     /* Allocate WebSocket connection state */
-    KlWsServerConn *ws = kl_malloc(c->alloc, sizeof(KlWsServerConn));
+    KlWsServerConn *ws = kl_malloc(c->stream.alloc, sizeof(KlWsServerConn));
     if (!ws) return KL_CONN_CLOSED;
     memset(ws, 0, sizeof(*ws));
 
     ws->config = cfg;
     ws->conn = c;
-    ws->alloc = c->alloc;
+    ws->alloc = c->stream.alloc;
     ws->utf8_state = KL_UTF8_ACCEPT;
     kl_ws_frame_init(&ws->frame);
     if (cfg->ping_interval_ms > 0)
@@ -627,7 +627,7 @@ void kl_ws_server_cleanup(KlConn *c) {
         kl_drain_free(&ws->drain);
     if (ws->msg_buf)
         kl_free(ws->alloc, ws->msg_buf, ws->msg_cap);
-    kl_free(c->alloc, ws, sizeof(KlWsServerConn));
+    kl_free(c->stream.alloc, ws, sizeof(KlWsServerConn));
     c->ws = NULL;
 }
 
