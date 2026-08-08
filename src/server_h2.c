@@ -675,9 +675,18 @@ void kl_h2_server_cleanup(KlConn *c) {
 /* ── HTTP/2 server upgrade seam registration (proto_hooks.h) ─────────────────
  * The shared server core reaches HTTP/2 only through this table; installing it
  * both wires the core and forces server_h2.o out of the static archive. */
+/* Readiness WRITE-interest predicate (h2 analogue of ws drain_pending): does the session
+ * have queued output? Keeps server.c's rearm from peeking KlH2ServerConn internals. */
+static int kl_h2_server_want_write_hook(const KlConn *c) {
+    return c->h2 && c->h2->session && c->h2->session->want_write(c->h2->session);
+}
+
 static const KlH2ServerHooks kl_h2_server_hooks_table = {
     .upgrade         = kl_h2_server_upgrade,
     .upgrade_from_h1 = kl_h2_server_upgrade_from_h1,
+    .on_readable     = kl_h2_server_on_readable,
+    .on_writable     = kl_h2_server_on_writable,
+    .want_write      = kl_h2_server_want_write_hook,
     .cleanup         = kl_h2_server_cleanup,
     .drain_shutdown  = kl_h2_server_drain_shutdown,
 };

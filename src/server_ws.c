@@ -11,6 +11,8 @@
 #include <keel/websocket_server.h>
 #include <keel/connection.h>
 #include <keel/request.h>
+#include <keel/server.h>   /* KlServer — kl_server_ws registration API lives here */
+#include <keel/router.h>   /* kl_router_add + KlRoute.ws_config */
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
@@ -663,6 +665,9 @@ int kl_ws_server_auto_ping(KlConn *c, uint64_t now) {
  * both wires the core and forces server_ws.o out of the static archive. */
 static const KlWsServerHooks kl_ws_server_hooks_table = {
     .upgrade             = kl_ws_server_upgrade,
+    .on_readable         = kl_ws_server_on_readable,
+    .on_writable         = kl_ws_server_on_writable,
+    .drain_pending       = kl_ws_server_drain_pending,
     .cleanup             = kl_ws_server_cleanup,
     .auto_ping           = kl_ws_server_auto_ping,
     .check_close_timeout = kl_ws_server_check_close_timeout,
@@ -671,6 +676,17 @@ static const KlWsServerHooks kl_ws_server_hooks_table = {
 
 void kl_ws_server_hooks_install(void) {
     kl_ws_server_hooks_set(&kl_ws_server_hooks_table);
+}
+
+/* Public WebSocket route-registration API. Lives in the ws module (moved from server.c
+ * in the Finding-1 decoupling) so the readiness server.c owns no WebSocket type — a
+ * freestanding HTTP/1.1 server links neither this nor KlWsServerConfig. */
+int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
+    /* Register as a GET route with no handler — ws_config triggers the upgrade. */
+    if (kl_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
+        return -1;
+    s->router.routes[s->router.count - 1].ws_config = config;
+    return 0;
 }
 
 /* Also self-install at load, so a consumer driving connection.c's dispatch directly

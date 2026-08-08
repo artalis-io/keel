@@ -2,8 +2,6 @@
 #include <keel/async.h>
 #include <keel/timer.h>
 #include <keel/tls.h>
-#include <keel/websocket_server.h>
-#include <keel/h2_server.h>
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
@@ -11,13 +9,15 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include "internal.h"
-#include "h2_internal.h"
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
 #include "server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
 #include "platform.h"     /* KlPlatWakeup — self-pipe so kl_server_stop wakes the run loop */
-#include "proto_hooks.h"  /* ws/h2 upgrade seam — install the hosted tables at init */
+/* No websocket_server.h / h2_server.h / h2_internal.h: the readiness data plane now
+ * dispatches ws/h2 (and PROXY) through proto_hooks.h — the same seam the completion
+ * driver uses — so this TU names no optional-protocol type or symbol (Finding 1). */
+#include "proto_hooks.h"  /* ws/h2/proxy readiness + upgrade seam */
 
 #define KL_LISTEN_BACKLOG  128
 #define KL_EVENTS_PER_TICK 64
@@ -270,15 +270,8 @@ void kl_server_close_listener(KlServer *s) {
 /* Route + middleware registration (the kl_server_route / kl_server_use family) and
  * the read-side body flow control (kl_request_pause_body / resume_body) plus
  * kl_server_stats moved to the freestanding-safe server core (server_core.c) in the
- * S-1 bisection. kl_server_ws stays here: WebSocket is out of the freestanding EFI
- * server's scope (HTTP/1.1 only). */
-int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
-    /* Register as a GET route with no handler — ws_config triggers upgrade */
-    if (kl_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
-        return -1;
-    s->router.routes[s->router.count - 1].ws_config = config;
-    return 0;
-}
+ * S-1 bisection. kl_server_ws moved to server_ws.c (Finding 1): the WebSocket type +
+ * registration belong to the ws module, so this readiness TU owns no protocol type. */
 
 
 int kl_server_run(KlServer *s) {
@@ -458,11 +451,14 @@ int kl_server_run(KlServer *s) {
                         nc->tls_want = KL_EVENT_READ;
                     }
 
-                    /* PROXY protocol: from a trusted source, read the header
-                     * first (before TLS/HTTP). Overrides the state above. */
-                    if (s->proxy_cidr_count > 0 &&
+                    /* PROXY protocol: from a trusted source, read the header first (before
+                     * TLS/HTTP). Overrides the state above. Through the PROXY seam
+                     * (kl_proxy_hooks) — symmetric with completion_server.c; NULL when
+                     * proxy_protocol.c is not linked. */
+                    const KlProxyHooks *ph = kl_proxy_hooks();
+                    if (s->proxy_cidr_count > 0 && ph && ph->cidr_match &&
                         kl_sockaddr_family(&peer) != KL_AF_UNSPEC &&
-                        kl_cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &peer)) {
+                        ph->cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &peer)) {
                         nc->state = KL_CONN_PROXY_HEADER;
                     }
 
@@ -518,23 +514,29 @@ rearm_listen:
                 goto transition;
             }
 
-            /* WebSocket — handle read/write events */
+            /* WebSocket — handle read/write events through the ws seam (symmetric with
+             * the completion path's KlWsCompHooks; the conn only reached this state via a
+             * ws upgrade, so the hooks are installed). */
             if (c->state == KL_CONN_WEBSOCKET) {
+                const KlWsServerHooks *wsh = kl_ws_server_hooks();
+                if (!wsh) { new_state = KL_CONN_CLOSED; goto transition; }
                 if (events[i].ready & KL_EVENT_READ)
-                    new_state = (KlConnState)kl_ws_server_on_readable(c);
+                    new_state = (KlConnState)wsh->on_readable(c);
                 if (new_state == KL_CONN_WEBSOCKET &&
                     (events[i].ready & KL_EVENT_WRITE))
-                    new_state = (KlConnState)kl_ws_server_on_writable(c);
+                    new_state = (KlConnState)wsh->on_writable(c);
                 goto transition;
             }
 
-            /* HTTP/2 — handle read/write events */
+            /* HTTP/2 — handle read/write events through the h2 seam. */
             if (c->state == KL_CONN_HTTP2) {
+                const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+                if (!h2h) { new_state = KL_CONN_CLOSED; goto transition; }
                 if (events[i].ready & KL_EVENT_READ)
-                    new_state = (KlConnState)kl_h2_server_on_readable(c);
+                    new_state = (KlConnState)h2h->on_readable(c);
                 if (new_state == KL_CONN_HTTP2 &&
                     (events[i].ready & KL_EVENT_WRITE))
-                    new_state = (KlConnState)kl_h2_server_on_writable(c);
+                    new_state = (KlConnState)h2h->on_writable(c);
                 goto transition;
             }
 
@@ -570,7 +572,8 @@ transition:
                 }
             } else if (new_state == KL_CONN_WEBSOCKET) {
                 KlEventMask ws_mask = KL_EVENT_READ;
-                if (kl_ws_server_drain_pending(c))
+                const KlWsServerHooks *wsh = kl_ws_server_hooks();
+                if (wsh && wsh->drain_pending && wsh->drain_pending(c))
                     ws_mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
                 if (kl_event_mod(&s->ev.loop, c->fd, ws_mask, c) < 0) {
                     kl_event_del(&s->ev.loop, c->fd);
@@ -578,8 +581,8 @@ transition:
                 }
             } else if (new_state == KL_CONN_HTTP2) {
                 KlEventMask mask = KL_EVENT_READ;
-                if (c->h2 && c->h2->session &&
-                    c->h2->session->want_write(c->h2->session))
+                const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+                if (h2h && h2h->want_write && h2h->want_write(c))
                     mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
                 if (kl_event_mod(&s->ev.loop, c->fd, mask, c) < 0) {
                     kl_event_del(&s->ev.loop, c->fd);
