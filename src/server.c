@@ -179,74 +179,9 @@ int kl_request_peer_cert(const KlRequest *req, KlPeerCert *out) {
     return conn->tls->peer_cert(conn->tls, out);
 }
 
-int kl_systemd_listen_fds(int *count) {
-    const char *pid_s = getenv("LISTEN_PID");
-    const char *fds_s = getenv("LISTEN_FDS");
-    int first = -1;
-    int n = 0;
-
-    if (pid_s && fds_s) {
-        char *end;
-        long lpid = strtol(pid_s, &end, 10);
-        if (end != pid_s && *end == '\0' && (long)getpid() == lpid) {
-            long nfds = strtol(fds_s, &end, 10);
-            if (end != fds_s && *end == '\0' && nfds >= 1 && nfds <= 4096) {
-                n = (int)nfds;
-                first = 3;  /* SD_LISTEN_FDS_START; the fds are 3 .. 3+n-1 */
-            }
-        }
-    }
-
-    /* Clear so the variables are not inherited by child processes. */
-    kl_server_plat_unsetenv("LISTEN_PID");
-    kl_server_plat_unsetenv("LISTEN_FDS");
-    kl_server_plat_unsetenv("LISTEN_FDNAMES");
-    if (count)
-        *count = n;
-    return first;
-}
-
-int kl_systemd_listen_fd(void) {
-    return kl_systemd_listen_fds(NULL);
-}
-
-int kl_systemd_listen_fd_by_name(const char *name) {
-    if (!name)
-        return -1;
-    const char *pid_s = getenv("LISTEN_PID");
-    const char *fds_s = getenv("LISTEN_FDS");
-    const char *names = getenv("LISTEN_FDNAMES");
-    int result = -1;
-
-    if (pid_s && fds_s && names) {
-        char *end;
-        long lpid = strtol(pid_s, &end, 10);
-        long nfds = 0;
-        if (end != pid_s && *end == '\0' && (long)getpid() == lpid) {
-            nfds = strtol(fds_s, &end, 10);
-            if (!(end != fds_s && *end == '\0' && nfds >= 1 && nfds <= 4096))
-                nfds = 0;
-        }
-        /* LISTEN_FDNAMES is a colon-separated list, one name per passed fd in
-         * fd order starting at SD_LISTEN_FDS_START (3). */
-        size_t namelen = strlen(name);
-        const char *p = names;
-        for (long idx = 0; idx < nfds && p; idx++) {
-            const char *colon = strchr(p, ':');
-            size_t seglen = colon ? (size_t)(colon - p) : strlen(p);
-            if (seglen == namelen && memcmp(p, name, namelen) == 0) {
-                result = 3 + (int)idx;
-                break;
-            }
-            p = colon ? colon + 1 : NULL;
-        }
-    }
-
-    kl_server_plat_unsetenv("LISTEN_PID");
-    kl_server_plat_unsetenv("LISTEN_FDS");
-    kl_server_plat_unsetenv("LISTEN_FDNAMES");
-    return result;
-}
+/* Socket-activation (systemd LISTEN_* fd inheritance) moved to server_activation.c
+ * (Finding 6): a self-contained responsibility, separate from the readiness loop,
+ * TCP listener construction, and peer accessors. */
 
 /* Non-static so the freestanding kl_server_free (server_core.c) can call it on the
  * hosted path (it needs the AF_UNIX unlink); declared in internal.h. */
