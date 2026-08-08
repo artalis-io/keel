@@ -60,7 +60,7 @@ only after the Tier-2 machinery lands (see `docs/generic_transport_audit.md` §8
    possible later change (requires extending `KlDrain`); not the initial policy.
 2. **Backpressure signal = one writable callback at low-water.** Today `KlDrain.on_drain` fires
    only empty→non-empty→empty; the API defines separate high/low-water marks and one `on_writable`
-   at low-water — a small `KlDrain` extension (Tier 2), not a new subsystem.
+   at low-water — a small `KlDrain` extension (**Tier 1 / Phase B**), not a new subsystem.
 3. **Pause = STRICT.** No read callback fires after `pause` returns; a completion recv already
    outstanding at pause time completes into the single receive buffer and its bytes are delivered
    only after `resume`. Bounded to one buffer. (Resolves the earlier §5 contradiction.)
@@ -274,6 +274,7 @@ or `0`):
 |---|---|---|
 | `KL_STREAM_ACCEPTED` | `len` | all bytes taken (sent and/or queued); continue |
 | `KL_STREAM_WOULD_BLOCK` | `0` | high-water reached; **nothing** taken — wait for the **writable** signal, then retry the whole write |
+| `KL_STREAM_TOO_LARGE` | `0` | `len > total_capacity`; **permanent** — do **NOT** wait for writable (no notification will ever unblock it); **chunk** the message (§2) |
 | `KL_STREAM_CLOSED` | `0` | write side gone (Tier-3 half-close, or peer-closed) — begin teardown |
 | `KL_STREAM_ERROR` | `0` | fatal; `io_status` carries the category — begin teardown |
 
@@ -301,7 +302,7 @@ returns.
   re-arms READ / completion re-posts a recv. **Both pause and resume are idempotent** (double-call
   is a no-op; resume does not double-post).
 - This is the existing `read_paused` mechanism, renamed off the HTTP request onto the stream, plus
-  the strict "hold the already-in-flight buffer" rule (new, Tier 2).
+  the strict "hold the already-in-flight buffer" rule (new, **Tier 1 / Phase B**).
 
 ---
 
@@ -335,8 +336,8 @@ returns.
 
 | Event | Tier | Terminal delivered to caller |
 |---|---|---|
-| peer sent FIN (orderly) | 1 | read **EOF** (§1); Tier-1 ends the stream (Tier-3 half-open keeps write side open) |
-| peer sent RST | 2 | read **error** `KL_IO_RESET` (needs the completion-event error field, §header); Tier-1 sees it as EOF-like close |
+| peer sent FIN (orderly) | 1→2 | **Tier 1:** `KL_STREAM_CLOSED_UNKNOWN` (cause not distinguishable); **Tier 2:** orderly **EOF** (needs `KlCompletionEvent.status`, §header). (Tier-3 half-open keeps the write side open.) |
+| peer sent RST | 1→2 | **Tier 1:** `KL_STREAM_CLOSED_UNKNOWN` (NOT "EOF-like" — an unknown termination is not a clean message boundary); **Tier 2:** read **error** `KL_IO_RESET` (needs `KlCompletionEvent.status`, §header) |
 | local `close` (graceful) | 1 | flush accepted output (close deadline), detach, then exactly one `on_close` (§7) |
 | local `cancel` (discard) | 1 | drop queued output, detach, then `on_close` (§7) — no per-op terminals in Tier 1 |
 | `connect` op cancelled | 1 | that **`KlConnectOp`** → cancelled (exactly once) — the only per-op terminal in Tier 1 |
@@ -519,10 +520,12 @@ ExitBootServices).
   order:
   1. **Detach backend operations** — cancel/quarantine per the DETACHMENT rule; confirm no external
      agent can reference the stream (incl. no kernel write into `read_buf`).
-  2. **Run internal resource/release hooks** — return the listener accept-credit lease (§8.2), unlink
-     from internal lists, release any Keel-owned buffers. These touch *Keel* state, never the caller's
-     `KlStream` beyond reading it, and must be idempotent w.r.t. an **already-closed/destroyed
-     parent** (a lease release after listener teardown is a no-op, §8.2).
+  2. **Run internal resource/release hooks** — release the accept lease (§8.2): **always return the
+     stream slot** via the pool-owned slot-release capability, and **update listener credit + re-arm
+     only if the listener-credit target is still live** (null after standalone listener teardown → skip,
+     never a slot leak). Also unlink from internal lists and release any Keel-owned buffers. These touch
+     *Keel* state, never the caller's `KlStream` beyond reading it, and the credit half must be
+     idempotent w.r.t. an **already-destroyed listener** (§8.2 split lease).
   3. **Invoke public `on_close(stream)`** — the last access to the stream; nothing follows.
   Credit is therefore returned in step 2, never "after `on_close`" or via work the caller schedules
   from inside it.
@@ -579,23 +582,38 @@ no `on_accept`.
 - **On each completed accept:** bind the `KlStream` to the **already-reserved** slot, initialize it,
   then invoke `on_accept(listener, stream)` (an ownership handoff; §7 rules govern the stream from
   there). Because the slot was reserved at arm time, acquisition never fails *here*.
-- **If reservation itself fails (allocator failure, parent shutdown, inconsistent external pool):** the
-  listener simply **does not arm** that accept (it drops below full arming) and, if it holds an
-  accepted-but-unbindable handle from a backend that accepted anyway, it **closes that handle, restores
-  the credit, reports `on_accept_error`, and re-arms only if the listener is still live.** A generic
-  acquire hook is thus allowed to fail — the contract just never lets that failure surface *after*
+- **If reservation itself fails** — on the **conforming (preallocated, allocation-free) path** the only
+  failure causes are **pool exhaustion, listener/parent shutdown, or acquire-hook rejection /
+  inconsistent external-pool state** (Finding 6). *Allocator failure is NOT a conforming-path cause* —
+  the accept path never allocates; only a **hosted, optional allocator-backed pool** could additionally
+  fail on allocation, and that is explicitly **non-conforming/optional**, not part of the normal accept
+  path. On any such failure the listener simply **does not arm** that accept (it drops below full
+  arming) and, if it holds an accepted-but-unbindable handle from a backend that accepted anyway, it
+  **closes that handle, restores the credit, reports `on_accept_error`, and re-arms only if the listener
+  is still live.** A generic acquire hook is thus allowed to fail — the contract just never lets that
+  failure surface *after*
   `on_accept` has handed a stream over. "Credit" always means reserved backing, never a hope.
-- **`on_accept` / `on_accept_error` reentrancy (Finding 2).** The callback runs on the loop thread and
-  **may synchronously**: close/free the accepted stream; `close`/free the **listener**; stop accepting;
-  or destroy the parent server. The backend must therefore **not blindly re-arm or touch the listener
-  after the callback returns** — it re-reads the listener's **generation/state** first and only re-arms
-  if the listener is still live and still accepting. If listener destruction inside the callback is
-  permitted (it is), then **`on_accept`/`on_accept_error` are DESTRUCTIVE TAILs w.r.t. that
-  accept-dispatch frame**: after invoking either, the dispatch frame makes **no further access** to the
-  listener or the accept record — no field read, no re-arm through a stale pointer, no list fixup.
-  (Same rule as `on_close` in §7, applied to the accept dispatch.) Re-arming, credit bookkeeping, and
-  "should I post the next accept?" are all decided **before** the callback or **after** a fresh
-  generation/liveness check — never assumed across it.
+- **`on_accept` / `on_accept_error` reentrancy — liveness lives in a backend-owned token, never a
+  re-read of the possibly-freed listener (Finding 2).** The callback runs on the loop thread and **may
+  synchronously**: close/free the accepted stream; `close`/free the **listener**; stop accepting; or
+  destroy the parent server. Re-reading the `KlListener` *after* the callback to check liveness would
+  itself be a UAF if the callback freed it. So the mechanism is:
+  - **The accept dispatch holds a stable, backend-owned registration/token** (carrying the listener's
+    **generation + a liveness/accepting flag**) that **outlives the callback** and is **not** part of
+    `KlListener` storage. After the callback the dispatch inspects **that token**, never the
+    `KlListener` pointer.
+  - **The token is cleared/invalidated by listener teardown itself** (the same generation-invalidation
+    used for streams). So `on_accept` freeing the listener marks the token dead; the post-callback
+    dispatch reads the token, sees dead, and **does not re-arm and does not touch `KlListener`.**
+  - Equivalently, a backend MAY do **all** re-arm/credit bookkeeping **before** invoking the callback
+    and treat `on_accept`/`on_accept_error` as an **unconditional destructive tail** (no post-callback
+    dispatch work at all). Either is conforming.
+  - (A backend that instead **prohibits freeing the listener inside the callback** — allowing only a
+    *deferred* `kl_listener_close` — is also legal and needs no token; it is the more restrictive
+    option.)
+  In all cases: **no read of the `KlListener` after the callback through the original pointer.** The
+  earlier "re-reads the listener's generation/state" wording is replaced by "reads the backend-owned
+  token."
 - **`on_accept` conveys ownership; a stream that fails before `on_accept` is never handed over
   (Finding 2).** For a **TLS listener**, the handshake runs on the half-built stream *before*
   `on_accept`. On handshake failure/deadline the listener does internal teardown (§7 DETACHMENT +
@@ -607,33 +625,45 @@ no `on_accept`.
   stream carries an internal **credit lease** naming the listener's credit accounting, not the public
   `KlListener` storage. The lease indirection exists so a stream outliving the listener never
   dereferences freed listener storage.
-- **The lease is allocation-free and its release returns the STREAM SLOT, not just a counter
-  (Finding 4).** The lease record is **embedded in the preallocated stream/connection slot** (or drawn
-  from a **preallocated listener arena**) — never `malloc`d per accept, consistent with the
-  allocation-free accept path. Its internal release (step 2 of §7 teardown) does **both**:
-  1. **return/update the accept-credit accounting** (so the listener can arm the next accept), and
-  2. **return the acquired stream slot through the listener's release hook** (the pool slot goes back
-     to the caller-supplied pool).
-  This also closes the **accepted-TLS-failure** path (Finding 2): since no public `on_close` fires
-  there, the internal teardown must **explicitly run this same step-2 release** — returning the
-  half-built stream's slot to the pool and its credit to the listener — not merely decrement an
-  abstract counter. A failed handshake and a normal close free the same slot the same way.
-- **Listener lifetime vs accepted streams (Finding 3): the listener's credit accounting must outlive
-  every outstanding lease.** Two legal disciplines, and a backend/caller picks one:
-  1. **Parent-owned (the HTTP server, today):** the parent owns *both* the listener and the stream
-     pool and tears down in order — close all accepted streams, drive them to DETACHMENT + lease
-     release (§7), *then* free the listener. An accepted stream can never outlive the listener, so the
-     lease release always finds live accounting.
-  2. **Standalone listener close:** `kl_listener_free`/close **neutralizes the lease target of every
-     outstanding accepted stream** (marks the accounting detached) so a later stream close runs its
-     step-2 release as a **no-op** instead of touching freed storage. The listener may then be freed
-     while accepted streams are still live.
-  In both, the rule the release hook obeys is the same: **releasing a credit lease must tolerate an
-  already-closed/destroyed listener** (idempotent no-op). Discipline (1) is what ships in Phase A/B
-  (matches the current `KlServer`-owns-pool model); (2) is the general form for a standalone
-  `KlListener`.
-- **Credit return:** the accepted stream returns its lease when it closes (step 2 of §7 teardown),
-  which lets the listener arm the next accept. Accept never exceeds outstanding credit.
+- **The lease carries TWO independently-lived capabilities — a nullable listener-credit target and a
+  stable slot-release capability (Finding 1 + Finding 4).** Conflating them means neutralizing the
+  lease on listener death also loses the slot-return path, leaking the slot. So the embedded lease holds
+  two separable things:
+  - **Slot-release capability** — a **stable `release_slot(ctx, stream)` callback + context owned by
+    the pool/caller, NOT by `KlListener` storage.** It remains valid until the stream closes,
+    *independent of listener lifetime*. Returning the stream slot to the pool goes through this.
+  - **Listener-credit target** — a **nullable** pointer to the listener's credit accounting. Updating
+    credit + arming the next accept goes through this, and only when it is non-null (listener live).
+  The lease record itself is **allocation-free** — embedded in the preallocated stream/connection slot
+  (or a preallocated listener arena), never `malloc`d per accept. Its internal release (step 2 of §7
+  teardown) therefore does, in order:
+  1. **return the stream slot** via the stable `release_slot` capability — **always**, unconditionally;
+  2. **if the listener-credit target is non-null**, return/update credit accounting so the listener can
+     arm the next accept; if it is null (listener already destroyed), **skip credit + rearm**.
+  This closes the **accepted-TLS-failure** path (Finding 2): since no public `on_close` fires there, the
+  internal teardown runs this **same** step-2 release — the half-built stream's slot returns to the pool
+  via `release_slot`, credit returns iff the listener lives — not a bare counter decrement.
+- **Listener lifetime vs accepted streams (Finding 1): slot-release outlives the listener; credit does
+  not.** An accepted stream may outlive the listener, and closing it must still return its slot without
+  touching freed listener storage:
+  1. **Parent-owned (the HTTP server, today):** the parent owns *both* the listener and the stream pool
+     and tears down in order — close all accepted streams, drive them to DETACHMENT + lease release
+     (§7), *then* free the listener. Streams never outlive the listener, so credit accounting is always
+     live at release. (Slot-release still goes through the pool-owned capability, as always.)
+  2. **Standalone listener close:** `kl_listener_free`/close **null-outs only the listener-credit
+     target** of every outstanding accepted stream's lease — it does **not** touch the slot-release
+     capability (pool-owned, still valid). A later stream close then: **returns its slot** (step-2.1,
+     via the still-valid `release_slot`), **skips credit update/rearm** (step-2.2, target is null), and
+     **never dereferences the listener.** The listener may be freed while accepted streams are still
+     live, and no slot is leaked.
+  The invariant the release obeys: **the slot always comes back; the credit update is best-effort and
+  guarded by a non-null (live) listener target.** Discipline (1) ships in Phase A/B (the current
+  `KlServer`-owns-pool model); (2) is the general form for a standalone `KlListener`. (A simpler Tier-1
+  option — *forbid accepted streams outliving the listener* — is also legal but less generic; the
+  split-lease model is preferred so a standalone listener works.)
+- **Credit return:** on close a live-listener stream returns its lease's credit (step 2.2), letting the
+  listener arm the next accept; a stream whose listener already died just returns its slot. Accept never
+  exceeds outstanding credit.
 - **Listener close** detaches outstanding armed (not-yet-accepted) accepts under §7 (deferred
   `on_close` semantics for any half-built stream), draining/quarantining any posted accept op the
   same way streams do; no `on_accept` fires for a discarded armed accept. *Already-accepted* streams
@@ -701,6 +731,13 @@ completion and across TCP/Unix/lwIP where available.
 - **Cancel-vs-completion race (Finding 4):** cancel racing a natural completion yields **exactly one**
   retirement (natural wins; the late "cancel not-found" is discarded — no second terminal, no missed
   `on_close`); a failed cancel submission does not detach the stream.
+- **Standalone-listener slot recovery (Finding 1):** free a standalone `KlListener` while an accepted
+  stream is still live, then close that stream — under ASan/LSan the **stream slot returns to the pool**
+  (no leak), credit update + re-arm are **skipped**, and the freed `KlListener` is **never
+  dereferenced**. (Slot-release capability outlives the listener; credit target is nulled.)
+- **Callback frees the listener (Finding 2):** an `on_accept`/`on_accept_error` that synchronously frees
+  the listener (or stops accepting) does not cause a post-callback read of the freed listener — the
+  driver consults the backend-owned token, does not re-arm, and is ASan-clean.
 
 **Tier-2 gate (once the new machinery lands):**
 - EOF **vs** RST distinguishable identically across models (requires the extended completion event).
