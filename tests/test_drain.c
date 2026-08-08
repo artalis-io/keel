@@ -4,7 +4,9 @@
 #include <keel/response.h>
 #include <keel/websocket_server.h>
 #include <keel/connection.h>
+#include "../src/drain_reserve.h"   /* Phase-B internal reservation + low-water API */
 #include <string.h>
+#include <stdlib.h>
 
 /* ── Mock writer ─────────────────────────────────────────────────────── */
 
@@ -770,6 +772,227 @@ UTEST(drain, consume_fires_on_drain) {
     ASSERT_EQ(cb.count, 0);
     kl_drain_consume(&d, 2);          /* now empty → callback fires once */
     ASSERT_EQ(cb.count, 1);
+
+    kl_drain_free(&d);
+}
+
+/* ── Phase-B reservation + low-water (drain_reserve.h) ───────────────────── */
+
+/* A failing allocator: fails malloc/realloc after `budget` successful calls (0 = fail all). */
+typedef struct { int budget; } FailAlloc;
+static void *fa_malloc(void *ctx, size_t n) {
+    FailAlloc *f = ctx;
+    if (f->budget <= 0) return NULL;
+    f->budget--;
+    return malloc(n);
+}
+static void *fa_realloc(void *ctx, void *p, size_t oldn, size_t newn) {
+    FailAlloc *f = ctx; (void)oldn;
+    if (f->budget <= 0) return NULL;
+    f->budget--;
+    return realloc(p, newn);
+}
+static void fa_free(void *ctx, void *p, size_t n) { (void)ctx; (void)n; free(p); }
+
+UTEST(drain_reserve, prealloc_then_atomic_accept_and_wouldblock) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w; mock_init(&w);
+    w.mode = 2;   /* always would-block: everything is buffered into the reserved capacity */
+
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    ASSERT_EQ(kl_drain_prealloc(&d, 8), 0);   /* fixed 8-byte reserved capacity */
+    ASSERT_EQ(d.prealloc, 1);
+    ASSERT_EQ((int)d.buf_cap, 8);
+
+    /* Reserve-write 5 bytes: fits (0 buffered) → ACCEPTED, buffered. */
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "hello", 5), (int)KL_DRAIN_ACCEPTED);
+    ASSERT_EQ((int)kl_drain_buffered(&d), 5);
+
+    /* 4 more would exceed capacity-buffered (8-5=3): WOULD_BLOCK, nothing taken. */
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "wxyz", 4), (int)KL_DRAIN_WOULD_BLOCK);
+    ASSERT_EQ((int)kl_drain_buffered(&d), 5);   /* unchanged — atomic */
+
+    /* Exactly 3 fits (fills to capacity). */
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "xyz", 3), (int)KL_DRAIN_ACCEPTED);
+    ASSERT_EQ((int)kl_drain_buffered(&d), 8);
+    ASSERT_EQ(memcmp(d.buf, "helloxyz", 8), 0);   /* ordering preserved */
+
+    kl_drain_free(&d);
+}
+
+UTEST(drain_reserve, too_large_is_permanent) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w; mock_init(&w);
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    ASSERT_EQ(kl_drain_prealloc(&d, 8), 0);
+
+    /* 9 > capacity 8 → TOO_LARGE, and it's permanent: an EMPTY buffer still can't hold it. */
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "123456789", 9), (int)KL_DRAIN_TOO_LARGE);
+    ASSERT_EQ((int)kl_drain_buffered(&d), 0);
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "123456789", 9), (int)KL_DRAIN_TOO_LARGE);
+    ASSERT_EQ(d.error, 0);   /* TOO_LARGE is not a sticky error */
+
+    kl_drain_free(&d);
+}
+
+UTEST(drain_reserve, direct_send_fast_path_no_buffering) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w; mock_init(&w);
+    w.mode = 0;   /* accept everything inline */
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    ASSERT_EQ(kl_drain_prealloc(&d, 16), 0);
+
+    /* All bytes go out inline; nothing buffered (zero-copy fast path). */
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "hello", 5), (int)KL_DRAIN_ACCEPTED);
+    ASSERT_EQ((int)kl_drain_buffered(&d), 0);
+    ASSERT_EQ((int)w.len, 5);
+    ASSERT_EQ(memcmp(w.buf, "hello", 5), 0);
+
+    kl_drain_free(&d);
+}
+
+UTEST(drain_reserve, prealloc_allocation_failure) {
+    FailAlloc fctx = { .budget = 0 };   /* fail the very first allocation */
+    KlAllocator a = { fa_malloc, fa_realloc, fa_free, &fctx };
+    MockWriter w; mock_init(&w);
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+
+    ASSERT_EQ(kl_drain_prealloc(&d, 8), -1);   /* allocation failed */
+    ASSERT_EQ(d.prealloc, 0);                  /* not in reservation mode */
+    ASSERT_TRUE(d.buf == NULL);
+    /* reserve_write with no reserved capacity fails closed (not a crash). */
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "x", 1), (int)KL_DRAIN_WERROR);
+
+    kl_drain_free(&d);   /* safe on an unallocated drain */
+}
+
+UTEST(drain_reserve, low_water_writable_fires_once_per_crossing) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w; mock_init(&w);
+    w.mode = 2;   /* would-block: fill the buffer */
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    ASSERT_EQ(kl_drain_prealloc(&d, 16), 0);
+    DrainCbCtx cb = { 0 };
+    kl_drain_set_low_water(&d, 4);
+    kl_drain_on_writable(&d, drain_cb, &cb);
+
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "0123456789", 10), (int)KL_DRAIN_ACCEPTED);  /* buffered 10 */
+
+    /* Consume down to 6 (> low_water 4): no crossing yet. */
+    kl_drain_consume(&d, 4);
+    ASSERT_EQ((int)kl_drain_buffered(&d), 6);
+    ASSERT_EQ(cb.count, 0);
+
+    /* Consume to 3 (<= low_water 4): crossing → on_writable fires once. */
+    kl_drain_consume(&d, 3);
+    ASSERT_EQ((int)kl_drain_buffered(&d), 3);
+    ASSERT_EQ(cb.count, 1);
+
+    /* Further consume while already below low-water: no re-fire. */
+    kl_drain_consume(&d, 1);
+    ASSERT_EQ(cb.count, 1);
+
+    kl_drain_free(&d);
+}
+
+UTEST(drain_reserve, requires_prealloc_not_just_max_size) {
+    /* Finding 1 regression: an ordinary (growable) drain with max_size but NO preallocated
+     * buffer must NOT be treated as reservation-capable — reserve_write fails closed without
+     * invoking the writer or modifying state (else a remainder is copied into buf == NULL). */
+    KlAllocator a = kl_allocator_default();
+    MockWriter w; mock_init(&w);
+    w.mode = 1;   /* partial writer — would tempt a remainder copy into a NULL buffer */
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    kl_drain_set_max_size(&d, 64);   /* max_size set, but no prealloc */
+
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "hello", 5), (int)KL_DRAIN_WERROR);
+    ASSERT_EQ(w.call_count, 0);       /* writer never invoked */
+    ASSERT_EQ((int)kl_drain_buffered(&d), 0);
+    ASSERT_TRUE(d.buf == NULL);       /* no state mutation, no crash */
+
+    kl_drain_free(&d);
+}
+
+UTEST(drain_reserve, atomic_partial_prefix_copies_exact_remainder) {
+    /* Finding 4: reserve capacity for the whole remainder, writer takes a nonzero prefix, the
+     * EXACT remainder is copied (caller buffer may then change), flush sends it in order. */
+    KlAllocator a = kl_allocator_default();
+    MockWriter w; mock_init(&w);
+    w.mode = 1;   /* accept len/2 of the direct send */
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    ASSERT_EQ(kl_drain_prealloc(&d, 16), 0);
+
+    char src[7] = "abcdef";   /* mutable source */
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, src, 6), (int)KL_DRAIN_ACCEPTED);
+    ASSERT_EQ(w.call_count, 1);
+    ASSERT_EQ((int)w.len, 3);                 /* prefix "abc" sent inline */
+    ASSERT_EQ((int)kl_drain_buffered(&d), 3); /* remainder "def" buffered */
+    ASSERT_EQ(memcmp(d.buf, "def", 3), 0);
+
+    memset(src, 'Z', sizeof(src));            /* mutate caller buffer — remainder was copied */
+    ASSERT_EQ(memcmp(d.buf, "def", 3), 0);    /* buffered remainder unaffected */
+
+    w.mode = 0;                               /* now accept everything */
+    ASSERT_EQ(kl_drain_flush(&d), 0);
+    ASSERT_EQ((int)w.len, 6);
+    ASSERT_EQ(memcmp(w.buf, "abcdef", 6), 0); /* full original, in order */
+
+    kl_drain_free(&d);
+}
+
+UTEST(drain_reserve, low_water_fires_on_second_crossing) {
+    /* Finding 5: a crossing fires again after the buffer goes back above low-water. */
+    KlAllocator a = kl_allocator_default();
+    MockWriter w; mock_init(&w);
+    w.mode = 2;   /* buffer everything */
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    ASSERT_EQ(kl_drain_prealloc(&d, 16), 0);
+    DrainCbCtx cb = { 0 };
+    kl_drain_set_low_water(&d, 4);
+    kl_drain_on_writable(&d, drain_cb, &cb);
+
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "0123456789", 10), (int)KL_DRAIN_ACCEPTED);
+    kl_drain_consume(&d, 7);       /* 10 -> 3: first crossing */
+    ASSERT_EQ(cb.count, 1);
+    kl_drain_consume(&d, 1);       /* 3 -> 2: still below, no re-fire */
+    ASSERT_EQ(cb.count, 1);
+
+    /* Refill back above low-water, then cross again. */
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "abcdef", 6), (int)KL_DRAIN_ACCEPTED);  /* 2 -> 8 */
+    ASSERT_EQ((int)kl_drain_buffered(&d), 8);
+    kl_drain_consume(&d, 5);       /* 8 -> 3: SECOND crossing */
+    ASSERT_EQ(cb.count, 2);
+    kl_drain_consume(&d, 1);       /* still below: no dup */
+    ASSERT_EQ(cb.count, 2);
+
+    kl_drain_free(&d);
+}
+
+UTEST(drain_reserve, low_water_fires_on_flush_crossing) {
+    KlAllocator a = kl_allocator_default();
+    MockWriter w; mock_init(&w);
+    w.mode = 2;   /* buffer everything first */
+    KlDrain d;
+    kl_drain_init(&d, mock_write, &w, &a);
+    ASSERT_EQ(kl_drain_prealloc(&d, 16), 0);
+    DrainCbCtx cb = { 0 };
+    kl_drain_set_low_water(&d, 4);
+    kl_drain_on_writable(&d, drain_cb, &cb);
+    ASSERT_EQ((int)kl_drain_reserve_write(&d, "0123456789", 10), (int)KL_DRAIN_ACCEPTED);
+
+    /* Now let the writer accept everything and flush → buf empties, crossing low-water. */
+    w.mode = 0;
+    ASSERT_EQ(kl_drain_flush(&d), 0);
+    ASSERT_EQ((int)kl_drain_buffered(&d), 0);
+    ASSERT_EQ(cb.count, 1);   /* fired once on the crossing */
 
     kl_drain_free(&d);
 }
