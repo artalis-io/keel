@@ -63,19 +63,19 @@ typedef struct {
  * ══════════════════════════════════════════════════════════════════════ */
 
 typedef enum {
-    KL_HCLIENT_RESOLVING,
-    KL_HCLIENT_CONNECTING,
-    KL_HCLIENT_PROXY_CONNECTING,   /* sending CONNECT request */
-    KL_HCLIENT_PROXY_HANDSHAKE,    /* reading proxy 200 response */
-    KL_HCLIENT_TLS_HANDSHAKE,
-    KL_HCLIENT_SENDING,
-    KL_HCLIENT_SENDING_STREAM,  /* chunked body from body_read callback */
-    KL_HCLIENT_RECEIVING,
-    KL_HCLIENT_DONE
+    KL_CLIENT_RESOLVING,
+    KL_CLIENT_CONNECTING,
+    KL_CLIENT_PROXY_CONNECTING,   /* sending CONNECT request */
+    KL_CLIENT_PROXY_HANDSHAKE,    /* reading proxy 200 response */
+    KL_CLIENT_TLS_HANDSHAKE,
+    KL_CLIENT_SENDING,
+    KL_CLIENT_SENDING_STREAM,  /* chunked body from body_read callback */
+    KL_CLIENT_RECEIVING,
+    KL_CLIENT_DONE
 } KlClientState;
 
 /* One in-flight racing connect socket (Happy Eyeballs). */
-typedef struct { KlSocketHandle fd; int active; } KlConnAttempt;
+typedef struct { KlSocketHandle fd; int active; } KlClientConnectAttempt;
 
 struct KlClient {
     KlSocketHandle     fd;
@@ -106,7 +106,7 @@ struct KlClient {
     /* Happy Eyeballs — racing connect over the resolved address list (RFC 8305).
      * Only active on the async resolver path (conn_racing=1); the UNIX and sync
      * sync name resolution paths stay single-fd. */
-    KlConnAttempt      conn_attempts[KL_RESOLVE_MAX_ADDRS];
+    KlClientConnectAttempt      conn_attempts[KL_RESOLVE_MAX_ADDRS];
     KlResolveResult    conn_addrs;      /* full list, copied from the resolver */
     int                conn_next;       /* index of next address to dial */
     int                conn_pending;    /* number of in-flight attempts */

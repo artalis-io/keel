@@ -129,7 +129,7 @@ static int start_connect(KlClient *c, const KlSockAddr *addr)
     /* Completion loop: drive connect over the completion axis (no readiness WRITE watcher). */
     if (client_loop_is_completion(c)) {
         c->fd = fd;
-        c->state = KL_HCLIENT_CONNECTING;   /* the connect completion advances us */
+        c->state = KL_CLIENT_CONNECTING;   /* the connect completion advances us */
         if (client_comp_connect(c, fd, addr) != 0) {
             kl_sock_close(c->ev_ctx->sockets, fd);
             c->fd = KL_INVALID_SOCKET;
@@ -145,7 +145,7 @@ static int start_connect(KlClient *c, const KlSockAddr *addr)
     }
 
     c->fd = fd;
-    c->state = (rc == 0) ? KL_HCLIENT_SENDING : KL_HCLIENT_CONNECTING;
+    c->state = (rc == 0) ? KL_CLIENT_SENDING : KL_CLIENT_CONNECTING;
 
     if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
         kl_sock_close(c->ev_ctx->sockets, fd);
@@ -208,7 +208,7 @@ static void he_arm_delay(KlClient *c)
         kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
         c->conn_delay_timer = -1;
     }
-    if (c->state == KL_HCLIENT_CONNECTING && c->conn_next < c->conn_addrs.naddrs)
+    if (c->state == KL_CLIENT_CONNECTING && c->conn_next < c->conn_addrs.naddrs)
         c->conn_delay_timer = kl_timer_add(c->ev_ctx,
                                            (uint64_t)c->connect_delay_ms,
                                            he_on_delay, c);
@@ -274,7 +274,7 @@ static int he_new_attempt(KlClient *c, int idx)
  * exhausted and nothing is pending. */
 static void he_start_next(KlClient *c)
 {
-    while (c->state == KL_HCLIENT_CONNECTING &&
+    while (c->state == KL_CLIENT_CONNECTING &&
            c->conn_next < c->conn_addrs.naddrs) {
         int idx = c->conn_next++;
         if (he_new_attempt(c, idx) == 0) {
@@ -282,7 +282,7 @@ static void he_start_next(KlClient *c)
             return;
         }
     }
-    if (c->state == KL_HCLIENT_CONNECTING && c->conn_pending == 0) {
+    if (c->state == KL_CLIENT_CONNECTING && c->conn_pending == 0) {
         c->error = (c->conn_last_err != KL_ERR_NONE) ? c->conn_last_err
                                                      : KL_ERR_CONNECT;
         async_complete_error(c);
@@ -294,7 +294,7 @@ static void he_on_delay(void *user_data)
 {
     KlClient *c = user_data;
     c->conn_delay_timer = -1;
-    if (c->state == KL_HCLIENT_CONNECTING)
+    if (c->state == KL_CLIENT_CONNECTING)
         he_start_next(c);
 }
 
@@ -304,7 +304,7 @@ static void he_on_deadline(void *user_data)
 {
     KlClient *c = user_data;
     c->deadline_timer = -1;
-    if (c->state == KL_HCLIENT_DONE)
+    if (c->state == KL_CLIENT_DONE)
         return;
     he_close_attempts(c, KL_INVALID_SOCKET);    /* drop any racing sockets */
     c->error = KL_ERR_TIMEOUT;
@@ -387,7 +387,7 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
     c->conn_pending = 0;
     c->conn_racing = 1;
     c->conn_last_err = KL_ERR_NONE;
-    c->state = KL_HCLIENT_CONNECTING;
+    c->state = KL_CLIENT_CONNECTING;
 
     he_arm_deadline(c);
     he_start_next(c);
@@ -449,14 +449,14 @@ static void he_proceed_after_connect(KlClient *c)
             async_complete_error(c);
             return;
         }
-        c->state = KL_HCLIENT_PROXY_CONNECTING;
+        c->state = KL_CLIENT_PROXY_CONNECTING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
         return;
     }
 
     /* Proxy: HTTP target — request already has absolute-form URL, send directly */
     if (c->is_proxied) {
-        c->state = KL_HCLIENT_SENDING;
+        c->state = KL_CLIENT_SENDING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
         return;
     }
@@ -482,10 +482,10 @@ static void he_proceed_after_connect(KlClient *c)
             return;
         }
 
-        c->state = KL_HCLIENT_TLS_HANDSHAKE;
+        c->state = KL_CLIENT_TLS_HANDSHAKE;
         async_handle_tls_handshake(c);
     } else {
-        c->state = KL_HCLIENT_SENDING;
+        c->state = KL_CLIENT_SENDING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
     }
 }
@@ -533,7 +533,7 @@ static void async_handle_proxy_connecting(KlClient *c)
     }
     c->proxy_recv_len = 0;
 
-    c->state = KL_HCLIENT_PROXY_HANDSHAKE;
+    c->state = KL_CLIENT_PROXY_HANDSHAKE;
     kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
 }
 
@@ -613,7 +613,7 @@ static void async_handle_proxy_handshake(KlClient *c)
             return;
         }
 
-        c->state = KL_HCLIENT_TLS_HANDSHAKE;
+        c->state = KL_CLIENT_TLS_HANDSHAKE;
         async_handle_tls_handshake(c);
         return;
     }
@@ -625,7 +625,7 @@ static void async_handle_tls_handshake(KlClient *c)
 {
     KlTlsResult r = c->tls->handshake(c->tls, c->fd);
     if (r == KL_TLS_OK) {
-        c->state = KL_HCLIENT_SENDING;
+        c->state = KL_CLIENT_SENDING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
         return;
     }
@@ -668,13 +668,13 @@ static void async_handle_sending(KlClient *c)
 
     /* If streaming body, transition to chunk-send state */
     if (c->body_read) {
-        c->state = KL_HCLIENT_SENDING_STREAM;
+        c->state = KL_CLIENT_SENDING_STREAM;
         c->chunk_phase = 0;
         async_handle_sending_stream(c);
         return;
     }
 
-    c->state = KL_HCLIENT_RECEIVING;
+    c->state = KL_CLIENT_RECEIVING;
     kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
 }
 
@@ -801,7 +801,7 @@ static void async_handle_sending_stream(KlClient *c)
                 c->chunk_hdr_sent += (size_t)w;
             }
             /* Done sending — switch to receiving */
-            c->state = KL_HCLIENT_RECEIVING;
+            c->state = KL_CLIENT_RECEIVING;
             kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
             return;
 
@@ -880,9 +880,9 @@ static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data
     KlClient *c = user_data;
 
     switch (c->state) {
-    case KL_HCLIENT_RESOLVING:
+    case KL_CLIENT_RESOLVING:
         break;  /* DNS resolution handled by resolver callback, not watcher */
-    case KL_HCLIENT_CONNECTING:
+    case KL_CLIENT_CONNECTING:
         /* Happy Eyeballs races several fds — dispatch by the fd that fired.
          * The single-fd UNIX / sync-sync name resolution path uses c->fd directly.
          * On a completion loop the connect result is carried in `ready` (KL_EVENT_WRITE =
@@ -900,25 +900,25 @@ static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data
             async_handle_connecting(c);
         }
         break;
-    case KL_HCLIENT_PROXY_CONNECTING:
+    case KL_CLIENT_PROXY_CONNECTING:
         async_handle_proxy_connecting(c);
         break;
-    case KL_HCLIENT_PROXY_HANDSHAKE:
+    case KL_CLIENT_PROXY_HANDSHAKE:
         async_handle_proxy_handshake(c);
         break;
-    case KL_HCLIENT_TLS_HANDSHAKE:
+    case KL_CLIENT_TLS_HANDSHAKE:
         async_handle_tls_handshake(c);
         break;
-    case KL_HCLIENT_SENDING:
+    case KL_CLIENT_SENDING:
         async_handle_sending(c);
         break;
-    case KL_HCLIENT_SENDING_STREAM:
+    case KL_CLIENT_SENDING_STREAM:
         async_handle_sending_stream(c);
         break;
-    case KL_HCLIENT_RECEIVING:
+    case KL_CLIENT_RECEIVING:
         async_handle_receiving(c);
         break;
-    case KL_HCLIENT_DONE:
+    case KL_CLIENT_DONE:
         break;
     }
 }
@@ -967,7 +967,7 @@ static void async_complete_success(KlClient *c)
         kl_client_decompress_response_body(&c->resp, c->decompress_cfg);
     }
 
-    c->state = KL_HCLIENT_DONE;
+    c->state = KL_CLIENT_DONE;
     c->error = KL_ERR_NONE;
     if (c->on_done)
         c->on_done(c, c->user_data);
@@ -1019,7 +1019,7 @@ static void async_complete_error(KlClient *c)
         c->proxy_recv = NULL;
     }
 
-    c->state = KL_HCLIENT_DONE;
+    c->state = KL_CLIENT_DONE;
     /* error already set by caller — fallback if not set */
     if (c->error == KL_ERR_NONE)
         c->error = KL_ERR_IO;
@@ -1261,7 +1261,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;
-        c->state = KL_HCLIENT_RESOLVING;
+        c->state = KL_CLIENT_RESOLVING;
         KlResolveReq *rq = resolver->resolve(resolver, ev_ctx,
                                              resolve_host, resolve_port,
                                              dns_resolved, c);
@@ -1271,7 +1271,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
          * that case the caller owns c (and frees it via kl_client_free); a NULL
          * return is NOT a start failure and must not free c out from under
          * on_done. Only when we are still RESOLVING did resolve() truly defer. */
-        if (c->state != KL_HCLIENT_RESOLVING)
+        if (c->state != KL_CLIENT_RESOLVING)
             return c;                 /* rq discarded; resolve_req cleared by dns_resolved */
         c->resolve_req = rq;
         if (!c->resolve_req) {
@@ -1382,7 +1382,7 @@ void kl_client_cancel(KlClient *client)
     if (kl_handle_valid(client->fd)) {
         /* Single-fd completion connect still in flight: drop its pending connect op before the
          * watcher/fd go away (HE attempts were already dropped by he_close_attempts above). */
-        if (client->state == KL_HCLIENT_CONNECTING && client_loop_is_completion(client))
+        if (client->state == KL_CLIENT_CONNECTING && client_loop_is_completion(client))
             kl_comp_cancel(client->ev_ctx, client->fd);
         kl_watcher_del(client->ev_ctx, client->fd);
 
@@ -1404,7 +1404,7 @@ void kl_client_cancel(KlClient *client)
         }
     }
 
-    client->state = KL_HCLIENT_DONE;
+    client->state = KL_CLIENT_DONE;
     if (client->error == KL_ERR_NONE)
         client->error = KL_ERR_IO;
 }
@@ -1415,7 +1415,7 @@ void kl_client_free(KlClient *client)
         return;
 
     /* Cancel if still in-flight (cancels any pending resolve_req first). */
-    if (client->state != KL_HCLIENT_DONE)
+    if (client->state != KL_CLIENT_DONE)
         kl_client_cancel(client);
 
     /* Destroy the auto-created resolver (after any resolve_req was cancelled). */
@@ -1577,7 +1577,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
         c->fd = pconn.fd;
         c->tls = pconn.tls;
         c->pool_conn = pconn;
-        c->state = KL_HCLIENT_SENDING;
+        c->state = KL_CLIENT_SENDING;
 
         if (kl_watcher_add(ev_ctx, c->fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
             c->fd = KL_INVALID_SOCKET;
@@ -1599,7 +1599,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;
-        c->state = KL_HCLIENT_RESOLVING;
+        c->state = KL_CLIENT_RESOLVING;
         c->resolve_req = resolver->resolve(resolver, ev_ctx,
                                             host_buf, parsed.port,
                                             dns_resolved, c);

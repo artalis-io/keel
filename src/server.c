@@ -118,7 +118,7 @@ static int kl_server_bind_listener(KlServer *s) {
     if (s->config.listen_fd > 0)
         return kl_server_adopt_fd(s);
     if (s->config.transport == KL_TRANSPORT_UNIX)
-        return kl_srv_bind_unix(s);
+        return kl_server_plat_bind_unix(s);
     return kl_server_bind_tcp(s);
 }
 
@@ -138,7 +138,7 @@ int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
     if (!conn || !kl_handle_valid(conn->fd))
         return -1;
 
-    return kl_srv_peer_label_fd(conn->fd, buf, buflen);
+    return kl_server_plat_peer_label_fd(conn->fd, buf, buflen);
 }
 
 const KlSockAddr *kl_request_peer_sockaddr(const KlRequest *req) {
@@ -198,9 +198,9 @@ int kl_systemd_listen_fds(int *count) {
     }
 
     /* Clear so the variables are not inherited by child processes. */
-    kl_srv_unsetenv("LISTEN_PID");
-    kl_srv_unsetenv("LISTEN_FDS");
-    kl_srv_unsetenv("LISTEN_FDNAMES");
+    kl_server_plat_unsetenv("LISTEN_PID");
+    kl_server_plat_unsetenv("LISTEN_FDS");
+    kl_server_plat_unsetenv("LISTEN_FDNAMES");
     if (count)
         *count = n;
     return first;
@@ -242,9 +242,9 @@ int kl_systemd_listen_fd_by_name(const char *name) {
         }
     }
 
-    kl_srv_unsetenv("LISTEN_PID");
-    kl_srv_unsetenv("LISTEN_FDS");
-    kl_srv_unsetenv("LISTEN_FDNAMES");
+    kl_server_plat_unsetenv("LISTEN_PID");
+    kl_server_plat_unsetenv("LISTEN_FDS");
+    kl_server_plat_unsetenv("LISTEN_FDNAMES");
     return result;
 }
 
@@ -255,7 +255,7 @@ void kl_server_close_listener(KlServer *s) {
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
     }
-    kl_srv_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
+    kl_server_plat_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
 }
 
 /* kl_server_conn_release moved to the freestanding-safe server core (server_core.c)
@@ -319,7 +319,7 @@ int kl_server_run(KlServer *s) {
     /* Ignore SIGPIPE + install SIGTERM/SIGINT graceful-stop handlers (POSIX) or
      * a console Ctrl handler (Windows). Done here — past the setup early-returns
      * — so a failed bind never leaves handlers installed without a restore. */
-    kl_srv_signals_install(s);
+    kl_server_plat_signals_install(s);
 
     atomic_store(&s->running, 1);
     atomic_store(&s->draining, 0);
@@ -637,7 +637,7 @@ transition:
         kl_server_drain_progress(s, now);
     }
 
-    kl_srv_signals_restore(s);
+    kl_server_plat_signals_restore(s);
 
     return 0;
 }
