@@ -1,11 +1,54 @@
-# Keel Stream Transport Contract (normative)
+# Keel Stream Transport Contract (DRAFT — not yet normative)
 
 **Date:** 2026-08-08
-**Status:** normative contract for the generic `KlStream` / `KlListener` layer. Written before
-migrating HTTP code (per the Phase-1 audit, `docs/generic_transport_audit.md`). It describes the
-semantics BOTH the readiness and completion implementations, and EVERY transport provider
-(TCP / Unix / lwIP / EFI / future pipes / vsock), must present identically. Where possible it
-codifies behavior Keel already implements today so migration is retype-not-redesign.
+**Status: DRAFT.** A prior version was labelled "normative"; that was premature — it promised
+capabilities Keel does not have yet (per-op cancel, half-close/abort, prefix-accept writes,
+TLS-wrapped-stream semantics) as though existing primitives already guaranteed them. This revision
+(a) demotes it to DRAFT, (b) tiers the semantics into what exists vs. must-be-built vs. optional,
+and (c) records the resolved design decisions for the must-be-built parts. It becomes normative
+only after the Tier-2 machinery lands (see `docs/generic_transport_audit.md` §8).
+
+### Capability tiers (which parts of this doc are real *today* vs. new work)
+
+- **Tier 1 (extraction — safe to implement now):** push read-delivery callback; `kl_stream_write`
+  with an **atomic-accept** result; stream-level `pause`/`resume`; `kl_stream_close`; EOF vs RST on
+  the read side (already observable via `KlIoStatus`). **Plaintext only.**
+- **Tier 2 (NEW machinery — designed here, must be built before this is normative):** the concrete
+  write-result type + backpressure API; operation identity + cancellation; deferred-destruction
+  ownership; TLS-wrapped-stream state machine.
+- **Tier 3 (OPTIONAL — NOT in the initial contract):** `shutdown_write` half-close, `abort`/RST
+  (both are new `KlSocketOps` provider work — no such op exists today), a tagged non-socket
+  `KlEndpoint` union, file-transfer (`sendfile`) extensions.
+
+### Resolved decisions (this DRAFT commits to these; sections below are read through them)
+
+1. **Write acceptance = ATOMIC.** `kl_stream_write` accepts *all* bytes or *none*; it returns a
+   `KlStreamWriteResult { status; accepted; io_status }` where `accepted ∈ {0, len}` for the atomic
+   policy. Maps naturally onto bounded buffering + today's `KlDrain` (0/-1). Prefix-acceptance is a
+   possible later change (requires extending `KlDrain`); not the initial policy.
+2. **Backpressure signal = one writable callback at low-water.** Today `KlDrain.on_drain` fires
+   only empty→non-empty→empty; the API defines separate high/low-water marks and one `on_writable`
+   at low-water — a small `KlDrain` extension (Tier 2), not a new subsystem.
+3. **Pause = STRICT.** No read callback fires after `pause` returns; a completion recv already
+   outstanding at pause time completes into the single receive buffer and its bytes are delivered
+   only after `resume`. Bounded to one buffer. (Resolves the earlier §5 contradiction.)
+4. **Cancellation = stream-level for the first cut.** No per-*write* cancel (that needs the Tier-2
+   op-lifecycle). `kl_stream_cancel(stream)` cancels the stream's in-flight I/O; `connect`/`accept`
+   are separately cancellable op *handles* (they precede a live stream).
+5. **Destruction = caller-owned + deferred close + `on_close` terminal (normative, §7).** `close`
+   *begins* teardown; the object stays internally retained until every outstanding op is confirmed
+   retired (interoperates with EFI quarantine — retirement is *confirmed*, never "immediate"), then
+   the single `on_close` callback fires; only then may the caller free/reuse the (embedded or
+   pooled) storage. No callback after `on_close`.
+6. **Endpoints = `KlSockAddr` directly.** No `TCP`/`Unix`/`lwIP`/`EFI` endpoint "kinds" — provider
+   selection stays in `KlEventCtx`/config. A tagged union appears only for a real non-socket
+   address (Tier 3).
+7. **TLS = plaintext first.** The initial `KlStream` is plaintext; a TLS-wrapped stream is a later
+   phase with the state machine in §6bis. (`KlTls` already wraps the socket seam, but the
+   generic-stream TLS semantics below are not yet implemented.)
+
+The remainder describes the intended semantics both event models and every provider must present
+identically once each tier lands. Read every section through the decisions above.
 
 A protocol author programs to *this contract only*. They must never need to know the event model
 (epoll/kqueue/WSAPoll/io_uring/IOCP), the provider (native vs lwIP vs EFI), or that a native
@@ -35,7 +78,7 @@ completion implementation. **provider** = the socket/transport implementation (T
 4. Output buffering is **bounded**; read-side delivery is **pausable** and never accumulates
    unboundedly.
 5. Cancellation, timeout, peer-close and explicit close have a **deterministic precedence**
-   (§5.6).
+   (§6.3).
 6. The stream is single-threaded / one-event-loop-affine (Keel's model): all callbacks for a
    stream run on its loop thread; no cross-thread op submission on a stream.
 
@@ -52,8 +95,11 @@ readers and the completion `comp_on_read` → dispatch.)
   into the stream's `read_buf`) and completion (recv into a posted buffer) without the caller
   pre-posting buffers, and it's what the HTTP parser + body readers already assume.
 - **Validity duration: the bytes are valid only for the duration of the callback.** A caller that
-  needs them longer must copy (the HTTP parser copies what it retains; body readers copy into
-  their own storage). After the callback returns, Keel may reuse/overwrite the buffer.
+  needs them longer must copy. (Nuance — not a stream promise: Keel's HTTP layer deliberately
+  *retains* some pointers into the read/header buffer with documented lifetime limits, e.g. header
+  values live until the buffer is reset; that is a per-caller optimization built on knowledge of
+  the buffer, not a guarantee the stream makes. The generic guarantee is only "valid for the
+  callback.") After the callback returns, Keel may reuse/overwrite the buffer.
 - **Reentrancy: a read callback MAY synchronously request another read / pause / write / close.**
   These are recorded and take effect without deep recursion (the backend re-arms or posts after
   the callback returns; it must not recurse per delivered chunk). A caller must tolerate its next
@@ -82,10 +128,13 @@ readers and the completion `comp_on_read` → dispatch.)
     consumed from `data` inline and any remainder is **copied** into the stream's bounded write
     buffer (`KlDrain`) — so after the call returns the caller may free `data`. I.e. the caller's
     buffer need only remain valid *for the duration of the call*.
-  - Completion: a posted write **copies or pins** the bytes for the op's lifetime (invariant 2).
-    The completion contract is **copy-required unless the caller guarantees validity to
-    completion** — Keel's default is copy (proven necessary: the completion TLS send path frees its
-    ciphertext right after posting; a reference would be a use-after-free).
+  - Completion: a posted write **copies or pins** the bytes for the op's lifetime (invariant 2) —
+    this is backend-specific and NOT a single "copy is the default." Some backends copy (the
+    completion TLS send path frees its ciphertext right after posting — there a reference would be
+    a use-after-free); others pin (lwIP-raw legitimately retains live response segments). The
+    *caller-facing* rule is the invariant, not the mechanism: **the caller's buffer need only remain
+    valid for the duration of the `kl_stream_write*` call**; whether the backend copied or pinned is
+    below the contract.
   - Net caller rule: **after `kl_stream_write*` returns, the caller may reuse/free its buffer.**
     (A future zero-copy `write_owned` that transfers ownership until a completion callback may be
     added as an explicit opt-in; it is not the default contract.)
@@ -146,15 +195,19 @@ accumulates unboundedly.
 
 ## 5. Read pause / resume
 
-- `kl_stream_pause(stream)` — stop read-delivery. While paused:
-  - readiness backends drop READ interest (no readable dispatch);
-  - completion backends do **not** post a new recv (at most the one already-outstanding recv
-    completes, its bytes delivered, then no re-post);
-  - Keel does not accumulate beyond that one in-flight buffer.
-- `kl_stream_resume(stream)` — re-enable delivery: readiness re-arms READ; completion re-posts a
-  recv. **Idempotent and safe to call multiple times** (resume-when-not-paused is a no-op;
-  double-resume does not double-post). Pause is likewise idempotent.
-- This is the existing `read_paused` mechanism, renamed off the HTTP request onto the stream.
+**STRICT pause (resolved decision #3).** No read callback fires after `kl_stream_pause(stream)`
+returns.
+- readiness backends drop READ interest (no readable dispatch);
+- completion backends do **not** post a new recv; a recv **already outstanding** at pause time
+  completes into the single receive buffer but its bytes are **held, not delivered** — they are
+  handed to the read callback only after `kl_stream_resume`. (This is the fix for the earlier
+  contradiction, which allowed one post-pause delivery.)
+- Keel does not accumulate beyond that one in-flight buffer.
+- `kl_stream_resume(stream)` re-enables delivery (first flushing any held bytes), then readiness
+  re-arms READ / completion re-posts a recv. **Both pause and resume are idempotent** (double-call
+  is a no-op; resume does not double-post).
+- This is the existing `read_paused` mechanism, renamed off the HTTP request onto the stream, plus
+  the strict "hold the already-in-flight buffer" rule (new, Tier 2).
 
 ---
 
@@ -162,12 +215,16 @@ accumulates unboundedly.
 
 ### 6.1 The close/terminal verbs
 
-| Verb | Meaning | Effect |
-|---|---|---|
-| `kl_stream_shutdown_write` | orderly local finish of the *write* side | send FIN; further writes → `CLOSED`; reads continue until peer EOF |
-| `kl_stream_close` | orderly full close | flush-then-close best effort (bounded); release the stream after outstanding ops retire |
-| `kl_stream_abort` | reset / hard close | send RST where supported; drop queued output; retire ops immediately |
-| `kl_stream_cancel(op)` | cancel one in-flight op | that op reaches the **cancelled** terminal; the stream stays usable |
+| Verb | Tier | Meaning | Effect |
+|---|---|---|---|
+| `kl_stream_close` | 1 | orderly full close | flush-then-close best effort (bounded); deferred release per §7 (`on_close` when ops confirmed retired) |
+| `kl_stream_cancel(stream)` | 1 | cancel the stream's in-flight I/O | in-flight recv/send reach **cancelled** (once each); stream then closes per §7 |
+| `kl_stream_shutdown_write` | **3 (OPTIONAL)** | orderly local finish of the *write* side | send FIN; further writes → `CLOSED`; reads continue until peer EOF. **New provider work: `KlSocketOps` has no `shutdown` op today** (POSIX/Winsock/lwIP/EFI impls or explicit UNSUPPORTED). Not in the initial contract. |
+| `kl_stream_abort` | **3 (OPTIONAL)** | reset / hard close | send RST where supported; drop queued output; ops retire per §7 (**confirmed**, never "immediate" — must interoperate with EFI quarantine). Also new provider work (no `abort` op today). |
+
+Note: per resolved decision #4, the first cut has **stream-level** cancel, not per-*write* cancel
+(that needs the Tier-2 op-lifecycle). `connect`/`accept` are separately cancellable op handles
+(§8) since they precede a live stream.
 
 ### 6.2 Which terminal callback fires for each event
 
@@ -197,16 +254,54 @@ lifted to the stream contract.
 
 ---
 
-## 7. Lifecycle / destruction (invariants 1, 3, 7)
+## 6bis. TLS-wrapped stream (Tier 2 — deferred, plaintext ships first)
 
-- Destroying a `KlStream` with outstanding completion ops: the stream enters a **draining**
-  state — no new callbacks are delivered to the caller, outstanding ops are cancelled, and the
-  underlying handle/buffers are released only once the backend confirms every op retired (today:
-  the EFI provider's quarantine-on-failed-cancel + generation guard; the pool free path guards
-  every vtable call). **No callback fires after destruction begins.**
-- `close`/`abort` inside a callback is legal (recorded; applied after the callback returns).
-- `cancel` inside a callback is legal.
-- Parent (`KlListener`/`KlServer`) destruction closes its streams under the same rules.
+The initial `KlStream` is **plaintext**. A TLS-wrapped stream is a later phase; `KlTls` already
+wraps the socket seam (socket-BIO: `t->sp = ctx->sockets`; or completion memory-BIO via
+`feed_input`/`drain_output`), but the *generic-stream* TLS semantics below are not yet implemented
+and are not normative. When TLS wrapping lands it must specify — so the wrapped stream stays
+model-neutral and does not accidentally become readiness-shaped:
+
+- **Handshake-before-delivery:** a newly connected/accepted TLS stream is delivered to the protocol
+  only *after* a successful handshake (no app bytes before). Handshake **failure** and **deadline**
+  are connect/accept terminals (§8), distinct from a plaintext connect.
+- **Cross-direction wants:** a `write` may need to read (`WANT_READ`) and a `read` may need to write
+  (`WANT_WRITE`); the wrapped stream drives the underlying transport for the opposite direction
+  without surfacing it to the protocol.
+- **`pending()` drain:** after decrypting, buffered plaintext (`tls->pending()`) must be delivered
+  without waiting for another transport event (else completion mode stalls).
+- **Memory-BIO ciphertext ownership** (completion): the wrapped stream owns the ciphertext in/out
+  rings for the op lifetime (the copy-required send lesson from the completion-TLS review).
+- **Close:** orderly TLS `close_notify` vs transport FIN are distinct; TLS shutdown precedes (Tier-3)
+  transport `shutdown_write`.
+- **ALPN** is exposed via the existing `KlTls.alpn_protocol` accessor on the wrapped stream.
+
+Until then, TLS continues to work through the current HTTP paths unchanged; migrating it onto the
+generic stream is explicitly a separate, later step.
+
+---
+
+## 7. Lifecycle / destruction — NORMATIVE ownership model (invariants 1, 3, 4)
+
+Ownership is a UAF boundary, so it is normative even in this DRAFT (resolved decision #5):
+
+- **The stream storage is caller-owned** — embedded in the caller's struct (e.g.
+  `KlHttpConn { KlStream stream; … }`) or in a caller pool. Keel never `malloc`s the stream behind
+  the caller's back (preserves Keel's preallocated-slot, allocation-free accept model).
+- **`close` is deferred, not synchronous.** `kl_stream_close(stream)` *begins* teardown and returns;
+  the stream enters a **draining** state: no further read/write callbacks are delivered, any
+  outstanding op is cancelled, and the underlying handle/buffers are released only once the backend
+  **confirms** every op retired (today: the EFI quarantine-on-failed-cancel + generation guard; the
+  pool-free path NULL-guards every vtable call).
+- **The caller learns teardown finished via exactly one `on_close(stream)` terminal.** Only after
+  `on_close` fires may the caller free or reuse the (embedded/pooled) storage. **No callback of any
+  kind fires after `on_close`.** (For an embedded stream, the parent must not be released until
+  `on_close`.)
+- `close`/`cancel` **inside a callback** are legal (recorded; applied after the callback returns).
+- Parent (`KlListener`/HTTP server) destruction closes its streams under the same rules and waits
+  for their `on_close` before releasing the pool.
+- "Retirement is confirmed, not immediate" — `abort` (Tier 3) obeys the same deferred `on_close`;
+  it never assumes synchronous op retirement (EFI cannot guarantee it).
 
 ---
 
@@ -219,18 +314,28 @@ lifted to the stream contract.
   to the caller.
 - **Accept:** `kl_listener_accept` yields the next connected `KlStream` (readiness: listener
   readable → `accept`; completion: posted accept → `KL_COMP_ACCEPT`), identical to the caller.
-  Accept is **capacity-gated**: a listener never accepts beyond the caller's configured capacity
-  (today's backpressure-floor + the EFI capacity-gated arming). `cancel` before/racing an accept,
-  and listener close with a pending accept, follow §6/§7.
+  Accept is **capacity-gated by a listener-intrinsic credit**, not by reaching into a server pool:
+  the listener owns its accepted-stream target (a caller-supplied pool + a credit count), and
+  never accepts beyond that credit (this generalizes today's server-pool backpressure floor + the
+  EFI capacity-gated arming, which are currently `KlServer`-scoped). `cancel` before/racing an
+  accept, and listener close with a pending accept, follow §6/§7 (deferred `on_close`).
 
 ---
 
-## 9. Endpoints (§0)
+## 9. Endpoints (§0) — `KlSockAddr` directly (resolved decision #6)
 
-`KlEndpoint` = `KlSockAddr` (already neutral: IPv4/IPv6/Unix) + a transport-kind tag so
-`connect`/`bind`/`listen` dispatch to the correct provider. Non-socket kinds (future pipe/vsock)
-carry their own address payload and are NOT forced into `sockaddr`. `local_endpoint`/`peer_endpoint`
-return a `KlEndpoint`; a caller reads host/port/path via the existing `kl_sockaddr_*` accessors.
+The initial `KlEndpoint` **is `KlSockAddr`** (already neutral: IPv4/IPv6/Unix). It carries
+**address identity only** — it does NOT carry a provider/transport "kind" (`TCP`/`Unix`/`lwIP`/
+`EFI`). Those are two different axes: address family is intrinsic to the address, but *which
+provider* handles it (native vs lwIP vs EFI) is selected through `KlEventCtx`/config — putting
+provider identity in the endpoint would violate the axis separation the project established. So
+`connect`/`bind`/`listen` take a `KlSockAddr` and dispatch through the *configured* provider;
+`local_endpoint`/`peer_endpoint` return a `KlSockAddr` read via the existing `kl_sockaddr_*`
+accessors.
+
+A **tagged `KlEndpoint` union** (address family/kind + payload) is introduced ONLY when a genuinely
+non-socket address type appears that cannot live in `KlSockAddr` (e.g. a Windows named pipe path or
+vsock CID/port) — Tier 3. Even then the tag distinguishes *address kinds*, never *providers*.
 
 ---
 
@@ -251,7 +356,8 @@ return a `KlEndpoint`; a caller reads host/port/path via the existing `kl_sockad
 A backend/provider conforms iff, observably through `KlStream`/`KlListener` only:
 1-byte fragmented reads reassemble; large reads/writes stream within bounds; EOF ≠ reset; write
 returns the four-way outcome; `writev` matches `write`; pause halts delivery + accumulation;
-resume is idempotent; `shutdown_write` then writes → `CLOSED` while reads continue; every op
+resume is idempotent; [Tier 3, when implemented] `shutdown_write` then writes → `CLOSED` while
+reads continue; every op
 reaches exactly one terminal; cancel/timeout/peer-close obey §6.3 precedence; close/cancel inside a
 callback are safe; no callback after destruction; no UAF / double-callback / leak under ASan+UBSan;
 identical results under readiness and completion and across TCP/Unix/lwIP where available.
