@@ -76,6 +76,31 @@ typedef struct KlStream {
     int                send_inflight;  /**< a submit is outstanding — do not post another */
     size_t             inflight_len;   /**< bytes handed to the in-flight submit */
     int                inflight_copying; /**< ownership policy CAPTURED for the in-flight op */
+
+    /* ── Phase-B strict read pause/resume machinery (internal; API in src/stream_read.h) ──
+     * Mediates the raw receive path: a receive lands in the stable read_buf; while paused the
+     * completed receive is HELD (undelivered) until resume, which delivers it exactly once
+     * before re-arming. Dormant until kl_stream_read_init(); read hooks (deliver/arm/disarm)
+     * are adapter-supplied (inline pointers, internal names in src/stream_read.h). No HTTP
+     * routing yet; INTERNAL/UNSTABLE. read_paused (above) is the pause flag. */
+    void             (*read_deliver)(void *ctx, const char *buf, size_t len, int ok); /**< deliver hook */
+    int              (*read_arm)(void *ctx);   /**< arm/post the next receive: 0 ok, -1 fail */
+    void             (*read_disarm)(void *ctx);/**< readiness: drop READ interest; completion: no-op */
+    void              *read_ctx;               /**< shared context for the read hooks */
+    int                read_completion_mode;   /**< 1 = completion (a posted recv completes → held) */
+    int                read_inited;            /**< 1 once kl_stream_read_init installed the hooks */
+    int                recv_inflight;          /**< a receive is armed/posted */
+    int                recv_held;              /**< a completed receive is held (undelivered) */
+    size_t             held_len;               /**< held byte count (<= read_cap) */
+    int                held_ok;                /**< held terminal flag: 1 = data, 0 = EOF/error */
+    int                read_closed;            /**< read side closed (terminal delivered / cancelled) */
+    /* Arm trampoline (iterative, bounds stack under synchronous completion): `arming` marks that
+     * we are inside read_arm(); a re-arm requested during that window sets `rearm_pending` for the
+     * trampoline loop instead of recursing; `completed_inline` records that on_recv retired the
+     * current arm synchronously, so read_arm's later return can't retroactively fail it. */
+    int                arming;
+    int                rearm_pending;
+    int                completed_inline;
 } KlStream;
 
 typedef enum {
