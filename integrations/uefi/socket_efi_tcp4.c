@@ -1129,9 +1129,11 @@ int kl_uefi_socket_accept_arm(KlSocketHandle fd, int want) {
     return posted;
 }
 
-/* accept(): non-blocking. Poll the listener, hand back the first completed Accept
- * token's child as a fresh KlUefiConn (peer via GetModeData), re-arm that token.
- * KL_INVALID_SOCKET + EFI_NOT_READY (would-block) when none is ready. */
+/* accept(): non-blocking. Poll the listener, hand back the first completed Accept token's
+ * child as a fresh KlUefiConn (peer via GetModeData). It does NOT re-arm the consumed token
+ * — re-arming is capacity-gated and done explicitly by kl_uefi_socket_accept_arm (the event
+ * layer arms only up to free Keel pool slots; see below). KL_INVALID_SOCKET + EFI_NOT_READY
+ * (would-block) when none is ready. */
 static KlSocketHandle efi_sock_accept(void *cx, KlSocketHandle fd, KlSockAddr *peer) {
     (void)cx;
     if (kl_uefi_after_ebs()) return KL_INVALID_SOCKET;
