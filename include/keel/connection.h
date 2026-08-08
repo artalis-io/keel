@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <keel/sockaddr.h>   /* KlSockAddr peer_addr */
+#include <keel/drain.h>      /* KlDrain wq (Phase-B write queue, embedded in KlStream) */
 
 /** @brief Default read buffer size (bytes). */
 #define KL_READ_BUF_SIZE 8192
@@ -56,6 +57,25 @@ typedef struct KlStream {
     int read_paused;            /**< Read-side flow control: 1 = body reads paused
                                      (kl_request_pause_body). Readiness drops READ interest;
                                      completion stops posting the next recv. */
+
+    /* ── Phase-B write machinery (internal; API in src/stream_write.h) ────────────────
+     * The bounded, preallocated write queue + completion send-in-flight tracking that the
+     * generic KlStream write path uses. Dormant (zero) until kl_stream_write_init(); the raw
+     * transport writer/submit hooks are supplied by the (interim) HTTP/TLS adapter — no TLS
+     * state lives here. Not yet routed by the HTTP response path; INTERNAL/UNSTABLE. */
+    KlDrain            wq;          /**< Bounded write queue (reserved capacity at init) */
+    int                wq_inited;   /**< 1 once kl_stream_write_init preallocated wq */
+    int                wq_err;      /**< Sticky write-side error (submission/completion failure) */
+    /* Completion-mode send tracking: exactly one async send may be in flight at a time; a
+     * successful submission does NOT permit another until its WRITE completion (ordering).
+     * The submit hook is an inline function pointer (no named public typedef while the
+     * machinery is internal — the internal name is in src/stream_write.h). */
+    int              (*submit_fn)(void *ctx, const char *data, size_t len); /**< NULL = readiness */
+    void              *submit_ctx;  /**< submit hook context */
+    int                submit_copying; /**< configured ownership policy: 1 = backend copies on submit */
+    int                send_inflight;  /**< a submit is outstanding — do not post another */
+    size_t             inflight_len;   /**< bytes handed to the in-flight submit */
+    int                inflight_copying; /**< ownership policy CAPTURED for the in-flight op */
 } KlStream;
 
 typedef enum {

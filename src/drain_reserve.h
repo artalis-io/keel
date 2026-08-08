@@ -40,6 +40,12 @@ int kl_drain_prealloc(KlDrain *d, size_t capacity);
  * buffer is non-empty the whole write is appended (no direct send). */
 KlDrainWriteStatus kl_drain_reserve_write(KlDrain *d, const char *data, size_t len);
 
+/* Buffer-only atomic reservation (reservation mode only): identical capacity semantics to
+ * kl_drain_reserve_write (TOO_LARGE / WOULD_BLOCK / ACCEPTED) but NEVER attempts a direct send —
+ * the whole write is copied into the reserved queue. For the completion write path, where output
+ * leaves via an async submit rather than a synchronous write_fn. No allocation. */
+KlDrainWriteStatus kl_drain_reserve_buffer(KlDrain *d, const char *data, size_t len);
+
 /* Set the low-water mark. When buffered output crosses from above to <= `low_water` (via
  * kl_drain_flush / kl_drain_consume), the on_writable callback fires ONCE for that crossing.
  * 0 disables it.

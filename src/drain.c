@@ -245,6 +245,24 @@ KlDrainWriteStatus kl_drain_reserve_write(KlDrain *d, const char *data, size_t l
     return KL_DRAIN_ACCEPTED;
 }
 
+KlDrainWriteStatus kl_drain_reserve_buffer(KlDrain *d, const char *data, size_t len) {
+    if (!d || d->error) return KL_DRAIN_WERROR;
+    if (len == 0) return KL_DRAIN_ACCEPTED;
+    if (!data) return KL_DRAIN_WERROR;
+
+    /* Same full reservation invariant + capacity checks as kl_drain_reserve_write, but no
+     * direct send: the whole write is copied into the reserved queue (completion path). */
+    if (!d->prealloc || !d->buf || d->buf_cap == 0) return KL_DRAIN_WERROR;
+    if (d->buf_len > d->buf_cap) { d->error = 1; return KL_DRAIN_WERROR; }
+    size_t capacity = d->buf_cap;
+    if (len > capacity) return KL_DRAIN_TOO_LARGE;
+    if (len > capacity - d->buf_len) return KL_DRAIN_WOULD_BLOCK;
+
+    memcpy(d->buf + d->buf_len, data, len);
+    d->buf_len += len;
+    return KL_DRAIN_ACCEPTED;
+}
+
 void kl_drain_free(KlDrain *d) {
     if (!d) return;
     if (d->buf) {
