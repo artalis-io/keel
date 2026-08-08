@@ -135,8 +135,8 @@ What actually exists:
 
 **Assessment (NEW MACHINERY, not extraction):** per-operation cancellation and the five terminal
 states are **not** available from existing primitives. This requires either (a) a small
-transport-operation lifecycle (per-stream: one read + one write op record, plus separately
-cancellable connect/accept handles, each with a generation + terminal flag) — NOT a futures
+transport-operation lifecycle (per-stream: one read + one write op record, plus a separately
+cancellable `KlConnectOp` handle with a generation + terminal flag; accept is push-only, §8.2) — NOT a futures
 framework — or (b) a deliberately coarser **stream-level** cancellation contract for the first
 cut. `KlTimer` supplies deadlines; the op-identity/terminal layer must be built.
 
@@ -284,24 +284,42 @@ stay internal; the stream API is the protocol-author-facing layer above it.
 > that's safe to implement now** — when it actually depends on new machinery (reservation, listener
 > carve, deferred close). Those are **two different axes.** This section is the **implementation
 > order** (Phase A → B → C → Optional); the *capability tiers* in `docs/stream_contract.md` describe
-> what the contract promises. Phase A is the only "pure extraction"; the baseline public surface is
-> **Phase B** and requires the new foundations before it can ship.
+> what the contract promises. **No phase is "pure extraction" (Finding 7):** even Phase A is
+> *semantics-preserving structural extraction*, not a no-logic retype — it moves the receive-buffer
+> boundary above the provider and retypes the listener accept target (both change backend logic while
+> preserving observable behavior). The baseline public surface is **Phase B** and requires the new
+> foundations before it can ship.
 
 ### Phase A — structural extraction (semantics-preserving; internal; the receive-boundary move)
 - **`KlStream`** = the transport subset of `KlConn`, **embedded** (below): handle + `KlEventCtx*` +
   `KlSockAddr` peer/local + read buffer + `read_paused` + a `KlDrain`. Plaintext only.
 - **Move the receive-buffer boundary ABOVE the provider (the real Phase-A prerequisite — NOT a pure
-  retype).** Today `post_recv(KlConn*)` is **not logic-neutral**: the EFI completion recv
-  (`event_efi.c:409`) inspects `c->tls` / `c->state` / `KL_CONN_PROXY_HEADER` and chooses between
-  recv-into-`read_buf` vs recv-ciphertext-into-scratch + `tls->feed_input`. Those are TLS/HTTP-state
-  decisions living **inside a backend**. Phase A must evolve the op so the **provider only performs
-  raw transport I/O into a caller-specified buffer**:
+  retype).** Today `post_recv(KlConn*)` is **not logic-neutral** in *every* completion backend, not
+  just EFI (Finding 5). Each one inspects `c->tls` / `c->state` / `KL_CONN_PROXY_HEADER` and chooses
+  between recv-into-`read_buf` (plaintext) vs recv-ciphertext-into-backend-scratch + `tls->feed_input`
+  (TLS):
+  - **io_uring** — `IOU_READ` → `op->buf = c->read_buf + c->read_len`; `IOU_TLS_RECV` → `op->sendbuf`
+    scratch + `feed_input` (`src/event_iouring.c`).
+  - **IOCP** — `KL_IOCP_READ` → `buf.buf = c->read_buf + c->read_len`; `KL_IOCP_TLS_RECV` → `op->sendbuf`
+    scratch + `feed_input` (`src/event_iocp.c`).
+  - **pollcomp** — `PC_READ` / `PC_TLS_RECV` → same split (`src/event_pollcomp.c`).
+  - **EFI** — `el_post_recv`/drain (`event_efi.c`) → `read_buf` (plaintext) vs `g_tls_cipher` +
+    `feed_input`.
+  Those are TLS/HTTP-state decisions living **inside a backend**. Phase A must migrate **all** of them
+  so the **provider only performs raw transport I/O into a caller-specified buffer**:
   ```c
   post_recv(KlStream *stream, void *buf, size_t cap);   /* provider: raw transport bytes only */
   ```
   - a **plaintext stream** passes its `read_buf`+space and delivers those bytes directly;
   - a **TLS wrapper** (Phase C) passes its own ciphertext scratch, feeds `KlTls`, delivers the
     resulting plaintext.
+  **TLS-preservation path across the gap:** the generic TLS *wrapper stream* is Phase C, but production
+  HTTPS must not regress in between. So once `post_recv` is raw, the **existing HTTP TLS completion
+  driver** (the `comp_tls_*` glue that already owns ciphertext scratch + `feed_input`) **temporarily
+  becomes the caller** that hands the provider its ciphertext buffer and runs the decrypt — i.e. the
+  `c->tls` decision moves from *inside each backend* up into the one HTTP-side driver, unchanged in
+  behavior, until Phase C generalizes it into the wrapper stream. This gives Phase A a concrete,
+  no-regression path for TLS rather than leaving it stranded.
   This **removes the cross-backend `c->tls` peek** (a boundary the earlier review flagged) and is the
   step that makes `post_recv` genuinely stream-typed. Audit `post_send` the same way — confirm no
   backend reads HTTP response fields after the retype.
@@ -316,14 +334,28 @@ stay internal; the stream API is the protocol-author-facing layer above it.
 - Generic read/write **delivery callbacks**; **stream-level** `pause`/`resume` (rename `read_paused`).
 - **Coarse internal close only** — preserve today's behavior. Do NOT ship the public graceful
   `kl_stream_close` here (Phase B).
-- **Embed + preserve the public `KlConn` name (Finding 7).** `KlConn` is a **public** type
-  (`include/keel/connection.h`) whose fields tests/apps may read, so do NOT hard-rename it. Options,
-  and the audit must state which ships: (a) keep `KlConn` as the public name, embed a `KlStream`
-  inside it as a **source-compatible internal change** (retain the public transport fields as
-  accessors/aliases into the embedded stream); (b) `typedef KlHttpConn KlConn;` alias; (c) an
-  explicit source-breaking major-version rename. **Recommended: (a)/(b)** — keep source compatibility
-  + static relink; a hard rename is out of scope. Embedding still preserves the allocation-free
-  accept path (the stream is inline, not `malloc`d).
+- **DECISION — embed `KlStream` in `KlConn`, keep the public name, migrate internal field access to
+  `conn->stream.*` (Finding 6).** `KlConn`'s struct is defined in a public header
+  (`include/keel/connection.h`), but a survey of the tree shows **no public/example/test code reads its
+  transport fields** — the only public surface is the *type name* `KlConn`, the `kl_request_conn()`
+  accessor (returns `KlConn*`), and one doc comment mentioning `peer_addr`. Nothing does `conn->fd`
+  outside libkeel's own TUs. So the source-compatibility surface that must be preserved is narrow, and
+  the decision is concrete:
+  - **Ships:** keep the public struct **name** `KlConn`; move the transport subset into an embedded
+    `KlStream stream;` leading member; migrate the ~internal references from `conn->fd` / `conn->ctx` /
+    `conn->peer_addr` / `conn->read_buf|read_len|read_cap` / `conn->read_paused` / `conn->tls` /
+    `conn->tls_want` to `conn->stream.fd` (etc.). The HTTP fields (`req`/`res`/`parser`/`ws`/`h2`/
+    `router`/`file_io`/`access_log`) stay top-level on `KlConn`.
+  - **Source compatibility preserved:** the type name, `sizeof(KlConn)` embeddability, and
+    `kl_request_conn()` — all unchanged. The one `peer_addr` doc-comment reference is updated to
+    `conn->stream.peer_addr`; if any public accessor for it is ever wanted, add
+    `kl_conn_peer_addr(KlConn*)` rather than re-aliasing the field.
+  - **Rejected:** field-level aliasing (a) (duplicated members / macro aliases — ugly, collision-prone,
+    and unnecessary since nothing external reads the fields); `typedef KlHttpConn KlConn` (b) (a rename
+    in disguise that still wouldn't preserve `conn->fd` field access, which we don't need anyway); a
+    source-breaking public rename (c) (out of scope).
+  Embedding keeps the allocation-free accept path (the stream is inline in the pooled `KlConn`, not
+  `malloc`d).
 
 ### Phase B — baseline public contract (needs NEW machinery; this is the shippable API)
 This is the "target public surface." It is NOT pure extraction — each item below is new work:
@@ -386,8 +418,9 @@ This is the "target public surface." It is NOT pure extraction — each item bel
 
 **Migration order (test-driven):** (a) **Phase A** structural extraction (embedded `KlStream`,
 retyped recv/send + listener accept, coarse close) — internal, no API; (b) **Phase B** ship the
-baseline API (atomic write+reservation, strict pause, graceful close/detachment, connect/accept
-handles, listener credits) and lock it with the Phase-8 length-prefixed echo test over TCP +
+baseline API (atomic write+reservation incl. `TOO_LARGE`, strict pause, graceful close/detachment,
+the `KlConnectOp` handle + push `on_accept`, listener credit leases) and lock it with the Phase-8
+length-prefixed echo test over TCP +
 pollcomp; (c) client transport → `KlStream` (+ sync adapter); (d) server transport
 (`KlHttpConn { KlStream stream; … }`); (e) **Phase C** EOF/RST taxonomy + TLS wrapping; (f) WS/H2
 reuse. Each step green + sanitizer-clean.
@@ -401,12 +434,16 @@ machinery (Phase B) + advanced semantics (Phase C) + optional capabilities** —
 retyping" wholesale, and Phase A alone is not the shippable API:
 - The **substrate** (socket provider, sockaddr, handle, event/completion negotiation) is generic
   and model-negotiated — reuse unchanged.
-- **Phase A** (pure extraction): carve the embedded `KlStream` + `KlListener` out of `KlConn`/
-  `KlServer` and retype `KlCompletionOps` recv/send/accept onto them behind the existing dispatch —
-  no new semantics, preserves the allocation-free accept path.
-- **Phase B** (the shippable public surface) is NOT free: atomic write + `KlDrain` reservation,
-  low-water writable, strict pause, graceful close + DETACHMENT-based `on_close`, cancellable
-  connect/accept handles + listener credits — all new work.
+- **Phase A** (semantics-preserving structural extraction — NOT a no-logic retype): carve the
+  embedded `KlStream` + `KlListener` out of `KlConn`/`KlServer`, **move the receive-buffer boundary
+  above the provider** (raw `post_recv(stream, buf, cap)` across all backends; HTTP TLS driver becomes
+  the interim ciphertext caller), and retype `KlCompletionOps` recv/send/accept onto them behind the
+  existing dispatch — preserves observable behavior + the allocation-free accept path, but does change
+  backend logic.
+- **Phase B** (the shippable public surface) is NOT free: atomic write + `KlDrain` reservation (with
+  `TOO_LARGE` for oversized writes), low-water writable, strict pause, graceful close + DETACHMENT-based
+  `on_close` (with the class-split cancel-to-completion vs synchronous-ack teardown), the cancellable
+  `KlConnectOp` handle + push `on_accept` + listener credit leases — all new work.
 - **Phase C**: model-neutral EOF-vs-RST (needs an extended completion event), per-op terminals, and
   the TLS-wrapped-stream state machine (`KlTls` is reusable substrate, but its generic integration is
   new orchestration, not a retype). **Half-close/abort/file-transfer/non-socket endpoints are
