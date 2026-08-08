@@ -287,22 +287,43 @@ stay internal; the stream API is the protocol-author-facing layer above it.
 > what the contract promises. Phase A is the only "pure extraction"; the baseline public surface is
 > **Phase B** and requires the new foundations before it can ship.
 
-### Phase A — structural extraction (pure; no new semantics; ships internally)
+### Phase A — structural extraction (semantics-preserving; internal; the receive-boundary move)
 - **`KlStream`** = the transport subset of `KlConn`, **embedded** (below): handle + `KlEventCtx*` +
   `KlSockAddr` peer/local + read buffer + `read_paused` + a `KlDrain`. Plaintext only.
-- Retype **only the generic byte-transfer** completion target — `KlCompletionOps.post_recv` /
-  `post_send` and the readiness `conn_read`/`conn_write` — from `KlConn*` to the generic stream
-  handle, behind the existing `completion_dispatch.c` seam (**no backend logic change**).
-  **`post_sendfile(KlConn*)` stays HTTP-specific** (file transfer — Optional); not retyped in Phase A.
+- **Move the receive-buffer boundary ABOVE the provider (the real Phase-A prerequisite — NOT a pure
+  retype).** Today `post_recv(KlConn*)` is **not logic-neutral**: the EFI completion recv
+  (`event_efi.c:409`) inspects `c->tls` / `c->state` / `KL_CONN_PROXY_HEADER` and chooses between
+  recv-into-`read_buf` vs recv-ciphertext-into-scratch + `tls->feed_input`. Those are TLS/HTTP-state
+  decisions living **inside a backend**. Phase A must evolve the op so the **provider only performs
+  raw transport I/O into a caller-specified buffer**:
+  ```c
+  post_recv(KlStream *stream, void *buf, size_t cap);   /* provider: raw transport bytes only */
+  ```
+  - a **plaintext stream** passes its `read_buf`+space and delivers those bytes directly;
+  - a **TLS wrapper** (Phase C) passes its own ciphertext scratch, feeds `KlTls`, delivers the
+    resulting plaintext.
+  This **removes the cross-backend `c->tls` peek** (a boundary the earlier review flagged) and is the
+  step that makes `post_recv` genuinely stream-typed. Audit `post_send` the same way — confirm no
+  backend reads HTTP response fields after the retype.
+- **`post_sendfile(KlConn*)` stays HTTP-specific** (file transfer — Optional); not retyped in Phase A.
 - Retype the **listener** accept target: `prime_accepts` / `post_accept` from `KlServer*` to a
-  `KlListener*`, and add `KL_COMP_ACCEPT.target = KlListener*`, behind the same dispatch. The server
-  embeds/owns a `KlListener` and supplies its existing connection pool through the listener's
-  acquire/release seam (no new pool, no new allocation).
+  `KlListener*`, add `KL_COMP_ACCEPT.target = KlListener*`. This is **semantics-preserving backend
+  retyping, NOT "no logic change"** (Finding 5): every completion backend must store the listener in
+  each posted accept, carry it in `.target`, read **listener credit** instead of server-pool
+  counters, route completions to the right listener, support multiple listeners per `KlEventCtx`, and
+  detach listener-owned accept records on close. The server embeds/owns a `KlListener` and supplies
+  its existing connection pool via the listener's acquire/release seam (no new pool/allocation).
 - Generic read/write **delivery callbacks**; **stream-level** `pause`/`resume` (rename `read_paused`).
-- **Coarse internal close only** — preserve today's `recv≤0 → close` behavior. Do NOT ship the
-  public graceful `kl_stream_close` here (that's Phase B).
-- **Embed, do not pointer-ize:** `KlHttpConn { KlStream stream; <HTTP state> }` (rename `KlConn`;
-  container-of where needed). Preserves the preallocated-slot, allocation-free accept path.
+- **Coarse internal close only** — preserve today's behavior. Do NOT ship the public graceful
+  `kl_stream_close` here (Phase B).
+- **Embed + preserve the public `KlConn` name (Finding 7).** `KlConn` is a **public** type
+  (`include/keel/connection.h`) whose fields tests/apps may read, so do NOT hard-rename it. Options,
+  and the audit must state which ships: (a) keep `KlConn` as the public name, embed a `KlStream`
+  inside it as a **source-compatible internal change** (retain the public transport fields as
+  accessors/aliases into the embedded stream); (b) `typedef KlHttpConn KlConn;` alias; (c) an
+  explicit source-breaking major-version rename. **Recommended: (a)/(b)** — keep source compatibility
+  + static relink; a hard rename is out of scope. Embedding still preserves the allocation-free
+  accept path (the stream is inline, not `malloc`d).
 
 ### Phase B — baseline public contract (needs NEW machinery; this is the shippable API)
 This is the "target public surface." It is NOT pure extraction — each item below is new work:
@@ -316,8 +337,9 @@ This is the "target public surface." It is NOT pure extraction — each item bel
   close deadline; degrade to discard on timeout), and the DETACHMENT-based `on_close` terminal
   (confirmed non-reference to caller storage, NOT physical token retirement — EFI-safe). New
   lifecycle machinery.
-- **Cancellable `KlConnectOp` / `KlAcceptOp`** handles (caller-owned, deferred terminal) + a coarse
-  **stream-level** cancel (stop delivery, cancel-by-handle, detach, `on_close`).
+- **Cancellable `KlConnectOp`** handle (caller-owned, deferred terminal) + a coarse **stream-level**
+  cancel (stop delivery, cancel-by-handle, detach, `on_close`). Accept is push-only (`on_accept`,
+  no public per-accept handle — cancel by closing the listener); see contract §8.2.
 - **Listener credit + acquire/release** — the listener returns an accept credit when a stream
   closes; listener close detaches outstanding accepts. Capacity is listener-intrinsic, not
   `KlServer`-scoped.

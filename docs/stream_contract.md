@@ -18,16 +18,26 @@ only after the Tier-2 machinery lands (see `docs/generic_transport_audit.md` §8
 > is the shippable target, **not** "safe to implement immediately."
 
 - **Tier 1 (baseline public surface — built in Phase B):** push read-delivery callback;
-  `kl_stream_write` with an **atomic-accept** result (over `KlDrain` reservation); low-water
-  writable notification; stream-level strict `pause`/`resume`; graceful `kl_stream_close` +
-  detachment `on_close`; cancellable `KlConnectOp`/`KlAcceptOp`; listener credits; **plaintext
-  only**. Delivers **EOF** as a terminal (recv≤0), matching today's readiness/HTTP behavior.
-- **Tier 2 also owns model-neutral EOF-vs-RST.** The distinction is only reliable on the
-  synchronous/readiness seam today; the completion event (`KlCompletionEvent`) currently carries
-  just `bytes`+`ok` and **no `KlIoStatus` category**, so completion drivers cannot distinguish
-  orderly FIN from reset without extending the event (add a target-side error field). Until that
-  extension lands, EOF-vs-RST is NOT identical across models — so it is Tier 2, not "already
-  observable" (correcting an earlier claim).
+  `kl_stream_write` with an **atomic-accept** result (over a **preallocated** bounded queue — no
+  hot-path alloc); low-water writable notification; stream-level strict `pause`/`resume`; graceful
+  `kl_stream_close` + detachment `on_close`; a cancellable `KlConnectOp` (client) and a **push
+  `on_accept`** listener; **plaintext only**. On read termination Tier 1 delivers a **conservative
+  close** (`KL_STREAM_CLOSED_UNKNOWN` — "the stream ended; cause unknown"), **not** a claim of
+  orderly EOF: today's `KlCompletionEvent` carries only `bytes`+`ok` and collapses orderly EOF and
+  error into `ok==0`, so orderly-EOF-vs-error is **not** representable on completion backends yet.
+  There is **no `recv≤0 → EOF` rule** — that is not a valid generic-stream rule.
+- **Tier 2/Phase C owns ALL model-neutral close taxonomy** — not just EOF-vs-RST but **orderly EOF
+  itself.** `KlCompletionEvent` carries just `bytes`+`ok` today, so a completion backend cannot
+  distinguish orderly FIN from generic failure at all. Phase C adds a **`KlIoStatus status`** field
+  to `KlCompletionEvent`; the driver then classifies:
+  | condition | outcome |
+  |---|---|
+  | `bytes > 0` | data delivered |
+  | `bytes == 0` && `status == KL_IO_CLOSED` | orderly **EOF** |
+  | `status == KL_IO_RESET` | **reset** |
+  | `status == KL_IO_WOULD_BLOCK`/`KL_IO_INTERRUPTED` | **not terminal** (retry) |
+  | any other `status` | **fatal error** |
+  Until that field lands, Tier 1's read termination is only `KL_STREAM_CLOSED_UNKNOWN`.
 - **Tier 2 (NEW machinery — designed here, must be built before this is normative):** the concrete
   write-result type + backpressure API; operation identity + cancellation; deferred-destruction
   ownership; TLS-wrapped-stream state machine.
@@ -85,9 +95,12 @@ completion implementation. **provider** = the socket/transport implementation (T
 - `KlEndpoint` — **initially just `KlSockAddr`** (a conceptual alias; already neutral IPv4/IPv6/Unix).
   It is address identity only and carries **no provider/transport kind** — provider selection stays
   in `KlEventCtx`/config (§9). A tagged non-socket union is a later tier.
-- Pre-stream operation handles: **`KlConnectOp` / `KlAcceptOp`** — separately cancellable records for
-  the connect and accept operations that *precede* a live stream (§8). There is **no** generic
-  public `KlOp` type; it is not introduced until a real generic operation type is actually needed.
+- Accept is **push-based**: the listener delivers each connected stream via an **`on_accept(stream)`**
+  callback (matching the server model). There is **no** public per-accept handle — mixing a pull
+  `KlAcceptOp` with push/pool acceptance was ambiguous, so the listener is push-only (§8.2).
+- **`KlConnectOp`** — the one pre-stream, separately cancellable, caller-owned handle: the client
+  `connect` (inherently a single pull operation, §8.1). There is **no** generic public `KlOp` type;
+  it is not introduced until a real generic operation type is actually needed.
 
 **Global invariants (all sections below refine these):**
 1. Every async operation reaches **exactly one** terminal outcome: completed | failed | cancelled
@@ -128,14 +141,15 @@ readers and the completion `comp_on_read` → dispatch.)
   caller must maintain its own framing state across callbacks (the Phase-8 echo test exercises
   1-byte fragmentation). A readiness event ≠ "a whole message"; a completion ≠ "the requested
   count."
-- **EOF (orderly peer close, FIN):** delivered as a distinct terminal read outcome — a zero-length
-  EOF signal (today: `recv`==0 → `KL_COMP_READ` with `bytes==0`/`ok` → driver closes; readiness:
-  `recv`==0). After EOF no further read callbacks fire. **Tier 1: EOF ends the stream** (today's
-  HTTP behavior maps `recv≤0` to close). **[Tier 3] half-open** — keeping the write side usable
-  after peer FIN — depends on `shutdown_write` provider support and is NOT in the initial contract.
-- **[Tier 2] Peer reset (RST) vs orderly EOF:** reset is *intended* to be a read **error** with
-  category `KL_IO_RESET` (`KlIoStatus`), distinct from EOF, but this is Tier 2 (§ header): the
-  completion event carries no error category yet. EOF = "peer finished sending, cleanly"; reset =
+- **Read termination:**
+  - **Tier 1 (conservative):** when the read side ends, the stream delivers a single
+    `KL_STREAM_CLOSED_UNKNOWN` close — "the stream ended; cause not distinguishable." There is **no
+    `recv≤0 → EOF` rule**: `recv==0` is orderly EOF but `recv<0` may be WOULD_BLOCK / INTERRUPTED
+    (not terminal) / reset / fatal, and the completion event cannot tell these apart today. After
+    the close, no further read callbacks fire.
+  - **Tier 2/Phase C (precise):** once `KlCompletionEvent.status` exists (header table), the close
+    is classified as orderly **EOF** (`bytes==0` && `KL_IO_CLOSED`), **reset** (`KL_IO_RESET`), or
+    **fatal** — matching the readiness seam. EOF = "peer finished sending, cleanly"; reset =
   "connection aborted, in-flight data may be lost." The caller can distinguish them and MUST NOT
   treat a reset as a clean end-of-message.
 - **Backpressure interaction:** while paused (§4) no read callbacks fire and the backend does not
@@ -178,13 +192,20 @@ readers and the completion `comp_on_read` → dispatch.)
   Provider-level short writes (a `send` that took a prefix) are **internal**: the stream keeps the
   remainder in its own storage and reports `ACCEPTED`. They are never observable as partial API
   acceptance.
-- **Reservation requirement (implementation note for decision #1).** All-or-none is only safe if the
-  stream **reserves queue capacity for the whole write before exposing any byte to the provider** —
-  otherwise a direct `send` could take a prefix and then the buffer cap/alloc could reject the
-  remainder, which is neither atomic nor recoverable. Implement via one of: (1) preflight enough
-  queue capacity, then attempt the direct send; (2) copy the whole write into owned storage first,
-  then pump; (3) extend `KlDrain` with a reservation op. Without reservation, atomic acceptance is
-  not implementable — this is a Tier-2 requirement, not free from today's `KlDrain`.
+- **Reservation requirement — a capacity CHECK, not a hot-path allocation (decision #1 + Finding 3).**
+  All-or-none is only safe if the stream **reserves queue capacity for the remainder before exposing
+  any byte to the provider** (else a prefix `send` could strand bytes it cannot buffer). But
+  reservation must **not `realloc` during `kl_stream_write`** — that would violate Keel's
+  allocation-free event-loop / response-send rule and break freestanding. So the policy is:
+  - each stream has a **finite configured write capacity**, backed by storage **preallocated at
+    stream/pool init** (or drawn from a preallocated bounded arena);
+  - `kl_stream_write` performs **no allocation** — reservation is a capacity *check* against that
+    preallocated space;
+  - if the write exceeds available capacity → `WOULD_BLOCK` with `accepted == 0` (caller retries
+    after the writable signal); it never grows the buffer inline.
+  Optional dynamic growth may exist as a **hosted-only** mode, but it is NOT the default/conformance
+  path and is **unavailable in freestanding builds**. This is Phase-B machinery (a bounded,
+  preallocating `KlDrain` extension), not free from today's `KlDrain`.
 - **Ordering:** bytes are delivered to the peer in submission order. Queued bytes flush before any
   later write is sent — a write while the buffer is non-empty appends (never reorders).
 - **Concurrent writes:** not supported within one stream from multiple call sites racing; the
@@ -273,8 +294,9 @@ returns.
 - **Tier-1 cancel does NOT promise per-operation terminals.** `kl_stream_cancel` is coarse: stop
   delivery, cancel by handle where applicable, detach, and eventually fire `on_close` — it does
   **not** deliver separate "cancelled" terminals for the read op and the write op. Per-op terminals
-  require the Tier-2 operation-identity records. `connect`/`accept` are separately cancellable op
-  handles (`KlConnectOp`/`KlAcceptOp`, §8) because they precede a live stream.
+  require the Tier-2 operation-identity records. Client `connect` is a separately cancellable
+  `KlConnectOp` (§8.1); accept is push `on_accept` (no per-accept handle — cancel by closing the
+  listener, §8.2).
 
 ### 6.2 Which terminal callback fires for each event
 
@@ -284,8 +306,9 @@ returns.
 | peer sent RST | 2 | read **error** `KL_IO_RESET` (needs the completion-event error field, §header); Tier-1 sees it as EOF-like close |
 | local `close` (graceful) | 1 | flush accepted output (close deadline), detach, then exactly one `on_close` (§7) |
 | local `cancel` (discard) | 1 | drop queued output, detach, then `on_close` (§7) — no per-op terminals in Tier 1 |
-| `connect`/`accept` op cancelled | 1 | that **`KlConnectOp`/`KlAcceptOp`** → cancelled (exactly once) — these are the only per-op terminals in Tier 1 |
-| `connect`/`accept` deadline | 1 | that op → timed-out (exactly once); precedence per §6.3 |
+| `connect` op cancelled | 1 | that **`KlConnectOp`** → cancelled (exactly once) — the only per-op terminal in Tier 1 |
+| `connect` deadline | 1 | that `KlConnectOp` → timed-out (exactly once); precedence per §6.3 |
+| listener closed with accepts armed | 1 | armed accepts discarded; no `on_accept` fires for them (§8.2) — a listener-level terminal, not per-accept |
 | local `shutdown_write` | **3** | no local callback; subsequent writes → `CLOSED` (optional; no provider op today) |
 | local `abort` | **3** | drop queued output, detach per §7; no post-`on_close` callbacks (optional; no provider op today) |
 | per-*stream-op* cancelled/timed-out terminals | **2** | separate read-op / write-op terminals require the Tier-2 operation-identity records |
@@ -363,16 +386,30 @@ ExitBootServices).
   safely even while EFI keeps a quarantined token — synchronous server destruction never blocks on
   firmware.
 - `close`/`cancel` **inside a callback** are legal (recorded; applied after the callback returns).
-- Parent (`KlListener`/HTTP server) destruction closes its streams under the same rules and waits
-  for their `on_close` before releasing the pool.
+- **Synchronous parent teardown drives detachment; it does not merely wait for it (Finding 6).**
+  `close` is deferred, but `kl_server_free`/`kl_listener_free`/any parent destructor is a *blocking*
+  call that must not return while a stream can still reference the pool it is about to release. It
+  reconciles the two by **driving** detachment to completion rather than passively waiting:
+  - it `close`s every live stream, then **runs a bounded completion-drain loop** (submit-cancels +
+    drain the completion queue) until every stream has reported `on_close` (DETACHMENT), and only
+    then releases the pool. The loop is bounded — a stream that will not detach within the close
+    deadline is force-detached (below), never spun on forever;
+  - a provider whose `close` can **synchronously acknowledge detachment** (invalidate the
+    generation, move any in-flight op record into provider-owned/quarantined storage, then return
+    `DETACHED` from the close call itself) lets the parent detach without a drain loop at all. **EFI
+    takes exactly this path**: it cannot guarantee physical token retirement before ExitBootServices,
+    so it quarantines and acks detachment synchronously — the pool is freed immediately, the token
+    retires (or not) independently. This is the general form of today's EFI quarantine-on-close.
+  Either way the invariant holds: **the parent never frees storage a live op can still reach**, and
+  it never blocks on physical retirement.
 - "Retirement is confirmed, not immediate" — `abort` (Tier 3) obeys the same deferred `on_close`;
   it never assumes synchronous op retirement (EFI cannot guarantee it).
 - **`on_close` is a DESTRUCTIVE TAIL callback.** It is the *final* action the implementation takes
   involving that stream: after invoking `on_close` the implementation must **never** touch the
   `KlStream` again — no field read, no logging through it, no list removal referencing it, no further
   callback. The caller may free the stream (or the parent object containing it) *inside* `on_close`.
-  The same destructive-tail rule applies to the terminal callback of a caller-owned `KlConnectOp`/
-  `KlAcceptOp` (§8).
+  The same destructive-tail rule applies to the terminal callback of a caller-owned `KlConnectOp`
+  (§8.1) and to the accepted stream's `on_accept`/`on_close` pair (§8.2).
 
 ---
 
@@ -383,28 +420,31 @@ ExitBootServices).
   Cancellation racing a successful connect resolves per §6.3 (completion wins if it already
   happened). The client's Happy-Eyeballs address racing is an implementation of this op, invisible
   to the caller.
-- **Accept:** `kl_listener_accept` yields the next connected `KlStream` (readiness: listener
-  readable → `accept`; completion: posted accept → `KL_COMP_ACCEPT`), identical to the caller.
-  Accept is **capacity-gated by a listener-intrinsic credit**, not by reaching into a server pool:
-  the listener owns its accepted-stream target (a caller-supplied pool + a credit count), and
-  never accepts beyond that credit (this generalizes today's server-pool backpressure floor + the
-  EFI capacity-gated arming, which are currently `KlServer`-scoped). `cancel` before/racing an
-  accept, and listener close with a pending accept, follow §6/§7 (deferred `on_close`).
+- **Accept is push-based, not pull.** A listener is configured with an `on_accept(listener,
+  stream)` callback and started; Keel keeps it armed and delivers each connected `KlStream` by
+  invoking `on_accept` (readiness: listener readable → `accept`; completion: posted accept →
+  `KL_COMP_ACCEPT`). There is **no** `kl_listener_accept` pull call and **no** public per-accept
+  handle — a single push model avoids the ambiguity of mixing a pull `KlAcceptOp` with pool/credit
+  arming (Finding 4). This matches how the HTTP server already consumes accepts.
 
-### 8.1 Pre-stream operation handles — `KlConnectOp` / `KlAcceptOp` (ownership)
+### 8.1 Pre-stream operation handle — `KlConnectOp` (ownership)
 
-These precede a live `KlStream`, so they have their own records with the same ownership model as
-streams:
-- **Caller-owned** storage (embedded or pooled); Keel does not allocate them behind the caller's
-  back. Each must remain valid until its terminal callback fires.
+The client `connect` precedes a live `KlStream`, so it has its own record with the same ownership
+model as a stream:
+- **Caller-owned** storage (embedded or pooled); Keel does not allocate it behind the caller's
+  back. It must remain valid until its terminal callback fires.
 - **Exactly one terminal callback** (connected/refused/timed-out/cancelled, per §6.3), which is a
   **destructive tail** (§7) — no access to the handle afterward; the caller may reuse its storage in
   the callback.
 - **Cancellation is deferred**, not synchronous: `cancel` requests it; the terminal still arrives
   exactly once (as `cancelled`, unless a real result already won per §6.3).
-- **Stream transfer:** a successful `connect`/`accept` hands the resulting `KlStream` to the caller
-  **in** the terminal callback (the stream is live for the duration of that call and beyond, owned
-  per §7); it is not delivered before the terminal.
+- **Stream transfer:** a successful `connect` hands the resulting `KlStream` to the caller **in**
+  the terminal callback (the stream is live for the duration of that call and beyond, owned per §7);
+  it is not delivered before the terminal.
+
+Accept has **no** analogous caller-owned handle — it is push-only (§8.2). Cancel an accept by
+closing the listener; the listener-level terminal (§6.2) is that armed accepts are discarded with
+no `on_accept`.
 
 ### 8.2 Listener seam (the generic accept carve — Phase A/B)
 
@@ -412,12 +452,22 @@ streams:
   identifies its target as `KL_COMP_ACCEPT.target = KlListener*` (today it reaches `KlServer`).
 - **Multiple listeners share one `KlEventCtx`** — each carries its own target + credit; the drain
   routes each `KL_COMP_ACCEPT` to the listener named in `target`.
-- **Acquire/release seam:** the listener draws the accepted `KlStream` from a **caller-supplied
-  pool** via an acquire hook (the HTTP server passes its existing connection pool — no new pool, no
-  per-accept allocation) and **returns the accept credit when that stream closes** (its `on_close`,
-  §7). Accept never exceeds the outstanding credit.
-- **Listener close** detaches outstanding accepts under §7 (deferred `on_close`), draining/
-  quarantining any posted accept op the same way streams do.
+- **Credit-bounded arming (the scheduling rule).** The listener owns a caller-supplied acquire hook
+  (the HTTP server passes its existing connection pool — no new pool, no per-accept allocation) and
+  a credit count. At any moment **armed accepts ≤ min(available acquire credit, backend arming
+  capacity)** — the listener never posts/arms an accept it cannot land a stream for. This
+  generalizes today's server-pool backpressure floor + the EFI capacity-gated arming (currently
+  `KlServer`-scoped).
+- **On each completed accept:** acquire a stream slot from the pool, initialize the `KlStream` on
+  it, then invoke `on_accept(listener, stream)` (a destructive-handoff for that record; §7 rules
+  govern the stream from there). If a slot cannot be acquired the accept is not armed in the first
+  place (credit rule above), so `on_accept` never fires without backing storage.
+- **Credit return:** the accepted stream returns its credit to the listener when it closes (its
+  `on_close`, §7), which lets the listener arm the next accept. Accept never exceeds outstanding
+  credit.
+- **Listener close** detaches outstanding armed accepts under §7 (deferred `on_close` semantics for
+  any half-built stream), draining/quarantining any posted accept op the same way streams do; no
+  `on_accept` fires for a discarded armed accept.
 
 ---
 
