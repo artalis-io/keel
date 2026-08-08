@@ -281,23 +281,26 @@ static int el_post_recv(KlConn *c) {
  * bounded by KL_EFI_SNDBUF (a larger framed response is refused -> conn closed). drain
  * transmits sndbuf in bounded EFI Transmit fragments and surfaces one KL_COMP_WRITE. */
 static int el_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
-    if (!c || iovcnt < 0) return -1;
+    if (!c || iovcnt < 0 || (iovcnt > 0 && !iov)) return -1;
     if (total > KL_EFI_SNDBUF) return -1;   /* response too large for the inline buffer */
     EfiIoOp *op = io_op_alloc();
     if (!op) return -1;
     for (size_t b = 0; b < sizeof(*op); b++) ((unsigned char *)op)[b] = 0;
     size_t off = 0;
     for (int i = 0; i < iovcnt; i++) {
-        if (off + iov[i].len > KL_EFI_SNDBUF) return -1;   /* op still !in_use — nothing to retire */
+        /* Overflow-safe bound (KL_EFI_SNDBUF - off never underflows: off <= KL_EFI_SNDBUF
+         * is the loop invariant). op still !in_use on the early return — nothing to retire. */
+        if (iov[i].len > KL_EFI_SNDBUF - off) return -1;
         for (size_t j = 0; j < iov[i].len; j++)
             op->sndbuf[off + j] = ((const unsigned char *)iov[i].base)[j];
         off += iov[i].len;
     }
+    if (off != total) return -1;   /* declared total must equal the bytes actually framed */
     op->kind       = EFI_IO_SEND;
     op->conn       = c;
     op->fd         = c->fd;
     op->generation = (uint64_t)kl_uefi_conn_generation_h(c->fd);
-    op->send_total = off;      /* == total (bytes actually copied) */
+    op->send_total = off;
     op->send_done  = 0;
     op->in_use     = 1;        /* set last: a mid-loop return -1 leaves the slot free */
     return 0;
