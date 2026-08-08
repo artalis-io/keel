@@ -168,7 +168,8 @@ void kl_conn_pool_free(KlConnPool *pool) {
                     pool->conns[i].req.body_reader);
                 pool->conns[i].req.body_reader = NULL;
             }
-            if (pool->conns[i].tls && kl_handle_valid(pool->conns[i].fd)) {
+            if (pool->conns[i].tls && pool->conns[i].tls->shutdown &&
+                kl_handle_valid(pool->conns[i].fd)) {
                 KlTlsResult sr = pool->conns[i].tls->shutdown(
                     pool->conns[i].tls, pool->conns[i].fd);
                 for (int j = 0; sr == KL_TLS_WANT_WRITE && j < 4; j++)
@@ -181,7 +182,7 @@ void kl_conn_pool_free(KlConnPool *pool) {
             if (pool->conns[i].parser) {
                 pool->conns[i].parser->destroy(pool->conns[i].parser);
             }
-            if (pool->conns[i].tls) {
+            if (pool->conns[i].tls && pool->conns[i].tls->destroy) {
                 pool->conns[i].tls->destroy(pool->conns[i].tls);
             }
             if (pool->conns[i].res.hdr_buf) {

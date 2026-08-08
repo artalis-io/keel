@@ -190,6 +190,22 @@ struct KlTls {
 };
 
 /**
+ * @brief True iff every REQUIRED KlTls callback is present.
+ *
+ * The 7 required ops (handshake/read/write/shutdown/pending/reset/destroy) must all be
+ * set; alpn_protocol/peer_cert/feed_input/drain_output/at_eof are optional. A factory that
+ * returns a session missing any required op — including `destroy` — is unusable, and a
+ * later cleanup path that blindly called the missing op would crash. Callers (e.g.
+ * kl_server_init) reject such a session with KL_ERR_TLS_VTABLE and free it via its own
+ * `destroy` only when that pointer is non-NULL. Header-only so hosted + freestanding share
+ * one definition.
+ */
+static inline int kl_tls_vtable_valid(const KlTls *t) {
+    return t && t->handshake && t->read && t->write &&
+           t->shutdown && t->pending && t->reset && t->destroy;
+}
+
+/**
  * @brief Opaque per-server TLS context (certificates, keys, ciphers).
  * User-owned — KEEL never inspects or modifies this.
  */

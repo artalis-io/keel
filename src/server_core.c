@@ -219,6 +219,14 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
 
     /* Pre-allocate TLS sessions (one per connection slot) */
     if (s->config.tls) {
+        /* A NULL factory would crash on the first call below — reject it up front (no
+         * sessions allocated yet, so pool_free touches no tls). */
+        if (!s->config.tls->factory) {
+            s->last_error = KL_ERR_TLS_VTABLE;
+            kl_conn_pool_free(&s->pool);
+            kl_router_free(&s->router);
+            return -1;
+        }
         for (int i = 0; i < s->pool.capacity; i++) {
             s->pool.conns[i].tls = s->config.tls->factory(
                 s->config.tls->ctx, alloc);
@@ -228,12 +236,15 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
                 kl_router_free(&s->router);
                 return -1;
             }
-            /* Validate vtable — all 7 required pointers must be set
-             * (alpn_protocol is optional, NULL if not supported) */
-            const KlTls *t = s->pool.conns[i].tls;
-            if (!t->handshake || !t->read || !t->write ||
-                !t->shutdown || !t->pending || !t->reset || !t->destroy) {
+            /* Validate the vtable (all 7 required ops; alpn_protocol etc. optional). A
+             * session missing a required op — notably `destroy` — must NOT reach
+             * kl_conn_pool_free, which would call the NULL op. Free it here via its own
+             * destroy only when present, clear the slot, THEN run pool cleanup. */
+            if (!kl_tls_vtable_valid(s->pool.conns[i].tls)) {
                 s->last_error = KL_ERR_TLS_VTABLE;
+                if (s->pool.conns[i].tls->destroy)
+                    s->pool.conns[i].tls->destroy(s->pool.conns[i].tls);
+                s->pool.conns[i].tls = NULL;
                 kl_conn_pool_free(&s->pool);
                 kl_router_free(&s->router);
                 return -1;
