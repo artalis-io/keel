@@ -950,52 +950,30 @@ static int iou_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
     return count;
 }
 
-/* Teardown accept quiescence (6B-3 2b review). kl_listener_close already requested the accept
- * cancel; ensure every posted accept is cancel-requested + submitted (a full SQ at cancel time
- * could have skipped one), then BLOCK-reap CQEs until no IOU_ACCEPT op remains — guaranteed, since
- * a cancelled accept always completes. Each accept CQE is dispatched (retires the listener; a
- * shutdown-race success is disposed by the CLOSING listener) and freed AFTER its CQE (the kernel is
- * done with op->peer). Non-accept CQEs are drained past and left in st->ops for the ring teardown
- * (io_uring_queue_exit in close) — safe, since queue_exit drops in-flight ops without touching the
- * op records. */
-static void iou_shutdown_accepts(struct KlServer *s) {
+/* Teardown accept-side force-completion (6B-3 2b review). Does NOT reap — the server drives the
+ * drain (kl_comp_run) so every dequeued CQE gets its normal routing (no completion lost). This only
+ * GUARANTEES that every posted accept will complete: it UNCONDITIONALLY submits a cancel for each
+ * IOU_ACCEPT (not relying on iou_comp_cancel having obtained an SQE — a full SQ could have skipped
+ * one; a duplicate cancel is harmless, its CQE is an ignored NULL-data sentinel), ensuring an SQE
+ * for each even under SQ pressure (iou_sqe flushes + retries; one more submit+get as a backstop),
+ * then flushes. Returns 0, or -1 if a cancel SQE genuinely could not be obtained (the server then
+ * skips the reap loop rather than block forever). */
+static int iou_shutdown_accepts(struct KlServer *s) {
     KlIouState *st = s->ev.loop._backend;
-    int any = 0;
-    for (KlIouOp *o = st->ops; o; o = o->next)
-        if (o->type == IOU_ACCEPT) {
-            any = 1;
-            if (!o->aborted) {                       /* ensure a cancel is queued for it */
-                o->aborted = 1;
-                struct io_uring_sqe *sqe = iou_sqe(st);
-                if (sqe) { io_uring_prep_cancel(sqe, o, 0); io_uring_sqe_set_data(sqe, NULL); }
-            }
+    for (KlIouOp *o = st->ops; o; o = o->next) {
+        if (o->type != IOU_ACCEPT) continue;
+        o->aborted = 1;
+        struct io_uring_sqe *sqe = iou_sqe(st);          /* get_sqe, else submit + retry */
+        if (!sqe) {
+            if (io_uring_submit(&st->ring) < 0) return -1;   /* flush to free SQ slots */
+            sqe = io_uring_get_sqe(&st->ring);
+            if (!sqe) return -1;                          /* truly saturated — cannot guarantee */
         }
-    if (!any) return;
-    io_uring_submit(&st->ring);                      /* flush the cancel(s) to the kernel */
-
-    for (;;) {
-        int remaining = 0;
-        for (const KlIouOp *o = st->ops; o; o = o->next)
-            if (o->type == IOU_ACCEPT) { remaining = 1; break; }
-        if (!remaining) break;
-
-        struct io_uring_cqe *cqe = NULL;
-        if (io_uring_wait_cqe(&st->ring, &cqe) < 0) break;   /* fatal ring error — close drops rest */
-        unsigned head, seen = 0;
-        io_uring_for_each_cqe(&st->ring, head, cqe) {
-            seen++;
-            uint64_t ud = io_uring_cqe_get_data64(cqe);
-            if (ud == 0 || ud == (uint64_t)-1) continue;     /* cancel / timeout sentinels */
-            KlIouOp *op = (void *)(uintptr_t)ud;
-            if (*(IouOpType *)op != IOU_ACCEPT) continue;    /* non-accept: leave for ring teardown */
-            KlCompletionEvent ev;
-            (void)iou_complete(st, op, cqe->res, &ev);       /* builds ev; clears accept_pending */
-            iou_op_unlink(st, op);
-            s->ev.comp_conn_dispatch(&s->ev, &ev);           /* retire the listener */
-            iou_op_free(op);
-        }
-        io_uring_cq_advance(&st->ring, seen);
+        io_uring_prep_cancel(sqe, o, 0);
+        io_uring_sqe_set_data(sqe, NULL);                /* ignored cancel-completion sentinel */
     }
+    if (io_uring_submit(&st->ring) < 0) return -1;       /* flush all cancels to the kernel */
+    return 0;
 }
 
 /* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────

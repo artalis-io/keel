@@ -673,22 +673,15 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
     return count;
 }
 
-/* Teardown accept quiescence (6B-3 2b review). A pollcomp accept op never pre-accepts a socket
- * (accept() runs in pc_complete), so quiescence is synchronous: unlink each posted accept, retire
- * it on the listener via the dispatch hook (ok=0, no fd), and free. No kernel async → trivially
- * memory-safe + terminating. */
-static void pc_shutdown_accepts(struct KlServer *s) {
+/* Teardown accept-side force-completion (6B-3 2b review). Does NOT reap — the server drives the
+ * drain (kl_comp_run) so every dequeued op gets its normal routing. This only marks each posted
+ * accept aborted, so the next pc_comp_drain's abort pass (pc_emit_abort) emits a KL_COMP_ACCEPT
+ * ok=0 that retires the listener. Synchronous → always succeeds. */
+static int pc_shutdown_accepts(struct KlServer *s) {
     KlPcState *st = s->ev.loop._backend;
-    for (KlPcOp **link = &st->ops; *link; ) {
-        KlPcOp *op = *link;
-        if (op->type != PC_ACCEPT) { link = &op->next; continue; }
-        *link = op->next;
-        KlCompletionEvent ev;
-        memset(&ev, 0, sizeof(ev));
-        ev.kind = KL_COMP_ACCEPT;   /* ev.ok = 0 → kl_listener_on_accept_failed retires the credit */
-        s->ev.comp_conn_dispatch(&s->ev, &ev);
-        pc_op_free(op);
-    }
+    for (KlPcOp *o = st->ops; o; o = o->next)
+        if (o->type == PC_ACCEPT) o->aborted = 1;
+    return 0;
 }
 
 /* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────

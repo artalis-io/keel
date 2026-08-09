@@ -37,6 +37,10 @@
  * independent of server.c (both are plain compile-time constants). */
 #define KL_POLL_TIMEOUT_MS 1000
 
+/* Events reaped per kl_comp_run tick while teardown drains the forced accept completions to
+ * confirmed detachment (6B-3 2b review). kl_comp_run clamps to its own internal cap. */
+#define KL_ACCEPT_DRAIN_MAX_EVENTS 64
+
 /* ── Stop-wakeup self-pipe (hosted only) ──────────────────────────────────────
  * kl_server_stop() writes a byte to wake the run loop promptly. A freestanding EFI
  * server has no self-pipe (no OS pipe/socketpair, no kl_server_stop caller) — it
@@ -354,22 +358,31 @@ void kl_server_free(KlServer *s) {
         kl_listener_close(&s->accept_listener);
         /* Readiness close disarms the listen interest and returns every credit synchronously, so
          * the listener is already detached. A COMPLETION close only REQUESTED cancellation; the
-         * posted accepts retire only once physically quiesced. Do it in a guaranteed, memory-safe
-         * order: (1) close the listen socket, forcing every posted accept toward completion; (2)
-         * hand the backend an explicit quiescence pass (kl_comp_shutdown_accepts) that DEQUEUES
-         * each posted accept's completion — so the OS is provably done with the op record before it
-         * is freed (no kernel-facing use-after-free on an IOCP OVERLAPPED) — retires it on the
-         * listener (→ confirmed detachment), and frees the op + any pre-created accept socket.
-         * Terminating by construction: a closed listen socket / submitted io_uring cancel guarantees
-         * every posted accept completes. The listen fd is closed inline here (freestanding-safe);
-         * the kl_server_close_listener below then only does the owned-AF_UNIX unlink. */
+         * posted accepts retire only once physically completed + reaped. Do it in a guaranteed,
+         * memory-safe, no-completion-lost order:
+         *   (1) close the listen socket — freestanding-safe; forces every posted IOCP AcceptEx to
+         *       complete (closesocket cancels its overlapped I/O). kl_server_close_listener below
+         *       then only does the owned-AF_UNIX unlink (fd already invalid).
+         *   (2) kl_comp_shutdown_accepts — the backend GUARANTEES every posted accept will complete
+         *       (io_uring unconditionally submits a cancel per accept; pollcomp marks them aborted;
+         *       IOCP relies on the closed listen socket). Returns -1 only if it could not force.
+         *   (3) reap through the NORMAL completion path until confirmed detachment: each kl_comp_run
+         *       DEQUEUES every completion before freeing it (no OVERLAPPED use-after-free) and routes
+         *       every dequeued entry ordinarily — accepts retire the listener; unrelated read/write/
+         *       udp/watcher completions get their normal teardown handling, NONE lost. Guaranteed to
+         *       terminate: the forced accept completions are pending and each blocking drain reaps
+         *       them. If the force failed we skip the loop (the backend close is the physical
+         *       backstop) rather than risk an unbounded wait. */
         if ((kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) &&
             !kl_listener_is_detached(&s->accept_listener)) {
             if (kl_handle_valid(s->listen_fd)) {
                 kl_sock_close(s->ev.sockets, s->listen_fd);
                 s->listen_fd = KL_INVALID_SOCKET;
             }
-            kl_comp_shutdown_accepts(s);
+            if (kl_comp_shutdown_accepts(s) == 0)
+                while (!kl_listener_is_detached(&s->accept_listener))
+                    if (kl_comp_run(&s->ev, KL_ACCEPT_DRAIN_MAX_EVENTS, KL_POLL_TIMEOUT_MS) < 0)
+                        break;
         }
     }
 

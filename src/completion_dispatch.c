@@ -42,11 +42,12 @@ int kl_comp_prime_accepts(struct KlServer *s) {
     return kl_comp_ops(&s->ev.loop)->prime_accepts(s);
 }
 
-void kl_comp_shutdown_accepts(struct KlServer *s) {
+int kl_comp_shutdown_accepts(struct KlServer *s) {
     const KlCompletionOps *ops = kl_comp_ops(&s->ev.loop);
     /* ops is NULL on a readiness builtin (never reached — the caller gates on KL_EVENT_CAP_
-     * COMPLETION); shutdown_accepts is NULL on an autonomous/no-accept backend. Both → no-op. */
-    if (ops && ops->shutdown_accepts) ops->shutdown_accepts(s);
+     * COMPLETION); shutdown_accepts is NULL on an autonomous/no-accept backend. Both → success. */
+    if (ops && ops->shutdown_accepts) return ops->shutdown_accepts(s);
+    return 0;
 }
 
 /* Raw transport routers (KlStream form). The HTTP-adapter helpers kl_comp_post_recv/

@@ -38,12 +38,14 @@ int kl_completion_axis_available(void);
  * generic tick over its event ctx. Returns 0 to continue the run loop, <0 to stop. */
 int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms);
 
-/* Teardown accept quiescence (6B-3 2b review): guaranteed, memory-safe reap + listener retirement
- * + free of every posted accept. Called once from kl_server_free AFTER kl_listener_close() and
- * after the listen socket is closed (so posted accepts are forced to completion). Re-declared here
- * (not via completion.h) to keep server_core.c decoupled from the internal completion vtable, like
- * kl_comp_cancel below; the real impl is per-backend, a no-op on readiness/autonomous builds. */
-void kl_comp_shutdown_accepts(struct KlServer *s);
+/* Teardown accept-side force-completion (6B-3 2b review): GUARANTEE every posted accept will
+ * complete, so the caller's subsequent kl_comp_run drain reaps + retires each through the normal
+ * completion path (no completion lost). Called once from kl_server_free AFTER kl_listener_close()
+ * and after the listen socket is closed. Returns 0 on success (incl. readiness/autonomous no-op),
+ * -1 if the force could not be guaranteed (caller then skips the reap loop). Re-declared here (not
+ * via completion.h) to keep server_core.c decoupled from the internal completion vtable, like
+ * kl_comp_cancel below; the real impl is per-backend. */
+int kl_comp_shutdown_accepts(struct KlServer *s);
 
 /* The generic completion tick: drain the ctx's completion loop and route each op to
  * its consumer (connections; datagrams in 8b-4c). Shared by the server run loop and
