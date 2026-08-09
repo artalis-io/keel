@@ -103,4 +103,13 @@ int kl_version_number(void);
 #include <keel/sse.h>
 #include <keel/timer.h>
 
+/* Phase-B transport — EXPERIMENTAL / UNSTABLE candidate contract headers (step 6A). These expose
+ * KlStream, KlListener, and KlConnectOp as an independently-usable transport surface; their
+ * signatures may change before stabilization (step 6D). The matching per-type detail layout
+ * headers (keel/stream_detail.h etc.) are OPT-IN for embedders only and are deliberately NOT
+ * included by this umbrella. */
+#include <keel/stream.h>
+#include <keel/listener.h>
+#include <keel/connect.h>
+
 #endif

@@ -42,7 +42,7 @@ static int stream_config_locked(const KlStream *s) {
     return s->send_inflight || kl_drain_buffered(&s->wq) > 0;
 }
 
-int kl_stream_set_writer(KlStream *s, KlDrainWriteFn fn, void *ctx) {
+int kl_stream_set_writer(KlStream *s, KlStreamWriteFn fn, void *ctx) {
     if (!s || !s->wq_inited) return -1;
     if (stream_config_locked(s)) return -1;
     s->wq.write_fn  = fn;
@@ -50,7 +50,7 @@ int kl_stream_set_writer(KlStream *s, KlDrainWriteFn fn, void *ctx) {
     return 0;
 }
 
-int kl_stream_set_submit(KlStream *s, KlInternalStreamSubmitFn fn, void *ctx, int copying) {
+int kl_stream_set_submit(KlStream *s, KlStreamSubmitFn fn, void *ctx, int copying) {
     if (!s || !s->wq_inited) return -1;
     if (stream_config_locked(s)) return -1;
     s->submit_fn      = fn;

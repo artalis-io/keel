@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <keel/sockaddr.h>   /* KlSockAddr peer_addr */
 #include <keel/drain.h>      /* KlDrain wq (Phase-B write queue, embedded in KlStream) */
+#include <keel/stream.h>         /* KlStream contract (Phase-B transport, candidate public API) */
+#include <keel/stream_detail.h>  /* struct KlStream layout — KlConn embeds it (opt-in detail) */
 
 /** @brief Default read buffer size (bytes). */
 #define KL_READ_BUF_SIZE 8192
@@ -26,112 +28,10 @@ typedef struct KlTls KlTls;
 typedef struct KlWsServerConn KlWsServerConn;
 typedef struct KlH2ServerConn KlH2ServerConn;
 typedef struct KlH2ServerConfig KlH2ServerConfig;
-/* Back-pointer to the owning event context (for the internal socket provider,
- * ctx->sockets). Opaque forward decl keeps the provider seam out of this
- * header. */
-struct KlEventCtx;
 
-/**
- * @brief Raw-transport subset of a connection (Phase A structural extraction).
- *
- * INTERNAL / UNSTABLE: these fields were formerly top-level `KlConn` members and
- * are NOT a stable public API — they may move or change without notice. External
- * code must use accessors (e.g. kl_conn_peer_addr()), not `conn->stream.*`.
- *
- * This carries RAW transport state only. TLS-wrapper orchestration (`tls`,
- * `tls_want`) and HTTP policy deliberately stay on `KlConn`; a generic TLS
- * wrapper (`KlTlsStream`) arrives in a later phase.
- */
-typedef struct KlStream {
-    KlSocketHandle fd;          /**< Socket handle */
-    KlAllocator *alloc;         /**< Allocator (set once on pool init) */
-    struct KlEventCtx *ctx;     /**< Back-pointer to event ctx (set once at pool init;
-                                     hot path reads ctx->sockets for the provider) */
-
-    KlSockAddr peer_addr;       /**< Client address (captured at accept);
-                                     family KL_AF_UNSPEC = unavailable */
-
-    char *read_buf;             /**< Read buffer */
-    size_t read_len;            /**< Bytes in read buffer */
-    size_t read_cap;            /**< Read buffer capacity */
-    int read_paused;            /**< Read-side flow control: 1 = body reads paused
-                                     (kl_request_pause_body). Readiness drops READ interest;
-                                     completion stops posting the next recv. */
-
-    /* ── Phase-B write machinery (internal; API in src/stream_write.h) ────────────────
-     * The bounded, preallocated write queue + completion send-in-flight tracking that the
-     * generic KlStream write path uses. Dormant (zero) until kl_stream_write_init(); the raw
-     * transport writer/submit hooks are supplied by the (interim) HTTP/TLS adapter — no TLS
-     * state lives here. Not yet routed by the HTTP response path; INTERNAL/UNSTABLE. */
-    KlDrain            wq;          /**< Bounded write queue (reserved capacity at init) */
-    int                wq_inited;   /**< 1 once kl_stream_write_init preallocated wq */
-    int                wq_err;      /**< Sticky write-side error (submission/completion failure) */
-    /* Completion-mode send tracking: exactly one async send may be in flight at a time; a
-     * successful submission does NOT permit another until its WRITE completion (ordering).
-     * The submit hook is an inline function pointer (no named public typedef while the
-     * machinery is internal — the internal name is in src/stream_write.h). */
-    int              (*submit_fn)(void *ctx, const char *data, size_t len); /**< NULL = readiness */
-    void              *submit_ctx;  /**< submit hook context */
-    int                submit_copying; /**< configured ownership policy: 1 = backend copies on submit */
-    int                send_inflight;  /**< a submit is outstanding — do not post another */
-    size_t             inflight_len;   /**< bytes handed to the in-flight submit */
-    int                inflight_copying; /**< ownership policy CAPTURED for the in-flight op */
-
-    /* ── Phase-B strict read pause/resume machinery (internal; API in src/stream_read.h) ──
-     * Mediates the raw receive path: a receive lands in the stable read_buf; while paused the
-     * completed receive is HELD (undelivered) until resume, which delivers it exactly once
-     * before re-arming. Dormant until kl_stream_read_init(); read hooks (deliver/arm/disarm)
-     * are adapter-supplied (inline pointers, internal names in src/stream_read.h). No HTTP
-     * routing yet; INTERNAL/UNSTABLE. read_paused (above) is the pause flag. */
-    void             (*read_deliver)(void *ctx, const char *buf, size_t len, int ok); /**< deliver hook */
-    int              (*read_arm)(void *ctx);   /**< arm/post the next receive: 0 ok, -1 fail */
-    void             (*read_disarm)(void *ctx);/**< readiness: drop READ interest; completion: no-op */
-    void              *read_ctx;               /**< shared context for the read hooks */
-    int                read_completion_mode;   /**< 1 = completion (a posted recv completes → held) */
-    int                read_inited;            /**< 1 once kl_stream_read_init installed the hooks */
-    int                recv_inflight;          /**< a receive is armed/posted */
-    int                recv_held;              /**< a completed receive is held (undelivered) */
-    size_t             held_len;               /**< held byte count (<= read_cap) */
-    int                held_ok;                /**< held terminal flag: 1 = data, 0 = EOF/error */
-    int                read_closed;            /**< read side closed (terminal delivered / cancelled) */
-    /* Arm trampoline (iterative, bounds stack under synchronous completion): `arming` marks that
-     * we are inside read_arm(); a re-arm requested during that window sets `rearm_pending` for the
-     * trampoline loop instead of recursing; `completed_inline` records that on_recv retired the
-     * current arm synchronously, so read_arm's later return can't retroactively fail it. */
-    int                arming;
-    int                rearm_pending;
-    int                completed_inline;
-
-    /* ── Phase-B graceful-close / confirmed-detachment lifecycle (internal; src/stream_close.h) ──
-     * on_close (detachment) fires EXACTLY ONCE, and ONLY after BOTH the receive and the send
-     * operations are PHYSICALLY retired (recv_inflight == 0 && send_inflight == 0) — a merely
-     * logical read/write close is not enough (a completion provider may still own a posted
-     * buffer). Graceful drains the write queue first; abortive requests op cancellation (the
-     * cancel hooks obey the same synchronous-completion discipline as the arm trampoline). Reuse
-     * of the stream is legal only after on_close. Dormant (on_retire NULL) until
-     * kl_stream_close_init(); zero-init = OPEN, so the write/read machinery is unaffected until a
-     * close lifecycle is installed. INTERNAL/UNSTABLE. */
-    int                close_state;      /**< KL_STREAM_STATE_OPEN(0)/_CLOSING/_CLOSED (src/stream_close.h) */
-    int                close_abort;      /**< 1 = abortive (cancel ops, drop queue) vs graceful drain */
-    int                in_close_cancel;  /**< DEPTH counter: >0 = inside cancel hooks — defer finalize
-                                              (survives a reentrant kl_stream_cancel from a hook) */
-    int                close_notified;   /**< on_close has fired (exactly-once guard) */
-    int                close_inited;     /**< 1 once kl_stream_close_init installed the lifecycle */
-    int                wq_closing;       /**< write side closing: reject new kl_stream_write (CLOSED) */
-    /* Per-operation cancellation-request idempotence: a cancel hook is invoked AT MOST ONCE per
-     * outstanding op. The flag is set BEFORE the hook (so a synchronous retirement is safe) and
-     * reset only when a genuinely NEW op starts (recv armed / send submitted) or at re-init —
-     * never on a hook error. Re-issuing a cancel could corrupt provider bookkeeping / duplicate
-     * terminal events. */
-    int                recv_cancel_requested; /**< the outstanding recv has been cancel-requested */
-    int                send_cancel_requested; /**< the outstanding send has been cancel-requested */
-    void             (*on_close)(void *ctx);       /**< detachment callback: reuse legal only after */
-    void              *close_ctx;                  /**< on_close + cancel hook context */
-    int              (*cancel_recv)(void *ctx);    /**< optional: request provider cancel a posted recv */
-    int              (*cancel_send)(void *ctx);    /**< optional: request provider cancel a posted send */
-    void             (*on_retire)(struct KlStream *s); /**< set by close_init; read/write call it when
-                                                            a physical op retires so close can finalize */
-} KlStream;
+/* The raw-transport subset of a connection is now the candidate public KlStream (contract in
+ * <keel/stream.h>, layout in <keel/stream_detail.h>). KlConn embeds it below via the detail header.
+ * External code must use accessors (e.g. kl_conn_peer_addr()), not `conn->stream.*`. */
 
 typedef enum {
     KL_CONN_PROXY_HEADER,    /**< Reading a PROXY protocol header (pre-TLS) */
