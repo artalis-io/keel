@@ -265,7 +265,7 @@ static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease le
         ph->cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &s->accept_pending_peer)) {
         nc->state = KL_CONN_PROXY_HEADER;
     }
-    if (kl_event_add(&s->ev.loop, fd, KL_EVENT_READ, nc) < 0)
+    if (kl_event_add(&s->ev.loop, fd, KL_EVENT_READ, &nc->stream) < 0)  /* identity = raw stream */
         kl_server_conn_release(s, nc);                 /* releases the conn AND consumes the lease */
 }
 
@@ -399,10 +399,10 @@ int kl_server_run(KlServer *s) {
                         /* FILE_IO_READING — async read pending, no WRITE reg */
                     } else {
                         kl_event_mod(&s->ev.loop, fc->stream.fd,
-                                     KL_EVENT_WRITE, fc);
+                                     KL_EVENT_WRITE, &fc->stream);
                     }
                 } else if (fstate == KL_CONN_READING) {
-                    kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, fc);
+                    kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
                 } else if (fstate == KL_CONN_CLOSED) {
                     kl_event_del(&s->ev.loop, fc->stream.fd);
                     kl_server_conn_release(s, fc);
@@ -415,7 +415,10 @@ int kl_server_run(KlServer *s) {
             if (kl_event_dispatch(&s->ev, &events[i]))
                 continue;
 
-            KlConn *c = (KlConn *)events[i].udata;
+            /* Readiness event identity is the raw KlStream (step 6B-2); recover the owning KlConn
+             * only here, at the HTTP adapter boundary. NULL udata = the listen socket. */
+            KlStream *evs = (KlStream *)events[i].udata;
+            KlConn *c = evs ? kl_conn_from_stream(evs) : NULL;
 
             if (c == NULL) {
                 /* Listen socket — accept new connections through the readiness KlListener
@@ -548,7 +551,7 @@ transition:
             /* Transition */
             if (new_state == KL_CONN_TLS_HANDSHAKE) {
                 if (kl_event_mod(&s->ev.loop, c->stream.fd,
-                                 (KlEventMask)c->tls_want, c) < 0) {
+                                 (KlEventMask)c->tls_want, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
@@ -556,7 +559,7 @@ transition:
                 if (c->file_io_phase == 1) {
                     /* FILE_IO_READING — async read pending, no WRITE event */
                 } else if (kl_event_mod(&s->ev.loop, c->stream.fd,
-                                 KL_EVENT_WRITE, c) < 0) {
+                                 KL_EVENT_WRITE, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
@@ -565,7 +568,7 @@ transition:
                 const KlWsServerHooks *wsh = kl_ws_server_hooks();
                 if (wsh && wsh->drain_pending && wsh->drain_pending(c))
                     ws_mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
-                if (kl_event_mod(&s->ev.loop, c->stream.fd, ws_mask, c) < 0) {
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, ws_mask, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
@@ -574,7 +577,7 @@ transition:
                 const KlH2ServerHooks *h2h = kl_h2_server_hooks();
                 if (h2h && h2h->want_write && h2h->want_write(c))
                     mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
-                if (kl_event_mod(&s->ev.loop, c->stream.fd, mask, c) < 0) {
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, mask, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
@@ -586,7 +589,7 @@ transition:
                  * re-arms READ. Only READING_BODY pauses. */
                 KlEventMask rm = (new_state == KL_CONN_READING_BODY && c->stream.read_paused)
                                      ? 0 : KL_EVENT_READ;
-                if (kl_event_mod(&s->ev.loop, c->stream.fd, rm, c) < 0) {
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, rm, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }

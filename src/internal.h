@@ -25,18 +25,45 @@
 /* ── Transport helpers — TLS-aware read/write ────────────────────── */
 
 /* The socket provider for a connection (ctx->sockets; NULL = POSIX fast path). */
+/* ── Raw-transport seam over the embedded KlStream (step 6B-2) ─────────────────────────────────
+ * HTTP connection code performs raw socket I/O and identity recovery through the neutral KlStream,
+ * never touching the socket provider or fd directly. TLS is an adapter ABOVE these (conn_read/
+ * conn_write). The generic KlStream write queue / strict-read facets stay dormant for HTTP/1. */
+static inline const KlSocketProvider *kl_stream_provider(const KlStream *s) {
+    return s->ctx ? s->ctx->sockets : NULL;
+}
+static inline ssize_t kl_stream_recv(const KlStream *s, void *buf, size_t len) {
+    return kl_sock_recv(kl_stream_provider(s), s->fd, buf, len);
+}
+static inline ssize_t kl_stream_send(const KlStream *s, const void *buf, size_t len) {
+    return kl_sock_send(kl_stream_provider(s), s->fd, buf, len);
+}
+static inline ssize_t kl_stream_recv_peek(const KlStream *s, void *buf, size_t len) {
+    return kl_sock_recv_peek(kl_stream_provider(s), s->fd, buf, len);
+}
+/* Classify the last raw stream op's status (would-block / interrupted / etc.) via the seam,
+ * so HTTP code never inspects the socket provider directly. */
+static inline KlIoStatus kl_stream_io_status(const KlStream *s) {
+    return kl_sock_io_status(kl_stream_provider(s));
+}
+/* Recover the owning KlConn from its embedded stream at the HTTP adapter boundary. The stream is
+ * the leading member (offset 0), but containerof keeps that an implementation detail. */
+static inline KlConn *kl_conn_from_stream(KlStream *s) {
+    return (KlConn *)((char *)s - offsetof(KlConn, stream));
+}
+
 static inline const KlSocketProvider *conn_provider(const KlConn *c) {
-    return c->stream.ctx ? c->stream.ctx->sockets : NULL;
+    return kl_stream_provider(&c->stream);
 }
 
 static inline ssize_t conn_read(KlConn *c, void *buf, size_t len) {
     if (c->tls) return c->tls->read(c->tls, c->stream.fd, buf, len);
-    return kl_sock_recv(conn_provider(c), c->stream.fd, buf, len);
+    return kl_stream_recv(&c->stream, buf, len);
 }
 
 static inline ssize_t conn_write(KlConn *c, const void *buf, size_t len) {
     if (c->tls) return c->tls->write(c->tls, c->stream.fd, buf, len);
-    return kl_sock_send(conn_provider(c), c->stream.fd, buf, len);
+    return kl_stream_send(&c->stream, buf, len);
 }
 
 /* Write all bytes, retrying on short writes (TLS WANT_WRITE, etc.) */

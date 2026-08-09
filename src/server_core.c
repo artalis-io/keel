@@ -585,7 +585,7 @@ void kl_request_pause_body(const KlRequest *req) {
     if (!c || c->stream.read_paused) return;                 /* idempotent */
     c->stream.read_paused = 1;
     if (!(kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION))
-        (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, 0, c);   /* readiness: stop READ now */
+        (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, 0, &c->stream);   /* readiness: stop READ now */
     /* completion: comp_start_body_read skips the next recv; the in-flight recv may
      * deliver <=1 more chunk before the pause takes hold (bounded). */
 }
@@ -597,7 +597,7 @@ void kl_request_resume_body(const KlRequest *req) {
     if (kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION)
         kl_io_engine_post_read(c);                    /* completion: re-post the body recv */
     else
-        (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, KL_EVENT_READ, c);   /* readiness: re-arm READ */
+        (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, KL_EVENT_READ, &c->stream);   /* readiness: re-arm READ */
 }
 
 /* ── Read-only load snapshot ──────────────────────────────────────────────── */

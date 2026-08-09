@@ -867,6 +867,27 @@ cppcheck:
 	  -UKEEL_PLATFORM_LWIP \
 	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
 
+# Readiness event-identity audit gate (step 6B-2): every readiness kl_event_add/mod must register
+# the raw KlStream (&conn->stream) as udata, not a bare KlConn. Pointer equality (stream is the
+# leading member) hides regressions from behavioral tests. tools/check_readiness_identity.pl parses
+# whole call expressions (balanced parens), so it catches BOTH single-line and multiline calls. The
+# completion accept path (completion_server.c) still registers KlConn until 6B-3 and is excluded.
+check-readiness-identity:
+	@perl tools/check_readiness_identity.pl src/server.c src/async.c src/server_core.c \
+	  && echo "readiness-identity: OK — all readiness registrations use &conn->stream"
+
+# Self-test the audit gate against fixtures with single-line AND multiline violations (must FAIL)
+# and a clean fixture (must PASS) — proving the gate actually detects multiline regressions.
+check-readiness-identity-selftest:
+	@perl tools/check_readiness_identity.pl tests/fixtures/readiness_identity_good.c \
+	  && echo "selftest: good fixture PASSED (as expected)" \
+	  || { echo "selftest FAIL: clean fixture was flagged"; exit 1; }
+	@if perl tools/check_readiness_identity.pl tests/fixtures/readiness_identity_bad.c 2>/dev/null; then \
+	  echo "selftest FAIL: bad fixture (single-line + multiline violations) was NOT flagged"; exit 1; \
+	else \
+	  echo "selftest: bad fixture flagged (as expected)"; \
+	fi
+
 # W^X / no-runtime-codegen regression guard.
 # See SECURITY.md "Architectural Guarantees" for the invariant.
 wx-guard:

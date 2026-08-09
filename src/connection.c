@@ -18,10 +18,10 @@
 #include "h2_internal.h"
 #include "socket.h"
 
-/* Socket provider for this connection's fd. NULL (POSIX default) for a
- * standalone pool with no event ctx wired — see kl_conn_release. */
+/* Socket provider for this connection's fd — via the raw KlStream seam (step 6B-2). NULL (POSIX
+ * default) for a standalone pool with no event ctx wired — see kl_conn_release. */
 static inline const KlSocketProvider *conn_sp(const KlConn *c) {
-    return c->stream.ctx ? c->stream.ctx->sockets : NULL;
+    return kl_stream_provider(&c->stream);
 }
 
 #define KL_TLS_DRAIN_MAX 256  /* max pending drain iterations per event */
@@ -77,9 +77,19 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
             pool->conns = NULL;
             return -1;
         }
-        pool->conns[i].stream.read_cap = KL_READ_BUF_SIZE;
+        /* Base-init the embedded raw stream (step 6B-2): sets read_buf/read_cap, invalid handle,
+         * and clears all facet state. The read_buf was allocated just above; kl_stream_init records
+         * it as the stable receive buffer. Arguments are known-valid, but check the result and
+         * unwind on failure to keep initialization discipline intact against future changes. */
+        char *rb = pool->conns[i].stream.read_buf;
+        if (kl_stream_init(&pool->conns[i].stream, rb, KL_READ_BUF_SIZE) < 0) {
+            for (int j = 0; j <= i; j++)   /* free through i (rb for slot i was set above) */
+                kl_free(alloc, pool->conns[j].stream.read_buf, KL_READ_BUF_SIZE);
+            kl_free(alloc, pool->conns, sizeof(KlConn) * (size_t)capacity);
+            pool->conns = NULL;
+            return -1;
+        }
         pool->conns[i].next_free = (i < capacity - 1) ? &pool->conns[i + 1] : NULL;
-        pool->conns[i].stream.fd = KL_INVALID_SOCKET;
         pool->conns[i].state = KL_CONN_CLOSED;
         pool->conns[i].stream.alloc = alloc;
     }
@@ -402,10 +412,10 @@ int kl_conn_read_proxy_header(KlConn *c) {
     uint8_t buf[KL_PROXY_HEADER_MAX];
     ssize_t n;
     do {
-        n = kl_sock_recv_peek(conn_sp(c), c->stream.fd, buf, sizeof(buf));
-    } while (n < 0 && kl_sock_io_status(conn_sp(c)) == KL_IO_INTERRUPTED);
+        n = kl_stream_recv_peek(&c->stream, buf, sizeof(buf));
+    } while (n < 0 && kl_stream_io_status(&c->stream) == KL_IO_INTERRUPTED);
     if (n < 0)
-        return (kl_sock_io_status(conn_sp(c)) == KL_IO_WOULD_BLOCK) ? 0 : -1;
+        return (kl_stream_io_status(&c->stream) == KL_IO_WOULD_BLOCK) ? 0 : -1;
     if (n == 0)
         return -1;   /* peer closed before sending a header */
 
@@ -432,7 +442,7 @@ int kl_conn_read_proxy_header(KlConn *c) {
     while (left > 0) {
         size_t want = left < sizeof(buf) ? left : sizeof(buf);
         ssize_t rd;
-        rd = kl_sock_recv(conn_sp(c), c->stream.fd, buf, want);
+        rd = kl_stream_recv(&c->stream, buf, want);
         if (rd <= 0)
             return -1;
         left -= (size_t)rd;
@@ -974,10 +984,10 @@ static KlConnState conn_file_submit_read(KlConn *c) {
 
 static KlConnState conn_file_flush(KlConn *c) {
     while (c->file_io_sent < c->file_io_len) {
-        ssize_t nw = kl_sock_send(conn_sp(c), c->stream.fd, c->stream.read_buf + c->file_io_sent,
-                                  c->file_io_len - c->file_io_sent);
+        ssize_t nw = kl_stream_send(&c->stream, c->stream.read_buf + c->file_io_sent,
+                                    c->file_io_len - c->file_io_sent);
         if (nw < 0) {
-            KlIoStatus st = kl_sock_io_status(conn_sp(c));
+            KlIoStatus st = kl_stream_io_status(&c->stream);
             if (st == KL_IO_WOULD_BLOCK) {
                 c->state = KL_CONN_SENDING;
                 return c->state;  /* wait for WRITE event */
