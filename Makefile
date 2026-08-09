@@ -196,6 +196,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c src/stream_write.c src/stream_read.c src/stream_close.c \
+           src/connect_op.c \
            $(COMPLETION_CORE) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
 # The built-in DNS resolver now builds on every platform: dns_resolver.c is
