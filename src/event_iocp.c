@@ -57,6 +57,15 @@ typedef struct KlIocpConnect {
     struct KlIocpOp      *op;
 } KlIocpConnect;
 
+/* In-flight AcceptEx tracker (6B-3 2b-ii). AcceptEx PRE-creates its accept socket (op->accept_sock)
+ * before the op completes; tracking every posted accept lets kl_event_close_builtin() forcibly
+ * reclaim the ones a (delayed/failed) cancellation never retired — closing the pre-created socket
+ * and freeing the op — so teardown never leaks an accept socket or op. Mirrors KlIocpConnect. */
+typedef struct KlIocpAccept {
+    struct KlIocpAccept *next;
+    struct KlIocpOp     *op;
+} KlIocpAccept;
+
 typedef struct {
     HANDLE                    port;
     LPFN_ACCEPTEX             acceptex;
@@ -66,6 +75,7 @@ typedef struct {
     SOCKET                    listen_fd;   /* stored at prime — drain is ctx-scoped */
     KlIocpWatch              *watches;     /* registered readiness watches (8e-2c) */
     KlIocpConnect            *connects;    /* in-flight ConnectEx ops (LC-0) */
+    KlIocpAccept             *accepts;     /* in-flight AcceptEx ops (6B-3 2b-ii) */
     KlAllocator              *alloc;
 } KlIocpState;
 
@@ -216,6 +226,16 @@ void kl_event_close_builtin(KlEventLoop *loop) {
             kl_free(st->alloc, tr, sizeof(*tr));
             tr = n;
         }
+        /* Reclaim any AcceptEx op a cancellation never retired (6B-3 2b-ii): close the PRE-created
+         * accept socket (never handed to a conn) and free the op, so teardown leaks neither. */
+        KlIocpAccept *at = st->accepts;
+        while (at) {
+            KlIocpAccept *n = at->next;
+            closesocket(at->op->accept_sock);
+            iocp_op_free(at->op);
+            kl_free(st->alloc, at, sizeof(*at));
+            at = n;
+        }
         if (st->port) CloseHandle(st->port);
         kl_free(st->alloc, st, sizeof(*st));
         loop->_backend = NULL;
@@ -325,16 +345,35 @@ static int iocp_comp_post_accept(struct KlServer *s) {
     op->alloc = st->alloc;
     op->accept_sock = a;
 
+    /* Track the op BEFORE posting so a synchronous completion (or teardown close) can always find
+     * it. On a hard post failure we untrack + free below. */
+    KlIocpAccept *tr = kl_malloc(st->alloc, sizeof(*tr));
+    if (!tr) { closesocket(a); iocp_op_free(op); return -1; }
+    tr->op = op; tr->next = st->accepts; st->accepts = tr;
+
     DWORD bytes = 0;
     BOOL ok = st->acceptex((SOCKET)s->listen_fd, a, op->accept_buf,
                            0, (DWORD)KL_IOCP_ADDR_LEN, (DWORD)KL_IOCP_ADDR_LEN,
                            &bytes, &op->ov);
     if (!ok && WSAGetLastError() != WSA_IO_PENDING) {
+        st->accepts = tr->next;                 /* unlink (it is the head we just pushed) */
+        kl_free(st->alloc, tr, sizeof(*tr));
         closesocket(a);
         iocp_op_free(op);
         return -1;
     }
     return 0;
+}
+
+/* Unlink the AcceptEx tracker for `op` (on completion). Returns whether it was found + freed. */
+static void iocp_accept_untrack(KlIocpState *st, const KlIocpOp *op) {
+    for (KlIocpAccept **link = &st->accepts; *link; link = &(*link)->next)
+        if ((*link)->op == op) {
+            KlIocpAccept *tr = *link;
+            *link = tr->next;
+            kl_free(st->alloc, tr, sizeof(*tr));
+            return;
+        }
 }
 
 /* TransmitFile's per-call byte cap. Defaults to the documented ~2 GiB maximum; a test may
@@ -665,9 +704,10 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * close the PRE-created accept socket (AcceptEx allocates it up front — no leak) and
              * deliver ok=0 so the completion listener retires this posted accept (returns its
              * credit). The overlapped is associated with the listen socket, so query it there. */
+            iocp_accept_untrack(st, op);   /* completing — no longer close's responsibility */
             DWORD xfer = 0, flags = 0;
             if (!WSAGetOverlappedResult(lst, &op->ov, &xfer, FALSE, &flags)) {
-                closesocket(op->accept_sock);
+                closesocket(op->accept_sock);   /* pre-created socket never handed off — close it */
                 memset(&out[count], 0, sizeof(out[count]));
                 out[count].kind = KL_COMP_ACCEPT;
                 out[count].target = NULL;

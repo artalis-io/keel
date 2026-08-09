@@ -25,6 +25,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <errno.h>              /* EAGAIN/EWOULDBLOCK — backlog-queued read distinguishes not-reset */
 
 #define SMOKE_PORT 18092
 #define SMOKE_UDP_PORT 18093
@@ -480,9 +481,88 @@ static int proxy_over_completion_ok(void) {
     return ok;
 }
 
+/* Backlog exhaustion (6B-3 2b-ii): with ONE connection slot, a post-driven completion server must
+ * QUEUE a second connection in the kernel backlog — not accept-and-drop/reset it — and serve it
+ * once the first slot frees. Proves the reserve-before-post PAUSE end to end over real sockets:
+ *   1. client A occupies the one slot (keep-alive: its conn stays READING after the response);
+ *   2. client B connects + sends, but is NOT served while the pool is exhausted, and NOT reset;
+ *   3. client A closes → the slot frees → the listener resumes and accepts B;
+ *   4. B's request now completes over the same previously-queued connection.
+ * Returns 1 on success. */
+#define SMOKE_BACKLOG_PORT 18096
+static int read_until_body(int fd, char *buf, size_t cap) {   /* 1 if SMOKE_BODY seen, else 0 */
+    size_t got = 0;
+    while (got < cap - 1) {
+        ssize_t n = read(fd, buf + got, cap - 1 - got);
+        if (n <= 0) break;
+        got += (size_t)n; buf[got] = 0;
+        if (strstr(buf, SMOKE_BODY)) return 1;
+    }
+    return 0;
+}
+static int backlog_exhaustion_queues_not_drops(void) {
+    KlServer srv;
+    KlConfig cfg = { .port = SMOKE_BACKLOG_PORT, .bind_addr = "127.0.0.1",
+                     .sockets = kl_socket_provider_pollcomp(),
+                     .max_connections = 1,          /* exactly one connection slot */
+                     .read_timeout_ms = 10000 };    /* generous, so A is not idle-swept mid-test */
+    if (kl_server_init(&srv, &cfg) != 0) return 0;
+    kl_server_route(&srv, "GET", "/", handle_ok, NULL, NULL);
+    pthread_t th;
+    if (pthread_create(&th, NULL, run_server_arg, &srv) != 0) { kl_server_free(&srv); return 0; }
+    for (int i = 0; i < 200 && srv.bound_port == 0; i++) nap_ms(5);
+
+    int ok = 0, a = -1, b = -1;
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(SMOKE_BACKLOG_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+    char buf[512];
+
+    /* 1. Client A: keep-alive request; read its 200 so we KNOW the one slot is now occupied. */
+    a = socket(AF_INET, SOCK_STREAM, 0);
+    if (a < 0) goto done;
+    { struct timeval t = { 2, 0 }; setsockopt(a, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof(t)); }
+    if (connect(a, (struct sockaddr *)&to, sizeof(to)) != 0) goto done;
+    { const char *r = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";      /* keep-alive (no Connection: close) */
+      if (write(a, r, strlen(r)) < 0) goto done; }
+    if (!read_until_body(a, buf, sizeof(buf))) goto done;      /* A served → holds the only slot */
+
+    /* 2. Client B: connect (into the kernel backlog) + send. While the pool is exhausted the server
+     *    posts no accept, so B is neither served nor reset — a short read blocks out (EAGAIN). */
+    b = socket(AF_INET, SOCK_STREAM, 0);
+    if (b < 0) goto done;
+    { struct timeval t = { 0, 400000 }; setsockopt(b, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof(t)); }
+    if (connect(b, (struct sockaddr *)&to, sizeof(to)) != 0) goto done;
+    { const char *r = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+      if (write(b, r, strlen(r)) < 0) goto done; }
+    { ssize_t n = read(b, buf, sizeof(buf) - 1);
+      if (n > 0) goto done;    /* served while exhausted → accept-and-drop regression */
+      if (n == 0) goto done;   /* EOF/reset while exhausted → dropped */
+      if (errno != EAGAIN && errno != EWOULDBLOCK) goto done;   /* reset (ECONNRESET) etc. → dropped */
+    }
+
+    /* 3. Client A closes → its slot frees → the listener resumes and accepts B. */
+    close(a); a = -1;
+
+    /* 4. B's request now completes over the previously-queued connection. */
+    { struct timeval t = { 3, 0 }; setsockopt(b, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof(t)); }
+    ok = read_until_body(b, buf, sizeof(buf));
+
+done:
+    if (a >= 0) close(a);
+    if (b >= 0) close(b);
+    kl_server_stop(&srv);
+    pthread_join(th, NULL);
+    kl_server_free(&srv);
+    return ok;
+}
+
 int main(void) {
     /* PROXY-over-completion is rejected at init (no completion PROXY-header driver). */
     int proxy_ok = proxy_over_completion_ok();
+    int backlog_ok = backlog_exhaustion_queues_not_drops();
 
     static KlH2ServerConfig h2cfg = { .factory = echo_factory };
     KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
@@ -670,7 +750,8 @@ int main(void) {
     if (!big_ok) { fprintf(stderr, "smoke-pollcomp: large-response partial-send FAILED\n"); return 1; }
     if (!bigstream_ok) { fprintf(stderr, "smoke-pollcomp: bigstream overlapped flush / HOL FAILED\n"); return 1; }
     if (!proxy_ok) { fprintf(stderr, "smoke-pollcomp: PROXY-over-completion roundtrip FAILED\n"); return 1; }
+    if (!backlog_ok) { fprintf(stderr, "smoke-pollcomp: backlog exhaustion (queue-not-drop) FAILED\n"); return 1; }
 
-    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST + file + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large + bigstream + proxy)\n");
+    printf("smoke-pollcomp: over-completion roundtrip OK (GET + POST + file + stream + UDP + h2c + h2-pk + idle-timeout + keepalive + resilience + large + bigstream + proxy + backlog)\n");
     return 0;
 }

@@ -832,13 +832,16 @@ int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
     s->ev.comp_conn_dispatch = comp_server_conn_dispatch;
     if (!s->accept_setup_done) {
         int window = kl_comp_prime_accepts(s);   /* one-time setup; returns the accept window */
-        if (window < 0) return -1;
-        s->accept_setup_done = 1;
+        if (window < 0) return -1;               /* setup NOT latched — a retry re-attempts */
         if (window >= 1) {
+            /* Post-driven: start the listener BEFORE latching setup_done, so a start failure
+             * leaves setup unlatched (honest retry / error cleanup). prime_accepts is idempotent
+             * (returns the same window), so the retry re-primes cheaply then re-starts. */
             if (comp_accept_listener_start(s, window) < 0) return -1;
             s->accept_via_listener = 1;
         }
         /* window == 0: autonomous backend — prime already armed its own gate. */
+        s->accept_setup_done = 1;                /* latch only after setup fully succeeded */
     } else if (!s->accept_via_listener) {
         if (kl_comp_prime_accepts(s) < 0) return -1;   /* autonomous: re-arm the gate each tick */
     }
