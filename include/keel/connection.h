@@ -15,6 +15,7 @@
 #include <keel/drain.h>      /* KlDrain wq (Phase-B write queue, embedded in KlStream) */
 #include <keel/stream.h>         /* KlStream contract (Phase-B transport, candidate public API) */
 #include <keel/stream_detail.h>  /* struct KlStream layout — KlConn embeds it (opt-in detail) */
+#include <keel/listener.h>       /* KlSlotLease (admission credit handed off at accept, step 6B) */
 
 /** @brief Default read buffer size (bytes). */
 #define KL_READ_BUF_SIZE 8192
@@ -104,13 +105,19 @@ typedef struct KlConn {
                        void *user_data); /**< Access log callback (set once at pool init) */
     void *access_log_data;      /**< Opaque data for access_log callback */
 
+    KlSlotLease slot_lease;     /**< Admission credit handed off by KlListener at accept (step 6B);
+                                     consumed once on close AFTER the KlConn returns to the pool. */
+
     struct KlConn *next_free;   /**< Free list linkage */
 } KlConn;
 
 typedef struct {
     KlConn *conns;          /**< Connection slot array */
     int capacity;           /**< Maximum connection slots */
-    int active_count;       /**< Number of in-use slots */
+    int active_count;       /**< Number of in-use slots (physical KlConn ownership) */
+    int free_credits;       /**< Admission rights reserved before posting accepts (step 6B). The
+                                 invariant free_credits + reserved_accepts + active_count == capacity
+                                 holds; reserve() takes a credit, the lease returns it on close. */
     KlConn *free_list;      /**< Free slot linked list */
     KlAllocator *alloc;     /**< Allocator for pool memory */
 } KlConnPool;
@@ -123,6 +130,17 @@ typedef struct {
  * @return 0 on success, -1 on failure.
  */
 int     kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc);
+
+/** @brief Reserve one admission credit before posting/arming an accept (step 6B). Returns 1 if a
+ *  credit was taken (free_credits--), 0 if none available (→ listener backpressure), -1 on a NULL
+ *  pool (fail closed). Only the listener-backed READINESS admission path uses free_credits; the
+ *  completion accept path currently bypasses it (it calls kl_conn_acquire directly). */
+int     kl_conn_pool_reserve(KlConnPool *pool);
+
+/** @brief Return one admission credit to the pool (free_credits++, capped at capacity). Called via
+ *  the KlSlotLease on connection close, or when a reserved-but-unused accept is dropped. No-op on a
+ *  NULL pool; an over-return (broken lease accounting) trips an assert in debug/test builds. */
+void    kl_conn_pool_return_credit(KlConnPool *pool);
 
 /** @brief Acquire a connection slot from the pool. Returns NULL if full. */
 KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd);

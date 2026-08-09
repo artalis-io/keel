@@ -176,6 +176,12 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     /* Wait for pool to register both connections */
     usleep(50000);
 
+    /* Stats must reflect the readiness listener's PAUSED state when the pool is full (step 6B-1). */
+    KlServerStats st_full;
+    kl_server_stats(&srv, &st_full);
+    ASSERT_EQ(st_full.active_connections, 2);
+    ASSERT_EQ(st_full.listen_paused, 1);
+
     /* Third connect — pool full, server paused listening.
      * The OS may queue the connection in the backlog, but it won't
      * get a response because no slot is available. */
@@ -212,6 +218,55 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     kl_server_stop(&srv);
     pthread_join(tid, NULL);
     kl_server_free(&srv);
+}
+
+/* ── Listener teardown (step 6B-1): kl_server_free must complete the accept listener's
+ *    close/detachment while armed AND while paused. ASan/UBSan verify no leak/UAF. ─────── */
+
+UTEST(server_integration, teardown_while_armed) {
+    KlServer srv;
+    KlConfig cfg = { .port = 0, .max_connections = 4 };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    wait_for_bind(&srv);
+    ASSERT_TRUE(srv.bound_port > 0);
+
+    /* No connections → listener LISTENING (armed). */
+    KlServerStats st;
+    kl_server_stats(&srv, &st);
+    ASSERT_EQ(st.listen_paused, 0);
+
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);   /* must close+detach the armed listener cleanly */
+}
+
+UTEST(server_integration, teardown_while_paused) {
+    KlServer srv;
+    KlConfig cfg = { .port = 0, .max_connections = 1 };
+    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
+    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread_fn, &srv);
+    wait_for_bind(&srv);
+    int port = srv.bound_port;
+
+    int fd1 = connect_to(port);     /* fills the single slot */
+    int fd2 = connect_nb(port);     /* backlog; listener PAUSED */
+    usleep(50000);
+    KlServerStats st;
+    kl_server_stats(&srv, &st);
+    ASSERT_EQ(st.listen_paused, 1);
+
+    /* Free the server while the listener is PAUSED with a held reservation dropped and interest
+     * disarmed — the close/detachment contract must complete. */
+    kl_server_stop(&srv);
+    pthread_join(tid, NULL);
+    kl_server_free(&srv);
+    if (fd1 >= 0) kl_test_closesock(fd1);
+    if (fd2 >= 0) kl_test_closesock(fd2);
 }
 
 /* ── Backpressure recovery ──────────────────────────────────────────── */

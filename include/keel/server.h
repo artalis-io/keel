@@ -11,6 +11,7 @@
 #include <keel/tls.h>
 #include <keel/h2_server.h>
 #include <keel/connection.h>
+#include <keel/listener_detail.h>  /* struct KlListener layout — KlServer embeds it (step 6B-1) */
 #include <keel/event_ctx.h>
 #include <keel/proxy_protocol.h>
 #include <stdarg.h>
@@ -138,7 +139,16 @@ typedef struct KlServer {
     KlConnPool pool;            /**< Connection pool */
     KlEventCtx ev;              /**< event loop + watcher list */
     KlAcceptTarget accept_target;        /**< Internal accept target (KL_COMP_ACCEPT.target); server-owned,
-                                     back-points here. Phase-A retype — INTERNAL/UNSTABLE. */
+                                     back-points here. Phase-A retype — INTERNAL/UNSTABLE.
+                                     Still used by the completion accept path (6B-1b). */
+    /* ── Readiness accept via KlListener (step 6B-1) ─────────────────────────────────
+     * When the loop is a readiness loop (!completion_loop), the readiness accept path is driven by
+     * this embedded KlListener with the split-credit pool accounting. INTERNAL/UNSTABLE. */
+    KlListener accept_listener;   /**< readiness accept driver (active when accept_via_listener) */
+    int  accept_via_listener;     /**< 1 = readiness KlListener drives accepts (vs KlAcceptTarget) */
+    int  listen_registered;       /**< listen fd currently has READ interest (listener-managed) */
+    int  accept_alive;            /**< liveness token for slot leases; 0'd before pool teardown */
+    KlSockAddr accept_pending_peer; /**< peer addr stashed for the on_accept hook (single-threaded) */
     KlSocketHandle listen_fd;              /**< Listening socket fd */
     int bound_port;             /**< actual port after bind (useful with port=0) */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */

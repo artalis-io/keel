@@ -331,6 +331,11 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
  * precondition for a clean ExitBootServices. Hosted-only pieces (async-op cancel, the
  * self-pipe, the AF_UNIX unlink) are compiled out under KEEL_FREESTANDING. */
 void kl_server_free(KlServer *s) {
+    /* Invalidate the accept liveness token BEFORE any teardown (step 6B-1): a slot lease released
+     * while connections drain below must see accept_alive == 0 and no-op, never touching the
+     * about-to-be-destroyed listener/pool. Ordered first, before the pool is freed. */
+    s->accept_alive = 0;
+
 #ifndef KEEL_FREESTANDING
     /* Cancel all active async ops (idempotent terminal: fires on_cancel once, removes
      * each op from the list). Freestanding has no async suspend (no thread pool). */
@@ -342,6 +347,13 @@ void kl_server_free(KlServer *s) {
         s->file_io->destroy(s->file_io);
         s->file_io = NULL;
     }
+
+    /* Complete the readiness accept listener's close/detachment contract WHILE the event context,
+     * listen handle, and pool still exist (step 6B-1): readiness close disarms the listen interest
+     * and retires synchronously, so the listener reaches CLOSED here rather than being abandoned
+     * LISTENING with a held reservation + registered interest. */
+    if (s->accept_via_listener)
+        kl_listener_close(&s->accept_listener);   /* readiness close → synchronous detachment */
 
     /* Close the listen socket. Hosted also unlinks an owned AF_UNIX path; a freestanding
      * EFI server has only the TCP listener, so close it directly. */
@@ -427,6 +439,17 @@ int kl_server_run_completion_loop(KlServer *s) {
 /* Release a connection and resume the listen socket if it was paused due to pool
  * exhaustion. Called from the event loop, timeout sweep, and async completion. */
 void kl_server_conn_release(KlServer *s, KlConn *c) {
+    if (s->accept_via_listener) {
+        /* Split-credit accept path (step 6B-1): return the physical KlConn to the pool FIRST, then
+         * consume the admission lease. The lease's release returns the credit and resumes the
+         * listener, which may immediately reserve + arm + accept — so the KlConn must already be
+         * back on the free list before the notification fires. */
+        KlSlotLease lease = c->slot_lease;
+        memset(&c->slot_lease, 0, sizeof(lease));   /* clear the owned copy on the conn */
+        kl_conn_release(&s->pool, c);
+        kl_slot_lease_release(&lease);
+        return;
+    }
     kl_conn_release(&s->pool, c);
     if (s->listen_paused && s->pool.free_list) {
         kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL);
@@ -585,7 +608,11 @@ void kl_server_stats(const KlServer *s, KlServerStats *out) {
 
     out->active_connections = s->pool.active_count;
     out->max_connections    = s->pool.capacity;
-    out->listen_paused      = s->listen_paused;
+    /* Report from the active accept driver: the readiness listener owns pause state via
+     * KL_LISTENER_PAUSED; the completion / legacy path uses s->listen_paused. */
+    out->listen_paused      = s->accept_via_listener
+        ? (kl_listener_state(&s->accept_listener) == KL_LISTENER_PAUSED)
+        : s->listen_paused;
 
     /* Count suspended connections by walking the async ops list */
     int suspended = 0;

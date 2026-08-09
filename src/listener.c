@@ -112,7 +112,16 @@ static void l_arm_loop(KlListener *l) {
                 if (r == 1) l_release_credit(l);     /* return the credit we just acquired */
                 break;
             }
-            if (r == 0) { l->state = KL_LISTENER_PAUSED; break; }   /* backpressure */
+            if (r == 0) {                            /* backpressure: no credit */
+                l->state = KL_LISTENER_PAUSED;
+                /* Readiness: drop the persistent listen READ interest so a level-triggered fd stops
+                 * firing until a slot frees and kl_listener_notify_slot_free re-arms it. Completion
+                 * disarm is a documented no-op. The disarm hook is idempotent (it tracks its own
+                 * registration), so calling it here even if nothing was armed is safe. */
+                if (!l->completion_mode && l->disarm_accept)
+                    l->disarm_accept(l->ctx);
+                break;
+            }
             l->reserved = 1;
         }
 

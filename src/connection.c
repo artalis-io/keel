@@ -59,6 +59,7 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
     pool->alloc = alloc;
     pool->capacity = capacity;
     pool->active_count = 0;
+    pool->free_credits = capacity;   /* admission rights: one per slot (step 6B credit layer) */
     if ((size_t)capacity > SIZE_MAX / sizeof(KlConn)) return -1;
     pool->conns = kl_malloc(alloc, sizeof(KlConn) * (size_t)capacity);
     if (!pool->conns) return -1;
@@ -84,6 +85,21 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
     }
 
     return 0;
+}
+
+int kl_conn_pool_reserve(KlConnPool *pool) {
+    if (!pool) return -1;                     /* fail closed on a NULL pool */
+    if (pool->free_credits <= 0) return 0;    /* admission full → listener backpressure */
+    pool->free_credits--;
+    return 1;
+}
+
+void kl_conn_pool_return_credit(KlConnPool *pool) {
+    if (!pool) return;                        /* defensive no-op */
+    /* Over-return means broken lease accounting (the free_credits + reserved + active == capacity
+     * invariant was violated) — catch it in debug/tests instead of silently hiding it. */
+    assert(pool->free_credits < pool->capacity);
+    if (pool->free_credits < pool->capacity) pool->free_credits++;   /* release-once safety net */
 }
 
 KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd) {

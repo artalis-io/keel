@@ -70,7 +70,10 @@ void kl_slot_lease_release(KlSlotLease *lease);
 /** Arm/post one accept. May complete inline (call kl_listener_on_accepted / on_accept_failed).
  *  Returns 0 (armed/in flight, or inline-decided), -1 on a hard failure that closes the listener. */
 typedef int  (*KlListenerArmFn)(void *ctx);
-/** Readiness: drop listen-fd READ interest. Completion: no-op. Required in readiness mode. */
+/** Drop the accept interest. Readiness: remove the persistent listen-fd READ interest — MUST be
+ *  IDEMPOTENT (it is called both on close AND on backpressure PAUSE, i.e. after an accept
+ *  completion, whenever the persistent level-triggered interest must be removed). Completion:
+ *  no-op. Required in readiness mode. */
 typedef void (*KlListenerDisarmFn)(void *ctx);
 /** Completion: request cancellation of an outstanding posted accept (invoked at most once). */
 typedef void (*KlListenerCancelFn)(void *ctx);

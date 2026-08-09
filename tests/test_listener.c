@@ -139,6 +139,23 @@ UTEST(listener, backpressure_pauses_when_no_slot) {
     ASSERT_EQ(m.arm_calls, 2);
 }
 
+UTEST(listener, readiness_pause_disarms_then_resume_rearms) {
+    /* Readiness backpressure must DROP the listen interest on pause (a level-triggered fd would
+     * otherwise keep firing), and re-arm on resume. Exposed by the live server wiring (step 6B-1). */
+    KlListener l; LT m; lt_setup(&m, &l, /*completion=*/0);
+    m.slots = 1;
+    ASSERT_EQ(kl_listener_start(&l), 0);          /* reserves the one slot, arms */
+    kl_listener_on_accepted(&l, (KlSocketHandle)1000);   /* commits it; next reserve → 0 → PAUSED */
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(m.disarm_calls, 1);                 /* pause dropped the listen interest */
+
+    kl_slot_lease_release(&m.last_lease);          /* slot returns */
+    kl_listener_notify_slot_free(&l);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(m.arm_calls, 2);                     /* resume re-armed */
+    kl_listener_close(&l);
+}
+
 UTEST(listener, notify_slot_free_noop_when_listening) {
     KlListener l; LT m; lt_setup(&m, &l, 0);
     m.slots = 2;
@@ -227,6 +244,17 @@ UTEST(listener, accept_failed_releases_slot_and_rearms) {
     ASSERT_EQ(m.release_calls, 1);            /* the reserved slot returned */
     ASSERT_EQ(m.arm_calls, 2);                /* re-armed (slot available again) */
     ASSERT_EQ(m.reserved_now, 1);
+}
+
+UTEST(listener, close_while_paused_detaches) {
+    /* Teardown while PAUSED (backpressure): close must still reach confirmed detachment. */
+    KlListener l; LT m; lt_setup(&m, &l, 0);
+    m.slots = 0;                                  /* reserve fails at start → PAUSED */
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    kl_listener_close(&l);
+    ASSERT_EQ(m.close_calls, 1);
+    ASSERT_EQ(kl_listener_is_detached(&l), 1);
 }
 
 UTEST(listener, readiness_close_disarms_and_detaches) {
