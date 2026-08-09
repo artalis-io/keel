@@ -53,6 +53,7 @@ static int stream_arm(KlStream *s) {
     for (;;) {
         if (s->read_closed || s->read_paused || s->recv_inflight || s->recv_held) break;
         s->recv_inflight    = 1;
+        s->recv_cancel_requested = 0;   /* a genuinely new recv op — not yet cancel-requested */
         s->completed_inline = 0;
         s->rearm_pending    = 0;
         s->arming           = 1;
@@ -102,10 +103,14 @@ int kl_stream_on_recv(KlStream *s, size_t len, int ok) {
     if (!s->recv_inflight) return 0;                  /* duplicate/spurious — drop, never deliver */
     s->recv_inflight = 0;                             /* this receive op has retired */
     if (s->arming) s->completed_inline = 1;           /* synchronous completion of the current arm */
-    if (s->read_closed) return 0;                     /* retirement of a closed op — drop data */
+    if (s->read_closed) {                             /* retirement of a closed op — drop data */
+        if (s->on_retire) s->on_retire(s);            /* recv physically retired — let close finalize */
+        return 0;
+    }
 
     if (ok && len > s->read_cap) {                    /* backend contract violation — fail closed */
         s->read_closed = 1;
+        if (s->on_retire) s->on_retire(s);            /* recv retired (into error) — notify */
         return -1;                                    /* not delivered as data; caller tears down */
     }
     if (!ok) len = 0;                                 /* terminal carries no data */
@@ -114,9 +119,14 @@ int kl_stream_on_recv(KlStream *s, size_t len, int ok) {
         s->recv_held = 1;                             /* completed_inline (set above) still marks the */
         s->held_len  = len;                           /* arm retired; rearm_pending stays clear (no re-arm) */
         s->held_ok   = ok ? 1 : 0;
+        if (s->on_retire) s->on_retire(s);            /* recv op physically retired (held); notify */
         return 0;
     }
-    return stream_deliver_and_continue(s, len, ok ? 1 : 0);
+    int r = stream_deliver_and_continue(s, len, ok ? 1 : 0);
+    /* If the deliver callback re-armed, recv_inflight is set again and finalize sees the read side
+     * busy; if it paused/closed instead, recv_inflight stays 0 and this notification detaches. */
+    if (!s->recv_inflight && s->on_retire) s->on_retire(s);
+    return r;
 }
 
 void kl_stream_pause(KlStream *s) {

@@ -72,6 +72,7 @@ static int stream_pump_completion(KlStream *s) {
     int r = s->submit_fn(s->submit_ctx, data, len);
     if (r != 0) { s->wq_err = 1; return -1; }    /* 0 = submitted; anything else = failed. */
     s->send_inflight    = 1;
+    s->send_cancel_requested = 0;                /* a genuinely new send op — not yet cancel-requested */
     s->inflight_len     = len;
     s->inflight_copying = s->submit_copying;     /* capture the policy WITH the op (Finding 4) */
     if (s->inflight_copying)                     /* backend copied — free the queue now, but */
@@ -82,6 +83,7 @@ static int stream_pump_completion(KlStream *s) {
 KlStreamWriteStatus kl_stream_write(KlStream *s, const char *data, size_t len) {
     if (!s || !s->wq_inited) return KL_STREAM_ERROR;
     if (s->wq_err) return KL_STREAM_ERROR;
+    if (s->wq_closing) return KL_STREAM_CLOSED;   /* close in progress — refuse new writes (step 3) */
     /* Fail closed if the adapter never installed a transport hook (readiness write_fn or a
      * completion submit) — otherwise the readiness path would call a NULL write_fn. Not sticky:
      * a missing hook is a setup ordering issue, not a permanent stream error. Nothing is taken. */
@@ -108,7 +110,11 @@ int kl_stream_flush(KlStream *s) {
      * Fail closed in completion mode, and when no readiness writer is installed (kl_drain_flush
      * would call a NULL write_fn) — never crash on an accidental flush. */
     if (s->submit_fn || !s->wq.write_fn) return -1;
-    return kl_drain_flush(&s->wq);   /* 0 drained / 1 pending / -1 error */
+    int r = kl_drain_flush(&s->wq);   /* 0 drained / 1 pending / -1 error */
+    /* Readiness graceful close drains via successive writable flushes; a fully-drained queue means
+     * the write side is retired — notify so close can finalize (no-op unless closing). */
+    if (r == 0 && s->on_retire) s->on_retire(s);
+    return r;
 }
 
 int kl_stream_on_write_complete(KlStream *s, int ok) {
@@ -124,13 +130,19 @@ int kl_stream_on_write_complete(KlStream *s, int ok) {
         s->send_inflight = 0;
         s->inflight_len  = 0;
         s->wq_err        = 1;
+        if (s->on_retire) s->on_retire(s);       /* send op physically retired — let close finalize */
         return -1;
     }
     if (!s->inflight_copying)                     /* referencing backend: safe to free NOW */
         kl_drain_consume(&s->wq, s->inflight_len);
     s->send_inflight = 0;
     s->inflight_len  = 0;
-    return stream_pump_completion(s);            /* send the next queued batch, if any */
+    int r = stream_pump_completion(s);           /* send the next queued batch, if any */
+    /* This send op retired. If pump re-submitted, send_inflight is set again and finalize will
+     * see the write side as still busy (graceful drain continues); once the queue is empty and
+     * nothing is re-submitted, this notification is what detaches the stream. */
+    if (s->on_retire) s->on_retire(s);
+    return r;
 }
 
 size_t kl_stream_write_pending(const KlStream *s) {

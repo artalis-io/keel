@@ -101,6 +101,36 @@ typedef struct KlStream {
     int                arming;
     int                rearm_pending;
     int                completed_inline;
+
+    /* ── Phase-B graceful-close / confirmed-detachment lifecycle (internal; src/stream_close.h) ──
+     * on_close (detachment) fires EXACTLY ONCE, and ONLY after BOTH the receive and the send
+     * operations are PHYSICALLY retired (recv_inflight == 0 && send_inflight == 0) — a merely
+     * logical read/write close is not enough (a completion provider may still own a posted
+     * buffer). Graceful drains the write queue first; abortive requests op cancellation (the
+     * cancel hooks obey the same synchronous-completion discipline as the arm trampoline). Reuse
+     * of the stream is legal only after on_close. Dormant (on_retire NULL) until
+     * kl_stream_close_init(); zero-init = OPEN, so the write/read machinery is unaffected until a
+     * close lifecycle is installed. INTERNAL/UNSTABLE. */
+    int                close_state;      /**< KL_STREAM_STATE_OPEN(0)/_CLOSING/_CLOSED (src/stream_close.h) */
+    int                close_abort;      /**< 1 = abortive (cancel ops, drop queue) vs graceful drain */
+    int                in_close_cancel;  /**< DEPTH counter: >0 = inside cancel hooks — defer finalize
+                                              (survives a reentrant kl_stream_cancel from a hook) */
+    int                close_notified;   /**< on_close has fired (exactly-once guard) */
+    int                close_inited;     /**< 1 once kl_stream_close_init installed the lifecycle */
+    int                wq_closing;       /**< write side closing: reject new kl_stream_write (CLOSED) */
+    /* Per-operation cancellation-request idempotence: a cancel hook is invoked AT MOST ONCE per
+     * outstanding op. The flag is set BEFORE the hook (so a synchronous retirement is safe) and
+     * reset only when a genuinely NEW op starts (recv armed / send submitted) or at re-init —
+     * never on a hook error. Re-issuing a cancel could corrupt provider bookkeeping / duplicate
+     * terminal events. */
+    int                recv_cancel_requested; /**< the outstanding recv has been cancel-requested */
+    int                send_cancel_requested; /**< the outstanding send has been cancel-requested */
+    void             (*on_close)(void *ctx);       /**< detachment callback: reuse legal only after */
+    void              *close_ctx;                  /**< on_close + cancel hook context */
+    int              (*cancel_recv)(void *ctx);    /**< optional: request provider cancel a posted recv */
+    int              (*cancel_send)(void *ctx);    /**< optional: request provider cancel a posted send */
+    void             (*on_retire)(struct KlStream *s); /**< set by close_init; read/write call it when
+                                                            a physical op retires so close can finalize */
 } KlStream;
 
 typedef enum {
