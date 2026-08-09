@@ -129,6 +129,8 @@ int kl_event_init_builtin(KlEventLoop *loop) {
 }
 
 static void iocp_op_free(KlIocpOp *op);
+/* Safely dequeue-reap every tracked AcceptEx (6B-3 2b review); defined below. */
+static void iocp_reap_accepts(KlIocpState *st, struct KlEventCtx *ev);
 
 /* Post (or re-post) the persistent WSARecv for a watcher socket (8e-2c). */
 static int iocp_watch_post(KlIocpOp *op) {
@@ -226,16 +228,12 @@ void kl_event_close_builtin(KlEventLoop *loop) {
             kl_free(st->alloc, tr, sizeof(*tr));
             tr = n;
         }
-        /* Reclaim any AcceptEx op a cancellation never retired (6B-3 2b-ii): close the PRE-created
-         * accept socket (never handed to a conn) and free the op, so teardown leaks neither. */
-        KlIocpAccept *at = st->accepts;
-        while (at) {
-            KlIocpAccept *n = at->next;
-            closesocket(at->op->accept_sock);
-            iocp_op_free(at->op);
-            kl_free(st->alloc, at, sizeof(*at));
-            at = n;
-        }
+        /* Safely quiesce any AcceptEx still outstanding (defensive — kl_comp_shutdown_accepts
+         * normally drained them at teardown). The listen socket is closed by now, so their
+         * completions are posted; iocp_reap_accepts DEQUEUES each before freeing (never frees an
+         * OVERLAPPED the kernel may still be writing — the 2b-review UAF). No listener retirement
+         * here (the server is being freed). Runs before CloseHandle(port) so the port is alive. */
+        iocp_reap_accepts(st, NULL);
         if (st->port) CloseHandle(st->port);
         kl_free(st->alloc, st, sizeof(*st));
         loop->_backend = NULL;
@@ -885,6 +883,44 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
     return count;
 }
 
+/* Dequeue-reap every tracked AcceptEx for teardown quiescence (6B-3 2b review).
+ * PRECONDITION: the listen socket is already closed, so each posted AcceptEx is completing and WILL
+ * post to the port — GetQueuedCompletionStatus therefore returns them, and we free ONLY after
+ * dequeue (the kernel is provably done with the OVERLAPPED — no use-after-free). If `ev` is non-NULL
+ * each is retired on the listener via its comp_conn_dispatch hook (→ confirmed detachment). Bounded
+ * + terminating: all forced completions are posted. Non-accept completions are left for their own
+ * paths. On a port error we stop; any residual trackers/ops are then leaked rather than freed
+ * un-dequeued (memory-safe over leak-free — only reachable on a catastrophic teardown port error). */
+static void iocp_reap_accepts(KlIocpState *st, struct KlEventCtx *ev) {
+    while (st->accepts) {
+        OVERLAPPED_ENTRY entries[KL_IOCP_ACCEPT_BACKLOG];
+        ULONG got = 0;
+        if (!GetQueuedCompletionStatusEx(st->port, entries,
+                                         (ULONG)(sizeof entries / sizeof entries[0]),
+                                         &got, INFINITE, FALSE))
+            break;
+        for (ULONG i = 0; i < got; i++) {
+            KlIocpOp *op = CONTAINING_RECORD(entries[i].lpOverlapped, KlIocpOp, ov);
+            if (op->type != KL_IOCP_ACCEPT) continue;   /* non-accept: leave for its own path */
+            iocp_accept_untrack(st, op);
+            closesocket(op->accept_sock);               /* aborted → never handed off to a conn */
+            if (ev && ev->comp_conn_dispatch) {
+                KlCompletionEvent cev;
+                memset(&cev, 0, sizeof(cev));
+                cev.kind = KL_COMP_ACCEPT;              /* ok=0 → listener retires the credit */
+                ev->comp_conn_dispatch(ev, &cev);
+            }
+            iocp_op_free(op);
+        }
+    }
+}
+
+/* Teardown accept quiescence (6B-3 2b review). See KlCompletionOps.shutdown_accepts. The caller
+ * closed the listen socket first, so every posted AcceptEx is completing; reap + retire + free. */
+static void iocp_shutdown_accepts(struct KlServer *s) {
+    iocp_reap_accepts(s->ev.loop._backend, &s->ev);
+}
+
 /* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
  * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
  * reaches them on the compiled-in path (kl_comp_ops_builtin) or through a runtime
@@ -893,6 +929,7 @@ static const KlCompletionOps iocp_completion_ops = {
     iocp_comp_drain, iocp_comp_prime_accepts, iocp_comp_post_recv, iocp_comp_post_send,
     iocp_comp_post_accept, iocp_comp_post_sendfile, iocp_comp_cancel,
     iocp_comp_post_udp_recv, iocp_comp_post_udp_send, iocp_comp_post_connect,
+    iocp_shutdown_accepts,
 };
 
 const KlCompletionOps *kl_comp_ops_builtin(void) { return &iocp_completion_ops; }

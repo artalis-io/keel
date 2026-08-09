@@ -37,13 +37,6 @@
  * independent of server.c (both are plain compile-time constants). */
 #define KL_POLL_TIMEOUT_MS 1000
 
-/* Per-tick blocking drain timeout (ms) while teardown waits for the accept KlListener to reach
- * confirmed detachment — every cancelled posted accept physically retired (6B-3 2b-ii). Blocking
- * (not zero-time) so a cancelled accept's completion is actually reaped; a cancelled accept
- * surfaces within a tick or two (io_uring reaps the ASYNC_CANCEL CQE; IOCP the CancelIoEx
- * completion; pollcomp emits the abort synchronously). */
-#define KL_ACCEPT_CANCEL_DRAIN_MS 100
-
 /* ── Stop-wakeup self-pipe (hosted only) ──────────────────────────────────────
  * kl_server_stop() writes a byte to wake the run loop promptly. A freestanding EFI
  * server has no self-pipe (no OS pipe/socketpair, no kl_server_stop caller) — it
@@ -360,19 +353,23 @@ void kl_server_free(KlServer *s) {
     if (s->accept_via_listener) {
         kl_listener_close(&s->accept_listener);
         /* Readiness close disarms the listen interest and returns every credit synchronously, so
-         * the listener is already detached. A COMPLETION close only REQUESTS cancellation (io_uring
-         * ASYNC_CANCEL / IOCP CancelIoEx) — the posted accepts retire only when their completions
-         * are reaped. WAIT for confirmed detachment: every posted accept physically retired (its
-         * credit returned) and any accept that succeeded during shutdown disposed via the listener's
-         * CLOSING path. The terminal condition is detachment, not a tick count — blocking drains so
-         * a cancelled accept's completion is actually reaped, and the OS guarantees a cancelled
-         * accept completes, so this terminates. Should a drain report a fatal loop error we stop;
-         * the backend's own close (kl_event_ctx_free, below) is then the physical backstop — it
-         * frees every outstanding accept op AND closes any pre-created accept socket (IOCP) — so no
-         * op, socket, or accepted fd leaks even on that error path. */
-        while ((kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) &&
-               !kl_listener_is_detached(&s->accept_listener)) {
-            if (kl_io_engine_run_completion(s, KL_ACCEPT_CANCEL_DRAIN_MS) < 0) break;
+         * the listener is already detached. A COMPLETION close only REQUESTED cancellation; the
+         * posted accepts retire only once physically quiesced. Do it in a guaranteed, memory-safe
+         * order: (1) close the listen socket, forcing every posted accept toward completion; (2)
+         * hand the backend an explicit quiescence pass (kl_comp_shutdown_accepts) that DEQUEUES
+         * each posted accept's completion — so the OS is provably done with the op record before it
+         * is freed (no kernel-facing use-after-free on an IOCP OVERLAPPED) — retires it on the
+         * listener (→ confirmed detachment), and frees the op + any pre-created accept socket.
+         * Terminating by construction: a closed listen socket / submitted io_uring cancel guarantees
+         * every posted accept completes. The listen fd is closed inline here (freestanding-safe);
+         * the kl_server_close_listener below then only does the owned-AF_UNIX unlink. */
+        if ((kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) &&
+            !kl_listener_is_detached(&s->accept_listener)) {
+            if (kl_handle_valid(s->listen_fd)) {
+                kl_sock_close(s->ev.sockets, s->listen_fd);
+                s->listen_fd = KL_INVALID_SOCKET;
+            }
+            kl_comp_shutdown_accepts(s);
         }
     }
 

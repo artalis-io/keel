@@ -134,6 +134,19 @@ typedef struct KlCompletionOps {
      * outbound counterpart of post_accept. See completion.h KL_COMP_CONNECT + client.c. */
     int  (*post_connect)(struct KlEventCtx *ctx, KlSocketHandle fd,
                          const KlSockAddr *addr, void *watcher_udata);
+    /* Teardown quiescence for the accept side (6B-3 2b review). Called once at server teardown,
+     * AFTER kl_listener_close() requested cancellation and the listen socket has been closed to
+     * force every posted accept toward completion. GUARANTEE, by construction, that on return the
+     * native backend will never again touch a posted-accept operation record: reap every posted
+     * accept by DEQUEUING its completion (so the OS is provably done with the op — no use-after-
+     * free), retire it on the listener via the installed comp_conn_dispatch hook (a KL_COMP_ACCEPT
+     * with ok=0, or ok=1+fd which the CLOSING listener disposes) so credit accounting reaches
+     * confirmed detachment, then free the op record + any pre-created accept socket. Terminating:
+     * each backend relies on an OS-level force-completion (io_uring ASYNC_CANCEL → CQE; a closed
+     * listen socket → posted IOCP completions; pollcomp's synchronous abort). Post-driven backends
+     * only (io_uring/IOCP/pollcomp); an autonomous backend (EFI/lwip) never installs a listener, so
+     * its impl is a no-op. NULL is treated as a no-op by kl_comp_shutdown_accepts. */
+    void (*shutdown_accepts)(struct KlServer *s);
 } KlCompletionOps;
 
 /* The compiled-in completion backend's vtable (one per completion backend TU). A
@@ -151,6 +164,11 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
 /* Prime the server's accept backlog on its completion loop (idempotent — the backend
  * latches after the first call). Server-scoped; keeps kl_comp_drain server-agnostic. */
 int kl_comp_prime_accepts(struct KlServer *s);
+
+/* Teardown accept quiescence (6B-3 2b review): guaranteed reap + listener retirement + free of
+ * every posted accept. See KlCompletionOps.shutdown_accepts. No-op when the backend provides none
+ * (autonomous backends, or a readiness build). Call only after kl_listener_close() + listen close. */
+void kl_comp_shutdown_accepts(struct KlServer *s);
 
 /* HTTP-adapter helper (defined in completion_server.c): choose the receive buffer for the
  * connection's current phase — plaintext/PROXY → c->stream.read_buf; TLS → the per-conn

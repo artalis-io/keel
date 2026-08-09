@@ -673,6 +673,24 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
     return count;
 }
 
+/* Teardown accept quiescence (6B-3 2b review). A pollcomp accept op never pre-accepts a socket
+ * (accept() runs in pc_complete), so quiescence is synchronous: unlink each posted accept, retire
+ * it on the listener via the dispatch hook (ok=0, no fd), and free. No kernel async → trivially
+ * memory-safe + terminating. */
+static void pc_shutdown_accepts(struct KlServer *s) {
+    KlPcState *st = s->ev.loop._backend;
+    for (KlPcOp **link = &st->ops; *link; ) {
+        KlPcOp *op = *link;
+        if (op->type != PC_ACCEPT) { link = &op->next; continue; }
+        *link = op->next;
+        KlCompletionEvent ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.kind = KL_COMP_ACCEPT;   /* ev.ok = 0 → kl_listener_on_accept_failed retires the credit */
+        s->ev.comp_conn_dispatch(&s->ev, &ev);
+        pc_op_free(op);
+    }
+}
+
 /* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
  * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
  * can reach them through a runtime provider (loop->ops->completion, the injected path)
@@ -683,6 +701,7 @@ const KlCompletionOps kl_pollcomp_completion_ops = {
     pc_comp_drain, pc_comp_prime_accepts, pc_comp_post_recv, pc_comp_post_send,
     pc_comp_post_accept, pc_comp_post_sendfile, pc_comp_cancel,
     pc_comp_post_udp_recv, pc_comp_post_udp_send, pc_comp_post_connect,
+    pc_shutdown_accepts,
 };
 
 /* ── Runtime event provider (RC-2) ────────────────────────────────────────

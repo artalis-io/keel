@@ -42,6 +42,13 @@ int kl_comp_prime_accepts(struct KlServer *s) {
     return kl_comp_ops(&s->ev.loop)->prime_accepts(s);
 }
 
+void kl_comp_shutdown_accepts(struct KlServer *s) {
+    const KlCompletionOps *ops = kl_comp_ops(&s->ev.loop);
+    /* ops is NULL on a readiness builtin (never reached — the caller gates on KL_EVENT_CAP_
+     * COMPLETION); shutdown_accepts is NULL on an autonomous/no-accept backend. Both → no-op. */
+    if (ops && ops->shutdown_accepts) ops->shutdown_accepts(s);
+}
+
 /* Raw transport routers (KlStream form). The HTTP-adapter helpers kl_comp_post_recv/
  * _send/_sendfile (KlConn form) live in completion_server.c and call these; the backend
  * behind the vtable does raw I/O only and never sees a KlConn. */

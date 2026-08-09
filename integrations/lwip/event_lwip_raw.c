@@ -752,4 +752,5 @@ static const KlCompletionOps lwip_raw_completion_ops = {
     lwr_comp_drain, lwr_comp_prime_accepts, lwr_comp_post_recv, lwr_comp_post_send,
     lwr_comp_post_accept, lwr_comp_post_sendfile, lwr_comp_cancel,
     lwr_comp_post_udp_recv, lwr_comp_post_udp_send, lwr_comp_post_connect,
+    NULL,   /* shutdown_accepts: autonomous accept model (never installs a listener) — no-op */
 };
