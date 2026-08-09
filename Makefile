@@ -873,8 +873,9 @@ cppcheck:
 # whole call expressions (balanced parens), so it catches BOTH single-line and multiline calls. The
 # completion accept path (completion_server.c) still registers KlConn until 6B-3 and is excluded.
 check-readiness-identity:
-	@perl tools/check_readiness_identity.pl src/server.c src/async.c src/server_core.c \
-	  && echo "readiness-identity: OK — all readiness registrations use &conn->stream"
+	@perl tools/check_readiness_identity.pl \
+	     src/server.c src/async.c src/server_core.c src/completion_server.c \
+	  && echo "readiness-identity: OK — all connection registrations use &conn->stream"
 
 # Self-test the audit gate against fixtures with single-line AND multiline violations (must FAIL)
 # and a clean fixture (must PASS) — proving the gate actually detects multiline regressions.

@@ -558,10 +558,10 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
         nc->tls->feed_input(nc->tls, NULL, 0);   /* enable memory-BIO mode */
     }
 
-    /* Register the accepted socket with the loop (associate) + post the first read.
-     * COMPLETION-PATH event identity is still the KlConn here; it is converted to &nc->stream
-     * together with the completion accept adoption in step 6B-3 (KlAcceptTarget removal). */
-    if (kl_event_add(&s->ev.loop, nc->stream.fd, KL_EVENT_READ, nc) < 0 ||
+    /* Register the accepted socket with the loop (associate) + post the first read. Event identity
+     * is the raw KlStream (step 6B-3), matching the READ/WRITE completion target and the readiness
+     * path; the owning KlConn is recovered at the HTTP adapter boundary. */
+    if (kl_event_add(&s->ev.loop, nc->stream.fd, KL_EVENT_READ, &nc->stream) < 0 ||
         kl_comp_post_recv(nc) < 0) {
         kl_comp_close(s, nc);
     }
