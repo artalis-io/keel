@@ -37,6 +37,12 @@
  * independent of server.c (both are plain compile-time constants). */
 #define KL_POLL_TIMEOUT_MS 1000
 
+/* Max completion ticks to pump during teardown while the accept KlListener drains its cancelled
+ * posted accepts to confirmed detachment (6B-3 2b-ii). A cancelled accept surfaces within one or
+ * two ticks (io_uring reaps the ASYNC_CANCEL CQE; IOCP the CancelIoEx completion); this bound just
+ * guards against a backend that never completes a cancelled accept from hanging teardown. */
+#define KL_ACCEPT_CANCEL_DRAIN_TICKS 64
+
 /* ── Stop-wakeup self-pipe (hosted only) ──────────────────────────────────────
  * kl_server_stop() writes a byte to wake the run loop promptly. A freestanding EFI
  * server has no self-pipe (no OS pipe/socketpair, no kl_server_stop caller) — it
@@ -347,12 +353,24 @@ void kl_server_free(KlServer *s) {
         s->file_io = NULL;
     }
 
-    /* Complete the readiness accept listener's close/detachment contract WHILE the event context,
-     * listen handle, and pool still exist (step 6B-1): readiness close disarms the listen interest
-     * and retires synchronously, so the listener reaches CLOSED here rather than being abandoned
-     * LISTENING with a held reservation + registered interest. */
-    if (s->accept_via_listener)
-        kl_listener_close(&s->accept_listener);   /* readiness close → synchronous detachment */
+    /* Complete the accept listener's close/detachment contract WHILE the event context, listen
+     * handle, and pool still exist (step 6B-1 / 6B-3 2b-ii): the listener must reach CLOSED here
+     * rather than being abandoned LISTENING with a held reservation + posted accepts. */
+    if (s->accept_via_listener) {
+        kl_listener_close(&s->accept_listener);
+        /* Readiness close disarms the listen interest and returns every credit synchronously, so
+         * the listener is already detached. A COMPLETION close only REQUESTS cancellation (io_uring
+         * ASYNC_CANCEL / IOCP CancelIoEx) — the posted accepts don't retire until their completions
+         * are reaped. Pump the loop until confirmed detachment so every posted accept retires (its
+         * credit returned) and any accept that succeeded during shutdown is disposed via the
+         * listener's CLOSING path — no leaked op, socket, or accepted-but-unowned fd. Bounded. */
+        if ((kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) &&
+            !kl_listener_is_detached(&s->accept_listener)) {
+            for (int i = 0; i < KL_ACCEPT_CANCEL_DRAIN_TICKS &&
+                            !kl_listener_is_detached(&s->accept_listener); i++)
+                if (kl_io_engine_run_completion(s, 0) < 0) break;
+        }
+    }
 
     /* Close the listen socket. Hosted also unlinks an owned AF_UNIX path; a freestanding
      * EFI server has only the TCP listener, so close it directly. */

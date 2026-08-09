@@ -126,8 +126,9 @@ typedef struct KlServer {
     /* ── Accept via KlListener (step 6B) ────────────────────────────────────────────
      * When the loop is a readiness loop (!completion_loop), the readiness accept path is driven by
      * this embedded KlListener with the split-credit pool accounting. INTERNAL/UNSTABLE. */
-    KlListener accept_listener;   /**< readiness accept driver (active when accept_via_listener) */
-    int  accept_via_listener;     /**< 1 = the KlListener drives accepts (readiness now; completion 6B-3 2b-ii) */
+    KlListener accept_listener;   /**< accept driver (active when accept_via_listener); readiness or completion */
+    int  accept_via_listener;     /**< 1 = the KlListener drives accepts (readiness, or a post-driven completion backend) */
+    int  accept_setup_done;       /**< completion path: prime_accepts run once (window latched) — 6B-3 2b-ii */
     int  listen_registered;       /**< listen fd currently has READ interest (listener-managed) */
     int  accept_alive;            /**< liveness token for slot leases; 0'd before pool teardown */
     KlSockAddr accept_pending_peer; /**< peer addr stashed for the on_accept hook (single-threaded) */

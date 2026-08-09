@@ -496,33 +496,29 @@ static void comp_tls_drive(struct KlServer *s, KlConn *c) {
     }
 }
 
-static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
-#ifndef KEEL_FREESTANDING
-    /* Register the completion-mode ws/h2 drive tables once, and (the reason this is
-     * an explicit installer call, not a constructor) pull completion_ws.o /
-     * completion_h2.o out of the static archive — the seam's function-pointer
-     * dispatch above references no completion-TU symbol, so nothing else would.
-     * Guarded because a freestanding HTTP/1.1 archive links neither completion TU
-     * (nor their installers); it never upgrades, so the dispatch sees NULL hooks.
-     * This is the one irreducible build-axis line the pure seam can't absorb. */
-    static int comp_hooks_done = 0;
-    if (!comp_hooks_done) {
-        kl_ws_comp_hooks_install();
-        kl_h2_comp_hooks_install();
-        comp_hooks_done = 1;
-    }
-#endif
-    if (!ev->ok || !kl_handle_valid(ev->accepted_fd)) goto refill;
-
-    KlConn *nc = kl_conn_acquire(&s->pool, ev->accepted_fd);
+/* Set up an accepted connection on the completion loop: acquire a pooled KlConn for `fd`, wire the
+ * peer address + response allocator, choose the initial state (PROXY header / TLS handshake / HTTP
+ * read), register the socket with the loop (identity = the raw KlStream), and post the first recv.
+ * `lease` is the pool-owned release capability committed to this conn (consumed exactly once on
+ * close via kl_server_conn_release); on the legacy autonomous path it is a zero lease (no credit
+ * accounting). On ANY failure the fd is closed and the lease consumed — the caller must not touch
+ * `fd` afterward. Shared by the post-driven listener hook and the autonomous accept path. */
+static void comp_setup_accepted(struct KlServer *s, KlSocketHandle fd,
+                                const KlSockAddr *peer, KlSlotLease lease) {
+    KlConn *nc = kl_conn_acquire(&s->pool, fd);
     if (!nc) {
-        kl_sock_close(s->ev.sockets, ev->accepted_fd);   /* pool full — drop */
-        goto refill;
+        /* Post-driven path: a credit was reserved, so a free slot is guaranteed — reaching here is
+         * an invariant failure. Autonomous path: the pool is full (accept-and-drop). Either way,
+         * never leak the fd or the credit: close the descriptor and consume the lease. */
+        kl_sock_close(s->ev.sockets, fd);
+        kl_slot_lease_release(&lease);             /* zero lease → no-op */
+        return;
     }
+    nc->slot_lease = lease;                        /* consumed once on close (zero lease → no-op) */
     nc->peer_source = KL_PEER_SOCKET;
     /* The backend already converted the native accept peer to the neutral KlSockAddr
      * once at its seam; copy it straight in. KL_AF_UNSPEC = unavailable. */
-    nc->stream.peer_addr = ev->peer;
+    nc->stream.peer_addr = *peer;
     nc->res.alloc = &s->alloc_storage;
     (void)kl_sock_set_tcp_nodelay(nc->stream.ctx ? nc->stream.ctx->sockets : NULL, nc->stream.fd, 1);
 
@@ -534,18 +530,15 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
     /* TLS needs the backend's memory-BIO ops (feed_input/drain_output) on a completion loop —
      * reject a backend that lacks them before doing anything else. */
     if (nc->tls && (!nc->tls->feed_input || !nc->tls->drain_output)) {
-        kl_comp_close(s, nc);   /* backend can't do completion-mode TLS */
-        goto refill;
+        kl_comp_close(s, nc);   /* backend can't do completion-mode TLS (releases conn + lease) */
+        return;
     }
 
-    /* PROXY protocol: a trusted-source connection sends a plaintext PROXY header before any
-     * TLS/HTTP. Read it first (KL_CONN_PROXY_HEADER, a plaintext recv); comp_drive_proxy enters
-     * the real initial state (TLS handshake or HTTP read) once the header is consumed. Mirrors
-     * the readiness accept gate (server.c). */
     /* PROXY protocol: a trusted-source connection sends a plaintext PROXY header
      * before any TLS/HTTP. Reached only through the PROXY seam — NULL in a
      * freestanding firmware server (proxy_protocol.c not linked; proxy_trusted_cidrs
-     * never set), so this is skipped and the archive omits the hosted PROXY parser. */
+     * never set), so this is skipped and the archive omits the hosted PROXY parser.
+     * Mirrors the readiness accept gate (server.c). */
     const KlProxyHooks *ph = kl_proxy_hooks();
     if (s->proxy_cidr_count > 0 && ph && ph->cidr_match &&
         kl_sockaddr_family(&nc->stream.peer_addr) != KL_AF_UNSPEC &&
@@ -565,8 +558,96 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
         kl_comp_post_recv(nc) < 0) {
         kl_comp_close(s, nc);
     }
+}
 
-refill:
+/* ── Completion accept adapter (6B-3 2b-ii): drive the shared KlListener over the completion accept
+ * ops + the split-credit pool, for POST-DRIVEN backends (io_uring/IOCP/pollcomp). The listener
+ * reserves one pool credit per posted accept and PAUSES (stops posting; the kernel TCP backlog
+ * queues the rest) instead of accept-and-dropping when the pool is full. Autonomous backends
+ * (EFI/lwip, prime_accepts → 0) keep their own capacity gate and never install this. ───────────── */
+static int comp_accept_reserve(void *ctx) {
+    KlServer *s = ctx;
+    return kl_conn_pool_reserve(&s->pool);
+}
+static void comp_accept_release(void *ctx) {
+    KlServer *s = ctx;
+    kl_conn_pool_return_credit(&s->pool);               /* free_credits++ ... */
+    kl_listener_notify_slot_free(&s->accept_listener);  /* ...then resume the accept if paused */
+}
+static int comp_accept_arm(void *ctx) {
+    KlServer *s = ctx;
+    return kl_comp_post_accept(s);                       /* post ONE accept op */
+}
+static void comp_accept_cancel(void *ctx) {
+    KlServer *s = ctx;
+    /* Batch-cancel every posted accept on the listen fd; each completes as failed
+     * (kl_listener_on_accept_failed → returns its credit + decrements inflight), so the
+     * listener detaches only once every posted accept has retired (confirmed detachment). */
+    kl_comp_cancel(&s->ev, s->listen_fd);
+}
+static void comp_accept_dispose(void *ctx, KlSocketHandle fd) {
+    kl_sock_close(((KlServer *)ctx)->ev.sockets, fd);   /* no local var: read-only, keep ctx void* */
+}
+static void comp_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease lease) {
+    KlServer *s = ctx;
+    /* Commit the reserved credit to a KlConn. The peer was stashed on the server just before
+     * kl_listener_on_accepted (single-threaded, consumed immediately) — mirrors server.c. */
+    comp_setup_accepted(s, fd, &s->accept_pending_peer, lease);
+}
+
+/* Init + start the completion-mode KlListener with the backend's accept window. The reserve/release
+ * hooks are the split-credit pool ops (same accounting as readiness); arm posts one accept, cancel
+ * batch-cancels the whole window. Returns 0 on success, -1 on a listener setup failure. */
+static int comp_accept_listener_start(KlServer *s, int window) {
+    s->accept_alive = 1;                                /* liveness token live before any lease issues */
+    KlListenerHooks h = {
+        .reserve = comp_accept_reserve, .release = comp_accept_release, .credit_ctx = s,
+        .liveness = &s->accept_alive,
+        .arm_accept = comp_accept_arm, .cancel_accept = comp_accept_cancel,
+        .on_accept = comp_accept_on_accept, .dispose_fd = comp_accept_dispose,
+    };
+    if (kl_listener_init(&s->accept_listener, /*completion_mode=*/1, &h, s) < 0) return -1;
+    if (window > 1 && kl_listener_set_accept_window(&s->accept_listener, window) < 0) return -1;
+    return kl_listener_start(&s->accept_listener);
+}
+
+static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
+#ifndef KEEL_FREESTANDING
+    /* Register the completion-mode ws/h2 drive tables once, and (the reason this is
+     * an explicit installer call, not a constructor) pull completion_ws.o /
+     * completion_h2.o out of the static archive — the seam's function-pointer
+     * dispatch above references no completion-TU symbol, so nothing else would.
+     * Guarded because a freestanding HTTP/1.1 archive links neither completion TU
+     * (nor their installers); it never upgrades, so the dispatch sees NULL hooks.
+     * This is the one irreducible build-axis line the pure seam can't absorb. */
+    static int comp_hooks_done = 0;
+    if (!comp_hooks_done) {
+        kl_ws_comp_hooks_install();
+        kl_h2_comp_hooks_install();
+        comp_hooks_done = 1;
+    }
+#endif
+
+    if (s->accept_via_listener) {
+        /* Post-driven backend: route the accept through the counted KlListener. A failed/cancelled
+         * accept retires one posted accept and returns its reserved credit; a good one commits that
+         * credit to a KlConn (comp_accept_on_accept) and the listener tops the window back up — or
+         * PAUSEs if the pool is now full (the kernel backlog queues; no accept-and-drop). */
+        if (!ev->ok || !kl_handle_valid(ev->accepted_fd)) {
+            kl_listener_on_accept_failed(&s->accept_listener, -1);
+            return;
+        }
+        s->accept_pending_peer = ev->peer;   /* stashed for the on_accept hook (single-threaded) */
+        kl_listener_on_accepted(&s->accept_listener, ev->accepted_fd);
+        return;
+    }
+
+    /* Autonomous backend (EFI/lwip): the backend gates capacity itself (it does not accept into a
+     * full pool), so commit directly with a zero lease and top the backlog up with one post. */
+    if (ev->ok && kl_handle_valid(ev->accepted_fd)) {
+        KlSlotLease none = {0};
+        comp_setup_accepted(s, ev->accepted_fd, &ev->peer, none);
+    }
     (void)kl_comp_post_accept(s);   /* keep the accept backlog topped up */
 }
 
@@ -738,11 +819,28 @@ void kl_io_engine_post_read(struct KlConn *c) {
         kl_comp_close(server_of_ctx(c->stream.ctx), c);
 }
 
-/* The server's io_engine seam entry: install the conn-dispatch hook (idempotent, the
- * single always-hit server-completion-init point — before any accept is primed), prime
- * the accept backlog, then run one generic tick over its shared event ctx. */
+/* The server's io_engine seam entry: install the conn-dispatch hook (idempotent, the single
+ * always-hit server-completion-init point), set up the accept path once from the backend's window,
+ * then run one generic tick over its shared event ctx.
+ *
+ * One-time accept setup (6B-3 2b-ii): prime_accepts returns the backend's accept window. window>=1
+ * is a POST-DRIVEN backend — start the completion KlListener, which reserves one pool credit per
+ * posted accept and PAUSEs (kernel backlog queues) when the pool is full instead of accept-and-
+ * dropping. window==0 is an AUTONOMOUS backend (EFI/lwip) that gates capacity in its own drain; it
+ * gets no listener and is re-primed each tick so a freed slot re-opens its gate (EFI top-up). */
 int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
     s->ev.comp_conn_dispatch = comp_server_conn_dispatch;
-    if (kl_comp_prime_accepts(s) < 0) return -1;
+    if (!s->accept_setup_done) {
+        int window = kl_comp_prime_accepts(s);   /* one-time setup; returns the accept window */
+        if (window < 0) return -1;
+        s->accept_setup_done = 1;
+        if (window >= 1) {
+            if (comp_accept_listener_start(s, window) < 0) return -1;
+            s->accept_via_listener = 1;
+        }
+        /* window == 0: autonomous backend — prime already armed its own gate. */
+    } else if (!s->accept_via_listener) {
+        if (kl_comp_prime_accepts(s) < 0) return -1;   /* autonomous: re-arm the gate each tick */
+    }
     return kl_comp_run(&s->ev, KL_COMP_MAX_EVENTS, timeout_ms) < 0 ? -1 : 0;
 }

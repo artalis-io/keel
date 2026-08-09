@@ -425,6 +425,10 @@ const KlSocketProvider *kl_socket_provider_lwip_raw(void) { return &lwip_raw_pro
 /* ── completion.h backend primitives ─────────────────────────────────────────── */
 
 
+/* Returns 0 = AUTONOMOUS accept model (6B-3 2b-ii): accepts arrive via the passive tcp_accept
+ * callback and surface through drain's per-slot scan (below), bounded by the per-conn slot table
+ * (sized to max_connections == pool capacity), NOT by posted ops. No completion KlListener is
+ * installed; this one-time setup latches the relocated listen pcb. */
 static int lwr_comp_prime_accepts(struct KlServer *s) {
     if (!s) return -1;
     KlLwrState *st = s->ev.loop._backend;

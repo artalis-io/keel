@@ -101,9 +101,17 @@ struct KlUdp;
  * exposes them via kl_comp_ops_builtin(). See docs/event_provider_design.md. */
 typedef struct KlCompletionOps {
     int  (*drain)(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms);
-    /* Accept ops take the KlServer directly (6B-3: KlAcceptTarget removed). prime_accepts does the
-     * one-time backend setup; post_accept posts one accept. The server reaches its pool/listen
-     * fd/event ctx as before. */
+    /* Accept ops take the KlServer directly (6B-3: KlAcceptTarget removed). prime_accepts is a
+     * one-time SETUP call that RETURNS the backend's accept window (6B-3 2b-ii) and does NOT post:
+     *   >=1  post-driven — the completion KlListener drives accepts with this window, reserving one
+     *        pool credit per posted accept and PAUSING (not accept-and-dropping) when the pool is
+     *        full. window 1 for io_uring/pollcomp; KL_IOCP_ACCEPT_BACKLOG for IOCP.
+     *    0   autonomous — the backend generates accepts itself under its own capacity gate (EFI's
+     *        drain gates on pool.active_count; lwip's tcp_accept fills a slot table == pool cap).
+     *        The listener is NOT installed; prime_accepts is re-called each tick to top the gate up.
+     *   <0   fatal setup error.
+     * post_accept posts exactly ONE accept op (post-driven backends). The server reaches its
+     * pool/listen fd/event ctx as before. See docs/generic_transport_audit.md (6B-3). */
     int  (*prime_accepts)(struct KlServer *s);
     /* Raw transport I/O — the backend gets a KlStream and a caller-chosen buffer; it does
      * NOT inspect TLS/HTTP/connection state (that lives in the HTTP adapter). READ/WRITE

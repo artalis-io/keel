@@ -367,10 +367,12 @@ static int pc_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
 static int pc_comp_prime_accepts(struct KlServer *s) {
     if (!s) return -1;
     KlPcState *st = s->ev.loop._backend;
-    if (st->primed) return 0;
+    if (st->primed) return 1;              /* setup already done — report the window (6B-3 2b-ii) */
     st->listen_fd = s->listen_fd;
     st->primed = 1;
-    return pc_comp_post_accept(s);
+    /* Post-driven, window 1: latch the listen fd; the completion KlListener posts the single accept
+     * (reserve-before-post backpressure). No accept posted here — the listener arms it. */
+    return 1;
 }
 
 /* Cancel pending ops on `fd`. Server conn ops (idle-timeout sweep): mark aborted so the next
@@ -410,7 +412,11 @@ static int pc_emit_abort(const KlPcOp *op, KlCompletionEvent *ev) {
     case PC_CONNECT:                 /* never reached: cancelled connect ops are freed in
                                       * pc_comp_cancel, not delivered as aborts. */
                                      return 0;
-    case PC_ACCEPT:                  return 0;
+    case PC_ACCEPT:                  /* a cancelled accept (listener close, 6B-3 2b-ii) — deliver
+                                      * ok=0 with no fd so the completion listener retires this
+                                      * posted accept (returns its credit). The op never pre-accepts
+                                      * a socket (accept() runs in pc_complete), so nothing leaks. */
+                                     ev->kind = KL_COMP_ACCEPT; ev->target = NULL; return 1;
     }
     return 0;
 }

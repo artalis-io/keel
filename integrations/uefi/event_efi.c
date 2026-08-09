@@ -224,7 +224,9 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
 
 /* prime_accepts: latch the server + its passive listen fd so drain can hand back
  * accepted children. The S-2 listen() already armed the Accept-token pool; this only
- * records what drain needs. Idempotent. */
+ * records what drain needs. Idempotent. Returns 0 = AUTONOMOUS accept model (6B-3 2b-ii):
+ * EFI generates accepts inside drain under its own capacity gate (below), so NO completion
+ * KlListener is installed and the server re-calls this each tick to top the gate up. */
 static int el_prime_accepts(struct KlServer *s) {
     if (!s) return -1;
     g_efi.server = s;

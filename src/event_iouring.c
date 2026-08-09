@@ -707,10 +707,12 @@ static int iou_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
 static int iou_comp_prime_accepts(struct KlServer *s) {
     if (!s) return -1;
     KlIouState *st = s->ev.loop._backend;
-    if (st->primed) return 0;
+    if (st->primed) return 1;              /* setup already done — report the window (6B-3 2b-ii) */
     st->listen_fd = s->listen_fd;
     st->primed = 1;
-    return iou_comp_post_accept(s);
+    /* Post-driven, window 1: latch the listen fd and let the completion KlListener post the single
+     * accept (reserve-before-post backpressure). No accept posted here — the listener arms it. */
+    return 1;
 }
 
 /* Cancel pending ops on `fd` (idle-timeout sweep): mark aborted + prep_cancel so the
@@ -743,7 +745,11 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         st->accept_pending = 0;
         ev->kind = KL_COMP_ACCEPT;
         ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
-        if (op->aborted || res < 0) { ev->ok = 0; return 1; }   /* driver just refills */
+        /* Key ONLY on res: a cancelled accept usually completes -ECANCELED (res<0, no fd → ok=0),
+         * but a cancel that races a successful accept still yields a real fd (res>=0). Deliver that
+         * fd even though op->aborted is set, so the completion listener disposes it on its CLOSING
+         * path (total accepted-fd ownership during shutdown, 6B-3 2b-ii) instead of leaking it. */
+        if (res < 0) { ev->ok = 0; return 1; }
         ev->ok = 1;
         ev->accepted_fd = res;
         if (op->peer_len > 0)                    /* native → neutral once, at the seam */

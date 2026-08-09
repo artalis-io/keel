@@ -560,6 +560,37 @@ UTEST(listener, window_exhaustion_pauses_then_resumes) {
     ASSERT_EQ(kl_listener_is_detached(&l), 1);
 }
 
+UTEST(listener, completion_exhaustion_queues_not_drops) {
+    /* 6B-3 2b-ii: when the pool is exhausted, a POST-DRIVEN completion listener must PAUSE — post
+     * NO accept — so a further connection waits in the kernel TCP backlog. It must NOT accept the
+     * fd and then drop it (the old comp_on_accept behavior). Proof: while exhausted no accept is
+     * posted (arm frozen) and nothing is disposed; when a slot frees, the listener posts and the
+     * queued connection is accepted — never reset. */
+    KlListener l; LT m; lt_setup(&m, &l, /*completion=*/1);
+    m.slots = 1;
+    ASSERT_EQ(kl_listener_start(&l), 0);       /* reserve the one credit, post one accept */
+    ASSERT_EQ(m.arm_calls, 1);
+
+    kl_listener_on_accepted(&l, (KlSocketHandle)2000);   /* commit → pool exhausted → PAUSE */
+    ASSERT_EQ(m.accept_calls, 1);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(m.arm_calls, 1);                  /* no further accept posted while exhausted */
+    ASSERT_EQ(m.dispose_calls, 0);             /* nothing accepted-and-dropped — it queues instead */
+
+    /* The first connection closes → its credit returns → the queued connection is now served. */
+    kl_slot_lease_release(&m.last_lease);       /* slots: 0 → 1 */
+    kl_listener_notify_slot_free(&l);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(m.arm_calls, 2);                  /* posts an accept for the previously-queued conn */
+    kl_listener_on_accepted(&l, (KlSocketHandle)2001);
+    ASSERT_EQ(m.accept_calls, 2);              /* the queued connection is accepted, not dropped */
+    ASSERT_EQ(m.dispose_calls, 0);
+
+    kl_slot_lease_release(&m.last_lease);
+    kl_listener_close(&l);
+    ASSERT_EQ(kl_listener_is_detached(&l), 1);
+}
+
 UTEST(listener, window_sync_completion_bounded) {
     /* Many synchronous accept completions while filling a window must not recurse (pump trampoline)
      * and must still leave the window filled with async posts once the sync budget is exhausted. */

@@ -584,14 +584,16 @@ static int iocp_connect_untrack(KlIocpState *st, const KlIocpOp *op) {
 }
 
 /* First-drain setup: load the extension fn pointers off the listen socket, learn
- * its address family, store it, and prime the accept backlog. Idempotent — latches
- * on st->started so the server may call it every tick. Server-scoped (needs the
- * listen socket); keeps kl_comp_drain ctx-scoped/server-agnostic. */
+ * its address family, and store it. Idempotent — latches on st->started so the server
+ * may call it every tick. Server-scoped (needs the listen socket); keeps kl_comp_drain
+ * ctx-scoped/server-agnostic. Post-driven (6B-3 2b-ii): returns the AcceptEx window
+ * (KL_IOCP_ACCEPT_BACKLOG) and posts NOTHING — the completion KlListener posts that many
+ * AcceptEx ops, one reserved pool credit each, and replenishes one per accept completion. */
 static int iocp_comp_prime_accepts(struct KlServer *s) {
     if (!s) return -1;
     KlIocpState *st = s->ev.loop._backend;
     if (st->started)
-        return 0;
+        return KL_IOCP_ACCEPT_BACKLOG;
 
     SOCKET lst = (SOCKET)s->listen_fd;
     st->listen_fd = lst;
@@ -612,11 +614,7 @@ static int iocp_comp_prime_accepts(struct KlServer *s) {
         st->accept_family = sa.ss_family;
 
     st->started = 1;
-    for (int i = 0; i < KL_IOCP_ACCEPT_BACKLOG; i++) {
-        if (iocp_comp_post_accept(s) < 0)
-            return (i == 0) ? -1 : 0;
-    }
-    return 0;
+    return KL_IOCP_ACCEPT_BACKLOG;   /* window; the listener posts the AcceptEx ops (6B-3 2b-ii) */
 }
 
 /* Cancel outstanding overlapped ops on `fd` (idle-timeout sweep). CancelIoEx aborts the
@@ -662,6 +660,22 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 
         if (op->type == KL_IOCP_ACCEPT) {
             SOCKET lst = st->listen_fd;
+            /* Whether this AcceptEx actually succeeded — a cancelled one (CancelIoEx on the listen
+             * socket at listener close, 6B-3 2b-ii) completes here with an error status. On failure,
+             * close the PRE-created accept socket (AcceptEx allocates it up front — no leak) and
+             * deliver ok=0 so the completion listener retires this posted accept (returns its
+             * credit). The overlapped is associated with the listen socket, so query it there. */
+            DWORD xfer = 0, flags = 0;
+            if (!WSAGetOverlappedResult(lst, &op->ov, &xfer, FALSE, &flags)) {
+                closesocket(op->accept_sock);
+                memset(&out[count], 0, sizeof(out[count]));
+                out[count].kind = KL_COMP_ACCEPT;
+                out[count].target = NULL;
+                out[count].ok = 0;
+                count++;
+                iocp_op_free(op);
+                continue;
+            }
             setsockopt(op->accept_sock, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
                        (char *)&lst, sizeof(lst));
             struct sockaddr *local = NULL, *remote = NULL;
