@@ -17,14 +17,15 @@ struct KlListener {
     int  detached;            /* on_close fired (exactly-once) */
     int  last_error;          /* last accept/arm error (informational) */
 
-    int  reserved;            /* 1 = a slot credit is held, awaiting an accept to commit it */
-    int  accept_inflight;     /* an accept is armed/posted */
-    int  accept_cancel_requested;
+    int  window;              /* max concurrent posted accepts (>=1); 1 for readiness/io_uring/
+                                 pollcomp, KL_IOCP_ACCEPT_BACKLOG for IOCP. Set via
+                                 kl_listener_set_accept_window before start. */
+    int  inflight;            /* count of accepts currently posted/armed (each holds one credit) */
+    int  accept_cancel_requested;   /* the batch cancel was requested once (completion close) */
 
-    /* sync-completion trampoline (bounds stack; mirrors stream_read) */
-    int  arming;
-    int  rearm_pending;
-    int  accepted_inline;
+    /* sync-completion pump trampoline (bounds stack; mirrors stream_read) */
+    int  pumping;             /* inside an arm hook — a nested pump defers via pump_pending */
+    int  pump_pending;
 
     /* reentrancy guards */
     int  in_start;            /* DEPTH: inside an arm hook — defer detachment */

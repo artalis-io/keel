@@ -9,8 +9,10 @@
  *
  * A model-agnostic accept-path state machine, symmetric with KlConnectOp. It keeps FOUR lifetimes
  * structurally distinct:
- *   1. LISTENER LIFETIME — start → accept loop → close → confirmed detachment (on_close after the
- *      outstanding accept AND the held reservation retire; reuse/free legal only after).
+ *   1. LISTENER LIFETIME — start → accept loop → close → confirmed detachment (on_close after
+ *      EVERY posted accept has retired and its reservation returned; reuse/free legal only after).
+ *      Up to `window` accepts are posted concurrently (window=1 readiness; backlog for IOCP), each
+ *      holding one reserved credit and retiring exactly once via on_accepted/on_accept_failed.
  *   2. POOL-OWNED SLOT-RELEASE CAPABILITY — reserve/release belong to the pool; the listener
  *      borrows them for backpressure and bakes the release fn+ctx BY VALUE into each KlSlotLease.
  *   3. NULLABLE CREDIT / LIVENESS TARGET — slot accounting is optional; a nullable liveness token
@@ -29,12 +31,16 @@
 /** @brief Opaque listener. Full layout in <keel/listener_detail.h> (opt-in). */
 typedef struct KlListener KlListener;
 
-/** @brief Lifecycle phase (kl_listener_state). */
+/** @brief Lifecycle phase (kl_listener_state). The listener keeps up to `window` accepts posted
+ *  concurrently, one reserved pool credit each (window=1 for readiness; up to the AcceptEx backlog
+ *  for IOCP — see kl_listener_set_accept_window). */
 enum {
     KL_LISTENER_IDLE = 0,   /**< not started */
-    KL_LISTENER_LISTENING,  /**< a slot is reserved and an accept is armed */
-    KL_LISTENER_PAUSED,     /**< no slot credit — backpressure (no accept armed) */
-    KL_LISTENER_CLOSING,    /**< close requested; awaiting accept + reservation retirement */
+    KL_LISTENER_LISTENING,  /**< accepting: 1..window accepts posted (credit starvation while some
+                                 remain posted STAYS LISTENING — it does not pause) */
+    KL_LISTENER_PAUSED,     /**< backpressure: NO credit AND zero accepts posted (posted count
+                                 reached 0); resumes via kl_listener_notify_slot_free */
+    KL_LISTENER_CLOSING,    /**< close requested; awaiting retirement of every posted accept */
     KL_LISTENER_CLOSED      /**< fully retired; on_close fired; reuse legal */
 };
 
@@ -67,19 +73,29 @@ void kl_slot_lease_release(KlSlotLease *lease);
 
 /* ── Accept hooks ──────────────────────────────────────────────────────────────────────────── */
 
-/** Arm/post one accept. May complete inline (call kl_listener_on_accepted / on_accept_failed).
- *  Returns 0 (armed/in flight, or inline-decided), -1 on a hard failure that closes the listener. */
+/** Arm/post ONE accept. Readiness: (re)assert the single persistent listen interest. Completion:
+ *  post one discrete accept op. May complete inline. Returns 0 (posted / inline-decided), -1 on a
+ *  hard failure that closes the listener.
+ *
+ *  SYNCHRONOUS-COMPLETION ASSOCIATION (required for window > 1): if this hook completes inline, the
+ *  inline kl_listener_on_accepted / on_accept_failed MUST retire the accept THIS call is posting —
+ *  not an older still-outstanding one. The pump detects inline completion by the posted count
+ *  returning to its pre-post value, which is only correct under that association; violating it would
+ *  undercount an operation and lose its reserved credit. */
 typedef int  (*KlListenerArmFn)(void *ctx);
 /** Drop the accept interest. Readiness: remove the persistent listen-fd READ interest — MUST be
  *  IDEMPOTENT (it is called both on close AND on backpressure PAUSE, i.e. after an accept
  *  completion, whenever the persistent level-triggered interest must be removed). Completion:
  *  no-op. Required in readiness mode. */
 typedef void (*KlListenerDisarmFn)(void *ctx);
-/** Completion: request cancellation of an outstanding posted accept (invoked at most once). */
+/** Completion: request cancellation of the posted accepts. Invoked at most once — it is a SINGLE
+ *  BATCH request covering EVERY currently-posted accept; each cancelled accept must still complete
+ *  once through kl_listener_on_accept_failed (returning its credit). */
 typedef void (*KlListenerCancelFn)(void *ctx);
 /** An accepted connection: `fd` is the new socket; `lease` (by value → ownership transfer) is the
  *  committed slot. The callback takes ownership of fd and the lease and releases the lease exactly
- *  once on close. It MAY reentrantly close the listener. */
+ *  once on close. It MAY reentrantly close the listener. Every posted accept retires EXACTLY ONCE —
+ *  through this callback (success) or kl_listener_on_accept_failed (failure/cancel). */
 typedef void (*KlListenerAcceptFn)(void *ctx, KlSocketHandle fd, KlSlotLease lease);
 /** Dispose of an accepted `fd` that cannot become a live connection (closing/spurious/out-of-range).
  *  REQUIRED. */
@@ -108,16 +124,29 @@ typedef struct {
  *  on_accept, dispose_fd; requires disarm_accept in readiness mode; reserve/release both-or-neither.
  *  Returns 0, or -1 on a bad/missing hook. */
 int  kl_listener_init(KlListener *l, int completion_mode, const KlListenerHooks *hooks, void *ctx);
-/** Begin accepting: reserve a slot and arm the first accept (or PAUSE if none). Returns 0, or -1
- *  if not inited / not IDLE. */
+/** Set the bounded accept window — the max number of accepts kept posted concurrently, one reserved
+ *  pool credit each (default 1). Use the IOCP AcceptEx backlog for IOCP so its multi-deep accept
+ *  concurrency is preserved; other completion backends (io_uring / pollcomp) use 1. REJECTED for a
+ *  readiness listener (window MUST be 1: a readiness arm is one persistent interest, not N posted
+ *  ops). Init-time only (before start): returns 0, or -1 if not inited / not IDLE / window < 1 / a
+ *  window != 1 in readiness mode. */
+int  kl_listener_set_accept_window(KlListener *l, int window);
+/** Begin accepting: fill the window (reserve + post up to `window` accepts); PAUSE only if NO credit
+ *  is available at all. Returns 0, or -1 if not inited / not IDLE. */
 int  kl_listener_start(KlListener *l);
-/** An accept completed with a new connection `fd` (handed off, or disposed during teardown). */
+/** A posted accept completed with a new connection `fd`: retires that accept (exactly-once) and
+ *  commits its reserved credit into the handed-off lease, then refills the window. During teardown
+ *  the fd is disposed and the credit returned instead. */
 void kl_listener_on_accepted(KlListener *l, KlSocketHandle fd);
-/** An accept attempt failed with `error` (return the slot and re-arm, unless closing). */
+/** A posted accept failed/was cancelled with `error`: retires that accept (exactly-once) and
+ *  returns its reserved credit, then refills the window (or, when closing, advances detachment). */
 void kl_listener_on_accept_failed(KlListener *l, int error);
-/** A connection slot was released back to the pool elsewhere: resume if PAUSED. */
+/** A connection slot was released to the pool elsewhere: top the window back up (resumes a PAUSED
+ *  listener; also fills remaining window slots that were starved of credit). */
 void kl_listener_notify_slot_free(KlListener *l);
-/** Begin close: stop accepting, release the held reservation, detach once the accept retires.
+/** Begin close: stop accepting and retire every posted accept's reservation — readiness disarms and
+ *  returns all posted credits at once; completion issues ONE batch cancel and returns each credit as
+ *  its accept completes as failed. Detaches (on_close) once every posted accept has retired.
  *  Idempotent. Returns 0, or -1 if not inited. */
 int  kl_listener_close(KlListener *l);
 /** Current lifecycle phase (KL_LISTENER_*). */

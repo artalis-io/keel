@@ -19,6 +19,7 @@ typedef struct {
     int reserved_now;          /* net reserved (reserve - release) */
     int arm_calls, disarm_calls, cancel_calls;
     int accept_calls, last_fd; KlSlotLease last_lease;   /* owned copy of the last handed-off lease */
+    KlSlotLease held[64]; int held_n;   /* every handed-off lease, for credit-conservation checks */
     int arm_reentrant_close;   /* arm hook directly calls kl_listener_close (no completion) */
     int arm_accept_then_close; /* arm hook inline-accepts, then calls kl_listener_close */
     int dispose_calls, disposed_fd;
@@ -76,8 +77,15 @@ static void lt_disarm(void *ctx) { LT *m = ctx; m->disarm_calls++; }
 static void lt_cancel(void *ctx) { LT *m = ctx; m->cancel_calls++; }
 static void lt_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease lease) {
     LT *m = ctx; m->accept_calls++; m->last_fd = (int)fd; m->last_lease = lease;  /* take ownership */
+    if (m->held_n < 64) m->held[m->held_n++] = lease;   /* track every committed lease */
     m->detached_at_accept = kl_listener_is_detached(m->l);
     if (m->accept_reentrant_close) { m->accept_reentrant_close = 0; kl_listener_close(m->l); }
+}
+/* Committed (handed-off but not-yet-released) leases: a released lease is consumed (NULL fn). */
+static int committed_leases(const LT *m) {
+    int n = 0;
+    for (int i = 0; i < m->held_n; i++) if (m->held[i].release) n++;
+    return n;
 }
 static void lt_dispose(void *ctx, KlSocketHandle fd) {
     LT *m = ctx; m->dispose_calls++; m->disposed_fd = (int)fd;
@@ -272,15 +280,17 @@ UTEST(listener, completion_close_cancels_and_waits_for_straggler) {
     ASSERT_EQ(kl_listener_start(&l), 0);      /* accept posted (async) */
     kl_listener_close(&l);
     ASSERT_EQ(m.cancel_calls, 1);             /* cancel requested once */
-    ASSERT_EQ(m.release_calls, 1);            /* held reservation returned */
+    ASSERT_EQ(m.release_calls, 0);            /* credit stays with the posted accept until it retires */
     ASSERT_EQ(kl_listener_is_detached(&l), 0);/* posted accept still outstanding */
 
-    /* a straggler accept completes during teardown → its fd is disposed, then detach */
+    /* a straggler accept completes during teardown → return its credit, dispose its fd, then detach */
     kl_listener_on_accepted(&l, (KlSocketHandle)2000);
     ASSERT_EQ(m.dispose_calls, 1);
     ASSERT_EQ(m.disposed_fd, 2000);
+    ASSERT_EQ(m.release_calls, 1);            /* the posted accept's reservation returned on retire */
     ASSERT_EQ(m.accept_calls, 0);             /* never handed off as a live connection */
     ASSERT_EQ(m.close_calls, 1);
+    ASSERT_EQ(kl_listener_is_detached(&l), 1);
 }
 
 UTEST(listener, completion_close_cancel_completes_as_failure) {
@@ -476,6 +486,137 @@ UTEST(listener, reserved_slot_returned_on_readiness_close_while_armed) {
     kl_listener_close(&l);
     ASSERT_EQ(m.reserved_now, 0);              /* balanced: reservation returned, no leak */
     ASSERT_EQ(kl_listener_is_detached(&l), 1);
+}
+
+/* ── Counted bounded-accept window (step 6B-3) — one reserved credit per posted accept ──────── */
+
+UTEST(listener, window_posts_up_to_window) {
+    KlListener l; LT m; lt_setup(&m, &l, /*completion=*/1);
+    m.slots = 10;
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 3), 0);
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(m.arm_calls, 3);                 /* posted 3 accepts up front (IOCP-style backlog) */
+    ASSERT_EQ(m.reserve_calls, 3);             /* one credit each */
+    ASSERT_EQ(l.inflight, 3);
+
+    kl_listener_close(&l);
+    ASSERT_EQ(m.cancel_calls, 1);              /* one batch cancel */
+    ASSERT_EQ(m.release_calls, 0);             /* credits ride with the posted accepts */
+    kl_listener_on_accept_failed(&l, 0);
+    kl_listener_on_accept_failed(&l, 0);
+    ASSERT_EQ(kl_listener_is_detached(&l), 0); /* detach waits for ALL posted accepts */
+    kl_listener_on_accept_failed(&l, 0);
+    ASSERT_EQ(m.release_calls, 3);             /* each completion returned exactly its reservation */
+    ASSERT_EQ(kl_listener_is_detached(&l), 1);
+}
+
+UTEST(listener, window_capped_by_credits) {
+    KlListener l; LT m; lt_setup(&m, &l, 1);
+    m.slots = 2;
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 5), 0);
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(m.arm_calls, 2);                 /* window 5 but only 2 credits → 2 posted */
+    ASSERT_EQ(l.inflight, 2);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);   /* inflight>0 → not paused */
+    kl_listener_close(&l);
+    kl_listener_on_accept_failed(&l, 0);
+    kl_listener_on_accept_failed(&l, 0);
+    ASSERT_EQ(kl_listener_is_detached(&l), 1);
+}
+
+UTEST(listener, window_tops_up_on_completion) {
+    KlListener l; LT m; lt_setup(&m, &l, 1);
+    m.slots = 10;
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 2), 0);
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(m.arm_calls, 2);
+    kl_listener_on_accepted(&l, (KlSocketHandle)500);   /* one connects → commit + refill window */
+    ASSERT_EQ(m.accept_calls, 1);
+    ASSERT_EQ(m.arm_calls, 3);                 /* posted a replacement to refill the window */
+    ASSERT_EQ(l.inflight, 2);
+    kl_slot_lease_release(&m.last_lease);
+    kl_listener_close(&l);
+    kl_listener_on_accept_failed(&l, 0);
+    kl_listener_on_accept_failed(&l, 0);
+    ASSERT_EQ(kl_listener_is_detached(&l), 1);
+}
+
+UTEST(listener, window_exhaustion_pauses_then_resumes) {
+    KlListener l; LT m; lt_setup(&m, &l, 1);
+    m.slots = 2;
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 2), 0);
+    ASSERT_EQ(kl_listener_start(&l), 0);       /* posts 2, credits exhausted */
+    kl_listener_on_accepted(&l, (KlSocketHandle)600);   /* commit; top-up reserve fails */
+    kl_listener_on_accepted(&l, (KlSocketHandle)601);   /* commit; inflight 0 → PAUSED */
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(m.arm_calls, 2);                 /* no posts while out of credit */
+
+    kl_slot_lease_release(&m.last_lease);       /* a connection closes → a credit frees */
+    kl_listener_notify_slot_free(&l);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(m.arm_calls, 3);                 /* resumed — posted one */
+    kl_listener_close(&l);
+    kl_listener_on_accept_failed(&l, 0);
+    ASSERT_EQ(kl_listener_is_detached(&l), 1);
+}
+
+UTEST(listener, window_sync_completion_bounded) {
+    /* Many synchronous accept completions while filling a window must not recurse (pump trampoline)
+     * and must still leave the window filled with async posts once the sync budget is exhausted. */
+    KlListener l; LT m; lt_setup(&m, &l, 1);
+    m.slots = 100000; m.sync_accept_budget = 5000;
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 4), 0);
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(m.accept_calls, 5000);           /* all inline accepts delivered, no recursion */
+    ASSERT_EQ(l.inflight, 4);                   /* window filled with async posts after the budget */
+}
+
+UTEST(listener, set_accept_window_validation) {
+    KlListener l; LT m; lt_setup(&m, &l, 1);
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 0), -1);   /* window must be >= 1 */
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 4), 0);
+    ASSERT_EQ(kl_listener_start(&l), 0);
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 8), -1);   /* init-time only (not after start) */
+}
+
+UTEST(listener, readiness_rejects_window_over_one) {
+    /* A readiness arm is one persistent interest, not N posted ops — a window > 1 is rejected. */
+    KlListener l; LT m; lt_setup(&m, &l, /*completion=*/0);
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 2), -1);
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 1), 0);    /* window 1 is fine */
+}
+
+UTEST(listener, credit_conservation_through_lifecycle) {
+    /* available credits + posted accepts + committed leases == capacity, at every phase. */
+    KlListener l; LT m; lt_setup(&m, &l, /*completion=*/1);
+    const int CAP = 4;
+    m.slots = CAP;
+    ASSERT_EQ(kl_listener_set_accept_window(&l, 3), 0);
+#define INV() ASSERT_EQ(m.slots + l.inflight + committed_leases(&m), CAP)
+
+    ASSERT_EQ(kl_listener_start(&l), 0);               /* fill window: 3 posted */
+    ASSERT_EQ(l.inflight, 3);
+    INV();
+
+    kl_listener_on_accepted(&l, (KlSocketHandle)10);   /* commit + refill */
+    INV();
+    kl_listener_on_accepted(&l, (KlSocketHandle)11);   /* commit; credit now exhausted, stays LISTENING */
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    INV();
+
+    kl_slot_lease_release(&m.held[0]);                 /* a connection closes → a credit frees */
+    kl_listener_notify_slot_free(&l);
+    INV();
+
+    kl_listener_close(&l);                             /* completion close: batch cancel */
+    while (l.inflight > 0) kl_listener_on_accept_failed(&l, 0);   /* drain posted accepts */
+    ASSERT_EQ(kl_listener_is_detached(&l), 1);
+    INV();
+
+    for (int i = 0; i < m.held_n; i++)                 /* release the remaining committed leases */
+        if (m.held[i].release) kl_slot_lease_release(&m.held[i]);
+    ASSERT_EQ(m.slots, CAP);                            /* every credit returned to the pool */
+#undef INV
 }
 
 UTEST_MAIN();
