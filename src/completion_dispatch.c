@@ -39,7 +39,7 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
 }
 
 int kl_comp_prime_accepts(struct KlServer *s) {
-    return kl_comp_ops(&s->ev.loop)->prime_accepts(&s->accept_target);
+    return kl_comp_ops(&s->ev.loop)->prime_accepts(s);
 }
 
 /* Raw transport routers (KlStream form). The HTTP-adapter helpers kl_comp_post_recv/
@@ -54,7 +54,7 @@ int kl_comp_post_send_raw(KlStream *stream, const KlIoVec *iov, int iovcnt, size
 }
 
 int kl_comp_post_accept(struct KlServer *s) {
-    return kl_comp_ops(&s->ev.loop)->post_accept(&s->accept_target);
+    return kl_comp_ops(&s->ev.loop)->post_accept(s);
 }
 
 int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,

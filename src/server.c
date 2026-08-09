@@ -212,7 +212,8 @@ void kl_server_close_listener(KlServer *s) {
 /* ── Readiness accept adapter (step 6B-1): drive KlListener over the listen fd + pool credits ──
  * The listener owns the accept lifecycle (reserve-before-accept backpressure, pause/resume,
  * confirmed retirement); these hooks bridge it to the event loop and the split-credit pool. Only
- * installed for a readiness loop (!completion_loop); the completion path still uses KlAcceptTarget. */
+ * installed for a readiness loop (!completion_loop); the completion path keeps its own accept
+ * priming until 6B-3 part 2b-ii adopts the listener. */
 static int server_accept_reserve(void *ctx) {
     KlServer *s = ctx;
     return kl_conn_pool_reserve(&s->pool);
@@ -342,7 +343,7 @@ int kl_server_run(KlServer *s) {
         (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
 
     /* Readiness loops drive the accept path through the embedded KlListener (step 6B-1); the
-     * completion path keeps its KlAcceptTarget priming until 6B-1b. */
+     * completion path keeps its own accept priming until 6B-3 part 2b-ii. */
     if (!completion_loop) {
         if (server_accept_listener_start(s) < 0) {
             s->last_error = KL_ERR_EVENT_ADD;

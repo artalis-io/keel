@@ -114,21 +114,6 @@ typedef struct {
 
 typedef struct KlAsyncOp KlAsyncOp;
 
-/**
- * @brief Internal accept target (Phase-A retype of KlServer* accept targeting).
- *
- * A thin, server-owned, embedded object that names the completion accept target so a
- * KL_COMP_ACCEPT event can carry it (target = KlAcceptTarget*) and the completion accept ops
- * (prime_accepts/post_accept) take it instead of KlServer*. It holds only a back-pointer to
- * its owning server — accept arming reads the server's pool/capacity exactly as before, and
- * teardown is unchanged. NO standalone lifetime, NO credit/lease/reservation/liveness token,
- * NO public API (those are Phase B). INTERNAL / UNSTABLE.
- */
-typedef struct KlAcceptTarget {
-    struct KlServer *server;   /**< Owning server (set at init); the accept path reaches the
-                                    pool/listen fd/event ctx through it — behavior unchanged. */
-} KlAcceptTarget;
-
 typedef struct KlServer {
     KlConfig config;
     KlAllocator alloc_storage;  /**< owned copy if user didn't provide one */
@@ -138,14 +123,11 @@ typedef struct KlServer {
     KlRouter router;            /**< Route table */
     KlConnPool pool;            /**< Connection pool */
     KlEventCtx ev;              /**< event loop + watcher list */
-    KlAcceptTarget accept_target;        /**< Internal accept target (KL_COMP_ACCEPT.target); server-owned,
-                                     back-points here. Phase-A retype — INTERNAL/UNSTABLE.
-                                     Still used by the completion accept path (6B-1b). */
-    /* ── Readiness accept via KlListener (step 6B-1) ─────────────────────────────────
+    /* ── Accept via KlListener (step 6B) ────────────────────────────────────────────
      * When the loop is a readiness loop (!completion_loop), the readiness accept path is driven by
      * this embedded KlListener with the split-credit pool accounting. INTERNAL/UNSTABLE. */
     KlListener accept_listener;   /**< readiness accept driver (active when accept_via_listener) */
-    int  accept_via_listener;     /**< 1 = readiness KlListener drives accepts (vs KlAcceptTarget) */
+    int  accept_via_listener;     /**< 1 = the KlListener drives accepts (readiness now; completion 6B-3 2b-ii) */
     int  listen_registered;       /**< listen fd currently has READ interest (listener-managed) */
     int  accept_alive;            /**< liveness token for slot leases; 0'd before pool teardown */
     KlSockAddr accept_pending_peer; /**< peer addr stashed for the on_accept hook (single-threaded) */

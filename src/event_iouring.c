@@ -120,7 +120,6 @@ typedef struct KlIouOp {
     socklen_t      peer_len;
     union {
         void              *watcher_udata;   /* CONNECT: the client's tagged KlWatcher */
-        struct KlAcceptTarget *accept_target;   /* ACCEPT: KL_COMP_ACCEPT.target */
     };
     int            aborted;               /* cancelled (idle timeout) — deliver as error */
 } KlIouOp;
@@ -606,15 +605,14 @@ static int iou_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n
     return 0;
 }
 
-static int iou_comp_post_accept(struct KlAcceptTarget *l) {
-    if (!l || !l->server) return -1;
-    KlIouState *st = l->server->ev.loop._backend;
+static int iou_comp_post_accept(struct KlServer *s) {
+    if (!s) return -1;
+    KlIouState *st = s->ev.loop._backend;
     if (st->accept_pending) return 0;                /* one accept outstanding is enough */
     KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
     op->type = IOU_ACCEPT;
     op->fd = st->listen_fd;
-    op->accept_target = l;   /* carry the accept target → KL_COMP_ACCEPT.target (Phase-A) */
     op->peer_len = sizeof(op->peer);
     struct io_uring_sqe *sqe = iou_sqe(st);
     if (!sqe) { iou_op_free(op); return -1; }
@@ -706,13 +704,13 @@ static int iou_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
     return 0;
 }
 
-static int iou_comp_prime_accepts(struct KlAcceptTarget *l) {
-    if (!l || !l->server) return -1;
-    KlIouState *st = l->server->ev.loop._backend;
+static int iou_comp_prime_accepts(struct KlServer *s) {
+    if (!s) return -1;
+    KlIouState *st = s->ev.loop._backend;
     if (st->primed) return 0;
-    st->listen_fd = l->server->listen_fd;
+    st->listen_fd = s->listen_fd;
     st->primed = 1;
-    return iou_comp_post_accept(l);
+    return iou_comp_post_accept(s);
 }
 
 /* Cancel pending ops on `fd` (idle-timeout sweep): mark aborted + prep_cancel so the
@@ -744,7 +742,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
     case IOU_ACCEPT:
         st->accept_pending = 0;
         ev->kind = KL_COMP_ACCEPT;
-        ev->target = op->accept_target;   /* Phase-A: the accept target, stashed at post_accept */
+        ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
         if (op->aborted || res < 0) { ev->ok = 0; return 1; }   /* driver just refills */
         ev->ok = 1;
         ev->accepted_fd = res;

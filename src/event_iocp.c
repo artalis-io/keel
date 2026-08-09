@@ -98,7 +98,6 @@ typedef struct KlIocpOp {
     uint64_t      file_chunk;                   /* SENDFILE: bytes in the in-flight TransmitFile */
     union {
         void              *watcher_udata;   /* WATCHER/CONNECT: the tagged KlWatcher pointer */
-        struct KlAcceptTarget *accept_target;   /* ACCEPT: KL_COMP_ACCEPT.target */
     };
     int           watcher_removed;             /* WATCHER: kl_event_del'd — free, don't re-post */
 } KlIocpOp;
@@ -312,9 +311,8 @@ static int iocp_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt,
     return 0;
 }
 
-static int iocp_comp_post_accept(struct KlAcceptTarget *l) {
-    if (!l || !l->server) return -1;
-    struct KlServer *s = l->server;
+static int iocp_comp_post_accept(struct KlServer *s) {
+    if (!s) return -1;
     KlIocpState *st = s->ev.loop._backend;
     SOCKET a = WSASocketW(st->accept_family, SOCK_STREAM, IPPROTO_TCP,
                           NULL, 0, WSA_FLAG_OVERLAPPED);
@@ -326,7 +324,6 @@ static int iocp_comp_post_accept(struct KlAcceptTarget *l) {
     op->type = KL_IOCP_ACCEPT;
     op->alloc = st->alloc;
     op->accept_sock = a;
-    op->accept_target = l;   /* carry the accept target → KL_COMP_ACCEPT.target (Phase-A) */
 
     DWORD bytes = 0;
     BOOL ok = st->acceptex((SOCKET)s->listen_fd, a, op->accept_buf,
@@ -590,9 +587,8 @@ static int iocp_connect_untrack(KlIocpState *st, const KlIocpOp *op) {
  * its address family, store it, and prime the accept backlog. Idempotent — latches
  * on st->started so the server may call it every tick. Server-scoped (needs the
  * listen socket); keeps kl_comp_drain ctx-scoped/server-agnostic. */
-static int iocp_comp_prime_accepts(struct KlAcceptTarget *l) {
-    if (!l || !l->server) return -1;
-    struct KlServer *s = l->server;
+static int iocp_comp_prime_accepts(struct KlServer *s) {
+    if (!s) return -1;
     KlIocpState *st = s->ev.loop._backend;
     if (st->started)
         return 0;
@@ -617,7 +613,7 @@ static int iocp_comp_prime_accepts(struct KlAcceptTarget *l) {
 
     st->started = 1;
     for (int i = 0; i < KL_IOCP_ACCEPT_BACKLOG; i++) {
-        if (iocp_comp_post_accept(l) < 0)
+        if (iocp_comp_post_accept(s) < 0)
             return (i == 0) ? -1 : 0;
     }
     return 0;
@@ -674,7 +670,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                               (DWORD)KL_IOCP_ADDR_LEN, &local, &llen, &remote, &rlen);
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_ACCEPT;
-            out[count].target = op->accept_target;   /* the accept target, stashed at post_accept */
+            out[count].target = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
             out[count].ok = 1;
             out[count].accepted_fd = (KlSocketHandle)op->accept_sock;
             if (rlen > 0 && remote)              /* native → neutral once, at the seam */
