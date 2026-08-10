@@ -2,9 +2,10 @@
  * keel/listener.h — Accept-side listener state machine (KlListener).
  *
  * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
- * │ EXPERIMENTAL / UNSTABLE CANDIDATE API (Phase-B transport, step 6A).                          │
- * │ The FUNCTION + OWNERSHIP CONTRACTS below are the public surface. The struct layout is NOT —  │
- * │ it lives in <keel/listener_detail.h> for embedders (opt-in) and may change without notice.   │
+ * │ STABLE API (Phase-B transport). The function signatures + ownership contracts below are the  │
+ * │ committed public surface. The struct LAYOUT is NOT part of the ABI: it lives in              │
+ * │ <keel/listener_detail.h> (opt-in, for embedders that stack/embed a KlListener) and may change │
+ * │ between releases — embedders recompile. Use the accessors, never the detail fields.          │
  * └───────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * A model-agnostic accept-path state machine, symmetric with KlConnectOp. It keeps FOUR lifetimes
@@ -34,15 +35,15 @@ typedef struct KlListener KlListener;
 /** @brief Lifecycle phase (kl_listener_state). The listener keeps up to `window` accepts posted
  *  concurrently, one reserved pool credit each (window=1 for readiness; up to the AcceptEx backlog
  *  for IOCP — see kl_listener_set_accept_window). */
-enum {
-    KL_LISTENER_IDLE = 0,   /**< not started */
-    KL_LISTENER_LISTENING,  /**< accepting: 1..window accepts posted (credit starvation while some
+typedef enum {
+    KL_LISTENER_STATE_IDLE = 0,   /**< not started */
+    KL_LISTENER_STATE_LISTENING,  /**< accepting: 1..window accepts posted (credit starvation while some
                                  remain posted STAYS LISTENING — it does not pause) */
-    KL_LISTENER_PAUSED,     /**< backpressure: NO credit AND zero accepts posted (posted count
+    KL_LISTENER_STATE_PAUSED,     /**< backpressure: NO credit AND zero accepts posted (posted count
                                  reached 0); resumes via kl_listener_notify_slot_free */
-    KL_LISTENER_CLOSING,    /**< close requested; awaiting retirement of every posted accept */
-    KL_LISTENER_CLOSED      /**< fully retired; on_close fired; reuse legal */
-};
+    KL_LISTENER_STATE_CLOSING,    /**< close requested; awaiting retirement of every posted accept */
+    KL_LISTENER_STATE_CLOSED      /**< fully retired; on_close fired; reuse legal */
+} KlListenerState;
 
 /* ── Slot credit (pool-owned capability, borrowed by the listener) ─────────────────────────── */
 
@@ -149,8 +150,8 @@ void kl_listener_notify_slot_free(KlListener *l);
  *  its accept completes as failed. Detaches (on_close) once every posted accept has retired.
  *  Idempotent. Returns 0, or -1 if not inited. */
 int  kl_listener_close(KlListener *l);
-/** Current lifecycle phase (KL_LISTENER_*). */
-int  kl_listener_state(const KlListener *l);
+/** Current lifecycle phase (KlListenerState). */
+KlListenerState kl_listener_state(const KlListener *l);
 /** 1 once on_close has fired (fully retired; reusable), else 0. */
 int  kl_listener_is_detached(const KlListener *l);
 

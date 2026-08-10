@@ -112,7 +112,7 @@ UTEST(listener, start_reserves_then_arms) {
     ASSERT_EQ(kl_listener_start(&l), 0);
     ASSERT_EQ(m.reserve_calls, 1);            /* a slot is reserved before arming */
     ASSERT_EQ(m.arm_calls, 1);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
     kl_listener_close(&l);
     ASSERT_EQ(m.release_calls, 1);            /* the held reservation is returned on close */
     ASSERT_EQ(m.close_calls, 1);
@@ -137,13 +137,13 @@ UTEST(listener, backpressure_pauses_when_no_slot) {
     m.slots = 1;
     ASSERT_EQ(kl_listener_start(&l), 0);      /* reserves the one slot, arms */
     kl_listener_on_accepted(&l, (KlSocketHandle)1000);   /* commits it; next reserve finds none */
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
     ASSERT_EQ(m.arm_calls, 1);                /* no second arm while paused */
 
     /* the accepted connection closes → slot returns → resume */
     kl_slot_lease_release(&m.last_lease);     /* slots: 0 → 1 */
     kl_listener_notify_slot_free(&l);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
     ASSERT_EQ(m.arm_calls, 2);
 }
 
@@ -154,12 +154,12 @@ UTEST(listener, readiness_pause_disarms_then_resume_rearms) {
     m.slots = 1;
     ASSERT_EQ(kl_listener_start(&l), 0);          /* reserves the one slot, arms */
     kl_listener_on_accepted(&l, (KlSocketHandle)1000);   /* commits it; next reserve → 0 → PAUSED */
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
     ASSERT_EQ(m.disarm_calls, 1);                 /* pause dropped the listen interest */
 
     kl_slot_lease_release(&m.last_lease);          /* slot returns */
     kl_listener_notify_slot_free(&l);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
     ASSERT_EQ(m.arm_calls, 2);                     /* resume re-armed */
     kl_listener_close(&l);
 }
@@ -221,7 +221,7 @@ UTEST(listener, sync_accept_inline) {
     m.slots = 10; m.sync_accept_budget = 1;   /* first arm inline-accepts, then async */
     ASSERT_EQ(kl_listener_start(&l), 0);
     ASSERT_EQ(m.accept_calls, 1);             /* delivered inline from the arm hook */
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
 }
 
 UTEST(listener, many_sync_accepts_bounded) {
@@ -240,7 +240,7 @@ UTEST(listener, sync_accept_failures_rearm_bounded) {
     ASSERT_EQ(m.arm_calls, 10001);            /* failed arms + one final async arm */
     /* each failed accept returned its reserved slot */
     ASSERT_EQ(m.reserved_now, 1);             /* only the final armed accept holds a reservation */
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
 }
 
 UTEST(listener, accept_failed_releases_slot_and_rearms) {
@@ -259,7 +259,7 @@ UTEST(listener, close_while_paused_detaches) {
     KlListener l; LT m; lt_setup(&m, &l, 0);
     m.slots = 0;                                  /* reserve fails at start → PAUSED */
     ASSERT_EQ(kl_listener_start(&l), 0);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
     kl_listener_close(&l);
     ASSERT_EQ(m.close_calls, 1);
     ASSERT_EQ(kl_listener_is_detached(&l), 1);
@@ -272,7 +272,7 @@ UTEST(listener, readiness_close_disarms_and_detaches) {
     ASSERT_EQ(m.disarm_calls, 1);             /* readiness drops interest */
     ASSERT_EQ(m.release_calls, 1);            /* reservation returned */
     ASSERT_EQ(m.close_calls, 1);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_CLOSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_CLOSED);
 }
 
 UTEST(listener, completion_close_cancels_and_waits_for_straggler) {
@@ -321,7 +321,7 @@ UTEST(listener, spurious_accept_disposed) {
     ASSERT_EQ(kl_listener_start(&l), 0);
     kl_listener_on_accepted(&l, (KlSocketHandle)3000);   /* real accept; then PAUSED (slot spent) */
     ASSERT_EQ(m.accept_calls, 1);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
     kl_listener_on_accepted(&l, (KlSocketHandle)3001);   /* spurious — no accept in flight */
     ASSERT_EQ(m.accept_calls, 1);                        /* not handed off */
     ASSERT_EQ(m.dispose_calls, 1);                       /* fd disposed */
@@ -359,7 +359,7 @@ UTEST(listener, hard_arm_failure_closes) {
     ASSERT_EQ(kl_listener_start(&l), 0);      /* arm returns -1 → listener closes */
     ASSERT_EQ(m.release_calls, 1);            /* reserved slot returned */
     ASSERT_EQ(m.close_calls, 1);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_CLOSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_CLOSED);
 }
 
 UTEST(listener, reserve_error_closes) {
@@ -368,14 +368,14 @@ UTEST(listener, reserve_error_closes) {
     ASSERT_EQ(kl_listener_start(&l), 0);
     ASSERT_EQ(m.arm_calls, 0);                 /* never armed — reservation failed */
     ASSERT_EQ(m.close_calls, 1);              /* pool error closes the listener */
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_CLOSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_CLOSED);
 }
 
 UTEST(listener, no_slot_pauses_not_closes) {
     KlListener l; LT m; lt_setup(&m, &l, 0);
     m.slots = 0;                              /* reserve returns 0 (backpressure) */
     ASSERT_EQ(kl_listener_start(&l), 0);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
     ASSERT_EQ(m.arm_calls, 0);
 }
 
@@ -385,7 +385,7 @@ UTEST(listener, no_reuse_until_reinit) {
     kl_listener_close(&l);
     ASSERT_EQ(kl_listener_start(&l), -1);     /* not IDLE — no restart without re-init */
     lt_setup(&m, &l, 0);                       /* re-init = reuse reset */
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_IDLE);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_IDLE);
     ASSERT_EQ(kl_listener_start(&l), 0);
 }
 
@@ -517,7 +517,7 @@ UTEST(listener, window_capped_by_credits) {
     ASSERT_EQ(kl_listener_start(&l), 0);
     ASSERT_EQ(m.arm_calls, 2);                 /* window 5 but only 2 credits → 2 posted */
     ASSERT_EQ(l.inflight, 2);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);   /* inflight>0 → not paused */
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);   /* inflight>0 → not paused */
     kl_listener_close(&l);
     kl_listener_on_accept_failed(&l, 0);
     kl_listener_on_accept_failed(&l, 0);
@@ -548,12 +548,12 @@ UTEST(listener, window_exhaustion_pauses_then_resumes) {
     ASSERT_EQ(kl_listener_start(&l), 0);       /* posts 2, credits exhausted */
     kl_listener_on_accepted(&l, (KlSocketHandle)600);   /* commit; top-up reserve fails */
     kl_listener_on_accepted(&l, (KlSocketHandle)601);   /* commit; inflight 0 → PAUSED */
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
     ASSERT_EQ(m.arm_calls, 2);                 /* no posts while out of credit */
 
     kl_slot_lease_release(&m.last_lease);       /* a connection closes → a credit frees */
     kl_listener_notify_slot_free(&l);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
     ASSERT_EQ(m.arm_calls, 3);                 /* resumed — posted one */
     kl_listener_close(&l);
     kl_listener_on_accept_failed(&l, 0);
@@ -573,14 +573,14 @@ UTEST(listener, completion_exhaustion_queues_not_drops) {
 
     kl_listener_on_accepted(&l, (KlSocketHandle)2000);   /* commit → pool exhausted → PAUSE */
     ASSERT_EQ(m.accept_calls, 1);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_PAUSED);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_PAUSED);
     ASSERT_EQ(m.arm_calls, 1);                  /* no further accept posted while exhausted */
     ASSERT_EQ(m.dispose_calls, 0);             /* nothing accepted-and-dropped — it queues instead */
 
     /* The first connection closes → its credit returns → the queued connection is now served. */
     kl_slot_lease_release(&m.last_lease);       /* slots: 0 → 1 */
     kl_listener_notify_slot_free(&l);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
     ASSERT_EQ(m.arm_calls, 2);                  /* posts an accept for the previously-queued conn */
     kl_listener_on_accepted(&l, (KlSocketHandle)2001);
     ASSERT_EQ(m.accept_calls, 2);              /* the queued connection is accepted, not dropped */
@@ -632,7 +632,7 @@ UTEST(listener, credit_conservation_through_lifecycle) {
     kl_listener_on_accepted(&l, (KlSocketHandle)10);   /* commit + refill */
     INV();
     kl_listener_on_accepted(&l, (KlSocketHandle)11);   /* commit; credit now exhausted, stays LISTENING */
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
     INV();
 
     kl_slot_lease_release(&m.held[0]);                 /* a connection closes → a credit frees */

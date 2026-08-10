@@ -428,7 +428,7 @@ int kl_server_run(KlServer *s) {
                  * exhausted it transitions to PAUSED (disarming the listen fd, so the kernel TCP
                  * backlog queues the rest) and resumes when a slot frees. */
                 if (atomic_load(&s->draining)) goto rearm_listen;
-                while (kl_listener_state(&s->accept_listener) == KL_LISTENER_LISTENING) {
+                while (kl_listener_state(&s->accept_listener) == KL_LISTENER_STATE_LISTENING) {
                     KlSockAddr peer;
                     KlSocketHandle client_fd = kl_sock_accept(s->ev.sockets, s->listen_fd,
                                                               &peer);
@@ -465,7 +465,7 @@ int kl_server_run(KlServer *s) {
                  * one-shot POLL_ADD) unless the listener paused (which already disarmed it). */
 rearm_listen:
                 if (s->listen_registered &&
-                    kl_listener_state(&s->accept_listener) != KL_LISTENER_PAUSED)
+                    kl_listener_state(&s->accept_listener) != KL_LISTENER_STATE_PAUSED)
                     kl_event_mod(&s->ev.loop, s->listen_fd,
                                  KL_EVENT_READ, NULL);
                 continue;

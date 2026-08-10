@@ -304,8 +304,8 @@ int kl_connect_op_cancel(KlConnectOp *op) {
     return 0;
 }
 
-int kl_connect_op_state(const KlConnectOp *op) {
-    return op ? op->state : KL_CONNECT_STATE_DETACHED;
+KlConnectState kl_connect_op_state(const KlConnectOp *op) {
+    return op ? (KlConnectState)op->state : KL_CONNECT_STATE_DETACHED;
 }
 
 int kl_connect_op_is_detached(const KlConnectOp *op) {

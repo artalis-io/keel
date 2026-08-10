@@ -127,8 +127,8 @@ static int stream_close_common(KlStream *s, int abort) {
 int kl_stream_close_begin(KlStream *s) { return stream_close_common(s, /*abort=*/0); }
 int kl_stream_cancel(KlStream *s)      { return stream_close_common(s, /*abort=*/1); }
 
-int kl_stream_close_state(const KlStream *s) {
-    return s ? s->close_state : KL_STREAM_STATE_CLOSED;
+KlStreamCloseState kl_stream_close_state(const KlStream *s) {
+    return s ? (KlStreamCloseState)s->close_state : KL_STREAM_STATE_CLOSED;
 }
 
 int kl_stream_is_detached(const KlStream *s) {

@@ -51,11 +51,11 @@ static void l_release_credit(KlListener *l) {      /* return one raw credit to t
  * callback is on the stack (in_start / in_dispatch). Exactly-once via `detached`. Every posted
  * accept holds a reservation, so `inflight == 0` also means no credit is held uncommitted. */
 static void l_finalize(KlListener *l) {
-    if (l->state != KL_LISTENER_CLOSING) return;
+    if (l->state != KL_LISTENER_STATE_CLOSING) return;
     if (l->in_start || l->in_dispatch) return;   /* defer past a start / callback frame */
     if (l->inflight) return;                      /* posted accepts still outstanding */
     if (l->detached) return;
-    l->state    = KL_LISTENER_CLOSED;
+    l->state    = KL_LISTENER_STATE_CLOSED;
     l->detached = 1;
     if (l->on_close) l->on_close(l->ctx);        /* reuse/free legal only after this returns */
 }
@@ -73,9 +73,9 @@ static void l_dispose(KlListener *l, KlSocketHandle fd) {
 /* Begin close (public or fatal-internal). Stops accepting and retires the reservations held by the
  * posted accepts; detachment waits until every posted accept retires. */
 static void l_begin_close(KlListener *l) {
-    if (l->state == KL_LISTENER_CLOSED) return;
-    if (l->state != KL_LISTENER_CLOSING) {
-        l->state = KL_LISTENER_CLOSING;
+    if (l->state == KL_LISTENER_STATE_CLOSED) return;
+    if (l->state != KL_LISTENER_STATE_CLOSING) {
+        l->state = KL_LISTENER_STATE_CLOSING;
         if (l->inflight > 0) {
             if (!l->completion_mode) {
                 /* Readiness: drop the listen interest; the pending interest is cancelled, so nothing
@@ -105,16 +105,16 @@ static void l_pump(KlListener *l) {
 
     do {
         l->pump_pending = 0;
-        while (l->state == KL_LISTENER_LISTENING && l->inflight < l->window) {
+        while (l->state == KL_LISTENER_STATE_LISTENING && l->inflight < l->window) {
             int r = l_reserve(l);                        /* may reentrantly close the listener */
             if (r < 0) { l->last_error = -1; l_begin_close(l); break; }   /* pool error → close */
-            if (l->state != KL_LISTENER_LISTENING) {     /* the reserve hook reentrantly closed us */
+            if (l->state != KL_LISTENER_STATE_LISTENING) {     /* the reserve hook reentrantly closed us */
                 if (r == 1) l_release_credit(l);         /* return the credit we just acquired */
                 break;
             }
             if (r == 0) {                                /* backpressure: no credit */
                 if (l->inflight == 0) {
-                    l->state = KL_LISTENER_PAUSED;
+                    l->state = KL_LISTENER_STATE_PAUSED;
                     /* Readiness: drop the persistent listen READ interest so a level-triggered fd
                      * stops firing until a slot frees and notify_slot_free re-arms it. Completion
                      * disarm is a documented no-op; the disarm hook is idempotent. */
@@ -171,13 +171,13 @@ int kl_listener_init(KlListener *l, int completion_mode, const KlListenerHooks *
     l->dispose_fd      = hooks->dispose_fd;
     l->on_close        = hooks->on_close;
     l->ctx             = ctx;
-    l->state           = KL_LISTENER_IDLE;
+    l->state           = KL_LISTENER_STATE_IDLE;
     l->inited          = 1;
     return 0;
 }
 
 int kl_listener_set_accept_window(KlListener *l, int window) {
-    if (!l || !l->inited || l->state != KL_LISTENER_IDLE) return -1;   /* init-time only */
+    if (!l || !l->inited || l->state != KL_LISTENER_STATE_IDLE) return -1;   /* init-time only */
     if (window < 1) return -1;
     /* A readiness arm is a single persistent interest registration, not N distinct posted
      * operations — a window > 1 would reserve several credits against one registration. Only a
@@ -189,8 +189,8 @@ int kl_listener_set_accept_window(KlListener *l, int window) {
 
 int kl_listener_start(KlListener *l) {
     if (!l || !l->inited) return -1;
-    if (l->state != KL_LISTENER_IDLE) return -1;
-    l->state = KL_LISTENER_LISTENING;
+    if (l->state != KL_LISTENER_STATE_IDLE) return -1;
+    l->state = KL_LISTENER_STATE_LISTENING;
     l_pump(l);
     return 0;
 }
@@ -200,7 +200,7 @@ void kl_listener_on_accepted(KlListener *l, KlSocketHandle fd) {
     if (l->inflight <= 0) { l_dispose(l, fd); return; }   /* spurious accept — dispose its fd */
     l->inflight--;                                        /* this posted accept retired */
 
-    if (l->state == KL_LISTENER_CLOSING || l->state == KL_LISTENER_CLOSED) {
+    if (l->state == KL_LISTENER_STATE_CLOSING || l->state == KL_LISTENER_STATE_CLOSED) {
         /* teardown: cannot hand off — return this accept's credit and dispose the fd */
         l_release_credit(l);
         l_dispose(l, fd);          /* guarded tail: finalizes after dispose returns */
@@ -224,7 +224,7 @@ void kl_listener_on_accept_failed(KlListener *l, int error) {
     l->last_error = error;
     l_release_credit(l);                       /* return this accept's credit */
 
-    if (l->state == KL_LISTENER_CLOSING || l->state == KL_LISTENER_CLOSED) {
+    if (l->state == KL_LISTENER_STATE_CLOSING || l->state == KL_LISTENER_STATE_CLOSED) {
         l_finalize(l);
         return;
     }
@@ -233,8 +233,8 @@ void kl_listener_on_accept_failed(KlListener *l, int error) {
 
 void kl_listener_notify_slot_free(KlListener *l) {
     if (!l || !l->inited) return;
-    if (l->state == KL_LISTENER_PAUSED) l->state = KL_LISTENER_LISTENING;
-    if (l->state != KL_LISTENER_LISTENING) return;
+    if (l->state == KL_LISTENER_STATE_PAUSED) l->state = KL_LISTENER_STATE_LISTENING;
+    if (l->state != KL_LISTENER_STATE_LISTENING) return;
     l_pump(l);         /* a credit is available now — top up (re-arms readiness interest if paused) */
 }
 
@@ -244,8 +244,8 @@ int kl_listener_close(KlListener *l) {
     return 0;
 }
 
-int kl_listener_state(const KlListener *l) {
-    return l ? l->state : KL_LISTENER_CLOSED;
+KlListenerState kl_listener_state(const KlListener *l) {
+    return l ? (KlListenerState)l->state : KL_LISTENER_STATE_CLOSED;
 }
 
 int kl_listener_is_detached(const KlListener *l) {

@@ -1,14 +1,14 @@
 /*
- * keel/connect_detail.h — Layout of KlConnectOp (opt-in detail).
+ * keel/connect_op_detail.h — Layout of KlConnectOp (opt-in detail).
  *
  * INTERNAL / UNSTABLE. Include this ONLY to embed or stack-allocate a KlConnectOp; the fields are
  * NOT part of the API and may change without notice. The behavior/ownership contract is in
- * <keel/connect.h>. Do not read or write these fields directly — use the kl_connect_op_* functions.
+ * <keel/connect_op.h>. Do not read or write these fields directly — use the kl_connect_op_* functions.
  */
-#ifndef KEEL_CONNECT_DETAIL_H
-#define KEEL_CONNECT_DETAIL_H
+#ifndef KEEL_CONNECT_OP_DETAIL_H
+#define KEEL_CONNECT_OP_DETAIL_H
 
-#include <keel/connect.h>   /* KlConnectOp typedef, hook typedefs, KlConnectResult */
+#include <keel/connect_op.h>   /* KlConnectOp typedef, hook typedefs, KlConnectResult */
 
 struct KlConnectOp {
     int  state;               /* KL_CONNECT_STATE_* */
@@ -53,4 +53,4 @@ struct KlConnectOp {
     void *ctx;
 };
 
-#endif /* KEEL_CONNECT_DETAIL_H */
+#endif /* KEEL_CONNECT_OP_DETAIL_H */

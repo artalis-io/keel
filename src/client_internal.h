@@ -26,8 +26,8 @@
 #include <keel/decompress.h>
 #include <keel/parser.h>
 #include <keel/resolver.h>
-#include <keel/connect.h>          /* KlConnectOp — outbound-connect state machine (6C) */
-#include <keel/connect_detail.h>   /* KlConnectOp layout (embedded by value) */
+#include <keel/connect_op.h>          /* KlConnectOp — outbound-connect state machine (6C) */
+#include <keel/connect_op_detail.h>   /* KlConnectOp layout (embedded by value) */
 #include <keel/tls.h>
 #include <keel/url.h>
 

@@ -1,11 +1,11 @@
 /*
- * keel/connect.h — Outbound-connect terminal-once state machine (KlConnectOp).
+ * keel/connect_op.h — Outbound-connect terminal-once state machine (KlConnectOp).
  *
  * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
- * │ EXPERIMENTAL / UNSTABLE CANDIDATE API (Phase-B transport, step 6A).                          │
- * │ The FUNCTION + OWNERSHIP CONTRACTS below are the public surface. The struct layout is NOT —  │
- * │ it lives in <keel/connect_detail.h> for embedders (opt-in) and may change without notice.    │
- * │ Signatures may still change before this header is declared stable (step 6D).                 │
+ * │ STABLE API (Phase-B transport). The function signatures + ownership contracts below are the  │
+ * │ committed public surface. The struct LAYOUT is NOT part of the ABI: it lives in              │
+ * │ <keel/connect_op_detail.h> (opt-in, for embedders that stack/embed a KlConnectOp) and may     │
+ * │ change between releases — embedders recompile. Use the accessors, never the detail fields.   │
  * └───────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * A model-agnostic state machine for establishing ONE outbound connection: name resolution
@@ -26,25 +26,25 @@
  *     outstanding op AND both timers retire. Re-init (kl_connect_op_init, which zeroes the op) is
  *     the reuse reset.
  */
-#ifndef KEEL_CONNECT_H
-#define KEEL_CONNECT_H
+#ifndef KEEL_CONNECT_OP_H
+#define KEEL_CONNECT_OP_H
 
 #include <keel/handle.h>   /* KlSocketHandle, KL_INVALID_SOCKET */
 
-/** @brief Opaque connect operation. Full layout in <keel/connect_detail.h> (opt-in). */
+/** @brief Opaque connect operation. Full layout in <keel/connect_op_detail.h> (opt-in). */
 typedef struct KlConnectOp KlConnectOp;
 
 /** @brief Max racing addresses (matches KL_RESOLVE_MAX_ADDRS without coupling to resolver.h). */
 #define KL_CONNECT_MAX_ADDRS 8
 
 /** @brief Lifecycle phase (kl_connect_op_state). */
-enum {
+typedef enum {
     KL_CONNECT_STATE_IDLE = 0,   /**< not started */
     KL_CONNECT_STATE_RESOLVING,  /**< a name resolution is in flight */
     KL_CONNECT_STATE_CONNECTING, /**< racing connect over the resolved list */
     KL_CONNECT_STATE_DONE,       /**< terminal decided (on_done fired) */
     KL_CONNECT_STATE_DETACHED    /**< all ops retired; on_detach fired; reuse legal */
-};
+} KlConnectState;
 
 /** @brief Terminal result. */
 typedef enum {
@@ -126,9 +126,9 @@ void kl_connect_op_on_deadline(KlConnectOp *op, int error);
 /** Request an abortive cancel (terminal CANCELLED if not already terminal; cancel every op once).
  *  Safe reentrantly; idempotent once detached. Returns 0, or -1 if not inited. */
 int  kl_connect_op_cancel(KlConnectOp *op);
-/** Current lifecycle phase (KL_CONNECT_STATE_*). */
-int  kl_connect_op_state(const KlConnectOp *op);
+/** Current lifecycle phase (KlConnectState). */
+KlConnectState kl_connect_op_state(const KlConnectOp *op);
 /** 1 once on_detach has fired (fully retired; reusable), else 0. */
 int  kl_connect_op_is_detached(const KlConnectOp *op);
 
-#endif /* KEEL_CONNECT_H */
+#endif /* KEEL_CONNECT_OP_H */

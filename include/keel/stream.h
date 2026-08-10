@@ -3,9 +3,10 @@
  * lifecycle (KlStream).
  *
  * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
- * │ EXPERIMENTAL / UNSTABLE CANDIDATE API (Phase-B transport, step 6A).                          │
- * │ The FUNCTION + OWNERSHIP CONTRACTS below are the public surface. The struct layout is NOT —  │
- * │ it lives in <keel/stream_detail.h> for embedders (opt-in) and may change without notice.     │
+ * │ STABLE API (Phase-B transport). The function signatures + ownership contracts below are the  │
+ * │ committed public surface. The struct LAYOUT is NOT part of the ABI: it lives in              │
+ * │ <keel/stream_detail.h> (opt-in, for embedders that stack/embed a KlStream) and may change    │
+ * │ between releases — embedders recompile. Use the accessors, never the detail fields.          │
  * └───────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * A model-agnostic raw byte transport, independent of readiness vs completion. Three cooperating
@@ -119,11 +120,11 @@ int  kl_stream_read_held(const KlStream *s);
 
 /** Close lifecycle phase (kl_stream_close_state). Distinct from the KlStreamWriteStatus
  *  KL_STREAM_CLOSED write-result enumerator. */
-enum {
+typedef enum {
     KL_STREAM_STATE_OPEN = 0,   /**< normal; no close requested */
     KL_STREAM_STATE_CLOSING,    /**< close requested; awaiting physical retirement of both ops */
     KL_STREAM_STATE_CLOSED      /**< both ops retired; on_close fired; reuse legal */
-};
+} KlStreamCloseState;
 
 /** Detachment callback: invoked exactly once when the stream is fully retired (reuse legal after). */
 typedef void (*KlStreamCloseFn)(void *ctx);
@@ -139,8 +140,8 @@ int  kl_stream_set_cancel(KlStream *s, KlStreamCancelFn cancel_recv, KlStreamCan
 int  kl_stream_close_begin(KlStream *s);
 /** Begin an ABORTIVE close (cancel outstanding ops; drop queue). Idempotent once CLOSED. 0/-1. */
 int  kl_stream_cancel(KlStream *s);
-/** Current lifecycle phase (KL_STREAM_STATE_*). */
-int  kl_stream_close_state(const KlStream *s);
+/** Current lifecycle phase (KlStreamCloseState). */
+KlStreamCloseState kl_stream_close_state(const KlStream *s);
 /** 1 once on_close has fired (fully detached; reusable), else 0. */
 int  kl_stream_is_detached(const KlStream *s);
 

@@ -12,8 +12,8 @@
 #include <keel/stream_detail.h>       /* embed/stack-allocate KlStream (opt-in detail) */
 #include <keel/listener.h>
 #include <keel/listener_detail.h>
-#include <keel/connect.h>
-#include <keel/connect_detail.h>
+#include <keel/connect_op.h>
+#include <keel/connect_op_detail.h>
 #include <keel/allocator.h>
 #include <string.h>
 
@@ -58,7 +58,7 @@ UTEST(transport_public, listener_accept_and_lease) {
     };
     ASSERT_EQ(kl_listener_init(&l, /*completion=*/0, &h, &m), 0);
     ASSERT_EQ(kl_listener_start(&l), 0);
-    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_LISTENING);
+    ASSERT_EQ(kl_listener_state(&l), KL_LISTENER_STATE_LISTENING);
 
     kl_listener_on_accepted(&l, (KlSocketHandle)900);
     ASSERT_EQ(m.accepts, 1);

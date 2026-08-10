@@ -638,9 +638,9 @@ void kl_server_stats(const KlServer *s, KlServerStats *out) {
     out->active_connections = s->pool.active_count;
     out->max_connections    = s->pool.capacity;
     /* Report from the active accept driver: the readiness listener owns pause state via
-     * KL_LISTENER_PAUSED; the completion / legacy path uses s->listen_paused. */
+     * KL_LISTENER_STATE_PAUSED; the completion / legacy path uses s->listen_paused. */
     out->listen_paused      = s->accept_via_listener
-        ? (kl_listener_state(&s->accept_listener) == KL_LISTENER_PAUSED)
+        ? (kl_listener_state(&s->accept_listener) == KL_LISTENER_STATE_PAUSED)
         : s->listen_paused;
 
     /* Count suspended connections by walking the async ops list */
