@@ -235,11 +235,13 @@ jobs:
           release: false
           install: mingw-w64-x86_64-gcc make
 
-      # IOCP completion backend (BACKEND=iocp). Increment 2: this gates that the
-      # completion backend TU (event_iocp.c) + overlapped provider compile and the
-      # whole library links with them, and boots a real IOCP loop. The completion
-      # connection driver (server-over-IOCP) lands in the next increment, at which
-      # point the full suite + a smoke test join here. See docs/phase8_iocp_design.md.
+      # IOCP completion backend (BACKEND=iocp) on a real Windows runner. This job
+      # provides native runtime coverage: it links the whole library with event_iocp.c
+      # + the overlapped provider, boots a real IOCP loop for the engine lifecycle +
+      # capability-negotiation suite (test-win-iocp), and drives end-to-end
+      # HTTP-, mock-TLS-, and async/thread-pool-over-IOCP roundtrips (the smoke steps
+      # below). Broadening direct unit/integration coverage under BACKEND=iocp is
+      # tracked in #236. See docs/phase8_iocp_design.md.
       - name: Build full core (IOCP link gate)
         run: make OS=windows BACKEND=iocp CC=gcc
 
