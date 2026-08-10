@@ -18,10 +18,10 @@
 #include "h2_internal.h"
 #include "socket.h"
 
-/* Socket provider for this connection's fd. NULL (POSIX default) for a
- * standalone pool with no event ctx wired — see kl_conn_release. */
+/* Socket provider for this connection's fd — via the raw KlStream seam (step 6B-2). NULL (POSIX
+ * default) for a standalone pool with no event ctx wired — see kl_conn_release. */
 static inline const KlSocketProvider *conn_sp(const KlConn *c) {
-    return c->ctx ? c->ctx->sockets : NULL;
+    return kl_stream_provider(&c->stream);
 }
 
 #define KL_TLS_DRAIN_MAX 256  /* max pending drain iterations per event */
@@ -59,6 +59,7 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
     pool->alloc = alloc;
     pool->capacity = capacity;
     pool->active_count = 0;
+    pool->free_credits = capacity;   /* admission rights: one per slot (step 6B credit layer) */
     if ((size_t)capacity > SIZE_MAX / sizeof(KlConn)) return -1;
     pool->conns = kl_malloc(alloc, sizeof(KlConn) * (size_t)capacity);
     if (!pool->conns) return -1;
@@ -68,22 +69,47 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
     /* Build free list and allocate read buffers */
     pool->free_list = &pool->conns[0];
     for (int i = 0; i < capacity; i++) {
-        pool->conns[i].read_buf = kl_malloc(alloc, KL_READ_BUF_SIZE);
-        if (!pool->conns[i].read_buf) {
+        pool->conns[i].stream.read_buf = kl_malloc(alloc, KL_READ_BUF_SIZE);
+        if (!pool->conns[i].stream.read_buf) {
             for (int j = 0; j < i; j++)
-                kl_free(alloc, pool->conns[j].read_buf, KL_READ_BUF_SIZE);
+                kl_free(alloc, pool->conns[j].stream.read_buf, KL_READ_BUF_SIZE);
             kl_free(alloc, pool->conns, sizeof(KlConn) * (size_t)capacity);
             pool->conns = NULL;
             return -1;
         }
-        pool->conns[i].read_cap = KL_READ_BUF_SIZE;
+        /* Base-init the embedded raw stream (step 6B-2): sets read_buf/read_cap, invalid handle,
+         * and clears all facet state. The read_buf was allocated just above; kl_stream_init records
+         * it as the stable receive buffer. Arguments are known-valid, but check the result and
+         * unwind on failure to keep initialization discipline intact against future changes. */
+        char *rb = pool->conns[i].stream.read_buf;
+        if (kl_stream_init(&pool->conns[i].stream, rb, KL_READ_BUF_SIZE) < 0) {
+            for (int j = 0; j <= i; j++)   /* free through i (rb for slot i was set above) */
+                kl_free(alloc, pool->conns[j].stream.read_buf, KL_READ_BUF_SIZE);
+            kl_free(alloc, pool->conns, sizeof(KlConn) * (size_t)capacity);
+            pool->conns = NULL;
+            return -1;
+        }
         pool->conns[i].next_free = (i < capacity - 1) ? &pool->conns[i + 1] : NULL;
-        pool->conns[i].fd = KL_INVALID_SOCKET;
         pool->conns[i].state = KL_CONN_CLOSED;
-        pool->conns[i].alloc = alloc;
+        pool->conns[i].stream.alloc = alloc;
     }
 
     return 0;
+}
+
+int kl_conn_pool_reserve(KlConnPool *pool) {
+    if (!pool) return -1;                     /* fail closed on a NULL pool */
+    if (pool->free_credits <= 0) return 0;    /* admission full → listener backpressure */
+    pool->free_credits--;
+    return 1;
+}
+
+void kl_conn_pool_return_credit(KlConnPool *pool) {
+    if (!pool) return;                        /* defensive no-op */
+    /* Over-return means broken lease accounting (the free_credits + reserved + active == capacity
+     * invariant was violated) — catch it in debug/tests instead of silently hiding it. */
+    assert(pool->free_credits < pool->capacity);
+    if (pool->free_credits < pool->capacity) pool->free_credits++;   /* release-once safety net */
 }
 
 KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd) {
@@ -94,9 +120,9 @@ KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd) {
     c->next_free = NULL;
     pool->active_count++;
 
-    c->fd = fd;
+    c->stream.fd = fd;
     c->state = KL_CONN_READING;
-    c->read_len = 0;
+    c->stream.read_len = 0;
     c->hdr_sent = 0;
     c->route = NULL;
     c->num_params = 0;
@@ -110,6 +136,10 @@ KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd) {
     memset(&c->req, 0, sizeof(c->req));
 
     return c;
+}
+
+const KlSockAddr *kl_conn_peer_addr(const KlConn *c) {
+    return &c->stream.peer_addr;
 }
 
 static void conn_cleanup_body_reader(KlConn *c) {
@@ -130,15 +160,15 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
     /* TLS shutdown before close(fd) — best-effort close_notify.
      * Retry on WANT_WRITE to flush the close_notify record.
      * Give up on WANT_READ (can't block for peer's close_notify). */
-    if (c->tls && kl_handle_valid(c->fd)) {
-        KlTlsResult sr = c->tls->shutdown(c->tls, c->fd);
+    if (c->tls && kl_handle_valid(c->stream.fd)) {
+        KlTlsResult sr = c->tls->shutdown(c->tls, c->stream.fd);
         for (int i = 0; sr == KL_TLS_WANT_WRITE && i < 4; i++)
-            sr = c->tls->shutdown(c->tls, c->fd);
+            sr = c->tls->shutdown(c->tls, c->stream.fd);
         c->tls->reset(c->tls);
     }
-    if (kl_handle_valid(c->fd)) {
-        kl_sock_close(conn_sp(c), c->fd);
-        c->fd = KL_INVALID_SOCKET;
+    if (kl_handle_valid(c->stream.fd)) {
+        kl_sock_close(conn_sp(c), c->stream.fd);
+        c->stream.fd = KL_INVALID_SOCKET;
     }
     conn_cleanup_body_reader(c);
     if (c->parser) {
@@ -169,15 +199,15 @@ void kl_conn_pool_free(KlConnPool *pool) {
                 pool->conns[i].req.body_reader = NULL;
             }
             if (pool->conns[i].tls && pool->conns[i].tls->shutdown &&
-                kl_handle_valid(pool->conns[i].fd)) {
+                kl_handle_valid(pool->conns[i].stream.fd)) {
                 KlTlsResult sr = pool->conns[i].tls->shutdown(
-                    pool->conns[i].tls, pool->conns[i].fd);
+                    pool->conns[i].tls, pool->conns[i].stream.fd);
                 for (int j = 0; sr == KL_TLS_WANT_WRITE && j < 4; j++)
                     sr = pool->conns[i].tls->shutdown(
-                        pool->conns[i].tls, pool->conns[i].fd);
+                        pool->conns[i].tls, pool->conns[i].stream.fd);
             }
-            if (kl_handle_valid(pool->conns[i].fd)) {
-                kl_sock_close(conn_sp(&pool->conns[i]), pool->conns[i].fd);
+            if (kl_handle_valid(pool->conns[i].stream.fd)) {
+                kl_sock_close(conn_sp(&pool->conns[i]), pool->conns[i].stream.fd);
             }
             if (pool->conns[i].parser) {
                 pool->conns[i].parser->destroy(pool->conns[i].parser);
@@ -188,9 +218,13 @@ void kl_conn_pool_free(KlConnPool *pool) {
             if (pool->conns[i].res.hdr_buf) {
                 kl_response_free(&pool->conns[i].res);
             }
-            if (pool->conns[i].read_buf) {
-                kl_free(pool->alloc, pool->conns[i].read_buf,
-                        pool->conns[i].read_cap);
+            if (pool->conns[i].stream.read_buf) {
+                kl_free(pool->alloc, pool->conns[i].stream.read_buf,
+                        pool->conns[i].stream.read_cap);
+            }
+            if (pool->conns[i].comp_cipher) {   /* Phase-A interim completion TLS scratch */
+                kl_free(pool->alloc, pool->conns[i].comp_cipher,
+                        pool->conns[i].comp_cipher_cap);
             }
         }
         kl_free(pool->alloc, pool->conns,
@@ -223,9 +257,9 @@ static int conn_init_response(KlConn *c) {
         if (kl_response_init(&c->res, c->res.alloc) < 0)
             return -1;
     }
-    c->res.conn_fd = c->fd;
+    c->res.conn_fd = c->stream.fd;
     c->res.tls = c->tls;
-    c->res.ctx = c->ctx;   /* socket provider for writev/sendfile (ctx->sockets) */
+    c->res.ctx = c->stream.ctx;   /* socket provider for writev/sendfile (ctx->sockets) */
     c->res.keep_alive = c->req.keep_alive;
     c->res.head_request = (c->req.method_len == 4 &&
                            memcmp(c->req.method, "HEAD", 4) == 0);
@@ -339,7 +373,7 @@ KlConnState kl_conn_on_handshake(KlConn *c) {
      * Idempotent — a pointer store the backend consults on the readiness path. */
     if (c->tls->set_socket_provider)
         c->tls->set_socket_provider(c->tls, conn_sp(c));
-    KlTlsResult r = c->tls->handshake(c->tls, c->fd);
+    KlTlsResult r = c->tls->handshake(c->tls, c->stream.fd);
     c->last_active_ms = kl_monotonic_ms();
     switch (r) {
         case KL_TLS_OK:
@@ -378,10 +412,10 @@ int kl_conn_read_proxy_header(KlConn *c) {
     uint8_t buf[KL_PROXY_HEADER_MAX];
     ssize_t n;
     do {
-        n = kl_sock_recv_peek(conn_sp(c), c->fd, buf, sizeof(buf));
-    } while (n < 0 && kl_sock_io_status(conn_sp(c)) == KL_IO_INTERRUPTED);
+        n = kl_stream_recv_peek(&c->stream, buf, sizeof(buf));
+    } while (n < 0 && kl_stream_io_status(&c->stream) == KL_IO_INTERRUPTED);
     if (n < 0)
-        return (kl_sock_io_status(conn_sp(c)) == KL_IO_WOULD_BLOCK) ? 0 : -1;
+        return (kl_stream_io_status(&c->stream) == KL_IO_WOULD_BLOCK) ? 0 : -1;
     if (n == 0)
         return -1;   /* peer closed before sending a header */
 
@@ -408,14 +442,14 @@ int kl_conn_read_proxy_header(KlConn *c) {
     while (left > 0) {
         size_t want = left < sizeof(buf) ? left : sizeof(buf);
         ssize_t rd;
-        rd = kl_sock_recv(conn_sp(c), c->fd, buf, want);
+        rd = kl_stream_recv(&c->stream, buf, want);
         if (rd <= 0)
             return -1;
         left -= (size_t)rd;
     }
 
     if (kl_sockaddr_family(&peer) != KL_AF_UNSPEC) {
-        c->peer_addr = peer;
+        c->stream.peer_addr = peer;
         c->peer_source = KL_PEER_PROXY;
     }
     /* LOCAL/UNKNOWN (KL_AF_UNSPEC): keep the socket address. */
@@ -424,7 +458,7 @@ int kl_conn_read_proxy_header(KlConn *c) {
 
 /* Model-blind PROXY-header ingest for the completion path: parse a PROXY header from bytes
  * already received into read_buf[0..len] (an overlapped recv, not a socket peek — the readiness
- * counterpart above peeks + consumes on the socket). On a real header sets c->peer_addr as
+ * counterpart above peeks + consumes on the socket). On a real header sets c->stream.peer_addr as
  * KL_PEER_PROXY. Returns the number of leading header bytes to consume (0 = not a PROXY header,
  * proceed with all bytes as HTTP/TLS), -1 on malformed/oversized, or -2 if more bytes are needed
  * (the caller posts another recv). */
@@ -433,7 +467,7 @@ int kl_conn_ingest_proxy(KlConn *c, size_t len) {
     size_t consumed = 0;
     const KlProxyHooks *ph = kl_proxy_hooks();
     if (!ph || !ph->parse) return 0;   /* PROXY module not linked — no header */
-    KlProxyResult r = ph->parse((const uint8_t *)c->read_buf, len,
+    KlProxyResult r = ph->parse((const uint8_t *)c->stream.read_buf, len,
                                 &consumed, &peer);
     switch (r) {
         case KL_PROXY_NEED_MORE:
@@ -446,7 +480,7 @@ int kl_conn_ingest_proxy(KlConn *c, size_t len) {
             return 0;   /* not a PROXY header — proceed with all buffered bytes */
         case KL_PROXY_OK:
             if (kl_sockaddr_family(&peer) != KL_AF_UNSPEC) {
-                c->peer_addr = peer;
+                c->stream.peer_addr = peer;
                 c->peer_source = KL_PEER_PROXY;
             }
             return (int)consumed;
@@ -460,13 +494,13 @@ int kl_conn_ingest_proxy(KlConn *c, size_t len) {
  * char (\r, :, ?, space) that is never read again post-parse.
  */
 static void conn_null_terminate_headers(KlConn *c) {
-    c->read_buf[(size_t)(c->req.method - c->read_buf) + c->req.method_len] = '\0';
-    c->read_buf[(size_t)(c->req.path - c->read_buf) + c->req.path_len] = '\0';
+    c->stream.read_buf[(size_t)(c->req.method - c->stream.read_buf) + c->req.method_len] = '\0';
+    c->stream.read_buf[(size_t)(c->req.path - c->stream.read_buf) + c->req.path_len] = '\0';
     if (c->req.query)
-        c->read_buf[(size_t)(c->req.query - c->read_buf) + c->req.query_len] = '\0';
+        c->stream.read_buf[(size_t)(c->req.query - c->stream.read_buf) + c->req.query_len] = '\0';
     for (int i = 0; i < c->req.num_headers; i++) {
-        c->read_buf[(size_t)(c->req.headers[i].name - c->read_buf) + c->req.headers[i].name_len] = '\0';
-        c->read_buf[(size_t)(c->req.headers[i].value - c->read_buf) + c->req.headers[i].value_len] = '\0';
+        c->stream.read_buf[(size_t)(c->req.headers[i].name - c->stream.read_buf) + c->req.headers[i].name_len] = '\0';
+        c->stream.read_buf[(size_t)(c->req.headers[i].value - c->stream.read_buf) + c->req.headers[i].value_len] = '\0';
     }
 }
 
@@ -545,7 +579,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
     if (has_body && c->route && c->route->body_reader) {
         /* Create body reader — factory can inspect headers */
         KlBodyReader *br = c->route->body_reader(
-            c->alloc, &c->req, c->route->user_data);
+            c->stream.alloc, &c->req, c->route->user_data);
         if (!br) {
             best_effort_conn_write(c, kl_415_response,
                         sizeof(kl_415_response) - 1);
@@ -678,7 +712,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
                 return s;
         }
 
-        c->read_len = 0;
+        c->stream.read_len = 0;
         c->body_start_ms = kl_monotonic_ms();
         c->state = KL_CONN_READING_BODY;
         return c->state;
@@ -743,7 +777,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
             }
         }
 
-        c->read_len = 0;
+        c->stream.read_len = 0;
         c->body_start_ms = kl_monotonic_ms();
         c->state = KL_CONN_READING_BODY;
         return c->state;
@@ -757,44 +791,44 @@ KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
         int hdr_drains = 0;
 read_more_headers: ;
         /* Read available data */
-        size_t space = c->read_cap - c->read_len;
+        size_t space = c->stream.read_cap - c->stream.read_len;
         if (space == 0) {
-            if (c->read_cap >= c->max_header_size) {
+            if (c->stream.read_cap >= c->max_header_size) {
                 best_effort_conn_write(c, kl_431_response,
                                        sizeof(kl_431_response) - 1);
                 c->state = KL_CONN_CLOSED;
                 return c->state;
             }
-            size_t new_cap = c->read_cap * 2;
+            size_t new_cap = c->stream.read_cap * 2;
             if (new_cap > c->max_header_size)
                 new_cap = c->max_header_size;
-            if (new_cap < c->read_cap || new_cap > SIZE_MAX / 2) {
+            if (new_cap < c->stream.read_cap || new_cap > SIZE_MAX / 2) {
                 best_effort_conn_write(c, kl_431_response,
                                        sizeof(kl_431_response) - 1);
                 c->state = KL_CONN_CLOSED;
                 return c->state;
             }
-            char *nb = kl_realloc(c->alloc, c->read_buf,
-                                   c->read_cap, new_cap);
+            char *nb = kl_realloc(c->stream.alloc, c->stream.read_buf,
+                                   c->stream.read_cap, new_cap);
             if (!nb) {
                 best_effort_conn_write(c, kl_431_response,
                                        sizeof(kl_431_response) - 1);
                 c->state = KL_CONN_CLOSED;
                 return c->state;
             }
-            c->read_buf = nb;
-            c->read_cap = new_cap;
+            c->stream.read_buf = nb;
+            c->stream.read_cap = new_cap;
             c->parser->reset(c->parser);
             memset(&c->req, 0, sizeof(c->req));
-            space = c->read_cap - c->read_len;
+            space = c->stream.read_cap - c->stream.read_len;
         }
 
-        ssize_t nr = conn_read(c, c->read_buf + c->read_len, space);
+        ssize_t nr = conn_read(c, c->stream.read_buf + c->stream.read_len, space);
         if (nr <= 0) {
             c->state = KL_CONN_CLOSED;
             return c->state;
         }
-        c->read_len += (size_t)nr;
+        c->stream.read_len += (size_t)nr;
 
         /* HTTP/2 connection preface detection (before HTTP/1.1 parser) */
         if (c->h2_config != NULL) {
@@ -803,8 +837,8 @@ read_more_headers: ;
              * preface is compared with explicit length 24 below. */
             static const char h2_preface[] =
                 "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-            if (c->read_len >= 24) {
-                if (memcmp(c->read_buf, h2_preface, 24) == 0) {
+            if (c->stream.read_len >= 24) {
+                if (memcmp(c->stream.read_buf, h2_preface, 24) == 0) {
                     /* Hand the session the FULL preface (magic included) — the
                      * session's HTTP/2 engine consumes the client connection
                      * preface itself, matching the ALPN-h2 and h2c-Upgrade paths
@@ -814,11 +848,11 @@ read_more_headers: ;
                         return c->state;   /* HTTP/2 not linked — stay HTTP/1.1 */
                     c->state = (KlConnState)h2hp->upgrade(
                         c, router, c->h2_config,
-                        c->read_buf, c->read_len);
+                        c->stream.read_buf, c->stream.read_len);
                     return c->state;
                 }
                 /* Not a preface — fall through to HTTP/1.1 parser */
-            } else if (memcmp(c->read_buf, h2_preface, c->read_len) == 0) {
+            } else if (memcmp(c->stream.read_buf, h2_preface, c->stream.read_len) == 0) {
                 /* Partial preface match — wait for more data */
                 return KL_CONN_READING;
             }
@@ -827,7 +861,7 @@ read_more_headers: ;
         /* Try parsing */
         size_t consumed = 0;
         KlParseResult pr = c->parser->parse(c->parser, &c->req,
-                                             c->read_buf, c->read_len,
+                                             c->stream.read_buf, c->stream.read_len,
                                              &consumed);
 
         if (pr == KL_PARSE_INCOMPLETE) {
@@ -844,8 +878,8 @@ read_more_headers: ;
 
         if (pr == KL_PARSE_HEADERS_OK) {
             return conn_dispatch_request(c, router,
-                                          c->read_buf + consumed,
-                                          c->read_len - consumed);
+                                          c->stream.read_buf + consumed,
+                                          c->stream.read_len - consumed);
         }
 
         if (pr == KL_PARSE_OK) {
@@ -861,7 +895,7 @@ read_more_body: ;
         /* Transport: sliding window read into the start of the buffer, then feed
          * the model-blind body core. On TLS, drain buffered records before
          * re-arming (the socket won't signal readable again). */
-        ssize_t nr = conn_read(c, c->read_buf, c->read_cap);
+        ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
         if (nr <= 0) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);
@@ -885,13 +919,13 @@ static KlConnState conn_keepalive_reset(KlConn *c) {
     kl_response_reset(&c->res);
     c->parser->reset(c->parser);
     memset(&c->req, 0, sizeof(c->req));
-    c->read_len = 0;
-    if (c->read_cap > KL_READ_BUF_SIZE) {
-        char *shrunk = kl_realloc(c->alloc, c->read_buf,
-                                   c->read_cap, KL_READ_BUF_SIZE);
+    c->stream.read_len = 0;
+    if (c->stream.read_cap > KL_READ_BUF_SIZE) {
+        char *shrunk = kl_realloc(c->stream.alloc, c->stream.read_buf,
+                                   c->stream.read_cap, KL_READ_BUF_SIZE);
         if (shrunk) {
-            c->read_buf = shrunk;
-            c->read_cap = KL_READ_BUF_SIZE;
+            c->stream.read_buf = shrunk;
+            c->stream.read_cap = KL_READ_BUF_SIZE;
         }
     }
     c->hdr_sent = 0;
@@ -922,22 +956,22 @@ static KlConnState conn_file_submit_read(KlConn *c) {
         return conn_send_complete(c);
 
     size_t remaining = (size_t)(c->res.file_size - c->res.file_offset);
-    size_t to_read = remaining < c->read_cap ? remaining : c->read_cap;
+    size_t to_read = remaining < c->stream.read_cap ? remaining : c->stream.read_cap;
 
     /* Try zero-copy splice first (non-TLS only, buf=NULL) */
     if (!c->tls &&
         c->file_io->submit(c->file_io, c->res.file_fd, NULL,
                             to_read, c->res.file_offset,
-                            c->fd, c) == 0) {
+                            c->stream.fd, c) == 0) {
         c->file_io_phase = FILE_IO_READING;
         c->state = KL_CONN_SENDING;
         return c->state;
     }
 
     /* Fallback: async read into buffer */
-    if (c->file_io->submit(c->file_io, c->res.file_fd, c->read_buf,
+    if (c->file_io->submit(c->file_io, c->res.file_fd, c->stream.read_buf,
                             to_read, c->res.file_offset,
-                            c->fd, c) < 0) {
+                            c->stream.fd, c) < 0) {
         c->file_io_phase = FILE_IO_IDLE;
         c->state = KL_CONN_CLOSED;
         return c->state;
@@ -950,10 +984,10 @@ static KlConnState conn_file_submit_read(KlConn *c) {
 
 static KlConnState conn_file_flush(KlConn *c) {
     while (c->file_io_sent < c->file_io_len) {
-        ssize_t nw = kl_sock_send(conn_sp(c), c->fd, c->read_buf + c->file_io_sent,
-                                  c->file_io_len - c->file_io_sent);
+        ssize_t nw = kl_stream_send(&c->stream, c->stream.read_buf + c->file_io_sent,
+                                    c->file_io_len - c->file_io_sent);
         if (nw < 0) {
-            KlIoStatus st = kl_sock_io_status(conn_sp(c));
+            KlIoStatus st = kl_stream_io_status(&c->stream);
             if (st == KL_IO_WOULD_BLOCK) {
                 c->state = KL_CONN_SENDING;
                 return c->state;  /* wait for WRITE event */
@@ -1058,7 +1092,7 @@ KlConnState kl_conn_run_post_body(KlConn *c, KlRouter *router) {
  * same core, no event model leaked in. */
 KlConnState kl_conn_ingest_body(KlConn *c, size_t nread) {
     if (c->req.chunked) {
-        int rc = kl_chunked_decode(&c->chunked_dec, c->read_buf, nread,
+        int rc = kl_chunked_decode(&c->chunked_dec, c->stream.read_buf, nread,
                                    c->req.body_reader);
         if (rc < 0) {
             if (c->req.body_reader)
@@ -1108,7 +1142,7 @@ KlConnState kl_conn_ingest_body(KlConn *c, size_t nread) {
     /* Content-Length body — parser path */
     size_t consumed = 0;
     KlParseResult pr = c->parser->parse(c->parser, &c->req,
-                                        c->read_buf, nread, &consumed);
+                                        c->stream.read_buf, nread, &consumed);
     if (pr == KL_PARSE_ERROR) {
         if (c->req.body_reader)
             c->req.body_reader->on_error(c->req.body_reader);

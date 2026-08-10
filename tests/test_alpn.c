@@ -89,8 +89,8 @@ static KlConnState ta_handshake_with_alpn(KlConn *conn, KlH2ServerConfig *h2cfg,
                                           int pfd[2], const char *alpn) {
     memset(conn, 0, sizeof(*conn));
     if (kl_test_socketpair(pfd) != 0) return KL_CONN_CLOSED;
-    conn->fd = pfd[1];
-    conn->alloc = &ta_alloc;
+    conn->stream.fd = pfd[1];
+    conn->stream.alloc = &ta_alloc;
     conn->router = &ta_router;
     conn->h2_config = h2cfg;
     conn->tls = mock_tls_create(NULL, &ta_alloc);
@@ -180,7 +180,7 @@ UTEST(alpn, http2_request_uses_shared_rest_layer) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
     KlConn conn; memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1]; conn.alloc = &ta_alloc;
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &ta_alloc;
     int up = kl_h2_server_upgrade(&conn, &ta_router, &h2cfg, NULL, 0);
     ASSERT_EQ(up, (int)KL_CONN_HTTP2);
     ASSERT_TRUE(ta_cap != NULL);

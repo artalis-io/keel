@@ -42,15 +42,16 @@ static void async_handle_sending_stream(KlClient *c);
 static void async_handle_proxy_connecting(KlClient *c);
 static void async_handle_proxy_handshake(KlClient *c);
 static int  start_connect(KlClient *c, const KlSockAddr *addr);
-/* Happy Eyeballs helpers (defined below start_connect) */
+/* Happy Eyeballs via KlConnectOp (6C) — hooks + entry-point wrappers defined below start_connect */
 static void he_proceed_after_connect(KlClient *c);
-static void he_start_next(KlClient *c);
 static void he_win(KlClient *c, KlSocketHandle fd);
 static void he_on_writable(KlClient *c, KlSocketHandle fd);
-static void he_close_attempts(KlClient *c, KlSocketHandle keep_fd);
+static void he_on_connect_result(KlClient *c, KlSocketHandle fd, KlEventMask ready);
 static void he_cancel_timers(KlClient *c);
 static void he_on_deadline(void *user_data);
 static void he_on_delay(void *user_data);
+static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
+                          int error, void *user_data);
 
 /* ── Build CONNECT request into heap buffer ──────────────────────── */
 
@@ -156,9 +157,16 @@ static int start_connect(KlClient *c, const KlSockAddr *addr)
     return 0;
 }
 
-/* ── Happy Eyeballs — racing connect over the resolved list (RFC 8305) ─── */
+/* ── Happy Eyeballs via KlConnectOp — racing connect over the resolved list (RFC 8305) ── 6C ──
+ * KlConnectOp (connect_op.c) owns the resolve + racing cursor + attempt-delay stagger + winner
+ * selection + loser cancellation + terminal-once + confirmed detachment. The client provides the
+ * adapter hooks below and drives the on_* entry points from the resolver callback, the connect-
+ * writable event, and the delay timer. The overall request DEADLINE stays CLIENT-owned (it must
+ * outlive the connect terminal to bound the post-connect TLS/send/recv), so it is not a KlConnectOp
+ * timer; only the Connection Attempt Delay is. The post-connect path is entered via he_win. */
 
-/* Cancel the Connection Attempt Delay + overall deadline timers (idempotent). */
+/* Cancel the (client-owned) overall deadline timer. The Connection Attempt Delay is a KlConnectOp
+ * timer disarmed via cli_co_cancel_delay at the connect terminal; dropped defensively here too. */
 static void he_cancel_timers(KlClient *c)
 {
     if (c->conn_delay_timer >= 0) {
@@ -171,189 +179,243 @@ static void he_cancel_timers(KlClient *c)
     }
 }
 
-/* Close every active racing attempt except keep_fd (the winner, or -1 for all). */
-static void he_close_attempts(KlClient *c, KlSocketHandle keep_fd)
+/* Map a racing fd back to its address index (the client owns the idx->fd map). -1 if not found. */
+static int he_idx_of_fd(const KlClient *c, KlSocketHandle fd)
 {
-    for (int i = 0; i < c->conn_next; i++) {
-        if (c->conn_attempts[i].active && c->conn_attempts[i].fd != keep_fd) {
-            client_drop_connect_fd(c, c->conn_attempts[i].fd);
-            c->conn_attempts[i].active = 0;
-        }
-    }
-    c->conn_pending = 0;
-}
-
-/* A winner has connected: stop the stagger, drop the losers, adopt its fd, and
- * hand off to the shared post-connect path. The overall deadline stays armed to
- * bound the remaining TLS/send/recv. */
-static void he_win(KlClient *c, KlSocketHandle fd)
-{
-    if (c->conn_delay_timer >= 0) {
-        kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
-        c->conn_delay_timer = -1;
-    }
-    /* Mark the winner inactive so he_close_attempts won't touch its fd. */
-    for (int i = 0; i < c->conn_next; i++)
+    for (int i = 0; i < c->conn_addrs.naddrs; i++)
         if (c->conn_attempts[i].active && c->conn_attempts[i].fd == fd)
-            c->conn_attempts[i].active = 0;
-    he_close_attempts(c, fd);
-    c->fd = fd;
-    he_proceed_after_connect(c);
+            return i;
+    return -1;
 }
 
-/* Arm the Connection Attempt Delay to stagger the next address, if any remain. */
-static void he_arm_delay(KlClient *c)
+/* ── KlConnectOp adapter hooks (ctx = the KlClient) ───────────────────────────────────────────── */
+
+/* Begin name resolution: kick the (already-selected) resolver. dns_resolved drives on_resolved/
+ * on_resolve_failed — possibly INLINE for a sync-completion-capable resolver, in which case the op
+ * has already advanced past RESOLVING and the returned req is moot. If resolve() could NOT start
+ * (returns NULL, no inline completion), flag it so cli_co_on_done suppresses the request callback
+ * for the resulting terminal FAILED — the setup then frees the client and returns NULL, preserving
+ * the "no callback on a start failure" contract while the op still retires cleanly (terminal +
+ * detach). */
+static int cli_co_start_resolve(void *ctx)
 {
-    if (c->conn_delay_timer >= 0) {
-        kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
-        c->conn_delay_timer = -1;
-    }
-    if (c->state == KL_CLIENT_CONNECTING && c->conn_next < c->conn_addrs.naddrs)
-        c->conn_delay_timer = kl_timer_add(c->ev_ctx,
-                                           (uint64_t)c->connect_delay_ms,
-                                           he_on_delay, c);
+    KlClient *c = ctx;
+    KlResolveReq *rq = c->resolver->resolve(c->resolver, c->ev_ctx,
+                                            c->resolve_host, c->resolve_port,
+                                            dns_resolved, c);
+    if (kl_connect_op_state(&c->connect_op) != KL_CONNECT_OP_STATE_RESOLVING)
+        return 0;                     /* dns_resolved ran inline — op already advanced */
+    c->resolve_req = rq;
+    if (!rq) { c->connect_start_failed = 1; return -1; }   /* → terminal FAILED, callback suppressed */
+    return 0;
 }
 
-/* Start a nonblocking connect to address index idx. Returns 0 if an attempt is
- * now in flight (or already won), -1 on a hard local failure (try the next). */
-static int he_new_attempt(KlClient *c, int idx)
+static void cli_co_cancel_resolve(void *ctx)
 {
+    KlClient *c = ctx;
+    if (c->resolve_req && c->resolver && c->resolver->cancel)
+        c->resolver->cancel(c->resolve_req);
+    c->resolve_req = NULL;
+    /* KEEL resolvers cancel by freeing the request and do NOT then invoke done_fn — so the machine
+     * would never see the resolve retire. Report it synchronously now (the op is already terminal
+     * when this hook runs, so this just clears resolve_inflight; reentrancy is guarded). */
+    kl_connect_op_on_resolve_failed(&c->connect_op, KL_ERR_DNS);
+}
+
+/* Start one nonblocking connect to conn_addrs.addrs[idx]. 0 = in flight (or decided inline),
+ * -1 = hard local failure (*out_err set; advance to the next address). */
+static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
+{
+    KlClient *c = ctx;
     const KlSockAddr *sa = &c->conn_addrs.addrs[idx];
     int fam = (kl_sockaddr_family(sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
 
-    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, fam, c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
-    if (!kl_handle_valid(fd))
-        return -1;
-
+    KlSocketHandle fd = kl_sock_socket(c->ev_ctx->sockets, fam,
+                                       c->conn_addrs.ai_socktype, c->conn_addrs.ai_protocol);
+    if (!kl_handle_valid(fd)) { *out_err = KL_ERR_CONNECT; return -1; }
     kl_sock_set_nosigpipe(c->ev_ctx->sockets, fd);
     if (kl_sock_set_nonblocking(c->ev_ctx->sockets, fd) < 0) {
         kl_sock_close(c->ev_ctx->sockets, fd);
+        *out_err = KL_ERR_CONNECT;
         return -1;
     }
 
-    /* Completion loop: post the connect over the completion axis. Several client connect
-     * ops can be outstanding at once (Happy Eyeballs races them natively); the first
-     * KL_COMP_CONNECT that reports connected wins (he_on_connect_result → he_win), losers are
-     * dropped by client_drop_connect_fd. No immediate-success shortcut — the completion always
-     * arrives on a subsequent drain (loopback POLLOUT is ready at once). */
+    /* Completion loop: post the connect over the completion axis (several may race natively). The
+     * completion always arrives on a later drain — no inline-success shortcut. */
     if (client_loop_is_completion(c)) {
         if (client_comp_connect(c, fd, sa) != 0) {
-            c->conn_last_err = KL_ERR_CONNECT;
             kl_sock_close(c->ev_ctx->sockets, fd);
+            *out_err = KL_ERR_CONNECT;
             return -1;
         }
         c->conn_attempts[idx].fd = fd;
         c->conn_attempts[idx].active = 1;
-        c->conn_pending++;
         return 0;
     }
 
     int rc = kl_sock_connect(c->ev_ctx->sockets, fd, sa);
     if (rc < 0 && kl_sock_io_status(c->ev_ctx->sockets) != KL_IO_PENDING) {
-        c->conn_last_err = KL_ERR_CONNECT;
         kl_sock_close(c->ev_ctx->sockets, fd);
+        *out_err = KL_ERR_CONNECT;
         return -1;
     }
-
     if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
         kl_sock_close(c->ev_ctx->sockets, fd);
+        *out_err = KL_ERR_CONNECT;
         return -1;
     }
-
     c->conn_attempts[idx].fd = fd;
     c->conn_attempts[idx].active = 1;
-    c->conn_pending++;
-
-    if (rc == 0)            /* connected immediately (e.g. loopback) */
-        he_win(c, fd);
+    if (rc == 0)   /* connected immediately (e.g. loopback) — decide this attempt inline */
+        kl_connect_op_on_attempt_connected(&c->connect_op, idx, fd);
     return 0;
 }
 
-/* Advance the cursor and start the next viable address; skip hard local
- * failures without consuming the delay. Complete with an error when the list is
- * exhausted and nothing is pending. */
-static void he_start_next(KlClient *c)
+/* Abort an in-flight (not-yet-connected) racing attempt: drop its socket, then REPORT the retirement
+ * to the machine. The provider op + fd are removed synchronously here; kl_connect_op_on_attempt_
+ * failed clears attempt_active[idx] + pending so the op can reach confirmed detachment (the machine
+ * never observes the drop otherwise). Reentrancy is guarded — this hook runs inside the machine's
+ * terminal/cancel dispatch. */
+static void cli_co_cancel_attempt(void *ctx, int idx)
 {
-    while (c->state == KL_CLIENT_CONNECTING &&
-           c->conn_next < c->conn_addrs.naddrs) {
-        int idx = c->conn_next++;
-        if (he_new_attempt(c, idx) == 0) {
-            he_arm_delay(c);   /* schedule the next staggered attempt */
-            return;
-        }
+    KlClient *c = ctx;
+    if (c->conn_attempts[idx].active) {
+        client_drop_connect_fd(c, c->conn_attempts[idx].fd);
+        c->conn_attempts[idx].active = 0;
+        c->conn_attempts[idx].fd = KL_INVALID_SOCKET;
     }
-    if (c->state == KL_CLIENT_CONNECTING && c->conn_pending == 0) {
-        c->error = (c->conn_last_err != KL_ERR_NONE) ? c->conn_last_err
-                                                     : KL_ERR_CONNECT;
-        async_complete_error(c);
+    kl_connect_op_on_attempt_failed(&c->connect_op, idx, KL_ERR_CONNECT);
+}
+
+/* Dispose a connected non-winner descriptor (straggler / out-of-range / duplicate). */
+static void cli_co_dispose_fd(void *ctx, KlSocketHandle fd)
+{
+    KlClient *c = ctx;
+    int idx = he_idx_of_fd(c, fd);
+    if (idx >= 0) { c->conn_attempts[idx].active = 0; c->conn_attempts[idx].fd = KL_INVALID_SOCKET; }
+    client_drop_connect_fd(c, fd);
+}
+
+/* Arm / disarm the Connection Attempt Delay (RFC 8305 §5 stagger). arm returns -1 (no timer) when
+ * the delay is 0, so the machine fast-starts the next address without staggering. */
+static int cli_co_arm_delay(void *ctx)
+{
+    KlClient *c = ctx;
+    if (c->connect_delay_ms <= 0) return -1;
+    c->conn_delay_timer = kl_timer_add(c->ev_ctx, (uint64_t)c->connect_delay_ms, he_on_delay, c);
+    return (c->conn_delay_timer >= 0) ? 0 : -1;
+}
+static void cli_co_cancel_delay(void *ctx)
+{
+    KlClient *c = ctx;
+    if (c->conn_delay_timer >= 0) {
+        kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
+        c->conn_delay_timer = -1;
     }
 }
 
-/* Connection Attempt Delay fired: start the next address if we're still racing. */
+/* A winner has connected: adopt its fd + enter the shared post-connect path. The losers are
+ * cancelled by the machine (co_request_cancels → cli_co_cancel_attempt) right after this returns;
+ * the overall deadline stays armed (client-owned) to bound the remaining TLS/send/recv. */
+static void he_win(KlClient *c, KlSocketHandle fd)
+{
+    int idx = he_idx_of_fd(c, fd);
+    if (idx >= 0) { c->conn_attempts[idx].active = 0; c->conn_attempts[idx].fd = KL_INVALID_SOCKET; }
+    c->fd = fd;
+    he_proceed_after_connect(c);
+}
+
+/* Terminal: SUCCESS adopts the winner via he_win; FAILED completes the request with the error.
+ * CANCELLED is the client's own doing (deadline / teardown) and completes separately. */
+static void cli_co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd, int error)
+{
+    KlClient *c = ctx;
+    if (result == KL_CONNECT_SUCCESS) {
+        he_win(c, fd);
+    } else if (result == KL_CONNECT_FAILED) {
+        /* A resolver-start failure (resolve()==NULL) retires the op cleanly but must NOT fire the
+         * request callback — the setup detects connect_start_failed and returns NULL instead. */
+        if (c->connect_start_failed)
+            return;
+        c->error = error ? (KlError)error : KL_ERR_CONNECT;
+        async_complete_error(c);
+    }
+    /* CANCELLED: the client itself requested the cancel (deadline / teardown) and completes
+     * separately — nothing to do here. */
+}
+
+static void cli_co_on_detach(void *ctx)
+{
+    KlClient *c = ctx;
+    c->conn_racing = 0;   /* the connect op is fully retired — reusable */
+}
+
+static const KlConnectOpHooks CLI_CONNECT_HOOKS = {
+    .start_resolve  = cli_co_start_resolve,
+    .cancel_resolve = cli_co_cancel_resolve,
+    .start_attempt  = cli_co_start_attempt,
+    .cancel_attempt = cli_co_cancel_attempt,
+    .dispose_fd     = cli_co_dispose_fd,
+    .arm_delay      = cli_co_arm_delay,
+    .cancel_delay   = cli_co_cancel_delay,
+    .on_done        = cli_co_on_done,
+    .on_detach      = cli_co_on_detach,
+};
+
+/* A racing socket became writable: SO_ERROR==0 wins the race, else it failed. Map the fd to its
+ * attempt index and drive the connect op; the client owns the failed socket, so drop it before
+ * reporting the failure (the machine does not dispose a not-yet-connected attempt). */
+static void he_on_writable(KlClient *c, KlSocketHandle fd)
+{
+    int idx = he_idx_of_fd(c, fd);
+    if (idx < 0) return;
+    int err = 0;
+    kl_sock_get_so_error(c->ev_ctx->sockets, fd, &err);
+    if (err == 0) {
+        kl_connect_op_on_attempt_connected(&c->connect_op, idx, fd);
+    } else {
+        c->conn_attempts[idx].active = 0; c->conn_attempts[idx].fd = KL_INVALID_SOCKET;
+        client_drop_connect_fd(c, fd);
+        kl_connect_op_on_attempt_failed(&c->connect_op, idx, KL_ERR_CONNECT);
+    }
+}
+
+/* Completion-loop connect result (LC-0): the backend delivered win/fail in the watcher mask
+ * (KL_EVENT_WRITE = connected) rather than SO_ERROR (io_uring does not preserve it after a failed
+ * IORING_OP_CONNECT). Mirrors he_on_writable's win/fail branch. */
+static void he_on_connect_result(KlClient *c, KlSocketHandle fd, KlEventMask ready)
+{
+    int idx = he_idx_of_fd(c, fd);
+    if (idx < 0) return;
+    if (ready & KL_EVENT_WRITE) {
+        kl_connect_op_on_attempt_connected(&c->connect_op, idx, fd);
+    } else {
+        c->conn_attempts[idx].active = 0; c->conn_attempts[idx].fd = KL_INVALID_SOCKET;
+        client_drop_connect_fd(c, fd);
+        kl_connect_op_on_attempt_failed(&c->connect_op, idx, KL_ERR_CONNECT);
+    }
+}
+
+/* Connection Attempt Delay fired: advance to the next address (the KEEL one-shot timer retired). */
 static void he_on_delay(void *user_data)
 {
     KlClient *c = user_data;
     c->conn_delay_timer = -1;
-    if (c->state == KL_CLIENT_CONNECTING)
-        he_start_next(c);
+    kl_connect_op_on_delay(&c->connect_op);
 }
 
-/* Overall request deadline fired: fail the whole request (covers connect racing
- * and the otherwise-untimed TLS handshake / send / recv). */
+/* Overall request deadline fired: fail the whole request. Cancel the connect op (aborts any racing
+ * attempts once + detaches it) then complete with TIMEOUT. Covers connect racing and the otherwise-
+ * untimed post-connect TLS handshake / send / recv. */
 static void he_on_deadline(void *user_data)
 {
     KlClient *c = user_data;
     c->deadline_timer = -1;
     if (c->state == KL_CLIENT_DONE)
         return;
-    he_close_attempts(c, KL_INVALID_SOCKET);    /* drop any racing sockets */
+    kl_connect_op_cancel(&c->connect_op);   /* drop any racing sockets (idempotent if terminal) */
     c->error = KL_ERR_TIMEOUT;
     async_complete_error(c);
-}
-
-/* One racing attempt failed: drop it, then either fast-start the next address
- * (a failure must not wait out the delay, §5) or complete when all are gone. */
-static void he_fail_attempt(KlClient *c, KlSocketHandle fd)
-{
-    for (int i = 0; i < c->conn_next; i++) {
-        if (c->conn_attempts[i].active && c->conn_attempts[i].fd == fd) {
-            client_drop_connect_fd(c, fd);
-            c->conn_attempts[i].active = 0;
-            c->conn_pending--;
-            break;
-        }
-    }
-    c->conn_last_err = KL_ERR_CONNECT;
-
-    if (c->conn_next < c->conn_addrs.naddrs)
-        he_start_next(c);
-    else if (c->conn_pending == 0) {
-        c->error = c->conn_last_err;
-        async_complete_error(c);
-    }
-}
-
-/* A racing socket became writable: SO_ERROR==0 wins the race, else it failed. */
-static void he_on_writable(KlClient *c, KlSocketHandle fd)
-{
-    int err = 0;
-    kl_sock_get_so_error(c->ev_ctx->sockets, fd, &err);
-    if (err == 0)
-        he_win(c, fd);
-    else
-        he_fail_attempt(c, fd);
-}
-
-/* Completion-loop connect result (LC-0). The backend delivered the connect outcome in the
- * watcher mask (KL_EVENT_WRITE = connected, else failed) rather than via SO_ERROR — io_uring
- * does not preserve SO_ERROR after a failed IORING_OP_CONNECT, so the client trusts the
- * delivered result. Mirrors he_on_writable's win/fail branch. */
-static void he_on_connect_result(KlClient *c, KlSocketHandle fd, KlEventMask ready)
-{
-    if (ready & KL_EVENT_WRITE)
-        he_win(c, fd);
-    else
-        he_fail_attempt(c, fd);
 }
 
 /* ── Async DNS resolve callback ──────────────────────────────────── */
@@ -374,23 +436,25 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
     c->resolve_req = NULL;
 
     if (error || !result || result->naddrs < 1) {
-        c->error = KL_ERR_DNS;
-        async_complete_error(c);
+        kl_connect_op_on_resolve_failed(&c->connect_op, KL_ERR_DNS);   /* → terminal FAILED */
         return;
     }
 
-    /* Copy the whole (family-interleaved, preferred-first) list and race it. */
+    /* Copy the whole (family-interleaved, preferred-first) list; KlConnectOp races it by index. */
     c->conn_addrs = *result;
     if (c->conn_addrs.naddrs > KL_RESOLVE_MAX_ADDRS)
         c->conn_addrs.naddrs = KL_RESOLVE_MAX_ADDRS;
-    c->conn_next = 0;
-    c->conn_pending = 0;
+    for (int i = 0; i < KL_RESOLVE_MAX_ADDRS; i++) {
+        c->conn_attempts[i].active = 0;
+        c->conn_attempts[i].fd = KL_INVALID_SOCKET;
+    }
     c->conn_racing = 1;
-    c->conn_last_err = KL_ERR_NONE;
     c->state = KL_CLIENT_CONNECTING;
 
+    /* Arm the whole-request deadline (client-owned; bounds racing + post-connect), then hand the
+     * address count to the connect op, which drives the racing via the adapter hooks. */
     he_arm_deadline(c);
-    he_start_next(c);
+    kl_connect_op_on_resolved(&c->connect_op, c->conn_addrs.naddrs);
 }
 
 /* Select the resolver for an async request. Precedence: explicit cfg->resolver
@@ -1251,8 +1315,8 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return c;
     }
 
-    /* DNS resolution — resolve proxy host when proxied, target host otherwise */
-    const char *resolve_host = is_proxied ? proxy->host : host_buf;
+    /* DNS resolution — resolve proxy host when proxied, target host otherwise. The host itself is
+     * taken from the persistent c->host_buf / borrowed proxy->host at the connect-op wiring below. */
     int resolve_port = is_proxied ? proxy->port : parsed.port;
 
     /* Async DNS resolver path (explicit, built-in default, or sync name resolution). */
@@ -1261,20 +1325,19 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;
+        /* Persistent host for start_resolve: c->host_buf (already copied above) for the target, or
+         * the borrowed proxy host (valid through the request) when proxied — no dangling local. */
+        c->resolve_host = is_proxied ? proxy->host : c->host_buf;
+        c->resolve_port = resolve_port;
         c->state = KL_CLIENT_RESOLVING;
-        KlResolveReq *rq = resolver->resolve(resolver, ev_ctx,
-                                             resolve_host, resolve_port,
-                                             dns_resolved, c);
-        /* The resolver contract permits synchronous completion: dns_resolved
-         * may have already run inside resolve() — firing on_done (DONE) or
-         * advancing the connect (CONNECTING/…) — and taken ownership of c. In
-         * that case the caller owns c (and frees it via kl_client_free); a NULL
-         * return is NOT a start failure and must not free c out from under
-         * on_done. Only when we are still RESOLVING did resolve() truly defer. */
-        if (c->state != KL_CLIENT_RESOLVING)
-            return c;                 /* rq discarded; resolve_req cleared by dns_resolved */
-        c->resolve_req = rq;
-        if (!c->resolve_req) {
+        /* Drive resolve + Happy Eyeballs via KlConnectOp (6C). kl_connect_op_start runs start_resolve
+         * synchronously (which kicks resolver->resolve); a sync-completion-capable resolver may drive
+         * the whole request to terminal inline. init/start are infallible (valid static hook table). */
+        kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
+        kl_connect_op_start(&c->connect_op);
+        if (c->connect_start_failed) {
+            /* resolver->resolve() could not start: the op retired terminal + detached with no user
+             * callback. Free the client and report the start failure as a NULL return (contract). */
             if (res_owned)
                 resolver->destroy(resolver);
             c->resolver = NULL;
@@ -1286,6 +1349,9 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             kl_free(alloc, c, sizeof(KlClient));
             return NULL;
         }
+        /* Otherwise: still RESOLVING (deferred; resolve_req stored by start_resolve) or the resolver
+         * completed inline (op advanced/terminal, possibly firing on_done + taking ownership of c).
+         * Both cases return c — the request is live or already completed via on_done. */
         return c;
     }
 
@@ -1369,15 +1435,11 @@ void kl_client_cancel(KlClient *client)
     if (!client)
         return;
 
-    /* Cancel in-flight DNS resolution */
-    if (client->resolve_req && client->resolver) {
-        client->resolver->cancel(client->resolve_req);
-        client->resolve_req = NULL;
-    }
-
-    /* Cancel Happy Eyeballs racing (timers + any in-flight attempt sockets). */
+    /* Abort the connect op (6C): cancels an in-flight resolve, drops every racing attempt socket
+     * (cli_co_cancel_attempt), and disarms the Connection Attempt Delay — all exactly once. */
+    kl_connect_op_cancel(&client->connect_op);
+    /* The overall request deadline is client-owned (not a connect-op timer) — cancel it here. */
     he_cancel_timers(client);
-    he_close_attempts(client, KL_INVALID_SOCKET);
 
     if (kl_handle_valid(client->fd)) {
         /* Single-fd completion connect still in flight: drop its pending connect op before the
@@ -1599,11 +1661,15 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;
+        c->resolve_host = c->host_buf;   /* persistent copy (set above); no dangling local */
+        c->resolve_port = parsed.port;
         c->state = KL_CLIENT_RESOLVING;
-        c->resolve_req = resolver->resolve(resolver, ev_ctx,
-                                            host_buf, parsed.port,
-                                            dns_resolved, c);
-        if (!c->resolve_req) {
+        /* Drive resolve + Happy Eyeballs via KlConnectOp (6C), same as the non-streaming path:
+         * kl_connect_op_start runs start_resolve (kicks resolver->resolve) synchronously; a
+         * start failure retires cleanly + returns NULL, an inline completion advances the op. */
+        kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
+        kl_connect_op_start(&c->connect_op);
+        if (c->connect_start_failed) {
             if (res_owned)
                 resolver->destroy(resolver);
             c->resolver = NULL;
@@ -1615,7 +1681,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
             kl_free(alloc, c, sizeof(KlClient));
             return NULL;
         }
-        return c;
+        return c;                 /* deferred (RESOLVING) or inline-completed — both return c */
     }
 
     /* Sync DNS fallback (blocking name resolution → KlSockAddr) */

@@ -37,7 +37,6 @@
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
-#include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "sockaddr_native.h"     /* KlSockAddr <-> host sockaddr at the seam boundary */
@@ -50,10 +49,8 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 
-#define KL_PC_CIPHER_SIZE (17u * 1024u)   /* one TLS record + slack (mirrors IOCP) */
-
 typedef enum {
-    PC_ACCEPT, PC_READ, PC_TLS_RECV, PC_WRITE, PC_SENDFILE, PC_UDP_RECV, PC_UDP_SEND,
+    PC_ACCEPT, PC_READ, PC_WRITE, PC_SENDFILE, PC_UDP_RECV, PC_UDP_SEND,
     PC_CONNECT   /* outbound connect (LC-0): real connect()+POLLOUT+SO_ERROR */
 } PcOpType;
 
@@ -63,17 +60,19 @@ typedef struct KlPcOp {
     PcOpType       type;
     KlAllocator   *alloc;
     KlSocketHandle fd;                    /* the descriptor this op polls */
-    KlConn        *conn;                  /* READ / TLS_RECV / WRITE / SENDFILE */
+    KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
     KlUdp         *udp;                   /* UDP_RECV / UDP_SEND */
-    void          *buf;                   /* READ: capture of read_buf+read_len */
-    size_t         buflen;                /* READ: space captured at post time */
+    void          *buf;                   /* READ: caller-chosen receive buffer */
+    size_t         buflen;                /* READ: capacity at post time */
     char          *sendbuf;              /* WRITE/SENDFILE head/UDP_SEND: owned copy */
     size_t         send_total, send_done; /* partial-send tracking */
     int            file_fd;               /* SENDFILE */
     uint64_t       file_count, file_off;  /* SENDFILE: file bytes + progress */
     struct sockaddr_storage dest;         /* UDP_SEND / CONNECT destination */
     socklen_t      dest_len;
-    void          *watcher_udata;         /* CONNECT: the client's tagged KlWatcher */
+    union {
+        void              *watcher_udata;   /* CONNECT: the client's tagged KlWatcher */
+    };
     int            aborted;               /* cancelled (idle timeout) — deliver as error */
 } KlPcOp;
 
@@ -93,7 +92,6 @@ typedef struct {
     KlAllocator   *alloc;
     KlPcOp        *ops;                    /* singly-linked pending-op list */
     KlPcWatch     *watches;                /* registered readiness watches (8e-2) */
-    struct KlServer *server;              /* accept target (set at prime) */
     KlSocketHandle  listen_fd;
     int             primed;
 } KlPcState;
@@ -163,8 +161,7 @@ void kl_pollcomp_ev_close(KlEventLoop *loop) {
     KlPcOp *op = st->ops;
     while (op) {
         KlPcOp *next = op->next;
-        if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total
-                                                                        : KL_PC_CIPHER_SIZE);
+        if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total : 1);
         kl_free(op->alloc, op, sizeof(*op));
         op = next;
     }
@@ -216,56 +213,43 @@ static void pc_op_push(KlPcState *st, KlPcOp *op) {
 
 static void pc_op_free(KlPcOp *op) {
     /* send_total is set to the sendbuf allocation size on every path that allocates one
-     * (PC_TLS_RECV = KL_PC_CIPHER_SIZE; WRITE/SENDFILE/UDP = total, or 1 when total==0 since
-     * the alloc is `total ? total : 1`). Fall back to 1 — NOT KL_PC_CIPHER_SIZE — for a
-     * zero-length send, else a sized custom allocator mis-buckets the freed 1-byte block. */
+     * (WRITE/SENDFILE/UDP = total, or 1 when total==0 since the alloc is `total ? total : 1`).
+     * Fall back to 1 for a zero-length send, else a sized custom allocator mis-buckets the
+     * freed 1-byte block. Receives no longer own a buffer (the caller supplies it). */
     if (op->sendbuf)
         kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total : 1);
     kl_free(op->alloc, op, sizeof(*op));
 }
 
-static KlPcState *pc_state(KlConn *c) { return c->ctx->loop._backend; }
-
-static int pc_comp_post_recv(KlConn *c) {
-    KlPcState *st = pc_state(c);
-    KlPcOp *op = kl_malloc(c->alloc, sizeof(*op));
+/* Raw receive: recv up to `cap` bytes into the caller-supplied `buf` on `stream`. No TLS /
+ * connection-state knowledge — the HTTP adapter chose the buffer. */
+static int pc_comp_post_recv(KlStream *stream, void *buf, size_t cap) {
+    if (!buf || cap == 0) return -1;
+    KlPcState *st = stream->ctx->loop._backend;
+    KlPcOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
-    op->alloc = c->alloc;
-    op->conn = c;
-    op->fd = c->fd;
-
-    if (c->tls && c->state != KL_CONN_PROXY_HEADER) {  /* PROXY header is plaintext, pre-TLS */
-        /* TLS: read ciphertext into a transient buffer; read_buf holds plaintext.
-         * kl_comp_drain feeds this to the engine (feed_input) before completing. */
-        op->type = PC_TLS_RECV;
-        op->send_total = KL_PC_CIPHER_SIZE;   /* reuse send_total as the free size */
-        op->sendbuf = kl_malloc(c->alloc, KL_PC_CIPHER_SIZE);
-        if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
-        op->buf = op->sendbuf;
-        op->buflen = KL_PC_CIPHER_SIZE;
-    } else {
-        size_t space = c->read_cap - c->read_len;
-        if (space == 0) { pc_op_free(op); return -1; }   /* headers overflowed */
-        op->type = PC_READ;
-        op->buf = c->read_buf + c->read_len;
-        op->buflen = space;
-    }
+    op->alloc = stream->alloc;
+    op->stream = stream;
+    op->fd = stream->fd;
+    op->type = PC_READ;
+    op->buf = buf;
+    op->buflen = cap;
     pc_op_push(st, op);
     return 0;
 }
 
-static int pc_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
-    KlPcState *st = pc_state(c);
-    KlPcOp *op = kl_malloc(c->alloc, sizeof(*op));
+static int pc_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total) {
+    KlPcState *st = stream->ctx->loop._backend;
+    KlPcOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = PC_WRITE;
-    op->alloc = c->alloc;
-    op->conn = c;
-    op->fd = c->fd;
+    op->alloc = stream->alloc;
+    op->stream = stream;
+    op->fd = stream->fd;
     op->send_total = total;
-    op->sendbuf = kl_malloc(c->alloc, total ? total : 1);
+    op->sendbuf = kl_malloc(stream->alloc, total ? total : 1);
     if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < iovcnt; i++) {
@@ -278,18 +262,19 @@ static int pc_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t t
 
 static int pc_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlPcState *st = pc_state(c);
-    KlPcOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
+    KlPcState *st = stream->ctx->loop._backend;
+    KlPcOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = PC_SENDFILE;
-    op->alloc = c->alloc;
-    op->conn = c;
-    op->fd = c->fd;
+    op->alloc = stream->alloc;
+    op->stream = stream;
+    op->fd = stream->fd;
     op->file_fd = file_fd;
     op->file_count = count;
     op->send_total = head_total;
-    op->sendbuf = kl_malloc(c->alloc, head_total ? head_total : 1);
+    op->sendbuf = kl_malloc(stream->alloc, head_total ? head_total : 1);
     if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < head_n; i++) {
@@ -301,6 +286,7 @@ static int pc_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
 }
 
 static int pc_comp_post_accept(struct KlServer *s) {
+    if (!s) return -1;
     KlPcState *st = s->ev.loop._backend;
     /* One accept op suffices: on completion the driver refills. Avoid stacking
      * duplicate accept ops on the same listen fd (they would just spin on EAGAIN). */
@@ -379,12 +365,14 @@ static int pc_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
 }
 
 static int pc_comp_prime_accepts(struct KlServer *s) {
+    if (!s) return -1;
     KlPcState *st = s->ev.loop._backend;
-    if (st->primed) return 0;
+    if (st->primed) return 1;              /* setup already done — report the window (6B-3 2b-ii) */
     st->listen_fd = s->listen_fd;
-    st->server = s;
     st->primed = 1;
-    return pc_comp_post_accept(s);
+    /* Post-driven, window 1: latch the listen fd; the completion KlListener posts the single accept
+     * (reserve-before-post backpressure). No accept posted here — the listener arms it. */
+    return 1;
 }
 
 /* Cancel pending ops on `fd`. Server conn ops (idle-timeout sweep): mark aborted so the next
@@ -417,14 +405,18 @@ static int pc_emit_abort(const KlPcOp *op, KlCompletionEvent *ev) {
     memset(ev, 0, sizeof(*ev));
     ev->ok = 0;
     switch (op->type) {
-    case PC_READ: case PC_TLS_RECV:  ev->kind = KL_COMP_READ;  ev->target = op->conn; return 1;
-    case PC_WRITE: case PC_SENDFILE: ev->kind = KL_COMP_WRITE; ev->target = op->conn; return 1;
+    case PC_READ:                    ev->kind = KL_COMP_READ;  ev->target = op->stream; return 1;
+    case PC_WRITE: case PC_SENDFILE: ev->kind = KL_COMP_WRITE; ev->target = op->stream; return 1;
     case PC_UDP_RECV:                ev->kind = KL_COMP_UDP_RECV; ev->target = op->udp; return 1;
     case PC_UDP_SEND:                ev->kind = KL_COMP_UDP_SEND; ev->target = op->udp; return 1;
     case PC_CONNECT:                 /* never reached: cancelled connect ops are freed in
                                       * pc_comp_cancel, not delivered as aborts. */
                                      return 0;
-    case PC_ACCEPT:                  return 0;
+    case PC_ACCEPT:                  /* a cancelled accept (listener close, 6B-3 2b-ii) — deliver
+                                      * ok=0 with no fd so the completion listener retires this
+                                      * posted accept (returns its credit). The op never pre-accepts
+                                      * a socket (accept() runs in pc_complete), so nothing leaks. */
+                                     ev->kind = KL_COMP_ACCEPT; ev->target = NULL; return 1;
     }
     return 0;
 }
@@ -447,23 +439,21 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         if (a < 0) return 0;                 /* EAGAIN/spurious — keep the accept op */
         pc_set_blocking(a);
         ev->kind = KL_COMP_ACCEPT;
+        ev->target = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
         ev->ok = 1;
         ev->accepted_fd = a;
         if (slen > 0)                            /* native → neutral once, at the seam */
             (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&ss, slen);
         return 1;
     }
-    case PC_READ:
-    case PC_TLS_RECV: {
+    case PC_READ: {
         ssize_t n = recv(op->fd, op->buf, op->buflen, 0);
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
             return 0;
         ev->kind = KL_COMP_READ;
-        ev->target = op->conn;
+        ev->target = op->stream;               /* raw bytes landed in the caller's buffer */
         ev->ok = 1;
         ev->bytes = (n > 0) ? (size_t)n : 0;   /* 0/-1 → peer closed; driver closes */
-        if (op->type == PC_TLS_RECV && n > 0 && op->conn->tls->feed_input)
-            op->conn->tls->feed_input(op->conn->tls, op->buf, (size_t)n);
         return 1;
     }
     case PC_WRITE: {
@@ -473,12 +463,12 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
             if (n < 0) {
                 if (errno == EINTR) continue;
                 if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;  /* re-poll */
-                ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 0;
+                ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0;
                 return -1;
             }
             op->send_done += (size_t)n;
         }
-        ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 1;
+        ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 1;
         ev->bytes = op->send_total;
         return 1;
     }
@@ -489,7 +479,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
             if (n < 0) {
                 if (errno == EINTR) continue;
                 if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
-                ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 0;
+                ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0;
                 return -1;
             }
             op->send_done += (size_t)n;
@@ -501,13 +491,13 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
             if (n < 0) {
                 if (errno == EINTR) continue;
                 if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
-                ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 0;
+                ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 0;
                 return -1;
             }
             if (n == 0) break;
             op->file_off = off;
         }
-        ev->kind = KL_COMP_WRITE; ev->target = op->conn; ev->ok = 1;
+        ev->kind = KL_COMP_WRITE; ev->target = op->stream; ev->ok = 1;
         ev->bytes = op->send_total + op->file_count;
         return 1;
     }
@@ -582,7 +572,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
 
 static short pc_poll_events(PcOpType t) {
     switch (t) {
-    case PC_ACCEPT: case PC_READ: case PC_TLS_RECV: case PC_UDP_RECV: return POLLIN;
+    case PC_ACCEPT: case PC_READ: case PC_UDP_RECV: return POLLIN;
     default: return POLLOUT;   /* PC_WRITE / PC_SENDFILE / PC_UDP_SEND */
     }
 }
@@ -683,6 +673,17 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
     return count;
 }
 
+/* Teardown accept-side force-completion (6B-3 2b review). Does NOT reap — the server drives the
+ * drain (kl_comp_run) so every dequeued op gets its normal routing. This only marks each posted
+ * accept aborted, so the next pc_comp_drain's abort pass (pc_emit_abort) emits a KL_COMP_ACCEPT
+ * ok=0 that retires the listener. Synchronous → always succeeds. */
+static int pc_shutdown_accepts(struct KlServer *s) {
+    KlPcState *st = s->ev.loop._backend;
+    for (KlPcOp *o = st->ops; o; o = o->next)
+        if (o->type == PC_ACCEPT) o->aborted = 1;
+    return 0;
+}
+
 /* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
  * Group this backend's completion primitives so the dispatch (completion_dispatch.c)
  * can reach them through a runtime provider (loop->ops->completion, the injected path)
@@ -693,6 +694,7 @@ const KlCompletionOps kl_pollcomp_completion_ops = {
     pc_comp_drain, pc_comp_prime_accepts, pc_comp_post_recv, pc_comp_post_send,
     pc_comp_post_accept, pc_comp_post_sendfile, pc_comp_cancel,
     pc_comp_post_udp_recv, pc_comp_post_udp_send, pc_comp_post_connect,
+    pc_shutdown_accepts,
 };
 
 /* ── Runtime event provider (RC-2) ────────────────────────────────────────

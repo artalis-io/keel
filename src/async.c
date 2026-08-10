@@ -22,7 +22,7 @@ int kl_async_suspend(KlServer *s, KlConn *conn, KlAsyncOp *op) {
     if (conn->state == KL_CONN_SUSPENDED) return -1;
 
     /* Remove client FD from event loop */
-    kl_event_del(&s->ev.loop, conn->fd);
+    kl_event_del(&s->ev.loop, conn->stream.fd);
 
     /* Park the connection */
     conn->state = KL_CONN_SUSPENDED;
@@ -95,10 +95,10 @@ void kl_async_complete(KlServer *s, KlAsyncOp *op) {
 
     /* Re-register FD with appropriate mask */
     if (new_state == KL_CONN_SENDING) {
-        if (kl_event_add(&s->ev.loop, conn->fd, KL_EVENT_WRITE, conn) < 0)
+        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_WRITE, &conn->stream) < 0)
             kl_server_conn_release(s, conn);
     } else if (new_state == KL_CONN_READING) {
-        if (kl_event_add(&s->ev.loop, conn->fd, KL_EVENT_READ, conn) < 0)
+        if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
             kl_server_conn_release(s, conn);
     } else if (new_state == KL_CONN_CLOSED) {
         kl_server_conn_release(s, conn);

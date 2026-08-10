@@ -6,7 +6,8 @@
  * completion backend. The completion-mode TLS server is entirely in the model-blind
  * core (completion_server.c: comp_tls_drive / kl_comp_tls_flush / comp_tls_send_response);
  * the EFI backend supplies only the two documented obligations:
- *   1. post_recv feeds received CIPHERTEXT to tls->feed_input (event_efi.c, S-6),
+ *   1. post_recv does raw transport I/O into the caller-chosen buffer (event_efi.c) — the HTTP
+ *      completion adapter (comp_on_read) feeds received CIPHERTEXT to tls->feed_input,
  *   2. a synchronous send on the accepted socket for kl_comp_tls_flush (efi_sock_send).
  * The response ciphertext rides the same post_send as S-4 (content-agnostic).
  *
@@ -163,8 +164,8 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
     /* Run the completion loop. Each tick primes accepts, drains KL_COMP_ACCEPT →
      * comp_on_accept (which enters KL_CONN_TLS_HANDSHAKE + memory-BIO mode), then the
-     * EFI post_recv feeds ciphertext to feed_input and comp_tls_drive handshakes /
-     * decrypts / responds — all model-blind. The handler prints GO on the first served
+     * EFI post_recv delivers raw ciphertext and the HTTP adapter (comp_on_read) feeds it to
+     * feed_input while comp_tls_drive handshakes / decrypts / responds — all model-blind. The handler prints GO on the first served
      * request; the loop keeps serving (the harness times out QEMU after curl's 200). */
     for (long tick = 0; tick < 100000000L; tick++) {
         if (kl_server_run_completion_loop(&s) < 0) {

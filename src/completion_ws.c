@@ -24,14 +24,14 @@
 void kl_comp_ws_drive(struct KlServer *s, KlConn *c) {
     if (c->tls) {
         for (;;) {
-            ssize_t p = c->tls->read(c->tls, c->fd, c->read_buf, c->read_cap);
+            ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
             if (p < 0) { kl_comp_close(s, c); return; }
             if (p == 0) {                              /* WANT_READ — need the network */
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
                 return;
             }
             KlConnState st = (KlConnState)kl_ws_server_on_readable_data(
-                                 c, (uint8_t *)c->read_buf, (size_t)p);
+                                 c, (uint8_t *)c->stream.read_buf, (size_t)p);
             if (st == KL_CONN_WEBSOCKET && kl_ws_server_drain_pending(c))
                 st = (KlConnState)kl_ws_server_on_writable(c);   /* flush buffered frames */
             if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }   /* ring → socket */
@@ -45,8 +45,8 @@ void kl_comp_ws_drive(struct KlServer *s, KlConn *c) {
     /* Plaintext: the received frame bytes are already in read_buf; the callbacks emit
      * through conn_write (a synchronous blocking send on this loop). */
     KlConnState st = (KlConnState)kl_ws_server_on_readable_data(
-                         c, (uint8_t *)c->read_buf, c->read_len);
-    c->read_len = 0;
+                         c, (uint8_t *)c->stream.read_buf, c->stream.read_len);
+    c->stream.read_len = 0;
     if (st == KL_CONN_WEBSOCKET && kl_ws_server_drain_pending(c))
         st = (KlConnState)kl_ws_server_on_writable(c);
     if (st != KL_CONN_WEBSOCKET) { kl_comp_close(s, c); return; }

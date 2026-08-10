@@ -76,6 +76,8 @@ int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
     (void)s; (void)timeout_ms; abort();
 }
 
+int kl_io_engine_quiesce_accepts(struct KlServer *s) { (void)s; abort(); }
+
 void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn) {
     (void)s; (void)conn; abort();
 }

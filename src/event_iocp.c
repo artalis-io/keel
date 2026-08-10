@@ -15,7 +15,6 @@
 #include <keel/server.h>
 #include <keel/connection.h>
 #include <keel/udp.h>            /* KlUdp — datagram recv over completion (8b-4c) */
-#include <keel/tls.h>            /* KlTls feed_input — deliver received ciphertext (8b-5b) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "sockaddr_native.h"     /* KlSockAddr -> Winsock sockaddr for the overlapped UDP send */
@@ -58,6 +57,15 @@ typedef struct KlIocpConnect {
     struct KlIocpOp      *op;
 } KlIocpConnect;
 
+/* In-flight AcceptEx tracker (6B-3 2b-ii). AcceptEx PRE-creates its accept socket (op->accept_sock)
+ * before the op completes; tracking every posted accept lets kl_event_close_builtin() forcibly
+ * reclaim the ones a (delayed/failed) cancellation never retired — closing the pre-created socket
+ * and freeing the op — so teardown never leaks an accept socket or op. Mirrors KlIocpConnect. */
+typedef struct KlIocpAccept {
+    struct KlIocpAccept *next;
+    struct KlIocpOp     *op;
+} KlIocpAccept;
+
 typedef struct {
     HANDLE                    port;
     LPFN_ACCEPTEX             acceptex;
@@ -67,28 +75,25 @@ typedef struct {
     SOCKET                    listen_fd;   /* stored at prime — drain is ctx-scoped */
     KlIocpWatch              *watches;     /* registered readiness watches (8e-2c) */
     KlIocpConnect            *connects;    /* in-flight ConnectEx ops (LC-0) */
+    KlIocpAccept             *accepts;     /* in-flight AcceptEx ops (6B-3 2b-ii) */
+    struct KlIocpOp          *ops;         /* global registry of ALL outstanding ops (2b review) */
+    int                       quiescing;   /* teardown: drain must not re-post any op (2b review) */
     KlAllocator              *alloc;
 } KlIocpState;
 
 typedef enum {
     KL_IOCP_ACCEPT, KL_IOCP_READ, KL_IOCP_WRITE, KL_IOCP_SENDFILE,
     KL_IOCP_UDP_RECV, KL_IOCP_UDP_SEND,
-    KL_IOCP_TLS_RECV,                          /* WSARecv ciphertext for a TLS conn (8b-5b) */
     KL_IOCP_WATCHER,                           /* WSARecv on a KlWatcher socket (8e-2c) */
     KL_IOCP_CONNECT                            /* ConnectEx outbound connect (LC-0) */
 } KlIocpOpType;
-
-/* One overlapped TLS ciphertext read: a whole TLS record (~16 KiB max) plus a
- * little header/MAC slack. The engine's input ring reassembles across recvs, so
- * this only bounds one WSARecv, not a record. */
-#define KL_IOCP_CIPHER_SIZE (17u * 1024u)
 
 /* One in-flight overlapped op. `ov` MUST be first (CONTAINING_RECORD round-trip). */
 typedef struct KlIocpOp {
     OVERLAPPED    ov;
     KlIocpOpType  type;
     KlAllocator  *alloc;
-    KlConn       *conn;                        /* READ / WRITE */
+    KlStream     *stream;                      /* READ / WRITE / SENDFILE target (raw transport) */
     KlUdp        *udp;                          /* UDP_RECV */
     SOCKET        accept_sock;                 /* ACCEPT */
     char          accept_buf[2 * KL_IOCP_ADDR_LEN];  /* ACCEPT: local+remote addr */
@@ -103,8 +108,18 @@ typedef struct KlIocpOp {
     HANDLE        file_h;                       /* SENDFILE: file handle for chunked re-posts */
     uint64_t      file_total, file_done;        /* SENDFILE: total file bytes / bytes transmitted */
     uint64_t      file_chunk;                   /* SENDFILE: bytes in the in-flight TransmitFile */
-    void         *watcher_udata;               /* WATCHER: the tagged KlWatcher pointer */
+    union {
+        void              *watcher_udata;   /* WATCHER/CONNECT: the tagged KlWatcher pointer */
+    };
     int           watcher_removed;             /* WATCHER: kl_event_del'd — free, don't re-post */
+    /* Global outstanding-op registry (6B-3 2b review): EVERY posted op is linked here so teardown
+     * (kl_event_close_builtin) can cancel + dequeue every kernel-owned OVERLAPPED before freeing it
+     * — including the otherwise-untracked READ/WRITE/SENDFILE/UDP ops. op_sock is the socket the
+     * overlapped I/O runs on (CancelIoEx target). g_link points at the pointer that points to this
+     * op (O(1) unlink). Registered by iocp_op_register at post; unlinked by iocp_op_free. */
+    SOCKET             op_sock;
+    struct KlIocpOp   *g_next;
+    struct KlIocpOp  **g_link;
 } KlIocpOp;
 
 /* ── KlEventLoop lifecycle over an IOCP port ─────────────────────────── */
@@ -124,6 +139,9 @@ int kl_event_init_builtin(KlEventLoop *loop) {
 }
 
 static void iocp_op_free(KlIocpOp *op);
+static void iocp_op_register(KlIocpState *st, KlIocpOp *op, SOCKET op_sock);   /* 2b review */
+/* Cancel + dequeue every tracked outstanding overlapped op before free (6B-3 2b review); below. */
+static void iocp_quiesce_port_for_close(KlIocpState *st);
 
 /* Post (or re-post) the persistent WSARecv for a watcher socket (8e-2c). */
 static int iocp_watch_post(KlIocpOp *op) {
@@ -157,6 +175,7 @@ int kl_event_add_builtin(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask,
         op->alloc = st->alloc;
         op->accept_sock = (SOCKET)fd;
         op->watcher_udata = udata;
+        iocp_op_register(st, op, (SOCKET)fd);
         if (iocp_watch_post(op) < 0) { iocp_op_free(op); return -1; }
         KlIocpWatch *w = kl_malloc(st->alloc, sizeof(*w));
         if (!w) { op->watcher_removed = 1; CancelIoEx((HANDLE)(uintptr_t)fd, &op->ov); return -1; }
@@ -207,20 +226,24 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
 void kl_event_close_builtin(KlEventLoop *loop) {
     KlIocpState *st = loop->_backend;
     if (st) {
-        KlIocpWatch *w = st->watches;   /* free watch ops (shutdown; the loop is stopped) */
-        while (w) {
-            KlIocpWatch *n = w->next;
-            iocp_op_free(w->op);
-            kl_free(st->alloc, w, sizeof(*w));
-            w = n;
-        }
-        KlIocpConnect *tr = st->connects;   /* free any leftover connect trackers + their ops */
-        while (tr) {
-            KlIocpConnect *n = tr->next;
-            iocp_op_free(tr->op);
-            kl_free(st->alloc, tr, sizeof(*tr));
-            tr = n;
-        }
+        /* Every tracked op (watch / connect / accept) may still own a kernel OVERLAPPED. Cancel +
+         * DEQUEUE each before freeing it — freeing an OVERLAPPED the kernel is still writing is a
+         * use-after-free (6B-3 2b review). iocp_quiesce_port_for_close drains the port until the
+         * tracked lists empty (cancelled I/O always completes → terminating). */
+        st->quiescing = 1;
+        iocp_quiesce_port_for_close(st);
+        /* Anything still tracked here means the drain hit a fatal port error (catastrophic only):
+         * free our tracker nodes but intentionally LEAK each op record — its OVERLAPPED was never
+         * dequeued, so it may still be kernel-owned. closesocket reclaims an accept fd. Memory-safe
+         * over leak-free on that path. */
+        KlIocpWatch *w = st->watches;
+        while (w) { KlIocpWatch *n = w->next; kl_free(st->alloc, w, sizeof(*w)); w = n; }
+        KlIocpConnect *tr = st->connects;
+        while (tr) { KlIocpConnect *n = tr->next; kl_free(st->alloc, tr, sizeof(*tr)); tr = n; }
+        KlIocpAccept *at = st->accepts;
+        while (at) { KlIocpAccept *n = at->next; closesocket(at->op->accept_sock);
+                     kl_free(st->alloc, at, sizeof(*at)); at = n; }
+        st->watches = NULL; st->connects = NULL; st->accepts = NULL;
         if (st->port) CloseHandle(st->port);
         kl_free(st->alloc, st, sizeof(*st));
         loop->_backend = NULL;
@@ -256,50 +279,49 @@ const KlSocketProvider *kl_socket_provider_iocp(void) { return &IOCP_PROVIDER; }
 
 /* ── completion.h implementation (the overlapped mechanics) ──────────── */
 
+/* Register a freshly-allocated + zeroed op in the global outstanding-op registry (6B-3 2b review),
+ * recording the socket its overlapped I/O runs on (for CancelIoEx at teardown). Call once, right
+ * after memset, at every post site. O(1). */
+static void iocp_op_register(KlIocpState *st, KlIocpOp *op, SOCKET op_sock) {
+    op->op_sock = op_sock;
+    op->g_next  = st->ops;
+    op->g_link  = &st->ops;
+    if (st->ops) st->ops->g_link = &op->g_next;
+    st->ops = op;
+}
+
 static void iocp_op_free(KlIocpOp *op) {
-    /* send_total is the sendbuf allocation size (KL_IOCP_CIPHER_SIZE for TLS_RECV; the send
-     * total, or 1 when total==0, for WRITE/SENDFILE — the alloc is `total ? total : 1`). Fall
-     * back to 1 for a zero-length send so a sized custom allocator frees the right bucket. */
+    if (op->g_link) {                          /* unlink from the global registry (if registered) */
+        *op->g_link = op->g_next;
+        if (op->g_next) op->g_next->g_link = op->g_link;
+        op->g_link = NULL;
+    }
+    /* send_total is the sendbuf allocation size for WRITE/SENDFILE (the send total, or 1 when
+     * total==0 — the alloc is `total ? total : 1`). Fall back to 1 for a zero-length send so a
+     * sized custom allocator frees the right bucket. Receives no longer own a buffer. */
     if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total : 1);
     kl_free(op->alloc, op, sizeof(*op));
 }
 
-static KlIocpState *state_of(KlConn *c) {
-    return c->ctx->loop._backend;   /* c->ctx == &server->ev */
-}
-
-static int iocp_comp_post_recv(KlConn *c) {
-    (void)state_of(c);   /* the socket is already associated with the port */
-
-    KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
+/* Raw receive: WSARecv up to `cap` bytes into the caller-supplied `buf` on `stream`. No TLS /
+ * connection-state knowledge — the HTTP adapter chose the buffer. */
+static int iocp_comp_post_recv(KlStream *stream, void *buf_in, size_t cap) {
+    if (!buf_in || cap == 0) return -1;
+    if (cap > (size_t)0xFFFFFFFFu) cap = 0xFFFFFFFFu;   /* clamp to WSABUF ULONG len */
+    KlIocpOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
-    op->alloc = c->alloc;
-    op->conn = c;
+    op->alloc = stream->alloc;
+    op->stream = stream;
+    op->type = KL_IOCP_READ;
+    iocp_op_register(stream->ctx->loop._backend, op, (SOCKET)stream->fd);
 
     WSABUF buf;
-    if (c->tls && c->state != KL_CONN_PROXY_HEADER) {  /* PROXY header is plaintext, pre-TLS */
-        /* TLS: read raw ciphertext into a transient op buffer (kept in sendbuf so
-         * iocp_op_free reclaims it). read_buf holds *decrypted plaintext*, which
-         * accumulates across records for headers — it must not be clobbered by an
-         * inbound ciphertext read. kl_comp_drain feeds this buffer to the engine
-         * (tls->feed_input) before freeing the op. */
-        op->type = KL_IOCP_TLS_RECV;
-        op->send_total = KL_IOCP_CIPHER_SIZE;
-        op->sendbuf = kl_malloc(c->alloc, KL_IOCP_CIPHER_SIZE);
-        if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
-        buf.len = (ULONG)KL_IOCP_CIPHER_SIZE;
-        buf.buf = op->sendbuf;
-    } else {
-        size_t space = c->read_cap - c->read_len;
-        if (space == 0) { iocp_op_free(op); return -1; }   /* headers overflowed */
-        op->type = KL_IOCP_READ;
-        buf.len = (ULONG)space;
-        buf.buf = c->read_buf + c->read_len;
-    }
+    buf.len = (ULONG)cap;
+    buf.buf = (char *)buf_in;
 
     DWORD flags = 0, received = 0;
-    int rc = WSARecv((SOCKET)c->fd, &buf, 1, &received, &flags, &op->ov, NULL);
+    int rc = WSARecv((SOCKET)stream->fd, &buf, 1, &received, &flags, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);
         return -1;
@@ -307,16 +329,17 @@ static int iocp_comp_post_recv(KlConn *c) {
     return 0;
 }
 
-static int iocp_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
-    KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
+static int iocp_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total) {
+    KlIocpOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_WRITE;
-    op->alloc = c->alloc;
-    op->conn = c;
+    op->alloc = stream->alloc;
+    op->stream = stream;
     op->send_total = total;
+    iocp_op_register(stream->ctx->loop._backend, op, (SOCKET)stream->fd);
 
-    op->sendbuf = kl_malloc(c->alloc, total ? total : 1);
+    op->sendbuf = kl_malloc(stream->alloc, total ? total : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < iovcnt; i++) {
@@ -326,7 +349,7 @@ static int iocp_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t
 
     WSABUF buf = { (ULONG)total, op->sendbuf };
     DWORD sent = 0;
-    int rc = WSASend((SOCKET)c->fd, &buf, 1, &sent, 0, &op->ov, NULL);
+    int rc = WSASend((SOCKET)stream->fd, &buf, 1, &sent, 0, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);
         return -1;
@@ -335,6 +358,7 @@ static int iocp_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t
 }
 
 static int iocp_comp_post_accept(struct KlServer *s) {
+    if (!s) return -1;
     KlIocpState *st = s->ev.loop._backend;
     SOCKET a = WSASocketW(st->accept_family, SOCK_STREAM, IPPROTO_TCP,
                           NULL, 0, WSA_FLAG_OVERLAPPED);
@@ -346,17 +370,38 @@ static int iocp_comp_post_accept(struct KlServer *s) {
     op->type = KL_IOCP_ACCEPT;
     op->alloc = st->alloc;
     op->accept_sock = a;
+    /* op_sock = the LISTEN socket: AcceptEx's overlapped I/O runs there (CancelIoEx target). */
+    iocp_op_register(st, op, (SOCKET)s->listen_fd);
+
+    /* Track the op BEFORE posting so a synchronous completion (or teardown close) can always find
+     * it. On a hard post failure we untrack + free below. */
+    KlIocpAccept *tr = kl_malloc(st->alloc, sizeof(*tr));
+    if (!tr) { closesocket(a); iocp_op_free(op); return -1; }
+    tr->op = op; tr->next = st->accepts; st->accepts = tr;
 
     DWORD bytes = 0;
     BOOL ok = st->acceptex((SOCKET)s->listen_fd, a, op->accept_buf,
                            0, (DWORD)KL_IOCP_ADDR_LEN, (DWORD)KL_IOCP_ADDR_LEN,
                            &bytes, &op->ov);
     if (!ok && WSAGetLastError() != WSA_IO_PENDING) {
+        st->accepts = tr->next;                 /* unlink (it is the head we just pushed) */
+        kl_free(st->alloc, tr, sizeof(*tr));
         closesocket(a);
         iocp_op_free(op);
         return -1;
     }
     return 0;
+}
+
+/* Unlink the AcceptEx tracker for `op` (on completion). Returns whether it was found + freed. */
+static void iocp_accept_untrack(KlIocpState *st, const KlIocpOp *op) {
+    for (KlIocpAccept **link = &st->accepts; *link; link = &(*link)->next)
+        if ((*link)->op == op) {
+            KlIocpAccept *tr = *link;
+            *link = tr->next;
+            kl_free(st->alloc, tr, sizeof(*tr));
+            return;
+        }
 }
 
 /* TransmitFile's per-call byte cap. Defaults to the documented ~2 GiB maximum; a test may
@@ -395,7 +440,7 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
         tb.Head = op->sendbuf;
         tb.HeadLength = (DWORD)op->send_total;
     }
-    BOOL ok = TransmitFile((SOCKET)op->conn->fd, op->file_h, chunk, 0, &op->ov, &tb, 0);
+    BOOL ok = TransmitFile((SOCKET)op->stream->fd, op->file_h, chunk, 0, &op->ov, &tb, 0);
     if (!ok && WSAGetLastError() != WSA_IO_PENDING)
         return -1;
     return 0;
@@ -403,22 +448,24 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
 
 static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
     HANDLE hfile = (HANDLE)_get_osfhandle(file_fd);
     if (hfile == INVALID_HANDLE_VALUE) return -1;
 
-    KlIocpOp *op = kl_malloc(c->alloc, sizeof(*op));
+    KlIocpOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_SENDFILE;
-    op->alloc = c->alloc;
-    op->conn = c;
+    op->alloc = stream->alloc;
+    op->stream = stream;
     op->file_h = hfile;
     op->file_total = count;
     op->file_done = 0;
+    iocp_op_register(stream->ctx->loop._backend, op, (SOCKET)stream->fd);
 
     /* Copy the response head — TransmitFile's head buffer must outlive the op. */
     op->send_total = head_total;
-    op->sendbuf = kl_malloc(c->alloc, head_total ? head_total : 1);
+    op->sendbuf = kl_malloc(stream->alloc, head_total ? head_total : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
     size_t off = 0;
     for (int i = 0; i < head_n; i++) {
@@ -449,6 +496,7 @@ static int iocp_comp_post_udp_recv(KlUdp *udp) {
     op->alloc = st->alloc;
     op->udp = udp;
     op->src_len = (int)sizeof(op->src);
+    iocp_op_register(st, op, (SOCKET)udp->fd);
 
     LPFN_WSARECVMSG recvmsg = kl_udp_win_get_recvmsg((SOCKET)udp->fd);
     if (recvmsg) {
@@ -495,6 +543,7 @@ static int iocp_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
     op->alloc = st->alloc;
     op->udp = udp;
     op->send_total = len;
+    iocp_op_register(st, op, (SOCKET)udp->fd);
 
     op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
@@ -570,6 +619,7 @@ static int iocp_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
     op->watcher_udata = watcher_udata;
     memcpy(&op->src, &dst, (size_t)dstlen);
     op->src_len = dstlen;
+    iocp_op_register(st, op, s);         /* ConnectEx overlapped runs on the connecting socket */
 
     /* Track the op so a later iocp_comp_cancel(fd) can mark it aborted. */
     KlIocpConnect *tr = kl_malloc(st->alloc, sizeof(*tr));
@@ -605,13 +655,16 @@ static int iocp_connect_untrack(KlIocpState *st, const KlIocpOp *op) {
 }
 
 /* First-drain setup: load the extension fn pointers off the listen socket, learn
- * its address family, store it, and prime the accept backlog. Idempotent — latches
- * on st->started so the server may call it every tick. Server-scoped (needs the
- * listen socket); keeps kl_comp_drain ctx-scoped/server-agnostic. */
+ * its address family, and store it. Idempotent — latches on st->started so the server
+ * may call it every tick. Server-scoped (needs the listen socket); keeps kl_comp_drain
+ * ctx-scoped/server-agnostic. Post-driven (6B-3 2b-ii): returns the AcceptEx window
+ * (KL_IOCP_ACCEPT_BACKLOG) and posts NOTHING — the completion KlListener posts that many
+ * AcceptEx ops, one reserved pool credit each, and replenishes one per accept completion. */
 static int iocp_comp_prime_accepts(struct KlServer *s) {
+    if (!s) return -1;
     KlIocpState *st = s->ev.loop._backend;
     if (st->started)
-        return 0;
+        return KL_IOCP_ACCEPT_BACKLOG;
 
     SOCKET lst = (SOCKET)s->listen_fd;
     st->listen_fd = lst;
@@ -632,11 +685,7 @@ static int iocp_comp_prime_accepts(struct KlServer *s) {
         st->accept_family = sa.ss_family;
 
     st->started = 1;
-    for (int i = 0; i < KL_IOCP_ACCEPT_BACKLOG; i++) {
-        if (iocp_comp_post_accept(s) < 0)
-            return (i == 0) ? -1 : 0;
-    }
-    return 0;
+    return KL_IOCP_ACCEPT_BACKLOG;   /* window; the listener posts the AcceptEx ops (6B-3 2b-ii) */
 }
 
 /* Cancel outstanding overlapped ops on `fd` (idle-timeout sweep). CancelIoEx aborts the
@@ -682,6 +731,23 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 
         if (op->type == KL_IOCP_ACCEPT) {
             SOCKET lst = st->listen_fd;
+            /* Whether this AcceptEx actually succeeded — a cancelled one (CancelIoEx on the listen
+             * socket at listener close, 6B-3 2b-ii) completes here with an error status. On failure,
+             * close the PRE-created accept socket (AcceptEx allocates it up front — no leak) and
+             * deliver ok=0 so the completion listener retires this posted accept (returns its
+             * credit). The overlapped is associated with the listen socket, so query it there. */
+            iocp_accept_untrack(st, op);   /* completing — no longer close's responsibility */
+            DWORD xfer = 0, flags = 0;
+            if (!WSAGetOverlappedResult(lst, &op->ov, &xfer, FALSE, &flags)) {
+                closesocket(op->accept_sock);   /* pre-created socket never handed off — close it */
+                memset(&out[count], 0, sizeof(out[count]));
+                out[count].kind = KL_COMP_ACCEPT;
+                out[count].target = NULL;
+                out[count].ok = 0;
+                count++;
+                iocp_op_free(op);
+                continue;
+            }
             setsockopt(op->accept_sock, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
                        (char *)&lst, sizeof(lst));
             struct sockaddr *local = NULL, *remote = NULL;
@@ -690,6 +756,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                               (DWORD)KL_IOCP_ADDR_LEN, &local, &llen, &remote, &rlen);
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_ACCEPT;
+            out[count].target = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
             out[count].ok = 1;
             out[count].accepted_fd = (KlSocketHandle)op->accept_sock;
             if (rlen > 0 && remote)              /* native → neutral once, at the seam */
@@ -698,43 +765,30 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             count++;
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_READ) {
+            /* Raw bytes landed in the caller's buffer. For a TLS conn that buffer is the
+             * HTTP adapter's per-conn ciphertext scratch; the adapter (comp_on_read) feeds
+             * it to the engine. The backend has no TLS knowledge. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_READ;
-            out[count].target = op->conn;
-            out[count].bytes = bytes;
-            out[count].ok = 1;
-            count++;
-            iocp_op_free(op);
-        } else if (op->type == KL_IOCP_TLS_RECV) {
-            /* Hand the received ciphertext to the TLS engine via the public
-             * feed_input op (backend-agnostic — no mbedTLS knowledge here), then
-             * surface a plain READ event. The driver owns all TLS protocol logic
-             * (handshake / decrypt / encrypt); the buffer is consumed here so the
-             * op — which carries it in sendbuf — can be freed immediately. bytes==0
-             * means the peer closed: surface it so the driver tears down. */
-            KlConn *c = op->conn;
-            if (bytes > 0 && c->tls->feed_input)
-                c->tls->feed_input(c->tls, op->sendbuf, (size_t)bytes);
-            memset(&out[count], 0, sizeof(out[count]));
-            out[count].kind = KL_COMP_READ;
-            out[count].target = c;
+            out[count].target = op->stream;
             out[count].bytes = bytes;
             out[count].ok = 1;
             count++;
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_WRITE) {
             op->send_done += bytes;
+            if (st->quiescing) { iocp_op_free(op); continue; }   /* teardown: no re-post (2b review) */
             if (bytes > 0 && op->send_done < op->send_total) {
                 /* Partial send — re-post the remainder; do NOT surface an event
                  * until the whole response is out (the driver sees full writes). */
                 WSABUF buf = { (ULONG)(op->send_total - op->send_done),
                                op->sendbuf + op->send_done };
                 DWORD sent = 0;
-                int rc = WSASend((SOCKET)op->conn->fd, &buf, 1, &sent, 0, &op->ov, NULL);
+                int rc = WSASend((SOCKET)op->stream->fd, &buf, 1, &sent, 0, &op->ov, NULL);
                 if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
                     memset(&out[count], 0, sizeof(out[count]));
                     out[count].kind = KL_COMP_WRITE;
-                    out[count].target = op->conn;
+                    out[count].target = op->stream;
                     out[count].ok = 0;
                     count++;
                     iocp_op_free(op);
@@ -743,7 +797,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             }
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WRITE;
-            out[count].target = op->conn;
+            out[count].target = op->stream;
             out[count].bytes = bytes;
             out[count].ok = (bytes > 0);
             count++;
@@ -796,6 +850,18 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * watching. If kl_event_del'd it (watcher_removed), this is the aborted
              * completion — just free the op. (8e-2c) */
             if (op->watcher_removed) { iocp_op_free(op); continue; }
+            /* Teardown (6B-3 2b review): do NOT re-post — a fresh WSARecv would leave this op
+             * kernel-owned when kl_event_close_builtin frees it (use-after-free). This completion
+             * dequeued the op, so it is no longer kernel-owned: unlink it from st->watches and free
+             * it now. Not surfaced (the teardown reaper drops non-accept events anyway). */
+            if (st->quiescing) {
+                for (KlIocpWatch **l = &st->watches; *l; l = &(*l)->next)
+                    if ((*l)->op == op) {
+                        KlIocpWatch *w = *l; *l = w->next; kl_free(st->alloc, w, sizeof(*w)); break;
+                    }
+                iocp_op_free(op);
+                continue;
+            }
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WATCHER;
             out[count].target = op->watcher_udata;
@@ -837,6 +903,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             iocp_op_free(op);
         } else { /* KL_IOCP_SENDFILE — one chunk of a (possibly multi-chunk) TransmitFile. */
             op->file_done += op->file_chunk;
+            if (st->quiescing) { iocp_op_free(op); continue; }   /* teardown: no re-post (2b review) */
             if (bytes > 0 && op->file_done < op->file_total) {
                 /* More file to send — re-post the next offset-advancing chunk (file-only);
                  * do NOT surface until the whole head+file is out (the driver sees full
@@ -844,7 +911,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                 if (iocp_post_transmitfile_chunk(op) < 0) {
                     memset(&out[count], 0, sizeof(out[count]));
                     out[count].kind = KL_COMP_WRITE;
-                    out[count].target = op->conn;
+                    out[count].target = op->stream;
                     out[count].ok = 0;
                     count++;
                     iocp_op_free(op);
@@ -854,7 +921,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             /* Whole file out (or a failed/short completion) — surface the completed write. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WRITE;
-            out[count].target = op->conn;
+            out[count].target = op->stream;
             out[count].bytes = bytes;
             out[count].ok = (bytes > 0);
             count++;
@@ -862,6 +929,63 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
         }
     }
     return count;
+}
+
+/* Cancel + DEQUEUE every tracked outstanding overlapped op, then free it — so kl_event_close_builtin
+ * never frees an OVERLAPPED the kernel still owns (6B-3 2b review). CancelIoEx forces each pending
+ * watcher/connect I/O to complete; the listen socket is already closed so AcceptEx are completing
+ * too. Then drain the port until the tracked lists empty, freeing each op AFTER its completion is
+ * dequeued. Untracked conn read/write completions that happen to arrive are freed too (dequeued →
+ * safe). Terminating: cancelled/closed I/O always completes → posts → is dequeued. On a port error
+ * it returns with lists non-empty; the caller then frees the tracker nodes but leaks those op
+ * records (never freeing an un-dequeued OVERLAPPED). No dispatch/callbacks — pure teardown. */
+static void iocp_quiesce_port_for_close(KlIocpState *st) {
+    /* Cancel EVERY outstanding op (the global registry covers conn READ/WRITE/SENDFILE + UDP too,
+     * not just watch/connect/accept) on its owning socket, so all their completions post. The
+     * conn/udp sockets are still open at this point (kl_conn_pool_free runs after), so CancelIoEx
+     * reaches them; the listen socket is already closed (its AcceptEx are completing regardless). */
+    for (KlIocpOp *op = st->ops; op; op = op->g_next)
+        CancelIoEx((HANDLE)(uintptr_t)op->op_sock, &op->ov);
+    /* Dequeue every completion before freeing its op — no OVERLAPPED freed while kernel-owned.
+     * Terminating: cancelled/closed I/O always completes → posts. Per-type teardown cleanup
+     * (free the tracker node, close a pre-created accept socket) then free the op (which unlinks it
+     * from the registry). No dispatch/callbacks. */
+    while (st->ops) {
+        OVERLAPPED_ENTRY entries[KL_IOCP_ACCEPT_BACKLOG];
+        ULONG got = 0;
+        if (!GetQueuedCompletionStatusEx(st->port, entries,
+                                         (ULONG)(sizeof entries / sizeof entries[0]),
+                                         &got, INFINITE, FALSE))
+            return;   /* fatal port error — caller frees trackers + leaks the un-dequeued ops */
+        for (ULONG i = 0; i < got; i++) {
+            KlIocpOp *op = CONTAINING_RECORD(entries[i].lpOverlapped, KlIocpOp, ov);
+            if (op->type == KL_IOCP_WATCHER) {
+                for (KlIocpWatch **l = &st->watches; *l; l = &(*l)->next)
+                    if ((*l)->op == op) {
+                        KlIocpWatch *w = *l; *l = w->next; kl_free(st->alloc, w, sizeof(*w)); break;
+                    }
+            } else if (op->type == KL_IOCP_CONNECT) {
+                iocp_connect_untrack(st, op);
+            } else if (op->type == KL_IOCP_ACCEPT) {
+                iocp_accept_untrack(st, op);
+                closesocket(op->accept_sock);   /* aborted → never handed off */
+            }
+            iocp_op_free(op);                   /* unlinks from the global registry */
+        }
+    }
+}
+
+/* Teardown accept-side force-completion (6B-3 2b review). Does NOT reap. The server closed the
+ * listen socket BEFORE calling this, and closesocket cancels every pending overlapped AcceptEx on
+ * it — so all posted accepts are already completing (their completions will post to the port). The
+ * server then drives the reap through the NORMAL path (kl_comp_run → iocp_comp_drain), which
+ * DEQUEUES every completion (accept OR read/write/udp/watcher) before freeing it (no OVERLAPPED is
+ * freed while the kernel may still be writing → no use-after-free) and routes each ordinarily (no
+ * completion lost); accept completions untrack + retire the listener. Nothing more to force here. */
+static int iocp_shutdown_accepts(struct KlServer *s) {
+    KlIocpState *st = s->ev.loop._backend;
+    st->quiescing = 1;   /* from now, iocp_comp_drain frees fired watchers instead of re-posting */
+    return 0;
 }
 
 /* ── Completion sub-vtable (RC-1) ─────────────────────────────────────────
@@ -872,6 +996,7 @@ static const KlCompletionOps iocp_completion_ops = {
     iocp_comp_drain, iocp_comp_prime_accepts, iocp_comp_post_recv, iocp_comp_post_send,
     iocp_comp_post_accept, iocp_comp_post_sendfile, iocp_comp_cancel,
     iocp_comp_post_udp_recv, iocp_comp_post_udp_send, iocp_comp_post_connect,
+    iocp_shutdown_accepts,
 };
 
 const KlCompletionOps *kl_comp_ops_builtin(void) { return &iocp_completion_ops; }

@@ -12,6 +12,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <keel/sockaddr.h>   /* KlSockAddr peer_addr */
+#include <keel/drain.h>      /* KlDrain wq (Phase-B write queue, embedded in KlStream) */
+#include <keel/stream.h>         /* KlStream contract (Phase-B transport, candidate public API) */
+#include <keel/stream_detail.h>  /* struct KlStream layout — KlConn embeds it (opt-in detail) */
+#include <keel/listener.h>       /* KlSlotLease (admission credit handed off at accept, step 6B) */
 
 /** @brief Default read buffer size (bytes). */
 #define KL_READ_BUF_SIZE 8192
@@ -25,10 +29,10 @@ typedef struct KlTls KlTls;
 typedef struct KlWsServerConn KlWsServerConn;
 typedef struct KlH2ServerConn KlH2ServerConn;
 typedef struct KlH2ServerConfig KlH2ServerConfig;
-/* Back-pointer to the owning event context (for the internal socket provider,
- * ctx->sockets). Opaque forward decl keeps the provider seam out of this
- * header. */
-struct KlEventCtx;
+
+/* The raw-transport subset of a connection is now the candidate public KlStream (contract in
+ * <keel/stream.h>, layout in <keel/stream_detail.h>). KlConn embeds it below via the detail header.
+ * External code must use accessors (e.g. kl_conn_peer_addr()), not `conn->stream.*`. */
 
 typedef enum {
     KL_CONN_PROXY_HEADER,    /**< Reading a PROXY protocol header (pre-TLS) */
@@ -44,21 +48,15 @@ typedef enum {
 } KlConnState;
 
 typedef struct KlConn {
-    KlSocketHandle fd;                     /**< Socket file descriptor */
-    KlConnState state;          /**< Connection state */
-    KlAllocator *alloc;         /**< Allocator (set once on pool init) */
+    KlStream stream;            /**< Raw-transport subset (fd, alloc, ctx, peer_addr,
+                                     read_buf/len/cap, read_paused). Phase A extraction —
+                                     INTERNAL/UNSTABLE, not a stable field-level API. */
 
-    KlSockAddr peer_addr;               /**< Client address (captured at accept);
-                                         *   family KL_AF_UNSPEC = unavailable */
+    KlConnState state;          /**< Connection state */
+
     uint8_t peer_source;                /**< KL_PEER_SOCKET | KL_PEER_PROXY */
 
-    char *read_buf;             /**< Read buffer */
-    size_t read_len;            /**< Bytes in read buffer */
-    size_t read_cap;            /**< Read buffer capacity */
     size_t max_header_size;     /**< Max header size (from KlConfig) */
-    int read_paused;            /**< Read-side flow control: 1 = body reads paused
-                                     (kl_request_pause_body). Readiness drops READ interest;
-                                     completion stops posting the next recv. */
 
     KlRequest req;              /**< Current request */
     KlResponse res;             /**< Current response */
@@ -78,14 +76,20 @@ typedef struct KlConn {
 
     KlTls *tls;                 /**< TLS session (NULL for plaintext) */
     int tls_want;               /**< KL_EVENT_READ or KL_EVENT_WRITE during handshake */
+    char *comp_cipher;          /**< Completion-mode TLS ciphertext scratch: driver-owned,
+                                     stable until the async recv completes. Preallocated at server
+                                     init for TLS + completion slots (never in the event-loop hot
+                                     path); NULL otherwise. Interim Phase-A TLS orchestration
+                                     (→ KlTlsStream in Phase C). Freed in pool free.
+                                     INTERNAL/UNSTABLE. */
+    size_t comp_cipher_cap;     /**< Allocated size of comp_cipher (0 if unallocated) — so
+                                     alloc/free need no completion-internal size macro. */
 
     KlWsServerConn *ws;         /**< WebSocket state (NULL until upgrade) */
 
     KlH2ServerConn *h2;         /**< HTTP/2 state (NULL until upgrade) */
     KlH2ServerConfig *h2_config; /**< HTTP/2 config (set once at pool init) */
     KlRouter *router;           /**< Back-pointer to server router */
-    struct KlEventCtx *ctx;     /**< Back-pointer to event ctx (set once at pool init;
-                                     hot path reads ctx->sockets for the provider) */
     size_t max_body_size;       /**< Discard-path body limit (from KlConfig) */
 
     struct KlAsyncOp *async_op; /**< Active async op (non-NULL when SUSPENDED) */
@@ -101,13 +105,19 @@ typedef struct KlConn {
                        void *user_data); /**< Access log callback (set once at pool init) */
     void *access_log_data;      /**< Opaque data for access_log callback */
 
+    KlSlotLease slot_lease;     /**< Admission credit handed off by KlListener at accept (step 6B);
+                                     consumed once on close AFTER the KlConn returns to the pool. */
+
     struct KlConn *next_free;   /**< Free list linkage */
 } KlConn;
 
 typedef struct {
     KlConn *conns;          /**< Connection slot array */
     int capacity;           /**< Maximum connection slots */
-    int active_count;       /**< Number of in-use slots */
+    int active_count;       /**< Number of in-use slots (physical KlConn ownership) */
+    int free_credits;       /**< Admission rights reserved before posting accepts (step 6B). The
+                                 invariant free_credits + reserved_accepts + active_count == capacity
+                                 holds; reserve() takes a credit, the lease returns it on close. */
     KlConn *free_list;      /**< Free slot linked list */
     KlAllocator *alloc;     /**< Allocator for pool memory */
 } KlConnPool;
@@ -120,6 +130,17 @@ typedef struct {
  * @return 0 on success, -1 on failure.
  */
 int     kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc);
+
+/** @brief Reserve one admission credit before posting/arming an accept (step 6B). Returns 1 if a
+ *  credit was taken (free_credits--), 0 if none available (→ listener backpressure), -1 on a NULL
+ *  pool (fail closed). Only the listener-backed READINESS admission path uses free_credits; the
+ *  completion accept path currently bypasses it (it calls kl_conn_acquire directly). */
+int     kl_conn_pool_reserve(KlConnPool *pool);
+
+/** @brief Return one admission credit to the pool (free_credits++, capped at capacity). Called via
+ *  the KlSlotLease on connection close, or when a reserved-but-unused accept is dropped. No-op on a
+ *  NULL pool; an over-return (broken lease accounting) trips an assert in debug/test builds. */
+void    kl_conn_pool_return_credit(KlConnPool *pool);
 
 /** @brief Acquire a connection slot from the pool. Returns NULL if full. */
 KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd);
@@ -141,7 +162,7 @@ KlConnState kl_conn_on_handshake(KlConn *c);
  *
  * Uses MSG_PEEK to inspect the leading bytes without consuming the following
  * TLS/HTTP stream; on a valid header it consumes exactly the header bytes and
- * overwrites conn->peer_addr with the real client address.
+ * overwrites conn->stream.peer_addr with the real client address.
  *
  * @return 1 = done (proceed to TLS/read), 0 = need more bytes, -1 = close.
  */
@@ -184,5 +205,14 @@ KlConnState kl_conn_on_file_complete(KlConn *c, kl_ssize_t result, int zero_copy
 
 /** @brief Monotonic clock in milliseconds (for timeout tracking). */
 uint64_t kl_monotonic_ms(void);
+
+/**
+ * @brief Peer (client) address for a connection — stable accessor.
+ *
+ * Returns a pointer to the connection's peer address (family KL_AF_UNSPEC when
+ * unavailable). Prefer this over reaching into `conn->stream.*`, which is
+ * internal/unstable.
+ */
+const KlSockAddr *kl_conn_peer_addr(const KlConn *c);
 
 #endif

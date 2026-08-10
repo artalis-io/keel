@@ -103,15 +103,15 @@ UTEST(file_io, submit_called) {
     KlAllocator a = kl_allocator_default();
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = 42;
+    c.stream.alloc = &a;
+    c.stream.fd = 42;
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
 
     /* Set up read buffer */
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
 
     /* Set up response as file body with headers already sent */
     memset(&c.res, 0, sizeof(c.res));
@@ -132,7 +132,7 @@ UTEST(file_io, submit_called) {
     ASSERT_EQ(mock.last_offset, (uint64_t)0);
     ASSERT_EQ(c.file_io_phase, FILE_IO_READING);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
 }
 
 UTEST(file_io, headers_first) {
@@ -145,14 +145,14 @@ UTEST(file_io, headers_first) {
     KlAllocator a = kl_allocator_default();
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = -1;  /* invalid fd — send will fail */
+    c.stream.alloc = &a;
+    c.stream.fd = -1;  /* invalid fd — send will fail */
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
 
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
     c.res.body_mode = KL_BODY_FILE;
@@ -167,7 +167,7 @@ UTEST(file_io, headers_first) {
     ASSERT_EQ(state, KL_CONN_CLOSED);
     ASSERT_EQ(mock.submitted, 0);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
 }
 
 UTEST(file_io, complete_writes) {
@@ -187,17 +187,17 @@ UTEST(file_io, complete_writes) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = fds[0];
+    c.stream.alloc = &a;
+    c.stream.fd = fds[0];
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_READING;
 
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
 
     /* Simulate file data in read_buf */
-    memcpy(c.read_buf, "hello world", 11);
+    memcpy(c.stream.read_buf, "hello world", 11);
 
     memset(&c.res, 0, sizeof(c.res));
     c.res.body_mode = KL_BODY_FILE;
@@ -219,7 +219,7 @@ UTEST(file_io, complete_writes) {
     ASSERT_EQ(nr, 11);
     ASSERT_EQ(memcmp(buf, "hello world", 11), 0);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
     close(fds[0]);
     close(fds[1]);
 }
@@ -242,15 +242,15 @@ UTEST(file_io, partial_write) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = fds[0];
+    c.stream.alloc = &a;
+    c.stream.fd = fds[0];
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_READING;
 
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
-    memcpy(c.read_buf, "test data here", 14);
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
+    memcpy(c.stream.read_buf, "test data here", 14);
 
     memset(&c.res, 0, sizeof(c.res));
     c.res.body_mode = KL_BODY_FILE;
@@ -264,7 +264,7 @@ UTEST(file_io, partial_write) {
     ASSERT_EQ(state, KL_CONN_SENDING);
     ASSERT_EQ(c.file_io_phase, FILE_IO_WRITING);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
     close(fds[0]);
     close(fds[1]);
 }
@@ -281,14 +281,14 @@ UTEST(file_io, multi_chunk) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = fds[0];
+    c.stream.alloc = &a;
+    c.stream.fd = fds[0];
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
 
     size_t bufcap = 100;
-    c.read_buf = kl_malloc(&a, bufcap);
-    c.read_cap = bufcap;
+    c.stream.read_buf = kl_malloc(&a, bufcap);
+    c.stream.read_cap = bufcap;
 
     memset(&c.res, 0, sizeof(c.res));
     c.res.body_mode = KL_BODY_FILE;
@@ -306,7 +306,7 @@ UTEST(file_io, multi_chunk) {
     ASSERT_EQ(mock.last_offset, (uint64_t)0);
 
     /* Complete first chunk */
-    memset(c.read_buf, 'A', 100);
+    memset(c.stream.read_buf, 'A', 100);
     state = kl_conn_on_file_complete(&c, 100, 0);
 
     /* After writing 100 bytes, offset advances, submits next read */
@@ -316,14 +316,14 @@ UTEST(file_io, multi_chunk) {
     ASSERT_EQ(mock.last_len, (size_t)100);
 
     /* Complete second chunk */
-    memset(c.read_buf, 'B', 100);
+    memset(c.stream.read_buf, 'B', 100);
     state = kl_conn_on_file_complete(&c, 100, 0);
     ASSERT_EQ(c.res.file_offset, (uint64_t)200);
     ASSERT_EQ(mock.submitted, 3);
     ASSERT_EQ(mock.last_len, (size_t)50);  /* remaining = 50 */
 
     /* Complete final chunk */
-    memset(c.read_buf, 'C', 50);
+    memset(c.stream.read_buf, 'C', 50);
     state = kl_conn_on_file_complete(&c, 50, 0);
     ASSERT_EQ(c.res.file_offset, (uint64_t)250);
 
@@ -337,7 +337,7 @@ UTEST(file_io, multi_chunk) {
 
     ASSERT_EQ(total, (size_t)250);
 
-    kl_free(&a, c.read_buf, bufcap);
+    kl_free(&a, c.stream.read_buf, bufcap);
     close(fds[0]);
     close(fds[1]);
 }
@@ -350,14 +350,14 @@ UTEST(file_io, cancel_on_timeout) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = 99;
+    c.stream.alloc = &a;
+    c.stream.fd = 99;
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_READING;
 
     /* Simulate what the server timeout sweep does */
-    mock.base.cancel(&mock.base, c.fd);
+    mock.base.cancel(&mock.base, c.stream.fd);
     c.file_io_phase = FILE_IO_CANCELLING;
 
     ASSERT_EQ(mock.cancelled, 1);
@@ -373,21 +373,21 @@ UTEST(file_io, cancel_cqe) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = 99;
+    c.stream.alloc = &a;
+    c.stream.fd = 99;
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_CANCELLING;
 
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
 
     /* Cancel CQE arrives with -ECANCELED */
     KlConnState state = kl_conn_on_file_complete(&c, -125, 0);  /* -ECANCELED */
     ASSERT_EQ(state, KL_CONN_CLOSED);
     ASSERT_EQ(c.file_io_phase, FILE_IO_IDLE);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
 }
 
 UTEST(file_io, tls_fallback) {
@@ -401,15 +401,15 @@ UTEST(file_io, tls_fallback) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = -1;
+    c.stream.alloc = &a;
+    c.stream.fd = -1;
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
     c.tls = (KlTls *)(void *)&fake_tls;  /* non-NULL = TLS active */
 
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
     c.res.body_mode = KL_BODY_FILE;
@@ -423,7 +423,7 @@ UTEST(file_io, tls_fallback) {
     /* Will fail due to invalid fd, but should NOT have called submit */
     ASSERT_EQ(mock.submitted, 0);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
 }
 
 UTEST(file_io, head_request) {
@@ -438,14 +438,14 @@ UTEST(file_io, head_request) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = fds[0];
+    c.stream.alloc = &a;
+    c.stream.fd = fds[0];
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
 
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
     c.res.body_mode = KL_BODY_FILE;
@@ -460,7 +460,7 @@ UTEST(file_io, head_request) {
     /* Connection should be done (CLOSED since keep_alive=0) */
     ASSERT_EQ(state, KL_CONN_CLOSED);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
     close(fds[0]);
     close(fds[1]);
 }
@@ -471,13 +471,13 @@ UTEST(file_io, read_error) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = -1;
+    c.stream.alloc = &a;
+    c.stream.fd = -1;
     c.state = KL_CONN_SENDING;
     c.file_io_phase = FILE_IO_READING;
 
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
 
     KlConnState state = kl_conn_on_file_complete(&c, -5, 0);
     ASSERT_EQ(state, KL_CONN_CLOSED);
@@ -489,7 +489,7 @@ UTEST(file_io, read_error) {
     state = kl_conn_on_file_complete(&c, 0, 0);
     ASSERT_EQ(state, KL_CONN_CLOSED);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
 }
 
 UTEST(file_io, zero_copy_skips_write) {
@@ -504,14 +504,14 @@ UTEST(file_io, zero_copy_skips_write) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = fds[0];
+    c.stream.alloc = &a;
+    c.stream.fd = fds[0];
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_READING;
 
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
     c.res.body_mode = KL_BODY_FILE;
@@ -530,7 +530,7 @@ UTEST(file_io, zero_copy_skips_write) {
     /* Connection done (CLOSED since keep_alive=0) */
     ASSERT_EQ(state, KL_CONN_CLOSED);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
     close(fds[0]);
     close(fds[1]);
 }
@@ -547,14 +547,14 @@ UTEST(file_io, zero_copy_multi_chunk) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = fds[0];
+    c.stream.alloc = &a;
+    c.stream.fd = fds[0];
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
 
     size_t bufcap = 100;
-    c.read_buf = kl_malloc(&a, bufcap);
-    c.read_cap = bufcap;
+    c.stream.read_buf = kl_malloc(&a, bufcap);
+    c.stream.read_cap = bufcap;
 
     memset(&c.res, 0, sizeof(c.res));
     c.res.body_mode = KL_BODY_FILE;
@@ -582,7 +582,7 @@ UTEST(file_io, zero_copy_multi_chunk) {
     ASSERT_EQ(c.res.file_offset, (uint64_t)250);
     /* File done */
 
-    kl_free(&a, c.read_buf, bufcap);
+    kl_free(&a, c.stream.read_buf, bufcap);
     close(fds[0]);
     close(fds[1]);
 }
@@ -617,14 +617,14 @@ UTEST(file_io, splice_fallback) {
 
     KlConn c;
     memset(&c, 0, sizeof(c));
-    c.alloc = &a;
-    c.fd = fds[0];
+    c.stream.alloc = &a;
+    c.stream.fd = fds[0];
     c.state = KL_CONN_SENDING;
     c.file_io = &mock.base;
     c.file_io_phase = FILE_IO_IDLE;
 
-    c.read_buf = kl_malloc(&a, 8192);
-    c.read_cap = 8192;
+    c.stream.read_buf = kl_malloc(&a, 8192);
+    c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
     c.res.body_mode = KL_BODY_FILE;
@@ -638,10 +638,10 @@ UTEST(file_io, splice_fallback) {
     KlConnState state = kl_conn_on_writable(&c);
     ASSERT_EQ(state, KL_CONN_SENDING);
     ASSERT_EQ(mock.submitted, 1);
-    ASSERT_EQ(mock.last_buf, c.read_buf);  /* buffered path used */
+    ASSERT_EQ(mock.last_buf, c.stream.read_buf);  /* buffered path used */
     ASSERT_EQ(c.file_io_phase, FILE_IO_READING);
 
-    kl_free(&a, c.read_buf, 8192);
+    kl_free(&a, c.stream.read_buf, 8192);
     close(fds[0]);
     close(fds[1]);
 }

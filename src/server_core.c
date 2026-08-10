@@ -212,7 +212,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->pool.conns[i].access_log_data = s->config.access_log_data;
         s->pool.conns[i].h2_config = s->config.h2;  /* NULL if disabled */
         s->pool.conns[i].router = &s->router;
-        s->pool.conns[i].ctx = &s->ev;   /* for the socket provider (ctx->sockets) */
+        s->pool.conns[i].stream.ctx = &s->ev;   /* for the socket provider (ctx->sockets) */
         s->pool.conns[i].max_body_size = s->config.max_body_size;
         s->pool.conns[i].max_header_size = s->config.max_header_size;
     }
@@ -287,6 +287,25 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         return -1;
     }
 
+    /* Preallocate the completion-mode TLS ciphertext scratch (one stable buffer per slot) at
+     * init — NEVER in the event-loop hot path (Step-2 review). Only for TLS + a completion event
+     * model: the HTTP completion adapter reads ciphertext into it, and readiness TLS decrypts
+     * straight from the socket so needs none. The event model is only known now (post event-ctx
+     * init). Unwinds like the negotiation failure above; pool_free reclaims any already set. */
+    if (s->config.tls && (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION)) {
+        for (int i = 0; i < s->pool.capacity; i++) {
+            s->pool.conns[i].comp_cipher = kl_malloc(alloc, KL_COMP_CIPHER_SIZE);
+            if (!s->pool.conns[i].comp_cipher) {
+                s->last_error = KL_ERR_ALLOC;
+                kl_event_ctx_free(&s->ev);
+                kl_conn_pool_free(&s->pool);
+                kl_router_free(&s->router);
+                return -1;
+            }
+            s->pool.conns[i].comp_cipher_cap = KL_COMP_CIPHER_SIZE;
+        }
+    }
+
     /* Create async file I/O backend (NULL if backend doesn't support it). Freestanding
      * has no async file I/O — file_io.c is not in the archive; s->file_io stays NULL. */
 #ifndef KEEL_FREESTANDING
@@ -311,6 +330,11 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
  * precondition for a clean ExitBootServices. Hosted-only pieces (async-op cancel, the
  * self-pipe, the AF_UNIX unlink) are compiled out under KEEL_FREESTANDING. */
 void kl_server_free(KlServer *s) {
+    /* Invalidate the accept liveness token BEFORE any teardown (step 6B-1): a slot lease released
+     * while connections drain below must see accept_alive == 0 and no-op, never touching the
+     * about-to-be-destroyed listener/pool. Ordered first, before the pool is freed. */
+    s->accept_alive = 0;
+
 #ifndef KEEL_FREESTANDING
     /* Cancel all active async ops (idempotent terminal: fires on_cancel once, removes
      * each op from the list). Freestanding has no async suspend (no thread pool). */
@@ -321,6 +345,43 @@ void kl_server_free(KlServer *s) {
     if (s->file_io) {                 /* NULL on freestanding (kl_file_io_create guarded) */
         s->file_io->destroy(s->file_io);
         s->file_io = NULL;
+    }
+
+    /* Complete the accept listener's close/detachment contract WHILE the event context, listen
+     * handle, and pool still exist (step 6B-1 / 6B-3 2b-ii): the listener must reach CLOSED here
+     * rather than being abandoned LISTENING with a held reservation + posted accepts. */
+    if (s->accept_via_listener) {
+        kl_listener_close(&s->accept_listener);
+        /* Readiness close disarms the listen interest and returns every credit synchronously, so
+         * the listener is already detached. A COMPLETION close only REQUESTED cancellation; the
+         * posted accepts retire only once physically completed + reaped. Do it in a guaranteed,
+         * memory-safe, no-completion-lost order:
+         *   (1) close the listen socket — freestanding-safe; forces every posted IOCP AcceptEx to
+         *       complete (closesocket cancels its overlapped I/O). kl_server_close_listener below
+         *       then only does the owned-AF_UNIX unlink (fd already invalid).
+         *   (2) kl_comp_shutdown_accepts — the backend GUARANTEES every posted accept will complete
+         *       (io_uring unconditionally submits a cancel per accept; pollcomp marks them aborted;
+         *       IOCP relies on the closed listen socket). Returns -1 only if it could not force.
+         *   (3) reap through the NORMAL completion path until confirmed detachment: each kl_comp_run
+         *       DEQUEUES every completion before freeing it (no OVERLAPPED use-after-free) and routes
+         *       every dequeued entry ordinarily — accepts retire the listener; unrelated read/write/
+         *       udp/watcher completions get their normal teardown handling, NONE lost. Guaranteed to
+         *       terminate: the forced accept completions are pending and each blocking drain reaps
+         *       them. If the force failed we skip the loop (the backend close is the physical
+         *       backstop) rather than risk an unbounded wait. */
+        if ((kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) &&
+            !kl_listener_is_detached(&s->accept_listener)) {
+            if (kl_handle_valid(s->listen_fd)) {
+                kl_sock_close(s->ev.sockets, s->listen_fd);
+                s->listen_fd = KL_INVALID_SOCKET;
+            }
+            /* Force + teardown-reap (see kl_io_engine_quiesce_accepts): a teardown-specific
+             * dispatcher routes ONLY ACCEPT to the listener and drops every other completion
+             * without dispatch, so no HTTP step / consumer callback / timer runs here — safe now
+             * that async ops + file_io are already destroyed. Returns -1 only if the force could
+             * not be guaranteed, in which case the backend close below is the physical backstop. */
+            (void)kl_io_engine_quiesce_accepts(s);
+        }
     }
 
     /* Close the listen socket. Hosted also unlinks an owned AF_UNIX path; a freestanding
@@ -407,6 +468,17 @@ int kl_server_run_completion_loop(KlServer *s) {
 /* Release a connection and resume the listen socket if it was paused due to pool
  * exhaustion. Called from the event loop, timeout sweep, and async completion. */
 void kl_server_conn_release(KlServer *s, KlConn *c) {
+    if (s->accept_via_listener) {
+        /* Split-credit accept path (step 6B-1): return the physical KlConn to the pool FIRST, then
+         * consume the admission lease. The lease's release returns the credit and resumes the
+         * listener, which may immediately reserve + arm + accept — so the KlConn must already be
+         * back on the free list before the notification fires. */
+        KlSlotLease lease = c->slot_lease;
+        memset(&c->slot_lease, 0, sizeof(lease));   /* clear the owned copy on the conn */
+        kl_conn_release(&s->pool, c);
+        kl_slot_lease_release(&lease);
+        return;
+    }
     kl_conn_release(&s->pool, c);
     if (s->listen_paused && s->pool.free_list) {
         kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL);
@@ -439,9 +511,9 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
                 if (wsh->auto_ping) wsh->auto_ping(tc, now);
                 if (wsh->check_close_timeout && wsh->check_close_timeout(tc, now)) {
                     if (completion_loop) {
-                        kl_comp_cancel(&s->ev, tc->fd);
+                        kl_comp_cancel(&s->ev, tc->stream.fd);
                     } else {
-                        kl_event_del(&s->ev.loop, tc->fd);
+                        kl_event_del(&s->ev.loop, tc->stream.fd);
                         kl_server_conn_release(s, tc);
                     }
                 }
@@ -462,7 +534,7 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
         if (timed_out) {
             /* Cancel pending async file read before release (readiness io_uring path) */
             if (tc->file_io_phase == 1 && tc->file_io) {
-                tc->file_io->cancel(tc->file_io, tc->fd);
+                tc->file_io->cancel(tc->file_io, tc->stream.fd);
                 tc->file_io_phase = 3;  /* FILE_IO_CANCELLING */
                 continue;  /* wait for cancel CQE in next tick */
             }
@@ -474,9 +546,9 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
                 best_effort_conn_write(tc, kl_408_response,
                                        sizeof(kl_408_response) - 1);
             if (completion_loop) {
-                kl_comp_cancel(&s->ev, tc->fd);   /* abort op → release via its completion */
+                kl_comp_cancel(&s->ev, tc->stream.fd);   /* abort op → release via its completion */
             } else {
-                kl_event_del(&s->ev.loop, tc->fd);
+                kl_event_del(&s->ev.loop, tc->stream.fd);
                 kl_server_conn_release(s, tc);
             }
         }
@@ -539,22 +611,22 @@ int kl_server_use_post(KlServer *s, const char *method, const char *pattern,
  * re-posts the recv via the io_engine seam. Both idempotent; loop-thread only. */
 void kl_request_pause_body(const KlRequest *req) {
     KlConn *c = req ? kl_request_conn(req) : NULL;
-    if (!c || c->read_paused) return;                 /* idempotent */
-    c->read_paused = 1;
-    if (!(kl_event_caps(&c->ctx->loop) & KL_EVENT_CAP_COMPLETION))
-        (void)kl_event_mod(&c->ctx->loop, c->fd, 0, c);   /* readiness: stop READ now */
+    if (!c || c->stream.read_paused) return;                 /* idempotent */
+    c->stream.read_paused = 1;
+    if (!(kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION))
+        (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, 0, &c->stream);   /* readiness: stop READ now */
     /* completion: comp_start_body_read skips the next recv; the in-flight recv may
      * deliver <=1 more chunk before the pause takes hold (bounded). */
 }
 
 void kl_request_resume_body(const KlRequest *req) {
     KlConn *c = req ? kl_request_conn(req) : NULL;
-    if (!c || !c->read_paused) return;                /* idempotent */
-    c->read_paused = 0;
-    if (kl_event_caps(&c->ctx->loop) & KL_EVENT_CAP_COMPLETION)
+    if (!c || !c->stream.read_paused) return;                /* idempotent */
+    c->stream.read_paused = 0;
+    if (kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION)
         kl_io_engine_post_read(c);                    /* completion: re-post the body recv */
     else
-        (void)kl_event_mod(&c->ctx->loop, c->fd, KL_EVENT_READ, c);   /* readiness: re-arm READ */
+        (void)kl_event_mod(&c->stream.ctx->loop, c->stream.fd, KL_EVENT_READ, &c->stream);   /* readiness: re-arm READ */
 }
 
 /* ── Read-only load snapshot ──────────────────────────────────────────────── */
@@ -565,7 +637,11 @@ void kl_server_stats(const KlServer *s, KlServerStats *out) {
 
     out->active_connections = s->pool.active_count;
     out->max_connections    = s->pool.capacity;
-    out->listen_paused      = s->listen_paused;
+    /* Report from the active accept driver: the readiness listener owns pause state via
+     * KL_LISTENER_STATE_PAUSED; the completion / legacy path uses s->listen_paused. */
+    out->listen_paused      = s->accept_via_listener
+        ? (kl_listener_state(&s->accept_listener) == KL_LISTENER_STATE_PAUSED)
+        : s->listen_paused;
 
     /* Count suspended connections by walking the async ops list */
     int suspended = 0;

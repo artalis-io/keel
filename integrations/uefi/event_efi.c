@@ -28,10 +28,6 @@
  * (8) and the server completion driver keeps at most one recv OR one send outstanding
  * per conn, so 16 slots leave headroom without allocation in the loop. */
 #define KL_EFI_MAX_IO_OPS   16
-/* Transient ciphertext scratch for TLS post_recv (S-6): one TLS record max (~16 KiB).
- * A file-scope static (zero-alloc, single-threaded drain) — read ciphertext into it and
- * feed_input consumes it before the next recv op reuses it. */
-#define KL_EFI_TLS_CIPHER   16384
 /* Alloc-free server send (S-4/S-7 review): post_send COPIES the whole response into an
  * inline per-op buffer — no heap. A copy (not a reference) is required because the send
  * contract lets the caller free its iovec bytes right after posting: comp_tls_post_encrypted
@@ -75,8 +71,10 @@ typedef enum { EFI_IO_RECV = 0, EFI_IO_SEND = 1 } EfiIoOpKind;
 typedef struct {
     int             in_use;
     EfiIoOpKind     kind;
-    KlConn         *conn;            /* completion target (ev->target) */
+    KlStream       *stream;          /* completion target (ev->target) — raw transport */
     KlSocketHandle  fd;
+    void           *buf;             /* recv only: caller-chosen receive buffer */
+    size_t          buf_cap;         /* recv only: capacity */
     uint64_t        generation;      /* captured at post; drain re-checks kl_uefi_conn_valid_h */
     /* send only: an inline copy of the framed response (the caller may free its iovec
      * bytes right after post_send — see KL_EFI_SNDBUF) + transmit progress. */
@@ -226,7 +224,9 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
 
 /* prime_accepts: latch the server + its passive listen fd so drain can hand back
  * accepted children. The S-2 listen() already armed the Accept-token pool; this only
- * records what drain needs. Idempotent. */
+ * records what drain needs. Idempotent. Returns 0 = AUTONOMOUS accept model (6B-3 2b-ii):
+ * EFI generates accepts inside drain under its own capacity gate (below), so NO completion
+ * KlListener is installed and the server re-calls this each tick to top the gate up. */
 static int el_prime_accepts(struct KlServer *s) {
     if (!s) return -1;
     g_efi.server = s;
@@ -257,19 +257,21 @@ static EfiIoOp *io_op_alloc(void) {
     return NULL;
 }
 
-/* post_recv (S-4): queue a server-side receive on an accepted child. The bytes land in
- * conn->read_buf at the live read_len (computed in drain, unchanged between post and
- * completion — the conn parks with no other op), surfaced as KL_COMP_READ. */
-static int el_post_recv(KlConn *c) {
-    if (!c) return -1;
-    if (c->read_cap <= c->read_len) return -1;   /* no header/body space — caller closes */
+/* post_recv (S-4): queue a raw server-side receive on an accepted child into the
+ * caller-supplied `buf` (drain does the actual recv, unchanged between post and completion —
+ * the conn parks with no other op), surfaced as KL_COMP_READ. No TLS/state knowledge — the
+ * HTTP adapter chose the buffer. */
+static int el_post_recv(KlStream *stream, void *buf, size_t cap) {
+    if (!stream || !buf || cap == 0) return -1;
     EfiIoOp *op = io_op_alloc();
     if (!op) return -1;
     for (size_t b = 0; b < sizeof(*op); b++) ((unsigned char *)op)[b] = 0;
     op->kind       = EFI_IO_RECV;
-    op->conn       = c;
-    op->fd         = c->fd;
-    op->generation = (uint64_t)kl_uefi_conn_generation_h(c->fd);
+    op->stream     = stream;
+    op->fd         = stream->fd;
+    op->buf        = buf;
+    op->buf_cap    = cap;
+    op->generation = (uint64_t)kl_uefi_conn_generation_h(stream->fd);
     op->in_use     = 1;   /* set last */
     return 0;
 }
@@ -280,8 +282,8 @@ static int el_post_recv(KlConn *c) {
  * the encrypted buffer immediately), so a reference would be a use-after-free. No heap;
  * bounded by KL_EFI_SNDBUF (a larger framed response is refused -> conn closed). drain
  * transmits sndbuf in bounded EFI Transmit fragments and surfaces one KL_COMP_WRITE. */
-static int el_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
-    if (!c || iovcnt < 0 || (iovcnt > 0 && !iov)) return -1;
+static int el_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total) {
+    if (!stream || iovcnt < 0 || (iovcnt > 0 && !iov)) return -1;
     if (total > KL_EFI_SNDBUF) return -1;   /* response too large for the inline buffer */
     EfiIoOp *op = io_op_alloc();
     if (!op) return -1;
@@ -297,9 +299,9 @@ static int el_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total)
     }
     if (off != total) return -1;   /* declared total must equal the bytes actually framed */
     op->kind       = EFI_IO_SEND;
-    op->conn       = c;
-    op->fd         = c->fd;
-    op->generation = (uint64_t)kl_uefi_conn_generation_h(c->fd);
+    op->stream     = stream;
+    op->fd         = stream->fd;
+    op->generation = (uint64_t)kl_uefi_conn_generation_h(stream->fd);
     op->send_total = off;
     op->send_done  = 0;
     op->in_use     = 1;        /* set last: a mid-loop return -1 leaves the slot free */
@@ -379,6 +381,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             if (!kl_handle_valid(a)) break;   /* none ready (would-block) */
             for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
             out[count].kind        = KL_COMP_ACCEPT;
+            out[count].target      = NULL;   /* ACCEPT: server recovered from ctx at dispatch (6B-3) */
             out[count].ok          = 1;
             out[count].accepted_fd = a;
             out[count].peer        = peer;
@@ -395,7 +398,6 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
     for (int i = 0; i < KL_EFI_MAX_IO_OPS && count < max; i++) {
         EfiIoOp *op = &g_efi.io[i];
         if (!op->in_use) continue;
-        KlConn *c = op->conn;
 
         if (!kl_uefi_conn_valid_h(op->fd, op->generation)) {
             io_op_free(op);        /* stale (closed / slot reused) — drop, no event */
@@ -403,28 +405,14 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         }
 
         if (op->kind == EFI_IO_RECV) {
-            /* RECV: only when the provider can return something now. */
+            /* RECV: only when the provider can return something now. Raw recv into the
+             * caller-supplied buffer — no TLS/state knowledge. For a TLS conn that buffer is
+             * the HTTP adapter's ciphertext scratch, which comp_on_read feeds to the engine. */
             if (!kl_uefi_socket_recv_ready(op->fd)) continue;
-            ssize_t n;
-            if (c->tls && c->state != KL_CONN_PROXY_HEADER) {
-                /* TLS (S-6): the socket carries CIPHERTEXT. Read it into a transient
-                 * scratch buffer and feed it to the engine's input BIO; the completion
-                 * server's comp_tls_drive then handshakes / decrypts into read_buf.
-                 * bytes counts ciphertext (comp_on_read routes c->tls to comp_tls_drive,
-                 * which ignores the count beyond ok/!=0). The scratch is consumed by
-                 * feed_input before the next op reuses it (single-threaded drain). */
-                static unsigned char g_tls_cipher[KL_EFI_TLS_CIPHER];
-                n = kl_sock_recv(ctx->sockets, op->fd, g_tls_cipher, sizeof(g_tls_cipher));
-                if (n > 0 && c->tls->feed_input)
-                    c->tls->feed_input(c->tls, g_tls_cipher, (size_t)n);
-            } else {
-                void  *buf = c->read_buf + c->read_len;   /* live: read_len unchanged since post */
-                size_t cap = c->read_cap - c->read_len;
-                n = kl_sock_recv(ctx->sockets, op->fd, buf, cap);
-            }
+            ssize_t n = kl_sock_recv(ctx->sockets, op->fd, op->buf, op->buf_cap);
             for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
             out[count].kind   = KL_COMP_READ;
-            out[count].target = c;
+            out[count].target = op->stream;
             out[count].bytes  = (n > 0) ? (size_t)n : 0;  /* 0 / <0 → peer closed; driver closes */
             out[count].ok     = (n > 0) ? 1 : 0;
             count++;
@@ -447,7 +435,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         if (wouldblock) continue;   /* retry the remainder on a later drain */
         for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
         out[count].kind   = KL_COMP_WRITE;
-        out[count].target = c;
+        out[count].target = op->stream;
         out[count].bytes  = fatal ? 0 : op->send_total;
         out[count].ok     = fatal ? 0 : 1;
         count++;

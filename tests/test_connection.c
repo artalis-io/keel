@@ -23,7 +23,7 @@ UTEST(connection, acquire_and_release) {
     int fakefd = 100;
     KlConn *c1 = kl_conn_acquire(&pool, fakefd);
     ASSERT_TRUE(c1 != NULL);
-    ASSERT_EQ(c1->fd, fakefd);
+    ASSERT_EQ(c1->stream.fd, fakefd);
     ASSERT_EQ(c1->state, KL_CONN_READING);
 
     KlConn *c2 = kl_conn_acquire(&pool, fakefd + 1);
@@ -31,7 +31,7 @@ UTEST(connection, acquire_and_release) {
     ASSERT_TRUE(c1 != c2);
 
     /* Release — set fd to -1 to avoid closing real fds */
-    c1->fd = -1;
+    c1->stream.fd = -1;
     kl_conn_release(&pool, c1);
 
     /* Should be able to acquire again */
@@ -39,8 +39,8 @@ UTEST(connection, acquire_and_release) {
     ASSERT_TRUE(c3 != NULL);
 
     /* Clean up */
-    c2->fd = -1;
-    c3->fd = -1;
+    c2->stream.fd = -1;
+    c3->stream.fd = -1;
     kl_conn_pool_free(&pool);
 }
 
@@ -62,8 +62,8 @@ UTEST(connection, pool_exhaustion) {
     KlConn *c3 = kl_conn_acquire(&pool, 102);
     ASSERT_TRUE(c3 == NULL);
 
-    c1->fd = -1;
-    c2->fd = -1;
+    c1->stream.fd = -1;
+    c2->stream.fd = -1;
     kl_conn_pool_free(&pool);
 }
 
@@ -87,7 +87,7 @@ UTEST(connection, active_count_tracking) {
     ASSERT_EQ(pool.active_count, 3);
 
     /* Release one — count decrements, free_list non-NULL */
-    c2->fd = -1;
+    c2->stream.fd = -1;
     kl_conn_release(&pool, c2);
     ASSERT_EQ(pool.active_count, 2);
     ASSERT_TRUE(pool.free_list != NULL);
@@ -97,9 +97,9 @@ UTEST(connection, active_count_tracking) {
     ASSERT_TRUE(c4 != NULL);
     ASSERT_EQ(pool.active_count, 3);
 
-    c1->fd = -1;
-    c3->fd = -1;
-    c4->fd = -1;
+    c1->stream.fd = -1;
+    c3->stream.fd = -1;
+    c4->stream.fd = -1;
     kl_conn_pool_free(&pool);
 }
 
@@ -118,7 +118,7 @@ UTEST(connection, state_initial) {
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(c->state, KL_CONN_READING);
 
-    c->fd = -1;
+    c->stream.fd = -1;
     kl_conn_pool_free(&pool);
 }
 
@@ -134,18 +134,18 @@ UTEST(connection, release_resets_state) {
 
     /* Simulate some activity */
     c->state = KL_CONN_PROCESSING;
-    c->read_len = 42;
+    c->stream.read_len = 42;
 
     /* Release and re-acquire */
-    c->fd = -1;
+    c->stream.fd = -1;
     kl_conn_release(&pool, c);
 
     KlConn *c2 = kl_conn_acquire(&pool, 101);
     ASSERT_TRUE(c2 != NULL);
     ASSERT_EQ(c2->state, KL_CONN_READING);
-    ASSERT_EQ(c2->read_len, (size_t)0);
+    ASSERT_EQ(c2->stream.read_len, (size_t)0);
 
-    c2->fd = -1;
+    c2->stream.fd = -1;
     kl_conn_pool_free(&pool);
 }
 
@@ -165,18 +165,18 @@ UTEST(connection, acquire_after_release) {
     ASSERT_TRUE(kl_conn_acquire(&pool, 102) == NULL);
 
     /* Release c1 */
-    c1->fd = -1;
+    c1->stream.fd = -1;
     kl_conn_release(&pool, c1);
     ASSERT_EQ(pool.active_count, 1);
 
     /* Acquire again — should succeed */
     KlConn *c3 = kl_conn_acquire(&pool, 103);
     ASSERT_TRUE(c3 != NULL);
-    ASSERT_EQ(c3->fd, 103);
+    ASSERT_EQ(c3->stream.fd, 103);
     ASSERT_EQ(pool.active_count, 2);
 
-    c2->fd = -1;
-    c3->fd = -1;
+    c2->stream.fd = -1;
+    c3->stream.fd = -1;
     kl_conn_pool_free(&pool);
 }
 
@@ -215,8 +215,8 @@ UTEST(connection, read_buf_allocated) {
     ASSERT_EQ(kl_conn_pool_init(&pool, 4, &a), 0);
 
     for (int i = 0; i < 4; i++) {
-        ASSERT_TRUE(pool.conns[i].read_buf != NULL);
-        ASSERT_EQ(pool.conns[i].read_cap, (size_t)KL_READ_BUF_SIZE);
+        ASSERT_TRUE(pool.conns[i].stream.read_buf != NULL);
+        ASSERT_EQ(pool.conns[i].stream.read_cap, (size_t)KL_READ_BUF_SIZE);
     }
 
     kl_conn_pool_free(&pool);
@@ -231,22 +231,22 @@ UTEST(connection, read_buf_survives_acquire_release) {
 
     KlConn *c = kl_conn_acquire(&pool, 100);
     ASSERT_TRUE(c != NULL);
-    ASSERT_TRUE(c->read_buf != NULL);
-    ASSERT_EQ(c->read_cap, (size_t)KL_READ_BUF_SIZE);
+    ASSERT_TRUE(c->stream.read_buf != NULL);
+    ASSERT_EQ(c->stream.read_cap, (size_t)KL_READ_BUF_SIZE);
 
-    char *buf_ptr = c->read_buf;
-    c->fd = -1;
+    char *buf_ptr = c->stream.read_buf;
+    c->stream.fd = -1;
     kl_conn_release(&pool, c);
 
     /* Re-acquire — buffer should still be valid */
     KlConn *c2 = kl_conn_acquire(&pool, 101);
     ASSERT_TRUE(c2 != NULL);
-    ASSERT_TRUE(c2->read_buf != NULL);
-    ASSERT_EQ(c2->read_cap, (size_t)KL_READ_BUF_SIZE);
+    ASSERT_TRUE(c2->stream.read_buf != NULL);
+    ASSERT_EQ(c2->stream.read_cap, (size_t)KL_READ_BUF_SIZE);
     /* Same slot, same buffer pointer */
-    ASSERT_EQ(c2->read_buf, buf_ptr);
+    ASSERT_EQ(c2->stream.read_buf, buf_ptr);
 
-    c2->fd = -1;
+    c2->stream.fd = -1;
     kl_conn_pool_free(&pool);
 }
 

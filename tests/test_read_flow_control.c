@@ -55,7 +55,7 @@ static int rfc_on_data(KlBodyReader *self, const char *data, size_t len) {
         g_calls_at_pause = g_calls;
         KlConn *c = kl_request_conn(r->req);
         kl_request_pause_body(r->req);
-        kl_timer_add(c->ctx, 30, rfc_resume, r);
+        kl_timer_add(c->stream.ctx, 30, rfc_resume, r);
     }
     return 0;
 }

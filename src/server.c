@@ -128,26 +128,26 @@ int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
     const KlConn *conn = kl_request_conn(req);
     if (!conn)
         return -1;
-    return kl_peer_cred_fd(conn->fd, out);
+    return kl_peer_cred_fd(conn->stream.fd, out);
 }
 
 int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
     if (!req || !buf || buflen == 0)
         return -1;
     const KlConn *conn = kl_request_conn(req);
-    if (!conn || !kl_handle_valid(conn->fd))
+    if (!conn || !kl_handle_valid(conn->stream.fd))
         return -1;
 
-    return kl_server_plat_peer_label_fd(conn->fd, buf, buflen);
+    return kl_server_plat_peer_label_fd(conn->stream.fd, buf, buflen);
 }
 
 const KlSockAddr *kl_request_peer_sockaddr(const KlRequest *req) {
     if (!req)
         return NULL;
     const KlConn *conn = kl_request_conn(req);
-    if (!conn || kl_sockaddr_family(&conn->peer_addr) == KL_AF_UNSPEC)
+    if (!conn || kl_sockaddr_family(&conn->stream.peer_addr) == KL_AF_UNSPEC)
         return NULL;
-    return &conn->peer_addr;
+    return &conn->stream.peer_addr;
 }
 
 int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
@@ -158,7 +158,7 @@ int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
     if (!conn)
         return -1;
 
-    const KlSockAddr *a = &conn->peer_addr;
+    const KlSockAddr *a = &conn->stream.peer_addr;
     KlAddrFamily fam = kl_sockaddr_family(a);
     if (fam != KL_AF_INET && fam != KL_AF_INET6)
         return -1;  /* UNSPEC / AF_UNIX — no IP address (use peer credentials) */
@@ -209,8 +209,82 @@ void kl_server_close_listener(KlServer *s) {
  * registration belong to the ws module, so this readiness TU owns no protocol type. */
 
 
+/* ── Readiness accept adapter (step 6B-1): drive KlListener over the listen fd + pool credits ──
+ * The listener owns the accept lifecycle (reserve-before-accept backpressure, pause/resume,
+ * confirmed retirement); these hooks bridge it to the event loop and the split-credit pool. Only
+ * installed for a readiness loop (!completion_loop); the completion path keeps its own accept
+ * priming until 6B-3 part 2b-ii adopts the listener. */
+static int server_accept_reserve(void *ctx) {
+    KlServer *s = ctx;
+    return kl_conn_pool_reserve(&s->pool);
+}
+static void server_accept_release(void *ctx) {
+    KlServer *s = ctx;
+    kl_conn_pool_return_credit(&s->pool);               /* free_credits++ ... */
+    kl_listener_notify_slot_free(&s->accept_listener);  /* ...then resume the accept if paused */
+}
+static int server_accept_arm(void *ctx) {
+    KlServer *s = ctx;
+    if (s->listen_registered) return 0;                 /* already armed (level-triggered) */
+    if (kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL) < 0) return -1;
+    s->listen_registered = 1;
+    return 0;
+}
+static void server_accept_disarm(void *ctx) {
+    KlServer *s = ctx;
+    if (s->listen_registered) {
+        kl_event_del(&s->ev.loop, s->listen_fd);
+        s->listen_registered = 0;
+    }
+}
+static void server_accept_dispose(void *ctx, KlSocketHandle fd) {
+    kl_sock_close(((KlServer *)ctx)->ev.sockets, fd);   /* no local var: read-only, keep ctx void* */
+}
+static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease lease) {
+    KlServer *s = ctx;
+    KlConn *nc = kl_conn_acquire(&s->pool, fd);         /* commit — credit already reserved */
+    if (!nc) {
+        /* Invariant failure (credit-backed accept but no free KlConn): dispose the descriptor and
+         * consume the lease to return the credit. free_credits+reserved+active==capacity guarantees
+         * this cannot happen, but never leak an fd or a credit if it somehow does. */
+        kl_sock_close(s->ev.sockets, fd);
+        kl_slot_lease_release(&lease);
+        return;
+    }
+    nc->slot_lease = lease;                             /* consumed once on close (after conn return) */
+    nc->peer_source = KL_PEER_SOCKET;
+    nc->stream.peer_addr = s->accept_pending_peer;
+    nc->res.alloc = &s->alloc_storage;
+    if (s->config.tls) {                               /* TLS: enter handshake instead of reading */
+        nc->state = KL_CONN_TLS_HANDSHAKE;
+        nc->tls_want = KL_EVENT_READ;
+    }
+    /* PROXY protocol from a trusted source: read the header first (before TLS/HTTP). */
+    const KlProxyHooks *ph = kl_proxy_hooks();
+    if (s->proxy_cidr_count > 0 && ph && ph->cidr_match &&
+        kl_sockaddr_family(&s->accept_pending_peer) != KL_AF_UNSPEC &&
+        ph->cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &s->accept_pending_peer)) {
+        nc->state = KL_CONN_PROXY_HEADER;
+    }
+    if (kl_event_add(&s->ev.loop, fd, KL_EVENT_READ, &nc->stream) < 0)  /* identity = raw stream */
+        kl_server_conn_release(s, nc);                 /* releases the conn AND consumes the lease */
+}
+
+static int server_accept_listener_start(KlServer *s) {
+    s->accept_alive = 1;                               /* liveness token live before any lease issues */
+    KlListenerHooks h = {
+        .reserve = server_accept_reserve, .release = server_accept_release, .credit_ctx = s,
+        .liveness = &s->accept_alive,
+        .arm_accept = server_accept_arm, .disarm_accept = server_accept_disarm,
+        .on_accept = server_accept_on_accept, .dispose_fd = server_accept_dispose,
+    };
+    if (kl_listener_init(&s->accept_listener, /*completion_mode=*/0, &h, s) < 0) return -1;
+    return kl_listener_start(&s->accept_listener);
+}
+
 int kl_server_run(KlServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
+    (void)alloc;   /* the readiness accept path now configures conns via the listener adapter */
 
     if (kl_server_bind_listener(s) < 0)
         return -1;
@@ -237,6 +311,7 @@ int kl_server_run(KlServer *s) {
         kl_server_close_listener(s);
         return -1;
     }
+    s->listen_registered = 1;   /* the readiness listener's arm hook treats this as already armed */
 
     if (s->config.transport == KL_TRANSPORT_UNIX) {
         /* An adopted fd (socket activation) has no path we own. */
@@ -266,6 +341,17 @@ int kl_server_run(KlServer *s) {
      * readiness path. Never true on readiness backends, so that path is unchanged. */
     const int completion_loop =
         (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+
+    /* Readiness loops drive the accept path through the embedded KlListener (step 6B-1); the
+     * completion path keeps its own accept priming until 6B-3 part 2b-ii. */
+    if (!completion_loop) {
+        if (server_accept_listener_start(s) < 0) {
+            s->last_error = KL_ERR_EVENT_ADD;
+            kl_server_close_listener(s);
+            return -1;
+        }
+        s->accept_via_listener = 1;
+    }
 
     while (atomic_load(&s->running)) {
         if (completion_loop) {
@@ -313,13 +399,13 @@ int kl_server_run(KlServer *s) {
                     if (fc->file_io_phase == 1) {
                         /* FILE_IO_READING — async read pending, no WRITE reg */
                     } else {
-                        kl_event_mod(&s->ev.loop, fc->fd,
-                                     KL_EVENT_WRITE, fc);
+                        kl_event_mod(&s->ev.loop, fc->stream.fd,
+                                     KL_EVENT_WRITE, &fc->stream);
                     }
                 } else if (fstate == KL_CONN_READING) {
-                    kl_event_mod(&s->ev.loop, fc->fd, KL_EVENT_READ, fc);
+                    kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
                 } else if (fstate == KL_CONN_CLOSED) {
-                    kl_event_del(&s->ev.loop, fc->fd);
+                    kl_event_del(&s->ev.loop, fc->stream.fd);
                     kl_server_conn_release(s, fc);
                 }
             }
@@ -330,12 +416,19 @@ int kl_server_run(KlServer *s) {
             if (kl_event_dispatch(&s->ev, &events[i]))
                 continue;
 
-            KlConn *c = (KlConn *)events[i].udata;
+            /* Readiness event identity is the raw KlStream (step 6B-2); recover the owning KlConn
+             * only here, at the HTTP adapter boundary. NULL udata = the listen socket. */
+            KlStream *evs = (KlStream *)events[i].udata;
+            KlConn *c = evs ? kl_conn_from_stream(evs) : NULL;
 
             if (c == NULL) {
-                /* Listen socket — accept new connections */
+                /* Listen socket — accept new connections through the readiness KlListener
+                 * (step 6B-1). It holds one reserved pool credit while LISTENING; each accepted
+                 * fd is committed + wired by server_accept_on_accept; when the pool credit is
+                 * exhausted it transitions to PAUSED (disarming the listen fd, so the kernel TCP
+                 * backlog queues the rest) and resumes when a slot frees. */
                 if (atomic_load(&s->draining)) goto rearm_listen;
-                while (1) {
+                while (kl_listener_state(&s->accept_listener) == KL_LISTENER_STATE_LISTENING) {
                     KlSockAddr peer;
                     KlSocketHandle client_fd = kl_sock_accept(s->ev.sockets, s->listen_fd,
                                                               &peer);
@@ -361,52 +454,18 @@ int kl_server_run(KlServer *s) {
                     if (s->config.transport == KL_TRANSPORT_TCP)
                         (void)kl_sock_set_tcp_nodelay(s->ev.sockets, client_fd, 1);
 
-                    KlConn *nc = kl_conn_acquire(&s->pool, client_fd);
-                    if (!nc) {
-                        kl_sock_close(s->ev.sockets, client_fd);
-                        /* Pool full — stop accepting until a slot frees up.
-                         * The kernel TCP backlog queues further connections. */
-                        kl_event_del(&s->ev.loop, s->listen_fd);
-                        s->listen_paused = 1;
-                        break;
-                    }
-
-                    /* Record the client address for kl_request_peer_addr()
-                     * (peer is KL_AF_UNSPEC if the provider couldn't supply it). */
-                    nc->peer_source = KL_PEER_SOCKET;
-                    nc->peer_addr = peer;
-
-                    /* Set allocator on connection's response.
-                     * This is set once on accept; response reuses it across keep-alive. */
-                    nc->res.alloc = alloc;
-
-                    /* TLS: enter handshake state instead of reading */
-                    if (s->config.tls) {
-                        nc->state = KL_CONN_TLS_HANDSHAKE;
-                        nc->tls_want = KL_EVENT_READ;
-                    }
-
-                    /* PROXY protocol: from a trusted source, read the header first (before
-                     * TLS/HTTP). Overrides the state above. Through the PROXY seam
-                     * (kl_proxy_hooks) — symmetric with completion_server.c; NULL when
-                     * proxy_protocol.c is not linked. */
-                    const KlProxyHooks *ph = kl_proxy_hooks();
-                    if (s->proxy_cidr_count > 0 && ph && ph->cidr_match &&
-                        kl_sockaddr_family(&peer) != KL_AF_UNSPEC &&
-                        ph->cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &peer)) {
-                        nc->state = KL_CONN_PROXY_HEADER;
-                    }
-
-                    if (kl_event_add(&s->ev.loop, client_fd,
-                                     KL_EVENT_READ, nc) < 0) {
-                        kl_server_conn_release(s,nc);
-                        continue;
-                    }
+                    /* Hand the accepted fd to the listener: it commits the reserved credit to a
+                     * KlConn (server_accept_on_accept), then reserves + arms the next accept — or
+                     * PAUSEs if the pool is full, ending this drain. The peer is stashed for the
+                     * hook (single-threaded, consumed immediately). */
+                    s->accept_pending_peer = peer;
+                    kl_listener_on_accepted(&s->accept_listener, client_fd);
                 }
-                /* Re-arm listen socket (no-op for persistent backends;
-                 * required for io_uring's one-shot POLL_ADD) */
+                /* Re-arm listen socket (no-op for persistent backends; required for io_uring's
+                 * one-shot POLL_ADD) unless the listener paused (which already disarmed it). */
 rearm_listen:
-                if (!s->listen_paused)
+                if (s->listen_registered &&
+                    kl_listener_state(&s->accept_listener) != KL_LISTENER_STATE_PAUSED)
                     kl_event_mod(&s->ev.loop, s->listen_fd,
                                  KL_EVENT_READ, NULL);
                 continue;
@@ -439,7 +498,7 @@ rearm_listen:
                  * triggered backends don't re-deliver the consumed readiness,
                  * but newly-arriving bytes always trigger). */
                 uint8_t probe;
-                if (kl_sock_recv_peek(s->ev.sockets, c->fd, &probe, 1) <= 0)
+                if (kl_sock_recv_peek(s->ev.sockets, c->stream.fd, &probe, 1) <= 0)
                     goto transition;
             }
 
@@ -492,17 +551,17 @@ rearm_listen:
 transition:
             /* Transition */
             if (new_state == KL_CONN_TLS_HANDSHAKE) {
-                if (kl_event_mod(&s->ev.loop, c->fd,
-                                 (KlEventMask)c->tls_want, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                if (kl_event_mod(&s->ev.loop, c->stream.fd,
+                                 (KlEventMask)c->tls_want, &c->stream) < 0) {
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_SENDING) {
                 if (c->file_io_phase == 1) {
                     /* FILE_IO_READING — async read pending, no WRITE event */
-                } else if (kl_event_mod(&s->ev.loop, c->fd,
-                                 KL_EVENT_WRITE, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                } else if (kl_event_mod(&s->ev.loop, c->stream.fd,
+                                 KL_EVENT_WRITE, &c->stream) < 0) {
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_WEBSOCKET) {
@@ -510,8 +569,8 @@ transition:
                 const KlWsServerHooks *wsh = kl_ws_server_hooks();
                 if (wsh && wsh->drain_pending && wsh->drain_pending(c))
                     ws_mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
-                if (kl_event_mod(&s->ev.loop, c->fd, ws_mask, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, ws_mask, &c->stream) < 0) {
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_HTTP2) {
@@ -519,8 +578,8 @@ transition:
                 const KlH2ServerHooks *h2h = kl_h2_server_hooks();
                 if (h2h && h2h->want_write && h2h->want_write(c))
                     mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
-                if (kl_event_mod(&s->ev.loop, c->fd, mask, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, mask, &c->stream) < 0) {
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_READING ||
@@ -529,17 +588,17 @@ transition:
                 /* Read-side flow control: a paused body consumer keeps READ interest OFF (0)
                  * so the level-triggered loop stops delivering body bytes; kl_request_resume_body
                  * re-arms READ. Only READING_BODY pauses. */
-                KlEventMask rm = (new_state == KL_CONN_READING_BODY && c->read_paused)
+                KlEventMask rm = (new_state == KL_CONN_READING_BODY && c->stream.read_paused)
                                      ? 0 : KL_EVENT_READ;
-                if (kl_event_mod(&s->ev.loop, c->fd, rm, c) < 0) {
-                    kl_event_del(&s->ev.loop, c->fd);
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, rm, &c->stream) < 0) {
+                    kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
             } else if (new_state == KL_CONN_SUSPENDED) {
                 /* Handler suspended for async I/O — FD already removed
                  * from event loop by kl_async_suspend. */
             } else if (new_state == KL_CONN_CLOSED) {
-                kl_event_del(&s->ev.loop, c->fd);
+                kl_event_del(&s->ev.loop, c->stream.fd);
                 kl_server_conn_release(s,c);
             }
         }

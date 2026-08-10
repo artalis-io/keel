@@ -195,7 +195,8 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/client_pool.c src/redirect.c src/sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
-           src/compress.c src/decompress.c src/drain.c \
+           src/compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
+           src/connect_op.c src/listener.c \
            $(COMPLETION_CORE) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
 
 # The built-in DNS resolver now builds on every platform: dns_resolver.c is
@@ -866,6 +867,28 @@ cppcheck:
 	  -UKEEL_PLATFORM_LWIP \
 	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
 
+# Readiness event-identity audit gate (step 6B-2): every readiness kl_event_add/mod must register
+# the raw KlStream (&conn->stream) as udata, not a bare KlConn. Pointer equality (stream is the
+# leading member) hides regressions from behavioral tests. tools/check_readiness_identity.pl parses
+# whole call expressions (balanced parens), so it catches BOTH single-line and multiline calls. The
+# completion accept path (completion_server.c) still registers KlConn until 6B-3 and is excluded.
+check-readiness-identity:
+	@perl tools/check_readiness_identity.pl \
+	     src/server.c src/async.c src/server_core.c src/completion_server.c \
+	  && echo "readiness-identity: OK — all connection registrations use &conn->stream"
+
+# Self-test the audit gate against fixtures with single-line AND multiline violations (must FAIL)
+# and a clean fixture (must PASS) — proving the gate actually detects multiline regressions.
+check-readiness-identity-selftest:
+	@perl tools/check_readiness_identity.pl tests/fixtures/readiness_identity_good.c \
+	  && echo "selftest: good fixture PASSED (as expected)" \
+	  || { echo "selftest FAIL: clean fixture was flagged"; exit 1; }
+	@if perl tools/check_readiness_identity.pl tests/fixtures/readiness_identity_bad.c 2>/dev/null; then \
+	  echo "selftest FAIL: bad fixture (single-line + multiline violations) was NOT flagged"; exit 1; \
+	else \
+	  echo "selftest: bad fixture flagged (as expected)"; \
+	fi
+
 # W^X / no-runtime-codegen regression guard.
 # See SECURITY.md "Architectural Guarantees" for the invariant.
 wx-guard:
@@ -1037,6 +1060,7 @@ FREESTANDING_CLIENT_SRC = \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
     src/client_common.c src/client_async.c src/client_proxy.c src/client_pool.c src/decompress.c \
+    src/connect_op.c \
     parsers/response_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 

@@ -263,8 +263,8 @@ UTEST(h2, session_vtable_validation) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
 
     /* Tell factory to skip vtable init — we set pointers manually
      * with NULL recv to test validation */
@@ -297,8 +297,8 @@ UTEST(h2, conn_init_and_free) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
 
     int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
     ASSERT_EQ(r, (int)KL_CONN_HTTP2);
@@ -328,8 +328,8 @@ UTEST(h2, stream_create) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/test", test_handler, NULL, NULL);
 
     int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -370,8 +370,8 @@ UTEST(h2, stream_max_limit) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "POST", "/data", test_handler, NULL,
                   test_br_factory);
 
@@ -422,8 +422,8 @@ UTEST(h2, stream_destroy_cleanup) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "POST", "/upload", test_handler, NULL,
                   test_br_factory);
 
@@ -464,8 +464,8 @@ UTEST(h2, cb_on_request_creates_stream) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/hello", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -511,8 +511,8 @@ UTEST(h2, cb_on_request_routes) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/users/:id", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -553,8 +553,8 @@ UTEST(h2, cb_on_request_middleware) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/protected", test_handler, NULL, NULL);
     kl_router_use(&test_router, "*", "/*", test_middleware, NULL);
 
@@ -587,8 +587,8 @@ UTEST(h2, cb_on_data_forwards) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "POST", "/data", test_handler, NULL,
                   test_br_factory);
 
@@ -626,8 +626,8 @@ UTEST(h2, cb_on_data_reject) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "POST", "/data", test_handler, NULL,
                   test_br_factory);
 
@@ -665,8 +665,8 @@ UTEST(h2, cb_on_stream_end_handler) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/hello", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -703,8 +703,8 @@ UTEST(h2, cb_on_stream_end_404) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     /* No routes registered */
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -734,8 +734,8 @@ UTEST(h2, cb_on_stream_reset_cleanup) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "POST", "/upload", test_handler, NULL,
                   test_br_factory);
 
@@ -774,8 +774,8 @@ UTEST(h2, cb_send_wraps_conn_write) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -804,24 +804,24 @@ UTEST(h2, preface_detection_full) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.alloc = &test_alloc;
+    conn.stream.alloc = &test_alloc;
     conn.h2_config = &test_h2_cfg;
     conn.router = &test_router;
 
     /* Provide a stack buffer since read_buf is now a pointer */
     char h2_buf[KL_READ_BUF_SIZE];
-    conn.read_buf = h2_buf;
-    conn.read_cap = sizeof(h2_buf);
+    conn.stream.read_buf = h2_buf;
+    conn.stream.read_cap = sizeof(h2_buf);
 
     /* Simulate 24-byte HTTP/2 preface in read_buf */
     static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-    memcpy(conn.read_buf, preface, 24);
-    conn.read_len = 24;
+    memcpy(conn.stream.read_buf, preface, 24);
+    conn.stream.read_len = 24;
 
     /* We can't call kl_conn_on_readable directly (needs fd),
      * so test the preface detection logic via direct buffer check */
-    ASSERT_EQ(conn.read_len, (size_t)24);
-    ASSERT_EQ(memcmp(conn.read_buf, preface, 24), 0);
+    ASSERT_EQ(conn.stream.read_len, (size_t)24);
+    ASSERT_EQ(memcmp(conn.stream.read_buf, preface, 24), 0);
 
     /* Verify the preface constant matches RFC 7540 */
     ASSERT_EQ((size_t)24, strlen(preface));
@@ -861,8 +861,8 @@ UTEST(h2, alpn_h2) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     conn.h2_config = &test_h2_cfg;
     conn.router = &test_router;
 
@@ -908,8 +908,8 @@ UTEST(h2, multi_stream) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/a", test_handler, NULL, NULL);
     kl_router_add(&test_router, "GET", "/b", test_handler, NULL, NULL);
     kl_router_add(&test_router, "GET", "/c", test_handler, NULL, NULL);
@@ -961,8 +961,8 @@ UTEST(h2, goaway_shutdown) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -991,8 +991,8 @@ UTEST(h2, cleanup_frees_all) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/x", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -1041,8 +1041,8 @@ UTEST(h2, response_header_extraction) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/json", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -1084,8 +1084,8 @@ UTEST(h2, handler_same_api) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
 
     /* Custom handler that sets a custom header */
     handler_status = 201;
@@ -1122,8 +1122,8 @@ UTEST(h2, query_string_parsing) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = pfd[1];
-    conn.alloc = &test_alloc;
+    conn.stream.fd = pfd[1];
+    conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/search", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);

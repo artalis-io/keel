@@ -20,6 +20,11 @@
 #include <pthread.h>
 #include <string.h>
 
+/* Internal layout — the retirement/detachment assertions (6C review) inspect the embedded
+ * KlConnectOp + conn_racing directly. INTERNAL/UNSTABLE, test-only. */
+#include "../src/client_internal.h"
+#include <keel/connect_op.h>
+
 /* A blackhole address (RFC 5737 TEST-NET-1): a connect there stays pending
  * (SYN dropped by the default gateway) until the deadline — used to exercise the
  * slow-first race and the overall deadline. Guarded by blackhole_stalls(). */
@@ -31,6 +36,11 @@ static const char  *g_res_ip[KL_RESOLVE_MAX_ADDRS];
 static int          g_res_ports[KL_RESOLVE_MAX_ADDRS];
 static int          g_res_n;
 static KlResolveReq g_mock_req;
+static int           g_res_defer;      /* 1 = do NOT complete inline (stays RESOLVING) */
+static int           g_res_return_null;/* 1 = resolve() returns NULL (could not start) */
+static int           g_res_cancelled;  /* set by he_resolve_cancel (no done_fn after — KEEL contract) */
+static KlResolveDoneFn g_res_done;     /* deferred: stored resolve callback */
+static void         *g_res_ud;         /* deferred: stored resolve user-data */
 
 static void fill_v4(KlSockAddr *a, const char *ip, int port) {
     uint8_t b[4];
@@ -42,7 +52,14 @@ static KlResolveReq *he_resolve(KlResolver *self, KlEventCtx *ctx,
                                  const char *host, int port,
                                  KlResolveDoneFn done_fn, void *ud) {
     (void)ctx; (void)host; (void)port;
+    if (g_res_return_null)                 /* simulate a resolver that cannot start (6C review) */
+        return NULL;
     g_mock_req.resolver = self;
+    if (g_res_defer) {                     /* stay RESOLVING; a later cancel/complete drives it */
+        g_res_done = done_fn;
+        g_res_ud = ud;
+        return &g_mock_req;
+    }
     KlResolveResult r;
     memset(&r, 0, sizeof(r));
     r.ai_socktype = SOCK_STREAM;
@@ -54,7 +71,8 @@ static KlResolveReq *he_resolve(KlResolver *self, KlEventCtx *ctx,
     done_fn(&g_mock_req, &r, 0, ud);       /* synchronous completion */
     return &g_mock_req;
 }
-static void he_resolve_cancel(KlResolveReq *req) { (void)req; }
+/* KEEL resolvers cancel by freeing the request and do NOT then invoke done_fn. */
+static void he_resolve_cancel(KlResolveReq *req) { (void)req; g_res_cancelled = 1; }
 static void he_resolve_destroy(KlResolver *self) { (void)self; }
 
 static KlResolver g_mock_resolver = {
@@ -150,12 +168,24 @@ static void pump(KlEventCtx *ev, int *done, int max_iters) {
 }
 
 static KlClientConfig he_cfg(int delay_ms, int timeout_ms) {
+    /* Reset the deferred/null/cancel mock knobs — they persist across UTEST cases (file statics). */
+    g_res_defer = 0;
+    g_res_return_null = 0;
+    g_res_cancelled = 0;
+    g_res_done = NULL;
+    g_res_ud = NULL;
     KlClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.resolver = &g_mock_resolver;
     cfg.connect_attempt_delay_ms = delay_ms;
     cfg.timeout_ms = timeout_ms;
     return cfg;
+}
+
+/* Confirmed-detachment predicate (6C review): the embedded KlConnectOp has retired all outstanding
+ * ops + fired on_detach, and the client's HE racing flag is cleared. Checked in every terminal path. */
+static int he_fully_detached(const KlClient *c) {
+    return kl_connect_op_is_detached(&c->connect_op) && c->conn_racing == 0;
 }
 
 /* ── Tests ───────────────────────────────────────────────────────────── */
@@ -182,6 +212,8 @@ UTEST(he, first_wins) {
     ASSERT_TRUE(x.done);
     ASSERT_EQ(200, x.status);
     ASSERT_EQ(KL_ERR_NONE, x.err);
+    pump(&ev, &(int){0}, 5);                 /* let any loser cancellation retire */
+    ASSERT_TRUE(he_fully_detached(c));       /* success path reaches confirmed detachment */
 
     kl_client_free(c);
     kl_event_ctx_free(&ev);
@@ -237,6 +269,7 @@ UTEST(he, all_fail) {
 
     ASSERT_TRUE(x.done);
     ASSERT_EQ(KL_ERR_CONNECT, x.err);
+    ASSERT_TRUE(he_fully_detached(c));       /* all-fail path reaches confirmed detachment */
 
     kl_client_free(c);
     kl_event_ctx_free(&ev);
@@ -319,8 +352,135 @@ UTEST(he, deadline_fires_on_blackhole) {
 
     ASSERT_TRUE(x.done);
     ASSERT_EQ(KL_ERR_TIMEOUT, x.err);
+    ASSERT_TRUE(he_fully_detached(c));   /* deadline during racing → connect op retired + detached */
 
     kl_client_free(c);
+    kl_event_ctx_free(&ev);
+}
+
+/* ── 6C confirmed-detachment / retirement-handshake assertions ─────────────────────────────────
+ * These verify the adapter reports every synchronous provider retirement back to KlConnectOp, so
+ * the op reaches on_detach (and conn_racing clears) in every terminal path. */
+
+/* Winner + (possibly outstanding) loser → confirmed detachment. Two live addresses raced with a
+ * zero attempt-delay: one wins, the other is cancelled/disposed and must retire. */
+UTEST(he_detach, winner_and_loser) {
+    KlServer srv; pthread_t tid;
+    ASSERT_EQ(0, start_server(&srv, &tid));
+    memset(g_res_ip, 0, sizeof(g_res_ip));
+    g_res_n = 2;
+    g_res_ports[0] = srv.bound_port;
+    g_res_ports[1] = srv.bound_port;
+
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    KlClientConfig cfg = he_cfg(0, 2000);    /* delay 0 → both attempts start together */
+    HeCtx x = { 0, 0, 0 };
+    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+                                   NULL, 0, NULL, 0, he_done, &x);
+    ASSERT_TRUE(c != NULL);
+    pump(&ev, &x.done, 200);
+    ASSERT_TRUE(x.done);
+    ASSERT_EQ(200, x.status);
+    pump(&ev, &(int){0}, 5);                 /* let the loser's cancellation retire */
+    ASSERT_TRUE(he_fully_detached(c));
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+    stop_server(&srv, tid);
+}
+
+/* Cancellation while still resolving → detachment. A deferred resolver keeps the op in RESOLVING;
+ * kl_client_cancel must cancel the resolve AND report its retirement so the op detaches. */
+UTEST(he_detach, cancel_during_dns) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    KlClientConfig cfg = he_cfg(30, 2000);
+    g_res_defer = 1;                         /* resolve() defers — stays RESOLVING */
+    g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
+
+    HeCtx x = { 0, 0, 0 };
+    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+                                   NULL, 0, NULL, 0, he_done, &x);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_FALSE(he_fully_detached(c));       /* still resolving — not yet retired */
+
+    kl_client_cancel(c);
+    ASSERT_TRUE(g_res_cancelled);             /* the resolver's cancel ran */
+    ASSERT_TRUE(he_fully_detached(c));        /* ...and its retirement was reported → detached */
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+}
+
+/* Cancellation with multiple in-flight attempts → detachment. Two stalling addresses keep both
+ * connects pending; kl_client_cancel must retire every one. Needs a real connect stall. */
+UTEST(he_detach, cancel_multiple_attempts) {
+    if (!blackhole_stalls())
+        UTEST_SKIP("no reliable connect-stall in this environment");
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    KlClientConfig cfg = he_cfg(0, 5000);    /* delay 0 → both attempts start together */
+    g_res_n = 2;
+    g_res_ip[0] = BLACKHOLE_IP; g_res_ports[0] = 80;
+    g_res_ip[1] = BLACKHOLE_IP; g_res_ports[1] = 81;
+
+    HeCtx x = { 0, 0, 0 };
+    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+                                   NULL, 0, NULL, 0, he_done, &x);
+    ASSERT_TRUE(c != NULL);
+    pump(&ev, &x.done, 5);                    /* let both attempts post (they stall) */
+    ASSERT_FALSE(x.done);
+
+    kl_client_cancel(c);
+    ASSERT_TRUE(he_fully_detached(c));        /* both racing attempts retired → detached */
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+}
+
+/* Resolution failure (DNS phase) → detachment. A deferred resolver is completed with an error; the
+ * op must go terminal FAILED and, with the resolve retired, reach confirmed detachment. (The overall
+ * client deadline covers racing + post-connect, not the DNS phase — the resolver's own timeout does;
+ * a DNS-phase timeout surfaces here as this resolve-failure completion.) */
+UTEST(he_detach, resolve_failed_during_dns) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    KlClientConfig cfg = he_cfg(30, 2000);
+    g_res_defer = 1;                          /* stays RESOLVING until we complete it */
+    g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
+
+    HeCtx x = { 0, 0, 0 };
+    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+                                   NULL, 0, NULL, 0, he_done, &x);
+    ASSERT_TRUE(c != NULL);
+    ASSERT_FALSE(he_fully_detached(c));        /* resolving — not retired */
+
+    ASSERT_TRUE(g_res_done != NULL);
+    g_res_done(&g_mock_req, NULL, -1, g_res_ud);   /* resolver reports failure */
+    ASSERT_TRUE(x.done);
+    ASSERT_EQ(KL_ERR_DNS, x.err);
+    ASSERT_TRUE(he_fully_detached(c));         /* resolve retired → terminal FAILED → detached */
+
+    kl_client_free(c);
+    kl_event_ctx_free(&ev);
+}
+
+/* Resolver-start failure → the request does not start (NULL return) and leaves no outstanding
+ * connect state (ASan/LSan confirm no leak; the op retired terminal+detached before the free). */
+UTEST(he_detach, resolver_returns_null) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
+    KlClientConfig cfg = he_cfg(30, 2000);
+    g_res_return_null = 1;                    /* resolve() cannot start */
+    g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
+
+    HeCtx x = { 0, 0, 0 };
+    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+                                   NULL, 0, NULL, 0, he_done, &x);
+    ASSERT_TRUE(c == NULL);                   /* start failure → NULL, no callback */
+    ASSERT_FALSE(x.done);                     /* the request callback never fired */
+
     kl_event_ctx_free(&ev);
 }
 

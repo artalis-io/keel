@@ -42,12 +42,23 @@ int kl_comp_prime_accepts(struct KlServer *s) {
     return kl_comp_ops(&s->ev.loop)->prime_accepts(s);
 }
 
-int kl_comp_post_recv(KlConn *c) {
-    return kl_comp_ops(&c->ctx->loop)->post_recv(c);
+int kl_comp_shutdown_accepts(struct KlServer *s) {
+    const KlCompletionOps *ops = kl_comp_ops(&s->ev.loop);
+    /* ops is NULL on a readiness builtin (never reached — the caller gates on KL_EVENT_CAP_
+     * COMPLETION); shutdown_accepts is NULL on an autonomous/no-accept backend. Both → success. */
+    if (ops && ops->shutdown_accepts) return ops->shutdown_accepts(s);
+    return 0;
 }
 
-int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
-    return kl_comp_ops(&c->ctx->loop)->post_send(c, iov, iovcnt, total);
+/* Raw transport routers (KlStream form). The HTTP-adapter helpers kl_comp_post_recv/
+ * _send/_sendfile (KlConn form) live in completion_server.c and call these; the backend
+ * behind the vtable does raw I/O only and never sees a KlConn. */
+int kl_comp_post_recv_raw(KlStream *stream, void *buf, size_t cap) {
+    return kl_comp_ops(&stream->ctx->loop)->post_recv(stream, buf, cap);
+}
+
+int kl_comp_post_send_raw(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total) {
+    return kl_comp_ops(&stream->ctx->loop)->post_send(stream, iov, iovcnt, total);
 }
 
 int kl_comp_post_accept(struct KlServer *s) {
@@ -56,8 +67,8 @@ int kl_comp_post_accept(struct KlServer *s) {
 
 int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    return kl_comp_ops(&c->ctx->loop)->post_sendfile(c, head_iov, head_n, head_total,
-                                                     file_fd, count);
+    return kl_comp_ops(&c->stream.ctx->loop)->post_sendfile(c, head_iov, head_n, head_total,
+                                                            file_fd, count);
 }
 
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {

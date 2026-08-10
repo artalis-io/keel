@@ -783,8 +783,8 @@ UTEST(cleanup, abnormal_closure_calls_on_close) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = -1;
-    conn.alloc = &alloc;
+    conn.stream.fd = -1;
+    conn.stream.alloc = &alloc;
     conn.ws = ws;
 
     cleanup_on_close_called = 0;
@@ -812,8 +812,8 @@ UTEST(cleanup, no_callback_if_close_received) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = -1;
-    conn.alloc = &alloc;
+    conn.stream.fd = -1;
+    conn.stream.alloc = &alloc;
     conn.ws = ws;
 
     cleanup_on_close_called = 0;
@@ -859,8 +859,8 @@ UTEST(auto_ping, sends_ping) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = fds[0];
-    conn.alloc = &alloc;
+    conn.stream.fd = fds[0];
+    conn.stream.alloc = &alloc;
     conn.ws = ws;
     ws->conn = &conn;
 
@@ -899,8 +899,8 @@ UTEST(auto_ping, reschedules) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = fds[0];
-    conn.alloc = &alloc;
+    conn.stream.fd = fds[0];
+    conn.stream.alloc = &alloc;
     conn.ws = ws;
     ws->conn = &conn;
 
@@ -964,8 +964,8 @@ UTEST(cleanup, rejects_unmasked_client_frame) {
 
     KlConn conn;
     memset(&conn, 0, sizeof(conn));
-    conn.fd = fds[0];
-    conn.alloc = &alloc;
+    conn.stream.fd = fds[0];
+    conn.stream.alloc = &alloc;
 
     KlWsServerConn *ws = kl_malloc(&alloc, sizeof(KlWsServerConn));
     memset(ws, 0, sizeof(*ws));
