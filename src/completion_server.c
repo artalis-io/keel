@@ -781,19 +781,12 @@ static inline struct KlServer *server_of_ctx(struct KlEventCtx *ctx) {
 static void comp_server_conn_dispatch(struct KlEventCtx *ctx, const void *evp) {
     const KlCompletionEvent *ev = evp;
     switch (ev->kind) {
-    case KL_COMP_ACCEPT: {
+    case KL_COMP_ACCEPT:
         /* ACCEPT recovers the server from the event ctx (6B-3: KlAcceptTarget removed), exactly
-         * like READ/WRITE. Fail closed on a malformed ctx rather than crash — close the just-
-         * accepted fd (if any) and drop the event. */
-        struct KlServer *s = server_of_ctx(ctx);
-        if (!s) {
-            if (kl_handle_valid(ev->accepted_fd))
-                kl_sock_close(ctx->sockets, ev->accepted_fd);
-            break;
-        }
-        comp_on_accept(s, ev);
+         * like READ/WRITE below — server_of_ctx is a containerof over &server->ev and is always
+         * valid on a server loop (see its contract), so it needs no NULL guard. */
+        comp_on_accept(server_of_ctx(ctx), ev);
         break;
-    }
     /* READ/WRITE recover the server from the ctx (their target is the KlStream, which
      * comp_on_read/write resolve to a conn). */
     case KL_COMP_READ:   comp_on_read(server_of_ctx(ctx), ev);   break;
