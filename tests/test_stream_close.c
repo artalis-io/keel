@@ -199,6 +199,9 @@ UTEST(stream_close, closing_refuses_new_writes) {
     ASSERT_EQ(kl_stream_close_begin(&s), 0);
     ASSERT_EQ((int)kl_stream_write(&s, "y", 1), KL_STREAM_CLOSED);   /* new write refused while closing */
     ASSERT_EQ(l.submit_calls, 1);                              /* the refused write never submitted */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);          /* retire in-flight "x" so the write
+                                                                * queue frees (write_free refuses
+                                                                * while a send is in flight) */
     mk_free(&s, buf);
 }
 
@@ -410,6 +413,8 @@ UTEST(stream_close, set_cancel_frozen_once_closing) {
     ASSERT_EQ((int)kl_stream_write(&s, "z", 1), KL_STREAM_ACCEPTED);
     ASSERT_EQ(kl_stream_close_begin(&s), 0);                        /* now CLOSING */
     ASSERT_EQ(kl_stream_set_cancel(&s, lc_cancel_recv, lc_cancel_send), -1); /* frozen */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);          /* retire in-flight "z" so the write
+                                                                * queue frees (not in flight) */
     mk_free(&s, buf);
 }
 

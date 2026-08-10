@@ -133,6 +133,8 @@ UTEST(stream_write, completion_copying_consumes_at_submit_but_blocks_next) {
     ASSERT_EQ((int)c.total, 10);
     ASSERT_EQ(memcmp(c.buf, "helloworld", 10), 0);
 
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);  /* ack in-flight "world" (write_free refuses
+                                                        * while a send is in flight) */
     kl_stream_write_free(&s);
 }
 
@@ -256,7 +258,8 @@ UTEST(stream_write, flush_fails_closed_in_completion_and_without_writer) {
     ASSERT_EQ(kl_stream_flush(&s), -1);            /* completion mode → refused, no mutation */
     ASSERT_EQ(c.submits, 1);                       /* untouched */
     ASSERT_EQ((int)kl_stream_write_pending(&s), 10);
-    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);  /* acks "hello", pumps "world" */
+    ASSERT_EQ(kl_stream_on_write_complete(&s, 1), 0);  /* acks "world" — nothing left in flight */
     kl_stream_write_free(&s);
 
     /* Readiness mode with no writer installed: flush must not deref a NULL write_fn. */

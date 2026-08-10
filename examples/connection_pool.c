@@ -43,7 +43,7 @@ int main(void) {
     for (int i = 0; i < capacity; i++) {
         conns[i] = kl_conn_acquire(&pool, 100 + i);
         printf("  acquired fd=%d, active=%d, state=%u\n",
-               conns[i] ? (int)conns[i]->fd : -1,
+               conns[i] ? (int)conns[i]->stream.fd : -1,
                pool.active_count,
                conns[i] ? (unsigned)conns[i]->state : 0);
     }
@@ -56,13 +56,13 @@ int main(void) {
 
     /* Release one and re-acquire */
     printf("\n--- Release + Re-acquire ---\n");
-    conns[1]->fd = -1;  /* avoid closing real fds */
+    conns[1]->stream.fd = KL_INVALID_SOCKET;  /* avoid closing real fds */
     kl_conn_release(&pool, conns[1]);
     printf("  released slot, active=%d\n", pool.active_count);
 
     KlConn *reused = kl_conn_acquire(&pool, 201);
     printf("  re-acquired fd=%d, active=%d\n",
-           reused ? (int)reused->fd : -1, pool.active_count);
+           reused ? (int)reused->stream.fd : -1, pool.active_count);
 
     /* Timing */
     printf("\n--- Monotonic clock ---\n");
@@ -73,10 +73,10 @@ int main(void) {
            t2 >= t1 ? "YES" : "NO");
 
     /* Cleanup (set fake fds to -1 to avoid close() on bad fds) */
-    conns[0]->fd = -1;
-    conns[2]->fd = -1;
-    conns[3]->fd = -1;
-    if (reused) reused->fd = -1;
+    conns[0]->stream.fd = KL_INVALID_SOCKET;
+    conns[2]->stream.fd = KL_INVALID_SOCKET;
+    conns[3]->stream.fd = KL_INVALID_SOCKET;
+    if (reused) reused->stream.fd = KL_INVALID_SOCKET;
     kl_conn_pool_free(&pool);
     printf("\nPool freed.\n");
 
