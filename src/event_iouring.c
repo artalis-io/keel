@@ -629,10 +629,10 @@ static int iou_comp_post_udp_recv(struct KlUdp *udp) {
     if (!op) return -1;
     op->type = IOU_UDP_RECV;
     op->udp = udp;
-    op->fd = udp->fd;
+    op->fd = udp->dg.fd;
     op->peer_len = sizeof(op->peer);
-    op->msgiov.iov_base = udp->recv_buf;
-    op->msgiov.iov_len = udp->recv_buf_size;
+    op->msgiov.iov_base = udp->dg.recv_buf;
+    op->msgiov.iov_len = udp->dg.recv_buf_size;
     op->msgh.msg_name = &op->peer;
     op->msgh.msg_namelen = sizeof(op->peer);
     op->msgh.msg_iov = &op->msgiov;
@@ -654,7 +654,7 @@ static int iou_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t le
     if (!op) return -1;
     op->type = IOU_UDP_SEND;
     op->udp = udp;
-    op->fd = udp->fd;
+    op->fd = udp->dg.fd;
     op->send_total = len;
     op->sendcap = len ? len : 1;
     op->sendbuf = kl_malloc(st->alloc, op->sendcap);
@@ -830,11 +830,11 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         ev->target = op->udp;
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
-        ev->buf = op->udp->recv_buf;
+        ev->buf = op->udp->dg.recv_buf;
         if (res >= 0 && op->msgh.msg_namelen > 0) /* source: native → neutral at the seam */
             (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&op->peer,
                                           op->msgh.msg_namelen);
-        if (res >= 0 && op->udp->pktinfo) {       /* local (dest) addr via pktinfo cmsg */
+        if (res >= 0 && op->udp->dg.pktinfo) {       /* local (dest) addr via pktinfo cmsg */
             struct sockaddr_storage local_ss;
             socklen_t local_len = kl_udp_parse_local(&op->msgh, &local_ss);
             if (local_len)
@@ -842,7 +842,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
                                               (struct sockaddr *)&local_ss, local_len);
         }
         if (res >= 0) {
-            if (op->udp->recv_gro)                /* GRO coalesced segment size */
+            if (op->udp->dg.recv_gro)                /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&op->msgh);
             if (op->msgh.msg_flags & MSG_TRUNC)   /* datagram truncated to recv_buf */
                 ev->truncated = 1;

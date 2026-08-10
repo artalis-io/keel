@@ -100,7 +100,7 @@ typedef struct KlIocpOp {
     struct sockaddr_storage src;               /* UDP_RECV: source addr (WSARecvMsg name) */
     int           src_len;                     /* UDP_RECV: source addr length */
     WSAMSG        umsg;                         /* UDP_RECV: WSARecvMsg header (name + buf + control) */
-    WSABUF        ubuf;                         /* UDP_RECV: single recv iovec into udp->recv_buf */
+    WSABUF        ubuf;                         /* UDP_RECV: single recv iovec into udp->dg.recv_buf */
     char          uctrl[KL_UDP_WIN_RX_CMSG_SPACE]; /* UDP_RECV: pktinfo control buffer (local addr) */
     int           via_recvmsg;                 /* UDP_RECV: 1 = WSARecvMsg (has control), 0 = WSARecvFrom */
     char         *sendbuf;                     /* WRITE/SENDFILE: contiguous response (head) copy */
@@ -496,13 +496,13 @@ static int iocp_comp_post_udp_recv(KlUdp *udp) {
     op->alloc = st->alloc;
     op->udp = udp;
     op->src_len = (int)sizeof(op->src);
-    iocp_op_register(st, op, (SOCKET)udp->fd);
+    iocp_op_register(st, op, (SOCKET)udp->dg.fd);
 
-    LPFN_WSARECVMSG recvmsg = kl_udp_win_get_recvmsg((SOCKET)udp->fd);
+    LPFN_WSARECVMSG recvmsg = kl_udp_win_get_recvmsg((SOCKET)udp->dg.fd);
     if (recvmsg) {
         op->via_recvmsg = 1;
-        op->ubuf.len = (ULONG)udp->recv_buf_size;
-        op->ubuf.buf = (char *)udp->recv_buf;
+        op->ubuf.len = (ULONG)udp->dg.recv_buf_size;
+        op->ubuf.buf = (char *)udp->dg.recv_buf;
         op->umsg.name = (SOCKADDR *)&op->src;
         op->umsg.namelen = (INT)sizeof(op->src);
         op->umsg.lpBuffers = &op->ubuf;
@@ -511,7 +511,7 @@ static int iocp_comp_post_udp_recv(KlUdp *udp) {
         op->umsg.Control.buf = op->uctrl;
         op->umsg.dwFlags = 0;
         DWORD recvd = 0;
-        int rc = recvmsg((SOCKET)udp->fd, &op->umsg, &recvd, &op->ov, NULL);
+        int rc = recvmsg((SOCKET)udp->dg.fd, &op->umsg, &recvd, &op->ov, NULL);
         if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
             iocp_op_free(op);
             return -1;
@@ -520,9 +520,9 @@ static int iocp_comp_post_udp_recv(KlUdp *udp) {
     }
 
     /* Fallback: no WSARecvMsg extension — source address only. */
-    WSABUF buf = { (ULONG)udp->recv_buf_size, (char *)udp->recv_buf };
+    WSABUF buf = { (ULONG)udp->dg.recv_buf_size, (char *)udp->dg.recv_buf };
     DWORD flags = 0, recvd = 0;
-    int rc = WSARecvFrom((SOCKET)udp->fd, &buf, 1, &recvd, &flags,
+    int rc = WSARecvFrom((SOCKET)udp->dg.fd, &buf, 1, &recvd, &flags,
                          (struct sockaddr *)&op->src, &op->src_len, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);
@@ -543,7 +543,7 @@ static int iocp_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
     op->alloc = st->alloc;
     op->udp = udp;
     op->send_total = len;
-    iocp_op_register(st, op, (SOCKET)udp->fd);
+    iocp_op_register(st, op, (SOCKET)udp->dg.fd);
 
     op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
@@ -554,7 +554,7 @@ static int iocp_comp_post_udp_send(KlUdp *udp, const void *data, size_t len,
 
     WSABUF buf = { (ULONG)len, op->sendbuf };
     DWORD sent = 0;
-    int rc = WSASendTo((SOCKET)udp->fd, &buf, 1, &sent, 0,
+    int rc = WSASendTo((SOCKET)udp->dg.fd, &buf, 1, &sent, 0,
                        (struct sockaddr *)&op->src, op->src_len, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);
@@ -808,7 +808,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             out[count].target = op->udp;
             out[count].bytes = bytes;
             out[count].ok = 1;
-            out[count].buf = op->udp->recv_buf;
+            out[count].buf = op->udp->dg.recv_buf;
             /* Only a completion that actually received a datagram (bytes > 0) carries a
              * valid source address + pktinfo control message. A cancelled/failed overlapped
              * recv — e.g. the outstanding WSARecvMsg completing when the socket is closed at
@@ -823,7 +823,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                                                   (struct sockaddr *)&op->src,
                                                   (socklen_t)slen);
                 /* Local (dest) address from the pktinfo control message (WSARecvMsg path). */
-                if (op->via_recvmsg && op->udp->pktinfo) {
+                if (op->via_recvmsg && op->udp->dg.pktinfo) {
                     struct sockaddr_storage local_ss;
                     socklen_t local_len = kl_udp_win_parse_local(&op->umsg, &local_ss);
                     if (local_len)

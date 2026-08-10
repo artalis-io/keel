@@ -43,31 +43,31 @@ static inline void *udp_sp_ctx(const KlUdp *u) {
 
 /* Reconcile event-loop interest with current recv/send state. */
 void kl_udp_update_interest(KlUdp *udp) {
-    if (!kl_handle_valid(udp->fd))
+    if (!kl_handle_valid(udp->dg.fd))
         return;
     KlEventMask want = 0;
-    if (udp->recv_active) want |= KL_EVENT_READ;
-    if (udp->q_head)      want |= KL_EVENT_WRITE;
+    if (udp->dg.recv_active) want |= KL_EVENT_READ;
+    if (udp->dg.q_head)      want |= KL_EVENT_WRITE;
 
-    if (want == udp->want_mask)
+    if (want == udp->dg.want_mask)
         return;
 
     if (want == 0) {
-        kl_watcher_del(udp->ctx, udp->fd);
-        udp->watcher_added = 0;
-        udp->want_mask = 0;
-    } else if (!udp->watcher_added) {
-        if (kl_watcher_add(udp->ctx, udp->fd, want, udp_on_ready, udp) == 0) {
-            udp->watcher_added = 1;
-            udp->want_mask = want;
+        kl_watcher_del(udp->ctx, udp->dg.fd);
+        udp->dg.watcher_added = 0;
+        udp->dg.want_mask = 0;
+    } else if (!udp->dg.watcher_added) {
+        if (kl_watcher_add(udp->ctx, udp->dg.fd, want, udp_on_ready, udp) == 0) {
+            udp->dg.watcher_added = 1;
+            udp->dg.want_mask = want;
         } else {
-            udp->last_error = KL_ERR_EVENT_ADD;
+            udp->dg.last_error = KL_ERR_EVENT_ADD;
         }
     } else {
-        if (kl_watcher_mod(udp->ctx, udp->fd, want) == 0)
-            udp->want_mask = want;
+        if (kl_watcher_mod(udp->ctx, udp->dg.fd, want) == 0)
+            udp->dg.want_mask = want;
         else
-            udp->last_error = KL_ERR_EVENT_ADD;
+            udp->dg.last_error = KL_ERR_EVENT_ADD;
     }
 }
 
@@ -76,21 +76,21 @@ void kl_udp_update_interest(KlUdp *udp) {
 static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
                        const KlSockAddr *dest, const KlSockAddr *src, int tos) {
     /* Backpressure cap (avoids max_send_queue - len underflow). */
-    if (len > udp->max_send_queue || udp->q_bytes > udp->max_send_queue - len) {
-        udp->dropped++;
-        udp->last_error = KL_ERR_QUEUE_FULL;
+    if (len > udp->dg.max_send_queue || udp->dg.q_bytes > udp->dg.max_send_queue - len) {
+        udp->dg.dropped++;
+        udp->dg.last_error = KL_ERR_QUEUE_FULL;
         return -1;
     }
     if (len > SIZE_MAX - sizeof(KlUdpDatagram)) {
-        udp->dropped++;
-        udp->last_error = KL_ERR_OVERFLOW;
+        udp->dg.dropped++;
+        udp->dg.last_error = KL_ERR_OVERFLOW;
         return -1;
     }
 
     size_t node_sz = sizeof(KlUdpDatagram) + len;
     KlUdpDatagram *node = kl_malloc(udp->alloc, node_sz);
     if (!node) {
-        udp->last_error = KL_ERR_ALLOC;
+        udp->dg.last_error = KL_ERR_ALLOC;
         return -1;
     }
     node->next = NULL;
@@ -102,10 +102,10 @@ static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
     if (len)
         memcpy(node->data, data, len);
 
-    if (udp->q_tail) udp->q_tail->next = node;
-    else             udp->q_head = node;
-    udp->q_tail = node;
-    udp->q_bytes += len;
+    if (udp->dg.q_tail) udp->dg.q_tail->next = node;
+    else             udp->dg.q_head = node;
+    udp->dg.q_tail = node;
+    udp->dg.q_bytes += len;
 
     kl_udp_update_interest(udp);   /* arm WRITE */
     return 0;
@@ -113,8 +113,8 @@ static int udp_enqueue(KlUdp *udp, const void *data, size_t len,
 
 static int udp_send_common(KlUdp *udp, const void *data, size_t len,
                            const KlSockAddr *dest, const KlSockAddr *src, int tos) {
-    if (!kl_handle_valid(udp->fd)) {
-        udp->last_error = KL_ERR_INVALID_ARG;
+    if (!kl_handle_valid(udp->dg.fd)) {
+        udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
 
@@ -125,29 +125,29 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
      * on_drain fires when the last in-flight send completes (kl_udp_comp_on_send). */
     if (src == NULL && tos < 0 &&
         (kl_event_caps(&udp->ctx->loop) & KL_EVENT_CAP_COMPLETION)) {
-        if (len > udp->max_send_queue || udp->q_bytes > udp->max_send_queue - len) {
-            udp->last_error = KL_ERR_IO;   /* backpressure cap — drop the datagram */
+        if (len > udp->dg.max_send_queue || udp->dg.q_bytes > udp->dg.max_send_queue - len) {
+            udp->dg.last_error = KL_ERR_IO;   /* backpressure cap — drop the datagram */
             return -1;
         }
         if (kl_comp_post_udp_send(udp, data, len, dest) < 0) {
-            udp->last_error = KL_ERR_IO;
+            udp->dg.last_error = KL_ERR_IO;
             return -1;
         }
-        udp->q_bytes += len;
+        udp->dg.q_bytes += len;
         return 0;
     }
 
     /* Preserve ordering: if anything is queued, queue behind it. */
-    if (udp->q_head)
+    if (udp->dg.q_head)
         return udp_enqueue(udp, data, len, dest, src, tos);
 
-    ssize_t n = udp_dg(udp)->send(udp_sp_ctx(udp), udp->fd, data, len, dest, src, tos);
+    ssize_t n = udp_dg(udp)->send(udp_sp_ctx(udp), udp->dg.fd, data, len, dest, src, tos);
     if (n >= 0)
         return 0;   /* UDP send is all-or-nothing — no short-send handling */
     if (errno == EAGAIN || errno == EWOULDBLOCK)
         return udp_enqueue(udp, data, len, dest, src, tos);
 
-    udp->last_error = KL_ERR_IO;
+    udp->dg.last_error = KL_ERR_IO;
     return -1;
 }
 
@@ -172,7 +172,7 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
             if (udp->on_recv)
                 udp->on_recv(udp, (const char *)data + off, chunk,
                              src, local, udp->recv_ud);
-            if (!udp->recv_active || !kl_handle_valid(udp->fd))
+            if (!udp->dg.recv_active || !kl_handle_valid(udp->dg.fd))
                 return;   /* callback stopped/freed mid-split */
             off += chunk;
         }
@@ -193,11 +193,11 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
 
 /* Dequeue+free the first `k` queued datagrams from the front (sent or dropped). */
 static void udp_drop_front(KlUdp *udp, int k) {
-    for (int i = 0; i < k && udp->q_head; i++) {
-        KlUdpDatagram *node = udp->q_head;
-        udp->q_head = node->next;
-        if (!udp->q_head) udp->q_tail = NULL;
-        udp->q_bytes -= node->len;
+    for (int i = 0; i < k && udp->dg.q_head; i++) {
+        KlUdpDatagram *node = udp->dg.q_head;
+        udp->dg.q_head = node->next;
+        if (!udp->dg.q_head) udp->dg.q_tail = NULL;
+        udp->dg.q_bytes -= node->len;
         kl_free(udp->alloc, node, sizeof(KlUdpDatagram) + node->len);
     }
 }
@@ -206,51 +206,51 @@ static void udp_drop_front(KlUdp *udp, int k) {
  * tx batch + send_batch op are present, else one send() per node. */
 static void udp_flush_dgram(KlUdp *udp, const KlDatagramOps *dg) {
     void *ctx = udp_sp_ctx(udp);
-    int had_data = (udp->q_head != NULL);
+    int had_data = (udp->dg.q_head != NULL);
 
-    if (udp->tx_batch && dg->send_batch) {
+    if (udp->dg.tx_batch && dg->send_batch) {
         KlDgramTxDesc descs[UDP_MMSG_MAX];
-        while (udp->q_head) {
+        while (udp->dg.q_head) {
             int cnt = 0;
-            for (const KlUdpDatagram *node = udp->q_head;
-                 node && cnt < udp->mmsg_batch && cnt < UDP_MMSG_MAX;
+            for (const KlUdpDatagram *node = udp->dg.q_head;
+                 node && cnt < udp->dg.mmsg_batch && cnt < UDP_MMSG_MAX;
                  node = node->next, cnt++) {
                 descs[cnt].data = node->data; descs[cnt].len = node->len;
                 descs[cnt].dest = node->dest; descs[cnt].src = node->src;
                 descs[cnt].tos  = node->tos;
             }
             if (cnt == 0) break;
-            int sent = dg->send_batch(ctx, udp->fd, udp->tx_batch, descs, cnt);
+            int sent = dg->send_batch(ctx, udp->dg.fd, udp->dg.tx_batch, descs, cnt);
             if (sent < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                udp->last_error = KL_ERR_IO; udp->dropped++;
+                udp->dg.last_error = KL_ERR_IO; udp->dg.dropped++;
                 udp_drop_front(udp, 1); continue;   /* drop the head, retry */
             }
             udp_drop_front(udp, sent);
             if (sent < cnt) break;
         }
     } else {
-        while (udp->q_head) {
-            KlUdpDatagram *node = udp->q_head;
-            kl_ssize_t n = dg->send(ctx, udp->fd, node->data, node->len,
+        while (udp->dg.q_head) {
+            KlUdpDatagram *node = udp->dg.q_head;
+            kl_ssize_t n = dg->send(ctx, udp->dg.fd, node->data, node->len,
                                     &node->dest, &node->src, node->tos);
             if (n < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                udp->last_error = KL_ERR_IO; udp->dropped++;
+                udp->dg.last_error = KL_ERR_IO; udp->dg.dropped++;
             }
             udp_drop_front(udp, 1);
         }
     }
     kl_udp_update_interest(udp);
-    if (had_data && udp->q_head == NULL && udp->on_drain)
+    if (had_data && udp->dg.q_head == NULL && udp->on_drain)
         udp->on_drain(udp, udp->drain_ud);
 }
 
 /* Deliver one KlDgramRxSlot/recv result to the machine. */
 static void udp_deliver_slot(KlUdp *udp, const void *data, size_t len,
                              const KlSockAddr *src, const KlDgramRxMeta *meta) {
-    if (meta->truncated) udp->truncated++;
-    udp->recv_tos_val = meta->tos;
+    if (meta->truncated) udp->dg.truncated++;
+    udp->dg.recv_tos_val = meta->tos;
     kl_udp_deliver(udp, data, len, meta->gro_seg,
                    (src && kl_sockaddr_family(src) != KL_AF_UNSPEC) ? src : NULL,
                    meta->has_local ? &meta->local : NULL);
@@ -261,19 +261,19 @@ static void udp_deliver_slot(KlUdp *udp, const void *data, size_t len,
 static void udp_recv_dgram(KlUdp *udp, const KlDatagramOps *dg) {
     void *ctx = udp_sp_ctx(udp);
 
-    if (udp->rx_batch && dg->recv_batch) {
+    if (udp->dg.rx_batch && dg->recv_batch) {
         KlDgramRxSlot slots[UDP_MMSG_MAX];
-        int max = udp->mmsg_batch < UDP_MMSG_MAX ? udp->mmsg_batch : UDP_MMSG_MAX;
+        int max = udp->dg.mmsg_batch < UDP_MMSG_MAX ? udp->dg.mmsg_batch : UDP_MMSG_MAX;
         for (;;) {
-            int cnt = dg->recv_batch(ctx, udp->fd, udp->rx_batch, slots, max);
+            int cnt = dg->recv_batch(ctx, udp->dg.fd, udp->dg.rx_batch, slots, max);
             if (cnt < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) udp->last_error = KL_ERR_IO;
+                if (errno != EAGAIN && errno != EWOULDBLOCK) udp->dg.last_error = KL_ERR_IO;
                 break;
             }
             if (cnt == 0) break;
             for (int i = 0; i < cnt; i++) {
                 udp_deliver_slot(udp, slots[i].data, slots[i].len, &slots[i].src, &slots[i].meta);
-                if (!udp->recv_active || !kl_handle_valid(udp->fd)) return;
+                if (!udp->dg.recv_active || !kl_handle_valid(udp->dg.fd)) return;
             }
             if (cnt < max) break;   /* fewer than a full batch → socket drained */
         }
@@ -283,13 +283,13 @@ static void udp_recv_dgram(KlUdp *udp, const KlDatagramOps *dg) {
     for (;;) {
         KlSockAddr src;
         KlDgramRxMeta meta;
-        kl_ssize_t n = dg->recv(ctx, udp->fd, udp->recv_buf, udp->recv_buf_size, &src, &meta);
+        kl_ssize_t n = dg->recv(ctx, udp->dg.fd, udp->dg.recv_buf, udp->dg.recv_buf_size, &src, &meta);
         if (n < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) udp->last_error = KL_ERR_IO;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) udp->dg.last_error = KL_ERR_IO;
             break;
         }
-        udp_deliver_slot(udp, udp->recv_buf, (size_t)n, &src, &meta);
-        if (!udp->recv_active || !kl_handle_valid(udp->fd)) break;
+        udp_deliver_slot(udp, udp->dg.recv_buf, (size_t)n, &src, &meta);
+        if (!udp->dg.recv_active || !kl_handle_valid(udp->dg.fd)) break;
     }
 }
 
@@ -308,13 +308,13 @@ static int udp_group_ok(int family, const char *group) {
 
 /* Join/leave a multicast group through the provider datagram ops. */
 static int udp_mcast_dispatch(KlUdp *udp, const char *group, unsigned iface, int join) {
-    if (!udp_group_ok(udp->family, group)) {
-        udp->last_error = KL_ERR_INVALID_ARG;   /* not a multicast addr / family mismatch */
+    if (!udp_group_ok(udp->dg.family, group)) {
+        udp->dg.last_error = KL_ERR_INVALID_ARG;   /* not a multicast addr / family mismatch */
         return -1;
     }
-    int rc = udp_dg(udp)->mcast_membership(udp_sp_ctx(udp), udp->fd, udp->family,
+    int rc = udp_dg(udp)->mcast_membership(udp_sp_ctx(udp), udp->dg.fd, udp->dg.family,
                                            group, iface, join);
-    if (rc != 0) udp->last_error = KL_ERR_SOCKET;
+    if (rc != 0) udp->dg.last_error = KL_ERR_SOCKET;
     return rc;
 }
 
@@ -324,7 +324,7 @@ static void udp_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data) 
     const KlDatagramOps *dg = udp_dg(udp);
     if (ready & KL_EVENT_WRITE)
         udp_flush_dgram(udp, dg);
-    if (kl_handle_valid(udp->fd) && udp->recv_active && (ready & KL_EVENT_READ))
+    if (kl_handle_valid(udp->dg.fd) && udp->dg.recv_active && (ready & KL_EVENT_READ))
         udp_recv_dgram(udp, dg);
 }
 
@@ -334,10 +334,10 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     if (!udp)
         return -1;
     memset(udp, 0, sizeof(*udp));
-    udp->fd = KL_INVALID_SOCKET;
+    udp->dg.fd = KL_INVALID_SOCKET;
 
     if (!cfg || !cfg->ctx) {
-        udp->last_error = KL_ERR_INVALID_ARG;
+        udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     udp->ctx = cfg->ctx;
@@ -347,26 +347,26 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     cfg->ctx->comp_udp_dispatch = kl_udp_comp_dispatch;
     udp->alloc = cfg->alloc ? cfg->alloc : cfg->ctx->alloc;
     if (!udp->alloc) {
-        udp->last_error = KL_ERR_INVALID_ARG;
+        udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     /* Datagram I/O is the socket provider's datagram vtable — a provider without it
      * (no KL_SOCK_CAP_DATAGRAM) cannot back a KlUdp. */
     if (!udp_dg(udp)) {
-        udp->last_error = KL_ERR_INVALID_ARG;
+        udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
 
     size_t rbs = cfg->recv_buf_size ? cfg->recv_buf_size : 2048;
     if (rbs > 65535) rbs = 65535;
-    udp->recv_buf_size = rbs;
-    udp->max_send_queue = cfg->max_send_queue ? cfg->max_send_queue : (256u * 1024u);
+    udp->dg.recv_buf_size = rbs;
+    udp->dg.max_send_queue = cfg->max_send_queue ? cfg->max_send_queue : (256u * 1024u);
 
     /* recv/sendmmsg batch size: 0 = default, clamp to [1, UDP_MMSG_MAX]. */
     int batch = cfg->mmsg_batch > 0 ? cfg->mmsg_batch : UDP_MMSG_DEFAULT;
     if (batch > UDP_MMSG_MAX) batch = UDP_MMSG_MAX;
     if (batch < 1) batch = 1;
-    udp->mmsg_batch = batch;
+    udp->dg.mmsg_batch = batch;
 
     int family = cfg->family;
     KlSockAddr bind_sa;
@@ -374,7 +374,7 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
     if (cfg->bind_addr) {
         /* Numeric bind address (no DNS) — pure, works on lwIP too. */
         if (kl_sockaddr_parse(&bind_sa, cfg->bind_addr, cfg->bind_port) != 0) {
-            udp->last_error = KL_ERR_INVALID_ARG;
+            udp->dg.last_error = KL_ERR_INVALID_ARG;
             return -1;
         }
         family = (kl_sockaddr_family(&bind_sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
@@ -383,16 +383,16 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         family = AF_INET;
     }
 
-    udp->fd = kl_sock_socket(udp->ctx->sockets, family, SOCK_DGRAM, 0);
-    if (!kl_handle_valid(udp->fd)) {
-        udp->last_error = KL_ERR_SOCKET;
+    udp->dg.fd = kl_sock_socket(udp->ctx->sockets, family, SOCK_DGRAM, 0);
+    if (!kl_handle_valid(udp->dg.fd)) {
+        udp->dg.last_error = KL_ERR_SOCKET;
         goto fail;
     }
-    udp->family = family;
-    udp->recv_tos_val = -1;
-    kl_sock_set_cloexec(udp->ctx->sockets, udp->fd);
-    if (kl_sock_set_nonblocking(udp->ctx->sockets, udp->fd) < 0) {
-        udp->last_error = KL_ERR_SOCKET;
+    udp->dg.family = family;
+    udp->dg.recv_tos_val = -1;
+    kl_sock_set_cloexec(udp->ctx->sockets, udp->dg.fd);
+    if (kl_sock_set_nonblocking(udp->ctx->sockets, udp->dg.fd) < 0) {
+        udp->dg.last_error = KL_ERR_SOCKET;
         goto fail;
     }
 
@@ -400,15 +400,15 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
      * per-datagram pktinfo/GRO/TOS capture): the provider's configure() folds all
      * three and reports the capture options the kernel accepted. */
     {
-        uint32_t caps = udp_dg(udp)->configure(udp_sp_ctx(udp), udp->fd, family, cfg);
-        udp->pktinfo  = (caps & KL_DGRAM_RX_PKTINFO) ? 1 : 0;
-        udp->recv_gro = (caps & KL_DGRAM_RX_GRO) ? 1 : 0;
-        udp->recv_tos = (caps & KL_DGRAM_RX_TOS) ? 1 : 0;
+        uint32_t caps = udp_dg(udp)->configure(udp_sp_ctx(udp), udp->dg.fd, family, cfg);
+        udp->dg.pktinfo  = (caps & KL_DGRAM_RX_PKTINFO) ? 1 : 0;
+        udp->dg.recv_gro = (caps & KL_DGRAM_RX_GRO) ? 1 : 0;
+        udp->dg.recv_tos = (caps & KL_DGRAM_RX_TOS) ? 1 : 0;
     }
 
     if (have_bind) {
-        if (kl_sock_bind(udp->ctx->sockets, udp->fd, &bind_sa) < 0) {
-            udp->last_error = KL_ERR_BIND;
+        if (kl_sock_bind(udp->ctx->sockets, udp->dg.fd, &bind_sa) < 0) {
+            udp->dg.last_error = KL_ERR_BIND;
             goto fail;
         }
     }
@@ -420,9 +420,9 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
             goto fail;   /* last_error set by helper */
     }
 
-    udp->recv_buf = kl_malloc(udp->alloc, udp->recv_buf_size);
-    if (!udp->recv_buf) {
-        udp->last_error = KL_ERR_ALLOC;
+    udp->dg.recv_buf = kl_malloc(udp->alloc, udp->dg.recv_buf_size);
+    if (!udp->dg.recv_buf) {
+        udp->dg.last_error = KL_ERR_ALLOC;
         goto fail;
     }
 
@@ -432,15 +432,15 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
      * optimization) — a no-op where batching is unavailable. */
     {
         const KlDatagramOps *dg = udp_dg(udp);
-        if (udp->mmsg_batch > 1 && dg->tx_batch_new && !udp->tx_batch)
-            udp->tx_batch = dg->tx_batch_new(udp->alloc, udp->mmsg_batch);
+        if (udp->dg.mmsg_batch > 1 && dg->tx_batch_new && !udp->dg.tx_batch)
+            udp->dg.tx_batch = dg->tx_batch_new(udp->alloc, udp->dg.mmsg_batch);
     }
     return 0;
 
 fail:
-    if (kl_handle_valid(udp->fd)) {
-        kl_sock_close(udp->ctx->sockets, udp->fd);
-        udp->fd = KL_INVALID_SOCKET;
+    if (kl_handle_valid(udp->dg.fd)) {
+        kl_sock_close(udp->ctx->sockets, udp->dg.fd);
+        udp->dg.fd = KL_INVALID_SOCKET;
     }
     return -1;
 }
@@ -448,62 +448,62 @@ fail:
 void kl_udp_free(KlUdp *udp) {
     if (!udp)
         return;
-    udp->recv_active = 0;
-    if (udp->watcher_added && kl_handle_valid(udp->fd))
-        kl_watcher_del(udp->ctx, udp->fd);
-    udp->watcher_added = 0;
-    udp->want_mask = 0;
+    udp->dg.recv_active = 0;
+    if (udp->dg.watcher_added && kl_handle_valid(udp->dg.fd))
+        kl_watcher_del(udp->ctx, udp->dg.fd);
+    udp->dg.watcher_added = 0;
+    udp->dg.want_mask = 0;
 
-    KlUdpDatagram *node = udp->q_head;
+    KlUdpDatagram *node = udp->dg.q_head;
     while (node) {
         KlUdpDatagram *next = node->next;
         kl_free(udp->alloc, node, sizeof(KlUdpDatagram) + node->len);
         node = next;
     }
-    udp->q_head = udp->q_tail = NULL;
-    udp->q_bytes = 0;
+    udp->dg.q_head = udp->dg.q_tail = NULL;
+    udp->dg.q_bytes = 0;
 
-    if (udp->recv_buf) {
-        kl_free(udp->alloc, udp->recv_buf, udp->recv_buf_size);
-        udp->recv_buf = NULL;
+    if (udp->dg.recv_buf) {
+        kl_free(udp->alloc, udp->dg.recv_buf, udp->dg.recv_buf_size);
+        udp->dg.recv_buf = NULL;
     }
     {
         /* dg may be NULL here if init failed before the provider check (free is
          * called on the half-built udp) — guard it. */
         const KlDatagramOps *dg = udp_dg(udp);
         if (dg) {
-            if (udp->rx_batch && dg->rx_batch_free) dg->rx_batch_free(udp->alloc, udp->rx_batch);
-            if (udp->tx_batch && dg->tx_batch_free) dg->tx_batch_free(udp->alloc, udp->tx_batch);
+            if (udp->dg.rx_batch && dg->rx_batch_free) dg->rx_batch_free(udp->alloc, udp->dg.rx_batch);
+            if (udp->dg.tx_batch && dg->tx_batch_free) dg->tx_batch_free(udp->alloc, udp->dg.tx_batch);
         }
-        udp->rx_batch = udp->tx_batch = NULL;
+        udp->dg.rx_batch = udp->dg.tx_batch = NULL;
     }
-    if (kl_handle_valid(udp->fd)) {
-        kl_sock_close(udp->ctx->sockets, udp->fd);
-        udp->fd = KL_INVALID_SOCKET;
+    if (kl_handle_valid(udp->dg.fd)) {
+        kl_sock_close(udp->ctx->sockets, udp->dg.fd);
+        udp->dg.fd = KL_INVALID_SOCKET;
     }
 }
 
 int kl_udp_connect(KlUdp *udp, const KlSockAddr *peer) {
-    if (!udp || !kl_handle_valid(udp->fd) || !peer) {
-        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+    if (!udp || !kl_handle_valid(udp->dg.fd) || !peer) {
+        if (udp) udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    if (kl_sock_connect(udp->ctx->sockets, udp->fd, peer) < 0) {
-        udp->last_error = KL_ERR_CONNECT;
+    if (kl_sock_connect(udp->ctx->sockets, udp->dg.fd, peer) < 0) {
+        udp->dg.last_error = KL_ERR_CONNECT;
         return -1;
     }
-    udp->connected = 1;
+    udp->dg.connected = 1;
     return 0;
 }
 
 int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
-    if (!udp || !kl_handle_valid(udp->fd) || !on_recv) {
-        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+    if (!udp || !kl_handle_valid(udp->dg.fd) || !on_recv) {
+        if (udp) udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     udp->on_recv = on_recv;
     udp->recv_ud = user_data;
-    udp->recv_active = 1;
+    udp->dg.recv_active = 1;
 
     /* Completion loop (IOCP): a readiness watcher never fires here — associate the
      * socket with the port and post an overlapped WSARecvFrom instead (8b-4c). The
@@ -511,10 +511,10 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
      * recvmmsg batch below is not allocated here: the completion path never runs the
      * readiness recv loop that consumes it. */
     if (kl_event_caps(&udp->ctx->loop) & KL_EVENT_CAP_COMPLETION) {
-        if (kl_event_add(&udp->ctx->loop, udp->fd, KL_EVENT_READ, udp) < 0 ||
+        if (kl_event_add(&udp->ctx->loop, udp->dg.fd, KL_EVENT_READ, udp) < 0 ||
             kl_comp_post_udp_recv(udp) < 0) {
-            udp->recv_active = 0;
-            udp->last_error = KL_ERR_IO;
+            udp->dg.recv_active = 0;
+            udp->dg.last_error = KL_ERR_IO;
             return -1;
         }
         return 0;
@@ -525,13 +525,13 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
      * → the per-datagram path is used; a no-op where batching is unavailable. */
     {
         const KlDatagramOps *dg = udp_dg(udp);
-        if (udp->mmsg_batch > 1 && dg->rx_batch_new && !udp->rx_batch)
-            udp->rx_batch = dg->rx_batch_new(udp->alloc, udp->mmsg_batch, udp->recv_buf_size);
+        if (udp->dg.mmsg_batch > 1 && dg->rx_batch_new && !udp->dg.rx_batch)
+            udp->dg.rx_batch = dg->rx_batch_new(udp->alloc, udp->dg.mmsg_batch, udp->dg.recv_buf_size);
     }
 
     kl_udp_update_interest(udp);
-    if (!(udp->want_mask & KL_EVENT_READ)) {   /* watcher registration failed */
-        udp->recv_active = 0;
+    if (!(udp->dg.want_mask & KL_EVENT_READ)) {   /* watcher registration failed */
+        udp->dg.recv_active = 0;
         return -1;
     }
     return 0;
@@ -542,12 +542,12 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
  * the next receive. gro_seg 0 — GRO coalescing is a readiness/Linux offload. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
                          const KlSockAddr *src, const KlUdpRxMeta *meta) {
-    if (!udp->recv_active || !kl_handle_valid(udp->fd))
+    if (!udp->dg.recv_active || !kl_handle_valid(udp->dg.fd))
         return;
     if (meta->truncated)
-        udp->truncated++;
+        udp->dg.truncated++;
     kl_udp_deliver(udp, buf, len, meta->gro_seg, src, meta->local);
-    if (udp->recv_active && kl_handle_valid(udp->fd))
+    if (udp->dg.recv_active && kl_handle_valid(udp->dg.fd))
         (void)kl_comp_post_udp_recv(udp);   /* arm the next datagram */
 }
 
@@ -555,8 +555,8 @@ void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
  * outstanding-bytes reservation; fire on_drain when nothing is left in flight
  * (same public semantics as the readiness queue emptying). */
 void kl_udp_comp_on_send(KlUdp *udp, size_t len) {
-    udp->q_bytes = (udp->q_bytes >= len) ? udp->q_bytes - len : 0;
-    if (udp->q_bytes == 0 && udp->on_drain)
+    udp->dg.q_bytes = (udp->dg.q_bytes >= len) ? udp->dg.q_bytes - len : 0;
+    if (udp->dg.q_bytes == 0 && udp->on_drain)
         udp->on_drain(udp, udp->drain_ud);
 }
 
@@ -594,7 +594,7 @@ void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp) {
 void kl_udp_recv_stop(KlUdp *udp) {
     if (!udp)
         return;
-    udp->recv_active = 0;
+    udp->dg.recv_active = 0;
     kl_udp_update_interest(udp);
 }
 
@@ -607,7 +607,7 @@ int kl_udp_send_to_from(KlUdp *udp, const void *data, size_t len,
                         const KlSockAddr *dest, const KlSockAddr *src) {
     if (!udp || (!data && len) || !dest ||
         kl_sockaddr_family(dest) == KL_AF_UNSPEC) {
-        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+        if (udp) udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     return udp_send_common(udp, data, len, dest, src, -1);
@@ -617,36 +617,36 @@ int kl_udp_send_to_tos(KlUdp *udp, const void *data, size_t len,
                        const KlSockAddr *dest, int tos) {
     if (!udp || (!data && len) || !dest ||
         kl_sockaddr_family(dest) == KL_AF_UNSPEC || tos < 0 || tos > 255) {
-        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+        if (udp) udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     return udp_send_common(udp, data, len, dest, NULL, tos);
 }
 
 int kl_udp_set_tos(KlUdp *udp, int tos) {
-    if (!udp || !kl_handle_valid(udp->fd) || tos < 0 || tos > 255) {
-        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+    if (!udp || !kl_handle_valid(udp->dg.fd) || tos < 0 || tos > 255) {
+        if (udp) udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     const KlDatagramOps *dg = udp_dg(udp);
-    int rc = dg->set_tos ? dg->set_tos(udp_sp_ctx(udp), udp->fd, udp->family, tos) : -1;
+    int rc = dg->set_tos ? dg->set_tos(udp_sp_ctx(udp), udp->dg.fd, udp->dg.family, tos) : -1;
     if (rc == 0)
         return 0;
-    udp->last_error = KL_ERR_SOCKET;
+    udp->dg.last_error = KL_ERR_SOCKET;
     return -1;
 }
 
 int kl_udp_recv_tos(const KlUdp *udp) {
-    return udp ? udp->recv_tos_val : -1;
+    return udp ? udp->dg.recv_tos_val : -1;
 }
 
 int kl_udp_send(KlUdp *udp, const void *data, size_t len) {
     if (!udp || (!data && len)) {
-        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+        if (udp) udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    if (!udp->connected) {
-        udp->last_error = KL_ERR_INVALID_ARG;
+    if (!udp->dg.connected) {
+        udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     return udp_send_common(udp, data, len, NULL, NULL, -1);
@@ -672,24 +672,24 @@ int kl_udp_send_gso(KlUdp *udp, const void *buf, size_t total_len,
     if (!udp || (!buf && total_len) || total_len == 0 || segment_size == 0 ||
         segment_size > total_len || total_len > 65507 || !dest ||
         kl_sockaddr_family(dest) == KL_AF_UNSPEC) {
-        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+        if (udp) udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     /* Single-syscall GSO when there is more than one segment, nothing is already
      * queued (preserve ordering), and GSO hasn't been ruled unsupported. The
      * seam returns -1/EOPNOTSUPP where GSO is unavailable at build time. */
-    if (segment_size < total_len && !udp->q_head && !udp->gso_disabled) {
+    if (segment_size < total_len && !udp->dg.q_head && !udp->dg.gso_disabled) {
         const KlDatagramOps *dg = udp_dg(udp);
         ssize_t n;
         if (dg->send_gso) {
-            n = dg->send_gso(udp_sp_ctx(udp), udp->fd, buf, total_len, (uint16_t)segment_size, dest);
+            n = dg->send_gso(udp_sp_ctx(udp), udp->dg.fd, buf, total_len, (uint16_t)segment_size, dest);
         } else {
             n = -1; errno = EOPNOTSUPP;   /* no GSO op — fall through to per-segment */
         }
         if (n >= 0)
             return 0;
         if (errno != EAGAIN && errno != EWOULDBLOCK)
-            udp->gso_disabled = 1;   /* GSO unsupported here — stop trying */
+            udp->dg.gso_disabled = 1;   /* GSO unsupported here — stop trying */
         /* EAGAIN or unsupported: fall through and send/queue per-segment. */
     }
     return udp_send_segments(udp, buf, total_len, segment_size, dest);
@@ -702,16 +702,16 @@ void kl_udp_recv_segments(KlUdp *udp, KlUdpRecvSegmentsFn cb, void *user_data) {
 }
 
 int kl_udp_multicast_join(KlUdp *udp, const char *group, unsigned iface_index) {
-    if (!udp || !kl_handle_valid(udp->fd) || !group) {
-        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+    if (!udp || !kl_handle_valid(udp->dg.fd) || !group) {
+        if (udp) udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     return udp_mcast_dispatch(udp, group, iface_index, 1);
 }
 
 int kl_udp_multicast_leave(KlUdp *udp, const char *group, unsigned iface_index) {
-    if (!udp || !kl_handle_valid(udp->fd) || !group) {
-        if (udp) udp->last_error = KL_ERR_INVALID_ARG;
+    if (!udp || !kl_handle_valid(udp->dg.fd) || !group) {
+        if (udp) udp->dg.last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     return udp_mcast_dispatch(udp, group, iface_index, 0);
@@ -723,17 +723,17 @@ void kl_udp_on_drain(KlUdp *udp, KlUdpDrainFn cb, void *user_data) {
     udp->drain_ud = user_data;
 }
 
-size_t   kl_udp_send_queued(const KlUdp *udp) { return udp ? udp->q_bytes : 0; }
-uint64_t kl_udp_dropped(const KlUdp *udp)     { return udp ? udp->dropped : 0; }
-uint64_t kl_udp_truncated(const KlUdp *udp)   { return udp ? udp->truncated : 0; }
-KlSocketHandle kl_udp_fd(const KlUdp *udp)    { return udp ? udp->fd : KL_INVALID_SOCKET; }
-KlError  kl_udp_last_error(const KlUdp *udp)  { return udp ? udp->last_error : KL_ERR_INVALID_ARG; }
+size_t   kl_udp_send_queued(const KlUdp *udp) { return udp ? udp->dg.q_bytes : 0; }
+uint64_t kl_udp_dropped(const KlUdp *udp)     { return udp ? udp->dg.dropped : 0; }
+uint64_t kl_udp_truncated(const KlUdp *udp)   { return udp ? udp->dg.truncated : 0; }
+KlSocketHandle kl_udp_fd(const KlUdp *udp)    { return udp ? udp->dg.fd : KL_INVALID_SOCKET; }
+KlError  kl_udp_last_error(const KlUdp *udp)  { return udp ? udp->dg.last_error : KL_ERR_INVALID_ARG; }
 
 uint16_t kl_udp_local_port(const KlUdp *udp) {
-    if (!udp || !kl_handle_valid(udp->fd))
+    if (!udp || !kl_handle_valid(udp->dg.fd))
         return 0;
     KlSockAddr la;
-    if (kl_sock_get_local_addr(udp->ctx->sockets, udp->fd, &la) != 0)
+    if (kl_sock_get_local_addr(udp->ctx->sockets, udp->dg.fd, &la) != 0)
         return 0;
     return kl_sockaddr_port(&la);
 }

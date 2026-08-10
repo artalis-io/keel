@@ -310,7 +310,7 @@ static int pc_comp_post_udp_recv(struct KlUdp *udp) {
     op->type = PC_UDP_RECV;
     op->alloc = st->alloc;
     op->udp = udp;
-    op->fd = udp->fd;
+    op->fd = udp->dg.fd;
     pc_op_push(st, op);
     return 0;
 }
@@ -324,7 +324,7 @@ static int pc_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len
     op->type = PC_UDP_SEND;
     op->alloc = st->alloc;
     op->udp = udp;
-    op->fd = udp->fd;
+    op->fd = udp->dg.fd;
     op->send_total = len;
     op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
     if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
@@ -504,7 +504,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
     case PC_UDP_RECV: {
         struct sockaddr_storage ss;
         unsigned char ctrl[KL_UDP_RX_CTRL_SIZE];
-        struct iovec iov = { .iov_base = op->udp->recv_buf, .iov_len = op->udp->recv_buf_size };
+        struct iovec iov = { .iov_base = op->udp->dg.recv_buf, .iov_len = op->udp->dg.recv_buf_size };
         struct msghdr msg;
         memset(&msg, 0, sizeof(msg));
         msg.msg_name = &ss;
@@ -521,11 +521,11 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         ev->target = op->udp;
         ev->ok = (n >= 0);
         ev->bytes = (n > 0) ? (size_t)n : 0;
-        ev->buf = op->udp->recv_buf;
+        ev->buf = op->udp->dg.recv_buf;
         if (n >= 0 && msg.msg_namelen > 0)         /* source: native → neutral at the seam */
             (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&ss,
                                           msg.msg_namelen);
-        if (n >= 0 && op->udp->pktinfo) {          /* local (dest) addr via pktinfo cmsg */
+        if (n >= 0 && op->udp->dg.pktinfo) {          /* local (dest) addr via pktinfo cmsg */
             struct sockaddr_storage local_ss;
             socklen_t local_len = kl_udp_parse_local(&msg, &local_ss);
             if (local_len)
@@ -533,7 +533,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                                               (struct sockaddr *)&local_ss, local_len);
         }
         if (n >= 0) {
-            if (op->udp->recv_gro)                 /* GRO coalesced segment size */
+            if (op->udp->dg.recv_gro)                 /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&msg);
             if (msg.msg_flags & MSG_TRUNC)         /* datagram truncated to recv_buf */
                 ev->truncated = 1;

@@ -24,6 +24,11 @@
  * delivery, backpressure, and interest tracking all stay in udp.c.
  */
 
+/** @brief Opaque datagram transport object — the raw datagram transport state (fd, send queue,
+ *  recv buffer, event-loop interest, counters) carved out of KlUdp (Phase A). KlUdp wraps it as
+ *  the UDP configuration/control surface. Full layout in <keel/datagram_detail.h> (opt-in). */
+typedef struct KlDatagram KlDatagram;
+
 struct KlUdpConfig;   /* keel/udp.h — datagram socket-option config (borrowed) */
 
 /* Per-datagram receive-capture options a provider enabled during configure(),
