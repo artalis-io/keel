@@ -104,6 +104,10 @@ struct KlClient {
     KlResolver        *resolver;
     KlResolveReq      *resolve_req;
     int                owns_resolver;   /* 1 = auto-created, destroy on teardown */
+    const char        *resolve_host;    /* host to resolve (borrowed; valid through the request) — 6C */
+    int                resolve_port;    /* port for the resolve (6C) */
+    int                connect_start_failed; /* 6C: resolver->resolve() could not start — the setup
+                                              * returns NULL with no user callback (see cli_co_on_done) */
 
     /* Happy Eyeballs — racing connect over the resolved address list (RFC 8305), driven by the
      * KlConnectOp state machine (6C). Only active on the async resolver path (conn_racing=1); the

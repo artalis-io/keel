@@ -190,15 +190,23 @@ static int he_idx_of_fd(const KlClient *c, KlSocketHandle fd)
 
 /* ── KlConnectOp adapter hooks (ctx = the KlClient) ───────────────────────────────────────────── */
 
-/* Begin name resolution. The request setup kicks the (already-selected) resolver immediately AFTER
- * kl_connect_op_start returns — so it can preserve the "return NULL on a start failure, with no
- * on_done callback" contract that resolver->resolve()==NULL requires (an inline on_done from here
- * would violate it). The resolve is already accounted for as an outstanding op (resolve_inflight),
- * dns_resolved drives on_resolved/on_resolve_failed, and cli_co_cancel_resolve cancels it — so this
- * hook has nothing to start. */
+/* Begin name resolution: kick the (already-selected) resolver. dns_resolved drives on_resolved/
+ * on_resolve_failed — possibly INLINE for a sync-completion-capable resolver, in which case the op
+ * has already advanced past RESOLVING and the returned req is moot. If resolve() could NOT start
+ * (returns NULL, no inline completion), flag it so cli_co_on_done suppresses the request callback
+ * for the resulting terminal FAILED — the setup then frees the client and returns NULL, preserving
+ * the "no callback on a start failure" contract while the op still retires cleanly (terminal +
+ * detach). */
 static int cli_co_start_resolve(void *ctx)
 {
-    (void)ctx;
+    KlClient *c = ctx;
+    KlResolveReq *rq = c->resolver->resolve(c->resolver, c->ev_ctx,
+                                            c->resolve_host, c->resolve_port,
+                                            dns_resolved, c);
+    if (kl_connect_op_state(&c->connect_op) != KL_CONNECT_STATE_RESOLVING)
+        return 0;                     /* dns_resolved ran inline — op already advanced */
+    c->resolve_req = rq;
+    if (!rq) { c->connect_start_failed = 1; return -1; }   /* → terminal FAILED, callback suppressed */
     return 0;
 }
 
@@ -208,6 +216,10 @@ static void cli_co_cancel_resolve(void *ctx)
     if (c->resolve_req && c->resolver && c->resolver->cancel)
         c->resolver->cancel(c->resolve_req);
     c->resolve_req = NULL;
+    /* KEEL resolvers cancel by freeing the request and do NOT then invoke done_fn — so the machine
+     * would never see the resolve retire. Report it synchronously now (the op is already terminal
+     * when this hook runs, so this just clears resolve_inflight; reentrancy is guarded). */
+    kl_connect_op_on_resolve_failed(&c->connect_op, KL_ERR_DNS);
 }
 
 /* Start one nonblocking connect to conn_addrs.addrs[idx]. 0 = in flight (or decided inline),
@@ -259,7 +271,11 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
     return 0;
 }
 
-/* Abort an in-flight (not-yet-connected) racing attempt: drop its socket. */
+/* Abort an in-flight (not-yet-connected) racing attempt: drop its socket, then REPORT the retirement
+ * to the machine. The provider op + fd are removed synchronously here; kl_connect_op_on_attempt_
+ * failed clears attempt_active[idx] + pending so the op can reach confirmed detachment (the machine
+ * never observes the drop otherwise). Reentrancy is guarded — this hook runs inside the machine's
+ * terminal/cancel dispatch. */
 static void cli_co_cancel_attempt(void *ctx, int idx)
 {
     KlClient *c = ctx;
@@ -268,6 +284,7 @@ static void cli_co_cancel_attempt(void *ctx, int idx)
         c->conn_attempts[idx].active = 0;
         c->conn_attempts[idx].fd = KL_INVALID_SOCKET;
     }
+    kl_connect_op_on_attempt_failed(&c->connect_op, idx, KL_ERR_CONNECT);
 }
 
 /* Dispose a connected non-winner descriptor (straggler / out-of-range / duplicate). */
@@ -316,9 +333,15 @@ static void cli_co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd,
     if (result == KL_CONNECT_SUCCESS) {
         he_win(c, fd);
     } else if (result == KL_CONNECT_FAILED) {
+        /* A resolver-start failure (resolve()==NULL) retires the op cleanly but must NOT fire the
+         * request callback — the setup detects connect_start_failed and returns NULL instead. */
+        if (c->connect_start_failed)
+            return;
         c->error = error ? (KlError)error : KL_ERR_CONNECT;
         async_complete_error(c);
     }
+    /* CANCELLED: the client itself requested the cancel (deadline / teardown) and completes
+     * separately — nothing to do here. */
 }
 
 static void cli_co_on_detach(void *ctx)
@@ -1292,8 +1315,8 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return c;
     }
 
-    /* DNS resolution — resolve proxy host when proxied, target host otherwise */
-    const char *resolve_host = is_proxied ? proxy->host : host_buf;
+    /* DNS resolution — resolve proxy host when proxied, target host otherwise. The host itself is
+     * taken from the persistent c->host_buf / borrowed proxy->host at the connect-op wiring below. */
     int resolve_port = is_proxied ? proxy->port : parsed.port;
 
     /* Async DNS resolver path (explicit, built-in default, or sync name resolution). */
@@ -1302,25 +1325,19 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;
+        /* Persistent host for start_resolve: c->host_buf (already copied above) for the target, or
+         * the borrowed proxy host (valid through the request) when proxied — no dangling local. */
+        c->resolve_host = is_proxied ? proxy->host : c->host_buf;
+        c->resolve_port = resolve_port;
         c->state = KL_CLIENT_RESOLVING;
-        /* Drive resolve + Happy Eyeballs via KlConnectOp (6C). Start it BEFORE kicking the resolver
-         * so the resolve completion (dns_resolved) drives on_resolved; start_resolve is a no-op, so
-         * this setup keeps the resolver->resolve() kick + its return-NULL-on-start-failure contract.
-         * init/start are infallible here (the hook table is a valid compile-time constant). */
+        /* Drive resolve + Happy Eyeballs via KlConnectOp (6C). kl_connect_op_start runs start_resolve
+         * synchronously (which kicks resolver->resolve); a sync-completion-capable resolver may drive
+         * the whole request to terminal inline. init/start are infallible (valid static hook table). */
         kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
         kl_connect_op_start(&c->connect_op);
-        KlResolveReq *rq = resolver->resolve(resolver, ev_ctx,
-                                             resolve_host, resolve_port,
-                                             dns_resolved, c);
-        /* The resolver contract permits synchronous completion: dns_resolved may have already run
-         * inside resolve() — driving the connect op to CONNECTING/terminal, and possibly firing the
-         * request's on_done (DONE) and taking ownership of c. In that case a NULL return is NOT a
-         * start failure and must not free c out from under on_done. Only when we are still RESOLVING
-         * did resolve() truly defer. */
-        if (c->state != KL_CLIENT_RESOLVING)
-            return c;                 /* rq discarded; resolve_req cleared by dns_resolved */
-        c->resolve_req = rq;
-        if (!c->resolve_req) {
+        if (c->connect_start_failed) {
+            /* resolver->resolve() could not start: the op retired terminal + detached with no user
+             * callback. Free the client and report the start failure as a NULL return (contract). */
             if (res_owned)
                 resolver->destroy(resolver);
             c->resolver = NULL;
@@ -1332,6 +1349,9 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             kl_free(alloc, c, sizeof(KlClient));
             return NULL;
         }
+        /* Otherwise: still RESOLVING (deferred; resolve_req stored by start_resolve) or the resolver
+         * completed inline (op advanced/terminal, possibly firing on_done + taking ownership of c).
+         * Both cases return c — the request is live or already completed via on_done. */
         return c;
     }
 
@@ -1641,19 +1661,15 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     if (resolver) {
         c->resolver = resolver;
         c->owns_resolver = res_owned;
+        c->resolve_host = c->host_buf;   /* persistent copy (set above); no dangling local */
+        c->resolve_port = parsed.port;
         c->state = KL_CLIENT_RESOLVING;
         /* Drive resolve + Happy Eyeballs via KlConnectOp (6C), same as the non-streaming path:
-         * start the op before kicking the resolver (start_resolve is a no-op) so dns_resolved drives
-         * on_resolved, and honor an inline completion via the state check. */
+         * kl_connect_op_start runs start_resolve (kicks resolver->resolve) synchronously; a
+         * start failure retires cleanly + returns NULL, an inline completion advances the op. */
         kl_connect_op_init(&c->connect_op, &CLI_CONNECT_HOOKS, c);
         kl_connect_op_start(&c->connect_op);
-        KlResolveReq *rq = resolver->resolve(resolver, ev_ctx,
-                                            host_buf, parsed.port,
-                                            dns_resolved, c);
-        if (c->state != KL_CLIENT_RESOLVING)
-            return c;                 /* inline-completed — c owned by the caller / on_done */
-        c->resolve_req = rq;
-        if (!c->resolve_req) {
+        if (c->connect_start_failed) {
             if (res_owned)
                 resolver->destroy(resolver);
             c->resolver = NULL;
@@ -1665,7 +1681,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
             kl_free(alloc, c, sizeof(KlClient));
             return NULL;
         }
-        return c;
+        return c;                 /* deferred (RESOLVING) or inline-completed — both return c */
     }
 
     /* Sync DNS fallback (blocking name resolution → KlSockAddr) */
