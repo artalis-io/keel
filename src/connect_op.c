@@ -22,7 +22,7 @@ static void co_finalize(KlConnectOp *op) {
     if (op->pending) return;                     /* a racing attempt is still outstanding */
     if (op->delay_armed || op->deadline_armed) return; /* a timer could still fire into this op */
     if (op->detached) return;
-    op->state    = KL_CONNECT_STATE_DETACHED;
+    op->state    = KL_CONNECT_OP_STATE_DETACHED;
     op->detached = 1;
     if (op->on_detach) op->on_detach(op->ctx);   /* reuse/free legal only after this returns */
 }
@@ -73,7 +73,7 @@ static void co_request_cancels(KlConnectOp *op) {
 static void co_terminal(KlConnectOp *op, KlConnectResult result, KlSocketHandle fd, int error) {
     if (op->terminal) return;
     op->terminal = 1;
-    op->state    = KL_CONNECT_STATE_DONE;
+    op->state    = KL_CONNECT_OP_STATE_DONE;
     op->result   = result;
     op->win_fd   = fd;
     op->error    = error;
@@ -126,11 +126,11 @@ static int co_arm_delay(KlConnectOp *op) {
  * fast-start the next address immediately (best-effort stagger). Terminal FAILED when the list is
  * exhausted and nothing is pending. */
 static void co_start_next(KlConnectOp *op) {
-    while (op->state == KL_CONNECT_STATE_CONNECTING && !op->terminal &&
+    while (op->state == KL_CONNECT_OP_STATE_CONNECTING && !op->terminal &&
            op->next_idx < op->naddrs) {
         int idx = op->next_idx++;
         if (co_start_one(op, idx) == 0) {
-            if (op->arm_delay && op->state == KL_CONNECT_STATE_CONNECTING && !op->terminal &&
+            if (op->arm_delay && op->state == KL_CONNECT_OP_STATE_CONNECTING && !op->terminal &&
                 op->next_idx < op->naddrs && !op->delay_armed) {
                 if (co_arm_delay(op) < 0)
                     continue;                  /* delay-arm failed — fast-start the next address now */
@@ -139,7 +139,7 @@ static void co_start_next(KlConnectOp *op) {
         }
         /* hard local fail — try the next address immediately (no delay) */
     }
-    if (op->state == KL_CONNECT_STATE_CONNECTING && !op->terminal && op->pending == 0)
+    if (op->state == KL_CONNECT_OP_STATE_CONNECTING && !op->terminal && op->pending == 0)
         co_terminal(op, KL_CONNECT_FAILED, KL_INVALID_SOCKET, op->last_error);
 }
 
@@ -177,15 +177,15 @@ int kl_connect_op_init(KlConnectOp *op, const KlConnectOpHooks *hooks, void *ctx
     op->on_detach       = hooks->on_detach;
     op->ctx             = ctx;
     op->win_fd          = KL_INVALID_SOCKET;
-    op->state           = KL_CONNECT_STATE_IDLE;
+    op->state           = KL_CONNECT_OP_STATE_IDLE;
     op->inited          = 1;
     return 0;
 }
 
 int kl_connect_op_start(KlConnectOp *op) {
     if (!op || !op->inited) return -1;
-    if (op->state != KL_CONNECT_STATE_IDLE) return -1;
-    op->state            = KL_CONNECT_STATE_RESOLVING;
+    if (op->state != KL_CONNECT_OP_STATE_IDLE) return -1;
+    op->state            = KL_CONNECT_OP_STATE_RESOLVING;
     op->resolve_cancel_requested = 0;
 
     /* Arm the deadline BEFORE marking the resolve outstanding: if it fires inline (a 0ms deadline)
@@ -223,7 +223,7 @@ void kl_connect_op_on_resolved(KlConnectOp *op, int naddrs) {
     if (naddrs > KL_CONNECT_MAX_ADDRS) naddrs = KL_CONNECT_MAX_ADDRS;
     op->naddrs   = naddrs;
     op->next_idx = 0;
-    op->state    = KL_CONNECT_STATE_CONNECTING;
+    op->state    = KL_CONNECT_OP_STATE_CONNECTING;
     if (naddrs == 0)
         co_terminal(op, KL_CONNECT_FAILED, KL_INVALID_SOCKET, op->last_error);
     else
@@ -279,7 +279,7 @@ void kl_connect_op_on_delay(KlConnectOp *op) {
     if (!op || !op->inited) return;
     if (!op->delay_armed) return;                 /* stale/duplicate — consume exactly once */
     op->delay_armed = 0;
-    if (op->state == KL_CONNECT_STATE_CONNECTING && !op->terminal)
+    if (op->state == KL_CONNECT_OP_STATE_CONNECTING && !op->terminal)
         co_start_next(op);                        /* may re-arm the delay for the following address */
     co_finalize(op);
 }
@@ -304,8 +304,8 @@ int kl_connect_op_cancel(KlConnectOp *op) {
     return 0;
 }
 
-KlConnectState kl_connect_op_state(const KlConnectOp *op) {
-    return op ? (KlConnectState)op->state : KL_CONNECT_STATE_DETACHED;
+KlConnectOpState kl_connect_op_state(const KlConnectOp *op) {
+    return op ? (KlConnectOpState)op->state : KL_CONNECT_OP_STATE_DETACHED;
 }
 
 int kl_connect_op_is_detached(const KlConnectOp *op) {

@@ -131,7 +131,7 @@ UTEST(connect_op, sync_resolve_sync_connect_single_addr) {
     ASSERT_EQ(m.last_fd, 100);
     ASSERT_EQ(m.detach_calls, 1);                 /* detached after unwind (no losers, no in-flight) */
     ASSERT_EQ(kl_connect_op_is_detached(&op), 1);
-    ASSERT_EQ(kl_connect_op_state(&op), KL_CONNECT_STATE_DETACHED);
+    ASSERT_EQ(kl_connect_op_state(&op), KL_CONNECT_OP_STATE_DETACHED);
 }
 
 UTEST(connect_op, async_resolve_then_async_connect_success) {
@@ -139,11 +139,11 @@ UTEST(connect_op, async_resolve_then_async_connect_success) {
     m.resolve_mode = M_ASYNC;
     m.attempt_mode[0] = M_ASYNC; m.attempt_mode[1] = M_ASYNC;
     ASSERT_EQ(kl_connect_op_start(&op), 0);
-    ASSERT_EQ(kl_connect_op_state(&op), KL_CONNECT_STATE_RESOLVING);
+    ASSERT_EQ(kl_connect_op_state(&op), KL_CONNECT_OP_STATE_RESOLVING);
     ASSERT_EQ(m.done_calls, 0);
 
     kl_connect_op_on_resolved(&op, 2);            /* enter CONNECTING, start attempt 0 */
-    ASSERT_EQ(kl_connect_op_state(&op), KL_CONNECT_STATE_CONNECTING);
+    ASSERT_EQ(kl_connect_op_state(&op), KL_CONNECT_OP_STATE_CONNECTING);
     ASSERT_EQ(m.attempt_calls[0], 1);
     ASSERT_EQ(m.arm_delay_calls, 1);              /* staggered next armed */
 
@@ -395,7 +395,7 @@ UTEST(connect_op, no_reuse_until_reinit) {
 
     co_setup(&m, &op);                             /* re-init = reuse reset */
     m.resolve_mode = M_SYNC_OK; m.resolve_naddrs = 1; m.attempt_mode[0] = M_SYNC_OK;
-    ASSERT_EQ(kl_connect_op_state(&op), KL_CONNECT_STATE_IDLE);
+    ASSERT_EQ(kl_connect_op_state(&op), KL_CONNECT_OP_STATE_IDLE);
     ASSERT_EQ(kl_connect_op_start(&op), 0);
     ASSERT_EQ(m.done_calls, 1);
     ASSERT_EQ(m.detach_calls, 1);

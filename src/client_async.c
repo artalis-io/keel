@@ -203,7 +203,7 @@ static int cli_co_start_resolve(void *ctx)
     KlResolveReq *rq = c->resolver->resolve(c->resolver, c->ev_ctx,
                                             c->resolve_host, c->resolve_port,
                                             dns_resolved, c);
-    if (kl_connect_op_state(&c->connect_op) != KL_CONNECT_STATE_RESOLVING)
+    if (kl_connect_op_state(&c->connect_op) != KL_CONNECT_OP_STATE_RESOLVING)
         return 0;                     /* dns_resolved ran inline — op already advanced */
     c->resolve_req = rq;
     if (!rq) { c->connect_start_failed = 1; return -1; }   /* → terminal FAILED, callback suppressed */

@@ -11,7 +11,7 @@
 #include <keel/connect_op.h>   /* KlConnectOp typedef, hook typedefs, KlConnectResult */
 
 struct KlConnectOp {
-    int  state;               /* KL_CONNECT_STATE_* */
+    int  state;               /* KL_CONNECT_OP_STATE_* */
     int  inited;              /* 1 once kl_connect_op_init ran */
     int  terminal;            /* on_done fired (exactly-once guard) */
     int  detached;            /* on_detach fired (exactly-once guard) */

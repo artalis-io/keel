@@ -39,12 +39,12 @@ typedef struct KlConnectOp KlConnectOp;
 
 /** @brief Lifecycle phase (kl_connect_op_state). */
 typedef enum {
-    KL_CONNECT_STATE_IDLE = 0,   /**< not started */
-    KL_CONNECT_STATE_RESOLVING,  /**< a name resolution is in flight */
-    KL_CONNECT_STATE_CONNECTING, /**< racing connect over the resolved list */
-    KL_CONNECT_STATE_DONE,       /**< terminal decided (on_done fired) */
-    KL_CONNECT_STATE_DETACHED    /**< all ops retired; on_detach fired; reuse legal */
-} KlConnectState;
+    KL_CONNECT_OP_STATE_IDLE = 0,   /**< not started */
+    KL_CONNECT_OP_STATE_RESOLVING,  /**< a name resolution is in flight */
+    KL_CONNECT_OP_STATE_CONNECTING, /**< racing connect over the resolved list */
+    KL_CONNECT_OP_STATE_DONE,       /**< terminal decided (on_done fired) */
+    KL_CONNECT_OP_STATE_DETACHED    /**< all ops retired; on_detach fired; reuse legal */
+} KlConnectOpState;
 
 /** @brief Terminal result. */
 typedef enum {
@@ -126,8 +126,8 @@ void kl_connect_op_on_deadline(KlConnectOp *op, int error);
 /** Request an abortive cancel (terminal CANCELLED if not already terminal; cancel every op once).
  *  Safe reentrantly; idempotent once detached. Returns 0, or -1 if not inited. */
 int  kl_connect_op_cancel(KlConnectOp *op);
-/** Current lifecycle phase (KlConnectState). */
-KlConnectState kl_connect_op_state(const KlConnectOp *op);
+/** Current lifecycle phase (KlConnectOpState). */
+KlConnectOpState kl_connect_op_state(const KlConnectOp *op);
 /** 1 once on_detach has fired (fully retired; reusable), else 0. */
 int  kl_connect_op_is_detached(const KlConnectOp *op);
 
