@@ -34,8 +34,8 @@
  *
  * CAPABILITIES (IPv4, loopback): listen/accept + recv/send/sendfile completion for a TCP
  * server, an outbound TCP client connect (LC-1), and — as of LC-3a — a UDP datagram data-plane
- * (KlUdp over raw): SOCK_DGRAM sockets create a udp_pcb, kl_comp_post_udp_recv/send arm/send via
- * the glue, and the drain surfaces KL_COMP_UDP_RECV/SEND. The socket-provider primitives operate
+ * (KlUdp over raw): SOCK_DGRAM sockets create a udp_pcb, kl_comp_post_dgram_recv/send arm/send via
+ * the glue, and the drain surfaces KL_COMP_DGRAM_RECV/SEND. The socket-provider primitives operate
  * on real tcp_pcb/udp_pcb handles via the glue. Unsupported operations fail EARLY and CLEARLY
  * (see the socket ops below): outbound connect on the READINESS path returns -1/ENOTSUP (the raw
  * client rides the completion post_connect), and non-IPv4 bind returns -1 (IPv4-only loopif). See
@@ -75,7 +75,7 @@
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
 #include "completion.h"        /* the abstract completion axis this TU implements (src/) */
 #include "io_engine.h"         /* kl_comp_post_udp_* decls (forward-declares struct KlUdp) */
-#include <keel/udp.h>          /* kl_udp_fd — reach the udp_pcb handle from the KlUdp* (LC-3a) */
+#include <keel/udp.h>          /* KlDatagram layout (dg->ctx / dg->fd) — the UDP completion target */
 
 #include <string.h>
 #include <time.h>
@@ -369,7 +369,7 @@ static kl_ssize_t lwr_sock_io(void *c, KlSocketHandle fd, void *b, size_t n) {
 
 /* ── LC-3a: datagram data-plane (KlDatagramOps) ────────────────────────────────────
  * On a COMPLETION loop, udp.c drives recv/send through the completion primitives
- * (kl_comp_post_udp_recv/send), NOT these ops — so send/recv are fail-stubs (the readiness /
+ * (kl_comp_post_dgram_recv/send), NOT these ops — so send/recv are fail-stubs (the readiness /
  * source-pinned / TOS path that would call them never runs on this loop). The ONE op the machine
  * needs at init is configure(): kl_udp_init calls it to set socket options + learn which
  * per-datagram capture options (pktinfo/GRO/TOS) the stack accepted. For the raw loopback stack
@@ -384,12 +384,12 @@ static uint32_t lwr_dg_configure(void *ctx, KlSocketHandle fd, int family,
 static kl_ssize_t lwr_dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                               const KlSockAddr *dest, const KlSockAddr *src, int tos) {
     (void)ctx; (void)fd; (void)data; (void)len; (void)dest; (void)src; (void)tos;
-    return -1;   /* completion loop uses kl_comp_post_udp_send, not this readiness-path send */
+    return -1;   /* completion loop uses kl_comp_post_dgram_send, not this readiness-path send */
 }
 static kl_ssize_t lwr_dg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t buflen,
                               KlSockAddr *src, KlDgramRxMeta *meta) {
     (void)ctx; (void)fd; (void)buf; (void)buflen; (void)src; (void)meta;
-    return -1;   /* completion loop uses kl_comp_post_udp_recv → drain, not this recv */
+    return -1;   /* completion loop uses kl_comp_post_dgram_recv → drain, not this recv */
 }
 static const KlDatagramOps lwip_raw_dgram_ops = {
     .send = lwr_dg_send, .recv = lwr_dg_recv,
@@ -532,27 +532,27 @@ static void lwr_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
 }
 
 /* LC-3a: UDP datagram over the raw completion loop. udp.c drives these on a completion loop
- * (KL_EVENT_CAP_COMPLETION): post_udp_recv arms one datagram recv on the udp pcb (surfaced as
- * KL_COMP_UDP_RECV via the drain when a datagram arrives), and post_udp_send hands one datagram to
- * udp_sendto (surfaced as KL_COMP_UDP_SEND). The KlUdp* is the completion target; the udp pcb is
+ * (KL_EVENT_CAP_COMPLETION): post_dgram_recv arms one datagram recv on the udp pcb (surfaced as
+ * KL_COMP_DGRAM_RECV via the drain when a datagram arrives), and post_dgram_send hands one datagram to
+ * udp_sendto (surfaced as KL_COMP_DGRAM_SEND). The KlDatagram* is the completion target; the udp pcb is
  * udp->fd. Raw recv is passive (the udp_recv callback retains datagrams into the glue's per-slot
  * ring), so "posting" a recv just associates the owner + arms the slot — mirroring the tcp recv-arm
  * model. IPv4-only (the loopif is IPv4). */
-static int lwr_comp_post_udp_recv(struct KlUdp *udp) {
-    KlLwrState *st = udp->ctx->loop._backend;
-    KlSocketHandle fd = kl_udp_fd(udp);
+static int lwr_comp_post_dgram_recv(struct KlDatagram *dg) {
+    KlLwrState *st = dg->ctx->loop._backend;
+    KlSocketHandle fd = dg->fd;
     if (!st || !kl_handle_valid(fd)) return -1;
-    return kl_lwr_udp_post_recv(st->lwrctx, (void *)fd, udp);
+    return kl_lwr_udp_post_recv(st->lwrctx, (void *)fd, dg);
 }
-static int lwr_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+static int lwr_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
                           const KlSockAddr *dest) {
-    KlLwrState *st = udp->ctx->loop._backend;
-    KlSocketHandle fd = kl_udp_fd(udp);
+    KlLwrState *st = dg->ctx->loop._backend;
+    KlSocketHandle fd = dg->fd;
     if (!st || !kl_handle_valid(fd)) return -1;
     /* Dest → raw IPv4 bytes + host-order port. A connected send (dest UNSPEC) is not exercised on
      * this loopback path — reject an unspecified/non-IPv4 dest fail-early. */
     if (!dest || kl_sockaddr_family(dest) != KL_AF_INET) return -1;
-    return kl_lwr_udp_send(st->lwrctx, (void *)fd, udp, data, len,
+    return kl_lwr_udp_send(st->lwrctx, (void *)fd, dg, data, len,
                            dest->u.ip, kl_sockaddr_port(dest));
 }
 
@@ -681,8 +681,8 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
     }
 
     /* (d) UDP datagram completions (LC-3a): the glue's udp slots surface inbound datagrams
-     * (KL_LWR_UDP_RECV) + completed sends (KL_LWR_UDP_SEND). Translate each into KL_COMP_UDP_RECV /
-     * KL_COMP_UDP_SEND targeting the KlUdp* the machine posted. For a RECV, store the raw source
+     * (KL_LWR_DGRAM_RECV) + completed sends (KL_LWR_DGRAM_SEND). Translate each into KL_COMP_DGRAM_RECV /
+     * KL_COMP_DGRAM_SEND targeting the KlDatagram* the machine posted. For a RECV, store the raw source
      * IPv4 bytes + port directly as the neutral KlSockAddr ev->peer (no native round-trip), and
      * point ev->buf at the glue's staged payload (valid until the next udp drain). */
     KlLwrUdpRecord urecs[KL_LWR_MAX_DRAIN];
@@ -694,16 +694,16 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             KlCompletionEvent *ev = &out[count];
             memset(ev, 0, sizeof(*ev));
             ev->target = u->owner;
-            if (u->kind == KL_LWR_UDP_RECV) {
-                ev->kind = KL_COMP_UDP_RECV;
+            if (u->kind == KL_LWR_DGRAM_RECV) {
+                ev->kind = KL_COMP_DGRAM_RECV;
                 ev->ok = 1;
                 ev->bytes = u->len;
                 ev->buf = (void *)u->data;
                 ev->truncated = u->truncated;
                 /* ev->peer is the neutral KlSockAddr directly — no native round-trip. */
                 (void)kl_sockaddr_from_ipv4(&ev->peer, u->src_ip, u->src_port);
-            } else {   /* KL_LWR_UDP_SEND */
-                ev->kind = KL_COMP_UDP_SEND;
+            } else {   /* KL_LWR_DGRAM_SEND */
+                ev->kind = KL_COMP_DGRAM_SEND;
                 ev->ok = 1;
                 ev->bytes = u->len;
             }
@@ -751,6 +751,6 @@ static int lwr_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
 static const KlCompletionOps lwip_raw_completion_ops = {
     lwr_comp_drain, lwr_comp_prime_accepts, lwr_comp_post_recv, lwr_comp_post_send,
     lwr_comp_post_accept, lwr_comp_post_sendfile, lwr_comp_cancel,
-    lwr_comp_post_udp_recv, lwr_comp_post_udp_send, lwr_comp_post_connect,
+    lwr_comp_post_dgram_recv, lwr_comp_post_dgram_send, lwr_comp_post_connect,
     NULL,   /* shutdown_accepts: autonomous accept model (never installs a listener) — no-op */
 };

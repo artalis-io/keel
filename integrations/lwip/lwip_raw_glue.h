@@ -114,20 +114,20 @@ typedef struct {
 /* ── LC-3a: UDP datagram completion path (KlUdp over raw) ──────────────────────────
  * The datagram counterpart of the tcp_* path: a udp_pcb is created + bound + recv-armed via the
  * glue, and its inbound datagrams / completed sends surface as KlLwrUdpRecord's the backend
- * translates into KL_COMP_UDP_RECV / KL_COMP_UDP_SEND. All lwIP contact stays in the glue;
+ * translates into KL_COMP_DGRAM_RECV / KL_COMP_DGRAM_SEND. All lwIP contact stays in the glue;
  * addresses cross as raw IPv4 bytes + host-order port, payloads as byte buffers — no lwIP type. */
 
 typedef enum {
-    KL_LWR_UDP_RECV,   /* a datagram arrived (data/len + src ip/port) — one per armed recv */
-    KL_LWR_UDP_SEND,   /* a posted send completed (len bytes) */
+    KL_LWR_DGRAM_RECV,   /* a datagram arrived (data/len + src ip/port) — one per armed recv */
+    KL_LWR_DGRAM_SEND,   /* a posted send completed (len bytes) */
 } KlLwrUdpKind;
 
 /* One finished UDP op. For UDP_RECV, `data` points into the udp slot's `staged` buffer and stays
  * valid until the NEXT kl_lwr_udp_drain on that ctx (the backend delivers it inline before then).
- * `owner` is the KlUdp* the machine passed at post time (the KL_COMP_UDP_RECV/SEND target). */
+ * `owner` is the KlDatagram* the machine passed at post time (the KL_COMP_DGRAM_RECV/SEND target). */
 typedef struct {
     KlLwrUdpKind kind;
-    void        *owner;       /* KlUdp* target */
+    void        *owner;       /* KlDatagram* target */
     const void  *data;        /* UDP_RECV: datagram payload (in the slot's staged buffer) */
     size_t       len;         /* UDP_RECV: payload len / UDP_SEND: bytes sent */
     int          truncated;   /* UDP_RECV: 1 if the datagram was truncated to the buffer */
@@ -145,11 +145,11 @@ int   kl_lwr_is_udp(void *lwrctx, void *pcb);
 int   kl_lwr_udp_bind(void *pcb, const uint8_t ip4[4], uint16_t port);
 /* pcb->local_port (host order) for a bound udp pcb — bound-port readback. */
 uint16_t kl_lwr_udp_local_port(void *pcb);
-/* Associate a KlUdp* owner with a udp pcb + arm ONE recv (wires udp_recv on first call). The drain
- * surfaces one queued datagram per armed slot as KL_LWR_UDP_RECV. Returns 0, -1 if no slot. */
+/* Associate a KlDatagram* owner with a udp pcb + arm ONE recv (wires udp_recv on first call). The drain
+ * surfaces one queued datagram per armed slot as KL_LWR_DGRAM_RECV. Returns 0, -1 if no slot. */
 int   kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *owner);
 /* Send one datagram out `pcb` to dest ip4:port (udp_sendto; ip4 NULL = ANY). Records a pending
- * KL_LWR_UDP_SEND (len bytes) the drain reports. `owner` is the KlUdp* target. Returns 0 / -1. */
+ * KL_LWR_DGRAM_SEND (len bytes) the drain reports. `owner` is the KlDatagram* target. Returns 0 / -1. */
 int   kl_lwr_udp_send(void *lwrctx, void *pcb, void *owner, const void *data, size_t len,
                       const uint8_t dest_ip[4], uint16_t dest_port);
 /* Close a udp pcb: detach the recv cb, udp_remove, free the slot. Idempotent on an unknown/NULL. */

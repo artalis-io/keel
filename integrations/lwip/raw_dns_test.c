@@ -9,7 +9,7 @@
  * whose ctx.sockets = kl_socket_provider_lwip_raw() resolves names over lwIP with NO changes to
  * src/dns_resolver.c or src/udp.c: the resolver's UDP query socket (kl_udp_init in
  * dns_resolver.c) becomes a udp_pcb, kl_udp_send_to -> udp_sendto over loopif, the reply lands in
- * the glue's udp recv ring and surfaces as KL_COMP_UDP_RECV, and dns_on_recv parses it with
+ * the glue's udp recv ring and surfaces as KL_COMP_DGRAM_RECV, and dns_on_recv parses it with
  * KEEL's own kl_dns_parse_response. The TCP fallback (RFC 7766) would ride ctx->sockets'
  * SOCK_STREAM connect (LC-1) too, but a small UDP answer never triggers it here.
  *

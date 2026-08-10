@@ -19,7 +19,7 @@
 
 #include <keel/connection.h>   /* KlConn */
 #include <keel/socket.h>       /* KlIoVec, KlSocketHandle */
-#include <keel/sockaddr.h>     /* KlSockAddr (event addrs + KlCompletionOps.post_udp_send) */
+#include <keel/sockaddr.h>     /* KlSockAddr (event addrs + KlCompletionOps.post_dgram_send) */
 #include <stdint.h>            /* uint64_t (KlCompletionOps.post_sendfile) */
 #include <stddef.h>
 
@@ -33,7 +33,7 @@ struct KlServer;   /* the accept ops (prime_accepts/post_accept) take it directl
 typedef enum {
     KL_COMP_ACCEPT,                                /* TCP accept (server recovered from ctx) */
     KL_COMP_READ, KL_COMP_WRITE,                   /* TCP conn (target = KlStream*) */
-    KL_COMP_UDP_RECV, KL_COMP_UDP_SEND,            /* datagram (target = KlUdp*) */
+    KL_COMP_DGRAM_RECV, KL_COMP_DGRAM_SEND,            /* datagram (target = KlDatagram*) */
     KL_COMP_CONNECT,  /* an outbound connect finished (LC-0). The completion mirror of
                        * KL_COMP_ACCEPT for the OUTBOUND direction: pollcomp does a real
                        * connect()+POLLOUT+SO_ERROR, io_uring an IORING_OP_CONNECT, IOCP a
@@ -58,12 +58,13 @@ typedef enum {
  * The backend has already done any platform post-processing (address extraction,
  * partial-write re-posting) — the driver sees only high-level, completed events.
  * `target` is the consumer the event belongs to, disambiguated by `kind`:
- * KlStream* for READ/WRITE (the HTTP adapter recovers the KlConn); KlUdp* for UDP kinds.
+ * KlStream* for READ/WRITE (the HTTP adapter recovers the KlConn); KlDatagram* for UDP kinds.
  * ACCEPT carries no target (the generic tick recovers the server from its KlEventCtx). */
 typedef struct {
-    void          *target;     /* KlStream* (READ/WRITE) — a KlUdp* for UDP kinds. The HTTP
-                                * adapter recovers the containing KlConn (kl_conn_of_stream);
-                                * a completion backend never holds/derefs a KlConn. */
+    void          *target;     /* KlStream* (READ/WRITE) — a KlDatagram* for UDP kinds. The HTTP
+                                * adapter recovers the containing KlConn (kl_conn_of_stream) and
+                                * the UDP adapter recovers the KlUdp (kl_udp_of_dg); a completion
+                                * backend never holds/derefs a KlConn or KlUdp. */
     KlCompKind     kind;
     size_t         bytes;      /* transferred (READ / WRITE) */
     int            ok;         /* 0 = failed / peer-closed */
@@ -79,7 +80,7 @@ typedef struct {
 } KlCompletionEvent;
 
 struct KlEventCtx;
-struct KlUdp;
+struct KlDatagram;   /* UDP completion target — the backend holds a KlDatagram*, never a KlUdp */
 
 /* The generic completion tick kl_comp_run() is declared in io_engine.h (the event-
  * model seam), so async.c's kl_event_ctx_run can reach it without pulling the whole
@@ -125,8 +126,8 @@ typedef struct KlCompletionOps {
     int  (*post_sendfile)(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count);
     void (*cancel)(struct KlEventCtx *ctx, KlSocketHandle fd);
-    int  (*post_udp_recv)(struct KlUdp *udp);
-    int  (*post_udp_send)(struct KlUdp *udp, const void *data, size_t len,
+    int  (*post_dgram_recv)(struct KlDatagram *dg);
+    int  (*post_dgram_send)(struct KlDatagram *dg, const void *data, size_t len,
                           const KlSockAddr *dest);
     /* Post one outbound connect on `fd` (a nonblocking socket the client created + owns)
      * to `addr`; its completion is surfaced as KL_COMP_CONNECT targeting `watcher_udata`

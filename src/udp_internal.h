@@ -60,7 +60,7 @@ typedef struct {
 /* Completion-loop datagram receive (PAL 8b-4c): a recv finished with `len` bytes in
  * udp->recv_buf from `src`, with per-datagram `meta` (local addr / GRO / truncation).
  * Deliver it (kl_udp_deliver) then re-post the next receive. The completion driver calls
- * this for a KL_COMP_UDP_RECV event; the model-blind delivery matches the readiness
+ * this for a KL_COMP_DGRAM_RECV event; the model-blind delivery matches the readiness
  * recvmsg path. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
                          const KlSockAddr *src, const KlUdpRxMeta *meta);
@@ -71,7 +71,7 @@ void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
 void kl_udp_comp_on_send(KlUdp *udp, size_t len);
 
 /* The comp_udp_dispatch hook (completion_core.c → here): route a datagram completion
- * (KL_COMP_UDP_RECV / KL_COMP_UDP_SEND) to kl_udp_comp_on_recv / kl_udp_comp_on_send.
+ * (KL_COMP_DGRAM_RECV / KL_COMP_DGRAM_SEND) to kl_udp_comp_on_recv / kl_udp_comp_on_send.
  * Registered on the ctx by kl_udp_init, so the generic tick reaches the UDP stack
  * without a static reference — a client-only build links neither udp.c nor these.
  * `evp` is a const KlCompletionEvent* (opaque const void* at the hook seam). */

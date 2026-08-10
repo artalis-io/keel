@@ -117,12 +117,10 @@ typedef struct KlUdpConfig {      /* named tag: the datagram provider ops (keel/
  * @brief Non-blocking UDP socket. Caller-owned; initialize with kl_udp_init.
  */
 struct KlUdp {
-    /* Config/control wrapper: the borrowed event loop + allocator and the user-facing
-     * receive/drain callbacks. The raw datagram transport state (fd, send queue, recv
-     * buffer, event-loop interest, counters) lives in the embedded KlDatagram `dg`
-     * (Phase A carve — behaviour unchanged). Access it through the kl_udp_* API. */
-    KlEventCtx    *ctx;
-    KlAllocator   *alloc;
+    /* Config/control wrapper: the user-facing receive/drain callbacks. The raw datagram
+     * transport state — the borrowed event loop + allocator, fd, send queue, recv buffer,
+     * event-loop interest, and counters — lives in the embedded KlDatagram `dg` (Phase A
+     * carve — behaviour unchanged). Access it through the kl_udp_* API. */
     /* Receive/drain callbacks (the consumer boundary). */
     KlUdpRecvFn    on_recv;
     void          *recv_ud;

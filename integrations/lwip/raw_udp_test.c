@@ -6,10 +6,10 @@
  * KEEL's own KlUdp machine (src/udp.c) over the raw datagram data-plane:
  *
  *   - the raw socket provider creates a udp_pcb for SOCK_DGRAM (kl_udp_init → lwr_sock_socket),
- *   - kl_udp_recv_start posts an overlapped recv (kl_comp_post_udp_recv → udp_recv arm),
- *   - kl_udp_send_to posts a send (kl_comp_post_udp_send → udp_sendto),
+ *   - kl_udp_recv_start posts an overlapped recv (kl_comp_post_dgram_recv → udp_recv arm),
+ *   - kl_udp_send_to posts a send (kl_comp_post_dgram_send → udp_sendto),
  *   - the mainloop tick (kl_event_ctx_run → lwr_comp_drain) delivers the datagram back as a
- *     KL_COMP_UDP_RECV, which the driver turns into the on_recv callback.
+ *     KL_COMP_DGRAM_RECV, which the driver turns into the on_recv callback.
  *
  * Coverage:
  *   T1  a single datagram round-trips byte-exact, with the correct source address (127.0.0.1).

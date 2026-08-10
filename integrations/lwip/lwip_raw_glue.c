@@ -128,9 +128,9 @@ u32_t sys_now(void) {
 /* ── LC-3a: UDP datagram-completion path (KlUdp over raw) ─────────────────────────
  * A datagram slot mirrors the TCP conn slot but for a udp_pcb. lwIP's udp_recv callback
  * retains inbound datagrams into a bounded per-slot ring (payload copied out of the pbuf +
- * source IPv4/port), which the drain surfaces as KL_COMP_UDP_RECV one-at-a-time (mirroring the
+ * source IPv4/port), which the drain surfaces as KL_COMP_DGRAM_RECV one-at-a-time (mirroring the
  * completion contract's one-in-flight recv, gated by `rx_armed`). Sends go straight out
- * (udp_sendto) and the drain surfaces the matching KL_COMP_UDP_SEND. See the design notes in
+ * (udp_sendto) and the drain surfaces the matching KL_COMP_DGRAM_SEND. See the design notes in
  * event_lwip_raw.c and docs. */
 
 /* Max datagrams retained per udp slot before inbound datagrams are DROPPED (bounded per-slot
@@ -289,21 +289,21 @@ typedef struct {
 
 /* ── LC-3a: per-udp-socket slot ───────────────────────────────────────────────────
  * One slot per KlUdp bound over the raw backend. `pcb == NULL` = free slot. `owner` is the
- * opaque KlUdp* the machine passed at post time (the KL_COMP_UDP_RECV/SEND target). The recv
+ * opaque KlDatagram* the machine passed at post time (the KL_COMP_DGRAM_RECV/SEND target). The recv
  * ring is a fixed circular buffer of retained datagrams (bounded — drops on overflow). `rx_armed`
  * gates delivery to the completion contract's one-in-flight recv. `pend_send` counts sends whose
- * KL_COMP_UDP_SEND the drain still owes. */
+ * KL_COMP_DGRAM_SEND the drain still owes. */
 typedef struct {
     struct udp_pcb *pcb;          /* NULL = free slot */
-    void           *owner;        /* KlUdp* (KL_COMP_UDP_RECV/SEND target) */
+    void           *owner;        /* KlDatagram* (KL_COMP_DGRAM_RECV/SEND target) */
     KlLwrDgram      ring[KL_LWR_UDP_RX_RING];
     int             rx_head;      /* oldest queued datagram index */
     int             rx_count;     /* queued datagrams (0..KL_LWR_UDP_RX_RING) */
     int             rx_armed;     /* a recv is posted (surface one datagram per drain) */
-    int             pend_send;    /* pending KL_COMP_UDP_SEND completions owed */
+    int             pend_send;    /* pending KL_COMP_DGRAM_SEND completions owed */
     KlLwrDgram      staged;       /* the datagram currently surfaced (buf stays valid this drain) */
 
-    /* Bounded FIFO of pending completed-send byte counts (each surfaces one KL_COMP_UDP_SEND).
+    /* Bounded FIFO of pending completed-send byte counts (each surfaces one KL_COMP_DGRAM_SEND).
      * A datagram send completes synchronously (udp_sendto), so this is drained promptly; the ring
      * is sized generously enough that a burst of sends between drains is not lost. On overflow the
      * oldest pending send len is coalesced (never lost as an accounting quantity — see enqueue). */
@@ -1023,7 +1023,7 @@ long kl_lwr_srv_sync_send(void *lwrctx, void *pcb, const void *buf, size_t len, 
 
 /* ── LC-3a: UDP datagram glue (udp_pcb ↔ KlUdp) ───────────────────────────────────
  * A udp slot is created by kl_lwr_udp_new (lwr_sock_socket for SOCK_DGRAM), bound by
- * kl_lwr_udp_bind, associated with a KlUdp* + recv-armed by kl_lwr_udp_post_recv, and closed by
+ * kl_lwr_udp_bind, associated with a KlDatagram* + recv-armed by kl_lwr_udp_post_recv, and closed by
  * kl_lwr_udp_close. Inbound datagrams land in lwr_udp_recv_cb, which copies the payload out of the
  * pbuf (freeing it immediately — no retained pbuf) into the bounded per-slot ring. The drain
  * (kl_lwr_udp_drain) surfaces one queued datagram per armed slot as a UDP-RECV record, and one
@@ -1117,7 +1117,7 @@ uint16_t kl_lwr_udp_local_port(void *pcb) {
     return ((struct udp_pcb *)pcb)->local_port;
 }
 
-/* Associate a KlUdp* owner with a udp pcb + arm one recv (mirrors kl_lwr_conn_arm). Wires the
+/* Associate a KlDatagram* owner with a udp pcb + arm one recv (mirrors kl_lwr_conn_arm). Wires the
  * udp_recv callback on first arm (idempotent). Returns 0, or -1 if the pcb has no slot. */
 int kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *owner) {
     KlLwrCtx *ctx = lwrctx;
@@ -1131,7 +1131,7 @@ int kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *owner) {
 
 /* Send one datagram out `pcb` to dest ip4:port via udp_sendto. Copies `data` into a fresh pbuf,
  * sends, frees it (a datagram is one pbuf — the only alloc lwIP requires). Records a pending
- * KL_COMP_UDP_SEND on the slot so the drain reports it (with the byte count). Returns 0 / -1. */
+ * KL_COMP_DGRAM_SEND on the slot so the drain reports it (with the byte count). Returns 0 / -1. */
 int kl_lwr_udp_send(void *lwrctx, void *pcb, void *owner, const void *data, size_t len,
                     const uint8_t dest_ip[4], uint16_t dest_port) {
     KlLwrCtx *ctx = lwrctx;
@@ -1200,7 +1200,7 @@ int kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max) {
 
             KlLwrUdpRecord *r = &out[n++];
             memset(r, 0, sizeof(*r));
-            r->kind = KL_LWR_UDP_RECV;
+            r->kind = KL_LWR_DGRAM_RECV;
             r->owner = s->owner;
             r->data = s->staged.data;
             r->len = s->staged.len;
@@ -1209,14 +1209,14 @@ int kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max) {
             r->src_port = s->staged.src_port;
         }
 
-        /* Pending sends (each a completed KL_COMP_UDP_SEND). */
+        /* Pending sends (each a completed KL_COMP_DGRAM_SEND). */
         while (s->pend_send > 0 && n < max) {
             size_t bytes = s->send_len[s->send_head];
             s->send_head = (s->send_head + 1) % KL_LWR_UDP_RX_RING;
             s->pend_send--;
             KlLwrUdpRecord *r = &out[n++];
             memset(r, 0, sizeof(*r));
-            r->kind = KL_LWR_UDP_SEND;
+            r->kind = KL_LWR_DGRAM_SEND;
             r->owner = s->owner;
             r->len = bytes;
         }

@@ -87,7 +87,7 @@
  * user_data can be discriminated by reading *(IouOpType*). IOU_WATCH tags a poll-add. */
 typedef enum {
     IOU_ACCEPT, IOU_READ, IOU_WRITE, IOU_SENDFILE,
-    IOU_UDP_RECV, IOU_UDP_SEND, IOU_WATCH,
+    IOU_DGRAM_RECV, IOU_DGRAM_SEND, IOU_WATCH,
     IOU_CONNECT   /* outbound connect (LC-0): IORING_OP_CONNECT */
 } IouOpType;
 
@@ -98,7 +98,7 @@ typedef struct KlIouOp {
     KlAllocator   *alloc;
     KlSocketHandle fd;
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
-    KlUdp         *udp;                   /* UDP_RECV / UDP_SEND */
+    KlDatagram   *dg;                   /* UDP_RECV / UDP_SEND */
     void          *buf;                   /* READ: caller-chosen recv buffer */
     size_t         buflen;
     char          *sendbuf;               /* WRITE/UDP_SEND: owned copy.
@@ -623,16 +623,16 @@ static int iou_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-static int iou_comp_post_udp_recv(struct KlUdp *udp) {
-    KlIouState *st = udp->ctx->loop._backend;
+static int iou_comp_post_dgram_recv(struct KlDatagram *dg) {
+    KlIouState *st = dg->ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
-    op->type = IOU_UDP_RECV;
-    op->udp = udp;
-    op->fd = udp->dg.fd;
+    op->type = IOU_DGRAM_RECV;
+    op->dg = dg;
+    op->fd = dg->fd;
     op->peer_len = sizeof(op->peer);
-    op->msgiov.iov_base = udp->dg.recv_buf;
-    op->msgiov.iov_len = udp->dg.recv_buf_size;
+    op->msgiov.iov_base = dg->recv_buf;
+    op->msgiov.iov_len = dg->recv_buf_size;
     op->msgh.msg_name = &op->peer;
     op->msgh.msg_namelen = sizeof(op->peer);
     op->msgh.msg_iov = &op->msgiov;
@@ -647,14 +647,14 @@ static int iou_comp_post_udp_recv(struct KlUdp *udp) {
     return 0;
 }
 
-static int iou_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+static int iou_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
                           const KlSockAddr *dest) {
-    KlIouState *st = udp->ctx->loop._backend;
+    KlIouState *st = dg->ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
-    op->type = IOU_UDP_SEND;
-    op->udp = udp;
-    op->fd = udp->dg.fd;
+    op->type = IOU_DGRAM_SEND;
+    op->dg = dg;
+    op->fd = dg->fd;
     op->send_total = len;
     op->sendcap = len ? len : 1;
     op->sendbuf = kl_malloc(st->alloc, op->sendcap);
@@ -825,16 +825,16 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         ev->bytes = op->sent_total;
         return 1;
 
-    case IOU_UDP_RECV:
-        ev->kind = KL_COMP_UDP_RECV;
-        ev->target = op->udp;
+    case IOU_DGRAM_RECV:
+        ev->kind = KL_COMP_DGRAM_RECV;
+        ev->target = op->dg;
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
-        ev->buf = op->udp->dg.recv_buf;
+        ev->buf = op->dg->recv_buf;
         if (res >= 0 && op->msgh.msg_namelen > 0) /* source: native → neutral at the seam */
             (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&op->peer,
                                           op->msgh.msg_namelen);
-        if (res >= 0 && op->udp->dg.pktinfo) {       /* local (dest) addr via pktinfo cmsg */
+        if (res >= 0 && op->dg->pktinfo) {       /* local (dest) addr via pktinfo cmsg */
             struct sockaddr_storage local_ss;
             socklen_t local_len = kl_udp_parse_local(&op->msgh, &local_ss);
             if (local_len)
@@ -842,16 +842,16 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
                                               (struct sockaddr *)&local_ss, local_len);
         }
         if (res >= 0) {
-            if (op->udp->dg.recv_gro)                /* GRO coalesced segment size */
+            if (op->dg->recv_gro)                /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&op->msgh);
             if (op->msgh.msg_flags & MSG_TRUNC)   /* datagram truncated to recv_buf */
                 ev->truncated = 1;
         }
         return 1;
 
-    case IOU_UDP_SEND:
-        ev->kind = KL_COMP_UDP_SEND;
-        ev->target = op->udp;
+    case IOU_DGRAM_SEND:
+        ev->kind = KL_COMP_DGRAM_SEND;
+        ev->target = op->dg;
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
         return 1;
@@ -988,7 +988,7 @@ static int iou_shutdown_accepts(struct KlServer *s) {
 static const KlCompletionOps iou_completion_ops = {
     iou_comp_drain, iou_comp_prime_accepts, iou_comp_post_recv, iou_comp_post_send,
     iou_comp_post_accept, iou_comp_post_sendfile, iou_comp_cancel,
-    iou_comp_post_udp_recv, iou_comp_post_udp_send, iou_comp_post_connect,
+    iou_comp_post_dgram_recv, iou_comp_post_dgram_send, iou_comp_post_connect,
     iou_shutdown_accepts,
 };
 

@@ -17,13 +17,13 @@
 #ifndef KEEL_SRC_IO_ENGINE_H
 #define KEEL_SRC_IO_ENGINE_H
 
-#include <stddef.h>   /* size_t (kl_comp_post_udp_send) */
+#include <stddef.h>   /* size_t (kl_comp_post_dgram_send) */
 #include <keel/handle.h>   /* KlSocketHandle (kl_comp_cancel) */
-#include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_udp_send) */
+#include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_dgram_send) */
 
 struct KlServer;
 struct KlEventCtx;
-struct KlUdp;
+struct KlDatagram;   /* UDP completion target — backends hold a KlDatagram*, never a KlUdp */
 struct sockaddr;
 
 /* Is the completion axis compiled into this build? 1 when the driver + dispatch are
@@ -83,16 +83,16 @@ void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn);
 void kl_io_engine_post_read(struct KlConn *conn);
 
 /* Post one overlapped datagram receive for a UDP socket on a completion loop (into
- * udp->recv_buf). Called by udp.c (shared) on a completion loop, so — like
+ * dg->recv_buf). Called by udp.c (shared) on a completion loop, so — like
  * kl_comp_run — it is declared here and stubbed in io_engine.c on non-completion
  * builds (never reached there); the real primitive lives in event_iocp.c. */
-int kl_comp_post_udp_recv(struct KlUdp *udp);
+int kl_comp_post_dgram_recv(struct KlDatagram *dg);
 
 /* Post one overlapped datagram send (WSASendTo) on a completion loop. The backend
  * copies the datagram + destination for the op's lifetime; the completion surfaces
- * a KL_COMP_UDP_SEND event. Shared-called by udp.c → stubbed in io_engine.c on
+ * a KL_COMP_DGRAM_SEND event. Shared-called by udp.c → stubbed in io_engine.c on
  * non-completion builds; real primitive in event_iocp.c. */
-int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+int kl_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
                           const KlSockAddr *dest);
 
 /* Post one outbound connect on a completion loop (LC-0). `fd` is a nonblocking socket the

@@ -50,7 +50,7 @@
 #include <sys/socket.h>
 
 typedef enum {
-    PC_ACCEPT, PC_READ, PC_WRITE, PC_SENDFILE, PC_UDP_RECV, PC_UDP_SEND,
+    PC_ACCEPT, PC_READ, PC_WRITE, PC_SENDFILE, PC_DGRAM_RECV, PC_DGRAM_SEND,
     PC_CONNECT   /* outbound connect (LC-0): real connect()+POLLOUT+SO_ERROR */
 } PcOpType;
 
@@ -61,7 +61,7 @@ typedef struct KlPcOp {
     KlAllocator   *alloc;
     KlSocketHandle fd;                    /* the descriptor this op polls */
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
-    KlUdp         *udp;                   /* UDP_RECV / UDP_SEND */
+    KlDatagram   *dg;                   /* UDP_RECV / UDP_SEND */
     void          *buf;                   /* READ: caller-chosen receive buffer */
     size_t         buflen;                /* READ: capacity at post time */
     char          *sendbuf;              /* WRITE/SENDFILE head/UDP_SEND: owned copy */
@@ -302,29 +302,29 @@ static int pc_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-static int pc_comp_post_udp_recv(struct KlUdp *udp) {
-    KlPcState *st = udp->ctx->loop._backend;
+static int pc_comp_post_dgram_recv(struct KlDatagram *dg) {
+    KlPcState *st = dg->ctx->loop._backend;
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
-    op->type = PC_UDP_RECV;
+    op->type = PC_DGRAM_RECV;
     op->alloc = st->alloc;
-    op->udp = udp;
-    op->fd = udp->dg.fd;
+    op->dg = dg;
+    op->fd = dg->fd;
     pc_op_push(st, op);
     return 0;
 }
 
-static int pc_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
+static int pc_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
                           const KlSockAddr *dest) {
-    KlPcState *st = udp->ctx->loop._backend;
+    KlPcState *st = dg->ctx->loop._backend;
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
     if (!op) return -1;
     memset(op, 0, sizeof(*op));
-    op->type = PC_UDP_SEND;
+    op->type = PC_DGRAM_SEND;
     op->alloc = st->alloc;
-    op->udp = udp;
-    op->fd = udp->dg.fd;
+    op->dg = dg;
+    op->fd = dg->fd;
     op->send_total = len;
     op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
     if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
@@ -407,8 +407,8 @@ static int pc_emit_abort(const KlPcOp *op, KlCompletionEvent *ev) {
     switch (op->type) {
     case PC_READ:                    ev->kind = KL_COMP_READ;  ev->target = op->stream; return 1;
     case PC_WRITE: case PC_SENDFILE: ev->kind = KL_COMP_WRITE; ev->target = op->stream; return 1;
-    case PC_UDP_RECV:                ev->kind = KL_COMP_UDP_RECV; ev->target = op->udp; return 1;
-    case PC_UDP_SEND:                ev->kind = KL_COMP_UDP_SEND; ev->target = op->udp; return 1;
+    case PC_DGRAM_RECV:                ev->kind = KL_COMP_DGRAM_RECV; ev->target = op->dg; return 1;
+    case PC_DGRAM_SEND:                ev->kind = KL_COMP_DGRAM_SEND; ev->target = op->dg; return 1;
     case PC_CONNECT:                 /* never reached: cancelled connect ops are freed in
                                       * pc_comp_cancel, not delivered as aborts. */
                                      return 0;
@@ -501,10 +501,10 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         ev->bytes = op->send_total + op->file_count;
         return 1;
     }
-    case PC_UDP_RECV: {
+    case PC_DGRAM_RECV: {
         struct sockaddr_storage ss;
         unsigned char ctrl[KL_UDP_RX_CTRL_SIZE];
-        struct iovec iov = { .iov_base = op->udp->dg.recv_buf, .iov_len = op->udp->dg.recv_buf_size };
+        struct iovec iov = { .iov_base = op->dg->recv_buf, .iov_len = op->dg->recv_buf_size };
         struct msghdr msg;
         memset(&msg, 0, sizeof(msg));
         msg.msg_name = &ss;
@@ -517,15 +517,15 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         do { n = recvmsg(op->fd, &msg, 0); } while (n < 0 && errno == EINTR);
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             return 0;
-        ev->kind = KL_COMP_UDP_RECV;
-        ev->target = op->udp;
+        ev->kind = KL_COMP_DGRAM_RECV;
+        ev->target = op->dg;
         ev->ok = (n >= 0);
         ev->bytes = (n > 0) ? (size_t)n : 0;
-        ev->buf = op->udp->dg.recv_buf;
+        ev->buf = op->dg->recv_buf;
         if (n >= 0 && msg.msg_namelen > 0)         /* source: native → neutral at the seam */
             (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&ss,
                                           msg.msg_namelen);
-        if (n >= 0 && op->udp->dg.pktinfo) {          /* local (dest) addr via pktinfo cmsg */
+        if (n >= 0 && op->dg->pktinfo) {          /* local (dest) addr via pktinfo cmsg */
             struct sockaddr_storage local_ss;
             socklen_t local_len = kl_udp_parse_local(&msg, &local_ss);
             if (local_len)
@@ -533,21 +533,21 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                                               (struct sockaddr *)&local_ss, local_len);
         }
         if (n >= 0) {
-            if (op->udp->dg.recv_gro)                 /* GRO coalesced segment size */
+            if (op->dg->recv_gro)                 /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&msg);
             if (msg.msg_flags & MSG_TRUNC)         /* datagram truncated to recv_buf */
                 ev->truncated = 1;
         }
         return 1;
     }
-    case PC_UDP_SEND: {
+    case PC_DGRAM_SEND: {
         ssize_t n = sendto(op->fd, op->sendbuf, op->send_total, 0,
                            op->dest_len ? (struct sockaddr *)&op->dest : NULL,
                            op->dest_len);
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
             return 0;
-        ev->kind = KL_COMP_UDP_SEND;
-        ev->target = op->udp;
+        ev->kind = KL_COMP_DGRAM_SEND;
+        ev->target = op->dg;
         ev->ok = (n >= 0);
         ev->bytes = (n > 0) ? (size_t)n : 0;
         return 1;
@@ -572,8 +572,8 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
 
 static short pc_poll_events(PcOpType t) {
     switch (t) {
-    case PC_ACCEPT: case PC_READ: case PC_UDP_RECV: return POLLIN;
-    default: return POLLOUT;   /* PC_WRITE / PC_SENDFILE / PC_UDP_SEND */
+    case PC_ACCEPT: case PC_READ: case PC_DGRAM_RECV: return POLLIN;
+    default: return POLLOUT;   /* PC_WRITE / PC_SENDFILE / PC_DGRAM_SEND */
     }
 }
 
@@ -693,7 +693,7 @@ static int pc_shutdown_accepts(struct KlServer *s) {
 const KlCompletionOps kl_pollcomp_completion_ops = {
     pc_comp_drain, pc_comp_prime_accepts, pc_comp_post_recv, pc_comp_post_send,
     pc_comp_post_accept, pc_comp_post_sendfile, pc_comp_cancel,
-    pc_comp_post_udp_recv, pc_comp_post_udp_send, pc_comp_post_connect,
+    pc_comp_post_dgram_recv, pc_comp_post_dgram_send, pc_comp_post_connect,
     pc_shutdown_accepts,
 };
 

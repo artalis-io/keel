@@ -44,8 +44,8 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
             break;
         /* Datagram completions → the udp stack (via the ctx hook, set by kl_udp_init).
          * NULL when no UDP socket runs on this loop. */
-        case KL_COMP_UDP_RECV:
-        case KL_COMP_UDP_SEND:
+        case KL_COMP_DGRAM_RECV:
+        case KL_COMP_DGRAM_SEND:
             if (ctx->comp_udp_dispatch)
                 ctx->comp_udp_dispatch(ctx, &ev[i]);
             break;

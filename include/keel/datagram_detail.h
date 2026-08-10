@@ -23,10 +23,14 @@
 #include <stdint.h>
 
 struct KlUdpDatagram;      /* whole-datagram FIFO node (src/udp_internal.h) — pointer-only here */
+struct KlEventCtx;         /* owning event loop — back-pointer (the provider reads ctx->sockets) */
 
 /* Raw datagram transport state. Behaviour is unchanged by the Phase-A carve — this is a
- * structural relocation of the fields that previously lived directly on KlUdp. */
+ * structural relocation of the fields that previously lived directly on KlUdp. Mirrors KlStream:
+ * the transport object owns the borrowed event loop (ctx) + allocator (alloc). */
 struct KlDatagram {
+    struct KlEventCtx *ctx;          /**< Back-pointer to the event loop (borrowed; must outlive). */
+    KlAllocator   *alloc;            /**< Allocator for the send-queue nodes + recv buffer (borrowed). */
     KlSocketHandle fd;
     int            family;           /**< AF_INET / AF_INET6 (resolved at init). */
     int            connected;        /**< 1 after kl_udp_connect. */
