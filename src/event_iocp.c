@@ -76,6 +76,7 @@ typedef struct {
     KlIocpWatch              *watches;     /* registered readiness watches (8e-2c) */
     KlIocpConnect            *connects;    /* in-flight ConnectEx ops (LC-0) */
     KlIocpAccept             *accepts;     /* in-flight AcceptEx ops (6B-3 2b-ii) */
+    int                       quiescing;   /* teardown: drain must not re-post watchers (2b review) */
     KlAllocator              *alloc;
 } KlIocpState;
 
@@ -129,6 +130,8 @@ int kl_event_init_builtin(KlEventLoop *loop) {
 }
 
 static void iocp_op_free(KlIocpOp *op);
+/* Cancel + dequeue every tracked outstanding overlapped op before free (6B-3 2b review); below. */
+static void iocp_quiesce_port_for_close(KlIocpState *st);
 
 /* Post (or re-post) the persistent WSARecv for a watcher socket (8e-2c). */
 static int iocp_watch_post(KlIocpOp *op) {
@@ -212,35 +215,24 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
 void kl_event_close_builtin(KlEventLoop *loop) {
     KlIocpState *st = loop->_backend;
     if (st) {
-        KlIocpWatch *w = st->watches;   /* free watch ops (shutdown; the loop is stopped) */
-        while (w) {
-            KlIocpWatch *n = w->next;
-            iocp_op_free(w->op);
-            kl_free(st->alloc, w, sizeof(*w));
-            w = n;
-        }
-        KlIocpConnect *tr = st->connects;   /* free any leftover connect trackers + their ops */
-        while (tr) {
-            KlIocpConnect *n = tr->next;
-            iocp_op_free(tr->op);
-            kl_free(st->alloc, tr, sizeof(*tr));
-            tr = n;
-        }
-        /* Any AcceptEx still tracked here means the teardown reap loop (server kl_comp_run, driven
-         * after kl_comp_shutdown_accepts) did not finish — only reachable on a fatal drain/port
-         * error. The listen socket is closed, so each pending AcceptEx is completing but its
-         * completion was never dequeued. Close the pre-created accept socket to reclaim the fd
-         * (cancels the AcceptEx) and free our tracker node, but intentionally LEAK the op record:
-         * freeing an OVERLAPPED the kernel may still be writing would be a use-after-free. Bounded
-         * leak on a catastrophic-only path; memory-safety wins over leak-freedom here. */
+        /* Every tracked op (watch / connect / accept) may still own a kernel OVERLAPPED. Cancel +
+         * DEQUEUE each before freeing it — freeing an OVERLAPPED the kernel is still writing is a
+         * use-after-free (6B-3 2b review). iocp_quiesce_port_for_close drains the port until the
+         * tracked lists empty (cancelled I/O always completes → terminating). */
+        st->quiescing = 1;
+        iocp_quiesce_port_for_close(st);
+        /* Anything still tracked here means the drain hit a fatal port error (catastrophic only):
+         * free our tracker nodes but intentionally LEAK each op record — its OVERLAPPED was never
+         * dequeued, so it may still be kernel-owned. closesocket reclaims an accept fd. Memory-safe
+         * over leak-free on that path. */
+        KlIocpWatch *w = st->watches;
+        while (w) { KlIocpWatch *n = w->next; kl_free(st->alloc, w, sizeof(*w)); w = n; }
+        KlIocpConnect *tr = st->connects;
+        while (tr) { KlIocpConnect *n = tr->next; kl_free(st->alloc, tr, sizeof(*tr)); tr = n; }
         KlIocpAccept *at = st->accepts;
-        while (at) {
-            KlIocpAccept *n = at->next;
-            closesocket(at->op->accept_sock);
-            kl_free(st->alloc, at, sizeof(*at));   /* op record deliberately not freed (see above) */
-            at = n;
-        }
-        st->accepts = NULL;
+        while (at) { KlIocpAccept *n = at->next; closesocket(at->op->accept_sock);
+                     kl_free(st->alloc, at, sizeof(*at)); at = n; }
+        st->watches = NULL; st->connects = NULL; st->accepts = NULL;
         if (st->port) CloseHandle(st->port);
         kl_free(st->alloc, st, sizeof(*st));
         loop->_backend = NULL;
@@ -822,6 +814,18 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * watching. If kl_event_del'd it (watcher_removed), this is the aborted
              * completion — just free the op. (8e-2c) */
             if (op->watcher_removed) { iocp_op_free(op); continue; }
+            /* Teardown (6B-3 2b review): do NOT re-post — a fresh WSARecv would leave this op
+             * kernel-owned when kl_event_close_builtin frees it (use-after-free). This completion
+             * dequeued the op, so it is no longer kernel-owned: unlink it from st->watches and free
+             * it now. Not surfaced (the teardown reaper drops non-accept events anyway). */
+            if (st->quiescing) {
+                for (KlIocpWatch **l = &st->watches; *l; l = &(*l)->next)
+                    if ((*l)->op == op) {
+                        KlIocpWatch *w = *l; *l = w->next; kl_free(st->alloc, w, sizeof(*w)); break;
+                    }
+                iocp_op_free(op);
+                continue;
+            }
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_WATCHER;
             out[count].target = op->watcher_udata;
@@ -890,6 +894,52 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
     return count;
 }
 
+/* Cancel + DEQUEUE every tracked outstanding overlapped op, then free it — so kl_event_close_builtin
+ * never frees an OVERLAPPED the kernel still owns (6B-3 2b review). CancelIoEx forces each pending
+ * watcher/connect I/O to complete; the listen socket is already closed so AcceptEx are completing
+ * too. Then drain the port until the tracked lists empty, freeing each op AFTER its completion is
+ * dequeued. Untracked conn read/write completions that happen to arrive are freed too (dequeued →
+ * safe). Terminating: cancelled/closed I/O always completes → posts → is dequeued. On a port error
+ * it returns with lists non-empty; the caller then frees the tracker nodes but leaks those op
+ * records (never freeing an un-dequeued OVERLAPPED). No dispatch/callbacks — pure teardown. */
+static void iocp_quiesce_port_for_close(KlIocpState *st) {
+    for (KlIocpWatch *w = st->watches; w; w = w->next) {
+        w->op->watcher_removed = 1;
+        CancelIoEx((HANDLE)(uintptr_t)w->fd, &w->op->ov);
+    }
+    for (KlIocpConnect *c = st->connects; c; c = c->next) {
+        c->op->watcher_removed = 1;
+        CancelIoEx((HANDLE)(uintptr_t)c->fd, &c->op->ov);
+    }
+    while (st->watches || st->connects || st->accepts) {
+        OVERLAPPED_ENTRY entries[KL_IOCP_ACCEPT_BACKLOG];
+        ULONG got = 0;
+        if (!GetQueuedCompletionStatusEx(st->port, entries,
+                                         (ULONG)(sizeof entries / sizeof entries[0]),
+                                         &got, INFINITE, FALSE))
+            return;   /* fatal port error — caller frees trackers + leaks the un-dequeued ops */
+        for (ULONG i = 0; i < got; i++) {
+            KlIocpOp *op = CONTAINING_RECORD(entries[i].lpOverlapped, KlIocpOp, ov);
+            if (op->type == KL_IOCP_WATCHER) {
+                for (KlIocpWatch **l = &st->watches; *l; l = &(*l)->next)
+                    if ((*l)->op == op) {
+                        KlIocpWatch *w = *l; *l = w->next; kl_free(st->alloc, w, sizeof(*w)); break;
+                    }
+                iocp_op_free(op);
+            } else if (op->type == KL_IOCP_CONNECT) {
+                iocp_connect_untrack(st, op);
+                iocp_op_free(op);
+            } else if (op->type == KL_IOCP_ACCEPT) {
+                iocp_accept_untrack(st, op);
+                closesocket(op->accept_sock);   /* aborted → never handed off */
+                iocp_op_free(op);
+            } else {
+                iocp_op_free(op);               /* untracked conn read/write — dequeued, safe */
+            }
+        }
+    }
+}
+
 /* Teardown accept-side force-completion (6B-3 2b review). Does NOT reap. The server closed the
  * listen socket BEFORE calling this, and closesocket cancels every pending overlapped AcceptEx on
  * it — so all posted accepts are already completing (their completions will post to the port). The
@@ -898,7 +948,8 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
  * freed while the kernel may still be writing → no use-after-free) and routes each ordinarily (no
  * completion lost); accept completions untrack + retire the listener. Nothing more to force here. */
 static int iocp_shutdown_accepts(struct KlServer *s) {
-    (void)s;
+    KlIocpState *st = s->ev.loop._backend;
+    st->quiescing = 1;   /* from now, iocp_comp_drain frees fired watchers instead of re-posting */
     return 0;
 }
 
