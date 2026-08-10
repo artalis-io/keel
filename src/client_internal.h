@@ -26,6 +26,8 @@
 #include <keel/decompress.h>
 #include <keel/parser.h>
 #include <keel/resolver.h>
+#include <keel/connect.h>          /* KlConnectOp — outbound-connect state machine (6C) */
+#include <keel/connect_detail.h>   /* KlConnectOp layout (embedded by value) */
 #include <keel/tls.h>
 #include <keel/url.h>
 
@@ -103,15 +105,18 @@ struct KlClient {
     KlResolveReq      *resolve_req;
     int                owns_resolver;   /* 1 = auto-created, destroy on teardown */
 
-    /* Happy Eyeballs — racing connect over the resolved address list (RFC 8305).
-     * Only active on the async resolver path (conn_racing=1); the UNIX and sync
-     * sync name resolution paths stay single-fd. */
-    KlClientConnectAttempt      conn_attempts[KL_RESOLVE_MAX_ADDRS];
-    KlResolveResult    conn_addrs;      /* full list, copied from the resolver */
-    int                conn_next;       /* index of next address to dial */
-    int                conn_pending;    /* number of in-flight attempts */
+    /* Happy Eyeballs — racing connect over the resolved address list (RFC 8305), driven by the
+     * KlConnectOp state machine (6C). Only active on the async resolver path (conn_racing=1); the
+     * UNIX and sync-name-resolution paths stay single-fd. The client owns the idx->fd map
+     * (conn_attempts) + the idx->addr map (conn_addrs); KlConnectOp owns the cursor / pending /
+     * per-attempt-active / terminal-once / detachment state (its old conn_next/conn_pending/
+     * conn_last_err duplicates are gone). The overall request deadline stays CLIENT-owned (it must
+     * outlive the connect terminal to bound TLS/send/recv), so it is NOT a KlConnectOp timer. */
+    KlConnectOp        connect_op;      /* outbound-connect state machine (async HE path) */
+    KlClientConnectAttempt      conn_attempts[KL_RESOLVE_MAX_ADDRS];  /* idx -> racing fd */
+    KlResolveResult    conn_addrs;      /* full list, copied from the resolver (idx -> addr) */
     int                conn_racing;     /* 1 = HE attempts in conn_attempts[] */
-    int64_t            conn_delay_timer;/* Connection Attempt Delay timer (-1) */
+    int64_t            conn_delay_timer;/* Connection Attempt Delay timer (KlConnectOp-armed) (-1) */
     int64_t            deadline_timer;  /* overall request deadline timer (-1) */
     int                timeout_ms;      /* overall deadline (0 = none) */
     int                connect_delay_ms;/* Connection Attempt Delay */

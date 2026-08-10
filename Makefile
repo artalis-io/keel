@@ -1060,6 +1060,7 @@ FREESTANDING_CLIENT_SRC = \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
     src/client_common.c src/client_async.c src/client_proxy.c src/client_pool.c src/decompress.c \
+    src/connect_op.c \
     parsers/response_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
