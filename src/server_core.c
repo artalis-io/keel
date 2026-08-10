@@ -37,10 +37,6 @@
  * independent of server.c (both are plain compile-time constants). */
 #define KL_POLL_TIMEOUT_MS 1000
 
-/* Events reaped per kl_comp_run tick while teardown drains the forced accept completions to
- * confirmed detachment (6B-3 2b review). kl_comp_run clamps to its own internal cap. */
-#define KL_ACCEPT_DRAIN_MAX_EVENTS 64
-
 /* ── Stop-wakeup self-pipe (hosted only) ──────────────────────────────────────
  * kl_server_stop() writes a byte to wake the run loop promptly. A freestanding EFI
  * server has no self-pipe (no OS pipe/socketpair, no kl_server_stop caller) — it
@@ -379,10 +375,12 @@ void kl_server_free(KlServer *s) {
                 kl_sock_close(s->ev.sockets, s->listen_fd);
                 s->listen_fd = KL_INVALID_SOCKET;
             }
-            if (kl_comp_shutdown_accepts(s) == 0)
-                while (!kl_listener_is_detached(&s->accept_listener))
-                    if (kl_comp_run(&s->ev, KL_ACCEPT_DRAIN_MAX_EVENTS, KL_POLL_TIMEOUT_MS) < 0)
-                        break;
+            /* Force + teardown-reap (see kl_io_engine_quiesce_accepts): a teardown-specific
+             * dispatcher routes ONLY ACCEPT to the listener and drops every other completion
+             * without dispatch, so no HTTP step / consumer callback / timer runs here — safe now
+             * that async ops + file_io are already destroyed. Returns -1 only if the force could
+             * not be guaranteed, in which case the backend close below is the physical backstop. */
+            (void)kl_io_engine_quiesce_accepts(s);
         }
     }
 

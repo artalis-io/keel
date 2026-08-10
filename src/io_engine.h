@@ -38,14 +38,15 @@ int kl_completion_axis_available(void);
  * generic tick over its event ctx. Returns 0 to continue the run loop, <0 to stop. */
 int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms);
 
-/* Teardown accept-side force-completion (6B-3 2b review): GUARANTEE every posted accept will
- * complete, so the caller's subsequent kl_comp_run drain reaps + retires each through the normal
- * completion path (no completion lost). Called once from kl_server_free AFTER kl_listener_close()
- * and after the listen socket is closed. Returns 0 on success (incl. readiness/autonomous no-op),
- * -1 if the force could not be guaranteed (caller then skips the reap loop). Re-declared here (not
- * via completion.h) to keep server_core.c decoupled from the internal completion vtable, like
- * kl_comp_cancel below; the real impl is per-backend. */
-int kl_comp_shutdown_accepts(struct KlServer *s);
+/* Teardown accept quiescence (6B-3 2b review): force every posted accept to completion, then reap to
+ * confirmed KlListener detachment with a TEARDOWN-SPECIFIC dispatcher that routes ONLY ACCEPT and
+ * drops all other completions WITHOUT dispatch — so no HTTP step, application/consumer callback, or
+ * timer runs against logically destroyed state (async ops / file_io already torn down). Called once
+ * from kl_server_free AFTER kl_listener_close() and after the listen socket is closed. Returns 0, or
+ * -1 if the force could not be guaranteed (caller leaves the backend close as the physical backstop).
+ * The impl (completion_server.c) owns the completion dispatch hook + the listener; server_core.c
+ * stays decoupled from the internal completion vtable. Aborting stub under KEEL_NO_COMPLETION. */
+int kl_io_engine_quiesce_accepts(struct KlServer *s);
 
 /* The generic completion tick: drain the ctx's completion loop and route each op to
  * its consumer (connections; datagrams in 8b-4c). Shared by the server run loop and

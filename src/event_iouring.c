@@ -972,7 +972,12 @@ static int iou_shutdown_accepts(struct KlServer *s) {
         io_uring_prep_cancel(sqe, o, 0);
         io_uring_sqe_set_data(sqe, NULL);                /* ignored cancel-completion sentinel */
     }
-    if (io_uring_submit(&st->ring) < 0) return -1;       /* flush all cancels to the kernel */
+    /* Flush until EVERY queued SQE has actually been submitted — io_uring_submit may submit fewer
+     * than are queued, so the guarantee is "sq_ready() reached 0", not "one submit returned >= 0".
+     * A submit that makes no progress (<= 0 with entries still pending) means the force cannot be
+     * guaranteed → -1, and the caller skips the reap loop rather than block on an un-cancelled op. */
+    while (io_uring_sq_ready(&st->ring) > 0)
+        if (io_uring_submit(&st->ring) <= 0) return -1;
     return 0;
 }
 

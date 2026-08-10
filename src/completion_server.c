@@ -41,6 +41,11 @@
 /* Max events the generic tick drains per call (matches completion_core.c's clamp). */
 #define KL_COMP_MAX_EVENTS 64
 
+/* Blocking per-drain timeout (ms) while teardown quiescence waits for the forced accept completions
+ * (6B-3 2b review v4). Blocking so the pending completions are actually reaped; they arrive at once
+ * (already forced), so this rarely elapses. */
+#define KL_ACCEPT_QUIESCE_TIMEOUT_MS 1000
+
 /* Stack chunk for draining the TLS engine's outgoing ciphertext to the socket. */
 #define KL_TLS_FLUSH_CHUNK 16384
 
@@ -846,4 +851,35 @@ int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
         if (kl_comp_prime_accepts(s) < 0) return -1;   /* autonomous: re-arm the gate each tick */
     }
     return kl_comp_run(&s->ev, KL_COMP_MAX_EVENTS, timeout_ms) < 0 ? -1 : 0;
+}
+
+/* Teardown accept quiescence (6B-3 2b review v4): force every posted accept to completion, then reap
+ * to CONFIRMED DETACHMENT with a TEARDOWN-SPECIFIC dispatcher — NOT the live kl_comp_run tick.
+ *
+ * Called from kl_server_free() AFTER higher-level consumers (async ops, file_io) are torn down, so
+ * the live tick is unsafe here: kl_comp_run would advance the HTTP state machine on READ/WRITE, run
+ * watcher/connect/UDP callbacks, and fire timers — invoking application/consumer code against
+ * logically destroyed state. Instead this drains raw completions (kl_comp_drain — no dispatch) and:
+ *   - routes ONLY KL_COMP_ACCEPT to the server dispatcher, so the KlListener retires each posted
+ *     accept (a shutdown-race ok=1 fd is disposed by the CLOSING listener) and reaches detachment;
+ *   - DROPS every other completion (READ/WRITE/UDP/WATCHER/CONNECT) without dispatch — the backend
+ *     drain already freed each op record, and the owning conn/udp/watcher is freed by its own
+ *     teardown, so nothing leaks and no callback, HTTP step, or timer runs;
+ *   - never calls kl_timer_fire.
+ * Terminating: kl_comp_shutdown_accepts guaranteed every posted accept will complete, and each
+ * blocking kl_comp_drain reaps the pending completions. Returns 0, or -1 if the force could not be
+ * guaranteed (caller leaves the backend close as the physical backstop). The listen socket must be
+ * closed by the caller first (forces IOCP AcceptEx completion). */
+int kl_io_engine_quiesce_accepts(struct KlServer *s) {
+    if (kl_comp_shutdown_accepts(s) < 0) return -1;
+    while (!kl_listener_is_detached(&s->accept_listener)) {
+        KlCompletionEvent evs[KL_COMP_MAX_EVENTS];
+        int n = kl_comp_drain(&s->ev, evs, KL_COMP_MAX_EVENTS, KL_ACCEPT_QUIESCE_TIMEOUT_MS);
+        if (n < 0) return -1;
+        for (int i = 0; i < n; i++)
+            if (evs[i].kind == KL_COMP_ACCEPT)
+                comp_server_conn_dispatch(&s->ev, &evs[i]);   /* accept → listener retire only */
+        /* all other kinds: op already freed by the drain; intentionally not dispatched */
+    }
+    return 0;
 }
