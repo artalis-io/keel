@@ -167,6 +167,10 @@ void kl_pollcomp_ev_close(KlEventLoop *loop) {
     KlPcOp *op = st->ops;
     while (op) {
         KlPcOp *next = op->next;
+        /* Release the datagram op's stable-token reference (loop teardown drops a never-reaped op
+         * WITHOUT emitting an event) — its final release frees the receive storage. Non-datagram ops
+         * have op->life == NULL. */
+        if (op->life) kl_dgram_life_release(op->life);
         if (op->sendbuf) kl_free(op->alloc, op->sendbuf, op->send_total ? op->send_total : 1);
         kl_free(op->alloc, op, sizeof(*op));
         op = next;
