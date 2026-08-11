@@ -57,6 +57,26 @@ void kl_dgram_send_set_drain_cb(KlDgramSend *s, KlDgramDrainFn cb, void *ctx) {
 void kl_dgram_send_set_closing(KlDgramSend *s, int closing) {
     if (s) s->closing = closing ? 1 : 0;
 }
+void kl_dgram_send_set_retire_cb(KlDgramSend *s, void (*cb)(void *ctx), void *ctx) {
+    if (!s) return;
+    s->on_retire = cb; s->retire_ctx = ctx;
+}
+static void send_notify_retire(KlDgramSend *s) {
+    if (s->on_retire) s->on_retire(s->retire_ctx);   /* close coordinator re-checks terminal state */
+}
+
+void kl_dgram_send_discard_queued(KlDgramSend *s) {
+    if (!s) return;
+    /* Release every queued-but-unsubmitted slot (from the tail), keeping the in-flight head prefix. */
+    while (s->count > s->inflight_n) {
+        size_t idx = (s->head + s->count - 1) % s->ring_cap;
+        KlDgramSlot *slot = s->ring[idx];
+        s->ring[idx] = NULL;
+        kl_dgram_slots_release(s->slots, slot);
+        s->count--;
+    }
+    s->full = 0;   /* slots freed; no on_writable — this is close-initiated */
+}
 
 /* ── Deferred callbacks (depth-guarded; reentrancy-safe) ─────────────────────────────────────
  * dispatch_enter/leave bracket any public call that can retire a slot. Callbacks fire only at the
@@ -220,6 +240,7 @@ int kl_dgram_send_on_complete(KlDgramSend *s, int ok) {
         (void)send_pump(s);                        /* async path pumps next; inline lets the outer pump continue */
     int ret = s->err ? -1 : 0;                     /* capture before callbacks (which may free s) */
     dispatch_leave(s);
+    send_notify_retire(s);                         /* last action — close finalize may detach (frees s) */
     return ret;
 }
 
@@ -230,6 +251,7 @@ int kl_dgram_send_flush(KlDgramSend *s) {
     (void)send_pump(s);
     int ret = s->err ? -1 : 0;
     dispatch_leave(s);
+    send_notify_retire(s);                         /* last action — close finalize may detach (frees s) */
     return ret;
 }
 

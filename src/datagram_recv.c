@@ -12,6 +12,14 @@ static const KlSockAddr *addr_or_null(const KlSockAddr *a) {
     return (a && kl_sockaddr_family(a) != KL_AF_UNSPEC) ? a : NULL;
 }
 
+void kl_dgram_recv_set_retire_cb(KlDgramRecv *r, void (*cb)(void *ctx), void *ctx) {
+    if (!r) return;
+    r->on_retire = cb; r->retire_ctx = ctx;
+}
+static void recv_notify_retire(KlDgramRecv *r) {
+    if (r->on_retire) r->on_retire(r->retire_ctx);   /* close coordinator re-checks terminal state */
+}
+
 int kl_dgram_recv_init(KlDgramRecv *r, KlDgramSlots *slots, int completion,
                        KlDgramRecvDeliverFn deliver, void *deliver_ctx,
                        KlDgramRecvArmFn arm, KlDgramRecvDisarmFn disarm,
@@ -110,23 +118,22 @@ int kl_dgram_recv_on_complete(KlDgramRecv *r, size_t len, int ok) {
     r->recv_inflight = 0;                    /* this receive op has retired */
     if (r->arming)
         r->completed_inline = 1;             /* synchronous completion of the current arm */
-    if (r->stopped)
-        return 0;                            /* retirement of a stopped op — drop */
+    if (r->stopped) {
+        recv_notify_retire(r);               /* a stopped/cancelled op retired — let close finalize */
+        return 0;                            /* drop the data */
+    }
 
-    if (!ok) {                               /* a FAILED receive is not a datagram — never deliver */
-        recv_fail(r);
-        return -1;
-    }
-    if (len > r->slots->in_cap) {            /* provider contract violation — fail safely */
-        recv_fail(r);
-        return -1;
-    }
-    if (r->paused) {                         /* STRICT: hold the valid datagram, do not deliver */
-        r->held     = 1;
-        r->held_len = len;
-        return 0;
-    }
-    return recv_deliver_and_continue(r, len);
+    int ret;
+    if (!ok)                                 /* a FAILED receive is not a datagram — never deliver */
+        { recv_fail(r); ret = -1; }
+    else if (len > r->slots->in_cap)         /* provider contract violation — fail safely */
+        { recv_fail(r); ret = -1; }
+    else if (r->paused)                      /* STRICT: hold the valid datagram, do not deliver */
+        { r->held = 1; r->held_len = len; ret = 0; }
+    else
+        ret = recv_deliver_and_continue(r, len);
+    recv_notify_retire(r);                   /* last action — close finalize may detach (frees r) */
+    return ret;
 }
 
 int kl_dgram_recv_on_readable(KlDgramRecv *r) {
@@ -142,10 +149,12 @@ int kl_dgram_recv_on_readable(KlDgramRecv *r) {
             break;                           /* would-block — drained */
         if (pr < 0) {                        /* fatal receive error — disarm + clear (recv_fail) */
             recv_fail(r);
+            recv_notify_retire(r);
             return -1;
         }
         if (len > r->slots->in_cap) {        /* provider contract violation — fail safely */
             recv_fail(r);
+            recv_notify_retire(r);
             return -1;
         }
         KlDgramSlot *in = kl_dgram_slots_inbound(r->slots);
