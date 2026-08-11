@@ -686,9 +686,17 @@ void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp) {
     case KL_COMP_DGRAM_RECV: {  /* datagram — the target is a KlDatagram*, no server */
         KlUdp *udp = kl_udp_of_dg((KlDatagram *)ev->target);
         KlUdpRx *rx = udp_rx(udp);
-        /* A failed/cancelled recv (ev->ok == 0, classified at the backend seam), or a recv that
-         * completes after recv_stop, retires the posted op with NO delivery and NO re-arm. */
-        if (!ev->ok || !udp->dg.recv_active) {
+        /* Drop a completion that lands after teardown/stop BEFORE touching the machine: rx freed
+         * (kl_udp_free ran — e.g. the loop teardown drains this posted recv on the now-closed fd),
+         * the receiver stopped, or the socket closed. Retire the posted op only while it is live. */
+        if (!rx || !udp->dg.recv_active || !kl_handle_valid(udp->dg.fd)) {
+            if (rx && kl_dgram_recv_inflight(&rx->recv))
+                (void)kl_dgram_recv_on_complete(&rx->recv, 0, 0);
+            break;
+        }
+        /* A failed/cancelled recv (ev->ok == 0, classified at the backend seam) retires the posted
+         * op with NO delivery and NO re-arm. */
+        if (!ev->ok) {
             (void)kl_dgram_recv_on_complete(&rx->recv, 0, 0);
             break;
         }
