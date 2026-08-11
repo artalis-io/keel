@@ -60,6 +60,7 @@ static KlDgramSlots *g_ia_slots;
 static int inline_close_arm(void *ctx) {   /* posts + inline-completes into a closing delivery */
     (void)ctx;
     KlDgramSlot *in = kl_dgram_slots_inbound(g_ia_slots);
+    kl_sockaddr_from_ipv4(&in->peer, (const unsigned char *)"\x7f\0\0\1", 53);   /* mandatory peer */
     memcpy(in->data, "I", 1);
     kl_dgram_recv_on_complete(g_ia_recv, 1, 1);
     return 0;
@@ -355,6 +356,7 @@ UTEST(dgram_close, close_from_recv_delivery) {
     g_cb_close = &close; g_cb_did = 0; g_on_close = 0;
     ASSERT_EQ(kl_dgram_recv_start(&recv), 0);              /* posts; recv in flight */
     KlDgramSlot *in = kl_dgram_slots_inbound(&slots);
+    kl_sockaddr_from_ipv4(&in->peer, (const unsigned char *)"\x7f\0\0\1", 53);   /* mandatory peer */
     memcpy(in->data, "PKT!", 4);
     ASSERT_EQ(kl_dgram_recv_on_complete(&recv, 4, 1), 0);  /* deliver → close_begin (deferred) → detach */
     ASSERT_EQ(g_on_close, 1);                              /* exactly once */

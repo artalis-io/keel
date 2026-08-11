@@ -23,6 +23,14 @@
 
 #include <stddef.h>
 
+/* Per-datagram metadata flags carried in `KlDgramSlot.flags` and passed to the receive delivery
+ * callback's `flags`. Providers set the raw hints (a completed WSAMSG.dwFlags MSG_TRUNC / WSAEMSGSIZE
+ * on IOCP, msg_flags & MSG_TRUNC on recvmsg, an active pktinfo local); the receive machine (step 5)
+ * canonicalizes them per the frozen contract (docs/datagram_contract.md §4/§8). */
+#define KL_DGRAM_TRUNCATED  (1u << 0)  /* captured prefix: the datagram exceeded inbound capacity */
+#define KL_DGRAM_HAS_LOCAL  (1u << 1)  /* `local` (destination / receiving interface) is valid */
+/* (1u << 2) _BROADCAST, (1u << 3) _MULTICAST reserved for a later step. */
+
 /* One packet slot: bounded payload storage (data points into the shared pool block) plus the
  * per-packet metadata the contract carries (peer/local addresses, length, flags, TOS). In step 1
  * these fields are STORAGE only — nothing interprets flags/tos yet. */

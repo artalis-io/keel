@@ -2,8 +2,8 @@
 #define KEEL_SRC_DATAGRAM_RECV_H
 
 /*
- * datagram_recv.h — INTERNAL serial receive + strict pause/resume over the dedicated inbound slot
- * (Phase B, step 3). See docs/datagram_contract.md §2/§4.
+ * datagram_recv.h — INTERNAL serial receive + strict pause/resume + uniform truncation/metadata
+ * over the dedicated inbound slot (Phase B, steps 3 + 5). See docs/datagram_contract.md §2/§4/§8.
  *
  * Exactly one receive is outstanding at a time: completion posts ONE recv op; readiness arms ONE
  * READ source and performs serial provider receives (one datagram per pull), re-checking
@@ -16,10 +16,24 @@
  * pause/stop, but MUST NOT free or re-init the object before the (step-4) confirmed-detachment
  * callback — kl_dgram_recv_free refuses while a receive is outstanding.
  *
+ * UNIFORM RECEIVE CONTRACT (step 5), enforced in the machine regardless of provider/backend:
+ *  - The delivered `len` is the CAPTURED-PREFIX length and never exceeds inbound_payload_capacity.
+ *  - An oversized datagram is delivered ONCE with KL_DGRAM_TRUNCATED (captured prefix) — it is NOT
+ *    treated as a fatal receive. Truncation is signalled either by a provider length > in_cap or by
+ *    the provider setting KL_DGRAM_TRUNCATED in the inbound slot (e.g. IOCP parsing WSAMSG.dwFlags /
+ *    WSAEMSGSIZE at exact capacity, or recvmsg's MSG_TRUNC).
+ *  - `peer` (source) is MANDATORY on every successful delivery; a completion/pull that yields no
+ *    peer is a provider contract violation and FAILS SAFELY (no callback, error state) — it is not
+ *    delivered as an anonymous datagram.
+ *  - `local` (dest/interface) is delivered only when KL_DGRAM_HAS_LOCAL is set AND valid; otherwise
+ *    it is passed as NULL and the slot's stale local is cleared. Metadata is copied into the inbound
+ *    slot and canonicalized BEFORE delivery or pause-hold, and the inbound slot's metadata is reset
+ *    before each arm/pull so a prior packet's addresses/flags never survive slot reuse.
+ *  - A genuine zero-length datagram (ok, len 0, peer present) remains distinct from a failure (ok=0).
+ *  - A held (paused) datagram preserves its complete metadata snapshot across pause/resume.
+ *
  * No allocation at all (uses the borrowed inbound slot); no interaction with outbound slot
- * availability. INTERNAL, NOT wired to a live provider or exposed publicly. Truncation delivery
- * semantics are deferred to step 5 — here an over-capacity provider length FAILS SAFELY (the recv
- * is stopped; nothing oversized is delivered).
+ * availability. INTERNAL, NOT wired to a live provider or exposed publicly.
  *
  * INTERNAL header — not installed, no ABI commitment.
  */
@@ -35,10 +49,14 @@
 typedef int  (*KlDgramRecvArmFn)(void *ctx);
 /* Readiness only: remove READ interest (idempotent at the provider). */
 typedef void (*KlDgramRecvDisarmFn)(void *ctx);
-/* Readiness only: receive ONE datagram into the inbound slot (fill data/len/peer/local/flags).
- * Returns 1 = one datagram (bytes in *out_len), 0 = would-block (drained), -1 = fatal error. */
+/* Readiness only: receive ONE datagram into the inbound slot (fill data + metadata: peer [mandatory],
+ * local + KL_DGRAM_HAS_LOCAL when available, KL_DGRAM_TRUNCATED for an oversized/exact-capacity
+ * truncation). *out_len = the datagram length (may exceed in_cap → captured-prefix truncation).
+ * Returns 1 = one datagram, 0 = would-block (drained), -1 = fatal error. */
 typedef int  (*KlDgramRecvPullFn)(void *ctx, size_t *out_len);
-/* Deliver one received datagram (borrowed from the inbound slot; valid only for the call). */
+/* Deliver one received datagram (borrowed from the inbound slot; valid only for the call). `peer` is
+ * always non-NULL; `local` is non-NULL iff KL_DGRAM_HAS_LOCAL is set in `flags`; `flags` may carry
+ * KL_DGRAM_TRUNCATED. `len` is the captured-prefix length (≤ inbound_payload_capacity). */
 typedef void (*KlDgramRecvDeliverFn)(void *ctx, const void *data, size_t len,
                                      const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
 
@@ -106,8 +124,9 @@ int  kl_dgram_recv_free(KlDgramRecv *r);
 
 static inline int kl_dgram_recv_held(const KlDgramRecv *r)     { return (r && r->held) ? 1 : 0; }
 static inline int kl_dgram_recv_inflight(const KlDgramRecv *r) { return (r && r->recv_inflight) ? 1 : 0; }
-/* 1 once a receive failed / violated the length contract — the recv side is stopped and NOTHING was
- * delivered. Step 4 (confirmed detachment) surfaces this. */
+/* 1 once a receive FAILED (provider error) or a delivery violated the contract (peer absent) — the
+ * recv side is stopped and NOTHING was delivered. Note an oversized datagram is NOT an error: it is
+ * delivered as a captured prefix with KL_DGRAM_TRUNCATED. Step 4 (confirmed detachment) surfaces this. */
 static inline int kl_dgram_recv_error(const KlDgramRecv *r)    { return (r && r->error) ? 1 : 0; }
 
 #endif /* KEEL_SRC_DATAGRAM_RECV_H */

@@ -831,6 +831,12 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                                                       (struct sockaddr *)&local_ss,
                                                       local_len);
                 }
+                /* Truncation: WSARecvMsg completes SUCCESSFULLY for an oversized datagram with
+                 * MSG_TRUNC set in the completed WSAMSG.dwFlags (the bytes that fit are already in
+                 * the recv buffer). Surface it as a captured-prefix datagram, NOT a fatal receive —
+                 * mirrors the sync provider's WSAEMSGSIZE/MSG_TRUNC handling (socket_dgram_win.c). */
+                if (op->via_recvmsg && (op->umsg.dwFlags & MSG_TRUNC))
+                    out[count].truncated = 1;
             }
             count++;
             iocp_op_free(op);
