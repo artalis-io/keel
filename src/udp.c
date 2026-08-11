@@ -222,8 +222,15 @@ static void udp_rx_deliver(void *ctx, const void *data, size_t len,
 }
 
 /* Readiness arm/disarm: re-sync the combined (READ recv + WRITE send-queue) interest. recv_active is
- * the READ-intent flag KlUdp already toggles in recv_start/recv_stop, so the hooks only reconcile. */
-static int  udp_rx_arm(void *ctx)    { kl_udp_update_interest(((KlUdpRx *)ctx)->udp); return 0; }
+ * the READ-intent flag KlUdp already toggles in recv_start/recv_stop, so the hooks only reconcile.
+ * ARM must report failure: if the watcher add/mod could not arm READ interest, return -1 so the
+ * receive machine enters its error state instead of believing a receive is armed (recv_inflight=1)
+ * when no READ interest exists. update_interest leaves want_mask without READ on failure. */
+static int  udp_rx_arm(void *ctx) {
+    KlUdp *udp = ((KlUdpRx *)ctx)->udp;
+    kl_udp_update_interest(udp);
+    return (udp->dg.want_mask & KL_EVENT_READ) ? 0 : -1;
+}
 static void udp_rx_disarm(void *ctx) { kl_udp_update_interest(((KlUdpRx *)ctx)->udp); }
 
 /* Readiness pull: one datagram via the provider recv op into the inbound slot; marshal the source +
@@ -500,12 +507,17 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
             goto fail;
         }
         rx->completion = (kl_event_caps(&udp->dg.ctx->loop) & KL_EVENT_CAP_COMPLETION) ? 1 : 0;
-        if (rx->completion)
-            kl_dgram_recv_init(&rx->recv, &rx->slots, /*completion*/1, udp_rx_deliver, rx,
-                               udp_rx_post, NULL, NULL, rx);
-        else
-            kl_dgram_recv_init(&rx->recv, &rx->slots, /*completion*/0, udp_rx_deliver, rx,
-                               udp_rx_arm, udp_rx_disarm, udp_rx_pull, rx);
+        int rinit = rx->completion
+            ? kl_dgram_recv_init(&rx->recv, &rx->slots, /*completion*/1, udp_rx_deliver, rx,
+                                 udp_rx_post, NULL, NULL, rx)
+            : kl_dgram_recv_init(&rx->recv, &rx->slots, /*completion*/0, udp_rx_deliver, rx,
+                                 udp_rx_arm, udp_rx_disarm, udp_rx_pull, rx);
+        if (rinit != 0) {                       /* unwind the slots + holder on init failure */
+            kl_dgram_slots_free(&rx->slots);
+            kl_free(udp->dg.alloc, rx, sizeof(*rx));
+            udp->dg.last_error = KL_ERR_INVALID_ARG;
+            goto fail;
+        }
         udp->rx = rx;
         udp->dg.recv_buf = kl_dgram_slots_inbound(&rx->slots)->data;   /* completion post + delivery */
     }
