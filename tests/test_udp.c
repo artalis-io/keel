@@ -525,4 +525,52 @@ UTEST(udp, free_from_recv_callback) {
     kl_event_ctx_free(&ctx);
 }
 
+/* Cancellation / teardown of an in-flight SEND: on a completion backend kl_udp_send_to posts an
+ * overlapped send op that retains the socket's stable token; freeing the sender + loop BEFORE the op
+ * completes (no pump) must release that op's token reference during backend teardown, then run the
+ * token's final release exactly once. ASan/LSan prove no leak, no double-free of the send op or the
+ * receive storage the token guards. (On a readiness backend the send takes the synchronous path and
+ * holds no token op-ref, so this is a clean plain send + teardown.) */
+UTEST(udp, free_while_send_inflight) {
+    reset_capture();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp tx;
+    KlUdpConfig tc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&tx, &tc));
+
+    KlSockAddr dst;
+    dest_v4(&dst, 65000);                                 /* any loopback port — nothing need receive */
+    ASSERT_EQ(0, kl_udp_send_to(&tx, "inflight", 8, &dst)); /* completion: posts an in-flight send op */
+
+    kl_udp_free(&tx);                                     /* free WITHOUT draining the posted send */
+    kl_event_ctx_free(&ctx);                              /* backend teardown releases the send op's token */
+}
+
+/* A RECV and a SEND in flight at once on the SAME socket both hold a reference to that socket's single
+ * stable token (owner ref + recv-op ref + send-op ref). Tearing down without draining must release
+ * each op's reference during backend cleanup and fire the token's final release exactly once — the
+ * real-backend analogue of dgram_life.many_ops_final_once. ASan/LSan prove no leak or double-free. */
+UTEST(udp, free_while_recv_and_send_inflight) {
+    reset_capture();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp udp;
+    KlUdpConfig uc = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
+    ASSERT_EQ(0, kl_udp_init(&udp, &uc));
+    ASSERT_EQ(0, kl_udp_recv_start(&udp, on_recv, NULL)); /* completion: posts an in-flight recv op */
+    ASSERT_TRUE(kl_udp_local_port(&udp) > 0);
+
+    KlSockAddr dst;
+    dest_v4(&dst, kl_udp_local_port(&udp));               /* aim at our own port; never pumped */
+    ASSERT_EQ(0, kl_udp_send_to(&udp, "both", 4, &dst));  /* completion: posts an in-flight send op */
+
+    kl_udp_free(&udp);                                    /* drop the owner ref; two ops still in flight */
+    kl_event_ctx_free(&ctx);                              /* backend releases both op refs → final once */
+}
+
 UTEST_MAIN();

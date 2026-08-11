@@ -52,6 +52,7 @@
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "completion.h"          /* the abstract axis this TU implements */
+#include "datagram_life.h"       /* stable-liveness token for datagram completion ops (neutral) */
 #include "platform.h"            /* kl_plat_file_pread — file body into the send buffer */
 
 #include <liburing.h>
@@ -98,8 +99,14 @@ typedef struct KlIouOp {
     KlAllocator   *alloc;
     KlSocketHandle fd;
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
-    KlDatagram   *dg;                   /* UDP_RECV / UDP_SEND */
-    void          *buf;                   /* READ: caller-chosen recv buffer */
+    /* Datagram ops (IOU_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
+     * post so the op NEVER dereferences KlDatagram afterwards (the owner may be freed while this op is
+     * in flight). The recv buffer + capture flags are COPIED at post (into buf/buflen/dg_pktinfo/
+     * dg_gro) so the completion touches only the op. */
+    KlDgramLife   *life;
+    int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
+    int            dg_gro;                /* UDP_RECV: capture GRO segment size */
+    void          *buf;                   /* READ / UDP_RECV: receive buffer (pinned by `life`) */
     size_t         buflen;
     char          *sendbuf;               /* WRITE/UDP_SEND: owned copy.
                                            * With reg_idx >= 0 it borrows a registered buffer. */
@@ -333,6 +340,12 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
 }
 
 static void iou_op_free(KlIouOp *op) {
+    /* A datagram op that still owns its token reference (dropped WITHOUT emitting an event — post-
+     * failure unwind, an aborted op freed in the drain loop, or loop teardown after queue_exit)
+     * releases it here. Its final release frees the receive storage. iou_complete transfers the ref to
+     * the event and NULLs op->life first, so an emitted op does not double-release. Non-datagram ops
+     * carry op->life == NULL. */
+    if (op->life) kl_dgram_life_release(op->life);
     /* A registered send buffer (reg_idx >= 0) is borrowed — its index is returned to the
      * pool at the completion/error site, not here; only a malloc'd sendbuf is freed. */
     if (op->sendbuf && op->reg_idx < 0) kl_free(op->alloc, op->sendbuf, op->sendcap);
@@ -628,11 +641,16 @@ static int iou_comp_post_dgram_recv(struct KlDatagram *dg) {
     KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
     op->type = IOU_DGRAM_RECV;
-    op->dg = dg;
     op->fd = dg->fd;
     op->peer_len = sizeof(op->peer);
-    op->msgiov.iov_base = dg->recv_buf;
-    op->msgiov.iov_len = dg->recv_buf_size;
+    /* Copy the receive buffer + capture flags now; the op must not dereference KlDatagram later. The
+     * buffer stays valid because the token ref (retained below) pins it past the op's lifetime. */
+    op->buf        = dg->recv_buf;
+    op->buflen     = dg->recv_buf_size;
+    op->dg_pktinfo = dg->pktinfo;
+    op->dg_gro     = dg->recv_gro;
+    op->msgiov.iov_base = op->buf;
+    op->msgiov.iov_len = op->buflen;
     op->msgh.msg_name = &op->peer;
     op->msgh.msg_namelen = sizeof(op->peer);
     op->msgh.msg_iov = &op->msgiov;
@@ -640,9 +658,11 @@ static int iou_comp_post_dgram_recv(struct KlDatagram *dg) {
     op->msgh.msg_control = op->udp_ctrl;          /* capture pktinfo (local addr) cmsg */
     op->msgh.msg_controllen = sizeof(op->udp_ctrl);
     struct io_uring_sqe *sqe = iou_sqe(st);
-    if (!sqe) { iou_op_free(op); return -1; }
+    if (!sqe) { iou_op_free(op); return -1; }      /* life unset → no release */
     io_uring_prep_recvmsg(sqe, op->fd, &op->msgh, 0);
     io_uring_sqe_set_data(sqe, op);
+    op->life = (KlDgramLife *)dg->rx_life;          /* retain AFTER the failure unwind above */
+    kl_dgram_life_retain(op->life);
     iou_op_push(st, op);
     return 0;
 }
@@ -653,12 +673,11 @@ static int iou_comp_post_dgram_send(struct KlDatagram *dg, const void *data, siz
     KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
     op->type = IOU_DGRAM_SEND;
-    op->dg = dg;
     op->fd = dg->fd;
     op->send_total = len;
     op->sendcap = len ? len : 1;
     op->sendbuf = kl_malloc(st->alloc, op->sendcap);
-    if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }
+    if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }   /* life unset → no release */
     memcpy(op->sendbuf, data, len);
     /* Marshal the neutral dest to a host sockaddr for the overlapped sendmsg. */
     if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC) {
@@ -676,6 +695,8 @@ static int iou_comp_post_dgram_send(struct KlDatagram *dg, const void *data, siz
     if (!sqe) { iou_op_free(op); return -1; }
     io_uring_prep_sendmsg(sqe, op->fd, &op->msgh, 0);
     io_uring_sqe_set_data(sqe, op);
+    op->life = (KlDgramLife *)dg->rx_life;          /* retain AFTER the failure unwind above */
+    kl_dgram_life_retain(op->life);
     iou_op_push(st, op);
     return 0;
 }
@@ -826,15 +847,18 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         return 1;
 
     case IOU_DGRAM_RECV:
+        /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op. Transfer
+         * the token ref op → event (released after dispatch); NULL op->life so iou_op_free does not
+         * double-release. Never dereference KlDatagram. */
         ev->kind = KL_COMP_DGRAM_RECV;
-        ev->target = op->dg;
+        ev->life = op->life; op->life = NULL;
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
-        ev->buf = op->dg->recv_buf;
+        ev->buf = op->buf;
         if (res >= 0 && op->msgh.msg_namelen > 0) /* source: native → neutral at the seam */
             (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&op->peer,
                                           op->msgh.msg_namelen);
-        if (res >= 0 && op->dg->pktinfo) {       /* local (dest) addr via pktinfo cmsg */
+        if (res >= 0 && op->dg_pktinfo) {        /* local (dest) addr via pktinfo cmsg */
             struct sockaddr_storage local_ss;
             socklen_t local_len = kl_udp_parse_local(&op->msgh, &local_ss);
             if (local_len)
@@ -842,7 +866,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
                                               (struct sockaddr *)&local_ss, local_len);
         }
         if (res >= 0) {
-            if (op->dg->recv_gro)                /* GRO coalesced segment size */
+            if (op->dg_gro)                      /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&op->msgh);
             if (op->msgh.msg_flags & MSG_TRUNC)   /* datagram truncated to recv_buf */
                 ev->truncated = 1;
@@ -851,7 +875,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
 
     case IOU_DGRAM_SEND:
         ev->kind = KL_COMP_DGRAM_SEND;
-        ev->target = op->dg;
+        ev->life = op->life; op->life = NULL;      /* transfer token ref op → event */
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
         return 1;
