@@ -1,24 +1,23 @@
 /*
  * datagram_send.c — INTERNAL atomic send machinery over KlDgramSlots (Phase B, step 2).
  *
- * See datagram_send.h. A whole datagram is copied into a preallocated outbound slot and queued in
- * a FIFO ring (send order), decoupled from the LIFO free-slot allocator. Readiness providers drain
- * synchronously (submit→DONE); completion providers submit up to `max_inflight` async sends
- * (submit→INFLIGHT) retired via on_complete. All state is updated before any callback fires.
+ * See datagram_send.h. Single-flight (Tier-1): the oldest queued datagram is the only one
+ * submitted; the next is pumped when it retires. The submit hook is armed BEFORE it is called so an
+ * inline kl_dgram_send_on_complete retires correctly. All state is updated before callbacks, which
+ * are deferred to the outermost public call; on_writable is reentrant/non-destructive, on_drain is
+ * the destructive tail (re-checked, then no self-access).
  */
 #include "datagram_send.h"
 
 #include <stdint.h>   /* SIZE_MAX */
 #include <string.h>   /* memcpy / memset */
 
-/* Normalize an address to NULL when unset (KL_AF_UNSPEC) so the provider sees a connected send /
- * no source-pin as NULL rather than a zeroed sockaddr. */
 static const KlSockAddr *addr_or_null(const KlSockAddr *a) {
     return (a && kl_sockaddr_family(a) != KL_AF_UNSPEC) ? a : NULL;
 }
 
 int kl_dgram_send_init(KlDgramSend *s, KlDgramSlots *slots, KlAllocator *ring_alloc,
-                       int completion, size_t max_inflight, unsigned caps,
+                       int completion, unsigned caps,
                        KlDgramSubmitFn submit, void *submit_ctx) {
     if (!s)
         return -1;
@@ -27,47 +26,66 @@ int kl_dgram_send_init(KlDgramSend *s, KlDgramSlots *slots, KlAllocator *ring_al
         return -1;
 
     size_t cap = slots->slot_count;
-    size_t ring_bytes;
     if (cap > SIZE_MAX / sizeof(KlDgramSlot *))   /* overflow-safe ring sizing */
         return -1;
-    ring_bytes = cap * sizeof(KlDgramSlot *);
+    size_t ring_bytes = cap * sizeof(KlDgramSlot *);
 
     KlDgramSlot **ring = kl_malloc(ring_alloc, ring_bytes);
     if (!ring)
         return -1;
     memset(ring, 0, ring_bytes);
 
-    s->slots        = slots;
-    s->alloc        = ring_alloc;
-    s->ring         = ring;
-    s->ring_cap     = cap;
-    s->completion   = completion ? 1 : 0;
-    s->max_inflight = max_inflight < 1 ? 1 : max_inflight;
-    s->caps         = caps;
-    s->submit       = submit;
-    s->submit_ctx   = submit_ctx;
+    s->slots      = slots;
+    s->alloc      = ring_alloc;
+    s->ring       = ring;
+    s->ring_cap   = cap;
+    s->completion = completion ? 1 : 0;
+    s->caps       = caps;
+    s->submit     = submit;
+    s->submit_ctx = submit_ctx;
     return 0;
 }
 
 void kl_dgram_send_set_writable_cb(KlDgramSend *s, KlDgramWritableFn cb, void *ctx) {
     if (!s) return;
-    s->on_writable = cb;
-    s->writable_ctx = ctx;
+    s->on_writable = cb; s->writable_ctx = ctx;
 }
 void kl_dgram_send_set_drain_cb(KlDgramSend *s, KlDgramDrainFn cb, void *ctx) {
     if (!s) return;
-    s->on_drain = cb;
-    s->drain_ctx = ctx;
+    s->on_drain = cb; s->drain_ctx = ctx;
 }
 void kl_dgram_send_set_closing(KlDgramSend *s, int closing) {
     if (s) s->closing = closing ? 1 : 0;
 }
 
-/* Pop+release the oldest occupied slot; update FIFO + inflight + edge state. Returns the edges to
- * fire via *fire_writable / *fire_drain — the caller fires them AFTER all state (incl. a sticky
- * error) is updated, so a reentrant callback observes fully-updated state. */
-static void send_retire_head(KlDgramSend *s, int was_inflight,
-                             int *fire_writable, int *fire_drain) {
+/* ── Deferred callbacks (depth-guarded; reentrancy-safe) ─────────────────────────────────────
+ * dispatch_enter/leave bracket any public call that can retire a slot. Callbacks fire only at the
+ * outermost frame, so a reentrant send from a callback defers ITS callbacks back here. */
+static void dispatch_enter(KlDgramSend *s) { s->in_dispatch++; }
+
+static void dispatch_leave(KlDgramSend *s) {
+    if (s->in_dispatch > 1) { s->in_dispatch--; return; }   /* nested — defer to the outer frame */
+
+    /* on_writable is reentrant/non-destructive: fire while depth is still 1 (so a reentrant send
+     * defers its callbacks back to us), looping to absorb a refill+re-drain it may cause. */
+    while (s->pend_writable) {
+        s->pend_writable = 0;
+        if (s->on_writable) s->on_writable(s->writable_ctx);
+    }
+
+    /* on_drain is the DESTRUCTIVE tail: fire only if the queue is STILL empty (a reentrant
+     * on_writable send may have refilled it). Drop to depth 0 BEFORE firing and make no further
+     * access to `s` — the callback may free/tear down the object. */
+    int fire_drain = (s->pend_drain && s->count == 0 && s->on_drain != NULL);
+    s->pend_drain = 0;
+    s->in_dispatch = 0;
+    if (fire_drain)
+        s->on_drain(s->drain_ctx);   /* NO access to `s` after this line */
+}
+
+/* Pop+release the oldest occupied slot; update FIFO + inflight + edge flags. No callbacks here —
+ * they are deferred (dispatch_leave), so a caller can update a sticky error before they fire. */
+static void send_retire_head(KlDgramSend *s, int was_inflight) {
     KlDgramSlot *slot = s->ring[s->head];
     s->ring[s->head] = NULL;
     s->head = (s->head + 1) % s->ring_cap;
@@ -75,44 +93,45 @@ static void send_retire_head(KlDgramSend *s, int was_inflight,
     if (was_inflight && s->inflight_n > 0)
         s->inflight_n--;
     kl_dgram_slots_release(s->slots, slot);   /* a free slot appears */
-
-    *fire_writable = 0;
-    *fire_drain    = 0;
-    if (s->full) { s->full = 0; *fire_writable = 1; }   /* full → non-full (exactly once) */
-    if (s->count == 0) *fire_drain = 1;                 /* non-empty → empty */
+    if (s->full) { s->full = 0; s->pend_writable = 1; }   /* full → non-full */
+    if (s->count == 0) s->pend_drain = 1;                 /* non-empty → empty (re-checked at leave) */
 }
 
-static void send_fire(KlDgramSend *s, int fire_writable, int fire_drain) {
-    if (fire_writable && s->on_writable) s->on_writable(s->writable_ctx);
-    if (fire_drain && s->on_drain) s->on_drain(s->drain_ctx);
-}
-
-/* Submit the slot at FIFO position `off` from the head. */
+/* Submit the queued slot at FIFO position `off` from the head. */
 static KlDgramSubmitResult send_submit_slot(KlDgramSend *s, size_t off) {
     KlDgramSlot *slot = s->ring[(s->head + off) % s->ring_cap];
     return s->submit(s->submit_ctx, slot->data, slot->len,
                      addr_or_null(&slot->peer), addr_or_null(&slot->local), slot->tos);
 }
 
-/* Drain queued datagrams: readiness submits (DONE) until WOULD_BLOCK/empty; completion submits up
- * to max_inflight (INFLIGHT). Returns 0, or -1 once a sticky error is set. */
+/* Single-flight pump: while nothing is in flight and a queued datagram exists, submit the head.
+ * The op is ARMED (inflight_n = 1) before submit so an inline on_complete retires it. Returns 0, or
+ * -1 once a sticky error is set. Must be called inside a dispatch. */
 static int send_pump(KlDgramSend *s) {
     if (s->err) return -1;
-    while (s->count > s->inflight_n && s->inflight_n < s->max_inflight) {
-        KlDgramSubmitResult r = send_submit_slot(s, s->inflight_n);
+    while (s->inflight_n == 0 && s->count > 0) {
+        s->inflight_n     = 1;    /* arm before submit (inline-completion window) */
+        s->in_submit      = 1;
+        s->submit_retired = 0;
+        KlDgramSubmitResult r = send_submit_slot(s, 0);   /* head is the only un-submitted slot */
+        s->in_submit = 0;
+
+        if (s->submit_retired) {
+            /* an inline on_complete already retired this op (inflight_n back to 0, head popped). */
+            if (r == KL_DGRAM_SUBMIT_ERROR) { s->err = 1; return -1; }
+            continue;             /* submit the next queued datagram, if any */
+        }
         if (r == KL_DGRAM_SUBMIT_INFLIGHT) {
-            s->inflight_n++;                       /* completion: one more async op outstanding */
+            return 0;             /* stays in flight (inflight_n == 1) — retire via on_complete */
         } else if (r == KL_DGRAM_SUBMIT_DONE) {
-            /* readiness sync send: valid only at the head (a sync provider never has async ops
-             * ahead). Reject a provider that mixes the two rather than corrupt FIFO retirement. */
-            if (s->inflight_n != 0) { s->err = 1; return -1; }
-            int fw, fd;
-            send_retire_head(s, 0, &fw, &fd);
-            send_fire(s, fw, fd);
+            s->inflight_n = 0;    /* not async — un-arm, then retire the head synchronously */
+            send_retire_head(s, 0);
         } else if (r == KL_DGRAM_SUBMIT_WOULDBLOCK) {
-            break;                                 /* keep queued; a writable event resumes (flush) */
-        } else {                                   /* KL_DGRAM_SUBMIT_ERROR */
-            s->err = 1;                            /* sticky; datagram retained (owned) in its slot */
+            s->inflight_n = 0;    /* un-arm; keep queued (a writable event resumes via flush) */
+            return 0;
+        } else {                  /* KL_DGRAM_SUBMIT_ERROR */
+            s->inflight_n = 0;    /* un-arm; datagram retained (owned) in its slot */
+            s->err = 1;
             return -1;
         }
     }
@@ -141,8 +160,10 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
     if (m->len > s->slots->out_cap)
         return KL_DATAGRAM_TOO_LARGE;
 
-    /* Readiness fast path: an empty queue tries a direct synchronous send with NO slot consumed —
-     * so a synchronously-sent datagram never creates a transient non-empty→empty transition. */
+    /* Readiness fast path: an empty queue tries a direct synchronous send with NO slot consumed, so
+     * a synchronously-sent datagram never creates a transient non-empty→empty transition. A
+     * readiness provider returns DONE / WOULD_BLOCK / ERROR (never INFLIGHT), so no on_complete can
+     * fire here — no dispatch/callbacks needed. */
     if (!s->completion && s->count == 0) {
         KlDgramSubmitResult r = s->submit(s->submit_ctx, m->data, m->len,
                                           addr_or_null(m->peer), addr_or_null(m->local), m->tos);
@@ -152,7 +173,7 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
             s->err = 1;
             return KL_DATAGRAM_ERROR;              /* refusal: nothing taken (no slot acquired) */
         }
-        /* WOULD_BLOCK: fall through and queue it. (A readiness provider never returns INFLIGHT.) */
+        /* WOULD_BLOCK: fall through and queue it. */
     }
 
     /* Acquire a slot only once acceptance is certain — every refusal above takes no ownership and
@@ -172,14 +193,15 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
     if (addr_or_null(m->peer))  slot->peer  = *m->peer;  else memset(&slot->peer,  0, sizeof(slot->peer));
     if (addr_or_null(m->local)) slot->local = *m->local; else memset(&slot->local, 0, sizeof(slot->local));
 
-    /* Enqueue FIFO (tail). */
-    s->ring[(s->head + s->count) % s->ring_cap] = slot;
+    s->ring[(s->head + s->count) % s->ring_cap] = slot;   /* enqueue FIFO (tail) */
     s->count++;
     if (kl_dgram_slots_free_count(s->slots) == 0)
         s->full = 1;                               /* filled the last slot */
 
+    dispatch_enter(s);
     (void)send_pump(s);                            /* submit failure is sticky; the datagram stays owned */
-    return KL_DATAGRAM_ACCEPTED;
+    dispatch_leave(s);                             /* may fire the destructive on_drain — no s access after */
+    return KL_DATAGRAM_ACCEPTED;                   /* local return value; safe even if s was freed */
 }
 
 int kl_dgram_send_on_complete(KlDgramSend *s, int ok) {
@@ -188,27 +210,34 @@ int kl_dgram_send_on_complete(KlDgramSend *s, int ok) {
     if (s->inflight_n == 0)
         return s->err ? -1 : 0;                    /* spurious / duplicate completion */
 
-    int fw, fd;
-    send_retire_head(s, 1, &fw, &fd);
+    dispatch_enter(s);
+    if (s->in_submit)
+        s->submit_retired = 1;                     /* inline: tell the pump the op retired */
+    send_retire_head(s, 1);                         /* inflight_n 1 → 0 */
     if (!ok)
         s->err = 1;                                /* op physically retired but failed — sticky */
-    send_fire(s, fw, fd);                          /* state (incl. err) fully updated before callbacks */
-    if (s->err)
-        return -1;
-    return send_pump(s);                           /* submit the next queued datagram(s) */
+    if (!s->err && !s->in_submit)
+        (void)send_pump(s);                        /* async path pumps next; inline lets the outer pump continue */
+    int ret = s->err ? -1 : 0;                     /* capture before callbacks (which may free s) */
+    dispatch_leave(s);
+    return ret;
 }
 
 int kl_dgram_send_flush(KlDgramSend *s) {
     if (!s)
         return -1;
-    return send_pump(s);
+    dispatch_enter(s);
+    (void)send_pump(s);
+    int ret = s->err ? -1 : 0;
+    dispatch_leave(s);
+    return ret;
 }
 
 int kl_dgram_send_free(KlDgramSend *s) {
     if (!s)
         return 0;
     if (s->inflight_n > 0)
-        return -1;   /* provider-referenced sends outstanding — slot storage must not be freed */
+        return -1;   /* provider-referenced send outstanding — slot storage must not be freed */
     if (s->ring && s->alloc)
         kl_free(s->alloc, s->ring, s->ring_cap * sizeof(KlDgramSlot *));
     memset(s, 0, sizeof(*s));   /* reusable (the borrowed slots are the caller's to free) */

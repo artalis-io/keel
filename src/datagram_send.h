@@ -6,14 +6,26 @@
  *
  * The send-side state machine the frozen Tier-1 contract requires (docs/datagram_contract.md §1):
  * a whole datagram is accepted (copied into a preallocated outbound slot) or refused — never
- * partial — with exact status mapping, FIFO send order over the LIFO free-slot allocator, at most
- * a provider-supported bounded number of sends in flight, on_writable (full→non-full) and on_drain
- * (non-empty→empty) edges, a sticky error state, and free refused while provider-referenced sends
- * are outstanding.
+ * partial — with exact status mapping, FIFO send order over the LIFO free-slot allocator, a sticky
+ * error state, on_writable (full→non-full) / on_drain (non-empty→empty) edges, and free refused
+ * while a provider-referenced send is outstanding.
  *
- * This is INTERNAL and NOT yet wired to a live UDP/DNS provider or exposed publicly — it drives an
- * abstract `submit` hook (a mock in tests; the real udp/completion send in a later step). It
- * operates OVER a borrowed KlDgramSlots (step 1); it owns only its FIFO ring.
+ * SINGLE-FLIGHT (Tier-1). At most ONE send is in flight at a time (contract §1: "exactly one send
+ * batch submitted at a time"). The oldest queued datagram is the only one submitted; the next is
+ * pumped when it retires. A bounded-N>1 window would require a per-submission stable token so
+ * out-of-order completions retire the exact slot — that is a future capability, not this API.
+ *
+ * INLINE COMPLETION SAFE. The submit hook MAY synchronously call kl_dgram_send_on_complete (the op
+ * is armed before submit); a synchronous readiness provider signals completion via DONE instead.
+ *
+ * CALLBACK DISCIPLINE. All state is updated before any callback fires; callbacks are deferred to
+ * the outermost public call (a depth guard makes reentrant sends defer their callbacks back).
+ * on_writable is reentrant but NON-DESTRUCTIVE. on_drain is the DESTRUCTIVE TAIL: it fires only if
+ * the queue is STILL empty (a reentrant on_writable send may have refilled it), and the machine
+ * makes no further access to itself afterwards — the callback may free/tear down the object.
+ *
+ * INTERNAL and NOT yet wired to a live UDP/DNS provider or exposed publicly — it drives an abstract
+ * `submit` hook (a mock in tests) over a BORROWED KlDgramSlots (step 1); it owns only its FIFO ring.
  *
  * INTERNAL header — not installed, no ABI commitment.
  */
@@ -35,8 +47,7 @@ typedef enum {
     KL_DATAGRAM_ERROR           /* bad argument or sticky transport error */
 } KlDatagramSendStatus;
 
-/* Requested-feature capabilities (subset needed for send UNSUPPORTED mapping in step 2; the full
- * set is exposed in step 7). A feature the caller requests but the object lacks fails. */
+/* Requested-feature capabilities (subset needed for send UNSUPPORTED mapping in step 2). */
 #define KL_DGRAM_CAP_SOURCE_PIN  (1u << 0)   /* msg.local source-pin on send */
 #define KL_DGRAM_CAP_TOS         (1u << 1)   /* per-packet TOS/ECN on send */
 #define KL_DGRAM_CAP_CONNECTED   (1u << 2)   /* connected-mode send (msg.peer == NULL) */
@@ -65,8 +76,8 @@ typedef enum {
 typedef KlDgramSubmitResult (*KlDgramSubmitFn)(void *ctx, const void *data, size_t len,
                                                const KlSockAddr *peer, const KlSockAddr *local,
                                                int tos);
-typedef void (*KlDgramWritableFn)(void *ctx);   /* full→non-full edge */
-typedef void (*KlDgramDrainFn)(void *ctx);      /* non-empty→empty edge */
+typedef void (*KlDgramWritableFn)(void *ctx);   /* full→non-full edge (reentrant, non-destructive) */
+typedef void (*KlDgramDrainFn)(void *ctx);      /* non-empty→empty edge (destructive tail) */
 
 typedef struct {
     KlDgramSlots     *slots;         /* borrowed (step 1) — outbound slots + inbound slot */
@@ -75,8 +86,7 @@ typedef struct {
     size_t            ring_cap;      /* == slots->slot_count */
     size_t            head;          /* index of the oldest occupied slot */
     size_t            count;         /* occupied slots (queued + in-flight) */
-    size_t            inflight_n;    /* head-prefix slots submitted, awaiting async retirement */
-    size_t            max_inflight;  /* provider-supported bound (>= 1; readiness stays at 0) */
+    size_t            inflight_n;    /* 0 or 1 — single-flight (Tier-1) */
     int               completion;    /* 1 = async (submit→INFLIGHT); 0 = readiness (submit→DONE) */
     unsigned          caps;          /* KL_DGRAM_CAP_* for UNSUPPORTED mapping */
     KlDgramSubmitFn   submit;   void *submit_ctx;
@@ -85,14 +95,20 @@ typedef struct {
     int               err;           /* sticky transport error */
     int               closing;       /* refuse new sends with CLOSED */
     int               full;          /* latched: the queue is full (for the full→non-full edge) */
+    /* callback-deferral + inline-completion sentinels */
+    int               in_dispatch;   /* depth of public calls that may fire callbacks */
+    int               pend_writable; /* a full→non-full edge is pending */
+    int               pend_drain;    /* a retirement emptied the queue (re-checked before firing) */
+    int               in_submit;     /* a submit() call is on the stack (inline-completion window) */
+    int               submit_retired;/* an inline on_complete retired the in-flight op */
 } KlDgramSend;
 
 /* Wire the send machine over a borrowed, already-inited KlDgramSlots. `completion` selects the I/O
- * model (1 = async submit/INFLIGHT, 0 = readiness sync submit/DONE). `max_inflight` (clamped >= 1)
- * bounds concurrent async sends. Allocates only the FIFO ring (one init-time allocation). Returns 0,
- * or -1 on bad argument / overflow / allocation failure (object left zeroed, reusable). */
+ * model (1 = async submit/INFLIGHT, 0 = readiness sync submit/DONE). Single-flight (Tier-1).
+ * Allocates only the FIFO ring (one init-time allocation). Returns 0, or -1 on bad argument /
+ * overflow / allocation failure (object left zeroed, reusable). */
 int  kl_dgram_send_init(KlDgramSend *s, KlDgramSlots *slots, KlAllocator *ring_alloc,
-                        int completion, size_t max_inflight, unsigned caps,
+                        int completion, unsigned caps,
                         KlDgramSubmitFn submit, void *submit_ctx);
 
 void kl_dgram_send_set_writable_cb(KlDgramSend *s, KlDgramWritableFn cb, void *ctx);
@@ -101,21 +117,19 @@ void kl_dgram_send_set_drain_cb(KlDgramSend *s, KlDgramDrainFn cb, void *ctx);
 /* Accept or refuse one whole datagram (never partial). Copies data + metadata before returning. */
 KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m);
 
-/* Async retirement of the oldest in-flight send (completion mode). ok=0 → sticky error. Returns 0,
- * or -1 if a sticky error is set. Spurious/duplicate completions (none in flight) are ignored. */
+/* Async retirement of the single in-flight send (completion mode; may be called inline from the
+ * submit hook). ok=0 → sticky error. Returns 0, or -1 if a sticky error is set. Spurious/duplicate
+ * completions (none in flight) are ignored. */
 int  kl_dgram_send_on_complete(KlDgramSend *s, int ok);
 
-/* Readiness: retry draining queued datagrams after a WOULD_BLOCK, on a writable event. Returns 0,
- * or -1 on sticky error. */
+/* Readiness: retry draining queued datagrams after a WOULD_BLOCK, on a writable event. 0 / -1. */
 int  kl_dgram_send_flush(KlDgramSend *s);
 
-/* Mark the send side closing (subsequent kl_dgram_send returns CLOSED). Full close/detachment is a
- * later step; this only gates new sends. */
+/* Mark the send side closing (subsequent kl_dgram_send returns CLOSED). Full close is a later step. */
 void kl_dgram_send_set_closing(KlDgramSend *s, int closing);
 
 /* Free the FIFO ring and zero the object (the borrowed slots are NOT freed here). REFUSES with -1
- * while any provider-referenced (in-flight) send is outstanding — slot storage must not be freed
- * underneath the provider. */
+ * while the in-flight send is outstanding — slot storage must not be freed under the provider. */
 int  kl_dgram_send_free(KlDgramSend *s);
 
 static inline size_t kl_dgram_send_inflight(const KlDgramSend *s) { return s ? s->inflight_n : 0; }
