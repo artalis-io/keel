@@ -54,11 +54,11 @@ typedef struct {
     int    inited;
     int    paused;
     int    stopped;                   /* logical stop (no future delivery/re-arm) */
+    int    error;                     /* a failed/contract-violating receive (exposed to step 4) */
     int    recv_inflight;             /* completion: op posted; readiness: interest armed */
-    /* held completion (completion mode, paused) */
+    /* held completion (completion mode, paused) — always a VALID datagram (failures are never held) */
     int    held;
     size_t held_len;
-    int    held_ok;
     /* inline-completion iterative trampoline (mirror stream read) */
     int    arming;
     int    rearm_pending;
@@ -99,5 +99,8 @@ int  kl_dgram_recv_free(KlDgramRecv *r);
 
 static inline int kl_dgram_recv_held(const KlDgramRecv *r)     { return (r && r->held) ? 1 : 0; }
 static inline int kl_dgram_recv_inflight(const KlDgramRecv *r) { return (r && r->recv_inflight) ? 1 : 0; }
+/* 1 once a receive failed / violated the length contract — the recv side is stopped and NOTHING was
+ * delivered. Step 4 (confirmed detachment) surfaces this. */
+static inline int kl_dgram_recv_error(const KlDgramRecv *r)    { return (r && r->error) ? 1 : 0; }
 
 #endif /* KEEL_SRC_DATAGRAM_RECV_H */

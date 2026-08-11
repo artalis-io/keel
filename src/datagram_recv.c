@@ -66,17 +66,32 @@ static int recv_arm(KlDgramRecv *r) {
     return result;
 }
 
-/* Deliver one datagram from the inbound slot, then re-arm — unless it was a fatal receive (ok==0)
- * or the callback paused/stopped. State re-checked AFTER the callback. */
-static int recv_deliver_and_continue(KlDgramRecv *r, size_t len, int ok) {
-    if (!ok) { r->stopped = 1; len = 0; }
+/* Deliver one VALID datagram from the inbound slot, then re-arm — unless the callback paused/stopped.
+ * A failed receive NEVER reaches here (it is routed through recv_fail). State re-checked AFTER the
+ * callback. */
+static int recv_deliver_and_continue(KlDgramRecv *r, size_t len) {
     KlDgramSlot *in = kl_dgram_slots_inbound(r->slots);
     r->deliver(r->deliver_ctx, in->data, len,
                addr_or_null(&in->peer), addr_or_null(&in->local), in->flags);
-    if (!ok) return 0;                       /* fatal delivered — never re-arm */
     if (r->stopped || r->paused) return 0;   /* callback stopped/paused — do not re-arm */
     if (r->recv_inflight) return 0;          /* a synchronous completion already re-armed */
     return recv_arm(r);
+}
+
+/* A receive FAILED (provider error) or violated the length contract: stop the receive side, set the
+ * error state, and NEVER deliver (a failure is not a datagram, and is never held). Readiness: drop
+ * READ interest EXACTLY ONCE and clear recv_inflight, so nothing is left logically armed and cleanup
+ * /free are not wedged. Completion: physical retirement is the caller's (recv_inflight is already
+ * cleared before this in on_complete). Safe under a subsequent idempotent kl_dgram_recv_stop. */
+static void recv_fail(KlDgramRecv *r) {
+    r->error    = 1;
+    r->stopped  = 1;
+    r->held     = 0;
+    r->held_len = 0;
+    if (!r->completion && r->recv_inflight) {
+        r->disarm(r->hook_ctx);
+        r->recv_inflight = 0;
+    }
 }
 
 int kl_dgram_recv_start(KlDgramRecv *r) {
@@ -98,19 +113,20 @@ int kl_dgram_recv_on_complete(KlDgramRecv *r, size_t len, int ok) {
     if (r->stopped)
         return 0;                            /* retirement of a stopped op — drop */
 
-    if (ok && len > r->slots->in_cap) {      /* provider contract violation — fail safely */
-        r->stopped = 1;
+    if (!ok) {                               /* a FAILED receive is not a datagram — never deliver */
+        recv_fail(r);
         return -1;
     }
-    if (!ok) len = 0;
-
-    if (r->paused) {                         /* STRICT: hold in the inbound slot, do not deliver */
+    if (len > r->slots->in_cap) {            /* provider contract violation — fail safely */
+        recv_fail(r);
+        return -1;
+    }
+    if (r->paused) {                         /* STRICT: hold the valid datagram, do not deliver */
         r->held     = 1;
         r->held_len = len;
-        r->held_ok  = ok ? 1 : 0;
         return 0;
     }
-    return recv_deliver_and_continue(r, len, ok ? 1 : 0);
+    return recv_deliver_and_continue(r, len);
 }
 
 int kl_dgram_recv_on_readable(KlDgramRecv *r) {
@@ -124,12 +140,12 @@ int kl_dgram_recv_on_readable(KlDgramRecv *r) {
         int pr = r->pull(r->hook_ctx, &len);
         if (pr == 0)
             break;                           /* would-block — drained */
-        if (pr < 0) {                        /* fatal receive error */
-            r->stopped = 1;
+        if (pr < 0) {                        /* fatal receive error — disarm + clear (recv_fail) */
+            recv_fail(r);
             return -1;
         }
         if (len > r->slots->in_cap) {        /* provider contract violation — fail safely */
-            r->stopped = 1;
+            recv_fail(r);
             return -1;
         }
         KlDgramSlot *in = kl_dgram_slots_inbound(r->slots);
@@ -161,9 +177,8 @@ int kl_dgram_recv_resume(KlDgramRecv *r) {
 
     if (r->held) {
         size_t len = r->held_len;
-        int ok = r->held_ok;
-        r->held = 0; r->held_len = 0; r->held_ok = 0;   /* consume exactly once */
-        return recv_deliver_and_continue(r, len, ok);
+        r->held = 0; r->held_len = 0;   /* consume the valid held datagram exactly once */
+        return recv_deliver_and_continue(r, len);
     }
     if (r->recv_inflight)                     /* completion: a recv posted before pause is still out */
         return 0;
@@ -176,7 +191,6 @@ void kl_dgram_recv_stop(KlDgramRecv *r) {
     r->stopped  = 1;
     r->held     = 0;                         /* discard held completion — not delivered */
     r->held_len = 0;
-    r->held_ok  = 0;
     if (!r->completion) {
         if (r->recv_inflight) r->disarm(r->hook_ctx);
         r->recv_inflight = 0;

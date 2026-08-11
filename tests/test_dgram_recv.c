@@ -67,12 +67,14 @@ typedef struct {
     int    avail;              /* datagrams available to pull before would-block */
     const char *payload; size_t plen;
     size_t bad_len;            /* if != 0, pull reports this length (capacity-bound test) */
+    int    fatal;              /* if set, pull returns a fatal error (-1) */
 } RdCtx;
 static int  rd_arm(void *ctx)    { RdCtx *c = ctx; c->arms++;   return 0; }
 static void rd_disarm(void *ctx) { RdCtx *c = ctx; c->disarms++; }
 static int  rd_pull(void *ctx, size_t *out) {
     RdCtx *c = ctx;
     c->pulls++;
+    if (c->fatal) return -1;                     /* fatal receive error */
     if (c->avail <= 0) return 0;                 /* would-block */
     c->avail--;
     KlDgramSlot *in = kl_dgram_slots_inbound(c->slots);
@@ -216,8 +218,10 @@ UTEST(dgram_recv, capacity_bound_fails_safe) {
     ASSERT_EQ(kl_dgram_recv_start(&rc), 0);
     ASSERT_EQ(kl_dgram_recv_on_complete(&rc, 999, 1), -1);   /* > in_cap → fail safe */
     ASSERT_EQ(g_deliv, 0);
-    kl_dgram_recv_free(&rc);
-    /* readiness */
+    ASSERT_TRUE(kl_dgram_recv_error(&rc));
+    ASSERT_EQ(kl_dgram_recv_inflight(&rc), 0);
+    ASSERT_EQ(kl_dgram_recv_free(&rc), 0);
+    /* readiness: an oversized pull fails safe — disarm exactly once, nothing armed, free succeeds */
     KlDgramRecv rr;
     RdCtx rd = { .slots = &slots, .avail = 1, .payload = "x", .plen = 1, .bad_len = 999 };
     ASSERT_EQ(kl_dgram_recv_init(&rr, &slots, 0, on_deliver, NULL, rd_arm, rd_disarm, rd_pull, &rd), 0);
@@ -225,7 +229,72 @@ UTEST(dgram_recv, capacity_bound_fails_safe) {
     ASSERT_EQ(kl_dgram_recv_start(&rr), 0);
     ASSERT_EQ(kl_dgram_recv_on_readable(&rr), -1);          /* pull len > in_cap → fail safe */
     ASSERT_EQ(g_deliv, 0);
-    kl_dgram_recv_free(&rr);
+    ASSERT_EQ(rd.disarms, 1);                               /* disarmed exactly once */
+    ASSERT_EQ(kl_dgram_recv_inflight(&rr), 0);              /* not left logically armed */
+    ASSERT_TRUE(kl_dgram_recv_error(&rr));
+    kl_dgram_recv_stop(&rr);                                 /* idempotent — no second disarm */
+    ASSERT_EQ(rd.disarms, 1);
+    ASSERT_EQ(kl_dgram_recv_free(&rr), 0);                   /* not wedged */
+    kl_dgram_slots_free(&slots);
+}
+
+/* an active failed completion is NOT delivered as an empty datagram (error state, no re-arm) */
+UTEST(dgram_recv, active_failed_completion_not_delivered) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 64, 64), 0);
+    KlDgramRecv r;
+    CompCtx c = { .slots = &slots, .inline_remaining = 0, .next_len = 0, .payload = "" };
+    ASSERT_EQ(kl_dgram_recv_init(&r, &slots, 1, on_deliver, NULL, comp_arm, NULL, NULL, &c), 0);
+    c.r = &r;
+    reset_deliver(&r, ACT_NONE, 0);
+    ASSERT_EQ(kl_dgram_recv_start(&r), 0);
+    ASSERT_EQ(kl_dgram_recv_inflight(&r), 1);
+    ASSERT_EQ(kl_dgram_recv_on_complete(&r, 0, 0), -1);     /* failed receive */
+    ASSERT_EQ(g_deliv, 0);                                  /* NOT delivered as a 0-length datagram */
+    ASSERT_TRUE(kl_dgram_recv_error(&r));
+    ASSERT_EQ(kl_dgram_recv_inflight(&r), 0);               /* retired; no re-arm */
+    ASSERT_EQ(kl_dgram_recv_free(&r), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* a failed completion while paused is NOT a held packet and is never delivered on resume */
+UTEST(dgram_recv, paused_failed_completion_not_held) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 64, 64), 0);
+    KlDgramRecv r;
+    CompCtx c = { .slots = &slots, .inline_remaining = 0, .next_len = 0, .payload = "" };
+    ASSERT_EQ(kl_dgram_recv_init(&r, &slots, 1, on_deliver, NULL, comp_arm, NULL, NULL, &c), 0);
+    c.r = &r;
+    reset_deliver(&r, ACT_NONE, 0);
+    ASSERT_EQ(kl_dgram_recv_start(&r), 0);
+    kl_dgram_recv_pause(&r);
+    ASSERT_EQ(kl_dgram_recv_on_complete(&r, 0, 0), -1);     /* failed while paused */
+    ASSERT_EQ(kl_dgram_recv_held(&r), 0);                   /* NOT held */
+    ASSERT_TRUE(kl_dgram_recv_error(&r));
+    ASSERT_EQ(kl_dgram_recv_resume(&r), 0);
+    ASSERT_EQ(g_deliv, 0);                                  /* nothing delivered on resume */
+    ASSERT_EQ(kl_dgram_recv_inflight(&r), 0);               /* stopped — no re-arm */
+    ASSERT_EQ(kl_dgram_recv_free(&r), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* readiness fatal pull disarms exactly once, leaves nothing armed, and frees cleanly */
+UTEST(dgram_recv, readiness_fatal_pull) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 64, 64), 0);
+    KlDgramRecv r;
+    RdCtx rd = { .slots = &slots, .fatal = 1, .payload = "x", .plen = 1 };
+    ASSERT_EQ(kl_dgram_recv_init(&r, &slots, 0, on_deliver, NULL, rd_arm, rd_disarm, rd_pull, &rd), 0);
+    reset_deliver(&r, ACT_NONE, 0);
+    ASSERT_EQ(kl_dgram_recv_start(&r), 0);
+    ASSERT_EQ(kl_dgram_recv_on_readable(&r), -1);           /* fatal pull */
+    ASSERT_EQ(g_deliv, 0);
+    ASSERT_EQ(rd.disarms, 1);                               /* disarmed exactly once */
+    ASSERT_EQ(kl_dgram_recv_inflight(&r), 0);              /* not left armed */
+    ASSERT_TRUE(kl_dgram_recv_error(&r));
+    kl_dgram_recv_stop(&r);                                  /* idempotent */
+    ASSERT_EQ(rd.disarms, 1);
+    ASSERT_EQ(kl_dgram_recv_free(&r), 0);                   /* not wedged */
     kl_dgram_slots_free(&slots);
 }
 
