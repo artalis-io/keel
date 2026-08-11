@@ -650,11 +650,18 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
  * drive the shared KlDgramRecv machine, which delivers (udp_rx_deliver) and RE-ARMS (posts the next
  * recv via udp_rx_post) — no manual re-post here. `src == NULL` (a connected socket without a
  * name) leaves the slot peer UNSPEC, which the machine rejects as a contract violation. */
-void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
+void kl_udp_comp_on_recv(const KlUdp *udp, const void *buf, size_t len,
                          const KlSockAddr *src, const KlUdpRxMeta *meta) {
-    (void)buf;   /* the provider already wrote it into the inbound slot (dg->recv_buf) */
-    KlUdpRx *rx = udp_rx(udp);
+    KlUdpRx *rx = udp_rx(udp);   /* mutation flows through the (non-const) machine, not `udp` */
     KlDgramSlot *in = kl_dgram_slots_inbound(&rx->slots);
+    /* The machine delivers from the inbound slot. On the posted-recv backends (pollcomp/IOCP) the
+     * provider already wrote there (ev->buf == dg->recv_buf == in->data) so this is skipped; a
+     * backend that delivers from its OWN buffer (e.g. the lwIP raw copy-ring) passes a different
+     * ev->buf, so copy it into the slot (bounded by capacity). */
+    if (buf && buf != in->data && len) {
+        size_t n = len <= rx->slots.in_cap ? len : rx->slots.in_cap;
+        memcpy(in->data, buf, n);
+    }
     in->flags = 0;
     if (src && kl_sockaddr_family(src) != KL_AF_UNSPEC) in->peer = *src;
     else memset(&in->peer, 0, sizeof(in->peer));
@@ -684,7 +691,7 @@ void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp) {
     const KlCompletionEvent *ev = evp;
     switch (ev->kind) {
     case KL_COMP_DGRAM_RECV: {  /* datagram — the target is a KlDatagram*, no server */
-        KlUdp *udp = kl_udp_of_dg((KlDatagram *)ev->target);
+        const KlUdp *udp = kl_udp_of_dg((KlDatagram *)ev->target);
         KlUdpRx *rx = udp_rx(udp);
         /* Drop a completion that lands after teardown/stop BEFORE touching the machine: rx freed
          * (kl_udp_free ran — e.g. the loop teardown drains this posted recv on the now-closed fd),

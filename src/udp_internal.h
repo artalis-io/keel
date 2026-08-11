@@ -62,7 +62,7 @@ typedef struct {
  * Deliver it (kl_udp_deliver) then re-post the next receive. The completion driver calls
  * this for a KL_COMP_DGRAM_RECV event; the model-blind delivery matches the readiness
  * recvmsg path. */
-void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
+void kl_udp_comp_on_recv(const KlUdp *udp, const void *buf, size_t len,
                          const KlSockAddr *src, const KlUdpRxMeta *meta);
 
 /* Completion-loop datagram send done (PAL 8b-4d): an overlapped WSASendTo of `len`
