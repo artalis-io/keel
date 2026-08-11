@@ -24,6 +24,7 @@
 #include <windows.h>             /* IOCP */
 #include <mswsock.h>             /* AcceptEx / GetAcceptExSockaddrs / TransmitFile */
 #include "udp_cmsg_win.h"        /* WSARecvMsg fetch + pktinfo parse — UDP local addr (shared) */
+#include "dgram_recv_classify.h" /* platform-agnostic completed-recv classification (unit-tested) */
 #include <io.h>                  /* _get_osfhandle (CRT fd → file HANDLE) */
 #include <string.h>
 #include <stdlib.h>              /* getenv / strtol — TransmitFile chunk-cap test seam */
@@ -708,6 +709,23 @@ static void iocp_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     CancelIoEx((HANDLE)(uintptr_t)fd, NULL);
 }
 
+/* Source (peer) of a completed datagram receive: WSARecvMsg fills umsg.namelen, WSARecvFrom fills
+ * src_len. Filled by the kernel even for a ZERO-BYTE datagram, so parse it independent of byte count. */
+static void iocp_dgram_parse_source(KlIocpOp *op, KlCompletionEvent *ev) {
+    int slen = op->via_recvmsg ? (int)op->umsg.namelen : op->src_len;
+    if (slen > 0)
+        (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&op->src, (socklen_t)slen);
+}
+/* Local (destination) address from the pktinfo control message — WSARecvMsg path only. */
+static void iocp_dgram_parse_local(KlIocpOp *op, KlCompletionEvent *ev) {
+    if (op->via_recvmsg && op->dg->pktinfo) {
+        struct sockaddr_storage local_ss;
+        socklen_t local_len = kl_udp_win_parse_local(&op->umsg, &local_ss);
+        if (local_len)
+            (void)kl_sockaddr_from_native(&ev->local, (struct sockaddr *)&local_ss, local_len);
+    }
+}
+
 static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms) {
     KlIocpState *st = ctx->loop._backend;
 
@@ -803,40 +821,33 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             count++;
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_DGRAM_RECV) {
+            /* Teardown: a recv cancelled by iocp_quiesce_port_for_close completes here (ABORTED).
+             * Drop it — the teardown reaper discards non-accept events anyway — and avoid touching a
+             * socket that is about to be closed. */
+            if (st->quiescing) { iocp_op_free(op); continue; }
+
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_DGRAM_RECV;
             out[count].target = op->dg;
-            out[count].bytes = bytes;
-            out[count].ok = 1;
             out[count].buf = op->dg->recv_buf;
-            /* Only a completion that actually received a datagram (bytes > 0) carries a
-             * valid source address + pktinfo control message. A cancelled/failed overlapped
-             * recv — e.g. the outstanding WSARecvMsg completing when the socket is closed at
-             * teardown — arrives here with bytes == 0 and an unfilled name/control buffer, so
-             * its metadata must not be parsed. (kl_udp_win_parse_local is itself hardened
-             * against a zeroed control buffer, so this is belt-and-suspenders.) */
-            if (bytes > 0) {
-                /* WSARecvMsg fills umsg.namelen (source); WSARecvFrom fills src_len. */
-                int slen = op->via_recvmsg ? (int)op->umsg.namelen : op->src_len;
-                if (slen > 0)                    /* source: native → neutral at the seam */
-                    (void)kl_sockaddr_from_native(&out[count].peer,
-                                                  (struct sockaddr *)&op->src,
-                                                  (socklen_t)slen);
-                /* Local (dest) address from the pktinfo control message (WSARecvMsg path). */
-                if (op->via_recvmsg && op->dg->pktinfo) {
-                    struct sockaddr_storage local_ss;
-                    socklen_t local_len = kl_udp_win_parse_local(&op->umsg, &local_ss);
-                    if (local_len)
-                        (void)kl_sockaddr_from_native(&out[count].local,
-                                                      (struct sockaddr *)&local_ss,
-                                                      local_len);
-                }
-                /* Truncation: WSARecvMsg completes SUCCESSFULLY for an oversized datagram with
-                 * MSG_TRUNC set in the completed WSAMSG.dwFlags (the bytes that fit are already in
-                 * the recv buffer). Surface it as a captured-prefix datagram, NOT a fatal receive —
-                 * mirrors the sync provider's WSAEMSGSIZE/MSG_TRUNC handling (socket_dgram_win.c). */
-                if (op->via_recvmsg && (op->umsg.dwFlags & MSG_TRUNC))
-                    out[count].truncated = 1;
+
+            /* Classify the completed overlapped recv EXPLICITLY via the actual operation result (do
+             * NOT assume success by byte count): a zero-length datagram is a real receive; a truncated
+             * one is a captured-prefix success; a cancelled/failed one delivers nothing. The decision
+             * itself is platform-agnostic + unit-tested (dgram_recv_classify.h); here we supply the
+             * Winsock result and then parse the metadata it says is valid. */
+            DWORD xfer = 0, wflags = 0;
+            BOOL wok = WSAGetOverlappedResult((SOCKET)op->dg->fd, &op->ov, &xfer, FALSE, &wflags);
+            unsigned mflags = op->via_recvmsg ? op->umsg.dwFlags : wflags;
+            KlDgramRecvClass cl = kl_dgram_recv_classify(wok, wok ? 0 : WSAGetLastError(), WSAEMSGSIZE,
+                                                         (size_t)xfer, mflags, MSG_TRUNC,
+                                                         op->dg->recv_buf_size);
+            out[count].ok = cl.ok;
+            if (cl.ok) {
+                out[count].bytes = (DWORD)cl.bytes;
+                out[count].truncated = cl.truncated;
+                if (cl.parse_source) iocp_dgram_parse_source(op, &out[count]);
+                if (cl.parse_local)  iocp_dgram_parse_local(op, &out[count]);
             }
             count++;
             iocp_op_free(op);
