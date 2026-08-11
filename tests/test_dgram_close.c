@@ -65,6 +65,36 @@ static int inline_close_arm(void *ctx) {   /* posts + inline-completes into a cl
     return 0;
 }
 
+/* readiness direct-send submit hook that reentrantly requests close, then returns a chosen result.
+ * The busy frame around the direct submit must defer detachment until kl_dgram_send returns. */
+static int g_rc_result, g_rc_did;
+static KlDgramSubmitResult reentrant_close_submit(void *ctx, const void *d, size_t n,
+                                                  const KlSockAddr *p, const KlSockAddr *l, int t) {
+    (void)ctx; (void)d; (void)n; (void)p; (void)l; (void)t;
+    if (!g_rc_did) { g_rc_did = 1; kl_dgram_close_begin(g_cb_close); }
+    return (KlDgramSubmitResult)g_rc_result;
+}
+/* Drive one reentrant-close-from-submit case; report observable state via out-params (ASSERT-free). */
+static void run_reentrant_close(int submit_result, int *st, int *queued, int *detached, int *closes) {
+    KlDgramSlots slots; KlAllocator a = kl_allocator_default();
+    kl_dgram_slots_init(&slots, &a, 4, 64, 64);
+    KlDgramSend send;
+    kl_dgram_send_init(&send, &slots, &a, /*completion*/0, KL_DGRAM_CAP_CONNECTED,
+                       reentrant_close_submit, NULL);
+    KlDgramClose close;
+    kl_dgram_close_init(&close, &send, NULL, on_close_cb, NULL);
+    g_cb_close = &close; g_rc_did = 0; g_rc_result = submit_result; g_on_close = 0;
+    KlSockAddr p; kl_sockaddr_from_ipv4(&p, (const unsigned char *)"\x7f\0\0\1", 53);
+    KlDatagramMessage m = { .data = "x", .len = 1, .peer = &p, .tos = -1 };
+    *st       = (int)kl_dgram_send(&send, &m);          /* hook closes reentrantly, mid-frame */
+    *queued   = (int)kl_dgram_send_queued(&send);
+    *detached = kl_dgram_close_is_detached(&close);     /* must be 1 — deferred to send's final leave */
+    *closes   = g_on_close;
+    kl_dgram_close_free(&close);
+    kl_dgram_send_free(&send);
+    kl_dgram_slots_free(&slots);
+}
+
 /* Fixtures: slots + a completion send + a completion recv, wired into a close coordinator. */
 typedef struct { KlDgramSlots slots; KlDgramSend send; KlDgramRecv recv; KlDgramClose close; } Fix;
 static KlAllocator g_a;
@@ -392,6 +422,39 @@ UTEST(dgram_close, close_from_inline_arm) {
     ASSERT_EQ(kl_dgram_close_free(&close), 0);
     ASSERT_EQ(kl_dgram_recv_free(&recv), 0);
     kl_dgram_slots_free(&slots);
+}
+
+/* ── reentrant close from the readiness DIRECT-SEND submit hook (busy-frame coverage of the fast
+ *    path). Detachment must be deferred to kl_dgram_send's final leave, never mid-hook (ASan). ──── */
+
+/* DONE: the datagram was sent; nothing queued; close finalizes once send returns. */
+UTEST(dgram_close, reentrant_close_readiness_done) {
+    int st, q, d, oc;
+    run_reentrant_close(KL_DGRAM_SUBMIT_DONE, &st, &q, &d, &oc);
+    ASSERT_EQ(st, (int)KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ(q, 0);
+    ASSERT_EQ(d, 1);                          /* detached exactly once, after the frame unwound */
+    ASSERT_EQ(oc, 1);
+}
+
+/* WOULD_BLOCK after a reentrant close: MUST NOT enqueue (closing began) — returns CLOSED, queue empty. */
+UTEST(dgram_close, reentrant_close_readiness_wouldblock) {
+    int st, q, d, oc;
+    run_reentrant_close(KL_DGRAM_SUBMIT_WOULDBLOCK, &st, &q, &d, &oc);
+    ASSERT_EQ(st, (int)KL_DATAGRAM_CLOSED);   /* re-checked closing state; refused enqueue */
+    ASSERT_EQ(q, 0);                          /* no slot taken after closing began */
+    ASSERT_EQ(d, 1);
+    ASSERT_EQ(oc, 1);
+}
+
+/* ERROR: sticky error set on the still-valid object (no UAF); returns ERROR; close finalizes. */
+UTEST(dgram_close, reentrant_close_readiness_error) {
+    int st, q, d, oc;
+    run_reentrant_close(KL_DGRAM_SUBMIT_ERROR, &st, &q, &d, &oc);
+    ASSERT_EQ(st, (int)KL_DATAGRAM_ERROR);
+    ASSERT_EQ(q, 0);
+    ASSERT_EQ(d, 1);
+    ASSERT_EQ(oc, 1);
 }
 
 UTEST_MAIN();

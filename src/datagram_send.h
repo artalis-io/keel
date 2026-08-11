@@ -141,8 +141,10 @@ void kl_dgram_send_set_activity_cb(KlDgramSend *s, void (*cb)(void *ctx, int del
  * in-flight prefix (which the cancel hook retires). Fires no callbacks. */
 void kl_dgram_send_discard_queued(KlDgramSend *s);
 
-/* Free the FIFO ring and zero the object (the borrowed slots are NOT freed here). REFUSES with -1
- * while the in-flight send is outstanding — slot storage must not be freed under the provider. */
+/* Free the FIFO ring and zero the object (the borrowed slots pool is NOT freed here, but every
+ * queued-but-unsubmitted slot is RELEASED back to it first — symmetric teardown, so reuse of the
+ * pool sees full capacity). REFUSES with -1 while the in-flight send is outstanding (slot storage
+ * must not be freed under the provider). */
 int  kl_dgram_send_free(KlDgramSend *s);
 
 static inline size_t kl_dgram_send_inflight(const KlDgramSend *s) { return s ? s->inflight_n : 0; }

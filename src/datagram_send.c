@@ -180,50 +180,57 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
     if (m->len > s->slots->out_cap)
         return KL_DATAGRAM_TOO_LARGE;
 
+    /* From here a provider submit hook OR a deferred callback may run and may REENTRANTLY request
+     * close; hold ONE busy frame across the whole tail so detachment is deferred to the final leave
+     * (which may free s — nothing may touch s after it). The readiness direct-submit participates in
+     * the handshake like every other provider frame. */
+    KlDatagramSendStatus status = KL_DATAGRAM_ACCEPTED;
+    send_enter(s);
+
     /* Readiness fast path: an empty queue tries a direct synchronous send with NO slot consumed, so
      * a synchronously-sent datagram never creates a transient non-empty→empty transition. A
-     * readiness provider returns DONE / WOULD_BLOCK / ERROR (never INFLIGHT), so no on_complete can
-     * fire here — no dispatch/callbacks needed. */
+     * readiness provider returns DONE / WOULD_BLOCK / ERROR (never INFLIGHT). */
     if (!s->completion && s->count == 0) {
         KlDgramSubmitResult r = s->submit(s->submit_ctx, m->data, m->len,
                                           addr_or_null(m->peer), addr_or_null(m->local), m->tos);
-        if (r == KL_DGRAM_SUBMIT_DONE)
-            return KL_DATAGRAM_ACCEPTED;           /* sent; nothing queued, no ownership retained */
-        if (r == KL_DGRAM_SUBMIT_ERROR) {
-            s->err = 1;
-            return KL_DATAGRAM_ERROR;              /* refusal: nothing taken (no slot acquired) */
+        if (r == KL_DGRAM_SUBMIT_DONE)  { status = KL_DATAGRAM_ACCEPTED; goto leave; }
+        if (r == KL_DGRAM_SUBMIT_ERROR) { s->err = 1; status = KL_DATAGRAM_ERROR; goto leave; }
+        /* WOULD_BLOCK: queue it below — UNLESS the hook reentrantly errored / began closing (still
+         * inside our frame, so detachment is deferred). NEVER enqueue after closing began. */
+        if (s->err)     { status = KL_DATAGRAM_ERROR;  goto leave; }
+        if (s->closing) { status = KL_DATAGRAM_CLOSED; goto leave; }
+    }
+
+    /* Acquire a slot only once acceptance is certain — every refusal takes no ownership and mutates
+     * no queue state. */
+    {
+        KlDgramSlot *slot = kl_dgram_slots_acquire(s->slots);
+        if (!slot) {
+            s->full = 1;                           /* full — arm the full→non-full edge */
+            status  = KL_DATAGRAM_WOULD_BLOCK;     /* transient; nothing taken */
+            goto leave;
         }
-        /* WOULD_BLOCK: fall through and queue it. */
+        /* Copy the whole datagram + its metadata before returning (caller owns nothing after). */
+        if (m->len)
+            memcpy(slot->data, m->data, m->len);
+        slot->len   = m->len;
+        slot->tos   = m->tos;
+        slot->flags = m->flags;
+        if (addr_or_null(m->peer))  slot->peer  = *m->peer;  else memset(&slot->peer,  0, sizeof(slot->peer));
+        if (addr_or_null(m->local)) slot->local = *m->local; else memset(&slot->local, 0, sizeof(slot->local));
+        s->ring[(s->head + s->count) % s->ring_cap] = slot;   /* enqueue FIFO (tail) */
+        s->count++;
+        if (kl_dgram_slots_free_count(s->slots) == 0)
+            s->full = 1;                           /* filled the last slot */
+        dispatch_enter(s);
+        (void)send_pump(s);                        /* submit failure is sticky; the datagram stays owned */
+        dispatch_leave(s);                         /* fires on_drain (non-destructive under a coordinator) */
+        status = KL_DATAGRAM_ACCEPTED;
     }
 
-    /* Acquire a slot only once acceptance is certain — every refusal above takes no ownership and
-     * mutates no queue state. */
-    KlDgramSlot *slot = kl_dgram_slots_acquire(s->slots);
-    if (!slot) {
-        s->full = 1;                               /* full — arm the full→non-full edge */
-        return KL_DATAGRAM_WOULD_BLOCK;            /* transient; nothing taken */
-    }
-
-    /* Copy the whole datagram + its metadata before returning (caller owns nothing after). */
-    if (m->len)
-        memcpy(slot->data, m->data, m->len);
-    slot->len   = m->len;
-    slot->tos   = m->tos;
-    slot->flags = m->flags;
-    if (addr_or_null(m->peer))  slot->peer  = *m->peer;  else memset(&slot->peer,  0, sizeof(slot->peer));
-    if (addr_or_null(m->local)) slot->local = *m->local; else memset(&slot->local, 0, sizeof(slot->local));
-
-    s->ring[(s->head + s->count) % s->ring_cap] = slot;   /* enqueue FIFO (tail) */
-    s->count++;
-    if (kl_dgram_slots_free_count(s->slots) == 0)
-        s->full = 1;                               /* filled the last slot */
-
-    send_enter(s);                                 /* busy handshake: a callback here (on_drain) may close */
-    dispatch_enter(s);
-    (void)send_pump(s);                            /* submit failure is sticky; the datagram stays owned */
-    dispatch_leave(s);                             /* fires on_drain (non-destructive under a coordinator) */
+leave:
     send_leave(s);                                 /* LAST action — may detach + free s via the coordinator */
-    return KL_DATAGRAM_ACCEPTED;                   /* local return value; safe even if s was freed */
+    return status;                                 /* local value; safe even if s was freed */
 }
 
 int kl_dgram_send_on_complete(KlDgramSend *s, int ok) {
@@ -264,6 +271,8 @@ int kl_dgram_send_free(KlDgramSend *s) {
         return 0;
     if (s->inflight_n > 0)
         return -1;   /* provider-referenced send outstanding — slot storage must not be freed */
+    kl_dgram_send_discard_queued(s);   /* release queued-but-unsubmitted slots back to the borrowed
+                                          pool (symmetric teardown; else reuse sees missing capacity) */
     if (s->ring && s->alloc)
         kl_free(s->alloc, s->ring, s->ring_cap * sizeof(KlDgramSlot *));
     memset(s, 0, sizeof(*s));   /* reusable (the borrowed slots are the caller's to free) */

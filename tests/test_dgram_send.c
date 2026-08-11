@@ -401,4 +401,36 @@ UTEST(dgram_send, hot_path_is_allocation_free) {
     kl_dgram_slots_free(&slots);
 }
 
+/* teardown symmetry: freeing a machine that still holds queued-but-unsubmitted (WOULD_BLOCK)
+ * datagrams releases their slots back to the borrowed pool, so a fresh machine sees full capacity. */
+UTEST(dgram_send, readiness_wouldblock_free_restores_slots) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    int free0 = (int)kl_dgram_slots_free_count(&slots);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m = { .data = "xy", .len = 2, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);       /* direct WB → enqueue */
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);       /* pump WB → stays queued */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 2);
+    ASSERT_EQ((int)kl_dgram_slots_free_count(&slots), free0 - 2); /* two slots consumed */
+
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);                         /* free WITHOUT flushing/discarding */
+    ASSERT_EQ((int)kl_dgram_slots_free_count(&slots), free0);     /* all outbound slots restored */
+
+    /* Prove the pool is fully reusable: a fresh machine can queue every slot again. */
+    Mock mk2 = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
+    KlDgramSend s2;
+    ASSERT_EQ(kl_dgram_send_init(&s2, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk2), 0);
+    for (int i = 0; i < free0; i++)
+        ASSERT_EQ(kl_dgram_send(&s2, &m), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s2), free0);
+    ASSERT_EQ((int)kl_dgram_slots_free_count(&slots), 0);         /* full capacity was available */
+    ASSERT_EQ(kl_dgram_send_free(&s2), 0);                        /* releases the queued slots again */
+    ASSERT_EQ((int)kl_dgram_slots_free_count(&slots), free0);
+    kl_dgram_slots_free(&slots);
+}
+
 UTEST_MAIN();
