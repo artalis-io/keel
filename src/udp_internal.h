@@ -37,10 +37,12 @@ struct KlUdpDatagram {
 /* Reconcile event-loop interest with current recv/send state. */
 void kl_udp_update_interest(KlUdp *udp);
 
-/* Deliver one received buffer to the on_recv / on_recv_segments callbacks,
- * splitting a GRO-coalesced buffer per segment when needed. */
-void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
-                    const KlSockAddr *src, const KlSockAddr *local);
+/* Deliver one received buffer to the on_recv / on_recv_segments callbacks, splitting a GRO-coalesced
+ * buffer per segment when needed. `life` is the stable-liveness token: the GRO split re-checks it
+ * between segments (a callback may free the owner) instead of the possibly-dead wrapper's fields. */
+struct KlDgramLife;
+void kl_udp_deliver(KlUdp *udp, const struct KlDgramLife *life, const void *data, size_t len,
+                    int gro_seg, const KlSockAddr *src, const KlSockAddr *local);
 
 /* The POSIX cmsg parser (kl_udp_parse_local) + its RX control-buffer size live in the
  * POSIX-only udp_cmsg.h, included by the POSIX recv TUs — kept out of this cross-platform

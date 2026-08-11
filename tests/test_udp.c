@@ -486,4 +486,43 @@ UTEST(udp, free_while_recv_active) {
     kl_event_ctx_free(&ctx);
 }
 
+/* Free the receiver from INSIDE its own receive callback. The completion recv that delivered this
+ * datagram is still being dispatched; its stable token keeps the inbound storage alive until the op
+ * is released after dispatch, so kl_udp_free() in the callback is safe (ASan/LSan prove it). The
+ * delivery path re-checks token liveness — not wrapper fields — after the callback. */
+static KlUdp *g_free_target;
+static int    g_free_done;
+static void free_in_recv(KlUdp *udp, const void *data, size_t len,
+                         const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)udp; (void)data; (void)len; (void)src; (void)local; (void)ud;
+    g_got++;
+    if (!g_free_done) { g_free_done = 1; kl_udp_free(g_free_target); }
+}
+UTEST(udp, free_from_recv_callback) {
+    reset_capture();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp rx, tx;
+    KlUdpConfig rc = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
+    KlUdpConfig tc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&rx, &rc));
+    ASSERT_EQ(0, kl_udp_init(&tx, &tc));
+    g_free_target = &rx; g_free_done = 0;
+    ASSERT_EQ(0, kl_udp_recv_start(&rx, free_in_recv, NULL));
+
+    KlSockAddr dst;
+    dest_v4(&dst, kl_udp_local_port(&rx));
+    ASSERT_EQ(0, kl_udp_send_to(&tx, "bye", 3, &dst));
+    pump_until(&ctx, 1, 200);
+
+    ASSERT_EQ(1, g_got);
+    ASSERT_EQ(1, g_free_done);        /* freed inside the callback — no UAF, no double-free */
+
+    kl_udp_free(&rx);                 /* idempotent: rx was already freed in the callback */
+    kl_udp_free(&tx);
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST_MAIN();

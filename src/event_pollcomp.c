@@ -41,6 +41,7 @@
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "sockaddr_native.h"     /* KlSockAddr <-> host sockaddr at the seam boundary */
 #include "completion.h"          /* the abstract axis this TU implements */
+#include "datagram_life.h"       /* stable-liveness token for datagram completion ops (neutral) */
 
 #include <poll.h>
 #include <string.h>
@@ -61,9 +62,14 @@ typedef struct KlPcOp {
     KlAllocator   *alloc;
     KlSocketHandle fd;                    /* the descriptor this op polls */
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
-    KlDatagram   *dg;                   /* UDP_RECV / UDP_SEND */
-    void          *buf;                   /* READ: caller-chosen receive buffer */
-    size_t         buflen;                /* READ: capacity at post time */
+    /* Datagram ops (PC_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
+     * post so the op NEVER dereferences KlDatagram afterwards. The recv buffer + capture flags are
+     * COPIED at post (into buf/buflen/dg_pktinfo/dg_gro) so the completion touches only the op. */
+    KlDgramLife   *life;
+    int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
+    int            dg_gro;                /* UDP_RECV: capture GRO segment size */
+    void          *buf;                   /* READ / UDP_RECV: receive buffer (pinned by `life`) */
+    size_t         buflen;                /* READ / UDP_RECV: capacity at post time */
     char          *sendbuf;              /* WRITE/SENDFILE head/UDP_SEND: owned copy */
     size_t         send_total, send_done; /* partial-send tracking */
     int            file_fd;               /* SENDFILE */
@@ -212,6 +218,11 @@ static void pc_op_push(KlPcState *st, KlPcOp *op) {
 }
 
 static void pc_op_free(KlPcOp *op) {
+    /* A datagram op that still owns its token reference (dropped WITHOUT emitting an event — e.g. a
+     * post-failure unwind or loop teardown) releases it here. Emit paths transfer the ref to the
+     * event and NULL op->life first, so this does not double-release. */
+    if (op->life)
+        kl_dgram_life_release(op->life);
     /* send_total is set to the sendbuf allocation size on every path that allocates one
      * (WRITE/SENDFILE/UDP = total, or 1 when total==0 since the alloc is `total ? total : 1`).
      * Fall back to 1 for a zero-length send, else a sized custom allocator mis-buckets the
@@ -309,8 +320,15 @@ static int pc_comp_post_dgram_recv(struct KlDatagram *dg) {
     memset(op, 0, sizeof(*op));
     op->type = PC_DGRAM_RECV;
     op->alloc = st->alloc;
-    op->dg = dg;
     op->fd = dg->fd;
+    /* Copy the receive buffer + capture flags now; the op must not dereference KlDatagram later. The
+     * buffer stays valid because the token ref (retained below) pins it past the op's lifetime. */
+    op->buf        = dg->recv_buf;
+    op->buflen     = dg->recv_buf_size;
+    op->dg_pktinfo = dg->pktinfo;
+    op->dg_gro     = dg->recv_gro;
+    op->life = (KlDgramLife *)dg->rx_life;
+    kl_dgram_life_retain(op->life);
     pc_op_push(st, op);
     return 0;
 }
@@ -323,15 +341,16 @@ static int pc_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size
     memset(op, 0, sizeof(*op));
     op->type = PC_DGRAM_SEND;
     op->alloc = st->alloc;
-    op->dg = dg;
     op->fd = dg->fd;
     op->send_total = len;
     op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
-    if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }
+    if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }   /* life unset → no release */
     memcpy(op->sendbuf, data, len);
     /* Marshal the neutral dest to a host sockaddr for the sendto at drain time. */
     if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC)
         op->dest_len = kl_sockaddr_to_native(dest, &op->dest);
+    op->life = (KlDgramLife *)dg->rx_life;   /* retain AFTER the failure unwind above */
+    kl_dgram_life_retain(op->life);
     pc_op_push(st, op);
     return 0;
 }
@@ -401,14 +420,16 @@ static void pc_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
 
 /* Fill an error completion for a cancelled op. Returns 1 if an event was written
  * (a connection/UDP target exists), 0 for an accept op (no target — just drop it). */
-static int pc_emit_abort(const KlPcOp *op, KlCompletionEvent *ev) {
+static int pc_emit_abort(KlPcOp *op, KlCompletionEvent *ev) {
     memset(ev, 0, sizeof(*ev));
     ev->ok = 0;
     switch (op->type) {
     case PC_READ:                    ev->kind = KL_COMP_READ;  ev->target = op->stream; return 1;
     case PC_WRITE: case PC_SENDFILE: ev->kind = KL_COMP_WRITE; ev->target = op->stream; return 1;
-    case PC_DGRAM_RECV:                ev->kind = KL_COMP_DGRAM_RECV; ev->target = op->dg; return 1;
-    case PC_DGRAM_SEND:                ev->kind = KL_COMP_DGRAM_SEND; ev->target = op->dg; return 1;
+    /* Datagram: transfer the token reference op → event (released after dispatch); the op no longer
+     * owns it, so pc_op_free must not release it. Never touch KlDatagram. */
+    case PC_DGRAM_RECV:                ev->kind = KL_COMP_DGRAM_RECV; ev->life = op->life; op->life = NULL; return 1;
+    case PC_DGRAM_SEND:                ev->kind = KL_COMP_DGRAM_SEND; ev->life = op->life; op->life = NULL; return 1;
     case PC_CONNECT:                 /* never reached: cancelled connect ops are freed in
                                       * pc_comp_cancel, not delivered as aborts. */
                                      return 0;
@@ -504,7 +525,8 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
     case PC_DGRAM_RECV: {
         struct sockaddr_storage ss;
         unsigned char ctrl[KL_UDP_RX_CTRL_SIZE];
-        struct iovec iov = { .iov_base = op->dg->recv_buf, .iov_len = op->dg->recv_buf_size };
+        /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op. */
+        struct iovec iov = { .iov_base = op->buf, .iov_len = op->buflen };
         struct msghdr msg;
         memset(&msg, 0, sizeof(msg));
         msg.msg_name = &ss;
@@ -518,14 +540,14 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             return 0;
         ev->kind = KL_COMP_DGRAM_RECV;
-        ev->target = op->dg;
+        ev->life = op->life; op->life = NULL;      /* transfer token ref op → event */
         ev->ok = (n >= 0);
         ev->bytes = (n > 0) ? (size_t)n : 0;
-        ev->buf = op->dg->recv_buf;
+        ev->buf = op->buf;
         if (n >= 0 && msg.msg_namelen > 0)         /* source: native → neutral at the seam */
             (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&ss,
                                           msg.msg_namelen);
-        if (n >= 0 && op->dg->pktinfo) {          /* local (dest) addr via pktinfo cmsg */
+        if (n >= 0 && op->dg_pktinfo) {           /* local (dest) addr via pktinfo cmsg */
             struct sockaddr_storage local_ss;
             socklen_t local_len = kl_udp_parse_local(&msg, &local_ss);
             if (local_len)
@@ -533,7 +555,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                                               (struct sockaddr *)&local_ss, local_len);
         }
         if (n >= 0) {
-            if (op->dg->recv_gro)                 /* GRO coalesced segment size */
+            if (op->dg_gro)                       /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&msg);
             if (msg.msg_flags & MSG_TRUNC)         /* datagram truncated to recv_buf */
                 ev->truncated = 1;
@@ -547,7 +569,7 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
             return 0;
         ev->kind = KL_COMP_DGRAM_SEND;
-        ev->target = op->dg;
+        ev->life = op->life; op->life = NULL;      /* transfer token ref op → event */
         ev->ok = (n >= 0);
         ev->bytes = (n > 0) ? (size_t)n : 0;
         return 1;

@@ -77,6 +77,13 @@ typedef struct {
                                               * family KL_AF_UNSPEC = unavailable. */
     int            gro_seg;                  /* UDP_RECV: GRO coalesced segment size, 0 = none */
     int            truncated;                /* UDP_RECV: 1 if the datagram was truncated (MSG_TRUNC) */
+    /* UDP_RECV/_SEND stable-liveness token (transport-neutral; src/datagram_life.h). A datagram
+     * completion outlives the KlUdp wrapper, so instead of dereferencing `target` (a KlDatagram
+     * embedded in a possibly-freed KlUdp) the UDP adapter recovers the owner via this token and
+     * touches it only while live. The posting op transferred its reference to this event; the
+     * adapter releases it after dispatch. NULL on a backend not yet on the token path (the adapter
+     * falls back to the legacy `target` recovery). */
+    struct KlDgramLife *life;
 } KlCompletionEvent;
 
 struct KlEventCtx;

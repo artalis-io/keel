@@ -62,6 +62,10 @@ struct KlDatagram {
     int            watcher_added;
     KlEventMask    want_mask;
     KlError        last_error;
+    /* Stable-liveness token for datagram completion ops (transport-neutral KlDgramLife*, opaque
+     * here). A completion backend reads it at POST time to copy a reference into the op, then never
+     * dereferences this KlDatagram again — the op/completion recover the owner through the token. */
+    void          *rx_life;
 };
 
 #endif /* KEEL_DATAGRAM_DETAIL_H */
