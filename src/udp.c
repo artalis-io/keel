@@ -9,6 +9,8 @@
 #include "socket.h"   /* seam: kl_sock_* + KlSockAddr + KlSocketProvider.dgram */
 #include <keel/datagram.h>   /* KlDatagramOps — the provider datagram data-plane */
 #include "udp_internal.h"
+#include "datagram_slots.h"  /* the dedicated inbound slot (recv storage) */
+#include "datagram_recv.h"   /* KlDgramRecv — Tier-1 serial receive machine */
 #include "event_caps.h"   /* kl_event_caps — pick readiness vs completion recv */
 #include "io_engine.h"    /* kl_comp_post_dgram_recv (completion loop) */
 #include "completion.h"   /* KlCompletionEvent — the comp_udp_dispatch hook */
@@ -190,6 +192,70 @@ void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
         udp->on_recv(udp, data, len, src, local, udp->recv_ud);
 }
 
+/* ── Receive machine (step 6.1) ────────────────────────────────────────────
+ * The Tier-1 per-datagram receive rides the shared KlDgramRecv over a dedicated inbound slot
+ * (KlDgramSlots) — the same uniform captured-prefix truncation, mandatory-peer, serial pause/resume
+ * normalization the public KlDatagram path will use. GRO (a single coalesced recv) rides through it
+ * via per-datagram scratch (gro_seg/tos); only true recvmmsg BATCHING (rx_batch) bypasses it as a
+ * legacy Tier-2 path (see udp_recv_dgram). The byte-budget SEND queue and close remain LEGACY
+ * compatibility paths, deliberately outside the Tier-1 fixed-slot send facet. */
+typedef struct KlUdpRx {
+    KlDgramSlots slots;      /* the dedicated inbound slot backs udp->dg.recv_buf (one init-time alloc) */
+    KlDgramRecv  recv;
+    KlUdp       *udp;
+    int          completion; /* 1 = completion (post/on_complete); 0 = readiness (arm/pull) */
+    int          gro_seg;    /* scratch: the in-flight datagram's GRO segment size (0 = none) */
+    int          tos;        /* scratch: the in-flight datagram's TOS byte, or -1 */
+} KlUdpRx;
+static inline KlUdpRx *udp_rx(const KlUdp *u) { return (KlUdpRx *)u->rx; }
+
+/* Machine delivery: one finalized datagram (peer mandatory; local iff KL_DGRAM_HAS_LOCAL; the
+ * KL_DGRAM_TRUNCATED flag for an oversized capture). Fan out via the GRO-splitting delivery, folding
+ * in the truncation counter + per-datagram TOS (the scratch the pull/dispatch adapter stashed). */
+static void udp_rx_deliver(void *ctx, const void *data, size_t len,
+                           const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    KlUdpRx *rx = ctx;
+    KlUdp *udp = rx->udp;
+    if (flags & KL_DGRAM_TRUNCATED) udp->dg.truncated++;
+    udp->dg.recv_tos_val = rx->tos;
+    kl_udp_deliver(udp, data, len, rx->gro_seg, peer, local);
+}
+
+/* Readiness arm/disarm: re-sync the combined (READ recv + WRITE send-queue) interest. recv_active is
+ * the READ-intent flag KlUdp already toggles in recv_start/recv_stop, so the hooks only reconcile. */
+static int  udp_rx_arm(void *ctx)    { kl_udp_update_interest(((KlUdpRx *)ctx)->udp); return 0; }
+static void udp_rx_disarm(void *ctx) { kl_udp_update_interest(((KlUdpRx *)ctx)->udp); }
+
+/* Readiness pull: one datagram via the provider recv op into the inbound slot; marshal the source +
+ * control metadata for the machine to finalize (peer mandatory; local + HAS_LOCAL; TRUNCATED). */
+static int udp_rx_pull(void *ctx, size_t *out_len) {
+    KlUdpRx *rx = ctx;
+    KlUdp *udp = rx->udp;
+    KlDgramSlot *in = kl_dgram_slots_inbound(&rx->slots);
+    KlSockAddr src;
+    KlDgramRxMeta meta;
+    kl_ssize_t n = udp_dg(udp)->recv(udp_sp_ctx(udp), udp->dg.fd, in->data, rx->slots.in_cap, &src, &meta);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;   /* drained (would-block) */
+        udp->dg.last_error = KL_ERR_IO;
+        return -1;                                                /* fatal receive error */
+    }
+    in->peer  = src;
+    in->flags = 0;
+    if (meta.has_local) { in->local = meta.local; in->flags |= KL_DGRAM_HAS_LOCAL; }
+    if (meta.truncated) in->flags |= KL_DGRAM_TRUNCATED;
+    rx->gro_seg = meta.gro_seg;
+    rx->tos     = meta.tos;
+    *out_len = (size_t)n;
+    return 1;
+}
+
+/* Completion arm: post one overlapped recv into the inbound slot (dg->recv_buf points at it). */
+static int udp_rx_post(void *ctx) {
+    KlUdpRx *rx = ctx;
+    return kl_comp_post_dgram_recv(&rx->udp->dg) < 0 ? -1 : 0;
+}
+
 /* ── Datagram-provider dispatch ───────────────────────────────────────────
  * The datagram data-plane is a provider vtable (KlSocketProvider.dgram) folded
  * onto the socket provider, so one runtime provider owns stream + datagram I/O.
@@ -264,8 +330,9 @@ static void udp_deliver_slot(KlUdp *udp, const void *data, size_t len,
                    meta->has_local ? &meta->local : NULL);
 }
 
-/* Drain the socket through the provider datagram ops: recvmmsg batches when an rx
- * batch + recv_batch op are present, else one recv() per datagram. */
+/* Drain the socket on a READ-ready event. TIER-2: recvmmsg batches through the legacy loop when an
+ * rx batch + recv_batch op are present (outside the Tier-1 machine). TIER-1: otherwise the shared
+ * KlDgramRecv machine performs the serial per-datagram drain (uniform truncation/metadata/pause). */
 static void udp_recv_dgram(KlUdp *udp, const KlDatagramOps *dg) {
     void *ctx = udp_sp_ctx(udp);
 
@@ -288,17 +355,7 @@ static void udp_recv_dgram(KlUdp *udp, const KlDatagramOps *dg) {
         return;
     }
 
-    for (;;) {
-        KlSockAddr src;
-        KlDgramRxMeta meta;
-        kl_ssize_t n = dg->recv(ctx, udp->dg.fd, udp->dg.recv_buf, udp->dg.recv_buf_size, &src, &meta);
-        if (n < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) udp->dg.last_error = KL_ERR_IO;
-            break;
-        }
-        udp_deliver_slot(udp, udp->dg.recv_buf, (size_t)n, &src, &meta);
-        if (!udp->dg.recv_active || !kl_handle_valid(udp->dg.fd)) break;
-    }
+    (void)kl_dgram_recv_on_readable(&udp_rx(udp)->recv);
 }
 
 /* Is `group` a numeric multicast address of `family` (IPv4 224.0.0.0/4, IPv6
@@ -428,10 +485,29 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
             goto fail;   /* last_error set by helper */
     }
 
-    udp->dg.recv_buf = kl_malloc(udp->dg.alloc, udp->dg.recv_buf_size);
-    if (!udp->dg.recv_buf) {
-        udp->dg.last_error = KL_ERR_ALLOC;
-        goto fail;
+    /* Receive machine (step 6.1): allocate the KlUdpRx holder once; its dedicated INBOUND SLOT is
+     * the recv buffer (replaces the standalone recv_buf malloc — still exactly one init-time alloc
+     * for receive storage). A minimal 1×1 outbound slot is unused (the SEND queue stays legacy). */
+    {
+        KlUdpRx *rx = kl_malloc(udp->dg.alloc, sizeof(*rx));
+        if (!rx) { udp->dg.last_error = KL_ERR_ALLOC; goto fail; }
+        memset(rx, 0, sizeof(*rx));
+        rx->udp = udp;
+        rx->tos = -1;
+        if (kl_dgram_slots_init(&rx->slots, udp->dg.alloc, 1, 1, udp->dg.recv_buf_size) != 0) {
+            kl_free(udp->dg.alloc, rx, sizeof(*rx));
+            udp->dg.last_error = KL_ERR_ALLOC;
+            goto fail;
+        }
+        rx->completion = (kl_event_caps(&udp->dg.ctx->loop) & KL_EVENT_CAP_COMPLETION) ? 1 : 0;
+        if (rx->completion)
+            kl_dgram_recv_init(&rx->recv, &rx->slots, /*completion*/1, udp_rx_deliver, rx,
+                               udp_rx_post, NULL, NULL, rx);
+        else
+            kl_dgram_recv_init(&rx->recv, &rx->slots, /*completion*/0, udp_rx_deliver, rx,
+                               udp_rx_arm, udp_rx_disarm, udp_rx_pull, rx);
+        udp->rx = rx;
+        udp->dg.recv_buf = kl_dgram_slots_inbound(&rx->slots)->data;   /* completion post + delivery */
     }
 
     /* Allocate the (small) sendmmsg batch upfront where mmsg batching applies;
@@ -457,6 +533,16 @@ void kl_udp_free(KlUdp *udp) {
     if (!udp)
         return;
     udp->dg.recv_active = 0;
+    /* Legacy-owned close (step 6.1): the receive machine is stopped; a completion recv still posted
+     * is retired locally (the socket close below cancels it, and its completion is reaped by the loop
+     * teardown, never delivered here) so kl_dgram_recv_free won't refuse. KlDgramClose whole-object
+     * detachment is intentionally NOT used while the legacy send queue can still be outstanding. */
+    if (udp->rx) {
+        KlUdpRx *rx = udp_rx(udp);
+        kl_dgram_recv_stop(&rx->recv);
+        if (kl_dgram_recv_inflight(&rx->recv))
+            (void)kl_dgram_recv_on_complete(&rx->recv, 0, 0);   /* drop the posted op (no delivery) */
+    }
     if (udp->dg.watcher_added && kl_handle_valid(udp->dg.fd))
         kl_watcher_del(udp->dg.ctx, udp->dg.fd);
     udp->dg.watcher_added = 0;
@@ -471,10 +557,15 @@ void kl_udp_free(KlUdp *udp) {
     udp->dg.q_head = udp->dg.q_tail = NULL;
     udp->dg.q_bytes = 0;
 
-    if (udp->dg.recv_buf) {
-        kl_free(udp->dg.alloc, udp->dg.recv_buf, udp->dg.recv_buf_size);
-        udp->dg.recv_buf = NULL;
+    /* Free the receive machine + its dedicated inbound slot (this owns the recv storage now). */
+    if (udp->rx) {
+        KlUdpRx *rx = udp_rx(udp);
+        kl_dgram_recv_free(&rx->recv);
+        kl_dgram_slots_free(&rx->slots);
+        kl_free(udp->dg.alloc, rx, sizeof(*rx));
+        udp->rx = NULL;
     }
+    udp->dg.recv_buf = NULL;   /* was the inbound slot's data — freed with the slots above */
     {
         /* dg may be NULL here if init failed before the provider check (free is
          * called on the half-built udp) — guard it. */
@@ -512,15 +603,14 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
     udp->on_recv = on_recv;
     udp->recv_ud = user_data;
     udp->dg.recv_active = 1;
+    KlUdpRx *rx = udp_rx(udp);
 
-    /* Completion loop (IOCP): a readiness watcher never fires here — associate the
-     * socket with the port and post an overlapped WSARecvFrom instead (8b-4c). The
-     * completion driver re-posts after each datagram via kl_udp_comp_on_recv. The
-     * recvmmsg batch below is not allocated here: the completion path never runs the
-     * readiness recv loop that consumes it. */
-    if (kl_event_caps(&udp->dg.ctx->loop) & KL_EVENT_CAP_COMPLETION) {
+    /* Completion loop (IOCP/io_uring): a readiness watcher never fires — associate the socket with
+     * the port, then let the machine post the first overlapped recv (its re-arm posts each next one).
+     * The recvmmsg batch is not used on a completion loop. */
+    if (rx->completion) {
         if (kl_event_add(&udp->dg.ctx->loop, udp->dg.fd, KL_EVENT_READ, udp) < 0 ||
-            kl_comp_post_dgram_recv(&udp->dg) < 0) {
+            kl_dgram_recv_start(&rx->recv) < 0) {
             udp->dg.recv_active = 0;
             udp->dg.last_error = KL_ERR_IO;
             return -1;
@@ -528,35 +618,51 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
         return 0;
     }
 
-    /* Readiness path only: lazily allocate the recvmmsg batch (large: mmsg_batch ×
-     * recv_buf_size) where mmsg batching applies. Failure just leaves rx_batch NULL
-     * → the per-datagram path is used; a no-op where batching is unavailable. */
+    /* Readiness: lazily allocate the recvmmsg batch (large: mmsg_batch × recv_buf_size) where mmsg
+     * batching applies — the TIER-2 legacy path that bypasses the machine. Failure leaves rx_batch
+     * NULL → the Tier-1 machine drains per-datagram; a no-op where batching is unavailable. */
     {
         const KlDatagramOps *dg = udp_dg(udp);
         if (udp->dg.mmsg_batch > 1 && dg->rx_batch_new && !udp->dg.rx_batch)
             udp->dg.rx_batch = dg->rx_batch_new(udp->dg.alloc, udp->dg.mmsg_batch, udp->dg.recv_buf_size);
     }
 
-    kl_udp_update_interest(udp);
+    if (udp->dg.rx_batch) {
+        /* TIER-2 legacy batch: interest is driven directly by recv_active (not the machine). */
+        kl_udp_update_interest(udp);
+    } else {
+        /* TIER-1: the machine arms READ interest (its arm hook reconciles kl_udp_update_interest). */
+        if (kl_dgram_recv_start(&rx->recv) < 0) {
+            udp->dg.recv_active = 0;
+            return -1;
+        }
+    }
     if (!(udp->dg.want_mask & KL_EVENT_READ)) {   /* watcher registration failed */
         udp->dg.recv_active = 0;
+        kl_dgram_recv_stop(&rx->recv);
         return -1;
     }
     return 0;
 }
 
-/* Completion-loop datagram receive (8b-4c): deliver the finished WSARecvFrom via the
- * model-blind kl_udp_deliver (identical to the readiness recvmsg path), then re-post
- * the next receive. gro_seg 0 — GRO coalescing is a readiness/Linux offload. */
+/* Completion-loop datagram receive (step 6.1): a successful overlapped recv landed `len` bytes in
+ * the inbound slot (== udp->dg.recv_buf). Marshal its source + control metadata into the slot and
+ * drive the shared KlDgramRecv machine, which delivers (udp_rx_deliver) and RE-ARMS (posts the next
+ * recv via udp_rx_post) — no manual re-post here. `src == NULL` (a connected socket without a
+ * name) leaves the slot peer UNSPEC, which the machine rejects as a contract violation. */
 void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
                          const KlSockAddr *src, const KlUdpRxMeta *meta) {
-    if (!udp->dg.recv_active || !kl_handle_valid(udp->dg.fd))
-        return;
-    if (meta->truncated)
-        udp->dg.truncated++;
-    kl_udp_deliver(udp, buf, len, meta->gro_seg, src, meta->local);
-    if (udp->dg.recv_active && kl_handle_valid(udp->dg.fd))
-        (void)kl_comp_post_dgram_recv(&udp->dg);   /* arm the next datagram */
+    (void)buf;   /* the provider already wrote it into the inbound slot (dg->recv_buf) */
+    KlUdpRx *rx = udp_rx(udp);
+    KlDgramSlot *in = kl_dgram_slots_inbound(&rx->slots);
+    in->flags = 0;
+    if (src && kl_sockaddr_family(src) != KL_AF_UNSPEC) in->peer = *src;
+    else memset(&in->peer, 0, sizeof(in->peer));
+    if (meta->local) { in->local = *meta->local; in->flags |= KL_DGRAM_HAS_LOCAL; }
+    if (meta->truncated) in->flags |= KL_DGRAM_TRUNCATED;
+    rx->gro_seg = meta->gro_seg;
+    rx->tos     = -1;   /* the completion recv carries no per-datagram TOS today */
+    (void)kl_dgram_recv_on_complete(&rx->recv, len, 1);
 }
 
 /* An overlapped WSASendTo of `len` bytes finished (8b-4d): release its
@@ -578,9 +684,17 @@ void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp) {
     const KlCompletionEvent *ev = evp;
     switch (ev->kind) {
     case KL_COMP_DGRAM_RECV: {  /* datagram — the target is a KlDatagram*, no server */
-        /* The backend already converted src/local to the neutral KlSockAddr once at
-         * its seam. A recv without a source name (family KL_AF_UNSPEC, e.g. a
-         * connected socket) or without pktinfo passes NULL, not a zeroed address. */
+        KlUdp *udp = kl_udp_of_dg((KlDatagram *)ev->target);
+        KlUdpRx *rx = udp_rx(udp);
+        /* A failed/cancelled recv (ev->ok == 0, classified at the backend seam), or a recv that
+         * completes after recv_stop, retires the posted op with NO delivery and NO re-arm. */
+        if (!ev->ok || !udp->dg.recv_active) {
+            (void)kl_dgram_recv_on_complete(&rx->recv, 0, 0);
+            break;
+        }
+        /* The backend already converted src/local to the neutral KlSockAddr once at its seam. A recv
+         * without a source name (family KL_AF_UNSPEC, e.g. a connected socket) or without pktinfo
+         * passes NULL, not a zeroed address. */
         int have_src   = kl_sockaddr_family(&ev->peer)  != KL_AF_UNSPEC;
         int have_local = kl_sockaddr_family(&ev->local) != KL_AF_UNSPEC;
         KlUdpRxMeta meta = {
@@ -588,8 +702,7 @@ void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp) {
             .gro_seg   = ev->gro_seg,
             .truncated = ev->truncated,
         };
-        kl_udp_comp_on_recv(kl_udp_of_dg((KlDatagram *)ev->target), ev->buf, ev->bytes,
-                            have_src ? &ev->peer : NULL, &meta);
+        kl_udp_comp_on_recv(udp, ev->buf, ev->bytes, have_src ? &ev->peer : NULL, &meta);
         break;
     }
     case KL_COMP_DGRAM_SEND:
@@ -603,6 +716,8 @@ void kl_udp_recv_stop(KlUdp *udp) {
     if (!udp)
         return;
     udp->dg.recv_active = 0;
+    if (udp->rx)
+        kl_dgram_recv_stop(&udp_rx(udp)->recv);   /* readiness disarms; completion drops on completion */
     kl_udp_update_interest(udp);
 }
 

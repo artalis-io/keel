@@ -437,4 +437,53 @@ UTEST(udp, null_and_arg_guards) {
     kl_event_ctx_free(&ctx);
 }
 
+/* A genuine zero-length datagram is delivered (len 0, with a source) — the receive machine keeps it
+ * distinct from a receive failure. Runs on the readiness path (native) + the completion path
+ * (pollcomp/io_uring/IOCP) — the same test file over every CI backend. */
+UTEST(udp, zero_length_datagram) {
+    reset_capture();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp rx, tx;
+    KlUdpConfig rc = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
+    KlUdpConfig tc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&rx, &rc));
+    ASSERT_EQ(0, kl_udp_init(&tx, &tc));
+    ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));
+
+    KlSockAddr dst;
+    dest_v4(&dst, kl_udp_local_port(&rx));
+    ASSERT_EQ(0, kl_udp_send_to(&tx, "", 0, &dst));   /* zero-length datagram */
+    pump_until(&ctx, 1, 200);
+
+    ASSERT_EQ(1, g_got);                              /* delivered — not dropped as a failure */
+    ASSERT_EQ((size_t)0, g_len);
+    ASSERT_STREQ("127.0.0.1", g_src_ip);              /* mandatory source present */
+
+    kl_udp_free(&tx);
+    kl_udp_free(&rx);
+    kl_event_ctx_free(&ctx);
+}
+
+/* Cancellation / graceful close: free the receiver while a receive is armed/posted (no recv_stop
+ * first). The receive machine must be retired and its inbound slot freed cleanly — ASan/LSan prove
+ * no leak or use-after-free of the posted-recv storage. */
+UTEST(udp, free_while_recv_active) {
+    reset_capture();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+
+    KlUdp rx;
+    KlUdpConfig rc = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
+    ASSERT_EQ(0, kl_udp_init(&rx, &rc));
+    ASSERT_EQ(0, kl_udp_recv_start(&rx, on_recv, NULL));   /* a recv is now armed/posted */
+    ASSERT_TRUE(kl_udp_local_port(&rx) > 0);
+
+    kl_udp_free(&rx);                                      /* free WITHOUT recv_stop — must be clean */
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST_MAIN();

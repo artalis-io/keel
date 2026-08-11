@@ -128,6 +128,11 @@ struct KlUdp {
     void          *recv_seg_ud;
     KlUdpDrainFn   on_drain;
     void          *drain_ud;
+    /* Internal receive machine (step 6.1): a KlDgramRecv + its dedicated inbound slot, allocated
+     * once at init. Opaque here (the layout lives in src/udp.c); NOT part of the API. The Tier-1
+     * per-datagram receive rides this shared machinery (uniform truncation/metadata/pause); the
+     * byte-budget SEND queue below stays a legacy compatibility path outside the Tier-1 facet. */
+    void          *rx;
     /* Raw datagram transport (opaque layout in <keel/datagram_detail.h>). */
     KlDatagram     dg;
 };
