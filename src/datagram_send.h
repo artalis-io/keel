@@ -94,7 +94,10 @@ typedef struct {
     KlDgramDrainFn    on_drain;  void *drain_ctx;
     int               err;           /* sticky transport error */
     int               closing;       /* refuse new sends with CLOSED */
-    void            (*on_retire)(void *ctx); void *retire_ctx;  /* step-4 close: async retirement notify */
+    /* step-4 busy handshake: fired +1 on entering / -1 on leaving (as the LAST action) any public op
+     * that can retire or fire a callback, so the close coordinator only detaches once the outermost
+     * machine/coordinator frame unwinds. */
+    void            (*on_activity)(void *ctx, int delta); void *activity_ctx;
     int               full;          /* latched: the queue is full (for the full→non-full edge) */
     /* callback-deferral + inline-completion sentinels */
     int               in_dispatch;   /* depth of public calls that may fire callbacks */
@@ -129,11 +132,11 @@ int  kl_dgram_send_flush(KlDgramSend *s);
 /* Mark the send side closing (subsequent kl_dgram_send returns CLOSED). Full close is a later step. */
 void kl_dgram_send_set_closing(KlDgramSend *s, int closing);
 
-/* Step-4 close hooks. on_retire fires (as the last action) whenever an async retirement or drain
- * step settles (on_complete / flush) — the close coordinator re-checks its terminal condition. When
- * a retire cb is set, any on_drain callback MUST be non-destructive (on_close is the destructive
- * tail). */
-void kl_dgram_send_set_retire_cb(KlDgramSend *s, void (*cb)(void *ctx), void *ctx);
+/* Step-4 close hooks. on_activity(delta) brackets every public op that can retire or fire a
+ * callback (+1 entry, -1 as the LAST action) — the close coordinator counts frames and detaches
+ * only when the outermost unwinds. When an activity cb is set, any on_drain callback MUST be
+ * non-destructive (the coordinator's on_close is the sole destructive tail). */
+void kl_dgram_send_set_activity_cb(KlDgramSend *s, void (*cb)(void *ctx, int delta), void *ctx);
 /* Abortive close: discard every queued-but-UNSUBMITTED datagram (release their slots), keeping the
  * in-flight prefix (which the cancel hook retires). Fires no callbacks. */
 void kl_dgram_send_discard_queued(KlDgramSend *s);

@@ -57,13 +57,13 @@ void kl_dgram_send_set_drain_cb(KlDgramSend *s, KlDgramDrainFn cb, void *ctx) {
 void kl_dgram_send_set_closing(KlDgramSend *s, int closing) {
     if (s) s->closing = closing ? 1 : 0;
 }
-void kl_dgram_send_set_retire_cb(KlDgramSend *s, void (*cb)(void *ctx), void *ctx) {
+void kl_dgram_send_set_activity_cb(KlDgramSend *s, void (*cb)(void *ctx, int delta), void *ctx) {
     if (!s) return;
-    s->on_retire = cb; s->retire_ctx = ctx;
+    s->on_activity = cb; s->activity_ctx = ctx;
 }
-static void send_notify_retire(KlDgramSend *s) {
-    if (s->on_retire) s->on_retire(s->retire_ctx);   /* close coordinator re-checks terminal state */
-}
+static void send_enter(KlDgramSend *s) { if (s->on_activity) s->on_activity(s->activity_ctx, +1); }
+/* send_leave is the LAST action of a public op — it may detach + free the object via the coordinator. */
+static void send_leave(KlDgramSend *s) { if (s->on_activity) s->on_activity(s->activity_ctx, -1); }
 
 void kl_dgram_send_discard_queued(KlDgramSend *s) {
     if (!s) return;
@@ -218,9 +218,11 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
     if (kl_dgram_slots_free_count(s->slots) == 0)
         s->full = 1;                               /* filled the last slot */
 
+    send_enter(s);                                 /* busy handshake: a callback here (on_drain) may close */
     dispatch_enter(s);
     (void)send_pump(s);                            /* submit failure is sticky; the datagram stays owned */
-    dispatch_leave(s);                             /* may fire the destructive on_drain — no s access after */
+    dispatch_leave(s);                             /* fires on_drain (non-destructive under a coordinator) */
+    send_leave(s);                                 /* LAST action — may detach + free s via the coordinator */
     return KL_DATAGRAM_ACCEPTED;                   /* local return value; safe even if s was freed */
 }
 
@@ -228,8 +230,9 @@ int kl_dgram_send_on_complete(KlDgramSend *s, int ok) {
     if (!s)
         return -1;
     if (s->inflight_n == 0)
-        return s->err ? -1 : 0;                    /* spurious / duplicate completion */
+        return s->err ? -1 : 0;                    /* spurious / duplicate completion — no activity */
 
+    send_enter(s);
     dispatch_enter(s);
     if (s->in_submit)
         s->submit_retired = 1;                     /* inline: tell the pump the op retired */
@@ -240,18 +243,19 @@ int kl_dgram_send_on_complete(KlDgramSend *s, int ok) {
         (void)send_pump(s);                        /* async path pumps next; inline lets the outer pump continue */
     int ret = s->err ? -1 : 0;                     /* capture before callbacks (which may free s) */
     dispatch_leave(s);
-    send_notify_retire(s);                         /* last action — close finalize may detach (frees s) */
+    send_leave(s);                                 /* LAST action — coordinator finalize may detach (frees s) */
     return ret;
 }
 
 int kl_dgram_send_flush(KlDgramSend *s) {
     if (!s)
         return -1;
+    send_enter(s);
     dispatch_enter(s);
     (void)send_pump(s);
     int ret = s->err ? -1 : 0;
     dispatch_leave(s);
-    send_notify_retire(s);                         /* last action — close finalize may detach (frees s) */
+    send_leave(s);                                 /* LAST action — coordinator finalize may detach (frees s) */
     return ret;
 }
 

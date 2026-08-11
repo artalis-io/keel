@@ -45,7 +45,8 @@ typedef struct {
     int          state;
     int          abort;
     int          notified;
-    int          in_close_cancel;             /* depth guard — defer detach past cancel frames */
+    int          busy;         /* active send/recv/coordinator frames — detach only at 0 (handshake) */
+    int          detaching;    /* reentrancy guard while the terminal logic runs */
     int          recv_cancel_requested, send_cancel_requested;
     KlDgramCancelFn cancel_recv, cancel_send; void *cancel_ctx;
     KlDgramCloseFn  on_close; void *close_ctx;

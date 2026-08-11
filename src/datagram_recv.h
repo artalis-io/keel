@@ -63,7 +63,9 @@ typedef struct {
     int    arming;
     int    rearm_pending;
     int    completed_inline;
-    void (*on_retire)(void *ctx); void *retire_ctx;   /* step-4 close: async retirement notify */
+    /* step-4 busy handshake (see datagram_send.h): +1 entry / -1 as the LAST action of any public op
+     * that can retire or deliver, so the coordinator detaches only when the outermost frame unwinds. */
+    void (*on_activity)(void *ctx, int delta); void *activity_ctx;
 } KlDgramRecv;
 
 /* Wire the receive machine over a borrowed KlDgramSlots. `completion` selects the model. Requires
@@ -94,9 +96,9 @@ int  kl_dgram_recv_resume(KlDgramRecv *r);
  * A physically-outstanding completion recv retires on its (dropped) completion. Idempotent. */
 void kl_dgram_recv_stop(KlDgramRecv *r);
 
-/* Step-4 close: on_retire fires (as the last action) when an async retirement settles (on_complete /
- * on_readable / resume) — the close coordinator re-checks its terminal condition. */
-void kl_dgram_recv_set_retire_cb(KlDgramRecv *r, void (*cb)(void *ctx), void *ctx);
+/* Step-4 close: on_activity(delta) brackets every public op that can retire or deliver (+1 entry,
+ * -1 as the LAST action) — the coordinator detaches only once the outermost frame unwinds. */
+void kl_dgram_recv_set_activity_cb(KlDgramRecv *r, void (*cb)(void *ctx, int delta), void *ctx);
 
 /* Free/zero the object (borrows no heap). REFUSES with -1 while a receive is outstanding (a posted
  * completion op / armed readiness interest references the inbound slot). */
