@@ -88,9 +88,14 @@ static char g_last_qname[256];   /* last query's decoded name (lowercased) */
 /* Step 6.3 conformance knobs (see the section at the bottom): */
 static int    g_octet_from_name; /* A record's 4th octet = the query name's first char (lowercased) —
                                   * gives DISTINGUISHABLE answers for the concurrent-resolution demux test */
-static int    g_wrong_source;    /* also send a POISONED answer from g_spoof_sock (a non-nameserver
-                                  * source) — the resolver must drop it (src address+port check) */
+static int    g_wrong_source;    /* two-phase src-filter proof: send ONLY a POISONED answer from
+                                  * g_spoof_sock (a non-nameserver source) + STASH the legit response +
+                                  * the resolver's dest for the test to release later. No auto-reply. */
 static KlUdp *g_spoof_sock;      /* the wrong-source socket (bound to a different ephemeral port) */
+static uint8_t    g_stash_resp[2][512]; /* stashed legit responses (A + AAAA), released in phase 2 */
+static size_t     g_stash_len[2];
+static int        g_stash_n;
+static KlSockAddr g_stash_dest;         /* the resolver's addr:port (reply destination) */
 
 /* Parse a DNS query's question: set *qtype, return qend (0 on malformed). */
 static size_t dns_q_parse(const uint8_t *q, size_t len, int *qtype) {
@@ -260,15 +265,24 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
         memcpy(resp + n, cli, 8); n += 8;         /* echo client cookie */
         memcpy(resp + n, g_srv_cookie, 8); n += 8;/* add server cookie */
     }
-    /* Wrong-source spoof: send a POISONED copy (corrupt the A answer's last octet) FROM a socket that
-     * is NOT the configured nameserver. The resolver must drop it on the src (address+port) check and
-     * still accept the legitimate reply below — never returning the poisoned answer. */
+    /* Two-phase wrong-source proof: send ONLY a POISONED copy (corrupt the A answer's last octet) FROM
+     * a socket that is NOT the configured nameserver, and STASH the legit response + the resolver's
+     * dest so the test can release it from the real nameserver socket in phase 2. No legit reply now —
+     * so if the resolver's src (address+port) gate were broken, the poison alone would (wrongly)
+     * complete the resolution; a working gate leaves it PENDING until the stashed reply is released. */
     if (g_wrong_source && g_spoof_sock && n <= 512) {
         uint8_t poison[512];
         memcpy(poison, resp, n);
         if (poison[7] >= 1)                     /* an A answer present (no cookie in this test) */
             poison[n - 1] = 0xEE;               /* 10.1.2.3 -> 10.1.2.238 (distinguishable) */
         (void)kl_udp_send_to(g_spoof_sock, poison, n, src);
+        if (g_stash_n < 2) {                    /* stash the legit A + AAAA responses for phase 2 */
+            memcpy(g_stash_resp[g_stash_n], resp, n);
+            g_stash_len[g_stash_n] = n;
+            g_stash_n++;
+        }
+        g_stash_dest = *src;
+        return;                                 /* withhold the legit reply until phase 2 */
     }
     kl_udp_server_reply(s, resp, n, src);
 }
@@ -389,7 +403,7 @@ static void reset_dns(void) {
     g_cookie = g_cookie_wrong_client = g_cookie_badcookie_once = g_cookie_bad_sent = 0;
     g_seen_client_ok = 0; g_seen_server_len = 0;
     g_done = 0; g_err = 0; memset(&g_res, 0, sizeof(g_res));
-    g_octet_from_name = 0; g_wrong_source = 0; g_spoof_sock = NULL;
+    g_octet_from_name = 0; g_wrong_source = 0; g_spoof_sock = NULL; g_stash_n = 0;
 }
 
 /* Start the mock nameserver and create a resolver pointed at it (custom cfg). */
@@ -1405,9 +1419,13 @@ UTEST(dns, cookie_client_mismatch_ignored) {
  * cover the couplings dns_on_recv leans on THROUGH the machine — src on every recv (anti-spoof) and
  * txid demux across serial re-arms — and run on both readiness and completion backends. */
 
-/* A response that is valid in content but arrives from a socket NOT configured as a nameserver must be
- * dropped on the src (address+port) check, and the legitimate reply must still complete the query with
- * the correct answer — never the poisoned spoof. */
+/* Two-phase proof that a valid-content response from a NON-nameserver socket is rejected at the src
+ * (address+port) gate — independent of cross-socket scheduling. Phase 1: only the poisoned answer is
+ * ever sent (from the spoofer's port); pump and assert the resolution stays PENDING (a broken gate
+ * would complete it here with 10.1.2.238). Phase 2: release the withheld legit responses from the real
+ * nameserver socket; pump and assert completion with 10.1.2.3. (A single-phase send of both would not
+ * prove the gate: if the legit arrived first it would retire the txn and the poison would be dropped
+ * as an unknown id regardless of the src check.) */
 UTEST(dns, wrong_source_response_ignored) {
     reset_dns();
     g_answer_a = 1;
@@ -1415,26 +1433,36 @@ UTEST(dns, wrong_source_response_ignored) {
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
     KlUdpServer ns;
-    KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
+    KlResolver *r = make_resolver(&ctx, &ns, 3000, 1);   /* long timeout, 1 attempt: no retransmit in phase 1 */
     ASSERT_TRUE(r != NULL);
 
-    /* The spoofer binds a DIFFERENT ephemeral port than the nameserver; mock_ns fires a poisoned
-     * answer through it (10.1.2.238) alongside the legit reply (10.1.2.3) from the nameserver port. */
     KlUdp spoof;
     KlUdpConfig sp = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
     ASSERT_EQ(0, kl_udp_init(&spoof, &sp));
     g_wrong_source = 1; g_spoof_sock = &spoof;
 
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done, NULL) != NULL);
-    pump(&ctx, &g_done, 300);
+
+    /* Phase 1: only the wrong-source poison is ever in flight. Pump until both queries have been seen
+     * (both poisons sent), then a margin so each poison round-trips to the resolver and is dropped.
+     * The src gate must reject them, so the resolution has NOT completed (all well under the 3s
+     * timeout, so a still-pending resolution is a rejection, not a timeout). */
+    for (int i = 0; i < 200 && g_stash_n < 2; i++) kl_event_ctx_run(&ctx, 16, 2);
+    for (int i = 0; i < 20; i++) kl_event_ctx_run(&ctx, 16, 2);   /* poison round-trip + drop */
+    ASSERT_TRUE(g_stash_n >= 1);             /* the mock captured the legit response(s) + dest */
+    ASSERT_EQ(0, g_done);                    /* poison rejected at the src gate — still pending */
+
+    /* Phase 2: release the legit responses from the configured nameserver socket (correct src). */
+    for (int i = 0; i < g_stash_n; i++)
+        ASSERT_EQ(0, kl_udp_server_reply(&ns, g_stash_resp[i], g_stash_len[i], &g_stash_dest));
+    pump(&ctx, &g_done, 200);
 
     ASSERT_EQ(1, g_done);
-    ASSERT_EQ(0, g_err);                     /* the legit response completed the query */
+    ASSERT_EQ(0, g_err);
     ASSERT_TRUE(g_res.naddrs >= 1);
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, g_res.addrs[0].u.ip, ip, sizeof(ip));
-    ASSERT_STREQ("10.1.2.3", ip);            /* the LEGIT answer — the wrong-source spoof was dropped */
-    ASSERT_TRUE(g_queries >= 1);
+    ASSERT_STREQ("10.1.2.3", ip);            /* the LEGIT answer, released only in phase 2 */
 
     g_spoof_sock = NULL;
     kl_udp_free(&spoof);

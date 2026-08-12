@@ -359,7 +359,9 @@ implementation or documented limitation for each backend (the matrix in
 > machine transitively through `kl_udp_recv_start(dns_on_recv)`, so no DNS-specific receive seam exists
 > or is added. `tests/test_dns_resolver.c` adds coverage for the couplings `dns_on_recv` leans on
 > through the machine — a wrong-**source** response (valid content from a non-nameserver socket) dropped
-> on the src address+port check while the legitimate reply still completes the query; and concurrent
+> on the src address+port check, proven two-phase (poison alone leaves the resolution pending; the
+> withheld legit reply, released from the nameserver socket, then completes it — independent of
+> cross-socket scheduling); and concurrent
 > distinct-name resolutions demultiplexed by transaction id across the serial receive re-arms (each
 > callback receives only its own name's distinguishable answer) — on both readiness and completion
 > backends. As with `KlUdpServer`, DNS's UDP **send (`kl_udp_send_to`) and teardown (`kl_udp_free`)
