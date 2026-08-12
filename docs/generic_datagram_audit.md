@@ -348,8 +348,9 @@ implementation or documented limitation for each backend (the matrix in
 > `KlUdpServer`: because the server is a thin wrapper over the public `KlUdp` API, its receive already
 > rides that machine transitively — no server-side wiring exists or is added. `tests/test_udp_server.c`
 > now covers the server's Tier-1 couplings through the machine (serial multi-datagram
-> one-packet-one-callback dispatch; source addr on every recv; source-pinned reply-to-sender from the
-> handler; Linux-gated `SO_REUSEPORT` fan-out with the total conserved) on both readiness and
+> one-packet-one-callback dispatch, validated per-payload with a duplicate-rejecting seen-set; source
+> addr on every recv; reply-to-each-sender's-own-source from the handler; Linux-gated,
+> getsockopt-verified `SO_REUSEPORT` shared bind with delivery conserved) on both readiness and
 > completion backends. The server's **send queue (byte-budget) and close (`kl_udp_free` legacy
 > teardown) remain the existing `KlUdp` compatibility behavior** — the fixed-slot atomic send +
 > confirmed-detachment close machines land on the public `KlDatagram` path (Step 7), not here.

@@ -5,11 +5,12 @@
  * (kl_udp_init + kl_udp_recv_start + kl_udp_send_to_from), so its receive already rides the shared
  * serial-receive machine (KlDgramRecv over the dedicated inbound slot) that step 6.1 wired into
  * kl_udp_recv_start — no separate server-side wiring exists or is needed. These cases exercise the
- * server's Tier-1 couplings THROUGH that machine: one-packet-one-callback + serial multi-datagram
- * dispatch (no coalescing/loss across the re-arm), source address on every recv, and a source-pinned
- * reply from inside the handler. Being backend-agnostic (a default KlEventCtx loop), the same suite
- * runs on the readiness backends (kqueue/epoll/wsapoll/poll) AND the completion backends
- * (pollcomp/io_uring/IOCP) — so both paths are covered by one file.
+ * server's Tier-1 couplings THROUGH that machine: serial multi-datagram one-packet-one-callback
+ * dispatch validated per-payload with a duplicate-rejecting seen-set (no coalescing/substitution/
+ * duplication/loss across the re-arm); source address on every recv with a reply to each sender's own
+ * source; and (Linux) a getsockopt-verified SO_REUSEPORT shared bind with delivery conserved. Being
+ * backend-agnostic (a default KlEventCtx loop), the same suite runs on the readiness backends
+ * (kqueue/epoll/wsapoll/poll) AND the completion backends (pollcomp/io_uring/IOCP) — one file, both paths.
  *
  * The server's SEND queue (byte-budget) and CLOSE (kl_udp_free legacy teardown) remain the existing
  * KlUdp compatibility behavior; the fixed-slot atomic send + confirmed-detachment close machines are
@@ -48,13 +49,10 @@ static char     g_cli_buf[512];
 static size_t   g_cli_len;
 static int      g_cli_got;
 static char     g_cli_src_ip[INET6_ADDRSTRLEN];
-static unsigned g_cli_sum;   /* running sum of every received byte (multi-datagram integrity) */
 
 static void cli_recv(KlUdp *u, const void *data, size_t len,
                      const KlSockAddr *src, const KlSockAddr *local, void *ud) {
     (void)u; (void)local; (void)ud;
-    for (size_t i = 0; i < len; i++)
-        g_cli_sum += ((const unsigned char *)data)[i];
     if (len > sizeof(g_cli_buf)) len = sizeof(g_cli_buf);
     memcpy(g_cli_buf, data, len);
     g_cli_len = len;
@@ -65,10 +63,28 @@ static void cli_recv(KlUdp *u, const void *data, size_t len,
     g_cli_got++;
 }
 
+/* Per-payload capture for the serial multi-datagram test: each echoed datagram must be exactly
+ * "srv-<i>" for a distinct 0<=i<N. Sets bit i in `mask`; a malformed payload OR a duplicate index
+ * flips `bad`. The test then asserts bad==0 (no corruption/substitution/dup) and mask==(1<<N)-1
+ * (every distinct message arrived) — stronger than an aggregate over the bytes. */
+static unsigned g_multi_mask;
+static int      g_multi_bad;
+static void multi_recv(KlUdp *u, const void *data, size_t len,
+                       const KlSockAddr *src, const KlSockAddr *local, void *ud) {
+    (void)u; (void)src; (void)local; (void)ud;
+    g_cli_got++;
+    const char *p = data;
+    if (len != 5 || memcmp(p, "srv-", 4) != 0 || p[4] < '0' || p[4] > '9') { g_multi_bad = 1; return; }
+    unsigned bit = 1u << (p[4] - '0');
+    if (g_multi_mask & bit) { g_multi_bad = 1; return; }   /* duplicate index */
+    g_multi_mask |= bit;
+}
+
 static void reset(void) {
     g_srv_hits = 0; g_srv_src_ip[0] = '\0';
     g_cli_len = 0; g_cli_got = 0; memset(g_cli_buf, 0, sizeof(g_cli_buf));
-    g_cli_src_ip[0] = '\0'; g_cli_sum = 0;
+    g_cli_src_ip[0] = '\0';
+    g_multi_mask = 0; g_multi_bad = 0;
 }
 
 /* Per-client capture (independent state) for the two-sender source-pinning test. */
@@ -188,10 +204,11 @@ UTEST(udp_server, null_and_arg_guards) {
     kl_event_ctx_free(&ctx);
 }
 
-/* Serial multi-datagram dispatch: several datagrams sent back-to-back are each delivered as ONE
- * handler call (one-packet-one-callback) and each echoed — none coalesced, none lost across the
- * receive machine's re-arm. Proven by the counts (N in → N handled → N out) plus a byte-sum
- * integrity check over every echoed payload. Runs on readiness and completion backends alike. */
+/* Serial multi-datagram dispatch: N distinct datagrams ("srv-0".."srv-<N-1>") sent back-to-back are
+ * each delivered as ONE handler call (one-packet-one-callback) and each echoed — none coalesced,
+ * substituted, duplicated, or lost across the receive machine's re-arm. multi_recv validates each
+ * payload byte-for-byte and records its index in a seen-set that rejects duplicates; the test then
+ * asserts every distinct message arrived exactly once. Runs on readiness and completion alike. */
 UTEST(udp_server, serial_multi_datagram) {
     reset();
     KlAllocator alloc = kl_allocator_default();
@@ -206,25 +223,24 @@ UTEST(udp_server, serial_multi_datagram) {
     KlUdp cli;
     KlUdpConfig cc = { .ctx = &ctx };
     ASSERT_EQ(0, kl_udp_init(&cli, &cc));
-    ASSERT_EQ(0, kl_udp_recv_start(&cli, cli_recv, NULL));
+    ASSERT_EQ(0, kl_udp_recv_start(&cli, multi_recv, NULL));
 
     KlSockAddr dst;
     dest_v4(&dst, port);
 
     enum { N = 4 };
-    unsigned expect_sum = 0;
     for (int i = 0; i < N; i++) {
         char m[8];
-        int mn = snprintf(m, sizeof(m), "srv-%d", i);
-        for (int k = 0; k < mn; k++) expect_sum += (unsigned char)m[k];
+        int mn = snprintf(m, sizeof(m), "srv-%d", i);   /* exactly 5 bytes, distinct trailing digit */
         ASSERT_EQ(0, kl_udp_send_to(&cli, m, (size_t)mn, &dst));
     }
 
     pump_until(&ctx, &g_cli_got, N, 400);
 
-    ASSERT_EQ(N, g_srv_hits);          /* each datagram = exactly one handler call */
-    ASSERT_EQ(N, g_cli_got);           /* each echo delivered separately (no coalescing/loss) */
-    ASSERT_EQ(expect_sum, g_cli_sum);  /* every payload round-tripped byte-intact */
+    ASSERT_EQ(N, g_srv_hits);                         /* each datagram = exactly one handler call */
+    ASSERT_EQ(N, g_cli_got);                          /* each echo delivered separately */
+    ASSERT_EQ(0, g_multi_bad);                        /* no corruption/substitution/duplicate */
+    ASSERT_EQ((unsigned)((1u << N) - 1), g_multi_mask); /* every distinct message arrived exactly once */
 
     kl_udp_free(&cli);
     kl_udp_server_free(&srv);
@@ -309,12 +325,14 @@ UTEST(udp_server, reply_from_hit_address) {
     kl_event_ctx_free(&ctx);
 }
 
-/* SO_REUSEPORT fan-out (Linux, where REUSEPORT load-balances): TWO servers bind the SAME port with
- * reuse_port=1 — the second bind succeeding is itself the capability proof (without SO_REUSEPORT it
- * would fail EADDRINUSE). Every datagram is handled exactly once across the group; we assert only the
- * conserved TOTAL, never WHICH server handled each (kernel policy, non-deterministic). Capability-
- * gated to Linux rather than made environment-dependent — other platforms' REUSEPORT semantics differ. */
-UTEST(udp_server, reuse_port_fanout) {
+/* SO_REUSEPORT shared bind (Linux): TWO servers bind the SAME port with reuse_port=1. Rather than
+ * infer REUSEPORT from the bind merely succeeding (KlUdpServer also sets SO_REUSEADDR, which can by
+ * itself permit a duplicate UDP bind on Linux), verify SO_REUSEPORT is actually set on each server's
+ * socket via getsockopt on the native fd. Then confirm delivery is conserved — every datagram handled
+ * exactly once across the group. We do NOT assert fan-out/distribution: a single client flow hashes
+ * entirely to one server (REUSEPORT keys on the 4-tuple), so WHICH server handles each is not
+ * observable deterministically. Capability-gated to Linux (SO_REUSEPORT semantics differ elsewhere). */
+UTEST(udp_server, reuse_port_shared_bind) {
     reset();
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
@@ -328,7 +346,15 @@ UTEST(udp_server, reuse_port_fanout) {
 
     KlUdpServer b;
     KlUdpServerConfig scb = { .bind_addr = "127.0.0.1", .port = port, .reuse_port = 1 };
-    ASSERT_EQ(0, kl_udp_server_init(&b, &ctx, &scb, echo_handler, NULL));   /* same port → REUSEPORT */
+    ASSERT_EQ(0, kl_udp_server_init(&b, &ctx, &scb, echo_handler, NULL));   /* same port */
+
+    /* Prove the shared bind is via SO_REUSEPORT, not merely SO_REUSEADDR. */
+    int opt = 0; socklen_t olen = sizeof(opt);
+    ASSERT_EQ(0, getsockopt((int)kl_udp_server_fd(&a), SOL_SOCKET, SO_REUSEPORT, &opt, &olen));
+    ASSERT_TRUE(opt != 0);
+    opt = 0; olen = sizeof(opt);
+    ASSERT_EQ(0, getsockopt((int)kl_udp_server_fd(&b), SOL_SOCKET, SO_REUSEPORT, &opt, &olen));
+    ASSERT_TRUE(opt != 0);
 
     KlUdp cli;
     KlUdpConfig cc = { .ctx = &ctx };
@@ -343,7 +369,7 @@ UTEST(udp_server, reuse_port_fanout) {
 
     pump_until(&ctx, &g_cli_got, N, 500);
 
-    ASSERT_EQ(N, g_srv_hits);   /* total conserved across the two servers, however distributed */
+    ASSERT_EQ(N, g_srv_hits);   /* delivery conserved across the shared-port group */
     ASSERT_EQ(N, g_cli_got);
 
     kl_udp_free(&cli);
