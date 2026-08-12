@@ -393,8 +393,13 @@ int kl_uefi_udp_poll_recv(KlSocketHandle fd, void *copy_into, size_t cap,
     return 1;
 }
 
-int kl_uefi_udp_post_send(KlSocketHandle fd, const void *data, size_t len, const KlSockAddr *dest) {
-    KlUefiUdp *u = udp_of(fd);
+/* Internal transmit: build the ENTIRE session (dest + optional source pin) and descriptor
+ * BEFORE Transmit — the firmware may consume the descriptor during Transmit, so nothing
+ * reachable from the token may be mutated after submit. @src NULL = no source pin (completion
+ * send); a non-NULL IPv4 @src is written into UdpSession.SourceAddress. Shared by the public
+ * completion post (src=NULL) and the sync source-pinned fallback. */
+static int udp_post_send_ex(KlUefiUdp *u, const void *data, size_t len,
+                            const KlSockAddr *dest, const KlSockAddr *src) {
     if (!u) return -1;
     if (kl_uefi_after_ebs()) return -1;
     if (u->tx_posted) return -1;                 /* a send is already outstanding */
@@ -402,12 +407,19 @@ int kl_uefi_udp_post_send(KlSocketHandle fd, const void *data, size_t len, const
     EFI_IPv4_ADDRESS dip; UINT16 dport = 0;
     if (kl_efi_sockaddr_to_ipv4(dest, &dip, &dport) != 0) return -1;   /* per-datagram dest, IPv4 */
 
-    const unsigned char *src = data;
-    for (size_t i = 0; i < len; i++) u->tx_buf[i] = src[i];
+    const unsigned char *sb = data;
+    for (size_t i = 0; i < len; i++) u->tx_buf[i] = sb[i];
 
     u_zero(&u->tx_sess, sizeof(u->tx_sess));
     for (int i = 0; i < 4; i++) u->tx_sess.DestinationAddress.Addr[i] = dip.Addr[i];
     u->tx_sess.DestinationPort = dport;
+    if (src && kl_sockaddr_family(src) == KL_AF_INET) {   /* optional source pin — set BEFORE submit */
+        EFI_IPv4_ADDRESS sip; UINT16 sport = 0;
+        if (kl_efi_sockaddr_to_ipv4(src, &sip, &sport) == 0) {
+            for (int i = 0; i < 4; i++) u->tx_sess.SourceAddress.Addr[i] = sip.Addr[i];
+            u->tx_sess.SourcePort = sport;
+        }
+    }
 
     u_zero(&u->tx_desc, sizeof(u->tx_desc));
     u->tx_desc.UdpSessionData = &u->tx_sess;
@@ -418,11 +430,15 @@ int kl_uefi_udp_post_send(KlSocketHandle fd, const void *data, size_t len, const
 
     u->tx_tok.Status = EFI_NOT_READY;
     u->tx_tok.Packet.TxData = &u->tx_desc;
-    EFI_STATUS st = u->udp->Transmit(u->udp, &u->tx_tok);
+    EFI_STATUS st = u->udp->Transmit(u->udp, &u->tx_tok);   /* firmware may consume the descriptor now */
     u->last_status = st;
     if (EFI_ERROR(st)) return -1;
     u->tx_posted = 1;
     return 0;
+}
+
+int kl_uefi_udp_post_send(KlSocketHandle fd, const void *data, size_t len, const KlSockAddr *dest) {
+    return udp_post_send_ex(udp_of(fd), data, len, dest, NULL);   /* completion send: no source pin */
 }
 
 int kl_uefi_udp_poll_send(KlSocketHandle fd, size_t *out_bytes, int *out_ok) {
@@ -521,42 +537,41 @@ int kl_uefi_udp_close(KlSocketHandle fd) {
     return 0;
 }
 
-/* ── KlDatagramOps: configure (mandatory) + sync send fallback; recv = NULL ────────── */
+/* ── KlDatagramOps: configure (mandatory) + sync send fallback; recv = NULL ──────────
+ *
+ * LIMITATION (KlDatagramOps.configure has no error channel — it returns a capture-cap mask,
+ * not a status): EFI_UDP4.Configure can genuinely fail (no DHCP, bad station). We cannot
+ * report that through the return, so on failure we FAIL-CLOSE the slot (full teardown here)
+ * — udp_of(fd) then returns NULL, so the next init step (bind for a bound socket, or the
+ * first post_dgram_recv at kl_udp_recv_start for an unbound one) reliably fails rather than
+ * leaving kl_udp_init "succeeding" with an unusable socket.
+ *
+ * SINGLE Configure per child (a second Configure on an already-started child returns
+ * EFI_ALREADY_STARTED): udp.c calls configure() BEFORE kl_sock_bind(), so an explicit
+ * bind_addr is DEFERRED to kl_uefi_udp_bind() (the only Configure for a bound socket); the
+ * unbound/default case is configured here (no bind() follows). */
 static uint32_t dg_configure(void *ctx, KlSocketHandle fd, int family,
                              const struct KlUdpConfig *cfg) {
     (void)ctx; (void)family;
     KlUefiUdp *u = udp_of(fd);
     if (!u) return 0;
-    /* Unconnected DHCP-ephemeral config unless the caller bound a numeric station. */
-    if (cfg && cfg->bind_addr) {
-        EFI_IPv4_ADDRESS ip; UINT16 port = cfg->bind_port;
-        KlSockAddr sa;
-        if (kl_sockaddr_parse(&sa, cfg->bind_addr, port) == 0 &&
-            kl_efi_sockaddr_to_ipv4(&sa, &ip, &port) == 0) {
-            (void)udp_configure(u, &ip, port);
-            return 0;
-        }
-    }
-    (void)udp_configure(u, NULL, 0);
-    return 0;   /* no KL_DGRAM_RX_* capture caps: src+local ride each completion event natively */
+    if (cfg && cfg->bind_addr)
+        return 0;   /* explicit station → kl_uefi_udp_bind does the single Configure */
+    if (udp_configure(u, NULL, 0) != 0)
+        (void)kl_uefi_udp_close(fd);   /* fail-close: next init step fails (no error channel here) */
+    return 0;       /* no KL_DGRAM_RX_* capture caps: src+local ride each completion event natively */
 }
 
 /* Sync single-Transmit fallback for the source-pinned / TOS path udp.c routes off the
- * completion fast path. Independent Tx token under the same quarantine discipline. src (source
- * pin) honored via UdpSession.SourceAddress; tos not mapped (EFI_UDP4 sets it via config). */
+ * completion fast path. Independent Tx token under the same quarantine discipline. The source
+ * pin is written into the session BEFORE submit (via udp_post_send_ex); tos not mapped (EFI_UDP4
+ * carries TOS through Configure, not per-datagram). */
 static kl_ssize_t dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                           const KlSockAddr *dest, const KlSockAddr *src, int tos) {
     (void)ctx; (void)tos;
     KlUefiUdp *u = udp_of(fd);
     if (!u) return -1;
-    if (kl_uefi_udp_post_send(fd, data, len, dest) != 0) return -1;
-    if (src && kl_sockaddr_family(src) == KL_AF_INET) {
-        EFI_IPv4_ADDRESS sip; UINT16 sport = 0;
-        if (kl_efi_sockaddr_to_ipv4(src, &sip, &sport) == 0) {
-            for (int i = 0; i < 4; i++) u->tx_sess.SourceAddress.Addr[i] = sip.Addr[i];
-            u->tx_sess.SourcePort = sport;
-        }
-    }
+    if (udp_post_send_ex(u, data, len, dest, src) != 0) return -1;   /* full session built pre-submit */
     /* Drive the Tx token to completion (or quarantine on an unconfirmed cancel). */
     if (!udp_pump_until(u->bs, u->udp, u->tx_tok.Event, KL_EFI_UDP_PUMP_SPINS)) {
         if (kl_uefi_udp_cancel_send(fd) == 0) { u->quarantined = 1; u->dead = 1; }
