@@ -358,6 +358,9 @@ jobs:
       - name: Freestanding DNS gate (stock resolver, UDP-only; compile + header + symbol + composition)
         run: make freestanding-dns
 
+      - name: Freestanding DNS harness (runtime: truncation settles KL_ERR_DNS, no TCP, no timeout — ASan+UBSan+LSan)
+        run: make freestanding-dns-harness
+
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
 

@@ -13,7 +13,10 @@
  *   - resolv.conf discovery (dns_build_ns_list / default hosts path): the caller
  *     MUST supply cfg->nameserver; there is no config discovery.
  * The freestanding build therefore performs UDP-only Do53 against an explicitly
- * configured nameserver. See docs/datagram_contract.md.
+ * configured nameserver — the consumer-visible limitations (explicit nameserver
+ * required, no hosts/resolv.conf discovery, no TCP recovery on TC) are documented
+ * in docs/datagram_contract.md §11 ("Freestanding (UDP-only) DNS build"), and the
+ * TC-settles-clean branch is runtime-proven by tests/freestanding_dns_harness.c.
  */
 #include <keel/dns_resolver.h>
 #include <keel/udp.h>

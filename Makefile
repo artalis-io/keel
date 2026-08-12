@@ -1497,7 +1497,24 @@ freestanding-harness:
 	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_HARNESS_BIN)
 	@rm -f $(FREESTANDING_HARNESS_BIN)
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
+# Freestanding DNS harness (6.4a-2 review): RUNS the freestanding (UDP-only) resolver
+# on the host under -DKEEL_FREESTANDING over a mock datagram provider + readiness loop,
+# EXECUTING the truncation branch (TC → settle-empty → KL_ERR_DNS, no TCP, no timeout).
+# Links the same TUs as the freestanding-dns archive + the F-5 host platform TU.
+FREESTANDING_DNS_HARNESS_BIN = tests/freestanding_dns_harness$(EXE)
+FREESTANDING_DNS_HARNESS_SRC = $(FREESTANDING_DNS_SRC) \
+                               tests/freestanding_host_platform.c \
+                               tests/freestanding_dns_harness.c
+freestanding-dns-harness:
+	@echo "== freestanding DNS host mock harness (ASan+UBSan+LSan, -DKEEL_FREESTANDING) =="
+	$(CC) $(FREESTANDING_HARNESS_CFLAGS) -w -o $(FREESTANDING_DNS_HARNESS_BIN) \
+	    $(FREESTANDING_DNS_HARNESS_SRC)
+	@echo "== run =="
+	@LEAKS=$$(uname -s | grep -qi linux && echo detect_leaks=1 || echo detect_leaks=0); \
+	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_DNS_HARNESS_BIN)
+	@rm -f $(FREESTANDING_DNS_HARNESS_BIN)
+
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

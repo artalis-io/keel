@@ -424,6 +424,20 @@ is a deferred Tier-1 cleanup (the copy-ring was deliberately preserved).
 - **DoT / TCP fallback / any stream transport.** The DNS TCP fallback + `(fd, KlTls*)` DoT hook
   is a **byte-stream** helper (audit §2.4) — it belongs to `KlStream`/the socket seam, never
   folded into `KlDatagram`.
+- **Freestanding (UDP-only) DNS build.** When the built-in resolver (`src/dns_resolver.c`) is
+  compiled `-DKEEL_FREESTANDING` (the datagram/DNS freestanding archive that a bare EFI_UDP4
+  consumer links — 6.4a-2), it performs **UDP-only Do53 against an explicitly configured
+  nameserver**, with three *documented, consumer-visible* limitations vs the hosted build:
+  1. **Explicit nameserver required** — there is no `resolv.conf` discovery; the caller MUST set
+     `KlDnsResolverConfig.nameserver` (a numeric NS address). Creation fails otherwise.
+  2. **No `/etc/hosts` lookup** — there is no filesystem, so the hosts-file shortcut is absent
+     (literal-IP and `localhost` shortcuts still work — they need no filesystem).
+  3. **No RFC 7766 TCP recovery on truncation** — a truncated (TC) response cannot be recovered
+     over TCP, so it **fails that query leg promptly and clearly** (the resolution completes with
+     `KL_ERR_DNS`), rather than opening a TCP socket or silently waiting for the leg timeout.
+     Runtime-proven by `tests/freestanding_dns_harness.c` (`make freestanding-dns-harness`).
+  The UDP query engine itself is otherwise identical (dual-family A+AAAA, 0x20, EDNS0, cookies,
+  the bounds-safe parser). The DoT/TCP hook above is the stream helper these limitations drop.
 - **Connected-socket assumptions.** Connected is a mode (§7), never assumed.
 - **fd exposure.** `kl_udp_server_fd`-style raw-handle leaks are provider-specific; providers
   without fds (lwIP/EFI) report the absence rather than fabricate one.
