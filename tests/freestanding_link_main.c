@@ -42,6 +42,9 @@
 #include "../src/resolve_sync.h"  /* kl_resolve_sync */
 #include "../src/event_builtin.h" /* kl_event_*_builtin */
 #include "../src/completion.h"    /* KlCompletionOps + kl_comp_ops_builtin */
+#ifdef KEEL_FS_LINK_DGRAM
+#include <keel/udp.h>              /* 6.4a-1 composition probe: also pull the datagram archive layer */
+#endif
 
 #include <stddef.h>
 #include <stdint.h>
@@ -72,6 +75,17 @@ int efi_main(void *image_handle, void *system_table) {
     uintptr_t acc = 0;
     for (unsigned i = 0; i < sizeof(refs) / sizeof(refs[0]); i++)
         acc |= (uintptr_t)refs[i];
+#ifdef KEEL_FS_LINK_DGRAM
+    /* Composition probe (6.4a-1 review): also reference the KlUdp entry points so the datagram archive
+     * layer participates in the link — proving the client + datagram freestanding archives compose with
+     * NO duplicate or unresolved symbol across their overlapping base objects (allocator / event_ctx /
+     * sockaddr / completion_*). */
+    void *dgram_refs[] = {
+        (void *)&kl_udp_init, (void *)&kl_udp_free, (void *)&kl_udp_recv_start,
+    };
+    for (unsigned i = 0; i < sizeof(dgram_refs) / sizeof(dgram_refs[0]); i++)
+        acc |= (uintptr_t)dgram_refs[i];
+#endif
     return acc ? 0 : 1;
 }
 
@@ -99,6 +113,14 @@ KlIoStatus kl_sockdef_io_status(void) { return KL_IO_FATAL; }
 ssize_t kl_sockdef_send(KlSocketHandle f, const void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 ssize_t kl_sockdef_recv(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 ssize_t kl_sockdef_recv_peek(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
+#ifdef KEEL_FS_LINK_DGRAM
+/* Datagram-path socket seams referenced by udp.c (a client-only link never binds / reads the local
+ * addr / needs the datagram data-plane, so these live under the composition-probe guard). */
+void kl_sockdef_set_cloexec(KlSocketHandle f) { (void)f; }
+int  kl_sockdef_bind(KlSocketHandle f, const KlSockAddr *a) { (void)f;(void)a; return -1; }
+int  kl_sockdef_get_local_addr(KlSocketHandle f, KlSockAddr *a) { (void)f;(void)a; return -1; }
+const struct KlDatagramOps *kl_sockdef_dgram(void) { return NULL; }
+#endif
 
 /* ══════════════════════════════════════════════════════════════════════
  * EVENT / COMPLETION BUILTIN HOOKS (fail-closed)

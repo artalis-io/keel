@@ -1205,13 +1205,15 @@ freestanding-lib-dgram:
 	$(call fs_build_and_gate,$(FREESTANDING_DGRAM_SRC),libkeel_freestanding_dgram,,)
 
 # The full 6.4a-1 gate: compile (fs archive, per target) + undefined-host-symbol
-# (freestanding_symbol_gate.sh, run inside fs_build_and_gate) + forbidden-header
+# (freestanding_symbol_gate.sh, run inside fs_build_and_gate) + COMPOSITION link
+# (freestanding-dgram-link — the client + datagram archives link together with no
+# duplicate/unresolved across their overlapping base objects) + forbidden-header
 # (below). The cross-target build already proves no host POSIX header is reachable
 # (the macOS/host include tree is off the --target=windows search path), so the
 # dep-scan is belt-and-suspenders: it FAILS if any FREESTANDING_FORBIDDEN header is
 # pulled from OUTSIDE the freestanding shim (the shim's winsock2.h/ws2tcpip.h — the
 # intended replacements sockcompat's _WIN32 branch selects — are allowed).
-freestanding-dgram: freestanding-lib-dgram
+freestanding-dgram: freestanding-lib-dgram freestanding-dgram-link
 	@echo "== dep proof: datagram TUs pull no HOST forbidden header (shim replacements OK) =="
 	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then \
 	  echo "  SKIP header dep-scan (non-clang; the cross-target compile + symbol gate above proves it)"; \
@@ -1231,7 +1233,47 @@ freestanding-dgram: freestanding-lib-dgram
 	  if [ $$bad -ne 0 ]; then echo "freestanding-dgram: header gate FAILED"; exit 1; fi; \
 	  echo "  zero HOST forbidden headers pulled (only shim + keel + C-standard)"; \
 	fi
-	@echo "== freestanding-dgram gate OK (compile + forbidden-header + undefined-host-symbol) =="
+	@echo "== freestanding-dgram gate OK (compile + forbidden-header + undefined-host-symbol + composition) =="
+
+# Composition link probe (6.4a-1 review): the intended EFI build consumes the client
+# AND datagram freestanding layers together, and both self-contained archives share
+# overlapping base objects (allocator/event_ctx/sockaddr/completion_*/kl_cstr_builtin).
+# Static-archive member extraction is link-order-sensitive, so PROVE they compose:
+# link the shared entry (freestanding_link_main.c, compiled with -DKEEL_FS_LINK_DGRAM so
+# efi_main also references the KlUdp API) against the datagram-SC then client-SC archive
+# (the intended EFI order) into a CRT-less PE image, for BOTH PE targets. The link fails
+# on any duplicate or unresolved symbol; on-demand extraction must pick ONE copy of each
+# shared base object. Needs clang + lld PE (skips with a note otherwise, like freestanding-link).
+FREESTANDING_DGRAM_SC_SRC = $(FREESTANDING_DGRAM_SRC) src/kl_cstr_builtin.c
+
+freestanding-dgram-link:
+	@echo "== freestanding COMPOSITION link (6.4a-1): client + datagram archives, both PE targets =="
+	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then echo "  SKIP (needs clang PE cross target + lld)"; exit 0; fi
+	@lld_ok=0; \
+	if echo 'int mainCRTStartup(void){return 0;}' | $(FREESTANDING_LIB_CC) --target=x86_64-unknown-windows -ffreestanding -nostdlib -fuse-ld=lld -Wl,-entry:mainCRTStartup -Wl,-subsystem:efi_application -x c - -o /tmp/keel_lld_probe2.efi >/dev/null 2>&1; then lld_ok=1; fi; \
+	rm -f /tmp/keel_lld_probe2.efi; \
+	if [ $$lld_ok -ne 1 ]; then echo "  SKIP (lld PE backend unavailable in this toolchain)"; exit 0; fi; \
+	linked=""; \
+	for tgt in $(FREESTANDING_TARGETS); do \
+	  if ! echo 'int x;' | $(FREESTANDING_LIB_CC) --target=$$tgt -ffreestanding -c -x c -o /dev/null - >/dev/null 2>&1; then echo "  SKIP $$tgt (backend unavailable)"; continue; fi; \
+	  case "$$tgt" in x86_64*) RZ="-mno-red-zone"; efi=keel_freestanding_dgram_compose.efi;; *) RZ=""; efi=keel_freestanding_dgram_compose_$${tgt%%-*}.efi;; esac; \
+	  echo "== [$$tgt] build client-SC + datagram-SC archives + composition entry =="; \
+	  cobjs=""; for f in $(FREESTANDING_SC_SRC); do o=$${f%.c}.compose_c_$$tgt.o; $(FREESTANDING_LIB_CC) --target=$$tgt $(FREESTANDING_LIB_CFLAGS) $$RZ -isystem $(FREESTANDING_SHIM) $(FREESTANDING_SC_EXTRA) -w -c -o $$o $$f || { rm -f $$cobjs; exit 1; }; cobjs="$$cobjs $$o"; done; \
+	  carc=libkeel_freestanding_compose_client_$$tgt.a; $(FREESTANDING_AR) rcs $$carc $$cobjs; \
+	  dobjs=""; for f in $(FREESTANDING_DGRAM_SC_SRC); do o=$${f%.c}.compose_d_$$tgt.o; $(FREESTANDING_LIB_CC) --target=$$tgt $(FREESTANDING_LIB_CFLAGS) $$RZ -isystem $(FREESTANDING_SHIM) $(FREESTANDING_SC_EXTRA) -w -c -o $$o $$f || { rm -f $$cobjs $$carc $$dobjs; exit 1; }; dobjs="$$dobjs $$o"; done; \
+	  darc=libkeel_freestanding_compose_dgram_$$tgt.a; $(FREESTANDING_AR) rcs $$darc $$dobjs; \
+	  mo=tests/freestanding_link_main.compose_$$tgt.o; \
+	  $(FREESTANDING_LIB_CC) --target=$$tgt $(FREESTANDING_LIB_CFLAGS) $$RZ -isystem $(FREESTANDING_SHIM) -DKEEL_FS_LINK_DGRAM -w -c -o $$mo $(FREESTANDING_LINK_MAIN) || { rm -f $$cobjs $$carc $$dobjs $$darc; exit 1; }; \
+	  echo "== [$$tgt] LINK entry + datagram-SC + client-SC (intended EFI order), -nostdlib -fuse-ld=lld =="; \
+	  if $(FREESTANDING_LIB_CC) --target=$$tgt -ffreestanding -fno-stack-protector -fno-builtin -nostdlib -fuse-ld=lld -Wl,-entry:efi_main -Wl,-subsystem:efi_application -o $$efi $$mo $$darc $$carc; then \
+	    echo "  COMPOSE LINK OK (no duplicate/unresolved symbol): $$efi"; \
+	    $(FREESTANDING_READOBJ) --file-headers $$efi 2>/dev/null | grep -iE 'Format|Machine|Subsystem' | sed 's/^/    /' || true; \
+	    linked="$$linked $$efi"; \
+	  else echo "  COMPOSE LINK FAILED for $$tgt"; rm -f $$cobjs $$carc $$dobjs $$darc $$mo $$efi; exit 1; fi; \
+	  rm -f $$cobjs $$carc $$dobjs $$darc $$mo; \
+	done; \
+	if [ -z "$$linked" ]; then echo "freestanding-dgram-link: no arch linked"; exit 1; fi; \
+	echo "== freestanding-dgram-link: OK — client + datagram archives compose:$$linked =="
 
 # ── Self-contained freestanding archive (optional; bare target, no libc/EDK2) ──
 # The default archive leaves mem*/strlen undefined for the platform to supply
@@ -1372,7 +1414,7 @@ freestanding-harness:
 	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_HARNESS_BIN)
 	@rm -f $(FREESTANDING_HARNESS_BIN)
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan
