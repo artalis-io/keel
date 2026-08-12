@@ -787,6 +787,8 @@ clean:
 	find . -name '*.fs_*.o' -delete
 	find . -name '*.sc.o' -delete
 	find . -name '*.link_*.o' -delete
+	find . -name '*.compose_*.o' -delete
+	rm -f libkeel_freestanding_compose_*.a keel_freestanding_dgram_compose*.efi keel_freestanding_dns_compose*.efi
 	rm -rf .aarch64 src/.aarch64 parsers/.aarch64 vendor/llhttp/.aarch64
 	rm -f examples/hello examples/hello_server examples/rest_api examples/rest_api_server examples/middleware examples/static_files examples/streaming examples/body_readers examples/websocket examples/websocket_server examples/websocket_client examples/tls examples/tls_server examples/tls_client examples/async examples/thread_pool examples/h2_server examples/h2_client examples/client examples/async_client examples/async_thread_pool examples/custom_allocator examples/custom_socket_provider examples/connection_pool examples/url_parser examples/sse examples/streaming_client examples/timer examples/redirect_client examples/proxy_client examples/compress_server examples/decompress_client
 	rm -f $(BENCH_SERVER)
@@ -1188,7 +1190,8 @@ freestanding-lib-server:
 # consumer that wants KlUdp over a freestanding datagram provider (the future
 # EFI_UDP4 backend, 6.4b) links THIS archive instead. The Tier-1 datagram machine
 # (slots/send/recv/close/life) + KlUdp + the base TUs they need (allocator/sockaddr/
-# event_ctx/event_dispatch/completion_dispatch+core). NO dns_resolver.c (6.4a-2), NO
+# event_ctx/event_dispatch/completion_dispatch+core). NO dns_resolver.c (that rides ON
+# TOP of this layer — see the freestanding DNS layer / FREESTANDING_DNS_SRC below), NO
 # socket PROVIDER (a freestanding build injects EFI_UDP4). The symbol gate proves the
 # undefined closure is the SAME documented whitelist as the client/server archives
 # (C-runtime mem* + kl_plat_*/provider ops) — no OS-syscall/errno/getaddrinfo/fopen.
@@ -1274,6 +1277,86 @@ freestanding-dgram-link:
 	done; \
 	if [ -z "$$linked" ]; then echo "freestanding-dgram-link: no arch linked"; exit 1; fi; \
 	echo "== freestanding-dgram-link: OK — client + datagram archives compose:$$linked =="
+
+# ── Freestanding DNS layer (6.4a-2) ───────────────────────────────────────────
+# The stock async resolver (src/dns_resolver.c) freestanding-enabled: it rides the
+# datagram layer (KlUdp over a freestanding provider) for UDP-only Do53 against an
+# EXPLICIT cfg->nameserver. dns_resolver.c compiles its three hosted-only surfaces
+# out under KEEL_FREESTANDING — RFC 7766 TCP fallback, /etc/hosts, resolv.conf
+# discovery — so the archive's undefined closure stays the SAME documented whitelist
+# as the dgram archive (mem* + kl_cstr helpers + kl_plat_*/provider ops): NO fopen /
+# errno / getaddrinfo / dns_sys / TCP-fallback symbol. This is the archive the future
+# EFI_UDP4 backend (6.4b) links the built-in resolver from; the bespoke dns_uefi.c is
+# retired against it separately.
+FREESTANDING_DNS_SRC = $(FREESTANDING_DGRAM_SRC) src/dns_resolver.c
+
+freestanding-lib-dns:
+	@echo "== freestanding DNS archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
+	@rm -f libkeel_freestanding_dns.a
+	$(call fs_build_and_gate,$(FREESTANDING_DNS_SRC),libkeel_freestanding_dns,,)
+
+# Full DNS gate: compile (fs archive, per target) + undefined-host-symbol (gate script,
+# inside fs_build_and_gate) + COMPOSITION link (freestanding-dns-link) + forbidden-header
+# dep-scan (mirrors freestanding-dgram; belt-and-suspenders over the cross-target compile).
+freestanding-dns: freestanding-lib-dns freestanding-dns-link
+	@echo "== dep proof: DNS TUs pull no HOST forbidden header (shim replacements OK) =="
+	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then \
+	  echo "  SKIP header dep-scan (non-clang; the cross-target compile + symbol gate above proves it)"; \
+	else \
+	  bad=0; \
+	  for f in $(FREESTANDING_DNS_SRC); do \
+	    $(FREESTANDING_LIB_CC) --target=x86_64-unknown-windows -ffreestanding -DKEEL_FREESTANDING \
+	      -isystem $(FREESTANDING_SHIM) -Iinclude -Ivendor/llhttp -Isrc -M $$f 2>/dev/null \
+	      | tr ' \\' '\n\n' | sed '/^$$/d' > /tmp/keel_dns_fs.deps; \
+	    for h in $(FREESTANDING_FORBIDDEN); do \
+	      if grep -E "(^|/)$$h$$" /tmp/keel_dns_fs.deps | grep -v "$(FREESTANDING_SHIM)/" >/dev/null 2>&1; then \
+	        echo "  FREESTANDING LEAK: $$f pulls host <$$h>"; bad=1; \
+	      fi; \
+	    done; \
+	  done; \
+	  rm -f /tmp/keel_dns_fs.deps; \
+	  if [ $$bad -ne 0 ]; then echo "freestanding-dns: header gate FAILED"; exit 1; fi; \
+	  echo "  zero HOST forbidden headers pulled (only shim + keel + C-standard)"; \
+	fi
+	@echo "== freestanding-dns gate OK (compile + forbidden-header + undefined-host-symbol + composition) =="
+
+# Composition link probe: the intended EFI build consumes the client AND DNS layers
+# together (DNS pulls the datagram layer transitively). Link the shared entry
+# (freestanding_link_main.c, -DKEEL_FS_LINK_DNS so efi_main references kl_dns_resolver_create)
+# against the DNS-SC then client-SC archive (intended EFI order) into a CRT-less PE image,
+# for BOTH PE targets. Fails on any duplicate/unresolved symbol; on-demand extraction must
+# pick ONE copy of each shared base object (allocator/sockaddr/event_ctx/completion_*/
+# kl_cstr_builtin/udp/datagram_*). Needs clang + lld PE (skips with a note otherwise).
+FREESTANDING_DNS_SC_SRC = $(FREESTANDING_DNS_SRC) src/kl_cstr_builtin.c
+
+freestanding-dns-link:
+	@echo "== freestanding COMPOSITION link (6.4a-2): client + DNS archives, both PE targets =="
+	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then echo "  SKIP (needs clang PE cross target + lld)"; exit 0; fi
+	@lld_ok=0; \
+	if echo 'int mainCRTStartup(void){return 0;}' | $(FREESTANDING_LIB_CC) --target=x86_64-unknown-windows -ffreestanding -nostdlib -fuse-ld=lld -Wl,-entry:mainCRTStartup -Wl,-subsystem:efi_application -x c - -o /tmp/keel_lld_probe3.efi >/dev/null 2>&1; then lld_ok=1; fi; \
+	rm -f /tmp/keel_lld_probe3.efi; \
+	if [ $$lld_ok -ne 1 ]; then echo "  SKIP (lld PE backend unavailable in this toolchain)"; exit 0; fi; \
+	linked=""; \
+	for tgt in $(FREESTANDING_TARGETS); do \
+	  if ! echo 'int x;' | $(FREESTANDING_LIB_CC) --target=$$tgt -ffreestanding -c -x c -o /dev/null - >/dev/null 2>&1; then echo "  SKIP $$tgt (backend unavailable)"; continue; fi; \
+	  case "$$tgt" in x86_64*) RZ="-mno-red-zone"; efi=keel_freestanding_dns_compose.efi;; *) RZ=""; efi=keel_freestanding_dns_compose_$${tgt%%-*}.efi;; esac; \
+	  echo "== [$$tgt] build client-SC + DNS-SC archives + composition entry =="; \
+	  cobjs=""; for f in $(FREESTANDING_SC_SRC); do o=$${f%.c}.compose_nc_$$tgt.o; $(FREESTANDING_LIB_CC) --target=$$tgt $(FREESTANDING_LIB_CFLAGS) $$RZ -isystem $(FREESTANDING_SHIM) $(FREESTANDING_SC_EXTRA) -w -c -o $$o $$f || { rm -f $$cobjs; exit 1; }; cobjs="$$cobjs $$o"; done; \
+	  carc=libkeel_freestanding_compose_dnsclient_$$tgt.a; $(FREESTANDING_AR) rcs $$carc $$cobjs; \
+	  nobjs=""; for f in $(FREESTANDING_DNS_SC_SRC); do o=$${f%.c}.compose_n_$$tgt.o; $(FREESTANDING_LIB_CC) --target=$$tgt $(FREESTANDING_LIB_CFLAGS) $$RZ -isystem $(FREESTANDING_SHIM) $(FREESTANDING_SC_EXTRA) -w -c -o $$o $$f || { rm -f $$cobjs $$carc $$nobjs; exit 1; }; nobjs="$$nobjs $$o"; done; \
+	  narc=libkeel_freestanding_compose_dns_$$tgt.a; $(FREESTANDING_AR) rcs $$narc $$nobjs; \
+	  mo=tests/freestanding_link_main.compose_dns_$$tgt.o; \
+	  $(FREESTANDING_LIB_CC) --target=$$tgt $(FREESTANDING_LIB_CFLAGS) $$RZ -isystem $(FREESTANDING_SHIM) -DKEEL_FS_LINK_DNS -w -c -o $$mo $(FREESTANDING_LINK_MAIN) || { rm -f $$cobjs $$carc $$nobjs $$narc; exit 1; }; \
+	  echo "== [$$tgt] LINK entry + DNS-SC + client-SC (intended EFI order), -nostdlib -fuse-ld=lld =="; \
+	  if $(FREESTANDING_LIB_CC) --target=$$tgt -ffreestanding -fno-stack-protector -fno-builtin -nostdlib -fuse-ld=lld -Wl,-entry:efi_main -Wl,-subsystem:efi_application -o $$efi $$mo $$narc $$carc; then \
+	    echo "  COMPOSE LINK OK (no duplicate/unresolved symbol): $$efi"; \
+	    $(FREESTANDING_READOBJ) --file-headers $$efi 2>/dev/null | grep -iE 'Format|Machine|Subsystem' | sed 's/^/    /' || true; \
+	    linked="$$linked $$efi"; \
+	  else echo "  COMPOSE LINK FAILED for $$tgt"; rm -f $$cobjs $$carc $$nobjs $$narc $$mo $$efi; exit 1; fi; \
+	  rm -f $$cobjs $$carc $$nobjs $$narc $$mo; \
+	done; \
+	if [ -z "$$linked" ]; then echo "freestanding-dns-link: no arch linked"; exit 1; fi; \
+	echo "== freestanding-dns-link: OK — client + DNS archives compose:$$linked =="
 
 # ── Self-contained freestanding archive (optional; bare target, no libc/EDK2) ──
 # The default archive leaves mem*/strlen undefined for the platform to supply
@@ -1414,7 +1497,7 @@ freestanding-harness:
 	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_HARNESS_BIN)
 	@rm -f $(FREESTANDING_HARNESS_BIN)
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

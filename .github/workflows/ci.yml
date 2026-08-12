@@ -355,6 +355,9 @@ jobs:
       - name: Freestanding datagram gate (KlUdp + Tier-1 machine; compile + header + symbol)
         run: make freestanding-dgram
 
+      - name: Freestanding DNS gate (stock resolver, UDP-only; compile + header + symbol + composition)
+        run: make freestanding-dns
+
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
 

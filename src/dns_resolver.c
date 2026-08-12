@@ -1,19 +1,38 @@
+/*
+ * dns_resolver.c — async A+AAAA resolver over KlUdp (Do53), implementing KlResolver.
+ *
+ * FREESTANDING (KEEL_FREESTANDING): the UDP query engine — dual-family queries,
+ * 0x20 randomization, EDNS0, DNS cookies, the bounds-safe parser, and literal-IP /
+ * "localhost" shortcuts — is fully portable and builds without a hosted libc. Three
+ * hosted-only surfaces are compiled out, each around a cohesive helper (never a
+ * scattered statement):
+ *   - RFC 7766 TCP fallback (the whole dns_tcp_* block + its tcp[] state): a
+ *     truncated (TC) response fails the leg with a prompt, clear error instead of
+ *     retrying over TCP or silently waiting for the leg timeout.
+ *   - /etc/hosts lookup (dns_hosts_lookup): returns "not found" — no filesystem.
+ *   - resolv.conf discovery (dns_build_ns_list / default hosts path): the caller
+ *     MUST supply cfg->nameserver; there is no config discovery.
+ * The freestanding build therefore performs UDP-only Do53 against an explicitly
+ * configured nameserver. See docs/datagram_contract.md.
+ */
 #include <keel/dns_resolver.h>
 #include <keel/udp.h>
 #include <keel/timer.h>
 #include <keel/event_ctx.h>
 #include <keel/tls.h>
 
-#include <errno.h>
+#ifndef KEEL_FREESTANDING
+#include <errno.h>       /* hosted TCP fallback only (EINPROGRESS / EAGAIN / EWOULDBLOCK) */
+#endif
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "socket.h"      /* sockaddr / inet_pton / htons / ntohs via sockcompat.h */
-#include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (connect currency) */
+#include "socket.h"      /* kl_sock_* seam + AF_INET/AF_INET6/SOCK_* (via sockcompat / the fs shim) */
 #include "platform.h"
-#include "dns_sys.h"     /* platform config discovery (nameservers/hosts/search) */
+#include "kl_cstr.h"     /* locale-free bounded string primitives (freestanding-safe) */
+#include "dns_sys.h"     /* platform config discovery (nameservers/hosts/search) — hosted-only uses */
 
 #define DNS_NAME_MAX      256
 _Static_assert(DNS_NAME_MAX == KL_DNS_SYS_NAME_MAX,
@@ -129,14 +148,15 @@ struct KlDnsResolver {
     int            disable_edns;
     int            disable_cookies;           /* 1 = don't send/verify DNS cookies */
     char           hosts_path[DNS_NAME_MAX];
-    struct sockaddr_storage ns[DNS_MAX_NS];   /* nameserver addresses */
-    socklen_t      ns_len[DNS_MAX_NS];
+    KlSockAddr     ns[DNS_MAX_NS];            /* nameserver addresses (neutral currency) */
     int            nns;                        /* number of nameservers */
     char           search[DNS_MAX_SEARCH][DNS_NAME_MAX]; /* search domains */
     int            nsearch;
     int            ndots;                     /* threshold for search expansion */
     KlDnsReq      *inflight;
-    KlDnsTcp       tcp[DNS_MAX_NS]; /* per-nameserver persistent TCP fallback conns */
+#ifndef KEEL_FREESTANDING
+    KlDnsTcp       tcp[DNS_MAX_NS]; /* per-nameserver persistent TCP fallback conns (hosted only) */
+#endif
     KlDnsCookie    cookie[DNS_MAX_NS]; /* per-nameserver DNS cookie state (RFC 7873) */
     unsigned char  rnd_pool[DNS_RND_POOL_SIZE]; /* pooled OS entropy for IDs + 0x20 */
     size_t         rnd_off;       /* next unused byte in rnd_pool */
@@ -285,7 +305,7 @@ static int dns_build_query(KlDnsResolver *r, uint8_t *buf, size_t cap, uint16_t 
     size_t off = 12;
     const char *p = host;
     while (*p) {
-        const char *dot = strchr(p, '.');
+        const char *dot = kl_strchr(p, '.');
         size_t lab = dot ? (size_t)(dot - p) : strlen(p);
         if (lab == 0 || lab > 63)
             return -1;             /* empty or over-long label */
@@ -386,7 +406,12 @@ static void dns_cancel_timers(KlDnsResolver *r, KlDnsReq *q) {
         }
 }
 
-static void dns_tcp_touch_idle_all(KlDnsResolver *r);
+#ifndef KEEL_FREESTANDING
+static void dns_tcp_touch_idle_all(KlDnsResolver *r);   /* RFC 7766 TCP fallback (defined below) */
+#else
+/* UDP-only freestanding build: no persistent TCP fallback, so idle-touch is a no-op. */
+static void dns_tcp_touch_idle_all(KlDnsResolver *r) { (void)r; }
+#endif
 
 static void dns_complete(KlDnsResolver *r, KlDnsReq *q,
                          const KlResolveResult *result, int error) {
@@ -450,11 +475,9 @@ static int dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLeg *leg) 
     memcpy(leg->question, buf + q_off, q_len);
     leg->question_len = q_len;
 
-    KlSockAddr ns_ksa;
-    kl_sockaddr_from_native(&ns_ksa, (const struct sockaddr *)&r->ns[leg->ns_idx],
-                            r->ns_len[leg->ns_idx]);
+    const KlSockAddr *ns_ksa = &r->ns[leg->ns_idx];
     leg->ns_idx = (leg->ns_idx + 1) % r->nns;
-    if (kl_udp_send_to(&r->sock, buf, qlen, &ns_ksa) != 0)
+    if (kl_udp_send_to(&r->sock, buf, qlen, ns_ksa) != 0)
         return -1;
 
     if (leg->timer_id >= 0)
@@ -692,17 +715,16 @@ static int dns_extract_opt(const uint8_t *pkt, size_t len, uint8_t *ext_rcode,
  * unconnected for multi-NS, so this replaces the kernel peer filter.) */
 static int dns_ns_index(const KlDnsResolver *r, const KlSockAddr *src) {
     for (int i = 0; i < r->nns; i++) {
-        KlSockAddr ns;
-        if (kl_sockaddr_from_native(&ns, (const struct sockaddr *)&r->ns[i],
-                                    r->ns_len[i]) != 0)
-            continue;
-        if (kl_sockaddr_equal(src, &ns))   /* family + address + port */
+        if (kl_sockaddr_equal(src, &r->ns[i]))   /* family + address + port */
             return i;
     }
     return -1;
 }
 
 /* ── DNS-over-TCP fallback (RFC 7766): persistent, pipelined per-NS ─────── */
+/* Hosted-only: the freestanding (UDP-only) build compiles this whole block out —
+ * truncated responses fail the leg clearly rather than recovering over TCP. */
+#ifndef KEEL_FREESTANDING
 
 static void dns_tcp_on_event(KlSocketHandle fd, KlEventMask mask, void *ud);
 
@@ -804,9 +826,9 @@ static void dns_tcp_fail(KlDnsResolver *r, KlDnsTcp *t) {
 }
 
 static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
-    const struct sockaddr *nsa = (const struct sockaddr *)&r->ns[ns_idx];
-    socklen_t nsl = r->ns_len[ns_idx];
-    KlSocketHandle fd = kl_sock_socket(r->ctx->sockets, nsa->sa_family, SOCK_STREAM, 0);
+    const KlSockAddr *ns_ksa = &r->ns[ns_idx];
+    int fam = (kl_sockaddr_family(ns_ksa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
+    KlSocketHandle fd = kl_sock_socket(r->ctx->sockets, fam, SOCK_STREAM, 0);
     if (!kl_handle_valid(fd))
         return -1;
     if (kl_sock_set_nonblocking(r->ctx->sockets, fd) < 0) {
@@ -814,9 +836,7 @@ static int dns_tcp_connect(KlDnsResolver *r, KlDnsTcp *t, int ns_idx) {
     }
     kl_sock_set_cloexec(r->ctx->sockets, fd);
 
-    KlSockAddr ns_sa;
-    kl_sockaddr_from_native(&ns_sa, nsa, nsl);
-    int rc = kl_sock_connect(r->ctx->sockets, fd, &ns_sa);
+    int rc = kl_sock_connect(r->ctx->sockets, fd, ns_ksa);
     if (rc < 0 && errno != EINPROGRESS) {
         kl_sock_close(r->ctx->sockets, fd); return -1;
     }
@@ -977,6 +997,8 @@ static void dns_tcp_send_leg(KlDnsResolver *r, KlDnsLeg *leg, int ns_idx) {
         dns_tcp_update_interest(r, t);
 }
 
+#endif /* !KEEL_FREESTANDING — DNS-over-TCP fallback */
+
 static void dns_on_recv(KlUdp *u, const void *data, size_t len,
                         const KlSockAddr *src, const KlSockAddr *local, void *ud) {
     (void)u; (void)local;
@@ -996,8 +1018,17 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
     /* Truncation (TC bit): recover the answer over TCP (RFC 7766) — but only when
      * the response genuinely echoes our question, so a spoofed TC can't force TCP. */
     if ((pkt[2] & 0x02) && !leg->tcp_pending) {
-        if (dns_question_matches(pkt, len, leg->question, leg->question_len))
-            dns_tcp_send_leg(r, leg, ns_idx);
+        if (dns_question_matches(pkt, len, leg->question, leg->question_len)) {
+#ifndef KEEL_FREESTANDING
+            dns_tcp_send_leg(r, leg, ns_idx);    /* recover over TCP (RFC 7766) */
+#else
+            /* No TCP fallback in the UDP-only freestanding build: settle the leg
+             * empty so the resolution fails promptly and clearly, rather than
+             * silently waiting for the per-leg timeout. */
+            leg->naddrs = 0;
+            dns_leg_settle(r, q, leg);
+#endif
+        }
         return;
     }
 
@@ -1064,16 +1095,9 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
 
 static int dns_is_literal(const char *host, int port, KlResolveResult *out) {
     memset(out, 0, sizeof(*out));
-    struct in_addr a4;
-    struct in6_addr a6;
-    if (inet_pton(AF_INET, host, &a4) == 1) {
-        kl_sockaddr_from_ipv4(&out->addrs[0], (const uint8_t *)&a4, (uint16_t)port);
-        out->naddrs = 1;
-        out->ai_socktype = SOCK_STREAM;
-        return 1;
-    }
-    if (inet_pton(AF_INET6, host, &a6) == 1) {
-        kl_sockaddr_from_ipv6(&out->addrs[0], (const uint8_t *)&a6, (uint16_t)port, 0);
+    /* Numeric IPv4/IPv6 literal → neutral KlSockAddr (kl_sockaddr_parse does NO name resolution, so
+     * both families collapse into one freestanding-clean call). */
+    if (kl_sockaddr_parse(&out->addrs[0], host, (uint16_t)port) == 0) {
         out->naddrs = 1;
         out->ai_socktype = SOCK_STREAM;
         return 1;
@@ -1103,6 +1127,11 @@ static int dns_is_localhost(const char *host, int port, int prefer_ipv6,
  * Fills a v4 and/or v6 address from matching lines and returns 1 if found. */
 static int dns_hosts_lookup(const char *path, const char *host, int port,
                             int prefer_ipv6, KlResolveResult *out) {
+#ifdef KEEL_FREESTANDING
+    /* No hosts-file lookup in the freestanding (no-filesystem) build. */
+    (void)path; (void)host; (void)port; (void)prefer_ipv6; (void)out;
+    return 0;
+#else
     FILE *f = fopen(path, "r");
     if (!f)
         return 0;
@@ -1147,6 +1176,7 @@ static int dns_hosts_lookup(const char *path, const char *host, int port,
     out->naddrs = 1;
     out->ai_socktype = SOCK_STREAM;
     return 1;
+#endif /* !KEEL_FREESTANDING */
 }
 
 /* ── Candidate names (search domains + ndots) ────────────────────────── */
@@ -1239,7 +1269,10 @@ static KlResolveReq *dns_resolve(KlResolver *self, KlEventCtx *ctx,
     q->rdelay_timer = -1;
     q->legs[0].timer_id = -1;
     q->legs[1].timer_id = -1;
-    snprintf(q->host, sizeof(q->host), "%s", host);
+    if (dns_copy(q->host, sizeof(q->host), host) != 0) {   /* reject an over-long name (can't be a DNS name) */
+        kl_free(r->alloc, q, sizeof(*q));
+        return NULL;
+    }
 
     /* Link before scheduling so a synchronous timer/send callback can find it. */
     q->next = r->inflight;
@@ -1298,9 +1331,11 @@ static void dns_destroy(KlResolver *self) {
     KlDnsResolver *r = (KlDnsResolver *)self;
     if (!r)
         return;
+#ifndef KEEL_FREESTANDING
     for (int i = 0; i < r->nns; i++)
         if (kl_handle_valid(r->tcp[i].fd))
             dns_tcp_close(r, &r->tcp[i]);          /* close persistent TCP conns */
+#endif
     KlDnsReq *q = r->inflight;
     while (q) {
         KlDnsReq *next = q->next;
@@ -1317,45 +1352,25 @@ static void dns_destroy(KlResolver *self) {
 
 /* Parse "IP" or "IP#port" into a sockaddr (the #port form is a testing/advanced
  * extension; standard resolv.conf entries have no port and default to 53). */
-static int dns_parse_ns(const char *s, uint16_t defport,
-                        struct sockaddr_storage *out, socklen_t *out_len, int *family) {
+static int dns_parse_ns(const char *s, uint16_t defport, KlSockAddr *out) {
     char buf[80];
     size_t sl = strlen(s);
     if (sl >= sizeof(buf))
         return -1;                /* nameserver token too long */
     memcpy(buf, s, sl + 1);
     uint16_t port = defport;
-    char *hash = strchr(buf, '#');
+    char *hash = (char *)kl_strchr(buf, '#');   /* resolv.conf "ip#port" extension */
     if (hash) {
         *hash = '\0';
-        char *end;
-        long p = strtol(hash + 1, &end, 10);
-        if (end != hash + 1 && *end == '\0' && p > 0 && p <= 65535)
-            port = (uint16_t)p;
+        const char *ps = hash + 1;
+        uint16_t p;
+        /* Full-token decimal, 1..65535 (kl_parse_u16_decimal rejects empty / non-digit / >65535). */
+        if (kl_parse_u16_decimal(ps, strlen(ps), &p) == 0 && p > 0)
+            port = p;
     }
-
-    memset(out, 0, sizeof(*out));
-    struct in_addr a4;
-    struct in6_addr a6;
-    if (inet_pton(AF_INET, buf, &a4) == 1) {
-        struct sockaddr_in *s4 = (struct sockaddr_in *)out;
-        s4->sin_family = AF_INET;
-        s4->sin_addr = a4;
-        s4->sin_port = htons(port);
-        *out_len = sizeof(*s4);
-        *family = AF_INET;
-        return 0;
-    }
-    if (inet_pton(AF_INET6, buf, &a6) == 1) {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)out;
-        s6->sin6_family = AF_INET6;
-        s6->sin6_addr = a6;
-        s6->sin6_port = htons(port);
-        *out_len = sizeof(*s6);
-        *family = AF_INET6;
-        return 0;
-    }
-    return -1;
+    /* Numeric IPv4/IPv6 literal → neutral KlSockAddr (a nameserver is always a literal, never a
+     * hostname — kl_sockaddr_parse does NO name resolution, so this stays freestanding-clean). */
+    return kl_sockaddr_parse(out, buf, port);
 }
 
 /* Fill the resolver's nameserver list; returns the (single) socket family. */
@@ -1367,9 +1382,15 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
     r->ndots = 1;
     if (cfg && cfg->nameserver) {
         /* Explicit nameserver overrides system discovery (no search domains). */
-        snprintf(nsbuf[0], sizeof(nsbuf[0]), "%s", cfg->nameserver);
+        if (dns_copy(nsbuf[0], sizeof(nsbuf[0]), cfg->nameserver) != 0)
+            return -1;                          /* nameserver token too long */
         count = 1;
     } else {
+#ifdef KEEL_FREESTANDING
+        /* Freestanding (UDP-only) DNS has no resolv.conf discovery — the caller MUST supply a
+         * nameserver via cfg->nameserver (see the file-header note). */
+        return -1;
+#else
         const char *rc = (cfg && cfg->resolv_conf_path) ? cfg->resolv_conf_path : NULL;
         count = kl_dns_sys_nameservers(r->alloc, rc, nsbuf, DNS_MAX_NS);
         kl_dns_sys_resolv_options(r->alloc, rc, r->search, DNS_MAX_SEARCH,
@@ -1378,28 +1399,30 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
             snprintf(nsbuf[0], sizeof(nsbuf[0]), "127.0.0.1");
             count = 1;
         }
+#endif
     }
 
     /* Parse; keep only nameservers of the first one's family (one socket). */
-    int fam = -1, nns = 0;
+    int nns = 0;
+    KlAddrFamily fam = KL_AF_UNSPEC;
     for (int i = 0; i < count && nns < DNS_MAX_NS; i++) {
-        struct sockaddr_storage ss;
-        socklen_t sl = 0;
-        int f;
-        if (dns_parse_ns(nsbuf[i], defport, &ss, &sl, &f) != 0)
+        KlSockAddr ns;
+        if (dns_parse_ns(nsbuf[i], defport, &ns) != 0)
             continue;
-        if (fam == -1)
+        KlAddrFamily f = kl_sockaddr_family(&ns);
+        if (fam == KL_AF_UNSPEC)
             fam = f;
         else if (f != fam)
             continue;
-        r->ns[nns] = ss;
-        r->ns_len[nns] = sl;
+        r->ns[nns] = ns;
         nns++;
     }
     if (nns == 0)
         return -1;
     r->nns = nns;
-    *family = fam;
+    /* KlUdpConfig.family is a host domain (AF_INET/AF_INET6); map from the neutral family, exactly as
+     * the freestanding client (client_async.c) does when opening a socket. */
+    *family = (fam == KL_AF_INET6) ? AF_INET6 : AF_INET;
     return 0;
 }
 
@@ -1427,14 +1450,20 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
     r->disable_0x20 = cfg ? cfg->disable_0x20 : 0;
     r->disable_edns = cfg ? cfg->disable_edns : 0;
     r->disable_cookies = cfg ? cfg->disable_cookies : 0;
+#ifndef KEEL_FREESTANDING
     snprintf(r->hosts_path, sizeof(r->hosts_path), "%s",
              (cfg && cfg->hosts_path) ? cfg->hosts_path
                                       : kl_dns_sys_default_hosts_path());
+#else
+    r->hosts_path[0] = '\0';            /* no hosts file in the freestanding build */
+#endif
     r->rnd_off = sizeof(r->rnd_pool);   /* pool empty → refills on first draw */
+#ifndef KEEL_FREESTANDING
     for (int i = 0; i < DNS_MAX_NS; i++) {
         r->tcp[i].fd = KL_INVALID_SOCKET;
         r->tcp[i].idle_timer = -1;
     }
+#endif
 
     int family = AF_INET;
     if (dns_build_ns_list(r, cfg, &family) != 0) {
