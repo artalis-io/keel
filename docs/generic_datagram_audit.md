@@ -354,6 +354,17 @@ implementation or documented limitation for each backend (the matrix in
 > completion backends. The server's **send queue (byte-budget) and close (`kl_udp_free` legacy
 > teardown) remain the existing `KlUdp` compatibility behavior** — the fixed-slot atomic send +
 > confirmed-detachment close machines land on the public `KlDatagram` path (Step 7), not here.
+>
+> 6.3 is the same **verification checkpoint** for the built-in DNS resolver: it too rides the receive
+> machine transitively through `kl_udp_recv_start(dns_on_recv)`, so no DNS-specific receive seam exists
+> or is added. `tests/test_dns_resolver.c` adds coverage for the couplings `dns_on_recv` leans on
+> through the machine — a wrong-**source** response (valid content from a non-nameserver socket) dropped
+> on the src address+port check while the legitimate reply still completes the query; and concurrent
+> distinct-name resolutions demultiplexed by transaction id across the serial receive re-arms (each
+> callback receives only its own name's distinguishable answer) — on both readiness and completion
+> backends. As with `KlUdpServer`, DNS's UDP **send (`kl_udp_send_to`) and teardown (`kl_udp_free`)
+> keep the existing `KlUdp` compatibility semantics until Step 7**, and its TCP fallback (RFC 7766) is
+> an **independent byte-stream path**, not the datagram machine.
 
 **Not in the baseline:** QUIC (consumes `KlDatagram`, does not shape it); `recvmmsg` batching
 and GSO/GRO delivery (Tier-2 — a batch of already-received datagrams cannot honor the
