@@ -266,6 +266,14 @@ jobs:
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-async
 
+      # Datagram-over-IOCP: smoke_udp drives a real UDP roundtrip + teardown over the default
+      # (IOCP) loop, so this is the runtime gate for event_iocp.c's datagram completion path —
+      # WSARecvMsg/WSASendTo posts and, per phase-B.6.3, the stable-token retain/transfer/release
+      # (in-flight teardown frees the receive storage without touching the freed KlDatagram).
+      - name: End-to-end UDP-over-IOCP datagram roundtrip smoke test
+        timeout-minutes: 3
+        run: make OS=windows BACKEND=iocp CC=gcc smoke-udp
+
   sanitizers:
     name: ASan + UBSan
     runs-on: ubuntu-latest

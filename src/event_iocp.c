@@ -19,6 +19,7 @@
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "sockaddr_native.h"     /* KlSockAddr -> Winsock sockaddr for the overlapped UDP send */
 #include "completion.h"          /* the abstract axis this TU implements */
+#include "datagram_life.h"       /* stable-liveness token for datagram completion ops (neutral) */
 
 #include "sockcompat.h"          /* winsock2.h */
 #include <windows.h>             /* IOCP */
@@ -95,7 +96,14 @@ typedef struct KlIocpOp {
     KlIocpOpType  type;
     KlAllocator  *alloc;
     KlStream     *stream;                      /* READ / WRITE / SENDFILE target (raw transport) */
-    KlDatagram   *dg;                          /* UDP_RECV */
+    /* Datagram ops (DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at post
+     * so the op NEVER dereferences KlDatagram afterwards (the owner may be freed while this op is in
+     * flight). The recv buffer + capacity + pktinfo flag are COPIED at post (buf/buflen/dg_pktinfo) so
+     * the completion touches only the op; op_sock already carries the socket (CancelIoEx / GetOverlappedResult). */
+    KlDgramLife  *life;
+    void         *buf;                         /* UDP_RECV: receive buffer (pinned by `life`) */
+    size_t        buflen;                      /* UDP_RECV: capacity at post time */
+    int           dg_pktinfo;                  /* UDP_RECV: capture pktinfo local addr */
     SOCKET        accept_sock;                 /* ACCEPT */
     char          accept_buf[2 * KL_IOCP_ADDR_LEN];  /* ACCEPT: local+remote addr */
     struct sockaddr_storage src;               /* UDP_RECV: source addr (WSARecvMsg name) */
@@ -297,6 +305,12 @@ static void iocp_op_free(KlIocpOp *op) {
         if (op->g_next) op->g_next->g_link = op->g_link;
         op->g_link = NULL;
     }
+    /* A datagram op that still owns its token reference (dropped WITHOUT emitting an event — post-
+     * failure unwind, or loop teardown where iocp_quiesce_port_for_close / the drain's quiescing
+     * branch cancel + free the op) releases it here. Its final release frees the receive storage. The
+     * drain transfers the ref to the event and NULLs op->life first, so an emitted op does not
+     * double-release. Non-datagram ops carry op->life == NULL. */
+    if (op->life) kl_dgram_life_release(op->life);
     /* send_total is the sendbuf allocation size for WRITE/SENDFILE (the send total, or 1 when
      * total==0 — the alloc is `total ? total : 1`). Fall back to 1 for a zero-length send so a
      * sized custom allocator frees the right bucket. Receives no longer own a buffer. */
@@ -495,15 +509,19 @@ static int iocp_comp_post_dgram_recv(KlDatagram *dg) {
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_DGRAM_RECV;
     op->alloc = st->alloc;
-    op->dg = dg;
     op->src_len = (int)sizeof(op->src);
+    /* Copy the receive buffer + capture flags now; the op must not dereference KlDatagram later. The
+     * buffer stays valid because the token ref (retained below) pins it past the op's lifetime. */
+    op->buf        = dg->recv_buf;
+    op->buflen     = dg->recv_buf_size;
+    op->dg_pktinfo = dg->pktinfo;
     iocp_op_register(st, op, (SOCKET)dg->fd);
 
     LPFN_WSARECVMSG recvmsg = kl_udp_win_get_recvmsg((SOCKET)dg->fd);
     if (recvmsg) {
         op->via_recvmsg = 1;
-        op->ubuf.len = (ULONG)dg->recv_buf_size;
-        op->ubuf.buf = (char *)dg->recv_buf;
+        op->ubuf.len = (ULONG)op->buflen;
+        op->ubuf.buf = (char *)op->buf;
         op->umsg.name = (SOCKADDR *)&op->src;
         op->umsg.namelen = (INT)sizeof(op->src);
         op->umsg.lpBuffers = &op->ubuf;
@@ -514,21 +532,25 @@ static int iocp_comp_post_dgram_recv(KlDatagram *dg) {
         DWORD recvd = 0;
         int rc = recvmsg((SOCKET)dg->fd, &op->umsg, &recvd, &op->ov, NULL);
         if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-            iocp_op_free(op);
+            iocp_op_free(op);                  /* life unset → no release */
             return -1;
         }
+        op->life = (KlDgramLife *)dg->rx_life;  /* retain AFTER the failure unwind above */
+        kl_dgram_life_retain(op->life);
         return 0;
     }
 
     /* Fallback: no WSARecvMsg extension — source address only. */
-    WSABUF buf = { (ULONG)dg->recv_buf_size, (char *)dg->recv_buf };
+    WSABUF buf = { (ULONG)op->buflen, (char *)op->buf };
     DWORD flags = 0, recvd = 0;
     int rc = WSARecvFrom((SOCKET)dg->fd, &buf, 1, &recvd, &flags,
                          (struct sockaddr *)&op->src, &op->src_len, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        iocp_op_free(op);
+        iocp_op_free(op);                      /* life unset → no release */
         return -1;
     }
+    op->life = (KlDgramLife *)dg->rx_life;      /* retain AFTER the failure unwind above */
+    kl_dgram_life_retain(op->life);
     return 0;
 }
 
@@ -542,12 +564,11 @@ static int iocp_comp_post_dgram_send(KlDatagram *dg, const void *data, size_t le
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_DGRAM_SEND;
     op->alloc = st->alloc;
-    op->dg = dg;
     op->send_total = len;
     iocp_op_register(st, op, (SOCKET)dg->fd);
 
     op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
-    if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }
+    if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }  /* life unset → no release */
     memcpy(op->sendbuf, data, len);
     /* Marshal the neutral dest to a Winsock sockaddr for the overlapped WSASendTo. */
     if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC)
@@ -558,9 +579,11 @@ static int iocp_comp_post_dgram_send(KlDatagram *dg, const void *data, size_t le
     int rc = WSASendTo((SOCKET)dg->fd, &buf, 1, &sent, 0,
                        (struct sockaddr *)&op->src, op->src_len, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        iocp_op_free(op);
+        iocp_op_free(op);                      /* life unset → no release */
         return -1;
     }
+    op->life = (KlDgramLife *)dg->rx_life;      /* retain AFTER the failure unwind above */
+    kl_dgram_life_retain(op->life);
     return 0;
 }
 
@@ -718,7 +741,7 @@ static void iocp_dgram_parse_source(KlIocpOp *op, KlCompletionEvent *ev) {
 }
 /* Local (destination) address from the pktinfo control message — WSARecvMsg path only. */
 static void iocp_dgram_parse_local(KlIocpOp *op, KlCompletionEvent *ev) {
-    if (op->via_recvmsg && op->dg->pktinfo) {
+    if (op->via_recvmsg && op->dg_pktinfo) {
         struct sockaddr_storage local_ss;
         socklen_t local_len = kl_udp_win_parse_local(&op->umsg, &local_ss);
         if (local_len)
@@ -826,10 +849,13 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * socket that is about to be closed. */
             if (st->quiescing) { iocp_op_free(op); continue; }
 
+            /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op.
+             * Transfer the token ref op → event (released after dispatch); NULL op->life so
+             * iocp_op_free does not double-release. Never dereference KlDatagram. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_DGRAM_RECV;
-            out[count].target = op->dg;
-            out[count].buf = op->dg->recv_buf;
+            out[count].life = op->life; op->life = NULL;
+            out[count].buf = op->buf;
 
             /* Classify the completed overlapped recv EXPLICITLY via the actual operation result (do
              * NOT assume success by byte count): a zero-length datagram is a real receive; a truncated
@@ -837,11 +863,11 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
              * itself is platform-agnostic + unit-tested (dgram_recv_classify.h); here we supply the
              * Winsock result and then parse the metadata it says is valid. */
             DWORD xfer = 0, wflags = 0;
-            BOOL wok = WSAGetOverlappedResult((SOCKET)op->dg->fd, &op->ov, &xfer, FALSE, &wflags);
+            BOOL wok = WSAGetOverlappedResult(op->op_sock, &op->ov, &xfer, FALSE, &wflags);
             unsigned mflags = op->via_recvmsg ? op->umsg.dwFlags : wflags;
             KlDgramRecvClass cl = kl_dgram_recv_classify(wok, wok ? 0 : WSAGetLastError(), WSAEMSGSIZE,
                                                          (size_t)xfer, mflags, MSG_TRUNC,
-                                                         op->dg->recv_buf_size);
+                                                         op->buflen);
             out[count].ok = cl.ok;
             if (cl.ok) {
                 out[count].bytes = (DWORD)cl.bytes;
@@ -853,10 +879,12 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
             iocp_op_free(op);
         } else if (op->type == KL_IOCP_DGRAM_SEND) {
             /* Whole datagram send done — surface the original len so the driver
-             * releases exactly the reserved outstanding bytes (success or not). */
+             * releases exactly the reserved outstanding bytes (success or not). Transfer the token
+             * ref op → event (released after dispatch); NULL op->life so iocp_op_free does not
+             * double-release. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_DGRAM_SEND;
-            out[count].target = op->dg;
+            out[count].life = op->life; op->life = NULL;
             out[count].bytes = op->send_total;
             out[count].ok = (bytes > 0);
             count++;
