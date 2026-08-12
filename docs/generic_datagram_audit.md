@@ -343,6 +343,17 @@ implementation or documented limitation for each backend (the matrix in
 (behavior-preserving), and **public stabilization** — the boxed STABLE banner +
 `<keel/datagram_detail.h>` opt-in ABI split, matching `stream.h`/`listener.h`/`connect_op.h`.
 
+> **Step-6 live-wiring status.** 6.1 routed `kl_udp_recv_start` through the shared serial-receive
+> machine (`KlDgramRecv` over the dedicated inbound slot). 6.2 is a **verification checkpoint** for
+> `KlUdpServer`: because the server is a thin wrapper over the public `KlUdp` API, its receive already
+> rides that machine transitively — no server-side wiring exists or is added. `tests/test_udp_server.c`
+> now covers the server's Tier-1 couplings through the machine (serial multi-datagram
+> one-packet-one-callback dispatch; source addr on every recv; source-pinned reply-to-sender from the
+> handler; Linux-gated `SO_REUSEPORT` fan-out with the total conserved) on both readiness and
+> completion backends. The server's **send queue (byte-budget) and close (`kl_udp_free` legacy
+> teardown) remain the existing `KlUdp` compatibility behavior** — the fixed-slot atomic send +
+> confirmed-detachment close machines land on the public `KlDatagram` path (Step 7), not here.
+
 **Not in the baseline:** QUIC (consumes `KlDatagram`, does not shape it); `recvmmsg` batching
 and GSO/GRO delivery (Tier-2 — a batch of already-received datagrams cannot honor the
 one-held-packet pause rule); a variable-size byte-budget queue (optional future capability);
