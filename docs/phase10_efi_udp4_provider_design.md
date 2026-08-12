@@ -283,17 +283,18 @@ Corollary: an **unsignalled** token has **no valid `Packet` union** — do NOT i
 - **QUARANTINED** — cancel-drain could NOT confirm within budget → the token **never signalled**, so the
   firmware may still own the token / event / op record / Tx descriptor+payload **forever** (its `Packet`
   union is NOT valid — do not inspect it). The op (and its inline buffers) is **leaked**, its `life` ref
-  is **never released** (retirement unconfirmed → per B.6 keep the ref; the token never hits its final
-  release → the inbound slot + receive machine are pinned, never freed — safe), the EFI child/events are
-  **never** CloseEvent'd / DestroyChild'd, and the provider **fail-closes** further datagram I/O on that
-  socket. Leaked until EBS.
+  is **never released** — for **both Rx and Tx** ops, because B.6 releases only on *genuine* retirement
+  and this op's retirement is unconfirmed. For an **Rx** op that pinned ref also keeps `on_final` from
+  freeing the inbound slot + receive machine (a token that might still complete must not have its machine
+  freed). The EFI child/events are **never** CloseEvent'd / DestroyChild'd, and the provider
+  **fail-closes** further datagram I/O on that socket. Leaked until EBS.
 
 ### 7.3 Transitions
 
 | From | Trigger | Action | To |
 |---|---|---|---|
 | POSTED | `CheckEvent`=SUCCESS (drain), EFI child still valid | copy-out+recycle RxData; **always** emit event (`ev->life=op->life; op->life=NULL`); generic dispatch drops delivery if owner dead + re-arms | COMPLETED |
-| POSTED | `CheckEvent`=SUCCESS but `kl_uefi_udp_valid_h` fails (stale child) | no event; release `op->life`; free op | RETIRED (no-event) |
+| POSTED | `CheckEvent`=SUCCESS but `kl_uefi_udp_valid_h` fails (stale child) | **signalled → `Packet` is valid**: for **Rx**, if `Packet.RxData` non-NULL `SignalEvent(RxData.RecycleSignal)` (do **not** copy into the stale owner buffer); (Tx has nothing to recycle); release `op->life`; free op — **no event** | RETIRED (no-event) |
 | POSTED | socket close / owner `kl_udp_free` while token outstanding | `Cancel(token)` | CANCEL-DRAINING |
 | CANCEL-DRAINING | `CheckEvent`=SUCCESS within budget | recycle RxData if present; `kl_dgram_life_release(op->life)`; free op slot | RETIRED |
 | CANCEL-DRAINING | budget exhausted, no signal | mark op+slot `quarantined`; **do NOT** release `life`, CloseEvent, or DestroyChild; fail-close the socket | QUARANTINED |
@@ -316,6 +317,14 @@ Corollary: an **unsignalled** token has **no valid `Packet` union** — do NOT i
   `SignalEvent(RxData.RecycleSignal)` to return the firmware buffer (even on the aborted-but-signalled
   path, exactly as `dns_uefi.c` does). On the **quarantine** path the token **never signalled**, so there
   is no published `RxData` to recycle — do **not** touch `Packet` at all; it leaks with the op until EBS.
+- **Stale-child but SIGNALLED (review correction):** "signalled" and "captured generation still valid"
+  are **independent**. A drain may observe `CheckEvent`=SUCCESS (the token IS signalled, `Packet` valid)
+  yet find `kl_uefi_udp_valid_h(op->fd, op->generation)` false because the EFI child was closed/reused
+  since post. This is a **no-event** drop (the owner it targeted is gone), but the firmware buffer is
+  real: for an **Rx** op, `SignalEvent(RxData.RecycleSignal)` when `Packet.RxData` is non-NULL (do NOT
+  copy into the now-stale owner buffer), then release `op->life` and retire the op **without emitting**.
+  Skipping the recycle here would leak the firmware buffer. (Tx has no firmware buffer to recycle.) This
+  differs from quarantine, where the token is **un**signalled and `Packet` must not be touched.
 - **Fail-close scope:** a quarantine fail-closes **that datagram socket** (`dead=1`), and — matching
   `dns_uefi.c`'s `g_dns_quarantined` — a provider-level "a firmware that can't cancel is unusable" latch
   may fail-close further datagram sockets. (Whether the latch is per-socket or provider-wide is an
@@ -324,11 +333,15 @@ Corollary: an **unsignalled** token has **no valid `Packet` union** — do NOT i
   fail-closed; `kl_uefi_udp_provider_live_count()` (new, mirrors the TCP live-count) must be 0 before
   `kl_uefi_shutdown()`.
 
-**FROZEN #6:** the cancel/quarantine state machine above, with the **token-ref rule**: a quarantined
-receive op **never releases its stable-token ref** because **retirement is unconfirmed** (B.6) — which
-keeps `on_final` from freeing the receive machine while a possibly-still-live op is outstanding; quarantine
-separately pins the firmware-reachable EFI storage. An unsignalled token's `Packet` is never inspected;
-confirmed cancel-drain releases normally; EBS is fail-closed everywhere.
+**FROZEN #6:** the cancel/quarantine state machine above, with the **token-ref rule**: a **quarantined op
+of EITHER kind never releases its stable-token ref** because **retirement is unconfirmed** (B.6 releases
+only on genuine retirement) — for an Rx op that also keeps `on_final` from freeing the receive machine
+while a possibly-still-live op is outstanding; quarantine separately pins the firmware-reachable EFI
+storage. An **unsignalled** token's `Packet` is never inspected. A **signalled** token's `Packet` IS valid
+even if the captured child generation is now stale — the **stale-child no-event drop** must still
+`SignalEvent(RxData.RecycleSignal)` for a non-NULL Rx buffer (no copy into the stale owner), then release
+`life` and retire without an event. Confirmed cancel-drain releases normally; EBS is fail-closed
+everywhere.
 
 ---
 
@@ -398,13 +411,15 @@ Two layers, matching the KlStream/UEFI coverage bar (host-mock ≠ real firmware
    (quarantined) token's `Packet` is never inspected (leaks until EBS).
 5. **B.6 stable-token** obligations identical to the other four backends (retain-at-post,
    transfer-to-event, release-on-drop).
-6. **Cancel/quarantine state machine** (§7) with the token-ref rule: a **quarantined receive op never
-   releases its stable-token ref** — because **retirement is unconfirmed** (B.6: release only on genuine
-   retirement), which keeps `on_final` from freeing the inbound slot/machine while a possibly-still-live
-   op is outstanding. Quarantine pins the **firmware-reachable EFI storage** (token/event/op/Tx payload);
-   the inbound slot is NOT firmware-written before completion. An **unsignalled** token's `Packet` union
-   is never inspected/recycled. On a **signalled** completion the backend always emits+transfers `life`
-   (owner-dead drop is generic dispatch's job, not the backend's). Confirmed cancel-drain releases
-   normally; **EBS fail-closed** everywhere; live-count 0 before shutdown.
+6. **Cancel/quarantine state machine** (§7) with the token-ref rule: a **quarantined op of EITHER kind
+   never releases its stable-token ref** — because **retirement is unconfirmed** (B.6: release only on
+   genuine retirement); for an Rx op that also keeps `on_final` from freeing the inbound slot/machine
+   while a possibly-still-live op is outstanding. Quarantine pins the **firmware-reachable EFI storage**
+   (token/event/op/Tx payload); the inbound slot is NOT firmware-written before completion. An
+   **unsignalled** token's `Packet` is never inspected/recycled; a **signalled** token's `Packet` is valid
+   even if the captured child generation is stale, so the **stale-child no-event drop still recycles**
+   `RxData.RecycleSignal` (Rx, non-NULL) before releasing `life`. On a **signalled + valid-child**
+   completion the backend always emits+transfers `life` (owner-dead drop is generic dispatch's job).
+   Confirmed cancel-drain releases normally; **EBS fail-closed** everywhere; live-count 0 before shutdown.
 7. **Acceptance** = host mock-EFI unit test (state machine incl. quarantine) **and** QEMU/OVMF e2e (6.4c);
    the `dns_uefi.c` retirement is a separate later step; `KlDgramClose`/Step-7 is not claimed here.
