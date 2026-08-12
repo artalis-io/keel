@@ -24,8 +24,8 @@ CFLAGS=(
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/src" -I. -I"$KEEL_ROOT/spikes/uefi"
   -Wall -Wextra
 )
-SRCS=( mock_efi_test.c socket_efi_tcp4.c dns_uefi.c event_efi.c allocator_uefi.c entropy_uefi.c
-       civil_time.c wallclock_uefi.c clock_snapshot.c )
+SRCS=( mock_efi_test.c socket_efi_tcp4.c socket_efi_udp4.c dns_uefi.c event_efi.c allocator_uefi.c
+       entropy_uefi.c civil_time.c wallclock_uefi.c clock_snapshot.c )
 
 echo "building mock_efi_test (host, ASan+UBSan) ..."
 "$CC" "${CFLAGS[@]}" "${SRCS[@]}" "$KEEL_ROOT/libkeel.a" -o mock_efi_test
