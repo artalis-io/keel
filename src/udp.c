@@ -32,13 +32,6 @@
 
 static void udp_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data);
 
-/* Recover the owning KlUdp from its embedded KlDatagram (the completion target). ONLY the UDP
- * adapter recovers KlUdp — the completion backends hold a KlDatagram* and never dereference KlUdp.
- * Mirrors kl_conn_of_stream (a completion backend never derefs a KlConn). */
-static inline KlUdp *kl_udp_of_dg(KlDatagram *dg) {
-    return (KlUdp *)((char *)dg - offsetof(KlUdp, dg));
-}
-
 /* The provider's datagram data-plane (KlSocketProvider.dgram). NULL sockets =
  * the built-in default provider → its default datagram ops (kl_sockdef_dgram). */
 static inline const KlDatagramOps *udp_dg(const KlUdp *u) {
@@ -739,12 +732,13 @@ void kl_udp_comp_on_send(KlUdp *udp, size_t len) {
 void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp) {
     (void)ctx;
     const KlCompletionEvent *ev = evp;
-    /* Recover the owner through the STABLE TOKEN (NULL once dead) when the backend is on the token
-     * path (ev->life set, ref transferred from the op). A backend not yet converted leaves ev->life
-     * NULL → legacy recovery from the KlDatagram target (guarded below by udp->rx == NULL). */
+    /* Recover the owner through the STABLE TOKEN (NULL once dead). ALL completion backends are on the
+     * token path (Phase B.6: pollcomp/io_uring/IOCP/lwIP-raw), so every datagram completion carries
+     * ev->life and the ref was transferred from the posted op; the legacy ev->target (KlUdp-deref)
+     * recovery is gone. A dgram event without a token (ev->life == NULL) yields a NULL owner and is
+     * safely dropped/retired below — never a dereference of a possibly-freed KlDatagram. */
     KlDgramLife *life = ev->life;
-    KlUdp *udp = life ? (KlUdp *)kl_dgram_life_target(life)
-                      : (ev->target ? kl_udp_of_dg((KlDatagram *)ev->target) : NULL);
+    KlUdp *udp = life ? (KlUdp *)kl_dgram_life_target(life) : NULL;
     switch (ev->kind) {
     case KL_COMP_DGRAM_RECV: {
         KlUdpRx *rx = udp ? udp_rx(udp) : NULL;

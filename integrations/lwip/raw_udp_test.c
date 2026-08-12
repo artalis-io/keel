@@ -15,9 +15,16 @@
  *   T1  a single datagram round-trips byte-exact, with the correct source address (127.0.0.1).
  *   T2  a few datagrams back-to-back all arrive in order.
  *   T3  a datagram at the per-udp DGRAM_MAX bound round-trips (largest retained payload).
- *   T4  close-with-queued-rx: a datagram sits in the ring un-drained when the socket is freed —
- *         must not leak (ASan/LSan gate).
- *   T5  kl_udp_free leaves no leak (the whole test is run under ASan+UBSan+LSan).
+ *   T4  close-with-queued-rx: a datagram sits in the ring un-drained + a receive is armed when the
+ *         socket is freed — exercises the recv-side token release-on-close (arm ref) + the drain
+ *         transfer path for the sends (T4 pumps, so its sends are transferred, not released).
+ *   T5  close-with-undrained-sends: the SENDER is freed before any drain, so its pending sends take
+ *         the token release-ON-CLOSE path (T4 cannot cover this — the drain consumes all pending
+ *         sends of a slot in one tick). Isolates the send-side retained-ref release.
+ *
+ * Diagnostic: the whole suite runs under ASan+UBSan+LSan, so every case doubles as a leak/
+ * double-free check on the stable-token retain/transfer/release discipline (no independent "no-leak"
+ * case — LSan validates the suite as a whole).
  *
  * A real datagram crosses the loopback netif through KEEL's udp.c machine — src/udp.c is
  * UNCHANGED; only the raw provider + glue supply the datagram transport. Prints "LC-3a PASS".
@@ -190,6 +197,37 @@ static int t4_close_with_queued(KlEventCtx *ctx) {
     return 0;
 }
 
+/* T5 — close-with-undrained-sends: post several sends and free the SENDER before ANY drain, so its
+ * pending KL_COMP_DGRAM_SEND records are released by kl_lwr_udp_close (each holds one stable-token
+ * ref) rather than transferred out by the drain. T4 pumps between the sends and the free, and the
+ * drain consumes ALL pending sends of a slot in one tick — so T4 exercises the send TRANSFER path,
+ * NOT the send release-on-close path. This isolates the latter: no drain runs before kl_udp_free(&tx),
+ * so pend_send > 0 at close and the retained refs must be released there exactly once (ASan/LSan
+ * gate). The trailing pump (AFTER the free) only lets lwIP process the queued loopback datagrams so
+ * their pbufs are freed — it cannot touch the already-freed sender. */
+static int t5_close_with_undrained_sends(KlEventCtx *ctx) {
+    reset_capture();
+    KlUdp rx, tx;
+    KlUdpConfig rc = { .ctx = ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
+    KlUdpConfig tc = { .ctx = ctx };
+    if (kl_udp_init(&rx, &rc) != 0) return fail("T5 rx init");
+    if (kl_udp_init(&tx, &tc) != 0) { kl_udp_free(&rx); return fail("T5 tx init"); }
+    if (kl_udp_recv_start(&rx, on_recv, NULL) != 0) { kl_udp_free(&tx); kl_udp_free(&rx); return fail("T5 recv_start"); }
+    uint16_t port = kl_udp_local_port(&rx);
+    KlSockAddr dst; dest_v4(&dst, port);
+
+    /* Three sends, NO pump/drain between them or before the free — the tx slot keeps pend_send == 3,
+     * each holding one token ref that only close can release. */
+    for (int i = 0; i < 3; i++)
+        if (kl_udp_send_to(&tx, "snd", 3, &dst) != 0) { kl_udp_free(&tx); kl_udp_free(&rx); return fail("T5 send"); }
+
+    kl_udp_free(&tx);          /* releases the 3 undrained pending-send token refs (never transferred) */
+    pump_until(ctx, 1, 200);   /* drain the loopback datagrams (frees their pbufs); tx is already gone */
+    kl_udp_free(&rx);
+    printf("PASS T5 (close-with-undrained-sends, no leak/crash)\n");
+    return 0;
+}
+
 int main(void) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
@@ -205,6 +243,7 @@ int main(void) {
     if (rc == 0) rc = t2_burst(&ctx);
     if (rc == 0) rc = t3_max(&ctx);
     if (rc == 0) rc = t4_close_with_queued(&ctx);
+    if (rc == 0) rc = t5_close_with_undrained_sends(&ctx);
 
     kl_event_ctx_free(&ctx);
     if (rc != 0) return 1;

@@ -58,13 +58,12 @@ typedef enum {
  * The backend has already done any platform post-processing (address extraction,
  * partial-write re-posting) — the driver sees only high-level, completed events.
  * `target` is the consumer the event belongs to, disambiguated by `kind`:
- * KlStream* for READ/WRITE (the HTTP adapter recovers the KlConn); KlDatagram* for UDP kinds.
- * ACCEPT carries no target (the generic tick recovers the server from its KlEventCtx). */
+ * KlStream* for READ/WRITE (the HTTP adapter recovers the KlConn). ACCEPT carries no target (the
+ * generic tick recovers the server from its KlEventCtx). UDP kinds use `life`, not `target`. */
 typedef struct {
-    void          *target;     /* KlStream* (READ/WRITE) — a KlDatagram* for UDP kinds. The HTTP
-                                * adapter recovers the containing KlConn (kl_conn_of_stream) and
-                                * the UDP adapter recovers the KlUdp (kl_udp_of_dg); a completion
-                                * backend never holds/derefs a KlConn or KlUdp. */
+    void          *target;     /* KlStream* (READ/WRITE); the HTTP adapter recovers the containing
+                                * KlConn (kl_conn_of_stream). A completion backend never holds/derefs
+                                * a KlConn. UNUSED for UDP kinds — they carry `life` (below). */
     KlCompKind     kind;
     size_t         bytes;      /* transferred (READ / WRITE) */
     int            ok;         /* 0 = failed / peer-closed */
@@ -78,11 +77,12 @@ typedef struct {
     int            gro_seg;                  /* UDP_RECV: GRO coalesced segment size, 0 = none */
     int            truncated;                /* UDP_RECV: 1 if the datagram was truncated (MSG_TRUNC) */
     /* UDP_RECV/_SEND stable-liveness token (transport-neutral; src/datagram_life.h). A datagram
-     * completion outlives the KlUdp wrapper, so instead of dereferencing `target` (a KlDatagram
-     * embedded in a possibly-freed KlUdp) the UDP adapter recovers the owner via this token and
-     * touches it only while live. The posting op transferred its reference to this event; the
-     * adapter releases it after dispatch. NULL on a backend not yet on the token path (the adapter
-     * falls back to the legacy `target` recovery). */
+     * completion outlives the KlUdp wrapper, so rather than dereferencing a KlDatagram embedded in a
+     * possibly-freed KlUdp, the UDP adapter recovers the owner via this token and touches it only
+     * while live. The posting op transferred its reference to this event; the adapter releases it
+     * after dispatch. ALL completion backends set this for UDP kinds (Phase B.6: pollcomp/io_uring/
+     * IOCP/lwIP-raw); a UDP completion with life == NULL yields a NULL owner and is safely dropped —
+     * there is no KlUdp-deref (`target`) fallback. */
     struct KlDgramLife *life;
 } KlCompletionEvent;
 
