@@ -1,10 +1,8 @@
 #include <keel/udp.h>
 
-#include <errno.h>
 #include <stddef.h>   /* offsetof — recover KlUdp from its embedded KlDatagram */
 #include <stdint.h>
-#include <stdio.h>
-#include <string.h>
+#include <string.h>   /* memcpy / memset — freestanding intrinsics */
 
 #include "socket.h"   /* seam: kl_sock_* + KlSockAddr + KlSocketProvider.dgram */
 #include <keel/datagram.h>   /* KlDatagramOps — the provider datagram data-plane */
@@ -43,6 +41,12 @@ static inline const KlDatagramOps *udp_dg(const KlUdp *u) {
 static inline void *udp_sp_ctx(const KlUdp *u) {
     const KlSocketProvider *sp = u->dg.ctx ? u->dg.ctx->sockets : NULL;
     return sp ? sp->context : NULL;
+}
+/* The socket provider, for kl_sock_io_status — the neutral would-block classifier (the errno mapping
+ * is confined to kl_sockdef_io_status, so this TU stays errno-free / freestanding-clean). NULL = the
+ * default provider; a freestanding provider reports the I/O category itself. */
+static inline const KlSocketProvider *udp_sp(const KlUdp *u) {
+    return u->dg.ctx ? u->dg.ctx->sockets : NULL;
 }
 
 /* Reconcile event-loop interest with current recv/send state. */
@@ -148,7 +152,7 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
     ssize_t n = udp_dg(udp)->send(udp_sp_ctx(udp), udp->dg.fd, data, len, dest, src, tos);
     if (n >= 0)
         return 0;   /* UDP send is all-or-nothing — no short-send handling */
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
+    if (kl_sock_io_status(udp_sp(udp)) == KL_IO_WOULD_BLOCK)
         return udp_enqueue(udp, data, len, dest, src, tos);
 
     udp->dg.last_error = KL_ERR_IO;
@@ -252,7 +256,7 @@ static int udp_rx_pull(void *ctx, size_t *out_len) {
     KlDgramRxMeta meta;
     kl_ssize_t n = udp_dg(udp)->recv(udp_sp_ctx(udp), udp->dg.fd, in->data, rx->slots.in_cap, &src, &meta);
     if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;   /* drained (would-block) */
+        if (kl_sock_io_status(udp_sp(udp)) == KL_IO_WOULD_BLOCK) return 0;   /* drained (would-block) */
         udp->dg.last_error = KL_ERR_IO;
         return -1;                                                /* fatal receive error */
     }
@@ -312,7 +316,7 @@ static void udp_flush_dgram(KlUdp *udp, const KlDatagramOps *dg) {
             if (cnt == 0) break;
             int sent = dg->send_batch(ctx, udp->dg.fd, udp->dg.tx_batch, descs, cnt);
             if (sent < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                if (kl_sock_io_status(udp_sp(udp)) == KL_IO_WOULD_BLOCK) break;
                 udp->dg.last_error = KL_ERR_IO; udp->dg.dropped++;
                 udp_drop_front(udp, 1); continue;   /* drop the head, retry */
             }
@@ -325,7 +329,7 @@ static void udp_flush_dgram(KlUdp *udp, const KlDatagramOps *dg) {
             kl_ssize_t n = dg->send(ctx, udp->dg.fd, node->data, node->len,
                                     &node->dest, &node->src, node->tos);
             if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                if (kl_sock_io_status(udp_sp(udp)) == KL_IO_WOULD_BLOCK) break;
                 udp->dg.last_error = KL_ERR_IO; udp->dg.dropped++;
             }
             udp_drop_front(udp, 1);
@@ -358,7 +362,7 @@ static void udp_recv_dgram(KlUdp *udp, const KlDatagramOps *dg) {
         for (;;) {
             int cnt = dg->recv_batch(ctx, udp->dg.fd, udp->dg.rx_batch, slots, max);
             if (cnt < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) udp->dg.last_error = KL_ERR_IO;
+                if (kl_sock_io_status(udp_sp(udp)) != KL_IO_WOULD_BLOCK) udp->dg.last_error = KL_ERR_IO;
                 break;
             }
             if (cnt == 0) break;
@@ -863,20 +867,20 @@ int kl_udp_send_gso(KlUdp *udp, const void *buf, size_t total_len,
     }
     /* Single-syscall GSO when there is more than one segment, nothing is already
      * queued (preserve ordering), and GSO hasn't been ruled unsupported. The
-     * seam returns -1/EOPNOTSUPP where GSO is unavailable at build time. */
+     * missing send_gso op (or a non-would-block failure from it) disables GSO for good. */
     if (segment_size < total_len && !udp->dg.q_head && !udp->dg.gso_disabled) {
         const KlDatagramOps *dg = udp_dg(udp);
-        ssize_t n;
         if (dg->send_gso) {
-            n = dg->send_gso(udp_sp_ctx(udp), udp->dg.fd, buf, total_len, (uint16_t)segment_size, dest);
+            ssize_t n = dg->send_gso(udp_sp_ctx(udp), udp->dg.fd, buf, total_len,
+                                     (uint16_t)segment_size, dest);
+            if (n >= 0)
+                return 0;
+            if (kl_sock_io_status(udp_sp(udp)) != KL_IO_WOULD_BLOCK)
+                udp->dg.gso_disabled = 1;   /* GSO unsupported here — stop trying */
+            /* would-block or unsupported: fall through and send/queue per-segment. */
         } else {
-            n = -1; errno = EOPNOTSUPP;   /* no GSO op — fall through to per-segment */
+            udp->dg.gso_disabled = 1;       /* no GSO op — never attempt again */
         }
-        if (n >= 0)
-            return 0;
-        if (errno != EAGAIN && errno != EWOULDBLOCK)
-            udp->dg.gso_disabled = 1;   /* GSO unsupported here — stop trying */
-        /* EAGAIN or unsupported: fall through and send/queue per-segment. */
     }
     return udp_send_segments(udp, buf, total_len, segment_size, dest);
 }

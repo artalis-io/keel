@@ -1182,6 +1182,57 @@ freestanding-lib-server:
 	@rm -f libkeel_freestanding_server.a
 	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SRC),libkeel_freestanding_server,,)
 
+# ── Freestanding DATAGRAM archive (Phase 10 6.4a-1: KlUdp + the Tier-1 machine) ──
+# OPT-IN layer — the DNS/UDP surface is deliberately OUT of the minimal client
+# archive (FREESTANDING_CLIENT_SRC), so a datagram-free EFI client stays small; a
+# consumer that wants KlUdp over a freestanding datagram provider (the future
+# EFI_UDP4 backend, 6.4b) links THIS archive instead. The Tier-1 datagram machine
+# (slots/send/recv/close/life) + KlUdp + the base TUs they need (allocator/sockaddr/
+# event_ctx/event_dispatch/completion_dispatch+core). NO dns_resolver.c (6.4a-2), NO
+# socket PROVIDER (a freestanding build injects EFI_UDP4). The symbol gate proves the
+# undefined closure is the SAME documented whitelist as the client/server archives
+# (C-runtime mem* + kl_plat_*/provider ops) — no OS-syscall/errno/getaddrinfo/fopen.
+FREESTANDING_DGRAM_SRC = \
+    src/error.c src/allocator.c src/kl_cstr.c src/sockaddr.c src/timer.c \
+    src/event_ctx.c src/event_dispatch.c \
+    src/completion_dispatch.c src/completion_core.c \
+    src/datagram_slots.c src/datagram_send.c src/datagram_recv.c \
+    src/datagram_close.c src/datagram_life.c src/udp.c
+
+freestanding-lib-dgram:
+	@echo "== freestanding DATAGRAM archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
+	@rm -f libkeel_freestanding_dgram.a
+	$(call fs_build_and_gate,$(FREESTANDING_DGRAM_SRC),libkeel_freestanding_dgram,,)
+
+# The full 6.4a-1 gate: compile (fs archive, per target) + undefined-host-symbol
+# (freestanding_symbol_gate.sh, run inside fs_build_and_gate) + forbidden-header
+# (below). The cross-target build already proves no host POSIX header is reachable
+# (the macOS/host include tree is off the --target=windows search path), so the
+# dep-scan is belt-and-suspenders: it FAILS if any FREESTANDING_FORBIDDEN header is
+# pulled from OUTSIDE the freestanding shim (the shim's winsock2.h/ws2tcpip.h — the
+# intended replacements sockcompat's _WIN32 branch selects — are allowed).
+freestanding-dgram: freestanding-lib-dgram
+	@echo "== dep proof: datagram TUs pull no HOST forbidden header (shim replacements OK) =="
+	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then \
+	  echo "  SKIP header dep-scan (non-clang; the cross-target compile + symbol gate above proves it)"; \
+	else \
+	  bad=0; \
+	  for f in $(FREESTANDING_DGRAM_SRC); do \
+	    $(FREESTANDING_LIB_CC) --target=x86_64-unknown-windows -ffreestanding -DKEEL_FREESTANDING \
+	      -isystem $(FREESTANDING_SHIM) -Iinclude -Ivendor/llhttp -Isrc -M $$f 2>/dev/null \
+	      | tr ' \\' '\n\n' | sed '/^$$/d' > /tmp/keel_dgram_fs.deps; \
+	    for h in $(FREESTANDING_FORBIDDEN); do \
+	      if grep -E "(^|/)$$h$$" /tmp/keel_dgram_fs.deps | grep -v "$(FREESTANDING_SHIM)/" >/dev/null 2>&1; then \
+	        echo "  FREESTANDING LEAK: $$f pulls host <$$h>"; bad=1; \
+	      fi; \
+	    done; \
+	  done; \
+	  rm -f /tmp/keel_dgram_fs.deps; \
+	  if [ $$bad -ne 0 ]; then echo "freestanding-dgram: header gate FAILED"; exit 1; fi; \
+	  echo "  zero HOST forbidden headers pulled (only shim + keel + C-standard)"; \
+	fi
+	@echo "== freestanding-dgram gate OK (compile + forbidden-header + undefined-host-symbol) =="
+
 # ── Self-contained freestanding archive (optional; bare target, no libc/EDK2) ──
 # The default archive leaves mem*/strlen undefined for the platform to supply
 # (libc / EDK2 BaseMemoryLib). This variant ALSO links the optional reference

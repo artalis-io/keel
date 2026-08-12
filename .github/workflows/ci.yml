@@ -352,6 +352,9 @@ jobs:
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 
+      - name: Freestanding datagram gate (KlUdp + Tier-1 machine; compile + header + symbol)
+        run: make freestanding-dgram
+
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
 
