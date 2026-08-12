@@ -266,8 +266,9 @@ detachment; source-addr on every recv; truncation detection.
 
 **Cross-cutting:** (1) ~~no lifetime-safe teardown on io_uring/pollcomp — a posted op can
 reference freed object memory~~ — **RESOLVED (Phase B.6):** confirmed detachment via the
-backend-owned stable token (not a generation stamp) now covers pollcomp/io_uring/IOCP; lwIP-raw
-stays lifetime-safe via its copy-ring (token fold-in pending);
+backend-owned stable token (not a generation stamp) now covers ALL FOUR completion backends
+(pollcomp/io_uring/IOCP B.6.1–3; lwIP-raw B.6.4 — token replaces its legacy `ev->target` recovery,
+copy-ring kept as staging);
 (2) borrowed single `recv_buf` everywhere except lwIP-raw → the neutral object must own the
 recv buffer (or copy, as lwIP-raw's ring does); (3) truncation not uniform (IOCP gap);
 (4) `KlUdp*` target leaks into the abstract axis (§4); (5) strict pause has no explicit latch.

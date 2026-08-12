@@ -271,16 +271,19 @@ report its absence rather than silently misbehaving.
   A generation/duplicate stamp MAY *additionally* reject a stale or duplicate completion **while
   the object is still alive**, but under strict detachment a completion after legal reuse is
   impossible, so the stamp is defensive, not the primary guarantee.
-- **Status (Phase B.6, 2026-08-12): the backend-owned stable token is implemented on all three
-  primary completion backends** — pollcomp (B.6.1), io_uring (B.6.2), IOCP (B.6.3). The neutral
-  token lives in `src/datagram_life.{h,c}` (a single-thread refcount + nullable target +
+- **Status (Phase B.6, 2026-08-12): the backend-owned stable token is implemented on ALL FOUR
+  completion backends** — pollcomp (B.6.1), io_uring (B.6.2), IOCP (B.6.3), lwIP-raw (B.6.4). The
+  neutral token lives in `src/datagram_life.{h,c}` (a single-thread refcount + nullable target +
   `on_final`, allocated from the event-ctx allocator so it outlives `KlUdp`); `KlCompletionEvent`
   carries it in `life`. Each backend captures the recv buffer + flags at post and retains one token
   ref per posted op; the completion transfers that ref to the event (released after dispatch), and
   the op-free path releases a still-held ref on every drop-without-event path (post-failure unwind,
   silent cancel, loop teardown). No completion backend dereferences the `KlDatagram` (or its
-  embedding `KlUdp`) after post. lwIP-raw remains on the legacy `target` fallback (its copy-ring is
-  already lifetime-safe; conversion for uniformity is the one remaining backend).
+  embedding `KlUdp`) after post. lwIP-raw keeps its per-slot copy-ring (already lifetime-safe) as
+  the staging buffer — the token replaces only its legacy `ev->target` owner recovery; the ref lives
+  in the udp slot (one per armed recv / pending send, transferred on drain, released on close).
+  Replacing that copy-ring with a single dedicated inbound slot (§10 row) stays a deferred Tier-1
+  cleanup, intentionally out of the token conversion.
 - The recv buffer and any queued send slots are the object's own memory; a backend MUST NOT be
   handed a pointer it can dereference after the object detaches. `kl_datagram_*_free` refuses
   while an op is in flight (mirror `stream_write.c:160-168`).
@@ -383,11 +386,11 @@ limitation · ⚙ to build.
 | Atomic whole-packet send | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚙ (1 Tx token) |
 | Packet-slot bounded **send** queue | ⚙ (recast from byte-FIFO) | ⚙ | ⚙ | ⚙ | ⚙ | ⚙ (no preallocated atomic send-slot queue; the 16-slot ring is receive-side) | ⚙ |
 | Strict pause (post no more recv) | ⚙ (drop interest) | ⚙ | ⚙ (latch) | ⚙ (latch) | ⚙ (latch) | ⚙ | ⚙ |
-| Cancel-once + confirmed detachment | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (copy-ring, memset) | ⚙ (Cancel + quarantine model) |
-| Lifetime: no op refs object after detach | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (copy-ring) | ⚙ (Cancel + confirmed retire) |
+| Cancel-once + confirmed detachment | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring/memset) | ⚙ (Cancel + quarantine model) |
+| Lifetime: no op refs object after detach | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring) | ⚙ (Cancel + confirmed retire) |
 | `peer` (source) on every recv | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚙ |
 | Truncation detected + flagged | ✅ (`MSG_TRUNC`) | ✅ | ✅ | ✅ | ✅ (`dwFlags`/`WSAEMSGSIZE`, Step 5) | ✅ (ring flag) | ⚙ |
-| Recv storage = object's dedicated inbound slot (no `KlUdp` deref) | ✅ | ✅ | ✅ (token pins slot) | ✅ (token pins slot) | ✅ (token pins slot) | ⚙ (replace copy-ring with the one dedicated inbound slot) | ⚙ |
+| Recv storage = object's dedicated inbound slot (no `KlUdp` deref) | ✅ | ✅ | ✅ (token pins slot) | ✅ (token pins slot) | ✅ (token pins slot) | ▲ (no `KlUdp` deref via token; copy-ring still stages into the inbound slot — single-slot swap deferred) | ⚙ |
 | **Capabilities** | | | | | | | |
 | pktinfo (`local`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ | ✖ |
 | multicast | ✅ | ✅ (no v4 by-index ✖) | ✅ | ✅(ctl) | ✅(ctl) | ✖ | ✖ |
@@ -398,14 +401,15 @@ limitation · ⚙ to build.
 | source-pin send | ✅ | ✅ | ✅ | ▲ (sync seam) | ▲ (sync seam) | ✖ | ✖ |
 | connected mode | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ (rejected) | ⚙ |
 
-**Reading the matrix:** lifetime ownership + object-owned buffer are now ✅ across the three
-primary completion backends (pollcomp/io_uring/IOCP) via the backend-owned stable token
-(**Phase B.6 complete**, §5 status); the remaining ⚙ cells in the top block are the packet-slot
-**send** queue and strict pause. The ✖ capability cells are *documented limitations* — consumers
-query caps (§9) and degrade. **EFI_UDP4 is the only column that is ⚙ end-to-end** (no datagram
-integration exists; build a persistent provider from the `dns_uefi.c` token machine — audit §6).
-lwIP-raw is ⚙ only on the object-owned-buffer row (copy-ring, lifetime-safe) — the one remaining
-completion backend to fold onto the stable token + dedicated inbound slot.
+**Reading the matrix:** lifetime ownership is now ✅ across ALL FOUR completion backends
+(pollcomp/io_uring/IOCP/lwIP-raw) via the backend-owned stable token (**Phase B.6 complete**, §5
+status); the remaining ⚙ cells in the top block are the packet-slot **send** queue and strict
+pause. The ✖ capability cells are *documented limitations* — consumers query caps (§9) and degrade.
+**EFI_UDP4 is the only column that is ⚙ end-to-end** (no datagram integration exists; build a
+persistent provider from the `dns_uefi.c` token machine — audit §6). lwIP-raw's object-owned-buffer
+row is ▲: the token removed its `KlUdp` deref, but it still stages through its copy-ring before the
+machine copies into the dedicated inbound slot — replacing the copy-ring with a single inbound slot
+is a deferred Tier-1 cleanup (the copy-ring was deliberately preserved).
 
 ---
 
