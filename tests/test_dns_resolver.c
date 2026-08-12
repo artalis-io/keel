@@ -96,6 +96,8 @@ static uint8_t    g_stash_resp[2][512]; /* stashed legit responses (A + AAAA), r
 static size_t     g_stash_len[2];
 static int        g_stash_n;
 static KlSockAddr g_stash_dest;         /* the resolver's addr:port (reply destination) */
+static int        g_poison_sent;        /* poisoned spoofs SUCCESSFULLY submitted (send returned 0) */
+static int        g_poison_fail;        /* poisoned spoof submissions that FAILED (send returned != 0) */
 
 /* Parse a DNS query's question: set *qtype, return qend (0 on malformed). */
 static size_t dns_q_parse(const uint8_t *q, size_t len, int *qtype) {
@@ -275,7 +277,10 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
         memcpy(poison, resp, n);
         if (poison[7] >= 1)                     /* an A answer present (no cookie in this test) */
             poison[n - 1] = 0xEE;               /* 10.1.2.3 -> 10.1.2.238 (distinguishable) */
-        (void)kl_udp_send_to(g_spoof_sock, poison, n, src);
+        if (kl_udp_send_to(g_spoof_sock, poison, n, src) == 0)   /* count only submitted spoofs */
+            g_poison_sent++;
+        else
+            g_poison_fail++;                    /* a send failure would falsely leave the resolver pending */
         if (g_stash_n < 2) {                    /* stash the legit A + AAAA responses for phase 2 */
             memcpy(g_stash_resp[g_stash_n], resp, n);
             g_stash_len[g_stash_n] = n;
@@ -404,6 +409,7 @@ static void reset_dns(void) {
     g_seen_client_ok = 0; g_seen_server_len = 0;
     g_done = 0; g_err = 0; memset(&g_res, 0, sizeof(g_res));
     g_octet_from_name = 0; g_wrong_source = 0; g_spoof_sock = NULL; g_stash_n = 0;
+    g_poison_sent = 0; g_poison_fail = 0;
 }
 
 /* Start the mock nameserver and create a resolver pointed at it (custom cfg). */
@@ -1440,16 +1446,24 @@ UTEST(dns, wrong_source_response_ignored) {
     KlUdpConfig sp = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
     ASSERT_EQ(0, kl_udp_init(&spoof, &sp));
     g_wrong_source = 1; g_spoof_sock = &spoof;
+    /* Same address (127.0.0.1), DIFFERENT port — the port is what makes the spoofer's source not match
+     * the configured nameserver, so the mismatch is purely the discriminator dns_ns_index rejects on. */
+    ASSERT_TRUE(kl_udp_local_port(&spoof) != kl_udp_server_local_port(&ns));
 
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done, NULL) != NULL);
 
-    /* Phase 1: only the wrong-source poison is ever in flight. Pump until both queries have been seen
-     * (both poisons sent), then a margin so each poison round-trips to the resolver and is dropped.
-     * The src gate must reject them, so the resolution has NOT completed (all well under the 3s
-     * timeout, so a still-pending resolution is a rejection, not a timeout). */
-    for (int i = 0; i < 200 && g_stash_n < 2; i++) kl_event_ctx_run(&ctx, 16, 2);
+    /* Phase 1: only the wrong-source poison is ever in flight. Pump until BOTH queries (A+AAAA) have
+     * been seen (both legit responses stashed) AND both poisons were SUCCESSFULLY submitted, then a
+     * margin so each poison round-trips to the resolver and is dropped. Track submissions separately
+     * from stashing: a poison SEND failure (not a source rejection) would otherwise leave the resolver
+     * pending and falsely pass. All well under the 3s timeout, so a still-pending resolution here is a
+     * source rejection, not a timeout. */
+    for (int i = 0; i < 200 && g_poison_fail == 0 && (g_stash_n < 2 || g_poison_sent < 2); i++)
+        kl_event_ctx_run(&ctx, 16, 2);
+    ASSERT_EQ(0, g_poison_fail);             /* every spoof was actually submitted (no send failure) */
+    ASSERT_EQ(2, g_stash_n);                 /* both legit responses (A + AAAA) captured */
+    ASSERT_EQ(2, g_poison_sent);             /* both poisons in flight from the wrong source */
     for (int i = 0; i < 20; i++) kl_event_ctx_run(&ctx, 16, 2);   /* poison round-trip + drop */
-    ASSERT_TRUE(g_stash_n >= 1);             /* the mock captured the legit response(s) + dest */
     ASSERT_EQ(0, g_done);                    /* poison rejected at the src gate — still pending */
 
     /* Phase 2: release the legit responses from the configured nameserver socket (correct src). */
