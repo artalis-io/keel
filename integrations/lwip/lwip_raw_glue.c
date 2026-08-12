@@ -287,15 +287,26 @@ typedef struct {
     uint16_t      src_port;       /* source port, host order */
 } KlLwrDgram;
 
+/* Stable-liveness token for datagram completion ops (src/datagram_life.h — the frozen "backend-owned
+ * stable token", docs/datagram_contract.md §6). Forward-declared locally so this lwIP-only glue TU
+ * keeps its minimal include set (no src/ header path); the two entrypoints resolve against libkeel's
+ * datagram_life.o at link. Each posted udp op (recv arm / pending send) holds ONE ref; the drain
+ * transfers it to the completion event, and close/teardown release any op ref not yet drained. */
+typedef struct KlDgramLife KlDgramLife;
+void kl_dgram_life_retain(KlDgramLife *l);
+void kl_dgram_life_release(KlDgramLife *l);
+
 /* ── LC-3a: per-udp-socket slot ───────────────────────────────────────────────────
- * One slot per KlUdp bound over the raw backend. `pcb == NULL` = free slot. `owner` is the
- * opaque KlDatagram* the machine passed at post time (the KL_COMP_DGRAM_RECV/SEND target). The recv
- * ring is a fixed circular buffer of retained datagrams (bounded — drops on overflow). `rx_armed`
- * gates delivery to the completion contract's one-in-flight recv. `pend_send` counts sends whose
+ * One slot per KlUdp bound over the raw backend. `pcb == NULL` = free slot. `life` is the stable
+ * token the op retained at post (the drain transfers it to the KL_COMP_DGRAM_RECV/SEND event, so the
+ * backend never dereferences the possibly-freed KlDatagram). The slot holds exactly
+ * `(rx_armed ? 1 : 0) + pend_send` token refs; close/teardown release that many. The recv ring is a
+ * fixed circular buffer of retained datagrams (bounded — drops on overflow). `rx_armed` gates
+ * delivery to the completion contract's one-in-flight recv. `pend_send` counts sends whose
  * KL_COMP_DGRAM_SEND the drain still owes. */
 typedef struct {
     struct udp_pcb *pcb;          /* NULL = free slot */
-    void           *owner;        /* KlDatagram* (KL_COMP_DGRAM_RECV/SEND target) */
+    KlDgramLife    *life;         /* stable token; one ref per outstanding op (arm + pending sends) */
     KlLwrDgram      ring[KL_LWR_UDP_RX_RING];
     int             rx_head;      /* oldest queued datagram index */
     int             rx_count;     /* queued datagrams (0..KL_LWR_UDP_RX_RING) */
@@ -584,12 +595,18 @@ void kl_lwr_ctx_destroy(void *lwrctx) {
     }
 
     /* LC-3a: tear down any live udp pcbs (detach the recv cb + free the pcb). The retained
-     * datagram ring is inline in the slot (no heap), cleared by the memset below implicitly. */
+     * datagram ring is inline in the slot (no heap), cleared by the memset below implicitly. A slot
+     * still live here means kl_udp_free / kl_lwr_udp_close never ran (loop torn down before the
+     * socket): release its outstanding op token refs so they don't leak (the owner ref may still
+     * leak — the same free-sockets-before-the-loop contract as every backend). */
     for (int i = 0; i < KL_LWR_UDP_SLOTS; i++) {
-        if (ctx->udp[i].pcb) {
-            udp_recv(ctx->udp[i].pcb, NULL, NULL);
-            udp_remove(ctx->udp[i].pcb);
-            ctx->udp[i].pcb = NULL;
+        KlLwrUdpSlot *s = &ctx->udp[i];
+        if (s->pcb) {
+            for (int k = (s->rx_armed ? 1 : 0) + s->pend_send; k > 0; k--)
+                kl_dgram_life_release(s->life);
+            udp_recv(s->pcb, NULL, NULL);
+            udp_remove(s->pcb);
+            s->pcb = NULL;
         }
     }
 
@@ -1023,7 +1040,7 @@ long kl_lwr_srv_sync_send(void *lwrctx, void *pcb, const void *buf, size_t len, 
 
 /* ── LC-3a: UDP datagram glue (udp_pcb ↔ KlUdp) ───────────────────────────────────
  * A udp slot is created by kl_lwr_udp_new (lwr_sock_socket for SOCK_DGRAM), bound by
- * kl_lwr_udp_bind, associated with a KlDatagram* + recv-armed by kl_lwr_udp_post_recv, and closed by
+ * kl_lwr_udp_bind, recv-armed (taking a stable-token ref) by kl_lwr_udp_post_recv, and closed by
  * kl_lwr_udp_close. Inbound datagrams land in lwr_udp_recv_cb, which copies the payload out of the
  * pbuf (freeing it immediately — no retained pbuf) into the bounded per-slot ring. The drain
  * (kl_lwr_udp_drain) surfaces one queued datagram per armed slot as a UDP-RECV record, and one
@@ -1117,14 +1134,17 @@ uint16_t kl_lwr_udp_local_port(void *pcb) {
     return ((struct udp_pcb *)pcb)->local_port;
 }
 
-/* Associate a KlDatagram* owner with a udp pcb + arm one recv (mirrors kl_lwr_conn_arm). Wires the
- * udp_recv callback on first arm (idempotent). Returns 0, or -1 if the pcb has no slot. */
-int kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *owner) {
+/* Arm one recv on a udp pcb (mirrors kl_lwr_conn_arm), taking a stable-token ref for the posted op.
+ * Wires the udp_recv callback on first arm (idempotent). Returns 0, or -1 if the pcb has no slot. */
+int kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *life) {
     KlLwrCtx *ctx = lwrctx;
     KlLwrUdpSlot *s = lwr_udp_find(ctx, (const struct udp_pcb *)pcb);
     if (!s) return -1;
-    s->owner = owner;
-    s->rx_armed = 1;
+    s->life = (KlDgramLife *)life;
+    if (!s->rx_armed) {                 /* arm takes ONE token ref; the drain transfers it out */
+        kl_dgram_life_retain(s->life);
+        s->rx_armed = 1;
+    }
     udp_recv((struct udp_pcb *)pcb, lwr_udp_recv_cb, NULL);
     return 0;
 }
@@ -1132,13 +1152,13 @@ int kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *owner) {
 /* Send one datagram out `pcb` to dest ip4:port via udp_sendto. Copies `data` into a fresh pbuf,
  * sends, frees it (a datagram is one pbuf — the only alloc lwIP requires). Records a pending
  * KL_COMP_DGRAM_SEND on the slot so the drain reports it (with the byte count). Returns 0 / -1. */
-int kl_lwr_udp_send(void *lwrctx, void *pcb, void *owner, const void *data, size_t len,
+int kl_lwr_udp_send(void *lwrctx, void *pcb, void *life, const void *data, size_t len,
                     const uint8_t dest_ip[4], uint16_t dest_port) {
     KlLwrCtx *ctx = lwrctx;
     struct udp_pcb *p = (struct udp_pcb *)pcb;
     KlLwrUdpSlot *s = lwr_udp_find(ctx, p);
     if (!s || !p || len > 0xffffu) return -1;
-    s->owner = owner;   /* the send may be the first op that names the owner */
+    s->life = (KlDgramLife *)life;   /* the send may be the first op that names the token */
 
     struct pbuf *pb = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
     if (!pb) return -1;
@@ -1162,7 +1182,10 @@ int kl_lwr_udp_send(void *lwrctx, void *pcb, void *owner, const void *data, size
         int idx = (s->send_head + s->pend_send) % KL_LWR_UDP_RX_RING;
         s->send_len[idx] = len;
         s->pend_send++;
+        kl_dgram_life_retain(s->life);   /* new pending completion → ONE token ref (drain transfers it) */
     } else {
+        /* Coalesced into an existing pending record — no NEW record, so no new ref (the folded record
+         * still carries exactly one ref). Keeps refs == outstanding records == future transfers. */
         int tail = (s->send_head + s->pend_send - 1) % KL_LWR_UDP_RX_RING;
         s->send_len[tail] += len;
     }
@@ -1175,6 +1198,11 @@ void kl_lwr_udp_close(void *lwrctx, void *pcb) {
     if (p == NULL) return;
     KlLwrUdpSlot *s = lwr_udp_find(ctx, p);
     if (!s) return;                 /* not ours / already closed — idempotent no-op */
+    /* Release every token ref the drain never transferred out — the armed recv (if any) + each
+     * pending send. Balances the retains in post_recv/send; the token's final release (once the owner
+     * ref is also gone) frees the receive storage. life == NULL (slot never posted) → no-op. */
+    for (int k = (s->rx_armed ? 1 : 0) + s->pend_send; k > 0; k--)
+        kl_dgram_life_release(s->life);
     udp_recv(p, NULL, NULL);        /* detach the recv callback */
     udp_remove(p);                  /* free the pcb */
     memset(s, 0, sizeof(*s));       /* clears pcb (→ free slot) + the retained ring */
@@ -1201,7 +1229,7 @@ int kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max) {
             KlLwrUdpRecord *r = &out[n++];
             memset(r, 0, sizeof(*r));
             r->kind = KL_LWR_DGRAM_RECV;
-            r->owner = s->owner;
+            r->life = s->life;   /* TRANSFER the arm's token ref → event (rx_armed just cleared) */
             r->data = s->staged.data;
             r->len = s->staged.len;
             r->truncated = s->staged.truncated;
@@ -1217,7 +1245,7 @@ int kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max) {
             KlLwrUdpRecord *r = &out[n++];
             memset(r, 0, sizeof(*r));
             r->kind = KL_LWR_DGRAM_SEND;
-            r->owner = s->owner;
+            r->life = s->life;   /* TRANSFER one pending send's token ref → event */
             r->len = bytes;
         }
     }

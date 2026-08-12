@@ -124,10 +124,12 @@ typedef enum {
 
 /* One finished UDP op. For UDP_RECV, `data` points into the udp slot's `staged` buffer and stays
  * valid until the NEXT kl_lwr_udp_drain on that ctx (the backend delivers it inline before then).
- * `owner` is the KlDatagram* the machine passed at post time (the KL_COMP_DGRAM_RECV/SEND target). */
+ * `life` is the stable-liveness token (KlDgramLife*) the op retained at post; the drain TRANSFERS it
+ * to the completion event (ev->life), so the backend recovers the owner through the token and never
+ * dereferences the possibly-freed KlDatagram. See src/datagram_life.h + docs/datagram_contract.md §6. */
 typedef struct {
     KlLwrUdpKind kind;
-    void        *owner;       /* KlDatagram* target */
+    void        *life;        /* KlDgramLife* — token ref transferred op → event */
     const void  *data;        /* UDP_RECV: datagram payload (in the slot's staged buffer) */
     size_t       len;         /* UDP_RECV: payload len / UDP_SEND: bytes sent */
     int          truncated;   /* UDP_RECV: 1 if the datagram was truncated to the buffer */
@@ -145,12 +147,13 @@ int   kl_lwr_is_udp(void *lwrctx, void *pcb);
 int   kl_lwr_udp_bind(void *pcb, const uint8_t ip4[4], uint16_t port);
 /* pcb->local_port (host order) for a bound udp pcb — bound-port readback. */
 uint16_t kl_lwr_udp_local_port(void *pcb);
-/* Associate a KlDatagram* owner with a udp pcb + arm ONE recv (wires udp_recv on first call). The drain
- * surfaces one queued datagram per armed slot as KL_LWR_DGRAM_RECV. Returns 0, -1 if no slot. */
-int   kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *owner);
+/* Arm ONE recv on a udp pcb (wires udp_recv on first call), taking a `life` token reference for the
+ * posted op. The drain surfaces one queued datagram per armed slot as KL_LWR_DGRAM_RECV and transfers
+ * the ref to it. `life` is the KlDgramLife* (opaque here). Returns 0, -1 if no slot. */
+int   kl_lwr_udp_post_recv(void *lwrctx, void *pcb, void *life);
 /* Send one datagram out `pcb` to dest ip4:port (udp_sendto; ip4 NULL = ANY). Records a pending
- * KL_LWR_DGRAM_SEND (len bytes) the drain reports. `owner` is the KlDatagram* target. Returns 0 / -1. */
-int   kl_lwr_udp_send(void *lwrctx, void *pcb, void *owner, const void *data, size_t len,
+ * KL_LWR_DGRAM_SEND (len bytes) the drain reports, taking a `life` token ref for it. Returns 0 / -1. */
+int   kl_lwr_udp_send(void *lwrctx, void *pcb, void *life, const void *data, size_t len,
                       const uint8_t dest_ip[4], uint16_t dest_port);
 /* Close a udp pcb: detach the recv cb, udp_remove, free the slot. Idempotent on an unknown/NULL. */
 void  kl_lwr_udp_close(void *lwrctx, void *pcb);

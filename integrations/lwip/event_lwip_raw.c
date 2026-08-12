@@ -542,7 +542,9 @@ static int lwr_comp_post_dgram_recv(struct KlDatagram *dg) {
     KlLwrState *st = dg->ctx->loop._backend;
     KlSocketHandle fd = dg->fd;
     if (!st || !kl_handle_valid(fd)) return -1;
-    return kl_lwr_udp_post_recv(st->lwrctx, (void *)fd, dg);
+    /* Pass the stable token (read from KlDatagram at post ONLY); the glue retains a ref for the armed
+     * recv and the drain transfers it to the event — the completion never dereferences KlDatagram. */
+    return kl_lwr_udp_post_recv(st->lwrctx, (void *)fd, dg->rx_life);
 }
 static int lwr_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
                           const KlSockAddr *dest) {
@@ -552,7 +554,7 @@ static int lwr_comp_post_dgram_send(struct KlDatagram *dg, const void *data, siz
     /* Dest → raw IPv4 bytes + host-order port. A connected send (dest UNSPEC) is not exercised on
      * this loopback path — reject an unspecified/non-IPv4 dest fail-early. */
     if (!dest || kl_sockaddr_family(dest) != KL_AF_INET) return -1;
-    return kl_lwr_udp_send(st->lwrctx, (void *)fd, dg, data, len,
+    return kl_lwr_udp_send(st->lwrctx, (void *)fd, dg->rx_life, data, len,
                            dest->u.ip, kl_sockaddr_port(dest));
 }
 
@@ -693,7 +695,9 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             KlLwrUdpRecord *u = &urecs[i];
             KlCompletionEvent *ev = &out[count];
             memset(ev, 0, sizeof(*ev));
-            ev->target = u->owner;
+            /* Token path (B.6): the ref transferred glue-op → record → event; udp_comp_dispatch
+             * recovers the owner via the token and releases the ref after dispatch. No ev->target. */
+            ev->life = u->life;
             if (u->kind == KL_LWR_DGRAM_RECV) {
                 ev->kind = KL_COMP_DGRAM_RECV;
                 ev->ok = 1;
