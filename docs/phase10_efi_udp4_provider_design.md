@@ -60,12 +60,29 @@ already does) and slots directly into the B.6 stable-token contract the other co
 
 `kl_udp_init` still calls the **socket provider** for `socket()/set_cloexec/set_nonblocking/bind/
 get_local_addr` and `dgram->configure` regardless of readiness/completion. So the datagram vtable's
-**`configure` is mandatory**; **`dgram->send`/`dgram->recv` are only reached on a readiness/source-pinned/
-TOS send path** — provide them as **synchronous EFI fallbacks** (Transmit/Receive + `pump_or_cancel`,
-like `dns_uefi.c`) for robustness and readiness-portability, but they are **not** the DNS hot path.
+**`configure` is mandatory**.
+
+**`dgram->recv` and `dgram->send` (review-Medium resolution).** These are only reached on the non-
+completion paths (a readiness loop, or a completion loop's source-pinned / TOS send which `udp.c` routes
+around the `post_dgram_send` fast path). For a **completion-only** EFI provider:
+
+- **`dgram->recv = NULL`, unconditionally.** A synchronous EFI `Receive` here would be a **second receive
+  machine** racing the serial completion `post_dgram_recv` token → it would violate the one-receive-in-
+  flight contract. There is no readiness receive on EFI. Hard NULL.
+- **`dgram->send`**: provide a **synchronous single-`Transmit` fallback** ONLY to cover the source-pinned
+  / TOS sends the completion fast path skips, and ONLY under an **explicit guarantee** that it uses an
+  **independent Tx token** (never a receive token, never the serial recv machine) and **participates in
+  the same §7 cancel/quarantine discipline** (`pump_or_cancel`; unconfirmed → quarantine + fail-close).
+  The DNS resolver never source-pins or sets TOS, so this path is **not** on the DNS hot path — it exists
+  only so a general source-pinned datagram send does not silently fail or NULL-deref. Alternatively, a
+  source-pin/TOS send may be **rejected** as `KL_DATAGRAM_UNSUPPORTED` (contract §9) rather than
+  supported; either is conformant, but a second *receive* machine is never introduced.
 
 **FROZEN #1:** EFI datagram I/O is completion-native — `post_dgram_recv/_send` in `event_efi.c` over
-EFI_UDP4 Rx/Tx tokens; `dgram->configure` mandatory; `dgram->send/recv` sync fallbacks only.
+EFI_UDP4 Rx/Tx tokens; `dgram->configure` mandatory; **`dgram->recv` is NULL** (no second receive
+machine); **`dgram->send` is either a synchronous independent-Tx-token fallback under the §7
+cancel/quarantine discipline OR a `KL_DATAGRAM_UNSUPPORTED` rejection** for source-pinned/TOS sends
+(the DNS path uses neither — it rides `post_dgram_send`).
 
 ---
 
@@ -127,8 +144,25 @@ int  kl_uefi_udp_valid_h(KlSocketHandle fd, unsigned long long generation);
 ```
 
 `udp_of` rejects a handle whose tag is not `KL_EFI_H_UDP` (so a TCP handle passed to a datagram op is a
-hard NULL, not a misread). The generation guard is identical in spirit to `kl_uefi_conn_valid_h`: even
-generation = closed, different generation = slot reused → reject.
+hard NULL, not a misread).
+
+**What the generation guard does and does NOT cover (review-High correction).** The generation lives in
+**slot storage**, and the public handle encodes only `tag ‖ slot+1` — it does **not** carry the
+generation. So a handle value is **reused** after close+reopen of the same slot: an arbitrary caller that
+holds an *old, closed* handle and calls a datagram op will pass `udp_of()` against the **new** live
+socket, because the handle values are identical. The generation guard therefore protects **only** a
+**backend op that captured the generation at post time** (`op->generation = kl_uefi_udp_generation_h(fd)`)
+— a late completion whose slot was since closed (generation bumped) or reused (different generation) is
+rejected via `kl_uefi_udp_valid_h(op->fd, op->generation)`. It does **not**, and is not claimed to, make
+an arbitrary stale *caller* handle detectable after reuse.
+
+This is **exactly the existing EFI_TCP4 contract** (`socket_efi_tcp4.c`: `handle = slot+1`, generation in
+slot storage only), and matches KEEL's single-threaded, caller-owns-lifetime model: **a caller must not
+use a handle after it closed it** (invalid-by-contract, like a `close(2)`'d fd). We deliberately do NOT
+widen the handle to embed the generation — it would diverge from the TCP model for no real gain in a
+single-threaded pre-boot environment where the caller controls close ordering. If a future need arises,
+embedding generation into the handle (`tag ‖ generation ‖ slot+1`) is the extension point, but it is
+**out of scope and not frozen**.
 
 ### 4.3 Why the completion path does NOT rely on the handle to find the owner
 For datagram completions the owner (`KlUdp`) is recovered through the **stable token** `ev->life`
@@ -142,9 +176,12 @@ there are two independent, complementary guards:
 Both must pass before a completion touches owner state or the EFI child, respectively.
 
 **FROZEN #3:** handle discrimination = tagged handle (transport tag ‖ slot+1) + separate per-transport
-slot pools with distinct magics + even/odd generation stale-guard read from stable storage. Datagram
-completions recover the KEEL owner via `ev->life`, and validate the EFI child via the tagged-handle
-generation guard — the two guards are independent.
+slot pools with distinct magics. The tag prevents cross-transport confusion. The even/odd generation
+stale-guard (in slot storage, read from stable memory) protects **backend ops that captured the
+generation at post** — NOT arbitrary reused caller handles (identical handle values after slot reuse;
+same limitation and single-threaded caller-owns-close contract as EFI_TCP4). Datagram completions recover
+the KEEL owner via `ev->life` (B.6) and validate the EFI child via the captured-generation guard — the
+two guards are independent. Embedding generation into the handle is an out-of-scope extension, not frozen.
 
 ---
 
@@ -163,12 +200,14 @@ the resolver) and `ev->local` (dest, pktinfo-equivalent) come for free.
 | `post_dgram_send(data,len,dest)` | `EFI_UDP4.Transmit(EFI_UDP4_IO_TOKEN)` with `EFI_UDP4_TRANSMIT_DATA{ FragmentTable→copied data }` and **`UdpSessionData.DestinationAddress:Port = dest`** (per-datagram dest on the unconnected socket). |
 | `post_dgram_recv()` | `EFI_UDP4.Receive(EFI_UDP4_IO_TOKEN)`; firmware fills `Packet.RxData` (firmware-owned fragments + `UdpSession` + `RecycleSignal`). |
 | completion detect | `drain`: `udp->Poll(udp)` then `CheckEvent(tok.Event)` for each outstanding Rx/Tx token (no notify callback). |
-| recv copy-out | coalesce `RxData.FragmentTable[]` into the **captured inbound buffer** (`op->buf == dg->recv_buf`, bounded by `op->buflen` → set `truncated` if the datagram exceeds it), read src/dest from `RxData.UdpSession`, then **`SignalEvent(RxData.RecycleSignal)`** — always, even on the abort path (return the firmware buffer). |
+| recv copy-out (**signalled** token only) | coalesce `RxData.FragmentTable[]` into the **captured inbound buffer** (`op->buf == dg->recv_buf`, bounded by `op->buflen` → set `truncated` if the datagram exceeds it), read src/dest from `RxData.UdpSession`, then **`SignalEvent(RxData.RecycleSignal)`** to return the firmware buffer (do this on any signalled terminal where `Packet.RxData` is non-NULL, incl. aborted-but-signalled). An **unsignalled** token has no valid `Packet` — never inspected. |
 | re-arm | `kl_dgram_recv_on_complete` re-posts → a fresh `EFI_UDP4.Receive` token (serial, one in flight). |
 
 **FROZEN #4:** unconnected `Configure` (per-datagram dest via `TxData.UdpSessionData`; src+dest read
-from `RxData.UdpSession`); **`RecycleSignal` is signalled on every Rx completion including the
-aborted/cancelled path** (return the firmware-owned buffer or leak it under quarantine — see §7).
+from `RxData.UdpSession`); a token's `Packet` union is valid **only after it signals** — on every
+**signalled** Rx terminal (normal or aborted-and-signalled) with non-NULL `RxData`, copy out then
+`SignalEvent(RxData.RecycleSignal)`; an **unsignalled** (quarantined) token's `Packet` is never inspected
+and leaks with the op until EBS (see §7).
 
 ---
 
@@ -205,33 +244,56 @@ identical to the pollcomp/io_uring/IOCP pattern.
 This mirrors EFI_TCP4's `pump_or_cancel` + `quarantined`-slot discipline, with **one addition unique to
 datagrams**: the interaction with the stable token and with firmware-owned `RxData`.
 
-### 7.1 The rule the whole machine protects
-> A submitted EFI_UDP4 token has the firmware referencing **everything reachable from it** — the token
-> (Status/Packet written by firmware), the transmit descriptor+payload, and (Rx) the firmware-owned
-> `RxData` — until the token reaches ONE terminal state (completed **or** cancelled-and-drained). Its
-> backing storage MUST NOT be freed or reused before that. For a **receive** op, that backing storage
-> includes the **inbound slot** (`dg->recv_buf`), which the **stable token's `on_final` owns**. Therefore
-> an unconfirmed-cancel recv op MUST NOT allow the token refcount to reach zero — else `on_final` frees a
-> buffer the firmware may still write.
+### 7.1 The rule the whole machine protects — and the two distinct lifetimes (review-Medium correction)
+> A submitted EFI_UDP4 token has the firmware referencing the storage **directly reachable from the
+> token** — the completion **token** itself (firmware writes `Status` + the `Packet` union), the
+> **transmit descriptor + payload** (Tx), and, once the firmware *publishes a completion*, the
+> firmware-owned **`RxData`** (Rx) — until the token reaches ONE terminal state (completed **or**
+> cancelled-and-drained). That storage MUST NOT be freed or reused before then.
+
+Two **distinct** lifetimes must not be conflated (the earlier draft wrongly said firmware writes the KEEL
+inbound slot):
+
+1. **Firmware-reachable EFI storage** — the token, its `EFI_EVENT`, the op record holding them, and any
+   Tx descriptor/payload. This is what **quarantine pins** (leaked to EBS) when a cancel can't be
+   confirmed. `EFI_UDP4.Receive` does **not** write the KEEL inbound slot (`dg->recv_buf`); it writes
+   `Packet.RxData` into the token and owns the **fragment buffers**. KEEL copies fragments into
+   `dg->recv_buf` **only after** a signalled completion. So **before completion the inbound slot is not
+   firmware-reachable.**
+2. **The B.6 receive stable-token reference** — retained on an unconfirmed-cancel recv op **because
+   retirement is unconfirmed** (the op has not genuinely retired, so per B.6 its `life` ref must not be
+   released), **not** because firmware writes `dg->recv_buf`. Keeping the ref (never letting the refcount
+   reach zero) is the correct conservative rule: it prevents `on_final` from freeing the inbound
+   slot/machine while an op the firmware might still complete is logically outstanding.
+
+Corollary: an **unsignalled** token has **no valid `Packet` union** — do NOT inspect or recycle
+`Packet.RxData` (or read `Packet.TxData`) of a token that never signalled (the quarantine path). `RxData`
++ `RecycleSignal` exist only once firmware has published them through a **signalled** completion.
 
 ### 7.2 States (per datagram op)
 - **POSTED** — token submitted, event not yet signalled; op holds one `life` ref.
-- **COMPLETED** — CheckEvent fired; event emitted (`life` transferred) or dropped (owner dead) — but in
-  both cases the op releases/transfers its ref; RxData recycled.
+- **COMPLETED** — CheckEvent fired (signalled). The op **always emits** the `KL_COMP_DGRAM_*` event and
+  **transfers** `life` (`ev->life = op->life; op->life = NULL`); RxData recycled. The backend does **not**
+  inspect owner liveness — generic `kl_udp_comp_dispatch` recovers the owner via `ev->life` and **drops
+  the delivery if the owner is dead**, then releases the ref. (The backend's only *no-event* drops are the
+  stale-EFI-child validation and teardown/quarantine below.)
 - **CANCEL-DRAINING** — close/teardown called `Cancel(token)`; polling CheckEvent for the (EFI_ABORTED)
   signal within a bounded spin budget.
 - **RETIRED** — cancel-drain confirmed the signal → recycle any RxData, release the op's `life` ref.
-- **QUARANTINED** — cancel-drain could NOT confirm within budget → firmware may still own the token /
-  descriptor / RxData / the inbound buffer **forever**. The op (and its inline buffers) is **leaked**,
-  its `life` ref is **never released** (so the token never hits its final release → the inbound slot +
-  receive machine are pinned, never freed — safe), the EFI child/events are **never** CloseEvent'd /
-  DestroyChild'd, and the provider **fail-closes** further datagram I/O on that socket. Leaked until EBS.
+- **QUARANTINED** — cancel-drain could NOT confirm within budget → the token **never signalled**, so the
+  firmware may still own the token / event / op record / Tx descriptor+payload **forever** (its `Packet`
+  union is NOT valid — do not inspect it). The op (and its inline buffers) is **leaked**, its `life` ref
+  is **never released** (retirement unconfirmed → per B.6 keep the ref; the token never hits its final
+  release → the inbound slot + receive machine are pinned, never freed — safe), the EFI child/events are
+  **never** CloseEvent'd / DestroyChild'd, and the provider **fail-closes** further datagram I/O on that
+  socket. Leaked until EBS.
 
 ### 7.3 Transitions
 
 | From | Trigger | Action | To |
 |---|---|---|---|
-| POSTED | `CheckEvent`=SUCCESS (drain) | copy-out+recycle RxData; emit event (`ev->life=op->life; op->life=NULL`) or drop if owner dead; re-arm recv | COMPLETED |
+| POSTED | `CheckEvent`=SUCCESS (drain), EFI child still valid | copy-out+recycle RxData; **always** emit event (`ev->life=op->life; op->life=NULL`); generic dispatch drops delivery if owner dead + re-arms | COMPLETED |
+| POSTED | `CheckEvent`=SUCCESS but `kl_uefi_udp_valid_h` fails (stale child) | no event; release `op->life`; free op | RETIRED (no-event) |
 | POSTED | socket close / owner `kl_udp_free` while token outstanding | `Cancel(token)` | CANCEL-DRAINING |
 | CANCEL-DRAINING | `CheckEvent`=SUCCESS within budget | recycle RxData if present; `kl_dgram_life_release(op->life)`; free op slot | RETIRED |
 | CANCEL-DRAINING | budget exhausted, no signal | mark op+slot `quarantined`; **do NOT** release `life`, CloseEvent, or DestroyChild; fail-close the socket | QUARANTINED |
@@ -241,13 +303,19 @@ datagrams**: the interaction with the stable token and with firmware-owned `RxDa
 - **`kl_udp_free` with an outstanding EFI recv token:** `udp.c` marks the token dead + drops the owner
   ref (it does **not** force-retire the physical op — B.6). The EFI provider's **socket close**
   (`efi_sock_close` for the UDP slot, invoked when `udp.c` calls `kl_sock_close`) is where `Cancel`+drain
-  runs. If drain confirms → the op releases its `life` ref (possibly the final release → `on_final` frees
-  the inbound slot, now safe). If drain fails → **quarantine**: the op keeps its `life` ref forever, so
-  `on_final` never runs and the inbound slot is pinned (safe against firmware writes). Ordering: the
-  socket-close cancel-drain reconciles the token **before** any buffer is eligible to be freed.
-- **RecycleSignal under quarantine:** if a quarantined Rx op still holds a firmware `RxData` we can't
-  prove is retired, we do **not** SignalEvent it (the firmware may already be mid-write) — it leaks with
-  the rest until EBS. On the confirmed cancel-drain path, recycle it normally.
+  runs. If drain confirms retirement → the op releases its `life` ref (possibly the final release →
+  `on_final` frees the inbound slot/machine — safe, the op is genuinely retired). If drain fails →
+  **quarantine**: the op keeps its `life` ref forever, so `on_final` never runs and the inbound
+  slot/machine stays pinned — **because retirement is unconfirmed** (a token that may still complete must
+  not have its receive machine freed), and separately the firmware-reachable EFI storage
+  (token/event/op/Tx payload) is leaked. Ordering: the socket-close cancel-drain reconciles the token
+  **before** any buffer is eligible to be freed.
+- **RecycleSignal vs signalling:** `RxData` (and thus `RecycleSignal`) exists **only after a signalled
+  completion**. On a **signalled** Rx terminal — normal completion OR a cancel-drain that observed the
+  `EFI_ABORTED` signal — read `Packet.RxData`; if non-NULL, copy out (on the clean path) and **always**
+  `SignalEvent(RxData.RecycleSignal)` to return the firmware buffer (even on the aborted-but-signalled
+  path, exactly as `dns_uefi.c` does). On the **quarantine** path the token **never signalled**, so there
+  is no published `RxData` to recycle — do **not** touch `Packet` at all; it leaks with the op until EBS.
 - **Fail-close scope:** a quarantine fail-closes **that datagram socket** (`dead=1`), and — matching
   `dns_uefi.c`'s `g_dns_quarantined` — a provider-level "a firmware that can't cancel is unusable" latch
   may fail-close further datagram sockets. (Whether the latch is per-socket or provider-wide is an
@@ -257,8 +325,10 @@ datagrams**: the interaction with the stable token and with firmware-owned `RxDa
   `kl_uefi_shutdown()`.
 
 **FROZEN #6:** the cancel/quarantine state machine above, with the **token-ref rule**: a quarantined
-receive op **never releases its stable-token ref** (pins the inbound storage, so `on_final` cannot free a
-firmware-owned buffer); confirmed cancel-drain releases normally; EBS is fail-closed everywhere.
+receive op **never releases its stable-token ref** because **retirement is unconfirmed** (B.6) — which
+keeps `on_final` from freeing the receive machine while a possibly-still-live op is outstanding; quarantine
+separately pins the firmware-reachable EFI storage. An unsignalled token's `Packet` is never inspected;
+confirmed cancel-drain releases normally; EBS is fail-closed everywhere.
 
 ---
 
@@ -302,27 +372,39 @@ Two layers, matching the KlStream/UEFI coverage bar (host-mock ≠ real firmware
 - **AAAA over EFI_UDP4** — EFI_UDP4 is IPv4-only; AAAA queries still go out over UDP4 to the nameserver
   (the *transport* is v4, the *record* is v6) — no EFI_UDP6 needed for the resolver. `dns_is_literal`
   v6 shortcuts and v6 answers are unaffected (they never open a v6 socket).
-- **Sync `dgram->send/recv` fallbacks** — provide them (Transmit/Receive + `pump_or_cancel`) for the
-  source-pinned/TOS send path, or leave NULL and document that EFI datagram send requires the completion
-  path. Lean: provide the sync send fallback (cheap, mirrors `dns_uefi.c`); recv fallback optional.
+- **`dgram->send` fallback shape** — FROZEN #1 fixes `dgram->recv = NULL` and requires `dgram->send` (if
+  provided) to use an independent Tx token under §7. The only open choice is provide-vs-reject for
+  source-pinned/TOS sends: implement the sync independent-Tx-token `Transmit` (cheap, mirrors
+  `dns_uefi.c`) **or** return `KL_DATAGRAM_UNSUPPORTED`. Recommendation: implement it (small, and keeps a
+  general `KlUdp` source-pinned send working); revisit only if it complicates the quarantine latch.
 
 ---
 
 ## 11. Frozen decisions (summary)
 
 1. **Completion-native** EFI datagram I/O; `post_dgram_recv/_send` in `event_efi.c`; `dgram->configure`
-   mandatory, `dgram->send/recv` sync fallbacks only.
+   mandatory; **`dgram->recv = NULL`** (no second receive machine); **`dgram->send`** = a sync
+   independent-Tx-token fallback under the §7 discipline **or** `KL_DATAGRAM_UNSUPPORTED` for
+   source-pin/TOS (DNS uses neither — it rides `post_dgram_send`).
 2. **Unified** EFI provider (stream+datagram) on one handle space; `socket()` dispatches child by `type`.
 3. **Handle discrimination** = tagged handle (transport tag ‖ slot+1) + separate per-transport pools with
-   distinct magics + even/odd generation stale-guard from stable storage; owner recovered via `ev->life`,
-   EFI child validated via the tagged-handle generation guard (two independent guards).
+   distinct magics. Tag prevents cross-transport confusion; the generation stale-guard (slot storage)
+   protects **captured-at-post backend ops**, NOT arbitrary reused caller handles (same as EFI_TCP4;
+   caller-owns-close contract). Owner recovered via `ev->life`; EFI child validated via the
+   captured-generation guard (two independent guards). Generation-in-handle is out of scope.
 4. **Unconnected `Configure`**; per-datagram dest via `TxData.UdpSessionData`; src+dest from
-   `RxData.UdpSession`; **`RecycleSignal` on every Rx completion incl. the abort path** (or leaked under
-   quarantine).
+   `RxData.UdpSession`; a token's `Packet` is valid **only after it signals** — recycle `RxData` via
+   `RecycleSignal` on every **signalled** Rx terminal (incl. aborted-and-signalled); an **unsignalled**
+   (quarantined) token's `Packet` is never inspected (leaks until EBS).
 5. **B.6 stable-token** obligations identical to the other four backends (retain-at-post,
    transfer-to-event, release-on-drop).
 6. **Cancel/quarantine state machine** (§7) with the token-ref rule: a **quarantined receive op never
-   releases its token ref** (pins the inbound storage so `on_final` can't free a firmware-owned buffer);
-   confirmed cancel-drain releases normally; **EBS fail-closed** everywhere; live-count 0 before shutdown.
+   releases its stable-token ref** — because **retirement is unconfirmed** (B.6: release only on genuine
+   retirement), which keeps `on_final` from freeing the inbound slot/machine while a possibly-still-live
+   op is outstanding. Quarantine pins the **firmware-reachable EFI storage** (token/event/op/Tx payload);
+   the inbound slot is NOT firmware-written before completion. An **unsignalled** token's `Packet` union
+   is never inspected/recycled. On a **signalled** completion the backend always emits+transfers `life`
+   (owner-dead drop is generic dispatch's job, not the backend's). Confirmed cancel-drain releases
+   normally; **EBS fail-closed** everywhere; live-count 0 before shutdown.
 7. **Acceptance** = host mock-EFI unit test (state machine incl. quarantine) **and** QEMU/OVMF e2e (6.4c);
    the `dns_uefi.c` retirement is a separate later step; `KlDgramClose`/Step-7 is not claimed here.
