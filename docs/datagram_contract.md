@@ -271,6 +271,16 @@ report its absence rather than silently misbehaving.
   A generation/duplicate stamp MAY *additionally* reject a stale or duplicate completion **while
   the object is still alive**, but under strict detachment a completion after legal reuse is
   impossible, so the stamp is defensive, not the primary guarantee.
+- **Status (Phase B.6, 2026-08-12): the backend-owned stable token is implemented on all three
+  primary completion backends** — pollcomp (B.6.1), io_uring (B.6.2), IOCP (B.6.3). The neutral
+  token lives in `src/datagram_life.{h,c}` (a single-thread refcount + nullable target +
+  `on_final`, allocated from the event-ctx allocator so it outlives `KlUdp`); `KlCompletionEvent`
+  carries it in `life`. Each backend captures the recv buffer + flags at post and retains one token
+  ref per posted op; the completion transfers that ref to the event (released after dispatch), and
+  the op-free path releases a still-held ref on every drop-without-event path (post-failure unwind,
+  silent cancel, loop teardown). No completion backend dereferences the `KlDatagram` (or its
+  embedding `KlUdp`) after post. lwIP-raw remains on the legacy `target` fallback (its copy-ring is
+  already lifetime-safe; conversion for uniformity is the one remaining backend).
 - The recv buffer and any queued send slots are the object's own memory; a backend MUST NOT be
   handed a pointer it can dereference after the object detaches. `kl_datagram_*_free` refuses
   while an op is in flight (mirror `stream_write.c:160-168`).
@@ -355,8 +365,9 @@ require — e.g. recv `local` is simply absent when pktinfo is off.
 **Truncation is not a capability.** Detecting and flagging truncation (invariant 5, decision #7)
 is **mandatory for every Tier-1 implementation** — its absence is non-conformance, not a
 runtime-degradable feature — so there is no `KL_DGRAM_CAP_TRUNCATION` to publish (a conforming
-object would always set it). The one backend that does not yet detect it (IOCP — must parse
-`WSAMSG.dwFlags`) is tracked as a ⚙ cell in the §10 matrix, not as an absent capability.
+object would always set it). The last backend to lack it, IOCP, now parses `WSAMSG.dwFlags` /
+`WSAEMSGSIZE` (Step 5, via the pure `dgram_recv_classify.h` helper), so every completion backend
+is ✅ on the §10 truncation row.
 
 ---
 
@@ -372,11 +383,11 @@ limitation · ⚙ to build.
 | Atomic whole-packet send | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚙ (1 Tx token) |
 | Packet-slot bounded **send** queue | ⚙ (recast from byte-FIFO) | ⚙ | ⚙ | ⚙ | ⚙ | ⚙ (no preallocated atomic send-slot queue; the 16-slot ring is receive-side) | ⚙ |
 | Strict pause (post no more recv) | ⚙ (drop interest) | ⚙ | ⚙ (latch) | ⚙ (latch) | ⚙ (latch) | ⚙ | ⚙ |
-| Cancel-once + confirmed detachment | ✅ (no async op) | ✅ | ⚙ (reap before free) | ⚙ (reap before free) | ✅ (dequeue-before-free) | ✅ (copy-ring, memset) | ⚙ (Cancel + quarantine model) |
-| Lifetime: no op refs object after detach | ✅ (no async op) | ✅ | ⚙ (reap or stable token) | ⚙ (reap or stable token) | ✅ (dequeue-before-free) | ✅ (copy-ring) | ⚙ (Cancel + confirmed retire) |
+| Cancel-once + confirmed detachment | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (copy-ring, memset) | ⚙ (Cancel + quarantine model) |
+| Lifetime: no op refs object after detach | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (copy-ring) | ⚙ (Cancel + confirmed retire) |
 | `peer` (source) on every recv | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚙ |
-| Truncation detected + flagged | ✅ (`MSG_TRUNC`) | ✅ | ✅ | ✅ | ✖→⚙ (**must parse `dwFlags`**) | ✅ (ring flag) | ⚙ |
-| Recv storage = object's dedicated inbound slot (no `KlUdp` deref) | ⚙ | ⚙ | ⚙ | ⚙ | ⚙ | ⚙ (replace copy-ring with the one dedicated inbound slot) | ⚙ |
+| Truncation detected + flagged | ✅ (`MSG_TRUNC`) | ✅ | ✅ | ✅ | ✅ (`dwFlags`/`WSAEMSGSIZE`, Step 5) | ✅ (ring flag) | ⚙ |
+| Recv storage = object's dedicated inbound slot (no `KlUdp` deref) | ✅ | ✅ | ✅ (token pins slot) | ✅ (token pins slot) | ✅ (token pins slot) | ⚙ (replace copy-ring with the one dedicated inbound slot) | ⚙ |
 | **Capabilities** | | | | | | | |
 | pktinfo (`local`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ | ✖ |
 | multicast | ✅ | ✅ (no v4 by-index ✖) | ✅ | ✅(ctl) | ✅(ctl) | ✖ | ✖ |
@@ -387,12 +398,14 @@ limitation · ⚙ to build.
 | source-pin send | ✅ | ✅ | ✅ | ▲ (sync seam) | ▲ (sync seam) | ✖ | ✖ |
 | connected mode | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ (rejected) | ⚙ |
 
-**Reading the matrix:** the ⚙ cells in the top block (queue, strict pause, lifetime ownership,
-object-owned buffer) are exactly the Phase-B work; they are uniform across the completion
-backends. The ✖ capability cells are *documented limitations* — consumers query caps (§9) and
-degrade. **EFI_UDP4 is the only column that is ⚙ end-to-end** (no datagram integration exists;
-build a persistent provider from the `dns_uefi.c` token machine — audit §6). The IOCP
-truncation cell (✖→⚙) is the one *correctness* gap to close, not merely a capability.
+**Reading the matrix:** lifetime ownership + object-owned buffer are now ✅ across the three
+primary completion backends (pollcomp/io_uring/IOCP) via the backend-owned stable token
+(**Phase B.6 complete**, §5 status); the remaining ⚙ cells in the top block are the packet-slot
+**send** queue and strict pause. The ✖ capability cells are *documented limitations* — consumers
+query caps (§9) and degrade. **EFI_UDP4 is the only column that is ⚙ end-to-end** (no datagram
+integration exists; build a persistent provider from the `dns_uefi.c` token machine — audit §6).
+lwIP-raw is ⚙ only on the object-owned-buffer row (copy-ring, lifetime-safe) — the one remaining
+completion backend to fold onto the stable token + dedicated inbound slot.
 
 ---
 

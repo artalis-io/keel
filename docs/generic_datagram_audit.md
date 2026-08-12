@@ -258,15 +258,16 @@ detachment; source-addr on every recv; truncation detection.
 | Backend | Blocking gaps |
 |---|---|
 | POSIX / Winsock readiness | Recv is a *level-triggered drain loop* — reframe as a bounded sequence of **serial receive operations** under one armed READ source, re-checking pause/close after every callback (the interest is an armed source, not an in-flight op; the ≤N/tick drain is a fairness bound). No structural blocker otherwise. |
-| pollcomp | No reap-before-free → borrowed recv_buf can outlive the object (UAF); "confirmed detachment" not guaranteed (cancel emits a late error completion the buffer must outlive). Fix = reap-before-free or a backend-owned stable token. |
-| io_uring | No reap-before-free → borrowed recv_buf UAF; cancel best-effort (may miss on full SQ); strict pause needs an explicit "don't re-post" latch (today re-post is implicit in `kl_udp_comp_on_recv`). |
-| IOCP | Best positioned (dequeue-before-free = lifetime-safe by construction); **truncation not surfaced** (must parse `WSAMSG.dwFlags`). |
+| pollcomp | ~~No reap-before-free → borrowed recv_buf can outlive the object (UAF); "confirmed detachment" not guaranteed.~~ **RESOLVED (Phase B.6.1):** backend-owned stable token (`datagram_life.c`) — the op captures the buffer + retains a token ref at post, so a late/cancelled completion lands on live token state and the receive storage outlives every op. |
+| io_uring | ~~No reap-before-free → borrowed recv_buf UAF~~ (**RESOLVED, Phase B.6.2:** stable token); strict pause `don't re-post` latch landed in Step 3 (`datagram_recv.c`). |
+| IOCP | Best positioned (dequeue-before-free = lifetime-safe by construction); truncation surfaced (Step 5, `WSAMSG.dwFlags`); **stable token added (Phase B.6.3)** so the completion never dereferences the freed `KlDatagram`. |
 | lwIP-raw | Raw provider `.dgram = NULL` → no control-plane dgram ops (configure/set_tos/mcast) — needs a stub or `kl_sockdef_dgram` fallback; no local addr (pktinfo); IPv4/loopback only; connected-send rejected. Copy-ring already avoids UAF and detects truncation, **but its 16-slot ring accumulates multiple transport-owned packets → does NOT yet satisfy strict one-held-packet pause (⚙ — rework to a single held inbound slot).** |
 | EFI_UDP4 | **No datagram integration at all** — build a persistent `KlDatagram` provider from the `dns_uefi.c` token machine (one Rx token in flight, one Tx per send, `EFI_UDP4.Cancel` + confirmed retirement; the quarantine logic already models confirmed-or-fail-closed). No pktinfo/mcast/bcast/TOS. |
 
-**Cross-cutting:** (1) no lifetime-safe teardown on io_uring/pollcomp — a posted op can
-reference freed object memory (IOCP compensates via dequeue-before-free); the fix is confirmed
-detachment / a backend-owned stable token, not a generation stamp;
+**Cross-cutting:** (1) ~~no lifetime-safe teardown on io_uring/pollcomp — a posted op can
+reference freed object memory~~ — **RESOLVED (Phase B.6):** confirmed detachment via the
+backend-owned stable token (not a generation stamp) now covers pollcomp/io_uring/IOCP; lwIP-raw
+stays lifetime-safe via its copy-ring (token fold-in pending);
 (2) borrowed single `recv_buf` everywhere except lwIP-raw → the neutral object must own the
 recv buffer (or copy, as lwIP-raw's ring does); (3) truncation not uniform (IOCP gap);
 (4) `KlUdp*` target leaks into the abstract axis (§4); (5) strict pause has no explicit latch.
