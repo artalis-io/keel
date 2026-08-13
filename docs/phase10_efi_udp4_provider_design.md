@@ -270,6 +270,24 @@ Corollary: an **unsignalled** token has **no valid `Packet` union** — do NOT i
 `Packet.RxData` (or read `Packet.TxData`) of a token that never signalled (the quarantine path). `RxData`
 + `RecycleSignal` exist only once firmware has published them through a **signalled** completion.
 
+### 7.1a Operation identity — the completion primitives select the EXACT posted op (review-High)
+The completion backend polls an op that was posted EARLIER; between post and poll the slot may have been
+**closed** (dead) or **closed-and-REUSED** (a new socket at the same handle value). Resolving the op
+through the live handle alone (`udp_of(fd)`) is therefore **unsafe**: a dead slot skips the op (its
+firmware buffer never returned), and a reused slot lets the poll touch the **new** socket's token
+(cross-generation confusion). So the primitives take the **generation captured at post**
+(`kl_uefi_udp_generation_h` after `post_recv`/`post_send`) and resolve the exact record via **stable slot
+storage + a generation match** — never `udp_of(fd)`:
+- **generation matches** → the live posted op → poll/copy/recycle as below;
+- **generation differs** (closed / reused / quarantined) → the op is **stale**: it was already
+  **reaped+recycled at close** (single-threaded — `kl_uefi_udp_close` runs its `Cancel`+drain, which
+  recycles a signalled `RxData`, *before* any reuse; a quarantined slot is never reused), so the poll
+  returns a **terminal-DROP without touching the (possibly reused) token**.
+
+So for EFI the "signalled stale-child recycle" of §7.4 is realized **at close** (the synchronous reap
+point), and a stale-generation poll performs no token access. This is the concrete EFI form of the B.6
+"never resolve a stale completion through the object" rule.
+
 ### 7.2 States (per datagram op)
 - **POSTED** — token submitted, event not yet signalled; op holds one `life` ref.
 - **COMPLETED** — CheckEvent fired (signalled). The op **always emits** the `KL_COMP_DGRAM_*` event and
@@ -325,6 +343,11 @@ Corollary: an **unsignalled** token has **no valid `Packet` union** — do NOT i
   copy into the now-stale owner buffer), then release `op->life` and retire the op **without emitting**.
   Skipping the recycle here would leak the firmware buffer. (Tx has no firmware buffer to recycle.) This
   differs from quarantine, where the token is **un**signalled and `Packet` must not be touched.
+  **EFI realization (§7.1a):** for this provider the reap+recycle happens synchronously at
+  `kl_uefi_udp_close` (which runs before any slot reuse), and the completion primitives select the exact
+  op by **captured generation over stable storage** — so a stale-generation drain poll performs **no token
+  access at all** (the token was already reaped). The generic drain-time recycle above is the abstract
+  form; §7.1a is how EFI satisfies it without ever resolving a stale op through `udp_of(fd)`.
 - **Fail-close scope:** a quarantine fail-closes **that datagram socket** (`dead=1`), and — matching
   `dns_uefi.c`'s `g_dns_quarantined` — a provider-level "a firmware that can't cancel is unusable" latch
   may fail-close further datagram sockets. (Whether the latch is per-socket or provider-wide is an

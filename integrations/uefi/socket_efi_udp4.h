@@ -106,36 +106,49 @@ int  kl_uefi_udp_valid_h(KlSocketHandle fd, unsigned long long generation);
 
 /* ── Completion-native token primitives (driven by event_efi.c post_dgram_* + drain) ──
  *
+ * OPERATION IDENTITY (review-High): the completion backend polls an operation that was posted
+ * EARLIER, and between post and poll the slot may have been closed (dead) or CLOSED-AND-REUSED
+ * (a NEW socket at the same handle value). Resolving the op through the live handle alone
+ * (udp_of(fd)) is therefore UNSAFE: a dead slot would skip the op, and a reused slot would let
+ * the poll touch the NEW socket's token (cross-generation confusion). So every poll/cancel/query
+ * below takes the GENERATION captured at post (kl_uefi_udp_generation_h after post_recv/_send) and
+ * resolves the EXACT posted record via STABLE slot storage + a generation match — NEVER udp_of(fd).
+ * If the generation no longer matches (closed / reused / quarantined), the op is STALE: it was
+ * already reaped+recycled at close (single-threaded — close runs before any reuse), so the poll
+ * returns a terminal-DROP WITHOUT touching the (possibly reused) token.
+ *
  * RECEIVE (serial — at most one Receive token outstanding per socket):
- *   post_recv  → issue EFI_UDP4.Receive(&rx_tok) WITHOUT pumping. 0 = posted, -1 = error.
- *   poll_recv  → Poll()+CheckEvent(rx_tok): 0 = pending; 1 = terminal (signalled). On a
- *                terminal, if @copy_into != NULL coalesce the datagram into it (bounded by
- *                @cap; *out_trunc set if the datagram exceeded @cap), fill out_src + out_local
- *                from RxData.UdpSession, and set out_bytes + out_ok; if @copy_into == NULL
- *                (stale-child no-event drop) recycle WITHOUT copying. RxData.RecycleSignal is
- *                ALWAYS signalled on a signalled terminal with non-NULL RxData. -1 = invalid fd.
+ *   post_recv  → issue EFI_UDP4.Receive(&rx_tok) WITHOUT pumping (on the live slot). 0/-1.
+ *   poll_recv  → resolve {fd,@generation}: -1 = not a datagram handle; STALE → 1 with out_ok=0
+ *                (terminal-drop, token untouched). LIVE + Poll()+CheckEvent: 0 = pending; 1 =
+ *                terminal (signalled) → coalesce the datagram into @copy_into (bounded by @cap;
+ *                *out_trunc if it exceeded @cap), fill out_src + out_local from RxData.UdpSession,
+ *                set out_bytes + out_ok, and ALWAYS SignalEvent(RxData.RecycleSignal). (@copy_into
+ *                NULL on a live signalled token recycles WITHOUT copying — a drain-without-deliver.)
  *                Marks the token no longer posted (close must not re-drain it).
  *
  * TRANSMIT (independent Tx token — completion send):
- *   post_send  → issue EFI_UDP4.Transmit(&tx_tok) with a copied payload + per-datagram @dest
- *                (UdpSessionData). 0 = posted, -1 = error.
- *   poll_send  → Poll()+CheckEvent(tx_tok): 0 = pending; 1 = terminal (out_bytes + out_ok);
- *                -1 = invalid fd.
+ *   post_send  → issue EFI_UDP4.Transmit(&tx_tok) with a copied payload + per-datagram @dest. 0/-1.
+ *   poll_send  → resolve {fd,@generation} (same stale rule): 0 = pending; 1 = terminal
+ *                (out_bytes + out_ok, or out_ok=0 on stale); -1 = not a datagram handle.
  *
  * CANCEL (close / kl_udp_free while a token is outstanding):
- *   cancel_recv / cancel_send → Cancel(token) + bounded drain. 1 = retired (recycle a
- *                signalled RxData), 0 = UNCONFIRMED → the caller quarantines. */
+ *   cancel_recv / cancel_send → resolve {fd,@generation}; Cancel(token) + bounded drain.
+ *                1 = retired (recycle a signalled RxData) or already-stale; 0 = UNCONFIRMED →
+ *                the caller quarantines. */
 int kl_uefi_udp_post_recv(KlSocketHandle fd);
-int kl_uefi_udp_poll_recv(KlSocketHandle fd, void *copy_into, size_t cap,
+int kl_uefi_udp_poll_recv(KlSocketHandle fd, unsigned long long generation,
+                          void *copy_into, size_t cap,
                           KlSockAddr *out_src, KlSockAddr *out_local,
                           int *out_trunc, size_t *out_bytes, int *out_ok);
 int kl_uefi_udp_post_send(KlSocketHandle fd, const void *data, size_t len,
                           const KlSockAddr *dest);
-int kl_uefi_udp_poll_send(KlSocketHandle fd, size_t *out_bytes, int *out_ok);
-int kl_uefi_udp_cancel_recv(KlSocketHandle fd);
-int kl_uefi_udp_cancel_send(KlSocketHandle fd);
-/* 1 iff a Receive token is currently outstanding on @fd (drain iterates only posted ops). */
-int kl_uefi_udp_recv_posted(KlSocketHandle fd);
-int kl_uefi_udp_send_posted(KlSocketHandle fd);
+int kl_uefi_udp_poll_send(KlSocketHandle fd, unsigned long long generation,
+                          size_t *out_bytes, int *out_ok);
+int kl_uefi_udp_cancel_recv(KlSocketHandle fd, unsigned long long generation);
+int kl_uefi_udp_cancel_send(KlSocketHandle fd, unsigned long long generation);
+/* 1 iff a Receive/Transmit token is currently outstanding on the EXACT op {fd,@generation}. */
+int kl_uefi_udp_recv_posted(KlSocketHandle fd, unsigned long long generation);
+int kl_uefi_udp_send_posted(KlSocketHandle fd, unsigned long long generation);
 
 #endif /* KEEL_UEFI_SOCKET_EFI_UDP4_H */

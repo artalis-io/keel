@@ -20,7 +20,10 @@ cd "$(dirname "$0")"
 # Refresh the archive symbol index: a parallel `make -j` can leave libkeel.a with a stale/
 # partial armap, which GNU ld then fails to resolve members from (e.g. kl_monotonic_ms via
 # clock_snapshot.c) — even though the member defines the symbol. ranlib is a safe no-op on macOS.
-ranlib "$KEEL_ROOT/libkeel.a" 2>/dev/null || true
+# Require it to SUCCEED when the archive is present (a silent skip would drop us back into the
+# nondeterministic link failure); use $RANLIB if the toolchain provides one.
+: "${RANLIB:=ranlib}"
+"$RANLIB" "$KEEL_ROOT/libkeel.a"
 
 CFLAGS=(
   -std=c11 -g -O1 -fno-omit-frame-pointer

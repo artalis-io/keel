@@ -115,6 +115,23 @@ static KlUefiUdp *udp_slot_of(KlSocketHandle fd) {
     return &g_udp_conns[idx1 - 1];
 }
 
+/* Resolve the EXACT posted operation via STABLE storage + the captured generation — the
+ * completion-op identity (review-High). Returns the slot IFF it is still the live op that was
+ * posted (magic set, not dead, generation matches); NULL if the op is STALE (closed / reused /
+ * quarantined) OR @fd is not a datagram handle. A stale op is NEVER resolved through udp_of(),
+ * so a poll can never touch a reused slot's token. @stale (optional) distinguishes "not a udp
+ * handle" (0) from "udp handle but stale generation" (1). */
+static KlUefiUdp *udp_op_of(KlSocketHandle fd, unsigned long long gen, int *stale) {
+    if (stale) *stale = 0;
+    KlUefiUdp *u = udp_slot_of(fd);
+    if (!u) return NULL;                         /* not a datagram handle */
+    if (u->magic != KL_EFI_UDP_MAGIC || u->dead || u->generation != (UINT64)gen) {
+        if (stale) *stale = 1;                   /* valid udp handle, but the op is gone */
+        return NULL;
+    }
+    return u;
+}
+
 unsigned long long kl_uefi_udp_generation_h(KlSocketHandle fd) {
     KlUefiUdp *u = udp_of(fd);   /* live read: captured at post time */
     return u ? (unsigned long long)u->generation : 0ULL;
@@ -333,8 +350,12 @@ static void udp_recycle_rx(KlUefiUdp *u) {
 }
 
 /* ── completion-native token primitives ──────────────────────────────────────────── */
-int kl_uefi_udp_recv_posted(KlSocketHandle fd) { KlUefiUdp *u = udp_of(fd); return u && u->rx_posted; }
-int kl_uefi_udp_send_posted(KlSocketHandle fd) { KlUefiUdp *u = udp_of(fd); return u && u->tx_posted; }
+int kl_uefi_udp_recv_posted(KlSocketHandle fd, unsigned long long gen) {
+    KlUefiUdp *u = udp_op_of(fd, gen, NULL); return u && u->rx_posted;
+}
+int kl_uefi_udp_send_posted(KlSocketHandle fd, unsigned long long gen) {
+    KlUefiUdp *u = udp_op_of(fd, gen, NULL); return u && u->tx_posted;
+}
 
 int kl_uefi_udp_post_recv(KlSocketHandle fd) {
     KlUefiUdp *u = udp_of(fd);
@@ -350,14 +371,17 @@ int kl_uefi_udp_post_recv(KlSocketHandle fd) {
     return 0;
 }
 
-int kl_uefi_udp_poll_recv(KlSocketHandle fd, void *copy_into, size_t cap,
+int kl_uefi_udp_poll_recv(KlSocketHandle fd, unsigned long long gen, void *copy_into, size_t cap,
                           KlSockAddr *out_src, KlSockAddr *out_local,
                           int *out_trunc, size_t *out_bytes, int *out_ok) {
-    KlUefiUdp *u = udp_of(fd);
-    if (!u) return -1;
     if (out_trunc) *out_trunc = 0;
     if (out_bytes) *out_bytes = 0;
     if (out_ok)    *out_ok    = 0;
+    int stale = 0;
+    KlUefiUdp *u = udp_op_of(fd, gen, &stale);   /* EXACT op via stable storage + generation */
+    if (!u)
+        return stale ? 1 : -1;   /* STALE → terminal-DROP (token reaped at close, not touched here);
+                                    !stale → not a datagram handle */
     if (!u->rx_posted) return 0;
     if (kl_uefi_after_ebs()) return 0;
     u->udp->Poll(u->udp);
@@ -447,11 +471,13 @@ int kl_uefi_udp_post_send(KlSocketHandle fd, const void *data, size_t len, const
     return udp_post_send_ex(udp_of(fd), data, len, dest, NULL);   /* completion send: no source pin */
 }
 
-int kl_uefi_udp_poll_send(KlSocketHandle fd, size_t *out_bytes, int *out_ok) {
-    KlUefiUdp *u = udp_of(fd);
-    if (!u) return -1;
+int kl_uefi_udp_poll_send(KlSocketHandle fd, unsigned long long gen, size_t *out_bytes, int *out_ok) {
     if (out_bytes) *out_bytes = 0;
     if (out_ok)    *out_ok    = 0;
+    int stale = 0;
+    KlUefiUdp *u = udp_op_of(fd, gen, &stale);
+    if (!u)
+        return stale ? 1 : -1;   /* STALE → terminal-DROP; !stale → not a datagram handle */
     if (!u->tx_posted) return 0;
     if (kl_uefi_after_ebs()) return 0;
     u->udp->Poll(u->udp);
@@ -465,11 +491,12 @@ int kl_uefi_udp_poll_send(KlSocketHandle fd, size_t *out_bytes, int *out_ok) {
     return 1;
 }
 
-/* Cancel + bounded drain a Receive token. 1 = retired (a signalled RxData is recycled), 0 =
- * UNCONFIRMED (caller quarantines — do NOT touch the Packet). */
-int kl_uefi_udp_cancel_recv(KlSocketHandle fd) {
-    KlUefiUdp *u = udp_of(fd);
-    if (!u) return 1;                            /* nothing live to cancel */
+/* Cancel + bounded drain a Receive token. 1 = retired (a signalled RxData is recycled) OR the op
+ * is already stale (nothing to cancel — reaped at close); 0 = UNCONFIRMED (caller quarantines —
+ * do NOT touch the Packet). Resolves the EXACT op via {fd,@gen} + stable storage. */
+int kl_uefi_udp_cancel_recv(KlSocketHandle fd, unsigned long long gen) {
+    KlUefiUdp *u = udp_op_of(fd, gen, NULL);
+    if (!u) return 1;                            /* not live / already stale — nothing to cancel */
     if (!u->rx_posted) return 1;
     if (kl_uefi_after_ebs()) return 0;           /* cannot drive EFI — treat as unconfirmed */
     u->udp->Cancel(u->udp, &u->rx_tok);
@@ -481,8 +508,8 @@ int kl_uefi_udp_cancel_recv(KlSocketHandle fd) {
     return 0;                                     /* unconfirmed */
 }
 
-int kl_uefi_udp_cancel_send(KlSocketHandle fd) {
-    KlUefiUdp *u = udp_of(fd);
+int kl_uefi_udp_cancel_send(KlSocketHandle fd, unsigned long long gen) {
+    KlUefiUdp *u = udp_op_of(fd, gen, NULL);
     if (!u) return 1;
     if (!u->tx_posted) return 1;
     if (kl_uefi_after_ebs()) return 0;
@@ -594,7 +621,7 @@ static kl_ssize_t dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t
     if (udp_post_send_ex(u, data, len, dest, src) != 0) return -1;   /* full session built pre-submit */
     /* Drive the Tx token to completion (or quarantine on an unconfirmed cancel). */
     if (!udp_pump_until(u->bs, u->udp, u->tx_tok.Event, KL_EFI_UDP_PUMP_SPINS)) {
-        if (kl_uefi_udp_cancel_send(fd) == 0) { u->quarantined = 1; u->dead = 1; }
+        if (kl_uefi_udp_cancel_send(fd, u->generation) == 0) { u->quarantined = 1; u->dead = 1; }
         u->last_status = EFI_TIMEOUT;
         return -1;
     }

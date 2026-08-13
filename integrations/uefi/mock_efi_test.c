@@ -1396,24 +1396,25 @@ static void t_udp_recv_normal(void) {
     KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);   /* unbound DHCP-ephemeral configure */
     CHECK(g_udp_configure_calls == 1, "unbound configure() Configured once");
+    unsigned long long gen = kl_uefi_udp_generation_h(fd);   /* the op identity captured at post */
 
     memcpy(g_udp_resp, "hello", 5); g_udp_resp_len = 5; g_udp_receive_mode = TOK_COMPLETE_OK;
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "post_recv posts a Receive token");
-    CHECK(kl_uefi_udp_recv_posted(fd), "a receive is outstanding");
+    CHECK(kl_uefi_udp_recv_posted(fd, gen), "a receive is outstanding");
     unsigned char buf[64]; KlSockAddr src, local; int trunc = 9; size_t nb = 0; int ok = 0;
-    int rc = kl_uefi_udp_poll_recv(fd, buf, sizeof(buf), &src, &local, &trunc, &nb, &ok);
+    int rc = kl_uefi_udp_poll_recv(fd, gen, buf, sizeof(buf), &src, &local, &trunc, &nb, &ok);
     CHECK(rc == 1, "poll_recv reports a signalled terminal");
     CHECK(ok == 1 && nb == 5 && memcmp(buf, "hello", 5) == 0, "payload copied out");
     CHECK(trunc == 0, "not truncated");
     CHECK(addr_is(&src, 10, 3, 53), "source == 10.0.2.3:53 (anti-spoof discriminator)");
     CHECK(addr_is(&local, 10, 15, 49152), "local (dest) == 10.0.2.15:49152");
     CHECK(g_recycle_signals == 1, "RxData RecycleSignal fired exactly once");
-    CHECK(!kl_uefi_udp_recv_posted(fd), "no receive outstanding after delivery");
+    CHECK(!kl_uefi_udp_recv_posted(fd, gen), "no receive outstanding after delivery");
 
     memcpy(g_udp_resp, "two", 3); g_udp_resp_len = 3;
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "serial re-arm: post_recv again");
     ok = 0; nb = 0;
-    rc = kl_uefi_udp_poll_recv(fd, buf, sizeof(buf), &src, &local, &trunc, &nb, &ok);
+    rc = kl_uefi_udp_poll_recv(fd, gen, buf, sizeof(buf), &src, &local, &trunc, &nb, &ok);
     CHECK(rc == 1 && ok == 1 && nb == 3 && memcmp(buf, "two", 3) == 0, "second datagram delivered");
     CHECK(g_recycle_signals == 2, "second RecycleSignal");
     kl_uefi_udp_close(fd);
@@ -1427,10 +1428,11 @@ static void t_udp_recv_truncate(void) {
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
     const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
+    unsigned long long gen = kl_uefi_udp_generation_h(fd);
     memset(g_udp_resp, 'A', 20); g_udp_resp_len = 20; g_udp_receive_mode = TOK_COMPLETE_OK;
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "post_recv");
     unsigned char buf[8]; KlSockAddr src, local; int trunc = 0; size_t nb = 0; int ok = 0;
-    int rc = kl_uefi_udp_poll_recv(fd, buf, sizeof(buf), &src, &local, &trunc, &nb, &ok);
+    int rc = kl_uefi_udp_poll_recv(fd, gen, buf, sizeof(buf), &src, &local, &trunc, &nb, &ok);
     CHECK(rc == 1 && ok == 1, "delivered");
     CHECK(nb == 8 && trunc == 1, "prefix filled the 8-byte buffer + TRUNCATED flag set");
     kl_uefi_udp_close(fd);
@@ -1443,11 +1445,12 @@ static void t_udp_send_normal(void) {
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
     const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
+    unsigned long long gen = kl_uefi_udp_generation_h(fd);
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
     CHECK(kl_uefi_udp_post_send(fd, "q", 1, &dest) == 0, "post_send posts a Transmit");
     size_t nb = 0; int ok = 0;
-    int rc = kl_uefi_udp_poll_send(fd, &nb, &ok);
+    int rc = kl_uefi_udp_poll_send(fd, gen, &nb, &ok);
     CHECK(rc == 1 && ok == 1 && nb == 1, "poll_send terminal ok, 1 byte");
     CHECK(g_udp_tx_calls == 1 && g_udp_tx_dst[0] == 10 && g_udp_tx_dst[3] == 3 && g_udp_tx_dport == 53,
           "destination captured in the Tx session");
@@ -1462,12 +1465,13 @@ static void t_udp_cancel_confirmed(void) {
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
     const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
+    unsigned long long gen = kl_uefi_udp_generation_h(fd);
     g_udp_receive_mode = TOK_HANG;
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "post_recv (hangs — no completion)");
     g_cancel_signals = 1;
-    CHECK(kl_uefi_udp_cancel_recv(fd) == 1, "cancel_recv confirms retirement");
+    CHECK(kl_uefi_udp_cancel_recv(fd, gen) == 1, "cancel_recv confirms retirement");
     CHECK(g_udp_cancel_calls >= 1, "Cancel(token) was called");
-    CHECK(!kl_uefi_udp_recv_posted(fd), "no receive outstanding after confirmed cancel");
+    CHECK(!kl_uefi_udp_recv_posted(fd, gen), "no receive outstanding after confirmed cancel");
     kl_uefi_udp_close(fd);
     CHECK(g_destroy_child_calls >= 1, "clean teardown (DestroyChild) after confirmed cancel");
     CHECK(kl_uefi_udp_provider_quarantined_count() == 0, "not quarantined");
@@ -1494,22 +1498,62 @@ static void t_udp_quarantine_unconfirmed(void) {
     kl_uefi_udp_close(fd2);
 }
 
-/* Stale-child no-event drop: a SIGNALLED receive whose owner is gone (copy_into==NULL) still
- * recycles the firmware RxData, and does NOT copy into the stale owner buffer. */
-static void t_udp_stale_child_recycle(void) {
-    T_CASE("udp: stale-child no-event drop still recycles RxData (no copy)");
+/* poll_recv no-copy mode: a LIVE signalled receive polled with copy_into==NULL recycles the
+ * firmware RxData without copying (a drain-without-deliver). (This is NOT the stale path — the
+ * op is live; stale is exercised by t_udp_stale_generation_drop below.) */
+static void t_udp_poll_recv_null_copy(void) {
+    T_CASE("udp: poll_recv NULL-copy mode recycles a live signalled token without copying");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
     const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
+    unsigned long long gen = kl_uefi_udp_generation_h(fd);
     memcpy(g_udp_resp, "data", 4); g_udp_resp_len = 4; g_udp_receive_mode = TOK_COMPLETE_OK;
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "post_recv");
     int trunc = 9; size_t nb = 7; int ok = 1;
-    int rc = kl_uefi_udp_poll_recv(fd, NULL, 0, NULL, NULL, &trunc, &nb, &ok);
+    int rc = kl_uefi_udp_poll_recv(fd, gen, NULL, 0, NULL, NULL, &trunc, &nb, &ok);
     CHECK(rc == 1, "poll_recv reports terminal");
-    CHECK(ok == 0 && nb == 0, "no delivery (no copy into stale owner buffer)");
+    CHECK(ok == 0 && nb == 0, "no delivery (copy_into==NULL)");
     CHECK(g_recycle_signals == 1, "firmware RxData still recycled (no leak)");
     kl_uefi_udp_close(fd);
+}
+
+/* REAL stale-generation drop (review-High/Medium): post a receive, close the slot (reaping the
+ * token), then REUSE the same slot with a NEW socket (same handle value, new generation) that posts
+ * its OWN receive. Polling the OLD op {fd, old-gen} must be a terminal-DROP that does NOT touch/
+ * consume the reused slot's token — proving the completion op is selected by captured generation
+ * over stable storage, never by udp_of(fd). The new op then delivers its own datagram correctly. */
+static void t_udp_stale_generation_drop(void) {
+    T_CASE("udp: stale-generation poll drops without touching the reused slot's token");
+    reset_counters(); fresh_udp();
+    KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    (void)ops->configure(NULL, fd, AF_INET_, &cfg);
+    unsigned long long oldgen = kl_uefi_udp_generation_h(fd);
+    memcpy(g_udp_resp, "old", 3); g_udp_resp_len = 3; g_udp_receive_mode = TOK_COMPLETE_OK;
+    CHECK(kl_uefi_udp_post_recv(fd) == 0, "post_recv on the original op");
+    kl_uefi_udp_close(fd);   /* reaps + recycles the original token (Cancel+drain) before reuse */
+    CHECK(g_recycle_signals == 1, "close reaped+recycled the original signalled token");
+
+    KlSocketHandle fd2 = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
+    CHECK(fd2 == fd, "the slot was REUSED (same handle value)");
+    unsigned long long newgen = kl_uefi_udp_generation_h(fd2);
+    CHECK(newgen != oldgen, "the reused slot has a DIFFERENT generation");
+    (void)ops->configure(NULL, fd2, AF_INET_, &cfg);
+    memcpy(g_udp_resp, "new", 3); g_udp_resp_len = 3;
+    CHECK(kl_uefi_udp_post_recv(fd2) == 0, "post_recv on the reused slot (new op)");
+
+    int recyc_before = g_recycle_signals;
+    unsigned char buf[16]; KlSockAddr s, l; int tr = 0; size_t nb = 9; int ok = 1;
+    int rc = kl_uefi_udp_poll_recv(fd, oldgen, buf, sizeof(buf), &s, &l, &tr, &nb, &ok);
+    CHECK(rc == 1 && ok == 0 && nb == 0, "stale-generation poll: terminal-DROP, no delivery");
+    CHECK(g_recycle_signals == recyc_before, "did NOT touch/recycle the reused slot's token");
+    CHECK(kl_uefi_udp_recv_posted(fd2, newgen), "the NEW op is still outstanding (untouched)");
+
+    ok = 0; nb = 0;
+    rc = kl_uefi_udp_poll_recv(fd2, newgen, buf, sizeof(buf), &s, &l, &tr, &nb, &ok);
+    CHECK(rc == 1 && ok == 1 && nb == 3 && memcmp(buf, "new", 3) == 0, "new op delivers its own datagram");
+    kl_uefi_udp_close(fd2);
 }
 
 /* Handle discrimination: a TCP handle is not a UDP slot and vice-versa; a cross-provider
@@ -1616,7 +1660,8 @@ int main(void) {
     t_udp_recv_truncate();
     t_udp_send_normal();
     t_udp_cancel_confirmed();
-    t_udp_stale_child_recycle();
+    t_udp_poll_recv_null_copy();
+    t_udp_stale_generation_drop();
     t_udp_cross_transport_reject();
     t_udp_bind_single_configure();
     t_udp_configure_failclose();
