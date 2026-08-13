@@ -21,3 +21,8 @@ s6_cert_embed.h
 mbedtls_obj/
 esp_s7.img
 vars_rw_s7.fd
+# 6.4c EFI_UDP4 datagram-DNS harness artifacts (per-mode OVMF vars + AArch64 image)
+vars_happy.fd
+vars_tc.fd
+BOOTAA64.EFI
+BOOTAA64.lib

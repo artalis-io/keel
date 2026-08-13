@@ -19,9 +19,11 @@
 #   CC                clang (default)
 #   ARCH              x86_64 (default) | aarch64
 #   KEEL_ROOT         repo root holding the freestanding archive (default: ../..)
-#   ARCHIVE           override the freestanding archive path
+#   ARCHIVE           override the freestanding DNS archive path
+#   CLIENT_ARCHIVE    override the freestanding client archive path
 #   KL_U9_HOSTNAME    hostname the resolver looks up (default keel.test)
 #   KL_U9_NAMESERVER  DNS server the guest queries (default 10.0.2.2 — the SLIRP host)
+#   TARGET_PORT       host HTTP responder port compiled into the GET URL (default 18080)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -38,14 +40,28 @@ case "$ARCH" in
   *) echo "ERROR: unknown ARCH=$ARCH (want x86_64|aarch64)" >&2; exit 2 ;;
 esac
 
+: "${TARGET_PORT:=18080}"
+
+# Two self-contained archives compose without duplicate mem*/strlen (proven by the
+# `make freestanding-dns-link` compose probe): the DNS/datagram stack (dns_resolver + udp +
+# datagram_* + completion) and the client stack (kl_client + response parser). The GET rides
+# the client over EFI_TCP4; the DNS rides the datagram archive over EFI_UDP4.
 : "${ARCHIVE:=$KEEL_ROOT/libkeel_freestanding_dns_selfcontained_$ARCH.a}"
 if [ ! -f "$ARCHIVE" ]; then ARCHIVE="$KEEL_ROOT/libkeel_freestanding_dns_selfcontained.a"; fi
+: "${CLIENT_ARCHIVE:=$KEEL_ROOT/libkeel_freestanding_selfcontained_$ARCH.a}"
+if [ ! -f "$CLIENT_ARCHIVE" ]; then CLIENT_ARCHIVE="$KEEL_ROOT/libkeel_freestanding_selfcontained.a"; fi
 if [ ! -f "$ARCHIVE" ]; then
   echo "ERROR: freestanding DNS archive not found. Run 'make freestanding-lib-dns-selfcontained' in $KEEL_ROOT first." >&2
   exit 2
 fi
-echo "arch=$ARCH triple=$TRIPLE archive=$ARCHIVE"
-echo "hostname=$KL_U9_HOSTNAME nameserver=$KL_U9_NAMESERVER"
+if [ ! -f "$CLIENT_ARCHIVE" ]; then
+  echo "ERROR: freestanding client archive not found. Run 'make freestanding-lib-selfcontained' in $KEEL_ROOT first." >&2
+  exit 2
+fi
+echo "arch=$ARCH triple=$TRIPLE"
+echo "  dns archive:    $ARCHIVE"
+echo "  client archive: $CLIENT_ARCHIVE"
+echo "hostname=$KL_U9_HOSTNAME nameserver=$KL_U9_NAMESERVER port=$TARGET_PORT"
 
 CFLAGS=(
   --target="$TRIPLE"
@@ -55,6 +71,7 @@ CFLAGS=(
   -DKEEL_FREESTANDING
   -DKL_U9_NAMESERVER="\"$KL_U9_NAMESERVER\""
   -DKL_U9_HOSTNAME="\"$KL_U9_HOSTNAME\""
+  -DTARGET_PORT="$TARGET_PORT"
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src"
   -I. -I"$KEEL_ROOT/spikes/uefi"
   -isystem "$SHIM"
@@ -82,7 +99,7 @@ echo "linking $BOOTNAME (lld PE, subsystem=efi_application, -nostdlib)..."
   -ffreestanding -fno-stack-protector -fno-builtin \
   -nostdlib -fuse-ld=lld \
   -Wl,-entry:efi_main -Wl,-subsystem:efi_application \
-  -o "$BOOTNAME" "${OBJS[@]}" "$ARCHIVE"
+  -o "$BOOTNAME" "${OBJS[@]}" "$ARCHIVE" "$CLIENT_ARCHIVE"
 
 echo "built: $(stat -c%s "$BOOTNAME" 2>/dev/null || stat -f%z "$BOOTNAME") bytes -> $BOOTNAME"
 file "$BOOTNAME" || true

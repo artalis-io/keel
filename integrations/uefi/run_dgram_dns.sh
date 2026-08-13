@@ -1,48 +1,52 @@
 #!/usr/bin/env bash
-# run_dgram_dns.sh — 6.4c harness: the STOCK dns_resolver over KlUdp-over-EFI_UDP4 on
-# real firmware. Runs inside the Ubuntu 24.04 container.
-#   1. build the self-contained freestanding DNS archive (make freestanding-lib-dns-selfcontained)
-#   2. build BOOTX64.EFI (build_dgram_dns.sh) with the hostname + nameserver defines
-#   3. build a FAT ESP image with EFI/BOOT/BOOTX64.EFI + startup.nsh
-#   4. start a tiny host DNS server on 0.0.0.0:53 answering A <HOSTNAME> -> 10.0.2.2
-#   5. boot QEMU x86_64 + OVMF (TCG, no KVM), e1000 NIC, SLIRP user-net, serial to stdout
-#   6. capture serial, grep for the 6.4c: markers (resolved / GO)
+# run_dgram_dns.sh — 6.4c harness: the STOCK dns_resolver over KlUdp-over-EFI_UDP4 on real
+# firmware, to the FROZEN acceptance (docs/phase10_efi_udp4_provider_design.md §9). Runs
+# inside the Ubuntu 24.04 container. Two QEMU/OVMF boots of one EFI image:
 #
-# Unlike run_u5.sh this needs NO HTTP responder: the self-test only RESOLVES (the datagram
-# path is the whole point). The guest reaches the host DNS server at 10.0.2.2 (the SLIRP
-# host/gateway), which answers with 10.0.2.2 so the resolved-address print is deterministic.
+#   HAPPY: python DNS answers A keel.test -> 10.0.2.2; python HTTP responder on TARGET_PORT.
+#          Assert: resolver ran A+AAAA over EFI_UDP4, GET returned 200, udp_live==0/quar==0.
+#   TC:    python DNS answers with TC=1 (truncated) + no records. The freestanding resolver
+#          has NO TCP fallback (6.4a-2), so it must settle a clean KL_ERR_DNS — no hang.
+#          Assert: NO-GO, no HTTP 200, udp_live==0, terminal DONE reached (bounded failure).
+#
+# The self-test only reports FACTS; THIS harness is the oracle. It exits non-zero unless BOTH
+# boots pass. The guest reaches host services at 10.0.2.2 (the SLIRP host/gateway).
 #
 # Env:
 #   KEEL_ROOT        repo root (default: ../..)
+#   TARGET_PORT      host HTTP responder port (default 18080)
 #   KL_U9_HOSTNAME   hostname the guest resolves (default keel.test)
 #   KL_U9_NAMESERVER guest-visible DNS server address (default 10.0.2.2)
 #   OVMF_CODE/VARS   override OVMF fds
-#   BOOT_TIMEOUT     qemu timeout seconds (default 200 — DNS + TCG is slow)
+#   BOOT_TIMEOUT     per-boot qemu safety timeout seconds (default 150 — DNS/GET + TCG is slow)
 set -uo pipefail
 cd "$(dirname "$0")"
 
 : "${KEEL_ROOT:=../..}"
+TARGET_PORT="${TARGET_PORT:-18080}"
 KL_U9_HOSTNAME="${KL_U9_HOSTNAME:-keel.test}"
 KL_U9_NAMESERVER="${KL_U9_NAMESERVER:-10.0.2.2}"
-BOOT_TIMEOUT="${BOOT_TIMEOUT:-200}"
-export KL_U9_HOSTNAME KL_U9_NAMESERVER
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-150}"
+export TARGET_PORT KL_U9_HOSTNAME KL_U9_NAMESERVER
 
-echo "=== 6.4c run harness (stock dns_resolver over EFI_UDP4) ==="
-echo "hostname=$KL_U9_HOSTNAME nameserver=$KL_U9_NAMESERVER"
+echo "=== 6.4c run harness (stock dns_resolver over EFI_UDP4 → GET, + TC case) ==="
+echo "hostname=$KL_U9_HOSTNAME nameserver=$KL_U9_NAMESERVER port=$TARGET_PORT"
 
-# ---- 1. build the freestanding self-contained DNS archive (x86_64) ----
+# ---- 1. build both self-contained archives (client + dns/datagram), x86_64 ----
 pick() { for c in "$@"; do command -v "$c" >/dev/null 2>&1 && { echo "$c"; return; }; done; }
 LLVM_NM="$(pick llvm-nm llvm-nm-18 llvm-nm-17 llvm-nm-16)"
 LLVM_AR="$(pick llvm-ar llvm-ar-18 llvm-ar-17 llvm-ar-16)"
 ARCHIVE_ARGS=()
 [ -n "$LLVM_NM" ] && ARCHIVE_ARGS+=( "NM=$LLVM_NM" )
 [ -n "$LLVM_AR" ] && ARCHIVE_ARGS+=( "AR=$LLVM_AR" )
-echo "building libkeel_freestanding_dns_selfcontained.a (${ARCHIVE_ARGS[*]:-default tools}) ..."
+echo "building archives (${ARCHIVE_ARGS[*]:-default tools}) ..."
+( cd "$KEEL_ROOT" && make freestanding-lib-selfcontained "${ARCHIVE_ARGS[@]}" ) \
+  || { echo "CLIENT ARCHIVE BUILD FAILED"; exit 2; }
 ( cd "$KEEL_ROOT" && make freestanding-lib-dns-selfcontained "${ARCHIVE_ARGS[@]}" ) \
-  || { echo "ARCHIVE BUILD FAILED"; exit 2; }
+  || { echo "DNS ARCHIVE BUILD FAILED"; exit 2; }
 
 # ---- 2. build the EFI app ----
-KL_U9_HOSTNAME="$KL_U9_HOSTNAME" KL_U9_NAMESERVER="$KL_U9_NAMESERVER" \
+TARGET_PORT="$TARGET_PORT" KL_U9_HOSTNAME="$KL_U9_HOSTNAME" KL_U9_NAMESERVER="$KL_U9_NAMESERVER" \
   ./build_dgram_dns.sh || { echo "BUILD FAILED"; exit 2; }
 
 # ---- 3. ESP FAT image ----
@@ -54,41 +58,43 @@ mmd    -i "$ESP" ::/EFI
 mmd    -i "$ESP" ::/EFI/BOOT
 mcopy  -i "$ESP" BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
 mcopy  -i "$ESP" startup.nsh ::/startup.nsh
-echo "ESP image built:"
-mdir -i "$ESP" ::/EFI/BOOT/
+echo "ESP image built:"; mdir -i "$ESP" ::/EFI/BOOT/
 
-# ---- 4. host DNS server on 0.0.0.0:53 ----
-# Answers an A query for $KL_U9_HOSTNAME with 10.0.2.2 (the SLIRP host the guest reaches).
-# Also answers AAAA with an empty NOERROR (the stock resolver races A+AAAA — see RFC 8305 —
-# so the AAAA family must not hang; an empty answer lets the A result win cleanly).
-# Binding :53 needs root — the container runs as root, so this is fine.
+# ---- 4. host HTTP responder (happy path GET target) ----
+mkdir -p wwwroot
+printf '6.4c EFI_UDP4 responder OK\n' > wwwroot/index.html
+( cd wwwroot && python3 -m http.server "$TARGET_PORT" --bind 0.0.0.0 ) >/tmp/httpd_u9.log 2>&1 &
+HTTPD_PID=$!
+sleep 1
+echo "python http.server pid=$HTTPD_PID on 0.0.0.0:$TARGET_PORT"
+
+# ---- 5. DNS server (mode-switchable) on 0.0.0.0:53 ----
+# HAPPY: answer A keel.test -> 10.0.2.2, AAAA -> empty NOERROR (A wins, no hang).
+# TC:    every response has TC=1 (truncated) and no records — exercises the freestanding
+#        no-TCP-fallback branch, which must settle KL_ERR_DNS.
 DNS_ANSWER_IP="10.0.2.2"
 cat > /tmp/u9_dns.py <<PYEOF
-import socket, struct, sys
+import socket, struct, sys, os
 
-HOSTNAME = ${KL_U9_HOSTNAME@Q}
+HOSTNAME  = ${KL_U9_HOSTNAME@Q}
 ANSWER_IP = "${DNS_ANSWER_IP}"
+MODE      = os.environ.get("DNS_MODE", "happy")
 
 def parse_qname(data, off):
     labels = []
     while True:
-        if off >= len(data):
-            return None, off
+        if off >= len(data): return None, off
         l = data[off]
-        if l == 0:
-            off += 1
-            break
-        if (l & 0xC0):
-            return None, off
+        if l == 0: off += 1; break
+        if (l & 0xC0): return None, off
         off += 1
-        labels.append(data[off:off+l].decode("ascii", "replace"))
-        off += l
+        labels.append(data[off:off+l].decode("ascii", "replace")); off += l
     return ".".join(labels), off
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("0.0.0.0", 53))
-sys.stderr.write("6.4c DNS server up on 0.0.0.0:53 -> %s A %s\n" % (HOSTNAME, ANSWER_IP))
+sys.stderr.write("6.4c DNS server up on :53 mode=%s -> %s A %s\n" % (MODE, HOSTNAME, ANSWER_IP))
 sys.stderr.flush()
 
 while True:
@@ -96,88 +102,105 @@ while True:
         data, addr = sock.recvfrom(1500)
     except Exception:
         continue
-    if len(data) < 12:
-        continue
+    if len(data) < 12: continue
     tid = data[0:2]
     qname, off = parse_qname(data, 12)
-    if qname is None or off + 4 > len(data):
-        continue
+    if qname is None or off + 4 > len(data): continue
     qtype = struct.unpack(">H", data[off:off+2])[0]
-    sys.stderr.write("6.4c DNS query: %s type=%d from %s\n" % (qname, qtype, addr))
+    sys.stderr.write("6.4c DNS query: %s type=%d mode=%s from %s\n" % (qname, qtype, MODE, addr))
     sys.stderr.flush()
-    # A (1) for the hostname -> one answer; AAAA (28) or others -> NOERROR/no-answer.
-    is_a = (qtype == 1 and qname.lower() == HOSTNAME.lower())
-    ancount = 1 if is_a else 0
-    flags = struct.pack(">H", 0x8180)  # QR|RD|RA, RCODE=0
-    header = tid + flags + struct.pack(">HHHH", 1, ancount, 0, 0)
     question = data[12:off+4]
-    resp = header + question
-    if is_a:
-        resp += b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4)
-        resp += socket.inet_aton(ANSWER_IP)
+    if MODE == "tc":
+        # QR|RD|RA|TC, RCODE=0, no records — a truncated answer.
+        flags = struct.pack(">H", 0x8380)
+        resp = tid + flags + struct.pack(">HHHH", 1, 0, 0, 0) + question
+    else:
+        is_a = (qtype == 1 and qname.lower() == HOSTNAME.lower())
+        ancount = 1 if is_a else 0
+        flags = struct.pack(">H", 0x8180)  # QR|RD|RA, RCODE=0
+        resp = tid + flags + struct.pack(">HHHH", 1, ancount, 0, 0) + question
+        if is_a:
+            resp += b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + socket.inet_aton(ANSWER_IP)
     try:
         sock.sendto(resp, addr)
     except Exception:
         pass
 PYEOF
-python3 /tmp/u9_dns.py >/tmp/u9_dns.log 2>&1 &
-DNS_PID=$!
-sleep 1
-echo "6.4c DNS server pid=$DNS_PID on 0.0.0.0:53 (answers $KL_U9_HOSTNAME -> $DNS_ANSWER_IP)"
-cat /tmp/u9_dns.log || true
 
-cleanup() { kill "$DNS_PID" 2>/dev/null || true; }
+DNS_PID=""
+start_dns() {  # $1 = mode
+  [ -n "$DNS_PID" ] && kill "$DNS_PID" 2>/dev/null || true
+  DNS_MODE="$1" python3 /tmp/u9_dns.py >"/tmp/u9_dns_$1.log" 2>&1 &
+  DNS_PID=$!
+  sleep 1
+  echo "6.4c DNS server pid=$DNS_PID mode=$1"
+}
+
+cleanup() { kill "$HTTPD_PID" "$DNS_PID" 2>/dev/null || true; }
 trap cleanup EXIT
 
-# ---- 5. locate OVMF ----
-find_ovmf() {
-  for c in "${OVMF_CODE:-}" /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd ; do
-    [ -n "$c" ] && [ -f "$c" ] && { echo "$c"; return; }
-  done
-}
-find_vars() {
-  for v in "${OVMF_VARS:-}" /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd ; do
-    [ -n "$v" ] && [ -f "$v" ] && { echo "$v"; return; }
-  done
-}
-OVMF_CODE_FD="$(find_ovmf)"
-OVMF_VARS_FD="$(find_vars)"
+# ---- 6. locate OVMF ----
+find_ovmf() { for c in "${OVMF_CODE:-}" /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd; do [ -n "$c" ] && [ -f "$c" ] && { echo "$c"; return; }; done; }
+find_vars() { for v in "${OVMF_VARS:-}" /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd; do [ -n "$v" ] && [ -f "$v" ] && { echo "$v"; return; }; done; }
+OVMF_CODE_FD="$(find_ovmf)"; OVMF_VARS_FD="$(find_vars)"
 if [ -z "$OVMF_CODE_FD" ]; then echo "ERROR: no OVMF code fd found"; exit 3; fi
-echo "OVMF code: $OVMF_CODE_FD"
-echo "OVMF vars: ${OVMF_VARS_FD:-<none>}"
-VARS_RW=vars_rw.fd
-if [ -n "$OVMF_VARS_FD" ]; then cp "$OVMF_VARS_FD" "$VARS_RW"; fi
+echo "OVMF code: $OVMF_CODE_FD ; vars: ${OVMF_VARS_FD:-<none>}"
 
-# ---- 6. boot QEMU (TCG; no KVM in container) ----
-QEMU_ARGS=(
-  -machine q35
-  -m 512
-  -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE_FD"
-)
-[ -n "$OVMF_VARS_FD" ] && QEMU_ARGS+=( -drive if=pflash,format=raw,file="$VARS_RW" )
-QEMU_ARGS+=(
-  -drive format=raw,file="$ESP"
-  -netdev "user,id=n0"
-  -device e1000,netdev=n0
-  -serial stdio
-  -display none
-  -monitor none
-  -no-reboot
-)
+# ---- 7. one boot: $1 = mode, writes serial to /tmp/serial_<mode>.log ----
+boot() {
+  local mode="$1" serial="/tmp/serial_$1.log"
+  local vars_rw="vars_$1.fd"
+  [ -n "$OVMF_VARS_FD" ] && cp "$OVMF_VARS_FD" "$vars_rw"
+  local args=( -machine q35 -m 512 -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE_FD" )
+  [ -n "$OVMF_VARS_FD" ] && args+=( -drive if=pflash,format=raw,file="$vars_rw" )
+  args+=( -drive format=raw,file="$ESP" -netdev user,id=n0 -device e1000,netdev=n0
+          -serial stdio -display none -monitor none -no-reboot )
+  echo "=== boot mode=$mode (timeout ${BOOT_TIMEOUT}s) ==="
+  timeout "${BOOT_TIMEOUT}" qemu-system-x86_64 "${args[@]}" 2>&1 | tee "$serial"
+  echo "(qemu exit: ${PIPESTATUS[0]} — 124=safety-timeout, expected only if firmware ignored reset -s)"
+}
 
-echo "=== qemu cmd ==="
-echo "timeout ${BOOT_TIMEOUT} qemu-system-x86_64 ${QEMU_ARGS[*]}"
-echo "=== serial output begin ==="
-timeout "${BOOT_TIMEOUT}" qemu-system-x86_64 "${QEMU_ARGS[@]}" 2>&1 | tee /tmp/serial_u9.log
-echo "=== serial output end ==="
+# ---- 8. oracles ----
+FAILS=0
+has() { grep -qE "$2" "$1"; }
 
-echo "=== DNS server log ==="
-cat /tmp/u9_dns.log || true
+assert_happy() {
+  local s=/tmp/serial_happy.log dns=/tmp/u9_dns_happy.log ok=1
+  echo "--- HAPPY oracle ---"
+  has "$s" '6\.4c: DONE'                     && echo "  [ok] terminal DONE reached"        || { echo "  [FAIL] no DONE (crash/hang)"; ok=0; }
+  has "$s" '6\.4c: GO'                        && echo "  [ok] GO"                            || { echo "  [FAIL] no GO"; ok=0; }
+  has "$s" 'http status = 200'               && echo "  [ok] HTTP 200 over EFI_TCP4"        || { echo "  [FAIL] no HTTP 200"; ok=0; }
+  has "$s" 'udp_live = 0 udp_quarantined = 0' && echo "  [ok] udp_live=0 quarantined=0"     || { echo "  [FAIL] dirty UDP teardown"; ok=0; }
+  has "$dns" 'type=1 '                        && echo "  [ok] A query seen over EFI_UDP4"    || { echo "  [FAIL] no A query"; ok=0; }
+  has "$dns" 'type=28 '                       && echo "  [ok] AAAA query seen over EFI_UDP4" || { echo "  [FAIL] no AAAA query"; ok=0; }
+  [ "$ok" = 1 ] && echo "  HAPPY: PASS" || { echo "  HAPPY: FAIL"; FAILS=$((FAILS+1)); }
+}
 
-echo "=== grep markers ==="
-grep -E '6\.4c:' /tmp/serial_u9.log || echo "(no 6.4c markers found)"
-if grep -q '6\.4c: GO' /tmp/serial_u9.log; then
-  echo "RESULT: PASS (stock dns_resolver resolved over EFI_UDP4)"
+assert_tc() {
+  local s=/tmp/serial_tc.log dns=/tmp/u9_dns_tc.log ok=1
+  echo "--- TC oracle (truncated response, no TCP fallback → clean KL_ERR_DNS) ---"
+  has "$s" '6\.4c: DONE'                 && echo "  [ok] terminal DONE reached (bounded, no hang)" || { echo "  [FAIL] no DONE (hang on TC?)"; ok=0; }
+  has "$s" '6\.4c: NO-GO'                && echo "  [ok] NO-GO (did not falsely succeed)"          || { echo "  [FAIL] unexpected GO on TC"; ok=0; }
+  ! has "$s" 'http status = 200'         && echo "  [ok] no HTTP 200 (resolve failed as required)" || { echo "  [FAIL] got HTTP 200 on TC"; ok=0; }
+  has "$s" 'udp_live = 0'                && echo "  [ok] udp_live=0 after failed resolve"          || { echo "  [FAIL] dirty UDP teardown on TC"; ok=0; }
+  has "$dns" 'type=1 '                   && echo "  [ok] guest issued the query (TC path exercised)" || { echo "  [FAIL] no query reached DNS"; ok=0; }
+  [ "$ok" = 1 ] && echo "  TC: PASS" || { echo "  TC: FAIL"; FAILS=$((FAILS+1)); }
+}
+
+# ---- 9. run both boots ----
+start_dns happy; boot happy
+echo "=== HAPPY DNS log ==="; cat /tmp/u9_dns_happy.log || true
+assert_happy
+
+start_dns tc;    boot tc
+echo "=== TC DNS log ==="; cat /tmp/u9_dns_tc.log || true
+assert_tc
+
+echo "======================================================"
+if [ "$FAILS" -eq 0 ]; then
+  echo "RESULT: PASS — stock dns_resolver over EFI_UDP4: GET 200 (happy) + clean KL_ERR_DNS (TC), no UDP leak"
+  exit 0
 else
-  echo "RESULT: FAIL / INCOMPLETE"
+  echo "RESULT: FAIL — $FAILS boot(s) did not meet the frozen 6.4c acceptance"
+  exit 1
 fi
