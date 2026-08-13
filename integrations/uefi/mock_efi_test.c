@@ -1539,6 +1539,34 @@ static void t_udp_quarantine_tx(void) {
     kl_uefi_udp_close(fd2);
 }
 
+/* SYNCHRONOUS dgram->send quarantine (review-High): a sync send whose Transmit times out AND whose
+ * cancel is unconfirmed must go through the SAME centralized quarantine transition as close — bumping
+ * the generation exactly once so {fd, captured_gen} classifies as QUARANTINED (not STALE_RETIRED),
+ * retaining the child/events/token (no DestroyChild/CloseEvent), and never reusing the slot. */
+static void t_udp_sync_send_quarantine(void) {
+    T_CASE("udp: sync dgram->send timeout + unconfirmed cancel → centralized quarantine (gen bumped once)");
+    reset_counters(); fresh_udp();
+    KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    (void)ops->configure(NULL, fd, AF_INET_, &cfg);
+    unsigned long long gen = kl_uefi_udp_generation_h(fd);
+    int q_before = kl_uefi_udp_provider_quarantined_count();
+    g_udp_transmit_mode = TOK_HANG;   /* Transmit posts but never completes */
+    g_cancel_signals    = 0;          /* and the cancel-drain cannot confirm → quarantine */
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+    CHECK(ops->send(NULL, fd, "x", 1, &dest, NULL, -1) < 0, "sync send fails on transmit timeout");
+    CHECK(g_destroy_child_calls == 0, "quarantine: no DestroyChild (child retained)");
+    CHECK(g_close_proto_calls == 0, "quarantine: no CloseProtocol (child retained)");
+    CHECK(kl_uefi_udp_provider_quarantined_count() == q_before + 1, "this sync send quarantined one slot");
+    CHECK(kl_uefi_udp_provider_live_count() == 0, "quarantined slot is not live (never reusable)");
+    /* The load-bearing invariant: {fd, captured_gen} → QUARANTINED (generation bumped exactly once). */
+    CHECK(kl_uefi_udp_op_state(fd, gen) == KL_UEFI_UDP_OP_QUARANTINED,
+          "op {fd, captured_gen} == QUARANTINED (NOT STALE_RETIRED — generation bumped once)");
+    KlSocketHandle fd2 = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
+    CHECK(kl_handle_valid(fd2) && fd2 != fd, "a fresh socket uses a DIFFERENT slot (quarantined one leaked)");
+    kl_uefi_udp_close(fd2);
+}
+
 /* poll_recv no-copy mode: a LIVE signalled receive polled with copy_into==NULL recycles the
  * firmware RxData without copying (a drain-without-deliver). (This is NOT the stale path — the
  * op is live; stale is exercised by t_udp_stale_generation_drop below.) */
@@ -1713,6 +1741,7 @@ int main(void) {
     t_udp_after_ebs_refuses();
     t_udp_quarantine_unconfirmed();   /* leaks one udp slot by design — runs last of the udp set */
     t_udp_quarantine_tx();            /* leaks one udp slot by design */
+    t_udp_sync_send_quarantine();     /* leaks one udp slot by design */
 
     t_connect_timeout_close();
     t_transmit_timeout();

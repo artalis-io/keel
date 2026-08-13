@@ -546,21 +546,34 @@ KlUefiUdpOpResult kl_uefi_udp_cancel_send(KlSocketHandle fd, unsigned long long 
     return KL_UEFI_UDP_OP_QUARANTINED;
 }
 
+/* Centralized QUARANTINE transition (review-High): the single place that establishes the invariant
+ * an op {fd, captured_gen} needs to later classify as KL_UEFI_UDP_OP_QUARANTINED. Used by BOTH
+ * kl_uefi_udp_close (unconfirmed drain) and the synchronous dg_send timeout. Atomic + idempotent:
+ *   dead = 1 · quarantined = 1 · generation bumped EXACTLY ONCE (captured_gen == generation - 1) ·
+ *   magic/child/events/token storage RETAINED (never CloseEvent/Configure(NULL)/CloseProtocol/
+ *   DestroyChild) · slot never reusable (socket() scans magic==0; a quarantined slot keeps its magic).
+ * Callers must NOT have bumped the generation themselves (close bumps only in its terminal branches). */
+static void udp_quarantine(KlUefiUdp *u) {
+    if (u->quarantined) return;     /* idempotent — bump the generation exactly once */
+    u->dead        = 1;
+    u->quarantined = 1;
+    u->generation++;                /* the quarantined op's captured_gen == generation - 1 */
+}
+
 /*
  * close(): reconcile every outstanding token before teardown so the firmware cannot write
  * freed/reused storage. Cancel(NULL) all tokens, drain each posted one; if any cannot be
- * confirmed retired → QUARANTINE (leak the slot to EBS, never CloseEvent/DestroyChild). F3
- * post-EBS: touch no boot service, just mark the slot free. Generation bumped even == closed.
+ * confirmed retired → udp_quarantine() (leak the slot to EBS, never CloseEvent/DestroyChild). F3
+ * post-EBS: touch no boot service, just free the slot. The generation is bumped exactly once in
+ * each TERMINAL branch (clean / quarantine / EBS) — NOT at entry — so the quarantine helper is the
+ * sole bump on that path (even == closed / odd == live is preserved; no double bump).
  */
 int kl_uefi_udp_close(KlSocketHandle fd) {
     KlUefiUdp *u = udp_of(fd);
-    if (!u) return 0;               /* already invalid — nothing to do */
-    if (u->dead) return 0;          /* idempotent */
-    u->dead = 1;
-    u->generation++;                /* even == closed: reject any late {fd,gen} */
+    if (!u) return 0;               /* already invalid / dead / quarantined — nothing to do */
+    u->dead = 1;                    /* mark dead (single-threaded: no poll interleaves the drain) */
 
-    if (kl_uefi_after_ebs()) { u->magic = 0; return 0; }   /* F3: no boot service */
-    if (u->quarantined) return 0;                          /* already leaked */
+    if (kl_uefi_after_ebs()) { u->generation++; u->magic = 0; return 0; }   /* F3: no boot service */
 
     EFI_BOOT_SERVICES *bs = u->bs;
     EFI_UDP4_PROTOCOL *udp = u->udp;
@@ -583,8 +596,9 @@ int kl_uefi_udp_close(KlSocketHandle fd) {
             drained_ok = 0;
     }
 
-    if (!drained_ok) { u->quarantined = 1; return 0; }   /* leak until EBS */
+    if (!drained_ok) { udp_quarantine(u); return 0; }   /* leak until EBS (helper bumps generation) */
 
+    u->generation++;                      /* clean close: even == closed (reused → socket() → odd) */
     udp_close_events(u);
     if (udp) udp->Configure(udp, NULL);   /* reset config */
     if (u->child) {
@@ -646,9 +660,8 @@ static kl_ssize_t dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t
     if (udp_post_send_ex(u, data, len, dest, src) != 0) return -1;   /* full session built pre-submit */
     /* Drive the Tx token to completion (or quarantine on an unconfirmed cancel). */
     if (!udp_pump_until(u->bs, u->udp, u->tx_tok.Event, KL_EFI_UDP_PUMP_SPINS)) {
-        if (kl_uefi_udp_cancel_send(fd, u->generation) == KL_UEFI_UDP_OP_QUARANTINED) {
-            u->quarantined = 1; u->dead = 1;
-        }
+        if (kl_uefi_udp_cancel_send(fd, u->generation) == KL_UEFI_UDP_OP_QUARANTINED)
+            udp_quarantine(u);   /* centralized: dead + quarantined + generation bumped exactly once */
         u->last_status = EFI_TIMEOUT;
         return -1;
     }
