@@ -643,6 +643,15 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         }
     }
 
+    /* When no send op remains, restart the FIFO acceptance counter — so op->seq comparisons can never
+     * be defeated by a (2^64) wrap over the loop's lifetime (formally completes the FIFO invariant). */
+    {
+        int any_send = 0;
+        for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++)
+            if (g_efi.dgram[i].in_use && g_efi.dgram[i].kind == EFI_DG_SEND) { any_send = 1; break; }
+        if (!any_send) g_efi.dgram_seq = 0;
+    }
+
     if (count == 0 && g_efi.bs)
         g_efi.bs->Stall(1000);   /* 1 ms — idle tick while a connect settles / no work */
     return count;

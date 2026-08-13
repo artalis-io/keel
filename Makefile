@@ -1514,7 +1514,36 @@ freestanding-dns-harness:
 	ASAN_OPTIONS=$$LEAKS UBSAN_OPTIONS=halt_on_error=1 $(FREESTANDING_DNS_HARNESS_BIN)
 	@rm -f $(FREESTANDING_DNS_HARNESS_BIN)
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
+# ── EFI_UDP4 datagram provider — freestanding-PE compile gate (6.4b step 4) ────────────
+# The BYO EFI datagram-provider TUs (socket_efi_tcp4 unified stream+datagram, socket_efi_udp4,
+# event_efi datagram completion wiring) must keep compiling for the REAL UEFI target — a PE/COFF
+# cross build with no hosted libc — on BOTH arches UEFI ships (x86_64 + AArch64). This gate compiles
+# them with the SAME flags the QEMU build (build_s4.sh) uses (-ffreestanding -fshort-wchar
+# -mno-red-zone -DKEEL_FREESTANDING + the freestanding shim), plus -Wpedantic -Werror. Compile-only
+# (-c); the actual EFI link + run is the QEMU/OVMF e2e (6.4c). Skips with a note off clang / a missing
+# PE backend. Host correctness is covered by the mock-EFI harness (build_mock_efi_test.sh).
+UEFI_DGRAM_TU = integrations/uefi/socket_efi_tcp4.c integrations/uefi/socket_efi_udp4.c \
+                integrations/uefi/event_efi.c
+UEFI_DGRAM_GATE_CFLAGS = -ffreestanding -fshort-wchar -fno-stack-protector -fno-builtin -std=c11 \
+                         -DKEEL_FREESTANDING -isystem $(FREESTANDING_SHIM) \
+                         -Iinclude -Ivendor/llhttp -Isrc -Iintegrations/uefi -Ispikes/uefi \
+                         -Wall -Wextra -Wpedantic -Werror
+uefi-dgram-gate:
+	@echo "== EFI_UDP4 datagram provider: freestanding-PE compile gate (both arches, -Werror -Wpedantic) =="
+	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then echo "  SKIP (needs a clang PE cross target)"; exit 0; fi
+	@for tgt in $(FREESTANDING_TARGETS); do \
+	  if ! echo 'int x;' | $(FREESTANDING_LIB_CC) --target=$$tgt -ffreestanding -c -x c -o /dev/null - >/dev/null 2>&1; then \
+	    echo "  SKIP $$tgt (backend unavailable)"; continue; fi; \
+	  case "$$tgt" in x86_64*) RZ="-mno-red-zone";; *) RZ="";; esac; \
+	  for f in $(UEFI_DGRAM_TU); do \
+	    $(FREESTANDING_LIB_CC) --target=$$tgt $$RZ $(UEFI_DGRAM_GATE_CFLAGS) -c $$f -o /dev/null || \
+	      { echo "  FAIL [$$tgt] $$f"; exit 1; }; \
+	  done; \
+	  echo "  [$$tgt] EFI datagram TUs compiled clean"; \
+	done
+	@echo "== uefi-dgram-gate OK (socket_efi_tcp4 + socket_efi_udp4 + event_efi, PE x86_64 + aarch64) =="
+
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

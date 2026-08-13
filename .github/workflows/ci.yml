@@ -361,6 +361,9 @@ jobs:
       - name: Freestanding DNS harness (runtime: truncation settles KL_ERR_DNS, no TCP, no timeout — ASan+UBSan+LSan)
         run: make freestanding-dns-harness
 
+      - name: EFI_UDP4 datagram provider PE gate (unified provider + event_efi compile, x86_64 + aarch64)
+        run: make uefi-dgram-gate
+
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
 
