@@ -413,12 +413,18 @@ static int udp_post_send_ex(KlUefiUdp *u, const void *data, size_t len,
     u_zero(&u->tx_sess, sizeof(u->tx_sess));
     for (int i = 0; i < 4; i++) u->tx_sess.DestinationAddress.Addr[i] = dip.Addr[i];
     u->tx_sess.DestinationPort = dport;
-    if (src && kl_sockaddr_family(src) == KL_AF_INET) {   /* optional source pin — set BEFORE submit */
+    /* Optional source pin — set BEFORE submit. A non-NULL source MUST be a valid IPv4; an
+     * unsupported/invalid source is REJECTED (fail, send nothing) rather than silently sent
+     * from the default source. NULL = no source pin (the completion send path). */
+    if (src) {
         EFI_IPv4_ADDRESS sip; UINT16 sport = 0;
-        if (kl_efi_sockaddr_to_ipv4(src, &sip, &sport) == 0) {
-            for (int i = 0; i < 4; i++) u->tx_sess.SourceAddress.Addr[i] = sip.Addr[i];
-            u->tx_sess.SourcePort = sport;
+        if (kl_sockaddr_family(src) != KL_AF_INET ||
+            kl_efi_sockaddr_to_ipv4(src, &sip, &sport) != 0) {
+            u->last_status = EFI_INVALID_PARAMETER;
+            return -1;   /* nothing submitted (tx_posted stays 0) */
         }
+        for (int i = 0; i < 4; i++) u->tx_sess.SourceAddress.Addr[i] = sip.Addr[i];
+        u->tx_sess.SourcePort = sport;
     }
 
     u_zero(&u->tx_desc, sizeof(u->tx_desc));
@@ -539,12 +545,21 @@ int kl_uefi_udp_close(KlSocketHandle fd) {
 
 /* ── KlDatagramOps: configure (mandatory) + sync send fallback; recv = NULL ──────────
  *
- * LIMITATION (KlDatagramOps.configure has no error channel — it returns a capture-cap mask,
- * not a status): EFI_UDP4.Configure can genuinely fail (no DHCP, bad station). We cannot
- * report that through the return, so on failure we FAIL-CLOSE the slot (full teardown here)
- * — udp_of(fd) then returns NULL, so the next init step (bind for a bound socket, or the
- * first post_dgram_recv at kl_udp_recv_start for an unbound one) reliably fails rather than
- * leaving kl_udp_init "succeeding" with an unusable socket.
+ * ERROR-CHANNEL LIMITATION + ACCEPTANCE (KlDatagramOps.configure returns a capture-cap mask,
+ * NOT a status — cross-cutting to add one). EFI_UDP4.Configure can genuinely fail (no DHCP,
+ * bad station). On failure we FAIL-CLOSE the slot (full teardown here) so udp_of(fd) returns
+ * NULL and EVERY subsequent op on the socket fails. The point at which that failure SURFACES
+ * differs, and is a documented, narrowed acceptance:
+ *   - BOUND socket (cfg->bind_addr): the single Configure is done by kl_uefi_udp_bind(), whose
+ *     -1 return kl_udp_init() checks (src/udp.c) → kl_udp_init() FAILS. (Nothing is configured
+ *     here — see the single-Configure note below.)
+ *   - UNBOUND / DHCP-default socket (the DNS resolver): kl_udp_init() makes no further provider
+ *     call after configure(), so it still RETURNS SUCCESS on a fail-closed slot. The failure
+ *     instead surfaces at the FIRST OPERATION — kl_udp_recv_start()'s post_dgram_recv (or a
+ *     send) returns -1 on the dead slot. The stock resolver handles this cleanly:
+ *     kl_dns_resolver_create() checks kl_udp_recv_start() and tears down (returns NULL). A raw
+ *     KlUdp user who never starts receiving holds a socket whose every op fails (safe, not
+ *     silently-wrong). This deferred-surface path is covered by the mock state-machine tests.
  *
  * SINGLE Configure per child (a second Configure on an already-started child returns
  * EFI_ALREADY_STARTED): udp.c calls configure() BEFORE kl_sock_bind(), so an explicit
@@ -556,21 +571,26 @@ static uint32_t dg_configure(void *ctx, KlSocketHandle fd, int family,
     KlUefiUdp *u = udp_of(fd);
     if (!u) return 0;
     if (cfg && cfg->bind_addr)
-        return 0;   /* explicit station → kl_uefi_udp_bind does the single Configure */
+        return 0;   /* explicit station → kl_uefi_udp_bind does the single Configure (checked at init) */
     if (udp_configure(u, NULL, 0) != 0)
-        (void)kl_uefi_udp_close(fd);   /* fail-close: next init step fails (no error channel here) */
+        (void)kl_uefi_udp_close(fd);   /* fail-close: every subsequent op fails (see acceptance above) */
     return 0;       /* no KL_DGRAM_RX_* capture caps: src+local ride each completion event natively */
 }
 
 /* Sync single-Transmit fallback for the source-pinned / TOS path udp.c routes off the
  * completion fast path. Independent Tx token under the same quarantine discipline. The source
- * pin is written into the session BEFORE submit (via udp_post_send_ex); tos not mapped (EFI_UDP4
- * carries TOS through Configure, not per-datagram). */
+ * pin is written into the session BEFORE submit (via udp_post_send_ex).
+ *
+ * TOS is PROVIDE-OR-REJECT (frozen contract §9): EFI_UDP4 has no per-datagram TOS — it carries
+ * TypeOfService through Configure, not the Transmit token — so an explicitly requested
+ * per-datagram tos (>= 0) cannot be honored and is REJECTED (fail, send nothing) rather than
+ * silently transmitted without the requested marking. tos < 0 = "no per-datagram TOS" proceeds. */
 static kl_ssize_t dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                           const KlSockAddr *dest, const KlSockAddr *src, int tos) {
-    (void)ctx; (void)tos;
+    (void)ctx;
     KlUefiUdp *u = udp_of(fd);
     if (!u) return -1;
+    if (tos >= 0) { u->last_status = EFI_UNSUPPORTED; return -1; }   /* per-datagram TOS not representable */
     if (udp_post_send_ex(u, data, len, dest, src) != 0) return -1;   /* full session built pre-submit */
     /* Drive the Tx token to completion (or quarantine on an unconfirmed cancel). */
     if (!udp_pump_until(u->bs, u->udp, u->tx_tok.Event, KL_EFI_UDP_PUMP_SPINS)) {
