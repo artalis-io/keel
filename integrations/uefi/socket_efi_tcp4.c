@@ -13,9 +13,10 @@
  */
 
 #include "socket_efi_tcp4.h"
+#include "socket_efi_udp4.h"          /* 6.4b: unified stream+datagram provider (tag-dispatched) */
 #include "allocator_uefi.h"           /* kl_uefi_allocator */
 #include "platform_uefi.h"            /* kl_uefi_after_ebs (U-7 boot-services guard) */
-#include "../../src/socket.h"         /* KL_SOCK_CAP_OVERLAPPED (internal cap bit) */
+#include "../../src/socket.h"         /* KL_SOCK_CAP_OVERLAPPED / KL_SOCK_CAP_DATAGRAM */
 
 /* ── errno (WRITE-only) ──────────────────────────────────────────────────────
  * U-6 makes recv non-blocking; the mbedTLS BIO (tls_mbedtls.c) detects a
@@ -869,6 +870,7 @@ static int listener_teardown(KlUefiConn *lc) {
 
 static int efi_sock_close(void *cx, KlSocketHandle fd) {
     (void)cx;
+    if (kl_efi_is_udp_handle(fd)) return kl_uefi_udp_close(fd);   /* unified: datagram close */
     KlUefiConn *c = conn_of(fd);
     if (!c) return 0;               /* already invalid — nothing to do */
     if (c->dead) return 0;          /* idempotent */
@@ -1041,6 +1043,7 @@ static int listener_arm_token(KlUefiConn *lc, int i) {
  * DHCP). The passive Configure happens in listen(). */
 static int efi_sock_bind(void *cx, KlSocketHandle fd, const KlSockAddr *a) {
     (void)cx;
+    if (kl_efi_is_udp_handle(fd)) return kl_uefi_udp_bind(fd, a);   /* unified: datagram bind */
     if (kl_uefi_after_ebs()) return -1;
     KlUefiConn *c = conn_of(fd);
     if (!c || c->dead) return -1;
@@ -1178,7 +1181,12 @@ static int efi_sock_get_so_error(void *cx, KlSocketHandle fd, int *out_err) {
 /* ── ops wrappers that also stash the ctx-level last status ───────────────────────
  * The vtable entries below wrap the conn-op so io_status() (which only gets the ctx)
  * reads the right status. Thin — they just mirror c->last_status into the ctx global. */
+#ifndef SOCK_DGRAM
+#define SOCK_DGRAM 2
+#endif
 static KlSocketHandle w_socket(void *cx, int d, int t, int p) {
+    if (t == SOCK_DGRAM)                          /* unified provider: SOCK_DGRAM → EFI_UDP4 child */
+        return kl_uefi_udp_socket(d, t, p);
     KlSocketHandle h = efi_sock_socket(cx, d, t, p);
     KlUefiConn *c = conn_of(h);
     g_last_ctx_status = c ? c->last_status : EFI_OUT_OF_RESOURCES;
@@ -1203,6 +1211,7 @@ static kl_ssize_t w_recv(void *cx, KlSocketHandle fd, void *b, size_t n) {
     return r;
 }
 static int w_get_local_addr(void *cx, KlSocketHandle fd, KlSockAddr *addr) {
+    if (kl_efi_is_udp_handle(fd)) return kl_uefi_udp_get_local_addr(fd, addr);   /* unified: datagram */
     int r = efi_sock_get_local_addr(cx, fd, addr);
     KlUefiConn *c = conn_of(fd);
     if (c) g_last_ctx_status = c->last_status;
@@ -1266,6 +1275,14 @@ const KlSocketProvider *kl_uefi_socket_provider(EFI_BOOT_SERVICES *bs, EFI_HANDL
     g_provider.context      = &g_ctx;
     g_provider.capabilities = KL_SOCK_CAP_OVERLAPPED;
     g_provider.dgram        = NULL;
+
+    /* 6.4b: one unified provider serves SOCK_STREAM (EFI_TCP4) AND SOCK_DGRAM (EFI_UDP4) — a UEFI
+     * client resolves (UDP) then connects (TCP) on one KlEventCtx.sockets. Add the datagram
+     * data-plane iff an EFI_UDP4 ServiceBinding is present (tolerated absent — no DATAGRAM cap). */
+    if (kl_uefi_udp_provider_init(bs, image) == 0) {
+        g_provider.capabilities |= KL_SOCK_CAP_DATAGRAM;
+        g_provider.dgram         = kl_uefi_udp_dgram_ops();
+    }
     return &g_provider;
 }
 
@@ -1281,6 +1298,7 @@ void kl_uefi_socket_provider_reset(void) {
      * closed) are reclaimable, and those are already zero. So we clear nothing here — a
      * subsequent provider reuses the free slots and skips the occupied ones. */
     g_last_ctx_status = EFI_SUCCESS;
+    kl_uefi_udp_provider_reset();   /* 6.4b: the unified provider owns the datagram side too */
 }
 
 /* F6: how many slots are still LIVE (open, not closed) — the lifecycle contract is that

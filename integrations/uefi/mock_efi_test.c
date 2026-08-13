@@ -1651,6 +1651,38 @@ static void t_udp_cross_transport_reject(void) {
     kl_uefi_udp_close(udpfd);
 }
 
+/* Unified provider (6.4b-3a): ONE KlSocketProvider serves SOCK_STREAM (EFI_TCP4) AND SOCK_DGRAM
+ * (EFI_UDP4). socket() routes by type; the datagram data-plane is on .dgram; close routes by tag. */
+static void t_udp_unified_provider(void) {
+    T_CASE("udp: unified provider routes SOCK_DGRAM → EFI_UDP4 (.dgram + tag-routed close)");
+    reset_counters();
+    const KlSocketProvider *p = fresh_provider();   /* now also inits the datagram side */
+    CHECK(p != NULL, "provider created");
+    CHECK((p->capabilities & KL_SOCK_CAP_DATAGRAM) != 0, "provider advertises KL_SOCK_CAP_DATAGRAM");
+    CHECK(p->dgram != NULL && p->dgram->configure != NULL, "provider exposes the .dgram data-plane");
+
+    KlSocketHandle ufd = p->ops->socket(p->context, AF_INET_, SOCK_DGRAM_, 0);
+    KlSocketHandle tfd = p->ops->socket(p->context, AF_INET_, SOCK_STREAM_, 0);
+    CHECK(kl_handle_valid(ufd) && kl_efi_is_udp_handle(ufd), "SOCK_DGRAM → a UDP-tagged handle");
+    CHECK(kl_handle_valid(tfd) && !kl_efi_is_udp_handle(tfd), "SOCK_STREAM → a stream handle (untagged)");
+
+    /* A datagram round-trips through the unified provider's .dgram + completion primitives. */
+    KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    (void)p->dgram->configure(p->context, ufd, AF_INET_, &cfg);
+    unsigned long long gen = kl_uefi_udp_generation_h(ufd);
+    memcpy(g_udp_resp, "ok", 2); g_udp_resp_len = 2; g_udp_receive_mode = TOK_COMPLETE_OK;
+    CHECK(kl_uefi_udp_post_recv(ufd) == 0, "post_recv on the unified-provider datagram socket");
+    unsigned char buf[8]; KlSockAddr s, l; int tr = 0; size_t nb = 0; int ok = 0;
+    CHECK(kl_uefi_udp_poll_recv(ufd, gen, buf, sizeof(buf), &s, &l, &tr, &nb, &ok) == KL_UEFI_UDP_OP_DELIVERED
+          && nb == 2, "datagram delivered via the unified provider");
+
+    /* Provider close on the UDP handle routes to the datagram teardown (DestroyChild). */
+    int destroy_before = g_destroy_child_calls;
+    CHECK(p->ops->close(p->context, ufd) == 0, "provider close on a UDP handle");
+    CHECK(g_destroy_child_calls == destroy_before + 1, "datagram close tore down the EFI_UDP4 child");
+    p->ops->close(p->context, tfd);
+}
+
 /* Configuration: an explicit bind_addr is configured EXACTLY ONCE (configure() defers, bind()
  * does the single Configure) — no EFI_ALREADY_STARTED double-Configure. */
 static void t_udp_bind_single_configure(void) {
@@ -1735,6 +1767,7 @@ int main(void) {
     t_udp_poll_recv_null_copy();
     t_udp_stale_generation_drop();
     t_udp_cross_transport_reject();
+    t_udp_unified_provider();
     t_udp_bind_single_configure();
     t_udp_configure_failclose();
     t_udp_send_tos_and_srcpin();
