@@ -66,6 +66,7 @@ typedef struct {
     /* send-only: the queued payload/dest (copied so it survives the caller freeing them) + state. */
     int                 posted;        /* send: 1 = an EFI Transmit token is outstanding for this op */
     int                 post_failed;   /* send: the deferred substrate post failed → emit ok=0 */
+    unsigned long long  seq;           /* send: monotonic acceptance order → per-socket FIFO pumping */
     unsigned char       snd[KL_EFI_DGRAM_SNDBUF];
     size_t              snd_len;
     KlSockAddr          snd_dest;
@@ -124,6 +125,7 @@ typedef struct {
     EfiWatch           watches[KL_EFI_MAX_WATCHES];
     EfiIoOp            io[KL_EFI_MAX_IO_OPS];   /* S-4 server recv/send ops */
     EfiDgramOp         dgram[KL_EFI_MAX_DGRAM_OPS];  /* 6.4b-3b datagram recv/send ops */
+    unsigned long long dgram_seq;                    /* monotonic send-acceptance counter (FIFO) */
     /* S-3 server accept: latched by prime_accepts; drain hands back each ready child
      * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlConn-pool backpressure. */
     struct KlServer   *server;
@@ -394,10 +396,15 @@ static void efi_dgram_pump_sends(KlSocketHandle fd) {
         if (g_efi.dgram[i].in_use && g_efi.dgram[i].kind == EFI_DG_SEND &&
             g_efi.dgram[i].fd == fd && g_efi.dgram[i].posted)
             return;
+    /* FIFO: choose the OLDEST unposted send for @fd by acceptance sequence — NOT the lowest array slot,
+     * which would let a newly accepted send reuse a freed hole and jump ahead of older queued sends. */
+    EfiDgramOp *op = NULL;
     for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++) {
-        EfiDgramOp *op = &g_efi.dgram[i];
-        if (!op->in_use || op->kind != EFI_DG_SEND || op->fd != fd || op->posted || op->post_failed)
-            continue;
+        EfiDgramOp *c = &g_efi.dgram[i];
+        if (!c->in_use || c->kind != EFI_DG_SEND || c->fd != fd || c->posted || c->post_failed) continue;
+        if (!op || c->seq < op->seq) op = c;
+    }
+    if (op) {
         if (kl_uefi_udp_post_send(fd, op->snd, op->snd_len, &op->snd_dest) == 0) {
             op->generation = kl_uefi_udp_generation_h(fd);   /* op identity captured at the real post */
             op->posted = 1;
@@ -421,6 +428,7 @@ static int el_post_dgram_send(struct KlDatagram *dg, const void *data, size_t le
     for (size_t b = 0; b < len; b++) op->snd[b] = ((const unsigned char *)data)[b];
     op->snd_len = len;
     if (dest) op->snd_dest = *dest;
+    op->seq  = g_efi.dgram_seq++;         /* monotonic acceptance order → per-socket FIFO */
     op->life = (struct KlDgramLife *)dg->rx_life;
     kl_dgram_life_retain(op->life);      /* one B.6 ref per accepted send op */
     op->in_use = 1;                      /* accepted (queued) */
@@ -603,6 +611,9 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
                 out[count].kind = KL_COMP_DGRAM_SEND;
                 out[count].life = op->life; op->life = NULL;   /* TRANSFER ref op → event */
                 out[count].ok   = 0;
+                /* Release the FULL q_bytes reservation (udp.c reserved snd_len at post, releases
+                 * ev->bytes) even on failure — else a failed send permanently inflates the send queue. */
+                out[count].bytes = op->snd_len;
                 count++;
                 op->in_use = 0;
                 efi_dgram_pump_sends(sfd);   /* let a queued send take the freed Tx token */
@@ -613,11 +624,14 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             KlUefiUdpOpResult r = kl_uefi_udp_poll_send(op->fd, op->generation, &nb, &ok);
             if (r == KL_UEFI_UDP_OP_PENDING) continue;
             if (r == KL_UEFI_UDP_OP_DELIVERED) {
+                (void)nb;
                 for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
                 out[count].kind  = KL_COMP_DGRAM_SEND;
                 out[count].life  = op->life; op->life = NULL;   /* TRANSFER ref op → event */
                 out[count].ok    = ok;
-                out[count].bytes = nb;
+                /* Emit the RESERVED length (== snd_len), not the reported byte count, so udp.c releases
+                 * the full q_bytes reservation whether the Transmit succeeded or failed (ok=0). */
+                out[count].bytes = op->snd_len;
                 count++;
             } else if (r == KL_UEFI_UDP_OP_STALE_RETIRED) {
                 kl_dgram_life_release(op->life); op->life = NULL;
