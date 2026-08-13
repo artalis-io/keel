@@ -1392,6 +1392,20 @@ freestanding-lib-server-selfcontained:
 	@rm -f $(FREESTANDING_SERVER_SC_LIB)
 	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SC_SRC),libkeel_freestanding_server_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
 
+# Self-contained DATAGRAM+DNS archive (6.4c UEFI EFI_UDP4 e2e): the datagram machine
+# (udp + datagram_* + completion) + the STOCK src/dns_resolver.c + in-archive mem*/
+# strlen (kl_cstr_builtin.c), for a bare EFI target with no libc/EDK2 BaseMemoryLib.
+# Same selfcontained gate — mem*/strlen must be DEFINED; the only undefined symbols are
+# the KEEL platform/provider hooks (+ PE __chkstk/_fltused). build_dgram_dns.sh links
+# this against the unified EFI socket provider (SOCK_DGRAM → EFI_UDP4) + event_efi so the
+# stock resolver runs over KlUdp-over-EFI_UDP4 on real firmware (contrast dns_uefi.c).
+FREESTANDING_DNS_SC_LIB = libkeel_freestanding_dns_selfcontained.a
+
+freestanding-lib-dns-selfcontained:
+	@echo "== self-contained freestanding DNS archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
+	@rm -f $(FREESTANDING_DNS_SC_LIB)
+	$(call fs_build_and_gate,$(FREESTANDING_DNS_SC_SRC),libkeel_freestanding_dns_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
+
 # ── CRT-less PE/COFF link (B2 — the milestone's last literal) ─────────────────
 # LINKS libkeel_freestanding_selfcontained.a (mem*/strlen in-archive) into a
 # PE/COFF EFI image with NO hosted CRT (-nostdlib, lld PE), proving the archive
@@ -1558,7 +1572,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): socket_efi_tcp4 + socket_efi_udp4 + event_efi) =="
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

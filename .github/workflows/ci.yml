@@ -364,6 +364,9 @@ jobs:
       - name: EFI_UDP4 datagram provider PE gate (unified provider + event_efi compile, x86_64 + aarch64)
         run: make uefi-dgram-gate UEFI_GATE_STRICT=1
 
+      - name: Self-contained DNS archive gate (6.4c EFI_UDP4 e2e archive; both PE arches, selfcontained symbols)
+        run: make freestanding-lib-dns-selfcontained
+
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
 
