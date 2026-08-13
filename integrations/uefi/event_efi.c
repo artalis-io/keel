@@ -8,13 +8,16 @@
 
 #include "event_efi.h"
 #include "socket_efi_tcp4.h"          /* kl_uefi_socket_provider + async-connect prims */
+#include "socket_efi_udp4.h"          /* 6.4b-3b: datagram completion primitives + KlUefiUdpOpResult */
 #include "platform_uefi.h"            /* kl_uefi_after_ebs (F3 boot-services guard) */
 
 #include <keel/event.h>
 #include <keel/sockaddr.h>
 #include <keel/connection.h>           /* KlConn — server post_recv/post_send targets (S-4) */
+#include <keel/udp.h>                  /* KlDatagram layout (dg->fd/recv_buf/rx_life) for post_dgram_* */
 #include "../../src/socket.h"          /* KlSocketProvider, kl_sock_accept/send/recv, kl_handle_valid */
 #include "../../src/completion.h"      /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
+#include "../../src/datagram_life.h"   /* KlDgramLife retain/release — B.6 stable-token transfer */
 #include <keel/server.h>               /* KlServer.pool — accept backpressure (S-3) */
 
 #include <stdint.h>
@@ -37,6 +40,22 @@
  * + a small body or one TLS record; larger bodies belong on the (future) sendfile/stream
  * path. Firmware BSS cost: KL_EFI_MAX_IO_OPS * KL_EFI_SNDBUF. */
 #define KL_EFI_SNDBUF       16384
+/* Datagram completion ops (6.4b-3b). DNS drives one Receive + a few Transmits per socket; a small
+ * fixed pool, no allocation in the loop. Each op holds a B.6 KlDgramLife ref from post until it is
+ * transferred to a completion event (DELIVERED), released (RETIRED/STALE_RETIRED), or RETAINED forever
+ * (QUARANTINED/INVALID) — see el_drain. */
+#define KL_EFI_MAX_DGRAM_OPS 4
+
+typedef enum { EFI_DG_RECV = 0, EFI_DG_SEND = 1 } EfiDgramKind;
+typedef struct {
+    int                 in_use;
+    EfiDgramKind        kind;
+    KlSocketHandle      fd;
+    unsigned long long  generation;   /* the op identity (captured at post) */
+    void               *buf;          /* recv: the captured dg->recv_buf (copy target) */
+    size_t              buflen;        /* recv: capacity */
+    struct KlDgramLife *life;          /* B.6 token ref: retained at post; NULLed on transfer/release */
+} EfiDgramOp;
 
 /* A queued outbound connect (post_connect). Its terminal result is surfaced as a
  * KL_COMP_CONNECT on a later drain (once the Connect token fires), then retired. The
@@ -90,6 +109,7 @@ typedef struct {
     EfiConnectOp       connect_ops[KL_EFI_MAX_CONNECT_OPS];
     EfiWatch           watches[KL_EFI_MAX_WATCHES];
     EfiIoOp            io[KL_EFI_MAX_IO_OPS];   /* S-4 server recv/send ops */
+    EfiDgramOp         dgram[KL_EFI_MAX_DGRAM_OPS];  /* 6.4b-3b datagram recv/send ops */
     /* S-3 server accept: latched by prime_accepts; drain hands back each ready child
      * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlConn-pool backpressure. */
     struct KlServer   *server;
@@ -108,6 +128,7 @@ static int el_init(KlEventLoop *loop) {
     for (int i = 0; i < KL_EFI_MAX_CONNECT_OPS; i++) g_efi.connect_ops[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_WATCHES; i++)      g_efi.watches[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++)       g_efi.io[i].in_use = 0;
+    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++)    g_efi.dgram[i].in_use = 0;
     return 0;
 }
 
@@ -165,6 +186,11 @@ static void el_close(KlEventLoop *loop) {
     for (int i = 0; i < KL_EFI_MAX_CONNECT_OPS; i++) g_efi.connect_ops[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_WATCHES; i++)      g_efi.watches[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++)       g_efi.io[i].in_use = 0;
+    /* A still-in-flight datagram op at ctx teardown: its EFI token may still be firmware-owned, so
+     * we CANNOT confirm retirement → RETAIN its B.6 life ref (abandon it, never release) exactly as a
+     * quarantine would, so on_final never frees storage the firmware might still touch. On a clean
+     * teardown the drain already reaped these (released), so this loop typically sees none. */
+    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++) { g_efi.dgram[i].life = NULL; g_efi.dgram[i].in_use = 0; }
     g_efi.server        = NULL;
     g_efi.listen_fd     = KL_INVALID_SOCKET;
     g_efi.accept_primed = 0;
@@ -308,6 +334,48 @@ static int el_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t
     return 0;
 }
 
+/* ── Datagram completion ops (6.4b-3b) — post an EFI_UDP4 Receive/Transmit token, retain a B.6
+ *    life ref, and capture the op identity {fd, generation}; el_drain reaps via KlUefiUdpOpResult. */
+static EfiDgramOp *dgram_op_alloc(void) {
+    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++)
+        if (!g_efi.dgram[i].in_use) return &g_efi.dgram[i];
+    return NULL;
+}
+
+static int el_post_dgram_recv(struct KlDatagram *dg) {
+    if (!dg) return -1;
+    EfiDgramOp *op = dgram_op_alloc();
+    if (!op) return -1;
+    for (size_t b = 0; b < sizeof(*op); b++) ((unsigned char *)op)[b] = 0;
+    op->kind   = EFI_DG_RECV;
+    op->fd     = dg->fd;
+    op->buf    = dg->recv_buf;          /* copy target — captured now; the token ref pins it */
+    op->buflen = dg->recv_buf_size;
+    if (kl_uefi_udp_post_recv(dg->fd) != 0) return -1;   /* op still !in_use → nothing to retire */
+    op->generation = kl_uefi_udp_generation_h(dg->fd);   /* the live slot's generation (op identity) */
+    op->life = (struct KlDgramLife *)dg->rx_life;
+    kl_dgram_life_retain(op->life);                      /* one ref per posted op (B.6) */
+    op->in_use = 1;   /* set last */
+    return 0;
+}
+
+static int el_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
+                              const KlSockAddr *dest) {
+    if (!dg) return -1;
+    EfiDgramOp *op = dgram_op_alloc();
+    if (!op) return -1;
+    for (size_t b = 0; b < sizeof(*op); b++) ((unsigned char *)op)[b] = 0;
+    op->kind = EFI_DG_SEND;
+    op->fd   = dg->fd;
+    /* post_send COPIES data into the slot's stable staging (the caller may free it after post). */
+    if (kl_uefi_udp_post_send(dg->fd, data, len, dest) != 0) return -1;
+    op->generation = kl_uefi_udp_generation_h(dg->fd);
+    op->life = (struct KlDgramLife *)dg->rx_life;
+    kl_dgram_life_retain(op->life);
+    op->in_use = 1;
+    return 0;
+}
+
 /* drain: surface completed Connect tokens (stale-guarded) as KL_COMP_CONNECT, then
  * relay each armed watch as a KL_COMP_WATCHER (level-triggered — the client re-arms
  * while it still needs to send/recv). If nothing fired, Stall briefly so the firmware
@@ -442,6 +510,60 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         io_op_free(op);
     }
 
+    /* Datagram ops (6.4b-3b): poll each posted Receive/Transmit by its {fd, captured_generation}
+     * identity and apply the KlUefiUdpOpResult contract. DELIVERED → emit KL_COMP_DGRAM_RECV/_SEND
+     * and TRANSFER the B.6 life ref to the event (kl_udp_comp_dispatch releases it after delivery);
+     * RETIRED/STALE_RETIRED → RELEASE the ref (its final release runs on_final); QUARANTINED/INVALID →
+     * RETAIN the ref forever (abandon it — retirement was never confirmed, so on_final must NOT run and
+     * the receive storage the firmware may still touch stays pinned). The backend never inspects owner
+     * liveness — a live-but-owner-dead delivery is dropped by generic dispatch via ev->life. */
+    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS && count < max; i++) {
+        EfiDgramOp *op = &g_efi.dgram[i];
+        if (!op->in_use) continue;
+
+        if (op->kind == EFI_DG_RECV) {
+            KlSockAddr peer, local; int trunc = 0; size_t nb = 0; int ok = 0;
+            for (size_t b = 0; b < sizeof(peer); b++) { ((unsigned char *)&peer)[b] = 0; ((unsigned char *)&local)[b] = 0; }
+            KlUefiUdpOpResult r = kl_uefi_udp_poll_recv(op->fd, op->generation, op->buf, op->buflen,
+                                                        &peer, &local, &trunc, &nb, &ok);
+            if (r == KL_UEFI_UDP_OP_PENDING) continue;
+            if (r == KL_UEFI_UDP_OP_DELIVERED) {
+                for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
+                out[count].kind      = KL_COMP_DGRAM_RECV;
+                out[count].life      = op->life; op->life = NULL;   /* TRANSFER ref op → event */
+                out[count].ok        = ok;
+                out[count].bytes     = nb;
+                out[count].buf       = op->buf;
+                if (kl_sockaddr_family(&peer)  != KL_AF_UNSPEC) out[count].peer  = peer;
+                if (kl_sockaddr_family(&local) != KL_AF_UNSPEC) out[count].local = local;
+                out[count].truncated = trunc;
+                count++;
+            } else if (r == KL_UEFI_UDP_OP_STALE_RETIRED) {
+                kl_dgram_life_release(op->life); op->life = NULL;   /* confirmed retirement → release */
+            } else {   /* QUARANTINED or INVALID — retain the ref forever (never release) */
+                op->life = NULL;
+            }
+            op->in_use = 0;   /* retire the record (life already transferred/released/abandoned) */
+        } else {   /* EFI_DG_SEND */
+            size_t nb = 0; int ok = 0;
+            KlUefiUdpOpResult r = kl_uefi_udp_poll_send(op->fd, op->generation, &nb, &ok);
+            if (r == KL_UEFI_UDP_OP_PENDING) continue;
+            if (r == KL_UEFI_UDP_OP_DELIVERED) {
+                for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
+                out[count].kind  = KL_COMP_DGRAM_SEND;
+                out[count].life  = op->life; op->life = NULL;   /* TRANSFER ref op → event */
+                out[count].ok    = ok;
+                out[count].bytes = nb;
+                count++;
+            } else if (r == KL_UEFI_UDP_OP_STALE_RETIRED) {
+                kl_dgram_life_release(op->life); op->life = NULL;
+            } else {   /* QUARANTINED or INVALID */
+                op->life = NULL;
+            }
+            op->in_use = 0;
+        }
+    }
+
     if (count == 0 && g_efi.bs)
         g_efi.bs->Stall(1000);   /* 1 ms — idle tick while a connect settles / no work */
     return count;
@@ -455,10 +577,12 @@ static const KlCompletionOps EFI_COMP_OPS = {
     .post_accept = el_post_accept,
     .post_recv = el_post_recv,           /* S-4: server completion-native recv */
     .post_send = el_post_send,           /* S-4: server completion-native send */
-    /* post_sendfile/post_udp_* = NULL: file responses (S-6) + UDP are out of scope for
-     * the S-4 plaintext server. The CLIENT's send/recv still ride the SYNC socket
-     * provider relayed as KL_COMP_WATCHER (post_connect + the drain watch loop), so
-     * adding these server ops does not change the client path. */
+    .post_dgram_recv = el_post_dgram_recv,   /* 6.4b-3b: datagram completion recv (EFI_UDP4 Receive) */
+    .post_dgram_send = el_post_dgram_send,   /* 6.4b-3b: datagram completion send (EFI_UDP4 Transmit) */
+    /* post_sendfile = NULL: file responses (S-6) are out of scope for the S-4 plaintext
+     * server. The CLIENT's stream send/recv still ride the SYNC socket provider relayed as
+     * KL_COMP_WATCHER (post_connect + the drain watch loop); the datagram ops above serve
+     * KlUdp/dns_resolver over the completion axis without changing the stream client path. */
 };
 
 static const KlEventOps EFI_EVENT_OPS = {

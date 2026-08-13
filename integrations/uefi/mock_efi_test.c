@@ -30,7 +30,9 @@
 #include "clock_snapshot.h"               /* TLS-platform-lifetime snapshot clock gate (U-8) */
 
 #include <keel/sockaddr.h>
-#include <keel/udp.h>                /* KlUdpConfig (6.4b datagram provider tests) */
+#include <keel/udp.h>                /* KlUdpConfig + KlDatagram layout (6.4b) */
+#include <keel/allocator.h>          /* KlAllocator (KlDgramLife tests) */
+#include "../../src/datagram_life.h" /* KlDgramLife create/retain/release/mark_dead (6.4b-3b) */
 #include "../../src/socket.h"        /* KlSocketProvider, KlSocketOps, kl_handle_valid */
 #include "../../src/completion.h"    /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
 #include <keel/event.h>
@@ -593,6 +595,36 @@ static void reset_counters(void) {
     g_event_count = 0;
     for (int i = 0; i < MAX_EVENTS; i++) memset(&g_events[i], 0, sizeof(g_events[i]));
 }
+
+/* ── tracking allocator + on_final counter for the KlDgramLife tests (6.4b-3b) ──────────
+ * A KlAllocator over malloc that RECORDS live blocks, so a QUARANTINE test — which intentionally
+ * leaks a KlDgramLife forever (on_final must NEVER run) — can reclaim that heap block at test end
+ * WITHOUT running on_final (talloc_free_all frees it directly), keeping LSan clean while still
+ * proving retention. Delivered/stale tests release normally (on_final frees the life via t_free). */
+#define TALLOC_MAX 32
+static struct { void *p[TALLOC_MAX]; int n; } g_talloc;
+static void *t_malloc(void *c, size_t n) {
+    (void)c; void *p = malloc(n ? n : 1);
+    if (p && g_talloc.n < TALLOC_MAX) g_talloc.p[g_talloc.n++] = p;
+    return p;
+}
+static void *t_realloc(void *c, void *p, size_t o, size_t n) {
+    (void)c; (void)o; void *q = realloc(p, n ? n : 1);
+    for (int i = 0; i < g_talloc.n; i++) if (g_talloc.p[i] == p) { g_talloc.p[i] = q; return q; }
+    if (q && g_talloc.n < TALLOC_MAX) g_talloc.p[g_talloc.n++] = q;
+    return q;
+}
+static void t_free(void *c, void *p, size_t n) {
+    (void)c; (void)n; if (!p) return;
+    for (int i = 0; i < g_talloc.n; i++) if (g_talloc.p[i] == p) { g_talloc.p[i] = g_talloc.p[--g_talloc.n]; break; }
+    free(p);
+}
+static KlAllocator g_ta = { .malloc = t_malloc, .realloc = t_realloc, .free = t_free, .ctx = NULL };
+static void talloc_reset(void) { g_talloc.n = 0; }
+static void talloc_free_all(void) { for (int i = 0; i < g_talloc.n; i++) free(g_talloc.p[i]); g_talloc.n = 0; }
+
+static int g_on_final_ran;
+static void mock_on_final(void *ctx) { (void)ctx; g_on_final_ran++; }
 
 /* Fresh UDP datagram provider each test (re-inits the file-scope ctx over the fake bs). The
  * static slot pool is reclaimed as tests close their sockets; a quarantine test leaks one slot
@@ -1567,6 +1599,123 @@ static void t_udp_sync_send_quarantine(void) {
     kl_uefi_udp_close(fd2);
 }
 
+/* ── event_efi datagram completion wiring (6.4b-3b) — B.6 KlDgramLife lifetime ─────────────
+ * These drive event_efi's post_dgram_recv/_send + drain against a REAL KlDgramLife over a REAL
+ * EFI_UDP4 socket (fake firmware), proving the frozen op-result → life contract:
+ *   DELIVERED     → the event carries the transferred ref; after dispatch releases it AND the owner
+ *                   ref is dropped, on_final runs (release on delivery + confirmed retirement);
+ *   STALE_RETIRED → drain releases the op ref → on_final runs;
+ *   QUARANTINED   → drain RETAINS the ref forever → on_final NEVER runs (Rx and Tx). */
+static KlSocketHandle dgl_socket(void) {
+    fresh_udp();
+    KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops();
+    KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    (void)ops->configure(NULL, fd, AF_INET_, &cfg);
+    return fd;
+}
+
+static void t_dgram_life_delivered_recv(void) {
+    T_CASE("dgram life: DELIVERED transfers the ref → dispatch+owner release run on_final");
+    reset_counters(); talloc_reset(); g_on_final_ran = 0;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int owner = 0;
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);   /* refcount 1 (owner) */
+    CHECK(life != NULL, "KlDgramLife created (owner ref)");
+    unsigned char rbuf[64];
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
+    memcpy(g_udp_resp, "abc", 3); g_udp_resp_len = 3; g_udp_receive_mode = TOK_COMPLETE_OK;
+    CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (op ref retained → 2)");
+    KlCompletionEvent evs[4];
+    int dn = COMP(ep)->drain(NULL, evs, 4, 0);
+    int idx = -1; for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_RECV) idx = i;
+    CHECK(idx >= 0, "drain emitted KL_COMP_DGRAM_RECV");
+    CHECK(idx >= 0 && evs[idx].life == life, "event carries the TRANSFERRED life ref");
+    CHECK(idx >= 0 && evs[idx].ok == 1 && evs[idx].bytes == 3, "delivered payload (3 bytes)");
+    CHECK(g_on_final_ran == 0, "on_final NOT run yet (event + owner refs outstanding)");
+    if (idx >= 0) kl_dgram_life_release(evs[idx].life);   /* dispatch releases after delivery */
+    CHECK(g_on_final_ran == 0, "still not run (owner ref remains)");
+    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop (kl_udp_free) */
+    CHECK(g_on_final_ran == 1, "on_final RAN once event + owner refs released (confirmed retirement)");
+    kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
+}
+
+static void t_dgram_life_stale_release_recv(void) {
+    T_CASE("dgram life: STALE_RETIRED (clean close) releases the op ref → on_final runs");
+    reset_counters(); talloc_reset(); g_on_final_ran = 0;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int owner = 0;
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
+    unsigned char rbuf[64];
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
+    g_udp_receive_mode = TOK_HANG;   /* posted, never completes — reaped cleanly at close */
+    CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (→ 2)");
+    g_cancel_signals = 1;
+    kl_uefi_udp_close(fd);   /* clean close reaps the token, bumps the generation */
+    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    CHECK(g_on_final_ran == 0, "on_final not run yet (op ref remains after owner drop)");
+    KlCompletionEvent evs[4];
+    int dn = COMP(ep)->drain(NULL, evs, 4, 0);
+    int emitted = 0; for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_RECV) emitted = 1;
+    CHECK(emitted == 0, "no event on a stale (cleanly-retired) op");
+    CHECK(g_on_final_ran == 1, "STALE_RETIRED released the op ref → on_final RAN");
+    kl_uefi_event_provider_reset(); talloc_free_all();
+}
+
+static void t_dgram_life_quarantine_recv(void) {
+    T_CASE("dgram life: QUARANTINED Rx RETAINS the ref forever → on_final NEVER runs");
+    reset_counters(); talloc_reset(); g_on_final_ran = 0;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int owner = 0;
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
+    unsigned char rbuf[64];
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
+    g_udp_receive_mode = TOK_HANG;
+    CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (→ 2)");
+    g_cancel_signals = 0;
+    kl_uefi_udp_close(fd);   /* unconfirmed → quarantine */
+    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    KlCompletionEvent evs[4];
+    (void)COMP(ep)->drain(NULL, evs, 4, 0);   /* QUARANTINED → RETAIN (no release) */
+    CHECK(g_on_final_ran == 0, "QUARANTINED Rx: op ref RETAINED → on_final NEVER runs");
+    talloc_free_all();   /* reclaim the intentionally-leaked life WITHOUT release (LSan-clean) */
+    CHECK(g_on_final_ran == 0, "on_final still never ran (retention proven)");
+    kl_uefi_event_provider_reset();
+}
+
+static void t_dgram_life_quarantine_send(void) {
+    T_CASE("dgram life: QUARANTINED Tx RETAINS the ref forever → on_final NEVER runs");
+    reset_counters(); talloc_reset(); g_on_final_ran = 0;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int owner = 0;
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    dg.fd = fd; dg.rx_life = life;
+    g_udp_transmit_mode = TOK_HANG;
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+    CHECK(COMP(ep)->post_dgram_send(&dg, "x", 1, &dest) == 0, "post_dgram_send (→ 2)");
+    g_cancel_signals = 0;
+    kl_uefi_udp_close(fd);   /* unconfirmed → quarantine (Tx) */
+    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    KlCompletionEvent evs[4];
+    (void)COMP(ep)->drain(NULL, evs, 4, 0);
+    CHECK(g_on_final_ran == 0, "QUARANTINED Tx: op ref RETAINED → on_final NEVER runs");
+    talloc_free_all();
+    CHECK(g_on_final_ran == 0, "on_final still never ran (retention proven)");
+    kl_uefi_event_provider_reset();
+}
+
 /* poll_recv no-copy mode: a LIVE signalled receive polled with copy_into==NULL recycles the
  * firmware RxData without copying (a drain-without-deliver). (This is NOT the stale path — the
  * op is live; stale is exercised by t_udp_stale_generation_drop below.) */
@@ -1772,9 +1921,13 @@ int main(void) {
     t_udp_configure_failclose();
     t_udp_send_tos_and_srcpin();
     t_udp_after_ebs_refuses();
+    t_dgram_life_delivered_recv();    /* 6.4b-3b event_efi wiring — clean (no slot leak) */
+    t_dgram_life_stale_release_recv();
     t_udp_quarantine_unconfirmed();   /* leaks one udp slot by design — runs last of the udp set */
     t_udp_quarantine_tx();            /* leaks one udp slot by design */
     t_udp_sync_send_quarantine();     /* leaks one udp slot by design */
+    t_dgram_life_quarantine_recv();   /* leaks one udp slot + retains a life by design */
+    t_dgram_life_quarantine_send();   /* leaks one udp slot + retains a life by design */
 
     t_connect_timeout_close();
     t_transmit_timeout();
