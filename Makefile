@@ -1528,20 +1528,35 @@ UEFI_DGRAM_GATE_CFLAGS = -ffreestanding -fshort-wchar -fno-stack-protector -fno-
                          -DKEEL_FREESTANDING -isystem $(FREESTANDING_SHIM) \
                          -Iinclude -Ivendor/llhttp -Isrc -Iintegrations/uefi -Ispikes/uefi \
                          -Wall -Wextra -Wpedantic -Werror
+# UEFI_GATE_STRICT (set by CI, .github/workflows/ci.yml): every FREESTANDING_TARGETS arch MUST compile —
+# no toolchain-absence SKIP is allowed to green-pass. Locally it is unset, so a dev without the clang PE
+# cross target still gets an (announced) skip rather than a hard failure. Either way the gate counts the
+# arches it actually compiled and refuses to print OK for arches it skipped (no false-green no-op).
 uefi-dgram-gate:
-	@echo "== EFI_UDP4 datagram provider: freestanding-PE compile gate (both arches, -Werror -Wpedantic) =="
-	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then echo "  SKIP (needs a clang PE cross target)"; exit 0; fi
-	@for tgt in $(FREESTANDING_TARGETS); do \
+	@echo "== EFI_UDP4 datagram provider: freestanding-PE compile gate (x86_64 + aarch64, -Werror -Wpedantic) =="
+	@if [ "$(FREESTANDING_IS_CLANG)" != yes ]; then \
+	  if [ -n "$(UEFI_GATE_STRICT)" ]; then echo "  FAIL: strict gate requires a clang PE cross target"; exit 1; fi; \
+	  echo "  SKIP (needs a clang PE cross target — set UEFI_GATE_STRICT=1 to require it)"; exit 0; \
+	fi
+	@want=0; got=0; \
+	for tgt in $(FREESTANDING_TARGETS); do \
+	  want=$$((want+1)); \
 	  if ! echo 'int x;' | $(FREESTANDING_LIB_CC) --target=$$tgt -ffreestanding -c -x c -o /dev/null - >/dev/null 2>&1; then \
-	    echo "  SKIP $$tgt (backend unavailable)"; continue; fi; \
+	    if [ -n "$(UEFI_GATE_STRICT)" ]; then echo "  FAIL: strict gate requires the $$tgt PE backend"; exit 1; fi; \
+	    echo "  SKIP $$tgt (backend unavailable)"; continue; \
+	  fi; \
 	  case "$$tgt" in x86_64*) RZ="-mno-red-zone";; *) RZ="";; esac; \
 	  for f in $(UEFI_DGRAM_TU); do \
 	    $(FREESTANDING_LIB_CC) --target=$$tgt $$RZ $(UEFI_DGRAM_GATE_CFLAGS) -c $$f -o /dev/null || \
 	      { echo "  FAIL [$$tgt] $$f"; exit 1; }; \
 	  done; \
-	  echo "  [$$tgt] EFI datagram TUs compiled clean"; \
-	done
-	@echo "== uefi-dgram-gate OK (socket_efi_tcp4 + socket_efi_udp4 + event_efi, PE x86_64 + aarch64) =="
+	  echo "  [$$tgt] EFI datagram TUs compiled clean"; got=$$((got+1)); \
+	done; \
+	if [ -n "$(UEFI_GATE_STRICT)" ] && [ "$$got" -lt "$$want" ]; then \
+	  echo "  FAIL: strict gate compiled $$got/$$want arches"; exit 1; \
+	fi; \
+	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
+	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): socket_efi_tcp4 + socket_efi_udp4 + event_efi) =="
 
 .PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \

@@ -362,7 +362,7 @@ jobs:
         run: make freestanding-dns-harness
 
       - name: EFI_UDP4 datagram provider PE gate (unified provider + event_efi compile, x86_64 + aarch64)
-        run: make uefi-dgram-gate
+        run: make uefi-dgram-gate UEFI_GATE_STRICT=1
 
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard
