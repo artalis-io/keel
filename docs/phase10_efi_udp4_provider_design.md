@@ -288,6 +288,24 @@ So for EFI the "signalled stale-child recycle" of §7.4 is realized **at close**
 point), and a stale-generation poll performs no token access. This is the concrete EFI form of the B.6
 "never resolve a stale completion through the object" rule.
 
+**Result must distinguish retired-vs-quarantined (review-High #2).** A stale generation alone is not
+enough: after an **unconfirmed** close the slot is `dead + quarantined + generation-bumped`, so a naive
+"terminal-drop" would look identical to a **cleanly-retired** stale op — and the event layer would then
+release the op's B.6 `KlDgramLife` ref, which a quarantined op must **retain forever** (retirement never
+confirmed). So the primitives return an explicit `KlUefiUdpOpResult`:
+`PENDING` · `DELIVERED` · `RETIRED` · `STALE_RETIRED` · `QUARANTINED` · `INVALID`. A quarantined slot is
+never reused, so its one quarantined op is identified from **stable storage** by `slot.quarantined &&
+captured_gen == slot.generation − 1` (close bumps the generation exactly once). The event-layer contract:
+- `DELIVERED` → emit the completion, transfer `life`;
+- `RETIRED` / `STALE_RETIRED` → drop the op, **release** `life` (→ `on_final` eventually runs);
+- `QUARANTINED` → remove from active polling, **never release** `life` (→ `on_final` never runs);
+- `INVALID` → fail safe (drop from polling; do NOT treat as a confirmed retirement);
+- `PENDING` → keep polling.
+`poll_recv`/`poll_send` return {PENDING, DELIVERED, STALE_RETIRED, QUARANTINED, INVALID}; `cancel_recv`/
+`cancel_send` return {RETIRED, STALE_RETIRED, QUARANTINED, INVALID} (a quarantined op is **never** reported
+as RETIRED); `kl_uefi_udp_op_state` is the side-effect-free query. Increment 3's on_final test asserts a
+confirmed/stale drop eventually runs `on_final`, and a **quarantined Rx and Tx op do NOT**.
+
 ### 7.2 States (per datagram op)
 - **POSTED** — token submitted, event not yet signalled; op holds one `life` ref.
 - **COMPLETED** — CheckEvent fired (signalled). The op **always emits** the `KL_COMP_DGRAM_*` event and

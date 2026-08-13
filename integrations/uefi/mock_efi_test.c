@@ -1403,7 +1403,7 @@ static void t_udp_recv_normal(void) {
     CHECK(kl_uefi_udp_recv_posted(fd, gen), "a receive is outstanding");
     unsigned char buf[64]; KlSockAddr src, local; int trunc = 9; size_t nb = 0; int ok = 0;
     int rc = kl_uefi_udp_poll_recv(fd, gen, buf, sizeof(buf), &src, &local, &trunc, &nb, &ok);
-    CHECK(rc == 1, "poll_recv reports a signalled terminal");
+    CHECK(rc == KL_UEFI_UDP_OP_DELIVERED, "poll_recv reports DELIVERED");
     CHECK(ok == 1 && nb == 5 && memcmp(buf, "hello", 5) == 0, "payload copied out");
     CHECK(trunc == 0, "not truncated");
     CHECK(addr_is(&src, 10, 3, 53), "source == 10.0.2.3:53 (anti-spoof discriminator)");
@@ -1415,7 +1415,8 @@ static void t_udp_recv_normal(void) {
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "serial re-arm: post_recv again");
     ok = 0; nb = 0;
     rc = kl_uefi_udp_poll_recv(fd, gen, buf, sizeof(buf), &src, &local, &trunc, &nb, &ok);
-    CHECK(rc == 1 && ok == 1 && nb == 3 && memcmp(buf, "two", 3) == 0, "second datagram delivered");
+    CHECK(rc == KL_UEFI_UDP_OP_DELIVERED && ok == 1 && nb == 3 && memcmp(buf, "two", 3) == 0,
+          "second datagram delivered");
     CHECK(g_recycle_signals == 2, "second RecycleSignal");
     kl_uefi_udp_close(fd);
     CHECK(kl_uefi_udp_provider_live_count() == 0, "no live udp slots after close");
@@ -1433,7 +1434,7 @@ static void t_udp_recv_truncate(void) {
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "post_recv");
     unsigned char buf[8]; KlSockAddr src, local; int trunc = 0; size_t nb = 0; int ok = 0;
     int rc = kl_uefi_udp_poll_recv(fd, gen, buf, sizeof(buf), &src, &local, &trunc, &nb, &ok);
-    CHECK(rc == 1 && ok == 1, "delivered");
+    CHECK(rc == KL_UEFI_UDP_OP_DELIVERED && ok == 1, "delivered");
     CHECK(nb == 8 && trunc == 1, "prefix filled the 8-byte buffer + TRUNCATED flag set");
     kl_uefi_udp_close(fd);
 }
@@ -1451,7 +1452,7 @@ static void t_udp_send_normal(void) {
     CHECK(kl_uefi_udp_post_send(fd, "q", 1, &dest) == 0, "post_send posts a Transmit");
     size_t nb = 0; int ok = 0;
     int rc = kl_uefi_udp_poll_send(fd, gen, &nb, &ok);
-    CHECK(rc == 1 && ok == 1 && nb == 1, "poll_send terminal ok, 1 byte");
+    CHECK(rc == KL_UEFI_UDP_OP_DELIVERED && ok == 1 && nb == 1, "poll_send DELIVERED, 1 byte");
     CHECK(g_udp_tx_calls == 1 && g_udp_tx_dst[0] == 10 && g_udp_tx_dst[3] == 3 && g_udp_tx_dport == 53,
           "destination captured in the Tx session");
     kl_uefi_udp_close(fd);
@@ -1469,7 +1470,7 @@ static void t_udp_cancel_confirmed(void) {
     g_udp_receive_mode = TOK_HANG;
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "post_recv (hangs — no completion)");
     g_cancel_signals = 1;
-    CHECK(kl_uefi_udp_cancel_recv(fd, gen) == 1, "cancel_recv confirms retirement");
+    CHECK(kl_uefi_udp_cancel_recv(fd, gen) == KL_UEFI_UDP_OP_RETIRED, "cancel_recv confirms retirement");
     CHECK(g_udp_cancel_calls >= 1, "Cancel(token) was called");
     CHECK(!kl_uefi_udp_recv_posted(fd, gen), "no receive outstanding after confirmed cancel");
     kl_uefi_udp_close(fd);
@@ -1479,12 +1480,16 @@ static void t_udp_cancel_confirmed(void) {
 
 /* Unconfirmed quarantine: a hung Receive whose Cancel canNOT be confirmed at close →
  * QUARANTINE (child NOT destroyed, leaked to EBS), and a fresh socket is still available. */
+/* RECEIVE quarantine: an unconfirmed cancel at close leaks the slot AND — critically — a later
+ * op query for the quarantined op reports QUARANTINED (not STALE_RETIRED), so the event layer will
+ * RETAIN the B.6 life ref rather than release it. */
 static void t_udp_quarantine_unconfirmed(void) {
-    T_CASE("udp: unconfirmed cancel at close → quarantine (leak, fail-close)");
+    T_CASE("udp: unconfirmed Rx cancel at close → quarantine (leak) + QUARANTINED op result");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
     const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
+    unsigned long long gen = kl_uefi_udp_generation_h(fd);
     g_udp_receive_mode = TOK_HANG;
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "post_recv (hangs)");
     g_cancel_signals = 0;   /* firmware CANNOT cancel → drain fails → quarantine */
@@ -1493,8 +1498,44 @@ static void t_udp_quarantine_unconfirmed(void) {
     CHECK(g_destroy_child_calls == 0, "quarantine: child NOT destroyed (leaked to EBS)");
     CHECK(kl_uefi_udp_provider_quarantined_count() == 1, "one quarantined slot");
     CHECK(kl_uefi_udp_provider_live_count() == 0, "quarantined slot is not live");
+    /* The op-result distinction (review-High #2): the quarantined op must NOT look like a clean
+     * retirement — poll/cancel/state all report QUARANTINED so the event layer retains life. */
+    unsigned char buf[16]; KlSockAddr s, l; int tr = 0; size_t nb = 0; int ok = 0;
+    CHECK(kl_uefi_udp_op_state(fd, gen) == KL_UEFI_UDP_OP_QUARANTINED, "op_state == QUARANTINED (retain life)");
+    CHECK(kl_uefi_udp_poll_recv(fd, gen, buf, sizeof(buf), &s, &l, &tr, &nb, &ok) == KL_UEFI_UDP_OP_QUARANTINED,
+          "poll_recv on the quarantined op == QUARANTINED (not STALE_RETIRED)");
+    CHECK(kl_uefi_udp_cancel_recv(fd, gen) == KL_UEFI_UDP_OP_QUARANTINED,
+          "cancel_recv on the quarantined op == QUARANTINED (not RETIRED)");
     KlSocketHandle fd2 = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
     CHECK(kl_handle_valid(fd2), "a fresh udp socket still available after quarantine");
+    kl_uefi_udp_close(fd2);
+}
+
+/* TRANSMIT quarantine: same distinction for the Tx op — an unconfirmed Tx cancel at close reports
+ * QUARANTINED (never RETIRED), so the event layer retains the send op's life ref. */
+static void t_udp_quarantine_tx(void) {
+    T_CASE("udp: unconfirmed Tx cancel at close → quarantine + QUARANTINED op result");
+    reset_counters(); fresh_udp();
+    KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    (void)ops->configure(NULL, fd, AF_INET_, &cfg);
+    unsigned long long gen = kl_uefi_udp_generation_h(fd);
+    int q_before = kl_uefi_udp_provider_quarantined_count();   /* prior udp tests may have leaked slots */
+    g_udp_transmit_mode = TOK_HANG;
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+    CHECK(kl_uefi_udp_post_send(fd, "q", 1, &dest) == 0, "post_send (hangs)");
+    g_cancel_signals = 0;
+    kl_uefi_udp_close(fd);
+    CHECK(g_destroy_child_calls == 0, "quarantine: child NOT destroyed");
+    CHECK(kl_uefi_udp_provider_quarantined_count() == q_before + 1, "this Tx op quarantined one more slot");
+    size_t nb = 0; int ok = 0;
+    CHECK(kl_uefi_udp_op_state(fd, gen) == KL_UEFI_UDP_OP_QUARANTINED, "op_state == QUARANTINED");
+    CHECK(kl_uefi_udp_poll_send(fd, gen, &nb, &ok) == KL_UEFI_UDP_OP_QUARANTINED,
+          "poll_send on the quarantined Tx op == QUARANTINED");
+    CHECK(kl_uefi_udp_cancel_send(fd, gen) == KL_UEFI_UDP_OP_QUARANTINED,
+          "cancel_send on the quarantined Tx op == QUARANTINED (not RETIRED)");
+    KlSocketHandle fd2 = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
+    CHECK(kl_handle_valid(fd2), "a fresh udp socket still available after Tx quarantine");
     kl_uefi_udp_close(fd2);
 }
 
@@ -1512,7 +1553,7 @@ static void t_udp_poll_recv_null_copy(void) {
     CHECK(kl_uefi_udp_post_recv(fd) == 0, "post_recv");
     int trunc = 9; size_t nb = 7; int ok = 1;
     int rc = kl_uefi_udp_poll_recv(fd, gen, NULL, 0, NULL, NULL, &trunc, &nb, &ok);
-    CHECK(rc == 1, "poll_recv reports terminal");
+    CHECK(rc == KL_UEFI_UDP_OP_DELIVERED, "poll_recv reports DELIVERED (live op)");
     CHECK(ok == 0 && nb == 0, "no delivery (copy_into==NULL)");
     CHECK(g_recycle_signals == 1, "firmware RxData still recycled (no leak)");
     kl_uefi_udp_close(fd);
@@ -1546,13 +1587,16 @@ static void t_udp_stale_generation_drop(void) {
     int recyc_before = g_recycle_signals;
     unsigned char buf[16]; KlSockAddr s, l; int tr = 0; size_t nb = 9; int ok = 1;
     int rc = kl_uefi_udp_poll_recv(fd, oldgen, buf, sizeof(buf), &s, &l, &tr, &nb, &ok);
-    CHECK(rc == 1 && ok == 0 && nb == 0, "stale-generation poll: terminal-DROP, no delivery");
+    CHECK(rc == KL_UEFI_UDP_OP_STALE_RETIRED, "stale (cleanly-retired) poll → STALE_RETIRED (release life)");
+    CHECK(ok == 0 && nb == 0, "no delivery on the stale op");
     CHECK(g_recycle_signals == recyc_before, "did NOT touch/recycle the reused slot's token");
+    CHECK(kl_uefi_udp_op_state(fd, oldgen) == KL_UEFI_UDP_OP_STALE_RETIRED, "op_state == STALE_RETIRED");
     CHECK(kl_uefi_udp_recv_posted(fd2, newgen), "the NEW op is still outstanding (untouched)");
 
     ok = 0; nb = 0;
     rc = kl_uefi_udp_poll_recv(fd2, newgen, buf, sizeof(buf), &s, &l, &tr, &nb, &ok);
-    CHECK(rc == 1 && ok == 1 && nb == 3 && memcmp(buf, "new", 3) == 0, "new op delivers its own datagram");
+    CHECK(rc == KL_UEFI_UDP_OP_DELIVERED && ok == 1 && nb == 3 && memcmp(buf, "new", 3) == 0,
+          "new op delivers its own datagram");
     kl_uefi_udp_close(fd2);
 }
 
@@ -1668,6 +1712,7 @@ int main(void) {
     t_udp_send_tos_and_srcpin();
     t_udp_after_ebs_refuses();
     t_udp_quarantine_unconfirmed();   /* leaks one udp slot by design — runs last of the udp set */
+    t_udp_quarantine_tx();            /* leaks one udp slot by design */
 
     t_connect_timeout_close();
     t_transmit_timeout();

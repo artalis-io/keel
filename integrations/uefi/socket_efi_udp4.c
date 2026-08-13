@@ -132,6 +132,26 @@ static KlUefiUdp *udp_op_of(KlSocketHandle fd, unsigned long long gen, int *stal
     return u;
 }
 
+/* Classify a STALE op {fd,@gen} (generation no longer matches / slot dead): was its slot cleanly
+ * closed/reused (reaped at close → release life) or QUARANTINED (leaked → retain life forever)? A
+ * quarantined slot is never reused; its one quarantined op captured gen = slot->generation - 1 (close
+ * bumped the generation exactly once). Any other gen on a quarantined slot is an earlier cleanly-retired
+ * op (or bogus) → STALE_RETIRED. Reads STABLE storage (no UAF). */
+static KlUefiUdpOpResult udp_stale_class(KlSocketHandle fd, unsigned long long gen) {
+    KlUefiUdp *slot = udp_slot_of(fd);
+    if (!slot) return KL_UEFI_UDP_OP_INVALID;   /* not a datagram handle */
+    if (slot->quarantined && (UINT64)gen == slot->generation - 1)
+        return KL_UEFI_UDP_OP_QUARANTINED;      /* this op was quarantined at close — retain life */
+    return KL_UEFI_UDP_OP_STALE_RETIRED;        /* cleanly retired at close (or reused) — release life */
+}
+
+/* Side-effect-free op state for the event layer's life-release decision. */
+KlUefiUdpOpResult kl_uefi_udp_op_state(KlSocketHandle fd, unsigned long long gen) {
+    int stale = 0;
+    if (udp_op_of(fd, gen, &stale)) return KL_UEFI_UDP_OP_PENDING;   /* still the live posted op */
+    return stale ? udp_stale_class(fd, gen) : KL_UEFI_UDP_OP_INVALID;
+}
+
 unsigned long long kl_uefi_udp_generation_h(KlSocketHandle fd) {
     KlUefiUdp *u = udp_of(fd);   /* live read: captured at post time */
     return u ? (unsigned long long)u->generation : 0ULL;
@@ -371,7 +391,8 @@ int kl_uefi_udp_post_recv(KlSocketHandle fd) {
     return 0;
 }
 
-int kl_uefi_udp_poll_recv(KlSocketHandle fd, unsigned long long gen, void *copy_into, size_t cap,
+KlUefiUdpOpResult kl_uefi_udp_poll_recv(KlSocketHandle fd, unsigned long long gen,
+                          void *copy_into, size_t cap,
                           KlSockAddr *out_src, KlSockAddr *out_local,
                           int *out_trunc, size_t *out_bytes, int *out_ok) {
     if (out_trunc) *out_trunc = 0;
@@ -380,13 +401,13 @@ int kl_uefi_udp_poll_recv(KlSocketHandle fd, unsigned long long gen, void *copy_
     int stale = 0;
     KlUefiUdp *u = udp_op_of(fd, gen, &stale);   /* EXACT op via stable storage + generation */
     if (!u)
-        return stale ? 1 : -1;   /* STALE → terminal-DROP (token reaped at close, not touched here);
-                                    !stale → not a datagram handle */
-    if (!u->rx_posted) return 0;
-    if (kl_uefi_after_ebs()) return 0;
+        return stale ? udp_stale_class(fd, gen)  /* STALE_RETIRED (release life) vs QUARANTINED (retain) */
+                     : KL_UEFI_UDP_OP_INVALID;   /* not a datagram handle */
+    if (!u->rx_posted) return KL_UEFI_UDP_OP_PENDING;
+    if (kl_uefi_after_ebs()) return KL_UEFI_UDP_OP_PENDING;
     u->udp->Poll(u->udp);
     if (u->bs->CheckEvent(u->rx_tok.Event) != EFI_SUCCESS)
-        return 0;                                /* pending */
+        return KL_UEFI_UDP_OP_PENDING;           /* not yet signalled */
 
     /* Signalled: Packet is now valid. */
     u->rx_posted = 0;
@@ -412,9 +433,9 @@ int kl_uefi_udp_poll_recv(KlSocketHandle fd, unsigned long long gen, void *copy_
                                                rx->UdpSession.DestinationPort, out_local);
     }
     /* Return the firmware buffer on any signalled terminal with a published RxData — incl. the
-     * stale-child no-event drop (copy_into == NULL) and the aborted-but-signalled path. */
+     * NULL-copy (drain-without-deliver) and aborted-but-signalled paths. */
     udp_recycle_rx(u);
-    return 1;
+    return KL_UEFI_UDP_OP_DELIVERED;
 }
 
 /* Internal transmit: build the ENTIRE session (dest + optional source pin) and descriptor
@@ -471,54 +492,58 @@ int kl_uefi_udp_post_send(KlSocketHandle fd, const void *data, size_t len, const
     return udp_post_send_ex(udp_of(fd), data, len, dest, NULL);   /* completion send: no source pin */
 }
 
-int kl_uefi_udp_poll_send(KlSocketHandle fd, unsigned long long gen, size_t *out_bytes, int *out_ok) {
+KlUefiUdpOpResult kl_uefi_udp_poll_send(KlSocketHandle fd, unsigned long long gen,
+                          size_t *out_bytes, int *out_ok) {
     if (out_bytes) *out_bytes = 0;
     if (out_ok)    *out_ok    = 0;
     int stale = 0;
     KlUefiUdp *u = udp_op_of(fd, gen, &stale);
     if (!u)
-        return stale ? 1 : -1;   /* STALE → terminal-DROP; !stale → not a datagram handle */
-    if (!u->tx_posted) return 0;
-    if (kl_uefi_after_ebs()) return 0;
+        return stale ? udp_stale_class(fd, gen) : KL_UEFI_UDP_OP_INVALID;
+    if (!u->tx_posted) return KL_UEFI_UDP_OP_PENDING;
+    if (kl_uefi_after_ebs()) return KL_UEFI_UDP_OP_PENDING;
     u->udp->Poll(u->udp);
     if (u->bs->CheckEvent(u->tx_tok.Event) != EFI_SUCCESS)
-        return 0;
+        return KL_UEFI_UDP_OP_PENDING;
     u->tx_posted = 0;
     u->last_status = u->tx_tok.Status;
     int ok = !EFI_ERROR(u->tx_tok.Status);
     if (out_ok)    *out_ok    = ok;
     if (out_bytes) *out_bytes = ok ? (size_t)u->tx_desc.DataLength : 0;
-    return 1;
+    return KL_UEFI_UDP_OP_DELIVERED;
 }
 
-/* Cancel + bounded drain a Receive token. 1 = retired (a signalled RxData is recycled) OR the op
- * is already stale (nothing to cancel — reaped at close); 0 = UNCONFIRMED (caller quarantines —
- * do NOT touch the Packet). Resolves the EXACT op via {fd,@gen} + stable storage. */
-int kl_uefi_udp_cancel_recv(KlSocketHandle fd, unsigned long long gen) {
-    KlUefiUdp *u = udp_op_of(fd, gen, NULL);
-    if (!u) return 1;                            /* not live / already stale — nothing to cancel */
-    if (!u->rx_posted) return 1;
-    if (kl_uefi_after_ebs()) return 0;           /* cannot drive EFI — treat as unconfirmed */
+/* Cancel + bounded drain a Receive token. RETIRED = confirmed now (a signalled RxData is recycled);
+ * a live op with nothing outstanding = RETIRED; QUARANTINED = unconfirmed drain (caller quarantines)
+ * OR an already-quarantined slot; a cleanly-gone op = STALE_RETIRED; INVALID = not a datagram handle.
+ * Resolves the EXACT op via {fd,@gen} + stable storage — never reports a quarantined op as retired. */
+KlUefiUdpOpResult kl_uefi_udp_cancel_recv(KlSocketHandle fd, unsigned long long gen) {
+    int stale = 0;
+    KlUefiUdp *u = udp_op_of(fd, gen, &stale);
+    if (!u) return stale ? udp_stale_class(fd, gen) : KL_UEFI_UDP_OP_INVALID;
+    if (!u->rx_posted) return KL_UEFI_UDP_OP_RETIRED;   /* live, nothing outstanding */
+    if (kl_uefi_after_ebs()) return KL_UEFI_UDP_OP_QUARANTINED;   /* cannot drive EFI → unconfirmed */
     u->udp->Cancel(u->udp, &u->rx_tok);
     if (udp_pump_until(u->bs, u->udp, u->rx_tok.Event, KL_EFI_UDP_CANCEL_DRAIN_SPINS)) {
         u->rx_posted = 0;
         udp_recycle_rx(u);                       /* signalled (EFI_ABORTED) → return the buffer */
-        return 1;
+        return KL_UEFI_UDP_OP_RETIRED;
     }
-    return 0;                                     /* unconfirmed */
+    return KL_UEFI_UDP_OP_QUARANTINED;           /* unconfirmed — caller quarantines */
 }
 
-int kl_uefi_udp_cancel_send(KlSocketHandle fd, unsigned long long gen) {
-    KlUefiUdp *u = udp_op_of(fd, gen, NULL);
-    if (!u) return 1;
-    if (!u->tx_posted) return 1;
-    if (kl_uefi_after_ebs()) return 0;
+KlUefiUdpOpResult kl_uefi_udp_cancel_send(KlSocketHandle fd, unsigned long long gen) {
+    int stale = 0;
+    KlUefiUdp *u = udp_op_of(fd, gen, &stale);
+    if (!u) return stale ? udp_stale_class(fd, gen) : KL_UEFI_UDP_OP_INVALID;
+    if (!u->tx_posted) return KL_UEFI_UDP_OP_RETIRED;
+    if (kl_uefi_after_ebs()) return KL_UEFI_UDP_OP_QUARANTINED;
     u->udp->Cancel(u->udp, &u->tx_tok);
     if (udp_pump_until(u->bs, u->udp, u->tx_tok.Event, KL_EFI_UDP_CANCEL_DRAIN_SPINS)) {
         u->tx_posted = 0;
-        return 1;
+        return KL_UEFI_UDP_OP_RETIRED;
     }
-    return 0;
+    return KL_UEFI_UDP_OP_QUARANTINED;
 }
 
 /*
@@ -621,7 +646,9 @@ static kl_ssize_t dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t
     if (udp_post_send_ex(u, data, len, dest, src) != 0) return -1;   /* full session built pre-submit */
     /* Drive the Tx token to completion (or quarantine on an unconfirmed cancel). */
     if (!udp_pump_until(u->bs, u->udp, u->tx_tok.Event, KL_EFI_UDP_PUMP_SPINS)) {
-        if (kl_uefi_udp_cancel_send(fd, u->generation) == 0) { u->quarantined = 1; u->dead = 1; }
+        if (kl_uefi_udp_cancel_send(fd, u->generation) == KL_UEFI_UDP_OP_QUARANTINED) {
+            u->quarantined = 1; u->dead = 1;
+        }
         u->last_status = EFI_TIMEOUT;
         return -1;
     }

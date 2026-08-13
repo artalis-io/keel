@@ -104,6 +104,25 @@ int  kl_uefi_udp_provider_quarantined_count(void);
 unsigned long long kl_uefi_udp_generation_h(KlSocketHandle fd);
 int  kl_uefi_udp_valid_h(KlSocketHandle fd, unsigned long long generation);
 
+/* ── Completion-op result (review-High #2): the substrate MUST distinguish a cleanly-retired stale
+ * op (the event layer drops it AND releases its B.6 KlDgramLife ref) from a QUARANTINED op (the event
+ * layer removes it from polling but NEVER releases the ref — retirement was never confirmed). A bare
+ * "terminal-drop" conflates the two and would release a quarantined op's life. Every poll/cancel/query
+ * returns one of: ─────────────────────────────────────────────────────────────────────────────────── */
+typedef enum {
+    KL_UEFI_UDP_OP_PENDING = 0,    /* poll/query: still the live op, not yet signalled — keep polling */
+    KL_UEFI_UDP_OP_DELIVERED,      /* poll: live op signalled (recv: out_bytes/out_ok set; send likewise) */
+    KL_UEFI_UDP_OP_RETIRED,        /* cancel: confirmed retired now → release life */
+    KL_UEFI_UDP_OP_STALE_RETIRED,  /* op's slot was cleanly closed/reused (reaped at close) → release life */
+    KL_UEFI_UDP_OP_QUARANTINED,    /* op's slot was quarantined at close → RETAIN life forever (unconfirmed) */
+    KL_UEFI_UDP_OP_INVALID         /* not a datagram handle — fail safe; NOT a confirmed retirement */
+} KlUefiUdpOpResult;
+
+/* Side-effect-free state of the op {fd,@generation}: PENDING (still the live posted op),
+ * STALE_RETIRED (cleanly closed/reused), QUARANTINED (leaked at close), or INVALID. The event layer
+ * uses this to decide life-release without polling (e.g. after close). */
+KlUefiUdpOpResult kl_uefi_udp_op_state(KlSocketHandle fd, unsigned long long generation);
+
 /* ── Completion-native token primitives (driven by event_efi.c post_dgram_* + drain) ──
  *
  * OPERATION IDENTITY (review-High): the completion backend polls an operation that was posted
@@ -137,16 +156,16 @@ int  kl_uefi_udp_valid_h(KlSocketHandle fd, unsigned long long generation);
  *                1 = retired (recycle a signalled RxData) or already-stale; 0 = UNCONFIRMED →
  *                the caller quarantines. */
 int kl_uefi_udp_post_recv(KlSocketHandle fd);
-int kl_uefi_udp_poll_recv(KlSocketHandle fd, unsigned long long generation,
+KlUefiUdpOpResult kl_uefi_udp_poll_recv(KlSocketHandle fd, unsigned long long generation,
                           void *copy_into, size_t cap,
                           KlSockAddr *out_src, KlSockAddr *out_local,
                           int *out_trunc, size_t *out_bytes, int *out_ok);
 int kl_uefi_udp_post_send(KlSocketHandle fd, const void *data, size_t len,
                           const KlSockAddr *dest);
-int kl_uefi_udp_poll_send(KlSocketHandle fd, unsigned long long generation,
+KlUefiUdpOpResult kl_uefi_udp_poll_send(KlSocketHandle fd, unsigned long long generation,
                           size_t *out_bytes, int *out_ok);
-int kl_uefi_udp_cancel_recv(KlSocketHandle fd, unsigned long long generation);
-int kl_uefi_udp_cancel_send(KlSocketHandle fd, unsigned long long generation);
+KlUefiUdpOpResult kl_uefi_udp_cancel_recv(KlSocketHandle fd, unsigned long long generation);
+KlUefiUdpOpResult kl_uefi_udp_cancel_send(KlSocketHandle fd, unsigned long long generation);
 /* 1 iff a Receive/Transmit token is currently outstanding on the EXACT op {fd,@generation}. */
 int kl_uefi_udp_recv_posted(KlSocketHandle fd, unsigned long long generation);
 int kl_uefi_udp_send_posted(KlSocketHandle fd, unsigned long long generation);
