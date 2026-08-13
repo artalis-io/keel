@@ -975,6 +975,13 @@ static KlIoStatus efi_sock_io_status(void *cx) {
     return kl_efi_status_to_io(g_last_ctx_status);
 }
 
+/* 6.4b: the unified provider's io_status is provider-global (KlSocketOps.io_status has no fd), so the
+ * DATAGRAM side must publish its last op's EFI_STATUS into the SAME channel the (stream) io_status
+ * reads — otherwise a synchronous datagram failure (TOS/source-pin reject → EFI_UNSUPPORTED) would be
+ * classified from stale TCP state and udp.c could enqueue a packet it should have dropped. Called by
+ * socket_efi_udp4.c's sync dgram->send. Single-threaded + sequential, so the last op wins. */
+void kl_uefi_provider_set_last_status(EFI_STATUS st) { g_last_ctx_status = st; }
+
 /* No-op setup ops: EFI has no fd flags (the provider is inherently non-blocking via
  * tokens). All return success. */
 static int  efi_noop_fd(void *cx, KlSocketHandle fd)          { (void)cx; (void)fd; return 0; }

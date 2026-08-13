@@ -655,20 +655,30 @@ static kl_ssize_t dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t
                           const KlSockAddr *dest, const KlSockAddr *src, int tos) {
     (void)ctx;
     KlUefiUdp *u = udp_of(fd);
-    if (!u) return -1;
-    if (tos >= 0) { u->last_status = EFI_UNSUPPORTED; return -1; }   /* per-datagram TOS not representable */
-    if (udp_post_send_ex(u, data, len, dest, src) != 0) return -1;   /* full session built pre-submit */
-    /* Drive the Tx token to completion (or quarantine on an unconfirmed cancel). */
-    if (!udp_pump_until(u->bs, u->udp, u->tx_tok.Event, KL_EFI_UDP_PUMP_SPINS)) {
+    if (!u) {   /* not a live datagram socket — publish a fatal classification so udp.c drops, not queues */
+        kl_uefi_provider_set_last_status(EFI_INVALID_PARAMETER);
+        return -1;
+    }
+    kl_ssize_t rv;
+    if (tos >= 0) {
+        u->last_status = EFI_UNSUPPORTED;   /* per-datagram TOS not representable → reject (send nothing) */
+        rv = -1;
+    } else if (udp_post_send_ex(u, data, len, dest, src) != 0) {
+        rv = -1;                             /* u->last_status set inside (invalid src / too large / EFI) */
+    } else if (!udp_pump_until(u->bs, u->udp, u->tx_tok.Event, KL_EFI_UDP_PUMP_SPINS)) {
         if (kl_uefi_udp_cancel_send(fd, u->generation) == KL_UEFI_UDP_OP_QUARANTINED)
             udp_quarantine(u);   /* centralized: dead + quarantined + generation bumped exactly once */
         u->last_status = EFI_TIMEOUT;
-        return -1;
+        rv = -1;
+    } else {
+        u->tx_posted = 0;
+        u->last_status = u->tx_tok.Status;
+        rv = EFI_ERROR(u->tx_tok.Status) ? -1 : (kl_ssize_t)len;
     }
-    u->tx_posted = 0;
-    u->last_status = u->tx_tok.Status;
-    if (EFI_ERROR(u->tx_tok.Status)) return -1;
-    return (kl_ssize_t)len;
+    /* Publish the datagram op's classification into the provider-global io_status channel so udp.c
+     * (which reads kl_sock_io_status after a -1) drops an unsupported/failed send instead of queuing. */
+    kl_uefi_provider_set_last_status(u->last_status);
+    return rv;
 }
 
 static const KlDatagramOps EFI_UDP4_DGRAM_OPS = {

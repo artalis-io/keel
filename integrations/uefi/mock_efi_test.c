@@ -32,6 +32,7 @@
 #include <keel/sockaddr.h>
 #include <keel/udp.h>                /* KlUdpConfig + KlDatagram layout (6.4b) */
 #include <keel/allocator.h>          /* KlAllocator (KlDgramLife tests) */
+#include <keel/event_ctx.h>          /* KlEventCtx (end-to-end KlUdp test) */
 #include "../../src/datagram_life.h" /* KlDgramLife create/retain/release/mark_dead (6.4b-3b) */
 #include "../../src/socket.h"        /* KlSocketProvider, KlSocketOps, kl_handle_valid */
 #include "../../src/completion.h"    /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
@@ -1643,6 +1644,66 @@ static void t_dgram_life_delivered_recv(void) {
     kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
 }
 
+/* Two back-to-back completion sends before any drain (review-High): EFI has ONE Tx token per socket,
+ * so event_efi QUEUES the second and serializes — both must be ACCEPTED (the second must NOT fail),
+ * post distinct destinations, and retire independently (each transfers/releases its own life ref). */
+static void t_dgram_two_concurrent_sends(void) {
+    T_CASE("dgram: two back-to-back sends before drain (queued + serialized over one EFI Tx token)");
+    reset_counters(); talloc_reset(); g_on_final_ran = 0;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int owner = 0;
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);   /* owner ref */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
+    g_udp_transmit_mode = TOK_COMPLETE_OK;
+    KlSockAddr d1, d2; mk_ipv4(&d1, 10, 0, 2, 3, 53); mk_ipv4(&d2, 10, 0, 2, 4, 5353);
+    CHECK(COMP(ep)->post_dgram_send(&dg, "AAAA", 4, &d1) == 0, "send#1 accepted");
+    CHECK(COMP(ep)->post_dgram_send(&dg, "BB", 2, &d2) == 0, "send#2 ACCEPTED before any drain (not -1)");
+    CHECK(g_udp_tx_calls == 1, "only ONE EFI Transmit posted (send#2 queued)");
+    CHECK(g_udp_tx_dst[3] == 3 && g_udp_tx_dport == 53, "send#1 posted first (10.0.2.3:53)");
+    /* Drain until both sends retire (each completes when it reaches the head of the per-fd queue;
+     * a fast fake may retire both within one drain — count totals, not per-drain). */
+    KlCompletionEvent evs[4];
+    int total = 0;
+    for (int d = 0; d < 3 && total < 2; d++) {
+        int dn = COMP(ep)->drain(NULL, evs, 4, 0);
+        for (int i = 0; i < dn; i++)
+            if (evs[i].kind == KL_COMP_DGRAM_SEND) { total++; kl_dgram_life_release(evs[i].life); }
+    }
+    CHECK(total == 2, "both sends completed (2 DGRAM_SEND completions, independent retirement)");
+    CHECK(g_udp_tx_calls == 2, "send#2 was pumped onto the freed Tx token (2 Transmits total)");
+    CHECK(g_udp_tx_dst[3] == 4 && g_udp_tx_dport == 5353, "send#2's distinct dest was posted (10.0.2.4:5353)");
+    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop */
+    CHECK(g_on_final_ran == 1, "both sends' refs released + owner drop → on_final once");
+    kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
+}
+
+/* End-to-end KlUdp (review-High #2): a source-pinned/TOS send routes to the sync dgram->send, which
+ * must publish its OWN (fatal) classification into the unified provider's io_status — so udp.c DROPS
+ * (returns -1), not queues (returns 0), even when the shared channel held a stale WOULD_BLOCK. */
+static void t_udp_e2e_unsupported_send_not_queued(void) {
+    T_CASE("udp e2e: KlUdp TOS send REJECTED (not queued) — dg_send publishes FATAL over stale io_status");
+    reset_counters();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);   /* unified provider (DATAGRAM) */
+    KlUdp udp;
+    KlUdpConfig uc; memset(&uc, 0, sizeof(uc)); uc.ctx = &ev; uc.family = AF_INET_; uc.alloc = &g_ta;
+    CHECK(kl_udp_init(&udp, &uc) == 0, "kl_udp_init over EFI_UDP4 (completion)");
+    /* Poison the provider-global io_status with a stale WOULD_BLOCK (as a prior stream would-block would). */
+    kl_uefi_provider_set_last_status(EFI_NOT_READY);
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+    int r = kl_udp_send_to_tos(&udp, "x", 1, &dest, 5);   /* tos>=0 → sync dgram->send → reject */
+    CHECK(r < 0, "TOS send REJECTED (r<0) — NOT queued (a queued send would return 0)");
+    CHECK(g_udp_tx_calls == 0, "no EFI Transmit for a rejected send");
+    kl_udp_free(&udp);
+    kl_event_ctx_free(&ev);
+    kl_uefi_event_provider_reset();
+}
+
 static void t_dgram_life_stale_release_recv(void) {
     T_CASE("dgram life: STALE_RETIRED (clean close) releases the op ref → on_final runs");
     reset_counters(); talloc_reset(); g_on_final_ran = 0;
@@ -1666,6 +1727,31 @@ static void t_dgram_life_stale_release_recv(void) {
     CHECK(emitted == 0, "no event on a stale (cleanly-retired) op");
     CHECK(g_on_final_ran == 1, "STALE_RETIRED released the op ref → on_final RAN");
     kl_uefi_event_provider_reset(); talloc_free_all();
+}
+
+/* Clean teardown releases (review-Medium): a cleanly-closed socket's op is STALE_RETIRED, so el_close
+ * (ctx teardown, WITHOUT another drain) must RELEASE its life ref — on_final runs, no receive-storage
+ * leak on ordinary teardown. (Contrast the QUARANTINE tests, where el_close/drain must RETAIN.) */
+static void t_dgram_teardown_clean_release(void) {
+    T_CASE("dgram teardown: clean close + el_close (no drain) → on_final runs (STALE_RETIRED released)");
+    reset_counters(); talloc_reset(); g_on_final_ran = 0;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int owner = 0;
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
+    unsigned char rbuf[64];
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
+    g_udp_receive_mode = TOK_HANG;
+    CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (→ 2)");
+    g_cancel_signals = 1;
+    kl_uefi_udp_close(fd);   /* CLEAN close reaps the token */
+    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    CHECK(g_on_final_ran == 0, "on_final not run yet (op ref remains; NO drain happens)");
+    ep->ops->close(NULL);   /* el_close: an ordinary ctx teardown, no further drain */
+    CHECK(g_on_final_ran == 1, "el_close RELEASED the STALE_RETIRED op ref → on_final RAN (no leak)");
+    kl_uefi_event_provider_reset();
 }
 
 static void t_dgram_life_quarantine_recv(void) {
@@ -1922,7 +2008,10 @@ int main(void) {
     t_udp_send_tos_and_srcpin();
     t_udp_after_ebs_refuses();
     t_dgram_life_delivered_recv();    /* 6.4b-3b event_efi wiring — clean (no slot leak) */
+    t_dgram_two_concurrent_sends();
+    t_udp_e2e_unsupported_send_not_queued();
     t_dgram_life_stale_release_recv();
+    t_dgram_teardown_clean_release();
     t_udp_quarantine_unconfirmed();   /* leaks one udp slot by design — runs last of the udp set */
     t_udp_quarantine_tx();            /* leaks one udp slot by design */
     t_udp_sync_send_quarantine();     /* leaks one udp slot by design */

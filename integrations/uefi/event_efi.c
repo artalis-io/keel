@@ -40,21 +40,35 @@
  * + a small body or one TLS record; larger bodies belong on the (future) sendfile/stream
  * path. Firmware BSS cost: KL_EFI_MAX_IO_OPS * KL_EFI_SNDBUF. */
 #define KL_EFI_SNDBUF       16384
-/* Datagram completion ops (6.4b-3b). DNS drives one Receive + a few Transmits per socket; a small
+/* Datagram completion ops (6.4b-3b). DNS drives one Receive + several Transmits per socket; a small
  * fixed pool, no allocation in the loop. Each op holds a B.6 KlDgramLife ref from post until it is
  * transferred to a completion event (DELIVERED), released (RETIRED/STALE_RETIRED), or RETAINED forever
- * (QUARANTINED/INVALID) — see el_drain. */
-#define KL_EFI_MAX_DGRAM_OPS 4
+ * (QUARANTINED/INVALID) — see el_drain.
+ *
+ * SEND SERIALIZATION (review-High): EFI_UDP4 allows only ONE outstanding Transmit token per socket, but
+ * KlUdp's completion send lets multiple sends be posted before a drain (the resolver launches A + AAAA
+ * synchronously). So the SEND ops form a per-socket PENDING QUEUE at THIS layer: el_post_dgram_send always
+ * ACCEPTS (copies the payload+dest — the caller may free them right after), and only ONE send per fd is
+ * posted to the substrate at a time; when it retires, the drain pumps the next queued send for that fd.
+ * 1 recv + up to a handful of queued sends → 8 slots; a send larger than the inline buffer is refused. */
+#define KL_EFI_MAX_DGRAM_OPS 8
+#define KL_EFI_DGRAM_SNDBUF  1500
 
 typedef enum { EFI_DG_RECV = 0, EFI_DG_SEND = 1 } EfiDgramKind;
 typedef struct {
     int                 in_use;
     EfiDgramKind        kind;
     KlSocketHandle      fd;
-    unsigned long long  generation;   /* the op identity (captured at post) */
+    unsigned long long  generation;   /* the op identity (captured when POSTED to the substrate) */
     void               *buf;          /* recv: the captured dg->recv_buf (copy target) */
     size_t              buflen;        /* recv: capacity */
     struct KlDgramLife *life;          /* B.6 token ref: retained at post; NULLed on transfer/release */
+    /* send-only: the queued payload/dest (copied so it survives the caller freeing them) + state. */
+    int                 posted;        /* send: 1 = an EFI Transmit token is outstanding for this op */
+    int                 post_failed;   /* send: the deferred substrate post failed → emit ok=0 */
+    unsigned char       snd[KL_EFI_DGRAM_SNDBUF];
+    size_t              snd_len;
+    KlSockAddr          snd_dest;
 } EfiDgramOp;
 
 /* A queued outbound connect (post_connect). Its terminal result is surfaced as a
@@ -186,11 +200,24 @@ static void el_close(KlEventLoop *loop) {
     for (int i = 0; i < KL_EFI_MAX_CONNECT_OPS; i++) g_efi.connect_ops[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_WATCHES; i++)      g_efi.watches[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++)       g_efi.io[i].in_use = 0;
-    /* A still-in-flight datagram op at ctx teardown: its EFI token may still be firmware-owned, so
-     * we CANNOT confirm retirement → RETAIN its B.6 life ref (abandon it, never release) exactly as a
-     * quarantine would, so on_final never frees storage the firmware might still touch. On a clean
-     * teardown the drain already reaped these (released), so this loop typically sees none. */
-    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++) { g_efi.dgram[i].life = NULL; g_efi.dgram[i].in_use = 0; }
+    /* A still-in-flight datagram op at ctx teardown: consult the substrate to decide life-release,
+     * so an ORDINARY teardown (sockets already cleanly closed → STALE_RETIRED) RELEASES the ref and
+     * on_final frees the receive storage — rather than leaking it. Only an unconfirmed op (QUARANTINED,
+     * INVALID, or a still-live/PENDING posted op we cannot reconcile here) RETAINS the ref. A send op
+     * never posted to the substrate (queued / post-failed) touched no firmware → release it. */
+    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++) {
+        EfiDgramOp *op = &g_efi.dgram[i];
+        if (op->in_use && op->life) {
+            KlUefiUdpOpResult st = (op->kind == EFI_DG_SEND && !op->posted)
+                ? KL_UEFI_UDP_OP_STALE_RETIRED             /* never posted → no firmware ref → release */
+                : kl_uefi_udp_op_state(op->fd, op->generation);
+            if (st == KL_UEFI_UDP_OP_STALE_RETIRED || st == KL_UEFI_UDP_OP_RETIRED)
+                kl_dgram_life_release(op->life);           /* confirmed retirement → release */
+            /* else QUARANTINED / INVALID / PENDING → retain (abandon the ref) */
+            op->life = NULL;
+        }
+        op->in_use = 0;
+    }
     g_efi.server        = NULL;
     g_efi.listen_fd     = KL_INVALID_SOCKET;
     g_efi.accept_primed = 0;
@@ -359,20 +386,45 @@ static int el_post_dgram_recv(struct KlDatagram *dg) {
     return 0;
 }
 
+/* Post the next QUEUED (accepted-but-unposted) send for @fd to the substrate, IFF no Transmit token is
+ * currently outstanding for @fd (EFI allows one at a time). A substrate post failure flags the op so the
+ * drain emits an ok=0 completion. Called from el_post_dgram_send (fast path) and after each send retires. */
+static void efi_dgram_pump_sends(KlSocketHandle fd) {
+    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++)   /* a send already in flight on this fd? then wait */
+        if (g_efi.dgram[i].in_use && g_efi.dgram[i].kind == EFI_DG_SEND &&
+            g_efi.dgram[i].fd == fd && g_efi.dgram[i].posted)
+            return;
+    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++) {
+        EfiDgramOp *op = &g_efi.dgram[i];
+        if (!op->in_use || op->kind != EFI_DG_SEND || op->fd != fd || op->posted || op->post_failed)
+            continue;
+        if (kl_uefi_udp_post_send(fd, op->snd, op->snd_len, &op->snd_dest) == 0) {
+            op->generation = kl_uefi_udp_generation_h(fd);   /* op identity captured at the real post */
+            op->posted = 1;
+        } else {
+            op->post_failed = 1;   /* real failure (not tx-busy — we checked) → drain reports ok=0 */
+        }
+        return;   /* one at a time */
+    }
+}
+
 static int el_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
                               const KlSockAddr *dest) {
-    if (!dg) return -1;
+    if (!dg || len > KL_EFI_DGRAM_SNDBUF) return -1;
     EfiDgramOp *op = dgram_op_alloc();
     if (!op) return -1;
     for (size_t b = 0; b < sizeof(*op); b++) ((unsigned char *)op)[b] = 0;
     op->kind = EFI_DG_SEND;
     op->fd   = dg->fd;
-    /* post_send COPIES data into the slot's stable staging (the caller may free it after post). */
-    if (kl_uefi_udp_post_send(dg->fd, data, len, dest) != 0) return -1;
-    op->generation = kl_uefi_udp_generation_h(dg->fd);
+    /* COPY the payload + dest now — the caller may free them right after this returns. The op is queued
+     * and posted to the substrate one-at-a-time by efi_dgram_pump_sends (EFI: one Tx token per socket). */
+    for (size_t b = 0; b < len; b++) op->snd[b] = ((const unsigned char *)data)[b];
+    op->snd_len = len;
+    if (dest) op->snd_dest = *dest;
     op->life = (struct KlDgramLife *)dg->rx_life;
-    kl_dgram_life_retain(op->life);
-    op->in_use = 1;
+    kl_dgram_life_retain(op->life);      /* one B.6 ref per accepted send op */
+    op->in_use = 1;                      /* accepted (queued) */
+    efi_dgram_pump_sends(dg->fd);        /* post it now if the socket's Tx token is free */
     return 0;
 }
 
@@ -545,6 +597,18 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             }
             op->in_use = 0;   /* retire the record (life already transferred/released/abandoned) */
         } else {   /* EFI_DG_SEND */
+            KlSocketHandle sfd = op->fd;
+            if (op->post_failed) {   /* the deferred substrate post failed → emit a failed completion */
+                for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
+                out[count].kind = KL_COMP_DGRAM_SEND;
+                out[count].life = op->life; op->life = NULL;   /* TRANSFER ref op → event */
+                out[count].ok   = 0;
+                count++;
+                op->in_use = 0;
+                efi_dgram_pump_sends(sfd);   /* let a queued send take the freed Tx token */
+                continue;
+            }
+            if (!op->posted) continue;   /* queued but not yet posted (another send holds the Tx token) */
             size_t nb = 0; int ok = 0;
             KlUefiUdpOpResult r = kl_uefi_udp_poll_send(op->fd, op->generation, &nb, &ok);
             if (r == KL_UEFI_UDP_OP_PENDING) continue;
@@ -561,6 +625,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
                 op->life = NULL;
             }
             op->in_use = 0;
+            efi_dgram_pump_sends(sfd);   /* post the next queued send for this socket */
         }
     }
 
