@@ -188,14 +188,33 @@ assert_tc() {
   has "$s" '6\.4c: DONE'                 && echo "  [ok] terminal DONE reached (bounded, no hang)" || { echo "  [FAIL] no DONE (hang on TC?)"; ok=0; }
   has "$s" '6\.4c: NO-GO'                && echo "  [ok] NO-GO (did not falsely succeed)"          || { echo "  [FAIL] unexpected GO on TC"; ok=0; }
   ! has "$s" 'http status = 200'         && echo "  [ok] no HTTP 200 (resolve failed as required)" || { echo "  [FAIL] got HTTP 200 on TC"; ok=0; }
-  # Attribute the failure to the truncation, not a timeout/socket/malformed reject: the DNS
-  # server must PROVE it put the truncated response on the wire (TC-SENT, after sendto), AND
-  # the resolver must report KL_ERR_DNS specifically (error = 10). Both required (6.3 rule).
-  has "$dns" 'TC-SENT'                   && echo "  [ok] truncated response delivered to guest"    || { echo "  [FAIL] no TC response reached the wire"; ok=0; }
+  # Attribute the failure to the truncation, not a timeout/socket/malformed reject. Per the
+  # 6.3 negative-test rule the DNS server must PROVE it put a truncated response on the wire
+  # for BOTH legs (TC-SENT type=1 AND type=28, after sendto), and the resolver must report
+  # KL_ERR_DNS specifically (error = 10).
+  has "$dns" 'TC-SENT.*type=1 '          && echo "  [ok] A-leg truncated response delivered"       || { echo "  [FAIL] no TC response for the A leg"; ok=0; }
+  has "$dns" 'TC-SENT.*type=28 '         && echo "  [ok] AAAA-leg truncated response delivered"    || { echo "  [FAIL] no TC response for the AAAA leg"; ok=0; }
   has "$s" '6\.4c: resolve-error = KL_ERR_DNS' && echo "  [ok] failure is KL_ERR_DNS (the TC rejection)" || { echo "  [FAIL] failure not attributable to TC rejection"; ok=0; }
   has "$s" 'error = 10'                  && echo "  [ok] error = 10 (KL_ERR_DNS numeric)"          || { echo "  [FAIL] error != 10"; ok=0; }
   has "$s" 'udp_live = 0 udp_quarantined = 0' && echo "  [ok] udp_live=0 quarantined=0 (clean teardown on TC too)" || { echo "  [FAIL] dirty UDP teardown on TC (live or quarantine != 0)"; ok=0; }
   has "$dns" 'type=1 '                   && echo "  [ok] guest issued the query (TC path exercised)" || { echo "  [FAIL] no query reached DNS"; ok=0; }
+  # Timing: response-driven TC settlement is prompt (leg fails immediately on TC, no retransmit),
+  # so it lands well below the per-leg timeout. A DROPPED TC response would only settle after
+  # the ≥leg_timeout_ms timer — indistinguishable from this test's other markers WITHOUT this
+  # check. Require completion under 2/3 of the leg timeout (derived from the serial, not magic).
+  local legto ms thr
+  legto=$(grep -oE 'leg_timeout_ms = [0-9]+' "$s" | grep -oE '[0-9]+' | head -1)
+  ms=$(grep -oE 'elapsed_ms = [0-9]+' "$s" | grep -oE '[0-9]+' | head -1)
+  if [ -n "$legto" ] && [ -n "$ms" ]; then
+    thr=$(( legto * 2 / 3 ))
+    if [ "$ms" -lt "$thr" ]; then
+      echo "  [ok] TC settled in ${ms}ms < ${thr}ms (2/3 of ${legto}ms leg timeout) → response-driven, not timeout"
+    else
+      echo "  [FAIL] TC settled in ${ms}ms (>= ${thr}ms) — cannot rule out a timeout-driven failure"; ok=0
+    fi
+  else
+    echo "  [FAIL] missing leg_timeout_ms/elapsed_ms markers (cannot prove prompt settlement)"; ok=0
+  fi
   [ "$ok" = 1 ] && echo "  TC: PASS" || { echo "  TC: FAIL"; FAILS=$((FAILS+1)); }
 }
 

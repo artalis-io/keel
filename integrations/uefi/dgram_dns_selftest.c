@@ -35,6 +35,7 @@
 #include "socket_efi_udp4.h"   /* kl_uefi_udp_provider_live_count / _quarantined_count */
 #include "event_efi.h"
 #include "allocator_uefi.h"
+#include "../../src/platform.h" /* kl_monotonic_ms — elapsed-time oracle (response- vs timeout-driven) */
 
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
@@ -145,6 +146,12 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     DoneCtx d;
     { unsigned char *p = (unsigned char *)&d; for (size_t i = 0; i < sizeof(d); i++) p[i] = 0; }
 
+    /* Time the whole resolve→GET. On the TC leg the stock resolver fails PROMPTLY (no TCP
+     * fallback, no retransmit — src/dns_resolver.c header §"TC-settles-clean"), so completion
+     * lands far below the per-leg timeout (dcfg.timeout_ms). If instead the TC responses were
+     * dropped, both legs would only settle KL_ERR_DNS after the ≥6000 ms leg timeout. The
+     * elapsed marker below therefore distinguishes response-driven settlement from a timeout. */
+    uint64_t t0 = kl_monotonic_ms();
     KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET", TARGET_URL,
                                   NULL, 0, NULL, 0, on_done, &d);
     if (c) {
@@ -157,9 +164,12 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         print_line("6.4c: kl_client_start failed");
         d.done = 1; d.status = -1; d.err = KL_ERR_DNS;
     }
+    uint64_t elapsed = kl_monotonic_ms() - t0;
 
     print("6.4c: http status = "); print_int(d.status); print_line("");
     print("6.4c: error = "); print_int((int)d.err); print_line("");
+    print("6.4c: leg_timeout_ms = "); print_int(dcfg.timeout_ms); print_line("");
+    print("6.4c: elapsed_ms = "); print_int((int)elapsed); print_line("");
     /* Symbolic error marker (robust to KlError reordering vs the numeric above): lets the TC
      * oracle attribute the failure to the DNS rejection specifically — not a timeout, socket
      * error, or malformed-response reject — per the 6.3 negative-test rule. */
