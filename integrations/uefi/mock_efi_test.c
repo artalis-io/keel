@@ -7,7 +7,7 @@
  *
  * It provides a scriptable fake EFI_BOOT_SERVICES + EFI_TCP4_PROTOCOL +
  * EFI_UDP4_PROTOCOL + EFI_SERVICE_BINDING_PROTOCOL, then drives the REAL provider TUs
- * (socket_efi_tcp4.c, dns_uefi.c, event_efi.c — compiled host-side against these mock
+ * (socket_efi_tcp4.c, socket_efi_udp4.c, event_efi.c — compiled host-side against these mock
  * headers) and asserts the F1/F2/F3/F6 fixes hold: every token reaches exactly one
  * terminal state (complete OR cancel-and-drained), close() reconciles outstanding
  * tokens, post-EBS every entry refuses without a firmware call, and the stale-guard
@@ -23,7 +23,6 @@
 #include "socket_efi_tcp4.h"
 #include "socket_efi_udp4.h"              /* the 6.4b datagram provider under test */
 #include "../../spikes/uefi/efi_udp4.h"   /* EFI_UDP4_* types for the UDP mock */
-#include "dns_uefi.h"
 #include "event_efi.h"
 #include "civil_time.h"                   /* cert validity-time conversion (U-8) */
 #include "wallclock_uefi.h"               /* EFI_TIME decode + unspecified-TZ policy (U-8) */
@@ -57,7 +56,7 @@ static const char *g_case = "?";
 } while (0)
 
 /* ── controllable EBS flag (the F3 fail-closed guard reads this) ────────────────
- * socket_efi_tcp4.c / dns_uefi.c / event_efi.c reference kl_uefi_after_ebs(); its real
+ * socket_efi_tcp4.c / socket_efi_udp4.c / event_efi.c reference kl_uefi_after_ebs(); its real
  * definition lives in platform_uefi.c (not linked here). The harness owns it so we can
  * script the post-EBS path. */
 static int g_after_ebs = 0;
@@ -467,9 +466,9 @@ static unsigned char g_udp_resp[512];
 static EFI_UDP4_RECEIVE_DATA g_udp_rxdata;
 static MockEvent g_udp_recycle_ev;
 /* The last UDP token the firmware ACCEPTED but did not complete (a TOK_HANG). The test uses
- * it to model a DELAYED firmware write into the token AFTER kl_uefi_dns_resolve() returns —
- * the exact condition that catches a stack-local token (write into a returned frame =
- * ASan stack-use-after-return) vs the stable g_dns_op storage (safe). */
+ * it to model a DELAYED firmware write into the token AFTER a datagram op is posted — the exact
+ * condition that catches a stack-local token (write into a returned frame = ASan stack-use-after-
+ * return) vs the socket_efi_udp4 stable per-slot storage (safe, B.6). */
 static EFI_UDP4_COMPLETION_TOKEN *g_udp_hung_tok;
 static EFI_STATUS EFIAPI m_udp_Transmit(EFI_UDP4_PROTOCOL *This, EFI_UDP4_COMPLETION_TOKEN *t) {
     (void)This; FW();
@@ -741,65 +740,6 @@ static void t_receive_pending_close(void) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
- * TEST 4 — DNS transmit & receive timeout: same for the UDP4 path.
- * ───────────────────────────────────────────────────────────────────────────── */
-static void t_dns_transmit_timeout(void) {
-    T_CASE("DNS transmit timeout (F1 UDP tx cancel+drain)");
-    reset_counters();
-    g_udp_transmit_mode = TOK_HANG;
-    g_udp_receive_mode  = TOK_COMPLETE_OK;
-    kl_uefi_dns_init(&g_bs, (EFI_HANDLE)0x1);
-    KlSockAddr out;
-    int r = kl_uefi_dns_resolve("example.com", 80, &out);
-    CHECK(r == -1, "dns_resolve -1 on transmit hang");
-    CHECK(g_udp_cancel_calls >= 1, "F1: UDP Cancel(token) on tx timeout");
-    CHECK(outstanding_count() == 0, "F1: no UDP token outstanding after tx cancel+drain");
-    CHECK(g_destroy_child_calls == 1, "dns teardown: DestroyChild called");
-}
-
-static void t_dns_receive_timeout(void) {
-    T_CASE("DNS receive timeout (F1 UDP rx cancel+drain)");
-    reset_counters();
-    g_udp_transmit_mode = TOK_COMPLETE_OK;
-    g_udp_receive_mode  = TOK_HANG;
-    kl_uefi_dns_init(&g_bs, (EFI_HANDLE)0x1);
-    KlSockAddr out;
-    int r = kl_uefi_dns_resolve("example.com", 80, &out);
-    CHECK(r == -1, "dns_resolve -1 on receive hang");
-    CHECK(g_udp_cancel_calls >= 1, "F1: UDP Cancel(token) on rx timeout");
-    CHECK(outstanding_count() == 0, "F1: no UDP token outstanding after rx cancel+drain");
-    CHECK(g_destroy_child_calls == 1, "dns teardown: DestroyChild called");
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
- * TEST 5 — cancel racing natural completion: a token that completes naturally is NOT
- * cancelled (exactly one terminal), and the OK DNS path recycles RxData exactly once.
- * ───────────────────────────────────────────────────────────────────────────── */
-static void build_dns_a_response(uint16_t id) {
-    /* Minimal valid A-record response for the query id the resolver will use. The
-     * resolver uses a random id, so we can't match it — instead test the happy send/recv
-     * lifetime (no double-terminal) via counters rather than a parsed answer. */
-    (void)id;
-    memset(g_udp_resp, 0, sizeof(g_udp_resp));
-    g_udp_resp_len = 12;   /* header only — parse will fail (no answer), that's fine */
-}
-static void t_cancel_racing_completion(void) {
-    T_CASE("cancel racing natural completion (exactly-one terminal + single recycle)");
-    reset_counters();
-    g_udp_transmit_mode = TOK_COMPLETE_OK;
-    g_udp_receive_mode  = TOK_COMPLETE_OK;   /* both complete naturally, no cancel */
-    build_dns_a_response(0);
-    kl_uefi_dns_init(&g_bs, (EFI_HANDLE)0x1);
-    KlSockAddr out;
-    int r = kl_uefi_dns_resolve("example.com", 80, &out);
-    (void)r;   /* parse fails (12-byte header, no answer) → -1, but lifetime is clean */
-    CHECK(g_udp_cancel_calls == 0, "no Cancel when both tokens complete naturally");
-    CHECK(outstanding_count() == 0, "exactly-one terminal: no token left outstanding");
-    CHECK(g_recycle_signals == 1, "RxData RecycleSignal signaled exactly once");
-    CHECK(g_destroy_child_calls == 1, "teardown: DestroyChild once");
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
  * TEST 6 — close-token timeout: graceful Close hangs → close() still tears down
  * (Cancel+drain the close token, DestroyChild) — no hang, no leak.
  * ───────────────────────────────────────────────────────────────────────────── */
@@ -853,11 +793,6 @@ static void t_after_ebs_refuses(void) {
     KlCompletionEvent evs[4];
     int dn = COMP(ep)->drain(NULL, evs, 4, 0);
     CHECK(dn == 0, "el_drain returns 0 post-EBS");
-
-    /* DNS must refuse up front. */
-    kl_uefi_dns_init(&g_bs, (EFI_HANDLE)0x1);
-    KlSockAddr out;
-    CHECK(kl_uefi_dns_resolve("example.com", 80, &out) == -1, "dns_resolve refuses post-EBS");
 
     CHECK(g_firmware_calls == fw_before, "F3: ZERO firmware calls across all post-EBS entries");
 
@@ -1161,43 +1096,6 @@ static void t_bad_rx_length(void) {
     CHECK(n == -1, "F4: recv returns -1 (fatal) on impossible DataLength, no OOB read");
     g_tcp_rx_datalen_override = 0;
     p->ops->close(p->context, fd);
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
- * TEST 13 (F1/UDP release-blocker) — a DNS Transmit hangs AND Cancel does not retire
- * the token: the resolver must QUARANTINE (leak the child/events/static tx+qbuf, retain
- * until EBS) and fail-close every subsequent resolve — never DestroyChild a live token.
- * Runs LAST: it sets the sticky g_dns_quarantined.
- * ───────────────────────────────────────────────────────────────────────────── */
-static void t_dns_cancel_fails_quarantine(void) {
-    T_CASE("DNS cancel-drain FAILS -> quarantine + fail-close (F1/UDP)");
-    reset_counters();
-    g_udp_transmit_mode = TOK_HANG;
-    g_cancel_signals    = 0;             /* UDP Cancel is a no-op — token stays live */
-    kl_uefi_dns_init(&g_bs, (EFI_HANDLE)0x1);
-    KlSockAddr out;
-    g_udp_hung_tok = NULL;
-    int r = kl_uefi_dns_resolve("example.com", 80, &out);
-    CHECK(r == -1, "dns_resolve -1 on tx hang + failed cancel");
-    CHECK(g_destroy_child_calls == 0, "F1/UDP: child NOT destroyed while token live (leaked, safe)");
-
-    /* THE bug this guards: the live token the firmware still owns must NOT be stack-local.
-     * Model a DELAYED firmware write into it AFTER dns_resolve() has returned (the firmware
-     * eventually completes the "hung" Transmit, writing Status + Packet into the token). If
-     * the token lived on dns_resolve's stack, this write hits a returned frame — ASan
-     * stack-use-after-return. With the g_dns_op fix it lands in stable static storage. */
-    CHECK(g_udp_hung_tok != NULL, "F1/UDP: firmware retained the live token address");
-    if (g_udp_hung_tok) {
-        g_udp_hung_tok->Status = EFI_ABORTED;      /* late write — must be safe */
-        g_udp_hung_tok->Packet.RxData = NULL;
-        CHECK(g_udp_hung_tok->Status == EFI_ABORTED,
-              "F1/UDP: late firmware write lands in STABLE token storage (no stack-UAR)");
-    }
-
-    /* A subsequent resolve must fail-close (quarantined). */
-    int r2 = kl_uefi_dns_resolve("example.com", 80, &out);
-    CHECK(r2 == -1, "F1/UDP: subsequent resolve fails-closed after quarantine");
-    g_cancel_signals = 1;
 }
 
 /* ═════════════════════════════════════════════════════════════════════════════
@@ -2155,9 +2053,6 @@ int main(void) {
     t_connect_timeout_close();
     t_transmit_timeout();
     t_receive_pending_close();
-    t_dns_transmit_timeout();
-    t_dns_receive_timeout();
-    t_cancel_racing_completion();
     t_close_token_timeout();
     t_after_ebs_refuses();
     t_entropy_fail_closed();           /* links entropy_uefi.c (mbedTLS-free) */
@@ -2180,7 +2075,6 @@ int main(void) {
     t_accept_backpressure();
     t_accept_stale_generation();
     t_accept_cancel_fail_quarantine();   /* last: intentional permanent slot leak */
-    t_dns_cancel_fails_quarantine();   /* last: sets the sticky DNS quarantine */
 
     printf(g_fail ? "\nmock-EFI harness: FAIL\n" : "\nmock-EFI harness: PASS\n");
     return g_fail;

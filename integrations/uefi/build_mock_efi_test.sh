@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build_mock_efi_test.sh — HOST build of the mock-EFI failure-path harness (F7b).
 #
-# Compiles the REAL provider TUs (socket_efi_tcp4.c, dns_uefi.c, event_efi.c,
+# Compiles the REAL provider TUs (socket_efi_tcp4.c, socket_efi_udp4.c, event_efi.c,
 # allocator_uefi.c) host-side against the scriptable fake EFI in mock_efi_test.c, under
 # ASan+UBSan, and links the core libkeel.a for kl_sockaddr_*/kl_malloc/etc. Runs the
 # token-lifetime failure-path assertions (timeouts, aborts, close-with-outstanding,
@@ -32,7 +32,7 @@ CFLAGS=(
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/src" -I. -I"$KEEL_ROOT/spikes/uefi"
   -Wall -Wextra
 )
-SRCS=( mock_efi_test.c socket_efi_tcp4.c socket_efi_udp4.c dns_uefi.c event_efi.c allocator_uefi.c
+SRCS=( mock_efi_test.c socket_efi_tcp4.c socket_efi_udp4.c event_efi.c allocator_uefi.c
        entropy_uefi.c civil_time.c wallclock_uefi.c clock_snapshot.c )
 
 echo "building mock_efi_test (host, ASan+UBSan) ..."
