@@ -160,6 +160,11 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
     print("6.4c: http status = "); print_int(d.status); print_line("");
     print("6.4c: error = "); print_int((int)d.err); print_line("");
+    /* Symbolic error marker (robust to KlError reordering vs the numeric above): lets the TC
+     * oracle attribute the failure to the DNS rejection specifically — not a timeout, socket
+     * error, or malformed-response reject — per the 6.3 negative-test rule. */
+    if (d.err == KL_ERR_DNS)     print_line("6.4c: resolve-error = KL_ERR_DNS");
+    if (d.err == KL_ERR_TIMEOUT) print_line("6.4c: resolve-error = KL_ERR_TIMEOUT");
 
     /* Teardown BEFORE the live-count assertion: the resolver's KlUdp (EFI_UDP4 child) must
      * be reaped and no slot leaked/quarantined on the happy path (frozen §9.3). */

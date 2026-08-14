@@ -110,7 +110,8 @@ while True:
     sys.stderr.write("6.4c DNS query: %s type=%d mode=%s from %s\n" % (qname, qtype, MODE, addr))
     sys.stderr.flush()
     question = data[12:off+4]
-    if MODE == "tc":
+    is_tc = (MODE == "tc")
+    if is_tc:
         # QR|RD|RA|TC, RCODE=0, no records — a truncated answer.
         flags = struct.pack(">H", 0x8380)
         resp = tid + flags + struct.pack(">HHHH", 1, 0, 0, 0) + question
@@ -122,9 +123,14 @@ while True:
         if is_a:
             resp += b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + socket.inet_aton(ANSWER_IP)
     try:
-        sock.sendto(resp, addr)
-    except Exception:
-        pass
+        n = sock.sendto(resp, addr)
+        # Prove the (truncated) response was actually delivered to the guest BEFORE the
+        # harness attributes the resolver failure to the rejection (6.3 negative-test rule).
+        if is_tc:
+            sys.stderr.write("6.4c DNS TC-SENT %d bytes (TC=1, 0 records) type=%d to %s\n" % (n, qtype, addr))
+            sys.stderr.flush()
+    except Exception as e:
+        sys.stderr.write("6.4c DNS sendto FAILED: %s\n" % e); sys.stderr.flush()
 PYEOF
 
 DNS_PID=""
@@ -182,7 +188,13 @@ assert_tc() {
   has "$s" '6\.4c: DONE'                 && echo "  [ok] terminal DONE reached (bounded, no hang)" || { echo "  [FAIL] no DONE (hang on TC?)"; ok=0; }
   has "$s" '6\.4c: NO-GO'                && echo "  [ok] NO-GO (did not falsely succeed)"          || { echo "  [FAIL] unexpected GO on TC"; ok=0; }
   ! has "$s" 'http status = 200'         && echo "  [ok] no HTTP 200 (resolve failed as required)" || { echo "  [FAIL] got HTTP 200 on TC"; ok=0; }
-  has "$s" 'udp_live = 0'                && echo "  [ok] udp_live=0 after failed resolve"          || { echo "  [FAIL] dirty UDP teardown on TC"; ok=0; }
+  # Attribute the failure to the truncation, not a timeout/socket/malformed reject: the DNS
+  # server must PROVE it put the truncated response on the wire (TC-SENT, after sendto), AND
+  # the resolver must report KL_ERR_DNS specifically (error = 10). Both required (6.3 rule).
+  has "$dns" 'TC-SENT'                   && echo "  [ok] truncated response delivered to guest"    || { echo "  [FAIL] no TC response reached the wire"; ok=0; }
+  has "$s" '6\.4c: resolve-error = KL_ERR_DNS' && echo "  [ok] failure is KL_ERR_DNS (the TC rejection)" || { echo "  [FAIL] failure not attributable to TC rejection"; ok=0; }
+  has "$s" 'error = 10'                  && echo "  [ok] error = 10 (KL_ERR_DNS numeric)"          || { echo "  [FAIL] error != 10"; ok=0; }
+  has "$s" 'udp_live = 0 udp_quarantined = 0' && echo "  [ok] udp_live=0 quarantined=0 (clean teardown on TC too)" || { echo "  [FAIL] dirty UDP teardown on TC (live or quarantine != 0)"; ok=0; }
   has "$dns" 'type=1 '                   && echo "  [ok] guest issued the query (TC path exercised)" || { echo "  [FAIL] no query reached DNS"; ok=0; }
   [ "$ok" = 1 ] && echo "  TC: PASS" || { echo "  TC: FAIL"; FAILS=$((FAILS+1)); }
 }
