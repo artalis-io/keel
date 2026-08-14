@@ -410,8 +410,9 @@ Two layers, matching the KlStream/UEFI coverage bar (host-mock ≠ real firmware
    budget exhausts, slot quarantined, `life` ref **retained** (inbound storage NOT freed — the mock
    allocator's live count proves it), fail-close. This is where the two emphasized mechanisms
    (discrimination + quarantine) get deterministic coverage the way `dgram_recv_classify` did for IOCP.
-2. **QEMU/OVMF end-to-end (6.4c, next step):** the U-5 harness (python DNS server on :53, SLIRP
-   10.0.2.2) with the **stock `dns_resolver.c` over `KlUdp`-over-EFI_UDP4** → A/AAAA → HTTPS GET 200;
+2. **QEMU/OVMF end-to-end (6.4c — DONE):** a U-5-derived harness (`run_dgram_dns.sh`: python DNS
+   server on :53, SLIRP 10.0.2.2) with the **stock `dns_resolver.c` over `KlUdp`-over-EFI_UDP4** →
+   A/AAAA → HTTP GET 200 + a truncation (TC) case;
    plus a truncated-response case exercising the freestanding TC branch (6.4a-2) on real firmware;
    assert `kl_uefi_udp_provider_live_count()==0` at teardown (clean, no quarantine on the happy path).
 

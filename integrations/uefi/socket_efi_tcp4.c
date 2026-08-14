@@ -28,7 +28,7 @@
  * would-block by reading errno==EAGAIN, so the provider MUST set it on the
  * would-block/error -1 paths (matching the lwip provider contract). We only
  * WRITE errno here; the definition lives in u1_link_stubs.c (linked by every
- * U-3/U-4/U-5 build). No libc errno.h — the freestanding shim may lack it —
+ * U-3/U-4 build). No libc errno.h — the freestanding shim may lack it —
  * so declare the global + the two codes locally. */
 extern int errno;
 #ifndef EAGAIN

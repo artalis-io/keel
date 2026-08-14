@@ -34,9 +34,9 @@
 #include <ws2tcpip.h>               /* socklen_t (local shim) for inet_ntop */
 
 /* ── (c) errno global ────────────────────────────────────────────────────────
- * MOVED to u1_link_stubs.c (linked by U-3/U-4/U-5): the EFI socket provider now
+ * MOVED to u1_link_stubs.c (linked by U-3/U-4): the EFI socket provider now
  * WRITES errno=EAGAIN/EIO on its would-block/error -1 returns (U-6), which the
- * plaintext U-3/U-5 builds — that do NOT link this TU — reference too. Defining
+ * plaintext U-3 build — that does NOT link this TU — references too. Defining
  * it in the shared u1_link_stubs.c gives exactly one `errno` per link set. */
 
 /* ── (c) inert <stdio.h> FILE ops ───────────────────────────────────────────

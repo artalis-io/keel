@@ -180,7 +180,7 @@ firmware's handle database via `LocateProtocol` / `OpenProtocol`:
   `Cancel()`, `Poll()`, `GetModeData()`. Each I/O call takes a **completion token**
   (`EFI_TCP4_..._TOKEN`) carrying an `EFI_EVENT` and a `Status`; the call returns immediately
   and the firmware **signals the event** when the op completes.
-- **`EFI_UDP4/6_PROTOCOL`** — the datagram analog (for a future DNS/UDP leg).
+- **`EFI_UDP4/6_PROTOCOL`** — the datagram analog; EFI_UDP4 is now a real KEEL socket provider (`socket_efi_udp4.c`, 6.4b) carrying the stock `dns_resolver` over `KlUdp` (6.4c).
 - **`EFI_DNS4/6_PROTOCOL`** — firmware DNS (present on many but not all implementations).
 - **`EFI_MANAGED_NETWORK_PROTOCOL` / `EFI_SIMPLE_NETWORK_PROTOCOL`** — lower layers; we do not
   touch these directly if TCP4 is available.
@@ -233,7 +233,7 @@ tokens/events. The generic `completion_driver.c` does the rest.
 | `post_recv(conn)` | `Receive(&RxToken)` with an `EFI_TCP4_RECEIVE_DATA` fragment table | Completion → bytes in the fragment buffers → `KL_COMP_READ`. Ciphertext for TLS (feed to `feed_input` — the completion-TLS backend contract, see below). |
 | `post_send(conn, iov, n, total)` | `Transmit(&TxToken)` with an `EFI_TCP4_TRANSMIT_DATA` fragment table | Fragment table maps directly from `KlIoVec[]` (scatter-gather is native). Completion → `KL_COMP_WRITE`. |
 | `post_sendfile(...)` | (optional) `Transmit` chunks from the file | No zero-copy `splice` in UEFI; chunk through a bounded buffer, like the readiness fallback. |
-| `post_udp_recv/send(udp)` | `EFI_UDP4_PROTOCOL` Receive/Transmit tokens | Datagram axis → enables KEEL's `dns_resolver.c` over EFI UDP (one DNS path, the LC-3 pattern). Deferred to a later stage. |
+| `post_dgram_recv/send(dg)` | `EFI_UDP4_PROTOCOL` Receive/Transmit tokens | Datagram axis → the stock `dns_resolver.c` runs over `KlUdp`-over-EFI_UDP4. **Done (6.4b/6.4c):** `event_efi.c` `post_dgram_recv/_send` + drain over the `socket_efi_udp4.c` provider, B.6 stable token. |
 | `drain(ctx, out, max, timeout_ms)` | `WaitForEvent`/`CheckEvent` over the pending tokens' events (+ the protocol's `Poll()` to advance the stack) | The pump. Collect every signaled token, translate `token->Status` → Keel category, emit `KlCompletionEvent[]`. `timeout_ms` via an `EFI_TIMER` event added to the `WaitForEvent` set. |
 | `cancel(ctx, fd)` | `EFI_TCP4_PROTOCOL.Cancel(token)` (or `Cancel(NULL)` for all on that handle) | Must reconcile the exactly-once terminal-result contract (§5). |
 
@@ -354,8 +354,10 @@ Mirrors P9-1..P9-5 / LC-0..LC-5 discipline. **U-0 is a hard gate** — no U-1 wi
 - **U-4 — HTTPS (client).** mbedTLS built freestanding; reuse the memory-BIO completion-TLS leg;
   satisfy the backend completion-TLS contract (feed ciphertext + sync handshake send). Gate:
   `GET https://<addr>/ → 200`. Out of standard CI (BYO mbedTLS), like LC-4.
-- **U-5 — DNS + UDP (optional).** `EFI_UDP4` datagram ops → KEEL's `dns_resolver.c` over it
-  (one DNS path, the LC-3 pattern), or `EFI_DNS4` where present. Gate: resolve + `GET → 200`.
+- **DNS + UDP — REALIZED (6.4b/6.4c).** `EFI_UDP4` datagram ops (`socket_efi_udp4.c` +
+  `event_efi.c`) → KEEL's stock `dns_resolver.c` over `KlUdp` — resolve + `GET → 200` proven in
+  QEMU/OVMF. (The original U-5 spike used a bespoke sync `dns_uefi.c`, since retired; `EFI_DNS4`
+  firmware DNS remains a possible future alternative.)
 - **U-6 — server (stretch, optional).** `Accept` tokens → `KL_COMP_ACCEPT`; a raw `KlServer`
   serves `GET / → 200` under OVMF. Only if a boot-time server has a real use case.
 - **U-7 — caps + docs.** Capability matrix (what's Supported/Unsupported-by-design/
@@ -373,7 +375,7 @@ switch (`EFI_TCP6`).
 |-------------|--------|
 | EFI_TCP4 + EFI completion loop (client, plaintext) | **PROVEN — `KlClient GET → 200` in QEMU/OVMF (U-3, #215)** |
 | EFI_TCP4 + EFI completion loop (client, HTTPS) | **HAPPY PATH PROVEN — freestanding mbedTLS `GET → 200` in QEMU/OVMF (U-4, #216). Prod mode = CA + hostname verified, real EFI_RNG — but NO cert-time validation (`HAVE_TIME` off) and the reusable entropy adapter was not fail-closed (F-8 hardening).** |
-| EFI_UDP4 DNS (A-query resolve) | **PROVEN — `resolve keel.test → GET → 200` in QEMU/OVMF (U-5, #219); bounds-safe parse, sync** |
+| EFI_UDP4 DNS (async stock resolver) | **PROVEN — the stock async `dns_resolver` resolves `keel.test` over `KlUdp`-over-EFI_UDP4 → A/AAAA → GET 200, plus a truncation (TC) case, in QEMU/OVMF (6.4c); bounds-safe parse. (The original U-5 spike, #219, used a bespoke *synchronous* one-shot `dns_uefi.c` — since retired.)** |
 | EFI_TCP4 + EFI completion loop (server) | *stretch; deferred (client-first)* |
 | Host EFI_TCP4 **mock** + completion driver (ASan gate) | **PROVEN — F-7 harness 57/57 (mock socket + completion provider)** |
 | IPv6 (`EFI_TCP6`) | *out of first cut (family switch)* |
@@ -444,7 +446,7 @@ host-side, no-firmware groundwork the spike builds on).
   2. `client_async.c` unconditionally auto-created the built-in DNS-over-UDP resolver
      (`kl_dns_resolver_create`), dragging in the DNS + UDP stack. Gated out under
      `KEEL_FREESTANDING` (a freestanding client resolves via `cfg->resolver` or a numeric
-     address — the §8 IPv4/numeric-first shape; DNS is U-5).
+     address — the §8 IPv4/numeric-first shape; hostname DNS is the async `cfg->resolver`, 6.4c).
 
 **The enforced whitelist** (the archive's full undefined-symbol closure):
 
@@ -482,7 +484,9 @@ the F-7 harness (`tests/freestanding_host_platform.c`).
 | a `KlEventProvider` + `KlCompletionOps` | `drain` + `post_connect` + `cancel` (+ `add`/`mod`/`del`/`caps`/`native_provider`). | U-3 (EFI tokens/events). Injected via `kl_event_ctx_init_ex`, so the `kl_event_*_builtin`/`kl_comp_ops_builtin` fallbacks are never reached. |
 
 Nothing more for a plaintext client. TLS/ws add a `KlTls` backend + its entropy (`kl_plat_random`
-/ EFI_RNG); DNS (U-5) adds a `KlResolver` or a real `kl_resolve_sync` over EFI_UDP4/EFI_DNS4.
+/ EFI_RNG); DNS is an **async** `KlResolver` — the stock `dns_resolver` over the EFI_UDP4 provider,
+injected via `cfg.resolver` (6.4c). `kl_resolve_sync` stays **numeric-only** (no sync DNS): a
+freestanding hostname resolve goes through the async resolver, never a sync-over-async adapter.
 
 **`kl_resolve_sync`: MOCKED, not trimmed (finding).** The archive genuinely *references*
 `kl_resolve_sync` — `client_async.c`'s sync-DNS *fallback* (reached when `client_pick_resolver`
@@ -492,7 +496,7 @@ literals also flow through that fallback. Trimming would mean `#ifdef`-ing out b
 to dial even a numeric literal without a resolver. The design already whitelists it as "the tiny
 platform seam", so the correct move is to **provide a numeric-only reference** (dotted-quad IPv4
 parse; any non-numeric host fails — a freestanding client with no resolver *cannot* resolve names).
-That is exactly what a minimal embedder ships pre-DNS (U-5). The F-7 harness itself drives the
+That is exactly what a minimal embedder ships when no async resolver is wired. The F-7 harness itself drives the
 client via `cfg->resolver`, so it never *executes* `kl_resolve_sync` — but the symbol stays a link
 dependency, hence the mock. **No `src/` change was required for F-5/F-7.**
 

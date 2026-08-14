@@ -382,35 +382,38 @@ limitation · ⚙ to build.
 
 | Tier-1 requirement | POSIX rdy | Winsock rdy | pollcomp | io_uring | IOCP | lwIP-raw | EFI_UDP4 |
 |---|---|---|---|---|---|---|---|
-| Serial recv, one per op (armed source ≠ op) | ✅ (drain≤N/tick, serial) | ✅ | ✅ | ✅ | ✅ | ⚙ (16-slot ring accumulates >1 held pkt — needs one-held-slot rework) | ⚙ (1 Rx token) |
-| Atomic whole-packet send | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚙ (1 Tx token) |
+| Serial recv, one per op (armed source ≠ op) | ✅ (drain≤N/tick, serial) | ✅ | ✅ | ✅ | ✅ | ⚙ (16-slot ring accumulates >1 held pkt — needs one-held-slot rework) | ✅ (1 self-rearming Rx token, 6.4b) |
+| Atomic whole-packet send | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (1 Tx token, 6.4b) |
 | Packet-slot bounded **send** queue | ⚙ (recast from byte-FIFO) | ⚙ | ⚙ | ⚙ | ⚙ | ⚙ (no preallocated atomic send-slot queue; the 16-slot ring is receive-side) | ⚙ |
 | Strict pause (post no more recv) | ⚙ (drop interest) | ⚙ | ⚙ (latch) | ⚙ (latch) | ⚙ (latch) | ⚙ | ⚙ |
-| Cancel-once + confirmed detachment | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring/memset) | ⚙ (Cancel + quarantine model) |
-| Lifetime: no op refs object after detach | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring) | ⚙ (Cancel + confirmed retire) |
-| `peer` (source) on every recv | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚙ |
-| Truncation detected + flagged | ✅ (`MSG_TRUNC`) | ✅ | ✅ | ✅ | ✅ (`dwFlags`/`WSAEMSGSIZE`, Step 5) | ✅ (ring flag) | ⚙ |
-| Recv storage = object's dedicated inbound slot (no `KlUdp` deref) | ✅ | ✅ | ✅ (token pins slot) | ✅ (token pins slot) | ✅ (token pins slot) | ▲ (no `KlUdp` deref via token; copy-ring still stages into the inbound slot — single-slot swap deferred) | ⚙ |
+| Cancel-once + confirmed detachment | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring/memset) | ✅ (stable token + Cancel + confirmed-retire-or-quarantine, 6.4b) |
+| Lifetime: no op refs object after detach | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring) | ✅ (B.6 stable token, 6.4b) |
+| `peer` (source) on every recv | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (native `EFI_UDP4_SESSION_DATA`) |
+| Truncation detected + flagged | ✅ (`MSG_TRUNC`) | ✅ | ✅ | ✅ | ✅ (`dwFlags`/`WSAEMSGSIZE`, Step 5) | ✅ (ring flag) | ✅ (6.4b) |
+| Recv storage = object's dedicated inbound slot (no `KlUdp` deref) | ✅ | ✅ | ✅ (token pins slot) | ✅ (token pins slot) | ✅ (token pins slot) | ▲ (no `KlUdp` deref via token; copy-ring still stages into the inbound slot — single-slot swap deferred) | ✅ (token pins slot, 6.4b) |
 | **Capabilities** | | | | | | | |
-| pktinfo (`local`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ | ✖ |
+| pktinfo (`local`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ | ✅ (native dest in `EFI_UDP4_SESSION_DATA`) |
 | multicast | ✅ | ✅ (no v4 by-index ✖) | ✅ | ✅(ctl) | ✅(ctl) | ✖ | ✖ |
 | broadcast | ✅ | ✅ | ✅ | ✅(ctl) | ✅ | ✖ | ✖ |
 | TOS/ECN | ✅ | ✅ | ✅ | ✅(ctl) | ✅(ctl) | ✖ | ✖ |
 | mmsg batch (Tier 2) | ✅(Linux) | ✖ | ✖ | ✖ | ✖ | ✖ | ✖ |
 | GSO / GRO (Tier 2) | ✅(Linux) | ✖ | ▲ | ✅ GRO / ✖ GSO | ✖ | ✖ | ✖ |
 | source-pin send | ✅ | ✅ | ✅ | ▲ (sync seam) | ▲ (sync seam) | ✖ | ✖ |
-| connected mode | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ (rejected) | ⚙ |
+| connected mode | ✅ | ✅ | ✅ | ✅ | ✅ | ✖ (rejected) | ✖ (unconnected only) |
 
-**Reading the matrix:** lifetime ownership is now ✅ across ALL FOUR completion backends
-(pollcomp/io_uring/IOCP/lwIP-raw) via the backend-owned stable token (**Phase B.6 complete**, §5
-status); the remaining ⚙ cells in the top block are the packet-slot **send** queue and strict
-pause. The ✖ capability cells are *documented limitations* — consumers query caps (§9) and degrade.
-**EFI_UDP4 is the only column that is ⚙ end-to-end** — now served by the stock `dns_resolver` over the
-`socket_efi_udp4.c` EFI_UDP4 provider (6.4b/6.4c); the seed `dns_uefi.c` token machine was retired
-(audit §6). lwIP-raw's object-owned-buffer
-row is ▲: the token removed its `KlUdp` deref, but it still stages through its copy-ring before the
-machine copies into the dedicated inbound slot — replacing the copy-ring with a single inbound slot
-is a deferred Tier-1 cleanup (the copy-ring was deliberately preserved).
+**Reading the matrix:** lifetime ownership is now ✅ across ALL FIVE completion backends
+(pollcomp/io_uring/IOCP/lwIP-raw **and EFI_UDP4**) via the backend-owned stable token (**Phase B.6
+complete**, §5 status). **EFI_UDP4 is a real provider** now (`socket_efi_udp4.c` + `event_efi.c`, 6.4b;
+implemented + host-mock-tested + firmware-proven end-to-end in 6.4c — the seed `dns_uefi.c` token
+machine was retired, audit §6): its serial recv, atomic send, cancel-once/confirmed-retirement +
+quarantine, stable-token lifetime, native `peer`/`local` (from `EFI_UDP4_SESSION_DATA`), truncation,
+and dedicated inbound slot are all ✅. The only ⚙ cells remaining anywhere are the **shared** Tier-1
+items still to build for EVERY backend — the packet-slot bounded **send** queue and strict pause; a
+`✅`-per-backend flip lands with that work, not per-provider. The ✖ capability cells are *documented
+limitations* — consumers query caps (§9) and degrade. lwIP-raw's object-owned-buffer row is ▲: the
+token removed its `KlUdp` deref, but it still stages through its copy-ring before the machine copies
+into the dedicated inbound slot — replacing the copy-ring with a single inbound slot is a deferred
+Tier-1 cleanup (the copy-ring was deliberately preserved).
 
 ---
 

@@ -26,7 +26,7 @@ static int parse_ipv4(const char *host, uint8_t out[4]) {
             val = -1;
             if (*p == '\0') break;
         } else {
-            return -1;   /* non-numeric host — no DNS in a pre-U-5 freestanding client */
+            return -1;   /* non-numeric host — this seam is numeric-only; hostnames resolve via the async cfg.resolver */
         }
         p++;
     }
@@ -47,9 +47,9 @@ int kl_resolve_sync(const char *host, uint16_t port, int socktype,
     if (!host || !out || max <= 0 || !n) return -1;
     uint8_t ip[4];
 #ifdef KL_U4_STATIC_HOST
-    /* Optional compile-time single-entry /etc/hosts: a name→IPv4 mapping so a
-     * pre-DNS (U-5) client can dial a HOSTNAME — needed so TLS verifies the server
-     * cert against a dNSName SAN (production TLS) rather than a bare IP. Set via
+    /* Optional compile-time single-entry /etc/hosts: a name→IPv4 mapping so a client
+     * with no async resolver wired can still dial a HOSTNAME — needed so TLS verifies the
+     * server cert against a dNSName SAN (production TLS) rather than a bare IP. Set via
      * -DKL_U4_STATIC_HOST="name" -DKL_U4_STATIC_IP="a.b.c.d". */
     if (streq(host, KL_U4_STATIC_HOST)) {
         if (parse_ipv4(KL_U4_STATIC_IP, ip) != 0) return -1;
