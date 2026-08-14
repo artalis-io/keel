@@ -34,8 +34,9 @@ each a focused reviewed commit with its own regression tests:
 - **7A-2 — close/retirement integration.** Wire `KlDgramClose` with the frozen retirement sequence (§4)
   and the neutral retirement-classification seam (§4.3, `KlDgramRetireFn`/`KlDgramRetireResult`), incl.
   backend close/cancel as the *classifying* step and the terminal result.
-- **7A-3 — send integration + compatibility.** Assemble `KlDgramSend`+`KlDgramSlots` into the public
-  `KlDatagram`. Per the frozen D-COMPAT policy (§6) this does **not** re-base `KlUdp`'s send — `KlUdp`
+- **7A-3 — send integration + compatibility.** Assemble `KlDgramSend`+`KlDgramSlots` into the internal
+  `KlDgramCore` (the assembly the public `KlDatagram` becomes a facade over in 7B — Option 2, `KlUdp`
+  untouched). Per the frozen D-COMPAT policy (§6) this does **not** re-base `KlUdp`'s send — `KlUdp`
   keeps byte-budget. Includes the send-queue-geometry tests that byte-budget green tests would NOT prove.
 - **7A-4a — strict-pause CORE conformance.** Prove `KlDgramCore` drives the interest-drop latch
   (readiness drops interest; completion holds one) over neutral scripted adapters, incl. reentrant
@@ -333,9 +334,11 @@ tests, run as a matrix over a scripted in-test provider double:
      at submit time and performs **no** later read/write through the retained pointer (ASan on the
      allocator-poisoned region catches a violation). This proves the *backend* copied — a facade
      copy into the slot would still pass test 1 but fail here if the backend kept a slot pointer.
-- **Receive (7A-4):** one per callback; `peer` mandatory (violation → error, no callback); pause
-  holds one (completion) / drops interest (readiness); resume delivers once then re-arms; stop discards
-  held; truncation flagged + counted; zero-length ≠ failure.
+- **Receive (7A-4a core conformance / 7A-4b live):** 7A-4a proves the CORE contract over neutral
+  scripted adapters — one per callback; `peer` mandatory (violation → error, no callback); pause holds
+  one (completion) / drops interest (readiness), incl. reentrant pause/stop DURING a readiness drain;
+  resume delivers once then re-arms; stop discards held; truncation flagged + counted; zero-length ≠
+  failure. 7A-4b (in 7B) re-validates the same properties driven by each LIVE provider seam.
 - **Close + terminal result (7A-2):** graceful drains then DETACHED; abortive discards + cancels;
   `on_close(result)` fires **exactly once**; **DETACHED** path asserts confirmed retirement + `live_count
   == 0`; **QUARANTINED** path (scripted unconfirmable cancel) asserts the object detaches, `on_close`
