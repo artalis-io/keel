@@ -546,10 +546,17 @@ UTEST(dgram_close_result, pending_stays_closing_then_detaches) {
     ASSERT_EQ((int)kl_dgram_close_result(&f.close), (int)KL_DGRAM_CLOSE_NONE);
     ASSERT_EQ((int)kl_dgram_close_state(&f.close), (int)KL_DGRAM_CLOSE_CLOSING);
 
-    g_rt_recv = KL_DGRAM_RETIRE_RETIRED;                        /* op now terminal */
-    kl_dgram_close_begin(&f.close);                            /* re-run the terminal logic */
+    /* A retry with the op STILL pending is a safe no-op (idempotent). */
+    ASSERT_EQ(kl_dgram_close_retry(&f.close), 0);
+    ASSERT_EQ(g_on_close, 0);
+
+    g_rt_recv = KL_DGRAM_RETIRE_RETIRED;                        /* op now terminal (resolved out-of-band) */
+    ASSERT_EQ(kl_dgram_close_retry(&f.close), 0);              /* the backend-drain progress hook */
     ASSERT_EQ(g_on_close, 1);
     ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    /* retry after CLOSED is a no-op. */
+    ASSERT_EQ(kl_dgram_close_retry(&f.close), 0);
+    ASSERT_EQ(g_on_close, 1);
     fix_free(&f);
 }
 

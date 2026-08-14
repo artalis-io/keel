@@ -6,9 +6,13 @@
  * KlDgramRecv (Phase B, step 4). See docs/datagram_contract.md §6.
  *
  * Coordinates the terminal lifecycle of the (borrowed) send + receive machines. Its one invariant:
- * on_close fires EXACTLY ONCE, only after the receive is physically retired (recv in-flight 0), the
- * send is physically retired (send in-flight 0), and — for a GRACEFUL close — the outbound queue has
- * drained (or become undrainable via a sticky error, so a failure never wedges the close).
+ * on_close fires EXACTLY ONCE, only after the machine gate holds — recv in-flight 0, send in-flight 0,
+ * and (for a GRACEFUL close) the outbound queue drained (or undrainable via a sticky error, so a
+ * failure never wedges the close). on_close carries a TERMINAL CLASSIFICATION (§4.3), NOT a single
+ * "detached" fact: KL_DGRAM_DETACHED is confirmed physical retirement of every op; KL_DGRAM_QUARANTINED
+ * means an op could NOT be confirmed retired (fail-closed) — the wrapper is safe to release but the
+ * op's storage stays pinned; KL_DGRAM_CLOSE_ERROR is a transport error with every op nonetheless
+ * RETIRED. A still-PENDING classifier keeps the state CLOSING (see kl_dgram_close_retry).
  *
  *  - Graceful close (kl_dgram_close_begin): refuse new sends, stop receiving, drain queued output.
  *  - Abortive cancel (kl_dgram_close_cancel): discard queued-but-unsubmitted datagrams and request
@@ -19,7 +23,8 @@
  *    detachment never happens inside a provider hook.
  *  - on_close is a DESTRUCTIVE TAIL: state is CLOSED before it fires and the coordinator makes no
  *    self-access afterwards (the callback may free/tear down everything).
- *  - Free is refused before confirmed detachment.
+ *  - Free is refused before a terminal classification (state CLOSED) — which DETACHED and
+ *    QUARANTINED both reach (a quarantine releases the wrapper without physical retirement).
  *
  * Readiness disarm (recv pause/stop) is a SYNCHRONOUS physical retirement; a completion op requires
  * its actual terminal completion (on_complete) — surfaced here via each machine's on_retire hook.
@@ -94,6 +99,14 @@ int  kl_dgram_close_set_retire(KlDgramClose *c, KlDgramRetireFn retire, void *ct
 int  kl_dgram_close_begin(KlDgramClose *c);
 int  kl_dgram_close_cancel(KlDgramClose *c);
 
+/* Re-evaluate the terminal classification (the backend-drain PROGRESS hook). The machine gate
+ * (close_fully_retired) can hold while the §4.3 classifier still returns PENDING — the send/recv
+ * machines are then already at zero, so NO machine retirement is guaranteed to wake the close. A
+ * backend that later resolves that PENDING op's retirement (e.g. a quarantine finally confirmed, or a
+ * cancel-token terminal drained out-of-band) calls this to re-run the terminal logic. Idempotent and
+ * safe any time: a no-op unless the state is CLOSING. 0 / -1. */
+int  kl_dgram_close_retry(KlDgramClose *c);
+
 KlDgramCloseState kl_dgram_close_state(const KlDgramClose *c);
 int  kl_dgram_close_is_detached(const KlDgramClose *c);
 
@@ -101,7 +114,8 @@ int  kl_dgram_close_is_detached(const KlDgramClose *c);
  * QUARANTINED, or CLOSE_ERROR. Also delivered as the on_close argument. */
 KlDatagramCloseResult kl_dgram_close_result(const KlDgramClose *c);
 
-/* Free/zero (borrows no heap). REFUSED with -1 before confirmed detachment. After detachment, tear
+/* Free/zero (borrows no heap). REFUSED with -1 before a terminal classification (state CLOSED —
+ * DETACHED or QUARANTINED, both wrapper-safe to release). After CLOSED, tear
  * down send + recv + this together with no further operations (the retire wiring becomes inert). */
 int  kl_dgram_close_free(KlDgramClose *c);
 

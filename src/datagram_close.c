@@ -43,7 +43,8 @@ static int close_fully_retired(const KlDgramClose *c) {
 /* The §4.3 object-result join, computed only when fully retired. Without a backend classifier every
  * op is confirmed RETIRED → DETACHED. With one: any QUARANTINED op ⇒ QUARANTINED (retain its life ref
  * forever); else a transport error with ALL ops RETIRED ⇒ CLOSE_ERROR; else DETACHED. A classifier
- * that still reports PENDING ⇒ KL_DGRAM_CLOSE_NONE (stay CLOSING — the next retirement re-runs this).
+ * that still reports PENDING ⇒ KL_DGRAM_CLOSE_NONE (stay CLOSING — re-run via a machine retirement OR
+ * an explicit kl_dgram_close_retry() from the backend drain path).
  * CLOSE_ERROR is legal ONLY when every op is RETIRED, so a failed close never frees storage whose
  * ownership is unknown (that is what QUARANTINED is for). */
 static KlDatagramCloseResult close_join_result(KlDgramClose *c) {
@@ -167,6 +168,17 @@ static int close_common(KlDgramClose *c, int abort) {
 
 int kl_dgram_close_begin(KlDgramClose *c)  { return close_common(c, /*abort=*/0); }
 int kl_dgram_close_cancel(KlDgramClose *c) { return close_common(c, /*abort=*/1); }
+
+/* Backend-drain PROGRESS hook (§4.3): re-run the terminal logic when a PENDING op's retirement may
+ * have resolved out-of-band. Uses the busy handshake so it composes with any in-flight frame (a
+ * reentrant call defers to the outermost unwind). Idempotent; a no-op unless CLOSING. */
+int kl_dgram_close_retry(KlDgramClose *c) {
+    if (!c) return -1;
+    if (c->state != KL_DGRAM_CLOSE_CLOSING) return 0;
+    close_enter(c);
+    close_leave(c);   /* re-runs close_run_terminal → re-queries the classifier on the outermost unwind */
+    return 0;
+}
 
 KlDgramCloseState kl_dgram_close_state(const KlDgramClose *c) {
     return c ? (KlDgramCloseState)c->state : KL_DGRAM_CLOSE_CLOSED;
