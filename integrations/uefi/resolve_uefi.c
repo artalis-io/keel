@@ -8,10 +8,6 @@
 #include <keel/sockaddr.h>
 #include "../../src/resolve_sync.h"   /* kl_resolve_sync decl */
 
-#ifdef KL_U5_DNS
-#include "dns_uefi.h"                 /* kl_uefi_dns_resolve (EFI_UDP4 DNS, U-5) */
-#endif
-
 #include <stdint.h>
 #include <stddef.h>
 
@@ -68,15 +64,9 @@ int kl_resolve_sync(const char *host, uint16_t port, int socktype,
         return 0;
     }
 
-#ifdef KL_U5_DNS
-    /* Non-numeric, non-static host: resolve via a real DNS A-query over EFI_UDP4
-     * (U-5). kl_uefi_dns_resolve fills out[0] directly. Requires kl_uefi_dns_init()
-     * to have stashed the boot services + image handle at startup. */
-    if (kl_uefi_dns_resolve(host, port, &out[0]) == 0) {
-        *n = 1;
-        return 0;
-    }
-#endif
-
-    return -1;   /* non-numeric host with no DNS path (pre-U-5) — fail closed */
+    /* Non-numeric host: this seam resolves numeric literals only. DNS is an ASYNC protocol
+     * consumer, not a sync platform-seam capability — a freestanding client that needs a
+     * hostname injects cfg.resolver (a stock kl_dns_resolver_create over the EFI_UDP4 provider;
+     * see 6.4c dgram_dns_selftest.c). Fail closed here. */
+    return -1;
 }
