@@ -15,12 +15,15 @@
  *   T1  a single datagram round-trips byte-exact, with the correct source address (127.0.0.1).
  *   T2  a few datagrams back-to-back all arrive in order.
  *   T3  a datagram at the per-udp DGRAM_MAX bound round-trips (largest retained payload).
- *   T4  close-with-queued-rx: a datagram sits in the ring un-drained + a receive is armed when the
- *         socket is freed — exercises the recv-side token release-on-close (arm ref) + the drain
- *         transfer path for the sends (T4 pumps, so its sends are transferred, not released).
+ *   T4  close-with-armed-recv: a receive is armed when the socket is freed — exercises the recv-side
+ *         token release-on-close (arm ref) + the drain transfer path for the sends (T4 pumps, so its
+ *         sends are transferred, not released).
  *   T5  close-with-undrained-sends: the SENDER is freed before any drain, so its pending sends take
  *         the token release-ON-CLOSE path (T4 cannot cover this — the drain consumes all pending
  *         sends of a slot in one tick). Isolates the send-side retained-ref release.
+ *   T6  one-held-packet overflow (7A-5): two datagrams reach the udp_recv callback in one lwIP tick
+ *         (netif_poll drains the whole loopback queue before the completion drain) — the backend holds
+ *         exactly ONE and DROPS the second (no 16-entry ring), so precisely one is ever delivered.
  *
  * Diagnostic: the whole suite runs under ASan+UBSan+LSan, so every case doubles as a leak/
  * double-free check on the stable-token retain/transfer/release discipline (no independent "no-leak"
@@ -170,9 +173,9 @@ static int t3_max(KlEventCtx *ctx) {
     return 0;
 }
 
-/* T4 — close-with-queued-rx: send two datagrams but drain only one, then free the rx socket while a
- * datagram is still queued in the ring. Must not leak (ASan/LSan gate) and must not crash. */
-static int t4_close_with_queued(KlEventCtx *ctx) {
+/* T4 — close-with-armed-recv: deliver one datagram (which re-arms the recv), then free the rx socket
+ * with a recv armed. Exercises the recv-side arm-ref release on close. Must not leak / crash. */
+static int t4_close_with_armed_recv(KlEventCtx *ctx) {
     reset_capture();
     KlUdp rx, tx;
     KlUdpConfig rc = { .ctx = ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
@@ -183,17 +186,13 @@ static int t4_close_with_queued(KlEventCtx *ctx) {
     uint16_t port = kl_udp_local_port(&rx);
     KlSockAddr dst; dest_v4(&dst, port);
 
-    /* Two datagrams; the recv arm surfaces only one per drain, so after a single receive the
-     * second still sits in the glue's ring. */
-    if (kl_udp_send_to(&tx, "one", 3, &dst) != 0) { kl_udp_free(&tx); kl_udp_free(&rx); return fail("T4 send1"); }
-    if (kl_udp_send_to(&tx, "two", 3, &dst) != 0) { kl_udp_free(&tx); kl_udp_free(&rx); return fail("T4 send2"); }
-    pump_until(ctx, 1, 200);   /* deliver exactly one; leave the other queued */
+    if (kl_udp_send_to(&tx, "one", 3, &dst) != 0) { kl_udp_free(&tx); kl_udp_free(&rx); return fail("T4 send"); }
+    pump_until(ctx, 1, 200);   /* deliver one; udp.c re-arms → a recv is armed at free time */
 
-    /* Free with a datagram still queued in the ring — the ring is inline in the udp slot, cleared
-     * by kl_lwr_udp_close's memset; no leak. */
+    /* Free with a recv armed (arm token ref outstanding) — kl_lwr_udp_close releases it; no leak. */
     kl_udp_free(&tx);
     kl_udp_free(&rx);
-    printf("PASS T4 (close-with-queued-rx, no leak/crash)\n");
+    printf("PASS T4 (close-with-armed-recv, no leak/crash)\n");
     return 0;
 }
 
@@ -228,6 +227,40 @@ static int t5_close_with_undrained_sends(KlEventCtx *ctx) {
     return 0;
 }
 
+/* T6 — one-held-packet overflow (7A-5): two datagrams reach the udp_recv callback in one lwIP tick
+ * (both sent before any pump → netif_poll drains the whole loopback queue before the completion drain).
+ * The backend holds exactly ONE (the first) and DROPS the second — so no matter how long we pump,
+ * precisely one datagram is ever delivered. A former 16-entry ring would have surfaced the second. */
+static int t6_one_held_overflow(KlEventCtx *ctx) {
+    reset_capture();
+    KlUdp rx, tx;
+    KlUdpConfig rc = { .ctx = ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
+    KlUdpConfig tc = { .ctx = ctx };
+    if (kl_udp_init(&rx, &rc) != 0) return fail("T6 rx init");
+    if (kl_udp_init(&tx, &tc) != 0) { kl_udp_free(&rx); return fail("T6 tx init"); }
+    if (kl_udp_recv_start(&rx, on_recv, NULL) != 0) { kl_udp_free(&tx); kl_udp_free(&rx); return fail("T6 recv_start"); }
+    uint16_t port = kl_udp_local_port(&rx);
+    KlSockAddr dst; dest_v4(&dst, port);
+
+    /* Two datagrams, NO pump between them → both reach the recv callback in the same netif_poll: the
+     * first fills the single held slot, the second hits has_held and is dropped. */
+    if (kl_udp_send_to(&tx, "one", 3, &dst) != 0) { kl_udp_free(&tx); kl_udp_free(&rx); return fail("T6 send1"); }
+    if (kl_udp_send_to(&tx, "two", 3, &dst) != 0) { kl_udp_free(&tx); kl_udp_free(&rx); return fail("T6 send2"); }
+
+    pump_until(ctx, 1, 400);                            /* deliver the held (first) datagram */
+    for (int i = 0; i < 50; i++) kl_event_ctx_run(ctx, 16, 5);   /* a 16-ring would surface the second here */
+
+    int rc2 = 0;
+    if (g_got != 1) rc2 = fail("T6: expected exactly one delivery (the second must be dropped)");
+    else if (g_len != 3 || memcmp(g_buf, "one", 3) != 0) rc2 = fail("T6: wrong held datagram (should be the first)");
+
+    kl_udp_free(&tx);
+    kl_udp_free(&rx);
+    if (rc2) return rc2;
+    printf("PASS T6 (one-held overflow — second datagram dropped, exactly one delivered)\n");
+    return 0;
+}
+
 int main(void) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
@@ -242,8 +275,9 @@ int main(void) {
     if (rc == 0) rc = t1_single(&ctx);
     if (rc == 0) rc = t2_burst(&ctx);
     if (rc == 0) rc = t3_max(&ctx);
-    if (rc == 0) rc = t4_close_with_queued(&ctx);
+    if (rc == 0) rc = t4_close_with_armed_recv(&ctx);
     if (rc == 0) rc = t5_close_with_undrained_sends(&ctx);
+    if (rc == 0) rc = t6_one_held_overflow(&ctx);
 
     kl_event_ctx_free(&ctx);
     if (rc != 0) return 1;

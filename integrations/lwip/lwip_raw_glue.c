@@ -125,21 +125,24 @@ u32_t sys_now(void) {
 /* tcp_write's u16_t len ceiling (Stage B send-pump chunking). */
 #define KL_LWR_TCP_WRITE_MAX 0xffffu
 
-/* ── LC-3a: UDP datagram-completion path (KlUdp over raw) ─────────────────────────
- * A datagram slot mirrors the TCP conn slot but for a udp_pcb. lwIP's udp_recv callback
- * retains inbound datagrams into a bounded per-slot ring (payload copied out of the pbuf +
- * source IPv4/port), which the drain surfaces as KL_COMP_DGRAM_RECV one-at-a-time (mirroring the
- * completion contract's one-in-flight recv, gated by `rx_armed`). Sends go straight out
- * (udp_sendto) and the drain surfaces the matching KL_COMP_DGRAM_SEND. See the design notes in
- * event_lwip_raw.c and docs. */
+/* ── LC-3a / 7A-5: UDP datagram-completion path (KlUdp over raw) ───────────────────
+ * A datagram slot mirrors the TCP conn slot but for a udp_pcb. lwIP's udp_recv callback holds ONE
+ * inbound datagram (the ONE-HELD-PACKET contract, docs/datagram_step7_public_api_design.md §3):
+ * the payload is copied out of the pbuf + source IPv4/port into the slot's single held datagram,
+ * which the drain surfaces as KL_COMP_DGRAM_RECV (gated by `rx_armed` — one in-flight recv). A
+ * second datagram arriving while one is already held is DROPPED (deterministic UDP loss — a
+ * completion backend with no socket receive buffer holds exactly the one datagram the posted recv
+ * op will take). Sends go straight out (udp_sendto) and the drain surfaces the matching
+ * KL_COMP_DGRAM_SEND. See the design notes in event_lwip_raw.c and docs.
+ *
+ * 7A-5 converted the former 16-entry receive ring to this single held slot so the backend matches
+ * the KlDgramRecv one-in-flight/one-held contract exactly (no over-buffering that could deliver
+ * stale datagrams a paused/slow consumer never posted ops for). */
 
-/* Max datagrams retained per udp slot before inbound datagrams are DROPPED (bounded per-slot
- * receive memory = KL_LWR_UDP_RX_RING * KL_LWR_UDP_DGRAM_MAX). A slow consumer that never drains
- * loses the oldest-unarmed datagrams deterministically rather than growing without bound — the
- * same graceful UDP drop semantics as a full kernel socket receive buffer. Overridable at build
- * time so a small-config test can force the drop path. */
-#ifndef KL_LWR_UDP_RX_RING
-#define KL_LWR_UDP_RX_RING 16
+/* Depth of the pending-SEND completion FIFO per udp slot (a burst of udp_sendto between drains).
+ * Distinct from receive, which is now a single held datagram (one-held-packet contract). */
+#ifndef KL_LWR_UDP_SEND_RING
+#define KL_LWR_UDP_SEND_RING 16
 #endif
 
 /* Largest single datagram payload retained (a datagram larger than this is truncated on capture,
@@ -275,10 +278,10 @@ typedef struct {
     size_t          tx_head_used;
 } KlLwrConn;
 
-/* ── LC-3a: one retained inbound datagram in a udp slot's receive ring ────────────
+/* ── LC-3a / 7A-5: the single held inbound datagram in a udp slot ──────────────────
  * The payload is copied out of the lwIP pbuf at capture (so the pbuf is freed immediately — no
  * pbuf retained past the callback), bounded to KL_LWR_UDP_DGRAM_MAX. src_ip/src_port carry the
- * datagram source (IPv4 network-order bytes + host-order port). */
+ * datagram source (IPv4 network-order bytes + host-order port). One per slot (one-held-packet). */
 typedef struct {
     unsigned char data[KL_LWR_UDP_DGRAM_MAX];
     size_t        len;
@@ -300,17 +303,16 @@ void kl_dgram_life_release(KlDgramLife *l);
  * One slot per KlUdp bound over the raw backend. `pcb == NULL` = free slot. `life` is the stable
  * token the op retained at post (the drain transfers it to the KL_COMP_DGRAM_RECV/SEND event, so the
  * backend never dereferences the possibly-freed KlDatagram). The slot holds exactly
- * `(rx_armed ? 1 : 0) + pend_send` token refs; close/teardown release that many. The recv ring is a
- * fixed circular buffer of retained datagrams (bounded — drops on overflow). `rx_armed` gates
- * delivery to the completion contract's one-in-flight recv. `pend_send` counts sends whose
- * KL_COMP_DGRAM_SEND the drain still owes. */
+ * `(rx_armed ? 1 : 0) + pend_send` token refs; close/teardown release that many. The receive side is
+ * ONE held datagram (`held`/`has_held`, the one-held-packet contract) — a second arrival while one is
+ * held is dropped, never buffered. `rx_armed` gates delivery to the completion contract's one-in-flight
+ * recv. `pend_send` counts sends whose KL_COMP_DGRAM_SEND the drain still owes. */
 typedef struct {
     struct udp_pcb *pcb;          /* NULL = free slot */
     KlDgramLife    *life;         /* stable token; one ref per outstanding op (arm + pending sends) */
-    KlLwrDgram      ring[KL_LWR_UDP_RX_RING];
-    int             rx_head;      /* oldest queued datagram index */
-    int             rx_count;     /* queued datagrams (0..KL_LWR_UDP_RX_RING) */
-    int             rx_armed;     /* a recv is posted (surface one datagram per drain) */
+    KlLwrDgram      held;         /* the ONE held inbound datagram (one-held-packet contract) */
+    int             has_held;     /* 1 = `held` carries an undelivered datagram */
+    int             rx_armed;     /* a recv is posted (surface the held datagram on drain) */
     int             pend_send;    /* pending KL_COMP_DGRAM_SEND completions owed */
     KlLwrDgram      staged;       /* the datagram currently surfaced (buf stays valid this drain) */
 
@@ -318,7 +320,7 @@ typedef struct {
      * A datagram send completes synchronously (udp_sendto), so this is drained promptly; the ring
      * is sized generously enough that a burst of sends between drains is not lost. On overflow the
      * oldest pending send len is coalesced (never lost as an accounting quantity — see enqueue). */
-    size_t          send_len[KL_LWR_UDP_RX_RING];
+    size_t          send_len[KL_LWR_UDP_SEND_RING];
     int             send_head;
 } KlLwrUdpSlot;
 
@@ -594,8 +596,8 @@ void kl_lwr_ctx_destroy(void *lwrctx) {
         if (tcp_close(lp) != ERR_OK) tcp_abort(lp);
     }
 
-    /* LC-3a: tear down any live udp pcbs (detach the recv cb + free the pcb). The retained
-     * datagram ring is inline in the slot (no heap), cleared by the memset below implicitly. A slot
+    /* LC-3a: tear down any live udp pcbs (detach the recv cb + free the pcb). The single held
+     * datagram is inline in the slot (no heap), cleared by the memset below implicitly. A slot
      * still live here means kl_udp_free / kl_lwr_udp_close never ran (loop torn down before the
      * socket): release its outstanding op token refs so they don't leak (the owner ref may still
      * leak — the same free-sockets-before-the-loop contract as every backend). */
@@ -1065,11 +1067,13 @@ static KlLwrUdpSlot *lwr_udp_alloc(KlLwrCtx *ctx, struct udp_pcb *pcb) {
     return NULL;
 }
 
-/* lwIP udp_recv callback: a datagram arrived on `pcb`. Copy the payload out of the pbuf chain
- * (bounded to KL_LWR_UDP_DGRAM_MAX; truncate + flag if larger) into the slot's ring, record the
- * source IPv4 + port, and free the pbuf (lwIP hands us ownership). On ring overflow drop the
- * OLDEST retained datagram (advance rx_head) — deterministic UDP drop, never unbounded growth.
- * Runs inline on the mainloop tick (NO_SYS=1 single-thread), so no locking. IPv4-only (loopif). */
+/* lwIP udp_recv callback: a datagram arrived on `pcb`. ONE-HELD-PACKET contract: if a datagram is
+ * already held (undelivered), DROP the incoming one (free its pbuf) — a completion backend with no
+ * socket receive buffer holds exactly the one datagram the posted recv op will take; a burst overflows
+ * as deterministic UDP loss, never buffered. Otherwise copy the payload out of the pbuf chain (bounded
+ * to KL_LWR_UDP_DGRAM_MAX; truncate + flag if larger) into the single held slot, record the source
+ * IPv4 + port, and free the pbuf (lwIP hands us ownership). Runs inline on the mainloop tick
+ * (NO_SYS=1 single-thread), so no locking. IPv4-only (loopif). */
 static void lwr_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                             const ip_addr_t *addr, u16_t port) {
     (void)arg; (void)pcb;
@@ -1077,13 +1081,8 @@ static void lwr_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     KlLwrUdpSlot *s = lwr_udp_find(ctx, pcb);
     if (!s || p == NULL) { if (p) pbuf_free(p); return; }
 
-    /* Overflow: drop the oldest to make room (bounded ring). */
-    if (s->rx_count >= KL_LWR_UDP_RX_RING) {
-        s->rx_head = (s->rx_head + 1) % KL_LWR_UDP_RX_RING;
-        s->rx_count--;
-    }
-    int idx = (s->rx_head + s->rx_count) % KL_LWR_UDP_RX_RING;
-    KlLwrDgram *d = &s->ring[idx];
+    if (s->has_held) { pbuf_free(p); return; }   /* one held already → drop the incoming (UDP loss) */
+    KlLwrDgram *d = &s->held;
 
     u16_t want = p->tot_len;
     d->truncated = 0;
@@ -1101,7 +1100,7 @@ static void lwr_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     }
     d->src_port = port;
 
-    s->rx_count++;
+    s->has_held = 1;
     pbuf_free(p);   /* payload copied out — free the pbuf now (no retained pbuf) */
 }
 
@@ -1178,15 +1177,15 @@ int kl_lwr_udp_send(void *lwrctx, void *pcb, void *life, const void *data, size_
     /* Record the completed send (bounded FIFO of byte counts). On overflow (a burst larger than
      * the ring between drains) fold into the tail so no accounting is lost — udp.c's on_send just
      * releases the outstanding-bytes reservation, so a coalesced count is correct there. */
-    if (s->pend_send < KL_LWR_UDP_RX_RING) {
-        int idx = (s->send_head + s->pend_send) % KL_LWR_UDP_RX_RING;
+    if (s->pend_send < KL_LWR_UDP_SEND_RING) {
+        int idx = (s->send_head + s->pend_send) % KL_LWR_UDP_SEND_RING;
         s->send_len[idx] = len;
         s->pend_send++;
         kl_dgram_life_retain(s->life);   /* new pending completion → ONE token ref (drain transfers it) */
     } else {
         /* Coalesced into an existing pending record — no NEW record, so no new ref (the folded record
          * still carries exactly one ref). Keeps refs == outstanding records == future transfers. */
-        int tail = (s->send_head + s->pend_send - 1) % KL_LWR_UDP_RX_RING;
+        int tail = (s->send_head + s->pend_send - 1) % KL_LWR_UDP_SEND_RING;
         s->send_len[tail] += len;
     }
     return 0;
@@ -1205,7 +1204,7 @@ void kl_lwr_udp_close(void *lwrctx, void *pcb) {
         kl_dgram_life_release(s->life);
     udp_recv(p, NULL, NULL);        /* detach the recv callback */
     udp_remove(p);                  /* free the pcb */
-    memset(s, 0, sizeof(*s));       /* clears pcb (→ free slot) + the retained ring */
+    memset(s, 0, sizeof(*s));       /* clears pcb (→ free slot) + the held datagram */
 }
 
 /* Drain: surface up to `max` UDP completions. Per armed slot with a queued datagram, emit ONE
@@ -1219,11 +1218,10 @@ int kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max) {
         KlLwrUdpSlot *s = &ctx->udp[i];
         if (s->pcb == NULL) continue;
 
-        /* One recv per armed slot (one-in-flight recv contract). */
-        if (s->rx_armed && s->rx_count > 0 && n < max) {
-            s->staged = s->ring[s->rx_head];
-            s->rx_head = (s->rx_head + 1) % KL_LWR_UDP_RX_RING;
-            s->rx_count--;
+        /* One recv per armed slot (one-in-flight / one-held recv contract). */
+        if (s->rx_armed && s->has_held && n < max) {
+            s->staged = s->held;
+            s->has_held = 0;
             s->rx_armed = 0;   /* consumed — udp.c re-posts via kl_udp_comp_on_recv */
 
             KlLwrUdpRecord *r = &out[n++];
@@ -1240,7 +1238,7 @@ int kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max) {
         /* Pending sends (each a completed KL_COMP_DGRAM_SEND). */
         while (s->pend_send > 0 && n < max) {
             size_t bytes = s->send_len[s->send_head];
-            s->send_head = (s->send_head + 1) % KL_LWR_UDP_RX_RING;
+            s->send_head = (s->send_head + 1) % KL_LWR_UDP_SEND_RING;
             s->pend_send--;
             KlLwrUdpRecord *r = &out[n++];
             memset(r, 0, sizeof(*r));
