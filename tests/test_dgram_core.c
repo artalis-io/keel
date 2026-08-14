@@ -444,7 +444,11 @@ UTEST(dgram_core, close_detached_when_all_retired) {
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
 }
 
-/* ── strict pause / receive control (7A-4) ────────────────────────────────────────────────── */
+/* ── strict pause / receive control (7A-4a — CORE CONFORMANCE) ────────────────────────────────
+ * These prove KlDgramCore correctly drives the strict-pause interest-drop latch over neutral scripted
+ * adapters (completion + readiness). Wiring the ACTUAL backend seams (poll/kqueue/epoll, pollcomp,
+ * io_uring, IOCP, EFI, lwIP-raw) onto KlDgramCore and flipping the §10 matrix is 7B — this increment
+ * does not establish that any live provider drives the core. */
 
 /* A completion datagram delivers once (peer present) and the machine re-arms through the core. */
 UTEST(dgram_core, recv_completion_deliver_and_rearm) {
@@ -526,6 +530,42 @@ UTEST(dgram_core, recv_readiness_pause_drops_interest) {
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
 }
 
+/* Reentrant STRICT pause DURING a readiness drain: pausing from the first callback stops the active
+ * serial drain before the second queued datagram is pulled — one delivery, one pull, interest dropped,
+ * nothing more until resume. */
+UTEST(dgram_core, recv_readiness_pause_during_drain) {
+    reset_globals();
+    KlAllocator a = kl_allocator_default();
+    KlDgramCore core;
+    KlDgramCoreConfig cfg = base_cfg(&a, /*completion*/0, 4, 16);
+    ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
+
+    g_rx_payload = "ab"; g_rx_len = 2; g_avail = 2;   /* TWO datagrams queued at the provider */
+    g_action = ACT_PAUSE; g_action_at = 1;             /* pause from the FIRST delivery */
+    ASSERT_EQ(kl_dgram_core_recv_start(&core), 0);
+    ASSERT_EQ(kl_dgram_core_recv_on_readable(&core), 0);
+    ASSERT_EQ(g_deliv, 1);                 /* only the first delivered */
+    ASSERT_EQ(g_pull_calls, 1);            /* drain STOPPED before pulling the second */
+    ASSERT_EQ(g_avail, 1);                 /* second still queued at the provider */
+    ASSERT_EQ(g_disarm_calls, 1);          /* interest dropped mid-drain */
+    ASSERT_EQ(g_interest, 0);
+
+    /* a further readable event delivers nothing while paused */
+    ASSERT_EQ(kl_dgram_core_recv_on_readable(&core), 0);
+    ASSERT_EQ(g_deliv, 1);
+    ASSERT_EQ(g_pull_calls, 1);
+
+    ASSERT_EQ(kl_dgram_core_resume(&core), 0);
+    ASSERT_EQ(g_interest, 1);              /* re-armed */
+    ASSERT_EQ(kl_dgram_core_recv_on_readable(&core), 0);
+    ASSERT_EQ(g_deliv, 2);                 /* the second now drains */
+
+    ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    ASSERT_EQ(kl_dgram_core_free(&core), 0);
+}
+
 /* Invariant 9 confinement: a delivery callback may pause — after which the machine does NOT re-arm. */
 UTEST(dgram_core, recv_pause_from_callback) {
     reset_globals();
@@ -540,6 +580,27 @@ UTEST(dgram_core, recv_pause_from_callback) {
     recv_arrive(&core, "x", 1);
     ASSERT_EQ(g_deliv, 1);
     ASSERT_EQ(g_arm_calls, 1);             /* callback paused → NO re-arm */
+
+    ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    ASSERT_EQ(kl_dgram_core_free(&core), 0);
+}
+
+/* Invariant 9 confinement: a delivery callback may STOP — no re-arm, nothing delivered afterward. */
+UTEST(dgram_core, recv_stop_from_callback) {
+    reset_globals();
+    KlAllocator a = kl_allocator_default();
+    KlDgramCore core;
+    KlDgramCoreConfig cfg = base_cfg(&a, /*completion*/1, 4, 16);
+    ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
+    g_action = ACT_STOP; g_action_at = 1;
+
+    ASSERT_EQ(kl_dgram_core_recv_start(&core), 0);
+    recv_arrive(&core, "x", 1);
+    ASSERT_EQ(g_deliv, 1);
+    ASSERT_EQ(g_arm_calls, 1);             /* callback stopped → NO re-arm */
+    ASSERT_EQ(kl_dgram_core_recv_held(&core), 0);
 
     ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
     ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);

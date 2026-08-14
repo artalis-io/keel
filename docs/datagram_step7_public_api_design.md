@@ -37,8 +37,15 @@ each a focused reviewed commit with its own regression tests:
 - **7A-3 — send integration + compatibility.** Assemble `KlDgramSend`+`KlDgramSlots` into the public
   `KlDatagram`. Per the frozen D-COMPAT policy (§6) this does **not** re-base `KlUdp`'s send — `KlUdp`
   keeps byte-budget. Includes the send-queue-geometry tests that byte-budget green tests would NOT prove.
-- **7A-4 — strict-pause backend wiring.** Wire the interest-drop latch at each backend seam (readiness
-  drops interest; completion holds one). Shared with `KlUdp`'s recv — recv behavior preserved (tested).
+- **7A-4a — strict-pause CORE conformance.** Prove `KlDgramCore` drives the interest-drop latch
+  (readiness drops interest; completion holds one) over neutral scripted adapters, incl. reentrant
+  pause/stop DURING a readiness drain. Completes the core recv-control surface (`recv_stop`,
+  `recv_held`). **This does NOT wire any live provider onto the core** — it establishes the core
+  contract only.
+- **7A-4b (folded into 7B) — LIVE backend seams.** Wire the actual poll/kqueue/epoll · pollcomp ·
+  io_uring · IOCP · EFI · lwIP-raw recv seams onto the core and flip the `§10` strict-pause rows. Shared
+  with `KlUdp`'s recv — recv behavior preserved (tested). Deferred to 7B with the public surface, since
+  it is the same "make `KlDatagram` the live facade" step.
 - **7A-5 — lwIP-raw one-held-slot cleanup.** Convert lwIP-raw's 16-entry copy ring to the one-held-packet
   contract. **This is provider state-machine work, not generic seam wiring** — its own increment with
   dedicated overflow / pause-under-backlog / close-with-backlog tests.
@@ -47,8 +54,9 @@ each a focused reviewed commit with its own regression tests:
 banner + `tests/test_datagram_public.c`.
 
 The `§10` matrix's ⚙ rows (packet-slot send queue, strict pause; lwIP-raw serial-recv) flip to ✅ per
-backend as 7A-3/7A-4/7A-5 land. Step 7 is not "done" until they are ✅ on the completion backends §8
-validates.
+backend only when the LIVE provider is wired onto the core and §8 validates it — i.e. in 7A-4b/7B, NOT
+from the neutral-core conformance increments (7A-3/7A-4a) alone. Step 7 is not "done" until they are ✅
+on the completion backends §8 validates.
 
 ---
 
