@@ -28,6 +28,7 @@ cd "$(dirname "$0")"
 CFLAGS=(
   -std=c11 -g -O1 -fno-omit-frame-pointer
   -fsanitize=address,undefined -fno-sanitize-recover=all
+  -DKEEL_UEFI_DATAGRAM   # the mock exercises event_efi's datagram completion wiring (6.4b)
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/src" -I. -I"$KEEL_ROOT/spikes/uefi"
   -Wall -Wextra
 )

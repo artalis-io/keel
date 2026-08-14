@@ -69,6 +69,7 @@ CFLAGS=(
   -fno-stack-protector -fno-builtin
   ${RZ[@]+"${RZ[@]}"} -std=c11
   -DKEEL_FREESTANDING
+  -DKEEL_UEFI_DATAGRAM
   -DKL_U9_NAMESERVER="\"$KL_U9_NAMESERVER\""
   -DKL_U9_HOSTNAME="\"$KL_U9_HOSTNAME\""
   -DTARGET_PORT="$TARGET_PORT"

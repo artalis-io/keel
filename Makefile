@@ -1536,8 +1536,14 @@ freestanding-dns-harness:
 # -mno-red-zone -DKEEL_FREESTANDING + the freestanding shim), plus -Wpedantic -Werror. Compile-only
 # (-c); the actual EFI link + run is the QEMU/OVMF e2e (6.4c). Skips with a note off clang / a missing
 # PE backend. Host correctness is covered by the mock-EFI harness (build_mock_efi_test.sh).
-UEFI_DGRAM_TU = integrations/uefi/socket_efi_tcp4.c integrations/uefi/socket_efi_udp4.c \
-                integrations/uefi/event_efi.c
+# Datagram build (KEEL_UEFI_DATAGRAM on): the unified provider + event_efi datagram completion +
+# the EFI_UDP4 substrate. TCP-only build (KEEL_UEFI_DATAGRAM off): event_efi + socket_efi_tcp4 must
+# compile with NO datagram code and NO kl_uefi_udp_*/KlDgramLife references — the boundary that keeps
+# U-3/U-4/U-7 + S-4/S-6/S-7 (which link event_efi.c but not the UDP provider) building. The gate
+# proves BOTH configs compile, both arches. socket_efi_udp4.c is datagram-only (no TCP-only pass).
+UEFI_DGRAM_TU     = integrations/uefi/socket_efi_tcp4.c integrations/uefi/socket_efi_udp4.c \
+                    integrations/uefi/event_efi.c
+UEFI_TCPONLY_TU   = integrations/uefi/socket_efi_tcp4.c integrations/uefi/event_efi.c
 UEFI_DGRAM_GATE_CFLAGS = -ffreestanding -fshort-wchar -fno-stack-protector -fno-builtin -std=c11 \
                          -DKEEL_FREESTANDING -isystem $(FREESTANDING_SHIM) \
                          -Iinclude -Ivendor/llhttp -Isrc -Iintegrations/uefi -Ispikes/uefi \
@@ -1561,16 +1567,20 @@ uefi-dgram-gate:
 	  fi; \
 	  case "$$tgt" in x86_64*) RZ="-mno-red-zone";; *) RZ="";; esac; \
 	  for f in $(UEFI_DGRAM_TU); do \
-	    $(FREESTANDING_LIB_CC) --target=$$tgt $$RZ $(UEFI_DGRAM_GATE_CFLAGS) -c $$f -o /dev/null || \
-	      { echo "  FAIL [$$tgt] $$f"; exit 1; }; \
+	    $(FREESTANDING_LIB_CC) --target=$$tgt $$RZ $(UEFI_DGRAM_GATE_CFLAGS) -DKEEL_UEFI_DATAGRAM -c $$f -o /dev/null || \
+	      { echo "  FAIL [$$tgt] (datagram) $$f"; exit 1; }; \
 	  done; \
-	  echo "  [$$tgt] EFI datagram TUs compiled clean"; got=$$((got+1)); \
+	  for f in $(UEFI_TCPONLY_TU); do \
+	    $(FREESTANDING_LIB_CC) --target=$$tgt $$RZ $(UEFI_DGRAM_GATE_CFLAGS) -c $$f -o /dev/null || \
+	      { echo "  FAIL [$$tgt] (TCP-only: KEEL_UEFI_DATAGRAM off) $$f"; exit 1; }; \
+	  done; \
+	  echo "  [$$tgt] EFI TUs compiled clean (datagram + TCP-only)"; got=$$((got+1)); \
 	done; \
 	if [ -n "$(UEFI_GATE_STRICT)" ] && [ "$$got" -lt "$$want" ]; then \
 	  echo "  FAIL: strict gate compiled $$got/$$want arches"; exit 1; \
 	fi; \
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
-	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): socket_efi_tcp4 + socket_efi_udp4 + event_efi) =="
+	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
 .PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \

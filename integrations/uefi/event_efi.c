@@ -8,16 +8,25 @@
 
 #include "event_efi.h"
 #include "socket_efi_tcp4.h"          /* kl_uefi_socket_provider + async-connect prims */
-#include "socket_efi_udp4.h"          /* 6.4b-3b: datagram completion primitives + KlUefiUdpOpResult */
 #include "platform_uefi.h"            /* kl_uefi_after_ebs (F3 boot-services guard) */
 
 #include <keel/event.h>
 #include <keel/sockaddr.h>
 #include <keel/connection.h>           /* KlConn — server post_recv/post_send targets (S-4) */
-#include <keel/udp.h>                  /* KlDatagram layout (dg->fd/recv_buf/rx_life) for post_dgram_* */
 #include "../../src/socket.h"          /* KlSocketProvider, kl_sock_accept/send/recv, kl_handle_valid */
 #include "../../src/completion.h"      /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
+
+/* Datagram completion (EFI_UDP4) is an OPTIONAL transport capability, gated by
+ * KEEL_UEFI_DATAGRAM: only the datagram builds (6.4c image, the mock harness, the strict
+ * two-arch datagram gate) define it. A TCP-only EFI build (U-3/U-4/U-7, S-4/S-6/S-7) compiles
+ * NONE of the datagram op storage / pumping / teardown / vtable wiring below, and therefore
+ * references NO kl_uefi_udp_* / KlDgramLife symbols — completion is the execution model, UDP
+ * is an optional transport, and the two do not link together unless asked. */
+#ifdef KEEL_UEFI_DATAGRAM
+#include "socket_efi_udp4.h"          /* 6.4b-3b: datagram completion primitives + KlUefiUdpOpResult */
+#include <keel/udp.h>                  /* KlDatagram layout (dg->fd/recv_buf/rx_life) for post_dgram_* */
 #include "../../src/datagram_life.h"   /* KlDgramLife retain/release — B.6 stable-token transfer */
+#endif
 #include <keel/server.h>               /* KlServer.pool — accept backpressure (S-3) */
 
 #include <stdint.h>
@@ -51,6 +60,7 @@
  * ACCEPTS (copies the payload+dest — the caller may free them right after), and only ONE send per fd is
  * posted to the substrate at a time; when it retires, the drain pumps the next queued send for that fd.
  * 1 recv + up to a handful of queued sends → 8 slots; a send larger than the inline buffer is refused. */
+#ifdef KEEL_UEFI_DATAGRAM
 #define KL_EFI_MAX_DGRAM_OPS 8
 #define KL_EFI_DGRAM_SNDBUF  1500
 
@@ -71,6 +81,7 @@ typedef struct {
     size_t              snd_len;
     KlSockAddr          snd_dest;
 } EfiDgramOp;
+#endif /* KEEL_UEFI_DATAGRAM */
 
 /* A queued outbound connect (post_connect). Its terminal result is surfaced as a
  * KL_COMP_CONNECT on a later drain (once the Connect token fires), then retired. The
@@ -124,8 +135,10 @@ typedef struct {
     EfiConnectOp       connect_ops[KL_EFI_MAX_CONNECT_OPS];
     EfiWatch           watches[KL_EFI_MAX_WATCHES];
     EfiIoOp            io[KL_EFI_MAX_IO_OPS];   /* S-4 server recv/send ops */
+#ifdef KEEL_UEFI_DATAGRAM
     EfiDgramOp         dgram[KL_EFI_MAX_DGRAM_OPS];  /* 6.4b-3b datagram recv/send ops */
     unsigned long long dgram_seq;                    /* monotonic send-acceptance counter (FIFO) */
+#endif
     /* S-3 server accept: latched by prime_accepts; drain hands back each ready child
      * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlConn-pool backpressure. */
     struct KlServer   *server;
@@ -144,7 +157,9 @@ static int el_init(KlEventLoop *loop) {
     for (int i = 0; i < KL_EFI_MAX_CONNECT_OPS; i++) g_efi.connect_ops[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_WATCHES; i++)      g_efi.watches[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++)       g_efi.io[i].in_use = 0;
+#ifdef KEEL_UEFI_DATAGRAM
     for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++)    g_efi.dgram[i].in_use = 0;
+#endif
     return 0;
 }
 
@@ -202,6 +217,7 @@ static void el_close(KlEventLoop *loop) {
     for (int i = 0; i < KL_EFI_MAX_CONNECT_OPS; i++) g_efi.connect_ops[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_WATCHES; i++)      g_efi.watches[i].in_use = 0;
     for (int i = 0; i < KL_EFI_MAX_IO_OPS; i++)       g_efi.io[i].in_use = 0;
+#ifdef KEEL_UEFI_DATAGRAM
     /* A still-in-flight datagram op at ctx teardown: consult the substrate to decide life-release,
      * so an ORDINARY teardown (sockets already cleanly closed → STALE_RETIRED) RELEASES the ref and
      * on_final frees the receive storage — rather than leaking it. Only an unconfirmed op (QUARANTINED,
@@ -220,6 +236,7 @@ static void el_close(KlEventLoop *loop) {
         }
         op->in_use = 0;
     }
+#endif /* KEEL_UEFI_DATAGRAM */
     g_efi.server        = NULL;
     g_efi.listen_fd     = KL_INVALID_SOCKET;
     g_efi.accept_primed = 0;
@@ -363,6 +380,7 @@ static int el_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t
     return 0;
 }
 
+#ifdef KEEL_UEFI_DATAGRAM
 /* ── Datagram completion ops (6.4b-3b) — post an EFI_UDP4 Receive/Transmit token, retain a B.6
  *    life ref, and capture the op identity {fd, generation}; el_drain reaps via KlUefiUdpOpResult. */
 static EfiDgramOp *dgram_op_alloc(void) {
@@ -435,6 +453,7 @@ static int el_post_dgram_send(struct KlDatagram *dg, const void *data, size_t le
     efi_dgram_pump_sends(dg->fd);        /* post it now if the socket's Tx token is free */
     return 0;
 }
+#endif /* KEEL_UEFI_DATAGRAM */
 
 /* drain: surface completed Connect tokens (stale-guarded) as KL_COMP_CONNECT, then
  * relay each armed watch as a KL_COMP_WATCHER (level-triggered — the client re-arms
@@ -570,6 +589,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
         io_op_free(op);
     }
 
+#ifdef KEEL_UEFI_DATAGRAM
     /* Datagram ops (6.4b-3b): poll each posted Receive/Transmit by its {fd, captured_generation}
      * identity and apply the KlUefiUdpOpResult contract. DELIVERED → emit KL_COMP_DGRAM_RECV/_SEND
      * and TRANSFER the B.6 life ref to the event (kl_udp_comp_dispatch releases it after delivery);
@@ -651,6 +671,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
             if (g_efi.dgram[i].in_use && g_efi.dgram[i].kind == EFI_DG_SEND) { any_send = 1; break; }
         if (!any_send) g_efi.dgram_seq = 0;
     }
+#endif /* KEEL_UEFI_DATAGRAM */
 
     if (count == 0 && g_efi.bs)
         g_efi.bs->Stall(1000);   /* 1 ms — idle tick while a connect settles / no work */
@@ -665,8 +686,12 @@ static const KlCompletionOps EFI_COMP_OPS = {
     .post_accept = el_post_accept,
     .post_recv = el_post_recv,           /* S-4: server completion-native recv */
     .post_send = el_post_send,           /* S-4: server completion-native send */
+#ifdef KEEL_UEFI_DATAGRAM
     .post_dgram_recv = el_post_dgram_recv,   /* 6.4b-3b: datagram completion recv (EFI_UDP4 Receive) */
     .post_dgram_send = el_post_dgram_send,   /* 6.4b-3b: datagram completion send (EFI_UDP4 Transmit) */
+    /* TCP-only builds leave post_dgram_* NULL — no datagram socket is ever created there, so the
+     * completion core never dispatches to them (KEEL_UEFI_DATAGRAM off → the ops above don't exist). */
+#endif
     /* post_sendfile = NULL: file responses (S-6) are out of scope for the S-4 plaintext
      * server. The CLIENT's stream send/recv still ride the SYNC socket provider relayed as
      * KL_COMP_WATCHER (post_connect + the drain watch loop); the datagram ops above serve
