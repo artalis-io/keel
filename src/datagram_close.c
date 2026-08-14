@@ -194,7 +194,7 @@ int kl_dgram_close_free(KlDgramClose *c) {
     if (!c)
         return 0;
     if (c->state != KL_DGRAM_CLOSE_CLOSED)
-        return -1;                    /* refuse before confirmed detachment */
+        return -1;                    /* refuse before a terminal classification (DETACHED/QUARANTINED) */
     memset(c, 0, sizeof(*c));         /* borrows no heap; send/recv are the caller's to free */
     return 0;
 }
