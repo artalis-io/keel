@@ -166,6 +166,12 @@ void kl_dgram_core_pause(KlDgramCore *core) {
 int kl_dgram_core_resume(KlDgramCore *core) {
     return (core && core->inited && core->rx) ? kl_dgram_recv_resume(&core->rx->recv) : -1;
 }
+void kl_dgram_core_recv_stop(KlDgramCore *core) {
+    if (core && core->inited && core->rx) kl_dgram_recv_stop(&core->rx->recv);
+}
+int kl_dgram_core_recv_held(const KlDgramCore *core) {
+    return (core && core->inited && core->rx) ? kl_dgram_recv_held(&core->rx->recv) : 0;
+}
 
 int kl_dgram_core_close_begin(KlDgramCore *core)  { return (core && core->inited) ? kl_dgram_close_begin(&core->close)  : -1; }
 int kl_dgram_core_close_cancel(KlDgramCore *core) { return (core && core->inited) ? kl_dgram_close_cancel(&core->close) : -1; }

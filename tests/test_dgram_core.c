@@ -63,15 +63,42 @@ static KlDgramRetireResult test_retire(void *ctx, KlDgramOpKind kind, int *te) {
     return kind == KL_DGRAM_OP_SEND ? g_retire_send : g_retire_recv;
 }
 
-/* recv arm: posting a completion recv PINS the op by retaining a core life ref (the B.6 contract). */
-static int         g_arm_calls;
+/* recv arm. Completion: posting a recv PINS the op by retaining a core life ref (the B.6 contract) —
+ * readiness interest is NOT a posted op, so it retains nothing. Readiness also tracks armed interest. */
+static int         g_completion;        /* the core's mode (set by base_cfg) */
+static int         g_arm_calls, g_disarm_calls, g_pull_calls, g_interest;
 static KlDgramLife *g_recv_life;
 static int         g_recv_quarantine;   /* 1 = cancel drops the op but does NOT release its life ref */
+static int         g_avail;             /* readiness: datagrams available to pull before would-block */
+static const char *g_rx_payload; static size_t g_rx_len; static int g_rx_no_peer;
+
+/* Fill the inbound slot as a provider would, AFTER the machine reset it: peer MANDATORY. */
+static void inbound_fill(KlDgramCore *core, const char *payload, size_t len) {
+    KlDgramSlot *in = kl_dgram_core_inbound_slot(core);
+    kl_sockaddr_from_ipv4(&in->peer, (const unsigned char *)"\x7f\0\0\1", 12345);
+    if (g_rx_no_peer) memset(&in->peer, 0, sizeof(in->peer));   /* provider bug → fail-safe */
+    if (len && payload) { size_t n = len < in->cap ? len : in->cap; memcpy(in->data, payload, n); }
+    in->flags = 0;
+}
+
 static int test_arm(void *ctx) {
     (void)ctx; g_arm_calls++;
-    g_recv_life = kl_dgram_core_life(g_core);
-    kl_dgram_life_retain(g_recv_life);    /* op ref — released at the op's terminal completion */
+    if (g_completion) {
+        g_recv_life = kl_dgram_core_life(g_core);
+        kl_dgram_life_retain(g_recv_life);   /* posted op ref — released at terminal completion */
+    } else {
+        g_interest = 1;                       /* readiness: READ interest armed */
+    }
     return 0;
+}
+static void test_disarm(void *ctx) { (void)ctx; g_disarm_calls++; g_interest = 0; }   /* readiness drops interest */
+static int  test_pull(void *ctx, size_t *out) {
+    (void)ctx; g_pull_calls++;
+    if (g_avail <= 0) return 0;               /* would-block (drained) */
+    g_avail--;
+    inbound_fill(g_core, g_rx_payload, g_rx_len);
+    *out = g_rx_len;
+    return 1;
 }
 /* cancel_recv: the backend delivers the outstanding recv's terminal completion (cancel-drop). A clean
  * retirement releases the op's life ref; a QUARANTINED op abandons it (storage stays pinned). */
@@ -81,8 +108,33 @@ static void test_cancel_recv(void *ctx) {
     kl_dgram_core_recv_on_complete(g_core, 0, 0);   /* drop machine inflight (stopped-drop) */
     if (!g_recv_quarantine) kl_dgram_life_release(g_recv_life);
 }
+
+/* delivery recorder (+ optional pause/stop from within the callback — invariant-9 confinement). */
+static int          g_deliv;
+static unsigned char g_last[128]; static size_t g_last_len;
+static int          g_has_peer, g_has_local; static unsigned g_last_flags;
+enum { ACT_NONE = 0, ACT_PAUSE, ACT_STOP };
+static int          g_action, g_action_at;
 static void test_deliver(void *ctx, const void *d, size_t n, const KlSockAddr *p,
-                         const KlSockAddr *l, unsigned f) { (void)ctx;(void)d;(void)n;(void)p;(void)l;(void)f; }
+                         const KlSockAddr *l, unsigned f) {
+    (void)ctx;
+    g_deliv++;
+    if (n <= sizeof(g_last)) { memcpy(g_last, d, n); g_last_len = n; }
+    g_has_peer = (p != NULL); g_has_local = (l != NULL); g_last_flags = f;
+    if (g_deliv == g_action_at) {
+        if (g_action == ACT_PAUSE)     kl_dgram_core_pause(g_core);
+        else if (g_action == ACT_STOP) kl_dgram_core_recv_stop(g_core);
+    }
+}
+
+/* A datagram arrives on a posted COMPLETION recv: fill the inbound slot, then signal completion and
+ * release THIS op's token ref (capture it first — a delivery re-arms, retaining a fresh ref). */
+static void recv_arrive(KlDgramCore *core, const char *payload, size_t len) {
+    KlDgramLife *completing = g_recv_life;
+    inbound_fill(core, payload, len);
+    kl_dgram_core_recv_on_complete(core, len, 1);   /* deliver (or hold, if paused) + maybe re-arm */
+    kl_dgram_life_release(completing);              /* the completed op's ref */
+}
 
 /* close_transport: the physical fd close — must run EXACTLY ONCE with the adopted fd. */
 static int            g_fd_close_calls;
@@ -100,7 +152,12 @@ static void reset_globals(void) {
     g_submit_has_peer = g_submit_has_local = 0; g_submit_tos = -2;
     memset(&g_submit_peer, 0, sizeof(g_submit_peer)); memset(&g_submit_local, 0, sizeof(g_submit_local));
     g_retire_send = g_retire_recv = KL_DGRAM_RETIRE_RETIRED;
-    g_arm_calls = 0; g_recv_life = NULL; g_recv_quarantine = 0; g_cancel_recv_calls = 0;
+    g_completion = 1;
+    g_arm_calls = g_disarm_calls = g_pull_calls = 0; g_interest = 0;
+    g_recv_life = NULL; g_recv_quarantine = 0; g_cancel_recv_calls = 0;
+    g_avail = 0; g_rx_payload = NULL; g_rx_len = 0; g_rx_no_peer = 0;
+    g_deliv = 0; g_last_len = 0; g_has_peer = g_has_local = 0; g_last_flags = 0;
+    g_action = ACT_NONE; g_action_at = 0;
     g_fd_close_calls = 0; g_fd_closed = KL_INVALID_SOCKET;
     g_on_close_calls = 0; g_on_close_result = KL_DGRAM_CLOSE_NONE;
 }
@@ -115,12 +172,13 @@ static void  count_free(void *c, void *p, size_t s) { (void)c;(void)s; if (p) { 
 #define TEST_FD ((KlSocketHandle)3)
 
 static KlDgramCoreConfig base_cfg(KlAllocator *a, int completion, size_t slots, size_t cap) {
+    g_completion = completion ? 1 : 0;
     KlDgramCoreConfig c; memset(&c, 0, sizeof(c));
     c.alloc = a; c.fd = TEST_FD; c.completion = completion;
     c.send_slots = slots; c.send_slot_cap = cap; c.recv_cap = 64;
     c.caps = KL_DGRAM_CAP_CONNECTED | KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS;
-    c.submit = test_submit; c.arm = test_arm; c.deliver = test_deliver;
-    c.cancel_recv = test_cancel_recv;
+    c.submit = test_submit; c.arm = test_arm; c.disarm = test_disarm; c.pull = test_pull;
+    c.deliver = test_deliver; c.cancel_recv = test_cancel_recv;
     c.retire = test_retire; c.close_transport = test_close_transport; c.on_close = test_on_close;
     return c;
 }
@@ -383,6 +441,131 @@ UTEST(dgram_core, close_detached_when_all_retired) {
     send_done(&core, 1);
     ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
     ASSERT_EQ(g_fd_close_calls, 1);
+    ASSERT_EQ(kl_dgram_core_free(&core), 0);
+}
+
+/* ── strict pause / receive control (7A-4) ────────────────────────────────────────────────── */
+
+/* A completion datagram delivers once (peer present) and the machine re-arms through the core. */
+UTEST(dgram_core, recv_completion_deliver_and_rearm) {
+    reset_globals();
+    KlAllocator a = kl_allocator_default();
+    KlDgramCore core;
+    KlDgramCoreConfig cfg = base_cfg(&a, /*completion*/1, 4, 16);
+    ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
+
+    ASSERT_EQ(kl_dgram_core_recv_start(&core), 0);
+    ASSERT_EQ(g_arm_calls, 1);
+    recv_arrive(&core, "hi", 2);
+    ASSERT_EQ(g_deliv, 1);                 /* delivered exactly once */
+    ASSERT_TRUE(g_has_peer);               /* peer mandatory + present */
+    ASSERT_EQ(g_last_len, (size_t)2);
+    ASSERT_EQ(g_arm_calls, 2);             /* re-armed for the next datagram */
+
+    ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    ASSERT_EQ(kl_dgram_core_free(&core), 0);
+}
+
+/* STRICT pause, completion: a recv posted before pause completes while paused → the datagram is HELD
+ * (not delivered); resume delivers it exactly once, then re-arms. */
+UTEST(dgram_core, recv_completion_pause_holds_one) {
+    reset_globals();
+    KlAllocator a = kl_allocator_default();
+    KlDgramCore core;
+    KlDgramCoreConfig cfg = base_cfg(&a, /*completion*/1, 4, 16);
+    ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
+
+    ASSERT_EQ(kl_dgram_core_recv_start(&core), 0);
+    kl_dgram_core_pause(&core);
+    recv_arrive(&core, "held", 4);         /* completes while paused → held, not delivered */
+    ASSERT_EQ(g_deliv, 0);
+    ASSERT_EQ(kl_dgram_core_recv_held(&core), 1);
+    ASSERT_EQ(g_arm_calls, 1);             /* no re-arm while paused */
+
+    ASSERT_EQ(kl_dgram_core_resume(&core), 0);
+    ASSERT_EQ(g_deliv, 1);                 /* the held datagram delivered exactly once */
+    ASSERT_EQ(g_last_len, (size_t)4);
+    ASSERT_EQ(kl_dgram_core_recv_held(&core), 0);
+    ASSERT_EQ(g_arm_calls, 2);             /* re-armed after resume */
+
+    ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    ASSERT_EQ(kl_dgram_core_free(&core), 0);
+}
+
+/* STRICT pause, readiness: pause DROPS interest at the backend seam (disarm); resume re-arms it. */
+UTEST(dgram_core, recv_readiness_pause_drops_interest) {
+    reset_globals();
+    KlAllocator a = kl_allocator_default();
+    KlDgramCore core;
+    KlDgramCoreConfig cfg = base_cfg(&a, /*completion*/0, 4, 16);
+    ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
+
+    ASSERT_EQ(kl_dgram_core_recv_start(&core), 0);
+    ASSERT_EQ(g_arm_calls, 1);
+    ASSERT_EQ(g_interest, 1);              /* READ interest armed */
+
+    g_rx_payload = "rd"; g_rx_len = 2; g_avail = 1;
+    ASSERT_EQ(kl_dgram_core_recv_on_readable(&core), 0);
+    ASSERT_EQ(g_deliv, 1);                 /* pulled + delivered one, then would-block */
+    ASSERT_TRUE(g_pull_calls >= 1);
+    ASSERT_EQ(g_interest, 1);              /* interest persists across a drain */
+
+    kl_dgram_core_pause(&core);
+    ASSERT_EQ(g_disarm_calls, 1);          /* pause dropped interest */
+    ASSERT_EQ(g_interest, 0);
+    ASSERT_EQ(kl_dgram_core_resume(&core), 0);
+    ASSERT_EQ(g_interest, 1);              /* resume re-armed interest */
+
+    ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    ASSERT_EQ(kl_dgram_core_free(&core), 0);
+}
+
+/* Invariant 9 confinement: a delivery callback may pause — after which the machine does NOT re-arm. */
+UTEST(dgram_core, recv_pause_from_callback) {
+    reset_globals();
+    KlAllocator a = kl_allocator_default();
+    KlDgramCore core;
+    KlDgramCoreConfig cfg = base_cfg(&a, /*completion*/1, 4, 16);
+    ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
+    g_action = ACT_PAUSE; g_action_at = 1;
+
+    ASSERT_EQ(kl_dgram_core_recv_start(&core), 0);
+    recv_arrive(&core, "x", 1);
+    ASSERT_EQ(g_deliv, 1);
+    ASSERT_EQ(g_arm_calls, 1);             /* callback paused → NO re-arm */
+
+    ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    ASSERT_EQ(kl_dgram_core_free(&core), 0);
+}
+
+/* recv_stop discards a held (paused) datagram. */
+UTEST(dgram_core, recv_stop_discards_held) {
+    reset_globals();
+    KlAllocator a = kl_allocator_default();
+    KlDgramCore core;
+    KlDgramCoreConfig cfg = base_cfg(&a, /*completion*/1, 4, 16);
+    ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
+
+    ASSERT_EQ(kl_dgram_core_recv_start(&core), 0);
+    kl_dgram_core_pause(&core);
+    recv_arrive(&core, "held", 4);
+    ASSERT_EQ(kl_dgram_core_recv_held(&core), 1);
+
+    kl_dgram_core_recv_stop(&core);
+    ASSERT_EQ(kl_dgram_core_recv_held(&core), 0);   /* held datagram discarded */
+    ASSERT_EQ(g_deliv, 0);
+
+    ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
 }
 

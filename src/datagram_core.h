@@ -104,12 +104,16 @@ KlDatagramSendStatus kl_dgram_core_send(KlDgramCore *core, const KlDatagramMessa
 int  kl_dgram_core_send_on_complete(KlDgramCore *core, int ok);
 int  kl_dgram_core_send_flush(KlDgramCore *core);
 
-/* Receive control (delegates to KlDgramRecv). */
+/* Receive control (delegates to KlDgramRecv). pause is STRICT: readiness drops interest at the backend
+ * seam (disarm); a completion recv already posted stays in flight and is HELD on completion, delivered
+ * exactly once on resume then re-armed. recv_stop discards any held datagram + drops interest. */
 int  kl_dgram_core_recv_start(KlDgramCore *core);
 int  kl_dgram_core_recv_on_complete(KlDgramCore *core, size_t len, int ok);
 int  kl_dgram_core_recv_on_readable(KlDgramCore *core);
 void kl_dgram_core_pause(KlDgramCore *core);
 int  kl_dgram_core_resume(KlDgramCore *core);
+void kl_dgram_core_recv_stop(KlDgramCore *core);
+int  kl_dgram_core_recv_held(const KlDgramCore *core);      /* 1 = a paused completion datagram is held */
 
 /* Close (graceful/abortive) + progress hook + terminal classification. */
 int  kl_dgram_core_close_begin(KlDgramCore *core);
