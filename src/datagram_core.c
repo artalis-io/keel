@@ -58,8 +58,8 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     memset(core, 0, sizeof(*core));
     if (!cfg || !cfg->alloc || !kl_handle_valid(cfg->fd) ||
         cfg->send_slots == 0 || cfg->send_slot_cap == 0 || cfg->recv_cap == 0 ||
-        !cfg->submit || !cfg->arm || !cfg->deliver)
-        return -1;
+        !cfg->submit || !cfg->arm || !cfg->deliver || !cfg->close_transport)
+        return -1;   /* close_transport REQUIRED — the core adopts the fd, so it must close it */
 
     KlAllocator *a = cfg->alloc;
 

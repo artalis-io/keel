@@ -17,9 +17,11 @@
 
 /* ── scripted neutral adapter ─────────────────────────────────────────────────────────────── */
 
-static KlDgramCore *g_core;   /* the core under test — the recv adapters reach it to pin/retire ops */
+static KlDgramCore *g_core;   /* the core under test — the adapters reach it to pin/retire ops */
+static KlDgramLife *g_send_life;  /* the outstanding posted-send op's token (captured at submit) */
 
-/* submit: copy-before-accept of payload AND metadata into backend-owned storage. */
+/* submit: copy-before-accept of payload AND metadata into backend-owned storage, and — for an INFLIGHT
+ * (async-posted) send — RETAIN a stable-token ref, uniform with the recv arm (B.6). */
 static KlDgramSubmitResult g_submit_result;
 static int        g_submit_calls;
 static unsigned char g_submitted[64];         /* backend's COPY of the last payload */
@@ -38,7 +40,20 @@ static KlDgramSubmitResult test_submit(void *ctx, const void *data, size_t len,
     g_submit_has_peer  = peer  != NULL; if (peer)  g_submit_peer  = *peer;   /* copy addr metadata too */
     g_submit_has_local = local != NULL; if (local) g_submit_local = *local;
     g_submit_tos       = tos;
+    if (g_submit_result == KL_DGRAM_SUBMIT_INFLIGHT) {   /* posted async op → holds one token ref */
+        g_send_life = kl_dgram_core_life(g_core);
+        kl_dgram_life_retain(g_send_life);
+    }
     return g_submit_result;
+}
+
+/* Deliver a posted send's terminal completion the way a backend does: retire the machine op AND
+ * release that op's token ref. (Capture the token BEFORE completion — send_on_complete may pump the
+ * next queued send, which retains a fresh ref on the same token.) */
+static void send_done(KlDgramCore *core, int ok) {
+    KlDgramLife *l = g_send_life;
+    kl_dgram_core_send_on_complete(core, ok);
+    kl_dgram_life_release(l);
 }
 
 /* per-op retirement classifier (§4.3) */
@@ -79,7 +94,7 @@ static KlDatagramCloseResult g_on_close_result;
 static void test_on_close(void *ctx, KlDatagramCloseResult r) { (void)ctx; g_on_close_calls++; g_on_close_result = r; }
 
 static void reset_globals(void) {
-    g_core = NULL;
+    g_core = NULL; g_send_life = NULL;
     g_submit_result = KL_DGRAM_SUBMIT_INFLIGHT; g_submit_calls = 0; g_submitted_len = 0;
     memset(g_submitted, 0, sizeof(g_submitted)); g_retained_ptr = NULL;
     g_submit_has_peer = g_submit_has_local = 0; g_submit_tos = -2;
@@ -89,6 +104,13 @@ static void reset_globals(void) {
     g_fd_close_calls = 0; g_fd_closed = KL_INVALID_SOCKET;
     g_on_close_calls = 0; g_on_close_result = KL_DGRAM_CLOSE_NONE;
 }
+
+/* Counting allocator — tracks live allocations so a quarantine test can prove that on_final (which
+ * frees the life-owned inbound + rx holder) did NOT run while a posted-op token ref is outstanding. */
+static int g_live;
+static void *count_malloc(void *c, size_t n) { (void)c; void *p = malloc(n); if (p) g_live++; return p; }
+static void *count_realloc(void *c, void *p, size_t o, size_t n) { (void)c;(void)o; void *q = realloc(p, n); if (!p && q) g_live++; return q; }
+static void  count_free(void *c, void *p, size_t s) { (void)c;(void)s; if (p) { g_live--; free(p); } }
 
 #define TEST_FD ((KlSocketHandle)3)
 
@@ -138,6 +160,7 @@ UTEST(dgram_core, init_rejects_bad_args) {
     bad = cfg; bad.submit = NULL;        ASSERT_EQ(kl_dgram_core_init(&core, &bad), -1);
     bad = cfg; bad.arm = NULL;           ASSERT_EQ(kl_dgram_core_init(&core, &bad), -1);
     bad = cfg; bad.deliver = NULL;       ASSERT_EQ(kl_dgram_core_init(&core, &bad), -1);
+    bad = cfg; bad.close_transport = NULL; ASSERT_EQ(kl_dgram_core_init(&core, &bad), -1);  /* fd owner needs a closer */
     ASSERT_EQ((int)core.inited, 0);      /* left zeroed/reusable on every rejection */
 }
 
@@ -179,6 +202,7 @@ UTEST(dgram_core, send_count_backpressure_and_fifo) {
     KlDgramCore core;
     KlDgramCoreConfig cfg = base_cfg(&a, /*completion*/1, /*slots*/2, /*cap*/16);
     ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
     g_writable_calls = 0;
     kl_dgram_core_on_writable(&core, on_writable, NULL);
 
@@ -190,12 +214,12 @@ UTEST(dgram_core, send_count_backpressure_and_fifo) {
     ASSERT_EQ(g_submit_calls, 1);                    /* single-flight: only A submitted */
     ASSERT_EQ(g_submitted[0], 'A');
 
-    ASSERT_EQ(kl_dgram_core_send_on_complete(&core, 1), 0);   /* A retires → B pumps (FIFO) */
+    send_done(&core, 1);                             /* A retires → B pumps (FIFO) */
     ASSERT_EQ(g_submit_calls, 2);
     ASSERT_EQ(g_submitted[0], 'B');
     ASSERT_EQ(g_writable_calls, 1);                  /* full(2)→non-full edge fired once */
 
-    ASSERT_EQ(kl_dgram_core_send_on_complete(&core, 1), 0);   /* B retires, queue empty */
+    send_done(&core, 1);                             /* B retires, queue empty */
     ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
 }
@@ -206,12 +230,13 @@ UTEST(dgram_core, send_drain_edge) {
     KlDgramCore core;
     KlDgramCoreConfig cfg = base_cfg(&a, 1, 4, 16);
     ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
     g_drain_calls = 0;
     kl_dgram_core_on_drain(&core, on_drain, NULL);
 
     ASSERT_EQ((int)kl_dgram_core_send(&core, &(KlDatagramMessage){ .data = "x", .len = 1, .tos = -1 }), (int)KL_DATAGRAM_ACCEPTED);
     ASSERT_EQ(g_drain_calls, 0);
-    ASSERT_EQ(kl_dgram_core_send_on_complete(&core, 1), 0);   /* non-empty → empty */
+    send_done(&core, 1);                             /* non-empty → empty */
     ASSERT_EQ(g_drain_calls, 1);
     ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
@@ -226,6 +251,7 @@ UTEST(dgram_core, copy_before_accept_facade) {
     KlDgramCore core;
     KlDgramCoreConfig cfg = base_cfg(&a, 1, 4, 16);
     ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
 
     char buf[4] = { 'W', 'X', 'Y', 'Z' };
     KlDatagramMessage m = { .data = buf, .len = 4, .tos = -1 };
@@ -234,27 +260,33 @@ UTEST(dgram_core, copy_before_accept_facade) {
     ASSERT_EQ(g_submitted_len, (size_t)4);
     ASSERT_EQ(memcmp(g_submitted, "WXYZ", 4), 0);    /* submit saw the ORIGINAL */
 
-    ASSERT_EQ(kl_dgram_core_send_on_complete(&core, 1), 0);
+    send_done(&core, 1);
     ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
 }
 
-/* Provider contract: payload AND address/TOS metadata are copied before acceptance, so a QUARANTINED
- * send can release the OBJECT-owned outbound pool at free with no late access through the pool pointer.
- * (If the backend had kept g_retained_ptr and dereffed it after free, ASan on the freed pool fires.) */
-UTEST(dgram_core, quarantined_send_releases_outbound_pool) {
+/* Provider contract, storage ASYMMETRY. A QUARANTINED send exercises BOTH halves of the split:
+ *  - copy-before-accept (payload AND address/TOS metadata) makes the OBJECT-owned outbound pool safe to
+ *    release immediately at core_free — no late access through the pool pointer (ASan on the freed pool);
+ *  - yet the send op still holds a B.6 token ref (uniform contract), so abandoning it on quarantine
+ *    PINS the life-owned rx storage exactly as a quarantined recv would — on_final defers until the
+ *    abandoned ref is reclaimed. */
+UTEST(dgram_core, quarantined_send_releases_pool_but_pins_rx) {
     reset_globals();
-    KlAllocator a = kl_allocator_default();
+    KlAllocator a = { count_malloc, count_realloc, count_free, NULL };
+    g_live = 0;
     KlDgramCore core;
     KlDgramCoreConfig cfg = base_cfg(&a, /*completion*/1, 4, 16);
     ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
+    ASSERT_TRUE(g_live > 0);
 
     KlSockAddr peer, local;
     kl_sockaddr_from_ipv4(&peer,  (const unsigned char *)"\xC0\xA8\x01\x2A", 4242);   /* 192.168.1.42:4242 */
     kl_sockaddr_from_ipv4(&local, (const unsigned char *)"\x0A\x00\x00\x07", 5353);   /* 10.0.0.7:5353 */
     char payload[5] = { 'H', 'E', 'L', 'L', 'O' };
     KlDatagramMessage m = { .data = payload, .len = 5, .peer = &peer, .local = &local, .tos = 0x28 };
-    ASSERT_EQ((int)kl_dgram_core_send(&core, &m), (int)KL_DATAGRAM_ACCEPTED);   /* INFLIGHT */
+    ASSERT_EQ((int)kl_dgram_core_send(&core, &m), (int)KL_DATAGRAM_ACCEPTED);   /* INFLIGHT → submit retains */
     const void *slot_ptr = g_retained_ptr;
     ASSERT_TRUE(slot_ptr != NULL);
     ASSERT_EQ(memcmp(g_submitted, "HELLO", 5), 0);   /* payload copied at submit */
@@ -262,8 +294,8 @@ UTEST(dgram_core, quarantined_send_releases_outbound_pool) {
     ASSERT_EQ(g_submit_tos, 0x28);
     KlSockAddr saved_peer = g_submit_peer, saved_local = g_submit_local;   /* snapshot the copies */
 
-    /* Backend cannot confirm the cancel → QUARANTINED; the op still reaches its MACHINE terminal so the
-     * close can proceed (the verdict is the classifier's, orthogonal to the send's ok). */
+    /* Backend cannot confirm the cancel → QUARANTINED; the op reaches its MACHINE terminal so the close
+     * can proceed, but its token ref is ABANDONED (raw on_complete, NOT send_done → no release). */
     g_retire_send = KL_DGRAM_RETIRE_QUARANTINED;
     ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
     ASSERT_EQ(kl_dgram_core_send_on_complete(&core, 1), 0);
@@ -271,24 +303,21 @@ UTEST(dgram_core, quarantined_send_releases_outbound_pool) {
     ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_QUARANTINED);
     ASSERT_EQ(g_fd_close_calls, 1);
 
-    /* free RELEASES the object-owned outbound pool (slot_ptr's backing). No late access happens through
-     * it — ASan on the freed pool is the check — and the backend's own metadata copy is intact. */
+    /* free RELEASES the object-owned outbound pool (slot_ptr's backing) immediately — ASan on the freed
+     * pool is the check, and the backend's own payload+metadata copies stay intact... */
     ASSERT_EQ(kl_dgram_core_free(&core), 0);
     ASSERT_EQ(memcmp(g_submitted, "HELLO", 5), 0);
     ASSERT_EQ(memcmp(&saved_peer,  &g_submit_peer,  sizeof(KlSockAddr)), 0);
     ASSERT_EQ(memcmp(&saved_local, &g_submit_local, sizeof(KlSockAddr)), 0);
     ASSERT_EQ(g_submit_tos, 0x28);
+    /* ...but the life-owned rx storage stays PINNED by the abandoned send token ref. */
+    ASSERT_TRUE(g_live > 0);
+    kl_dgram_life_release(g_send_life);              /* reclaim the abandoned ref → on_final runs */
+    ASSERT_EQ(g_live, 0);
     (void)slot_ptr;
 }
 
 /* ── backend retirement + fd close ────────────────────────────────────────────────────────── */
-
-/* Counting allocator — tracks live allocations so a test can prove that on_final (which frees the
- * life-owned inbound + rx holder) did NOT run while a posted-op life ref is outstanding. */
-static int g_live;
-static void *count_malloc(void *c, size_t n) { (void)c; void *p = malloc(n); if (p) g_live++; return p; }
-static void *count_realloc(void *c, void *p, size_t o, size_t n) { (void)c;(void)o; void *q = realloc(p, n); if (!p && q) g_live++; return q; }
-static void  count_free(void *c, void *p, size_t s) { (void)c;(void)s; if (p) { g_live--; free(p); } }
 
 /* An idle posted completion recv (no datagram ever arrives) must NOT wedge a graceful close: the
  * backend-retirement step cancels + retires it and closes the fd exactly once → DETACHED. */
@@ -347,10 +376,11 @@ UTEST(dgram_core, close_detached_when_all_retired) {
     KlDgramCore core;
     KlDgramCoreConfig cfg = base_cfg(&a, 1, 4, 16);
     ASSERT_EQ(kl_dgram_core_init(&core, &cfg), 0);
+    g_core = &core;
     ASSERT_EQ((int)kl_dgram_core_send(&core, &(KlDatagramMessage){ .data = "x", .len = 1, .tos = -1 }), (int)KL_DATAGRAM_ACCEPTED);
     g_retire_send = KL_DGRAM_RETIRE_RETIRED;
     ASSERT_EQ(kl_dgram_core_close_begin(&core), 0);
-    ASSERT_EQ(kl_dgram_core_send_on_complete(&core, 1), 0);
+    send_done(&core, 1);
     ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
     ASSERT_EQ(g_fd_close_calls, 1);
     ASSERT_EQ(kl_dgram_core_free(&core), 0);

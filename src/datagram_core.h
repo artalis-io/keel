@@ -55,7 +55,8 @@ typedef struct {
     /* close */
     KlDgramCancelFn cancel_send, cancel_recv; void *cancel_ctx;
     KlDgramRetireFn retire; void *retire_ctx;      /* per-op RETIRED/QUARANTINED/PENDING (may be NULL). */
-    KlDgramCloseTransportFn close_transport; void *transport_ctx;  /* physical fd close (once); may be NULL. */
+    KlDgramCloseTransportFn close_transport; void *transport_ctx;  /* physical fd close (once); REQUIRED —
+                                                    * the core adopts the fd, so it must be able to close it. */
     KlDgramCloseFn  on_close; void *close_ctx;     /* terminal classification (fires once). */
 } KlDgramCoreConfig;
 
@@ -92,7 +93,8 @@ typedef struct {
 
 /* Assemble the core over the prepared transport + neutral adapters. Overflow-/failure-safe: on any
  * failure the object is left zeroed (fd NOT adopted — caller retains it) and re-init-able. Requires
- * alloc, valid fd, send_slots/send_slot_cap/recv_cap > 0, submit, arm, deliver. Returns 0 / -1. */
+ * alloc, valid fd, send_slots/send_slot_cap/recv_cap > 0, submit, arm, deliver, AND close_transport
+ * (the core adopts the fd on success, so it must own a way to close it). Returns 0 / -1. */
 int  kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg);
 
 /* One whole datagram out (atomic accept; count-based backpressure). See KlDatagramSendStatus. */
@@ -123,10 +125,14 @@ void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx);
 /* The inbound slot (recv storage) — a submit/pull adapter writes the received datagram here. */
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core);
 
-/* The B.6 stable-liveness token owning the life-owned rx storage (inbound + recv). A completion
- * backend adapter RETAINS a ref when it posts a recv op — so the inbound outlives a teardown — and
- * releases it at that op's terminal completion (via kl_dgram_life_retain/_release). A QUARANTINED
- * recv op's ref is intentionally never released, pinning its storage. Returns NULL once detached. */
+/* The B.6 stable-liveness token. A completion backend adapter RETAINS one ref for EVERY posted
+ * datagram op — recv AND send alike (uniform with pollcomp/io_uring/IOCP/EFI) — and releases it at
+ * that op's terminal completion (kl_dgram_life_retain/_release). The token carries operation-identity
+ * / owner-lifetime for both directions; that a send's PAYLOAD lives in the object-owned outbound pool
+ * (copy-before-accept) is a SEPARATE concern and does not exempt a send from the token. A QUARANTINED
+ * op (recv or send) intentionally never releases its ref, so on_final — which frees the life-owned rx
+ * storage — is deferred until that ref is reclaimed. Capture the pointer at POST time (it stays valid
+ * via the refcount); it returns NULL once detached. */
 KlDgramLife *kl_dgram_core_life(KlDgramCore *core);
 
 /* Free the OBJECT-owned parts (outbound pool + send + close) and drop the owner life ref (its final
