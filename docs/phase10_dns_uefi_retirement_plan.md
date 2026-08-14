@@ -12,7 +12,7 @@ before a datagram transport existed. 6.4b/6.4c replaced its reason to exist: the
 `KlResolver`** (`src/dns_resolver.c`) now runs over `KlUdp`-over-EFI_UDP4 (the `socket_efi_udp4.c`
 provider + `event_efi.c` completion) and is proven on firmware (DNS→GET 200 + a TC case). The clean
 outcome is to **delete the bespoke resolver and retire U-5 as a superseded diagnostic**, while
-keeping the **numeric `kl_resolve_sync` seam** (`resolve_uefi.c`) that U-3/U-4/U-7/S-6 still use.
+keeping the **numeric `kl_resolve_sync` seam** (`resolve_uefi.c`) that U-3/U-4/U-7 still use.
 Critically, we do **not** build a synchronous compatibility adapter over the async resolver — that
 would re-embed a DNS protocol engine into the platform seam and violate the axis split.
 
@@ -50,12 +50,12 @@ Definitions: `src/resolve_sync.c` (hosted `getaddrinfo`), `integrations/uefi/res
 (numeric), `integrations/lwip/resolve_sync_lwip.c`, and the fail-closed `u1_link_stubs.c` stub.
 Callers: `src/client_async.c` (freestanding numeric fallback + a hosted path), `src/client_sync.c`,
 `src/websocket_client.c`, `src/h2_client.c`. **None of these change.** `resolve_uefi.c` continues to
-serve U-3/U-4/U-7/S-6 as a numeric resolver; only its DNS `#ifdef` disappears.
+serve U-3/U-4/U-7 as a numeric resolver; only its DNS `#ifdef` disappears.
 
 ### 2.3 Flags
 - `KL_U5_DNS` — **fully dead** after retirement (only `resolve_uefi.c` + `build_u5.sh` mention it).
 - `KEEL_UEFI_HAVE_RESOLVE` — **STAYS**. It is the `u1_link_stubs.c` "let `resolve_uefi.c`'s
-  `kl_resolve_sync` win" switch used by U-3/U-4/U-7/S-6/S-6 — unrelated to DNS.
+  `kl_resolve_sync` win" switch used by U-3/U-4/U-7 — unrelated to DNS.
 - `KL_U4_STATIC_HOST`/`KL_U4_STATIC_IP` — **STAY** (U-4 TLS-SAN dialing; not DNS).
 
 ### 2.4 Shared symbols that survive
@@ -123,28 +123,40 @@ of `client_async.c`'s `#ifdef KEEL_FREESTANDING` branch; retirement just deletes
 - `docs/phase10_efi_udp4_provider_design.md` — the "seed of a future provider = `dns_uefi.c`" framing
   → retired; 6.4c is the realized provider.
 - `docs/generic_datagram_audit.md`, `docs/keel_audit.md` — drop/relabel `dns_uefi.c` rows.
+- `integrations/uefi/README.md:30` — still presents U-5 as a live real provider (the "sync DNS"
+  seam + "U-2/U-3/U-5 replace them with real EFI providers" line) → relabel to 6.4c.
 
-## 7. Proposed step sequence (each committed, then paused for review)
+## 7. Proposed step sequence — each checkpoint internally buildable
 
-- **R-1 — delete the bespoke engine.** Remove `dns_uefi.c`/`.h`; delete the `KL_U5_DNS` block from
-  `resolve_uefi.c` (+ its header note); delete the `dns_uefi` cases + include from `mock_efi_test.c`;
-  drop `dns_uefi.c` from `build_mock_efi_test.sh`. **Validate:** `build_mock_efi_test.sh` green
-  (ASan/UBSan/LSan), all surviving `socket_efi_udp4` cases pass; U-3/U-4/U-7/S-6 still *link*
-  (numeric `resolve_uefi.c` unaffected — compile-check).
-- **R-2 — retire U-5.** Delete `u5_selftest.c`, `build_u5.sh`, `run_u5.sh`. **Validate:** re-run the
-  6.4c `run_dgram_dns.sh` (happy+TC) as the replacement firmware acceptance; confirm no CI/Makefile
-  reference dangles.
-- **R-3 — docs + comment sweep.** §6 doc edits; soften the `socket_efi_udp4.c`/`Makefile`/6.4c
-  "contrast dns_uefi.c" comments to past tense. No code.
+**Buildability constraint (why this order):** `dns_uefi.c` cannot be deleted until *both* its
+referencers — `u5_selftest.c` **and** `mock_efi_test.c` — stop naming it, or that checkpoint won't
+compile. The earlier draft deleted the engine in R-1 while `build_u5.sh`/`u5_selftest.c` still
+referenced it — a deliberately-broken intermediate. Corrected ordering (retire the U-5 consumer +
+neutralize the `#ifdef` first; delete the now-mock-only engine + mock cleanup second):
 
-## 8. Risks / open questions (resolve during R-1, not blocking the freeze)
-- **Lost unit coverage.** The `dns_uefi` mock cases (delayed-write settle, post-EBS refuse,
-  quarantine) go away. Confirm the surviving `socket_efi_udp4` cases (6.4b) cover the *same
-  disciplines* on the surviving provider (they do: dedicated quarantine Rx/Tx, post-EBS, stale-gen,
-  cancel-confirm cases). If any dns_uefi case tests a behavior with no udp4 analogue, port it to a
-  `socket_efi_udp4` case rather than delete it.
-- **Keep U-5's static-host trick?** `KL_U4_STATIC_HOST` in `resolve_uefi.c` is a U-4 TLS-SAN feature,
-  not DNS — **keep** it; only the `KL_U5_DNS` block leaves.
+- **R-1 — retire U-5 + neutralize the DNS `#ifdef`.** Delete `u5_selftest.c`, `build_u5.sh`,
+  `run_u5.sh`; delete the `KL_U5_DNS` block (+ the `#ifdef KL_U5_DNS #include "dns_uefi.h"`) from
+  `resolve_uefi.c` (+ its header note). After R-1 nothing defines `KL_U5_DNS`, `resolve_uefi.c` is
+  numeric-only and no longer includes `dns_uefi.h`, and `dns_uefi.c` is referenced **only** by the
+  mock — everything still builds. **Validate:** U-3/U-4/U-7 link (numeric `resolve_uefi.c`
+  unaffected); `build_mock_efi_test.sh` still green (it still compiles `dns_uefi.c`).
+- **R-2 — delete the now-mock-only engine + mock cleanup (atomic).** Remove `dns_uefi.c`/`.h`, delete
+  the `dns_uefi` cases + `#include "dns_uefi.h"` from `mock_efi_test.c`, drop `dns_uefi.c` from
+  `build_mock_efi_test.sh` `SRCS` — all in one commit (the engine and its last referencer must go
+  together). After R-2 `dns_uefi` is fully gone and the mock builds. **Validate:**
+  `build_mock_efi_test.sh` green (ASan/UBSan/LSan), all surviving `socket_efi_udp4` cases pass; re-run
+  the 6.4c `run_dgram_dns.sh` (happy+TC) as the replacement firmware acceptance.
+- **R-3 — docs + comment sweep.** §6 doc edits (incl. `README.md:30`); soften the
+  `socket_efi_udp4.c`/`Makefile`/6.4c "contrast dns_uefi.c" comments to past tense. No code.
+
+## 8. Risks / open questions (not blocking the freeze)
+- **Lost unit coverage (resolve during R-2).** The `dns_uefi` mock cases (delayed-write settle,
+  post-EBS refuse, quarantine) go away with the engine. Confirm the surviving `socket_efi_udp4` cases
+  (6.4b) cover the *same disciplines* on the surviving provider (they do: dedicated quarantine Rx/Tx,
+  post-EBS, stale-gen, cancel-confirm cases). If any dns_uefi case tests a behavior with no udp4
+  analogue, port it to a `socket_efi_udp4` case rather than delete it.
+- **Keep U-5's static-host trick? (R-1).** `KL_U4_STATIC_HOST` in `resolve_uefi.c` is a U-4 TLS-SAN
+  feature, not DNS — **keep** it; only the `KL_U5_DNS` block leaves.
 - **`run_u5.sh` HTTP responder reuse.** `run_dgram_dns.sh` already stands up its own responder; no
   dependency on `run_u5.sh` remains after R-2.
 
