@@ -1,60 +1,68 @@
-# Step 7 — Public `KlDatagram` API: Design Freeze
+# Step 7 — Public `KlDatagram` API: Design Freeze (v2)
 
-**Status:** DESIGN FREEZE — no code. For review before any implementation (per the datagram-consolidation
-cadence). Grounds every decision in the frozen Tier-1 contract (`docs/datagram_contract.md`) and the
-already-built machine (`src/datagram_{slots,send,recv,close,life}.h`, `include/keel/datagram{,_detail}.h`).
+**Status:** DESIGN FREEZE (v2 — addresses review of v1). No code. For re-review before any
+implementation. Grounds every decision in the frozen Tier-1 contract (`docs/datagram_contract.md`) and
+the already-built machine (`src/datagram_{slots,send,recv,close,life}.h`, `include/keel/datagram{,_detail}.h`).
 
-Scope: the **public stabilization** step of the roadmap (`datagram_contract.md` §13) — expose a
-consumer-facing `KlDatagram` surface + the `<keel/datagram_detail.h>` opt-in ABI split + a STABLE
-banner, over the Tier-1 machine.
+**v2 changes (from review):** (1) quarantine is modeled as an explicit terminal *result* — it no longer
+hides under "confirmed detachment"; (2) one frozen close/retirement sequence with backend close/cancel
+as the classifying step (fd close moves into the close machine, not `free`); (3) the compatibility
+policy is frozen — `KlUdp` KEEPS its byte-budget queue, is NOT re-based onto fixed slots in Step 7;
+(4) a public close *result* (DETACHED/QUARANTINED/ERROR) is exposed to callers; (5) copy-before-accept
+is a provider contract that makes object-owned outbound storage safe; (6) lwIP-raw one-held-slot is an
+explicit 7A increment with its own tests; (7) STABLE-banner wording clarified.
 
 ---
 
-## 0. Current state (what Step 7 inherits) and the two coupled deliverables
+## 0. Current state and the two coupled deliverables (7A incremental)
 
-The Tier-1 machine exists as **standalone, unit-tested TUs** with the exact semantics the eight
-topics below require, but they are only PARTLY live-wired:
+The Tier-1 machine exists as **standalone, unit-tested TUs**, but only **recv + the B.6 life-token are
+live-wired**; the packet-slot **send** queue, strict pause, and close coordinator are ⚙ (`KlDatagram`
+still carries the legacy `q_head/q_tail` byte-FIFO — `src/udp.c:84`, `include/keel/udp.h`).
 
-| Component | File | Built? | Live-wired into `KlDatagram`/`KlUdp`? |
-|---|---|---|---|
-| B.6 stable token (`KlDgramLife`) | `datagram_life.h` | ✅ | ✅ (`KlDatagram.rx_life`, all completion backends) |
-| Serial recv + strict pause/resume + one-held-packet (`KlDgramRecv`) | `datagram_recv.h` | ✅ | ✅ (`KlUdp.rx`, wired 6.1) — **recv is live** |
-| Fixed-slot pool (`KlDgramSlots`) | `datagram_slots.h` | ✅ | ✖ — `KlDatagram` still uses the **legacy `q_head/q_tail` byte-FIFO** |
-| Single-flight slot send queue (`KlDgramSend`) | `datagram_send.h` | ✅ | ✖ (`§10` "packet-slot send queue" = ⚙ for every backend) |
-| Confirmed-detachment close coordinator (`KlDgramClose`) | `datagram_close.h` | ✅ | ✖ |
-| Strict pause row | — | ✅ (in `KlDgramRecv`) | ✖ (`§10` "strict pause" = ⚙ — the *interest-drop latch* isn't wired at the backend seam) |
+Step 7 = **7A wire the machine** then **7B public surface**. Per review, **7A is itself incremental**,
+each a focused reviewed commit with its own regression tests:
 
-So Step 7 is **two coupled deliverables**, proposed as sub-steps:
+- **7A-1 — storage separation.** Split the single `KlDgramSlots` block into an **object-owned outbound
+  pool** and a **life-token-owned inbound slot** (§5). Recv inbound storage is already life-owned (6.1);
+  this makes the split explicit and reusable.
+- **7A-2 — close/retirement integration.** Wire `KlDgramClose` with the frozen retirement sequence (§4),
+  incl. backend close/cancel as the *classifying* step and the terminal result.
+- **7A-3 — send integration + compatibility.** Assemble `KlDgramSend`+`KlDgramSlots` into the public
+  `KlDatagram`. Per the frozen D-COMPAT policy (§6) this does **not** re-base `KlUdp`'s send — `KlUdp`
+  keeps byte-budget. Includes the send-queue-geometry tests that byte-budget green tests would NOT prove.
+- **7A-4 — strict-pause backend wiring.** Wire the interest-drop latch at each backend seam (readiness
+  drops interest; completion holds one). Shared with `KlUdp`'s recv — recv behavior preserved (tested).
+- **7A-5 — lwIP-raw one-held-slot cleanup.** Convert lwIP-raw's 16-entry copy ring to the one-held-packet
+  contract. **This is provider state-machine work, not generic seam wiring** — its own increment with
+  dedicated overflow / pause-under-backlog / close-with-backlog tests.
 
-- **7A — Live-wire the Tier-1 machine** into `KlDatagram` (replace the legacy `q_head/q_tail` send queue
-  with `KlDgramSlots`+`KlDgramSend`; wire `KlDgramClose`; wire the strict-pause interest-drop at each
-  backend seam). This flips the `§10` "packet-slot send queue" + "strict pause" rows ⚙ → ✅ and makes
-  `KlUdp` run over the new machine. No public surface change yet.
-- **7B — Public surface** — the `kl_datagram_*` API + `<keel/datagram_detail.h>` opt-in layout + STABLE
-  banner, plus the validation suite.
+**7B** = the public `kl_datagram_*` surface + `<keel/datagram_detail.h>` opt-in ABI split + STABLE
+banner + `tests/test_datagram_public.c`.
 
-Each sub-step lands as its own reviewed commit. 7A is a pure internal refactor (KlUdp behavior
-identical, its tests unchanged); 7B is additive.
+The `§10` matrix's ⚙ rows (packet-slot send queue, strict pause; lwIP-raw serial-recv) flip to ✅ per
+backend as 7A-3/7A-4/7A-5 land. Step 7 is not "done" until they are ✅ on the completion backends §8
+validates.
 
 ---
 
 ## 1. Public `KlDatagram` API and ownership
 
-**Ownership model.** `KlDatagram` is a **caller-owned value type** (stack- or embed-allocatable, like
-`KlUdp`/`KlConn`), single-threaded, driven on the event-loop thread. Its full layout lives in
-`<keel/datagram_detail.h>` (opt-in — an embedder that wants to embed it by value `#include`s the detail
-header and recompiles on layout change); the umbrella `<keel/datagram.h>` keeps `KlDatagram` opaque for
-consumers that only hold a pointer. This is the same **STABLE-with-opt-in-ABI** split the contract §4
-mandates and that `datagram.h`/`datagram_detail.h` already scaffold.
+**Ownership.** `KlDatagram` is a caller-owned value type, single-threaded, event-loop-thread-driven.
+Its layout lives in `<keel/datagram_detail.h>` (opt-in). **STABLE-banner wording (7B, review Low):** the
+`<keel/datagram.h>` banner MUST state — *"STABLE covers the `kl_datagram_*` function + type CONTRACT.
+The struct LAYOUT is not ABI-stable: a consumer that stack-/embed-allocates a `KlDatagram` opts into the
+layout by including `<keel/datagram_detail.h>` and MUST recompile when it changes. A consumer that only
+holds a `KlDatagram *` (created behind the API) is insulated from layout."*
 
-**The surface** (new `kl_datagram_*`, thin facade over the existing `kl_dgram_*` machine):
+**Surface** (new `kl_datagram_*`, facade over the `kl_dgram_*` machine):
 
 ```c
 /* lifecycle */
-int  kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg);   /* wire slots+send+recv+close+life */
+int  kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg);   /* fd ownership transfers ONLY on success */
 int  kl_datagram_close_begin(KlDatagram *dg);     /* graceful */
 int  kl_datagram_close_cancel(KlDatagram *dg);    /* abortive */
-int  kl_datagram_free(KlDatagram *dg);            /* refuses before detachment; -1 if still attached */
+int  kl_datagram_free(KlDatagram *dg);            /* releases object memory AFTER on_close; -1 before */
 
 /* data plane */
 KlDatagramSendStatus kl_datagram_send(KlDatagram *dg, const KlDatagramMessage *m);
@@ -63,12 +71,14 @@ void kl_datagram_pause(KlDatagram *dg);
 int  kl_datagram_resume(KlDatagram *dg);
 void kl_datagram_recv_stop(KlDatagram *dg);
 
-/* edges + queries */
-void   kl_datagram_on_writable(KlDatagram *dg, KlDatagramWritableFn cb, void *ud);
-void   kl_datagram_on_drain(KlDatagram *dg, KlDatagramDrainFn cb, void *ud);
-void   kl_datagram_on_close(KlDatagram *dg, KlDatagramCloseFn cb, void *ud);
-unsigned         kl_datagram_caps(const KlDatagram *dg);         /* KL_DGRAM_CAP_* bitmask */
-KlDgramCloseState kl_datagram_close_state(const KlDatagram *dg); /* OPEN/CLOSING/CLOSED */
+/* edges + terminal result + queries */
+void kl_datagram_on_writable(KlDatagram *dg, KlDatagramWritableFn cb, void *ud);
+void kl_datagram_on_drain(KlDatagram *dg, KlDatagramDrainFn cb, void *ud);
+void kl_datagram_on_close(KlDatagram *dg, KlDatagramCloseFn cb, void *ud);   /* cb receives the RESULT */
+
+unsigned              kl_datagram_caps(const KlDatagram *dg);          /* KL_DGRAM_CAP_* */
+KlDgramCloseState     kl_datagram_close_state(const KlDatagram *dg);   /* OPEN/CLOSING/CLOSED (phase) */
+KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg);  /* terminal classification (§4) */
 size_t   kl_datagram_send_queued(const KlDatagram *dg);
 size_t   kl_datagram_send_inflight(const KlDatagram *dg);
 uint64_t kl_datagram_dropped(const KlDatagram *dg);
@@ -76,217 +86,208 @@ uint64_t kl_datagram_truncated(const KlDatagram *dg);
 KlError  kl_datagram_last_error(const KlDatagram *dg);
 ```
 
-`KlDatagramConfig` carries the **borrowed** dependencies + the fixed sizing, resolving the layering
-(see §6): `{ KlEventCtx *ctx; KlAllocator *alloc; const KlSocketProvider *sockets; KlSocketHandle fd;
-size_t send_slots; size_t send_slot_cap; size_t recv_cap; unsigned want_caps; }`. The `fd` is
-**already `socket()`'d, `configure()`'d, and `bound`** by the caller through `sockets->dgram` (KlUdp
-does this today); `KlDatagram` owns it from `init` to detachment and closes it via `sockets->close` as
-the terminal act of the close machine. Sockopt/multicast/TOS/GSO stay OUT of this core surface (§6).
+`KlDatagramConfig` (all borrowed): `{ KlEventCtx *ctx; KlAllocator *alloc; const KlSocketProvider
+*sockets; KlSocketHandle fd; size_t send_slots; size_t send_slot_cap; size_t recv_cap; unsigned
+want_caps; }`. The `fd` is already `socket()`'d / `configure()`'d / `bound` by the caller through
+`sockets->dgram`. **fd ownership transfers to `KlDatagram` ONLY when `kl_datagram_init` returns 0**
+(review High-2); on failure `init` touches nothing the caller must reclaim and the caller retains the
+fd. From success to terminal close, `KlDatagram` owns the fd and closes it as part of the close
+machine's backend-retirement step (§4) — **not** in `free`. Sockopts stay OUT of this surface (§6).
 
-**Reuse.** `kl_datagram_init` (memset-zero precondition) is the reuse reset, legal **only on a
-fully-detached** object (invariant 8).
+**Reuse** (invariant 8): `kl_datagram_init` on a fully-detached (memset-zero) object.
 
 ---
 
 ## 2. Fixed-slot send: capacity, FIFO ordering, backpressure
 
-Exactly the frozen `KlDgramSend`+`KlDgramSlots` contract, surfaced verbatim:
+The frozen `KlDgramSend`+`KlDgramSlots` contract, surfaced verbatim: `send_slots` fixed slots ×
+`send_slot_cap` bytes (one init-time alloc, object-owned); FIFO ring by submission order; single-flight
+(Tier-1); atomic accept with a total `KlDatagramSendStatus` (`ACCEPTED | WOULD_BLOCK | TOO_LARGE |
+UNSUPPORTED | CLOSED | ERROR`) — no ownership on refusal (invariant 4); full→non-full fires
+`on_writable` (reentrant, non-destructive); non-empty→empty fires `on_drain` (destructive tail).
 
-- **Capacity.** `send_slots` fixed outbound slots × `send_slot_cap` bytes, allocated **once** at
-  `init` (object-owned, in the outbound pool block); acquire/release never touch the allocator.
-- **FIFO ordering.** The occupied slots form a FIFO ring by submission order (the LIFO free-list only
-  feeds allocation; the ring orders sends). A freed hole never lets a newer send jump an older one.
-- **Single-flight (Tier-1).** At most one send op is in flight; the rest wait queued. Retirement
-  (`kl_dgram_send_on_complete` in completion mode / `kl_dgram_send_flush` on writable in readiness)
-  pumps the next FIFO slot.
-- **Atomic accept.** `kl_datagram_send` copies the whole datagram (payload + dest/src/tos) before
-  returning and returns a **total** status — never partial (invariant 3):
-  `ACCEPTED | WOULD_BLOCK | TOO_LARGE | UNSUPPORTED | CLOSED | ERROR` (the existing
-  `KlDatagramSendStatus`). On any non-`ACCEPTED` status it takes **no ownership** and mutates no queue
-  (invariant 4).
-- **Backpressure.** All slots occupied → `WOULD_BLOCK`. A full→non-full edge fires the registered
-  `on_writable` (reentrant, non-destructive). A non-empty→empty edge fires `on_drain` (destructive
-  tail). Over-cap accounting increments `dropped` only where a *policy* drops (KlUdp's cap wrapper);
-  the core `kl_datagram_send` never silently drops — it returns `WOULD_BLOCK`.
-- **`KlDatagramMessage`** (borrowed): `{ data, len, peer(NULL=connected), local(NULL=no source-pin),
-  tos(-1=none), flags }`.
+**Backpressure geometry is a DELIBERATE contract change vs. `KlUdp` (review High-3).** Fixed
+equal-capacity slots back-pressure at a **datagram count** (`send_slots`), NOT a byte budget: many small
+datagrams can exhaust the slot count while well under a legacy byte budget. This is the public
+`KlDatagram` contract; `KlUdp` does NOT inherit it (§6). 7A-3 ships explicit tests for this geometry
+(count-based `WOULD_BLOCK`, hole-reuse FIFO) precisely because they exercise behavior the byte-budget
+tests never touch.
 
 ---
 
 ## 3. Receive pause/resume and one-held-packet semantics
 
-Exactly the frozen `KlDgramRecv` contract:
-
-- **Serial receive** (invariant 1): at most one recv op outstanding; a readiness READ interest is an
-  *armed source*, not an operation.
-- **One-held-packet.** In **completion** mode a posted recv that arrives while paused is *held* (one
-  datagram, full metadata snapshot) and delivered exactly once on `resume`. In **readiness** mode
-  pause drops READ interest so nothing completes; resume re-arms.
-- **`kl_datagram_pause`** — strict pause, idempotent, callable from inside the deliver callback.
-  **`kl_datagram_resume`** — deliver the held datagram (if any) exactly once, then re-arm.
-  **`kl_datagram_recv_stop`** — logical stop: no future delivery/re-arm; a held datagram is discarded;
-  a physically-outstanding completion retires (dropped) on arrival.
-- **Delivery contract** (invariants 2, 5, 7): one datagram per callback; `peer` (source) **mandatory**
-  (a completion/pull with no peer is a provider-contract violation → fail safely, no callback, error
-  state); `local` present iff `KL_DGRAM_HAS_LOCAL`; oversized → delivered once with `KL_DGRAM_TRUNCATED`
-  + `truncated` counter, never disguised as complete.
-- **Callback confinement** (invariant 9): the deliver callback may pause or close the object but MUST
-  NOT free/re-init before `on_close`; the readiness drain re-checks paused/closing after every callback
-  and stops immediately.
-- `KlDatagramRecvFn = void(*)(void *ud, const void *data, size_t len, const KlSockAddr *peer, const
-  KlSockAddr *local, unsigned flags)`.
+The frozen `KlDgramRecv` contract, unchanged from v1: serial receive (invariant 1); one-held-packet
+(completion holds one on pause, delivered once on resume; readiness drops interest); `pause`/`resume`/
+`recv_stop`; delivery contract (one per callback; `peer` mandatory → violation fails safely with error;
+`local` iff `KL_DGRAM_HAS_LOCAL`; oversized → one delivery with `KL_DGRAM_TRUNCATED` + counter);
+callback confinement (invariant 9 — may pause/close but not free/re-init before `on_close`; readiness
+re-checks paused/closing after every callback).
 
 ---
 
-## 4. Confirmed-detachment close state machine
+## 4. Close, retirement sequence, and terminal classification (v2 — the core correction)
 
-Exactly the frozen `KlDgramClose` coordinator (invariant 6):
+The v1 error was firing `on_close` on a **logically** cancelled-but-**physically**-unretired op while
+still calling it "confirmed detachment." v2 separates the two and reports which one happened.
 
-- **States** `KL_DGRAM_CLOSE_{OPEN, CLOSING, CLOSED}` via `kl_datagram_close_state`.
-- **`kl_datagram_close_begin`** (graceful): refuse new sends (`send.closing`), stop receiving, drain
-  the queued output; may escalate to abortive.
-  **`kl_datagram_close_cancel`** (abortive): discard queued-but-unsubmitted datagrams, request cancel
-  of the outstanding recv/send op (each op cancel-requested **at most once**).
-- **Detachment predicate:** `on_close` fires **exactly once**, only after `recv_inflight == 0 &&
-  send_inflight == 0`; graceful additionally requires `send_pending == 0` (drain first) OR the queue
-  becomes undrainable via sticky error (a failure never wedges close). `on_close` is a **destructive
-  tail** — state set to `CLOSED` first, no self-access after (the callback may free/teardown).
-- **Reentrancy.** The `busy`/`on_activity(±1)` handshake around every send/recv public op defers
-  detachment while a cancel hook or callback is on the stack; the outermost frame re-attempts on
-  unwind. This is why `on_drain`/`on_close` are destructive tails.
-- **`kl_datagram_free`** refuses (-1) before confirmed detachment; after detachment it tears down
-  send + recv + coordinator + closes the fd, and the object is memset-zero-reusable (invariant 8).
+### 4.1 One frozen close/retirement sequence (review High-2)
+
+`close_begin` (graceful) / `close_cancel` (abortive) drive a single ordered sequence; the backend
+close/cancel is the step that **classifies** the outcome (for EFI, closing/cancelling the child is what
+establishes RETIRED vs QUARANTINED — it cannot wait until after the coordinator has already declared
+retirement):
+
+1. **Stop admission** — refuse new sends (`CLOSED`), stop arming recv.
+2. **Discard / drain** — abortive: discard queued-but-unsubmitted datagrams (release slots); graceful:
+   drain the queued output first (or observe sticky error — failure never wedges close).
+3. **Backend retirement, exactly once** — invoke the provider's cancel/close on the outstanding recv/
+   send op **and close the fd**. Each op is cancel-requested at most once. This is the single point that
+   touches the backend and where the fd is closed.
+4. **Receive terminal classification** — the backend reports, per op, one of: **RETIRED** (physically
+   confirmed — buffer returned, token releasable), **QUARANTINED** (unconfirmed — firmware/kernel may
+   still hold the buffer; fail-closed), or **ERROR** (terminal transport failure). The object's result is
+   the join over its ops (any QUARANTINED ⇒ QUARANTINED; else any ERROR ⇒ CLOSE_ERROR; else DETACHED).
+5. **Fire `on_close(ctx, result)`** — exactly once, as a destructive tail (state `CLOSED` set first).
+6. **Release wrapper resources** — `kl_datagram_free` (or the caller in the callback) releases
+   object-owned memory. On QUARANTINED the life-token-owned inbound storage is NOT released here (§5).
+
+### 4.2 Terminal result — DETACHED vs QUARANTINED (review High-1, Medium-5)
+
+```c
+typedef enum {
+    KL_DGRAM_DETACHED = 0,   /* CONFIRMED physical retirement: recv+send ops retired, buffers returned,
+                                life fully released → live_count 0. The strong Tier-1 guarantee. */
+    KL_DGRAM_QUARANTINED,    /* Wrapper-SAFE but NOT physically retired: an op could not be confirmed
+                                retired (EFI). The KlDatagram object + fd wrapper are detached and
+                                reusable/freeable; the life-token-owned inbound buffer stays pinned to
+                                process/firmware teardown (bounded fail-closed leak). NOT "confirmed
+                                detachment". */
+    KL_DGRAM_CLOSE_ERROR     /* Terminal transport error during close; ops retired, result is failure. */
+} KlDatagramCloseResult;
+
+typedef void (*KlDatagramCloseFn)(void *ctx, KlDatagramCloseResult result);
+```
+
+- **Invariant 6 ("confirmed detachment") applies ONLY to `KL_DGRAM_DETACHED`.** `on_close` firing with
+  QUARANTINED is explicitly NOT confirmed detachment — it promises only that no completion will
+  reference the wrapper (guaranteed by the life token, §5), not that the op physically retired.
+- `kl_datagram_close_state()` stays the lifecycle phase (`OPEN/CLOSING/CLOSED`); `CLOSED` no longer
+  conflates outcomes — `kl_datagram_close_result()` (and the callback argument) carries the distinction.
+- **`free` refuses before `CLOSED`.** After `CLOSED` it releases object memory; on QUARANTINED it must
+  NOT reclaim the pinned inbound storage (life-owned) — safe because that storage is not in the object.
 
 ---
 
-## 5. B.6 stable-token and quarantine interaction (the crux)
+## 5. B.6 stable-token, quarantine, and copy-before-accept
 
-The close machine (§4) tracks **logical** retirement; the `KlDgramLife` token (§0) tracks **physical**
-storage lifetime. Step 7 must keep these aligned so a late completion never touches freed memory.
-
-- **Storage split (KEY DECISION D-STORAGE).** The **receive inbound storage** (the one-held-packet
-  slot + recv machine) is owned by the **life token** (`on_final` frees it), allocated from the
-  **event-ctx allocator** so it outlives the `KlDatagram`/`KlUdp` wrapper — exactly as 6.1 wired it.
-  The **outbound send-slot pool** is owned by the **`KlDatagram`** (object-owned, freed at
-  detachment once `send_inflight == 0`). Rationale: only the *recv* op can be left dangling by a
-  firmware/kernel that hasn't returned the buffer; the send pool is safe to free once the single
-  in-flight send retires. This means `KlDgramSlots` is used in **two instances** per object — an
-  object-owned outbound pool and a life-token-owned inbound slot — NOT one shared block. (Contrast the
-  standalone `datagram_slots.h`, which today allocates both in one block; 7A must split them.)
-- **Happy detachment.** `on_close` drops the owner life ref (`kl_dgram_life_mark_dead` + `release`);
-  the FINAL release runs `on_final`, freeing the inbound storage; `live_count == 0`.
-- **Quarantine (EFI unconfirmed cancel).** A backend that cannot confirm a cancel retains its op's life
-  ref **forever** (fail-closed to ExitBootServices). Consequence, frozen here: `on_close` **still
-  fires** (the object logically detaches — `recv_inflight` reaches 0 from the object's view once the op
-  is cancel-requested and will never deliver), the `KlDatagram` struct is safely reusable/freeable,
-  **but the inbound storage is NOT reclaimed** — the abandoned life ref pins it until EBS. Because that
-  storage is life-token-owned (not embedded in `KlDatagram`), freeing/reusing the object after
-  `on_close` is memory-safe; the leak is bounded, deliberate, and provider-local. The public contract
-  states: *after `on_close`, the object is detached and reusable; on a quarantining backend the receive
-  buffer for the unconfirmed op remains pinned until process/firmware teardown.*
-- A UDP completion with `life == NULL` yields a NULL owner and is dropped — no object deref. No
-  completion backend dereferences `KlDatagram` after post.
+- **Storage split (D-STORAGE, approved).** Receive inbound storage (one-held slot + recv machine) is
+  **life-token-owned** (`on_final` frees it, event-ctx-allocated → outlives the wrapper). Outbound send
+  pool is **object-owned** (freed at detachment once `send_inflight == 0`).
+- **Copy-before-accept is a PROVIDER CONTRACT (review D-STORAGE correction).** Object-owned outbound
+  storage is safe ONLY because **every provider `send`/`post_dgram_send` copies the payload into
+  backend-owned op storage before returning** (the ops table already documents "backend copies datagram
+  + destination for op's lifetime"; io_uring/IOCP copy into `op->sendbuf`). 7B promotes this to a
+  normative clause in `datagram.h` and `datagram_contract.md`, and §8 adds a provider-conformance test
+  (mutate/free the caller buffer immediately after `ACCEPTED`; the on-wire bytes must be unchanged).
+  A provider that cannot copy-before-accept may not use object-owned outbound storage.
+- **Quarantine terminal (§4.2).** A backend that cannot confirm a cancel retains its op's life ref
+  forever; `on_close` fires with **QUARANTINED**; the object detaches (wrapper-safe) but the inbound
+  buffer stays pinned to EBS. A UDP completion with `life == NULL` is dropped (no wrapper deref).
 
 ---
 
-## 6. Compatibility boundary with legacy `KlUdp`
+## 6. Compatibility policy with legacy `KlUdp` (D-COMPAT — frozen)
 
-**`KlUdp` is retained, unchanged in surface, and re-based onto `KlDatagram` (source- and behavior-
-compatible).** Decision (D-COMPAT):
+**Frozen policy: `KlUdp` KEEPS its documented byte-budget send semantics and is NOT re-based onto fixed
+slots in Step 7.** (Review High-3 + D-COMPAT: v1's "KlUdp behavior identical via rebase" is withdrawn —
+fixed equal-capacity slots change *when* backpressure occurs vs. a byte budget, so a rebase is a
+behavior change, not a refactor.)
 
-- `KlUdp` remains the **ergonomic UDP surface**: it owns socket creation + `configure()` (sockopts:
-  reuse, buffers, broadcast, multicast, TOS, GSO/GRO, pktinfo), embeds a `KlDatagram` (`dg`), and
-  forwards `kl_udp_send*`/`recv`/`pause`/`free` to `kl_datagram_*`. Every existing `kl_udp_*` function
-  keeps its signature and semantics; `KlUdpServer` (6.2) and the DNS resolver (6.3) are untouched.
-- `KlDatagram` is the **raw Tier-1 primitive**: send/recv/pause/close over a prepared `(provider, fd)`,
-  no sockopt surface. New consumers that need the bare confirmed-detachment/fixed-slot contract (a
-  future QUIC/HTTP-3 endpoint, a custom protocol) use `KlDatagram` directly; consumers that want the
-  convenience layer use `KlUdp`.
-- The multicast/TOS/GSO/pktinfo **capabilities** are configured through `KlUdp` (or a raw caller's own
-  `sockets->dgram->{configure,set_tos,mcast_membership}` calls) — they are provider/socket-option
-  concerns, deliberately **not** on the core `KlDatagram` send/recv/close surface, matching
-  `datagram.h`'s "the provider holds no UDP machine state" split.
-- 7A makes `KlUdp` run over the new machine with **no test changes** (behavior identical); it is the
-  regression proof that the wiring is faithful.
+- `KlUdp` remains the ergonomic byte-budget UDP surface: `kl_udp_*` keep their exact signatures,
+  semantics, `max_send_queue` **byte** budget, and one-node-per-packet queue. `KlUdpServer` (6.2) and the
+  DNS resolver (6.3) are untouched. Its send path is NOT migrated in Step 7.
+- The public `KlDatagram` is the **fixed-slot Tier-1 primitive**, exposed and validated **independently**
+  (raw `KlDatagram` over a scripted provider + new consumers), NOT by re-routing `KlUdp`'s send.
+- They coexist and share the transport substrate that does NOT change acceptance geometry — recv, the
+  life token, the fd, and (where a consumer uses `KlDatagram` directly) the close coordinator. `KlUdp`'s
+  existing teardown is unchanged; 7A does not route `KlUdp`'s send through `KlDgramSend`.
+- **Object-model note (7A-1/7A-3):** the concrete reconciliation of "does `KlUdp`'s embedded transport
+  share `struct KlDatagram` with the fixed-slot public type" is an implementation detail bounded by this
+  policy — *whatever the layout, `KlUdp`'s byte-budget acceptance behavior must not change*, and the
+  fixed-slot geometry must not leak into `kl_udp_*`. If they cannot cleanly share one struct without
+  changing `KlUdp`, they don't share it.
+- A future **intentional** migration of `KlUdp` onto fixed slots — with a documented backpressure/memory
+  contract change and its own tests — is a separate step, explicitly **out of Step 7 scope**. Sockopts
+  (multicast/TOS/GSO/pktinfo) stay on `KlUdp` / the provider `dgram` ops, off the core `KlDatagram`
+  surface.
 
 ---
 
 ## 7. Backend capability and degradation rules
 
-- **Query:** `kl_datagram_caps(dg)` returns a `KL_DGRAM_CAP_*` bitmask sourced from the socket
-  provider's declared datagram capabilities (`KL_DGRAM_CAP_{PKTINFO, SOURCE_PIN, TOS, CONNECTED,
-  MULTICAST, BROADCAST}`; the `_BATCH_*`/`GSO`/`GRO` Tier-2 flags remain reserved).
-- **Required-if-requested MUST fail** (invariant, §9): a non-NULL `msg->local` without
-  `SOURCE_PIN`, or per-packet TOS without `TOS`, returns `KL_DATAGRAM_UNSUPPORTED` from `send` and
-  sends nothing; connected-mode / multicast / broadcast without support fail at config/init. Never
-  silently dropped.
-- **Optional recv metadata degrades silently:** `local` is simply absent when `PKTINFO` is off
-  (`local == NULL` at delivery). Truncation is **not** a capability — mandatory for every backend.
-- **Per-backend truth** is the `datagram_contract.md` §10 matrix; the public API surfaces exactly what
-  a backend reports and refuses the rest. The matrix's remaining ⚙ (shared packet-slot send-queue +
-  strict-pause rows, plus lwIP-raw's serial-recv one-held-slot rework) are the 7A wiring targets —
-  they flip to ✅ per backend as 7A lands, and Step 7 is not "done" until they are ✅ on the completion
-  backends it validates (§8).
+- `kl_datagram_caps(dg)` → `KL_DGRAM_CAP_*` bitmask from the provider's declared datagram caps.
+- **Required-if-requested MUST fail** (§9 of the contract): non-NULL `msg->local` without `SOURCE_PIN`,
+  or per-packet TOS without `TOS` → `KL_DATAGRAM_UNSUPPORTED`, nothing sent; connected/multicast/broadcast
+  without support → config/init error. Never silently dropped.
+- **Optional recv metadata degrades silently** (`local` absent when `PKTINFO` off). Truncation is not a
+  capability — mandatory.
+- **Copy-before-accept (§5) is a REQUIRED provider behavior**, not a queried capability — a provider that
+  cannot satisfy it cannot serve object-owned outbound storage.
+- Per-backend truth = `datagram_contract.md` §10; the ⚙ rows are the 7A wiring targets.
 
 ---
 
 ## 8. Deterministic unit, sanitizer, backend, and teardown validation
 
-A new `tests/test_datagram_public.c` (the datagram analogue of `test_transport_public`), plus the
-existing standalone facet tests, run as a matrix:
+`tests/test_datagram_public.c` (analogue of `test_transport_public`), plus per-increment 7A regression
+tests, run as a matrix over a scripted in-test provider double:
 
-- **Facets (deterministic, over a scripted in-test provider double):**
-  - *Send queue* — FIFO ordering across a hole-reuse sequence; single-flight; `WOULD_BLOCK` at
-    capacity; `on_writable` full→non-full edge; `on_drain` non-empty→empty edge; `TOO_LARGE`;
-    `UNSUPPORTED` (required cap absent); `CLOSED` after `close_begin`; no-ownership-on-refusal.
-  - *Receive* — one datagram per callback; `peer` mandatory (violation → error, no callback); pause
-    holds exactly one (completion) / drops interest (readiness); resume delivers once then re-arms;
-    stop discards held; truncation flagged + counted; zero-length ≠ failure.
-  - *Close* — graceful drains then detaches; abortive discards queued + cancels in-flight;
-    `on_close` fires **exactly once**; `close`/`free` refused before detachment; **reuse after
-    detachment** (re-init on the same storage) works; a completion after legal reuse is impossible.
-- **Backends (the same suite over each seam):** readiness (POSIX `poll`) + the four completion
-  backends — the **pollcomp completion double** (deterministic CI/ASan driver), io_uring (Linux
-  container), IOCP (MinGW cross at least compiles; runtime where available), lwIP-raw (loopback), and
-  EFI_UDP4 via the **host mock-EFI harness** (`build_mock_efi_test.sh`). The pollcomp double is the
-  deterministic gate; the rest are capability-gated.
-- **Teardown/lifetime (ASan+UBSan+LSan):** after every close path assert **confirmed detachment**
-  (`on_close` once), **`live_count == 0`** on the happy path (0 UDP + 0 quarantined for
-  EFI), **no op references the object after detach** (the stable-token invariant — a late completion
-  with `life == NULL` is dropped), and **reuse-after-detach** is clean. Quarantine paths assert the
-  object detaches while the inbound storage stays pinned (leak intentional, LSan-suppressed on that
-  exact allocation).
-- **Gates:** the deterministic facet suite over readiness + pollcomp runs in CI under ASan/UBSan; the
-  `uefi-dgram-gate` (both PE arches, both configs) continues to compile the EFI datagram path; the
-  freestanding datagram/dns gates are unaffected.
+- **Send queue (7A-3):** FIFO across hole-reuse; single-flight; **count-based** `WOULD_BLOCK` at
+  `send_slots` (the geometry byte-budget tests miss); `on_writable`/`on_drain` edges; `TOO_LARGE`;
+  `UNSUPPORTED` (required cap absent); `CLOSED` after `close_begin`; no-ownership-on-refusal.
+  **Copy-before-accept conformance:** mutate+free the caller buffer right after `ACCEPTED`; assert the
+  transmitted bytes are the original.
+- **Receive (7A-4):** one per callback; `peer` mandatory (violation → error, no callback); pause
+  holds one (completion) / drops interest (readiness); resume delivers once then re-arms; stop discards
+  held; truncation flagged + counted; zero-length ≠ failure.
+- **Close + terminal result (7A-2):** graceful drains then DETACHED; abortive discards + cancels;
+  `on_close(result)` fires **exactly once**; **DETACHED** path asserts confirmed retirement + `live_count
+  == 0`; **QUARANTINED** path (scripted unconfirmable cancel) asserts the object detaches, `on_close`
+  reports QUARANTINED, the inbound buffer stays pinned (LSan-suppressed on that exact allocation), and a
+  late completion with `life == NULL` is dropped; **CLOSE_ERROR** path asserts a terminal transport
+  error is reported; `free` refused before `CLOSED`; reuse-after-detach clean.
+- **lwIP-raw one-held-slot (7A-5):** dedicated overflow (>1 transport-owned packet), pause-under-backlog,
+  and close-with-backlog tests proving the copy-ring→one-held-slot conversion.
+- **Backends:** readiness (POSIX `poll`) + the four completion backends — pollcomp double (deterministic
+  CI/ASan gate), io_uring (container), IOCP (MinGW compile; runtime where available), lwIP-raw
+  (loopback), EFI_UDP4 (host mock-EFI harness; the QUARANTINED terminal is exercised here).
+- **Sanitizers:** ASan+UBSan+LSan across all facet tests; the `uefi-dgram-gate` + freestanding gates
+  continue to pass. Each 7A increment carries its own focused regression test; a green `KlUdp` suite is
+  explicitly NOT accepted as proof of send-geometry equivalence (review High-3).
 
 ---
 
-## 9. Open decisions requiring reviewer confirmation
+## 9. Decisions (updated per review calls)
 
-1. **D-STORAGE (§5):** split `KlDgramSlots` into an object-owned outbound pool + a life-token-owned
-   inbound slot (vs. the current single-block allocation). *Recommendation: split — it is what B.6
-   requires and what 6.1 already implies for recv.*
-2. **D-COMPAT (§6):** keep `KlUdp` as an ergonomic wrapper re-based on `KlDatagram`, both public
-   surfaces coexisting (vs. deprecating `kl_udp_*`). *Recommendation: coexist, no `kl_udp_*` break.*
-3. **D-FD-OWNERSHIP (§1):** `KlDatagram` takes a prepared `(provider, fd)` and owns the fd close at
-   detachment; sockopts stay off the core surface (vs. `KlDatagram` doing socket creation/config).
-   *Recommendation: prepared-fd + off-surface sockopts — keeps the Tier-1 primitive transport-pure.*
-4. **Sub-step split (§0):** 7A (wire the machine, flip ⚙→✅, KlUdp unchanged) then 7B (public surface +
-   ABI split + banner + validation). *Recommendation: yes — 7A is a reviewable behavior-preserving
-   refactor; 7B is additive.*
+1. **D-STORAGE — APPROVED** with the copy-before-accept provider contract + test (§5, §8).
+2. **D-COMPAT — coexistence APPROVED; rebase NOT approved.** Policy frozen (§6): `KlUdp` keeps
+   byte-budget, not re-based in Step 7; public `KlDatagram` fixed-slot is separate; migration out of scope.
+3. **D-FD-OWNERSHIP — APPROVED:** ownership transfers only on successful `init`; backend close/cancel
+   (and fd close) happen in the close machine's step 3 as the classifying act (§4.1), before detachment
+   is declared; sockopts stay off the core surface.
+4. **7A/7B split — APPROVED, and 7A is incremental** (§0: storage sep → close/retirement → send
+   integration/compat → strict-pause backend wiring → lwIP one-held-slot), each with focused regression
+   tests.
 
 ## 10. Out of scope / non-goals
 
-- Tier-2 (`mmsg` batching, GSO/GRO split/coalesce) — the flags stay reserved; the public API does not
-  add batch entry points in Step 7.
-- New capabilities on any backend (no new multicast/TOS/EFI features) — Step 7 only exposes what the
-  matrix already reports.
-- `KlUdpServer`/DNS API changes — they ride `KlUdp` unchanged.
-- Threading — single-threaded event-loop model, unchanged.
+Tier-2 (`mmsg`, GSO/GRO split/coalesce) entry points; new backend capabilities; a `KlUdp` fixed-slot
+migration (a separate future step with a documented contract change); `KlUdpServer`/DNS API changes;
+threading (single-threaded, unchanged).
 
 ---
 
-**No implementation begins until this freeze is reviewed.** On acceptance, 7A lands first (machine
-wiring + KlUdp regression), then 7B (public surface + `datagram_detail.h` opt-in + STABLE banner +
-`test_datagram_public`), each committed and paused for review.
+**No implementation begins until this v2 freeze is reviewed.** On acceptance, 7A lands in the five
+increments above (each committed + paused for review), then 7B (public surface + `datagram_detail.h`
+opt-in + STABLE banner + `test_datagram_public`).
