@@ -40,6 +40,15 @@ static int close_fully_retired(const KlDgramClose *c) {
     return 1;
 }
 
+/* The outbound side has quiesced — queue empty and no in-flight send. This (NOT full retirement) is
+ * the frozen trigger for backend retirement + fd close: a datagram RECV has no natural EOF, so the fd
+ * close is what finally retires it; for EFI closing the child is also what CLASSIFIES the ops. */
+static int close_send_drained(const KlDgramClose *c) {
+    if (c->send && kl_dgram_send_inflight(c->send)) return 0;
+    if (c->send && kl_dgram_send_queued(c->send) > 0) return 0;
+    return 1;
+}
+
 /* The §4.3 object-result join, computed only when fully retired. Without a backend classifier every
  * op is confirmed RETIRED → DETACHED. With one: any QUARANTINED op ⇒ QUARANTINED (retain its life ref
  * forever); else a transport error with ALL ops RETIRED ⇒ CLOSE_ERROR; else DETACHED. A classifier
@@ -96,7 +105,21 @@ static void close_run_terminal(KlDgramClose *c) {
         (kl_dgram_send_inflight(c->send) || kl_dgram_send_queued(c->send) > 0)) {
         close_abort_cleanup(c);
     }
-    /* Machine-level gate first (no op physically outstanding), THEN classify the outcome. A classifier
+    /* Backend retirement + fd close — EXACTLY ONCE, the moment the outbound side has quiesced (frozen
+     * §4.1). A datagram recv has no natural EOF, so this is where the still-outstanding recv is retired
+     * (cancel_recv) and the fd is closed; for EFI closing the child is also what CLASSIFIES the ops.
+     * The busy/detaching handshake makes a synchronous recv retirement inside these hooks re-enter
+     * safely (deferred to this frame). */
+    if (!c->backend_retired && close_send_drained(c)) {
+        c->backend_retired = 1;
+        if (c->recv && kl_dgram_recv_inflight(c->recv) &&
+            c->cancel_recv && !c->recv_cancel_requested) {
+            c->recv_cancel_requested = 1;
+            c->cancel_recv(c->cancel_ctx);
+        }
+        if (c->backend_close) c->backend_close(c->backend_ctx);   /* close fd exactly once */
+    }
+    /* Machine-level gate (no op physically outstanding), THEN classify the outcome. A classifier
      * still reporting PENDING yields NONE → stay CLOSING; the next retirement re-runs this. */
     KlDatagramCloseResult res = KL_DGRAM_CLOSE_NONE;
     if (close_fully_retired(c))
@@ -146,6 +169,14 @@ int kl_dgram_close_set_retire(KlDgramClose *c, KlDgramRetireFn retire, void *ctx
     if (c->state != KL_DGRAM_CLOSE_OPEN) return -1;   /* frozen once closing begins */
     c->retire     = retire;
     c->retire_ctx = ctx;
+    return 0;
+}
+
+int kl_dgram_close_set_backend_close(KlDgramClose *c, KlDgramBackendCloseFn fn, void *ctx) {
+    if (!c) return -1;
+    if (c->state != KL_DGRAM_CLOSE_OPEN) return -1;   /* frozen once closing begins */
+    c->backend_close = fn;
+    c->backend_ctx   = ctx;
     return 0;
 }
 

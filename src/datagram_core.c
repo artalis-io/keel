@@ -21,6 +21,19 @@ static void core_rx_final(void *ctx) {
     kl_free(a, rx, sizeof(*rx));
 }
 
+/* Backend-retirement hook driven ONCE by the close coordinator (after the outbound queue drains): the
+ * single point that physically closes the adopted fd. Idempotent by fd_closed as belt-and-suspenders
+ * (the coordinator already guarantees once). Runs BEFORE classification/on_close, matching the frozen
+ * §4.1 order (fd close is what classifies + retires the still-outstanding recv on a completion backend). */
+static void core_backend_close(void *ctx) {
+    KlDgramCore *core = ctx;
+    if (core->fd_closed) return;
+    core->fd_closed = 1;
+    if (core->close_transport && kl_handle_valid(core->fd))
+        core->close_transport(core->transport_ctx, core->fd);
+    core->fd = KL_INVALID_SOCKET;
+}
+
 /* The core's own on_close: drop the owner life ref (its final release runs core_rx_final → frees the
  * inbound; on QUARANTINE a posted op still holds a ref → the final release DEFERS, storage pinned),
  * NULL the (now token-owned) rx/life, then forward the terminal classification to the caller. This is
@@ -93,10 +106,13 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     }
     (void)kl_dgram_close_set_cancel(&core->close, cfg->cancel_recv, cfg->cancel_send, cfg->cancel_ctx);
     (void)kl_dgram_close_set_retire(&core->close, cfg->retire, cfg->retire_ctx);
+    (void)kl_dgram_close_set_backend_close(&core->close, core_backend_close, core);
 
     rx->life           = life;
     core->alloc        = a;
     core->fd           = cfg->fd;     /* fd ADOPTED only now (init succeeded) */
+    core->close_transport  = cfg->close_transport;
+    core->transport_ctx    = cfg->transport_ctx;
     core->completion   = cfg->completion ? 1 : 0;
     core->caps         = cfg->caps;
     core->rx           = rx;
@@ -171,4 +187,8 @@ void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx) {
 
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core) {
     return (core && core->inited && core->rx) ? kl_dgram_inbound_slot(&core->rx->inbound) : (KlDgramSlot *)0;
+}
+
+KlDgramLife *kl_dgram_core_life(KlDgramCore *core) {
+    return (core && core->inited) ? core->life : (KlDgramLife *)0;
 }

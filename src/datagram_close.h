@@ -64,6 +64,11 @@ typedef KlDgramRetireResult (*KlDgramRetireFn)(void *ctx, KlDgramOpKind kind, in
 
 typedef void (*KlDgramCloseFn)(void *ctx, KlDatagramCloseResult result);  /* detachment (fires once) */
 typedef void (*KlDgramCancelFn)(void *ctx);   /* request cancel of the outstanding recv / send op */
+/* Backend retirement + fd close — the single point that physically retires the transport and closes
+ * the fd, run EXACTLY ONCE once the outbound queue has drained (graceful) or been discarded (abortive).
+ * For a completion backend this is where the outstanding recv (a datagram recv has no natural EOF)
+ * is finally retired and, for EFI, where RETIRED vs QUARANTINED is decided. */
+typedef void (*KlDgramBackendCloseFn)(void *ctx);
 
 typedef struct {
     KlDgramSend *send;   /* borrowed (may be NULL) */
@@ -74,7 +79,9 @@ typedef struct {
     int          busy;         /* active send/recv/coordinator frames — detach only at 0 (handshake) */
     int          detaching;    /* reentrancy guard while the terminal logic runs */
     int          recv_cancel_requested, send_cancel_requested;
+    int          backend_retired;   /* backend-close/retirement step ran (exactly once) */
     KlDgramCancelFn cancel_recv, cancel_send; void *cancel_ctx;
+    KlDgramBackendCloseFn backend_close; void *backend_ctx;   /* fd close + transport retirement, once */
     KlDgramRetireFn retire; void *retire_ctx;   /* per-op backend classifier (NULL → always DETACHED) */
     KlDatagramCloseResult result;               /* the terminal classification (valid once CLOSED) */
     KlDgramCloseFn  on_close; void *close_ctx;
@@ -93,6 +100,13 @@ int  kl_dgram_close_set_cancel(KlDgramClose *c, KlDgramCancelFn cancel_recv,
  * treated as confirmed RETIRED → the terminal result is DETACHED (the readiness/pure-machine model,
  * and KlUdp's legacy path). 0 / -1. */
 int  kl_dgram_close_set_retire(KlDgramClose *c, KlDgramRetireFn retire, void *ctx);
+
+/* Backend retirement + fd-close hook (§4.1), run EXACTLY ONCE once the outbound queue has drained
+ * (graceful) or been discarded (abortive) — regardless of recv state, since a datagram recv has no
+ * natural EOF and this step is what retires it. Owns the physical fd close. Frozen once close begins.
+ * If unset (KlUdp's legacy path, or a coordinator driven purely by machine retirements), no fd is
+ * closed here. 0 / -1. */
+int  kl_dgram_close_set_backend_close(KlDgramClose *c, KlDgramBackendCloseFn fn, void *ctx);
 
 /* Graceful close (drain queued output) / abortive cancel (discard + cancel outstanding). Idempotent;
  * graceful may later escalate via cancel. 0 / -1. */

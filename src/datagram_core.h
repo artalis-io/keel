@@ -30,6 +30,11 @@
 #include "datagram_close.h"
 #include "datagram_life.h"
 
+/* Physically close the prepared fd (the provider's socket close). Invoked EXACTLY ONCE by the close
+ * coordinator's backend-retirement step (after the outbound queue drains). 7B binds it to the socket
+ * provider; a test scripts it to assert the exactly-once fd close. */
+typedef void (*KlDgramCloseTransportFn)(void *ctx, KlSocketHandle fd);
+
 /* Borrowed neutral adapters + prepared transport state. The `fd` is already socket()'d/configure()'d/
  * bound by the caller through its provider; the core owns it from a SUCCESSFUL init to detachment. */
 typedef struct {
@@ -50,6 +55,7 @@ typedef struct {
     /* close */
     KlDgramCancelFn cancel_send, cancel_recv; void *cancel_ctx;
     KlDgramRetireFn retire; void *retire_ctx;      /* per-op RETIRED/QUARANTINED/PENDING (may be NULL). */
+    KlDgramCloseTransportFn close_transport; void *transport_ctx;  /* physical fd close (once); may be NULL. */
     KlDgramCloseFn  on_close; void *close_ctx;     /* terminal classification (fires once). */
 } KlDgramCoreConfig;
 
@@ -75,6 +81,9 @@ typedef struct {
     /* life-owned rx holder (inbound + recv), pinned by `life` */
     KlDgramCoreRx *rx;
     KlDgramLife   *life;
+    /* physical fd close, driven once by the coordinator's backend-retirement step */
+    KlDgramCloseTransportFn close_transport; void *transport_ctx;
+    int            fd_closed;
     /* the caller's terminal callback — the core interposes its own on_close to drop the owner life ref
      * (releasing the rx storage on DETACHED, or leaving it pinned on QUARANTINE) before forwarding. */
     KlDgramCloseFn user_on_close; void *user_close_ctx;
@@ -113,6 +122,12 @@ void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx);
 
 /* The inbound slot (recv storage) — a submit/pull adapter writes the received datagram here. */
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core);
+
+/* The B.6 stable-liveness token owning the life-owned rx storage (inbound + recv). A completion
+ * backend adapter RETAINS a ref when it posts a recv op — so the inbound outlives a teardown — and
+ * releases it at that op's terminal completion (via kl_dgram_life_retain/_release). A QUARANTINED
+ * recv op's ref is intentionally never released, pinning its storage. Returns NULL once detached. */
+KlDgramLife *kl_dgram_core_life(KlDgramCore *core);
 
 /* Free the OBJECT-owned parts (outbound pool + send + close) and drop the owner life ref (its final
  * release runs on_final → frees the rx holder + inbound). REFUSED with -1 before CLOSED. */
