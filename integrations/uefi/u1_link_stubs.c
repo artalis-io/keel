@@ -53,6 +53,11 @@ KlIoStatus kl_sockdef_io_status(void) { return KL_IO_FATAL; }
 ssize_t kl_sockdef_send(KlSocketHandle f, const void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 ssize_t kl_sockdef_recv(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 ssize_t kl_sockdef_recv_peek(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
+/* The completion provider (event_efi.c) references kl_sock_accept in el_drain for the SERVER accept
+ * path; a client never accepts (the branch is g_efi.server-gated) but the seam still emits the
+ * symbol, so the fail-closed default belongs with the client seam residuals — not s4_link_stubs.c
+ * (server-only), which U-3/U-7 do not link. Servers link u1+s4 → still exactly one definition. */
+KlSocketHandle kl_sockdef_accept(KlSocketHandle f, KlSockAddr *peer) { (void)f;(void)peer; return KL_INVALID_SOCKET; }
 
 /* ── event / completion builtins (U-3) — never reached; fail-closed ───────── */
 int  kl_event_init_builtin(KlEventLoop *loop) { (void)loop; return -1; }

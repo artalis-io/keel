@@ -1174,6 +1174,7 @@ FREESTANDING_SERVER_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c src/sockaddr.c \
     src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c src/completion_server.c \
+    src/listener.c src/stream.c \
     src/connection.c src/response.c src/router.c src/chunked.c src/drain.c \
     src/body_reader_buffer.c src/server_core.c src/proto_hooks.c \
     parsers/parser_llhttp.c \

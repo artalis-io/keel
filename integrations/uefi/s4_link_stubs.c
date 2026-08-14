@@ -28,7 +28,9 @@ int kl_sockdef_set_tcp_nodelay(KlSocketHandle f, int on) { (void)f; (void)on; re
 int kl_sockdef_set_cork(KlSocketHandle f, int on) { (void)f; (void)on; return -1; }
 int kl_sockdef_bind(KlSocketHandle f, const KlSockAddr *a) { (void)f; (void)a; return -1; }
 int kl_sockdef_listen(KlSocketHandle f, int backlog) { (void)f; (void)backlog; return -1; }
-KlSocketHandle kl_sockdef_accept(KlSocketHandle f, KlSockAddr *peer) { (void)f; (void)peer; return KL_INVALID_SOCKET; }
+/* kl_sockdef_accept moved to u1_link_stubs.c: event_efi.c (the shared completion provider)
+ * references kl_sock_accept in el_drain, so the fail-closed default is a CLIENT residual too —
+ * not a server-only one — else U-3/U-7 (which link only u1_link_stubs.c) fail to link. */
 ssize_t kl_sockdef_writev(KlSocketHandle f, const KlIoVec *iov, int iovcnt) {
     (void)f; (void)iov; (void)iovcnt; return -1;
 }
