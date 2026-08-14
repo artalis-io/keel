@@ -24,6 +24,10 @@
  *   T6  one-held-packet overflow (7A-5): two datagrams reach the udp_recv callback in one lwIP tick
  *         (netif_poll drains the whole loopback queue before the completion drain) — the backend holds
  *         exactly ONE and DROPS the second (no 16-entry ring), so precisely one is ever delivered.
+ *   T7  no stale capture while UNARMED (7A-5), driven at the GLUE level (kl_lwr_udp_*, its own ctx after
+ *         the event ctx is freed): a datagram arriving with no recv armed is DROPPED at the callback, so
+ *         a later post_recv surfaces NOTHING stale. Not observable through KlUdp (recv_stop is terminal
+ *         in KlDgramRecv + the dispatch drops on recv_active==0), so this proves the gate one layer down.
  *
  * Diagnostic: the whole suite runs under ASan+UBSan+LSan, so every case doubles as a leak/
  * double-free check on the stable-token retain/transfer/release discipline (no independent "no-leak"
@@ -41,9 +45,18 @@
 #include <keel/sockaddr.h>
 
 #include "keel_lwip_raw.h"
+#include "lwip_raw_glue.h"   /* T7 drives the datagram glue directly (kl_lwr_udp_* / kl_lwr_ctx_*) */
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
+
+/* The stable-liveness token (src/datagram_life.h), forward-declared so this test manages op tokens for
+ * the glue-level T7 without pulling the src/ header. Resolves against libkeel's datagram_life.o. */
+typedef struct KlDgramLife KlDgramLife;
+KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx);
+void         kl_dgram_life_release(KlDgramLife *l);
+static void  t7_noop_final(void *ctx) { (void)ctx; }
 
 static int fail(const char *msg) { printf("LC-3a FAIL: %s\n", msg); return 1; }
 
@@ -261,6 +274,74 @@ static int t6_one_held_overflow(KlEventCtx *ctx) {
     return 0;
 }
 
+/* T7 — no stale capture while UNARMED (7A-5 review), driven at the GLUE level.
+ *
+ * Through the KlUdp API this is not observable: KlDgramRecv's recv_stop is terminal (it never re-posts
+ * after an unarmed gap) and the completion dispatch independently drops on recv_active == 0 — so a KlUdp
+ * test cannot exhibit a stale delivery. One layer down the CONSUMER controls re-posting, which is where
+ * the stale-buffering bug would bite: a datagram captured while no recv is armed would be surfaced on the
+ * NEXT post_recv. This drives kl_lwr_udp_* directly to prove the recv callback drops it.
+ *
+ * Runs after the shared event ctx is freed (kl_lwr_ctx_create rejects a second CONCURRENT ctx). Manages
+ * the stable tokens itself: each posted op retains one ref, the drain TRANSFERS it to the record (we
+ * release it), and close releases any op ref not drained — so the suite stays LSan-clean. */
+static int t7_glue_unarmed_drop(void) {
+    KlAllocator alloc = kl_allocator_default();
+    void *lwrctx = kl_lwr_ctx_create(&alloc, 4);
+    if (!lwrctx) return fail("T7: ctx create");
+    void *loopif = kl_lwr_ctx_loopif(lwrctx);
+
+    const uint8_t lo[4] = { 127, 0, 0, 1 };
+    void *rx = kl_lwr_udp_new();
+    void *tx = kl_lwr_udp_new();
+    if (!rx || !tx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T7: rx bind"); }
+    uint16_t port = kl_lwr_udp_local_port(rx);
+
+    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL);   /* owner ref each */
+    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL);
+    if (!lrx || !ltx) { kl_lwr_ctx_destroy(lwrctx); return fail("T7: token create"); }
+
+    KlLwrUdpRecord recs[8];
+    int got_recv1 = 0, stale = 0;
+
+    /* (1) ARMED: post a recv, send "a", tick → recv callback captures it; drain surfaces it and CONSUMES
+     * the arm (rx is now UNARMED). */
+    kl_lwr_udp_post_recv(lwrctx, rx, lrx);
+    kl_lwr_udp_send(lwrctx, tx, ltx, "a", 1, lo, port);
+    kl_lwr_lwip_tick(loopif);
+    int n1 = kl_lwr_udp_drain(lwrctx, recs, 8);
+    for (int i = 0; i < n1; i++) {
+        if (recs[i].kind == KL_LWR_DGRAM_RECV) got_recv1++;
+        kl_dgram_life_release((KlDgramLife *)recs[i].life);   /* release each transferred ref */
+    }
+
+    /* (2) UNARMED: "b" arrives with no recv posted → the callback must DROP it (never fill `held`). */
+    kl_lwr_udp_send(lwrctx, tx, ltx, "b", 1, lo, port);
+    kl_lwr_lwip_tick(loopif);
+    int n2 = kl_lwr_udp_drain(lwrctx, recs, 8);
+    for (int i = 0; i < n2; i++) kl_dgram_life_release((KlDgramLife *)recs[i].life);   /* SEND record(s) only */
+
+    /* (3) RE-ARM + drain: a correctly-dropped "b" surfaces NOTHING here; a buggily-held "b" surfaces as a
+     * stale RECV. */
+    kl_lwr_udp_post_recv(lwrctx, rx, lrx);
+    int n3 = kl_lwr_udp_drain(lwrctx, recs, 8);
+    for (int i = 0; i < n3; i++) {
+        if (recs[i].kind == KL_LWR_DGRAM_RECV) stale++;
+        kl_dgram_life_release((KlDgramLife *)recs[i].life);
+    }
+
+    kl_lwr_udp_close(lwrctx, rx);       /* releases any un-drained arm ref */
+    kl_lwr_udp_close(lwrctx, tx);       /* releases any un-drained pending-send refs */
+    kl_dgram_life_release(lrx);         /* owner refs → final release runs t7_noop_final */
+    kl_dgram_life_release(ltx);
+    kl_lwr_ctx_destroy(lwrctx);
+
+    if (got_recv1 != 1) return fail("T7: setup — the armed datagram was not delivered");
+    if (stale != 0)     return fail("T7: a datagram captured while UNARMED surfaced on re-arm (stale buffering)");
+    printf("PASS T7 (glue: unarmed datagram dropped — no stale delivery on re-arm)\n");
+    return 0;
+}
+
 int main(void) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
@@ -279,8 +360,12 @@ int main(void) {
     if (rc == 0) rc = t5_close_with_undrained_sends(&ctx);
     if (rc == 0) rc = t6_one_held_overflow(&ctx);
 
-    kl_event_ctx_free(&ctx);
+    kl_event_ctx_free(&ctx);   /* free the event ctx FIRST — the raw backend allows only one live ctx */
     if (rc != 0) return 1;
+
+    /* T7 stands up its OWN standalone glue ctx (sequential — the event ctx is now gone). */
+    if (t7_glue_unarmed_drop() != 0) return 1;
+
     printf("LC-3a PASS\n");
     return 0;
 }

@@ -1067,13 +1067,17 @@ static KlLwrUdpSlot *lwr_udp_alloc(KlLwrCtx *ctx, struct udp_pcb *pcb) {
     return NULL;
 }
 
-/* lwIP udp_recv callback: a datagram arrived on `pcb`. ONE-HELD-PACKET contract: if a datagram is
- * already held (undelivered), DROP the incoming one (free its pbuf) — a completion backend with no
- * socket receive buffer holds exactly the one datagram the posted recv op will take; a burst overflows
- * as deterministic UDP loss, never buffered. Otherwise copy the payload out of the pbuf chain (bounded
- * to KL_LWR_UDP_DGRAM_MAX; truncate + flag if larger) into the single held slot, record the source
- * IPv4 + port, and free the pbuf (lwIP hands us ownership). Runs inline on the mainloop tick
- * (NO_SYS=1 single-thread), so no locking. IPv4-only (loopif). */
+/* lwIP udp_recv callback: a datagram arrived on `pcb`. ONE-HELD-PACKET contract: capture a datagram
+ * ONLY when a recv is armed AND none is already held. Drop (free the pbuf) otherwise:
+ *   - NOT armed (`!rx_armed`): no posted recv op wants it — a completion backend with no socket receive
+ *     buffer must not buffer datagrams arriving before recv_start, after recv_stop, or in any unarmed
+ *     gap, else they would be delivered STALE when a later recv is posted;
+ *   - already held (`has_held`): a burst under a held datagram is deterministic UDP loss, never buffered.
+ * The udp_recv callback stays wired for the socket's whole life (detached only on close), so `rx_armed`
+ * — not the callback wiring — is the authoritative "a recv is posted" gate. On capture, copy the payload
+ * out of the pbuf chain (bounded to KL_LWR_UDP_DGRAM_MAX; truncate + flag if larger) into the single held
+ * slot, record the source IPv4 + port, and free the pbuf (lwIP hands us ownership). Runs inline on the
+ * mainloop tick (NO_SYS=1 single-thread), so no locking. IPv4-only (loopif). */
 static void lwr_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                             const ip_addr_t *addr, u16_t port) {
     (void)arg; (void)pcb;
@@ -1081,7 +1085,7 @@ static void lwr_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     KlLwrUdpSlot *s = lwr_udp_find(ctx, pcb);
     if (!s || p == NULL) { if (p) pbuf_free(p); return; }
 
-    if (s->has_held) { pbuf_free(p); return; }   /* one held already → drop the incoming (UDP loss) */
+    if (!s->rx_armed || s->has_held) { pbuf_free(p); return; }   /* unarmed, or one already held → drop */
     KlLwrDgram *d = &s->held;
 
     u16_t want = p->tot_len;
@@ -1204,7 +1208,12 @@ void kl_lwr_udp_close(void *lwrctx, void *pcb) {
         kl_dgram_life_release(s->life);
     udp_recv(p, NULL, NULL);        /* detach the recv callback */
     udp_remove(p);                  /* free the pcb */
-    memset(s, 0, sizeof(*s));       /* clears pcb (→ free slot) + the held datagram */
+    /* Discard any held datagram unconditionally. A held datagram CAN outlive a drain (an armed slot may
+     * be left holding one if the drain's output budget `max` is exhausted before this slot is visited),
+     * so close must not assume has_held == 0. It is safe regardless: the held datagram is inline in the
+     * slot (no heap) and carries NO token ref (only rx_armed/pend_send do — released above), so clearing
+     * it is a plain memset with nothing to free. */
+    memset(s, 0, sizeof(*s));       /* clears pcb (→ free slot) + any held datagram */
 }
 
 /* Drain: surface up to `max` UDP completions. Per armed slot with a queued datagram, emit ONE
