@@ -45,8 +45,10 @@ Status: **feasibility / design (2026-08-05).**
 >   CA → `VERIFY_REQUIRED`; client dials a hostname mapped by a compile-time hosts entry) + **real
 >   EFI_RNG** (fail-closed; QEMU `virtio-rng-pci` makes stock OVMF publish `EFI_RNG_PROTOCOL`).
 > - **U-5** (#219) — **DNS over EFI_UDP4**: a stock freestanding `KlClient` resolves a real hostname
->   (`keel.test`) via an A-query over EFI_UDP4 (`spikes/uefi/efi_udp4.h` + `dns_uefi.c`, wired into
->   `kl_resolve_sync`), then connects (EFI_TCP4) + GET → 200 on bare firmware. Bounds-safe DNS parse.
+>   (`keel.test`), then connects (EFI_TCP4) + GET → 200 on bare firmware. Bounds-safe DNS parse. (The
+>   original U-5 spike used a bespoke one-shot `dns_uefi.c` behind `kl_resolve_sync`; the firmware DNS
+>   demo now uses the stock async `src/dns_resolver.c` over the EFI_UDP4 socket provider (6.4c), and
+>   `dns_uefi.c` has since been retired.)
 > - **U-6** (#221) — **non-blocking, drain-polled EFI_TCP4 recv** (was a blocking internal pump): a
 >   provider-owned rx buffer + `kl_uefi_socket_recv_ready()`; the drain relays READ only when data is
 >   ready. Removes the per-op event-loop block (timers fire mid-receive; the foundation for an EFI

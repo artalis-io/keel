@@ -5,8 +5,9 @@
  * src/dns_resolver.c resolves a hostname over KlUdp-over-EFI_UDP4 — the unified EFI socket
  * provider (SOCK_DGRAM → EFI_UDP4 child, socket_efi_udp4.c) + the completion-native datagram
  * wiring in event_efi.c (post_dgram_recv/_send + drain, B.6 stable token) — with NO bespoke
- * dns_uefi.c on the path. Contrast U-5, which used the one-shot dns_uefi.c behind
- * kl_resolve_sync; here the async KlResolver vtable runs the real Do53 query engine over the
+ * dns_uefi.c on the path. (The retired U-5 build used the one-shot dns_uefi.c behind
+ * kl_resolve_sync; U-5 and dns_uefi.c have since been removed.) Here the async KlResolver vtable
+ * runs the real Do53 query engine over the
  * datagram machine, and the resolved address then drives an EFI_TCP4 GET.
  *
  * Frozen 6.4c acceptance (docs/phase10_efi_udp4_provider_design.md §9):

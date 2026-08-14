@@ -178,15 +178,18 @@ is driven. "In-flight": async op object + cancel/close model.
 | **io_uring** | completion-native RECVMSG/SENDMSG SQEs (`event_iouring.c:626-681`) | one RECVMSG SQE; borrow `recv_buf` in iovec; src/local/gro/TRUNC on drain | SENDMSG SQE, **mandatory copy** into `op->sendbuf` | per-op on `st->ops`; `IORING_OP_CANCEL` (may miss on full SQ); **no reap-before-free → borrowed recv_buf UAF** | pktinfo ✅, GRO ✅, TRUNC ✅; TOS/mcast via control plane; **mmsg ❌, GSO ❌**; src-pin routed to **sync seam** |
 | **IOCP** | completion-native WSARecvMsg/WSASendTo (`event_iocp.c:490-564`) | one overlapped op; borrow `recv_buf`; WSARecvMsg→local, else WSARecvFrom→src only; metadata only when `bytes>0` | overlapped WSASendTo, **copy** into `op->sendbuf`; releases original len | global op registry; teardown **dequeues every completion before free** (`:942-976`) → no UAF (lifetime-safe by construction) | pktinfo ✅, mcast/TOS via control plane, bcast ✅; **mmsg ❌, GSO ❌, GRO ❌; TRUNCATION ❌ (not surfaced)**; overlapped-send TOS routed to sync seam |
 | **lwIP-raw** | completion-only `lwr_comp_post_udp_recv/send`; raw provider `.dgram = NULL` | lwIP `udp_recv` copies pbuf into a **16×2 KB bounded ring**, frees pbuf; one slot surfaced per drain (no UAF — payload copied). **⚠ The ring can accumulate >1 transport-owned packet, so it does NOT yet satisfy Tier-1 strict one-held-packet pause — needs a one-held-slot rework (⚙).** | copy into pbuf, `udp_sendto` (loopback), free pbuf | ring drops oldest on overflow; close detaches cb + memsets ring | IPv4/loopback only; **pktinfo ❌, mcast ❌, bcast ❌, TOS ❌, mmsg ❌, GSO ❌, GRO ❌**; connected-send rejected |
-| **EFI_UDP4** | **none** — `g_provider.dgram = NULL`, completion `post_udp_* = NULL` | n/a — `KlUdp` does not run over EFI | n/a | bespoke one-shot resolver only (see below) | **none apply** |
+| **EFI_UDP4** | completion-native EFI_UDP4 Receive/Transmit tokens (`socket_efi_udp4.c` + `event_efi.c`, 6.4b) | one Receive token; src/local native from `EFI_UDP4_SESSION_DATA`; B.6 stable token | Transmit token; per-datagram dest on the unconnected socket | provider-owned slot + generation guard; `EFI_UDP4.Cancel` + confirmed-retirement-or-quarantine (fail-closed to EBS) | IPv4/loopback+DHCP; pktinfo (native src/local) ✅; mcast/bcast/TOS/mmsg/GSO/GRO ✖ |
 
-**EFI note:** "U-5 DNS over EFI_UDP4" is a *bespoke synchronous one-shot* resolver
-(`integrations/uefi/dns_uefi.c`, `kl_uefi_dns_resolve`) that opens `EFI_UDP4_PROTOCOL`, submits
-one Tx + one Rx token, pumps to completion, parses, recycles — it does **not** touch `udp.c`,
-`KlUdp`, `KlDatagramOps`, or the completion axis. Its `u5_pump_or_cancel` already models
-"confirmed retirement or fail-closed" (issues `EFI_UDP4.Cancel`, and if retirement can't be
-confirmed it **quarantines** further DNS until ExitBootServices). That token machine is the
-seed of a future EFI `KlDatagram` provider, but today EFI is the largest build gap.
+**EFI note:** the EFI_UDP4 **datagram provider now exists** — `integrations/uefi/socket_efi_udp4.c`
+(the `KlDatagramOps` half of the unified EFI socket provider) + the `post_dgram_recv/_send` datagram
+completion in `event_efi.c` (6.4b) — so the stock `src/dns_resolver.c` runs over `KlUdp`-over-EFI_UDP4
+on real firmware (6.4c). This supersedes the earlier *bespoke synchronous one-shot* resolver
+(`integrations/uefi/dns_uefi.c`, `kl_uefi_dns_resolve`), which opened `EFI_UDP4_PROTOCOL`, submitted
+one Tx + one Rx token, pumped to completion, parsed, recycled — never touching `udp.c`, `KlUdp`,
+`KlDatagramOps`, or the completion axis. Its `u5_pump_or_cancel` modelled "confirmed retirement or
+fail-closed" (issued `EFI_UDP4.Cancel`, and quarantined further DNS to ExitBootServices if retirement
+couldn't be confirmed). That token machine **seeded** the real EFI `KlDatagram` provider and has since
+been **retired**.
 
 ---
 
@@ -262,7 +265,7 @@ detachment; source-addr on every recv; truncation detection.
 | io_uring | ~~No reap-before-free → borrowed recv_buf UAF~~ (**RESOLVED, Phase B.6.2:** stable token); strict pause `don't re-post` latch landed in Step 3 (`datagram_recv.c`). |
 | IOCP | Best positioned (dequeue-before-free = lifetime-safe by construction); truncation surfaced (Step 5, `WSAMSG.dwFlags`); **stable token added (Phase B.6.3)** so the completion never dereferences the freed `KlDatagram`. |
 | lwIP-raw | Raw provider `.dgram = NULL` → no control-plane dgram ops (configure/set_tos/mcast) — needs a stub or `kl_sockdef_dgram` fallback; no local addr (pktinfo); IPv4/loopback only; connected-send rejected. Copy-ring already avoids UAF and detects truncation, **but its 16-slot ring accumulates multiple transport-owned packets → does NOT yet satisfy strict one-held-packet pause (⚙ — rework to a single held inbound slot).** |
-| EFI_UDP4 | **No datagram integration at all** — build a persistent `KlDatagram` provider from the `dns_uefi.c` token machine (one Rx token in flight, one Tx per send, `EFI_UDP4.Cancel` + confirmed retirement; the quarantine logic already models confirmed-or-fail-closed). No pktinfo/mcast/bcast/TOS. |
+| EFI_UDP4 | **Datagram provider now exists** (6.4b): a persistent `KlDatagram` provider (`socket_efi_udp4.c` + `event_efi.c` — one Rx token in flight, one Tx per send, `EFI_UDP4.Cancel` + confirmed retirement; quarantine models confirmed-or-fail-closed) over which the stock `dns_resolver` runs on firmware (6.4c). The seed `dns_uefi.c` token machine has since been retired. No mcast/bcast/TOS (src/local are native). |
 
 **Cross-cutting:** (1) ~~no lifetime-safe teardown on io_uring/pollcomp — a posted op can
 reference freed object memory~~ — **RESOLVED (Phase B.6):** confirmed detachment via the

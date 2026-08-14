@@ -405,8 +405,9 @@ limitation · ⚙ to build.
 (pollcomp/io_uring/IOCP/lwIP-raw) via the backend-owned stable token (**Phase B.6 complete**, §5
 status); the remaining ⚙ cells in the top block are the packet-slot **send** queue and strict
 pause. The ✖ capability cells are *documented limitations* — consumers query caps (§9) and degrade.
-**EFI_UDP4 is the only column that is ⚙ end-to-end** (no datagram integration exists; build a
-persistent provider from the `dns_uefi.c` token machine — audit §6). lwIP-raw's object-owned-buffer
+**EFI_UDP4 is the only column that is ⚙ end-to-end** — now served by the stock `dns_resolver` over the
+`socket_efi_udp4.c` EFI_UDP4 provider (6.4b/6.4c); the seed `dns_uefi.c` token machine was retired
+(audit §6). lwIP-raw's object-owned-buffer
 row is ▲: the token removed its `KlUdp` deref, but it still stages through its copy-ring before the
 machine copies into the dedicated inbound slot — replacing the copy-ring with a single inbound slot
 is a deferred Tier-1 cleanup (the copy-ring was deliberately preserved).

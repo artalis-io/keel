@@ -1,6 +1,6 @@
 # dns_uefi.c Retirement Plan (post-6.4c)
 
-**Status:** PLAN — no code. Follows the 6.4c acceptance (stock `src/dns_resolver.c` over
+**Status:** COMPLETED — R-1 `91d50fa`, R-2 `81e3188`, R-3 (docs/comment sweep). Follows the 6.4c acceptance (stock `src/dns_resolver.c` over
 `KlUdp`-over-EFI_UDP4, reviewer-accepted, commits `ff06344`→`1834f18`). This document is the
 dependency audit + decision the 6.4c reviewer asked for before any code lands. It preserves the
 design-freeze cadence used for 6.4b: freeze the plan, then implement in reviewable steps.

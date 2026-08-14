@@ -11,9 +11,10 @@ Sibling references (verified against the tree):
 - `integrations/uefi/socket_efi_tcp4.{h,c}` — the EFI_TCP4 `KlSocketProvider` (the handle /
   slot-pool / generation-guard / quarantine template we mirror).
 - `integrations/uefi/event_efi.{h,c}` — the EFI completion backend (`KlCompletionOps`) we extend.
-- `integrations/uefi/dns_uefi.c` — the bespoke one-shot EFI_UDP4 DNS client: the concrete
-  EFI_UDP4 API pattern (Configure / Receive+RecycleSignal / Transmit / `u5_pump_or_cancel` /
-  quarantine). **6.4b generalizes this; the separate `dns_uefi.c` retirement is a later step.**
+- `integrations/uefi/dns_uefi.c` (retired) — the bespoke one-shot EFI_UDP4 DNS client that SEEDED
+  the concrete EFI_UDP4 API pattern (Configure / Receive+RecycleSignal / Transmit / `u5_pump_or_cancel` /
+  quarantine). **6.4b generalized this into the persistent provider; `dns_uefi.c` has SINCE BEEN
+  RETIRED (R-1 `91d50fa` / R-2 `81e3188`, 2026-08), and 6.4c is the realized provider.**
 - `src/datagram_life.{h,c}` — `KlDgramLife`, the frozen B.6 backend-owned stable receive token.
 - `src/completion.h` — `KlCompletionOps.post_dgram_recv/_send`, `KlCompletionEvent{.life,.buf,.peer,.local,.truncated,...}`.
 - `src/udp.c` — `kl_udp_init` (init requires the socket provider + `dgram->configure`),
@@ -37,7 +38,8 @@ Sibling references (verified against the tree):
    the firmware may still touch) and fail-closed at ExitBootServices (EBS).
 
 **Out of scope (later steps):** 6.4c = QEMU/OVMF end-to-end (`dns_resolver.c` over EFI_UDP4 → A/AAAA →
-HTTP GET 200); the `dns_uefi.c` retirement; EFI_UDP6; multicast/GSO/GRO/TOS datagram knobs (EFI_UDP4
+HTTP GET 200); the `dns_uefi.c` retirement (since DONE — R-1 `91d50fa` / R-2 `81e3188`, 2026-08);
+EFI_UDP6; multicast/GSO/GRO/TOS datagram knobs (EFI_UDP4
 has no analogue for most — they stay `✖` capabilities, degraded per §9 of the contract).
 
 **Non-goal:** 6.4b does NOT make legacy `KlUdp` implement the Step-7 `KlDgramClose` confirmed-detachment
@@ -55,8 +57,9 @@ The EFI event loop (`event_efi.c`) advertises **`KL_EVENT_CAP_COMPLETION`** (U-3
 - send (unconnected, no source-pin, default TOS — exactly the DNS resolver's send): the completion
   branch `kl_comp_post_dgram_send(&udp->dg, data, len, dest)`.
 
-This is the correct model: it uses the real EFI_UDP4 asynchronous **token** machine (as `dns_uefi.c`
-already does) and slots directly into the B.6 stable-token contract the other completion backends satisfy.
+This is the correct model: it uses the real EFI_UDP4 asynchronous **token** machine (as the seed
+`dns_uefi.c` did — that file has since been retired) and slots directly into the B.6 stable-token
+contract the other completion backends satisfy.
 
 `kl_udp_init` still calls the **socket provider** for `socket()/set_cloexec/set_nonblocking/bind/
 get_local_addr` and `dgram->configure` regardless of readiness/completion. So the datagram vtable's
@@ -194,7 +197,7 @@ the resolver) and `ev->local` (dest, pktinfo-equivalent) come for free.
 | KEEL op | EFI_UDP4 mapping |
 |---|---|
 | `socket(SOCK_DGRAM)` | `ServiceBinding.CreateChild` → `OpenProtocol(EFI_UDP4_PROTOCOL)`; create the per-op token **events once** here (bare `EVT_TOKEN` type-0, CheckEvent-polled). |
-| `dgram->configure` | `EFI_UDP4.Configure(EFI_UDP4_CONFIG_DATA)` **UNCONNECTED**: `UseDefaultAddress=TRUE` (DHCP station), `StationPort=0` (ephemeral), **no** `RemoteAddress` (multi-nameserver → per-datagram dest). Tolerate `EFI_NO_MAPPING` with a bounded Poll+Stall retry (DHCP settle), as `dns_uefi.c` does. |
+| `dgram->configure` | `EFI_UDP4.Configure(EFI_UDP4_CONFIG_DATA)` **UNCONNECTED**: `UseDefaultAddress=TRUE` (DHCP station), `StationPort=0` (ephemeral), **no** `RemoteAddress` (multi-nameserver → per-datagram dest). Tolerate `EFI_NO_MAPPING` with a bounded Poll+Stall retry (DHCP settle), as `dns_uefi.c` did. |
 | `bind(addr)` | `Configure` with an explicit `StationAddress/StationPort` (numeric; the resolver leaves it ephemeral). |
 | `get_local_addr` | from the config / `GetModeData` station address+port. |
 | `post_dgram_send(data,len,dest)` | `EFI_UDP4.Transmit(EFI_UDP4_IO_TOKEN)` with `EFI_UDP4_TRANSMIT_DATA{ FragmentTable→copied data }` and **`UdpSessionData.DestinationAddress:Port = dest`** (per-datagram dest on the unconnected socket). |
@@ -351,7 +354,7 @@ confirmed/stale drop eventually runs `on_final`, and a **quarantined Rx and Tx o
   completion**. On a **signalled** Rx terminal — normal completion OR a cancel-drain that observed the
   `EFI_ABORTED` signal — read `Packet.RxData`; if non-NULL, copy out (on the clean path) and **always**
   `SignalEvent(RxData.RecycleSignal)` to return the firmware buffer (even on the aborted-but-signalled
-  path, exactly as `dns_uefi.c` does). On the **quarantine** path the token **never signalled**, so there
+  path, exactly as `dns_uefi.c` did). On the **quarantine** path the token **never signalled**, so there
   is no published `RxData` to recycle — do **not** touch `Packet` at all; it leaks with the op until EBS.
 - **Stale-child but SIGNALLED (review correction):** "signalled" and "captured generation still valid"
   are **independent**. A drain may observe `CheckEvent`=SUCCESS (the token IS signalled, `Packet` valid)
@@ -367,7 +370,7 @@ confirmed/stale drop eventually runs `on_final`, and a **quarantined Rx and Tx o
   access at all** (the token was already reaped). The generic drain-time recycle above is the abstract
   form; §7.1a is how EFI satisfies it without ever resolving a stale op through `udp_of(fd)`.
 - **Fail-close scope:** a quarantine fail-closes **that datagram socket** (`dead=1`), and — matching
-  `dns_uefi.c`'s `g_dns_quarantined` — a provider-level "a firmware that can't cancel is unusable" latch
+  the seed `dns_uefi.c`'s `g_dns_quarantined` — a provider-level "a firmware that can't cancel is unusable" latch
   may fail-close further datagram sockets. (Whether the latch is per-socket or provider-wide is an
   implementation choice; **frozen**: at minimum per-socket fail-close + no reuse of a quarantined slot.)
 - **EBS:** every datagram op (`socket/configure/send/recv/close`) checks `kl_uefi_after_ebs()` and is
@@ -419,16 +422,16 @@ Two layers, matching the KlStream/UEFI coverage bar (host-mock ≠ real firmware
 - **Handle tag width / max UDP slots** — pick `KL_EFI_H_SHIFT` and `KL_EFI_MAX_UDP` (small, e.g. 8–16
   UDP children; DNS needs 1–2). Concrete values are an implementation detail.
 - **Quarantine latch scope** — per-socket (frozen minimum) vs provider-wide `g_udp_quarantined` (as
-  `dns_uefi.c` does). Lean provider-wide for datagrams (a firmware that can't cancel one UDP token is
+  `dns_uefi.c` did). Lean provider-wide for datagrams (a firmware that can't cancel one UDP token is
   suspect for all), but confirm it doesn't wedge a mixed TCP+UDP process's TCP path (it must not — the
   latch is datagram-scoped).
-- **`Configure` DHCP-settle budget** — reuse `dns_uefi.c`'s `EFI_NO_MAPPING` Poll+Stall retry bounds.
+- **`Configure` DHCP-settle budget** — reuse the seed `dns_uefi.c`'s `EFI_NO_MAPPING` Poll+Stall retry bounds.
 - **AAAA over EFI_UDP4** — EFI_UDP4 is IPv4-only; AAAA queries still go out over UDP4 to the nameserver
   (the *transport* is v4, the *record* is v6) — no EFI_UDP6 needed for the resolver. `dns_is_literal`
   v6 shortcuts and v6 answers are unaffected (they never open a v6 socket).
 - **`dgram->send` fallback shape** — FROZEN #1 fixes `dgram->recv = NULL` and requires `dgram->send` (if
   provided) to use an independent Tx token under §7. The only open choice is provide-vs-reject for
-  source-pinned/TOS sends: implement the sync independent-Tx-token `Transmit` (cheap, mirrors
+  source-pinned/TOS sends: implement the sync independent-Tx-token `Transmit` (cheap, mirrored the seed
   `dns_uefi.c`) **or** return `KL_DATAGRAM_UNSUPPORTED`. Recommendation: implement it (small, and keeps a
   general `KlUdp` source-pinned send working); revisit only if it complicates the quarantine latch.
 
@@ -463,4 +466,4 @@ Two layers, matching the KlStream/UEFI coverage bar (host-mock ≠ real firmware
    completion the backend always emits+transfers `life` (owner-dead drop is generic dispatch's job).
    Confirmed cancel-drain releases normally; **EBS fail-closed** everywhere; live-count 0 before shutdown.
 7. **Acceptance** = host mock-EFI unit test (state machine incl. quarantine) **and** QEMU/OVMF e2e (6.4c);
-   the `dns_uefi.c` retirement is a separate later step; `KlDgramClose`/Step-7 is not claimed here.
+   the `dns_uefi.c` retirement is DONE (R-1 `91d50fa` / R-2 `81e3188`, 2026-08); `KlDgramClose`/Step-7 is not claimed here.

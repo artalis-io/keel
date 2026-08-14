@@ -23,11 +23,13 @@ of symbols undefined (see `tests/freestanding_symbol_gate.sh`). U-1 supplies the
 | `uint64_t kl_monotonic_ms(void)` | periodic-timer tick counter — `platform_uefi.c` |
 | `void kl_plat_random(void*, size_t)` | `EFI_RNG_PROTOCOL`, fail-closed — `platform_uefi.c` |
 
-The remaining seams (socket provider, event/completion provider, sync DNS, the
+The remaining seams (socket provider, event/completion provider, DNS, the
 vendored-llhttp `abort`/`fprintf`/`stderr` residual, the PE `__chkstk`) are **not**
 U-1's job; the self-test defines fail-closed link stubs for them in
 `u1_link_stubs.c` purely so the image links (they never run — U-1 issues no
-request). U-2/U-3/U-5 replace them with real EFI providers.
+request). U-2/U-3 replace the socket + event/completion seams with real EFI
+providers; DNS is now the async stock `src/dns_resolver.c` running over the
+EFI_UDP4 socket provider (6.4c), not a sync seam.
 
 ## Files
 

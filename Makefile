@@ -1287,8 +1287,8 @@ freestanding-dgram-link:
 # discovery — so the archive's undefined closure stays the SAME documented whitelist
 # as the dgram archive (mem* + kl_cstr helpers + kl_plat_*/provider ops): NO fopen /
 # errno / getaddrinfo / dns_sys / TCP-fallback symbol. This is the archive the future
-# EFI_UDP4 backend (6.4b) links the built-in resolver from; the bespoke dns_uefi.c is
-# retired against it separately.
+# EFI_UDP4 backend (6.4b) links the built-in resolver from; the bespoke dns_uefi.c was
+# retired against it separately (2026-08).
 FREESTANDING_DNS_SRC = $(FREESTANDING_DGRAM_SRC) src/dns_resolver.c
 
 freestanding-lib-dns:
@@ -1399,7 +1399,8 @@ freestanding-lib-server-selfcontained:
 # Same selfcontained gate — mem*/strlen must be DEFINED; the only undefined symbols are
 # the KEEL platform/provider hooks (+ PE __chkstk/_fltused). build_dgram_dns.sh links
 # this against the unified EFI socket provider (SOCK_DGRAM → EFI_UDP4) + event_efi so the
-# stock resolver runs over KlUdp-over-EFI_UDP4 on real firmware (contrast dns_uefi.c).
+# stock resolver runs over KlUdp-over-EFI_UDP4 on real firmware (superseding the now-retired
+# bespoke dns_uefi.c).
 FREESTANDING_DNS_SC_LIB = libkeel_freestanding_dns_selfcontained.a
 
 freestanding-lib-dns-selfcontained:

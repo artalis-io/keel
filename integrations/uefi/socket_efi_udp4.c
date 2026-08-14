@@ -4,8 +4,9 @@
  * See socket_efi_udp4.h + docs/phase10_efi_udp4_provider_design.md (FROZEN). This TU owns
  * the EFI_UDP4 child/token lifecycle on a TAGGED, generation-guarded slot handle and the
  * completion-native Receive/Transmit token primitives event_efi.c drives. It mirrors
- * socket_efi_tcp4.c (magic/generation stale-guard, create-events-once, pump/cancel) and the
- * EFI_UDP4 calls in dns_uefi.c (Configure / Receive+RecycleSignal / Transmit / quarantine).
+ * socket_efi_tcp4.c (magic/generation stale-guard, create-events-once, pump/cancel). This TU
+ * now OWNS the EFI_UDP4 calls (Configure / Receive+RecycleSignal / Transmit / quarantine); the
+ * pattern was seeded from the now-retired one-shot dns_uefi.c.
  *
  * No libc: memory ops are hand-rolled byte loops (no guaranteed memset in this TU); every
  * -1 is classified via kl_efi_status_to_io off the slot's last EFI_STATUS (no errno — the
