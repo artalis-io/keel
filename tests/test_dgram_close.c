@@ -42,7 +42,8 @@ static void cancel_recv(void *ctx) {
     if (g_cancel_mode == CANCEL_SYNC)   kl_dgram_recv_on_complete(g_recv, 0, 0);/* inline retire */
     else if (g_cancel_mode == CANCEL_REENTER) kl_dgram_close_cancel(g_close);
 }
-static void on_close_cb(void *ctx) { (void)ctx; g_on_close++; }
+static KlDatagramCloseResult g_on_close_result;
+static void on_close_cb(void *ctx, KlDatagramCloseResult result) { (void)ctx; g_on_close++; g_on_close_result = result; }
 
 /* callback-initiated close: a machine callback calls close; detachment must be DEFERRED to the
  * outermost frame's unwind — otherwise the callback's frame would touch freed state (ASan). */
@@ -317,7 +318,7 @@ UTEST(dgram_close, free_refused_before_detachment) {
 /* on_close is a destructive tail: the callback tears everything down with no coordinator self-access */
 static Fix *g_de_fix;
 static int  g_de_fired;
-static void destructive_close(void *ctx) {
+static void destructive_close(void *ctx, KlDatagramCloseResult result) { (void)result;
     (void)ctx;
     g_de_fired = 1;
     /* Everything is retired at detachment → safe to free the whole fixture inside on_close. */
@@ -461,6 +462,95 @@ UTEST(dgram_close, reentrant_close_readiness_error) {
     ASSERT_EQ(q, 0);
     ASSERT_EQ(d, 1);
     ASSERT_EQ(oc, 1);
+}
+
+/* ══ §4.3 retirement classification — the terminal close RESULT via the backend classifier ═══════ */
+
+static KlDgramRetireResult g_rt_recv, g_rt_send;
+static int g_rt_te_recv, g_rt_te_send;
+static KlDgramRetireResult test_retire(void *ctx, KlDgramOpKind kind, int *te) {
+    (void)ctx;
+    if (kind == KL_DGRAM_OP_RECV) { *te = g_rt_te_recv; return g_rt_recv; }
+    *te = g_rt_te_send; return g_rt_send;
+}
+/* Drive a send+recv fixture (classifier installed) to full machine retirement. The classifier then
+ * resolves the terminal result. Caller sets g_rt_* first; f is left CLOSED (fix_free-able). */
+static void drive_classified(Fix *f) {
+    fix_init(f, KL_DGRAM_CAP_CONNECTED);
+    kl_dgram_close_set_retire(&f->close, test_retire, NULL);
+    send_one(f);
+    kl_dgram_recv_start(&f->recv);
+    kl_dgram_close_begin(&f->close);
+    kl_dgram_send_on_complete(&f->send, 1);   /* send op terminal (inflight → 0) */
+    kl_dgram_recv_on_complete(&f->recv, 0, 0);/* recv op terminal → classifier resolves the result */
+}
+
+/* No classifier → every op is confirmed RETIRED → DETACHED (the legacy/readiness model). */
+UTEST(dgram_close_result, no_classifier_is_detached) {
+    Fix f; fix_init(&f, KL_DGRAM_CAP_CONNECTED); g_on_close = 0;
+    send_one(&f); kl_dgram_recv_start(&f.recv); kl_dgram_close_begin(&f.close);
+    kl_dgram_send_on_complete(&f.send, 1); kl_dgram_recv_on_complete(&f.recv, 0, 0);
+    ASSERT_EQ(g_on_close, 1);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    ASSERT_EQ((int)kl_dgram_close_result(&f.close), (int)KL_DGRAM_DETACHED);
+    fix_free(&f);
+}
+
+/* All ops RETIRED (classifier) → DETACHED. */
+UTEST(dgram_close_result, all_retired_is_detached) {
+    g_rt_recv = g_rt_send = KL_DGRAM_RETIRE_RETIRED; g_rt_te_recv = g_rt_te_send = 0; g_on_close = 0;
+    Fix f; drive_classified(&f);
+    ASSERT_EQ(g_on_close, 1);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    fix_free(&f);
+}
+
+/* Any op QUARANTINED → QUARANTINED (not confirmed detachment). */
+UTEST(dgram_close_result, one_quarantined_is_quarantined) {
+    g_rt_recv = KL_DGRAM_RETIRE_QUARANTINED; g_rt_send = KL_DGRAM_RETIRE_RETIRED;
+    g_rt_te_recv = g_rt_te_send = 0; g_on_close = 0;
+    Fix f; drive_classified(&f);
+    ASSERT_EQ(g_on_close, 1);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_QUARANTINED);
+    ASSERT_EQ((int)kl_dgram_close_result(&f.close), (int)KL_DGRAM_QUARANTINED);
+    fix_free(&f);
+}
+
+/* All RETIRED + a transport error → CLOSE_ERROR. */
+UTEST(dgram_close_result, retired_with_transport_error_is_close_error) {
+    g_rt_recv = g_rt_send = KL_DGRAM_RETIRE_RETIRED; g_rt_te_recv = 0; g_rt_te_send = 1; g_on_close = 0;
+    Fix f; drive_classified(&f);
+    ASSERT_EQ(g_on_close, 1);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_CLOSE_ERROR);
+    fix_free(&f);
+}
+
+/* The safety rule: a transport error alongside a QUARANTINED op is QUARANTINED, NEVER CLOSE_ERROR
+ * (CLOSE_ERROR is legal only when every op is confirmed RETIRED). */
+UTEST(dgram_close_result, quarantine_dominates_transport_error) {
+    g_rt_recv = KL_DGRAM_RETIRE_QUARANTINED; g_rt_send = KL_DGRAM_RETIRE_RETIRED;
+    g_rt_te_recv = 0; g_rt_te_send = 1; g_on_close = 0;
+    Fix f; drive_classified(&f);
+    ASSERT_EQ(g_on_close, 1);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_QUARANTINED);
+    fix_free(&f);
+}
+
+/* A PENDING classification keeps the object CLOSING (no on_close, result NONE); a later re-run once
+ * the op is RETIRED detaches. */
+UTEST(dgram_close_result, pending_stays_closing_then_detaches) {
+    g_rt_recv = KL_DGRAM_RETIRE_PENDING; g_rt_send = KL_DGRAM_RETIRE_RETIRED;
+    g_rt_te_recv = g_rt_te_send = 0; g_on_close = 0;
+    Fix f; drive_classified(&f);
+    ASSERT_EQ(g_on_close, 0);                                   /* PENDING → not detached */
+    ASSERT_EQ((int)kl_dgram_close_result(&f.close), (int)KL_DGRAM_CLOSE_NONE);
+    ASSERT_EQ((int)kl_dgram_close_state(&f.close), (int)KL_DGRAM_CLOSE_CLOSING);
+
+    g_rt_recv = KL_DGRAM_RETIRE_RETIRED;                        /* op now terminal */
+    kl_dgram_close_begin(&f.close);                            /* re-run the terminal logic */
+    ASSERT_EQ(g_on_close, 1);
+    ASSERT_EQ((int)g_on_close_result, (int)KL_DGRAM_DETACHED);
+    fix_free(&f);
 }
 
 UTEST_MAIN();

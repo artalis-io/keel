@@ -18,22 +18,51 @@
 
 #include <string.h>
 
-/* Fire detachment exactly once. State is CLOSED before the callback so a stray later frame is a
- * no-op; the callback may free/tear down everything (no self-access after it returns). */
-static void close_detach(KlDgramClose *c) {
-    c->state = KL_DGRAM_CLOSE_CLOSED;
+/* Fire detachment exactly once with its terminal classification. State is CLOSED + result recorded
+ * before the callback so a stray later frame is a no-op; the callback may free/tear down everything
+ * (no self-access after it returns). */
+static void close_detach(KlDgramClose *c, KlDatagramCloseResult result) {
+    c->state  = KL_DGRAM_CLOSE_CLOSED;
     if (!c->notified) {
         c->notified = 1;
-        if (c->on_close) c->on_close(c->close_ctx);   /* DESTRUCTIVE TAIL — no c access after */
+        c->result   = result;
+        if (c->on_close) c->on_close(c->close_ctx, result);   /* DESTRUCTIVE TAIL — no c access after */
     }
 }
 
-/* recv retired + send retired + outbound queue empty. */
+/* recv retired + send retired + outbound queue empty (the machine-level gate: no op physically
+ * outstanding). Only once this holds does the backend classifier (§4.3) resolve RETIRED vs
+ * QUARANTINED. */
 static int close_fully_retired(const KlDgramClose *c) {
     if (c->recv && kl_dgram_recv_inflight(c->recv)) return 0;
     if (c->send && kl_dgram_send_inflight(c->send)) return 0;
     if (c->send && kl_dgram_send_queued(c->send) > 0) return 0;
     return 1;
+}
+
+/* The §4.3 object-result join, computed only when fully retired. Without a backend classifier every
+ * op is confirmed RETIRED → DETACHED. With one: any QUARANTINED op ⇒ QUARANTINED (retain its life ref
+ * forever); else a transport error with ALL ops RETIRED ⇒ CLOSE_ERROR; else DETACHED. A classifier
+ * that still reports PENDING ⇒ KL_DGRAM_CLOSE_NONE (stay CLOSING — the next retirement re-runs this).
+ * CLOSE_ERROR is legal ONLY when every op is RETIRED, so a failed close never frees storage whose
+ * ownership is unknown (that is what QUARANTINED is for). */
+static KlDatagramCloseResult close_join_result(KlDgramClose *c) {
+    if (!c->retire)
+        return KL_DGRAM_DETACHED;
+    int quarantined = 0, transport_err = 0;
+    const KlDgramOpKind kinds[2] = { KL_DGRAM_OP_RECV, KL_DGRAM_OP_SEND };
+    const int present[2] = { c->recv != NULL, c->send != NULL };
+    for (int i = 0; i < 2; i++) {
+        if (!present[i]) continue;
+        int te = 0;
+        KlDgramRetireResult r = c->retire(c->retire_ctx, kinds[i], &te);
+        if (r == KL_DGRAM_RETIRE_PENDING)     return KL_DGRAM_CLOSE_NONE;   /* stay CLOSING */
+        if (r == KL_DGRAM_RETIRE_QUARANTINED) quarantined = 1;
+        if (te)                               transport_err = 1;
+    }
+    if (quarantined)   return KL_DGRAM_QUARANTINED;
+    if (transport_err) return KL_DGRAM_CLOSE_ERROR;   /* all RETIRED + a transport error */
+    return KL_DGRAM_DETACHED;
 }
 
 /* Abortive cleanup: discard queued-but-unsubmitted output and request cancellation of any
@@ -66,9 +95,13 @@ static void close_run_terminal(KlDgramClose *c) {
         (kl_dgram_send_inflight(c->send) || kl_dgram_send_queued(c->send) > 0)) {
         close_abort_cleanup(c);
     }
-    int done = close_fully_retired(c);
+    /* Machine-level gate first (no op physically outstanding), THEN classify the outcome. A classifier
+     * still reporting PENDING yields NONE → stay CLOSING; the next retirement re-runs this. */
+    KlDatagramCloseResult res = KL_DGRAM_CLOSE_NONE;
+    if (close_fully_retired(c))
+        res = close_join_result(c);
     c->detaching = 0;
-    if (done) close_detach(c);   /* destructive tail */
+    if (res != KL_DGRAM_CLOSE_NONE) close_detach(c, res);   /* destructive tail */
 }
 
 /* Enter/leave a frame. Detach is attempted only as the last frame unwinds (busy 1 → 0). */
@@ -107,6 +140,14 @@ int kl_dgram_close_set_cancel(KlDgramClose *c, KlDgramCancelFn cancel_recv,
     return 0;
 }
 
+int kl_dgram_close_set_retire(KlDgramClose *c, KlDgramRetireFn retire, void *ctx) {
+    if (!c) return -1;
+    if (c->state != KL_DGRAM_CLOSE_OPEN) return -1;   /* frozen once closing begins */
+    c->retire     = retire;
+    c->retire_ctx = ctx;
+    return 0;
+}
+
 static int close_common(KlDgramClose *c, int abort) {
     if (!c) return -1;
     if (c->state == KL_DGRAM_CLOSE_CLOSED) return 0;   /* already detached — idempotent */
@@ -132,6 +173,9 @@ KlDgramCloseState kl_dgram_close_state(const KlDgramClose *c) {
 }
 int kl_dgram_close_is_detached(const KlDgramClose *c) {
     return (c && c->notified) ? 1 : 0;
+}
+KlDatagramCloseResult kl_dgram_close_result(const KlDgramClose *c) {
+    return c ? c->result : KL_DGRAM_CLOSE_NONE;
 }
 
 int kl_dgram_close_free(KlDgramClose *c) {
