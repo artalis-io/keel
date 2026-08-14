@@ -407,9 +407,11 @@ complete**, §5 status). **EFI_UDP4 is a real provider** now (`socket_efi_udp4.c
 implemented + host-mock-tested + firmware-proven end-to-end in 6.4c — the seed `dns_uefi.c` token
 machine was retired, audit §6): its serial recv, atomic send, cancel-once/confirmed-retirement +
 quarantine, stable-token lifetime, native `peer`/`local` (from `EFI_UDP4_SESSION_DATA`), truncation,
-and dedicated inbound slot are all ✅. The only ⚙ cells remaining anywhere are the **shared** Tier-1
-items still to build for EVERY backend — the packet-slot bounded **send** queue and strict pause; a
-`✅`-per-backend flip lands with that work, not per-provider. The ✖ capability cells are *documented
+and dedicated inbound slot are all ✅. The ⚙ cells remaining are the **shared** Tier-1 items still to
+build for EVERY backend — the packet-slot bounded **send** queue and strict pause (a `✅`-per-backend
+flip lands with that work, not per-provider) — **plus** lwIP-raw's provider-specific serial-recv
+cleanup (its 16-slot copy-ring can hold >1 packet → needs the one-held-slot rework). The ✖ capability
+cells are *documented
 limitations* — consumers query caps (§9) and degrade. lwIP-raw's object-owned-buffer row is ▲: the
 token removed its `KlUdp` deref, but it still stages through its copy-ring before the machine copies
 into the dedicated inbound slot — replacing the copy-ring with a single inbound slot is a deferred
