@@ -1,16 +1,21 @@
-# Step 7 — Public `KlDatagram` API: Design Freeze (v2)
+# Step 7 — Public `KlDatagram` API: Design Freeze (v3)
 
-**Status:** DESIGN FREEZE (v2 — addresses review of v1). No code. For re-review before any
-implementation. Grounds every decision in the frozen Tier-1 contract (`docs/datagram_contract.md`) and
-the already-built machine (`src/datagram_{slots,send,recv,close,life}.h`, `include/keel/datagram{,_detail}.h`).
+**Status:** DESIGN FREEZE (v3 — addresses v2 review). No code. For re-review before 7A-1. Grounds every
+decision in the frozen Tier-1 contract (`docs/datagram_contract.md`) and the already-built machine
+(`src/datagram_{slots,send,recv,close,life}.h`, `include/keel/datagram{,_detail}.h`).
 
-**v2 changes (from review):** (1) quarantine is modeled as an explicit terminal *result* — it no longer
-hides under "confirmed detachment"; (2) one frozen close/retirement sequence with backend close/cancel
-as the classifying step (fd close moves into the close machine, not `free`); (3) the compatibility
-policy is frozen — `KlUdp` KEEPS its byte-budget queue, is NOT re-based onto fixed slots in Step 7;
-(4) a public close *result* (DETACHED/QUARANTINED/ERROR) is exposed to callers; (5) copy-before-accept
-is a provider contract that makes object-owned outbound storage safe; (6) lwIP-raw one-held-slot is an
-explicit 7A increment with its own tests; (7) STABLE-banner wording clarified.
+**v3 changes (from v2 review):** (1) **the neutral, cross-platform retirement-classification seam is
+now designed** (new §4.3) — a `KlDgramRetireResult` the close coordinator collects per op, with the
+per-backend mapping and the CLOSE_ERROR-only-when-all-retired rule; (2) a **`KL_DGRAM_CLOSE_NONE = 0`
+sentinel** so a zeroed object never looks DETACHED; (3) the **copy-before-accept test is strengthened**
+to prove the *provider* contract (retain the submit pointer, force QUARANTINED, poison the freed
+outbound pool, assert no late access) — the caller-buffer facade test is kept too; (4) §5 states the
+send-copy / recv-lend **asymmetry** that justifies the storage split.
+
+**v2 changes (retained):** quarantine is an explicit terminal *result* (not "confirmed detachment"); one
+frozen close/retirement sequence with backend close/cancel as the classifying step (fd close in the
+close machine, not `free`); `KlUdp` KEEPS its byte-budget queue (not re-based); copy-before-accept is a
+provider contract; lwIP-raw one-held-slot is an explicit 7A increment; STABLE-banner wording clarified.
 
 ---
 
@@ -26,8 +31,9 @@ each a focused reviewed commit with its own regression tests:
 - **7A-1 — storage separation.** Split the single `KlDgramSlots` block into an **object-owned outbound
   pool** and a **life-token-owned inbound slot** (§5). Recv inbound storage is already life-owned (6.1);
   this makes the split explicit and reusable.
-- **7A-2 — close/retirement integration.** Wire `KlDgramClose` with the frozen retirement sequence (§4),
-  incl. backend close/cancel as the *classifying* step and the terminal result.
+- **7A-2 — close/retirement integration.** Wire `KlDgramClose` with the frozen retirement sequence (§4)
+  and the neutral retirement-classification seam (§4.3, `KlDgramRetireFn`/`KlDgramRetireResult`), incl.
+  backend close/cancel as the *classifying* step and the terminal result.
 - **7A-3 — send integration + compatibility.** Assemble `KlDgramSend`+`KlDgramSlots` into the public
   `KlDatagram`. Per the frozen D-COMPAT policy (§6) this does **not** re-base `KlUdp`'s send — `KlUdp`
   keeps byte-budget. Includes the send-queue-geometry tests that byte-budget green tests would NOT prove.
@@ -156,19 +162,26 @@ retirement):
 
 ```c
 typedef enum {
-    KL_DGRAM_DETACHED = 0,   /* CONFIRMED physical retirement: recv+send ops retired, buffers returned,
+    KL_DGRAM_CLOSE_NONE = 0, /* SENTINEL: no terminal reached yet (also the value of a zeroed/reused
+                                object). kl_datagram_close_result() returns this until state == CLOSED. */
+    KL_DGRAM_DETACHED,       /* CONFIRMED physical retirement: recv+send ops retired, buffers returned,
                                 life fully released → live_count 0. The strong Tier-1 guarantee. */
     KL_DGRAM_QUARANTINED,    /* Wrapper-SAFE but NOT physically retired: an op could not be confirmed
                                 retired (EFI). The KlDatagram object + fd wrapper are detached and
                                 reusable/freeable; the life-token-owned inbound buffer stays pinned to
                                 process/firmware teardown (bounded fail-closed leak). NOT "confirmed
                                 detachment". */
-    KL_DGRAM_CLOSE_ERROR     /* Terminal transport error during close; ops retired, result is failure. */
+    KL_DGRAM_CLOSE_ERROR     /* Terminal transport error AND all ops nevertheless confirmed retired
+                                (see §4.3 — an uncertain-ownership close error is QUARANTINED, not this). */
 } KlDatagramCloseResult;
 
 typedef void (*KlDatagramCloseFn)(void *ctx, KlDatagramCloseResult result);
 ```
 
+- **`KL_DGRAM_CLOSE_NONE = 0` is the sentinel** (review Medium): a memset-zero (reused, invariant 8) or
+  not-yet-closed object reports NONE, never a spurious DETACHED. All terminal results are nonzero.
+  `kl_datagram_close_result()` is only meaningful once `close_state() == CLOSED`; before that it returns
+  NONE.
 - **Invariant 6 ("confirmed detachment") applies ONLY to `KL_DGRAM_DETACHED`.** `on_close` firing with
   QUARANTINED is explicitly NOT confirmed detachment — it promises only that no completion will
   reference the wrapper (guaranteed by the life token, §5), not that the op physically retired.
@@ -177,20 +190,73 @@ typedef void (*KlDatagramCloseFn)(void *ctx, KlDatagramCloseResult result);
 - **`free` refuses before `CLOSED`.** After `CLOSED` it releases object memory; on QUARANTINED it must
   NOT reclaim the pinned inbound storage (life-owned) — safe because that storage is not in the object.
 
+### 4.3 The neutral retirement-classification seam (7A-2 — review High-1, the remaining blocker)
+
+The close sequence (§4.1 step 3–4) needs each backend to classify each op as retired / quarantined /
+pending. Today generic `close` returns only `0/-1` and the rich result lives only in EFI primitives
+(`kl_uefi_udp_op_state` → `KlUefiUdpOpResult`). 7A-2 freezes a **neutral, transport-agnostic seam** the
+close coordinator (`KlDgramClose`) collects, so no backend-specific type leaks into the machine:
+
+```c
+typedef enum {
+    KL_DGRAM_RETIRE_PENDING = 0,  /* not yet terminal — object stays CLOSING; re-poll on the next
+                                     drained terminal event for this op. */
+    KL_DGRAM_RETIRE_RETIRED,      /* physically confirmed: buffer returned, life ref releasable. */
+    KL_DGRAM_RETIRE_QUARANTINED,  /* ownership UNCONFIRMED — retain the life ref forever, fail-closed. */
+} KlDgramRetireResult;
+
+typedef enum { KL_DGRAM_OP_RECV = 0, KL_DGRAM_OP_SEND } KlDgramOpKind;
+
+/* Installed by the live-wiring layer (udp.c / the public KlDatagram) alongside the existing cancel
+ * hooks. The close coordinator calls it at step 3 (backend retirement) and again whenever a cancelled
+ * op's terminal completion is drained (the existing on_complete retire path notifies the coordinator).
+ * `transport_err` is set to 1 by the op iff a terminal transport error occurred on it. */
+typedef KlDgramRetireResult (*KlDgramRetireFn)(void *ctx, KlDgramOpKind kind, int *transport_err);
+```
+
+**Per-backend mapping (frozen):**
+
+| Backend / situation | Classification |
+|---|---|
+| POSIX / readiness — synchronous disarm + `close(fd)` | `RETIRED` immediately (no async op outstanding). |
+| Completion (pollcomp / io_uring / IOCP) — normal cancel | `PENDING` until the op's terminal completion event is drained (which releases the life ref), then `RETIRED`. IOCP dequeues-before-free; io_uring's `IORING_OP_CANCEL` may miss but the op still eventually completes → still resolves to `RETIRED`. |
+| EFI — unconfirmed cancellation (`kl_uefi_udp_op_state` = QUARANTINED/INVALID) | `QUARANTINED`. |
+| Any provider — close/cancel error with **uncertain** buffer ownership | `QUARANTINED` (never `CLOSE_ERROR`), or stay `PENDING`/`CLOSING` if it may yet resolve. |
+
+**Object-result join (step 4).** The coordinator computes the terminal `KlDatagramCloseResult` only once
+**no op is PENDING**:
+- any op `QUARANTINED` ⇒ **`KL_DGRAM_QUARANTINED`** (retain those life refs; object detaches wrapper-safe);
+- else if any op set `transport_err` (with **all** ops `RETIRED`) ⇒ **`KL_DGRAM_CLOSE_ERROR`**;
+- else ⇒ **`KL_DGRAM_DETACHED`**.
+
+**The safety rule (review High-1):** `CLOSE_ERROR` is legal **only when every op is confirmed
+`RETIRED`.** A close/cancel failure that leaves ownership uncertain is `QUARANTINED`, never
+`CLOSE_ERROR` — because only `DETACHED` and `CLOSE_ERROR` permit the object's storage to be reclaimed,
+and reclaiming under unknown ownership is the exact UAF the stable token exists to prevent. Until every
+op is terminal, the object stays `CLOSING` and `on_close` does not fire.
+
 ---
 
 ## 5. B.6 stable-token, quarantine, and copy-before-accept
 
-- **Storage split (D-STORAGE, approved).** Receive inbound storage (one-held slot + recv machine) is
-  **life-token-owned** (`on_final` frees it, event-ctx-allocated → outlives the wrapper). Outbound send
-  pool is **object-owned** (freed at detachment once `send_inflight == 0`).
-- **Copy-before-accept is a PROVIDER CONTRACT (review D-STORAGE correction).** Object-owned outbound
-  storage is safe ONLY because **every provider `send`/`post_dgram_send` copies the payload into
-  backend-owned op storage before returning** (the ops table already documents "backend copies datagram
-  + destination for op's lifetime"; io_uring/IOCP copy into `op->sendbuf`). 7B promotes this to a
-  normative clause in `datagram.h` and `datagram_contract.md`, and §8 adds a provider-conformance test
-  (mutate/free the caller buffer immediately after `ACCEPTED`; the on-wire bytes must be unchanged).
-  A provider that cannot copy-before-accept may not use object-owned outbound storage.
+- **Storage split (D-STORAGE, approved) — and WHY it is asymmetric (v3).** The split follows the
+  buffer-ownership asymmetry between recv and send:
+  - **Receive = buffer-LENT.** The backend writes the inbound datagram *into* the object's inbound slot
+    across the async op, so it holds a pointer to that slot for the op's whole lifetime. That storage
+    must therefore outlive any op that can be left dangling (quarantine) → it is **life-token-owned**
+    (`on_final` frees it, event-ctx-allocated, outlives the wrapper).
+  - **Send = payload-COPIED.** The backend copies the payload + dest/src/tos into **backend-owned op
+    storage before returning** from submit, so it holds NO pointer into the object's outbound slot after
+    `ACCEPTED`. That pool is therefore safe to reclaim at detachment even if a send op is later
+    quarantined → it is **object-owned** (freed at detachment / on QUARANTINED).
+- **Copy-before-accept is a PROVIDER CONTRACT (review D-STORAGE + Medium-3).** The send half above holds
+  ONLY IF every provider `send`/`post_dgram_send` truly copies before returning (the ops table documents
+  "backend copies datagram + destination for op's lifetime"; io_uring/IOCP copy into `op->sendbuf`). A
+  provider that retained a pointer into the object's outbound slot would UAF the moment the object frees
+  its pool at a QUARANTINED close. 7B promotes copy-before-accept to a normative clause in `datagram.h`
+  and `datagram_contract.md`; §8 proves it with a provider-conformance test that poisons the freed pool
+  (not just a facade-copy test). A provider that cannot copy-before-accept may not use object-owned
+  outbound storage.
 - **Quarantine terminal (§4.2).** A backend that cannot confirm a cancel retains its op's life ref
   forever; `on_close` fires with **QUARANTINED**; the object detaches (wrapper-safe) but the inbound
   buffer stays pinned to EBS. A UDP completion with `life == NULL` is dropped (no wrapper deref).
@@ -246,8 +312,15 @@ tests, run as a matrix over a scripted in-test provider double:
 - **Send queue (7A-3):** FIFO across hole-reuse; single-flight; **count-based** `WOULD_BLOCK` at
   `send_slots` (the geometry byte-budget tests miss); `on_writable`/`on_drain` edges; `TOO_LARGE`;
   `UNSUPPORTED` (required cap absent); `CLOSED` after `close_begin`; no-ownership-on-refusal.
-  **Copy-before-accept conformance:** mutate+free the caller buffer right after `ACCEPTED`; assert the
-  transmitted bytes are the original.
+  **Copy-before-accept — TWO distinct tests (review Medium-3):**
+  1. *Facade ownership:* mutate+free the **caller's** buffer right after `ACCEPTED`; assert the
+     transmitted bytes are the original (proves `kl_datagram_send` copied caller→slot).
+  2. *Provider contract:* the scripted provider **retains the exact pointer passed to `submit`** (the
+     object's outbound slot), then the test forces a **QUARANTINED** close and **frees + poisons** the
+     object-owned outbound pool; assert the provider had already copied all payload **and** address
+     metadata into backend op storage at submit time and performs **no** later read/write through the
+     retained pointer (ASan catches a poisoned-pool access). This proves the *backend* copied — a facade
+     copy into the slot would still pass test 1 but fail here if the backend kept a slot pointer.
 - **Receive (7A-4):** one per callback; `peer` mandatory (violation → error, no callback); pause
   holds one (completion) / drops interest (readiness); resume delivers once then re-arms; stop discards
   held; truncation flagged + counted; zero-length ≠ failure.
@@ -279,6 +352,10 @@ tests, run as a matrix over a scripted in-test provider double:
 4. **7A/7B split — APPROVED, and 7A is incremental** (§0: storage sep → close/retirement → send
    integration/compat → strict-pause backend wiring → lwIP one-held-slot), each with focused regression
    tests.
+
+**Remaining v2 blocker (retirement-classification seam) is now designed in §4.3**, and the two v2 test/API
+gaps are closed (§4.2 `KL_DGRAM_CLOSE_NONE` sentinel; §8 provider-contract copy test). Per the review,
+this makes the design ready for **7A-1** on acceptance.
 
 ## 10. Out of scope / non-goals
 
