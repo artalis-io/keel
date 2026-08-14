@@ -150,10 +150,12 @@ retirement):
 3. **Backend retirement, exactly once** — invoke the provider's cancel/close on the outstanding recv/
    send op **and close the fd**. Each op is cancel-requested at most once. This is the single point that
    touches the backend and where the fd is closed.
-4. **Receive terminal classification** — the backend reports, per op, one of: **RETIRED** (physically
-   confirmed — buffer returned, token releasable), **QUARANTINED** (unconfirmed — firmware/kernel may
-   still hold the buffer; fail-closed), or **ERROR** (terminal transport failure). The object's result is
-   the join over its ops (any QUARANTINED ⇒ QUARANTINED; else any ERROR ⇒ CLOSE_ERROR; else DETACHED).
+4. **Receive terminal classification** — each op resolves to one of the neutral **`KlDgramRetireResult`**
+   values `PENDING | RETIRED | QUARANTINED` (§4.3), and may additionally flag a terminal transport
+   failure via `transport_err`. There is no per-op `ERROR` result: a transport failure is carried
+   alongside `RETIRED` and only becomes the object-level `CLOSE_ERROR` when *every* op is confirmed
+   RETIRED (§4.3 join). The object's result = the §4.3 join over its ops (any QUARANTINED ⇒ QUARANTINED;
+   else `transport_err` with all RETIRED ⇒ CLOSE_ERROR; else DETACHED).
 5. **Fire `on_close(ctx, result)`** — exactly once, as a destructive tail (state `CLOSED` set first).
 6. **Release wrapper resources** — `kl_datagram_free` (or the caller in the callback) releases
    object-owned memory. On QUARANTINED the life-token-owned inbound storage is NOT released here (§5).
@@ -316,10 +318,12 @@ tests, run as a matrix over a scripted in-test provider double:
   1. *Facade ownership:* mutate+free the **caller's** buffer right after `ACCEPTED`; assert the
      transmitted bytes are the original (proves `kl_datagram_send` copied caller→slot).
   2. *Provider contract:* the scripted provider **retains the exact pointer passed to `submit`** (the
-     object's outbound slot), then the test forces a **QUARANTINED** close and **frees + poisons** the
-     object-owned outbound pool; assert the provider had already copied all payload **and** address
-     metadata into backend op storage at submit time and performs **no** later read/write through the
-     retained pointer (ASan catches a poisoned-pool access). This proves the *backend* copied — a facade
+     object's outbound slot), then the test forces a **QUARANTINED** close and releases the object-owned
+     outbound pool **through the test allocator**, which poisons the freed region (or the fake provider
+     is instrumented to record any deref) — the test never hand-dereferences freed storage itself.
+     Assert the provider had already copied all payload **and** address metadata into backend op storage
+     at submit time and performs **no** later read/write through the retained pointer (ASan on the
+     allocator-poisoned region catches a violation). This proves the *backend* copied — a facade
      copy into the slot would still pass test 1 but fail here if the backend kept a slot pointer.
 - **Receive (7A-4):** one per callback; `peer` mandatory (violation → error, no callback); pause
   holds one (completion) / drops interest (readiness); resume delivers once then re-arms; stop discards
