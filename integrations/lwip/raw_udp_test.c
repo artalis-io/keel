@@ -299,35 +299,51 @@ static int t7_glue_unarmed_drop(void) {
 
     KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL);   /* owner ref each */
     KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL);
-    if (!lrx || !ltx) { kl_lwr_ctx_destroy(lwrctx); return fail("T7: token create"); }
-
-    KlLwrUdpRecord recs[8];
-    int got_recv1 = 0, stale = 0;
-
-    /* (1) ARMED: post a recv, send "a", tick → recv callback captures it; drain surfaces it and CONSUMES
-     * the arm (rx is now UNARMED). */
-    kl_lwr_udp_post_recv(lwrctx, rx, lrx);
-    kl_lwr_udp_send(lwrctx, tx, ltx, "a", 1, lo, port);
-    kl_lwr_lwip_tick(loopif);
-    int n1 = kl_lwr_udp_drain(lwrctx, recs, 8);
-    for (int i = 0; i < n1; i++) {
-        if (recs[i].kind == KL_LWR_DGRAM_RECV) got_recv1++;
-        kl_dgram_life_release((KlDgramLife *)recs[i].life);   /* release each transferred ref */
+    if (!lrx || !ltx) {                 /* release whichever succeeded (NULL-safe) before teardown */
+        kl_dgram_life_release(lrx);
+        kl_dgram_life_release(ltx);
+        kl_lwr_ctx_destroy(lwrctx);
+        return fail("T7: token create");
     }
 
-    /* (2) UNARMED: "b" arrives with no recv posted → the callback must DROP it (never fill `held`). */
-    kl_lwr_udp_send(lwrctx, tx, ltx, "b", 1, lo, port);
-    kl_lwr_lwip_tick(loopif);
-    int n2 = kl_lwr_udp_drain(lwrctx, recs, 8);
-    for (int i = 0; i < n2; i++) kl_dgram_life_release((KlDgramLife *)recs[i].life);   /* SEND record(s) only */
+    KlLwrUdpRecord recs[8];
+    int got_recv1 = 0, recv2 = 0, send2 = 0, stale = 0;
+    int rc = 0;
 
-    /* (3) RE-ARM + drain: a correctly-dropped "b" surfaces NOTHING here; a buggily-held "b" surfaces as a
-     * stale RECV. */
-    kl_lwr_udp_post_recv(lwrctx, rx, lrx);
-    int n3 = kl_lwr_udp_drain(lwrctx, recs, 8);
-    for (int i = 0; i < n3; i++) {
-        if (recs[i].kind == KL_LWR_DGRAM_RECV) stale++;
-        kl_dgram_life_release((KlDgramLife *)recs[i].life);
+    /* (1) ARMED: post a recv, send "a", tick → recv callback captures it; drain surfaces one RECV
+     * (+ the matching SEND) and CONSUMES the arm (rx is now UNARMED). */
+    if (kl_lwr_udp_post_recv(lwrctx, rx, lrx) != 0)                rc = fail("T7: post_recv");
+    else if (kl_lwr_udp_send(lwrctx, tx, ltx, "a", 1, lo, port) != 0) rc = fail("T7: send a");
+    if (rc == 0) {
+        kl_lwr_lwip_tick(loopif);
+        int n1 = kl_lwr_udp_drain(lwrctx, recs, 8);
+        for (int i = 0; i < n1; i++) {
+            if (recs[i].kind == KL_LWR_DGRAM_RECV) got_recv1++;
+            kl_dgram_life_release((KlDgramLife *)recs[i].life);   /* release each transferred ref */
+        }
+
+        /* (2) UNARMED: "b" MUST actually send — its SEND completion proves the datagram traversed the
+         * loopback to the recv callback (else the phase-3 oracle would false-green). The callback must
+         * DROP it, so this drain yields exactly one SEND and ZERO RECV. */
+        if (kl_lwr_udp_send(lwrctx, tx, ltx, "b", 1, lo, port) != 0) rc = fail("T7: send b");
+        else {
+            kl_lwr_lwip_tick(loopif);
+            int n2 = kl_lwr_udp_drain(lwrctx, recs, 8);
+            for (int i = 0; i < n2; i++) {
+                if (recs[i].kind == KL_LWR_DGRAM_RECV)      recv2++;
+                else if (recs[i].kind == KL_LWR_DGRAM_SEND) send2++;
+                kl_dgram_life_release((KlDgramLife *)recs[i].life);
+            }
+
+            /* (3) RE-ARM + drain: a correctly-dropped "b" surfaces NOTHING here; a buggily-held "b"
+             * surfaces as a stale RECV. */
+            kl_lwr_udp_post_recv(lwrctx, rx, lrx);
+            int n3 = kl_lwr_udp_drain(lwrctx, recs, 8);
+            for (int i = 0; i < n3; i++) {
+                if (recs[i].kind == KL_LWR_DGRAM_RECV) stale++;
+                kl_dgram_life_release((KlDgramLife *)recs[i].life);
+            }
+        }
     }
 
     kl_lwr_udp_close(lwrctx, rx);       /* releases any un-drained arm ref */
@@ -336,9 +352,12 @@ static int t7_glue_unarmed_drop(void) {
     kl_dgram_life_release(ltx);
     kl_lwr_ctx_destroy(lwrctx);
 
+    if (rc != 0)        return rc;
     if (got_recv1 != 1) return fail("T7: setup — the armed datagram was not delivered");
+    if (send2 != 1)     return fail("T7: the unarmed datagram 'b' never sent — oracle would false-green");
+    if (recv2 != 0)     return fail("T7: 'b' surfaced as a RECV while unarmed");
     if (stale != 0)     return fail("T7: a datagram captured while UNARMED surfaced on re-arm (stale buffering)");
-    printf("PASS T7 (glue: unarmed datagram dropped — no stale delivery on re-arm)\n");
+    printf("PASS T7 (glue: unarmed datagram dropped — 'b' sent but never delivered, no stale on re-arm)\n");
     return 0;
 }
 
