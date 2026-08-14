@@ -194,16 +194,17 @@ void kl_udp_deliver(KlUdp *udp, const KlDgramLife *life, const void *data, size_
 
 /* ── Receive machine (step 6.1) ────────────────────────────────────────────
  * The Tier-1 per-datagram receive rides the shared KlDgramRecv over a dedicated inbound slot
- * (KlDgramSlots) — the same uniform captured-prefix truncation, mandatory-peer, serial pause/resume
+ * (KlDgramInbound — its own allocation, life-token-owned, 7A-1) — the same uniform captured-prefix
+ * truncation, mandatory-peer, serial pause/resume
  * normalization the public KlDatagram path will use. GRO (a single coalesced recv) rides through it
  * via per-datagram scratch (gro_seg/tos); only true recvmmsg BATCHING (rx_batch) bypasses it as a
  * legacy Tier-2 path (see udp_recv_dgram). The byte-budget SEND queue and close remain LEGACY
  * compatibility paths, deliberately outside the Tier-1 fixed-slot send facet. */
 typedef struct KlUdpRx {
-    KlDgramSlots slots;      /* the dedicated inbound slot backs udp->dg.recv_buf (one init-time alloc) */
+    KlDgramInbound inbound;  /* the dedicated inbound slot backs udp->dg.recv_buf (its own allocation) */
     KlDgramRecv  recv;
     KlUdp       *udp;        /* owner — also the stable token's target while live */
-    KlAllocator *alloc;      /* the event-ctx allocator (outlives KlUdp); frees slots + this at final */
+    KlAllocator *alloc;      /* the event-ctx allocator (outlives KlUdp); frees inbound + this at final */
     KlDgramLife *life;       /* stable-liveness token owning this storage (see datagram_life.h) */
     int          completion; /* 1 = completion (post/on_complete); 0 = readiness (arm/pull) */
     int          gro_seg;    /* scratch: the in-flight datagram's GRO segment size (0 = none) */
@@ -215,7 +216,7 @@ static inline KlUdpRx *udp_rx(const KlUdp *u) { return (KlUdpRx *)u->rx; }
  * no longer pinned by any op — free the slot + this holder. The receive machine borrows no heap. */
 static void udp_rx_final(void *ctx) {
     KlUdpRx *rx = ctx;
-    kl_dgram_slots_free(&rx->slots);
+    kl_dgram_inbound_free(&rx->inbound);
     kl_free(rx->alloc, rx, sizeof(*rx));
 }
 
@@ -251,10 +252,10 @@ static void udp_rx_disarm(void *ctx) { kl_udp_update_interest(((KlUdpRx *)ctx)->
 static int udp_rx_pull(void *ctx, size_t *out_len) {
     KlUdpRx *rx = ctx;
     KlUdp *udp = rx->udp;
-    KlDgramSlot *in = kl_dgram_slots_inbound(&rx->slots);
+    KlDgramSlot *in = kl_dgram_inbound_slot(&rx->inbound);
     KlSockAddr src;
     KlDgramRxMeta meta;
-    kl_ssize_t n = udp_dg(udp)->recv(udp_sp_ctx(udp), udp->dg.fd, in->data, rx->slots.in_cap, &src, &meta);
+    kl_ssize_t n = udp_dg(udp)->recv(udp_sp_ctx(udp), udp->dg.fd, in->data, rx->inbound.slot.cap, &src, &meta);
     if (n < 0) {
         if (kl_sock_io_status(udp_sp(udp)) == KL_IO_WOULD_BLOCK) return 0;   /* drained (would-block) */
         udp->dg.last_error = KL_ERR_IO;
@@ -529,33 +530,33 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         rx->udp   = udp;
         rx->alloc = la;
         rx->tos   = -1;
-        if (kl_dgram_slots_init(&rx->slots, la, 1, 1, udp->dg.recv_buf_size) != 0) {
+        if (kl_dgram_inbound_init(&rx->inbound, la, udp->dg.recv_buf_size) != 0) {
             kl_free(la, rx, sizeof(*rx));
             udp->dg.last_error = KL_ERR_ALLOC;
             goto fail;
         }
         rx->completion = (kl_event_caps(&udp->dg.ctx->loop) & KL_EVENT_CAP_COMPLETION) ? 1 : 0;
         int rinit = rx->completion
-            ? kl_dgram_recv_init(&rx->recv, &rx->slots, /*completion*/1, udp_rx_deliver, rx,
+            ? kl_dgram_recv_init(&rx->recv, &rx->inbound, /*completion*/1, udp_rx_deliver, rx,
                                  udp_rx_post, NULL, NULL, rx)
-            : kl_dgram_recv_init(&rx->recv, &rx->slots, /*completion*/0, udp_rx_deliver, rx,
+            : kl_dgram_recv_init(&rx->recv, &rx->inbound, /*completion*/0, udp_rx_deliver, rx,
                                  udp_rx_arm, udp_rx_disarm, udp_rx_pull, rx);
-        if (rinit != 0) {                       /* unwind the slots + holder on init failure */
-            kl_dgram_slots_free(&rx->slots);
+        if (rinit != 0) {                       /* unwind the inbound slot + holder on init failure */
+            kl_dgram_inbound_free(&rx->inbound);
             kl_free(la, rx, sizeof(*rx));
             udp->dg.last_error = KL_ERR_INVALID_ARG;
             goto fail;
         }
         rx->life = kl_dgram_life_create(la, udp, udp_rx_final, rx);   /* owner ref (refs=1, live) */
         if (!rx->life) {
-            kl_dgram_slots_free(&rx->slots);
+            kl_dgram_inbound_free(&rx->inbound);
             kl_free(la, rx, sizeof(*rx));
             udp->dg.last_error = KL_ERR_ALLOC;
             goto fail;
         }
         udp->rx = rx;
         udp->dg.rx_life  = rx->life;   /* backends read this at post time to pin the op */
-        udp->dg.recv_buf = kl_dgram_slots_inbound(&rx->slots)->data;   /* completion post + delivery */
+        udp->dg.recv_buf = kl_dgram_inbound_slot(&rx->inbound)->data;   /* completion post + delivery */
     }
 
     /* Allocate the (small) sendmmsg batch upfront where mmsg batching applies;
@@ -700,13 +701,13 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
 void kl_udp_comp_on_recv(const KlUdp *udp, const void *buf, size_t len,
                          const KlSockAddr *src, const KlUdpRxMeta *meta) {
     KlUdpRx *rx = udp_rx(udp);   /* mutation flows through the (non-const) machine, not `udp` */
-    KlDgramSlot *in = kl_dgram_slots_inbound(&rx->slots);
+    KlDgramSlot *in = kl_dgram_inbound_slot(&rx->inbound);
     /* The machine delivers from the inbound slot. On the posted-recv backends (pollcomp/IOCP) the
      * provider already wrote there (ev->buf == dg->recv_buf == in->data) so this is skipped; a
      * backend that delivers from its OWN buffer (e.g. the lwIP raw copy-ring) passes a different
      * ev->buf, so copy it into the slot (bounded by capacity). */
     if (buf && buf != in->data && len) {
-        size_t n = len <= rx->slots.in_cap ? len : rx->slots.in_cap;
+        size_t n = len <= rx->inbound.slot.cap ? len : rx->inbound.slot.cap;
         memcpy(in->data, buf, n);
     }
     in->flags = 0;

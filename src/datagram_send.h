@@ -80,7 +80,7 @@ typedef void (*KlDgramWritableFn)(void *ctx);   /* full→non-full edge (reentra
 typedef void (*KlDgramDrainFn)(void *ctx);      /* non-empty→empty edge (destructive tail) */
 
 typedef struct {
-    KlDgramSlots     *slots;         /* borrowed (step 1) — outbound slots + inbound slot */
+    KlDgramSlots     *slots;         /* borrowed — the OBJECT-owned outbound send pool */
     KlAllocator      *alloc;         /* the FIFO ring's allocator (init/free only) */
     KlDgramSlot     **ring;          /* [ring_cap] occupied slots in FIFO send order */
     size_t            ring_cap;      /* == slots->slot_count */

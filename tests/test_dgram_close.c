@@ -56,10 +56,10 @@ static void closing_deliver(void *c, const void *d, size_t n,
 static void closing_writable(void *c) { (void)c; cb_do_close(); }
 static void closing_drain(void *c)    { (void)c; cb_do_close(); }
 static KlDgramRecv  *g_ia_recv;
-static KlDgramSlots *g_ia_slots;
+static KlDgramInbound *g_ia_slots;
 static int inline_close_arm(void *ctx) {   /* posts + inline-completes into a closing delivery */
     (void)ctx;
-    KlDgramSlot *in = kl_dgram_slots_inbound(g_ia_slots);
+    KlDgramSlot *in = kl_dgram_inbound_slot(g_ia_slots);
     kl_sockaddr_from_ipv4(&in->peer, (const unsigned char *)"\x7f\0\0\1", 53);   /* mandatory peer */
     memcpy(in->data, "I", 1);
     kl_dgram_recv_on_complete(g_ia_recv, 1, 1);
@@ -78,7 +78,7 @@ static KlDgramSubmitResult reentrant_close_submit(void *ctx, const void *d, size
 /* Drive one reentrant-close-from-submit case; report observable state via out-params (ASSERT-free). */
 static void run_reentrant_close(int submit_result, int *st, int *queued, int *detached, int *closes) {
     KlDgramSlots slots; KlAllocator a = kl_allocator_default();
-    kl_dgram_slots_init(&slots, &a, 4, 64, 64);
+    kl_dgram_slots_init(&slots, &a, 4, 64);
     KlDgramSend send;
     kl_dgram_send_init(&send, &slots, &a, /*completion*/0, KL_DGRAM_CAP_CONNECTED,
                        reentrant_close_submit, NULL);
@@ -97,13 +97,14 @@ static void run_reentrant_close(int submit_result, int *st, int *queued, int *de
 }
 
 /* Fixtures: slots + a completion send + a completion recv, wired into a close coordinator. */
-typedef struct { KlDgramSlots slots; KlDgramSend send; KlDgramRecv recv; KlDgramClose close; } Fix;
+typedef struct { KlDgramSlots slots; KlDgramInbound inbound; KlDgramSend send; KlDgramRecv recv; KlDgramClose close; } Fix;
 static KlAllocator g_a;
 static void fix_init(Fix *f, unsigned caps) {   /* fixed valid args → each init returns 0 */
     g_a = kl_allocator_default();
-    kl_dgram_slots_init(&f->slots, &g_a, 4, 64, 64);
+    kl_dgram_slots_init(&f->slots, &g_a, 4, 64);        /* object-owned outbound (send) */
+    kl_dgram_inbound_init(&f->inbound, &g_a, 64);       /* life-ownable inbound (recv) */
     kl_dgram_send_init(&f->send, &f->slots, &g_a, /*completion*/1, caps, send_submit, NULL);
-    kl_dgram_recv_init(&f->recv, &f->slots, /*completion*/1, recv_deliver, NULL,
+    kl_dgram_recv_init(&f->recv, &f->inbound, /*completion*/1, recv_deliver, NULL,
                        recv_arm, NULL, NULL, NULL);
     kl_dgram_close_init(&f->close, &f->send, &f->recv, on_close_cb, NULL);
     g_send = &f->send; g_recv = &f->recv; g_close = &f->close;
@@ -114,6 +115,7 @@ static void fix_free(Fix *f) {   /* only when nothing is in flight */
     kl_dgram_recv_free(&f->recv);
     kl_dgram_send_free(&f->send);
     kl_dgram_slots_free(&f->slots);
+    kl_dgram_inbound_free(&f->inbound);
 }
 static void send_one(Fix *f) {
     KlSockAddr p; kl_sockaddr_from_ipv4(&p, (const unsigned char *)"\x7f\0\0\1", 53);
@@ -262,7 +264,7 @@ static KlDgramSubmitResult send_submit_err(void *ctx, const void *d, size_t n,
 }
 UTEST(dgram_close, error_sync_submission_during_graceful) {
     KlDgramSlots slots; KlAllocator a = kl_allocator_default();
-    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     KlDgramSend send;
     ASSERT_EQ(kl_dgram_send_init(&send, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, send_submit_err, NULL), 0);
     KlDgramClose close;
@@ -323,13 +325,15 @@ static void destructive_close(void *ctx) {
     kl_dgram_recv_free(&g_de_fix->recv);
     kl_dgram_send_free(&g_de_fix->send);
     kl_dgram_slots_free(&g_de_fix->slots);
+    kl_dgram_inbound_free(&g_de_fix->inbound);
 }
 UTEST(dgram_close, destructive_on_close_tail) {
     static Fix f;   /* static so the destructive callback frees it by pointer */
     g_a = kl_allocator_default();
-    ASSERT_EQ(kl_dgram_slots_init(&f.slots, &g_a, 4, 64, 64), 0);
+    ASSERT_EQ(kl_dgram_slots_init(&f.slots, &g_a, 4, 64), 0);
+    ASSERT_EQ(kl_dgram_inbound_init(&f.inbound, &g_a, 64), 0);
     ASSERT_EQ(kl_dgram_send_init(&f.send, &f.slots, &g_a, 1, KL_DGRAM_CAP_CONNECTED, send_submit, NULL), 0);
-    ASSERT_EQ(kl_dgram_recv_init(&f.recv, &f.slots, 1, recv_deliver, NULL, recv_arm, NULL, NULL, NULL), 0);
+    ASSERT_EQ(kl_dgram_recv_init(&f.recv, &f.inbound, 1, recv_deliver, NULL, recv_arm, NULL, NULL, NULL), 0);
     ASSERT_EQ(kl_dgram_close_init(&f.close, &f.send, &f.recv, destructive_close, NULL), 0);
     g_de_fix = &f; g_de_fired = 0;
     send_one(&f);
@@ -346,16 +350,16 @@ UTEST(dgram_close, destructive_on_close_tail) {
 
 /* close from a RECEIVE DELIVERY callback (recv-only coordinator). */
 UTEST(dgram_close, close_from_recv_delivery) {
-    KlDgramSlots slots; KlAllocator a = kl_allocator_default();
-    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramInbound inbound; KlAllocator a = kl_allocator_default();
+    ASSERT_EQ(kl_dgram_inbound_init(&inbound, &a, 64), 0);
     KlDgramRecv recv;
-    ASSERT_EQ(kl_dgram_recv_init(&recv, &slots, 1, closing_deliver, NULL,
+    ASSERT_EQ(kl_dgram_recv_init(&recv, &inbound, 1, closing_deliver, NULL,
                                  recv_arm, NULL, NULL, NULL), 0);
     KlDgramClose close;
     ASSERT_EQ(kl_dgram_close_init(&close, NULL, &recv, on_close_cb, NULL), 0);
     g_cb_close = &close; g_cb_did = 0; g_on_close = 0;
     ASSERT_EQ(kl_dgram_recv_start(&recv), 0);              /* posts; recv in flight */
-    KlDgramSlot *in = kl_dgram_slots_inbound(&slots);
+    KlDgramSlot *in = kl_dgram_inbound_slot(&inbound);
     kl_sockaddr_from_ipv4(&in->peer, (const unsigned char *)"\x7f\0\0\1", 53);   /* mandatory peer */
     memcpy(in->data, "PKT!", 4);
     ASSERT_EQ(kl_dgram_recv_on_complete(&recv, 4, 1), 0);  /* deliver → close_begin (deferred) → detach */
@@ -363,13 +367,13 @@ UTEST(dgram_close, close_from_recv_delivery) {
     ASSERT_EQ(kl_dgram_close_is_detached(&close), 1);      /* only after on_complete's frame unwinds */
     ASSERT_EQ(kl_dgram_close_free(&close), 0);
     ASSERT_EQ(kl_dgram_recv_free(&recv), 0);
-    kl_dgram_slots_free(&slots);
+    kl_dgram_inbound_free(&inbound);
 }
 
 /* close from an ON_WRITABLE callback (send-only, single slot → A fills → full→non-full fires). */
 UTEST(dgram_close, close_from_on_writable) {
     KlDgramSlots slots; KlAllocator a = kl_allocator_default();
-    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 1, 64, 64), 0);   /* one slot → A makes it full */
+    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 1, 64), 0);   /* one slot → A makes it full */
     KlDgramSend send;
     ASSERT_EQ(kl_dgram_send_init(&send, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, send_submit, NULL), 0);
     kl_dgram_send_set_writable_cb(&send, closing_writable, NULL);
@@ -390,7 +394,7 @@ UTEST(dgram_close, close_from_on_writable) {
 /* close from an ON_DRAIN callback (send-only, 4 slots → A never fills → only the drain edge fires). */
 UTEST(dgram_close, close_from_on_drain) {
     KlDgramSlots slots; KlAllocator a = kl_allocator_default();
-    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     KlDgramSend send;
     ASSERT_EQ(kl_dgram_send_init(&send, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, send_submit, NULL), 0);
     kl_dgram_send_set_drain_cb(&send, closing_drain, NULL);
@@ -410,20 +414,20 @@ UTEST(dgram_close, close_from_on_drain) {
 
 /* close from an INLINE ARM completion chain (arm() synchronously completes into a closing delivery). */
 UTEST(dgram_close, close_from_inline_arm) {
-    KlDgramSlots slots; KlAllocator a = kl_allocator_default();
-    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramInbound inbound; KlAllocator a = kl_allocator_default();
+    ASSERT_EQ(kl_dgram_inbound_init(&inbound, &a, 64), 0);
     KlDgramRecv recv;
-    ASSERT_EQ(kl_dgram_recv_init(&recv, &slots, 1, closing_deliver, NULL,
+    ASSERT_EQ(kl_dgram_recv_init(&recv, &inbound, 1, closing_deliver, NULL,
                                  inline_close_arm, NULL, NULL, NULL), 0);
     KlDgramClose close;
     ASSERT_EQ(kl_dgram_close_init(&close, NULL, &recv, on_close_cb, NULL), 0);
-    g_ia_recv = &recv; g_ia_slots = &slots; g_cb_close = &close; g_cb_did = 0; g_on_close = 0;
+    g_ia_recv = &recv; g_ia_slots = &inbound; g_cb_close = &close; g_cb_did = 0; g_on_close = 0;
     ASSERT_EQ(kl_dgram_recv_start(&recv), 0);   /* arm→inline complete→deliver→close→detach at unwind */
     ASSERT_EQ(g_on_close, 1);
     ASSERT_EQ(kl_dgram_close_is_detached(&close), 1);
     ASSERT_EQ(kl_dgram_close_free(&close), 0);
     ASSERT_EQ(kl_dgram_recv_free(&recv), 0);
-    kl_dgram_slots_free(&slots);
+    kl_dgram_inbound_free(&inbound);
 }
 
 /* ── reentrant close from the readiness DIRECT-SEND submit hook (busy-frame coverage of the fast

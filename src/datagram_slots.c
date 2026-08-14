@@ -1,9 +1,10 @@
 /*
- * datagram_slots.c — INTERNAL packet-slot storage for the datagram transport (Phase B, step 1).
+ * datagram_slots.c — INTERNAL packet-slot storage for the datagram transport (Phase B).
  *
- * See datagram_slots.h. One init-time allocation backs the outbound slot metadata array, the
- * outbound free-list, and every payload region (outbound + the dedicated inbound slot). All
- * size arithmetic is overflow-checked; acquire/release are allocation-free.
+ * See datagram_slots.h. 7A-1 storage separation: the OUTBOUND pool (KlDgramSlots — object-owned) and
+ * the INBOUND slot (KlDgramInbound — life-token-ownable) are DISTINCT allocations with distinct
+ * owners. One init-time allocation each; all size arithmetic overflow-checked; acquire/release
+ * allocation-free.
  */
 #include "datagram_slots.h"
 
@@ -31,26 +32,25 @@ static int sz_align_up(size_t x, size_t align, size_t *out) {
 }
 
 int kl_dgram_slots_init(KlDgramSlots *s, KlAllocator *a,
-                        size_t slot_count, size_t out_cap, size_t in_cap) {
+                        size_t slot_count, size_t out_cap) {
     if (!s || !a)
         return -1;
     memset(s, 0, sizeof(*s));   /* leave the object zeroed on every failure path (reusable) */
-    if (slot_count == 0 || out_cap == 0 || in_cap == 0)
+    if (slot_count == 0 || out_cap == 0)
         return -1;
 
     /* Section sizes, each checked. Layout in the block:
-     *   [ KlDgramSlot out[slot_count] ][ size_t freelist[slot_count] ][ payload bytes ]
+     *   [ KlDgramSlot out[slot_count] ][ size_t freelist[slot_count] ][ outbound payload bytes ]
      * The metadata sections are aligned so the free-list (size_t) lands on a size_t boundary;
      * payload bytes are char and need no alignment. */
-    size_t slots_bytes, free_bytes, outpay_bytes, pay_bytes, meta_bytes, total;
+    size_t slots_bytes, free_bytes, outpay_bytes, meta_bytes, total;
     if (!sz_mul(slot_count, sizeof(KlDgramSlot), &slots_bytes)) return -1;
     if (!sz_mul(slot_count, sizeof(size_t), &free_bytes))       return -1;
     if (!sz_mul(slot_count, out_cap, &outpay_bytes))           return -1;
-    if (!sz_add(outpay_bytes, in_cap, &pay_bytes))             return -1;   /* all payload bytes */
 
     if (!sz_align_up(slots_bytes, sizeof(size_t), &slots_bytes)) return -1; /* freelist alignment */
     if (!sz_add(slots_bytes, free_bytes, &meta_bytes))          return -1;
-    if (!sz_add(meta_bytes, pay_bytes, &total))                 return -1;
+    if (!sz_add(meta_bytes, outpay_bytes, &total))              return -1;
 
     unsigned char *block = kl_malloc(a, total);
     if (!block)
@@ -61,11 +61,10 @@ int kl_dgram_slots_init(KlDgramSlots *s, KlAllocator *a,
     s->block_size = total;
     s->slot_count = slot_count;
     s->out_cap    = out_cap;
-    s->in_cap     = in_cap;
     s->out        = (KlDgramSlot *)block;
     s->freelist   = (size_t *)(block + slots_bytes);
 
-    unsigned char *pay = block + meta_bytes;   /* payload region base */
+    unsigned char *pay = block + meta_bytes;   /* outbound payload region base */
     for (size_t i = 0; i < slot_count; i++) {
         memset(&s->out[i], 0, sizeof(s->out[i]));
         s->out[i].data = pay + i * out_cap;    /* i*out_cap < outpay_bytes (checked) — no overflow */
@@ -76,11 +75,6 @@ int kl_dgram_slots_init(KlDgramSlots *s, KlAllocator *a,
         s->freelist[i] = slot_count - 1 - i;
     }
     s->free_n = slot_count;
-
-    memset(&s->inbound, 0, sizeof(s->inbound));
-    s->inbound.data = pay + outpay_bytes;      /* after all outbound payloads (separate storage) */
-    s->inbound.cap  = in_cap;
-    s->inbound.tos  = -1;
     return 0;
 }
 
@@ -90,6 +84,37 @@ void kl_dgram_slots_free(KlDgramSlots *s) {
     if (s->block && s->alloc)
         kl_free(s->alloc, s->block, s->block_size);
     memset(s, 0, sizeof(*s));   /* reusable */
+}
+
+/* ── Inbound slot (its own allocation; life-token-ownable) ─────────────────────────────────── */
+
+int kl_dgram_inbound_init(KlDgramInbound *in, KlAllocator *a, size_t cap) {
+    if (!in || !a)
+        return -1;
+    memset(in, 0, sizeof(*in));   /* zeroed + reusable on every failure path */
+    if (cap == 0)
+        return -1;
+
+    unsigned char *block = kl_malloc(a, cap);   /* payload only; the slot metadata is embedded */
+    if (!block)
+        return -1;
+
+    in->alloc      = a;
+    in->block      = block;
+    in->block_size = cap;
+    memset(&in->slot, 0, sizeof(in->slot));
+    in->slot.data = block;
+    in->slot.cap  = cap;
+    in->slot.tos  = -1;
+    return 0;
+}
+
+void kl_dgram_inbound_free(KlDgramInbound *in) {
+    if (!in)
+        return;
+    if (in->block && in->alloc)
+        kl_free(in->alloc, in->block, in->block_size);
+    memset(in, 0, sizeof(*in));   /* reusable */
 }
 
 KlDgramSlot *kl_dgram_slots_acquire(KlDgramSlots *s) {

@@ -13,7 +13,7 @@
  * slot reuse). Called before every arm (completion) / pull (readiness). Never runs while a datagram
  * is held (no arm/pull in that state), so a held snapshot is preserved. */
 static void recv_reset_inbound(KlDgramRecv *r) {
-    KlDgramSlot *in = kl_dgram_slots_inbound(r->slots);
+    KlDgramSlot *in = kl_dgram_inbound_slot(r->inbound);
     memset(&in->peer,  0, sizeof(in->peer));    /* family → KL_AF_UNSPEC (0) = absent */
     memset(&in->local, 0, sizeof(in->local));
     in->len   = 0;
@@ -28,10 +28,10 @@ static void recv_reset_inbound(KlDgramRecv *r) {
  * MANDATORY peer. `reported_len` is the provider's datagram length. Returns 1 = deliverable, 0 =
  * provider contract violation (peer absent) → the caller fails without delivering. */
 static int recv_finalize(KlDgramRecv *r, size_t reported_len) {
-    KlDgramSlot *in = kl_dgram_slots_inbound(r->slots);
+    KlDgramSlot *in = kl_dgram_inbound_slot(r->inbound);
     if (kl_sockaddr_family(&in->peer) == KL_AF_UNSPEC)
         return 0;                                /* peer mandatory (invariant 7 / DNS anti-spoof) */
-    size_t   in_cap    = r->slots->in_cap;
+    size_t   in_cap    = r->inbound->slot.cap;
     int      truncated = (reported_len > in_cap) || (in->flags & KL_DGRAM_TRUNCATED);
     size_t   captured  = reported_len > in_cap ? in_cap : reported_len;
     int      has_local = (in->flags & KL_DGRAM_HAS_LOCAL) &&
@@ -47,7 +47,7 @@ static int recv_finalize(KlDgramRecv *r, size_t reported_len) {
  * only when KL_DGRAM_HAS_LOCAL is set. Reads only the canonical slot fields (set by recv_finalize),
  * so a held datagram delivers the same snapshot on resume. */
 static void recv_present(KlDgramRecv *r) {
-    KlDgramSlot *in = kl_dgram_slots_inbound(r->slots);
+    KlDgramSlot *in = kl_dgram_inbound_slot(r->inbound);
     const KlSockAddr *local = (in->flags & KL_DGRAM_HAS_LOCAL) ? &in->local : NULL;
     r->deliver(r->deliver_ctx, in->data, in->len, &in->peer, local, in->flags);
 }
@@ -60,18 +60,18 @@ static void recv_enter(KlDgramRecv *r) { if (r->on_activity) r->on_activity(r->a
 /* recv_leave is the LAST action of a public op — it may detach + free the object via the coordinator. */
 static void recv_leave(KlDgramRecv *r) { if (r->on_activity) r->on_activity(r->activity_ctx, -1); }
 
-int kl_dgram_recv_init(KlDgramRecv *r, KlDgramSlots *slots, int completion,
+int kl_dgram_recv_init(KlDgramRecv *r, KlDgramInbound *inbound, int completion,
                        KlDgramRecvDeliverFn deliver, void *deliver_ctx,
                        KlDgramRecvArmFn arm, KlDgramRecvDisarmFn disarm,
                        KlDgramRecvPullFn pull, void *hook_ctx) {
     if (!r)
         return -1;
     memset(r, 0, sizeof(*r));
-    if (!slots || slots->in_cap == 0 || !deliver || !arm)
+    if (!inbound || inbound->slot.cap == 0 || !deliver || !arm)
         return -1;
     if (!completion && (!disarm || !pull))   /* readiness pause MUST drop interest + pull to drain */
         return -1;
-    r->slots       = slots;
+    r->inbound     = inbound;
     r->completion  = completion ? 1 : 0;
     r->arm         = arm;
     r->disarm      = disarm;
@@ -170,7 +170,7 @@ int kl_dgram_recv_on_complete(KlDgramRecv *r, size_t len, int ok) {
     else if (!recv_finalize(r, len))         /* peer absent = provider contract violation — fail safe */
         { recv_fail(r); ret = -1; }
     else if (r->paused)                      /* STRICT: hold the finalized datagram (canonical slot) */
-        { r->held = 1; r->held_len = kl_dgram_slots_inbound(r->slots)->len; ret = 0; }
+        { r->held = 1; r->held_len = kl_dgram_inbound_slot(r->inbound)->len; ret = 0; }
     else
         ret = recv_deliver_and_continue(r);
     recv_leave(r);                           /* LAST action — coordinator finalize may detach (frees r) */

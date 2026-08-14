@@ -61,7 +61,7 @@ typedef void (*KlDgramRecvDeliverFn)(void *ctx, const void *data, size_t len,
                                      const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
 
 typedef struct {
-    KlDgramSlots       *slots;        /* borrowed — the INBOUND slot only */
+    KlDgramInbound     *inbound;      /* borrowed — the dedicated inbound slot (life-token-ownable) */
     int                 completion;   /* 1 = completion (post/on_complete); 0 = readiness (arm/pull) */
     KlDgramRecvArmFn    arm;
     KlDgramRecvDisarmFn disarm;       /* required for readiness */
@@ -86,9 +86,10 @@ typedef struct {
     void (*on_activity)(void *ctx, int delta); void *activity_ctx;
 } KlDgramRecv;
 
-/* Wire the receive machine over a borrowed KlDgramSlots. `completion` selects the model. Requires
- * deliver + arm; readiness additionally requires disarm + pull. No allocation. 0 / -1. */
-int  kl_dgram_recv_init(KlDgramRecv *r, KlDgramSlots *slots, int completion,
+/* Wire the receive machine over a borrowed KlDgramInbound (the dedicated inbound slot). `completion`
+ * selects the model. Requires deliver + arm; readiness additionally requires disarm + pull. No
+ * allocation. 0 / -1. */
+int  kl_dgram_recv_init(KlDgramRecv *r, KlDgramInbound *inbound, int completion,
                         KlDgramRecvDeliverFn deliver, void *deliver_ctx,
                         KlDgramRecvArmFn arm, KlDgramRecvDisarmFn disarm,
                         KlDgramRecvPullFn pull, void *hook_ctx);

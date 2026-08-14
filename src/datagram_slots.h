@@ -2,18 +2,23 @@
 #define KEEL_SRC_DATAGRAM_SLOTS_H
 
 /*
- * datagram_slots.h — INTERNAL packet-slot storage for the datagram transport (Phase B, step 1).
+ * datagram_slots.h — INTERNAL packet-slot storage for the datagram transport (Phase B).
  *
  * The frozen Tier-1 datagram contract (docs/datagram_contract.md §2/§3) requires bounded,
- * preallocated, allocation-free packet storage: a fixed number of OUTBOUND send slots plus ONE
- * dedicated INBOUND slot, kept separate so a full send queue never starves the posted receive.
+ * preallocated, allocation-free packet storage. Step-7A-1 (storage separation) splits this into two
+ * INDEPENDENTLY-OWNED objects, matching the two lifetime owners the public KlDatagram needs
+ * (docs/datagram_step7_public_api_design.md §5):
  *
- * This module owns ONLY that storage and its invariants — it is NOT yet wired into the live
- * send/receive path (no queueing, pause, truncation, or send-status semantics here; those are
- * later Phase-B steps). The whole pool (outbound slot metadata + a free-list + every slot's
- * payload region, outbound and inbound) is ONE init-time allocation; acquire/release never touch
- * the allocator. Initialization is overflow-safe and unwinds completely on failure, leaving the
- * object zeroed and safely reusable.
+ *   - KlDgramSlots   — the OUTBOUND send pool: a fixed number of equal-capacity slots + a free-list,
+ *                      ONE init-time allocation, OBJECT-owned (freed at detachment). The send half is
+ *                      payload-COPIED into backend op storage at submit, so the object may free this
+ *                      pool once the single in-flight send retires.
+ *   - KlDgramInbound — ONE dedicated inbound slot, its OWN allocation, LIFE-TOKEN-ownable (freed by
+ *                      the B.6 token's on_final). The recv half is buffer-LENT (a backend writes into
+ *                      it across the async op), so it must outlive any op that can be left dangling.
+ *
+ * Keeping them separate also means a full send pool never starves the posted receive. Both are
+ * allocation-free after init; both init overflow-safe and unwind to a zeroed, reusable object.
  *
  * INTERNAL header — not installed, no ABI commitment.
  */
@@ -45,26 +50,24 @@ typedef struct {
     unsigned char *data;      /* payload region inside the pool block (never separately freed) */
 } KlDgramSlot;
 
-/* Fixed preallocated packet-slot pool: `slot_count` outbound slots (a reserve/release free-list)
- * plus one dedicated inbound slot, all backed by a SINGLE allocation. */
+/* ── Outbound send pool (OBJECT-owned) ─────────────────────────────────────────────────────────
+ * `slot_count` equal-capacity outbound slots + a reserve/release free-list, ONE init-time
+ * allocation. No inbound slot lives here (7A-1 storage separation). */
 typedef struct {
     KlAllocator   *alloc;      /* borrowed; used only by init/free (never on acquire/release) */
-    unsigned char *block;      /* the one allocation: slot array + free-list + all payloads */
+    unsigned char *block;      /* the one allocation: slot array + free-list + outbound payloads */
     size_t         block_size; /* for kl_free */
     KlDgramSlot   *out;        /* outbound slot metadata array [slot_count] (into block) */
     size_t         slot_count; /* number of outbound slots */
     size_t         out_cap;    /* per-outbound-slot payload capacity (bytes) */
     size_t        *freelist;   /* [slot_count] free outbound indices, LIFO (into block) */
     size_t         free_n;     /* number of outbound slots currently free */
-    KlDgramSlot    inbound;    /* the dedicated inbound slot (data → into block) */
-    size_t         in_cap;     /* inbound payload capacity (bytes) */
 } KlDgramSlots;
 
-/* Allocate the pool in one block. Requires slot_count > 0, out_cap > 0, in_cap > 0. Returns 0 on
+/* Allocate the outbound pool in one block. Requires slot_count > 0, out_cap > 0. Returns 0 on
  * success; -1 on a bad argument, size-arithmetic overflow, or allocation failure — on any failure
  * the object is left zeroed (block == NULL) and safe to re-init. */
-int  kl_dgram_slots_init(KlDgramSlots *s, KlAllocator *a,
-                         size_t slot_count, size_t out_cap, size_t in_cap);
+int  kl_dgram_slots_init(KlDgramSlots *s, KlAllocator *a, size_t slot_count, size_t out_cap);
 
 /* Free the pool block and zero the object (safe to re-init; idempotent; NULL-safe). */
 void kl_dgram_slots_free(KlDgramSlots *s);
@@ -77,10 +80,27 @@ KlDgramSlot *kl_dgram_slots_acquire(KlDgramSlots *s);
  * pool's outbound slots, or not currently in use (double-release is safe). */
 void kl_dgram_slots_release(KlDgramSlots *s, KlDgramSlot *slot);
 
-/* The dedicated inbound slot (always available; independent of outbound reservation). */
-static inline KlDgramSlot *kl_dgram_slots_inbound(KlDgramSlots *s) { return &s->inbound; }
-
 /* Number of outbound slots currently free (slot_count when idle, 0 when exhausted). */
 static inline size_t kl_dgram_slots_free_count(const KlDgramSlots *s) { return s->free_n; }
+
+/* ── Inbound slot (LIFE-TOKEN-ownable) ─────────────────────────────────────────────────────────
+ * ONE dedicated inbound slot with its OWN allocation, so a B.6 KlDgramLife on_final can free it
+ * independently of (and outliving) the outbound pool + the KlUdp/KlDatagram wrapper. */
+typedef struct {
+    KlAllocator   *alloc;      /* borrowed; used only by init/free */
+    unsigned char *block;      /* the one allocation: this slot's payload region */
+    size_t         block_size; /* for kl_free */
+    KlDgramSlot    slot;       /* the inbound slot (data → into block) */
+} KlDgramInbound;
+
+/* Allocate the inbound slot's payload. Requires cap > 0. Returns 0 on success; -1 on a bad
+ * argument or allocation failure — object left zeroed (block == NULL), safe to re-init. */
+int  kl_dgram_inbound_init(KlDgramInbound *in, KlAllocator *a, size_t cap);
+
+/* Free the inbound payload and zero the object (safe to re-init; idempotent; NULL-safe). */
+void kl_dgram_inbound_free(KlDgramInbound *in);
+
+/* The inbound slot (always available). */
+static inline KlDgramSlot *kl_dgram_inbound_slot(KlDgramInbound *in) { return &in->slot; }
 
 #endif /* KEEL_SRC_DATAGRAM_SLOTS_H */

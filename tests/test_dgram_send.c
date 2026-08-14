@@ -61,7 +61,7 @@ static KlSockAddr any_peer(void) {
 /* readiness sync provider: direct fast path — no slot churn, no on_drain spam */
 UTEST(dgram_send, readiness_sync_direct) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_DONE };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/0, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
@@ -83,7 +83,7 @@ UTEST(dgram_send, readiness_sync_direct) {
 /* readiness WOULD_BLOCK queues (copy), flush drains, on_drain fires once on empty */
 UTEST(dgram_send, readiness_wouldblock_then_flush) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
@@ -109,7 +109,7 @@ UTEST(dgram_send, readiness_wouldblock_then_flush) {
 /* completion async: submit (INFLIGHT), retire via on_complete, on_drain on empty */
 UTEST(dgram_send, completion_async_retire) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
@@ -133,7 +133,7 @@ UTEST(dgram_send, completion_async_retire) {
 /* single-flight: a second send queues; only one submit until the first retires (FIFO order) */
 UTEST(dgram_send, single_flight_and_fifo_over_lifo) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     /* Scramble the LIFO free-list so acquire hands out non-sequential slots. */
     KlDgramSlot *t[4];
     for (int i = 0; i < 4; i++) t[i] = kl_dgram_slots_acquire(&slots);
@@ -167,7 +167,7 @@ UTEST(dgram_send, single_flight_and_fifo_over_lifo) {
 /* full→non-full fires on_writable once; refusal (WOULD_BLOCK) takes no ownership */
 UTEST(dgram_send, writable_edge_and_no_ownership_on_refusal) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 64, 64), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
@@ -194,7 +194,7 @@ UTEST(dgram_send, writable_edge_and_no_ownership_on_refusal) {
 /* status mapping + none take ownership */
 UTEST(dgram_send, status_mapping_and_no_ownership) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 16, 16), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 16), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, /*caps*/0, mock_submit, &mk), 0);
@@ -224,7 +224,7 @@ UTEST(dgram_send, status_mapping_and_no_ownership) {
 /* submission failure is sticky and never discards the datagram */
 UTEST(dgram_send, submit_error_is_sticky_and_retains) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_ERROR };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
@@ -252,7 +252,7 @@ static KlDgramSubmitResult inline_submit(void *ctx, const void *data, size_t len
 }
 UTEST(dgram_send, inline_completion_no_phantom) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, inline_submit, &mk), 0);
@@ -290,7 +290,7 @@ static void refill_writable(void *ctx) {
 }
 UTEST(dgram_send, writable_refill_suppresses_drain) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 1, 32, 32), 0);   /* single slot */
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 1, 32), 0);   /* single slot */
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
@@ -334,7 +334,7 @@ UTEST(dgram_send, destructive_on_drain_tail) {
     KlAllocator a = kl_allocator_default();
     static KlDgramSlots slots;   /* static so the destructive callback can free them by pointer */
     static KlDgramSend  s;
-    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 32, 32), 0);
+    ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 32), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
     g_de_s = &s; g_de_slots = &slots; g_de_fired = 0;
@@ -354,7 +354,7 @@ UTEST(dgram_send, destructive_on_drain_tail) {
 /* teardown refusal while a provider-referenced send is outstanding */
 UTEST(dgram_send, free_refused_while_inflight) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 32, 32), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 32), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
@@ -371,7 +371,7 @@ UTEST(dgram_send, free_refused_while_inflight) {
 /* the send/complete/flush hot path performs no allocation */
 UTEST(dgram_send, hot_path_is_allocation_free) {
     KlAllocator a = counting_alloc();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
     ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
@@ -405,7 +405,7 @@ UTEST(dgram_send, hot_path_is_allocation_free) {
  * datagrams releases their slots back to the borrowed pool, so a fresh machine sees full capacity. */
 UTEST(dgram_send, readiness_wouldblock_free_restores_slots) {
     KlAllocator a = kl_allocator_default();
-    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64, 64), 0);
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     int free0 = (int)kl_dgram_slots_free_count(&slots);
     Mock mk = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
     KlDgramSend s;
