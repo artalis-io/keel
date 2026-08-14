@@ -193,7 +193,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/client_common.c src/client_sync.c src/client_async.c \
            src/client_proxy.c \
            src/client_pool.c src/redirect.c src/sse.c \
-           src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_life.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
+           src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
            src/connect_op.c src/listener.c \
@@ -1201,7 +1201,7 @@ FREESTANDING_DGRAM_SRC = \
     src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
     src/datagram_slots.c src/datagram_send.c src/datagram_recv.c \
-    src/datagram_close.c src/datagram_life.c src/udp.c
+    src/datagram_close.c src/datagram_core.c src/datagram_life.c src/udp.c
 
 freestanding-lib-dgram:
 	@echo "== freestanding DATAGRAM archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
