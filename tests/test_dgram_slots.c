@@ -239,10 +239,11 @@ UTEST(dgram_inbound, separate_lifetime_from_outbound) {
     ASSERT_EQ(kl_dgram_slots_init(&out, &a, 2, 16), 0);
     ASSERT_EQ(kl_dgram_inbound_init(&in, &a, 64), 0);
 
-    /* Disjoint allocations. */
+    /* Disjoint allocations — pointer INEQUALITY only (relational `<`/`>=` across independent
+     * allocations is UB). Non-overlap is proven functionally below: freeing the outbound pool must
+     * not disturb the inbound payload, and ASan would flag any aliasing. */
     ASSERT_TRUE(out.block != in.block);
     KlDgramSlot *islot = kl_dgram_inbound_slot(&in);
-    ASSERT_TRUE(islot->data < out.block || islot->data >= out.block + out.block_size);
 
     /* Free the OUTBOUND pool first; the inbound slot stays fully usable (ASan/LSan clean). */
     kl_dgram_slots_free(&out);

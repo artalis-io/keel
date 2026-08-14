@@ -135,13 +135,20 @@ KlDgramSlot *kl_dgram_slots_acquire(KlDgramSlots *s) {
 void kl_dgram_slots_release(KlDgramSlots *s, KlDgramSlot *slot) {
     if (!s || !slot)
         return;
-    /* Must be one of THIS pool's outbound slots. */
-    if (slot < s->out || slot >= s->out + s->slot_count)
+    /* Must be one of THIS pool's outbound slots. Establish membership by pointer EQUALITY — which is
+     * defined for any two pointers — rather than relational `<`/`>=` against s->out, which is UB for a
+     * FOREIGN pointer (the API accepts one as a guarded no-op). The equality scan also yields the index
+     * for the free-list without a (foreign-pointer) subtraction. slot_count is a small fixed bound. */
+    size_t idx = s->slot_count;
+    for (size_t i = 0; i < s->slot_count; i++) {
+        if (&s->out[i] == slot) { idx = i; break; }
+    }
+    if (idx == s->slot_count)   /* not one of our slots — no-op */
         return;
     if (!slot->in_use)          /* not acquired → double-release, ignore */
         return;
     if (s->free_n >= s->slot_count)   /* defensive: free-list is full, nothing to return */
         return;
     slot->in_use = 0;
-    s->freelist[s->free_n++] = (size_t)(slot - s->out);
+    s->freelist[s->free_n++] = idx;
 }

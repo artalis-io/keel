@@ -516,9 +516,9 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
             goto fail;   /* last_error set by helper */
     }
 
-    /* Receive machine (step 6.1): allocate the KlUdpRx holder once; its dedicated INBOUND SLOT is
-     * the recv buffer (replaces the standalone recv_buf malloc — still exactly one init-time alloc
-     * for receive storage). A minimal 1×1 outbound slot is unused (the SEND queue stays legacy). */
+    /* Receive machine (step 6.1): allocate the KlUdpRx holder once; its dedicated KlDgramInbound slot
+     * (7A-1: its own allocation) is the recv buffer — exactly one init-time alloc for receive storage.
+     * No outbound pool here: the SEND queue stays the legacy byte-budget q_head/q_tail (D-COMPAT). */
     {
         /* The receive storage + its stable-liveness token are allocated from the EVENT-CONTEXT
          * allocator (not cfg->alloc) so they outlive the KlUdp wrapper: a completion op that pins
