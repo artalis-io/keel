@@ -179,12 +179,20 @@ uses for completion loops (`kl_udp_recv_start`). Rather than fold association in
 (which would add associate/detach state + a close-time detach the seam does not express, and would touch
 `KlUdp`'s only CI-tested IOCP datagram path), the **completion adapter uses the same generic
 registration IN ADDITION to post/cancel/retire** — backend-neutral (inert on io_uring/pollcomp), not
-IOCP-specific facade logic. Lifecycle (frozen): register ONCE at init before any post; on a registration
-failure `init` returns -1 with the fd NOT adopted and registration undone; at close the coordinator
-retires every op, then `kl_event_del`, then the socket close — exactly once. `KlUdp`'s lifecycle is
-unchanged. Runtime proof is the Windows IOCP CI (`smoke_datagram`); pollcomp/io_uring/readiness cannot
-exercise the association (their `kl_event_add` is inert). Mock coverage: registration-failure +
-register-before-post + deregister-before-close ordering (`tests/test_datagram_public.c`).
+IOCP-specific facade logic. **Ordering (review High — the load-bearing correction): registration is the
+LAST fallible step.** IOCP can NOT detach an ordinary socket from a completion port (`kl_event_del` is a
+no-op there; only closing the socket drops the association), so an associate-then-fail path could not be
+undone. The registration therefore runs via a `KlDgramCore` **pre-adoption hook** (`KlDgramCoreConfig.
+on_prepared`), invoked ONCE after every core allocation has succeeded and immediately before the fd is
+adopted: on failure the core unwinds all prepared allocations and returns -1 WITHOUT adopting the fd, so
+`kl_event_add`/`CreateIoCompletionPort` (if it ran at all) is the only thing that could have failed — the
+fd is NEVER left associated, and no allocation can fail after a successful association. At close the
+coordinator retires every op, then `kl_event_del`, then the socket close — exactly once (`kl_event_del`
+is symmetric bookkeeping; on IOCP the socket close does the de-association). `KlUdp`'s lifecycle is
+unchanged. Runtime proof is the Windows IOCP CI (`smoke_datagram`) — PROVISIONAL until that job is green;
+pollcomp/io_uring/readiness cannot exercise the association (their `kl_event_add` is inert). Mock
+coverage: registration-failure, register-before-post + deregister-before-close ordering, AND
+**allocation-failure-during-prep → fd never registered** (`tests/test_datagram_public.c`).
 
 ### 2.5.1 The completion-post seam must be neutralized (review High — the real blocker)
 

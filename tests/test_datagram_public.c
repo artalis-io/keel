@@ -327,6 +327,38 @@ UTEST(datagram_public, registration_ordering) {
     ASSERT_EQ(0, kl_datagram_free(&dg));
 }
 
+/* A failing allocator: forwards to the default, but the Nth malloc returns NULL — to force an
+ * allocation failure DURING core preparation, BEFORE the pre-adoption registration hook. */
+static KlAllocator g_dfl; static int g_fail_at, g_alloc_n;
+static void *fa_malloc(void *ctx, size_t size) {
+    (void)ctx; if (++g_alloc_n == g_fail_at) return NULL; return g_dfl.malloc(g_dfl.ctx, size);
+}
+static void *fa_realloc(void *ctx, void *p, size_t o, size_t n) { (void)ctx; return g_dfl.realloc(g_dfl.ctx, p, o, n); }
+static void  fa_free(void *ctx, void *p, size_t s) { (void)ctx; g_dfl.free(g_dfl.ctx, p, s); }
+static KlAllocator failing_alloc(int fail_at) {
+    g_dfl = kl_allocator_default(); g_fail_at = fail_at; g_alloc_n = 0;
+    KlAllocator a = { fa_malloc, fa_realloc, fa_free, NULL }; return a;
+}
+
+/* 7B-7 (review): an allocation failure DURING core preparation must leave the fd UN-registered — proving
+ * registration is gated behind successful prep (the pre-adoption hook), not rolled back by kl_event_del
+ * (which on IOCP is a no-op and cannot detach an ordinary socket from its port). The failing allocator
+ * fails the first core-internal allocation (#2: the facade's KlDgramCore struct is #1), which is before
+ * the registration hook — so kl_event_add must NEVER be called and the caller keeps a clean fd. */
+UTEST(datagram_public, alloc_failure_during_prep_leaves_fd_unregistered) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlSocketHandle fd = mk_fd();
+    KlAllocator fa = failing_alloc(2);
+    KlDatagramConfig c = cfg_for(fd, 4, 1500);
+    c.alloc = &fa;   /* the core allocates through this; the ctx keeps its own allocator */
+    ASSERT_EQ(-1, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(0, g_mc.add_calls);   /* registration NEVER ran — prep failed first → fd NOT associated */
+    ASSERT_EQ(0, g_mc.del_calls);   /* and no del-as-rollback was relied upon */
+    ASSERT_NE((int)KL_ERR_NONE, (int)kl_datagram_last_error(&dg));
+    (void)close((int)fd);           /* the caller keeps a clean, un-associated fd */
+}
+
 /* Terminal QUARANTINE classification (the fail-closed leak of the life-owned inbound storage) is proven
  * at the core/backend layer where the arena teardown keeps it LSan-clean — test_dgram_core (7A-3) and
  * the EFI host-mock (7B-2c retire_dgram override). The public test stays on the clean DETACHED paths so

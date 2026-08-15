@@ -112,6 +112,18 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     (void)kl_dgram_close_set_retire(&core->close, cfg->retire, cfg->retire_ctx);
     (void)kl_dgram_close_set_backend_close(&core->close, core_backend_close, core);
 
+    /* Final PRE-ADOPTION hook (7B-7) — the LAST fallible step, run only after EVERY allocation above
+     * succeeded. On abort, unwind ALL prepared state and return -1 WITHOUT adopting the fd, so a
+     * completion facade's fd↔loop registration (kl_event_add) that failed leaves the fd un-associated
+     * and re-usable. No allocation follows a successful commit. */
+    if (cfg->on_prepared && cfg->on_prepared(cfg->prepared_ctx) != 0) {
+        kl_dgram_close_free(&core->close);
+        kl_dgram_send_free(&core->send);
+        kl_dgram_slots_free(&core->out);
+        kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* runs core_rx_final → frees rx */
+        return -1;   /* fd NOT adopted; registration (if any) did not commit */
+    }
+
     rx->life           = life;
     core->alloc        = a;
     core->fd           = cfg->fd;     /* fd ADOPTED only now (init succeeded) */

@@ -63,6 +63,15 @@ typedef struct {
      * life->dispatch(target=KlDgramCore, ev). NULL (the default / neutral-adapter tests) → the token
      * carries no dispatch and completions are driven directly (kl_dgram_core_{send,recv}_on_complete). */
     KlDgramDispatchFn dispatch;
+    /* Final PRE-ADOPTION hook (7B-7). Called ONCE, as the LAST fallible step — only after EVERY core
+     * allocation has succeeded and immediately before the fd is adopted. Returns 0 to commit (fd
+     * adopted) or non-0 to abort: the core then unwinds every prepared allocation and returns -1 WITHOUT
+     * adopting the fd. Used by the completion facade to register the fd with the loop (kl_event_add →
+     * CreateIoCompletionPort on IOCP) as the last step, so a failed/non-committed init NEVER leaves the
+     * fd associated with a completion port it cannot be detached from except by closing it. NULL = no
+     * pre-adoption step (always commits). */
+    int  (*on_prepared)(void *ctx);
+    void  *prepared_ctx;
 } KlDgramCoreConfig;
 
 /* The life-owned receive holder: inbound slot + recv machine, freed as a unit by on_final so a posted

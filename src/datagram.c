@@ -232,6 +232,22 @@ static void dg_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     dg_reconcile_write(dg);
 }
 
+/* 7B-7 final PRE-ADOPTION hook: register the fd with the loop as the LAST fallible init step (after all
+ * of KlDgramCore's allocations), immediately before adoption. Completion mode does the generic
+ * kl_event_add (inert on io_uring/pollcomp, CreateIoCompletionPort on IOCP); readiness registers
+ * per-arm via a watcher, so nothing here. On failure the core unwinds without adopting the fd — so on
+ * IOCP the fd was never associated (CreateIoCompletionPort failed) and stays clean/re-usable. */
+static int dg_prepare_register(void *ctx) {
+    KlDatagram *dg = ctx;
+    if (!dg->completion) return 0;
+    if (kl_event_add(&dg->ctx->loop, dg->fd, KL_EVENT_READ, dg) < 0) {
+        dg->last_error = KL_ERR_EVENT_ADD;
+        return -1;
+    }
+    dg->registered = 1;
+    return 0;
+}
+
 /* ══ public API ═══════════════════════════════════════════════════════════════════════════════ */
 
 int kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg) {
@@ -252,20 +268,6 @@ int kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg) {
     if (!core) { dg->last_error = KL_ERR_ALLOC; return -1; }
     memset(core, 0, sizeof(*core));
 
-    /* 7B-7: a completion transport must REGISTER its fd with the loop before posting any overlapped op —
-     * the generic fd↔loop association (kl_event_add), the SAME lifecycle KlUdp uses. Inert on
-     * io_uring/pollcomp; CreateIoCompletionPort on IOCP. Do it BEFORE kl_dgram_core_init (which adopts
-     * the fd on success) so a registration failure returns -1 with the fd NOT adopted (caller keeps it),
-     * and a later core-init failure unwinds the registration. Readiness registers per-arm via a watcher. */
-    if (completion) {
-        if (kl_event_add(&cfg->ctx->loop, cfg->fd, KL_EVENT_READ, dg) < 0) {
-            kl_free(cfg->alloc, core, sizeof(*core));
-            dg->last_error = KL_ERR_EVENT_ADD;
-            return -1;   /* fd NOT adopted, NOT registered */
-        }
-        dg->registered = 1;
-    }
-
     KlDgramCoreConfig cc;
     memset(&cc, 0, sizeof(cc));
     cc.alloc = cfg->alloc; cc.fd = cfg->fd; cc.completion = completion;
@@ -284,12 +286,18 @@ int kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg) {
     cc.close_transport = dg_close_transport; cc.transport_ctx = dg;
     cc.on_close = dg_on_close; cc.close_ctx = dg;
     cc.dispatch = completion ? kl_datagram_comp_dispatch : NULL;
+    /* 7B-7: registration is the core's final pre-adoption step (dg_prepare_register), so it runs ONLY
+     * after every allocation has succeeded and never leaves the fd associated on a failed init. */
+    cc.on_prepared = dg_prepare_register; cc.prepared_ctx = dg;
 
     if (kl_dgram_core_init(core, &cc) != 0) {
-        if (dg->registered) { kl_event_del(&cfg->ctx->loop, cfg->fd); dg->registered = 0; }  /* undo 7B-7 registration */
-        kl_free(cfg->alloc, core, sizeof(*core));   /* core init took NO fd ownership on failure */
-        dg->last_error = KL_ERR_ALLOC;
-        return -1;   /* fd NOT adopted (caller keeps it); registration undone */
+        /* fd NOT adopted (caller keeps it). Registration was the last fallible step: it either did not
+         * run (an earlier allocation failed) or failed itself — so the fd is NEVER left associated, and
+         * dg->registered is 0. No kl_event_del is needed or correct here (IOCP cannot detach an ordinary
+         * socket from its port; only closing it does). */
+        kl_free(cfg->alloc, core, sizeof(*core));
+        if (dg->last_error == KL_ERR_NONE) dg->last_error = KL_ERR_ALLOC;   /* the hook set EVENT_ADD on its own failure */
+        return -1;
     }
     dg->core = core;   /* fd ownership has transferred to the core */
     return 0;
