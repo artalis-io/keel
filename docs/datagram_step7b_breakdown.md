@@ -163,7 +163,7 @@ does via `src/event_caps.h`):
 | `pull` | — | `sockets->dgram->recv` |
 | `cancel_send/recv` | `KlCompletionOps.cancel_dgram` *(new, additive)* | drop interest / no-op |
 | `retire` (§4.3 classify) | `KlCompletionOps.retire_dgram` *(new, additive; default RETIRED-on-terminal, EFI overrides QUARANTINED)* | synchronous → always RETIRED |
-| `close_transport` | `sockets->stream`/provider socket close | provider socket close |
+| `close_transport` | provider `KlSocketOps.close` | provider `KlSocketOps.close` |
 
 So `src/datagram.c` contains **two adapter builders** (`dgram_adapter_completion`,
 `dgram_adapter_readiness`) that WRAP the existing seams — **no per-backend code in the facade**. The
@@ -388,7 +388,7 @@ that backend are unchanged — `KlUdp` still rides `KlUdpTransport`).
   releases it only after CLOSED. This is the cost of keeping the installed ABI a forward decl (§1.1).
 - **New `KlCompletionOps` hooks (`cancel_dgram`/`retire_dgram`).** Added additively with defaults so
   every existing backend keeps compiling + behaving (default RETIRED-on-terminal); only EFI overrides.
-  Shape finalized in 7B-3, home frozen now (§2.5).
+  Shape frozen now (§2.5.1); lands in 7B-2.
 
 ---
 
