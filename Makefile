@@ -646,7 +646,9 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # io_uring_prep_poll_update (IORING_POLL_UPDATE_EVENTS). test_async is 19/19 over io_uring (verified
 # under ASan+UBSan in the Apple container).
 IOURING_TEST_SUITES = allocator alpn async body_reader chunked client client_happy_eyeballs client_pool \
-                          client_stream compress connection cors cross_module decompress \
+                          client_stream compress connection cors cross_module \
+                          datagram_life datagram_public datagram_live \
+                          dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots decompress \
                           dns_resolver drain error event_provider file_io h2 h2_client integration \
                           multipart_stream overflow parser peer_addr peer_cert proxy \
                           proxy_protocol read_flow_control redirect request resolver_cache \
