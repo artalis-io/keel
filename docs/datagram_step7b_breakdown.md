@@ -170,11 +170,66 @@ So `src/datagram.c` contains **two adapter builders** (`dgram_adapter_completion
 per-backend behaviour comes from each backend's already-implemented `KlCompletionOps.post_dgram_*` /
 `KlSocketProvider.dgram`, exactly as `KlUdp` gets it today.
 
-**Where the new hooks live (frozen):** `cancel_dgram` + `retire_dgram` are added **additively to
-`KlCompletionOps`** (the completion axis, `src/event_caps.h` / the completion-ops table), NOT to any
-per-backend header — so a backend that doesn't implement them gets the documented default (RETIRED on
-terminal completion). Their exact signatures are finalized in **7B-3** (the reference completion seam)
-but their HOME (`KlCompletionOps`) and default semantics are frozen now.
+### 2.5.1 The completion-post seam must be neutralized (review High — the real blocker)
+
+Today `kl_comp_post_dgram_send/recv` take `KlUdpTransport *dg` (post-rename) and **dereference the legacy
+object** for the fd, the receive buffer, the capture flags, and the `KlDgramLife *`. A public
+`KlDatagram`/`KlDgramCore` cannot be passed to them, so the completion adapter of §2.5 **cannot wrap the
+existing seam as-is** — and adding only `cancel_dgram`/`retire_dgram` does not solve *posting*. The seam
+must become **core-native / neutral** BEFORE the facade or mock encode it (else they encode an interface
+the first live backend cannot implement). Frozen as a distinct increment (**7B-2**, below).
+
+**Frozen boundary = operation DESCRIPTORS carrying everything the op needs — no transport deref.** Both
+`KlUdpTransport` (KlUdp's path) and `KlDgramCore` (the facade) BUILD these from their own state:
+
+```c
+/* keel/socket_dgram.h (completion seam, provider/axis-scoped — NOT the app API) */
+typedef struct {
+    KlSocketHandle fd;
+    const void   *data; size_t len;         /* payload — the backend COPIES it before accept */
+    const KlSockAddr *dest, *src; int tos;   /* dest UNSPEC=connected; src UNSPEC=no pin; tos -1=none */
+    struct KlDgramLife *life;                /* token ref TRANSFERRED into the op */
+} KlDgramSendOp;
+
+typedef struct {
+    KlSocketHandle fd;
+    void         *buf; size_t cap;           /* the inbound slot — LENT (life-owned), backend writes it */
+    unsigned      capture;                   /* KL_DGRAM_RX_* metadata-capture flags */
+    struct KlDgramLife *life;                /* token ref TRANSFERRED into the op */
+} KlDgramRecvOp;
+
+/* added additively to KlCompletionOps (the completion axis) */
+int  (*post_dgram_send)(struct KlEventCtx *ctx, const KlDgramSendOp *op);   /* was (…, KlUdpTransport*) */
+int  (*post_dgram_recv)(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
+int  (*cancel_dgram)(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind);
+KlDgramRetireResult (*retire_dgram)(struct KlEventCtx *ctx, struct KlDgramLife *life,
+                                    KlDgramOpKind kind, int *transport_err);
+```
+
+**Ownership-transfer rules (frozen — match the existing pollcomp/io_uring/IOCP/EFI/lwIP discipline the
+7A-3-retained backend tests cover):**
+- **Post:** the caller retains one `life` ref and TRANSFERS it into the op (the op owns it).
+- **Payload:** a send op's `data` is COPIED into backend op storage before the post returns (copy-
+  before-accept — the object-owned outbound pool is then safe to free at detachment).
+- **Recv buffer:** a recv op's `buf` is LENT (the life-owned inbound slot); the backend writes into it
+  and NEVER frees it. The completion delivers `len` + `peer` + `meta` (already how `KlCompletionEvent`
+  carries a datagram RECV).
+- **Completion:** the op's `life` ref is transferred to the completion event (`ev->life`) and released by
+  the dispatch after delivery. **Routing on a shared ctx** (KlUdp AND KlDatagram both live): the dispatch
+  recovers the owner via `kl_dgram_life_target(ev->life)` — the token's TARGET (set at token creation:
+  the `KlUdpTransport` for KlUdp, the `KlDgramCore` for the facade) — so one completion path serves both.
+  The exact owner→dispatch hook (a small kind tag / vtable on the target) is finalized in 7B-2.
+- **Cancel:** `cancel_dgram` is idempotent and does NOT release the ref; the op's terminal completion
+  (even when cancelled) releases it.
+- **Retire:** `retire_dgram` is a pure query (no ownership effect); default RETIRED-on-terminal, EFI
+  overrides QUARANTINED on an unconfirmed op.
+
+`cancel_dgram`/`retire_dgram` and the descriptor-based `post_dgram_*` are added **additively to
+`KlCompletionOps`** (the completion axis), NOT per-backend; a backend with no `retire_dgram` gets the
+default. **7B-2 (below) neutralizes this seam across ALL completion backends at once** (each backend's
+`post_dgram_*` refactored to descriptors; `KlUdp` rebuilds the descriptors from `KlUdpTransport`; full
+suite green, zero behaviour change) — so the interface is proven real on every backend BEFORE the facade
+(7B-3) or any live binding encodes it. Nothing about post/cancel/retire is deferred to a live increment.
 
 **Init failure without fd ownership (frozen):** `kl_datagram_init` selects a mode BEFORE calling
 `kl_dgram_core_init`. If the loop offers neither a datagram-capable completion seam
@@ -203,47 +258,58 @@ ownership, and the §7 open decisions. **Gate: reviewer sign-off on the frozen c
   ASan/UBSan/LSan, freestanding-dgram, lwIP loopback-raw-asan, MinGW, cosmo). The diff is a rename +
   header move; no logic changes. **This frees the `KlDatagram` / `keel/datagram.h` namespace.**
 
-### 7B-2 — public facade + headers + `test_datagram_public` (NO live backend)
-- `keel/datagram.h` (public API + promoted types) + `keel/datagram_detail.h` (layout embedding
-  `KlDgramCore`) + `src/datagram.c` (the `kl_datagram_*` facade forwarding to `KlDgramCore`, binding the
-  neutral adapter hooks to a provider+completion loop *interface* — but exercised here by a MOCK).
-- `tests/test_datagram_public.c` — drives the PUBLIC API over a scripted provider/completion mock
-  (the `test_dgram_core` adapters, one layer up): init/reuse/free-refusal, fixed-slot send geometry,
-  strict pause/resume, confirmed-detachment close + terminal result, copy-before-accept, ownership
-  (fd-on-success, free-after-close), counters. Proves the **public surface + ABI + ownership** with
-  **zero live-backend risk**. §10 matrix rows stay ⚙ (no live provider yet).
+### 7B-2 — neutralize the completion post/cancel/retire seam (§2.5.1; zero behaviour change)
+- Refactor `KlCompletionOps.post_dgram_send/recv` from `(…, KlUdpTransport *dg)` to the descriptor form
+  (`KlDgramSendOp`/`KlDgramRecvOp`), and add `cancel_dgram` + `retire_dgram`, across ALL completion
+  backends (`event_{pollcomp,iouring,iocp,efi_*}.c`, `integrations/lwip`, `completion_*.c`).
+- Re-point `KlUdp`: `udp.c` builds the descriptors from `KlUdpTransport` at post time (was: passed `dg`).
+- Freeze the shared-ctx completion routing (owner recovered via `kl_dgram_life_target`).
+- **Validation:** the WHOLE existing suite green unchanged on every gated backend — the seam is
+  behaviour-preserving; only its shape changes. This is the increment that makes the seam CORE-NATIVE, so
+  the facade and mock (7B-3) can encode an interface every live backend already implements. Kept separate
+  from the 7B-1 rename so each review is a single concern.
+
+### 7B-3 — public facade + headers + `test_datagram_public` (NO live backend)
+- `keel/datagram.h` (public API + promoted types + the `keel/socket_dgram.h` compat re-export) +
+  `keel/datagram_detail.h` (opaque-`KlDgramCore` layout, §1.1) + `src/datagram.c` (the `kl_datagram_*`
+  facade forwarding to `KlDgramCore`, with the two adapter builders of §2.5 — exercised here by a MOCK
+  completion/readiness seam).
+- `tests/test_datagram_public.c` — drives the PUBLIC API over a scripted mock (the `test_dgram_core`
+  adapters, one layer up): init/reuse/free-refusal, fixed-slot send geometry, strict pause/resume,
+  confirmed-detachment close + terminal result, copy-before-accept, ownership (fd-on-success,
+  free-after-close, alloc-failure pre-adoption), counters. Proves the **public surface + ABI + ownership**
+  with **zero live-backend risk**. §10 matrix rows stay ⚙ (no live provider yet).
 - **Validation:** macOS `make test`, container ASan/UBSan/LSan, freestanding-dgram (the facade must stay
-  freestanding-clean), MinGW/cosmo header checks.
+  freestanding-clean; the compat re-export must not cycle), MinGW/cosmo header checks.
 
-### 7B-3 … 7B-8 — LIVE backend seams (the 7A-4b work), one increment each
-Each binds `KlDgramCore`'s neutral adapters (submit / arm / disarm / pull / cancel / retire /
-close_transport) to a REAL provider + completion (or readiness) loop for that backend, adds a live
-datagram round-trip test, flips that backend's `§10` rows (send-slot + strict-pause) to ✅, and — per
-the 7A-3 reviewer note — **retains the existing backend tests** (post-failure unwind, inline/early
-completion ordering are adapter concerns proven per backend). Proposed order, easiest-to-hardest:
+### 7B-4 … 7B-9 — LIVE backend bindings (the 7A-4b work), one increment each
+Each binds the facade's adapter builders (over the now-neutral 7B-2 seam) to a REAL loop for that
+backend, adds a live datagram round-trip test, flips that backend's `§10` rows (send-slot + strict-pause)
+to ✅, and — per the 7A-3 reviewer note — **retains the existing backend tests** (post-failure unwind,
+inline/early completion ordering, proven per backend). Order easiest-to-hardest:
 
-- **7B-3 — pollcomp** (portable `poll()` completion double). Testable on any POSIX host + CI/ASan; the
-  reference completion seam. Establishes the facade↔provider binding pattern the rest reuse.
-- **7B-4 — io_uring** (Linux completion; container).
-- **7B-5 — readiness (epoll / kqueue / poll)** — the readiness datagram seam (arm/disarm/pull path).
-  `KlDatagram` supports readiness because `KlDgramCore` does; this wires it.
-- **7B-6 — IOCP** (Windows completion; MinGW cross-compile + CI).
-- **7B-7 — lwIP-raw** (completion; Apple container). Reuses the 7A-5 one-held glue.
-- **7B-8 — EFI** (freestanding; QEMU/OVMF). Reuses the EFI_UDP4 datagram provider.
+- **7B-4 — pollcomp** (portable `poll()` completion double). The reference live binding; establishes the
+  pattern the rest reuse.
+- **7B-5 — io_uring** (Linux completion; container).
+- **7B-6 — readiness (epoll / kqueue / poll)** — the readiness datagram seam (arm/disarm/pull). — the
+  **hosted CHECKPOINT** (below).
+- **7B-7 — IOCP** (Windows completion; MinGW cross-compile + CI).
+- **7B-8 — lwIP-raw** (completion; Apple container). Reuses the 7A-5 one-held glue.
+- **7B-9 — EFI** (freestanding; QEMU/OVMF). Reuses the EFI_UDP4 datagram provider. — **completion**.
 
 **Backend scope (review Medium-4).** Every backend that already exposes the datagram provider capability
-must get a working facade before the public surface is finalized/advertised STABLE — otherwise a
-consumer sees a capability with no usable API on IOCP/lwIP/EFI. So:
+must get a working facade before the public surface is finalized/advertised STABLE — else a consumer sees
+a capability with no usable API on IOCP/lwIP/EFI. So:
 
-- **7B-5 is a CHECKPOINT, not completion.** After pollcomp + io_uring + readiness the public API is
+- **7B-6 is a CHECKPOINT, not completion.** After pollcomp + io_uring + readiness the public API is
   *usable + `§8`-validated on the primary hosted backends*, but it is NOT yet advertised STABLE and the
   IOCP/lwIP-raw/EFI `§10` rows stay ⚙.
-- **7B-8 is completion** — every supported live backend (IOCP, lwIP-raw, EFI) has a working facade.
-- **STABLE + advertise happens only at 7B-9**, after 7B-8. A hosted-only early adopter can use the API
-  after the 7B-5 checkpoint (documented "usable, not yet STABLE"); the banner is not flipped until all
+- **7B-9 is completion** — every supported live backend (IOCP, lwIP-raw, EFI) has a working facade.
+- **STABLE + advertise happens only at 7B-10**, after 7B-9. A hosted-only early adopter can use the API
+  after the 7B-6 checkpoint (documented "usable, not yet STABLE"); the banner is not flipped until all
   supported backends are live.
 
-### 7B-9 — matrix + banner finalization (only after 7B-8)
+### 7B-10 — matrix + banner finalization (only after 7B-9)
 - All supported-backend `§10` rows → ✅; the STABLE banner is flipped (no "not-yet-wired" caveat
   remains); docs reconciliation (contract + this doc + the main design doc); README/site datagram entry.
 - If any supported backend is deliberately deferred beyond 7B, it stays ⚙ with an explicit note and the
@@ -256,14 +322,15 @@ consumer sees a capability with no usable API on IOCP/lwIP/EFI. So:
 | Increment | macOS | container ASan/UBSan/LSan | freestanding-dgram | lwIP raw-asan | MinGW | cosmo | QEMU/OVMF |
 |---|---|---|---|---|---|---|---|
 | 7B-1 rename | ✅ full suite | ✅ full | ✅ | ✅ | ✅ headers | ✅ | ✅ (EFI builds link) |
-| 7B-2 facade+public test | ✅ | ✅ | ✅ facade clean | — | ✅ headers | ✅ | — |
-| 7B-3 pollcomp | ✅ | ✅ live round-trip | — | — | — | — | — |
-| 7B-4 io_uring | — | ✅ live round-trip | — | — | — | — | — |
-| 7B-5 readiness | ✅ (kqueue) | ✅ (epoll) | — | — | — | — | — |
-| 7B-6 IOCP | — | — | — | — | ✅ + CI | — | — |
-| 7B-7 lwIP-raw | — | — | — | ✅ live | — | — | — |
-| 7B-8 EFI | — | — | ✅ | — | — | — | ✅ e2e |
-| 7B-9 finalize | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 7B-2 neutralize seam | ✅ full suite | ✅ full | ✅ | ✅ | ✅ | ✅ | ✅ (EFI builds link) |
+| 7B-3 facade+public test | ✅ | ✅ | ✅ facade clean | — | ✅ headers | ✅ | — |
+| 7B-4 pollcomp | ✅ | ✅ live round-trip | — | — | — | — | — |
+| 7B-5 io_uring | — | ✅ live round-trip | — | — | — | — | — |
+| 7B-6 readiness *(checkpoint)* | ✅ (kqueue) | ✅ (epoll) | — | — | — | — | — |
+| 7B-7 IOCP | — | — | — | — | ✅ + CI | — | — |
+| 7B-8 lwIP-raw | — | — | — | ✅ live | — | — | — |
+| 7B-9 EFI *(completion)* | — | — | ✅ | — | — | — | ✅ e2e |
+| 7B-10 finalize | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 Each live-backend increment ALSO keeps its existing per-backend suite green (KlUdp + protocol tests over
 that backend are unchanged — `KlUdp` still rides `KlUdpTransport`).
@@ -306,15 +373,18 @@ that backend are unchanged — `KlUdp` still rides `KlUdpTransport`).
    provider vtable in place)?
 2. **`KlDgramCore` embedding — proposed RESOLVED to opaque pointer + explicit allocation** (§1.1,
    review High-1): confirm, or require the by-value installed core-layout header family instead.
-3. **Backend scope (review Medium-4)** — confirm 7B-5 = hosted CHECKPOINT (usable, not STABLE) and
-   7B-8 = completion (every supported live backend), with STABLE/advertise only at 7B-9; or a different
+3. **Backend scope (review Medium-4)** — confirm 7B-6 = hosted CHECKPOINT (usable, not STABLE) and
+   7B-9 = completion (every supported live backend), with STABLE/advertise only at 7B-10; or a different
    line for what "7B done" requires.
-4. **Live adapter boundary (§2.5)** — confirm the facade-owns-two-builders model over existing seams,
-   `cancel_dgram`/`retire_dgram` added additively to `KlCompletionOps`, and the pre-adoption init-failure
-   contract for a loop lacking a datagram seam.
-5. **`KlUdp` permanence** — confirm `KlUdp` stays on `KlUdpTransport` permanently (never re-based on the
+4. **Completion-post seam neutralization (§2.5.1, review High)** — confirm the descriptor-based
+   `post_dgram_send/recv` (`KlDgramSendOp`/`KlDgramRecvOp`) + `cancel_dgram`/`retire_dgram` on
+   `KlCompletionOps`, the transfer/lend/copy ownership rules, and the shared-ctx routing via
+   `kl_dgram_life_target` — landed as 7B-2 (all backends) BEFORE the facade.
+5. **Live adapter boundary (§2.5)** — confirm the facade-owns-two-builders model over existing seams and
+   the pre-adoption init-failure contract for a loop lacking a datagram seam.
+6. **`KlUdp` permanence** — confirm `KlUdp` stays on `KlUdpTransport` permanently (never re-based on the
    public `KlDatagram`), so the two surfaces coexist by design.
-6. **fd-preparation contract** — confirm the caller prepares the fd via `sockets->dgram`
+7. **fd-preparation contract** — confirm the caller prepares the fd via `sockets->dgram`
    (`socket`/`configure`/`bind`) before `kl_datagram_init`, and `KlDatagram` sets no sockopt (§2).
 
 **No 7B code — not even the mechanical rename — begins until these are frozen.**
