@@ -65,7 +65,11 @@ typedef struct KlEventCtx {
      * the UDP stack. The event arg is a const KlCompletionEvent* (opaque here, exactly as
      * KlEventOps.completion). Additive — appended after `sockets`, do not reorder. */
     void (*comp_conn_dispatch)(struct KlEventCtx *ctx, const void *ev);  /* ACCEPT/READ/WRITE → server */
-    void (*comp_udp_dispatch)(struct KlEventCtx *ctx, const void *ev);   /* UDP_RECV/UDP_SEND → udp */
+    /* 7B-2a removed the datagram completion hook `comp_udp_dispatch` that sat here: datagram completions
+     * (UDP_RECV/UDP_SEND) are now routed by each token's own KlDgramDispatchFn (life->dispatch), so a
+     * KlUdp coexists with a public KlDatagram on one ctx. This is an INTENTIONAL pre-release ABI break —
+     * the datagram API is being reshaped in this branch and no released consumer holds this slot — so the
+     * field is dropped outright rather than kept as dead reserved clutter. */
 } KlEventCtx;
 
 /**

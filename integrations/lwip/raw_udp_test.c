@@ -52,9 +52,14 @@
 #include <string.h>
 
 /* The stable-liveness token (src/datagram_life.h), forward-declared so this test manages op tokens for
- * the glue-level T7 without pulling the src/ header. Resolves against libkeel's datagram_life.o. */
+ * the glue-level T7 without pulling the src/ header. Resolves against libkeel's datagram_life.o.
+ * (7B-2a: create gained the {kind, dispatch} completion-routing identity — unused here, so NULL.) */
 typedef struct KlDgramLife KlDgramLife;
-KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx);
+typedef enum { KL_DGRAM_OWNER_UDP = 0, KL_DGRAM_OWNER_DATAGRAM } KlDgramOwnerKind;
+struct KlCompletionEvent;
+typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);
+KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx,
+                                  KlDgramOwnerKind kind, KlDgramDispatchFn dispatch);
 void         kl_dgram_life_release(KlDgramLife *l);
 static void  t7_noop_final(void *ctx) { (void)ctx; }
 
@@ -297,8 +302,8 @@ static int t7_glue_unarmed_drop(void) {
     if (!rx || !tx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T7: rx bind"); }
     uint16_t port = kl_lwr_udp_local_port(rx);
 
-    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL);   /* owner ref each */
-    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL);
+    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);   /* owner ref each */
+    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
     if (!lrx || !ltx) {                 /* release whichever succeeded (NULL-safe) before teardown */
         kl_dgram_life_release(lrx);
         kl_dgram_life_release(ltx);

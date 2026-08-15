@@ -76,8 +76,9 @@ void kl_udp_comp_on_send(KlUdp *udp, size_t len);
  * (KL_COMP_DGRAM_RECV / KL_COMP_DGRAM_SEND) to kl_udp_comp_on_recv / kl_udp_comp_on_send.
  * Registered on the ctx by kl_udp_init, so the generic tick reaches the UDP stack
  * without a static reference — a client-only build links neither udp.c nor these.
- * `evp` is a const KlCompletionEvent* (opaque const void* at the hook seam). */
-struct KlEventCtx;
-void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp);
+ * 7B-2a: the KL_DGRAM_OWNER_UDP token's KlDgramDispatchFn — `target` is the live KlUdp (NULL once
+ * dead), `ev` the datagram completion whose transferred ref it releases after dispatch. */
+struct KlCompletionEvent;
+void kl_udp_comp_dispatch(void *target, const struct KlCompletionEvent *ev);
 
 #endif /* KEEL_SRC_UDP_INTERNAL_H */

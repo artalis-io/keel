@@ -19,6 +19,7 @@
 #include <keel/event_ctx.h>      /* KlEventCtx + kl_event_dispatch */
 #include <keel/timer.h>          /* kl_timer_fire — due timers on the completion tick */
 #include "completion.h"          /* the abstract completion axis (KlCompletionEvent) */
+#include "datagram_life.h"       /* KlDgramLife dispatch — type-safe datagram completion routing (7B-2a) */
 #include "io_engine.h"           /* kl_comp_run (the seam this TU defines) */
 
 #define KL_COMP_MAX_EVENTS 64
@@ -42,13 +43,20 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
             if (ctx->comp_conn_dispatch)
                 ctx->comp_conn_dispatch(ctx, &ev[i]);
             break;
-        /* Datagram completions → the udp stack (via the ctx hook, set by kl_udp_init).
-         * NULL when no UDP socket runs on this loop. */
+        /* Datagram completions → the owner named by the token (7B-2a): type-safe routing via the
+         * token's own dispatch handler (KlUdp or, from 7B-3, KlDatagram), NOT a ctx-global hook or an
+         * untyped downcast of kl_dgram_life_target(). A dead token yields a NULL target the handler
+         * drops; a token with no handler (or ev->life NULL) still has its transferred ref released. */
         case KL_COMP_DGRAM_RECV:
-        case KL_COMP_DGRAM_SEND:
-            if (ctx->comp_udp_dispatch)
-                ctx->comp_udp_dispatch(ctx, &ev[i]);
+        case KL_COMP_DGRAM_SEND: {
+            KlDgramLife *life = ev[i].life;
+            KlDgramDispatchFn d = life ? kl_dgram_life_dispatch(life) : (KlDgramDispatchFn)0;
+            if (d)
+                d(kl_dgram_life_target(life), &ev[i]);   /* handler releases life after dispatch */
+            else if (life)
+                kl_dgram_life_release(life);              /* no handler → drop the transferred ref */
             break;
+        }
         case KL_COMP_CONNECT:
             /* An outbound connect finished (LC-0). The consumer is the async KlClient, not
              * the server driver — so route it exactly like KL_COMP_WATCHER: the backend has

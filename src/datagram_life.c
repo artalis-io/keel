@@ -13,10 +13,13 @@ struct KlDgramLife {
     void        *target;                /* the owner (KlUdp), or NULL once dead */
     void       (*on_final)(void *ctx);  /* frees owner receive storage on the final release */
     void        *final_ctx;
+    KlDgramOwnerKind  kind;             /* completion-routing identity (7B-2a) */
+    KlDgramDispatchFn dispatch;         /* the owner's completion handler */
 };
 
 KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target,
-                                  void (*on_final)(void *final_ctx), void *final_ctx) {
+                                  void (*on_final)(void *final_ctx), void *final_ctx,
+                                  KlDgramOwnerKind kind, KlDgramDispatchFn dispatch) {
     if (!alloc)
         return NULL;
     KlDgramLife *l = kl_malloc(alloc, sizeof(*l));
@@ -28,7 +31,16 @@ KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target,
     l->target    = target;
     l->on_final  = on_final;
     l->final_ctx = final_ctx;
+    l->kind      = kind;
+    l->dispatch  = dispatch;
     return l;
+}
+
+KlDgramOwnerKind kl_dgram_life_kind(const KlDgramLife *l) {
+    return l ? l->kind : KL_DGRAM_OWNER_UDP;
+}
+KlDgramDispatchFn kl_dgram_life_dispatch(const KlDgramLife *l) {
+    return l ? l->dispatch : (KlDgramDispatchFn)0;
 }
 
 void kl_dgram_life_retain(KlDgramLife *l) {

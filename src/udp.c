@@ -437,10 +437,9 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
         return -1;
     }
     udp->dg.ctx = cfg->ctx;
-    /* Route datagram completions on this ctx to the UDP stack (set once; harmless if
-     * set repeatedly by multiple UDP sockets sharing a ctx). On a readiness loop this
-     * hook is simply never consulted. */
-    cfg->ctx->comp_udp_dispatch = kl_udp_comp_dispatch;
+    /* 7B-2a: datagram completions route through the per-token dispatch handler installed at
+     * kl_dgram_life_create (below), not a ctx-global hook — so KlUdp coexists with a public
+     * KlDatagram on a shared ctx. On a readiness loop the token/dispatch is simply never consulted. */
     udp->dg.alloc = cfg->alloc ? cfg->alloc : cfg->ctx->alloc;
     if (!udp->dg.alloc) {
         udp->dg.last_error = KL_ERR_INVALID_ARG;
@@ -547,7 +546,8 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
             udp->dg.last_error = KL_ERR_INVALID_ARG;
             goto fail;
         }
-        rx->life = kl_dgram_life_create(la, udp, udp_rx_final, rx);   /* owner ref (refs=1, live) */
+        rx->life = kl_dgram_life_create(la, udp, udp_rx_final, rx,    /* owner ref (refs=1, live) */
+                                        KL_DGRAM_OWNER_UDP, kl_udp_comp_dispatch);
         if (!rx->life) {
             kl_dgram_inbound_free(&rx->inbound);
             kl_free(la, rx, sizeof(*rx));
@@ -729,21 +729,18 @@ void kl_udp_comp_on_send(KlUdp *udp, size_t len) {
         udp->on_drain(udp, udp->drain_ud);
 }
 
-/* The comp_udp_dispatch hook (completion_core.c → here): route a datagram completion to
- * kl_udp_comp_on_recv / kl_udp_comp_on_send. Registered on the ctx by kl_udp_init so the
- * generic tick reaches the UDP stack without a static reference (a client-only build
- * links neither). The src/local KlSockAddr + GRO/truncation meta logic moved here from
- * the old kl_comp_run UDP branch. */
-void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp) {
-    (void)ctx;
-    const KlCompletionEvent *ev = evp;
-    /* Recover the owner through the STABLE TOKEN (NULL once dead). ALL completion backends are on the
-     * token path (Phase B.6: pollcomp/io_uring/IOCP/lwIP-raw), so every datagram completion carries
-     * ev->life and the ref was transferred from the posted op; the legacy ev->target (KlUdp-deref)
-     * recovery is gone. A dgram event without a token (ev->life == NULL) yields a NULL owner and is
-     * safely dropped/retired below — never a dereference of a possibly-freed KlUdpTransport. */
+/* The datagram completion handler named by a KL_DGRAM_OWNER_UDP token (7B-2a; completion_core.c →
+ * here via life->dispatch): route a datagram completion to kl_udp_comp_on_recv / kl_udp_comp_on_send.
+ * Installed on each token at kl_dgram_life_create (kl_udp_init), so the generic tick reaches the UDP
+ * stack without a static reference (a client-only build links neither) AND KlUdp coexists with a
+ * public KlDatagram on a shared ctx. `target` is the live owner (KlUdp, NULL once dead), already
+ * resolved by the driver via kl_dgram_life_target(). The src/local KlSockAddr + GRO/truncation meta
+ * logic lives here. */
+void kl_udp_comp_dispatch(void *target, const KlCompletionEvent *ev) {
+    /* `ev->life` is the transferred ref this handler releases after dispatch; `target` is its live
+     * owner (NULL once dead → retire/drop below, never a deref of a possibly-freed KlUdpTransport). */
     KlDgramLife *life = ev->life;
-    KlUdp *udp = life ? (KlUdp *)kl_dgram_life_target(life) : NULL;
+    KlUdp *udp = (KlUdp *)target;
     switch (ev->kind) {
     case KL_COMP_DGRAM_RECV: {
         KlUdpRx *rx = udp ? udp_rx(udp) : NULL;

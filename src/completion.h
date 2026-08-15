@@ -60,7 +60,7 @@ typedef enum {
  * `target` is the consumer the event belongs to, disambiguated by `kind`:
  * KlStream* for READ/WRITE (the HTTP adapter recovers the KlConn). ACCEPT carries no target (the
  * generic tick recovers the server from its KlEventCtx). UDP kinds use `life`, not `target`. */
-typedef struct {
+typedef struct KlCompletionEvent {
     void          *target;     /* KlStream* (READ/WRITE); the HTTP adapter recovers the containing
                                 * KlConn (kl_conn_of_stream). A completion backend never holds/derefs
                                 * a KlConn. UNUSED for UDP kinds — they carry `life` (below). */

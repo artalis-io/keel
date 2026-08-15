@@ -80,7 +80,11 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
         kl_free(a, rx, sizeof(*rx));
         return -1;
     }
-    KlDgramLife *life = kl_dgram_life_create(a, core, core_rx_final, rx);   /* owner ref (refs=1) */
+    /* Owner ref (refs=1). Dispatch is NULL here: KlDgramCore's neutral adapters drive completions
+     * directly (kl_dgram_core_recv_on_complete), not through the completion-driver's life->dispatch.
+     * 7B-3 (the live facade) installs kl_datagram_comp_dispatch on real-backend tokens. */
+    KlDgramLife *life = kl_dgram_life_create(a, core, core_rx_final, rx,
+                                             KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
     if (!life) {
         kl_dgram_inbound_free(&rx->inbound);
         kl_free(a, rx, sizeof(*rx));
