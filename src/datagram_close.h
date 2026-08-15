@@ -34,6 +34,7 @@
 
 #include "datagram_send.h"
 #include "datagram_recv.h"
+#include "datagram_life.h"   /* KlDgramOpKind + KlDgramRetireResult (shared with the completion seam) */
 
 typedef enum {
     KL_DGRAM_CLOSE_OPEN = 0,       /* lifecycle PHASE (not the terminal result) */
@@ -50,16 +51,9 @@ typedef enum {
     KL_DGRAM_CLOSE_ERROR       /* terminal transport error AND every op nevertheless RETIRED (§4.3) */
 } KlDatagramCloseResult;
 
-/* Per-op retirement classification the backend reports to the coordinator (§4.3). PENDING keeps the
- * object CLOSING; the coordinator joins only once no op is PENDING. `transport_err` (out) is set to 1
- * iff a terminal transport error occurred on that op — it becomes CLOSE_ERROR ONLY when every op is
- * RETIRED (a close/cancel error with uncertain ownership must be QUARANTINED, never CLOSE_ERROR). */
-typedef enum {
-    KL_DGRAM_RETIRE_PENDING = 0,
-    KL_DGRAM_RETIRE_RETIRED,
-    KL_DGRAM_RETIRE_QUARANTINED
-} KlDgramRetireResult;
-typedef enum { KL_DGRAM_OP_RECV = 0, KL_DGRAM_OP_SEND } KlDgramOpKind;
+/* Per-op retirement classifier the backend reports to the coordinator (§4.3): the coordinator joins
+ * only once no op is PENDING. KlDgramRetireResult + KlDgramOpKind now live in datagram_life.h (shared
+ * with the completion seam KlCompletionOps.retire_dgram). */
 typedef KlDgramRetireResult (*KlDgramRetireFn)(void *ctx, KlDgramOpKind kind, int *transport_err);
 
 typedef void (*KlDgramCloseFn)(void *ctx, KlDatagramCloseResult result);  /* detachment (fires once) */

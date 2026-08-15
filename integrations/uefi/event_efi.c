@@ -452,6 +452,49 @@ static int el_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) 
     efi_dgram_pump_sends(sop->fd);        /* post it now if the socket's Tx token is free */
     return 0;
 }
+
+/* Cancel the outstanding datagram op(s) of `kind` for `life` (7B-2): request the firmware Cancel on the
+ * matching POSTED op (a queued/unposted send touched no firmware — nothing to cancel). The return is
+ * IGNORED: ref release stays with the drain/el_close op_state classifier (never here), so cancel is
+ * idempotent + does not double-release. Confirmed retirement then surfaces via retire_dgram. */
+static int el_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+    (void)ctx;
+    EfiDgramKind want = (kind == KL_DGRAM_OP_SEND) ? EFI_DG_SEND : EFI_DG_RECV;
+    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++) {
+        EfiDgramOp *op = &g_efi.dgram[i];
+        if (!op->in_use || op->life != life || op->kind != want) continue;
+        if (want == EFI_DG_SEND) {
+            if (op->posted) (void)kl_uefi_udp_cancel_send(op->fd, op->generation);
+        } else {
+            (void)kl_uefi_udp_cancel_recv(op->fd, op->generation);
+        }
+    }
+    return 0;
+}
+
+/* Classify retirement (§4.3, 7B-2) — the EFI-distinctive path. Mirrors el_close's per-op decision: a
+ * never-posted send touched no firmware → RETIRED; else consult the substrate — STALE_RETIRED/RETIRED →
+ * RETIRED, PENDING/DELIVERED (live, not yet reaped) → PENDING, QUARANTINED/INVALID (unconfirmed) →
+ * QUARANTINED (fail-closed, the override no other backend needs). No matching op → already retired. */
+static KlDgramRetireResult el_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+                                           KlDgramOpKind kind, int *transport_err) {
+    (void)ctx;
+    if (transport_err) *transport_err = 0;
+    EfiDgramKind want = (kind == KL_DGRAM_OP_SEND) ? EFI_DG_SEND : EFI_DG_RECV;
+    for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS; i++) {
+        EfiDgramOp *op = &g_efi.dgram[i];
+        if (!op->in_use || op->life != life || op->kind != want) continue;
+        KlUefiUdpOpResult st = (want == EFI_DG_SEND && !op->posted)
+            ? KL_UEFI_UDP_OP_STALE_RETIRED
+            : kl_uefi_udp_op_state(op->fd, op->generation);
+        if (st == KL_UEFI_UDP_OP_STALE_RETIRED || st == KL_UEFI_UDP_OP_RETIRED)
+            return KL_DGRAM_RETIRE_RETIRED;
+        if (st == KL_UEFI_UDP_OP_PENDING || st == KL_UEFI_UDP_OP_DELIVERED)
+            return KL_DGRAM_RETIRE_PENDING;
+        return KL_DGRAM_RETIRE_QUARANTINED;   /* QUARANTINED / INVALID → fail-closed */
+    }
+    return KL_DGRAM_RETIRE_RETIRED;
+}
 #endif /* KEEL_UEFI_DATAGRAM */
 
 /* drain: surface completed Connect tokens (stale-guarded) as KL_COMP_CONNECT, then
@@ -688,8 +731,10 @@ static const KlCompletionOps EFI_COMP_OPS = {
 #ifdef KEEL_UEFI_DATAGRAM
     .post_dgram_recv = el_post_dgram_recv,   /* 6.4b-3b: datagram completion recv (EFI_UDP4 Receive) */
     .post_dgram_send = el_post_dgram_send,   /* 6.4b-3b: datagram completion send (EFI_UDP4 Transmit) */
-    /* TCP-only builds leave post_dgram_* NULL — no datagram socket is ever created there, so the
-     * completion core never dispatches to them (KEEL_UEFI_DATAGRAM off → the ops above don't exist). */
+    .cancel_dgram    = el_cancel_dgram,      /* 7B-2: request firmware Cancel (release stays with drain/close) */
+    .retire_dgram    = el_retire_dgram,      /* 7B-2: §4.3 classifier — the EFI QUARANTINE override */
+    /* TCP-only builds leave the datagram ops (post/cancel/retire) NULL — no datagram socket is ever
+     * created there, so the completion core never dispatches to them (KEEL_UEFI_DATAGRAM off). */
 #endif
     /* post_sendfile = NULL: file responses (S-6) are out of scope for the S-4 plaintext
      * server. The CLIENT's stream send/recv still ride the SYNC socket provider relayed as

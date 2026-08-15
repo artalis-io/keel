@@ -138,6 +138,13 @@ typedef struct KlCompletionOps {
      * backend never dereferences a transport. See io_engine.h KlDgramSendOp/KlDgramRecvOp + ownership. */
     int  (*post_dgram_recv)(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
     int  (*post_dgram_send)(struct KlEventCtx *ctx, const KlDgramSendOp *op);
+    /* Datagram cancel/retire seam (7B-2): key an op by its KlDgramLife token + kind (no transport
+     * deref). cancel_dgram requests cancellation (idempotent, no ref release — the terminal completion
+     * releases); retire_dgram is a pure §4.3 classifier query (PENDING/RETIRED/QUARANTINED). The 7B-3
+     * facade binds the KlDgramClose cancel/retire hooks to these. See io_engine.h kl_comp_cancel_dgram. */
+    int  (*cancel_dgram)(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind);
+    KlDgramRetireResult (*retire_dgram)(struct KlEventCtx *ctx, struct KlDgramLife *life,
+                                        KlDgramOpKind kind, int *transport_err);
     /* Post one outbound connect on `fd` (a nonblocking socket the client created + owns)
      * to `addr`; its completion is surfaced as KL_COMP_CONNECT targeting `watcher_udata`
      * (the tagged KlWatcher the client registered on `fd`). LC-0 — the client-side

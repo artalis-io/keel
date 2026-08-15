@@ -698,6 +698,37 @@ static int iou_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     return 0;
 }
 
+/* Cancel the outstanding datagram op(s) of `kind` for `life` (7B-2): mark aborted + post an
+ * IORING_OP_ASYNC_CANCEL SQE (mirrors iou_comp_cancel). The op stays tracked until its (cancelled)
+ * CQE drains and releases the token ref — so this is idempotent and does NOT release the ref here. */
+static int iou_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+    KlIouState *st = ctx->loop._backend;
+    IouOpType want = (kind == KL_DGRAM_OP_SEND) ? IOU_DGRAM_SEND : IOU_DGRAM_RECV;
+    for (KlIouOp *o = st->ops; o; o = o->next)
+        if (o->life == life && o->type == want && !o->aborted) {
+            o->aborted = 1;
+            struct io_uring_sqe *sqe = iou_sqe(st);
+            if (sqe) {
+                io_uring_prep_cancel(sqe, o, 0);
+                io_uring_sqe_set_data(sqe, NULL);   /* sentinel — ignore the cancel CQE */
+            }
+        }
+    return 0;
+}
+
+/* Classify retirement (§4.3): a matching op still tracked in st->ops is PENDING (its cancelled CQE
+ * has not yet drained + released); none tracked means it physically retired. io_uring never
+ * quarantines — a posted op always yields a terminal CQE the drain reaps. */
+static KlDgramRetireResult iou_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+                                                 KlDgramOpKind kind, int *transport_err) {
+    KlIouState *st = ctx->loop._backend;
+    IouOpType want = (kind == KL_DGRAM_OP_SEND) ? IOU_DGRAM_SEND : IOU_DGRAM_RECV;
+    if (transport_err) *transport_err = 0;
+    for (const KlIouOp *o = st->ops; o; o = o->next)
+        if (o->life == life && o->type == want) return KL_DGRAM_RETIRE_PENDING;
+    return KL_DGRAM_RETIRE_RETIRED;
+}
+
 /* Post an outbound connect (LC-0) via IORING_OP_CONNECT. The dest is marshalled into the op's
  * peer storage (kernel reads it until the CQE), which must stay valid — it lives in the op, so
  * it does. On completion iou_complete surfaces KL_COMP_CONNECT against the client's tagged
@@ -1009,7 +1040,8 @@ static int iou_shutdown_accepts(struct KlServer *s) {
 static const KlCompletionOps iou_completion_ops = {
     iou_comp_drain, iou_comp_prime_accepts, iou_comp_post_recv, iou_comp_post_send,
     iou_comp_post_accept, iou_comp_post_sendfile, iou_comp_cancel,
-    iou_comp_post_dgram_recv, iou_comp_post_dgram_send, iou_comp_post_connect,
+    iou_comp_post_dgram_recv, iou_comp_post_dgram_send,
+    iou_comp_cancel_dgram, iou_comp_retire_dgram, iou_comp_post_connect,
     iou_shutdown_accepts,
 };
 

@@ -49,6 +49,22 @@ typedef enum {
     KL_DGRAM_OWNER_DATAGRAM     /* target = KlDgramCore (kl_datagram_comp_dispatch, 7B-3) */
 } KlDgramOwnerKind;
 
+/* Which side of a datagram op a completion-axis cancel/retire query targets (7B-2). Shared by the
+ * completion backend seam (KlCompletionOps.cancel_dgram/retire_dgram) and the close coordinator
+ * (datagram_close.h KlDgramRetireFn), so it lives on this transport-neutral token header. */
+typedef enum { KL_DGRAM_OP_RECV = 0, KL_DGRAM_OP_SEND } KlDgramOpKind;
+
+/* Per-op retirement classification a completion backend reports to the close coordinator (§4.3).
+ * PENDING keeps the object CLOSING (a cancelled completion op not yet drained); RETIRED = physically
+ * done (storage safe to free); QUARANTINED = could NOT be confirmed retired (EFI unconfirmed op →
+ * fail-closed, ref abandoned). `transport_err` (out) is 1 iff a terminal transport error occurred on
+ * the op — it becomes CLOSE_ERROR ONLY when every op is RETIRED (never under quarantine). */
+typedef enum {
+    KL_DGRAM_RETIRE_PENDING = 0,
+    KL_DGRAM_RETIRE_RETIRED,
+    KL_DGRAM_RETIRE_QUARANTINED
+} KlDgramRetireResult;
+
 /* The owner's completion handler. `target` is the live owner (kl_dgram_life_target(), NULL once dead);
  * the handler routes the event and RELEASES the event's transferred token ref after dispatch. */
 typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);

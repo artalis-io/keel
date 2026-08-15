@@ -20,11 +20,11 @@
 #include <stddef.h>   /* size_t (kl_comp_post_dgram_send) */
 #include <keel/handle.h>   /* KlSocketHandle (kl_comp_cancel) */
 #include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_dgram_send) */
+#include "datagram_life.h" /* KlDgramLife + KlDgramOpKind/KlDgramRetireResult (cancel_dgram/retire_dgram) */
 
 struct KlServer;
 struct KlEventCtx;
 struct KlUdpTransport;   /* legacy datagram transport (KlUdp's) — the CALLER, not passed to the seam */
-struct KlDgramLife;      /* stable-liveness token — carried in the op descriptors below */
 struct sockaddr;
 
 /* ── Neutral datagram completion-op descriptors (7B-2b) ───────────────────────────────────────
@@ -117,6 +117,20 @@ int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
  * backend COPIES the payload + dest/src/tos before a successful return; the completion surfaces a
  * KL_COMP_DGRAM_SEND. Ownership per KlDgramSendOp. Stubbed in io_engine.c on non-completion builds. */
 int kl_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *op);
+
+/* Request cancellation of the outstanding datagram op(s) of `kind` belonging to `life` (7B-2). The
+ * completion adapter (7B-3) binds a KlDgramClose cancel hook to this. Idempotent; does NOT release the
+ * token ref — the op's terminal completion (even when cancelled) releases it. Stubbed on non-completion
+ * builds. */
+int kl_comp_cancel_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind);
+
+/* Classify the retirement of `life`'s datagram op(s) of `kind` for the close coordinator (§4.3, 7B-2).
+ * Pure query (no ownership effect): PENDING while a cancelled completion op has not yet drained; RETIRED
+ * once physically done; QUARANTINED when a backend cannot confirm retirement (EFI unconfirmed op).
+ * `*transport_err` is set to 1 iff a terminal transport error occurred. Stubbed on non-completion
+ * builds. */
+KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life,
+                                         KlDgramOpKind kind, int *transport_err);
 
 /* Post one outbound connect on a completion loop (LC-0). `fd` is a nonblocking socket the
  * async KlClient created and owns; `addr` is the destination; `watcher_udata` is the tagged

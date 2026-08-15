@@ -583,6 +583,31 @@ static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp
     return 0;
 }
 
+/* Cancel the outstanding datagram op(s) of `kind` for `life` (7B-2): CancelIoEx the matching
+ * overlapped(s) — the forced ERROR_OPERATION_ABORTED completion drains + releases the token ref (the
+ * same mechanism the per-fd cancel relies on). Idempotent; NO ref release here. */
+static int iocp_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+    KlIocpState *st = ctx->loop._backend;
+    KlIocpOpType want = (kind == KL_DGRAM_OP_SEND) ? KL_IOCP_DGRAM_SEND : KL_IOCP_DGRAM_RECV;
+    for (KlIocpOp *o = st->ops; o; o = o->g_next)
+        if (o->life == life && o->type == want)
+            CancelIoEx((HANDLE)(uintptr_t)o->op_sock, &o->ov);
+    return 0;
+}
+
+/* Classify retirement (§4.3): a matching op still in the global registry is PENDING (its aborted
+ * completion has not yet drained + released); none tracked means it physically retired. IOCP never
+ * quarantines — a posted overlapped always yields a completion the drain reaps. */
+static KlDgramRetireResult iocp_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+                                                  KlDgramOpKind kind, int *transport_err) {
+    KlIocpState *st = ctx->loop._backend;
+    KlIocpOpType want = (kind == KL_DGRAM_OP_SEND) ? KL_IOCP_DGRAM_SEND : KL_IOCP_DGRAM_RECV;
+    if (transport_err) *transport_err = 0;
+    for (const KlIocpOp *o = st->ops; o; o = o->g_next)
+        if (o->life == life && o->type == want) return KL_DGRAM_RETIRE_PENDING;
+    return KL_DGRAM_RETIRE_RETIRED;
+}
+
 /* Fetch the ConnectEx extension pointer for `s` (per-socket WSAIoctl, as MSDN requires). */
 static LPFN_CONNECTEX iocp_get_connectex(SOCKET s) {
     LPFN_CONNECTEX fn = NULL;
@@ -1036,7 +1061,8 @@ static int iocp_shutdown_accepts(struct KlServer *s) {
 static const KlCompletionOps iocp_completion_ops = {
     iocp_comp_drain, iocp_comp_prime_accepts, iocp_comp_post_recv, iocp_comp_post_send,
     iocp_comp_post_accept, iocp_comp_post_sendfile, iocp_comp_cancel,
-    iocp_comp_post_dgram_recv, iocp_comp_post_dgram_send, iocp_comp_post_connect,
+    iocp_comp_post_dgram_recv, iocp_comp_post_dgram_send,
+    iocp_comp_cancel_dgram, iocp_comp_retire_dgram, iocp_comp_post_connect,
     iocp_shutdown_accepts,
 };
 

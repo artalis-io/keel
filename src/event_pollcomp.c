@@ -356,6 +356,30 @@ static int pc_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *
     return 0;
 }
 
+/* Cancel the outstanding datagram op(s) of `kind` for `life` (7B-2): mark them aborted so the next
+ * drain delivers their terminal completion (which releases the token ref). Idempotent; NO ref release
+ * here. Pollcomp has no in-kernel op — "cancel" just flips the abort flag on the tracked op. */
+static int pc_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+    KlPcState *st = ctx->loop._backend;
+    PcOpType want = (kind == KL_DGRAM_OP_SEND) ? PC_DGRAM_SEND : PC_DGRAM_RECV;
+    for (KlPcOp *o = st->ops; o; o = o->next)
+        if (o->life == life && o->type == want) o->aborted = 1;
+    return 0;
+}
+
+/* Classify retirement (§4.3): a matching op still tracked in st->ops is PENDING (its cancelled
+ * completion has not yet drained + released); none tracked means it physically retired. Pollcomp
+ * never quarantines — a portable double where every posted op completes in a drain. */
+static KlDgramRetireResult pc_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+                                                KlDgramOpKind kind, int *transport_err) {
+    KlPcState *st = ctx->loop._backend;
+    PcOpType want = (kind == KL_DGRAM_OP_SEND) ? PC_DGRAM_SEND : PC_DGRAM_RECV;
+    if (transport_err) *transport_err = 0;
+    for (const KlPcOp *o = st->ops; o; o = o->next)
+        if (o->life == life && o->type == want) return KL_DGRAM_RETIRE_PENDING;
+    return KL_DGRAM_RETIRE_RETIRED;
+}
+
 /* Post an outbound connect (LC-0): issue the real nonblocking connect() now (the client
  * already made the fd nonblocking), then poll POLLOUT and read SO_ERROR on completion — a
  * genuine, portable connect completion (not a fake readiness relay). On connect() returning
@@ -716,7 +740,8 @@ static int pc_shutdown_accepts(struct KlServer *s) {
 const KlCompletionOps kl_pollcomp_completion_ops = {
     pc_comp_drain, pc_comp_prime_accepts, pc_comp_post_recv, pc_comp_post_send,
     pc_comp_post_accept, pc_comp_post_sendfile, pc_comp_cancel,
-    pc_comp_post_dgram_recv, pc_comp_post_dgram_send, pc_comp_post_connect,
+    pc_comp_post_dgram_recv, pc_comp_post_dgram_send,
+    pc_comp_cancel_dgram, pc_comp_retire_dgram, pc_comp_post_connect,
     pc_shutdown_accepts,
 };
 

@@ -1617,6 +1617,9 @@ static void t_dgram_life_delivered_recv(void) {
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
     memcpy(g_udp_resp, "abc", 3); g_udp_resp_len = 3; g_udp_receive_mode = TOK_COMPLETE_OK;
     CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (op ref retained → 2)");
+    int terr = 9;   /* 7B-2: a posted-but-undrained op is live → retire says PENDING, not RETIRED */
+    CHECK(COMP(ep)->retire_dgram(NULL, life, KL_DGRAM_OP_RECV, &terr) == KL_DGRAM_RETIRE_PENDING,
+          "7B-2 retire_dgram: live posted recv → PENDING");
     KlCompletionEvent evs[4];
     int dn = COMP(ep)->drain(NULL, evs, 4, 0);
     int idx = -1; for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_RECV) idx = i;
@@ -1626,6 +1629,9 @@ static void t_dgram_life_delivered_recv(void) {
     CHECK(g_on_final_ran == 0, "on_final NOT run yet (event + owner refs outstanding)");
     if (idx >= 0) kl_dgram_life_release(evs[idx].life);   /* dispatch releases after delivery */
     CHECK(g_on_final_ran == 0, "still not run (owner ref remains)");
+    CHECK(COMP(ep)->retire_dgram(NULL, life, KL_DGRAM_OP_RECV, &terr) == KL_DGRAM_RETIRE_RETIRED,
+          "7B-2 retire_dgram: delivered+drained recv → RETIRED (op physically gone)");
+    CHECK(terr == 0, "7B-2 retire_dgram: no transport error on a clean retirement");
     kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop (kl_udp_free) */
     CHECK(g_on_final_ran == 1, "on_final RAN once event + owner refs released (confirmed retirement)");
     kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
@@ -1820,6 +1826,10 @@ static void t_dgram_life_quarantine_recv(void) {
     CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (→ 2)");
     g_cancel_signals = 0;
     kl_uefi_udp_close(fd);   /* unconfirmed → quarantine */
+    int terr = 7;
+    CHECK(COMP(ep)->retire_dgram(NULL, life, KL_DGRAM_OP_RECV, &terr) == KL_DGRAM_RETIRE_QUARANTINED,
+          "7B-2 retire_dgram: unconfirmed Rx → QUARANTINED (the EFI override)");
+    CHECK(terr == 0, "7B-2 retire_dgram: no transport error flagged under quarantine");
     kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
     KlCompletionEvent evs[4];
     (void)COMP(ep)->drain(NULL, evs, 4, 0);   /* QUARANTINED → RETAIN (no release) */
@@ -1844,6 +1854,9 @@ static void t_dgram_life_quarantine_send(void) {
     CHECK(mock_post_dgram_send(ep, &dg, "x", 1, &dest) == 0, "post_dgram_send (→ 2)");
     g_cancel_signals = 0;
     kl_uefi_udp_close(fd);   /* unconfirmed → quarantine (Tx) */
+    int terr = 7;
+    CHECK(COMP(ep)->retire_dgram(NULL, life, KL_DGRAM_OP_SEND, &terr) == KL_DGRAM_RETIRE_QUARANTINED,
+          "7B-2 retire_dgram: unconfirmed Tx → QUARANTINED (the EFI override)");
     kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
     KlCompletionEvent evs[4];
     (void)COMP(ep)->drain(NULL, evs, 4, 0);
@@ -1851,6 +1864,36 @@ static void t_dgram_life_quarantine_send(void) {
     talloc_free_all();
     CHECK(g_on_final_ran == 0, "on_final still never ran (retention proven)");
     kl_uefi_event_provider_reset();
+}
+
+/* 7B-2 completion cancel seam: cancel_dgram requests the firmware Cancel on the posted op, is
+ * idempotent, and RELEASES NOTHING itself — the op ref is released by the drain/close op_state
+ * classifier (never by cancel), so exactly one release runs (no leak, no double-release). */
+static void t_dgram_cancel_idempotent(void) {
+    T_CASE("dgram 7B-2: cancel_dgram returns 0, idempotent, releases no ref itself (drain/close does)");
+    reset_counters(); talloc_reset(); g_on_final_ran = 0;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int owner = 0;
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
+    unsigned char rbuf[64];
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
+    dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
+    g_udp_receive_mode = TOK_HANG;   /* posted, never self-completes — cancel drives its retirement */
+    CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (→ 2)");
+    g_cancel_signals = 1;            /* a confirmed cancel */
+    CHECK(COMP(ep)->cancel_dgram(NULL, life, KL_DGRAM_OP_RECV) == 0, "cancel_dgram returns 0");
+    CHECK(g_on_final_ran == 0, "cancel_dgram released NOTHING (owner + op refs intact)");
+    CHECK(COMP(ep)->cancel_dgram(NULL, life, KL_DGRAM_OP_RECV) == 0, "cancel_dgram idempotent (2nd call)");
+    CHECK(g_on_final_ran == 0, "still nothing released after the idempotent 2nd cancel");
+    /* Retire the op the ordinary way — clean close + drain releases the (single) op ref → on_final. */
+    kl_uefi_udp_close(fd);
+    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    KlCompletionEvent evs[4];
+    (void)COMP(ep)->drain(NULL, evs, 4, 0);
+    CHECK(g_on_final_ran == 1, "op ref released by drain/close → on_final RAN once (no leak/double-release)");
+    kl_uefi_event_provider_reset(); talloc_free_all();
 }
 
 /* poll_recv no-copy mode: a LIVE signalled receive polled with copy_into==NULL recycles the
@@ -2066,6 +2109,7 @@ int main(void) {
     t_dgram_send_fifo_hole_reuse();
     t_dgram_life_stale_release_recv();
     t_dgram_teardown_clean_release();
+    t_dgram_cancel_idempotent();      /* 7B-2 cancel_dgram — clean (retires via close+drain) */
     t_udp_quarantine_unconfirmed();   /* leaks one udp slot by design — runs last of the udp set */
     t_udp_quarantine_tx();            /* leaks one udp slot by design */
     t_udp_sync_send_quarantine();     /* leaks one udp slot by design */

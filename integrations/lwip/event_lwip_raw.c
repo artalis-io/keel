@@ -562,6 +562,20 @@ static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     return rc;
 }
 
+/* 7B-2 cancel/retire seam. The lwIP-raw glue OWNS the datagram op lifetime (its own retain/transfer/
+ * release discipline), and recv/send complete synchronously in the drain — userspace, no in-kernel op
+ * to cancel and no unconfirmed-retirement risk. So cancel is a no-op (interest is dropped by the glue
+ * at teardown) and retire always reports RETIRED; lwIP never quarantines. */
+static int lwr_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+    (void)ctx; (void)life; (void)kind; return 0;
+}
+static KlDgramRetireResult lwr_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+                                                 KlDgramOpKind kind, int *transport_err) {
+    (void)ctx; (void)life; (void)kind;
+    if (transport_err) *transport_err = 0;
+    return KL_DGRAM_RETIRE_RETIRED;
+}
+
 /* ── drain: one lwIP tick, then translate per-slot pending state into completion events ──
  * fix #4: there is no global completion ring. First tick lwIP (so the tcp_* callbacks update
  * per-slot state), then (a) drain per-slot ACCEPT/WRITE/terminal completions via kl_lwr_drain,
@@ -759,6 +773,7 @@ static int lwr_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
 static const KlCompletionOps lwip_raw_completion_ops = {
     lwr_comp_drain, lwr_comp_prime_accepts, lwr_comp_post_recv, lwr_comp_post_send,
     lwr_comp_post_accept, lwr_comp_post_sendfile, lwr_comp_cancel,
-    lwr_comp_post_dgram_recv, lwr_comp_post_dgram_send, lwr_comp_post_connect,
+    lwr_comp_post_dgram_recv, lwr_comp_post_dgram_send,
+    lwr_comp_cancel_dgram, lwr_comp_retire_dgram, lwr_comp_post_connect,
     NULL,   /* shutdown_accepts: autonomous accept model (never installs a listener) — no-op */
 };
