@@ -384,8 +384,8 @@ limitation · ⚙ to build.
 |---|---|---|---|---|---|---|---|
 | Serial recv, one per op (armed source ≠ op) | ✅ (drain≤N/tick, serial) | ✅ | ✅ | ✅ | ✅ | ⚙ (16-slot ring accumulates >1 held pkt — needs one-held-slot rework) | ✅ (1 self-rearming Rx token, 6.4b) |
 | Atomic whole-packet send | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (1 Tx token, 6.4b) |
-| Packet-slot bounded **send** queue | ⚙ (recast from byte-FIFO) | ⚙ | ⚙ | ⚙ | ⚙ | ⚙ (no preallocated atomic send-slot queue; the 16-slot ring is receive-side) | ⚙ |
-| Strict pause (post no more recv) | ⚙ (drop interest) | ⚙ | ⚙ (latch) | ⚙ (latch) | ⚙ (latch) | ⚙ | ⚙ |
+| Packet-slot bounded **send** queue | ⚙ (recast from byte-FIFO) | ⚙ | ✅ (7B-4: KlDatagram fixed-slot over the live facade) | ⚙ | ⚙ | ⚙ (no preallocated atomic send-slot queue; the 16-slot ring is receive-side) | ⚙ |
+| Strict pause (post no more recv) | ⚙ (drop interest) | ⚙ | ✅ (7B-4: strict latch over the live facade) | ⚙ (latch) | ⚙ (latch) | ⚙ | ⚙ |
 | Cancel-once + confirmed detachment | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring/memset) | ✅ (stable token + Cancel + confirmed-retire-or-quarantine, 6.4b) |
 | Lifetime: no op refs object after detach | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring) | ✅ (B.6 stable token, 6.4b) |
 | `peer` (source) on every recv | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (native `EFI_UDP4_SESSION_DATA`) |
