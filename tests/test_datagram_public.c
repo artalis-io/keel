@@ -19,6 +19,8 @@
 
 #include "../src/completion.h"      /* KlCompletionEvent + KL_COMP_DGRAM_* */
 #include "../src/datagram_life.h"   /* kl_dgram_life_dispatch/_target — drive completions like the driver */
+#include "../src/socket.h"          /* KlSocketProvider / KlSocketOps — the close-ordering mock provider */
+#include <unistd.h>                 /* close() */
 
 #include <string.h>
 #include <sys/socket.h>
@@ -40,12 +42,16 @@ typedef struct {
     /* retire scripting */
     KlDgramRetireResult retire_result;
     int                 cancels;
+    /* 7B-7 fd↔loop registration (kl_event_add/del) + lifecycle ordering (monotonic seq) */
+    int                 add_calls, del_calls, add_fail;
+    int                 seq, add_seq, first_post_seq, del_seq, close_seq;
 } MockComp;
 static MockComp g_mc;
 
 static int mc_post_send(struct KlEventCtx *ctx, const KlDgramSendOp *op) {
     (void)ctx;
     if (g_mc.send_fail) return -1;   /* transfer-only-on-success: caller releases its ref */
+    if (!g_mc.first_post_seq) g_mc.first_post_seq = ++g_mc.seq;
     g_mc.send_life = op->life;       /* the transferred ref rides the op */
     g_mc.send_len  = op->len < sizeof(g_mc.send_copy) ? op->len : sizeof(g_mc.send_copy);
     memcpy(g_mc.send_copy, op->data, g_mc.send_len);   /* copy-before-accept (provider contract) */
@@ -55,6 +61,7 @@ static int mc_post_send(struct KlEventCtx *ctx, const KlDgramSendOp *op) {
 }
 static int mc_post_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op) {
     (void)ctx;
+    if (!g_mc.first_post_seq) g_mc.first_post_seq = ++g_mc.seq;
     g_mc.recv_life = op->life; g_mc.recv_buf = op->buf; g_mc.recv_cap = op->cap;
     g_mc.recv_posted++;
     return 0;
@@ -71,7 +78,25 @@ static const KlCompletionOps MC_COMP = {
     .cancel_dgram = mc_cancel, .retire_dgram = mc_retire,
 };
 static unsigned mc_caps(const KlEventLoop *loop) { (void)loop; return KL_EVENT_CAP_COMPLETION; }
-static const KlEventOps MC_EVOPS = { .caps = mc_caps, .completion = &MC_COMP };
+/* 7B-7: the facade registers/deregisters the fd with the loop via the generic kl_event_add/del — the
+ * mock records them + can force a registration failure. `add` records BEFORE any post; `del` before close. */
+static int mc_add(KlEventLoop *loop, KlSocketHandle fd, KlEventMask mask, void *udata) {
+    (void)loop; (void)fd; (void)mask; (void)udata;
+    if (g_mc.add_fail) return -1;
+    g_mc.add_calls++; g_mc.add_seq = ++g_mc.seq; return 0;
+}
+static int mc_del(KlEventLoop *loop, KlSocketHandle fd) {
+    (void)loop; (void)fd; g_mc.del_calls++; g_mc.del_seq = ++g_mc.seq; return 0;
+}
+static const KlEventOps MC_EVOPS = { .caps = mc_caps, .completion = &MC_COMP, .add = mc_add, .del = mc_del };
+
+/* A mock socket provider whose only job is to record the close ordering (del must precede close). It
+ * actually closes the fd so no descriptor leaks. Completion mode never calls its dgram send/recv. */
+static int mc_sock_close(void *pctx, KlSocketHandle fd) {
+    (void)pctx; g_mc.close_seq = ++g_mc.seq; return close((int)fd);
+}
+static const KlSocketOps MC_SOCK_OPS = { .close = mc_sock_close };
+static const KlSocketProvider MC_SP = { .ops = &MC_SOCK_OPS };
 
 /* Drive the pending SEND / RECV completion exactly as the real driver: life->dispatch(target, ev). */
 static void drive_send(int ok) {
@@ -257,6 +282,48 @@ UTEST(datagram_public, pause_holds_one_then_resume_delivers) {
     ASSERT_EQ(0, memcmp(g_recv_buf, "held", 4));
     ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
     drive_recv_cancelled();
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
+/* 7B-7: a completion transport registers its fd with the loop (kl_event_add) before posting. A
+ * registration FAILURE must fail init cleanly — nothing adopted, posted, or closed; the caller keeps
+ * the fd. (Mirrors KlUdp's fd↔loop lifecycle; inert on io_uring/pollcomp, CreateIoCompletionPort on IOCP.) */
+UTEST(datagram_public, registration_failure_keeps_fd) {
+    mk_ctx(); mc_reset();
+    g_mc.add_fail = 1;   /* the loop refuses to register the fd */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlSocketHandle fd = mk_fd();
+    KlDatagramConfig c = cfg_for(fd, 4, 1500);
+    ASSERT_EQ(-1, kl_datagram_init(&dg, &c));
+    ASSERT_EQ((int)KL_ERR_EVENT_ADD, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(0, g_mc.add_calls);     /* add returned -1, recorded nothing */
+    ASSERT_EQ(0, g_mc.recv_posted);   /* nothing posted (init never reached the core) */
+    ASSERT_EQ(0, g_mc.send_posted);
+    ASSERT_EQ(0, g_mc.close_seq);      /* fd NOT closed — the caller retains it */
+    (void)close((int)fd);
+}
+
+/* 7B-7 lifecycle ordering: register BEFORE the first post; on close, deregister BEFORE the socket close
+ * (retire → kl_event_del → close, exactly once). Uses the mock socket provider to observe the close. */
+UTEST(datagram_public, registration_ordering) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 4, 1500);
+    c.sockets = &MC_SP;   /* observe the close ordering */
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(1, g_mc.add_calls);     /* registered exactly once at init */
+    ASSERT_EQ(0, g_mc.recv_posted);   /* ...before any post */
+    kl_datagram_on_close(&dg, on_close, NULL); g_close_calls = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));
+    ASSERT_TRUE(g_mc.add_seq > 0 && g_mc.first_post_seq > 0);
+    ASSERT_TRUE(g_mc.add_seq < g_mc.first_post_seq);   /* register BEFORE posting */
+    ASSERT_EQ(0, kl_datagram_close_begin(&dg));
+    drive_recv_cancelled();
+    ASSERT_EQ((int)KL_DGRAM_CLOSE_CLOSED, (int)kl_datagram_close_state(&dg));
+    ASSERT_EQ((int)KL_DGRAM_DETACHED, (int)kl_datagram_close_result(&dg));
+    ASSERT_EQ(1, g_mc.del_calls);     /* deregistered exactly once */
+    ASSERT_TRUE(g_mc.del_seq > 0 && g_mc.close_seq > 0);
+    ASSERT_TRUE(g_mc.del_seq < g_mc.close_seq);   /* deregister BEFORE the socket close */
     ASSERT_EQ(0, kl_datagram_free(&dg));
 }
 

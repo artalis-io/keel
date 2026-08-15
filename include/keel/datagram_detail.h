@@ -39,6 +39,9 @@ struct KlDatagram {
     uint64_t                truncated; /* count of delivered captured-prefix (KL_DGRAM_TRUNCATED) datagrams */
     uint64_t                dropped;   /* RESERVED: 0 until the recv machine surfaces overflow/contract drops */
     int                     completion;/* 1 = completion mode / 0 = readiness mode */
+    int                     registered;/* completion: the fd is registered with the loop (kl_event_add) —
+                                        * the generic fd↔loop association step (7B-7): inert on
+                                        * io_uring/pollcomp, CreateIoCompletionPort on IOCP */
     int                     read_armed;/* readiness: a watcher is installed on `fd` */
     unsigned                want_mask; /* readiness: desired KlEventMask (READ | WRITE) */
 };

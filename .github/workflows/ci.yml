@@ -208,6 +208,10 @@ jobs:
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-udp
 
+      - name: Link + public KlDatagram roundtrip smoke test
+        timeout-minutes: 3
+        run: make OS=windows CC=gcc smoke-datagram
+
       - name: Link + DNS resolver init/resolve smoke test
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-dns
@@ -273,6 +277,14 @@ jobs:
       - name: End-to-end UDP-over-IOCP datagram roundtrip smoke test
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-udp
+
+      # Public KlDatagram-over-IOCP (7B-7): smoke_datagram preps its fds through the socket seam and
+      # drives a real roundtrip + clean DETACHED close over the IOCP loop. This is the RUNTIME proof of
+      # the facade's completion fd<->loop registration (kl_event_add -> CreateIoCompletionPort) — the
+      # path pollcomp/io_uring cannot exercise (their kl_event_add is inert).
+      - name: End-to-end KlDatagram-over-IOCP roundtrip smoke test
+        timeout-minutes: 3
+        run: make OS=windows BACKEND=iocp CC=gcc smoke-datagram
 
   sanitizers:
     name: ASan + UBSan

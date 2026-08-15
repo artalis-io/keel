@@ -16,6 +16,13 @@
  *
  * fd ownership transfers to KlDatagram ONLY on a successful kl_datagram_init (the core adopts it then);
  * the close machine's backend-retirement step closes it exactly once. KlUdp is untouched (D-COMPAT §6).
+ *
+ * 7B-7: the COMPLETION adapter additionally uses the GENERIC fd↔loop registration (kl_event_add at init,
+ * kl_event_del at close) — the same lifecycle KlUdp uses for completion loops. This is NOT part of the
+ * post/cancel/retire datagram seam; it is inert on io_uring/pollcomp and CreateIoCompletionPort on IOCP.
+ * Register once before posting; on registration failure init fails without adopting the fd; at close the
+ * coordinator retires every op, then kl_event_del, then the socket close — exactly once. (See the 7B-7
+ * design resolution in docs/datagram_step7b_breakdown.md §2.5.)
  */
 
 #include <keel/datagram.h>
@@ -191,8 +198,16 @@ static KlDgramRetireResult dg_rdy_retire(void *ctx, KlDgramOpKind kind, int *tra
 /* ── shared adapters ──────────────────────────────────────────────────────────────────────────── */
 static void dg_close_transport(void *ctx, KlSocketHandle fd) {
     KlDatagram *dg = ctx;
-    if (dg->read_armed && kl_handle_valid(dg->fd)) { kl_watcher_del(dg->ctx, dg->fd); dg->read_armed = 0; }
-    dg->want_mask = 0;
+    /* The close machine has already retired every op (cancel + drained) before this backend-retirement
+     * step. Now, EXACTLY ONCE: remove the fd↔loop registration, then close the socket. Completion mode
+     * uses the generic kl_event_del (7B-7, symmetric with the init kl_event_add — inert on
+     * io_uring/pollcomp, the IOCP association drops on the close); readiness removes its watcher. */
+    if (dg->completion) {
+        if (dg->registered && kl_handle_valid(dg->fd)) { kl_event_del(&dg->ctx->loop, dg->fd); dg->registered = 0; }
+    } else {
+        if (dg->read_armed && kl_handle_valid(dg->fd)) { kl_watcher_del(dg->ctx, dg->fd); dg->read_armed = 0; }
+        dg->want_mask = 0;
+    }
     (void)kl_sock_close(dg->sockets, fd);
 }
 static void dg_deliver(void *ctx, const void *data, size_t len,
@@ -237,6 +252,20 @@ int kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg) {
     if (!core) { dg->last_error = KL_ERR_ALLOC; return -1; }
     memset(core, 0, sizeof(*core));
 
+    /* 7B-7: a completion transport must REGISTER its fd with the loop before posting any overlapped op —
+     * the generic fd↔loop association (kl_event_add), the SAME lifecycle KlUdp uses. Inert on
+     * io_uring/pollcomp; CreateIoCompletionPort on IOCP. Do it BEFORE kl_dgram_core_init (which adopts
+     * the fd on success) so a registration failure returns -1 with the fd NOT adopted (caller keeps it),
+     * and a later core-init failure unwinds the registration. Readiness registers per-arm via a watcher. */
+    if (completion) {
+        if (kl_event_add(&cfg->ctx->loop, cfg->fd, KL_EVENT_READ, dg) < 0) {
+            kl_free(cfg->alloc, core, sizeof(*core));
+            dg->last_error = KL_ERR_EVENT_ADD;
+            return -1;   /* fd NOT adopted, NOT registered */
+        }
+        dg->registered = 1;
+    }
+
     KlDgramCoreConfig cc;
     memset(&cc, 0, sizeof(cc));
     cc.alloc = cfg->alloc; cc.fd = cfg->fd; cc.completion = completion;
@@ -257,9 +286,10 @@ int kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg) {
     cc.dispatch = completion ? kl_datagram_comp_dispatch : NULL;
 
     if (kl_dgram_core_init(core, &cc) != 0) {
+        if (dg->registered) { kl_event_del(&cfg->ctx->loop, cfg->fd); dg->registered = 0; }  /* undo 7B-7 registration */
         kl_free(cfg->alloc, core, sizeof(*core));   /* core init took NO fd ownership on failure */
         dg->last_error = KL_ERR_ALLOC;
-        return -1;
+        return -1;   /* fd NOT adopted (caller keeps it); registration undone */
     }
     dg->core = core;   /* fd ownership has transferred to the core */
     return 0;

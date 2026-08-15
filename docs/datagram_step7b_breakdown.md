@@ -170,6 +170,22 @@ So `src/datagram.c` contains **two adapter builders** (`dgram_adapter_completion
 per-backend behaviour comes from each backend's already-implemented `KlCompletionOps.post_dgram_*` /
 `KlSocketProvider.dgram`, exactly as `KlUdp` gets it today.
 
+**7B-7 design resolution — the completion fd↔loop registration (against this mapping).** The frozen
+completion seam is `post/cancel/retire` (§2.5.1) — it has **no socket-association lifecycle**. But a
+completion transport must register its fd with the loop before posting overlapped ops: on IOCP that is
+`CreateIoCompletionPort(fd, port)`; on io_uring/pollcomp it is inert. This is NOT part of the datagram
+seam — it is the **generic `kl_event_add`/`kl_event_del` event-loop registration** that `KlUdp` already
+uses for completion loops (`kl_udp_recv_start`). Rather than fold association into the IOCP `post_dgram`
+(which would add associate/detach state + a close-time detach the seam does not express, and would touch
+`KlUdp`'s only CI-tested IOCP datagram path), the **completion adapter uses the same generic
+registration IN ADDITION to post/cancel/retire** — backend-neutral (inert on io_uring/pollcomp), not
+IOCP-specific facade logic. Lifecycle (frozen): register ONCE at init before any post; on a registration
+failure `init` returns -1 with the fd NOT adopted and registration undone; at close the coordinator
+retires every op, then `kl_event_del`, then the socket close — exactly once. `KlUdp`'s lifecycle is
+unchanged. Runtime proof is the Windows IOCP CI (`smoke_datagram`); pollcomp/io_uring/readiness cannot
+exercise the association (their `kl_event_add` is inert). Mock coverage: registration-failure +
+register-before-post + deregister-before-close ordering (`tests/test_datagram_public.c`).
+
 ### 2.5.1 The completion-post seam must be neutralized (review High — the real blocker)
 
 Today `kl_comp_post_dgram_send/recv` take `KlUdpTransport *dg` (post-rename) and **dereference the legacy

@@ -672,6 +672,15 @@ smoke-udp: $(SMOKE_UDP_BIN)
 $(SMOKE_UDP_BIN): tests/smoke_udp.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
 
+# Public KlDatagram link + roundtrip smoke — the runtime proof of the facade's completion fd↔loop
+# registration (7B-7). On BACKEND=iocp it exercises CreateIoCompletionPort (the Windows IOCP CI gate);
+# pollcomp/io_uring/readiness run it too (their kl_event_add is inert / a readiness watcher).
+SMOKE_DATAGRAM_BIN = tests/smoke_datagram$(EXE)
+smoke-datagram: $(SMOKE_DATAGRAM_BIN)
+	./$(SMOKE_DATAGRAM_BIN)
+$(SMOKE_DATAGRAM_BIN): tests/smoke_datagram.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
+
 # DNS resolver link + init/resolve smoke test — the Windows CI gate for
 # dns_sys_win.c (iphlpapi config discovery). Single-threaded event loop.
 SMOKE_DNS_BIN = tests/smoke_dns$(EXE)
