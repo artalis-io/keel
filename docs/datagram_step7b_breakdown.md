@@ -47,6 +47,12 @@ end-state proposed here (open for review — see §7):
   provider-scoped header **`keel/socket_dgram.h`** (included by `keel/socket.h`). It is the
   `KlSocketProvider.dgram` seam and stays named `KlDatagramOps` (a provider concept, not the app API).
   Freeing `keel/datagram.h` of the provider vtable is what lets the public API take that header.
+  **Source-compat (review Medium-3):** relocating `KlDatagramOps` out of `<keel/datagram.h>` would break
+  existing provider authors who `#include <keel/datagram.h>` directly. To keep it source-compatible, the
+  **new public `<keel/datagram.h>` re-includes `<keel/socket_dgram.h>`** (a compatibility re-export), so
+  `KlDatagramOps` + the descriptor types stay visible through the old include path. The move is then a
+  relocation, not a break; if a future major version wants to drop the re-export it is classified +
+  documented then. (Guard against an include cycle: `socket_dgram.h` must not include `datagram.h`.)
 - **Public fixed-slot API** takes the freed **`keel/datagram.h`** (functions + `KlDatagram` handle) and
   **`keel/datagram_detail.h`** (the public layout). `KlDatagramMessage/SendStatus/CloseResult` are
   promoted from `src/` into `keel/datagram.h` (their contracts are already frozen; only the header
@@ -65,31 +71,41 @@ The surface, `KlDatagramConfig`, and the STABLE banner are already frozen in
 `docs/datagram_step7_public_api_design.md` §1 — pinned here verbatim by reference, not restated. 7B-0
 additionally freezes the **layout** and **type homes**:
 
-### 1.1 Handle + layout
+### 1.1 Handle + layout — resolved to an opaque-pointer core (review High-1)
 
-`KlDatagram` is a **caller-owned value type**. `<keel/datagram.h>` declares only the opaque handle
-(`typedef struct KlDatagram KlDatagram;`) + the `kl_datagram_*` functions + the message/status/result
-types. `<keel/datagram_detail.h>` (opt-in, UNSTABLE) defines the layout:
+A **by-value** `KlDgramCore core;` in `<keel/datagram_detail.h>` is **NOT installable as first sketched**:
+the detail header would need `KlDgramCore`'s complete type, which lives in `src/datagram_core.h` and
+recursively pulls `src/datagram_{slots,send,recv,close,life}.h` — none of which are installed. There is
+no "src-only include" an installed consumer can satisfy. Two ways out; **frozen choice = the second**:
+
+- *(A) by-value)* Relocate the whole machine layout — `KlDgramCore` + `KlDgramSlots` + `KlDgramSend` +
+  `KlDgramClose` (embedded by value) — into an **installed unstable core-layout header family** under
+  `include/keel/` (e.g. `keel/datagram_core_detail.h` including `keel/dgram_{slots,send,close}_detail.h`;
+  recv/inbound/life stay behind the rx pointer). Preserves the value type but **installs four internal
+  machine layouts** as public-unstable headers — a large, churny installed surface.
+- **(B) opaque pointer + explicit allocation — CHOSEN.** `<keel/datagram_detail.h>` only forward-declares
+  `KlDgramCore`; `kl_datagram_init` allocates the core from `cfg->alloc`, `kl_datagram_free` releases it.
+  The installed detail surface stays tiny (one forward decl); no internal machine layout is exported.
 
 ```c
+/* keel/datagram_detail.h (opt-in, UNSTABLE) */
+struct KlDgramCore;   /* opaque — full type is src-only; the facade heap-allocates it */
 struct KlDatagram {
-    KlDgramCore core;    /* the 7A assembly — embedded BY VALUE (its layout is INTERNAL, pulled in via
-                          * a src-only include the detail header forwards; a layout-embedding consumer
-                          * opts into instability, exactly as the STABLE banner states) */
-    /* facade-only state that is NOT in KlDgramCore: the user recv callback + ud, the public counters
-     * mirror (dropped/truncated), last_error, and the config snapshot needed for reuse. */
+    struct KlDgramCore *core;   /* heap, allocated in init from cfg->alloc, freed in free (after CLOSED) */
+    /* facade-only state (NOT in the core): the user recv callback, last_error, and the borrowed handles
+     * kept for the close/backend-retirement step + reuse. */
     KlDatagramRecvFn on_recv; void *recv_ud;
     KlError last_error;
-    /* provider/ctx handles kept for close + reuse (borrowed) */
     KlEventCtx *ctx; const KlSocketProvider *sockets;
 };
 ```
 
-**Decision to confirm (§7):** embed `KlDgramCore` by value (value-type, one allocation, matches
-`KlStream`/`KlUdp`) vs. hold a `KlDgramCore *` (keeps `KlDgramCore` layout entirely out of any installed
-header). Recommendation: **by value**, since the detail header is already opt-in/unstable and a value
-type is the frozen contract; the detail header includes a thin `src/`-facing shim so `KlDgramCore`'s
-fields never appear in a *stable* header.
+`KlDatagram` stays a **caller-owned handle** (the struct lives wherever the caller puts it — stack,
+embed, or heap); only its heavy machine state is heap-allocated behind `core`. Cost vs. by-value: **one
+extra allocation at init** (a new init failure mode — handled without taking fd ownership, §2/§2.5) and
+an indirection. Benefit: the installed ABI is a forward decl, and 7A's `KlDgramCore`/machine headers
+stay purely internal. (§1 of the main design doc says "value type" of the HANDLE — an opaque-pointer
+handle satisfies it; it does not require embedding the core by value.)
 
 ### 1.2 Type homes (frozen)
 
@@ -128,6 +144,44 @@ Inherited from `docs/datagram_step7_public_api_design.md` §1/§4/§5 and the 7A
   `bind`) through `sockets->dgram` before `init`. `KlDatagram` never sets a sockopt.
 - **`KlUdp` is NOT re-based** onto `KlDatagram` (D-COMPAT §6). It keeps `KlUdpTransport` (byte-budget).
   The two surfaces coexist permanently; consumers choose. (Confirm in §7.)
+
+---
+
+## 2.5 Live adapter boundary (review High-2)
+
+`KlDgramCore` takes NEUTRAL hooks (submit / arm / disarm / pull / cancel / retire / close_transport).
+`KlDatagramConfig` does **not** carry them, and `src/datagram.c` cannot manufacture backend behaviour
+generically. Frozen boundary — **the facade assembles the hooks from the EXISTING backend seams**, in
+exactly two implementations, selected by the loop's capability (the same negotiation `KlUdp` already
+does via `src/event_caps.h`):
+
+| Core hook | Completion mode (loop has `KL_EVENT_CAP_COMPLETION`) | Readiness mode (`KL_EVENT_CAP_READINESS` + `sockets->dgram`) |
+|---|---|---|
+| `submit` (send) | `KlCompletionOps.post_dgram_send` | `sockets->dgram->send` (synchronous) |
+| `arm` (recv) | `KlCompletionOps.post_dgram_recv` | add READ interest (a `KlWatcher` on the fd) |
+| `disarm` | — (completion holds the posted op) | remove READ interest |
+| `pull` | — | `sockets->dgram->recv` |
+| `cancel_send/recv` | `KlCompletionOps.cancel_dgram` *(new, additive)* | drop interest / no-op |
+| `retire` (§4.3 classify) | `KlCompletionOps.retire_dgram` *(new, additive; default RETIRED-on-terminal, EFI overrides QUARANTINED)* | synchronous → always RETIRED |
+| `close_transport` | `sockets->stream`/provider socket close | provider socket close |
+
+So `src/datagram.c` contains **two adapter builders** (`dgram_adapter_completion`,
+`dgram_adapter_readiness`) that WRAP the existing seams — **no per-backend code in the facade**. The
+per-backend behaviour comes from each backend's already-implemented `KlCompletionOps.post_dgram_*` /
+`KlSocketProvider.dgram`, exactly as `KlUdp` gets it today.
+
+**Where the new hooks live (frozen):** `cancel_dgram` + `retire_dgram` are added **additively to
+`KlCompletionOps`** (the completion axis, `src/event_caps.h` / the completion-ops table), NOT to any
+per-backend header — so a backend that doesn't implement them gets the documented default (RETIRED on
+terminal completion). Their exact signatures are finalized in **7B-3** (the reference completion seam)
+but their HOME (`KlCompletionOps`) and default semantics are frozen now.
+
+**Init failure without fd ownership (frozen):** `kl_datagram_init` selects a mode BEFORE calling
+`kl_dgram_core_init`. If the loop offers neither a datagram-capable completion seam
+(`post_dgram_recv/send` present) NOR a datagram-capable readiness provider (`sockets->dgram != NULL`),
+`init` returns -1 immediately — the fd is never adopted (it is only handed to `kl_dgram_core_init`, which
+itself adopts on success only). A requested capability the selected mode can't supply is a
+`KL_DATAGRAM_UNSUPPORTED`-class init failure, likewise pre-adoption.
 
 ---
 
@@ -177,15 +231,23 @@ completion ordering are adapter concerns proven per backend). Proposed order, ea
 - **7B-7 — lwIP-raw** (completion; Apple container). Reuses the 7A-5 one-held glue.
 - **7B-8 — EFI** (freestanding; QEMU/OVMF). Reuses the EFI_UDP4 datagram provider.
 
-**Scope question for review (§7):** which backends must be live for 7B to be "done." A defensible
-**7B core** = 7B-3 + 7B-4 + 7B-5 (pollcomp + io_uring + readiness) — enough to declare the public API
-usable + `§8`-validated on the primary hosted backends — with 7B-6/7/8 (IOCP/lwIP/EFI) as follow-on
-increments that need no further API change.
+**Backend scope (review Medium-4).** Every backend that already exposes the datagram provider capability
+must get a working facade before the public surface is finalized/advertised STABLE — otherwise a
+consumer sees a capability with no usable API on IOCP/lwIP/EFI. So:
 
-### 7B-9 — matrix + banner finalization
-- `§10` matrix rows for wired backends → ✅; the STABLE banner drops any "not-yet-wired" caveat for
-  those; docs reconciliation (contract + this doc + the main design doc); README/site datagram entry.
-- Any backend NOT wired in 7B stays ⚙ with an explicit note (no silent "covered").
+- **7B-5 is a CHECKPOINT, not completion.** After pollcomp + io_uring + readiness the public API is
+  *usable + `§8`-validated on the primary hosted backends*, but it is NOT yet advertised STABLE and the
+  IOCP/lwIP-raw/EFI `§10` rows stay ⚙.
+- **7B-8 is completion** — every supported live backend (IOCP, lwIP-raw, EFI) has a working facade.
+- **STABLE + advertise happens only at 7B-9**, after 7B-8. A hosted-only early adopter can use the API
+  after the 7B-5 checkpoint (documented "usable, not yet STABLE"); the banner is not flipped until all
+  supported backends are live.
+
+### 7B-9 — matrix + banner finalization (only after 7B-8)
+- All supported-backend `§10` rows → ✅; the STABLE banner is flipped (no "not-yet-wired" caveat
+  remains); docs reconciliation (contract + this doc + the main design doc); README/site datagram entry.
+- If any supported backend is deliberately deferred beyond 7B, it stays ⚙ with an explicit note and the
+  banner keeps a matching caveat (no silent "covered").
 
 ---
 
@@ -224,25 +286,35 @@ that backend are unchanged — `KlUdp` still rides `KlUdpTransport`).
   + cosmo. Mitigation: pure mechanical, no logic change, full multi-target gate before review; land it
   alone so any breakage is unambiguously "rename typo," not behaviour.
 - **Header layering under freestanding.** `keel/datagram.h` becoming the public API must stay
-  freestanding-clean (no host headers) and must not create an include cycle with `keel/socket_dgram.h`.
-  Verified by the freestanding-dgram gate in 7B-2.
-- **`KlDgramCore`-by-value in the detail header** exposes the core's field layout to a layout-embedding
-  consumer. Acceptable (opt-in/unstable) but confirm in §7; the alternative (pointer) costs an
-  allocation and diverges from the value-type contract.
+  freestanding-clean (no host headers). The Medium-3 compat re-export (`datagram.h` → `socket_dgram.h`)
+  must NOT create an include cycle (`socket_dgram.h` never includes `datagram.h`). Verified by the
+  freestanding-dgram gate in 7B-2.
+- **Opaque-pointer core adds an init allocation** (a new failure mode). Mitigation: `init` allocates the
+  core BEFORE adopting the fd, so an allocation failure returns -1 with nothing adopted (§2.5); `free`
+  releases it only after CLOSED. This is the cost of keeping the installed ABI a forward decl (§1.1).
+- **New `KlCompletionOps` hooks (`cancel_dgram`/`retire_dgram`).** Added additively with defaults so
+  every existing backend keeps compiling + behaving (default RETIRED-on-terminal); only EFI overrides.
+  Shape finalized in 7B-3, home frozen now (§2.5).
 
 ---
 
 ## 7. Open decisions to freeze in the 7B-0 review
 
 1. **Namespace resolution** — accept §0's three-way split (transport→`KlUdpTransport`; provider vtable→
-   `keel/socket_dgram.h`; public API takes `keel/datagram.h`), or an alternative (e.g. public API in a
-   new `keel/datagram_api.h`, leaving the provider vtable in place)?
-2. **`KlDgramCore` embedding** — by value (recommended) vs. pointer.
-3. **Backend scope for "7B done"** — 7B core (pollcomp + io_uring + readiness) with IOCP/lwIP/EFI as
-   follow-ons, or all-eight in 7B?
-4. **`KlUdp` permanence** — confirm `KlUdp` stays on `KlUdpTransport` permanently (never re-based on the
+   `keel/socket_dgram.h` WITH the compat re-export from `keel/datagram.h`; public API takes
+   `keel/datagram.h`), or an alternative (e.g. public API in a new `keel/datagram_api.h`, leaving the
+   provider vtable in place)?
+2. **`KlDgramCore` embedding — proposed RESOLVED to opaque pointer + explicit allocation** (§1.1,
+   review High-1): confirm, or require the by-value installed core-layout header family instead.
+3. **Backend scope (review Medium-4)** — confirm 7B-5 = hosted CHECKPOINT (usable, not STABLE) and
+   7B-8 = completion (every supported live backend), with STABLE/advertise only at 7B-9; or a different
+   line for what "7B done" requires.
+4. **Live adapter boundary (§2.5)** — confirm the facade-owns-two-builders model over existing seams,
+   `cancel_dgram`/`retire_dgram` added additively to `KlCompletionOps`, and the pre-adoption init-failure
+   contract for a loop lacking a datagram seam.
+5. **`KlUdp` permanence** — confirm `KlUdp` stays on `KlUdpTransport` permanently (never re-based on the
    public `KlDatagram`), so the two surfaces coexist by design.
-5. **fd-preparation contract** — confirm the caller prepares the fd via `sockets->dgram`
+6. **fd-preparation contract** — confirm the caller prepares the fd via `sockets->dgram`
    (`socket`/`configure`/`bind`) before `kl_datagram_init`, and `KlDatagram` sets no sockopt (§2).
 
 **No 7B code — not even the mechanical rename — begins until these are frozen.**
