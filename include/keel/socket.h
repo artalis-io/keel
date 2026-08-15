@@ -34,6 +34,7 @@
 #include <keel/handle.h>       /* KlSocketHandle, KL_INVALID_SOCKET, kl_handle_valid, kl_ssize_t */
 #include <keel/sockaddr.h>     /* KlSockAddr (connect/bind/accept/get_local_addr currency) */
 #include <keel/error.h>        /* KlError */
+#include <keel/socket_dgram.h> /* KlDatagramOps — the optional provider->dgram data-plane vtable */
 
 #ifdef __cplusplus
 extern "C" {

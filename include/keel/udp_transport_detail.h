@@ -14,13 +14,18 @@
 #ifndef KEEL_UDP_TRANSPORT_DETAIL_H
 #define KEEL_UDP_TRANSPORT_DETAIL_H
 
-#include <keel/datagram.h>  /* typedef struct KlUdpTransport KlUdpTransport (the opaque handle) */
 #include <keel/handle.h>    /* KlSocketHandle */
 #include <keel/error.h>     /* KlError */
 #include <keel/event.h>     /* KlEventMask */
 
 #include <stddef.h>
 #include <stdint.h>
+
+/** @brief Opaque datagram transport object — the raw datagram transport state (fd, send queue, recv
+ *  buffer, event-loop interest, counters) carved out of KlUdp (Phase A). KlUdp wraps it as the UDP
+ *  configuration/control surface. (Named `KlDatagram` before 7B-1a; the name was freed for the public
+ *  fixed-slot API.) */
+typedef struct KlUdpTransport KlUdpTransport;
 
 struct KlUdpDatagram;      /* whole-datagram FIFO node (src/udp_internal.h) — pointer-only here */
 struct KlEventCtx;         /* owning event loop — back-pointer (the provider reads ctx->sockets) */
