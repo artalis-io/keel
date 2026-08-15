@@ -35,21 +35,11 @@
 #include "datagram_send.h"
 #include "datagram_recv.h"
 #include "datagram_life.h"   /* KlDgramOpKind + KlDgramRetireResult (shared with the completion seam) */
+#include <keel/datagram.h>   /* KlDgramCloseState + KlDatagramCloseResult (promoted 7B-3) */
 
-typedef enum {
-    KL_DGRAM_CLOSE_OPEN = 0,       /* lifecycle PHASE (not the terminal result) */
-    KL_DGRAM_CLOSE_CLOSING,
-    KL_DGRAM_CLOSE_CLOSED
-} KlDgramCloseState;
-
-/* Terminal CLASSIFICATION of a close (docs/datagram_step7_public_api_design.md §4.2). NONE=0 is the
- * sentinel: a not-yet-CLOSED (or zeroed/reused) object reports NONE, never a spurious DETACHED. */
-typedef enum {
-    KL_DGRAM_CLOSE_NONE = 0,   /* no terminal reached yet (also the zeroed-object value) */
-    KL_DGRAM_DETACHED,         /* CONFIRMED physical retirement of every op (the strong guarantee) */
-    KL_DGRAM_QUARANTINED,      /* wrapper-safe but an op could NOT be confirmed retired (fail-closed) */
-    KL_DGRAM_CLOSE_ERROR       /* terminal transport error AND every op nevertheless RETIRED (§4.3) */
-} KlDatagramCloseResult;
+/* KlDgramCloseState (lifecycle phase OPEN/CLOSING/CLOSED) and KlDatagramCloseResult (terminal §4.2
+ * classification: NONE sentinel / DETACHED / QUARANTINED / CLOSE_ERROR) are now defined in the public
+ * <keel/datagram.h> (promoted 7B-3); this coordinator consumes them. */
 
 /* Per-op retirement classifier the backend reports to the coordinator (§4.3): the coordinator joins
  * only once no op is PENDING. KlDgramRetireResult + KlDgramOpKind now live in datagram_life.h (shared

@@ -58,6 +58,11 @@ typedef struct {
     KlDgramCloseTransportFn close_transport; void *transport_ctx;  /* physical fd close (once); REQUIRED —
                                                     * the core adopts the fd, so it must be able to close it. */
     KlDgramCloseFn  on_close; void *close_ctx;     /* terminal classification (fires once). */
+    /* Completion-dispatch identity for the B.6 token (7B-3). A live completion facade installs its typed
+     * handler (kl_datagram_comp_dispatch) here so the driver routes this token's completions via
+     * life->dispatch(target=KlDgramCore, ev). NULL (the default / neutral-adapter tests) → the token
+     * carries no dispatch and completions are driven directly (kl_dgram_core_{send,recv}_on_complete). */
+    KlDgramDispatchFn dispatch;
 } KlDgramCoreConfig;
 
 /* The life-owned receive holder: inbound slot + recv machine, freed as a unit by on_final so a posted
@@ -69,7 +74,7 @@ typedef struct KlDgramCoreRx {
     KlDgramRecv    recv;
 } KlDgramCoreRx;
 
-typedef struct {
+typedef struct KlDgramCore {   /* tagged so <keel/datagram_detail.h> can forward-declare it opaquely (7B-3) */
     KlAllocator   *alloc;
     KlSocketHandle fd;
     int            completion;

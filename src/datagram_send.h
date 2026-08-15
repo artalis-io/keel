@@ -34,33 +34,13 @@
 
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
+#include <keel/datagram.h>   /* KlDatagramSendStatus, KlDatagramMessage, KL_DGRAM_CAP_* (promoted 7B-3) */
 
 #include <stddef.h>
 
-/* Send-status contract (§1). Named to match the eventual public KlDatagramSendStatus (step 7). */
-typedef enum {
-    KL_DATAGRAM_ACCEPTED = 0,   /* whole datagram taken (sent or slot-queued) */
-    KL_DATAGRAM_WOULD_BLOCK,    /* transient: no free outbound slot; nothing taken */
-    KL_DATAGRAM_TOO_LARGE,      /* permanent: datagram exceeds one slot; nothing taken */
-    KL_DATAGRAM_UNSUPPORTED,    /* an explicitly-requested capability is unavailable; nothing sent */
-    KL_DATAGRAM_CLOSED,         /* closing/closed: no further sends */
-    KL_DATAGRAM_ERROR           /* bad argument or sticky transport error */
-} KlDatagramSendStatus;
-
-/* Requested-feature capabilities (subset needed for send UNSUPPORTED mapping in step 2). */
-#define KL_DGRAM_CAP_SOURCE_PIN  (1u << 0)   /* msg.local source-pin on send */
-#define KL_DGRAM_CAP_TOS         (1u << 1)   /* per-packet TOS/ECN on send */
-#define KL_DGRAM_CAP_CONNECTED   (1u << 2)   /* connected-mode send (msg.peer == NULL) */
-
-/* One outbound datagram to send (borrowed; copied before kl_dgram_send returns). */
-typedef struct {
-    const void       *data;
-    size_t            len;
-    const KlSockAddr *peer;    /* destination; NULL = connected-mode send */
-    const KlSockAddr *local;   /* source/interface pin; NULL = none */
-    int               tos;     /* per-packet TOS/ECN byte, or -1 = none */
-    unsigned          flags;   /* stored on the slot; opaque to the machine in step 2 */
-} KlDatagramMessage;
+/* KlDatagramSendStatus (§1 accept/refuse contract), KL_DGRAM_CAP_* (send UNSUPPORTED mapping), and
+ * KlDatagramMessage (one outbound datagram, copied before kl_dgram_send returns) are now defined in the
+ * public <keel/datagram.h> (promoted 7B-3); this machine consumes them. */
 
 /* Result of one provider submit attempt. A provider is EITHER synchronous (readiness: DONE /
  * WOULD_BLOCK) OR asynchronous (completion: INFLIGHT), never both. */
