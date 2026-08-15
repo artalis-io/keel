@@ -334,6 +334,10 @@ typedef struct KlLwrCtx {
     KlLwrConn      *conns;        /* conn_cap slots (kl_malloc'd) */
     int             conn_cap;
     KlLwrUdpSlot    udp[KL_LWR_UDP_SLOTS];   /* LC-3a udp slots (fixed, in-ctx) */
+    /* 7B-8: context-owned pending RECV terminal completions (a cancelled armed recv). Preallocated (one
+     * per udp slot); SURVIVES the slot teardown so the terminal drains even after the pcb closes. Each
+     * non-NULL entry holds ONE transferred arm token ref; the drain emits one terminal + releases it. */
+    KlDgramLife    *udp_term[KL_LWR_UDP_SLOTS];   /* NULL = free */
 
     /* ── Stage B: preallocated transmit memory (kl_malloc'd once, sliced per slot) ──
      * ONE contiguous block of conn_cap * KL_LWR_TX_STRIDE bytes; slot i owns bytes
@@ -611,6 +615,10 @@ void kl_lwr_ctx_destroy(void *lwrctx) {
             s->pcb = NULL;
         }
     }
+    /* 7B-8: release any pending recv terminal never drained (loop torn down before the drain) — each
+     * holds one transferred arm ref. Symmetric with the arm/send release above. */
+    for (int t = 0; t < KL_LWR_UDP_SLOTS; t++)
+        if (ctx->udp_term[t]) { kl_dgram_life_release(ctx->udp_term[t]); ctx->udp_term[t] = NULL; }
 
     size_t bytes = (size_t)ctx->conn_cap * sizeof(KlLwrConn);
     KlAllocator *alloc = ctx->alloc;
@@ -1216,6 +1224,36 @@ void kl_lwr_udp_close(void *lwrctx, void *pcb) {
     memset(s, 0, sizeof(*s));       /* clears pcb (→ free slot) + any held datagram */
 }
 
+/* 7B-8: cancel the armed recv for `life` → a context-owned pending terminal (survives slot teardown).
+ * See lwip_raw_glue.h. No allocation; idempotent. */
+void kl_lwr_udp_cancel_recv(void *lwrctx, void *life) {
+    KlLwrCtx *ctx = lwrctx;
+    if (!ctx || !life) return;
+    KlDgramLife *l = (KlDgramLife *)life;
+    for (int i = 0; i < KL_LWR_UDP_SLOTS; i++) {
+        KlLwrUdpSlot *s = &ctx->udp[i];
+        if (s->pcb == NULL || s->life != l || !s->rx_armed) continue;
+        /* Remove the arm FIRST so a held datagram can no longer produce a completion, then TRANSFER the
+         * arm's one token ref into a context-owned pending terminal. kl_lwr_udp_close now sees rx_armed==0
+         * and so will NOT release that ref (the pending terminal owns it until the drain emits it). */
+        s->rx_armed = 0;
+        s->has_held = 0;            /* discard any held datagram (inline in the slot, no ref, no free) */
+        for (int t = 0; t < KL_LWR_UDP_SLOTS; t++)
+            if (ctx->udp_term[t] == NULL) { ctx->udp_term[t] = l; break; }
+        return;                     /* one armed recv per slot; one token ↔ one slot */
+    }
+    /* No armed recv for `life` (already cancelled / drained / never armed) → idempotent no-op. */
+}
+
+/* 7B-8: 1 while a pending recv terminal is queued for `life`, else 0. See lwip_raw_glue.h. */
+int kl_lwr_udp_recv_pending(void *lwrctx, void *life) {
+    KlLwrCtx *ctx = lwrctx;
+    if (!ctx || !life) return 0;
+    for (int t = 0; t < KL_LWR_UDP_SLOTS; t++)
+        if (ctx->udp_term[t] == (KlDgramLife *)life) return 1;
+    return 0;
+}
+
 /* Drain: surface up to `max` UDP completions. Per armed slot with a queued datagram, emit ONE
  * UDP-RECV (the oldest, copied into `staged` so buf stays valid this drain), consuming the arm.
  * Per slot with pending sends, emit UDP-SEND records. Bounded by KL_LWR_UDP_SLOTS * ring. */
@@ -1255,6 +1293,17 @@ int kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max) {
             r->life = s->life;   /* TRANSFER one pending send's token ref → event */
             r->len = bytes;
         }
+    }
+    /* 7B-8: emit context-owned pending recv terminals (cancelled armed recvs). One terminal per entry,
+     * transferring the token ref → event (the dispatch retires recv_inflight + releases the ref). */
+    for (int t = 0; t < KL_LWR_UDP_SLOTS && n < max; t++) {
+        if (ctx->udp_term[t] == NULL) continue;
+        KlLwrUdpRecord *r = &out[n++];
+        memset(r, 0, sizeof(*r));
+        r->kind = KL_LWR_DGRAM_RECV;
+        r->terminal = 1;                 /* ok=0, no data — retires the recv machine */
+        r->life = ctx->udp_term[t];      /* TRANSFER the ref → event */
+        ctx->udp_term[t] = NULL;
     }
     return n;
 }

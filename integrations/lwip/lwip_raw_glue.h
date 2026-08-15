@@ -133,6 +133,7 @@ typedef struct {
     const void  *data;        /* UDP_RECV: datagram payload (in the slot's staged buffer) */
     size_t       len;         /* UDP_RECV: payload len / UDP_SEND: bytes sent */
     int          truncated;   /* UDP_RECV: 1 if the datagram was truncated to the buffer */
+    int          terminal;    /* UDP_RECV: 1 = a cancelled/terminal recv (ok=0, no data) — 7B-8 */
     uint8_t      src_ip[4];   /* UDP_RECV: source IPv4 (network order) */
     uint16_t     src_port;    /* UDP_RECV: source port (host order) */
 } KlLwrUdpRecord;
@@ -159,6 +160,17 @@ int   kl_lwr_udp_send(void *lwrctx, void *pcb, void *life, const void *data, siz
 void  kl_lwr_udp_close(void *lwrctx, void *pcb);
 /* Scan udp slots + emit up to `max` pending UDP_RECV/UDP_SEND records. Returns the count (>=0). */
 int   kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max);
+
+/* 7B-8: cancel the armed recv for `life` (KlDgramLife*). Removes the arm (so a held datagram can no
+ * longer complete) and moves it to a CONTEXT-owned pending-terminal record that SURVIVES kl_lwr_udp_close
+ * — the drain later emits ONE terminal KL_LWR_DGRAM_RECV (terminal=1) transferring the arm's token ref,
+ * so a KlDatagram completion-close retires recv_inflight. No allocation. Idempotent (a second call, or a
+ * life with no armed recv, is a no-op — no duplicate terminal). Only KlDatagram calls this; KlUdp never
+ * does, so its close/teardown path is unchanged. */
+void  kl_lwr_udp_cancel_recv(void *lwrctx, void *life);
+/* 7B-8: 1 while a pending recv terminal is queued for `life` (retire → PENDING), 0 once it has drained
+ * (retire → RETIRED). */
+int   kl_lwr_udp_recv_pending(void *lwrctx, void *life);
 
 /* ── socket-provider primitives on tcp_pcb (all handles opaque) ────────────── */
 

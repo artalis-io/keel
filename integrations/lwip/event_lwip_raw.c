@@ -562,17 +562,25 @@ static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     return rc;
 }
 
-/* 7B-2 cancel/retire seam. The lwIP-raw glue OWNS the datagram op lifetime (its own retain/transfer/
- * release discipline), and recv/send complete synchronously in the drain — userspace, no in-kernel op
- * to cancel and no unconfirmed-retirement risk. So cancel is a no-op (interest is dropped by the glue
- * at teardown) and retire always reports RETIRED; lwIP never quarantines. */
+/* 7B-2/7B-8 cancel/retire seam. A SEND completes synchronously in the drain (no in-kernel op) → cancel
+ * is a no-op. A RECV, however, is an armed op the KlDatagram close coordinator must see RETIRE: cancel
+ * moves the armed recv to a context-owned pending TERMINAL the drain surfaces as an ok=0 completion
+ * (kl_lwr_udp_cancel_recv), so recv_inflight retires. retire reports PENDING while that terminal is
+ * queued, RETIRED once it has drained (or when there was nothing armed). lwIP never quarantines. Only
+ * KlDatagram drives this; KlUdp never calls cancel_dgram, so its teardown path is unchanged. */
 static int lwr_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
-    (void)ctx; (void)life; (void)kind; return 0;
+    if (kind != KL_DGRAM_OP_RECV) return 0;   /* sends drain synchronously — nothing to cancel */
+    KlLwrState *st = ctx ? ctx->loop._backend : NULL;
+    if (st) kl_lwr_udp_cancel_recv(st->lwrctx, life);
+    return 0;
 }
 static KlDgramRetireResult lwr_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
                                                  KlDgramOpKind kind, int *transport_err) {
-    (void)ctx; (void)life; (void)kind;
     if (transport_err) *transport_err = 0;
+    if (kind == KL_DGRAM_OP_RECV) {
+        KlLwrState *st = ctx ? ctx->loop._backend : NULL;
+        if (st && kl_lwr_udp_recv_pending(st->lwrctx, life)) return KL_DGRAM_RETIRE_PENDING;
+    }
     return KL_DGRAM_RETIRE_RETIRED;
 }
 
@@ -718,12 +726,12 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
             ev->life = u->life;
             if (u->kind == KL_LWR_DGRAM_RECV) {
                 ev->kind = KL_COMP_DGRAM_RECV;
-                ev->ok = 1;
+                ev->ok = u->terminal ? 0 : 1;   /* 7B-8: a cancelled/terminal recv retires with no delivery */
                 ev->bytes = u->len;
                 ev->buf = (void *)u->data;
                 ev->truncated = u->truncated;
                 /* ev->peer is the neutral KlSockAddr directly — no native round-trip. */
-                (void)kl_sockaddr_from_ipv4(&ev->peer, u->src_ip, u->src_port);
+                if (!u->terminal) (void)kl_sockaddr_from_ipv4(&ev->peer, u->src_ip, u->src_port);
             } else {   /* KL_LWR_DGRAM_SEND */
                 ev->kind = KL_COMP_DGRAM_SEND;
                 ev->ok = 1;
