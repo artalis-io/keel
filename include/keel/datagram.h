@@ -18,10 +18,11 @@
  * <keel/datagram_detail.h> and MUST recompile when it changes. A consumer that only holds a
  * `KlDatagram *` (created behind the API) is insulated from layout.
  *
- * NOTE (7B-3): the live backend bindings (§10 of docs/datagram_contract.md) are being wired one
- * increment at a time (7B-4..7B-9). This increment ships the public surface + facade + adapter builders
- * validated over a scripted mock; the §10 live-capability rows are not yet flipped. A hosted-only
- * consumer can use the API after the 7B-6 checkpoint; the STABLE banner is finalized at 7B-10.
+ * NOTE (7B-6 HOSTED CHECKPOINT): the API is USABLE on the primary hosted backends — the completion loops
+ * pollcomp (7B-4) + io_uring (7B-5) and the POSIX readiness loops epoll/kqueue/poll (7B-6) are live and
+ * §10-validated. It is NOT yet advertised STABLE: the remaining live bindings (IOCP, lwIP-raw, EFI) stay
+ * ⚙ and are wired in 7B-7..7B-9; the STABLE banner is finalized only at 7B-10. A hosted-only consumer may
+ * use the API now.
  *
  * The provider data-plane vtable (KlDatagramOps + KlDgramRx/TxDesc descriptors + KL_DGRAM_RX_ flags)
  * lives on the socket axis in <keel/socket_dgram.h>, re-exported here so `#include <keel/datagram.h>`
