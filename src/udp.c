@@ -137,7 +137,13 @@ static int udp_send_common(KlUdp *udp, const void *data, size_t len,
             udp->dg.last_error = KL_ERR_IO;   /* backpressure cap — drop the datagram */
             return -1;
         }
-        if (kl_comp_post_dgram_send(&udp->dg, data, len, dest) < 0) {
+        KlDgramSendOp op = {
+            .fd = udp->dg.fd, .data = data, .len = len, .dest = dest,
+            .src = NULL, .tos = -1, .life = (KlDgramLife *)udp->dg.rx_life,
+        };
+        kl_dgram_life_retain(op.life);   /* transferred into the op on success (no-op on a NULL token) */
+        if (kl_comp_post_dgram_send(udp->dg.ctx, &op) < 0) {
+            kl_dgram_life_release(op.life);   /* failure → caller releases; backend took nothing */
             udp->dg.last_error = KL_ERR_IO;
             return -1;
         }
@@ -271,10 +277,24 @@ static int udp_rx_pull(void *ctx, size_t *out_len) {
     return 1;
 }
 
-/* Completion arm: post one overlapped recv into the inbound slot (dg->recv_buf points at it). */
+/* Completion arm: post one overlapped recv into the inbound slot (dg->recv_buf points at it). Builds a
+ * neutral KlDgramRecvOp (7B-2b) + TRANSFERS one token ref into it on success; releases it on failure. */
 static int udp_rx_post(void *ctx) {
     KlUdpRx *rx = ctx;
-    return kl_comp_post_dgram_recv(&rx->udp->dg) < 0 ? -1 : 0;
+    struct KlUdpTransport *dg = &rx->udp->dg;
+    KlDgramRecvOp op = {
+        .fd = dg->fd, .buf = dg->recv_buf, .cap = dg->recv_buf_size,
+        .capture = (unsigned)((dg->pktinfo  ? KL_DGRAM_RX_PKTINFO : 0u) |
+                              (dg->recv_gro ? KL_DGRAM_RX_GRO     : 0u) |
+                              (dg->recv_tos ? KL_DGRAM_RX_TOS     : 0u)),
+        .life = (KlDgramLife *)dg->rx_life,
+    };
+    kl_dgram_life_retain(op.life);
+    if (kl_comp_post_dgram_recv(dg->ctx, &op) < 0) {
+        kl_dgram_life_release(op.life);   /* failure → caller releases; the backend took nothing */
+        return -1;
+    }
+    return 0;
 }
 
 /* ── Datagram-provider dispatch ───────────────────────────────────────────

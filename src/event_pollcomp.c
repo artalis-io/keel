@@ -317,44 +317,41 @@ static int pc_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-static int pc_comp_post_dgram_recv(struct KlUdpTransport *dg) {
-    KlPcState *st = dg->ctx->loop._backend;
+static int pc_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *rop) {
+    KlPcState *st = ctx->loop._backend;
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
-    if (!op) return -1;
+    if (!op) return -1;                 /* nothing taken → caller releases its retained token ref */
     memset(op, 0, sizeof(*op));
     op->type = PC_DGRAM_RECV;
     op->alloc = st->alloc;
-    op->fd = dg->fd;
-    /* Copy the receive buffer + capture flags now; the op must not dereference KlUdpTransport later. The
-     * buffer stays valid because the token ref (retained below) pins it past the op's lifetime. */
-    op->buf        = dg->recv_buf;
-    op->buflen     = dg->recv_buf_size;
-    op->dg_pktinfo = dg->pktinfo;
-    op->dg_gro     = dg->recv_gro;
-    op->life = (KlDgramLife *)dg->rx_life;
-    kl_dgram_life_retain(op->life);
+    op->fd = rop->fd;
+    /* The receive buffer + capture flags travel in the descriptor; the op never dereferences a transport.
+     * The buffer stays valid because the token ref (transferred below) pins it past the op's lifetime. */
+    op->buf        = rop->buf;
+    op->buflen     = rop->cap;
+    op->dg_pktinfo = (rop->capture & KL_DGRAM_RX_PKTINFO) != 0;
+    op->dg_gro     = (rop->capture & KL_DGRAM_RX_GRO)     != 0;
+    op->life = rop->life;               /* TRANSFERRED into the op (no retain — the caller retained) */
     pc_op_push(st, op);
     return 0;
 }
 
-static int pc_comp_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
-                          const KlSockAddr *dest) {
-    KlPcState *st = dg->ctx->loop._backend;
+static int pc_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
+    KlPcState *st = ctx->loop._backend;
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
-    if (!op) return -1;
+    if (!op) return -1;                 /* nothing taken → caller releases its ref */
     memset(op, 0, sizeof(*op));
     op->type = PC_DGRAM_SEND;
     op->alloc = st->alloc;
-    op->fd = dg->fd;
-    op->send_total = len;
-    op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
-    if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }   /* life unset → no release */
-    memcpy(op->sendbuf, data, len);
+    op->fd = sop->fd;
+    op->send_total = sop->len;
+    op->sendbuf = kl_malloc(st->alloc, sop->len ? sop->len : 1);
+    if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }   /* life unset → caller releases */
+    memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
     /* Marshal the neutral dest to a host sockaddr for the sendto at drain time. */
-    if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC)
-        op->dest_len = kl_sockaddr_to_native(dest, &op->dest);
-    op->life = (KlDgramLife *)dg->rx_life;   /* retain AFTER the failure unwind above */
-    kl_dgram_life_retain(op->life);
+    if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC)
+        op->dest_len = kl_sockaddr_to_native(sop->dest, &op->dest);
+    op->life = sop->life;               /* TRANSFERRED into the op (no retain) */
     pc_op_push(st, op);
     return 0;
 }

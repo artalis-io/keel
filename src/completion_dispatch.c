@@ -75,13 +75,12 @@ void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     kl_comp_ops(&ctx->loop)->cancel(ctx, fd);
 }
 
-int kl_comp_post_dgram_recv(struct KlUdpTransport *dg) {
-    return kl_comp_ops(&dg->ctx->loop)->post_dgram_recv(dg);
+int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op) {
+    return kl_comp_ops(&ctx->loop)->post_dgram_recv(ctx, op);
 }
 
-int kl_comp_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
-                          const KlSockAddr *dest) {
-    return kl_comp_ops(&dg->ctx->loop)->post_dgram_send(dg, data, len, dest);
+int kl_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *op) {
+    return kl_comp_ops(&ctx->loop)->post_dgram_send(ctx, op);
 }
 
 int kl_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,

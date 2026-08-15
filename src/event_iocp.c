@@ -502,22 +502,22 @@ static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_
  * the readiness Windows recv (udp_cmsg_win.h). Falls back to WSARecvFrom (source address
  * only, local left 0) if the extension is unavailable. Either way the completion surfaces a
  * KL_COMP_DGRAM_RECV event. */
-static int iocp_comp_post_dgram_recv(KlUdpTransport *dg) {
-    KlIocpState *st = dg->ctx->loop._backend;
+static int iocp_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *rop) {
+    KlIocpState *st = ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
-    if (!op) return -1;
+    if (!op) return -1;                 /* nothing taken → caller releases its retained token ref */
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_DGRAM_RECV;
     op->alloc = st->alloc;
     op->src_len = (int)sizeof(op->src);
-    /* Copy the receive buffer + capture flags now; the op must not dereference KlUdpTransport later. The
-     * buffer stays valid because the token ref (retained below) pins it past the op's lifetime. */
-    op->buf        = dg->recv_buf;
-    op->buflen     = dg->recv_buf_size;
-    op->dg_pktinfo = dg->pktinfo;
-    iocp_op_register(st, op, (SOCKET)dg->fd);
+    /* The receive buffer + capture flags travel in the descriptor; the op never dereferences a transport.
+     * The buffer stays valid because the token ref (transferred below) pins it past the op's lifetime. */
+    op->buf        = rop->buf;
+    op->buflen     = rop->cap;
+    op->dg_pktinfo = (rop->capture & KL_DGRAM_RX_PKTINFO) != 0;
+    iocp_op_register(st, op, (SOCKET)rop->fd);
 
-    LPFN_WSARECVMSG recvmsg = kl_udp_win_get_recvmsg((SOCKET)dg->fd);
+    LPFN_WSARECVMSG recvmsg = kl_udp_win_get_recvmsg((SOCKET)rop->fd);
     if (recvmsg) {
         op->via_recvmsg = 1;
         op->ubuf.len = (ULONG)op->buflen;
@@ -530,60 +530,56 @@ static int iocp_comp_post_dgram_recv(KlUdpTransport *dg) {
         op->umsg.Control.buf = op->uctrl;
         op->umsg.dwFlags = 0;
         DWORD recvd = 0;
-        int rc = recvmsg((SOCKET)dg->fd, &op->umsg, &recvd, &op->ov, NULL);
+        int rc = recvmsg((SOCKET)rop->fd, &op->umsg, &recvd, &op->ov, NULL);
         if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
             iocp_op_free(op);                  /* life unset → no release */
             return -1;
         }
-        op->life = (KlDgramLife *)dg->rx_life;  /* retain AFTER the failure unwind above */
-        kl_dgram_life_retain(op->life);
+        op->life = rop->life;  /* TRANSFERRED into the op (no retain) */
         return 0;
     }
 
     /* Fallback: no WSARecvMsg extension — source address only. */
     WSABUF buf = { (ULONG)op->buflen, (char *)op->buf };
     DWORD flags = 0, recvd = 0;
-    int rc = WSARecvFrom((SOCKET)dg->fd, &buf, 1, &recvd, &flags,
+    int rc = WSARecvFrom((SOCKET)rop->fd, &buf, 1, &recvd, &flags,
                          (struct sockaddr *)&op->src, &op->src_len, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);                      /* life unset → no release */
         return -1;
     }
-    op->life = (KlDgramLife *)dg->rx_life;      /* retain AFTER the failure unwind above */
-    kl_dgram_life_retain(op->life);
+    op->life = rop->life;      /* TRANSFERRED into the op (no retain) */
     return 0;
 }
 
 /* Post one overlapped WSASendTo for a UDP socket (8b-4d). Copies the datagram + its
  * destination into the op (owned until completion); surfaces KL_COMP_DGRAM_SEND. */
-static int iocp_comp_post_dgram_send(KlUdpTransport *dg, const void *data, size_t len,
-                          const KlSockAddr *dest) {
-    KlIocpState *st = dg->ctx->loop._backend;
+static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
+    KlIocpState *st = ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
-    if (!op) return -1;
+    if (!op) return -1;                 /* nothing taken → caller releases its ref */
     memset(op, 0, sizeof(*op));
     op->type = KL_IOCP_DGRAM_SEND;
     op->alloc = st->alloc;
-    op->send_total = len;
-    iocp_op_register(st, op, (SOCKET)dg->fd);
+    op->send_total = sop->len;
+    iocp_op_register(st, op, (SOCKET)sop->fd);
 
-    op->sendbuf = kl_malloc(st->alloc, len ? len : 1);
-    if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }  /* life unset → no release */
-    memcpy(op->sendbuf, data, len);
+    op->sendbuf = kl_malloc(st->alloc, sop->len ? sop->len : 1);
+    if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }  /* life unset → caller releases */
+    memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
     /* Marshal the neutral dest to a Winsock sockaddr for the overlapped WSASendTo. */
-    if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC)
-        op->src_len = (int)kl_sockaddr_to_native(dest, &op->src);
+    if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC)
+        op->src_len = (int)kl_sockaddr_to_native(sop->dest, &op->src);
 
-    WSABUF buf = { (ULONG)len, op->sendbuf };
+    WSABUF buf = { (ULONG)sop->len, op->sendbuf };
     DWORD sent = 0;
-    int rc = WSASendTo((SOCKET)dg->fd, &buf, 1, &sent, 0,
+    int rc = WSASendTo((SOCKET)sop->fd, &buf, 1, &sent, 0,
                        (struct sockaddr *)&op->src, op->src_len, &op->ov, NULL);
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        iocp_op_free(op);                      /* life unset → no release */
+        iocp_op_free(op);                      /* life unset → caller releases */
         return -1;
     }
-    op->life = (KlDgramLife *)dg->rx_life;      /* retain AFTER the failure unwind above */
-    kl_dgram_life_retain(op->life);
+    op->life = sop->life;               /* TRANSFERRED into the op (no retain) */
     return 0;
 }
 

@@ -75,6 +75,7 @@
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
 #include "completion.h"        /* the abstract completion axis this TU implements (src/) */
 #include "io_engine.h"         /* kl_comp_post_udp_* decls (forward-declares struct KlUdp) */
+#include "datagram_life.h"     /* kl_dgram_life_release — drop the caller-transferred ref (7B-2b) */
 #include <keel/udp.h>          /* KlUdpTransport layout (dg->ctx / dg->fd) — the UDP completion target */
 
 #include <string.h>
@@ -538,24 +539,27 @@ static void lwr_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
  * udp->fd. Raw recv is passive (the udp_recv callback retains datagrams into the glue's per-slot
  * ring), so "posting" a recv just associates the owner + arms the slot — mirroring the tcp recv-arm
  * model. IPv4-only (the loopif is IPv4). */
-static int lwr_comp_post_dgram_recv(struct KlUdpTransport *dg) {
-    KlLwrState *st = dg->ctx->loop._backend;
-    KlSocketHandle fd = dg->fd;
-    if (!st || !kl_handle_valid(fd)) return -1;
-    /* Pass the stable token (read from KlUdpTransport at post ONLY); the glue retains a ref for the armed
-     * recv and the drain transfers it to the event — the completion never dereferences KlUdpTransport. */
-    return kl_lwr_udp_post_recv(st->lwrctx, (void *)fd, dg->rx_life);
+/* 7B-2b ownership note: the caller (udp.c / a facade) retained ONE token ref and TRANSFERRED it in the
+ * descriptor. The lwIP GLUE keeps its OWN independent ref discipline (retain-at-arm/-send, transfer-at-
+ * drain, release-at-close), so the transferred ref is redundant here: on a successful post the wrapper
+ * RELEASES it (the glue's own ref carries the op); on failure it leaves it for the caller to release. */
+static int lwr_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *rop) {
+    KlLwrState *st = ctx->loop._backend;
+    if (!st || !kl_handle_valid(rop->fd)) return -1;   /* caller releases its transferred ref */
+    int rc = kl_lwr_udp_post_recv(st->lwrctx, (void *)rop->fd, rop->life);
+    if (rc == 0) kl_dgram_life_release(rop->life);      /* glue took its own ref → drop the transferred one */
+    return rc;
 }
-static int lwr_comp_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
-                          const KlSockAddr *dest) {
-    KlLwrState *st = dg->ctx->loop._backend;
-    KlSocketHandle fd = dg->fd;
-    if (!st || !kl_handle_valid(fd)) return -1;
+static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
+    KlLwrState *st = ctx->loop._backend;
+    if (!st || !kl_handle_valid(sop->fd)) return -1;   /* caller releases its transferred ref */
     /* Dest → raw IPv4 bytes + host-order port. A connected send (dest UNSPEC) is not exercised on
      * this loopback path — reject an unspecified/non-IPv4 dest fail-early. */
-    if (!dest || kl_sockaddr_family(dest) != KL_AF_INET) return -1;
-    return kl_lwr_udp_send(st->lwrctx, (void *)fd, dg->rx_life, data, len,
-                           dest->u.ip, kl_sockaddr_port(dest));
+    if (!sop->dest || kl_sockaddr_family(sop->dest) != KL_AF_INET) return -1;
+    int rc = kl_lwr_udp_send(st->lwrctx, (void *)sop->fd, sop->life, sop->data, sop->len,
+                             sop->dest->u.ip, kl_sockaddr_port(sop->dest));
+    if (rc == 0) kl_dgram_life_release(sop->life);      /* glue took its own ref → drop the transferred one */
+    return rc;
 }
 
 /* ── drain: one lwIP tick, then translate per-slot pending state into completion events ──

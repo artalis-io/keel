@@ -1532,6 +1532,28 @@ static void mock_complete_hung_tx(void) {
     g_udp_hung_tok = NULL;
 }
 
+/* 7B-2b: the datagram post seam is descriptor-based + caller-owned — the caller retains one KlDgramLife
+ * ref and TRANSFERS it into the op on a SUCCESSFUL post, releasing it on failure. These wrappers mirror
+ * udp.c's udp_send_common / udp_rx_post so the mock drives the vtable exactly as production does (the EFI
+ * backend ignores the ctx arg — it reaches its substrate via file-scope g_efi — so NULL is fine here). */
+static int mock_post_dgram_send(const KlEventProvider *ep, KlUdpTransport *dg,
+                                const void *data, size_t len, const KlSockAddr *dest) {
+    KlDgramSendOp op = { .fd = dg->fd, .data = data, .len = len, .dest = dest,
+                         .src = NULL, .tos = -1, .life = (KlDgramLife *)dg->rx_life };
+    kl_dgram_life_retain(op.life);
+    int rc = COMP(ep)->post_dgram_send(NULL, &op);
+    if (rc < 0) kl_dgram_life_release(op.life);   /* failure → caller releases; backend took nothing */
+    return rc;
+}
+static int mock_post_dgram_recv(const KlEventProvider *ep, KlUdpTransport *dg) {
+    KlDgramRecvOp op = { .fd = dg->fd, .buf = dg->recv_buf, .cap = dg->recv_buf_size,
+                         .capture = 0, .life = (KlDgramLife *)dg->rx_life };
+    kl_dgram_life_retain(op.life);
+    int rc = COMP(ep)->post_dgram_recv(NULL, &op);
+    if (rc < 0) kl_dgram_life_release(op.life);
+    return rc;
+}
+
 /* Pending-send FIFO across freed-slot reuse (review-Medium): A/B/C accepted; A retires and B posts;
  * D is accepted into A's freed array slot but has a LATER acceptance sequence; when B retires, the pump
  * must post C (older) before D — proving order is by acceptance sequence, not array-slot index. */
@@ -1548,9 +1570,9 @@ static void t_dgram_send_fifo_hole_reuse(void) {
     KlSockAddr dA, dB, dC, dD;
     mk_ipv4(&dA, 10, 0, 2, 3, 1); mk_ipv4(&dB, 10, 0, 2, 4, 1);
     mk_ipv4(&dC, 10, 0, 2, 5, 1); mk_ipv4(&dD, 10, 0, 2, 6, 1);
-    CHECK(COMP(ep)->post_dgram_send(&dg, "A", 1, &dA) == 0, "A accepted (posts first)");
-    CHECK(COMP(ep)->post_dgram_send(&dg, "B", 1, &dB) == 0, "B accepted (queued)");
-    CHECK(COMP(ep)->post_dgram_send(&dg, "C", 1, &dC) == 0, "C accepted (queued)");
+    CHECK(mock_post_dgram_send(ep, &dg, "A", 1, &dA) == 0, "A accepted (posts first)");
+    CHECK(mock_post_dgram_send(ep, &dg, "B", 1, &dB) == 0, "B accepted (queued)");
+    CHECK(mock_post_dgram_send(ep, &dg, "C", 1, &dC) == 0, "C accepted (queued)");
     CHECK(g_udp_tx_calls == 1 && g_udp_tx_dst[3] == 3, "A posted first (10.0.2.3)");
     KlCompletionEvent evs[8];
     int released = 0;
@@ -1560,7 +1582,7 @@ static void t_dgram_send_fifo_hole_reuse(void) {
     for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_SEND) { kl_dgram_life_release(evs[i].life); released++; }
     CHECK(g_udp_tx_calls == 2 && g_udp_tx_dst[3] == 4, "after A retired, B posted (10.0.2.4)");
     /* D accepted — reuses A's freed array slot but has a later sequence than C */
-    CHECK(COMP(ep)->post_dgram_send(&dg, "D", 1, &dD) == 0, "D accepted (reuses A's freed slot)");
+    CHECK(mock_post_dgram_send(ep, &dg, "D", 1, &dD) == 0, "D accepted (reuses A's freed slot)");
     CHECK(g_udp_tx_calls == 2, "D queued (B still in flight)");
     /* B retires → FIFO must pump C (older), NOT D */
     mock_complete_hung_tx();
@@ -1594,7 +1616,7 @@ static void t_dgram_life_delivered_recv(void) {
     KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
     memcpy(g_udp_resp, "abc", 3); g_udp_resp_len = 3; g_udp_receive_mode = TOK_COMPLETE_OK;
-    CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (op ref retained → 2)");
+    CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (op ref retained → 2)");
     KlCompletionEvent evs[4];
     int dn = COMP(ep)->drain(NULL, evs, 4, 0);
     int idx = -1; for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_RECV) idx = i;
@@ -1623,8 +1645,8 @@ static void t_dgram_two_concurrent_sends(void) {
     KlUdpTransport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr d1, d2; mk_ipv4(&d1, 10, 0, 2, 3, 53); mk_ipv4(&d2, 10, 0, 2, 4, 5353);
-    CHECK(COMP(ep)->post_dgram_send(&dg, "AAAA", 4, &d1) == 0, "send#1 accepted");
-    CHECK(COMP(ep)->post_dgram_send(&dg, "BB", 2, &d2) == 0, "send#2 ACCEPTED before any drain (not -1)");
+    CHECK(mock_post_dgram_send(ep, &dg, "AAAA", 4, &d1) == 0, "send#1 accepted");
+    CHECK(mock_post_dgram_send(ep, &dg, "BB", 2, &d2) == 0, "send#2 ACCEPTED before any drain (not -1)");
     CHECK(g_udp_tx_calls == 1, "only ONE EFI Transmit posted (send#2 queued)");
     CHECK(g_udp_tx_dst[3] == 3 && g_udp_tx_dport == 53, "send#1 posted first (10.0.2.3:53)");
     /* Drain until both sends retire (each completes when it reaches the head of the per-fd queue;
@@ -1714,8 +1736,8 @@ static void t_dgram_deferred_post_failure_releases(void) {
     KlUdpTransport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr d1, d2; mk_ipv4(&d1, 10, 0, 2, 3, 53); mk_ipv4(&d2, 10, 0, 2, 4, 5353);
-    CHECK(COMP(ep)->post_dgram_send(&dg, "AAAA", 4, &d1) == 0, "send#1 posted+completes");
-    CHECK(COMP(ep)->post_dgram_send(&dg, "BBBBB", 5, &d2) == 0, "send#2 queued (snd_len 5)");
+    CHECK(mock_post_dgram_send(ep, &dg, "AAAA", 4, &d1) == 0, "send#1 posted+completes");
+    CHECK(mock_post_dgram_send(ep, &dg, "BBBBB", 5, &d2) == 0, "send#2 queued (snd_len 5)");
     g_udp_transmit_ret = EFI_INVALID_PARAMETER;   /* send#2's pump-post (Transmit call) will be REJECTED */
     KlCompletionEvent evs[8];
     int fail_bytes = -1, ok_bytes = -1;
@@ -1745,7 +1767,7 @@ static void t_dgram_life_stale_release_recv(void) {
     KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
     g_udp_receive_mode = TOK_HANG;   /* posted, never completes — reaped cleanly at close */
-    CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (→ 2)");
+    CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (→ 2)");
     g_cancel_signals = 1;
     kl_uefi_udp_close(fd);   /* clean close reaps the token, bumps the generation */
     kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
@@ -1773,7 +1795,7 @@ static void t_dgram_teardown_clean_release(void) {
     KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
     g_udp_receive_mode = TOK_HANG;
-    CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (→ 2)");
+    CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (→ 2)");
     g_cancel_signals = 1;
     kl_uefi_udp_close(fd);   /* CLEAN close reaps the token */
     kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
@@ -1795,7 +1817,7 @@ static void t_dgram_life_quarantine_recv(void) {
     KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
     g_udp_receive_mode = TOK_HANG;
-    CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (→ 2)");
+    CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (→ 2)");
     g_cancel_signals = 0;
     kl_uefi_udp_close(fd);   /* unconfirmed → quarantine */
     kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
@@ -1819,7 +1841,7 @@ static void t_dgram_life_quarantine_send(void) {
     dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_HANG;
     KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
-    CHECK(COMP(ep)->post_dgram_send(&dg, "x", 1, &dest) == 0, "post_dgram_send (→ 2)");
+    CHECK(mock_post_dgram_send(ep, &dg, "x", 1, &dest) == 0, "post_dgram_send (→ 2)");
     g_cancel_signals = 0;
     kl_uefi_udp_close(fd);   /* unconfirmed → quarantine (Tx) */
     kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */

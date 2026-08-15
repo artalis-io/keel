@@ -389,19 +389,19 @@ static EfiDgramOp *dgram_op_alloc(void) {
     return NULL;
 }
 
-static int el_post_dgram_recv(struct KlUdpTransport *dg) {
-    if (!dg) return -1;
+static int el_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *rop) {
+    (void)ctx;                          /* EFI reaches its substrate via file-scope g_efi, not the ctx */
+    if (!rop) return -1;
     EfiDgramOp *op = dgram_op_alloc();
-    if (!op) return -1;
+    if (!op) return -1;                 /* nothing taken → caller releases its retained token ref */
     for (size_t b = 0; b < sizeof(*op); b++) ((unsigned char *)op)[b] = 0;
     op->kind   = EFI_DG_RECV;
-    op->fd     = dg->fd;
-    op->buf    = dg->recv_buf;          /* copy target — captured now; the token ref pins it */
-    op->buflen = dg->recv_buf_size;
-    if (kl_uefi_udp_post_recv(dg->fd) != 0) return -1;   /* op still !in_use → nothing to retire */
-    op->generation = kl_uefi_udp_generation_h(dg->fd);   /* the live slot's generation (op identity) */
-    op->life = (struct KlDgramLife *)dg->rx_life;
-    kl_dgram_life_retain(op->life);                      /* one ref per posted op (B.6) */
+    op->fd     = rop->fd;
+    op->buf    = rop->buf;              /* copy target — captured now; the token ref pins it */
+    op->buflen = rop->cap;
+    if (kl_uefi_udp_post_recv(rop->fd) != 0) return -1;  /* op still !in_use → nothing to retire */
+    op->generation = kl_uefi_udp_generation_h(rop->fd);  /* the live slot's generation (op identity) */
+    op->life = rop->life;               /* TRANSFERRED into the op (no retain — the caller retained) */
     op->in_use = 1;   /* set last */
     return 0;
 }
@@ -433,24 +433,23 @@ static void efi_dgram_pump_sends(KlSocketHandle fd) {
     }
 }
 
-static int el_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
-                              const KlSockAddr *dest) {
-    if (!dg || len > KL_EFI_DGRAM_SNDBUF) return -1;
+static int el_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
+    (void)ctx;                          /* EFI reaches its substrate via file-scope g_efi, not the ctx */
+    if (!sop || sop->len > KL_EFI_DGRAM_SNDBUF) return -1;
     EfiDgramOp *op = dgram_op_alloc();
-    if (!op) return -1;
+    if (!op) return -1;                 /* nothing taken → caller releases its ref */
     for (size_t b = 0; b < sizeof(*op); b++) ((unsigned char *)op)[b] = 0;
     op->kind = EFI_DG_SEND;
-    op->fd   = dg->fd;
+    op->fd   = sop->fd;
     /* COPY the payload + dest now — the caller may free them right after this returns. The op is queued
      * and posted to the substrate one-at-a-time by efi_dgram_pump_sends (EFI: one Tx token per socket). */
-    for (size_t b = 0; b < len; b++) op->snd[b] = ((const unsigned char *)data)[b];
-    op->snd_len = len;
-    if (dest) op->snd_dest = *dest;
+    for (size_t b = 0; b < sop->len; b++) op->snd[b] = ((const unsigned char *)sop->data)[b];
+    op->snd_len = sop->len;
+    if (sop->dest) op->snd_dest = *sop->dest;
     op->seq  = g_efi.dgram_seq++;         /* monotonic acceptance order → per-socket FIFO */
-    op->life = (struct KlDgramLife *)dg->rx_life;
-    kl_dgram_life_retain(op->life);      /* one B.6 ref per accepted send op */
-    op->in_use = 1;                      /* accepted (queued) */
-    efi_dgram_pump_sends(dg->fd);        /* post it now if the socket's Tx token is free */
+    op->life = sop->life;                 /* TRANSFERRED into the op (no retain) */
+    op->in_use = 1;                       /* accepted (queued) */
+    efi_dgram_pump_sends(sop->fd);        /* post it now if the socket's Tx token is free */
     return 0;
 }
 #endif /* KEEL_UEFI_DATAGRAM */

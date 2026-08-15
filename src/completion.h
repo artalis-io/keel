@@ -20,6 +20,7 @@
 #include <keel/connection.h>   /* KlConn */
 #include <keel/socket.h>       /* KlIoVec, KlSocketHandle */
 #include <keel/sockaddr.h>     /* KlSockAddr (event addrs + KlCompletionOps.post_dgram_send) */
+#include "io_engine.h"         /* KlDgramSendOp / KlDgramRecvOp — the neutral datagram post descriptors */
 #include <stdint.h>            /* uint64_t (KlCompletionOps.post_sendfile) */
 #include <stddef.h>
 
@@ -133,9 +134,10 @@ typedef struct KlCompletionOps {
     int  (*post_sendfile)(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count);
     void (*cancel)(struct KlEventCtx *ctx, KlSocketHandle fd);
-    int  (*post_dgram_recv)(struct KlUdpTransport *dg);
-    int  (*post_dgram_send)(struct KlUdpTransport *dg, const void *data, size_t len,
-                          const KlSockAddr *dest);
+    /* Neutral datagram post seam (7B-2b): descriptors carry fd + payload/buffer + KlDgramLife, so the
+     * backend never dereferences a transport. See io_engine.h KlDgramSendOp/KlDgramRecvOp + ownership. */
+    int  (*post_dgram_recv)(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
+    int  (*post_dgram_send)(struct KlEventCtx *ctx, const KlDgramSendOp *op);
     /* Post one outbound connect on `fd` (a nonblocking socket the client created + owns)
      * to `addr`; its completion is surfaced as KL_COMP_CONNECT targeting `watcher_udata`
      * (the tagged KlWatcher the client registered on `fd`). LC-0 — the client-side

@@ -636,19 +636,19 @@ static int iou_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-static int iou_comp_post_dgram_recv(struct KlUdpTransport *dg) {
-    KlIouState *st = dg->ctx->loop._backend;
+static int iou_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *rop) {
+    KlIouState *st = ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
-    if (!op) return -1;
+    if (!op) return -1;                 /* nothing taken → caller releases its retained token ref */
     op->type = IOU_DGRAM_RECV;
-    op->fd = dg->fd;
+    op->fd = rop->fd;
     op->peer_len = sizeof(op->peer);
-    /* Copy the receive buffer + capture flags now; the op must not dereference KlUdpTransport later. The
-     * buffer stays valid because the token ref (retained below) pins it past the op's lifetime. */
-    op->buf        = dg->recv_buf;
-    op->buflen     = dg->recv_buf_size;
-    op->dg_pktinfo = dg->pktinfo;
-    op->dg_gro     = dg->recv_gro;
+    /* The receive buffer + capture flags travel in the descriptor; the op never dereferences a transport.
+     * The buffer stays valid because the token ref (transferred below) pins it past the op's lifetime. */
+    op->buf        = rop->buf;
+    op->buflen     = rop->cap;
+    op->dg_pktinfo = (rop->capture & KL_DGRAM_RX_PKTINFO) != 0;
+    op->dg_gro     = (rop->capture & KL_DGRAM_RX_GRO)     != 0;
     op->msgiov.iov_base = op->buf;
     op->msgiov.iov_len = op->buflen;
     op->msgh.msg_name = &op->peer;
@@ -661,42 +661,39 @@ static int iou_comp_post_dgram_recv(struct KlUdpTransport *dg) {
     if (!sqe) { iou_op_free(op); return -1; }      /* life unset → no release */
     io_uring_prep_recvmsg(sqe, op->fd, &op->msgh, 0);
     io_uring_sqe_set_data(sqe, op);
-    op->life = (KlDgramLife *)dg->rx_life;          /* retain AFTER the failure unwind above */
-    kl_dgram_life_retain(op->life);
+    op->life = rop->life;               /* TRANSFERRED into the op (no retain — the caller retained) */
     iou_op_push(st, op);
     return 0;
 }
 
-static int iou_comp_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
-                          const KlSockAddr *dest) {
-    KlIouState *st = dg->ctx->loop._backend;
+static int iou_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
+    KlIouState *st = ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
-    if (!op) return -1;
+    if (!op) return -1;                 /* nothing taken → caller releases its ref */
     op->type = IOU_DGRAM_SEND;
-    op->fd = dg->fd;
-    op->send_total = len;
-    op->sendcap = len ? len : 1;
+    op->fd = sop->fd;
+    op->send_total = sop->len;
+    op->sendcap = sop->len ? sop->len : 1;
     op->sendbuf = kl_malloc(st->alloc, op->sendcap);
-    if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }   /* life unset → no release */
-    memcpy(op->sendbuf, data, len);
+    if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }   /* life unset → caller releases */
+    memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
     /* Marshal the neutral dest to a host sockaddr for the overlapped sendmsg. */
-    if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC) {
-        op->peer_len = kl_sockaddr_to_native(dest, &op->peer);
+    if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC) {
+        op->peer_len = kl_sockaddr_to_native(sop->dest, &op->peer);
         if (op->peer_len) {
             op->msgh.msg_name = &op->peer;
             op->msgh.msg_namelen = op->peer_len;
         }
     }
     op->msgiov.iov_base = op->sendbuf;
-    op->msgiov.iov_len = len;
+    op->msgiov.iov_len = sop->len;
     op->msgh.msg_iov = &op->msgiov;
     op->msgh.msg_iovlen = 1;
     struct io_uring_sqe *sqe = iou_sqe(st);
-    if (!sqe) { iou_op_free(op); return -1; }
+    if (!sqe) { iou_op_free(op); return -1; }       /* life unset → caller releases */
     io_uring_prep_sendmsg(sqe, op->fd, &op->msgh, 0);
     io_uring_sqe_set_data(sqe, op);
-    op->life = (KlDgramLife *)dg->rx_life;          /* retain AFTER the failure unwind above */
-    kl_dgram_life_retain(op->life);
+    op->life = sop->life;               /* TRANSFERRED into the op (no retain) */
     iou_op_push(st, op);
     return 0;
 }
