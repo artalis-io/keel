@@ -75,7 +75,7 @@
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
 #include "completion.h"        /* the abstract completion axis this TU implements (src/) */
 #include "io_engine.h"         /* kl_comp_post_udp_* decls (forward-declares struct KlUdp) */
-#include <keel/udp.h>          /* KlDatagram layout (dg->ctx / dg->fd) — the UDP completion target */
+#include <keel/udp.h>          /* KlUdpTransport layout (dg->ctx / dg->fd) — the UDP completion target */
 
 #include <string.h>
 #include <time.h>
@@ -534,19 +534,19 @@ static void lwr_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
 /* LC-3a: UDP datagram over the raw completion loop. udp.c drives these on a completion loop
  * (KL_EVENT_CAP_COMPLETION): post_dgram_recv arms one datagram recv on the udp pcb (surfaced as
  * KL_COMP_DGRAM_RECV via the drain when a datagram arrives), and post_dgram_send hands one datagram to
- * udp_sendto (surfaced as KL_COMP_DGRAM_SEND). The KlDatagram* is the completion target; the udp pcb is
+ * udp_sendto (surfaced as KL_COMP_DGRAM_SEND). The KlUdpTransport* is the completion target; the udp pcb is
  * udp->fd. Raw recv is passive (the udp_recv callback retains datagrams into the glue's per-slot
  * ring), so "posting" a recv just associates the owner + arms the slot — mirroring the tcp recv-arm
  * model. IPv4-only (the loopif is IPv4). */
-static int lwr_comp_post_dgram_recv(struct KlDatagram *dg) {
+static int lwr_comp_post_dgram_recv(struct KlUdpTransport *dg) {
     KlLwrState *st = dg->ctx->loop._backend;
     KlSocketHandle fd = dg->fd;
     if (!st || !kl_handle_valid(fd)) return -1;
-    /* Pass the stable token (read from KlDatagram at post ONLY); the glue retains a ref for the armed
-     * recv and the drain transfers it to the event — the completion never dereferences KlDatagram. */
+    /* Pass the stable token (read from KlUdpTransport at post ONLY); the glue retains a ref for the armed
+     * recv and the drain transfers it to the event — the completion never dereferences KlUdpTransport. */
     return kl_lwr_udp_post_recv(st->lwrctx, (void *)fd, dg->rx_life);
 }
-static int lwr_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
+static int lwr_comp_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
                           const KlSockAddr *dest) {
     KlLwrState *st = dg->ctx->loop._backend;
     KlSocketHandle fd = dg->fd;
@@ -684,7 +684,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
 
     /* (d) UDP datagram completions (LC-3a): the glue's udp slots surface inbound datagrams
      * (KL_LWR_DGRAM_RECV) + completed sends (KL_LWR_DGRAM_SEND). Translate each into KL_COMP_DGRAM_RECV /
-     * KL_COMP_DGRAM_SEND targeting the KlDatagram* the machine posted. For a RECV, store the raw source
+     * KL_COMP_DGRAM_SEND targeting the KlUdpTransport* the machine posted. For a RECV, store the raw source
      * IPv4 bytes + port directly as the neutral KlSockAddr ev->peer (no native round-trip), and
      * point ev->buf at the glue's staged payload (valid until the next udp drain). */
     KlLwrUdpRecord urecs[KL_LWR_MAX_DRAIN];

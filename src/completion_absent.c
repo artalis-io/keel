@@ -54,9 +54,9 @@ int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
 
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) { (void)ctx; (void)fd; abort(); }
 
-int kl_comp_post_dgram_recv(struct KlDatagram *dg) { (void)dg; abort(); }
+int kl_comp_post_dgram_recv(struct KlUdpTransport *dg) { (void)dg; abort(); }
 
-int kl_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
+int kl_comp_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
                           const KlSockAddr *dest) {
     (void)dg; (void)data; (void)len; (void)dest; abort();
 }

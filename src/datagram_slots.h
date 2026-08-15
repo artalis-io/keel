@@ -85,7 +85,7 @@ static inline size_t kl_dgram_slots_free_count(const KlDgramSlots *s) { return s
 
 /* ── Inbound slot (LIFE-TOKEN-ownable) ─────────────────────────────────────────────────────────
  * ONE dedicated inbound slot with its OWN allocation, so a B.6 KlDgramLife on_final can free it
- * independently of (and outliving) the outbound pool + the KlUdp/KlDatagram wrapper. */
+ * independently of (and outliving) the outbound pool + the KlUdp/KlUdpTransport wrapper. */
 typedef struct {
     KlAllocator   *alloc;      /* borrowed; used only by init/free */
     unsigned char *block;      /* the one allocation: this slot's payload region */

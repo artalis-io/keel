@@ -23,7 +23,7 @@
 
 struct KlServer;
 struct KlEventCtx;
-struct KlDatagram;   /* UDP completion target — backends hold a KlDatagram*, never a KlUdp */
+struct KlUdpTransport;   /* UDP completion target — backends hold a KlUdpTransport*, never a KlUdp */
 struct sockaddr;
 
 /* Is the completion axis compiled into this build? 1 when the driver + dispatch are
@@ -86,13 +86,13 @@ void kl_io_engine_post_read(struct KlConn *conn);
  * dg->recv_buf). Called by udp.c (shared) on a completion loop, so — like
  * kl_comp_run — it is declared here and stubbed in io_engine.c on non-completion
  * builds (never reached there); the real primitive lives in event_iocp.c. */
-int kl_comp_post_dgram_recv(struct KlDatagram *dg);
+int kl_comp_post_dgram_recv(struct KlUdpTransport *dg);
 
 /* Post one overlapped datagram send (WSASendTo) on a completion loop. The backend
  * copies the datagram + destination for the op's lifetime; the completion surfaces
  * a KL_COMP_DGRAM_SEND event. Shared-called by udp.c → stubbed in io_engine.c on
  * non-completion builds; real primitive in event_iocp.c. */
-int kl_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
+int kl_comp_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
                           const KlSockAddr *dest);
 
 /* Post one outbound connect on a completion loop (LC-0). `fd` is a nonblocking socket the

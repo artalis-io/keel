@@ -8,7 +8,7 @@
  * KlUdp wrapper that started it: the backend op is kernel-/backend-owned and its completion may be
  * reaped only when the loop is driven, possibly AFTER the owner called kl_udp_free() (and after the
  * caller freed/reused the KlUdp). The op therefore must NOT retain or dereference the owner (KlUdp)
- * nor its embedded KlDatagram. Instead each posted op carries a reference to this token, which:
+ * nor its embedded KlUdpTransport. Instead each posted op carries a reference to this token, which:
  *
  *  - is allocated from the EVENT-CONTEXT / backend allocator (outlives KlUdp), before the first
  *    receive is posted;
@@ -26,7 +26,7 @@
  *
  * This is the frozen "backend-owned stable token" mechanism (docs/datagram_contract.md §6), NOT a
  * generation check on a freed object. It is transport-neutral: the completion backends never regain
- * UDP coupling — at post time they read KlDatagram to copy the socket/context/buffer/token into the
+ * UDP coupling — at post time they read KlUdpTransport to copy the socket/context/buffer/token into the
  * op, and thereafter touch only the token.
  *
  * SINGLE-THREADED: every create/retain/release/mark_dead/target call MUST run on the event-loop
@@ -58,7 +58,7 @@ void kl_dgram_life_release(KlDgramLife *l);
 void kl_dgram_life_mark_dead(KlDgramLife *l);
 
 /* The live target (the owner), or NULL once dead. A completion path MUST check this before touching
- * the owner / its KlDatagram. */
+ * the owner / its KlUdpTransport. */
 void *kl_dgram_life_target(const KlDgramLife *l);
 
 #endif /* KEEL_SRC_DATAGRAM_LIFE_H */

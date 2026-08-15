@@ -1420,7 +1420,7 @@ UTEST(dns, cookie_client_mismatch_ignored) {
  * The built-in resolver transitively rides the shared serial-receive machine (KlDgramRecv over the
  * dedicated inbound slot) through kl_udp_recv_start(dns_on_recv) — exactly like KlUdpServer; no
  * DNS-specific receive seam exists. Its UDP SENDS (kl_udp_send_to) and TEARDOWN (kl_udp_free) keep the
- * existing KlUdp compatibility semantics until the public KlDatagram path (Step 7), and the TCP
+ * existing KlUdp compatibility semantics until the public KlUdpTransport path (Step 7), and the TCP
  * fallback (mock above) is an independent byte-stream path, NOT the datagram machine. These two cases
  * cover the couplings dns_on_recv leans on THROUGH the machine — src on every recv (anti-spoof) and
  * txid demux across serial re-arms — and run on both readiness and completion backends. */

@@ -24,7 +24,7 @@
  * is an optional transport, and the two do not link together unless asked. */
 #ifdef KEEL_UEFI_DATAGRAM
 #include "socket_efi_udp4.h"          /* 6.4b-3b: datagram completion primitives + KlUefiUdpOpResult */
-#include <keel/udp.h>                  /* KlDatagram layout (dg->fd/recv_buf/rx_life) for post_dgram_* */
+#include <keel/udp.h>                  /* KlUdpTransport layout (dg->fd/recv_buf/rx_life) for post_dgram_* */
 #include "../../src/datagram_life.h"   /* KlDgramLife retain/release — B.6 stable-token transfer */
 #endif
 #include <keel/server.h>               /* KlServer.pool — accept backpressure (S-3) */
@@ -389,7 +389,7 @@ static EfiDgramOp *dgram_op_alloc(void) {
     return NULL;
 }
 
-static int el_post_dgram_recv(struct KlDatagram *dg) {
+static int el_post_dgram_recv(struct KlUdpTransport *dg) {
     if (!dg) return -1;
     EfiDgramOp *op = dgram_op_alloc();
     if (!op) return -1;
@@ -433,7 +433,7 @@ static void efi_dgram_pump_sends(KlSocketHandle fd) {
     }
 }
 
-static int el_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
+static int el_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
                               const KlSockAddr *dest) {
     if (!dg || len > KL_EFI_DGRAM_SNDBUF) return -1;
     EfiDgramOp *op = dgram_op_alloc();

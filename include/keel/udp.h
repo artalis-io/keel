@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <keel/sockaddr.h>          /* KlSockAddr — the public address currency */
-#include <keel/datagram_detail.h>   /* KlDatagram — the raw transport state KlUdp wraps (Phase A) */
+#include <keel/udp_transport_detail.h>   /* KlUdpTransport — the raw transport state KlUdp wraps (Phase A) */
 
 /**
  * udp.h — Non-blocking UDP datagram socket over KlEventCtx.
@@ -119,7 +119,7 @@ typedef struct KlUdpConfig {      /* named tag: the datagram provider ops (keel/
 struct KlUdp {
     /* Config/control wrapper: the user-facing receive/drain callbacks. The raw datagram
      * transport state — the borrowed event loop + allocator, fd, send queue, recv buffer,
-     * event-loop interest, and counters — lives in the embedded KlDatagram `dg` (Phase A
+     * event-loop interest, and counters — lives in the embedded KlUdpTransport `dg` (Phase A
      * carve — behaviour unchanged). Access it through the kl_udp_* API. */
     /* Receive/drain callbacks (the consumer boundary). */
     KlUdpRecvFn    on_recv;
@@ -133,8 +133,8 @@ struct KlUdp {
      * per-datagram receive rides this shared machinery (uniform truncation/metadata/pause); the
      * byte-budget SEND queue below stays a legacy compatibility path outside the Tier-1 facet. */
     void          *rx;
-    /* Raw datagram transport (opaque layout in <keel/datagram_detail.h>). */
-    KlDatagram     dg;
+    /* Raw datagram transport (opaque layout in <keel/udp_transport_detail.h>). */
+    KlUdpTransport     dg;
 };
 
 /**

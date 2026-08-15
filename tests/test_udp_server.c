@@ -14,7 +14,7 @@
  *
  * The server's SEND queue (byte-budget) and CLOSE (kl_udp_free legacy teardown) remain the existing
  * KlUdp compatibility behavior; the fixed-slot atomic send + confirmed-detachment close machines are
- * deferred to the public KlDatagram path (Step 7) and are intentionally NOT exercised here.
+ * deferred to the public KlUdpTransport path (Step 7) and are intentionally NOT exercised here.
  *
  * SPDX-License-Identifier: MIT
  */

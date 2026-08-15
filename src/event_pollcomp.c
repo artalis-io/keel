@@ -63,7 +63,7 @@ typedef struct KlPcOp {
     KlSocketHandle fd;                    /* the descriptor this op polls */
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
     /* Datagram ops (PC_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
-     * post so the op NEVER dereferences KlDatagram afterwards. The recv buffer + capture flags are
+     * post so the op NEVER dereferences KlUdpTransport afterwards. The recv buffer + capture flags are
      * COPIED at post (into buf/buflen/dg_pktinfo/dg_gro) so the completion touches only the op. */
     KlDgramLife   *life;
     int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
@@ -317,7 +317,7 @@ static int pc_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-static int pc_comp_post_dgram_recv(struct KlDatagram *dg) {
+static int pc_comp_post_dgram_recv(struct KlUdpTransport *dg) {
     KlPcState *st = dg->ctx->loop._backend;
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
     if (!op) return -1;
@@ -325,7 +325,7 @@ static int pc_comp_post_dgram_recv(struct KlDatagram *dg) {
     op->type = PC_DGRAM_RECV;
     op->alloc = st->alloc;
     op->fd = dg->fd;
-    /* Copy the receive buffer + capture flags now; the op must not dereference KlDatagram later. The
+    /* Copy the receive buffer + capture flags now; the op must not dereference KlUdpTransport later. The
      * buffer stays valid because the token ref (retained below) pins it past the op's lifetime. */
     op->buf        = dg->recv_buf;
     op->buflen     = dg->recv_buf_size;
@@ -337,7 +337,7 @@ static int pc_comp_post_dgram_recv(struct KlDatagram *dg) {
     return 0;
 }
 
-static int pc_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
+static int pc_comp_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
                           const KlSockAddr *dest) {
     KlPcState *st = dg->ctx->loop._backend;
     KlPcOp *op = kl_malloc(st->alloc, sizeof(*op));
@@ -431,7 +431,7 @@ static int pc_emit_abort(KlPcOp *op, KlCompletionEvent *ev) {
     case PC_READ:                    ev->kind = KL_COMP_READ;  ev->target = op->stream; return 1;
     case PC_WRITE: case PC_SENDFILE: ev->kind = KL_COMP_WRITE; ev->target = op->stream; return 1;
     /* Datagram: transfer the token reference op → event (released after dispatch); the op no longer
-     * owns it, so pc_op_free must not release it. Never touch KlDatagram. */
+     * owns it, so pc_op_free must not release it. Never touch KlUdpTransport. */
     case PC_DGRAM_RECV:                ev->kind = KL_COMP_DGRAM_RECV; ev->life = op->life; op->life = NULL; return 1;
     case PC_DGRAM_SEND:                ev->kind = KL_COMP_DGRAM_SEND; ev->life = op->life; op->life = NULL; return 1;
     case PC_CONNECT:                 /* never reached: cancelled connect ops are freed in

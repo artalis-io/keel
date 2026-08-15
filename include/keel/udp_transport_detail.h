@@ -1,7 +1,7 @@
 /*
- * keel/datagram_detail.h — Layout of KlDatagram (opt-in detail).
+ * keel/udp_transport_detail.h — Layout of KlUdpTransport (opt-in detail).
  *
- * INTERNAL / UNSTABLE. Include this ONLY to embed or stack-allocate a KlDatagram (e.g. KlUdp
+ * INTERNAL / UNSTABLE. Include this ONLY to embed or stack-allocate a KlUdpTransport (e.g. KlUdp
  * embeds it); the fields are NOT part of the API and may change without notice. The
  * behavior/ownership contract is in <keel/datagram_contract.md>; the data-plane provider vtable is
  * in <keel/datagram.h>. External code must use the kl_udp_* accessors, not `dg.*`.
@@ -11,10 +11,10 @@
  * borrowed event loop + allocator and the user-facing receive/drain callbacks stay on KlUdp (the
  * UDP configuration/control wrapper).
  */
-#ifndef KEEL_DATAGRAM_DETAIL_H
-#define KEEL_DATAGRAM_DETAIL_H
+#ifndef KEEL_UDP_TRANSPORT_DETAIL_H
+#define KEEL_UDP_TRANSPORT_DETAIL_H
 
-#include <keel/datagram.h>  /* typedef struct KlDatagram KlDatagram (the opaque handle) */
+#include <keel/datagram.h>  /* typedef struct KlUdpTransport KlUdpTransport (the opaque handle) */
 #include <keel/handle.h>    /* KlSocketHandle */
 #include <keel/error.h>     /* KlError */
 #include <keel/event.h>     /* KlEventMask */
@@ -28,7 +28,7 @@ struct KlEventCtx;         /* owning event loop — back-pointer (the provider r
 /* Raw datagram transport state. Behaviour is unchanged by the Phase-A carve — this is a
  * structural relocation of the fields that previously lived directly on KlUdp. Mirrors KlStream:
  * the transport object owns the borrowed event loop (ctx) + allocator (alloc). */
-struct KlDatagram {
+struct KlUdpTransport {
     struct KlEventCtx *ctx;          /**< Back-pointer to the event loop (borrowed; must outlive). */
     KlAllocator   *alloc;            /**< Allocator for the send-queue nodes + recv buffer (borrowed). */
     KlSocketHandle fd;
@@ -44,7 +44,7 @@ struct KlDatagram {
     size_t         recv_buf_size;
     /* The per-datagram source + local (dest) address are stack scratch inside the datagram
      * provider's recv op (marshalled to KlSockAddr before delivery), so no host sockaddr lives
-     * on this struct — KlDatagram is layout-neutral. */
+     * on this struct — KlUdpTransport is layout-neutral. */
     int            pktinfo;          /**< 1 = local-address capture enabled. */
     uint64_t       truncated;        /**< Count of oversized (truncated) datagrams. */
     /* Send queue (whole-datagram FIFO) */
@@ -64,8 +64,8 @@ struct KlDatagram {
     KlError        last_error;
     /* Stable-liveness token for datagram completion ops (transport-neutral KlDgramLife*, opaque
      * here). A completion backend reads it at POST time to copy a reference into the op, then never
-     * dereferences this KlDatagram again — the op/completion recover the owner through the token. */
+     * dereferences this KlUdpTransport again — the op/completion recover the owner through the token. */
     void          *rx_life;
 };
 
-#endif /* KEEL_DATAGRAM_DETAIL_H */
+#endif /* KEEL_UDP_TRANSPORT_DETAIL_H */

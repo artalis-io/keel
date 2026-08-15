@@ -1,6 +1,6 @@
 #include <keel/udp.h>
 
-#include <stddef.h>   /* offsetof — recover KlUdp from its embedded KlDatagram */
+#include <stddef.h>   /* offsetof — recover KlUdp from its embedded KlUdpTransport */
 #include <stdint.h>
 #include <string.h>   /* memcpy / memset — freestanding intrinsics */
 
@@ -196,7 +196,7 @@ void kl_udp_deliver(KlUdp *udp, const KlDgramLife *life, const void *data, size_
  * The Tier-1 per-datagram receive rides the shared KlDgramRecv over a dedicated inbound slot
  * (KlDgramInbound — its own allocation, life-token-owned, 7A-1) — the same uniform captured-prefix
  * truncation, mandatory-peer, serial pause/resume
- * normalization the public KlDatagram path will use. GRO (a single coalesced recv) rides through it
+ * normalization the public KlUdpTransport path will use. GRO (a single coalesced recv) rides through it
  * via per-datagram scratch (gro_seg/tos); only true recvmmsg BATCHING (rx_batch) bypasses it as a
  * legacy Tier-2 path (see udp_recv_dgram). The byte-budget SEND queue and close remain LEGACY
  * compatibility paths, deliberately outside the Tier-1 fixed-slot send facet. */
@@ -741,7 +741,7 @@ void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp) {
      * token path (Phase B.6: pollcomp/io_uring/IOCP/lwIP-raw), so every datagram completion carries
      * ev->life and the ref was transferred from the posted op; the legacy ev->target (KlUdp-deref)
      * recovery is gone. A dgram event without a token (ev->life == NULL) yields a NULL owner and is
-     * safely dropped/retired below — never a dereference of a possibly-freed KlDatagram. */
+     * safely dropped/retired below — never a dereference of a possibly-freed KlUdpTransport. */
     KlDgramLife *life = ev->life;
     KlUdp *udp = life ? (KlUdp *)kl_dgram_life_target(life) : NULL;
     switch (ev->kind) {

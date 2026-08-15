@@ -97,7 +97,7 @@ typedef struct KlIocpOp {
     KlAllocator  *alloc;
     KlStream     *stream;                      /* READ / WRITE / SENDFILE target (raw transport) */
     /* Datagram ops (DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at post
-     * so the op NEVER dereferences KlDatagram afterwards (the owner may be freed while this op is in
+     * so the op NEVER dereferences KlUdpTransport afterwards (the owner may be freed while this op is in
      * flight). The recv buffer + capacity + pktinfo flag are COPIED at post (buf/buflen/dg_pktinfo) so
      * the completion touches only the op; op_sock already carries the socket (CancelIoEx / GetOverlappedResult). */
     KlDgramLife  *life;
@@ -502,7 +502,7 @@ static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_
  * the readiness Windows recv (udp_cmsg_win.h). Falls back to WSARecvFrom (source address
  * only, local left 0) if the extension is unavailable. Either way the completion surfaces a
  * KL_COMP_DGRAM_RECV event. */
-static int iocp_comp_post_dgram_recv(KlDatagram *dg) {
+static int iocp_comp_post_dgram_recv(KlUdpTransport *dg) {
     KlIocpState *st = dg->ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
     if (!op) return -1;
@@ -510,7 +510,7 @@ static int iocp_comp_post_dgram_recv(KlDatagram *dg) {
     op->type = KL_IOCP_DGRAM_RECV;
     op->alloc = st->alloc;
     op->src_len = (int)sizeof(op->src);
-    /* Copy the receive buffer + capture flags now; the op must not dereference KlDatagram later. The
+    /* Copy the receive buffer + capture flags now; the op must not dereference KlUdpTransport later. The
      * buffer stays valid because the token ref (retained below) pins it past the op's lifetime. */
     op->buf        = dg->recv_buf;
     op->buflen     = dg->recv_buf_size;
@@ -556,7 +556,7 @@ static int iocp_comp_post_dgram_recv(KlDatagram *dg) {
 
 /* Post one overlapped WSASendTo for a UDP socket (8b-4d). Copies the datagram + its
  * destination into the op (owned until completion); surfaces KL_COMP_DGRAM_SEND. */
-static int iocp_comp_post_dgram_send(KlDatagram *dg, const void *data, size_t len,
+static int iocp_comp_post_dgram_send(KlUdpTransport *dg, const void *data, size_t len,
                           const KlSockAddr *dest) {
     KlIocpState *st = dg->ctx->loop._backend;
     KlIocpOp *op = kl_malloc(st->alloc, sizeof(*op));
@@ -851,7 +851,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 
             /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op.
              * Transfer the token ref op → event (released after dispatch); NULL op->life so
-             * iocp_op_free does not double-release. Never dereference KlDatagram. */
+             * iocp_op_free does not double-release. Never dereference KlUdpTransport. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_DGRAM_RECV;
             out[count].life = op->life; op->life = NULL;

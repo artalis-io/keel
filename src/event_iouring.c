@@ -100,7 +100,7 @@ typedef struct KlIouOp {
     KlSocketHandle fd;
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
     /* Datagram ops (IOU_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
-     * post so the op NEVER dereferences KlDatagram afterwards (the owner may be freed while this op is
+     * post so the op NEVER dereferences KlUdpTransport afterwards (the owner may be freed while this op is
      * in flight). The recv buffer + capture flags are COPIED at post (into buf/buflen/dg_pktinfo/
      * dg_gro) so the completion touches only the op. */
     KlDgramLife   *life;
@@ -636,14 +636,14 @@ static int iou_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-static int iou_comp_post_dgram_recv(struct KlDatagram *dg) {
+static int iou_comp_post_dgram_recv(struct KlUdpTransport *dg) {
     KlIouState *st = dg->ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
     if (!op) return -1;
     op->type = IOU_DGRAM_RECV;
     op->fd = dg->fd;
     op->peer_len = sizeof(op->peer);
-    /* Copy the receive buffer + capture flags now; the op must not dereference KlDatagram later. The
+    /* Copy the receive buffer + capture flags now; the op must not dereference KlUdpTransport later. The
      * buffer stays valid because the token ref (retained below) pins it past the op's lifetime. */
     op->buf        = dg->recv_buf;
     op->buflen     = dg->recv_buf_size;
@@ -667,7 +667,7 @@ static int iou_comp_post_dgram_recv(struct KlDatagram *dg) {
     return 0;
 }
 
-static int iou_comp_post_dgram_send(struct KlDatagram *dg, const void *data, size_t len,
+static int iou_comp_post_dgram_send(struct KlUdpTransport *dg, const void *data, size_t len,
                           const KlSockAddr *dest) {
     KlIouState *st = dg->ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
@@ -849,7 +849,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
     case IOU_DGRAM_RECV:
         /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op. Transfer
          * the token ref op → event (released after dispatch); NULL op->life so iou_op_free does not
-         * double-release. Never dereference KlDatagram. */
+         * double-release. Never dereference KlUdpTransport. */
         ev->kind = KL_COMP_DGRAM_RECV;
         ev->life = op->life; op->life = NULL;
         ev->ok = (res >= 0);

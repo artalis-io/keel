@@ -29,7 +29,7 @@
 #include "clock_snapshot.h"               /* TLS-platform-lifetime snapshot clock gate (U-8) */
 
 #include <keel/sockaddr.h>
-#include <keel/udp.h>                /* KlUdpConfig + KlDatagram layout (6.4b) */
+#include <keel/udp.h>                /* KlUdpConfig + KlUdpTransport layout (6.4b) */
 #include <keel/allocator.h>          /* KlAllocator (KlDgramLife tests) */
 #include <keel/event_ctx.h>          /* KlEventCtx (end-to-end KlUdp test) */
 #include "../../src/datagram_life.h" /* KlDgramLife create/retain/release/mark_dead (6.4b-3b) */
@@ -1543,7 +1543,7 @@ static void t_dgram_send_fifo_hole_reuse(void) {
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
     KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
-    KlDatagram dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_HANG;   /* sends post but do NOT auto-complete — step them manually */
     KlSockAddr dA, dB, dC, dD;
     mk_ipv4(&dA, 10, 0, 2, 3, 1); mk_ipv4(&dB, 10, 0, 2, 4, 1);
@@ -1591,7 +1591,7 @@ static void t_dgram_life_delivered_recv(void) {
     KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);   /* refcount 1 (owner) */
     CHECK(life != NULL, "KlDgramLife created (owner ref)");
     unsigned char rbuf[64];
-    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
     memcpy(g_udp_resp, "abc", 3); g_udp_resp_len = 3; g_udp_receive_mode = TOK_COMPLETE_OK;
     CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (op ref retained → 2)");
@@ -1620,7 +1620,7 @@ static void t_dgram_two_concurrent_sends(void) {
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
     KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);   /* owner ref */
-    KlDatagram dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr d1, d2; mk_ipv4(&d1, 10, 0, 2, 3, 53); mk_ipv4(&d2, 10, 0, 2, 4, 5353);
     CHECK(COMP(ep)->post_dgram_send(&dg, "AAAA", 4, &d1) == 0, "send#1 accepted");
@@ -1711,7 +1711,7 @@ static void t_dgram_deferred_post_failure_releases(void) {
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
     KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
-    KlDatagram dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr d1, d2; mk_ipv4(&d1, 10, 0, 2, 3, 53); mk_ipv4(&d2, 10, 0, 2, 4, 5353);
     CHECK(COMP(ep)->post_dgram_send(&dg, "AAAA", 4, &d1) == 0, "send#1 posted+completes");
@@ -1742,7 +1742,7 @@ static void t_dgram_life_stale_release_recv(void) {
     int owner = 0;
     KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
     unsigned char rbuf[64];
-    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
     g_udp_receive_mode = TOK_HANG;   /* posted, never completes — reaped cleanly at close */
     CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (→ 2)");
@@ -1770,7 +1770,7 @@ static void t_dgram_teardown_clean_release(void) {
     int owner = 0;
     KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
     unsigned char rbuf[64];
-    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
     g_udp_receive_mode = TOK_HANG;
     CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (→ 2)");
@@ -1792,7 +1792,7 @@ static void t_dgram_life_quarantine_recv(void) {
     int owner = 0;
     KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
     unsigned char rbuf[64];
-    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
     g_udp_receive_mode = TOK_HANG;
     CHECK(COMP(ep)->post_dgram_recv(&dg) == 0, "post_dgram_recv (→ 2)");
@@ -1815,7 +1815,7 @@ static void t_dgram_life_quarantine_send(void) {
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
     KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL);
-    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_HANG;
     KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
