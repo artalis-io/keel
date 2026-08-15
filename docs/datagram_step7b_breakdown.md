@@ -182,20 +182,29 @@ the first live backend cannot implement). Frozen as a distinct increment (**7B-2
 **Frozen boundary = operation DESCRIPTORS carrying everything the op needs — no transport deref.** Both
 `KlUdpTransport` (KlUdp's path) and `KlDgramCore` (the facade) BUILD these from their own state:
 
+**Header home (review Medium):** these descriptors carry the internal B.6 token + retirement-machine
+concepts and are consumed by `KlCompletionOps` — they belong on the **completion-model AXIS**, in the
+INTERNAL completion header (`src/io_engine.h` / the `KlCompletionOps` header), **NOT** the public
+provider-facing `keel/socket_dgram.h`. `keel/socket_dgram.h` holds only the provider data-plane
+(`KlDatagramOps` + `KlDgramRx*/TxDesc`); mixing the completion axis into the provider axis is exactly the
+layering the axis-audit forbids. So:
+
 ```c
-/* keel/socket_dgram.h (completion seam, provider/axis-scoped — NOT the app API) */
+/* src/io_engine.h — the COMPLETION AXIS (internal), alongside KlCompletionOps — NOT a provider header */
 typedef struct {
     KlSocketHandle fd;
-    const void   *data; size_t len;         /* payload — the backend COPIES it before accept */
-    const KlSockAddr *dest, *src; int tos;   /* dest UNSPEC=connected; src UNSPEC=no pin; tos -1=none */
-    struct KlDgramLife *life;                /* token ref TRANSFERRED into the op */
+    const void   *data; size_t len;         /* payload — COPIED into op storage before a successful post */
+    const KlSockAddr *dest, *src; int tos;   /* dest UNSPEC=connected; src UNSPEC=no pin; tos -1=none —
+                                              * ALSO copied before a successful post (address metadata is
+                                              * captured with the payload, not aliased past return) */
+    struct KlDgramLife *life;                /* token ref — see the ownership rule below */
 } KlDgramSendOp;
 
 typedef struct {
     KlSocketHandle fd;
     void         *buf; size_t cap;           /* the inbound slot — LENT (life-owned), backend writes it */
     unsigned      capture;                   /* KL_DGRAM_RX_* metadata-capture flags */
-    struct KlDgramLife *life;                /* token ref TRANSFERRED into the op */
+    struct KlDgramLife *life;
 } KlDgramRecvOp;
 
 /* added additively to KlCompletionOps (the completion axis) */
@@ -208,17 +217,30 @@ KlDgramRetireResult (*retire_dgram)(struct KlEventCtx *ctx, struct KlDgramLife *
 
 **Ownership-transfer rules (frozen — match the existing pollcomp/io_uring/IOCP/EFI/lwIP discipline the
 7A-3-retained backend tests cover):**
-- **Post:** the caller retains one `life` ref and TRANSFERS it into the op (the op owns it).
-- **Payload:** a send op's `data` is COPIED into backend op storage before the post returns (copy-
-  before-accept — the object-owned outbound pool is then safe to free at detachment).
+- **Post — transfer ONLY on success (review High-1).** The caller holds one retained `life` ref across
+  the post call. Ownership transfers into the op **iff `post_dgram_*` returns success** (op accepted /
+  INFLIGHT). On **failure** (bad arg, allocation / SQE-full / `WSASendTo` error, etc.) the post returns
+  -1 having taken NO ownership: the **caller** releases its retained ref, and the backend MUST NOT retain
+  or release it. This is the single rule that prevents a leak (backend forgot) or double-release (both
+  sides released) on a failed submit — the exact failure surface io_uring/IOCP add.
+- **Payload AND address metadata:** a send op's `data` — **and its `dest`/`src`/`tos`** — are COPIED into
+  backend op storage before a successful post returns (copy-before-accept). Nothing in the descriptor is
+  aliased past a successful return, so the object-owned outbound pool + the caller's address structs are
+  safe to reuse/free immediately.
 - **Recv buffer:** a recv op's `buf` is LENT (the life-owned inbound slot); the backend writes into it
   and NEVER frees it. The completion delivers `len` + `peer` + `meta` (already how `KlCompletionEvent`
   carries a datagram RECV).
-- **Completion:** the op's `life` ref is transferred to the completion event (`ev->life`) and released by
-  the dispatch after delivery. **Routing on a shared ctx** (KlUdp AND KlDatagram both live): the dispatch
-  recovers the owner via `kl_dgram_life_target(ev->life)` — the token's TARGET (set at token creation:
-  the `KlUdpTransport` for KlUdp, the `KlDgramCore` for the facade) — so one completion path serves both.
-  The exact owner→dispatch hook (a small kind tag / vtable on the target) is finalized in 7B-2.
+- **Completion + shared-ctx routing — frozen type-safe discriminator (review High-2).** The op's `life`
+  ref rides the completion event (`ev->life`); the dispatch releases it after delivery. `KlDgramLife`
+  MUST NOT be routed by guessing what `kl_dgram_life_target()`'s untyped pointer is. Frozen mechanism:
+  **`KlDgramLife` carries, set at creation, an owner DISPATCH callback + a kind tag** —
+  `KlDgramOwnerKind kind` (`KL_DGRAM_OWNER_UDP` / `KL_DGRAM_OWNER_DATAGRAM`, extensible) and
+  `void (*dispatch)(void *target, const KlCompletionEvent *ev)`. The completion path calls
+  `life->dispatch(kl_dgram_life_target(life), ev)` — each owner supplies its OWN typed handler
+  (`kl_udp_comp_dispatch` for `KlUdpTransport`, `kl_datagram_comp_dispatch` for `KlDgramCore`), so
+  routing is type-safe with no downcast-by-guess and KlUdp + KlDatagram coexist on one ctx. (This
+  replaces today's single ctx-global `comp_udp_dispatch`.) `kl_dgram_life_create` gains the
+  `kind`+`dispatch` params; landed in 7B-2.
 - **Cancel:** `cancel_dgram` is idempotent and does NOT release the ref; the op's terminal completion
   (even when cancelled) releases it.
 - **Retire:** `retire_dgram` is a pure query (no ownership effect); default RETIRED-on-terminal, EFI
@@ -251,7 +273,9 @@ ownership, and the §7 open decisions. **Gate: reviewer sign-off on the frozen c
 
 ### 7B-1 — the rename (pure mechanical, zero behaviour change)
 - `struct KlDatagram` → `KlUdpTransport`; `keel/datagram_detail.h` → `keel/udp_transport_detail.h`.
-- Relocate `KlDatagramOps` + descriptors + `KL_DGRAM_RX_*` → `keel/socket_dgram.h`.
+- Relocate `KlDatagramOps` + its PROVIDER descriptors (`KlDgramRx*`/`KlDgramTxDesc`) + `KL_DGRAM_RX_*` →
+  `keel/socket_dgram.h`. (The completion-axis op descriptors `KlDgramSendOp`/`KlDgramRecvOp` are a
+  SEPARATE, internal `src/io_engine.h` concern introduced in 7B-2 — not part of this rename.)
 - Sweep every reference: `udp.c`, `completion_*.c`, `event_{pollcomp,iouring,iocp,efi_*}.c`,
   `integrations/lwip`, `socket_*.c`, the freestanding manifest, tests.
 - **Validation:** the WHOLE existing suite green unchanged on every gated backend (macOS, container
@@ -260,10 +284,13 @@ ownership, and the §7 open decisions. **Gate: reviewer sign-off on the frozen c
 
 ### 7B-2 — neutralize the completion post/cancel/retire seam (§2.5.1; zero behaviour change)
 - Refactor `KlCompletionOps.post_dgram_send/recv` from `(…, KlUdpTransport *dg)` to the descriptor form
-  (`KlDgramSendOp`/`KlDgramRecvOp`), and add `cancel_dgram` + `retire_dgram`, across ALL completion
-  backends (`event_{pollcomp,iouring,iocp,efi_*}.c`, `integrations/lwip`, `completion_*.c`).
+  (`KlDgramSendOp`/`KlDgramRecvOp`, in `src/io_engine.h`), and add `cancel_dgram` + `retire_dgram`, across
+  ALL completion backends (`event_{pollcomp,iouring,iocp,efi_*}.c`, `integrations/lwip`, `completion_*.c`).
+  Enforce transfer-only-on-success in every backend's post path (failure releases nothing).
+- Add `{kind, dispatch}` to `KlDgramLife` (`kl_dgram_life_create` gains the params); replace the
+  ctx-global `comp_udp_dispatch` with `life->dispatch(target, ev)` in the completion dispatch. `KlUdp`
+  registers `kl_udp_comp_dispatch` on its tokens (target = `KlUdpTransport`); behaviour identical.
 - Re-point `KlUdp`: `udp.c` builds the descriptors from `KlUdpTransport` at post time (was: passed `dg`).
-- Freeze the shared-ctx completion routing (owner recovered via `kl_dgram_life_target`).
 - **Validation:** the WHOLE existing suite green unchanged on every gated backend — the seam is
   behaviour-preserving; only its shape changes. This is the increment that makes the seam CORE-NATIVE, so
   the facade and mock (7B-3) can encode an interface every live backend already implements. Kept separate
@@ -376,10 +403,13 @@ that backend are unchanged — `KlUdp` still rides `KlUdpTransport`).
 3. **Backend scope (review Medium-4)** — confirm 7B-6 = hosted CHECKPOINT (usable, not STABLE) and
    7B-9 = completion (every supported live backend), with STABLE/advertise only at 7B-10; or a different
    line for what "7B done" requires.
-4. **Completion-post seam neutralization (§2.5.1, review High)** — confirm the descriptor-based
-   `post_dgram_send/recv` (`KlDgramSendOp`/`KlDgramRecvOp`) + `cancel_dgram`/`retire_dgram` on
-   `KlCompletionOps`, the transfer/lend/copy ownership rules, and the shared-ctx routing via
-   `kl_dgram_life_target` — landed as 7B-2 (all backends) BEFORE the facade.
+4. **Completion-post seam neutralization (§2.5.1, review High-1/High-2/Medium)** — confirm: the
+   descriptor `post_dgram_send/recv` (`KlDgramSendOp`/`KlDgramRecvOp`) + `cancel_dgram`/`retire_dgram` on
+   `KlCompletionOps` live in the INTERNAL completion header (`src/io_engine.h`), not `keel/socket_dgram.h`;
+   **transfer-only-on-success** (failure → caller releases, backend must not touch); payload AND
+   `dest`/`src`/`tos` copied before a successful post; and the **type-safe dispatch discriminator** —
+   `KlDgramLife` carries `{kind, dispatch}` set at creation, dispatch called as
+   `life->dispatch(target, ev)`. Landed as 7B-2 (all backends) BEFORE the facade.
 5. **Live adapter boundary (§2.5)** — confirm the facade-owns-two-builders model over existing seams and
    the pre-adoption init-failure contract for a loop lacking a datagram seam.
 6. **`KlUdp` permanence** — confirm `KlUdp` stays on `KlUdpTransport` permanently (never re-based on the
