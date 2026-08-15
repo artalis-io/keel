@@ -335,13 +335,16 @@ static int t7_glue_unarmed_drop(void) {
                 kl_dgram_life_release((KlDgramLife *)recs[i].life);
             }
 
-            /* (3) RE-ARM + drain: a correctly-dropped "b" surfaces NOTHING here; a buggily-held "b"
-             * surfaces as a stale RECV. */
-            kl_lwr_udp_post_recv(lwrctx, rx, lrx);
-            int n3 = kl_lwr_udp_drain(lwrctx, recs, 8);
-            for (int i = 0; i < n3; i++) {
-                if (recs[i].kind == KL_LWR_DGRAM_RECV) stale++;
-                kl_dgram_life_release((KlDgramLife *)recs[i].life);
+            /* (3) RE-ARM + drain: the re-post MUST succeed (else the drain trivially yields no RECV and
+             * the oracle false-greens). A correctly-dropped "b" surfaces NOTHING here; a buggily-held
+             * "b" surfaces as a stale RECV. */
+            if (kl_lwr_udp_post_recv(lwrctx, rx, lrx) != 0) rc = fail("T7: re-arm post_recv");
+            else {
+                int n3 = kl_lwr_udp_drain(lwrctx, recs, 8);
+                for (int i = 0; i < n3; i++) {
+                    if (recs[i].kind == KL_LWR_DGRAM_RECV) stale++;
+                    kl_dgram_life_release((KlDgramLife *)recs[i].life);
+                }
             }
         }
     }
