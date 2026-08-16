@@ -180,6 +180,58 @@ static int t3_glue_cancel_semantics(void) {
     return rc;
 }
 
+/* T4 — bounded-state saturation/reuse (review): arm+cancel+close EVERY udp slot so all pending terminals
+ * are queued (each tied 1:1 to its slot index); no slot may be reused until the terminals drain; after
+ * draining, reuse works; exact ref accounting (each life: owner + arm→terminal→drain-release). */
+static int t4_saturation_reuse(void) {
+    KlAllocator alloc = kl_allocator_default();
+    void *lwrctx = kl_lwr_ctx_create(&alloc, 4);
+    if (!lwrctx) return fail("T4 ctx");
+    const uint8_t lo[4] = { 127, 0, 0, 1 };
+    KlDgramLife *life[16]; int n = 0; int rc = 0;
+
+    /* Fill every udp slot: new+bind+arm+cancel (→ pending terminal on that slot) + close (frees the pcb
+     * slot; the terminal stays queued and pins the slot against reuse). */
+    for (;;) {
+        void *p = kl_lwr_udp_new();
+        if (!p) break;                          /* slot table full */
+        if (n >= 16) { rc = fail("T4 slot count > 16"); break; }
+        KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
+        if (!l || kl_lwr_udp_bind(p, lo, 0) != 0 || kl_lwr_udp_post_recv(lwrctx, p, l) != 0) {
+            kl_dgram_life_release(l); kl_lwr_udp_close(lwrctx, p); rc = fail("T4 arm"); break;
+        }
+        life[n++] = l;
+        kl_lwr_udp_cancel_recv(lwrctx, l);      /* → pending terminal tied to this slot */
+        if (kl_lwr_udp_recv_pending(lwrctx, l) != 1) { rc = fail("T4 not PENDING"); break; }
+        kl_lwr_udp_close(lwrctx, p);            /* free the pcb slot; terminal remains, pins the slot */
+    }
+    if (rc == 0 && n < 2) rc = fail("T4 too few slots to test");
+    /* No slot is reusable while terminals are pending. */
+    if (rc == 0 && kl_lwr_udp_new() != NULL) rc = fail("T4 slot reused before drain");
+    /* Drain → exactly n terminals; release each transferred ref. */
+    if (rc == 0) {
+        KlLwrUdpRecord recs[16]; int drained = 0;
+        for (int pass = 0; pass < 8 && drained < n; pass++) {
+            int d = kl_lwr_udp_drain(lwrctx, recs, 16);
+            for (int i = 0; i < d; i++) {
+                if (recs[i].kind == KL_LWR_DGRAM_RECV && recs[i].terminal) drained++;
+                kl_dgram_life_release((KlDgramLife *)recs[i].life);
+            }
+            if (d == 0) break;
+        }
+        if (drained != n) rc = fail("T4 terminal count != slots");
+    }
+    /* Reuse works now that the terminals drained. */
+    if (rc == 0) {
+        void *p = kl_lwr_udp_new();
+        if (!p) rc = fail("T4 no reuse after drain");
+        else kl_lwr_udp_close(lwrctx, p);
+    }
+    for (int i = 0; i < n; i++) kl_dgram_life_release(life[i]);   /* drop each owner ref → freed */
+    kl_lwr_ctx_destroy(lwrctx);
+    return rc;
+}
+
 int main(void) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
@@ -194,7 +246,8 @@ int main(void) {
     if (rc != 0) return 1;
 
     if (t3_glue_cancel_semantics() != 0) return 1;
+    if (t4_saturation_reuse() != 0) return 1;
 
-    printf("7B-8 PASS (KlDatagram roundtrip + empty-armed cancel + glue PENDING->RETIRED over lwIP-raw)\n");
+    printf("7B-8 PASS (roundtrip + empty-armed cancel + PENDING->RETIRED + saturation/reuse over lwIP-raw)\n");
     return 0;
 }

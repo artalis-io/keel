@@ -1067,7 +1067,10 @@ static KlLwrUdpSlot *lwr_udp_find(KlLwrCtx *ctx, const struct udp_pcb *pcb) {
 /* Reserve a free udp slot for a fresh pcb (zero-initialised). NULL if the table is full. */
 static KlLwrUdpSlot *lwr_udp_alloc(KlLwrCtx *ctx, struct udp_pcb *pcb) {
     for (int i = 0; i < KL_LWR_UDP_SLOTS; i++)
-        if (ctx->udp[i].pcb == NULL) {
+        /* 7B-8: a slot with a pending cancel-terminal (udp_term[i] != NULL) is NOT reusable until that
+         * terminal drains — the terminal is tied to slot index i, so reusing i would collide with (and
+         * silently drop) the queued terminal's ref. This is what keeps udp_term bounded 1:1 to slots. */
+        if (ctx->udp[i].pcb == NULL && ctx->udp_term[i] == NULL) {
             memset(&ctx->udp[i], 0, sizeof(ctx->udp[i]));
             ctx->udp[i].pcb = pcb;
             return &ctx->udp[i];
@@ -1233,13 +1236,15 @@ void kl_lwr_udp_cancel_recv(void *lwrctx, void *life) {
     for (int i = 0; i < KL_LWR_UDP_SLOTS; i++) {
         KlLwrUdpSlot *s = &ctx->udp[i];
         if (s->pcb == NULL || s->life != l || !s->rx_armed) continue;
-        /* Remove the arm FIRST so a held datagram can no longer produce a completion, then TRANSFER the
-         * arm's one token ref into a context-owned pending terminal. kl_lwr_udp_close now sees rx_armed==0
-         * and so will NOT release that ref (the pending terminal owns it until the drain emits it). */
-        s->rx_armed = 0;
+        /* The terminal is tied to THIS slot index i — a genuinely bounded 1:1 mapping (one terminal per
+         * udp slot), so udp_term can never overflow: lwr_udp_alloc will not reuse slot i until
+         * udp_term[i] drains. The originating entry MUST be free here (a slot with a pending terminal is
+         * never re-armed). If it is unexpectedly occupied, that is an invariant violation — do NOT clear
+         * the arm (no silent ref loss); leave the arm so close/teardown releases its ref. */
+        if (ctx->udp_term[i] != NULL) return;   /* invariant failure: keep the arm, drop nothing */
+        s->rx_armed = 0;            /* remove the arm so a held datagram can no longer complete */
         s->has_held = 0;            /* discard any held datagram (inline in the slot, no ref, no free) */
-        for (int t = 0; t < KL_LWR_UDP_SLOTS; t++)
-            if (ctx->udp_term[t] == NULL) { ctx->udp_term[t] = l; break; }
+        ctx->udp_term[i] = l;       /* TRANSFER the arm's one token ref into THIS slot's terminal */
         return;                     /* one armed recv per slot; one token ↔ one slot */
     }
     /* No armed recv for `life` (already cancelled / drained / never armed) → idempotent no-op. */
