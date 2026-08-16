@@ -1,6 +1,20 @@
-# Handoff — Windows IOCP `smoke-udp` teardown hang (blocks 7B-7 IOCP firm ✅)
+# Handoff — Windows IOCP `smoke-udp` teardown hang (RESOLVED — 7B-7 IOCP firm ✅)
 
-**Status:** IOCP §10 stays **PROVISIONAL** (✅*). The Windows IOCP runtime gate ran for the first time
+**Status: RESOLVED.** Root cause found via the `KL_IOCP_TEARDOWN_TRACE` instrumentation run on the real
+Windows IOCP CI runner (no local Windows rig needed): a **send-only KlUdp socket** (`kl_udp_send_to` with
+no `kl_udp_recv_start`) was **never associated with the IOCP completion port** — association lived only in
+`kl_udp_recv_start`. So its `WSASendTo` completion had nowhere to post (never reaped during the pump), and
+`closesocket` could not post an aborted completion for an unassociated socket either, so
+`iocp_quiesce_port_for_close`'s `INFINITE` wait blocked forever on that one `DGRAM_SEND` op. **Fix
+(9dec1d9):** associate the socket once at `kl_udp_init()` (completion mode), covering send-only + recv;
+drop the redundant `recv_start` association. The instrumentation was reverted (0de075c). CI `windows-iocp`
+`smoke-udp` **and** `smoke-datagram` are green on real IOCP → IOCP §10 is firm ✅. The trace evidence
+(below) is kept for the record; the INFINITE drain was NOT bounded as a speculative fix.
+
+---
+_Original handoff (investigation record):_
+
+The Windows IOCP runtime gate ran for the first time
 (PR #240) and the `smoke-udp` step HANGS in teardown, so `smoke-datagram` (the public KlDatagram-over-IOCP
 proof) never runs. Needs debugging on a **real Windows / IOCP** environment — it does not reproduce on
 macOS/Linux (pollcomp/io_uring pass) and must NOT be "fixed" by bounding the infinite drain speculatively
