@@ -321,6 +321,13 @@ TEST_SRC = $(filter-out tests/test_iocp_engine.c, $(wildcard tests/test_*.c))
 ifeq ($(BACKEND),iocp)
   TEST_SRC += tests/test_iocp_engine.c
 endif
+# test_datagram_public.c drives a scripted COMPLETION mock (a KL_EVENT_CAP_COMPLETION loop +
+# kl_comp_post_dgram_*) with no readiness path; the KEEL_NO_COMPLETION build stubs those entry points
+# to abort() (completion_absent.c), so this completion-axis test cannot run there — exclude it (mirrors
+# the readiness-adapting test_datagram_live, which DOES run under KEEL_NO_COMPLETION).
+ifdef KEEL_NO_COMPLETION
+  TEST_SRC := $(filter-out tests/test_datagram_public.c, $(TEST_SRC))
+endif
 TEST_BIN = $(TEST_SRC:.c=)
 
 # Per-platform test-network helpers (net_compat_posix.c / net_compat_win.c),
