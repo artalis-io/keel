@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build_mock_efi_test.sh — HOST build of the mock-EFI failure-path harness (F7b).
 #
-# Compiles the REAL provider TUs (socket_efi_tcp4.c, dns_uefi.c, event_efi.c,
+# Compiles the REAL provider TUs (socket_efi_tcp4.c, socket_efi_udp4.c, event_efi.c,
 # allocator_uefi.c) host-side against the scriptable fake EFI in mock_efi_test.c, under
 # ASan+UBSan, and links the core libkeel.a for kl_sockaddr_*/kl_malloc/etc. Runs the
 # token-lifetime failure-path assertions (timeouts, aborts, close-with-outstanding,
@@ -17,15 +17,23 @@ cd "$(dirname "$0")"
 : "${KEEL_ROOT:=../..}"
 
 [ -f "$KEEL_ROOT/libkeel.a" ] || ( cd "$KEEL_ROOT" && make -j4 >/dev/null )
+# Refresh the archive symbol index: a parallel `make -j` can leave libkeel.a with a stale/
+# partial armap, which GNU ld then fails to resolve members from (e.g. kl_monotonic_ms via
+# clock_snapshot.c) — even though the member defines the symbol. ranlib is a safe no-op on macOS.
+# Require it to SUCCEED when the archive is present (a silent skip would drop us back into the
+# nondeterministic link failure); use $RANLIB if the toolchain provides one.
+: "${RANLIB:=ranlib}"
+"$RANLIB" "$KEEL_ROOT/libkeel.a"
 
 CFLAGS=(
   -std=c11 -g -O1 -fno-omit-frame-pointer
   -fsanitize=address,undefined -fno-sanitize-recover=all
+  -DKEEL_UEFI_DATAGRAM   # the mock exercises event_efi's datagram completion wiring (6.4b)
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/src" -I. -I"$KEEL_ROOT/spikes/uefi"
   -Wall -Wextra
 )
-SRCS=( mock_efi_test.c socket_efi_tcp4.c dns_uefi.c event_efi.c allocator_uefi.c entropy_uefi.c
-       civil_time.c wallclock_uefi.c clock_snapshot.c )
+SRCS=( mock_efi_test.c socket_efi_tcp4.c socket_efi_udp4.c event_efi.c allocator_uefi.c
+       entropy_uefi.c civil_time.c wallclock_uefi.c clock_snapshot.c )
 
 echo "building mock_efi_test (host, ASan+UBSan) ..."
 "$CC" "${CFLAGS[@]}" "${SRCS[@]}" "$KEEL_ROOT/libkeel.a" -o mock_efi_test

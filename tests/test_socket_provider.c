@@ -312,9 +312,9 @@ UTEST(dgramprov, configure_caps_negotiated) {
     ASSERT_EQ(0, kl_udp_init(&udp, &cfg));
 
     ASSERT_EQ(1, g_mdg.configure_calls);
-    ASSERT_EQ(1, udp.pktinfo);    /* KL_DGRAM_RX_PKTINFO accepted → stored */
-    ASSERT_EQ(0, udp.recv_gro);   /* not reported → off */
-    ASSERT_EQ(1, udp.recv_tos);   /* KL_DGRAM_RX_TOS accepted → stored */
+    ASSERT_EQ(1, udp.dg.pktinfo);    /* KL_DGRAM_RX_PKTINFO accepted → stored (raw transport state) */
+    ASSERT_EQ(0, udp.dg.recv_gro);   /* not reported → off */
+    ASSERT_EQ(1, udp.dg.recv_tos);   /* KL_DGRAM_RX_TOS accepted → stored */
 
     kl_udp_free(&udp);
     kl_event_ctx_free(&ctx);

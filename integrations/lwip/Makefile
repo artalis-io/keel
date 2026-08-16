@@ -252,6 +252,11 @@ loopback-raw: $(LWIPRAW_OBJS) liblwip_raw.a
 	  -o raw_dns_test raw_dns_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
+	$(CC) -std=c11 -O2 -Wall -Wextra -D_DEFAULT_SOURCE \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o raw_datagram_test raw_datagram_test.c \
+	  $(LWIPRAW_OBJS) \
+	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	./raw_tick_test
 	./raw_recv_test
 	./raw_send_test
@@ -260,7 +265,8 @@ loopback-raw: $(LWIPRAW_OBJS) liblwip_raw.a
 	./raw_he_test
 	./raw_udp_test
 	./raw_dns_test
-	@echo "integrations/lwip: P9/LC-1/LC-2/LC-3a/LC-3 lwIP raw completion tests OK (runtime injection on stock libkeel)"
+	./raw_datagram_test
+	@echo "integrations/lwip: P9/LC-1/LC-2/LC-3a/LC-3/7B-8 lwIP raw completion tests OK (runtime injection on stock libkeel)"
 
 # ASan+UBSan+LSan variant — the lifetime/close/cancel + Stage-A receive/context cases need it.
 # Builds a STOCK DEBUG libkeel (make -C .. debug) + sanitizer-instrumented provider objects + tests.
@@ -314,6 +320,11 @@ loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	  -o raw_dns_test raw_dns_test.c \
 	  $(LWIPRAW_OBJS) \
 	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
+	$(CC) $(LWIPRAW_ASAN) -Wall -Wextra \
+	  -I. -I$(KEEL_ROOT)/include -I$(KEEL_ROOT)/src $(RAW_INC) \
+	  -o raw_datagram_test raw_datagram_test.c \
+	  $(LWIPRAW_OBJS) \
+	  "$(LWIPRAW_KEEL_LIB)" liblwip_raw.a -lpthread
 	ASAN_OPTIONS=detect_leaks=1 ./raw_tick_test
 	ASAN_OPTIONS=detect_leaks=1 ./raw_recv_test
 	ASAN_OPTIONS=detect_leaks=1 ./raw_send_test
@@ -322,7 +333,8 @@ loopback-raw-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	ASAN_OPTIONS=detect_leaks=1 ./raw_he_test
 	ASAN_OPTIONS=detect_leaks=1 ./raw_udp_test
 	ASAN_OPTIONS=detect_leaks=1 ./raw_dns_test
-	@echo "integrations/lwip: P9/LC-1/LC-2/LC-3a/LC-3 lwIP raw completion tests OK under ASan+UBSan+LSan"
+	ASAN_OPTIONS=detect_leaks=1 ./raw_datagram_test
+	@echo "integrations/lwip: P9/LC-1/LC-2/LC-3a/LC-3/7B-8 lwIP raw completion tests OK under ASan+UBSan+LSan"
 
 # ── LC-4: HTTPS (TLS) over the lwIP-raw COMPLETION backend (BYO mbedTLS, out of CI) ──
 # The TLS counterpart of loopback-raw. Combines how loopback-tls (non-raw) links the mbedTLS adapter
@@ -365,7 +377,7 @@ loopback-raw-tls-asan: $(RAW_BUILD)/lwipopts.h $(RAW_ARCH) liblwip_raw.a
 	@echo "integrations/lwip: LC-4 HTTPS over lwIP raw completion OK under ASan+UBSan+LSan"
 
 clean:
-	rm -f *.o *.a lwip_loopback_test raw_loopback_spike raw_tick_test raw_recv_test raw_send_test raw_caps_test raw_client_test raw_he_test raw_udp_test raw_dns_test raw_tls_test
+	rm -f *.o *.a lwip_loopback_test raw_loopback_spike raw_tick_test raw_recv_test raw_send_test raw_caps_test raw_client_test raw_he_test raw_udp_test raw_dns_test raw_datagram_test raw_tls_test
 	rm -rf $(RAW_BUILD)
 
 .PHONY: check loopback loopback-tls raw-spike loopback-raw loopback-raw-asan loopback-raw-tls loopback-raw-tls-asan clean

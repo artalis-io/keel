@@ -63,6 +63,11 @@ KlIoStatus kl_efi_status_to_io(EFI_STATUS st);
 /* Map an EFI_STATUS to a coarse KlError category (diagnostics). Pure. */
 KlError kl_efi_status_to_error(EFI_STATUS st);
 
+/* 6.4b unified provider: publish the last op's EFI_STATUS into the provider-global channel that
+ * KlSocketProvider.ops->io_status reads. The datagram TU calls this on its synchronous send so a
+ * datagram failure is classified from datagram state, not stale stream state. */
+void kl_uefi_provider_set_last_status(EFI_STATUS st);
+
 /* ── KlSockAddr ⇄ EFI_IPv4_ADDRESS (IPv4 only) ────────────────────────────────── */
 
 /* Marshal an IPv4 KlSockAddr into an EFI_IPv4_ADDRESS (4 network-order bytes).

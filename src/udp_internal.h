@@ -37,10 +37,12 @@ struct KlUdpDatagram {
 /* Reconcile event-loop interest with current recv/send state. */
 void kl_udp_update_interest(KlUdp *udp);
 
-/* Deliver one received buffer to the on_recv / on_recv_segments callbacks,
- * splitting a GRO-coalesced buffer per segment when needed. */
-void kl_udp_deliver(KlUdp *udp, const void *data, size_t len, int gro_seg,
-                    const KlSockAddr *src, const KlSockAddr *local);
+/* Deliver one received buffer to the on_recv / on_recv_segments callbacks, splitting a GRO-coalesced
+ * buffer per segment when needed. `life` is the stable-liveness token: the GRO split re-checks it
+ * between segments (a callback may free the owner) instead of the possibly-dead wrapper's fields. */
+struct KlDgramLife;
+void kl_udp_deliver(KlUdp *udp, const struct KlDgramLife *life, const void *data, size_t len,
+                    int gro_seg, const KlSockAddr *src, const KlSockAddr *local);
 
 /* The POSIX cmsg parser (kl_udp_parse_local) + its RX control-buffer size live in the
  * POSIX-only udp_cmsg.h, included by the POSIX recv TUs — kept out of this cross-platform
@@ -60,9 +62,9 @@ typedef struct {
 /* Completion-loop datagram receive (PAL 8b-4c): a recv finished with `len` bytes in
  * udp->recv_buf from `src`, with per-datagram `meta` (local addr / GRO / truncation).
  * Deliver it (kl_udp_deliver) then re-post the next receive. The completion driver calls
- * this for a KL_COMP_UDP_RECV event; the model-blind delivery matches the readiness
+ * this for a KL_COMP_DGRAM_RECV event; the model-blind delivery matches the readiness
  * recvmsg path. */
-void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
+void kl_udp_comp_on_recv(const KlUdp *udp, const void *buf, size_t len,
                          const KlSockAddr *src, const KlUdpRxMeta *meta);
 
 /* Completion-loop datagram send done (PAL 8b-4d): an overlapped WSASendTo of `len`
@@ -71,11 +73,12 @@ void kl_udp_comp_on_recv(KlUdp *udp, const void *buf, size_t len,
 void kl_udp_comp_on_send(KlUdp *udp, size_t len);
 
 /* The comp_udp_dispatch hook (completion_core.c → here): route a datagram completion
- * (KL_COMP_UDP_RECV / KL_COMP_UDP_SEND) to kl_udp_comp_on_recv / kl_udp_comp_on_send.
+ * (KL_COMP_DGRAM_RECV / KL_COMP_DGRAM_SEND) to kl_udp_comp_on_recv / kl_udp_comp_on_send.
  * Registered on the ctx by kl_udp_init, so the generic tick reaches the UDP stack
  * without a static reference — a client-only build links neither udp.c nor these.
- * `evp` is a const KlCompletionEvent* (opaque const void* at the hook seam). */
-struct KlEventCtx;
-void kl_udp_comp_dispatch(struct KlEventCtx *ctx, const void *evp);
+ * 7B-2a: the KL_DGRAM_OWNER_UDP token's KlDgramDispatchFn — `target` is the live KlUdp (NULL once
+ * dead), `ev` the datagram completion whose transferred ref it releases after dispatch. */
+struct KlCompletionEvent;
+void kl_udp_comp_dispatch(void *target, const struct KlCompletionEvent *ev);
 
 #endif /* KEEL_SRC_UDP_INTERNAL_H */

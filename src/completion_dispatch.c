@@ -75,13 +75,21 @@ void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     kl_comp_ops(&ctx->loop)->cancel(ctx, fd);
 }
 
-int kl_comp_post_udp_recv(struct KlUdp *udp) {
-    return kl_comp_ops(&udp->ctx->loop)->post_udp_recv(udp);
+int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op) {
+    return kl_comp_ops(&ctx->loop)->post_dgram_recv(ctx, op);
 }
 
-int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
-                          const KlSockAddr *dest) {
-    return kl_comp_ops(&udp->ctx->loop)->post_udp_send(udp, data, len, dest);
+int kl_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *op) {
+    return kl_comp_ops(&ctx->loop)->post_dgram_send(ctx, op);
+}
+
+int kl_comp_cancel_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind) {
+    return kl_comp_ops(&ctx->loop)->cancel_dgram(ctx, life, kind);
+}
+
+KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life,
+                                         KlDgramOpKind kind, int *transport_err) {
+    return kl_comp_ops(&ctx->loop)->retire_dgram(ctx, life, kind, transport_err);
 }
 
 int kl_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,

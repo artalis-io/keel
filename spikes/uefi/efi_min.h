@@ -221,9 +221,19 @@ typedef struct {                          /* §8.3 — opaque here (we pass NULL
     BOOLEAN SetsToZero;
 } EFI_TIME_CAPABILITIES;
 
-/* ---- Runtime Services (UEFI 2.10 §8) — only GetTime is modelled. GetTime is valid
- * both before AND after ExitBootServices, so it is the cert-validity clock source.
- * Layout: the 24-byte EFI_TABLE_HEADER, then GetTime is the FIRST runtime function. -- */
+/* ResetSystem ResetType (UEFI 2.10 §8.5.1). EfiResetShutdown powers the platform off. */
+typedef enum {
+    EfiResetCold,
+    EfiResetWarm,
+    EfiResetShutdown,
+    EfiResetPlatformSpecific
+} EFI_RESET_TYPE;
+
+/* ---- Runtime Services (UEFI 2.10 §8) — GetTime + ResetSystem are modelled at their spec
+ * offsets. GetTime is valid both before AND after ExitBootServices (the cert-validity clock
+ * source). ResetSystem is the 11th runtime function (offset 104 on x64: the 24-byte
+ * EFI_TABLE_HEADER + 10 preceding pointers); the intervening functions are opaque placeholders
+ * ONLY to land ResetSystem at the correct offset for a real-firmware call — never dereferenced. */
 typedef struct {
     UINT64 Signature;
     UINT32 Revision;
@@ -232,7 +242,17 @@ typedef struct {
     UINT32 Reserved;
 
     EFI_STATUS (EFIAPI *GetTime)(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities);
-    /* remaining runtime services (SetTime, GetWakeupTime, …) intentionally omitted */
+    VOID *SetTime;
+    VOID *GetWakeupTime;
+    VOID *SetWakeupTime;
+    VOID *SetVirtualAddressMap;
+    VOID *ConvertPointer;
+    VOID *GetVariable;
+    VOID *GetNextVariableName;
+    VOID *SetVariable;
+    VOID *GetNextHighMonotonicCount;
+    EFI_STATUS (EFIAPI *ResetSystem)(EFI_RESET_TYPE ResetType, EFI_STATUS ResetStatus,
+                                     UINTN DataSize, VOID *ResetData);
 } EFI_RUNTIME_SERVICES;
 
 /* ---- System Table (UEFI 2.10 §4.3, partial) ---- */

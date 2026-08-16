@@ -208,6 +208,10 @@ jobs:
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-udp
 
+      - name: Link + public KlDatagram roundtrip smoke test
+        timeout-minutes: 3
+        run: make OS=windows CC=gcc smoke-datagram
+
       - name: Link + DNS resolver init/resolve smoke test
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-dns
@@ -265,6 +269,22 @@ jobs:
       - name: End-to-end async/thread-pool-over-IOCP roundtrip smoke test
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-async
+
+      # Datagram-over-IOCP: smoke_udp drives a real UDP roundtrip + teardown over the default
+      # (IOCP) loop, so this is the runtime gate for event_iocp.c's datagram completion path —
+      # WSARecvMsg/WSASendTo posts and, per phase-B.6.3, the stable-token retain/transfer/release
+      # (in-flight teardown frees the receive storage without touching the freed KlDatagram).
+      - name: End-to-end UDP-over-IOCP datagram roundtrip smoke test
+        timeout-minutes: 3
+        run: make OS=windows BACKEND=iocp CC=gcc smoke-udp
+
+      # Public KlDatagram-over-IOCP (7B-7): smoke_datagram preps its fds through the socket seam and
+      # drives a real roundtrip + clean DETACHED close over the IOCP loop. This is the RUNTIME proof of
+      # the facade's completion fd<->loop registration (kl_event_add -> CreateIoCompletionPort) — the
+      # path pollcomp/io_uring cannot exercise (their kl_event_add is inert).
+      - name: End-to-end KlDatagram-over-IOCP roundtrip smoke test
+        timeout-minutes: 3
+        run: make OS=windows BACKEND=iocp CC=gcc smoke-datagram
 
   sanitizers:
     name: ASan + UBSan
@@ -328,9 +348,14 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Install tools
+        # llvm provides llvm-ar / llvm-nm: the freestanding gates (freestanding-dgram / -dns /
+        # uefi-dgram-gate / *-selfcontained) build Windows-COFF cross archives, and FREESTANDING_AR
+        # auto-selects llvm-ar when present. GNU `ar`'s archive index is not scannable by lld-link for
+        # those PE targets — on-demand member extraction fails ("undefined symbol: kl_udp_init") — so
+        # without llvm-ar the compose-link probes break. (llvm-nm likewise for the symbol gate.)
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tools cppcheck
+          sudo apt-get install -y clang-tools cppcheck llvm
 
       - name: scan-build
         run: make analyze
@@ -343,6 +368,21 @@ jobs:
 
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
+
+      - name: Freestanding datagram gate (KlUdp + Tier-1 machine; compile + header + symbol)
+        run: make freestanding-dgram
+
+      - name: Freestanding DNS gate (stock resolver, UDP-only; compile + header + symbol + composition)
+        run: make freestanding-dns
+
+      - name: "Freestanding DNS harness (runtime: truncation settles KL_ERR_DNS, no TCP, no timeout — ASan+UBSan+LSan)"
+        run: make freestanding-dns-harness
+
+      - name: EFI_UDP4 datagram provider PE gate (unified provider + event_efi compile, x86_64 + aarch64)
+        run: make uefi-dgram-gate UEFI_GATE_STRICT=1
+
+      - name: Self-contained DNS archive gate (6.4c EFI_UDP4 e2e archive; both PE arches, selfcontained symbols)
+        run: make freestanding-lib-dns-selfcontained
 
       - name: W^X surface guard (no JIT/dlopen/exec/mmap+PROT_EXEC)
         run: make wx-guard

@@ -8,11 +8,14 @@
  * archive). A client dialing a NUMERIC address literal flows through this same path,
  * so the symbol is a genuine link dependency even with no name resolution.
  *
- * This TU provides it as a dotted-quad IPv4 parser: any non-numeric host FAILS (a
- * pre-DNS freestanding client cannot resolve names — the correct behavior). U-5 will
- * replace this with a real KlResolver over EFI_UDP4 / EFI_DNS4; until then it is what
- * a minimal EFI HTTP client ships. Defining KEEL_UEFI_HAVE_RESOLVE when compiling
- * u1_link_stubs.c drops that file's fail-closed kl_resolve_sync in favor of this one.
+ * This TU provides it as a dotted-quad IPv4 parser: any non-numeric host FAILS — and that
+ * is the PERMANENT contract, not a stopgap. DNS is an ASYNC protocol consumer, not a sync
+ * platform-seam capability: a freestanding client that must resolve a hostname injects
+ * cfg.resolver (a stock kl_dns_resolver_create over the EFI_UDP4 provider — proven end-to-end
+ * by 6.4c, integrations/uefi/dgram_dns_selftest.c). This keeps the axes clean (EFI_UDP4 =
+ * platform provider; DNS = protocol) and avoids a sync-over-async adapter. Defining
+ * KEEL_UEFI_HAVE_RESOLVE when compiling u1_link_stubs.c drops that file's fail-closed
+ * kl_resolve_sync in favor of this one.
  */
 #ifndef KEEL_UEFI_RESOLVE_UEFI_H
 #define KEEL_UEFI_RESOLVE_UEFI_H

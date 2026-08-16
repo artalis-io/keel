@@ -39,6 +39,10 @@ tests/test_*
 tests/smoke_*
 !tests/smoke_*.c
 
+# Freestanding host mock harness binaries (sources .c stay tracked; make rm's them post-run)
+tests/freestanding_harness
+tests/freestanding_dns_harness
+
 # Benchmark binary
 bench/bench_server
 

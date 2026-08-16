@@ -43,7 +43,6 @@ int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
     ctx->timer_next_id = 0;
     ctx->sockets = NULL;              /* POSIX by default (internal seam) */
     ctx->comp_conn_dispatch = NULL;   /* set by the server on its completion path */
-    ctx->comp_udp_dispatch = NULL;    /* set by kl_udp_init on a completion loop */
     ctx->loop.alloc = alloc;
     ctx->loop.ops = NULL;             /* set by kl_event_init[_provider] below */
     /* A runtime provider (e.g. lwIP) supplies its own event backend; NULL uses

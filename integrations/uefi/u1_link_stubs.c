@@ -6,7 +6,7 @@
  * kl_plat_random) — those are supplied by allocator_uefi.c / platform_uefi.c and
  * are DELIBERATELY NOT stubbed here. Everything else the archive references but
  * U-1 does not yet implement — the socket provider (U-2), the event/completion
- * provider (U-3), sync DNS (U-5), and the vendored-llhttp / PE-runtime residual —
+ * provider (U-3), the numeric kl_resolve_sync seam, and the vendored-llhttp / PE-runtime residual —
  * is defined here as a minimal FAIL-CLOSED stub so the U-1 self-test LINKS under
  * -nostdlib. None of these run in the U-1 test (it never issues a request); they
  * exist only to close the link. This mirrors tests/freestanding_link_main.c's
@@ -30,7 +30,7 @@
  * socket provider but NOT this stubs TU. (It previously lived here, which broke the
  * U-2 link once the provider started writing errno.) */
 
-/* ── sync DNS (U-5) — fail-closed ───────────────────────────────────────────
+/* ── numeric kl_resolve_sync seam — fail-closed ─────────────────────────────
  * U-3 links resolve_uefi.c (a real numeric-only kl_resolve_sync) and compiles this
  * TU with -DKEEL_UEFI_HAVE_RESOLVE so the two definitions don't collide; the U-1
  * self-test (no resolver) keeps this fail-closed stub. */
@@ -53,6 +53,11 @@ KlIoStatus kl_sockdef_io_status(void) { return KL_IO_FATAL; }
 ssize_t kl_sockdef_send(KlSocketHandle f, const void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 ssize_t kl_sockdef_recv(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
 ssize_t kl_sockdef_recv_peek(KlSocketHandle f, void *b, size_t n) { (void)f;(void)b;(void)n; return -1; }
+/* The completion provider (event_efi.c) references kl_sock_accept in el_drain for the SERVER accept
+ * path; a client never accepts (the branch is g_efi.server-gated) but the seam still emits the
+ * symbol, so the fail-closed default belongs with the client seam residuals — not s4_link_stubs.c
+ * (server-only), which U-3/U-7 do not link. Servers link u1+s4 → still exactly one definition. */
+KlSocketHandle kl_sockdef_accept(KlSocketHandle f, KlSockAddr *peer) { (void)f;(void)peer; return KL_INVALID_SOCKET; }
 
 /* ── event / completion builtins (U-3) — never reached; fail-closed ───────── */
 int  kl_event_init_builtin(KlEventLoop *loop) { (void)loop; return -1; }

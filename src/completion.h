@@ -19,7 +19,8 @@
 
 #include <keel/connection.h>   /* KlConn */
 #include <keel/socket.h>       /* KlIoVec, KlSocketHandle */
-#include <keel/sockaddr.h>     /* KlSockAddr (event addrs + KlCompletionOps.post_udp_send) */
+#include <keel/sockaddr.h>     /* KlSockAddr (event addrs + KlCompletionOps.post_dgram_send) */
+#include "io_engine.h"         /* KlDgramSendOp / KlDgramRecvOp — the neutral datagram post descriptors */
 #include <stdint.h>            /* uint64_t (KlCompletionOps.post_sendfile) */
 #include <stddef.h>
 
@@ -33,7 +34,7 @@ struct KlServer;   /* the accept ops (prime_accepts/post_accept) take it directl
 typedef enum {
     KL_COMP_ACCEPT,                                /* TCP accept (server recovered from ctx) */
     KL_COMP_READ, KL_COMP_WRITE,                   /* TCP conn (target = KlStream*) */
-    KL_COMP_UDP_RECV, KL_COMP_UDP_SEND,            /* datagram (target = KlUdp*) */
+    KL_COMP_DGRAM_RECV, KL_COMP_DGRAM_SEND,            /* datagram (target = KlUdpTransport*) */
     KL_COMP_CONNECT,  /* an outbound connect finished (LC-0). The completion mirror of
                        * KL_COMP_ACCEPT for the OUTBOUND direction: pollcomp does a real
                        * connect()+POLLOUT+SO_ERROR, io_uring an IORING_OP_CONNECT, IOCP a
@@ -58,12 +59,12 @@ typedef enum {
  * The backend has already done any platform post-processing (address extraction,
  * partial-write re-posting) — the driver sees only high-level, completed events.
  * `target` is the consumer the event belongs to, disambiguated by `kind`:
- * KlStream* for READ/WRITE (the HTTP adapter recovers the KlConn); KlUdp* for UDP kinds.
- * ACCEPT carries no target (the generic tick recovers the server from its KlEventCtx). */
-typedef struct {
-    void          *target;     /* KlStream* (READ/WRITE) — a KlUdp* for UDP kinds. The HTTP
-                                * adapter recovers the containing KlConn (kl_conn_of_stream);
-                                * a completion backend never holds/derefs a KlConn. */
+ * KlStream* for READ/WRITE (the HTTP adapter recovers the KlConn). ACCEPT carries no target (the
+ * generic tick recovers the server from its KlEventCtx). UDP kinds use `life`, not `target`. */
+typedef struct KlCompletionEvent {
+    void          *target;     /* KlStream* (READ/WRITE); the HTTP adapter recovers the containing
+                                * KlConn (kl_conn_of_stream). A completion backend never holds/derefs
+                                * a KlConn. UNUSED for UDP kinds — they carry `life` (below). */
     KlCompKind     kind;
     size_t         bytes;      /* transferred (READ / WRITE) */
     int            ok;         /* 0 = failed / peer-closed */
@@ -76,10 +77,26 @@ typedef struct {
                                               * family KL_AF_UNSPEC = unavailable. */
     int            gro_seg;                  /* UDP_RECV: GRO coalesced segment size, 0 = none */
     int            truncated;                /* UDP_RECV: 1 if the datagram was truncated (MSG_TRUNC) */
+    /* UDP_RECV/_SEND stable-liveness token (transport-neutral; src/datagram_life.h). A datagram
+     * completion outlives the KlUdp wrapper, so rather than dereferencing a KlUdpTransport embedded in a
+     * possibly-freed KlUdp, the UDP adapter recovers the owner via this token and touches it only
+     * while live. The posting op transferred its reference to this event; the adapter releases it
+     * after dispatch UNLESS `retain_life` (below). ALL completion backends set this for UDP kinds
+     * (Phase B.6: pollcomp/io_uring/IOCP/lwIP-raw/EFI); a UDP completion with life == NULL yields a NULL
+     * owner and is safely dropped — there is no KlUdp-deref (`target`) fallback. */
+    struct KlDgramLife *life;
+    /* 7B-9: a BORROWED life ref — the event routes/retires but its ref is NOT released after dispatch.
+     * Set (==1) only by the EFI drain for a QUARANTINED recv terminal: the backend op keeps the ref
+     * forever (fail-closed — the abandoned firmware op may still write the inbound storage). Default 0
+     * (transferred ref, released after dispatch — the invariant for every other event). This governs ref
+     * ownership at EVERY release site BEFORE routing: kl_comp_run's no-handler fallback AND the owner
+     * dispatch handlers (kl_udp_comp_dispatch / kl_datagram_comp_dispatch) all release iff !retain_life.
+     * MUST default 0 — every backend zero-inits the event; only the EFI QUARANTINED branch sets it. */
+    int            retain_life;
 } KlCompletionEvent;
 
 struct KlEventCtx;
-struct KlUdp;
+struct KlUdpTransport;   /* UDP completion target — the backend holds a KlUdpTransport*, never a KlUdp */
 
 /* The generic completion tick kl_comp_run() is declared in io_engine.h (the event-
  * model seam), so async.c's kl_event_ctx_run can reach it without pulling the whole
@@ -125,9 +142,17 @@ typedef struct KlCompletionOps {
     int  (*post_sendfile)(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count);
     void (*cancel)(struct KlEventCtx *ctx, KlSocketHandle fd);
-    int  (*post_udp_recv)(struct KlUdp *udp);
-    int  (*post_udp_send)(struct KlUdp *udp, const void *data, size_t len,
-                          const KlSockAddr *dest);
+    /* Neutral datagram post seam (7B-2b): descriptors carry fd + payload/buffer + KlDgramLife, so the
+     * backend never dereferences a transport. See io_engine.h KlDgramSendOp/KlDgramRecvOp + ownership. */
+    int  (*post_dgram_recv)(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
+    int  (*post_dgram_send)(struct KlEventCtx *ctx, const KlDgramSendOp *op);
+    /* Datagram cancel/retire seam (7B-2): key an op by its KlDgramLife token + kind (no transport
+     * deref). cancel_dgram requests cancellation (idempotent, no ref release — the terminal completion
+     * releases); retire_dgram is a pure §4.3 classifier query (PENDING/RETIRED/QUARANTINED). The 7B-3
+     * facade binds the KlDgramClose cancel/retire hooks to these. See io_engine.h kl_comp_cancel_dgram. */
+    int  (*cancel_dgram)(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind);
+    KlDgramRetireResult (*retire_dgram)(struct KlEventCtx *ctx, struct KlDgramLife *life,
+                                        KlDgramOpKind kind, int *transport_err);
     /* Post one outbound connect on `fd` (a nonblocking socket the client created + owns)
      * to `addr`; its completion is surfaced as KL_COMP_CONNECT targeting `watcher_udata`
      * (the tagged KlWatcher the client registered on `fd`). LC-0 — the client-side

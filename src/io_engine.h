@@ -17,14 +17,41 @@
 #ifndef KEEL_SRC_IO_ENGINE_H
 #define KEEL_SRC_IO_ENGINE_H
 
-#include <stddef.h>   /* size_t (kl_comp_post_udp_send) */
+#include <stddef.h>   /* size_t (kl_comp_post_dgram_send) */
 #include <keel/handle.h>   /* KlSocketHandle (kl_comp_cancel) */
-#include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_udp_send) */
+#include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_dgram_send) */
+#include "datagram_life.h" /* KlDgramLife + KlDgramOpKind/KlDgramRetireResult (cancel_dgram/retire_dgram) */
 
 struct KlServer;
 struct KlEventCtx;
-struct KlUdp;
+struct KlUdpTransport;   /* legacy datagram transport (KlUdp's) — the CALLER, not passed to the seam */
 struct sockaddr;
+
+/* ── Neutral datagram completion-op descriptors (7B-2b) ───────────────────────────────────────
+ * post_dgram_send/recv are CORE-NATIVE: they carry everything the op needs by value, so BOTH the
+ * legacy KlUdpTransport (via udp.c) and the public KlDatagram/KlDgramCore (7B-3) build them from their
+ * own state — the backend never dereferences a transport object. OWNERSHIP (frozen §2.5.1): the caller
+ * retains one `life` ref and TRANSFERS it into the op ONLY on a SUCCESSFUL post; on failure the post
+ * takes nothing and the CALLER releases its ref (the backend must not retain/release it). A send op's
+ * payload AND dest/src/tos are COPIED before a successful return; a recv op's `buf` is LENT (the
+ * life-owned inbound slot — the backend writes it, never frees it). */
+typedef struct {
+    KlSocketHandle      fd;
+    const void         *data;
+    size_t              len;
+    const KlSockAddr   *dest;   /* NULL/UNSPEC = connected send */
+    const KlSockAddr   *src;    /* NULL/UNSPEC = no source pin */
+    int                 tos;    /* -1 = no mark */
+    struct KlDgramLife *life;   /* token ref — transferred into the op on success */
+} KlDgramSendOp;
+
+typedef struct {
+    KlSocketHandle      fd;
+    void               *buf;    /* the inbound slot — LENT (life-owned); the backend writes it */
+    size_t              cap;
+    unsigned            capture; /* KL_DGRAM_RX_* metadata-capture flags */
+    struct KlDgramLife *life;
+} KlDgramRecvOp;
 
 /* Is the completion axis compiled into this build? 1 when the driver + dispatch are
  * linked (any completion or readiness build), 0 under KEEL_NO_COMPLETION (the axis is
@@ -82,18 +109,28 @@ void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn);
  * (resume branches on KL_EVENT_CAP_COMPLETION). Keeps the request API event-axis-agnostic. */
 void kl_io_engine_post_read(struct KlConn *conn);
 
-/* Post one overlapped datagram receive for a UDP socket on a completion loop (into
- * udp->recv_buf). Called by udp.c (shared) on a completion loop, so — like
- * kl_comp_run — it is declared here and stubbed in io_engine.c on non-completion
- * builds (never reached there); the real primitive lives in event_iocp.c. */
-int kl_comp_post_udp_recv(struct KlUdp *udp);
+/* Post one overlapped datagram receive on a completion loop from a neutral descriptor (7B-2b). The
+ * completion surfaces a KL_COMP_DGRAM_RECV. Stubbed in io_engine.c on non-completion builds. */
+int kl_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *op);
 
-/* Post one overlapped datagram send (WSASendTo) on a completion loop. The backend
- * copies the datagram + destination for the op's lifetime; the completion surfaces
- * a KL_COMP_UDP_SEND event. Shared-called by udp.c → stubbed in io_engine.c on
- * non-completion builds; real primitive in event_iocp.c. */
-int kl_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
-                          const KlSockAddr *dest);
+/* Post one overlapped datagram send on a completion loop from a neutral descriptor (7B-2b). The
+ * backend COPIES the payload + dest/src/tos before a successful return; the completion surfaces a
+ * KL_COMP_DGRAM_SEND. Ownership per KlDgramSendOp. Stubbed in io_engine.c on non-completion builds. */
+int kl_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *op);
+
+/* Request cancellation of the outstanding datagram op(s) of `kind` belonging to `life` (7B-2). The
+ * completion adapter (7B-3) binds a KlDgramClose cancel hook to this. Idempotent; does NOT release the
+ * token ref — the op's terminal completion (even when cancelled) releases it. Stubbed on non-completion
+ * builds. */
+int kl_comp_cancel_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life, KlDgramOpKind kind);
+
+/* Classify the retirement of `life`'s datagram op(s) of `kind` for the close coordinator (§4.3, 7B-2).
+ * Pure query (no ownership effect): PENDING while a cancelled completion op has not yet drained; RETIRED
+ * once physically done; QUARANTINED when a backend cannot confirm retirement (EFI unconfirmed op).
+ * `*transport_err` is set to 1 iff a terminal transport error occurred. Stubbed on non-completion
+ * builds. */
+KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlDgramLife *life,
+                                         KlDgramOpKind kind, int *transport_err);
 
 /* Post one outbound connect on a completion loop (LC-0). `fd` is a nonblocking socket the
  * async KlClient created and owns; `addr` is the destination; `watcher_udata` is the tagged

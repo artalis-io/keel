@@ -84,6 +84,13 @@ over real EFI_TCP4) re-run as a happy-path regression guard.
 validity-time); the previously-documented cert-time gap (U10) is closed. Remaining items are
 operational (real-firmware RTC quality), not missing checks.
 
+> **Retirement note (2026-08):** `dns_uefi.c` (the U1/U1b findings above, and the
+> `t_dns_cancel_fails_quarantine` test) has since been **retired** — the stock async
+> `src/dns_resolver.c` now runs over the EFI_UDP4 datagram provider (`socket_efi_udp4.c`, 6.4b/6.4c).
+> The cancel / quarantine / stable-token disciplines the U1/U1b findings hardened now live in
+> `socket_efi_udp4.c`, whose 6.4b mock cases cover them; `t_dns_cancel_fails_quarantine` was removed
+> with the retired engine. The findings above are preserved as a point-in-time record.
+
 **Status:** the happy path is proven end-to-end in QEMU; the failure paths are hardened and
 host-test-covered under ASan+UBSan; cert-time enforcement is proven with a valid/expired QEMU pair.
 The two originally-Critical token-lifetime findings (and the 2nd-review DNS-token + entropy-test

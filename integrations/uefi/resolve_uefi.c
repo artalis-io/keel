@@ -8,10 +8,6 @@
 #include <keel/sockaddr.h>
 #include "../../src/resolve_sync.h"   /* kl_resolve_sync decl */
 
-#ifdef KL_U5_DNS
-#include "dns_uefi.h"                 /* kl_uefi_dns_resolve (EFI_UDP4 DNS, U-5) */
-#endif
-
 #include <stdint.h>
 #include <stddef.h>
 
@@ -30,7 +26,7 @@ static int parse_ipv4(const char *host, uint8_t out[4]) {
             val = -1;
             if (*p == '\0') break;
         } else {
-            return -1;   /* non-numeric host — no DNS in a pre-U-5 freestanding client */
+            return -1;   /* non-numeric host — this seam is numeric-only; hostnames resolve via the async cfg.resolver */
         }
         p++;
     }
@@ -51,9 +47,9 @@ int kl_resolve_sync(const char *host, uint16_t port, int socktype,
     if (!host || !out || max <= 0 || !n) return -1;
     uint8_t ip[4];
 #ifdef KL_U4_STATIC_HOST
-    /* Optional compile-time single-entry /etc/hosts: a name→IPv4 mapping so a
-     * pre-DNS (U-5) client can dial a HOSTNAME — needed so TLS verifies the server
-     * cert against a dNSName SAN (production TLS) rather than a bare IP. Set via
+    /* Optional compile-time single-entry /etc/hosts: a name→IPv4 mapping so a client
+     * with no async resolver wired can still dial a HOSTNAME — needed so TLS verifies the
+     * server cert against a dNSName SAN (production TLS) rather than a bare IP. Set via
      * -DKL_U4_STATIC_HOST="name" -DKL_U4_STATIC_IP="a.b.c.d". */
     if (streq(host, KL_U4_STATIC_HOST)) {
         if (parse_ipv4(KL_U4_STATIC_IP, ip) != 0) return -1;
@@ -68,15 +64,9 @@ int kl_resolve_sync(const char *host, uint16_t port, int socktype,
         return 0;
     }
 
-#ifdef KL_U5_DNS
-    /* Non-numeric, non-static host: resolve via a real DNS A-query over EFI_UDP4
-     * (U-5). kl_uefi_dns_resolve fills out[0] directly. Requires kl_uefi_dns_init()
-     * to have stashed the boot services + image handle at startup. */
-    if (kl_uefi_dns_resolve(host, port, &out[0]) == 0) {
-        *n = 1;
-        return 0;
-    }
-#endif
-
-    return -1;   /* non-numeric host with no DNS path (pre-U-5) — fail closed */
+    /* Non-numeric host: this seam resolves numeric literals only. DNS is an ASYNC protocol
+     * consumer, not a sync platform-seam capability — a freestanding client that needs a
+     * hostname injects cfg.resolver (a stock kl_dns_resolver_create over the EFI_UDP4 provider;
+     * see 6.4c dgram_dns_selftest.c). Fail closed here. */
+    return -1;
 }

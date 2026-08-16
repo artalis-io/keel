@@ -8,7 +8,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <keel/sockaddr.h>   /* KlSockAddr — the public address currency */
+#include <keel/sockaddr.h>          /* KlSockAddr — the public address currency */
+#include <keel/udp_transport_detail.h>   /* KlUdpTransport — the raw transport state KlUdp wraps (Phase A) */
 
 /**
  * udp.h — Non-blocking UDP datagram socket over KlEventCtx.
@@ -116,46 +117,24 @@ typedef struct KlUdpConfig {      /* named tag: the datagram provider ops (keel/
  * @brief Non-blocking UDP socket. Caller-owned; initialize with kl_udp_init.
  */
 struct KlUdp {
-    KlEventCtx    *ctx;
-    KlAllocator   *alloc;
-    KlSocketHandle fd;
-    int            family;           /**< AF_INET / AF_INET6 (resolved at init). */
-    int            connected;        /**< 1 after kl_udp_connect. */
-    /* Receive */
+    /* Config/control wrapper: the user-facing receive/drain callbacks. The raw datagram
+     * transport state — the borrowed event loop + allocator, fd, send queue, recv buffer,
+     * event-loop interest, and counters — lives in the embedded KlUdpTransport `dg` (Phase A
+     * carve — behaviour unchanged). Access it through the kl_udp_* API. */
+    /* Receive/drain callbacks (the consumer boundary). */
     KlUdpRecvFn    on_recv;
     void          *recv_ud;
     KlUdpRecvSegmentsFn on_recv_segments; /**< Coalesced-GRO callback, or NULL. */
     void          *recv_seg_ud;
-    int            recv_gro;         /**< 1 = UDP_GRO enabled on this socket. */
-    int            gso_disabled;     /**< 1 = UDP GSO ruled unsupported; use fallback. */
-    int            recv_tos;         /**< 1 = deliver per-datagram TOS byte. */
-    int            recv_tos_val;     /**< Current datagram's TOS byte, or -1. */
-    int            recv_active;
-    unsigned char *recv_buf;
-    size_t         recv_buf_size;
-    /* The per-datagram source + local (dest) address are stack scratch inside the
-     * datagram provider's recv op (marshalled to KlSockAddr before delivery), so no
-     * host sockaddr lives on this struct — KlUdp is layout-neutral (a foreign-stack
-     * datagram provider can share its ABI without host-sockaddr size skew). */
-    int            pktinfo;          /**< 1 = local-address capture enabled. */
-    uint64_t       truncated;        /**< Count of oversized (truncated) datagrams. */
-    /* Send queue (whole-datagram FIFO) */
-    KlUdpDatagram *q_head;
-    KlUdpDatagram *q_tail;
-    size_t         q_bytes;          /**< Payload bytes currently queued. */
-    size_t         max_send_queue;
-    uint64_t       dropped;          /**< Datagrams dropped over the cap. */
     KlUdpDrainFn   on_drain;
     void          *drain_ud;
-    /* recv/sendmmsg batching (Linux). Batch blocks are opaque (defined in
-     * src/udp.c) to keep this header free of the Linux-only struct mmsghdr. */
-    int            mmsg_batch;       /**< Effective batch (1 = per-datagram). */
-    void          *rx_batch;         /**< Opaque recvmmsg batch, or NULL. */
-    void          *tx_batch;         /**< Opaque sendmmsg batch, or NULL. */
-    /* Event-loop interest tracking */
-    int            watcher_added;
-    KlEventMask    want_mask;
-    KlError        last_error;
+    /* Internal receive machine (step 6.1): a KlDgramRecv + its dedicated inbound slot, allocated
+     * once at init. Opaque here (the layout lives in src/udp.c); NOT part of the API. The Tier-1
+     * per-datagram receive rides this shared machinery (uniform truncation/metadata/pause); the
+     * byte-budget SEND queue below stays a legacy compatibility path outside the Tier-1 facet. */
+    void          *rx;
+    /* Raw datagram transport (opaque layout in <keel/udp_transport_detail.h>). */
+    KlUdpTransport     dg;
 };
 
 /**

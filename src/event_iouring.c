@@ -52,6 +52,7 @@
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
 #include "completion.h"          /* the abstract axis this TU implements */
+#include "datagram_life.h"       /* stable-liveness token for datagram completion ops (neutral) */
 #include "platform.h"            /* kl_plat_file_pread — file body into the send buffer */
 
 #include <liburing.h>
@@ -87,7 +88,7 @@
  * user_data can be discriminated by reading *(IouOpType*). IOU_WATCH tags a poll-add. */
 typedef enum {
     IOU_ACCEPT, IOU_READ, IOU_WRITE, IOU_SENDFILE,
-    IOU_UDP_RECV, IOU_UDP_SEND, IOU_WATCH,
+    IOU_DGRAM_RECV, IOU_DGRAM_SEND, IOU_WATCH,
     IOU_CONNECT   /* outbound connect (LC-0): IORING_OP_CONNECT */
 } IouOpType;
 
@@ -98,8 +99,14 @@ typedef struct KlIouOp {
     KlAllocator   *alloc;
     KlSocketHandle fd;
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
-    KlUdp         *udp;                   /* UDP_RECV / UDP_SEND */
-    void          *buf;                   /* READ: caller-chosen recv buffer */
+    /* Datagram ops (IOU_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
+     * post so the op NEVER dereferences KlUdpTransport afterwards (the owner may be freed while this op is
+     * in flight). The recv buffer + capture flags are COPIED at post (into buf/buflen/dg_pktinfo/
+     * dg_gro) so the completion touches only the op. */
+    KlDgramLife   *life;
+    int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
+    int            dg_gro;                /* UDP_RECV: capture GRO segment size */
+    void          *buf;                   /* READ / UDP_RECV: receive buffer (pinned by `life`) */
     size_t         buflen;
     char          *sendbuf;               /* WRITE/UDP_SEND: owned copy.
                                            * With reg_idx >= 0 it borrows a registered buffer. */
@@ -333,6 +340,12 @@ int kl_event_wait_builtin(KlEventLoop *loop, KlEvent *out, int max, int timeout_
 }
 
 static void iou_op_free(KlIouOp *op) {
+    /* A datagram op that still owns its token reference (dropped WITHOUT emitting an event — post-
+     * failure unwind, an aborted op freed in the drain loop, or loop teardown after queue_exit)
+     * releases it here. Its final release frees the receive storage. iou_complete transfers the ref to
+     * the event and NULLs op->life first, so an emitted op does not double-release. Non-datagram ops
+     * carry op->life == NULL. */
+    if (op->life) kl_dgram_life_release(op->life);
     /* A registered send buffer (reg_idx >= 0) is borrowed — its index is returned to the
      * pool at the completion/error site, not here; only a malloc'd sendbuf is freed. */
     if (op->sendbuf && op->reg_idx < 0) kl_free(op->alloc, op->sendbuf, op->sendcap);
@@ -623,16 +636,21 @@ static int iou_comp_post_accept(struct KlServer *s) {
     return 0;
 }
 
-static int iou_comp_post_udp_recv(struct KlUdp *udp) {
-    KlIouState *st = udp->ctx->loop._backend;
+static int iou_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *rop) {
+    KlIouState *st = ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
-    if (!op) return -1;
-    op->type = IOU_UDP_RECV;
-    op->udp = udp;
-    op->fd = udp->fd;
+    if (!op) return -1;                 /* nothing taken → caller releases its retained token ref */
+    op->type = IOU_DGRAM_RECV;
+    op->fd = rop->fd;
     op->peer_len = sizeof(op->peer);
-    op->msgiov.iov_base = udp->recv_buf;
-    op->msgiov.iov_len = udp->recv_buf_size;
+    /* The receive buffer + capture flags travel in the descriptor; the op never dereferences a transport.
+     * The buffer stays valid because the token ref (transferred below) pins it past the op's lifetime. */
+    op->buf        = rop->buf;
+    op->buflen     = rop->cap;
+    op->dg_pktinfo = (rop->capture & KL_DGRAM_RX_PKTINFO) != 0;
+    op->dg_gro     = (rop->capture & KL_DGRAM_RX_GRO)     != 0;
+    op->msgiov.iov_base = op->buf;
+    op->msgiov.iov_len = op->buflen;
     op->msgh.msg_name = &op->peer;
     op->msgh.msg_namelen = sizeof(op->peer);
     op->msgh.msg_iov = &op->msgiov;
@@ -640,44 +658,75 @@ static int iou_comp_post_udp_recv(struct KlUdp *udp) {
     op->msgh.msg_control = op->udp_ctrl;          /* capture pktinfo (local addr) cmsg */
     op->msgh.msg_controllen = sizeof(op->udp_ctrl);
     struct io_uring_sqe *sqe = iou_sqe(st);
-    if (!sqe) { iou_op_free(op); return -1; }
+    if (!sqe) { iou_op_free(op); return -1; }      /* life unset → no release */
     io_uring_prep_recvmsg(sqe, op->fd, &op->msgh, 0);
     io_uring_sqe_set_data(sqe, op);
+    op->life = rop->life;               /* TRANSFERRED into the op (no retain — the caller retained) */
     iou_op_push(st, op);
     return 0;
 }
 
-static int iou_comp_post_udp_send(struct KlUdp *udp, const void *data, size_t len,
-                          const KlSockAddr *dest) {
-    KlIouState *st = udp->ctx->loop._backend;
+static int iou_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *sop) {
+    KlIouState *st = ctx->loop._backend;
     KlIouOp *op = iou_op_alloc(st->alloc);
-    if (!op) return -1;
-    op->type = IOU_UDP_SEND;
-    op->udp = udp;
-    op->fd = udp->fd;
-    op->send_total = len;
-    op->sendcap = len ? len : 1;
+    if (!op) return -1;                 /* nothing taken → caller releases its ref */
+    op->type = IOU_DGRAM_SEND;
+    op->fd = sop->fd;
+    op->send_total = sop->len;
+    op->sendcap = sop->len ? sop->len : 1;
     op->sendbuf = kl_malloc(st->alloc, op->sendcap);
-    if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }
-    memcpy(op->sendbuf, data, len);
+    if (!op->sendbuf) { op->sendcap = 0; iou_op_free(op); return -1; }   /* life unset → caller releases */
+    memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
     /* Marshal the neutral dest to a host sockaddr for the overlapped sendmsg. */
-    if (dest && kl_sockaddr_family(dest) != KL_AF_UNSPEC) {
-        op->peer_len = kl_sockaddr_to_native(dest, &op->peer);
+    if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC) {
+        op->peer_len = kl_sockaddr_to_native(sop->dest, &op->peer);
         if (op->peer_len) {
             op->msgh.msg_name = &op->peer;
             op->msgh.msg_namelen = op->peer_len;
         }
     }
     op->msgiov.iov_base = op->sendbuf;
-    op->msgiov.iov_len = len;
+    op->msgiov.iov_len = sop->len;
     op->msgh.msg_iov = &op->msgiov;
     op->msgh.msg_iovlen = 1;
     struct io_uring_sqe *sqe = iou_sqe(st);
-    if (!sqe) { iou_op_free(op); return -1; }
+    if (!sqe) { iou_op_free(op); return -1; }       /* life unset → caller releases */
     io_uring_prep_sendmsg(sqe, op->fd, &op->msgh, 0);
     io_uring_sqe_set_data(sqe, op);
+    op->life = sop->life;               /* TRANSFERRED into the op (no retain) */
     iou_op_push(st, op);
     return 0;
+}
+
+/* Cancel the outstanding datagram op(s) of `kind` for `life` (7B-2): mark aborted + post an
+ * IORING_OP_ASYNC_CANCEL SQE (mirrors iou_comp_cancel). The op stays tracked until its (cancelled)
+ * CQE drains and releases the token ref — so this is idempotent and does NOT release the ref here. */
+static int iou_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
+    KlIouState *st = ctx->loop._backend;
+    IouOpType want = (kind == KL_DGRAM_OP_SEND) ? IOU_DGRAM_SEND : IOU_DGRAM_RECV;
+    for (KlIouOp *o = st->ops; o; o = o->next)
+        if (o->life == life && o->type == want && !o->aborted) {
+            o->aborted = 1;
+            struct io_uring_sqe *sqe = iou_sqe(st);
+            if (sqe) {
+                io_uring_prep_cancel(sqe, o, 0);
+                io_uring_sqe_set_data(sqe, NULL);   /* sentinel — ignore the cancel CQE */
+            }
+        }
+    return 0;
+}
+
+/* Classify retirement (§4.3): a matching op still tracked in st->ops is PENDING (its cancelled CQE
+ * has not yet drained + released); none tracked means it physically retired. io_uring never
+ * quarantines — a posted op always yields a terminal CQE the drain reaps. */
+static KlDgramRetireResult iou_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
+                                                 KlDgramOpKind kind, int *transport_err) {
+    const KlIouState *st = ctx->loop._backend;
+    IouOpType want = (kind == KL_DGRAM_OP_SEND) ? IOU_DGRAM_SEND : IOU_DGRAM_RECV;
+    if (transport_err) *transport_err = 0;
+    for (const KlIouOp *o = st->ops; o; o = o->next)
+        if (o->life == life && o->type == want) return KL_DGRAM_RETIRE_PENDING;
+    return KL_DGRAM_RETIRE_RETIRED;
 }
 
 /* Post an outbound connect (LC-0) via IORING_OP_CONNECT. The dest is marshalled into the op's
@@ -825,16 +874,19 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
         ev->bytes = op->sent_total;
         return 1;
 
-    case IOU_UDP_RECV:
-        ev->kind = KL_COMP_UDP_RECV;
-        ev->target = op->udp;
+    case IOU_DGRAM_RECV:
+        /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op. Transfer
+         * the token ref op → event (released after dispatch); NULL op->life so iou_op_free does not
+         * double-release. Never dereference KlUdpTransport. */
+        ev->kind = KL_COMP_DGRAM_RECV;
+        ev->life = op->life; op->life = NULL;
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
-        ev->buf = op->udp->recv_buf;
+        ev->buf = op->buf;
         if (res >= 0 && op->msgh.msg_namelen > 0) /* source: native → neutral at the seam */
             (void)kl_sockaddr_from_native(&ev->peer, (struct sockaddr *)&op->peer,
                                           op->msgh.msg_namelen);
-        if (res >= 0 && op->udp->pktinfo) {       /* local (dest) addr via pktinfo cmsg */
+        if (res >= 0 && op->dg_pktinfo) {        /* local (dest) addr via pktinfo cmsg */
             struct sockaddr_storage local_ss;
             socklen_t local_len = kl_udp_parse_local(&op->msgh, &local_ss);
             if (local_len)
@@ -842,16 +894,16 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
                                               (struct sockaddr *)&local_ss, local_len);
         }
         if (res >= 0) {
-            if (op->udp->recv_gro)                /* GRO coalesced segment size */
+            if (op->dg_gro)                      /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&op->msgh);
             if (op->msgh.msg_flags & MSG_TRUNC)   /* datagram truncated to recv_buf */
                 ev->truncated = 1;
         }
         return 1;
 
-    case IOU_UDP_SEND:
-        ev->kind = KL_COMP_UDP_SEND;
-        ev->target = op->udp;
+    case IOU_DGRAM_SEND:
+        ev->kind = KL_COMP_DGRAM_SEND;
+        ev->life = op->life; op->life = NULL;      /* transfer token ref op → event */
         ev->ok = (res >= 0);
         ev->bytes = (res > 0) ? (size_t)res : 0;
         return 1;
@@ -988,7 +1040,8 @@ static int iou_shutdown_accepts(struct KlServer *s) {
 static const KlCompletionOps iou_completion_ops = {
     iou_comp_drain, iou_comp_prime_accepts, iou_comp_post_recv, iou_comp_post_send,
     iou_comp_post_accept, iou_comp_post_sendfile, iou_comp_cancel,
-    iou_comp_post_udp_recv, iou_comp_post_udp_send, iou_comp_post_connect,
+    iou_comp_post_dgram_recv, iou_comp_post_dgram_send,
+    iou_comp_cancel_dgram, iou_comp_retire_dgram, iou_comp_post_connect,
     iou_shutdown_accepts,
 };
 
