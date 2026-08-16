@@ -274,18 +274,9 @@ jobs:
       # (IOCP) loop, so this is the runtime gate for event_iocp.c's datagram completion path —
       # WSARecvMsg/WSASendTo posts and, per phase-B.6.3, the stable-token retain/transfer/release
       # (in-flight teardown frees the receive storage without touching the freed KlDatagram).
-      # TEMPORARY (IOCP smoke-udp teardown-hang diagnosis): rebuild the IOCP core with
-      # KL_IOCP_TEARDOWN_TRACE so event_iocp.c's port-quiesce dumps the outstanding-op registry,
-      # CancelIoEx results, and dequeued completions, and — instead of the production INFINITE wait —
-      # bounds the teardown wait so a never-arriving completion DUMPS state + aborts (fails the step)
-      # rather than hanging silently. Diagnostic only; production behaviour is unchanged with the flag
-      # off. Revert once the lifecycle bug is fixed.
       - name: End-to-end UDP-over-IOCP datagram roundtrip smoke test
         timeout-minutes: 3
-        run: |
-          make OS=windows BACKEND=iocp CC=gcc clean
-          make OS=windows BACKEND=iocp CC=gcc EXTRA_CFLAGS="-DKL_IOCP_TEARDOWN_TRACE"
-          make OS=windows BACKEND=iocp CC=gcc EXTRA_CFLAGS="-DKL_IOCP_TEARDOWN_TRACE" smoke-udp
+        run: make OS=windows BACKEND=iocp CC=gcc smoke-udp
 
       # Public KlDatagram-over-IOCP (7B-7): smoke_datagram preps its fds through the socket seam and
       # drives a real roundtrip + clean DETACHED close over the IOCP loop. This is the RUNTIME proof of
