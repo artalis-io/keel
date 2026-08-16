@@ -288,6 +288,40 @@ const KlSocketProvider *kl_socket_provider_iocp(void) { return &IOCP_PROVIDER; }
 
 /* ── completion.h implementation (the overlapped mechanics) ──────────── */
 
+/* ── TEMPORARY IOCP teardown/registry diagnostics (KL_IOCP_TEARDOWN_TRACE) ─────────────
+ * Compiled out by default; enabled ONLY for the IOCP smoke CI step to capture runtime evidence
+ * of the smoke-udp teardown hang (which does not reproduce off real Windows/IOCP). This changes
+ * NO production wait or ownership rule: with the flag OFF, the quiesce still waits INFINITE and
+ * nothing is logged. With the flag ON, the quiesce bounds its wait so it DUMPS the outstanding
+ * registry and aborts (fails the smoke, non-zero exit) instead of hanging silently — a diagnostic,
+ * never a fix. Remove (or leave compiled out) once the lifecycle bug is understood + corrected. */
+#ifdef KL_IOCP_TEARDOWN_TRACE
+#include <stdio.h>
+#include <stdlib.h>   /* abort — the diagnostic stall handler */
+#define KLIT(...) do { fprintf(stderr, "[IOCPTRACE] " __VA_ARGS__); fflush(stderr); } while (0)
+static const char *klit_type(int t) {
+    switch (t) {
+    case KL_IOCP_ACCEPT: return "ACCEPT"; case KL_IOCP_READ: return "READ";
+    case KL_IOCP_WRITE: return "WRITE"; case KL_IOCP_SENDFILE: return "SENDFILE";
+    case KL_IOCP_WATCHER: return "WATCHER"; case KL_IOCP_CONNECT: return "CONNECT";
+    case KL_IOCP_DGRAM_RECV: return "DGRAM_RECV"; case KL_IOCP_DGRAM_SEND: return "DGRAM_SEND";
+    default: return "?";
+    }
+}
+static void klit_dump_ops(KlIocpState *st) {
+    int n = 0;
+    for (KlIocpOp *o = st->ops; o; o = o->g_next) {
+        KLIT("  reg[%d] op=%p type=%s sock=%llu life=%p ov=%p\n", n++, (void *)o, klit_type(o->type),
+             (unsigned long long)o->op_sock, (void *)o->life, (void *)&o->ov);
+    }
+    KLIT("  reg: %d outstanding op(s)\n", n);
+}
+#define KLIT_DUMP(st) klit_dump_ops(st)
+#else
+#define KLIT(...)     do { } while (0)
+#define KLIT_DUMP(st) do { (void)(st); } while (0)
+#endif
+
 /* Register a freshly-allocated + zeroed op in the global outstanding-op registry (6B-3 2b review),
  * recording the socket its overlapped I/O runs on (for CancelIoEx at teardown). Call once, right
  * after memset, at every post site. O(1). */
@@ -297,9 +331,13 @@ static void iocp_op_register(KlIocpState *st, KlIocpOp *op, SOCKET op_sock) {
     op->g_link  = &st->ops;
     if (st->ops) st->ops->g_link = &op->g_next;
     st->ops = op;
+    KLIT("register op=%p type=%s sock=%llu\n", (void *)op, klit_type(op->type),
+         (unsigned long long)op_sock);
 }
 
 static void iocp_op_free(KlIocpOp *op) {
+    KLIT("free op=%p type=%s sock=%llu life=%p\n", (void *)op, klit_type(op->type),
+         (unsigned long long)op->op_sock, (void *)op->life);
     if (op->g_link) {                          /* unlink from the global registry (if registered) */
         *op->g_link = op->g_next;
         if (op->g_next) op->g_next->g_link = op->g_link;
@@ -536,6 +574,8 @@ static int iocp_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp
             return -1;
         }
         op->life = rop->life;  /* TRANSFERRED into the op (no retain) */
+        KLIT("post_dgram_recv (recvmsg) op=%p sock=%llu life=%p\n", (void *)op,
+             (unsigned long long)op->op_sock, (void *)op->life);
         return 0;
     }
 
@@ -549,6 +589,8 @@ static int iocp_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp
         return -1;
     }
     op->life = rop->life;      /* TRANSFERRED into the op (no retain) */
+    KLIT("post_dgram_recv (recvfrom) op=%p sock=%llu life=%p\n", (void *)op,
+         (unsigned long long)op->op_sock, (void *)op->life);
     return 0;
 }
 
@@ -580,6 +622,8 @@ static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp
         return -1;
     }
     op->life = sop->life;               /* TRANSFERRED into the op (no retain) */
+    KLIT("post_dgram_send op=%p sock=%llu life=%p len=%zu\n", (void *)op,
+         (unsigned long long)op->op_sock, (void *)op->life, (size_t)op->send_total);
     return 0;
 }
 
@@ -1006,12 +1050,17 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
  * it returns with lists non-empty; the caller then frees the tracker nodes but leaks those op
  * records (never freeing an un-dequeued OVERLAPPED). No dispatch/callbacks — pure teardown. */
 static void iocp_quiesce_port_for_close(KlIocpState *st) {
+    KLIT("quiesce ENTER\n"); KLIT_DUMP(st);
     /* Cancel EVERY outstanding op (the global registry covers conn READ/WRITE/SENDFILE + UDP too,
      * not just watch/connect/accept) on its owning socket, so all their completions post. The
      * conn/udp sockets are still open at this point (kl_conn_pool_free runs after), so CancelIoEx
      * reaches them; the listen socket is already closed (its AcceptEx are completing regardless). */
-    for (KlIocpOp *op = st->ops; op; op = op->g_next)
-        CancelIoEx((HANDLE)(uintptr_t)op->op_sock, &op->ov);
+    for (KlIocpOp *op = st->ops; op; op = op->g_next) {
+        BOOL cr = CancelIoEx((HANDLE)(uintptr_t)op->op_sock, &op->ov);
+        (void)cr;   /* used only by the trace below (no-op when the flag is off) */
+        KLIT("cancel op=%p type=%s sock=%llu -> %d gle=%lu\n", (void *)op, klit_type(op->type),
+             (unsigned long long)op->op_sock, (int)cr, (unsigned long)GetLastError());
+    }
     /* Dequeue every completion before freeing its op — no OVERLAPPED freed while kernel-owned.
      * Terminating: cancelled/closed I/O always completes → posts. Per-type teardown cleanup
      * (free the tracker node, close a pre-created accept socket) then free the op (which unlinks it
@@ -1019,12 +1068,35 @@ static void iocp_quiesce_port_for_close(KlIocpState *st) {
     while (st->ops) {
         OVERLAPPED_ENTRY entries[KL_IOCP_ACCEPT_BACKLOG];
         ULONG got = 0;
-        if (!GetQueuedCompletionStatusEx(st->port, entries,
+        DWORD wait_ms = INFINITE;   /* PRODUCTION: block until every op's completion is reaped */
+#ifdef KL_IOCP_TEARDOWN_TRACE
+        /* DIAGNOSTIC ONLY: bound the wait so a never-arriving completion DUMPS the registry and
+         * aborts (fails the smoke) instead of hanging silently. NOT a production behaviour change. */
+        static int klit_stalls = 0;
+        wait_ms = 3000;
+        KLIT("quiesce: about to wait (%lu ms); remaining registry:\n", (unsigned long)wait_ms);
+        klit_dump_ops(st);
+#endif
+        BOOL wok = GetQueuedCompletionStatusEx(st->port, entries,
                                          (ULONG)(sizeof entries / sizeof entries[0]),
-                                         &got, INFINITE, FALSE))
+                                         &got, wait_ms, FALSE);
+        if (!wok) {
+#ifdef KL_IOCP_TEARDOWN_TRACE
+            DWORD gle = GetLastError();
+            if (gle == WAIT_TIMEOUT) {
+                KLIT("quiesce: WAIT_TIMEOUT with st->ops non-empty (stall %d)\n", ++klit_stalls);
+                klit_dump_ops(st);
+                if (klit_stalls >= 2) { KLIT("quiesce STUCK — no completion for the above op(s); aborting for evidence\n"); abort(); }
+                continue;   /* retry the (bounded) wait once more before aborting */
+            }
+            KLIT("quiesce: GQCS failed gle=%lu (fatal)\n", (unsigned long)gle);
+#endif
             return;   /* fatal port error — caller frees trackers + leaks the un-dequeued ops */
+        }
         for (ULONG i = 0; i < got; i++) {
             KlIocpOp *op = CONTAINING_RECORD(entries[i].lpOverlapped, KlIocpOp, ov);
+            KLIT("dequeued op=%p type=%s sock=%llu bytes=%lu\n", (void *)op, klit_type(op->type),
+                 (unsigned long long)op->op_sock, (unsigned long)entries[i].dwNumberOfBytesTransferred);
             if (op->type == KL_IOCP_WATCHER) {
                 for (KlIocpWatch **l = &st->watches; *l; l = &(*l)->next)
                     if ((*l)->op == op) {

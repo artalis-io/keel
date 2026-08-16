@@ -271,7 +271,7 @@ else
 endif
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) -c -o $@ $<
 
 # The lwIP-raw completion backend (integrations/lwip/event_lwip_raw.o +
 # lwip_raw_glue.o) is a RUNTIME PROVIDER built next to a STOCK libkeel, NOT compiled into
