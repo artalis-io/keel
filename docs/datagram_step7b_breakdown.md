@@ -368,11 +368,14 @@ a capability with no usable API on IOCP/lwIP/EFI. So:
 - **Done:** the `<keel/datagram.h>` STABLE banner is finalized (STABLE function+type contract, live across
   pollcomp/io_uring/IOCP/lwIP-raw/EFI_UDP4 + POSIX & Winsock readiness); the §10 send-slot + strict-pause
   rows are ✅ for every supported backend (Winsock/WSAPoll flipped ✅ — the same backend-agnostic readiness
-  adapter as POSIX, proven by the CI Windows `smoke-datagram`). The lone remaining ⚙ (lwIP-raw's 16-slot
-  serial-recv ring → one-held-slot rework) is an explicitly-noted provider-internal buffering detail that
-  does NOT weaken the STABLE API contract (the facade still delivers one datagram per op), NOT a deferred
-  backend — so the banner carries no caveat. `<keel/datagram_detail.h>` keeps its OPT-IN/UNSTABLE-layout
-  banner (the ABI split from 7B-3). Frozen validation matrix re-run green.
+  adapter as POSIX, proven by the CI Windows `smoke-datagram`). **EVERY Tier-1 §10 row is now ✅ for every
+  supported backend — NO ⚙ remains:** the previously-⚙ lwIP-raw serial-recv cell was stale (the one-held-slot
+  rework was completed by 7A-5 — the 16-entry ring is gone; the backend holds exactly one datagram + drops
+  the second, test T6 `raw_udp_test`), so it is flipped ✅, consistent with the no-caveat STABLE banner. The
+  only remaining non-✅ cells are `▲` (implemented-but-degraded with a documented bound, e.g. lwIP-raw's
+  recv-storage double-staging / io_uring source-pin sync-seam) and `✖` (documented capability limitations) —
+  neither is a contract gap. `<keel/datagram_detail.h>` keeps its OPT-IN/UNSTABLE-layout banner (the ABI
+  split from 7B-3). Frozen validation matrix re-run green.
 
 ---
 
