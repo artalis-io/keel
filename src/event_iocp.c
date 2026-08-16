@@ -600,7 +600,7 @@ static int iocp_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlD
  * quarantines — a posted overlapped always yields a completion the drain reaps. */
 static KlDgramRetireResult iocp_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
                                                   KlDgramOpKind kind, int *transport_err) {
-    KlIocpState *st = ctx->loop._backend;
+    const KlIocpState *st = ctx->loop._backend;
     KlIocpOpType want = (kind == KL_DGRAM_OP_SEND) ? KL_IOCP_DGRAM_SEND : KL_IOCP_DGRAM_RECV;
     if (transport_err) *transport_err = 0;
     for (const KlIocpOp *o = st->ops; o; o = o->g_next)

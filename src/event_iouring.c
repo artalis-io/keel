@@ -721,7 +721,7 @@ static int iou_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDg
  * quarantines — a posted op always yields a terminal CQE the drain reaps. */
 static KlDgramRetireResult iou_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
                                                  KlDgramOpKind kind, int *transport_err) {
-    KlIouState *st = ctx->loop._backend;
+    const KlIouState *st = ctx->loop._backend;
     IouOpType want = (kind == KL_DGRAM_OP_SEND) ? IOU_DGRAM_SEND : IOU_DGRAM_RECV;
     if (transport_err) *transport_err = 0;
     for (const KlIouOp *o = st->ops; o; o = o->next)

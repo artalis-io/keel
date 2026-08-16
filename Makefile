@@ -878,12 +878,26 @@ check-sockaddr-neutral:
 	if [ $$bad -ne 0 ]; then echo "check-sockaddr-neutral: FAILED"; exit 1; fi; \
 	echo "check-sockaddr-neutral: OK ($(words $(AXIS_PROTO_TUS)) protocol TUs are KlSockAddr-only)"
 
+# Scoped suppressions for documented false-positives (not real defects):
+#  - dns_resolver.c unusedStructMember / knownConditionTrueFalse: cppcheck explores the
+#    KEEL_FREESTANDING config, where the DNS-over-TCP fallback (the whole KlDnsTcp struct usage +
+#    its functions) is `#ifndef KEEL_FREESTANDING`-compiled-out and dns_hosts_lookup is a stub that
+#    returns 0 (no filesystem). Both are fully used in the hosted build; the findings exist only in
+#    that stub config.
+#  - event_{iocp,iouring,pollcomp}.c constParameterCallback: `life` on cancel_dgram/retire_dgram is
+#    fixed non-const by the KlCompletionOps vtable signature — const-ing one impl would mismatch the
+#    vtable and require casting the installed function pointers, which cppcheck itself warns about.
 cppcheck:
 	cppcheck --enable=all --inline-suppr --suppress=missingIncludeSystem \
 	  --suppress=unusedFunction --suppress=checkersReport \
 	  --suppress=toomanyconfigs --suppress=staticFunction \
 	  --suppress=normalCheckLevelMaxBranches \
 	  --suppress=unmatchedSuppression \
+	  --suppress=unusedStructMember:src/dns_resolver.c \
+	  --suppress=knownConditionTrueFalse:src/dns_resolver.c \
+	  --suppress=constParameterCallback:src/event_iocp.c \
+	  --suppress=constParameterCallback:src/event_iouring.c \
+	  --suppress=constParameterCallback:src/event_pollcomp.c \
 	  -UKEEL_PLATFORM_LWIP \
 	  --error-exitcode=1 -Iinclude -Ivendor/llhttp src/ parsers/
 

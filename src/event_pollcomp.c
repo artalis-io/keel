@@ -372,7 +372,7 @@ static int pc_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgr
  * never quarantines — a portable double where every posted op completes in a drain. */
 static KlDgramRetireResult pc_comp_retire_dgram(struct KlEventCtx *ctx, KlDgramLife *life,
                                                 KlDgramOpKind kind, int *transport_err) {
-    KlPcState *st = ctx->loop._backend;
+    const KlPcState *st = ctx->loop._backend;
     PcOpType want = (kind == KL_DGRAM_OP_SEND) ? PC_DGRAM_SEND : PC_DGRAM_RECV;
     if (transport_err) *transport_err = 0;
     for (const KlPcOp *o = st->ops; o; o = o->next)
