@@ -1,6 +1,12 @@
 # Step 7B-9 — EFI KlDatagram close: cancel→terminal + quarantine retirement (design note)
 
-Status: **IMPLEMENTED** (host-mock validated). The `retain_life` ownership delta below is unchanged from
+Status: **COMPLETE** (host-mock + QEMU/OVMF validated). The public KlDatagram close over EFI_UDP4 now
+passes a QEMU/OVMF end-to-end gate (`integrations/uefi/{dgram_public_selftest.c,build_dgram_public.sh,
+run_dgram_public.sh}` + `make freestanding-lib-dgram-selfcontained`): on bare OVMF the facade does a real
+send + recv-echo round-trip over EFI_UDP4 then a graceful **DETACHED** close with `udp_live=0`/
+`quarantined=0`, and the guest powers off cleanly (`ResetSystem(EfiResetShutdown)`; a `#PF` regression on
+return was traced to the still-armed platform timer and fixed by `kl_uefi_platform_shutdown()` before
+return). §10 EFI_UDP4 send-slot + strict-pause rows are now firm ✅. The `retain_life` ownership delta below is unchanged from
 the reviewed design; **§0a records one trace-based correction found during implementation** — the empty-
 armed-recv terminal is surfaced by el_drain's **STALE_RETIRED** branch (not a `request_recv_cancel` +
 `DELIVERED(EFI_ABORTED)` reap), because `backend_close` drains + cleanly closes the child (bumping the
@@ -273,8 +279,17 @@ releases, `src/datagram.c` submit/arm failure releases, and KlUdp's internal own
 6. **Roundtrip + clean close** (a datagram delivered, then DETACHED) unchanged.
 7. **KlUdp-over-EFI unaffected:** the existing e2e KlUdp cases stay green (never take the `retain_life`
    path).
-8. **QEMU/OVMF e2e:** a KlDatagram roundtrip + clean DETACHED close on bare OVMF (extends the existing
-   dgram-DNS harness) once the host-mock matrix is green.
+8. **QEMU/OVMF e2e (DONE):** the public KlDatagram does a real send + recv-echo round-trip over EFI_UDP4
+   on bare OVMF, then a graceful **DETACHED** close with `udp_live=0`/`quarantined=0`, and powers the guest
+   off cleanly. New standalone harness (NOT the dgram-DNS one, which drives KlUdp): `dgram_public_
+   selftest.c` (entry) + `build_dgram_public.sh` (links the self-contained freestanding datagram archive —
+   `make freestanding-lib-dgram-selfcontained`, no client/DNS/TLS) + `run_dgram_public.sh` (marker oracle:
+   host UDP echo over SLIRP, one QEMU boot; asserts DONE + GO + send-accepted + recv-matched + DETACHED +
+   clean teardown). Two real bugs surfaced + fixed on firmware: (1) `platform_init(image_handle,…)` should
+   be `platform_init(bs,…)` — the wrong arg deref'd EDK2 freed-pool (0xAF) → #GP; (2) the still-armed
+   periodic platform timer #PF'd on return → `kl_uefi_platform_shutdown()` before return; plus a clean
+   power-off via `ResetSystem(EfiResetShutdown)` (needed `EFI_RUNTIME_SERVICES` extended with ResetSystem
+   at its spec offset in `spikes/uefi/efi_min.h`), since BDS boots the ESP image directly (no startup.nsh).
 
 ## 12. Change surface (once approved)
 - `src/completion.h`: `int retain_life;` on `KlCompletionEvent` + the amended invariant note (the
