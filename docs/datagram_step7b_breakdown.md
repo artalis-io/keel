@@ -360,11 +360,19 @@ a capability with no usable API on IOCP/lwIP/EFI. So:
   after the 7B-6 checkpoint (documented "usable, not yet STABLE"); the banner is not flipped until all
   supported backends are live.
 
-### 7B-10 — matrix + banner finalization (only after 7B-9)
+### 7B-10 — matrix + banner finalization (only after 7B-9) — **DONE**
 - All supported-backend `§10` rows → ✅; the STABLE banner is flipped (no "not-yet-wired" caveat
   remains); docs reconciliation (contract + this doc + the main design doc); README/site datagram entry.
 - If any supported backend is deliberately deferred beyond 7B, it stays ⚙ with an explicit note and the
   banner keeps a matching caveat (no silent "covered").
+- **Done:** the `<keel/datagram.h>` STABLE banner is finalized (STABLE function+type contract, live across
+  pollcomp/io_uring/IOCP/lwIP-raw/EFI_UDP4 + POSIX & Winsock readiness); the §10 send-slot + strict-pause
+  rows are ✅ for every supported backend (Winsock/WSAPoll flipped ✅ — the same backend-agnostic readiness
+  adapter as POSIX, proven by the CI Windows `smoke-datagram`). The lone remaining ⚙ (lwIP-raw's 16-slot
+  serial-recv ring → one-held-slot rework) is an explicitly-noted provider-internal buffering detail that
+  does NOT weaken the STABLE API contract (the facade still delivers one datagram per op), NOT a deferred
+  backend — so the banner carries no caveat. `<keel/datagram_detail.h>` keeps its OPT-IN/UNSTABLE-layout
+  banner (the ABI split from 7B-3). Frozen validation matrix re-run green.
 
 ---
 

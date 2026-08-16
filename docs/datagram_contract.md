@@ -384,8 +384,8 @@ limitation · ⚙ to build.
 |---|---|---|---|---|---|---|---|
 | Serial recv, one per op (armed source ≠ op) | ✅ (drain≤N/tick, serial) | ✅ | ✅ | ✅ | ✅ | ⚙ (16-slot ring accumulates >1 held pkt — needs one-held-slot rework) | ✅ (1 self-rearming Rx token, 6.4b) |
 | Atomic whole-packet send | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (1 Tx token, 6.4b) |
-| Packet-slot bounded **send** queue | ✅ (7B-6: KlDatagram fixed-slot over the readiness facade) | ⚙ | ✅ (7B-4: KlDatagram fixed-slot over the live facade) | ✅ (7B-5: live io_uring) | ✅ (7B-7: live Windows IOCP — CI windows-iocp `smoke-udp` + `smoke-datagram` green after the init-association fix) | ✅ (7B-8: live lwIP-raw, container ASan/UBSan/LSan) | ✅ (7B-9: host-mock ASan/UBSan + QEMU/OVMF public-KlDatagram e2e — round-trip + DETACHED close over EFI_UDP4, clean teardown udp_live=0/quar=0) |
-| Strict pause (post no more recv) | ✅ (7B-6: drop-interest latch over the readiness facade) | ⚙ | ✅ (7B-4: strict latch over the live facade) | ✅ (7B-5: live io_uring) | ✅ (7B-7: live Windows IOCP — CI windows-iocp `smoke-udp` + `smoke-datagram` green) | ✅ (7B-8: live lwIP-raw, container ASan/UBSan/LSan) | ✅ (7B-9: host-mock ASan/UBSan + QEMU/OVMF public-KlDatagram e2e over EFI_UDP4) |
+| Packet-slot bounded **send** queue | ✅ (7B-6: KlDatagram fixed-slot over the readiness facade) | ✅ (7B-10: Winsock/WSAPoll readiness — the same backend-agnostic readiness adapter as POSIX; CI Windows `smoke-datagram` public-KlDatagram roundtrip green) | ✅ (7B-4: KlDatagram fixed-slot over the live facade) | ✅ (7B-5: live io_uring) | ✅ (7B-7: live Windows IOCP — CI windows-iocp `smoke-udp` + `smoke-datagram` green after the init-association fix) | ✅ (7B-8: live lwIP-raw, container ASan/UBSan/LSan) | ✅ (7B-9: host-mock ASan/UBSan + QEMU/OVMF public-KlDatagram e2e — round-trip + DETACHED close over EFI_UDP4, clean teardown udp_live=0/quar=0) |
+| Strict pause (post no more recv) | ✅ (7B-6: drop-interest latch over the readiness facade) | ✅ (7B-10: Winsock/WSAPoll readiness — same readiness adapter as POSIX; CI Windows `smoke-datagram` green) | ✅ (7B-4: strict latch over the live facade) | ✅ (7B-5: live io_uring) | ✅ (7B-7: live Windows IOCP — CI windows-iocp `smoke-udp` + `smoke-datagram` green) | ✅ (7B-8: live lwIP-raw, container ASan/UBSan/LSan) | ✅ (7B-9: host-mock ASan/UBSan + QEMU/OVMF public-KlDatagram e2e over EFI_UDP4) |
 | Cancel-once + confirmed detachment | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring/memset) | ✅ (stable token + Cancel + confirmed-retire-or-quarantine, 6.4b) |
 | Lifetime: no op refs object after detach | ✅ (no async op) | ✅ | ✅ (stable token) | ✅ (stable token) | ✅ (stable token + dequeue-before-free) | ✅ (stable token + copy-ring) | ✅ (B.6 stable token, 6.4b) |
 | `peer` (source) on every recv | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (native `EFI_UDP4_SESSION_DATA`) |
@@ -407,10 +407,14 @@ complete**, §5 status). **EFI_UDP4 is a real provider** now (`socket_efi_udp4.c
 implemented + host-mock-tested + firmware-proven end-to-end in 6.4c — the seed `dns_uefi.c` token
 machine was retired, audit §6): its serial recv, atomic send, cancel-once/confirmed-retirement +
 quarantine, stable-token lifetime, native `peer`/`local` (from `EFI_UDP4_SESSION_DATA`), truncation,
-and dedicated inbound slot are all ✅. The ⚙ cells remaining are the **shared** Tier-1 items still to
-build for EVERY backend — the packet-slot bounded **send** queue and strict pause (a `✅`-per-backend
-flip lands with that work, not per-provider) — **plus** lwIP-raw's provider-specific serial-recv
-cleanup (its 16-slot copy-ring can hold >1 packet → needs the one-held-slot rework). The ✖ capability
+and dedicated inbound slot are all ✅. The packet-slot bounded **send** queue and strict pause are now
+✅ across EVERY supported backend via the public KlDatagram facade (7B-4 pollcomp, 7B-5 io_uring, 7B-6
+POSIX readiness, 7B-7 IOCP, 7B-8 lwIP-raw, 7B-9 EFI_UDP4, 7B-10 Winsock/WSAPoll readiness) — the
+`kl_datagram_*` contract is **STABLE** as of 7B-10 (see the `<keel/datagram.h>` banner). The one ⚙ cell
+remaining is lwIP-raw's provider-specific serial-recv cleanup (its 16-slot copy-ring can hold >1 packet →
+the one-held-slot rework): a deferred, provider-internal buffering detail that does NOT weaken the STABLE
+API contract — the facade's serial recv machine still delivers one datagram per op; §10 STABLE covers the
+function+type contract, not a backend's internal buffering. The ✖ capability
 cells are *documented
 limitations* — consumers query caps (§9) and degrade. lwIP-raw's object-owned-buffer row is ▲: the
 token removed its `KlUdp` deref, but it still stages through its copy-ring before the machine copies

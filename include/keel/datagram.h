@@ -13,16 +13,13 @@
  * KlDatagramSendStatus, KlDatagramCloseResult, KlDgramCloseState, KL_DGRAM_CAP_*, KL_DGRAM_HAS_LOCAL/
  * TRUNCATED); the internal machine headers (src/datagram_*.h) include this header for them.
  *
- * STABILITY. STABLE covers the kl_datagram_* FUNCTION + TYPE CONTRACT. The struct LAYOUT is NOT
- * ABI-stable: a consumer that stack-/embed-allocates a KlDatagram opts into the layout by including
- * <keel/datagram_detail.h> and MUST recompile when it changes. A consumer that only holds a
- * `KlDatagram *` (created behind the API) is insulated from layout.
- *
- * NOTE (7B-6 HOSTED CHECKPOINT): the API is USABLE on the primary hosted backends — the completion loops
- * pollcomp (7B-4) + io_uring (7B-5) and the POSIX readiness loops epoll/kqueue/poll (7B-6) are live and
- * §10-validated. It is NOT yet advertised STABLE: the remaining live bindings (IOCP, lwIP-raw, EFI) stay
- * ⚙ and are wired in 7B-7..7B-9; the STABLE banner is finalized only at 7B-10. A hosted-only consumer may
- * use the API now.
+ * STABILITY (STABLE as of 7B-10). The kl_datagram_* FUNCTION + TYPE CONTRACT is STABLE — validated LIVE
+ * across every supported event backend: the completion loops pollcomp (7B-4), io_uring (7B-5), Windows
+ * IOCP (7B-7), raw lwIP-raw (7B-8), and firmware EFI_UDP4 (7B-9), plus the readiness loops POSIX
+ * epoll/kqueue/poll (7B-6) and Windows WSAPoll — each §10-validated (docs/datagram_contract.md). The
+ * struct LAYOUT is NOT ABI-stable: a consumer that stack-/embed-allocates a KlDatagram opts into the
+ * layout by including <keel/datagram_detail.h> and MUST recompile when it changes. A consumer that only
+ * holds a `KlDatagram *` (created behind the API) is insulated from layout.
  *
  * The provider data-plane vtable (KlDatagramOps + KlDgramRx/TxDesc descriptors + KL_DGRAM_RX_ flags)
  * lives on the socket axis in <keel/socket_dgram.h>, re-exported here so `#include <keel/datagram.h>`
