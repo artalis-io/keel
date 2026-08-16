@@ -139,23 +139,53 @@ existing `ok`/`bytes`/`buf` semantics. The invariant it amends is stated explici
   is intentionally kept `in_use` with `op_state == QUARANTINED`). This is why `close_join_result`, which
   runs only once `recv_inflight == 0`, still sees QUARANTINED.
 
-## 8. Dispatch behaviour (all owners/targets)
+## 8. Event-reference ownership at EVERY release site (all owners/targets/routers)
+
+**`retain_life` governs the completion event's ref ownership BEFORE routing, at every site that could
+release `ev->life` — not just the two owner handlers.** Rule (single-sourced): a site releases `ev->life`
+IFF `!ev->retain_life`; when `retain_life == 1` the ref is borrowed and the site must leave it alone
+(the backend op retains it, fail-closed). The three release sites (audited §9a) all obey this:
+
+- **Router — `completion_core.c` `kl_comp_run` (KL_COMP_DGRAM_*).** THE MISSED SITE (review). It routes
+  by the token's dispatch handler and, for a token with **no handler or a NULL life**, releases the ref
+  itself (`else if (life) kl_dgram_life_release(life)`). This decision is made BEFORE (and instead of)
+  routing, so it MUST honour `retain_life` first:
+  `if (d) d(target, &ev); else if (life && !ev.retain_life) kl_dgram_life_release(life);`
+  — a quarantined borrowed terminal whose token has `dispatch == NULL` is therefore NOT released here.
 - **KlDatagram** (`kl_datagram_comp_dispatch`): RECV: fill slot (skip for a terminal — `ok=0`, no data);
   `recv_on_complete(core, bytes, ok)`; then `if (!ev->retain_life) kl_dgram_life_release(ev->life)`.
 - **Legacy KlUdp** (`kl_udp_comp_dispatch`): a `retain_life` terminal is only emitted for a
   `cancel_dgram`-cancelled op, which KlUdp never triggers, so it never receives one. It MUST still honour
   the flag uniformly (`if (!ev->retain_life) release`) so the invariant is single-sourced, not
   per-owner. KlUdp's existing ok=0 recv handling (retire the posted machine only while live) is unchanged.
-- **Dead target** (owner freed; `kl_dgram_life_target()` NULL): retire nothing; honour `retain_life`
-  (release iff 0). A quarantined terminal to a dead target keeps the ref (already the fail-closed intent).
+- **Dead target** (owner freed; `kl_dgram_life_target()` NULL): the token still has a handler, so routing
+  reaches the owner dispatch (which retires nothing for a NULL target) and honours `retain_life` there. A
+  quarantined terminal to a dead target keeps the ref (already the fail-closed intent).
 - **Unknown owner kind:** cannot occur (token kind is UDP/_DATAGRAM, set at create); the release decision
   is owner-independent (reads `ev->retain_life`), so routing correctness is unaffected.
+
+The note's earlier claim "release behaviour is owner-independent" is now made TRUE by enforcement: it is
+independent of the owner AND of the router-vs-handler path, because every site reads the same
+`ev->retain_life`.
 
 ## 9. Event initialisation across every completion backend
 `retain_life` MUST default 0 on every emitted event, or a stray 1 would leak refs. Audit: every backend
 zero-inits each `KlCompletionEvent` before filling it — pollcomp/io_uring/IOCP use `memset`, EFI uses an
 explicit byte loop, lwIP-raw uses `memset`. Requirement: keep zero-init mandatory; only the EFI drain's
 QUARANTINED branch sets `retain_life = 1`. A one-time audit line per backend is part of the 7B-9 diff.
+
+### 9a. Release-site audit (every consumer of `KlCompletionEvent.life`)
+The 7B-9 diff must touch every site that releases a completion event's `ev->life`, not only the two owner
+handlers. Audited (grep `kl_dgram_life_release` for `ev`/event-borne life):
+- `src/completion_core.c` `kl_comp_run` KL_COMP_DGRAM_* no-handler fallback — **must gate on
+  `!ev.retain_life`** (the missed site).
+- `src/datagram.c` `kl_datagram_comp_dispatch` — gate on `!ev->retain_life`.
+- `src/udp.c` `kl_udp_comp_dispatch` — gate on `!ev->retain_life`.
+Explicitly OUT of scope (not event-borne — these release a `op.life` retained by the CALLER before a
+`post_dgram_*`, released on POST FAILURE, never a completion event): `src/udp.c` submit/arm failure
+releases, `src/datagram.c` submit/arm failure releases, and KlUdp's internal owner-ref releases
+(`kl_udp_free` teardown). These do not read `retain_life`; the review must confirm none is a disguised
+`ev->life` release.
 
 ## 10. Context teardown + late firmware completion
 - **Teardown (`el_close`):** the existing loop already RETAINS (abandons) a QUARANTINED op's ref and
@@ -174,6 +204,11 @@ QUARANTINED branch sets `retain_life = 1`. A one-time audit line per backend is 
 4. **No callback delivery:** (1)+(2) assert the terminal never delivers a datagram to `on_recv`.
 5. **No double terminal / double release:** pump repeatedly after (1)/(2) → exactly one DGRAM_RECV
    terminal per op; `retire_dgram` stable (RETIRED after (1); QUARANTINED after (2)); refcount exact.
+5a. **No-dispatch-handler quarantine (the router site):** drive a `KL_COMP_DGRAM_RECV(retain_life=1)`
+   event whose token has `dispatch == NULL` straight through `kl_comp_run` (a token created without a
+   handler, as KlDgramCore's neutral-adapter tokens are); assert `completion_core.c` does NOT release the
+   borrowed ref (refcount unchanged) — proving the router site honours `retain_life`, not only the owner
+   handlers. A `retain_life=0` no-handler event still releases (unchanged).
 6. **Roundtrip + clean close** (a datagram delivered, then DETACHED) unchanged.
 7. **KlUdp-over-EFI unaffected:** the existing e2e KlUdp cases stay green (never take the `retain_life`
    path).
@@ -181,7 +216,10 @@ QUARANTINED branch sets `retain_life = 1`. A one-time audit line per backend is 
    dgram-DNS harness) once the host-mock matrix is green.
 
 ## 12. Change surface (once approved)
-- `src/completion.h`: `int retain_life;` on `KlCompletionEvent` + the amended invariant note.
+- `src/completion.h`: `int retain_life;` on `KlCompletionEvent` + the amended invariant note (the
+  transferred ref is released after dispatch UNLESS `retain_life`, at every release site).
+- `src/completion_core.c` (`kl_comp_run` KL_COMP_DGRAM_* no-handler fallback): gate the release on
+  `!ev.retain_life` — the router release site (§8, the missed one).
 - `src/datagram.c` (`kl_datagram_comp_dispatch`) + `src/udp.c` (`kl_udp_comp_dispatch`): honour
   `retain_life`.
 - `integrations/uefi/socket_efi_udp4.{h,c}`: `kl_uefi_udp_request_recv_cancel`.
