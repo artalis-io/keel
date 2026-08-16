@@ -2038,6 +2038,85 @@ static void t_dgram_router_retain_life_no_handler(void) {
     kl_uefi_event_provider_reset();
 }
 
+/* 7B-9 (review of cfda595): abortive close with an IN-FLIGHT SEND. The send machine gates backend_close
+ * (close_send_drained), and after el_cancel_dgram's synchronous Cancel poll_send reports PENDING forever
+ * — so el_drain MUST surface the send terminal from the RECORDED cancel result, else the send machine
+ * never retires and the abortive close never reaches backend_close (deadlock). Confirmed cancel → the
+ * send retires (RETIRED) + a clean close → DETACHED; unconfirmed cancel → a borrowed send terminal (ref
+ * retained) + the slot quarantines → QUARANTINED. */
+static void t_dgram_public_abortive_send_detached(void) {
+    T_CASE("dgram public 7B-9: abortive close with in-flight send + confirmed cancel → DETACHED");
+    reset_counters(); talloc_reset();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int base = g_talloc.n;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.ctx = &ev; cfg.alloc = &g_ta; cfg.sockets = ev.sockets; cfg.fd = fd;
+    cfg.send_slots = 2; cfg.send_slot_cap = 64; cfg.recv_cap = 64;
+    CHECK(kl_datagram_init(&dg, &cfg) == 0, "kl_datagram_init over EFI_UDP4 (completion)");
+    g_dg_recv_count = 0; g_dg_close_fired = 0; g_dg_close_result = KL_DGRAM_CLOSE_NONE;
+    kl_datagram_on_close(&dg, dg_pub_on_close, NULL);
+    g_udp_transmit_mode = TOK_HANG;   /* the send posts but never self-completes — stays IN-FLIGHT */
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+    KlDatagramMessage m; memset(&m, 0, sizeof(m)); m.data = "hi"; m.len = 2; m.peer = &dest; m.tos = -1;
+    CHECK(kl_datagram_send(&dg, &m) == KL_DATAGRAM_ACCEPTED, "send accepted (posted, in-flight)");
+    CHECK(kl_datagram_send_inflight(&dg) == 1, "one send in flight");
+    g_cancel_signals = 1;   /* cancel_send drain CONFIRMS → RETIRED */
+    CHECK(kl_datagram_close_cancel(&dg) == 0, "abortive close_cancel");
+    for (int i = 0; i < 8 && kl_datagram_close_state(&dg) != KL_DGRAM_CLOSE_CLOSED; i++)
+        kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_close_state(&dg) == KL_DGRAM_CLOSE_CLOSED, "close reached CLOSED (not deadlocked)");
+    CHECK(kl_datagram_close_result(&dg) == KL_DGRAM_DETACHED, "confirmed send cancel → DETACHED");
+    CHECK(g_dg_close_fired == 1 && g_dg_close_result == KL_DGRAM_DETACHED, "on_close fired once with DETACHED");
+    CHECK(kl_datagram_send_inflight(&dg) == 0, "the in-flight send retired (send_inflight → 0)");
+    CHECK(kl_datagram_free(&dg) == 0, "free after CLOSED");
+    CHECK(g_talloc.n == base, "DETACHED reclaimed ALL storage (on_final ran) — no leak");
+    kl_event_ctx_free(&ev);
+    kl_uefi_event_provider_reset(); talloc_free_all();
+}
+
+static void t_dgram_public_abortive_send_quarantine(void) {
+    T_CASE("dgram public 7B-9: abortive close with in-flight send + unconfirmed cancel → QUARANTINED");
+    reset_counters(); talloc_reset();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int base = g_talloc.n;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.ctx = &ev; cfg.alloc = &g_ta; cfg.sockets = ev.sockets; cfg.fd = fd;
+    cfg.send_slots = 2; cfg.send_slot_cap = 64; cfg.recv_cap = 64;
+    CHECK(kl_datagram_init(&dg, &cfg) == 0, "kl_datagram_init over EFI_UDP4 (completion)");
+    g_dg_recv_count = 0; g_dg_close_fired = 0; g_dg_close_result = KL_DGRAM_CLOSE_NONE;
+    kl_datagram_on_close(&dg, dg_pub_on_close, NULL);
+    g_udp_transmit_mode = TOK_HANG;
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+    KlDatagramMessage m; memset(&m, 0, sizeof(m)); m.data = "hi"; m.len = 2; m.peer = &dest; m.tos = -1;
+    CHECK(kl_datagram_send(&dg, &m) == KL_DATAGRAM_ACCEPTED, "send accepted (posted, in-flight)");
+    CHECK(kl_datagram_send_inflight(&dg) == 1, "one send in flight");
+    g_cancel_signals = 0;   /* cancel_send drain FAILS → QUARANTINED; backend_close then quarantines slot */
+    CHECK(kl_datagram_close_cancel(&dg) == 0, "abortive close_cancel");
+    for (int i = 0; i < 8 && kl_datagram_close_state(&dg) != KL_DGRAM_CLOSE_CLOSED; i++)
+        kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_close_state(&dg) == KL_DGRAM_CLOSE_CLOSED, "close reached CLOSED (wrapper-safe, not deadlocked)");
+    CHECK(kl_datagram_close_result(&dg) == KL_DGRAM_QUARANTINED, "unconfirmed send cancel → QUARANTINED");
+    CHECK(g_dg_close_fired == 1 && g_dg_close_result == KL_DGRAM_QUARANTINED, "on_close fired once with QUARANTINED");
+    CHECK(kl_datagram_send_inflight(&dg) == 0, "the send MACHINE retired (send_inflight → 0) despite the retained ref");
+    CHECK(kl_datagram_free(&dg) == 0, "free after CLOSED");
+    CHECK(g_talloc.n > base, "QUARANTINE RETAINED storage (on_final did NOT run) — pinned by the abandoned send ref");
+    kl_event_ctx_free(&ev);
+    talloc_free_all();   /* reclaim the intentionally-retained life+holder (LSan-clean) */
+    kl_uefi_event_provider_reset();
+}
+
 /* poll_recv no-copy mode: a LIVE signalled receive polled with copy_into==NULL recycles the
  * firmware RxData without copying (a drain-without-deliver). (This is NOT the stale path — the
  * op is live; stale is exercised by t_udp_stale_generation_drop below.) */
@@ -2253,12 +2332,14 @@ int main(void) {
     t_dgram_teardown_clean_release();
     t_dgram_cancel_idempotent();      /* 7B-2 cancel_dgram — clean (retires via close+drain) */
     t_dgram_public_close_detached();  /* 7B-9 public KlDatagram — clean (DETACHED, no slot leak) */
+    t_dgram_public_abortive_send_detached();  /* 7B-9 abortive close, in-flight send, confirmed → DETACHED */
     t_udp_quarantine_unconfirmed();   /* leaks one udp slot by design — runs last of the udp set */
     t_udp_quarantine_tx();            /* leaks one udp slot by design */
     t_udp_sync_send_quarantine();     /* leaks one udp slot by design */
     t_dgram_life_quarantine_recv();   /* leaks one udp slot + retains a life by design */
     t_dgram_life_quarantine_send();   /* leaks one udp slot + retains a life by design */
     t_dgram_public_close_quarantine();       /* 7B-9 public KlDatagram — QUARANTINED (leaks by design) */
+    t_dgram_public_abortive_send_quarantine(); /* 7B-9 abortive close, in-flight send, unconfirmed → QUARANTINED (leaks) */
     t_dgram_router_retain_life_no_handler(); /* 7B-9 router no-handler retain_life (leaks by design) */
 
     t_connect_timeout_close();

@@ -33,6 +33,33 @@ outcome (DETACHED vs QUARANTINED) is exactly as reviewed; only the KlUefiUdpOpRe
 (STALE_RETIRED, not DELIVERED). Validated by the host-mock §11 cases (DETACHED reclaims ALL storage;
 QUARANTINE retains it; the router no-handler site honours retain_life).
 
+## 0b. Review fix (cfda595 → follow-up) — SEND cancel + recv INVALID must also retire their machines
+Two blocking gaps found reviewing cfda595 — the recv fix above was necessary but NOT sufficient:
+
+- **High — SEND cancellation had the SAME machine/backend mismatch.** `el_cancel_dgram(SEND)` called
+  `kl_uefi_udp_cancel_send` and IGNORED the result. After a confirmed cancel `tx_posted` is cleared, so
+  `kl_uefi_udp_poll_send` returns PENDING forever → no send terminal → the send machine's `send_inflight`
+  stays set. And send is **asymmetric with recv**: `close_send_drained()` GATES `backend_close`, so an
+  abortive `kl_datagram_close_cancel()` with an in-flight send can never reach `backend_close` (the recv
+  trick — surface the terminal from the post-`backend_close` STALE state — is unavailable because
+  `backend_close` never runs). So the send terminal MUST come from the **recorded** synchronous cancel
+  result, before/independent of `backend_close`. Fix: `EfiDgramOp` records `send_cancelled` +
+  `send_cancel_res`; el_drain surfaces a `KL_COMP_DGRAM_SEND` terminal from it — **RETIRED** →
+  transfer+release+retire the record (→ backend_close runs → clean close → DETACHED); **QUARANTINED** →
+  BORROWED terminal (retain_life=1), retire the send machine, keep the op `in_use` + ref (→ backend_close
+  quarantines the slot → `retire_dgram(SEND)` reports QUARANTINED at join). The non-cancel `poll_send`
+  path was also made symmetric with recv (STALE_RETIRED emits+transfers; QUARANTINED/INVALID borrow).
+- **Medium — recv INVALID** abandoned the ref + retired the record with NO terminal → `recv_inflight`
+  stuck AND the QUARANTINED classification erased. INVALID is explicitly unconfirmed/fail-safe, so it now
+  shares the QUARANTINED branch: one BORROWED terminal, keep the record + classification, `terminal_emitted`
+  gates re-emission. (INVALID is unreachable for a genuinely-posted op, so it has no dedicated test — the
+  change is defensive symmetry.)
+
+The `terminal_emitted` gate is hoisted to the top of the drain loop (covers recv AND send borrowed
+terminals). Validated by the host-mock §11.9/§11.10 abortive-close cases: in-flight send + confirmed
+cancel → DETACHED (send retired, storage reclaimed, no deadlock); + unconfirmed cancel → QUARANTINED
+(send machine retired despite the retained ref, storage pinned).
+
 ## 0. Problem
 
 The public `KlDatagram` close is driven by the confirmed-detachment coordinator (`src/datagram_close.c`).
