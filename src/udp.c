@@ -535,6 +535,20 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
             goto fail;   /* last_error set by helper */
     }
 
+    /* Completion loop (IOCP/io_uring/pollcomp): associate the socket with the loop ONCE at init, so
+     * EVERY overlapped op — SEND as well as receive — posts its completion to the port. Previously only
+     * kl_udp_recv_start() associated, so a send-only socket (kl_udp_send_to with no recv_start) was never
+     * joined to the IOCP port: its WSASendTo completion never posted and, at teardown, closesocket could
+     * not post an aborted completion either, so the port-quiesce blocked forever waiting to reap it. On
+     * io_uring/pollcomp kl_event_add is inert; on readiness (no COMPLETION cap) the recv arm adds its own
+     * lazy watcher instead, so this is skipped. The association is released when the fd is closed. */
+    if (kl_event_caps(&udp->dg.ctx->loop) & KL_EVENT_CAP_COMPLETION) {
+        if (kl_event_add(&udp->dg.ctx->loop, udp->dg.fd, KL_EVENT_READ, udp) < 0) {
+            udp->dg.last_error = KL_ERR_IO;
+            goto fail;
+        }
+    }
+
     /* Receive machine (step 6.1): allocate the KlUdpRx holder once; its dedicated KlDgramInbound slot
      * (7A-1: its own allocation) is the recv buffer — exactly one init-time alloc for receive storage.
      * No outbound pool here: the SEND queue stays the legacy byte-budget q_head/q_tail (D-COMPAT). */
@@ -673,12 +687,11 @@ int kl_udp_recv_start(KlUdp *udp, KlUdpRecvFn on_recv, void *user_data) {
     udp->dg.recv_active = 1;
     KlUdpRx *rx = udp_rx(udp);
 
-    /* Completion loop (IOCP/io_uring): a readiness watcher never fires — associate the socket with
-     * the port, then let the machine post the first overlapped recv (its re-arm posts each next one).
-     * The recvmmsg batch is not used on a completion loop. */
+    /* Completion loop (IOCP/io_uring): a readiness watcher never fires — the socket was already
+     * associated with the port at kl_udp_init(), so just let the machine post the first overlapped
+     * recv (its re-arm posts each next one). The recvmmsg batch is not used on a completion loop. */
     if (rx->completion) {
-        if (kl_event_add(&udp->dg.ctx->loop, udp->dg.fd, KL_EVENT_READ, udp) < 0 ||
-            kl_dgram_recv_start(&rx->recv) < 0) {
+        if (kl_dgram_recv_start(&rx->recv) < 0) {
             udp->dg.recv_active = 0;
             udp->dg.last_error = KL_ERR_IO;
             return -1;
