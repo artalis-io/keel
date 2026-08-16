@@ -348,9 +348,14 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Install tools
+        # llvm provides llvm-ar / llvm-nm: the freestanding gates (freestanding-dgram / -dns /
+        # uefi-dgram-gate / *-selfcontained) build Windows-COFF cross archives, and FREESTANDING_AR
+        # auto-selects llvm-ar when present. GNU `ar`'s archive index is not scannable by lld-link for
+        # those PE targets — on-demand member extraction fails ("undefined symbol: kl_udp_init") — so
+        # without llvm-ar the compose-link probes break. (llvm-nm likewise for the symbol gate.)
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tools cppcheck
+          sudo apt-get install -y clang-tools cppcheck llvm
 
       - name: scan-build
         run: make analyze
