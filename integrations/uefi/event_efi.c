@@ -76,6 +76,9 @@ typedef struct {
     /* send-only: the queued payload/dest (copied so it survives the caller freeing them) + state. */
     int                 posted;        /* send: 1 = an EFI Transmit token is outstanding for this op */
     int                 post_failed;   /* send: the deferred substrate post failed → emit ok=0 */
+    int                 terminal_emitted; /* recv: 7B-9 — a QUARANTINE terminal was already emitted for
+                                        * this op; it stays in_use (fail-closed, ref abandoned) but must
+                                        * never be re-drained/re-emitted. Gates the drain's re-scan. */
     unsigned long long  seq;           /* send: monotonic acceptance order → per-socket FIFO pumping */
     unsigned char       snd[KL_EFI_DGRAM_SNDBUF];
     size_t              snd_len;
@@ -466,6 +469,10 @@ static int el_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpK
         if (want == EFI_DG_SEND) {
             if (op->posted) (void)kl_uefi_udp_cancel_send(op->fd, op->generation);
         } else {
+            /* Cancel + drain the recv token. This retires the SUBSTRATE op (rx_posted→0) but NOT the
+             * recv MACHINE — recv_inflight only reaches 0 once el_drain surfaces a KL_COMP_DGRAM_RECV
+             * terminal (7B-9). After backend_close bumps the generation, el_drain observes the op as
+             * STALE_RETIRED (clean) or QUARANTINED (unconfirmed) and emits that terminal. */
             (void)kl_uefi_udp_cancel_recv(op->fd, op->generation);
         }
     }
@@ -633,39 +640,70 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
 
 #ifdef KEEL_UEFI_DATAGRAM
     /* Datagram ops (6.4b-3b): poll each posted Receive/Transmit by its {fd, captured_generation}
-     * identity and apply the KlUefiUdpOpResult contract. DELIVERED → emit KL_COMP_DGRAM_RECV/_SEND
-     * and TRANSFER the B.6 life ref to the event (kl_udp_comp_dispatch releases it after delivery);
-     * RETIRED/STALE_RETIRED → RELEASE the ref (its final release runs on_final); QUARANTINED/INVALID →
-     * RETAIN the ref forever (abandon it — retirement was never confirmed, so on_final must NOT run and
-     * the receive storage the firmware may still touch stays pinned). The backend never inspects owner
-     * liveness — a live-but-owner-dead delivery is dropped by generic dispatch via ev->life. */
+     * identity and apply the KlUefiUdpOpResult contract. Every recv terminal (7B-9) emits a
+     * KL_COMP_DGRAM_RECV so the recv MACHINE retires (recv_inflight → 0 — required by the
+     * confirmed-detachment close for EVERY outcome, not just a delivery):
+     *   DELIVERED / STALE_RETIRED → emit + TRANSFER the B.6 life ref (dispatch releases it, retain_life=0;
+     *     the final release runs on_final). STALE_RETIRED is the close path (child cancel-drained + cleanly
+     *     closed by backend_close before we polled) → ok=0, no delivery.
+     *   QUARANTINED → emit a BORROWED terminal (retain_life=1: no site releases it; op stays in_use,
+     *     abandoned) so recv_inflight retires but on_final never frees storage the firmware may still touch.
+     *   INVALID → unreachable for a posted op; fail-safe retain + retire.
+     * SEND terminals TRANSFER + release as before. The backend never inspects owner liveness — a
+     * live-but-owner-dead delivery is dropped by generic dispatch via ev->life. */
     for (int i = 0; i < KL_EFI_MAX_DGRAM_OPS && count < max; i++) {
         EfiDgramOp *op = &g_efi.dgram[i];
         if (!op->in_use) continue;
 
         if (op->kind == EFI_DG_RECV) {
+            /* 7B-9: a QUARANTINE terminal was already surfaced for this op; it stays in_use (abandoned,
+             * ref retained) so retire_dgram keeps reporting QUARANTINED at close-join. Never re-drain. */
+            if (op->terminal_emitted) continue;
             KlSockAddr peer, local; int trunc = 0; size_t nb = 0; int ok = 0;
             for (size_t b = 0; b < sizeof(peer); b++) { ((unsigned char *)&peer)[b] = 0; ((unsigned char *)&local)[b] = 0; }
             KlUefiUdpOpResult r = kl_uefi_udp_poll_recv(op->fd, op->generation, op->buf, op->buflen,
                                                         &peer, &local, &trunc, &nb, &ok);
             if (r == KL_UEFI_UDP_OP_PENDING) continue;
-            if (r == KL_UEFI_UDP_OP_DELIVERED) {
+            if (r == KL_UEFI_UDP_OP_DELIVERED || r == KL_UEFI_UDP_OP_STALE_RETIRED) {
+                /* A terminal that RETIRES the recv machine (recv_inflight → 0). DELIVERED may carry a
+                 * real datagram (ok=1) or a signalled-aborted token (ok=0); STALE_RETIRED (7B-9) is the
+                 * confirmed-detachment close path — the child was cancel-drained AND cleanly closed by
+                 * backend_close (generation bumped) BEFORE we polled, so there is nothing to deliver
+                 * (ok=0). Both TRANSFER the ref op → event; dispatch releases it (retain_life=0), whose
+                 * final release runs on_final. */
+                int delivered = (r == KL_UEFI_UDP_OP_DELIVERED);
                 for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
                 out[count].kind      = KL_COMP_DGRAM_RECV;
                 out[count].life      = op->life; op->life = NULL;   /* TRANSFER ref op → event */
-                out[count].ok        = ok;
-                out[count].bytes     = nb;
+                out[count].ok        = delivered ? ok : 0;
+                out[count].bytes     = delivered ? nb : 0;
                 out[count].buf       = op->buf;
-                if (kl_sockaddr_family(&peer)  != KL_AF_UNSPEC) out[count].peer  = peer;
-                if (kl_sockaddr_family(&local) != KL_AF_UNSPEC) out[count].local = local;
-                out[count].truncated = trunc;
+                if (delivered) {
+                    if (kl_sockaddr_family(&peer)  != KL_AF_UNSPEC) out[count].peer  = peer;
+                    if (kl_sockaddr_family(&local) != KL_AF_UNSPEC) out[count].local = local;
+                    out[count].truncated = trunc;
+                }
                 count++;
-            } else if (r == KL_UEFI_UDP_OP_STALE_RETIRED) {
-                kl_dgram_life_release(op->life); op->life = NULL;   /* confirmed retirement → release */
-            } else {   /* QUARANTINED or INVALID — retain the ref forever (never release) */
-                op->life = NULL;
+                op->in_use = 0;   /* retire the record (life transferred) */
+            } else if (r == KL_UEFI_UDP_OP_QUARANTINED) {
+                /* 7B-9 QUARANTINE terminal: retire the recv MACHINE (recv_inflight → 0 so the
+                 * confirmed-detachment close can classify) WITHOUT releasing the life ref — the
+                 * abandoned firmware RxToken may still write op->buf, so on_final must never run and free
+                 * that storage. BORROW the ref (retain_life=1: neither the router nor dispatch releases
+                 * it; op->life STAYS set), KEEP the record in_use (retire_dgram keeps reporting
+                 * QUARANTINED at join), and gate re-emission with terminal_emitted. ok=0 → no delivery. */
+                for (size_t b = 0; b < sizeof(*out); b++) ((unsigned char *)&out[count])[b] = 0;
+                out[count].kind        = KL_COMP_DGRAM_RECV;
+                out[count].life        = op->life;   /* BORROW — do NOT NULL op->life */
+                out[count].retain_life = 1;
+                out[count].ok          = 0;
+                out[count].buf         = op->buf;
+                count++;
+                op->terminal_emitted = 1;   /* keep in_use (abandoned) — never re-drained/re-emitted */
+            } else {   /* INVALID — not a datagram handle (unreachable for a posted op); fail-safe */
+                op->life = NULL;             /* retain the ref (unconfirmed) — never release */
+                op->in_use = 0;
             }
-            op->in_use = 0;   /* retire the record (life already transferred/released/abandoned) */
         } else {   /* EFI_DG_SEND */
             KlSocketHandle sfd = op->fd;
             if (op->post_failed) {   /* the deferred substrate post failed → emit a failed completion */

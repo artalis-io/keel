@@ -52,9 +52,11 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
             KlDgramLife *life = ev[i].life;
             KlDgramDispatchFn d = life ? kl_dgram_life_dispatch(life) : (KlDgramDispatchFn)0;
             if (d)
-                d(kl_dgram_life_target(life), &ev[i]);   /* handler releases life after dispatch */
-            else if (life)
-                kl_dgram_life_release(life);              /* no handler → drop the transferred ref */
+                d(kl_dgram_life_target(life), &ev[i]);   /* handler releases life after dispatch (iff !retain_life) */
+            else if (life && !ev[i].retain_life)
+                kl_dgram_life_release(life);              /* no handler → drop the transferred ref. 7B-9: a
+                                                          * borrowed quarantine ref (retain_life=1) is NOT
+                                                          * released here — same rule as the owner handlers. */
             break;
         }
         case KL_COMP_CONNECT:

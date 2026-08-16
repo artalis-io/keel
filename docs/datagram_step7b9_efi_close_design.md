@@ -1,7 +1,37 @@
 # Step 7B-9 — EFI KlDatagram close: cancel→terminal + quarantine retirement (design note)
 
-Status: **DESIGN — no code until reviewed** (freeze cadence; the quarantine mechanism changes a core
-completion invariant — "a completion event's transferred life ref is always released after dispatch").
+Status: **IMPLEMENTED** (host-mock validated). The `retain_life` ownership delta below is unchanged from
+the reviewed design; **§0a records one trace-based correction found during implementation** — the empty-
+armed-recv terminal is surfaced by el_drain's **STALE_RETIRED** branch (not a `request_recv_cancel` +
+`DELIVERED(EFI_ABORTED)` reap), because `backend_close` drains + cleanly closes the child (bumping the
+generation) BEFORE el_drain polls. The reviewed ref-ownership semantics (transfer→release for a normal
+terminal; borrow→retain for a quarantine terminal; `retain_life` honoured at all three release sites) are
+unaffected — only the substrate-result LABEL and the change surface changed. §2a/§12 are corrected inline.
+
+## 0a. Correction (post-trace, implementation) — the terminal source is STALE_RETIRED, not DELIVERED
+The reviewed §2a assumed `el_cancel_dgram(RECV)` would leave the RxToken posted (a new
+`kl_uefi_udp_request_recv_cancel`) so a later `el_drain` reaps it as `DELIVERED(out_ok=0)` via `EFI_ABORTED`.
+Tracing the real close path (`src/datagram_close.c` `close_run_terminal`: `cancel_recv` **then**
+`backend_close`, same synchronous frame) shows that is not what happens:
+- `backend_close` = `dg_close_transport` → `kl_sock_close` → **`kl_uefi_udp_close`**, which does its OWN
+  `Cancel(NULL)` + **bounded drain** of the posted RxToken (recycling the firmware RxData) and then bumps
+  the child **generation** (clean close) or `udp_quarantine()`s it (unconfirmed) — ALL before any later
+  `el_drain`.
+- So when `el_drain` next polls the op by its captured generation, the op is **STALE**:
+  `kl_uefi_udp_poll_recv` → `udp_stale_class` → **STALE_RETIRED** (clean close) or **QUARANTINED**
+  (unconfirmed). It is never observed as a live `DELIVERED(EFI_ABORTED)` token.
+- The OLD el_drain silently released the ref on STALE_RETIRED and emitted **no** event → the recv MACHINE
+  never retired (`recv_inflight` stuck at 1) → close hangs. That is the true form of gap #1.
+
+**Corrected mechanism (implemented):** el_drain emits the terminal for BOTH terminal results — a normal
+`KL_COMP_DGRAM_RECV(ok=0)` for STALE_RETIRED (transfer→release, exactly like DELIVERED(ok=0)) and a
+BORROWED `KL_COMP_DGRAM_RECV(ok=0, retain_life=1)` for QUARANTINED. `el_cancel_dgram(RECV)` keeps the
+existing synchronous `kl_uefi_udp_cancel_recv`; **`kl_uefi_udp_request_recv_cancel` is NOT added** (it is
+unnecessary — the terminal is a substrate-state observation after backend_close, not a reaped posted
+token). Everything in §2a/§2c about ref ownership (transfer vs borrow), `recv_inflight`, and the join
+outcome (DETACHED vs QUARANTINED) is exactly as reviewed; only the KlUefiUdpOpResult label differs
+(STALE_RETIRED, not DELIVERED). Validated by the host-mock §11 cases (DETACHED reclaims ALL storage;
+QUARANTINE retains it; the router no-handler site honours retain_life).
 
 ## 0. Problem
 
@@ -43,23 +73,27 @@ This note pins the mechanism for review before any code.
   ref; STALE_RETIRED → release ref, no event; QUARANTINED/INVALID → abandon ref (`op->life = NULL`), no
   event; then `op->in_use = 0` (retire the record).
 
-**New primitive (proposed):** `kl_uefi_udp_request_recv_cancel(fd, gen)` — calls `u->udp->Cancel(u->udp,
-&u->rx_tok)` and returns, **leaving `rx_posted = 1`** (no drain). Idempotent (a second request, or no
-posted recv, is a no-op). This lets `el_drain` reap the aborted token as DELIVERED(ok=0).
+**~~New primitive (proposed): `kl_uefi_udp_request_recv_cancel`~~ — DROPPED (see §0a).** It is
+unnecessary: `backend_close` (`kl_uefi_udp_close`) drains + recycles the RxToken and bumps the generation
+BEFORE any `el_drain`, so the op is observed as STALE_RETIRED/QUARANTINED, never as a live
+DELIVERED(EFI_ABORTED) token. `el_cancel_dgram(RECV)` keeps the existing synchronous
+`kl_uefi_udp_cancel_recv`; el_drain's STALE_RETIRED branch surfaces the terminal.
 
 ## 2. State sequences (the three close paths)
 
 Notation: `refs(L)` = the life token's refcount. At recv arm: `refs = owner(1) + op(1) = 2`.
 
-### 2a. Ordinary cancellation → confirmed retirement → DETACHED
+### 2a. Ordinary cancellation → confirmed retirement → DETACHED   *(corrected per §0a)*
 1. `recv_start` → `el_post_dgram_recv` posts an RxToken; op `in_use=1`, holds 1 ref. `recv_inflight=1`.
 2. `close_begin` → coordinator sets recv `stopped`; at `close_send_drained` calls `cancel_recv`
-   (`el_cancel_dgram(RECV)` → **`kl_uefi_udp_request_recv_cancel`**: Cancel the RxToken, `rx_posted`
-   stays 1) then `backend_close` (`el_close_transport` → provider close of the fd). `retire_dgram` at
-   this instant = PENDING (op still `in_use`, `op_state` PENDING/DELIVERED). Close stays CLOSING.
-3. pump → `el_drain` → `poll_recv` sees the token signalled `EFI_ABORTED` ⇒ **DELIVERED, `out_ok=0`**.
-   Drain emits `KL_COMP_DGRAM_RECV(ok=0, quarantined=0)`, **TRANSFERS** the ref (`ev.life = op->life;
-   op->life = NULL`), `op->in_use = 0` (record retired). `refs` unchanged (transfer, not release).
+   (`el_cancel_dgram(RECV)` → **`kl_uefi_udp_cancel_recv`**: Cancel + bounded drain, `rx_posted → 0`)
+   **then** `backend_close` (`dg_close_transport` → `kl_uefi_udp_close`: clean close, generation bumped).
+   `retire_dgram` at this instant = PENDING (op still `in_use`). Close stays CLOSING.
+3. pump → `el_drain` → `poll_recv` resolves the op by its captured generation ⇒ **STALE_RETIRED** (the
+   child was cancel-drained + cleanly closed in step 2). Drain emits `KL_COMP_DGRAM_RECV(ok=0,
+   retain_life=0)`, **TRANSFERS** the ref (`ev.life = op->life; op->life = NULL`), `op->in_use = 0`
+   (record retired). `refs` unchanged (transfer, not release). *(Same ref semantics as the reviewed
+   DELIVERED(ok=0) path — only the substrate label differs.)*
 4. dispatch → `kl_dgram_core_recv_on_complete(core, 0, 0)`: recv machine is `stopped` ⇒ retires with **no
    delivery**, `recv_inflight = 0`. `quarantined=0` ⇒ **release** `ev.life` → `refs = owner(1)`.
 5. coordinator re-runs (recv activity) → `close_fully_retired` true → `close_join_result` → `retire_dgram`
@@ -222,10 +256,15 @@ releases, `src/datagram.c` submit/arm failure releases, and KlUdp's internal own
   `!ev.retain_life` — the router release site (§8, the missed one).
 - `src/datagram.c` (`kl_datagram_comp_dispatch`) + `src/udp.c` (`kl_udp_comp_dispatch`): honour
   `retain_life`.
-- `integrations/uefi/socket_efi_udp4.{h,c}`: `kl_uefi_udp_request_recv_cancel`.
-- `integrations/uefi/event_efi.c`: `el_cancel_dgram(RECV)` → request-cancel; `el_drain` recv branch emits
-  a terminal for DELIVERED(ok=0) [transfer+release] and QUARANTINED [borrow+retain, keep `in_use`,
-  `terminal_emitted` gate]; `EfiDgramOp` gains `terminal_emitted`.
-- backends: confirm zero-init (audit, §9).
-- `integrations/uefi/mock_efi_test.c`: the §11 cases.
+- `integrations/uefi/socket_efi_udp4.{h,c}`: **no new primitive** (the §0a correction dropped
+  `kl_uefi_udp_request_recv_cancel` — `el_cancel_dgram` keeps the existing `kl_uefi_udp_cancel_recv`).
+- `integrations/uefi/event_efi.c`: `el_cancel_dgram(RECV)` UNCHANGED (synchronous `cancel_recv`); `el_drain`
+  recv branch emits a terminal for **DELIVERED or STALE_RETIRED** [ok=0 on non-delivery; transfer+release]
+  and **QUARANTINED** [borrow+retain, keep `in_use`, `terminal_emitted` gate]; INVALID stays fail-safe
+  (retain+retire); `EfiDgramOp` gains `terminal_emitted`.
+- backends: confirm zero-init (audit, §9) — all memset/byte-loop before fill; only EFI's QUARANTINED
+  branch sets `retain_life=1`. No change needed in pollcomp/io_uring/IOCP/lwIP-raw.
+- `integrations/uefi/mock_efi_test.c`: the §11 cases (public DETACHED/QUARANTINED e2e + the no-handler
+  router site); the pre-existing STALE_RETIRED/cancel-idempotent unit cases updated to the new
+  "STALE_RETIRED emits a transferred terminal" contract.
 - `docs/datagram_contract.md` §10: flip EFI cells only after host-mock + QEMU pass.

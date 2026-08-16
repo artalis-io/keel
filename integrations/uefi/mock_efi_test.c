@@ -30,6 +30,8 @@
 
 #include <keel/sockaddr.h>
 #include <keel/udp.h>                /* KlUdpConfig + KlUdpTransport layout (6.4b) */
+#include <keel/datagram.h>           /* public KlDatagram facade (7B-9 close e2e) */
+#include <keel/datagram_detail.h>    /* opt-in KlDatagram layout (stack-allocate the handle) */
 #include <keel/allocator.h>          /* KlAllocator (KlDgramLife tests) */
 #include <keel/event_ctx.h>          /* KlEventCtx (end-to-end KlUdp test) */
 #include "../../src/datagram_life.h" /* KlDgramLife create/retain/release/mark_dead (6.4b-3b) */
@@ -1762,7 +1764,7 @@ static void t_dgram_deferred_post_failure_releases(void) {
 }
 
 static void t_dgram_life_stale_release_recv(void) {
-    T_CASE("dgram life: STALE_RETIRED (clean close) releases the op ref → on_final runs");
+    T_CASE("dgram life: STALE_RETIRED (clean close) EMITS a terminal + TRANSFERS the op ref (router releases → on_final)");
     reset_counters(); talloc_reset(); g_on_final_ran = 0;
     kl_uefi_event_provider_reset();
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
@@ -1780,9 +1782,17 @@ static void t_dgram_life_stale_release_recv(void) {
     CHECK(g_on_final_ran == 0, "on_final not run yet (op ref remains after owner drop)");
     KlCompletionEvent evs[4];
     int dn = COMP(ep)->drain(NULL, evs, 4, 0);
-    int emitted = 0; for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_RECV) emitted = 1;
-    CHECK(emitted == 0, "no event on a stale (cleanly-retired) op");
-    CHECK(g_on_final_ran == 1, "STALE_RETIRED released the op ref → on_final RAN");
+    /* 7B-9: STALE_RETIRED now EMITS a KL_COMP_DGRAM_RECV terminal (ok=0, no delivery) so the recv
+     * MACHINE retires (recv_inflight → 0 — required by the confirmed-detachment close). The op ref is
+     * TRANSFERRED into the event, NOT released by the drain; the router/dispatch releases it. */
+    int idx = -1; for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_RECV) idx = i;
+    CHECK(idx >= 0, "STALE_RETIRED emits a terminal (retires recv_inflight)");
+    CHECK(idx >= 0 && evs[idx].ok == 0, "the terminal carries ok=0 (no delivery)");
+    CHECK(idx >= 0 && evs[idx].retain_life == 0, "the terminal TRANSFERS the ref (retain_life=0)");
+    CHECK(g_on_final_ran == 0, "drain did NOT release — the ref is transferred to the event");
+    /* Router (no-handler token → kl_comp_run fallback) releases the transferred ref iff !retain_life. */
+    if (idx >= 0 && evs[idx].life && !evs[idx].retain_life) kl_dgram_life_release(evs[idx].life);
+    CHECK(g_on_final_ran == 1, "router released the transferred ref → on_final RAN");
     kl_uefi_event_provider_reset(); talloc_free_all();
 }
 
@@ -1887,13 +1897,145 @@ static void t_dgram_cancel_idempotent(void) {
     CHECK(g_on_final_ran == 0, "cancel_dgram released NOTHING (owner + op refs intact)");
     CHECK(COMP(ep)->cancel_dgram(NULL, life, KL_DGRAM_OP_RECV) == 0, "cancel_dgram idempotent (2nd call)");
     CHECK(g_on_final_ran == 0, "still nothing released after the idempotent 2nd cancel");
-    /* Retire the op the ordinary way — clean close + drain releases the (single) op ref → on_final. */
+    /* Retire the op the ordinary way — clean close then drain: STALE_RETIRED emits a terminal that
+     * TRANSFERS the (single) op ref (7B-9); the router releases it → on_final runs exactly once. */
     kl_uefi_udp_close(fd);
     kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
     KlCompletionEvent evs[4];
-    (void)COMP(ep)->drain(NULL, evs, 4, 0);
-    CHECK(g_on_final_ran == 1, "op ref released by drain/close → on_final RAN once (no leak/double-release)");
+    int dn = COMP(ep)->drain(NULL, evs, 4, 0);
+    CHECK(g_on_final_ran == 0, "drain TRANSFERS the ref to the event (7B-9) — not released yet");
+    int idx = -1; for (int i = 0; i < dn; i++) if (evs[i].kind == KL_COMP_DGRAM_RECV) idx = i;
+    if (idx >= 0 && evs[idx].life && !evs[idx].retain_life) kl_dgram_life_release(evs[idx].life);
+    CHECK(g_on_final_ran == 1, "router released the transferred ref → on_final RAN once (no leak/double-release)");
     kl_uefi_event_provider_reset(); talloc_free_all();
+}
+
+/* ── 7B-9 public KlDatagram close over EFI_UDP4 (§11) ─────────────────────────────────────────────
+ * The confirmed-detachment close coordinator needs a KL_COMP_DGRAM_RECV terminal for an EMPTY armed
+ * recv (recv_inflight must reach 0 for EVERY outcome). Over EFI the terminal is produced by el_drain
+ * AFTER backend_close bumps the child generation: STALE_RETIRED (clean cancel-drain) → DETACHED, or
+ * QUARANTINED (unconfirmed drain) → a BORROWED terminal that retires the machine WITHOUT releasing the
+ * abandoned life ref. These e2e cases drive the public API through kl_event_ctx_run (→ kl_comp_run). */
+static int                   g_dg_recv_count;
+static int                   g_dg_close_fired;
+static KlDatagramCloseResult g_dg_close_result;
+static void dg_pub_on_recv(void *ud, const void *data, size_t len,
+                           const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)data; (void)len; (void)peer; (void)local; (void)flags; g_dg_recv_count++;
+}
+static void dg_pub_on_close(void *ud, KlDatagramCloseResult r) {
+    (void)ud; g_dg_close_result = r; g_dg_close_fired++;
+}
+
+/* §11.1/4/5: empty armed recv + confirmed cancel → DETACHED, no delivery, exactly one terminal,
+ * ALL storage reclaimed (on_final ran). */
+static void t_dgram_public_close_detached(void) {
+    T_CASE("dgram public 7B-9: empty armed recv + close → DETACHED (no delivery, storage reclaimed)");
+    reset_counters(); talloc_reset();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int base = g_talloc.n;   /* baseline BEFORE the datagram lifecycle (ctx/socket excluded) */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.ctx = &ev; cfg.alloc = &g_ta; cfg.sockets = ev.sockets; cfg.fd = fd;
+    cfg.send_slots = 2; cfg.send_slot_cap = 64; cfg.recv_cap = 64;
+    CHECK(kl_datagram_init(&dg, &cfg) == 0, "kl_datagram_init over EFI_UDP4 (completion)");
+    g_dg_recv_count = 0; g_dg_close_fired = 0; g_dg_close_result = KL_DGRAM_CLOSE_NONE;
+    kl_datagram_on_close(&dg, dg_pub_on_close, NULL);
+    g_udp_receive_mode = TOK_HANG;    /* armed, never self-completes — an EMPTY armed recv */
+    CHECK(kl_datagram_recv_start(&dg, dg_pub_on_recv, NULL) == 0, "recv_start posts an empty armed recv");
+    g_cancel_signals = 1;             /* cancel-drain CONFIRMS → clean close → STALE_RETIRED terminal */
+    CHECK(kl_datagram_close_begin(&dg) == 0, "close_begin");
+    for (int i = 0; i < 8 && kl_datagram_close_state(&dg) != KL_DGRAM_CLOSE_CLOSED; i++)
+        kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_close_state(&dg) == KL_DGRAM_CLOSE_CLOSED, "close reached CLOSED");
+    CHECK(kl_datagram_close_result(&dg) == KL_DGRAM_DETACHED, "empty armed recv confirmed-retired → DETACHED");
+    CHECK(g_dg_close_fired == 1, "on_close fired exactly once");
+    CHECK(g_dg_close_result == KL_DGRAM_DETACHED, "on_close carried DETACHED");
+    CHECK(g_dg_recv_count == 0, "no datagram was ever delivered (empty recv → ok=0 terminal)");
+    /* §11.5 no double terminal: extra pumps after CLOSED change nothing. */
+    for (int i = 0; i < 3; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(g_dg_close_fired == 1 && g_dg_recv_count == 0, "no second terminal / delivery after CLOSED");
+    CHECK(kl_datagram_free(&dg) == 0, "free after CLOSED");
+    CHECK(g_talloc.n == base, "DETACHED reclaimed ALL datagram storage (on_final ran) — no leak");
+    kl_event_ctx_free(&ev);
+    kl_uefi_event_provider_reset(); talloc_free_all();
+}
+
+/* §11.2/3/4: empty armed recv + UNCONFIRMED cancel → QUARANTINED terminal; the borrowed life ref is
+ * RETAINED (on_final never runs → storage pinned), no delivery. Leaks one udp slot + one life BY
+ * DESIGN (reclaimed via the arena, LSan-clean). */
+static void t_dgram_public_close_quarantine(void) {
+    T_CASE("dgram public 7B-9: empty armed recv + unconfirmed cancel → QUARANTINED (ref retained, no delivery)");
+    reset_counters(); talloc_reset();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int base = g_talloc.n;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.ctx = &ev; cfg.alloc = &g_ta; cfg.sockets = ev.sockets; cfg.fd = fd;
+    cfg.send_slots = 2; cfg.send_slot_cap = 64; cfg.recv_cap = 64;
+    CHECK(kl_datagram_init(&dg, &cfg) == 0, "kl_datagram_init over EFI_UDP4 (completion)");
+    g_dg_recv_count = 0; g_dg_close_fired = 0; g_dg_close_result = KL_DGRAM_CLOSE_NONE;
+    kl_datagram_on_close(&dg, dg_pub_on_close, NULL);
+    g_udp_receive_mode = TOK_HANG;
+    CHECK(kl_datagram_recv_start(&dg, dg_pub_on_recv, NULL) == 0, "recv_start posts an empty armed recv");
+    g_cancel_signals = 0;             /* cancel-drain FAILS → quarantine → QUARANTINED terminal */
+    CHECK(kl_datagram_close_begin(&dg) == 0, "close_begin");
+    for (int i = 0; i < 8 && kl_datagram_close_state(&dg) != KL_DGRAM_CLOSE_CLOSED; i++)
+        kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_close_state(&dg) == KL_DGRAM_CLOSE_CLOSED, "close reached CLOSED (wrapper-safe)");
+    CHECK(kl_datagram_close_result(&dg) == KL_DGRAM_QUARANTINED, "unconfirmed retirement → QUARANTINED");
+    CHECK(g_dg_close_fired == 1, "on_close fired exactly once");
+    CHECK(g_dg_close_result == KL_DGRAM_QUARANTINED, "on_close carried QUARANTINED");
+    CHECK(g_dg_recv_count == 0, "the QUARANTINE terminal delivered NOTHING to on_recv");
+    for (int i = 0; i < 3; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(g_dg_close_fired == 1 && g_dg_recv_count == 0, "no second terminal / delivery after CLOSED");
+    CHECK(kl_datagram_free(&dg) == 0, "free after CLOSED");
+    CHECK(g_talloc.n > base, "QUARANTINE RETAINED storage (on_final did NOT run) — pinned by the abandoned ref");
+    kl_event_ctx_free(&ev);
+    talloc_free_all();   /* reclaim the intentionally-retained life+holder WITHOUT release (LSan-clean) */
+    kl_uefi_event_provider_reset();
+}
+
+/* §11.5a: the NO-DISPATCH-HANDLER router site. Drive a QUARANTINE terminal (retain_life=1) whose token
+ * has dispatch == NULL straight through kl_comp_run (via kl_event_ctx_run): the router's no-handler
+ * FALLBACK must NOT release the borrowed ref (proving completion_core.c honours retain_life, not only
+ * the owner handlers). A retain_life=0 no-handler event still releases — proven by the STALE_RETIRED
+ * case above. Leaks one udp slot + one life BY DESIGN. */
+static void t_dgram_router_retain_life_no_handler(void) {
+    T_CASE("dgram 7B-9: router (no-dispatch-handler) honours retain_life — borrowed quarantine ref NOT released");
+    reset_counters(); talloc_reset(); g_on_final_ran = 0;
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int owner = 0;
+    /* NO dispatch handler → kl_comp_run routes the terminal via its no-handler fallback, not an owner. */
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
+    unsigned char rbuf[64];
+    KlUdpTransport dg; memset(&dg, 0, sizeof(dg));
+    dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
+    g_udp_receive_mode = TOK_HANG;
+    CHECK(mock_post_dgram_recv(ep, &dg) == 0, "post_dgram_recv (→ 2)");
+    g_cancel_signals = 0;                                        /* unconfirmed → quarantine */
+    kl_uefi_udp_close(fd);
+    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop → refcount 1 (op) */
+    kl_event_ctx_run(&ev, 4, 0);   /* el_drain emits retain_life=1 (dispatch==NULL) → router fallback */
+    CHECK(g_on_final_ran == 0, "router honoured retain_life=1 — borrowed ref NOT released (on_final never ran)");
+    kl_event_ctx_free(&ev);
+    talloc_free_all();   /* reclaim the intentionally-retained life (LSan-clean) */
+    kl_uefi_event_provider_reset();
 }
 
 /* poll_recv no-copy mode: a LIVE signalled receive polled with copy_into==NULL recycles the
@@ -2110,11 +2252,14 @@ int main(void) {
     t_dgram_life_stale_release_recv();
     t_dgram_teardown_clean_release();
     t_dgram_cancel_idempotent();      /* 7B-2 cancel_dgram — clean (retires via close+drain) */
+    t_dgram_public_close_detached();  /* 7B-9 public KlDatagram — clean (DETACHED, no slot leak) */
     t_udp_quarantine_unconfirmed();   /* leaks one udp slot by design — runs last of the udp set */
     t_udp_quarantine_tx();            /* leaks one udp slot by design */
     t_udp_sync_send_quarantine();     /* leaks one udp slot by design */
     t_dgram_life_quarantine_recv();   /* leaks one udp slot + retains a life by design */
     t_dgram_life_quarantine_send();   /* leaks one udp slot + retains a life by design */
+    t_dgram_public_close_quarantine();       /* 7B-9 public KlDatagram — QUARANTINED (leaks by design) */
+    t_dgram_router_retain_life_no_handler(); /* 7B-9 router no-handler retain_life (leaks by design) */
 
     t_connect_timeout_close();
     t_transmit_timeout();

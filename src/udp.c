@@ -792,8 +792,11 @@ void kl_udp_comp_dispatch(void *target, const KlCompletionEvent *ev) {
     default: break;   /* core routes only UDP kinds here */
     }
     /* The token reference transferred backend-op → event; release it after dispatch (may trigger the
-     * final release + free of the inbound storage once the owner ref + all op refs are gone). */
-    if (life)
+     * final release + free of the inbound storage once the owner ref + all op refs are gone). 7B-9:
+     * honour retain_life uniformly so the release invariant is single-sourced (not per-owner). KlUdp
+     * never triggers cancel_dgram, so it never actually receives a retain_life=1 (borrowed) terminal —
+     * but reading the flag here keeps every release site (router + both owner handlers) identical. */
+    if (life && !ev->retain_life)
         kl_dgram_life_release(life);
 }
 

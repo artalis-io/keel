@@ -81,10 +81,18 @@ typedef struct KlCompletionEvent {
      * completion outlives the KlUdp wrapper, so rather than dereferencing a KlUdpTransport embedded in a
      * possibly-freed KlUdp, the UDP adapter recovers the owner via this token and touches it only
      * while live. The posting op transferred its reference to this event; the adapter releases it
-     * after dispatch. ALL completion backends set this for UDP kinds (Phase B.6: pollcomp/io_uring/
-     * IOCP/lwIP-raw); a UDP completion with life == NULL yields a NULL owner and is safely dropped —
-     * there is no KlUdp-deref (`target`) fallback. */
+     * after dispatch UNLESS `retain_life` (below). ALL completion backends set this for UDP kinds
+     * (Phase B.6: pollcomp/io_uring/IOCP/lwIP-raw/EFI); a UDP completion with life == NULL yields a NULL
+     * owner and is safely dropped — there is no KlUdp-deref (`target`) fallback. */
     struct KlDgramLife *life;
+    /* 7B-9: a BORROWED life ref — the event routes/retires but its ref is NOT released after dispatch.
+     * Set (==1) only by the EFI drain for a QUARANTINED recv terminal: the backend op keeps the ref
+     * forever (fail-closed — the abandoned firmware op may still write the inbound storage). Default 0
+     * (transferred ref, released after dispatch — the invariant for every other event). This governs ref
+     * ownership at EVERY release site BEFORE routing: kl_comp_run's no-handler fallback AND the owner
+     * dispatch handlers (kl_udp_comp_dispatch / kl_datagram_comp_dispatch) all release iff !retain_life.
+     * MUST default 0 — every backend zero-inits the event; only the EFI QUARANTINED branch sets it. */
+    int            retain_life;
 } KlCompletionEvent;
 
 struct KlEventCtx;

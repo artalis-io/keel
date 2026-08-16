@@ -109,7 +109,11 @@ void kl_datagram_comp_dispatch(void *target, const KlCompletionEvent *ev) {
         break;
     default: break;
     }
-    kl_dgram_life_release(life);   /* the event's transferred ref */
+    /* 7B-9: release the event's ref UNLESS it is a BORROWED quarantine ref (retain_life=1) — then the
+     * backend op keeps it forever (fail-closed; the recv machine still retired above via ok=0). Honoured
+     * uniformly, including the dead-owner (core==NULL) break above. */
+    if (!ev->retain_life)
+        kl_dgram_life_release(life);
 }
 
 /* ── completion-mode adapters ─────────────────────────────────────────────────────────────────── */
