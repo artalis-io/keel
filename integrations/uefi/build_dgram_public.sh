@@ -57,7 +57,7 @@ CFLAGS=(
   -I"$KEEL_ROOT/include" -I"$KEEL_ROOT/vendor/llhttp" -I"$KEEL_ROOT/src"
   -I. -I"$KEEL_ROOT/spikes/uefi"
   -isystem "$SHIM"
-  -Wall -Wextra
+  -Wall -Wextra -Werror
   -c
 )
 

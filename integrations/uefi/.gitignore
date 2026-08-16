@@ -26,3 +26,6 @@ vars_happy.fd
 vars_tc.fd
 BOOTAA64.EFI
 BOOTAA64.lib
+# 7B-9 public-KlDatagram QEMU/OVMF harness artifacts (run_dgram_public.sh)
+esp_pub.img
+vars_pub.fd

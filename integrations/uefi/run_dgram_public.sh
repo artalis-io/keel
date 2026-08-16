@@ -97,7 +97,8 @@ args+=( -drive format=raw,file="$ESP" -netdev user,id=n0 -device e1000,netdev=n0
         -serial stdio -display none -monitor none -no-reboot )
 echo "=== boot (timeout ${BOOT_TIMEOUT}s) ==="
 timeout "${BOOT_TIMEOUT}" qemu-system-x86_64 "${args[@]}" 2>&1 | tee "$SERIAL"
-echo "(qemu exit: ${PIPESTATUS[0]} — 124=safety-timeout, expected only if firmware ignored reset -s)"
+QEMU_RC=${PIPESTATUS[0]}   # capture BEFORE any other command resets PIPESTATUS
+echo "(qemu exit: $QEMU_RC — 0=clean guest power-off via ResetSystem; 124=safety-timeout; other=crash/qemu error)"
 
 echo "=== host UDP echo log ==="; cat /tmp/u9_echo.log || true
 
@@ -113,6 +114,11 @@ has "$SERIAL" '7b9: close_state = 2'             && echo "  [ok] close reached C
 has "$SERIAL" '7b9: close_result = 1'            && echo "  [ok] close_result = DETACHED"          || { echo "  [FAIL] close_result != DETACHED"; ok=0; }
 has "$SERIAL" '7b9: udp_live = 0 udp_quarantined = 0' && echo "  [ok] udp_live=0 quarantined=0 (clean teardown)" || { echo "  [FAIL] dirty UDP teardown"; ok=0; }
 has /tmp/u9_echo.log 'echo recv'                 && echo "  [ok] host echo saw the guest probe"    || { echo "  [FAIL] host echo never saw the probe"; ok=0; }
+# The markers above are all emitted BEFORE the app returns/ResetSystem, so a post-DONE crash,
+# failed reset, or hang would still print them. Require QEMU to have exited CLEANLY (0) — a
+# non-zero exit (124 timeout / crash) means the guest never powered off, which is exactly the
+# timer/return failure class this increment fixed.
+[ "$QEMU_RC" = 0 ]                                && echo "  [ok] qemu exited 0 (guest powered off cleanly; no post-DONE crash/hang)" || { echo "  [FAIL] qemu exit=$QEMU_RC (post-DONE crash / failed reset / timeout)"; ok=0; }
 
 echo "======================================================"
 if [ "$ok" = 1 ]; then
