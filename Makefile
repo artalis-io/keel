@@ -880,31 +880,40 @@ check-sockaddr-neutral:
 	if [ $$bad -ne 0 ]; then echo "check-sockaddr-neutral: FAILED"; exit 1; fi; \
 	echo "check-sockaddr-neutral: OK ($(words $(AXIS_PROTO_TUS)) protocol TUs are KlSockAddr-only)"
 
-# Tier-1 transport-boundary gate (R1). The complement of check-sockaddr-neutral (host socket-ADDRESS
-# types): protocol-layer TUs (AXIS_PROTO_TUS) must not reach BELOW the Tier-1 transports
-# (KlListener/KlStream/KlDatagram) into engine/provider internals — no platform networking/event
-# system header, and no raw completion-seam header (completion.h). The Keel completion TICK
-# (io_engine.h: kl_comp_run / kl_comp_post_connect) is the driver-orchestration seam, allowed ONLY for
-# the two driver TUs that actually run the loop / drive the async connect — server.c and
-# client_async.c (allowlisted, with reason). Include-based, so it is robust against the WSA*/overlapped
-# mentions that appear only in explanatory comments (connection.c / response.c / client_sync.c).
-# Backstop for docs/architecture_invariants.md I10; mirrors axis-audit Goal 4.
-TIER1_IOENGINE_ALLOW = src/server.c src/client_async.c
+# Tier-1 transport-boundary gate (R1). Complements check-sockaddr-neutral (host socket-ADDRESS types).
+# DEFAULT-DENY: EVERY src/*.c + parsers/*.c is treated as an above-transport (protocol/util) TU that
+# must NOT reach below the Tier-1 transports (KlListener/KlStream/KlDatagram) into engine/provider
+# internals — no platform networking/event system header, no raw completion seam (completion.h), no
+# completion tick (io_engine.h) — UNLESS it is in TIER1_INFRA: the layer that legitimately bridges
+# Tier-1 to the engine/provider (event backends, socket providers, platform glue, the completion
+# driver/adapters, the transport state machines, and the run-loop / async-connect drivers). This is
+# the mechanical classification rule: a NEWLY ADDED protocol TU is governed automatically (it is not
+# in TIER1_INFRA), so a new file cannot silently include completion.h/a platform header the way the
+# old AXIS_PROTO_TUS-only manifest allowed (e.g. router.c / cors.c / chunked.c / body_reader*.c /
+# parsers/*.c are now covered). A new INFRASTRUCTURE TU that needs these headers must be added to
+# TIER1_INFRA below, with a reason. Include-based → robust vs the WSA*/overlapped mentions that appear
+# only in explanatory comments (connection.c / response.c / client_sync.c). Backstop for
+# docs/architecture_invariants.md I10; mirrors axis-audit Goal 4.
+#
+# TIER1_INFRA — the engine/provider/bridge layer (wildcards so new backends auto-classify; explicit
+# for the transport machines + run-loop/async drivers). server.c / client_async.c live here because
+# they drive the loop / async connect via the Keel completion tick (io_engine.h). Everything NOT here
+# is governed.
+TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
+              $(wildcard src/platform_*.c) $(wildcard src/server_plat_*.c) $(wildcard src/dns_sys_*.c) \
+              $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
+              src/listener.c src/connect_op.c src/udp.c \
+              src/event_ctx.c src/async.c src/server_core.c src/server.c src/client_async.c
 check-tier1-boundary:
 	@bad=0; \
-	for f in $(AXIS_PROTO_TUS); do \
-	  if grep -nE '#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|liburing|mswsock|winsock2|windows)\.h>|#[[:space:]]*include[[:space:]]*"completion\.h"' "$$f"; then \
-	    echo "TIER-1 VIOLATION: $$f includes a platform-event / completion-seam header"; bad=1; \
+	for f in src/*.c parsers/*.c; do \
+	  case " $(TIER1_INFRA) " in *" $$f "*) continue ;; esac; \
+	  if grep -nE '#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|#[[:space:]]*include[[:space:]]*"(completion|io_engine)\.h"' "$$f"; then \
+	    echo "TIER-1 VIOLATION: $$f (above the transport boundary) includes a platform/backend header"; bad=1; \
 	  fi; \
-	  case " $(TIER1_IOENGINE_ALLOW) " in \
-	    *" $$f "*) : ;; \
-	    *) if grep -nE '#[[:space:]]*include[[:space:]]*"io_engine\.h"' "$$f"; then \
-	         echo "TIER-1 VIOLATION: $$f includes io_engine.h (Keel completion tick — driver-only, not allowlisted)"; bad=1; \
-	       fi ;; \
-	  esac; \
 	done; \
-	if [ $$bad -ne 0 ]; then echo "check-tier1-boundary: FAILED"; exit 1; fi; \
-	echo "check-tier1-boundary: OK ($(words $(AXIS_PROTO_TUS)) protocol TUs stay above Tier-1; io_engine.h allowlist: $(TIER1_IOENGINE_ALLOW))"
+	if [ $$bad -ne 0 ]; then echo "check-tier1-boundary: FAILED — an above-transport TU reaches a backend header; if it is infrastructure, add it to TIER1_INFRA with a reason"; exit 1; fi; \
+	echo "check-tier1-boundary: OK (default-deny: every src/parsers TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs)"
 
 # Documentation-reference gate (R0). Every in-repo path a living-architecture doc links to must
 # resolve to a file that exists — so an architecture claim can never point at code/contract/gate

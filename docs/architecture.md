@@ -54,8 +54,10 @@ network through `KlListener`/`KlStream`/`KlDatagram` and the socket/event abstra
 including a platform networking/event header or the raw completion seam, and never by calling an
 engine directly. A lower seam is used only when a missing semantic is documented and reviewed. This
 is invariant I10, enforced by `make check-tier1-boundary` (the complement of `check-sockaddr-neutral`).
-Two driver TUs are allowlisted to use the Keel completion *tick* (`io_engine.h`): `server.c` (run
-loop) and `client_async.c` (completion connect) — driver orchestration, not backend internals.
+The gate is **default-deny**: every `src`/`parsers` TU is governed except an allowlisted `TIER1_INFRA`
+layer (event backends, socket providers, platform glue, the completion driver/adapters, the transport
+machines, and the run-loop/async-connect drivers `server.c` / `client_async.c`) — so a newly added
+protocol TU is covered automatically, and only infrastructure may include a backend header.
 
 Every combination's runtime status is the compatibility matrix in
 [capability_matrix.md](capability_matrix.md) and the axis audit's matrix in

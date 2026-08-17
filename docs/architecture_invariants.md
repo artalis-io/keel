@@ -191,19 +191,27 @@ seam only when a missing semantic is documented and reviewed.
 - **Why:** a protocol that reached `epoll_ctl`/`WSARecv`/the completion vtable directly would be
   pinned to one engine — the whole point of the three-axis split is that a protocol is written once,
   above the transport, and runs over every backend unchanged.
-- **Anchor:** `make check-tier1-boundary` ([Makefile](../Makefile)) over the protocol set
-  (`AXIS_PROTO_TUS`) — the complement of `make check-sockaddr-neutral` (host socket-*address* types,
-  I6). Include-based, so robust against the `WSA*`/overlapped mentions that appear only in explanatory
-  comments (`connection.c`/`response.c`/`client_sync.c`).
-- **Intentional exceptions (allowlisted, with reason):** `server.c` and `client_async.c` — the server
-  run loop and the async client's connect path — include `io_engine.h`, the Keel completion **tick**
-  (`kl_comp_run` / `kl_comp_post_connect`). That is the driver-*orchestration* seam (a Keel
-  abstraction that runs a loop / posts a connect), not a backend internal. Separately, `udp_server.c`
-  (its datagram handler API surfaces the source `struct sockaddr`) and `dns_resolver.c` (the
-  freestanding DNS-over-TCP fallback) carry deliberate, documented *address* exceptions — which is why
-  they sit outside the address-neutral set (I6), not a Tier-1-boundary breach.
-- **Enforced by:** `make check-tier1-boundary`; the inventory that found zero defects is recorded in
-  [keel_axis_audit.md](keel_axis_audit.md) (Goal 4).
+- **Anchor:** `make check-tier1-boundary` ([Makefile](../Makefile)) — the complement of
+  `make check-sockaddr-neutral` (host socket-*address* types, I6). It is **default-deny**: *every*
+  `src/*.c` + `parsers/*.c` is governed (no platform networking/event header, no `completion.h`, no
+  `io_engine.h`) **except** the allowlisted `TIER1_INFRA` — the engine/provider/bridge layer (event
+  backends, socket providers, platform glue, the completion driver/adapters, the transport state
+  machines, and the run-loop / async-connect drivers). This is the **mechanical classification rule**:
+  a newly added protocol TU is governed automatically, so the whole protocol layer — including the
+  pure-byte TUs `router.c`/`cors.c`/`chunked.c`/`body_reader*.c`/`parsers/*.c` — is covered, not just
+  the network-facing subset. Include-based, so robust against the `WSA*`/overlapped mentions that
+  appear only in explanatory comments (`connection.c`/`response.c`/`client_sync.c`).
+- **`TIER1_INFRA` allowlist (with reason):** the bridge layer legitimately includes these headers.
+  Notably `server.c` and `client_async.c` sit there because they drive the run loop / async connect
+  via the Keel completion **tick** (`io_engine.h`: `kl_comp_run` / `kl_comp_post_connect`) — a Keel
+  orchestration seam, not a backend internal. A new infrastructure TU that needs the headers is added
+  to `TIER1_INFRA` with a reason; nothing else may include them.
+- **Address exceptions (separate, I6):** `udp_server.c` (its datagram handler API surfaces the source
+  `struct sockaddr`) and `dns_resolver.c` (the freestanding DNS-over-TCP fallback) carry deliberate,
+  documented *address* exceptions — which is why they sit outside the address-neutral set — and are
+  governed by the Tier-1 boundary (they include no platform/backend header).
+- **Enforced by:** `make check-tier1-boundary` (found zero defects); the protocol-independence
+  inventory in [keel_axis_audit.md](keel_axis_audit.md) (Goal 4).
 
 ---
 
