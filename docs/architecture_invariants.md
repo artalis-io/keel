@@ -100,10 +100,16 @@ life reference transfers into the op on submit and releases exactly once at its 
 For classes that carry a raw `target` instead of a life token (stream, accept, connect, watcher),
 the equivalent guarantee comes from **single-shot completion** — every backend emits exactly one
 completion per submitted op, with no duplicate and no post-retirement completion — combined with the
-class-specific guard (stream inflight-pin, accept force-reap, connect physical-abort, watcher
-ctx-list scan). **Single-shot is therefore a load-bearing contract:** a new completion backend must
-uphold it or supply its own stale-completion guard (R3a inventory; R3b decision, pinned by a planned
-single-shot regression test).
+class-specific guard (stream inflight-pin, accept force-reap, connect physical-abort). **Single-shot
+is therefore a load-bearing contract:** a new completion backend must uphold it or supply its own
+stale-completion guard (R3a inventory; R3b decision, pinned by a planned single-shot regression
+test).
+
+The **watcher** guard (the `kl_event_dispatch` ctx-list scan) is the exception: it is UAF-safe but
+**not yet sufficient** — it matches by pointer identity, so a freed watcher node whose address is
+reused within the same drained batch causes stale-event *misdelivery* (an ABA hole; single-shot does
+not prevent it — the stale event is the legitimate one completion). This is an **open gap** with a
+remedy under design in R3b-W; until it lands, do not cite the watcher scan as a complete guard.
 
 - **Why:** two related events in one batch, where the first frees the second's target, is the
   canonical completion UAF. A generation/lifetime token makes stale targets a safe no-op instead;
