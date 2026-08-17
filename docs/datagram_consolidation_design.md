@@ -17,8 +17,9 @@ inside the `KlDatagram` facade.
 `configure`/`set_tos`/`mcast_membership`/`rx_batch_new`/`recv_batch`/`send_batch`, and the POSIX
 provider (`socket_dgram_posix.c`) **implements all of them** (Linux offload gated). Source-pin and
 per-packet TOS are already carried end-to-end (`KlDatagramMessage.local` / `.tos`, `KlDgramTxDesc`,
-caps `KL_DGRAM_CAP_SOURCE_PIN` / `KL_DGRAM_CAP_TOS`). So consolidation is mostly **wiring existing
-provider capability up through the facade + adding a queue-policy option**, not new backend work.
+caps `KL_DGRAM_CAP_SOURCE_PIN` / `KL_DGRAM_CAP_TOS`). So the work is mostly **facade/core-level** —
+wiring existing provider capability up, adding a **preallocated byte-queue policy** (§4) and a
+**socket-preparation helper** (§2), and provider→caps derivation — **not new backend/provider work.**
 
 The target layering (consumers never see backend internals — invariant I10):
 
@@ -65,16 +66,33 @@ reads through its public API, so they can be provider-level opt-ins without new 
 ## 2. DNS behavior-parity + failure-path requirements (the clean first migration)
 
 DNS uses only `kl_udp_init` / `kl_udp_recv_start` / `kl_udp_send_to` / `kl_udp_free`, config
-`{ctx, family, alloc}`, **zero extensions**. Parity requirements for a `KlDatagram` port:
+`{ctx, family, alloc}`, **zero extensions**. It requests no caps and can use the default recv model,
+so it does **not** depend on the capability/extended layer (M2). But it *does* depend on two things
+this freeze must specify — a socket-preparation design (P2 below) and a queue policy that matches its
+**unbounded** concurrency (P1 below). Parity requirements:
 
-- **Datagram boundaries** preserved (one `send` = one query; one recv = one response). `KlDatagram`
-  core guarantees this.
-- **Multiple concurrent legs on one socket** — dual-family A+AAAA and per-nameserver rotation issue
-  several sends before replies arrive; replies are matched by txn-id, not order. `KlDatagram`'s
-  fixed-slot send queue must be sized to the **max concurrent in-flight legs** (small, e.g. ≥ 2×
-  families × retry fan-out). **Decision D-DNS-1:** size `send_slots` to the resolver's max concurrent
-  legs; handle `KL_DATAGRAM_WOULD_BLOCK` (today's byte budget effectively never blocks tiny queries;
-  the slot budget must not be tighter than the leg count).
+- **Datagram boundaries** preserved (one `send` = one query; one recv = one response). Core guarantees.
+- **Concurrency is UNBOUNDED, not a small leg count.** `dns_resolver.c` keeps an unbounded singly-linked
+  `r->inflight` list (`src/dns_resolver.c:389`), each request owning up to two active legs (`legs[2]`),
+  and today's `KlUdp` byte budget (256 KiB) bounds only *bytes*, not datagram count. So sizing
+  `send_slots` to "2 × families × retry" is **wrong** — aggregate simultaneous sends are not bounded
+  by leg count. **Decision D-DNS-1 (revised):** to preserve current behavior, DNS uses the **`BYTE`**
+  queue policy (§4) with a byte budget equal to today's `max_send_queue` default — byte-bounded, count-
+  unbounded, exactly as now. *Alternative* (behavior change, only if explicitly accepted): add a
+  resolver-wide in-flight **admission cap** and use `SLOT`; but capping concurrency rejects/queues
+  resolves under load — a new behavior, so the default recommendation is `BYTE`. (This means M3 does
+  depend on M1 for the `BYTE` policy; it still does **not** depend on M2.)
+- **Socket preparation + ownership (P2).** `kl_udp_init` today creates, configures, binds, (associates
+  with the completion loop,) and **owns** the socket. `KlDatagramConfig` requires an **already
+  prepared + bound** fd, and ownership transfers only on a successful `kl_datagram_init`. **Decision
+  D-DNS-2:** M3 introduces a provider-neutral **preparation helper** (e.g. `kl_datagram_open(cfg)` or
+  a documented sequence) that mirrors `kl_udp_init`'s prep exactly: `kl_sock_socket(sockets, family,
+  SOCK_DGRAM)` → set cloexec + nonblocking → `provider->configure(...)` → `kl_sock_bind` (if a bind
+  addr) → return the prepared fd; **on any step failure it closes the fd** (the caller reclaims
+  nothing). `kl_datagram_init(fd)` then takes ownership; its own failure leaves the fd with the caller
+  (per its contract), so the helper's caller closes it. This freezes the create/configure/bind/error-
+  cleanup sequence the migration needs; the completion-loop association that `kl_udp_init` does is
+  already handled inside `kl_datagram_init` (7B-7), so the helper stops at bind.
 - **Source validation** — `dns_on_recv` rejects any datagram whose `peer` is not a configured
   nameserver. `KlDatagram` recv delivers `peer` — parity holds.
 - **No local/TOS/UDP-truncation needs** — DNS uses the payload's TC bit, not the UDP `MSG_TRUNC`
@@ -82,12 +100,12 @@ DNS uses only `kl_udp_init` / `kl_udp_recv_start` / `kl_udp_send_to` / `kl_udp_f
 - **Per-query timeout/retransmit** are DNS-level timers, transport-agnostic — unchanged.
 - **Send failure** → map `KlDatagramSendStatus` (`ERROR`/`WOULD_BLOCK`) to the existing
   send-failure/next-nameserver path.
-- **TCP fallback** is already a **separate** `(fd, KlTls)` path (not the UDP socket) — untouched by
-  this migration.
+- **TCP fallback** is already a **separate** `(fd, KlTls)` path (not the UDP socket) — untouched.
 
-Failure-path tests to add with the DNS migration: WOULD_BLOCK under many concurrent legs; send error →
-NS rotation; spoofed-source drop; truncation → TCP fallback still triggers; dual-family concurrency;
-close/reopen.
+Failure-path tests to add with the DNS migration: `WOULD_BLOCK`/backpressure under many concurrent
+in-flight requests (byte budget, not leg count); each prep-step failure closes the fd (no leak, no
+double-close); send error → NS rotation; spoofed-source drop; truncation → TCP fallback still triggers;
+dual-family concurrency; close/reopen.
 
 ## 3. Optional-capability seam (decisions)
 
@@ -120,22 +138,37 @@ un-granted cap). What is missing is **provider→caps derivation** and coverage 
 
 Today `KlDatagram` is **count-only**: a fixed `send_slots × send_slot_cap` array, atomic admission
 (`WOULD_BLOCK` when no free slot, `TOO_LARGE` when `len > slot_cap`), single-flight pump, **all
-preallocated** at init (no hot-path malloc; overflow-checked sizing). `KlUdp` is **byte-only**
-(`max_send_queue`).
+preallocated** at init (no hot-path malloc). `KlUdp` is **byte-only**: a per-datagram-**malloc'd**
+`q_head`/`q_tail` linked list bounded by `q_bytes ≤ max_send_queue` (`src/udp.c:87,116`) — byte-bounded
+and *unbounded in datagram count*, but it allocates a node per queued datagram (legacy Tier-2; not I8).
 
-- **Decision D-Q-1 (policy enum, preallocated, default unchanged).** Add a bounded-queue *policy* to
-  `KlDatagramConfig`: `SLOT` (count — today's default, unchanged), `BYTE` (total queued bytes),
-  `BOTH` (admit only if a free slot **and** free bytes). Storage stays fully preallocated
-  (`send_slots × send_slot_cap`); the byte cap is an **accounting gate**, not a growing buffer. This
-  preserves I8 (allocation-free hot path).
-- **Decision D-Q-2 (hook points, already located).** `kl_dgram_slots_init` gains a `byte_budget`;
-  `kl_dgram_slots_acquire` gates on `free_slots > 0 && (policy≠BYTE-inclusive || bytes_used + len ≤
-  byte_budget)`; `send_retire_head` decrements `bytes_used`. Overflow rules: reject at admission
-  (`TOO_LARGE`) if a single datagram exceeds `slot_cap` (unchanged) or, under BYTE/BOTH, exceeds
-  `byte_budget`; `WOULD_BLOCK` on transient fullness by either dimension.
-- **Decision D-Q-3 (consumer mapping).** DNS: `SLOT` (default) is fine. `KlUdpServer`: `BYTE` or
-  `BOTH` to preserve `max_send_queue` semantics — its compat wrapper sets the byte budget from the
-  passed-through `max_send_queue`. **No silent reinterpretation** of one budget as the other.
+**The blocker (why a slot array cannot be "byte-only").** A fixed `send_slots × send_slot_cap` array
+that always requires a free slot is **BOTH by construction**: it can refuse a datagram (`WOULD_BLOCK`)
+because slots are exhausted *even while `max_send_queue` still has byte capacity*. Layering a byte gate
+on top does not fix this — it only tightens admission. So the naive "slot array + byte accounting" can
+**not** reproduce `KlUdp`'s pure-byte backpressure, and M4/M5 cannot claim exact compatibility with it.
+
+- **Decision D-Q-1 (three genuinely different, all preallocated).**
+  - **`SLOT`** (today's default, unchanged): fixed `send_slots × send_slot_cap`; count-bounded.
+  - **`BOTH`**: the slot array **plus** a byte gate — bounded by whichever dimension fills first.
+    Honest name; do not call this "byte".
+  - **`BYTE`** (new preallocated design, for exact `KlUdp` parity): a preallocated **payload arena of
+    `byte_budget` bytes** managed as a ring/pool, **plus** a preallocated **descriptor pool** for the
+    queued datagrams. Admission is gated on **free bytes** (`bytes_used + len ≤ byte_budget`), so the
+    *byte* budget is the backpressure dimension. The descriptor pool is sized so it is **not** the
+    binding constraint under a documented minimum-datagram floor — `max_datagrams ≥ byte_budget /
+    floor` (config knob; default derived from `byte_budget` and a small floor). This preserves
+    `KlUdp`'s byte-only admission **and** is allocation-free (a strict improvement over `KlUdp`'s
+    per-node malloc), at the cost of one bounded caveat: if a consumer queues more datagrams than
+    `max_datagrams` (only reachable below the floor), it hits the descriptor bound before the byte
+    bound — documented, and sized away in practice.
+- **Decision D-Q-2 (overflow rules).** `TOO_LARGE` if one datagram exceeds `slot_cap` (SLOT/BOTH) or
+  `byte_budget` (BYTE); `WOULD_BLOCK` on transient fullness of the policy's binding dimension(s). All
+  arenas/pools preallocated + overflow-checked at init (I8). Storage stays fixed for the object's life.
+- **Decision D-Q-3 (consumer mapping).** `KlUdpServer` compat: **`BYTE`** (its byte-only design goal),
+  budget from the passed-through `max_send_queue` — **no silent reinterpretation** of bytes as a slot
+  count. DNS: see §2 — it needs byte-bounded parity too (its concurrency is unbounded), so **`BYTE`**,
+  not `SLOT`.
 
 ## 5. KlUdpServer migration + compatibility-wrapper requirements
 
@@ -151,7 +184,8 @@ const KlSockAddr *src, void*)`.
   layer; none is read in handler/reply logic.
 - **Migration shape:** re-implement `KlUdpServer` on `{KlDatagram core + extended-UDP layer}`,
   preserving the handler/reply/multicast semantics. The `reply` path uses `kl_datagram_send` with
-  `msg.peer = src`, `msg.local = captured local` (source-pin), queue policy `BYTE/BOTH`.
+  `msg.peer = src`, `msg.local = captured local` (source-pin), and the **`BYTE`** queue policy (its
+  `max_send_queue` is byte-only; do not silently convert it to a slot count).
 - **Compatibility wrapper for `KlUdp` itself:** after the consumers migrate, re-implement the public
   `KlUdp` API as a thin wrapper over the same `{core + extended layer}`, preserving its full public
   surface + byte-budget semantics, so out-of-tree `KlUdp` users are unaffected. Deprecation (if ever)
@@ -166,25 +200,34 @@ const KlSockAddr *src, void*)`.
 Each is its own increment with its own design-freeze-then-code review; **none is authorized by this
 document** — it only scopes them.
 
-1. **M1 — queue policy (additive, no consumer change).** Add SLOT/BYTE/BOTH to `KlDatagram` per §4;
-   default stays SLOT; preallocated; overflow-safe. Tests: byte/both admission + retirement, no
-   hot-path alloc (ASan/LSan), no change to existing slot-only consumers.
+0. **M0 — datagram socket-preparation helper (additive, no consumer change).** A provider-neutral
+   create/configure/bind helper (§2 D-DNS-2) that mirrors `kl_udp_init`'s prep with per-step error
+   cleanup + ownership handoff to `kl_datagram_init`. Tests: each step's failure closes the fd (no
+   leak/double-close); success prepares a bound fd. Prereq for M3 and M4.
+1. **M1 — queue policy (additive, no consumer change).** Add SLOT/BOTH/BYTE to `KlDatagram` per §4 —
+   including the **preallocated byte-only `BYTE`** design (payload arena + descriptor pool), not just a
+   byte gate on the slot array; default stays SLOT; overflow-safe. Tests: byte-only admission
+   (count-unbounded up to `byte_budget`), BOTH admission, retirement, no hot-path alloc (ASan/LSan), no
+   change to existing SLOT consumers.
 2. **M2 — capability derivation + extended-UDP layer (additive).** Provider→caps report (§3 D-CAP-1);
    a thin extended layer exposing multicast join/leave (D-CAP-3) and, if justified, batching/GSO/GRO
    opt-in over the existing provider ops. No consumer change yet.
-3. **M3 — migrate DNS → KlDatagram (first production consumer).** Behavior-parity + failure-path
-   tests per §2; `send_slots` sized to max legs; TCP fallback untouched. Removes DNS's `KlUdp`
-   dependency.
-4. **M4 — migrate KlUdpServer → {core + extended layer}.** Preserve the public API/ABI + handler +
-   multicast + source-pinned reply + byte budget per §5. Full parity + every backend gate.
+3. **M3 — migrate DNS → KlDatagram (first production consumer).** Uses the M0 prep helper and the M1
+   **`BYTE`** policy (to preserve unbounded-concurrency, byte-bounded backpressure — §2 D-DNS-1);
+   requests no caps, so **independent of M2**. Behavior-parity + failure-path tests per §2; TCP
+   fallback untouched. Removes DNS's `KlUdp` dependency.
+4. **M4 — migrate KlUdpServer → {core + extended layer}.** Uses M0 (prep) + M1 (`BYTE`) + M2 (multicast
+   + passthrough caps). Preserve the public API/ABI + handler + multicast + source-pinned reply + byte
+   budget per §5. Full parity + every backend gate.
 5. **M5 — reduce KlUdp to a compatibility wrapper.** Re-express the public `KlUdp` API over the same
-   substrate, preserving semantics/ABI; conformance across every backend. Optional deprecation is a
-   later, versioned decision.
+   substrate, preserving semantics/ABI (incl. its byte-only queue via the `BYTE` policy); conformance
+   across every backend. Optional deprecation is a later, versioned decision.
 
-**Order/dependencies:** M1 and M2 are additive and unblock M3/M4; M3 (DNS) is the low-risk proof; M4
-(server) needs M1+M2; M5 needs M3+M4 complete and green on every backend. Whether *full* consolidation
-is worthwhile is re-decided after M3+M4 land — if the extended layer or wrapper proves ugly, stopping
-after DNS (with `KlUdp` retained for the server) remains a valid end state.
+**Order/dependencies:** M0 and M1 are additive prerequisites; M2 is additive. **M3 (DNS) needs M0 + M1
+(not M2)** — it is the low-risk proof. **M4 (server) needs M0 + M1 + M2.** M5 needs M3 + M4 complete and
+green on every backend. Whether *full* consolidation is worthwhile is re-decided after M3 + M4 land — if
+the extended layer or wrapper proves ugly, stopping after DNS (with `KlUdp` retained for the server)
+remains a valid end state.
 
 ## 7. Non-goals of this freeze
 
