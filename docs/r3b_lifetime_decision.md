@@ -58,14 +58,19 @@ is written in R3b.
 ### R3b-T1 — single-shot stream contract through a real seam **(DONE — `tests/test_stream_single_shot.c`)**
 
 - **What (delivered):** a backend-adaptive test (`kl_event_ctx_init`) that drives the single-shot
-  contract **through the real completion seam** — a bare `KlStream` over a socketpair, `kl_comp_post_
-  recv_raw` / `kl_comp_post_send_raw`, driven by `kl_event_ctx_run` → `kl_comp_run`, counting
-  completions via `ctx.comp_conn_dispatch` (no scripted mock). For **READ and WRITE**: post one op,
-  drain the sole terminal completion, then — without rearming/resubmitting — trigger more peer
-  activity (fd stays readable/writable) and drain again, asserting **no second completion**. On a
-  readiness build (no submitted-op model) it skips.
+  contract **through the real completion seam** — a bare `KlStream` over a **full-width
+  `KlSocketHandle`** loopback pair built via the KEEL default socket seam (`kl_sockdef_*`, so the
+  handles are real pointer-width, overlapped-capable SOCKETs on IOCP — not int-truncated test
+  handles), `kl_comp_post_recv_raw` / `kl_comp_post_send_raw`, driven by `kl_event_ctx_run` →
+  `kl_comp_run`, counting completions via `ctx.comp_conn_dispatch` (no scripted mock). For **READ and
+  WRITE**: post one op, drain the sole terminal completion, then — without rearming/resubmitting —
+  trigger more peer activity and drain again, asserting **no second completion**. **All peer transfers
+  and every drain return are asserted** (exact byte counts + nonnegative `kl_event_ctx_run`), so a
+  failed peer write or drain cannot masquerade as "no duplicate". On a readiness build (no
+  submitted-op model) it skips.
 - **Backends:** **pollcomp** = deterministic oracle (a new CI step); **io_uring** = native (enrolled
-  in `test-iouring`); **IOCP** = native (enrolled in `test-win-iocp`, Windows CI).
+  in `test-iouring`); **IOCP** = native (enrolled in `test-win-iocp`, Windows CI) — the full-width
+  handles make that enrollment operate on real overlapped SOCKETs.
 - **Demonstrated teeth:** injecting a real second recv makes the counter reach 2 and the assertion
   **FAIL** — the test genuinely detects a second completion. Verified passing over pollcomp (local)
   and io_uring (container); default readiness build skips.
