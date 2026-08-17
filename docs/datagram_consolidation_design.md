@@ -146,11 +146,15 @@ Parity requirements:
       it (`dns_leg_settle` → mark done → `dns_advance_candidate` if both legs done). **Expiry does NOT
       consume a network attempt** (`tries_left` unchanged — no packet was sent); retrying the same
       congested socket is futile, so it settles rather than retransmits.
-    - **Cancellation:** the existing `dns_free_timers(q)` (`src/dns_resolver.c:401`) already cancels
-      `leg->timer_id` on cancel/finalize/resolver-free, and the leg unlinks from `r->inflight`, so
-      neither the timer nor the writable scan touches a freed leg; clear `send_pending` on teardown.
-    - **Reentrancy:** the single-threaded loop serializes the writable-retry and the timer; a settled
-      leg is no longer `send_pending`/in `r->inflight`, so a later writable scan skips it. The expiry
+    - **Cancellation:** the existing `dns_cancel_timers(r, q)` (`src/dns_resolver.c:402`) already
+      cancels `leg->timer_id` when the request finalizes/cancels; the **request** unlinks from
+      `r->inflight` only at finalization (not per leg — the request stays while its other leg is
+      active). Safety for the writable scan comes from **clearing `send_pending` + marking the leg
+      done** so the scan skips it, and from cancelling `leg->timer_id` on teardown so it cannot fire on
+      a freed leg.
+    - **Reentrancy:** the single-threaded loop serializes the writable-retry and the timer; once a leg
+      is settled its `send_pending` is cleared and it is marked done, so a later writable scan skips it
+      (the request may remain in `r->inflight` for its other leg). The expiry
       callback may finalize/free the request — reentrancy-safe exactly like today's `dns_on_leg_timer`.
 - **TCP fallback** is already a **separate** `(fd, KlTls)` path (not the UDP socket) — untouched.
 
