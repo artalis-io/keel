@@ -18,8 +18,11 @@ w->on_ready(w->fd, event->ready, w->user_data);
 ```
 
 `kl_watcher_add`/`kl_watcher_del` (`src/event_ctx.c`) allocate/free each node with same-size
-`kl_malloc`/`kl_free`. Batches are drained then dispatched one-by-one (`kl_comp_run` in
-`src/completion_core.c`; `kl_event_ctx_run` in `src/async.c`). The ABA:
+`kl_malloc`/`kl_free`. Batches are drained then dispatched one-by-one by **three** internal loops —
+`kl_comp_run` (`src/completion_core.c`), `kl_event_ctx_run` (`src/async.c`), **and the readiness
+server loop `src/server.c:381-416`** — and `kl_event_dispatch` is itself a **public inline** in the
+installed `include/keel/event_ctx.h`, so external code can drain its own batch and call it directly.
+The ABA:
 
 ```
 batch = [ evA(→A), evB(→B), ... ]        # both already drained
@@ -47,95 +50,164 @@ B's stale event is **misdelivered to C**. Properties:
 3. **Hot-path cost (I8):** no per-event allocation; ideally no growth of the core `KlEvent` struct.
 4. **ABI:** avoid changing the installed public event ABI if possible (`KlEvent`,
    the tagged-pointer encoding).
-5. **Both engines:** the fix must hold for readiness (`kl_event_ctx_run`) and completion
-   (`kl_comp_run`) dispatch, since both use `kl_event_dispatch`.
-6. **Reentrancy:** correct when a watcher callback adds/deletes watchers, including self-delete.
+5. **All three internal loops:** the fix must hold for readiness (`kl_event_ctx_run`), completion
+   (`kl_comp_run`), **and the readiness server loop (`src/server.c`)** — all three drain a batch and
+   call `kl_event_dispatch`, and server-owned watchers ride the third one.
+6. **Public direct-dispatch path:** `kl_event_dispatch` is a public inline; the freeze must state what
+   happens when external code drains a batch and calls it directly, and either make that safe or
+   explicitly bound it.
+7. **Reentrancy:** correct when a watcher callback adds/deletes watchers, including self-delete, and
+   when dispatch nests (a callback runs its own tick).
 
-## Candidate A — deferred node reclamation to batch end (recommended)
+## Candidate A — deferred node reclamation to batch end
 
 **Idea:** during a dispatch batch, `kl_watcher_del` still *unlinks* the node from `ctx->watchers`
 (so the scan already treats it as not-live) but **defers the `kl_free`** to the end of the batch.
 While the batch is in flight the node's memory is not returned to the allocator, so a mid-batch
 `kl_watcher_add` **cannot** receive that address — ABA is impossible by construction.
 
-**Mechanism (minimal):**
-- Add to `KlEventCtx`: a `dispatch_depth` counter and a `retired` singly-linked list of unlinked
-  nodes awaiting reclamation.
+**Central begin/end helpers (no per-loop duplication).** Add one pair, used by every batch dispatcher:
+
+```
+void kl_event_ctx_dispatch_begin(KlEventCtx *ctx);   /* ++dispatch_depth */
+void kl_event_ctx_dispatch_end(KlEventCtx *ctx);     /* if (--dispatch_depth == 0) drain retired */
+```
+
 - `kl_watcher_del`: unlink from `ctx->watchers` and call `kl_event_del` (backend unregister) **now**
-  (so no further events are armed); if `dispatch_depth > 0`, push the node onto `retired` instead of
-  freeing; else free immediately (unchanged behavior outside a batch).
-- The two dispatch loops bump `dispatch_depth` around the per-event dispatch loop and, on exit to
-  depth 0, drain `retired` with `kl_free`.
-- The scan is **unchanged** — it already returns "not live" for an unlinked node; the fix only
-  prevents that unlinked node's address from being reused mid-batch.
+  (so no further events are armed); if `dispatch_depth > 0`, thread the node onto the `retired` list
+  **through its existing `next` field** and defer; else `kl_free` immediately (today's behavior).
+- The scan is **unchanged** — it already returns "not live" for an unlinked node; the fix only stops
+  that address being reused before the batch ends.
+
+**All three internal loops route through the helpers (requirement 5):** `kl_comp_run`,
+`kl_event_ctx_run`, and the `src/server.c` readiness loop each call `dispatch_begin` before their
+per-event loop and `dispatch_end` after — so server-owned watchers on the third loop are covered.
+The helpers are the single source of the nesting/cleanup logic; the three call sites hold no bespoke
+depth or reclaim code.
+
+**Public direct-dispatch decision (requirement 6) — option (a): a documented batch contract.**
+`kl_event_dispatch` stays public and unchanged. The begin/end helpers become the **public batch
+contract**: a caller that drains ≥2 events and calls `kl_event_dispatch` per event must bracket the
+loop with `dispatch_begin`/`dispatch_end` to be ABA-safe. A single `kl_event_dispatch` outside a
+batch is inherently safe (a del in its callback runs at depth 0 → frees immediately, and there is no
+sibling event to go stale). **Compatibility:** existing external multi-event direct-dispatch callers
+that do not bracket are **no more exposed than they are today** (no regression) and opt into the fix
+with two calls; all *Keel-internal* loops are fixed unconditionally. This does **not** transparently
+fix un-bracketed external direct batch dispatch — that gap is the price of A, and is the axis on
+which Candidate B differs (B needs no caller contract). Option (b) — narrowing/deprecating direct
+multi-event dispatch — is the same contract stated as a restriction; option (c) is "choose B".
+
+**`kl_event_ctx_free` handling:** at teardown, free the live `watchers` list as today **and** drain
+any nodes still on `retired` (defensive — `retired` is normally empty at depth 0; freeing at teardown
+covers a ctx destroyed without a final `dispatch_end`, and asserts `dispatch_depth == 0`).
 
 **State / ownership:**
 
 | Node state | In `ctx->watchers`? | Memory owner | Scan verdict |
 |---|---|---|---|
 | live | yes | ctx | dispatched |
-| deleted mid-batch | no (unlinked) | ctx `retired` list (freed at depth→0) | not live ⇒ stale event consumed |
+| deleted mid-batch | no (unlinked) | ctx `retired` list (freed at depth→0, or at ctx_free) | not live ⇒ stale event consumed |
 | deleted outside batch | no | freed immediately | not live |
 
-**Failure paths:** allocation is not on the del path (only a list push); `kl_event_del` failure is
-handled as today; nested/reentrant dispatch reclaims only at the outermost batch boundary
-(depth→0), so a callback that runs its own tick does not free a parent batch's nodes early.
+**Failure paths:** allocation is not on the del path (only a list re-link); `kl_event_del` failure is
+handled as today; nesting reclaims only at the outermost boundary (depth→0), so a callback that runs
+its own tick does not free a parent batch's nodes early.
 
-**Compatibility:** internal only — no `KlEvent`/tagged-pointer/public-ABI change; `KlEventCtx` gains
-two private fields (it is not a stack-ABI-frozen public type in the same sense as the transports).
-**Backends:** engine-agnostic — the change lives in `event_ctx.c` + the two dispatch loops; no
-backend (`event_epoll/kqueue/poll/iouring/iocp/pollcomp`) is touched.
+**ABI / layout classification (requirement, honest):** `KlEventCtx` has a **public, installed,
+caller-allocated layout** (`include/keel/event_ctx.h`; embedded in `KlServer`, stack-allocated by
+clients). Adding `int dispatch_depth` and `KlWatcher *retired` is a **layout change, NOT a no-op** —
+it is an **additive, appended, pre-release layout change that requires consumers to recompile.** This
+is consistent with the branch's existing stance (the header already documents intentional pre-release
+ABI breaks); it must be classified as such, not sold as "no ABI impact." No change to `KlEvent`, the
+tagged-pointer encoding, or any backend.
 
-**Cost:** one extra pointer per *deleted-during-batch* node for the duration of a batch; no per-event
-or per-live-watcher cost; no hot-path field on `KlEvent`. Reclamation is O(deleted-this-batch).
+**Backends:** none touched — the change lives in `event_ctx.c`, the begin/end helpers, and the three
+loop call sites. No `event_epoll/kqueue/poll/iouring/iocp/pollcomp` change.
+
+**Cost (corrected):** exactly **two persistent fields per `KlEventCtx`** (`dispatch_depth`,
+`retired`). A retired node reuses its **existing `next` link** to thread the `retired` list, so there
+is **no extra pointer per retired node** and no allocation on the del path. No per-event or
+per-live-watcher cost; no `KlEvent` growth. Reclamation is O(deleted-this-batch).
 
 ## Candidate B — stable watcher identity / generation
 
-**Idea:** give each watcher a generation (a ctx counter bumped on node reuse, or a generational
-slotmap index). The event carries `(identity, generation)`; the scan matches both, so a reused
-address with a new generation fails the match and the stale event is dropped.
+**Idea:** give each watcher a generation. The event carries a `(slot, generation)` handle instead of a
+raw node address; `kl_event_dispatch` decodes it, looks up the watcher table, and matches the
+generation. A reused slot bumps its generation, so a stale handle's generation mismatches and the
+stale event is dropped — **per-event, with no batch boundary**.
+
+**Its decisive advantage (requirement 6):** validation is entirely self-contained in
+`kl_event_dispatch`, so **any** caller — including external code draining its own batch and calling
+the public inline directly, with no begin/end brackets — is **transparently ABA-safe**. This is the
+one option that satisfies "existing direct batch dispatch must remain transparently safe" without a
+new caller contract.
 
 **Why it is heavier here:**
-- The event's reference to a watcher is a **tagged pointer** (LSB=1) with no room for a generation.
-  Carrying one requires either (i) adding a generation field to the event — but readiness dispatch
-  flows through `KlEvent.udata`, so this grows the **core `KlEvent` struct** (ABI/ size, req. 4), or
-  (ii) replacing the heap-node registry with a **generational slotmap** and encoding a
-  `(slot, gen)` handle into the tagged word — a larger rework of `kl_watcher_*` and every site that
-  reads `event->udata`/`target` as a `KlWatcher*`.
-- More surface, more invariants (generation overflow policy, slot recycling), for the same
-  correctness result A achieves structurally.
+- The event's reference to a watcher is a **tagged pointer** (LSB=1). To carry a generation without
+  growing the core `KlEvent` struct (req. 4), the cleanest form replaces the heap-node registry with
+  a **generational slotmap** and packs `(slot, gen)` into the same `uintptr_t` word (LSB tag
+  preserved). This reworks `kl_watcher_add/mod/del`, the scan, and **every site + backend arm-path
+  that stores/reads the tagged watcher reference** (`event->udata`/`target`), because the stored
+  token is now a handle, not a pointer.
+- New invariants: generation overflow policy and slot recycling. On **32-bit** the `uintptr_t` bit
+  budget is tight (e.g. ~15-bit slot / ~16-bit gen / 1 tag) and must be justified; 64-bit is ample.
+- Also a `KlEventCtx` layout change (the `watchers` list head becomes a table pointer + counts), so B
+  is **not** ABI-free either — it is a *different* layout change plus an encoding change, versus A's
+  two appended fields.
 
-**When B would be preferable:** if a future need arises for a *stable watcher identity that survives
-across batches* (e.g. cross-thread references, or handing a watcher id to external code), the
-generational handle becomes worth its cost. No current code needs that.
+**When B is the right call:** if the project requires the public direct-dispatch path to be
+transparently safe with no caller contract, or if a future need arises for a stable watcher identity
+that survives across batches (cross-thread references, handing a watcher id to external code). Absent
+those, B buys the same intra-Keel correctness A gives, at more surface and a bit-budget constraint.
 
-## Comparison
+## Comparison (decision reopened — the axis is the public direct-dispatch path)
 
 | Criterion | A — deferred reclamation | B — identity/generation |
 |---|---|---|
-| Defeats ABA | yes (address not reusable mid-batch) | yes (gen mismatch) |
+| Defeats ABA (intra-Keel) | yes (address not reusable mid-batch) | yes (gen mismatch) |
 | UAF-safe | yes | yes |
-| Hot-path / `KlEvent` growth | none | grows `KlEvent` **or** reworks registry + encoding |
-| Public ABI impact | none | likely (`KlEvent`) or large internal rework |
-| TUs touched | `event_ctx.c` + 2 dispatch loops | registry + all `event->udata`→watcher readers + encoding |
+| **Public direct-dispatch (un-bracketed external caller)** | **not fixed** — needs the begin/end batch contract; unchanged callers no worse than today | **transparently fixed** — per-event, no caller contract |
+| Caller contract required | yes (bracket multi-event loops) | no |
+| `KlEvent` growth / tagged-encoding change | none | none if slotmap-packed; but changes token meaning at every reader + backend arm-path |
+| `KlEventCtx` layout change | yes — 2 appended fields (recompile) | yes — list head → table (recompile) |
+| Public ABI classification | additive pre-release layout change | layout **and** encoding change |
+| TUs touched | `event_ctx.c` + begin/end helpers + **3** loop sites | registry + scan + every `event->udata`/`target` reader + **backend arm-paths** |
+| 32-bit constraint | none | tight `uintptr_t` bit budget (slot/gen) |
 | Complexity / new invariants | low (defer + reclaim at depth 0) | higher (gen overflow, slot recycling) |
-| Backends touched | none | none, but touches shared event encoding |
 
-## Recommendation
+## Recommendation (conditional — for review)
 
-**Candidate A (deferred reclamation to batch end).** It is the smallest change that makes the ABA
-*structurally impossible*, needs no `KlEvent`/ABI change, no hot-path field, and touches only
-`event_ctx.c` and the two dispatch loops. Candidate B is recorded as the heavier alternative to
-revisit only if a future requirement needs cross-batch stable watcher identity.
+The choice turns on **one policy question:** *must the public `kl_event_dispatch` be transparently
+ABA-safe for an external caller that drains its own multi-event batch without adopting a new batch
+contract?*
+
+- **If yes → Candidate B.** Only B makes the un-bracketed public path safe with no caller contract;
+  its extra surface (slotmap + encoding + backend arm-paths + 32-bit bit budget) is the price.
+- **If no (a batch contract for custom multi-event loops is acceptable) → Candidate A.** A fully fixes
+  all three *internal* loops via the central begin/end helpers, leaves un-bracketed external callers
+  exactly as safe as today (no regression), and is far smaller — `event_ctx.c` + helpers + three call
+  sites, no backend churn, no encoding change, two appended `KlEventCtx` fields.
+
+**Lean, not a decision:** given the branch is pre-release, the internal loops are the dominant
+exposure, and custom-loop external callers are a niche that can opt into the bracket API, **A is the
+smaller, lower-risk fix** — provided the project accepts the documented batch contract for external
+multi-event direct dispatch. If that contract is unacceptable, choose **B**. This freeze does not
+force the pick; it resolves the boundaries so review can decide A vs B.
 
 ## Implementation & validation plan (separate, reviewed increments — not done here)
 
-1. **R3b-W-impl** (production): implement Candidate A in `src/event_ctx.c` + `src/completion_core.c`
-   (`kl_comp_run`) + `src/async.c` (`kl_event_ctx_run`). No public-header change expected.
+1. **R3b-W-impl** (production): implement the chosen candidate. For A: add
+   `kl_event_ctx_dispatch_begin/end` + the two `KlEventCtx` fields in `src/event_ctx.c` /
+   `include/keel/event_ctx.h`; drain `retired` in `kl_event_ctx_free`; route `kl_comp_run`
+   (`src/completion_core.c`), `kl_event_ctx_run` (`src/async.c`), and the `src/server.c` readiness
+   loop through the helpers; document the public batch contract on `kl_event_dispatch`. This is an
+   **additive pre-release `KlEventCtx` layout change → consumers recompile.**
 2. **R3b-T2 part 2** (test): the ABA regression — delete B, force same-address C via a fixture
    allocator, dispatch B's captured event, assert no misdelivery; ASan-clean; run over readiness and
-   (enrolled) io_uring. It should **fail before** R3b-W-impl and **pass after**.
-3. On landing, flip invariant I5's watcher caveat from "open gap" to "resolved (deferred
-   reclamation)", and update R3a 1a / R3b accordingly.
+   (enrolled) io_uring, **and** exercise the `src/server.c` server-loop path. It must **fail before**
+   R3b-W-impl and **pass after**.
+3. On landing, flip invariant I5's watcher caveat from "open gap" to "resolved", and update R3a 1a /
+   R3b accordingly.
 
-No production or test change is made in this freeze; it pauses here for review of the chosen remedy.
+No production or test change is made in this freeze; it pauses here for review of A vs B and the
+public-dispatch policy question.
