@@ -19,7 +19,7 @@ w->on_ready(w->fd, event->ready, w->user_data);
 
 `kl_watcher_add`/`kl_watcher_del` (`src/event_ctx.c`) allocate/free each node with same-size
 `kl_malloc`/`kl_free`. Batches are drained then dispatched one-by-one by **three** internal loops —
-`kl_comp_run` (`src/completion_core.c`), `kl_event_ctx_run` (`src/async.c`), **and the readiness
+`kl_comp_run` (`src/completion_core.c`), `kl_event_ctx_run` (`src/event_ctx.c`), **and the readiness
 server loop `src/server.c:381-416`** — and `kl_event_dispatch` is itself a **public inline** in the
 installed `include/keel/event_ctx.h`, so external code can drain its own batch and call it directly.
 The ABA:
@@ -199,7 +199,7 @@ force the pick; it resolves the boundaries so review can decide A vs B.
 1. **R3b-W-impl** (production): implement the chosen candidate. For A: add
    `kl_event_ctx_dispatch_begin/end` + the two `KlEventCtx` fields in `src/event_ctx.c` /
    `include/keel/event_ctx.h`; drain `retired` in `kl_event_ctx_free`; route `kl_comp_run`
-   (`src/completion_core.c`), `kl_event_ctx_run` (`src/async.c`), and the `src/server.c` readiness
+   (`src/completion_core.c`), `kl_event_ctx_run` (`src/event_ctx.c`), and the `src/server.c` readiness
    loop through the helpers; document the public batch contract on `kl_event_dispatch`. This is an
    **additive pre-release `KlEventCtx` layout change → consumers recompile.**
 2. **R3b-T2 part 2** (test): the ABA regression — delete B, force same-address C via a fixture

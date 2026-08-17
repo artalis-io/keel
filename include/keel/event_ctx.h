@@ -65,6 +65,14 @@ typedef struct KlEventCtx {
      * the UDP stack. The event arg is a const KlCompletionEvent* (opaque here, exactly as
      * KlEventOps.completion). Additive — appended after `sockets`, do not reorder. */
     void (*comp_conn_dispatch)(struct KlEventCtx *ctx, const void *ev);  /* ACCEPT/READ/WRITE → server */
+    /* R3b-W (watcher pointer-reuse ABA remedy). `dispatch_depth` counts nested
+     * kl_event_ctx_dispatch_begin/end brackets; `retired` chains watcher nodes deleted DURING a
+     * bracketed batch (threaded through KlWatcher.next), so a freed node's address cannot be reused
+     * by a mid-batch kl_watcher_add before the batch's remaining events are dispatched. Reclaimed
+     * when the outermost bracket closes (depth → 0). Appended fields: an ADDITIVE pre-release layout
+     * change — consumers of KlEventCtx must recompile. */
+    int         dispatch_depth;
+    KlWatcher  *retired;
     /* 7B-2a removed the datagram completion hook `comp_udp_dispatch` that sat here: datagram completions
      * (UDP_RECV/UDP_SEND) are now routed by each token's own KlDgramDispatchFn (life->dispatch), so a
      * KlUdp coexists with a public KlDatagram on one ctx. This is an INTENTIONAL pre-release ABI break —
@@ -145,6 +153,16 @@ int  kl_watcher_rearm(KlEventCtx *ctx, KlSocketHandle fd);
  * If the tag is clear (connection, listen socket, etc.) returns 0 —
  * the caller handles it.
  *
+ * BATCH CONTRACT (watcher ABA safety, R3b-W). A single kl_event_dispatch call — one event, not part
+ * of a drained batch — is always safe: a watcher deleted in its callback is freed immediately (no
+ * sibling event can reference it). A caller that drains MULTIPLE events (kl_event_wait /
+ * kl_comp_drain) and dispatches them one-by-one MUST bracket the dispatch loop with
+ * kl_event_ctx_dispatch_begin/end. The bracket defers freeing of watchers deleted mid-batch until
+ * the batch ends, so a deleted node's address cannot be reused by a mid-batch kl_watcher_add and
+ * then matched by a later stale event's pointer scan (which would misdeliver it to the new watcher).
+ * Keel's own loops (kl_event_ctx_run, kl_comp_run, the server readiness loop) do this internally;
+ * external custom batch dispatchers are responsible for the brackets.
+ *
  * @return 1 if a watcher was dispatched, 0 otherwise.
  */
 static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
@@ -175,6 +193,18 @@ static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
         kl_watcher_rearm(ctx, wfd);
     return 1;
 }
+
+/**
+ * @brief Open/close a batch-dispatch bracket (watcher ABA remedy, R3b-W).
+ *
+ * Bracket a loop that drains and dispatches multiple events. `begin` increments the nesting depth;
+ * `end` decrements it and, when the OUTERMOST bracket closes (depth returns to 0), reclaims every
+ * watcher node deleted during the batch. Nesting (a callback that runs its own tick) is supported —
+ * reclamation happens only at depth 0. `end` guards against underflow (an unmatched end is a no-op).
+ * A single unbatched kl_event_dispatch needs no bracket. See the kl_event_dispatch batch contract.
+ */
+void kl_event_ctx_dispatch_begin(KlEventCtx *ctx);
+void kl_event_ctx_dispatch_end(KlEventCtx *ctx);
 
 /**
  * @brief Run one tick of the event loop, dispatching all watcher events.

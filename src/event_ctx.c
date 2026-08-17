@@ -36,6 +36,8 @@ int kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
     ctx->alloc = alloc;
     ctx->watchers = NULL;
     ctx->dispatch_dirty = 0;
+    ctx->dispatch_depth = 0;          /* R3b-W: batch-dispatch reclamation */
+    ctx->retired = NULL;
     ctx->last_error = KL_ERR_NONE;
     ctx->timers = NULL;
     ctx->timer_count = 0;
@@ -68,6 +70,15 @@ void kl_event_ctx_free(KlEventCtx *ctx) {
     ctx->timers = NULL;
     ctx->timer_count = 0;
     ctx->timer_cap = 0;
+    /* R3b-W: teardown must be balanced — no batch dispatch in flight (dispatch_depth == 0).
+     * Defensively reset the depth and reclaim any deferred nodes (normally empty at depth 0) so a
+     * ctx destroyed without a final dispatch_end still frees every retired watcher. */
+    ctx->dispatch_depth = 0;
+    while (ctx->retired) {
+        KlWatcher *w = ctx->retired;
+        ctx->retired = w->next;
+        kl_free(ctx->alloc, w, sizeof(KlWatcher));
+    }
     while (ctx->watchers) {
         KlWatcher *w = ctx->watchers;
         ctx->watchers = w->next;
@@ -214,12 +225,44 @@ void kl_watcher_del(KlEventCtx *ctx, KlSocketHandle fd) {
             KlWatcher *w = *pp;
             *pp = w->next;
             kl_event_del(&ctx->loop, fd);
-            kl_free(a, w, sizeof(KlWatcher));
+            if (ctx->dispatch_depth > 0) {
+                /* R3b-W: deleted DURING a batch — defer the free so this node's address cannot be
+                 * reused by a mid-batch kl_watcher_add before the batch's remaining events are
+                 * dispatched (that reuse would let a stale event's pointer scan match the new
+                 * watcher). Thread onto `retired` via the node's own next link; reclaimed when the
+                 * outermost dispatch bracket closes. */
+                w->next = ctx->retired;
+                ctx->retired = w;
+            } else {
+                kl_free(a, w, sizeof(KlWatcher));
+            }
             ctx->dispatch_dirty = 1;  /* suppress auto-rearm */
             return;
         }
         pp = &(*pp)->next;
     }
+}
+
+/* ── batch-dispatch reclamation (R3b-W watcher pointer-reuse ABA remedy) ─── */
+
+/* Free every watcher node deferred during a batch (chained through KlWatcher.next). */
+static void kl_ctx_reclaim_retired(KlEventCtx *ctx) {
+    while (ctx->retired) {
+        KlWatcher *w = ctx->retired;
+        ctx->retired = w->next;
+        kl_free(ctx->alloc, w, sizeof(KlWatcher));
+    }
+}
+
+void kl_event_ctx_dispatch_begin(KlEventCtx *ctx) {
+    if (!ctx) return;
+    ctx->dispatch_depth++;
+}
+
+void kl_event_ctx_dispatch_end(KlEventCtx *ctx) {
+    if (!ctx || ctx->dispatch_depth == 0) return;   /* underflow guard: an unmatched end is a no-op */
+    if (--ctx->dispatch_depth == 0)                 /* reclaim only when the OUTERMOST bracket closes */
+        kl_ctx_reclaim_retired(ctx);
 }
 
 /* ── kl_event_ctx_run ──────────────────────────────────────────────── */
@@ -250,8 +293,10 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
 
     int n = kl_event_wait(&ctx->loop, events, max_events, timeout_ms);
     if (n > 0) {
+        kl_event_ctx_dispatch_begin(ctx);   /* R3b-W: batch bracket (defer mid-batch watcher frees) */
         for (int i = 0; i < n; i++)
             kl_event_dispatch(ctx, &events[i]);
+        kl_event_ctx_dispatch_end(ctx);
     }
 
     if (events != stack_buf)

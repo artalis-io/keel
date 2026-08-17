@@ -33,6 +33,8 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
     int n = kl_comp_drain(ctx, ev, max, timeout_ms);
     if (n < 0) return -1;
 
+    kl_event_ctx_dispatch_begin(ctx);   /* R3b-W: batch bracket — defer mid-batch watcher frees so a
+                                         * stale KL_COMP_WATCHER/CONNECT can't be misdelivered via reuse */
     for (int i = 0; i < n; i++) {
         switch (ev[i].kind) {
         /* TCP conn completions → the server (via the ctx hook, set when a server runs
@@ -77,6 +79,7 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
         }
         }
     }
+    kl_event_ctx_dispatch_end(ctx);     /* R3b-W: outermost close reclaims deferred watcher nodes */
 
     /* Fire expired timers — the completion tick's counterpart to the readiness
      * kl_event_ctx_run's kl_timer_fire(). Without this, timer-driven async work stalls
