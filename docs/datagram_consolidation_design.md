@@ -289,11 +289,15 @@ document** — it only scopes them.
    **Status: implemented** — `kl_datagram_open()` in `src/datagram_open.c` (internal
    `src/datagram_open.h`); TIER1_INFRA-allowlisted infra (it creates/binds a platform socket, like
    `listener.c`/`connect_op.c`/`udp.c`), so the Tier-1 facade `datagram.c` stays platform-neutral. No
-   public/ABI surface added; no consumer migrated. Tests in `tests/test_datagram_open.c` (11 cases): the
-   per-step failure matrix over a fully-virtual mock provider (bad-arg / no-datagram-provider / bad-bind
-   / `socket()` / `set_nonblocking` / `bind`, each asserting exactly-one-or-zero close + the right
-   `KlError`) + ownership handoff (success returns the unclosed fd; the caller closes) + a real
-   default-provider bound/unbound loopback socket.
+   public/ABI surface added; no consumer migrated. It fills a `KlDatagramPrep {fd, rx_caps, err}`: the
+   prepared fd **plus** the `KL_DGRAM_RX_*` capture mask `configure()` actually enabled — that mask
+   cannot be reconstructed after the fact, and M2 capability derivation + M4 source-pinned replies
+   (pktinfo) need it. It rejects a provider with **no OR a partial** datagram vtable (missing the
+   required `configure` op) **before** creating an fd. Tests in `tests/test_datagram_open.c` (13 cases):
+   the per-step failure matrix over a fully-virtual mock provider (bad-arg / no-datagram-provider /
+   partial-vtable / bad-bind / `socket()` / `set_nonblocking` / `bind`, each asserting exactly-one-or-zero
+   close + the right `KlError`) + ownership handoff (success returns the unclosed fd; the caller closes) +
+   capture-mask passthrough + a real default-provider bound/unbound loopback socket.
 1. **M1 — `BOTH` queue policy (additive, no consumer change).** Add the `BOTH` policy per §4 — a byte
    **admission gate** on the existing fixed slot array (no ring, no byte arena; the impossible byte-only
    policy is not built). Default stays `SLOT`; preallocated; overflow-safe. Tests: `BOTH` admission by
