@@ -38,8 +38,12 @@ three and touch no platform socket API or event engine directly.
     `KlUdp` is the compatibility + extended-UDP facility alongside it (batching, GSO/GRO, multicast).
 - **Engine axis** — readiness ([event.h](../include/keel/event.h): register interest → wait →
   re-arm) and completion ([completion.h](../src/completion.h): submit owned op → track → retire) are
-  *peer models*, negotiated by capability ([event_caps.h](../src/event_caps.h)), never emulated in
-  terms of each other. Details: [event_provider_design.md](event_provider_design.md).
+  *peer models*, negotiated by capability ([event_caps.h](../src/event_caps.h)). The **production**
+  backends preserve their native model (epoll/kqueue/WSAPoll/poll are readiness; io_uring/IOCP are
+  completion) — neither is emulated in terms of the other. The sole deliberate exception is
+  **pollcomp**, a portable *test double* that implements the completion contract over `poll()` so the
+  completion driver can run under ASan on any POSIX host; it is a CI/testing backend, not a
+  production one. Details: [event_provider_design.md](event_provider_design.md).
 - **Provider axis** — the network stack behind [socket.h](../src/socket.h)
   (`KlSocketProvider`): POSIX [socket_posix.c](../src/socket_posix.c), Winsock, and the
   `integrations/` adapters (lwIP, EFI). Providers are transport-mechanical — no protocol knowledge.

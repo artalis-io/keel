@@ -47,10 +47,16 @@ implementation detail of the driver, never a branch in protocol code.
 
 The two engine models keep their native semantics. Readiness = register interest → wait → perform
 op → handle `EAGAIN` → re-arm. Completion = construct owned op → submit → track lifetime → receive
-completion → retire/cancel/resubmit. Neither is emulated in terms of the other.
+completion → retire/cancel/resubmit. No **production** backend is emulated in terms of the other
+(epoll/kqueue/WSAPoll/poll stay readiness; io_uring/IOCP stay completion). The one deliberate
+exception is **pollcomp** — a portable *test double* that implements the completion contract over
+`poll()` so the completion driver can be exercised under ASan on any POSIX host. It is explicitly a
+CI/testing backend; the invariant this states is that production backends preserve their native
+model, not that no adapter may ever bridge them for testing.
 
-- **Why:** honest models are correct and fast; a lowest-common-denominator emulation (epoll-as-completion,
-  IOCP-as-readiness) is both slower and a source of lifetime bugs.
+- **Why:** honest production models are correct and fast; a lowest-common-denominator emulation
+  (shipping epoll-as-completion, or IOCP-as-readiness, in production) is both slower and a source of
+  lifetime bugs. pollcomp is confined to CI precisely so production never pays that cost.
 - **Anchor:** readiness interest is [event.h](../include/keel/event.h) `kl_event_add`/`_mod`/`_del`;
   completion submission is [completion.h](../src/completion.h) `kl_comp_post_*` with by-value op
   descriptors. Selection is [event_caps.h](../src/event_caps.h) (`KL_EVENT_CAP_COMPLETION`).
@@ -170,4 +176,3 @@ of releasing and risking a UAF.
 
 Every markdown link above to an in-repo path is checked by `make check-doc-refs` — a claim that
 points at a file which no longer exists fails the gate.
-

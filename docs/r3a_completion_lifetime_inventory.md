@@ -32,7 +32,7 @@ live defect.
 | Target class | Event owner repr. | Ref / lease mechanism | Same-batch destruction | Cancel path | Retirement proof | Quarantine |
 |---|---|---|---|---|---|---|
 | **Datagram op** (DGRAM_RECV/SEND) | stable `life` token (`KlDgramLife*`), never a transport deref | generation token + refcount; `retain_life` borrow flag | token → NULL owner if dead ⇒ dropped | `kl_comp_cancel_dgram` (kind-specific) | `retire_dgram` classifier: PENDING / RETIRED / QUARANTINED | **yes** — `retain_life=1` retains ref fail-closed (EFI) |
-| **Stream read/write** (READ/WRITE) | raw `KlStream*`; HTTP recovers `KlConn` via `kl_conn_of_stream` containerof | **none on the stream** — raw pointer + inflight-pin | pinned: `stream_fully_retired` blocks detach while either op inflight (`src/stream_close.c:36-38`) | `kl_stream_cancel` / timeout `kl_comp_cancel`; `in_close_cancel` depth defers finalize | `recv_inflight`+`send_inflight` counters; `on_close` fires only when both 0 (`src/stream_close.c:23-50`) | implicit: unretired op pins the conn (leak, not UAF); timeout sweep tears down |
+| **Stream read/write** (READ/WRITE) | raw `KlStream*`; HTTP recovers `KlConn` via `kl_conn_of_stream` containerof | **none on the stream** — raw pointer + inflight-pin | pinned: `stream_fully_retired` blocks detach while either op inflight (`src/stream_close.c:36-38`) | `kl_stream_cancel` / timeout `kl_comp_cancel`; `in_close_cancel` depth defers finalize | `recv_inflight`+`send_inflight` counters; `on_close` fires only when both 0 (`src/stream_close.c:23-50`) | implicit: unretired op pins the conn (fail-stop pin, not UAF). The timeout sweep *initiates* cancel but cannot retire a genuinely-lost terminal — the pin holds until backend/context teardown |
 | **Listener accept** (ACCEPT) | `target=NULL`; server via `server_of_ctx` containerof (always valid on a server loop) | `KlSlotLease` by value (release fn+ctx baked in) + nullable `alive` liveness token | `in_dispatch` depth defers finalize; second accept in CLOSING state is disposed, no callback (`src/listener.c`) | readiness disarm + return credits; completion `cancel_accept` once, force-complete via shutdown/quiesce | per-listener `inflight` counter; `on_close` only when `inflight==0` & not in dispatch | none — accepts force-completed + reaped before free |
 | **Connect attempt** (CONNECT) | tagged `KlWatcher` (detached node), Happy-Eyeballs races several | none/token; abort is **physical** (backend frees/skips aborted op) | winner's cancel marks losers aborted; drain skips aborted before emit; `in_dispatch`/`in_start` depth defers detach (`src/connect_op.c`) | first-wins + deadline timer → `co_request_cancels`; `kl_comp_cancel` marks aborted | `terminal`+`co_finalize`: all attempts cleared, timers disarmed, resolve retired | none — op owned by KlClient, reused via reset |
 | **Watcher** (WATCHER) | tagged `KlWatcher` udata | none — ctx-owned node | `kl_event_dispatch` **pointer-scans** `ctx->watchers` before deref (`include/keel/event_ctx.h`); freed node ⇒ event consumed, no deref | `kl_watcher_del` unlinks+frees synchronously; `dispatch_dirty` suppresses auto-rearm | node unlinked from ctx list before `kl_event_del`; backend fires no further events | none — freed synchronously |
@@ -71,8 +71,11 @@ relies on a class-specific guarantee rather than a generation token (defense-in-
 
 3. **Quarantine exists only where retirement is genuinely unprovable** (I9): the datagram/EFI
    `retain_life=1` path. Stream/accept/connect/watcher retire deterministically (inflight counters,
-   force-reap, synchronous free), so they need no quarantine — a lost completion there is a bounded
-   resource pin cleared by the timeout sweep, never a UAF.
+   force-reap, synchronous free), so they need no quarantine under a *correctly* terminating backend.
+   Note the failure mode of a genuinely-lost terminal completion (a backend defect): the timeout
+   sweep *initiates* cancellation, but it cannot retire an op whose terminal never arrives, so the
+   result is a persistent **fail-stop** pin/hang that holds until backend or context teardown — still
+   never a UAF, but not automatically cleared.
 
 4. **Reentrancy and synchronous completion are handled uniformly but via different primitives** —
    arm trampoline (datagram/stream read), `completed_inline`/`before=inflight` sync-detect (stream/
