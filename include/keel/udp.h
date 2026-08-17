@@ -23,8 +23,10 @@
  *
  * KlUdp is the compatibility + extended-UDP facility (batching, GSO/GRO, multicast, per-packet TOS,
  * source-pinned send). For new portable message protocols prefer the canonical Tier-1 KlDatagram
- * (<keel/datagram.h>); the two coexist permanently and their backpressure semantics intentionally
- * differ (KlUdp = byte budget; KlDatagram = fixed-slot count). See docs/datagram_vs_udp.md.
+ * (<keel/datagram.h>); KlUdp stays supported and non-deprecated because its current consumers and
+ * extended features require it (consolidation/retirement is a separate, deferred increment). Their
+ * backpressure semantics intentionally differ (KlUdp = byte budget; KlDatagram = fixed-slot count).
+ * See docs/datagram_vs_udp.md.
  */
 
 typedef struct KlUdp KlUdp;

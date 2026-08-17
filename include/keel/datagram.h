@@ -7,9 +7,11 @@
  * KlDatagram is the Tier-1 datagram primitive: a caller-owned, single-threaded, event-loop-driven
  * handle over a prepared UDP fd. It is a thin facade over the internal KlDgramCore assembly (7A) and is
  * exposed + validated INDEPENDENTLY of the legacy KlUdp byte-budget surface (D-COMPAT, §6): KlUdp is
- * NOT re-based onto fixed slots and keeps its exact semantics. The two coexist permanently. KlDatagram
- * is the canonical Tier-1 message transport for new portable protocols; KlUdp is the compatibility +
- * extended-UDP facility (batching/GSO/GRO/multicast/…). See docs/datagram_vs_udp.md for which to use.
+ * NOT re-based onto fixed slots and keeps its exact semantics. The two coexist today: KlDatagram is the
+ * canonical Tier-1 message transport for new portable protocols; KlUdp is the compatibility +
+ * extended-UDP facility (batching/GSO/GRO/multicast/…), required by its current consumers, so it stays
+ * supported and non-deprecated. Any consolidation/retirement is a separate, reviewed design + migration
+ * increment (deferred). See docs/datagram_vs_udp.md for which to use.
  *
  * This header is also the single home for the public datagram data TYPES (KlDatagramMessage,
  * KlDatagramSendStatus, KlDatagramCloseResult, KlDgramCloseState, KL_DGRAM_CAP_*, KL_DGRAM_HAS_LOCAL/

@@ -4,8 +4,14 @@
 Documentation only — **no source or ABI change**, and **no consumer migration**; migrations, if any,
 are proposed and implemented separately (see the consumer inventory below).
 
-Keel ships two datagram APIs. They are **not** competitors with one canonical winner that deprecates
-the other — they occupy different roles:
+**Frozen direction.** `KlDatagram` is the canonical Tier-1 API for new portable message protocols.
+`KlUdp` remains supported and non-deprecated **because current consumers and extended UDP features
+require it**. Any consolidation or deprecation of `KlUdp` requires a **separate design + migration
+increment** — it is a recognized future objective, currently **deferred**, not precluded and not
+promised as permanent. (Earlier phrasing that the two "coexist permanently" overstated the evidence;
+the accurate statement is "required today, consolidation is a future increment".)
+
+Keel ships two datagram APIs occupying different roles today:
 
 - **`KlDatagram`** (`<keel/datagram.h>`) — the **canonical Tier-1 bounded *message* transport.** A
   caller-owned, single-threaded, event-loop-driven datagram primitive, sibling to `KlStream` and
@@ -13,8 +19,15 @@ the other — they occupy different roles:
   (readiness + completion). Fixed-slot admission and confirmed-detachment close. Use it for new
   portable message protocols.
 - **`KlUdp`** (`<keel/udp.h>`) — the **compatibility + extended-UDP facility.** The original,
-  full-featured UDP socket surface. It is **not deprecated**; it carries the advanced UDP features
-  `KlDatagram` deliberately does not, and it backs the existing `KlUdpServer` and DNS resolver.
+  full-featured UDP socket surface, required by its current consumers (`KlUdpServer`, the DNS
+  resolver) and by the advanced UDP features `KlDatagram` deliberately does not carry.
+
+**True implementation relationship (not a public-API dependency).** `KlUdpServer` and `dns_resolver.c`
+directly consume the **public `KlUdp`** API; **nothing in production consumes public `KlDatagram`
+yet.** The two public APIs are *not* layered on each other — what they share is the **internal
+datagram substrate** (the `KlDatagramOps` provider seam, the lifetime/liveness tokens, receive
+handling, and parts of the close/retirement machinery). So `KlDatagram` is not the "foundation" of
+`KlUdpServer`/DNS; the shared internal substrate is.
 
 ## Decision table
 
@@ -75,3 +88,7 @@ frozen and implemented one protocol at a time with behavior parity and every app
 - No hidden change from byte-budget to slot-budget semantics.
 - No claim that every `KlUdp` extension exists in `KlDatagram`.
 - No consumer migration — only the positioning, the rule, and the inventory.
+- **Not** a claim of *permanent* duplication: consolidation (migrate DNS + `KlUdpServer` onto
+  `KlDatagram` behind an optional extended-capability / queue-policy layer, then reduce `KlUdp` to a
+  compatibility wrapper and optionally deprecate it) is a **recognized future objective, deferred** to
+  its own design + migration increment. This document neither designs nor commits to it.
