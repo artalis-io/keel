@@ -30,14 +30,20 @@
 int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
     if (max > KL_COMP_MAX_EVENTS) max = KL_COMP_MAX_EVENTS;
     KlCompletionEvent ev[KL_COMP_MAX_EVENTS];
-    int n = kl_comp_drain(ctx, ev, max, timeout_ms);
-    if (n < 0) return -1;
 
-    /* R3b-W: batch bracket — defer mid-batch watcher frees so a stale KL_COMP_WATCHER/CONNECT can't
-     * be misdelivered via address reuse. If begin fails (max nesting depth), do not dispatch this
-     * batch; propagate failure. */
+    /* R3b-W: open the batch bracket BEFORE draining, so an overflow refusal consumes no events
+     * (already-dequeued completions must not be dropped — that would leak transferred datagram life
+     * refs and starve stream/accept/connect state machines of physical retirement). The bracket
+     * defers mid-batch watcher frees so a stale KL_COMP_WATCHER/CONNECT can't be misdelivered via
+     * address reuse. begin → drain → dispatch → end on every exit. */
     if (kl_event_ctx_dispatch_begin(ctx) < 0)
         return -1;
+    int n = kl_comp_drain(ctx, ev, max, timeout_ms);
+    if (n < 0) {
+        kl_event_ctx_dispatch_end(ctx);
+        return -1;
+    }
+
     for (int i = 0; i < n; i++) {
         switch (ev[i].kind) {
         /* TCP conn completions → the server (via the ctx hook, set when a server runs

@@ -68,26 +68,29 @@ int kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc) {
 
 void kl_event_ctx_free(KlEventCtx *ctx) {
     if (!ctx) return;
+    /* R3b-W: freeing a ctx DURING batch dispatch is a CALLER BUG — captured events on the live
+     * dispatch stack may still reference retired nodes. Precondition: dispatch_depth == 0. Assert
+     * loudly in hosted debug builds; in non-assert (and freestanding) builds FAIL CLOSED — return
+     * before touching anything, so a precondition violation does not leave a partially destroyed
+     * context (timers/watchers freed, loop closed, retired leaked). Checked FIRST, before any free. */
+#ifndef KEEL_FREESTANDING
+    assert(ctx->dispatch_depth == 0);
+#endif
+    if (ctx->dispatch_depth != 0)
+        return;
+
     if (ctx->timers)
         kl_free(ctx->alloc, ctx->timers,
                 (size_t)ctx->timer_cap * sizeof(KlTimerEntry));
     ctx->timers = NULL;
     ctx->timer_count = 0;
     ctx->timer_cap = 0;
-    /* R3b-W: freeing a ctx during batch dispatch is a CALLER BUG — captured events on the live
-     * dispatch stack may still reference retired nodes, so reclaiming them here would be unsafe.
-     * The precondition is dispatch_depth == 0 (asserted in hosted debug builds). Defensive draining
-     * of `retired` (normally already empty, drained when the outermost bracket closed) is valid ONLY
-     * at depth 0; at nonzero depth we deliberately do NOT touch it. */
-#ifndef KEEL_FREESTANDING
-    assert(ctx->dispatch_depth == 0);
-#endif
-    if (ctx->dispatch_depth == 0) {
-        while (ctx->retired) {
-            KlWatcher *w = ctx->retired;
-            ctx->retired = w->next;
-            kl_free(ctx->alloc, w, sizeof(KlWatcher));
-        }
+    /* At depth 0 the retired list is normally already empty (drained when the outermost bracket
+     * closed); defensively reclaim any stragglers. */
+    while (ctx->retired) {
+        KlWatcher *w = ctx->retired;
+        ctx->retired = w->next;
+        kl_free(ctx->alloc, w, sizeof(KlWatcher));
     }
     while (ctx->watchers) {
         KlWatcher *w = ctx->watchers;
@@ -306,26 +309,28 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
         if (!events) return -1;
     }
 
+    /* R3b-W: open the batch bracket BEFORE kl_event_wait so the whole acquire→dispatch→cleanup
+     * window is covered and an overflow refusal consumes no events. begin → wait → dispatch →
+     * cleanup → end on every exit. */
+    if (kl_event_ctx_dispatch_begin(ctx) < 0) {
+        if (events != stack_buf)
+            kl_free(ctx->alloc, events, (size_t)max_events * sizeof(KlEvent));
+        return -1;   /* consumes no events (no wait yet) */
+    }
+
     int n = kl_event_wait(&ctx->loop, events, max_events, timeout_ms);
-    int begin_failed = 0;
     if (n > 0) {
-        /* R3b-W: batch bracket (defer mid-batch watcher frees). If begin fails (max nesting depth),
-         * do NOT dispatch this batch and propagate failure. */
-        if (kl_event_ctx_dispatch_begin(ctx) < 0) {
-            begin_failed = 1;
-        } else {
-            for (int i = 0; i < n; i++)
-                kl_event_dispatch(ctx, &events[i]);
-            kl_event_ctx_dispatch_end(ctx);
-        }
+        for (int i = 0; i < n; i++)
+            kl_event_dispatch(ctx, &events[i]);
     }
 
     if (events != stack_buf)
         kl_free(ctx->alloc, events, (size_t)max_events * sizeof(KlEvent));
 
+    kl_event_ctx_dispatch_end(ctx);   /* end after cleanup — reclaims deferred watcher nodes */
+
     /* Fire expired timers */
     kl_timer_fire(ctx);
 
-    if (begin_failed) return -1;
     return n < 0 ? -1 : n;
 }

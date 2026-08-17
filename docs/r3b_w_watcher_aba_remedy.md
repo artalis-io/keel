@@ -84,11 +84,15 @@ dispatching the drained batch and surface an error (the server loop fail-stops i
 - The scan is **unchanged** — it already returns "not live" for an unlinked node; the fix only stops
   that address being reused before the batch ends.
 
-**All three internal loops route through the helpers (requirement 5):** `kl_comp_run`,
-`kl_event_ctx_run`, and the `src/server.c` readiness loop each call `dispatch_begin` before their
-per-event loop and `dispatch_end` after — so server-owned watchers on the third loop are covered.
-The helpers are the single source of the nesting/cleanup logic; the three call sites hold no bespoke
-depth or reclaim code.
+**All three internal loops route through the helpers (requirement 5), opening the bracket BEFORE the
+batch is acquired:** `kl_comp_run` calls `begin` before `kl_comp_drain` (so an overflow refusal
+consumes no events — dropping already-dequeued completions would leak transferred datagram life refs
+and starve stream/accept/connect of physical retirement); `kl_event_ctx_run` calls `begin` before
+`kl_event_wait`; the `src/server.c` readiness loop calls `begin` before `kl_event_wait` and **holds
+it through the file-I/O completion callbacks** (which run while a watcher-event batch is captured and
+can delete/reallocate watchers) and the dispatch loop — calling `end` on every exit (timeout, error,
+EINTR, normal). The helpers are the single source of the nesting/cleanup logic; the call sites hold
+no bespoke depth or reclaim code.
 
 **Public direct-dispatch decision (requirement 6) — option (a): a documented batch contract.**
 `kl_event_dispatch` stays public and unchanged. The begin/end helpers become the **public batch
@@ -104,11 +108,13 @@ multi-event dispatch — is the same contract stated as a restriction; option (c
 
 **`kl_event_ctx_free` handling:** freeing a context **during** batch dispatch is **invalid** — captured
 events on the live dispatch stack may still reference retired nodes, so reclaiming them mid-batch would
-be unsafe. The precondition is `dispatch_depth == 0`, **asserted in hosted debug builds** (guarded
-`#ifndef KEEL_FREESTANDING` so freestanding is unaffected). Defensive draining of `retired` (normally
-already empty, having been drained when the outermost bracket closed) is performed **only at depth 0**;
-at nonzero depth the list is deliberately left untouched. The reset-and-drain framing is dropped: free
-does **not** silently "cover" a missing `dispatch_end`.
+be unsafe. The precondition `dispatch_depth == 0` is checked **first, before any free**: **asserted in
+hosted debug builds** (guarded `#ifndef KEEL_FREESTANDING`), and in non-assert (and freestanding)
+builds it **fails closed** — returns immediately without freeing timers/watchers/retired or closing
+the loop, so a precondition violation does not leave a partially destroyed context. At depth 0 the
+`retired` list is normally already empty (drained when the outermost bracket closed) and is
+defensively reclaimed. The reset-and-drain framing is dropped: free does **not** silently "cover" a
+missing `dispatch_end`.
 
 **State / ownership:**
 
