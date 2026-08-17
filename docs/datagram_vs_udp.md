@@ -1,0 +1,77 @@
+# `KlDatagram` vs `KlUdp` — which datagram API to use
+
+**Status:** positioning + decision table (R2 of [keel_improvement_roadmap.md](keel_improvement_roadmap.md)).
+Documentation only — **no source or ABI change**, and **no consumer migration**; migrations, if any,
+are proposed and implemented separately (see the consumer inventory below).
+
+Keel ships two datagram APIs. They are **not** competitors with one canonical winner that deprecates
+the other — they occupy different roles:
+
+- **`KlDatagram`** (`<keel/datagram.h>`) — the **canonical Tier-1 bounded *message* transport.** A
+  caller-owned, single-threaded, event-loop-driven datagram primitive, sibling to `KlStream` and
+  `KlListener`, with a STABLE function+type contract validated live across every event backend
+  (readiness + completion). Fixed-slot admission and confirmed-detachment close. Use it for new
+  portable message protocols.
+- **`KlUdp`** (`<keel/udp.h>`) — the **compatibility + extended-UDP facility.** The original,
+  full-featured UDP socket surface. It is **not deprecated**; it carries the advanced UDP features
+  `KlDatagram` deliberately does not, and it backs the existing `KlUdpServer` and DNS resolver.
+
+## Decision table
+
+| If you are… | Use | Because |
+|---|---|---|
+| Writing a **new portable message protocol** (mDNS, CoAP, a datagram QUIC/HTTP-3 base, …) | **`KlDatagram`** | It is the canonical Tier-1 message transport — one contract, every backend, bounded fixed-slot backpressure, confirmed-detachment close. |
+| You need **advanced UDP features** — `recvmmsg`/`sendmmsg` batching, GSO/GRO segmentation offload, multicast join/leave + `IP_MULTICAST_*`, broadcast, per-packet TOS/DSCP, source-pinned sends, `IP_PKTINFO` dest capture | **`KlUdp`** | These live only on `KlUdp` (see "intentionally differ" below). `KlDatagram` is deliberately a minimal bounded-message core. |
+| You are **maintaining or extending an existing `KlUdp` consumer** (`KlUdpServer`, `dns_resolver`) | **`KlUdp`** | No migration is implied by this document; the byte-budget semantics and feature set stay as-is. |
+| You need a **byte-budgeted** send queue (backpressure measured in bytes) | **`KlUdp`** | `KlDatagram` backpressure is a datagram **count** (fixed slots), not a byte budget — see below. |
+| You want the **same event-model-agnostic lifetime/close contract** used by `KlStream`/`KlListener` | **`KlDatagram`** | It shares the Tier-1 confirmed-detachment / retirement model; `KlUdp` has its own legacy teardown. |
+
+## Semantics that intentionally differ
+
+These are **deliberate** differences, not gaps to be papered over. A protocol picks the API whose
+semantics it wants; the two are not drop-in interchangeable.
+
+| Aspect | `KlDatagram` (Tier-1) | `KlUdp` (extended UDP) |
+|---|---|---|
+| **Send backpressure** | **slot / count budget** — a fixed, preallocated number of outbound slots (`send_slots` × `send_slot_cap`); admission is atomic-or-refused | **byte budget** — `max_send_queue` bytes (default 256 KiB); whole-datagram queue |
+| **Recv model** | one in-flight + one held, strict pause/resume; source + local addr + truncation flags | per-datagram callback + source/local addr; optional coalesced GRO / segment callbacks |
+| **Batching / offload** | none (single-datagram core) | `recvmmsg`/`sendmmsg` (Linux), GSO/GRO (`kl_udp_send_gso`, `recv_gro`) |
+| **Multicast / broadcast** | none | join/leave (any-source), `IP_MULTICAST_TTL/LOOP/IF`, `SO_BROADCAST` |
+| **Per-packet TOS/DSCP, source-pinned send** | none | `kl_udp_send_to_tos`, `kl_udp_send_to_from`, `tos`/`recv_tos` |
+| **Close** | confirmed-detachment (Tier-1): `on_close` after physical retirement | legacy teardown |
+| **Layout ABI** | opt-in via `<keel/datagram_detail.h>` (recompile) | `KlUdpConfig`/`KlUdp` public layout |
+
+**No promise of feature parity.** `KlDatagram` does **not** implement the `KlUdp` extensions above and
+is not intended to. If a protocol needs one of them, it uses `KlUdp`. Do not migrate a `KlUdp`
+consumer to `KlDatagram` if it relies on any extension, and never silently reinterpret a byte-budget
+(`KlUdp`) as a slot-budget (`KlDatagram`) — they are different backpressure contracts.
+
+## Contributor rule
+
+> **New portable message protocols use `KlDatagram`** (the canonical Tier-1 message transport) unless
+> they require a documented `KlUdp` extension (batching, GSO/GRO, multicast/broadcast, per-packet
+> TOS, source-pinned send, `recvmmsg`/`sendmmsg`). If a `KlUdp` extension is required, say which one
+> and why in the design note. This mirrors invariant I10's dependency direction
+> ([architecture_invariants.md](architecture_invariants.md)) at the datagram layer.
+
+(Also recorded in [CONTRIBUTING.md](../CONTRIBUTING.md).)
+
+## Consumer inventory (migrations proposed separately — NOT in this increment)
+
+The production API consumers today:
+
+| Consumer | Uses | Why `KlUdp` | Migration candidate? |
+|---|---|---|---|
+| `src/dns_resolver.c` (built-in DNS resolver) | `KlUdp` | Predates `KlDatagram`; the DNS query path is a fixed small-datagram exchange. It does not currently need `KlUdp` extensions, so it is a **plausible** future `KlDatagram` candidate | Yes — but only as a **separate, reviewed** increment with behavior-parity + failure-path tests; not evaluated or done here. |
+| `src/udp_server.c` (`KlUdpServer`) | `KlUdp` | The dispatch surface deliberately passes through the `KlUdp` config knobs (multicast/broadcast/batching) and surfaces the source `struct sockaddr` in its handler API | Not a candidate — it exposes `KlUdp`'s extended surface by design. |
+
+`KlDatagram` has **no** production protocol consumer yet — it is the new Tier-1 primitive; only its
+public-facade tests exercise it. Any migration (e.g. DNS → `KlDatagram`) is a distinct increment,
+frozen and implemented one protocol at a time with behavior parity and every applicable backend gate.
+
+## Non-goals of this document
+
+- No source or ABI change to `KlUdp` (or `KlDatagram`).
+- No hidden change from byte-budget to slot-budget semantics.
+- No claim that every `KlUdp` extension exists in `KlDatagram`.
+- No consumer migration — only the positioning, the rule, and the inventory.

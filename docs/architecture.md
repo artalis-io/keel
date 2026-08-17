@@ -35,7 +35,9 @@ three and touch no platform socket API or event engine directly.
     read pause/resume, graceful/abortive close). Contract: [stream_contract.md](stream_contract.md).
   - [`KlDatagram`](../include/keel/datagram.h) — bounded message transport (fixed-slot admission,
     message boundaries, source/local metadata). Contract: [datagram_contract.md](datagram_contract.md).
-    `KlUdp` is the compatibility + extended-UDP facility alongside it (batching, GSO/GRO, multicast).
+    `KlUdp` is the compatibility + extended-UDP facility alongside it (batching, GSO/GRO, multicast) —
+    which API to use, and how their semantics intentionally differ (slot-budget vs byte-budget), is
+    [datagram_vs_udp.md](datagram_vs_udp.md).
 - **Engine axis** — readiness ([event.h](../include/keel/event.h): register interest → wait →
   re-arm) and completion ([completion.h](../src/completion.h): submit owned op → track → retire) are
   *peer models*, negotiated by capability ([event_caps.h](../src/event_caps.h)). The **production**
