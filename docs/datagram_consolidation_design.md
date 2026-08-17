@@ -286,6 +286,14 @@ document** — it only scopes them.
    create/configure/bind helper (§2 D-DNS-2) that mirrors `kl_udp_init`'s prep with per-step error
    cleanup + ownership handoff to `kl_datagram_init`. Tests: each step's failure closes the fd (no
    leak/double-close); success prepares a bound fd. Prereq for M3 and M4.
+   **Status: implemented** — `kl_datagram_open()` in `src/datagram_open.c` (internal
+   `src/datagram_open.h`); TIER1_INFRA-allowlisted infra (it creates/binds a platform socket, like
+   `listener.c`/`connect_op.c`/`udp.c`), so the Tier-1 facade `datagram.c` stays platform-neutral. No
+   public/ABI surface added; no consumer migrated. Tests in `tests/test_datagram_open.c` (11 cases): the
+   per-step failure matrix over a fully-virtual mock provider (bad-arg / no-datagram-provider / bad-bind
+   / `socket()` / `set_nonblocking` / `bind`, each asserting exactly-one-or-zero close + the right
+   `KlError`) + ownership handoff (success returns the unclosed fd; the caller closes) + a real
+   default-provider bound/unbound loopback socket.
 1. **M1 — `BOTH` queue policy (additive, no consumer change).** Add the `BOTH` policy per §4 — a byte
    **admission gate** on the existing fixed slot array (no ring, no byte arena; the impossible byte-only
    policy is not built). Default stays `SLOT`; preallocated; overflow-safe. Tests: `BOTH` admission by
