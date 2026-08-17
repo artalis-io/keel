@@ -103,14 +103,45 @@ Parity requirements:
 - **No local/TOS/UDP-truncation needs** — DNS uses the payload's TC bit, not the UDP `MSG_TRUNC`
   flag; it never reads `local` or recv-TOS. No caps required (`want_caps = 0`).
 - **Per-query timeout/retransmit** are DNS-level timers, transport-agnostic — unchanged.
-- **Send failure** → map `KlDatagramSendStatus` (`ERROR`/`WOULD_BLOCK`) to the existing
-  send-failure/next-nameserver path.
+- **Transient send refusal (`WOULD_BLOCK`) needs NEW handling — it is NOT the existing failure path
+  (P1).** Today `dns_transmit_leg` (`src/dns_resolver.c:460`) **consumes a try (`tries_left--`, :463)
+  and builds the query into a local stack buffer *before* the send**, and any send failure returns
+  `-1` → the caller marks the leg **done/failed** (:571) with no timer armed. So mapping `WOULD_BLOCK`
+  to that path turns transient backpressure into a **resolution failure** — and since concurrent
+  `resolve()` is unbounded, no fixed `send_slots` rules it out. (Under `KlUdp` today this is *masked*:
+  its byte queue absorbs the transient block — `kl_udp_send_to` returns success and sends later — so
+  DNS only sees a hard `-1` when the 256 KiB budget is exhausted, and then it fails the leg. The frozen
+  behavior below **defers and retries** instead, so the parity target is **resolution success under
+  send backpressure**, not byte-identical queue depth — a deliberate improvement.) **Decision D-DNS-3
+  (transient backpressure, frozen):**
+  - **Split `dns_transmit_leg` so a try is consumed and the response timer is armed ONLY on
+    successful admission (`KL_DATAGRAM_ACCEPTED`).** It returns a 3-way result — `SENT` / `WOULD_BLOCK`
+    / `FAILED`. Nothing is consumed on `WOULD_BLOCK`.
+  - **On `WOULD_BLOCK`:** mark the leg `send_pending` (a new flag). Do **not** decrement `tries_left`,
+    do **not** arm the response timer, do **not** mark it done. The query is **rebuilt** on retry (it
+    lives only in the stack buffer today — no retained payload storage needed), so a fresh txn-id /
+    EDNS / cookie is re-derived at retry time.
+  - **Register `kl_datagram_on_writable` once at resolver init.** On the full→non-full edge, scan the
+    existing `r->inflight` list for `send_pending` legs and re-attempt each: on `SENT`, clear
+    `send_pending` + consume the try + arm the timer; on `WOULD_BLOCK` again, stop (queue re-filled —
+    leave the rest pending for the next edge). No new unbounded structure — `send_pending` is a leg
+    flag; the writable handler iterates `r->inflight` (already bounded by in-flight requests). The
+    callback is non-destructive/reentrant-safe (no free/close inside it).
+  - **Permanent send failure** (`FAILED` = `ERROR`/`TOO_LARGE`/`CLOSED`) keeps today's behavior:
+    settle/advance the leg. (`TOO_LARGE` cannot occur for DNS if `send_slot_cap ≥ DNS_QUERY_MAX`.)
+  - **Cancellation + lifetime:** on request cancel/finalize/resolver-free, a `send_pending` leg is
+    removed from `r->inflight` (as today), so the writable scan never touches a freed leg; clear
+    `send_pending` on teardown. **A `send_pending` leg has no response timer, so it must remain bounded
+    by the overall resolve deadline** (or an explicit send-pending guard timer) — a leg must not hang
+    forever if the send queue never drains (a dead socket). Freeze this bound in M3.
 - **TCP fallback** is already a **separate** `(fd, KlTls)` path (not the UDP socket) — untouched.
 
-Failure-path tests to add with the DNS migration: `WOULD_BLOCK`/backpressure under many concurrent
-in-flight requests (byte budget, not leg count); each prep-step failure closes the fd (no leak, no
-double-close); send error → NS rotation; spoofed-source drop; truncation → TCP fallback still triggers;
-dual-family concurrency; close/reopen.
+Failure-path tests to add with the DNS migration: **`WOULD_BLOCK` on a full send queue → leg goes
+`send_pending`, no try consumed, no timer armed → `on_writable` re-sends → resolution still succeeds**
+(the core backpressure regression); cancel/free while `send_pending` (no use-after-free, no leaked
+timer); `send_pending` bounded by the resolve deadline (dead socket does not hang); permanent send
+error → NS rotation/settle; each prep-step failure closes the fd (no leak, no double-close);
+spoofed-source drop; truncation → TCP fallback still triggers; dual-family concurrency; close/reopen.
 
 ## 3. Optional-capability seam (decisions)
 
@@ -240,8 +271,12 @@ document** — it only scopes them.
    opt-in over the existing provider ops. No consumer change yet.
 3. **M3 — migrate DNS → KlDatagram (first production consumer).** Uses the M0 prep helper and the
    **existing `SLOT`** policy (its send queue is transient — §2 D-DNS-1); requests no caps.
-   **Independent of M1 and M2.** Behavior-parity + failure-path tests per §2; TCP fallback untouched.
-   Removes DNS's `KlUdp` dependency.
+   **Independent of M1 and M2.** Must implement the **transient-backpressure state machine (§2
+   D-DNS-3)**: split `dns_transmit_leg` so a try/timer is consumed only on `KL_DATAGRAM_ACCEPTED`; a
+   `send_pending` leg on `WOULD_BLOCK`; `kl_datagram_on_writable` re-sends; cancellation/lifetime +
+   a deadline bound for `send_pending`. Behavior-parity + failure-path tests per §2 (the `WOULD_BLOCK`
+   → `on_writable` → success regression is the load-bearing one); TCP fallback untouched. Removes
+   DNS's `KlUdp` dependency.
 4. **M4 — migrate KlUdpServer → {core + extended layer}.** Uses M0 (prep) + M1 (`BOTH`) + M2 (multicast
    + passthrough caps). Preserve the public API/ABI + handler + multicast + source-pinned reply, with
    the documented count-bound caveat per §4/§5; or keep `KlUdpServer` on `KlUdp` if exact byte-only
