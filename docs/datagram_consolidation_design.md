@@ -117,31 +117,51 @@ Parity requirements:
   - **Split `dns_transmit_leg` so a try is consumed and the response timer is armed ONLY on
     successful admission (`KL_DATAGRAM_ACCEPTED`).** It returns a 3-way result — `SENT` / `WOULD_BLOCK`
     / `FAILED`. Nothing is consumed on `WOULD_BLOCK`.
-  - **On `WOULD_BLOCK`:** mark the leg `send_pending` (a new flag). Do **not** decrement `tries_left`,
-    do **not** arm the response timer, do **not** mark it done. The query is **rebuilt** on retry (it
+  - **On `WOULD_BLOCK`:** mark the leg `send_pending` (a new flag) and, on the **first** `WOULD_BLOCK`,
+    arm the **send-admission guard timer** (frozen below). Do **not** decrement `tries_left`, do
+    **not** arm the *response* timer, do **not** mark it done. The query is **rebuilt** on retry (it
     lives only in the stack buffer today — no retained payload storage needed), so a fresh txn-id /
     EDNS / cookie is re-derived at retry time.
   - **Register `kl_datagram_on_writable` once at resolver init.** On the full→non-full edge, scan the
     existing `r->inflight` list for `send_pending` legs and re-attempt each: on `SENT`, clear
-    `send_pending` + consume the try + arm the timer; on `WOULD_BLOCK` again, stop (queue re-filled —
-    leave the rest pending for the next edge). No new unbounded structure — `send_pending` is a leg
-    flag; the writable handler iterates `r->inflight` (already bounded by in-flight requests). The
-    callback is non-destructive/reentrant-safe (no free/close inside it).
+    `send_pending` + **cancel the send-admission timer** + consume the try + arm the RESPONSE timer; on
+    `WOULD_BLOCK` again, stop (queue re-filled — leave the rest pending, admission timer still running,
+    for the next edge). No new unbounded structure — `send_pending` is a leg flag; the writable handler
+    iterates `r->inflight` (already bounded by in-flight requests). The callback is
+    non-destructive/reentrant-safe (no free/close inside it).
   - **Permanent send failure** (`FAILED` = `ERROR`/`TOO_LARGE`/`CLOSED`) keeps today's behavior:
     settle/advance the leg. (`TOO_LARGE` cannot occur for DNS if `send_slot_cap ≥ DNS_QUERY_MAX`.)
-  - **Cancellation + lifetime:** on request cancel/finalize/resolver-free, a `send_pending` leg is
-    removed from `r->inflight` (as today), so the writable scan never touches a freed leg; clear
-    `send_pending` on teardown. **A `send_pending` leg has no response timer, so it must remain bounded
-    by the overall resolve deadline** (or an explicit send-pending guard timer) — a leg must not hang
-    forever if the send queue never drains (a dead socket). Freeze this bound in M3.
+  - **Send-admission guard timer (FROZEN — bounds a leg that never gets admitted).** The resolver has
+    **no overall request deadline** (only per-leg timers, armed *after* send, plus the RFC 8305
+    resolution-delay timer), so a `send_pending` leg that never sees a writable edge (permanently full
+    or dead socket) would hang. Frozen bound:
+    - **Slot + callback:** reuse `leg->timer_id` (free while `send_pending` — mutually exclusive with
+      the response timer) and the existing `dns_on_leg_timer`, which **branches on `send_pending`** at
+      the top.
+    - **Arm:** on the leg's **first** `WOULD_BLOCK` (the transition into `send_pending`), arm it for
+      **`r->timeout_ms`** (the per-query timeout — no new config knob). **Preserved across writable
+      retries** (armed once on entry, not re-armed per attempt): it bounds *total* time in
+      `send_pending`.
+    - **On expiry (fires while `send_pending`):** the leg was never transmitted → **settle/advance**
+      it (`dns_leg_settle` → mark done → `dns_advance_candidate` if both legs done). **Expiry does NOT
+      consume a network attempt** (`tries_left` unchanged — no packet was sent); retrying the same
+      congested socket is futile, so it settles rather than retransmits.
+    - **Cancellation:** the existing `dns_free_timers(q)` (`src/dns_resolver.c:401`) already cancels
+      `leg->timer_id` on cancel/finalize/resolver-free, and the leg unlinks from `r->inflight`, so
+      neither the timer nor the writable scan touches a freed leg; clear `send_pending` on teardown.
+    - **Reentrancy:** the single-threaded loop serializes the writable-retry and the timer; a settled
+      leg is no longer `send_pending`/in `r->inflight`, so a later writable scan skips it. The expiry
+      callback may finalize/free the request — reentrancy-safe exactly like today's `dns_on_leg_timer`.
 - **TCP fallback** is already a **separate** `(fd, KlTls)` path (not the UDP socket) — untouched.
 
 Failure-path tests to add with the DNS migration: **`WOULD_BLOCK` on a full send queue → leg goes
-`send_pending`, no try consumed, no timer armed → `on_writable` re-sends → resolution still succeeds**
-(the core backpressure regression); cancel/free while `send_pending` (no use-after-free, no leaked
-timer); `send_pending` bounded by the resolve deadline (dead socket does not hang); permanent send
-error → NS rotation/settle; each prep-step failure closes the fd (no leak, no double-close);
-spoofed-source drop; truncation → TCP fallback still triggers; dual-family concurrency; close/reopen.
+`send_pending`, no try consumed, response timer not armed, send-admission timer armed → `on_writable`
+re-sends → resolution still succeeds** (the core backpressure regression); **no writable edge ever
+arrives → the send-admission timer fires at `timeout_ms` → the leg settles/advances, no attempt
+consumed, resolution completes (the other family/candidate) or fails cleanly — no hang** (the frozen
+guard); cancel/free while `send_pending` (no use-after-free, no leaked timer); permanent send error →
+NS rotation/settle; each prep-step failure closes the fd (no leak, no double-close); spoofed-source
+drop; truncation → TCP fallback still triggers; dual-family concurrency; close/reopen.
 
 ## 3. Optional-capability seam (decisions)
 
@@ -273,10 +293,11 @@ document** — it only scopes them.
    **existing `SLOT`** policy (its send queue is transient — §2 D-DNS-1); requests no caps.
    **Independent of M1 and M2.** Must implement the **transient-backpressure state machine (§2
    D-DNS-3)**: split `dns_transmit_leg` so a try/timer is consumed only on `KL_DATAGRAM_ACCEPTED`; a
-   `send_pending` leg on `WOULD_BLOCK`; `kl_datagram_on_writable` re-sends; cancellation/lifetime +
-   a deadline bound for `send_pending`. Behavior-parity + failure-path tests per §2 (the `WOULD_BLOCK`
-   → `on_writable` → success regression is the load-bearing one); TCP fallback untouched. Removes
-   DNS's `KlUdp` dependency.
+   `send_pending` leg on `WOULD_BLOCK`; `kl_datagram_on_writable` re-sends; the **frozen send-admission
+   guard timer** (`r->timeout_ms`, reusing `leg->timer_id`, settle-on-expiry, no attempt consumed) +
+   cancellation/reentrancy rules. Behavior-parity + failure-path tests per §2 (the two load-bearing
+   ones: `WOULD_BLOCK` → `on_writable` → success, and no-writable-edge → guard fires → no hang); TCP
+   fallback untouched. Removes DNS's `KlUdp` dependency.
 4. **M4 — migrate KlUdpServer → {core + extended layer}.** Uses M0 (prep) + M1 (`BOTH`) + M2 (multicast
    + passthrough caps). Preserve the public API/ABI + handler + multicast + source-pinned reply, with
    the documented count-bound caveat per §4/§5; or keep `KlUdpServer` on `KlUdp` if exact byte-only
