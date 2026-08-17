@@ -220,9 +220,12 @@ Candidate A was selected and landed across reviewed increments:
    loop — open the bracket **before acquiring the batch** and balance it on every exit; public batch
    contract documented on `kl_event_dispatch`. An **additive pre-release `KlEventCtx` layout change →
    consumers recompile.**
-2. **R3b-T2** (test, **DONE** — `tests/test_watcher_aba.c`): deterministic same-address-reuse ABA
-   over readiness / completion / the real server loop, plus nested-bracket / unmatched-`end` /
-   overflow-refusal / depth-0. **Demonstrated to fail against the pre-fix behavior and pass at HEAD**;
+2. **R3b-T2** (test, **DONE** — `tests/test_watcher_aba.c`): deterministic same-address-reuse full
+   ABA (assert C not called) over readiness (mock `.wait`), completion (mock `.drain`), and the real
+   `kl_server_run` loop via a scripted readiness `KlEventProvider`; plus nested-bracket /
+   unmatched-`end` / depth-0 reclamation and begin-before-acquire ordering (readiness+completion
+   entries at `INT_MAX` acquire nothing). **Demonstrated to fail against both pre-fix states — the
+   ABA-deferral revert and the begin-after-acquire ordering revert — and pass at HEAD**;
    ASan/UBSan/LSan-clean.
 3. On landing, invariant I5's watcher caveat was flipped from "open gap" to **resolved**, and R3a 1a /
    R3b updated accordingly.

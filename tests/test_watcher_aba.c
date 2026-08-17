@@ -90,15 +90,17 @@ static void a_cb(KlSocketHandle fd, KlEventMask r, void *ud) {
 }
 
 /* ── mock readiness loop: .wait returns a scripted batch once ───────────────────────────────────── */
+static int noop_init(KlEventLoop *l) { (void)l; return 0; }
 static int noop_add(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) { (void)l;(void)fd;(void)m;(void)u; return 0; }
 static int noop_del(KlEventLoop *l, KlSocketHandle fd) { (void)l;(void)fd; return 0; }
 static int noop_mod(KlEventLoop *l, KlSocketHandle fd, KlEventMask m, void *u) { (void)l;(void)fd;(void)m;(void)u; return 0; }
 static void noop_close(KlEventLoop *l) { (void)l; }
 static unsigned rdy_caps(const KlEventLoop *l) { (void)l; return KL_EVENT_CAP_READINESS | KL_EVENT_CAP_NATIVE_FD; }
 
-static struct { KlEvent evs[8]; int n; int served; } g_wait;
+static struct { KlEvent evs[8]; int n; int served; int calls; } g_wait;
 static int rdy_wait(KlEventLoop *l, KlEvent *out, int max, int timeout) {
     (void)l; (void)timeout;
+    g_wait.calls++;                       /* proves .wait was (not) reached — begin-before-acquire */
     if (g_wait.served) return 0;
     g_wait.served = 1;
     int n = g_wait.n < max ? g_wait.n : max;
@@ -111,9 +113,10 @@ static const KlEventOps RDY_OPS = {
 
 /* ── mock completion loop: .completion->drain returns a scripted KL_COMP_WATCHER batch once ──────── */
 static unsigned cmp_caps(const KlEventLoop *l) { (void)l; return KL_EVENT_CAP_COMPLETION; }
-static struct { KlCompletionEvent evs[8]; int n; int served; } g_drain;
+static struct { KlCompletionEvent evs[8]; int n; int served; int calls; } g_drain;
 static int cmp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout) {
     (void)ctx; (void)timeout;
+    g_drain.calls++;                      /* proves .drain was (not) reached — begin-before-acquire */
     if (g_drain.served) return 0;
     g_drain.served = 1;
     int n = g_drain.n < max ? g_drain.n : max;
@@ -232,61 +235,103 @@ UTEST(watcher_aba, overflow_refusal) {
     ctx.dispatch_depth = 0;
 }
 
-/* ── server-loop ABA: a probe watcher runs INSIDE the real kl_server_run dispatch batch ─────────── */
-static KlServer      g_srv;
-static volatile int  g_srv_done;
-static int           g_srv_depth_seen;
-static void         *g_srv_w1, *g_srv_w2;
-static KlSocketHandle g_srv_arm, g_srv_fd1, g_srv_fd2;
+/* An overflow refusal at the READINESS loop entry must acquire NOTHING: begin precedes the wait, so
+ * .wait is never called and no scripted event is consumed. */
+UTEST(watcher_aba, overflow_refusal_readiness_acquires_nothing) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; memset(&ctx, 0, sizeof(ctx));
+    ctx.loop.ops = &RDY_OPS; ctx.alloc = &a;
+    ctx.dispatch_depth = INT_MAX;
+    g_wait.served = 0; g_wait.calls = 0; g_wait.n = 1;
+    g_wait.evs[0].udata = tag((void *)0x10); g_wait.evs[0].ready = KL_EVENT_READ;
 
-static void srv_probe_cb(KlSocketHandle fd, KlEventMask r, void *ud) {
-    (void)fd; (void)r; (void)ud;
-    if (__atomic_load_n(&g_srv_done, __ATOMIC_ACQUIRE)) return;
-    g_srv_depth_seen = g_srv.ev.dispatch_depth;               /* > 0 iff the server bracketed dispatch */
-    kl_watcher_add(&g_srv.ev, g_srv_fd1, KL_EVENT_READ, c_cb, NULL);
-    g_srv_w1 = g_fa.last;
-    kl_watcher_del(&g_srv.ev, g_srv_fd1);                      /* delete inside the batch */
-    kl_watcher_add(&g_srv.ev, g_srv_fd2, KL_EVENT_READ, c_cb, NULL);
-    g_srv_w2 = g_fa.last;                                      /* must NOT be w1's address (post-fix) */
-    kl_watcher_del(&g_srv.ev, g_srv_arm);                     /* stop refiring */
-    __atomic_store_n(&g_srv_done, 1, __ATOMIC_RELEASE);
+    ASSERT_EQ(kl_event_ctx_run(&ctx, 8, 0), -1);   /* begin-before-acquire refuses */
+    ASSERT_EQ(g_wait.calls, 0);                    /* .wait never reached */
+    ASSERT_EQ(g_wait.served, 0);                   /* no event consumed */
+    ctx.dispatch_depth = 0;
 }
+
+/* Same for the COMPLETION loop entry: begin precedes the drain, so .drain is never called. */
+UTEST(watcher_aba, overflow_refusal_completion_acquires_nothing) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; memset(&ctx, 0, sizeof(ctx));
+    ctx.loop.ops = &CMP_OPS; ctx.alloc = &a;
+    ctx.dispatch_depth = INT_MAX;
+    g_drain.served = 0; g_drain.calls = 0; g_drain.n = 1;
+    memset(g_drain.evs, 0, sizeof(g_drain.evs));
+    g_drain.evs[0].kind = KL_COMP_WATCHER; g_drain.evs[0].target = tag((void *)0x10); g_drain.evs[0].bytes = KL_EVENT_READ;
+
+    ASSERT_EQ(kl_event_ctx_run(&ctx, 8, 0), -1);   /* delegates to kl_comp_run; begin precedes drain */
+    ASSERT_EQ(g_drain.calls, 0);                   /* .drain never reached */
+    ASSERT_EQ(g_drain.served, 0);                  /* no event consumed */
+    ctx.dispatch_depth = 0;
+}
+
+/* ── server-loop ABA: the REAL kl_server_run loop receives a scripted [A, stale-B] readiness batch ─
+ * A scripted readiness KlEventProvider is injected into KlServer (cfg.event_provider). Its .wait
+ * returns [tag(A), tag(stale-B)] once; the server dispatches them inside its own R3b-W bracket, so A
+ * deletes B + adds C, and B's already-captured stale event must NOT be misdelivered to C — the exact
+ * ABA sequence, driven through the server loop (not a probe). */
+static KlServer      g_srv;
+static volatile int  g_srv_batch_dispatched;
+
+static int srv_wait(KlEventLoop *l, KlEvent *out, int max, int timeout) {
+    (void)l; (void)timeout;
+    if (!g_wait.served) {                       /* first tick: deliver the scripted batch */
+        g_wait.served = 1;
+        int n = g_wait.n < max ? g_wait.n : max;
+        for (int i = 0; i < n; i++) out[i] = g_wait.evs[i];
+        return n;
+    }
+    /* Second tick onward: the batch was fully dispatched last iteration. Signal + idle so
+     * kl_server_stop (running=0) is observed at the loop top without a hot spin. */
+    __atomic_store_n(&g_srv_batch_dispatched, 1, __ATOMIC_RELEASE);
+    struct timespec ts = { 0, 2 * 1000 * 1000 }; nanosleep(&ts, NULL);
+    return 0;
+}
+static const KlEventOps SRV_RDY_OPS = {
+    .init = noop_init, .add = noop_add, .del = noop_del, .mod = noop_mod,
+    .wait = srv_wait, .close = noop_close, .caps = rdy_caps
+};
+static const KlEventProvider SRV_RDY_PROV = { &SRV_RDY_OPS, "aba-srv" };
 static void *srv_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }
 
-UTEST(watcher_aba, server_loop_brackets_dispatch) {
+UTEST(watcher_aba, server_loop_no_misdelivery) {
     fa_reset();
     KlAllocator a = fa_alloc();
     KlConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.port = 0; cfg.bind_addr = "127.0.0.1"; cfg.alloc = &a;
+    cfg.event_provider = &SRV_RDY_PROV;        /* scripted readiness backend → deterministic batch */
     ASSERT_EQ(kl_server_init(&g_srv, &cfg), 0);
 
-    int arm[2], w1[2], w2[2];
-    ASSERT_EQ(kl_test_socketpair(arm), 0);
-    ASSERT_EQ(kl_test_socketpair(w1), 0);
-    ASSERT_EQ(kl_test_socketpair(w2), 0);
-    g_srv_arm = (KlSocketHandle)arm[0]; g_srv_fd1 = (KlSocketHandle)w1[0]; g_srv_fd2 = (KlSocketHandle)w2[0];
-    (void)kl_test_sockwrite(arm[1], "x", 1);   /* make arm[0] readable so the probe fires first tick */
+    g_ctx = &g_srv.ev; g_c_called = 0; g_Cnode = NULL;
+    g_fdB = (KlSocketHandle)101; g_fdC = (KlSocketHandle)102;
 
-    g_srv_done = 0; g_srv_depth_seen = -1; g_srv_w1 = NULL; g_srv_w2 = NULL;
-    /* Added BEFORE kl_server_run (loop not started) → thread-safe. */
-    ASSERT_EQ(kl_watcher_add(&g_srv.ev, g_srv_arm, KL_EVENT_READ, srv_probe_cb, NULL), 0);
+    /* Add A and B to the server's ctx BEFORE the loop starts (thread-safe). */
+    ASSERT_EQ(kl_watcher_add(&g_srv.ev, (KlSocketHandle)100, KL_EVENT_READ, a_cb, NULL), 0);
+    void *Anode = g_fa.last;
+    ASSERT_EQ(kl_watcher_add(&g_srv.ev, g_fdB, KL_EVENT_READ, c_cb, NULL), 0);
+    g_Bnode = g_fa.last;
+
+    g_wait.served = 0; g_wait.calls = 0; g_wait.n = 2;
+    g_wait.evs[0].udata = tag(Anode);   g_wait.evs[0].ready = KL_EVENT_READ;   /* A first */
+    g_wait.evs[1].udata = tag(g_Bnode); g_wait.evs[1].ready = KL_EVENT_READ;   /* stale B, same batch */
+    g_srv_batch_dispatched = 0;
 
     pthread_t th;
     ASSERT_EQ(pthread_create(&th, NULL, srv_thread, NULL), 0);
-    for (int i = 0; i < 1000 && !__atomic_load_n(&g_srv_done, __ATOMIC_ACQUIRE); i++) {
+    for (int i = 0; i < 1000 && !__atomic_load_n(&g_srv_batch_dispatched, __ATOMIC_ACQUIRE); i++) {
         struct timespec ts = { 0, 2 * 1000 * 1000 }; nanosleep(&ts, NULL);
     }
-    int done = __atomic_load_n(&g_srv_done, __ATOMIC_ACQUIRE);
+    int dispatched = __atomic_load_n(&g_srv_batch_dispatched, __ATOMIC_ACQUIRE);
     kl_server_stop(&g_srv);
     pthread_join(th, NULL);
 
-    ASSERT_TRUE(done);
-    ASSERT_GT(g_srv_depth_seen, 0);                          /* probe ran inside the server bracket */
-    ASSERT_NE((uintptr_t)g_srv_w2, (uintptr_t)g_srv_w1);     /* no address reuse under the bracket */
+    ASSERT_TRUE(dispatched);
+    ASSERT_NE((uintptr_t)g_Cnode, (uintptr_t)g_Bnode);   /* C did not reuse B's address */
+    ASSERT_EQ(g_c_called, 0);                            /* B's stale event NOT misdelivered to C */
 
     kl_server_free(&g_srv);
-    kl_test_closesock(arm[1]); kl_test_closesock(w1[0]); kl_test_closesock(w1[1]);
-    kl_test_closesock(w2[0]); kl_test_closesock(w2[1]);
     fa_reset();
 }
 

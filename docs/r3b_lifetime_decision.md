@@ -48,7 +48,7 @@ its dangerous sequences (R3a (a)–(f)); "Gap" = the smallest missing piece.
 | **Stream** — inflight-pin + confirmed-detachment | `tests/test_stream_close.c` (graceful waits for recv/send/both, `abortive_sync_cancel_detaches_exactly_once`, `abortive_async_cancel_detaches_on_later_completions`, reentrant-cancel-once, escalation, idempotent double-begin); `tests/test_stream_read.c` (`completion_close_leaves_inflight_until_retirement`, `duplicate_completion_dropped`, `duplicate_completion_while_held_preserves_held`, `terminal_callback_cannot_restart`, bounded sync completions); `tests/test_stream.c` (`free_refused_while_send_in_flight`, `completion_one_send_in_flight_then_pump`) | **Covered for sequences (a)–(d),(f)** — **Gap on the single-shot contract itself** (see R3b-T1) |
 | **Accept** — credit-lease + `in_dispatch` + force-reap | `tests/test_listener.c` (reentrant close from arm/release/reserve hooks, `double_lease_release_is_noop`, `completion_close_cancels_and_waits_for_straggler`, `spurious_accept_disposed`, `close_during_accept/dispose_callback_defers_detach`, window top-up/exhaustion, `credit_conservation_through_lifecycle`, `accepted_stream_lease_outlives_listener`, `lease_liveness_guard_noops_when_pool_gone`) | **Covered** — no addition |
 | **Connect** — physical-abort + depth guards | `tests/test_connect_op.c` (`happy_eyeballs_winner_cancels_loser_once`, `straggler_connect_after_win_does_not_refire`, `duplicate_completions_dropped`, `stale_delay/deadline_event_dropped`, reentrant-cancel-once, `straggler_fd_disposed`, `deadline_fails_and_cancels_all_pending`); `tests/test_client_happy_eyeballs.c` (`he_detach` winner/loser, cancel-during-dns, multi-attempt) | **Covered** — no addition |
-| **Watcher** — ctx-list scan + R3b-W bracketed deferred reclamation | `tests/test_async.c` (add/mod/del/soak) **+ `tests/test_watcher_aba.c`** (R3b-T2): deterministic same-address-reuse ABA over readiness, completion, and the server loop, plus nested-bracket / unmatched-end / overflow-refusal / depth-0 reclamation | **Resolved.** The ABA (R3a 1a) is fixed by R3b-W and covered by a regression demonstrated to fail against the pre-fix behavior and pass at HEAD |
+| **Watcher** — ctx-list scan + R3b-W bracketed deferred reclamation | `tests/test_async.c` (add/mod/del/soak) **+ `tests/test_watcher_aba.c`** (R3b-T2): deterministic same-address-reuse full ABA (assert-C-not-called) over readiness, completion, and the real server loop (scripted `KlEventProvider`), plus nested-bracket / unmatched-end / depth-0 reclamation / begin-before-acquire ordering (loop entries at INT_MAX acquire nothing) | **Resolved.** The ABA (R3a 1a) is fixed by R3b-W and covered by a regression demonstrated to fail against both pre-fix states (deferral and ordering) and pass at HEAD |
 
 ## Proposed test increments (later, independently reviewed — NOT implemented here)
 
@@ -73,15 +73,19 @@ is written in R3b.
 
 - **What (delivered):** a deterministic test using a fixture allocator (a LIFO free-list keyed on
   `sizeof(KlWatcher)` that hands a just-freed watcher node back to the very next watcher allocation,
-  forcing same-address reuse). It drives the ABA — A deletes B, adds C at B's address, then B's
-  already-captured stale event is dispatched — over **all three loops**: readiness (mock `.wait`),
-  completion (mock `.drain` → `kl_comp_run`, `KL_COMP_WATCHER`), and the **real server loop**
-  (`kl_server_run`, probe inside the batch). Asserts no address reuse and no misdelivery. Plus
-  nested-bracket reclaim-at-outermost, unmatched-`end` no-op, overflow refusal, and depth-0 immediate
-  free.
-- **Demonstrated regression:** simulating the pre-fix behavior (`kl_watcher_del` freeing immediately
-  regardless of depth) makes the readiness/completion/server + nested cases **FAIL**; at HEAD all
-  pass, ASan/UBSan/LSan-clean.
+  forcing same-address reuse). It drives the **full ABA** — A deletes B, adds C at B's address, then
+  B's already-captured stale event is dispatched, asserting **C is not called** and C did not reuse
+  B's address — over **all three loops**, each fed a deterministic `[A, stale-B]` batch: readiness
+  (mock `.wait`), completion (mock `.drain` → `kl_comp_run`, `KL_COMP_WATCHER`), and the **real
+  `kl_server_run` loop** via a **scripted readiness `KlEventProvider`** injected through
+  `cfg.event_provider` (not a probe). Plus: nested-bracket reclaim-at-outermost, unmatched-`end`
+  no-op, depth-0 immediate free, and **begin-before-acquire ordering** — readiness and completion
+  loop entries at `dispatch_depth == INT_MAX` return −1 with `.wait`/`.drain` **never called** and no
+  scripted event consumed.
+- **Demonstrated regressions (both fixes):** (a) simulating the ABA-fix pre-state (`kl_watcher_del`
+  freeing immediately regardless of depth) makes readiness/completion/**server**/nested **FAIL**;
+  (b) simulating the ordering pre-state (begin *after* acquire) makes both overflow-ordering cases
+  **FAIL** (`.wait`/`.drain` gets called). At HEAD all 9 pass, ASan/UBSan/LSan-clean.
 - **Scope guard:** test + fixture allocator only; the dispatch/list change itself is R3b-W's remedy
   increment, reviewed separately.
 
