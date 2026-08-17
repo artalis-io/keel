@@ -97,8 +97,18 @@ Any object a completion event references (op, buffer, transport core, life token
 *after* every event in the drained batch that could reach it has been dispatched. Ownership of a
 life reference transfers into the op on submit and releases exactly once at its terminal event.
 
+For classes that carry a raw `target` instead of a life token (stream, accept, connect, watcher),
+the equivalent guarantee comes from **single-shot completion** — every backend emits exactly one
+completion per submitted op, with no duplicate and no post-retirement completion — combined with the
+class-specific guard (stream inflight-pin, accept force-reap, connect physical-abort, watcher
+ctx-list scan). **Single-shot is therefore a load-bearing contract:** a new completion backend must
+uphold it or supply its own stale-completion guard (R3a inventory; R3b decision, pinned by a planned
+single-shot regression test).
+
 - **Why:** two related events in one batch, where the first frees the second's target, is the
-  canonical completion UAF. A generation/lifetime token makes stale targets a safe no-op instead.
+  canonical completion UAF. A generation/lifetime token makes stale targets a safe no-op instead;
+  for raw-`target` classes, single-shot + the class guard makes the freed-then-referenced sequence
+  unreachable rather than merely survivable.
 - **Anchor:** [completion.h](../src/completion.h) `KlCompletionEvent.life` + `retain_life` (the
   borrowed-vs-transferred rule), released *iff* `!retain_life` at all three sites —
   [completion_core.c](../src/completion_core.c), [datagram.c](../src/datagram.c), [udp.c](../src/udp.c).
