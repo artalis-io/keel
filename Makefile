@@ -904,16 +904,25 @@ TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard sr
               $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
               src/listener.c src/connect_op.c src/udp.c \
               src/event_ctx.c src/async.c src/server_core.c src/server.c src/client_async.c
+# The forbidden-header regex (shared by the file scan and the self-canary below). Covers the
+# completion + readiness/event platform interfaces (epoll/kqueue/eventfd/poll/select/io_uring/IOCP)
+# and the socket-ADDRESS headers, plus the internal completion.h / io_engine.h seams.
+TIER1_FORBIDDEN_RE = \#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|sys/poll|sys/select|poll|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|\#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|\#[[:space:]]*include[[:space:]]*"(completion|io_engine)\.h"
 check-tier1-boundary:
 	@bad=0; \
 	for f in src/*.c parsers/*.c; do \
 	  case " $(TIER1_INFRA) " in *" $$f "*) continue ;; esac; \
-	  if grep -nE '#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|liburing|mswsock|winsock2|windows|netinet|arpa/inet|sys/socket|sys/un|netdb)\.h>|#[[:space:]]*include[[:space:]]*<(netinet/|arpa/)|#[[:space:]]*include[[:space:]]*"(completion|io_engine)\.h"' "$$f"; then \
+	  if grep -nE '$(TIER1_FORBIDDEN_RE)' "$$f"; then \
 	    echo "TIER-1 VIOLATION: $$f (above the transport boundary) includes a platform/backend header"; bad=1; \
 	  fi; \
 	done; \
 	if [ $$bad -ne 0 ]; then echo "check-tier1-boundary: FAILED — an above-transport TU reaches a backend header; if it is infrastructure, add it to TIER1_INFRA with a reason"; exit 1; fi; \
-	echo "check-tier1-boundary: OK (default-deny: every src/parsers TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs)"
+	for h in '<poll.h>' '<sys/poll.h>' '<sys/select.h>' '<sys/epoll.h>' '<winsock2.h>' '"completion.h"' '"io_engine.h"'; do \
+	  if ! printf '#include %s\n' "$$h" | grep -qE '$(TIER1_FORBIDDEN_RE)'; then \
+	    echo "check-tier1-boundary: SELF-TEST FAILED — the forbidden-header regex no longer matches $$h"; exit 1; \
+	  fi; \
+	done; \
+	echo "check-tier1-boundary: OK (default-deny: every src/parsers TU stays above Tier-1 except $(words $(TIER1_INFRA)) allowlisted infrastructure TUs; self-canary green)"
 
 # Documentation-reference gate (R0). Every in-repo path a living-architecture doc links to must
 # resolve to a file that exists — so an architecture claim can never point at code/contract/gate
