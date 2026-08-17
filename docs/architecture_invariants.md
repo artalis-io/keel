@@ -105,11 +105,14 @@ is therefore a load-bearing contract:** a new completion backend must uphold it 
 stale-completion guard (R3a inventory; R3b decision, pinned by a planned single-shot regression
 test).
 
-The **watcher** guard (the `kl_event_dispatch` ctx-list scan) is the exception: it is UAF-safe but
-**not yet sufficient** — it matches by pointer identity, so a freed watcher node whose address is
-reused within the same drained batch causes stale-event *misdelivery* (an ABA hole; single-shot does
-not prevent it — the stale event is the legitimate one completion). This is an **open gap** with a
-remedy under design in R3b-W; until it lands, do not cite the watcher scan as a complete guard.
+The **watcher** guard is the `kl_event_dispatch` ctx-list scan **plus batch-bracketed deferred
+reclamation** (R3b-W): the scan alone matched by pointer identity and had a pointer-reuse ABA hole
+(a freed node's address reused within the same drained batch misdelivered the stale event; single-
+shot did not prevent it — the stale event is the legitimate one completion). **Resolved** by
+`kl_watcher_del` deferring a node's free while a dispatch bracket is open
+(`kl_event_ctx_dispatch_begin`/`end` around all three internal loops), so the address cannot be
+reused mid-batch. Regression: `tests/test_watcher_aba.c` (readiness / completion / server loops +
+nested / overflow / depth-0), demonstrated to fail against the pre-fix behavior.
 
 - **Why:** two related events in one batch, where the first frees the second's target, is the
   canonical completion UAF. A generation/lifetime token makes stale targets a safe no-op instead;

@@ -24,12 +24,12 @@ I5 (batch targets outlive referencing events), I9 (quarantine on uncertain retir
 **This is the central finding of R3a:** the datagram class carries a generation/liveness token and a
 quarantine flag; the other four classes do not — they are kept safe by *different, class-specific*
 mechanisms (inflight-pin, reentrancy-depth guards, exactly-one-completion-per-op, a watcher-list
-liveness scan). No live UAF exists in any class. However, one of those guards is **not sufficient**:
-the watcher pointer-scan is UAF-safe but has an **ABA misdelivery gap** under same-batch node
-address-reuse (finding 1a). So the picture is: the stream raw-`containerof` is a defense-in-depth
-question (safe today under single-shot + inflight-pin), while the **watcher class has a real
-correctness gap requiring a remedy** (R3b-W). The other three classes (datagram, accept, connect)
-are sound.
+liveness scan). No live UAF exists in any class. One of those guards was initially **not sufficient**:
+the watcher pointer-scan is UAF-safe but had an **ABA misdelivery gap** under same-batch node
+address-reuse (finding 1a) — now **RESOLVED** by R3b-W (batch-bracketed deferred reclamation,
+regression `tests/test_watcher_aba.c`). So the picture is: the stream raw-`containerof` is a
+defense-in-depth question (safe today under single-shot + inflight-pin); the watcher ABA is fixed;
+the other three classes (datagram, accept, connect) are sound.
 
 ## Inventory table
 
@@ -48,7 +48,7 @@ relies on a class-specific guarantee rather than a generation token (defense-in-
 
 | Sequence | Datagram | Stream | Accept | Connect | Watcher |
 |---|:--:|:--:|:--:|:--:|:--:|
-| (a) two events/batch, first frees second's target | P (token) | P (inflight-pin) | P (`in_dispatch`+CLOSING) | P (abort-skip) | **P(UAF) / GAP(ABA)** — scan is UAF-safe but address-reuse misdelivers (1a; R3b-W) |
+| (a) two events/batch, first frees second's target | P (token) | P (inflight-pin) | P (`in_dispatch`+CLOSING) | P (abort-skip) | P (scan + R3b-W bracketed deferred reclamation; ABA **resolved**, 1a) |
 | (b) synchronous completion during submit/arm | P (arm trampoline) | P (`completed_inline`, flag before arm) | P (`before=inflight` sync detect) | P (depth guards) | N/A |
 | (c) cancel completes inline | P (retire classifier) | P (`in_close_cancel` depth) | P (`in_dispatch`) | P (`cancel_requested` set first) | N/A |
 | (d) late completion after logical close | P (token→NULL owner) | P (`read_closed`; drop, still retire) | P (CLOSING ⇒ dispose) | P (`terminal` early-return) | P (list scan) |
@@ -75,8 +75,10 @@ relies on a class-specific guarantee rather than a generation token (defense-in-
    a pool/arena allocator that recycles a just-freed same-size block). Scope: this is a property of
    the shared tagged-watcher scan, but the **connect** class is additionally protected by drain-time
    abort-skip (an aborted connect op is freed in the drain loop *before* it becomes a dispatched
-   event — `src/event_iouring.c:344`), so the **watcher class is the one exposed**. Remedy is
-   deferred to a separate freeze — see R3b-W ([r3b_w_watcher_aba_remedy.md](r3b_w_watcher_aba_remedy.md)).
+   event — `src/event_iouring.c:344`), so the **watcher class is the one exposed**. **RESOLVED** by
+   R3b-W ([r3b_w_watcher_aba_remedy.md](r3b_w_watcher_aba_remedy.md)) — batch-bracketed deferred node
+   reclamation (a deleted node's address cannot be reused mid-batch). Regression:
+   `tests/test_watcher_aba.c`, demonstrated to fail against the pre-fix behavior and pass now.
 
 2. **The one asymmetry — sequence (e) for the stream class.** `KL_COMP_READ/WRITE` carries a raw
    `KlStream*` and the HTTP adapter recovers `KlConn` by containerof with **no generation guard**.
@@ -106,11 +108,10 @@ relies on a class-specific guarantee rather than a generation token (defense-in-
 
 R3b chooses the smallest remedy per class, if any. R3a records the open questions:
 
-- **Watcher ABA (finding 1a) — a real gap needing a remedy, not just coverage.** The pointer-scan
-  must be made ABA-safe. R3a does not choose the mechanism; the candidates (deferred node
-  reclamation to batch-end vs a stable watcher identity/generation) are compared in the R3b-W remedy
-  freeze ([r3b_w_watcher_aba_remedy.md](r3b_w_watcher_aba_remedy.md)). This is the one place R3
-  concludes "preserve as-is" is **not** acceptable.
+- **Watcher ABA (finding 1a) — RESOLVED.** The one place R3 concluded "preserve as-is" was not
+  acceptable. R3b-W ([r3b_w_watcher_aba_remedy.md](r3b_w_watcher_aba_remedy.md)) chose Candidate A
+  (batch-bracketed deferred node reclamation) over a stable identity/generation; implemented and
+  regression-tested (`tests/test_watcher_aba.c`, R3b-T2).
 - **Stream (e) defense-in-depth.** Is the "inflight-pin + single-shot backend" pair a strong enough
   contract to leave as-is, or should the stream class gain a lightweight generation check so a
   hypothetical duplicate/late completion is a safe no-op like datagram? Weigh against the cost of a

@@ -1,10 +1,10 @@
 # R3b-W — Watcher pointer-reuse ABA: remedy design freeze (docs-only)
 
-**Status:** design freeze, **docs-only**. No production code, no test changes here. This document
-scopes the remedy for the watcher ABA gap ([R3a](r3a_completion_lifetime_inventory.md) finding 1a),
-compares two candidate mechanisms, and recommends one — pausing for review before any implementation.
-Sibling docs: the [R3b decision](r3b_lifetime_decision.md) and invariant I5 in
-[architecture_invariants.md](architecture_invariants.md).
+**Status:** remedy design freeze — **reviewed, selected (Candidate A), and LANDED** (R3b-W-impl +
+R3b-T2). This document scopes the watcher ABA gap ([R3a](r3a_completion_lifetime_inventory.md)
+finding 1a), compares the two candidate mechanisms, and records the chosen one; see the
+Implementation & validation section at the end. Sibling docs: the [R3b decision](r3b_lifetime_decision.md)
+and invariant I5 in [architecture_invariants.md](architecture_invariants.md).
 
 ## The defect (grounded in code)
 
@@ -209,20 +209,22 @@ smaller, lower-risk fix** — provided the project accepts the documented batch 
 multi-event direct dispatch. If that contract is unacceptable, choose **B**. This freeze does not
 force the pick; it resolves the boundaries so review can decide A vs B.
 
-## Implementation & validation plan (separate, reviewed increments — not done here)
+## Implementation & validation — DONE
 
-1. **R3b-W-impl** (production): implement the chosen candidate. For A: add
-   `kl_event_ctx_dispatch_begin/end` + the two `KlEventCtx` fields in `src/event_ctx.c` /
-   `include/keel/event_ctx.h`; drain `retired` in `kl_event_ctx_free`; route `kl_comp_run`
+Candidate A was selected and landed across reviewed increments:
+
+1. **R3b-W-impl** (production, **DONE**): `kl_event_ctx_dispatch_begin/end` (checked, overflow-safe)
+   + the two `KlEventCtx` fields in `src/event_ctx.c` / `include/keel/event_ctx.h`; depth-0
+   fail-closed teardown in `kl_event_ctx_free`; all three loops — `kl_comp_run`
    (`src/completion_core.c`), `kl_event_ctx_run` (`src/event_ctx.c`), and the `src/server.c` readiness
-   loop through the helpers; document the public batch contract on `kl_event_dispatch`. This is an
-   **additive pre-release `KlEventCtx` layout change → consumers recompile.**
-2. **R3b-T2 part 2** (test): the ABA regression — delete B, force same-address C via a fixture
-   allocator, dispatch B's captured event, assert no misdelivery; ASan-clean; run over readiness and
-   (enrolled) io_uring, **and** exercise the `src/server.c` server-loop path. It must **fail before**
-   R3b-W-impl and **pass after**.
-3. On landing, flip invariant I5's watcher caveat from "open gap" to "resolved", and update R3a 1a /
-   R3b accordingly.
+   loop — open the bracket **before acquiring the batch** and balance it on every exit; public batch
+   contract documented on `kl_event_dispatch`. An **additive pre-release `KlEventCtx` layout change →
+   consumers recompile.**
+2. **R3b-T2** (test, **DONE** — `tests/test_watcher_aba.c`): deterministic same-address-reuse ABA
+   over readiness / completion / the real server loop, plus nested-bracket / unmatched-`end` /
+   overflow-refusal / depth-0. **Demonstrated to fail against the pre-fix behavior and pass at HEAD**;
+   ASan/UBSan/LSan-clean.
+3. On landing, invariant I5's watcher caveat was flipped from "open gap" to **resolved**, and R3a 1a /
+   R3b updated accordingly.
 
-No production or test change is made in this freeze; it pauses here for review of A vs B and the
-public-dispatch policy question.
+The watcher pointer-reuse ABA is **RESOLVED**.
