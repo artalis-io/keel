@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include <keel/sockaddr.h>   /* KlSockAddr peer_addr */
 #include <keel/drain.h>      /* KlDrain wq (Phase-B write queue, embedded in KlStream) */
-#include <keel/stream.h>         /* KlStream contract (Phase-B transport, candidate public API) */
+#include <keel/stream.h>         /* KlStream contract (STABLE Phase-B transport API) */
 #include <keel/stream_detail.h>  /* struct KlStream layout — KlConn embeds it (opt-in detail) */
 #include <keel/listener.h>       /* KlSlotLease (admission credit handed off at accept, step 6B) */
 
@@ -30,9 +30,10 @@ typedef struct KlWsServerConn KlWsServerConn;
 typedef struct KlH2ServerConn KlH2ServerConn;
 typedef struct KlH2ServerConfig KlH2ServerConfig;
 
-/* The raw-transport subset of a connection is now the candidate public KlStream (contract in
- * <keel/stream.h>, layout in <keel/stream_detail.h>). KlConn embeds it below via the detail header.
- * External code must use accessors (e.g. kl_conn_peer_addr()), not `conn->stream.*`. */
+/* The raw-transport subset of a connection is the STABLE public KlStream (function + ownership
+ * contract in <keel/stream.h>, opt-in/unstable layout in <keel/stream_detail.h>). KlConn embeds it
+ * below via the detail header. External code must use accessors (e.g. kl_conn_peer_addr()), not
+ * `conn->stream.*` — the embedded layout is INTERNAL/UNSTABLE even though the API is stable. */
 
 typedef enum {
     KL_CONN_PROXY_HEADER,    /**< Reading a PROXY protocol header (pre-TLS) */

@@ -878,6 +878,31 @@ check-sockaddr-neutral:
 	if [ $$bad -ne 0 ]; then echo "check-sockaddr-neutral: FAILED"; exit 1; fi; \
 	echo "check-sockaddr-neutral: OK ($(words $(AXIS_PROTO_TUS)) protocol TUs are KlSockAddr-only)"
 
+# Documentation-reference gate (R0). Every in-repo path a living-architecture doc links to must
+# resolve to a file that exists — so an architecture claim can never point at code/contract/gate
+# that has been renamed or deleted. Narrow by construction: only the two living docs are scanned,
+# only markdown links (`](target)`), and each target is resolved relative to the doc's directory
+# (so `../include/keel/stream.h`, `datagram_contract.md`, `audits/README.md` all check). External
+# (http/mailto) and pure `#anchor` links are skipped. Backstop for docs/architecture_invariants.md.
+DOC_REF_FILES = docs/architecture.md docs/architecture_invariants.md
+check-doc-refs:
+	@bad=0; \
+	for doc in $(DOC_REF_FILES); do \
+	  if [ ! -f "$$doc" ]; then echo "check-doc-refs: MISSING doc $$doc"; bad=1; continue; fi; \
+	  dir=`dirname "$$doc"`; \
+	  refs=`grep -oE '\]\([^)]+\)' "$$doc" | sed -E 's/^\]\(//; s/\)$$//'`; \
+	  for ref in $$refs; do \
+	    case "$$ref" in \
+	      http://*|https://*|mailto:*|\#*) continue ;; \
+	    esac; \
+	    path=`printf '%s' "$$ref" | sed -E 's/#.*$$//'`; \
+	    [ -z "$$path" ] && continue; \
+	    if [ ! -e "$$dir/$$path" ]; then echo "check-doc-refs: $$doc -> broken link: $$path"; bad=1; fi; \
+	  done; \
+	done; \
+	if [ $$bad -ne 0 ]; then echo "check-doc-refs: FAILED"; exit 1; fi; \
+	echo "check-doc-refs: OK ($(words $(DOC_REF_FILES)) living-architecture docs, all in-repo links resolve)"
+
 # Scoped suppressions for documented false-positives (not real defects):
 #  - dns_resolver.c unusedStructMember / knownConditionTrueFalse: cppcheck explores the
 #    KEEL_FREESTANDING config, where the DNS-over-TCP fallback (the whole KlDnsTcp struct usage +
@@ -1629,7 +1654,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-doc-refs freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

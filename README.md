@@ -266,7 +266,7 @@ Full runnable demo: **`examples/custom_socket_provider.c`**.
 
 ## Architecture
 
-Keel is organized along **three orthogonal axes**, so any one can be replaced without disturbing the others:
+Keel is organized along **three orthogonal axes**, so any one can be replaced without disturbing the others. For the full model — the Tier-1 semantic transports (`KlListener`/`KlStream`/`KlDatagram`), the engine/provider split, and the rules that keep them separate — see [`docs/architecture.md`](docs/architecture.md) and the enforceable [`docs/architecture_invariants.md`](docs/architecture_invariants.md).
 
 - **Event axis** (`event.h` + `completion.h`) — how the loop learns work is ready. **Readiness** backends (epoll, kqueue, WSAPoll, poll) register interest and react to EAGAIN; **completion** backends (io_uring, IOCP) submit operations and reap completions. A capability negotiation (`KL_EVENT_CAP_READINESS | _COMPLETION`) matches a loop to a compatible socket provider; each backend keeps its native low-level semantics.
 - **Socket axis** (`socket.h` — the `KlSocketProvider` vtable + pointer-width `KlSocketHandle`) — where the bytes actually go. POSIX and Winsock built in; lwIP and a freestanding UEFI EFI_TCP4/UDP4 provider ship as integrations. Error translation, address conversion, and handle ownership live here, never above it.

@@ -366,6 +366,9 @@ jobs:
       - name: Address-neutrality gate (protocol TUs are KlSockAddr-only)
         run: make check-sockaddr-neutral
 
+      - name: Documentation-reference gate (living-architecture doc links resolve)
+        run: make check-doc-refs
+
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 

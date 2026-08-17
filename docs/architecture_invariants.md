@@ -1,0 +1,173 @@
+# KEEL — Architecture Invariants
+
+**Status:** living document (R0). These are the *enforceable* invariants of Keel's networking
+architecture — the rules every increment must preserve. Each is stated once, with why it matters
+and an **anchor**: a header contract, a source seam, an executable gate, or a test that pins it to
+real code. If an anchor and the code disagree, the code is authoritative and the anchor is a bug to
+fix — not the other way round.
+
+This document is deliberately about the **three-axis transport core**, not the whole HTTP feature
+set. For the layered internals (parsing, routing, body readers, response modes) see
+[architecture.md](architecture.md); for the historical audit trail see
+[audits/README.md](audits/README.md).
+
+## Vocabulary
+
+Introductory reasoning uses three nouns (see [keel_improvement_roadmap.md](keel_improvement_roadmap.md)):
+
+| Noun | Meaning | Canonical anchor |
+|---|---|---|
+| **Transport** | Semantic contract: `KlListener`, `KlStream`, `KlDatagram` | [stream.h](../include/keel/stream.h), [datagram.h](../include/keel/datagram.h), [listener.h](../include/keel/listener.h) |
+| **Engine** | Execution model: readiness or completion | [event.h](../include/keel/event.h), [completion.h](../src/completion.h) |
+| **Provider** | Network stack: POSIX, Winsock, lwIP, EFI | [socket.h](../src/socket.h), [socket_posix.c](../src/socket_posix.c) |
+
+"Event backend", "completion backend", and provider names remain valid implementation terms.
+
+---
+
+## The invariants
+
+### I1 — Semantic transports do not expose readiness/completion differences
+
+A protocol built on `KlStream`/`KlDatagram`/`KlListener` sees the *same* Keel-level behavior
+regardless of whether the loop underneath is readiness or completion. The engine model is an
+implementation detail of the driver, never a branch in protocol code.
+
+- **Why:** it is what makes the event axis replaceable. If protocols could observe the model, every
+  backend swap would be a protocol regression.
+- **Anchor:** the transport banners in [stream.h](../include/keel/stream.h) and
+  [datagram.h](../include/keel/datagram.h) both declare a *model-agnostic* contract; the datagram
+  facade proves it by feeding two capability-selected adapter tables into one state machine
+  ([datagram.c](../src/datagram.c) — `dg_comp_*` vs `dg_rdy_*`).
+- **Enforced by:** the same-facade live test runs over readiness and completion via
+  `kl_event_ctx_init` (`tests/test_datagram_live.c`); the axis matrix in
+  [keel_axis_audit.md](keel_axis_audit.md).
+
+### I2 — Readiness registers interest; completion submits owned operations
+
+The two engine models keep their native semantics. Readiness = register interest → wait → perform
+op → handle `EAGAIN` → re-arm. Completion = construct owned op → submit → track lifetime → receive
+completion → retire/cancel/resubmit. Neither is emulated in terms of the other.
+
+- **Why:** honest models are correct and fast; a lowest-common-denominator emulation (epoll-as-completion,
+  IOCP-as-readiness) is both slower and a source of lifetime bugs.
+- **Anchor:** readiness interest is [event.h](../include/keel/event.h) `kl_event_add`/`_mod`/`_del`;
+  completion submission is [completion.h](../src/completion.h) `kl_comp_post_*` with by-value op
+  descriptors. Selection is [event_caps.h](../src/event_caps.h) (`KL_EVENT_CAP_COMPLETION`).
+- **Enforced by:** [event_provider_design.md](event_provider_design.md); the capability negotiation
+  `kl_event_ctx_sockets_compatible()`.
+
+### I3 — Logical close is distinct from physical retirement
+
+Calling close/cancel on a transport is a *logical* request. The underlying storage (op state,
+buffers, the transport object) must not be reused or freed until the backend proves the operation
+can no longer touch it. `on_close` fires exactly once, only after every posted op has physically
+retired.
+
+- **Why:** on a completion engine a "cancelled" op can still complete later; freeing on the logical
+  close is a use-after-free.
+- **Anchor:** the CLOSE facet in [stream.h](../include/keel/stream.h) ("CONFIRMED DETACHMENT — on_close
+  fires once, only after both the receive and send ops are physically retired") and lifetime #1 in
+  [listener.h](../include/keel/listener.h).
+- **Enforced by:** [datagram_contract.md](datagram_contract.md) close section;
+  [datagram_step7b9_efi_close_design.md](datagram_step7b9_efi_close_design.md) (the hardest close case).
+
+### I4 — Callback reentrancy and synchronous completion are supported
+
+An arm/submit may complete *synchronously*, before it returns, and a callback may run reentrantly
+or earlier in the same drained completion batch than a related event. Transport state machines are
+written to survive this (iterative arm trampolines, not recursive re-arm).
+
+- **Why:** several providers (and the resolver contract) legitimately complete inline; code that
+  assumes async-only delivery corrupts state under them.
+- **Anchor:** the READ facet in [stream.h](../include/keel/stream.h) ("sync-completion-safe —
+  iterative arm trampoline"); the resolver sync-completion contract in [CLAUDE.md](../CLAUDE.md).
+- **Enforced by:** the pollcomp double drives synchronous/scripted completions
+  (`make smoke-pollcomp-asan`); public-facade mock tests (`tests/test_datagram_public.c`).
+
+### I5 — Completion-batch targets outlive every event that can reference them
+
+Any object a completion event references (op, buffer, transport core, life token) stays valid until
+*after* every event in the drained batch that could reach it has been dispatched. Ownership of a
+life reference transfers into the op on submit and releases exactly once at its terminal event.
+
+- **Why:** two related events in one batch, where the first frees the second's target, is the
+  canonical completion UAF. A generation/lifetime token makes stale targets a safe no-op instead.
+- **Anchor:** [completion.h](../src/completion.h) `KlCompletionEvent.life` + `retain_life` (the
+  borrowed-vs-transferred rule), released *iff* `!retain_life` at all three sites —
+  [completion_core.c](../src/completion_core.c), [datagram.c](../src/datagram.c), [udp.c](../src/udp.c).
+- **Enforced by:** ASan/UBSan/LSan over the completion driver (`make smoke-pollcomp-asan`,
+  container `make smoke-iouring-asan`); the R3 lifetime audit builds the full target table.
+
+### I6 — Platform backends are transport-mechanical, not protocol-aware
+
+Event/completion backends and socket providers move bytes and deliver ops. They contain no HTTP,
+TLS, WebSocket, HTTP/2, or PROXY knowledge, and no host socket-address types leak up into protocol
+TUs. The backend receives operation kind, opaque target/lifetime, buffers, lengths, and mechanical
+flags — never protocol-state enums.
+
+- **Why:** protocol knowledge in a backend duplicates decisions per engine and couples the axes.
+- **Anchor:** completion ops are neutral by-value descriptors (`KlDgramSendOp`/`KlDgramRecvOp` in
+  [completion.h](../src/completion.h)); the address seam is [socket.h](../src/socket.h) (`KlSockAddr`).
+- **Enforced by:** `make check-sockaddr-neutral` ([Makefile](../Makefile)) + the protocol-header grep
+  in [keel_axis_audit.md](keel_axis_audit.md) Goal 4. (R4 extends this to a protocol-state check.)
+
+### I7 — Integration-owned types do not enter `include/keel/*.h`
+
+Optional third-party/platform implementations (nghttp2, mbedtls, lwIP, EFI) live under
+`integrations/` and implement Keel-owned seams. Their dependency headers and types never appear in
+the installed public API.
+
+- **Why:** the core `libkeel` must build and install without any integration's dependency present.
+- **Anchor:** `include/keel/*.h` references no `nghttp2_*`/`mbedtls_*`/`lwip`/`efi` type;
+  integrations sit in `integrations/` (see [event_provider_design.md](event_provider_design.md)).
+- **Enforced by:** the freestanding-header gate `make freestanding-headers` ([Makefile](../Makefile)) —
+  the public subset compiles with no hosted libc and no integration present.
+
+### I8 — Hot transport paths allocate no memory
+
+Steady-state send/recv/accept allocate nothing. Buffers and op slots are preallocated at init;
+backpressure is a bounded, fixed-capacity queue, not a growing one.
+
+- **Why:** allocation on the data path is a latency and failure-mode hazard; bounded queues are also
+  the backpressure mechanism.
+- **Anchor:** the datagram fixed-slot send queue ([datagram.h](../include/keel/datagram.h) —
+  "packet-slot bounded send queue"); the pre-allocated connection pool and inline `read_buf`
+  ([architecture.md](architecture.md), "No `malloc` during request handling"). All allocation goes
+  through [allocator.h](../include/keel/allocator.h).
+- **Enforced by:** ASan/LSan smokes show no per-request allocation churn; the fixed-slot admission
+  tests in [datagram_contract.md](datagram_contract.md).
+
+### I9 — Uncertain retirement quarantines storage rather than guessing
+
+When a backend cannot prove an operation has retired (an abandoned firmware token that may still
+write an inbound buffer), it *quarantines* the storage — retains the reference fail-closed — instead
+of releasing and risking a UAF.
+
+- **Why:** on exotic providers (EFI) physical retirement is genuinely unprovable at close; leaking a
+  bounded amount of storage is strictly safer than a use-after-free.
+- **Anchor:** the borrowed-ref path in [completion.h](../src/completion.h) (`retain_life=1`) and the
+  `KL_DGRAM_RETIRE_QUARANTINED` classifier; design in
+  [datagram_step7b9_efi_close_design.md](datagram_step7b9_efi_close_design.md).
+- **Enforced by:** the EFI host-mock quarantine tests (`integrations/uefi/mock_efi_test.c`); the
+  release invariant in I5 honors `retain_life` uniformly.
+
+---
+
+## Enforcement summary
+
+| Invariant | Primary mechanical gate |
+|---|---|
+| I1 model-agnostic transports | `tests/test_datagram_live.c` over both engines |
+| I2 honest engine models | capability negotiation + `event_provider_design.md` |
+| I3 close ≠ retirement | contract close sections + close-design note |
+| I4 sync/reentrant completion | `make smoke-pollcomp-asan`, public mock |
+| I5 target lifetime | ASan/UBSan/LSan smokes; R3 audit table |
+| I6 transport-mechanical backends | `make check-sockaddr-neutral` + Goal-4 grep |
+| I7 no integration types in public API | `make freestanding-headers` |
+| I8 allocation-free hot path | fixed-slot design + sanitizer smokes |
+| I9 quarantine on uncertain retirement | EFI host-mock quarantine tests |
+
+Every markdown link above to an in-repo path is checked by `make check-doc-refs` — a claim that
+points at a file which no longer exists fails the gate.
+

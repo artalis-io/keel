@@ -1,6 +1,57 @@
 # KEEL — Architecture
 
-Deep technical documentation of KEEL's internal design.
+The current-state entry point to KEEL's design. Start with the three-axis model below; the rest of
+this document is the HTTP-server internals reference (state machines, memory model, zero-copy, TLS).
+The *rules* those internals must preserve are in
+[architecture_invariants.md](architecture_invariants.md); the dated verification history is in
+[audits/README.md](audits/README.md); the consolidation plan is
+[keel_improvement_roadmap.md](keel_improvement_roadmap.md).
+
+## Architecture at a glance — Transport / Engine / Provider
+
+KEEL's networking is three **orthogonal, independently replaceable axes**. Protocols sit above all
+three and touch no platform socket API or event engine directly.
+
+```text
+        application  →  protocols (HTTP/1.1, HTTP/2, WebSocket, SSE, DNS, TLS-above-stream)
+                            │
+                            ▼
+   Transport   KlListener        KlStream          KlDatagram        ← semantic contracts (Tier-1)
+   (semantics) (accept path)     (raw byte stream) (bounded message)
+                            │
+              ┌─────────────┴─────────────┐
+              ▼                            ▼
+   Engine     readiness  |  completion     Provider   POSIX | Winsock | lwIP | EFI
+   (model)    epoll/kqueue/  io_uring/      (stack)    sockets        raw    EFI_*
+              WSAPoll/poll   IOCP/pollcomp
+```
+
+- **Transport axis** — the three **Tier-1 semantic primitives**, each a `STABLE` public API whose
+  *function + ownership contract* is committed and whose struct layout is opt-in/unstable
+  (`*_detail.h`):
+  - [`KlListener`](../include/keel/listener.h) — accept-path state machine (credit reservation,
+    lease handoff, confirmed-detachment close). Contract: [transport_surface.md](transport_surface.md).
+  - [`KlStream`](../include/keel/stream.h) — raw byte transport (bounded write queue, strict
+    read pause/resume, graceful/abortive close). Contract: [stream_contract.md](stream_contract.md).
+  - [`KlDatagram`](../include/keel/datagram.h) — bounded message transport (fixed-slot admission,
+    message boundaries, source/local metadata). Contract: [datagram_contract.md](datagram_contract.md).
+    `KlUdp` is the compatibility + extended-UDP facility alongside it (batching, GSO/GRO, multicast).
+- **Engine axis** — readiness ([event.h](../include/keel/event.h): register interest → wait →
+  re-arm) and completion ([completion.h](../src/completion.h): submit owned op → track → retire) are
+  *peer models*, negotiated by capability ([event_caps.h](../src/event_caps.h)), never emulated in
+  terms of each other. Details: [event_provider_design.md](event_provider_design.md).
+- **Provider axis** — the network stack behind [socket.h](../src/socket.h)
+  (`KlSocketProvider`): POSIX [socket_posix.c](../src/socket_posix.c), Winsock, and the
+  `integrations/` adapters (lwIP, EFI). Providers are transport-mechanical — no protocol knowledge.
+
+Every combination's runtime status is the compatibility matrix in
+[capability_matrix.md](capability_matrix.md) and the axis audit's matrix in
+[keel_axis_audit.md](keel_axis_audit.md). The invariants that keep the axes separate — and keep
+completion lifetimes safe — are enumerated in [architecture_invariants.md](architecture_invariants.md).
+
+> The diagrams and sections below predate the three-axis vocabulary and describe the **HTTP server
+> data path** specifically (readiness/POSIX). They remain accurate for that path; read them as the
+> protocol-layer detail beneath the Transport axis.
 
 ## System Overview
 

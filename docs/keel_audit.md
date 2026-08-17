@@ -1,5 +1,54 @@
 # C Audit Report: KEEL
 
+> **Historical, append-only evidence log — newest pass first.** Each pass records what was verified
+> on its date; verify any specific claim against current code before acting on it. Current-state
+> docs: [architecture.md](architecture.md), [architecture_invariants.md](architecture_invariants.md).
+> Index: [audits/README.md](audits/README.md).
+
+## Thirteenth pass — datagram Phase B (public `KlDatagram` + `KlUdp`/dns) whole-tree re-audit (2026-08-17)
+
+**Scope:** whole `src/` (69 `.c`) + `parsers/` + headers + `Makefile`, focused on the code added
+since the twelfth pass — the datagram consolidation arc (`src/udp.c`, `src/socket_dgram_posix.c`,
+`src/datagram.c`, `src/datagram_core.*`, `src/completion_core.c`, `src/dns_resolver.c`,
+`src/udp_server.c`, `integrations/uefi/event_efi.c`) plus the IOCP association-at-create fix.
+
+**Verdict: CLEAN.** 0 Critical / 0 High / 0 Medium / 1 Low (informational). The build is
+`-Werror`-clean (**0 warnings** under `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2`), `cppcheck`
+exits 0, and the completion axis is ASan/UBSan/LSan-clean natively (`smoke-pollcomp-asan`) and in
+the container (`smoke-iouring-asan`).
+
+### Mechanical scans (whole tree)
+
+| Category | Result |
+|---|---|
+| Unsafe str/format (`strcpy`/`strcat`/`sprintf`/`gets`/`vsprintf`) | **none** (grep hits are the word "gets" in comments) |
+| Unsafe int parse (`atoi`/`atol`/`atof`/`atoll`) | **none** |
+| Direct `malloc`/`free`/`calloc`/`realloc` | **none** — all via `kl_malloc`/`kl_free` (with size) |
+| Unchecked `kl_malloc` (spot-checked incl. dgram batch, websocket, decompress) | all NULL-checked; multi-alloc uses batch-then-check + free-on-error |
+| Overflow guards (`SIZE_MAX`/`INT_MAX` before size arithmetic) | present in 39 `.c` files |
+| Dead code (`#if 0` / `if (0)`) | **none** |
+| VLAs / large stack arrays | **none** |
+| SIGPIPE | ignored at server init; `SO_NOSIGPIPE` + `MSG_NOSIGNAL` (POSIX); no-op on Windows |
+| `-Werror` build warnings | **0** |
+
+### Automated safety net (cross-referenced, not re-derived)
+
+83 test suites · 8 fuzz targets (parser/multipart/websocket/response/dns/proxy/url + decompress)
+· `make analyze` (scan-build) · `make cppcheck` (**rc=0**) · `make debug` ASan+UBSan · the
+completion-axis smokes above.
+
+### Low (informational)
+
+| # | File:line | Note |
+|---|-----------|------|
+| L1 | `src/socket_dgram_posix.c:500-504` | `pdg_rx_batch_new` computes `(size_t)n * sizeof(...)` for the `recvmmsg` batch without an explicit overflow guard on `n`. Not exploitable: `n` is the app-set `mmsg_batch` config knob (not network input) and is 64-bit-safe; on 32-bit a pathological value could overflow. Defense-in-depth: cap `mmsg_batch` or guard the multiply. |
+
+**Conclusion:** no actionable memory-safety, resource, or hardening issues in the datagram arc or
+the wider tree; the sole Low item is a config-controlled, 64-bit-safe robustness nit. No fixes
+applied (audit-only pass).
+
+---
+
 ## Twelfth pass — Phase 10 UEFI server (S-1..S-7) + client/server orchestration refactors (2026-08-08)
 
 **Scope:** the code added/changed since the eleventh pass — the freestanding UEFI HTTP(S)
