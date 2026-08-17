@@ -90,5 +90,7 @@ frozen and implemented one protocol at a time with behavior parity and every app
 - No consumer migration — only the positioning, the rule, and the inventory.
 - **Not** a claim of *permanent* duplication: consolidation (migrate DNS + `KlUdpServer` onto
   `KlDatagram` behind an optional extended-capability / queue-policy layer, then reduce `KlUdp` to a
-  compatibility wrapper and optionally deprecate it) is a **recognized future objective, deferred** to
-  its own design + migration increment. This document neither designs nor commits to it.
+  compatibility wrapper and optionally deprecate it) is a **recognized future objective**. Its
+  inventory + decisions are frozen in
+  [datagram_consolidation_design.md](datagram_consolidation_design.md); the implementation is split
+  into separately-reviewed increments there (none authorized yet).
