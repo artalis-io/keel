@@ -14,6 +14,10 @@
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <stdint.h>
+#include <limits.h>            /* INT_MAX — dispatch-depth overflow guard (R3b-W) */
+#ifndef KEEL_FREESTANDING
+#include <assert.h>            /* debug precondition in kl_event_ctx_free (hosted only) */
+#endif
 #include "socket.h"        /* kl_socket_provider_has_cap + KL_SOCK_CAP_* (caps negotiation) */
 #include "event_caps.h"
 #include "io_engine.h"   /* kl_comp_run — the generic completion tick */
@@ -70,14 +74,20 @@ void kl_event_ctx_free(KlEventCtx *ctx) {
     ctx->timers = NULL;
     ctx->timer_count = 0;
     ctx->timer_cap = 0;
-    /* R3b-W: teardown must be balanced — no batch dispatch in flight (dispatch_depth == 0).
-     * Defensively reset the depth and reclaim any deferred nodes (normally empty at depth 0) so a
-     * ctx destroyed without a final dispatch_end still frees every retired watcher. */
-    ctx->dispatch_depth = 0;
-    while (ctx->retired) {
-        KlWatcher *w = ctx->retired;
-        ctx->retired = w->next;
-        kl_free(ctx->alloc, w, sizeof(KlWatcher));
+    /* R3b-W: freeing a ctx during batch dispatch is a CALLER BUG — captured events on the live
+     * dispatch stack may still reference retired nodes, so reclaiming them here would be unsafe.
+     * The precondition is dispatch_depth == 0 (asserted in hosted debug builds). Defensive draining
+     * of `retired` (normally already empty, drained when the outermost bracket closed) is valid ONLY
+     * at depth 0; at nonzero depth we deliberately do NOT touch it. */
+#ifndef KEEL_FREESTANDING
+    assert(ctx->dispatch_depth == 0);
+#endif
+    if (ctx->dispatch_depth == 0) {
+        while (ctx->retired) {
+            KlWatcher *w = ctx->retired;
+            ctx->retired = w->next;
+            kl_free(ctx->alloc, w, sizeof(KlWatcher));
+        }
     }
     while (ctx->watchers) {
         KlWatcher *w = ctx->watchers;
@@ -254,9 +264,14 @@ static void kl_ctx_reclaim_retired(KlEventCtx *ctx) {
     }
 }
 
-void kl_event_ctx_dispatch_begin(KlEventCtx *ctx) {
-    if (!ctx) return;
+/* Returns 0 on success (batch may be dispatched), -1 if the maximum nesting depth is reached
+ * (pathological/unbalanced nesting). On -1 the caller MUST NOT dispatch the batch and MUST NOT call
+ * kl_event_ctx_dispatch_end (the depth was not incremented). Guards against signed-overflow UB. */
+int kl_event_ctx_dispatch_begin(KlEventCtx *ctx) {
+    if (!ctx) return -1;
+    if (ctx->dispatch_depth == INT_MAX) return -1;   /* refuse to overflow — do not dispatch */
     ctx->dispatch_depth++;
+    return 0;
 }
 
 void kl_event_ctx_dispatch_end(KlEventCtx *ctx) {
@@ -292,11 +307,17 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
     }
 
     int n = kl_event_wait(&ctx->loop, events, max_events, timeout_ms);
+    int begin_failed = 0;
     if (n > 0) {
-        kl_event_ctx_dispatch_begin(ctx);   /* R3b-W: batch bracket (defer mid-batch watcher frees) */
-        for (int i = 0; i < n; i++)
-            kl_event_dispatch(ctx, &events[i]);
-        kl_event_ctx_dispatch_end(ctx);
+        /* R3b-W: batch bracket (defer mid-batch watcher frees). If begin fails (max nesting depth),
+         * do NOT dispatch this batch and propagate failure. */
+        if (kl_event_ctx_dispatch_begin(ctx) < 0) {
+            begin_failed = 1;
+        } else {
+            for (int i = 0; i < n; i++)
+                kl_event_dispatch(ctx, &events[i]);
+            kl_event_ctx_dispatch_end(ctx);
+        }
     }
 
     if (events != stack_buf)
@@ -305,5 +326,6 @@ int kl_event_ctx_run(KlEventCtx *ctx, int max_events, int timeout_ms) {
     /* Fire expired timers */
     kl_timer_fire(ctx);
 
+    if (begin_failed) return -1;
     return n < 0 ? -1 : n;
 }

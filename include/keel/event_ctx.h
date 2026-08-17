@@ -202,8 +202,12 @@ static inline int kl_event_dispatch(KlEventCtx *ctx, const KlEvent *event) {
  * watcher node deleted during the batch. Nesting (a callback that runs its own tick) is supported —
  * reclamation happens only at depth 0. `end` guards against underflow (an unmatched end is a no-op).
  * A single unbatched kl_event_dispatch needs no bracket. See the kl_event_dispatch batch contract.
+ *
+ * `begin` RETURN CONTRACT: 0 on success (the batch may be dispatched); -1 if the maximum nesting
+ * depth is reached (pathological/unbalanced nesting). On -1 the caller MUST NOT dispatch the batch
+ * and MUST NOT call `end` — the depth was not incremented. This makes the increment overflow-safe.
  */
-void kl_event_ctx_dispatch_begin(KlEventCtx *ctx);
+int  kl_event_ctx_dispatch_begin(KlEventCtx *ctx);
 void kl_event_ctx_dispatch_end(KlEventCtx *ctx);
 
 /**

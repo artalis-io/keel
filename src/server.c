@@ -413,8 +413,12 @@ int kl_server_run(KlServer *s) {
 
         /* R3b-W: bracket the batch dispatch so a watcher deleted mid-batch (e.g. via async
          * completion during a connection callback) is not freed until every event in this batch
-         * has been dispatched — closing the pointer-reuse ABA hole. */
-        kl_event_ctx_dispatch_begin(&s->ev);
+         * has been dispatched — closing the pointer-reuse ABA hole. If begin fails (max nesting
+         * depth — an unbalanced-bracket bug), do not dispatch; fail-stop the run loop. */
+        if (kl_event_ctx_dispatch_begin(&s->ev) < 0) {
+            kl_log(s, KL_LOG_ERROR, "dispatch nesting overflow");
+            break;
+        }
         for (int i = 0; i < n; i++) {
             /* Watcher dispatch (tagged pointer, LSB=1) */
             if (kl_event_dispatch(&s->ev, &events[i]))

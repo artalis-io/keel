@@ -69,9 +69,14 @@ While the batch is in flight the node's memory is not returned to the allocator,
 **Central begin/end helpers (no per-loop duplication).** Add one pair, used by every batch dispatcher:
 
 ```
-void kl_event_ctx_dispatch_begin(KlEventCtx *ctx);   /* ++dispatch_depth */
+int  kl_event_ctx_dispatch_begin(KlEventCtx *ctx);   /* 0 ok; -1 at INT_MAX depth (overflow guard) */
 void kl_event_ctx_dispatch_end(KlEventCtx *ctx);     /* if (--dispatch_depth == 0) drain retired */
 ```
+
+`begin` is **checked**: it returns -1 rather than incrementing past `INT_MAX` (these are public helpers,
+so pathological/unbalanced nesting must not trigger signed-overflow UB). On -1 the caller MUST NOT
+dispatch the batch and MUST NOT call `end`. All three internal loops propagate the failure — they skip
+dispatching the drained batch and surface an error (the server loop fail-stops its run loop).
 
 - `kl_watcher_del`: unlink from `ctx->watchers` and call `kl_event_del` (backend unregister) **now**
   (so no further events are armed); if `dispatch_depth > 0`, thread the node onto the `retired` list
@@ -97,16 +102,20 @@ fix un-bracketed external direct batch dispatch — that gap is the price of A, 
 which Candidate B differs (B needs no caller contract). Option (b) — narrowing/deprecating direct
 multi-event dispatch — is the same contract stated as a restriction; option (c) is "choose B".
 
-**`kl_event_ctx_free` handling:** at teardown, free the live `watchers` list as today **and** drain
-any nodes still on `retired` (defensive — `retired` is normally empty at depth 0; freeing at teardown
-covers a ctx destroyed without a final `dispatch_end`, and asserts `dispatch_depth == 0`).
+**`kl_event_ctx_free` handling:** freeing a context **during** batch dispatch is **invalid** — captured
+events on the live dispatch stack may still reference retired nodes, so reclaiming them mid-batch would
+be unsafe. The precondition is `dispatch_depth == 0`, **asserted in hosted debug builds** (guarded
+`#ifndef KEEL_FREESTANDING` so freestanding is unaffected). Defensive draining of `retired` (normally
+already empty, having been drained when the outermost bracket closed) is performed **only at depth 0**;
+at nonzero depth the list is deliberately left untouched. The reset-and-drain framing is dropped: free
+does **not** silently "cover" a missing `dispatch_end`.
 
 **State / ownership:**
 
 | Node state | In `ctx->watchers`? | Memory owner | Scan verdict |
 |---|---|---|---|
 | live | yes | ctx | dispatched |
-| deleted mid-batch | no (unlinked) | ctx `retired` list (freed at depth→0, or at ctx_free) | not live ⇒ stale event consumed |
+| deleted mid-batch | no (unlinked) | ctx `retired` list (freed when the outermost bracket closes, depth→0; or at ctx_free only if depth is already 0) | not live ⇒ stale event consumed |
 | deleted outside batch | no | freed immediately | not live |
 
 **Failure paths:** allocation is not on the del path (only a list re-link); `kl_event_del` failure is

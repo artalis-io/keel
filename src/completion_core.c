@@ -33,8 +33,11 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
     int n = kl_comp_drain(ctx, ev, max, timeout_ms);
     if (n < 0) return -1;
 
-    kl_event_ctx_dispatch_begin(ctx);   /* R3b-W: batch bracket — defer mid-batch watcher frees so a
-                                         * stale KL_COMP_WATCHER/CONNECT can't be misdelivered via reuse */
+    /* R3b-W: batch bracket — defer mid-batch watcher frees so a stale KL_COMP_WATCHER/CONNECT can't
+     * be misdelivered via address reuse. If begin fails (max nesting depth), do not dispatch this
+     * batch; propagate failure. */
+    if (kl_event_ctx_dispatch_begin(ctx) < 0)
+        return -1;
     for (int i = 0; i < n; i++) {
         switch (ev[i].kind) {
         /* TCP conn completions → the server (via the ctx hook, set when a server runs
