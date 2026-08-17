@@ -880,6 +880,32 @@ check-sockaddr-neutral:
 	if [ $$bad -ne 0 ]; then echo "check-sockaddr-neutral: FAILED"; exit 1; fi; \
 	echo "check-sockaddr-neutral: OK ($(words $(AXIS_PROTO_TUS)) protocol TUs are KlSockAddr-only)"
 
+# Tier-1 transport-boundary gate (R1). The complement of check-sockaddr-neutral (host socket-ADDRESS
+# types): protocol-layer TUs (AXIS_PROTO_TUS) must not reach BELOW the Tier-1 transports
+# (KlListener/KlStream/KlDatagram) into engine/provider internals — no platform networking/event
+# system header, and no raw completion-seam header (completion.h). The Keel completion TICK
+# (io_engine.h: kl_comp_run / kl_comp_post_connect) is the driver-orchestration seam, allowed ONLY for
+# the two driver TUs that actually run the loop / drive the async connect — server.c and
+# client_async.c (allowlisted, with reason). Include-based, so it is robust against the WSA*/overlapped
+# mentions that appear only in explanatory comments (connection.c / response.c / client_sync.c).
+# Backstop for docs/architecture_invariants.md I10; mirrors axis-audit Goal 4.
+TIER1_IOENGINE_ALLOW = src/server.c src/client_async.c
+check-tier1-boundary:
+	@bad=0; \
+	for f in $(AXIS_PROTO_TUS); do \
+	  if grep -nE '#[[:space:]]*include[[:space:]]*<(sys/epoll|sys/event|sys/eventfd|liburing|mswsock|winsock2|windows)\.h>|#[[:space:]]*include[[:space:]]*"completion\.h"' "$$f"; then \
+	    echo "TIER-1 VIOLATION: $$f includes a platform-event / completion-seam header"; bad=1; \
+	  fi; \
+	  case " $(TIER1_IOENGINE_ALLOW) " in \
+	    *" $$f "*) : ;; \
+	    *) if grep -nE '#[[:space:]]*include[[:space:]]*"io_engine\.h"' "$$f"; then \
+	         echo "TIER-1 VIOLATION: $$f includes io_engine.h (Keel completion tick — driver-only, not allowlisted)"; bad=1; \
+	       fi ;; \
+	  esac; \
+	done; \
+	if [ $$bad -ne 0 ]; then echo "check-tier1-boundary: FAILED"; exit 1; fi; \
+	echo "check-tier1-boundary: OK ($(words $(AXIS_PROTO_TUS)) protocol TUs stay above Tier-1; io_engine.h allowlist: $(TIER1_IOENGINE_ALLOW))"
+
 # Documentation-reference gate (R0). Every in-repo path a living-architecture doc links to must
 # resolve to a file that exists — so an architecture claim can never point at code/contract/gate
 # that has been renamed or deleted. Narrow by construction: only the two living docs are scanned,
@@ -1656,7 +1682,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-doc-refs freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

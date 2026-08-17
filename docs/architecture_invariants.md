@@ -179,6 +179,32 @@ of releasing and risking a UAF.
 - **Enforced by:** the EFI host-mock quarantine tests (`integrations/uefi/mock_efi_test.c`); the
   release invariant in I5 honors `retain_life` uniformly.
 
+### I10 — Protocols depend downward only through the Tier-1 transports
+
+`KlListener`, `KlStream`, and `KlDatagram` are the **canonical Tier-1 semantic transports**. A
+protocol-layer TU (HTTP/1.1, HTTP/2, WebSocket, SSE, client, redirect, …) reaches the network *only*
+through them plus the socket/event abstractions — the dependency direction is
+**`protocol → transport → driver/adapter → engine + provider`, one way**. A protocol TU includes no
+platform networking/event system header and no raw completion seam (`completion.h`); it uses a lower
+seam only when a missing semantic is documented and reviewed.
+
+- **Why:** a protocol that reached `epoll_ctl`/`WSARecv`/the completion vtable directly would be
+  pinned to one engine — the whole point of the three-axis split is that a protocol is written once,
+  above the transport, and runs over every backend unchanged.
+- **Anchor:** `make check-tier1-boundary` ([Makefile](../Makefile)) over the protocol set
+  (`AXIS_PROTO_TUS`) — the complement of `make check-sockaddr-neutral` (host socket-*address* types,
+  I6). Include-based, so robust against the `WSA*`/overlapped mentions that appear only in explanatory
+  comments (`connection.c`/`response.c`/`client_sync.c`).
+- **Intentional exceptions (allowlisted, with reason):** `server.c` and `client_async.c` — the server
+  run loop and the async client's connect path — include `io_engine.h`, the Keel completion **tick**
+  (`kl_comp_run` / `kl_comp_post_connect`). That is the driver-*orchestration* seam (a Keel
+  abstraction that runs a loop / posts a connect), not a backend internal. Separately, `udp_server.c`
+  (its datagram handler API surfaces the source `struct sockaddr`) and `dns_resolver.c` (the
+  freestanding DNS-over-TCP fallback) carry deliberate, documented *address* exceptions — which is why
+  they sit outside the address-neutral set (I6), not a Tier-1-boundary breach.
+- **Enforced by:** `make check-tier1-boundary`; the inventory that found zero defects is recorded in
+  [keel_axis_audit.md](keel_axis_audit.md) (Goal 4).
+
 ---
 
 ## Enforcement summary
@@ -194,6 +220,7 @@ of releasing and risking a UAF.
 | I7 no integration types in public API | `make freestanding-headers` |
 | I8 allocation-free hot path | fixed-slot design + sanitizer smokes |
 | I9 quarantine on uncertain retirement | EFI host-mock quarantine tests |
+| I10 protocols depend only through Tier-1 | `make check-tier1-boundary` |
 
 Every markdown link above to an in-repo path is checked by `make check-doc-refs` — a claim that
 points at a file which no longer exists fails the gate.

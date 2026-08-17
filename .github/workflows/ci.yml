@@ -373,6 +373,9 @@ jobs:
       - name: Address-neutrality gate (protocol TUs are KlSockAddr-only)
         run: make check-sockaddr-neutral
 
+      - name: Tier-1 boundary gate (protocol TUs stay above KlListener/KlStream/KlDatagram)
+        run: make check-tier1-boundary
+
       - name: Documentation-reference gate (living-architecture doc links resolve)
         run: make check-doc-refs
 

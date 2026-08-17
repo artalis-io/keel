@@ -48,6 +48,15 @@ three and touch no platform socket API or event engine directly.
   (`KlSocketProvider`): POSIX [socket_posix.c](../src/socket_posix.c), Winsock, and the
   `integrations/` adapters (lwIP, EFI). Providers are transport-mechanical — no protocol knowledge.
 
+**Dependency direction (one way).** New protocols depend *downward* only:
+`protocol → Tier-1 transport → driver/adapter → engine + provider`. A protocol TU reaches the
+network through `KlListener`/`KlStream`/`KlDatagram` and the socket/event abstractions — never by
+including a platform networking/event header or the raw completion seam, and never by calling an
+engine directly. A lower seam is used only when a missing semantic is documented and reviewed. This
+is invariant I10, enforced by `make check-tier1-boundary` (the complement of `check-sockaddr-neutral`).
+Two driver TUs are allowlisted to use the Keel completion *tick* (`io_engine.h`): `server.c` (run
+loop) and `client_async.c` (completion connect) — driver orchestration, not backend internals.
+
 Every combination's runtime status is the compatibility matrix in
 [capability_matrix.md](capability_matrix.md) and the axis audit's matrix in
 [keel_axis_audit.md](keel_axis_audit.md). The invariants that keep the axes separate — and keep
