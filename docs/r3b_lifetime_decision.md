@@ -45,7 +45,7 @@ its dangerous sequences (R3a (a)–(f)); "Gap" = the smallest missing piece.
 | Class / mechanism | Existing coverage (representative cases) | Verdict |
 |---|---|---|
 | **Datagram** — token + quarantine | `tests/test_datagram_life.c` (`op_outlives_owner`, `many_ops_final_once`, `mark_dead_then_release`, `idempotent_and_null_safe`); `tests/test_dgram_close.c` (graceful/abortive/reentrant/error-sync+async/close-from-callback + classifier `one_quarantined_is_quarantined`, `quarantine_dominates_transport_error`, `pending_stays_closing_then_detaches`); `tests/test_datagram_public.c` (fixed-slot FIFO, pause-holds-one, registration ordering, `alloc_failure_during_prep_leaves_fd_unregistered`); `tests/test_datagram_live.c` | **Covered** — no addition |
-| **Stream** — inflight-pin + confirmed-detachment | `tests/test_stream_close.c` (graceful waits for recv/send/both, `abortive_sync_cancel_detaches_exactly_once`, `abortive_async_cancel_detaches_on_later_completions`, reentrant-cancel-once, escalation, idempotent double-begin); `tests/test_stream_read.c` (`completion_close_leaves_inflight_until_retirement`, `duplicate_completion_dropped`, `duplicate_completion_while_held_preserves_held`, `terminal_callback_cannot_restart`, bounded sync completions); `tests/test_stream.c` (`free_refused_while_send_in_flight`, `completion_one_send_in_flight_then_pump`) | **Covered for sequences (a)–(d),(f)** — **Gap on the single-shot contract itself** (see R3b-T1) |
+| **Stream** — inflight-pin + confirmed-detachment | `tests/test_stream_close.c` (graceful waits for recv/send/both, `abortive_sync_cancel_detaches_exactly_once`, `abortive_async_cancel_detaches_on_later_completions`, reentrant-cancel-once, escalation, idempotent double-begin); `tests/test_stream_read.c` (`completion_close_leaves_inflight_until_retirement`, `duplicate_completion_dropped`, `duplicate_completion_while_held_preserves_held`, `terminal_callback_cannot_restart`, bounded sync completions); `tests/test_stream.c` (`free_refused_while_send_in_flight`, `completion_one_send_in_flight_then_pump`) **+ `tests/test_stream_single_shot.c`** (R3b-T1) | **Covered.** Sequences (a)–(d),(f) by the close/read/write suites; the single-shot contract itself by the real-seam regression (pollcomp oracle + native io_uring/IOCP) |
 | **Accept** — credit-lease + `in_dispatch` + force-reap | `tests/test_listener.c` (reentrant close from arm/release/reserve hooks, `double_lease_release_is_noop`, `completion_close_cancels_and_waits_for_straggler`, `spurious_accept_disposed`, `close_during_accept/dispose_callback_defers_detach`, window top-up/exhaustion, `credit_conservation_through_lifecycle`, `accepted_stream_lease_outlives_listener`, `lease_liveness_guard_noops_when_pool_gone`) | **Covered** — no addition |
 | **Connect** — physical-abort + depth guards | `tests/test_connect_op.c` (`happy_eyeballs_winner_cancels_loser_once`, `straggler_connect_after_win_does_not_refire`, `duplicate_completions_dropped`, `stale_delay/deadline_event_dropped`, reentrant-cancel-once, `straggler_fd_disposed`, `deadline_fails_and_cancels_all_pending`); `tests/test_client_happy_eyeballs.c` (`he_detach` winner/loser, cancel-during-dns, multi-attempt) | **Covered** — no addition |
 | **Watcher** — ctx-list scan + R3b-W bracketed deferred reclamation | `tests/test_async.c` (add/mod/del/soak) **+ `tests/test_watcher_aba.c`** (R3b-T2): deterministic same-address-reuse full ABA (assert-C-not-called) over readiness, completion, and the real server loop (scripted `KlEventProvider`), plus nested-bracket / unmatched-end / depth-0 reclamation / begin-before-acquire ordering (loop entries at INT_MAX acquire nothing) | **Resolved.** The ABA (R3a 1a) is fixed by R3b-W and covered by a regression demonstrated to fail against both pre-fix states (deferral and ordering) and pass at HEAD |
@@ -55,19 +55,22 @@ its dangerous sequences (R3a (a)–(f)); "Gap" = the smallest missing piece.
 Two focused additions cover the two gaps. Each is a separate review unit with its own scope; neither
 is written in R3b.
 
-### R3b-T1 — pin single-shot as the stream contract (through a real seam)
+### R3b-T1 — single-shot stream contract through a real seam **(DONE — `tests/test_stream_single_shot.c`)**
 
-- **What:** a deterministic test that drives the single-shot contract **through a real completion
-  seam**, not a hand-written script. A scripted mock that emits one event only proves its own script;
-  it does not exercise the driver's actual submit→complete→retire path. **pollcomp** is the
-  deterministic contract host — its `poll()`-driven drain lets a test submit a stream op, complete it
-  once, retire it, and assert the driver produces **no second completion** for the retired op — with
-  the whole path under ASan. Native **io_uring** (and **IOCP** in Windows CI) enroll the same
-  scenario as validation on the production seams.
-- **Why smallest:** it makes decision bullet 4 enforceable on the code path that actually matters
-  (the seam), without adding any production code or hot-path field.
-- **Scope guard:** does not add a generation token; does not change the stream machine.
-- **Backends:** pollcomp = the deterministic oracle; io_uring/IOCP = native validation.
+- **What (delivered):** a backend-adaptive test (`kl_event_ctx_init`) that drives the single-shot
+  contract **through the real completion seam** — a bare `KlStream` over a socketpair, `kl_comp_post_
+  recv_raw` / `kl_comp_post_send_raw`, driven by `kl_event_ctx_run` → `kl_comp_run`, counting
+  completions via `ctx.comp_conn_dispatch` (no scripted mock). For **READ and WRITE**: post one op,
+  drain the sole terminal completion, then — without rearming/resubmitting — trigger more peer
+  activity (fd stays readable/writable) and drain again, asserting **no second completion**. On a
+  readiness build (no submitted-op model) it skips.
+- **Backends:** **pollcomp** = deterministic oracle (a new CI step); **io_uring** = native (enrolled
+  in `test-iouring`); **IOCP** = native (enrolled in `test-win-iocp`, Windows CI).
+- **Demonstrated teeth:** injecting a real second recv makes the counter reach 2 and the assertion
+  **FAIL** — the test genuinely detects a second completion. Verified passing over pollcomp (local)
+  and io_uring (container); default readiness build skips.
+- **Scope guard:** no generation token; no stream-machine or production change (test + CI enrollment
+  only).
 
 ### R3b-T2 — ABA regression **(DONE — `tests/test_watcher_aba.c`)**
 
@@ -94,13 +97,15 @@ is written in R3b.
 - No `KlOpLife` and no stream generation token (decision 1–2).
 - No production-code change and **no test change in R3b** — R3b is the frozen decision + coverage
   plan only; R3b-T1/T2 are separate increments.
-- No change to the doc-reference gate scope or any Makefile/CI target.
+- No production build/behavior change. (Test increments R3b-T1/T2 do add test-suite enrollment — new
+  suites in the io_uring/IOCP subsets and a pollcomp oracle CI step — which is not production code.)
 
-## Definition of done for R3 (increments land separately)
+## Definition of done for R3 — **COMPLETE**
 
-R3 status: the watcher ABA remedy is designed (R3b-W), implemented (R3b-W-impl), and
-regression-tested (R3b-T2, `tests/test_watcher_aba.c` — **DONE**, green at HEAD, fails pre-fix). The
-only remaining R3 item is **R3b-T1** (assert the single-shot stream contract through a real seam),
-independent and landable anytime. Every other class mechanism remains covered as inventoried above.
+R3 is complete: the watcher ABA remedy is designed (R3b-W), implemented (R3b-W-impl), and
+regression-tested (R3b-T2, `tests/test_watcher_aba.c` — green at HEAD, fails pre-fix); the single-shot
+stream contract is asserted through the real completion seam (R3b-T1, `tests/test_stream_single_shot.c`
+— pollcomp oracle + native io_uring/IOCP). Every other class mechanism remains covered as inventoried
+above. No lifetime remedy beyond the watcher ABA fix was required; the four other classes need none.
 One lifetime remedy (watcher ABA) *was* required, contrary to the pre-review "no remedy" reading — the other four
 classes need none.

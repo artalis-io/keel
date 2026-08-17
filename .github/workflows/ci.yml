@@ -104,6 +104,13 @@ jobs:
         timeout-minutes: 5
         run: make BACKEND=pollcomp smoke-pollcomp-async
 
+      # R3b-T1: single-shot completion contract for KlStream over the REAL pollcomp seam (the
+      # deterministic oracle — post one recv/send, exactly one completion, no re-fire after more
+      # peer activity). Also enrolled natively under io_uring (test-iouring) and IOCP (test-win-iocp).
+      - name: Stream single-shot contract (pollcomp oracle)
+        timeout-minutes: 5
+        run: make BACKEND=pollcomp tests/test_stream_single_shot && ./tests/test_stream_single_shot
+
       # Linux ASan has leak detection (macOS does not) — run BOTH completion smokes
       # (plaintext + TLS-via-mock), the pollcomp op-table, and the TLS/h2 buffers under
       # ASan+UBSan with leak checking.

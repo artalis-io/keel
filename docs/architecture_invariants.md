@@ -102,8 +102,10 @@ the equivalent guarantee comes from **single-shot completion** — every backend
 completion per submitted op, with no duplicate and no post-retirement completion — combined with the
 class-specific guard (stream inflight-pin, accept force-reap, connect physical-abort). **Single-shot
 is therefore a load-bearing contract:** a new completion backend must uphold it or supply its own
-stale-completion guard (R3a inventory; R3b decision, pinned by a planned single-shot regression
-test).
+stale-completion guard (R3a inventory; R3b decision). **Covered** by `tests/test_stream_single_shot.c`
+(R3b-T1) — a real-seam regression over pollcomp (deterministic oracle) + native io_uring / IOCP:
+post one READ / one WRITE, drain the sole completion, then trigger more peer activity and drain again,
+asserting no second completion.
 
 The **watcher** guard is the `kl_event_dispatch` ctx-list scan **plus batch-bracketed deferred
 reclamation** (R3b-W): the scan alone matched by pointer identity and had a pointer-reuse ABA hole

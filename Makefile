@@ -394,13 +394,15 @@ test-win: $(WIN_TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME WINDOWS TESTS FAILED"; exit 1; fi
 
-# Windows IOCP backend (BACKEND=iocp) test subset. Increment 2: the completion
-# connection driver does not exist yet, so a server cannot run over IOCP — this
-# runs only the IOCP backend-lifecycle + negotiation suite (no server-over-IOCP).
-# The full suite over IOCP joins once the driver lands. Build with BACKEND=iocp so
-# libkeel.a carries event_iocp.o. (test_event_caps is a *readiness*-backend suite —
-# it asserts READINESS caps — so it runs in the WSAPoll/POSIX jobs, NOT here.)
-WIN_IOCP_TEST_SUITES = iocp_engine
+# Windows IOCP backend (BACKEND=iocp) test subset. The completion connection driver
+# does not exist over IOCP yet, so a server cannot run over IOCP — hence the
+# backend-lifecycle + negotiation suite (no server-over-IOCP). stream_single_shot is a
+# BARE-stream test (raw kl_comp_post_recv/_send + drain, no HTTP connection driver), so
+# it validates the IOCP single-shot completion contract natively (R3b-T1); it skips on a
+# readiness build. Build with BACKEND=iocp so libkeel.a carries event_iocp.o.
+# (test_event_caps is a *readiness*-backend suite — it asserts READINESS caps — so it
+# runs in the WSAPoll/POSIX jobs, NOT here.)
+WIN_IOCP_TEST_SUITES = iocp_engine stream_single_shot
 WIN_IOCP_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_IOCP_TEST_SUITES)))
 test-win-iocp: $(WIN_IOCP_TEST_BIN)
 	@failed=0; \
@@ -660,7 +662,7 @@ IOURING_TEST_SUITES = allocator alpn async body_reader chunked client client_hap
                           multipart_stream overflow parser peer_addr peer_cert proxy \
                           proxy_protocol read_flow_control redirect request resolver_cache \
                           response response_parser router server_integration server_stats sockaddr sse \
-                          stream_transport thread_pool timeout timer tls tls_integration udp udp_batching \
+                          stream_single_shot stream_transport thread_pool timeout timer tls tls_integration udp udp_batching \
                           udp_offload udp_server udp_tos unix_socket url version websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
