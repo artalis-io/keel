@@ -604,6 +604,46 @@ static int pdg_send_batch(void *ctx, KlSocketHandle fd, void *tx_batch,
 
 /* ── The ops table ────────────────────────────────────────────────────── */
 
+/* M2: report ONLY the caps whose implementation is actually compiled in FOR THIS fd's family. Each bit
+ * is gated on the exact macro the corresponding op uses (build_control source-pin, IP_TOS/IPV6_TCLASS,
+ * IP_ADD_MEMBERSHIP/IPV6_JOIN_GROUP, SO_BROADCAST) so a bit never over-reports a silently-absent op
+ * (e.g. IPv4 without IP_PKTINFO emits no source-pin cmsg → SOURCE_PIN is NOT granted). Connected-mode
+ * send is always available. If the family cannot be determined, grant nothing (fail-loud). */
+static unsigned pdg_caps(void *ctx, KlSocketHandle fd) {
+    (void)ctx;
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof(ss);
+    if (getsockname((int)fd, (struct sockaddr *)&ss, &sl) != 0)
+        return 0;
+    unsigned caps = KL_DGRAM_CAP_CONNECTED;   /* connect()+send: no family-specific compile guard */
+    if (ss.ss_family == AF_INET) {
+#if defined(IP_PKTINFO)
+        caps |= KL_DGRAM_CAP_SOURCE_PIN;
+#endif
+#if defined(IP_TOS)
+        caps |= KL_DGRAM_CAP_TOS;
+#endif
+#if defined(IP_ADD_MEMBERSHIP)
+        caps |= KL_DGRAM_CAP_MULTICAST;
+#endif
+#if defined(SO_BROADCAST)
+        caps |= KL_DGRAM_CAP_BROADCAST;   /* IPv4-only */
+#endif
+    } else if (ss.ss_family == AF_INET6) {
+#if defined(IPV6_PKTINFO)
+        caps |= KL_DGRAM_CAP_SOURCE_PIN;
+#endif
+#if defined(IPV6_TCLASS)
+        caps |= KL_DGRAM_CAP_TOS;
+#endif
+#if defined(IPV6_JOIN_GROUP)
+        caps |= KL_DGRAM_CAP_MULTICAST;
+#endif
+        /* no broadcast on IPv6 */
+    }
+    return caps;
+}
+
 const KlDatagramOps kl_socket_posix_dgram_ops = {
     .send             = pdg_send,
     .recv             = pdg_recv,
@@ -611,6 +651,7 @@ const KlDatagramOps kl_socket_posix_dgram_ops = {
     .configure        = pdg_configure,
     .set_tos          = pdg_set_tos,
     .mcast_membership = pdg_mcast,
+    .caps             = pdg_caps,
 #if defined(__linux__)
     .rx_batch_new     = pdg_rx_batch_new,
     .tx_batch_new     = pdg_tx_batch_new,

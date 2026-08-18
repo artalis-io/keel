@@ -263,9 +263,33 @@ static int lwdg_mcast(void *c, KlSocketHandle fd, int family,
     return -1;
 }
 
+/* M2: lwIP ignores source-pin / per-packet TOS (§4) → NEVER granted (no silent-no-op emulation), and
+ * has no IPv6 broadcast. Connected-mode send is always available. Multicast is granted ONLY when the
+ * fd's family has its multicast subsystem compiled in — LWIP_IGMP (IPv4) / LWIP_IPV6_MLD (IPv6) — the
+ * exact guards lwdg_mcast uses; otherwise a join would fail after init granted it. */
+static unsigned lwdg_caps(void *ctx, KlSocketHandle fd) {
+    (void)ctx;
+    struct sockaddr_storage ss; socklen_t sl = sizeof(ss);
+    if (lwip_getsockname((int)fd, (struct sockaddr *)&ss, &sl) != 0)
+        return 0;   /* family undeterminable → grant nothing (fail-loud, per the freeze) */
+    unsigned caps = KL_DGRAM_CAP_CONNECTED;   /* connected-mode send: family-independent */
+    if (ss.ss_family == AF_INET) {
+#if LWIP_IGMP
+        caps |= KL_DGRAM_CAP_MULTICAST;
+#endif
+    }
+#if LWIP_IPV6 && LWIP_IPV6_MLD
+    else if (ss.ss_family == AF_INET6) {
+        caps |= KL_DGRAM_CAP_MULTICAST;
+    }
+#endif
+    return caps;
+}
+
 static const KlDatagramOps lwip_dgram_ops = {
     .send             = lwdg_send,
     .recv             = lwdg_recv,
+    .caps             = lwdg_caps,
     .send_gso         = lwdg_send_gso,
     .configure        = lwdg_configure,
     .set_tos          = lwdg_set_tos,

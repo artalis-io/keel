@@ -282,6 +282,16 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
     if (!completion && (!ops || !ops->send || !ops->recv)) { dg->last_error = KL_ERR_INVALID_ARG; return -1; }
     dg->completion = completion;
 
+    /* M2: derive the provider's capabilities for THIS fd, then fail-loud gate want_caps. A NULL caps op
+     * reports NO optional caps (a function signature never proves behavior). A want_caps requesting a cap
+     * the provider does not support fails init HERE — before fd adoption — so the caller retains the fd. */
+    {
+        void *sp_ctx = cfg->sockets ? cfg->sockets->context : NULL;
+        unsigned provider_caps = (ops && ops->caps) ? ops->caps(sp_ctx, cfg->fd) : 0;
+        if (cfg->want_caps & ~provider_caps) { dg->last_error = KL_ERR_UNSUPPORTED; return -1; }
+        dg->provider_caps = provider_caps;
+    }
+
     KlDgramCore *core = kl_malloc(cfg->alloc, sizeof(*core));
     if (!core) { dg->last_error = KL_ERR_ALLOC; return -1; }
     memset(core, 0, sizeof(*core));
@@ -392,6 +402,36 @@ void kl_datagram_on_close(KlDatagram *dg, KlDatagramCloseFn cb, void *ud) {
 }
 
 unsigned kl_datagram_caps(const KlDatagram *dg) { return (dg && dg->core) ? dg->core->caps : 0; }
+unsigned kl_datagram_provider_caps(const KlDatagram *dg) { return dg ? dg->provider_caps : 0; }
+
+/* M2 extended-UDP layer: runtime multicast join/leave, gated on KL_DGRAM_CAP_MULTICAST, routed to the
+ * provider's mcast_membership. Deterministic error precedence (docs/datagram_m2_capability_design.md §3):
+ * missing capability → KL_ERR_UNSUPPORTED (checked first, no provider call); malformed group literal →
+ * KL_ERR_INVALID_ARG (no provider call); provider/syscall failure → KL_ERR_IO. */
+static int dg_multicast(KlDatagram *dg, const char *group, unsigned iface_index, int join) {
+    if (!dg || !dg->core || !group) { if (dg) dg->last_error = KL_ERR_INVALID_ARG; return -1; }
+    const KlDatagramOps *ops = dg_ops(dg);
+    if (!(dg->provider_caps & KL_DGRAM_CAP_MULTICAST) || !ops || !ops->mcast_membership) {
+        dg->last_error = KL_ERR_UNSUPPORTED; return -1;
+    }
+    /* Family from the group literal (KlDatagramConfig carries none; §D-M2-8). A literal that is not a
+     * numeric MULTICAST address (malformed, or a valid non-multicast IP) is a caller error. */
+    KlSockAddr ga;
+    if (kl_sockaddr_parse(&ga, group, 0) != 0 || !kl_sockaddr_is_multicast(&ga)) {
+        dg->last_error = KL_ERR_INVALID_ARG; return -1;
+    }
+    int family = (kl_sockaddr_family(&ga) == KL_AF_INET6) ? AF_INET6 : AF_INET;
+    if (ops->mcast_membership(dg_sp_ctx(dg), dg->fd, family, group, iface_index, join) != 0) {
+        dg->last_error = KL_ERR_IO; return -1;
+    }
+    return 0;
+}
+int kl_datagram_multicast_join(KlDatagram *dg, const char *group, unsigned iface_index) {
+    return dg_multicast(dg, group, iface_index, 1);
+}
+int kl_datagram_multicast_leave(KlDatagram *dg, const char *group, unsigned iface_index) {
+    return dg_multicast(dg, group, iface_index, 0);
+}
 KlDgramCloseState kl_datagram_close_state(const KlDatagram *dg) {
     return (dg && dg->core) ? kl_dgram_core_close_state(dg->core) : KL_DGRAM_CLOSE_CLOSED;
 }

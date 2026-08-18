@@ -36,6 +36,7 @@ struct KlDatagram {
     KlDatagramCloseFn       on_close_cb;/* facade-only: user terminal callback (dg_on_close forwards) */
     void                   *close_ud;
     KlError                 last_error;
+    unsigned                provider_caps; /* M2: KL_DGRAM_CAP_* the provider supports on `fd` (kl_datagram_provider_caps) */
     uint64_t                truncated; /* count of delivered captured-prefix (KL_DGRAM_TRUNCATED) datagrams */
     uint64_t                dropped;   /* RESERVED: 0 until the recv machine surfaces overflow/contract drops */
     int                     completion;/* 1 = completion mode / 0 = readiness mode */

@@ -98,6 +98,14 @@ typedef struct KlDatagramOps {
     int (*mcast_membership)(void *ctx, KlSocketHandle fd, int family,
                             const char *group, unsigned iface_index, int join);
 
+    /* KL_DGRAM_CAP_* the provider can honor on THIS fd — accounting for the fd's actual address family
+     * (M2). Optional (NULL ⇒ the facade grants no optional caps). Family-AWARE but takes no `family`
+     * param: the provider inspects the fd (e.g. getsockname) or reports the cross-family intersection;
+     * it MUST NOT report a capability the fd's family cannot use (e.g. BROADCAST on an IPv6 fd).
+     * NOTE: appending this member is an intentional pre-consumer ABI revision — a provider compiled
+     * against the older KlDatagramOps must be rebuilt (see docs/datagram_m2_capability_design.md §7). */
+    unsigned (*caps)(void *ctx, KlSocketHandle fd);
+
     /* ── Optional mmsg batching (Linux) — data-oriented, no callbacks ───────── */
     /* All NULL on a provider without recvmmsg/sendmmsg → udp.c uses send/recv in a
      * loop. The batch block is provider-allocated but KlUdp-owned (opaque here). */

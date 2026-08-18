@@ -27,6 +27,7 @@ static const char *kl_error_messages[] = {
     [KL_ERR_REDIRECT_LOOP] = "too many redirects",
     [KL_ERR_COMPRESS]      = "compression error",
     [KL_ERR_PROXY]         = "proxy error",
+    [KL_ERR_UNSUPPORTED]   = "capability not supported by provider",
 };
 
 const char *kl_strerror(KlError err)

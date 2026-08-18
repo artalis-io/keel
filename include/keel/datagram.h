@@ -60,6 +60,8 @@ typedef struct KlDatagram KlDatagram;
 #define KL_DGRAM_CAP_SOURCE_PIN  (1u << 0)   /* msg.local source-pin on send */
 #define KL_DGRAM_CAP_TOS         (1u << 1)   /* per-packet TOS/ECN on send */
 #define KL_DGRAM_CAP_CONNECTED   (1u << 2)   /* connected-mode send (msg.peer == NULL) */
+#define KL_DGRAM_CAP_MULTICAST   (1u << 3)   /* runtime multicast join/leave (kl_datagram_multicast_*) — M2 */
+#define KL_DGRAM_CAP_BROADCAST   (1u << 4)   /* SO_BROADCAST — IPv4 fds only (reported per-fd); config via KlUdpConfig — M2 */
 
 /* ── Send status: atomic accept-or-refuse, no ownership on refusal (invariant 4) ──────────────── */
 typedef enum {
@@ -159,7 +161,15 @@ void kl_datagram_on_writable(KlDatagram *dg, KlDatagramWritableFn cb, void *ud);
 void kl_datagram_on_drain(KlDatagram *dg, KlDatagramDrainFn cb, void *ud);
 void kl_datagram_on_close(KlDatagram *dg, KlDatagramCloseFn cb, void *ud);
 
-unsigned              kl_datagram_caps(const KlDatagram *dg);          /* KL_DGRAM_CAP_* */
+unsigned              kl_datagram_caps(const KlDatagram *dg);          /* granted caps (== want_caps) */
+unsigned              kl_datagram_provider_caps(const KlDatagram *dg); /* caps the provider supports on the fd — M2 */
+
+/* Runtime multicast join/leave (extended-UDP layer, M2). Gated on KL_DGRAM_CAP_MULTICAST. Returns 0, or
+ * -1 with kl_datagram_last_error(): KL_ERR_UNSUPPORTED (provider lacks multicast), KL_ERR_INVALID_ARG
+ * (malformed group literal), KL_ERR_IO (provider/syscall failure — incl. group/socket family mismatch).
+ * The address family is derived from the group literal (dotted-quad → IPv4, colon → IPv6). */
+int kl_datagram_multicast_join (KlDatagram *dg, const char *group, unsigned iface_index);
+int kl_datagram_multicast_leave(KlDatagram *dg, const char *group, unsigned iface_index);
 KlDgramCloseState     kl_datagram_close_state(const KlDatagram *dg);   /* OPEN/CLOSING/CLOSED */
 KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg);  /* terminal (NONE until CLOSED) */
 size_t   kl_datagram_send_queued(const KlDatagram *dg);

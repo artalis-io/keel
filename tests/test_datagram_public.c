@@ -9,13 +9,29 @@
  * with ZERO live-backend risk. §10 live rows are wired in 7B-4+.
  */
 
+/* Match the POSIX provider's feature-test preamble (socket_dgram_posix.c) BEFORE any system header, so
+ * the m2_posix_provider_caps_per_family test sees the SAME IP_PKTINFO/IPV6_* macro visibility the
+ * provider compiled against, and can build the expected capability mask under the identical guards. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+#if defined(__APPLE__) && !defined(__APPLE_USE_RFC_3542)
+#define __APPLE_USE_RFC_3542
+#endif
+
 #include "../vendor/utest.h"
+
+#if !defined(_WIN32)
+#include <sys/socket.h>
+#include <netinet/in.h>
+#endif
 
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
+#include <keel/error.h>
 
 #include "../src/completion.h"      /* KlCompletionEvent + KL_COMP_DGRAM_* */
 #include "../src/datagram_life.h"   /* kl_dgram_life_dispatch/_target — drive completions like the driver */
@@ -628,6 +644,214 @@ UTEST(datagram_public, m1_init_is_slot_policy) {
     ASSERT_EQ((size_t)0, kl_datagram_send_queued(&dg));
     ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
     ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
+/* ══ M2 — capability derivation + multicast (docs/datagram_m2_capability_design.md §9) ════════════
+ * A scriptable mock socket provider whose dgram vtable reports caps + records mcast_membership, so the
+ * FACADE gate/routing can be tested independently of any real provider. */
+static unsigned g_mock_caps;                     /* what mock caps() returns */
+static int      g_mock_caps_null;                /* 1 → present a NULL caps op */
+static int      g_mcast_calls, g_mcast_family, g_mcast_join; static unsigned g_mcast_iface;
+static char     g_mcast_group[64]; static int g_mcast_ret;
+static unsigned mock_dg_caps(void *ctx, KlSocketHandle fd) { (void)ctx; (void)fd; return g_mock_caps; }
+static int mock_dg_mcast(void *ctx, KlSocketHandle fd, int family, const char *group,
+                         unsigned iface, int join) {
+    (void)ctx; (void)fd;
+    g_mcast_calls++; g_mcast_family = family; g_mcast_join = join; g_mcast_iface = iface;
+    snprintf(g_mcast_group, sizeof(g_mcast_group), "%s", group ? group : "");
+    return g_mcast_ret;
+}
+static const KlDatagramOps MOCK_DG_WITH_CAPS = { .caps = mock_dg_caps, .mcast_membership = mock_dg_mcast };
+static const KlDatagramOps MOCK_DG_NO_CAPS   = { .caps = NULL,         .mcast_membership = mock_dg_mcast };
+static const KlSocketProvider MOCK_SP_CAPS    = { .ops = &MC_SOCK_OPS, .dgram = &MOCK_DG_WITH_CAPS };
+static const KlSocketProvider MOCK_SP_NOCAPS  = { .ops = &MC_SOCK_OPS, .dgram = &MOCK_DG_NO_CAPS };
+
+static KlDatagramConfig cfg_caps(KlSocketHandle fd, unsigned want_caps) {
+    KlDatagramConfig c; memset(&c, 0, sizeof(c));
+    c.ctx = &g_ctx; c.alloc = &g_alloc;
+    c.sockets = g_mock_caps_null ? &MOCK_SP_NOCAPS : &MOCK_SP_CAPS;
+    c.fd = fd; c.send_slots = 4; c.send_slot_cap = 1500; c.recv_cap = 2048; c.want_caps = want_caps;
+    return c;
+}
+/* no ops outstanding → DETACHED → free (macro: utest ASSERTs must expand inside a UTEST body) */
+#define m2_close(dg) do { ASSERT_EQ(0, kl_datagram_close_begin(dg)); ASSERT_EQ(0, kl_datagram_free(dg)); } while (0)
+
+/* §9.1 — kl_datagram_provider_caps() = provider set; kl_datagram_caps() = granted (want_caps). */
+UTEST(datagram_public, m2_caps_derivation) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_MULTICAST;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), KL_DGRAM_CAP_SOURCE_PIN);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ((unsigned)(KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_MULTICAST), kl_datagram_provider_caps(&dg));
+    ASSERT_EQ((unsigned)KL_DGRAM_CAP_SOURCE_PIN, kl_datagram_caps(&dg));   /* granted, not the full set */
+    m2_close(&dg);
+}
+
+/* §9.2 — want_caps init gate is fail-loud, fd not adopted. */
+UTEST(datagram_public, m2_want_caps_gate_failloud) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_SOURCE_PIN;   /* provider lacks TOS */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlSocketHandle fd = mk_fd();
+    KlDatagramConfig bad = cfg_caps(fd, KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS);
+    ASSERT_EQ(-1, kl_datagram_init(&dg, &bad));
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
+    (void)close((int)fd);   /* caller still owns the fd (not adopted) */
+    /* a subset request succeeds */
+    KlDatagram dg2; memset(&dg2, 0, sizeof(dg2));
+    KlDatagramConfig ok = cfg_caps(mk_fd(), KL_DGRAM_CAP_SOURCE_PIN);
+    ASSERT_EQ(0, kl_datagram_init(&dg2, &ok));
+    m2_close(&dg2);
+}
+
+/* §9.3 — NULL caps op ⇒ no optional caps; any non-zero want_caps fails init. */
+UTEST(datagram_public, m2_null_caps_no_optional) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 1;   /* MOCK_SP_NOCAPS: caps == NULL */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c0 = cfg_caps(mk_fd(), 0);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c0));               /* want_caps 0 → ok */
+    ASSERT_EQ((unsigned)0, kl_datagram_provider_caps(&dg)); /* no optional caps */
+    m2_close(&dg);
+    KlDatagram dg2; memset(&dg2, 0, sizeof(dg2));
+    KlSocketHandle fd = mk_fd();
+    KlDatagramConfig cc = cfg_caps(fd, KL_DGRAM_CAP_CONNECTED);
+    ASSERT_EQ(-1, kl_datagram_init(&dg2, &cc));             /* any cap → fail */
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg2));
+    (void)close((int)fd);
+    g_mock_caps_null = 0;
+}
+
+/* §9.4 (blocker P1) — a family-limited report makes an unavailable requested cap fail INIT. */
+UTEST(datagram_public, m2_family_limited_rejects_at_init) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    /* model an IPv6 fd: everything BUT the IPv4-only BROADCAST */
+    g_mock_caps = KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS |
+                  KL_DGRAM_CAP_CONNECTED | KL_DGRAM_CAP_MULTICAST;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlSocketHandle fd = mk_fd();
+    KlDatagramConfig c = cfg_caps(fd, KL_DGRAM_CAP_BROADCAST);
+    ASSERT_EQ(-1, kl_datagram_init(&dg, &c));               /* BROADCAST not usable on this fd */
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
+    (void)close((int)fd);
+    /* model an IPv4 fd: BROADCAST now present → granted */
+    g_mock_caps |= KL_DGRAM_CAP_BROADCAST;
+    KlDatagram dg2; memset(&dg2, 0, sizeof(dg2));
+    KlDatagramConfig c2 = cfg_caps(mk_fd(), KL_DGRAM_CAP_BROADCAST);
+    ASSERT_EQ(0, kl_datagram_init(&dg2, &c2));
+    m2_close(&dg2);
+}
+
+/* §9.5 — multicast gated on the capability; no provider call when ungranted. */
+UTEST(datagram_public, m2_multicast_gated) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_CONNECTED;   /* no MULTICAST */
+    g_mcast_calls = 0; g_mcast_ret = 0;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), 0);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(-1, kl_datagram_multicast_join(&dg, "239.1.2.3", 0));
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(0, g_mcast_calls);            /* provider NOT called */
+    m2_close(&dg);
+}
+
+/* §9.6 — deterministic multicast error outcomes. */
+UTEST(datagram_public, m2_multicast_error_outcomes) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_MULTICAST;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), 0);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    /* malformed group → INVALID_ARG, no provider call */
+    g_mcast_calls = 0;
+    ASSERT_EQ(-1, kl_datagram_multicast_join(&dg, "not-an-ip", 0));
+    ASSERT_EQ((int)KL_ERR_INVALID_ARG, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(0, g_mcast_calls);
+    /* valid but NON-multicast IP → INVALID_ARG, still no provider call */
+    ASSERT_EQ(-1, kl_datagram_multicast_join(&dg, "8.8.8.8", 0));
+    ASSERT_EQ((int)KL_ERR_INVALID_ARG, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(0, g_mcast_calls);
+    /* provider/syscall failure → IO */
+    g_mcast_ret = -1;
+    ASSERT_EQ(-1, kl_datagram_multicast_join(&dg, "239.1.2.3", 0));
+    ASSERT_EQ((int)KL_ERR_IO, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(1, g_mcast_calls);
+    m2_close(&dg);
+}
+
+/* §9.7 — join/leave route to mcast_membership with the family derived from the group literal. */
+UTEST(datagram_public, m2_multicast_routes) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_MULTICAST; g_mcast_ret = 0;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), 0);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    g_mcast_calls = 0;
+    ASSERT_EQ(0, kl_datagram_multicast_join(&dg, "239.1.2.3", 7));
+    ASSERT_EQ(1, g_mcast_calls);
+    ASSERT_EQ(AF_INET, g_mcast_family);       /* IPv4 group → AF_INET */
+    ASSERT_EQ(1, g_mcast_join);
+    ASSERT_EQ((unsigned)7, g_mcast_iface);
+    ASSERT_EQ(0, strcmp(g_mcast_group, "239.1.2.3"));
+    ASSERT_EQ(0, kl_datagram_multicast_leave(&dg, "ff02::fb", 0));
+    ASSERT_EQ(AF_INET6, g_mcast_family);      /* IPv6 group → AF_INET6 */
+    ASSERT_EQ(0, g_mcast_join);
+    m2_close(&dg);
+}
+
+/* Per-provider verification — the REAL POSIX provider (sockets = NULL) reports its true per-fd-family
+ * set. The expected mask is built under the SAME family-specific compile guards the provider uses (so
+ * this passes on reduced-capability POSIX builds where a macro is absent), with explicit assertions for
+ * the always-available CONNECTED and the IPv4-only BROADCAST. */
+UTEST(datagram_public, m2_posix_provider_caps_per_family) {
+    mk_ctx(); mc_reset();
+    unsigned exp4 = KL_DGRAM_CAP_CONNECTED;      /* connect()+send: always */
+#if defined(IP_PKTINFO)
+    exp4 |= KL_DGRAM_CAP_SOURCE_PIN;
+#endif
+#if defined(IP_TOS)
+    exp4 |= KL_DGRAM_CAP_TOS;
+#endif
+#if defined(IP_ADD_MEMBERSHIP)
+    exp4 |= KL_DGRAM_CAP_MULTICAST;
+#endif
+#if defined(SO_BROADCAST)
+    exp4 |= KL_DGRAM_CAP_BROADCAST;              /* IPv4-only */
+#endif
+    unsigned exp6 = KL_DGRAM_CAP_CONNECTED;
+#if defined(IPV6_PKTINFO)
+    exp6 |= KL_DGRAM_CAP_SOURCE_PIN;
+#endif
+#if defined(IPV6_TCLASS)
+    exp6 |= KL_DGRAM_CAP_TOS;
+#endif
+#if defined(IPV6_JOIN_GROUP) || defined(IPV6_ADD_MEMBERSHIP)
+    exp6 |= KL_DGRAM_CAP_MULTICAST;
+#endif
+    /* AF_INET */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 4, 1500);   /* sockets = NULL → posix ops, AF_INET fd */
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(exp4, kl_datagram_provider_caps(&dg));
+    ASSERT_TRUE(kl_datagram_provider_caps(&dg) & KL_DGRAM_CAP_CONNECTED);   /* explicit: always */
+#if defined(SO_BROADCAST)
+    ASSERT_TRUE(kl_datagram_provider_caps(&dg) & KL_DGRAM_CAP_BROADCAST);   /* explicit: IPv4 has it where compiled */
+#else
+    ASSERT_EQ((unsigned)0, kl_datagram_provider_caps(&dg) & KL_DGRAM_CAP_BROADCAST);
+#endif
+    m2_close(&dg);
+    /* AF_INET6 (skip if unavailable) */
+    KlSocketHandle fd6 = (KlSocketHandle)socket(AF_INET6, SOCK_DGRAM, 0);
+    if (kl_handle_valid(fd6)) {
+        KlDatagram dg6; memset(&dg6, 0, sizeof(dg6));
+        KlDatagramConfig c6 = cfg_for(fd6, 4, 1500);
+        ASSERT_EQ(0, kl_datagram_init(&dg6, &c6));
+        ASSERT_EQ(exp6, kl_datagram_provider_caps(&dg6));
+        ASSERT_TRUE(kl_datagram_provider_caps(&dg6) & KL_DGRAM_CAP_CONNECTED);          /* explicit: always */
+        ASSERT_EQ((unsigned)0, kl_datagram_provider_caps(&dg6) & KL_DGRAM_CAP_BROADCAST); /* explicit: no IPv6 broadcast */
+        m2_close(&dg6);
+    }
 }
 
 UTEST_MAIN();

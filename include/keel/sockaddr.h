@@ -91,6 +91,8 @@ int kl_sockaddr_equal(const KlSockAddr *a, const KlSockAddr *b);
 int kl_sockaddr_equal_addr(const KlSockAddr *a, const KlSockAddr *b);
 /** 1 if @p a is a loopback address (127.0.0.0/8 or ::1), else 0. */
 int kl_sockaddr_is_loopback(const KlSockAddr *a);
+/** 1 if @p a is a multicast address (224.0.0.0/4 or ff00::/8), else 0. */
+int kl_sockaddr_is_multicast(const KlSockAddr *a);
 
 /* ── presentation ─────────────────────────────────────────────────────────── */
 

@@ -365,6 +365,57 @@ static int wdg_mcast(void *ctx, KlSocketHandle fd, int family,
     return -1;
 }
 
+/* M2: report ONLY the caps usable on THIS fd. Source-pin AND per-packet TOS both ride WSASendMsg
+ * (wdg_send returns EIO if the extension is absent), so both are gated on a successful runtime probe
+ * of WSASendMsg for this socket AND the family's cmsg macro. Multicast/broadcast are gated on their
+ * family-specific macros; broadcast is IPv4-only; connected-mode send is always available. If the
+ * family cannot be determined, grant nothing (fail-loud). */
+static unsigned wdg_caps(void *ctx, KlSocketHandle fd) {
+    (void)ctx;
+    SOCKET s = (SOCKET)fd;
+    struct sockaddr_storage ss;
+    int sl = (int)sizeof(ss);
+    if (getsockname(s, (struct sockaddr *)&ss, &sl) != 0)
+        return 0;
+    unsigned caps = KL_DGRAM_CAP_CONNECTED;
+#if defined(IP_PKTINFO) || defined(IP_TOS) || defined(IPV6_PKTINFO) || defined(IPV6_TCLASS)
+    int have_sendmsg = (dgram_get_sendmsg(s) != NULL);   /* probe the extension for THIS socket */
+#endif
+    if (ss.ss_family == AF_INET) {
+#if defined(IP_PKTINFO) || defined(IP_TOS)
+        if (have_sendmsg) {   /* source-pin + per-packet TOS both ride WSASendMsg */
+#if defined(IP_PKTINFO)
+            caps |= KL_DGRAM_CAP_SOURCE_PIN;
+#endif
+#if defined(IP_TOS)
+            caps |= KL_DGRAM_CAP_TOS;
+#endif
+        }
+#endif
+#if defined(IP_ADD_MEMBERSHIP)
+        caps |= KL_DGRAM_CAP_MULTICAST;
+#endif
+#if defined(SO_BROADCAST)
+        caps |= KL_DGRAM_CAP_BROADCAST;   /* IPv4-only */
+#endif
+    } else if (ss.ss_family == AF_INET6) {
+#if defined(IPV6_PKTINFO) || defined(IPV6_TCLASS)
+        if (have_sendmsg) {
+#if defined(IPV6_PKTINFO)
+            caps |= KL_DGRAM_CAP_SOURCE_PIN;
+#endif
+#if defined(IPV6_TCLASS)
+            caps |= KL_DGRAM_CAP_TOS;
+#endif
+        }
+#endif
+#if defined(IPV6_JOIN_GROUP)
+        caps |= KL_DGRAM_CAP_MULTICAST;
+#endif
+    }
+    return caps;
+}
+
 /* ── The ops table (no mmsg batching on Winsock) ──────────────────────── */
 
 const KlDatagramOps kl_socket_winsock_dgram_ops = {
@@ -374,6 +425,7 @@ const KlDatagramOps kl_socket_winsock_dgram_ops = {
     .configure        = wdg_configure,
     .set_tos          = wdg_set_tos,
     .mcast_membership = wdg_mcast,
+    .caps             = wdg_caps,
     .rx_batch_new     = NULL,
     .tx_batch_new     = NULL,
     .rx_batch_free    = NULL,
