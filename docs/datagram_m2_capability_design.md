@@ -1,6 +1,6 @@
 # Datagram M2 — capability derivation + extended-UDP layer — design freeze
 
-Status: **PROPOSED (docs-only, revision 2)** — no code until reviewed and accepted, per the
+Status: **PROPOSED (docs-only, revision 3)** — no code until reviewed and accepted, per the
 consolidation workflow. Sibling of the accepted M0 / synchronous-teardown / M1 freezes. Authority is
 `docs/datagram_consolidation_design.md` §3 (Decisions D-CAP-1..D-CAP-3, Open question O-CAP-1) and §5;
 this freeze turns them into an implementable increment and pins the edges they leave open.
@@ -9,17 +9,26 @@ this freeze turns them into an implementable increment and pins the edges they l
 pre-consumer ABI revision** — documented as such (§7), not claimed ABI-safe merely because the member
 is trailing/nullable; NULL-tolerance applies only *after* recompilation. (2) An unknown/NULL provider
 report yields **no optional caps** (§1a) — a function signature never proves source-pin/TOS/connected/
-broadcast behavior. (3) The `caps` op is **family-independent** so it is callable at init, where no
-family is known (§1). (4) `kl_datagram_caps()` is **preserved** as the granted-caps report; provider
-support is exposed additively via a **new** `kl_datagram_provider_caps()` (§1, P2 resolved without
-revising a STABLE function). Rulings confirmed: add `KL_ERR_UNSUPPORTED`; unknown ⇒ no optional caps;
-defer batching/GSO/GRO.
+broadcast behavior. (3) The `caps` op takes no `family` **parameter** so it is callable at init (where
+`KlDatagramConfig` carries no family); rev 3 sharpens this — it is fd-family-*aware* (§1). (4)
+`kl_datagram_caps()` is **preserved** as the granted-caps report; provider support is exposed additively
+via a **new** `kl_datagram_provider_caps()` (§1, P2 resolved without revising a STABLE function).
+Rulings confirmed: add `KL_ERR_UNSUPPORTED`; unknown ⇒ no optional caps; defer batching/GSO/GRO.
+
+**Revision 3** applies the rev-2 review: (P1) the `caps` report is **truthful for the specific fd's
+family** — not provider-global — so the fail-loud gate cannot grant an IPv4-only cap to an IPv6 socket
+(the provider inspects the fd, e.g. `getsockname`, or reports the cross-family intersection;
+`KL_DGRAM_CAP_BROADCAST` is `AF_INET`-only), plus a family-limited-provider init-rejection test (§9.4);
+(P2, doc) reconciled the last stale §0 sentence (`kl_datagram_caps()` stays the granted report); (P2,
+multicast) specified deterministic `kl_datagram_last_error()` outcomes — `KL_ERR_UNSUPPORTED` (missing
+capability), `KL_ERR_INVALID_ARG` (malformed group literal), `KL_ERR_IO` (provider/syscall failure).
 
 ## 0. Scope
 
 **M2 is additive and changes no consumer.** It gives the datagram facade two things the design (§3)
-calls missing: (1) **provider→capability derivation** so `kl_datagram_caps()` reflects what the
-provider *actually* supports and `want_caps` becomes a fail-loud **init** gate; and (2) a **thin
+calls missing: (1) **provider→capability derivation** so a new `kl_datagram_provider_caps()` reports
+what the provider *actually* supports on the fd and `want_caps` becomes a fail-loud **init** gate
+(`kl_datagram_caps()` itself is preserved as the granted-caps report); and (2) a **thin
 extended-UDP layer** exposing the one genuinely *runtime* UDP feature — **multicast join/leave** —
 routed to the provider's existing `mcast_membership` op. It prepares M4 (`KlUdpServer`), which needs
 source-pin caps + multicast; it does **not** touch the core send/recv/close machinery.
@@ -53,19 +62,31 @@ Today `KlDatagram` has only the negotiation half: `want_caps` (consumer requires
 `cfg->want_caps` — so `kl_datagram_caps()` echoes the *request*, and an unsupported `want_caps` is
 caught only at **send** time. M2 closes that:
 
-- **D-M2-1 — a provider capability report (family-independent).** Append to the `KlDatagramOps` vtable
-  (`include/keel/socket_dgram.h`):
+- **D-M2-1 — a provider capability report, truthful for THIS fd (Decision D-M2-1, blocker P1).** Append
+  to the `KlDatagramOps` vtable (`include/keel/socket_dgram.h`):
   ```c
-  /* KL_DGRAM_CAP_* the provider supports. Optional (NULL ⇒ no optional caps, §1a). Family-INDEPENDENT:
-   * caps are a provider-level feature report, not per-address-family; a family-specific limit (e.g. an
-   * IPv6 group on a v4 socket) surfaces at the actual operation's syscall, not here. */
+  /* KL_DGRAM_CAP_* usable on THIS fd — accounting for the fd's actual address family. Optional
+   * (NULL ⇒ no optional caps, §1a). The signature omits `family` (KlDatagramConfig carries none at
+   * init); the provider determines the fd's family itself (e.g. getsockname) OR conservatively reports
+   * only the cross-family intersection. It must NOT report a capability the fd's family cannot use. */
   unsigned (*caps)(void *ctx, KlSocketHandle fd);
   ```
-  Appended at the **end** of the vtable. This is an **intentional pre-consumer ABI revision** (§7), not
-  an "ABI-safe" trailing add: any provider that positionally-initializes `KlDatagramOps` MUST recompile;
-  NULL-tolerance is a *post-recompile* convenience, not binary compatibility. The op takes no `family`
-  — resolving that `KlDatagramConfig` carries no family to pass at init (P1). A dedicated op — **not**
-  folded into `configure`'s return, which already means the `KL_DGRAM_RX_*` receive-capture bitmask.
+  The report is **fd-specific, not provider-global.** Reporting a provider-wide set and deferring
+  family limits to the operation's syscall would break the fail-loud `want_caps` gate — e.g. an
+  IPv4-only capability granted to an IPv6 socket would pass init and fail later. The frozen contract is
+  **"the caps the provider can honor on this exact fd."** A provider obtains the fd's family internally
+  (`getsockname`) or, if it cannot, reports only the **cross-family intersection** (omitting any
+  family-specific capability). Concrete instance: `KL_DGRAM_CAP_BROADCAST` is **IPv4-only** (IPv6 has no
+  broadcast) — the POSIX provider reports it only for an `AF_INET` fd, never for `AF_INET6`; so
+  `want_caps = BROADCAST` on an IPv6 datagram fails init loudly, not at a later send.
+
+  The op takes no `family` parameter — resolving that `KlDatagramConfig` carries no family to pass at
+  init (P1-family); the provider inspects the fd. A dedicated op — **not** folded into `configure`'s
+  return, which already means the `KL_DGRAM_RX_*` receive-capture bitmask.
+
+  Appended at the **end** of the vtable — an **intentional pre-consumer ABI revision** (§7), not an
+  "ABI-safe" trailing add: any provider that positionally-initializes `KlDatagramOps` MUST recompile;
+  NULL-tolerance is a *post-recompile* convenience, not binary compatibility.
 
 - **D-M2-2 — the facade derives at init.** `kl_datagram_init_ex` (and thus `kl_datagram_init`) computes
   `provider_caps = ops->caps ? ops->caps(sp_ctx, fd) : 0` (NULL ⇒ **no optional caps**, §1a), then:
@@ -115,10 +136,11 @@ Extend the `KL_DGRAM_CAP_*` bitfield (`include/keel/datagram.h`), appending bits
 unchanged):
 ```c
 #define KL_DGRAM_CAP_MULTICAST (1u << 3)   /* runtime multicast join/leave (kl_datagram_multicast_*) */
-#define KL_DGRAM_CAP_BROADCAST (1u << 4)   /* SO_BROADCAST datagrams (reportable; configured via KlUdpConfig) */
+#define KL_DGRAM_CAP_BROADCAST (1u << 4)   /* SO_BROADCAST — IPv4 fds only (reported per-fd); config via KlUdpConfig */
 ```
 `MULTICAST` gates the §3 runtime API. `BROADCAST` is report-only (discoverability), configured at
-`kl_datagram_open` time, no runtime toggle.
+`kl_datagram_open` time, no runtime toggle — and, being IPv4-only, is reported (§1 D-M2-1) only for an
+`AF_INET` fd, never for `AF_INET6`.
 
 ## 3. Multicast runtime API — the extended-UDP layer (Decision D-CAP-3 / D-M2-7)
 
@@ -128,18 +150,28 @@ config. The **entire** extended-UDP runtime surface for M2 is two functions (pub
 int kl_datagram_multicast_join (KlDatagram *dg, const char *group, unsigned iface_index);
 int kl_datagram_multicast_leave(KlDatagram *dg, const char *group, unsigned iface_index);
 ```
-Symmetric with `kl_udp_multicast_join/leave` (`src/udp.c:928`). Semantics:
-- Gated on `KL_DGRAM_CAP_MULTICAST`: if `!(provider_caps & MULTICAST)` (or `mcast_membership` is NULL)
-  → return `-1` (`KL_ERR_UNSUPPORTED`), fail-loud, no emulation.
-- Route to `dg_ops(dg)->mcast_membership(sp_ctx, dg->fd, family, group, iface_index, join)` — the same
-  provider op `KlUdp` uses. Return its `0`/`-1`.
-- **Family (Decision D-M2-8):** unlike the family-independent `caps` op (§1), `mcast_membership` *does*
-  take the socket family — but `KlDatagramConfig` carries none and is **frozen** (M1 — no ABI change).
-  The family is **derived from the group literal** at the join/leave call (`kl_sockaddr_parse`/
-  family-detect: dotted-quad → `AF_INET`, colon → `AF_INET6`). A group whose family mismatches the
-  socket is rejected by the kernel at the join syscall (fail-loud), so no stored socket family is
-  needed. (Alternative — record family via `getsockname` at init — rejected: extra syscall, not
-  portable to EFI/lwIP; the group literal is unambiguous.)
+Symmetric with `kl_udp_multicast_join/leave` (`src/udp.c:928`). Each returns `0` on success or `-1`,
+setting `kl_datagram_last_error()` to a **deterministic** code per failure class (Decision D-M2-7a,
+blocker P2). Evaluated in this order — the first failing check returns, and no later step runs:
+- **capability missing** — `!(provider_caps & KL_DGRAM_CAP_MULTICAST)` or `mcast_membership == NULL` →
+  `-1`, `KL_ERR_UNSUPPORTED`. Checked first (before parsing); no provider call.
+- **malformed group literal** — the group fails to parse to a numeric multicast address (§ D-M2-8) →
+  `-1`, `KL_ERR_INVALID_ARG`; no provider call.
+- **provider / syscall failure** — `mcast_membership` returns `-1` (e.g. `setsockopt` `EADDRNOTAVAIL`,
+  a group/socket family mismatch, no such interface) → `-1`, `KL_ERR_IO`. This is the only outcome that
+  reaches the provider.
+- **success** — `mcast_membership` returns `0` → `0`, `last_error` untouched.
+
+On success the call routes to `dg_ops(dg)->mcast_membership(sp_ctx, dg->fd, family, group, iface_index,
+join)` — the same provider op `KlUdp` uses.
+- **Family (Decision D-M2-8):** `mcast_membership` takes an explicit `family` parameter (the `caps` op
+  does not — §1 — but that op is still fd-family-*aware*, inspecting the fd itself). `KlDatagramConfig`
+  carries no family and is **frozen** (M1 — no ABI change), so the join/leave **derives the family from
+  the group literal** (`kl_sockaddr_parse`/family-detect: dotted-quad → `AF_INET`, colon → `AF_INET6`;
+  a literal that does not parse to a numeric multicast address → `KL_ERR_INVALID_ARG`, above). A group
+  whose family mismatches the socket is rejected by the provider/kernel (→ `KL_ERR_IO`, above), so no
+  stored socket family is needed. (Alternative — record family via `getsockname` at init — rejected:
+  extra syscall, not portable to EFI/lwIP; the group literal is unambiguous.)
 
 **Placement (Decision D-M2-9):** the two functions live in the facade TU `src/datagram.c` (they route
 through the existing `dg_ops()` accessor, exactly like `kl_datagram_send` → provider `send`). No new
@@ -152,18 +184,21 @@ honest: a capability gate + two runtime calls, not a new subsystem.
 Each in-tree provider implements `caps` reporting its **true** support — unsupported features report
 **absent**, never emulate (the lwIP source-pin/TOS no-op must surface as a *missing* cap, D-CAP-1):
 
+Reported **for the fd's family** (§1 D-M2-1), so `BROADCAST` is `AF_INET`-only:
+
 | Provider | SOURCE_PIN | TOS | CONNECTED | MULTICAST | BROADCAST |
 |---|---|---|---|---|---|
-| `socket_posix` (default) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `socket_winsock` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `socket_posix` (default) | ✓ | ✓ | ✓ | ✓ | ✓ **iff `AF_INET` fd** |
+| `socket_winsock` | ✓ | ✓ | ✓ | ✓ | ✓ **iff `AF_INET` fd** |
 | overlapped (iouring / iocp / pollcomp) | inherit posix/winsock dgram ops | | | | |
 | lwIP (BSD + raw) | ✗ (ignored today) | ✗ | ✓ | ✓ (IGMP) | dep. |
 | EFI_UDP4 | ✗ | ✗ | ✓ | dep. (EFI_UDP4 mcast) | ✗ |
 
 Exact lwIP/EFI rows are finalized against each provider's real behavior at implementation; the
-**principle is frozen**: report what is real, so the D-CAP-1 init gate turns a silent no-op into a loud
-`want_caps` failure. (The overlapped providers delegate to the underlying posix/winsock dgram ops, so
-they report that provider's set.)
+**principle is frozen**: report what is real **on this fd** (so `BROADCAST` is never reported on an
+IPv6 fd), turning the D-CAP-1 init gate from a silent no-op into a loud `want_caps` failure. The POSIX
+provider determines the fd's family via `getsockname` inside `caps`. (The overlapped providers delegate
+to the underlying posix/winsock dgram ops, so they report that provider's per-fd set.)
 
 ## 5. Recv-TOS delivery — O-CAP-1 resolved (Decision D-M2-11)
 
@@ -226,17 +261,23 @@ capability-reporting mock, plus a live loopback multicast case where the platfor
 3. **NULL `caps` ⇒ no optional caps** — a provider with `caps == NULL`: `kl_datagram_provider_caps()`
    is 0; `want_caps == 0` init succeeds; **any** non-zero `want_caps` fails init with
    `KL_ERR_UNSUPPORTED` (no signature-derived grant — blocker P1).
-4. **multicast gated** — `kl_datagram_multicast_join/leave` on a provider **without** `MULTICAST` (or
+4. **family-limited report rejects an unavailable requested cap (blocker P1)** — a mock provider whose
+   `caps(ctx, fd)` returns a **family-limited** set (e.g. omits `BROADCAST` for the test fd, modelling
+   an IPv6 socket): `want_caps = BROADCAST` → `init_ex` returns `-1` / `KL_ERR_UNSUPPORTED` (fd not
+   adopted); the same provider reporting `BROADCAST` for an `AF_INET` fd grants it. Proves the gate is
+   truthful **at init**, not deferred to a later syscall.
+5. **multicast gated** — `kl_datagram_multicast_join/leave` on a provider **without** `MULTICAST` (or
    NULL `mcast_membership`) returns `-1`/`KL_ERR_UNSUPPORTED`, and does **not** call the provider.
-5. **multicast routes** — on a `MULTICAST`-capable mock, join/leave call `mcast_membership` with the
+6. **multicast error outcomes (blocker P2)** — deterministic `kl_datagram_last_error()`: a malformed
+   group literal → `-1`/`KL_ERR_INVALID_ARG` (no provider call); a `mcast_membership` that returns `-1`
+   → `-1`/`KL_ERR_IO`; the missing-capability case (test 5) → `KL_ERR_UNSUPPORTED`.
+7. **multicast routes** — on a `MULTICAST`-capable mock, join/leave call `mcast_membership` with the
    family **derived from the group literal** (IPv4 group → `AF_INET`, IPv6 group → `AF_INET6`), the
    right `iface_index`, and `join` 1/0.
-6. **family mismatch** — a group/socket family mismatch surfaces the provider's `-1` (kernel/mock
-   rejects), not a silent success.
-7. **recv-TOS unchanged** — the recv callback signature and delivery are byte-identical (O-CAP-1 (a)).
-8. **live loopback multicast** (where supported) — real POSIX provider join/leave on a loopback group
+8. **recv-TOS unchanged** — the recv callback signature and delivery are byte-identical (O-CAP-1 (a)).
+9. **live loopback multicast** (where supported) — real POSIX provider join/leave on a loopback group
    returns 0 (skipped on platforms/CI without multicast).
-9. **regression** — every existing datagram suite (send/close/public/live, DNS) passes verbatim.
+10. **regression** — every existing datagram suite (send/close/public/live, DNS) passes verbatim.
 
 ## 10. Validation plan
 
@@ -248,8 +289,14 @@ capability-reporting mock, plus a live loopback multicast case where the platfor
   new boundary crossing), `check-sockaddr-neutral`, `check-doc-refs`, `cppcheck`; EFI host-mock +
   freestanding datagram build (new caps op + multicast funcs compile; EFI/lwIP report reduced sets).
 
-## 11. Decisions — all resolved at review (revision 2)
+## 11. Decisions — all resolved at review (revision 3)
 
+- **P1-fd-truthful — RESOLVED: caps are reported for the specific fd's family** (§1 D-M2-1). Not
+  provider-global; the provider inspects the fd (`getsockname`) or reports the cross-family
+  intersection, so the fail-loud gate cannot grant a family-inapplicable cap (`BROADCAST` is
+  `AF_INET`-only). Family-limited-provider init-rejection test at §9.4.
+- **P2-mcast-errors — RESOLVED: deterministic `kl_datagram_last_error()`** (§3 D-M2-7a). Missing cap →
+  `KL_ERR_UNSUPPORTED`; malformed group → `KL_ERR_INVALID_ARG`; provider/syscall failure → `KL_ERR_IO`.
 - **O-M2-err — RESOLVED: add `KL_ERR_UNSUPPORTED`** (§1b). A precise fail-loud diagnostic on the
   `want_caps` init gate and the multicast gate; the reuse-`KL_ERR_INVALID_ARG` alternative dropped.
 - **O-M2-caps-report — RESOLVED: preserve `kl_datagram_caps()` (granted), add
