@@ -350,9 +350,17 @@ document** — it only scopes them.
    + passthrough caps). Preserve the public API/ABI + handler + multicast + source-pinned reply, with
    the documented count-bound caveat per §4/§5; or keep `KlUdpServer` on `KlUdp` if exact byte-only
    backpressure is required (off-ramp). Full parity + every backend gate.
-5. **M5 — reduce KlUdp to a compatibility wrapper.** Express send/recv/lifetime over the shared
-   substrate **but keep `KlUdp`'s own byte-only/count-unbounded queue** (§5) — the core cannot provide
-   it; conformance across every backend. Optional deprecation is a later, versioned decision.
+5. **M5 — batch/GSO/GRO high-throughput extension for KlDatagram + migrate KlUdpServer onto it.**
+   **RE-SCOPED (2026-08-19, reviewer direction) — see [datagram_m5_batch_extension_design.md](datagram_m5_batch_extension_design.md).**
+   The four Linux fast paths (recvmmsg / sendmmsg / UDP GSO / UDP GRO) are real pps/CPU wins, not
+   compatibility baggage; they belong in `KlDatagram` as an OPTIONAL, capability-gated, caller-
+   preallocated extension layer (the provider vtable already exposes them), with `KlUdpServer` opting in
+   when `mmsg_batch`/`recv_gro` is configured (its handler still sees one logical datagram at a time; an
+   adapter splits the batch/GRO buffer). The single-datagram Tier-1 contract is unchanged; the byte-only
+   send queue is NOT moved into the core (§5/§7 of the M5 freeze). **Reducing/retiring `KlUdp` itself is
+   deferred to a later, separately-decided step** (provisionally "M6") once the extension lands and
+   `KlUdpServer` is migrated — express-`KlUdp`-over-the-shared-substrate-while-keeping-its-byte-queue is
+   re-decided then, not now.
 
 **Order/dependencies:** M0 is the prerequisite for M3/M4; M1 and M2 are additive. **M3 (DNS) needs M0
 only (not M1 or M2)** — the low-risk proof. **M4 (server) needs M0 + M1 + M2.** M5 needs M3 + M4 complete
