@@ -15,6 +15,16 @@ free-twice regressions. (P2) Queue sizing uses normalized, overflow-safe arithme
 accepted: the `KlUdpServer` layout ABI revision; GRO-off + mmsg-inert; fail-loud wildcard source-pin
 *with both caps verified*; full-payload slot sizing with accurately-stated defaults + tradeoff.
 
+**Revision 3** reconciles four contract/ownership details. (P1) `kl_datagram_init_ex` failure leaves
+`prep.fd` with the caller — `kl_udp_server_init` now **explicitly closes `prep.fd` on every `init_ex`
+failure** (after copying `kl_datagram_last_error`), with a close-count assertion (§4/§8/§10.3). (P1) The
+reentrant-free rule is now part of M4's scope as a **`udp_server.h` public-header doc change** (§0/§9).
+(P2) The preallocation expression is corrected to `65507 × max(1, floor(effective_budget / 65507))`
+with the unused byte-budget headroom noted as another count-bound source (§3). (P2) "always available"
+is corrected — source-pin's two halves are **expected on mainstream POSIX/Winsock configs but init
+fails loudly when either is absent** (reduced-capability builds / runtime Winsock extension absence,
+per M2) (§4).
+
 ## 0. Scope
 
 Re-implement `KlUdpServer` on top of the Tier-1 `KlDatagram` core (M0 prep + M1 `BOTH` policy) and the
@@ -27,7 +37,9 @@ by M4 (its reduction to a compat wrapper is M5).
 **In scope:** the config→{KlUdpConfig + KlDatagramConfig} mapping; the send-queue sizing onto fixed
 slots; source-pinned reply via `msg.local`; recv + local-address capture + handler dispatch; multicast
 join-at-init + runtime join/leave via M2; deterministic error mapping; teardown; the documented
-behavior caveats (count-bound queue, no mmsg/GRO coalescing).
+behavior caveats (count-bound queue, no mmsg/GRO coalescing); a **`udp_server.h` public-header doc
+update** for the reentrant-free rule (§9) — a safety-critical caller-contract change, not merely an
+implementation detail.
 
 **Not in scope:** M5 (`KlUdp` compat wrapper); any new public `KlUdpServer` API.
 
@@ -90,13 +102,20 @@ Normalized, overflow-safe arithmetic (blocker P2), with `KL_UDP_DGRAM_MAX = 6550
 - `send_slots = effective_budget / KL_UDP_DGRAM_MAX; if (send_slots == 0) send_slots = 1;` — `size_t`
   division (no overflow); clamped to ≥ 1. The default 256 KiB ⇒ `262144 / 65507 = 4` slots.
 
-**Memory / count tradeoff, stated exactly.** For `effective_budget ≥ 65507`, preallocation
-(`send_slots × 65507`) ≈ `effective_budget` (the memory bound the user already chose via
-`max_send_queue`); e.g. 256 KiB ⇒ 4 × 65507 ≈ 256 KiB. For `effective_budget < 65507`, `send_slots`
-clamps to 1, so **one 65507-byte slot is allocated even though the budget is smaller** — preallocation
-is `65507`, above the byte budget; the byte gate still caps *queued bytes* at `effective_budget` (so a
-sub-datagram budget admits exactly one queued reply up to its size). Preallocation is therefore
-`max(65507, effective_budget)`, not `≈ budget`, for small budgets.
+**Memory / count tradeoff, stated exactly.** With floor division, preallocation is exactly
+`65507 × max(1, floor(effective_budget / 65507))`:
+- `effective_budget ≥ 65507`: preallocation ≤ `effective_budget` (floor rounds the slot count *down*),
+  e.g. 256 KiB ⇒ `floor(262144/65507)=4` ⇒ 4 × 65507 = 262 028 bytes ≈ budget. The rounding leaves up
+  to `65506` bytes of **unused byte-budget headroom** (e.g. budget 100 000 ⇒ `floor=1` ⇒ ONE 65507-byte
+  slot; the remaining ~34 493 bytes of budget are unreachable because there is only one slot). That
+  headroom is a *further* source of earlier count-bound refusal — the slot count, not the byte budget,
+  binds — and is part of the documented count-bound caveat below.
+- `effective_budget < 65507`: `send_slots` clamps to 1, so **one 65507-byte slot is allocated even
+  though the budget is smaller** (preallocation `65507` > budget); the byte gate still caps *queued
+  bytes* at `effective_budget`, admitting exactly one queued reply up to that many bytes.
+
+So preallocation is NOT `max(65507, budget)` — it is `65507 × max(1, floor(budget/65507))`, at most the
+budget for budgets ≥ 65507 (with sub-slot headroom) and exactly `65507` below.
 
 **Documented caveat (accepted §4 D-Q-2):** because slots are fixed and full-datagram-sized, a burst of
 many *small* replies is count-bounded sooner than `KlUdp`'s byte-only bound — the (N+1)-th concurrent
@@ -128,12 +147,17 @@ M4 makes source-pin **fail-loud where it is load-bearing** (M2), requiring both 
   **require `prep.rx_caps & KL_DGRAM_RX_PKTINFO`** (the kernel accepted RX pktinfo). If absent →
   `kl_sock_close(sockets, prep.fd)` (M0 transferred the fd to the caller on open success) and return
   `-1` with `last_error = KL_ERR_UNSUPPORTED`, adopting nothing. Then `kl_datagram_init_ex` with
-  `want_caps = KL_DGRAM_CAP_SOURCE_PIN`, whose M2 gate requires the send cap (init `-1` /
-  `KL_ERR_UNSUPPORTED`, fd not adopted, on a provider lacking it). Both must hold; on POSIX/Winsock both
-  are always available, so init succeeds and behavior matches `KlUdp`. Reply passes `msg.local =
-  &s->local` when `have_local`.
+  `want_caps = KL_DGRAM_CAP_SOURCE_PIN`, whose M2 gate requires the send cap. **`init_ex` failure leaves
+  `prep.fd` with the caller** (its contract is "failure before adoption; caller retains fd"), so
+  `kl_udp_server_init` MUST — on *any* `init_ex` failure — first copy `s->last_error =
+  kl_datagram_last_error(&s->dg)`, then `kl_sock_close(sockets, prep.fd)`, then return `-1` (§8). Both
+  caps must hold; both are **expected on mainstream POSIX/Winsock configurations**, but per M2 either
+  half may be absent (a reduced-capability build without the pktinfo/source-pin macros, or a runtime
+  Winsock `WSASendMsg` lookup failure) — in which case **init fails loudly** rather than answering from
+  the wrong source. Reply passes `msg.local = &s->local` when `have_local`.
 - **Specific-address bind:** `recv_pktinfo = 0`, no RX-caps check, `want_caps = 0`, reply
-  `msg.local = NULL` — the socket's bound address fixes the source; no source-pin needed.
+  `msg.local = NULL` — the socket's bound address fixes the source; no source-pin needed. (`init_ex`
+  failure here still closes `prep.fd` per the same rule.)
 
 *(O-M4-srcpin, §12: the alternative is opportunistic source-pin — `want_caps = 0` always, reply
 consults `kl_datagram_provider_caps() & SOURCE_PIN` and passes `msg.local` only if supported — exactly
@@ -189,8 +213,11 @@ needs that throughput, it stays on `KlUdp` (off-ramp). Recorded, not silently dr
 - **reply:** `KL_DATAGRAM_ACCEPTED → 0`; `WOULD_BLOCK` / `TOO_LARGE` (budget or slot_cap) → `-1`,
   `last_error = KL_ERR_QUEUE_FULL` (the drop `KlUdp` already reports); `CLOSED` → `-1`,
   `KL_ERR_INVALID_ARG`; `ERROR`/`UNSUPPORTED` → `-1`, `KL_ERR_IO` / `KL_ERR_UNSUPPORTED`.
-- **init:** any prep/init/join failure → `-1` with `last_error` carried from the failing step
-  (`kl_datagram_last_error` / the multicast error). fd never leaked (M0/M2 contracts).
+- **init:** `-1` with `last_error` carried from the failing step, and the fd closed by the right owner:
+  a `kl_datagram_open` failure closed its own fd (M0); an **RX-caps or `kl_datagram_init_ex` failure →
+  `kl_udp_server_init` closes `prep.fd`** (the fd was never adopted — §4); a **post-adoption failure**
+  (the multicast join-at-init) → `kl_datagram_teardown(&s->dg, NULL, NULL)` closes the adopted fd. Exactly
+  one close on every path; no leak (verified under ASan/LSan + a close-observing mock, §10.3).
 - **multicast join/leave:** pass through the M2 error precedence (`KL_ERR_UNSUPPORTED` /
   `KL_ERR_INVALID_ARG` / `KL_ERR_IO`).
 
@@ -220,6 +247,13 @@ gives exactly two behaviors by whether a delivery frame is active:
 `us_on_recv` never touches `s` after calling `s->handler`, so a from-handler free that defers leaves no
 use-after-teardown inside the wrapper; the datagram frame handles internal ordering.
 
+**Public-header contract (in scope, §0):** this reentrant-free rule changes when a caller may release an
+embedded `KlUdpServer`, so it is documented in `include/keel/udp_server.h` on `kl_udp_server_free` —
+"synchronous when called outside a handler (storage may be released on return); if called from within a
+handler, the datagram is reclaimed at the end of the current event-loop tick and the `KlUdpServer`
+storage MUST remain valid until that tick returns; idempotent." A safety-critical rule must live in the
+header, not only this design doc.
+
 ## 10. Test matrix (`tests/test_udp_server.c` + the existing udp-server suite)
 
 Preserve the existing suite (behavior parity) and add M4-specifics:
@@ -229,10 +263,13 @@ Preserve the existing suite (behavior parity) and add M4-specifics:
    is source-pinned to that local (assert via a second bound address / `recv` local on the peer where
    the platform allows); both `prep.rx_caps & KL_DGRAM_RX_PKTINFO` and `want_caps = SOURCE_PIN` accepted
    on POSIX.
-3. **Missing RX pktinfo fails init (blocker P1)** — a mock provider whose `configure` returns
-   `rx_caps` WITHOUT `KL_DGRAM_RX_PKTINFO` on a wildcard bind → `kl_udp_server_init` returns `-1` /
-   `KL_ERR_UNSUPPORTED`, and the prep fd is closed (no adoption, no leak under ASan/LSan). A companion
-   mock lacking the send `SOURCE_PIN` cap fails the `init_ex` gate likewise.
+3. **Missing-cap fails init + closes the fd exactly once (blocker P1)** — over a close-observing mock
+   provider: (a) `configure` returns `rx_caps` WITHOUT `KL_DGRAM_RX_PKTINFO` on a wildcard bind →
+   `kl_udp_server_init` returns `-1` / `KL_ERR_UNSUPPORTED` and closes `prep.fd` **exactly once**
+   (assert close-count == 1, no adoption, no leak under ASan/LSan); (b) a companion mock reporting RX
+   pktinfo but lacking the send `SOURCE_PIN` cap fails the `init_ex` gate → `kl_udp_server_init` copies
+   `last_error` then closes `prep.fd` **exactly once** (assert close-count == 1). Both assert the fd is
+   not double-closed and not leaked.
 4. **Specific-address bind** — no `recv_pktinfo`, no RX-caps check, `want_caps = 0`, reply from the
    bound address.
 5. **Reply backpressure** — fill the send queue (gating provider / no drain), the next reply returns
@@ -277,6 +314,16 @@ Preserve the existing suite (behavior parity) and add M4-specifics:
   single-flight core; documented M2 §6 caveat (ruling).
 - **O-M4-free (§9) — RESOLVED: one lifecycle** — synchronous outside a handler; deferred-to-tick-end
   from within a handler (caller keeps `KlUdpServer` valid until the tick returns); idempotent. Regressions
-  in §10.7 (blocker P1).
+  in §10.7 (blocker P1). The reentrant-free rule is documented in `udp_server.h` (rev-3 P1; §0/§9).
+- **O-M4-initfd (§4/§8) — RESOLVED (rev 3): `kl_udp_server_init` closes `prep.fd` on every `init_ex`
+  failure** (after copying `last_error`), because `init_ex`'s contract leaves an unadopted fd with the
+  caller. Exactly-one-close asserted (§10.3). Post-adoption (join) failures close via
+  `kl_datagram_teardown`.
+- **O-M4-prealloc (§3) — RESOLVED (rev 3): exact expression** `65507 × max(1, floor(effective_budget /
+  65507))`; ≤ budget for budgets ≥ 65507 (with ≤ 65506 B unused-headroom → earlier count-bound),
+  `65507` below. Not `max(65507, budget)`.
+- **O-M4-caps-availability (§4) — RESOLVED (rev 3):** source-pin's two halves are EXPECTED on mainstream
+  POSIX/Winsock but not assumed present — init fails loudly when either is absent (M2 reduced-capability
+  / runtime `WSASendMsg` absence).
 
 No open decisions remain; the freeze is ready for implementation review.
