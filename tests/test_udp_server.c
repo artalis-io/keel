@@ -26,7 +26,6 @@
 #include <string.h>
 #include <stdio.h>
 #include "net_compat.h"
-#include "../src/event_caps.h"   /* kl_event_caps — source-pin over completion backends is deferred (see below) */
 
 /* ── Server side: echo handler ───────────────────────────────────────── */
 
@@ -319,13 +318,9 @@ UTEST(udp_server, reply_from_hit_address) {
     pump_until(&ctx, &g_cli_got, 1, 300);
 
     ASSERT_EQ(1, g_cli_got);
-    /* Source-pinned reply (egress from the hit addr) is asserted only on READINESS loops. On a
-     * COMPLETION backend, native source-pin (overlapped WSASendMsg / io_uring sendmsg control message)
-     * lands in the reviewed prerequisite framework increment (KlDatagram completion source-pin/TOS);
-     * until then the completion recv does not capture the local addr, so the reply egresses from the
-     * default route. The reply still arrives (asserted above). */
-    if (!(kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION))
-        ASSERT_STREQ("127.0.0.2", g_cli_src_ip);
+    ASSERT_STREQ("127.0.0.2", g_cli_src_ip);   /* source-pinned reply egresses from the hit addr —
+                                                * on readiness AND completion (native cmsg send + recv
+                                                * pktinfo capture; the completion-source-pin increment) */
 
     kl_udp_free(&cli);
     kl_udp_server_free(&srv);

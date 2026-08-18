@@ -834,11 +834,11 @@ UTEST(datagram_public, m2_posix_provider_caps_per_family) {
     KlDatagramConfig c = cfg_for(mk_fd(), 4, 1500);   /* sockets = NULL → posix ops, AF_INET fd */
     ASSERT_EQ(0, kl_datagram_init(&dg, &c));
     ASSERT_EQ(exp4, kl_datagram_provider_caps(&dg));
-    ASSERT_TRUE(kl_datagram_provider_caps(&dg) & KL_DGRAM_CAP_CONNECTED);   /* explicit: always */
+    ASSERT_TRUE((kl_datagram_provider_caps(&dg) & KL_DGRAM_CAP_CONNECTED));   /* explicit: always */
 #if defined(SO_BROADCAST)
-    ASSERT_TRUE(kl_datagram_provider_caps(&dg) & KL_DGRAM_CAP_BROADCAST);   /* explicit: IPv4 has it where compiled */
+    ASSERT_TRUE((kl_datagram_provider_caps(&dg) & KL_DGRAM_CAP_BROADCAST));   /* explicit: IPv4 has it where compiled */
 #else
-    ASSERT_EQ((unsigned)0, kl_datagram_provider_caps(&dg) & KL_DGRAM_CAP_BROADCAST);
+    ASSERT_EQ((unsigned)0, (kl_datagram_provider_caps(&dg) & KL_DGRAM_CAP_BROADCAST));
 #endif
     m2_close(&dg);
     /* AF_INET6 (skip if unavailable) */
@@ -848,8 +848,8 @@ UTEST(datagram_public, m2_posix_provider_caps_per_family) {
         KlDatagramConfig c6 = cfg_for(fd6, 4, 1500);
         ASSERT_EQ(0, kl_datagram_init(&dg6, &c6));
         ASSERT_EQ(exp6, kl_datagram_provider_caps(&dg6));
-        ASSERT_TRUE(kl_datagram_provider_caps(&dg6) & KL_DGRAM_CAP_CONNECTED);          /* explicit: always */
-        ASSERT_EQ((unsigned)0, kl_datagram_provider_caps(&dg6) & KL_DGRAM_CAP_BROADCAST); /* explicit: no IPv6 broadcast */
+        ASSERT_TRUE((kl_datagram_provider_caps(&dg6) & KL_DGRAM_CAP_CONNECTED));          /* explicit: always */
+        ASSERT_EQ((unsigned)0, (kl_datagram_provider_caps(&dg6) & KL_DGRAM_CAP_BROADCAST)); /* explicit: no IPv6 broadcast */
         m2_close(&dg6);
     }
 }
@@ -877,6 +877,33 @@ UTEST(datagram_public, m4_fd_accessors_require_live_core) {
     m2_close(&dg2);
     ASSERT_EQ(KL_INVALID_SOCKET, kl_datagram_fd(&dg2));   /* after free: core NULL */
     ASSERT_EQ((uint16_t)0, kl_datagram_local_port(&dg2));
+}
+
+/* A control (source-pinned) send whose completion is a TERMINAL ERROR retires the single in-flight op
+ * exactly once (sticky error, no re-post, no queued-without-op state) — the completion guarantee. */
+UTEST(datagram_public, m_control_send_terminal_error_retires_once) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    c.want_caps = KL_DGRAM_CAP_SOURCE_PIN;                 /* the posix provider grants it on a real fd */
+    ASSERT_EQ(0, kl_datagram_init_ex(&dg, &c, 0));
+
+    KlSockAddr d = addr4(10,0,0,1, 53), loc = addr4(127,0,0,1, 0);
+    KlDatagramMessage m = { .data = "AAAA", .len = 4, .peer = &d, .local = &loc, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));   /* one posted op */
+    ASSERT_EQ(1, g_mc.send_posted);
+    ASSERT_EQ((size_t)1, kl_datagram_send_inflight(&dg));
+
+    drive_send(0);                                          /* TERMINAL ERROR completion */
+    ASSERT_EQ((size_t)0, kl_datagram_send_inflight(&dg));  /* retired exactly once */
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued(&dg));    /* no queued-without-op state */
+    ASSERT_EQ(1, g_mc.send_posted);                        /* not re-posted after the error */
+    /* the send error is STICKY — a subsequent send is refused with ERROR (no new op posted). */
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send(&dg, &m));
+    ASSERT_EQ(1, g_mc.send_posted);
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    ASSERT_EQ(0, kl_datagram_free(&dg));
 }
 
 UTEST_MAIN();

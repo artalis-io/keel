@@ -663,7 +663,7 @@ IOURING_TEST_SUITES = allocator alpn async body_reader chunked client client_hap
                           proxy_protocol read_flow_control redirect request resolver_cache \
                           response response_parser router server_integration server_stats sockaddr sse \
                           stream_single_shot stream_transport thread_pool timeout timer tls tls_integration udp udp_batching \
-                          udp_offload udp_server udp_tos unix_socket url version websocket websocket_client
+                          udp_cmsg udp_offload udp_server udp_tos unix_socket url version websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \

@@ -110,7 +110,9 @@ typedef struct KlIocpOp {
     int           src_len;                     /* UDP_RECV: source addr length */
     WSAMSG        umsg;                         /* UDP_RECV: WSARecvMsg header (name + buf + control) */
     WSABUF        ubuf;                         /* UDP_RECV: single recv iovec into dg->recv_buf */
-    char          uctrl[KL_UDP_WIN_RX_CMSG_SPACE]; /* UDP_RECV: pktinfo control buffer (local addr) */
+    /* _Alignas: typed WSACMSGHDR accesses (recv pktinfo parse + send control build) require WSACMSGHDR
+     * alignment; a plain char[] is only byte-aligned. Dual-use (recv pktinfo / send source-pin+TOS). */
+    _Alignas(WSACMSGHDR) char uctrl[KL_UDP_WIN_RX_CMSG_SPACE]; /* UDP recv pktinfo / send cmsg buffer */
     int           via_recvmsg;                 /* UDP_RECV: 1 = WSARecvMsg (has control), 0 = WSARecvFrom */
     char         *sendbuf;                     /* WRITE/SENDFILE: contiguous response (head) copy */
     size_t        send_total, send_done;       /* WRITE: partial-send tracking; SENDFILE: head len */
@@ -567,14 +569,48 @@ static int iocp_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp
     op->sendbuf = kl_malloc(st->alloc, sop->len ? sop->len : 1);
     if (!op->sendbuf) { op->send_total = 0; iocp_op_free(op); return -1; }  /* life unset → caller releases */
     memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
-    /* Marshal the neutral dest to a Winsock sockaddr for the overlapped WSASendTo. */
+    /* Marshal the neutral dest to a Winsock sockaddr (op->src holds the send dest here). */
     if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC)
         op->src_len = (int)kl_sockaddr_to_native(sop->dest, &op->src);
+    /* The WSABUF lives in the op — overlapped WSASend calls retain the buffer array until completion. */
+    op->ubuf.len = (ULONG)sop->len;
+    op->ubuf.buf = op->sendbuf;
 
-    WSABUF buf = { (ULONG)sop->len, op->sendbuf };
+    /* Source-pin / per-packet TOS → overlapped WSASendMsg with a control message; ALL descriptor objects
+     * (WSAMSG, WSABUF, name, control) live in the op and survive until the terminal completion (§1b).
+     * Plain sends keep overlapped WSASendTo. */
+    int want_ctrl = (sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC) || sop->tos >= 0;
+    LPFN_WSASENDMSG fn = want_ctrl ? kl_udp_win_get_sendmsg((SOCKET)sop->fd) : NULL;
+    /* A REQUESTED control send with no WSASendMsg extension must FAIL — never fall back to WSASendTo and
+     * silently drop the source-pin/TOS (§P1; the seam must be correct for custom providers / runtime
+     * extension failure, not just the capability-gated built-in provider). */
+    if (want_ctrl && !fn) { iocp_op_free(op); return -1; }
     DWORD sent = 0;
-    int rc = WSASendTo((SOCKET)sop->fd, &buf, 1, &sent, 0,
+    int rc;
+    if (fn) {
+        struct sockaddr_storage sss;
+        const struct sockaddr *src_sa = NULL;
+        if (sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC && kl_sockaddr_to_native(sop->src, &sss))
+            src_sa = (const struct sockaddr *)&sss;
+        int fam = kl_udp_win_send_family((SOCKET)sop->fd,
+                                         op->src_len ? (struct sockaddr *)&op->src : NULL, src_sa);
+        if (fam < 0) { iocp_op_free(op); return -1; }   /* undeterminable family → fail the post */
+        ULONG clen;
+        if (kl_udp_win_build_control((unsigned char *)op->uctrl, sizeof(op->uctrl),
+                                     src_sa, sop->tos, fam, &clen) != 0) {
+            iocp_op_free(op); return -1;   /* requested source-pin/TOS could not be built → fail the post */
+        }
+        memset(&op->umsg, 0, sizeof(op->umsg));
+        op->umsg.name = op->src_len ? (SOCKADDR *)&op->src : NULL;
+        op->umsg.namelen = op->src_len;
+        op->umsg.lpBuffers = &op->ubuf;
+        op->umsg.dwBufferCount = 1;
+        if (clen) { op->umsg.Control.buf = op->uctrl; op->umsg.Control.len = clen; }
+        rc = fn((SOCKET)sop->fd, &op->umsg, 0, &sent, &op->ov, NULL);
+    } else {
+        rc = WSASendTo((SOCKET)sop->fd, &op->ubuf, 1, &sent, 0,
                        (struct sockaddr *)&op->src, op->src_len, &op->ov, NULL);
+    }
     if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         iocp_op_free(op);                      /* life unset → caller releases */
         return -1;

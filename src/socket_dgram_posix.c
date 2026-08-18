@@ -21,6 +21,7 @@
 #include <keel/socket.h>
 #include <keel/udp.h>          /* KlUdpConfig */
 #include "sockaddr_native.h"   /* KlSockAddr <-> host sockaddr at the boundary */
+#include "udp_cmsg.h"          /* kl_udp_build_control / kl_udp_send_family — shared send cmsg builder */
 /* Self-contained: the pktinfo/GRO cmsg parsers are dup'd static below rather than
  * shared through a separate seam TU, so a foreign stack can link-override the whole
  * datagram data-plane by supplying its own KlSocketProvider.dgram. */
@@ -55,66 +56,12 @@
 
 /* ── cmsg build/parse (primitive helpers) ─────────────────────────────── */
 
-/* Build per-datagram control messages: source-pin pktinfo (when src) + a TOS mark
- * (when tos >= 0). `family` selects the IP level for the TOS cmsg. */
-static size_t dgram_build_control(unsigned char *buf, size_t bufsz,
-                                  const struct sockaddr *src, int tos, int family) {
-    struct msghdr tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    tmp.msg_control = buf;
-    tmp.msg_controllen = bufsz;
-    struct cmsghdr *cm = CMSG_FIRSTHDR(&tmp);
-    size_t used = 0;
-
-    if (src && cm) {
-#if defined(IP_PKTINFO)
-        if (src->sa_family == AF_INET) {
-            cm->cmsg_level = IPPROTO_IP;
-            cm->cmsg_type = IP_PKTINFO;
-            cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
-            struct in_pktinfo pi;
-            memset(&pi, 0, sizeof(pi));
-            pi.ipi_spec_dst = ((const struct sockaddr_in *)src)->sin_addr;
-            memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
-            used += CMSG_SPACE(sizeof(struct in_pktinfo));
-            cm = CMSG_NXTHDR(&tmp, cm);
-        } else
-#endif
-        if (src->sa_family == AF_INET6) {
-            cm->cmsg_level = IPPROTO_IPV6;
-            cm->cmsg_type = IPV6_PKTINFO;
-            cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
-            struct in6_pktinfo pi;
-            memset(&pi, 0, sizeof(pi));
-            pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
-            memcpy(CMSG_DATA(cm), &pi, sizeof(pi));
-            used += CMSG_SPACE(sizeof(struct in6_pktinfo));
-            cm = CMSG_NXTHDR(&tmp, cm);
-        }
-    }
-
-    if (tos >= 0 && cm) {
-        if (family == AF_INET) {
-#if defined(IP_TOS)
-            int v = tos & 0xff;
-            cm->cmsg_level = IPPROTO_IP;
-            cm->cmsg_type = IP_TOS;
-            cm->cmsg_len = CMSG_LEN(sizeof(int));
-            memcpy(CMSG_DATA(cm), &v, sizeof(v));
-            used += CMSG_SPACE(sizeof(int));
-#endif
-        } else if (family == AF_INET6) {
-#if defined(IPV6_TCLASS)
-            int v = tos & 0xff;
-            cm->cmsg_level = IPPROTO_IPV6;
-            cm->cmsg_type = IPV6_TCLASS;
-            cm->cmsg_len = CMSG_LEN(sizeof(int));
-            memcpy(CMSG_DATA(cm), &v, sizeof(v));
-            used += CMSG_SPACE(sizeof(int));
-#endif
-        }
-    }
-    return used;
+/* Build per-datagram send control messages — delegates to the shared builder (udp_cmsg.c) so the
+ * provider send and the POSIX completion backends share one implementation (no drift). Returns 0 with
+ * *out set, or -1 if a REQUESTED cmsg could not be built (caller fails the send). */
+static int dgram_build_control(unsigned char *buf, size_t bufsz,
+                               const struct sockaddr *src, int tos, int family, size_t *out) {
+    return kl_udp_build_control(buf, bufsz, src, tos, family, out);
 }
 
 /* Read the received TOS / Traffic-Class byte from control messages, or -1. */
@@ -208,13 +155,18 @@ static kl_ssize_t pdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
     const struct sockaddr *dsa = dest_len ? (const struct sockaddr *)&ds : NULL;
 
     if (src_len || tos >= 0) {
-        unsigned char control[DGRAM_TX_CMSG_SPACE];
+        /* _Alignas: the builder makes typed struct cmsghdr accesses into this buffer, which requires
+         * cmsghdr alignment — a plain unsigned char[] is only byte-aligned. */
+        _Alignas(struct cmsghdr) unsigned char control[DGRAM_TX_CMSG_SPACE];
         memset(control, 0, sizeof(control));
-        /* Family for the TOS cmsg level: from the dest, else the source-pin, else v4. */
-        int family = dest_len ? dsa->sa_family
-                   : (src_len ? ((struct sockaddr *)&ss)->sa_family : AF_INET);
-        size_t clen = dgram_build_control(control, sizeof(control),
-                                          src_len ? (struct sockaddr *)&ss : NULL, tos, family);
+        /* Family for the TOS cmsg level: dest, else src, else getsockname — never defaulted to v4. */
+        int family = kl_udp_send_family(s, dsa, src_len ? (struct sockaddr *)&ss : NULL);
+        if (family < 0) { errno = EINVAL; return -1; }
+        size_t clen;
+        if (dgram_build_control(control, sizeof(control),
+                                src_len ? (struct sockaddr *)&ss : NULL, tos, family, &clen) != 0) {
+            errno = EINVAL; return -1;   /* requested source-pin/TOS could not be built → fail the send */
+        }
         struct iovec iov = { .iov_base = (void *)data, .iov_len = len };
         struct msghdr msg;
         memset(&msg, 0, sizeof(msg));
@@ -587,10 +539,16 @@ static int pdg_send_batch(void *ctx, KlSocketHandle fd, void *tx_batch,
             struct sockaddr_storage src_ss;
             socklen_t src_len = have_src ? kl_sockaddr_to_native(&descs[i].src, &src_ss) : 0;
             unsigned char *ctrl = b->ctrl + (size_t)i * b->ctrl_sz;
-            int fam = dest_len ? (int)b->dst[i].ss_family : AF_INET;
-            size_t clen = dgram_build_control(ctrl, b->ctrl_sz,
-                                              src_len ? (struct sockaddr *)&src_ss : NULL,
-                                              descs[i].tos, fam);
+            int fam = kl_udp_send_family((int)fd, dest_len ? (struct sockaddr *)&b->dst[i] : NULL,
+                                         src_len ? (struct sockaddr *)&src_ss : NULL);
+            size_t clen;
+            /* A descriptor whose requested source-pin/TOS cannot be built (undeterminable family or the
+             * cmsg doesn't fit) FAILS the batch — never transmit without the requested metadata. */
+            if (fam < 0 ||
+                dgram_build_control(ctrl, b->ctrl_sz, src_len ? (struct sockaddr *)&src_ss : NULL,
+                                    descs[i].tos, fam, &clen) != 0) {
+                errno = EINVAL; return -1;
+            }
             if (clen) { m->msg_control = ctrl; m->msg_controllen = clen; }
         }
         b->msgs[i].msg_len = 0;

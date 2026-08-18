@@ -133,8 +133,11 @@ static KlDgramSubmitResult dg_comp_submit(void *ctx, const void *data, size_t le
 static int dg_comp_arm(void *ctx) {
     KlDatagram *dg = ctx;
     KlDgramSlot *in = kl_dgram_core_inbound_slot(dg->core);
+    /* Capture the local (dest) address on the completion recv — consistent with the readiness recv,
+     * which always parses the pktinfo cmsg — so a wildcard-bound source-pinned reply can learn its
+     * local addr. Harmless when the socket has no IP_PKTINFO (no cmsg → no local). */
     KlDgramRecvOp op = { .fd = dg->fd, .buf = in ? in->data : NULL, .cap = in ? in->cap : 0,
-                         .capture = 0, .life = kl_dgram_core_life(dg->core) };
+                         .capture = KL_DGRAM_RX_PKTINFO, .life = kl_dgram_core_life(dg->core) };
     kl_dgram_life_retain(op.life);
     if (kl_comp_post_dgram_recv(dg->ctx, &op) < 0) {
         kl_dgram_life_release(op.life);

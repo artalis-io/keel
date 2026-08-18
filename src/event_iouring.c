@@ -122,7 +122,9 @@ typedef struct KlIouOp {
     size_t         sent_total;            /* total bytes to report on WRITE completion */
     struct msghdr  msgh;                  /* UDP: recvmsg/sendmsg header */
     struct iovec   msgiov;                /* UDP: single iovec */
-    unsigned char  udp_ctrl[KL_UDP_RX_CTRL_SIZE]; /* UDP_RECV: cmsg buffer (pktinfo local addr) */
+    /* _Alignas: typed struct cmsghdr accesses (recv pktinfo parse + send control build) require
+     * cmsghdr alignment; a plain unsigned char[] is only byte-aligned. Dual-use (recv + send). */
+    _Alignas(struct cmsghdr) unsigned char udp_ctrl[KL_UDP_RX_CTRL_SIZE]; /* UDP recv pktinfo / send cmsg */
     struct sockaddr_storage peer;         /* ACCEPT peer / UDP addr (msg_name) / CONNECT dest */
     socklen_t      peer_len;
     union {
@@ -689,6 +691,23 @@ static int iou_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
     op->msgiov.iov_len = sop->len;
     op->msgh.msg_iov = &op->msgiov;
     op->msgh.msg_iovlen = 1;
+    /* Source-pin (src) / per-packet TOS control message — built into the op's control buffer (COPIED
+     * before post returns; the overlapped sendmsg carries it, so no synchronous fallthrough / watcher). */
+    if ((sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC) || sop->tos >= 0) {
+        struct sockaddr_storage sss;
+        const struct sockaddr *src_sa = NULL;
+        if (sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC &&
+            kl_sockaddr_to_native(sop->src, &sss))
+            src_sa = (const struct sockaddr *)&sss;
+        int fam = kl_udp_send_family((int)op->fd,
+                                     op->peer_len ? (struct sockaddr *)&op->peer : NULL, src_sa);
+        if (fam < 0) { iou_op_free(op); return -1; }   /* undeterminable family → fail the post */
+        size_t clen;
+        if (kl_udp_build_control(op->udp_ctrl, sizeof(op->udp_ctrl), src_sa, sop->tos, fam, &clen) != 0) {
+            iou_op_free(op); return -1;   /* requested source-pin/TOS could not be built → fail the post */
+        }
+        if (clen) { op->msgh.msg_control = op->udp_ctrl; op->msgh.msg_controllen = clen; }
+    }
     struct io_uring_sqe *sqe = iou_sqe(st);
     if (!sqe) { iou_op_free(op); return -1; }       /* life unset → caller releases */
     io_uring_prep_sendmsg(sqe, op->fd, &op->msgh, 0);

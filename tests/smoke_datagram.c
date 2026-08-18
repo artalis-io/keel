@@ -75,20 +75,57 @@ int main(void) {
     KlDatagram rx, tx; memset(&rx, 0, sizeof(rx)); memset(&tx, 0, sizeof(tx));
     KlDatagramConfig rc = { .ctx = &ctx, .alloc = &alloc, .sockets = sp, .fd = rxfd,
                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    /* tx grants source-pin + TOS so the second send drives the completion backend's overlapped
+     * cmsg path (on IOCP: WSASendMsg with an op-resident WSAMSG/WSABUF/name/control — §1b), not the
+     * plain WSASendTo. */
     KlDatagramConfig tc = rc; tc.fd = txfd;
-    if (kl_datagram_init(&rx, &rc) != 0 || kl_datagram_init(&tx, &tc) != 0) {
+    tc.want_caps = KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS;
+    if (kl_datagram_init(&rx, &rc) != 0 || kl_datagram_init_ex(&tx, &tc, 0) != 0) {
         fprintf(stderr, "smoke-datagram: init failed\n"); return 1;
     }
     if (kl_datagram_recv_start(&rx, on_recv, NULL) != 0) { fprintf(stderr, "smoke-datagram: recv_start failed\n"); return 1; }
 
     KlSockAddr dst;
     unsigned char ipb[4]; inet_pton(AF_INET, "127.0.0.1", ipb); kl_sockaddr_from_ipv4(&dst, ipb, port);
+
+    /* (1) plain send — the WSASendTo overlapped path. */
     KlDatagramMessage m = { .data = SMOKE_MSG, .len = sizeof(SMOKE_MSG) - 1, .peer = &dst, .tos = -1 };
     if (kl_datagram_send(&tx, &m) != KL_DATAGRAM_ACCEPTED) { fprintf(stderr, "smoke-datagram: send refused\n"); return 1; }
-
     for (int i = 0; i < 200 && g_got < 1; i++) kl_event_ctx_run(&ctx, 16, 10);
-
     int ok = (g_got == 1 && g_len == sizeof(SMOKE_MSG) - 1 && memcmp(g_buf, SMOKE_MSG, g_len) == 0);
+
+    /* (2) source-pinned + TOS send — the overlapped cmsg (WSASendMsg) path; its op-resident descriptor
+     * set must survive the post until the terminal completion retires it exactly once (§1b lifetime). */
+    KlSockAddr loc; kl_sockaddr_parse(&loc, "127.0.0.1", 0);
+    KlDatagramMessage cm = { .data = SMOKE_MSG, .len = sizeof(SMOKE_MSG) - 1,
+                             .peer = &dst, .local = &loc, .tos = 0x28 };
+    KlDatagramSendStatus sr = kl_datagram_send(&tx, &cm);
+    if (sr != KL_DATAGRAM_ACCEPTED) { fprintf(stderr, "smoke-datagram: control send refused (%d)\n", (int)sr); return 1; }
+    for (int i = 0; i < 200 && g_got < 2; i++) kl_event_ctx_run(&ctx, 16, 10);
+    int ctrl_ok = (g_got == 2 && g_len == sizeof(SMOKE_MSG) - 1 && memcmp(g_buf, SMOKE_MSG, g_len) == 0);
+
+    /* (3) §1b cancellation / late-completion lifetime: post a source-pin control send, then close the
+     * datagram WITHOUT draining the send completion. The op-resident descriptor set (on IOCP: WSAMSG,
+     * WSABUF, name, control — kernel-owned while the overlapped send is in flight) must stay valid until
+     * the close coordinator cancels and drains the terminal completion, retiring the single op exactly
+     * once → DETACHED, no UAF / no leak. Runs on every completion backend (IOCP is the target gate). */
+    KlDatagram tx2; memset(&tx2, 0, sizeof(tx2));
+    KlSocketHandle txfd2 = prep_fd(sp, 0, NULL);
+    KlDatagramConfig tc2 = rc; tc2.fd = txfd2; tc2.want_caps = KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS;
+    int cancel_ok = 0;
+    if (kl_handle_valid(txfd2) && kl_datagram_init_ex(&tx2, &tc2, 0) == 0) {
+        KlDatagramMessage cm2 = { .data = SMOKE_MSG, .len = sizeof(SMOKE_MSG) - 1,
+                                  .peer = &dst, .local = &loc, .tos = 0x28 };
+        KlDatagramSendStatus sr2 = kl_datagram_send(&tx2, &cm2);
+        kl_datagram_close_begin(&tx2);          /* close before pumping — send op still in flight */
+        pump_close(&ctx, &tx2);
+        cancel_ok = (sr2 == KL_DATAGRAM_ACCEPTED &&
+                     kl_datagram_close_state(&tx2) == KL_DGRAM_CLOSE_CLOSED &&
+                     kl_datagram_close_result(&tx2) == KL_DGRAM_DETACHED);
+        kl_datagram_free(&tx2);
+    } else if (kl_handle_valid(txfd2)) {
+        kl_sock_close(sp, txfd2);
+    }
 
     /* clean close: graceful → retire → deregister → close fd once → DETACHED (the 7B-7 lifecycle) */
     kl_datagram_close_begin(&rx); pump_close(&ctx, &rx);
@@ -98,8 +135,10 @@ int main(void) {
     kl_datagram_free(&rx); kl_datagram_free(&tx);
     kl_event_ctx_free(&ctx);
 
-    if (!ok)       { fprintf(stderr, "smoke-datagram: roundtrip FAILED (got=%d len=%zu)\n", g_got, g_len); return 1; }
-    if (!detached) { fprintf(stderr, "smoke-datagram: clean close FAILED (rx not DETACHED)\n"); return 1; }
-    printf("smoke-datagram: roundtrip + clean close OK\n");
+    if (!ok)        { fprintf(stderr, "smoke-datagram: roundtrip FAILED (got=%d len=%zu)\n", g_got, g_len); return 1; }
+    if (!ctrl_ok)   { fprintf(stderr, "smoke-datagram: source-pin+TOS control send FAILED (got=%d)\n", g_got); return 1; }
+    if (!cancel_ok) { fprintf(stderr, "smoke-datagram: control-send cancel/late-completion lifetime FAILED\n"); return 1; }
+    if (!detached)  { fprintf(stderr, "smoke-datagram: clean close FAILED (rx not DETACHED)\n"); return 1; }
+    printf("smoke-datagram: roundtrip + control send + cancel-lifetime + clean close OK\n");
     return 0;
 }

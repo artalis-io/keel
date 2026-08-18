@@ -14,6 +14,7 @@
 #include <mswsock.h>       /* WSAID_WSARECVMSG, LPFN_WSARECVMSG */
 #include <ws2tcpip.h>
 #include <string.h>
+#include <limits.h>        /* ULONG_MAX — bound the control-length size_t -> ULONG conversion */
 
 /* Fetched lazily via WSAIoctl on any socket; process-wide, so cached once. */
 static LPFN_WSARECVMSG udp_fn_recvmsg = NULL;
@@ -59,4 +60,92 @@ socklen_t kl_udp_win_parse_local(WSAMSG *msg, struct sockaddr_storage *out) {
         }
     }
     return 0;
+}
+
+/* Fetched lazily via WSAIoctl on any socket; process-wide, so cached once. */
+static LPFN_WSASENDMSG udp_fn_sendmsg = NULL;
+
+LPFN_WSASENDMSG kl_udp_win_get_sendmsg(SOCKET s) {
+    if (udp_fn_sendmsg)
+        return udp_fn_sendmsg;
+    GUID guid = WSAID_WSASENDMSG;
+    LPFN_WSASENDMSG fn = NULL;
+    DWORD nbytes = 0;
+    if (WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid),
+                 &fn, sizeof(fn), &nbytes, NULL, NULL) == 0)
+        udp_fn_sendmsg = fn;
+    return udp_fn_sendmsg;
+}
+
+/* Overflow-safe capacity check: does a `space`-byte cmsg record fit after `used` bytes in `bufsz`?
+ * `used` is a parameter so the subtraction is guarded without a `0 > bufsz` comparison. */
+static int ctrl_fits(size_t used, size_t space, size_t bufsz) {
+    return used <= bufsz && space <= bufsz - used;
+}
+
+int kl_udp_win_build_control(unsigned char *buf, size_t bufsz,
+                             const struct sockaddr *src, int tos, int family, ULONG *out_len) {
+    *out_len = 0;
+    if (bufsz > (size_t)ULONG_MAX) return -1;            /* bound the size_t -> ULONG control length */
+    size_t used = 0;   /* bytes written so far; the next cmsg starts at buf + used (WSA_CMSG_SPACE-aligned) */
+
+    if (src) {                                           /* source-pin REQUESTED (family from src) */
+        int ok = 0;
+        if (src->sa_family == AF_INET) {
+            size_t space = WSA_CMSG_SPACE(sizeof(IN_PKTINFO));
+            if (!ctrl_fits(used, space, bufsz)) return -1;   /* overflow-safe capacity check */
+            WSACMSGHDR *cm = (WSACMSGHDR *)(buf + used);
+            cm->cmsg_level = IPPROTO_IP; cm->cmsg_type = IP_PKTINFO;
+            cm->cmsg_len = WSA_CMSG_LEN(sizeof(IN_PKTINFO));
+            IN_PKTINFO pi; memset(&pi, 0, sizeof(pi));
+            pi.ipi_addr = ((const struct sockaddr_in *)src)->sin_addr;
+            memcpy(WSA_CMSG_DATA(cm), &pi, sizeof(pi));
+            used += space; ok = 1;
+        } else if (src->sa_family == AF_INET6) {
+            size_t space = WSA_CMSG_SPACE(sizeof(IN6_PKTINFO));
+            if (!ctrl_fits(used, space, bufsz)) return -1;   /* overflow-safe capacity check */
+            WSACMSGHDR *cm = (WSACMSGHDR *)(buf + used);
+            cm->cmsg_level = IPPROTO_IPV6; cm->cmsg_type = IPV6_PKTINFO;
+            cm->cmsg_len = WSA_CMSG_LEN(sizeof(IN6_PKTINFO));
+            IN6_PKTINFO pi; memset(&pi, 0, sizeof(pi));
+            pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
+            memcpy(WSA_CMSG_DATA(cm), &pi, sizeof(pi));
+            used += space; ok = 1;
+        }
+        if (!ok) return -1;                              /* requested source-pin but unknown family */
+    }
+    if (tos >= 0) {                                      /* TOS REQUESTED (family from the CALLER) */
+        int v = tos & 0xff, ok = 0;
+        size_t space = WSA_CMSG_SPACE(sizeof(int));
+        if (family == AF_INET) {
+            if (!ctrl_fits(used, space, bufsz)) return -1;   /* overflow-safe capacity check */
+            WSACMSGHDR *cm = (WSACMSGHDR *)(buf + used);
+            cm->cmsg_level = IPPROTO_IP; cm->cmsg_type = IP_TOS;
+            cm->cmsg_len = WSA_CMSG_LEN(sizeof(int));
+            memcpy(WSA_CMSG_DATA(cm), &v, sizeof(v));
+            used += space; ok = 1;
+        } else if (family == AF_INET6) {
+            if (!ctrl_fits(used, space, bufsz)) return -1;   /* overflow-safe capacity check */
+            WSACMSGHDR *cm = (WSACMSGHDR *)(buf + used);
+            cm->cmsg_level = IPPROTO_IPV6; cm->cmsg_type = IPV6_TCLASS;
+            cm->cmsg_len = WSA_CMSG_LEN(sizeof(int));
+            memcpy(WSA_CMSG_DATA(cm), &v, sizeof(v));
+            used += space; ok = 1;
+        }
+        if (!ok) return -1;                              /* requested TOS but unknown family */
+    }
+    *out_len = (ULONG)used;
+    return 0;
+}
+int kl_udp_win_send_family(SOCKET s, const struct sockaddr *dest, const struct sockaddr *src) {
+    if (dest && (dest->sa_family == AF_INET || dest->sa_family == AF_INET6))
+        return dest->sa_family;
+    if (src && (src->sa_family == AF_INET || src->sa_family == AF_INET6))
+        return src->sa_family;
+    struct sockaddr_storage ss;
+    int sl = (int)sizeof(ss);
+    if (getsockname(s, (struct sockaddr *)&ss, &sl) == 0 &&
+        (ss.ss_family == AF_INET || ss.ss_family == AF_INET6))
+        return (int)ss.ss_family;
+    return -1;
 }

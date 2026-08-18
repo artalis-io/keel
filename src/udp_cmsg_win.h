@@ -31,4 +31,23 @@ LPFN_WSARECVMSG kl_udp_win_get_recvmsg(SOCKET s);
  * present. Shared by the readiness recv and the IOCP completion backend. */
 socklen_t kl_udp_win_parse_local(WSAMSG *msg, struct sockaddr_storage *out);
 
+/* TX control-message buffer size (pktinfo source-pin + TOS) — the RX size already covers both. */
+#define KL_UDP_WIN_TX_CMSG_SPACE KL_UDP_WIN_RX_CMSG_SPACE
+
+/* Fetch the WSASendMsg extension pointer (WSAID_WSASENDMSG) for `s`; cached process-wide. NULL if the
+ * extension is unavailable (caller falls back to WSASendTo — no control message). */
+LPFN_WSASENDMSG kl_udp_win_get_sendmsg(SOCKET s);
+
+/* Build the per-datagram SEND control messages into `buf`: source-pin pktinfo (when `src`) + a TOS
+ * cmsg (when tos >= 0, keyed by `family`, CALLER-resolved via kl_udp_win_send_family). Every record is
+ * capacity-checked. Returns 0 with *out set to the control length (0 when nothing requested), or -1 if
+ * a REQUESTED cmsg cannot be built (doesn't fit or unknown family) — the caller MUST fail the send.
+ * Shared by the Winsock provider send + the IOCP backend. */
+int kl_udp_win_build_control(unsigned char *buf, size_t bufsz,
+                             const struct sockaddr *src, int tos, int family, ULONG *out_len);
+
+/* Resolve the family for a send's TOS cmsg level: `dest`, else `src`, else getsockname(s). NEVER
+ * defaults to AF_INET. Returns AF_INET / AF_INET6, or -1 if undeterminable. */
+int kl_udp_win_send_family(SOCKET s, const struct sockaddr *dest, const struct sockaddr *src);
+
 #endif /* KEEL_SRC_UDP_CMSG_WIN_H */

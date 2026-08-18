@@ -34,17 +34,8 @@
 
 /* ── Extension fetch + errno + cmsg helpers (self-contained statics) ────── */
 
-static LPFN_WSASENDMSG udp_fn_sendmsg = NULL;
-static LPFN_WSASENDMSG dgram_get_sendmsg(SOCKET s) {
-    if (udp_fn_sendmsg) return udp_fn_sendmsg;
-    GUID guid = WSAID_WSASENDMSG;
-    LPFN_WSASENDMSG fn = NULL;
-    DWORD nbytes = 0;
-    if (WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid),
-                 &fn, sizeof(fn), &nbytes, NULL, NULL) == 0)
-        udp_fn_sendmsg = fn;
-    return udp_fn_sendmsg;
-}
+/* Shared with the IOCP backend (udp_cmsg_win.c) — one cached WSASendMsg fetch, no drift. */
+static LPFN_WSASENDMSG dgram_get_sendmsg(SOCKET s) { return kl_udp_win_get_sendmsg(s); }
 
 /* WSAEWOULDBLOCK -> EWOULDBLOCK (udp.c queues); anything else -> EIO (error path). */
 static void dgram_set_errno_from_wsa(void) {
@@ -52,58 +43,11 @@ static void dgram_set_errno_from_wsa(void) {
     errno = (e == WSAEWOULDBLOCK || e == WSAEINPROGRESS) ? EWOULDBLOCK : EIO;
 }
 
-static ULONG dgram_build_control(unsigned char *buf, size_t bufsz,
-                                 const struct sockaddr *src, int tos, int family) {
-    WSAMSG tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    tmp.Control.buf = (CHAR *)buf;
-    tmp.Control.len = (ULONG)bufsz;
-    WSACMSGHDR *cm = WSA_CMSG_FIRSTHDR(&tmp);
-    ULONG used = 0;
-
-    if (src && cm) {
-        if (src->sa_family == AF_INET) {
-            cm->cmsg_level = IPPROTO_IP;
-            cm->cmsg_type = IP_PKTINFO;
-            cm->cmsg_len = WSA_CMSG_LEN(sizeof(IN_PKTINFO));
-            IN_PKTINFO pi;
-            memset(&pi, 0, sizeof(pi));
-            pi.ipi_addr = ((const struct sockaddr_in *)src)->sin_addr;
-            memcpy(WSA_CMSG_DATA(cm), &pi, sizeof(pi));
-            used += WSA_CMSG_SPACE(sizeof(IN_PKTINFO));
-            cm = WSA_CMSG_NXTHDR(&tmp, cm);
-        } else if (src->sa_family == AF_INET6) {
-            cm->cmsg_level = IPPROTO_IPV6;
-            cm->cmsg_type = IPV6_PKTINFO;
-            cm->cmsg_len = WSA_CMSG_LEN(sizeof(IN6_PKTINFO));
-            IN6_PKTINFO pi;
-            memset(&pi, 0, sizeof(pi));
-            pi.ipi6_addr = ((const struct sockaddr_in6 *)src)->sin6_addr;
-            memcpy(WSA_CMSG_DATA(cm), &pi, sizeof(pi));
-            used += WSA_CMSG_SPACE(sizeof(IN6_PKTINFO));
-            cm = WSA_CMSG_NXTHDR(&tmp, cm);
-        }
-    }
-    if (tos >= 0 && cm) {
-        if (family == AF_INET) {
-#if defined(IP_TOS)
-            int v = tos & 0xff;
-            cm->cmsg_level = IPPROTO_IP; cm->cmsg_type = IP_TOS;
-            cm->cmsg_len = WSA_CMSG_LEN(sizeof(int));
-            memcpy(WSA_CMSG_DATA(cm), &v, sizeof(v));
-            used += WSA_CMSG_SPACE(sizeof(int));
-#endif
-        } else if (family == AF_INET6) {
-#if defined(IPV6_TCLASS)
-            int v = tos & 0xff;
-            cm->cmsg_level = IPPROTO_IPV6; cm->cmsg_type = IPV6_TCLASS;
-            cm->cmsg_len = WSA_CMSG_LEN(sizeof(int));
-            memcpy(WSA_CMSG_DATA(cm), &v, sizeof(v));
-            used += WSA_CMSG_SPACE(sizeof(int));
-#endif
-        }
-    }
-    return used;
+/* Delegates to the shared Winsock builder (udp_cmsg_win.c) — one implementation shared with the
+ * IOCP backend (no drift). Returns 0 with *out set, or -1 if a requested cmsg could not be built. */
+static int dgram_build_control(unsigned char *buf, size_t bufsz,
+                               const struct sockaddr *src, int tos, int family, ULONG *out) {
+    return kl_udp_win_build_control(buf, bufsz, src, tos, family, out);
 }
 
 /* Runt-cmsg-safe (see kl_udp_win_parse_local): stop the walk on a zero-len cmsg. */
@@ -147,13 +91,19 @@ static kl_ssize_t wdg_send(void *ctx, KlSocketHandle fd, const void *data, size_
     if (src_len || tos >= 0) {
         LPFN_WSASENDMSG fn = dgram_get_sendmsg(s);
         if (!fn) { errno = EIO; return -1; }
-        unsigned char control[DGRAM_TX_CMSG_SPACE];
+        /* _Alignas: the builder makes typed WSACMSGHDR accesses into this buffer (WSACMSGHDR alignment
+         * required); a plain unsigned char[] is only byte-aligned. */
+        _Alignas(WSACMSGHDR) unsigned char control[DGRAM_TX_CMSG_SPACE];
         memset(control, 0, sizeof(control));
-        /* Family for the TOS cmsg level: from the dest, else the source-pin, else v4. */
-        int family = dest_len ? ((struct sockaddr *)&ds)->sa_family
-                   : (src_len ? ((struct sockaddr *)&ss)->sa_family : AF_INET);
-        ULONG clen = dgram_build_control(control, sizeof(control),
-                                         src_len ? (struct sockaddr *)&ss : NULL, tos, family);
+        /* Family for the TOS cmsg level: dest, else src, else getsockname — never defaulted to v4. */
+        int family = kl_udp_win_send_family(s, dest_len ? (struct sockaddr *)&ds : NULL,
+                                            src_len ? (struct sockaddr *)&ss : NULL);
+        if (family < 0) { errno = EIO; return -1; }
+        ULONG clen;
+        if (dgram_build_control(control, sizeof(control),
+                                src_len ? (struct sockaddr *)&ss : NULL, tos, family, &clen) != 0) {
+            errno = EIO; return -1;   /* requested source-pin/TOS could not be built → fail the send */
+        }
         WSABUF buf = { (ULONG)len, (CHAR *)data };
         WSAMSG msg;
         memset(&msg, 0, sizeof(msg));

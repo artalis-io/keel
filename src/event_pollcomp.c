@@ -76,6 +76,10 @@ typedef struct KlPcOp {
     uint64_t       file_count, file_off;  /* SENDFILE: file bytes + progress */
     struct sockaddr_storage dest;         /* UDP_SEND / CONNECT destination */
     socklen_t      dest_len;
+    /* _Alignas: the builder makes typed struct cmsghdr accesses into this buffer (cmsghdr alignment
+     * required); a plain unsigned char[] is only byte-aligned. */
+    _Alignas(struct cmsghdr) unsigned char send_ctrl[KL_UDP_TX_CTRL_SIZE]; /* UDP_SEND source-pin/TOS cmsg */
+    size_t         send_ctrllen;          /* 0 = no control → plain sendto */
     union {
         void              *watcher_udata;   /* CONNECT: the client's tagged KlWatcher */
     };
@@ -348,9 +352,23 @@ static int pc_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp *
     op->sendbuf = kl_malloc(st->alloc, sop->len ? sop->len : 1);
     if (!op->sendbuf) { op->send_total = 0; pc_op_free(op); return -1; }   /* life unset → caller releases */
     memcpy(op->sendbuf, sop->data, sop->len);   /* COPY payload before accept */
-    /* Marshal the neutral dest to a host sockaddr for the sendto at drain time. */
+    /* Marshal the neutral dest to a host sockaddr for the send at drain time. */
     if (sop->dest && kl_sockaddr_family(sop->dest) != KL_AF_UNSPEC)
         op->dest_len = kl_sockaddr_to_native(sop->dest, &op->dest);
+    /* Source-pin / per-packet TOS control message — COPIED into the op at post (§2.5.1); the drain uses
+     * sendmsg with it (the sendto fast path stays for plain sends). */
+    if ((sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC) || sop->tos >= 0) {
+        struct sockaddr_storage sss;
+        const struct sockaddr *src_sa = NULL;
+        if (sop->src && kl_sockaddr_family(sop->src) != KL_AF_UNSPEC && kl_sockaddr_to_native(sop->src, &sss))
+            src_sa = (const struct sockaddr *)&sss;
+        int fam = kl_udp_send_family((int)op->fd, op->dest_len ? (struct sockaddr *)&op->dest : NULL, src_sa);
+        if (fam < 0) { pc_op_free(op); return -1; }   /* undeterminable family → fail the post */
+        if (kl_udp_build_control(op->send_ctrl, sizeof(op->send_ctrl), src_sa, sop->tos, fam,
+                                 &op->send_ctrllen) != 0) {
+            pc_op_free(op); return -1;   /* requested source-pin/TOS could not be built → fail the post */
+        }
+    }
     op->life = sop->life;               /* TRANSFERRED into the op (no retain) */
     pc_op_push(st, op);
     return 0;
@@ -588,9 +606,20 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
         return 1;
     }
     case PC_DGRAM_SEND: {
-        ssize_t n = sendto(op->fd, op->sendbuf, op->send_total, 0,
-                           op->dest_len ? (struct sockaddr *)&op->dest : NULL,
-                           op->dest_len);
+        ssize_t n;
+        if (op->send_ctrllen) {                    /* source-pin / TOS → sendmsg with the copied cmsg */
+            struct iovec iov = { .iov_base = op->sendbuf, .iov_len = op->send_total };
+            struct msghdr msg;
+            memset(&msg, 0, sizeof(msg));
+            msg.msg_name = op->dest_len ? (void *)&op->dest : NULL;
+            msg.msg_namelen = op->dest_len;
+            msg.msg_iov = &iov; msg.msg_iovlen = 1;
+            msg.msg_control = op->send_ctrl; msg.msg_controllen = op->send_ctrllen;
+            n = sendmsg(op->fd, &msg, 0);
+        } else {
+            n = sendto(op->fd, op->sendbuf, op->send_total, 0,
+                       op->dest_len ? (struct sockaddr *)&op->dest : NULL, op->dest_len);
+        }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
             return 0;
         ev->kind = KL_COMP_DGRAM_SEND;
