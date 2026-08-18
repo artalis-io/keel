@@ -1,7 +1,7 @@
 # Datagram M1 — the `BOTH` (byte-gate) send-queue policy — design freeze
 
-Status: **PROPOSED (docs-only, revision 2)** — no code until reviewed and accepted, per the
-consolidation workflow. Sibling of the accepted M0 (`datagram_open.c`) and synchronous-teardown
+Status: **ACCEPTED (docs-only, revision 3) — ready for implementation.** Per the consolidation
+workflow. Sibling of the accepted M0 (`datagram_open.c`) and synchronous-teardown
 (`docs/datagram_sync_teardown_design.md`) freezes. Authority for the policy fork is
 `docs/datagram_consolidation_design.md` §4 (Decisions D-Q-1..D-Q-4); this freeze turns §4 into an
 implementable increment and pins the edges §4 leaves open.
@@ -14,6 +14,14 @@ queue — replaced with a KlUdp-exact rule (direct-send-first, then permanent re
 alone exceeds the budget), so any `budget > 0` is valid and nothing strands. Reviewer rulings applied:
 single budget value (no enum); threaded through `kl_dgram_send_init` (no setter); hard byte limit (no
 "always admit when empty"); the config change treated as a real STABLE-contract decision.
+
+**Revision 3** applies the final review correction (P2): the abortive-discard accounting test (§10.9)
+must not assume `bytes_used == 0` when a send is in flight — `kl_dgram_send_discard_queued` retains the
+in-flight head, so it leaves `bytes_used == inflight_len` until the terminal completion retires it
+(`abandon` still resets directly to 0, as a dead machine takes no late completion). The status-value
+call is resolved: **reuse `KL_DATAGRAM_TOO_LARGE`** ("exceeds a hard configured send-path capacity —
+`slot_cap` or the whole `byte_budget`"), no new enumerator. The freeze is accepted and ready for
+implementation.
 
 ## 0. Scope
 
@@ -248,8 +256,18 @@ Over the existing scripted send/submit mock, both I/O models where the edge diff
    dropped `budget ≥ slot_cap` requirement.
 8. **Byte accounting reopens admission** — fill the budget, retire one queued datagram, confirm
    `bytes_used` dropped by exactly its `len` and a same-size send now admits.
-9. **`discard_queued` / `abandon` reset** — after abortive discard and after abandon, `bytes_used == 0`
-   (symmetric with teardown; no drift), including a zero-length-mixed queue.
+9. **`discard_queued` / `abandon` accounting (blocker P2 — in-flight is retained).**
+   `kl_dgram_send_discard_queued` deliberately keeps the in-flight head (`count > inflight_n`), so it
+   reduces `bytes_used` by exactly the discarded **queued** slots and **leaves the in-flight slot's
+   length accounted** until its terminal completion retires it. Three sub-cases:
+   - **queued-only / readiness discard** (nothing in flight) → `bytes_used == 0` immediately after
+     discard;
+   - **in-flight + queued, completion** → discard leaves `bytes_used == inflight_len` (the retained
+     head), then the terminal `kl_dgram_send_on_complete` reduces it to `0`;
+   - **`abandon`** → `bytes_used == 0` directly (the machine is dead; a late completion cannot re-enter
+     it, so the in-flight length need not be tracked to a completion that will never dispatch).
+   Each sub-case run with a zero-length-mixed queue as well (a retained zero-length in-flight head
+   leaves `bytes_used == 0` after discard yet `count == 1` until completion — the P1a/P2 interaction).
 10. **Public facade** — one `test_datagram_public` case constructing `BOTH` via `kl_datagram_init_ex`
     end-to-end (budget admission + case-(a)/(b) split through the real facade, scripted completion
     mock), plus one asserting `kl_datagram_init` is `SLOT` (budget 0).
@@ -274,10 +292,11 @@ Reviewer rulings from revision 1, now frozen into the design:
 - **Public-config change treated as a real STABLE decision** — §2/§9: `KlDatagramConfig` frozen; the
   budget arrives via the new additive `kl_datagram_init_ex`, not a struct field.
 
-Remaining call for confirmation:
-- **D-M1-status — reuse `KL_DATAGRAM_TOO_LARGE` for case (a) (`len > byte_budget`).** *Chosen* to keep
-  the public status enum (itself STABLE) unchanged, redefining `TOO_LARGE` as "exceeds a hard
-  send-path capacity (`slot_cap` or the whole `byte_budget`)." *Alternative:* a new
-  `KL_DATAGRAM_BUDGET_EXCEEDED` enumerator — more precise for a direct `BOTH` consumer, but grows the
-  public enum. The M4/`KlUdpServer` surface is identical either way (both map to `-1` /
-  `KL_ERR_QUEUE_FULL`).
+Status-value decision — **resolved (confirmed at review):**
+- **D-M1-status — reuse `KL_DATAGRAM_TOO_LARGE` for case (a) (`len > byte_budget`).** The public
+  status enum (itself STABLE) is unchanged; `TOO_LARGE` means "exceeds a hard configured send-path
+  capacity — `slot_cap`, or the whole `byte_budget` under `BOTH`." A new `KL_DATAGRAM_BUDGET_EXCEEDED`
+  enumerator was rejected: it grows the public enum without improving M4 behavior (the
+  `KlUdpServer` surface is `-1` / `KL_ERR_QUEUE_FULL` either way).
+
+No open decisions remain; the freeze is ready for implementation.
