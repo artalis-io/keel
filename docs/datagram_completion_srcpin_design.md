@@ -1,11 +1,21 @@
 # Datagram framework increment — native completion source-pin / TOS — design freeze
 
-Status: **PROPOSED (docs-only)** — no code until reviewed and accepted, per the consolidation workflow.
-A **prerequisite framework increment** extracted from M4 at review request: the KlDatagram COMPLETION
-send path must carry the source-pin (`msg.local`) and per-packet TOS the frozen §2.5.1 seam already
-passes it, natively — with NO hot-path allocation — across io_uring, pollcomp, and IOCP. M4
-(`docs/datagram_m4_udpserver_design.md`) lands atop this: its wildcard source-pinned reply is correct
-on readiness today and becomes correct on completion backends once this increment lands.
+Status: **PROPOSED (docs-only, revision 2)** — no code until reviewed and accepted, per the
+consolidation workflow. A **prerequisite framework increment** extracted from M4 at review request: the
+KlDatagram COMPLETION send path must carry the source-pin (`msg.local`) and per-packet TOS the frozen
+§2.5.1 seam already passes it, natively — with NO hot-path allocation — across io_uring, pollcomp, and
+IOCP. M4 (`docs/datagram_m4_udpserver_design.md`, staged at 0a6350a) lands atop this: after this
+increment, M4's completion source-pin assertion gate is removed and the combined M4 result is
+revalidated and accepted.
+
+**Revision 2** applies the review rulings and fixes three findings. (P1) Connected TOS (dest==NULL,
+src==NULL) has no address to pick IP_TOS vs IPV6_TCLASS — family is now resolved via `getsockname`
+during post, never defaulting to IPv4 (§1a). (P1) The full overlapped WSASendMsg lifetime (WSAMSG,
+WSABUF, name, control) is frozen into `KlIocpOp` — no stack descriptor survives the post (§1b), with
+cancellation/late-completion coverage. (P2) "overlapped sends never return WOULD_BLOCK" is restated as
+the real guarantee: a successful post yields exactly one tracked in-flight op + exactly one terminal
+completion (success OR error), no queued-without-op state (§0/§4). Rulings accepted: shared POSIX +
+Winsock cmsg builders; carry both source-pin AND per-packet TOS; Windows IOCP CI is the native gate.
 
 ## 0. Problem
 
@@ -27,9 +37,14 @@ it). Two withdrawn non-solutions and why:
   readability, and can consume an inbound datagram). Rejected.
 
 **The native solution:** the overlapped send itself carries the control message (`sendmsg`/`WSASendMsg`
-with a pktinfo + TOS cmsg). Overlapped sends complete asynchronously — they never return WOULD_BLOCK to
-the caller (the op stays in flight and completes when the socket drains) — so there is **no retry, no
-watcher, no stranding**. Backpressure remains the single-flight in-flight op.
+with a pktinfo + TOS cmsg). **The guarantee (P2, precise):** a *successful post* transfers ownership and
+creates exactly **one tracked in-flight operation that yields exactly one terminal completion** — success
+OR a transient/terminal socket error reported by the CQE/overlapped completion. There is **no
+queued-without-op state**, hence **no facade-level retry, watcher, or stranding**; backpressure remains
+the single-flight in-flight op, and a terminal-error completion retires that op exactly as a success
+does (sticky error, no re-post). (It is NOT claimed that the transfer can never fail — a *post* itself
+can fail before creating an op, in which case the caller releases its ref and nothing is in flight, per
+the existing `post_dgram_send` contract.)
 
 ## 1. Send-side control message, per backend (Decision D-CS-1)
 
@@ -46,6 +61,29 @@ keeps the existing fast path (`sendto`/`WSASendTo`/`sendmsg` name-only).
 - **IOCP:** when src/tos present, switch the overlapped `WSASendTo` to overlapped **`WSASendMsg`**
   (`WSAID_WSASENDMSG`, already fetched for the synchronous path) with a control buffer (fixed `KlIocpOp`
   field). Plain sends keep `WSASendTo`.
+
+### 1a. TOS-cmsg family resolution — never default to IPv4 (Decision D-CS-1a, blocker P1)
+
+The TOS cmsg level is family-specific (`IPPROTO_IP`/`IP_TOS` vs `IPPROTO_IPV6`/`IPV6_TCLASS`), as is the
+pktinfo cmsg. A **connected TOS-only send** (`dest == NULL` AND `src == NULL`, `tos >= 0`) carries no
+address in `KlDgramSendOp`, so the family must come from the fd itself. Frozen resolution order, applied
+at post: **`dest` family, else `src` family, else `getsockname(fd)` family** — the resolved family is
+stored in the op and passed to the shared builder. It is **never** defaulted to `AF_INET` (the existing
+synchronous provider sends' `... : AF_INET` fallback is a latent bug; the shared builder (§3) is
+family-parameterized so the caller resolves it correctly, and the synchronous callers adopt the same
+`getsockname` fallback). A `getsockname` failure with no address available → the send fails the post
+(`-1`), never a wrong-family cmsg.
+
+### 1b. IOCP overlapped WSASendMsg lifetime (Decision D-CS-1b, blocker P1)
+
+`WSASendMsg` retains, until the terminal completion, **all** of: the `WSAMSG`, the `WSABUF` array, the
+destination `name` sockaddr storage, the control buffer, and the internal pointers among them (`WSAMSG`
+points at the `WSABUF`, the name, and the control). **Every one of these must be a field of `KlIocpOp`**
+— no stack-local `WSAMSG`/`WSABUF`/sockaddr/control may survive the `post` call (the existing overlapped
+`WSASendTo` already keeps the payload copy + `OVERLAPPED` in the op; this extends that to the full
+`WSASendMsg` descriptor set). The op is freed only on its terminal completion. Coverage: a cancellation
+/ late-completion test proving the op (and its `WSAMSG`/name/control) remains valid until the terminal
+completion is delivered (mirrors the recv-side `WSARecvMsg` lifetime already covered).
 
 ## 2. Recv-side pktinfo capture (Decision D-CS-2)
 
@@ -67,10 +105,14 @@ Today the send cmsg logic is duplicated as `static dgram_build_control` in `sock
 io_uring/pollcomp sends and the POSIX provider share one implementation, and IOCP shares the winsock one:
 - **POSIX:** `size_t kl_udp_build_control(void *buf, size_t cap, const KlSockAddr *src, int tos, int family)`
   in `udp_cmsg.h`/`.c` (sibling of the existing `kl_udp_parse_local`). `socket_dgram_posix.c`,
-  `event_iouring.c`, `event_pollcomp.c` call it.
+  `event_iouring.c`, `event_pollcomp.c` call it. The `family` is the CALLER-resolved fd family (§1a) —
+  the builder never guesses it.
 - **Winsock:** `kl_udp_win_build_control(...)` in `udp_cmsg_win.h` (sibling of the recv fetch). Used by
   `socket_dgram_win.c` and `event_iocp.c`.
-No behavior change to the readiness/synchronous sends — they get the same bytes from the shared builder.
+Ruling: the shared builders are used (duplication here is likely to drift). The synchronous provider
+sends adopt them, so they inherit the §1a family fix (no more `: AF_INET` default); the resulting cmsg
+bytes are otherwise identical, so readiness/synchronous send behavior is unchanged except for the
+now-correct IPv6 TOS family on a connected TOS send.
 
 ## 4. §2.5.1 copy-at-submit + I8 compliance (Decision D-CS-4)
 
@@ -107,11 +149,20 @@ therefore grants a capability that actually works on completion backends.
   the peer observes it. Runs under `BACKEND=pollcomp` and (container) `BACKEND=iouring`.
 - **Per-packet TOS over completion:** a send with `tos >= 0` sets the outgoing DSCP/ECN (verified via a
   recv-TOS capture on the peer where the platform allows, else a getsockopt/round-trip smoke).
-- **No WOULD_BLOCK stranding:** the overlapped send never returns WOULD_BLOCK, so the withdrawn
-  retry-watcher scenario is structurally absent; a fill-the-send-buffer test shows the source-pin send
-  completes via its CQE/overlapped completion, not a readiness edge.
+- **Connected TOS-only send picks the right family (P1/§1a):** a TOS send with `dest == NULL` and
+  `src == NULL` on an `AF_INET6` fd emits `IPV6_TCLASS` (resolved via `getsockname`), never `IP_TOS`;
+  and on an `AF_INET` fd emits `IP_TOS`. (A mock/gated provider or a getsockopt round-trip asserts the
+  level, since a wrong-family cmsg is silently ignored by the kernel.)
+- **One in-flight op → exactly one terminal completion (P2):** a successful post yields a single tracked
+  op; both a **success completion** and a forced **terminal-error completion** retire that op exactly
+  once (sticky error, no re-post, no queued-without-op state) — verified for source-pin sends, not only
+  the success path.
+- **IOCP overlapped lifetime (P1/§1b):** a cancellation / late-completion case proves the `KlIocpOp`
+  (its `WSAMSG`, `WSABUF`, name, and control) stays valid until the terminal completion — no stack
+  descriptor escaped the post (Windows IOCP CI).
 - **M4 re-enablement:** `reply_from_hit_address` (Linux) asserts the source-pinned egress on **both**
-  readiness and completion (the M4 `KL_EVENT_CAP_COMPLETION` gate on that assertion is removed).
+  readiness and completion (the M4 `KL_EVENT_CAP_COMPLETION` gate on that assertion is removed), and the
+  combined M4 result is revalidated and accepted.
 - **Regression:** DNS (want_caps 0), the datagram send/close/public suites unchanged; ASan/UBSan/LSan
   clean (no new allocation).
 
@@ -126,16 +177,15 @@ therefore grants a capability that actually works on completion backends.
 - Gates: `check-tier1-boundary` (the cmsg marshaling lives in TIER1_INFRA backends), `check-sockaddr-
   neutral`, `check-doc-refs`, `cppcheck`.
 
-## 9. Open decisions for the reviewer (before implementation)
+## 9. Decisions — resolved at review (revision 2)
 
-- **O-CS-share — the shared cmsg builder (§3).** *Recommended:* promote `kl_udp_build_control`
-  (POSIX, `udp_cmsg.c`) + `kl_udp_win_build_control` (winsock, `udp_cmsg_win`) and have both the
-  providers and the completion backends call them (dedup). *Alternative:* keep per-backend inline
-  marshaling (no shared helper) — more duplication, less risk of disturbing the readiness sends.
-- **O-CS-tos-scope — TOS in this increment.** *Recommended:* carry BOTH source-pin and per-packet TOS
-  (they share the same cmsg buffer + code path; splitting them doubles the work). *Alternative:*
-  source-pin only now, TOS deferred — but M4/`KlUdpServer` uses socket-default TOS (`tos = -1`), so TOS
-  has no current consumer; include it for completeness or defer.
-- **O-CS-iocp-gate — IOCP validation.** Confirm landing the IOCP `WSASendMsg`-control path on the
-  Windows IOCP CI gate (untestable locally), consistent with prior IOCP increments, vs blocking on a
-  local Windows rig (none exists).
+- **O-CS-share — RESOLVED: use the shared POSIX + Winsock cmsg builders** (`kl_udp_build_control` /
+  `kl_udp_win_build_control`), both providers and completion backends calling them (duplication here is
+  likely to drift). §3.
+- **O-CS-tos-scope — RESOLVED: carry BOTH source-pin AND per-packet TOS** in this increment (shared
+  cmsg buffer + code path). §1.
+- **O-CS-iocp-gate — RESOLVED: the Windows IOCP CI is the native validation gate** for the
+  `WSASendMsg`-control path (no local Windows rig), consistent with prior IOCP increments. §8.
+- **P1 family (§1a), P1 IOCP lifetime (§1b), P2 completion guarantee (§0/§4) — RESOLVED** per revision 2.
+
+No open decisions remain; the freeze is ready for implementation.
