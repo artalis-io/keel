@@ -1,10 +1,19 @@
 # Datagram M4 — migrate KlUdpServer → {KlDatagram core + extended layer} — design freeze
 
-Status: **PROPOSED (docs-only)** — no code until reviewed and accepted, per the consolidation workflow.
-Sibling of the accepted M0 / synchronous-teardown / M1 / M2 freezes. Authority is
-`docs/datagram_consolidation_design.md` §5 (KlUdpServer migration + compat-wrapper requirements) and
+Status: **PROPOSED (docs-only, revision 2)** — no code until reviewed and accepted, per the
+consolidation workflow. Sibling of the accepted M0 / synchronous-teardown / M1 / M2 freezes. Authority
+is `docs/datagram_consolidation_design.md` §5 (KlUdpServer migration + compat-wrapper requirements) and
 roadmap item 4; this freeze turns them into an implementable increment. **Depends on M0 (fd prep), M1
 (`BOTH` policy), M2 (source-pin cap gate + multicast).**
+
+**Revision 2** applies the review rulings and fixes three findings. (P1) Wildcard source-pin now
+requires BOTH the send cap (`KL_DGRAM_CAP_SOURCE_PIN`) AND the accepted RX capture
+(`prep.rx_caps & KL_DGRAM_RX_PKTINFO`) — §2/§4, with a frozen error + fd-cleanup path. (P1) Teardown is
+frozen to ONE exact lifecycle with explicit reentrant-free behavior — §9, plus free-from-handler /
+free-twice regressions. (P2) Queue sizing uses normalized, overflow-safe arithmetic off an
+`effective_budget` default, with corrected example math and small-budget qualification — §3. Rulings
+accepted: the `KlUdpServer` layout ABI revision; GRO-off + mmsg-inert; fail-loud wildcard source-pin
+*with both caps verified*; full-payload slot sizing with accurately-stated defaults + tradeoff.
 
 ## 0. Scope
 
@@ -46,8 +55,11 @@ struct KlUdpServer {
 ## 2. Config mapping (D-M4-2)
 
 `kl_udp_server_init` maps the 17-field `KlUdpServerConfig` onto two existing config types — no new
-public config. Step 1 prepares the fd provider-neutrally (M0 `kl_datagram_open` over a `KlUdpConfig`);
-step 2 adopts it into a `KlDatagram` (`kl_datagram_init_ex`).
+public config. Step 1 prepares the fd provider-neutrally (M0 `kl_datagram_open` over a `KlUdpConfig`),
+which returns `KlDatagramPrep{fd, rx_caps, err}`; step 1a verifies the RX capture on a wildcard bind
+(§4); step 2 adopts the fd into a `KlDatagram` (`kl_datagram_init_ex`). Ordering matters: the RX-caps
+check runs on `prep` **before** `kl_datagram_init_ex` adopts the fd, so a failure closes the caller-held
+prep fd and adopts nothing.
 
 **KlUdpConfig (→ `kl_datagram_open` → provider `configure`)** — the socket-option knobs:
 `family` (from `bind_addr`), `bind_addr`, `bind_port = port`, `recv_buf_size`, `reuse_addr = 1`
@@ -68,12 +80,23 @@ NOT a configure knob here — it is joined post-init (§6).
 I8 core is `send_slots × send_slot_cap`, preallocated. M1's `BOTH` policy bounds **both** dimensions.
 The mapping (per §4 D-Q-2 / D-Q-4, with the documented count-bound caveat):
 
-- `send_byte_budget = max_send_queue` — **verbatim** (M1; no inflation).
-- `send_slot_cap = 65507` — a full UDP payload, so **any valid reply is queueable** (preserving
-  `KlUdp`'s "can queue any reply" semantics; no surprising per-reply size refusal).
-- `send_slots = max(1, max_send_queue / send_slot_cap)` — the slot count is **derived from the byte
-  budget**, so preallocation (`send_slots × send_slot_cap`) ≈ `max_send_queue` — the same memory bound
-  the user already chose via `max_send_queue`. (Default 256 KiB ⇒ 3 slots.)
+Normalized, overflow-safe arithmetic (blocker P2), with `KL_UDP_DGRAM_MAX = 65507`:
+- `effective_budget = cfg->max_send_queue ? cfg->max_send_queue : (256u * 1024u)` — normalize the
+  `0 ⇒ 256 KiB` default FIRST, so a zero budget is never passed to `init_ex` (which would set
+  `send_byte_budget = 0` and disable `BOTH`, silently reverting to `SLOT`).
+- `send_byte_budget = effective_budget` — the M1 byte gate (no inflation).
+- `send_slot_cap = KL_UDP_DGRAM_MAX (65507)` — a full UDP payload, so **any valid reply is queueable**
+  (preserving `KlUdp`'s "can queue any reply" semantics; no per-reply size refusal).
+- `send_slots = effective_budget / KL_UDP_DGRAM_MAX; if (send_slots == 0) send_slots = 1;` — `size_t`
+  division (no overflow); clamped to ≥ 1. The default 256 KiB ⇒ `262144 / 65507 = 4` slots.
+
+**Memory / count tradeoff, stated exactly.** For `effective_budget ≥ 65507`, preallocation
+(`send_slots × 65507`) ≈ `effective_budget` (the memory bound the user already chose via
+`max_send_queue`); e.g. 256 KiB ⇒ 4 × 65507 ≈ 256 KiB. For `effective_budget < 65507`, `send_slots`
+clamps to 1, so **one 65507-byte slot is allocated even though the budget is smaller** — preallocation
+is `65507`, above the byte budget; the byte gate still caps *queued bytes* at `effective_budget` (so a
+sub-datagram budget admits exactly one queued reply up to its size). Preallocation is therefore
+`max(65507, effective_budget)`, not `≈ budget`, for small budgets.
 
 **Documented caveat (accepted §4 D-Q-2):** because slots are fixed and full-datagram-sized, a burst of
 many *small* replies is count-bounded sooner than `KlUdp`'s byte-only bound — the (N+1)-th concurrent
@@ -93,15 +116,24 @@ Multi-homed correctness: a reply must leave from the **local (destination) addre
 on**. `KlUdp` enables `recv_pktinfo` only on a wildcard bind (a specific-address bind already fixes the
 source), captures the local addr per datagram, and sends the reply source-pinned via `msg.local`.
 
-M4 preserves this and makes the source-pin capability **fail-loud where it is load-bearing** (M2):
-- **Wildcard bind:** `recv_pktinfo = 1` (capture the local addr) **and** `want_caps =
-  KL_DGRAM_CAP_SOURCE_PIN` (require the send-side source-pin). On the POSIX/Winsock providers
-  `KlUdpServer` runs on, source-pin is always available, so init succeeds and behavior is identical to
-  `KlUdp`; on a provider lacking it, init fails loudly rather than silently answering from the wrong
-  source (a latent `KlUdp` bug on such a provider). Reply passes `msg.local = &s->local` when
-  `have_local`.
-- **Specific-address bind:** `recv_pktinfo = 0`, `want_caps = 0`, reply `msg.local = NULL` — the
-  socket's bound address fixes the source; no source-pin needed.
+Source-pin correctness needs **two** capabilities, verified independently (blocker P1): the send side
+must accept `msg.local` (`KL_DGRAM_CAP_SOURCE_PIN`), AND the receive side must actually be capturing the
+local (dest) address (`recv_pktinfo` accepted by the kernel). `want_caps` proves only the former;
+`recv_pktinfo` is best-effort in `configure`, so M0 returns the accepted set in `KlDatagramPrep.rx_caps`
+— which M4 must check. Otherwise the server initializes, receives no local address (`have_local` always
+0), and silently replies via the default route — exactly the failure fail-loud is meant to prevent.
+
+M4 makes source-pin **fail-loud where it is load-bearing** (M2), requiring both caps:
+- **Wildcard bind:** request `recv_pktinfo = 1` in the `KlUdpConfig`, then after `kl_datagram_open`
+  **require `prep.rx_caps & KL_DGRAM_RX_PKTINFO`** (the kernel accepted RX pktinfo). If absent →
+  `kl_sock_close(sockets, prep.fd)` (M0 transferred the fd to the caller on open success) and return
+  `-1` with `last_error = KL_ERR_UNSUPPORTED`, adopting nothing. Then `kl_datagram_init_ex` with
+  `want_caps = KL_DGRAM_CAP_SOURCE_PIN`, whose M2 gate requires the send cap (init `-1` /
+  `KL_ERR_UNSUPPORTED`, fd not adopted, on a provider lacking it). Both must hold; on POSIX/Winsock both
+  are always available, so init succeeds and behavior matches `KlUdp`. Reply passes `msg.local =
+  &s->local` when `have_local`.
+- **Specific-address bind:** `recv_pktinfo = 0`, no RX-caps check, `want_caps = 0`, reply
+  `msg.local = NULL` — the socket's bound address fixes the source; no source-pin needed.
 
 *(O-M4-srcpin, §12: the alternative is opportunistic source-pin — `want_caps = 0` always, reply
 consults `kl_datagram_provider_caps() & SOURCE_PIN` and passes `msg.local` only if supported — exactly
@@ -162,13 +194,31 @@ needs that throughput, it stays on `KlUdp` (off-ramp). Recorded, not silently dr
 - **multicast join/leave:** pass through the M2 error precedence (`KL_ERR_UNSUPPORTED` /
   `KL_ERR_INVALID_ARG` / `KL_ERR_IO`).
 
-## 9. Teardown (D-M4-9)
+## 9. Teardown — one exact lifecycle (Decision D-M4-9, blocker P1)
 
-`kl_udp_server_free` → graceful/synchronous datagram teardown. Since `KlUdpServer` is caller-embedded
-(not heap-owned by the server) and `free` is a void best-effort call, it uses the confirmed-detachment
-close then object free, or the synchronous `kl_datagram_teardown` (Option A) if a close cannot be
-driven to completion inline — mirroring how `kl_udp_free` unconditionally reclaims. No user callback is
-invoked (a `void free`). Exactly-once fd close via the datagram close machine.
+`KlUdpServer` is caller-owned/embedded; its struct memory is never freed by the library. `kl_udp_server_free`
+reclaims only the transport (the embedded `KlDatagram`: its heap core + the fd) via **`kl_datagram_teardown(&s->dg,
+NULL, NULL)`** (Option A; `reclaim = NULL` because the owner memory is the caller's). No user callback is
+invoked (it is a `void` free). Exactly-once fd close via the datagram close machine. `kl_datagram_teardown`
+gives exactly two behaviors by whether a delivery frame is active:
+
+- **Outside any handler dispatch (the normal case, `busy == 0`):** teardown is **fully SYNCHRONOUS** — the
+  core is freed, the fd closed, and `s->dg` memset **before `kl_udp_server_free` returns**. The caller may
+  immediately release or reuse the `KlUdpServer` memory. This preserves `KlUdp`'s synchronous caller-owned
+  contract exactly.
+- **From within a handler (reentrant, `busy > 0`):** the destructive reclamation **defers to the end of the
+  current recv dispatch** (Option A's frame-leave rule — no internal UAF; the datagram coordinator reclaims at
+  the outermost leave, after the handler and the recv adapter have returned and no longer touch `s`). The one
+  explicit contract redefinition: **the caller MUST keep the `KlUdpServer` memory valid until the current
+  `kl_event_ctx_run` tick returns** (it must not release it inside the handler), because the deferred reclamation
+  memsets the embedded `s->dg` at frame-leave. `s->handler`/`user_data`/`local` are untouched by the memset.
+
+- **Idempotent:** after teardown `s->dg.core == NULL`, so a second `kl_udp_server_free` is a no-op success
+  (`kl_datagram_free`/`teardown` idempotency, frozen in the framework increment). A `free` following a
+  deferred (from-handler) free is likewise a no-op once the deferral has run.
+
+`us_on_recv` never touches `s` after calling `s->handler`, so a from-handler free that defers leaves no
+use-after-teardown inside the wrapper; the datagram frame handles internal ordering.
 
 ## 10. Test matrix (`tests/test_udp_server.c` + the existing udp-server suite)
 
@@ -177,16 +227,26 @@ Preserve the existing suite (behavior parity) and add M4-specifics:
    existing udp_server tests pass verbatim (loopback bind + echo reply).
 2. **Source-pinned reply (wildcard)** — bind `0.0.0.0`, a datagram to a specific local addr; the reply
    is source-pinned to that local (assert via a second bound address / `recv` local on the peer where
-   the platform allows); `want_caps = SOURCE_PIN` accepted on POSIX.
-3. **Specific-address bind** — no `recv_pktinfo`, `want_caps = 0`, reply from the bound address.
-4. **Reply backpressure** — fill the send queue (gating provider / no drain), the next reply returns
+   the platform allows); both `prep.rx_caps & KL_DGRAM_RX_PKTINFO` and `want_caps = SOURCE_PIN` accepted
+   on POSIX.
+3. **Missing RX pktinfo fails init (blocker P1)** — a mock provider whose `configure` returns
+   `rx_caps` WITHOUT `KL_DGRAM_RX_PKTINFO` on a wildcard bind → `kl_udp_server_init` returns `-1` /
+   `KL_ERR_UNSUPPORTED`, and the prep fd is closed (no adoption, no leak under ASan/LSan). A companion
+   mock lacking the send `SOURCE_PIN` cap fails the `init_ex` gate likewise.
+4. **Specific-address bind** — no `recv_pktinfo`, no RX-caps check, `want_caps = 0`, reply from the
+   bound address.
+5. **Reply backpressure** — fill the send queue (gating provider / no drain), the next reply returns
    `-1` / `KL_ERR_QUEUE_FULL`; drains and succeeds after progress (count-bound caveat exercised).
-5. **Multicast** — join-at-init (`multicast_group` set) succeeds on a multicast-capable provider;
+6. **Multicast** — join-at-init (`multicast_group` set) succeeds on a multicast-capable provider;
    runtime join/leave route through M2; a malformed group / unsupported provider yields the M2 errors.
-6. **Teardown** — `free` closes the fd exactly once (no leak under ASan/LSan); reuse after free.
-7. **`recv_gro` forced off** — a server configured with `recv_gro = 1` still delivers one datagram per
+7. **Teardown lifecycle (blocker P1)** — (a) `free` outside a handler is synchronous: fd closed exactly
+   once, immediate reuse works, no leak (ASan/LSan); (b) **free-twice** — a second `free` is a no-op
+   success; (c) **free-from-handler** — a handler calls `kl_udp_server_free`, the tick completes, the
+   deferred teardown reclaims cleanly with the `KlUdpServer` kept valid through the tick — no UAF/leak.
+   Run (b) and (c) on **both readiness (default) and completion (pollcomp/iouring)** backends.
+8. **`recv_gro` forced off** — a server configured with `recv_gro = 1` still delivers one datagram per
    recv (no coalesced mis-delivery).
-8. **Shared-loop coexistence** — a `KlUdpServer` and a TCP `KlServer` on one `KlEventCtx` (the headline
+9. **Shared-loop coexistence** — a `KlUdpServer` and a TCP `KlServer` on one `KlEventCtx` (the headline
    use case) both serve.
 
 ## 11. Validation plan
@@ -200,20 +260,23 @@ Preserve the existing suite (behavior parity) and add M4-specifics:
   freestanding unaffected (KlUdpServer is not a freestanding component). No `KlUdp` change → `KlUdp`
   suites unaffected.
 
-## 12. Open decisions for the reviewer (before implementation)
+## 12. Decisions — resolved at review (revision 2)
 
-- **O-M4-sizing (the crux, §3).** *Recommended:* `send_slot_cap = 65507`, `send_slots =
-  max(1, max_send_queue / send_slot_cap)` — any reply queueable, preallocation ≈ `max_send_queue`,
-  count-bound caveat for small-reply bursts. *Alternative:* a nominal `send_slot_cap` (e.g.
-  `recv_buf_size`) with deeper `send_slots` — deeper small-reply queuing, but replies larger than the
-  nominal cap can only be direct-sent (case-(a)), not queued. Which trade-off for the default?
-- **O-M4-srcpin (§4).** *Recommended:* `want_caps = SOURCE_PIN` on a wildcard bind (fail-loud where
-  source-pin is load-bearing; a no-op on POSIX/Winsock). *Alternative:* opportunistic source-pin
-  (`want_caps = 0`, runtime `provider_caps` check in reply) to preserve `KlUdp`'s graceful degrade
-  byte-for-byte on every provider.
-- **O-M4-struct (§1).** Confirm the `KlUdpServer` struct-layout change (`KlUdp udp` → `KlDatagram dg`)
-  as an accepted pre-consumer ABI revision (the M2-vtable precedent), vs any requirement to preserve
-  the struct's binary layout.
-- **O-M4-gro (§7).** Confirm forcing `recv_gro` off (correctness on the single-flight core) + `mmsg`
-  inert, documented as the M2 §6 caveat — vs deferring M4 until a batched-recv extended layer exists
-  (not recommended; that layer is explicitly deferred).
+- **O-M4-sizing (§3) — RESOLVED: full-payload slots with normalized defaults.** `send_slot_cap = 65507`,
+  `effective_budget = max_send_queue ?: 256 KiB`, `send_byte_budget = effective_budget`, `send_slots =
+  max(1, effective_budget / 65507)`. Memory/count tradeoff stated exactly (§3): preallocation ≈ budget
+  for budgets ≥ 65507; one 65507-byte slot for smaller budgets. Accepted as defensible with accurate
+  defaults/tradeoff (ruling).
+- **O-M4-srcpin (§4) — RESOLVED: fail-loud wildcard source-pin, BOTH caps verified.** On a wildcard
+  bind require `prep.rx_caps & KL_DGRAM_RX_PKTINFO` (receive capture accepted) AND `want_caps =
+  KL_DGRAM_CAP_SOURCE_PIN` (send side); either missing → init `-1`/`KL_ERR_UNSUPPORTED`, prep fd closed
+  (ruling + blocker P1).
+- **O-M4-struct (§1) — RESOLVED: accepted pre-consumer layout ABI revision** (`KlUdp udp` →
+  `KlDatagram dg`); no external consumers requiring binary compatibility (ruling).
+- **O-M4-gro (§7) — RESOLVED: force `recv_gro` off, leave `mmsg` inert** for correctness on the
+  single-flight core; documented M2 §6 caveat (ruling).
+- **O-M4-free (§9) — RESOLVED: one lifecycle** — synchronous outside a handler; deferred-to-tick-end
+  from within a handler (caller keeps `KlUdpServer` valid until the tick returns); idempotent. Regressions
+  in §10.7 (blocker P1).
+
+No open decisions remain; the freeze is ready for implementation review.
