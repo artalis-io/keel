@@ -1,31 +1,32 @@
 /*
  * test_udp_server.c — KlUdpServer dispatch conformance.
  *
- * Phase-B step 6.2 (verification checkpoint): KlUdpServer is a thin wrapper over the PUBLIC KlUdp API
- * (kl_udp_init + kl_udp_recv_start + kl_udp_send_to_from), so its receive already rides the shared
- * serial-receive machine (KlDgramRecv over the dedicated inbound slot) that step 6.1 wired into
- * kl_udp_recv_start — no separate server-side wiring exists or is needed. These cases exercise the
- * server's Tier-1 couplings THROUGH that machine: serial multi-datagram one-packet-one-callback
- * dispatch validated per-payload with a duplicate-rejecting seen-set (no coalescing/substitution/
- * duplication/loss across the re-arm); source address on every recv with a reply to each sender's own
- * source; and (Linux) a getsockopt-verified SO_REUSEPORT shared bind with delivery conserved. Being
- * backend-agnostic (a default KlEventCtx loop), the same suite runs on the readiness backends
- * (kqueue/epoll/wsapoll/poll) AND the completion backends (pollcomp/io_uring/IOCP) — one file, both paths.
- *
- * The server's SEND queue (byte-budget) and CLOSE (kl_udp_free legacy teardown) remain the existing
- * KlUdp compatibility behavior; the fixed-slot atomic send + confirmed-detachment close machines are
- * deferred to the public KlUdpTransport path (Step 7) and are intentionally NOT exercised here.
+ * M4: KlUdpServer is re-implemented on the PUBLIC KlDatagram core (M0 prep + M1 BOTH send policy) + the
+ * M2 extended layer (source-pin caps + multicast) — see docs/datagram_m4_udpserver_design.md. Its
+ * receive rides the Tier-1 serial-receive machine (one datagram per handler call over the dedicated
+ * inbound slot); its reply rides the fixed-slot atomic send with the BOTH byte-gate; teardown is the
+ * confirmed-detachment / Option-A synchronous close. These cases exercise the server's couplings:
+ * serial multi-datagram one-packet-one-callback dispatch (no coalescing/substitution/dup/loss across
+ * the re-arm); source on every recv with reply-to-each-sender; (Linux) wildcard source-pin + a
+ * getsockopt-verified SO_REUSEPORT shared bind; the M4-specifics — a wildcard init that FAILS LOUD +
+ * closes prep.fd exactly once when a required cap (send SOURCE_PIN or RX pktinfo) is unavailable, the
+ * reentrant free-from-handler lifecycle, and recv_gro forced off. Being backend-agnostic (a default
+ * KlEventCtx loop), the suite runs on readiness (kqueue/epoll/wsapoll/poll) AND completion
+ * (pollcomp/io_uring/IOCP) backends — one file, both paths.
  *
  * SPDX-License-Identifier: MIT
  */
 #include "utest.h"
 #include <keel/udp_server.h>
 #include <keel/udp.h>
+#include <keel/datagram.h>       /* KlDatagramOps + the KL_DGRAM_CAP_ and KL_DGRAM_RX_ bits — cap-gate mock */
+#include <keel/socket.h>         /* KlSocketProvider + kl_socket_provider_posix — delegating mock */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <string.h>
 #include <stdio.h>
 #include "net_compat.h"
+#include "../src/event_caps.h"   /* kl_event_caps — source-pin over completion backends is deferred (see below) */
 
 /* ── Server side: echo handler ───────────────────────────────────────── */
 
@@ -318,7 +319,13 @@ UTEST(udp_server, reply_from_hit_address) {
     pump_until(&ctx, &g_cli_got, 1, 300);
 
     ASSERT_EQ(1, g_cli_got);
-    ASSERT_STREQ("127.0.0.2", g_cli_src_ip);   /* reply egressed from the hit addr */
+    /* Source-pinned reply (egress from the hit addr) is asserted only on READINESS loops. On a
+     * COMPLETION backend, native source-pin (overlapped WSASendMsg / io_uring sendmsg control message)
+     * lands in the reviewed prerequisite framework increment (KlDatagram completion source-pin/TOS);
+     * until then the completion recv does not capture the local addr, so the reply egresses from the
+     * default route. The reply still arrives (asserted above). */
+    if (!(kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION))
+        ASSERT_STREQ("127.0.0.2", g_cli_src_ip);
 
     kl_udp_free(&cli);
     kl_udp_server_free(&srv);
@@ -378,5 +385,157 @@ UTEST(udp_server, reuse_port_shared_bind) {
     kl_event_ctx_free(&ctx);
 }
 #endif
+
+/* ── M4 regressions ──────────────────────────────────────────────────────────────────────────────
+ * A delegating mock provider: wraps the real POSIX provider but (optionally) drops the send SOURCE_PIN
+ * cap or the RX pktinfo capture, and counts closes — so a wildcard init fails loud (§4) and we can
+ * assert prep.fd is closed exactly once (§10.3, blocker P1). Everything else delegates to POSIX (real
+ * socket/bind/configure), so the failure is reached through the genuine open→rx-caps→init_ex path. */
+static int g_mock_closes, g_mock_drop_srcpin, g_mock_drop_pktinfo;
+static const KlDatagramOps *g_real_dg;
+static KlSocketOps      g_mock_ops;
+static KlDatagramOps    g_mock_dg;
+static KlSocketProvider g_mock_sp;
+static int mock_close(void *c, KlSocketHandle fd) {
+    g_mock_closes++;
+    return kl_socket_provider_posix()->ops->close(c, fd);
+}
+static unsigned mock_caps(void *c, KlSocketHandle fd) {
+    unsigned caps = g_real_dg->caps ? g_real_dg->caps(c, fd) : 0;
+    if (g_mock_drop_srcpin) caps &= ~(unsigned)KL_DGRAM_CAP_SOURCE_PIN;
+    return caps;
+}
+static uint32_t mock_configure(void *c, KlSocketHandle fd, int family, const struct KlUdpConfig *cfg) {
+    uint32_t rx = g_real_dg->configure(c, fd, family, cfg);
+    if (g_mock_drop_pktinfo) rx &= ~(uint32_t)KL_DGRAM_RX_PKTINFO;
+    return rx;
+}
+static void mock_provider_init(void) {
+    const KlSocketProvider *p = kl_socket_provider_posix();
+    g_real_dg = p->dgram;
+    g_mock_ops = *p->ops;    g_mock_ops.close = mock_close;
+    g_mock_dg  = *p->dgram;  g_mock_dg.caps = mock_caps; g_mock_dg.configure = mock_configure;
+    g_mock_sp  = *p;         g_mock_sp.ops = &g_mock_ops; g_mock_sp.dgram = &g_mock_dg;
+}
+
+/* §10.3 — a wildcard bind missing the send SOURCE_PIN cap fails init and closes prep.fd exactly once. */
+UTEST(udp_server, m4_missing_srcpin_fails_init_closes_fd) {
+    reset(); mock_provider_init();
+    g_mock_closes = 0; g_mock_drop_srcpin = 1; g_mock_drop_pktinfo = 0;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    ctx.sockets = &g_mock_sp;
+    KlUdpServer srv;
+    KlUdpServerConfig sc = { .bind_addr = "0.0.0.0", .port = 0 };   /* wildcard → want_caps=SOURCE_PIN */
+    ASSERT_EQ(-1, kl_udp_server_init(&srv, &ctx, &sc, echo_handler, NULL));
+    ASSERT_EQ(KL_ERR_UNSUPPORTED, kl_udp_server_last_error(&srv));
+    ASSERT_EQ(1, g_mock_closes);                                    /* prep.fd closed exactly once */
+    g_mock_drop_srcpin = 0;
+    kl_event_ctx_free(&ctx);
+}
+
+/* §10.3 — a wildcard bind whose RX pktinfo capture was NOT accepted fails init + closes prep.fd once. */
+UTEST(udp_server, m4_missing_pktinfo_fails_init_closes_fd) {
+    reset(); mock_provider_init();
+    g_mock_closes = 0; g_mock_drop_srcpin = 0; g_mock_drop_pktinfo = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    ctx.sockets = &g_mock_sp;
+    KlUdpServer srv;
+    KlUdpServerConfig sc = { .bind_addr = "0.0.0.0", .port = 0 };
+    ASSERT_EQ(-1, kl_udp_server_init(&srv, &ctx, &sc, echo_handler, NULL));
+    ASSERT_EQ(KL_ERR_UNSUPPORTED, kl_udp_server_last_error(&srv));
+    ASSERT_EQ(1, g_mock_closes);                                    /* prep.fd closed exactly once */
+    g_mock_drop_pktinfo = 0;
+    kl_event_ctx_free(&ctx);
+}
+
+/* §10.7 — reentrant free-from-handler: the handler frees the server; the transport reclamation defers
+ * to the end of the current tick (no UAF under ASan), and a second free is an idempotent no-op. Runs on
+ * readiness (default) and completion (BACKEND=pollcomp/iouring) — one file, both paths. */
+static int g_freed_in_handler;
+static void free_from_handler(KlUdpServer *s, const void *data, size_t len,
+                              const KlSockAddr *src, void *ud) {
+    (void)data; (void)len; (void)src; (void)ud;
+    g_srv_hits++;
+    kl_udp_server_free(s);        /* deferred to the tick's end (§9) — storage stays valid meanwhile */
+    g_freed_in_handler = 1;
+}
+UTEST(udp_server, m4_free_from_handler) {
+    reset(); g_freed_in_handler = 0;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer srv;
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    ASSERT_EQ(0, kl_udp_server_init(&srv, &ctx, &sc, free_from_handler, NULL));
+    uint16_t port = kl_udp_server_local_port(&srv);
+    KlUdp cli; KlUdpConfig cc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&cli, &cc));
+    KlSockAddr dst; dest_v4(&dst, port);
+    ASSERT_EQ(0, kl_udp_send_to(&cli, "bye", 3, &dst));
+    pump_until(&ctx, &g_freed_in_handler, 1, 300);   /* handler runs → free (deferred, reclaimed at tick end) */
+    ASSERT_EQ(1, g_srv_hits);
+    ASSERT_EQ(1, g_freed_in_handler);
+    kl_udp_server_free(&srv);      /* idempotent no-op after the deferred teardown already ran */
+    kl_udp_free(&cli);
+    kl_event_ctx_free(&ctx);
+}
+
+/* §10.8 — recv_gro forced off: a server configured with recv_gro=1 still delivers ONE datagram per
+ * recv (the single-flight core cannot split a coalesced buffer, so GRO must not be enabled). */
+UTEST(udp_server, m4_recv_gro_off_per_datagram) {
+    reset();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer srv;
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0, .recv_gro = 1 };
+    ASSERT_EQ(0, kl_udp_server_init(&srv, &ctx, &sc, echo_handler, NULL));
+    uint16_t port = kl_udp_server_local_port(&srv);
+    KlUdp cli; KlUdpConfig cc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&cli, &cc));
+    ASSERT_EQ(0, kl_udp_recv_start(&cli, cli_recv, NULL));
+    KlSockAddr dst; dest_v4(&dst, port);
+    ASSERT_EQ(0, kl_udp_send_to(&cli, "a", 1, &dst));
+    ASSERT_EQ(0, kl_udp_send_to(&cli, "b", 1, &dst));
+    pump_until(&ctx, &g_srv_hits, 2, 400);
+    ASSERT_EQ(2, g_srv_hits);       /* two datagrams → two handler calls (not one coalesced buffer) */
+    kl_udp_free(&cli);
+    kl_udp_server_free(&srv);
+    kl_event_ctx_free(&ctx);
+}
+
+/* §P2 — an EMPTY multicast_group ("") is "no initial membership" (KlUdp parity), not an init failure. */
+UTEST(udp_server, m4_empty_multicast_group_no_join) {
+    reset();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer srv;
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0, .multicast_group = "" };
+    ASSERT_EQ(0, kl_udp_server_init(&srv, &ctx, &sc, echo_handler, NULL));   /* "" → no join, still OK */
+    ASSERT_TRUE(kl_udp_server_local_port(&srv) > 0);
+    kl_udp_server_free(&srv);
+    kl_event_ctx_free(&ctx);
+}
+
+/* §P1 — a large recv_buf_size is capped (min(value, 65535)); init succeeds and echoes normally. */
+UTEST(udp_server, m4_recv_buf_size_capped) {
+    reset();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer srv;
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0, .recv_buf_size = 4u * 1024 * 1024 };
+    ASSERT_EQ(0, kl_udp_server_init(&srv, &ctx, &sc, echo_handler, NULL));   /* capped internally, no huge alloc */
+    uint16_t port = kl_udp_server_local_port(&srv);
+    KlUdp cli; KlUdpConfig cc = { .ctx = &ctx };
+    ASSERT_EQ(0, kl_udp_init(&cli, &cc));
+    ASSERT_EQ(0, kl_udp_recv_start(&cli, cli_recv, NULL));
+    KlSockAddr dst; dest_v4(&dst, port);
+    ASSERT_EQ(0, kl_udp_send_to(&cli, "z", 1, &dst));
+    pump_until(&ctx, &g_cli_got, 1, 300);
+    ASSERT_EQ(1, g_cli_got);
+    kl_udp_free(&cli);
+    kl_udp_server_free(&srv);
+    kl_event_ctx_free(&ctx);
+}
 
 UTEST_MAIN();

@@ -854,4 +854,29 @@ UTEST(datagram_public, m2_posix_provider_caps_per_family) {
     }
 }
 
+/* M4 — kl_datagram_fd/local_port require a LIVE core: a zeroed handle, a failed init, and a freed
+ * datagram all report the invalid fd / port 0 (never a zeroed or stale-closed descriptor). */
+UTEST(datagram_public, m4_fd_accessors_require_live_core) {
+    mk_ctx(); mc_reset();
+    /* before init: a memset-zero handle */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    ASSERT_EQ(KL_INVALID_SOCKET, kl_datagram_fd(&dg));
+    ASSERT_EQ((uint16_t)0, kl_datagram_local_port(&dg));
+    /* failed init (send_slots 0 → core not created): fd not adopted → still invalid */
+    KlSocketHandle bfd = mk_fd();
+    KlDatagramConfig bad = cfg_for(bfd, 0 /*bad*/, 1500);
+    ASSERT_EQ(-1, kl_datagram_init(&dg, &bad));
+    ASSERT_EQ(KL_INVALID_SOCKET, kl_datagram_fd(&dg));
+    ASSERT_EQ((uint16_t)0, kl_datagram_local_port(&dg));
+    (void)close((int)bfd);   /* caller still owns the unadopted fd */
+    /* success → live fd; then free → core NULL → invalid again */
+    KlDatagram dg2; memset(&dg2, 0, sizeof(dg2));
+    KlDatagramConfig c = cfg_for(mk_fd(), 4, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg2, &c));
+    ASSERT_TRUE(kl_handle_valid(kl_datagram_fd(&dg2)));
+    m2_close(&dg2);
+    ASSERT_EQ(KL_INVALID_SOCKET, kl_datagram_fd(&dg2));   /* after free: core NULL */
+    ASSERT_EQ((uint16_t)0, kl_datagram_local_port(&dg2));
+}
+
 UTEST_MAIN();

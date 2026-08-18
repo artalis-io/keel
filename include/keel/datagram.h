@@ -177,6 +177,8 @@ size_t   kl_datagram_send_inflight(const KlDatagram *dg);
 uint64_t kl_datagram_dropped(const KlDatagram *dg);
 uint64_t kl_datagram_truncated(const KlDatagram *dg);
 KlError  kl_datagram_last_error(const KlDatagram *dg);
+KlSocketHandle kl_datagram_fd(const KlDatagram *dg);          /* the adopted fd, or KL_INVALID_SOCKET */
+uint16_t       kl_datagram_local_port(const KlDatagram *dg);  /* bound local port, or 0 (via the socket seam) */
 
 #ifdef __cplusplus
 }

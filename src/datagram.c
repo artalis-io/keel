@@ -443,3 +443,14 @@ size_t kl_datagram_send_inflight(const KlDatagram *dg) { return (dg && dg->core)
 uint64_t kl_datagram_dropped(const KlDatagram *dg)     { return dg ? dg->dropped   : 0; }
 uint64_t kl_datagram_truncated(const KlDatagram *dg)   { return dg ? dg->truncated : 0; }
 KlError  kl_datagram_last_error(const KlDatagram *dg)  { return dg ? dg->last_error : KL_ERR_INVALID_ARG; }
+/* Only report the fd/port once it is ADOPTED (a live core) and the handle is valid — never a
+ * zeroed-but-not-inited handle, nor a stale fd after a failed init or after teardown (core == NULL). */
+KlSocketHandle kl_datagram_fd(const KlDatagram *dg) {
+    return (dg && dg->core && kl_handle_valid(dg->fd)) ? dg->fd : KL_INVALID_SOCKET;
+}
+uint16_t kl_datagram_local_port(const KlDatagram *dg) {
+    if (!dg || !dg->core || !kl_handle_valid(dg->fd)) return 0;
+    KlSockAddr la;
+    if (kl_sock_get_local_addr(dg->sockets, dg->fd, &la) != 0) return 0;
+    return kl_sockaddr_port(&la);
+}

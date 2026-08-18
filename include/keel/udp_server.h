@@ -5,7 +5,9 @@
 #include <keel/handle.h>
 #include <keel/error.h>
 #include <keel/event_ctx.h>
-#include <keel/udp.h>
+#include <keel/udp.h>              /* KlUdpConfig (socket-option knobs) */
+#include <keel/datagram.h>        /* KlDatagram — the migrated transport (M4) */
+#include <keel/datagram_detail.h> /* KlDatagram layout — KlUdpServer embeds it (caller-owned struct) */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -67,7 +69,7 @@ typedef struct {
  * @brief UDP dispatch server. Caller-owned; initialize with kl_udp_server_init.
  */
 struct KlUdpServer {
-    KlUdp          udp;
+    KlDatagram     dg;               /* migrated transport (M4; was KlUdp — a pre-consumer layout revision) */
     KlUdpHandlerFn handler;
     void          *user_data;
     KlError        last_error;
@@ -103,7 +105,13 @@ int kl_udp_server_multicast_leave(KlUdpServer *s, const char *group, unsigned if
 /**
  * @brief Stop dispatching, close the socket, and free buffers.
  *
- * Does not free the KlUdpServer struct itself (caller-owned). Safe to call twice.
+ * Does not free the KlUdpServer struct itself (caller-owned). Idempotent (safe to call twice).
+ *
+ * LIFETIME: when called OUTSIDE a handler, teardown is synchronous — the socket is closed and internal
+ * state reclaimed before this returns, so the caller may release or reuse the KlUdpServer storage
+ * immediately. When called FROM WITHIN a handler (reentrant), the transport is reclaimed at the end of
+ * the current event-loop tick; the caller MUST keep the KlUdpServer storage valid until that
+ * kl_event_ctx_run tick returns (do not free/reuse it inside the handler).
  */
 void kl_udp_server_free(KlUdpServer *s);
 
