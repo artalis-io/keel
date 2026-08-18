@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 /**
- * dns_resolver.h — Built-in async DNS resolver over KlUdp.
+ * dns_resolver.h — Built-in async DNS resolver over KlDatagram.
  *
  * Implements the KlResolver vtable using non-blocking UDP DNS queries, so it
  * drops into KlClientConfig.resolver and replaces the blocking getaddrinfo

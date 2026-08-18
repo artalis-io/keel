@@ -1304,7 +1304,7 @@ FREESTANDING_DGRAM_SRC = \
     src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
     src/datagram_slots.c src/datagram_send.c src/datagram_recv.c \
-    src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/udp.c
+    src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_open.c src/udp.c
 
 freestanding-lib-dgram:
 	@echo "== freestanding DATAGRAM archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="

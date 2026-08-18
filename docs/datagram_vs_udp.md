@@ -19,15 +19,15 @@ Keel ships two datagram APIs occupying different roles today:
   (readiness + completion). Fixed-slot admission and confirmed-detachment close. Use it for new
   portable message protocols.
 - **`KlUdp`** (`<keel/udp.h>`) — the **compatibility + extended-UDP facility.** The original,
-  full-featured UDP socket surface, required by its current consumers (`KlUdpServer`, the DNS
-  resolver) and by the advanced UDP features `KlDatagram` deliberately does not carry.
+  full-featured UDP socket surface, required by `KlUdpServer` and by the advanced UDP features
+  `KlDatagram` deliberately does not carry.
 
-**True implementation relationship (not a public-API dependency).** `KlUdpServer` and `dns_resolver.c`
-directly consume the **public `KlUdp`** API; **nothing in production consumes public `KlDatagram`
-yet.** The two public APIs are *not* layered on each other — what they share is the **internal
-datagram substrate** (the `KlDatagramOps` provider seam, the lifetime/liveness tokens, receive
-handling, and parts of the close/retirement machinery). So `KlDatagram` is not the "foundation" of
-`KlUdpServer`/DNS; the shared internal substrate is.
+**True implementation relationship (not a public-API dependency).** `KlUdpServer` directly consumes the
+**public `KlUdp`** API; the built-in DNS resolver has been **migrated to the public `KlDatagram`** (M3),
+so it is `KlDatagram`'s first production consumer. The two public APIs are *not* layered on each other —
+what they share is the **internal datagram substrate** (the `KlDatagramOps` provider seam, the
+lifetime/liveness tokens, receive handling, and parts of the close/retirement machinery). So
+`KlDatagram` is not the "foundation" of `KlUdpServer`; the shared internal substrate is.
 
 ## Decision table
 
@@ -35,7 +35,7 @@ handling, and parts of the close/retirement machinery). So `KlDatagram` is not t
 |---|---|---|
 | Writing a **new portable message protocol** (mDNS, CoAP, a datagram QUIC/HTTP-3 base, …) | **`KlDatagram`** | It is the canonical Tier-1 message transport — one contract, every backend, bounded fixed-slot backpressure, confirmed-detachment close. |
 | You need **advanced UDP features** — `recvmmsg`/`sendmmsg` batching, GSO/GRO segmentation offload, multicast join/leave + `IP_MULTICAST_*`, broadcast, per-packet TOS/DSCP, source-pinned sends, `IP_PKTINFO` dest capture | **`KlUdp`** | These live only on `KlUdp` (see "intentionally differ" below). `KlDatagram` is deliberately a minimal bounded-message core. |
-| You are **maintaining or extending an existing `KlUdp` consumer** (`KlUdpServer`, `dns_resolver`) | **`KlUdp`** | No migration is implied by this document; the byte-budget semantics and feature set stay as-is. |
+| You are **maintaining or extending `KlUdpServer`** (the remaining `KlUdp` consumer) | **`KlUdp`** | It exposes `KlUdp`'s extended surface (multicast/broadcast/batching) + byte-budget semantics by design. |
 | You need a **byte-budgeted** send queue (backpressure measured in bytes) | **`KlUdp`** | `KlDatagram` backpressure is a datagram **count** (fixed slots), not a byte budget — see below. |
 | You want the **same event-model-agnostic lifetime/close contract** used by `KlStream`/`KlListener` | **`KlDatagram`** | It shares the Tier-1 confirmed-detachment / retirement model; `KlUdp` has its own legacy teardown. |
 
@@ -75,12 +75,12 @@ The production API consumers today:
 
 | Consumer | Uses | Why `KlUdp` | Migration candidate? |
 |---|---|---|---|
-| `src/dns_resolver.c` (built-in DNS resolver) | `KlUdp` | Predates `KlDatagram`; the DNS query path is a fixed small-datagram exchange. It does not currently need `KlUdp` extensions, so it is a **plausible** future `KlDatagram` candidate | Yes — but only as a **separate, reviewed** increment with behavior-parity + failure-path tests; not evaluated or done here. |
+| `src/dns_resolver.c` (built-in DNS resolver) | **`KlDatagram`** | **Migrated (M3 of the consolidation).** The DNS query path is a fixed small-datagram exchange needing no `KlUdp` extension; it now embeds a fixed-slot `KlDatagram` (prepared via `kl_datagram_open`) with a transient-backpressure send machine (D-DNS-3). | Done — see [datagram_consolidation_design.md](datagram_consolidation_design.md) §2 (M3). |
 | `src/udp_server.c` (`KlUdpServer`) | `KlUdp` | The dispatch surface deliberately passes through the `KlUdp` config knobs (multicast/broadcast/batching) and surfaces the source `struct sockaddr` in its handler API | Not a candidate — it exposes `KlUdp`'s extended surface by design. |
 
-`KlDatagram` has **no** production protocol consumer yet — it is the new Tier-1 primitive; only its
-public-facade tests exercise it. Any migration (e.g. DNS → `KlDatagram`) is a distinct increment,
-frozen and implemented one protocol at a time with behavior parity and every applicable backend gate.
+`KlDatagram`'s first production protocol consumer is the built-in DNS resolver (migrated in M3); each
+further migration is a distinct increment, frozen and implemented one protocol at a time with behavior
+parity and every applicable backend gate.
 
 ## Non-goals of this document
 

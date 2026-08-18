@@ -147,6 +147,13 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     return 0;
 }
 
+void kl_dgram_core_dispatch_begin(KlDgramCore *core) {
+    if (core && core->inited) kl_dgram_close_hold(&core->close);
+}
+void kl_dgram_core_dispatch_end(KlDgramCore *core) {
+    if (core && core->inited) kl_dgram_close_release(&core->close);   /* may run the terminal + free `core` */
+}
+
 void kl_dgram_core_free_object_owned(KlDgramCore *core) {
     if (!core) return;
     /* send_abandon skips the inflight_n guard (safe: dead token + §2.5.1 copy-at-submit); close_free

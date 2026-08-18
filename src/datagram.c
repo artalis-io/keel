@@ -230,11 +230,20 @@ static void dg_on_close(void *ctx, KlDatagramCloseResult result) {
 static void dg_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)fd;
     KlDatagram *dg = user_data;
+    /* Hold a frame for the WHOLE dispatch: send_flush/recv_on_readable deliver callbacks (on_drain /
+     * on_writable / on_recv) from which the consumer may destroy the owner (kl_datagram_teardown). The
+     * bracket keeps busy > 0 so that teardown's terminal DEFERS to dispatch_end below — the last action —
+     * instead of firing inside the inner op leave and freeing `dg`/`core` while we still touch them
+     * (dg_reconcile_write). `core` is captured up front; the body cannot free it (deferred), and
+     * dispatch_end may. */
+    KlDgramCore *core = dg->core;
+    kl_dgram_core_dispatch_begin(core);
     if ((ready & KL_EVENT_WRITE) && dg_send_queued(dg) > 0)
-        (void)kl_dgram_core_send_flush(dg->core);
+        (void)kl_dgram_core_send_flush(core);
     if (ready & KL_EVENT_READ)
-        (void)kl_dgram_core_recv_on_readable(dg->core);
+        (void)kl_dgram_core_recv_on_readable(core);
     dg_reconcile_write(dg);
+    kl_dgram_core_dispatch_end(core);   /* LAST touch of `dg`/`core` — may run the deferred terminal + free */
 }
 
 /* 7B-7 final PRE-ADOPTION hook: register the fd with the loop as the LAST fallible init step (after all

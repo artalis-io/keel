@@ -162,6 +162,13 @@ int  kl_dgram_core_abandon(KlDgramCore *core,
  * destructive tail; does NOT touch the life-owned rx holder or the heap core block. */
 void kl_dgram_core_free_object_owned(KlDgramCore *core);
 
+/* Frame bracket for a DISPATCHER that runs send/recv ops then touches the owning handle afterwards (the
+ * readiness watcher). Hold on entry, release as the LAST action: a teardown requested from within a
+ * delivery callback then defers to `dispatch_end` instead of freeing the handle mid-dispatch. `dispatch_end`
+ * may run the (abandon) terminal and free the core — so it must be the caller's last touch of the core. */
+void kl_dgram_core_dispatch_begin(KlDgramCore *core);
+void kl_dgram_core_dispatch_end(KlDgramCore *core);
+
 /* Registered send edges (optional). */
 void kl_dgram_core_on_writable(KlDgramCore *core, KlDgramWritableFn cb, void *ctx);
 void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx);

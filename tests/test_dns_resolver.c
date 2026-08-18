@@ -4,10 +4,18 @@
 #include <keel/udp_server.h>
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
+#include <keel/error.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include "net_compat.h"
+
+/* D-DNS-3 send-backpressure tests use a socket provider that wraps the built-in POSIX provider and can
+ * force datagram sends to WOULD_BLOCK on demand (real fds so the readiness loop still polls writability). */
+#include "../src/socket.h"       /* KlSocketProvider / KlDatagramOps / kl_socket_provider_posix */
+#include "../src/event_caps.h"   /* kl_event_caps — skip the readiness-only gate on completion backends */
+#include "../src/platform.h"     /* kl_monotonic_ms — portable monotonic clock (no raw clock_gettime) */
 
 /* ── A canned A-record response for a.com → 1.2.3.4, id 0x1234 ────────── */
 static const uint8_t A_RESP[] = {
@@ -416,11 +424,25 @@ static void reset_dns(void) {
 static KlResolver *make_resolver_cfg(KlEventCtx *ctx, KlUdpServer *ns,
                                      KlDnsResolverConfig *dc) {
     KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
-    if (kl_udp_server_init(ns, ctx, &sc, mock_ns, NULL) != 0)
+    /* Diagnostic on any NULL return: pin the EXACT failing call + its Keel error + errno, so a
+     * construction failure that only reproduces in some environments is actionable at a glance
+     * (instead of a bare `r == NULL` from the 30+ resolver-backed cases). Two distinct failure
+     * points — the mock nameserver's KlUdpServer (unchanged by M3) vs the resolver's KlDatagram
+     * construction (kl_datagram_open -> _init -> _recv_start). */
+    errno = 0;
+    if (kl_udp_server_init(ns, ctx, &sc, mock_ns, NULL) != 0) {
+        fprintf(stderr, "make_resolver: kl_udp_server_init FAILED: %s (errno=%d: %s)\n",
+                kl_strerror(kl_udp_server_last_error(ns)), errno, strerror(errno));
         return NULL;
+    }
     dc->nameserver = "127.0.0.1";
     dc->port = kl_udp_server_local_port(ns);
-    return kl_dns_resolver_create(ctx, dc);
+    errno = 0;
+    KlResolver *r = kl_dns_resolver_create(ctx, dc);
+    if (!r)
+        fprintf(stderr, "make_resolver: kl_dns_resolver_create FAILED (nameserver 127.0.0.1#%u, "
+                        "errno=%d: %s)\n", dc->port, errno, strerror(errno));
+    return r;
 }
 
 /* Build a resolver + mock nameserver on one ctx. Caller frees. */
@@ -433,6 +455,33 @@ static KlResolver *make_resolver(KlEventCtx *ctx, KlUdpServer *ns, int timeout_m
 static void pump(KlEventCtx *ctx, int *flag, int ticks) {
     for (int i = 0; i < ticks && *flag == 0; i++)
         kl_event_ctx_run(ctx, 16, 10);
+}
+
+/* Internal test hook (not in the public header): create a resolver with an explicit outbound-slot count,
+ * so the D-DNS-3 tests can force KL_DATAGRAM_WOULD_BLOCK deterministically (send_slots=1). Production uses
+ * kl_dns_resolver_create (default slots). */
+extern KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverConfig *cfg,
+                                                int send_slots);
+
+/* Same as make_resolver_cfg but with an explicit outbound-slot count (the internal D-DNS-3 test hook). */
+static KlResolver *make_resolver_slots(KlEventCtx *ctx, KlUdpServer *ns,
+                                       KlDnsResolverConfig *dc, int send_slots) {
+    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    errno = 0;
+    if (kl_udp_server_init(ns, ctx, &sc, mock_ns, NULL) != 0) {
+        fprintf(stderr, "make_resolver_slots: kl_udp_server_init FAILED: %s (errno=%d: %s)\n",
+                kl_strerror(kl_udp_server_last_error(ns)), errno, strerror(errno));
+        return NULL;
+    }
+    dc->nameserver = "127.0.0.1";
+    dc->port = kl_udp_server_local_port(ns);
+    errno = 0;
+    KlResolver *r = kl_dns_resolver_create_slots(ctx, dc, send_slots);
+    if (!r)
+        fprintf(stderr, "make_resolver_slots: kl_dns_resolver_create_slots FAILED "
+                        "(nameserver 127.0.0.1#%u, send_slots=%d, errno=%d: %s)\n",
+                dc->port, send_slots, errno, strerror(errno));
+    return r;
 }
 
 UTEST(dns, resolve_a) {
@@ -597,6 +646,76 @@ UTEST(dns, destroy_with_inflight) {
     r->destroy(r);                       /* in-flight req + timer freed here */
     ASSERT_EQ(0, g_done);                /* never completed */
 
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* Destroy the resolver from WITHIN its own resolve-done callback — which the resolver fires from inside
+ * dns_on_recv (the datagram's recv-delivery frame, close.busy > 0). The synchronous teardown must DEFER
+ * the whole reclamation (incl. freeing the resolver) to the outermost frame leave, so `dns_complete`'s
+ * post-`done` access to `r` (freeing the request, touching idle TCP) and the unwinding recv_leave never
+ * touch freed memory (ASan/UBSan; io_uring under LSan). */
+static KlResolver *g_reentrant_resolver;
+static void on_done_destroy(KlResolveReq *req, const KlResolveResult *result, int error, void *ud) {
+    (void)req; (void)result; (void)ud;
+    g_done++;
+    g_err = error;   /* capture the outcome so tests can assert it */
+    KlResolver *r = g_reentrant_resolver; g_reentrant_resolver = NULL;
+    r->destroy(r);   /* reentrant destroy from within done → teardown deferred to dns_complete's tail */
+}
+UTEST(dns, destroy_from_within_on_recv) {
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
+    ASSERT_TRUE(r != NULL);
+    g_reentrant_resolver = r;
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done_destroy, NULL) != NULL);
+    pump(&ctx, &g_done, 200);   /* NS replies → dns_on_recv → on_done_destroy → destroy (deferred) */
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    /* r was freed by the deferred teardown at the outermost leave — do NOT touch it. */
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* Destroy from a done callback fired by a TIMER — which, unlike recv delivery, has NO datagram busy
+ * frame, so the datagram-level deferral does not apply. The resolver-level in_done/destroy_requested
+ * sentinel must defer the teardown to dns_complete's destructive tail so dns_complete's post-`done`
+ * access to `r` (freeing the request, dns_tcp_touch_idle_all) does not touch freed memory (ASan/UBSan).
+ * (a) the literal-IP 0-timer path (dns_on_literal), and (b) the response/guard timeout path. */
+UTEST(dns, destroy_from_done_literal_timer) {
+    reset_dns();
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
+    ASSERT_TRUE(r != NULL);
+    g_reentrant_resolver = r;
+    ASSERT_TRUE(r->resolve(r, &ctx, "192.0.2.10", 1234, on_done_destroy, NULL) != NULL);
+    pump(&ctx, &g_done, 50);   /* dns_on_literal (0-timer) → dns_complete → done → destroy (no datagram frame) */
+    ASSERT_EQ(1, g_done);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+UTEST(dns, destroy_from_done_on_timeout) {
+    reset_dns();
+    g_silent = 1;              /* NS never replies → response/guard timeout fires → done(error) → destroy */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlUdpServer ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 40, 1);   /* short per-attempt timeout, one attempt */
+    ASSERT_TRUE(r != NULL);
+    g_reentrant_resolver = r;
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done_destroy, NULL) != NULL);
+    pump(&ctx, &g_done, 400);  /* timeout timer → dns_complete(error) → done → destroy (timer, no datagram frame) */
+    ASSERT_EQ(1, g_done);
+    ASSERT_NE(0, g_err);
     kl_udp_server_free(&ns);
     kl_event_ctx_free(&ctx);
 }
@@ -1523,6 +1642,117 @@ UTEST(dns, concurrent_distinct_resolutions) {
     ASSERT_EQ((int)'b', (int)cb.res.addrs[0].u.ip[3]);
     ASSERT_EQ(111, kl_sockaddr_port(&ca.res.addrs[0]));
     ASSERT_EQ(222, kl_sockaddr_port(&cb.res.addrs[0]));
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── D-DNS-3: transient send backpressure (WOULD_BLOCK) state machine ─────────────────────────────
+ *
+ * A gating socket provider wraps the built-in POSIX provider (real fds, so the readiness loop still
+ * polls the socket for writability) and overrides ONLY the datagram send: when g_block is set, every
+ * send returns EAGAIN so the fixed send slots fill and kl_datagram_send returns WOULD_BLOCK. Combined
+ * with send_slots = 1, the SECOND leg of a resolve deterministically WOULD_BLOCKs → the frozen
+ * send_pending / writable-retry / send-admission-guard machine (D-DNS-3) is exercised end to end.
+ *
+ * These are the two load-bearing tests from the freeze: (1) WOULD_BLOCK → writable edge → success, and
+ * (2) no writable edge ever → guard fires → the resolve fails without hanging. Readiness is the
+ * deterministic vehicle (the gating provider is native-fd); on a completion backend the same
+ * backend-neutral machine runs, so these skip there (the provider would fail overlapped negotiation). */
+static int g_block;
+static kl_ssize_t (*g_real_dg_send)(void *, KlSocketHandle, const void *, size_t,
+                                    const KlSockAddr *, const KlSockAddr *, int);
+static kl_ssize_t gate_dg_send(void *ctx, KlSocketHandle fd, const void *data, size_t len,
+                               const KlSockAddr *dest, const KlSockAddr *src, int tos) {
+    if (g_block) { errno = EAGAIN; return -1; }        /* force the kernel-refused path deterministically */
+    return g_real_dg_send(ctx, fd, data, len, dest, src, tos);
+}
+static KlDatagramOps    g_gate_dg;
+static KlSocketProvider g_gate_sp;
+static const KlSocketProvider *gating_provider(void) {
+    g_gate_sp = *kl_socket_provider_posix();           /* real POSIX ops (native fds) */
+    g_gate_dg = *g_gate_sp.dgram;                       /* copy the datagram vtable... */
+    g_real_dg_send = g_gate_dg.send;
+    g_gate_dg.send = gate_dg_send;                      /* ...override only send */
+    g_gate_sp.dgram = &g_gate_dg;
+    return &g_gate_sp;
+}
+static int is_completion(KlEventCtx *ctx) {
+    return (kl_event_caps(&ctx->loop) & KL_EVENT_CAP_COMPLETION) ? 1 : 0;
+}
+
+/* Pump until `*flag` or a real-time budget elapses. A permanently send-blocked socket keeps WRITE
+ * interest armed, so the always-writable fd makes each kl_event_ctx_run return immediately without
+ * waiting — a fixed TICK budget would never let wall-clock reach the guard/response deadlines. Bound by
+ * real time instead: the guard still fires once its deadline passes; we just have to let the clock run. */
+static void pump_realtime(KlEventCtx *ctx, int *flag, int budget_ms) {
+    uint64_t t0 = kl_monotonic_ms();
+    while (!*flag) {
+        kl_event_ctx_run(ctx, 16, 2);
+        if (kl_monotonic_ms() - t0 > (uint64_t)budget_ms)
+            return;
+    }
+}
+
+/* (1) A leg that WOULD_BLOCKs is retried on the writable edge and the resolve then succeeds. */
+UTEST(dns, wouldblock_retries_on_writable_and_succeeds) {
+    reset_dns();
+    g_answer_a = 1;
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    if (is_completion(&ctx)) { kl_event_ctx_free(&ctx); return; }   /* readiness-only vehicle */
+    ctx.sockets = gating_provider();
+
+    KlUdpServer ns;
+    KlDnsResolverConfig dc = { .timeout_ms = 500, .attempts = 2 };
+    KlResolver *r = make_resolver_slots(&ctx, &ns, &dc, 1);   /* 1 slot → 2nd leg WOULD_BLOCKs */
+    ASSERT_TRUE(r != NULL);
+
+    g_block = 1;                                        /* both legs' sends refuse: leg0 queues slot 0,
+                                                        * leg1 finds no free slot → WOULD_BLOCK → pending */
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done, NULL) != NULL);
+    kl_event_ctx_run(&ctx, 16, 5);                     /* let the (refused) initial sends settle */
+    ASSERT_EQ(0, g_done);                              /* nothing out yet — the socket is blocked */
+
+    g_block = 0;                                       /* release: writable edge flushes slot 0, which
+                                                        * frees a slot → on_writable re-sends the pending leg */
+    pump(&ctx, &g_done, 200);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&g_res.addrs[0]));
+
+    r->destroy(r);
+    kl_udp_server_free(&ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* (2) A leg that WOULD_BLOCKs and NEVER sees a writable edge is bounded by the send-admission guard:
+ * the resolve fails (KL_ERR_DNS) instead of hanging. */
+UTEST(dns, wouldblock_guard_fires_no_hang) {
+    reset_dns();
+    g_answer_a = 1;                                     /* irrelevant: no query ever leaves the socket */
+    KlAllocator alloc = kl_allocator_default();
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    if (is_completion(&ctx)) { kl_event_ctx_free(&ctx); return; }   /* readiness-only vehicle */
+    ctx.sockets = gating_provider();
+
+    KlUdpServer ns;
+    KlDnsResolverConfig dc = { .timeout_ms = 40, .attempts = 1 };
+    KlResolver *r = make_resolver_slots(&ctx, &ns, &dc, 1);   /* 1 slot → 2nd leg WOULD_BLOCKs */
+    ASSERT_TRUE(r != NULL);
+
+    g_block = 1;                                        /* stays blocked forever — no writable progress */
+    ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
+
+    /* The guard (timeout_ms=40) settles the send_pending leg; the queued leg's response timeout settles
+     * it; both legs empty → the resolve FAILS. It must complete (not hang) well within the real-time
+     * budget (guard + response deadlines are 40ms; 2000ms is generous headroom). */
+    pump_realtime(&ctx, &g_done, 2000);
+    ASSERT_EQ(1, g_done);
+    ASSERT_NE(0, g_err);                               /* KL_ERR_DNS — settled, not hung */
 
     r->destroy(r);
     kl_udp_server_free(&ns);

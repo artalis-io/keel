@@ -1,5 +1,16 @@
 /*
- * dns_resolver.c — async A+AAAA resolver over KlUdp (Do53), implementing KlResolver.
+ * dns_resolver.c — async A+AAAA resolver over KlDatagram (Do53), implementing KlResolver.
+ *
+ * The datagram transport is the Tier-1 KlDatagram (M3 of the KlUdp->KlDatagram consolidation,
+ * docs/datagram_consolidation_design.md §2): a fixed-slot, count-budgeted, confirmed-detachment-close
+ * datagram primitive. The socket is prepared provider-neutrally by kl_datagram_open (M0) and adopted by
+ * kl_datagram_init. Send backpressure is a datagram COUNT (send_slots): a transient WOULD_BLOCK does NOT
+ * fail the leg — the leg is marked send_pending and retried on the writable edge, bounded by a
+ * send-admission guard timer so a permanently-full/dead socket can never hang a resolve (D-DNS-3).
+ *
+ * NOTE: this still includes <keel/udp.h> for KlUdpConfig ONLY — that is the provider's datagram
+ * socket-option config type (the kl_datagram_open prep input), not the KlUdp transport object; the
+ * resolver no longer creates or drives a KlUdp.
  *
  * FREESTANDING (KEEL_FREESTANDING): the UDP query engine — dual-family queries,
  * 0x20 randomization, EDNS0, DNS cookies, the bounds-safe parser, and literal-IP /
@@ -19,7 +30,9 @@
  * TC-settles-clean branch is runtime-proven by tests/freestanding_dns_harness.c.
  */
 #include <keel/dns_resolver.h>
-#include <keel/udp.h>
+#include <keel/udp.h>            /* KlUdpConfig ONLY — the kl_datagram_open prep socket-option config */
+#include <keel/datagram.h>       /* KlDatagram public API (Tier-1 datagram transport) */
+#include <keel/datagram_detail.h>/* KlDatagram layout — the resolver embeds one by value */
 #include <keel/timer.h>
 #include <keel/event_ctx.h>
 #include <keel/tls.h>
@@ -33,6 +46,7 @@
 #include <string.h>
 
 #include "socket.h"      /* kl_sock_* seam + AF_INET/AF_INET6/SOCK_* (via sockcompat / the fs shim) */
+#include "datagram_open.h" /* M0 kl_datagram_open — provider-neutral datagram socket prep */
 #include "platform.h"
 #include "kl_cstr.h"     /* locale-free bounded string primitives (freestanding-safe) */
 #include "dns_sys.h"     /* platform config discovery (nameservers/hosts/search) — hosted-only uses */
@@ -54,6 +68,8 @@ _Static_assert(DNS_NAME_MAX == KL_DNS_SYS_NAME_MAX,
 #define DNS_PORT          53    /* default nameserver port */
 #define DNS_TCP_IDLE_MS   10000 /* close an idle persistent TCP connection (RFC 7766) */
 #define DNS_TCP_MSG_MAX   65535 /* max DNS-over-TCP message (2-byte length prefix) */
+#define DNS_SEND_SLOTS    8     /* default outbound datagram slots (transient-burst tolerance, D-DNS-1) */
+#define DNS_RECV_CAP      2048  /* inbound slot payload capacity (parity with the old KlUdp recv default) */
 
 /* DNS-over-TCP connection state. */
 enum { DNS_TCP_CLOSED = 0, DNS_TCP_CONNECTING, DNS_TCP_READY };
@@ -72,8 +88,11 @@ typedef struct {
     uint16_t         id;           /* current transaction id */
     int              tries_left;   /* transmits remaining for this leg */
     int              ns_idx;       /* nameserver rotation cursor */
-    int64_t          timer_id;     /* per-leg timeout, -1 if none */
+    int64_t          timer_id;     /* per-leg timeout OR send-admission guard (mutually exclusive), -1 if none */
     int              done;         /* 1 = settled (answered / empty / exhausted) */
+    int              send_pending; /* 1 = a transient WOULD_BLOCK is pending re-send on the writable edge
+                                    *     (D-DNS-3); timer_id then holds the send-admission GUARD, not the
+                                    *     response timeout. Mutually exclusive with an armed response timer. */
     uint8_t          question[DNS_NAME_MAX + 8]; /* transmitted question (name+type+class) */
     size_t           question_len;
     KlSockAddr       addrs[KL_RESOLVE_MAX_ADDRS]; /* collected addresses */
@@ -143,7 +162,10 @@ struct KlDnsResolver {
     KlResolver     base;           /* MUST be first for upcast */
     KlEventCtx    *ctx;
     KlAllocator   *alloc;
-    KlUdp          sock;
+    KlDatagram     sock;          /* Tier-1 datagram transport (M3); prepared via kl_datagram_open */
+    int            send_slots;    /* outbound slot count (D-DNS-1 burst sizing) */
+    int            in_done;       /* >0 while a user done() callback is on the stack (dns_complete depth) */
+    int            destroy_requested; /* destroy() called from within done() → run at dns_complete's tail */
     int            timeout_ms;
     int            attempts;
     int            prefer_ipv6;
@@ -416,18 +438,27 @@ static void dns_tcp_touch_idle_all(KlDnsResolver *r);   /* RFC 7766 TCP fallback
 static void dns_tcp_touch_idle_all(KlDnsResolver *r) { (void)r; }
 #endif
 
+static void dns_teardown(KlDnsResolver *r);   /* the real destroy body (below) */
+
 static void dns_complete(KlDnsResolver *r, KlDnsReq *q,
                          const KlResolveResult *result, int error) {
     dns_cancel_timers(r, q);
     dns_unlink(r, q);
 
     q->in_done = 1;
+    /* Resolver-level deferred-destroy sentinel (reentrancy across ANY completion source, incl.
+     * timer-driven done — the guard/timeout/literal timers have no datagram busy frame to defer the
+     * teardown). If the user's done() calls r->destroy(r), it only SETS destroy_requested and returns; the
+     * real teardown runs at the tail below, AFTER dns_complete is finished touching `r`. */
+    r->in_done++;
     q->done(&q->base, error ? NULL : result, error, q->ud);
     /* The consumer drops its reference inside done(); free unconditionally.
      * (cancelled is honoured only to avoid a double-free if cancel() were
      * called re-entrantly during done — the free still happens exactly here.) */
     kl_free(r->alloc, q, sizeof(*q));
     dns_tcp_touch_idle_all(r);   /* a TCP-pending leg may have just vanished */
+    if (--r->in_done == 0 && r->destroy_requested)
+        dns_teardown(r);         /* destructive tail — no `r` access after this */
 }
 
 static void dns_set_port(KlResolveResult *res, int port) {
@@ -443,6 +474,13 @@ static void dns_on_leg_timer(void *ud);
 static void dns_on_rdelay(void *ud);
 static void dns_on_literal(void *ud);
 static void dns_advance_candidate(KlDnsResolver *r, KlDnsReq *q);
+static void dns_leg_settle(KlDnsResolver *r, KlDnsReq *q, KlDnsLeg *leg);
+
+/* Outcome of one transmit attempt (D-DNS-3). A network attempt (tries_left) and the response timer are
+ * consumed ONLY on DNS_TX_SENT; DNS_TX_WOULDBLOCK consumes nothing (the leg is retried on the writable
+ * edge); DNS_TX_FAILED is a permanent send failure (build error / TOO_LARGE / UNSUPPORTED / CLOSED /
+ * transport ERROR) handled like today (settle the leg). */
+typedef enum { DNS_TX_SENT, DNS_TX_WOULDBLOCK, DNS_TX_FAILED } DnsTxResult;
 
 /* 1 if some other in-flight leg already carries this id. */
 static int dns_id_in_use(const KlDnsResolver *r, uint16_t id, const KlDnsLeg *self) {
@@ -456,11 +494,12 @@ static int dns_id_in_use(const KlDnsResolver *r, uint16_t id, const KlDnsLeg *se
     return 0;
 }
 
-/* Transmit one leg's query (rotating nameserver); schedules its timeout. */
-static int dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLeg *leg) {
+/* Transmit one leg's query (rotating nameserver). A try/timer is consumed ONLY on successful admission
+ * (KL_DATAGRAM_ACCEPTED); on transient WOULD_BLOCK nothing is consumed and the leg stays on the same
+ * nameserver/id-space for a writable-edge retry (D-DNS-3). Returns a 3-way DnsTxResult. */
+static DnsTxResult dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLeg *leg) {
     if (leg->tries_left <= 0)
-        return -1;
-    leg->tries_left--;
+        return DNS_TX_FAILED;
 
     for (int tries = 0; tries < 8; tries++) {
         leg->id = dns_rand_u16(r);
@@ -472,21 +511,47 @@ static int dns_transmit_leg(KlDnsResolver *r, const KlDnsReq *q, KlDnsLeg *leg) 
     size_t qlen = 0, q_off = 0, q_len = 0;
     if (dns_build_query(r, buf, sizeof(buf), leg->id, q->host, leg->qtype,
                         leg->ns_idx, &qlen, &q_off, &q_len) != 0)
-        return -1;
+        return DNS_TX_FAILED;
     if (q_len > sizeof(leg->question))
-        return -1;
-    memcpy(leg->question, buf + q_off, q_len);
-    leg->question_len = q_len;
+        return DNS_TX_FAILED;
 
     const KlSockAddr *ns_ksa = &r->ns[leg->ns_idx];
-    leg->ns_idx = (leg->ns_idx + 1) % r->nns;
-    if (kl_udp_send_to(&r->sock, buf, qlen, ns_ksa) != 0)
-        return -1;
+    KlDatagramMessage msg = { .data = buf, .len = qlen, .peer = ns_ksa,
+                              .local = NULL, .tos = -1, .flags = 0 };
+    KlDatagramSendStatus st = kl_datagram_send(&r->sock, &msg);
+    if (st == KL_DATAGRAM_WOULD_BLOCK)
+        return DNS_TX_WOULDBLOCK;          /* transient: nothing consumed; retry on the writable edge */
+    if (st != KL_DATAGRAM_ACCEPTED)
+        return DNS_TX_FAILED;              /* TOO_LARGE / UNSUPPORTED / CLOSED / ERROR — permanent */
 
+    /* ACCEPTED — commit: record the sent question, rotate the nameserver, consume a try, arm the
+     * response timeout. (question is recorded only now, so a would-blocked build isn't tracked.) */
+    memcpy(leg->question, buf + q_off, q_len);
+    leg->question_len = q_len;
+    leg->ns_idx = (leg->ns_idx + 1) % r->nns;
+    leg->tries_left--;
     if (leg->timer_id >= 0)
         kl_timer_cancel(r->ctx, leg->timer_id);
     leg->timer_id = kl_timer_add(r->ctx, (uint64_t)r->timeout_ms, dns_on_leg_timer, leg);
-    return (leg->timer_id >= 0) ? 0 : -1;
+    return (leg->timer_id >= 0) ? DNS_TX_SENT : DNS_TX_FAILED;
+}
+
+/* Enter the send_pending state on the FIRST transient WOULD_BLOCK: arm the send-admission guard timer
+ * (reusing leg->timer_id, free while pending) for r->timeout_ms so a leg that never sees a writable edge
+ * (permanently-full/dead socket) settles instead of hanging (D-DNS-3). Preserved across writable retries
+ * — armed once on entry, not re-armed per attempt. Returns 0 (pending, guard running) or -1 (the guard
+ * timer could not be armed — the CALLER settles the leg; this function never settles, so it is safe to
+ * call mid-candidate-start before both legs are initialized). */
+static int dns_leg_mark_pending(KlDnsResolver *r, KlDnsLeg *leg) {
+    if (leg->send_pending)
+        return 0;                          /* guard already running — do not re-arm */
+    if (leg->timer_id >= 0) { kl_timer_cancel(r->ctx, leg->timer_id); leg->timer_id = -1; }
+    int64_t t = kl_timer_add(r->ctx, (uint64_t)r->timeout_ms, dns_on_leg_timer, leg);
+    if (t < 0)
+        return -1;                         /* guard couldn't arm */
+    leg->timer_id = t;
+    leg->send_pending = 1;
+    return 0;
 }
 
 /* Merge both legs' addresses, interleaved preferred-first (RFC 8305 §4). */
@@ -533,12 +598,14 @@ static void dns_check_complete(KlDnsResolver *r, KlDnsReq *q) {
     }
 }
 
-/* Mark a leg settled (cancel its timeout) and re-evaluate completion. */
+/* Mark a leg settled (cancel its timeout OR send-admission guard) and re-evaluate completion. Clearing
+ * send_pending here is what makes the writable scan skip a settled leg (D-DNS-3 reentrancy). */
 static void dns_leg_settle(KlDnsResolver *r, KlDnsReq *q, KlDnsLeg *leg) {
     if (leg->timer_id >= 0) {
         kl_timer_cancel(r->ctx, leg->timer_id);
         leg->timer_id = -1;
     }
+    leg->send_pending = 0;
     leg->done = 1;
     dns_check_complete(r, q);
 }
@@ -565,10 +632,19 @@ static int dns_start_candidate(KlDnsResolver *r, KlDnsReq *q) {
         leg->tcp_pending = 0;
         leg->tcp_ns = -1;
         leg->cookie_retry = 0;
-        if (dns_transmit_leg(r, q, leg) == 0)
+        leg->send_pending = 0;
+        DnsTxResult tr = dns_transmit_leg(r, q, leg);
+        if (tr == DNS_TX_SENT) {
             any = 1;
-        else
-            leg->done = 1;                          /* couldn't send → treat as empty */
+        } else if (tr == DNS_TX_WOULDBLOCK && dns_leg_mark_pending(r, leg) == 0) {
+            any = 1;                                /* transient backpressure → retry on writable edge
+                                                     * (pending IS progress, guard-bounded) */
+        } else {
+            leg->done = 1;                          /* permanent failure / guard-arm failure → empty.
+                                                     * NB: no dns_check_complete here — the other leg may
+                                                     * still be mid-init; completion is decided by the
+                                                     * caller via this function's any?0:-1 return. */
+        }
     }
     return any ? 0 : -1;                            /* -1 = neither leg could transmit */
 }
@@ -590,17 +666,53 @@ static void dns_on_leg_timer(void *ud) {
     KlDnsResolver *r = q->r;
     leg->timer_id = -1;
 
+    if (leg->send_pending) {                         /* SEND-ADMISSION GUARD fired (D-DNS-3): the leg was
+                                                      * never transmitted → settle. No attempt is consumed
+                                                      * (no packet went out); retrying a congested/dead
+                                                      * socket is futile, so settle rather than retransmit. */
+        leg->send_pending = 0;
+        dns_leg_settle(r, q, leg);
+        return;
+    }
     if (leg->tcp_pending) {                          /* DNS-over-TCP exchange timed out */
         leg->tcp_pending = 0;
         leg->tcp_ns = -1;
         dns_leg_settle(r, q, leg);
         return;
     }
-    if (leg->tries_left > 0) {                      /* retransmit (rotates nameserver) */
-        if (dns_transmit_leg(r, q, leg) == 0)
+    if (leg->tries_left > 0) {                       /* response timeout → retransmit (rotates NS) */
+        DnsTxResult tr = dns_transmit_leg(r, q, leg);
+        if (tr == DNS_TX_SENT)
             return;
+        if (tr == DNS_TX_WOULDBLOCK && dns_leg_mark_pending(r, leg) == 0)
+            return;                                  /* transient again → wait for the writable edge */
     }
-    dns_leg_settle(r, q, leg);                       /* exhausted → empty */
+    dns_leg_settle(r, q, leg);                       /* exhausted / permanent failure → empty */
+}
+
+/* Send-queue full→non-full edge (D-DNS-3): re-attempt every send_pending leg. Registered once at resolver
+ * init. Non-destructive in the common case (SENT/WOULD_BLOCK); a permanent failure settles the leg, which
+ * may complete + free its request, so the scan RESTARTS after any settle (mirrors the TCP writable sweep). */
+static void dns_on_writable(void *ud) {
+    KlDnsResolver *r = ud;
+restart:
+    for (KlDnsReq *q = r->inflight; q; q = q->next) {
+        for (int i = 0; i < 2; i++) {
+            KlDnsLeg *leg = &q->legs[i];
+            if (!leg->send_pending)
+                continue;
+            DnsTxResult tr = dns_transmit_leg(r, q, leg);
+            if (tr == DNS_TX_WOULDBLOCK)
+                return;                              /* queue re-filled → leave the rest pending (guard
+                                                      * still running) for the next writable edge */
+            leg->send_pending = 0;                   /* SENT (guard cancelled + response timer armed by
+                                                      * dns_transmit_leg) or permanent failure */
+            if (tr == DNS_TX_SENT)
+                continue;                            /* try the next pending leg */
+            dns_leg_settle(r, q, leg);               /* FAILED → settle; may free q → restart the scan */
+            goto restart;
+        }
+    }
 }
 
 static void dns_on_rdelay(void *ud) {
@@ -1002,9 +1114,12 @@ static void dns_tcp_send_leg(KlDnsResolver *r, KlDnsLeg *leg, int ns_idx) {
 
 #endif /* !KEEL_FREESTANDING — DNS-over-TCP fallback */
 
-static void dns_on_recv(KlUdp *u, const void *data, size_t len,
-                        const KlSockAddr *src, const KlSockAddr *local, void *ud) {
-    (void)u; (void)local;
+/* KlDatagramRecvFn: one datagram from the resolver's KlDatagram socket. `peer` is the source (always
+ * non-NULL); `local`/`flags` are unused (DNS uses the payload's TC bit, not the UDP MSG_TRUNC flag). */
+static void dns_on_recv(void *ud, const void *data, size_t len,
+                        const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    (void)local; (void)flags;
+    const KlSockAddr *src = peer;
     KlDnsResolver *r = ud;
     if (len < 12)
         return;
@@ -1064,10 +1179,13 @@ static void dns_on_recv(KlUdp *u, const void *data, size_t len,
                         kl_timer_cancel(r->ctx, leg->timer_id);
                         leg->timer_id = -1;
                     }
-                    if (dns_transmit_leg(r, q, leg) == 0)
+                    DnsTxResult tr = dns_transmit_leg(r, q, leg);
+                    if (tr == DNS_TX_SENT)
                         return;                  /* awaiting the cookie'd retry */
+                    if (tr == DNS_TX_WOULDBLOCK && dns_leg_mark_pending(r, leg) == 0)
+                        return;                  /* transient backpressure → retry on the writable edge */
                 }
-                leg->naddrs = 0;                 /* retries exhausted → settle empty */
+                leg->naddrs = 0;                 /* retries exhausted / permanent failure → settle empty */
                 dns_leg_settle(r, q, leg);
                 return;
             }
@@ -1330,10 +1448,22 @@ static void dns_cancel(KlResolveReq *req) {
     dns_tcp_touch_idle_all(r);   /* a TCP-pending leg may have just vanished */
 }
 
-static void dns_destroy(KlResolver *self) {
-    KlDnsResolver *r = (KlDnsResolver *)self;
-    if (!r)
-        return;
+/* Owner reclaim for kl_datagram_teardown (§4a destructive tail): free the resolver itself. Runs once the
+ * datagram has reclaimed its own state — synchronously on readiness / when no callback frame is active,
+ * or at the outermost frame leave if destroy was reached from within a datagram callback. Either way it
+ * is the last action of the teardown, so `r` (which embeds the now-detached facade) is safe to free. */
+static void dns_free_self(void *ud) {
+    KlDnsResolver *r = ud;
+    kl_free(r->alloc, r, sizeof(*r));
+}
+
+/* The real teardown body. Frees the TCP conns + in-flight requests, then reclaims the datagram + the
+ * resolver via kl_datagram_teardown (dns_free_self is its destructive-tail owner reclaim). Reached either
+ * directly from dns_destroy (no done callback active) or, when destroy was requested from within a done
+ * callback, from dns_complete's tail once it is finished touching `r` (in_done back to 0). DO NOT touch
+ * `r` after the kl_datagram_teardown call — it may free `r` synchronously (no datagram frame) or defer to
+ * the outermost datagram frame leave (recv delivery). */
+static void dns_teardown(KlDnsResolver *r) {
 #ifndef KEEL_FREESTANDING
     for (int i = 0; i < r->nns; i++)
         if (kl_handle_valid(r->tcp[i].fd))
@@ -1347,8 +1477,22 @@ static void dns_destroy(KlResolver *self) {
         q = next;
     }
     r->inflight = NULL;
-    kl_udp_free(&r->sock);
-    kl_free(r->alloc, r, sizeof(*r));
+    kl_datagram_teardown(&r->sock, dns_free_self, r);
+}
+
+static void dns_destroy(KlResolver *self) {
+    KlDnsResolver *r = (KlDnsResolver *)self;
+    if (!r)
+        return;
+    /* Reentrant destruction from ANY completion source: if a user done() callback is on the stack (recv
+     * OR timer driven), DEFER the teardown — just mark it. dns_complete runs it at its destructive tail,
+     * after it is done touching `r`. This complements the datagram-level busy-frame deferral (which only
+     * covers recv-delivery-driven destruction). */
+    if (r->in_done) {
+        r->destroy_requested = 1;
+        return;
+    }
+    dns_teardown(r);
 }
 
 /* ── Nameserver selection ────────────────────────────────────────────── */
@@ -1431,7 +1575,11 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
 
 /* ── Constructor ─────────────────────────────────────────────────────── */
 
-KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *cfg) {
+/* Internal creator with an explicit outbound-slot count (NOT in the public header). send_slots 0 = the
+ * DNS_SEND_SLOTS default; a positive value is a TEST hook to force KL_DATAGRAM_WOULD_BLOCK deterministically
+ * (the transient-burst size is an internal transport detail, not a public config knob). The public
+ * kl_dns_resolver_create below delegates with 0. */
+KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverConfig *cfg, int send_slots) {
     if (!ctx)
         return NULL;
     KlAllocator *alloc = (cfg && cfg->alloc) ? cfg->alloc : ctx->alloc;
@@ -1449,6 +1597,7 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
     r->alloc = alloc;
     r->timeout_ms = (cfg && cfg->timeout_ms) ? cfg->timeout_ms : 5000;
     r->attempts = (cfg && cfg->attempts) ? cfg->attempts : 2;
+    r->send_slots = (send_slots > 0) ? send_slots : DNS_SEND_SLOTS;
     r->prefer_ipv6 = cfg ? cfg->prefer_ipv6 : 0;
     r->disable_0x20 = cfg ? cfg->disable_0x20 : 0;
     r->disable_edns = cfg ? cfg->disable_edns : 0;
@@ -1474,17 +1623,36 @@ KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *c
         return NULL;
     }
 
-    /* Unconnected socket — sends target each nameserver by address (multi-NS);
-     * dns_on_recv verifies the source is a configured nameserver. */
-    KlUdpConfig uc = { .ctx = ctx, .family = family, .alloc = alloc };
-    if (kl_udp_init(&r->sock, &uc) != 0) {
+    /* Unconnected socket — sends target each nameserver by address (multi-NS); dns_on_recv verifies the
+     * source is a configured nameserver. Prepare the fd provider-neutrally (M0), then adopt it into a
+     * fixed-slot KlDatagram (M3). The prep socket-option config carries family only — no bind (ephemeral
+     * source port), no extensions (want_caps 0; the resolver reads neither `local` nor recv-TOS). */
+    KlUdpConfig uc = { .family = family };
+    KlDatagramPrep prep;
+    if (kl_datagram_open(ctx->sockets, &uc, &prep) != 0) {
         kl_free(alloc, r, sizeof(*r));
         return NULL;
     }
-    if (kl_udp_recv_start(&r->sock, dns_on_recv, r) != 0) {
-        kl_udp_free(&r->sock);
+    KlDatagramConfig dc = {
+        .ctx = ctx, .alloc = alloc, .sockets = ctx->sockets, .fd = prep.fd,
+        .send_slots = (size_t)r->send_slots, .send_slot_cap = DNS_QUERY_MAX,
+        .recv_cap = DNS_RECV_CAP, .want_caps = 0,
+    };
+    if (kl_datagram_init(&r->sock, &dc) != 0) {
+        kl_sock_close(ctx->sockets, prep.fd);   /* init failed → fd stays with the caller (M0/init contract) */
+        kl_free(alloc, r, sizeof(*r));
+        return NULL;
+    }
+    /* Register the writable-edge handler ONCE (D-DNS-3): it re-sends every send_pending leg. */
+    kl_datagram_on_writable(&r->sock, dns_on_writable, r);
+    if (kl_datagram_recv_start(&r->sock, dns_on_recv, r) != 0) {
+        kl_datagram_teardown(&r->sock, NULL, NULL);   /* synchronous abandon (no owner reclaim: r freed below) */
         kl_free(alloc, r, sizeof(*r));
         return NULL;
     }
     return &r->base;
+}
+
+KlResolver *kl_dns_resolver_create(KlEventCtx *ctx, const KlDnsResolverConfig *cfg) {
+    return kl_dns_resolver_create_slots(ctx, cfg, 0);   /* 0 = default outbound-slot count */
 }

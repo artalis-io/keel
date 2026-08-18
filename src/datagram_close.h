@@ -110,6 +110,14 @@ int  kl_dgram_close_cancel(KlDgramClose *c);
  * UNCHANGED — this is an additional owner-destruction entry, never a substitute. */
 int  kl_dgram_close_abandon(KlDgramClose *c);
 
+/* Public frame bracket (busy handshake) for a dispatcher that runs send/recv ops then touches the owning
+ * handle: hold on entry, release as the LAST action. A teardown requested from within a delivery callback
+ * then defers its terminal to `release` instead of firing inside the inner op leave. `release` may run the
+ * terminal (and free the object on an abandon), so nothing reachable through this close machine may be
+ * touched after it. */
+void kl_dgram_close_hold(KlDgramClose *c);
+void kl_dgram_close_release(KlDgramClose *c);
+
 /* Re-evaluate the terminal classification (the backend-drain PROGRESS hook). The machine gate
  * (close_fully_retired) can hold while the §4.3 classifier still returns PENDING — the send/recv
  * machines are then already at zero, so NO machine retirement is guaranteed to wake the close. A

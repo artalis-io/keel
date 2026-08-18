@@ -147,6 +147,15 @@ static void close_activity(void *ctx, int delta) {
     else           close_leave(c);
 }
 
+/* Public frame bracket for a caller (the readiness dispatch) that runs send/recv ops AND then touches the
+ * owning handle afterwards: holding the frame keeps `busy > 0` for the whole dispatch, so a teardown
+ * requested from within a delivery callback defers its terminal to `kl_dgram_close_release` — the LAST
+ * action — instead of firing inside the inner recv/send leave (which would free the handle mid-dispatch).
+ * `release` may run the terminal (and, for an abandon, free the object), so it must be the caller's last
+ * touch of any state reachable through this close machine. */
+void kl_dgram_close_hold(KlDgramClose *c)    { if (c) close_enter(c); }
+void kl_dgram_close_release(KlDgramClose *c) { if (c) close_leave(c); }
+
 int kl_dgram_close_init(KlDgramClose *c, KlDgramSend *send, KlDgramRecv *recv,
                         KlDgramCloseFn on_close, void *close_ctx) {
     if (!c || (!send && !recv))

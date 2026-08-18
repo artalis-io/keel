@@ -314,6 +314,30 @@ document** — it only scopes them.
    cancellation/reentrancy rules. Behavior-parity + failure-path tests per §2 (the two load-bearing
    ones: `WOULD_BLOCK` → `on_writable` → success, and no-writable-edge → guard fires → no hang); TCP
    fallback untouched. Removes DNS's `KlUdp` dependency.
+   **Status: implemented** — `src/dns_resolver.c` now embeds a `KlDatagram` (prepared via
+   `kl_datagram_open`, `send_slot_cap = DNS_QUERY_MAX`, `recv_cap = 2048`, `want_caps = 0`). The frozen
+   send machine is in place: `dns_transmit_leg` returns 3-way SENT/WOULD_BLOCK/FAILED (try + response
+   timer consumed only on `KL_DATAGRAM_ACCEPTED`); `dns_leg_mark_pending` arms the guard on the first
+   `WOULD_BLOCK`; `dns_on_writable` (registered once) re-sends pending legs and restarts its scan after any
+   settle; `dns_on_leg_timer` branches on `send_pending` (guard → settle, no attempt consumed);
+   `dns_leg_settle` clears `send_pending`. TCP fallback untouched; the `KlDatagram` object no longer
+   depends on `KlUdp` (only `KlUdpConfig` remains, as the `kl_datagram_open` socket-option type).
+   **Teardown is SYNCHRONOUS** via the reviewed framework primitive
+   ([datagram_sync_teardown_design.md](datagram_sync_teardown_design.md), Option A): `dns_destroy` calls
+   `kl_datagram_teardown(&r->sock, dns_free_self, r)` — it abandons any in-flight op and reclaims the
+   datagram immediately, then `dns_free_self` frees the resolver as the destructive tail; on a readiness
+   backend a from-within-`on_recv` destroy defers the whole reclamation to the outermost frame leave (so
+   `dns_complete`'s post-`done` access to `r` never touches freed memory). No public API/ABI change: the
+   outbound-slot count stays an internal constant (`DNS_SEND_SLOTS`, default 8) with an internal test-only
+   creator `kl_dns_resolver_create_slots` to force `WOULD_BLOCK`. Tests (`tests/test_dns_resolver.c`): 40
+   parity cases (plain synchronous `r->destroy`) + the two load-bearing D-DNS-3 cases (gating provider
+   forcing send `EAGAIN`, `send_slots=1`) + the two destruction probes — `destroy_with_inflight` and
+   `destroy_from_within_on_recv` (reentrant destroy from the resolve-done callback). Validated across
+   **readiness + `pollcomp` + Linux io_uring ASan/UBSan/LSan (dns_resolver 43/43, no leaks)** — both
+   probes green on every backend; freestanding datagram + DNS layers build/gate green.
+   (M3 also surfaced + fixed a latent readiness-dispatch reentrancy bug: `dg_on_ready` touched the handle
+   AFTER a delivery that a from-callback teardown could free; it is now bracketed in the busy handshake
+   (`kl_dgram_core_dispatch_begin`/`end`) so any teardown defers to the dispatch's own end.)
 4. **M4 — migrate KlUdpServer → {core + extended layer}.** Uses M0 (prep) + M1 (`BOTH`) + M2 (multicast
    + passthrough caps). Preserve the public API/ABI + handler + multicast + source-pinned reply, with
    the documented count-bound caveat per §4/§5; or keep `KlUdpServer` on `KlUdp` if exact byte-only
