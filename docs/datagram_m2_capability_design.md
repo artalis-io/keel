@@ -1,9 +1,19 @@
 # Datagram M2 — capability derivation + extended-UDP layer — design freeze
 
-Status: **PROPOSED (docs-only)** — no code until reviewed and accepted, per the consolidation
-workflow. Sibling of the accepted M0 / synchronous-teardown / M1 freezes. Authority is
+Status: **PROPOSED (docs-only, revision 2)** — no code until reviewed and accepted, per the
+consolidation workflow. Sibling of the accepted M0 / synchronous-teardown / M1 freezes. Authority is
 `docs/datagram_consolidation_design.md` §3 (Decisions D-CAP-1..D-CAP-3, Open question O-CAP-1) and §5;
 this freeze turns them into an implementable increment and pins the edges they leave open.
+
+**Revision 2** applies the review rulings. (1) The `KlDatagramOps.caps` append is an **intentional
+pre-consumer ABI revision** — documented as such (§7), not claimed ABI-safe merely because the member
+is trailing/nullable; NULL-tolerance applies only *after* recompilation. (2) An unknown/NULL provider
+report yields **no optional caps** (§1a) — a function signature never proves source-pin/TOS/connected/
+broadcast behavior. (3) The `caps` op is **family-independent** so it is callable at init, where no
+family is known (§1). (4) `kl_datagram_caps()` is **preserved** as the granted-caps report; provider
+support is exposed additively via a **new** `kl_datagram_provider_caps()` (§1, P2 resolved without
+revising a STABLE function). Rulings confirmed: add `KL_ERR_UNSUPPORTED`; unknown ⇒ no optional caps;
+defer batching/GSO/GRO.
 
 ## 0. Scope
 
@@ -17,7 +27,8 @@ source-pin caps + multicast; it does **not** touch the core send/recv/close mach
 **In scope:**
 - A provider capability report (`KlDatagramOps.caps`) + facade derivation (D-CAP-1).
 - `want_caps` as an init-time gate: init fails loudly if the provider lacks a requested cap (D-CAP-1).
-- `kl_datagram_caps()` re-specified to report **provider** support (not the `want_caps` echo).
+- `kl_datagram_caps()` **preserved** (granted caps); provider support exposed via a new additive
+  `kl_datagram_provider_caps()`.
 - A new `KL_DGRAM_CAP_MULTICAST` (+ `KL_DGRAM_CAP_BROADCAST`) capability bit.
 - Runtime `kl_datagram_multicast_join` / `_leave` gated on `KL_DGRAM_CAP_MULTICAST` (D-CAP-3).
 - The per-provider caps table (each in-tree provider reports truthfully; no emulation).
@@ -42,50 +53,61 @@ Today `KlDatagram` has only the negotiation half: `want_caps` (consumer requires
 `cfg->want_caps` — so `kl_datagram_caps()` echoes the *request*, and an unsupported `want_caps` is
 caught only at **send** time. M2 closes that:
 
-- **D-M2-1 — a provider capability report.** Append to the `KlDatagramOps` vtable
+- **D-M2-1 — a provider capability report (family-independent).** Append to the `KlDatagramOps` vtable
   (`include/keel/socket_dgram.h`):
   ```c
-  /* KL_DGRAM_CAP_* the provider actually supports on this fd/family. Optional (NULL). */
-  unsigned (*caps)(void *ctx, KlSocketHandle fd, int family);
+  /* KL_DGRAM_CAP_* the provider supports. Optional (NULL ⇒ no optional caps, §1a). Family-INDEPENDENT:
+   * caps are a provider-level feature report, not per-address-family; a family-specific limit (e.g. an
+   * IPv6 group on a v4 socket) surfaces at the actual operation's syscall, not here. */
+  unsigned (*caps)(void *ctx, KlSocketHandle fd);
   ```
-  Appended at the **end** of the vtable (source-additive; in-tree providers add it, third-party
-  providers that zero-init leave it NULL). A dedicated op — **not** folded into `configure`'s return,
-  which already means a different bitmask (`KL_DGRAM_RX_*` receive-capture flags); conflating the two
-  namespaces would be a latent bug.
+  Appended at the **end** of the vtable. This is an **intentional pre-consumer ABI revision** (§7), not
+  an "ABI-safe" trailing add: any provider that positionally-initializes `KlDatagramOps` MUST recompile;
+  NULL-tolerance is a *post-recompile* convenience, not binary compatibility. The op takes no `family`
+  — resolving that `KlDatagramConfig` carries no family to pass at init (P1). A dedicated op — **not**
+  folded into `configure`'s return, which already means the `KL_DGRAM_RX_*` receive-capture bitmask.
 
 - **D-M2-2 — the facade derives at init.** `kl_datagram_init_ex` (and thus `kl_datagram_init`) computes
-  `provider_caps = ops->caps ? ops->caps(sp_ctx, fd, family) : CAPS_FALLBACK` (fallback in §1a), then:
+  `provider_caps = ops->caps ? ops->caps(sp_ctx, fd) : 0` (NULL ⇒ **no optional caps**, §1a), then:
   - **fail-loud gate:** if `want_caps & ~provider_caps` ≠ 0 → init **fails** (`-1`,
-    `kl_datagram_last_error` = the unsupported error, §1b), fd not adopted (existing failure contract).
+    `kl_datagram_last_error` = `KL_ERR_UNSUPPORTED`, §1b), fd not adopted (existing failure contract).
     No silent emulation, no deferral to send time.
-  - store `provider_caps` on the core/facade for reporting; keep the **granted** set (`want_caps`,
-    already `⊆ provider_caps` after the gate) as `core->caps`, which continues to drive the send-time
-    `KL_DATAGRAM_UNSUPPORTED` check unchanged. Two fields, distinct meanings: *granted* (what the
-    consumer opted into, enforced on send) vs *available* (what the provider supports, reported).
+  - store `provider_caps` on the core/facade for `kl_datagram_provider_caps()`; keep the **granted** set
+    (`want_caps`, already `⊆ provider_caps` after the gate) as `core->caps`, which continues to drive
+    the send-time `KL_DATAGRAM_UNSUPPORTED` check unchanged and is what `kl_datagram_caps()` reports.
+    Two fields, distinct meanings: *granted* (what the consumer opted into, enforced on send, reported
+    by `kl_datagram_caps()`) vs *available* (what the provider supports, reported by
+    `kl_datagram_provider_caps()`).
 
-- **D-M2-3 — `kl_datagram_caps()` reports provider support.** Re-specified from "the `want_caps` echo"
-  to "the `KL_DGRAM_CAP_*` the provider supports" (`provider_caps`). Safe: **no in-tree consumer calls
-  `kl_datagram_caps()`** (verified), so the semantics change is observable only to new code, for which
-  provider-support is the intended, more-useful meaning. Since `want_caps ⊆ provider_caps` post-gate,
-  the value is a superset of the old echo — never fewer caps.
+- **D-M2-3 — `kl_datagram_caps()` preserved; add `kl_datagram_provider_caps()` (P2 resolved
+  additively).** `kl_datagram_caps()` keeps its exact current meaning — the **granted** caps
+  (`core->caps`, == `want_caps` post-gate) — so the STABLE function is **not** revised. Provider support
+  is exposed through a **new** additive symbol:
+  ```c
+  unsigned kl_datagram_provider_caps(const KlDatagram *dg);   /* KL_DGRAM_CAP_* the provider supports */
+  ```
+  Two crisp, non-overlapping meanings: `kl_datagram_caps()` = "what this datagram will accept on send"
+  (granted/negotiated); `kl_datagram_provider_caps()` = "what the provider could support" (available).
+  This is purely additive — no re-specification of a STABLE function (chosen over reopening
+  `kl_datagram_caps()` pre-consumer, to minimize contract churn).
 
-### 1a. `CAPS_FALLBACK` for a NULL `caps` op (Decision D-M2-4)
+### 1a. NULL / unknown `caps` op ⇒ no optional caps (Decision D-M2-4, blocker P1)
 
-A provider that has not implemented `caps` (NULL) must not silently fail every `want_caps`. The facade
-falls back to a **vtable-derived baseline**: the send-feature caps the core already exercises through
-the message fields — `KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS | KL_DGRAM_CAP_CONNECTED` (every
-provider's `send(dest, src, tos)` takes these) — **plus** `KL_DGRAM_CAP_MULTICAST` iff
-`ops->mcast_membership != NULL` and `KL_DGRAM_CAP_BROADCAST` iff the provider set the broadcast RX/opt
-path (conservatively: report it only when `configure` is present). This preserves today's behavior for
-un-updated third-party providers (their `want_caps` is granted as before; a real gap still surfaces as
-send-time `UNSUPPORTED`) while every in-tree provider reports precisely (§4). The fallback is
-**documented as best-effort**; accurate reporting requires implementing `caps`.
+A NULL `caps` op reports **no optional capabilities** — `provider_caps = 0`. A function signature never
+proves behavior: `send(dest, src, tos)` takes a source and TOS argument whether or not the provider
+*honors* them (lwIP already ignores source-pin/TOS — exactly the silent no-op D-CAP-1 forbids). So the
+facade must **not** infer `SOURCE_PIN`/`TOS`/`CONNECTED`/`BROADCAST` (or `MULTICAST` from a non-NULL
+`mcast_membership`) from the vtable shape. Consequences, both intended:
+- Any non-zero `want_caps` on a NULL-`caps` provider **fails init** (fail-loud) — correct: an
+  unimplemented reporter cannot vouch for a capability. `want_caps == 0` (e.g. DNS) is unaffected.
+- Every in-tree provider therefore MUST implement `caps` to grant any optional capability (§4); this
+  ships as part of M2. Since there are no external providers yet, no third-party build regresses.
 
-### 1b. The unsupported-capability error (Decision D-M2-5)
+### 1b. The unsupported-capability error (Decision D-M2-5, RULED)
 
-`KlError` has no "unsupported" code today (only `KL_ERR_INVALID_ARG`). *Recommended:* add
-`KL_ERR_UNSUPPORTED` (appended to the `KlError` enum — additive, existing values unchanged) for a
-precise fail-loud diagnostic. *Alternative:* reuse `KL_ERR_INVALID_ARG`. Open decision O-M2-err (§11).
+Add **`KL_ERR_UNSUPPORTED`** to the `KlError` enum (appended — existing values unchanged) for a precise
+fail-loud diagnostic on both the `want_caps` init gate (§1) and the multicast gate (§3). (Reviewer
+ruling; the reuse-`KL_ERR_INVALID_ARG` alternative is dropped.)
 
 ## 2. New capability constants (Decision D-M2-6)
 
@@ -111,12 +133,13 @@ Symmetric with `kl_udp_multicast_join/leave` (`src/udp.c:928`). Semantics:
   → return `-1` (`KL_ERR_UNSUPPORTED`), fail-loud, no emulation.
 - Route to `dg_ops(dg)->mcast_membership(sp_ctx, dg->fd, family, group, iface_index, join)` — the same
   provider op `KlUdp` uses. Return its `0`/`-1`.
-- **Family (Decision D-M2-8):** `mcast_membership` needs the socket family, but `KlDatagramConfig`
-  carries none and is **frozen** (M1 — no ABI change). The family is **derived from the group literal**
-  (`kl_sockaddr_parse`/family-detect: dotted-quad → `AF_INET`, colon → `AF_INET6`). A group whose family
-  mismatches the socket is rejected by the kernel at the join syscall (fail-loud), so no stored socket
-  family is needed. (Alternative — record family via `getsockname` at init — rejected: extra syscall,
-  not portable to EFI/lwIP; the group literal is unambiguous.)
+- **Family (Decision D-M2-8):** unlike the family-independent `caps` op (§1), `mcast_membership` *does*
+  take the socket family — but `KlDatagramConfig` carries none and is **frozen** (M1 — no ABI change).
+  The family is **derived from the group literal** at the join/leave call (`kl_sockaddr_parse`/
+  family-detect: dotted-quad → `AF_INET`, colon → `AF_INET6`). A group whose family mismatches the
+  socket is rejected by the kernel at the join syscall (fail-loud), so no stored socket family is
+  needed. (Alternative — record family via `getsockname` at init — rejected: extra syscall, not
+  portable to EFI/lwIP; the group literal is unambiguous.)
 
 **Placement (Decision D-M2-9):** the two functions live in the facade TU `src/datagram.c` (they route
 through the existing `dg_ops()` accessor, exactly like `kl_datagram_send` → provider `send`). No new
@@ -166,15 +189,20 @@ M2 or M4).
 ## 7. ABI / STABLE-contract treatment (Decision D-M2-13)
 
 - **`KlDatagramConfig` and every existing `kl_datagram_*` signature: unchanged.** No struct-layout ABI
-  break (the M1 lesson). M2 adds only **new** symbols (`kl_datagram_multicast_join`/`_leave`), **new**
-  capability bits, and — additively — a new vtable member and (optionally) a new `KlError` value.
-- **`KlDatagramOps` vtable: append `caps`** at the end. This is a provider-vtable extension, the same
-  additive move by which `mcast_membership` / batching ops were added; NULL is tolerated (§1a). A
-  provider that positionally-initializes must add the trailing member — in-tree providers all do (§4).
-- **`kl_datagram_caps()` semantics clarification** (want_caps echo → provider support): a behavior
-  refinement of a STABLE function, safe because no in-tree consumer calls it (§1). Documented in the
-  banner as the D-CAP-1 clarification (report available caps, not the request).
-- **`KlError` append** (if O-M2-err picks `KL_ERR_UNSUPPORTED`): enum extension, existing values fixed.
+  break (the M1 lesson). `kl_datagram_caps()` in particular keeps its exact meaning (granted caps).
+- **`KlDatagramOps` vtable: append `caps` — an INTENTIONAL PRE-CONSUMER ABI REVISION.** This is *not*
+  described as ABI-safe on the grounds that the member is trailing or nullable. Appending to a public
+  vtable changes its size/layout: a provider compiled against the old `KlDatagramOps` is binary-
+  incompatible and MUST be recompiled. NULL-tolerance (a recompiled provider that leaves `caps` NULL →
+  no optional caps, §1a) is a *source*-level convenience *after* recompilation, not binary
+  compatibility. It is acceptable **only because there are no external providers yet** (the same
+  project-stage ruling that permits it must own it explicitly). Every in-tree provider adds the member
+  in M2 (§4).
+- **Additive-only public API:** new symbols `kl_datagram_multicast_join`/`_leave` and
+  `kl_datagram_provider_caps`; new capability bits `KL_DGRAM_CAP_MULTICAST`/`_BROADCAST`; new
+  `KlError` value `KL_ERR_UNSUPPORTED` (enum append, existing values fixed). None revises an existing
+  symbol or type layout — so P2 (STABLE `kl_datagram_caps()`) does not arise: provider support is a new
+  reporter, not a re-specification.
 
 ## 8. Consumer neutrality
 
@@ -189,14 +217,15 @@ M2 or M4).
 Provider/caps + multicast over the scripted mock provider (`test_datagram_public.c`) and a
 capability-reporting mock, plus a live loopback multicast case where the platform allows:
 
-1. **caps derivation** — a mock provider reporting a subset; `kl_datagram_caps()` returns exactly the
-   provider set (not the `want_caps` echo).
+1. **caps derivation** — a mock provider reporting a subset; `kl_datagram_provider_caps()` returns
+   exactly the provider set, while `kl_datagram_caps()` returns the **granted** set (`want_caps`
+   post-gate) — the two reporters are distinct.
 2. **want_caps init gate (fail-loud)** — `want_caps` requiring a cap the provider lacks → `init_ex`
-   returns `-1` with the unsupported error and the fd is **not** adopted (retained by the caller); a
+   returns `-1` with `KL_ERR_UNSUPPORTED` and the fd is **not** adopted (retained by the caller); a
    `want_caps ⊆ provider_caps` request succeeds.
-3. **NULL `caps` fallback** — a provider with `caps == NULL` grants the §1a baseline (init succeeds for
-   `SOURCE_PIN|TOS|CONNECTED`, and `MULTICAST` iff `mcast_membership` set); a real gap still yields
-   send-time `UNSUPPORTED`.
+3. **NULL `caps` ⇒ no optional caps** — a provider with `caps == NULL`: `kl_datagram_provider_caps()`
+   is 0; `want_caps == 0` init succeeds; **any** non-zero `want_caps` fails init with
+   `KL_ERR_UNSUPPORTED` (no signature-derived grant — blocker P1).
 4. **multicast gated** — `kl_datagram_multicast_join/leave` on a provider **without** `MULTICAST` (or
    NULL `mcast_membership`) returns `-1`/`KL_ERR_UNSUPPORTED`, and does **not** call the provider.
 5. **multicast routes** — on a `MULTICAST`-capable mock, join/leave call `mcast_membership` with the
@@ -219,16 +248,17 @@ capability-reporting mock, plus a live loopback multicast case where the platfor
   new boundary crossing), `check-sockaddr-neutral`, `check-doc-refs`, `cppcheck`; EFI host-mock +
   freestanding datagram build (new caps op + multicast funcs compile; EFI/lwIP report reduced sets).
 
-## 11. Open decisions for the reviewer (before implementation)
+## 11. Decisions — all resolved at review (revision 2)
 
-- **O-M2-err — the unsupported error code.** *Recommended:* add `KL_ERR_UNSUPPORTED` (additive enum
-  value) for a precise fail-loud diagnostic on the `want_caps` init gate and the multicast gate.
-  *Alternative:* reuse `KL_ERR_INVALID_ARG`.
-- **O-M2-caps-report — `kl_datagram_caps()` semantics.** *Recommended (D-CAP-1):* re-specify it to
-  report **provider** support. *Alternative:* keep it as the granted (`want_caps`) echo and add a new
-  `kl_datagram_provider_caps()` — avoids re-specifying a STABLE function but adds a second reporter.
-- **O-M2-fallback — NULL `caps` baseline.** Confirm §1a (vtable-derived baseline preserving legacy
-  grant) vs the stricter "NULL ⇒ report nothing ⇒ any `want_caps` fails init" (cleaner fail-loud, but
-  breaks un-updated third-party providers). Recommended: §1a best-effort baseline.
-- **O-M2-batching — defer batching/GSO from the facade.** Confirm §6 (defer; single-flight core, no
-  justification) over building a batched-recv extended API in M2. Recommended: defer.
+- **O-M2-err — RESOLVED: add `KL_ERR_UNSUPPORTED`** (§1b). A precise fail-loud diagnostic on the
+  `want_caps` init gate and the multicast gate; the reuse-`KL_ERR_INVALID_ARG` alternative dropped.
+- **O-M2-caps-report — RESOLVED: preserve `kl_datagram_caps()` (granted), add
+  `kl_datagram_provider_caps()`** (§1 D-M2-3). Additive — no re-specification of a STABLE function
+  (P2 withdrawn without invoking the pre-consumer ruling for this symbol).
+- **O-M2-fallback — RESOLVED: NULL/unknown ⇒ no optional caps** (§1a). Signatures never prove
+  behavior; unknown providers report nothing, so any non-zero `want_caps` fails init loudly (the
+  stricter, correct reading — accepted because there are no external providers to regress).
+- **O-M2-batching — RESOLVED: defer** (§6). Single-flight core, no consumer justification; recorded
+  M4 perf note.
+
+No open decisions remain; the freeze is ready for review.
