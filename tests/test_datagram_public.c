@@ -573,4 +573,61 @@ UTEST(datagram_public, teardown_then_free_idempotent) {
     drive_recv_cancelled();
 }
 
+/* ══ M1 — BOTH byte-gate policy through the PUBLIC facade (§10.10) ═════════════════════════════════
+ * kl_datagram_init_ex(send_byte_budget > 0) selects BOTH end-to-end over the scripted completion mock:
+ * the byte gate binds before the slot count, an oversize datagram is a permanent TOO_LARGE (completion
+ * mode refuses upfront), and a retirement reopens admission. */
+UTEST(datagram_public, m1_both_budget_via_init_ex) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 4 /*slots*/, 1500 /*slot_cap*/);
+    ASSERT_EQ(0, kl_datagram_init_ex(&dg, &c, 20 /*byte_budget*/));   /* BOTH, budget 20 */
+
+    KlSockAddr d = addr4(10,0,0,1, 53);
+    KlDatagramMessage m10 = { .data = "0123456789", .len = 10, .peer = &d, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m10));  /* in flight (bytes 10) */
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m10));  /* queued (bytes 20) */
+    ASSERT_EQ(1, g_mc.send_posted);                                         /* single-flight */
+    /* case (b): budget full though slots remain free */
+    ASSERT_EQ((int)KL_DATAGRAM_WOULD_BLOCK, (int)kl_datagram_send(&dg, &m10));
+    ASSERT_EQ((size_t)2, kl_datagram_send_queued(&dg));
+    /* case (a): a datagram larger than the WHOLE budget (30 > 20, ≤ slot_cap) → permanent TOO_LARGE,
+     * refused upfront in completion mode (never posted). */
+    char big[30]; memset(big, 'X', sizeof(big));
+    KlDatagramMessage m30 = { .data = big, .len = 30, .peer = &d, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_TOO_LARGE, (int)kl_datagram_send(&dg, &m30));
+    ASSERT_EQ(1, g_mc.send_posted);                                         /* not posted */
+    ASSERT_EQ((size_t)2, kl_datagram_send_queued(&dg));                    /* queue unchanged */
+    /* retire the in-flight head → budget frees → admission reopens */
+    drive_send(1);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m10));
+
+    drive_send(1); drive_send(1);                /* drain the remaining in-flight+queued sends */
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued(&dg));
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
+/* kl_datagram_init is the SLOT policy: the byte budget is inert, so admission is count-bounded only —
+ * two 1000-byte datagrams (2000 bytes, far above any small budget) both admit; the slot count refuses. */
+UTEST(datagram_public, m1_init_is_slot_policy) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2 /*slots*/, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));                                /* SLOT (budget 0) */
+
+    KlSockAddr d = addr4(10,0,0,1, 53);
+    char big[1000]; memset(big, 'Z', sizeof(big));
+    KlDatagramMessage m = { .data = big, .len = 1000, .peer = &d, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));   /* in flight */
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));   /* queued — no byte gate */
+    ASSERT_EQ((int)KL_DATAGRAM_WOULD_BLOCK, (int)kl_datagram_send(&dg, &m)); /* refused by SLOTS only */
+    ASSERT_EQ((size_t)2, kl_datagram_send_queued(&dg));
+
+    drive_send(1); drive_send(1);                /* drain in-flight+queued before close */
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued(&dg));
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
 UTEST_MAIN();

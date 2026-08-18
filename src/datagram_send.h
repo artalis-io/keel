@@ -67,6 +67,13 @@ typedef struct {
     size_t            head;          /* index of the oldest occupied slot */
     size_t            count;         /* occupied slots (queued + in-flight) */
     size_t            inflight_n;    /* 0 or 1 — single-flight (Tier-1) */
+    /* M1 BOTH queue policy: a scalar byte admission gate over the slot array. `byte_budget` == 0 is the
+     * default SLOT policy (gate off). `bytes_used` == Σ slot->len over every OCCUPIED slot (queued +
+     * in-flight); it is ONLY an admission accumulator — NOT an emptiness predicate (a zero-length slot
+     * contributes 0 bytes yet occupies a slot, so bytes_used == 0 can hold with count > 0; `count`
+     * remains the sole drain predicate). See docs/datagram_m1_queue_policy_design.md. */
+    size_t            byte_budget;   /* 0 = SLOT (off); >0 = BOTH with this byte budget */
+    size_t            bytes_used;    /* Σ occupied-slot len (admission gate only) */
     int               completion;    /* 1 = async (submit→INFLIGHT); 0 = readiness (submit→DONE) */
     unsigned          caps;          /* KL_DGRAM_CAP_* for UNSUPPORTED mapping */
     KlDgramSubmitFn   submit;   void *submit_ctx;
@@ -92,7 +99,7 @@ typedef struct {
  * Allocates only the FIFO ring (one init-time allocation). Returns 0, or -1 on bad argument /
  * overflow / allocation failure (object left zeroed, reusable). */
 int  kl_dgram_send_init(KlDgramSend *s, KlDgramSlots *slots, KlAllocator *ring_alloc,
-                        int completion, unsigned caps,
+                        int completion, unsigned caps, size_t byte_budget,
                         KlDgramSubmitFn submit, void *submit_ctx);
 
 void kl_dgram_send_set_writable_cb(KlDgramSend *s, KlDgramWritableFn cb, void *ctx);

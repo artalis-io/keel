@@ -64,7 +64,7 @@ UTEST(dgram_send, readiness_sync_direct) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_DONE };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/0, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     kl_dgram_send_set_drain_cb(&s, on_drain_cb, NULL);
     g_drain = 0;
     KlSockAddr p = any_peer();
@@ -86,7 +86,7 @@ UTEST(dgram_send, readiness_wouldblock_then_flush) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     kl_dgram_send_set_drain_cb(&s, on_drain_cb, NULL);
     g_drain = 0;
     KlSockAddr p = any_peer();
@@ -112,7 +112,7 @@ UTEST(dgram_send, completion_async_retire) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     kl_dgram_send_set_drain_cb(&s, on_drain_cb, NULL);
     g_drain = 0;
     KlSockAddr p = any_peer();
@@ -144,7 +144,7 @@ UTEST(dgram_send, single_flight_and_fifo_over_lifo) {
 
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     KlSockAddr p = any_peer();
     const char *msgs[4] = { "A...", "B...", "C...", "D..." };
     for (int i = 0; i < 4; i++) {
@@ -170,7 +170,7 @@ UTEST(dgram_send, writable_edge_and_no_ownership_on_refusal) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     kl_dgram_send_set_writable_cb(&s, on_writable_cb, NULL);
     g_writable = 0;
     KlSockAddr p = any_peer();
@@ -197,7 +197,7 @@ UTEST(dgram_send, status_mapping_and_no_ownership) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 16), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, /*caps*/0, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, /*caps*/0, 0, mock_submit, &mk), 0);
     KlSockAddr p = any_peer(), lo = any_peer();
 
     char big[32]; memset(big, 'B', sizeof(big));
@@ -227,7 +227,7 @@ UTEST(dgram_send, submit_error_is_sticky_and_retains) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_ERROR };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     KlSockAddr p = any_peer();
     KlDatagramMessage m = { .data = "keep", .len = 4, .peer = &p, .tos = -1 };
 
@@ -255,7 +255,7 @@ UTEST(dgram_send, inline_completion_no_phantom) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, inline_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, inline_submit, &mk), 0);
     g_inline_s = &s;
     kl_dgram_send_set_drain_cb(&s, on_drain_cb, NULL);
     g_drain = 0;
@@ -293,7 +293,7 @@ UTEST(dgram_send, writable_refill_suppresses_drain) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 1, 32), 0);   /* single slot */
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     g_re_s = &s; g_re_sent = 0; g_re_status = -1; g_re_free_seen = 99;
     kl_dgram_send_set_writable_cb(&s, refill_writable, NULL);
     kl_dgram_send_set_drain_cb(&s, on_drain_cb, NULL);
@@ -336,7 +336,7 @@ UTEST(dgram_send, destructive_on_drain_tail) {
     static KlDgramSend  s;
     ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 32), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     g_de_s = &s; g_de_slots = &slots; g_de_fired = 0;
     kl_dgram_send_set_drain_cb(&s, destructive_drain, NULL);
     KlSockAddr p = any_peer();
@@ -357,7 +357,7 @@ UTEST(dgram_send, free_refused_while_inflight) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 32), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     KlSockAddr p = any_peer();
     KlDatagramMessage m = { .data = "x", .len = 1, .peer = &p, .tos = -1 };
     ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);
@@ -374,7 +374,7 @@ UTEST(dgram_send, hot_path_is_allocation_free) {
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     int base = g_mallocs;
     KlSockAddr p = any_peer();
     for (int round = 0; round < 100; round++) {
@@ -386,7 +386,7 @@ UTEST(dgram_send, hot_path_is_allocation_free) {
 
     Mock mk2 = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
     KlDgramSend r;
-    ASSERT_EQ(kl_dgram_send_init(&r, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk2), 0);
+    ASSERT_EQ(kl_dgram_send_init(&r, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk2), 0);
     int base2 = g_mallocs;
     for (int i = 0; i < 4; i++) {
         KlDatagramMessage m = { .data = "q", .len = 1, .peer = &p, .tos = -1 };
@@ -409,7 +409,7 @@ UTEST(dgram_send, readiness_wouldblock_free_restores_slots) {
     int free0 = (int)kl_dgram_slots_free_count(&slots);
     Mock mk = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
     KlDgramSend s;
-    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
     KlSockAddr p = any_peer();
     KlDatagramMessage m = { .data = "xy", .len = 2, .peer = &p, .tos = -1 };
     ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);       /* direct WB → enqueue */
@@ -423,13 +423,258 @@ UTEST(dgram_send, readiness_wouldblock_free_restores_slots) {
     /* Prove the pool is fully reusable: a fresh machine can queue every slot again. */
     Mock mk2 = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
     KlDgramSend s2;
-    ASSERT_EQ(kl_dgram_send_init(&s2, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, mock_submit, &mk2), 0);
+    ASSERT_EQ(kl_dgram_send_init(&s2, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk2), 0);
     for (int i = 0; i < free0; i++)
         ASSERT_EQ(kl_dgram_send(&s2, &m), KL_DATAGRAM_ACCEPTED);
     ASSERT_EQ((int)kl_dgram_send_queued(&s2), free0);
     ASSERT_EQ((int)kl_dgram_slots_free_count(&slots), 0);         /* full capacity was available */
     ASSERT_EQ(kl_dgram_send_free(&s2), 0);                        /* releases the queued slots again */
     ASSERT_EQ((int)kl_dgram_slots_free_count(&slots), free0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* ══ M1 — BOTH byte-gate send-queue policy (docs/datagram_m1_queue_policy_design.md §10) ══════════
+ * SLOT (byte_budget 0) is exercised by every test above (§10.1 regression). These cover BOTH. */
+
+/* §10.2 — BOTH byte-gate refusal (case b): the byte budget refuses while a slot is still free, and
+ * because bytes_used > 0 (count ≥ 1) a retirement re-signals writable. */
+UTEST(dgram_send, both_byte_gate_refuses_with_free_slot) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 8, 64), 0);  /* plenty of slots */
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/20, mock_submit, &mk), 0);
+    kl_dgram_send_set_writable_cb(&s, on_writable_cb, NULL);
+    g_writable = 0;
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m10 = { .data = "0123456789", .len = 10, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* bytes_used 10 (in flight) */
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* bytes_used 20 (queued) */
+    ASSERT_EQ((int)s.bytes_used, 20);
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_WOULD_BLOCK); /* case (b): 20+10 > 20 */
+    ASSERT_TRUE((int)kl_dgram_slots_free_count(&slots) > 0);     /* refused by BYTES, not slots */
+    ASSERT_EQ(s.full, 1);                                        /* full→non-full armed */
+    ASSERT_TRUE((int)kl_dgram_send_queued(&s) >= 1);             /* count ≥ 1 → retry will re-signal */
+    /* retire the in-flight head → bytes_used drops → on_writable fires */
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);
+    ASSERT_EQ(g_writable, 1);
+    ASSERT_EQ((int)s.bytes_used, 10);                           /* one 10-byte datagram retired */
+    kl_dgram_send_abandon(&s);
+    kl_dgram_slots_free(&slots);
+}
+
+/* §10.3 — under BOTH the SLOT bound still fires first when many small datagrams stay under budget. */
+UTEST(dgram_send, both_slot_gate_still_active) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 64), 0);  /* only 2 slots */
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/10000, mock_submit, &mk), 0);  /* budget won't bind */
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m = { .data = "0123456789", .len = 10, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);      /* both slots taken */
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_WOULD_BLOCK);   /* SLOT gate, not byte gate */
+    ASSERT_EQ((int)kl_dgram_slots_free_count(&slots), 0);
+    ASSERT_TRUE(s.bytes_used < s.byte_budget);                   /* budget had room to spare */
+    kl_dgram_send_abandon(&s);
+    kl_dgram_slots_free(&slots);
+}
+
+/* §10.4 — zero-length datagrams are bounded by SLOTS (not bytes); on_drain keys on count, not
+ * bytes_used (which stays 0 throughout) — the P1a regression. */
+UTEST(dgram_send, both_zero_length_bounded_by_slots) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 3, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/100, mock_submit, &mk), 0);
+    kl_dgram_send_set_drain_cb(&s, on_drain_cb, NULL);
+    g_drain = 0;
+    KlSockAddr p = any_peer();
+    KlDatagramMessage z = { .data = NULL, .len = 0, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &z), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ(kl_dgram_send(&s, &z), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ(kl_dgram_send(&s, &z), KL_DATAGRAM_ACCEPTED);      /* 3 zero-length in the 3 slots */
+    ASSERT_EQ((int)s.bytes_used, 0);                            /* 0 bytes, yet count == 3 */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);
+    ASSERT_EQ(kl_dgram_send(&s, &z), KL_DATAGRAM_WOULD_BLOCK);   /* refused by the SLOT bound */
+    /* drain all three via single-flight completions; on_drain fires once on count→0, bytes_used==0 */
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+    ASSERT_EQ((int)s.bytes_used, 0);
+    ASSERT_EQ(g_drain, 1);                                      /* drain keyed on count, not bytes */
+    kl_dgram_send_abandon(&s);
+    kl_dgram_slots_free(&slots);
+}
+
+/* §10.5 — case (a) len > byte_budget, readiness: permanent TOO_LARGE on a blocked empty queue (no
+ * full, no strand); but a socket-ready direct send still delivers it (KlUdp parity). */
+UTEST(dgram_send, both_oversize_readiness_permanent_or_direct) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 128), 0);  /* slot_cap 128 */
+    Mock mk = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/0, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/64, mock_submit, &mk), 0);      /* budget 64 < slot_cap */
+    KlSockAddr p = any_peer();
+    char big[100]; memset(big, 'X', sizeof(big));
+    KlDatagramMessage m = { .data = big, .len = 100, .peer = &p, .tos = -1 };   /* >budget, ≤slot_cap */
+    /* socket blocked: fast path WOULD_BLOCK → byte gate case (a) → permanent TOO_LARGE */
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_TOO_LARGE);
+    ASSERT_EQ(s.full, 0);                                       /* NOT armed — nothing to retry */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);               /* nothing queued → no strand */
+    /* socket ready: the SAME oversize datagram is delivered directly (budget bypassed) */
+    mk.next = KL_DGRAM_SUBMIT_DONE;
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* §10.6 — case (a), completion: no fast path, so len > byte_budget is refused TOO_LARGE upfront and
+ * nothing is submitted (matches KlUdp on a completion loop). */
+UTEST(dgram_send, both_oversize_completion_upfront) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 128), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/64, mock_submit, &mk), 0);
+    KlSockAddr p = any_peer();
+    char big[100]; memset(big, 'Y', sizeof(big));
+    KlDatagramMessage m = { .data = big, .len = 100, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_TOO_LARGE);
+    ASSERT_EQ(mk.calls, 0);                                     /* never submitted */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* §10.7 — budget < slot_cap is valid (no budget≥slot_cap requirement): a ≤budget datagram admits, a
+ * >budget (but ≤slot_cap) datagram is case (a). */
+UTEST(dgram_send, both_budget_below_slot_cap_valid) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 200), 0);  /* slot_cap 200 */
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/50, mock_submit, &mk), 0);       /* 50 < 200 */
+    KlSockAddr p = any_peer();
+    char d40[40]; memset(d40, 'a', sizeof(d40));
+    char d90[90]; memset(d90, 'b', sizeof(d90));
+    KlDatagramMessage fits = { .data = d40, .len = 40, .peer = &p, .tos = -1 };  /* ≤ budget */
+    KlDatagramMessage over = { .data = d90, .len = 90, .peer = &p, .tos = -1 };  /* > budget, ≤ slot_cap */
+    ASSERT_EQ(kl_dgram_send(&s, &fits), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ(kl_dgram_send(&s, &over), KL_DATAGRAM_TOO_LARGE);  /* case (a), not a slot TOO_LARGE */
+    kl_dgram_send_abandon(&s);
+    kl_dgram_slots_free(&slots);
+}
+
+/* §10.8 — retiring a datagram drops bytes_used by exactly its len and reopens admission. */
+UTEST(dgram_send, both_accounting_reopens_admission) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/20, mock_submit, &mk), 0);
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m10 = { .data = "0123456789", .len = 10, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* bytes_used 10 (in flight) */
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* bytes_used 20 (queued) */
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_WOULD_BLOCK); /* budget full (case b) */
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);            /* retire head → bytes_used 10 */
+    ASSERT_EQ((int)s.bytes_used, 10);
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* admission reopened */
+    ASSERT_EQ((int)s.bytes_used, 20);
+    kl_dgram_send_abandon(&s);
+    kl_dgram_slots_free(&slots);
+}
+
+/* §10.9 — discard/abandon accounting with in-flight retention (blocker P2). */
+UTEST(dgram_send, both_discard_queued_only_readiness) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };   /* readiness: queues, nothing in flight */
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/0, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/100, mock_submit, &mk), 0);
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m10 = { .data = "0123456789", .len = 10, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* fast path WOULD_BLOCK → queued */
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* queued behind it */
+    ASSERT_EQ((int)s.bytes_used, 20);
+    ASSERT_EQ((int)kl_dgram_send_inflight(&s), 0);
+    kl_dgram_send_discard_queued(&s);
+    ASSERT_EQ((int)s.bytes_used, 0);                           /* queued-only → 0 immediately */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+UTEST(dgram_send, both_discard_retains_inflight_then_completion_zeroes) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/100, mock_submit, &mk), 0);
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m10 = { .data = "0123456789", .len = 10, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* in flight (bytes_used 10) */
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* queued (bytes_used 20) */
+    ASSERT_EQ((int)kl_dgram_send_inflight(&s), 1);
+    kl_dgram_send_discard_queued(&s);
+    ASSERT_EQ((int)s.bytes_used, 10);                          /* retained in-flight head's len */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 1);              /* the in-flight slot remains */
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);           /* terminal completion */
+    ASSERT_EQ((int)s.bytes_used, 0);                          /* now zero */
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+UTEST(dgram_send, both_abandon_resets_bytes_used) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/100, mock_submit, &mk), 0);
+    KlSockAddr p = any_peer();
+    KlDatagramMessage m10 = { .data = "0123456789", .len = 10, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* in flight, bytes_used 10 */
+    kl_dgram_send_abandon(&s);                                  /* dead machine → direct reset */
+    ASSERT_EQ((int)s.bytes_used, 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* §10.9 zero-length interaction: a retained zero-length in-flight head leaves bytes_used == 0 after
+ * discard yet count == 1 until completion (P1a/P2 interaction). */
+UTEST(dgram_send, both_discard_zero_length_inflight_head) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_INFLIGHT };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED,
+                                 /*byte_budget*/100, mock_submit, &mk), 0);
+    KlSockAddr p = any_peer();
+    KlDatagramMessage z    = { .data = NULL, .len = 0,  .peer = &p, .tos = -1 };
+    KlDatagramMessage m10  = { .data = "0123456789", .len = 10, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &z),   KL_DATAGRAM_ACCEPTED);   /* zero-length in flight (0 bytes) */
+    ASSERT_EQ(kl_dgram_send(&s, &m10), KL_DATAGRAM_ACCEPTED);   /* 10-byte queued (bytes_used 10) */
+    ASSERT_EQ((int)s.bytes_used, 10);
+    kl_dgram_send_discard_queued(&s);
+    ASSERT_EQ((int)s.bytes_used, 0);                           /* retained head is zero-length */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 1);              /* yet count == 1 (P1a/P2) */
+    ASSERT_EQ(kl_dgram_send_on_complete(&s, 1), 0);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+    kl_dgram_send_free(&s);
     kl_dgram_slots_free(&slots);
 }
 

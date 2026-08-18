@@ -53,9 +53,18 @@ data-plane provider vtable).
    `payload_capacity` (outbound), and the inbound payload capacity at init with overflow-safe
    validation of
    `slot_count × (payload_capacity + metadata_size) + (inbound_payload_capacity + metadata_size)`.
-   **`TOO_LARGE`** = the packet exceeds one slot *permanently* (caller error); **`WOULD_BLOCK`**
-   = no send slot available *transiently*. Allocation-free steady state. A variable-size
-   byte-budget queue is a future optional capability, not Tier 1.
+   **`TOO_LARGE`** = the packet exceeds a hard configured send-path capacity *permanently* — one
+   slot (`payload_capacity`), or, under the `BOTH` policy, the whole byte budget (caller error);
+   **`WOULD_BLOCK`** = admission refused *transiently* — no send slot, or the `BOTH` byte gate.
+   Allocation-free steady state.
+   **Send-queue policy (M1).** The default `SLOT` policy (`kl_datagram_init`) bounds admission by the
+   slot COUNT only. `kl_datagram_init_ex(send_byte_budget > 0)` selects `BOTH` — admission is bounded
+   by both the slot count AND a byte budget (bytes of queued+in-flight payload), a scalar admission
+   gate over the same fixed slots (it never changes storage layout; zero-length packets are bounded by
+   the slot count, so `count` — not the byte total — remains the sole drain predicate). There is **no**
+   pure byte-only policy: an allocation-free queue is count-bounded, and zero-length datagrams make a
+   byte budget unable to bound the packet count. Exact `KlUdp` byte-only/count-unbounded backpressure
+   stays in the `KlUdp` compatibility wrapper's hot-path-allocating queue, not the Tier-1 core.
 3. **Addresses are `KlSockAddr`, never `struct sockaddr`.** Matches the neutral `KlDatagramOps`
    vtable and the completion event fields. (The legacy `KlUdp` public API's `struct sockaddr`
    is a provider-config detail, not the neutral surface.)
@@ -107,8 +116,8 @@ typedef struct {
 
 typedef enum {
     KL_DATAGRAM_ACCEPTED = 0,  /* whole packet taken (sent or slot-queued) */
-    KL_DATAGRAM_WOULD_BLOCK,   /* transient: no slot now; NOTHING taken, no state change */
-    KL_DATAGRAM_TOO_LARGE,     /* permanent: packet exceeds one slot; caller must not retry */
+    KL_DATAGRAM_WOULD_BLOCK,   /* transient: no slot now, or the BOTH byte gate; NOTHING taken */
+    KL_DATAGRAM_TOO_LARGE,     /* permanent: exceeds one slot, or the whole BOTH byte budget; no retry */
     KL_DATAGRAM_CLOSED,        /* closing/closed: no further sends */
     KL_DATAGRAM_UNSUPPORTED,   /* an explicitly-requested capability is unavailable; nothing sent */
     KL_DATAGRAM_ERROR          /* hard local/provider error (see last_error) */
@@ -152,8 +161,11 @@ typedef enum {
   `kl_datagram_send_pending` / the queue-full `WOULD_BLOCK`, not from a hidden 0.)*
 - **Ordering:** if anything is already queued, the new packet is queued behind it (FIFO); the
   socket is not attempted out of order (preserves `udp.c:141`).
-- **`TOO_LARGE`:** `msg->len > payload_capacity` — permanent; the packet can never fit a slot.
-  Distinct from `WOULD_BLOCK`. (Fixes the audit's lossy-status finding.)
+- **`TOO_LARGE`:** `msg->len > payload_capacity` — permanent; the packet can never fit a slot. Under
+  the `BOTH` policy (M1) it *also* covers `msg->len > send_byte_budget` (a packet larger than the whole
+  budget can never be queued — refused after the readiness fast path's direct-send attempt, or upfront
+  in completion mode, mirroring `KlUdp`). Distinct from `WOULD_BLOCK`. (Fixes the audit's lossy-status
+  finding.)
 - **`WOULD_BLOCK`:** all `slot_count` send slots occupied. Nothing copied, no counter bumped as
   a drop — the caller retries after `on_writable` (the full→non-full transition, §3).
 - **Copy timing:** the caller's `msg->data` is borrowed only for the duration of the call

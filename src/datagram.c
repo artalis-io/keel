@@ -265,6 +265,10 @@ static int dg_prepare_register(void *ctx) {
 /* ══ public API ═══════════════════════════════════════════════════════════════════════════════ */
 
 int kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg) {
+    return kl_datagram_init_ex(dg, cfg, 0);   /* 0 = SLOT policy (byte gate off) — the STABLE default */
+}
+
+int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send_byte_budget) {
     if (!dg || !cfg || !cfg->ctx || !cfg->alloc || !kl_handle_valid(cfg->fd)) {
         if (dg) { memset(dg, 0, sizeof(*dg)); dg->last_error = KL_ERR_INVALID_ARG; }
         return -1;
@@ -286,6 +290,7 @@ int kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg) {
     memset(&cc, 0, sizeof(cc));
     cc.alloc = cfg->alloc; cc.fd = cfg->fd; cc.completion = completion;
     cc.send_slots = cfg->send_slots; cc.send_slot_cap = cfg->send_slot_cap; cc.recv_cap = cfg->recv_cap;
+    cc.send_byte_budget = send_byte_budget;   /* M1: 0 = SLOT, >0 = BOTH */
     cc.caps = cfg->want_caps;
     cc.submit = completion ? dg_comp_submit : dg_rdy_submit; cc.submit_ctx = dg;
     cc.arm = completion ? dg_comp_arm : dg_rdy_arm;

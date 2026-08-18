@@ -262,8 +262,10 @@ const KlSockAddr *src, void*)`.
   layer; none is read in handler/reply logic.
 - **Migration shape:** re-implement `KlUdpServer` on `{KlDatagram core + extended-UDP layer}`,
   preserving the handler/reply/multicast semantics. The `reply` path uses `kl_datagram_send` with
-  `msg.peer = src`, `msg.local = captured local` (source-pin), and the **`BOTH`** queue policy (byte
-  budget from `max_send_queue` + a reply-burst slot count) — with the documented count-bound caveat
+  `msg.peer = src`, `msg.local = captured local` (source-pin), and the **`BOTH`** queue policy — its
+  two dimensions set independently: the byte budget is `max_send_queue` **verbatim** (no inflation —
+  M1 imposes no `budget ≥ slot_cap` rule), and the slot count is sized for a reply burst (`slot_cap` =
+  max UDP payload, so it is inert and the byte budget governs). With the documented count-bound caveat
   (§4 D-Q-2). If exact byte-only/count-unbounded backpressure is required, `KlUdpServer` stays on the
   `KlUdp` wrapper instead (off-ramp) — do not silently convert its byte budget to a slot count.
 - **Compatibility wrapper for `KlUdp` itself:** after the consumers migrate, express the public `KlUdp`
@@ -298,10 +300,16 @@ document** — it only scopes them.
    partial-vtable / bad-bind / `socket()` / `set_nonblocking` / `bind`, each asserting exactly-one-or-zero
    close + the right `KlError`) + ownership handoff (success returns the unclosed fd; the caller closes) +
    capture-mask passthrough + a real default-provider bound/unbound loopback socket.
-1. **M1 — `BOTH` queue policy (additive, no consumer change).** Add the `BOTH` policy per §4 — a byte
-   **admission gate** on the existing fixed slot array (no ring, no byte arena; the impossible byte-only
-   policy is not built). Default stays `SLOT`; preallocated; overflow-safe. Tests: `BOTH` admission by
-   whichever dimension binds, retirement, no hot-path alloc (ASan/LSan), no change to `SLOT` consumers.
+1. **M1 — `BOTH` queue policy (additive, no consumer change). LANDED.** Added the `BOTH` policy per §4
+   — a byte **admission gate** on the existing fixed slot array (no ring, no byte arena; the impossible
+   byte-only policy is not built). Default stays `SLOT`; preallocated; overflow-safe. The budget arrives
+   via the additive `kl_datagram_init_ex(send_byte_budget)` (`KlDatagramConfig` frozen — no ABI break);
+   a datagram larger than the whole budget is a permanent `TOO_LARGE` (after the readiness fast path, so
+   a socket-ready send still delivers it — `KlUdp` parity), so **any** budget > 0 is valid (no
+   `budget ≥ slot_cap` rule). See `docs/datagram_m1_queue_policy_design.md`. Tests: `BOTH` admission by
+   whichever dimension binds, zero-length bounded by slots (drain keyed on count), oversize permanent
+   refusal (readiness + completion), retirement reopens, discard/abandon accounting with in-flight
+   retention, no hot-path alloc (ASan/LSan), no change to `SLOT` consumers.
 2. **M2 — capability derivation + extended-UDP layer (additive).** Provider→caps report (§3 D-CAP-1);
    a thin extended layer exposing multicast join/leave (D-CAP-3) and, if justified, batching/GSO/GRO
    opt-in over the existing provider ops. No consumer change yet.

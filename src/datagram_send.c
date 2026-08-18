@@ -17,7 +17,7 @@ static const KlSockAddr *addr_or_null(const KlSockAddr *a) {
 }
 
 int kl_dgram_send_init(KlDgramSend *s, KlDgramSlots *slots, KlAllocator *ring_alloc,
-                       int completion, unsigned caps,
+                       int completion, unsigned caps, size_t byte_budget,
                        KlDgramSubmitFn submit, void *submit_ctx) {
     if (!s)
         return -1;
@@ -41,6 +41,7 @@ int kl_dgram_send_init(KlDgramSend *s, KlDgramSlots *slots, KlAllocator *ring_al
     s->ring_cap   = cap;
     s->completion = completion ? 1 : 0;
     s->caps       = caps;
+    s->byte_budget = byte_budget;   /* 0 = SLOT policy (gate off); >0 = BOTH (M1) */
     s->submit     = submit;
     s->submit_ctx = submit_ctx;
     return 0;
@@ -72,9 +73,13 @@ void kl_dgram_send_discard_queued(KlDgramSend *s) {
         size_t idx = (s->head + s->count - 1) % s->ring_cap;
         KlDgramSlot *slot = s->ring[idx];
         s->ring[idx] = NULL;
+        if (s->bytes_used >= slot->len) s->bytes_used -= slot->len;   /* release only the QUEUED slots */
+        else                            s->bytes_used = 0;
         kl_dgram_slots_release(s->slots, slot);
         s->count--;
     }
+    /* The in-flight head (if any) is retained, so bytes_used now == its len (== 0 when nothing is in
+     * flight) — it drops to 0 only when the terminal completion retires it (§10.9 / P2). */
     s->full = 0;   /* slots freed; no on_writable — this is close-initiated */
 }
 
@@ -112,6 +117,8 @@ static void send_retire_head(KlDgramSend *s, int was_inflight) {
     s->count--;
     if (was_inflight && s->inflight_n > 0)
         s->inflight_n--;
+    if (s->bytes_used >= slot->len) s->bytes_used -= slot->len;   /* byte-gate release (both retire paths) */
+    else                            s->bytes_used = 0;            /* defensive; invariant keeps ≥ */
     kl_dgram_slots_release(s->slots, slot);   /* a free slot appears */
     if (s->full) { s->full = 0; s->pend_writable = 1; }   /* full → non-full */
     if (s->count == 0) s->pend_drain = 1;                 /* non-empty → empty (re-checked at leave) */
@@ -201,6 +208,27 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
         if (s->closing) { status = KL_DATAGRAM_CLOSED; goto leave; }
     }
 
+    /* Byte-admission gate (M1 BOTH policy; inert when byte_budget == 0). Reached on the readiness
+     * WOULD_BLOCK fall-through, or directly in completion mode (no fast path). Two outcomes, split on
+     * whether the datagram ALONE exceeds the whole budget. See §4 of the M1 freeze. */
+    if (s->byte_budget) {
+        if (m->len > s->byte_budget) {
+            /* (a) exceeds the WHOLE budget → can never be queued: PERMANENT refusal (the readiness
+             * fast path above already delivered it if the socket was ready — KlUdp parity). Terminal,
+             * so it cannot strand or livelock; does NOT arm the full→non-full edge. */
+            status = KL_DATAGRAM_TOO_LARGE;
+            goto leave;
+        }
+        if (m->len > s->byte_budget - s->bytes_used) {   /* overflow-safe (bytes_used ≤ budget) */
+            /* (b) transient: fits the budget but not right now. Provably bytes_used > 0 here (len ≤
+             * budget ∧ bytes_used+len > budget), so count ≥ 1 and a retirement re-signals writable —
+             * cannot strand. Arm the full→non-full edge like a slot-full refusal. */
+            s->full = 1;
+            status  = KL_DATAGRAM_WOULD_BLOCK;
+            goto leave;
+        }
+    }
+
     /* Acquire a slot only once acceptance is certain — every refusal takes no ownership and mutates
      * no queue state. */
     {
@@ -220,6 +248,7 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
         if (addr_or_null(m->local)) slot->local = *m->local; else memset(&slot->local, 0, sizeof(slot->local));
         s->ring[(s->head + s->count) % s->ring_cap] = slot;   /* enqueue FIFO (tail) */
         s->count++;
+        s->bytes_used += m->len;                   /* byte-gate accounting (paired with every release) */
         if (kl_dgram_slots_free_count(s->slots) == 0)
             s->full = 1;                           /* filled the last slot */
         dispatch_enter(s);

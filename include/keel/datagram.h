@@ -25,6 +25,10 @@
  * layout by including <keel/datagram_detail.h> and MUST recompile when it changes. A consumer that only
  * holds a `KlDatagram *` (created behind the API) is insulated from layout.
  *
+ * M1 extends the STABLE surface ADDITIVELY: kl_datagram_init_ex is a new function selecting the BOTH
+ * (count+byte) send-queue policy; kl_datagram_init and the KlDatagramConfig layout are UNCHANGED (the
+ * budget is a parameter, not a struct field), so the extension never modifies the existing contract.
+ *
  * The provider data-plane vtable (KlDatagramOps + KlDgramRx/TxDesc descriptors + KL_DGRAM_RX_ flags)
  * lives on the socket axis in <keel/socket_dgram.h>, re-exported here so `#include <keel/datagram.h>`
  * reaches it.
@@ -60,8 +64,9 @@ typedef struct KlDatagram KlDatagram;
 /* ── Send status: atomic accept-or-refuse, no ownership on refusal (invariant 4) ──────────────── */
 typedef enum {
     KL_DATAGRAM_ACCEPTED = 0,   /* whole datagram taken (sent or slot-queued) */
-    KL_DATAGRAM_WOULD_BLOCK,    /* transient: no free outbound slot; nothing taken */
-    KL_DATAGRAM_TOO_LARGE,      /* permanent: datagram exceeds one slot; nothing taken */
+    KL_DATAGRAM_WOULD_BLOCK,    /* transient: no free outbound slot, or the BOTH byte gate; nothing taken */
+    KL_DATAGRAM_TOO_LARGE,      /* permanent: exceeds a hard configured send-path capacity — one slot
+                                   (send_slot_cap), or the whole send_byte_budget under BOTH; nothing taken */
     KL_DATAGRAM_UNSUPPORTED,    /* an explicitly-requested capability is unavailable; nothing sent */
     KL_DATAGRAM_CLOSED,         /* closing/closed: no further sends */
     KL_DATAGRAM_ERROR           /* bad argument or sticky transport error */
@@ -116,8 +121,16 @@ typedef struct {
 /* ── Lifecycle ────────────────────────────────────────────────────────────────────────────────── */
 /* Initialize `dg` (a memset-zero handle) over the prepared fd. fd OWNERSHIP TRANSFERS to KlDatagram
  * ONLY when this returns 0; on failure nothing the caller must reclaim is touched (the caller retains
- * the fd). Returns 0, or -1 (kl_datagram_last_error carries why). */
+ * the fd). Returns 0, or -1 (kl_datagram_last_error carries why).
+ *
+ * kl_datagram_init selects the SLOT send-queue policy (count-bounded backpressure — the STABLE
+ * default). kl_datagram_init_ex is the additive variant: send_byte_budget == 0 is identical to
+ * kl_datagram_init (SLOT); send_byte_budget > 0 selects the BOTH policy — admission is bounded by both
+ * the slot COUNT and that byte budget (bytes of queued+in-flight payload). Any budget > 0 is valid,
+ * including one below send_slot_cap: a datagram larger than the whole budget is a permanent
+ * KL_DATAGRAM_TOO_LARGE (delivered first if the socket is ready). See docs/datagram_m1_queue_policy_*. */
 int  kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg);
+int  kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send_byte_budget);
 
 /* Graceful close: stop admission, drain queued output, then retire ops + close the fd once (§4). */
 int  kl_datagram_close_begin(KlDatagram *dg);
@@ -130,7 +143,9 @@ int  kl_datagram_free(KlDatagram *dg);
 
 /* ── Data plane ───────────────────────────────────────────────────────────────────────────────── */
 /* One whole datagram out: atomic accept (payload + metadata COPIED before return) or refusal — never
- * partial, no ownership on refusal. Backpressure is a datagram COUNT (send_slots), NOT a byte budget. */
+ * partial, no ownership on refusal. Backpressure is a datagram COUNT (send_slots) under the default
+ * SLOT policy (kl_datagram_init); with kl_datagram_init_ex(send_byte_budget > 0) it is count-AND-byte
+ * bounded (BOTH). There is no pure byte-only policy. */
 KlDatagramSendStatus kl_datagram_send(KlDatagram *dg, const KlDatagramMessage *m);
 
 /* Begin receiving: deliver one datagram per `on_recv` call (serial). */

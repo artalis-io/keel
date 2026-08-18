@@ -82,7 +82,7 @@ static void run_reentrant_close(int submit_result, int *st, int *queued, int *de
     kl_dgram_slots_init(&slots, &a, 4, 64);
     KlDgramSend send;
     kl_dgram_send_init(&send, &slots, &a, /*completion*/0, KL_DGRAM_CAP_CONNECTED,
-                       reentrant_close_submit, NULL);
+                       0, reentrant_close_submit, NULL);
     KlDgramClose close;
     kl_dgram_close_init(&close, &send, NULL, on_close_cb, NULL);
     g_cb_close = &close; g_rc_did = 0; g_rc_result = submit_result; g_on_close = 0;
@@ -104,7 +104,7 @@ static void fix_init(Fix *f, unsigned caps) {   /* fixed valid args → each ini
     g_a = kl_allocator_default();
     kl_dgram_slots_init(&f->slots, &g_a, 4, 64);        /* object-owned outbound (send) */
     kl_dgram_inbound_init(&f->inbound, &g_a, 64);       /* life-ownable inbound (recv) */
-    kl_dgram_send_init(&f->send, &f->slots, &g_a, /*completion*/1, caps, send_submit, NULL);
+    kl_dgram_send_init(&f->send, &f->slots, &g_a, /*completion*/1, caps, 0, send_submit, NULL);
     kl_dgram_recv_init(&f->recv, &f->inbound, /*completion*/1, recv_deliver, NULL,
                        recv_arm, NULL, NULL, NULL);
     kl_dgram_close_init(&f->close, &f->send, &f->recv, on_close_cb, NULL);
@@ -267,7 +267,7 @@ UTEST(dgram_close, error_sync_submission_during_graceful) {
     KlDgramSlots slots; KlAllocator a = kl_allocator_default();
     ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     KlDgramSend send;
-    ASSERT_EQ(kl_dgram_send_init(&send, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, send_submit_err, NULL), 0);
+    ASSERT_EQ(kl_dgram_send_init(&send, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, send_submit_err, NULL), 0);
     KlDgramClose close;
     g_on_close = 0;
     ASSERT_EQ(kl_dgram_close_init(&close, &send, NULL, on_close_cb, NULL), 0);
@@ -333,7 +333,7 @@ UTEST(dgram_close, destructive_on_close_tail) {
     g_a = kl_allocator_default();
     ASSERT_EQ(kl_dgram_slots_init(&f.slots, &g_a, 4, 64), 0);
     ASSERT_EQ(kl_dgram_inbound_init(&f.inbound, &g_a, 64), 0);
-    ASSERT_EQ(kl_dgram_send_init(&f.send, &f.slots, &g_a, 1, KL_DGRAM_CAP_CONNECTED, send_submit, NULL), 0);
+    ASSERT_EQ(kl_dgram_send_init(&f.send, &f.slots, &g_a, 1, KL_DGRAM_CAP_CONNECTED, 0, send_submit, NULL), 0);
     ASSERT_EQ(kl_dgram_recv_init(&f.recv, &f.inbound, 1, recv_deliver, NULL, recv_arm, NULL, NULL, NULL), 0);
     ASSERT_EQ(kl_dgram_close_init(&f.close, &f.send, &f.recv, destructive_close, NULL), 0);
     g_de_fix = &f; g_de_fired = 0;
@@ -376,7 +376,7 @@ UTEST(dgram_close, close_from_on_writable) {
     KlDgramSlots slots; KlAllocator a = kl_allocator_default();
     ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 1, 64), 0);   /* one slot → A makes it full */
     KlDgramSend send;
-    ASSERT_EQ(kl_dgram_send_init(&send, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, send_submit, NULL), 0);
+    ASSERT_EQ(kl_dgram_send_init(&send, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, send_submit, NULL), 0);
     kl_dgram_send_set_writable_cb(&send, closing_writable, NULL);
     KlDgramClose close;
     ASSERT_EQ(kl_dgram_close_init(&close, &send, NULL, on_close_cb, NULL), 0);
@@ -397,7 +397,7 @@ UTEST(dgram_close, close_from_on_drain) {
     KlDgramSlots slots; KlAllocator a = kl_allocator_default();
     ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
     KlDgramSend send;
-    ASSERT_EQ(kl_dgram_send_init(&send, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, send_submit, NULL), 0);
+    ASSERT_EQ(kl_dgram_send_init(&send, &slots, &a, 1, KL_DGRAM_CAP_CONNECTED, 0, send_submit, NULL), 0);
     kl_dgram_send_set_drain_cb(&send, closing_drain, NULL);
     KlDgramClose close;
     ASSERT_EQ(kl_dgram_close_init(&close, &send, NULL, on_close_cb, NULL), 0);

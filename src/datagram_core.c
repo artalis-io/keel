@@ -105,7 +105,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
         return -1;
     }
     if (kl_dgram_send_init(&core->send, &core->out, a, cfg->completion, cfg->caps,
-                           cfg->submit, cfg->submit_ctx) != 0) {
+                           cfg->send_byte_budget, cfg->submit, cfg->submit_ctx) != 0) {
         kl_dgram_slots_free(&core->out);
         kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);
         return -1;

@@ -44,6 +44,7 @@ typedef struct {
     int          completion;   /* 1 = completion (submit posts; recv arm posts) / 0 = readiness (sync). */
     size_t       send_slots;   /* outbound slot count (count-based backpressure). */
     size_t       send_slot_cap;/* per outbound slot payload capacity. */
+    size_t       send_byte_budget;/* M1: 0 = SLOT policy; >0 = BOTH byte-gate budget (bytes). */
     size_t       recv_cap;     /* inbound slot payload capacity. */
     unsigned     caps;         /* KL_DGRAM_CAP_* for UNSUPPORTED mapping on send. */
 
