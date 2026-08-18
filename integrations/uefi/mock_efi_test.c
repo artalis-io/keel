@@ -32,6 +32,7 @@
 #include <keel/udp.h>                /* KlUdpConfig + KlUdpTransport layout (6.4b) */
 #include <keel/datagram.h>           /* public KlDatagram facade (7B-9 close e2e) */
 #include <keel/datagram_detail.h>    /* opt-in KlDatagram layout (stack-allocate the handle) */
+#include "../../src/datagram_open.h" /* kl_datagram_teardown — synchronous owner-destruction (Option A) */
 #include <keel/allocator.h>          /* KlAllocator (KlDgramLife tests) */
 #include <keel/event_ctx.h>          /* KlEventCtx (end-to-end KlUdp test) */
 #include "../../src/datagram_life.h" /* KlDgramLife create/retain/release/mark_dead (6.4b-3b) */
@@ -640,6 +641,7 @@ static void udp_e2e_on_drain(KlUdp *u, void *ud) { (void)u; (void)ud; g_udp_e2e_
  * by design, so the udp cases run before the pool is stressed. */
 static void fresh_udp(void) {
     kl_uefi_udp_provider_reset();
+    kl_uefi_udp_test_reset_pool();   /* reclaim by-design quarantine leaks so the fixed pool never exhausts */
     kl_uefi_udp_provider_init(&g_bs, (EFI_HANDLE)0x1);
 }
 
@@ -2006,6 +2008,108 @@ static void t_dgram_public_close_quarantine(void) {
     kl_uefi_event_provider_reset();
 }
 
+/* ── Option A synchronous owner-destruction (kl_datagram_teardown) over EFI_UDP4 ───────────────────
+ * The abandon path (docs/datagram_sync_teardown_design.md) reclaims the object SYNCHRONOUSLY without
+ * running the confirmed-detachment terminal: it is SILENT (no on_close, §4a) and frees the object-owned
+ * send storage regardless of an in-flight op (safe: EFI copies the send payload, §1/§2.5.1). The shared
+ * life token (and its rx holder) is reclaimed iff no op is quarantined; an EFI-quarantined recv OR send
+ * intentionally pins it (fail-closed). These mirror the confirmed-close cases above with teardown. */
+
+static void t_dgram_public_abandon_detached(void) {
+    T_CASE("dgram abandon (A): confirmed cancel → synchronous teardown reclaims ALL storage, SILENT");
+    reset_counters(); talloc_reset();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int base = g_talloc.n;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.ctx = &ev; cfg.alloc = &g_ta; cfg.sockets = ev.sockets; cfg.fd = fd;
+    cfg.send_slots = 2; cfg.send_slot_cap = 64; cfg.recv_cap = 64;
+    CHECK(kl_datagram_init(&dg, &cfg) == 0, "kl_datagram_init over EFI_UDP4 (completion)");
+    g_dg_close_fired = 0;
+    kl_datagram_on_close(&dg, dg_pub_on_close, NULL);   /* a callback the abandon must NOT invoke */
+    g_udp_receive_mode = TOK_HANG;
+    CHECK(kl_datagram_recv_start(&dg, dg_pub_on_recv, NULL) == 0, "recv_start posts an empty armed recv");
+    g_cancel_signals = 1;   /* cancel-drain CONFIRMS → clean retirement */
+    CHECK(kl_datagram_teardown(&dg, NULL, NULL) == 0, "synchronous teardown (no pump)");
+    CHECK(g_dg_close_fired == 0, "SILENT: user on_close NOT fired during abandon (§4a)");
+    /* The recv op's STALE_RETIRED terminal is produced by el_drain after backend_close; pump to reap it,
+     * then the (already owner-released) token final-releases → rx holder freed. */
+    for (int i = 0; i < 4; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(g_dg_close_fired == 0, "still SILENT after draining the late terminal");
+    CHECK(g_talloc.n == base, "confirmed retirement → ALL datagram storage reclaimed (no leak)");
+    kl_event_ctx_free(&ev);
+    kl_uefi_event_provider_reset(); talloc_free_all();
+}
+
+static void t_dgram_public_abandon_recv_quarantine(void) {
+    T_CASE("dgram abandon (A): unconfirmed RECV cancel → teardown pins token+rx (fail-closed), SILENT");
+    reset_counters(); talloc_reset();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int base = g_talloc.n;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.ctx = &ev; cfg.alloc = &g_ta; cfg.sockets = ev.sockets; cfg.fd = fd;
+    cfg.send_slots = 2; cfg.send_slot_cap = 64; cfg.recv_cap = 64;
+    CHECK(kl_datagram_init(&dg, &cfg) == 0, "kl_datagram_init over EFI_UDP4 (completion)");
+    g_dg_close_fired = 0;
+    kl_datagram_on_close(&dg, dg_pub_on_close, NULL);
+    g_udp_receive_mode = TOK_HANG;
+    CHECK(kl_datagram_recv_start(&dg, dg_pub_on_recv, NULL) == 0, "recv_start posts an empty armed recv");
+    g_cancel_signals = 0;   /* cancel-drain FAILS → QUARANTINE (recv op retains its life ref) */
+    CHECK(kl_datagram_teardown(&dg, NULL, NULL) == 0, "synchronous teardown");
+    CHECK(g_dg_close_fired == 0, "SILENT: no on_close (§4a)");
+    for (int i = 0; i < 4; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(g_dg_close_fired == 0, "still SILENT");
+    CHECK(g_talloc.n > base, "RECV quarantine → token+rx holder PINNED (fail-closed), send slots freed");
+    kl_event_ctx_free(&ev);
+    talloc_free_all();   /* reclaim the intentionally-pinned life+holder (LSan-clean) */
+    kl_uefi_event_provider_reset();
+}
+
+static void t_dgram_public_abandon_send_quarantine(void) {
+    T_CASE("dgram abandon (A): unconfirmed SEND cancel → teardown pins token+rx (fail-closed), SILENT");
+    reset_counters(); talloc_reset();
+    kl_uefi_event_provider_reset();
+    const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlEventCtx ev;
+    CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
+    ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
+    KlSocketHandle fd = dgl_socket();
+    int base = g_talloc.n;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.ctx = &ev; cfg.alloc = &g_ta; cfg.sockets = ev.sockets; cfg.fd = fd;
+    cfg.send_slots = 2; cfg.send_slot_cap = 64; cfg.recv_cap = 64;
+    CHECK(kl_datagram_init(&dg, &cfg) == 0, "kl_datagram_init over EFI_UDP4 (completion)");
+    g_dg_close_fired = 0;
+    kl_datagram_on_close(&dg, dg_pub_on_close, NULL);
+    g_udp_transmit_mode = TOK_HANG;   /* the Transmit token is ACCEPTED but never self-completes */
+    KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
+    KlDatagramMessage m = { .data = "q", .len = 1, .peer = &dest, .local = NULL, .tos = -1, .flags = 0 };
+    CHECK((int)kl_datagram_send(&dg, &m) == (int)KL_DATAGRAM_ACCEPTED, "send accepted (in-flight, hangs)");
+    g_cancel_signals = 0;   /* the SEND cancel-drain FAILS → SEND op QUARANTINED (retains its life ref) */
+    CHECK(kl_datagram_teardown(&dg, NULL, NULL) == 0, "synchronous teardown with an in-flight, un-cancellable send");
+    CHECK(g_dg_close_fired == 0, "SILENT: no on_close (§4a)");
+    for (int i = 0; i < 4; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(g_dg_close_fired == 0, "still SILENT");
+    /* The object-owned send ring/slots were freed by send_abandon (EFI copied the payload); the shared
+     * token is pinned by the QUARANTINED SEND op, so the rx holder is intentionally retained. */
+    CHECK(g_talloc.n > base, "SEND quarantine → token+rx holder PINNED by the quarantined Tx op (fail-closed)");
+    kl_event_ctx_free(&ev);
+    talloc_free_all();
+    kl_uefi_event_provider_reset();
+}
+
 /* §11.5a: the NO-DISPATCH-HANDLER router site. Drive a QUARANTINE terminal (retain_life=1) whose token
  * has dispatch == NULL straight through kl_comp_run (via kl_event_ctx_run): the router's no-handler
  * FALLBACK must NOT release the borrowed ref (proving completion_core.c honours retain_life, not only
@@ -2333,6 +2437,7 @@ int main(void) {
     t_dgram_cancel_idempotent();      /* 7B-2 cancel_dgram — clean (retires via close+drain) */
     t_dgram_public_close_detached();  /* 7B-9 public KlDatagram — clean (DETACHED, no slot leak) */
     t_dgram_public_abortive_send_detached();  /* 7B-9 abortive close, in-flight send, confirmed → DETACHED */
+    t_dgram_public_abandon_detached();  /* Option A synchronous teardown — clean (all reclaimed, SILENT) */
     t_udp_quarantine_unconfirmed();   /* leaks one udp slot by design — runs last of the udp set */
     t_udp_quarantine_tx();            /* leaks one udp slot by design */
     t_udp_sync_send_quarantine();     /* leaks one udp slot by design */
@@ -2340,6 +2445,8 @@ int main(void) {
     t_dgram_life_quarantine_send();   /* leaks one udp slot + retains a life by design */
     t_dgram_public_close_quarantine();       /* 7B-9 public KlDatagram — QUARANTINED (leaks by design) */
     t_dgram_public_abortive_send_quarantine(); /* 7B-9 abortive close, in-flight send, unconfirmed → QUARANTINED (leaks) */
+    t_dgram_public_abandon_recv_quarantine();  /* Option A teardown — RECV quarantine pins token+rx (leaks by design) */
+    t_dgram_public_abandon_send_quarantine();  /* Option A teardown — SEND quarantine pins token+rx (leaks by design) */
     t_dgram_router_retain_life_no_handler(); /* 7B-9 router no-handler retain_life (leaks by design) */
 
     t_connect_timeout_close();

@@ -77,6 +77,10 @@ int  kl_uefi_udp_provider_init(EFI_BOOT_SERVICES *bs, EFI_HANDLE image);
  * Does NOT close live datagram sockets. Safe on an un-inited provider. */
 void kl_uefi_udp_provider_reset(void);
 
+/* TEST SUPPORT ONLY: reclaim the entire UDP slot pool (incl. quarantined slots the production reset
+ * preserves) so host-mock quarantine tests don't exhaust the small fixed pool. Never used on firmware. */
+void kl_uefi_udp_test_reset_pool(void);
+
 /* The datagram data-plane vtable (KlSocketProvider.dgram). `configure` maps to
  * EFI_UDP4.Configure (unconnected); `send` is the sync source-pin/TOS fallback (independent
  * Tx token under the same quarantine discipline); `recv` is NULL. */

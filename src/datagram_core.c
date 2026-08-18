@@ -47,6 +47,14 @@ static void core_on_close(void *ctx, KlDatagramCloseResult result) {
         kl_dgram_life_mark_dead(life);   /* completions after this see a dead token → dropped */
         kl_dgram_life_release(life);      /* owner ref; runs core_rx_final iff no posted op holds one */
     }
+    if (core->abandoning) {
+        /* Owner-destruction (§4a): SILENT — do NOT invoke user_on_close (it could free the owner). Run
+         * the facade reclaim as the DESTRUCTIVE TAIL: it frees the object-owned machines + this heap
+         * core + the handle + the owner. The hook + its ctx are read as call args (before it runs), and
+         * nothing accesses `core` after this returns. */
+        if (core->abandon_reclaim) core->abandon_reclaim(core->abandon_reclaim_ctx);
+        return;
+    }
     if (core->user_on_close) core->user_on_close(core->user_close_ctx, result);
 }
 
@@ -136,6 +144,42 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     core->user_on_close    = cfg->on_close;
     core->user_close_ctx   = cfg->close_ctx;
     core->inited       = 1;
+    return 0;
+}
+
+void kl_dgram_core_free_object_owned(KlDgramCore *core) {
+    if (!core) return;
+    /* send_abandon skips the inflight_n guard (safe: dead token + §2.5.1 copy-at-submit); close_free
+     * requires CLOSED (the silent abandon set it); slots_free reclaims the whole outbound pool block
+     * (incl. any still-occupied in-flight slot — its payload copy lives in the backend op). None of these
+     * touch the life-owned rx holder or the heap core block. */
+    kl_dgram_close_free(&core->close);
+    kl_dgram_send_abandon(&core->send);
+    kl_dgram_slots_free(&core->out);
+}
+
+int kl_dgram_core_abandon(KlDgramCore *core,
+                          void (*reclaim)(void *), void *reclaim_ctx,
+                          void (*owner)(void *),   void *owner_ctx) {
+    if (!core || !core->inited)
+        return -1;
+    /* Idempotent while ALREADY abandoning (§4b): a second request during the DEFERRED window — reachable
+     * via a nested cancellation callback, not only direct repetition — must be a no-op success that
+     * PRESERVES the first request's reclaim/owner callbacks. Overwriting them here would drop (or NULL
+     * out → leak) the original owner reclaim before the terminal fires. */
+    if (core->abandoning)
+        return 0;
+    /* Arm the silent-abandon terminal, then request it through the close coordinator. The coordinator's
+     * busy handshake decides WHEN it runs: immediately (no active frame) or deferred to the outermost
+     * leave (invoked from within a delivery frame). Either way, core_on_close (abandon branch) does
+     * mark-dead + owner-ref-release, then runs `reclaim` as the destructive tail. mark_dead/release are
+     * NOT done here — they belong in the terminal so they run at the SAME safe point as the free. */
+    core->abandoning          = 1;
+    core->abandon_reclaim      = reclaim;
+    core->abandon_reclaim_ctx  = reclaim_ctx;
+    core->abandon_owner        = owner;
+    core->abandon_owner_ctx    = owner_ctx;
+    kl_dgram_close_abandon(&core->close);   /* silent forced terminal, deferred by the busy handshake */
     return 0;
 }
 

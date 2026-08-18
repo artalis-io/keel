@@ -223,6 +223,16 @@ void kl_uefi_udp_provider_reset(void) {
     u_zero(&g_uctx, sizeof(g_uctx));
 }
 
+/* TEST SUPPORT ONLY: forcibly reclaim the ENTIRE UDP slot pool, INCLUDING quarantined slots — which the
+ * production kl_uefi_udp_provider_reset intentionally PRESERVES (a quarantined slot is leaked to firmware
+ * and must never be reused on real hardware). The host-mock harness calls this between tests so that
+ * accumulated by-design quarantine leaks do not exhaust the small fixed pool (KL_EFI_MAX_UDP). Never
+ * called on real firmware. */
+void kl_uefi_udp_test_reset_pool(void) {
+    for (int i = 0; i < KL_EFI_MAX_UDP; i++)
+        u_zero(&g_udp_conns[i], sizeof(g_udp_conns[i]));
+}
+
 int kl_uefi_udp_provider_live_count(void) {
     int n = 0;
     for (int i = 0; i < KL_EFI_MAX_UDP; i++)

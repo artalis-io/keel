@@ -127,6 +127,15 @@ void kl_dgram_send_discard_queued(KlDgramSend *s);
  * must not be freed under the provider). */
 int  kl_dgram_send_free(KlDgramSend *s);
 
+/* Owner-destruction teardown (docs/datagram_sync_teardown_design.md, Option A): free the FIFO ring +
+ * zero the machine REGARDLESS of inflight_n. Safe ONLY under the abandon preconditions — a dead life
+ * token (no late completion re-enters send_on_complete) AND the frozen §2.5.1 copy-at-submit contract
+ * (no backend references a slot after submit). The borrowed slot pool is freed separately by the caller
+ * (kl_dgram_slots_free), which reclaims any still-occupied in-flight slot; this touches only the ring.
+ * The ordinary kl_dgram_send_free (with its inflight_n guard) is UNCHANGED for the confirmed-detachment
+ * path — abandon is an additional owner-destruction entry, never a substitute. */
+void kl_dgram_send_abandon(KlDgramSend *s);
+
 static inline size_t kl_dgram_send_inflight(const KlDgramSend *s) { return s ? s->inflight_n : 0; }
 static inline size_t kl_dgram_send_queued(const KlDgramSend *s)   { return s ? s->count : 0; }
 static inline int    kl_dgram_send_error(const KlDgramSend *s)    { return s ? s->err : 1; }

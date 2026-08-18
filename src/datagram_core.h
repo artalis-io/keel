@@ -103,6 +103,15 @@ typedef struct KlDgramCore {   /* tagged so <keel/datagram_detail.h> can forward
      * (releasing the rx storage on DETACHED, or leaving it pinned on QUARANTINE) before forwarding. */
     KlDgramCloseFn user_on_close; void *user_close_ctx;
     int            inited;
+    /* Owner-destruction (abandon) reclamation (docs/datagram_sync_teardown_design.md §4a). When
+     * `abandoning`, the coordinator's SILENT terminal (deferred to the outermost busy-frame leave) skips
+     * user_on_close and instead runs `abandon_reclaim` as its destructive tail — the facade frees the
+     * object-owned machines + this heap core + memsets the handle, then invokes `abandon_owner` to free
+     * the embedding owner (e.g. the resolver). All of this runs at the outermost leave, so it is
+     * reentrancy-safe when kl_datagram_teardown is called from within on_recv/on_writable/on_drain. */
+    int            abandoning;
+    void         (*abandon_reclaim)(void *ctx); void *abandon_reclaim_ctx;   /* facade: free core + handle */
+    void         (*abandon_owner)(void *ctx);   void *abandon_owner_ctx;     /* owner: free the container */
 } KlDgramCore;
 
 /* Assemble the core over the prepared transport + neutral adapters. Overflow-/failure-safe: on any
@@ -135,6 +144,23 @@ int  kl_dgram_core_close_cancel(KlDgramCore *core);
 int  kl_dgram_core_close_retry(KlDgramCore *core);
 KlDgramCloseState     kl_dgram_core_close_state(const KlDgramCore *core);
 KlDatagramCloseResult kl_dgram_core_close_result(const KlDgramCore *core);
+
+/* Owner-destruction SILENT teardown (docs/datagram_sync_teardown_design.md, Option A + §4a). Requests a
+ * forced SILENT terminal via the close coordinator's existing busy handshake: mark dead → cancel/close
+ * backend → release owner ref → run `reclaim` (the facade's free-core-and-handle) → `owner` (free the
+ * container). If no busy frame is active it all runs synchronously before returning; if invoked from
+ * within a send/recv delivery frame (on_recv/on_writable/on_drain) the terminal + reclamation are
+ * DEFERRED to the outermost leave — still within the same top-level dispatch, so no caller pump is
+ * needed and no machine state is freed under an active frame. The rx holder + any in-flight/EFI-
+ * quarantined op's ref outlive, reclaimed at the token's final release. The ordinary confirmed-detachment
+ * close (begin/cancel + free) is UNCHANGED. `reclaim`/`owner` may be NULL. 0 / -1. */
+int  kl_dgram_core_abandon(KlDgramCore *core,
+                           void (*reclaim)(void *), void *reclaim_ctx,
+                           void (*owner)(void *),   void *owner_ctx);
+
+/* Free the OBJECT-owned machines (close + send-via-abandon + slots). Used by the abandon reclaim as its
+ * destructive tail; does NOT touch the life-owned rx holder or the heap core block. */
+void kl_dgram_core_free_object_owned(KlDgramCore *core);
 
 /* Registered send edges (optional). */
 void kl_dgram_core_on_writable(KlDgramCore *core, KlDgramWritableFn cb, void *ctx);

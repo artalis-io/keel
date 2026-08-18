@@ -20,6 +20,7 @@
 #include "../src/completion.h"      /* KlCompletionEvent + KL_COMP_DGRAM_* */
 #include "../src/datagram_life.h"   /* kl_dgram_life_dispatch/_target — drive completions like the driver */
 #include "../src/socket.h"          /* KlSocketProvider / KlSocketOps — the close-ordering mock provider */
+#include "../src/datagram_open.h"   /* kl_datagram_teardown — synchronous owner-destruction (Option A) */
 #include <unistd.h>                 /* close() */
 
 #include <string.h>
@@ -363,5 +364,213 @@ UTEST(datagram_public, alloc_failure_during_prep_leaves_fd_unregistered) {
  * at the core/backend layer where the arena teardown keeps it LSan-clean — test_dgram_core (7A-3) and
  * the EFI host-mock (7B-2c retire_dgram override). The public test stays on the clean DETACHED paths so
  * it is leak-free under container ASan/UBSan/LSan. */
+
+/* ── Option A: synchronous owner-destruction teardown (kl_datagram_teardown) ──────────────────────
+ *
+ * kl_datagram_teardown abandons any in-flight op and reclaims the object IMMEDIATELY (no loop pump),
+ * for a consumer bound to a synchronous free contract (the DNS resolver). These drive the scripted
+ * completion mock exactly like the real driver: the op's late terminal completion is delivered AFTER the
+ * teardown; it must dispatch against the now-dead token (NULL owner), drop, and release the op's ref so
+ * the life-owned rx storage is reclaimed — all UAF/leak-clean (ASan/UBSan; LSan on Linux). Silent: no
+ * on_close callback fires and no public terminal is reported (§4a). See
+ * docs/datagram_sync_teardown_design.md. */
+
+UTEST(datagram_public, teardown_recv_only_then_late_terminal) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    kl_datagram_on_close(&dg, on_close, NULL); g_close_calls = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));   /* posts a recv (holds a token ref) */
+
+    ASSERT_EQ(0, kl_datagram_teardown(&dg, NULL, NULL));                    /* synchronous abandon + free */
+    ASSERT_EQ(0, g_close_calls);                               /* SILENT — no on_close fired (§4a) */
+    ASSERT_EQ((int)KL_DGRAM_CLOSE_CLOSED, (int)kl_datagram_close_state(&dg));  /* handle memset → CLOSED */
+
+    /* the posted recv's cancel terminal drains LATER → dead token → drop + release ref → rx freed */
+    drive_recv_cancelled();
+}
+
+UTEST(datagram_public, teardown_send_inflight_then_late_terminal) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    KlSockAddr peer = addr4(10, 0, 0, 1, 53);
+    KlDatagramMessage m = { .data = "query", .len = 5, .peer = &peer, .local = NULL, .tos = -1, .flags = 0 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));   /* send in-flight (holds a ref) */
+    ASSERT_EQ(1, g_mc.send_posted);
+
+    ASSERT_EQ(0, kl_datagram_teardown(&dg, NULL, NULL));   /* abandons the in-flight send + frees the ring (the 64B case) */
+
+    drive_send(1);   /* the send's late completion → dead token → drop (no send_on_complete) + release ref */
+}
+
+UTEST(datagram_public, teardown_recv_and_send_simultaneous) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));
+    KlSockAddr peer = addr4(10, 0, 0, 1, 53);
+    KlDatagramMessage m = { .data = "q", .len = 1, .peer = &peer, .local = NULL, .tos = -1, .flags = 0 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));
+
+    ASSERT_EQ(0, kl_datagram_teardown(&dg, NULL, NULL));   /* both a recv AND a send in-flight at destroy */
+
+    drive_send(1);            /* late send terminal drops */
+    drive_recv_cancelled();   /* late recv terminal drops → last ref → rx storage reclaimed */
+}
+
+UTEST(datagram_public, teardown_is_silent_no_callback) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    kl_datagram_on_close(&dg, on_close, NULL); g_close_calls = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));
+
+    ASSERT_EQ(0, kl_datagram_teardown(&dg, NULL, NULL));
+    ASSERT_EQ(0, g_close_calls);   /* the user close callback must NEVER fire during owner-destruction */
+    drive_recv_cancelled();
+    ASSERT_EQ(0, g_close_calls);   /* nor when the late terminal drains */
+}
+
+UTEST(datagram_public, teardown_then_reuse_late_terminal_drops) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));
+    struct KlDgramLife *old_recv_life = g_mc.recv_life;   /* the FIRST datagram's recv op */
+
+    ASSERT_EQ(0, kl_datagram_teardown(&dg, NULL, NULL));
+
+    /* Re-init a NEW datagram on the same ctx (the handle was memset → reusable). */
+    KlDatagramConfig c2 = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c2));
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));
+
+    /* The OLD op's late terminal drains now — it must drop against its own dead token and NOT touch the
+     * new object. Drive it explicitly by the OLD life (not g_mc.recv_life, which is now the new op's). */
+    {
+        KlCompletionEvent ev; memset(&ev, 0, sizeof(ev));
+        ev.kind = KL_COMP_DGRAM_RECV; ev.ok = 0; ev.life = old_recv_life;
+        kl_dgram_life_dispatch(old_recv_life)(kl_dgram_life_target(old_recv_life), &ev);
+    }
+
+    /* Tear the new one down cleanly too. */
+    ASSERT_EQ(0, kl_datagram_teardown(&dg, NULL, NULL));
+    drive_recv_cancelled();   /* the new op's late terminal (g_mc.recv_life is the new one) */
+}
+
+/* ── Option A §4a: reentrancy (teardown from within a delivery frame) + idempotence ───────────────
+ *
+ * When kl_datagram_teardown is invoked from on_recv / on_writable / on_drain, the datagram's own machine
+ * frame is still unwinding (close.busy > 0). The teardown must DEFER the silent terminal + reclamation to
+ * the outermost frame leave (still within the same top-level dispatch) so recv_leave/send_leave never run
+ * against freed state, the owner reclaim fires exactly once, and there is no UAF (ASan/UBSan; LSan). */
+static int g_owner_reclaimed;
+static int g_reclaimed_in_frame;   /* snapshot of g_owner_reclaimed taken just after the in-frame teardown */
+static void owner_reclaim_cb(void *ctx) { (void)ctx; g_owner_reclaimed++; }
+
+static void on_recv_teardown(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                             const KlSockAddr *local, unsigned flags) {
+    (void)data; (void)len; (void)peer; (void)local; (void)flags;
+    g_recv_calls++;
+    /* Tear down from WITHIN delivery (busy > 0). Must defer — the reclaim runs at the outermost leave. */
+    kl_datagram_teardown((KlDatagram *)ud, owner_reclaim_cb, NULL);
+    g_reclaimed_in_frame = g_owner_reclaimed;   /* must still be 0 here (deferred), asserted in the body */
+}
+
+UTEST(datagram_public, teardown_from_within_on_recv_defers) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    g_recv_calls = 0; g_owner_reclaimed = 0; g_reclaimed_in_frame = -1;
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv_teardown, &dg));
+    KlSockAddr peer = addr4(1, 2, 3, 4, 53);
+    drive_recv("x", 1, &peer, 0);   /* deliver → on_recv → teardown (deferred to recv_leave) */
+    ASSERT_EQ(1, g_recv_calls);
+    ASSERT_EQ(0, g_reclaimed_in_frame);   /* deferred: NOT reclaimed while the delivery frame was active */
+    ASSERT_EQ(1, g_owner_reclaimed);      /* reclaim ran exactly once, at the outermost leave */
+}
+
+/* Same, from the SEND side: teardown from within on_drain (fired on the non-empty→empty edge, inside the
+ * send op's busy frame). The reclaim — which frees the SEND machine — must defer to send_leave. */
+static void on_drain_teardown(void *ud) {
+    kl_datagram_teardown((KlDatagram *)ud, owner_reclaim_cb, NULL);
+    g_reclaimed_in_frame = g_owner_reclaimed;   /* deferred → still 0 here */
+}
+UTEST(datagram_public, teardown_from_within_on_drain_defers) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    g_owner_reclaimed = 0; g_reclaimed_in_frame = -1;
+    kl_datagram_on_drain(&dg, on_drain_teardown, &dg);
+    KlSockAddr peer = addr4(1, 2, 3, 4, 53);
+    KlDatagramMessage m = { .data = "q", .len = 1, .peer = &peer, .local = NULL, .tos = -1, .flags = 0 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m));
+    drive_send(1);   /* retire the send → queue non-empty→empty → on_drain → teardown (deferred) */
+    ASSERT_EQ(0, g_reclaimed_in_frame);   /* deferred while the send frame was active */
+    ASSERT_EQ(1, g_owner_reclaimed);      /* reclaim ran once, at send_leave */
+}
+
+/* §4b deferred-window idempotence: a SECOND teardown while the first is still deferred (inside the same
+ * active frame) — the shape a nested cancellation callback would take — must NOT replace the first
+ * request's owner reclaim (nor NULL it out and leak the owner). The ORIGINAL owner runs exactly once. */
+static int g_owner_a, g_owner_b;
+static void owner_a(void *c) { (void)c; g_owner_a++; }
+static void owner_b(void *c) { (void)c; g_owner_b++; }
+static void on_recv_teardown_twice(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                                   const KlSockAddr *local, unsigned flags) {
+    (void)data; (void)len; (void)peer; (void)local; (void)flags;
+    KlDatagram *dg = ud;
+    kl_datagram_teardown(dg, owner_a, NULL);   /* first request → owner_a (deferred) */
+    kl_datagram_teardown(dg, owner_b, NULL);   /* second, deferred window: must be a no-op, keep owner_a */
+    kl_datagram_teardown(dg, NULL, NULL);      /* third with NULL owner: must NOT null the armed reclaim */
+    g_reclaimed_in_frame = g_owner_a + g_owner_b;   /* both still 0 — deferred */
+}
+UTEST(datagram_public, teardown_twice_in_frame_keeps_first_owner) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    g_owner_a = 0; g_owner_b = 0; g_reclaimed_in_frame = -1;
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv_teardown_twice, &dg));
+    KlSockAddr peer = addr4(1, 2, 3, 4, 53);
+    drive_recv("x", 1, &peer, 0);
+    ASSERT_EQ(0, g_reclaimed_in_frame);   /* deferred: nothing ran while the frame was active */
+    ASSERT_EQ(1, g_owner_a);              /* the ORIGINAL owner ran exactly once */
+    ASSERT_EQ(0, g_owner_b);              /* the deferred-window replacement was ignored (no owner leak) */
+}
+
+UTEST(datagram_public, teardown_idempotent_twice) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));
+    g_owner_reclaimed = 0;
+    ASSERT_EQ(0, kl_datagram_teardown(&dg, owner_reclaim_cb, NULL));   /* synchronous (not in a frame) */
+    ASSERT_EQ(1, g_owner_reclaimed);
+    /* Second teardown on the now-cleared handle → no-op success, reclaim NOT re-invoked. */
+    ASSERT_EQ(0, kl_datagram_teardown(&dg, owner_reclaim_cb, NULL));
+    ASSERT_EQ(1, g_owner_reclaimed);
+    drive_recv_cancelled();   /* the posted recv's late terminal drops → rx storage reclaimed */
+}
+
+UTEST(datagram_public, teardown_then_free_idempotent) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));
+    ASSERT_EQ(0, kl_datagram_teardown(&dg, NULL, NULL));
+    ASSERT_EQ(0, kl_datagram_free(&dg));   /* free after teardown → no-op success (was -1) */
+    drive_recv_cancelled();
+}
 
 UTEST_MAIN();

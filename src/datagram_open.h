@@ -59,4 +59,37 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
                      const struct KlUdpConfig *cfg,
                      KlDatagramPrep *out);
 
+struct KlDatagram;   /* keel/datagram.h (opaque layout in keel/datagram_detail.h) */
+
+/* Reclaim callback: frees the object that EMBEDS the KlDatagram (e.g. the resolver). Invoked exactly
+ * once by kl_datagram_teardown when the datagram has been reclaimed — synchronously if no busy frame is
+ * active, or at the outermost busy-frame leave otherwise. NULL if the handle is caller-managed (e.g.
+ * stack-allocated), in which case only the datagram's own heap state is reclaimed. */
+typedef void (*KlDatagramReclaimFn)(void *ctx);
+
+/*
+ * SYNCHRONOUS owner-destruction teardown of a KlDatagram (internal) — for a consumer bound to a
+ * synchronous free contract, i.e. that must fully reclaim the handle before returning (the DNS resolver;
+ * symmetric with kl_udp_free). See docs/datagram_sync_teardown_design.md (Option A + §4a).
+ *
+ * The public lifecycle (kl_datagram_close_begin/cancel then kl_datagram_free) is confirmed-detachment: on
+ * a completion backend the recv op's cancel terminal drains on a LATER loop tick, so `free` is refused
+ * until then — the object cannot be reclaimed synchronously. kl_datagram_teardown instead ABANDONS any
+ * in-flight op and reclaims immediately. It is safe because: a recv op's inbound buffer is
+ * life-token-owned (freed on the token's final release when the op is finally reaped — or intentionally
+ * pinned by an EFI-quarantined recv OR send); a send op's payload is a backend-owned copy (§2.5.1), so
+ * the send slots free safely; the token is marked dead so late completions drop; NO user close callback
+ * is invoked and NO public terminal is reported (§4a).
+ *
+ * REENTRANCY (§4a P1): if called from within a send/recv delivery frame (on_recv / on_writable /
+ * on_drain), the reclamation is DEFERRED to the outermost frame leave — still within the same top-level
+ * dispatch, so no machine state is freed under an active frame and no caller pump is needed. `reclaim`
+ * (if non-NULL) frees the embedding owner as the destructive tail of that reclamation, whether it runs
+ * synchronously or deferred — so the caller MUST NOT free the owner itself.
+ *
+ * IDEMPOTENT: a NULL/already-reclaimed handle is a no-op success (returns 0, `reclaim` NOT invoked).
+ * Returns 0, or -1 only for a NULL `dg`. The ordinary confirmed-detachment path is unchanged.
+ */
+int kl_datagram_teardown(struct KlDatagram *dg, KlDatagramReclaimFn reclaim, void *reclaim_ctx);
+
 #endif /* KEEL_SRC_DATAGRAM_OPEN_H */

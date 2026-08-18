@@ -278,3 +278,16 @@ int kl_dgram_send_free(KlDgramSend *s) {
     memset(s, 0, sizeof(*s));   /* reusable (the borrowed slots are the caller's to free) */
     return 0;
 }
+
+void kl_dgram_send_abandon(KlDgramSend *s) {
+    if (!s)
+        return;
+    /* Free ONLY the FIFO ring (the object-owned storage that leaks otherwise), regardless of inflight_n.
+     * No inflight_n guard: the caller has marked the life token dead (no late send completion re-enters
+     * this machine) and, per §2.5.1, the backend copied every submitted payload (no slot is referenced).
+     * Do NOT release slots back to the pool — the caller frees the whole pool (kl_dgram_slots_free) next,
+     * which reclaims any still-occupied slot; touching per-slot free-lists here would be wasted work. */
+    if (s->ring && s->alloc)
+        kl_free(s->alloc, s->ring, s->ring_cap * sizeof(KlDgramSlot *));
+    memset(s, 0, sizeof(*s));   /* reusable */
+}

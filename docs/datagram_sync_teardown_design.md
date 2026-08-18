@@ -199,6 +199,43 @@ The **ordinary confirmed-detachment path is UNCHANGED**: `close_begin`/`close_ca
 QUARANTINED/CLOSE_ERROR classification, on the loop tick when the ops actually retire. Abandon is a
 separate, additional, silent owner-destruction entry, never a substitute.
 
+## 4b. Reentrancy — defer via the busy handshake, do not free under an active frame (FROZEN)
+
+`kl_datagram_teardown` can be reached from within a datagram callback (`on_recv` / `on_writable` /
+`on_drain`) — e.g. resolver completion in `on_recv` leads the consumer to destroy the owner. At that
+point the datagram's own machine frame is still unwinding: the delivering `recv_leave`/`send_leave`
+(which run `close_activity(-1)` as their LAST action) have not yet returned, and `close.busy > 0`. If the
+abandon freed the close/send/slot state immediately, that pending `_leave` would touch freed memory.
+
+**The abandon therefore does NOT free anything eagerly. It reuses the close coordinator's existing busy
+handshake:** `kl_dgram_close_abandon` only ARMS an `abandon` flag and requests the terminal through
+`close_common`; the terminal (`close_run_terminal`) runs **only when `busy` returns to 0** — the
+outermost frame leave — exactly like the confirmed-detachment terminal. So:
+
+- **No active frame** (teardown called from ordinary code): the terminal runs immediately, all of §4a
+  happens synchronously before `kl_datagram_teardown` returns.
+- **Inside a delivery frame** (`on_recv`/`on_writable`/`on_drain`): the terminal + reclamation are
+  DEFERRED to the outermost `recv_leave`/`send_leave`. This is the machine's designed destructive-tail
+  point (each `_leave` is documented as "the LAST action of a public op — it may detach + free the object
+  via the coordinator"), so freeing there is safe by construction. It is still within the SAME top-level
+  dispatch — the reclaim (and the owner-reclaim callback) runs before control returns to the loop, so no
+  caller pump is needed and the free contract is still effectively synchronous.
+
+The silent terminal's destructive tail is the facade's `reclaim` (free object-owned machines + heap core
++ handle) followed by the caller's `owner` reclaim (free the embedding container) — the SAME
+destructive-tail discipline as `on_close` (no core/machine access after it returns). Because the owner is
+freed by this deferred callback, the CALLER must pass an owner-reclaim callback and MUST NOT free the
+owner itself.
+
+**Idempotence across the whole window (FROZEN).** `kl_datagram_teardown` is a no-op success in BOTH
+already-terminal states: (a) after reclamation (`dg->core == NULL`), and (b) DURING the deferred window
+(`core->abandoning` already set but the terminal not yet fired). Case (b) matters because a repeat
+request is reachable via a NESTED cancellation callback, not only direct repetition: a second
+`kl_dgram_core_abandon` while abandoning must PRESERVE the first request's `reclaim`/`owner` callbacks —
+overwriting them (or NULLing the owner) would drop/leak the original owner before the terminal runs. The
+owner reclaim therefore fires exactly once, with the FIRST request's callback, regardless of how many
+teardown requests arrive before the outermost leave.
+
 ## 5. Per-backend behavior
 
 - **readiness (epoll / kqueue / poll / WSAPoll / pollcomp-as-readiness):** send is synchronous →
@@ -251,8 +288,12 @@ pollcomp, io_uring; IOCP + lwIP-raw + EFI via their existing gates/host-mocks.
 - **allocation failure** — `kl_datagram_init` alloc-failure unwind (pool/ring/rx holder) leaves the fd
   unadopted and leaks nothing (extend the existing `alloc_failure_during_prep` coverage to the send
   storage).
-- **repeated teardown / idempotence** — `kl_datagram_teardown` twice; abandon then `free`; assert no
-  double-free.
+- **reentrancy (§4b)** — `kl_datagram_teardown` invoked from within `on_recv`, `on_writable`, and
+  `on_drain`: assert the reclamation (and owner-reclaim callback) is DEFERRED to the outermost frame
+  leave (not run mid-frame) and runs exactly once, with no use-after-free in the unwinding
+  `recv_leave`/`send_leave`.
+- **repeated teardown / idempotence** — `kl_datagram_teardown` twice (second is a no-op success, owner
+  reclaim NOT re-invoked); `teardown` then `kl_datagram_free` (a no-op success); assert no double-free.
 - **zero leaks** across all of the above under LSan; **no new hot-path allocation** (abandon touches
   only teardown); **overflow-safe** sizing unchanged (the ring `cap * sizeof(KlDgramSlot*)` guard and
   the pool block arithmetic are untouched).

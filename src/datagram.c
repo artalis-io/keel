@@ -36,6 +36,7 @@
 #include "socket.h"             /* KlSocketProvider, kl_sock_close, kl_sockdef_dgram, kl_sock_io_status */
 #include "event_caps.h"         /* kl_event_caps */
 #include "datagram_life.h"      /* kl_dgram_life_retain/_release */
+#include "datagram_open.h"      /* KlDatagramReclaimFn + kl_datagram_teardown */
 
 #include <string.h>
 
@@ -327,13 +328,43 @@ int kl_datagram_close_begin(KlDatagram *dg)  { return (dg && dg->core) ? kl_dgra
 int kl_datagram_close_cancel(KlDatagram *dg) { return (dg && dg->core) ? kl_dgram_core_close_cancel(dg->core) : -1; }
 
 int kl_datagram_free(KlDatagram *dg) {
-    if (!dg || !dg->core) return -1;
+    if (!dg) return -1;
+    if (!dg->core) return 0;   /* already reclaimed (e.g. after teardown) → idempotent no-op success */
     if (kl_dgram_core_close_state(dg->core) != KL_DGRAM_CLOSE_CLOSED) { dg->last_error = KL_ERR_INVALID_ARG; return -1; }
     KlAllocator *a = dg->alloc; KlDgramCore *core = dg->core;
     if (kl_dgram_core_free(core) != 0) return -1;
     kl_free(a, core, sizeof(*core));
     memset(dg, 0, sizeof(*dg));   /* fully-detached — reusable (invariant 8) */
     return 0;
+}
+
+/* The abandon reclaim (DESTRUCTIVE TAIL of the silent terminal, §4a) — frees the object-owned machines +
+ * this heap core + memsets the handle, then invokes the owner reclaim to free the embedding container.
+ * Runs synchronously (no busy frame) or at the outermost leave (deferred); nothing accesses the core or
+ * the machines after this returns. */
+static void dg_abandon_reclaim(void *ctx) {
+    KlDatagram *dg = ctx;
+    KlAllocator *a = dg->alloc;
+    KlDgramCore *core = dg->core;
+    /* Capture the owner reclaim BEFORE freeing the core (its source). Scope cannot be narrowed — it spans
+     * the free below. cppcheck-suppress variableScope */
+    KlDatagramReclaimFn owner = (KlDatagramReclaimFn)core->abandon_owner;
+    /* cppcheck-suppress variableScope */
+    void               *owner_ctx = core->abandon_owner_ctx;
+    kl_dgram_core_free_object_owned(core);   /* close + send(abandon) + slots — NOT the rx holder */
+    kl_free(a, core, sizeof(*core));         /* free the heap core block */
+    memset(dg, 0, sizeof(*dg));              /* fully-detached — reusable */
+    if (owner) owner(owner_ctx);             /* free the embedding owner (e.g. the resolver) — last */
+}
+
+/* Internal (src/datagram_open.h): SYNCHRONOUS owner-destruction teardown (Option A + §4a). Arms the
+ * silent-abandon terminal on the core; the close coordinator's busy handshake runs it immediately (no
+ * active frame) or DEFERS it to the outermost leave (invoked from within a delivery frame) — so it is
+ * reentrancy-safe. Idempotent. See datagram_open.h for the full contract. */
+int kl_datagram_teardown(KlDatagram *dg, KlDatagramReclaimFn reclaim, void *reclaim_ctx) {
+    if (!dg) return -1;
+    if (!dg->core) return 0;   /* already reclaimed → idempotent no-op; reclaim NOT invoked */
+    return kl_dgram_core_abandon(dg->core, dg_abandon_reclaim, dg, (void (*)(void *))reclaim, reclaim_ctx);
 }
 
 void kl_datagram_on_writable(KlDatagram *dg, KlDatagramWritableFn cb, void *ud) {
