@@ -688,8 +688,11 @@ static int g_settos_calls, g_settos_family, g_settos_val, g_settos_ret;
 static int mock_dg_set_tos(void *ctx, KlSocketHandle fd, int family, int tos) {
     (void)ctx; (void)fd; g_settos_calls++; g_settos_family = family; g_settos_val = tos; return g_settos_ret;
 }
+static int g_local_unspec;   /* 1 → get_local_addr yields an UNSPECIFIED-family addr (unknown-family test) */
 static int mc_sock_local_addr(void *pctx, KlSocketHandle fd, KlSockAddr *out) {
-    (void)pctx; (void)fd; *out = addr4(127,0,0,1, 0); return 0;   /* AF_INET → set_tos derives IPv4 */
+    (void)pctx; (void)fd;
+    if (g_local_unspec) { memset(out, 0, sizeof(*out)); return 0; }   /* KL_AF_UNSPEC → set_tos must refuse */
+    *out = addr4(127,0,0,1, 0); return 0;                             /* AF_INET → set_tos derives IPv4 */
 }
 static const KlDatagramOps MOCK_DG_WITH_CAPS = { .caps = mock_dg_caps, .mcast_membership = mock_dg_mcast,
                                                  .set_tos = mock_dg_set_tos };
@@ -1016,6 +1019,37 @@ UTEST(datagram_public, m6a_set_tos_routes_to_provider) {
     g_settos_ret = -1;
     ASSERT_EQ(-1, kl_datagram_set_tos(&dg, 0x10));
     ASSERT_EQ((int)KL_ERR_SOCKET, (int)kl_datagram_last_error(&dg));
+    m2_close(&dg);
+}
+
+/* P1 (capability truthfulness): a provider that EXPOSES set_tos but does NOT advertise KL_DGRAM_CAP_TOS
+ * for this fd must fail KL_ERR_UNSUPPORTED WITHOUT invoking the provider (M2 exact-fd contract). */
+UTEST(datagram_public, m6a_set_tos_cap_absent_not_invoked) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_SOURCE_PIN;   /* NO TOS cap, though MOCK_SP_CAPS has a set_tos op */
+    g_settos_calls = 0;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), 0);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(-1, kl_datagram_set_tos(&dg, 0x28));
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(0, g_settos_calls);            /* provider NOT called — cap absent */
+    m2_close(&dg);
+}
+
+/* P1 (never guess a family): an unspecified/non-IP local address must fail KL_ERR_INVALID_ARG WITHOUT
+ * calling set_tos (else the wrong socket-option level could be applied). */
+UTEST(datagram_public, m6a_set_tos_unknown_family_refused) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_TOS;          /* cap present, so we reach the family switch */
+    g_settos_calls = 0; g_local_unspec = 1;  /* get_local_addr yields KL_AF_UNSPEC */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), 0);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(-1, kl_datagram_set_tos(&dg, 0x28));
+    ASSERT_EQ((int)KL_ERR_INVALID_ARG, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(0, g_settos_calls);            /* provider NOT called — family undeterminable */
+    g_local_unspec = 0;
     m2_close(&dg);
 }
 

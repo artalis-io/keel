@@ -206,7 +206,10 @@ static int dg_rdy_pull(void *ctx, size_t *out_len) {
     in->flags = 0;
     if (meta.has_local) { in->local = meta.local; in->flags |= KL_DGRAM_HAS_LOCAL; }
     if (meta.truncated) in->flags |= KL_DGRAM_TRUNCATED;
-    in->tos = meta.tos;   /* M6.0a: received TOS (-1 = none) — read by kl_datagram_recv_tos in on_recv */
+    /* M6.0a: received TOS (read by kl_datagram_recv_tos in on_recv). GATE on the socket's accepted RX_TOS
+     * mask (as the completion dispatch does) so behavior is backend-INDEPENDENT — a provider that surfaces
+     * meta.tos on a socket that never enabled TOS capture must NOT leak it. */
+    in->tos = (kl_dgram_core_accepted_rx_caps(dg->core) & KL_DGRAM_RX_TOS) ? meta.tos : -1;
     *out_len = (size_t)n;
     return 1;
 }
@@ -269,8 +272,10 @@ static int dg_rdy_pull_batch(void *ctx, KlDgramRxView *v, int allow_refill) {
     if (slot->meta.has_local) { v->local = slot->meta.local; v->flags |= KL_DGRAM_HAS_LOCAL; }
     if (trunc)                  v->flags |= KL_DGRAM_TRUNCATED;
     /* M6.0a: keep kl_datagram_recv_tos correct in batch mode too — the accessor reads the inbound slot,
-     * which the batch path does not otherwise fill, so mirror this datagram's TOS onto it. */
-    { KlDgramSlot *in = kl_dgram_core_inbound_slot(dg->core); if (in) in->tos = slot->meta.tos; }
+     * which the batch path does not otherwise fill, so mirror this datagram's TOS onto it. GATE on the
+     * accepted RX_TOS mask (same as the single-recv + completion paths) so it is backend-independent. */
+    { KlDgramSlot *in = kl_dgram_core_inbound_slot(dg->core);
+      if (in) in->tos = (kl_dgram_core_accepted_rx_caps(dg->core) & KL_DGRAM_RX_TOS) ? slot->meta.tos : -1; }
 
     if (b->slot_split && avail > (size_t)b->slot_gro) {   /* split: yield one segment, stay on this slot */
         v->len = (size_t)b->slot_gro;
@@ -737,18 +742,31 @@ static int dg_multicast(KlDatagram *dg, const char *group, unsigned iface_index,
 /* M6.0a: socket-default outgoing TOS/Traffic-Class (IP_TOS / IPV6_TCLASS), the socket-wide default
  * applied to every send that carries no per-message tos — distinct from the per-message KlDatagramMessage.
  * tos. Routed to the provider's set_tos op; the family is derived from the adopted fd (getsockname), so
- * KlDatagram need not store it. Error precedence: bad handle/arg → KL_ERR_INVALID_ARG; no provider op →
- * KL_ERR_UNSUPPORTED; provider/syscall failure → KL_ERR_SOCKET. */
+ * KlDatagram need not store it. Error precedence: bad handle/arg → KL_ERR_INVALID_ARG; TOS capability
+ * absent OR no provider op → KL_ERR_UNSUPPORTED (no provider call); undeterminable/non-IP family →
+ * KL_ERR_INVALID_ARG (no provider call); provider/syscall failure → KL_ERR_SOCKET. */
 int kl_datagram_set_tos(KlDatagram *dg, int tos) {
     if (!dg || !dg->core || !kl_handle_valid(dg->fd) || tos < 0 || tos > 255) {
         if (dg) dg->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     const KlDatagramOps *ops = dg_ops(dg);
-    if (!ops || !ops->set_tos) { dg->last_error = KL_ERR_UNSUPPORTED; return -1; }
+    /* Capability truthfulness (M2 exact-fd contract): require BOTH the op AND the per-fd/family TOS
+     * capability. A reduced provider may expose set_tos while correctly omitting KL_DGRAM_CAP_TOS for
+     * this fd — fail UNSUPPORTED without invoking the provider. */
+    if (!ops || !ops->set_tos || !(dg->provider_caps & KL_DGRAM_CAP_TOS)) {
+        dg->last_error = KL_ERR_UNSUPPORTED; return -1;
+    }
     KlSockAddr la;
     if (kl_sock_get_local_addr(dg->sockets, dg->fd, &la) != 0) { dg->last_error = KL_ERR_SOCKET; return -1; }
-    int family = (kl_sockaddr_family(&la) == KL_AF_INET6) ? AF_INET6 : AF_INET;
+    /* Switch explicitly — NEVER guess a family. An unspecified/non-IP/malformed local address must fail
+     * without calling set_tos (else the wrong socket option level could be applied). */
+    int family;
+    switch (kl_sockaddr_family(&la)) {
+        case KL_AF_INET:  family = AF_INET;  break;
+        case KL_AF_INET6: family = AF_INET6; break;
+        default: dg->last_error = KL_ERR_INVALID_ARG; return -1;
+    }
     if (ops->set_tos(dg_sp_ctx(dg), dg->fd, family, tos) != 0) { dg->last_error = KL_ERR_SOCKET; return -1; }
     return 0;
 }

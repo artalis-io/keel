@@ -129,6 +129,34 @@ static const KlSocketProvider *mock_recv_provider(int (*rb)(void *, KlSocketHand
     return p;
 }
 
+/* M6.0a P1: a mock that FABRICATES a received TOS (a "custom provider that surfaces TOS") so the facade's
+ * accepted_rx_caps GATE can be tested on the readiness single-recv AND batch paths deterministically. */
+static int g_mock_tos = -1;
+/* single-recv: real recv (honest readability), then stamp the fabricated TOS onto meta. */
+static kl_ssize_t mock_tos_recv(void *ctx, KlSocketHandle fd, void *buf, size_t cap,
+                                KlSockAddr *src, KlDgramRxMeta *meta) {
+    kl_ssize_t r = g_real_recv(ctx, fd, buf, cap, src, meta);
+    if (r >= 0) meta->tos = g_mock_tos;
+    return r;
+}
+/* batch: real recv into slot 0, then stamp the fabricated TOS onto slot 0's meta. */
+static int mock_tos_recv_batch(void *ctx, KlSocketHandle fd, void *rxb, KlDgramRxSlot *slots, int max) {
+    (void)rxb; (void)max;
+    KlSockAddr src; KlDgramRxMeta meta; memset(&meta, 0, sizeof(meta)); meta.tos = -1;
+    kl_ssize_t r = g_real_recv(ctx, fd, g_mock_rxbuf[0], sizeof(g_mock_rxbuf[0]), &src, &meta);
+    if (r < 0) { errno = EAGAIN; return -1; }
+    slots[0].data = g_mock_rxbuf[0]; slots[0].len = (size_t)r; slots[0].src = src;
+    slots[0].meta = meta; slots[0].meta.tos = g_mock_tos;   /* fabricate the received TOS */
+    return 1;
+}
+/* Provider whose SINGLE recv fabricates TOS (no batch → forces the dg_rdy_pull path). */
+static const KlSocketProvider *mock_tos_single_provider(void) {
+    const KlSocketProvider *p = mock_gro_provider();   /* sets g_real_recv */
+    g_mrx_dg.recv = mock_tos_recv;
+    g_mrx_dg.recv_batch = NULL; g_mrx_dg.rx_batch_new = NULL; g_mrx_dg.rx_batch_free = NULL;
+    return p;
+}
+
 /* ── mock provider datagram vtables: a COMPLETE batch set + PARTIAL (leak-prone) variants ──────── */
 static void *mock_rx_new(KlAllocator *a, int n, size_t bufsz) { (void)n; (void)bufsz; return kl_malloc(a, sizeof(int)); }
 static void  mock_rx_free(KlAllocator *a, void *b) { kl_free(a, b, sizeof(int)); }
@@ -1014,7 +1042,14 @@ static void rx_on_segments(void *ud, const void *data, size_t len, size_t seg,
     (void)ud; (void)data; (void)peer; (void)local; (void)flags;
     g_seg_calls++; g_seg_size = seg; g_seg_len = len;
 }
-static void rx_reset(void) { g_rx_calls = 0; g_rx_stop_at = -1; g_seg_calls = 0; g_seg_size = 0; g_seg_len = 0; }
+/* M6.0a P1: reads kl_datagram_recv_tos DURING on_recv (its only valid window). */
+static int g_rx_tos;
+static void rx_on_recv_tos(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                           const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)data; (void)len; (void)peer; (void)local; (void)flags;
+    g_rx_calls++; g_rx_tos = kl_datagram_recv_tos(g_rx_dg);
+}
+static void rx_reset(void) { g_rx_calls = 0; g_rx_stop_at = -1; g_seg_calls = 0; g_seg_size = 0; g_seg_len = 0; g_rx_tos = -2; }
 
 /* send `n` datagrams from a throwaway socket to `port` */
 static void blast(int n, uint16_t port, const char *const *msgs) {
@@ -1480,6 +1515,74 @@ UTEST(dgram_batch, recv_gro_mode_latched_per_slot) {
     g_mock_gro = 0; g_mock_extra_caps = 0;
     ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
     kl_event_ctx_free(&ctx);
+}
+
+/* M6.0a P1 — readiness SINGLE-recv (dg_rdy_pull) RX-TOS gate: a provider that surfaces meta.tos must NOT
+ * leak it into kl_datagram_recv_tos unless the socket ACCEPTED RX_TOS. Both configs run in one body:
+ * accepted → the fabricated 0x28 is surfaced; NOT accepted → gated to -1 (backend-independent). */
+UTEST(dgram_batch, recv_tos_single_gate) {
+    const unsigned accepted[2] = { KL_DGRAM_RX_TOS, 0 };
+    const int      expect[2]   = { 0x28,            -1 };
+    for (int k = 0; k < 2; k++) {
+        KlAllocator a = kl_allocator_default();
+        KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+        if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }  /* readiness path */
+        const KlSocketProvider *sp = mock_tos_single_provider();
+        g_mock_tos = 0x28;
+        KlSocketHandle rxfd = prep_fd(sp);
+        KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+        uint16_t port = kl_sockaddr_port(&la);
+        KlDatagram rx; memset(&rx, 0, sizeof(rx));
+        KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                                 .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                                 .accepted_rx_caps = accepted[k] };
+        ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));   /* NO batch attached → single-recv path */
+        rx_reset(); g_rx_dg = &rx;
+        ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv_tos, NULL));
+        const char *m[1] = { "hi" };
+        blast(1, port, m);
+        for (int i = 0; i < 60 && g_rx_calls < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
+        ASSERT_EQ(1, g_rx_calls);
+        ASSERT_EQ(expect[k], g_rx_tos);                    /* surfaced iff RX_TOS accepted */
+        g_mock_tos = -1;
+        ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+        kl_event_ctx_free(&ctx);
+    }
+}
+
+/* M6.0a P1 — readiness BATCH-recv (dg_rdy_pull_batch) RX-TOS gate: same negative/positive gate through
+ * the attached RECV batch cursor path. */
+UTEST(dgram_batch, recv_tos_batch_gate) {
+    const unsigned accepted[2] = { KL_DGRAM_RX_TOS, 0 };
+    const int      expect[2]   = { 0x28,            -1 };
+    for (int k = 0; k < 2; k++) {
+        KlAllocator a = kl_allocator_default();
+        KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+        if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+        const KlSocketProvider *sp = mock_recv_provider(mock_tos_recv_batch);   /* RX_BATCH + fabricated tos */
+        g_mock_tos = 0x28;
+        KlSocketHandle rxfd = prep_fd(sp);
+        KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+        uint16_t port = kl_sockaddr_port(&la);
+        KlDatagram rx; memset(&rx, 0, sizeof(rx));
+        KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                                 .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                                 .accepted_rx_caps = accepted[k] };
+        ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+        KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+        ASSERT_TRUE(b != NULL);
+        ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+        rx_reset(); g_rx_dg = &rx;
+        ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv_tos, NULL));
+        const char *m[1] = { "hi" };
+        blast(1, port, m);
+        for (int i = 0; i < 60 && g_rx_calls < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
+        ASSERT_EQ(1, g_rx_calls);
+        ASSERT_EQ(expect[k], g_rx_tos);                    /* surfaced iff RX_TOS accepted */
+        g_mock_tos = -1;
+        ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+        kl_event_ctx_free(&ctx);   /* b core-owned → reclaimed at free */
+    }
 }
 
 UTEST_MAIN();
