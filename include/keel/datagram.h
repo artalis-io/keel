@@ -192,10 +192,14 @@ int kl_datagram_multicast_join (KlDatagram *dg, const char *group, unsigned ifac
 int kl_datagram_multicast_leave(KlDatagram *dg, const char *group, unsigned iface_index);
 
 /* M6.0a: set the socket-DEFAULT outgoing TOS/Traffic-Class byte (IP_TOS / IPV6_TCLASS) applied to every
- * send that carries no per-message tos. Compose with KL_TOS() (keel/udp.h). Returns 0, or -1 with
- * kl_datagram_last_error(): KL_ERR_INVALID_ARG (bad handle / tos ∉ [0,255]), KL_ERR_UNSUPPORTED (provider
- * has no set_tos op), KL_ERR_SOCKET (getsockname / setsockopt failed). Distinct from the per-message
- * KlDatagramMessage.tos (which overrides this default on a single send). */
+ * send that carries no per-message tos. Compose with KL_TOS() (keel/udp.h). Gated on the per-fd TOS
+ * capability (KL_DGRAM_CAP_TOS, M2 exact-fd contract). Returns 0, or -1 with kl_datagram_last_error():
+ *   - KL_ERR_INVALID_ARG — bad handle / tos ∉ [0,255] / the fd's local family is not IPv4 or IPv6
+ *     (undeterminable family: the call refuses rather than guess a socket-option level);
+ *   - KL_ERR_UNSUPPORTED — TOS is unavailable on this fd: EITHER the provider exposes no set_tos op OR
+ *     it does not advertise KL_DGRAM_CAP_TOS for this fd (checked WITHOUT invoking the provider);
+ *   - KL_ERR_SOCKET — getsockname / setsockopt failed.
+ * Distinct from the per-message KlDatagramMessage.tos (which overrides this default on a single send). */
 int kl_datagram_set_tos(KlDatagram *dg, int tos);
 
 /* M6.0a: the received TOS/Traffic-Class byte of the datagram currently being delivered, or -1 if
