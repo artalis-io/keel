@@ -73,6 +73,32 @@ int kl_udp_parse_gro(struct msghdr *msg) {
     return 0;
 }
 
+/* Read the received TOS/Traffic-Class byte (IP_TOS / IPV6_TCLASS cmsg), or -1 if none present. Mirrors
+ * the readiness provider's dgram_parse_tos (socket_dgram_posix.c) so the two event models stay
+ * byte-identical. A 1-byte or int-sized cmsg payload is accepted (platforms differ). */
+int kl_udp_parse_tos(struct msghdr *msg) {
+#if defined(IP_TOS) || defined(IPV6_TCLASS)
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(msg); cm; cm = CMSG_NXTHDR(msg, cm)) {
+        int is_tos = 0;
+#if defined(IP_TOS)
+        if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_TOS) is_tos = 1;
+#endif
+#if defined(IPV6_TCLASS)
+        if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_TCLASS) is_tos = 1;
+#endif
+        if (is_tos) {
+            if (cm->cmsg_len >= CMSG_LEN(sizeof(int))) {
+                int v; memcpy(&v, CMSG_DATA(cm), sizeof(v)); return v & 0xff;
+            }
+            if (cm->cmsg_len >= CMSG_LEN(1)) return CMSG_DATA(cm)[0];
+        }
+    }
+#else
+    (void)msg;
+#endif
+    return -1;
+}
+
 /* Overflow-safe capacity check: does a `space`-byte cmsg record fit after `used` bytes in `bufsz`?
  * `used` is a parameter (not a constant here) so the subtraction is guarded without a `0 > bufsz`
  * comparison — `bufsz - used` is evaluated only once `used <= bufsz` holds (short-circuit). */

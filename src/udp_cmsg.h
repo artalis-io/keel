@@ -31,6 +31,11 @@ socklen_t kl_udp_parse_local(struct msghdr *msg, struct sockaddr_storage *out);
  * none present (or GRO unsupported at build time). Shared by readiness + completion. */
 int kl_udp_parse_gro(struct msghdr *msg);
 
+/* Read the received TOS / Traffic-Class byte (IP_TOS / IPV6_TCLASS cmsg) from a received message's
+ * control data, or -1 if none present (or the platform macros are absent). Shared by the POSIX
+ * completion backends (event_iouring.c, event_pollcomp.c) — M6.0a receive-TOS. */
+int kl_udp_parse_tos(struct msghdr *msg);
+
 /* Control-message buffer size for a UDP sendmsg — a source-pin pktinfo cmsg + a TOS cmsg. */
 #define KL_UDP_TX_CTRL_SIZE 128
 

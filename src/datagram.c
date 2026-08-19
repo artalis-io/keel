@@ -106,6 +106,10 @@ void kl_datagram_comp_dispatch(void *target, const KlCompletionEvent *ev) {
                     in->local = ev->local; in->flags |= KL_DGRAM_HAS_LOCAL;
                 }
                 if (ev->truncated) in->flags |= KL_DGRAM_TRUNCATED;
+                /* M6.0a: stash the received TOS on the inbound slot (read by kl_datagram_recv_tos during
+                 * on_recv). Gate on the socket's accepted RX_TOS mask: a backend that does not capture TOS
+                 * leaves ev->tos == 0 (a VALID byte), so only trust it when TOS capture was enabled. */
+                in->tos = (kl_dgram_core_accepted_rx_caps(core) & KL_DGRAM_RX_TOS) ? ev->tos : -1;
             }
             (void)kl_dgram_core_recv_on_complete(core, ev->bytes, 1);
         }
@@ -140,9 +144,13 @@ static int dg_comp_arm(void *ctx) {
     KlDgramSlot *in = kl_dgram_core_inbound_slot(dg->core);
     /* Capture the local (dest) address on the completion recv — consistent with the readiness recv,
      * which always parses the pktinfo cmsg — so a wildcard-bound source-pinned reply can learn its
-     * local addr. Harmless when the socket has no IP_PKTINFO (no cmsg → no local). */
+     * local addr. Harmless when the socket has no IP_PKTINFO (no cmsg → no local). M6.0a: ALSO request
+     * the received-TOS cmsg when the socket has RX_TOS capture enabled (accepted_rx_caps), so
+     * kl_datagram_recv_tos can surface it — the capture mask only tells the backend which cmsgs to parse. */
+    unsigned capture = KL_DGRAM_RX_PKTINFO;
+    if (kl_dgram_core_accepted_rx_caps(dg->core) & KL_DGRAM_RX_TOS) capture |= KL_DGRAM_RX_TOS;
     KlDgramRecvOp op = { .fd = dg->fd, .buf = in ? in->data : NULL, .cap = in ? in->cap : 0,
-                         .capture = KL_DGRAM_RX_PKTINFO, .life = kl_dgram_core_life(dg->core) };
+                         .capture = capture, .life = kl_dgram_core_life(dg->core) };
     kl_dgram_life_retain(op.life);
     if (kl_comp_post_dgram_recv(dg->ctx, &op) < 0) {
         kl_dgram_life_release(op.life);
@@ -198,6 +206,7 @@ static int dg_rdy_pull(void *ctx, size_t *out_len) {
     in->flags = 0;
     if (meta.has_local) { in->local = meta.local; in->flags |= KL_DGRAM_HAS_LOCAL; }
     if (meta.truncated) in->flags |= KL_DGRAM_TRUNCATED;
+    in->tos = meta.tos;   /* M6.0a: received TOS (-1 = none) — read by kl_datagram_recv_tos in on_recv */
     *out_len = (size_t)n;
     return 1;
 }
@@ -259,6 +268,9 @@ static int dg_rdy_pull_batch(void *ctx, KlDgramRxView *v, int allow_refill) {
     v->flags = 0;
     if (slot->meta.has_local) { v->local = slot->meta.local; v->flags |= KL_DGRAM_HAS_LOCAL; }
     if (trunc)                  v->flags |= KL_DGRAM_TRUNCATED;
+    /* M6.0a: keep kl_datagram_recv_tos correct in batch mode too — the accessor reads the inbound slot,
+     * which the batch path does not otherwise fill, so mirror this datagram's TOS onto it. */
+    { KlDgramSlot *in = kl_dgram_core_inbound_slot(dg->core); if (in) in->tos = slot->meta.tos; }
 
     if (b->slot_split && avail > (size_t)b->slot_gro) {   /* split: yield one segment, stay on this slot */
         v->len = (size_t)b->slot_gro;
@@ -619,6 +631,15 @@ int kl_datagram_recv_attach_batch(KlDatagram *dg, KlDatagramBatch *b) {
 void kl_datagram_recv_segments(KlDatagram *dg, KlDatagramRecvSegmentsFn cb, void *ud) {
     if (!dg) return;
     dg->on_recv_segments = cb; dg->recv_seg_ud = ud;
+}
+
+/* M6.0a: the TOS/Traffic-Class byte of the datagram currently being delivered (read the inbound slot,
+ * which the recv paths stamp before each delivery), or -1 if unavailable (RX_TOS not enabled, or none
+ * present). Only meaningful inside the on_recv / on_recv_segments callback. */
+int kl_datagram_recv_tos(const KlDatagram *dg) {
+    if (!dg || !dg->core) return -1;
+    KlDgramSlot *in = kl_dgram_core_inbound_slot(dg->core);
+    return in ? in->tos : -1;
 }
 
 int kl_datagram_recv_start(KlDatagram *dg, KlDatagramRecvFn on_recv, void *ud) {

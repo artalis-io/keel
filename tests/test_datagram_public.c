@@ -131,6 +131,19 @@ static void drive_recv(const void *data, size_t len, const KlSockAddr *peer, int
     if (peer) ev.peer = *peer;
     kl_dgram_life_dispatch(life)(kl_dgram_life_target(life), &ev);
 }
+/* Drive a recv completion carrying a received-TOS byte (M6.0a) — like a completion backend that parsed
+ * the RX TOS cmsg into ev->tos. The facade's dispatch only trusts it when the socket's accepted_rx_caps
+ * carry RX_TOS. */
+static void drive_recv_tos(const void *data, size_t len, const KlSockAddr *peer, int tos) {
+    struct KlDgramLife *life = g_mc.recv_life;
+    if (g_mc.recv_buf && len) memcpy(g_mc.recv_buf, data, len <= g_mc.recv_cap ? len : g_mc.recv_cap);
+    KlCompletionEvent ev; memset(&ev, 0, sizeof(ev));
+    ev.kind = KL_COMP_DGRAM_RECV; ev.ok = 1; ev.bytes = len; ev.buf = g_mc.recv_buf;
+    ev.tos = tos; ev.life = life;
+    if (peer) ev.peer = *peer;
+    kl_dgram_life_dispatch(life)(kl_dgram_life_target(life), &ev);
+}
+
 /* The cancelled (terminal) completion of an outstanding recv op — as the driver would drain it after a
  * cancel at close. Retires the recv machine + releases the op's life ref so the close coordinator joins. */
 static void drive_recv_cancelled(void) {
@@ -172,6 +185,13 @@ static void on_recv(void *ud, const void *data, size_t len, const KlSockAddr *pe
     (void)ud; (void)local;
     g_recv_calls++; g_recv_len = len; g_recv_flags = flags; g_recv_has_peer = (peer != NULL);
     if (len) memcpy(g_recv_buf, data, len <= sizeof(g_recv_buf) ? len : sizeof(g_recv_buf));
+}
+/* recv-tos recorder: reads kl_datagram_recv_tos DURING on_recv (its only valid window). */
+static const KlDatagram *g_rt_dg; static int g_rt_tos;
+static void on_recv_rt(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                       const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)data; (void)len; (void)peer; (void)local; (void)flags;
+    g_recv_calls++; g_rt_tos = kl_datagram_recv_tos(g_rt_dg);
 }
 /* close recorder */
 static int g_close_calls; static KlDatagramCloseResult g_close_result;
@@ -1039,6 +1059,42 @@ UTEST(datagram_public, m6a_send_queued_bytes_tracks_payload) {
 
     ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
     ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
+/* Receive-TOS dispatch GATE: the facade trusts ev->tos ONLY when the socket's accepted_rx_caps carry
+ * RX_TOS. A backend that does not capture TOS leaves ev->tos == 0 (a valid byte), so without the gate a
+ * spurious 0 would be reported. Driven over the completion mock for determinism (the live capture-seam
+ * exercise is in test_datagram_live.recv_tos_capture_verifies). */
+UTEST(datagram_public, m6a_recv_tos_gated_on_accepted_caps) {
+    /* case 1: RX_TOS accepted → ev->tos surfaced */
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 2, 1500);
+    c.accepted_rx_caps = KL_DGRAM_RX_TOS;
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    g_recv_calls = 0; g_rt_tos = -2; g_rt_dg = &dg;
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv_rt, NULL));
+    KlSockAddr peer = addr4(192,168,0,9, 40000);
+    drive_recv_tos("hi", 2, &peer, 0x28);
+    ASSERT_EQ(1, g_recv_calls);
+    ASSERT_EQ(0x28, g_rt_tos);            /* surfaced (RX_TOS accepted) */
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    drive_recv_cancelled();
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+
+    /* case 2: RX_TOS NOT accepted → a backend's ev->tos (even a real byte) is IGNORED → -1 */
+    mk_ctx(); mc_reset();
+    KlDatagram dg2; memset(&dg2, 0, sizeof(dg2));
+    KlDatagramConfig c2 = cfg_for(mk_fd(), 2, 1500);   /* accepted_rx_caps == 0 */
+    ASSERT_EQ(0, kl_datagram_init(&dg2, &c2));
+    g_recv_calls = 0; g_rt_tos = -2; g_rt_dg = &dg2;
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg2, on_recv_rt, NULL));
+    drive_recv_tos("hi", 2, &peer, 0x28);   /* backend reports 0x28 but capture was not enabled */
+    ASSERT_EQ(1, g_recv_calls);
+    ASSERT_EQ(-1, g_rt_tos);              /* gated out → none */
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg2));
+    drive_recv_cancelled();
+    ASSERT_EQ(0, kl_datagram_free(&dg2));
 }
 
 UTEST_MAIN();

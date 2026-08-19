@@ -63,6 +63,34 @@ static KlSocketHandle prep_fd(const KlSocketProvider *sp, const char *bind_ip, i
     return fd;
 }
 
+/* prep a datagram fd with recv_tos enabled (IP_RECVTOS), returning the RX-capture mask the provider's
+ * configure() actually accepted (→ KlDatagramConfig.accepted_rx_caps, which gates the completion recv's
+ * TOS capture). Bound so it can receive. */
+static KlSocketHandle prep_fd_recvtos(const KlSocketProvider *sp, const char *bind_ip, int port,
+                                      unsigned *accepted) {
+    KlSocketHandle fd = kl_sock_socket(sp, AF_INET, SOCK_DGRAM, 0);
+    if (!kl_handle_valid(fd)) return fd;
+    kl_sock_set_nonblocking(sp, fd);
+    KlUdpConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
+    ucfg.recv_tos = 1;
+    const KlDatagramOps *dg = sp ? sp->dgram : kl_sockdef_dgram();
+    unsigned caps = dg->configure(sp ? sp->context : NULL, fd, AF_INET, &ucfg);
+    if (accepted) *accepted = caps;
+    KlSockAddr b; kl_sockaddr_parse(&b, bind_ip, (uint16_t)port);
+    if (kl_sock_bind(sp, fd, &b) != 0) { kl_sock_close(sp, fd); return KL_INVALID_SOCKET; }
+    return fd;
+}
+
+/* recv-TOS recorder: capture kl_datagram_recv_tos() DURING the on_recv callback (the only valid window). */
+static int g_rt_calls, g_rt_tos;
+static const KlDatagram *g_rt_dg;
+static void on_recv_tos(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                        const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)data; (void)len; (void)peer; (void)local; (void)flags;
+    g_rt_calls++;
+    g_rt_tos = kl_datagram_recv_tos(g_rt_dg);   /* read inside the delivery window */
+}
+
 static void pump_until(KlEventCtx *ctx, int *flag, int want, int ticks) {
     for (int i = 0; i < ticks && *flag < want; i++) kl_event_ctx_run(ctx, 16, 20);
 }
@@ -308,6 +336,57 @@ UTEST(datagram_live, set_tos_socket_default_egress_verifies) {
 
     ASSERT_EQ(0, kl_datagram_close_begin(&tx)); pump_close(&ctx, &tx, 100); ASSERT_EQ(0, kl_datagram_free(&tx));
     kl_sock_close(sp, rxfd);
+    kl_event_ctx_free(&ctx);
+}
+
+/* M6.0a: receive-TOS through the REAL capture seam. A KlDatagram rx with RX_TOS enabled receives a
+ * datagram sent with a per-packet TOS mark; kl_datagram_recv_tos() (read inside on_recv) returns the mark.
+ * Backend-adaptive via kl_event_ctx_init: on BACKEND=pollcomp/iouring this exercises the COMPLETION recv
+ * cmsg parse (dg_comp_arm requests RX_TOS → backend fills ev->tos → dispatch stamps the inbound slot); on
+ * a default build it exercises the readiness pull. NOT a fabricated-metadata accessor test — a backend
+ * that drops the RX TOS cmsg fails here (on Linux, where the RX TOS is reliably delivered). */
+UTEST(datagram_live, recv_tos_capture_verifies) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    const KlSocketProvider *sp = ctx.sockets;
+
+    unsigned accepted = 0;
+    KlSocketHandle rxfd = prep_fd_recvtos(sp, "127.0.0.1", 0, &accepted);
+    ASSERT_TRUE(kl_handle_valid(rxfd));
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    int port = (int)kl_sockaddr_port(&la);
+    KlSocketHandle txfd = prep_fd(sp, NULL, 0);
+    ASSERT_TRUE(kl_handle_valid(txfd));
+
+    KlDatagram rx, tx; memset(&rx, 0, sizeof(rx)); memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig rc = { .ctx = &ctx, .alloc = &g_alloc, .sockets = sp, .fd = rxfd,
+                            .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                            .accepted_rx_caps = accepted };   /* carries RX_TOS → gates the capture */
+    KlDatagramConfig tc = { .ctx = &ctx, .alloc = &g_alloc, .sockets = sp, .fd = txfd,
+                            .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                            .want_caps = KL_DGRAM_CAP_TOS };
+    ASSERT_EQ(0, kl_datagram_init(&rx, &rc));
+    ASSERT_EQ(0, kl_datagram_init_ex(&tx, &tc, 0));
+
+    g_rt_calls = 0; g_rt_tos = -2; g_rt_dg = &rx;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, on_recv_tos, NULL));
+
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", (uint16_t)port);
+    const char *msg = "rx-tos";
+    KlDatagramMessage m = { .data = msg, .len = strlen(msg), .peer = &dest, .tos = 0x28 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m));
+
+    pump_until(&ctx, &g_rt_calls, 1, 100);
+    ASSERT_EQ(1, g_rt_calls);
+#if defined(__linux__)
+    ASSERT_EQ(0x28, g_rt_tos);            /* Linux reliably delivers the RX TOS cmsg */
+#else
+    /* Other platforms may not deliver an RX TOS cmsg; if they do, it must be the sent mark, else -1. */
+    ASSERT_TRUE(g_rt_tos == 0x28 || g_rt_tos == -1);
+#endif
+
+    ASSERT_EQ(0, kl_datagram_close_begin(&rx)); pump_close(&ctx, &rx, 100); ASSERT_EQ(0, kl_datagram_free(&rx));
+    ASSERT_EQ(0, kl_datagram_close_begin(&tx)); pump_close(&ctx, &tx, 100); ASSERT_EQ(0, kl_datagram_free(&tx));
     kl_event_ctx_free(&ctx);
 }
 

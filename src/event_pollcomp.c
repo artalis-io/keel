@@ -68,6 +68,7 @@ typedef struct KlPcOp {
     KlDgramLife   *life;
     int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
     int            dg_gro;                /* UDP_RECV: capture GRO segment size */
+    int            dg_tos;                /* UDP_RECV: capture received TOS byte (M6.0a) */
     void          *buf;                   /* READ / UDP_RECV: receive buffer (pinned by `life`) */
     size_t         buflen;                /* READ / UDP_RECV: capacity at post time */
     char          *sendbuf;              /* WRITE/SENDFILE head/UDP_SEND: owned copy */
@@ -335,6 +336,7 @@ static int pc_comp_post_dgram_recv(struct KlEventCtx *ctx, const KlDgramRecvOp *
     op->buflen     = rop->cap;
     op->dg_pktinfo = (rop->capture & KL_DGRAM_RX_PKTINFO) != 0;
     op->dg_gro     = (rop->capture & KL_DGRAM_RX_GRO)     != 0;
+    op->dg_tos     = (rop->capture & KL_DGRAM_RX_TOS)     != 0;
     op->life = rop->life;               /* TRANSFERRED into the op (no retain — the caller retained) */
     pc_op_push(st, op);
     return 0;
@@ -597,9 +599,12 @@ static int pc_complete(KlPcOp *op, KlCompletionEvent *ev) {
                 (void)kl_sockaddr_from_native(&ev->local,
                                               (struct sockaddr *)&local_ss, local_len);
         }
+        ev->tos = -1;                              /* M6.0a: default "none"; parse only if requested */
         if (n >= 0) {
             if (op->dg_gro)                       /* GRO coalesced segment size */
                 ev->gro_seg = kl_udp_parse_gro(&msg);
+            if (op->dg_tos)                        /* received TOS/Traffic-Class byte */
+                ev->tos = kl_udp_parse_tos(&msg);
             if (msg.msg_flags & MSG_TRUNC)         /* datagram truncated to recv_buf */
                 ev->truncated = 1;
         }

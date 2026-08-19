@@ -926,6 +926,8 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
                                                          (size_t)xfer, mflags, MSG_TRUNC,
                                                          op->buflen);
             out[count].ok = cl.ok;
+            out[count].tos = -1;   /* M6.0a: IOCP does not yet capture the RX TOS cmsg (a later
+                                    * increment) — surface "none" explicitly, never a bogus 0. */
             if (cl.ok) {
                 out[count].bytes = (DWORD)cl.bytes;
                 out[count].truncated = cl.truncated;

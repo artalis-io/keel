@@ -197,6 +197,12 @@ int kl_datagram_multicast_leave(KlDatagram *dg, const char *group, unsigned ifac
  * has no set_tos op), KL_ERR_SOCKET (getsockname / setsockopt failed). Distinct from the per-message
  * KlDatagramMessage.tos (which overrides this default on a single send). */
 int kl_datagram_set_tos(KlDatagram *dg, int tos);
+
+/* M6.0a: the received TOS/Traffic-Class byte of the datagram currently being delivered, or -1 if
+ * unavailable (RX_TOS capture not enabled on the socket, or none present). Only meaningful while inside
+ * the KlDatagramRecvFn / on_recv_segments callback. Requires the socket to have been prepared with TOS
+ * capture (KlUdpConfig.recv_tos) and that bit carried in KlDatagramConfig.accepted_rx_caps. */
+int kl_datagram_recv_tos(const KlDatagram *dg);
 KlDgramCloseState     kl_datagram_close_state(const KlDatagram *dg);   /* OPEN/CLOSING/CLOSED */
 KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg);  /* terminal (NONE until CLOSED) */
 size_t   kl_datagram_send_queued(const KlDatagram *dg);         /* occupied send slots (count) */

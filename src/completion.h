@@ -77,6 +77,12 @@ typedef struct KlCompletionEvent {
                                               * family KL_AF_UNSPEC = unavailable. */
     int            gro_seg;                  /* UDP_RECV: GRO coalesced segment size, 0 = none */
     int            truncated;                /* UDP_RECV: 1 if the datagram was truncated (MSG_TRUNC) */
+    int            tos;                      /* UDP_RECV: received TOS/Traffic-Class byte, or -1 = none
+                                              * (M6.0a). A backend that captures it (RX_TOS requested)
+                                              * MUST set -1 when the cmsg was absent; one that does not
+                                              * capture TOS leaves it 0 — the dispatch gates on the
+                                              * socket's accepted RX_TOS mask, so an uncaptured 0 is
+                                              * never surfaced as a real TOS. */
     /* UDP_RECV/_SEND stable-liveness token (transport-neutral; src/datagram_life.h). A datagram
      * completion outlives the KlUdp wrapper, so rather than dereferencing a KlUdpTransport embedded in a
      * possibly-freed KlUdp, the UDP adapter recovers the owner via this token and touches it only
