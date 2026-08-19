@@ -198,6 +198,39 @@ void kl_udp_deliver(KlUdp *udp, const KlDgramLife *life, const void *data, size_
         udp->on_recv(udp, data, len, src, local, udp->recv_ud);
 }
 
+/* ── M6.0b: wrapper feature-adapters (KlDatagram callback contracts → KlUdp callbacks) ─────────────
+ * The three KlDatagram callbacks the M6.1 cutover registers on the embedded KlDatagram (see
+ * udp_internal.h for the full contract). `ud` is the owning KlUdp. Defined ahead of wiring so the
+ * translation is unit-tested in isolation (tests/test_udp_adapters.c, a socketless KlUdp — no second
+ * live socket owner); M6.1 only registers them. GRO splitting + truncation/TOS accounting live in
+ * KlDatagram post-cutover, so these are pure signature translation with one rule: surface `local` only
+ * under KL_DGRAM_HAS_LOCAL. */
+
+/* KlDatagramRecvFn → KlUdpRecvFn: one datagram (or one GRO segment). */
+void kl_udp_dg_on_recv(void *ud, const void *data, size_t len,
+                       const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    KlUdp *udp = ud;
+    const KlSockAddr *loc = (local && (flags & KL_DGRAM_HAS_LOCAL)) ? local : NULL;
+    if (udp->on_recv)
+        udp->on_recv(udp, data, len, peer, loc, udp->recv_ud);
+}
+
+/* KlDatagramRecvSegmentsFn → KlUdpRecvSegmentsFn: one whole GRO-coalesced buffer + its segment size. */
+void kl_udp_dg_on_segments(void *ud, const void *data, size_t len, size_t segment_size,
+                           const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    KlUdp *udp = ud;
+    const KlSockAddr *loc = (local && (flags & KL_DGRAM_HAS_LOCAL)) ? local : NULL;
+    if (udp->on_recv_segments)
+        udp->on_recv_segments(udp, data, len, segment_size, peer, loc, udp->recv_seg_ud);
+}
+
+/* KlDatagramDrainFn → KlUdpDrainFn: the send queue drained (non-empty → empty). */
+void kl_udp_dg_on_drain(void *ud) {
+    KlUdp *udp = ud;
+    if (udp->on_drain)
+        udp->on_drain(udp, udp->drain_ud);
+}
+
 /* ── Receive machine (step 6.1) ────────────────────────────────────────────
  * The Tier-1 per-datagram receive rides the shared KlDgramRecv over a dedicated inbound slot
  * (KlDgramInbound — its own allocation, life-token-owned, 7A-1) — the same uniform captured-prefix

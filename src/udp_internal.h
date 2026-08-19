@@ -81,4 +81,31 @@ void kl_udp_comp_on_send(KlUdp *udp, size_t len);
 struct KlCompletionEvent;
 void kl_udp_comp_dispatch(void *target, const struct KlCompletionEvent *ev);
 
+/* ── M6.0b: wrapper feature-adapters — KlDatagram callback contracts → KlUdp callbacks ─────────────
+ *
+ * The M6.1 cutover re-bases KlUdp onto an embedded public KlDatagram. These three adapters are the exact
+ * KlDatagram callbacks it registers (`ud` == the owning KlUdp *, matching the KlDatagram callback
+ * typedefs verbatim), each translating a KlDatagram delivery edge to the corresponding KlUdp callback:
+ *
+ *   kl_udp_dg_on_recv     — KlDatagramRecvFn         → KlUdpRecvFn         (per-datagram / GRO segment)
+ *   kl_udp_dg_on_segments — KlDatagramRecvSegmentsFn → KlUdpRecvSegmentsFn (whole GRO-coalesced buffer)
+ *   kl_udp_dg_on_drain    — KlDatagramDrainFn        → KlUdpDrainFn        (send queue non-empty→empty)
+ *
+ * Translation rules the adapters own (proved by tests/test_udp_adapters.c against a socketless KlUdp —
+ * NO second live socket owner): peer → src verbatim; `local` is surfaced ONLY when KL_DGRAM_HAS_LOCAL is
+ * set in `flags` (KlUdp passes NULL otherwise); a NULL user callback is a safe no-op; the registered
+ * user_data (recv_ud / recv_seg_ud / drain_ud) is forwarded. Truncation + received-TOS are NOT the
+ * adapters' concern — post-cutover they are read via kl_datagram_truncated / kl_datagram_recv_tos.
+ *
+ * Defined now (ahead of wiring) so the translation is unit-tested in isolation; M6.1 only REGISTERS them
+ * (kl_datagram_recv_start / _recv_segments / _on_drain) — it lifts nothing. The remaining "M5 batch
+ * ownership" adapter (create/attach the RECV KlDatagramBatch; create/free the caller-owned GSO SEND
+ * batch) CANNOT stand alone here — it requires a live embedded KlDatagram to create a batch on — so per
+ * the frozen rule its wiring + tests fold into the M6.1 cutover (never a second live socket owner). */
+void kl_udp_dg_on_recv(void *ud, const void *data, size_t len,
+                       const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
+void kl_udp_dg_on_segments(void *ud, const void *data, size_t len, size_t segment_size,
+                           const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
+void kl_udp_dg_on_drain(void *ud);
+
 #endif /* KEEL_SRC_UDP_INTERNAL_H */
