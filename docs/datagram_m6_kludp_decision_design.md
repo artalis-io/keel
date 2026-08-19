@@ -1,11 +1,36 @@
-# Post-M5 — KlUdp disposition (inventory + decision freeze)
+# Post-M5 — KlUdp disposition (inventory + decision freeze, rev 2 — RULED)
 
-**Status:** DECISION FREEZE (docs-only). No code. A short inventory + options analysis + recommendation
-for the deferred post-M5 `KlUdp` decision (the freeze
+**Status:** DECISION FREEZE (docs-only), **revision 2 — RULED**. No code. The inventory + options
+(§1–§6) stand; rev 2 records the review ruling and turns it into a frozen migration plan (§7–§9). The
+deferred post-M5 `KlUdp` decision (the freeze
 [`datagram_m5_batch_extension_design.md`](datagram_m5_batch_extension_design.md) §9 carried this
-forward). Its purpose is to determine whether `KlUdp`'s remaining byte-only send-queue semantics justify
-a compatibility wrapper or whether a versioned removal is cleaner — **the final call is a review ruling;
-this document scopes the options, it authorizes no code.**
+forward) is now decided: **modified Option B** (§7). This document scopes the migration; each increment
+lands as its own freeze-then-code review.
+
+## RULING (2026-08-19) — modified Option B
+
+Retain the ergonomic UDP client surface; do NOT retain the legacy byte-only queue:
+- **Keep** `KlUdp` and its convenient `init`/`connect`/`send`/`recv`/`free` API (the *function surface*).
+- **Reimplement** it entirely over `KlDatagram` + the M5 extension.
+- **Backpressure** via the preallocated M1 **BOTH** policy (count + byte bounded); **remove** the
+  `malloc`-per-datagram, count-UNBOUNDED FIFO queue (no hot-path allocation).
+- **`send_queued` and related backpressure semantics** are an intentional **pre-1.0 behavior revision**.
+- **Keep `KlUdpConfig`** (load-bearing).
+- **Correction to Option B's original wording — NO ABI preservation.** `KlUdp` is *caller-embedded*
+  (`struct KlUdp` is stack-/embed-allocatable via the public header), so re-basing it onto `KlDatagram`
+  **changes its public struct layout**. The freeze therefore preserves the **function surface + client
+  ergonomics**, with an **accepted struct-layout revision AND queue-semantics revision** (pre-1.0, no
+  external consumers — consistent with the ABI changes accepted through M1–M5). Callers recompile; the
+  API they call is unchanged.
+
+*Why (reviewer):* removing `KlUdp` would leave external users without a convenient public
+socket-creation/client API (`kl_datagram_open` is internal; raw `KlDatagram` needs a prepared fd), but
+preserving an unused legacy queue would retain hot-path allocation + complexity with no real consumer.
+
+## Original inventory + options (rev 1, retained)
+
+**Status (rev 1):** DECISION FREEZE (docs-only). No code. A short inventory + options analysis +
+recommendation for the deferred post-M5 `KlUdp` decision.
 
 ## 0. Context
 
@@ -130,10 +155,91 @@ fallback but leaves the parallel implementation the consolidation set out to rem
   `KlUdpConfig` is retained and the KlUdp-client test/integration usage migrates to `KlDatagram` (with
   the M5-duplicated feature suites dropped).
 
-## 6. Non-goals
+## 6. Non-goals (rev 1)
 
 - No code, no API change, no test migration in this freeze — it is inventory + a decision to be ruled.
 - `KlUdpConfig` is retained under every option (load-bearing socket-option type). Its possible rename to
   a datagram-neutral name is a separate cosmetic pass, not part of this decision.
 - Mode-B explicit `kl_datagram_recv_batch` (M5 §5.5) and native completion-backend batched receive
   (M5 §10 O-1) remain independent follow-ups, unaffected by this decision.
+
+## 7. Frozen direction (modified Option B) — mechanics
+
+`KlUdp` becomes a thin wrapper around an embedded `KlDatagram` (exactly the shape `KlUdpServer` took in
+M4), plus the M5 batch/GSO/GRO extension for the feature knobs. The public 19-function API is unchanged;
+the implementation, the struct layout, and the backpressure numbers change.
+
+**Layout revision (accepted).** `struct KlUdp` stops embedding `KlUdpTransport` (the byte-queue
+transport, `keel/udp_transport_detail.h`) + the `malloc`-per-node `KlUdpDatagram` FIFO, and instead
+embeds a `KlDatagram` (like `KlUdpServer`), plus the facade-only callbacks + any batch handles. The
+`KlUdpTransport`/`KlUdpDatagram` layouts and their opt-in detail header are RETIRED. Callers recompile.
+
+**fd prep + lifecycle.** `kl_udp_init` prepares the fd via `kl_datagram_open` (M0) from the existing
+`KlUdpConfig`, then `kl_datagram_init_ex` with the BOTH policy; `kl_udp_free` → `kl_datagram_teardown`
+(synchronous outside a callback / deferred within, unchanged ergonomics). `kl_udp_connect` →
+`kl_datagram_send` connected-mode (want_caps `KL_DGRAM_CAP_CONNECTED`).
+
+**Backpressure = BOTH (preallocated).** `max_send_queue` (bytes) → the M1 `send_byte_budget`;
+`send_slots` derived from the budget (per the M4 `KlUdpServer` sizing: full-datagram `send_slot_cap`,
+`slots = max(1, budget / 65507)`); `send_slot_cap` = a full UDP payload. No `malloc` on send. A
+datagram that exceeds the byte budget OR finds no free slot is refused (the KlUdp `int -1` +
+`KL_ERR_QUEUE_FULL` surface, preserved).
+
+**Queue-semantics revision (accepted, pre-1.0).**
+- `kl_udp_send_queued` continues to report **queued+in-flight payload BYTES** (closest to the legacy
+  meaning) — via a new public `kl_datagram_send_queued_bytes` accessor exposing the send machine's
+  `bytes_used` (a small additive `KlDatagram` accessor; `kl_datagram_send_queued` keeps returning the
+  slot COUNT). `kl_udp_dropped`/`truncated` semantics are preserved.
+- **The behavioral change:** admission is now count-AND-byte bounded (BOTH). A workload that previously
+  queued an unbounded COUNT of small datagrams (byte-bounded only) can now be refused on the slot count
+  — an accepted revision (the removed hazard: a zero-length-datagram flood was byte-unbounded).
+
+**Feature knobs over M5/M2 (no duplication).**
+- `send_to_from` (source-pin), multicast join/leave, `set_tos`/`send_to_tos` (per-packet TOS): existing
+  `KlDatagram`/M2 send + `kl_datagram_multicast_*`; want_caps requested from `KlUdpConfig` as today.
+- `send_gso`: `kl_datagram_send_gso` (M5.2b) — `KlUdp` lazily creates one SEND `KlDatagramBatch` (the
+  GSO group buffer) on first use, torn down at free.
+- `recv_segments` (GRO) + `mmsg_batch` (recvmmsg): a RECV `KlDatagramBatch` attached at `recv_start`
+  when the knobs + provider caps warrant (the M5.4 `KlUdpServer` pattern — GRO-mandatory guard keyed to
+  the accepted RX bit; `mmsg_batch` normalized 0→16/[1,64]).
+- `recv_tos` (read the current datagram's TOS in `on_recv`): needs a small `KlDatagram` addition — the
+  recv delivery must surface the datagram's TOS (a scratch on the facade, mirroring M5.3's
+  `recv_seg_size`, + a `kl_datagram_recv_tos` accessor). Frozen as an M6.2 sub-item.
+
+## 8. Increment breakdown (each its own freeze-then-code review; none authorized here)
+
+1. **M6.1 — KlUdp core over `KlDatagram`.** The layout revision (embed `KlDatagram`; retire
+   `KlUdpTransport`/`KlUdpDatagram` + `udp_transport_detail.h`); `init`/`free`/`connect`;
+   `send_to`/`send_to_from`/`send` over `kl_datagram_send` with the BOTH policy (no queue);
+   `recv_start`/`recv_stop`/`on_drain`; `fd`/`local_port`/`last_error`; the revised `send_queued`(bytes,
+   via the new `KlDatagram` byte accessor)/`dropped`/`truncated`. The plain UDP client, end to end. Full
+   parity re-run of the existing `test_udp` behavioral cases (adjusted for the bounded-queue revision).
+2. **M6.2 — KlUdp feature parity over M5/M2.** Multicast join/leave; `set_tos`/`send_to_tos`;
+   `recv_tos` (+ the small `KlDatagram` TOS-on-recv addition); `send_gso` (lazy SEND batch);
+   `recv_segments` + `mmsg_batch` (RECV batch attach, M5.4 pattern). Re-runs `test_udp_tos` /
+   `test_udp_multicast` / `test_udp_offload` / `test_udp_batching` against the reimplemented `KlUdp`.
+3. **(after M6.1+M6.2)** Delete the now-dead `udp.c` byte-queue/parallel-data-plane code paths that the
+   wrapper no longer uses; confirm the smoke/integration (`smoke_udp`, `lwip`, `uefi`) KlUdp-client
+   usage still passes over the reimplemented object.
+
+**Order/dependencies:** M6.1 → M6.2 → cleanup. Each is validated on the full matrix (macOS kqueue,
+pollcomp, container epoll + io_uring under ASan/UBSan/LSan, MinGW, freestanding). Whether the migration
+proves clean enough to finish (vs stopping after M6.1 with the feature knobs still on the old path) is
+re-decided after M6.1 lands — the same "stop if ugly" escape hatch the consolidation used throughout.
+
+## 9. Open decisions for the reviewer (rev 2)
+
+- **O-KLUDP-2 (was contingent, now framed):** confirm `send_queued` reports queued+in-flight BYTES via a
+  new `kl_datagram_send_queued_bytes` accessor (§7) — vs revising it to the slot COUNT (simpler, but a
+  larger semantic change to the reported number). Recommendation: bytes (closest to legacy).
+- **O-KLUDP-3:** confirm the M6.1 / M6.2 split (core client, then features) — or a finer split (e.g.
+  GSO and recv-batch/GRO as separate increments) if the M6.2 surface proves too large for one review.
+
+## 10. Non-goals (rev 2)
+
+- No code in this freeze; the layout + queue-semantics revisions are frozen-for-review, landing in
+  M6.1/M6.2.
+- `KlUdpConfig` is retained (load-bearing). A datagram-neutral rename stays a separate cosmetic pass.
+- No change to `KlDatagram`'s Tier-1 contract beyond the two small additive accessors (`send_queued_
+  bytes`, `recv_tos`) the wrapper needs.
+- Mode-B `recv_batch` (M5 §5.5) + native completion batched receive (M5 §10 O-1) remain independent.
