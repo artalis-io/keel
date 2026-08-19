@@ -193,7 +193,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/client_common.c src/client_sync.c src/client_async.c \
            src/client_proxy.c \
            src/client_pool.c src/redirect.c src/sse.c \
-           src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_open.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
+           src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c src/udp.c $(DGRAM_SRC) $(UDP_CMSG_SRC) src/udp_server.c \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
            src/connect_op.c src/listener.c \
@@ -656,7 +656,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # under ASan+UBSan in the Apple container).
 IOURING_TEST_SUITES = allocator alpn async body_reader chunked client client_happy_eyeballs client_pool \
                           client_stream compress connection cors cross_module \
-                          datagram_life datagram_public datagram_live \
+                          datagram_batch datagram_life datagram_public datagram_live \
                           dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots decompress \
                           dns_resolver drain error event_provider file_io h2 h2_client integration \
                           multipart_stream overflow parser peer_addr peer_cert proxy \

@@ -62,7 +62,9 @@ typedef enum {
     KL_IO_PENDING,       /* EINPROGRESS — async connect in progress */
     KL_IO_CLOSED,        /* peer closed / EPIPE */
     KL_IO_RESET,         /* ECONNRESET — peer reset */
-    KL_IO_FATAL          /* any other error */
+    KL_IO_FATAL,         /* any other error */
+    KL_IO_UNSUPPORTED    /* EOPNOTSUPP / ENOTSUP — op unavailable on this fd (e.g. UDP GSO); caller may
+                          * fall back. Appended (datagram M5.1) — values above are unchanged. */
 } KlIoStatus;
 
 /* Upper bound on scatter-gather segments a provider must handle in one writev.

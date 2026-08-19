@@ -599,6 +599,22 @@ static unsigned pdg_caps(void *ctx, KlSocketHandle fd) {
 #endif
         /* no broadcast on IPv6 */
     }
+    /* M5 high-throughput SUPPORT. Family-INDEPENDENT in mechanism, but only meaningful for IP datagram
+     * sockets — so gate on AF_INET/AF_INET6 to preserve M2's exact-fd truthfulness (a non-IP fd, e.g.
+     * AF_UNIX SOCK_DGRAM, must NOT be told it has UDP batch/GSO/GRO). RX/TX batch = recvmmsg/sendmmsg
+     * ops compiled in (Linux); GSO = the send_gso op can attempt UDP_SEGMENT (advisory — first use may
+     * EOPNOTSUPP); GRO = the provider can capture UDP_GRO (per-socket activation also needs accepted_rx). */
+    if (ss.ss_family == AF_INET || ss.ss_family == AF_INET6) {
+#if defined(__linux__)
+        caps |= KL_DGRAM_CAP_RX_BATCH | KL_DGRAM_CAP_TX_BATCH;
+#endif
+#if defined(UDP_SEGMENT)
+        caps |= KL_DGRAM_CAP_GSO;
+#endif
+#if defined(UDP_GRO)
+        caps |= KL_DGRAM_CAP_GRO;
+#endif
+    }
     return caps;
 }
 

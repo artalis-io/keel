@@ -305,6 +305,10 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
     cc.send_slots = cfg->send_slots; cc.send_slot_cap = cfg->send_slot_cap; cc.recv_cap = cfg->recv_cap;
     cc.send_byte_budget = send_byte_budget;   /* M1: 0 = SLOT, >0 = BOTH */
     cc.caps = cfg->want_caps;
+    /* M5.1: store the enabled-per-socket RX mask, masked to KNOWN KL_DGRAM_RX_* bits (O-E) — separate
+     * from provider support; drives the GRO-activation predicate (provider GRO support AND this). */
+    cc.accepted_rx_caps = cfg->accepted_rx_caps &
+        (KL_DGRAM_RX_PKTINFO | KL_DGRAM_RX_GRO | KL_DGRAM_RX_TOS);
     cc.submit = completion ? dg_comp_submit : dg_rdy_submit; cc.submit_ctx = dg;
     cc.arm = completion ? dg_comp_arm : dg_rdy_arm;
     cc.disarm = completion ? NULL : dg_rdy_disarm;

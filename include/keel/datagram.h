@@ -62,6 +62,14 @@ typedef struct KlDatagram KlDatagram;
 #define KL_DGRAM_CAP_CONNECTED   (1u << 2)   /* connected-mode send (msg.peer == NULL) */
 #define KL_DGRAM_CAP_MULTICAST   (1u << 3)   /* runtime multicast join/leave (kl_datagram_multicast_*) — M2 */
 #define KL_DGRAM_CAP_BROADCAST   (1u << 4)   /* SO_BROADCAST — IPv4 fds only (reported per-fd); config via KlUdpConfig — M2 */
+/* Provider SUPPORT for the M5 high-throughput extension (kl_datagram_provider_caps). Directional, and
+ * advisory for GSO/GRO: RX_BATCH/TX_BATCH = the provider has recvmmsg/sendmmsg; GSO = the send_gso op
+ * exists (first-use may still fail → extension latch); GRO = the provider CAN capture UDP_GRO (per-socket
+ * activation ALSO needs KlDatagramConfig.accepted_rx_caps & KL_DGRAM_RX_GRO). See docs/datagram_m5_*. */
+#define KL_DGRAM_CAP_RX_BATCH    (1u << 5)   /* recvmmsg batching — M5 */
+#define KL_DGRAM_CAP_TX_BATCH    (1u << 6)   /* sendmmsg batching — M5 */
+#define KL_DGRAM_CAP_GSO         (1u << 7)   /* UDP GSO segmentation offload (advisory) — M5 */
+#define KL_DGRAM_CAP_GRO         (1u << 8)   /* UDP GRO receive coalescing (provider support) — M5 */
 
 /* ── Send status: atomic accept-or-refuse, no ownership on refusal (invariant 4) ──────────────── */
 typedef enum {
@@ -118,6 +126,11 @@ typedef struct {
     size_t                   send_slot_cap; /* per outbound slot payload capacity */
     size_t                   recv_cap;      /* inbound slot payload capacity */
     unsigned                 want_caps;     /* KL_DGRAM_CAP_* the consumer requires */
+    /* M5: the KL_DGRAM_RX_* capture mask the socket actually has ENABLED (from the M0 prep's
+     * KlDatagramPrep.rx_caps) — enabled-per-socket state, SEPARATE from provider support. init masks it
+     * to known KL_DGRAM_RX_* bits and stores it; GRO activates only when the provider supports GRO AND
+     * this has KL_DGRAM_RX_GRO. 0 = the caller knows of no enabled capture (graceful). */
+    unsigned                 accepted_rx_caps;
 } KlDatagramConfig;
 
 /* ── Lifecycle ────────────────────────────────────────────────────────────────────────────────── */

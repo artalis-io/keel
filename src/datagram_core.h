@@ -47,6 +47,8 @@ typedef struct {
     size_t       send_byte_budget;/* M1: 0 = SLOT policy; >0 = BOTH byte-gate budget (bytes). */
     size_t       recv_cap;     /* inbound slot payload capacity. */
     unsigned     caps;         /* KL_DGRAM_CAP_* for UNSUPPORTED mapping on send. */
+    unsigned     accepted_rx_caps;/* M5.1: enabled-per-socket KL_DGRAM_RX_* mask (already masked by the
+                                * facade). Stored for the GRO-activation predicate; no wiring in M5.1. */
 
     /* send */
     KlDgramSubmitFn submit; void *submit_ctx;      /* copy-before-accept is the submit adapter's job. */
@@ -104,6 +106,13 @@ typedef struct KlDgramCore {   /* tagged so <keel/datagram_detail.h> can forward
      * (releasing the rx storage on DETACHED, or leaving it pinned on QUARANTINE) before forwarding. */
     KlDgramCloseFn user_on_close; void *user_close_ctx;
     int            inited;
+    /* M5.1 scaffolding (no wiring yet). `ext` = the core-adopted batch extension (KlDgramBatchExt*,
+     * opaque here; NULL when no batch attached — the single-flight paths run untouched). `gso_unsupported`
+     * = the per-fd first-use GSO latch (§6.3). `accepted_rx_caps` = the enabled-per-socket KL_DGRAM_RX_*
+     * mask (masked by the facade) for the GRO-activation predicate. */
+    void          *ext;
+    int            gso_unsupported;
+    unsigned       accepted_rx_caps;
     /* Owner-destruction (abandon) reclamation (docs/datagram_sync_teardown_design.md §4a). When
      * `abandoning`, the coordinator's SILENT terminal (deferred to the outermost busy-frame leave) skips
      * user_on_close and instead runs `abandon_reclaim` as its destructive tail — the facade frees the

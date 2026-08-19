@@ -829,6 +829,13 @@ UTEST(datagram_public, m2_posix_provider_caps_per_family) {
 #if defined(IPV6_JOIN_GROUP) || defined(IPV6_ADD_MEMBERSHIP)
     exp6 |= KL_DGRAM_CAP_MULTICAST;
 #endif
+    /* M5 high-throughput SUPPORT is family-independent and, in the POSIX provider, gated on __linux__
+     * (recvmmsg/sendmmsg + the always-defined-on-Linux UDP_SEGMENT/UDP_GRO fallbacks) — so all four are
+     * present on Linux and absent elsewhere. Mirror the provider (socket_dgram_posix.c pdg_caps). */
+#if defined(__linux__)
+    unsigned m5 = KL_DGRAM_CAP_RX_BATCH | KL_DGRAM_CAP_TX_BATCH | KL_DGRAM_CAP_GSO | KL_DGRAM_CAP_GRO;
+    exp4 |= m5; exp6 |= m5;
+#endif
     /* AF_INET */
     KlDatagram dg; memset(&dg, 0, sizeof(dg));
     KlDatagramConfig c = cfg_for(mk_fd(), 4, 1500);   /* sockets = NULL → posix ops, AF_INET fd */

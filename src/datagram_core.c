@@ -139,6 +139,9 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
     core->transport_ctx    = cfg->transport_ctx;
     core->completion   = cfg->completion ? 1 : 0;
     core->caps         = cfg->caps;
+    core->accepted_rx_caps = cfg->accepted_rx_caps;   /* M5.1: enabled-per-socket RX mask (facade-masked) */
+    core->ext          = NULL;                          /* M5.1: no batch attached */
+    core->gso_unsupported  = 0;                         /* M5.1: GSO latch clear */
     core->rx           = rx;
     core->life         = life;
     core->user_on_close    = cfg->on_close;

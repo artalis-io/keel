@@ -452,6 +452,11 @@ KlIoStatus kl_sockdef_io_status(void) {
             return KL_IO_CLOSED;
         case ECONNRESET:
             return KL_IO_RESET;
+        case EOPNOTSUPP:
+#if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
+        case ENOTSUP:
+#endif
+            return KL_IO_UNSUPPORTED;   /* datagram M5.1: e.g. UDP GSO unavailable → caller falls back */
         default:
             return KL_IO_FATAL;
     }
