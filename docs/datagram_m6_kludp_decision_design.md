@@ -1,9 +1,32 @@
-# Post-M5 — KlUdp disposition (inventory + decision freeze, rev 4 — RULED)
+# Post-M5 — KlUdp disposition (inventory + decision freeze, rev 5 — RULED)
 
-**Status:** DECISION FREEZE (docs-only), **revision 4 — RULED**. No code. The inventory + options
+**Status:** DECISION FREEZE (docs-only), **revision 5 — RULED**. No code. The inventory + options
 (§1–§6) stand; the review ruling + frozen migration plan are §7–§10. The deferred post-M5 `KlUdp`
 decision ([`datagram_m5_batch_extension_design.md`](datagram_m5_batch_extension_design.md) §9) is
-decided: **modified Option B** (§7). Each increment lands as its own freeze-then-code review.
+decided: **modified Option B** (§7), delivered via the rev-5 **dependency-first sequence** (§8). Each
+increment lands as its own freeze-then-code review.
+
+### Rev 5 — dependency-first sequence (supersedes the rev-3 feature split)
+
+A rewrite of the M6.1 boundary would have left an **invalid intermediate commit** — callable feature
+functions with degraded semantics and their tests disabled — because retiring `KlUdpTransport` forces
+rewriting the feature functions, yet their `KlDatagram` surface (recv-TOS accessor, socket-default TOS
+op, GRO/recv-batch) was scoped to later increments. **Ruling:** neither gate-and-degrade nor a permanent
+hybrid; instead land the missing `KlDatagram` capabilities FIRST, then cut KlUdp over atomically (§8):
+
+- **M6.0a** — additive `KlDatagram` prerequisites (`optional_caps`, `send_queued_bytes`, receive-TOS
+  capture/accessor, socket-default TOS facade op) + focused tests on readiness AND completion backends;
+  **no KlUdp layout/behavior change**, every existing suite stays green.
+- **M6.0b** — wrapper feature-adapter prep (recv delivery / GRO segmentation / M5 batch-ownership
+  adapters onto the `KlUdp` callback contracts); if an adapter can't stand alone without the cutover,
+  fold only its tests/helpers into the cutover — **never a second live socket owner**.
+- **M6.1** — **atomic** KlUdp layout cutover: embed `KlDatagram`, retire `KlUdpTransport`, move plain
+  send/recv **and all already-expressible features** at once; **preserve every public function's behavior
+  except the revised BOTH backpressure; keep ALL suites green.**
+- **M6.2** — GSO SEND-batch lifetime separable ONLY if `send_gso` stays correct through M6.1; else its
+  adapter folds into the cutover and only the deeper optimization stays here (teardown ordering frozen).
+- **Governing rule:** additive prerequisites land independently; once KlUdp changes layout the cutover is
+  behaviorally complete — no public feature silently disappears between reviewed commits.
 
 ### Rev 4 — M6.1 P1 fix (opportunistic capability policy)
 
@@ -306,71 +329,95 @@ datagram that exceeds the byte budget OR finds no free slot is refused (the KlUd
 - `recv_segments` (GRO) + `mmsg_batch` (recvmmsg): a RECV `KlDatagramBatch` attached at `recv_start`
   when the knobs + provider caps warrant (the M5.4 `KlUdpServer` pattern — GRO-mandatory guard keyed to
   the accepted RX bit; `mmsg_batch` normalized 0→16/[1,64]).
-- `recv_tos` (read the current datagram's TOS in `on_recv`): needs a small `KlDatagram` addition — the
-  recv delivery must surface the datagram's TOS (a scratch on the facade, mirroring M5.3's
-  `recv_seg_size`, + a `kl_datagram_recv_tos` accessor). Frozen as an M6.2 sub-item.
+- `recv_tos` (read the current datagram's TOS in `on_recv`) + `set_tos` (socket-default TOS): need small
+  `KlDatagram` additions — recv delivery must surface the datagram's TOS (a facade scratch mirroring
+  M5.3's `recv_seg_size`, + a `kl_datagram_recv_tos` accessor), and a `kl_datagram_set_tos` facade op for
+  the socket-wide default. Both land as **M6.0a prerequisites** (§8) BEFORE the cutover, so M6.1 can wire
+  them without an invalid intermediate commit.
 
-## 8. Increment breakdown (rev 3 — each its own freeze-then-code review; none authorized here)
+## 8. Increment breakdown (rev 5 — DEPENDENCY-FIRST; each its own freeze-then-code review)
 
-Per **O-KLUDP-3 (ruled)**, M6.2 splits finer. Order: **M6.1 → M6.2a → M6.2b → M6.2c → M6.3**.
+**Governing rule (ruled rev 5):** additive `KlDatagram` prerequisites may land independently while KlUdp
+stays untouched and fully green; **once KlUdp changes layout, the cutover is behaviorally complete** — no
+public feature may silently disappear or ship with degraded semantics between reviewed commits. The
+rev-3 finer M6.2a/b/c feature split is **superseded** (it implied an invalid intermediate commit where
+callable functions regress and their tests are disabled). New order: **M6.0a → M6.0b → M6.1 (atomic
+cutover) → M6.2 (optimization-only, optional) → M6.3 (reconcile)**.
 
-1. **M6.1 — KlUdp core over `KlDatagram`.** The layout revision (embed `KlDatagram`; retire
-   `KlUdpTransport`/`KlUdpDatagram` + `udp_transport_detail.h`); `init`/`free`/`connect`;
-   `send_to`/`send_to_from`/`send` over `kl_datagram_send` with the BOTH policy (no queue);
-   `recv_start`/`recv_stop`/`on_drain`; `fd`/`local_port`/`last_error`; the revised `send_queued`(bytes,
-   via the new `KlDatagram` byte accessor)/`dropped`/`truncated`. The plain UDP client, end to end.
-   - **Opportunistic capability policy (§7, rev 4):** add the additive `KlDatagramConfig.optional_caps`
-     grant-if-supported seam; `kl_udp_init` passes `want_caps = 0` + `optional_caps = CONNECTED |
-     SOURCE_PIN | TOS | MULTICAST` (every cap the public API may use, **unconditionally** — NOT
-     knob-derived, since the runtime feature functions are callable regardless of init options; the seam
-     intersects with `provider_caps` so the over-request is harmless). Ordinary unconnected `send_to`
-     succeeds on *every* provider incl. reduced/freestanding. `kl_udp_connect` calls `kl_sock_connect`,
-     succeeds only where CONNECTED was granted, and sets the wrapper `connected` flag. Peerless
-     `kl_udp_send` requires the granted CONNECTED cap AND the `connected` flag. Socket-config +
+1. **M6.0a — additive `KlDatagram` prerequisites (no KlUdp layout/behavior change).** Land the missing
+   `KlDatagram` capabilities FIRST, so the M6.1 cutover has every surface it needs:
+   - `KlDatagramConfig.optional_caps` grant-if-supported seam (`granted = want_caps | (optional_caps &
+     provider_caps)`; §7).
+   - `kl_datagram_send_queued_bytes` accessor (exposes the send machine's `bytes_used`; §7, O-KLUDP-2).
+   - **Receive-TOS capture + accessor** — recv delivery surfaces the datagram's TOS (facade scratch
+     mirroring M5.3's `recv_seg_size`) + `kl_datagram_recv_tos`.
+   - **Socket-default TOS facade op** — `kl_datagram_set_tos` (the socket-wide `IP_TOS`/`IPV6_TCLASS`
+     default, distinct from per-message `KlDatagramMessage.tos`).
+   - Focused `KlDatagram` tests for each, on **both** a readiness and a completion backend. `KlUdp` is
+     untouched and every existing suite stays green (these are purely additive to `KlDatagram`).
+2. **M6.0b — wrapper feature-adapter preparation.** Define + test the internal callback adapters the
+   cutover needs: mapping `KlDatagram` recv delivery, GRO segmentation, and M5 batch ownership onto the
+   `KlUdp` callback contracts (`KlUdpRecvFn`/`KlUdpRecvSegmentsFn`/`KlUdpDrainFn`). **If an adapter cannot
+   exist independently without a KlUdp cutover, fold only its tests/helpers into the M6.1 cutover design —
+   do NOT introduce a second live socket owner** (no parallel data plane on a second fd).
+3. **M6.1 — atomic KlUdp layout cutover (behaviorally complete).** Embed `KlDatagram`, retire
+   `KlUdpTransport`/`KlUdpDatagram` + `udp_transport_detail.h`. Move plain send/receive **and all
+   already-expressible feature functions** onto `KlDatagram`/M2/M5 in ONE reviewed increment:
+   `init`/`free`/`connect`; `send_to`/`send_to_from`/`send`; `recv_start`/`recv_stop`/`on_drain`;
+   `set_tos`/`send_to_tos`; `multicast_join`/`leave`; `recv_tos`; `recv_segments`/`mmsg_batch`;
+   `fd`/`local_port`/`last_error`; the revised `send_queued`(bytes)/`dropped`/`truncated`. **Preserve
+   every public function's behavior EXCEPT the explicitly-revised BOTH backpressure semantics; keep ALL
+   suites enabled and green** (`test_udp`, `test_udp_tos`, `test_udp_multicast`, `test_udp_offload`,
+   `test_udp_batching`).
+   - **Opportunistic capability policy (§7, rev 4):** `kl_udp_init` passes `want_caps = 0` +
+     `optional_caps = CONNECTED | SOURCE_PIN | TOS | MULTICAST` (+ GSO per §8.4), unconditionally
+     (NOT knob-derived; the seam intersects `provider_caps`). Ordinary unconnected `send_to` succeeds on
+     *every* provider incl. reduced/freestanding. `kl_udp_connect` calls `kl_sock_connect`, succeeds only
+     where CONNECTED was granted, sets the wrapper `connected` flag; peerless `kl_udp_send` requires the
+     granted CONNECTED cap AND `connected`; send-before-connect → `KL_ERR_INVALID_ARG`. Socket-config +
      accepted-RX capture (GRO two-part gate) stay separate.
-   - **Regressions:** full parity re-run of the existing `test_udp` behavioral cases (adjusted for the
-     bounded-queue revision), PLUS **reduced-provider init** (a provider with a NULL `caps` op →
-     `kl_udp_init` + `send_to` succeed; `kl_udp_connect` fails `KL_ERR_UNSUPPORTED`; peerless
-     `kl_udp_send` refused via the invalid-state surface) and **send-before-connect** (peerless
-     `kl_udp_send` before `kl_udp_connect` is refused, no UB).
-2. **M6.2a — multicast + TOS (incl. receive-TOS).** `multicast_join`/`multicast_leave`;
-   `set_tos`/`send_to_tos`; `recv_tos` (+ the small additive `KlDatagram` TOS-on-recv accessor). Re-runs
-   `test_udp_tos` / `test_udp_multicast` against the reimplemented `KlUdp`.
-3. **M6.2b — receive batching + GRO + `recv_segments`.** `recv_segments` + `mmsg_batch` (RECV batch
-   attach, M5.4 pattern) + the GRO two-part gate. Re-runs `test_udp_offload` (recv side) /
-   `test_udp_batching` (recv side).
-4. **M6.2c — GSO + SEND-batch lifetime.** `send_gso` (the caller-owned lazy SEND batch) + `mmsg_batch`
-   send batching. **Highest-risk sub-increment; MUST NOT share a commit with M6.2b.** **Frozen teardown
-   ordering:** on datagram close/discard the wrapper must **retire the GSO group and clear `gso_busy`
-   BEFORE freeing the caller-owned batch** — i.e. `kl_datagram`'s close path drains/retires any queued
-   GSO group and clears the busy latch first, so the wrapper's `kl_datagram_batch_free` never runs while
-   `gso_busy` (which returns -1) or with a live in-flight group referencing the batch's copy-once group
-   buffer. Re-runs `test_udp_offload` (send/GSO side) / `test_udp_batching` (send side).
-5. **M6.3 — delete the parallel machinery + reconcile gates/docs.** Delete the now-dead `udp.c`
-   byte-queue / parallel-data-plane code paths the wrapper no longer uses; reconcile the CI gates + docs
-   (§10 matrices, source comments) to the reimplemented object; confirm the smoke/integration
-   (`smoke_udp`, `lwip`, `uefi`) KlUdp-client usage still passes. **Must preserve the untracked
+   - **New regressions (added to the full parity re-run):** reduced-provider init (NULL `caps` op →
+     `kl_udp_init` + `send_to` succeed; `kl_udp_connect` fails `KL_ERR_UNSUPPORTED`; peerless send refused)
+     and send-before-connect (refused, no UB).
+4. **M6.2 — GSO send-batch lifetime (separable ONLY if `send_gso` stays correct through M6.1).**
+   `send_gso` MUST remain behaviorally correct after the M6.1 cutover. If its correct behavior can be
+   preserved with the simple per-segment/`kl_datagram_send_gso` path during M6.1, the **deeper
+   caller-owned SEND-batch optimization** may land here separately; **otherwise the `send_gso` adapter is
+   folded INTO the M6.1 atomic cutover** and only the deeper optimization remains here. **Frozen teardown
+   ordering (applies wherever the lazy SEND batch lands):** on datagram close/discard the group is
+   retired and `gso_busy` cleared **BEFORE** the wrapper frees the caller-owned batch, so
+   `kl_datagram_batch_free` never runs while `gso_busy` (returns -1) or with a live in-flight group
+   referencing the batch's copy-once group buffer. This teardown-ordering step must NOT share a commit
+   with unrelated receive batching.
+5. **M6.3 — reconcile gates/docs + remove any residual dead code.** After the atomic cutover there is no
+   parallel data plane to delete (M6.1 already retired `KlUdpTransport`); this step reconciles CI gates +
+   docs (§10 matrices, source comments) to the reimplemented object and confirms the smoke/integration
+   (`smoke_udp`, `lwip`, `uefi`) KlUdp-client usage. **Must preserve the untracked
    `docs/claude_code_transport_taxonomy_prompt.md` — no `git clean` that would remove it.**
 
-**Order/dependencies:** M6.1 → M6.2a → M6.2b → M6.2c → M6.3. Each is validated on the full matrix (macOS
-kqueue, pollcomp, container epoll + io_uring under ASan/UBSan/LSan, MinGW, freestanding). Whether the
-migration proves clean enough to finish (vs stopping after M6.1 with the feature knobs still on the old
-path) is re-decided after M6.1 lands — the same "stop if ugly" escape hatch used throughout.
+**Order/dependencies:** M6.0a → M6.0b → M6.1 → (M6.2) → M6.3. Each is validated on the full matrix (macOS
+kqueue, pollcomp, container epoll + io_uring under ASan/UBSan/LSan, MinGW, freestanding). The additive
+prerequisites (M6.0a) are independently landable; the layout cutover (M6.1) is atomic and behaviorally
+complete — no "stop with feature knobs on the old path" intermediate state.
 
-## 9. Ruled decisions (rev 3)
+## 9. Ruled decisions (rev 5)
 
 - **O-KLUDP-2 (RULED):** `send_queued` reports queued+in-flight payload BYTES via the additive
   `kl_datagram_send_queued_bytes` accessor (§7). Slot-count would be an unnecessary extra semantic break.
-- **O-KLUDP-3 (RULED):** the finer M6.2a/M6.2b/M6.2c + M6.3 split above.
+- **O-KLUDP-3 (SUPERSEDED by the rev-5 dependency-first sequence):** the rev-3 finer M6.2a/b/c *feature*
+  split is rejected — it would create an invalid intermediate commit (callable functions with degraded
+  semantics + disabled tests). Feature presence is now delivered atomically in the M6.1 cutover after the
+  additive prerequisites (M6.0a) land; only optimization-depth (GSO batch, §8.4) may remain separate.
 
-## 10. Non-goals (rev 3)
+## 10. Non-goals (rev 5)
 
-- No code in this freeze; the layout + queue-semantics revisions are frozen-for-review, landing in
-  M6.1–M6.2c.
+- No code in this freeze; the layout + queue-semantics revisions are frozen-for-review, landing across
+  M6.0a → M6.1 (→ M6.2).
 - `KlUdpConfig` is retained (load-bearing). A datagram-neutral rename stays a separate cosmetic pass.
-- No change to `KlDatagram`'s Tier-1 contract beyond three small additive changes the wrapper needs: the
-  two accessors (`send_queued_bytes`, `recv_tos`) and the `KlDatagramConfig.optional_caps`
-  grant-if-supported field (rev 4, §7) — all in the same additive class as M5.1's `accepted_rx_caps`.
+- No change to `KlDatagram`'s Tier-1 contract beyond **four** small additive changes (all M6.0a
+  prerequisites, in the same additive class as M5.1's `accepted_rx_caps`): the `KlDatagramConfig.
+  optional_caps` grant-if-supported field, and the `kl_datagram_send_queued_bytes`,
+  `kl_datagram_recv_tos`, and `kl_datagram_set_tos` accessors/ops.
 - Mode-B `recv_batch` (M5 §5.5) + native completion batched receive (M5 §10 O-1) remain independent.
 - The untracked `docs/claude_code_transport_taxonomy_prompt.md` is preserved across all M6 work (M6.3
   cleanup must not remove it).
