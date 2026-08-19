@@ -1,12 +1,30 @@
-# Datagram M5 — Batch / GSO / GRO high-throughput extension (design freeze, rev 5)
+# Datagram M5 — Batch / GSO / GRO high-throughput extension (design freeze, rev 6)
 
-**Status:** DESIGN FREEZE (docs-only), **revision 5**. **This docs commit changes no ABI**; the design
+**Status:** DESIGN FREEZE (docs-only), **revision 6**. **This docs commit changes no ABI**; the design
 it freezes intentionally introduces ABI additions in M5.1 — appending
 `KlDatagramConfig.accepted_rx_caps` (O-E) and a `KL_IO_UNSUPPORTED` `KlIoStatus` enumerator (§6.3),
-both accepted because there are no consumers. No production code or consumer migration here. Rev 5
-closes three remaining contradictions (batch hard-error vs the sticky-error contract, GSO error
-classification vs §6.3, GSO storage hot-alloc) plus an editorial fix, so the increment chain
+both accepted because there are no consumers. No production code or consumer migration here. Rev 6
+freezes the two remaining lifecycle/availability contracts (the queued-GSO SEND-batch lifetime, and
+the completion-datagram creation rules) plus the M5.1 allocation contract, so the increment chain
 (M5.1–M5.4) is implementable.
+
+### Rev 6 changelog — two lifecycle/availability blockers + allocation contract (map in §13)
+
+- **E1 (queued-GSO SEND-batch lifetime):** §4.5/§7 — a queued GSO group keeps reading `b`'s buffer
+  **asynchronously** across later writable/completion events, so a SEND batch is **not** transient once
+  GSO is in flight. Frozen: `b` records its owning datagram + direction + `gso_busy`; the send APIs
+  reject a `b` from another datagram or without SEND direction; `kl_datagram_batch_free(b)` returns
+  `-1` while `gso_busy`; close/discard releases the group and clears `gso_busy` but does **not** free a
+  caller-owned `b`; the caller must keep **both** `b` and its datagram alive until the group retires or
+  close/discard completes.
+- **E2 (completion creation rules — make the fallback reachable):** §3/§6.4/§7 — SEND-batch creation is
+  allowed on **both** readiness and completion datagrams (so the completion single-flight send fallback
+  is reachable — D-M5-3 was self-contradictory); RECV attachment stays readiness-only; **BOTH** is
+  refused on a completion datagram (create SEND explicitly). Completion `send_batch` = enqueue + the
+  single-flight pump; completion `send_gso` = the admitted per-segment fallback (no native completion
+  GSO seam in M5).
+- **Allocation contract (M5.1):** §6.4 — `batch_create` validates `n_slots > 0`, `slot_bufsz > 0`, and
+  guards `n_slots * slot_bufsz` against `SIZE_MAX` before allocating.
 
 ### Rev 5 changelog — three rev-4 contradictions + editorial (map in §13)
 
@@ -126,9 +144,18 @@ recv delivery seam** with a batch-backed yield adapter (§5), and **one core-own
 arrays, the recv buffer, the GSO staging buffer) is allocated once at create/attach; nothing allocates
 on a send/recv edge.
 
-**D-M5-3 — readiness-only (O-C).** The extension activates only when `core->completion == 0`. On a
-completion datagram, `kl_datagram_recv_attach_batch` is refused; `kl_datagram_send_batch` /
-`send_gso` admit+drain via the single-flight completion pump (correct, unbatched).
+**D-M5-3 — batching fast paths are readiness-only; SEND is creatable on both backends (O-C, E2).** The
+recvmmsg / sendmmsg fast paths and GRO activate only when `core->completion == 0`. Creation/activation
+rules (E2), so the completion send fallback is reachable:
+- `batch_create(RECV)` requires a readiness datagram (completion ⇒ NULL); `recv_attach_batch` stays
+  readiness-only.
+- `batch_create(SEND)` is allowed on **both** readiness and completion datagrams.
+- `batch_create(BOTH)` is refused on a completion datagram (create `SEND` explicitly).
+- On a **completion** datagram: `kl_datagram_send_batch` = `enqueue`-prefix + the existing single-flight
+  completion pump (`send_pump`, posts one op at a time — correct, unbatched); `kl_datagram_send_gso` =
+  the admitted per-segment fallback (the group's `mode` is always `FALLBACK`; each segment is a normal
+  single-flight completion send). A native completion GSO seam (one `send_gso` op posted to the
+  backend) is deferred (§10, O-1). The queued-GSO buffer lifetime (§4.5) applies on both backends.
 
 ## 4. SEND — enqueue-only transaction, prefix-only retirement, atomic GSO (B1, B2, B5)
 
@@ -264,6 +291,27 @@ queue. Frozen — the **recoverable send-error policy**, restoring `KlUdp`'s per
 `s->err` remains reserved for a genuinely fatal transport failure (not an isolated per-datagram error).
 Both §4.2's isolated-head hard error and §4.3's GSO other-hard-error use this policy.
 
+### 4.5 Queued-GSO SEND-batch lifetime (E1) — a SEND batch is NOT transient while a group is in flight
+
+A plain `send_batch` IS transient: its `descs` are copied into core slots at `enqueue`, and `b`'s `tx`
+staging is read only during the synchronous flush — nothing references `b` after the call. **GSO is
+different:** the queued group keeps reading `b`'s group buffer **asynchronously** across later writable
+edges (readiness) or completion sends until the group retires. So `b` is a live object bound to its
+datagram for the group's lifetime. Frozen:
+- **`b` records** its owning `KlDatagram *`, its `KlDgramBatchDir`, and a `gso_busy` flag.
+- **The send APIs validate `b`:** `kl_datagram_send_batch` / `kl_datagram_send_gso` reject (`ERROR`) a
+  `b` whose owner ≠ this datagram, or a `b` without SEND in its direction. (`send_gso` additionally
+  needs the group buffer, i.e. a SEND/BOTH batch — §4.3.)
+- **`gso_busy`** is set when a GSO group from `b` is admitted (queued) and cleared when that group
+  fully **retires** OR when the datagram's **close/discard** releases it (§4.3 step 6).
+- **`kl_datagram_batch_free(b)` returns `-1` while `gso_busy`** (the group is still reading the buffer);
+  it succeeds once the group has retired or after close/discard cleared `gso_busy`.
+- **Close / discard** releases the group and clears `gso_busy`, but does **NOT** free a caller-owned
+  `b` (a SEND batch is caller-owned — only a *consumed* RECV batch is core-owned, §5.4). The caller
+  frees `b` afterward via `kl_datagram_batch_free`.
+- **Caller obligation:** keep **both** `b` and its datagram alive until the group retires or
+  close/discard completes. Reusing `b` for a new `send_gso`/`send_batch` is permitted once `!gso_busy`.
+
 ## 5. RECV — borrowed-view delivery seam, held-buffer pause, core-owned teardown (B3, B4)
 
 ### 5.1 Borrowed-view delivery (B3) — the owned inbound slot is NOT repointed
@@ -333,10 +381,11 @@ reviewer's simpler contract):
 - **`!stopped` breaks before slot N+1.** A stop/close from delivery N sets `stopped=1`; the loop's
   top-of-iteration `!stopped` check returns before the next yield. (This, plus the deferred tail free —
   NOT `recv_inflight` — is the safety.)
-- **`kl_datagram_batch_free(b)` is ONLY for a never-successfully-attached batch** — a SEND batch
-  (§7, transient/caller-owned: its `tx` staging is copied into core slots at enqueue and referenced
-  only during the synchronous flush, so nothing points into it after `send_batch` returns), or a RECV
-  batch whose attach returned `-1`. It is never called on a consumed (successfully-attached) batch.
+- **`kl_datagram_batch_free(b)` is ONLY for a never-successfully-attached batch** — a **SEND** batch
+  (caller-owned; for a plain `send_batch` its `tx` staging is copied into core slots at enqueue and read
+  only during the synchronous flush, but a **queued GSO group keeps reading it asynchronously** until it
+  retires, so `batch_free` is refused while `gso_busy` — §4.5), or a RECV batch whose attach returned
+  `-1`. It is never called on a consumed (successfully-attached RECV) batch.
 
 ## 6. Capability model (semantic cleanup)
 
@@ -380,14 +429,22 @@ is an additive enum change (values unchanged, appended last) — M5.1 must audit
 switches to add a `default`/case (the `-Wswitch` surface is small: the completion drain + connect
 paths).
 
-### 6.4 Create never fails on capability absence (B6)
+### 6.4 Create rules, allocation contract, capability-independence (B6, E2)
 
-`kl_datagram_batch_create(dg, dir, n_slots, slot_bufsz)` allocates the provider `rx_batch`/`tx_batch`
-block for a direction **only when that direction's cap is present**; when absent it leaves the block
-NULL and the flush/refill takes the **portable fallback** (single `send`/`recv` loop, §4.2/§5.2). So
-create **succeeds regardless of caps** — otherwise the fallback would be unreachable. Create fails only
-for a **completion-mode** datagram (O-C) or **OOM**. A `RECV` batch is still useful without `RX_BATCH`
-(GRO-split via a single-`recv` refill).
+`kl_datagram_batch_create(dg, dir, n_slots, slot_bufsz)`:
+- **Allocation contract (M5.1):** validate `n_slots > 0` and `slot_bufsz > 0`, and guard
+  `n_slots * slot_bufsz` against overflow (`n_slots > SIZE_MAX / slot_bufsz` ⇒ NULL) **before** any
+  allocation. The SEND/BOTH group buffer is `n_slots * slot_bufsz` (§4.3); the RECV payload storage is
+  the provider `rx_batch` block.
+- **Backend rules (E2):** `RECV` requires a readiness datagram (completion ⇒ NULL); `SEND` is allowed
+  on **both** readiness and completion; `BOTH` is refused on a completion datagram (create `SEND`).
+- **Capability-independence (B6):** the provider `rx_batch`/`tx_batch` block is allocated for a
+  direction **only when that direction's cap is present**; when absent the block is NULL and the
+  flush/refill takes the **portable fallback** (single `send`/`recv` loop, §4.2/§5.2). Create
+  **succeeds regardless of caps** — otherwise the fallback would be unreachable. A `RECV` batch is still
+  useful without `RX_BATCH` (GRO-split via a single-`recv` refill).
+- **Create fails** only for: `n_slots`/`slot_bufsz` invalid or overflowing; a completion datagram with
+  `dir` ∈ {`RECV`, `BOTH`}; or OOM.
 
 ## 7. Public surface (`keel/datagram_batch.h`)
 
@@ -395,29 +452,34 @@ for a **completion-mode** datagram (O-C) or **OOM**. A `RECV` batch is still use
 typedef struct KlDatagramBatch KlDatagramBatch;
 typedef enum { KL_DGRAM_BATCH_RECV=1, KL_DGRAM_BATCH_SEND=2, KL_DGRAM_BATCH_BOTH=3 } KlDgramBatchDir;
 
-/* Create once (allocates ext + present-cap provider blocks + staging). NULL only on completion-mode
- * datagram (O-C) or OOM — never on capability absence (§6.4). */
+/* Create once (bound to `dg`; validates n_slots>0 / slot_bufsz>0 / overflow, §6.4; allocates ext +
+ * present-cap provider blocks + the SEND/BOTH group buffer). NULL on invalid/overflowing sizes, OOM,
+ * a completion datagram with dir RECV/BOTH (E2), else success regardless of caps (§6.4). */
 KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir, int n_slots, size_t slot_bufsz);
-/* Free a batch that was NEVER successfully attached (a SEND batch, or a RECV batch whose attach
- * returned -1). NEVER call on a consumed (successfully-attached) batch — the core owns it (§5.4). */
+/* Free a SEND batch (caller-owned), or a RECV batch whose attach returned -1. Returns -1 while a GSO
+ * group is in flight (gso_busy, §4.5). NEVER call on a consumed (successfully-attached RECV) batch —
+ * the core owns it (§5.4). */
 int              kl_datagram_batch_free(KlDatagramBatch *b);
 
-/* SEND (transient/caller-owned): enqueue-only accepted prefix + one batch flush (§4.1). Returns the
- * accepted count; *stop classifies descs[accepted] (ACCEPTED if all n taken). */
+/* SEND: enqueue-only accepted prefix + one batch flush (§4.1). `b` must be a SEND/BOTH batch owned by
+ * `dg` (else ERROR). Returns the accepted count; *stop classifies descs[accepted] (ACCEPTED if all n
+ * taken). Plain send_batch is transient (nothing references b after return). */
 int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDesc *descs, int n,
                            KlDatagramSendStatus *stop);
-/* GSO: `b` = a caller-preallocated SEND/BOTH batch; its storage is the group buffer (capacity
- * n_slots*slot_bufsz, D3 — no call-time alloc). Validated (seg!=0; buf non-NULL for len>0;
- * overflow-safe nseg) atomic nseg admission as a queued FIFO group, then one send_gso or the same
- * normal sequence (§4.3). ERROR on bad args; TOO_LARGE past capacity/budget; WOULD_BLOCK if b's group
- * is already outstanding. */
+/* GSO: `b` = a caller-preallocated SEND/BOTH batch owned by `dg` (else ERROR); its storage is the group
+ * buffer (capacity n_slots*slot_bufsz, D3 — no call-time alloc). Validated (seg!=0; buf non-NULL for
+ * len>0; overflow-safe nseg) atomic nseg admission as a queued FIFO group, then one send_gso or the
+ * same normal sequence (§4.3). ERROR on bad args/ownership/direction; TOO_LARGE past capacity/budget;
+ * WOULD_BLOCK if b's group is already outstanding. The group reads b ASYNCHRONOUSLY until it retires:
+ * keep b AND dg alive until then; b is gso_busy (batch_free refused) meanwhile (§4.5). */
 KlDatagramSendStatus kl_datagram_send_gso(KlDatagram *dg, KlDatagramBatch *b, const void *buf,
                                           size_t total_len, uint16_t segment_size, const KlSockAddr *peer);
 int  kl_datagram_gso_active(const KlDatagram *dg);
 
-/* RECV: attach BEFORE recv_start on a readiness datagram. On success (0) the core CONSUMES b — the
- * caller must never touch b again (§5.4, C3). On -1, b is untouched and caller-owned. The machine
- * then delivers via the borrowed view (§5.1), GRO split by default (whole via on_recv_segments). */
+/* RECV: attach BEFORE recv_start on a readiness datagram (`b` a RECV/BOTH batch owned by `dg`). On
+ * success (0) the core CONSUMES b — the caller must never touch b again (§5.4, C3). On -1 (completion
+ * datagram, wrong owner/direction, re-attach), b is untouched and caller-owned. The machine then
+ * delivers via the borrowed view (§5.1), GRO split by default (whole via on_recv_segments). */
 int  kl_datagram_recv_attach_batch(KlDatagram *dg, KlDatagramBatch *b);
 typedef void (*KlDatagramRecvSegmentsFn)(void *ud, const void *data, size_t len, size_t segment_size,
                                          const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
@@ -430,13 +492,14 @@ unchanged. Internal: `KlDgramCore` gains `KlDgramBatchExt *ext` + `int gso_unsup
 `kl_dgram_send_flush_batch` + the `submit_batch` adapter; the recv machine gains the borrowed-view
 yield/deliver path.
 
-## 8. `KlUdpServer` migration (unchanged from rev 2)
+## 8. `KlUdpServer` migration
 
 No API/ABI change. `kl_udp_server_init` threads `KlDatagramPrep.rx_caps` into `cfg.accepted_rx_caps`;
-if `mmsg_batch>1` / `recv_gro` and the provider reports `RX_BATCH`/`GRO`, it `batch_create(RECV)` +
-`recv_attach_batch` before `recv_start`. Handler unchanged (one logical datagram at a time, GRO
-split). Reply stays single-send (O-B). Batch is core-adopted → reclaimed at the server datagram's
-teardown. Absent caps ⇒ M4 single-flight (no regression).
+on a **readiness** server datagram, if `mmsg_batch>1` / `recv_gro` and the provider reports
+`RX_BATCH`/`GRO`, it `batch_create(RECV)` + `recv_attach_batch` before `recv_start`. Handler unchanged
+(one logical datagram at a time, GRO split). Reply stays single-send (O-B). The consumed RECV batch is
+core-owned → reclaimed at the server datagram's teardown. **On a completion-backend server**
+(`batch_create(RECV)` ⇒ NULL, readiness-only per E2) OR absent caps ⇒ M4 single-flight, no regression.
 
 ## 9. Byte-only queue OUT (O-D); post-M5 options (unchanged)
 
@@ -467,6 +530,17 @@ CONTRACT or the allocation-free hot path. Deferred: native completion batching (
   releases the whole remaining group; `total`-byte accounting released correctly; GSO latch → fallback.
 - **GSO validation:** `seg==0` / `buf==NULL && len>0` ⇒ ERROR; overflow-safe `nseg` (huge `total_len`
   ⇒ ERROR, not a wrapped small `nseg`); byte-budget arithmetic guarded.
+- **Queued-GSO batch lifetime (§4.5, E1):** `batch_free` while a GSO group is in flight ⇒ `-1`
+  (gso_busy); succeeds after the group retires or after close/discard; a `send_gso`/`send_batch` with a
+  `b` owned by another datagram ⇒ ERROR; a `send_gso` on a RECV-only batch ⇒ ERROR; a second `send_gso`
+  reusing `b` after the first group retired succeeds; close/discard with a group in flight clears
+  gso_busy + releases the group but leaves `b` freeable, no leak/UAF (ASan/UBSan/LSan).
+- **Completion creation/fallback (§6.4, E2):** `batch_create(RECV)`/`(BOTH)` on a completion datagram ⇒
+  NULL; `batch_create(SEND)` on a completion datagram succeeds; completion `send_batch` delivers via the
+  single-flight pump (one op at a time); completion `send_gso` delivers the per-segment fallback
+  sequence; the group buffer lifetime (E1) holds across the async completion sends.
+- **Allocation contract (§6.4):** `n_slots==0` / `slot_bufsz==0` ⇒ NULL; `n_slots * slot_bufsz`
+  overflow ⇒ NULL (no allocation).
 - **Borrowed view + GRO (§5.1/§5.2):** one recvmmsg → N serial `on_recv` (view data into ext storage,
   not the owned slot; GRO buffer > `recv_cap` delivered un-clamped); GRO split per-segment by default,
   whole to `on_recv_segments`; GRO active only with provider GRO support AND `accepted_rx_caps` GRO.
@@ -486,13 +560,16 @@ CONTRACT or the allocation-free hot path. Deferred: native completion batching (
 1. **M5.1** — the four `provider_caps` bits + `KlDatagramConfig.accepted_rx_caps` (masked) stored
    separately + GRO = provider-support AND accepted; **`KL_IO_UNSUPPORTED`** appended to `KlIoStatus` +
    the hosted `EOPNOTSUPP`→it mapping + the `-Wswitch` audit (§6.3); `KlDgramBatchExt` +
-   `KlDatagramBatch` create/free (create-never-fails-on-caps; the SEND/BOTH batch preallocates the GSO
-   group buffer, D3); the core `ext`/`gso_unsupported`/`accepted_rx_caps` fields. No wiring.
+   `KlDatagramBatch` create/free (validate `n_slots>0`/`slot_bufsz>0`/overflow; create-never-fails-on-
+   caps; SEND allowed on completion, RECV/BOTH readiness-only, E2; `b` records owner/dir/`gso_busy`, E1;
+   the SEND/BOTH batch preallocates the GSO group buffer, D3); the core `ext`/`gso_unsupported`/
+   `accepted_rx_caps` fields. No wiring.
 2. **M5.2 — send.** `kl_dgram_send_enqueue` + `kl_dgram_send_flush_batch` (prefix retire + `-1`
    `io_status` classification + single-send isolation, C1) + the **recoverable send-error policy**
-   (§4.4, D1) + `submit_batch` + portable fallback; `kl_datagram_send_batch` (transaction + `*stop`);
-   `kl_datagram_send_gso(dg, b, …)` (validated atomic nseg admission + the queued FIFO group +
-   three-way `io_status` classification + UNSUPPORTED-only latch + fallback, C2/D2/D3).
+   (§4.4, D1) + `submit_batch` + portable fallback; `kl_datagram_send_batch` (transaction + `*stop`;
+   readiness batch-drain, completion single-flight pump — E2); `kl_datagram_send_gso(dg, b, …)`
+   (validated atomic nseg admission + the queued FIFO group + `gso_busy` lifetime + owner/direction
+   checks, E1 + three-way `io_status` classification + UNSUPPORTED-only latch + fallback, C2/D2/D3).
 3. **M5.3 — recv.** the borrowed-view seam + yield adapter + GRO split + held-buffer pause/resume +
    `recv_attach_batch` (core adoption) + `recv_segments`; teardown-from-delivery-N + destructive-tail
    reclamation tests.
@@ -520,6 +597,9 @@ CONTRACT or the allocation-free hot path. Deferred: native completion batching (
 | D1 | batch hard-error vs sticky `s->err` | §4.4 recoverable send-error policy (drop + `dropped++` + facade `last_error`, NOT `s->err`, continue); `s->err` stays fatal-only |
 | D2 | GSO error class contradicts §6.3 | §4.3/§6.3 three `io_status` outcomes: WOULD_BLOCK retain; UNSUPPORTED-only latch+fallback; other hard error → §4.4 (no fallback retransmit); `KL_IO_UNSUPPORTED` added |
 | D3 | GSO hot-alloc + no capacity source | §4.3/§7 `send_gso(dg, b, …)` uses the caller-preallocated SEND/BOTH batch buffer (cap `n_slots×slot_bufsz`); no call-time alloc |
+| E1 | queued GSO batch referenced after return | §4.5 `b` records owner/dir/`gso_busy`; send APIs reject wrong owner/direction; `batch_free` `-1` while busy; close/discard clears busy without freeing `b`; caller keeps `b`+dg alive |
+| E2 | completion creation/fallback unreachable | §3/§6.4/§7 `SEND` create allowed on completion; `RECV`/`BOTH` refused; completion `send_batch` = single-flight pump, `send_gso` = per-segment fallback |
+| — | M5.1 allocation contract | §6.4 validate `n_slots>0` / `slot_bufsz>0` / guard `n_slots*slot_bufsz` overflow before allocating |
 
 ## 14. Open decisions for the reviewer
 
