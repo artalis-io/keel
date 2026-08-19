@@ -598,11 +598,32 @@ CONTRACT or the allocation-free hot path. Deferred: native completion batching (
 3. **M5.3 — recv.** the borrowed-view seam + yield adapter + GRO split + held-buffer pause/resume +
    `recv_attach_batch` (core adoption) + `recv_segments`; teardown-from-delivery-N + destructive-tail
    reclamation tests.
-4. **M5.4 — `KlUdpServer` opt-in.** thread `accepted_rx_caps`; wire `mmsg_batch`/`recv_gro`; parity +
-   every-backend conformance + teardown ordering.
+4. **M5.4 — `KlUdpServer` opt-in. IMPLEMENTED.** `kl_udp_server_init` threads `prep.rx_caps` into
+   `KlDatagramConfig.accepted_rx_caps`, enables GRO capture on a readiness loop (`uc.recv_gro`), and —
+   when `mmsg_batch>1`/`recv_gro` and the provider reports `RX_BATCH`/`GRO` — creates a RECV
+   `KlDatagramBatch` (`n_slots` = the normalized `mmsg_batch`, `slot_bufsz = max(recv_cap, 65535)` under
+   GRO) and attaches it before `recv_start`. `mmsg_batch` is normalized exactly as `KlUdp`: `0` → default
+   16, capped to `[1, 64]`, `1` disabling batching.
+   - **Batching alone is a throughput optimization** — `batch_create` NULL on a completion datagram (E2)
+     OR a create/attach failure falls back to the M4 single-flight recv with no behavioral change.
+   - **Accepted GRO makes a successfully-SPLITTING attachment MANDATORY (correctness, not fallback).**
+     Keyed to the ACCEPTED RX bit (`prep.rx_caps & KL_DGRAM_RX_GRO`), not merely provider support: once
+     GRO capture is on the socket, the single-flight receiver cannot split a coalesced buffer, so multiple
+     logical datagrams would reach the handler as one. So if GRO is enabled but active splitting is not
+     achieved — the batch failed to create/attach, OR it attached but the §6.2 two-part gate is not
+     satisfied (`provider_caps & KL_DGRAM_CAP_GRO` missing → the attached batch does NOT split) — init
+     TEARS DOWN (closes the fd) and FAILS with `KL_ERR_UNSUPPORTED`. It does NOT silently fall back.
+   The handler still sees one logical datagram per call (the batch splits GRO buffers before dispatch).
+   Reply stays single-send (O-B). The consumed RECV batch is core-owned → reclaimed at the server
+   datagram's teardown. Tests: `m54_mmsg_batch_parity`; `m54_gro_splits_to_handler` (a GRO-fabricating
+   mock → one coalesced datagram split into 3 per-segment handler calls); `m54_gro_batch_failure_fails_
+   init` (rx_batch_new NULL → init -1); `m54_gro_accepted_but_no_provider_cap_fails` (RX_GRO accepted but
+   CAP_GRO absent → attached-but-inactive split → init -1); `m54_mmsg_normalization` (0→16 / 1→no batch /
+   100→64 / 32→32). Validated macOS + pollcomp + container epoll (attached batch, real recvmmsg + the two
+   GRO-mandatory-failure regressions) + io_uring (single-flight) under ASan/UBSan/LSan; MinGW clean.
 5. **(post-M5)** `KlUdp` decision (§9) + mode B: separate freezes.
 
-**Order:** M5.1 → {M5.2, M5.3} → M5.4. Independent of any `KlUdp` change.
+**Order:** M5.1 → {M5.2, M5.3} → M5.4. Independent of any `KlUdp` change. **M5 (M5.1–M5.4) COMPLETE.**
 
 ## 13. Findings resolution map
 
