@@ -17,10 +17,18 @@ reject *every* `kl_udp_init`, even when the caller only uses `send_to`. Fixed (�
 - **Additive seam:** new `KlDatagramConfig.optional_caps` (grant-if-supported), distinct from mandatory
   `want_caps`: `granted = want_caps | (optional_caps & provider_caps)`. Unsupported optional caps are
   silently dropped, not a failure; they degrade at the feature entry point.
+- **Request EVERY cap the public API may use, unconditionally (rev-4 P1 fix).** `optional_caps =
+  CONNECTED | SOURCE_PIN | TOS | MULTICAST` (+ M6.2b/c caps as they land) — NOT derived from
+  `KlUdpConfig` knobs. The runtime feature functions (`send_to_from`, `send_to_tos`,
+  `multicast_join`/`leave`, `send_gso`) are callable regardless of init options, so knob-derivation would
+  regress them to `UNSUPPORTED` on a capable provider. The seam intersects with `provider_caps`, so the
+  over-request is harmless. Socket-config knobs + accepted-RX capture stay separate (GRO keeps its
+  two-part support+capture gate).
 - **`kl_udp_connect` runs `kl_sock_connect` and succeeds only where connected sends are supported**
   (CONNECTED granted); it sets the wrapper's own `connected` state.
 - **`kl_udp_send` (peerless) requires BOTH** the granted CONNECTED cap **AND** the wrapper's successful
-  connect-state — capability support alone is not connection.
+  connect-state — capability support alone is not connection. Send-before-connect is refused with
+  `KL_ERR_INVALID_ARG` (frozen — no new error enumerator).
 - **New M6.1 regressions:** reduced-provider init (`caps` op NULL → `kl_udp_init` + `send_to` succeed;
   `kl_udp_connect` → `KL_ERR_UNSUPPORTED`, peerless send refused) and send-before-connect (refused, not UB).
 
@@ -234,12 +242,29 @@ roles must be decoupled.
   the single NULL-`caps`-op → 0 rule inside `datagram.c` (the alternative — the wrapper deriving
   `provider_caps` itself before adoption and intersecting — duplicates that rule across the seam and is
   rejected in favor of the additive field).
-- **`kl_udp_init` grants, never demands.** It passes `want_caps = 0` (ordinary unconnected `send_to`
-  works on *every* provider, incl. reduced/freestanding) and `optional_caps =` the KlUdp feature set
-  derived from `KlUdpConfig` (`KL_DGRAM_CAP_CONNECTED` always, plus `SOURCE_PIN`/`TOS`/`MULTICAST` per
-  the configured knobs). Unsupported optional caps degrade at the **feature entry point** (e.g.
-  `send_to_from` returns `-1`/`KL_ERR_UNSUPPORTED` when `SOURCE_PIN` was not granted), matching KlUdp's
-  historical best-effort sockopt behavior — never at init.
+- **`kl_udp_init` grants, never demands — and requests EVERY cap the public API may use.** It passes
+  `want_caps = 0` (ordinary unconnected `send_to` works on *every* provider, incl. reduced/freestanding)
+  and requests `optional_caps` **unconditionally**, NOT "per configured knob":
+  ```c
+  optional_caps = KL_DGRAM_CAP_CONNECTED   /* kl_udp_connect + peerless send */
+                | KL_DGRAM_CAP_SOURCE_PIN   /* kl_udp_send_to_from — needs NO recv_pktinfo config */
+                | KL_DGRAM_CAP_TOS          /* kl_udp_send_to_tos  — needs NO socket-default TOS config */
+                | KL_DGRAM_CAP_MULTICAST    /* runtime kl_udp_multicast_join/leave */
+                /* + M6.2b/c caps (e.g. KL_DGRAM_CAP_GSO) as those feature increments land */;
+  ```
+  The runtime feature entry points (`send_to_from`, `send_to_tos`, `multicast_join`/`leave`, later
+  `send_gso`) are callable irrespective of any init knob, so deriving these caps from `KlUdpConfig`
+  options would wrongly deny them on a *capable* provider (e.g. source-pin does not require
+  `recv_pktinfo`; per-packet TOS does not require a socket-default `tos`). The additive seam makes the
+  over-request harmless: unsupported bits are intersected out (`optional_caps & provider_caps`).
+  Unsupported optional caps then degrade at the **feature entry point** (e.g. `send_to_from` returns
+  `-1`/`KL_ERR_UNSUPPORTED` when `SOURCE_PIN` was not granted), matching KlUdp's historical best-effort
+  sockopt behavior — never at init.
+- **Socket configuration and accepted-RX capture stay SEPARATE from `optional_caps`.** The `KlUdpConfig`
+  sockopt knobs still drive `kl_datagram_open`/`configure()` (socket defaults), and RX capture
+  (`accepted_rx_caps`) is unchanged — in particular **GRO** still needs its M5.3 two-part gate (provider
+  `CAP_GRO` support **AND** `accepted_rx_caps & KL_DGRAM_RX_GRO`), which `optional_caps` neither grants
+  nor bypasses.
 
 **`kl_udp_connect` (corrected).** It calls the **provider-neutral socket connect seam** —
 `kl_sock_connect(sockets, kl_datagram_fd(&udp->dg), peer)` — exactly as today (`udp.c` currently does
@@ -255,8 +280,8 @@ socket.
 only when (a) `CAP_CONNECTED` was granted (so the send machine accepts `peer == NULL`) **AND** (b) the
 wrapper's own `connected` flag is set (i.e. `kl_udp_connect` actually ran `kl_sock_connect` successfully).
 Capability support alone is NOT connection: a `kl_udp_send` issued **before** `kl_udp_connect` is refused
-`-1` via the existing invalid-state surface (`KL_ERR_INVALID_ARG`; M6.1 MAY add a clearer additive
-`KL_ERR_NOT_CONNECTED` code), never passed to the kernel on an unconnected socket.
+`-1` with `KL_ERR_INVALID_ARG` (frozen — no new enumerator; a `KL_ERR_NOT_CONNECTED` code would add no
+architectural value), never passed to the kernel on an unconnected socket.
 
 **Backpressure = BOTH (preallocated).** `max_send_queue` (bytes) → the M1 `send_byte_budget`;
 `send_slots` derived from the budget (per the M4 `KlUdpServer` sizing: full-datagram `send_slot_cap`,
@@ -295,11 +320,14 @@ Per **O-KLUDP-3 (ruled)**, M6.2 splits finer. Order: **M6.1 → M6.2a → M6.2b 
    `recv_start`/`recv_stop`/`on_drain`; `fd`/`local_port`/`last_error`; the revised `send_queued`(bytes,
    via the new `KlDatagram` byte accessor)/`dropped`/`truncated`. The plain UDP client, end to end.
    - **Opportunistic capability policy (§7, rev 4):** add the additive `KlDatagramConfig.optional_caps`
-     grant-if-supported seam; `kl_udp_init` passes `want_caps = 0` + `optional_caps =` the KlUdp feature
-     set (so ordinary unconnected `send_to` succeeds on *every* provider incl. reduced/freestanding).
-     `kl_udp_connect` calls `kl_sock_connect`, succeeds only where CONNECTED was granted, and sets the
-     wrapper `connected` flag. Peerless `kl_udp_send` requires the granted CONNECTED cap AND the
-     `connected` flag.
+     grant-if-supported seam; `kl_udp_init` passes `want_caps = 0` + `optional_caps = CONNECTED |
+     SOURCE_PIN | TOS | MULTICAST` (every cap the public API may use, **unconditionally** — NOT
+     knob-derived, since the runtime feature functions are callable regardless of init options; the seam
+     intersects with `provider_caps` so the over-request is harmless). Ordinary unconnected `send_to`
+     succeeds on *every* provider incl. reduced/freestanding. `kl_udp_connect` calls `kl_sock_connect`,
+     succeeds only where CONNECTED was granted, and sets the wrapper `connected` flag. Peerless
+     `kl_udp_send` requires the granted CONNECTED cap AND the `connected` flag. Socket-config +
+     accepted-RX capture (GRO two-part gate) stay separate.
    - **Regressions:** full parity re-run of the existing `test_udp` behavioral cases (adjusted for the
      bounded-queue revision), PLUS **reduced-provider init** (a provider with a NULL `caps` op →
      `kl_udp_init` + `send_to` succeed; `kl_udp_connect` fails `KL_ERR_UNSUPPORTED`; peerless
