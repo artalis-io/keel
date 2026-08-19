@@ -1,8 +1,31 @@
-# Datagram M5 — Batch / GSO / GRO high-throughput extension (design freeze, rev 3)
+# Datagram M5 — Batch / GSO / GRO high-throughput extension (design freeze, rev 4)
 
-**Status:** DESIGN FREEZE (docs-only), **revision 3**. No production code, no ABI change, no consumer
-migration here. Rev 3 freezes the concrete state-machine, lifetime, and ownership contracts that rev 2
-left open, so the increment chain (M5.1–M5.4) is implementable.
+**Status:** DESIGN FREEZE (docs-only), **revision 4**. **This docs commit changes no ABI**; the design
+it freezes intentionally introduces one ABI break in M5.1 — appending
+`KlDatagramConfig.accepted_rx_caps` (O-E, accepted because there are no consumers). No production code
+or consumer migration here. Rev 4 closes the three remaining rev-3 P1 contract gaps (send `-1`
+classification, GSO FIFO ordering, core-vs-handle ownership) plus two smaller corrections, so the
+increment chain (M5.1–M5.4) is implementable.
+
+### Rev 4 changelog — the three rev-3 blockers + two corrections (map in §13)
+
+- **C1 (send `-1` must be classified before isolation):** §4.2 — after `send_batch` returns `-1`,
+  inspect `kl_sock_io_status(provider)` **immediately** (before any other provider call overwrites it):
+  `KL_IO_WOULD_BLOCK` retains the entire unsent prefix and re-arms; only a hard error enters single-send
+  isolation.
+- **C2 (GSO is a queued FIFO group):** §4.3 — a GSO reservation is appended at the FIFO **tail** and
+  submitted only when its first segment reaches the head; the group records `nseg` / remaining /
+  offsets / GSO-or-fallback state; its staging buffer is pinned until the group retires, so a second
+  outstanding GSO is `WOULD_BLOCK` (one preallocated group buffer). Close/discard releases the whole
+  remaining group reservation.
+- **C3 (adoption vs the public handle — full transfer):** §5.4/§7 — a **successful**
+  `kl_datagram_recv_attach_batch` **consumes `b`**; the caller must never touch it again (no
+  `batch_free`). A failed attach leaves ownership with the caller. This removes the "how does `b` learn
+  it was reclaimed" ambiguity — there is nothing left in `b` for the caller.
+- **Correction — GSO validation/overflow:** §4.3 — `segment_size != 0`; non-NULL `buf` for nonzero
+  length; overflow-safe `nseg`; guarded `size_t`↔slot-count and byte-budget arithmetic.
+- **Correction — ABI wording:** the intro now states the docs commit changes no ABI while M5.1
+  intentionally will.
 
 **Supersedes** the M5 framing in
 [`datagram_consolidation_design.md`](datagram_consolidation_design.md) §6.5. `KlUdp` is UNTOUCHED by
@@ -127,43 +150,73 @@ partial admission and **no** direct-send of individual entries.
 2. **Stage** `KlDgramTxDesc[k]` from `ring[head .. head+k)` (data/len/peer/local/tos) into the batch's
    `tx_batch` block.
 3. **Submit once**: `submit_batch(ctx, fd, tx_batch, descs, k) → sent` (provider `send_batch` = one
-   `sendmmsg`, or the portable single-`send` loop under `!TX_BATCH`, §6.4). `sent ∈ [0, k]` **or** `-1`.
+   `sendmmsg`, or the portable single-`send` loop under `!TX_BATCH`, §6.4). `sent ∈ [0, k]` **or** `-1`
+   (the provider contract returns `-1` for **both** EAGAIN and a hard error — C1).
 4. **Retire exactly `sent`** from the head (release slots, `bytes_used -= len`, advance `head`,
    `count -= sent`) via the existing retire path (byte accounting + full→non-full + drain edges).
-5. Interpret the remainder:
+5. Interpret the result:
    - `sent == k`: fully drained this batch — loop for the next head-run if `count > 0` (bounded).
-   - `0 ≤ sent < k` (incl. 0, i.e. EAGAIN): **transient** — retain the remainder in FIFO order,
-     re-arm WRITE interest, return. Never drop.
-   - `sent == -1` (hard error, no prefix info — `sendmmsg` cannot name the offending descriptor):
-     **isolate via single-send** — submit ONLY the head slot through the existing single submit
-     adapter (`send_submit_slot(s,0)`): `DONE` → retire the head, continue; `WOULD_BLOCK` → retain +
-     re-arm; **hard error → drop exactly that (now-identified) head slot** (`dropped++`, sticky `err`),
-     advance. This isolates a permanently-bad descriptor to its own syscall; the batch path **never
-     infers** which of the `k` slots failed.
+   - `0 ≤ sent < k` (incl. 0): **transient** — retain the remainder in FIFO order, re-arm WRITE
+     interest, return. Never drop.
+   - `sent == -1` (**C1 — classify before isolating**): call `kl_sock_io_status(provider)`
+     **immediately after** `send_batch`, before any other provider call can overwrite it, and cache the
+     `KlIoStatus`:
+     - `KL_IO_WOULD_BLOCK`: **transient** — retain the **entire** unsent prefix (nothing was sent), re-arm
+       WRITE interest, return. (`sendmmsg` blocked on the head; identical handling to `sent == 0`.)
+     - any other status (a **hard error**): **isolate via single-send** — submit ONLY the head slot
+       through the existing single submit adapter (`send_submit_slot(s,0)`), re-classifying its own
+       result via `kl_sock_io_status`: `DONE` → retire the head, continue; `KL_IO_WOULD_BLOCK` → retain +
+       re-arm; **hard error → drop exactly that (now-identified) head slot** (`dropped++`, sticky `err`),
+       advance. This isolates a permanently-bad descriptor to its own syscall; the batch path **never
+       infers** which of the `k` slots failed and **never** treats an EAGAIN as a drop.
 
 Readiness send is synchronous, so there is no async in-flight batch (`inflight_n` stays 0); FIFO,
 byte budget, edges, single-flight, and close (`discard_queued` drops the queued remainder; readiness
 retire is always `RETIRED` → DETACHED) are all the existing machinery over a prefix. Completion mode
 keeps `send_pump` (single-flight); `flush_batch` is never wired there.
 
-### 4.3 GSO — atomic nseg admission, copy-once, GSO-or-normal-sequence (B5)
+### 4.3 GSO — a queued FIFO group: tail-append, head-submit, atomic release (B5, C2)
+
+A GSO request is **not** submitted ahead of older queued datagrams; it is a queued FIFO citizen — a
+**group** occupying `nseg` contiguous slots at the tail, submitted only when its head segment reaches
+the FIFO head.
+
+**Validation / overflow (correction):** reject with `KL_DATAGRAM_ERROR` if `segment_size == 0`, or
+`buf == NULL` while `total_len > 0`. Compute `nseg` overflow-safe: reject (`ERROR`) if `total_len >
+SIZE_MAX - (segment_size - 1)`; else `nseg = (total_len + segment_size - 1) / segment_size` (0-length ⇒
+`nseg == 0` ⇒ treated as a single empty datagram, `nseg = 1`). Reject (`ERROR`) if `nseg` does not fit
+the slot-count type. The byte-budget check uses guarded arithmetic (`bytes_used > budget - total_len`
+form, never `bytes_used + total_len`).
 
 `kl_datagram_send_gso(dg, buf, total_len, seg, peer)`:
-1. **Preflight**: `nseg = ceil(total_len / seg)` logical segments (last may be short). Bounds:
-   `total_len ≤ GSO staging capacity` and `seg ≤ send_slot_cap`.
-2. **Atomic admission** of all `nseg` segments against **both** limits — `nseg` free slots AND
-   (BOTH policy) `bytes_used + total_len ≤ byte_budget`. **All-or-nothing:** if `nseg > send_slots`
-   or `total_len > byte_budget` ⇒ `TOO_LARGE` (permanent); if they don't fit right now ⇒ `WOULD_BLOCK`
-   (nothing admitted). **No partial hidden admission.**
-3. **Copy once** (copy-at-submit invariant): the whole `buf` into the core-owned GSO staging buffer;
-   reserve the `nseg` slots + `total_len` bytes as one GSO reservation.
-4. **Submit**: GSO available AND not latched (§6.3) ⇒ one `send_gso(staging, total_len, seg, peer)`
-   syscall ⇒ on `DONE` retire the whole `nseg`/`total_len` reservation atomically. Otherwise ⇒ the
-   **same admitted sequence** sent normally: `nseg` single `send`s from the staging buffer at segment
-   offsets, retiring one segment's reservation each. `WOULD_BLOCK` on submit re-arms WRITE and retains
-   the reservation (drains on the writable edge). Byte accounting = `total_len` reserved at admission,
-   released as segments retire (all at once on GSO success, per-segment on fallback). GSO occupies
-   `nseg` logical slots (not one); fallback sends the identical admitted sequence.
+1. **Preflight bounds:** `seg ≤ send_slot_cap`; `total_len ≤` the GSO group-staging capacity.
+2. **Atomic admission** of all `nseg` segments against **both** limits — `nseg` free slots AND (BOTH
+   policy) the guarded byte budget. **All-or-nothing:** `nseg > send_slots` or `total_len > byte_budget`
+   ⇒ `TOO_LARGE` (permanent); doesn't fit right now (`< nseg` free slots, or a second GSO group is
+   already outstanding — see 5) ⇒ `WOULD_BLOCK` (nothing admitted). **No partial hidden admission.**
+3. **Copy once** (copy-at-submit) the whole `buf` into the core-owned **GSO group buffer**; append the
+   group at the FIFO **tail** occupying `nseg` slots, reserving `nseg` slots + `total_len` bytes.
+4. **The group record** (referenced by its `nseg` slots): `total_len`, `seg`, `nseg`, `remaining`
+   (segments not yet retired), the next-segment `offset`, and a `mode` latched at first submission
+   (`GSO` vs `FALLBACK`). It is submitted **only when its first segment is at the FIFO head** (the
+   flush of §4.2 detects a group-head slot and diverts it out of the `sendmmsg` batch):
+   - **GSO mode** (`CAP_GSO` and not latched, §6.3): one `send_gso(group_buf, total_len, seg, peer)`
+     ⇒ on `DONE` retire the **whole** group (all `remaining` slots + bytes) atomically; `WOULD_BLOCK`
+     re-arms WRITE and retains the group at the head; a hard error latches `FALLBACK` for the group.
+   - **FALLBACK mode** (GSO absent/latched): send the **same admitted sequence** — one `send` per
+     remaining segment from `group_buf + offset`, retiring one slot + `seg` bytes each and advancing
+     `offset`/`remaining`; `WOULD_BLOCK` retains the group at the head (drains on the next writable
+     edge). Segments interleave correctly because they are contiguous head slots.
+5. **One outstanding GSO group** (single preallocated group buffer — allocated once, lazily on first
+   `send_gso` or at SEND/BOTH batch create): while a group is queued or draining, a second
+   `send_gso` returns `WOULD_BLOCK` (the buffer cannot be reused until the group retires). A future
+   enhancement may preallocate N group buffers; M5 freezes exactly one.
+6. **Close / discard** (`kl_dgram_send_discard_queued`, abortive close) releases the **complete
+   remaining group reservation** in one step — all `remaining` slots + `total_len`-consumed bytes +
+   the group buffer's pinned state — never a half-released group.
+
+Byte accounting = `total_len` reserved at admission, released as the group retires (all at once in GSO
+mode, per-segment in fallback). GSO occupies `nseg` logical slots (not one).
 
 ## 5. RECV — borrowed-view delivery seam, held-buffer pause, core-owned teardown (B3, B4)
 
@@ -217,22 +270,27 @@ iteration, `!paused && !stopped` re-checked each time). Ext cursor state (in `Kl
 ### 5.4 Ownership + teardown safety (B4, O-F) — corrected
 
 Rev 2's "`recv_inflight` prevents reclamation during delivery" is **wrong** — readiness `disarm`
-clears `recv_inflight` inside the callback. The frozen model:
-- **Core adopts the extension on attach.** `kl_datagram_recv_attach_batch(dg, b)` **transfers
-  ownership** of `b`'s ext state to the core (`core->ext = ...`); after attach the caller MUST NOT free
-  `b`. Attach is permitted only before `recv_start`, on a readiness datagram.
-- **Reclamation at the destructive tail.** The ext is freed at the core's terminal
-  (`close_detach`/`core_rx_final`), which the `busy` handshake defers past any in-progress delivery
-  frame (the `on_readable` loop brackets `on_activity`). So the borrowed view + ext buffer stay valid
-  for the whole delivery loop; slot N+1 storage is never freed mid-loop.
+clears `recv_inflight` inside the callback. The frozen model — **full ownership transfer** (C3, the
+reviewer's simpler contract):
+- **Successful attach CONSUMES `b`.** `kl_datagram_recv_attach_batch(dg, b)` transfers the ENTIRE
+  `KlDatagramBatch` (the public wrapper AND its ext/provider blocks — one allocation the core now owns
+  via `core->ext`) to the core and returns 0. **The caller must never touch `b` again** — not
+  `batch_free`, not any accessor. There is nothing left in `b` for the caller, so there is no "how does
+  `b` learn it was reclaimed" question and no dangling-pointer path. Attach is permitted only before
+  `recv_start`, on a readiness datagram; it fails (`-1`) on a completion datagram or a re-attach.
+- **Failed attach leaves ownership with the caller.** On `-1`, `b` is untouched and still caller-owned;
+  the caller frees it with `kl_datagram_batch_free(b)`.
+- **The core frees the consumed batch at its destructive tail.** `core_rx_final` /
+  `close_detach` free `core->ext` (the whole adopted `KlDatagramBatch`) exactly once, after the `busy`
+  handshake defers past any in-progress `on_readable` frame — so the borrowed view + ext buffer stay
+  valid for the whole delivery loop; slot N+1 storage is never freed mid-loop.
 - **`!stopped` breaks before slot N+1.** A stop/close from delivery N sets `stopped=1`; the loop's
-  top-of-iteration `!stopped` check returns before the next yield — slots/segments N+1.. are never
-  delivered. (This, plus deferred ext free — NOT `recv_inflight` — is the safety.)
-- **Standalone `kl_datagram_batch_free(b)`** is permitted only while `b` is **unattached** or the
-  datagram is **CLOSED** (provably idle); calling it on an attached, non-closed datagram is refused
-  (`-1`) — the core owns it, freed via close. (A **SEND** batch — §7 — is transient/caller-owned: its
-  `tx` staging is copied into core slots at enqueue and referenced only during the synchronous flush,
-  so nothing points into it after `send_batch` returns; it needs no adoption.)
+  top-of-iteration `!stopped` check returns before the next yield. (This, plus the deferred tail free —
+  NOT `recv_inflight` — is the safety.)
+- **`kl_datagram_batch_free(b)` is ONLY for a never-successfully-attached batch** — a SEND batch
+  (§7, transient/caller-owned: its `tx` staging is copied into core slots at enqueue and referenced
+  only during the synchronous flush, so nothing points into it after `send_batch` returns), or a RECV
+  batch whose attach returned `-1`. It is never called on a consumed (successfully-attached) batch.
 
 ## 6. Capability model (semantic cleanup)
 
@@ -286,20 +344,24 @@ typedef enum { KL_DGRAM_BATCH_RECV=1, KL_DGRAM_BATCH_SEND=2, KL_DGRAM_BATCH_BOTH
 /* Create once (allocates ext + present-cap provider blocks + staging). NULL only on completion-mode
  * datagram (O-C) or OOM — never on capability absence (§6.4). */
 KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir, int n_slots, size_t slot_bufsz);
-/* Free a batch. Permitted only while UNATTACHED or the datagram is CLOSED (§5.4); else -1. */
+/* Free a batch that was NEVER successfully attached (a SEND batch, or a RECV batch whose attach
+ * returned -1). NEVER call on a consumed (successfully-attached) batch — the core owns it (§5.4). */
 int              kl_datagram_batch_free(KlDatagramBatch *b);
 
 /* SEND (transient/caller-owned): enqueue-only accepted prefix + one batch flush (§4.1). Returns the
  * accepted count; *stop classifies descs[accepted] (ACCEPTED if all n taken). */
 int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDesc *descs, int n,
                            KlDatagramSendStatus *stop);
-/* GSO: atomic nseg admission then one send_gso or the normal sequence (§4.3). */
+/* GSO: validated (seg != 0; buf non-NULL for len>0; overflow-safe nseg) atomic nseg admission as a
+ * queued FIFO group, then one send_gso or the same normal sequence (§4.3). ERROR on bad args;
+ * WOULD_BLOCK if a GSO group is already outstanding (one group buffer). */
 KlDatagramSendStatus kl_datagram_send_gso(KlDatagram *dg, const void *buf, size_t total_len,
                                           uint16_t segment_size, const KlSockAddr *peer);
 int  kl_datagram_gso_active(const KlDatagram *dg);
 
-/* RECV (core-adopted on attach, §5.4): attach BEFORE recv_start; the machine delivers via the
- * borrowed view (§5.1), GRO split by default. Whole-buffer delivery via on_recv_segments. */
+/* RECV: attach BEFORE recv_start on a readiness datagram. On success (0) the core CONSUMES b — the
+ * caller must never touch b again (§5.4, C3). On -1, b is untouched and caller-owned. The machine
+ * then delivers via the borrowed view (§5.1), GRO split by default (whole via on_recv_segments). */
 int  kl_datagram_recv_attach_batch(KlDatagram *dg, KlDatagramBatch *b);
 typedef void (*KlDatagramRecvSegmentsFn)(void *ud, const void *data, size_t len, size_t segment_size,
                                          const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
@@ -337,21 +399,27 @@ CONTRACT or the allocation-free hot path. Deferred: native completion batching (
 - **Send transaction (§4.1):** `send_batch` admits an accepted prefix, `*stop` classifies the first
   refusal (WOULD_BLOCK vs TOO_LARGE vs ERROR); the remainder is untaken; enqueue-only never
   direct-sends an individual entry (assert one `sendmmsg`, not N).
-- **Prefix-only retire + isolation (§4.2):** short `sendmmsg` (sent<k) retains + re-arms; a provider
-  `send_batch` returning `-1` triggers single-send of the head (a permanently-bad head is dropped and
-  counted; a good head is retired) — no middle slot inferred. Fast path AND `NULL send_batch` fallback
-  deliver identical bytes/order.
-- **GSO (§4.3):** `nseg` atomic admission (no partial), TOO_LARGE when `nseg>send_slots` /
-  `total>budget`, WOULD_BLOCK when it can't fit now; GSO path one syscall vs fallback `nseg` sends
-  deliver the same segments; `total`-byte accounting released correctly; GSO latch → fallback.
+- **Prefix-only retire + isolation (§4.2, C1):** short `sendmmsg` (sent<k) retains + re-arms; a
+  `send_batch` `-1` with `KL_IO_WOULD_BLOCK` retains the **whole** prefix + re-arms (asserted via a
+  gating provider that returns `-1`/EAGAIN — no drop); a `-1` hard error single-sends the head (a
+  permanently-bad head is dropped + counted; a good head is retired) — no middle slot inferred. Fast
+  path AND `NULL send_batch` fallback deliver identical bytes/order.
+- **GSO group (§4.3, C2):** `nseg` atomic admission (no partial), TOO_LARGE when `nseg>send_slots` /
+  `total>budget`, WOULD_BLOCK when it can't fit now; a GSO group behind older queued datagrams submits
+  only when its head segment reaches the FIFO head (assert ordering); a 2nd concurrent `send_gso` ⇒
+  WOULD_BLOCK; GSO path one syscall vs fallback `nseg` sends deliver the same segments; close/discard
+  releases the whole remaining group; `total`-byte accounting released correctly; GSO latch → fallback.
+- **GSO validation:** `seg==0` / `buf==NULL && len>0` ⇒ ERROR; overflow-safe `nseg` (huge `total_len`
+  ⇒ ERROR, not a wrapped small `nseg`); byte-budget arithmetic guarded.
 - **Borrowed view + GRO (§5.1/§5.2):** one recvmmsg → N serial `on_recv` (view data into ext storage,
   not the owned slot; GRO buffer > `recv_cap` delivered un-clamped); GRO split per-segment by default,
   whole to `on_recv_segments`; GRO active only with provider GRO support AND `accepted_rx_caps` GRO.
 - **Pause/resume held buffer (§5.3):** pause mid-buffer retains undelivered datagrams; resume drains
   them before re-arm; stop discards them — none lost, none double-delivered.
-- **Teardown ownership (§5.4):** stop/close from delivery N → N+1 never delivered; ext freed once at
-  the destructive tail (deferred past the callback); `batch_free` on an attached non-closed datagram
-  refused; UAF/leak-free under ASan/UBSan/LSan.
+- **Teardown ownership (§5.4, C3):** a successful attach consumes `b` (a subsequent `batch_free(b)` is
+  a caller bug, not exercised); a **failed** attach leaves `b` caller-owned and `batch_free(b)` frees it
+  once; stop/close from delivery N → N+1 never delivered; the consumed batch is freed once at the
+  destructive tail (deferred past the callback); UAF/leak-free under ASan/UBSan/LSan.
 - **Caps (§6):** `provider_caps` reports support (directional), not the accepted mask; `batch_create`
   succeeds with a cap absent and the fallback runs; RX-only / TX-only creation.
 - **`KlUdpServer` (§8) + regression:** burst → handler one-at-a-time; caps absent → still delivered;
@@ -362,9 +430,10 @@ CONTRACT or the allocation-free hot path. Deferred: native completion batching (
 1. **M5.1** — the four `provider_caps` bits + `KlDatagramConfig.accepted_rx_caps` (masked) stored
    separately + GRO = provider-support AND accepted; `KlDgramBatchExt` + `KlDatagramBatch` create/free
    (create-never-fails-on-caps); the core `ext`/`gso_unsupported`/`accepted_rx_caps` fields. No wiring.
-2. **M5.2 — send.** `kl_dgram_send_enqueue` + `kl_dgram_send_flush_batch` (prefix retire + single-send
-   isolation) + `submit_batch` + portable fallback; `kl_datagram_send_batch` (transaction + `*stop`);
-   `kl_datagram_send_gso` (atomic nseg admission + latch + fallback).
+2. **M5.2 — send.** `kl_dgram_send_enqueue` + `kl_dgram_send_flush_batch` (prefix retire + `-1`
+   `io_status` classification + single-send isolation, C1) + `submit_batch` + portable fallback;
+   `kl_datagram_send_batch` (transaction + `*stop`); `kl_datagram_send_gso` (validated atomic nseg
+   admission + the queued FIFO group + latch + fallback, C2).
 3. **M5.3 — recv.** the borrowed-view seam + yield adapter + GRO split + held-buffer pause/resume +
    `recv_attach_batch` (core adoption) + `recv_segments`; teardown-from-delivery-N + destructive-tail
    reclamation tests.
@@ -385,6 +454,10 @@ CONTRACT or the allocation-free hot path. Deferred: native completion batching (
 | B5 | GSO queue semantics undefined | §4.3 atomic `nseg` admission vs slot+byte (no partial), copy-once, GSO-or-normal-sequence, atomic/per-segment retire, `total` byte accounting |
 | B6 | fallback contradicts creation | §6.4 create never fails on cap absence; provider block optional (NULL ⇒ fallback) |
 | — | provider_caps vs accepted RX mask | §6.1/§6.2 provider_caps = support (directional); `accepted_rx_caps` separate per-socket; GRO needs BOTH |
+| C1 | `send_batch` `-1` = EAGAIN or hard | §4.2 classify via `kl_sock_io_status` immediately after; WOULD_BLOCK retains the whole prefix + re-arms; only a hard error isolates the head |
+| C2 | GSO not integrated into FIFO | §4.3 queued group: tail-append, head-submit, `{nseg,remaining,offset,mode}` record, one pinned group buffer (2nd GSO ⇒ WOULD_BLOCK), whole-group release on close/discard |
+| C3 | core adoption vs public handle ambiguous | §5.4/§7 full transfer: successful attach CONSUMES `b` (caller never touches it again); failed attach leaves it caller-owned; `batch_free` only for a never-attached batch |
+| — | GSO validation/overflow + ABI wording | §4.3 seg≠0 / non-NULL buf / overflow-safe `nseg` / guarded budget; intro: docs commit = no ABI, M5.1 = intentional ABI break |
 
 ## 14. Open decisions for the reviewer (rev 3)
 
