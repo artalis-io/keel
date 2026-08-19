@@ -1,406 +1,392 @@
-# Datagram M5 — Batch / GSO / GRO high-throughput extension (design freeze, rev 2)
+# Datagram M5 — Batch / GSO / GRO high-throughput extension (design freeze, rev 3)
 
-**Status:** DESIGN FREEZE (docs-only), **revision 2**. No production code, no ABI change, no consumer
-migration here. Rev 2 replaces rev 1's "batching above an unchanged core" hand-wave with **concrete
-core state-machine seams**, because (as the reviewer noted) the capability shape depends on the
-execution model — the seams must be frozen before M5.1.
+**Status:** DESIGN FREEZE (docs-only), **revision 3**. No production code, no ABI change, no consumer
+migration here. Rev 3 freezes the concrete state-machine, lifetime, and ownership contracts that rev 2
+left open, so the increment chain (M5.1–M5.4) is implementable.
 
-**Supersedes** the original M5 framing in
-[`datagram_consolidation_design.md`](datagram_consolidation_design.md) §6.5. Per reviewer direction
-(2026-08-19): design the batch/GSO/GRO extension for `KlDatagram` and migrate `KlUdpServer` onto it
-first; the `KlUdp` reduction is deferred to a later step. `KlUdp` is UNTOUCHED by M5.
+**Supersedes** the M5 framing in
+[`datagram_consolidation_design.md`](datagram_consolidation_design.md) §6.5. `KlUdp` is UNTOUCHED by
+M5; its reduction is a deferred post-M5 decision.
 
-### Rev 2 changelog — how the six review findings are resolved (map in §13)
+Rev-1/2 background (layering, ground truth, KlUdpServer shape, byte-queue disposition) is retained in
+§1–§2 and §8–§9; rev 3's substance is the frozen contracts in **§3–§6** and the findings map in §13.
 
-- **P1-a (send seam):** §4 freezes a **real readiness batch-drain over the head-run** of the core send
-  FIFO (reservation → one `sendmmsg` → prefix retirement), integrated with byte accounting, the
-  full→non-full / drain edges, and close. Not "a loop of `kl_datagram_send`"; not "call `send_batch`
-  above the core."
-- **P1-b (recv seam):** §5 freezes a **batch-backed multi-yield readiness pull adapter** on the
-  existing recv machine — exact hook, cursor state, who owns readiness, busy-across-deliveries, and
-  teardown-from-delivery-N safety. D-M5-1's absolute "core not modified" is **retracted**: the
-  single-datagram *contract* is unchanged, but the readiness pull adapter gains a defined internal
-  variant (an internal core/facade extension).
-- **P1-c (GRO cap derivation):** §6.2 freezes an **explicit `rx_caps` handoff** (from the M0
-  `KlDatagramPrep.rx_caps` into the datagram), because `kl_datagram_init_ex` stores no capture mask
-  today. No inference of GRO from provider support.
-- **P1-d (cap directionality):** §6.1 splits into **`KL_DGRAM_CAP_RX_BATCH`** and
-  **`KL_DGRAM_CAP_TX_BATCH`** (recv/send mmsg are independently absent).
-- **P1-e (GSO latch):** §6.3 defines **`KL_DGRAM_CAP_GSO` as advisory (op present)** plus an
-  **extension-owned per-fd first-use-fail→latch→fallback**; `provider_caps` does not mutate (the
-  provider stays stateless).
-- **P2 (mode-B event ownership):** §5.4 **defers the explicit data-oriented `recv_batch` (mode B)** —
-  its readiness-ownership contract needs its own design. M5 receive is **mode A only** (the callback
-  machine), which the core watcher already drives, so there is no competing readiness owner.
+### Rev 3 changelog — the six rev-2 blockers, frozen (map in §13)
 
-### Rulings applied (O-A..O-D, settled)
+- **B1 (send admission defeats batching):** §4.1 freezes an **enqueue-only batch transaction** — an
+  accepted prefix is copied into slots with NO per-datagram submit and NO readiness fast path, then one
+  batch flush runs under the same busy bracket. Acceptance-stop + return semantics (ACCEPTED /
+  WOULD_BLOCK / TOO_LARGE / hard error) are defined precisely.
+- **B2 (can't drop an arbitrary failed slot):** §4.2 — retire only the provider's reported sent prefix;
+  a short/zero return is transient (retain remainder + re-arm); a hard `-1` triggers **single-send
+  isolation of the head slot** (never infer which slot failed).
+- **B3 (don't repoint the canonical inbound slot):** §5.1 adopts a **borrowed-view delivery seam**
+  ({data,len,meta} into ext storage) — the owned inbound slot is not mutated and GRO buffers are not
+  clamped by `recv_cap`. Finalization/truncation operate on the view.
+- **B4 (extension teardown ownership):** §5.4 — the **core adopts/owns the attached recv extension**;
+  reclamation is at the core's **destructive tail** (not `recv_inflight`, which readiness disarm clears
+  in-callback); detach/free is permitted only while unattached or CLOSED (else UAF).
+- **B5 (GSO queue semantics):** §4.3 — **atomic preflight admission of all `nseg` logical segments**
+  against slot count AND byte budget (no partial), copy-once, then GSO-or-normal-sequence, with atomic
+  (GSO) / per-segment (fallback) retirement and `total`-byte accounting.
+- **B6 (fallback vs creation):** §6.4 — `kl_datagram_batch_create` **never fails on capability
+  absence**; the provider block is optional (NULL ⇒ the portable fallback path), so the fallback is
+  reachable. Create fails only for a completion-mode datagram (O-C) or OOM.
+- **Semantic cleanup:** §6.1/§6.2 — `provider_caps` stays **provider support**; the M0 **accepted RX
+  mask is separate per-socket state**; **GRO activates only when BOTH** provider GRO support AND
+  `accepted_rx_caps & KL_DGRAM_RX_GRO` hold. CAP_GRO is not synthesized into provider support.
 
-- **O-A:** GRO splits into logical datagrams **by default**; whole-buffer delivery is **explicit**
-  (register `on_recv_segments`).
-- **O-B:** `KlUdpServer` reply batching is **deferred** (replies are demand-driven one-per-recv).
-- **O-C:** batch/GRO is **readiness-only** for M5; completion backends (io_uring/IOCP) stay
-  single-flight (correct, unbatched).
-- **O-D:** the byte-only send queue stays **out** of M5 (§9).
+### Rulings applied
 
-## 1. Mandate & layering
+- **O-E (settled):** append `unsigned accepted_rx_caps` to `KlDatagramConfig` (ABI break accepted — no
+  consumers), **masked to known `KL_DGRAM_RX_*` bits**.
+- **O-F (settled):** **core-owned** attached-extension state, with ownership transfer on attach and
+  **destructive-tail reclamation** (§5.4).
+- **O-A:** GRO splits into logical datagrams by default; whole-buffer delivery is explicit
+  (`on_recv_segments`). **O-B:** reply batching deferred. **O-C:** readiness-only for M5; completion
+  stays single-flight. **O-D:** byte-only queue out of the core.
 
-The four Linux fast paths (recvmmsg / sendmmsg / UDP GSO / UDP GRO) are real pps/CPU wins and belong in
-`KlDatagram` as an OPTIONAL layer, not pushed up into `KlUdpServer`. Target layering:
+## 1. Mandate & layering (unchanged)
 
 ```
 KlUdpServer  →  KlDatagram facade  →  optional batch/GSO/GRO extension  →  KlDatagramOps provider
-                (single-datagram        (NEW: this freeze; readiness-only;    (already has send_gso /
-                 contract unchanged)     caller-preallocated; cap-gated)       recv_batch / send_batch)
+                (single-datagram        (NEW; readiness-only; caller-        (already has send_gso /
+                 CONTRACT unchanged)     preallocated; capability-gated)      recv_batch / send_batch)
 ```
 
-## 2. Ground truth (verified against `src/` — cite before coding)
+## 2. Ground truth (verified `src/`; the facts the contracts stand on)
 
-1. **Provider vtable already has the ops.** `KlDatagramOps` (`keel/socket_dgram.h`): `send_gso`,
-   `recv_batch`, `send_batch`, `rx_batch_new/tx_batch_new/rx_batch_free/tx_batch_free`, `configure`
-   (returns the accepted `KL_DGRAM_RX_*` mask incl. `KL_DGRAM_RX_GRO`), `caps`. Public caller-oriented
-   types `KlDgramRxSlot` / `KlDgramTxDesc` / `KlDgramRxMeta` exist. **No new provider data-plane ABI.**
-2. **The core send machine is strictly single-flight** (`KlDgramSend`, `datagram_send.c`): a fixed slot
-   array + LIFO free-list, a FIFO ring of occupied slots (`ring`/`head`/`count`), `inflight_n ∈ {0,1}`,
-   and `send_pump` (`datagram_send.c:137`) submits **only the head** via `send_submit_slot(s, 0)`. In
-   readiness mode submit is synchronous (submit→DONE, nothing lingers in-flight). Byte accounting
-   (`bytes_used`, M1 BOTH policy) is admission-only; `count==0` is the drain predicate. FIFO order is
-   the head-run of the ring.
-3. **The core recv machine owns one inbound slot** (`KlDgramRecv`, `datagram_recv.c`): the readiness
-   path `kl_dgram_recv_on_readable` (`datagram_recv.c:180`) **loops** `pull → recv_finalize →
-   recv_present`, re-checking `!paused && !stopped && recv_inflight` **after every delivery**. The
-   `pull` hook (`KlDgramRecvPullFn`) fills the **one** inbound slot and returns 1/0/-1. Completion mode
-   posts one op; `on_complete` delivers + re-arms (single op at a time).
-4. **`init_ex` stores no capture mask.** `kl_datagram_init_ex` (`datagram.c:274`) copies
-   `send_slots/send_slot_cap/recv_cap/want_caps` + the byte budget into `KlDgramCoreConfig`. There is
-   **no `rx_caps` field** on `KlDatagramConfig` or `KlDgramCoreConfig`; the completion recv seam
-   hard-codes `capture = KL_DGRAM_RX_PKTINFO` (`datagram.c:140`). **The datagram does not know whether
-   UDP_GRO was enabled.** (This is why P1-c is real.)
-5. **`KlUdpServer` already embeds `KlDatagram dg`** (M4, `udp_server.h:72`); its `mmsg_batch` /
-   `recv_gro` knobs are currently **inert** (a pps regression vs the old `KlUdp` path this extension
-   restores).
-6. **The life-token + close coordinator** own op lifetime and the from-callback deferral (the `busy`
-   handshake via `on_activity(+1/-1)` and `kl_dgram_core_dispatch_begin/end`). Any new seam must run
-   inside that bracket so a from-callback teardown defers to the outermost frame leave.
+- **Send machine `KlDgramSend`** (`datagram_send.c`): fixed slots + LIFO free-list + FIFO ring
+  (`ring`/`head`/`count`); `inflight_n ∈ {0,1}`; `send_pump` (`:137`) submits only the head; readiness
+  submit is **synchronous** (submit→DONE, nothing lingers). The readiness empty-queue fast path
+  (`kl_datagram_send` `:168`) direct-submits without consuming a slot. M1 byte gate (`bytes_used`) is
+  admission-only; `count==0` is the drain predicate. Callbacks fire through `dispatch_enter/leave`
+  (`:89`): `on_writable` while depth>1, `on_drain` at depth 0 (destructive tail).
+- **Recv machine `KlDgramRecv`** (`datagram_recv.c`): one owned inbound slot (`inbound`, capacity
+  `recv_cap`); readiness `kl_dgram_recv_on_readable` (`:180`) LOOPS `pull → recv_finalize →
+  recv_present`, re-checking `!paused && !stopped && recv_inflight` after every delivery; `recv_finalize`
+  (`:30`) enforces peer-mandatory + truncation (driven by `recv_cap`) + local flags. `recv_inflight`
+  marks armed interest — **readiness disarm (pause/stop) clears it synchronously inside a callback**.
+- **Lifetime:** the life-token + close coordinator own the from-callback deferral via the `busy`
+  handshake (`on_activity(+1/-1)`, `kl_dgram_core_dispatch_begin/end`); the destructive tail
+  (`close_detach`/`core_rx_final`) runs only when `busy==0` (outermost frame).
+- **`init_ex`** (`datagram.c:274`) stores **no** capture mask; `KlDatagramConfig` has no `rx_caps`;
+  completion recv hard-codes `capture = KL_DGRAM_RX_PKTINFO`. `KlUdpServer` embeds `KlDatagram dg` (M4)
+  with `mmsg_batch`/`recv_gro` currently inert.
 
-## 3. Design decisions (rev 2)
+## 3. Decisions (rev 3)
 
-**D-M5-1 (revised) — the single-datagram CONTRACT is unchanged; the core gains DEFINED internal
-seams.** The public single-datagram semantics (`kl_datagram_send` atomic accept/refuse;
-`kl_datagram_recv_start` one-logical-datagram-per-callback; the §4 close/quarantine model; the
-allocation-free hot path) are preserved exactly. But — correcting rev 1 — the batch/GSO/GRO paths ARE
-an internal core/facade extension: a readiness batch-drain entry on the send machine (§4) and a
-batch-backed multi-yield pull adapter on the recv machine (§5). The core gains **one optional `ext`
-pointer** (`KlDgramBatchExt *`, NULL when unused) holding the tx/rx batch blocks, the GRO cursor, and
-the GSO latch; a build/consumer that never attaches a batch is byte-for-byte unaffected (the ext
-pointer stays NULL and the single-flight paths run).
+**D-M5-1 — single-datagram CONTRACT unchanged; the core gains DEFINED internal seams.** Public
+send/recv/close semantics and the allocation-free hot path are preserved. The batch/GSO/GRO paths are
+internal core/facade extensions: an **enqueue-only + batch-flush** send path (§4), a **borrowed-view
+recv delivery seam** with a batch-backed yield adapter (§5), and **one core-owned `ext` pointer**
+(`KlDgramBatchExt *`, NULL when unused, O-F).
 
-**D-M5-2 — caller-preallocated; no hot allocation.** The `KlDgramBatchExt` and the provider
-`rx_batch`/`tx_batch` blocks are allocated **once** at batch-create/attach; the `KlDgramRxSlot[]` /
-`KlDgramTxDesc[]` staging arrays are ext-owned (sized at create) or caller-provided. No allocation on
-any send/recv edge.
+**D-M5-2 — caller-preallocated; no hot allocation.** All batch/GSO storage (provider blocks, staging
+arrays, the recv buffer, the GSO staging buffer) is allocated once at create/attach; nothing allocates
+on a send/recv edge.
 
-**D-M5-3 — readiness-only (O-C).** The extension activates ONLY on a readiness-mode datagram
-(`core->completion == 0`). On a completion datagram, attaching a recv batch is refused
-(`KL_ERR_UNSUPPORTED`) and the explicit send-batch admits+drains via the normal single-flight
-completion pump (correct, unbatched). Native completion multishot is deferred (§10, O-1).
+**D-M5-3 — readiness-only (O-C).** The extension activates only when `core->completion == 0`. On a
+completion datagram, `kl_datagram_recv_attach_batch` is refused; `kl_datagram_send_batch` /
+`send_gso` admit+drain via the single-flight completion pump (correct, unbatched).
 
-**D-M5-4 — capability-gated, directional, honest (P1-d/P1-e).** `KL_DGRAM_CAP_RX_BATCH` /
-`_TX_BATCH` / `_GSO` / `_GRO` (§6). Absence is reported, never emulated; the only "fallback" is a
-portable correctness loop for the SEND primitives (identical bytes, lower throughput, observable via
-`provider_caps`) — §6.4.
+## 4. SEND — enqueue-only transaction, prefix-only retirement, atomic GSO (B1, B2, B5)
 
-**D-M5-5 — GRO splits by default (O-A); segments-callback is explicit.** The recv pull yields one
-logical datagram per delivery; a GRO-coalesced buffer is split per-segment **unless** the consumer
-registered `on_recv_segments`, in which case the whole coalesced buffer is delivered once (§5.3).
+### 4.1 The enqueue-only batch transaction (B1)
 
-## 4. THE SEND SEAM — readiness batch-drain over the head-run (resolves P1-a)
+The core send FIFO stays the sole admission authority. Batching adds an **enqueue-only** primitive that
+does NOT trigger the per-datagram fast path or `send_pump`:
 
-The core send FIFO stays the single source of admission (slot count + M1 byte budget), ordering, and
-close. Batching changes only **how the queue drains on a readiness writable edge**: instead of
-`send_pump` submitting one head slot per iteration, a batch-drain reserves the head-run and issues one
-`sendmmsg`.
+- New send-machine primitive `kl_dgram_send_enqueue(s, msg) → KlDatagramSendStatus`: run the slot
+  acquire + byte gate + copy-into-slot + FIFO enqueue (`bytes_used += len`), **without** the readiness
+  fast path and **without** `send_pump`. Returns `ACCEPTED` / `WOULD_BLOCK` (no free slot or byte gate)
+  / `TOO_LARGE` (permanent: one datagram > `send_slot_cap`, or > the whole byte budget) / `CLOSED` /
+  `ERROR`.
 
-**New send-machine entry (readiness only):** `kl_dgram_send_flush_batch(KlDgramSend *s, int max)`,
-called by the facade's readiness writable-flush (replacing `send_pump` when a TX batch is attached):
+`kl_datagram_send_batch(dg, b, descs, n, KlDatagramSendStatus *stop) → int accepted`:
+1. Open one busy bracket (`dispatch_enter`), so all edge callbacks defer to the end.
+2. For `i` in `[0, n)`: `st = kl_dgram_send_enqueue(descs[i])`. If `st != ACCEPTED`: `*stop = st`;
+   `accepted = i`; **stop** (acceptance is a prefix — no reordering, no skipping).
+3. If all accepted: `accepted = n`, `*stop = ACCEPTED`.
+4. Run **one** `kl_dgram_send_flush_batch` (readiness, §4.2) / `send_pump` (completion) inside the
+   bracket; `dispatch_leave` fires the deferred `on_writable`/`on_drain` edges.
+5. Return `accepted`.
 
-1. **Reserve** the head-run: `k = min(max, s->count)` contiguous occupied slots `ring[head ..
-   head+k)`. (`max` = the attached batch's `n_slots`, itself ≤ `mmsg_batch`.)
-2. **Stage** `KlDgramTxDesc[k]` from those slots' metadata (`data`/`len`/`peer`→dest/`local`→src/`tos`)
-   into the ext's `tx_batch` block. Zero-copy: `desc.data` points at the slot payload.
-3. **Submit once** via a new batch-submit adapter `KlDgramSubmitBatchFn submit_batch(ctx, fd,
-   tx_batch, descs, k) → sent` (facade wires it to provider `send_batch` = one `sendmmsg`, or the
-   portable loop under `!TX_BATCH`, §6.4). `sent ∈ [0, k]`: `0` = WOULD_BLOCK, `<k` = partial, `k` =
-   all. (A per-datagram hard error inside the provider is surfaced as in KlUdp today: drop that slot,
-   count it in `dropped`, continue — the provider's `send_batch` contract already returns the sent
-   prefix count.)
-4. **Retire the sent prefix** from the head: for each of the `sent` slots, `send_retire_head`
-   semantics — release the slot to the free-list, `bytes_used -= len`, `head = (head+1) % ring_cap`,
-   `count--`. This reuses the existing retire path so the M1 byte accounting, the `full → non-full`
-   edge (`pend_writable`), and the non-empty→empty `on_drain` edge (`pend_drain`) fire through the
-   existing `dispatch_enter/leave` bracket.
-5. **Re-arm** if `count > 0` after a partial/WOULD_BLOCK drain (leave the remainder queued in FIFO
-   order); drop WRITE interest when `count == 0`.
+**Return semantics (frozen):** `accepted` = datagrams the core TOOK (copied + queued; now core-owned,
+draining on writable edges — invariant 4). `[accepted, n)` were NOT taken (caller retains them).
+`*stop` classifies `descs[accepted]`: `WOULD_BLOCK` = transient (retry the remainder later after a
+writable edge); `TOO_LARGE` = permanent (that datagram can never be admitted — the caller must drop or
+resize it, not retry the same batch); `ERROR`/`CLOSED` = sticky/closed (stop). There is **no** hidden
+partial admission and **no** direct-send of individual entries.
 
-**Invariants preserved.** Readiness send is synchronous, so there is **no async in-flight batch** —
-`inflight_n` stays 0 (as it does for the current per-slot readiness pump); reservation/submission/
-retirement all complete within the flush call. FIFO = the head-run; a partial drain keeps the tail in
-order. Byte budget, `full`, drain/writable edges, and single-flight are all the existing machinery,
-just retiring a prefix instead of one slot. **Close:** abortive close's `kl_dgram_send_discard_queued`
-already releases the queued remainder; there is no in-flight batch to cancel; readiness retire is
-always `RETIRED` → DETACHED. **Completion mode:** unaffected — it keeps `send_pump` (single-flight);
-`flush_batch` is never wired there.
+### 4.2 Readiness batch-drain: reserve head-run, one sendmmsg, prefix-only retire (B2)
 
-**Explicit primitive** `kl_datagram_send_batch(dg, batch, descs, n)`: admit `descs[0..n)` through the
-normal core admit (copy-at-submit, slot + byte gate) up to the first `WOULD_BLOCK`/`TOO_LARGE`
-(partial accept — the caller keeps the remainder, invariant 4), then run one `flush_batch` (readiness)
-or the single-flight pump (completion). Returns the accepted count. Everything transits the core queue,
-so admission/FIFO/byte/close/edges are identical to `kl_datagram_send`.
+`kl_dgram_send_flush_batch(s, int max)` — the readiness writable-flush when a TX batch is present
+(replacing `send_pump`):
+1. **Reserve** the head-run `k = min(max, count)` (`max` = the batch's `n_slots`).
+2. **Stage** `KlDgramTxDesc[k]` from `ring[head .. head+k)` (data/len/peer/local/tos) into the batch's
+   `tx_batch` block.
+3. **Submit once**: `submit_batch(ctx, fd, tx_batch, descs, k) → sent` (provider `send_batch` = one
+   `sendmmsg`, or the portable single-`send` loop under `!TX_BATCH`, §6.4). `sent ∈ [0, k]` **or** `-1`.
+4. **Retire exactly `sent`** from the head (release slots, `bytes_used -= len`, advance `head`,
+   `count -= sent`) via the existing retire path (byte accounting + full→non-full + drain edges).
+5. Interpret the remainder:
+   - `sent == k`: fully drained this batch — loop for the next head-run if `count > 0` (bounded).
+   - `0 ≤ sent < k` (incl. 0, i.e. EAGAIN): **transient** — retain the remainder in FIFO order,
+     re-arm WRITE interest, return. Never drop.
+   - `sent == -1` (hard error, no prefix info — `sendmmsg` cannot name the offending descriptor):
+     **isolate via single-send** — submit ONLY the head slot through the existing single submit
+     adapter (`send_submit_slot(s,0)`): `DONE` → retire the head, continue; `WOULD_BLOCK` → retain +
+     re-arm; **hard error → drop exactly that (now-identified) head slot** (`dropped++`, sticky `err`),
+     advance. This isolates a permanently-bad descriptor to its own syscall; the batch path **never
+     infers** which of the `k` slots failed.
 
-## 5. THE RECV SEAM — batch-backed multi-yield pull adapter (resolves P1-b, P2 mode-A)
+Readiness send is synchronous, so there is no async in-flight batch (`inflight_n` stays 0); FIFO,
+byte budget, edges, single-flight, and close (`discard_queued` drops the queued remainder; readiness
+retire is always `RETIRED` → DETACHED) are all the existing machinery over a prefix. Completion mode
+keeps `send_pump` (single-flight); `flush_batch` is never wired there.
 
-The recv machine keeps its one inbound slot and its `pull → finalize → deliver` loop **unchanged**.
-Batching/GRO change only the `pull` adapter: a batch-backed pull yields logical datagrams **one at a
-time** from an ext-owned buffer, refilling via `recv_batch` (one recvmmsg) when the buffer drains.
+### 4.3 GSO — atomic nseg admission, copy-once, GSO-or-normal-sequence (B5)
 
-### 5.1 The seam
+`kl_datagram_send_gso(dg, buf, total_len, seg, peer)`:
+1. **Preflight**: `nseg = ceil(total_len / seg)` logical segments (last may be short). Bounds:
+   `total_len ≤ GSO staging capacity` and `seg ≤ send_slot_cap`.
+2. **Atomic admission** of all `nseg` segments against **both** limits — `nseg` free slots AND
+   (BOTH policy) `bytes_used + total_len ≤ byte_budget`. **All-or-nothing:** if `nseg > send_slots`
+   or `total_len > byte_budget` ⇒ `TOO_LARGE` (permanent); if they don't fit right now ⇒ `WOULD_BLOCK`
+   (nothing admitted). **No partial hidden admission.**
+3. **Copy once** (copy-at-submit invariant): the whole `buf` into the core-owned GSO staging buffer;
+   reserve the `nseg` slots + `total_len` bytes as one GSO reservation.
+4. **Submit**: GSO available AND not latched (§6.3) ⇒ one `send_gso(staging, total_len, seg, peer)`
+   syscall ⇒ on `DONE` retire the whole `nseg`/`total_len` reservation atomically. Otherwise ⇒ the
+   **same admitted sequence** sent normally: `nseg` single `send`s from the staging buffer at segment
+   offsets, retiring one segment's reservation each. `WOULD_BLOCK` on submit re-arms WRITE and retains
+   the reservation (drains on the writable edge). Byte accounting = `total_len` reserved at admission,
+   released as segments retire (all at once on GSO success, per-segment on fallback). GSO occupies
+   `nseg` logical slots (not one); fallback sends the identical admitted sequence.
 
-The facade wires the readiness `pull` hook to `dg_rdy_pull_batch` (instead of `dg_rdy_pull`) when a RX
-batch is attached. The machine's existing `kl_dgram_recv_on_readable` loop (`datagram_recv.c:180`)
-drives it verbatim — one delivery per iteration, re-checking `!paused && !stopped && recv_inflight`
-each time.
+## 5. RECV — borrowed-view delivery seam, held-buffer pause, core-owned teardown (B3, B4)
 
-**Ext cursor state** (in `KlDgramBatchExt`, readiness-owned): `KlDgramRxSlot slots[n_slots]`, `int
-n_filled`, `int i` (next slot), `size_t seg_off` (byte offset within a GRO-coalesced slot `i`).
+### 5.1 Borrowed-view delivery (B3) — the owned inbound slot is NOT repointed
 
-**`dg_rdy_pull_batch(hook_ctx, inbound) → 1/0/-1`:**
-1. If the buffer is exhausted (`i >= n_filled` and no pending GRO segment): call `recv_batch(ctx, fd,
-   rx_batch, slots, n_slots)` → `n_filled`. `n_filled == 0` (EAGAIN) → return `0` (drained, ends the
-   readable loop). `< 0` → return `-1` (the machine calls `recv_fail`). Reset `i = 0`, `seg_off = 0`.
-2. **Yield the next logical datagram** into the inbound slot (point `inbound.data` at ext buffer
-   storage — borrowed, valid until the next `recv_batch`; the delivery contract is already "valid only
-   for the call"):
-   - If `slots[i].meta.gro_seg > 0` and `on_recv_segments` is **not** registered and `slots[i].len -
-     seg_off > gro_seg`: yield the segment `[seg_off, seg_off+gro_seg)`; `seg_off += gro_seg`; leave
-     `i` (more segments remain). The final (short) segment yields the remainder and advances `i`.
-   - Else: yield slot `i` whole (a plain datagram, the last GRO segment, or — when `on_recv_segments`
-     is set — the whole coalesced buffer with `gro_seg` carried for the segments callback); `i++`,
-     `seg_off = 0`.
-   Copy `src`→peer, `meta`→local/tos/flags into the inbound slot exactly as `dg_rdy_pull` does. Return
-   `1`.
-
-The machine then `recv_finalize`s (peer mandatory, truncation, local flags — unchanged) and delivers
-one logical datagram. **GRO-without-mmsg** (`recv_gro`, `mmsg_batch == 1`) is the same seam with
-`n_slots == 1`: `recv_batch` returns one coalesced slot; the cursor splits it per-segment. (A provider
-without `recv_batch` but with GRO uses a single-slot `recv` refill; §6.4.)
-
-### 5.2 Event ownership (resolves P2 for mode A)
-
-The **core's single readiness watcher** (READ interest, reconciled by `dg_reconcile`) drives
-`on_readable`, which drives the batch pull. The extension owns **no** watcher and posts **no** op — it
-is purely the pull source. There is exactly one readiness owner (the core), so mode A cannot compete
-with a core watcher.
-
-### 5.3 Whole-buffer segments delivery (O-A explicit)
-
-`kl_datagram_recv_segments(dg, cb, ud)` registers a `KlDatagramRecvSegmentsFn`. When set, the pull
-yields the coalesced buffer WHOLE (step 2, else-branch) and the deliver adapter routes a `gro_seg > 0`
-datagram to the segments callback; when unset (default), the pull splits per-segment → `on_recv`.
-
-### 5.4 Teardown-from-delivery-N safety (the reviewer's explicit requirement)
-
-Three guarantees, all from existing machinery:
-1. **The loop breaks before slot N+1.** A `stop`/`close` from delivery N sets `stopped = 1` (recv
-   machine) inside the delivery; `kl_dgram_recv_on_readable` re-checks `!stopped` at the top of the
-   next iteration and returns — `dg_rdy_pull_batch` is never called for slot N+1.
-2. **The buffer outlives the loop.** `KlDgramBatchExt` (and its `rx_batch` storage) is freed only at
-   the **terminal** (close-complete), which the `busy` handshake (`on_activity`/`dispatch_begin/end`)
-   defers past any in-progress `on_readable` frame. So borrowed `inbound.data` (pointing into the ext
-   buffer) is valid for the whole delivery, and no slot N+1 storage is freed mid-loop.
-3. **"Busy" spans all deliveries.** `recv_inflight` stays 1 for the entire readable edge (readiness
-   interest armed); the close coordinator cannot detach mid-drain because `close_fully_retired` gates
-   on `recv_inflight == 0`, which only clears when the machine disarms (stop/pause) — i.e. after the
-   loop yields control.
-
-### 5.5 Mode B (explicit `kl_datagram_recv_batch`) — DEFERRED (resolves P2)
-
-An explicit data-oriented poll (`kl_datagram_recv_batch(dg, batch, slots, max)`) would let a caller
-drain a recvmmsg on its own loop — but once `KlDatagram` adopts the fd, the **core owns readiness**;
-mode B needs its own event-ownership contract (who tells the caller the fd is readable; how it avoids
-competing with the core watcher). That is out of scope for M5. **M5 receive is mode A only** (the
-callback machine), which every M5 consumer (incl. `KlUdpServer`) uses. Mode B is revisited later with
-a dedicated readiness-ownership design.
-
-## 6. Capability model
-
-### 6.1 Directional caps (resolves P1-d)
-
-Added to `keel/datagram.h`:
-```
-KL_DGRAM_CAP_RX_BATCH (1u << 5)   /* recvmmsg: recv_batch + rx_batch_new/free present, caps() reports it */
-KL_DGRAM_CAP_TX_BATCH (1u << 6)   /* sendmmsg: send_batch + tx_batch_new/free present, caps() reports it */
-KL_DGRAM_CAP_GSO      (1u << 7)   /* send_gso present (advisory — see 6.3) */
-KL_DGRAM_CAP_GRO      (1u << 8)   /* UDP_GRO capture was accepted on THIS fd (see 6.2) */
-```
-A `KL_DGRAM_BATCH_RECV` request checks `RX_BATCH` only; `KL_DGRAM_BATCH_SEND` checks `TX_BATCH` only —
-neither is rejected for the other's absence.
-
-### 6.2 GRO from an explicit `rx_caps` handoff (resolves P1-c)
-
-`KL_DGRAM_CAP_GRO` is granted **iff the datagram was told UDP_GRO was accepted on its fd** — never
-inferred from provider support. Since the M0 prep helper already computes the accepted mask
-(`KlDatagramPrep.rx_caps`, `datagram_open.c`) but `init` drops it, freeze an explicit handoff:
-- Add `unsigned rx_caps;` to `KlDatagramConfig` (the accepted `KL_DGRAM_RX_*` mask; **0 for a
-  caller who does not know** → no GRO/pktinfo-derived caps). This is an additive, pre-1.0 config
-  revision (the same class as M2's intentional `KlDatagramOps.caps` addition — noted for the ABI
-  ledger). `kl_datagram_init_ex` stores it on the core; `KL_DGRAM_CAP_GRO` derives from `rx_caps &
-  KL_DGRAM_RX_GRO`.
-- `KlUdpServer` and other in-tree consumers thread `KlDatagramPrep.rx_caps` from `kl_datagram_open`
-  into `cfg.rx_caps`. A consumer wrapping an arbitrary fd it configured itself sets `rx_caps` to what
-  it enabled; if it sets 0, GRO is simply unavailable (graceful — `meta.gro_seg` stays 0).
-
-### 6.3 GSO — advisory cap + extension-owned runtime latch (resolves P1-e)
-
-Function presence and compile-time `UDP_SEGMENT` do **not** prove kernel acceptance, and the provider
-vtable is stateless (the current `gso_disabled` latch lives in `KlUdp`, not the provider). Freeze:
-- `KL_DGRAM_CAP_GSO` = **advisory**: the provider `send_gso` op is present (compile-time availability).
-  `provider_caps` reports it and **does not mutate** at runtime.
-- The **extension owns a per-fd runtime latch** (`int gso_unsupported` in `KlDgramBatchExt`, init 0).
-  `kl_datagram_send_gso` tries the provider op; on `EOPNOTSUPP`/first-use failure it sets the latch and
-  transparently falls back to the per-segment send loop (matching `KlUdp`); subsequent calls skip
-  straight to the fallback. A query (`int kl_datagram_gso_active(const KlDatagram*)`) exposes the
-  latch so a throughput-sensitive caller can observe it. No provider ABI or state is added.
-
-### 6.4 Fast-path vs correctness fallback (send only)
-
-`kl_datagram_send_batch` without `TX_BATCH` → the batch-submit adapter is the **portable loop** (one
-`send` per desc); `kl_datagram_send_gso` without `GSO` (or after the latch) → the per-segment loop.
-Both produce identical bytes/ordering at lower throughput; `provider_caps` reports the cap absent so a
-caller can branch. `RX_BATCH` has **no** emulation: without it, `dg_rdy_pull_batch`'s refill uses a
-single `recv` (`n_slots` effectively 1) — i.e. GRO-split still works, but there is no recvmmsg speedup;
-the explicit mode-B API (deferred) would simply require the cap. No silent capability fabrication.
-
-## 7. Proposed public surface (`keel/datagram_batch.h`, rev 2)
+The canonical `inbound` slot (owned, capacity `recv_cap`, drives single-datagram finalization) is
+**left untouched** in batch mode. Instead the recv machine gains a borrowed-view delivery path used
+when a batch is attached:
 
 ```c
-typedef struct KlDatagramBatch KlDatagramBatch;              /* opaque; wraps the ext + provider blocks */
-typedef enum { KL_DGRAM_BATCH_RECV = 1, KL_DGRAM_BATCH_SEND = 2, KL_DGRAM_BATCH_BOTH = 3 } KlDgramBatchDir;
+typedef struct {                     /* borrowed; valid ONLY for the delivery call */
+    const void *data; size_t len;    /* into ext rx-batch storage (capture cap = the batch slot bufsz) */
+    KlSockAddr  peer;  int has_local; KlSockAddr local;
+    int         tos;   unsigned flags;   /* KL_DGRAM_TRUNCATED / KL_DGRAM_HAS_LOCAL */
+} KlDgramRxView;
+```
+- **Finalization on the view:** peer-mandatory + local-flags as today, but **truncation is the
+  provider's `meta.truncated`** (recvmmsg `MSG_TRUNC`), NOT the `recv_cap` clamp. A GRO-coalesced
+  buffer (up to the batch slot bufsz, which is sized for GRO — e.g. 64 KiB) is **not** clamped by
+  `recv_cap`. This is the reviewer's "borrowed-view seam" (better throughput; no copy into the owned
+  slot).
+- **Lifetime:** the view points into the ext's `rx_batch` payload storage, valid only for the call;
+  the storage is core-owned (§5.4) and reclaimed at the destructive tail.
 
-/* Create once; allocates the ext + provider rx/tx blocks. NULL if the datagram is completion-mode
- * (readiness-only, D-M5-3), the direction's cap is absent, or on OOM. */
-KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
-                                          int n_slots, size_t slot_bufsz);
-void             kl_datagram_batch_free(KlDatagramBatch *b);   /* detaches + frees; safe post-close */
+### 5.2 The batch-backed yield adapter + GRO split
 
-/* SEND: admit descs through the core queue (partial-accept per backpressure), then one sendmmsg
- * drain (or portable loop). Returns accepted count (<= n), or -1 (kl_datagram_last_error). */
-int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDesc *descs, int n);
+The facade wires a readiness **yield adapter** (in place of `dg_rdy_pull`) that fills the machine's
+delivery via the view. The machine's `on_readable` loop drives it verbatim (one delivery per
+iteration, `!paused && !stopped` re-checked each time). Ext cursor state (in `KlDgramBatchExt`):
+`KlDgramRxSlot slots[n_slots]`, `int n_filled`, `int i`, `size_t seg_off`.
+- **Refill** when exhausted: one `recv_batch` (RX_BATCH) or one single `recv` (fallback, `n_slots`
+  effectively 1) → `n_filled`; `0` = EAGAIN (drained, ends the edge); `-1` = `recv_fail`.
+- **Yield one logical datagram** as a `KlDgramRxView`: a GRO-coalesced slot
+  (`meta.gro_seg > 0 && len - seg_off > gro_seg`) with **no** `on_recv_segments` registered yields the
+  next `gro_seg`-sized segment (`seg_off += gro_seg`; `i` stays); the final short segment advances `i`.
+  Otherwise the whole slot is yielded (plain datagram, last segment, or — with `on_recv_segments` set —
+  the whole coalesced buffer with `gro_seg` carried), `i++`, `seg_off = 0`.
+- **Deliver:** `on_recv(view)` for a logical datagram; `on_recv_segments(view + segment_size)` for a
+  whole coalesced buffer (O-A explicit).
 
-/* one-syscall UDP GSO, or per-segment fallback (+ latch, 6.3). Core-queue backpressure applies. */
+### 5.3 Pause / resume / stop lifetime (held buffer)
+
+`recv_batch` has already consumed datagrams from the kernel, so a pause mid-buffer must not lose them:
+- **Pause** (from a callback mid-buffer): `on_readable` breaks; the ext cursor (`slots`, `n_filled`,
+  `i`, `seg_off`) is **retained** (a held buffer of ≥1 undelivered logical datagrams).
+- **Resume**: drain the retained buffer first (deliver held logical datagrams one at a time,
+  re-checking pause/stop — analogous to the completion held-datagram), THEN re-arm READ interest. So
+  buffered datagrams are not stranded behind readiness.
+- **Stop / close**: discard the retained ext buffer (no delivery).
+
+### 5.4 Ownership + teardown safety (B4, O-F) — corrected
+
+Rev 2's "`recv_inflight` prevents reclamation during delivery" is **wrong** — readiness `disarm`
+clears `recv_inflight` inside the callback. The frozen model:
+- **Core adopts the extension on attach.** `kl_datagram_recv_attach_batch(dg, b)` **transfers
+  ownership** of `b`'s ext state to the core (`core->ext = ...`); after attach the caller MUST NOT free
+  `b`. Attach is permitted only before `recv_start`, on a readiness datagram.
+- **Reclamation at the destructive tail.** The ext is freed at the core's terminal
+  (`close_detach`/`core_rx_final`), which the `busy` handshake defers past any in-progress delivery
+  frame (the `on_readable` loop brackets `on_activity`). So the borrowed view + ext buffer stay valid
+  for the whole delivery loop; slot N+1 storage is never freed mid-loop.
+- **`!stopped` breaks before slot N+1.** A stop/close from delivery N sets `stopped=1`; the loop's
+  top-of-iteration `!stopped` check returns before the next yield — slots/segments N+1.. are never
+  delivered. (This, plus deferred ext free — NOT `recv_inflight` — is the safety.)
+- **Standalone `kl_datagram_batch_free(b)`** is permitted only while `b` is **unattached** or the
+  datagram is **CLOSED** (provably idle); calling it on an attached, non-closed datagram is refused
+  (`-1`) — the core owns it, freed via close. (A **SEND** batch — §7 — is transient/caller-owned: its
+  `tx` staging is copied into core slots at enqueue and referenced only during the synchronous flush,
+  so nothing points into it after `send_batch` returns; it needs no adoption.)
+
+## 6. Capability model (semantic cleanup)
+
+### 6.1 provider_caps = provider SUPPORT (directional)
+
+`kl_datagram_provider_caps()` reports what the provider/fd SUPPORTS — new bits added to
+`keel/datagram.h`, reported by the provider `caps()` op:
+```
+KL_DGRAM_CAP_RX_BATCH (1u<<5)  /* recv_batch + rx_batch_new/free present + caps() reports it */
+KL_DGRAM_CAP_TX_BATCH (1u<<6)  /* send_batch + tx_batch_new/free present + caps() reports it */
+KL_DGRAM_CAP_GSO      (1u<<7)  /* send_gso present — advisory (§6.3) */
+KL_DGRAM_CAP_GRO      (1u<<8)  /* the provider CAN capture UDP_GRO — advisory support, NOT per-socket */
+```
+Directional: a `RECV` batch checks `RX_BATCH`; `SEND`/GSO check `TX_BATCH`/`GSO` — one never gates the
+other.
+
+### 6.2 Accepted RX mask = separate per-socket state; GRO needs BOTH (semantic cleanup, P1-c)
+
+`provider_caps` must NOT be synthesized from the M0 accepted mask (that is enabled-per-socket state,
+not provider support). Frozen:
+- Add `unsigned accepted_rx_caps;` to `KlDatagramConfig` (O-E) — the `KL_DGRAM_RX_*` mask the socket
+  actually has enabled (from `KlDatagramPrep.rx_caps`); `kl_datagram_init_ex` **masks it to known
+  `KL_DGRAM_RX_*` bits** and stores it separately on the core (not folded into `caps`). A caller who
+  passes 0 gets no RX-derived features (graceful).
+- **GRO ACTIVATES iff BOTH** `provider_caps & KL_DGRAM_CAP_GRO` (the provider supports GRO) **AND**
+  `accepted_rx_caps & KL_DGRAM_RX_GRO` (this socket enabled it). Otherwise `meta.gro_seg` stays 0 and
+  delivery is per-datagram (graceful). `kl_datagram_provider_caps` keeps reporting support; a distinct
+  accessor (or the granted-caps `kl_datagram_caps`) reflects the AND for GRO activation.
+
+### 6.3 GSO — advisory cap + core-owned per-fd latch (P1-e, unchanged from rev 2)
+
+`KL_DGRAM_CAP_GSO` is advisory (op present); a runtime `int gso_unsupported` on the **core** (per-fd)
+latches on first-use `EOPNOTSUPP` and switches to the per-segment fallback (§4.3); `provider_caps` does
+not mutate. `kl_datagram_gso_active(dg)` exposes the latch.
+
+### 6.4 Create never fails on capability absence (B6)
+
+`kl_datagram_batch_create(dg, dir, n_slots, slot_bufsz)` allocates the provider `rx_batch`/`tx_batch`
+block for a direction **only when that direction's cap is present**; when absent it leaves the block
+NULL and the flush/refill takes the **portable fallback** (single `send`/`recv` loop, §4.2/§5.2). So
+create **succeeds regardless of caps** — otherwise the fallback would be unreachable. Create fails only
+for a **completion-mode** datagram (O-C) or **OOM**. A `RECV` batch is still useful without `RX_BATCH`
+(GRO-split via a single-`recv` refill).
+
+## 7. Public surface (`keel/datagram_batch.h`, rev 3)
+
+```c
+typedef struct KlDatagramBatch KlDatagramBatch;
+typedef enum { KL_DGRAM_BATCH_RECV=1, KL_DGRAM_BATCH_SEND=2, KL_DGRAM_BATCH_BOTH=3 } KlDgramBatchDir;
+
+/* Create once (allocates ext + present-cap provider blocks + staging). NULL only on completion-mode
+ * datagram (O-C) or OOM — never on capability absence (§6.4). */
+KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir, int n_slots, size_t slot_bufsz);
+/* Free a batch. Permitted only while UNATTACHED or the datagram is CLOSED (§5.4); else -1. */
+int              kl_datagram_batch_free(KlDatagramBatch *b);
+
+/* SEND (transient/caller-owned): enqueue-only accepted prefix + one batch flush (§4.1). Returns the
+ * accepted count; *stop classifies descs[accepted] (ACCEPTED if all n taken). */
+int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDesc *descs, int n,
+                           KlDatagramSendStatus *stop);
+/* GSO: atomic nseg admission then one send_gso or the normal sequence (§4.3). */
 KlDatagramSendStatus kl_datagram_send_gso(KlDatagram *dg, const void *buf, size_t total_len,
                                           uint16_t segment_size, const KlSockAddr *peer);
-int  kl_datagram_gso_active(const KlDatagram *dg);            /* 0 once the GSO latch tripped */
+int  kl_datagram_gso_active(const KlDatagram *dg);
 
-/* RECV mode A: attach a RX batch BEFORE recv_start; the machine's readiness pull becomes batch-backed
- * (§5). GRO splits per-segment by default; register on_recv_segments for whole-buffer delivery. */
+/* RECV (core-adopted on attach, §5.4): attach BEFORE recv_start; the machine delivers via the
+ * borrowed view (§5.1), GRO split by default. Whole-buffer delivery via on_recv_segments. */
 int  kl_datagram_recv_attach_batch(KlDatagram *dg, KlDatagramBatch *b);
 typedef void (*KlDatagramRecvSegmentsFn)(void *ud, const void *data, size_t len, size_t segment_size,
                                          const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
 void kl_datagram_recv_segments(KlDatagram *dg, KlDatagramRecvSegmentsFn cb, void *ud);
 ```
-New caps + `KlDatagramConfig.rx_caps` in `keel/datagram.h` (§6). **No** explicit `kl_datagram_recv_batch`
-in M5 (mode B deferred, §5.5). `keel/socket_dgram.h` unchanged. Internally: `KlDgramCore` gains one
-`KlDgramBatchExt *ext` pointer; the send machine gains `kl_dgram_send_flush_batch` + a
-`KlDgramSubmitBatchFn` adapter; the facade gains `dg_rdy_pull_batch` / `dg_rdy_submit_batch`.
+`keel/datagram.h`: the four `provider_caps` bits (§6.1) + `KlDatagramConfig.accepted_rx_caps` (§6.2) +
+`kl_datagram_gso_active`. **No** explicit `recv_batch` (mode B deferred). `keel/socket_dgram.h`
+unchanged. Internal: `KlDgramCore` gains `KlDgramBatchExt *ext` + `int gso_unsupported` +
+`unsigned accepted_rx_caps`; the send machine gains `kl_dgram_send_enqueue` +
+`kl_dgram_send_flush_batch` + the `submit_batch` adapter; the recv machine gains the borrowed-view
+yield/deliver path.
 
-## 8. `KlUdpServer` migration
+## 8. `KlUdpServer` migration (unchanged from rev 2)
 
-No public API/ABI change (8 funcs + 17-field config + `KlUdpHandlerFn` preserved; `mmsg_batch` /
-`recv_gro` stop being inert). `kl_udp_server_init` threads `KlDatagramPrep.rx_caps` into `cfg.rx_caps`
-(§6.2); if `mmsg_batch > 1` and/or `recv_gro` and the provider reports `RX_BATCH`/`GRO`, it
-`kl_datagram_batch_create(RECV)` + `kl_datagram_recv_attach_batch` before `recv_start`. The handler is
-unchanged — each logical datagram (a batch slot, or a GRO segment after the split) reaches
-`KlUdpHandlerFn` one at a time with `src` (+ `local` for source-pinned reply). Reply stays on the core
-single send (O-B). Batch torn down in `kl_udp_server_free` before the `KlDatagram` teardown
-(server-owned, freed once). Off-ramp: absent caps → the M4 single-flight behavior, no regression.
+No API/ABI change. `kl_udp_server_init` threads `KlDatagramPrep.rx_caps` into `cfg.accepted_rx_caps`;
+if `mmsg_batch>1` / `recv_gro` and the provider reports `RX_BATCH`/`GRO`, it `batch_create(RECV)` +
+`recv_attach_batch` before `recv_start`. Handler unchanged (one logical datagram at a time, GRO
+split). Reply stays single-send (O-B). Batch is core-adopted → reclaimed at the server datagram's
+teardown. Absent caps ⇒ M4 single-flight (no regression).
 
-## 9. Byte-only send queue — OUT of scope (O-D); options recorded
+## 9. Byte-only queue OUT (O-D); post-M5 options (unchanged)
 
-Not moved into the core (a zero-length datagram means a byte budget cannot bound message count). M5
-does not touch it. Post-M5 `KlUdp` decision options (unchanged from rev 1): (1) keep it only in a
-deprecated `KlUdp`; (2) replace with explicit `send_slots` + `send_byte_budget` (the M1 BOTH policy) in
-a future breaking release; (3) an optional allocator-backed queue adapter above `KlDatagram`, outside
-Tier-1.
+Not moved into the core. Post-M5 `KlUdp` options: (1) keep it in a deprecated `KlUdp`; (2) replace with
+explicit `send_slots` + `send_byte_budget` (M1 BOTH) in a breaking release; (3) an optional
+allocator-backed queue adapter above `KlDatagram`, outside Tier-1.
 
 ## 10. Non-goals
 
-- No production code / consumer migration / ABI break in this freeze (the `rx_caps` config field is a
-  frozen-for-review proposal, landed in M5.1).
-- Do NOT change the single-datagram delivery/close/quarantine CONTRACT or the allocation-free hot path.
-- **O-1 (deferred):** native COMPLETION-backend batched receive (io_uring multishot / IOCP). M5 batch/
-  GRO is readiness-only.
-- **Mode B deferred** (§5.5). **Reply batching deferred** (O-B). **Byte queue out** (O-D). **`KlUdp`
-  reduction deferred** to the post-M5 decision.
+No production code/ABI/migration here. Don't change the single-datagram delivery/close/quarantine
+CONTRACT or the allocation-free hot path. Deferred: native completion batching (O-1); explicit mode-B
+`recv_batch`; reply batching (O-B); byte queue (O-D); `KlUdp` reduction.
 
 ## 11. Test matrix
 
-- **Send seam (§4):** batch-drain retires the sent prefix in FIFO order; partial `sendmmsg` (sent < k)
-  leaves the tail queued + re-arms WRITE; byte budget released per retired slot; `on_drain` fires once
-  at empty; abortive close discards the remainder (DETACHED). Fast path AND portable-loop fallback
-  (provider with NULL `send_batch`) deliver identical bytes/order.
-- **Recv seam (§5):** one recvmmsg → N serial `on_recv` (assert N, per-datagram bytes/src);
-  GRO-coalesced slot splits into per-segment deliveries (assert segment count + boundaries) OR whole
-  to `on_recv_segments`; GRO-without-mmsg (n_slots=1) splits the same; drained→EAGAIN ends the edge.
-- **Teardown-from-delivery-N (§5.4):** `stop`/`close_begin`/`close_cancel` from delivery N (of a filled
-  batch and of a multi-segment GRO buffer) → slots/segments N+1.. are never delivered, DETACHED, no
-  UAF/leak (ASan/UBSan/LSan).
-- **Caps (§6):** `provider_caps` reports RX_BATCH/TX_BATCH/GSO/GRO honestly per fd/platform;
-  `batch_create(RECV)` succeeds with only RX_BATCH (TX absent) and vice-versa; `send_batch`/`send_gso`
-  without the cap take the fallback and still deliver; GRO cap absent when `rx_caps` lacks
-  `KL_DGRAM_RX_GRO` even on a GRO-capable provider.
-- **GSO latch (§6.3):** a provider whose `send_gso` returns `EOPNOTSUPP` on first use → the datagram
-  latches, `gso_active` becomes 0, subsequent sends use the per-segment loop and still deliver.
-- **`rx_caps` handoff (§6.2):** a datagram built with `rx_caps` = 0 grants no GRO even on a capable fd;
-  built from `KlDatagramPrep.rx_caps` grants GRO iff the kernel accepted `UDP_GRO`.
-- **`KlUdpServer` opt-in (§8):** a burst reaches the handler one-at-a-time (assert count + `src`); a GRO
-  burst is split; caps absent → every datagram still delivered (fallback); source-pinned reply
-  unchanged; batch freed once at teardown.
-- **Regression:** DNS single-flight + the existing datagram/udp_server suites unchanged; the ext
-  pointer is NULL and no allocation occurs when no batch is attached.
+- **Send transaction (§4.1):** `send_batch` admits an accepted prefix, `*stop` classifies the first
+  refusal (WOULD_BLOCK vs TOO_LARGE vs ERROR); the remainder is untaken; enqueue-only never
+  direct-sends an individual entry (assert one `sendmmsg`, not N).
+- **Prefix-only retire + isolation (§4.2):** short `sendmmsg` (sent<k) retains + re-arms; a provider
+  `send_batch` returning `-1` triggers single-send of the head (a permanently-bad head is dropped and
+  counted; a good head is retired) — no middle slot inferred. Fast path AND `NULL send_batch` fallback
+  deliver identical bytes/order.
+- **GSO (§4.3):** `nseg` atomic admission (no partial), TOO_LARGE when `nseg>send_slots` /
+  `total>budget`, WOULD_BLOCK when it can't fit now; GSO path one syscall vs fallback `nseg` sends
+  deliver the same segments; `total`-byte accounting released correctly; GSO latch → fallback.
+- **Borrowed view + GRO (§5.1/§5.2):** one recvmmsg → N serial `on_recv` (view data into ext storage,
+  not the owned slot; GRO buffer > `recv_cap` delivered un-clamped); GRO split per-segment by default,
+  whole to `on_recv_segments`; GRO active only with provider GRO support AND `accepted_rx_caps` GRO.
+- **Pause/resume held buffer (§5.3):** pause mid-buffer retains undelivered datagrams; resume drains
+  them before re-arm; stop discards them — none lost, none double-delivered.
+- **Teardown ownership (§5.4):** stop/close from delivery N → N+1 never delivered; ext freed once at
+  the destructive tail (deferred past the callback); `batch_free` on an attached non-closed datagram
+  refused; UAF/leak-free under ASan/UBSan/LSan.
+- **Caps (§6):** `provider_caps` reports support (directional), not the accepted mask; `batch_create`
+  succeeds with a cap absent and the fallback runs; RX-only / TX-only creation.
+- **`KlUdpServer` (§8) + regression:** burst → handler one-at-a-time; caps absent → still delivered;
+  DNS single-flight + existing suites unchanged; ext pointer NULL / zero alloc when no batch attached.
 
-## 12. Increment breakdown (each its own freeze-then-code review; none authorized here)
+## 12. Increment breakdown (each its own freeze-then-code review)
 
-1. **M5.1 — caps + `rx_caps` handoff + ext scaffolding.** Add `KL_DGRAM_CAP_RX_BATCH/_TX_BATCH/_GSO/
-   _GRO` + directional provider `caps()` reporting; add `KlDatagramConfig.rx_caps` + store it on the
-   core + derive `CAP_GRO`; the `KlDgramBatchExt` + `KlDatagramBatch` create/free (no wiring yet). No
-   behavior change to existing consumers.
-2. **M5.2 — send seam.** `kl_dgram_send_flush_batch` + the `KlDgramSubmitBatchFn` adapter + the
-   portable fallback; `kl_datagram_send_batch` + `kl_datagram_send_gso` + the GSO latch. Readiness
-   batch-drain reservation/submit/retire per §4.
-3. **M5.3 — recv seam.** `dg_rdy_pull_batch` + the GRO-split cursor + `kl_datagram_recv_attach_batch` +
-   `kl_datagram_recv_segments`. Machine loop unchanged; teardown-from-delivery-N tests per §5.4.
-4. **M5.4 — `KlUdpServer` opt-in.** Thread `rx_caps`; wire `mmsg_batch`/`recv_gro` to mode A; full
-   parity + every-backend conformance; batch teardown ordering.
-5. **(post-M5) `KlUdp` decision** (§9) and **mode B** (§5.5): separate freezes.
+1. **M5.1** — the four `provider_caps` bits + `KlDatagramConfig.accepted_rx_caps` (masked) stored
+   separately + GRO = provider-support AND accepted; `KlDgramBatchExt` + `KlDatagramBatch` create/free
+   (create-never-fails-on-caps); the core `ext`/`gso_unsupported`/`accepted_rx_caps` fields. No wiring.
+2. **M5.2 — send.** `kl_dgram_send_enqueue` + `kl_dgram_send_flush_batch` (prefix retire + single-send
+   isolation) + `submit_batch` + portable fallback; `kl_datagram_send_batch` (transaction + `*stop`);
+   `kl_datagram_send_gso` (atomic nseg admission + latch + fallback).
+3. **M5.3 — recv.** the borrowed-view seam + yield adapter + GRO split + held-buffer pause/resume +
+   `recv_attach_batch` (core adoption) + `recv_segments`; teardown-from-delivery-N + destructive-tail
+   reclamation tests.
+4. **M5.4 — `KlUdpServer` opt-in.** thread `accepted_rx_caps`; wire `mmsg_batch`/`recv_gro`; parity +
+   every-backend conformance + teardown ordering.
+5. **(post-M5)** `KlUdp` decision (§9) + mode B: separate freezes.
 
-**Order/dependencies:** M5.1 → {M5.2, M5.3} → M5.4. Independent of any `KlUdp` change. Re-decided after
-M5.1 + one of M5.2/M5.3 prove the seam clean (the master-plan §6 "stop if ugly" escape hatch applies).
+**Order:** M5.1 → {M5.2, M5.3} → M5.4. Independent of any `KlUdp` change.
 
 ## 13. Findings resolution map
 
-| # | Finding | Resolution |
-|---|---------|-----------|
-| P1-a | send fast path can't sit above an unchanged core | §4 — readiness batch-drain over the head-run: real reserve/submit(one sendmmsg)/retire-prefix in the core send FIFO, integrated with byte accounting + edges + close; completion stays single-flight (O-C) |
-| P1-b | callback recv batching needs a concrete seam | §5 — `dg_rdy_pull_batch` multi-yield adapter on the existing machine loop; cursor state; core owns readiness (§5.2); teardown-from-delivery-N safety from `stopped` re-check + deferred ext free (§5.4). D-M5-1 "core not modified" retracted → "contract unchanged, defined internal seam" |
-| P1-c | GRO cap derived from state the datagram lacks | §6.2 — explicit `KlDatagramConfig.rx_caps` handoff from `KlDatagramPrep.rx_caps`; `CAP_GRO` from the stored mask, never inferred |
-| P1-d | one CAP_BATCH bit not directional | §6.1 — split `KL_DGRAM_CAP_RX_BATCH` / `_TX_BATCH` |
-| P1-e | GSO latch not grounded in the stateless provider | §6.3 — `CAP_GSO` advisory (op present); extension-owned per-fd first-use-fail→latch→fallback; `provider_caps` does not mutate |
-| P2 | mode-B recv lacks event-ownership contract | §5.5 — mode B deferred; M5 recv is mode A only, driven by the core's single watcher (no competing owner) |
+| # | rev-2 blocker | rev-3 resolution |
+|---|---------------|------------------|
+| B1 | normal admission defeats batching | §4.1 enqueue-only transaction (no fast path, no per-datagram submit) + one flush; prefix acceptance + `*stop` semantics for WOULD_BLOCK/TOO_LARGE/hard error |
+| B2 | can't drop an arbitrary failed slot | §4.2 retire only the reported sent prefix; short/zero = transient (retain+re-arm); `-1` = single-send isolation of the head (never infer) |
+| B3 | must not repoint the canonical inbound slot | §5.1 borrowed-view seam ({data,len,meta} into ext storage); owned slot untouched; truncation from provider meta, not `recv_cap` clamp |
+| B4 | teardown ownership unsafe | §5.4 core adopts the attached ext; destructive-tail reclamation (not `recv_inflight`); `batch_free` only unattached/CLOSED; `!stopped` breaks before N+1 |
+| B5 | GSO queue semantics undefined | §4.3 atomic `nseg` admission vs slot+byte (no partial), copy-once, GSO-or-normal-sequence, atomic/per-segment retire, `total` byte accounting |
+| B6 | fallback contradicts creation | §6.4 create never fails on cap absence; provider block optional (NULL ⇒ fallback) |
+| — | provider_caps vs accepted RX mask | §6.1/§6.2 provider_caps = support (directional); `accepted_rx_caps` separate per-socket; GRO needs BOTH |
 
-## 14. Open decisions for the reviewer (rev 2)
+## 14. Open decisions for the reviewer (rev 3)
 
-- **O-E — `rx_caps` handoff mechanism.** §6.2 adds a `KlDatagramConfig.rx_caps` field (additive pre-1.0
-  revision). Confirm that vs. an alternative (an `init_ex2` parameter, or a post-init setter). The
-  field is the least-friction and mirrors how `KlDatagramPrep` already carries the mask.
-- **O-F — where `KlDgramBatchExt` lives.** §D-M5-1 puts one optional `ext` pointer on `KlDgramCore`
-  (NULL when unused) rather than a parallel facade-side object. Confirm the core-pointer placement
-  (it keeps the send/recv adapter wiring local to the core) vs. a facade-owned ext.
+None outstanding — O-A..O-F are ruled. Rev 3 requests acceptance-for-implementation of the frozen
+contracts in §4–§6, after which M5.1 proceeds.
