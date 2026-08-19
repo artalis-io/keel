@@ -55,6 +55,10 @@ void kl_dgram_send_set_drain_cb(KlDgramSend *s, KlDgramDrainFn cb, void *ctx) {
     if (!s) return;
     s->on_drain = cb; s->drain_ctx = ctx;
 }
+void kl_dgram_send_set_drop_cb(KlDgramSend *s, KlDgramDropFn cb, void *ctx) {
+    if (!s) return;
+    s->on_drop = cb; s->drop_ctx = ctx;
+}
 void kl_dgram_send_set_closing(KlDgramSend *s, int closing) {
     if (s) s->closing = closing ? 1 : 0;
 }
@@ -124,6 +128,17 @@ static void send_retire_head(KlDgramSend *s, int was_inflight) {
     if (s->count == 0) s->pend_drain = 1;                 /* non-empty → empty (re-checked at leave) */
 }
 
+/* The recoverable per-datagram send-error policy (§4.4): the head hard-errored but is a batch-enqueued
+ * (recoverable) datagram — drop it (release the slot + FIFO/edge accounting via send_retire_head), count
+ * it, and report it (on_drop), WITHOUT setting the sticky `err`. Used by every drain path (flush_batch
+ * isolation, the readiness pump, and completion on_complete) so a batch slot keeps its recoverable
+ * provenance wherever it is finally submitted. */
+static void send_drop_head(KlDgramSend *s, int was_inflight) {
+    send_retire_head(s, was_inflight);
+    s->dropped++;
+    if (s->on_drop) s->on_drop(s->drop_ctx);
+}
+
 /* Submit the queued slot at FIFO position `off` from the head. */
 static KlDgramSubmitResult send_submit_slot(KlDgramSend *s, size_t off) {
     KlDgramSlot *slot = s->ring[(s->head + off) % s->ring_cap];
@@ -157,15 +172,21 @@ static int send_pump(KlDgramSend *s) {
             s->inflight_n = 0;    /* un-arm; keep queued (a writable event resumes via flush) */
             return 0;
         } else {                  /* KL_DGRAM_SUBMIT_ERROR */
-            s->inflight_n = 0;    /* un-arm; datagram retained (owned) in its slot */
-            s->err = 1;
+            s->inflight_n = 0;    /* un-arm */
+            if (s->ring[s->head]->recoverable) {
+                send_drop_head(s, 0);   /* batch provenance: drop this one, keep draining the rest */
+                continue;
+            }
+            s->err = 1;           /* ordinary single send: sticky; datagram retained (owned) in its slot */
             return -1;
         }
     }
     return 0;
 }
 
-KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
+/* Up-front validation shared by kl_dgram_send + kl_dgram_send_enqueue. Returns KL_DATAGRAM_ACCEPTED if
+ * the datagram may proceed to admission, else the refusal status (§9 UNSUPPORTED / TOO_LARGE / ...). */
+static KlDatagramSendStatus send_validate(const KlDgramSend *s, const KlDatagramMessage *m) {
     if (!s || !m || !s->submit)
         return KL_DATAGRAM_ERROR;
     if (s->err)
@@ -174,7 +195,6 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
         return KL_DATAGRAM_CLOSED;
     if (m->len && !m->data)
         return KL_DATAGRAM_ERROR;
-
     /* Requested-but-unsupported features fail; nothing is taken (§9). */
     if (addr_or_null(m->local) && !(s->caps & KL_DGRAM_CAP_SOURCE_PIN))
         return KL_DATAGRAM_UNSUPPORTED;
@@ -182,10 +202,55 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
         return KL_DATAGRAM_UNSUPPORTED;
     if (!addr_or_null(m->peer) && !(s->caps & KL_DGRAM_CAP_CONNECTED))
         return KL_DATAGRAM_UNSUPPORTED;            /* connected-mode send unsupported */
-
     /* Permanent: a datagram that can never fit one slot. Nothing taken. */
     if (m->len > s->slots->out_cap)
         return KL_DATAGRAM_TOO_LARGE;
+    return KL_DATAGRAM_ACCEPTED;
+}
+
+/* Byte-admission gate (M1 BOTH policy) + slot acquire + copy + FIFO enqueue. NO fast path, NO submit,
+ * NO callbacks. Assumes send_validate already passed. `recoverable` stamps the slot's send-error
+ * provenance (1 = a batch datagram → drop on hard error; 0 = single send → sticky). Returns ACCEPTED /
+ * WOULD_BLOCK / TOO_LARGE. */
+static KlDatagramSendStatus send_admit(KlDgramSend *s, const KlDatagramMessage *m, int recoverable) {
+    /* Byte-admission gate (inert when byte_budget == 0). Two outcomes, split on whether the datagram
+     * ALONE exceeds the whole budget. See §4 of the M1 freeze. */
+    if (s->byte_budget) {
+        if (m->len > s->byte_budget)
+            return KL_DATAGRAM_TOO_LARGE;          /* (a) exceeds the whole budget → permanent */
+        if (m->len > s->byte_budget - s->bytes_used) {   /* overflow-safe (bytes_used ≤ budget) */
+            s->full = 1;                           /* (b) transient — arm full→non-full */
+            return KL_DATAGRAM_WOULD_BLOCK;
+        }
+    }
+    /* Acquire a slot only once acceptance is certain — every refusal takes no ownership and mutates no
+     * queue state. */
+    KlDgramSlot *slot = kl_dgram_slots_acquire(s->slots);
+    if (!slot) {
+        s->full = 1;                               /* full — arm full→non-full */
+        return KL_DATAGRAM_WOULD_BLOCK;            /* transient; nothing taken */
+    }
+    /* Copy the whole datagram + its metadata before returning (caller owns nothing after). */
+    if (m->len)
+        memcpy(slot->data, m->data, m->len);
+    slot->len   = m->len;
+    slot->tos   = m->tos;
+    slot->flags = m->flags;
+    slot->recoverable = recoverable;
+    if (addr_or_null(m->peer))  slot->peer  = *m->peer;  else memset(&slot->peer,  0, sizeof(slot->peer));
+    if (addr_or_null(m->local)) slot->local = *m->local; else memset(&slot->local, 0, sizeof(slot->local));
+    s->ring[(s->head + s->count) % s->ring_cap] = slot;   /* enqueue FIFO (tail) */
+    s->count++;
+    s->bytes_used += m->len;                       /* byte-gate accounting (paired with every release) */
+    if (kl_dgram_slots_free_count(s->slots) == 0)
+        s->full = 1;                               /* filled the last slot */
+    return KL_DATAGRAM_ACCEPTED;
+}
+
+KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
+    KlDatagramSendStatus v = send_validate(s, m);
+    if (v != KL_DATAGRAM_ACCEPTED)
+        return v;
 
     /* From here a provider submit hook OR a deferred callback may run and may REENTRANTLY request
      * close; hold ONE busy frame across the whole tail so detachment is deferred to the final leave
@@ -208,58 +273,77 @@ KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m) {
         if (s->closing) { status = KL_DATAGRAM_CLOSED; goto leave; }
     }
 
-    /* Byte-admission gate (M1 BOTH policy; inert when byte_budget == 0). Reached on the readiness
-     * WOULD_BLOCK fall-through, or directly in completion mode (no fast path). Two outcomes, split on
-     * whether the datagram ALONE exceeds the whole budget. See §4 of the M1 freeze. */
-    if (s->byte_budget) {
-        if (m->len > s->byte_budget) {
-            /* (a) exceeds the WHOLE budget → can never be queued: PERMANENT refusal (the readiness
-             * fast path above already delivered it if the socket was ready — KlUdp parity). Terminal,
-             * so it cannot strand or livelock; does NOT arm the full→non-full edge. */
-            status = KL_DATAGRAM_TOO_LARGE;
-            goto leave;
-        }
-        if (m->len > s->byte_budget - s->bytes_used) {   /* overflow-safe (bytes_used ≤ budget) */
-            /* (b) transient: fits the budget but not right now. Provably bytes_used > 0 here (len ≤
-             * budget ∧ bytes_used+len > budget), so count ≥ 1 and a retirement re-signals writable —
-             * cannot strand. Arm the full→non-full edge like a slot-full refusal. */
-            s->full = 1;
-            status  = KL_DATAGRAM_WOULD_BLOCK;
-            goto leave;
-        }
-    }
-
-    /* Acquire a slot only once acceptance is certain — every refusal takes no ownership and mutates
-     * no queue state. */
-    {
-        KlDgramSlot *slot = kl_dgram_slots_acquire(s->slots);
-        if (!slot) {
-            s->full = 1;                           /* full — arm the full→non-full edge */
-            status  = KL_DATAGRAM_WOULD_BLOCK;     /* transient; nothing taken */
-            goto leave;
-        }
-        /* Copy the whole datagram + its metadata before returning (caller owns nothing after). */
-        if (m->len)
-            memcpy(slot->data, m->data, m->len);
-        slot->len   = m->len;
-        slot->tos   = m->tos;
-        slot->flags = m->flags;
-        if (addr_or_null(m->peer))  slot->peer  = *m->peer;  else memset(&slot->peer,  0, sizeof(slot->peer));
-        if (addr_or_null(m->local)) slot->local = *m->local; else memset(&slot->local, 0, sizeof(slot->local));
-        s->ring[(s->head + s->count) % s->ring_cap] = slot;   /* enqueue FIFO (tail) */
-        s->count++;
-        s->bytes_used += m->len;                   /* byte-gate accounting (paired with every release) */
-        if (kl_dgram_slots_free_count(s->slots) == 0)
-            s->full = 1;                           /* filled the last slot */
+    status = send_admit(s, m, 0);   /* ordinary single send → sticky on hard error */
+    if (status == KL_DATAGRAM_ACCEPTED) {
         dispatch_enter(s);
         (void)send_pump(s);                        /* submit failure is sticky; the datagram stays owned */
         dispatch_leave(s);                         /* fires on_drain (non-destructive under a coordinator) */
-        status = KL_DATAGRAM_ACCEPTED;
     }
 
 leave:
     send_leave(s);                                 /* LAST action — may detach + free s via the coordinator */
     return status;                                 /* local value; safe even if s was freed */
+}
+
+/* M5.2a — enqueue-only: validate + admit, NO fast path, NO pump, NO callbacks (§4.1). */
+KlDatagramSendStatus kl_dgram_send_enqueue(KlDgramSend *s, const KlDatagramMessage *m) {
+    KlDatagramSendStatus v = send_validate(s, m);
+    if (v != KL_DATAGRAM_ACCEPTED)
+        return v;
+    return send_admit(s, m, 1);   /* batch datagram → recoverable (drop) on hard error */
+}
+
+int kl_dgram_send_flush_batch(KlDgramSend *s, KlDgramTxDesc *descs, int descs_cap,
+                              KlDgramSubmitBatchFn submit_batch, void *submit_ctx) {
+    if (!s || !descs || descs_cap <= 0 || !submit_batch)
+        return -1;
+    /* Readiness-only + nothing in flight: batching does a SYNCHRONOUS drain over the queued head-run.
+     * Reject a completion machine or an outstanding single-flight op — else a stray batch submit could
+     * duplicate the in-flight head. */
+    if (s->completion || s->inflight_n != 0)
+        return -1;
+    send_enter(s);
+    dispatch_enter(s);
+    while (!s->err && s->count > 0) {
+        /* Reserve the head-run: up to min(descs_cap, count) contiguous queued slots, staged in FIFO
+         * order into the caller's scratch. Readiness send is synchronous, so nothing is in flight and
+         * count == queued. */
+        size_t k = s->count;
+        if (k > (size_t)descs_cap) k = (size_t)descs_cap;
+        for (size_t i = 0; i < k; i++) {
+            const KlDgramSlot *slot = s->ring[(s->head + i) % s->ring_cap];
+            descs[i].data = slot->data; descs[i].len = slot->len;
+            descs[i].dest = slot->peer; descs[i].src = slot->local; descs[i].tos = slot->tos;
+        }
+        int sent = 0;
+        KlDgramBatchResult br = submit_batch(submit_ctx, descs, (int)k, &sent);
+        if (br == KL_DGRAM_BATCH_SENT) {
+            if (sent < 0) sent = 0;
+            if ((size_t)sent > k) sent = (int)k;
+            for (int i = 0; i < sent; i++)
+                send_retire_head(s, 0);            /* retire exactly the reported prefix */
+            if ((size_t)sent < k)
+                break;                             /* short/would-block on the remainder — retain, re-arm */
+            /* sent == k: the whole head-run drained; loop for the next run */
+        } else if (br == KL_DGRAM_BATCH_WOULDBLOCK) {
+            break;                                 /* nothing sent — retain all, re-arm */
+        } else {                                   /* KL_DGRAM_BATCH_ERROR — isolate the head */
+            KlDgramSubmitResult r = send_submit_slot(s, 0);   /* single submit hook (io_status-classified) */
+            if (r == KL_DGRAM_SUBMIT_DONE) {
+                send_retire_head(s, 0);            /* the head was fine after all — retire, continue */
+            } else if (r == KL_DGRAM_SUBMIT_WOULDBLOCK) {
+                break;                             /* head can't go now — retain, re-arm */
+            } else if (s->ring[s->head]->recoverable) {   /* hard error on a batch head → recoverable drop */
+                send_drop_head(s, 0);              /* release the slot + edges + report, NOT sticky s->err */
+            } else {                               /* non-recoverable head hard error → sticky (defensive) */
+                s->err = 1;
+            }
+        }
+    }
+    int ret = s->err ? -1 : 0;
+    dispatch_leave(s);
+    send_leave(s);                                 /* LAST action — coordinator finalize may detach (frees s) */
+    return ret;
 }
 
 int kl_dgram_send_on_complete(KlDgramSend *s, int ok) {
@@ -272,9 +356,12 @@ int kl_dgram_send_on_complete(KlDgramSend *s, int ok) {
     dispatch_enter(s);
     if (s->in_submit)
         s->submit_retired = 1;                     /* inline: tell the pump the op retired */
-    send_retire_head(s, 1);                         /* inflight_n 1 → 0 */
-    if (!ok)
-        s->err = 1;                                /* op physically retired but failed — sticky */
+    int recov = s->ring[s->head] ? s->ring[s->head]->recoverable : 0;   /* the in-flight head's provenance */
+    send_retire_head(s, 1);                         /* inflight_n 1 → 0 (the op physically retired) */
+    if (!ok) {
+        if (recov) { s->dropped++; if (s->on_drop) s->on_drop(s->drop_ctx); }  /* batch: recoverable drop */
+        else       s->err = 1;                     /* ordinary send: sticky failure */
+    }
     if (!s->err && !s->in_submit)
         (void)send_pump(s);                        /* async path pumps next; inline lets the outer pump continue */
     int ret = s->err ? -1 : 0;                     /* capture before callbacks (which may free s) */

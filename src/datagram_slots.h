@@ -46,6 +46,9 @@ typedef struct {
     size_t         cap;       /* payload capacity of this slot (bytes) */
     int            tos;       /* per-packet TOS/ECN byte, or -1 (none) */
     unsigned       flags;     /* KL_DGRAM_* flags — storage only in step 1 */
+    int            recoverable;/* M5.2a: outbound provenance — 1 = enqueued via a batch, so a hard send
+                               * error DROPS this datagram (recoverable policy) instead of poisoning the
+                               * queue with the sticky error. 0 = an ordinary single send (sticky). */
     int            in_use;    /* 1 while acquired (outbound); guards double-release */
     unsigned char *data;      /* payload region inside the pool block (never separately freed) */
 } KlDgramSlot;

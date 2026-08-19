@@ -39,9 +39,13 @@ struct KlDatagramBatch {
 
     /* Send side (SEND/BOTH). `tx_block` is the provider sendmmsg block, or NULL when TX_BATCH is
      * unsupported OR the provider's tx batch vtable is incomplete (a single-send loop is the fallback).
-     * `gso_buf` is the copy-once GSO group buffer; `gso_bytes` is its VALIDATED byte size
-     * (`n_slots * slot_bufsz`, overflow-guarded at create) — used for both the alloc and the free. */
+     * `tx_descs` is the neutral KlDgramTxDesc[] staging the send machine fills from the FIFO head-run
+     * for one flush (input to send_batch / the portable loop); `tx_descs_bytes` is its validated size.
+     * `gso_buf` is the copy-once GSO group buffer (used in M5.2b); `gso_bytes` is its VALIDATED byte
+     * size (`n_slots * slot_bufsz`, overflow-guarded at create) — used for both the alloc and the free. */
     void                *tx_block;
+    KlDgramTxDesc       *tx_descs;
+    size_t               tx_descs_bytes;
     unsigned char       *gso_buf;
     size_t               gso_bytes;
 };

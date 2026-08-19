@@ -58,6 +58,21 @@ typedef KlDgramSubmitResult (*KlDgramSubmitFn)(void *ctx, const void *data, size
                                                int tos);
 typedef void (*KlDgramWritableFn)(void *ctx);   /* full→non-full edge (reentrant, non-destructive) */
 typedef void (*KlDgramDrainFn)(void *ctx);      /* non-empty→empty edge (destructive tail) */
+typedef void (*KlDgramDropFn)(void *ctx);       /* M5.2a: a recoverable per-datagram send drop occurred
+                                                 * (the facade records last_error + a dropped count) */
+
+/* Result of one batch submit (readiness sendmmsg, or the portable single-send loop). The adapter has
+ * the provider, so it classifies a -1 into WOULD_BLOCK vs a hard error (via kl_sock_io_status) BEFORE
+ * returning — the machine stays transport-neutral (M5.2a §4.2). On SENT, `*sent` ∈ [0, n] is the
+ * prefix actually transmitted; WOULDBLOCK means nothing was sent (retain all); ERROR is a hard error on
+ * the head descriptor (the machine isolates it via the single submit hook). */
+typedef enum {
+    KL_DGRAM_BATCH_SENT = 0,     /* *sent datagrams of the prefix went out */
+    KL_DGRAM_BATCH_WOULDBLOCK,   /* EAGAIN with nothing sent — retain, re-arm */
+    KL_DGRAM_BATCH_ERROR         /* hard error on the head — isolate the head via the single hook */
+} KlDgramBatchResult;
+typedef KlDgramBatchResult (*KlDgramSubmitBatchFn)(void *ctx, const KlDgramTxDesc *descs, int n,
+                                                   int *sent);
 
 typedef struct {
     KlDgramSlots     *slots;         /* borrowed — the OBJECT-owned outbound send pool */
@@ -79,6 +94,7 @@ typedef struct {
     KlDgramSubmitFn   submit;   void *submit_ctx;
     KlDgramWritableFn on_writable; void *writable_ctx;
     KlDgramDrainFn    on_drain;  void *drain_ctx;
+    KlDgramDropFn     on_drop;   void *drop_ctx;   /* fired at each recoverable drop (non-destructive) */
     int               err;           /* sticky transport error */
     int               closing;       /* refuse new sends with CLOSED */
     /* step-4 busy handshake: fired +1 on entering / -1 on leaving (as the LAST action) any public op
@@ -92,6 +108,9 @@ typedef struct {
     int               pend_drain;    /* a retirement emptied the queue (re-checked before firing) */
     int               in_submit;     /* a submit() call is on the stack (inline-completion window) */
     int               submit_retired;/* an inline on_complete retired the in-flight op */
+    size_t            dropped;       /* M5.2a: datagrams dropped by the recoverable per-datagram send-error
+                                      * policy (a hard error on an isolated head — NOT the sticky `err`).
+                                      * The facade reads the delta to set its last_error + dropped count. */
 } KlDgramSend;
 
 /* Wire the send machine over a borrowed, already-inited KlDgramSlots. `completion` selects the I/O
@@ -104,9 +123,27 @@ int  kl_dgram_send_init(KlDgramSend *s, KlDgramSlots *slots, KlAllocator *ring_a
 
 void kl_dgram_send_set_writable_cb(KlDgramSend *s, KlDgramWritableFn cb, void *ctx);
 void kl_dgram_send_set_drain_cb(KlDgramSend *s, KlDgramDrainFn cb, void *ctx);
+void kl_dgram_send_set_drop_cb(KlDgramSend *s, KlDgramDropFn cb, void *ctx);
 
 /* Accept or refuse one whole datagram (never partial). Copies data + metadata before returning. */
 KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m);
+
+/* M5.2a — ENQUEUE-ONLY: the same up-front validation + byte-gate + slot-acquire + copy + FIFO enqueue
+ * as kl_dgram_send, but with NO readiness fast path and NO submit/pump (fires no callbacks). Returns
+ * ACCEPTED / WOULD_BLOCK / TOO_LARGE / UNSUPPORTED / CLOSED / ERROR. The batch transaction admits an
+ * accepted prefix via this, then drains once (kl_dgram_send_flush_batch on readiness, or
+ * kl_dgram_send_flush single-flight on completion). */
+KlDatagramSendStatus kl_dgram_send_enqueue(KlDgramSend *s, const KlDatagramMessage *m);
+
+/* M5.2a — READINESS batch-drain over the head-run. Stages up to min(descs_cap, count) contiguous
+ * queued slots into the caller-owned `descs` scratch and submits them in one `submit_batch` call; then:
+ * SENT → retire exactly the reported prefix (short/partial ⇒ retain the remainder + return, the facade
+ * re-arms WRITE); WOULDBLOCK → retain all + return; ERROR → isolate the head via the single submit hook
+ * (`s->submit`): DONE retires it and continues; WOULD_BLOCK retains + returns; a hard error DROPS that
+ * one head slot under the recoverable send-error policy (`dropped++`, NOT sticky `err`) and continues.
+ * Readiness-only (synchronous; inflight_n stays 0). Returns 0, or -1 if a sticky error is set. */
+int  kl_dgram_send_flush_batch(KlDgramSend *s, KlDgramTxDesc *descs, int descs_cap,
+                               KlDgramSubmitBatchFn submit_batch, void *submit_ctx);
 
 /* Async retirement of the single in-flight send (completion mode; may be called inline from the
  * submit hook). ok=0 → sticky error. Returns 0, or -1 if a sticky error is set. Spurious/duplicate
@@ -146,5 +183,6 @@ void kl_dgram_send_abandon(KlDgramSend *s);
 static inline size_t kl_dgram_send_inflight(const KlDgramSend *s) { return s ? s->inflight_n : 0; }
 static inline size_t kl_dgram_send_queued(const KlDgramSend *s)   { return s ? s->count : 0; }
 static inline int    kl_dgram_send_error(const KlDgramSend *s)    { return s ? s->err : 1; }
+static inline size_t kl_dgram_send_dropped(const KlDgramSend *s)  { return s ? s->dropped : 0; }
 
 #endif /* KEEL_SRC_DATAGRAM_SEND_H */

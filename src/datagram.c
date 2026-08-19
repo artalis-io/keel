@@ -31,6 +31,7 @@
 #include <keel/event.h>         /* KL_EVENT_READ / KL_EVENT_WRITE */
 
 #include "datagram_core.h"
+#include "datagram_batch.h"     /* KlDatagramBatch layout — M5.2a send_batch drives the core send queue */
 #include "completion.h"         /* KlCompletionEvent + kl_comp_* + KL_COMP_DGRAM_* */
 #include "io_engine.h"          /* KlDgramSendOp / KlDgramRecvOp descriptors */
 #include "socket.h"             /* KlSocketProvider, kl_sock_close, kl_sockdef_dgram, kl_sock_io_status */
@@ -52,6 +53,7 @@ static inline size_t dg_send_queued(const KlDatagram *dg)   { return kl_dgram_se
 static inline size_t dg_send_inflight(const KlDatagram *dg) { return kl_dgram_send_inflight(&dg->core->send); }
 
 static void dg_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data);
+static void dg_on_send_drop(void *ctx);   /* M5.2a: recoverable batch-drop reporter (wired at init) */
 
 /* ── readiness interest reconciliation ────────────────────────────────────────────────────────── */
 /* Apply `want_mask` (READ from the recv machine's arm/disarm; WRITE while the send queue is non-empty)
@@ -336,6 +338,7 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
         return -1;
     }
     dg->core = core;   /* fd ownership has transferred to the core */
+    kl_dgram_core_on_drop(core, dg_on_send_drop, dg);   /* M5.2a: surface recoverable batch drops */
     return 0;
 }
 
@@ -344,6 +347,99 @@ KlDatagramSendStatus kl_datagram_send(KlDatagram *dg, const KlDatagramMessage *m
     KlDatagramSendStatus st = kl_dgram_core_send(dg->core, m);
     dg_reconcile_write(dg);   /* a queued (would-block) readiness send needs WRITE interest */
     return st;
+}
+
+/* ── M5.2a batch send ─────────────────────────────────────────────────────────────────────────── */
+
+static const KlSockAddr *dg_addr_or_null(const KlSockAddr *a) {
+    return (a && kl_sockaddr_family(a) != KL_AF_UNSPEC) ? a : NULL;
+}
+
+/* Wired as the send machine's on_drop: a recoverable batch datagram was dropped (a hard send error) —
+ * record it so kl_datagram_last_error / the dropped count surface it. Fired from ANY drain path (the
+ * batch flush, or the ordinary writable-edge single-flight when a retained bad slot reaches the head),
+ * so a bad-middle datagram is reported wherever it is finally submitted. */
+static void dg_on_send_drop(void *ctx) {
+    KlDatagram *dg = ctx;
+    dg->dropped++;
+    dg->last_error = KL_ERR_IO;
+}
+
+struct dg_batch_submit_ctx { KlDatagram *dg; KlDatagramBatch *b; };
+
+/* KlDgramSubmitBatchFn: one sendmmsg when the tx block is present, else a portable single-send loop.
+ * Classifies a -1 into WOULD_BLOCK vs a hard error via kl_sock_io_status BEFORE returning (immediately,
+ * before another provider call can overwrite it) so the send machine stays transport-neutral. */
+static KlDgramBatchResult dg_batch_submit(void *ctx, const KlDgramTxDesc *descs, int n, int *sent) {
+    struct dg_batch_submit_ctx *c = ctx;
+    KlDatagram *dg = c->dg;
+    const KlDatagramOps *ops = c->b->ops;
+    void *pc = dg->sockets ? dg->sockets->context : NULL;
+    *sent = 0;
+    if (c->b->tx_block && ops && ops->send_batch) {
+        int rc = ops->send_batch(pc, dg->fd, c->b->tx_block, descs, n);   /* one sendmmsg */
+        if (rc >= 0) { *sent = rc; return KL_DGRAM_BATCH_SENT; }
+        return (kl_sock_io_status(dg->sockets) == KL_IO_WOULD_BLOCK)
+               ? KL_DGRAM_BATCH_WOULDBLOCK : KL_DGRAM_BATCH_ERROR;
+    }
+    for (int i = 0; i < n; i++) {   /* portable fallback: one provider send() per descriptor, FIFO order */
+        kl_ssize_t r = ops->send(pc, dg->fd, descs[i].data, descs[i].len,
+                                 dg_addr_or_null(&descs[i].dest), dg_addr_or_null(&descs[i].src), descs[i].tos);
+        if (r >= 0) { (*sent)++; continue; }
+        if (i == 0)
+            return (kl_sock_io_status(dg->sockets) == KL_IO_WOULD_BLOCK)
+                   ? KL_DGRAM_BATCH_WOULDBLOCK : KL_DGRAM_BATCH_ERROR;
+        return KL_DGRAM_BATCH_SENT;   /* a prefix went out; stop the run here (retain the rest) */
+    }
+    return KL_DGRAM_BATCH_SENT;
+}
+
+int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDesc *descs, int n,
+                           KlDatagramSendStatus *stop) {
+    if (!dg || !dg->core || !b || n < 0 || (n > 0 && !descs)) {
+        if (stop) *stop = KL_DATAGRAM_ERROR;
+        return -1;
+    }
+    if (b->owner != dg || !(b->dir & KL_DGRAM_BATCH_SEND)) {   /* wrong owner / not a send batch */
+        if (stop) *stop = KL_DATAGRAM_ERROR;
+        return -1;
+    }
+    KlDgramCore *core = dg->core;
+    KlDgramSend *snd = &core->send;
+
+    /* Hold ONE busy frame across the WHOLE operation. The drain's final activity release can otherwise
+     * run a deferred teardown that frees dg/core; bracketing defers that terminal to dispatch_end, which
+     * is the LAST access to dg/core here (only the local `accepted` is touched after). */
+    kl_dgram_core_dispatch_begin(core);
+
+    /* Admit an accepted prefix (enqueue-only — no per-datagram submit, no fast path). */
+    KlDatagramSendStatus st = KL_DATAGRAM_ACCEPTED;
+    int accepted = 0;
+    for (; accepted < n; accepted++) {
+        KlDatagramMessage m; memset(&m, 0, sizeof(m));
+        m.data = descs[accepted].data; m.len = descs[accepted].len; m.tos = descs[accepted].tos;
+        m.peer  = dg_addr_or_null(&descs[accepted].dest);
+        m.local = dg_addr_or_null(&descs[accepted].src);
+        st = kl_dgram_send_enqueue(snd, &m);
+        if (st != KL_DATAGRAM_ACCEPTED) break;
+    }
+    if (stop) *stop = st;   /* ACCEPTED iff all n taken, else the first refusal (descs[accepted]) */
+
+    /* One drain attempt (§4.2 — one batch attempt per call): the readiness batch-drain over the head-
+     * run, or the completion single-flight pump. A retained remainder (backpressure) arms WRITE and
+     * drains via the ordinary writable-edge single-flight path — a retained batch slot keeps its
+     * recoverable provenance there (its slot flag), and dropped datagrams are reported via on_drop
+     * (dg_on_send_drop) regardless of which path submits them. */
+    if (dg->completion) {
+        (void)kl_dgram_send_flush(snd);
+    } else {
+        struct dg_batch_submit_ctx sctx = { dg, b };
+        (void)kl_dgram_send_flush_batch(snd, b->tx_descs, b->n_slots, dg_batch_submit, &sctx);
+    }
+    dg_reconcile_write(dg);   /* arm WRITE if anything is still queued (as the single send path does) */
+
+    kl_dgram_core_dispatch_end(core);   /* LAST access to dg/core — may run the deferred teardown/free */
+    return accepted;                    /* a local — safe even if dg/core were just freed */
 }
 
 int kl_datagram_recv_start(KlDatagram *dg, KlDatagramRecvFn on_recv, void *ud) {

@@ -218,7 +218,32 @@ partial admission and **no** direct-send of individual entries.
 Readiness send is synchronous, so there is no async in-flight batch (`inflight_n` stays 0); FIFO,
 byte budget, edges, single-flight, and close (`discard_queued` drops the queued remainder; readiness
 retire is always `RETIRED` → DETACHED) are all the existing machinery over a prefix. Completion mode
-keeps `send_pump` (single-flight); `flush_batch` is never wired there.
+keeps `send_pump` (single-flight); `flush_batch` is never wired there. `flush_batch` defensively
+rejects (`-1`) a completion machine or an outstanding `inflight_n != 0`, so a stray batch submit can
+never duplicate an in-flight head.
+
+**One batch attempt per public call (M5.2a decision, revised P1-3).** `kl_datagram_send_batch` does
+exactly ONE `flush_batch` (readiness) — it does NOT persistently attach the transient SEND batch to the
+datagram. A short/EAGAIN **remainder is retained and arms WRITE, then drains via the ORDINARY
+writable-edge single-flight path** (`dg_on_ready` → `send_pump`), NOT a re-entered `flush_batch`. This
+preserves the transient SEND-batch ownership contract (§4.5 — the batch is caller-owned, referenced
+only during the synchronous call except for a GSO group) at the cost of a **deliberate throughput
+limitation**: a batch's retained remainder egresses one datagram per syscall on subsequent edges, not
+batched. Correctness is unaffected — and the recoverable per-datagram policy is NOT lost on that path:
+each batch-enqueued slot carries a **recoverable provenance flag** (`KlDgramSlot.recoverable`, set by
+`kl_dgram_send_enqueue`) so a hard error on a retained slot draining through `send_pump` (or completion
+`on_complete`) DROPS+reports that one datagram (§4.4) instead of setting the sticky error. A future
+increment MAY add persistent batch-flush state to keep the writable-edge drain batched; M5.2a does not.
+
+**Recoverable reporting seam (P1-2).** A recoverable drop from ANY path — `flush_batch` isolation, the
+`send_pump` writable-edge drain, or completion `on_complete` — fires the send machine's `on_drop`
+callback, which the facade wires to record `kl_datagram_last_error` + a dropped count. So a bad-middle
+datagram is reported wherever it is finally submitted, not only during the synchronous batch call.
+
+**Facade reentrancy (P1-1).** `kl_datagram_send_batch` brackets the WHOLE operation with
+`kl_dgram_core_dispatch_begin/end`: the drain's final activity release can otherwise run a deferred
+teardown that frees `dg`/`core`, after which the facade still reconciles WRITE. The bracket defers that
+terminal to `dispatch_end` — the last access to `dg`/`core` (only the local `accepted` is used after).
 
 ### 4.3 GSO — a queued FIFO group: tail-append, head-submit, atomic release (B5, C2)
 

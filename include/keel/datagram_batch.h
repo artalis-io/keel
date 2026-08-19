@@ -57,6 +57,24 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
  */
 int kl_datagram_batch_free(KlDatagramBatch *b);
 
+/**
+ * @brief Send up to @p n datagrams through the core send queue as one transaction (M5.2a).
+ *
+ * Admits an accepted prefix of @p descs into the datagram's send queue (each datagram atomically
+ * accepted or refused, subject to the configured slot-count / byte backpressure), then drains once —
+ * on a readiness datagram via one sendmmsg over the head-run (or a portable single-send loop when
+ * TX_BATCH is absent), on a completion datagram via the single-flight pump. @p b must be a SEND/BOTH
+ * batch owned by @p dg (else -1 with @p stop = KL_DATAGRAM_ERROR).
+ *
+ * @return the number of datagrams ACCEPTED (0..n; the caller retains descs[accepted..n)), or -1 on a
+ *  bad argument. On return @p stop (if non-NULL) classifies descs[accepted]: KL_DATAGRAM_ACCEPTED if
+ *  all @p n were taken, else the refusal (WOULD_BLOCK = retry later / TOO_LARGE = permanent / ...).
+ *  A per-datagram hard error while draining drops that datagram and is reported via
+ *  kl_datagram_last_error — it does not fail the call.
+ */
+int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDesc *descs, int n,
+                           KlDatagramSendStatus *stop);
+
 #ifdef __cplusplus
 }
 #endif

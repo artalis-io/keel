@@ -126,6 +126,7 @@ KlDgramSlot *kl_dgram_slots_acquire(KlDgramSlots *s) {
     slot->len   = 0;
     slot->tos   = -1;
     slot->flags = 0;
+    slot->recoverable = 0;
     slot->in_use = 1;
     memset(&slot->peer,  0, sizeof(slot->peer));
     memset(&slot->local, 0, sizeof(slot->local));

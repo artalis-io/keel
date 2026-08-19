@@ -182,6 +182,7 @@ void kl_dgram_core_dispatch_end(KlDgramCore *core);
 /* Registered send edges (optional). */
 void kl_dgram_core_on_writable(KlDgramCore *core, KlDgramWritableFn cb, void *ctx);
 void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx);
+void kl_dgram_core_on_drop(KlDgramCore *core, KlDgramDropFn cb, void *ctx);   /* M5.2a recoverable drop */
 
 /* The inbound slot (recv storage) — a submit/pull adapter writes the received datagram here. */
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core);

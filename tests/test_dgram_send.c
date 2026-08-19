@@ -678,4 +678,161 @@ UTEST(dgram_send, both_discard_zero_length_inflight_head) {
     kl_dgram_slots_free(&slots);
 }
 
+/* ══ M5.2a — readiness batch-drain (kl_dgram_send_flush_batch) ═══════════════════════════════════ */
+
+/* submit_batch mock: transmits the leading run of non-'B' descriptors; a 'B' at the head → ERROR. */
+static KlDgramBatchResult batch_submit_mark(void *ctx, const KlDgramTxDesc *descs, int n, int *sent) {
+    (void)ctx;
+    if (n > 0 && ((const char *)descs[0].data)[0] == 'B') { *sent = 0; return KL_DGRAM_BATCH_ERROR; }
+    int i = 0;
+    while (i < n && ((const char *)descs[i].data)[0] != 'B') i++;
+    *sent = i;                       /* the good prefix (stops before a 'B') */
+    return KL_DGRAM_BATCH_SENT;
+}
+/* submit_batch mock: nothing goes out (EAGAIN). */
+static KlDgramBatchResult batch_submit_wouldblock(void *ctx, const KlDgramTxDesc *descs, int n, int *sent) {
+    (void)ctx; (void)descs; (void)n; *sent = 0; return KL_DGRAM_BATCH_WOULDBLOCK;
+}
+/* submit_batch mock: transmits at most 2 per call (partial prefix). */
+static KlDgramBatchResult batch_submit_half(void *ctx, const KlDgramTxDesc *descs, int n, int *sent) {
+    (void)ctx; (void)descs; *sent = (n > 2) ? 2 : n; return KL_DGRAM_BATCH_SENT;
+}
+/* single-submit for the isolation step: ERROR for a 'B' head, DONE otherwise. */
+static KlDgramSubmitResult iso_submit(void *ctx, const void *data, size_t len,
+                                      const KlSockAddr *peer, const KlSockAddr *local, int tos) {
+    (void)ctx; (void)len; (void)peer; (void)local; (void)tos;
+    return (((const char *)data)[0] == 'B') ? KL_DGRAM_SUBMIT_ERROR : KL_DGRAM_SUBMIT_DONE;
+}
+
+static void enqueue_marked(KlDgramSend *s, const KlSockAddr *p, const char *marks) {
+    for (const char *c = marks; *c; c++) {
+        char b = *c;
+        KlDatagramMessage m = { .data = &b, .len = 1, .peer = p, .tos = -1 };
+        (void)kl_dgram_send_enqueue(s, &m);
+    }
+}
+
+/* A hard error on an isolated head is a RECOVERABLE drop: the head is dropped (dropped++), the sticky
+ * error is NOT set, and the rest of the queue still drains in FIFO order. */
+UTEST(dgram_send, flush_batch_recoverable_drop) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 8, 64), 0);
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    KlSockAddr p = any_peer();
+    /* Bad datagram at the head: submit_batch returns ERROR on the head-run → the head is isolated,
+     * hard-errors, is dropped, and the drain CONTINUES with the rest. (A middle bad descriptor instead
+     * surfaces as a short SENT prefix — transient, drained on the next writable edge per §4.2.) */
+    enqueue_marked(&s, &p, "BAC");                        /* B bad (head), A + C good */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);
+
+    KlDgramTxDesc descs[8];
+    ASSERT_EQ(kl_dgram_send_flush_batch(&s, descs, 8, batch_submit_mark, NULL), 0);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);          /* fully drained (B dropped, A + C sent) */
+    ASSERT_EQ((size_t)1, kl_dgram_send_dropped(&s));      /* B dropped by the recoverable policy */
+    ASSERT_EQ(0, kl_dgram_send_error(&s));                /* recoverable — the queue is NOT poisoned */
+
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* WOULD_BLOCK on the whole run retains everything (no drop, no sticky error) for a later writable edge. */
+UTEST(dgram_send, flush_batch_wouldblock_retains) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 8, 64), 0);
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    KlSockAddr p = any_peer();
+    enqueue_marked(&s, &p, "AAA");
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);
+
+    KlDgramTxDesc descs[8];
+    ASSERT_EQ(kl_dgram_send_flush_batch(&s, descs, 8, batch_submit_wouldblock, NULL), 0);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);          /* nothing sent — all retained */
+    ASSERT_EQ((size_t)0, kl_dgram_send_dropped(&s));
+    ASSERT_EQ(0, kl_dgram_send_error(&s));
+
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* A batch (recoverable) datagram that hard-errors on the ORDINARY single-flight pump (the path a
+ * retained bad-middle slot takes on a later writable edge) is DROPPED, not sticky — the queue keeps
+ * draining. (An ordinary single send in the same spot would set the sticky error — unchanged.) */
+UTEST(dgram_send, pump_recoverable_drop_of_batch_slot) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 8, 64), 0);
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    KlSockAddr p = any_peer();
+    enqueue_marked(&s, &p, "ABC");                        /* batch-enqueued → recoverable; B hard-errors */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);
+
+    ASSERT_EQ(kl_dgram_send_flush(&s), 0);                /* the single-flight pump drains A, drops B, sends C */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+    ASSERT_EQ((size_t)1, kl_dgram_send_dropped(&s));      /* B recoverably dropped mid-queue */
+    ASSERT_EQ(0, kl_dgram_send_error(&s));                /* NOT poisoned */
+
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* An ordinary (single) send that hard-errors stays STICKY — the recoverable policy is batch-only. */
+UTEST(dgram_send, single_send_hard_error_is_sticky) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 64), 0);
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    KlSockAddr p = any_peer();
+    char b = 'B';
+    KlDatagramMessage m = { .data = &b, .len = 1, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ERROR);  /* fast-path hard error → sticky */
+    ASSERT_EQ(1, kl_dgram_send_error(&s));
+    ASSERT_EQ((size_t)0, kl_dgram_send_dropped(&s));      /* NOT a recoverable drop */
+
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* flush_batch defensively refuses a completion machine or an outstanding in-flight op. */
+UTEST(dgram_send, flush_batch_rejects_completion_and_inflight) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramTxDesc descs[4];
+
+    KlDgramSlots rs; ASSERT_EQ(kl_dgram_slots_init(&rs, &a, 4, 64), 0);
+    KlDgramSend rd;
+    ASSERT_EQ(kl_dgram_send_init(&rd, &rs, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    rd.inflight_n = 1;                                    /* whitebox: pretend a single-flight op is out */
+    ASSERT_EQ(-1, kl_dgram_send_flush_batch(&rd, descs, 4, batch_submit_wouldblock, NULL));
+    rd.inflight_n = 0;
+    ASSERT_EQ(kl_dgram_send_free(&rd), 0);
+    kl_dgram_slots_free(&rs);
+
+    KlDgramSlots cs; ASSERT_EQ(kl_dgram_slots_init(&cs, &a, 4, 64), 0);
+    KlDgramSend cd;
+    ASSERT_EQ(kl_dgram_send_init(&cd, &cs, &a, /*completion*/1, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    ASSERT_EQ(-1, kl_dgram_send_flush_batch(&cd, descs, 4, batch_submit_wouldblock, NULL));
+    ASSERT_EQ(kl_dgram_send_free(&cd), 0);
+    kl_dgram_slots_free(&cs);
+}
+
+/* A short SENT prefix retires exactly that many and retains the remainder in FIFO order. */
+UTEST(dgram_send, flush_batch_partial_prefix) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 8, 64), 0);
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    KlSockAddr p = any_peer();
+    enqueue_marked(&s, &p, "AAAA");
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 4);
+
+    KlDgramTxDesc descs[8];
+    ASSERT_EQ(kl_dgram_send_flush_batch(&s, descs, 8, batch_submit_half, NULL), 0);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 2);          /* 2 sent, 2 retained (short prefix → break) */
+    ASSERT_EQ((size_t)0, kl_dgram_send_dropped(&s));
+
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
 UTEST_MAIN();

@@ -47,6 +47,7 @@ static void batch_destroy(KlDatagramBatch *b) {
     if (b->rx_block) b->ops->rx_batch_free(a, b->rx_block);
     if (b->tx_block) b->ops->tx_batch_free(a, b->tx_block);
     if (b->rx_slots) kl_free(a, b->rx_slots, b->rx_slots_bytes);
+    if (b->tx_descs) kl_free(a, b->tx_descs, b->tx_descs_bytes);
     if (b->gso_buf)  kl_free(a, b->gso_buf, b->gso_bytes);
     kl_free(a, b, sizeof(*b));
 }
@@ -63,8 +64,10 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
     if (n_slots <= 0 || slot_bufsz == 0) return NULL;
     if ((size_t)n_slots > SIZE_MAX / slot_bufsz) return NULL;
     if ((size_t)n_slots > SIZE_MAX / sizeof(KlDgramRxSlot)) return NULL;
+    if ((size_t)n_slots > SIZE_MAX / sizeof(KlDgramTxDesc)) return NULL;
     const size_t gso_bytes = (size_t)n_slots * slot_bufsz;
     const size_t rx_slots_bytes = (size_t)n_slots * sizeof(KlDgramRxSlot);
+    const size_t tx_descs_bytes = (size_t)n_slots * sizeof(KlDgramTxDesc);
 
     const int want_recv = (dir & KL_DGRAM_BATCH_RECV) != 0;
     const int want_send = (dir & KL_DGRAM_BATCH_SEND) != 0;
@@ -78,7 +81,7 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
     if (!b) return NULL;
     memset(b, 0, sizeof(*b));
     b->owner = dg; b->dir = dir; b->n_slots = n_slots; b->slot_bufsz = slot_bufsz;
-    b->rx_slots_bytes = rx_slots_bytes; b->gso_bytes = gso_bytes;
+    b->rx_slots_bytes = rx_slots_bytes; b->tx_descs_bytes = tx_descs_bytes; b->gso_bytes = gso_bytes;
     b->alloc = a; b->ops = ops;
 
     if (want_recv) {
@@ -98,7 +101,11 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
             b->tx_block = ops->tx_batch_new(a, n_slots);
             if (!b->tx_block) { batch_destroy(b); return NULL; }
         }
-        b->gso_buf = kl_malloc(a, gso_bytes);   /* copy-once GSO group buffer */
+        /* Neutral staging the send machine fills from the FIFO head-run for one flush (input to
+         * send_batch / the portable loop). Always present for a send batch — independent of caps. */
+        b->tx_descs = kl_malloc(a, tx_descs_bytes);
+        if (!b->tx_descs) { batch_destroy(b); return NULL; }
+        b->gso_buf = kl_malloc(a, gso_bytes);   /* copy-once GSO group buffer (M5.2b) */
         if (!b->gso_buf) { batch_destroy(b); return NULL; }
     }
     return b;
@@ -106,7 +113,10 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
 
 int kl_datagram_batch_free(KlDatagramBatch *b) {
     if (!b) return 0;
-    if (b->gso_busy) return -1;   /* E1: a GSO group still reads b's buffer asynchronously (M5.2) */
+    if (b->gso_busy) return -1;   /* E1: a GSO group still reads b's buffer asynchronously (M5.2b) */
     batch_destroy(b);
     return 0;
 }
+
+/* kl_datagram_send_batch lives in datagram.c (the facade home) — it needs facade internals
+ * (dg_reconcile_write to arm WRITE on a retained remainder) + the core send machine. */
