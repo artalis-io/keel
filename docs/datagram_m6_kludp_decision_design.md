@@ -1,12 +1,48 @@
-# Post-M5 — KlUdp disposition (inventory + decision freeze, rev 5 — RULED)
+# Post-M5 — KlUdp disposition (inventory + decision freeze, rev 6 — RULED: remove, don't wrap)
 
-**Status:** DECISION FREEZE (docs-only), **revision 5 — RULED**. No code. The inventory + options
-(§1–§6) stand; the review ruling + frozen migration plan are §7–§10. The deferred post-M5 `KlUdp`
-decision ([`datagram_m5_batch_extension_design.md`](datagram_m5_batch_extension_design.md) §9) is
-decided: **modified Option B** (§7), delivered via the rev-5 **dependency-first sequence** (§8). Each
-increment lands as its own freeze-then-code review.
+**Status:** DECISION FREEZE (docs-only), **revision 6 — RULED**. No code this turn. The new ruled
+direction is **§11–§18**; the historical inventory/options (§0–§6) are retained as context; the former
+**modified-Option-B KlUdp-wrapper plan (§7) and the M6.0a/M6.0b/M6.1 wrapper sequence (§8–§10) are
+SUPERSEDED** (kept for history, banner-marked). The prior "modified Option B" is withdrawn.
 
-### Rev 5 — dependency-first sequence (supersedes the rev-3 feature split)
+### Rev 6 — one canonical object per transport (supersedes the wrapper plan)
+
+**New architectural ruling.** There is exactly ONE canonical object per transport abstraction.
+`KlDatagram` is *the* generic connected-or-unconnected message transport; `KlStream` + `KlListener` +
+`KlConnectOp` are *the* reliable byte-stream machinery. Therefore:
+
+- `KlUdp` and `KlUdpServer` are **REMOVED**, not wrapped, renamed (`KlUdpSocket`), or retained as a
+  usage-pattern shell. No `KlTcpServer`/`KlTcpClient`/`KlTcpConnection` are introduced. `KlHttp*` names
+  are the HTTP protocol family and stay separate from transport objects.
+- **Why:** `KlUdp`/`KlUdpServer` no longer carry unique transport semantics. DNS already rides
+  `KlDatagram`; `KlUdpServer` is already a thin `KlDatagram`+M5 shell; source-pin, per-packet + default
+  TOS, receive-TOS, multicast, connected-send capability, BOTH backpressure, byte-queue reporting,
+  recv/send batching, GSO and GRO all now live on `KlDatagram`/M5 (the last four TOS/queue pieces landed
+  in the accepted M6.0a). `KlUdp`'s only former unique semantic — the byte-only `malloc`-per-datagram
+  queue — was explicitly rejected. `KlUdpServer` adds socket prep + callback adaptation + source-pinned
+  reply *convenience*, not a distinct protocol or state machine. UDP has no fundamental client/server
+  object split.
+- **The ergonomic gap belongs directly on `KlDatagram`** (§12, D1): safe public socket
+  creation/config/bind/adoption; provider-neutral optional connect; sensible send-slot/byte-budget/recv
+  sizing defaults; exact ownership + cleanup on every failure — on top of the existing
+  `KlDatagram` send/receive/close + M5 extensions.
+
+**Ruled sequence (each its own freeze-then-code review):** **D1** add the public `KlDatagram` socket
+convenience + connect (§12) → **D2** migrate every `KlUdp`/`KlUdpServer` test/smoke/integration/example
+to direct `KlDatagram` use, proving replacement coverage (§13) → **D3** delete `KlUdp`, `KlUdpServer`,
+`KlUdpTransport`/`KlUdpDatagram`/`udp_transport_detail.h`, the parallel `udp.c` data plane, and rename
+`KlUdpConfig` to the datagram-neutral socket config; add a stale-name gate (§14). No permanent aliases,
+forwarding headers, or compatibility macros — pre-1.0, this is an intentional API/ABI revision. The
+**M6.1 KlUdp-wrapper cutover is CANCELLED.**
+
+**M6.0b disposition (§16):** the landed M6.0b adapters + their test are **obsolete wrapper machinery
+(category c)** — they translate onto `KlUdp` callbacks that D3 deletes. They changed zero production
+behavior (unwired non-static functions). They are removed in D3 through a normal reviewed forward
+commit — **not** reverted, reset, or amended (its commit stands, corrupted message and all).
+
+---
+
+### Rev 5 — dependency-first sequence (SUPERSEDED by rev 6; wrapper cutover cancelled)
 
 A rewrite of the M6.1 boundary would have left an **invalid intermediate commit** — callable feature
 functions with degraded semantics and their tests disabled — because retiring `KlUdpTransport` forces
@@ -74,7 +110,11 @@ reject *every* `kl_udp_init`, even when the caller only uses `send_to`. Fixed (�
 - **Preserve `docs/claude_code_transport_taxonomy_prompt.md`** (present, untracked) across all M6 work —
   the M6.3 cleanup must not remove or `git clean` it.
 
-## RULING (2026-08-19) — modified Option B
+## RULING (2026-08-19) — modified Option B  ⛔ SUPERSEDED by rev 6 (§11)
+
+> **SUPERSEDED (rev 6):** the "keep + reimplement KlUdp as a wrapper" ruling below is WITHDRAWN. `KlUdp`
+> and `KlUdpServer` are removed, not wrapped/renamed. The ergonomic surface moves directly onto
+> `KlDatagram` (§12). The text is retained only for history.
 
 Retain the ergonomic UDP client surface; do NOT retain the legacy byte-only queue:
 - **Keep** `KlUdp` and its convenient `init`/`connect`/`send`/`recv`/`free` API (the *function surface*).
@@ -232,6 +272,14 @@ fallback but leaves the parallel implementation the consolidation set out to rem
   a datagram-neutral name is a separate cosmetic pass, not part of this decision.
 - Mode-B explicit `kl_datagram_recv_batch` (M5 §5.5) and native completion-backend batched receive
   (M5 §10 O-1) remain independent follow-ups, unaffected by this decision.
+
+## ⛔ §7–§10 — SUPERSEDED by rev 6 (wrapper plan withdrawn; see §11–§18)
+
+> **SUPERSEDED (rev 6).** §7 (modified-Option-B mechanics), §8 (the M6.0a/M6.0b/M6.1 dependency-first
+> wrapper sequence), §9 (rev-5 ruled decisions), and §10 (rev-5 non-goals) describe the CANCELLED
+> KlUdp-wrapper cutover. Retained verbatim for history. The accepted parts already landed as the M6.0a
+> additive `KlDatagram` prerequisites (optional_caps, send_queued_bytes, set_tos, receive-TOS, recv_tos)
+> and the now-obsolete M6.0b adapters (§16). The live plan is **§11 onward**.
 
 ## 7. Frozen direction (modified Option B) — mechanics
 
@@ -421,3 +469,291 @@ complete — no "stop with feature knobs on the old path" intermediate state.
 - Mode-B `recv_batch` (M5 §5.5) + native completion batched receive (M5 §10 O-1) remain independent.
 - The untracked `docs/claude_code_transport_taxonomy_prompt.md` is preserved across all M6 work (M6.3
   cleanup must not remove it).
+
+---
+
+# Rev 6 — RULED direction: KlDatagram is the single canonical datagram object
+
+## 11. The ruling + what is genuinely missing
+
+One canonical object per transport abstraction (see the rev-6 banner). `KlUdp` + `KlUdpServer` are
+removed; their ergonomics move onto `KlDatagram`. Comparing the entire `KlUdp`/`KlUdpServer` surface to
+`KlDatagram`/M5 (§15.3), **only two behaviors are genuinely missing from `KlDatagram` today — both
+ordinary construction/connect convenience, not unique transport semantics:**
+
+1. **Public socket construction.** `kl_datagram_init`/`_init_ex` require an ALREADY-prepared fd
+   (`socket()`'d + `configure()`'d + bound). Every current caller (DNS, `KlUdpServer`, tests) reaches
+   the INTERNAL `kl_datagram_open` (`src/datagram_open.h`) + hand-builds a `KlDatagramConfig` with that
+   fd. There is no public one-shot create-configure-bind-adopt. → **D1 `kl_datagram_socket_init`.**
+2. **Connect + connected state.** `KlDatagram` has no connect and no "actually connected" state. The
+   send machine admits a peerless send purely on the granted `KL_DGRAM_CAP_CONNECTED` capability
+   (`src/datagram_send.c:254`), which does NOT mean the socket was ever `connect()`'d. → **D1
+   `kl_datagram_connect` + a real connected-state gate.**
+
+Everything else already exists: source-pin (`msg.local` + `CAP_SOURCE_PIN`), default TOS
+(`kl_datagram_set_tos`, M6.0a), per-packet TOS (`msg.tos` + `CAP_TOS`), receive TOS
+(`kl_datagram_recv_tos`, M6.0a), multicast (`kl_datagram_multicast_*`), BOTH backpressure
+(`kl_datagram_init_ex`), queued-byte reporting (`kl_datagram_send_queued_bytes`, M6.0a), recv/send batch
++ GSO/GRO (M5 + `KlDatagramBatch`), pause/resume, confirmed-detachment close, reentrant teardown. The
+`KlUdpServer` "source-pinned reply" is `on_recv`'s `local` (under `KL_DGRAM_HAS_LOCAL`) fed back as
+`msg.local` on `kl_datagram_send` — a documented pattern/example, not new API (§15.3).
+
+## 12. D1 — public `KlDatagram` socket convenience + connect (FROZEN shapes)
+
+### 12.1 One-shot socket initializer
+
+A single public entry that creates, configures, optionally binds, and adopts the socket into a
+`KlDatagram` — reusing the accepted M0 preparation (`kl_datagram_open`) verbatim internally. **No
+public two-step open/adopt is exposed** (the inventory shows no caller needs the intermediate prepared
+fd exposed publicly; the wildcard source-pin gate `KlUdpServer` used the two-step for is done INSIDE the
+initializer). The low-level `kl_datagram_init`/`_init_ex` (bring-your-own prepared fd) REMAIN for
+advanced adoption; that is a distinct low/high-level pair, not an ambiguous two-step.
+
+```c
+typedef struct {                    /* FROZEN public config — all pointers borrowed */
+    struct KlEventCtx             *ctx;        /* event loop (selects completion vs readiness) */
+    const struct KlSocketProvider *sockets;    /* datagram-capable provider; NULL = ctx default */
+    KlAllocator                   *alloc;      /* NULL = ctx->alloc */
+
+    /* ── socket creation + options (the former KlUdpConfig sockopt knobs, datagram-neutral) ── */
+    int          family;            /* AF_INET / AF_INET6 / AF_UNSPEC (auto from bind_addr) */
+    const char  *bind_addr;         /* numeric bind address, or NULL = unbound (pure client) */
+    uint16_t     bind_port;         /* bind port; 0 = ephemeral (ignored when bind_addr == NULL) */
+    int          reuse_addr, reuse_port;
+    int          recv_pktinfo;      /* capture each datagram's local (dest) addr */
+    int          recv_tos;          /* deliver each datagram's TOS (kl_datagram_recv_tos) */
+    int          recv_gro;          /* UDP_GRO receive coalescing (readiness only) */
+    int          broadcast;         /* SO_BROADCAST (IPv4) */
+    int          multicast_ttl, multicast_disable_loop;
+    unsigned     multicast_iface;   /* egress interface index; 0 = kernel default */
+    const char  *multicast_group;   /* optional numeric group joined at init (after bind); NULL = none */
+    int          so_rcvbuf, so_sndbuf;
+    int          tos;               /* socket-default TOS/Traffic-Class (IP_TOS/IPV6_TCLASS) */
+    int          mmsg_batch;        /* recvmmsg/sendmmsg batch size hint; 0 = default */
+
+    /* ── KlDatagram sizing — EXPLICIT units, no reinterpretation (§12.3 defaults) ── */
+    size_t       send_slots;        /* fixed outbound slot COUNT; 0 = derived default */
+    size_t       send_slot_cap;     /* per-slot payload BYTES; 0 = default 65507 (full datagram) */
+    size_t       send_byte_budget;  /* BOTH byte-gate BYTES; 0 = default 262144 (256 KiB) */
+    size_t       recv_cap;          /* inbound slot payload BYTES; 0 = default 2048 (capped 65535) */
+
+    /* ── capabilities ── */
+    unsigned     want_caps;         /* required (fail-loud, M2 exact-fd) */
+    unsigned     optional_caps;     /* grant-if-supported (M6.0a) */
+} KlDatagramSocketConfig;
+
+/* Create + configure + (optionally) bind + adopt into `dg` (a memset-zero handle). Returns 0 (fd owned
+ * by KlDatagram) or -1 (kl_datagram_last_error carries why; nothing for the caller to reclaim). */
+int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg);
+```
+
+### 12.2 fd ownership (EXACT, single-close on every path)
+
+- **Pre-adoption prep failure** (socket/configure/bind fails inside `kl_datagram_open`): `kl_datagram_open`
+  already closes its own fd exactly once; the initializer returns -1 having created nothing else.
+- **Init failure before adoption** (source-pin gate rejects, or `kl_datagram_init_ex` fails pre-adoption):
+  the initializer closes the prepared fd exactly once (the M4 `KlUdpServer` ordering — copy
+  `last_error`, then `kl_sock_close(prep.fd)`), returns -1.
+- **Success:** fd ownership transfers to `KlDatagram`; the close machine closes it once at teardown.
+- **Post-adoption failure** (e.g. a later multicast-join-at-init fails): tear down THROUGH `KlDatagram`
+  (`kl_datagram_teardown`, which closes the fd once), return -1 — never a raw double close.
+
+Allocator discipline preserved (all allocation via `KlAllocator`); no hot-path allocation added (the
+slot/recv storage is the existing one-time init-time allocation). Readiness/completion/provider-neutral:
+the initializer selects nothing itself — `kl_datagram_open` + `kl_datagram_init_ex` already negotiate
+the loop model and go through the socket provider seam, so it works on POSIX, Winsock/IOCP, lwIP and EFI
+(freestanding) exactly as `KlUdpServer`/DNS do today over `kl_datagram_open`.
+
+### 12.3 Sizing defaults (no silent unit reinterpretation)
+
+Each field keeps its own unit; `0` selects a documented default:
+- `send_slot_cap == 0` → **65507** (a full UDP payload — one datagram per slot).
+- `send_byte_budget == 0` → **262144** (256 KiB, the legacy `max_send_queue` default) → BOTH policy.
+- `recv_cap == 0` → **2048**, hard-capped at 65535.
+- `send_slots == 0` → derived **`max(1, send_byte_budget_eff / send_slot_cap_eff)`** (the M4
+  `KlUdpServer` sizing; bytes÷bytes = a COUNT, a units-consistent derivation, documented — not a
+  reinterpretation of one value under two units). Pure-SLOT policy (no byte gate) stays reachable via the
+  low-level `kl_datagram_init`.
+
+### 12.4 Provider-neutral connect + connected state (FROZEN)
+
+```c
+/* Provider-neutral connect: calls the socket provider's connect seam (kl_sock_connect) on the adopted
+ * fd. On success, records the datagram's CONNECTED state so peerless sends (KlDatagramMessage.peer ==
+ * NULL) are admitted. Returns 0, or -1 with kl_datagram_last_error(). */
+int kl_datagram_connect(KlDatagram *dg, const KlSockAddr *peer);
+```
+
+- **Capability vs state are distinct.** Provider support = `provider_caps & KL_DGRAM_CAP_CONNECTED`
+  (does the fd support connected send). Actual state = a NEW `connected` flag on the datagram, set only
+  by a successful `kl_datagram_connect`. **Peerless-send validation changes** from "cap granted" to
+  "cap granted **AND** `connected` set" (`src/datagram_send.c:254` gains the state check via a
+  core-visible flag).
+- **send-before-connect fails deterministically:** a peerless `kl_datagram_send` before a successful
+  connect returns `KL_DATAGRAM_UNSUPPORTED` (or the invalid-state surface) — never handed to the kernel
+  on an unconnected socket. Destination-addressed send (`msg.peer != NULL`) is unaffected.
+- **Reduced provider:** a provider without connected-mode support still initializes and does
+  destination-addressed send; `kl_datagram_connect` fails `KL_ERR_UNSUPPORTED` (checked before the
+  syscall when the cap is absent).
+- **Reconnect (RULED):** repeated `kl_datagram_connect` is ALLOWED and re-points the peer (POSIX UDP
+  re-connect semantics); this is an explicit decision, not left to chance.
+- **Connect failure preserves the datagram:** a failed `kl_sock_connect` leaves `connected` false and
+  the datagram usable for destination-addressed sends (POSIX UDP leaves the socket usable) — unless the
+  provider contract makes a failed connect leave the socket unusable, in which case that provider's
+  documented behavior governs. The socket is NOT closed on connect failure.
+
+## 13. D2 — migrate internal usage + coverage (old → new)
+
+Migrate every `KlUdp`/`KlUdpServer` **subject** test/smoke/integration/example to direct `KlDatagram`
+use (via D1 `kl_datagram_socket_init` + `kl_datagram_connect`). Small test-only helpers are allowed; **no
+private production wrapper** that recreates `KlUdp`/`KlUdpServer`. Preserve backend coverage for every
+listed behavior across POSIX, Winsock/IOCP, lwIP and EFI. DNS stays on `KlDatagram`.
+
+| Old (subject) | kl refs | Disposition | Covers-it-today / new home |
+|---|---|---|---|
+| `tests/test_udp.c` | 131 | **Migrate (unique live socket-init/connect/byte-queue)** | new `test_datagram_socket.c` (D1) + `test_datagram_live` additions; BOTH/geometry already in `test_datagram_public` |
+| `tests/test_udp_server.c` | 108 | **Migrate unique (source-pinned reply, wildcard-pktinfo gate, multicast-at-init, reuse_port)** | bound-`KlDatagram` test/example; recv-local already in `test_datagram_live.completion_recv_captures_local` |
+| `tests/test_udp_multicast.c` | 69 | **Migrate (LIVE join/leave + TTL/loop/iface)** | new live `KlDatagram` multicast test; routing/gating/errors already in `test_datagram_public.m2_multicast_*` (mock) |
+| `tests/test_udp_offload.c` | 38 | **Migrate unique live GSO/GRO** | mostly DUP of `test_datagram_batch` (GRO split/gate/segments) + `send_gso` |
+| `tests/test_udp_tos.c` | 36 | **Mostly DUP** | `test_datagram_live` (set_tos/per-pkt/recv-tos) + `test_datagram_public` gates (M6.0a) |
+| `tests/test_udp_batching.c` | 20 | **Mostly DUP** | `test_datagram_batch` (recv batch) + `kl_datagram_send_batch` |
+| `tests/test_udp_adapters.c` | 9 | **DELETE (obsolete M6.0b)** | adapters removed in D3 |
+| `tests/smoke_udp.c` | 6 | **Migrate → `smoke_datagram.c`** (exists) | fold KlUdp roundtrip into the datagram smoke |
+| `tests/smoke_{iocp,iouring,pollcomp}.c` | 5 ea | **Migrate KlUdp client leg → KlDatagram** | completion smokes |
+| `tests/test_dns_resolver.c` | 67 + 62 svr | **Migrate the fake-nameserver harness (KlUdpServer) → bound `KlDatagram`** | DNS already on KlDatagram; only the test peer uses KlUdpServer |
+| `tests/test_socket_provider.c` | 11 | **Migrate (ctx→sockets threading proof)** | prove threading with a `KlDatagram` instead of a `KlUdp` |
+| `integrations/lwip/raw_udp_test.c` (48), `raw_caps_test.c`, `raw_dns_test.c`, `lwip_loopback_test.c` | — | **Migrate to `KlDatagram` over the lwIP provider** | preserves lwIP datagram coverage |
+| `integrations/uefi/mock_efi_test.c` (11) | — | **Migrate to `KlDatagram` over the EFI provider** | preserves EFI datagram coverage |
+| `tests/test_udp_cmsg.c` (20) | — | **KEEP (NOT a KlUdp subject)** | tests the shared `kl_udp_parse_*`/`build_control` cmsg helpers |
+
+**KEEP (shared infra, not KlUdp object):** `src/udp_cmsg.{c,h}`, `src/udp_cmsg_win.{c,h}` and their
+`kl_udp_*` cmsg helpers (used by the completion backends + `socket_dgram_*` providers), plus
+`tests/test_udp_cmsg.c`. Rename of these `kl_udp_parse_*` symbols to `kl_dgram_*` is an OPTIONAL cosmetic
+follow-up, out of D1–D3 scope (they are not the object API and the stale-name gate allowlists them).
+
+**Examples:** none exist today (no `examples/*udp*`), so D2/D3 *adds* a canonical bound-`KlDatagram`
+example (the D1 ergonomics showcase: init + recv + source-pinned reply + optional connect) rather than
+replacing one.
+
+## 14. D3 — remove the obsolete UDP object APIs
+
+After D2 proves replacement coverage:
+- **Delete** `KlUdp` (all 22 public functions), `KlUdpServer` (11 public functions), `KlUdpTransport`,
+  `KlUdpDatagram`, `include/keel/udp_transport_detail.h`, the parallel `src/udp.c` data plane +
+  `src/udp_internal.h`, `src/udp_server.c`, `include/keel/udp.h`, `include/keel/udp_server.h` — plus the
+  M6.0b adapters + `tests/test_udp_adapters.c` (§16), the `KL_DGRAM_OWNER_UDP` token path and
+  `kl_udp_comp_dispatch` (only KlUdp used it; `kl_datagram_comp_dispatch` is the survivor).
+- **Rename** `KlUdpConfig` → `KlDatagramSocketConfig` at the provider `configure()` seam
+  (`include/keel/socket_dgram.h` + `socket_dgram_posix.c`/`socket_dgram_win.c`/lwIP/EFI providers) and the
+  M0 `kl_datagram_open`/`KlDatagramPrep` (`src/datagram_open.{c,h}`); reconcile every struct-tag
+  forward-decl (`datagram.h`, `socket_dgram.h`). D1 introduces `KlDatagramSocketConfig` as the public
+  config and maps its sockopt subset into the still-`KlUdpConfig`-typed M0 internally (see §17 O-D6-1);
+  D3 collapses that mapping so a single config type remains.
+- **Remove** obsolete files, `Makefile`/`CORE_SRC` entries, CI enrollment (the `test_udp_*` gate lines,
+  `smoke_udp`), and documentation references (README/CLAUDE.md module list, matrices).
+- **No permanent aliases / forwarding headers / compat macros / duplicate symbols** — intentional
+  pre-1.0 API/ABI revision.
+- **Add a mechanical stale-name gate** (a `check-no-kludp` target, sibling of `check-doc-refs`/
+  `check-tier1-boundary`): fail if `KlUdp`/`KlUdpServer`/`KlUdpConfig`/`kl_udp_*` (object API) reappear in
+  `src/`/`include/`/`tests/`/`integrations/`, with a NARROW allowlist for the retained cmsg helpers
+  (`kl_udp_parse_*`, `kl_udp_build_control`, `kl_udp_send_family`, `test_udp_cmsg.c`) and for historical
+  design docs (`docs/datagram_m6_kludp_decision_design.md`, `docs/claude_code_transport_taxonomy_prompt.md`).
+
+## 15. Required inventory (verified against the tree, 2026-08-20)
+
+**15.1 KlUdp/KlUdpServer references.** Production OBJECT (delete): `src/udp.c`, `src/udp_internal.h`,
+`src/udp_server.c`, `include/keel/udp.h`, `include/keel/udp_server.h`,
+`include/keel/udp_transport_detail.h`; the completion hook `kl_udp_comp_dispatch`
+(`src/completion_core.c` registers it) + the `KL_DGRAM_OWNER_UDP` token (`src/datagram_life.*`). Tests/
+smokes/integrations/examples/docs: the full D2 table (§13) — subject tests `test_udp*.c`
+(`test_udp.c` 131, `test_udp_server.c` 108, `_multicast` 69, `_offload` 38, `_tos` 36, `_batching` 20,
+`_adapters` 9), `smoke_udp.c` + the three completion smokes, `test_dns_resolver.c` (fake-server harness),
+`test_socket_provider.c`, lwIP `raw_udp_test.c`/`raw_caps_test.c`/`raw_dns_test.c`/`lwip_loopback_test.c`,
+EFI `mock_efi_test.c`; ~139 doc references (mostly historical design docs — allowlisted). NO examples.
+**KEEP:** the `kl_udp_*` cmsg helpers + `test_udp_cmsg.c` (§13).
+
+**15.2 KlUdpConfig references.** The socket config, RENAMED (not deleted) in D3. Load-bearing at the
+provider seam — `configure(ctx, fd, family, const struct KlUdpConfig *cfg)` (`socket_dgram.h` vtable +
+`socket_dgram_posix.c`/`socket_dgram_win.c` + lwIP/EFI providers) — and the M0 helper
+`kl_datagram_open(sockets, const KlUdpConfig*, KlDatagramPrep*)` (`datagram_open.{c,h}`), plus
+`dns_resolver.c` (builds one for `kl_datagram_open`) and struct-tag forward-decls in `datagram.h` /
+`socket_dgram.h`, and ~20 test/integration constructors.
+
+**15.3 KlUdpServer field-by-field vs KlDatagram/M5.** `init` = `kl_datagram_open` + wildcard source-pin
+gate (`prep.rx_caps & RX_PKTINFO`) + `kl_datagram_init_ex` (BOTH) + optional recv `KlDatagramBatch`
+(GRO/mmsg) + `kl_datagram_recv_start` + join-at-init → **all KlDatagram/M5 + the D1 initializer**;
+`reply` = `kl_datagram_send` with `local` = the captured wildcard dest (source-pin) → **KlDatagram send +
+the `on_recv` local pattern**; `multicast_join/leave` = `kl_datagram_multicast_*`; `free` =
+`kl_datagram_teardown`; `local_port`/`fd`/`last_error` = `kl_datagram_local_port`/`_fd`/`_last_error`.
+**No field is a distinct protocol or state machine** — only socket prep + reply convenience.
+
+**15.4 Genuinely missing KlDatagram behavior.** Exactly the two in §11 (public socket construction;
+connect + connected state). Nothing else — ordinary convenience is not counted as a unique semantic.
+
+**15.5 KlDatagram construction audit.** Public `kl_datagram_init`/`_init_ex` demand a prepared fd; there
+is no public creator. Callers therefore use the INTERNAL `kl_datagram_open` (`src/datagram_open.h`, not
+installed) + a hand-built `KlDatagramConfig{.fd = prep.fd, ...}`. Consumers today: `dns_resolver.c`,
+`udp_server.c`, and tests (`test_datagram_open.c`, `test_datagram_batch.c`, `test_dns_resolver.c`, EFI
+`mock_efi_test.c`). D1 removes the need to reach the internal helper.
+
+**15.6 KlDatagram connected-mode state audit.** Capability stored in `dg->provider_caps` (per-fd) and the
+granted `core->caps` (= `want_caps | optional_caps&provider_caps`). **Actual successful-connect state is
+NOT represented** — there is no `kl_datagram_connect` and no `connected` flag; the peerless-send gate
+(`datagram_send.c:254`) checks only `s->caps & KL_DGRAM_CAP_CONNECTED`. No current KlDatagram consumer
+requests CONNECTED, so the gate is presently dormant. D1 adds `kl_datagram_connect` + a `connected` flag
+and tightens the peerless-send gate to require BOTH (§12.4).
+
+**15.7 Old-test → new-test mapping.** The §13 table is the exact map (migrate-unique vs
+duplicate-of-existing vs delete vs keep).
+
+## 16. M6.0b audit + classification
+
+- **Commit:** `23125f2` (`datagram(M6.0b) …`). **Diff:** +200 lines, all additions, zero deletions:
+  `src/udp.c` +33 (three adapters `kl_udp_dg_on_recv`/`_on_segments`/`_on_drain`), `src/udp_internal.h`
+  +27 (their declarations + doc block), `tests/test_udp_adapters.c` +140 (six unit tests). **The commit
+  MESSAGE is corrupted** — zsh command-substituted the backticks in the `-m` string at commit time,
+  injecting shell/env output into the body; the code diff is intact and correct.
+- **Behavior:** changes NO production behavior. The three functions are non-static but **unwired** (the
+  cancelled M6.1 was to register them); the recv path is untouched.
+- **Classification (every changed symbol/file):**
+  - a) canonical KlDatagram infrastructure to retain — **none.**
+  - b) reusable migration coverage/helper — **none.** The adapters translate onto `KlUdpRecvFn`/
+    `KlUdpRecvSegmentsFn`/`KlUdpDrainFn`, which D3 deletes; the `HAS_LOCAL`-gating logic they prove is
+    already covered on `KlDatagram` (`dg_deliver` + `us_on_recv`).
+  - c) **obsolete KlUdp-wrapper machinery to remove — ALL of it:** `kl_udp_dg_on_recv`,
+    `kl_udp_dg_on_segments`, `kl_udp_dg_on_drain` (src/udp.c + udp_internal.h decls) and
+    `tests/test_udp_adapters.c`.
+- **Cleanup:** category (c) is removed as part of the **D3** deletion commit (they vanish with `udp.c`/
+  `udp_internal.h`/the `test_udp_*` suite). **History is not rewritten** — `23125f2` stands; no revert,
+  reset, or amend.
+
+## 17. Open decisions / true blockers
+
+- **O-D6-1 (config-rename placement — recommendation, reviewer confirm):** put `KlDatagramSocketConfig`
+  into being in **D1** as the public config; keep the provider `configure()`/M0 `kl_datagram_open` on the
+  existing `KlUdpConfig` during D1–D2 (D1's initializer copies the sockopt subset into a local
+  `KlUdpConfig` — reuse M0 verbatim, zero provider churn mid-sequence); **collapse in D3** (switch
+  `configure()`/M0 to `KlDatagramSocketConfig`, delete `KlUdpConfig`). Alternative: do the rename in D1
+  (one mechanical pass, but touches ~14 configure/M0 call sites before the deletions). Recommend the
+  former (keeps each increment single-purpose, matches the reviewer's D3 placement of the rename).
+- **O-D6-2 (SLOT policy reachability):** `kl_datagram_socket_init` defaults `send_byte_budget` to 256 KiB
+  (BOTH). Pure-SLOT (no byte gate) stays reachable only via the low-level `kl_datagram_init`. Confirm
+  that's acceptable (vs adding an explicit "no byte budget" sentinel to the socket config).
+- **O-D6-3 (connect error code):** send-before-connect returns `KL_DATAGRAM_UNSUPPORTED` at the send-
+  status layer; the wrapper-era `KL_ERR_INVALID_ARG` (M6.0a rev-4b) no longer applies since there is no
+  wrapper. Confirm `KL_DATAGRAM_UNSUPPORTED` (send-status) + `KL_ERR_*` on the connect call itself.
+- **No true blockers.** D1 needs no new engine/provider capability; connect uses the existing
+  `kl_sock_connect` seam; construction reuses M0. Mode-B `recv_batch` and native completion batch-receive
+  remain out of scope and are NOT required for D1–D3.
+
+## 18. Non-goals (rev 6) + validation
+
+**Non-goals:** no production code this turn; no HTTP-taxonomy rename; no `KlTcp*` APIs; no `KlUdpSocket`
+wrapper; no private `KlUdpServer` replacement; no Mode-B explicit `recv_batch` API and no native
+completion batch-receive expansion unless D1–D3 are genuinely blocked without them (they are not); no
+push, no PR. The untracked `docs/claude_code_transport_taxonomy_prompt.md` is preserved (not staged,
+committed, cleaned, or deleted).
+
+**Validation for this docs-only freeze:** `make check-doc-refs`; `git diff --check`; confirm the
+taxonomy prompt remains present + untracked; confirm no `src/`/`include/` changes. Commit only this
+revised decision-freeze document locally; pause for review before any D1 implementation.
