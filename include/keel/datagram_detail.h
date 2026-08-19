@@ -33,6 +33,14 @@ struct KlDatagram {
     KlSocketHandle          fd;        /* adopted on init success; closed by the close machine (not free) */
     KlDatagramRecvFn        on_recv;   /* facade-only: the user recv callback (deliver adapter forwards) */
     void                   *recv_ud;
+    /* M5.3 batch/GRO receive (facade-only). `on_recv_segments` (+ its ud), when set, receives a
+     * whole GRO-coalesced buffer instead of the default per-segment split; `recv_seg_size` is the
+     * yield adapter's scratch (the coalesced segment size for the current whole-buffer delivery, 0 for
+     * a plain/split datagram) — read by the deliver adapter to route on_recv vs on_recv_segments. */
+    void (*on_recv_segments)(void *ud, const void *data, size_t len, size_t segment_size,
+                             const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
+    void                   *recv_seg_ud;
+    size_t                  recv_seg_size;
     KlDatagramCloseFn       on_close_cb;/* facade-only: user terminal callback (dg_on_close forwards) */
     void                   *close_ud;
     KlError                 last_error;

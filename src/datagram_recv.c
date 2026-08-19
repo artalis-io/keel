@@ -8,6 +8,8 @@
 
 #include <string.h>
 
+static void recv_fail(KlDgramRecv *r);   /* defined below; used by the M5.3 view drain */
+
 /* Clear the inbound slot's per-datagram metadata before the provider fills it, so a prior packet's
  * source/dest/flags can NEVER survive into the next receive (contract §8: no stale metadata across
  * slot reuse). Called before every arm (completion) / pull (readiness). Never runs while a datagram
@@ -55,6 +57,37 @@ static void recv_present(KlDgramRecv *r) {
 void kl_dgram_recv_set_activity_cb(KlDgramRecv *r, void (*cb)(void *ctx, int delta), void *ctx) {
     if (!r) return;
     r->on_activity = cb; r->activity_ctx = ctx;
+}
+void kl_dgram_recv_set_view_pull(KlDgramRecv *r, KlDgramRecvViewFn view_pull, void *ctx) {
+    if (!r) return;
+    r->view_pull = view_pull;
+    if (ctx) r->hook_ctx = ctx;   /* the batch cursor's context (else keep the readiness hook_ctx) */
+}
+
+/* M5.3 — deliver ONE borrowed view (peer-mandatory finalize on the view, NOT the recv_cap clamp; the
+ * view carries its own len/flags). Returns 0 delivered, -1 = peer-absent contract violation (fails). */
+static int recv_present_view(KlDgramRecv *r, const KlDgramRxView *v) {
+    if (kl_sockaddr_family(&v->peer) == KL_AF_UNSPEC) { recv_fail(r); return -1; }
+    if (v->len > 0 && v->data == NULL) { recv_fail(r); return -1; }   /* malformed borrowed payload */
+    const KlSockAddr *local = (v->flags & KL_DGRAM_HAS_LOCAL) ? &v->local : NULL;
+    r->deliver(r->deliver_ctx, v->data, v->len, &v->peer, local, v->flags);
+    return 0;
+}
+
+/* The borrowed-view readable drain (batch mode). Same serial contract as the inbound-slot loop: one
+ * view_pull → deliver, re-checking paused/stopped each iteration. `allow_refill` = 1 for the readable
+ * edge (refill via recv_batch when the cursor drains); 0 for the resume held-drain (§5.3 — deliver only
+ * already-buffered datagrams, NEVER read new kernel data). Runs inside a recv_enter/leave bracket. */
+static int recv_drive_view(KlDgramRecv *r, int allow_refill) {
+    int ret = 0;
+    while (!r->paused && !r->stopped) {
+        KlDgramRxView v; memset(&v, 0, sizeof(v));
+        int pr = r->view_pull(r->hook_ctx, &v, allow_refill);
+        if (pr == 0) break;                              /* drained (would-block / cursor empty) */
+        if (pr < 0) { recv_fail(r); ret = -1; break; }   /* fatal receive error */
+        if (recv_present_view(r, &v) < 0) { ret = -1; break; }
+    }
+    return ret;
 }
 static void recv_enter(KlDgramRecv *r) { if (r->on_activity) r->on_activity(r->activity_ctx, +1); }
 /* recv_leave is the LAST action of a public op — it may detach + free the object via the coordinator. */
@@ -144,6 +177,7 @@ static void recv_fail(KlDgramRecv *r) {
 int kl_dgram_recv_start(KlDgramRecv *r) {
     if (!r || !r->inited)
         return -1;
+    r->started = 1;   /* M5.3: latched regardless of the arm result / callback — attach is now refused */
     if (r->paused || r->stopped || r->recv_inflight || r->held)
         return 0;
     recv_enter(r);
@@ -183,7 +217,13 @@ int kl_dgram_recv_on_readable(KlDgramRecv *r) {
     if (r->stopped || r->paused || !r->recv_inflight)
         return 0;
     recv_enter(r);
-    int ret = 0;
+    int ret;
+    if (r->view_pull) {                      /* M5.3 borrowed-view batch mode */
+        ret = recv_drive_view(r, /*allow_refill*/1);
+        recv_leave(r);
+        return ret;
+    }
+    ret = 0;
     /* Serial provider receives: one pull → one delivery, re-checking paused/stopped each iteration. */
     while (!r->paused && !r->stopped && r->recv_inflight) {
         recv_reset_inbound(r);               /* fresh metadata slot before the provider fills it */
@@ -225,7 +265,16 @@ int kl_dgram_recv_resume(KlDgramRecv *r) {
     int ret;
     if (r->stopped)
         ret = 0;
-    else if (r->held) {
+    else if (r->view_pull) {
+        /* M5.3 batch mode (§5.3): pause dropped READ interest but the ext CURSOR may hold undelivered
+         * logical datagrams. Drain the held cursor FIRST (allow_refill=0 — deliver only buffered data,
+         * never read new kernel data), THEN re-arm READ interest if still active. Ordering matters: the
+         * held data is delivered even if the re-arm fails, and no new socket data is consumed ahead of
+         * the retained buffer. */
+        ret = recv_drive_view(r, /*allow_refill*/0);
+        if (ret == 0 && !r->paused && !r->stopped && !r->recv_inflight)
+            ret = recv_arm(r);
+    } else if (r->held) {
         r->held = 0; r->held_len = 0;        /* consume once; the canonical snapshot is still in-slot */
         ret = recv_deliver_and_continue(r);  /* delivers the preserved metadata (peer/local/flags/len) */
     } else if (r->recv_inflight)             /* completion: a recv posted before pause is still out */

@@ -201,6 +201,77 @@ static int dg_rdy_pull(void *ctx, size_t *out_len) {
     *out_len = (size_t)n;
     return 1;
 }
+/* M5.3 — the borrowed-view yield adapter (readiness batch mode). Yields one logical datagram from the
+ * attached RECV batch cursor, refilling via one recv_batch (or a single recv when RX_BATCH is absent).
+ * A GRO-coalesced slot is split per-segment by default; with on_recv_segments the whole coalesced
+ * buffer is yielded (recv_seg_size scratch carries the segment size for the deliver adapter). */
+static int dg_rdy_pull_batch(void *ctx, KlDgramRxView *v, int allow_refill) {
+    KlDatagram *dg = ctx;
+    KlDatagramBatch *b = (KlDatagramBatch *)dg->core->ext;
+    dg->recv_seg_size = 0;   /* default: a plain/split datagram (deliver → on_recv) */
+
+    if (b->cursor_i >= b->n_filled) {   /* cursor drained */
+        if (!allow_refill) return 0;    /* §5.3 held-drain: never read new kernel data */
+        if (b->rx_block) {              /* one recvmmsg into rx_slots[0..n_filled) */
+            int r = dg_ops(dg)->recv_batch(dg_sp_ctx(dg), dg->fd, b->rx_block, b->rx_slots, b->n_slots);
+            if (r < 0) { if (kl_sock_io_status(dg->sockets) == KL_IO_WOULD_BLOCK) return 0;
+                         dg->last_error = KL_ERR_IO; return -1; }
+            if (r > b->n_slots) { dg->last_error = KL_ERR_IO; return -1; }   /* provider over-report → fail */
+            b->n_filled = r;
+        } else {                        /* single-recv fallback into the fallback buffer */
+            KlSockAddr src; KlDgramRxMeta meta;
+            kl_ssize_t n = dg_ops(dg)->recv(dg_sp_ctx(dg), dg->fd, b->rx_fallback, b->slot_bufsz, &src, &meta);
+            if (n < 0) { if (kl_sock_io_status(dg->sockets) == KL_IO_WOULD_BLOCK) return 0;
+                         dg->last_error = KL_ERR_IO; return -1; }
+            /* The provider reports the DATAGRAM length (may exceed the buffer). Clamp the captured length
+             * to slot_bufsz and mark TRUNCATED if the datagram was larger. */
+            size_t captured = (size_t)n; int trunc = meta.truncated;
+            if (captured > b->slot_bufsz) { captured = b->slot_bufsz; trunc = 1; }
+            b->rx_slots[0].data = b->rx_fallback; b->rx_slots[0].len = captured;
+            b->rx_slots[0].src = src; b->rx_slots[0].meta = meta; b->rx_slots[0].meta.truncated = trunc;
+            b->n_filled = 1;
+        }
+        if (b->n_filled == 0) return 0;   /* drained (EAGAIN) */
+        b->cursor_i = 0; b->seg_off = 0;
+    }
+
+    KlDgramRxSlot *slot = &b->rx_slots[b->cursor_i];
+    /* Defensive bound: a provider over-reporting length past the slot buffer delivers a captured prefix
+     * with TRUNCATED — set the flag when EITHER the provider marked it OR the length was clamped. */
+    int    over  = slot->len > b->slot_bufsz;
+    size_t slen  = over ? b->slot_bufsz : slot->len;
+    int    trunc = slot->meta.truncated || over;
+
+    /* LATCH the GRO delivery mode when entering a slot (seg_off == 0) and keep it until the slot advances
+     * — a callback that (un)registers on_recv_segments mid-split cannot change the mode for the remaining
+     * segments. GRO split is active only under the §6.2 two-part gate (b->gro_active); otherwise the
+     * provider's meta.gro_seg is IGNORED. */
+    if (b->seg_off == 0) {
+        b->slot_gro   = b->gro_active ? slot->meta.gro_seg : 0;
+        b->slot_split = (b->slot_gro > 0) && (dg->on_recv_segments == NULL);
+    }
+    size_t avail = (slen > b->seg_off) ? slen - b->seg_off : 0;
+
+    /* Borrowed view at seg_off. Avoid NULL+off arithmetic (a zero-length or NULL provider buffer):
+     * reference the base directly when seg_off == 0. */
+    v->data = (b->seg_off == 0) ? slot->data : (const void *)((const unsigned char *)slot->data + b->seg_off);
+    v->peer = slot->src;
+    v->flags = 0;
+    if (slot->meta.has_local) { v->local = slot->meta.local; v->flags |= KL_DGRAM_HAS_LOCAL; }
+    if (trunc)                  v->flags |= KL_DGRAM_TRUNCATED;
+
+    if (b->slot_split && avail > (size_t)b->slot_gro) {   /* split: yield one segment, stay on this slot */
+        v->len = (size_t)b->slot_gro;
+        b->seg_off += (size_t)b->slot_gro;
+    } else {                              /* whole remaining slot (plain / last segment / coalesced) */
+        v->len = avail;
+        if (!b->slot_split && b->slot_gro > 0 && dg->on_recv_segments)
+            dg->recv_seg_size = (size_t)b->slot_gro;   /* whole-coalesced buffer → on_recv_segments */
+        b->cursor_i++; b->seg_off = 0;
+    }
+    return 1;
+}
+
 static void dg_rdy_cancel(void *ctx) { (void)ctx; }   /* readiness: interest is dropped at close_transport */
 static KlDgramRetireResult dg_rdy_retire(void *ctx, KlDgramOpKind kind, int *transport_err) {
     (void)ctx; (void)kind;
@@ -227,7 +298,12 @@ static void dg_deliver(void *ctx, const void *data, size_t len,
                        const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
     KlDatagram *dg = ctx;
     if (flags & KL_DGRAM_TRUNCATED) dg->truncated++;
-    if (dg->on_recv) dg->on_recv(dg->recv_ud, data, len, peer, local, flags);
+    /* M5.3: a whole GRO-coalesced buffer (recv_seg_size scratch set by the yield adapter) routes to
+     * on_recv_segments; everything else (plain datagram or a per-segment split) to on_recv. */
+    if (dg->recv_seg_size && dg->on_recv_segments)
+        dg->on_recv_segments(dg->recv_seg_ud, data, len, dg->recv_seg_size, peer, local, flags);
+    else if (dg->on_recv)
+        dg->on_recv(dg->recv_ud, data, len, peer, local, flags);
 }
 static void dg_on_close(void *ctx, KlDatagramCloseResult result) {
     KlDatagram *dg = ctx;
@@ -517,6 +593,28 @@ int kl_datagram_gso_active(const KlDatagram *dg) {
     return ops->send_gso != NULL;                                /* a real one-syscall op exists */
 }
 
+int kl_datagram_recv_attach_batch(KlDatagram *dg, KlDatagramBatch *b) {
+    if (!dg || !dg->core || !b) return -1;
+    if (dg->completion) return -1;                       /* readiness-only (D-M5-3) */
+    if (b->owner != dg || !(b->dir & KL_DGRAM_BATCH_RECV)) return -1;   /* wrong owner / not a recv batch */
+    if (dg->core->ext || b->attached) return -1;         /* re-attach */
+    if (kl_dgram_core_recv_started(dg->core)) return -1; /* must attach BEFORE recv_start (explicit sentinel) */
+    /* Consume b: the core now owns it (freed at the destructive tail). The readiness recv machine draws
+     * logical datagrams from its cursor via dg_rdy_pull_batch. GRO split activates only under the §6.2
+     * two-part gate: provider CAP_GRO AND the socket's accepted RX_GRO mask (from the M0 prep). */
+    b->attached = 1; b->n_filled = 0; b->cursor_i = 0; b->seg_off = 0;
+    b->gro_active = (dg->provider_caps & KL_DGRAM_CAP_GRO) &&
+                    (kl_dgram_core_accepted_rx_caps(dg->core) & KL_DGRAM_RX_GRO);
+    dg->core->ext = b;
+    kl_dgram_core_set_view_pull(dg->core, dg_rdy_pull_batch, dg);
+    return 0;
+}
+
+void kl_datagram_recv_segments(KlDatagram *dg, KlDatagramRecvSegmentsFn cb, void *ud) {
+    if (!dg) return;
+    dg->on_recv_segments = cb; dg->recv_seg_ud = ud;
+}
+
 int kl_datagram_recv_start(KlDatagram *dg, KlDatagramRecvFn on_recv, void *ud) {
     if (!dg || !dg->core) return -1;
     dg->on_recv = on_recv; dg->recv_ud = ud;
@@ -534,6 +632,10 @@ int kl_datagram_free(KlDatagram *dg) {
     if (!dg->core) return 0;   /* already reclaimed (e.g. after teardown) → idempotent no-op success */
     if (kl_dgram_core_close_state(dg->core) != KL_DGRAM_CLOSE_CLOSED) { dg->last_error = KL_ERR_INVALID_ARG; return -1; }
     KlAllocator *a = dg->alloc; KlDgramCore *core = dg->core;
+    /* M5.3: reclaim the core-adopted RECV batch (§5.4 destructive tail) BEFORE kl_dgram_core_free (which
+     * memsets the core, zeroing core->ext). State is CLOSED, so the recv machine no longer reads the
+     * ext's rx storage. */
+    if (core->ext) { KlDatagramBatch *xb = (KlDatagramBatch *)core->ext; core->ext = NULL; xb->reclaim(xb); }
     if (kl_dgram_core_free(core) != 0) return -1;
     kl_free(a, core, sizeof(*core));
     memset(dg, 0, sizeof(*dg));   /* fully-detached — reusable (invariant 8) */
@@ -554,6 +656,7 @@ static void dg_abandon_reclaim(void *ctx) {
     /* cppcheck-suppress variableScope */
     void               *owner_ctx = core->abandon_owner_ctx;
     kl_dgram_core_free_object_owned(core);   /* close + send(abandon) + slots — NOT the rx holder */
+    if (core->ext) { KlDatagramBatch *xb = (KlDatagramBatch *)core->ext; core->ext = NULL; xb->reclaim(xb); }  /* M5.3 */
     kl_free(a, core, sizeof(*core));         /* free the heap core block */
     memset(dg, 0, sizeof(*dg));              /* fully-detached — reusable */
     if (owner) owner(owner_ctx);             /* free the embedding owner (e.g. the resolver) — last */

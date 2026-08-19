@@ -100,6 +100,31 @@ KlDatagramSendStatus kl_datagram_send_gso(KlDatagram *dg, KlDatagramBatch *b, co
  *  the per-segment fallback (a provider EOPNOTSUPP on first use). Advisory. */
 int kl_datagram_gso_active(const KlDatagram *dg);
 
+/**
+ * @brief Attach a RECV batch to @p dg for high-throughput receive (M5.3): the readiness recv machine
+ *  then draws logical datagrams from @p b's recvmmsg buffer (one recv_batch refill per readable edge,
+ *  or a single recv when RX_BATCH is absent), delivering each to the on_recv callback one at a time.
+ *  A GRO-coalesced buffer is split per-segment by default (O-A); register kl_datagram_recv_segments to
+ *  receive the whole coalesced buffer instead.
+ *
+ * Attach BEFORE kl_datagram_recv_start, on a readiness datagram. @p b must be a RECV/BOTH batch owned
+ * by @p dg. **On success (0) the core CONSUMES @p b** — the caller must never touch it again (no
+ * kl_datagram_batch_free, no accessor; the core frees it at teardown). On failure (-1) @p b is
+ * untouched and still caller-owned: a completion datagram, a wrong owner/direction, a re-attach, or
+ * receiving already started.
+ */
+int kl_datagram_recv_attach_batch(KlDatagram *dg, KlDatagramBatch *b);
+
+/** @brief Whole-coalesced-buffer GRO delivery callback (M5.3): a GRO buffer is delivered ONCE with its
+ *  @p segment_size, instead of the default per-segment split. `peer`/`local`/`flags` as on_recv. */
+typedef void (*KlDatagramRecvSegmentsFn)(void *ud, const void *data, size_t len, size_t segment_size,
+                                         const KlSockAddr *peer, const KlSockAddr *local, unsigned flags);
+
+/** @brief Register (or clear, cb == NULL) the whole-coalesced-buffer GRO callback on @p dg. When set, a
+ *  GRO-coalesced datagram is delivered whole to @p cb (carrying segment_size) rather than split into
+ *  per-segment on_recv calls (O-A: split is the default). */
+void kl_datagram_recv_segments(KlDatagram *dg, KlDatagramRecvSegmentsFn cb, void *ud);
+
 #ifdef __cplusplus
 }
 #endif

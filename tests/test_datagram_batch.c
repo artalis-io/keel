@@ -5,8 +5,10 @@
  * partial accept, TOO_LARGE + owner/direction validation, the recoverable per-datagram drop, and
  * backpressure draining via the writable edge) + M5.2b GSO (kl_datagram_send_gso: the queued FIFO
  * group — delivery via one send_gso or the per-segment fallback, validation/bounds, gso_busy lifetime
- * + one-group-per-batch, and close/discard clearing gso_busy). Whitebox (internal batch + core layout).
- * Recv batching lands in M5.3.
+ * + one-group-per-batch, and close/discard clearing gso_busy) + M5.3 RECV batching (attach + the
+ * borrowed-view seam: batch delivery, GRO split-by-default vs whole-buffer on_recv_segments, held-cursor
+ * pause/resume, stop-from-delivery, attach/ownership validation, destructive-tail reclamation).
+ * Whitebox (internal batch + core layout).
  */
 #include "../vendor/utest.h"
 
@@ -55,6 +57,76 @@ static KlAllocator ca_init(CountAlloc *c) {
     c->base = kl_allocator_default();
     KlAllocator a = { ca_malloc, ca_realloc, ca_free, c };
     return a;
+}
+
+/* ── M5.3 mock RECV provider: wraps POSIX, reports RX_BATCH, and its recv_batch does a REAL recv (so
+ *    the fd's readability is honest) then FABRICATES gro_seg — deterministic GRO on any platform. ─── */
+static int g_mock_gro;                 /* fabricated gro_seg per recv_batch (0 = plain) */
+static unsigned char g_mock_rxbuf[8][2048];
+static kl_ssize_t (*g_real_recv)(void *, KlSocketHandle, void *, size_t, KlSockAddr *, KlDgramRxMeta *);
+static void *mrx_new(KlAllocator *a, int n, size_t bufsz) { (void)n; (void)bufsz; return kl_malloc(a, 1); }
+static void  mrx_free(KlAllocator *a, void *b) { kl_free(a, b, 1); }
+static int   mock_gro_recv_batch(void *ctx, KlSocketHandle fd, void *rxb, KlDgramRxSlot *slots, int max) {
+    (void)rxb;
+    int n = 0;
+    while (n < max && n < 8) {
+        KlSockAddr src; KlDgramRxMeta meta; memset(&meta, 0, sizeof(meta)); meta.tos = -1;
+        kl_ssize_t r = g_real_recv(ctx, fd, g_mock_rxbuf[n], sizeof(g_mock_rxbuf[n]), &src, &meta);
+        if (r < 0) break;
+        slots[n].data = g_mock_rxbuf[n]; slots[n].len = (size_t)r; slots[n].src = src;
+        meta.gro_seg = g_mock_gro;       /* fabricate coalescing */
+        slots[n].meta = meta;
+        n++;
+    }
+    if (n == 0) { errno = EAGAIN; return -1; }   /* drained */
+    return n;
+}
+static unsigned (*g_real_caps)(void *, KlSocketHandle);
+static unsigned g_mock_extra_caps = 0;   /* extra caps the mock provider advertises (0 or CAP_GRO) */
+static unsigned mock_gro_caps(void *ctx, KlSocketHandle fd) {
+    /* Force RX_BATCH; DROP the platform's real CAP_GRO so g_mock_extra_caps controls the GRO half of the
+     * §6.2 gate deterministically (posix reports CAP_GRO on Linux, which would defeat the negative gate). */
+    unsigned base = (g_real_caps ? g_real_caps(ctx, fd) : 0u) & ~(unsigned)KL_DGRAM_CAP_GRO;
+    return base | KL_DGRAM_CAP_RX_BATCH | g_mock_extra_caps;
+}
+/* A recv_batch that yields ONE malformed slot: NULL data with nonzero length (a broken provider). */
+static int mock_null_data_recv_batch(void *ctx, KlSocketHandle fd, void *rxb, KlDgramRxSlot *slots, int max) {
+    (void)rxb; (void)max;
+    KlSockAddr src; KlDgramRxMeta meta; memset(&meta, 0, sizeof(meta)); meta.tos = -1;
+    kl_ssize_t r = g_real_recv(ctx, fd, g_mock_rxbuf[0], sizeof(g_mock_rxbuf[0]), &src, &meta);
+    if (r < 0) { errno = EAGAIN; return -1; }
+    slots[0].data = NULL; slots[0].len = 8; slots[0].src = src; slots[0].meta = meta;   /* NULL + len>0 */
+    return 1;
+}
+/* A recv_batch that OVER-REPORTS length (> slot_bufsz) WITHOUT setting meta.truncated. */
+static size_t g_mock_over_len;
+static int mock_overlen_recv_batch(void *ctx, KlSocketHandle fd, void *rxb, KlDgramRxSlot *slots, int max) {
+    (void)rxb; (void)max;
+    KlSockAddr src; KlDgramRxMeta meta; memset(&meta, 0, sizeof(meta)); meta.tos = -1;
+    kl_ssize_t r = g_real_recv(ctx, fd, g_mock_rxbuf[0], sizeof(g_mock_rxbuf[0]), &src, &meta);
+    if (r < 0) { errno = EAGAIN; return -1; }
+    slots[0].data = g_mock_rxbuf[0]; slots[0].len = g_mock_over_len; slots[0].src = src;
+    slots[0].meta = meta; slots[0].meta.truncated = 0;   /* over-report, flag NOT set */
+    return 1;
+}
+static KlDatagramOps    g_mrx_dg;
+static KlSocketProvider g_mrx_sp;
+/* Build the mock provider, overriding recv_batch with `rb` (NULL → the default gro-fabricating one). */
+static const KlSocketProvider *mock_recv_provider(int (*rb)(void *, KlSocketHandle, void *, KlDgramRxSlot *, int));
+static const KlSocketProvider *mock_gro_provider(void) {
+    g_mrx_sp = *kl_socket_provider_posix();
+    g_mrx_dg = *g_mrx_sp.dgram;
+    g_real_recv = g_mrx_dg.recv;
+    g_real_caps = g_mrx_dg.caps;
+    g_mrx_dg.rx_batch_new = mrx_new; g_mrx_dg.rx_batch_free = mrx_free; g_mrx_dg.recv_batch = mock_gro_recv_batch;
+    g_mrx_dg.caps = mock_gro_caps;
+    g_mrx_sp.dgram = &g_mrx_dg;
+    return &g_mrx_sp;
+}
+static const KlSocketProvider *mock_recv_provider(int (*rb)(void *, KlSocketHandle, void *, KlDgramRxSlot *, int)) {
+    const KlSocketProvider *p = mock_gro_provider();   /* sets g_real_recv/caps + the block ops */
+    if (rb) g_mrx_dg.recv_batch = rb;
+    return p;
 }
 
 /* ── mock provider datagram vtables: a COMPLETE batch set + PARTIAL (leak-prone) variants ──────── */
@@ -911,6 +983,502 @@ UTEST(dgram_batch, gso_completion_close_with_inflight_segment) {
     ASSERT_EQ(0, kl_datagram_batch_free(b));   /* caller-owned; safe now that gso_busy is clear */
     close(rxfd);
     ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── M5.3 RECV batching / GRO ────────────────────────────────────────────────────────────────── */
+
+/* recv delivery recorder */
+static int   g_rx_calls;
+static char  g_rx_data[16][64];
+static size_t g_rx_len[16];
+static int   g_rx_stop_at;         /* stop receiving from this delivery index (−1 = never) */
+static int   g_seg_calls; static size_t g_seg_size; static size_t g_seg_len;
+static KlDatagram *g_rx_dg;
+static void rx_on_recv(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                       const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)peer; (void)local; (void)flags;
+    int i = g_rx_calls++;
+    if (i < 16) { size_t c = len < 64 ? len : 64; memcpy(g_rx_data[i], data, c); g_rx_len[i] = len; }
+    if (g_rx_stop_at >= 0 && i == g_rx_stop_at) kl_datagram_recv_stop(g_rx_dg);
+}
+static void rx_on_recv_pause(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                             const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)peer; (void)local; (void)flags;
+    int i = g_rx_calls++;
+    if (i < 16) { size_t c = len < 64 ? len : 64; memcpy(g_rx_data[i], data, c); g_rx_len[i] = len; }
+    if (i == g_rx_stop_at) kl_datagram_pause(g_rx_dg);   /* pause mid-buffer */
+}
+static void rx_on_segments(void *ud, const void *data, size_t len, size_t seg,
+                           const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)data; (void)peer; (void)local; (void)flags;
+    g_seg_calls++; g_seg_size = seg; g_seg_len = len;
+}
+static void rx_reset(void) { g_rx_calls = 0; g_rx_stop_at = -1; g_seg_calls = 0; g_seg_size = 0; g_seg_len = 0; }
+
+/* send `n` datagrams from a throwaway socket to `port` */
+static void blast(int n, uint16_t port, const char *const *msgs) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in d; memset(&d, 0, sizeof(d));
+    d.sin_family = AF_INET; d.sin_addr.s_addr = htonl(0x7f000001); d.sin_port = htons(port);
+    for (int i = 0; i < n; i++) (void)sendto(fd, msgs[i], strlen(msgs[i]), 0, (struct sockaddr *)&d, sizeof(d));
+    close(fd);
+}
+
+/* Basic recv batching over the DEFAULT provider (RX_BATCH on Linux, single-recv fallback on macOS):
+ * N datagrams delivered one-at-a-time with correct bytes. */
+UTEST(dgram_batch, recv_batch_delivers) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }  /* readiness (D-M5-3) */
+    const KlSocketProvider *sp = ctx.sockets;
+
+    KlSocketHandle rxfd = prep_fd(sp);
+    ASSERT_TRUE(kl_handle_valid(rxfd));
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+    ASSERT_TRUE(b != NULL);
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));   /* CONSUMES b — never touch it again */
+
+    rx_reset(); g_rx_dg = &rx;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));
+    const char *msgs[3] = { "aa", "bbbb", "cccccc" };
+    blast(3, port, msgs);
+    for (int i = 0; i < 60 && g_rx_calls < 3; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(3, g_rx_calls);
+    ASSERT_EQ((size_t)2, g_rx_len[0]); ASSERT_EQ((size_t)4, g_rx_len[1]); ASSERT_EQ((size_t)6, g_rx_len[2]);
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);   /* b is core-owned → reclaimed at free (no batch_free) */
+}
+
+/* GRO split (default): a coalesced 6-byte buffer with gro_seg 2 → three per-segment on_recv calls. */
+UTEST(dgram_batch, recv_gro_split_default) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_gro_provider();
+    g_mock_gro = 2; g_mock_extra_caps = KL_DGRAM_CAP_GRO;   /* provider half of the §6.2 gate */
+
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                             .accepted_rx_caps = KL_DGRAM_RX_GRO };   /* socket half of the gate */
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    ASSERT_TRUE((kl_datagram_provider_caps(&rx) & KL_DGRAM_CAP_RX_BATCH) != 0);
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+    ASSERT_TRUE(b != NULL && b->rx_block != NULL);   /* mock reports RX_BATCH → provider block */
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    ASSERT_EQ(1, b->gro_active);                      /* both gate halves set → GRO split active */
+
+    rx_reset(); g_rx_dg = &rx;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));
+    const char *m[1] = { "AABBCC" };   /* 6 bytes; mock claims gro_seg 2 → 3 segments */
+    blast(1, port, m);
+    for (int i = 0; i < 60 && g_rx_calls < 3; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(3, g_rx_calls);
+    ASSERT_EQ((size_t)2, g_rx_len[0]); ASSERT_EQ((size_t)2, g_rx_len[1]); ASSERT_EQ((size_t)2, g_rx_len[2]);
+    ASSERT_EQ(0, memcmp(g_rx_data[0], "AA", 2)); ASSERT_EQ(0, memcmp(g_rx_data[1], "BB", 2));
+    ASSERT_EQ(0, memcmp(g_rx_data[2], "CC", 2));
+
+    g_mock_gro = 0; g_mock_extra_caps = 0;
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* GRO two-part gate (§6.2): with only ONE half set, meta.gro_seg is IGNORED → the coalesced buffer is
+ * delivered WHOLE as a single datagram (no split). Both negative configs (provider-half missing /
+ * accepted-half missing) run in one body. */
+UTEST(dgram_batch, recv_gro_gate_two_part) {
+    const int      provider[2] = { 0, 1 };
+    const unsigned accepted[2] = { KL_DGRAM_RX_GRO, 0 };   /* [0] provider half missing; [1] accepted half missing */
+    for (int k = 0; k < 2; k++) {
+        KlAllocator a = kl_allocator_default();
+        KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+        if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+        const KlSocketProvider *sp = mock_gro_provider();
+        g_mock_gro = 2; g_mock_extra_caps = provider[k] ? KL_DGRAM_CAP_GRO : 0;
+
+        KlSocketHandle rxfd = prep_fd(sp);
+        KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+        uint16_t port = kl_sockaddr_port(&la);
+        KlDatagram rx; memset(&rx, 0, sizeof(rx));
+        KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                                 .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                                 .accepted_rx_caps = accepted[k] };
+        ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+        KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+        ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+        ASSERT_EQ(0, b->gro_active);                      /* one half missing → GRO inactive */
+
+        rx_reset(); g_rx_dg = &rx;
+        ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));
+        const char *m[1] = { "AABBCC" };
+        blast(1, port, m);
+        for (int i = 0; i < 60 && g_rx_calls < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
+        for (int i = 0; i < 5; i++) kl_event_ctx_run(&ctx, 8, 10);
+        ASSERT_EQ(1, g_rx_calls);                         /* whole 6-byte datagram, NOT split */
+        ASSERT_EQ((size_t)6, g_rx_len[0]);
+
+        g_mock_gro = 0; g_mock_extra_caps = 0;
+        ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+        kl_event_ctx_free(&ctx);
+    }
+}
+
+/* GRO whole-buffer via on_recv_segments: the same coalesced slot → ONE on_recv_segments call. */
+UTEST(dgram_batch, recv_gro_whole_via_segments) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_gro_provider();
+    g_mock_gro = 2; g_mock_extra_caps = KL_DGRAM_CAP_GRO;
+
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                             .accepted_rx_caps = KL_DGRAM_RX_GRO };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    rx_reset(); g_rx_dg = &rx;
+    kl_datagram_recv_segments(&rx, rx_on_segments, NULL);   /* whole-buffer instead of split */
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));
+    const char *m[1] = { "AABBCC" };
+    blast(1, port, m);
+    for (int i = 0; i < 60 && g_seg_calls < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(1, g_seg_calls);              /* one whole-buffer delivery */
+    ASSERT_EQ((size_t)2, g_seg_size);       /* carrying the segment size */
+    ASSERT_EQ((size_t)6, g_seg_len);        /* the whole coalesced buffer */
+    ASSERT_EQ(0, g_rx_calls);               /* NOT split into on_recv */
+
+    g_mock_gro = 0; g_mock_extra_caps = 0;
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* Pause mid-buffer retains the cursor; resume drains the held datagrams before re-arming (none lost). */
+UTEST(dgram_batch, recv_pause_resume_held_cursor) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_gro_provider();   /* recv_batch returns MANY slots per refill */
+    g_mock_gro = 0;
+
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    rx_reset(); g_rx_dg = &rx; g_rx_stop_at = 0;   /* pause after delivery 0 */
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv_pause, NULL));
+
+    const char *msgs[3] = { "a", "bb", "ccc" };
+    blast(3, port, msgs);   /* 3 datagrams — one recv_batch refill fills all 3 slots */
+    for (int i = 0; i < 30 && g_rx_calls < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(1, g_rx_calls);        /* delivered one, then paused mid-buffer (2 held in the cursor) */
+
+    /* pump more — a paused datagram must NOT be delivered (strict pause) */
+    for (int i = 0; i < 10; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(1, g_rx_calls);
+
+    ASSERT_EQ(0, kl_datagram_resume(&rx));   /* resume → drain the 2 held datagrams first */
+    ASSERT_EQ(3, g_rx_calls);                /* all three delivered, in order — none lost */
+    ASSERT_EQ((size_t)1, g_rx_len[0]); ASSERT_EQ((size_t)2, g_rx_len[1]); ASSERT_EQ((size_t)3, g_rx_len[2]);
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* Stop from delivery N: slots N+1.. are never delivered (the machine's !stopped breaks the loop). */
+UTEST(dgram_batch, recv_stop_from_delivery_stops_batch) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_gro_provider();
+    g_mock_gro = 0;
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    rx_reset(); g_rx_dg = &rx; g_rx_stop_at = 0;   /* stop after delivery 0 */
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));
+    const char *msgs[3] = { "a", "bb", "ccc" };
+    blast(3, port, msgs);
+    for (int i = 0; i < 30 && g_rx_calls < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
+    for (int i = 0; i < 10; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(1, g_rx_calls);   /* stopped at delivery 0 → slots 1,2 never delivered */
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* Attach validation + ownership: wrong owner/direction, completion datagram, re-attach, and attach
+ * after recv_start are all refused (-1); a refused attach leaves b caller-owned (freeable). */
+UTEST(dgram_batch, recv_attach_validation) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    const KlSocketProvider *sp = ctx.sockets;
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+
+    /* a SEND-only batch → refused (not a recv batch); b stays caller-owned → freeable */
+    KlDatagramBatch *bs = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_SEND, 4, 1500);
+    ASSERT_TRUE(bs != NULL);
+    ASSERT_EQ(-1, kl_datagram_recv_attach_batch(&rx, bs));
+    ASSERT_EQ(0, kl_datagram_batch_free(bs));
+
+    /* completion datagram → refused (whitebox flip; attach reads dg.completion only) */
+    KlDatagramBatch *br;
+    if (!rx.completion) {
+        br = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 4, 2048);
+        ASSERT_TRUE(br != NULL);
+        rx.completion = 1;
+        ASSERT_EQ(-1, kl_datagram_recv_attach_batch(&rx, br));
+        rx.completion = 0;
+        /* wrong owner → refused */
+        KlDatagram *save = br->owner; br->owner = NULL;
+        ASSERT_EQ(-1, kl_datagram_recv_attach_batch(&rx, br));
+        br->owner = save;
+        /* success consumes br */
+        ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, br));
+        /* re-attach with a fresh batch → refused (core->ext already set) */
+        KlDatagramBatch *br2 = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 4, 2048);
+        ASSERT_TRUE(br2 != NULL);
+        ASSERT_EQ(-1, kl_datagram_recv_attach_batch(&rx, br2));
+        ASSERT_EQ(0, kl_datagram_batch_free(br2));
+        /* attach after recv_start → refused */
+        ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));
+        KlDatagramBatch *br3 = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 4, 2048);
+        ASSERT_TRUE(br3 != NULL);
+        ASSERT_EQ(-1, kl_datagram_recv_attach_batch(&rx, br3));
+        ASSERT_EQ(0, kl_datagram_batch_free(br3));
+    }
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* Reentrant teardown from delivery N: kl_datagram_teardown() from within on_recv (delivery 0) — N+1 is
+ * never delivered, and the adopted batch is reclaimed EXACTLY ONCE at the outer destructive tail (ASan/
+ * LSan proves no leak / no double-free). */
+static int g_rx_torn;
+static void rx_reclaim(void *ctx) { (void)ctx; g_rx_torn++; }
+static void rx_on_recv_teardown(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                                const KlSockAddr *local, unsigned flags) {
+    (void)data; (void)len; (void)peer; (void)local; (void)flags;
+    g_rx_calls++;
+    kl_datagram_teardown((KlDatagram *)ud, rx_reclaim, NULL);   /* destroy from within the delivery */
+}
+UTEST(dgram_batch, recv_teardown_from_delivery) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_gro_provider();   /* one refill fills 3 slots */
+    g_mock_gro = 0;
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    rx_reset(); g_rx_torn = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv_teardown, &rx));   /* ud = the datagram */
+
+    const char *msgs[3] = { "a", "bb", "ccc" };
+    blast(3, port, msgs);   /* one recv_batch fills 3 slots; delivery 0 tears down */
+    for (int i = 0; i < 30 && g_rx_torn < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(1, g_rx_calls);   /* delivery 0 only — the teardown broke the loop before slots 1,2 */
+    ASSERT_EQ(1, g_rx_torn);    /* reclaimed exactly once at the outer destructive tail */
+    /* rx is fully detached (teardown memset the handle); the batch was core-owned → reclaimed with it. */
+    g_mock_gro = 0;
+    kl_event_ctx_free(&ctx);
+}
+
+/* recv_start with a NULL callback still latches "started" — a later attach is refused (P1-3). */
+UTEST(dgram_batch, recv_attach_after_null_start_refused) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = ctx.sockets;
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, NULL, NULL));   /* NULL callback — still "started" */
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 4, 2048);
+    ASSERT_TRUE(b != NULL);
+    ASSERT_EQ(-1, kl_datagram_recv_attach_batch(&rx, b));    /* refused — attach after start */
+    ASSERT_EQ(0, kl_datagram_batch_free(b));                 /* refused attach → b caller-owned */
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* Fallback single-recv path (no RX_BATCH): a datagram larger than slot_bufsz is delivered as a
+ * captured prefix with TRUNCATED (length clamped to slot_bufsz), never over the buffer (P1-4). */
+static int g_rx_trunc;
+static void rx_on_recv_trunc(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                             const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)data; (void)peer; (void)local;
+    g_rx_calls++; g_rx_len[0] = len; if (flags & KL_DGRAM_TRUNCATED) g_rx_trunc = 1;
+}
+UTEST(dgram_batch, recv_fallback_truncation_clamped) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = ctx.sockets;   /* default provider: NO RX_BATCH on macOS → fallback recv */
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    /* small batch slot bufsz (16) → an over-sized datagram must clamp+TRUNCATE */
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 4, 16);
+    ASSERT_TRUE(b != NULL);
+    if (b->rx_block) { kl_datagram_batch_free(b);  /* platform has RX_BATCH → this test targets the fallback */
+        ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+        kl_event_ctx_free(&ctx); return; }
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    rx_reset(); g_rx_dg = &rx; g_rx_trunc = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv_trunc, NULL));
+    const char *m[1] = { "0123456789ABCDEFGHIJ" };   /* 20 bytes > slot bufsz 16 */
+    blast(1, port, m);
+    for (int i = 0; i < 60 && g_rx_calls < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(1, g_rx_calls);
+    ASSERT_EQ((size_t)16, g_rx_len[0]);   /* clamped to slot_bufsz — never over the buffer */
+    ASSERT_EQ(1, g_rx_trunc);             /* TRUNCATED set */
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* A malformed provider view (data == NULL, len > 0) is a contract violation: NO callback, receive
+ * fails (peer-mandatory-style). */
+UTEST(dgram_batch, recv_null_data_rejected) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_recv_provider(mock_null_data_recv_batch);
+    g_mock_gro = 0; g_mock_extra_caps = 0;
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 4, 2048);
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    rx_reset(); g_rx_dg = &rx;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));
+    const char *m[1] = { "hello" };
+    blast(1, port, m);
+    for (int i = 0; i < 30; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(0, g_rx_calls);   /* the malformed view was NEVER delivered */
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* A native-batch slot whose length exceeds slot_bufsz WITHOUT meta.truncated is delivered as a clamped
+ * captured prefix WITH TRUNCATED set (the clamp implies truncation). */
+UTEST(dgram_batch, recv_native_overlen_sets_truncated) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_recv_provider(mock_overlen_recv_batch);
+    g_mock_gro = 0; g_mock_extra_caps = 0; g_mock_over_len = 100;   /* claim 100 bytes */
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 4, 16);   /* slot bufsz 16 */
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    rx_reset(); g_rx_dg = &rx; g_rx_trunc = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv_trunc, NULL));
+    const char *m[1] = { "0123456789ABCDEF" };
+    blast(1, port, m);
+    for (int i = 0; i < 40 && g_rx_calls < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(1, g_rx_calls);
+    ASSERT_EQ((size_t)16, g_rx_len[0]);   /* clamped to slot_bufsz */
+    ASSERT_EQ(1, g_rx_trunc);             /* TRUNCATED set from the clamp, though meta.truncated was 0 */
+
+    g_mock_over_len = 0;
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* GRO delivery mode is LATCHED per slot: a callback that registers on_recv_segments after segment 1
+ * does NOT turn the remaining suffix into a whole-buffer delivery — the whole slot stays split. */
+static int g_latch_seg_calls;
+static void latch_on_recv(void *ud, const void *data, size_t len, const KlSockAddr *peer,
+                          const KlSockAddr *local, unsigned flags) {
+    (void)data; (void)peer; (void)local; (void)flags;
+    int i = g_rx_calls++;
+    if (i < 16) g_rx_len[i] = len;
+    if (i == 0) kl_datagram_recv_segments((KlDatagram *)ud, rx_on_segments, NULL);   /* register mid-split */
+}
+UTEST(dgram_batch, recv_gro_mode_latched_per_slot) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_gro_provider();
+    g_mock_gro = 2; g_mock_extra_caps = KL_DGRAM_CAP_GRO;
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    uint16_t port = kl_sockaddr_port(&la);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                             .accepted_rx_caps = KL_DGRAM_RX_GRO };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    rx_reset(); g_rx_dg = &rx; g_latch_seg_calls = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, latch_on_recv, &rx));   /* ud = the datagram */
+    const char *m[1] = { "AABBCC" };   /* gro_seg 2 → split into 3; the slot started split → stays split */
+    blast(1, port, m);
+    for (int i = 0; i < 60 && g_rx_calls < 3; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(3, g_rx_calls);              /* all three segments via on_recv, despite the mid-split register */
+    ASSERT_EQ((size_t)2, g_rx_len[0]); ASSERT_EQ((size_t)2, g_rx_len[1]); ASSERT_EQ((size_t)2, g_rx_len[2]);
+    ASSERT_EQ(0, g_seg_calls);             /* the segments callback fired for NONE of this slot */
+
+    g_mock_gro = 0; g_mock_extra_caps = 0;
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
     kl_event_ctx_free(&ctx);
 }
 

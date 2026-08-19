@@ -239,6 +239,12 @@ int kl_dgram_core_resume(KlDgramCore *core) {
 void kl_dgram_core_recv_stop(KlDgramCore *core) {
     if (core && core->inited && core->rx) kl_dgram_recv_stop(&core->rx->recv);
 }
+void kl_dgram_core_set_view_pull(KlDgramCore *core, KlDgramRecvViewFn view_pull, void *ctx) {
+    if (core && core->inited && core->rx) kl_dgram_recv_set_view_pull(&core->rx->recv, view_pull, ctx);
+}
+int kl_dgram_core_recv_started(const KlDgramCore *core) {
+    return (core && core->inited && core->rx) ? kl_dgram_recv_started(&core->rx->recv) : 0;
+}
 int kl_dgram_core_recv_held(const KlDgramCore *core) {
     return (core && core->inited && core->rx) ? kl_dgram_recv_held(&core->rx->recv) : 0;
 }

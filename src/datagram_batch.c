@@ -46,7 +46,8 @@ static void batch_destroy(KlDatagramBatch *b) {
     KlAllocator *a = b->alloc;
     if (b->rx_block) b->ops->rx_batch_free(a, b->rx_block);
     if (b->tx_block) b->ops->tx_batch_free(a, b->tx_block);
-    if (b->rx_slots) kl_free(a, b->rx_slots, b->rx_slots_bytes);
+    if (b->rx_slots)    kl_free(a, b->rx_slots, b->rx_slots_bytes);
+    if (b->rx_fallback) kl_free(a, b->rx_fallback, b->rx_fallback_bytes);
     if (b->tx_descs) kl_free(a, b->tx_descs, b->tx_descs_bytes);
     if (b->gso_buf)  kl_free(a, b->gso_buf, b->gso_bytes);
     kl_free(a, b, sizeof(*b));
@@ -83,6 +84,8 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
     b->owner = dg; b->dir = dir; b->n_slots = n_slots; b->slot_bufsz = slot_bufsz;
     b->rx_slots_bytes = rx_slots_bytes; b->tx_descs_bytes = tx_descs_bytes; b->gso_bytes = gso_bytes;
     b->alloc = a; b->ops = ops;
+    b->reclaim = batch_destroy;   /* M5.3: the facade's indirect RECV-batch teardown (keeps datagram.c
+                                   * free of a static datagram_batch.c reference → freestanding-clean) */
 
     if (want_recv) {
         /* Provider recvmmsg block ONLY when RX_BATCH is reported AND the COMPLETE rx batch vtable exists
@@ -93,6 +96,11 @@ KlDatagramBatch *kl_datagram_batch_create(KlDatagram *dg, KlDgramBatchDir dir,
         }
         b->rx_slots = kl_malloc(a, rx_slots_bytes);
         if (!b->rx_slots) { batch_destroy(b); return NULL; }
+        if (!b->rx_block) {   /* no provider recvmmsg block ⇒ single-recv fallback needs payload storage */
+            b->rx_fallback = kl_malloc(a, slot_bufsz);
+            if (!b->rx_fallback) { batch_destroy(b); return NULL; }
+            b->rx_fallback_bytes = slot_bufsz;
+        }
     }
     if (want_send) {
         /* Provider sendmmsg block ONLY when TX_BATCH is reported AND the COMPLETE tx batch vtable exists
@@ -117,6 +125,7 @@ int kl_datagram_batch_free(KlDatagramBatch *b) {
     batch_destroy(b);
     return 0;
 }
+
 
 /* kl_datagram_send_batch lives in datagram.c (the facade home) — it needs facade internals
  * (dg_reconcile_write to arm WRITE on a retained remainder) + the core send machine. */

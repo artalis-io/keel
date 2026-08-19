@@ -146,6 +146,11 @@ int  kl_dgram_core_recv_on_readable(KlDgramCore *core);
 void kl_dgram_core_pause(KlDgramCore *core);
 int  kl_dgram_core_resume(KlDgramCore *core);
 void kl_dgram_core_recv_stop(KlDgramCore *core);
+void kl_dgram_core_set_view_pull(KlDgramCore *core, KlDgramRecvViewFn view_pull, void *ctx);   /* M5.3 */
+int  kl_dgram_core_recv_started(const KlDgramCore *core);   /* M5.3: recv_start latched (attach refused) */
+static inline unsigned kl_dgram_core_accepted_rx_caps(const KlDgramCore *core) {
+    return core ? core->accepted_rx_caps : 0u;   /* M5.3: the GRO two-part-gate half stored at init */
+}
 int  kl_dgram_core_recv_held(const KlDgramCore *core);      /* 1 = a paused completion datagram is held */
 
 /* Close (graceful/abortive) + progress hook + terminal classification. */
