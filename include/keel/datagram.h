@@ -190,6 +190,13 @@ unsigned              kl_datagram_provider_caps(const KlDatagram *dg); /* caps t
  * The address family is derived from the group literal (dotted-quad → IPv4, colon → IPv6). */
 int kl_datagram_multicast_join (KlDatagram *dg, const char *group, unsigned iface_index);
 int kl_datagram_multicast_leave(KlDatagram *dg, const char *group, unsigned iface_index);
+
+/* M6.0a: set the socket-DEFAULT outgoing TOS/Traffic-Class byte (IP_TOS / IPV6_TCLASS) applied to every
+ * send that carries no per-message tos. Compose with KL_TOS() (keel/udp.h). Returns 0, or -1 with
+ * kl_datagram_last_error(): KL_ERR_INVALID_ARG (bad handle / tos ∉ [0,255]), KL_ERR_UNSUPPORTED (provider
+ * has no set_tos op), KL_ERR_SOCKET (getsockname / setsockopt failed). Distinct from the per-message
+ * KlDatagramMessage.tos (which overrides this default on a single send). */
+int kl_datagram_set_tos(KlDatagram *dg, int tos);
 KlDgramCloseState     kl_datagram_close_state(const KlDatagram *dg);   /* OPEN/CLOSING/CLOSED */
 KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg);  /* terminal (NONE until CLOSED) */
 size_t   kl_datagram_send_queued(const KlDatagram *dg);         /* occupied send slots (count) */

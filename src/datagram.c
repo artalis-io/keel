@@ -713,6 +713,25 @@ static int dg_multicast(KlDatagram *dg, const char *group, unsigned iface_index,
     }
     return 0;
 }
+/* M6.0a: socket-default outgoing TOS/Traffic-Class (IP_TOS / IPV6_TCLASS), the socket-wide default
+ * applied to every send that carries no per-message tos — distinct from the per-message KlDatagramMessage.
+ * tos. Routed to the provider's set_tos op; the family is derived from the adopted fd (getsockname), so
+ * KlDatagram need not store it. Error precedence: bad handle/arg → KL_ERR_INVALID_ARG; no provider op →
+ * KL_ERR_UNSUPPORTED; provider/syscall failure → KL_ERR_SOCKET. */
+int kl_datagram_set_tos(KlDatagram *dg, int tos) {
+    if (!dg || !dg->core || !kl_handle_valid(dg->fd) || tos < 0 || tos > 255) {
+        if (dg) dg->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    const KlDatagramOps *ops = dg_ops(dg);
+    if (!ops || !ops->set_tos) { dg->last_error = KL_ERR_UNSUPPORTED; return -1; }
+    KlSockAddr la;
+    if (kl_sock_get_local_addr(dg->sockets, dg->fd, &la) != 0) { dg->last_error = KL_ERR_SOCKET; return -1; }
+    int family = (kl_sockaddr_family(&la) == KL_AF_INET6) ? AF_INET6 : AF_INET;
+    if (ops->set_tos(dg_sp_ctx(dg), dg->fd, family, tos) != 0) { dg->last_error = KL_ERR_SOCKET; return -1; }
+    return 0;
+}
+
 int kl_datagram_multicast_join(KlDatagram *dg, const char *group, unsigned iface_index) {
     return dg_multicast(dg, group, iface_index, 1);
 }

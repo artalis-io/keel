@@ -661,10 +661,26 @@ static int mock_dg_mcast(void *ctx, KlSocketHandle fd, int family, const char *g
     snprintf(g_mcast_group, sizeof(g_mcast_group), "%s", group ? group : "");
     return g_mcast_ret;
 }
-static const KlDatagramOps MOCK_DG_WITH_CAPS = { .caps = mock_dg_caps, .mcast_membership = mock_dg_mcast };
+/* M6.0a set_tos recorder (socket-default TOS routing). g_settos_present toggles whether the mock exposes
+ * a set_tos op (to exercise the UNSUPPORTED path). The mock provider's close op also serves get_local_addr
+ * so kl_datagram_set_tos can derive the family (returns an AF_INET addr). */
+static int g_settos_calls, g_settos_family, g_settos_val, g_settos_ret;
+static int mock_dg_set_tos(void *ctx, KlSocketHandle fd, int family, int tos) {
+    (void)ctx; (void)fd; g_settos_calls++; g_settos_family = family; g_settos_val = tos; return g_settos_ret;
+}
+static int mc_sock_local_addr(void *pctx, KlSocketHandle fd, KlSockAddr *out) {
+    (void)pctx; (void)fd; *out = addr4(127,0,0,1, 0); return 0;   /* AF_INET → set_tos derives IPv4 */
+}
+static const KlDatagramOps MOCK_DG_WITH_CAPS = { .caps = mock_dg_caps, .mcast_membership = mock_dg_mcast,
+                                                 .set_tos = mock_dg_set_tos };
 static const KlDatagramOps MOCK_DG_NO_CAPS   = { .caps = NULL,         .mcast_membership = mock_dg_mcast };
-static const KlSocketProvider MOCK_SP_CAPS    = { .ops = &MC_SOCK_OPS, .dgram = &MOCK_DG_WITH_CAPS };
+/* A dgram vtable WITH caps but WITHOUT a set_tos op — the UNSUPPORTED path. */
+static const KlDatagramOps MOCK_DG_NO_SETTOS = { .caps = mock_dg_caps, .mcast_membership = mock_dg_mcast,
+                                                 .set_tos = NULL };
+static const KlSocketOps MC_SOCK_OPS_ADDR = { .close = mc_sock_close, .get_local_addr = mc_sock_local_addr };
+static const KlSocketProvider MOCK_SP_CAPS    = { .ops = &MC_SOCK_OPS_ADDR, .dgram = &MOCK_DG_WITH_CAPS };
 static const KlSocketProvider MOCK_SP_NOCAPS  = { .ops = &MC_SOCK_OPS, .dgram = &MOCK_DG_NO_CAPS };
+static const KlSocketProvider MOCK_SP_NOSETTOS = { .ops = &MC_SOCK_OPS_ADDR, .dgram = &MOCK_DG_NO_SETTOS };
 
 static KlDatagramConfig cfg_caps(KlSocketHandle fd, unsigned want_caps) {
     KlDatagramConfig c; memset(&c, 0, sizeof(c));
@@ -957,6 +973,44 @@ UTEST(datagram_public, m6a_optional_caps_dont_relax_want_gate) {
     ASSERT_EQ(-1, kl_datagram_init(&dg, &c));
     ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
     (void)close((int)fd);
+}
+
+/* kl_datagram_set_tos routes the socket-default TOS to the provider's set_tos op with the fd's family
+ * (derived via get_local_addr → AF_INET here), and maps a provider failure to KL_ERR_SOCKET. */
+UTEST(datagram_public, m6a_set_tos_routes_to_provider) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_TOS;
+    g_settos_calls = 0; g_settos_ret = 0;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), 0);       /* MOCK_SP_CAPS has a set_tos op */
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(0, kl_datagram_set_tos(&dg, 0x28));    /* DSCP AF11-ish mark */
+    ASSERT_EQ(1, g_settos_calls);
+    ASSERT_EQ(AF_INET, g_settos_family);             /* derived from get_local_addr (127.0.0.1) */
+    ASSERT_EQ(0x28, g_settos_val);
+    /* out-of-range → INVALID_ARG, no provider call */
+    ASSERT_EQ(-1, kl_datagram_set_tos(&dg, 256));
+    ASSERT_EQ((int)KL_ERR_INVALID_ARG, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(1, g_settos_calls);
+    /* provider failure → SOCKET */
+    g_settos_ret = -1;
+    ASSERT_EQ(-1, kl_datagram_set_tos(&dg, 0x10));
+    ASSERT_EQ((int)KL_ERR_SOCKET, (int)kl_datagram_last_error(&dg));
+    m2_close(&dg);
+}
+
+/* A provider without a set_tos op → KL_ERR_UNSUPPORTED (no crash on the NULL op). */
+UTEST(datagram_public, m6a_set_tos_unsupported_without_op) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_TOS;
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c; memset(&c, 0, sizeof(c));
+    c.ctx = &g_ctx; c.alloc = &g_alloc; c.sockets = &MOCK_SP_NOSETTOS;
+    c.fd = mk_fd(); c.send_slots = 4; c.send_slot_cap = 1500; c.recv_cap = 2048;
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ(-1, kl_datagram_set_tos(&dg, 0x28));
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
+    m2_close(&dg);
 }
 
 /* kl_datagram_send_queued_bytes reports the Σ payload bytes of queued+in-flight datagrams (the byte view

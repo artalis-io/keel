@@ -255,4 +255,60 @@ UTEST(datagram_live, completion_tos_send_verifies_tos) {
     kl_event_ctx_free(&ctx);
 }
 
+/* M6.0a: kl_datagram_set_tos sets the SOCKET-DEFAULT TOS — a plain send (no per-message tos) then
+ * egresses with that default. A RAW recvmsg peer with IP_RECVTOS reads the received TOS and asserts the
+ * socket default actually applied. Backend-adaptive (pollcomp/io_uring completion, kqueue/epoll rdy) —
+ * the completion send path applies the kernel socket default just like readiness. */
+UTEST(datagram_live, set_tos_socket_default_egress_verifies) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    const KlSocketProvider *sp = ctx.sockets;
+
+    KlSocketHandle rxfd = prep_fd(sp, "127.0.0.1", 0);   /* RAW peer — recvmsg directly */
+    ASSERT_TRUE(kl_handle_valid(rxfd));
+    int rfd = (int)rxfd;
+#if defined(IP_RECVTOS)
+    int on = 1; (void)setsockopt(rfd, IPPROTO_IP, IP_RECVTOS, &on, sizeof(on));
+#endif
+    KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
+    int port = (int)kl_sockaddr_port(&la);
+    KlSocketHandle txfd = prep_fd(sp, NULL, 0);
+    ASSERT_TRUE(kl_handle_valid(txfd));
+
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig tc = { .ctx = &ctx, .alloc = &g_alloc, .sockets = sp, .fd = txfd,
+                            .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init(&tx, &tc));
+    ASSERT_EQ(0, kl_datagram_set_tos(&tx, 0x30));        /* socket-default DSCP mark */
+
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", (uint16_t)port);
+    const char *msg = "set-tos-default";
+    KlDatagramMessage m = { .data = msg, .len = strlen(msg), .peer = &dest, .tos = -1 };  /* NO per-msg tos */
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m));
+
+    unsigned char pbuf[128]; size_t plen = 0; int tos = -1, got = 0;
+    for (int i = 0; i < 100 && !got; i++) {
+        kl_event_ctx_run(&ctx, 16, 20);
+#if defined(IP_RECVTOS)
+        got = recv_tos_oracle(rfd, pbuf, sizeof(pbuf), &plen, &tos);
+#else
+        ssize_t n = recv(rfd, pbuf, sizeof(pbuf), 0);
+        if (n > 0) { plen = (size_t)n; got = 1; }
+#endif
+    }
+    ASSERT_EQ(1, got);
+    ASSERT_EQ(strlen(msg), plen);
+    ASSERT_EQ(0, memcmp(pbuf, msg, plen));
+#if defined(IP_RECVTOS)
+#if defined(__linux__)
+    ASSERT_TRUE(tos >= 0);
+#endif
+    if (tos >= 0) ASSERT_EQ(0x30, tos);                 /* the socket default egressed */
+#endif
+
+    ASSERT_EQ(0, kl_datagram_close_begin(&tx)); pump_close(&ctx, &tx, 100); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_sock_close(sp, rxfd);
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST_MAIN();
