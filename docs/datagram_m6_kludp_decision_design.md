@@ -1,9 +1,28 @@
-# Post-M5 — KlUdp disposition (inventory + decision freeze, rev 3 — RULED)
+# Post-M5 — KlUdp disposition (inventory + decision freeze, rev 4 — RULED)
 
-**Status:** DECISION FREEZE (docs-only), **revision 3 — RULED**. No code. The inventory + options
+**Status:** DECISION FREEZE (docs-only), **revision 4 — RULED**. No code. The inventory + options
 (§1–§6) stand; the review ruling + frozen migration plan are §7–§10. The deferred post-M5 `KlUdp`
 decision ([`datagram_m5_batch_extension_design.md`](datagram_m5_batch_extension_design.md) §9) is
 decided: **modified Option B** (§7). Each increment lands as its own freeze-then-code review.
+
+### Rev 4 — M6.1 P1 fix (opportunistic capability policy)
+
+Requiring `KL_DGRAM_CAP_CONNECTED` in `want_caps` at `kl_udp_init` would break ordinary unconnected UDP:
+`want_caps` is a hard fail-loud admission gate (`src/datagram.c:375`), so any provider lacking
+connected-mode support (incl. reduced/freestanding lwIP/EFI providers reporting no optional caps) would
+reject *every* `kl_udp_init`, even when the caller only uses `send_to`. Fixed (§7):
+
+- **`kl_udp_init` succeeds for ordinary unconnected operation without requiring CONNECTED** — it passes
+  `want_caps = 0` and grants KlUdp's optional caps opportunistically.
+- **Additive seam:** new `KlDatagramConfig.optional_caps` (grant-if-supported), distinct from mandatory
+  `want_caps`: `granted = want_caps | (optional_caps & provider_caps)`. Unsupported optional caps are
+  silently dropped, not a failure; they degrade at the feature entry point.
+- **`kl_udp_connect` runs `kl_sock_connect` and succeeds only where connected sends are supported**
+  (CONNECTED granted); it sets the wrapper's own `connected` state.
+- **`kl_udp_send` (peerless) requires BOTH** the granted CONNECTED cap **AND** the wrapper's successful
+  connect-state — capability support alone is not connection.
+- **New M6.1 regressions:** reduced-provider init (`caps` op NULL → `kl_udp_init` + `send_to` succeed;
+  `kl_udp_connect` → `KL_ERR_UNSUPPORTED`, peerless send refused) and send-before-connect (refused, not UB).
 
 ### Rev 3 — ruling on O-KLUDP-2/3 + two freeze corrections
 
@@ -186,7 +205,7 @@ fallback but leaves the parallel implementation the consolidation set out to rem
 ## 7. Frozen direction (modified Option B) — mechanics
 
 `KlUdp` becomes a thin wrapper around an embedded `KlDatagram` (exactly the shape `KlUdpServer` took in
-M4), plus the M5 batch/GSO/GRO extension for the feature knobs. The public 19-function API is unchanged;
+M4), plus the M5 batch/GSO/GRO extension for the feature knobs. The public 22-function API is unchanged;
 the implementation, the struct layout, and the backpressure numbers change.
 
 **Layout revision (accepted).** `struct KlUdp` stops embedding `KlUdpTransport` (the byte-queue
@@ -198,13 +217,46 @@ embeds a `KlDatagram` (like `KlUdpServer`), plus the facade-only callbacks + any
 `KlUdpConfig`, then `kl_datagram_init_ex` with the BOTH policy; `kl_udp_free` → `kl_datagram_teardown`
 (synchronous outside a callback / deferred within, unchanged ergonomics).
 
+**Opportunistic capability policy (rev 4 — P1 fix).** The existing `want_caps` is a **hard fail-loud
+admission gate**: `kl_datagram_init_ex` rejects the fd if `want_caps & ~provider_caps`
+(`src/datagram.c:375`), and a reduced/freestanding provider (a NULL `ops->caps`, or one reporting no
+optional caps) derives `provider_caps == 0`. Therefore the wrapper **must NOT put `KL_DGRAM_CAP_CONNECTED`
+(or any KlUdp feature cap) in `want_caps`** — that would reject `kl_udp_init` on every such provider even
+when the caller only ever uses `send_to()`. `want_caps` is also, separately, what the send machine reads
+to admit peerless sends (`s->caps & KL_DGRAM_CAP_CONNECTED`, `src/datagram_send.c:254`) — so the two
+roles must be decoupled.
+
+- **Additive `KlDatagram` init seam (frozen mechanism):** add `KlDatagramConfig.optional_caps` — a
+  *grant-if-supported* mask, distinct from the *mandatory* `want_caps`. Init keeps `want_caps` fail-loud
+  (unchanged), then computes `granted = want_caps | (optional_caps & provider_caps)` and sets
+  `core->caps = granted` (so `optional_caps` a provider lacks are silently dropped, never a failure).
+  This is a small additive Tier-1 config field, in the same class as M5.1's `accepted_rx_caps`; it keeps
+  the single NULL-`caps`-op → 0 rule inside `datagram.c` (the alternative — the wrapper deriving
+  `provider_caps` itself before adoption and intersecting — duplicates that rule across the seam and is
+  rejected in favor of the additive field).
+- **`kl_udp_init` grants, never demands.** It passes `want_caps = 0` (ordinary unconnected `send_to`
+  works on *every* provider, incl. reduced/freestanding) and `optional_caps =` the KlUdp feature set
+  derived from `KlUdpConfig` (`KL_DGRAM_CAP_CONNECTED` always, plus `SOURCE_PIN`/`TOS`/`MULTICAST` per
+  the configured knobs). Unsupported optional caps degrade at the **feature entry point** (e.g.
+  `send_to_from` returns `-1`/`KL_ERR_UNSUPPORTED` when `SOURCE_PIN` was not granted), matching KlUdp's
+  historical best-effort sockopt behavior — never at init.
+
 **`kl_udp_connect` (corrected).** It calls the **provider-neutral socket connect seam** —
 `kl_sock_connect(sockets, kl_datagram_fd(&udp->dg), peer)` — exactly as today (`udp.c` currently does
-`kl_sock_connect(udp->dg.ctx->sockets, udp->dg.fd, peer)`). `KL_DGRAM_CAP_CONNECTED` is a SEPARATE
-concern: it authorizes subsequent PEERLESS `kl_udp_send` (a `KlDatagramMessage` with `peer == NULL`)
-through the send machine — it does NOT connect the socket. So the wrapper both (a) `kl_sock_connect`s
-the fd (the kernel association) AND (b) requests `KL_DGRAM_CAP_CONNECTED` in `want_caps` so peerless
-sends are admitted; connect failure maps to the existing `KL_ERR_CONNECT` surface.
+`kl_sock_connect(udp->dg.ctx->sockets, udp->dg.fd, peer)`). It **succeeds only where connected sends are
+supported**: if `KL_DGRAM_CAP_CONNECTED` was not granted (`kl_datagram_caps(&udp->dg) & CAP_CONNECTED`
+== 0), connect returns `-1`/`KL_ERR_UNSUPPORTED` before touching the socket (a provider that cannot admit
+a peerless send has no use for the kernel association). On success it sets the wrapper's own
+`connected` state flag; connect *syscall* failure maps to the existing `KL_ERR_CONNECT` surface.
+`KL_DGRAM_CAP_CONNECTED` only **authorizes** subsequent peerless sends — it does NOT itself connect the
+socket.
+
+**`kl_udp_send` (peerless) requires BOTH cap AND connect-state.** A peerless `kl_udp_send` is admitted
+only when (a) `CAP_CONNECTED` was granted (so the send machine accepts `peer == NULL`) **AND** (b) the
+wrapper's own `connected` flag is set (i.e. `kl_udp_connect` actually ran `kl_sock_connect` successfully).
+Capability support alone is NOT connection: a `kl_udp_send` issued **before** `kl_udp_connect` is refused
+`-1` via the existing invalid-state surface (`KL_ERR_INVALID_ARG`; M6.1 MAY add a clearer additive
+`KL_ERR_NOT_CONNECTED` code), never passed to the kernel on an unconnected socket.
 
 **Backpressure = BOTH (preallocated).** `max_send_queue` (bytes) → the M1 `send_byte_budget`;
 `send_slots` derived from the budget (per the M4 `KlUdpServer` sizing: full-datagram `send_slot_cap`,
@@ -242,9 +294,17 @@ Per **O-KLUDP-3 (ruled)**, M6.2 splits finer. Order: **M6.1 → M6.2a → M6.2b 
    `send_to`/`send_to_from`/`send` over `kl_datagram_send` with the BOTH policy (no queue);
    `recv_start`/`recv_stop`/`on_drain`; `fd`/`local_port`/`last_error`; the revised `send_queued`(bytes,
    via the new `KlDatagram` byte accessor)/`dropped`/`truncated`. The plain UDP client, end to end.
-   `kl_udp_connect` calls the provider socket connect seam (`kl_sock_connect`) AND requests
-   `KL_DGRAM_CAP_CONNECTED` for peerless sends (§7 corrected). Full parity re-run of the existing
-   `test_udp` behavioral cases (adjusted for the bounded-queue revision).
+   - **Opportunistic capability policy (§7, rev 4):** add the additive `KlDatagramConfig.optional_caps`
+     grant-if-supported seam; `kl_udp_init` passes `want_caps = 0` + `optional_caps =` the KlUdp feature
+     set (so ordinary unconnected `send_to` succeeds on *every* provider incl. reduced/freestanding).
+     `kl_udp_connect` calls `kl_sock_connect`, succeeds only where CONNECTED was granted, and sets the
+     wrapper `connected` flag. Peerless `kl_udp_send` requires the granted CONNECTED cap AND the
+     `connected` flag.
+   - **Regressions:** full parity re-run of the existing `test_udp` behavioral cases (adjusted for the
+     bounded-queue revision), PLUS **reduced-provider init** (a provider with a NULL `caps` op →
+     `kl_udp_init` + `send_to` succeed; `kl_udp_connect` fails `KL_ERR_UNSUPPORTED`; peerless
+     `kl_udp_send` refused via the invalid-state surface) and **send-before-connect** (peerless
+     `kl_udp_send` before `kl_udp_connect` is refused, no UB).
 2. **M6.2a — multicast + TOS (incl. receive-TOS).** `multicast_join`/`multicast_leave`;
    `set_tos`/`send_to_tos`; `recv_tos` (+ the small additive `KlDatagram` TOS-on-recv accessor). Re-runs
    `test_udp_tos` / `test_udp_multicast` against the reimplemented `KlUdp`.
@@ -280,8 +340,9 @@ path) is re-decided after M6.1 lands — the same "stop if ugly" escape hatch us
 - No code in this freeze; the layout + queue-semantics revisions are frozen-for-review, landing in
   M6.1–M6.2c.
 - `KlUdpConfig` is retained (load-bearing). A datagram-neutral rename stays a separate cosmetic pass.
-- No change to `KlDatagram`'s Tier-1 contract beyond the two small additive accessors (`send_queued_
-  bytes`, `recv_tos`) the wrapper needs.
+- No change to `KlDatagram`'s Tier-1 contract beyond three small additive changes the wrapper needs: the
+  two accessors (`send_queued_bytes`, `recv_tos`) and the `KlDatagramConfig.optional_caps`
+  grant-if-supported field (rev 4, §7) — all in the same additive class as M5.1's `accepted_rx_caps`.
 - Mode-B `recv_batch` (M5 §5.5) + native completion batched receive (M5 §10 O-1) remain independent.
 - The untracked `docs/claude_code_transport_taxonomy_prompt.md` is preserved across all M6 work (M6.3
   cleanup must not remove it).
