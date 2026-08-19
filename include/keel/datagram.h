@@ -125,7 +125,14 @@ typedef struct {
     size_t                   send_slots;    /* fixed outbound slot count (count-based backpressure) */
     size_t                   send_slot_cap; /* per outbound slot payload capacity */
     size_t                   recv_cap;      /* inbound slot payload capacity */
-    unsigned                 want_caps;     /* KL_DGRAM_CAP_* the consumer requires */
+    unsigned                 want_caps;     /* KL_DGRAM_CAP_* the consumer REQUIRES (fail-loud: init -1
+                                             * with KL_ERR_UNSUPPORTED if the provider lacks any) */
+    /* M6.0a: KL_DGRAM_CAP_* the consumer would LIKE but does not require — granted opportunistically
+     * where the provider supports them, silently dropped otherwise (never an init failure). The granted
+     * cap set (kl_datagram_caps) is `want_caps | (optional_caps & provider_caps)`. Lets a wrapper (KlUdp)
+     * request every capability its API may use without regressing reduced/freestanding providers that
+     * only support unconnected send_to. 0 = request nothing beyond want_caps. */
+    unsigned                 optional_caps;
     /* M5: the KL_DGRAM_RX_* capture mask the socket actually has ENABLED (from the M0 prep's
      * KlDatagramPrep.rx_caps) — enabled-per-socket state, SEPARATE from provider support. init masks it
      * to known KL_DGRAM_RX_* bits and stores it; GRO activates only when the provider supports GRO AND
@@ -185,7 +192,8 @@ int kl_datagram_multicast_join (KlDatagram *dg, const char *group, unsigned ifac
 int kl_datagram_multicast_leave(KlDatagram *dg, const char *group, unsigned iface_index);
 KlDgramCloseState     kl_datagram_close_state(const KlDatagram *dg);   /* OPEN/CLOSING/CLOSED */
 KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg);  /* terminal (NONE until CLOSED) */
-size_t   kl_datagram_send_queued(const KlDatagram *dg);
+size_t   kl_datagram_send_queued(const KlDatagram *dg);         /* occupied send slots (count) */
+size_t   kl_datagram_send_queued_bytes(const KlDatagram *dg);  /* Σ queued+in-flight payload bytes — M6.0a */
 size_t   kl_datagram_send_inflight(const KlDatagram *dg);
 uint64_t kl_datagram_dropped(const KlDatagram *dg);
 uint64_t kl_datagram_truncated(const KlDatagram *dg);

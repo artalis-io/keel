@@ -207,6 +207,9 @@ void kl_dgram_send_abandon(KlDgramSend *s);
 
 static inline size_t kl_dgram_send_inflight(const KlDgramSend *s) { return s ? s->inflight_n : 0; }
 static inline size_t kl_dgram_send_queued(const KlDgramSend *s)   { return s ? s->count : 0; }
+/* Σ payload bytes over every OCCUPIED slot (queued + in-flight) — the byte view of the send backlog,
+ * distinct from the slot COUNT above. Exposed publicly as kl_datagram_send_queued_bytes (M6.0a). */
+static inline size_t kl_dgram_send_queued_bytes(const KlDgramSend *s) { return s ? s->bytes_used : 0; }
 static inline int    kl_dgram_send_error(const KlDgramSend *s)    { return s ? s->err : 1; }
 static inline size_t kl_dgram_send_dropped(const KlDgramSend *s)  { return s ? s->dropped : 0; }
 

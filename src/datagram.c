@@ -375,6 +375,12 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
         if (cfg->want_caps & ~provider_caps) { dg->last_error = KL_ERR_UNSUPPORTED; return -1; }
         dg->provider_caps = provider_caps;
     }
+    /* M6.0a: the granted cap set = the REQUIRED caps (already gated above) PLUS the OPTIONAL caps the
+     * provider actually supports on this fd. optional_caps a provider lacks are silently dropped (never
+     * an init failure), so a wrapper can request every capability its API may use without regressing a
+     * reduced provider that only does unconnected send_to. This is what the send machine reads (core->caps)
+     * to admit connected/source-pin/TOS sends, and what kl_datagram_caps reports. */
+    unsigned granted_caps = cfg->want_caps | (cfg->optional_caps & dg->provider_caps);
 
     KlDgramCore *core = kl_malloc(cfg->alloc, sizeof(*core));
     if (!core) { dg->last_error = KL_ERR_ALLOC; return -1; }
@@ -385,7 +391,7 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
     cc.alloc = cfg->alloc; cc.fd = cfg->fd; cc.completion = completion;
     cc.send_slots = cfg->send_slots; cc.send_slot_cap = cfg->send_slot_cap; cc.recv_cap = cfg->recv_cap;
     cc.send_byte_budget = send_byte_budget;   /* M1: 0 = SLOT, >0 = BOTH */
-    cc.caps = cfg->want_caps;
+    cc.caps = granted_caps;   /* M6.0a: want_caps + opportunistically-granted optional_caps */
     /* M5.1: store the enabled-per-socket RX mask, masked to KNOWN KL_DGRAM_RX_* bits (O-E) — separate
      * from provider support; drives the GRO-activation predicate (provider GRO support AND this). */
     cc.accepted_rx_caps = cfg->accepted_rx_caps &
@@ -721,6 +727,11 @@ KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg) {
 }
 size_t kl_datagram_send_queued(const KlDatagram *dg)   { return (dg && dg->core) ? dg_send_queued(dg)   : 0; }
 size_t kl_datagram_send_inflight(const KlDatagram *dg) { return (dg && dg->core) ? dg_send_inflight(dg) : 0; }
+/* M6.0a: the BYTE view of the send backlog (queued + in-flight payload), for KlUdp's byte-reporting
+ * kl_udp_send_queued. Distinct from the slot COUNT (kl_datagram_send_queued). */
+size_t kl_datagram_send_queued_bytes(const KlDatagram *dg) {
+    return (dg && dg->core) ? kl_dgram_send_queued_bytes(&dg->core->send) : 0;
+}
 uint64_t kl_datagram_dropped(const KlDatagram *dg)     { return dg ? dg->dropped   : 0; }
 uint64_t kl_datagram_truncated(const KlDatagram *dg)   { return dg ? dg->truncated : 0; }
 KlError  kl_datagram_last_error(const KlDatagram *dg)  { return dg ? dg->last_error : KL_ERR_INVALID_ARG; }

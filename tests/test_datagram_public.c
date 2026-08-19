@@ -913,4 +913,78 @@ UTEST(datagram_public, m_control_send_terminal_error_retires_once) {
     ASSERT_EQ(0, kl_datagram_free(&dg));
 }
 
+/* ══ M6.0a — additive KlDatagram prerequisites (optional_caps + send_queued_bytes) ════════════════ */
+
+/* optional_caps are granted opportunistically = intersected with provider support. A provider that has
+ * only a SUBSET of the requested optional caps grants exactly that subset (never fails init). This is what
+ * lets KlUdp request every cap its API may use (CONNECTED|SOURCE_PIN|TOS|MULTICAST) unconditionally. */
+UTEST(datagram_public, m6a_optional_caps_granted_intersection) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_MULTICAST;   /* provider has 2 of the 4 */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), 0 /*want*/);
+    c.optional_caps = KL_DGRAM_CAP_CONNECTED | KL_DGRAM_CAP_SOURCE_PIN |
+                      KL_DGRAM_CAP_TOS | KL_DGRAM_CAP_MULTICAST;      /* request all 4 optionally */
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));                          /* never fails on optional caps */
+    ASSERT_EQ((unsigned)(KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_MULTICAST), kl_datagram_caps(&dg));
+    m2_close(&dg);
+}
+
+/* A REDUCED provider (NULL caps op ⇒ provider_caps == 0) still initializes when the wrapper requests caps
+ * ONLY optionally — the granted set is empty, but ordinary unconnected send_to keeps working. This is the
+ * M6.1-prerequisite behavior: opportunistic optional caps never regress a reduced/freestanding provider. */
+UTEST(datagram_public, m6a_optional_caps_reduced_provider_inits) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 1;   /* MOCK_SP_NOCAPS: caps == NULL → provider_caps 0 */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_caps(mk_fd(), 0 /*want*/);
+    c.optional_caps = KL_DGRAM_CAP_CONNECTED | KL_DGRAM_CAP_SOURCE_PIN |
+                      KL_DGRAM_CAP_TOS | KL_DGRAM_CAP_MULTICAST;
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));       /* init SUCCEEDS — nothing was demanded */
+    ASSERT_EQ((unsigned)0, kl_datagram_caps(&dg)); /* nothing granted (provider supports none) */
+    m2_close(&dg);
+    g_mock_caps_null = 0;
+}
+
+/* optional_caps do NOT relax the fail-loud want_caps gate: a REQUIRED cap the provider lacks still fails
+ * init even alongside satisfiable optional caps. The two masks are independent. */
+UTEST(datagram_public, m6a_optional_caps_dont_relax_want_gate) {
+    mk_ctx(); mc_reset(); g_mock_caps_null = 0;
+    g_mock_caps = KL_DGRAM_CAP_SOURCE_PIN;   /* provider lacks TOS */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlSocketHandle fd = mk_fd();
+    KlDatagramConfig c = cfg_caps(fd, KL_DGRAM_CAP_TOS /*required, unsupported*/);
+    c.optional_caps = KL_DGRAM_CAP_SOURCE_PIN;   /* satisfiable optional — must not rescue the bad want */
+    ASSERT_EQ(-1, kl_datagram_init(&dg, &c));
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
+    (void)close((int)fd);
+}
+
+/* kl_datagram_send_queued_bytes reports the Σ payload bytes of queued+in-flight datagrams (the byte view
+ * of the backlog), distinct from the slot COUNT. Driven over the completion mock so sends stay occupied. */
+UTEST(datagram_public, m6a_send_queued_bytes_tracks_payload) {
+    mk_ctx(); mc_reset();
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramConfig c = cfg_for(mk_fd(), 3 /*slots*/, 1500);
+    ASSERT_EQ(0, kl_datagram_init(&dg, &c));
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued_bytes(&dg));   /* empty */
+
+    KlSockAddr d = addr4(10,0,0,1, 53);
+    KlDatagramMessage m10 = { .data = "0123456789", .len = 10, .peer = &d, .tos = -1 };
+    KlDatagramMessage m6  = { .data = "ABCDEF",     .len = 6,  .peer = &d, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m10));  /* in-flight: 10 bytes */
+    ASSERT_EQ((size_t)10, kl_datagram_send_queued_bytes(&dg));
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m6));   /* queued: +6 → 16 bytes */
+    ASSERT_EQ((size_t)16, kl_datagram_send_queued_bytes(&dg));
+    ASSERT_EQ((size_t)2, kl_datagram_send_queued(&dg));                      /* 2 slots occupied (count) */
+
+    drive_send(1);   /* head (10) retires → FIFO pumps the 6-byte datagram */
+    ASSERT_EQ((size_t)6, kl_datagram_send_queued_bytes(&dg));
+    drive_send(1);   /* the 6-byte datagram retires → empty */
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued_bytes(&dg));
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued(&dg));
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&dg));
+    ASSERT_EQ(0, kl_datagram_free(&dg));
+}
+
 UTEST_MAIN();
