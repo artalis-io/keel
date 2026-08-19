@@ -263,6 +263,11 @@ void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx) {
 void kl_dgram_core_on_drop(KlDgramCore *core, KlDgramDropFn cb, void *ctx) {
     if (core && core->inited) kl_dgram_send_set_drop_cb(&core->send, cb, ctx);
 }
+void kl_dgram_core_set_gso_cbs(KlDgramCore *core, KlDgramSubmitGsoFn submit_gso, void *submit_ctx,
+                               KlDgramGsoDoneFn on_gso_done, void *done_ctx) {
+    if (core && core->inited)
+        kl_dgram_send_set_gso_cbs(&core->send, submit_gso, submit_ctx, on_gso_done, done_ctx);
+}
 
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core) {
     return (core && core->inited && core->rx) ? kl_dgram_inbound_slot(&core->rx->inbound) : (KlDgramSlot *)0;

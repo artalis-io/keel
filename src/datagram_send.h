@@ -48,7 +48,9 @@ typedef enum {
     KL_DGRAM_SUBMIT_DONE = 0,    /* sent synchronously — retire now (readiness) */
     KL_DGRAM_SUBMIT_INFLIGHT,    /* accepted async — retire via kl_dgram_send_on_complete (completion) */
     KL_DGRAM_SUBMIT_WOULDBLOCK,  /* provider cannot accept now — keep queued (readiness EAGAIN) */
-    KL_DGRAM_SUBMIT_ERROR        /* hard failure — sticky error; datagram retained */
+    KL_DGRAM_SUBMIT_ERROR,       /* hard failure — sticky error; datagram retained */
+    KL_DGRAM_SUBMIT_UNSUPPORTED  /* M5.2b: the op is unavailable on this fd (GSO whole-submit) — the
+                                  * caller latches + falls back; nothing was sent so retransmit is safe */
 } KlDgramSubmitResult;
 
 /* Submit one datagram to the provider (fields, not a slot — so the readiness fast path can submit
@@ -74,6 +76,15 @@ typedef enum {
 typedef KlDgramBatchResult (*KlDgramSubmitBatchFn)(void *ctx, const KlDgramTxDesc *descs, int n,
                                                    int *sent);
 
+/* M5.2b — submit a WHOLE GSO group in ONE send_gso (readiness). `owner` is the group's KlDatagramBatch
+ * (opaque here); `buf`/`total`/`seg` are the group buffer + payload. Returns DONE (the whole group went)
+ * / WOULDBLOCK (retain) / UNSUPPORTED (latch + fall back) / ERROR (hard). */
+typedef KlDgramSubmitResult (*KlDgramSubmitGsoFn)(void *ctx, void *owner, const void *buf,
+                                                  size_t total, size_t seg,
+                                                  const KlSockAddr *peer, int tos);
+/* M5.2b — a GSO group's LAST segment retired: the batch group buffer is free (clears gso_busy). */
+typedef void (*KlDgramGsoDoneFn)(void *ctx, void *owner);
+
 typedef struct {
     KlDgramSlots     *slots;         /* borrowed — the OBJECT-owned outbound send pool */
     KlAllocator      *alloc;         /* the FIFO ring's allocator (init/free only) */
@@ -95,6 +106,8 @@ typedef struct {
     KlDgramWritableFn on_writable; void *writable_ctx;
     KlDgramDrainFn    on_drain;  void *drain_ctx;
     KlDgramDropFn     on_drop;   void *drop_ctx;   /* fired at each recoverable drop (non-destructive) */
+    KlDgramSubmitGsoFn submit_gso; void *submit_gso_ctx;   /* M5.2b: whole-group send_gso (readiness) */
+    KlDgramGsoDoneFn  on_gso_done; void *gso_done_ctx;     /* M5.2b: a GSO group fully retired */
     int               err;           /* sticky transport error */
     int               closing;       /* refuse new sends with CLOSED */
     /* step-4 busy handshake: fired +1 on entering / -1 on leaving (as the LAST action) any public op
@@ -124,6 +137,18 @@ int  kl_dgram_send_init(KlDgramSend *s, KlDgramSlots *slots, KlAllocator *ring_a
 void kl_dgram_send_set_writable_cb(KlDgramSend *s, KlDgramWritableFn cb, void *ctx);
 void kl_dgram_send_set_drain_cb(KlDgramSend *s, KlDgramDrainFn cb, void *ctx);
 void kl_dgram_send_set_drop_cb(KlDgramSend *s, KlDgramDropFn cb, void *ctx);
+void kl_dgram_send_set_gso_cbs(KlDgramSend *s, KlDgramSubmitGsoFn submit_gso, void *submit_ctx,
+                               KlDgramGsoDoneFn on_gso_done, void *done_ctx);
+
+/* M5.2b — atomically admit a GSO group of `nseg` contiguous segment slots (all-or-nothing against the
+ * free-slot count AND the byte budget). Each segment references the caller's group buffer (`buf`, valid
+ * until the group retires) via `gso_ext` at its offset — nothing is copied into the pool. `mode` = 0
+ * (GSO whole-submit) / 1 (FALLBACK per-segment). `owner` is the KlDatagramBatch whose gso_busy clears
+ * when the group retires (on_gso_done). Returns ACCEPTED / WOULD_BLOCK (not enough free slots or byte
+ * gate) / TOO_LARGE (nseg > slot count, or total > budget) / CLOSED / ERROR. Fires no callbacks. */
+KlDatagramSendStatus kl_dgram_send_enqueue_gso(KlDgramSend *s, const void *buf, size_t total,
+                                               size_t seg, size_t nseg, const KlSockAddr *peer, int tos,
+                                               int mode, void *owner);
 
 /* Accept or refuse one whole datagram (never partial). Copies data + metadata before returning. */
 KlDatagramSendStatus kl_dgram_send(KlDgramSend *s, const KlDatagramMessage *m);

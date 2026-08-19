@@ -835,4 +835,175 @@ UTEST(dgram_send, flush_batch_partial_prefix) {
     kl_dgram_slots_free(&slots);
 }
 
+/* ══ M5.2b — GSO queued group (machine level) ═══════════════════════════════════════════════════ */
+
+/* A whole-group GSO submit hook: DONE unless the payload's first byte marks it — 'W' → WOULDBLOCK,
+ * 'U' → UNSUPPORTED, 'E' → ERROR. Records the group submit for ordering assertions. */
+static int g_gso_calls, g_gso_done_calls;
+static char g_gso_first;
+static KlDgramSubmitResult gso_submit(void *ctx, void *owner, const void *buf, size_t total,
+                                      size_t seg, const KlSockAddr *peer, int tos) {
+    (void)ctx; (void)owner; (void)seg; (void)peer; (void)tos; (void)total;
+    g_gso_calls++;
+    char c = (buf && total) ? ((const char *)buf)[0] : 0;
+    g_gso_first = c;
+    if (c == 'W') return KL_DGRAM_SUBMIT_WOULDBLOCK;
+    if (c == 'U') return KL_DGRAM_SUBMIT_UNSUPPORTED;
+    if (c == 'E') return KL_DGRAM_SUBMIT_ERROR;
+    return KL_DGRAM_SUBMIT_DONE;
+}
+static void gso_done(void *ctx, void *owner) { (void)ctx; (void)owner; g_gso_done_calls++; }
+
+/* A GSO group queued BEHIND an older ordinary datagram is not submitted until that datagram retires —
+ * FIFO order (the ordinary 'X' egresses first, then the whole group). */
+UTEST(dgram_send, gso_fifo_behind_ordinary) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 8, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };   /* queue (no fast path) */
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
+    kl_dgram_send_set_gso_cbs(&s, gso_submit, NULL, gso_done, NULL);
+    g_gso_calls = g_gso_done_calls = 0;
+    KlSockAddr p = any_peer();
+
+    char x = 'X';
+    KlDatagramMessage m = { .data = &x, .len = 1, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&s, &m), KL_DATAGRAM_ACCEPTED);            /* ordinary, queued (WOULDBLOCK) */
+    static char gbuf[4] = { 'G','G','G','G' };
+    ASSERT_EQ(kl_dgram_send_enqueue_gso(&s, gbuf, 4, 2, 2, &p, -1, 0, NULL), KL_DATAGRAM_ACCEPTED);
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);                      /* 1 ordinary + 2 GSO segments */
+
+    /* The head is the ordinary datagram — flush submits IT (via the single hook), NOT the group. */
+    mk.order_n = 0; mk.next = KL_DGRAM_SUBMIT_WOULDBLOCK;
+    ASSERT_EQ(kl_dgram_send_flush(&s), 0);
+    ASSERT_EQ(0, g_gso_calls);                                         /* group NOT submitted yet */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 3);
+
+    /* Let the ordinary datagram go → the group reaches the head → one whole-group send_gso. */
+    mk.next = KL_DGRAM_SUBMIT_DONE;
+    ASSERT_EQ(kl_dgram_send_flush(&s), 0);
+    ASSERT_EQ('X', mk.order[0]);                                       /* ordinary egressed first (FIFO) */
+    ASSERT_EQ(1, g_gso_calls);                                         /* then the whole group, once */
+    ASSERT_EQ(1, g_gso_done_calls);                                    /* group retired → done fired once */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* Atomic refusal: not enough free slots, and the BOTH byte budget — nothing is reserved on refusal. */
+UTEST(dgram_send, gso_atomic_refusal) {
+    KlAllocator a = kl_allocator_default();
+    /* slots: only 2 free; a 3-segment group must be refused WHOLE (no partial reservation). */
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 2, 64), 0);
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    KlSockAddr p = any_peer();
+    static char g6[6] = { '1','2','3','4','5','6' };
+    ASSERT_EQ(kl_dgram_send_enqueue_gso(&s, g6, 6, 2, 3, &p, -1, 0, NULL), KL_DATAGRAM_TOO_LARGE); /* nseg>slots */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);                      /* nothing reserved */
+    ASSERT_EQ((int)kl_dgram_slots_free_count(&slots), 2);
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+
+    /* BOTH byte budget: 4 slots, budget 5 bytes. Hold datagrams queued with a WOULD_BLOCK mock. */
+    Mock wb = { .next = KL_DGRAM_SUBMIT_WOULDBLOCK };
+    KlDgramSlots s2; ASSERT_EQ(kl_dgram_slots_init(&s2, &a, 4, 64), 0);
+    KlDgramSend b;
+    ASSERT_EQ(kl_dgram_send_init(&b, &s2, &a, 0, KL_DGRAM_CAP_CONNECTED, /*budget*/5, mock_submit, &wb), 0);
+    /* (a) a 6-byte group over the WHOLE budget → permanent TOO_LARGE, nothing reserved. */
+    ASSERT_EQ(kl_dgram_send_enqueue_gso(&b, g6, 6, 2, 3, &p, -1, 0, NULL), KL_DATAGRAM_TOO_LARGE);
+    ASSERT_EQ((int)kl_dgram_send_queued(&b), 0);
+    ASSERT_EQ((int)kl_dgram_slots_free_count(&s2), 4);
+    /* (b) fits the budget but not right now: enqueue 4 bytes (queued, WOULD_BLOCK), then a 4-byte group
+     * (4+4 > 5) → transient WOULD_BLOCK, atomic (nothing reserved). */
+    char four[4] = { 'a','a','a','a' };
+    KlDatagramMessage mm = { .data = four, .len = 4, .peer = &p, .tos = -1 };
+    ASSERT_EQ(kl_dgram_send(&b, &mm), KL_DATAGRAM_ACCEPTED);          /* queued (4 of 5 bytes used) */
+    ASSERT_EQ((int)kl_dgram_send_queued(&b), 1);
+    static char g4[4] = { 'z','z','z','z' };
+    ASSERT_EQ(kl_dgram_send_enqueue_gso(&b, g4, 4, 2, 2, &p, -1, 0, NULL), KL_DATAGRAM_WOULD_BLOCK);
+    ASSERT_EQ((int)kl_dgram_send_queued(&b), 1);                      /* atomic — group not reserved */
+    ASSERT_EQ((int)kl_dgram_slots_free_count(&s2), 3);               /* only the 1 ordinary slot used */
+    kl_dgram_send_discard_queued(&b);
+    ASSERT_EQ(kl_dgram_send_free(&b), 0);
+    kl_dgram_slots_free(&s2);
+}
+
+/* UNSUPPORTED on the whole-group submit latches the group to FALLBACK; its segments then drain as
+ * ordinary per-segment sends (the single hook), in order. */
+UTEST(dgram_send, gso_unsupported_then_fallback) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 8, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_DONE };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
+    kl_dgram_send_set_gso_cbs(&s, gso_submit, NULL, gso_done, NULL);
+    g_gso_calls = g_gso_done_calls = 0; mk.order_n = 0;
+    KlSockAddr p = any_peer();
+    static char gU[6] = { 'U','U','U','U','U','U' };   /* 'U' → UNSUPPORTED on the whole-group submit */
+    ASSERT_EQ(kl_dgram_send_enqueue_gso(&s, gU, 6, 2, 3, &p, -1, /*mode GSO*/0, NULL), KL_DATAGRAM_ACCEPTED);
+
+    ASSERT_EQ(kl_dgram_send_flush(&s), 0);
+    ASSERT_EQ(1, g_gso_calls);                          /* one whole-group attempt → UNSUPPORTED */
+    ASSERT_EQ(3, mk.order_n);                            /* then 3 per-segment fallback sends */
+    ASSERT_EQ(1, g_gso_done_calls);                      /* group retired once */
+    ASSERT_EQ(0, g_gso_first == 0);                      /* the submit saw the buffer */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+    ASSERT_EQ((size_t)0, kl_dgram_send_dropped(&s));    /* fallback delivered — no drop */
+
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* An arbitrary hard error on the whole-group submit drops the WHOLE group (recoverable) with NO
+ * fallback retransmission. */
+UTEST(dgram_send, gso_hard_error_drops_group) {
+    KlAllocator a = kl_allocator_default();
+    KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 8, 64), 0);
+    Mock mk = { .next = KL_DGRAM_SUBMIT_DONE };
+    KlDgramSend s;
+    ASSERT_EQ(kl_dgram_send_init(&s, &slots, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, mock_submit, &mk), 0);
+    kl_dgram_send_set_gso_cbs(&s, gso_submit, NULL, gso_done, NULL);
+    g_gso_calls = g_gso_done_calls = 0; mk.order_n = 0;
+    KlSockAddr p = any_peer();
+    static char gE[6] = { 'E','E','E','E','E','E' };   /* 'E' → hard ERROR on the whole-group submit */
+    ASSERT_EQ(kl_dgram_send_enqueue_gso(&s, gE, 6, 2, 3, &p, -1, 0, NULL), KL_DATAGRAM_ACCEPTED);
+
+    ASSERT_EQ(kl_dgram_send_flush(&s), 0);
+    ASSERT_EQ(1, g_gso_calls);                          /* one whole-group attempt → hard error */
+    ASSERT_EQ(0, mk.order_n);                            /* NO fallback retransmission */
+    ASSERT_EQ((size_t)3, kl_dgram_send_dropped(&s));   /* the whole group (3 segments) dropped */
+    ASSERT_EQ(0, kl_dgram_send_error(&s));              /* recoverable — NOT sticky */
+    ASSERT_EQ(1, g_gso_done_calls);                      /* group retired (dropped) → done fired */
+    ASSERT_EQ((int)kl_dgram_send_queued(&s), 0);
+
+    ASSERT_EQ(kl_dgram_send_free(&s), 0);
+    kl_dgram_slots_free(&slots);
+}
+
+/* Connected-mode capability: a NULL peer GSO is UNSUPPORTED without KL_DGRAM_CAP_CONNECTED, ACCEPTED
+ * with it. */
+UTEST(dgram_send, gso_connected_capability) {
+    KlAllocator a = kl_allocator_default();
+    static char g4[4] = { '1','2','3','4' };
+
+    KlDgramSlots s1; ASSERT_EQ(kl_dgram_slots_init(&s1, &a, 8, 64), 0);
+    KlDgramSend no_conn;
+    ASSERT_EQ(kl_dgram_send_init(&no_conn, &s1, &a, 0, /*caps*/0, 0, iso_submit, NULL), 0);
+    ASSERT_EQ(kl_dgram_send_enqueue_gso(&no_conn, g4, 4, 2, 2, /*peer*/NULL, -1, 0, NULL),
+              KL_DATAGRAM_UNSUPPORTED);                 /* connected send not granted */
+    ASSERT_EQ((int)kl_dgram_send_queued(&no_conn), 0);
+    ASSERT_EQ(kl_dgram_send_free(&no_conn), 0);
+    kl_dgram_slots_free(&s1);
+
+    KlDgramSlots s2; ASSERT_EQ(kl_dgram_slots_init(&s2, &a, 8, 64), 0);
+    KlDgramSend conn;
+    ASSERT_EQ(kl_dgram_send_init(&conn, &s2, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    ASSERT_EQ(kl_dgram_send_enqueue_gso(&conn, g4, 4, 2, 2, NULL, -1, 0, NULL), KL_DATAGRAM_ACCEPTED);
+    kl_dgram_send_discard_queued(&conn);
+    ASSERT_EQ(kl_dgram_send_free(&conn), 0);
+    kl_dgram_slots_free(&s2);
+}
+
 UTEST_MAIN();

@@ -59,6 +59,12 @@ void kl_dgram_send_set_drop_cb(KlDgramSend *s, KlDgramDropFn cb, void *ctx) {
     if (!s) return;
     s->on_drop = cb; s->drop_ctx = ctx;
 }
+void kl_dgram_send_set_gso_cbs(KlDgramSend *s, KlDgramSubmitGsoFn submit_gso, void *submit_ctx,
+                               KlDgramGsoDoneFn on_gso_done, void *done_ctx) {
+    if (!s) return;
+    s->submit_gso = submit_gso; s->submit_gso_ctx = submit_ctx;
+    s->on_gso_done = on_gso_done; s->gso_done_ctx = done_ctx;
+}
 void kl_dgram_send_set_closing(KlDgramSend *s, int closing) {
     if (s) s->closing = closing ? 1 : 0;
 }
@@ -79,8 +85,11 @@ void kl_dgram_send_discard_queued(KlDgramSend *s) {
         s->ring[idx] = NULL;
         if (s->bytes_used >= slot->len) s->bytes_used -= slot->len;   /* release only the QUEUED slots */
         else                            s->bytes_used = 0;
+        int   gso_last  = slot->gso_last;    /* M5.2b: discarding a group's last segment frees its buffer */
+        void *gso_owner = slot->gso_owner;
         kl_dgram_slots_release(s->slots, slot);
         s->count--;
+        if (gso_last && s->on_gso_done) s->on_gso_done(s->gso_done_ctx, gso_owner);   /* clears gso_busy */
     }
     /* The in-flight head (if any) is retained, so bytes_used now == its len (== 0 when nothing is in
      * flight) — it drops to 0 only when the terminal completion retires it (§10.9 / P2). */
@@ -116,6 +125,8 @@ static void dispatch_leave(KlDgramSend *s) {
  * they are deferred (dispatch_leave), so a caller can update a sticky error before they fire. */
 static void send_retire_head(KlDgramSend *s, int was_inflight) {
     KlDgramSlot *slot = s->ring[s->head];
+    int   gso_last  = slot->gso_last;      /* M5.2b: capture before release (slot returns to the pool) */
+    void *gso_owner = slot->gso_owner;
     s->ring[s->head] = NULL;
     s->head = (s->head + 1) % s->ring_cap;
     s->count--;
@@ -126,6 +137,8 @@ static void send_retire_head(KlDgramSend *s, int was_inflight) {
     kl_dgram_slots_release(s->slots, slot);   /* a free slot appears */
     if (s->full) { s->full = 0; s->pend_writable = 1; }   /* full → non-full */
     if (s->count == 0) s->pend_drain = 1;                 /* non-empty → empty (re-checked at leave) */
+    if (gso_last && s->on_gso_done)                       /* the GSO group's last segment retired */
+        s->on_gso_done(s->gso_done_ctx, gso_owner);       /* clears the batch's gso_busy (non-destructive) */
 }
 
 /* The recoverable per-datagram send-error policy (§4.4): the head hard-errored but is a batch-enqueued
@@ -139,11 +152,44 @@ static void send_drop_head(KlDgramSend *s, int was_inflight) {
     if (s->on_drop) s->on_drop(s->drop_ctx);
 }
 
-/* Submit the queued slot at FIFO position `off` from the head. */
+/* Submit the queued slot at FIFO position `off` from the head. A GSO segment sends from the batch group
+ * buffer (`gso_ext`), an ordinary datagram from the copied pool payload (`data`). */
 static KlDgramSubmitResult send_submit_slot(KlDgramSend *s, size_t off) {
     KlDgramSlot *slot = s->ring[(s->head + off) % s->ring_cap];
-    return s->submit(s->submit_ctx, slot->data, slot->len,
+    const void *data = slot->gso_ext ? slot->gso_ext : slot->data;
+    return s->submit(s->submit_ctx, data, slot->len,
                      addr_or_null(&slot->peer), addr_or_null(&slot->local), slot->tos);
+}
+
+/* Retire the whole contiguous GSO group at the head (head .. gso_last), applying `fn` to each slot
+ * (send_retire_head for a clean retire, send_drop_head for a recoverable whole-group drop). */
+static void send_retire_gso_group(KlDgramSend *s, void (*fn)(KlDgramSend *, int)) {
+    for (;;) {
+        int last = s->ring[s->head]->gso_last;
+        fn(s, 0);
+        if (last || s->count == 0) break;
+    }
+}
+
+/* If the FIFO head is a GSO group in GSO mode, submit the WHOLE group in one send_gso (readiness) and
+ * handle the outcome. Returns 1 if handled (caller continues its drain), 0 if the head is not a
+ * GSO-mode group. On WOULD_BLOCK sets *retain = 1 (the caller stops draining and re-arms). */
+static int send_gso_head(KlDgramSend *s, int *retain) {
+    KlDgramSlot *head = s->ring[s->head];
+    if (!head->gso_head || head->gso_mode != 0 || !s->submit_gso)
+        return 0;
+    KlDgramSubmitResult r = s->submit_gso(s->submit_gso_ctx, head->gso_owner, head->gso_ext,
+                                          head->gso_total, head->gso_seg, addr_or_null(&head->peer), head->tos);
+    if (r == KL_DGRAM_SUBMIT_DONE) {
+        send_retire_gso_group(s, send_retire_head);          /* whole group sent → retire atomically */
+    } else if (r == KL_DGRAM_SUBMIT_WOULDBLOCK) {
+        *retain = 1;                                          /* retain the whole group; re-arm WRITE */
+    } else if (r == KL_DGRAM_SUBMIT_UNSUPPORTED) {
+        head->gso_mode = 1;                                   /* latch/fallback: segments drain per-send */
+    } else {                                                  /* hard error → recoverable whole-group drop */
+        send_retire_gso_group(s, send_drop_head);
+    }
+    return 1;
 }
 
 /* Single-flight pump: while nothing is in flight and a queued datagram exists, submit the head.
@@ -152,6 +198,11 @@ static KlDgramSubmitResult send_submit_slot(KlDgramSend *s, size_t off) {
 static int send_pump(KlDgramSend *s) {
     if (s->err) return -1;
     while (s->inflight_n == 0 && s->count > 0) {
+        int retain = 0;
+        if (send_gso_head(s, &retain)) {   /* GSO-mode group head → one whole send_gso (readiness) */
+            if (retain) return 0;          /* WOULD_BLOCK — keep the group queued */
+            continue;                      /* retired / dropped / switched-to-fallback → next head */
+        }
         s->inflight_n     = 1;    /* arm before submit (inline-completion window) */
         s->in_submit      = 1;
         s->submit_retired = 0;
@@ -293,6 +344,56 @@ KlDatagramSendStatus kl_dgram_send_enqueue(KlDgramSend *s, const KlDatagramMessa
     return send_admit(s, m, 1);   /* batch datagram → recoverable (drop) on hard error */
 }
 
+/* M5.2b — atomically admit a GSO group of `nseg` contiguous segment slots (all referencing `buf`). No
+ * fast path, no submit, no callbacks. */
+KlDatagramSendStatus kl_dgram_send_enqueue_gso(KlDgramSend *s, const void *buf, size_t total,
+                                               size_t seg, size_t nseg, const KlSockAddr *peer, int tos,
+                                               int mode, void *owner) {
+    if (!s || !s->submit || nseg == 0 || seg == 0)
+        return KL_DATAGRAM_ERROR;
+    if (s->err)     return KL_DATAGRAM_ERROR;
+    if (s->closing) return KL_DATAGRAM_CLOSED;
+    /* Requested-but-unsupported features fail (matching send_validate §9). A GSO group carries no
+     * per-packet source-pin / TOS (the public API has none), so only connected-mode applies: a
+     * NULL/UNSPEC peer requests connected send, which must be granted. Nothing taken. */
+    if (!addr_or_null(peer) && !(s->caps & KL_DGRAM_CAP_CONNECTED))
+        return KL_DATAGRAM_UNSUPPORTED;
+    /* Permanent: more segments than the whole slot pool, or over the whole byte budget. */
+    if (nseg > s->ring_cap)                            return KL_DATAGRAM_TOO_LARGE;
+    if (s->byte_budget && total > s->byte_budget)      return KL_DATAGRAM_TOO_LARGE;
+    /* Transient (all-or-nothing): not enough free slots now, or the byte gate. */
+    if (kl_dgram_slots_free_count(s->slots) < nseg) { s->full = 1; return KL_DATAGRAM_WOULD_BLOCK; }
+    if (s->byte_budget && total > s->byte_budget - s->bytes_used) {   /* overflow-safe */
+        s->full = 1;
+        return KL_DATAGRAM_WOULD_BLOCK;
+    }
+    /* Acquire + enqueue nseg segment slots; each references `buf` at its offset (nothing copied). */
+    for (size_t i = 0; i < nseg; i++) {
+        KlDgramSlot *slot = kl_dgram_slots_acquire(s->slots);   /* guaranteed: free_n >= nseg checked */
+        size_t off  = i * seg;
+        size_t slen = (total > off) ? (total - off) : 0;
+        if (slen > seg) slen = seg;
+        /* `buf + off` is UB when buf == NULL (a zero-length group: total 0, nseg 1, off 0). Reference buf
+         * directly for offset 0 to avoid NULL pointer arithmetic; a real payload always has off < total. */
+        slot->gso_ext     = (off == 0) ? buf : (const void *)((const unsigned char *)buf + off);
+        slot->len         = slen;
+        slot->tos         = tos;
+        slot->recoverable = 1;                                  /* a GSO group is a batch → recoverable */
+        slot->gso_owner   = owner;
+        if (peer && kl_sockaddr_family(peer) != KL_AF_UNSPEC) slot->peer = *peer;
+        else memset(&slot->peer, 0, sizeof(slot->peer));
+        if (i == 0)        { slot->gso_head = 1; slot->gso_mode = mode ? 1 : 0;
+                             slot->gso_total = total; slot->gso_seg = seg; }
+        if (i == nseg - 1)   slot->gso_last = 1;
+        s->ring[(s->head + s->count) % s->ring_cap] = slot;
+        s->count++;
+        s->bytes_used += slen;
+    }
+    if (kl_dgram_slots_free_count(s->slots) == 0)
+        s->full = 1;
+    return KL_DATAGRAM_ACCEPTED;
+}
+
 int kl_dgram_send_flush_batch(KlDgramSend *s, KlDgramTxDesc *descs, int descs_cap,
                               KlDgramSubmitBatchFn submit_batch, void *submit_ctx) {
     if (!s || !descs || descs_cap <= 0 || !submit_batch)
@@ -305,15 +406,30 @@ int kl_dgram_send_flush_batch(KlDgramSend *s, KlDgramTxDesc *descs, int descs_ca
     send_enter(s);
     dispatch_enter(s);
     while (!s->err && s->count > 0) {
+        /* A GSO-mode group head is diverted out of the sendmmsg batch — submit the whole group in one
+         * send_gso (§4.3). */
+        int retain = 0;
+        if (send_gso_head(s, &retain)) {
+            if (retain) break;   /* WOULD_BLOCK on the group — retain, re-arm */
+            continue;
+        }
         /* Reserve the head-run: up to min(descs_cap, count) contiguous queued slots, staged in FIFO
-         * order into the caller's scratch. Readiness send is synchronous, so nothing is in flight and
-         * count == queued. */
+         * order into the caller's scratch, STOPPING before a GSO-mode group head (it is submitted on
+         * its own next round). A GSO segment stages from its group buffer (`gso_ext`). Readiness send is
+         * synchronous, so nothing is in flight and count == queued. */
         size_t k = s->count;
         if (k > (size_t)descs_cap) k = (size_t)descs_cap;
-        for (size_t i = 0; i < k; i++) {
-            const KlDgramSlot *slot = s->ring[(s->head + i) % s->ring_cap];
-            descs[i].data = slot->data; descs[i].len = slot->len;
-            descs[i].dest = slot->peer; descs[i].src = slot->local; descs[i].tos = slot->tos;
+        {
+            size_t staged = 0;
+            for (size_t i = 0; i < k; i++) {
+                const KlDgramSlot *slot = s->ring[(s->head + i) % s->ring_cap];
+                if (i > 0 && slot->gso_head && slot->gso_mode == 0) break;   /* next GSO group — stop here */
+                descs[i].data = slot->gso_ext ? slot->gso_ext : slot->data;
+                descs[i].len = slot->len;
+                descs[i].dest = slot->peer; descs[i].src = slot->local; descs[i].tos = slot->tos;
+                staged++;
+            }
+            k = staged;
         }
         int sent = 0;
         KlDgramBatchResult br = submit_batch(submit_ctx, descs, (int)k, &sent);
@@ -398,6 +514,14 @@ int kl_dgram_send_free(KlDgramSend *s) {
 void kl_dgram_send_abandon(KlDgramSend *s) {
     if (!s)
         return;
+    /* M5.2b: any GSO group in flight references a caller batch buffer — clear its gso_busy (on owner
+     * destruction the ring is freed, so nothing reads the buffer anymore) before dropping the ring. */
+    if (s->on_gso_done && s->ring) {
+        for (size_t i = 0; i < s->count; i++) {
+            KlDgramSlot *slot = s->ring[(s->head + i) % s->ring_cap];
+            if (slot && slot->gso_last) s->on_gso_done(s->gso_done_ctx, slot->gso_owner);
+        }
+    }
     /* Free ONLY the FIFO ring (the object-owned storage that leaks otherwise), regardless of inflight_n.
      * No inflight_n guard: the caller has marked the life token dead (no late send completion re-enters
      * this machine) and, per §2.5.1, the backend copied every submitted payload (no slot is referenced).

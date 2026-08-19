@@ -75,6 +75,31 @@ int kl_datagram_batch_free(KlDatagramBatch *b);
 int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDesc *descs, int n,
                            KlDatagramSendStatus *stop);
 
+/**
+ * @brief Send one UDP GSO datagram (M5.2b): @p total_len bytes segmented into @p segment_size chunks,
+ *  transmitted in one send_gso syscall where the provider supports it, else the same segments sent
+ *  individually (a transparent per-segment fallback).
+ *
+ * @p b must be a SEND/BOTH batch owned by @p dg; its storage is the copy-once group buffer (capacity
+ * `n_slots * slot_bufsz`). The payload is copied into it once and referenced until the group retires, so
+ * @p b is busy (kl_datagram_batch_free returns -1) meanwhile — keep @p b AND @p dg alive until then.
+ *
+ * The group is a FIFO citizen occupying `ceil(total_len/segment_size)` (>= 1) slots at the tail, sent
+ * only when its first segment reaches the head. Atomic admission against BOTH the slot count and the
+ * byte budget.
+ *
+ * @return KlDatagramSendStatus: ACCEPTED (admitted; drains on this call / later edges); WOULD_BLOCK
+ *  (not enough free slots now, the byte gate, or @p b already has an outstanding group); TOO_LARGE
+ *  (`segment_size > send_slot_cap`, or `total_len` exceeds the group buffer / byte budget); ERROR
+ *  (segment_size 0, NULL buf for nonzero length, overflow, or a wrong-owner/direction batch).
+ */
+KlDatagramSendStatus kl_datagram_send_gso(KlDatagram *dg, KlDatagramBatch *b, const void *buf,
+                                          size_t total_len, uint16_t segment_size, const KlSockAddr *peer);
+
+/** @brief 1 while UDP GSO's one-syscall fast path is still available on @p dg; 0 once it has latched to
+ *  the per-segment fallback (a provider EOPNOTSUPP on first use). Advisory. */
+int kl_datagram_gso_active(const KlDatagram *dg);
+
 #ifdef __cplusplus
 }
 #endif

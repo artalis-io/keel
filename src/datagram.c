@@ -54,6 +54,9 @@ static inline size_t dg_send_inflight(const KlDatagram *dg) { return kl_dgram_se
 
 static void dg_on_ready(KlSocketHandle fd, KlEventMask ready, void *user_data);
 static void dg_on_send_drop(void *ctx);   /* M5.2a: recoverable batch-drop reporter (wired at init) */
+static KlDgramSubmitResult dg_submit_gso(void *ctx, void *owner, const void *buf, size_t total,
+                                         size_t seg, const KlSockAddr *peer, int tos);  /* M5.2b */
+static void dg_on_gso_done(void *ctx, void *owner);   /* M5.2b: clears the batch's gso_busy */
 
 /* ── readiness interest reconciliation ────────────────────────────────────────────────────────── */
 /* Apply `want_mask` (READ from the recv machine's arm/disarm; WRITE while the send queue is non-empty)
@@ -339,6 +342,7 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
     }
     dg->core = core;   /* fd ownership has transferred to the core */
     kl_dgram_core_on_drop(core, dg_on_send_drop, dg);   /* M5.2a: surface recoverable batch drops */
+    kl_dgram_core_set_gso_cbs(core, dg_submit_gso, dg, dg_on_gso_done, dg);   /* M5.2b: GSO submit + done */
     return 0;
 }
 
@@ -440,6 +444,77 @@ int kl_datagram_send_batch(KlDatagram *dg, KlDatagramBatch *b, const KlDgramTxDe
 
     kl_dgram_core_dispatch_end(core);   /* LAST access to dg/core — may run the deferred teardown/free */
     return accepted;                    /* a local — safe even if dg/core were just freed */
+}
+
+/* ── M5.2b GSO ────────────────────────────────────────────────────────────────────────────────── */
+
+/* KlDgramSubmitGsoFn: one whole-buffer provider send_gso (readiness). GSO carries no per-packet TOS
+ * (the public API has none) — the socket default applies; `owner`/`tos` are unused here. */
+static KlDgramSubmitResult dg_submit_gso(void *ctx, void *owner, const void *buf, size_t total,
+                                         size_t seg, const KlSockAddr *peer, int tos) {
+    (void)owner; (void)tos;
+    KlDatagram *dg = ctx;
+    const KlDatagramOps *ops = (dg->sockets && dg->sockets->dgram) ? dg->sockets->dgram : kl_sockdef_dgram();
+    void *pc = dg->sockets ? dg->sockets->context : NULL;
+    if (!ops->send_gso) return KL_DGRAM_SUBMIT_UNSUPPORTED;
+    kl_ssize_t r = ops->send_gso(pc, dg->fd, buf, total, (uint16_t)seg, dg_addr_or_null(peer));
+    if (r >= 0) return KL_DGRAM_SUBMIT_DONE;
+    KlIoStatus st = kl_sock_io_status(dg->sockets);
+    if (st == KL_IO_WOULD_BLOCK)  return KL_DGRAM_SUBMIT_WOULDBLOCK;
+    if (st == KL_IO_UNSUPPORTED) { dg->core->gso_unsupported = 1; return KL_DGRAM_SUBMIT_UNSUPPORTED; }
+    return KL_DGRAM_SUBMIT_ERROR;
+}
+
+/* A GSO group's last segment retired → the batch group buffer is free (clears gso_busy). */
+static void dg_on_gso_done(void *ctx, void *owner) {
+    (void)ctx;
+    if (owner) ((KlDatagramBatch *)owner)->gso_busy = 0;
+}
+
+KlDatagramSendStatus kl_datagram_send_gso(KlDatagram *dg, KlDatagramBatch *b, const void *buf,
+                                          size_t total_len, uint16_t segment_size, const KlSockAddr *peer) {
+    if (!dg || !dg->core || !b) return KL_DATAGRAM_ERROR;
+    if (b->owner != dg || !(b->dir & KL_DGRAM_BATCH_SEND)) return KL_DATAGRAM_ERROR;
+    if (segment_size == 0) return KL_DATAGRAM_ERROR;
+    if (total_len > 0 && !buf) return KL_DATAGRAM_ERROR;
+    if (total_len > SIZE_MAX - (size_t)(segment_size - 1)) return KL_DATAGRAM_ERROR;   /* nseg overflow */
+    size_t nseg = (total_len + segment_size - 1) / segment_size;
+    if (nseg == 0) nseg = 1;   /* 0-length → one empty datagram */
+
+    KlDgramCore *core = dg->core;
+    if ((size_t)segment_size > core->out.out_cap) return KL_DATAGRAM_TOO_LARGE;   /* seg ≤ send_slot_cap */
+    if (total_len > b->gso_bytes)                  return KL_DATAGRAM_TOO_LARGE;   /* group buffer capacity */
+    if (b->gso_busy)                               return KL_DATAGRAM_WOULD_BLOCK;/* one group per batch */
+
+    if (total_len) memcpy(b->gso_buf, buf, total_len);   /* copy once into the group buffer */
+    /* GSO one-syscall only on a readiness datagram with a working, un-latched provider send_gso; else the
+     * group is FALLBACK (its segments drain as ordinary sends). */
+    int fallback = dg->completion || core->gso_unsupported || !(dg->provider_caps & KL_DGRAM_CAP_GSO);
+
+    kl_dgram_core_dispatch_begin(core);   /* bracket the drain (may run a deferred teardown, P1-1) */
+    KlDatagramSendStatus st = kl_dgram_send_enqueue_gso(&core->send, b->gso_buf, total_len, segment_size,
+                                                        nseg, dg_addr_or_null(peer), -1, fallback, b);
+    if (st == KL_DATAGRAM_ACCEPTED) {
+        b->gso_busy = 1;   /* the group references b->gso_buf until it retires (on_gso_done clears it) */
+        if (dg->completion) {
+            (void)kl_dgram_send_flush(&core->send);
+        } else {
+            struct dg_batch_submit_ctx sctx = { dg, b };
+            (void)kl_dgram_send_flush_batch(&core->send, b->tx_descs, b->n_slots, dg_batch_submit, &sctx);
+        }
+        dg_reconcile_write(dg);
+    }
+    kl_dgram_core_dispatch_end(core);   /* LAST access to dg/core */
+    return st;
+}
+
+int kl_datagram_gso_active(const KlDatagram *dg) {
+    if (!dg || !dg->core) return 0;
+    if (dg->completion)                              return 0;   /* one-syscall GSO is readiness-only */
+    if (dg->core->gso_unsupported)                   return 0;   /* latched to per-segment fallback */
+    if (!(dg->provider_caps & KL_DGRAM_CAP_GSO))     return 0;   /* provider has no GSO */
+    const KlDatagramOps *ops = (dg->sockets && dg->sockets->dgram) ? dg->sockets->dgram : kl_sockdef_dgram();
+    return ops->send_gso != NULL;                                /* a real one-syscall op exists */
 }
 
 int kl_datagram_recv_start(KlDatagram *dg, KlDatagramRecvFn on_recv, void *ud) {

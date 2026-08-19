@@ -183,6 +183,8 @@ void kl_dgram_core_dispatch_end(KlDgramCore *core);
 void kl_dgram_core_on_writable(KlDgramCore *core, KlDgramWritableFn cb, void *ctx);
 void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx);
 void kl_dgram_core_on_drop(KlDgramCore *core, KlDgramDropFn cb, void *ctx);   /* M5.2a recoverable drop */
+void kl_dgram_core_set_gso_cbs(KlDgramCore *core, KlDgramSubmitGsoFn submit_gso, void *submit_ctx,
+                               KlDgramGsoDoneFn on_gso_done, void *done_ctx);   /* M5.2b GSO */
 
 /* The inbound slot (recv storage) — a submit/pull adapter writes the received datagram here. */
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core);

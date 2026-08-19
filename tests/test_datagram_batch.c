@@ -3,8 +3,10 @@
  * accepted_rx_caps masking, completion-creation rules E2, overflow-safe allocation + allocation-failure
  * unwind, KL_IO_UNSUPPORTED mapping) + M5.2a send batch (kl_datagram_send_batch: all-delivered,
  * partial accept, TOO_LARGE + owner/direction validation, the recoverable per-datagram drop, and
- * backpressure draining via the writable edge). Whitebox (reads the internal batch + core layout).
- * The GSO queued group + recv batching land in M5.2b / M5.3.
+ * backpressure draining via the writable edge) + M5.2b GSO (kl_datagram_send_gso: the queued FIFO
+ * group — delivery via one send_gso or the per-segment fallback, validation/bounds, gso_busy lifetime
+ * + one-group-per-batch, and close/discard clearing gso_busy). Whitebox (internal batch + core layout).
+ * Recv batching lands in M5.3.
  */
 #include "../vendor/utest.h"
 
@@ -545,6 +547,7 @@ static const KlSocketProvider *gating_provider(void) {
     g_real_send = g_gate_dg.send;
     g_gate_dg.send = gate_send;
     g_gate_dg.send_batch = NULL; g_gate_dg.tx_batch_new = NULL; g_gate_dg.tx_batch_free = NULL;
+    g_gate_dg.send_gso = NULL;   /* force GSO → UNSUPPORTED → per-segment fallback through gate_send */
     g_gate_sp.dgram = &g_gate_dg;
     return &g_gate_sp;
 }
@@ -680,6 +683,234 @@ UTEST(dgram_batch, send_batch_teardown_from_drain_no_uaf) {
     ASSERT_EQ(1, g_torn);                          /* reclaimed at dispatch_end (deferred, once) */
 
     ASSERT_EQ(0, kl_datagram_batch_free(b));        /* the SEND batch is caller-owned (tx already reclaimed) */
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── M5.2b GSO ──────────────────────────────────────────────────────────────────────────────────── */
+
+/* send_gso delivers the whole payload: one send_gso syscall where supported, else the same segments
+ * per-send. Robust across both (assert total bytes; the segment count where the platform falls back). */
+UTEST(dgram_batch, gso_delivers) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    const KlSocketProvider *sp = ctx.sockets;
+    int rxfd, port = mk_rx(&rxfd);
+    ASSERT_NE(0, port);
+    KlSocketHandle txfd = prep_fd(sp);
+    ASSERT_TRUE(kl_handle_valid(txfd));
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = txfd,
+                             .send_slots = 8, .send_slot_cap = 2048, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&tx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&tx, KL_DGRAM_BATCH_SEND, 8, 2048);
+    ASSERT_TRUE(b != NULL);
+    int gso_cap = (kl_datagram_provider_caps(&tx) & KL_DGRAM_CAP_GSO) != 0;
+
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", (uint16_t)port);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED,
+              (int)kl_datagram_send_gso(&tx, b, "112233", 6, 2, &dest));   /* 3 segments of 2 bytes */
+
+    size_t total = 0; int got = 0;
+    for (int i = 0; i < 80 && total < 6; i++) { kl_event_ctx_run(&ctx, 8, 10); size_t t; got += raw_drain(rxfd, &t); total += t; }
+    ASSERT_EQ((size_t)6, total);                  /* the whole payload egressed */
+    if (!gso_cap) ASSERT_EQ(3, got);              /* per-segment fallback → exactly nseg datagrams */
+
+    /* the group retired → gso_busy cleared → the batch is freeable */
+    for (int i = 0; i < 20 && b->gso_busy; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(0, b->gso_busy);
+    ASSERT_EQ(0, kl_datagram_batch_free(b));
+    close(rxfd);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* Validation + bounds: bad args → ERROR; over-cap → TOO_LARGE. */
+UTEST(dgram_batch, gso_validation_and_bounds) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    const KlSocketProvider *sp = ctx.sockets;
+    KlSocketHandle txfd = prep_fd(sp);
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = txfd,
+                             .send_slots = 4, .send_slot_cap = 100, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&tx, &cfg, 0));
+    KlDatagramBatch *bs = kl_datagram_batch_create(&tx, KL_DGRAM_BATCH_SEND, 4, 100);   /* group buf = 400 */
+    ASSERT_TRUE(bs != NULL);
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", 9999);
+
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send_gso(&tx, bs, "x", 1, 0, &dest));   /* seg 0 */
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send_gso(&tx, bs, NULL, 4, 2, &dest));  /* NULL buf */
+    ASSERT_EQ((int)KL_DATAGRAM_TOO_LARGE, (int)kl_datagram_send_gso(&tx, bs, "buf", 3, 200, &dest)); /* seg>cap */
+    { char big[500] = {0};
+      ASSERT_EQ((int)KL_DATAGRAM_TOO_LARGE, (int)kl_datagram_send_gso(&tx, bs, big, 500, 50, &dest)); } /* >buf */
+
+    /* wrong owner / non-SEND direction → ERROR (whitebox flips, backend-agnostic) */
+    void *save = bs->owner; bs->owner = NULL;
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send_gso(&tx, bs, "ab", 2, 2, &dest));
+    bs->owner = save;
+    KlDgramBatchDir sd = bs->dir; bs->dir = KL_DGRAM_BATCH_RECV;
+    ASSERT_EQ((int)KL_DATAGRAM_ERROR, (int)kl_datagram_send_gso(&tx, bs, "ab", 2, 2, &dest));
+    bs->dir = sd;
+
+    ASSERT_EQ(0, kl_datagram_batch_free(bs));
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* One group per batch + gso_busy lifetime: a retained group makes a 2nd send_gso WOULD_BLOCK and
+ * batch_free -1; draining clears gso_busy and the batch frees. Readiness-only (gating provider). */
+UTEST(dgram_batch, gso_busy_backpressure_and_free) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = gating_provider();
+    int rxfd, port = mk_rx(&rxfd);
+    ASSERT_NE(0, port);
+    KlSocketHandle txfd = prep_fd(sp);
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = txfd,
+                             .send_slots = 8, .send_slot_cap = 2048, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&tx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&tx, KL_DGRAM_BATCH_SEND, 8, 2048);
+    ASSERT_TRUE(b != NULL);
+
+    g_block = 100;   /* every send WOULD_BLOCKs → the group is retained (gso fallback via gate_send) */
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", (uint16_t)port);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send_gso(&tx, b, "112233", 6, 2, &dest));
+    ASSERT_EQ(1, b->gso_busy);                                          /* group queued (buffer in use) */
+    ASSERT_EQ((int)KL_DATAGRAM_WOULD_BLOCK, (int)kl_datagram_send_gso(&tx, b, "DD", 2, 2, &dest)); /* 2nd */
+    ASSERT_EQ(-1, kl_datagram_batch_free(b));                          /* refused while gso_busy */
+
+    g_block = 0;                                                       /* unblock → the group drains */
+    int got = 0;
+    for (int i = 0; i < 80 && got < 3; i++) { kl_event_ctx_run(&ctx, 8, 10); size_t t; got += raw_drain(rxfd, &t); }
+    ASSERT_EQ(3, got);                                                 /* the 3 fallback segments delivered */
+    ASSERT_EQ(0, b->gso_busy);                                         /* group retired → buffer free */
+    ASSERT_EQ(0, kl_datagram_batch_free(b));                          /* now freeable */
+    close(rxfd);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* close/discard releases a queued group and clears gso_busy (so the caller-owned batch frees). */
+UTEST(dgram_batch, gso_close_clears_busy) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = gating_provider();
+    KlSocketHandle txfd = prep_fd(sp);
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = txfd,
+                             .send_slots = 8, .send_slot_cap = 2048, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&tx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&tx, KL_DGRAM_BATCH_SEND, 8, 2048);
+    ASSERT_TRUE(b != NULL);
+
+    g_block = 100;
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", 9999);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send_gso(&tx, b, "112233", 6, 2, &dest));
+    ASSERT_EQ(1, b->gso_busy);
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx));    /* abortive close → discard the queued group */
+    pump_close(&ctx, &tx);
+    ASSERT_EQ(0, b->gso_busy);                       /* discard cleared gso_busy */
+    ASSERT_EQ(0, kl_datagram_batch_free(b));         /* the caller-owned batch is now freeable */
+    ASSERT_EQ(0, kl_datagram_free(&tx));
+    g_block = 0;
+    kl_event_ctx_free(&ctx);
+}
+
+/* Zero-length GSO: total_len 0 (buf may be NULL) → one empty datagram, delivered; no NULL+0 UB. */
+UTEST(dgram_batch, gso_zero_length) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    const KlSocketProvider *sp = ctx.sockets;
+    int rxfd, port = mk_rx(&rxfd);
+    ASSERT_NE(0, port);
+    KlSocketHandle txfd = prep_fd(sp);
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = txfd,
+                             .send_slots = 4, .send_slot_cap = 64, .recv_cap = 64 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&tx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&tx, KL_DGRAM_BATCH_SEND, 4, 64);
+    ASSERT_TRUE(b != NULL);
+
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", (uint16_t)port);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send_gso(&tx, b, NULL, 0, 1, &dest));  /* empty, NULL buf */
+
+    int got = 0; size_t total = 99;
+    for (int i = 0; i < 60 && got < 1; i++) { kl_event_ctx_run(&ctx, 8, 10); got += raw_drain(rxfd, &total); }
+    ASSERT_EQ(1, got);                            /* one empty datagram delivered */
+    ASSERT_EQ((size_t)0, total);                  /* zero bytes */
+    for (int i = 0; i < 20 && b->gso_busy; i++) kl_event_ctx_run(&ctx, 8, 10);
+    ASSERT_EQ(0, b->gso_busy);
+
+    ASSERT_EQ(0, kl_datagram_batch_free(b));
+    close(rxfd);
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* gso_active honestly reports the one-syscall fast path: false on a provider without CAP_GSO/send_gso
+ * (whitebox-forced) and after the latch; true only on readiness + CAP_GSO + a real op + unset latch. */
+UTEST(dgram_batch, gso_active_contract) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    const KlSocketProvider *sp = ctx.sockets;
+    KlSocketHandle txfd = prep_fd(sp);
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = txfd,
+                             .send_slots = 4, .send_slot_cap = 64, .recv_cap = 64 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&tx, &cfg, 0));
+
+    int expect = !tx.completion && (kl_datagram_provider_caps(&tx) & KL_DGRAM_CAP_GSO) &&
+                 ((sp && sp->dgram ? sp->dgram : kl_sockdef_dgram())->send_gso != NULL);
+    ASSERT_EQ(expect, kl_datagram_gso_active(&tx));   /* honest per backend/provider */
+    /* the latch forces it false regardless */
+    tx.core->gso_unsupported = 1;
+    ASSERT_EQ(0, kl_datagram_gso_active(&tx));
+    tx.core->gso_unsupported = 0;
+    /* a completion datagram never advertises the one-syscall path */
+    int save = tx.completion; tx.completion = 1;
+    ASSERT_EQ(0, kl_datagram_gso_active(&tx));
+    tx.completion = save;
+
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx)); pump_close(&ctx, &tx); ASSERT_EQ(0, kl_datagram_free(&tx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* Completion close/cancel with an in-flight fallback GSO segment: on a completion datagram GSO is
+ * FALLBACK (per-segment single-flight). Cancel while a segment is in flight → the coordinator drains it
+ * → gso_busy clears only when the group is fully retired (never mid-flight) → clean DETACHED close. */
+UTEST(dgram_batch, gso_completion_close_with_inflight_segment) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (!(kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION)) { kl_event_ctx_free(&ctx); return; }  /* completion only */
+    const KlSocketProvider *sp = ctx.sockets;
+    int rxfd, port = mk_rx(&rxfd);
+    ASSERT_NE(0, port);
+    KlSocketHandle txfd = prep_fd(sp);
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = txfd,
+                             .send_slots = 8, .send_slot_cap = 2048, .recv_cap = 2048 };
+    ASSERT_EQ(0, kl_datagram_init_ex(&tx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&tx, KL_DGRAM_BATCH_SEND, 8, 2048);
+    ASSERT_TRUE(b != NULL);
+
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", (uint16_t)port);
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send_gso(&tx, b, "AABBCC", 6, 2, &dest));
+    ASSERT_EQ(1, b->gso_busy);   /* a fallback segment is now in flight / queued on the completion loop */
+
+    /* Abortive close while the group is in flight: discard queued segments + cancel the in-flight one;
+     * gso_busy clears as the group retires (the terminal completion / discard), never mid-flight. */
+    ASSERT_EQ(0, kl_datagram_close_cancel(&tx));
+    pump_close(&ctx, &tx);
+    ASSERT_EQ((int)KL_DGRAM_CLOSE_CLOSED, (int)kl_datagram_close_state(&tx));
+    ASSERT_EQ(0, b->gso_busy);   /* cleared exactly once, at safe retirement */
+
+    ASSERT_EQ(0, kl_datagram_batch_free(b));   /* caller-owned; safe now that gso_busy is clear */
+    close(rxfd);
+    ASSERT_EQ(0, kl_datagram_free(&tx));
     kl_event_ctx_free(&ctx);
 }
 

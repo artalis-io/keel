@@ -49,6 +49,18 @@ typedef struct {
     int            recoverable;/* M5.2a: outbound provenance — 1 = enqueued via a batch, so a hard send
                                * error DROPS this datagram (recoverable policy) instead of poisoning the
                                * queue with the sticky error. 0 = an ordinary single send (sticky). */
+    /* M5.2b — GSO queued-group fields (outbound). A GSO request occupies `nseg` contiguous segment
+     * slots; each references the caller-preallocated batch group buffer via `gso_ext` (NOT the pool
+     * `data` — the payload is copied once into the group buffer, referenced until the group retires).
+     * The FIRST segment carries the group record (`gso_head` + `gso_total`/`gso_seg`/`gso_mode`); the
+     * LAST carries `gso_last` so its retirement clears the batch's gso_busy (on_gso_done). */
+    const void    *gso_ext;   /* external segment payload (into the batch group buffer), or NULL */
+    int            gso_head;   /* 1 = first segment: the whole-group send_gso submit point */
+    int            gso_last;   /* 1 = last segment: its retire fires on_gso_done (clears gso_busy) */
+    int            gso_mode;   /* head only: 0 = GSO (whole-buffer send_gso), 1 = FALLBACK (per-segment) */
+    size_t         gso_total;  /* head only: whole GSO payload length (for the one-syscall send_gso) */
+    size_t         gso_seg;    /* head only: segment size */
+    void          *gso_owner;  /* head + last: the owning KlDatagramBatch (opaque; on_gso_done arg) */
     int            in_use;    /* 1 while acquired (outbound); guards double-release */
     unsigned char *data;      /* payload region inside the pool block (never separately freed) */
 } KlDgramSlot;
