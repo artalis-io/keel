@@ -118,7 +118,7 @@ static size_t g_resp_size;            /* bytes the size handler should emit */
  * COPY that survives the async send) — this DOES allocate on the response allocator (bounded by
  * the response size), which is separate from the SEND path. The bounded-memory / no-send-alloc
  * proofs use the FILE route (B6) where the response carries no in-memory body at all. */
-static void handle_size(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_size(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     size_t n = g_resp_size;
     kl_http_response_status(res, 200);
@@ -152,7 +152,7 @@ static int make_pattern_file(off_t n) {
     return fd;
 }
 
-static void handle_file(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     int fd = open(g_file_path, O_RDONLY);
     if (fd < 0) { kl_http_response_error(res, 500, "open"); return; }

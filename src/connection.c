@@ -561,7 +561,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
     /* HTTP/2 cleartext upgrade (Upgrade: h2c) */
     if (c->h2_config != NULL) {
         size_t ug_len;
-        const char *ug = kl_request_header_len(
+        const char *ug = kl_http_request_header_len(
             &c->req, "Upgrade", &ug_len);
         const KlH2ServerHooks *h2h = kl_h2_server_hooks();
         if (ug && ug_len == 3 &&
@@ -590,7 +590,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
 
         /* Send 100 Continue if client expects it */
         size_t expect_len;
-        const char *expect = kl_request_header_len(
+        const char *expect = kl_http_request_header_len(
             &c->req, "Expect", &expect_len);
         if (expect && expect_len == 12 &&
             kl_ascii_strncasecmp(expect, "100-continue", 12) == 0) {

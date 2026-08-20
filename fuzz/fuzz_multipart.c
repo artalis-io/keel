@@ -10,7 +10,7 @@
 #include <keel/allocator.h>
 #include <keel/body_reader.h>
 #include <keel/body_reader_multipart.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -18,7 +18,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     KlAllocator alloc = kl_allocator_default();
 
     /* Set up a fake request with multipart content-type */
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     req.method = "POST";
     req.method_len = 4;

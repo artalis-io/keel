@@ -75,46 +75,46 @@ static ssize_t read_response(int fd, char *buf, size_t buflen) {
 
 /* ── Handlers ─────────────────────────────────────────────────────── */
 
-static void handle_headers(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_headers(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
     /* Case-insensitive header lookup */
-    test_state.found_host = kl_request_header_len(req, "Host",
+    test_state.found_host = kl_http_request_header_len(req, "Host",
                                                    &test_state.found_host_len);
 
     /* Missing header */
-    test_state.found_missing = kl_request_header(req, "X-Nonexistent");
+    test_state.found_missing = kl_http_request_header(req, "X-Nonexistent");
 
     /* Empty-value header */
-    test_state.found_empty = kl_request_header_len(req, "X-Empty",
+    test_state.found_empty = kl_http_request_header_len(req, "X-Empty",
                                                     &test_state.found_empty_len);
 
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_params(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_params(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
-    test_state.found_uid = kl_request_param(req, "uid", &test_state.found_uid_len);
-    test_state.found_pid = kl_request_param(req, "pid", &test_state.found_pid_len);
-    test_state.found_missing_param = kl_request_param(req, "nope",
+    test_state.found_uid = kl_http_request_param(req, "uid", &test_state.found_uid_len);
+    test_state.found_pid = kl_http_request_param(req, "pid", &test_state.found_pid_len);
+    test_state.found_missing_param = kl_http_request_param(req, "nope",
                                                        &test_state.found_missing_param_len);
 
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_single_param(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_single_param(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
-    test_state.found_id = kl_request_param(req, "id", &test_state.found_id_len);
+    test_state.found_id = kl_http_request_param(req, "id", &test_state.found_id_len);
 
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_query(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_query(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
@@ -125,14 +125,14 @@ static void handle_query(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_nulterm(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_nulterm(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
     test_state.nt_method = req->method;
     test_state.nt_path = req->path;
     test_state.nt_query = req->query;
-    test_state.nt_host = kl_request_header(req, "Host");
+    test_state.nt_host = kl_http_request_header(req, "Host");
 
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }

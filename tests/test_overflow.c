@@ -180,7 +180,7 @@ UTEST(overflow, multipart_max_parts_exceeded) {
      * iterator and assert the third part trips KL_MP_ERR_TOO_MANY_PARTS. */
     KlAllocator alloc = kl_allocator_default();
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     req.method = "POST";
     req.method_len = 4;
@@ -228,7 +228,7 @@ UTEST(overflow, multipart_max_part_size_exceeded) {
      * kl_multipart_next. on_data is parse-free in the streaming model. */
     KlAllocator alloc = kl_allocator_default();
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     req.method = "POST";
     req.method_len = 4;
@@ -269,7 +269,7 @@ UTEST(overflow, multipart_max_total_size_exceeded) {
     /* body_reader_multipart.c:66-67 — max_total_size enforcement */
     KlAllocator alloc = kl_allocator_default();
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     req.method = "POST";
     req.method_len = 4;
@@ -302,7 +302,7 @@ UTEST(overflow, multipart_max_total_size_exceeded) {
 
 /* ── Router capacity overflow ────────────────────────────────────── */
 
-static void dummy_handler(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void dummy_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)res; (void)ud;
 }
 
@@ -366,7 +366,7 @@ UTEST(overflow, router_post_mw_overflow) {
 UTEST(overflow, body_reader_buffer_max_size) {
     /* body_reader_buffer.c:10 — max_size enforcement */
     KlAllocator alloc = kl_allocator_default();
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
 
     /* Create a reader with 10-byte max */

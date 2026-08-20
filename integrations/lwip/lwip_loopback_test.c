@@ -34,7 +34,7 @@
 static sys_sem_t g_ready;
 static void tcpip_done(void *a) { (void)a; sys_sem_signal(&g_ready); }
 
-static void handler(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     kl_http_response_json(res, 200, "{\"stack\":\"lwip\"}", 16);
 }
@@ -173,7 +173,7 @@ static const char KEY_PEM[] =
 "HQSP88xCcQ17ZSg3dWoDMRGHDXznyJNlQ0vtbNr9Wcg4+/DAC/SLNu7I\n"
 "-----END PRIVATE KEY-----\n";
 
-static void https_handler(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void https_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     kl_http_response_json(res, 200, "{\"tls\":\"lwip\"}", 15);
 }

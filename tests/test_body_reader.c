@@ -10,7 +10,7 @@
 
 UTEST(buf, create_destroy) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
     br->destroy(br);
@@ -18,7 +18,7 @@ UTEST(buf, create_destroy) {
 
 UTEST(buf, single_chunk) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
 
@@ -34,7 +34,7 @@ UTEST(buf, single_chunk) {
 
 UTEST(buf, multi_chunk) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
 
     ASSERT_EQ(br->on_data(br, "abc", 3), 0);
@@ -51,7 +51,7 @@ UTEST(buf, multi_chunk) {
 
 UTEST(buf, growth) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
 
     /* Feed > 1024 bytes (initial cap) to trigger realloc */
@@ -70,7 +70,7 @@ UTEST(buf, growth) {
 
 UTEST(buf, max_size_reject) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     KlBodyReader *br = kl_body_reader_buffer(&a, &req, (void *)(size_t)100);
 
     char data[60];
@@ -84,7 +84,7 @@ UTEST(buf, max_size_reject) {
 
 UTEST(buf, exact_max_size) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     KlBodyReader *br = kl_body_reader_buffer(&a, &req, (void *)(size_t)100);
 
     char data[100];
@@ -100,7 +100,7 @@ UTEST(buf, exact_max_size) {
 
 UTEST(buf, empty_body) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
 
     br->on_complete(br);

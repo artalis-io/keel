@@ -10,7 +10,7 @@
 #include <keel/websocket.h>
 #include <keel/websocket_server.h>
 #include <keel/connection.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <keel/server.h>   /* KlServer — kl_server_ws registration API lives here */
 #include <keel/router.h>   /* kl_router_add + KlRoute.ws_config */
 #include <string.h>
@@ -232,14 +232,14 @@ int kl_ws_server_upgrade(KlConn *c, const char *leftover,
 
     /* Validate required headers */
     size_t conn_len = 0, upgrade_len = 0, ver_len = 0, key_len = 0;
-    const char *conn_hdr = kl_request_header_len(&c->req, "Connection",
+    const char *conn_hdr = kl_http_request_header_len(&c->req, "Connection",
                                                   &conn_len);
-    const char *upgrade_hdr = kl_request_header_len(&c->req, "Upgrade",
+    const char *upgrade_hdr = kl_http_request_header_len(&c->req, "Upgrade",
                                                      &upgrade_len);
-    const char *version = kl_request_header_len(&c->req,
+    const char *version = kl_http_request_header_len(&c->req,
                                                  "Sec-WebSocket-Version",
                                                  &ver_len);
-    const char *key = kl_request_header_len(&c->req, "Sec-WebSocket-Key",
+    const char *key = kl_http_request_header_len(&c->req, "Sec-WebSocket-Key",
                                              &key_len);
 
     /* Validate: Connection must contain "upgrade" */

@@ -14,16 +14,16 @@
 #include <stdio.h>
 #include <string.h>
 
-static void handle_get_users(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_get_users(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     const char *json = "[{\"id\":1,\"name\":\"Alice\"},{\"id\":2,\"name\":\"Bob\"}]";
     kl_http_response_json(res, 200, json, strlen(json));
 }
 
-static void handle_get_user(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_get_user(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     size_t id_len;
-    const char *id = kl_request_param(req, "id", &id_len);
+    const char *id = kl_http_request_param(req, "id", &id_len);
     if (!id) {
         kl_http_response_error(res, 400, "Missing id");
         return;
@@ -35,7 +35,7 @@ static void handle_get_user(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, json, (size_t)n);
 }
 
-static void handle_create_user(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_create_user(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) {

@@ -2,20 +2,20 @@
 #define KEEL_ROUTER_H
 
 #include <keel/allocator.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <keel/body_reader.h>
 #include <stddef.h>
 
 /** @brief Route handler function. */
-typedef void (*KlHandler)(KlRequest *req, KlHttpResponse *res, void *user_data);
+typedef void (*KlHandler)(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 
 /**
  * @brief Middleware function signature.
  * @return 0 to continue to next middleware/handler, non-zero to short-circuit
  *         (response must already be written by the middleware).
  */
-typedef int (*KlMiddleware)(KlRequest *req, KlHttpResponse *res, void *user_data);
+typedef int (*KlMiddleware)(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 
 typedef struct KlWsServerConfig KlWsServerConfig;
 
@@ -206,13 +206,13 @@ int  kl_router_use_post(KlRouter *r, const char *method, const char *pattern,
  * @brief Run all matching pre-body middleware in registration order.
  * @return 0 if all passed, non-zero if a middleware short-circuited.
  */
-int  kl_router_run_middleware(KlRouter *r, KlRequest *req, KlHttpResponse *res);
+int  kl_router_run_middleware(KlRouter *r, KlHttpRequest *req, KlHttpResponse *res);
 
 /**
  * @brief Run all matching post-body middleware in registration order.
  * @return 0 if all passed, non-zero if a middleware short-circuited.
  */
-int  kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlHttpResponse *res);
+int  kl_router_run_post_middleware(KlRouter *r, KlHttpRequest *req, KlHttpResponse *res);
 
 /**
  * @brief Run a fully-formed synthetic request through the router pipeline:
@@ -246,7 +246,7 @@ int  kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlHttpResponse *
  *         path matched but the method didn't; non-zero short-circuit
  *         code if middleware short-circuited; -1 on invalid arguments.
  */
-int  kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
+int  kl_router_dispatch_synthetic(KlRouter *r, KlHttpRequest *req,
                                    KlHttpResponse *res, int run_middleware);
 
 /** @brief Free router resources. */

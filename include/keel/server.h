@@ -23,7 +23,7 @@ typedef struct KlWsServerConfig KlWsServerConfig;
 typedef KlParser *(*KlParserFactory)(KlAllocator *alloc);
 
 /** @brief Access log callback — called after each response is fully sent. NULL = disabled. */
-typedef void (*KlAccessLogFn)(const KlRequest *req, int status,
+typedef void (*KlAccessLogFn)(const KlHttpRequest *req, int status,
                                size_t body_bytes, double duration_ms,
                                void *user_data);
 
@@ -101,7 +101,7 @@ typedef struct KlConfig {
 /**
  * @brief Peer credentials of a UNIX-domain-socket client.
  *
- * Populated by kl_request_peer_cred(). On Linux all three fields are
+ * Populated by kl_http_request_peer_cred(). On Linux all three fields are
  * available (SO_PEERCRED). On macOS/BSD only uid/gid are available
  * (getpeereid) and has_pid is 0.
  */
@@ -290,7 +290,7 @@ void kl_server_stats(const KlServer *s, KlServerStats *out);
  * application logic.
  */
 typedef enum {
-    KL_PLATCAP_PEER_CRED          = 1u << 0, /**< kl_request_peer_cred / kl_peer_cred_fd yield uid+gid (AF_UNIX; POSIX) */
+    KL_PLATCAP_PEER_CRED          = 1u << 0, /**< kl_http_request_peer_cred / kl_peer_cred_fd yield uid+gid (AF_UNIX; POSIX) */
     KL_PLATCAP_PEER_CRED_PID      = 1u << 1, /**< peer credentials also include the peer pid (Linux SO_PEERCRED / macOS LOCAL_PEERPID) */
     KL_PLATCAP_SYSTEMD_ACTIVATION = 1u << 2  /**< kl_systemd_listen_fd* honor the systemd LISTEN_FDS protocol (Linux/systemd) */
 } KlPlatformCap;
@@ -315,12 +315,12 @@ unsigned kl_platform_caps(void);
  * @return 0 on success, -1 if unavailable (not a UNIX socket, unsupported
  *         platform, or the socket has no peer credentials).
  */
-int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out);
+int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out);
 
 /**
  * @brief Read peer credentials directly from a connected socket fd.
  *
- * The building block behind kl_request_peer_cred / kl_ws_server_peer_cred.
+ * The building block behind kl_http_request_peer_cred / kl_ws_server_peer_cred.
  * Meaningful for AF_UNIX sockets. On macOS the pid is filled via LOCAL_PEERPID
  * (has_pid = 1); Linux uses SO_PEERCRED.
  *
@@ -340,7 +340,7 @@ int kl_peer_cred_fd(KlSocketHandle fd, KlPeerCred *out);
  * @return 0 on success, -1 if unavailable (non-Linux, no label, or not a
  *         UNIX socket).
  */
-int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen);
+int kl_http_request_peer_label(const KlHttpRequest *req, char *buf, size_t buflen);
 
 /**
  * @brief Format the client's IP address and port for a request.
@@ -351,7 +351,7 @@ int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen);
  * @param port   Receives the client port (host byte order); may be NULL.
  * @return 0 on success, -1 if unavailable (e.g. AF_UNIX — use peer credentials).
  */
-int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
+int kl_http_request_peer_addr(const KlHttpRequest *req, char *ip, size_t iplen,
                          uint16_t *port);
 
 /**
@@ -362,7 +362,7 @@ int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
  *         unavailable. Valid until the request completes. Format it with
  *         kl_sockaddr_format(), or read family/port via kl_sockaddr_family/port().
  */
-const KlSockAddr *kl_request_peer_sockaddr(const KlRequest *req);
+const KlSockAddr *kl_http_request_peer_sockaddr(const KlHttpRequest *req);
 
 /**
  * @brief Extract the verified mTLS client certificate for a request.
@@ -383,7 +383,7 @@ const KlSockAddr *kl_request_peer_sockaddr(const KlRequest *req);
  *         (plaintext connection, no client certificate, or a TLS backend
  *         without client-certificate support).
  */
-int kl_request_peer_cert(const KlRequest *req, KlPeerCert *out);
+int kl_http_request_peer_cert(const KlHttpRequest *req, KlPeerCert *out);
 
 /**
  * @brief Return an inherited listening socket fd from socket activation.

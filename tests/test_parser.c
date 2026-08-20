@@ -19,7 +19,7 @@ UTEST(parser, parse_simple_get) {
                       "\r\n";
     size_t len = strlen(raw);
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     size_t consumed = 0;
 
@@ -54,7 +54,7 @@ UTEST(parser, parse_with_query) {
                       "\r\n";
     size_t len = strlen(raw);
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     size_t consumed = 0;
 
@@ -80,7 +80,7 @@ UTEST(parser, parse_post_with_body) {
                       "{\"key\":\"val\"}";
     size_t len = strlen(raw);
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     size_t consumed = 0;
 
@@ -122,7 +122,7 @@ UTEST(parser, parse_multiple_headers) {
                       "\r\n";
     size_t len = strlen(raw);
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     size_t consumed = 0;
 
@@ -140,7 +140,7 @@ UTEST(parser, incomplete_request) {
     const char *raw = "GET /hello HTTP/1.1\r\n";
     size_t len = strlen(raw);
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     size_t consumed = 0;
 
@@ -155,7 +155,7 @@ UTEST(parser, reset_between_requests) {
     KlParser *p = kl_parser_llhttp(&a);
 
     const char *raw1 = "GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    KlRequest req1;
+    KlHttpRequest req1;
     memset(&req1, 0, sizeof(req1));
     size_t consumed1 = 0;
     KlParseResult r1 = p->parse(p, &req1, raw1, strlen(raw1), &consumed1);
@@ -165,7 +165,7 @@ UTEST(parser, reset_between_requests) {
     p->reset(p);
 
     const char *raw2 = "POST /second HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
-    KlRequest req2;
+    KlHttpRequest req2;
     memset(&req2, 0, sizeof(req2));
     size_t consumed2 = 0;
     KlParseResult r2 = p->parse(p, &req2, raw2, strlen(raw2), &consumed2);
@@ -190,7 +190,7 @@ UTEST(parser, chunked_cl_te_conflict) {
                       "\r\n";
     size_t len = strlen(raw);
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     size_t consumed = 0;
 
@@ -212,7 +212,7 @@ UTEST(parser, chunked_te_only) {
                       "\r\n";
     size_t len = strlen(raw);
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
     size_t consumed = 0;
 

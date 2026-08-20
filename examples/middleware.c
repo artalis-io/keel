@@ -25,7 +25,7 @@
 /* ── Middleware ──────────────────────────────────────────────────────── */
 
 /* Pre-body: log incoming request, store start time in req->ctx */
-static int request_log(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static int request_log(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res; (void)user_data;
     printf("→ %.*s %.*s\n",
            (int)req->method_len, req->method,
@@ -38,9 +38,9 @@ static int request_log(KlRequest *req, KlHttpResponse *res, void *user_data) {
 }
 
 /* Pre-body: reject /api/ requests without Authorization header */
-static int auth_check(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static int auth_check(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)user_data;
-    const char *auth = kl_request_header(req, "Authorization");
+    const char *auth = kl_http_request_header(req, "Authorization");
     if (!auth) {
         kl_http_response_error(res, 401, "Authorization required");
         return 1; /* short-circuit */
@@ -49,7 +49,7 @@ static int auth_check(KlRequest *req, KlHttpResponse *res, void *user_data) {
 }
 
 /* Post-body: log status and duration */
-static int access_log(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static int access_log(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)user_data;
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -64,17 +64,17 @@ static int access_log(KlRequest *req, KlHttpResponse *res, void *user_data) {
 
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
-static void handle_public(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_public(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"access\":\"public\"}", 19);
 }
 
-static void handle_private(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_private(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"access\":\"private\"}", 20);
 }
 
-static void handle_data(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_data(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) {

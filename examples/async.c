@@ -2,7 +2,7 @@
  * async.c — Async suspend/resume with FD watchers
  *
  * Concepts: KlWatcher, KlAsyncOp, kl_async_suspend, kl_async_complete,
- * pipe-based completion signaling, kl_request_conn().
+ * pipe-based completion signaling, kl_http_request_conn().
  *
  * GET /delay/:ms suspends the connection, spawns a thread that sleeps
  * for the requested duration, then signals completion via a pipe.
@@ -91,14 +91,14 @@ static void *delay_thread(void *arg) {
 
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
-static void handle_delay(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static void handle_delay(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_request_conn(req);
+    KlConn *conn = kl_http_request_conn(req);
 
     /* Parse delay from route param */
     size_t ms_len;
-    const char *ms_str = kl_request_param(req, "ms", &ms_len);
+    const char *ms_str = kl_http_request_param(req, "ms", &ms_len);
     int delay_ms = 100;
     if (ms_str) {
         char tmp[16];
@@ -158,7 +158,7 @@ static void handle_delay(KlRequest *req, KlHttpResponse *res, void *user_data) {
     pthread_attr_destroy(&attr);
 }
 
-static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
 }

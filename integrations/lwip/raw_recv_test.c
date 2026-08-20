@@ -55,7 +55,7 @@ static size_t pat_checksum(const unsigned char *b, size_t n) {
 }
 
 /* ── shared echo handler: copies the received body back verbatim ─────────────── */
-static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)ud;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) { kl_http_response_error(res, 400, "body required"); return; }
@@ -63,7 +63,7 @@ static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ud) {
     kl_http_response_header(res, "Content-Type", "application/octet-stream");
     kl_http_response_body_copy(res, br->data, br->len);   /* COPY: survives the async send */
 }
-static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }

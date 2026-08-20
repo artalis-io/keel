@@ -48,20 +48,20 @@ static void nap_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 
-static void handle_ok(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 
 #define SMOKE_BIG_LEN (256 * 1024)
 static char g_big[SMOKE_BIG_LEN];
-static void handle_big(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_big(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 200);
     kl_http_response_body_borrow(res, g_big, SMOKE_BIG_LEN);
 }
 
-static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) { kl_http_response_error(res, 400, "body required"); return; }
@@ -69,7 +69,7 @@ static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, br->data, br->len);
 }
 
-static void handle_file(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = open(SMOKE_FILE_PATH, O_RDONLY);
     if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
@@ -81,7 +81,7 @@ static void handle_file(KlRequest *req, KlHttpResponse *res, void *ctx) {
 
 /* GET /bigfile — a >pipe-capacity file so the splice sendfile loops over multiple
  * file→pipe→socket chunks and exercises the short-splice-out re-submit path (8f-2). */
-static void handle_bigfile(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_bigfile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = open(SMOKE_BIGFILE_PATH, O_RDONLY);
     if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
@@ -91,7 +91,7 @@ static void handle_bigfile(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_file(res, (KlSocketHandle)fd, size);
 }
 
-static void handle_stream(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     KlHttpResponseWriteFn write_fn = NULL;
     void *wctx = NULL;
@@ -107,7 +107,7 @@ static void handle_stream(KlRequest *req, KlHttpResponse *res, void *ctx) {
 #define SMOKE_BS_CHUNK   1024
 #define SMOKE_BS_CHUNKS  256
 #define SMOKE_BS_LEN     (SMOKE_BS_CHUNK * SMOKE_BS_CHUNKS)   /* 256 KiB payload */
-static void handle_bigstream(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_bigstream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     KlHttpResponseWriteFn write_fn = NULL;
     void *wctx = NULL;
@@ -290,7 +290,7 @@ static void astream_timer(void *ud) {
     free(a);
 }
 
-static void handle_astream(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_astream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     AsyncStreamCtx *a = calloc(1, sizeof(*a));
     if (!a) { kl_http_response_error(res, 500, "oom"); return; }
@@ -299,7 +299,7 @@ static void handle_astream(KlRequest *req, KlHttpResponse *res, void *ctx) {
     a->write_fn(a->wctx, "chunk-one;", 10);
     a->op.on_resume = astream_resume;
     a->op.user_data = a;
-    kl_async_suspend(&g_srv, kl_request_conn(req), &a->op);
+    kl_async_suspend(&g_srv, kl_http_request_conn(req), &a->op);
     kl_timer_add(&g_srv.ev, 20, astream_timer, a);   /* resume after 20 ms */
 }
 

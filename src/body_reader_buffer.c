@@ -51,7 +51,7 @@ static void buf_destroy(KlBodyReader *self) {
 /* user_data is void* (not const) to match the KlBodyReaderFactory typedef — it
  * carries max_size by value, not a pointer to read. */
 /* cppcheck-suppress constParameterPointer */
-KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, const KlRequest *req, void *user_data) {
+KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, const KlHttpRequest *req, void *user_data) {
     (void)req;
 
     KlBufReader *br = kl_malloc(alloc, sizeof(KlBufReader));

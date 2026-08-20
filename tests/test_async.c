@@ -681,10 +681,10 @@ static void sleep_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data)
     kl_async_complete(ctx->server, &ctx->op);
 }
 
-static void handle_async_sleep(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static void handle_async_sleep(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_request_conn(req);
+    KlConn *conn = kl_http_request_conn(req);
 
     /* Allocate sleep context */
     static SleepCtx sctx;  /* static for simplicity — single-request test */

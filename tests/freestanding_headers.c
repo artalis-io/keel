@@ -29,7 +29,7 @@
  * The SERVER protocol surface joined the gate in the Phase 10 UEFI *server* step
  * (docs/phase10_uefi_server_design.md, S-1): router, compress, proxy_protocol,
  * h2_server, connection, server. Their peer/PROXY addresses are already the
- * neutral KlSockAddr (kl_request_peer_sockaddr, kl_proxy_protocol_parse,
+ * neutral KlSockAddr (kl_http_request_peer_sockaddr, kl_proxy_protocol_parse,
  * kl_cidr_match) and their file size/offset the uint64_t sendfile seam — so a
  * freestanding UEFI server can compile the whole protocol-layer public API with
  * no POSIX socket/type header. (server.h's AF_UNIX / peer-cred references are
@@ -52,7 +52,7 @@
 #include <keel/timer.h>
 #include <keel/url.h>
 #include <keel/parser.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <keel/body_reader.h>
 #include <keel/chunked.h>
 #include <keel/drain.h>

@@ -108,8 +108,8 @@ static int comp_send_response(KlConn *c) {
 
 /* Start (or continue) a request-body read: reset the sliding-window buffer and post
  * the next receive. The body core (kl_conn_ingest_body) feeds read_buf[0..nread].
- * Read-side flow control (kl_request_pause_body): while paused, do NOT post the next recv —
- * the conn parks with no outstanding op until kl_request_resume_body re-posts it. */
+ * Read-side flow control (kl_http_request_pause_body): while paused, do NOT post the next recv —
+ * the conn parks with no outstanding op until kl_http_request_resume_body re-posts it. */
 static void comp_start_body_read(struct KlServer *s, KlConn *c) {
     c->stream.read_len = 0;
     if (c->stream.read_paused) return;   /* paused — resume re-posts via kl_io_engine_post_read */
@@ -808,7 +808,7 @@ void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn) {
     comp_after_state(s, conn, conn->state);
 }
 
-/* Re-arm a body read after read-side flow control resumes (kl_request_resume_body → the
+/* Re-arm a body read after read-side flow control resumes (kl_http_request_resume_body → the
  * io_engine seam on a completion loop): post a fresh recv; on failure release via the normal
  * completion path. Mirrors comp_start_body_read's post (read_len was reset when the body read
  * started; the next recv appends into read_buf as usual). */

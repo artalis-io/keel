@@ -331,10 +331,10 @@ static void tls_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_d
     kl_async_complete(ctx->server, &ctx->op);
 }
 
-static void handle_tls_async(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static void handle_tls_async(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_request_conn(req);
+    KlConn *conn = kl_http_request_conn(req);
 
     static TlsAsyncCtx tctx;
     memset(&tctx, 0, sizeof(tctx));
@@ -398,10 +398,10 @@ UTEST(cross, tls_async_suspend_resume) {
  * reader → async handler that suspends, then resumes with body data.
  * ═══════════════════════════════════════════════════════════════════ */
 
-static int auth_middleware(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static int auth_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)user_data;
     size_t key_len;
-    const char *key = kl_request_header_len(req, "X-Auth", &key_len);
+    const char *key = kl_http_request_header_len(req, "X-Auth", &key_len);
     if (!key || key_len != 6 || memcmp(key, "secret", 6) != 0) {
         kl_http_response_error(res, 401, "Unauthorized");
         return 1;
@@ -413,7 +413,7 @@ typedef struct {
     KlAsyncOp  op;
     KlServer  *server;
     int        pipe_fds[2];
-    KlRequest *saved_req;
+    KlHttpRequest *saved_req;
 } MwAsyncCtx;
 
 static void mw_async_resume(KlAsyncOp *op, void *user_data) {
@@ -444,10 +444,10 @@ static void mw_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_da
     kl_async_complete(ctx->server, &ctx->op);
 }
 
-static void handle_mw_async(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static void handle_mw_async(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_request_conn(req);
+    KlConn *conn = kl_http_request_conn(req);
 
     static MwAsyncCtx mctx;
     memset(&mctx, 0, sizeof(mctx));
@@ -587,7 +587,7 @@ UTEST(cross, resolver_cache_client) {
 
 static KlCompressConfig g_compress_cfg;
 
-static void handle_compressed(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_compressed(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     const char *body = "Hello, compressed world!";
     kl_http_response_status(res, 200);
@@ -690,10 +690,10 @@ static void hold_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) 
     kl_async_complete(ctx->server, &ctx->op);
 }
 
-static void handle_hold(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static void handle_hold(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_request_conn(req);
+    KlConn *conn = kl_http_request_conn(req);
 
     static TlsAsyncCtx hctx;
     memset(&hctx, 0, sizeof(hctx));

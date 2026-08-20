@@ -68,7 +68,7 @@ int kl_version_number(void);
 #include <keel/socket.h>
 #include <keel/event.h>
 #include <keel/event_ctx.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <keel/body_reader.h>
 #include <keel/body_reader_multipart.h>
 #include <keel/chunked.h>

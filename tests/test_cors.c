@@ -92,7 +92,7 @@ UTEST(cors, middleware_no_origin) {
     KlCorsConfig c;
     kl_cors_init(&c);
 
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/api"; req.path_len = 4;
 
@@ -113,7 +113,7 @@ UTEST(cors, middleware_wildcard_origin) {
     kl_cors_init(&c);
 
     /* Simulate a request with Origin header */
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/api"; req.path_len = 4;
     req.headers[0].name = "Origin"; req.headers[0].name_len = 6;
@@ -137,7 +137,7 @@ UTEST(cors, middleware_specific_origin) {
     kl_cors_init(&c);
     kl_cors_add_origin(&c, "https://allowed.com");
 
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/api"; req.path_len = 4;
     req.headers[0].name = "Origin"; req.headers[0].name_len = 6;
@@ -160,7 +160,7 @@ UTEST(cors, middleware_disallowed_origin) {
     kl_cors_init(&c);
     kl_cors_add_origin(&c, "https://allowed.com");
 
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/api"; req.path_len = 4;
     req.headers[0].name = "Origin"; req.headers[0].name_len = 6;
@@ -182,7 +182,7 @@ UTEST(cors, middleware_preflight) {
     KlCorsConfig c;
     kl_cors_init(&c);
 
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     req.method = "OPTIONS"; req.method_len = 7;
     req.path = "/api"; req.path_len = 4;
     req.headers[0].name = "Origin"; req.headers[0].name_len = 6;
@@ -206,7 +206,7 @@ UTEST(cors, middleware_preflight_disallowed) {
     kl_cors_init(&c);
     kl_cors_add_origin(&c, "https://allowed.com");
 
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     req.method = "OPTIONS"; req.method_len = 7;
     req.path = "/api"; req.path_len = 4;
     req.headers[0].name = "Origin"; req.headers[0].name_len = 6;
@@ -230,7 +230,7 @@ UTEST(cors, middleware_credentials) {
     kl_cors_add_origin(&c, "https://app.com");
     c.allow_credentials = 1;
 
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/api"; req.path_len = 4;
     req.headers[0].name = "Origin"; req.headers[0].name_len = 6;
@@ -251,7 +251,7 @@ UTEST(cors, middleware_credentials) {
 /* ── Audit coverage ────────────────────────────────────────────────── */
 
 UTEST(cors, middleware_null_user_data) {
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/api"; req.path_len = 4;
 

@@ -373,7 +373,7 @@ UTEST(cpool, host_count_null) {
 
 /* ── Integration tests: pooled sync requests ─────────────────────── */
 
-static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }

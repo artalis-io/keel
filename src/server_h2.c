@@ -258,7 +258,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     stream->hdr_storage_len = total;
 
     char *p = stream->hdr_storage;
-    KlRequest *req = &stream->req;
+    KlHttpRequest *req = &stream->req;
     memset(req, 0, sizeof(*req));
 
     /* Method */

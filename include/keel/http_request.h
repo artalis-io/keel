@@ -1,5 +1,5 @@
-#ifndef KEEL_REQUEST_H
-#define KEEL_REQUEST_H
+#ifndef KEEL_HTTP_REQUEST_H
+#define KEEL_HTTP_REQUEST_H
 
 #include <stddef.h>
 
@@ -58,9 +58,9 @@ typedef struct {
 /** @brief Maximum number of route parameters. */
 #define KL_MAX_PARAMS 16
 
-typedef struct KlRequest KlRequest;
+typedef struct KlHttpRequest KlHttpRequest;
 
-struct KlRequest {
+struct KlHttpRequest {
     const char *method;          /**< HTTP method pointer. */
     size_t method_len;           /**< HTTP method length. */
     const char *path;            /**< Request path pointer. */
@@ -92,16 +92,16 @@ struct KlRequest {
 typedef struct KlConn KlConn;
 
 /** @brief Typed accessor for the connection handle (preferred over raw _server_ctx). */
-static inline KlConn *kl_request_conn(const KlRequest *req) {
+static inline KlConn *kl_http_request_conn(const KlHttpRequest *req) {
     return (KlConn *)req->_server_ctx;
 }
 
 /**
  * @brief Read-side body flow control — pause / resume request-body reading.
  *
- * A streamed-body consumer whose downstream sink is full calls kl_request_pause_body() to stop
+ * A streamed-body consumer whose downstream sink is full calls kl_http_request_pause_body() to stop
  * Keel reading more body bytes off the connection, bounding accumulation without aborting the
- * body. It re-enables reading with kl_request_resume_body() once the sink drains. Both are
+ * body. It re-enables reading with kl_http_request_resume_body() once the sink drains. Both are
  * idempotent and must be called on the event-loop thread (e.g. from the body reader's on_data,
  * or later from a watcher/timer/thread-pool completion that drives the sink).
  *
@@ -114,13 +114,13 @@ static inline KlConn *kl_request_conn(const KlRequest *req) {
  *  - Pausing before/outside KL_CONN_READING_BODY is a no-op-safe state set; resume only re-arms
  *    when a pause is in effect.
  */
-/* const: they mutate the *connection's* read state (via kl_request_conn), not the KlRequest. */
-void kl_request_pause_body(const KlRequest *req);
-void kl_request_resume_body(const KlRequest *req);
+/* const: they mutate the *connection's* read state (via kl_http_request_conn), not the KlHttpRequest. */
+void kl_http_request_pause_body(const KlHttpRequest *req);
+void kl_http_request_resume_body(const KlHttpRequest *req);
 
 /** @brief Find header by name (case-insensitive).
  *  @return Null-terminated value pointer, or NULL if not found. */
-static inline const char *kl_request_header(const KlRequest *req,
+static inline const char *kl_http_request_header(const KlHttpRequest *req,
                                             const char *name) {
     size_t nlen = kl_req_strlen(name);
     for (int i = 0; i < req->num_headers; i++) {
@@ -134,7 +134,7 @@ static inline const char *kl_request_header(const KlRequest *req,
 
 /** @brief Find header by name (case-insensitive).
  *  @return Value pointer (sets *out_len), or NULL if not found. */
-static inline const char *kl_request_header_len(const KlRequest *req,
+static inline const char *kl_http_request_header_len(const KlHttpRequest *req,
                                                 const char *name,
                                                 size_t *out_len) {
     size_t nlen = kl_req_strlen(name);
@@ -150,7 +150,7 @@ static inline const char *kl_request_header_len(const KlRequest *req,
 
 /** @brief Find route parameter by name.
  *  @return Value pointer (sets *out_len), or NULL if not found. */
-static inline const char *kl_request_param(const KlRequest *req,
+static inline const char *kl_http_request_param(const KlHttpRequest *req,
                                             const char *name,
                                             size_t *out_len) {
     size_t nlen = kl_req_strlen(name);

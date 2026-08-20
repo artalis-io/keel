@@ -78,7 +78,7 @@ static NumResolver g_numres = {
 /* ── server handler: a known, non-trivial body (byte-exactness proof) ────────── */
 #define WANT_BODY "{\"lc1\":true,\"raw\":\"loopback\",\"n\":12345}"
 
-static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "application/json");

@@ -122,39 +122,39 @@ static int kl_server_bind_listener(KlServer *s) {
     return kl_server_bind_tcp(s);
 }
 
-int kl_request_peer_cred(const KlRequest *req, KlPeerCred *out) {
+int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out) {
     if (!req)
         return -1;
-    const KlConn *conn = kl_request_conn(req);
+    const KlConn *conn = kl_http_request_conn(req);
     if (!conn)
         return -1;
     return kl_peer_cred_fd(conn->stream.fd, out);
 }
 
-int kl_request_peer_label(const KlRequest *req, char *buf, size_t buflen) {
+int kl_http_request_peer_label(const KlHttpRequest *req, char *buf, size_t buflen) {
     if (!req || !buf || buflen == 0)
         return -1;
-    const KlConn *conn = kl_request_conn(req);
+    const KlConn *conn = kl_http_request_conn(req);
     if (!conn || !kl_handle_valid(conn->stream.fd))
         return -1;
 
     return kl_server_plat_peer_label_fd(conn->stream.fd, buf, buflen);
 }
 
-const KlSockAddr *kl_request_peer_sockaddr(const KlRequest *req) {
+const KlSockAddr *kl_http_request_peer_sockaddr(const KlHttpRequest *req) {
     if (!req)
         return NULL;
-    const KlConn *conn = kl_request_conn(req);
+    const KlConn *conn = kl_http_request_conn(req);
     if (!conn || kl_sockaddr_family(&conn->stream.peer_addr) == KL_AF_UNSPEC)
         return NULL;
     return &conn->stream.peer_addr;
 }
 
-int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
+int kl_http_request_peer_addr(const KlHttpRequest *req, char *ip, size_t iplen,
                          uint16_t *port) {
     if (!req || !ip || iplen == 0)
         return -1;
-    const KlConn *conn = kl_request_conn(req);
+    const KlConn *conn = kl_http_request_conn(req);
     if (!conn)
         return -1;
 
@@ -169,10 +169,10 @@ int kl_request_peer_addr(const KlRequest *req, char *ip, size_t iplen,
     return 0;
 }
 
-int kl_request_peer_cert(const KlRequest *req, KlPeerCert *out) {
+int kl_http_request_peer_cert(const KlHttpRequest *req, KlPeerCert *out) {
     if (!req || !out)
         return -1;
-    const KlConn *conn = kl_request_conn(req);
+    const KlConn *conn = kl_http_request_conn(req);
     if (!conn || !conn->tls || !conn->tls->peer_cert)
         return -1;   /* plaintext connection, or backend lacks mTLS support */
     memset(out, 0, sizeof(*out));
@@ -203,7 +203,7 @@ void kl_server_close_listener(KlServer *s) {
 
 
 /* Route + middleware registration (the kl_server_route / kl_server_use family) and
- * the read-side body flow control (kl_request_pause_body / resume_body) plus
+ * the read-side body flow control (kl_http_request_pause_body / resume_body) plus
  * kl_server_stats moved to the freestanding-safe server core (server_core.c) in the
  * S-1 bisection. kl_server_ws moved to server_ws.c (Finding 1): the WebSocket type +
  * registration belong to the ws module, so this readiness TU owns no protocol type. */
@@ -599,7 +599,7 @@ transition:
                        new_state == KL_CONN_READING_BODY ||
                        new_state == KL_CONN_PROXY_HEADER) {
                 /* Read-side flow control: a paused body consumer keeps READ interest OFF (0)
-                 * so the level-triggered loop stops delivering body bytes; kl_request_resume_body
+                 * so the level-triggered loop stops delivering body bytes; kl_http_request_resume_body
                  * re-arms READ. Only READING_BODY pauses. */
                 KlEventMask rm = (new_state == KL_CONN_READING_BODY && c->stream.read_paused)
                                      ? 0 : KL_EVENT_READ;
@@ -670,7 +670,7 @@ void kl_server_stop(KlServer *s) {
     }
 }
 
-/* kl_request_pause_body / kl_request_resume_body / kl_server_stats moved to the
+/* kl_http_request_pause_body / kl_http_request_resume_body / kl_server_stats moved to the
  * freestanding-safe server core (server_core.c) in the S-1 bisection. */
 
 /* kl_server_free moved to the freestanding-safe server core (server_core.c) in the

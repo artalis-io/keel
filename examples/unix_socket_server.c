@@ -2,7 +2,7 @@
  * unix_socket_server.c — Serving HTTP over a UNIX domain socket
  *
  * Concepts: KL_TRANSPORT_UNIX, socket activation (inherited fd via
- * kl_systemd_listen_fd), and peer-credential access (kl_request_peer_cred).
+ * kl_systemd_listen_fd), and peer-credential access (kl_http_request_peer_cred).
  *
  * Build:  make examples
  *
@@ -20,13 +20,13 @@
 #include <string.h>
 
 /* Report the connecting peer's credentials (UNIX-socket only). */
-static void handle_whoami(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_whoami(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlPeerCred cred;
     char body[160];
     int n;
 
-    if (kl_request_peer_cred(req, &cred) == 0) {
+    if (kl_http_request_peer_cred(req, &cred) == 0) {
         if (cred.has_pid)
             n = snprintf(body, sizeof(body),
                          "{\"uid\":%ld,\"gid\":%ld,\"pid\":%ld}",

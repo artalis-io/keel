@@ -16,7 +16,7 @@ typedef struct {
     KlAllocator *alloc;
     llhttp_t llhttp;
     llhttp_settings_t settings;
-    KlRequest *current_req; /* set during parse() */
+    KlHttpRequest *current_req; /* set during parse() */
     int headers_done;       /* on_headers_complete fired */
     int complete;           /* message_complete fired */
 
@@ -29,7 +29,7 @@ typedef struct {
 
 static int on_url(llhttp_t *p, const char *at, size_t len) {
     LlhttpParser *lp = p->data;
-    KlRequest *req = lp->current_req;
+    KlHttpRequest *req = lp->current_req;
 
     if (!req->path) {
         req->path = at;
@@ -43,7 +43,7 @@ static int on_url(llhttp_t *p, const char *at, size_t len) {
 
 static int on_url_complete(llhttp_t *p) {
     LlhttpParser *lp = p->data;
-    KlRequest *req = lp->current_req;
+    KlHttpRequest *req = lp->current_req;
 
     /* Split path and query at '?' */
     for (size_t i = 0; i < req->path_len; i++) {
@@ -59,7 +59,7 @@ static int on_url_complete(llhttp_t *p) {
 
 static int on_method(llhttp_t *p, const char *at, size_t len) {
     LlhttpParser *lp = p->data;
-    KlRequest *req = lp->current_req;
+    KlHttpRequest *req = lp->current_req;
 
     if (!req->method) {
         req->method = at;
@@ -84,7 +84,7 @@ static int on_header_field(llhttp_t *p, const char *at, size_t len) {
 
 static int on_header_value(llhttp_t *p, const char *at, size_t len) {
     LlhttpParser *lp = p->data;
-    KlRequest *req = lp->current_req;
+    KlHttpRequest *req = lp->current_req;
 
     if (req->num_headers >= KL_MAX_HEADERS) return -1;  /* reject: too many headers */
 
@@ -103,7 +103,7 @@ static int on_header_value(llhttp_t *p, const char *at, size_t len) {
 
 static int on_header_value_complete(llhttp_t *p) {
     LlhttpParser *lp = p->data;
-    KlRequest *req = lp->current_req;
+    KlHttpRequest *req = lp->current_req;
 
     req->num_headers++;
     lp->hdr_field = NULL;
@@ -113,7 +113,7 @@ static int on_header_value_complete(llhttp_t *p) {
 
 static int on_headers_complete(llhttp_t *p) {
     LlhttpParser *lp = p->data;
-    KlRequest *req = lp->current_req;
+    KlHttpRequest *req = lp->current_req;
 
     req->version_major = (int)p->http_major;
     req->version_minor = (int)p->http_minor;
@@ -132,7 +132,7 @@ static int on_headers_complete(llhttp_t *p) {
 
 static int on_body(llhttp_t *p, const char *at, size_t len) {
     LlhttpParser *lp = p->data;
-    KlRequest *req = lp->current_req;
+    KlHttpRequest *req = lp->current_req;
 
     /* Forward to body reader if present */
     if (req->body_reader) {
@@ -145,7 +145,7 @@ static int on_body(llhttp_t *p, const char *at, size_t len) {
 
 static int on_message_complete(llhttp_t *p) {
     LlhttpParser *lp = p->data;
-    KlRequest *req = lp->current_req;
+    KlHttpRequest *req = lp->current_req;
 
     lp->complete = 1;
 
@@ -157,7 +157,7 @@ static int on_message_complete(llhttp_t *p) {
 
 /* --- KlParser vtable implementation --- */
 
-static KlParseResult llhttp_parse(KlRequestParser *self, KlRequest *req,
+static KlParseResult llhttp_parse(KlRequestParser *self, KlHttpRequest *req,
                                    const char *buf, size_t len,
                                    size_t *consumed) {
     LlhttpParser *lp = (LlhttpParser *)self;

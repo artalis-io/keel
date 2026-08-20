@@ -650,11 +650,11 @@ KlMultipartErrorCode kl_multipart_last_error(const KlBodyReader *br) {
 /* ── Factory ─────────────────────────────────────────────────────────── */
 
 /* cppcheck-suppress constParameterPointer ; signature must match KlBodyReaderFactory typedef */
-KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlRequest *req, void *user_data) {
+KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlHttpRequest *req, void *user_data) {
     if (!alloc || !req) return NULL;
 
     size_t ct_len = 0;
-    const char *ct = kl_request_header_len(req, "Content-Type", &ct_len);
+    const char *ct = kl_http_request_header_len(req, "Content-Type", &ct_len);
     if (!ct) return NULL;
 
     const char *prefix = "multipart/form-data";

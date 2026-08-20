@@ -130,14 +130,14 @@ static const char *test_url(const char *path) {
 
 /* ── Server handlers ─────────────────────────────────────────────── */
 
-static void handle_dest(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_dest(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "text/plain");
     kl_http_response_body_borrow(res, req->method, strlen(req->method));
 }
 
-static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     kl_http_response_status(res, 200);
@@ -148,9 +148,9 @@ static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
         kl_http_response_body_borrow(res, "no body", 7);
 }
 
-static void handle_auth_check(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_auth_check(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    const char *auth = kl_request_header(req, "Authorization");
+    const char *auth = kl_http_request_header(req, "Authorization");
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "text/plain");
     if (auth)
@@ -159,7 +159,7 @@ static void handle_auth_check(KlRequest *req, KlHttpResponse *res, void *ctx) {
         kl_http_response_body_borrow(res, "none", 4);
 }
 
-static void handle_301(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_301(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 301);
     char loc[128];
@@ -168,7 +168,7 @@ static void handle_301(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, "moved", 5);
 }
 
-static void handle_302(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_302(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 302);
     char loc[128];
@@ -177,7 +177,7 @@ static void handle_302(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, "found", 5);
 }
 
-static void handle_303(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_303(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 303);
     char loc[128];
@@ -186,7 +186,7 @@ static void handle_303(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, "see other", 9);
 }
 
-static void handle_307(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_307(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 307);
     char loc[128];
@@ -195,7 +195,7 @@ static void handle_307(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, "temp", 4);
 }
 
-static void handle_308(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_308(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 308);
     char loc[128];
@@ -204,20 +204,20 @@ static void handle_308(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, "perm", 4);
 }
 
-static void handle_relative(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_relative(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 301);
     kl_http_response_header(res, "Location", "/dest");
     kl_http_response_body_borrow(res, "moved", 5);
 }
 
-static void handle_no_location(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_no_location(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 301);
     kl_http_response_body_borrow(res, "no location", 11);
 }
 
-static void handle_chain(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_chain(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 301);
     char loc[128];
@@ -226,7 +226,7 @@ static void handle_chain(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, "chain", 5);
 }
 
-static void handle_loop(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_loop(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 301);
     char loc[128];
@@ -235,7 +235,7 @@ static void handle_loop(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_body_borrow(res, "loop", 4);
 }
 
-static void handle_cross_origin(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_cross_origin(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 301);
     char loc[128];

@@ -20,15 +20,15 @@
  * backend's overlapped provider (8f-5a), so this default-provider server serves every backend
  * unchanged — no explicit provider needed. */
 
-static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
 }
 
-static void handle_user(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_user(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     size_t id_len;
-    const char *id = kl_request_param(req, "id", &id_len);
+    const char *id = kl_http_request_param(req, "id", &id_len);
     if (!id) { kl_http_response_error(res, 400, "Missing id"); return; }
     static char json[128];
     int n = snprintf(json, sizeof(json),
@@ -37,12 +37,12 @@ static void handle_user(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, json, (size_t)n);
 }
 
-static int noop_mw(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static int noop_mw(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)res; (void)ctx;
     return 0;
 }
 
-static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) {

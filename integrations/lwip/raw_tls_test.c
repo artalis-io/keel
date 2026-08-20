@@ -101,7 +101,7 @@ static const char KEY_PEM[] =
 /* ── server handler: a known, non-trivial body (byte-exactness proof) ────────── */
 #define WANT_BODY "{\"lc4\":true,\"raw\":\"tls\",\"loop\":\"lwip\",\"n\":424242}"
 
-static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "application/json");

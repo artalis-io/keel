@@ -43,9 +43,9 @@ static void done_fn(void *ud) {          /* event-loop thread (via the wakeup wa
     free(w);
 }
 
-static void handle_async(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)ud;
-    KlConn *conn = kl_request_conn(req);
+    KlConn *conn = kl_http_request_conn(req);
     WorkCtx *w = malloc(sizeof(*w));
     if (!w) { kl_http_response_error(res, 500, "oom"); return; }
     memset(w, 0, sizeof(*w));

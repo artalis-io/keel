@@ -32,7 +32,7 @@
 
 #include <keel/server.h>
 #include <keel/router.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
@@ -76,7 +76,7 @@ static void print_int(int v) {
 
 /* ── the request handler (the SAME one a hosted HTTPS server runs) ────────────── */
 static int g_served = 0;
-static void s6_handler(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static void s6_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)req; (void)user_data;
     static const char body[] = "hello from KEEL on UEFI (HTTPS over EFI_TCP4)\n";
     kl_http_response_status(res, 200);

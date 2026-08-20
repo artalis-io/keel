@@ -9,15 +9,15 @@
 
 static int test_port;  /* set by start_server / individual tests */
 
-static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
 }
 
-static void handle_param(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_param(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     size_t id_len;
-    const char *id = kl_request_param(req, "id", &id_len);
+    const char *id = kl_http_request_param(req, "id", &id_len);
     static char body[256]; /* static: body must outlive handler for async writev */
     int n;
     if (id) {
@@ -31,7 +31,7 @@ static void handle_param(KlRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, body, (size_t)n);
 }
 
-static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     kl_http_response_status(res, 200);
@@ -81,7 +81,7 @@ static char *handle_upload_dup(KlAllocator *a, const char *s, size_t n) {
     return d;
 }
 
-static void handle_upload(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBodyReader *br = req->body_reader;
     if (!br) {
@@ -216,7 +216,7 @@ static void handle_upload(KlRequest *req, KlHttpResponse *res, void *ctx) {
     handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
 }
 
-static void handle_no_reader(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_no_reader(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
@@ -267,7 +267,7 @@ static void eer_err_destroy(KlBodyReader *self) {
     kl_free(r->alloc, r, sizeof(*r));
 }
 
-static KlBodyReader *eer_err_factory(KlAllocator *alloc, const KlRequest *req,
+static KlBodyReader *eer_err_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                        void *user_data) {
     (void)req; (void)user_data;
     EarlyExitErrReader *r = kl_malloc(alloc, sizeof(*r));
@@ -281,11 +281,11 @@ static KlBodyReader *eer_err_factory(KlAllocator *alloc, const KlRequest *req,
     return &r->base;
 }
 
-static void handle_early_exit_err(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_early_exit_err(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     EarlyExitErrReader *r = (EarlyExitErrReader *)req->body_reader;
     if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
-    r->conn = kl_request_conn(req);
+    r->conn = kl_http_request_conn(req);
     r->res  = res;
     r->conn->state = KL_CONN_READING_BODY;
     eer_err_handler_called = 1;
@@ -306,12 +306,12 @@ static void handle_early_exit_err(KlRequest *req, KlHttpResponse *res, void *ctx
  */
 static volatile int eer_async_err_handler_called = 0;
 
-static void handle_early_exit_async_err(KlRequest *req, KlHttpResponse *res,
+static void handle_early_exit_async_err(KlHttpRequest *req, KlHttpResponse *res,
                                           void *ctx) {
     (void)ctx;
     EarlyExitErrReader *r = (EarlyExitErrReader *)req->body_reader;
     if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
-    r->conn = kl_request_conn(req);
+    r->conn = kl_http_request_conn(req);
     r->res  = res;
     r->conn->state = KL_CONN_READING_BODY;
     eer_async_err_handler_called = 1;
@@ -342,7 +342,7 @@ static void noop_destroy(KlBodyReader *self) {
     NoopReader *r = (NoopReader *)self;
     kl_free(r->alloc, r, sizeof(*r));
 }
-static KlBodyReader *noop_factory(KlAllocator *alloc, const KlRequest *req,
+static KlBodyReader *noop_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                     void *user_data) {
     (void)req; (void)user_data;
     NoopReader *r = kl_malloc(alloc, sizeof(*r));
@@ -357,7 +357,7 @@ static KlBodyReader *noop_factory(KlAllocator *alloc, const KlRequest *req,
 }
 
 /* Handler responds with 401 and returns — never touches body. */
-static void handle_async_sync_reject(KlRequest *req, KlHttpResponse *res,
+static void handle_async_sync_reject(KlHttpRequest *req, KlHttpResponse *res,
                                         void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_status(res, 401);
@@ -412,7 +412,7 @@ static void eer_destroy(KlBodyReader *self) {
     kl_free(r->alloc, r, sizeof(*r));
 }
 
-static KlBodyReader *eer_factory(KlAllocator *alloc, const KlRequest *req,
+static KlBodyReader *eer_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                   void *user_data) {
     (void)req; (void)user_data;
     EarlyExitReader *r = kl_malloc(alloc, sizeof(*r));
@@ -426,7 +426,7 @@ static KlBodyReader *eer_factory(KlAllocator *alloc, const KlRequest *req,
     return &r->base;
 }
 
-static void handle_early_exit(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_early_exit(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     /* Stash conn + res on the body reader so on_data can wake "us"
      * with the response. Then yield by leaving state as READING_BODY
@@ -434,7 +434,7 @@ static void handle_early_exit(KlRequest *req, KlHttpResponse *res, void *ctx) {
      * event loop keeps pumping on_data. */
     EarlyExitReader *r = (EarlyExitReader *)req->body_reader;
     if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
-    r->conn = kl_request_conn(req);
+    r->conn = kl_http_request_conn(req);
     r->res  = res;
     r->conn->state = KL_CONN_READING_BODY;
     /* Signal the test thread that we've run — it polls this before
@@ -795,7 +795,7 @@ typedef struct {
     int call_count;
 } AccessLogCapture;
 
-static void test_access_log_fn(const KlRequest *req, int status,
+static void test_access_log_fn(const KlHttpRequest *req, int status,
                                 size_t body_bytes, double duration_ms,
                                 void *user_data) {
     AccessLogCapture *cap = user_data;
@@ -1573,16 +1573,16 @@ UTEST(integration, signal_stop) {
 
 /* ── Middleware integration tests ────────────────────────────────────── */
 
-static int cors_middleware(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static int cors_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_header(res, "Access-Control-Allow-Origin", "*");
     return 0;
 }
 
-static int auth_middleware(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static int auth_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     const char *secret = ctx;
     size_t tok_len;
-    const char *tok = kl_request_header_len(req, "Authorization", &tok_len);
+    const char *tok = kl_http_request_header_len(req, "Authorization", &tok_len);
     size_t secret_len = strlen(secret);
     if (!tok || tok_len != secret_len || memcmp(tok, secret, secret_len) != 0) {
         kl_http_response_error(res, 401, "Unauthorized");
@@ -1591,12 +1591,12 @@ static int auth_middleware(KlRequest *req, KlHttpResponse *res, void *ctx) {
     return 0;
 }
 
-static void handle_mw_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_mw_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_mw_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_mw_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     kl_http_response_status(res, 200);
@@ -1714,13 +1714,13 @@ UTEST(integration, middleware_auth_pass) {
     stop_mw_server();
 }
 
-static int mw_add_x_first(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static int mw_add_x_first(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_header(res, "X-First", "1");
     return 0;
 }
 
-static int mw_add_x_second(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static int mw_add_x_second(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_header(res, "X-Second", "2");
     return 0;
@@ -1782,7 +1782,7 @@ static void *sc_body_server_thread(void *arg) {
     return NULL;
 }
 
-static int mw_reject_all(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static int mw_reject_all(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_error(res, 403, "Forbidden");
     return 1;
@@ -1847,7 +1847,7 @@ UTEST(integration, route_params) {
 
 /* ── Post-body middleware integration tests ──────────────────────────── */
 
-static int post_mw_check_body(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static int post_mw_check_body(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (br && br->len >= 6 && memcmp(br->data, "secret", 6) == 0) {
@@ -1857,7 +1857,7 @@ static int post_mw_check_body(KlRequest *req, KlHttpResponse *res, void *ctx) {
     return 1;
 }
 
-static void handle_post_mw_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_post_mw_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     kl_http_response_status(res, 200);

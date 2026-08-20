@@ -404,7 +404,7 @@ static void wait_for_bind(KlServer *s) {
 }
 
 /* Server handler: echo body back */
-static void srv_echo(KlRequest *req, KlHttpResponse *res, void *ctx)
+static void srv_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
@@ -417,14 +417,14 @@ static void srv_echo(KlRequest *req, KlHttpResponse *res, void *ctx)
 }
 
 /* Server handler: fixed JSON response */
-static void srv_hello(KlRequest *req, KlHttpResponse *res, void *ctx)
+static void srv_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* Server handler: streaming chunked response */
-static void srv_chunked(KlRequest *req, KlHttpResponse *res, void *ctx)
+static void srv_chunked(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)req; (void)ctx;
     kl_http_response_header(res, "Content-Type", "text/plain");
@@ -438,7 +438,7 @@ static void srv_chunked(KlRequest *req, KlHttpResponse *res, void *ctx)
 }
 
 /* Server handler: 204 No Content */
-static void srv_no_content(KlRequest *req, KlHttpResponse *res, void *ctx)
+static void srv_no_content(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)req; (void)ctx;
     kl_http_response_status(res, 204);

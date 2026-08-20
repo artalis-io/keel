@@ -9,7 +9,7 @@
  */
 #include <keel/allocator.h>
 #include <keel/parser.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -18,7 +18,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     KlParser *parser = kl_parser_llhttp(&alloc);
     if (!parser) return 0;
 
-    KlRequest req;
+    KlHttpRequest req;
     memset(&req, 0, sizeof(req));
 
     size_t consumed = 0;

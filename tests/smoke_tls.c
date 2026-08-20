@@ -58,7 +58,7 @@ static const char KEY_PEM[] =
 "HQSP88xCcQ17ZSg3dWoDMRGHDXznyJNlQ0vtbNr9Wcg4+/DAC/SLNu7I\n"
 "-----END PRIVATE KEY-----\n";
 
-static void handle_ok(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }

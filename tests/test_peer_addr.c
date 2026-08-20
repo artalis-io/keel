@@ -10,11 +10,11 @@ static char     g_ip[INET6_ADDRSTRLEN];
 static uint16_t g_port;
 static int      g_rc = -2;
 
-static void handle(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     g_ip[0] = '\0';
     g_port = 0;
-    g_rc = kl_request_peer_addr(req, g_ip, sizeof(g_ip), &g_port);
+    g_rc = kl_http_request_peer_addr(req, g_ip, sizeof(g_ip), &g_port);
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 

@@ -150,7 +150,7 @@ static int handler_status = 200;
 static const char *handler_body = "{\"ok\":true}";
 static size_t handler_body_len = 11;
 
-static void test_handler(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void test_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     handler_called++;
     kl_http_response_json(res, handler_status, handler_body, handler_body_len);
@@ -159,7 +159,7 @@ static void test_handler(KlRequest *req, KlHttpResponse *res, void *ud) {
 static int middleware_called = 0;
 static int middleware_return = 0;  /* 0 = continue */
 
-static int test_middleware(KlRequest *req, KlHttpResponse *res, void *ud) {
+static int test_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     middleware_called++;
     if (middleware_return != 0) {
@@ -201,7 +201,7 @@ static void test_br_destroy(KlBodyReader *self) {
 
 static TestBodyReader g_test_br;
 
-static KlBodyReader *test_br_factory(KlAllocator *alloc, const KlRequest *req,
+static KlBodyReader *test_br_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                       void *ud) {
     (void)alloc; (void)req; (void)ud;
     memset(&g_test_br, 0, sizeof(g_test_br));

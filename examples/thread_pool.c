@@ -80,10 +80,10 @@ typedef struct {
     KlThreadPool *pool;
 } AppCtx;
 
-static void handle_query(KlRequest *req, KlHttpResponse *res, void *user_data) {
+static void handle_query(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     AppCtx *app = user_data;
-    KlConn *conn = kl_request_conn(req);
+    KlConn *conn = kl_http_request_conn(req);
 
     QueryCtx *ctx = malloc(sizeof(*ctx));
     if (!ctx) {
@@ -113,7 +113,7 @@ static void handle_query(KlRequest *req, KlHttpResponse *res, void *user_data) {
     }
 }
 
-static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
 }

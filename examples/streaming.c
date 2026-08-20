@@ -22,7 +22,7 @@ static int write_json_key(KlHttpResponseWriteFn write_fn, void *ctx,
     return write_fn(ctx, buf, (size_t)n);
 }
 
-static void handle_stream(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
 
     kl_http_response_header(res, "Content-Type", "application/json");

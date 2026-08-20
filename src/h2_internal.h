@@ -13,7 +13,7 @@
 
 #include <keel/h2_server.h>    /* public vtable / callbacks / config typedefs */
 #include <keel/connection.h>   /* KlConn */
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <keel/body_reader.h>
 #include <keel/router.h>
@@ -25,7 +25,7 @@
 
 struct KlH2ServerStream {
     uint32_t stream_id;         /**< HTTP/2 stream identifier. */
-    KlRequest req;              /**< Parsed request for this stream. */
+    KlHttpRequest req;              /**< Parsed request for this stream. */
     KlHttpResponse res;             /**< Response builder for this stream. */
     KlBodyReader *body_reader;  /**< Body reader (route-provided or NULL). */
     KlRoute *route;             /**< Matched route (NULL if no match). */

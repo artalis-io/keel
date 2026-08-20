@@ -102,7 +102,7 @@ struct KlConn;
 void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn);
 
 /* Re-arm a body read on a completion loop after read-side flow control resumes
- * (kl_request_resume_body): post a fresh recv for the conn. The readiness path re-arms READ
+ * (kl_http_request_resume_body): post a fresh recv for the conn. The readiness path re-arms READ
  * interest directly (kl_event_mod) and never calls this. Defined in completion_driver.c
  * (kl_comp_post_recv); stubbed in io_engine.c on readiness builds, where it is never reached
  * (resume branches on KL_EVENT_CAP_COMPLETION). Keeps the request API event-axis-agnostic. */

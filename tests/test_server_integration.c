@@ -12,14 +12,14 @@
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
-static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* A large body forces partial sends through the serialized writev fallback. */
 static char g_big_body[64 * 1024];
-static void handle_big(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_big(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     for (size_t i = 0; i < sizeof(g_big_body); i++)
         g_big_body[i] = (char)('A' + (i % 26));
@@ -43,7 +43,7 @@ static const KlSocketProvider g_noviv = { &NOVIV_OPS, NULL, KL_SOCK_CAP_NATIVE_F
  * sendfile_fallback test, which is POSIX-only (hardcoded /tmp + CRT file I/O). */
 #if !defined(_WIN32)
 static char g_file_path[256];
-static void handle_file(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = open(g_file_path, O_RDONLY);
     if (fd < 0) { kl_http_response_json(res, 500, "{}", 2); return; }
@@ -53,7 +53,7 @@ static void handle_file(KlRequest *req, KlHttpResponse *res, void *ctx) {
 }
 #endif
 
-static void handle_slow(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_slow(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int delay_ms = ctx ? *(int *)ctx : 100;
     usleep((unsigned)(delay_ms * 1000));

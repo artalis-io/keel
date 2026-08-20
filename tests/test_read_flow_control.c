@@ -1,6 +1,6 @@
 /*
- * test_read_flow_control.c — Phase 1 read-side body flow control (kl_request_pause_body /
- * kl_request_resume_body).
+ * test_read_flow_control.c — Phase 1 read-side body flow control (kl_http_request_pause_body /
+ * kl_http_request_resume_body).
  *
  * A custom body reader pauses after the first chunk and schedules an async resume on a timer.
  * The client sends the body in two halves with a gap, so the server MUST stop reading after the
@@ -35,14 +35,14 @@ static int    g_completed;
 typedef struct {
     KlBodyReader base;
     KlAllocator *alloc;
-    KlRequest   *req;
+    KlHttpRequest   *req;
     int          paused;
 } PauseReader;
 
 static void rfc_resume(void *ud) {
     PauseReader *r = ud;
     g_resumed = 1;
-    kl_request_resume_body(r->req);
+    kl_http_request_resume_body(r->req);
 }
 
 static int rfc_on_data(KlBodyReader *self, const char *data, size_t len) {
@@ -53,8 +53,8 @@ static int rfc_on_data(KlBodyReader *self, const char *data, size_t len) {
     if (!r->paused) {                 /* pause on the first chunk, resume ~30ms later */
         r->paused = 1;
         g_calls_at_pause = g_calls;
-        KlConn *c = kl_request_conn(r->req);
-        kl_request_pause_body(r->req);
+        KlConn *c = kl_http_request_conn(r->req);
+        kl_http_request_pause_body(r->req);
         kl_timer_add(c->stream.ctx, 30, rfc_resume, r);
     }
     return 0;
@@ -66,13 +66,13 @@ static void rfc_destroy(KlBodyReader *self) {
     kl_free(r->alloc, r, sizeof(*r));
 }
 
-static KlBodyReader *rfc_factory(KlAllocator *alloc, const KlRequest *req, void *ud) {
+static KlBodyReader *rfc_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
     (void)ud;
     PauseReader *r = kl_malloc(alloc, sizeof(*r));
     if (!r) return NULL;
     memset(r, 0, sizeof(*r));
     r->alloc = alloc;
-    r->req = (KlRequest *)req;   /* factory param is const; req is mutable for pause/resume */
+    r->req = (KlHttpRequest *)req;   /* factory param is const; req is mutable for pause/resume */
     r->base.on_data = rfc_on_data;
     r->base.on_complete = rfc_on_complete;
     r->base.on_error = rfc_on_error;
@@ -80,7 +80,7 @@ static KlBodyReader *rfc_factory(KlAllocator *alloc, const KlRequest *req, void 
     return &r->base;
 }
 
-static void rfc_handler(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void rfc_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
@@ -160,15 +160,15 @@ static int rfc_pause_forever_on_data(KlBodyReader *self, const char *data, size_
     (void)data;
     PauseReader *r = (PauseReader *)self;
     g_total += len; g_calls++;
-    if (!r->paused) { r->paused = 1; g_calls_at_pause = g_calls; kl_request_pause_body(r->req); }
+    if (!r->paused) { r->paused = 1; g_calls_at_pause = g_calls; kl_http_request_pause_body(r->req); }
     return 0;
 }
-static KlBodyReader *rfc_pause_forever_factory(KlAllocator *alloc, const KlRequest *req, void *ud) {
+static KlBodyReader *rfc_pause_forever_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
     (void)ud;
     PauseReader *r = kl_malloc(alloc, sizeof(*r));
     if (!r) return NULL;
     memset(r, 0, sizeof(*r));
-    r->alloc = alloc; r->req = (KlRequest *)req;
+    r->alloc = alloc; r->req = (KlHttpRequest *)req;
     r->base.on_data = rfc_pause_forever_on_data;
     r->base.on_complete = rfc_on_complete;
     r->base.on_error = rfc_on_error;

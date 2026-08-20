@@ -17,7 +17,7 @@
 #include <keel/server.h>
 #include <keel/async.h>
 #include <keel/timer.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include "internal.h"
 #include "io_engine.h"    /* kl_io_engine_run_completion / kl_io_engine_post_read / kl_comp_cancel */
 #include "event_caps.h"   /* kl_event_caps — completion vs readiness pause/resume */
@@ -609,8 +609,8 @@ int kl_server_use_post(KlServer *s, const char *method, const char *pattern,
 /* ── Read-side body flow control (event-axis-agnostic) ────────────────────────
  * Readiness drops/re-arms READ interest (kl_event_mod); completion stops posting /
  * re-posts the recv via the io_engine seam. Both idempotent; loop-thread only. */
-void kl_request_pause_body(const KlRequest *req) {
-    KlConn *c = req ? kl_request_conn(req) : NULL;
+void kl_http_request_pause_body(const KlHttpRequest *req) {
+    KlConn *c = req ? kl_http_request_conn(req) : NULL;
     if (!c || c->stream.read_paused) return;                 /* idempotent */
     c->stream.read_paused = 1;
     if (!(kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION))
@@ -619,8 +619,8 @@ void kl_request_pause_body(const KlRequest *req) {
      * deliver <=1 more chunk before the pause takes hold (bounded). */
 }
 
-void kl_request_resume_body(const KlRequest *req) {
-    KlConn *c = req ? kl_request_conn(req) : NULL;
+void kl_http_request_resume_body(const KlHttpRequest *req) {
+    KlConn *c = req ? kl_http_request_conn(req) : NULL;
     if (!c || !c->stream.read_paused) return;                /* idempotent */
     c->stream.read_paused = 0;
     if (kl_event_caps(&c->stream.ctx->loop) & KL_EVENT_CAP_COMPLETION)

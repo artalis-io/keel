@@ -61,7 +61,7 @@ static KlTls *pt_factory(KlTlsCtx *ctx, KlAllocator *alloc)
 static KlServer target_srv;
 static int target_port;
 
-static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200,
         "{\"message\":\"hello via proxy\"}", 28);

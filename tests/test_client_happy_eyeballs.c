@@ -83,7 +83,7 @@ static KlResolver g_mock_resolver = {
 
 /* ── Real one-route server on a background thread ────────────────────── */
 
-static void handle_ok(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }

@@ -29,7 +29,7 @@ static const char *mime_type(const char *path, size_t len) {
     return "application/octet-stream";
 }
 
-static void handle_static(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_static(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
 
     /* Reject path traversal — portable check (req->path is not null-terminated) */

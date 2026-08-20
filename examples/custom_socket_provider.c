@@ -60,7 +60,7 @@ static const KlSocketOps counting_ops = {
 
 /* ── A tiny server to exercise the provider ────────────────────────── */
 
-static void handle_hello(KlRequest *req, KlHttpResponse *res, void *u) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
     static const char body[] = "{\"msg\":\"hello via decorated provider\"}";
     kl_http_response_json(res, 200, body, sizeof(body) - 1);

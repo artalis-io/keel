@@ -36,14 +36,14 @@ static void nap_ms(int ms) { Sleep(ms); }
 #define SMOKE_FILE_PATH "smoke_iocp_file.tmp"
 #define SMOKE_STREAM "chunk-one;chunk-two"   /* two chunks, dechunked by the client */
 
-static void handle_ok(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 
 /* POST /echo — reads the request body via the buffer reader (READING_BODY over
  * IOCP) and echoes it back, exercising the completion body path (8b-1). */
-static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) { kl_http_response_error(res, 400, "body required"); return; }
@@ -53,7 +53,7 @@ static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
 
 /* GET /file — serve a file body via kl_http_response_file (TransmitFile over IOCP, 8b-2).
  * Opens the pre-written temp file per request; the response owns and closes the fd. */
-static void handle_file(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = _open(SMOKE_FILE_PATH, _O_RDONLY | _O_BINARY);
     if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
@@ -69,7 +69,7 @@ static void handle_file(KlRequest *req, KlHttpResponse *res, void *ctx) {
  * right file offset (a wrong offset would scramble/repeat bytes). */
 #define SMOKE_BIGFILE_PATH "smoke_iocp_bigfile.tmp"
 #define SMOKE_BIGFILE_LEN  (256 * 1024)
-static void handle_bigfile(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_bigfile(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = _open(SMOKE_BIGFILE_PATH, _O_RDONLY | _O_BINARY);
     if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
@@ -81,7 +81,7 @@ static void handle_bigfile(KlRequest *req, KlHttpResponse *res, void *ctx) {
 
 /* GET /stream — a synchronous chunked stream produced during the handler
  * (KL_HTTP_BODY_STREAM over IOCP, 8b-3). */
-static void handle_stream(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_stream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     KlHttpResponseWriteFn write = NULL;
     void *wctx = NULL;
@@ -97,7 +97,7 @@ static void handle_stream(KlRequest *req, KlHttpResponse *res, void *ctx) {
 #define SMOKE_BS_CHUNK   1024
 #define SMOKE_BS_CHUNKS  256
 #define SMOKE_BS_LEN     (SMOKE_BS_CHUNK * SMOKE_BS_CHUNKS)   /* 256 KiB payload */
-static void handle_bigstream(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_bigstream(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     KlHttpResponseWriteFn write = NULL;
     void *wctx = NULL;
@@ -139,11 +139,11 @@ static void *server_thread(void *arg) {
  * is plaintext even though this is a completion backend). */
 #define SMOKE_PROXY_PORT 18084
 static char g_proxy_ip[64];
-static void handle_proxy_probe(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_proxy_probe(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     uint16_t port = 0;
     g_proxy_ip[0] = '\0';
-    kl_request_peer_addr(req, g_proxy_ip, sizeof(g_proxy_ip), &port);
+    kl_http_request_peer_addr(req, g_proxy_ip, sizeof(g_proxy_ip), &port);
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 static KlServer g_proxy_srv;

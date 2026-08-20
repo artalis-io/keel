@@ -2,7 +2,7 @@
 #define KEEL_PARSER_H
 
 #include <keel/allocator.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 
 typedef enum {
     KL_PARSE_OK,            /**< Full request/response parsed */
@@ -16,7 +16,7 @@ typedef enum {
 typedef struct KlRequestParser KlRequestParser;
 
 struct KlRequestParser {
-    KlParseResult (*parse)(KlRequestParser *self, KlRequest *req,
+    KlParseResult (*parse)(KlRequestParser *self, KlHttpRequest *req,
                            const char *buf, size_t len, size_t *consumed); /**< Parse request bytes */
     void (*reset)(KlRequestParser *self);   /**< Reset for next request */
     void (*destroy)(KlRequestParser *self); /**< Free parser resources */

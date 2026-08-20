@@ -329,7 +329,7 @@ static void wire_done(KlClient *client, void *ud) {
     c->done = 1;
 }
 
-static void wire_hello(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void wire_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }

@@ -31,18 +31,18 @@
 #define FPATH  "smoke_iocp_tls_file.tmp"
 #define STREAMB "iocp-tls-one;iocp-tls-two"
 
-static void h_ok(KlRequest *q, KlHttpResponse *r, void *c) {
+static void h_ok(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     (void)q; (void)c;
     kl_http_response_json(r, 200, BODY, sizeof(BODY) - 1);
 }
-static void h_echo(KlRequest *q, KlHttpResponse *r, void *c) {
+static void h_echo(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     (void)c;
     KlBufReader *br = (KlBufReader *)q->body_reader;
     if (!br || br->len == 0) { kl_http_response_error(r, 400, "body required"); return; }
     kl_http_response_status(r, 200);
     kl_http_response_body_borrow(r, br->data, br->len);
 }
-static void h_file(KlRequest *q, KlHttpResponse *r, void *c) {
+static void h_file(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     (void)q; (void)c;
     int fd = _open(FPATH, _O_RDONLY | _O_BINARY);
     if (fd < 0) { kl_http_response_error(r, 500, "open"); return; }
@@ -51,7 +51,7 @@ static void h_file(KlRequest *q, KlHttpResponse *r, void *c) {
     kl_http_response_status(r, 200);
     kl_http_response_file(r, (KlSocketHandle)fd, (off_t)sz);
 }
-static void h_stream(KlRequest *q, KlHttpResponse *r, void *c) {
+static void h_stream(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     (void)q; (void)c;
     KlHttpResponseWriteFn w = NULL;
     void *wc = NULL;

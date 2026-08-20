@@ -80,13 +80,13 @@ int kl_cors_is_allowed(const KlCorsConfig *config, const char *origin,
 /* ── Middleware function ────────────────────────────────────────────── */
 
 // cppcheck-suppress constParameterPointer
-int kl_cors_middleware(KlRequest *req, KlHttpResponse *res, void *user_data) {
+int kl_cors_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     if (!user_data) return 0;
     const KlCorsConfig *config = user_data;
 
     /* Extract Origin header */
     size_t origin_len;
-    const char *origin = kl_request_header_len(req, "Origin", &origin_len);
+    const char *origin = kl_http_request_header_len(req, "Origin", &origin_len);
 
     /* No Origin header — not a cross-origin request, continue */
     if (!origin) return 0;

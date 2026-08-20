@@ -17,7 +17,7 @@
 #include <keel_tls_mbedtls.h>
 #include <stdio.h>
 
-static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     kl_http_response_json(res, 200, "{\"msg\":\"hello over TLS\"}", 23);
 }

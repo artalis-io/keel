@@ -254,7 +254,7 @@ static int a2_resolve_literal(KlEventCtx *ctx) {
 /* ── B1: full client GET over raw, resolving via the built-in DNS resolver ──────── */
 #define WANT_BODY "{\"lc3\":true,\"raw\":\"dns\",\"n\":424242}"
 
-static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "application/json");

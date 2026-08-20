@@ -5,7 +5,7 @@
 #include <keel/handle.h>
 #include <keel/chunked.h>
 #include <keel/file_io.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <keel/parser.h>
 #include <keel/router.h>
@@ -59,7 +59,7 @@ typedef struct KlConn {
 
     size_t max_header_size;     /**< Max header size (from KlConfig) */
 
-    KlRequest req;              /**< Current request */
+    KlHttpRequest req;              /**< Current request */
     KlHttpResponse res;             /**< Current response */
     KlParser *parser;           /**< HTTP parser */
 
@@ -101,7 +101,7 @@ typedef struct KlConn {
     size_t file_io_len;         /**< Bytes from last async read */
     size_t file_io_sent;        /**< Bytes written to socket so far */
 
-    void (*access_log)(const KlRequest *req, int status,
+    void (*access_log)(const KlHttpRequest *req, int status,
                        size_t body_bytes, double duration_ms,
                        void *user_data); /**< Access log callback (set once at pool init) */
     void *access_log_data;      /**< Opaque data for access_log callback */

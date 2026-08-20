@@ -28,18 +28,18 @@ static int          ta_mw_calls;
 static char         ta_seen_host[128];
 static int          ta_seen_version;   /* req->version_major observed by handler */
 
-static void ta_handler(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void ta_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)ud;
     ta_handler_calls++;
     ta_seen_version = req->version_major;
-    const char *host = kl_request_header(req, "host");
+    const char *host = kl_http_request_header(req, "host");
     ta_seen_host[0] = '\0';
     if (host) { strncpy(ta_seen_host, host, sizeof(ta_seen_host) - 1);
                 ta_seen_host[sizeof(ta_seen_host) - 1] = '\0'; }
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static int ta_middleware(KlRequest *req, KlHttpResponse *res, void *ud) {
+static int ta_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)res; (void)ud;
     ta_mw_calls++;
     return 0;   /* continue */
@@ -207,7 +207,7 @@ UTEST(alpn, http2_request_uses_shared_rest_layer) {
 UTEST(alpn, http1_host_and_http2_authority_converge) {
     ta_setup();
     /* Simulate the handler reading host from an HTTP/1.1 request. */
-    KlRequest req; memset(&req, 0, sizeof(req));
+    KlHttpRequest req; memset(&req, 0, sizeof(req));
     req.method = "GET"; req.method_len = 3;
     req.path = "/x"; req.path_len = 2;
     req.version_major = 1; req.version_minor = 1;

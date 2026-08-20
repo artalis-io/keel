@@ -11,7 +11,7 @@
  * Passthrough TLS mock with a canned peer_cert
  *
  * The real mbedtls extraction is exercised by the mbedtls backend build;
- * here we validate the vtable plumbing: kl_request_peer_cert() must reach
+ * here we validate the vtable plumbing: kl_http_request_peer_cert() must reach
  * conn->tls->peer_cert and pass its result through unchanged. A global
  * knob selects the mock's behaviour per test.
  * ═══════════════════════════════════════════════════════════════════ */
@@ -57,10 +57,10 @@ static void pt_install_peer_cert(void) {
 static int        g_rc = -2;
 static KlPeerCert g_cert;
 
-static void handle(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&g_cert, 0xAA, sizeof(g_cert));   /* poison to prove it gets filled */
-    g_rc = kl_request_peer_cert(req, &g_cert);
+    g_rc = kl_http_request_peer_cert(req, &g_cert);
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
@@ -168,9 +168,9 @@ UTEST(peer_cert, plaintext_connection) {
 }
 
 UTEST(peer_cert, null_args) {
-    ASSERT_EQ(-1, kl_request_peer_cert(NULL, &g_cert));
+    ASSERT_EQ(-1, kl_http_request_peer_cert(NULL, &g_cert));
     /* req==NULL path; out==NULL guarded too (no crash). */
-    ASSERT_EQ(-1, kl_request_peer_cert(NULL, NULL));
+    ASSERT_EQ(-1, kl_http_request_peer_cert(NULL, NULL));
 }
 
 UTEST_MAIN();

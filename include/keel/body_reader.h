@@ -5,16 +5,16 @@
 #include <stddef.h>
 
 /** @brief Forward declaration — full definition in request.h. */
-typedef struct KlRequest KlRequest;
+typedef struct KlHttpRequest KlHttpRequest;
 
 /**
  * @brief Pluggable body reader interface.
  *
- * The factory receives a fully-parsed KlRequest with valid header pointers.
+ * The factory receives a fully-parsed KlHttpRequest with valid header pointers.
  * Inspect method, path, Content-Type, Content-Length, etc. in the factory —
  * header pointers into read_buf may be invalidated once the body spans
  * multiple socket reads.  Handlers should access body data exclusively
- * through the body reader, not through KlRequest header fields.
+ * through the body reader, not through KlHttpRequest header fields.
  */
 typedef struct KlBodyReader KlBodyReader;
 
@@ -32,7 +32,7 @@ struct KlBodyReader {
  * Return NULL to reject the request (KEEL sends 415 and closes).
  */
 typedef KlBodyReader *(*KlBodyReaderFactory)(KlAllocator *alloc,
-                                              const KlRequest *req,
+                                              const KlHttpRequest *req,
                                               void *user_data);
 
 /**
@@ -62,7 +62,7 @@ typedef struct {
  * @param user_data Cast to size_t max_size limit.
  * @return Body reader, or NULL on allocation failure.
  */
-KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, const KlRequest *req,
+KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, const KlHttpRequest *req,
                                      void *user_data);
 
 #endif

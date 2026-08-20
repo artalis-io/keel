@@ -28,7 +28,7 @@ static KlMultipartConfig mp_config = {
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
 /* HTML form with text input + file upload */
-static void handle_index(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_index(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     const char *html =
         "<h2>Body Readers</h2>"
@@ -49,7 +49,7 @@ static void handle_index(KlRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 /* POST /echo — buffer reader echoes body back */
-static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) {
@@ -66,7 +66,7 @@ static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
  * Drives kl_multipart_next() to walk the events. The full body has
  * been received by the time the handler runs, so NEED_DATA never
  * fires here (it would in a handler that yields mid-stream). */
-static void handle_upload(KlRequest *req, KlHttpResponse *res, void *ctx) {
+static void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBodyReader *br = req->body_reader;
     if (!br) {

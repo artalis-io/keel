@@ -25,8 +25,8 @@
 
 /* ── Fixtures ──────────────────────────────────────────────────────── */
 
-static KlRequest make_mp_request(const char *content_type) {
-    KlRequest req = {0};
+static KlHttpRequest make_mp_request(const char *content_type) {
+    KlHttpRequest req = {0};
     req.method = "POST";
     req.method_len = 4;
     req.path = "/upload";
@@ -174,14 +174,14 @@ static void collect_eager(KlBodyReader *br, Collector *c) {
 
 UTEST(mp, reject_non_multipart_content_type) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request("application/json");
+    KlHttpRequest req = make_mp_request("application/json");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br == NULL);
 }
 
 UTEST(mp, reject_missing_boundary) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request("multipart/form-data");
+    KlHttpRequest req = make_mp_request("multipart/form-data");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br == NULL);
 }
@@ -189,7 +189,7 @@ UTEST(mp, reject_missing_boundary) {
 UTEST(mp, reject_oversized_boundary) {
     KlAllocator a = kl_allocator_default();
     /* 71-byte boundary → over RFC 2046's 70 limit */
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary="
         "01234567890123456789012345678901234567890123456789"
         "012345678901234567890");
@@ -199,7 +199,7 @@ UTEST(mp, reject_oversized_boundary) {
 
 UTEST(mp, accept_quoted_boundary) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=\"qb123\"");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
@@ -227,7 +227,7 @@ UTEST(mp, accept_quoted_boundary) {
 
 UTEST(mp, single_field) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=abc123");
 
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
@@ -258,7 +258,7 @@ UTEST(mp, single_field) {
 
 UTEST(mp, two_fields) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=sep");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -288,7 +288,7 @@ UTEST(mp, two_fields) {
 
 UTEST(mp, file_upload) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=fileBnd");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -317,7 +317,7 @@ UTEST(mp, file_upload) {
 
 UTEST(mp, binary_body) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=BIN");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -353,7 +353,7 @@ UTEST(mp, three_fields_with_preamble) {
     /* Some clients prepend an explanatory preamble before the first
      * boundary. The parser must skip it. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=BND");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -386,7 +386,7 @@ UTEST(mp, three_fields_with_preamble) {
 UTEST(mp, body_byte_by_byte) {
     /* Feed every byte through a separate on_data call. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=BB");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -414,7 +414,7 @@ UTEST(mp, delimiter_split_across_chunks) {
      * on_data calls — the parser must keep the trailing potential-
      * boundary prefix and not flush it as PART_DATA. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=XYZ");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -443,7 +443,7 @@ UTEST(mp, drain_then_need_data_then_resume) {
     /* Pull events incrementally. Get PART_BEGIN, some DATA, then
      * NEED_DATA when input drains. Feed more, resume. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=R");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -502,7 +502,7 @@ UTEST(mp, max_part_size_exceeded_yields_part_too_large) {
     KlAllocator a = kl_allocator_default();
     KlMultipartConfig cfg = {0};
     cfg.max_part_size = 4;
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=LIM");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
 
@@ -527,7 +527,7 @@ UTEST(mp, max_total_size_exceeded_yields_total_too_large) {
     KlAllocator a = kl_allocator_default();
     KlMultipartConfig cfg = {0};
     cfg.max_total_size = 30;
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=TOT");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
 
@@ -548,7 +548,7 @@ UTEST(mp, max_parts_exceeded_yields_too_many_parts) {
     KlAllocator a = kl_allocator_default();
     KlMultipartConfig cfg = {0};
     cfg.max_parts = 2;
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=MP");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
 
@@ -581,7 +581,7 @@ UTEST(mp, max_input_buffer_exceeded) {
     KlAllocator a = kl_allocator_default();
     KlMultipartConfig cfg = {0};
     cfg.max_input_buffer = 1024;
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=IO");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
 
@@ -604,7 +604,7 @@ UTEST(mp, headers_oversize) {
     KlAllocator a = kl_allocator_default();
     KlMultipartConfig cfg = {0};
     cfg.max_headers_size = 512;
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=HO");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
 
@@ -632,7 +632,7 @@ UTEST(mp, headers_oversize) {
 
 UTEST(mp, malformed_disposition_yields_error) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=E");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -656,7 +656,7 @@ UTEST(mp, malformed_disposition_yields_error) {
 
 UTEST(mp, premature_eof_mid_part_yields_error) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=PE");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -679,7 +679,7 @@ UTEST(mp, premature_eof_mid_part_yields_error) {
 
 UTEST(mp, on_error_marks_reader) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=OE");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -699,7 +699,7 @@ UTEST(mp, empty_name_attribute_rejected_as_malformed) {
      * form-field key cannot meaningfully be empty. Distinct from the
      * filename case which DOES accept empty. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=EN");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -726,7 +726,7 @@ UTEST(mp, empty_filename_attribute) {
      * non-NULL filename string (a positive signal that the client
      * sent the attribute, vs. omitting it). */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=EF");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -755,7 +755,7 @@ UTEST(mp, empty_content_type_header) {
     /* Content-Type: <blank> is unusual but well-formed. The parser
      * should accept it and report ctype_len == 0. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=EC");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -784,7 +784,7 @@ UTEST(mp, zero_body_part_immediate_boundary) {
     /* A part with no body bytes between headers and the next boundary.
      * Must emit PART_BEGIN then PART_END with no intervening PART_DATA. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=ZB");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -823,7 +823,7 @@ UTEST(mp, rejects_subtype_prefix_collision) {
     /* "multipart/form-data-extra" must NOT be accepted as form-data
      * even though it shares the prefix. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data-extra; boundary=PC");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br == NULL);
@@ -837,7 +837,7 @@ UTEST(mp, headers_cap_not_tripped_by_co_resident_body) {
     KlAllocator a = kl_allocator_default();
     KlMultipartConfig cfg = {0};
     cfg.max_headers_size = 256;  /* tighter than total body */
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=CR");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
     ASSERT_TRUE(br != NULL);
@@ -875,7 +875,7 @@ UTEST(mp, headers_cap_not_tripped_by_co_resident_body) {
 
 UTEST(mp, case_insensitive_boundary_param) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; BOUNDARY=CI");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
@@ -901,7 +901,7 @@ UTEST(mp, case_insensitive_boundary_param) {
 
 UTEST(mp, case_insensitive_name_and_filename) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=NI");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -931,7 +931,7 @@ UTEST(mp, tab_terminates_unquoted_boundary_param) {
      * parameters. An unquoted boundary followed by a tab must not
      * fold the tab into the boundary string. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=TB\t");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
@@ -958,7 +958,7 @@ UTEST(mp, duplicate_content_type_header_no_leak) {
     /* Two Content-Type headers in the same part. The second wins;
      * the first allocation must be freed (ASan would catch the leak). */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=DC");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -988,7 +988,7 @@ UTEST(mp, name_does_not_collide_with_other_param_suffix) {
     /* M5 regression: `somename=` must NOT be matched as `name=`.
      * Real `name=` parameter must win. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=NC");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -1014,7 +1014,7 @@ UTEST(mp, name_does_not_collide_with_other_param_suffix) {
 UTEST(mp, filename_does_not_collide_with_other_param_suffix) {
     /* M5 regression for filename=. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=FC");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -1041,7 +1041,7 @@ UTEST(mp, boundary_does_not_collide_with_other_param_suffix) {
     /* M5 regression at factory layer. `xboundary=` must NOT match;
      * real `boundary=` must win. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; xboundary=ghost; boundary=REAL");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
@@ -1069,7 +1069,7 @@ UTEST(mp, unquoted_param_trims_trailing_lws) {
     /* L9 regression: trailing space / tab on an unquoted token is
      * stripped from name and filename. */
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=TR");
     KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
 
@@ -1095,7 +1095,7 @@ UTEST(mp, unquoted_param_trims_trailing_lws) {
 
 UTEST(mp, rejects_null_alloc_or_req) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = make_mp_request(
+    KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=NA");
     ASSERT_TRUE(kl_body_reader_multipart(NULL, &req, NULL) == NULL);
     ASSERT_TRUE(kl_body_reader_multipart(&a, NULL, NULL) == NULL);
@@ -1103,7 +1103,7 @@ UTEST(mp, rejects_null_alloc_or_req) {
 
 UTEST(mp, wrong_reader_kind_in_next_yields_error) {
     KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
+    KlHttpRequest req = {0};
     KlBodyReader *bufr = kl_body_reader_buffer(&a, &req, NULL);
     ASSERT_TRUE(bufr != NULL);
     /* Pass a KlBufReader to kl_multipart_next — must not crash. */

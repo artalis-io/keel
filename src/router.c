@@ -196,7 +196,7 @@ int kl_router_use(KlRouter *r, const char *method, const char *pattern,
     return 0;
 }
 
-int kl_router_run_middleware(KlRouter *r, KlRequest *req, KlHttpResponse *res) {
+int kl_router_run_middleware(KlRouter *r, KlHttpRequest *req, KlHttpResponse *res) {
     for (int i = 0; i < r->mw_count; i++) {
         KlMiddlewareEntry *mw = &r->middleware[i];
         if (match_middleware_pattern(req->method, req->method_len,
@@ -242,7 +242,7 @@ int kl_router_use_post(KlRouter *r, const char *method, const char *pattern,
     return 0;
 }
 
-int kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlHttpResponse *res) {
+int kl_router_run_post_middleware(KlRouter *r, KlHttpRequest *req, KlHttpResponse *res) {
     for (int i = 0; i < r->post_mw_count; i++) {
         KlMiddlewareEntry *mw = &r->post_middleware[i];
         if (match_middleware_pattern(req->method, req->method_len,
@@ -258,7 +258,7 @@ int kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlHttpResponse *r
 
 /* ── Synthetic request dispatch ─────────────────────────────────────── */
 
-int kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
+int kl_router_dispatch_synthetic(KlRouter *r, KlHttpRequest *req,
                                   KlHttpResponse *res, int run_middleware) {
     if (!r || !req || !res) return -1;
 

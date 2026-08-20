@@ -40,9 +40,9 @@ static const char KEY_PEM[] =
 "-----END PRIVATE KEY-----\n";
 
 /* One protocol-independent handler, shared by h2 and http/1.1. */
-static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)ud;
-    const char *host = kl_request_header(req, "host");
+    const char *host = kl_http_request_header(req, "host");
     char body[128];
     int n = snprintf(body, sizeof(body),
                      "{\"ok\":true,\"http\":%d,\"host\":\"%s\"}",

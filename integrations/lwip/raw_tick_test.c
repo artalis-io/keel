@@ -106,7 +106,7 @@ static KlServer g_srv;
 static atomic_int g_done;       /* client saw "200" */
 static atomic_int g_srv_stop;   /* stop signal for the server thread */
 
-static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     kl_http_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
 }
@@ -207,7 +207,7 @@ static atomic_int g_p3_finished;/* both cases resolved (pass or fail) */
 
 static char g_file_path[256];   /* temp file path for the /file route (created in main) */
 
-static void handle_big(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_big(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     /* Build the 64 KB body on the stack; kl_http_response_body_copy takes an owned copy. */
     static unsigned char body[P9_3_BODY_LEN];   /* static: 64 KB is large for a stack frame */
@@ -217,7 +217,7 @@ static void handle_big(KlRequest *req, KlHttpResponse *res, void *ud) {
     kl_http_response_body_copy(res, (const char *)body, sizeof(body));
 }
 
-static void handle_file(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     int fd = open(g_file_path, O_RDONLY);
     if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
@@ -432,11 +432,11 @@ static atomic_int g_p4_fail;
 static atomic_int g_p4_finished;
 static int        g_p4_many_started;    /* how many roundtrips in C1 have been kicked */
 
-static void handle4_root(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle4_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     kl_http_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
 }
-static void handle4_big(KlRequest *req, KlHttpResponse *res, void *ud) {
+static void handle4_big(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     static unsigned char body[P9_3_BODY_LEN];
     fill_pattern(body, sizeof(body));

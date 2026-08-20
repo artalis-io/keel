@@ -2,7 +2,7 @@
 #define KEEL_BODY_READER_MULTIPART_H
 
 #include <keel/body_reader.h>
-#include <keel/request.h>
+#include <keel/http_request.h>
 #include <stddef.h>
 
 /**
@@ -100,7 +100,7 @@ typedef struct KlMultipartReader KlMultipartReader;
  * @param user_data Optional KlMultipartConfig*; NULL → defaults.
  * @return Body reader, or NULL.
  */
-KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlRequest *req,
+KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlHttpRequest *req,
                                         void *user_data);
 
 /**
