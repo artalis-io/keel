@@ -169,7 +169,8 @@ typedef enum {
 
 typedef struct {                    /* all pointers borrowed */
     struct KlEventCtx             *ctx;        /* event loop (selects completion vs readiness) */
-    const struct KlSocketProvider *sockets;    /* datagram-capable provider; NULL = built-in default */
+    const struct KlSocketProvider *sockets;    /* datagram-capable provider; NULL = ctx->sockets; if that
+                                                * is NULL too, the built-in default provider */
     KlAllocator                   *alloc;      /* NULL = ctx->alloc */
 
     /* ── socket creation + options ── */
