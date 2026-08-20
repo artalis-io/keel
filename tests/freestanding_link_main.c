@@ -43,10 +43,10 @@
 #include "../src/event_builtin.h" /* kl_event_*_builtin */
 #include "../src/completion.h"    /* KlCompletionOps + kl_comp_ops_builtin */
 #ifdef KEEL_FS_LINK_DGRAM
-#include <keel/udp.h>              /* 6.4a-1 composition probe: also pull the datagram archive layer */
+#include <keel/datagram.h>          /* 6.4a-1 composition probe: pull the datagram archive layer */
 #endif
 #ifdef KEEL_FS_LINK_DNS
-#include <keel/udp.h>
+#include <keel/datagram.h>
 #include <keel/dns_resolver.h>     /* 6.4a-2 composition probe: pull the DNS layer (which rides the datagram layer) */
 #endif
 
@@ -85,7 +85,7 @@ int efi_main(void *image_handle, void *system_table) {
      * NO duplicate or unresolved symbol across their overlapping base objects (allocator / event_ctx /
      * sockaddr / completion_*). */
     void *dgram_refs[] = {
-        (void *)&kl_udp_init, (void *)&kl_udp_free, (void *)&kl_udp_recv_start,
+        (void *)&kl_datagram_socket_init, (void *)&kl_datagram_recv_start, (void *)&kl_datagram_send,
     };
     for (unsigned i = 0; i < sizeof(dgram_refs) / sizeof(dgram_refs[0]); i++)
         acc |= (uintptr_t)dgram_refs[i];
@@ -96,7 +96,7 @@ int efi_main(void *image_handle, void *system_table) {
      * client + DNS freestanding archives compose with NO duplicate or unresolved symbol across
      * their overlapping base objects (allocator / event_ctx / sockaddr / completion_* / kl_cstr). */
     void *dns_refs[] = {
-        (void *)&kl_dns_resolver_create, (void *)&kl_udp_init, (void *)&kl_udp_free,
+        (void *)&kl_dns_resolver_create, (void *)&kl_datagram_socket_init, (void *)&kl_datagram_send,
     };
     for (unsigned i = 0; i < sizeof(dns_refs) / sizeof(dns_refs[0]); i++)
         acc |= (uintptr_t)dns_refs[i];

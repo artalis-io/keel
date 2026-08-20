@@ -112,7 +112,7 @@ static void handle_bigstream(KlRequest *req, KlResponse *res, void *ctx) {
 /* UDP echo over the IOCP completion loop (8b-4c): a KlUdp on the server's ctx
  * receives via WSARecvFrom completions and echoes each datagram back to its source
  * (synchronous sendto — overlapped UDP send is 8b-4d). */
-static KlUdp g_udp;
+static KlDatagram g_udp;
 /* Set when a received datagram carried its local (destination) address — proves the IOCP
  * WSARecvMsg + IP_PKTINFO path captures it (parity with io_uring/pollcomp). */
 static int g_udp_local_ok = 0;
