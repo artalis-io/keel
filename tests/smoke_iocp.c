@@ -11,6 +11,9 @@
 #include <winsock2.h>   /* raw UDP client (socket/sendto/recvfrom) — before windows.h */
 #include <ws2tcpip.h>
 #include <keel/keel.h>
+#include <keel/datagram.h>
+#include <keel/datagram_detail.h>
+#include "../src/datagram_open.h"   /* kl_datagram_teardown */
 #include "../src/socket.h"   /* internal kl_socket_provider_iocp() */
 
 #include <pthread.h>
@@ -113,11 +116,12 @@ static KlUdp g_udp;
 /* Set when a received datagram carried its local (destination) address — proves the IOCP
  * WSARecvMsg + IP_PKTINFO path captures it (parity with io_uring/pollcomp). */
 static int g_udp_local_ok = 0;
-static void udp_echo(KlUdp *udp, const void *data, size_t len,
-                     const KlSockAddr *src, const KlSockAddr *local, void *ud) {
-    (void)ud;
+static void udp_echo(void *ud, const void *data, size_t len,
+                     const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    (void)flags;
     if (local) g_udp_local_ok = 1;
-    kl_udp_send_to(udp, data, len, src);
+    KlDatagramMessage m = { .data = data, .len = len, .peer = peer, .tos = -1 };
+    (void)kl_datagram_send((KlDatagram *)ud, &m);
 }
 
 static KlServer g_srv;
@@ -321,10 +325,10 @@ int main(void) {
     /* UDP echo on the same IOCP loop (recv via overlapped WSARecvMsg). recv_pktinfo asks
      * for the datagram's local (dest) address so the WSARecvMsg + IP_PKTINFO capture is
      * exercised (udp_echo asserts local was delivered). */
-    KlUdpConfig ucfg = { .ctx = &g_srv.ev, .bind_addr = "127.0.0.1",
-                         .bind_port = SMOKE_UDP_PORT, .recv_pktinfo = 1 };
-    int udp_ready = (kl_udp_init(&g_udp, &ucfg) == 0 &&
-                     kl_udp_recv_start(&g_udp, udp_echo, NULL) == 0);
+    KlDatagramSocketConfig ucfg = { .ctx = &g_srv.ev, .bind_addr = "127.0.0.1",
+                                    .bind_port = SMOKE_UDP_PORT, .recv_pktinfo = 1 };
+    int udp_ready = (kl_datagram_socket_init(&g_udp, &ucfg) == 0 &&
+                     kl_datagram_recv_start(&g_udp, udp_echo, &g_udp) == 0);
     if (!udp_ready) fprintf(stderr, "smoke-iocp: udp init/recv_start failed\n");
 
     pthread_t th;
@@ -477,8 +481,7 @@ int main(void) {
         }
     }
 
-    kl_udp_recv_stop(&g_udp);
-    kl_udp_free(&g_udp);
+    kl_datagram_teardown(&g_udp, NULL, NULL);
     kl_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_server_free(&g_srv);

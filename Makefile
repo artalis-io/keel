@@ -673,14 +673,6 @@ test-iouring: $(IOURING_TEST_BIN)
 	done; \
 	if [ $$failed -eq 1 ]; then echo "SOME iouring TESTS FAILED"; exit 1; fi
 
-# Datagram link + roundtrip smoke test — the Windows CI gate for udp_io_win.c
-# (WSARecvMsg/WSASendMsg + cmsg). Single-threaded event loop, no -lpthread.
-SMOKE_UDP_BIN = tests/smoke_udp$(EXE)
-smoke-udp: $(SMOKE_UDP_BIN)
-	./$(SMOKE_UDP_BIN)
-$(SMOKE_UDP_BIN): tests/smoke_udp.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel $(LDFLAGS)
-
 # Public KlDatagram link + roundtrip smoke — the runtime proof of the facade's completion fd↔loop
 # registration (7B-7). On BACKEND=iocp it exercises CreateIoCompletionPort (the Windows IOCP CI gate);
 # pollcomp/io_uring/readiness run it too (their kl_event_add is inert / a readiness watcher).
@@ -777,7 +769,7 @@ keel.pc: keel.pc.in
 
 clean:
 	rm -f $(CORE_OBJ) $(LLHTTP_OBJ) $(TLS_MBEDTLS_OBJ) $(LIB) $(TEST_BIN)
-	rm -f tests/smoke_tcp tests/smoke_tcp.exe tests/smoke_udp tests/smoke_udp.exe \
+	rm -f tests/smoke_tcp tests/smoke_tcp.exe \
 	      tests/smoke_dns tests/smoke_dns.exe tests/smoke_tls tests/smoke_tls.exe
 	rm -f $(WIN_TEST_BIN) tests/test_*.exe tests/net_compat_posix.o tests/net_compat_win.o
 	rm -f src/event_epoll.o src/event_kqueue.o src/event_poll.o
@@ -1702,5 +1694,5 @@ uefi-dgram-gate:
 
 .PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
-        smoke-tcp smoke-udp smoke-dns install uninstall coverage bench \
+        smoke-tcp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

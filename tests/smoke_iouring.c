@@ -15,6 +15,9 @@
  * idle-timeout + keep-alive churn + resilience, all over the io_uring completion loop.
  */
 #include <keel/keel.h>
+#include <keel/datagram.h>
+#include <keel/datagram_detail.h>
+#include "../src/datagram_open.h"   /* kl_datagram_teardown */
 #include "../src/socket.h"   /* internal kl_socket_provider_iouring() */
 
 #include <pthread.h>
@@ -116,11 +119,12 @@ static void handle_bigstream(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_end_stream(res);
 }
 
-static KlUdp g_udp;
-static void udp_echo(KlUdp *udp, const void *data, size_t len,
-                     const KlSockAddr *src, const KlSockAddr *local, void *ud) {
-    (void)local; (void)ud;
-    kl_udp_send_to(udp, data, len, src);
+static KlDatagram g_udp;
+static void udp_echo(void *ud, const void *data, size_t len,
+                     const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    (void)local; (void)flags;
+    KlDatagramMessage m = { .data = data, .len = len, .peer = peer, .tos = -1 };
+    (void)kl_datagram_send((KlDatagram *)ud, &m);
 }
 
 /* Minimal echo HTTP/2 server session (no nghttp2/HPACK) — echoes bytes through the send
@@ -504,10 +508,10 @@ int main(void) {
         return 1;
     }
 
-    KlUdpConfig ucfg = { .ctx = &g_srv.ev, .bind_addr = "127.0.0.1",
+    KlDatagramSocketConfig ucfg = { .ctx = &g_srv.ev, .bind_addr = "127.0.0.1",
                          .bind_port = SMOKE_UDP_PORT };
-    int udp_ready = (kl_udp_init(&g_udp, &ucfg) == 0 &&
-                     kl_udp_recv_start(&g_udp, udp_echo, NULL) == 0);
+    int udp_ready = (kl_datagram_socket_init(&g_udp, &ucfg) == 0 &&
+                     kl_datagram_recv_start(&g_udp, udp_echo, &g_udp) == 0);
     if (!udp_ready) fprintf(stderr, "smoke-iouring: udp init/recv_start failed\n");
 
     pthread_t th;
@@ -670,8 +674,7 @@ int main(void) {
         if (rc == 0) kl_client_response_free(&resp);
     }
 
-    kl_udp_recv_stop(&g_udp);
-    kl_udp_free(&g_udp);
+    kl_datagram_teardown(&g_udp, NULL, NULL);
     kl_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_server_free(&g_srv);
