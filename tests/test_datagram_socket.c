@@ -18,6 +18,7 @@
 
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
+#include <keel/datagram_batch.h>   /* KlDgramTxDesc / send_batch / send_gso — P1-2 peerless gate */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
@@ -37,26 +38,31 @@ static KlSocketProvider g_msp; static KlSocketOps g_mops; static KlDatagramOps g
 static unsigned  (*g_real_caps)(void *, KlSocketHandle);
 static uint32_t  (*g_real_configure)(void *, KlSocketHandle, int, const struct KlUdpConfig *);
 static int       (*g_real_close)(void *, KlSocketHandle);
+static int       (*g_real_connect)(void *, KlSocketHandle, const KlSockAddr *);
 static unsigned  g_drop_caps;                 /* caps() drops these bits */
 static uint32_t  g_rx_keep = 0xFFFFFFFFu;     /* configure() ANDs its accepted mask with this */
-static int       g_close_calls;
+static int       g_close_calls, g_configure_calls, g_connect_calls;
 
 static unsigned m_caps(void *c, KlSocketHandle fd) { return g_real_caps(c, fd) & ~g_drop_caps; }
 static uint32_t m_configure(void *c, KlSocketHandle fd, int fam, const struct KlUdpConfig *cfg) {
-    return g_real_configure(c, fd, fam, cfg) & g_rx_keep;
+    g_configure_calls++; return g_real_configure(c, fd, fam, cfg) & g_rx_keep;
 }
 static int m_close(void *c, KlSocketHandle fd) { g_close_calls++; return g_real_close(c, fd); }
+static int m_connect(void *c, KlSocketHandle fd, const KlSockAddr *a) { g_connect_calls++; return g_real_connect(c, fd, a); }
 
 static const KlSocketProvider *mock_provider(void) {
     g_msp = *kl_socket_provider_posix();
     g_mops = *g_msp.ops;
     g_mdg = *g_msp.dgram;
     g_real_caps = g_mdg.caps; g_real_configure = g_mdg.configure; g_real_close = g_mops.close;
-    g_mdg.caps = m_caps; g_mdg.configure = m_configure; g_mops.close = m_close;
+    g_real_connect = g_mops.connect;
+    g_mdg.caps = m_caps; g_mdg.configure = m_configure; g_mops.close = m_close; g_mops.connect = m_connect;
     g_msp.ops = &g_mops; g_msp.dgram = &g_mdg;
     return &g_msp;
 }
-static void mock_reset(void) { g_drop_caps = 0; g_rx_keep = 0xFFFFFFFFu; g_close_calls = 0; }
+static void mock_reset(void) {
+    g_drop_caps = 0; g_rx_keep = 0xFFFFFFFFu; g_close_calls = g_configure_calls = g_connect_calls = 0;
+}
 
 /* ── recv recorder ────────────────────────────────────────────────────────────────────────────── */
 static int g_recv_calls; static unsigned char g_buf[2048]; static size_t g_len;
@@ -293,6 +299,81 @@ UTEST(datagram_socket, connect_capability_absent) {
     ASSERT_EQ(-1, kl_datagram_connect(&dg, &peer));
     ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&dg));
     close_free(&ctx, &dg);
+    kl_event_ctx_free(&ctx);
+}
+
+/* P1: cfg->sockets == NULL means the EVENT CONTEXT's provider, not the built-in default. A custom
+ * provider on the ctx must be threaded through open/adopt/close. */
+UTEST(datagram_socket, context_provider_threaded_when_sockets_null) {
+    g_alloc = kl_allocator_default(); mock_reset();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    ctx.sockets = mock_provider();   /* the event context carries a custom provider */
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramSocketConfig cfg = { .ctx = &ctx, .sockets = NULL, .alloc = &g_alloc, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
+    ASSERT_TRUE(g_configure_calls > 0);   /* the CTX provider's configure ran — not the built-in default */
+    close_free(&ctx, &dg);
+    ASSERT_TRUE(g_close_calls > 0);        /* and its close op ran at teardown */
+    kl_event_ctx_free(&ctx);
+}
+
+/* P1: the actual-connected state gates ALL send admission paths (single/batch/GSO), not just the single
+ * send. A peerless batch or GSO send before connect is refused; after connect it is admitted. */
+UTEST(datagram_socket, peerless_batch_and_gso_require_connect) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramSocketConfig rc = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&rx, &rc));
+    uint16_t port = kl_datagram_local_port(&rx);
+    KlDatagram tx; memset(&tx, 0, sizeof(tx));
+    KlDatagramSocketConfig tc = { .ctx = &ctx, .alloc = &g_alloc };
+    ASSERT_EQ(0, kl_datagram_socket_init(&tx, &tc));
+
+    KlDatagramBatch *sb = kl_datagram_batch_create(&tx, KL_DGRAM_BATCH_SEND, 4, 1500);
+    ASSERT_TRUE(sb != NULL);
+    KlDgramTxDesc d; memset(&d, 0, sizeof(d)); d.data = "x"; d.len = 1; d.tos = -1;  /* dest UNSPEC = peerless */
+    char gbuf[4] = { 'a','b','c','d' };
+
+    /* BEFORE connect: peerless batch + GSO both refused (never reach the provider). */
+    KlDatagramSendStatus stop = KL_DATAGRAM_ACCEPTED;
+    ASSERT_EQ(0, kl_datagram_send_batch(&tx, sb, &d, 1, &stop));         /* nothing accepted */
+    ASSERT_EQ((int)KL_DATAGRAM_UNSUPPORTED, (int)stop);
+    ASSERT_EQ((int)KL_DATAGRAM_UNSUPPORTED, (int)kl_datagram_send_gso(&tx, sb, gbuf, 4, 2, NULL));
+
+    /* connect, then the SAME peerless sends are admitted. */
+    KlSockAddr dest; kl_sockaddr_parse(&dest, "127.0.0.1", port);
+    ASSERT_EQ(0, kl_datagram_connect(&tx, &dest));
+    stop = KL_DATAGRAM_ERROR;
+    ASSERT_EQ(1, kl_datagram_send_batch(&tx, sb, &d, 1, &stop));         /* admitted */
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)stop);
+    ASSERT_NE((int)KL_DATAGRAM_UNSUPPORTED, (int)kl_datagram_send_gso(&tx, sb, gbuf, 4, 2, NULL));
+
+    /* drain the send queue (incl. the GSO group) so the caller-owned batch frees cleanly. */
+    for (int i = 0; i < 60; i++) {
+        if (kl_datagram_batch_free(sb) == 0) { sb = NULL; break; }
+        kl_event_ctx_run(&ctx, 8, 10);
+    }
+    ASSERT_TRUE(sb == NULL);
+    close_free(&ctx, &rx); close_free(&ctx, &tx);
+    kl_event_ctx_free(&ctx);
+}
+
+/* P1: connect must be refused once close has begun — without issuing a provider connect syscall. */
+UTEST(datagram_socket, connect_after_close_begin_refused_no_syscall) {
+    g_alloc = kl_allocator_default(); mock_reset();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram dg; memset(&dg, 0, sizeof(dg));
+    KlDatagramSocketConfig cfg = { .ctx = &ctx, .sockets = mock_provider(), .alloc = &g_alloc,
+                                   .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
+    ASSERT_EQ(0, kl_datagram_recv_start(&dg, on_recv, NULL));   /* an in-flight recv → CLOSING on completion */
+    ASSERT_EQ(0, kl_datagram_close_begin(&dg));                 /* close begun (CLOSING or CLOSED) */
+    KlSockAddr peer; kl_sockaddr_parse(&peer, "127.0.0.1", 9999);
+    ASSERT_EQ(-1, kl_datagram_connect(&dg, &peer));            /* refused: not OPEN */
+    ASSERT_EQ((int)KL_ERR_INVALID_ARG, (int)kl_datagram_last_error(&dg));
+    ASSERT_EQ(0, g_connect_calls);                             /* no provider connect syscall */
+    pump_close(&ctx, &dg, 100); kl_datagram_free(&dg);
     kl_event_ctx_free(&ctx);
 }
 

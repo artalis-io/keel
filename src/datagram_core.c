@@ -110,6 +110,9 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
         kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);
         return -1;
     }
+    /* D1: initial connected state (0 for a fresh facade datagram — kl_datagram_connect sets it later;
+     * non-zero only when adopting an already-connected fd). Governs peerless-send admission uniformly. */
+    kl_dgram_send_set_connected(&core->send, cfg->connected);
     if (kl_dgram_close_init(&core->close, &core->send, &rx->recv, core_on_close, core) != 0) {
         kl_dgram_send_free(&core->send);
         kl_dgram_slots_free(&core->out);
@@ -273,6 +276,12 @@ void kl_dgram_core_set_gso_cbs(KlDgramCore *core, KlDgramSubmitGsoFn submit_gso,
                                KlDgramGsoDoneFn on_gso_done, void *done_ctx) {
     if (core && core->inited)
         kl_dgram_send_set_gso_cbs(&core->send, submit_gso, submit_ctx, on_gso_done, done_ctx);
+}
+void kl_dgram_core_set_connected(KlDgramCore *core, int on) {   /* D1 */
+    if (core && core->inited) kl_dgram_send_set_connected(&core->send, on);
+}
+int kl_dgram_core_connected(const KlDgramCore *core) {
+    return (core && core->inited) ? kl_dgram_send_connected(&core->send) : 0;
 }
 
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core) {

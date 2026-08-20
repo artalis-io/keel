@@ -1000,6 +1000,11 @@ UTEST(dgram_send, gso_connected_capability) {
     KlDgramSlots s2; ASSERT_EQ(kl_dgram_slots_init(&s2, &a, 8, 64), 0);
     KlDgramSend conn;
     ASSERT_EQ(kl_dgram_send_init(&conn, &s2, &a, 0, KL_DGRAM_CAP_CONNECTED, 0, iso_submit, NULL), 0);
+    /* D1: the granted cap alone is NOT enough — a peerless GSO before connect is refused. */
+    ASSERT_EQ(kl_dgram_send_enqueue_gso(&conn, g4, 4, 2, 2, NULL, -1, 0, NULL), KL_DATAGRAM_UNSUPPORTED);
+    ASSERT_EQ((int)kl_dgram_send_queued(&conn), 0);
+    /* after a successful connect (state set) the same peerless GSO is admitted. */
+    kl_dgram_send_set_connected(&conn, 1);
     ASSERT_EQ(kl_dgram_send_enqueue_gso(&conn, g4, 4, 2, 2, NULL, -1, 0, NULL), KL_DATAGRAM_ACCEPTED);
     kl_dgram_send_discard_queued(&conn);
     ASSERT_EQ(kl_dgram_send_free(&conn), 0);

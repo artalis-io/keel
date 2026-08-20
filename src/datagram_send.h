@@ -102,6 +102,9 @@ typedef struct {
     size_t            bytes_used;    /* Σ occupied-slot len (admission gate only) */
     int               completion;    /* 1 = async (submit→INFLIGHT); 0 = readiness (submit→DONE) */
     unsigned          caps;          /* KL_DGRAM_CAP_* for UNSUPPORTED mapping */
+    int               connected;     /* D1: the ACTUAL connected state (set after a successful connect).
+                                      * A peerless send needs BOTH (caps & CAP_CONNECTED) AND this — the
+                                      * single admission rule for kl_dgram_send / _enqueue / _enqueue_gso. */
     KlDgramSubmitFn   submit;   void *submit_ctx;
     KlDgramWritableFn on_writable; void *writable_ctx;
     KlDgramDrainFn    on_drain;  void *drain_ctx;
@@ -205,8 +208,13 @@ int  kl_dgram_send_free(KlDgramSend *s);
  * path — abandon is an additional owner-destruction entry, never a substitute. */
 void kl_dgram_send_abandon(KlDgramSend *s);
 
+/* D1: set the connected state (after a successful connect) — governs peerless-send admission for all of
+ * kl_dgram_send / _enqueue / _enqueue_gso. */
+void kl_dgram_send_set_connected(KlDgramSend *s, int on);
+
 static inline size_t kl_dgram_send_inflight(const KlDgramSend *s) { return s ? s->inflight_n : 0; }
 static inline size_t kl_dgram_send_queued(const KlDgramSend *s)   { return s ? s->count : 0; }
+static inline int    kl_dgram_send_connected(const KlDgramSend *s) { return s ? s->connected : 0; }
 /* Σ payload bytes over every OCCUPIED slot (queued + in-flight) — the byte view of the send backlog,
  * distinct from the slot COUNT above. Exposed publicly as kl_datagram_send_queued_bytes (M6.0a). */
 static inline size_t kl_dgram_send_queued_bytes(const KlDgramSend *s) { return s ? s->bytes_used : 0; }

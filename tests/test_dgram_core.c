@@ -177,6 +177,7 @@ static KlDgramCoreConfig base_cfg(KlAllocator *a, int completion, size_t slots, 
     c.alloc = a; c.fd = TEST_FD; c.completion = completion;
     c.send_slots = slots; c.send_slot_cap = cap; c.recv_cap = 64;
     c.caps = KL_DGRAM_CAP_CONNECTED | KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_TOS;
+    c.connected = 1;   /* D1: these unit tests use peerless sends — start already-connected */
     c.submit = test_submit; c.arm = test_arm; c.disarm = test_disarm; c.pull = test_pull;
     c.deliver = test_deliver; c.cancel_recv = test_cancel_recv;
     c.retire = test_retire; c.close_transport = test_close_transport; c.on_close = test_on_close;

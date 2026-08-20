@@ -462,6 +462,10 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
     }
     int completion = (kl_event_caps(&cfg->ctx->loop) & KL_EVENT_CAP_COMPLETION) ? 1 : 0;
     KlAllocator *alloc = cfg->alloc ? cfg->alloc : cfg->ctx->alloc;
+    /* P1: resolve ONE effective provider. "NULL = ctx default" means the EVENT CONTEXT's provider
+     * (cfg->ctx->sockets), not the built-in POSIX default — else a custom lwIP/EFI event context would be
+     * mixed with POSIX datagram ops. Use it consistently for open, adoption, and every pre-adoption close. */
+    const KlSocketProvider *sockets = cfg->sockets ? cfg->sockets : cfg->ctx->sockets;
 
     /* Map the sockopt subset → the M0 KlUdpConfig. GRO is readiness-only (M5.4): never enable UDP_GRO
      * capture on a completion loop (the completion recv cannot split). multicast_group is joined
@@ -484,13 +488,13 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
     uc.alloc = alloc;
 
     KlDatagramPrep prep;
-    if (kl_datagram_open(cfg->sockets, &uc, &prep) != 0) {
+    if (kl_datagram_open(sockets, &uc, &prep) != 0) {
         dg->last_error = prep.err;   /* open closed its own fd on failure — nothing to reclaim */
         return -1;
     }
     /* Required RX-capture gate (P1-D): fail-loud, close the prepared fd exactly once. */
     if (cfg->want_rx_caps & ~prep.rx_caps) {
-        kl_sock_close(cfg->sockets, prep.fd);
+        kl_sock_close(sockets, prep.fd);
         dg->last_error = KL_ERR_UNSUPPORTED;
         return -1;
     }
@@ -507,7 +511,7 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
     int want_mcast = (cfg->multicast_group && cfg->multicast_group[0]) ? 1 : 0;
 
     KlDatagramConfig dc; memset(&dc, 0, sizeof(dc));
-    dc.ctx = cfg->ctx; dc.alloc = alloc; dc.sockets = cfg->sockets; dc.fd = prep.fd;
+    dc.ctx = cfg->ctx; dc.alloc = alloc; dc.sockets = sockets; dc.fd = prep.fd;
     dc.send_slots = slots; dc.send_slot_cap = slot_cap; dc.recv_cap = recv_cap;
     dc.want_caps = cfg->want_caps | (want_mcast ? (unsigned)KL_DGRAM_CAP_MULTICAST : 0u);
     dc.optional_caps = cfg->optional_caps | (unsigned)KL_DGRAM_CAP_CONNECTED;   /* always opportunistic (P1-B) */
@@ -515,7 +519,7 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
     if (kl_datagram_init_ex(dg, &dc, budget) != 0) {
         /* init failed BEFORE adoption → the fd was not adopted (caller retains it). init_ex already set
          * dg->last_error + memset dg; close the prepared fd exactly once. */
-        kl_sock_close(cfg->sockets, prep.fd);
+        kl_sock_close(sockets, prep.fd);
         return -1;
     }
     /* fd is now adopted by dg; any failure below tears down THROUGH KlDatagram (which closes it once). */
@@ -532,13 +536,20 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
     return 0;
 }
 
-/* D1: provider-neutral connect (first-time only). Granted-cap gated (P1-B); reconnect unsupported (P1-C). */
+/* D1: provider-neutral connect (first-time only). Granted-cap gated (P1-B); reconnect unsupported (P1-C);
+ * connected state lives in the core send machine so single/batch/GSO all enforce it (P1-2); refused once
+ * close has begun (P1-3). */
 int kl_datagram_connect(KlDatagram *dg, const KlSockAddr *peer) {
     if (!dg || !dg->core || !kl_handle_valid(dg->fd) || !peer) {
         if (dg) dg->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
-    if (dg->connected) {                 /* reconnect is UNSUPPORTED in D1 — refuse without a syscall */
+    /* P1-3: only an OPEN datagram may connect. Once close has begun the core + fd are still live, so
+     * without this a closing/closed datagram could issue a connect syscall — refuse without one. */
+    if (kl_dgram_core_close_state(dg->core) != KL_DGRAM_CLOSE_OPEN) {
+        dg->last_error = KL_ERR_INVALID_ARG; return -1;
+    }
+    if (kl_dgram_core_connected(dg->core)) {   /* reconnect is UNSUPPORTED in D1 — refuse without a syscall */
         dg->last_error = KL_ERR_INVALID_ARG; return -1;
     }
     if (!(kl_datagram_caps(dg) & KL_DGRAM_CAP_CONNECTED)) {   /* the GRANTED cap, consistent with the send gate */
@@ -548,18 +559,16 @@ int kl_datagram_connect(KlDatagram *dg, const KlSockAddr *peer) {
         dg->last_error = KL_ERR_CONNECT;   /* first-connect failure: stays unconnected + usable */
         return -1;
     }
-    dg->connected = 1;
+    kl_dgram_core_set_connected(dg->core, 1);   /* now peerless sends (single/batch/GSO) are admitted */
     return 0;
 }
 
 KlDatagramSendStatus kl_datagram_send(KlDatagram *dg, const KlDatagramMessage *m) {
     if (!dg || !dg->core) return KL_DATAGRAM_ERROR;
-    /* D1: a peerless (connected-mode) send requires an ACTUAL successful connect, not merely the granted
-     * CAP_CONNECTED. Reject send-before-connect deterministically (O-D6-3: KL_DATAGRAM_UNSUPPORTED covers
-     * both "CONNECTED not granted" — the machine's own gate — and "granted but not connected", here) so it
-     * is never handed to the kernel on an unconnected socket. Destination-addressed sends are unaffected. */
-    if (m && (!m->peer || kl_sockaddr_family(m->peer) == KL_AF_UNSPEC) && !dg->connected)
-        return KL_DATAGRAM_UNSUPPORTED;
+    /* D1: a peerless (connected-mode) send requires the granted CAP_CONNECTED AND an ACTUAL successful
+     * connect — enforced uniformly in the core send machine's admission (send_validate), so the single,
+     * batch, and GSO paths share the one rule (O-D6-3: KL_DATAGRAM_UNSUPPORTED covers both "not granted"
+     * and "not connected"). No separate facade gate here. */
     KlDatagramSendStatus st = kl_dgram_core_send(dg->core, m);
     dg_reconcile_write(dg);   /* a queued (would-block) readiness send needs WRITE interest */
     return st;

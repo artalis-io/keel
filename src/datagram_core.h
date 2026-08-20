@@ -47,6 +47,8 @@ typedef struct {
     size_t       send_byte_budget;/* M1: 0 = SLOT policy; >0 = BOTH byte-gate budget (bytes). */
     size_t       recv_cap;     /* inbound slot payload capacity. */
     unsigned     caps;         /* KL_DGRAM_CAP_* for UNSUPPORTED mapping on send. */
+    int          connected;    /* D1: initial connected state for peerless-send admission (0 = fresh; the
+                                * facade sets it via kl_datagram_connect). Applied to the send machine at init. */
     unsigned     accepted_rx_caps;/* M5.1: enabled-per-socket KL_DGRAM_RX_* mask (already masked by the
                                 * facade). Stored for the GRO-activation predicate; no wiring in M5.1. */
 
@@ -190,6 +192,10 @@ void kl_dgram_core_on_drain(KlDgramCore *core, KlDgramDrainFn cb, void *ctx);
 void kl_dgram_core_on_drop(KlDgramCore *core, KlDgramDropFn cb, void *ctx);   /* M5.2a recoverable drop */
 void kl_dgram_core_set_gso_cbs(KlDgramCore *core, KlDgramSubmitGsoFn submit_gso, void *submit_ctx,
                                KlDgramGsoDoneFn on_gso_done, void *done_ctx);   /* M5.2b GSO */
+/* D1: the ACTUAL connected state on the send machine (set after a successful connect); governs
+ * peerless-send admission uniformly across the single / batch / GSO paths. */
+void kl_dgram_core_set_connected(KlDgramCore *core, int on);
+int  kl_dgram_core_connected(const KlDgramCore *core);
 
 /* The inbound slot (recv storage) — a submit/pull adapter writes the received datagram here. */
 KlDgramSlot *kl_dgram_core_inbound_slot(KlDgramCore *core);

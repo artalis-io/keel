@@ -68,6 +68,9 @@ void kl_dgram_send_set_gso_cbs(KlDgramSend *s, KlDgramSubmitGsoFn submit_gso, vo
 void kl_dgram_send_set_closing(KlDgramSend *s, int closing) {
     if (s) s->closing = closing ? 1 : 0;
 }
+void kl_dgram_send_set_connected(KlDgramSend *s, int on) {   /* D1: set after a successful connect */
+    if (s) s->connected = on ? 1 : 0;
+}
 void kl_dgram_send_set_activity_cb(KlDgramSend *s, void (*cb)(void *ctx, int delta), void *ctx) {
     if (!s) return;
     s->on_activity = cb; s->activity_ctx = ctx;
@@ -251,8 +254,11 @@ static KlDatagramSendStatus send_validate(const KlDgramSend *s, const KlDatagram
         return KL_DATAGRAM_UNSUPPORTED;
     if (m->tos >= 0 && !(s->caps & KL_DGRAM_CAP_TOS))
         return KL_DATAGRAM_UNSUPPORTED;
-    if (!addr_or_null(m->peer) && !(s->caps & KL_DGRAM_CAP_CONNECTED))
-        return KL_DATAGRAM_UNSUPPORTED;            /* connected-mode send unsupported */
+    /* Peerless (connected-mode) send: needs BOTH the granted CAP_CONNECTED AND an ACTUAL successful
+     * connect (D1). Shared by kl_dgram_send AND kl_dgram_send_enqueue (batch), so a peerless send can
+     * never reach the provider before kl_datagram_connect. */
+    if (!addr_or_null(m->peer) && !((s->caps & KL_DGRAM_CAP_CONNECTED) && s->connected))
+        return KL_DATAGRAM_UNSUPPORTED;            /* connected-mode send unsupported / not yet connected */
     /* Permanent: a datagram that can never fit one slot. Nothing taken. */
     if (m->len > s->slots->out_cap)
         return KL_DATAGRAM_TOO_LARGE;
@@ -356,8 +362,8 @@ KlDatagramSendStatus kl_dgram_send_enqueue_gso(KlDgramSend *s, const void *buf, 
     /* Requested-but-unsupported features fail (matching send_validate §9). A GSO group carries no
      * per-packet source-pin / TOS (the public API has none), so only connected-mode applies: a
      * NULL/UNSPEC peer requests connected send, which must be granted. Nothing taken. */
-    if (!addr_or_null(peer) && !(s->caps & KL_DGRAM_CAP_CONNECTED))
-        return KL_DATAGRAM_UNSUPPORTED;
+    if (!addr_or_null(peer) && !((s->caps & KL_DGRAM_CAP_CONNECTED) && s->connected))
+        return KL_DATAGRAM_UNSUPPORTED;   /* connected-mode GSO: cap granted AND actually connected (D1) */
     /* Permanent: more segments than the whole slot pool, or over the whole byte budget. */
     if (nseg > s->ring_cap)                            return KL_DATAGRAM_TOO_LARGE;
     if (s->byte_budget && total > s->byte_budget)      return KL_DATAGRAM_TOO_LARGE;
