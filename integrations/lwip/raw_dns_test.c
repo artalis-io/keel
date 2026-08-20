@@ -4,19 +4,18 @@
  * the loopback netif (NO_SYS=1, single-thread).
  *
  * The whole point of LC-3 (docs/phase10_lwip_raw_client_design.md, as corrected on review): the
- * built-in DNS resolver rides KEEL's OWN KlUdp — the same KlUdp that LC-3a (#194) made work over
- * lwip-raw. So there is ONE UDP/DNS path everywhere. kl_dns_resolver_create(ctx, cfg) on a ctx
- * whose ctx.sockets = kl_socket_provider_lwip_raw() resolves names over lwIP with NO changes to
- * src/dns_resolver.c or src/udp.c: the resolver's UDP query socket (kl_udp_init in
- * dns_resolver.c) becomes a udp_pcb, kl_udp_send_to -> udp_sendto over loopif, the reply lands in
- * the glue's udp recv ring and surfaces as KL_COMP_DGRAM_RECV, and dns_on_recv parses it with
- * KEEL's own kl_dns_parse_response. The TCP fallback (RFC 7766) would ride ctx->sockets'
- * SOCK_STREAM connect (LC-1) too, but a small UDP answer never triggers it here.
+ * built-in DNS resolver rides KEEL's OWN canonical KlDatagram — the same datagram path that LC-3a
+ * (#194) made work over lwip-raw. So there is ONE UDP/DNS path everywhere. kl_dns_resolver_create(ctx,
+ * cfg) on a ctx whose ctx.sockets = kl_socket_provider_lwip_raw() resolves names over lwIP with NO
+ * changes to src/dns_resolver.c: the resolver's KlDatagram query socket becomes a udp_pcb,
+ * kl_datagram_send -> udp_sendto over loopif, the reply lands in the glue's udp recv ring and surfaces
+ * as KL_COMP_DGRAM_RECV, and dns_on_recv parses it with KEEL's own kl_dns_parse_response. The TCP
+ * fallback (RFC 7766) would ride ctx->sockets' SOCK_STREAM connect (LC-1) too, but a small UDP answer
+ * never triggers it here.
  *
- * The in-process DNS responder is a public KlDatagram (not lwIP's dns), riding the same
- * datagram-over-raw path the resolver's own query socket uses (the resolver still creates that
- * socket through KlUdp internally today; it converges on KlDatagram when the production resolver
- * migrates). One datagram data-plane everywhere. It
+ * The in-process DNS responder is a public KlDatagram (not lwIP's dns), riding the SAME canonical
+ * datagram-over-raw path the resolver's own query socket uses (M3 migrated the production resolver to
+ * KlDatagram) — responder and resolver genuinely share one datagram data-plane. It
  * binds 127.0.0.1:<dns_port>, parses each query's question section, and replies with a hard-coded
  * A record (test.local -> 127.0.0.1); AAAA queries get a NODATA (0-answer) reply so that leg
  * settles promptly (the loopif is IPv4-only). It echoes the question bytes VERBATIM (preserving
@@ -30,8 +29,8 @@
  *   B1  a full KlClient GET http://test.local:<port>/ with the built-in DNS resolver -> 200 +
  *         byte-exact body: resolve over raw + Happy-Eyeballs connect over raw + request/response.
  *
- * src/dns_resolver.c and src/udp.c are UNCHANGED — only the raw provider + glue (from LC-1/LC-3a)
- * supply the transport. Prints "LC-3 PASS". Must be ASan+UBSan+LSan-clean.
+ * src/dns_resolver.c is UNCHANGED — only the raw provider + glue (from LC-1/LC-3a) supply the
+ * transport. Prints "LC-3 PASS". Must be ASan+UBSan+LSan-clean.
  *
  * SPDX-License-Identifier: MIT
  */

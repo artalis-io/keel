@@ -450,9 +450,11 @@ static KlResolver *make_resolver_cfg(KlEventCtx *ctx, KlDatagram *ns,
     dc->port = kl_datagram_local_port(ns);
     errno = 0;
     KlResolver *r = kl_dns_resolver_create(ctx, dc);
-    if (!r)
+    if (!r) {
         fprintf(stderr, "make_resolver: kl_dns_resolver_create FAILED (nameserver 127.0.0.1#%u, "
                         "errno=%d: %s)\n", dc->port, errno, strerror(errno));
+        kl_dg_close_free(ctx, ns);   /* reclaim the ADOPTED nameserver on resolver-create failure */
+    }
     return r;
 }
 
@@ -494,10 +496,12 @@ static KlResolver *make_resolver_slots(KlEventCtx *ctx, KlDatagram *ns,
     dc->port = kl_datagram_local_port(ns);
     errno = 0;
     KlResolver *r = kl_dns_resolver_create_slots(ctx, dc, send_slots);
-    if (!r)
+    if (!r) {
         fprintf(stderr, "make_resolver_slots: kl_dns_resolver_create_slots FAILED "
                         "(nameserver 127.0.0.1#%u, send_slots=%d, errno=%d: %s)\n",
                 dc->port, send_slots, errno, strerror(errno));
+        kl_dg_close_free(ctx, ns);   /* reclaim the ADOPTED nameserver on resolver-create failure */
+    }
     return r;
 }
 
@@ -1096,10 +1100,12 @@ static KlResolver *resolver_with_search(KlEventCtx *ctx, KlDatagram *ns,
     snprintf(rcbuf, sizeof(rcbuf), "nameserver 127.0.0.1#%u\n%s\n",
              kl_datagram_local_port(ns), search_line);
     const char *rcpath = write_resolv(rcbuf);
-    if (!rcpath) return NULL;
+    if (!rcpath) { kl_dg_close_free(ctx, ns); return NULL; }   /* reclaim on resolv.conf write failure */
     KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = timeout_ms,
                                .attempts = 1 };
-    return kl_dns_resolver_create(ctx, &dc);
+    KlResolver *r = kl_dns_resolver_create(ctx, &dc);
+    if (!r) kl_dg_close_free(ctx, ns);                         /* reclaim on resolver-create failure */
+    return r;
 }
 
 UTEST(dns, search_appended_for_unqualified) {

@@ -10,6 +10,9 @@
 #include <stdint.h>
 #include <keel/sockaddr.h>          /* KlSockAddr — the public address currency */
 #include <keel/udp_transport_detail.h>   /* KlUdpTransport — the raw transport state KlUdp wraps (Phase A) */
+#include <keel/datagram.h>          /* D2: the datagram-neutral TOS/DSCP/ECN constants moved here;
+                                     * udp.h re-exports them so <keel/udp.h>-only callers keep working
+                                     * until D3 deletes udp.h atomically. */
 
 /**
  * udp.h — Non-blocking UDP datagram socket over KlEventCtx.
@@ -31,8 +34,8 @@
 
 typedef struct KlUdp KlUdp;
 
-/* KL_TOS() + KL_DSCP_* / KL_ECN_* moved to <keel/datagram.h> (D2, datagram-neutral). Nothing in the KlUdp
- * surface uses them in code; a caller that wants them includes <keel/datagram.h>. */
+/* KL_TOS() + KL_DSCP_* / KL_ECN_* live in <keel/datagram.h> (D2, datagram-neutral); udp.h includes it
+ * above, so existing <keel/udp.h>-only callers still see these constants until D3 removes udp.h. */
 
 /** @brief Internal queued-datagram node (defined in src/udp.c). */
 typedef struct KlUdpDatagram KlUdpDatagram;
