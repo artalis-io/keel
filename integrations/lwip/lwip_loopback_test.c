@@ -11,7 +11,8 @@
  * libkeel — no core recompile. Exit 0 on success.
  */
 #include <keel/keel.h>
-#include <keel/udp.h>
+#include <keel/datagram.h>
+#include <keel/datagram_detail.h>   /* complete KlDatagram type — the echo server embeds one */
 #include "keel_lwip.h"
 #ifdef LWT_TLS
 #include <keel_tls_mbedtls.h>   /* Phase 4: HTTPS over lwIP (mbedTLS BIO → lwIP provider) */
@@ -78,13 +79,24 @@ static int keel_client_on_lwip(uint16_t port) {
     return ok;
 }
 
-/* Phase 3: a Keel KlUdp echo server on the lwIP providers, exercised by a raw lwIP
+/* Phase 3: a Keel KlDatagram echo server on the lwIP providers, exercised by a raw lwIP
  * UDP client. Proves the datagram axis (socket_lwip's KlDatagramOps: recv/send) —
  * the foundation for udp_server and the built-in async DNS resolver on lwIP. */
-static void udp_echo(KlUdp *udp, const void *data, size_t len,
-                     const KlSockAddr *src, const KlSockAddr *local, void *ud) {
-    (void)local; (void)ud;
-    if (src) (void)kl_udp_send_to(udp, data, len, src);   /* bounce it back */
+static void udp_echo(void *ud, const void *data, size_t len,
+                     const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    (void)local; (void)flags;
+    KlDatagram *echo = ud;
+    if (peer)   /* bounce it back */
+        (void)kl_datagram_send(echo, &(KlDatagramMessage){ .data = data, .len = len, .peer = peer, .tos = -1 });
+}
+
+/* Public close lifecycle over the lwIP readiness loop: abortive close, pump until CLOSED, free. */
+static void dg_close(KlEventCtx *ctx, KlDatagram *dg) {
+    if (kl_datagram_close_state(dg) != KL_DGRAM_CLOSE_CLOSED)
+        (void)kl_datagram_close_cancel(dg);
+    for (int i = 0; i < 300 && kl_datagram_close_state(dg) != KL_DGRAM_CLOSE_CLOSED; i++)
+        kl_event_ctx_run(ctx, 16, 5);
+    kl_datagram_free(dg);
 }
 
 static int keel_udp_on_lwip(void) {
@@ -94,15 +106,15 @@ static int keel_udp_on_lwip(void) {
         return 0;
     uev.sockets = kl_socket_provider_lwip();
 
-    KlUdp echo;
-    KlUdpConfig ucfg = {
+    KlDatagram echo;
+    KlDatagramSocketConfig ucfg = {
         .ctx = &uev, .family = AF_INET,
         .bind_addr = "127.0.0.1", .bind_port = LWT_UDP_PORT,
         .alloc = &alloc,
     };
-    if (kl_udp_init(&echo, &ucfg) != 0) { kl_event_ctx_free(&uev); return 0; }
-    if (kl_udp_recv_start(&echo, udp_echo, NULL) != 0) {
-        kl_udp_free(&echo); kl_event_ctx_free(&uev); return 0;
+    if (kl_datagram_socket_init(&echo, &ucfg) != 0) { kl_event_ctx_free(&uev); return 0; }
+    if (kl_datagram_recv_start(&echo, udp_echo, &echo) != 0) {
+        dg_close(&uev, &echo); kl_event_ctx_free(&uev); return 0;
     }
 
     /* Raw lwIP UDP client: send a datagram, expect it echoed back. */
@@ -128,7 +140,7 @@ static int keel_udp_on_lwip(void) {
         }
     }
     lwip_close(c);
-    kl_udp_free(&echo);
+    dg_close(&uev, &echo);
     kl_event_ctx_free(&uev);
     return ok;
 }
@@ -281,7 +293,7 @@ int main(void) {
     printf("lwIP loopback: Keel client on lwIP got %s\n",
            client_ok ? "200 (correct)" : "UNEXPECTED");
 
-    /* Phase 3: a Keel KlUdp echo on lwIP, exercised by a raw lwIP UDP client. */
+    /* Phase 3: a Keel KlDatagram echo on lwIP, exercised by a raw lwIP UDP client. */
     int udp_ok = keel_udp_on_lwip();
     printf("lwIP loopback: Keel UDP echo on lwIP %s\n",
            udp_ok ? "round-tripped (correct)" : "UNEXPECTED");

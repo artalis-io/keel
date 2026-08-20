@@ -13,8 +13,10 @@
  * KEEL's own kl_dns_parse_response. The TCP fallback (RFC 7766) would ride ctx->sockets'
  * SOCK_STREAM connect (LC-1) too, but a small UDP answer never triggers it here.
  *
- * The in-process DNS responder is ALSO a KlUdp (not lwIP's dns) — so BOTH the resolver and the
- * responder ride the SAME KlUdp-over-raw datagram path (the single-UDP-path requirement). It
+ * The in-process DNS responder is a public KlDatagram (not lwIP's dns), riding the same
+ * datagram-over-raw path the resolver's own query socket uses (the resolver still creates that
+ * socket through KlUdp internally today; it converges on KlDatagram when the production resolver
+ * migrates). One datagram data-plane everywhere. It
  * binds 127.0.0.1:<dns_port>, parses each query's question section, and replies with a hard-coded
  * A record (test.local -> 127.0.0.1); AAAA queries get a NODATA (0-answer) reply so that leg
  * settles promptly (the loopif is IPv4-only). It echoes the question bytes VERBATIM (preserving
@@ -22,7 +24,7 @@
  * for backward compat, dns_resolver.c) — so no cookie machinery is needed in the responder.
  *
  * Coverage:
- *   A1  resolve("test.local") over lwip-raw via the KlUdp responder -> 127.0.0.1 (the A leg).
+ *   A1  resolve("test.local") over lwip-raw via the KlDatagram responder -> 127.0.0.1 (the A leg).
  *   A2  resolve("127.0.0.1") numeric literal -> the deferred-literal fast path (no query, no
  *         responder); exercises the resolver's non-blocking literal completion.
  *   B1  a full KlClient GET http://test.local:<port>/ with the built-in DNS resolver -> 200 +
@@ -36,7 +38,8 @@
 #include <keel/keel.h>
 #include <keel/dns_resolver.h>
 #include <keel/resolver.h>
-#include <keel/udp.h>
+#include <keel/datagram.h>
+#include <keel/datagram_detail.h>   /* complete KlDatagram type — the responder embeds one */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
@@ -55,15 +58,26 @@ static int fail(const char *msg) { printf("LC-3 FAIL: %s\n", msg); return 1; }
 
 #define DNS_PORT 5533   /* responder port (>1024, no privilege needed) */
 
-/* ── in-process DNS responder (a KlUdp — the SAME KlUdp path the resolver uses) ────────
+/* ── in-process DNS responder (a public KlDatagram over the same datagram-over-raw path) ────────
  * Parses each incoming query's question section and replies with a hard-coded A record for
  * test.local -> 127.0.0.1 (or a NODATA reply for AAAA / other names), echoing the question bytes
- * verbatim. State lives in one struct so cleanup is exactly-once. */
+ * verbatim. State lives in one struct so cleanup is exactly-once. Holds its ctx so the public close
+ * lifecycle (close_cancel -> pump -> free) can drive to CLOSED. */
 typedef struct {
-    KlUdp  sock;
+    KlDatagram  sock;
+    KlEventCtx *ctx;
     int    inited;
     int    queries;      /* count of queries answered (diagnostic) */
 } DnsResponder;
+
+/* Public close lifecycle for a responder socket: abortive close, pump until CLOSED, free. */
+static void dg_close(KlEventCtx *ctx, KlDatagram *dg) {
+    if (kl_datagram_close_state(dg) != KL_DGRAM_CLOSE_CLOSED)
+        (void)kl_datagram_close_cancel(dg);
+    for (int i = 0; i < 300 && kl_datagram_close_state(dg) != KL_DGRAM_CLOSE_CLOSED; i++)
+        kl_event_ctx_run(ctx, 16, 5);
+    kl_datagram_free(dg);
+}
 
 /* Skip a DNS name starting at off (labels until a 0 length byte). No compression is used in a
  * query's QNAME, so a simple label walk suffices. Returns the offset just past the terminating 0,
@@ -101,12 +115,12 @@ static int resp_qname_is_test_local(const uint8_t *pkt, size_t len) {
     return 0;
 }
 
-static void resp_on_query(KlUdp *udp, const void *data, size_t len,
-                          const KlSockAddr *src, const KlSockAddr *local, void *ud) {
-    (void)local;
+static void resp_on_query(void *ud, const void *data, size_t len,
+                          const KlSockAddr *peer, const KlSockAddr *local, unsigned flags) {
+    (void)local; (void)flags;
     DnsResponder *dr = ud;
     const uint8_t *q = data;
-    if (!src || len < 12) return;
+    if (!peer || len < 12) return;
 
     /* Locate the question section: QNAME (from offset 12) + QTYPE + QCLASS. */
     size_t qend = resp_skip_qname(q, len, 12);
@@ -139,19 +153,21 @@ static void resp_on_query(KlUdp *udp, const void *data, size_t len,
         buf[n++] = 127; buf[n++] = 0; buf[n++] = 0; buf[n++] = 1;   /* RDATA = 127.0.0.1 */
     }
     dr->queries++;
-    (void)kl_udp_send_to(udp, buf, n, src);       /* reply to the resolver's ephemeral port */
+    /* reply to the resolver's ephemeral port */
+    (void)kl_datagram_send(&dr->sock, &(KlDatagramMessage){ .data = buf, .len = n, .peer = peer, .tos = -1 });
 }
 
 static int responder_init(DnsResponder *dr, KlEventCtx *ctx) {
     memset(dr, 0, sizeof(*dr));
-    KlUdpConfig uc = { .ctx = ctx, .bind_addr = "127.0.0.1", .bind_port = DNS_PORT };
-    if (kl_udp_init(&dr->sock, &uc) != 0) return -1;
-    if (kl_udp_recv_start(&dr->sock, resp_on_query, dr) != 0) { kl_udp_free(&dr->sock); return -1; }
+    dr->ctx = ctx;
+    KlDatagramSocketConfig uc = { .ctx = ctx, .bind_addr = "127.0.0.1", .bind_port = DNS_PORT };
+    if (kl_datagram_socket_init(&dr->sock, &uc) != 0) return -1;
+    if (kl_datagram_recv_start(&dr->sock, resp_on_query, dr) != 0) { dg_close(ctx, &dr->sock); return -1; }
     dr->inited = 1;
     return 0;
 }
 static void responder_free(DnsResponder *dr) {
-    if (dr->inited) { kl_udp_free(&dr->sock); dr->inited = 0; }
+    if (dr->inited) { dg_close(dr->ctx, &dr->sock); dr->inited = 0; }
 }
 
 /* ── A1/A2: standalone resolver captures ──────────────────────────────────────── */
@@ -177,7 +193,7 @@ static void pump_until_done(KlEventCtx *ctx, int ticks) {
         kl_event_ctx_run(ctx, 16, 5);
 }
 
-/* A1 — resolve "test.local" over the raw UDP path via the KlUdp responder. */
+/* A1 — resolve "test.local" over the raw UDP path via the KlDatagram responder. */
 static int a1_resolve_name(KlEventCtx *ctx) {
     atomic_store(&g_done, 0);
     atomic_store(&g_error, -1);
@@ -204,7 +220,7 @@ static int a1_resolve_name(KlEventCtx *ctx) {
     r->destroy(r);
     responder_free(&dr);
     if (rc) return rc;
-    printf("PASS A1 (resolve test.local -> 127.0.0.1:8080 over lwip-raw KlUdp)\n");
+    printf("PASS A1 (resolve test.local -> 127.0.0.1:8080 over lwip-raw KlDatagram)\n");
     return 0;
 }
 
