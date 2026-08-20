@@ -7,12 +7,13 @@
  */
 #include "utest.h"
 #include "../src/socket.h"
+#include "../src/event_caps.h"   /* kl_event_caps — guard readiness-only provider-seam tests */
 
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>   /* D2: provider-threading tests use a stack KlDatagram now */
-#include "../src/datagram_open.h"   /* kl_datagram_teardown */
+#include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
 #include <keel/server.h>
 #include <keel/client.h>
 
@@ -233,7 +234,7 @@ UTEST(sockprov, datagram_threads_provider) {
     ASSERT_TRUE(m.nb_calls >= 1);                    /* set_nonblocking went through the mock */
     ASSERT_TRUE(m.cloexec_calls >= 1);               /* set_cloexec too */
 
-    kl_datagram_teardown(&dg, NULL, NULL);
+    kl_dg_close_free(&ctx, &dg);
     kl_event_ctx_free(&ctx);
 }
 
@@ -318,7 +319,7 @@ UTEST(dgramprov, configure_caps_negotiated) {
     ASSERT_EQ((unsigned)0, (rc & KL_DGRAM_RX_GRO));  /* not reported → off */
     ASSERT_TRUE((rc & KL_DGRAM_RX_TOS) != 0);        /* accepted → stored */
 
-    kl_datagram_teardown(&dg, NULL, NULL);
+    kl_dg_close_free(&ctx, &dg);
     kl_event_ctx_free(&ctx);
 }
 
@@ -333,6 +334,16 @@ UTEST(dgramprov, send_success_then_eagain_enqueues) {
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
     ctx.sockets = &p;
+
+    /* This asserts the READINESS provider-seam send contract: a synchronous
+     * provider->send that returns EAGAIN is queued, not dropped. On a completion
+     * loop the datagram routes sends through the completion driver on the real
+     * fd (the provider->send op is never consulted), so the mock-seam assertion
+     * does not apply — skip there. */
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) {
+        kl_event_ctx_free(&ctx);
+        UTEST_SKIP("readiness-only mock provider-seam send contract");
+    }
 
     KlDatagram dg;
     KlDatagramSocketConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
@@ -358,7 +369,7 @@ UTEST(dgramprov, send_success_then_eagain_enqueues) {
     ASSERT_EQ((size_t)7, kl_datagram_send_queued_bytes(&dg));   /* queued behind backpressure */
     ASSERT_EQ((uint64_t)0, kl_datagram_dropped(&dg));           /* not dropped */
 
-    kl_datagram_teardown(&dg, NULL, NULL);
+    kl_dg_close_free(&ctx, &dg);
     kl_event_ctx_free(&ctx);
 }
 

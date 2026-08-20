@@ -17,7 +17,7 @@
 #include <keel/keel.h>
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
-#include "../src/datagram_open.h"   /* kl_datagram_teardown */
+#include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
 #include "../src/socket.h"   /* internal kl_socket_provider_iouring() */
 
 #include <pthread.h>
@@ -674,9 +674,9 @@ int main(void) {
         if (rc == 0) kl_client_response_free(&resp);
     }
 
-    kl_datagram_teardown(&g_udp, NULL, NULL);
     kl_server_stop(&g_srv);
     pthread_join(th, NULL);
+    kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now — safe to pump the public close */
     kl_server_free(&g_srv);
     unlink(SMOKE_FILE_PATH);
     unlink(SMOKE_BIGFILE_PATH);

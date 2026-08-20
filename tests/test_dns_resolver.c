@@ -3,7 +3,7 @@
 #include <keel/resolver.h>
 #include <keel/datagram.h>          /* D2: the fake nameserver + spoofer are bound KlDatagrams now */
 #include <keel/datagram_detail.h>   /* stack-allocate KlDatagram */
-#include "../src/datagram_open.h"   /* kl_datagram_teardown — synchronous harness teardown */
+#include "datagram_test_util.h"     /* kl_dg_close_free — PUBLIC close/drive/free lifecycle */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/error.h>
@@ -435,10 +435,15 @@ static KlResolver *make_resolver_cfg(KlEventCtx *ctx, KlDatagram *ns,
      * points — the mock nameserver's bound KlDatagram vs the resolver's own KlDatagram construction
      * (kl_datagram_open -> _init -> _recv_start). */
     errno = 0;
-    if (kl_datagram_socket_init(ns, &sc) != 0 ||
-        kl_datagram_recv_start(ns, mock_ns, ns) != 0) {
-        fprintf(stderr, "make_resolver: nameserver KlDatagram init FAILED: %s (errno=%d: %s)\n",
+    if (kl_datagram_socket_init(ns, &sc) != 0) {
+        fprintf(stderr, "make_resolver: nameserver socket_init FAILED: %s (errno=%d: %s)\n",
                 kl_strerror(kl_datagram_last_error(ns)), errno, strerror(errno));
+        return NULL;   /* socket_init closed the fd on failure — nothing to reclaim */
+    }
+    if (kl_datagram_recv_start(ns, mock_ns, ns) != 0) {         /* split: reclaim the ADOPTED nameserver */
+        fprintf(stderr, "make_resolver: nameserver recv_start FAILED: %s\n",
+                kl_strerror(kl_datagram_last_error(ns)));
+        kl_dg_close_free(ctx, ns);
         return NULL;
     }
     dc->nameserver = "127.0.0.1";
@@ -474,10 +479,15 @@ static KlResolver *make_resolver_slots(KlEventCtx *ctx, KlDatagram *ns,
                                        KlDnsResolverConfig *dc, int send_slots) {
     KlDatagramSocketConfig sc = { .ctx = ctx, .bind_addr = "127.0.0.1" };
     errno = 0;
-    if (kl_datagram_socket_init(ns, &sc) != 0 ||
-        kl_datagram_recv_start(ns, mock_ns, ns) != 0) {
-        fprintf(stderr, "make_resolver_slots: nameserver KlDatagram init FAILED: %s (errno=%d: %s)\n",
+    if (kl_datagram_socket_init(ns, &sc) != 0) {
+        fprintf(stderr, "make_resolver_slots: nameserver socket_init FAILED: %s (errno=%d: %s)\n",
                 kl_strerror(kl_datagram_last_error(ns)), errno, strerror(errno));
+        return NULL;
+    }
+    if (kl_datagram_recv_start(ns, mock_ns, ns) != 0) {
+        fprintf(stderr, "make_resolver_slots: nameserver recv_start FAILED: %s\n",
+                kl_strerror(kl_datagram_last_error(ns)));
+        kl_dg_close_free(ctx, ns);
         return NULL;
     }
     dc->nameserver = "127.0.0.1";
@@ -514,7 +524,7 @@ UTEST(dns, resolve_a) {
     ASSERT_EQ(1, g_res.naddrs);            /* resolver propagates the address list */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -538,7 +548,7 @@ UTEST(dns, fallback_a_to_aaaa) {
     ASSERT_TRUE(g_queries >= 2);        /* A then AAAA */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -559,7 +569,7 @@ UTEST(dns, nxdomain_errors) {
     ASSERT_EQ(KL_ERR_DNS, g_err);
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -580,7 +590,7 @@ UTEST(dns, timeout_errors) {
     ASSERT_EQ(KL_ERR_DNS, g_err);
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -606,7 +616,7 @@ UTEST(dns, literal_ip_shortcut) {
     ASSERT_EQ(0, g_queries);            /* no packet sent */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -633,7 +643,7 @@ UTEST(dns, localhost_shortcut) {
     ASSERT_EQ(0, g_queries);            /* no packet sent */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -653,7 +663,7 @@ UTEST(dns, destroy_with_inflight) {
     r->destroy(r);                       /* in-flight req + timer freed here */
     ASSERT_EQ(0, g_done);                /* never completed */
 
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -685,7 +695,7 @@ UTEST(dns, destroy_from_within_on_recv) {
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(0, g_err);
     /* r was freed by the deferred teardown at the outermost leave — do NOT touch it. */
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -706,7 +716,7 @@ UTEST(dns, destroy_from_done_literal_timer) {
     ASSERT_TRUE(r->resolve(r, &ctx, "192.0.2.10", 1234, on_done_destroy, NULL) != NULL);
     pump(&ctx, &g_done, 50);   /* dns_on_literal (0-timer) → dns_complete → done → destroy (no datagram frame) */
     ASSERT_EQ(1, g_done);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 UTEST(dns, destroy_from_done_on_timeout) {
@@ -723,7 +733,7 @@ UTEST(dns, destroy_from_done_on_timeout) {
     pump(&ctx, &g_done, 400);  /* timeout timer → dns_complete(error) → done → destroy (timer, no datagram frame) */
     ASSERT_EQ(1, g_done);
     ASSERT_NE(0, g_err);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -749,7 +759,7 @@ UTEST(dns, spoofed_question_rejected) {
     ASSERT_TRUE(g_queries >= 1);         /* the spoof reply was seen and rejected */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -770,7 +780,7 @@ UTEST(dns, case_tamper_rejected) {
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(KL_ERR_DNS, g_err);
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -801,7 +811,7 @@ UTEST(dns, dns_0x20_randomizes_case) {
     ASSERT_TRUE(q_uppercase_count() > 0);   /* ~30 letters → all-lowercase is ~2^-30 */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -825,7 +835,7 @@ UTEST(dns, disable_0x20_lowercase_and_resolves) {
     ASSERT_EQ(0, q_uppercase_count());      /* lowercase in, lowercase out: no 0x20 */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -851,7 +861,7 @@ UTEST(dns, transaction_ids_not_sequential) {
     ASSERT_FALSE(g_seen_ids[0] == 1 && g_seen_ids[1] == 2 && g_seen_ids[2] == 3);
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -911,7 +921,7 @@ UTEST(dns, hosts_file_lookup) {
     ASSERT_EQ(0, g_queries);            /* no packet sent */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
     unlink(hp);
 }
@@ -938,7 +948,7 @@ UTEST(dns, hosts_prefer_ipv6) {
     ASSERT_STREQ("2001:db8::1", ip);
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
     unlink(hp);
 }
@@ -961,7 +971,7 @@ UTEST(dns, edns0_opt_advertised) {
     ASSERT_EQ(1, g_last_arcount);           /* OPT record in the additional section */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -983,7 +993,7 @@ UTEST(dns, edns0_disabled) {
     ASSERT_EQ(0, g_last_arcount);           /* no OPT record */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1027,8 +1037,8 @@ UTEST(dns, nameserver_failover) {
     ASSERT_TRUE(g_silent_hits >= 1);     /* the first (silent) nameserver was tried */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns1, NULL, NULL);
-    kl_datagram_teardown(&ns2, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns1);
+    kl_dg_close_free(&ctx, &ns2);
     kl_event_ctx_free(&ctx);
     unlink(rcpath);
 }
@@ -1064,8 +1074,8 @@ UTEST(dns, all_nameservers_silent_times_out) {
     ASSERT_TRUE(g_silent_hits >= 2);     /* both nameservers were tried */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns1, NULL, NULL);
-    kl_datagram_teardown(&ns2, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns1);
+    kl_dg_close_free(&ctx, &ns2);
     kl_event_ctx_free(&ctx);
     unlink(rcpath);
 }
@@ -1076,8 +1086,12 @@ UTEST(dns, all_nameservers_silent_times_out) {
 static KlResolver *resolver_with_search(KlEventCtx *ctx, KlDatagram *ns,
                                         const char *search_line, int timeout_ms) {
     KlDatagramSocketConfig sc = { .ctx = ctx, .bind_addr = "127.0.0.1" };
-    if (kl_datagram_socket_init(ns, &sc) != 0 || kl_datagram_recv_start(ns, mock_ns, ns) != 0)
+    if (kl_datagram_socket_init(ns, &sc) != 0)
+        return NULL;                              /* socket_init closed its fd */
+    if (kl_datagram_recv_start(ns, mock_ns, ns) != 0) {
+        kl_dg_close_free(ctx, ns);                /* reclaim the adopted nameserver */
         return NULL;
+    }
     static char rcbuf[256];
     snprintf(rcbuf, sizeof(rcbuf), "nameserver 127.0.0.1#%u\n%s\n",
              kl_datagram_local_port(ns), search_line);
@@ -1107,7 +1121,7 @@ UTEST(dns, search_appended_for_unqualified) {
     ASSERT_STREQ("myhost.corp.example", g_last_qname);   /* search-appended */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1129,7 +1143,7 @@ UTEST(dns, absolute_tried_first_when_ndots_met) {
     ASSERT_STREQ("my.host", g_last_qname);   /* queried absolute, not my.host.corp.example */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1154,7 +1168,7 @@ UTEST(dns, search_falls_back_to_bare) {
     ASSERT_TRUE(g_queries >= 2);             /* both candidates were queried */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1299,7 +1313,7 @@ UTEST(dns, dual_family_returns_both) {
     ASSERT_EQ(80, (int)kl_sockaddr_port(&g_res.addrs[1]));
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1324,7 +1338,7 @@ UTEST(dns, dual_family_prefer_ipv6_orders_first) {
     ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&g_res.addrs[1]));
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1350,7 +1364,7 @@ UTEST(dns, resolution_delay_does_not_stall_on_slow_family) {
     ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&g_res.addrs[0]));
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1385,7 +1399,7 @@ UTEST(dns, tcp_fallback) {
 
     r->destroy(r);
     mock_tcp_stop(&tcp);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1423,7 +1437,7 @@ UTEST(dns, tcp_persistent_reuse) {
 
     r->destroy(r);
     mock_tcp_stop(&tcp);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1452,7 +1466,7 @@ UTEST(dns, tcp_drop) {
 
     r->destroy(r);
     mock_tcp_stop(&tcp);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1487,7 +1501,7 @@ UTEST(dns, cookie_learned_and_echoed) {
     ASSERT_EQ(0, memcmp(g_seen_server, g_srv_cookie, 8));
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1517,7 +1531,7 @@ UTEST(dns, cookie_badcookie_retry) {
     ASSERT_EQ(8, g_seen_server_len);      /* the retry carried the server cookie */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1542,7 +1556,7 @@ UTEST(dns, cookie_client_mismatch_ignored) {
     ASSERT_EQ(0, g_res.naddrs);           /* the mismatched-cookie answer was rejected */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1611,9 +1625,9 @@ UTEST(dns, wrong_source_response_ignored) {
     ASSERT_STREQ("10.1.2.3", ip);            /* the LEGIT answer, released only in phase 2 */
 
     g_spoof_sock = NULL;
-    kl_datagram_teardown(&spoof, NULL, NULL);
+    kl_dg_close_free(&ctx, &spoof);
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1657,7 +1671,7 @@ UTEST(dns, concurrent_distinct_resolutions) {
     ASSERT_EQ(222, kl_sockaddr_port(&cb.res.addrs[0]));
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1737,7 +1751,7 @@ UTEST(dns, wouldblock_retries_on_writable_and_succeeds) {
     ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&g_res.addrs[0]));
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1768,7 +1782,7 @@ UTEST(dns, wouldblock_guard_fires_no_hang) {
     ASSERT_NE(0, g_err);                               /* KL_ERR_DNS — settled, not hung */
 
     r->destroy(r);
-    kl_datagram_teardown(&ns, NULL, NULL);
+    kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
 

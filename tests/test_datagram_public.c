@@ -1131,4 +1131,20 @@ UTEST(datagram_public, m6a_recv_tos_gated_on_accepted_caps) {
     ASSERT_EQ(0, kl_datagram_free(&dg2));
 }
 
+/* D2: KL_TOS() composition + the DSCP/ECN constants (migrated from test_udp_tos.c:kl_tos_macro; the
+ * constants are datagram-neutral and now live in <keel/datagram.h>). Deterministic, no I/O. */
+UTEST(datagram_public, kl_tos_macro_and_constants) {
+    /* KL_TOS packs DSCP into the high 6 bits and ECN into the low 2. */
+    ASSERT_EQ(187, KL_TOS(KL_DSCP_EF, KL_ECN_CE));         /* (46<<2)|3 */
+    ASSERT_EQ(192, KL_TOS(KL_DSCP_CS6, KL_ECN_NOT_ECT));   /* 48<<2, no ECN */
+    ASSERT_EQ(255, KL_TOS(0x3F, 0x3));                     /* both fields saturated */
+    /* masking: out-of-range inputs are clamped to their field widths. */
+    ASSERT_EQ(255, KL_TOS(0x7F /*7 bits -> 6*/, 0x7 /*3 bits -> 2*/));
+    /* a spot-check of the constant values (RFC 2474 / 4594 / 3168). */
+    ASSERT_EQ(46, KL_DSCP_EF);
+    ASSERT_EQ(48, KL_DSCP_CS6);
+    ASSERT_EQ(0, KL_ECN_NOT_ECT);
+    ASSERT_EQ(3, KL_ECN_CE);
+}
+
 UTEST_MAIN();

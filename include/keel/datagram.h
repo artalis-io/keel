@@ -71,6 +71,30 @@ typedef struct KlDatagram KlDatagram;
 #define KL_DGRAM_CAP_GSO         (1u << 7)   /* UDP GSO segmentation offload (advisory) — M5 */
 #define KL_DGRAM_CAP_GRO         (1u << 8)   /* UDP GRO receive coalescing (provider support) — M5 */
 
+/* ── TOS / DSCP / ECN helpers (datagram-neutral; compose KlDatagramMessage.tos + kl_datagram_set_tos) ──
+ * DSCP class selectors + Expedited Forwarding (RFC 2474 / 4594). Shift into the TOS / Traffic-Class byte
+ * with KL_TOS(). */
+#define KL_DSCP_CS0   0
+#define KL_DSCP_CS1   8
+#define KL_DSCP_CS2  16
+#define KL_DSCP_CS3  24
+#define KL_DSCP_CS4  32
+#define KL_DSCP_CS5  40
+#define KL_DSCP_CS6  48
+#define KL_DSCP_CS7  56
+#define KL_DSCP_AF11 10
+#define KL_DSCP_AF21 18
+#define KL_DSCP_AF31 26
+#define KL_DSCP_AF41 34
+#define KL_DSCP_EF   46
+/* ECN codepoints — the low 2 bits of the TOS byte (RFC 3168). */
+#define KL_ECN_NOT_ECT 0
+#define KL_ECN_ECT1    1
+#define KL_ECN_ECT0    2
+#define KL_ECN_CE      3
+/* Compose a TOS/Traffic-Class byte from a DSCP class and an ECN codepoint. */
+#define KL_TOS(dscp, ecn) ((((dscp) & 0x3f) << 2) | ((ecn) & 0x3))
+
 /* ── Send status: atomic accept-or-refuse, no ownership on refusal (invariant 4) ──────────────── */
 typedef enum {
     KL_DATAGRAM_ACCEPTED = 0,   /* whole datagram taken (sent or slot-queued) */

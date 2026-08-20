@@ -523,4 +523,70 @@ UTEST(datagram_socket, source_pinned_reply_from_hit_address) {
 }
 #endif /* __linux__ */
 
+/* Live IPv6 unicast construction + roundtrip (migrated from test_udp.c:echo_v6). */
+UTEST(datagram_socket, ipv6_roundtrip) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram rx, tx; memset(&rx, 0, sizeof(rx)); memset(&tx, 0, sizeof(tx));
+    KlDatagramSocketConfig rc = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "::1" };
+    if (kl_datagram_socket_init(&rx, &rc) != 0) { kl_event_ctx_free(&ctx); UTEST_SKIP("IPv6 unavailable"); }
+    KlDatagramSocketConfig tc = { .ctx = &ctx, .alloc = &g_alloc, .family = AF_INET6 };
+    ASSERT_EQ(0, kl_datagram_socket_init(&tx, &tc));
+    uint16_t port = kl_datagram_local_port(&rx);
+    g_recv_calls = 0;
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, on_recv, NULL));
+    KlSockAddr dst; kl_sockaddr_parse(&dst, "::1", port);
+    const char *msg = "v6-hello";
+    KlDatagramMessage m = { .data = msg, .len = strlen(msg), .peer = &dst, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&tx, &m));
+    pump_until(&ctx, &g_recv_calls, 1, 100);
+    ASSERT_EQ(1, g_recv_calls);
+    ASSERT_EQ(strlen(msg), g_len);
+    close_free(&ctx, &rx); close_free(&ctx, &tx);
+    kl_event_ctx_free(&ctx);
+}
+
+/* SO_REUSEPORT shared bind (migrated from test_udp_server.c:reuse_port_shared_bind). */
+UTEST(datagram_socket, reuse_port_shared_bind) {
+#ifdef SO_REUSEPORT
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram a; memset(&a, 0, sizeof(a));
+    KlDatagramSocketConfig ca = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1", .reuse_port = 1 };
+    ASSERT_EQ(0, kl_datagram_socket_init(&a, &ca));
+    uint16_t port = kl_datagram_local_port(&a);
+    KlDatagram b; memset(&b, 0, sizeof(b));
+    KlDatagramSocketConfig cb = { .ctx = &ctx, .alloc = &g_alloc, .bind_addr = "127.0.0.1",
+                                  .bind_port = port, .reuse_port = 1 };
+    ASSERT_EQ(0, kl_datagram_socket_init(&b, &cb));   /* shares the port — SO_REUSEPORT */
+    int ra = 0, rb = 0; socklen_t l = sizeof(int);
+    ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&a), SOL_SOCKET, SO_REUSEPORT, (char *)&ra, &l));
+    ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&b), SOL_SOCKET, SO_REUSEPORT, (char *)&rb, &l));
+    ASSERT_TRUE(ra != 0); ASSERT_TRUE(rb != 0);
+    close_free(&ctx, &a); close_free(&ctx, &b);
+    kl_event_ctx_free(&ctx);
+#else
+    UTEST_SKIP("SO_REUSEPORT unavailable");
+#endif
+}
+
+/* SO_BROADCAST gated by the broadcast flag (migrated from test_udp_multicast.c:broadcast_flag_gates_send;
+ * deterministic getsockopt check — the live send-to-broadcast probe was environment-sensitive). */
+UTEST(datagram_socket, broadcast_flag_applied) {
+    g_alloc = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &g_alloc));
+    KlDatagram off, on; memset(&off, 0, sizeof(off)); memset(&on, 0, sizeof(on));
+    KlDatagramSocketConfig co = { .ctx = &ctx, .alloc = &g_alloc };                    /* broadcast off */
+    KlDatagramSocketConfig cb = { .ctx = &ctx, .alloc = &g_alloc, .broadcast = 1 };    /* broadcast on */
+    ASSERT_EQ(0, kl_datagram_socket_init(&off, &co));
+    ASSERT_EQ(0, kl_datagram_socket_init(&on, &cb));
+    int bo = -1, bn = -1; socklen_t l = sizeof(int);
+    ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&off), SOL_SOCKET, SO_BROADCAST, (char *)&bo, &l));
+    ASSERT_EQ(0, getsockopt((int)kl_datagram_fd(&on),  SOL_SOCKET, SO_BROADCAST, (char *)&bn, &l));
+    ASSERT_EQ(0, bo);            /* default: broadcast disabled */
+    ASSERT_TRUE(bn != 0);        /* broadcast=1 → SO_BROADCAST set */
+    close_free(&ctx, &off); close_free(&ctx, &on);
+    kl_event_ctx_free(&ctx);
+}
+
 UTEST_MAIN();

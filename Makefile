@@ -357,10 +357,8 @@ test: $(TEST_BIN)
 # tls_integration, peer_cert), which exercise the TLS server/client integration
 # against an in-test mock KlTls and need no mbedTLS.
 #
-# 8 not listed. 6 are genuinely POSIX/Linux-only: (recvmmsg),
-# (UDP GSO), (Windows restricts IP_TOS/DSCP setsockopt),
-# unix_socket (SO_PEERCRED), file_io (POSIX file-path
-# assumptions). 2 build clean but have runtime failures needing Windows-native
+# A few suites are not listed. Genuinely POSIX/Linux-only: unix_socket (SO_PEERCRED), file_io (POSIX
+# file-path assumptions). 2 build clean but have runtime failures needing Windows-native
 # iteration, deferred for now: dns_resolver (mock-UDP-nameserver + hosts/resolv.conf
 # harness) and proxy (CONNECT tunnel timing) — both still covered on Windows by
 # smoke-dns and the POSIX suites. (The real mbedTLS backend is validated separately
@@ -609,14 +607,13 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # drain mode, hanging server_integration's drain tests) → +1 (request) once the completion
 # path null-terminated parsed request fields: that was done at the shared conn_dispatch_request
 # core (not the readiness call site), so both event models get it and can't drift) → +1
-# (udp_server) once the completion UDP recv captured the datagram's local (dest) address via
-# an IP_PKTINFO cmsg — a shared kl_udp_parse_local() reused by the readiness recv and the
-# completion backends (io_uring/pollcomp), so kl_udp_send_to_from reply-from works over completion)
-# → +2 (udp,) once the completion recv finished cmsg parity: GRO segment size
-# (kl_udp_parse_gro, shared via udp_cmsg.h) + MSG_TRUNC truncation counting, carried on a
-# KlUdpRxMeta to kl_udp_comp_on_recv. (udp_multicast's broadcast_flag_gates_send stays excluded:
-# it asserts a *synchronous* send EACCES, which only holds for readiness — completion sends are
-# queued async, so the error surfaces on the send completion, not the post call.)
+# (the datagram completion UDP recv captured the datagram's local (dest) address via an IP_PKTINFO
+# cmsg — a shared kl_udp_parse_local() reused by the readiness recv and the completion backends
+# (io_uring/pollcomp), so source-pinned reply-from works over completion; the completion recv cmsg
+# parity — GRO segment size via kl_udp_parse_gro + MSG_TRUNC truncation counting — is exercised through
+# the datagram suites). D2 note: the former udp / udp_server / udp_multicast suites were migrated to
+# datagram_socket + datagram_multicast (broadcast is now a deterministic getsockopt check, not a
+# readiness-only synchronous-EACCES send probe).
 # → +4 (client, client_stream, redirect, dns_resolver) once kl_comp_run fired due timers
 # (kl_timer_fire) like the readiness kl_event_ctx_run does — without it every timer-driven async
 # op stalled over completion (client Happy-Eyeballs delay + request deadline, DNS timeout /
