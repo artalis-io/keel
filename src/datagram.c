@@ -27,6 +27,8 @@
 
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
+#include <keel/udp.h>           /* KlUdpConfig — the M0 sockopt config kl_datagram_socket_init maps into
+                                 * (O-D6-1: internal mapping during D1–D2; collapsed to the neutral name in D3) */
 #include <keel/event_ctx.h>     /* KlEventCtx, kl_watcher_add/_mod/_del, KlEventMask */
 #include <keel/event.h>         /* KL_EVENT_READ / KL_EVENT_WRITE */
 
@@ -445,8 +447,119 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
     return 0;
 }
 
+/* ── D1: public socket convenience (create + configure + bind + adopt) ────────────────────────────
+ * Reuses the accepted M0 preparation (kl_datagram_open) internally by mapping the sockopt subset into a
+ * local KlUdpConfig (O-D6-1: temporary during D1–D2; the neutral-name collapse is D3). See §12. */
+int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
+    if (!dg) return -1;
+    memset(dg, 0, sizeof(*dg));
+    if (!cfg || !cfg->ctx) { dg->last_error = KL_ERR_INVALID_ARG; return -1; }
+    /* Validate queue_policy BEFORE creating any fd (P2). */
+    if (cfg->queue_policy != KL_DATAGRAM_QUEUE_DEFAULT &&
+        cfg->queue_policy != KL_DATAGRAM_QUEUE_SLOT &&
+        cfg->queue_policy != KL_DATAGRAM_QUEUE_BOTH) {
+        dg->last_error = KL_ERR_INVALID_ARG; return -1;
+    }
+    int completion = (kl_event_caps(&cfg->ctx->loop) & KL_EVENT_CAP_COMPLETION) ? 1 : 0;
+    KlAllocator *alloc = cfg->alloc ? cfg->alloc : cfg->ctx->alloc;
+
+    /* Map the sockopt subset → the M0 KlUdpConfig. GRO is readiness-only (M5.4): never enable UDP_GRO
+     * capture on a completion loop (the completion recv cannot split). multicast_group is joined
+     * post-init via M2 (not at configure). Batch sizing is a kl_datagram_batch_create arg, not here. */
+    size_t recv_cap = cfg->recv_cap ? cfg->recv_cap : 2048;
+    if (recv_cap > 65535) recv_cap = 65535;
+    KlUdpConfig uc; memset(&uc, 0, sizeof(uc));
+    uc.ctx = cfg->ctx; uc.family = cfg->family;
+    uc.bind_addr = cfg->bind_addr; uc.bind_port = cfg->bind_port;
+    uc.recv_buf_size = recv_cap;
+    uc.reuse_addr = cfg->reuse_addr; uc.reuse_port = cfg->reuse_port;
+    uc.recv_pktinfo = cfg->recv_pktinfo; uc.recv_tos = cfg->recv_tos;
+    uc.recv_gro = (!completion && cfg->recv_gro) ? 1 : 0;
+    uc.so_rcvbuf = cfg->so_rcvbuf; uc.so_sndbuf = cfg->so_sndbuf;
+    uc.tos = cfg->tos; uc.broadcast = cfg->broadcast;
+    uc.multicast_ttl = cfg->multicast_ttl;
+    uc.multicast_disable_loop = cfg->multicast_disable_loop;
+    uc.multicast_iface = cfg->multicast_iface;
+    uc.multicast_group = NULL;   /* joined post-init (M2) */
+    uc.alloc = alloc;
+
+    KlDatagramPrep prep;
+    if (kl_datagram_open(cfg->sockets, &uc, &prep) != 0) {
+        dg->last_error = prep.err;   /* open closed its own fd on failure — nothing to reclaim */
+        return -1;
+    }
+    /* Required RX-capture gate (P1-D): fail-loud, close the prepared fd exactly once. */
+    if (cfg->want_rx_caps & ~prep.rx_caps) {
+        kl_sock_close(cfg->sockets, prep.fd);
+        dg->last_error = KL_ERR_UNSUPPORTED;
+        return -1;
+    }
+
+    /* Sizing (§12.3) — explicit units, documented defaults. */
+    int slot_policy = (cfg->queue_policy == KL_DATAGRAM_QUEUE_SLOT);
+    size_t slot_cap = cfg->send_slot_cap ? cfg->send_slot_cap : 65507u;
+    size_t budget   = slot_policy ? 0u : (cfg->send_byte_budget ? cfg->send_byte_budget : (256u * 1024u));
+    size_t slots    = cfg->send_slots;
+    if (slots == 0) {
+        if (slot_policy) slots = 8u;                       /* exact frozen SLOT default */
+        else { slots = budget / slot_cap; if (slots == 0) slots = 1u; }
+    }
+    int want_mcast = (cfg->multicast_group && cfg->multicast_group[0]) ? 1 : 0;
+
+    KlDatagramConfig dc; memset(&dc, 0, sizeof(dc));
+    dc.ctx = cfg->ctx; dc.alloc = alloc; dc.sockets = cfg->sockets; dc.fd = prep.fd;
+    dc.send_slots = slots; dc.send_slot_cap = slot_cap; dc.recv_cap = recv_cap;
+    dc.want_caps = cfg->want_caps | (want_mcast ? (unsigned)KL_DGRAM_CAP_MULTICAST : 0u);
+    dc.optional_caps = cfg->optional_caps | (unsigned)KL_DGRAM_CAP_CONNECTED;   /* always opportunistic (P1-B) */
+    dc.accepted_rx_caps = prep.rx_caps;
+    if (kl_datagram_init_ex(dg, &dc, budget) != 0) {
+        /* init failed BEFORE adoption → the fd was not adopted (caller retains it). init_ex already set
+         * dg->last_error + memset dg; close the prepared fd exactly once. */
+        kl_sock_close(cfg->sockets, prep.fd);
+        return -1;
+    }
+    /* fd is now adopted by dg; any failure below tears down THROUGH KlDatagram (which closes it once). */
+
+    /* Optional multicast join-at-init (post-adoption). CAP_MULTICAST is mandatory (added above), so the
+     * grant is present where supported; a join failure (bad group / syscall) tears down. */
+    if (want_mcast &&
+        kl_datagram_multicast_join(dg, cfg->multicast_group, cfg->multicast_iface) != 0) {
+        KlError e = kl_datagram_last_error(dg);
+        kl_datagram_teardown(dg, NULL, NULL);   /* closes the fd exactly once; memsets dg */
+        dg->last_error = e;                     /* re-surface the cause on the reclaimed handle */
+        return -1;
+    }
+    return 0;
+}
+
+/* D1: provider-neutral connect (first-time only). Granted-cap gated (P1-B); reconnect unsupported (P1-C). */
+int kl_datagram_connect(KlDatagram *dg, const KlSockAddr *peer) {
+    if (!dg || !dg->core || !kl_handle_valid(dg->fd) || !peer) {
+        if (dg) dg->last_error = KL_ERR_INVALID_ARG;
+        return -1;
+    }
+    if (dg->connected) {                 /* reconnect is UNSUPPORTED in D1 — refuse without a syscall */
+        dg->last_error = KL_ERR_INVALID_ARG; return -1;
+    }
+    if (!(kl_datagram_caps(dg) & KL_DGRAM_CAP_CONNECTED)) {   /* the GRANTED cap, consistent with the send gate */
+        dg->last_error = KL_ERR_UNSUPPORTED; return -1;
+    }
+    if (kl_sock_connect(dg->sockets, dg->fd, peer) < 0) {
+        dg->last_error = KL_ERR_CONNECT;   /* first-connect failure: stays unconnected + usable */
+        return -1;
+    }
+    dg->connected = 1;
+    return 0;
+}
+
 KlDatagramSendStatus kl_datagram_send(KlDatagram *dg, const KlDatagramMessage *m) {
     if (!dg || !dg->core) return KL_DATAGRAM_ERROR;
+    /* D1: a peerless (connected-mode) send requires an ACTUAL successful connect, not merely the granted
+     * CAP_CONNECTED. Reject send-before-connect deterministically (O-D6-3: KL_DATAGRAM_UNSUPPORTED covers
+     * both "CONNECTED not granted" — the machine's own gate — and "granted but not connected", here) so it
+     * is never handed to the kernel on an unconnected socket. Destination-addressed sends are unaffected. */
+    if (m && (!m->peer || kl_sockaddr_family(m->peer) == KL_AF_UNSPEC) && !dg->connected)
+        return KL_DATAGRAM_UNSUPPORTED;
     KlDatagramSendStatus st = kl_dgram_core_send(dg->core, m);
     dg_reconcile_write(dg);   /* a queued (would-block) readiness send needs WRITE interest */
     return st;
@@ -649,6 +762,15 @@ int kl_datagram_recv_tos(const KlDatagram *dg) {
 
 int kl_datagram_recv_start(KlDatagram *dg, KlDatagramRecvFn on_recv, void *ud) {
     if (!dg || !dg->core) return -1;
+    /* P1-A fail-loud guard: a socket with GRO capture ENABLED (accepted RX_GRO) must have an
+     * actively-splitting RECV batch attached, or a coalesced buffer would be delivered UNSPLIT as one
+     * datagram (the M5.4 boundary-corruption bug). Refuse recv_start rather than deliver corrupt data —
+     * GRO-without-splitting is thus unrepresentable. (An attached-but-inactive batch, gro_active == 0,
+     * counts as no splitter.) */
+    if (kl_dgram_core_accepted_rx_caps(dg->core) & KL_DGRAM_RX_GRO) {
+        const KlDatagramBatch *b = (const KlDatagramBatch *)dg->core->ext;
+        if (!b || !b->gro_active) { dg->last_error = KL_ERR_UNSUPPORTED; return -1; }
+    }
     dg->on_recv = on_recv; dg->recv_ud = ud;
     return kl_dgram_core_recv_start(dg->core);   /* the machine drives arm → dg_rdy_arm sets interest */
 }
@@ -716,6 +838,10 @@ void kl_datagram_on_close(KlDatagram *dg, KlDatagramCloseFn cb, void *ud) {
 
 unsigned kl_datagram_caps(const KlDatagram *dg) { return (dg && dg->core) ? dg->core->caps : 0; }
 unsigned kl_datagram_provider_caps(const KlDatagram *dg) { return dg ? dg->provider_caps : 0; }
+/* D1: the KL_DGRAM_RX_* capture mask the socket actually accepted (M0 prep) — complements want_rx_caps. */
+unsigned kl_datagram_accepted_rx_caps(const KlDatagram *dg) {
+    return (dg && dg->core) ? kl_dgram_core_accepted_rx_caps(dg->core) : 0u;
+}
 
 /* M2 extended-UDP layer: runtime multicast join/leave, gated on KL_DGRAM_CAP_MULTICAST, routed to the
  * provider's mcast_membership. Deterministic error precedence (docs/datagram_m2_capability_design.md §3):

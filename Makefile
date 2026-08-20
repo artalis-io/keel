@@ -656,7 +656,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # under ASan+UBSan in the Apple container).
 IOURING_TEST_SUITES = allocator alpn async body_reader chunked client client_happy_eyeballs client_pool \
                           client_stream compress connection cors cross_module \
-                          datagram_batch datagram_life datagram_public datagram_live \
+                          datagram_batch datagram_life datagram_public datagram_live datagram_socket \
                           dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots decompress \
                           dns_resolver drain error event_provider file_io h2 h2_client integration \
                           multipart_stream overflow parser peer_addr peer_cert proxy \

@@ -154,6 +154,78 @@ typedef struct {
 int  kl_datagram_init(KlDatagram *dg, const KlDatagramConfig *cfg);
 int  kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send_byte_budget);
 
+/* ── D1: public socket convenience (create + configure + bind + adopt in one call) ────────────────
+ * kl_datagram_init/_init_ex above adopt an ALREADY-prepared fd (advanced / bring-your-own). Most callers
+ * want the socket created for them: kl_datagram_socket_init creates + configures + (optionally) binds +
+ * adopts, reusing the M0 provider-neutral preparation internally. Works on every loop model + provider
+ * (POSIX, Winsock/IOCP, lwIP, EFI). See docs/datagram_m6_kludp_decision_design.md §12. */
+
+/* Send-queue backpressure policy. A zeroed config selects DEFAULT == BOTH. */
+typedef enum {
+    KL_DATAGRAM_QUEUE_DEFAULT = 0,  /* == BOTH (the sensible default for a UDP socket) */
+    KL_DATAGRAM_QUEUE_SLOT,         /* count-only backpressure; send_byte_budget IGNORED */
+    KL_DATAGRAM_QUEUE_BOTH,         /* count + byte backpressure */
+} KlDatagramQueuePolicy;
+
+typedef struct {                    /* all pointers borrowed */
+    struct KlEventCtx             *ctx;        /* event loop (selects completion vs readiness) */
+    const struct KlSocketProvider *sockets;    /* datagram-capable provider; NULL = built-in default */
+    KlAllocator                   *alloc;      /* NULL = ctx->alloc */
+
+    /* ── socket creation + options ── */
+    int          family;            /* AF_INET / AF_INET6 / AF_UNSPEC (auto from bind_addr) */
+    const char  *bind_addr;         /* numeric bind address, or NULL = unbound (pure client) */
+    uint16_t     bind_port;         /* bind port; 0 = ephemeral (ignored when bind_addr == NULL) */
+    int          reuse_addr, reuse_port;
+    int          recv_pktinfo;      /* capture each datagram's local (dest) addr */
+    int          recv_tos;          /* deliver each datagram's TOS (kl_datagram_recv_tos) */
+    int          recv_gro;          /* enable UDP_GRO capture (readiness only; ignored on completion).
+                                     * Enabling it OBLIGES attaching a splitting RECV batch before
+                                     * recv_start — else recv_start refuses (KL_ERR_UNSUPPORTED). */
+    int          broadcast;         /* SO_BROADCAST (IPv4) */
+    int          multicast_ttl, multicast_disable_loop;
+    unsigned     multicast_iface;   /* egress interface index; 0 = kernel default */
+    const char  *multicast_group;   /* optional numeric group joined at init (after bind); NULL/"" = none.
+                                     * A NON-EMPTY group is a MANDATORY multicast request — CAP_MULTICAST is
+                                     * added to required caps (init fails if unsupported). */
+    int          so_rcvbuf, so_sndbuf;
+    int          tos;               /* socket-default TOS/Traffic-Class (IP_TOS / IPV6_TCLASS) */
+
+    /* ── sizing + policy (explicit units; 0 = documented default) ── */
+    KlDatagramQueuePolicy queue_policy; /* 0 = DEFAULT = BOTH; unknown value → KL_ERR_INVALID_ARG */
+    size_t       send_slots;        /* fixed outbound slot COUNT; 0 = derived (BOTH) / 8 (SLOT) */
+    size_t       send_slot_cap;     /* per-slot payload BYTES; 0 = 65507 (a full UDP payload) */
+    size_t       send_byte_budget;  /* BOTH byte-gate BYTES; 0 = 262144; ignored under SLOT */
+    size_t       recv_cap;          /* inbound slot payload BYTES; 0 = 2048 (capped 65535) */
+
+    /* ── capabilities ── */
+    unsigned     want_caps;         /* required SEND-side caps (fail-loud, M2 exact-fd) */
+    unsigned     optional_caps;     /* grant-if-supported; the initializer ALWAYS adds CAP_CONNECTED */
+    unsigned     want_rx_caps;      /* required RX-CAPTURE mask (KL_DGRAM_RX_PKTINFO / RX_TOS): init FAILS
+                                     * (fd closed once) if the socket did not ACCEPT every bit — the
+                                     * receive-side analog of want_caps (source-pinned reply needs
+                                     * RX_PKTINFO; want_caps=SOURCE_PIN proves only the send half). */
+} KlDatagramSocketConfig;
+
+/* Create + configure + (optionally) bind + adopt into `dg` (a memset-zero handle). On success (0) the fd
+ * is owned by KlDatagram (closed once at teardown). On failure (-1, kl_datagram_last_error set) the fd is
+ * closed exactly once on every path (pre-adoption prep, required-RX-mask reject, init-before-adoption,
+ * post-adoption multicast-join). The initializer always requests CONNECTED opportunistically so
+ * kl_datagram_connect works wherever the provider supports it. */
+int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg);
+
+/* Provider-neutral connect (first-time only). Requires the GRANTED kl_datagram_caps() CAP_CONNECTED bit;
+ * calls the socket provider's connect seam and, on success, records the datagram's connected state so a
+ * peerless send (KlDatagramMessage.peer == NULL) is admitted. Returns 0, or -1 with kl_datagram_last_
+ * error(): KL_ERR_INVALID_ARG (bad args, or ALREADY connected — reconnect is unsupported in D1),
+ * KL_ERR_UNSUPPORTED (CONNECTED not granted), KL_ERR_CONNECT (the connect syscall failed — the datagram
+ * stays unconnected + usable for destination-addressed sends). */
+int kl_datagram_connect(KlDatagram *dg, const KlSockAddr *peer);
+
+/* The KL_DGRAM_RX_* capture mask the socket actually accepted (M0 prep), for validating receive capture
+ * (complement of the fail-loud want_rx_caps). 0 if `dg` is not initialized. */
+unsigned kl_datagram_accepted_rx_caps(const KlDatagram *dg);
+
 /* Graceful close: stop admission, drain queued output, then retire ops + close the fd once (§4). */
 int  kl_datagram_close_begin(KlDatagram *dg);
 /* Abortive close: discard queued output, then retire ops + close the fd once (§4). */

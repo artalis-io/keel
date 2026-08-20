@@ -1130,18 +1130,18 @@ UTEST(dgram_batch, recv_gro_split_default) {
     kl_event_ctx_free(&ctx);
 }
 
-/* GRO two-part gate (§6.2): with only ONE half set, meta.gro_seg is IGNORED → the coalesced buffer is
- * delivered WHOLE as a single datagram (no split). Both negative configs (provider-half missing /
- * accepted-half missing) run in one body. */
-UTEST(dgram_batch, recv_gro_gate_two_part) {
-    const int      provider[2] = { 0, 1 };
-    const unsigned accepted[2] = { KL_DGRAM_RX_GRO, 0 };   /* [0] provider half missing; [1] accepted half missing */
-    for (int k = 0; k < 2; k++) {
+/* GRO two-part gate (§6.2), SAFE half: RX_GRO was NOT accepted (capture is OFF, so the kernel never
+ * coalesces), even though the provider advertises CAP_GRO. The gate stays inactive → the fabricated
+ * gro_seg is IGNORED and the buffer is delivered WHOLE, and recv_start SUCCEEDS (no corruption is
+ * possible without capture). The DANGEROUS half — RX_GRO accepted but no active splitter — is now
+ * fail-loud at recv_start (D1 P1-A), covered by recv_start_refuses_gro_inactive_batch. */
+UTEST(dgram_batch, recv_gro_gate_accepted_half_missing_safe) {
+    {
         KlAllocator a = kl_allocator_default();
         KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
         if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
         const KlSocketProvider *sp = mock_gro_provider();
-        g_mock_gro = 2; g_mock_extra_caps = provider[k] ? KL_DGRAM_CAP_GRO : 0;
+        g_mock_gro = 2; g_mock_extra_caps = KL_DGRAM_CAP_GRO;   /* provider half present */
 
         KlSocketHandle rxfd = prep_fd(sp);
         KlSockAddr la; ASSERT_EQ(0, kl_sock_get_local_addr(sp, rxfd, &la));
@@ -1149,14 +1149,14 @@ UTEST(dgram_batch, recv_gro_gate_two_part) {
         KlDatagram rx; memset(&rx, 0, sizeof(rx));
         KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
                                  .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
-                                 .accepted_rx_caps = accepted[k] };
+                                 .accepted_rx_caps = 0 };   /* accepted half MISSING → capture off */
         ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
         KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
         ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
-        ASSERT_EQ(0, b->gro_active);                      /* one half missing → GRO inactive */
+        ASSERT_EQ(0, b->gro_active);                      /* accepted half missing → GRO inactive */
 
         rx_reset(); g_rx_dg = &rx;
-        ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));
+        ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));   /* RX_GRO not accepted → guard OK */
         const char *m[1] = { "AABBCC" };
         blast(1, port, m);
         for (int i = 0; i < 60 && g_rx_calls < 1; i++) kl_event_ctx_run(&ctx, 8, 10);
@@ -1583,6 +1583,76 @@ UTEST(dgram_batch, recv_tos_batch_gate) {
         ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
         kl_event_ctx_free(&ctx);   /* b core-owned → reclaimed at free */
     }
+}
+
+/* ══ D1 P1-A — kl_datagram_recv_start fail-loud guard: GRO-capture-enabled sockets MUST have an
+ * actively-splitting batch, else recv_start refuses (a coalesced buffer would be delivered unsplit). ═══ */
+
+/* GRO accepted (RX_GRO) but NO batch attached → recv_start fails KL_ERR_UNSUPPORTED. */
+UTEST(dgram_batch, recv_start_refuses_gro_without_batch) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_gro_provider();
+    g_mock_extra_caps = KL_DGRAM_CAP_GRO;
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                             .accepted_rx_caps = KL_DGRAM_RX_GRO };   /* GRO capture enabled, no splitter */
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    ASSERT_EQ(-1, kl_datagram_recv_start(&rx, rx_on_recv, NULL));     /* fail-loud */
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&rx));
+    g_mock_extra_caps = 0;
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* Batch attached but the two-part gate did NOT activate (provider CAP_GRO absent → gro_active == 0) →
+ * recv_start still fails: an attached-but-inactive batch is not a splitter. */
+UTEST(dgram_batch, recv_start_refuses_gro_inactive_batch) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_gro_provider();
+    g_mock_extra_caps = 0;   /* provider does NOT advertise CAP_GRO → gate half missing */
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                             .accepted_rx_caps = KL_DGRAM_RX_GRO };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+    ASSERT_TRUE(b != NULL);
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    ASSERT_EQ(0, b->gro_active);                                      /* two-part gate NOT active */
+    ASSERT_EQ(-1, kl_datagram_recv_start(&rx, rx_on_recv, NULL));     /* still fail-loud */
+    ASSERT_EQ((int)KL_ERR_UNSUPPORTED, (int)kl_datagram_last_error(&rx));
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
+}
+
+/* Active splitter (provider CAP_GRO AND accepted RX_GRO AND attached batch) → recv_start succeeds. */
+UTEST(dgram_batch, recv_start_allows_active_gro_splitter) {
+    KlAllocator a = kl_allocator_default();
+    KlEventCtx ctx; ASSERT_EQ(0, kl_event_ctx_init(&ctx, &a));
+    if (kl_event_caps(&ctx.loop) & KL_EVENT_CAP_COMPLETION) { kl_event_ctx_free(&ctx); return; }
+    const KlSocketProvider *sp = mock_gro_provider();
+    g_mock_extra_caps = KL_DGRAM_CAP_GRO;
+    KlSocketHandle rxfd = prep_fd(sp);
+    KlDatagram rx; memset(&rx, 0, sizeof(rx));
+    KlDatagramConfig cfg = { .ctx = &ctx, .alloc = &a, .sockets = sp, .fd = rxfd,
+                             .send_slots = 4, .send_slot_cap = 1500, .recv_cap = 2048,
+                             .accepted_rx_caps = KL_DGRAM_RX_GRO };
+    ASSERT_EQ(0, kl_datagram_init_ex(&rx, &cfg, 0));
+    KlDatagramBatch *b = kl_datagram_batch_create(&rx, KL_DGRAM_BATCH_RECV, 8, 2048);
+    ASSERT_TRUE(b != NULL);
+    ASSERT_EQ(0, kl_datagram_recv_attach_batch(&rx, b));
+    ASSERT_EQ(1, b->gro_active);                                      /* both gate halves set */
+    ASSERT_EQ(0, kl_datagram_recv_start(&rx, rx_on_recv, NULL));      /* splitter present → OK */
+    g_mock_extra_caps = 0;
+    ASSERT_EQ(0, kl_datagram_close_cancel(&rx)); pump_close(&ctx, &rx); ASSERT_EQ(0, kl_datagram_free(&rx));
+    kl_event_ctx_free(&ctx);
 }
 
 UTEST_MAIN();
