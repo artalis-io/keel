@@ -1,5 +1,5 @@
 #include <keel/h2_server.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/router.h>
 #include <keel/body_reader.h>
 #include <keel/event.h>
@@ -484,7 +484,7 @@ static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
 /* Install a custom output writer (fn != NULL) or restore the default socket writer
  * (fn == NULL). The completion driver brackets a feed with this to capture the produced
  * frames into its own buffer for one ordered overlapped send. See internal.h. */
-void kl_h2_server_set_writer(KlConn *c, KlH2WriteFn fn, void *ctx) {
+void kl_h2_server_set_writer(KlHttpConn *c, KlH2WriteFn fn, void *ctx) {
     if (!c->h2) return;
     if (fn) {
         c->h2->out_write = fn;
@@ -499,12 +499,12 @@ void kl_h2_server_set_writer(KlConn *c, KlH2WriteFn fn, void *ctx) {
  * Connection lifecycle
  * ═══════════════════════════════════════════════════════════════════ */
 
-int kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
+int kl_h2_server_upgrade(KlHttpConn *c, KlRouter *router, KlH2ServerConfig *cfg,
                           const char *leftover, size_t leftover_len) {
     KlAllocator *alloc = c->stream.alloc;
 
     KlH2ServerConn *h2c = kl_malloc(alloc, sizeof(KlH2ServerConn));
-    if (!h2c) return KL_CONN_CLOSED;
+    if (!h2c) return KL_HTTP_CONN_CLOSED;
     memset(h2c, 0, sizeof(*h2c));
 
     h2c->conn = c;
@@ -517,13 +517,13 @@ int kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
 
     if ((size_t)h2c->max_streams > SIZE_MAX / sizeof(KlH2ServerStream)) {
         kl_free(alloc, h2c, sizeof(KlH2ServerConn));
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
     size_t streams_size = sizeof(KlH2ServerStream) * (size_t)h2c->max_streams;
     h2c->streams = kl_malloc(alloc, streams_size);
     if (!h2c->streams) {
         kl_free(alloc, h2c, sizeof(KlH2ServerConn));
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
     memset(h2c->streams, 0, streams_size);
 
@@ -539,7 +539,7 @@ int kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
     if (!h2c->session) {
         kl_free(alloc, h2c->streams, streams_size);
         kl_free(alloc, h2c, sizeof(KlH2ServerConn));
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
 
     if (!h2c->session->recv || !h2c->session->submit_response ||
@@ -549,7 +549,7 @@ int kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
             h2c->session->destroy(h2c->session);
         kl_free(alloc, h2c->streams, streams_size);
         kl_free(alloc, h2c, sizeof(KlH2ServerConn));
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
 
     if (leftover && leftover_len > 0) {
@@ -558,7 +558,7 @@ int kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
             h2c->session->destroy(h2c->session);
             kl_free(alloc, h2c->streams, streams_size);
             kl_free(alloc, h2c, sizeof(KlH2ServerConn));
-            return KL_CONN_CLOSED;
+            return KL_HTTP_CONN_CLOSED;
         }
     }
 
@@ -566,8 +566,8 @@ int kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
         h2c->session->flush(h2c->session);
 
     c->h2 = h2c;
-    c->state = KL_CONN_HTTP2;
-    return KL_CONN_HTTP2;
+    c->state = KL_HTTP_CONN_HTTP2;
+    return KL_HTTP_CONN_HTTP2;
 }
 
 static const char h2c_101_response[] =
@@ -576,11 +576,11 @@ static const char h2c_101_response[] =
     "Upgrade: h2c\r\n"
     "\r\n";
 
-int kl_h2_server_upgrade_from_h1(KlConn *c, KlRouter *router,
+int kl_h2_server_upgrade_from_h1(KlHttpConn *c, KlRouter *router,
                                   KlH2ServerConfig *cfg,
                                   const char *leftover, size_t leftover_len) {
     if (conn_write_all(c, h2c_101_response, sizeof(h2c_101_response) - 1) < 0)
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
 
     return kl_h2_server_upgrade(c, router, cfg, leftover, leftover_len);
 }
@@ -588,18 +588,18 @@ int kl_h2_server_upgrade_from_h1(KlConn *c, KlRouter *router,
 /* Transport-agnostic h2 core: feed already-received plaintext to the session (parse
  * frames + flush produced output). Shared by the readiness drive below and the
  * completion driver — see internal.h. */
-KlConnState kl_h2_server_feed(KlConn *c, const void *data, size_t len) {
+KlHttpConnState kl_h2_server_feed(KlHttpConn *c, const void *data, size_t len) {
     KlH2ServerConn *h2c = c->h2;
-    if (!h2c || !h2c->session) return KL_CONN_CLOSED;
+    if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
 
     c->last_active_ms = kl_monotonic_ms();
 
     ssize_t consumed = h2c->session->recv(h2c->session, data, len);
-    if (consumed < 0) return KL_CONN_CLOSED;
+    if (consumed < 0) return KL_HTTP_CONN_CLOSED;
 
     if (h2c->session->want_write(h2c->session)) {
         if (h2c->session->flush(h2c->session) < 0)
-            return KL_CONN_CLOSED;
+            return KL_HTTP_CONN_CLOSED;
     }
 
     /* Session-done close: once the session (if it can report readiness) wants
@@ -610,40 +610,40 @@ KlConnState kl_h2_server_feed(KlConn *c, const void *data, size_t len) {
     if (h2c->session->want_read &&
         !h2c->session->want_read(h2c->session) &&
         !h2c->session->want_write(h2c->session))
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
 
-    return KL_CONN_HTTP2;
+    return KL_HTTP_CONN_HTTP2;
 }
 
-int kl_h2_server_on_readable(KlConn *c) {
-    if (!c->h2 || !c->h2->session) return KL_CONN_CLOSED;
+int kl_h2_server_on_readable(KlHttpConn *c) {
+    if (!c->h2 || !c->h2->session) return KL_HTTP_CONN_CLOSED;
 
     int drains = 0;
 read_more:
     ;
     ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
-    if (nr <= 0) return KL_CONN_CLOSED;
+    if (nr <= 0) return KL_HTTP_CONN_CLOSED;
 
-    KlConnState st = kl_h2_server_feed(c, c->stream.read_buf, (size_t)nr);
-    if (st != KL_CONN_HTTP2) return (int)st;
+    KlHttpConnState st = kl_h2_server_feed(c, c->stream.read_buf, (size_t)nr);
+    if (st != KL_HTTP_CONN_HTTP2) return (int)st;
 
     if (c->tls && c->tls->pending(c->tls) > 0 && ++drains < 256)
         goto read_more;
 
-    return KL_CONN_HTTP2;
+    return KL_HTTP_CONN_HTTP2;
 }
 
-int kl_h2_server_on_writable(KlConn *c) {
+int kl_h2_server_on_writable(KlHttpConn *c) {
     KlH2ServerConn *h2c = c->h2;
-    if (!h2c || !h2c->session) return KL_CONN_CLOSED;
+    if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
 
     if (h2c->session->flush(h2c->session) < 0)
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
 
-    return KL_CONN_HTTP2;
+    return KL_HTTP_CONN_HTTP2;
 }
 
-void kl_h2_server_drain_shutdown(KlConn *c) {
+void kl_h2_server_drain_shutdown(KlHttpConn *c) {
     KlH2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session || h2c->goaway_sent) return;
 
@@ -653,7 +653,7 @@ void kl_h2_server_drain_shutdown(KlConn *c) {
     h2c->goaway_sent = 1;
 }
 
-void kl_h2_server_cleanup(KlConn *c) {
+void kl_h2_server_cleanup(KlHttpConn *c) {
     KlH2ServerConn *h2c = c->h2;
     if (!h2c) return;
 
@@ -677,7 +677,7 @@ void kl_h2_server_cleanup(KlConn *c) {
  * both wires the core and forces server_h2.o out of the static archive. */
 /* Readiness WRITE-interest predicate (h2 analogue of ws drain_pending): does the session
  * have queued output? Keeps server.c's rearm from peeking KlH2ServerConn internals. */
-static int kl_h2_server_want_write_hook(const KlConn *c) {
+static int kl_h2_server_want_write_hook(const KlHttpConn *c) {
     return c->h2 && c->h2->session && c->h2->session->want_write(c->h2->session);
 }
 

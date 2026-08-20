@@ -47,7 +47,7 @@ static void done_fn(void *user_data) {
                      ctx->work_ms, ctx->result);
     if (n < 0) n = 0;
 
-    KlConn *conn = ctx->op.conn;
+    KlHttpConn *conn = ctx->op.conn;
     kl_http_response_json(&conn->res, 200, body, (size_t)n);
 
     kl_async_complete(ctx->server, &ctx->op);
@@ -78,7 +78,7 @@ static void handle_work(KlHttpRequest *req, KlHttpResponse *res, void *user_data
                          int work_ms) {
     (void)res;
     AppCtx *app = user_data;
-    KlConn *conn = kl_http_request_conn(req);
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     WorkCtx *ctx = malloc(sizeof(*ctx));
     if (!ctx) {

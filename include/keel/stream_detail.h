@@ -1,11 +1,11 @@
 /*
  * keel/stream_detail.h — Layout of KlStream (opt-in detail).
  *
- * INTERNAL / UNSTABLE. Include this ONLY to embed or stack-allocate a KlStream (e.g. KlConn embeds
+ * INTERNAL / UNSTABLE. Include this ONLY to embed or stack-allocate a KlStream (e.g. KlHttpConn embeds
  * it); the fields are NOT part of the API and may change without notice. The behavior/ownership
  * contract is in <keel/stream.h>. External code must use accessors, not `stream.*`.
  *
- * This carries RAW transport state only. TLS-wrapper orchestration and HTTP policy stay on KlConn.
+ * This carries RAW transport state only. TLS-wrapper orchestration and HTTP policy stay on KlHttpConn.
  */
 #ifndef KEEL_STREAM_DETAIL_H
 #define KEEL_STREAM_DETAIL_H

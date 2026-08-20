@@ -24,7 +24,7 @@
 #include <keel/client.h>
 #include <keel/client_pool.h>
 #include <keel/decompress.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/resolver.h>
 #include <keel/connect_op.h>          /* KlConnectOp — outbound-connect state machine (6C) */
 #include <keel/connect_op_detail.h>   /* KlConnectOp layout (embedded by value) */
@@ -92,7 +92,7 @@ struct KlClient {
 
     /* Response */
     KlClientResponse   resp;
-    KlResponseParser  *parser;
+    KlHttp1ResponseParser  *parser;
     KlError            error;
 
     /* TLS (NULL if plain HTTP) */

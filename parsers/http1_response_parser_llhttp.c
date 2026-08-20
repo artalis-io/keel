@@ -1,5 +1,5 @@
 /*
- * response_parser_llhttp.c — llhttp backend for KlResponseParser vtable
+ * response_parser_llhttp.c — llhttp backend for KlHttp1ResponseParser vtable
  *
  * Uses llhttp in HTTP_RESPONSE mode to parse response status, headers,
  * and body. Accumulates headers and body into the KlClientResponse struct.
@@ -8,7 +8,7 @@
  */
 
 #include <keel/client.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/allocator.h>
 #include "llhttp.h"
 
@@ -21,7 +21,7 @@
 /* ── Parser state ────────────────────────────────────────────────── */
 
 typedef struct {
-    KlResponseParser base;         /* vtable — must be first */
+    KlHttp1ResponseParser base;         /* vtable — must be first */
     llhttp_t         parser;
     llhttp_settings_t settings;
     KlAllocator     *alloc;
@@ -255,7 +255,7 @@ static int resp_on_message_complete(llhttp_t *parser)
 
 /* ── Transfer parser data to response ─────────────────────────────── */
 
-static KlParseResult transfer_to_response(RespLlhttpParser *p,
+static KlHttp1ParseResult transfer_to_response(RespLlhttpParser *p,
                                             KlClientResponse *resp)
 {
     /* Streaming mode: body was forwarded via callback, skip body transfer */
@@ -268,7 +268,7 @@ static KlParseResult transfer_to_response(RespLlhttpParser *p,
             char *exact = kl_realloc(p->alloc, p->body, p->body_cap,
                                       p->body_len + 1);
             if (!exact)
-                return KL_PARSE_ERROR;
+                return KL_HTTP1_PARSE_ERROR;
             exact[p->body_len] = '\0';
             p->body = exact;
         }
@@ -287,7 +287,7 @@ static KlParseResult transfer_to_response(RespLlhttpParser *p,
         size_t old_size = (size_t)p->headers_cap * sizeof(KlClientHeader);
         KlClientHeader *exact_hdrs = kl_malloc(p->alloc, exact_size);
         if (!exact_hdrs)
-            return KL_PARSE_ERROR;
+            return KL_HTTP1_PARSE_ERROR;
         memcpy(exact_hdrs, p->headers, exact_size);
         kl_free(p->alloc, p->headers, old_size);
         p->headers = exact_hdrs;
@@ -303,12 +303,12 @@ static KlParseResult transfer_to_response(RespLlhttpParser *p,
     p->num_headers = 0;
     p->headers_cap = 0;
 
-    return KL_PARSE_OK;
+    return KL_HTTP1_PARSE_OK;
 }
 
-/* ── KlResponseParser vtable ────────────────────────────────────── */
+/* ── KlHttp1ResponseParser vtable ────────────────────────────────────── */
 
-static KlParseResult resp_parser_parse(KlResponseParser *self,
+static KlHttp1ParseResult resp_parser_parse(KlHttp1ResponseParser *self,
                                          KlClientResponse *resp,
                                          const char *buf, size_t len,
                                          size_t *consumed)
@@ -325,7 +325,7 @@ static KlParseResult resp_parser_parse(KlResponseParser *self,
         *consumed = (size_t)(llhttp_get_error_pos(&p->parser) - buf);
 
     if (p->error)
-        return KL_PARSE_ERROR;
+        return KL_HTTP1_PARSE_ERROR;
 
     if (p->complete)
         return transfer_to_response(p, resp);
@@ -336,12 +336,12 @@ static KlParseResult resp_parser_parse(KlResponseParser *self,
     }
 
     if (err != HPE_OK)
-        return KL_PARSE_ERROR;
+        return KL_HTTP1_PARSE_ERROR;
 
-    return KL_PARSE_INCOMPLETE;
+    return KL_HTTP1_PARSE_INCOMPLETE;
 }
 
-static void resp_parser_reset(KlResponseParser *self)
+static void resp_parser_reset(KlHttp1ResponseParser *self)
 {
     RespLlhttpParser *p = (RespLlhttpParser *)self;
     llhttp_reset(&p->parser);
@@ -375,7 +375,7 @@ static void resp_parser_reset(KlResponseParser *self)
     p->headers_cap = 0;
 }
 
-static void resp_parser_destroy(KlResponseParser *self)
+static void resp_parser_destroy(KlHttp1ResponseParser *self)
 {
     if (!self)
         return;
@@ -401,7 +401,7 @@ static void resp_parser_destroy(KlResponseParser *self)
 
 /* ── Factory ─────────────────────────────────────────────────────── */
 
-static KlResponseParser *create_parser(size_t max_response_size,
+static KlHttp1ResponseParser *create_parser(size_t max_response_size,
                                          KlAllocator *alloc,
                                          KlClientBodyFn on_body,
                                          KlClientHeadersFn on_headers,
@@ -445,13 +445,13 @@ static KlResponseParser *create_parser(size_t max_response_size,
     return &p->base;
 }
 
-KlResponseParser *kl_response_parser_llhttp(size_t max_response_size,
+KlHttp1ResponseParser *kl_http1_response_parser_llhttp(size_t max_response_size,
                                              KlAllocator *alloc)
 {
     return create_parser(max_response_size, alloc, NULL, NULL, NULL, NULL);
 }
 
-KlResponseParser *kl_response_parser_llhttp_s(size_t max_response_size,
+KlHttp1ResponseParser *kl_http1_response_parser_llhttp_s(size_t max_response_size,
                                                 KlAllocator *alloc,
                                                 KlClientBodyFn on_body,
                                                 KlClientHeadersFn on_headers,

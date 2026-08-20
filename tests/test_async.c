@@ -28,7 +28,7 @@ static void cleanup_test_server(KlServer *s) {
         s->async_ops = op->next;
         if (op->conn) op->conn->async_op = NULL;
     }
-    kl_conn_pool_free(&s->pool);
+    kl_http_conn_pool_free(&s->pool);
 }
 
 /* ── Watcher callback context ─────────────────────────────────────── */
@@ -69,7 +69,7 @@ static void test_resume_cb(KlAsyncOp *op, void *user_data) {
     ctx->resume_called++;
     /* Simulate handler completion: set state to SENDING */
     if (op->conn)
-        op->conn->state = KL_CONN_SENDING;
+        op->conn->state = KL_HTTP_CONN_SENDING;
 }
 
 static void test_deadline_cb(KlAsyncOp *op, void *user_data) {
@@ -245,9 +245,9 @@ UTEST(async, suspend_sets_state) {
     KlServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
-    ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
-        s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
         s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
@@ -257,7 +257,7 @@ UTEST(async, suspend_sets_state) {
     set_nonblocking(fds[1]);
 
     /* Use fds[1] as the "server side" connection */
-    KlConn *c = kl_conn_acquire(&s.pool, fds[1]);
+    KlHttpConn *c = kl_http_conn_acquire(&s.pool, fds[1]);
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(kl_event_add(&s.ev.loop, fds[1], KL_EVENT_READ, c), 0);
 
@@ -274,7 +274,7 @@ UTEST(async, suspend_sets_state) {
     ASSERT_EQ(kl_async_suspend(&s, c, &op), 0);
 
     /* Verify state */
-    ASSERT_EQ(c->state, KL_CONN_SUSPENDED);
+    ASSERT_EQ(c->state, KL_HTTP_CONN_SUSPENDED);
     ASSERT_TRUE(c->async_op == &op);
     ASSERT_TRUE(c->suspend_start_ms > 0);
 
@@ -297,9 +297,9 @@ UTEST(async, complete_calls_on_resume) {
     KlServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
-    ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
-        s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
         s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
@@ -308,11 +308,11 @@ UTEST(async, complete_calls_on_resume) {
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
-    KlConn *c = kl_conn_acquire(&s.pool, fds[1]);
+    KlHttpConn *c = kl_http_conn_acquire(&s.pool, fds[1]);
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(kl_event_add(&s.ev.loop, fds[1], KL_EVENT_READ, c), 0);
 
-    /* Need response initialized for kl_conn_on_writable to work */
+    /* Need response initialized for kl_http_conn_on_writable to work */
     c->res.alloc = &s.alloc_storage;
     kl_http_response_init(&c->res, c->res.alloc);
     kl_http_response_json(&c->res, 200, "{}", 2);
@@ -329,7 +329,7 @@ UTEST(async, complete_calls_on_resume) {
     };
 
     ASSERT_EQ(kl_async_suspend(&s, c, &op), 0);
-    ASSERT_EQ(c->state, KL_CONN_SUSPENDED);
+    ASSERT_EQ(c->state, KL_HTTP_CONN_SUSPENDED);
 
     /* Complete the op */
     kl_async_complete(&s, &op);
@@ -339,7 +339,7 @@ UTEST(async, complete_calls_on_resume) {
 
     /* Connection should no longer be suspended */
     ASSERT_TRUE(c->async_op == NULL);
-    ASSERT_TRUE(c->state != KL_CONN_SUSPENDED);
+    ASSERT_TRUE(c->state != KL_HTTP_CONN_SUSPENDED);
 
     /* Op should be removed from active list */
     ASSERT_TRUE(s.async_ops == NULL);
@@ -354,9 +354,9 @@ UTEST(async, deadline_fires_on_timeout) {
     KlServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
-    ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
-        s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
         s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
@@ -365,7 +365,7 @@ UTEST(async, deadline_fires_on_timeout) {
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
-    KlConn *c = kl_conn_acquire(&s.pool, fds[1]);
+    KlHttpConn *c = kl_http_conn_acquire(&s.pool, fds[1]);
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(kl_event_add(&s.ev.loop, fds[1], KL_EVENT_READ, c), 0);
 
@@ -416,9 +416,9 @@ UTEST(async, cancel_on_server_free) {
     KlServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
-    ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
-        s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
         s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
@@ -427,7 +427,7 @@ UTEST(async, cancel_on_server_free) {
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
-    KlConn *c = kl_conn_acquire(&s.pool, fds[1]);
+    KlHttpConn *c = kl_http_conn_acquire(&s.pool, fds[1]);
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(kl_event_add(&s.ev.loop, fds[1], KL_EVENT_READ, c), 0);
 
@@ -469,9 +469,9 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
     KlServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
-    ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
-        s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
         s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
@@ -480,7 +480,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
 
-    KlConn *c = kl_conn_acquire(&s.pool, fds[1]);
+    KlHttpConn *c = kl_http_conn_acquire(&s.pool, fds[1]);
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(kl_event_add(&s.ev.loop, fds[1], KL_EVENT_READ, c), 0);
 
@@ -503,10 +503,10 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
     uint64_t timeout = 30000;  /* 30s read timeout */
     int reaped = 0;
     for (int i = 0; i < s.pool.capacity; i++) {
-        KlConn *tc = &s.pool.conns[i];
-        if (tc->state == KL_CONN_CLOSED || tc->state == KL_CONN_PROCESSING)
+        KlHttpConn *tc = &s.pool.conns[i];
+        if (tc->state == KL_HTTP_CONN_CLOSED || tc->state == KL_HTTP_CONN_PROCESSING)
             continue;
-        if (tc->state == KL_CONN_SUSPENDED)
+        if (tc->state == KL_HTTP_CONN_SUSPENDED)
             continue;  /* MUST be exempt */
         if (now - tc->last_active_ms > timeout) {
             reaped++;
@@ -515,7 +515,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
 
     /* Suspended connection should NOT have been reaped */
     ASSERT_EQ(reaped, 0);
-    ASSERT_EQ(c->state, KL_CONN_SUSPENDED);
+    ASSERT_EQ(c->state, KL_HTTP_CONN_SUSPENDED);
 
     /* Clean up */
     kl_async_complete(&s, &op);
@@ -549,9 +549,9 @@ UTEST(async, watcher_completes_suspended_conn) {
     KlServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
-    ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
     for (int i = 0; i < 4; i++) {
-        s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);
         s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 — a conn must know its event ctx */
     }
 
@@ -561,7 +561,7 @@ UTEST(async, watcher_completes_suspended_conn) {
     set_nonblocking(conn_fds[0]);
     set_nonblocking(conn_fds[1]);
 
-    KlConn *c = kl_conn_acquire(&s.pool, conn_fds[1]);
+    KlHttpConn *c = kl_http_conn_acquire(&s.pool, conn_fds[1]);
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(kl_event_add(&s.ev.loop, conn_fds[1], KL_EVENT_READ, c), 0);
 
@@ -587,7 +587,7 @@ UTEST(async, watcher_completes_suspended_conn) {
         .user_data = &actx,
     };
     ASSERT_EQ(kl_async_suspend(&s, c, &op), 0);
-    ASSERT_EQ(c->state, KL_CONN_SUSPENDED);
+    ASSERT_EQ(c->state, KL_HTTP_CONN_SUSPENDED);
 
     /* Register a watcher on the pipe read end — when the pipe is written to,
      * the watcher fires and completes the async op */
@@ -608,7 +608,7 @@ UTEST(async, watcher_completes_suspended_conn) {
     /* Verify the async op completed */
     ASSERT_EQ(actx.resume_called, 1);
     ASSERT_TRUE(c->async_op == NULL);
-    ASSERT_TRUE(c->state != KL_CONN_SUSPENDED);
+    ASSERT_TRUE(c->state != KL_HTTP_CONN_SUSPENDED);
     ASSERT_TRUE(s.async_ops == NULL);
 
     kl_watcher_del(&s.ev, pipe_fds[0]);
@@ -623,14 +623,14 @@ UTEST(async, watcher_completes_suspended_conn) {
 /* ── Server connection context test ──────────────────────────────── */
 
 UTEST(async, server_ctx_set_on_request) {
-    /* Verify _server_ctx is set to KlConn* when processing a request */
+    /* Verify _server_ctx is set to KlHttpConn* when processing a request */
     KlAllocator a = kl_allocator_default();
-    KlConnPool pool;
-    ASSERT_EQ(kl_conn_pool_init(&pool, 2, &a), 0);
+    KlHttpConnPool pool;
+    ASSERT_EQ(kl_http_conn_pool_init(&pool, 2, &a), 0);
     for (int i = 0; i < 2; i++)
-        pool.conns[i].parser = kl_parser_llhttp(&a);
+        pool.conns[i].parser = kl_http1_parser_llhttp(&a);
 
-    KlConn *c = kl_conn_acquire(&pool, 100);
+    KlHttpConn *c = kl_http_conn_acquire(&pool, 100);
     ASSERT_TRUE(c != NULL);
 
     /* _server_ctx should be NULL after acquire (request memset to 0) */
@@ -641,7 +641,7 @@ UTEST(async, server_ctx_set_on_request) {
     ASSERT_EQ(c->suspend_start_ms, (uint64_t)0);
 
     c->stream.fd = -1;
-    kl_conn_pool_free(&pool);
+    kl_http_conn_pool_free(&pool);
 }
 
 /* ── Integration test: async handler in real server ──────────────── */
@@ -665,9 +665,9 @@ typedef struct {
 static void sleep_resume(KlAsyncOp *op, void *user_data) {
     (void)user_data;
     /* Handler completed: set up response, transition to SENDING */
-    KlConn *c = op->conn;
+    KlHttpConn *c = op->conn;
     kl_http_response_json(&c->res, 200, "{\"slept\":true}", 14);
-    c->state = KL_CONN_SENDING;
+    c->state = KL_HTTP_CONN_SENDING;
 }
 
 static void sleep_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
@@ -684,7 +684,7 @@ static void sleep_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data)
 static void handle_async_sleep(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_http_request_conn(req);
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     /* Allocate sleep context */
     static SleepCtx sctx;  /* static for simplicity — single-request test */
@@ -778,14 +778,14 @@ static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
 #define RFC_TERMINAL_SETUP()                                                   \
     KlServer s; init_test_server(&s);                                          \
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);                  \
-    ASSERT_EQ(kl_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);             \
+    ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);             \
     for (int i = 0; i < 4; i++) {                                              \
-        s.pool.conns[i].parser = kl_parser_llhttp(&s.alloc_storage);          \
+        s.pool.conns[i].parser = kl_http1_parser_llhttp(&s.alloc_storage);          \
         s.pool.conns[i].stream.ctx = &s.ev;   /* mirror server.c:419 */               \
     }                                                                          \
     int fds[2]; ASSERT_EQ(kl_test_socketpair(fds), 0);                         \
     set_nonblocking(fds[0]); set_nonblocking(fds[1]);                          \
-    KlConn *c = kl_conn_acquire(&s.pool, fds[1]);                              \
+    KlHttpConn *c = kl_http_conn_acquire(&s.pool, fds[1]);                              \
     ASSERT_TRUE(c != NULL);                                                    \
     ASSERT_EQ(kl_event_add(&s.ev.loop, fds[1], KL_EVENT_READ, c), 0);          \
     AsyncCtx actx = {0};                                                       \

@@ -71,8 +71,8 @@ int kl_version_number(void);
 #include <keel/http_request.h>
 #include <keel/body_reader.h>
 #include <keel/body_reader_multipart.h>
-#include <keel/chunked.h>
-#include <keel/parser.h>
+#include <keel/http1_chunked.h>
+#include <keel/http1_parser.h>
 #include <keel/http_response.h>
 #include <keel/router.h>
 #include <keel/tls.h>
@@ -80,7 +80,7 @@ int kl_version_number(void);
 #include <keel/h2_server.h>
 #include <keel/h2_client.h>
 #include <keel/file_io.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/server.h>
 #include <keel/cors.h>
 #include <keel/websocket.h>

@@ -45,7 +45,7 @@
 #include <keel/event.h>
 #include "event_builtin.h"
 #include <keel/server.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include "sockaddr_native.h"     /* KlSockAddr -> host sockaddr for the overlapped UDP send */
 #include "event_caps.h"
@@ -583,9 +583,9 @@ static int iou_post_sendfile_copy(KlStream *stream, KlIouState *st, const KlIoVe
 /* Post a response-head + file-body send. 8f-2: zero-copy via splice — send the head, then
  * loop file → pipe → socket (no userspace copy of the file bytes). Falls back to
  * iou_post_sendfile_copy when the kernel lacks IORING_OP_SPLICE. */
-static int iou_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int iou_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     KlIouState *st = iou_state(stream);
     if (count > (uint64_t)(SIZE_MAX / 2) || head_total > SIZE_MAX / 2)
         return -1;                                   /* overflow guard */

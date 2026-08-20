@@ -92,19 +92,19 @@ typedef enum {
     KL_LWR_ACCEPT,   /* a new connection was accepted */
     KL_LWR_WRITE,    /* a posted send completed (ok=1) OR a terminal close (ok=0, nbytes=0) */
     KL_LWR_CONNECT,  /* an outbound connect finished (LC-1): ok=1 connected, ok=0 failed. `owner`
-                      * carries the tagged KlWatcher udata the client registered (NOT a KlConn*);
+                      * carries the tagged KlWatcher udata the client registered (NOT a KlHttpConn*);
                       * the backend routes it to KL_COMP_CONNECT against that watcher, mask-encoded
                       * (KL_EVENT_WRITE = connected, 0 = failed). See docs/phase10_...design.md LC-1. */
 } KlLwrKind;
 
 /* One finished ACCEPT/WRITE (or terminal) op, emitted by kl_lwr_drain and translated into a
- * KlCompletionEvent. `pcb`/`accepted` are opaque tcp_pcb*; `owner` is the KlConn* the backend
+ * KlCompletionEvent. `pcb`/`accepted` are opaque tcp_pcb*; `owner` is the KlHttpConn* the backend
  * stored via kl_lwr_set_owner. Addresses are raw IPv4 bytes + host-order port (peer). */
 typedef struct {
     KlLwrKind kind;
     void     *pcb;         /* the connection pcb (WRITE / terminal) */
     void     *accepted;    /* ACCEPT: the newly accepted pcb */
-    void     *owner;       /* KlConn* set via kl_lwr_set_owner (WRITE / terminal) */
+    void     *owner;       /* KlHttpConn* set via kl_lwr_set_owner (WRITE / terminal) */
     size_t    nbytes;      /* WRITE: bytes acked */
     int       ok;          /* WRITE ok flag (0 = terminal close) */
     uint8_t   peer_ip[4];  /* ACCEPT: peer IPv4 (network order) */
@@ -263,7 +263,7 @@ void  kl_lwr_tcp_abort(void *lwrctx, void *pcb);
  * yield a second terminal event (defence against a double comp_close). Idempotent. */
 void  kl_lwr_mark_terminated(void *lwrctx, void *pcb);
 
-/* Associate a KlConn* (opaque owner) with an accepted pcb so recv/sent callbacks tag their
+/* Associate a KlHttpConn* (opaque owner) with an accepted pcb so recv/sent callbacks tag their
  * completions with it, and (re)arm tcp_recv/tcp_sent/tcp_err on that pcb. */
 void  kl_lwr_set_owner(void *lwrctx, void *pcb, void *owner);
 

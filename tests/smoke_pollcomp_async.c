@@ -40,13 +40,13 @@ static void work_fn(void *ud) {          /* worker thread: simulate blocking wor
 }
 static void on_resume(KlAsyncOp *op, void *ud) {   /* event-loop thread: declare the send */
     (void)ud;
-    op->conn->state = KL_CONN_SENDING;
+    op->conn->state = KL_HTTP_CONN_SENDING;
 }
 static void on_cancel(KlAsyncOp *op, void *ud) { (void)ud; free(op); }
 static void cancel_fn(void *ud) { free(ud); }
 static void done_fn(void *ud) {          /* event-loop thread (via the wakeup watcher) */
     WorkCtx *w = ud;
-    KlConn *conn = w->op.conn;
+    KlHttpConn *conn = w->op.conn;
     kl_http_response_json(&conn->res, 200, WANT, sizeof(WANT) - 1);
     kl_async_complete(&g_srv, &w->op);
     free(w);
@@ -54,7 +54,7 @@ static void done_fn(void *ud) {          /* event-loop thread (via the wakeup wa
 
 static void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)ud;
-    KlConn *conn = kl_http_request_conn(req);
+    KlHttpConn *conn = kl_http_request_conn(req);
     WorkCtx *w = malloc(sizeof(*w));
     if (!w) { kl_http_response_error(res, 500, "oom"); return; }
     memset(w, 0, sizeof(*w));

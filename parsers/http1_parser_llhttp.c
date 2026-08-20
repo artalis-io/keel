@@ -1,4 +1,4 @@
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/body_reader.h>
 #include <string.h>
 #include "llhttp.h"
@@ -7,12 +7,12 @@
  * llhttp parser backend for KEEL.
  *
  * Two-phase parsing:
- *   1. Parse headers → return KL_PARSE_HEADERS_OK (paused after headers)
- *   2. Resume parsing body → forward chunks to body_reader → KL_PARSE_OK
+ *   1. Parse headers → return KL_HTTP1_PARSE_HEADERS_OK (paused after headers)
+ *   2. Resume parsing body → forward chunks to body_reader → KL_HTTP1_PARSE_OK
  */
 
 typedef struct {
-    KlRequestParser base;          /* vtable — must be first */
+    KlHttp1RequestParser base;          /* vtable — must be first */
     KlAllocator *alloc;
     llhttp_t llhttp;
     llhttp_settings_t settings;
@@ -155,9 +155,9 @@ static int on_message_complete(llhttp_t *p) {
     return HPE_PAUSED;  /* pause to return control */
 }
 
-/* --- KlParser vtable implementation --- */
+/* --- KlHttp1Parser vtable implementation --- */
 
-static KlParseResult llhttp_parse(KlRequestParser *self, KlHttpRequest *req,
+static KlHttp1ParseResult llhttp_parse(KlHttp1RequestParser *self, KlHttpRequest *req,
                                    const char *buf, size_t len,
                                    size_t *consumed) {
     LlhttpParser *lp = (LlhttpParser *)self;
@@ -170,7 +170,7 @@ static KlParseResult llhttp_parse(KlRequestParser *self, KlHttpRequest *req,
         *consumed = (size_t)(error_pos - buf);
         llhttp_resume(&lp->llhttp);
         lp->complete = 0;
-        return KL_PARSE_OK;
+        return KL_HTTP1_PARSE_OK;
     }
 
     if (lp->headers_done && err == HPE_PAUSED) {
@@ -179,28 +179,28 @@ static KlParseResult llhttp_parse(KlRequestParser *self, KlHttpRequest *req,
         *consumed = (size_t)(error_pos - buf);
         llhttp_resume(&lp->llhttp);
         lp->headers_done = 0;  /* consume flag so body resume won't re-trigger */
-        return KL_PARSE_HEADERS_OK;
+        return KL_HTTP1_PARSE_HEADERS_OK;
     }
 
     if (err == HPE_OK) {
         /* All data consumed but message not complete */
         *consumed = len;
-        return KL_PARSE_INCOMPLETE;
+        return KL_HTTP1_PARSE_INCOMPLETE;
     }
 
     if (err == HPE_PAUSED) {
         const char *error_pos = llhttp_get_error_pos(&lp->llhttp);
         *consumed = (size_t)(error_pos - buf);
         llhttp_resume(&lp->llhttp);
-        return KL_PARSE_OK;
+        return KL_HTTP1_PARSE_OK;
     }
 
     /* Parse error */
     *consumed = 0;
-    return KL_PARSE_ERROR;
+    return KL_HTTP1_PARSE_ERROR;
 }
 
-static void llhttp_reset_parser(KlRequestParser *self) {
+static void llhttp_reset_parser(KlHttp1RequestParser *self) {
     LlhttpParser *lp = (LlhttpParser *)self;
     llhttp_init(&lp->llhttp, HTTP_REQUEST, &lp->settings);
     lp->llhttp.data = lp;
@@ -211,12 +211,12 @@ static void llhttp_reset_parser(KlRequestParser *self) {
     lp->hdr_field_len = 0;
 }
 
-static void llhttp_destroy_parser(KlRequestParser *self) {
+static void llhttp_destroy_parser(KlHttp1RequestParser *self) {
     LlhttpParser *lp = (LlhttpParser *)self;
     kl_free(lp->alloc, lp, sizeof(LlhttpParser));
 }
 
-KlRequestParser *kl_request_parser_llhttp(KlAllocator *alloc) {
+KlHttp1RequestParser *kl_http1_request_parser_llhttp(KlAllocator *alloc) {
     LlhttpParser *lp = kl_malloc(alloc, sizeof(LlhttpParser));
     if (!lp) return NULL;
 

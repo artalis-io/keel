@@ -14,7 +14,7 @@
  *                         (comp_conn_dispatch / comp_udp_dispatch) so a client-only
  *                         build (CONNECT/WATCHER + timers only) links neither the
  *                         server nor UDP handlers.
- *   completion_server.c — the KlConn/HTTP-1 server state machine over completions,
+ *   completion_server.c — the KlHttpConn/HTTP-1 server state machine over completions,
  *                         PLUS the server-side memory-BIO TLS leg (comp_tls_*). TLS is
  *                         folded in because comp_tls_drive ↔ comp_after_state ↔
  *                         comp_h2_drive mutually recurse — separating TLS would need a
@@ -30,7 +30,7 @@
  * INTERNAL header — not installed, no ABI commitment.
  */
 
-#include <keel/connection.h>   /* KlConn */
+#include <keel/http_connection.h>   /* KlHttpConn */
 #include <stddef.h>            /* size_t */
 
 struct KlServer;
@@ -38,24 +38,24 @@ struct KlServer;
 /* ── server-side helpers the h2/ws drive TUs call back into ──────────────── */
 
 /* Release the connection (close the socket + return the pool slot). */
-void kl_comp_close(struct KlServer *s, KlConn *c);
+void kl_comp_close(struct KlServer *s, KlHttpConn *c);
 
 /* Push the TLS engine's pending outgoing ciphertext to the socket synchronously
  * (memory-BIO out ring → socket). Returns 0 on success, -1 on a fatal send error. */
-int  kl_comp_tls_flush(KlConn *c);
+int  kl_comp_tls_flush(KlHttpConn *c);
 
 /* Drain the TLS engine's pending outgoing ciphertext into one heap buffer (grow as it
  * fills). On success returns 0 with out/outlen/outcap set (caller frees outcap bytes),
  * -1 on error. Used to post h2 output overlapped instead of a synchronous flush. */
-int  kl_comp_tls_drain_output(KlConn *c, unsigned char **out, size_t *outlen,
+int  kl_comp_tls_drain_output(KlHttpConn *c, unsigned char **out, size_t *outlen,
                               size_t *outcap);
 
 /* ── the h2/ws drive functions the server dispatch calls ─────────────────── */
 
 /* Drive an established HTTP/2 connection over the completion loop. */
-void kl_comp_h2_drive(struct KlServer *s, KlConn *c);
+void kl_comp_h2_drive(struct KlServer *s, KlHttpConn *c);
 
 /* Drive an established WebSocket connection over the completion loop. */
-void kl_comp_ws_drive(struct KlServer *s, KlConn *c);
+void kl_comp_ws_drive(struct KlServer *s, KlHttpConn *c);
 
 #endif /* KEEL_SRC_COMPLETION_INTERNAL_H */

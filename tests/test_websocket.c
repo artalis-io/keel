@@ -1,7 +1,7 @@
 #include "utest.h"
 #include <keel/websocket.h>
 #include <keel/websocket_server.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/allocator.h>
 #include <string.h>
 #include <stdint.h>
@@ -734,8 +734,8 @@ UTEST(close, close_timeout_check) {
     ws.close_received = 0;
     ws.close_deadline_ms = 1000;
 
-    /* Create a minimal KlConn to test kl_ws_server_check_close_timeout */
-    KlConn conn;
+    /* Create a minimal KlHttpConn to test kl_ws_server_check_close_timeout */
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.ws = &ws;
 
@@ -781,7 +781,7 @@ UTEST(cleanup, abnormal_closure_calls_on_close) {
     ws->alloc = &alloc;
     ws->close_received = 0;
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = -1;
     conn.stream.alloc = &alloc;
@@ -810,7 +810,7 @@ UTEST(cleanup, no_callback_if_close_received) {
     ws->alloc = &alloc;
     ws->close_received = 1;  /* Already received close */
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = -1;
     conn.stream.alloc = &alloc;
@@ -857,7 +857,7 @@ UTEST(auto_ping, sends_ping) {
     ws->alloc = &alloc;
     ws->next_ping_ms = 1000;  /* deadline at t=1000 */
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = fds[0];
     conn.stream.alloc = &alloc;
@@ -897,7 +897,7 @@ UTEST(auto_ping, reschedules) {
     ws->alloc = &alloc;
     ws->next_ping_ms = 1000;
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = fds[0];
     conn.stream.alloc = &alloc;
@@ -928,7 +928,7 @@ UTEST(auto_ping, skips_closing) {
     ws.next_ping_ms = 1000;
     ws.close_sent = 1;
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.ws = &ws;
 
@@ -945,7 +945,7 @@ UTEST(auto_ping, not_before_deadline) {
     ws.config = &cfg;
     ws.next_ping_ms = 1000;
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.ws = &ws;
 
@@ -962,7 +962,7 @@ UTEST(cleanup, rejects_unmasked_client_frame) {
     int fds[2];
     ASSERT_EQ(kl_test_socketpair(fds), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = fds[0];
     conn.stream.alloc = &alloc;
@@ -981,7 +981,7 @@ UTEST(cleanup, rejects_unmasked_client_frame) {
                               (const uint8_t *)"hi", 2);
 
     int rc = kl_ws_server_on_readable_data(&conn, buf, flen);
-    ASSERT_EQ(rc, KL_CONN_CLOSED);
+    ASSERT_EQ(rc, KL_HTTP_CONN_CLOSED);
 
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
@@ -989,7 +989,7 @@ UTEST(cleanup, rejects_unmasked_client_frame) {
 }
 
 UTEST(cleanup, null_ws_is_noop) {
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.ws = NULL;
 

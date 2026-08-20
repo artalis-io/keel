@@ -16,7 +16,7 @@
 /* ── Forward declarations ────────────────────────────────────────── */
 
 typedef struct KlWsServerConn KlWsServerConn;
-typedef struct KlConn KlConn;
+typedef struct KlHttpConn KlHttpConn;
 
 /* ── Callbacks ───────────────────────────────────────────────────── */
 
@@ -57,7 +57,7 @@ struct KlWsServerConn {
     uint16_t close_code;         /**< Close status code */
     uint64_t close_deadline_ms;  /**< Close handshake timeout deadline */
     uint64_t next_ping_ms;       /**< 0 = auto-ping disabled */
-    KlConn *conn;                /**< Back-pointer for send functions */
+    KlHttpConn *conn;                /**< Back-pointer for send functions */
     KlAllocator *alloc;          /**< Allocator for message buffer */
     KlDrain drain;               /**< Backpressure write buffer (opt-in) */
     int drain_enabled;           /**< 0 = off (default), 1 = on */
@@ -99,14 +99,14 @@ int kl_ws_server_peer_cred(const KlWsServerConn *ws, KlPeerCred *out);
 
 /* ── Internal (used by connection.c / server.c) ──────────────────── */
 
-int  kl_ws_server_upgrade(KlConn *c, const char *leftover, size_t leftover_len);
-int  kl_ws_server_on_readable(KlConn *c);
-int  kl_ws_server_on_writable(KlConn *c);
-int  kl_ws_server_drain_pending(const KlConn *c);
-void kl_ws_server_cleanup(KlConn *c);
-void kl_ws_server_drain_close(KlConn *c);
-int  kl_ws_server_check_close_timeout(const KlConn *c, uint64_t now);
-int  kl_ws_server_auto_ping(KlConn *c, uint64_t now);
-int  kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len);
+int  kl_ws_server_upgrade(KlHttpConn *c, const char *leftover, size_t leftover_len);
+int  kl_ws_server_on_readable(KlHttpConn *c);
+int  kl_ws_server_on_writable(KlHttpConn *c);
+int  kl_ws_server_drain_pending(const KlHttpConn *c);
+void kl_ws_server_cleanup(KlHttpConn *c);
+void kl_ws_server_drain_close(KlHttpConn *c);
+int  kl_ws_server_check_close_timeout(const KlHttpConn *c, uint64_t now);
+int  kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now);
+int  kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len);
 
 #endif

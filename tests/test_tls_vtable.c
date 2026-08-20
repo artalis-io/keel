@@ -3,7 +3,7 @@
  * crashing during error cleanup (regression for the S-7-review Finding 1):
  *   - a NULL factory pointer,
  *   - a factory that returns a session missing a REQUIRED vtable op (esp. destroy/shutdown).
- * Each case must return -1 with KL_ERR_TLS_VTABLE and free cleanly (kl_conn_pool_free must
+ * Each case must return -1 with KL_ERR_TLS_VTABLE and free cleanly (kl_http_conn_pool_free must
  * not call a NULL destroy/shutdown), and a fully-valid vtable must still init + free.
  */
 #include "utest.h"
@@ -68,7 +68,7 @@ UTEST(tls_vtable, null_factory_rejected) {
 }
 
 /* Missing destroy → detected as invalid; cleanup must NOT call the NULL destroy. THE
- * regression: previously kl_conn_pool_free crashed here. */
+ * regression: previously kl_http_conn_pool_free crashed here. */
 UTEST(tls_vtable, missing_destroy_no_crash) {
     KlServer s;
     KlTlsConfig tls; memset(&tls, 0, sizeof(tls));

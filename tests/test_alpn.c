@@ -2,11 +2,11 @@
  * test_alpn.c — ALPN → protocol-adapter dispatch, and the single shared REST
  * layer across HTTP/1.1 and HTTP/2.
  *
- * Part A (dispatch): drive kl_conn_on_handshake() with a mock TLS whose
+ * Part A (dispatch): drive kl_http_conn_on_handshake() with a mock TLS whose
  * negotiated ALPN is configurable, and assert the connection enters exactly the
- * right adapter — h2 → the HTTP/2 adapter (KL_CONN_HTTP2), everything else
+ * right adapter — h2 → the HTTP/2 adapter (KL_HTTP_CONN_HTTP2), everything else
  * (http/1.1, no ALPN, an unsupported value) → the HTTP/1.1 adapter
- * (KL_CONN_READING). This is the regression guard for the ALPN selection.
+ * (KL_HTTP_CONN_READING). This is the regression guard for the ALPN selection.
  *
  * Part B (single REST layer): drive an HTTP/2 request through the real h2 server
  * path (h2.c) via a capturing session, and assert it lands on the SAME router,
@@ -84,19 +84,19 @@ static KlH2ServerSession *cap_factory(KlAllocator *a, KlH2ServerCallbacks *cbs, 
     return &c->base;
 }
 
-/* Build a KlConn on a socketpair with mock TLS + h2 config, run the handshake. */
-static KlConnState ta_handshake_with_alpn(KlConn *conn, KlH2ServerConfig *h2cfg,
+/* Build a KlHttpConn on a socketpair with mock TLS + h2 config, run the handshake. */
+static KlHttpConnState ta_handshake_with_alpn(KlHttpConn *conn, KlH2ServerConfig *h2cfg,
                                           int pfd[2], const char *alpn) {
     memset(conn, 0, sizeof(*conn));
-    if (kl_test_socketpair(pfd) != 0) return KL_CONN_CLOSED;
+    if (kl_test_socketpair(pfd) != 0) return KL_HTTP_CONN_CLOSED;
     conn->stream.fd = pfd[1];
     conn->stream.alloc = &ta_alloc;
     conn->router = &ta_router;
     conn->h2_config = h2cfg;
     conn->tls = mock_tls_create(NULL, &ta_alloc);
-    conn->state = KL_CONN_TLS_HANDSHAKE;
+    conn->state = KL_HTTP_CONN_TLS_HANDSHAKE;
     mock_tls_alpn = alpn;
-    return kl_conn_on_handshake(conn);
+    return kl_http_conn_on_handshake(conn);
 }
 
 /* ── Part A: ALPN → adapter dispatch ────────────────────────────────── */
@@ -104,9 +104,9 @@ static KlConnState ta_handshake_with_alpn(KlConn *conn, KlH2ServerConfig *h2cfg,
 UTEST(alpn, negotiated_h2_enters_http2_adapter) {
     ta_setup();
     KlH2ServerConfig h2cfg = { .factory = cap_factory };
-    KlConn conn; int pfd[2];
-    KlConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, "h2");
-    ASSERT_EQ(st, (KlConnState)KL_CONN_HTTP2);
+    KlHttpConn conn; int pfd[2];
+    KlHttpConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, "h2");
+    ASSERT_EQ(st, (KlHttpConnState)KL_HTTP_CONN_HTTP2);
     ASSERT_TRUE(conn.h2 != NULL);          /* HTTP/2 adapter owns the connection */
     kl_h2_server_cleanup(&conn);
     conn.tls->destroy(conn.tls);
@@ -117,9 +117,9 @@ UTEST(alpn, negotiated_h2_enters_http2_adapter) {
 UTEST(alpn, negotiated_http11_enters_http1_adapter) {
     ta_setup();
     KlH2ServerConfig h2cfg = { .factory = cap_factory };
-    KlConn conn; int pfd[2];
-    KlConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, "http/1.1");
-    ASSERT_EQ(st, (KlConnState)KL_CONN_READING);   /* HTTP/1.1 adapter */
+    KlHttpConn conn; int pfd[2];
+    KlHttpConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, "http/1.1");
+    ASSERT_EQ(st, (KlHttpConnState)KL_HTTP_CONN_READING);   /* HTTP/1.1 adapter */
     ASSERT_TRUE(conn.h2 == NULL);                  /* no HTTP/2 engaged */
     conn.tls->destroy(conn.tls);
     kl_test_closesock(pfd[0]); kl_test_closesock(pfd[1]);
@@ -129,9 +129,9 @@ UTEST(alpn, negotiated_http11_enters_http1_adapter) {
 UTEST(alpn, no_alpn_falls_back_to_http1) {
     ta_setup();
     KlH2ServerConfig h2cfg = { .factory = cap_factory };
-    KlConn conn; int pfd[2];
-    KlConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, NULL);
-    ASSERT_EQ(st, (KlConnState)KL_CONN_READING);   /* documented no-ALPN policy: HTTP/1.1 */
+    KlHttpConn conn; int pfd[2];
+    KlHttpConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, NULL);
+    ASSERT_EQ(st, (KlHttpConnState)KL_HTTP_CONN_READING);   /* documented no-ALPN policy: HTTP/1.1 */
     ASSERT_TRUE(conn.h2 == NULL);
     conn.tls->destroy(conn.tls);
     kl_test_closesock(pfd[0]); kl_test_closesock(pfd[1]);
@@ -141,10 +141,10 @@ UTEST(alpn, no_alpn_falls_back_to_http1) {
 UTEST(alpn, unsupported_alpn_does_not_engage_http2) {
     ta_setup();
     KlH2ServerConfig h2cfg = { .factory = cap_factory };
-    KlConn conn; int pfd[2];
+    KlHttpConn conn; int pfd[2];
     /* An unexpected/unsupported selection must NOT be treated as h2. */
-    KlConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, "spdy/3.1");
-    ASSERT_EQ(st, (KlConnState)KL_CONN_READING);
+    KlHttpConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, "spdy/3.1");
+    ASSERT_EQ(st, (KlHttpConnState)KL_HTTP_CONN_READING);
     ASSERT_TRUE(conn.h2 == NULL);
     conn.tls->destroy(conn.tls);
     kl_test_closesock(pfd[0]); kl_test_closesock(pfd[1]);
@@ -154,9 +154,9 @@ UTEST(alpn, unsupported_alpn_does_not_engage_http2) {
 /* No h2_config → even an "h2" ALPN result stays HTTP/1.1 (server didn't enable h2). */
 UTEST(alpn, h2_alpn_without_h2_config_stays_http1) {
     ta_setup();
-    KlConn conn; int pfd[2];
-    KlConnState st = ta_handshake_with_alpn(&conn, NULL, pfd, "h2");
-    ASSERT_EQ(st, (KlConnState)KL_CONN_READING);
+    KlHttpConn conn; int pfd[2];
+    KlHttpConnState st = ta_handshake_with_alpn(&conn, NULL, pfd, "h2");
+    ASSERT_EQ(st, (KlHttpConnState)KL_HTTP_CONN_READING);
     ASSERT_TRUE(conn.h2 == NULL);
     conn.tls->destroy(conn.tls);
     kl_test_closesock(pfd[0]); kl_test_closesock(pfd[1]);
@@ -179,10 +179,10 @@ UTEST(alpn, http2_request_uses_shared_rest_layer) {
     /* Bring up HTTP/2 on a conn and drive one request through the real h2 path. */
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
-    KlConn conn; memset(&conn, 0, sizeof(conn));
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1]; conn.stream.alloc = &ta_alloc;
     int up = kl_h2_server_upgrade(&conn, &ta_router, &h2cfg, NULL, 0);
-    ASSERT_EQ(up, (int)KL_CONN_HTTP2);
+    ASSERT_EQ(up, (int)KL_HTTP_CONN_HTTP2);
     ASSERT_TRUE(ta_cap != NULL);
 
     /* HTTP/2 HEADERS with :authority, then END_STREAM → the shared handler runs. */

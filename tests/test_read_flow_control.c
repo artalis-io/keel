@@ -53,7 +53,7 @@ static int rfc_on_data(KlBodyReader *self, const char *data, size_t len) {
     if (!r->paused) {                 /* pause on the first chunk, resume ~30ms later */
         r->paused = 1;
         g_calls_at_pause = g_calls;
-        KlConn *c = kl_http_request_conn(r->req);
+        KlHttpConn *c = kl_http_request_conn(r->req);
         kl_http_request_pause_body(r->req);
         kl_timer_add(c->stream.ctx, 30, rfc_resume, r);
     }

@@ -1,7 +1,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include <keel/client.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/allocator.h>
 #include <string.h>
 #include <pthread.h>
@@ -90,7 +90,7 @@ UTEST(client_stream, stream_body_simple) {
     StreamCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    KlResponseParser *p = kl_response_parser_llhttp_s(0, &a,
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a,
         test_on_body, test_on_headers, test_on_complete, &ctx);
     ASSERT_TRUE(p != NULL);
 
@@ -103,8 +103,8 @@ UTEST(client_stream, stream_body_simple) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp.status, 200);
 
     /* Body was streamed, not buffered */
@@ -137,7 +137,7 @@ UTEST(client_stream, stream_body_chunked) {
     StreamCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    KlResponseParser *p = kl_response_parser_llhttp_s(0, &a,
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a,
         test_on_body, NULL, test_on_complete, &ctx);
     ASSERT_TRUE(p != NULL);
 
@@ -152,8 +152,8 @@ UTEST(client_stream, stream_body_chunked) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_TRUE(resp.body == NULL);
     ASSERT_EQ(ctx.len, (size_t)11);
     ASSERT_EQ(memcmp(ctx.buf, "hello world", 11), 0);
@@ -169,7 +169,7 @@ UTEST(client_stream, stream_body_multi_feed) {
     StreamCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    KlResponseParser *p = kl_response_parser_llhttp_s(0, &a,
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a,
         test_on_body, NULL, test_on_complete, &ctx);
     ASSERT_TRUE(p != NULL);
 
@@ -184,8 +184,8 @@ UTEST(client_stream, stream_body_multi_feed) {
 
     /* Feed 5 bytes at a time */
     size_t pos = 0;
-    KlParseResult result = KL_PARSE_INCOMPLETE;
-    while (pos < total && result == KL_PARSE_INCOMPLETE) {
+    KlHttp1ParseResult result = KL_HTTP1_PARSE_INCOMPLETE;
+    while (pos < total && result == KL_HTTP1_PARSE_INCOMPLETE) {
         size_t chunk = 5;
         if (pos + chunk > total)
             chunk = total - pos;
@@ -194,7 +194,7 @@ UTEST(client_stream, stream_body_multi_feed) {
         pos += consumed;
     }
 
-    ASSERT_EQ(result, KL_PARSE_OK);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(ctx.len, (size_t)10);
     ASSERT_EQ(memcmp(ctx.buf, "0123456789", 10), 0);
     ASSERT_TRUE(ctx.complete);
@@ -206,7 +206,7 @@ UTEST(client_stream, stream_body_multi_feed) {
 UTEST(client_stream, stream_body_abort) {
     KlAllocator a = kl_allocator_default();
 
-    KlResponseParser *p = kl_response_parser_llhttp_s(0, &a,
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a,
         test_on_body_abort, NULL, NULL, NULL);
     ASSERT_TRUE(p != NULL);
 
@@ -219,8 +219,8 @@ UTEST(client_stream, stream_body_abort) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
-    ASSERT_EQ(result, KL_PARSE_ERROR);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_ERROR);
 
     kl_client_response_free(&resp);
     p->destroy(p);
@@ -231,7 +231,7 @@ UTEST(client_stream, stream_headers_callback) {
     StreamCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    KlResponseParser *p = kl_response_parser_llhttp_s(0, &a,
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a,
         test_on_body, test_on_headers, NULL, &ctx);
     ASSERT_TRUE(p != NULL);
 
@@ -245,8 +245,8 @@ UTEST(client_stream, stream_headers_callback) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_TRUE(ctx.headers_called);
     ASSERT_EQ(ctx.headers_status, 201);
     ASSERT_EQ(ctx.headers_count, 2);
@@ -258,7 +258,7 @@ UTEST(client_stream, stream_headers_callback) {
 UTEST(client_stream, stream_headers_abort) {
     KlAllocator a = kl_allocator_default();
 
-    KlResponseParser *p = kl_response_parser_llhttp_s(0, &a,
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a,
         test_on_body, test_on_headers_abort, NULL, NULL);
     ASSERT_TRUE(p != NULL);
 
@@ -271,8 +271,8 @@ UTEST(client_stream, stream_headers_abort) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
-    ASSERT_EQ(result, KL_PARSE_ERROR);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_ERROR);
 
     kl_client_response_free(&resp);
     p->destroy(p);
@@ -283,7 +283,7 @@ UTEST(client_stream, stream_no_body) {
     StreamCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    KlResponseParser *p = kl_response_parser_llhttp_s(0, &a,
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a,
         test_on_body, test_on_headers, test_on_complete, &ctx);
     ASSERT_TRUE(p != NULL);
 
@@ -295,8 +295,8 @@ UTEST(client_stream, stream_no_body) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp.status, 204);
     ASSERT_EQ(ctx.body_calls, 0);  /* on_body never called */
     ASSERT_TRUE(ctx.complete);
@@ -309,7 +309,7 @@ UTEST(client_stream, stream_null_optional_callbacks) {
     KlAllocator a = kl_allocator_default();
 
     /* on_body set, but on_headers=NULL and on_complete=NULL — should not crash */
-    KlResponseParser *p = kl_response_parser_llhttp_s(0, &a,
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(0, &a,
         test_on_body_noop, NULL, NULL, NULL);
     ASSERT_TRUE(p != NULL);
 
@@ -322,8 +322,8 @@ UTEST(client_stream, stream_null_optional_callbacks) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_TRUE(resp.body == NULL);
 
     kl_client_response_free(&resp);
@@ -336,7 +336,7 @@ UTEST(client_stream, stream_body_size_limit) {
     memset(&ctx, 0, sizeof(ctx));
 
     /* max 3 bytes in streaming mode */
-    KlResponseParser *p = kl_response_parser_llhttp_s(3, &a,
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp_s(3, &a,
         test_on_body, NULL, NULL, &ctx);
     ASSERT_TRUE(p != NULL);
 
@@ -349,8 +349,8 @@ UTEST(client_stream, stream_body_size_limit) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
-    ASSERT_EQ(result, KL_PARSE_ERROR);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, strlen(raw), &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_ERROR);
 
     kl_client_response_free(&resp);
     p->destroy(p);

@@ -8,7 +8,7 @@
 #include <keel/resolver_cache.h>
 #include <keel/allocator.h>    /* kl_malloc / kl_free wrappers */
 #include <keel/client.h>       /* KL_CLIENT_HOSTNAME_MAX */
-#include <keel/connection.h>   /* kl_monotonic_ms */
+#include <keel/http_connection.h>   /* kl_monotonic_ms */
 
 #include <stdint.h>
 #include <string.h>

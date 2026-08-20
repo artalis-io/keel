@@ -1,6 +1,6 @@
 #include "utest.h"
 #include <keel/client.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/allocator.h>
 #include <string.h>
 
@@ -8,14 +8,14 @@
 
 UTEST(response_parser, create_and_destroy) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
     ASSERT_TRUE(p != NULL);
     p->destroy(p);
 }
 
 UTEST(response_parser, simple_200) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
 
     const char *raw = "HTTP/1.1 200 OK\r\n"
                       "Content-Length: 5\r\n"
@@ -27,8 +27,8 @@ UTEST(response_parser, simple_200) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp.status, 200);
     ASSERT_EQ(resp.body_len, (size_t)5);
     ASSERT_EQ(memcmp(resp.body, "hello", 5), 0);
@@ -42,7 +42,7 @@ UTEST(response_parser, simple_200) {
 
 UTEST(response_parser, chunked_response) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
 
     const char *raw = "HTTP/1.1 200 OK\r\n"
                       "Transfer-Encoding: chunked\r\n"
@@ -56,8 +56,8 @@ UTEST(response_parser, chunked_response) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp.status, 200);
     ASSERT_EQ(resp.body_len, (size_t)11);
     ASSERT_EQ(memcmp(resp.body, "hello world", 11), 0);
@@ -68,7 +68,7 @@ UTEST(response_parser, chunked_response) {
 
 UTEST(response_parser, multiple_headers) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
 
     const char *raw = "HTTP/1.1 200 OK\r\n"
                       "Content-Type: text/plain\r\n"
@@ -82,8 +82,8 @@ UTEST(response_parser, multiple_headers) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp.num_headers, 3);
     ASSERT_STREQ(resp.headers[0].name, "Content-Type");
     ASSERT_STREQ(resp.headers[0].value, "text/plain");
@@ -98,7 +98,7 @@ UTEST(response_parser, multiple_headers) {
 
 UTEST(response_parser, body_size_limit) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(3, &a);  /* max 3 bytes */
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(3, &a);  /* max 3 bytes */
 
     const char *raw = "HTTP/1.1 200 OK\r\n"
                       "Content-Length: 5\r\n"
@@ -110,8 +110,8 @@ UTEST(response_parser, body_size_limit) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
-    ASSERT_EQ(result, KL_PARSE_ERROR);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_ERROR);
 
     free_client_response(&resp);
     p->destroy(p);
@@ -119,7 +119,7 @@ UTEST(response_parser, body_size_limit) {
 
 UTEST(response_parser, incomplete) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
 
     const char *raw = "HTTP/1.1 200 OK\r\n"
                       "Content-Length: 100\r\n"
@@ -131,8 +131,8 @@ UTEST(response_parser, incomplete) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
-    ASSERT_EQ(result, KL_PARSE_INCOMPLETE);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_INCOMPLETE);
 
     free_client_response(&resp);
     p->destroy(p);
@@ -140,7 +140,7 @@ UTEST(response_parser, incomplete) {
 
 UTEST(response_parser, malformed) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
 
     const char *raw = "GARBAGE DATA\r\n\r\n";
     size_t len = strlen(raw);
@@ -149,8 +149,8 @@ UTEST(response_parser, malformed) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
-    ASSERT_EQ(result, KL_PARSE_ERROR);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_ERROR);
 
     free_client_response(&resp);
     p->destroy(p);
@@ -158,7 +158,7 @@ UTEST(response_parser, malformed) {
 
 UTEST(response_parser, status_404) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
 
     const char *raw = "HTTP/1.1 404 Not Found\r\n"
                       "Content-Length: 9\r\n"
@@ -170,8 +170,8 @@ UTEST(response_parser, status_404) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp.status, 404);
     ASSERT_EQ(resp.body_len, (size_t)9);
 
@@ -181,7 +181,7 @@ UTEST(response_parser, status_404) {
 
 UTEST(response_parser, empty_body) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
 
     const char *raw = "HTTP/1.1 204 No Content\r\n"
                       "Content-Length: 0\r\n"
@@ -192,8 +192,8 @@ UTEST(response_parser, empty_body) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp.status, 204);
     ASSERT_EQ(resp.body_len, (size_t)0);
 
@@ -203,7 +203,7 @@ UTEST(response_parser, empty_body) {
 
 UTEST(response_parser, reset_and_reparse) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
 
     const char *raw1 = "HTTP/1.1 200 OK\r\n"
                        "Content-Length: 2\r\n"
@@ -214,8 +214,8 @@ UTEST(response_parser, reset_and_reparse) {
     memset(&resp1, 0, sizeof(resp1));
     size_t consumed1 = 0;
 
-    KlParseResult r1 = p->parse(p, &resp1, raw1, strlen(raw1), &consumed1);
-    ASSERT_EQ(r1, KL_PARSE_OK);
+    KlHttp1ParseResult r1 = p->parse(p, &resp1, raw1, strlen(raw1), &consumed1);
+    ASSERT_EQ(r1, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp1.status, 200);
     free_client_response(&resp1);
 
@@ -229,8 +229,8 @@ UTEST(response_parser, reset_and_reparse) {
     memset(&resp2, 0, sizeof(resp2));
     size_t consumed2 = 0;
 
-    KlParseResult r2 = p->parse(p, &resp2, raw2, strlen(raw2), &consumed2);
-    ASSERT_EQ(r2, KL_PARSE_OK);
+    KlHttp1ParseResult r2 = p->parse(p, &resp2, raw2, strlen(raw2), &consumed2);
+    ASSERT_EQ(r2, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp2.status, 301);
     free_client_response(&resp2);
 
@@ -241,7 +241,7 @@ UTEST(response_parser, reset_and_reparse) {
  * header, not merged into the following header's name. */
 UTEST(response_parser, empty_valued_header) {
     KlAllocator a = kl_allocator_default();
-    KlResponseParser *p = kl_response_parser_llhttp(0, &a);
+    KlHttp1ResponseParser *p = kl_http1_response_parser_llhttp(0, &a);
 
     const char *raw = "HTTP/1.1 200 OK\r\n"
                       "X-Empty:\r\n"
@@ -254,8 +254,8 @@ UTEST(response_parser, empty_valued_header) {
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
-    KlParseResult result = p->parse(p, &resp, raw, len, &consumed);
-    ASSERT_EQ(result, KL_PARSE_OK);
+    KlHttp1ParseResult result = p->parse(p, &resp, raw, len, &consumed);
+    ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
     ASSERT_EQ(resp.num_headers, 3);
     ASSERT_STREQ(resp.headers[0].name, "X-Empty");
     ASSERT_STREQ(resp.headers[0].value, "");      /* preserved, not merged */

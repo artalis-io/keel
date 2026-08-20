@@ -228,7 +228,7 @@ static void handle_no_reader(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
  * e.g. cap-exceeded). The handler stashes conn+res at dispatch time;
  * on_data writes the response, sets state = SENDING, then returns
  * -1 to simulate the reader rejecting the body bytes. The new branch
- * in kl_conn_on_readable's rc<0 / pr==KL_PARSE_ERROR paths must see
+ * in kl_http_conn_on_readable's rc<0 / pr==KL_HTTP1_PARSE_ERROR paths must see
  * the SENDING state and honor it instead of overwriting with the
  * hardcoded 413 + CLOSED. */
 static volatile int eer_err_handler_called = 0;
@@ -236,7 +236,7 @@ static volatile int eer_err_handler_called = 0;
 typedef struct {
     KlBodyReader  base;
     KlAllocator  *alloc;
-    KlConn       *conn;
+    KlHttpConn       *conn;
     KlHttpResponse   *res;
     int           responded;
 } EarlyExitErrReader;
@@ -256,7 +256,7 @@ static int  eer_err_on_data(KlBodyReader *self, const char *data, size_t len) {
     kl_http_response_header(r->res, "Content-Type", "text/plain");
     /* 31 bytes — em-dash is 3 bytes UTF-8 */
     kl_http_response_body_borrow(r->res, "cap exceeded — handler caught", 31);
-    r->conn->state = KL_CONN_SENDING;
+    r->conn->state = KL_HTTP_CONN_SENDING;
     r->responded = 1;
     return -1;   /* simulate body-reader rejection */
 }
@@ -287,7 +287,7 @@ static void handle_early_exit_err(KlHttpRequest *req, KlHttpResponse *res, void 
     if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
     r->conn = kl_http_request_conn(req);
     r->res  = res;
-    r->conn->state = KL_CONN_READING_BODY;
+    r->conn->state = KL_HTTP_CONN_READING_BODY;
     eer_err_handler_called = 1;
 }
 
@@ -313,7 +313,7 @@ static void handle_early_exit_async_err(KlHttpRequest *req, KlHttpResponse *res,
     if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
     r->conn = kl_http_request_conn(req);
     r->res  = res;
-    r->conn->state = KL_CONN_READING_BODY;
+    r->conn->state = KL_HTTP_CONN_READING_BODY;
     eer_async_err_handler_called = 1;
 }
 
@@ -372,7 +372,7 @@ static void handle_async_sync_reject(KlHttpRequest *req, KlHttpResponse *res,
  * Lua/JS coroutine-based handler would do: yield at dispatch time
  * (state = READING_BODY), then "resume" inside on_data, set up the
  * response, and transition state to SENDING. Without the early-exit
- * branch in kl_conn_on_readable's READING_BODY mid-stream return,
+ * branch in kl_http_conn_on_readable's READING_BODY mid-stream return,
  * Keel would override that SENDING with READING_BODY and the response
  * would never be sent.
  */
@@ -385,7 +385,7 @@ static volatile int eer_handler_called = 0;
 typedef struct {
     KlBodyReader  base;
     KlAllocator  *alloc;
-    KlConn       *conn;        /* stashed by handler at dispatch time */
+    KlHttpConn       *conn;        /* stashed by handler at dispatch time */
     KlHttpResponse   *res;         /* same */
     int           responded;   /* one-shot guard */
 } EarlyExitReader;
@@ -401,7 +401,7 @@ static int  eer_on_data(KlBodyReader *self, const char *data, size_t len) {
     kl_http_response_status(r->res, 200);
     kl_http_response_header(r->res, "Content-Type", "text/plain");
     kl_http_response_body_borrow(r->res, "early exit", 10);
-    r->conn->state = KL_CONN_SENDING;
+    r->conn->state = KL_HTTP_CONN_SENDING;
     r->responded = 1;
     return 0;
 }
@@ -436,7 +436,7 @@ static void handle_early_exit(KlHttpRequest *req, KlHttpResponse *res, void *ctx
     if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
     r->conn = kl_http_request_conn(req);
     r->res  = res;
-    r->conn->state = KL_CONN_READING_BODY;
+    r->conn->state = KL_HTTP_CONN_READING_BODY;
     /* Signal the test thread that we've run — it polls this before
      * sending the second body chunk so the test isn't timing-fragile. */
     eer_handler_called = 1;
@@ -1001,9 +1001,9 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
      * structured handler response (413 + "cap exceeded — handler
      * caught"), sets state = SENDING, and returns -1 to simulate a
      * cap-exceeded rejection. The new early-exit branch in
-     * kl_conn_on_readable's rc<0 / pr==KL_PARSE_ERROR clauses must
+     * kl_http_conn_on_readable's rc<0 / pr==KL_HTTP1_PARSE_ERROR clauses must
      * see SENDING and return it without overwriting state with
-     * KL_CONN_CLOSED + the hardcoded kl_413_response. The test
+     * KL_HTTP_CONN_CLOSED + the hardcoded kl_413_response. The test
      * asserts on the handler-supplied body, not the hardcoded one. */
     start_server();
 

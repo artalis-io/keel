@@ -6,11 +6,11 @@
 #include <keel/socket.h>
 #include <keel/compress.h>
 #include <keel/error.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/router.h>
 #include <keel/tls.h>
 #include <keel/h2_server.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/listener_detail.h>  /* struct KlListener layout — KlServer embeds it (step 6B-1) */
 #include <keel/event_ctx.h>
 #include <keel/proxy_protocol.h>
@@ -20,7 +20,7 @@
 
 typedef struct KlWsServerConfig KlWsServerConfig;
 /** @brief Factory function for creating request parsers. */
-typedef KlParser *(*KlParserFactory)(KlAllocator *alloc);
+typedef KlHttp1Parser *(*KlParserFactory)(KlAllocator *alloc);
 
 /** @brief Access log callback — called after each response is fully sent. NULL = disabled. */
 typedef void (*KlAccessLogFn)(const KlHttpRequest *req, int status,
@@ -59,7 +59,7 @@ typedef struct KlConfig {
     int read_timeout_ms;        /**< default: KL_DEFAULT_READ_TIMEOUT */
     int body_timeout_ms;        /**< total body deadline; 0 = use read_timeout_ms */
     KlAllocator *alloc;         /**< default: stdlib */
-    KlParserFactory parser;     /**< default: kl_parser_llhttp */
+    KlParserFactory parser;     /**< default: kl_http1_parser_llhttp */
     KlAccessLogFn access_log;   /**< default: NULL (disabled) */
     void *access_log_data;      /**< passed as user_data to access_log */
     KlLogFn log_fn;             /**< default: NULL (fprintf stderr) */
@@ -70,7 +70,7 @@ typedef struct KlConfig {
     KlTlsConfig *tls;           /**< TLS config — NULL = plaintext (default) */
     KlH2ServerConfig *h2;             /**< HTTP/2 config — NULL = disabled (default) */
     size_t max_body_size;       /**< discard-path body limit; default: 1 MB */
-    size_t max_header_size;     /**< max header block size; 0 = KL_READ_BUF_SIZE (8192) */
+    size_t max_header_size;     /**< max header block size; 0 = KL_HTTP_CONN_READ_BUF_SIZE (8192) */
     KlCompressConfig *compress; /**< compression config — NULL = disabled (default) */
     KlTransport transport;      /**< default: KL_TRANSPORT_TCP. Setting unix_socket_path
                                  *   forces UNIX regardless of this field (TCP == 0 is
@@ -121,7 +121,7 @@ typedef struct KlServer {
     KlH2ServerConfig h2_storage;     /**< owned copy of H2 config (if provided) */
     KlCompressConfig compress_storage; /**< owned copy of compress config (if provided) */
     KlRouter router;            /**< Route table */
-    KlConnPool pool;            /**< Connection pool */
+    KlHttpConnPool pool;            /**< Connection pool */
     KlEventCtx ev;              /**< event loop + watcher list */
     /* ── Accept via KlListener (step 6B) ────────────────────────────────────────────
      * When the loop is a readiness loop (!completion_loop), the readiness accept path is driven by

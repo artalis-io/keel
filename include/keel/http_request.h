@@ -85,15 +85,15 @@ struct KlHttpRequest {
     KlParam params[KL_MAX_PARAMS]; /**< Matched route parameters. */
     int num_params;              /**< Number of matched route parameters. */
 
-    void *_server_ctx;           /**< Opaque — set to KlConn* by connection layer (do not modify). */
+    void *_server_ctx;           /**< Opaque — set to KlHttpConn* by connection layer (do not modify). */
 };
 
 /** @brief Forward declaration — full definition in connection.h. */
-typedef struct KlConn KlConn;
+typedef struct KlHttpConn KlHttpConn;
 
 /** @brief Typed accessor for the connection handle (preferred over raw _server_ctx). */
-static inline KlConn *kl_http_request_conn(const KlHttpRequest *req) {
-    return (KlConn *)req->_server_ctx;
+static inline KlHttpConn *kl_http_request_conn(const KlHttpRequest *req) {
+    return (KlHttpConn *)req->_server_ctx;
 }
 
 /**
@@ -111,7 +111,7 @@ static inline KlConn *kl_http_request_conn(const KlHttpRequest *req) {
  *    deliver a final chunk (bounded to ≤1 in flight); resume posts a fresh recv.
  *  - A conn that stays paused is NOT exempt from the idle-read timeout — an indefinitely paused
  *    consumer is eventually timed out (slowloris/backpressure defense).
- *  - Pausing before/outside KL_CONN_READING_BODY is a no-op-safe state set; resume only re-arms
+ *  - Pausing before/outside KL_HTTP_CONN_READING_BODY is a no-op-safe state set; resume only re-arms
  *    when a pause is in effect.
  */
 /* const: they mutate the *connection's* read state (via kl_http_request_conn), not the KlHttpRequest. */

@@ -9,8 +9,8 @@
 #include "utest.h"
 #include "../src/proto_hooks.h"   /* internal seam; its includes are all public <keel/...> */
 
-static void drive_a(struct KlServer *s, KlConn *c) { (void)s; (void)c; }
-static void drive_b(struct KlServer *s, KlConn *c) { (void)s; (void)c; }
+static void drive_a(struct KlServer *s, KlHttpConn *c) { (void)s; (void)c; }
+static void drive_b(struct KlServer *s, KlHttpConn *c) { (void)s; (void)c; }
 
 UTEST(proto_hooks, install_once_registry) {
     static const KlWsCompHooks table_a = { drive_a };

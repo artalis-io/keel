@@ -125,7 +125,7 @@ static int kl_server_bind_listener(KlServer *s) {
 int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out) {
     if (!req)
         return -1;
-    const KlConn *conn = kl_http_request_conn(req);
+    const KlHttpConn *conn = kl_http_request_conn(req);
     if (!conn)
         return -1;
     return kl_peer_cred_fd(conn->stream.fd, out);
@@ -134,7 +134,7 @@ int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out) {
 int kl_http_request_peer_label(const KlHttpRequest *req, char *buf, size_t buflen) {
     if (!req || !buf || buflen == 0)
         return -1;
-    const KlConn *conn = kl_http_request_conn(req);
+    const KlHttpConn *conn = kl_http_request_conn(req);
     if (!conn || !kl_handle_valid(conn->stream.fd))
         return -1;
 
@@ -144,7 +144,7 @@ int kl_http_request_peer_label(const KlHttpRequest *req, char *buf, size_t bufle
 const KlSockAddr *kl_http_request_peer_sockaddr(const KlHttpRequest *req) {
     if (!req)
         return NULL;
-    const KlConn *conn = kl_http_request_conn(req);
+    const KlHttpConn *conn = kl_http_request_conn(req);
     if (!conn || kl_sockaddr_family(&conn->stream.peer_addr) == KL_AF_UNSPEC)
         return NULL;
     return &conn->stream.peer_addr;
@@ -154,7 +154,7 @@ int kl_http_request_peer_addr(const KlHttpRequest *req, char *ip, size_t iplen,
                          uint16_t *port) {
     if (!req || !ip || iplen == 0)
         return -1;
-    const KlConn *conn = kl_http_request_conn(req);
+    const KlHttpConn *conn = kl_http_request_conn(req);
     if (!conn)
         return -1;
 
@@ -172,7 +172,7 @@ int kl_http_request_peer_addr(const KlHttpRequest *req, char *ip, size_t iplen,
 int kl_http_request_peer_cert(const KlHttpRequest *req, KlPeerCert *out) {
     if (!req || !out)
         return -1;
-    const KlConn *conn = kl_http_request_conn(req);
+    const KlHttpConn *conn = kl_http_request_conn(req);
     if (!conn || !conn->tls || !conn->tls->peer_cert)
         return -1;   /* plaintext connection, or backend lacks mTLS support */
     memset(out, 0, sizeof(*out));
@@ -216,11 +216,11 @@ void kl_server_close_listener(KlServer *s) {
  * priming until 6B-3 part 2b-ii adopts the listener. */
 static int server_accept_reserve(void *ctx) {
     KlServer *s = ctx;
-    return kl_conn_pool_reserve(&s->pool);
+    return kl_http_conn_pool_reserve(&s->pool);
 }
 static void server_accept_release(void *ctx) {
     KlServer *s = ctx;
-    kl_conn_pool_return_credit(&s->pool);               /* free_credits++ ... */
+    kl_http_conn_pool_return_credit(&s->pool);               /* free_credits++ ... */
     kl_listener_notify_slot_free(&s->accept_listener);  /* ...then resume the accept if paused */
 }
 static int server_accept_arm(void *ctx) {
@@ -242,9 +242,9 @@ static void server_accept_dispose(void *ctx, KlSocketHandle fd) {
 }
 static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease lease) {
     KlServer *s = ctx;
-    KlConn *nc = kl_conn_acquire(&s->pool, fd);         /* commit — credit already reserved */
+    KlHttpConn *nc = kl_http_conn_acquire(&s->pool, fd);         /* commit — credit already reserved */
     if (!nc) {
-        /* Invariant failure (credit-backed accept but no free KlConn): dispose the descriptor and
+        /* Invariant failure (credit-backed accept but no free KlHttpConn): dispose the descriptor and
          * consume the lease to return the credit. free_credits+reserved+active==capacity guarantees
          * this cannot happen, but never leak an fd or a credit if it somehow does. */
         kl_sock_close(s->ev.sockets, fd);
@@ -252,11 +252,11 @@ static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease le
         return;
     }
     nc->slot_lease = lease;                             /* consumed once on close (after conn return) */
-    nc->peer_source = KL_PEER_SOCKET;
+    nc->peer_source = KL_HTTP_PEER_SOCKET;
     nc->stream.peer_addr = s->accept_pending_peer;
     nc->res.alloc = &s->alloc_storage;
     if (s->config.tls) {                               /* TLS: enter handshake instead of reading */
-        nc->state = KL_CONN_TLS_HANDSHAKE;
+        nc->state = KL_HTTP_CONN_TLS_HANDSHAKE;
         nc->tls_want = KL_EVENT_READ;
     }
     /* PROXY protocol from a trusted source: read the header first (before TLS/HTTP). */
@@ -264,7 +264,7 @@ static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease le
     if (s->proxy_cidr_count > 0 && ph && ph->cidr_match &&
         kl_sockaddr_family(&s->accept_pending_peer) != KL_AF_UNSPEC &&
         ph->cidr_match(s->proxy_cidrs, s->proxy_cidr_count, &s->accept_pending_peer)) {
-        nc->state = KL_CONN_PROXY_HEADER;
+        nc->state = KL_HTTP_CONN_PROXY_HEADER;
     }
     if (kl_event_add(&s->ev.loop, fd, KL_EVENT_READ, &nc->stream) < 0)  /* identity = raw stream */
         kl_server_conn_release(s, nc);                 /* releases the conn AND consumes the lease */
@@ -404,19 +404,19 @@ int kl_server_run(KlServer *s) {
             int nf = s->file_io->tick(s->file_io, fio_results,
                                        KL_EVENTS_PER_TICK);
             for (int fi = 0; fi < nf; fi++) {
-                KlConn *fc = fio_results[fi].udata;
-                KlConnState fstate = kl_conn_on_file_complete(
+                KlHttpConn *fc = fio_results[fi].udata;
+                KlHttpConnState fstate = kl_http_conn_on_file_complete(
                     fc, fio_results[fi].result, fio_results[fi].zero_copy);
-                if (fstate == KL_CONN_SENDING) {
+                if (fstate == KL_HTTP_CONN_SENDING) {
                     if (fc->file_io_phase == 1) {
                         /* FILE_IO_READING — async read pending, no WRITE reg */
                     } else {
                         kl_event_mod(&s->ev.loop, fc->stream.fd,
                                      KL_EVENT_WRITE, &fc->stream);
                     }
-                } else if (fstate == KL_CONN_READING) {
+                } else if (fstate == KL_HTTP_CONN_READING) {
                     kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
-                } else if (fstate == KL_CONN_CLOSED) {
+                } else if (fstate == KL_HTTP_CONN_CLOSED) {
                     kl_event_del(&s->ev.loop, fc->stream.fd);
                     kl_server_conn_release(s, fc);
                 }
@@ -429,10 +429,10 @@ int kl_server_run(KlServer *s) {
             if (kl_event_dispatch(&s->ev, &events[i]))
                 continue;
 
-            /* Readiness event identity is the raw KlStream (step 6B-2); recover the owning KlConn
+            /* Readiness event identity is the raw KlStream (step 6B-2); recover the owning KlHttpConn
              * only here, at the HTTP adapter boundary. NULL udata = the listen socket. */
             KlStream *evs = (KlStream *)events[i].udata;
-            KlConn *c = evs ? kl_conn_from_stream(evs) : NULL;
+            KlHttpConn *c = evs ? kl_http_conn_from_stream(evs) : NULL;
 
             if (c == NULL) {
                 /* Listen socket — accept new connections through the readiness KlListener
@@ -468,7 +468,7 @@ int kl_server_run(KlServer *s) {
                         (void)kl_sock_set_tcp_nodelay(s->ev.sockets, client_fd, 1);
 
                     /* Hand the accepted fd to the listener: it commits the reserved credit to a
-                     * KlConn (server_accept_on_accept), then reserves + arms the next accept — or
+                     * KlHttpConn (server_accept_on_accept), then reserves + arms the next accept — or
                      * PAUSEs if the pool is full, ending this drain. The peer is stashed for the
                      * hook (single-threaded, consumed immediately). */
                     s->accept_pending_peer = peer;
@@ -485,25 +485,25 @@ rearm_listen:
             }
 
             /* Client connection event */
-            KlConnState new_state = c->state;
+            KlHttpConnState new_state = c->state;
 
             /* PROXY protocol header — read before TLS/HTTP */
-            if (c->state == KL_CONN_PROXY_HEADER) {
-                int pr = kl_conn_read_proxy_header(c);
+            if (c->state == KL_HTTP_CONN_PROXY_HEADER) {
+                int pr = kl_http_conn_read_proxy_header(c);
                 if (pr < 0) {
-                    new_state = KL_CONN_CLOSED;
+                    new_state = KL_HTTP_CONN_CLOSED;
                     goto transition;
                 }
                 if (pr == 0) {
-                    new_state = KL_CONN_PROXY_HEADER;   /* need more bytes */
+                    new_state = KL_HTTP_CONN_PROXY_HEADER;   /* need more bytes */
                     goto transition;
                 }
                 /* Done — advance to the real initial state. */
                 if (s->config.tls) {
                     c->tls_want = KL_EVENT_READ;
-                    c->state = KL_CONN_TLS_HANDSHAKE;
+                    c->state = KL_HTTP_CONN_TLS_HANDSHAKE;
                 } else {
-                    c->state = KL_CONN_READING;
+                    c->state = KL_HTTP_CONN_READING;
                 }
                 new_state = c->state;
                 /* Process any bytes already buffered after the header this
@@ -516,60 +516,60 @@ rearm_listen:
             }
 
             /* TLS handshake — handle before normal read/write */
-            if (c->state == KL_CONN_TLS_HANDSHAKE) {
-                new_state = kl_conn_on_handshake(c);
+            if (c->state == KL_HTTP_CONN_TLS_HANDSHAKE) {
+                new_state = kl_http_conn_on_handshake(c);
                 goto transition;
             }
 
             /* WebSocket — handle read/write events through the ws seam (symmetric with
              * the completion path's KlWsCompHooks; the conn only reached this state via a
              * ws upgrade, so the hooks are installed). */
-            if (c->state == KL_CONN_WEBSOCKET) {
+            if (c->state == KL_HTTP_CONN_WEBSOCKET) {
                 const KlWsServerHooks *wsh = kl_ws_server_hooks();
-                if (!wsh) { new_state = KL_CONN_CLOSED; goto transition; }
+                if (!wsh) { new_state = KL_HTTP_CONN_CLOSED; goto transition; }
                 if (events[i].ready & KL_EVENT_READ)
-                    new_state = (KlConnState)wsh->on_readable(c);
-                if (new_state == KL_CONN_WEBSOCKET &&
+                    new_state = (KlHttpConnState)wsh->on_readable(c);
+                if (new_state == KL_HTTP_CONN_WEBSOCKET &&
                     (events[i].ready & KL_EVENT_WRITE))
-                    new_state = (KlConnState)wsh->on_writable(c);
+                    new_state = (KlHttpConnState)wsh->on_writable(c);
                 goto transition;
             }
 
             /* HTTP/2 — handle read/write events through the h2 seam. */
-            if (c->state == KL_CONN_HTTP2) {
+            if (c->state == KL_HTTP_CONN_HTTP2) {
                 const KlH2ServerHooks *h2h = kl_h2_server_hooks();
-                if (!h2h) { new_state = KL_CONN_CLOSED; goto transition; }
+                if (!h2h) { new_state = KL_HTTP_CONN_CLOSED; goto transition; }
                 if (events[i].ready & KL_EVENT_READ)
-                    new_state = (KlConnState)h2h->on_readable(c);
-                if (new_state == KL_CONN_HTTP2 &&
+                    new_state = (KlHttpConnState)h2h->on_readable(c);
+                if (new_state == KL_HTTP_CONN_HTTP2 &&
                     (events[i].ready & KL_EVENT_WRITE))
-                    new_state = (KlConnState)h2h->on_writable(c);
+                    new_state = (KlHttpConnState)h2h->on_writable(c);
                 goto transition;
             }
 
             if (events[i].ready & KL_EVENT_READ) {
-                new_state = kl_conn_on_readable(c, &s->router);
+                new_state = kl_http_conn_on_readable(c, &s->router);
             }
 
             if (events[i].ready & KL_EVENT_WRITE) {
-                if (new_state == KL_CONN_SENDING || c->state == KL_CONN_SENDING)
-                    new_state = kl_conn_on_writable(c);
+                if (new_state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_SENDING)
+                    new_state = kl_http_conn_on_writable(c);
             }
 
             /* Try immediate send after read→parse→handle */
-            if (new_state == KL_CONN_SENDING) {
-                new_state = kl_conn_on_writable(c);
+            if (new_state == KL_HTTP_CONN_SENDING) {
+                new_state = kl_http_conn_on_writable(c);
             }
 
 transition:
             /* Transition */
-            if (new_state == KL_CONN_TLS_HANDSHAKE) {
+            if (new_state == KL_HTTP_CONN_TLS_HANDSHAKE) {
                 if (kl_event_mod(&s->ev.loop, c->stream.fd,
                                  (KlEventMask)c->tls_want, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_CONN_SENDING) {
+            } else if (new_state == KL_HTTP_CONN_SENDING) {
                 if (c->file_io_phase == 1) {
                     /* FILE_IO_READING — async read pending, no WRITE event */
                 } else if (kl_event_mod(&s->ev.loop, c->stream.fd,
@@ -577,7 +577,7 @@ transition:
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_CONN_WEBSOCKET) {
+            } else if (new_state == KL_HTTP_CONN_WEBSOCKET) {
                 KlEventMask ws_mask = KL_EVENT_READ;
                 const KlWsServerHooks *wsh = kl_ws_server_hooks();
                 if (wsh && wsh->drain_pending && wsh->drain_pending(c))
@@ -586,7 +586,7 @@ transition:
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_CONN_HTTP2) {
+            } else if (new_state == KL_HTTP_CONN_HTTP2) {
                 KlEventMask mask = KL_EVENT_READ;
                 const KlH2ServerHooks *h2h = kl_h2_server_hooks();
                 if (h2h && h2h->want_write && h2h->want_write(c))
@@ -595,22 +595,22 @@ transition:
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_CONN_READING ||
-                       new_state == KL_CONN_READING_BODY ||
-                       new_state == KL_CONN_PROXY_HEADER) {
+            } else if (new_state == KL_HTTP_CONN_READING ||
+                       new_state == KL_HTTP_CONN_READING_BODY ||
+                       new_state == KL_HTTP_CONN_PROXY_HEADER) {
                 /* Read-side flow control: a paused body consumer keeps READ interest OFF (0)
                  * so the level-triggered loop stops delivering body bytes; kl_http_request_resume_body
                  * re-arms READ. Only READING_BODY pauses. */
-                KlEventMask rm = (new_state == KL_CONN_READING_BODY && c->stream.read_paused)
+                KlEventMask rm = (new_state == KL_HTTP_CONN_READING_BODY && c->stream.read_paused)
                                      ? 0 : KL_EVENT_READ;
                 if (kl_event_mod(&s->ev.loop, c->stream.fd, rm, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_server_conn_release(s,c);
                 }
-            } else if (new_state == KL_CONN_SUSPENDED) {
+            } else if (new_state == KL_HTTP_CONN_SUSPENDED) {
                 /* Handler suspended for async I/O — FD already removed
                  * from event loop by kl_async_suspend. */
-            } else if (new_state == KL_CONN_CLOSED) {
+            } else if (new_state == KL_HTTP_CONN_CLOSED) {
                 kl_event_del(&s->ev.loop, c->stream.fd);
                 kl_server_conn_release(s,c);
             }

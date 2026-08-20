@@ -13,7 +13,7 @@
 #include <keel/event.h>
 #include "event_builtin.h"
 #include <keel/server.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "sockaddr_native.h"     /* KlSockAddr -> Winsock sockaddr for the overlapped UDP send */
@@ -51,7 +51,7 @@ typedef struct KlIocpWatch {
  * client's connect op aborted before the client frees its (detached) watcher + closes the
  * socket — the aborted completion is then dropped in the drain instead of dispatching
  * against freed memory. (The IOCP backend doesn't otherwise track conn ops; connect is the
- * one op with no KlConn owner.) */
+ * one op with no KlHttpConn owner.) */
 typedef struct KlIocpConnect {
     struct KlIocpConnect *next;
     SOCKET                fd;
@@ -462,9 +462,9 @@ static int iocp_post_transmitfile_chunk(KlIocpOp *op) {
     return 0;
 }
 
-static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int iocp_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     HANDLE hfile = (HANDLE)_get_osfhandle(file_fd);
     if (hfile == INVALID_HANDLE_VALUE) return -1;
 
@@ -1045,7 +1045,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 static void iocp_quiesce_port_for_close(KlIocpState *st) {
     /* Cancel EVERY outstanding op (the global registry covers conn READ/WRITE/SENDFILE + UDP too,
      * not just watch/connect/accept) on its owning socket, so all their completions post. The
-     * conn/udp sockets are still open at this point (kl_conn_pool_free runs after), so CancelIoEx
+     * conn/udp sockets are still open at this point (kl_http_conn_pool_free runs after), so CancelIoEx
      * reaches them; the listen socket is already closed (its AcceptEx are completing regardless). */
     for (KlIocpOp *op = st->ops; op; op = op->g_next)
         CancelIoEx((HANDLE)(uintptr_t)op->op_sock, &op->ov);

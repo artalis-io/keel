@@ -163,7 +163,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     print_line("S-6: listening on :443");
 
     /* Run the completion loop. Each tick primes accepts, drains KL_COMP_ACCEPT →
-     * comp_on_accept (which enters KL_CONN_TLS_HANDSHAKE + memory-BIO mode), then the
+     * comp_on_accept (which enters KL_HTTP_CONN_TLS_HANDSHAKE + memory-BIO mode), then the
      * EFI post_recv delivers raw ciphertext and the HTTP adapter (comp_on_read) feeds it to
      * feed_input while comp_tls_drive handshakes / decrypts / responds — all model-blind. The handler prints GO on the first served
      * request; the loop keeps serving (the harness times out QEMU after curl's 200). */

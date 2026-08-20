@@ -12,7 +12,7 @@
 
 #include <keel/event.h>
 #include <keel/sockaddr.h>
-#include <keel/connection.h>           /* KlConn — server post_recv/post_send targets (S-4) */
+#include <keel/http_connection.h>           /* KlHttpConn — server post_recv/post_send targets (S-4) */
 #include "../../src/socket.h"          /* KlSocketProvider, kl_sock_accept/send/recv, kl_handle_valid */
 #include "../../src/completion.h"      /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
 
@@ -147,7 +147,7 @@ typedef struct {
     unsigned long long dgram_seq;                    /* monotonic send-acceptance counter (FIFO) */
 #endif
     /* S-3 server accept: latched by prime_accepts; drain hands back each ready child
-     * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlConn-pool backpressure. */
+     * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlHttpConn-pool backpressure. */
     struct KlServer   *server;
     KlSocketHandle     listen_fd;
     int                accept_primed;
@@ -217,7 +217,7 @@ static int el_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
  * event ctx is freed (kl_event_ctx_free calls this before the conn pool is freed in
  * kl_server_free). No heap is owned now (server send iovecs are inline snapshots — no
  * kl_malloc), so this clears state only: connect ops, watches, server I/O ops, and the
- * latched server/listener. Prevents a stale KlConn / watcher pointer from surviving into
+ * latched server/listener. Prevents a stale KlHttpConn / watcher pointer from surviving into
  * a later run and closes the (former) leak window a pending send buffer could open. */
 static void el_close(KlEventLoop *loop) {
     (void)loop;
@@ -581,7 +581,7 @@ static int el_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int
 
     /* Accept relay (S-3): hand back each child the S-2 Accept-token pool has ready as
      * KL_COMP_ACCEPT (peer already neutralized by efi_sock_accept via GetModeData).
-     * Backpressure — stop when the server's KlConn pool is full (don't accept into a
+     * Backpressure — stop when the server's KlHttpConn pool is full (don't accept into a
      * drop; the completion analogue of reducing readiness interest, Goal 8). The
      * socket-axis efi_sock_accept re-arms each consumed Accept token internally. */
     if (g_efi.accept_primed && g_efi.server && kl_handle_valid(g_efi.listen_fd)) {

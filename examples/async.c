@@ -45,7 +45,7 @@ static void delay_on_resume(KlAsyncOp *op, void *user_data) {
                      "{\"delayed_ms\":%d}", ctx->delay_ms);
     if (n < 0) n = 0;
 
-    KlConn *conn = op->conn;
+    KlHttpConn *conn = op->conn;
     kl_http_response_json(&conn->res, 200, body, (size_t)n);
 
     close(ctx->pipe_fds[0]);
@@ -94,7 +94,7 @@ static void *delay_thread(void *arg) {
 static void handle_delay(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_http_request_conn(req);
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     /* Parse delay from route param */
     size_t ms_len;

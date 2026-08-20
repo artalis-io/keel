@@ -15,7 +15,7 @@
 #include <keel/client_pool.h>
 #include <keel/decompress.h>
 #include <keel/dns_resolver.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/timer.h>
 
 #include <limits.h>
@@ -922,18 +922,18 @@ static void async_handle_receiving(KlClient *c)
         }
 
         size_t consumed;
-        KlParseResult pr = c->parser->parse(c->parser, &c->resp,
+        KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->resp,
                                               buf, (size_t)nread, &consumed);
-        if (pr == KL_PARSE_OK) {
+        if (pr == KL_HTTP1_PARSE_OK) {
             async_complete_success(c);
             return;
         }
-        if (pr == KL_PARSE_ERROR) {
+        if (pr == KL_HTTP1_PARSE_ERROR) {
             c->error = KL_ERR_PARSE;
             async_complete_error(c);
             return;
         }
-        /* KL_PARSE_INCOMPLETE — try to read more (non-blocking) */
+        /* KL_HTTP1_PARSE_INCOMPLETE — try to read more (non-blocking) */
     }
 }
 
@@ -1275,20 +1275,20 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             w->ds.alloc = alloc;
             c->decomp_wrap = w;
 
-            c->parser = kl_response_parser_llhttp_s(max_resp, alloc,
+            c->parser = kl_http1_response_parser_llhttp_s(max_resp, alloc,
                                                       kl_client_decomp_on_body,
                                                       kl_client_decomp_on_headers,
                                                       kl_client_decomp_on_complete,
                                                       w);
         } else {
-            c->parser = kl_response_parser_llhttp_s(max_resp, alloc,
+            c->parser = kl_http1_response_parser_llhttp_s(max_resp, alloc,
                                                       stream->on_body,
                                                       stream->on_headers,
                                                       stream->on_complete,
                                                       stream->user_data);
         }
     } else {
-        c->parser = kl_response_parser_llhttp(max_resp, alloc);
+        c->parser = kl_http1_response_parser_llhttp(max_resp, alloc);
     }
     if (!c->parser) {
         if (c->decomp_wrap) {
@@ -1620,7 +1620,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     c->decompress_cfg = cfg ? cfg->decompress : NULL;
 
     /* Create response parser */
-    c->parser = kl_response_parser_llhttp(max_resp, alloc);
+    c->parser = kl_http1_response_parser_llhttp(max_resp, alloc);
     if (!c->parser) {
         kl_free(alloc, req_buf, req_len);
         kl_free(alloc, c, sizeof(KlClient));

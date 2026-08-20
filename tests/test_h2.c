@@ -3,7 +3,7 @@
 #include <keel/h2.h>
 #include <keel/h2_server.h>
 #include "../src/h2_internal.h"
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/router.h>
 #include <keel/body_reader.h>
 #include <string.h>
@@ -212,7 +212,7 @@ static KlBodyReader *test_br_factory(KlAllocator *alloc, const KlHttpRequest *re
     return &g_test_br.base;
 }
 
-/* ── Helper: set up a minimal KlConn with pipes for I/O ──────────── */
+/* ── Helper: set up a minimal KlHttpConn with pipes for I/O ──────────── */
 
 static KlAllocator test_alloc;
 static KlRouter test_router;
@@ -261,7 +261,7 @@ UTEST(h2, session_vtable_validation) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -277,7 +277,7 @@ UTEST(h2, session_vtable_validation) {
     mock.base.destroy = mock_destroy;
 
     int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
-    ASSERT_EQ(r, (int)KL_CONN_CLOSED);
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_CLOSED);
     /* destroy should have been called during cleanup */
     ASSERT_EQ(mock.destroy_count, 1);
 
@@ -295,13 +295,13 @@ UTEST(h2, conn_init_and_free) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
 
     int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
-    ASSERT_EQ(r, (int)KL_CONN_HTTP2);
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
     ASSERT_TRUE(conn.h2 != NULL);
     ASSERT_TRUE(conn.h2->session != NULL);
     ASSERT_TRUE(conn.h2->streams != NULL);
@@ -326,14 +326,14 @@ UTEST(h2, stream_create) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
     kl_router_add(&test_router, "GET", "/test", test_handler, NULL, NULL);
 
     int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
-    ASSERT_EQ(r, (int)KL_CONN_HTTP2);
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
 
     /* Invoke the on_request callback to create a stream */
     const char *hdr_names[] = {};
@@ -368,7 +368,7 @@ UTEST(h2, stream_max_limit) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -376,7 +376,7 @@ UTEST(h2, stream_max_limit) {
                   test_br_factory);
 
     int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
-    ASSERT_EQ(r, (int)KL_CONN_HTTP2);
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
     ASSERT_EQ(conn.h2->max_streams, 2);
 
     /* Create stream 1 — POST with body, no stream_end yet */
@@ -420,7 +420,7 @@ UTEST(h2, stream_destroy_cleanup) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -462,7 +462,7 @@ UTEST(h2, cb_on_request_creates_stream) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -509,7 +509,7 @@ UTEST(h2, cb_on_request_routes) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -551,7 +551,7 @@ UTEST(h2, cb_on_request_middleware) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -585,7 +585,7 @@ UTEST(h2, cb_on_data_forwards) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -624,7 +624,7 @@ UTEST(h2, cb_on_data_reject) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -663,7 +663,7 @@ UTEST(h2, cb_on_stream_end_handler) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -701,7 +701,7 @@ UTEST(h2, cb_on_stream_end_404) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -732,7 +732,7 @@ UTEST(h2, cb_on_stream_reset_cleanup) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -772,7 +772,7 @@ UTEST(h2, cb_send_wraps_conn_write) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -802,14 +802,14 @@ UTEST(h2, preface_detection_full) {
     mock_init(&mock);
     g_mock_session = &mock;
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.alloc = &test_alloc;
     conn.h2_config = &test_h2_cfg;
     conn.router = &test_router;
 
     /* Provide a stack buffer since read_buf is now a pointer */
-    char h2_buf[KL_READ_BUF_SIZE];
+    char h2_buf[KL_HTTP_CONN_READ_BUF_SIZE];
     conn.stream.read_buf = h2_buf;
     conn.stream.read_cap = sizeof(h2_buf);
 
@@ -818,7 +818,7 @@ UTEST(h2, preface_detection_full) {
     memcpy(conn.stream.read_buf, preface, 24);
     conn.stream.read_len = 24;
 
-    /* We can't call kl_conn_on_readable directly (needs fd),
+    /* We can't call kl_http_conn_on_readable directly (needs fd),
      * so test the preface detection logic via direct buffer check */
     ASSERT_EQ(conn.stream.read_len, (size_t)24);
     ASSERT_EQ(memcmp(conn.stream.read_buf, preface, 24), 0);
@@ -850,7 +850,7 @@ UTEST(h2, preface_detection_non_match) {
 }
 
 UTEST(h2, alpn_h2) {
-    /* When TLS ALPN negotiates "h2", upgrade should produce KL_CONN_HTTP2 */
+    /* When TLS ALPN negotiates "h2", upgrade should produce KL_HTTP_CONN_HTTP2 */
     test_setup();
     MockH2Session mock;
     mock_init(&mock);
@@ -859,7 +859,7 @@ UTEST(h2, alpn_h2) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -868,7 +868,7 @@ UTEST(h2, alpn_h2) {
 
     /* Direct upgrade test (simulating ALPN h2) */
     int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
-    ASSERT_EQ(r, (int)KL_CONN_HTTP2);
+    ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
     ASSERT_TRUE(conn.h2 != NULL);
 
     kl_h2_server_cleanup(&conn);
@@ -880,7 +880,7 @@ UTEST(h2, alpn_h2) {
 UTEST(h2, alpn_null_fallback) {
     /* When alpn_protocol is NULL, no HTTP/2 upgrade should happen */
     /* This is tested implicitly — without alpn, conn stays in READING */
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
 
     /* No TLS at all means no ALPN */
@@ -906,7 +906,7 @@ UTEST(h2, multi_stream) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -959,7 +959,7 @@ UTEST(h2, goaway_shutdown) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -989,7 +989,7 @@ UTEST(h2, cleanup_frees_all) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -1021,7 +1021,7 @@ UTEST(h2, cleanup_frees_all) {
 
 UTEST(h2, h2c_disabled_when_null) {
     /* h2_config=NULL means preface check is skipped */
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.h2_config = NULL;
 
@@ -1039,7 +1039,7 @@ UTEST(h2, response_header_extraction) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -1082,7 +1082,7 @@ UTEST(h2, handler_same_api) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -1120,7 +1120,7 @@ UTEST(h2, query_string_parsing) {
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
 
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
@@ -1148,7 +1148,7 @@ UTEST(h2, query_string_parsing) {
 
 UTEST(h2, cleanup_null_is_noop) {
     /* kl_h2_server_cleanup with NULL h2 should be safe */
-    KlConn conn;
+    KlHttpConn conn;
     memset(&conn, 0, sizeof(conn));
     conn.h2 = NULL;
     kl_h2_server_cleanup(&conn);

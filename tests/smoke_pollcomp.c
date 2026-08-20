@@ -429,7 +429,7 @@ static int h2_prior_knowledge_roundtrip(void) {
 /* PROXY-over-completion: a trusted-source connection sends a plaintext PROXY v1 header before
  * its HTTP request; the completion driver's PROXY-header phase (comp_drive_proxy) must parse it
  * and the handler must see the real client address (1.2.3.4), not the socket's 127.0.0.1 —
- * exercising accept → KL_CONN_PROXY_HEADER → parse → READING → handler over the completion loop.
+ * exercising accept → KL_HTTP_CONN_PROXY_HEADER → parse → READING → handler over the completion loop.
  * Returns 1 on success. */
 #define SMOKE_PROXY_PORT 18097
 static char g_proxy_ip[64];

@@ -16,7 +16,7 @@
 #include <keel/decompress.h>
 #include <keel/error.h>
 #include <keel/event_ctx.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/resolver.h>
 #include <keel/socket.h>
 #include <keel/tls.h>
@@ -307,7 +307,7 @@ void kl_client_free(KlClient *client);
  * @param stream_user_data   User data passed to all callbacks.
  * @return Parser instance, or NULL on allocation failure.
  */
-KlResponseParser *kl_response_parser_llhttp_s(size_t max_response_size,
+KlHttp1ResponseParser *kl_http1_response_parser_llhttp_s(size_t max_response_size,
                                                 KlAllocator *alloc,
                                                 KlClientBodyFn on_body,
                                                 KlClientHeadersFn on_headers,

@@ -24,7 +24,7 @@ typedef struct KlH2ServerSession KlH2ServerSession;
 typedef struct KlH2ServerCallbacks KlH2ServerCallbacks;
 typedef struct KlH2ServerStream KlH2ServerStream;
 typedef struct KlH2ServerConn KlH2ServerConn;
-typedef struct KlConn KlConn;
+typedef struct KlHttpConn KlHttpConn;
 
 /* ── KlH2ServerCallbacks — KEEL provides these to the session ────── */
 
@@ -108,19 +108,19 @@ typedef struct KlH2ServerConfig {
 /* ── Internal functions (used by connection.c, server.c) ─────────── */
 
 /** @brief Upgrade a connection to HTTP/2 (direct h2c). */
-int  kl_h2_server_upgrade(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
+int  kl_h2_server_upgrade(KlHttpConn *c, KlRouter *router, KlH2ServerConfig *cfg,
                            const char *leftover, size_t leftover_len);
 /** @brief Upgrade a connection to HTTP/2 from an HTTP/1.1 Upgrade request. */
-int  kl_h2_server_upgrade_from_h1(KlConn *c, KlRouter *router,
+int  kl_h2_server_upgrade_from_h1(KlHttpConn *c, KlRouter *router,
                                    KlH2ServerConfig *cfg,
                                    const char *leftover, size_t leftover_len);
 /** @brief Handle readable event on an HTTP/2 connection. */
-int  kl_h2_server_on_readable(KlConn *c);
+int  kl_h2_server_on_readable(KlHttpConn *c);
 /** @brief Handle writable event on an HTTP/2 connection. */
-int  kl_h2_server_on_writable(KlConn *c);
+int  kl_h2_server_on_writable(KlHttpConn *c);
 /** @brief Initiate graceful GOAWAY drain on an HTTP/2 connection. */
-void kl_h2_server_drain_shutdown(KlConn *c);
+void kl_h2_server_drain_shutdown(KlHttpConn *c);
 /** @brief Clean up all HTTP/2 state for a connection. */
-void kl_h2_server_cleanup(KlConn *c);
+void kl_h2_server_cleanup(KlHttpConn *c);
 
 #endif

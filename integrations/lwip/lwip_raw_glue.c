@@ -25,7 +25,7 @@
  *      KlConfig.max_connections — ONE authoritative limit. A conn that has a slot always arms.
  *
  *   #4 silent completion-ring drop. A fixed 64-entry global ring (lwr_rec_push) silently
- *      dropped completions when full — a lost terminal = a leaked/never-closed KlConn. Gone:
+ *      dropped completions when full — a lost terminal = a leaked/never-closed KlHttpConn. Gone:
  *      each slot carries its own pending-completion flags (accept / write / terminal); the
  *      drain SCANS all slots and emits one completion per pending item, bounded by conn_cap.
  *      It cannot overflow, and a terminal is a per-slot flag -> always deliverable.
@@ -193,7 +193,7 @@ u32_t sys_now(void) {
  * owner/close correlation only — callers must consult ->dead before dereferencing ->pcb. */
 typedef struct {
     struct tcp_pcb *pcb;        /* NULL = free slot */
-    void           *owner;      /* KlConn* the backend associated (tcp_arg) */
+    void           *owner;      /* KlHttpConn* the backend associated (tcp_arg) */
 
     /* ── retained receive queue (fix #1) ──────────────────────────────────────────
      * rx_head is a retained pbuf chain (oldest first, appended with pbuf_cat). We OWN it and
@@ -229,14 +229,14 @@ typedef struct {
      * A client slot is created by kl_lwr_connect for a client pcb (tcp_connect). It reuses the
      * SAME retained-recv queue (rx_head/rx_queued) for the RESPONSE (lwr_srv_recv is direction-
      * agnostic). But its completions do NOT flow through the server-side KL_COMP_ACCEPT/READ/WRITE/
-     * terminal path (those need a KlConn target the driver owns). Instead:
+     * terminal path (those need a KlHttpConn target the driver owns). Instead:
      *   - the connect result surfaces as KL_LWR_CONNECT (pend_connect + connect_ok), routed to the
      *     client's tagged watcher as KL_COMP_CONNECT;
      *   - the data plane rides the client's readiness watcher: the backend records the armed watcher
      *     (watcher_udata + watcher_mask, captured at lwr_ev_add/mod) and the drain relays it as
      *     KL_COMP_WATCHER when the pcb is writable (sndbuf headroom) or readable (rx queued/closed).
      *     The client's kl_sock_send/kl_sock_recv on the pcb are real (kl_lwr_client_send/_recv).
-     * No KlConn, no server-side completion path — the seam holds. The request send does NOT use the
+     * No KlHttpConn, no server-side completion path — the seam holds. The request send does NOT use the
      * Stage-B pump (that surfaces a server KL_COMP_WRITE); the client writes via kl_lwr_client_send. */
     int             is_client;        /* 1 = an outbound client pcb (kl_lwr_connect) */
     int             connected;        /* client: TCP connected (connected_cb fired ERR_OK) */
@@ -795,7 +795,7 @@ static err_t lwr_srv_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
  * the previous owner-keyed scan dropped the err when owner was still NULL, leaving a dangling
  * pcb + pend_accept that the driver would then adopt (a use-after-free). We free the rx chain +
  * reset the (preallocated) send offsets, mark the slot dead + closed, then either recycle it
- * (aborted before adoption — no KlConn exists to notify) or surface the single terminal. */
+ * (aborted before adoption — no KlHttpConn exists to notify) or surface the single terminal. */
 static void lwr_srv_err(void *arg, err_t err) {
     (void)err;
     KlLwrCtx *ctx = lwr_ctx();
@@ -815,7 +815,7 @@ static void lwr_srv_err(void *arg, err_t err) {
 
     if (c->pend_accept && c->owner == NULL) {
         /* Aborted in the accept->post_recv window: the ACCEPT was never surfaced to the driver,
-         * so there is no KlConn to notify — recycle the slot silently rather than surfacing a
+         * so there is no KlHttpConn to notify — recycle the slot silently rather than surfacing a
          * bogus ACCEPT on a freed pcb. */
         lwr_slot_clear(c);
     } else {
@@ -854,7 +854,7 @@ static err_t lwr_srv_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
  * A client slot reuses the retained-recv queue (lwr_srv_recv) for the response. Its request send
  * is a direct real kl_lwr_client_send (NOT the Stage-B pump) and its completions surface via the
  * client's tagged watcher (KL_LWR_CONNECT for connect; KL_COMP_WATCHER relay for the data plane) —
- * never the server-side KL_LWR_WRITE/terminal path (which needs a KlConn the driver owns). So the
+ * never the server-side KL_LWR_WRITE/terminal path (which needs a KlHttpConn the driver owns). So the
  * client uses its OWN err callback (lwr_cli_err), keyed by tcp_arg == the watcher udata. */
 
 /* Find a client slot by its tagged-watcher udata (the err callback's arg after the pcb is freed). */
@@ -919,7 +919,7 @@ int kl_lwr_connect(void *lwrctx, void *pcb, const uint8_t ip4[4], uint16_t port,
     if (!c) return -1;                 /* table full — caller closes the pcb */
     c->is_client     = 1;
     c->watcher_udata = owner_watcher;  /* tagged KlWatcher udata — connect + data-plane relay */
-    c->owner         = NULL;           /* client slots never carry a KlConn owner */
+    c->owner         = NULL;           /* client slots never carry a KlHttpConn owner */
 
     tcp_arg(p, owner_watcher);         /* lwr_cli_err receives this (owner-keyed teardown) */
     tcp_err(p, lwr_cli_err);
@@ -1025,7 +1025,7 @@ long kl_lwr_client_recv(void *lwrctx, void *pcb, void *dst, size_t cap, int *wou
 
 /* Synchronous send on a server-accepted (non-client) live pcb — see the header. An accepted pcb is
  * already established (post-3WHS), so no `connected` flag is set/needed; require a live slot with a
- * driver-owned KlConn (owner != NULL) that is NOT a client and NOT already running the async send-
+ * driver-owned KlHttpConn (owner != NULL) that is NOT a client and NOT already running the async send-
  * pump (send_active), so a handshake flush never races the response body pump on the same pcb. */
 long kl_lwr_srv_sync_send(void *lwrctx, void *pcb, const void *buf, size_t len, int *would_block) {
     KlLwrCtx *ctx = lwrctx;
@@ -1617,7 +1617,7 @@ int kl_lwr_drain(void *lwrctx, KlLwrRecord *out, int max) {
 
         /* Client slots (LC-1) surface ONLY the connect completion here; their data plane rides the
          * watcher relay (kl_lwr_next_client_ready) + real send/recv, never the server-side
-         * ACCEPT/WRITE/terminal path (which needs a KlConn target). */
+         * ACCEPT/WRITE/terminal path (which needs a KlHttpConn target). */
         if (c->is_client) {
             if (c->pend_connect && n < max) {
                 KlLwrRecord *r = &out[n++];
@@ -1659,7 +1659,7 @@ int kl_lwr_drain(void *lwrctx, KlLwrRecord *out, int max) {
             KlLwrRecord *r = &out[n++];
             memset(r, 0, sizeof(*r));
             r->kind = KL_LWR_WRITE;   /* ok=0 → the driver turns any failed TCP completion into
-                                       * comp_close, releasing the KlConn exactly once. */
+                                       * comp_close, releasing the KlHttpConn exactly once. */
             r->pcb = c->pcb;
             r->owner = c->owner;
             r->nbytes = 0;

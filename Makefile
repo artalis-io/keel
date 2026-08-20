@@ -185,9 +185,9 @@ else
   endif
 endif
 CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/http_response.c src/router.c \
-           src/connection.c src/server.c src/server_core.c src/server_activation.c src/proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
+           src/http_connection.c src/server.c src/server_core.c src/server_activation.c src/proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
            src/body_reader_buffer.c \
-           src/body_reader_multipart.c src/chunked.c src/cors.c \
+           src/body_reader_multipart.c src/http1_chunked.c src/cors.c \
            src/websocket.c src/server_ws.c src/websocket_client.c \
            src/server_h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client_common.c src/client_sync.c src/client_async.c \
@@ -205,7 +205,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
 # needed here.
 
 # Default parser backend (llhttp)
-LLHTTP_SRC = parsers/parser_llhttp.c parsers/response_parser_llhttp.c \
+LLHTTP_SRC = parsers/http1_parser_llhttp.c parsers/http1_response_parser_llhttp.c \
              vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Optional mbedTLS backend (bring-your-own — mbedTLS is not vendored). The adapter
@@ -856,7 +856,7 @@ analyze:
 AXIS_PROTO_TUS = src/client_common.c src/client_sync.c src/client_async.c \
                  src/client_proxy.c \
                  src/h2_client.c src/websocket_client.c \
-                 src/connection.c src/server.c src/server_h2.c src/websocket.c src/server_ws.c \
+                 src/http_connection.c src/server.c src/server_h2.c src/websocket.c src/server_ws.c \
                  src/sse.c src/http_response.c src/redirect.c src/client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:
@@ -878,10 +878,10 @@ check-sockaddr-neutral:
 # driver/adapters, the transport state machines, and the run-loop / async-connect drivers). This is
 # the mechanical classification rule: a NEWLY ADDED protocol TU is governed automatically (it is not
 # in TIER1_INFRA), so a new file cannot silently include completion.h/a platform header the way the
-# old AXIS_PROTO_TUS-only manifest allowed (e.g. router.c / cors.c / chunked.c / body_reader*.c /
+# old AXIS_PROTO_TUS-only manifest allowed (e.g. router.c / cors.c / http1_chunked.c / body_reader*.c /
 # parsers/*.c are now covered). A new INFRASTRUCTURE TU that needs these headers must be added to
 # TIER1_INFRA below, with a reason. Include-based → robust vs the WSA*/overlapped mentions that appear
-# only in explanatory comments (connection.c / http_response.c / client_sync.c). Backstop for
+# only in explanatory comments (http_connection.c / http_response.c / client_sync.c). Backstop for
 # docs/architecture_invariants.md I10; mirrors axis-audit Goal 4.
 #
 # TIER1_INFRA — the engine/provider/bridge layer (wildcards so new backends auto-classify; explicit
@@ -1192,7 +1192,7 @@ FREESTANDING_CLIENT_SRC = \
     src/completion_dispatch.c src/completion_core.c \
     src/client_common.c src/client_async.c src/client_proxy.c src/client_pool.c src/decompress.c \
     src/connect_op.c \
-    parsers/response_parser_llhttp.c \
+    parsers/http1_response_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 # Freestanding, cross-representative toolchain. Prefer clang (SanitizerCoverage-
@@ -1290,7 +1290,7 @@ freestanding-lib:
 # ── Freestanding SERVER archive (Phase 10 UEFI server, S-1) ───────────────────
 # The model-blind HTTP/1.1 server core (server_core.c) + the completion server
 # driver (completion_server.c over completion_core.c) + protocol layer
-# (connection.c, http_response.c, router.c, chunked.c, drain.c, body_reader_buffer.c,
+# (http_connection.c, http_response.c, router.c, http1_chunked.c, drain.c, body_reader_buffer.c,
 # the request parser, proxy_protocol.c) + the ws/h2 upgrade-seam storage
 # (proto_hooks.c, tables NOT installed → HTTP/1.1 only). NO server.c (hosted:
 # bind/listen/systemd/signals/readiness loop), NO server_ws.c/server_h2.c
@@ -1304,9 +1304,9 @@ FREESTANDING_SERVER_SRC = \
     src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c src/completion_server.c \
     src/listener.c src/stream.c \
-    src/connection.c src/http_response.c src/router.c src/chunked.c src/drain.c \
+    src/http_connection.c src/http_response.c src/router.c src/http1_chunked.c src/drain.c \
     src/body_reader_buffer.c src/server_core.c src/proto_hooks.c \
-    parsers/parser_llhttp.c \
+    parsers/http1_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 
 freestanding-lib-server:

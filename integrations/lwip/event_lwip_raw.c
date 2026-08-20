@@ -65,7 +65,7 @@
  */
 #include <keel/event.h>
 #include <keel/event_ctx.h>    /* KlEventCtx — kl_comp_drain reaches loop._backend */
-#include <keel/connection.h>   /* KlStream — fd / ctx / alloc (raw transport target) */
+#include <keel/http_connection.h>   /* KlStream — fd / ctx / alloc (raw transport target) */
 #include <keel/server.h>       /* KlServer — listen_fd (prime accepts) */
 #include <keel/allocator.h>    /* kl_malloc / kl_free */
 #include <keel/sockaddr.h>     /* KlSockAddr marshalling at the seam boundary */
@@ -146,7 +146,7 @@ static int lwr_ev_init(KlEventLoop *loop) {
  * readiness watches, so for server conns add/mod/del are inert — matching the IOCP model.
  *
  * CLIENT data plane (LC-1), however, rides a readiness watcher: the async KlClient arms a
- * KL_EVENT_WRITE/READ watcher on its connect pcb for the send/recv phase (it has no KlConn, so it
+ * KL_EVENT_WRITE/READ watcher on its connect pcb for the send/recv phase (it has no KlHttpConn, so it
  * cannot use the server-side completion post path). Since a NO_SYS=1 raw loop has no pollable fd,
  * add/mod RECORD the armed watcher (fd == the client pcb; udata == the tagged KlWatcher) into the
  * glue's client slot, and lwr_comp_drain relays it as KL_COMP_WATCHER when the pcb is writable/
@@ -506,9 +506,9 @@ static int lwr_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
  * file size). One KL_COMP_WRITE follows when the whole head+file is acked; a file read error
  * surfaces a FAILED terminal (ok=0) so the driver closes. fd OWNERSHIP: the glue only READS
  * file_fd; the response layer closes res->file_fd (kl_http_response_reset/free) — not here. */
-static int lwr_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int lwr_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     (void)head_total;
     if (!kl_handle_valid(stream->fd)) return -1;
     if (head_n < 0 || head_n > KL_LWR_MAX_SEND_IOV) return -1;
@@ -519,12 +519,12 @@ static int lwr_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n
 }
 
 /* Cancel pending ops on `fd` (idle-timeout sweep). Semantics mirror event_pollcomp.c: the
- * conn is released ONLY through a completion event, so we do NOT free the KlConn here. Instead
+ * conn is released ONLY through a completion event, so we do NOT free the KlHttpConn here. Instead
  * we abort the underlying pcb (kl_lwr_tcp_abort: frees its owned send buffer + slot by owner,
  * detaches callbacks so lwIP's internal tcp_err isn't re-entered, RSTs the peer, and marks the
  * slot `closed`). The abort marks the slot closed, so the NEXT kl_comp_drain surfaces a single
  * terminal zero-length READ for this (armed) conn → the driver runs comp_close exactly once,
- * releasing the KlConn through its normal completion path. Idempotent + safe if the conn
+ * releasing the KlHttpConn through its normal completion path. Idempotent + safe if the conn
  * already closed (kl_lwr_tcp_abort is a no-op on a dead/free slot). */
 static void lwr_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
     KlLwrState *st = ctx ? ctx->loop._backend : NULL;
@@ -635,7 +635,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         }
 
         /* KL_LWR_WRITE — a completed send (ok=1) OR a terminal close (ok=0). */
-        KlConn *c = r->owner;
+        KlHttpConn *c = r->owner;
         if (!c) continue;
         ev->kind = KL_COMP_WRITE;
         ev->target = c;
@@ -644,7 +644,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         /* Exactly-one-close: a terminal (ok=0) completion — surfaced by the glue on
          * tcp_err / kl_comp_cancel / close-with-outstanding — drives the driver to release this
          * conn. Disarm it NOW so the armed-READ scan below (and future drains) never touch the
-         * about-to-be-released KlConn (no dangling armed slot aliasing a freed/reused conn). */
+         * about-to-be-released KlHttpConn (no dangling armed slot aliasing a freed/reused conn). */
         if (!r->ok) kl_lwr_conn_disarm(st->lwrctx, (void *)c->stream.fd);
         count++;
     }

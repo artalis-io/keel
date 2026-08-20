@@ -93,20 +93,20 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms);
 void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd);
 
 /* Resume a suspended connection on a completion loop after an async op completed (8e-2).
- * kl_async_complete's readiness path re-arms the fd + drives kl_conn_on_writable; on a
+ * kl_async_complete's readiness path re-arms the fd + drives kl_http_conn_on_writable; on a
  * completion loop the resume instead drives the completion send path. Defined in
  * completion_driver.c (runs comp_after_state on the conn's post-resume state); stubbed in
  * io_engine.c on readiness builds, where kl_async_complete never calls it (it branches on
  * KL_EVENT_CAP_COMPLETION). Keeps the async API free of any event-axis awareness. */
-struct KlConn;
-void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn);
+struct KlHttpConn;
+void kl_io_engine_resume_completion(struct KlServer *s, struct KlHttpConn *conn);
 
 /* Re-arm a body read on a completion loop after read-side flow control resumes
  * (kl_http_request_resume_body): post a fresh recv for the conn. The readiness path re-arms READ
  * interest directly (kl_event_mod) and never calls this. Defined in completion_driver.c
  * (kl_comp_post_recv); stubbed in io_engine.c on readiness builds, where it is never reached
  * (resume branches on KL_EVENT_CAP_COMPLETION). Keeps the request API event-axis-agnostic. */
-void kl_io_engine_post_read(struct KlConn *conn);
+void kl_io_engine_post_read(struct KlHttpConn *conn);
 
 /* Post one overlapped datagram receive on a completion loop from a neutral descriptor (7B-2b). The
  * completion surfaces a KL_COMP_DGRAM_RECV. Stubbed in io_engine.c on non-completion builds. */

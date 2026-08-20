@@ -1,7 +1,7 @@
 /*
  * connection_pool.c — Connection pool internals demo
  *
- * Concepts: kl_conn_pool_init, kl_conn_acquire, kl_conn_release,
+ * Concepts: kl_http_conn_pool_init, kl_http_conn_acquire, kl_http_conn_release,
  * pool exhaustion, active count tracking, kl_monotonic_ms.
  *
  * Build:  make examples
@@ -16,11 +16,11 @@ int main(void) {
     printf("connection_pool example\n\n");
 
     KlAllocator alloc = kl_allocator_default();
-    KlConnPool pool;
+    KlHttpConnPool pool;
     int capacity = 4;
 
     /* Initialize pool */
-    if (kl_conn_pool_init(&pool, capacity, &alloc) < 0) {
+    if (kl_http_conn_pool_init(&pool, capacity, &alloc) < 0) {
         fprintf(stderr, "pool init failed\n");
         return 1;
     }
@@ -29,19 +29,19 @@ int main(void) {
 
     /* Initialize parsers for each connection slot */
     for (int i = 0; i < capacity; i++) {
-        pool.conns[i].parser = kl_parser_llhttp(&alloc);
+        pool.conns[i].parser = kl_http1_parser_llhttp(&alloc);
         if (!pool.conns[i].parser) {
             fprintf(stderr, "parser init failed for slot %d\n", i);
-            kl_conn_pool_free(&pool);
+            kl_http_conn_pool_free(&pool);
             return 1;
         }
     }
 
     /* Acquire connections with fake fds */
     printf("\n--- Acquire ---\n");
-    KlConn *conns[4];
+    KlHttpConn *conns[4];
     for (int i = 0; i < capacity; i++) {
-        conns[i] = kl_conn_acquire(&pool, 100 + i);
+        conns[i] = kl_http_conn_acquire(&pool, 100 + i);
         printf("  acquired fd=%d, active=%d, state=%u\n",
                conns[i] ? (int)conns[i]->stream.fd : -1,
                pool.active_count,
@@ -50,17 +50,17 @@ int main(void) {
 
     /* Pool exhaustion */
     printf("\n--- Exhaustion ---\n");
-    KlConn *overflow = kl_conn_acquire(&pool, 200);
+    KlHttpConn *overflow = kl_http_conn_acquire(&pool, 200);
     printf("  acquire when full: %s\n",
            overflow == NULL ? "NULL (correct)" : "unexpected!");
 
     /* Release one and re-acquire */
     printf("\n--- Release + Re-acquire ---\n");
     conns[1]->stream.fd = KL_INVALID_SOCKET;  /* avoid closing real fds */
-    kl_conn_release(&pool, conns[1]);
+    kl_http_conn_release(&pool, conns[1]);
     printf("  released slot, active=%d\n", pool.active_count);
 
-    KlConn *reused = kl_conn_acquire(&pool, 201);
+    KlHttpConn *reused = kl_http_conn_acquire(&pool, 201);
     printf("  re-acquired fd=%d, active=%d\n",
            reused ? (int)reused->stream.fd : -1, pool.active_count);
 
@@ -77,7 +77,7 @@ int main(void) {
     conns[2]->stream.fd = KL_INVALID_SOCKET;
     conns[3]->stream.fd = KL_INVALID_SOCKET;
     if (reused) reused->stream.fd = KL_INVALID_SOCKET;
-    kl_conn_pool_free(&pool);
+    kl_http_conn_pool_free(&pool);
     printf("\nPool freed.\n");
 
     return 0;

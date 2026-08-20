@@ -12,7 +12,7 @@
 #define KEEL_SRC_H2_INTERNAL_H
 
 #include <keel/h2_server.h>    /* public vtable / callbacks / config typedefs */
-#include <keel/connection.h>   /* KlConn */
+#include <keel/http_connection.h>   /* KlHttpConn */
 #include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <keel/body_reader.h>
@@ -45,7 +45,7 @@ struct KlH2ServerStream {
 struct KlH2ServerConn {
     KlH2ServerSession *session;    /**< Active HTTP/2 session (user-provided vtable). */
     KlH2ServerCallbacks callbacks; /**< Callbacks wired to KEEL internals. */
-    KlConn *conn;                  /**< Underlying TCP connection. */
+    KlHttpConn *conn;                  /**< Underlying TCP connection. */
     KlRouter *router;              /**< Router for dispatching streams. */
     KlAllocator *alloc;            /**< Allocator for stream/header storage. */
     KlH2ServerStream *streams;     /**< Array of active streams. */

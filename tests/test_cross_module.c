@@ -315,9 +315,9 @@ typedef struct {
 static void tls_async_resume(KlAsyncOp *op, void *user_data) {
     TlsAsyncCtx *ctx = user_data;
     (void)op;
-    KlConn *conn = ctx->op.conn;
+    KlHttpConn *conn = ctx->op.conn;
     kl_http_response_json(&conn->res, 200, "{\"async_tls\":true}", 18);
-    conn->state = KL_CONN_SENDING;
+    conn->state = KL_HTTP_CONN_SENDING;
 }
 
 static void tls_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
@@ -334,7 +334,7 @@ static void tls_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_d
 static void handle_tls_async(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_http_request_conn(req);
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     static TlsAsyncCtx tctx;
     memset(&tctx, 0, sizeof(tctx));
@@ -419,7 +419,7 @@ typedef struct {
 static void mw_async_resume(KlAsyncOp *op, void *user_data) {
     (void)op;
     MwAsyncCtx *ctx = user_data;
-    KlConn *conn = ctx->op.conn;
+    KlHttpConn *conn = ctx->op.conn;
 
     /* Access body from the reader — should still be valid */
     KlBufReader *br = (KlBufReader *)ctx->saved_req->body_reader;
@@ -430,7 +430,7 @@ static void mw_async_resume(KlAsyncOp *op, void *user_data) {
     } else {
         kl_http_response_error(&conn->res, 400, "No body");
     }
-    conn->state = KL_CONN_SENDING;
+    conn->state = KL_HTTP_CONN_SENDING;
 }
 
 static void mw_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
@@ -447,7 +447,7 @@ static void mw_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_da
 static void handle_mw_async(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_http_request_conn(req);
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     static MwAsyncCtx mctx;
     memset(&mctx, 0, sizeof(mctx));
@@ -667,9 +667,9 @@ static int hold_stats_suspended;
 
 static void hold_resume(KlAsyncOp *op, void *user_data) {
     (void)user_data;
-    KlConn *conn = op->conn;
+    KlHttpConn *conn = op->conn;
     kl_http_response_json(&conn->res, 200, "{\"held\":true}", 13);
-    conn->state = KL_CONN_SENDING;
+    conn->state = KL_HTTP_CONN_SENDING;
 }
 
 static void hold_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) {
@@ -693,7 +693,7 @@ static void hold_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) 
 static void handle_hold(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
-    KlConn *conn = kl_http_request_conn(req);
+    KlHttpConn *conn = kl_http_request_conn(req);
 
     static TlsAsyncCtx hctx;
     memset(&hctx, 0, sizeof(hctx));

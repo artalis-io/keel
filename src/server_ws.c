@@ -1,6 +1,6 @@
 /*
  * server_ws.c — the WebSocket SERVER logic (kl_ws_server_*): handshake/upgrade,
- * framed send/recv over a KlConn, drain + idle keepalive, and the upgrade-seam
+ * framed send/recv over a KlHttpConn, drain + idle keepalive, and the upgrade-seam
  * registration (proto_hooks.h). Split out of websocket.c in the Phase 10 UEFI
  * server work (S-1) — the shared frame codec (kl_ws_frame_*) stays in websocket.c;
  * this TU mirrors the client's websocket_client.c and the server_core.c /
@@ -9,7 +9,7 @@
 
 #include <keel/websocket.h>
 #include <keel/websocket_server.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/http_request.h>
 #include <keel/server.h>   /* KlServer — kl_server_ws registration API lives here */
 #include <keel/router.h>   /* kl_router_add + KlRoute.ws_config */
@@ -226,7 +226,7 @@ static const char ws_400_response[] =
     "Connection: close\r\n"
     "\r\n";
 
-int kl_ws_server_upgrade(KlConn *c, const char *leftover,
+int kl_ws_server_upgrade(KlHttpConn *c, const char *leftover,
                           size_t leftover_len) {
     KlWsServerConfig *cfg = c->route->ws_config;
 
@@ -246,7 +246,7 @@ int kl_ws_server_upgrade(KlConn *c, const char *leftover,
     if (!conn_hdr || !connection_has_upgrade(conn_hdr, conn_len)) {
         best_effort_conn_write(c, ws_400_response,
                                sizeof(ws_400_response) - 1);
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
 
     /* Validate: Upgrade must be "websocket" */
@@ -254,21 +254,21 @@ int kl_ws_server_upgrade(KlConn *c, const char *leftover,
         strncasecmp(upgrade_hdr, "websocket", 9) != 0) {
         best_effort_conn_write(c, ws_400_response,
                                sizeof(ws_400_response) - 1);
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
 
     /* Validate: Version must be "13" */
     if (!version || ver_len != 2 || memcmp(version, "13", 2) != 0) {
         best_effort_conn_write(c, ws_400_response,
                                sizeof(ws_400_response) - 1);
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
 
     /* Validate: Key must be present (24 base64 chars) */
     if (!key || key_len != 24) {
         best_effort_conn_write(c, ws_400_response,
                                sizeof(ws_400_response) - 1);
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
 
     /* Validate: Key must contain only valid base64 characters */
@@ -279,7 +279,7 @@ int kl_ws_server_upgrade(KlConn *c, const char *leftover,
               ch == '=')) {
             best_effort_conn_write(c, ws_400_response,
                                    sizeof(ws_400_response) - 1);
-            return KL_CONN_CLOSED;
+            return KL_HTTP_CONN_CLOSED;
         }
     }
 
@@ -309,16 +309,16 @@ int kl_ws_server_upgrade(KlConn *c, const char *leftover,
     if (resp_len < 0 || (size_t)resp_len >= sizeof(resp)) {
         best_effort_conn_write(c, ws_400_response,
                                sizeof(ws_400_response) - 1);
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
 
     if (conn_write_all(c, resp, (size_t)resp_len) < 0) {
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
 
     /* Allocate WebSocket connection state */
     KlWsServerConn *ws = kl_malloc(c->stream.alloc, sizeof(KlWsServerConn));
-    if (!ws) return KL_CONN_CLOSED;
+    if (!ws) return KL_HTTP_CONN_CLOSED;
     memset(ws, 0, sizeof(*ws));
 
     ws->config = cfg;
@@ -330,7 +330,7 @@ int kl_ws_server_upgrade(KlConn *c, const char *leftover,
         ws->next_ping_ms = kl_monotonic_ms() + (uint64_t)cfg->ping_interval_ms;
 
     c->ws = ws;
-    c->state = KL_CONN_WEBSOCKET;
+    c->state = KL_HTTP_CONN_WEBSOCKET;
 
     /* Call on_open */
     if (cfg->callbacks.on_open)
@@ -343,7 +343,7 @@ int kl_ws_server_upgrade(KlConn *c, const char *leftover,
                                               leftover_len);
     }
 
-    return KL_CONN_WEBSOCKET;
+    return KL_HTTP_CONN_WEBSOCKET;
 }
 
 /* ── Message delivery ────────────────────────────────────────────── */
@@ -422,7 +422,7 @@ static int ws_handle_close(KlWsServerConn *ws, const uint8_t *payload,
         ws->config->callbacks.on_close(ws, code, reason, reason_len,
                                         ws->config->user_data);
 
-    return KL_CONN_CLOSED;
+    return KL_HTTP_CONN_CLOSED;
 }
 
 static int ws_handle_ping(KlWsServerConn *ws, const uint8_t *payload,
@@ -439,7 +439,7 @@ static int ws_handle_ping(KlWsServerConn *ws, const uint8_t *payload,
 
 /* ── Frame dispatch ──────────────────────────────────────────────── */
 
-int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
+int kl_ws_server_on_readable_data(KlHttpConn *c, uint8_t *data, size_t len) {
     KlWsServerConn *ws = c->ws;
     size_t pos = 0;
 
@@ -454,13 +454,13 @@ int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
 
         if (rc < 0) {
             kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
-            return KL_CONN_CLOSED;
+            return KL_HTTP_CONN_CLOSED;
         }
 
         /* RFC 6455 §5.1: server MUST close on unmasked client frame */
         if (ws->frame.state != KL_WS_FRAME_HEADER && !ws->frame.masked) {
             kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
-            return KL_CONN_CLOSED;
+            return KL_HTTP_CONN_CLOSED;
         }
 
         /* Extract and unmask payload data from this parse call */
@@ -480,7 +480,7 @@ int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
             /* Frame size check */
             if (ws->frame.payload_len > ws_max_frame(ws->config)) {
                 kl_ws_server_close(ws, KL_WS_TOO_BIG, NULL, 0);
-                return KL_CONN_CLOSED;
+                return KL_HTTP_CONN_CLOSED;
             }
 
             int opcode = ws->frame.opcode;
@@ -508,7 +508,7 @@ int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
                     if (ws->msg_len > 0 && ws->msg_opcode != 0) {
                         /* Previous message not finished — protocol error */
                         kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
-                        return KL_CONN_CLOSED;
+                        return KL_HTTP_CONN_CLOSED;
                     }
                     ws->msg_opcode = opcode;
                     ws->msg_len = 0;
@@ -516,13 +516,13 @@ int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
                 } else if (ws->msg_opcode == 0) {
                     /* Continuation without a start frame */
                     kl_ws_server_close(ws, KL_WS_PROTOCOL_ERROR, NULL, 0);
-                    return KL_CONN_CLOSED;
+                    return KL_HTTP_CONN_CLOSED;
                 }
 
                 /* Append to message buffer */
                 if (ws_msg_grow(ws, payload_consumed) < 0) {
                     kl_ws_server_close(ws, KL_WS_TOO_BIG, NULL, 0);
-                    return KL_CONN_CLOSED;
+                    return KL_HTTP_CONN_CLOSED;
                 }
                 memcpy(ws->msg_buf + ws->msg_len, payload_data,
                        payload_consumed);
@@ -534,14 +534,14 @@ int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
                                       payload_consumed);
                     if (ws->utf8_state == KL_UTF8_REJECT) {
                         kl_ws_server_close(ws, 1007, "Invalid UTF-8", 13);
-                        return KL_CONN_CLOSED;
+                        return KL_HTTP_CONN_CLOSED;
                     }
                 }
 
                 /* Deliver if final fragment */
                 if (rc == 1 && ws->frame.fin) {
                     if (ws_deliver_message(ws) < 0)
-                        return KL_CONN_CLOSED;
+                        return KL_HTTP_CONN_CLOSED;
                 }
             }
         } else if (rc == 1) {
@@ -560,7 +560,7 @@ int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
                     ws->utf8_state = KL_UTF8_ACCEPT;
                 }
                 if (ws_deliver_message(ws) < 0)
-                    return KL_CONN_CLOSED;
+                    return KL_HTTP_CONN_CLOSED;
             }
         }
 
@@ -577,21 +577,21 @@ int kl_ws_server_on_readable_data(KlConn *c, uint8_t *data, size_t len) {
 
     /* Check close deadline */
     if (ws->close_sent && ws->close_received)
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
 
-    return KL_CONN_WEBSOCKET;
+    return KL_HTTP_CONN_WEBSOCKET;
 }
 
 /* ── Readable event ──────────────────────────────────────────────── */
 
-int kl_ws_server_on_readable(KlConn *c) {
+int kl_ws_server_on_readable(KlHttpConn *c) {
     c->last_active_ms = kl_monotonic_ms();
 
-    uint8_t buf[KL_READ_BUF_SIZE];
+    uint8_t buf[KL_HTTP_CONN_READ_BUF_SIZE];
     ssize_t nr = conn_read(c, buf, sizeof(buf));
     if (nr <= 0) {
         /* Connection closed or error */
-        return KL_CONN_CLOSED;
+        return KL_HTTP_CONN_CLOSED;
     }
 
     return kl_ws_server_on_readable_data(c, buf, (size_t)nr);
@@ -599,22 +599,22 @@ int kl_ws_server_on_readable(KlConn *c) {
 
 /* ── Write-readiness (drain flush) ────────────────────────────────── */
 
-int kl_ws_server_on_writable(KlConn *c) {
+int kl_ws_server_on_writable(KlHttpConn *c) {
     if (!c->ws || !c->ws->drain_enabled)
-        return KL_CONN_WEBSOCKET;
+        return KL_HTTP_CONN_WEBSOCKET;
     int r = kl_drain_flush(&c->ws->drain);
-    if (r < 0) return KL_CONN_CLOSED;
-    return KL_CONN_WEBSOCKET;
+    if (r < 0) return KL_HTTP_CONN_CLOSED;
+    return KL_HTTP_CONN_WEBSOCKET;
 }
 
-int kl_ws_server_drain_pending(const KlConn *c) {
+int kl_ws_server_drain_pending(const KlHttpConn *c) {
     if (!c->ws || !c->ws->drain_enabled) return 0;
     return kl_drain_pending(&c->ws->drain);
 }
 
 /* ── Cleanup ─────────────────────────────────────────────────────── */
 
-void kl_ws_server_cleanup(KlConn *c) {
+void kl_ws_server_cleanup(KlHttpConn *c) {
     if (!c->ws) return;
     KlWsServerConn *ws = c->ws;
 
@@ -633,14 +633,14 @@ void kl_ws_server_cleanup(KlConn *c) {
 
 /* ── Drain close ─────────────────────────────────────────────────── */
 
-void kl_ws_server_drain_close(KlConn *c) {
+void kl_ws_server_drain_close(KlHttpConn *c) {
     if (!c->ws || c->ws->close_sent) return;
     kl_ws_server_close(c->ws, KL_WS_GOING_AWAY, "Server shutting down", 20);
 }
 
 /* ── Close timeout check ─────────────────────────────────────────── */
 
-int kl_ws_server_check_close_timeout(const KlConn *c, uint64_t now) {
+int kl_ws_server_check_close_timeout(const KlHttpConn *c, uint64_t now) {
     if (!c->ws) return 0;
     if (c->ws->close_sent && !c->ws->close_received &&
         now >= c->ws->close_deadline_ms) {
@@ -651,7 +651,7 @@ int kl_ws_server_check_close_timeout(const KlConn *c, uint64_t now) {
 
 /* ── Auto-ping keep-alive ─────────────────────────────────────────── */
 
-int kl_ws_server_auto_ping(KlConn *c, uint64_t now) {
+int kl_ws_server_auto_ping(KlHttpConn *c, uint64_t now) {
     if (!c->ws || c->ws->next_ping_ms == 0) return 0;
     if (c->ws->close_sent || c->ws->close_received) return 0;
     if (now < c->ws->next_ping_ms) return 0;

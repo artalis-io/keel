@@ -34,7 +34,7 @@
 #include <keel/event.h>
 #include "event_pollcomp_internal.h"
 #include <keel/server.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
@@ -279,9 +279,9 @@ static int pc_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, s
     return 0;
 }
 
-static int pc_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+static int pc_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
-    KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */
+    KlStream *stream = &c->stream;   /* post_sendfile stays KlHttpConn-typed (Phase-A audit §8) */
     KlPcState *st = stream->ctx->loop._backend;
     KlPcOp *op = kl_malloc(stream->alloc, sizeof(*op));
     if (!op) return -1;

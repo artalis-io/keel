@@ -7,7 +7,7 @@
  */
 
 #include <keel/client_pool.h>
-#include <keel/connection.h>  /* kl_monotonic_ms */
+#include <keel/http_connection.h>  /* kl_monotonic_ms */
 #include <keel/timer.h>
 #include "socket.h"
 #include "kl_cstr.h"   /* kl_streq — locale-free exact host-key compare */

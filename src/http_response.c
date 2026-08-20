@@ -670,7 +670,7 @@ int kl_http_response_begin_stream(KlHttpResponse *res, int status,
     /* Wire the transport-neutral outbound stream buffer by default (8g-0): stream writes
      * go through KlDrain — a non-blocking inline send with the would-block remainder
      * buffered (bounded, backpressure), flushed by the transport (readiness:
-     * kl_conn_on_writable; completion: kl_http_response_send in comp_send_stream, and 8g-1's
+     * kl_http_conn_on_writable; completion: kl_http_response_send in comp_send_stream, and 8g-1's
      * overlapped drive). This replaces the busy-spin-then-drop behavior of stream_writev_all
      * on a slow client. If no allocator is available, fall back to the spin-write path. */
     if (!res->drain_enabled && res->alloc)

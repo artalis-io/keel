@@ -38,15 +38,15 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
 
 int kl_comp_prime_accepts(struct KlServer *s) { (void)s; abort(); }
 
-int kl_comp_post_recv(KlConn *c) { (void)c; abort(); }
+int kl_comp_post_recv(KlHttpConn *c) { (void)c; abort(); }
 
-int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
+int kl_comp_post_send(KlHttpConn *c, const KlIoVec *iov, int iovcnt, size_t total) {
     (void)c; (void)iov; (void)iovcnt; (void)total; abort();
 }
 
 int kl_comp_post_accept(struct KlServer *s) { (void)s; abort(); }
 
-int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+int kl_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     (void)c; (void)head_iov; (void)head_n; (void)head_total; (void)file_fd; (void)count;
     abort();
@@ -84,8 +84,8 @@ int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
 
 int kl_io_engine_quiesce_accepts(struct KlServer *s) { (void)s; abort(); }
 
-void kl_io_engine_resume_completion(struct KlServer *s, struct KlConn *conn) {
+void kl_io_engine_resume_completion(struct KlServer *s, struct KlHttpConn *conn) {
     (void)s; (void)conn; abort();
 }
 
-void kl_io_engine_post_read(struct KlConn *conn) { (void)conn; abort(); }
+void kl_io_engine_post_read(struct KlHttpConn *conn) { (void)conn; abort(); }

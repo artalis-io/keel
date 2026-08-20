@@ -3,7 +3,7 @@
 #include <keel/allocator.h>
 #include <keel/http_response.h>
 #include <keel/websocket_server.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include "../src/drain_reserve.h"   /* Phase-B internal reservation + low-water API */
 #include <string.h>
 #include <stdlib.h>
@@ -695,7 +695,7 @@ UTEST(drain, ws_drain_pending_check) {
     MockWriter w;
     mock_init(&w);
 
-    KlConn c;
+    KlHttpConn c;
     memset(&c, 0, sizeof(c));
     c.stream.fd = -1;
     c.stream.alloc = &a;

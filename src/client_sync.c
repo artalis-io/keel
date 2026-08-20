@@ -16,7 +16,7 @@
 #include <keel/client.h>
 #include <keel/client_pool.h>
 #include <keel/decompress.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 
 #include <limits.h>
 #include <stdint.h>
@@ -499,15 +499,15 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
                                KlAllocator *alloc,
                                const KlClientStreamCfg *stream)
 {
-    KlResponseParser *parser;
+    KlHttp1ResponseParser *parser;
     if (stream && stream->on_body) {
-        parser = kl_response_parser_llhttp_s(max_response_size, alloc,
+        parser = kl_http1_response_parser_llhttp_s(max_response_size, alloc,
                                                stream->on_body,
                                                stream->on_headers,
                                                stream->on_complete,
                                                stream->user_data);
     } else {
-        parser = kl_response_parser_llhttp(max_response_size, alloc);
+        parser = kl_http1_response_parser_llhttp(max_response_size, alloc);
     }
     if (!parser)
         return -1;
@@ -535,13 +535,13 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
         }
 
         size_t consumed;
-        KlParseResult pr2 = parser->parse(parser, resp,
+        KlHttp1ParseResult pr2 = parser->parse(parser, resp,
                                             buf, (size_t)nread, &consumed);
-        if (pr2 == KL_PARSE_OK) {
+        if (pr2 == KL_HTTP1_PARSE_OK) {
             ret = 0;
             break;
         }
-        if (pr2 == KL_PARSE_ERROR)
+        if (pr2 == KL_HTTP1_PARSE_ERROR)
             break;
     }
 

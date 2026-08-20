@@ -33,9 +33,9 @@ UTEST(server_stats, stats_active_count) {
     ASSERT_EQ(kl_server_init(&s, &cfg), 0);
 
     /* Simulate active connections by acquiring from pool */
-    KlConn *c1 = kl_conn_acquire(&s.pool, 100);
+    KlHttpConn *c1 = kl_http_conn_acquire(&s.pool, 100);
     ASSERT_TRUE(c1 != NULL);
-    KlConn *c2 = kl_conn_acquire(&s.pool, 101);
+    KlHttpConn *c2 = kl_http_conn_acquire(&s.pool, 101);
     ASSERT_TRUE(c2 != NULL);
 
     KlServerStats stats;
@@ -43,11 +43,11 @@ UTEST(server_stats, stats_active_count) {
     ASSERT_EQ(stats.active_connections, 2);
 
     /* Release one */
-    kl_conn_release(&s.pool, c1);
+    kl_http_conn_release(&s.pool, c1);
     kl_server_stats(&s, &stats);
     ASSERT_EQ(stats.active_connections, 1);
 
-    kl_conn_release(&s.pool, c2);
+    kl_http_conn_release(&s.pool, c2);
     kl_server_stats(&s, &stats);
     ASSERT_EQ(stats.active_connections, 0);
 

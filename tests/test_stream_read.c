@@ -5,7 +5,7 @@
  * from the deliver callback and held terminal conditions.
  */
 #include "utest.h"
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/allocator.h>
 #include "../src/stream_read.h"
 #include <string.h>

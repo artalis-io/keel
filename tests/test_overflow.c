@@ -5,9 +5,9 @@
 #include "utest.h"
 #include <keel/allocator.h>
 #include <keel/http_response.h>
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/router.h>
-#include <keel/chunked.h>
+#include <keel/http1_chunked.h>
 #include <keel/body_reader.h>
 #include <keel/body_reader_multipart.h>
 #include <keel/websocket.h>
@@ -100,17 +100,17 @@ UTEST(overflow, ws_frame_control_oversized) {
 UTEST(overflow, conn_pool_negative) {
     /* connection.c:42 — capacity <= 0 returns -1 */
     KlAllocator alloc = kl_allocator_default();
-    KlConnPool pool;
+    KlHttpConnPool pool;
 
-    ASSERT_EQ(kl_conn_pool_init(&pool, -100, &alloc), -1);
+    ASSERT_EQ(kl_http_conn_pool_init(&pool, -100, &alloc), -1);
 }
 
 UTEST(overflow, conn_pool_size_guard_exists) {
-    /* connection.c:46 — SIZE_MAX / sizeof(KlConn) guard is in place.
+    /* connection.c:46 — SIZE_MAX / sizeof(KlHttpConn) guard is in place.
      * On 64-bit, INT_MAX won't trigger it (would need > 2^51), but
      * the guard protects 32-bit platforms. Verify the math. */
-    ASSERT_TRUE(sizeof(KlConn) > 0);
-    size_t max_safe = SIZE_MAX / sizeof(KlConn);
+    ASSERT_TRUE(sizeof(KlHttpConn) > 0);
+    size_t max_safe = SIZE_MAX / sizeof(KlHttpConn);
     ASSERT_TRUE(max_safe > 0);
     /* On 64-bit, max_safe is much larger than INT_MAX */
     ASSERT_TRUE(max_safe > 1000);
@@ -119,56 +119,56 @@ UTEST(overflow, conn_pool_size_guard_exists) {
 UTEST(overflow, conn_pool_zero) {
     /* connection.c:42 — capacity <= 0 */
     KlAllocator alloc = kl_allocator_default();
-    KlConnPool pool;
-    ASSERT_EQ(kl_conn_pool_init(&pool, 0, &alloc), -1);
-    ASSERT_EQ(kl_conn_pool_init(&pool, -1, &alloc), -1);
+    KlHttpConnPool pool;
+    ASSERT_EQ(kl_http_conn_pool_init(&pool, 0, &alloc), -1);
+    ASSERT_EQ(kl_http_conn_pool_init(&pool, -1, &alloc), -1);
 }
 
 /* ── Chunked hex overflow ────────────────────────────────────────── */
 
 UTEST(overflow, chunked_hex_too_many_digits) {
     /* chunked.c:60 — max 16 hex digits */
-    KlChunkedDecoder dec;
-    kl_chunked_init(&dec);
+    KlHttp1ChunkedDecoder dec;
+    kl_http1_chunked_init(&dec);
 
     /* Feed 17 hex digits */
     const char *input = "fffffffffffffffff\r\n";
-    int rc = kl_chunked_decode(&dec, input, strlen(input), NULL);
+    int rc = kl_http1_chunked_decode(&dec, input, strlen(input), NULL);
     ASSERT_EQ(rc, -1);
 }
 
 UTEST(overflow, chunked_hex_accumulator_overflow) {
     /* chunked.c:64 — size_accum > SIZE_MAX / 16 */
-    KlChunkedDecoder dec;
-    kl_chunked_init(&dec);
+    KlHttp1ChunkedDecoder dec;
+    kl_http1_chunked_init(&dec);
 
     /* Feed 16 'f' digits — on 64-bit this is SIZE_MAX.
      * After 15 f's: size_accum = 0x0FFFFFFFFFFFFFFF
      * 16th f: check size_accum > SIZE_MAX/16 → false (equal)
      * Result: valid chunk size but no data follows → need more data */
     const char *input = "ffffffffffffffff\r\n";
-    int rc = kl_chunked_decode(&dec, input, strlen(input), NULL);
+    int rc = kl_http1_chunked_decode(&dec, input, strlen(input), NULL);
     /* Should not crash. May return 0 (need data) or -1 (platform-dependent) */
     ASSERT_TRUE(rc == 0 || rc == -1);
 }
 
 UTEST(overflow, chunked_no_digits_before_cr) {
     /* chunked.c:47 — size_digits == 0 when CR arrives */
-    KlChunkedDecoder dec;
-    kl_chunked_init(&dec);
+    KlHttp1ChunkedDecoder dec;
+    kl_http1_chunked_init(&dec);
 
     const char *input = "\r\n";
-    int rc = kl_chunked_decode(&dec, input, strlen(input), NULL);
+    int rc = kl_http1_chunked_decode(&dec, input, strlen(input), NULL);
     ASSERT_EQ(rc, -1);
 }
 
 UTEST(overflow, chunked_no_digits_before_ext) {
     /* chunked.c:39 — size_digits == 0 when ';' arrives */
-    KlChunkedDecoder dec;
-    kl_chunked_init(&dec);
+    KlHttp1ChunkedDecoder dec;
+    kl_http1_chunked_init(&dec);
 
     const char *input = ";ext\r\n";
-    int rc = kl_chunked_decode(&dec, input, strlen(input), NULL);
+    int rc = kl_http1_chunked_decode(&dec, input, strlen(input), NULL);
     ASSERT_EQ(rc, -1);
 }
 

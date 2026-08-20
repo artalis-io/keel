@@ -17,7 +17,7 @@
 #ifndef KEEL_SRC_COMPLETION_H
 #define KEEL_SRC_COMPLETION_H
 
-#include <keel/connection.h>   /* KlConn */
+#include <keel/http_connection.h>   /* KlHttpConn */
 #include <keel/socket.h>       /* KlIoVec, KlSocketHandle */
 #include <keel/sockaddr.h>     /* KlSockAddr (event addrs + KlCompletionOps.post_dgram_send) */
 #include "io_engine.h"         /* KlDgramSendOp / KlDgramRecvOp — the neutral datagram post descriptors */
@@ -28,7 +28,7 @@ struct KlServer;   /* the accept ops (prime_accepts/post_accept) take it directl
 
 /* KL_COMP_CIPHER_SIZE (the interim completion-mode TLS ciphertext scratch size) is an internal
  * detail defined in "internal.h", used at the allocation site (kl_server_init). The buffer's
- * size travels with the connection as KlConn.comp_cipher_cap, so this header does not need it. */
+ * size travels with the connection as KlHttpConn.comp_cipher_cap, so this header does not need it. */
 
 /* Platform-independent completion op kinds. */
 typedef enum {
@@ -59,12 +59,12 @@ typedef enum {
  * The backend has already done any platform post-processing (address extraction,
  * partial-write re-posting) — the driver sees only high-level, completed events.
  * `target` is the consumer the event belongs to, disambiguated by `kind`:
- * KlStream* for READ/WRITE (the HTTP adapter recovers the KlConn). ACCEPT carries no target (the
+ * KlStream* for READ/WRITE (the HTTP adapter recovers the KlHttpConn). ACCEPT carries no target (the
  * generic tick recovers the server from its KlEventCtx). UDP kinds use `life`, not `target`. */
 typedef struct KlCompletionEvent {
     void          *target;     /* KlStream* (READ/WRITE); the HTTP adapter recovers the containing
-                                * KlConn (kl_conn_of_stream). A completion backend never holds/derefs
-                                * a KlConn. UNUSED for UDP kinds — they carry `life` (below). */
+                                * KlHttpConn (kl_http_conn_of_stream). A completion backend never holds/derefs
+                                * a KlHttpConn. UNUSED for UDP kinds — they carry `life` (below). */
     KlCompKind     kind;
     size_t         bytes;      /* transferred (READ / WRITE) */
     int            ok;         /* 0 = failed / peer-closed */
@@ -141,10 +141,10 @@ typedef struct KlCompletionOps {
     int  (*post_recv)(KlStream *stream, void *buf, size_t cap);
     int  (*post_send)(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total);
     int  (*post_accept)(struct KlServer *s);
-    /* post_sendfile stays KlConn-typed and HTTP/file-transfer-specific — NOT part of the
+    /* post_sendfile stays KlHttpConn-typed and HTTP/file-transfer-specific — NOT part of the
      * generic stream seam in Phase A (file transfer is an Optional capability; the generic
      * KlStream promises byte reads/writes only). See docs/generic_transport_audit.md §8. */
-    int  (*post_sendfile)(KlConn *c, const KlIoVec *head_iov, int head_n,
+    int  (*post_sendfile)(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count);
     void (*cancel)(struct KlEventCtx *ctx, KlSocketHandle fd);
     /* Neutral datagram post seam (7B-2b): descriptors carry fd + payload/buffer + KlDgramLife, so the
@@ -206,7 +206,7 @@ int kl_comp_shutdown_accepts(struct KlServer *s);
  * connection's current phase — plaintext/PROXY → c->stream.read_buf; TLS → the per-conn
  * ciphertext scratch (c->comp_cipher) — then post the raw receive. This is where all
  * TLS/PROXY/state knowledge lives; the backend below sees only (stream, buf, cap). */
-int kl_comp_post_recv(KlConn *c);
+int kl_comp_post_recv(KlHttpConn *c);
 
 /* Raw receive (dispatch router, completion_dispatch.c): post one async recv of up to `cap`
  * bytes into `buf` on `stream`. buf != NULL and cap > 0 are validated by the backend. On
@@ -223,10 +223,10 @@ int kl_comp_post_recv_raw(KlStream *stream, void *buf, size_t cap);
  * segments valid until the completion: comp_send_response() builds the iovec from the LIVE
  * c->res (res->hdr_buf, res->body) + static literals + a small stack Content-Length scratch,
  * and the driver does NOT reset or reuse c->res between kl_comp_post_send() and comp_on_write()
- * (it only resets in kl_conn_send_complete, which runs FROM comp_on_write). The one transient
+ * (it only resets in kl_http_conn_send_complete, which runs FROM comp_on_write). The one transient
  * segment (the stack Content-Length scratch) is tiny; a backend that references in place must
  * snapshot small segments itself. Copying backends are unaffected by this note. */
-int kl_comp_post_send(KlConn *c, const KlIoVec *iov, int iovcnt, size_t total);
+int kl_comp_post_send(KlHttpConn *c, const KlIoVec *iov, int iovcnt, size_t total);
 
 /* Raw send (dispatch router): the KlStream form of kl_comp_post_send. The WRITE completion
  * targets `stream`. */
@@ -240,7 +240,7 @@ int kl_comp_post_accept(struct KlServer *s);
  * (head as the transmit head-buffer, offset via OVERLAPPED); a future backend uses
  * its own zero-copy file send. Reports a KL_COMP_WRITE on completion — the driver
  * treats it like any completed response send. */
-int kl_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
+int kl_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count);
 
 /* Post one outbound connect (LC-0). Declared in io_engine.h (the shared event-model seam)

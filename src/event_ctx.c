@@ -4,10 +4,10 @@
  *
  * Split out of async.c in the freestanding phase (F0): this is the CLIENT-usable
  * half of the old async.c — it references only the event/timer/socket-provider
- * seams (no KlServer / KlConn / connection state machine), so a completion HTTP
+ * seams (no KlServer / KlHttpConn / connection state machine), so a completion HTTP
  * client can link it WITHOUT dragging in the server connection driver. The
  * server-side connection-suspension API (kl_async_suspend/complete/cancel) stays
- * in async.c, which references kl_conn_on_writable / kl_server_conn_release /
+ * in async.c, which references kl_http_conn_on_writable / kl_server_conn_release /
  * kl_io_engine_resume_completion — the exact server symbols that must not leak
  * into the freestanding client archive.
  */

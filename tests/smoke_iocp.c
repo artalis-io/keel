@@ -135,7 +135,7 @@ static void *server_thread(void *arg) {
 /* PROXY-over-IOCP: a trusted-source connection sends a plaintext PROXY v1 header before its
  * HTTP request; the completion driver's PROXY-header phase (comp_drive_proxy) must parse it and
  * the handler must see the real client address (1.2.3.4), not the socket's 127.0.0.1. Exercises
- * accept → KL_CONN_PROXY_HEADER → parse → READING → handler over the IOCP loop (the header recv
+ * accept → KL_HTTP_CONN_PROXY_HEADER → parse → READING → handler over the IOCP loop (the header recv
  * is plaintext even though this is a completion backend). */
 #define SMOKE_PROXY_PORT 18084
 static char g_proxy_ip[64];

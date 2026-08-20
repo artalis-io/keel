@@ -23,7 +23,7 @@
  * return NULL and the core stays pure HTTP/1.1 — with NO #ifdef in the shared code.
  */
 
-#include <keel/connection.h>   /* KlConn */
+#include <keel/http_connection.h>   /* KlHttpConn */
 #include <keel/router.h>       /* KlRouter */
 #include <keel/h2_server.h>    /* KlH2ServerConfig */
 #include <keel/proxy_protocol.h> /* KlProxyResult / KlCidr / KlSockAddr (PROXY seam) */
@@ -32,19 +32,19 @@
 
 /* ── WebSocket server upgrade seam ──────────────────────────────────────────── */
 typedef struct KlWsServerHooks {
-    /* HTTP/1.1 -> WebSocket upgrade (returns the next KlConnState as int). */
-    int  (*upgrade)(KlConn *c, const char *leftover, size_t leftover_len);
-    /* Readiness data plane (KL_CONN_WEBSOCKET): drive a read/write-ready frame pump;
-     * each returns the next KlConnState as int. The completion path uses .drive
+    /* HTTP/1.1 -> WebSocket upgrade (returns the next KlHttpConnState as int). */
+    int  (*upgrade)(KlHttpConn *c, const char *leftover, size_t leftover_len);
+    /* Readiness data plane (KL_HTTP_CONN_WEBSOCKET): drive a read/write-ready frame pump;
+     * each returns the next KlHttpConnState as int. The completion path uses .drive
      * (KlWsCompHooks); this is its readiness counterpart so server.c dispatches through
      * the same seam instead of naming kl_ws_server_* directly. */
-    int  (*on_readable)(KlConn *c);
-    int  (*on_writable)(KlConn *c);
-    int  (*drain_pending)(const KlConn *c);           /* readiness: want WRITE interest? */
-    void (*cleanup)(KlConn *c);                       /* per-connection teardown */
-    int  (*auto_ping)(KlConn *c, uint64_t now);       /* idle-sweep keepalive */
-    int  (*check_close_timeout)(const KlConn *c, uint64_t now);
-    void (*drain_close)(KlConn *c);                   /* graceful-drain nudge */
+    int  (*on_readable)(KlHttpConn *c);
+    int  (*on_writable)(KlHttpConn *c);
+    int  (*drain_pending)(const KlHttpConn *c);           /* readiness: want WRITE interest? */
+    void (*cleanup)(KlHttpConn *c);                       /* per-connection teardown */
+    int  (*auto_ping)(KlHttpConn *c, uint64_t now);       /* idle-sweep keepalive */
+    int  (*check_close_timeout)(const KlHttpConn *c, uint64_t now);
+    void (*drain_close)(KlHttpConn *c);                   /* graceful-drain nudge */
 } KlWsServerHooks;
 
 const KlWsServerHooks *kl_ws_server_hooks(void);      /* NULL if server_ws.c absent */
@@ -54,17 +54,17 @@ void kl_ws_server_hooks_install(void);                /* defined in server_ws.c 
 /* ── HTTP/2 server upgrade seam ─────────────────────────────────────────────── */
 typedef struct KlH2ServerHooks {
     /* ALPN / prior-knowledge upgrade, and the h2c (HTTP/1.1 Upgrade) path. */
-    int  (*upgrade)(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
+    int  (*upgrade)(KlHttpConn *c, KlRouter *router, KlH2ServerConfig *cfg,
                     const char *data, size_t len);
-    int  (*upgrade_from_h1)(KlConn *c, KlRouter *router, KlH2ServerConfig *cfg,
+    int  (*upgrade_from_h1)(KlHttpConn *c, KlRouter *router, KlH2ServerConfig *cfg,
                             const char *leftover, size_t leftover_len);
-    /* Readiness data plane (KL_CONN_HTTP2): drive a read/write-ready frame pump; each
-     * returns the next KlConnState as int (readiness counterpart of KlH2CompHooks.drive). */
-    int  (*on_readable)(KlConn *c);
-    int  (*on_writable)(KlConn *c);
-    int  (*want_write)(const KlConn *c);              /* readiness: arm WRITE interest? */
-    void (*cleanup)(KlConn *c);                       /* per-connection teardown */
-    void (*drain_shutdown)(KlConn *c);                /* graceful-drain GOAWAY */
+    /* Readiness data plane (KL_HTTP_CONN_HTTP2): drive a read/write-ready frame pump; each
+     * returns the next KlHttpConnState as int (readiness counterpart of KlH2CompHooks.drive). */
+    int  (*on_readable)(KlHttpConn *c);
+    int  (*on_writable)(KlHttpConn *c);
+    int  (*want_write)(const KlHttpConn *c);              /* readiness: arm WRITE interest? */
+    void (*cleanup)(KlHttpConn *c);                       /* per-connection teardown */
+    void (*drain_shutdown)(KlHttpConn *c);                /* graceful-drain GOAWAY */
 } KlH2ServerHooks;
 
 const KlH2ServerHooks *kl_h2_server_hooks(void);      /* NULL if server_h2.c absent */
@@ -82,14 +82,14 @@ void kl_h2_server_hooks_install(void);                /* defined in server_h2.c 
 struct KlServer;
 
 typedef struct KlWsCompHooks {
-    void (*drive)(struct KlServer *s, KlConn *c);
+    void (*drive)(struct KlServer *s, KlHttpConn *c);
 } KlWsCompHooks;
 const KlWsCompHooks *kl_ws_comp_hooks(void);
 void kl_ws_comp_hooks_set(const KlWsCompHooks *hooks);
 void kl_ws_comp_hooks_install(void);                  /* defined in completion_ws.c */
 
 typedef struct KlH2CompHooks {
-    void (*drive)(struct KlServer *s, KlConn *c);
+    void (*drive)(struct KlServer *s, KlHttpConn *c);
 } KlH2CompHooks;
 const KlH2CompHooks *kl_h2_comp_hooks(void);
 void kl_h2_comp_hooks_set(const KlH2CompHooks *hooks);

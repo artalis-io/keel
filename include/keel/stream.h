@@ -10,7 +10,7 @@
  * └───────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * A model-agnostic raw byte transport, independent of readiness vs completion. Three cooperating
- * facets, all dormant until their _init is called (so a plain KlConn is unaffected):
+ * facets, all dormant until their _init is called (so a plain KlHttpConn is unaffected):
  *   - WRITE: atomic all-or-none over a bounded, preallocated queue; readiness direct-send + flush,
  *     or completion one-submit-at-a-time with WRITE-completion pumping.
  *   - READ: strict pause/resume — a completed receive is HELD undelivered while paused and

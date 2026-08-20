@@ -502,7 +502,7 @@ UTEST(server_integration, concurrent_requests) {
 
 /* Conformance: driving accepted-connection I/O through the explicit POSIX
  * provider (the vtable dispatch path, not just the NULL fast path) is
- * byte-identical to the default. Proves the server's KlConn.ctx->sockets
+ * byte-identical to the default. Proves the server's KlHttpConn.ctx->sockets
  * plumbing + conn_read/conn_write seam adoption.
  *
  * POSIX-only: references kl_socket_provider_posix(), which lives in the

@@ -1,12 +1,12 @@
-#include <keel/connection.h>
+#include <keel/http_connection.h>
 #include <keel/body_reader.h>
-#include <keel/chunked.h>
+#include <keel/http1_chunked.h>
 #include <keel/event.h>
 #include <keel/tls.h>
 #include <keel/websocket_server.h>
 #include <keel/h2_server.h>
 #include <keel/proxy_protocol.h>
-#include "conn_internal.h"
+#include "http_conn_internal.h"
 #include "proto_hooks.h"        /* ws/h2 upgrade seam — core never names ws/h2 directly */
 #include <assert.h>
 #include <string.h>
@@ -19,8 +19,8 @@
 #include "socket.h"
 
 /* Socket provider for this connection's fd — via the raw KlStream seam (step 6B-2). NULL (POSIX
- * default) for a standalone pool with no event ctx wired — see kl_conn_release. */
-static inline const KlSocketProvider *conn_sp(const KlConn *c) {
+ * default) for a standalone pool with no event ctx wired — see kl_http_conn_release. */
+static inline const KlSocketProvider *conn_sp(const KlHttpConn *c) {
     return kl_stream_provider(&c->stream);
 }
 
@@ -54,26 +54,26 @@ static const char kl_100_continue[] =
     "HTTP/1.1 100 Continue\r\n"
     "\r\n";
 
-int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
+int kl_http_conn_pool_init(KlHttpConnPool *pool, int capacity, KlAllocator *alloc) {
     if (capacity <= 0) return -1;
     pool->alloc = alloc;
     pool->capacity = capacity;
     pool->active_count = 0;
     pool->free_credits = capacity;   /* admission rights: one per slot (step 6B credit layer) */
-    if ((size_t)capacity > SIZE_MAX / sizeof(KlConn)) return -1;
-    pool->conns = kl_malloc(alloc, sizeof(KlConn) * (size_t)capacity);
+    if ((size_t)capacity > SIZE_MAX / sizeof(KlHttpConn)) return -1;
+    pool->conns = kl_malloc(alloc, sizeof(KlHttpConn) * (size_t)capacity);
     if (!pool->conns) return -1;
 
-    memset(pool->conns, 0, sizeof(KlConn) * (size_t)capacity);
+    memset(pool->conns, 0, sizeof(KlHttpConn) * (size_t)capacity);
 
     /* Build free list and allocate read buffers */
     pool->free_list = &pool->conns[0];
     for (int i = 0; i < capacity; i++) {
-        pool->conns[i].stream.read_buf = kl_malloc(alloc, KL_READ_BUF_SIZE);
+        pool->conns[i].stream.read_buf = kl_malloc(alloc, KL_HTTP_CONN_READ_BUF_SIZE);
         if (!pool->conns[i].stream.read_buf) {
             for (int j = 0; j < i; j++)
-                kl_free(alloc, pool->conns[j].stream.read_buf, KL_READ_BUF_SIZE);
-            kl_free(alloc, pool->conns, sizeof(KlConn) * (size_t)capacity);
+                kl_free(alloc, pool->conns[j].stream.read_buf, KL_HTTP_CONN_READ_BUF_SIZE);
+            kl_free(alloc, pool->conns, sizeof(KlHttpConn) * (size_t)capacity);
             pool->conns = NULL;
             return -1;
         }
@@ -82,29 +82,29 @@ int kl_conn_pool_init(KlConnPool *pool, int capacity, KlAllocator *alloc) {
          * it as the stable receive buffer. Arguments are known-valid, but check the result and
          * unwind on failure to keep initialization discipline intact against future changes. */
         char *rb = pool->conns[i].stream.read_buf;
-        if (kl_stream_init(&pool->conns[i].stream, rb, KL_READ_BUF_SIZE) < 0) {
+        if (kl_stream_init(&pool->conns[i].stream, rb, KL_HTTP_CONN_READ_BUF_SIZE) < 0) {
             for (int j = 0; j <= i; j++)   /* free through i (rb for slot i was set above) */
-                kl_free(alloc, pool->conns[j].stream.read_buf, KL_READ_BUF_SIZE);
-            kl_free(alloc, pool->conns, sizeof(KlConn) * (size_t)capacity);
+                kl_free(alloc, pool->conns[j].stream.read_buf, KL_HTTP_CONN_READ_BUF_SIZE);
+            kl_free(alloc, pool->conns, sizeof(KlHttpConn) * (size_t)capacity);
             pool->conns = NULL;
             return -1;
         }
         pool->conns[i].next_free = (i < capacity - 1) ? &pool->conns[i + 1] : NULL;
-        pool->conns[i].state = KL_CONN_CLOSED;
+        pool->conns[i].state = KL_HTTP_CONN_CLOSED;
         pool->conns[i].stream.alloc = alloc;
     }
 
     return 0;
 }
 
-int kl_conn_pool_reserve(KlConnPool *pool) {
+int kl_http_conn_pool_reserve(KlHttpConnPool *pool) {
     if (!pool) return -1;                     /* fail closed on a NULL pool */
     if (pool->free_credits <= 0) return 0;    /* admission full → listener backpressure */
     pool->free_credits--;
     return 1;
 }
 
-void kl_conn_pool_return_credit(KlConnPool *pool) {
+void kl_http_conn_pool_return_credit(KlHttpConnPool *pool) {
     if (!pool) return;                        /* defensive no-op */
     /* Over-return means broken lease accounting (the free_credits + reserved + active == capacity
      * invariant was violated) — catch it in debug/tests instead of silently hiding it. */
@@ -112,16 +112,16 @@ void kl_conn_pool_return_credit(KlConnPool *pool) {
     if (pool->free_credits < pool->capacity) pool->free_credits++;   /* release-once safety net */
 }
 
-KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd) {
+KlHttpConn *kl_http_conn_acquire(KlHttpConnPool *pool, KlSocketHandle fd) {
     if (!pool->free_list) return NULL;
 
-    KlConn *c = pool->free_list;
+    KlHttpConn *c = pool->free_list;
     pool->free_list = c->next_free;
     c->next_free = NULL;
     pool->active_count++;
 
     c->stream.fd = fd;
-    c->state = KL_CONN_READING;
+    c->state = KL_HTTP_CONN_READING;
     c->stream.read_len = 0;
     c->hdr_sent = 0;
     c->route = NULL;
@@ -138,18 +138,18 @@ KlConn *kl_conn_acquire(KlConnPool *pool, KlSocketHandle fd) {
     return c;
 }
 
-const KlSockAddr *kl_conn_peer_addr(const KlConn *c) {
+const KlSockAddr *kl_http_conn_peer_addr(const KlHttpConn *c) {
     return &c->stream.peer_addr;
 }
 
-static void conn_cleanup_body_reader(KlConn *c) {
+static void conn_cleanup_body_reader(KlHttpConn *c) {
     if (c->req.body_reader) {
         c->req.body_reader->destroy(c->req.body_reader);
         c->req.body_reader = NULL;
     }
 }
 
-void kl_conn_release(KlConnPool *pool, KlConn *c) {
+void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
     /* WebSocket / HTTP-2 cleanup via the per-protocol upgrade seam (no-op when the
      * module isn't linked — e.g. a freestanding HTTP/1.1 server). */
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
@@ -178,14 +178,14 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
         kl_http_response_free(&c->res);
     }
     c->async_op = NULL;
-    c->state = KL_CONN_CLOSED;
+    c->state = KL_HTTP_CONN_CLOSED;
     c->route = NULL;
     c->next_free = pool->free_list;
     pool->free_list = c;
     pool->active_count--;
 }
 
-void kl_conn_pool_free(KlConnPool *pool) {
+void kl_http_conn_pool_free(KlHttpConnPool *pool) {
     if (pool->conns) {
         /* Close any active connections */
         const KlWsServerHooks *wsh = kl_ws_server_hooks();
@@ -228,12 +228,12 @@ void kl_conn_pool_free(KlConnPool *pool) {
             }
         }
         kl_free(pool->alloc, pool->conns,
-                sizeof(KlConn) * (size_t)pool->capacity);
+                sizeof(KlHttpConn) * (size_t)pool->capacity);
         pool->conns = NULL;
     }
 }
 
-static void conn_log_access(KlConn *c) {
+static void conn_log_access(KlHttpConn *c) {
     if (!c->access_log) return;
     size_t bytes = 0;
     if (c->res.body_mode == KL_HTTP_BODY_BUFFER) bytes = c->res.body_len;
@@ -248,7 +248,7 @@ static void conn_log_access(KlConn *c) {
  * Initialize response for the current request.  Extracted from conn_process
  * so middleware can write headers/status before the handler runs.
  */
-static int conn_init_response(KlConn *c) {
+static int conn_init_response(KlHttpConn *c) {
     c->req._server_ctx = c;
     c->request_start_ms = kl_monotonic_ms();
     if (c->res.hdr_buf) {
@@ -270,8 +270,8 @@ static int conn_init_response(KlConn *c) {
  * Process a fully parsed request: handler → response setup.
  * Response must already be initialized via conn_init_response().
  */
-static KlConnState conn_process(KlConn *c) {
-    c->state = KL_CONN_PROCESSING;
+static KlHttpConnState conn_process(KlHttpConn *c) {
+    c->state = KL_HTTP_CONN_PROCESSING;
 
     if (c->route_result == 200 && c->route) {
         c->route->handler(&c->req, &c->res, c->route->user_data);
@@ -282,21 +282,21 @@ static KlConnState conn_process(KlConn *c) {
     }
 
     /* If handler suspended the connection for async I/O, don't transition */
-    if (c->state == KL_CONN_SUSPENDED)
-        return KL_CONN_SUSPENDED;
+    if (c->state == KL_HTTP_CONN_SUSPENDED)
+        return KL_HTTP_CONN_SUSPENDED;
 
     /* If streaming, the handler already sent everything — unless drain is pending */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
         if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
-            c->state = KL_CONN_SENDING;
+            c->state = KL_HTTP_CONN_SENDING;
             return c->state;
         }
         conn_log_access(c);
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
 
-    c->state = KL_CONN_SENDING;
+    c->state = KL_HTTP_CONN_SENDING;
     return c->state;
 }
 
@@ -304,16 +304,16 @@ static KlConnState conn_process(KlConn *c) {
  * Run post-body middleware, then invoke the handler.
  * Body has already been consumed, so keep_alive is preserved on short-circuit.
  */
-static KlConnState conn_run_post_middleware_and_handle(KlConn *c,
+static KlHttpConnState conn_run_post_middleware_and_handle(KlHttpConn *c,
                                                        KlRouter *router) {
     if (kl_router_run_post_middleware(router, &c->req, &c->res) != 0) {
         /* Body already consumed — keep_alive preserved */
         if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
             conn_log_access(c);
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
-        c->state = KL_CONN_SENDING;
+        c->state = KL_HTTP_CONN_SENDING;
         return c->state;
     }
     return conn_process(c);
@@ -329,43 +329,43 @@ static KlConnState conn_run_post_middleware_and_handle(KlConn *c,
  * Post-handler transition mirrors conn_process. The handler can:
  *   - Complete synchronously (return with response set) → SENDING
  *   - Yield waiting for more body bytes → handler sets state
- *       KL_CONN_READING_BODY; the body reader's on_data callback
+ *       KL_HTTP_CONN_READING_BODY; the body reader's on_data callback
  *       resumes the handler when more bytes arrive
  *   - Yield for async I/O (db.async, http.fetch, etc.) → handler sets
- *       state KL_CONN_SUSPENDED via kl_async_suspend
+ *       state KL_HTTP_CONN_SUSPENDED via kl_async_suspend
  *   - Emit a streaming response (SSE / chunked) → drain or close
  */
-static KlConnState conn_invoke_streaming_handler(KlConn *c) {
+static KlHttpConnState conn_invoke_streaming_handler(KlHttpConn *c) {
     if (!c->route || !c->route->handler) {
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
-    c->state = KL_CONN_PROCESSING;
+    c->state = KL_HTTP_CONN_PROCESSING;
     c->route->handler(&c->req, &c->res, c->route->user_data);
 
     /* Yields keep the conn alive without transitioning to SENDING. */
-    if (c->state == KL_CONN_SUSPENDED) return KL_CONN_SUSPENDED;
-    if (c->state == KL_CONN_READING_BODY) return KL_CONN_READING_BODY;
+    if (c->state == KL_HTTP_CONN_SUSPENDED) return KL_HTTP_CONN_SUSPENDED;
+    if (c->state == KL_HTTP_CONN_READING_BODY) return KL_HTTP_CONN_READING_BODY;
 
     /* Streaming response — handler already wrote chunks. */
     if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
         if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
-            c->state = KL_CONN_SENDING;
+            c->state = KL_HTTP_CONN_SENDING;
             return c->state;
         }
         conn_log_access(c);
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
 
     /* Standard buffered response — send it. */
-    c->state = KL_CONN_SENDING;
+    c->state = KL_HTTP_CONN_SENDING;
     return c->state;
 }
 
-KlConnState kl_conn_on_handshake(KlConn *c) {
+KlHttpConnState kl_http_conn_on_handshake(KlHttpConn *c) {
     if (!c->tls) {
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
     /* Route the TLS socket-BIO through the connection's own socket provider, so
@@ -386,29 +386,29 @@ KlConnState kl_conn_on_handshake(KlConn *c) {
                     proto[2] == '\0' && h2h && h2h->upgrade) {
                     int hr = h2h->upgrade(c, c->router, c->h2_config,
                                           NULL, 0);
-                    if (hr == KL_CONN_HTTP2) {
-                        c->state = KL_CONN_HTTP2;
+                    if (hr == KL_HTTP_CONN_HTTP2) {
+                        c->state = KL_HTTP_CONN_HTTP2;
                         return c->state;
                     }
                 }
             }
-            c->state = KL_CONN_READING;
+            c->state = KL_HTTP_CONN_READING;
             return c->state;
         case KL_TLS_WANT_READ:
             c->tls_want = KL_EVENT_READ;
-            return KL_CONN_TLS_HANDSHAKE;
+            return KL_HTTP_CONN_TLS_HANDSHAKE;
         case KL_TLS_WANT_WRITE:
             c->tls_want = KL_EVENT_WRITE;
-            return KL_CONN_TLS_HANDSHAKE;
+            return KL_HTTP_CONN_TLS_HANDSHAKE;
         case KL_TLS_ERROR:
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
     }
-    c->state = KL_CONN_CLOSED;
+    c->state = KL_HTTP_CONN_CLOSED;
     return c->state;
 }
 
-int kl_conn_read_proxy_header(KlConn *c) {
+int kl_http_conn_read_proxy_header(KlHttpConn *c) {
     uint8_t buf[KL_PROXY_HEADER_MAX];
     ssize_t n;
     do {
@@ -450,7 +450,7 @@ int kl_conn_read_proxy_header(KlConn *c) {
 
     if (kl_sockaddr_family(&peer) != KL_AF_UNSPEC) {
         c->stream.peer_addr = peer;
-        c->peer_source = KL_PEER_PROXY;
+        c->peer_source = KL_HTTP_PEER_PROXY;
     }
     /* LOCAL/UNKNOWN (KL_AF_UNSPEC): keep the socket address. */
     return 1;
@@ -459,10 +459,10 @@ int kl_conn_read_proxy_header(KlConn *c) {
 /* Model-blind PROXY-header ingest for the completion path: parse a PROXY header from bytes
  * already received into read_buf[0..len] (an overlapped recv, not a socket peek — the readiness
  * counterpart above peeks + consumes on the socket). On a real header sets c->stream.peer_addr as
- * KL_PEER_PROXY. Returns the number of leading header bytes to consume (0 = not a PROXY header,
+ * KL_HTTP_PEER_PROXY. Returns the number of leading header bytes to consume (0 = not a PROXY header,
  * proceed with all bytes as HTTP/TLS), -1 on malformed/oversized, or -2 if more bytes are needed
  * (the caller posts another recv). */
-int kl_conn_ingest_proxy(KlConn *c, size_t len) {
+int kl_http_conn_ingest_proxy(KlHttpConn *c, size_t len) {
     KlSockAddr peer;
     size_t consumed = 0;
     const KlProxyHooks *ph = kl_proxy_hooks();
@@ -481,7 +481,7 @@ int kl_conn_ingest_proxy(KlConn *c, size_t len) {
         case KL_PROXY_OK:
             if (kl_sockaddr_family(&peer) != KL_AF_UNSPEC) {
                 c->stream.peer_addr = peer;
-                c->peer_source = KL_PEER_PROXY;
+                c->peer_source = KL_HTTP_PEER_PROXY;
             }
             return (int)consumed;
     }
@@ -493,7 +493,7 @@ int kl_conn_ingest_proxy(KlConn *c, size_t len) {
  * in-place in read_buf.  The byte after each string is an HTTP syntax
  * char (\r, :, ?, space) that is never read again post-parse.
  */
-static void conn_null_terminate_headers(KlConn *c) {
+static void conn_null_terminate_headers(KlHttpConn *c) {
     c->stream.read_buf[(size_t)(c->req.method - c->stream.read_buf) + c->req.method_len] = '\0';
     c->stream.read_buf[(size_t)(c->req.path - c->stream.read_buf) + c->req.path_len] = '\0';
     if (c->req.query)
@@ -509,13 +509,13 @@ static void conn_null_terminate_headers(KlConn *c) {
  * Called from both HEADERS_OK (has_leftover=true with leftover data) and
  * PARSE_OK (has_leftover=false, complete request with no body).
  */
-static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
+static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlRouter *router,
                                           const char *leftover_buf,
                                           size_t leftover_len) {
     /* Null-terminate the parsed request fields in read_buf so handlers get valid
      * C strings. Done here in the shared core (not at the call sites) so the
      * readiness and completion paths can't drift — the completion driver reaches
-     * this via kl_conn_dispatch_request. Idempotent + confined to the header
+     * this via kl_http_conn_dispatch_request. Idempotent + confined to the header
      * region (before any leftover body at read_buf + consumed). */
     conn_null_terminate_headers(c);
 
@@ -533,7 +533,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
 
     /* Init response and run pre-body middleware */
     if (conn_init_response(c) < 0) {
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
     if (kl_router_run_middleware(router, &c->req, &c->res) != 0) {
@@ -542,10 +542,10 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         c->res.keep_alive = 0;
         if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
             conn_log_access(c);
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
-        c->state = KL_CONN_SENDING;
+        c->state = KL_HTTP_CONN_SENDING;
         return c->state;
     }
 
@@ -553,7 +553,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
     if (c->route_result == 200 && c->route &&
         c->route->ws_config && wsh && wsh->upgrade) {
-        c->state = (KlConnState)wsh->upgrade(
+        c->state = (KlHttpConnState)wsh->upgrade(
             c, leftover_buf, leftover_len);
         return c->state;
     }
@@ -566,7 +566,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         const KlH2ServerHooks *h2h = kl_h2_server_hooks();
         if (ug && ug_len == 3 &&
             kl_ascii_strncasecmp(ug, "h2c", 3) == 0 && h2h && h2h->upgrade_from_h1) {
-            c->state = (KlConnState)h2h->upgrade_from_h1(
+            c->state = (KlHttpConnState)h2h->upgrade_from_h1(
                 c, router, c->h2_config,
                 leftover_buf, leftover_len);
             return c->state;
@@ -583,7 +583,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         if (!br) {
             best_effort_conn_write(c, kl_415_response,
                         sizeof(kl_415_response) - 1);
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
         c->req.body_reader = br;
@@ -611,8 +611,8 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
              * downstream API misuse (direct KlRoute mutation) in
              * debug builds without runtime cost in release. */
             assert(c->route->streaming_handler);
-            KlConnState s = conn_invoke_streaming_handler(c);
-            if (s != KL_CONN_READING_BODY) {
+            KlHttpConnState s = conn_invoke_streaming_handler(c);
+            if (s != KL_HTTP_CONN_READING_BODY) {
                 /* Handler completed synchronously (sent a response,
                  * suspended for async I/O, or emitted a streaming
                  * response) without parking on the body reader. The
@@ -634,9 +634,9 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
 
         /* Parse leftover body data in-place (no memmove) */
         if (c->req.chunked) {
-            kl_chunked_init(&c->chunked_dec);
+            kl_http1_chunked_init(&c->chunked_dec);
             if (leftover_len > 0) {
-                int rc = kl_chunked_decode(&c->chunked_dec,
+                int rc = kl_http1_chunked_decode(&c->chunked_dec,
                             leftover_buf, leftover_len,
                             c->req.body_reader);
                 if (rc < 0) {
@@ -645,13 +645,13 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
                      * response if the on_error chain resumed it
                      * (see READING_BODY paths below for the twin). */
                     if (c->route->streaming_handler &&
-                        (c->state == KL_CONN_SENDING ||
-                         c->state == KL_CONN_CLOSED)) {
+                        (c->state == KL_HTTP_CONN_SENDING ||
+                         c->state == KL_HTTP_CONN_CLOSED)) {
                         c->req.keep_alive = 0;
                         c->res.keep_alive = 0;
                         return c->state;
                     }
-                    c->state = KL_CONN_CLOSED;
+                    c->state = KL_HTTP_CONN_CLOSED;
                     return c->state;
                 }
                 if (rc == 1) {
@@ -670,27 +670,27 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
             }
         } else if (leftover_len > 0) {
             size_t body_consumed;
-            KlParseResult bpr = c->parser->parse(
+            KlHttp1ParseResult bpr = c->parser->parse(
                 c->parser, &c->req,
                 leftover_buf, leftover_len,
                 &body_consumed);
             (void)body_consumed;
 
-            if (bpr == KL_PARSE_ERROR) {
+            if (bpr == KL_HTTP1_PARSE_ERROR) {
                 c->req.body_reader->on_error(c->req.body_reader);
                 /* v2.1.2/v2.2.0 — same handler-state-honoring as the
                  * chunked path. */
                 if (c->route->streaming_handler &&
-                    (c->state == KL_CONN_SENDING ||
-                     c->state == KL_CONN_CLOSED)) {
+                    (c->state == KL_HTTP_CONN_SENDING ||
+                     c->state == KL_HTTP_CONN_CLOSED)) {
                     c->req.keep_alive = 0;
                     c->res.keep_alive = 0;
                     return c->state;
                 }
-                c->state = KL_CONN_CLOSED;
+                c->state = KL_HTTP_CONN_CLOSED;
                 return c->state;
             }
-            if (bpr == KL_PARSE_OK) {
+            if (bpr == KL_HTTP1_PARSE_OK) {
                 if (c->route->streaming_handler) {
                     if (c->route->streaming_async)
                         return c->state;
@@ -704,17 +704,17 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         /* Legacy streaming-handler (not async): invoke the handler NOW
          * (after any leftover has been fed via on_data). The handler
          * will consume what's available and yield on NEED_DATA, leaving
-         * the conn in KL_CONN_READING_BODY so the event loop continues
+         * the conn in KL_HTTP_CONN_READING_BODY so the event loop continues
          * pumping on_data. Async routes already invoked above. */
         if (c->route->streaming_handler && !c->route->streaming_async) {
-            KlConnState s = conn_invoke_streaming_handler(c);
-            if (s != KL_CONN_READING_BODY)
+            KlHttpConnState s = conn_invoke_streaming_handler(c);
+            if (s != KL_HTTP_CONN_READING_BODY)
                 return s;
         }
 
         c->stream.read_len = 0;
         c->body_start_ms = kl_monotonic_ms();
-        c->state = KL_CONN_READING_BODY;
+        c->state = KL_HTTP_CONN_READING_BODY;
         return c->state;
 
     } else if (!has_body) {
@@ -736,24 +736,24 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
             c->req.content_length > c->max_body_size) {
             best_effort_conn_write(c, kl_413_response,
                                    sizeof(kl_413_response) - 1);
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
 
         if (c->req.chunked) {
-            kl_chunked_init(&c->chunked_dec);
+            kl_http1_chunked_init(&c->chunked_dec);
             if (leftover_len > 0) {
-                int rc = kl_chunked_decode(&c->chunked_dec,
+                int rc = kl_http1_chunked_decode(&c->chunked_dec,
                             leftover_buf, leftover_len, NULL);
                 if (rc < 0) {
-                    c->state = KL_CONN_CLOSED;
+                    c->state = KL_HTTP_CONN_CLOSED;
                     return c->state;
                 }
                 if (c->max_body_size > 0 &&
                     c->chunked_dec.total_body > c->max_body_size) {
                     best_effort_conn_write(c, kl_413_response,
                                            sizeof(kl_413_response) - 1);
-                    c->state = KL_CONN_CLOSED;
+                    c->state = KL_HTTP_CONN_CLOSED;
                     return c->state;
                 }
                 if (rc == 1) {
@@ -762,32 +762,32 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
             }
         } else if (leftover_len > 0) {
             size_t body_consumed;
-            KlParseResult bpr = c->parser->parse(
+            KlHttp1ParseResult bpr = c->parser->parse(
                 c->parser, &c->req,
                 leftover_buf, leftover_len,
                 &body_consumed);
             (void)body_consumed;
 
-            if (bpr == KL_PARSE_ERROR) {
-                c->state = KL_CONN_CLOSED;
+            if (bpr == KL_HTTP1_PARSE_ERROR) {
+                c->state = KL_HTTP_CONN_CLOSED;
                 return c->state;
             }
-            if (bpr == KL_PARSE_OK) {
+            if (bpr == KL_HTTP1_PARSE_OK) {
                 return conn_run_post_middleware_and_handle(c, router);
             }
         }
 
         c->stream.read_len = 0;
         c->body_start_ms = kl_monotonic_ms();
-        c->state = KL_CONN_READING_BODY;
+        c->state = KL_HTTP_CONN_READING_BODY;
         return c->state;
     }
 }
 
-KlConnState kl_conn_on_readable(KlConn *c, KlRouter *router) {
+KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlRouter *router) {
     c->last_active_ms = kl_monotonic_ms();
 
-    if (c->state == KL_CONN_READING) {
+    if (c->state == KL_HTTP_CONN_READING) {
         int hdr_drains = 0;
 read_more_headers: ;
         /* Read available data */
@@ -796,7 +796,7 @@ read_more_headers: ;
             if (c->stream.read_cap >= c->max_header_size) {
                 best_effort_conn_write(c, kl_431_response,
                                        sizeof(kl_431_response) - 1);
-                c->state = KL_CONN_CLOSED;
+                c->state = KL_HTTP_CONN_CLOSED;
                 return c->state;
             }
             size_t new_cap = c->stream.read_cap * 2;
@@ -805,7 +805,7 @@ read_more_headers: ;
             if (new_cap < c->stream.read_cap || new_cap > SIZE_MAX / 2) {
                 best_effort_conn_write(c, kl_431_response,
                                        sizeof(kl_431_response) - 1);
-                c->state = KL_CONN_CLOSED;
+                c->state = KL_HTTP_CONN_CLOSED;
                 return c->state;
             }
             char *nb = kl_realloc(c->stream.alloc, c->stream.read_buf,
@@ -813,7 +813,7 @@ read_more_headers: ;
             if (!nb) {
                 best_effort_conn_write(c, kl_431_response,
                                        sizeof(kl_431_response) - 1);
-                c->state = KL_CONN_CLOSED;
+                c->state = KL_HTTP_CONN_CLOSED;
                 return c->state;
             }
             c->stream.read_buf = nb;
@@ -825,7 +825,7 @@ read_more_headers: ;
 
         ssize_t nr = conn_read(c, c->stream.read_buf + c->stream.read_len, space);
         if (nr <= 0) {
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
         c->stream.read_len += (size_t)nr;
@@ -846,7 +846,7 @@ read_more_headers: ;
                     const KlH2ServerHooks *h2hp = kl_h2_server_hooks();
                     if (!h2hp || !h2hp->upgrade)
                         return c->state;   /* HTTP/2 not linked — stay HTTP/1.1 */
-                    c->state = (KlConnState)h2hp->upgrade(
+                    c->state = (KlHttpConnState)h2hp->upgrade(
                         c, router, c->h2_config,
                         c->stream.read_buf, c->stream.read_len);
                     return c->state;
@@ -854,42 +854,42 @@ read_more_headers: ;
                 /* Not a preface — fall through to HTTP/1.1 parser */
             } else if (memcmp(c->stream.read_buf, h2_preface, c->stream.read_len) == 0) {
                 /* Partial preface match — wait for more data */
-                return KL_CONN_READING;
+                return KL_HTTP_CONN_READING;
             }
         }
 
         /* Try parsing */
         size_t consumed = 0;
-        KlParseResult pr = c->parser->parse(c->parser, &c->req,
+        KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->req,
                                              c->stream.read_buf, c->stream.read_len,
                                              &consumed);
 
-        if (pr == KL_PARSE_INCOMPLETE) {
+        if (pr == KL_HTTP1_PARSE_INCOMPLETE) {
             /* TLS may buffer multiple records — drain before re-arming */
             if (c->tls && c->tls->pending(c->tls) > 0
                 && ++hdr_drains < KL_TLS_DRAIN_MAX)
                 goto read_more_headers;
-            return KL_CONN_READING;
+            return KL_HTTP_CONN_READING;
         }
-        if (pr == KL_PARSE_ERROR) {
-            c->state = KL_CONN_CLOSED;
+        if (pr == KL_HTTP1_PARSE_ERROR) {
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
 
-        if (pr == KL_PARSE_HEADERS_OK) {
+        if (pr == KL_HTTP1_PARSE_HEADERS_OK) {
             return conn_dispatch_request(c, router,
                                           c->stream.read_buf + consumed,
                                           c->stream.read_len - consumed);
         }
 
-        if (pr == KL_PARSE_OK) {
+        if (pr == KL_HTTP1_PARSE_OK) {
             return conn_dispatch_request(c, router, NULL, 0);
         }
 
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
 
-    } else if (c->state == KL_CONN_READING_BODY) {
+    } else if (c->state == KL_HTTP_CONN_READING_BODY) {
         int body_drains = 0;
 read_more_body: ;
         /* Transport: sliding window read into the start of the buffer, then feed
@@ -899,11 +899,11 @@ read_more_body: ;
         if (nr <= 0) {
             if (c->req.body_reader)
                 c->req.body_reader->on_error(c->req.body_reader);
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
-        KlConnState bst = kl_conn_ingest_body(c, (size_t)nr);
-        if (bst == KL_CONN_READING_BODY && c->tls && c->tls->pending(c->tls) > 0
+        KlHttpConnState bst = kl_http_conn_ingest_body(c, (size_t)nr);
+        if (bst == KL_HTTP_CONN_READING_BODY && c->tls && c->tls->pending(c->tls) > 0
             && ++body_drains < KL_TLS_DRAIN_MAX)
             goto read_more_body;
         return bst;
@@ -914,18 +914,18 @@ read_more_body: ;
 
 /* ── Keep-alive reset helper ─────────────────────────────────────── */
 
-static KlConnState conn_keepalive_reset(KlConn *c) {
+static KlHttpConnState conn_keepalive_reset(KlHttpConn *c) {
     conn_cleanup_body_reader(c);
     kl_http_response_reset(&c->res);
     c->parser->reset(c->parser);
     memset(&c->req, 0, sizeof(c->req));
     c->stream.read_len = 0;
-    if (c->stream.read_cap > KL_READ_BUF_SIZE) {
+    if (c->stream.read_cap > KL_HTTP_CONN_READ_BUF_SIZE) {
         char *shrunk = kl_realloc(c->stream.alloc, c->stream.read_buf,
-                                   c->stream.read_cap, KL_READ_BUF_SIZE);
+                                   c->stream.read_cap, KL_HTTP_CONN_READ_BUF_SIZE);
         if (shrunk) {
             c->stream.read_buf = shrunk;
-            c->stream.read_cap = KL_READ_BUF_SIZE;
+            c->stream.read_cap = KL_HTTP_CONN_READ_BUF_SIZE;
         }
     }
     c->hdr_sent = 0;
@@ -935,23 +935,23 @@ static KlConnState conn_keepalive_reset(KlConn *c) {
     c->body_start_ms = 0;
     c->file_io_phase = FILE_IO_IDLE;
     c->last_active_ms = kl_monotonic_ms();
-    c->state = KL_CONN_READING;
+    c->state = KL_HTTP_CONN_READING;
     return c->state;
 }
 
-static KlConnState conn_send_complete(KlConn *c) {
+static KlHttpConnState conn_send_complete(KlHttpConn *c) {
     conn_log_access(c);
     if (c->req.keep_alive)
         return conn_keepalive_reset(c);
-    c->state = KL_CONN_CLOSED;
+    c->state = KL_HTTP_CONN_CLOSED;
     return c->state;
 }
 
 /* ── Async file I/O state machine ────────────────────────────────── */
 
-static KlConnState conn_file_flush(KlConn *c);
+static KlHttpConnState conn_file_flush(KlHttpConn *c);
 
-static KlConnState conn_file_submit_read(KlConn *c) {
+static KlHttpConnState conn_file_submit_read(KlHttpConn *c) {
     if (c->res.file_offset >= c->res.file_size)
         return conn_send_complete(c);
 
@@ -964,7 +964,7 @@ static KlConnState conn_file_submit_read(KlConn *c) {
                             to_read, c->res.file_offset,
                             c->stream.fd, c) == 0) {
         c->file_io_phase = FILE_IO_READING;
-        c->state = KL_CONN_SENDING;
+        c->state = KL_HTTP_CONN_SENDING;
         return c->state;
     }
 
@@ -973,28 +973,28 @@ static KlConnState conn_file_submit_read(KlConn *c) {
                             to_read, c->res.file_offset,
                             c->stream.fd, c) < 0) {
         c->file_io_phase = FILE_IO_IDLE;
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
 
     c->file_io_phase = FILE_IO_READING;
-    c->state = KL_CONN_SENDING;
+    c->state = KL_HTTP_CONN_SENDING;
     return c->state;
 }
 
-static KlConnState conn_file_flush(KlConn *c) {
+static KlHttpConnState conn_file_flush(KlHttpConn *c) {
     while (c->file_io_sent < c->file_io_len) {
         ssize_t nw = kl_stream_send(&c->stream, c->stream.read_buf + c->file_io_sent,
                                     c->file_io_len - c->file_io_sent);
         if (nw < 0) {
             KlIoStatus st = kl_stream_io_status(&c->stream);
             if (st == KL_IO_WOULD_BLOCK) {
-                c->state = KL_CONN_SENDING;
+                c->state = KL_HTTP_CONN_SENDING;
                 return c->state;  /* wait for WRITE event */
             }
             if (st == KL_IO_INTERRUPTED) continue;
             c->file_io_phase = FILE_IO_IDLE;
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
         c->file_io_sent += (size_t)nw;
@@ -1006,18 +1006,18 @@ static KlConnState conn_file_flush(KlConn *c) {
     return conn_file_submit_read(c);  /* next chunk or finish */
 }
 
-KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result, int zero_copy) {
+KlHttpConnState kl_http_conn_on_file_complete(KlHttpConn *c, ssize_t result, int zero_copy) {
     c->last_active_ms = kl_monotonic_ms();
 
     if (c->file_io_phase == FILE_IO_CANCELLING) {
         c->file_io_phase = FILE_IO_IDLE;
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
 
     if (result <= 0) {
         c->file_io_phase = FILE_IO_IDLE;
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
 
@@ -1036,10 +1036,10 @@ KlConnState kl_conn_on_file_complete(KlConn *c, ssize_t result, int zero_copy) {
 
 /* ── Writable event handler ──────────────────────────────────────── */
 
-KlConnState kl_conn_on_writable(KlConn *c) {
+KlHttpConnState kl_http_conn_on_writable(KlHttpConn *c) {
     c->last_active_ms = kl_monotonic_ms();
 
-    if (c->state != KL_CONN_SENDING) return c->state;
+    if (c->state != KL_HTTP_CONN_SENDING) return c->state;
 
     /* Resume io_uring file write after EAGAIN */
     if (c->file_io_phase == FILE_IO_WRITING)
@@ -1049,8 +1049,8 @@ KlConnState kl_conn_on_writable(KlConn *c) {
     if (c->res.body_mode == KL_HTTP_BODY_FILE && !c->tls && c->file_io) {
         if (!c->res.headers_sent) {
             int r = kl_http_response_send(&c->res);
-            if (r < 0) { c->state = KL_CONN_CLOSED; return c->state; }
-            if (!c->res.headers_sent) return KL_CONN_SENDING;
+            if (r < 0) { c->state = KL_HTTP_CONN_CLOSED; return c->state; }
+            if (!c->res.headers_sent) return KL_HTTP_CONN_SENDING;
         }
         if (c->res.head_request)
             return conn_send_complete(c);
@@ -1059,7 +1059,7 @@ KlConnState kl_conn_on_writable(KlConn *c) {
 
     int r = kl_http_response_send(&c->res);
     if (r < 0) {
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
     } else if (r == 0) {
         return conn_send_complete(c);
     }
@@ -1072,27 +1072,27 @@ KlConnState kl_conn_on_writable(KlConn *c) {
  * Thin non-static handles onto the static helpers above, so the IOCP completion
  * driver can reuse the exact parse→route→handle→lifecycle core after a completed
  * WSARecv, without the readiness transport wrapper and without connection.c
- * learning which event model produced the bytes. kl_conn_on_readable is unchanged
+ * learning which event model produced the bytes. kl_http_conn_on_readable is unchanged
  * (still calls the statics directly), so the readiness path stays byte-identical.
  * See conn_internal.h / docs/phase8_iocp_design.md §4. */
-KlConnState kl_conn_dispatch_request(KlConn *c, KlRouter *router,
+KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlRouter *router,
                                      const char *leftover, size_t leftover_len) {
     return conn_dispatch_request(c, router, leftover, leftover_len);
 }
 
-KlConnState kl_conn_run_post_body(KlConn *c, KlRouter *router) {
+KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlRouter *router) {
     return conn_run_post_middleware_and_handle(c, router);
 }
 
 /* PAL Phase 8b-1: the model-blind request-body core. Feed `nread` freshly-received
  * bytes (already in read_buf[0..nread]) to the chunked decoder / body reader, apply
  * limits, honor streaming-handler transitions. Returns the next state
- * (KL_CONN_READING_BODY = need more bytes). kl_conn_on_readable calls this inline
+ * (KL_HTTP_CONN_READING_BODY = need more bytes). kl_http_conn_on_readable calls this inline
  * after a recv (byte-identical); the completion driver calls it after a WSARecv —
  * same core, no event model leaked in. */
-KlConnState kl_conn_ingest_body(KlConn *c, size_t nread) {
+KlHttpConnState kl_http_conn_ingest_body(KlHttpConn *c, size_t nread) {
     if (c->req.chunked) {
-        int rc = kl_chunked_decode(&c->chunked_dec, c->stream.read_buf, nread,
+        int rc = kl_http1_chunked_decode(&c->chunked_dec, c->stream.read_buf, nread,
                                    c->req.body_reader);
         if (rc < 0) {
             if (c->req.body_reader)
@@ -1101,20 +1101,20 @@ KlConnState kl_conn_ingest_body(KlConn *c, size_t nread) {
              * instead of clobbering it with 413. Force keep-alive off (unread body
              * would bleed into the next request). */
             if (c->route && c->route->streaming_handler &&
-                (c->state == KL_CONN_SENDING || c->state == KL_CONN_CLOSED)) {
+                (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED)) {
                 c->req.keep_alive = 0;
                 c->res.keep_alive = 0;
                 return c->state;
             }
             best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
         /* Discard-path chunked limit */
         if (!c->req.body_reader && c->max_body_size > 0 &&
             c->chunked_dec.total_body > c->max_body_size) {
             best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
-            c->state = KL_CONN_CLOSED;
+            c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
         if (rc == 1) {
@@ -1128,51 +1128,51 @@ KlConnState kl_conn_ingest_body(KlConn *c, size_t nread) {
         }
         /* Mid-stream transitions from streaming handlers: honor the chosen state. */
         if (c->route && c->route->streaming_handler) {
-            if (c->state == KL_CONN_SUSPENDED)
+            if (c->state == KL_HTTP_CONN_SUSPENDED)
                 return c->state;
-            if (c->state == KL_CONN_SENDING || c->state == KL_CONN_CLOSED) {
+            if (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED) {
                 c->req.keep_alive = 0;
                 c->res.keep_alive = 0;
                 return c->state;
             }
         }
-        return KL_CONN_READING_BODY;
+        return KL_HTTP_CONN_READING_BODY;
     }
 
     /* Content-Length body — parser path */
     size_t consumed = 0;
-    KlParseResult pr = c->parser->parse(c->parser, &c->req,
+    KlHttp1ParseResult pr = c->parser->parse(c->parser, &c->req,
                                         c->stream.read_buf, nread, &consumed);
-    if (pr == KL_PARSE_ERROR) {
+    if (pr == KL_HTTP1_PARSE_ERROR) {
         if (c->req.body_reader)
             c->req.body_reader->on_error(c->req.body_reader);
         if (c->route && c->route->streaming_handler &&
-            (c->state == KL_CONN_SENDING || c->state == KL_CONN_CLOSED)) {
+            (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED)) {
             c->req.keep_alive = 0;
             c->res.keep_alive = 0;
             return c->state;
         }
         best_effort_conn_write(c, kl_413_response, sizeof(kl_413_response) - 1);
-        c->state = KL_CONN_CLOSED;
+        c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
-    if (pr == KL_PARSE_OK) {
+    if (pr == KL_HTTP1_PARSE_OK) {
         if (c->route && c->route->streaming_handler)
             return c->state;
         return conn_run_post_middleware_and_handle(c, c->router);
     }
     if (c->route && c->route->streaming_handler) {
-        if (c->state == KL_CONN_SUSPENDED)
+        if (c->state == KL_HTTP_CONN_SUSPENDED)
             return c->state;
-        if (c->state == KL_CONN_SENDING || c->state == KL_CONN_CLOSED) {
+        if (c->state == KL_HTTP_CONN_SENDING || c->state == KL_HTTP_CONN_CLOSED) {
             c->req.keep_alive = 0;
             c->res.keep_alive = 0;
             return c->state;
         }
     }
-    return KL_CONN_READING_BODY;
+    return KL_HTTP_CONN_READING_BODY;
 }
 
-KlConnState kl_conn_send_complete(KlConn *c) {
+KlHttpConnState kl_http_conn_send_complete(KlHttpConn *c) {
     return conn_send_complete(c);
 }

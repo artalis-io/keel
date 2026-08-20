@@ -57,10 +57,10 @@ int         kl_version_number(void);
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <keel/url.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/http_request.h>
 #include <keel/body_reader.h>
-#include <keel/chunked.h>
+#include <keel/http1_chunked.h>
 #include <keel/drain.h>
 #include <keel/tls.h>
 #include <keel/h2.h>
