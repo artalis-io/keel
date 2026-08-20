@@ -6,13 +6,13 @@
  * (max streams, window size) live in h2.h.
  */
 
-#ifndef KEEL_H2_SERVER_H
-#define KEEL_H2_SERVER_H
+#ifndef KEEL_HTTP2_SERVER_H
+#define KEEL_HTTP2_SERVER_H
 
 #include <stddef.h>
 #include <stdint.h>
 #include <keel/handle.h>   /* kl_ssize_t */
-#include <keel/h2.h>
+#include <keel/http2.h>
 #include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <keel/http_body_reader.h>
@@ -20,15 +20,15 @@
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
-typedef struct KlH2ServerSession KlH2ServerSession;
-typedef struct KlH2ServerCallbacks KlH2ServerCallbacks;
-typedef struct KlH2ServerStream KlH2ServerStream;
-typedef struct KlH2ServerConn KlH2ServerConn;
+typedef struct KlHttp2ServerSession KlHttp2ServerSession;
+typedef struct KlHttp2ServerCallbacks KlHttp2ServerCallbacks;
+typedef struct KlHttp2ServerStream KlHttp2ServerStream;
+typedef struct KlHttp2ServerConn KlHttp2ServerConn;
 typedef struct KlHttpConn KlHttpConn;
 
-/* ── KlH2ServerCallbacks — KEEL provides these to the session ────── */
+/* ── KlHttp2ServerCallbacks — KEEL provides these to the session ────── */
 
-struct KlH2ServerCallbacks {
+struct KlHttp2ServerCallbacks {
     int (*on_request)(void *ud, uint32_t stream_id,
                       const char *method, size_t method_len,
                       const char *path, size_t path_len,
@@ -46,7 +46,7 @@ struct KlH2ServerCallbacks {
      * Write data to the network.  May return short — `< len` bytes
      * written — under socket backpressure.  The session library MUST
      * handle short returns by re-queuing the un-written tail and
-     * retrying on the next @ref KlH2ServerSession::flush call.  A
+     * retrying on the next @ref KlHttp2ServerSession::flush call.  A
      * session implementation that assumes "send always writes
      * everything" will silently truncate HTTP/2 frames under load,
      * which the peer then rejects with PROTOCOL_ERROR or
@@ -59,20 +59,20 @@ struct KlH2ServerCallbacks {
     kl_ssize_t (*send)(void *ud, const void *data, size_t len);
 };
 
-/* ── KlH2ServerSession — user-provided vtable ───────────────────── */
+/* ── KlHttp2ServerSession — user-provided vtable ───────────────────── */
 
-struct KlH2ServerSession {
-    kl_ssize_t (*recv)(KlH2ServerSession *self, const void *data,
+struct KlHttp2ServerSession {
+    kl_ssize_t (*recv)(KlHttp2ServerSession *self, const void *data,
                        size_t len);                /**< Feed received network data. */
-    int (*submit_response)(KlH2ServerSession *self, uint32_t stream_id,
+    int (*submit_response)(KlHttp2ServerSession *self, uint32_t stream_id,
                            int status, const char **hdr_names,
                            const char **hdr_values, int num_headers,
                            const void *body, size_t body_len);
                                                    /**< Submit a response for a stream. */
-    int (*want_write)(KlH2ServerSession *self);    /**< Returns non-zero if output is pending. */
-    int (*flush)(KlH2ServerSession *self);         /**< Flush pending output via send callback. */
-    int (*shutdown)(KlH2ServerSession *self);      /**< Initiate graceful GOAWAY. */
-    void (*destroy)(KlH2ServerSession *self);      /**< Free session resources. */
+    int (*want_write)(KlHttp2ServerSession *self);    /**< Returns non-zero if output is pending. */
+    int (*flush)(KlHttp2ServerSession *self);         /**< Flush pending output via send callback. */
+    int (*shutdown)(KlHttp2ServerSession *self);      /**< Initiate graceful GOAWAY. */
+    void (*destroy)(KlHttp2ServerSession *self);      /**< Free session resources. */
     /**
      * Optional (may be NULL): returns non-zero while the session still wants to
      * read more input. When a session provides it, KEEL closes the connection
@@ -81,46 +81,46 @@ struct KlH2ServerSession {
      * shutdown). A NULL want_read keeps the connection open until the peer
      * closes (legacy behavior).
      */
-    int (*want_read)(KlH2ServerSession *self);
+    int (*want_read)(KlHttp2ServerSession *self);
 };
 
 /* ── Factory ─────────────────────────────────────────────────────── */
 
 /** @brief Factory for creating server-side HTTP/2 sessions. */
-typedef KlH2ServerSession *(*KlH2ServerSessionFactory)(KlAllocator *alloc,
-                                                        KlH2ServerCallbacks *callbacks,
+typedef KlHttp2ServerSession *(*KlHttp2ServerSessionFactory)(KlAllocator *alloc,
+                                                        KlHttp2ServerCallbacks *callbacks,
                                                         void *user_data);
 
 /* ── Config ──────────────────────────────────────────────────────── */
 
-typedef struct KlH2ServerConfig {
-    KlH2ServerSessionFactory factory; /**< Session factory (required). */
-    int max_concurrent_streams;  /**< 0 = KL_H2_DEFAULT_MAX_STREAMS */
-    int initial_window_size;     /**< 0 = KL_H2_DEFAULT_WINDOW_SIZE */
-} KlH2ServerConfig;
+typedef struct KlHttp2ServerConfig {
+    KlHttp2ServerSessionFactory factory; /**< Session factory (required). */
+    int max_concurrent_streams;  /**< 0 = KL_HTTP2_DEFAULT_MAX_STREAMS */
+    int initial_window_size;     /**< 0 = KL_HTTP2_DEFAULT_WINDOW_SIZE */
+} KlHttp2ServerConfig;
 
-/* Per-stream (KlH2ServerStream) and per-connection (KlH2ServerConn) state are opaque —
- * their bodies are internal (src/h2_internal.h). Users interact with HTTP/2 only through
- * the KlH2ServerSession vtable + KlH2ServerConfig above; the connection is passed to the
+/* Per-stream (KlHttp2ServerStream) and per-connection (KlHttp2ServerConn) state are opaque —
+ * their bodies are internal (src/http2_internal.h). Users interact with HTTP/2 only through
+ * the KlHttp2ServerSession vtable + KlHttp2ServerConfig above; the connection is passed to the
  * session callbacks as an opaque void*. Keeping the bodies out of this public header lets
  * KEEL evolve internal h2 state (buffering seams, etc.) without a public-API change. */
 
 /* ── Internal functions (used by connection.c, server.c) ─────────── */
 
 /** @brief Upgrade a connection to HTTP/2 (direct h2c). */
-int  kl_h2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *cfg,
+int  kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerConfig *cfg,
                            const char *leftover, size_t leftover_len);
 /** @brief Upgrade a connection to HTTP/2 from an HTTP/1.1 Upgrade request. */
-int  kl_h2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
-                                   KlH2ServerConfig *cfg,
+int  kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
+                                   KlHttp2ServerConfig *cfg,
                                    const char *leftover, size_t leftover_len);
 /** @brief Handle readable event on an HTTP/2 connection. */
-int  kl_h2_server_on_readable(KlHttpConn *c);
+int  kl_http2_server_on_readable(KlHttpConn *c);
 /** @brief Handle writable event on an HTTP/2 connection. */
-int  kl_h2_server_on_writable(KlHttpConn *c);
+int  kl_http2_server_on_writable(KlHttpConn *c);
 /** @brief Initiate graceful GOAWAY drain on an HTTP/2 connection. */
-void kl_h2_server_drain_shutdown(KlHttpConn *c);
+void kl_http2_server_drain_shutdown(KlHttpConn *c);
 /** @brief Clean up all HTTP/2 state for a connection. */
-void kl_h2_server_cleanup(KlHttpConn *c);
+void kl_http2_server_cleanup(KlHttpConn *c);
 
 #endif

@@ -4,7 +4,7 @@
 #include <keel/event.h>
 #include <keel/tls.h>
 #include <keel/websocket_server.h>
-#include <keel/h2_server.h>
+#include <keel/http2_server.h>
 #include <keel/proxy_protocol.h>
 #include "http_conn_internal.h"
 #include "http_proto_hooks.h"        /* ws/h2 upgrade seam — core never names ws/h2 directly */
@@ -15,7 +15,7 @@
  * raw errno, so this TU carries no errno symbol into the freestanding archive. */
 #include <stdint.h>
 #include "internal.h"
-#include "h2_internal.h"
+#include "http2_internal.h"
 #include "socket.h"
 
 /* Socket provider for this connection's fd — via the raw KlStream seam (step 6B-2). NULL (POSIX
@@ -153,7 +153,7 @@ void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
     /* WebSocket / HTTP-2 cleanup via the per-protocol upgrade seam (no-op when the
      * module isn't linked — e.g. a freestanding HTTP/1.1 server). */
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
-    const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+    const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     if (wsh && wsh->cleanup) wsh->cleanup(c);
     if (h2h && h2h->cleanup) h2h->cleanup(c);
 
@@ -189,7 +189,7 @@ void kl_http_conn_pool_free(KlHttpConnPool *pool) {
     if (pool->conns) {
         /* Close any active connections */
         const KlWsServerHooks *wsh = kl_ws_server_hooks();
-        const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+        const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
         for (int i = 0; i < pool->capacity; i++) {
             if (wsh && wsh->cleanup) wsh->cleanup(&pool->conns[i]);
             if (h2h && h2h->cleanup) h2h->cleanup(&pool->conns[i]);
@@ -381,7 +381,7 @@ KlHttpConnState kl_http_conn_on_handshake(KlHttpConn *c) {
             /* Check ALPN for HTTP/2 negotiation */
             if (c->h2_config && c->tls->alpn_protocol) {
                 const char *proto = c->tls->alpn_protocol(c->tls);
-                const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+                const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
                 if (proto && proto[0] == 'h' && proto[1] == '2' &&
                     proto[2] == '\0' && h2h && h2h->upgrade) {
                     int hr = h2h->upgrade(c, c->router, c->h2_config,
@@ -563,7 +563,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router
         size_t ug_len;
         const char *ug = kl_http_request_header_len(
             &c->req, "Upgrade", &ug_len);
-        const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+        const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
         if (ug && ug_len == 3 &&
             kl_ascii_strncasecmp(ug, "h2c", 3) == 0 && h2h && h2h->upgrade_from_h1) {
             c->state = (KlHttpConnState)h2h->upgrade_from_h1(
@@ -843,7 +843,7 @@ read_more_headers: ;
                      * session's HTTP/2 engine consumes the client connection
                      * preface itself, matching the ALPN-h2 and h2c-Upgrade paths
                      * where the magic arrives on the stream normally. */
-                    const KlH2ServerHooks *h2hp = kl_h2_server_hooks();
+                    const KlHttp2ServerHooks *h2hp = kl_http2_server_hooks();
                     if (!h2hp || !h2hp->upgrade)
                         return c->state;   /* HTTP/2 not linked — stay HTTP/1.1 */
                     c->state = (KlHttpConnState)h2hp->upgrade(

@@ -1,5 +1,5 @@
 /*
- * h2_nghttp2_client.c — client-side KlH2ClientSession backed by nghttp2.
+ * h2_nghttp2_client.c — client-side KlHttp2ClientSession backed by nghttp2.
  *
  * Maps the KEEL client session vtable (recv / submit_request / flush / destroy)
  * onto an nghttp2 client session, and nghttp2's receive callbacks back onto the
@@ -23,7 +23,7 @@
 /* ── Session + per-stream state ─────────────────────────────────────── */
 
 typedef struct {
-    KlH2ClientSession base;      /* must be first — vtable the driver sees */
+    KlHttp2ClientSession base;      /* must be first — vtable the driver sees */
     KlAllocator      *alloc;
     nghttp2_session  *ng;
 } NgClientSession;
@@ -31,7 +31,7 @@ typedef struct {
 typedef struct {
     KlAllocator      *alloc;
     int               status;
-    KlH2ClientHeader *hdrs;      /* accumulated response headers (dup'd) */
+    KlHttp2ClientHeader *hdrs;      /* accumulated response headers (dup'd) */
     int               n;
     int               cap;
     char             *body;      /* copy of the request body (or NULL) */
@@ -74,7 +74,7 @@ static int ng_stream_add_header(NgClientStream *st,
     if (st->n == st->cap) {
         int ncap = st->cap ? st->cap * 2 : 8;
         if ((size_t)ncap > SIZE_MAX / sizeof(*st->hdrs)) return -1;
-        KlH2ClientHeader *nh = kl_realloc(st->alloc, st->hdrs,
+        KlHttp2ClientHeader *nh = kl_realloc(st->alloc, st->hdrs,
                                           (size_t)st->cap * sizeof(*st->hdrs),
                                           (size_t)ncap * sizeof(*st->hdrs));
         if (!nh) return -1;
@@ -173,21 +173,21 @@ static ssize_t ng_body_read_cb(nghttp2_session *ng, int32_t stream_id,
 
 /* ── KEEL vtable ────────────────────────────────────────────────────── */
 
-static int ng_client_recv(KlH2ClientSession *self, const char *data, size_t len) {
+static int ng_client_recv(KlHttp2ClientSession *self, const char *data, size_t len) {
     NgClientSession *s = (NgClientSession *)self;
     ssize_t r = nghttp2_session_mem_recv(s->ng, (const uint8_t *)data, len);
     return r < 0 ? -1 : (int)r;
 }
 
-static int ng_client_flush(KlH2ClientSession *self) {
+static int ng_client_flush(KlHttp2ClientSession *self) {
     NgClientSession *s = (NgClientSession *)self;
     return nghttp2_session_send(s->ng) == 0 ? 0 : -1;
 }
 
-static int32_t ng_client_submit(KlH2ClientSession *self,
+static int32_t ng_client_submit(KlHttp2ClientSession *self,
                                 const char *method, const char *path,
                                 const char *authority,
-                                const KlH2ClientHeader *hdrs, int n,
+                                const KlHttp2ClientHeader *hdrs, int n,
                                 const char *body, size_t body_len) {
     NgClientSession *s = (NgClientSession *)self;
 
@@ -240,7 +240,7 @@ static int32_t ng_client_submit(KlH2ClientSession *self,
     return sid;
 }
 
-static void ng_client_destroy(KlH2ClientSession *self) {
+static void ng_client_destroy(KlHttp2ClientSession *self) {
     NgClientSession *s = (NgClientSession *)self;
     if (!s) return;
     if (s->ng) nghttp2_session_del(s->ng);
@@ -249,7 +249,7 @@ static void ng_client_destroy(KlH2ClientSession *self) {
 
 /* ── Factory ────────────────────────────────────────────────────────── */
 
-KlH2ClientSession *kl_h2_nghttp2_client_session(KlAllocator *alloc) {
+KlHttp2ClientSession *kl_http2_nghttp2_client_session(KlAllocator *alloc) {
     NgClientSession *s = kl_malloc(alloc, sizeof(*s));
     if (!s) return NULL;
     memset(s, 0, sizeof(*s));

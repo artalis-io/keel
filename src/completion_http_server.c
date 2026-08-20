@@ -382,7 +382,7 @@ static int comp_try_reading(struct KlHttpServer *s, KlHttpConn *c) {
      * into h2 by sending the 24-byte preface; upgrade and feed the leftover. */
     if (c->h2_config != NULL) {
         static const char h2_preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+        const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
         if (c->stream.read_len >= 24 && h2h && h2h->upgrade) {
             if (memcmp(c->stream.read_buf, h2_preface, 24) == 0) {
                 KlHttpConnState st = (KlHttpConnState)h2h->upgrade(
@@ -431,7 +431,7 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
     /* Upgraded connections drive through the completion-drive seam (NULL in a
      * freestanding HTTP/1.1 build, which never reaches these states). */
     if (c->state == KL_HTTP_CONN_HTTP2) {
-        const KlH2CompHooks *h2c = kl_h2_comp_hooks();
+        const KlHttp2CompHooks *h2c = kl_http2_comp_hooks();
         if (h2c && h2c->drive) h2c->drive(s, c);       /* ALPN h2 (8d-1) */
         return;
     }
@@ -450,7 +450,7 @@ static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
         }
         if (st == KL_HTTP_CONN_HTTP2) {                     /* ALPN h2 — SETTINGS flushed above */
             c->stream.read_len = 0;
-            const KlH2CompHooks *h2c = kl_h2_comp_hooks();
+            const KlHttp2CompHooks *h2c = kl_http2_comp_hooks();
             if (h2c && h2c->drive) h2c->drive(s, c);   /* process any buffered h2 frames */
             return;
         }
@@ -529,7 +529,7 @@ static void comp_setup_accepted(struct KlHttpServer *s, KlSocketHandle fd,
 
     /* HTTP/2 over the completion loop is supported (8d-1): h2_config is left intact, so
      * kl_http_conn_on_handshake may run the ALPN-h2 upgrade and comp_tls_drive / comp_after_
-     * state route KL_HTTP_CONN_HTTP2 to kl_comp_h2_drive. (8c-4 cleared h2_config here as a
+     * state route KL_HTTP_CONN_HTTP2 to kl_comp_http2_drive. (8c-4 cleared h2_config here as a
      * well-defined refusal before the driver existed; that clear is now removed.) */
 
     /* TLS needs the backend's memory-BIO ops (feed_input/drain_output) on a completion loop —
@@ -628,7 +628,7 @@ static void comp_on_accept(struct KlHttpServer *s, const KlCompletionEvent *ev) 
     static int comp_hooks_done = 0;
     if (!comp_hooks_done) {
         kl_ws_comp_hooks_install();
-        kl_h2_comp_hooks_install();
+        kl_http2_comp_hooks_install();
         comp_hooks_done = 1;
     }
 #endif
@@ -716,7 +716,7 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     /* Body reads use a fresh sliding window (read_len was reset to 0 before the
      * post), so read_len == the bytes just received. Headers accumulate. */
     if (c->state == KL_HTTP_CONN_HTTP2) {
-        const KlH2CompHooks *h2c = kl_h2_comp_hooks();
+        const KlHttp2CompHooks *h2c = kl_http2_comp_hooks();
         if (h2c && h2c->drive) h2c->drive(s, c);   /* plaintext h2 (h2c) frames (8d-1) */
     }
     else if (c->state == KL_HTTP_CONN_WEBSOCKET) {

@@ -63,8 +63,8 @@ int         kl_version_number(void);
 #include <keel/http1_chunked.h>
 #include <keel/drain.h>
 #include <keel/tls.h>
-#include <keel/h2.h>
-#include <keel/h2_client.h>
+#include <keel/http2.h>
+#include <keel/http2_client.h>
 #include <keel/http_response.h>
 #include <keel/file_io.h>
 

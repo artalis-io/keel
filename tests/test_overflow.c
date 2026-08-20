@@ -11,9 +11,9 @@
 #include <keel/http_body_reader.h>
 #include <keel/http_body_reader_multipart.h>
 #include <keel/websocket.h>
-#include <keel/h2.h>
-#include <keel/h2_server.h>
-#include "../src/h2_internal.h"
+#include <keel/http2.h>
+#include <keel/http2_server.h>
+#include "../src/http2_internal.h"
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
@@ -388,11 +388,11 @@ UTEST(overflow, body_reader_buffer_max_size) {
 /* ── H2 struct size sanity ───────────────────────────────────────── */
 
 UTEST(overflow, h2_stream_alloc_guard) {
-    /* h2.c:463 — verify SIZE_MAX / sizeof(KlH2ServerStream) is bounded */
-    ASSERT_TRUE(sizeof(KlH2ServerStream) > 0);
-    size_t max_safe = SIZE_MAX / sizeof(KlH2ServerStream);
+    /* h2.c:463 — verify SIZE_MAX / sizeof(KlHttp2ServerStream) is bounded */
+    ASSERT_TRUE(sizeof(KlHttp2ServerStream) > 0);
+    size_t max_safe = SIZE_MAX / sizeof(KlHttp2ServerStream);
     ASSERT_TRUE(max_safe > 0);
-    ASSERT_TRUE(max_safe <= SIZE_MAX / sizeof(KlH2ServerStream));
+    ASSERT_TRUE(max_safe <= SIZE_MAX / sizeof(KlHttp2ServerStream));
 }
 
 UTEST_MAIN();

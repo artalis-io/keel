@@ -17,7 +17,7 @@
 
 /* Drive an established WebSocket connection over the completion loop (8e-1). Feed
  * received bytes to the transport-agnostic WS frame core (kl_ws_server_on_readable_data,
- * the analogue of kl_h2_server_feed); its callbacks emit frames through conn_write — the
+ * the analogue of kl_http2_server_feed); its callbacks emit frames through conn_write — the
  * memory-BIO out ring for TLS — which we flush (plus any drain-buffered output). Reuses
  * the WS core + KlTls vtable verbatim: no WebSocket-protocol code and no IOCP/pollcomp
  * symbol appears here, so the completion axis stays out of the WS layer entirely. */

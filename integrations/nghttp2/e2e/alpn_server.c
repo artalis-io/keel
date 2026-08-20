@@ -73,7 +73,7 @@ int main(void) {
 
     KlTlsConfig tls = { .ctx = ctx, .factory = kl_tls_mbedtls_create,
                         .ctx_destroy = kl_tls_mbedtls_ctx_destroy };
-    KlH2ServerConfig h2 = { .factory = kl_h2_nghttp2_server_session };
+    KlHttp2ServerConfig h2 = { .factory = kl_http2_nghttp2_server_session };
     KlHttpServerConfig cfg = { .port = ALPN_PORT, .bind_addr = "127.0.0.1",
                      .tls = &tls, .h2 = &h2 };
 

@@ -76,9 +76,9 @@ int kl_version_number(void);
 #include <keel/http_response.h>
 #include <keel/http_router.h>
 #include <keel/tls.h>
-#include <keel/h2.h>
-#include <keel/h2_server.h>
-#include <keel/h2_client.h>
+#include <keel/http2.h>
+#include <keel/http2_server.h>
+#include <keel/http2_client.h>
 #include <keel/file_io.h>
 #include <keel/http_connection.h>
 #include <keel/http_server.h>

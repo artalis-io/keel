@@ -53,7 +53,7 @@ int  kl_comp_tls_drain_output(KlHttpConn *c, unsigned char **out, size_t *outlen
 /* ── the h2/ws drive functions the server dispatch calls ─────────────────── */
 
 /* Drive an established HTTP/2 connection over the completion loop. */
-void kl_comp_h2_drive(struct KlHttpServer *s, KlHttpConn *c);
+void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c);
 
 /* Drive an established WebSocket connection over the completion loop. */
 void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c);

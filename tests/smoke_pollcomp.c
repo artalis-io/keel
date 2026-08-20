@@ -118,15 +118,15 @@ static void udp_echo(void *ud, const void *data, size_t len,
  * (comp_h2_drive) end-to-end over pollcomp — feed received bytes → session → drain output
  * → send — without a real h2 stack. Entered via an h2c Upgrade (8d-1). */
 typedef struct {
-    KlH2ServerSession   base;
-    KlH2ServerCallbacks cb;
+    KlHttp2ServerSession   base;
+    KlHttp2ServerCallbacks cb;
     void               *cb_ud;
     KlAllocator        *alloc;
     char                pending[256];
     size_t              pending_len;
 } EchoH2;
 
-static kl_ssize_t echo_recv(KlH2ServerSession *self, const void *data, size_t len) {
+static kl_ssize_t echo_recv(KlHttp2ServerSession *self, const void *data, size_t len) {
     EchoH2 *e = (EchoH2 *)self;
     if (len > 0) {
         size_t n = len < sizeof(e->pending) ? len : sizeof(e->pending);
@@ -135,23 +135,23 @@ static kl_ssize_t echo_recv(KlH2ServerSession *self, const void *data, size_t le
     }
     return (ssize_t)len;
 }
-static int echo_want_write(KlH2ServerSession *self) { return ((EchoH2 *)self)->pending_len > 0; }
-static int echo_flush(KlH2ServerSession *self) {
+static int echo_want_write(KlHttp2ServerSession *self) { return ((EchoH2 *)self)->pending_len > 0; }
+static int echo_flush(KlHttp2ServerSession *self) {
     EchoH2 *e = (EchoH2 *)self;
     if (e->pending_len > 0) { e->cb.send(e->cb_ud, e->pending, e->pending_len); e->pending_len = 0; }
     return 0;
 }
-static int echo_submit(KlH2ServerSession *self, uint32_t sid, int status,
+static int echo_submit(KlHttp2ServerSession *self, uint32_t sid, int status,
                        const char **hn, const char **hv, int nh, const void *body, size_t bl) {
     (void)self; (void)sid; (void)status; (void)hn; (void)hv; (void)nh; (void)body; (void)bl;
     return 0;
 }
-static int echo_shutdown(KlH2ServerSession *self) { (void)self; return 0; }
-static void echo_destroy(KlH2ServerSession *self) {
+static int echo_shutdown(KlHttp2ServerSession *self) { (void)self; return 0; }
+static void echo_destroy(KlHttp2ServerSession *self) {
     EchoH2 *e = (EchoH2 *)self;
     kl_free(e->alloc, e, sizeof(*e));
 }
-static KlH2ServerSession *echo_factory(KlAllocator *alloc, KlH2ServerCallbacks *cb, void *ud) {
+static KlHttp2ServerSession *echo_factory(KlAllocator *alloc, KlHttp2ServerCallbacks *cb, void *ud) {
     EchoH2 *e = kl_malloc(alloc, sizeof(*e));
     if (!e) return NULL;
     memset(e, 0, sizeof(*e));
@@ -568,7 +568,7 @@ int main(void) {
     int proxy_ok = proxy_over_completion_ok();
     int backlog_ok = backlog_exhaustion_queues_not_drops();
 
-    static KlH2ServerConfig h2cfg = { .factory = echo_factory };
+    static KlHttp2ServerConfig h2cfg = { .factory = echo_factory };
     KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_pollcomp(), .h2 = &h2cfg,
                      .read_timeout_ms = 400 };   /* short, to exercise the idle sweep */

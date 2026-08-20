@@ -3,12 +3,12 @@
  *
  * State machine: CONNECTING -> TLS_HANDSHAKE -> H2_INIT -> ACTIVE -> CLOSED
  *
- * Uses the pluggable KlH2ClientSession vtable so the actual HTTP/2
+ * Uses the pluggable KlHttp2ClientSession vtable so the actual HTTP/2
  * framing can be backed by nghttp2 or any other library. Tests use
  * a mock session — no nghttp2 dependency.
  */
 
-#include <keel/h2_client.h>
+#include <keel/http2_client.h>
 #include <keel/url.h>
 
 #include <errno.h>
@@ -34,25 +34,25 @@ typedef enum {
 
 /* ── Per-stream tracking ────────────────────────────────────────── */
 
-struct KlH2ClientStream {
+struct KlHttp2ClientStream {
     int32_t                stream_id;
-    KlH2ClientResponse     resp;
-    KlH2ClientResponseFn   on_resp;
+    KlHttp2ClientResponse     resp;
+    KlHttp2ClientResponseFn   on_resp;
     void                  *user_data;
-    KlH2ClientStream      *next;
+    KlHttp2ClientStream      *next;
 };
 
 /* ── Connection struct ──────────────────────────────────────────── */
 
-struct KlH2ClientConn {
+struct KlHttp2ClientConn {
     KlSocketHandle         fd;
     H2cState               state;
     KlEventCtx            *ev;
     KlAllocator           *alloc;
 
     /* Session */
-    KlH2ClientSession     *session;
-    KlH2ClientConfig       cfg;
+    KlHttp2ClientSession     *session;
+    KlHttp2ClientConfig       cfg;
     char                   host_buf[256];
     char                   authority[280];
 
@@ -60,30 +60,30 @@ struct KlH2ClientConn {
     KlTls                 *tls;
 
     /* Streams */
-    KlH2ClientStream      *streams;
+    KlHttp2ClientStream      *streams;
     int                    num_streams;
 
     /* Callbacks */
-    KlH2ClientErrorFn      on_error;
+    KlHttp2ClientErrorFn      on_error;
     void                  *user_data;
 };
 
 /* ── Forward declarations ───────────────────────────────────────── */
 
 static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data);
-static void h2c_error(KlH2ClientConn *c, const char *msg);
-static void h2c_close_connection(KlH2ClientConn *c);
+static void h2c_error(KlHttp2ClientConn *c, const char *msg);
+static void h2c_close_connection(KlHttp2ClientConn *c);
 
 /* ── I/O abstraction ───────────────────────────────────────────── */
 
-static ssize_t h2c_write(KlH2ClientConn *c, const void *buf, size_t len)
+static ssize_t h2c_write(KlHttp2ClientConn *c, const void *buf, size_t len)
 {
     if (c->tls)
         return c->tls->write(c->tls, c->fd, buf, len);
     return kl_sock_send(c->ev->sockets, c->fd, buf, len);
 }
 
-static ssize_t h2c_read(KlH2ClientConn *c, void *buf, size_t len)
+static ssize_t h2c_read(KlHttp2ClientConn *c, void *buf, size_t len)
 {
     if (c->tls)
         return c->tls->read(c->tls, c->fd, buf, len);
@@ -92,26 +92,26 @@ static ssize_t h2c_read(KlH2ClientConn *c, void *buf, size_t len)
 
 /* ── Stream tracking ────────────────────────────────────────────── */
 
-static KlH2ClientStream *h2c_stream_find(KlH2ClientConn *c, int32_t stream_id)
+static KlHttp2ClientStream *h2c_stream_find(KlHttp2ClientConn *c, int32_t stream_id)
 {
-    for (KlH2ClientStream *s = c->streams; s; s = s->next) {
+    for (KlHttp2ClientStream *s = c->streams; s; s = s->next) {
         if (s->stream_id == stream_id)
             return s;
     }
     return NULL;
 }
 
-static KlH2ClientStream *h2c_stream_create(KlH2ClientConn *c, int32_t stream_id,
-                                             KlH2ClientResponseFn on_resp,
+static KlHttp2ClientStream *h2c_stream_create(KlHttp2ClientConn *c, int32_t stream_id,
+                                             KlHttp2ClientResponseFn on_resp,
                                              void *user_data)
 {
     int max = c->cfg.max_concurrent_streams > 0
                   ? c->cfg.max_concurrent_streams
-                  : KL_H2_DEFAULT_MAX_STREAMS;
+                  : KL_HTTP2_DEFAULT_MAX_STREAMS;
     if (c->num_streams >= max)
         return NULL;
 
-    KlH2ClientStream *s = kl_malloc(c->alloc, sizeof(KlH2ClientStream));
+    KlHttp2ClientStream *s = kl_malloc(c->alloc, sizeof(KlHttp2ClientStream));
     if (!s) return NULL;
     memset(s, 0, sizeof(*s));
 
@@ -124,18 +124,18 @@ static KlH2ClientStream *h2c_stream_create(KlH2ClientConn *c, int32_t stream_id,
     return s;
 }
 
-static void h2c_stream_remove(KlH2ClientConn *c, int32_t stream_id)
+static void h2c_stream_remove(KlHttp2ClientConn *c, int32_t stream_id)
 {
-    KlH2ClientStream **pp = &c->streams;
+    KlHttp2ClientStream **pp = &c->streams;
     while (*pp) {
         if ((*pp)->stream_id == stream_id) {
-            KlH2ClientStream *s = *pp;
+            KlHttp2ClientStream *s = *pp;
             *pp = s->next;
             c->num_streams--;
 
             /* Free accumulated response */
-            kl_h2_client_response_free(&s->resp, c->alloc);
-            kl_free(c->alloc, s, sizeof(KlH2ClientStream));
+            kl_http2_client_response_free(&s->resp, c->alloc);
+            kl_free(c->alloc, s, sizeof(KlHttp2ClientStream));
             return;
         }
         pp = &(*pp)->next;
@@ -144,9 +144,9 @@ static void h2c_stream_remove(KlH2ClientConn *c, int32_t stream_id)
 
 /* ── Session callbacks ──────────────────────────────────────────── */
 
-static int h2c_on_send(KlH2ClientSession *s, const void *data, size_t len)
+static int h2c_on_send(KlHttp2ClientSession *s, const void *data, size_t len)
 {
-    KlH2ClientConn *c = s->keel_ctx;
+    KlHttp2ClientConn *c = s->keel_ctx;
     const char *p = (const char *)data;
     size_t sent = 0;
     while (sent < len) {
@@ -162,11 +162,11 @@ static int h2c_on_send(KlH2ClientSession *s, const void *data, size_t len)
     return (int)sent;
 }
 
-static void h2c_on_response(KlH2ClientSession *s, int32_t stream_id,
-                              int status, const KlH2ClientHeader *hdrs, int n)
+static void h2c_on_response(KlHttp2ClientSession *s, int32_t stream_id,
+                              int status, const KlHttp2ClientHeader *hdrs, int n)
 {
-    KlH2ClientConn *c = s->keel_ctx;
-    KlH2ClientStream *st = h2c_stream_find(c, stream_id);
+    KlHttp2ClientConn *c = s->keel_ctx;
+    KlHttp2ClientStream *st = h2c_stream_find(c, stream_id);
     if (!st) return;
 
     st->resp.status = status;
@@ -174,13 +174,13 @@ static void h2c_on_response(KlH2ClientSession *s, int32_t stream_id,
     /* Copy headers */
     if (n > 0 && hdrs) {
         if (n > st->resp.headers_cap) {
-            if ((size_t)n > SIZE_MAX / sizeof(KlH2ClientHeader)) return;
-            size_t sz = (size_t)n * sizeof(KlH2ClientHeader);
-            KlH2ClientHeader *new_hdrs = kl_malloc(c->alloc, sz);
+            if ((size_t)n > SIZE_MAX / sizeof(KlHttp2ClientHeader)) return;
+            size_t sz = (size_t)n * sizeof(KlHttp2ClientHeader);
+            KlHttp2ClientHeader *new_hdrs = kl_malloc(c->alloc, sz);
             if (!new_hdrs) return;
             if (st->resp.headers)
                 kl_free(c->alloc, st->resp.headers,
-                        (size_t)st->resp.headers_cap * sizeof(KlH2ClientHeader));
+                        (size_t)st->resp.headers_cap * sizeof(KlHttp2ClientHeader));
             st->resp.headers = new_hdrs;
             st->resp.headers_cap = n;
         }
@@ -207,11 +207,11 @@ static void h2c_on_response(KlH2ClientSession *s, int32_t stream_id,
     }
 }
 
-static void h2c_on_data(KlH2ClientSession *s, int32_t stream_id,
+static void h2c_on_data(KlHttp2ClientSession *s, int32_t stream_id,
                           const char *data, size_t len)
 {
-    KlH2ClientConn *c = s->keel_ctx;
-    KlH2ClientStream *st = h2c_stream_find(c, stream_id);
+    KlHttp2ClientConn *c = s->keel_ctx;
+    KlHttp2ClientStream *st = h2c_stream_find(c, stream_id);
     if (!st || len == 0) return;
 
     /* Grow body buffer */
@@ -236,11 +236,11 @@ static void h2c_on_data(KlH2ClientSession *s, int32_t stream_id,
     st->resp.body_len += len;
 }
 
-static void h2c_on_stream_close(KlH2ClientSession *s, int32_t stream_id,
+static void h2c_on_stream_close(KlHttp2ClientSession *s, int32_t stream_id,
                                   int err)
 {
-    KlH2ClientConn *c = s->keel_ctx;
-    KlH2ClientStream *st = h2c_stream_find(c, stream_id);
+    KlHttp2ClientConn *c = s->keel_ctx;
+    KlHttp2ClientStream *st = h2c_stream_find(c, stream_id);
     if (!st) return;
 
     /* Deliver response */
@@ -259,7 +259,7 @@ static void h2c_on_stream_close(KlH2ClientSession *s, int32_t stream_id,
  * we must fail rather than send an HTTP/2 preface it cannot parse — no silent
  * protocol switch. A NULL result (the server sent no ALPN) is accepted as
  * prior-knowledge h2, the documented client policy (see docs/alpn_policy.md). */
-static int h2c_alpn_ok(KlH2ClientConn *c)
+static int h2c_alpn_ok(KlHttp2ClientConn *c)
 {
     if (!c->tls || !c->tls->alpn_protocol) return 1;   /* no ALPN → prior knowledge */
     const char *p = c->tls->alpn_protocol(c->tls);
@@ -267,7 +267,7 @@ static int h2c_alpn_ok(KlH2ClientConn *c)
     return (p[0] == 'h' && p[1] == '2' && p[2] == '\0');
 }
 
-static void h2c_handle_connecting(KlH2ClientConn *c)
+static void h2c_handle_connecting(KlHttp2ClientConn *c)
 {
     int err = 0;
     kl_sock_get_so_error(c->ev->sockets, c->fd, &err);
@@ -340,7 +340,7 @@ static void h2c_handle_connecting(KlH2ClientConn *c)
     kl_watcher_mod(c->ev, c->fd, KL_EVENT_READ);
 }
 
-static void h2c_handle_tls_handshake(KlH2ClientConn *c)
+static void h2c_handle_tls_handshake(KlHttp2ClientConn *c)
 {
     KlTlsResult r = c->tls->handshake(c->tls, c->fd);
     if (r == KL_TLS_OK) {
@@ -372,9 +372,9 @@ static void h2c_handle_tls_handshake(KlH2ClientConn *c)
     }
 }
 
-static void h2c_handle_active(KlH2ClientConn *c)
+static void h2c_handle_active(KlHttp2ClientConn *c)
 {
-    char buf[KL_H2_CLIENT_RECV_BUF_SIZE];
+    char buf[KL_HTTP2_CLIENT_RECV_BUF_SIZE];
     ssize_t nread = h2c_read(c, buf, sizeof(buf));
 
     if (nread < 0) {
@@ -409,7 +409,7 @@ static void h2c_handle_active(KlH2ClientConn *c)
 
 static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
-    KlH2ClientConn *c = user_data;
+    KlHttp2ClientConn *c = user_data;
     (void)fd;
     (void)ready;
 
@@ -434,7 +434,7 @@ static void h2c_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 
 /* ── Error + cleanup ────────────────────────────────────────────── */
 
-static void h2c_close_connection(KlH2ClientConn *c)
+static void h2c_close_connection(KlHttp2ClientConn *c)
 {
     if (kl_handle_valid(c->fd)) {
         kl_watcher_del(c->ev, c->fd);
@@ -448,7 +448,7 @@ static void h2c_close_connection(KlH2ClientConn *c)
     }
 }
 
-static void h2c_error(KlH2ClientConn *c, const char *msg)
+static void h2c_error(KlHttp2ClientConn *c, const char *msg)
 {
     c->state = H2C_CLOSED;
     h2c_close_connection(c);
@@ -458,10 +458,10 @@ static void h2c_error(KlH2ClientConn *c, const char *msg)
 
 /* ── Public API ─────────────────────────────────────────────────── */
 
-KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
-                                      const KlH2ClientConfig *cfg,
+KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
+                                      const KlHttp2ClientConfig *cfg,
                                       const char *url,
-                                      KlH2ClientErrorFn on_error,
+                                      KlHttp2ClientErrorFn on_error,
                                       void *user_data)
 {
     if (!ev || !alloc || !cfg || !url || !cfg->session)
@@ -537,7 +537,7 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         }
     }
 
-    KlH2ClientConn *c = kl_malloc(alloc, sizeof(KlH2ClientConn));
+    KlHttp2ClientConn *c = kl_malloc(alloc, sizeof(KlHttp2ClientConn));
     if (!c) {
         kl_sock_close(ev->sockets, fd);
         return NULL;
@@ -563,7 +563,7 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
         c->session = cfg->session(alloc);
         if (!c->session) {
             kl_sock_close(ev->sockets, fd);
-            kl_free(alloc, c, sizeof(KlH2ClientConn));
+            kl_free(alloc, c, sizeof(KlHttp2ClientConn));
             return NULL;
         }
         c->session->keel_cbs.on_send = h2c_on_send;
@@ -578,18 +578,18 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
                        h2c_on_event, c) != 0) {
         if (c->session) c->session->destroy(c->session);
         kl_sock_close(ev->sockets, fd);
-        kl_free(alloc, c, sizeof(KlH2ClientConn));
+        kl_free(alloc, c, sizeof(KlHttp2ClientConn));
         return NULL;
     }
 
     return c;
 }
 
-int32_t kl_h2_client_request(KlH2ClientConn *c, const char *method,
+int32_t kl_http2_client_request(KlHttp2ClientConn *c, const char *method,
                               const char *path,
-                              const KlH2ClientHeader *hdrs, int n,
+                              const KlHttp2ClientHeader *hdrs, int n,
                               const char *body, size_t body_len,
-                              KlH2ClientResponseFn on_resp, void *ud)
+                              KlHttp2ClientResponseFn on_resp, void *ud)
 {
     if (!c || c->state != H2C_ACTIVE || !c->session)
         return -1;
@@ -602,7 +602,7 @@ int32_t kl_h2_client_request(KlH2ClientConn *c, const char *method,
     if (stream_id < 0)
         return -1;
 
-    const KlH2ClientStream *st = h2c_stream_create(c, stream_id, on_resp, ud);
+    const KlHttp2ClientStream *st = h2c_stream_create(c, stream_id, on_resp, ud);
     if (!st)
         return -1;
 
@@ -612,26 +612,26 @@ int32_t kl_h2_client_request(KlH2ClientConn *c, const char *method,
     return stream_id;
 }
 
-void kl_h2_client_close(KlH2ClientConn *c)
+void kl_http2_client_close(KlHttp2ClientConn *c)
 {
     if (!c || c->state == H2C_CLOSED) return;
     c->state = H2C_CLOSED;
     h2c_close_connection(c);
 }
 
-void kl_h2_client_free(KlH2ClientConn *c)
+void kl_http2_client_free(KlHttp2ClientConn *c)
 {
     if (!c) return;
 
     if (c->state != H2C_CLOSED)
-        kl_h2_client_close(c);
+        kl_http2_client_close(c);
 
     /* Free all pending streams */
     while (c->streams) {
-        KlH2ClientStream *s = c->streams;
+        KlHttp2ClientStream *s = c->streams;
         c->streams = s->next;
-        kl_h2_client_response_free(&s->resp, c->alloc);
-        kl_free(c->alloc, s, sizeof(KlH2ClientStream));
+        kl_http2_client_response_free(&s->resp, c->alloc);
+        kl_free(c->alloc, s, sizeof(KlHttp2ClientStream));
     }
 
     if (c->session) {
@@ -640,10 +640,10 @@ void kl_h2_client_free(KlH2ClientConn *c)
     }
 
     KlAllocator *alloc = c->alloc;
-    kl_free(alloc, c, sizeof(KlH2ClientConn));
+    kl_free(alloc, c, sizeof(KlHttp2ClientConn));
 }
 
-void kl_h2_client_response_free(KlH2ClientResponse *resp, KlAllocator *alloc)
+void kl_http2_client_response_free(KlHttp2ClientResponse *resp, KlAllocator *alloc)
 {
     if (!resp || !alloc) return;
 
@@ -657,7 +657,7 @@ void kl_h2_client_response_free(KlH2ClientResponse *resp, KlAllocator *alloc)
                         strlen(resp->headers[i].value) + 1);
         }
         kl_free(alloc, resp->headers,
-                (size_t)resp->headers_cap * sizeof(KlH2ClientHeader));
+                (size_t)resp->headers_cap * sizeof(KlHttp2ClientHeader));
         resp->headers = NULL;
     }
     resp->num_headers = 0;

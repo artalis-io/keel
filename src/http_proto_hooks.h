@@ -8,7 +8,7 @@
  * in server.c) dispatches into the WebSocket and HTTP-2 server modules on upgrade,
  * cleanup, and the drain/idle sweeps. Those modules (server_ws.c / server_h2.c) are
  * OPTIONAL — a freestanding HTTP/1.1 server (UEFI, docs/phase10_uefi_server_design.md
- * §6) links neither. So the core never names kl_ws_server_* / kl_h2_server_* directly;
+ * §6) links neither. So the core never names kl_ws_server_* / kl_http2_server_* directly;
  * it goes through a SEPARATE hook table PER PROTOCOL, registered by that module.
  *
  * One table per protocol (not a merged blob) so each protocol is independently
@@ -19,13 +19,13 @@
  * kl_http_server_init — an explicit reference that both registers the table AND pulls the
  * protocol object out of the static archive (a self-registering constructor alone
  * would be dropped by the linker now that the core no longer names its symbols). A
- * freestanding build never calls them, so kl_ws_server_hooks()/kl_h2_server_hooks()
+ * freestanding build never calls them, so kl_ws_server_hooks()/kl_http2_server_hooks()
  * return NULL and the core stays pure HTTP/1.1 — with NO #ifdef in the shared code.
  */
 
 #include <keel/http_connection.h>   /* KlHttpConn */
 #include <keel/http_router.h>       /* KlHttpRouter */
-#include <keel/h2_server.h>    /* KlH2ServerConfig */
+#include <keel/http2_server.h>    /* KlHttp2ServerConfig */
 #include <keel/proxy_protocol.h> /* KlProxyResult / KlCidr / KlSockAddr (PROXY seam) */
 #include <stddef.h>
 #include <stdint.h>
@@ -52,24 +52,24 @@ void kl_ws_server_hooks_set(const KlWsServerHooks *hooks);
 void kl_ws_server_hooks_install(void);                /* defined in server_ws.c */
 
 /* ── HTTP/2 server upgrade seam ─────────────────────────────────────────────── */
-typedef struct KlH2ServerHooks {
+typedef struct KlHttp2ServerHooks {
     /* ALPN / prior-knowledge upgrade, and the h2c (HTTP/1.1 Upgrade) path. */
-    int  (*upgrade)(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *cfg,
+    int  (*upgrade)(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerConfig *cfg,
                     const char *data, size_t len);
-    int  (*upgrade_from_h1)(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *cfg,
+    int  (*upgrade_from_h1)(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerConfig *cfg,
                             const char *leftover, size_t leftover_len);
     /* Readiness data plane (KL_HTTP_CONN_HTTP2): drive a read/write-ready frame pump; each
-     * returns the next KlHttpConnState as int (readiness counterpart of KlH2CompHooks.drive). */
+     * returns the next KlHttpConnState as int (readiness counterpart of KlHttp2CompHooks.drive). */
     int  (*on_readable)(KlHttpConn *c);
     int  (*on_writable)(KlHttpConn *c);
     int  (*want_write)(const KlHttpConn *c);              /* readiness: arm WRITE interest? */
     void (*cleanup)(KlHttpConn *c);                       /* per-connection teardown */
     void (*drain_shutdown)(KlHttpConn *c);                /* graceful-drain GOAWAY */
-} KlH2ServerHooks;
+} KlHttp2ServerHooks;
 
-const KlH2ServerHooks *kl_h2_server_hooks(void);      /* NULL if server_h2.c absent */
-void kl_h2_server_hooks_set(const KlH2ServerHooks *hooks);
-void kl_h2_server_hooks_install(void);                /* defined in server_h2.c */
+const KlHttp2ServerHooks *kl_http2_server_hooks(void);      /* NULL if server_h2.c absent */
+void kl_http2_server_hooks_set(const KlHttp2ServerHooks *hooks);
+void kl_http2_server_hooks_install(void);                /* defined in server_h2.c */
 
 /* ── Completion-mode drive seam ─────────────────────────────────────────────
  * Once a connection has upgraded, the completion server driver (completion_server.c)
@@ -88,12 +88,12 @@ const KlWsCompHooks *kl_ws_comp_hooks(void);
 void kl_ws_comp_hooks_set(const KlWsCompHooks *hooks);
 void kl_ws_comp_hooks_install(void);                  /* defined in completion_ws.c */
 
-typedef struct KlH2CompHooks {
+typedef struct KlHttp2CompHooks {
     void (*drive)(struct KlHttpServer *s, KlHttpConn *c);
-} KlH2CompHooks;
-const KlH2CompHooks *kl_h2_comp_hooks(void);
-void kl_h2_comp_hooks_set(const KlH2CompHooks *hooks);
-void kl_h2_comp_hooks_install(void);                  /* defined in completion_h2.c */
+} KlHttp2CompHooks;
+const KlHttp2CompHooks *kl_http2_comp_hooks(void);
+void kl_http2_comp_hooks_set(const KlHttp2CompHooks *hooks);
+void kl_http2_comp_hooks_install(void);                  /* defined in completion_h2.c */
 
 /* ── PROXY-protocol seam ────────────────────────────────────────────────────
  * Recovering the real client address behind an L4 load balancer (proxy_protocol.c:

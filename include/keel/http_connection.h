@@ -27,8 +27,8 @@
 
 typedef struct KlTls KlTls;
 typedef struct KlWsServerConn KlWsServerConn;
-typedef struct KlH2ServerConn KlH2ServerConn;
-typedef struct KlH2ServerConfig KlH2ServerConfig;
+typedef struct KlHttp2ServerConn KlHttp2ServerConn;
+typedef struct KlHttp2ServerConfig KlHttp2ServerConfig;
 
 /* The raw-transport subset of a connection is the STABLE public KlStream (function + ownership
  * contract in <keel/stream.h>, opt-in/unstable layout in <keel/stream_detail.h>). KlHttpConn embeds it
@@ -88,8 +88,8 @@ typedef struct KlHttpConn {
 
     KlWsServerConn *ws;         /**< WebSocket state (NULL until upgrade) */
 
-    KlH2ServerConn *h2;         /**< HTTP/2 state (NULL until upgrade) */
-    KlH2ServerConfig *h2_config; /**< HTTP/2 config (set once at pool init) */
+    KlHttp2ServerConn *h2;         /**< HTTP/2 state (NULL until upgrade) */
+    KlHttp2ServerConfig *h2_config; /**< HTTP/2 config (set once at pool init) */
     KlHttpRouter *router;           /**< Back-pointer to server router */
     size_t max_body_size;       /**< Discard-path body limit (from KlHttpServerConfig) */
 

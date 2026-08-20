@@ -58,21 +58,21 @@ static void ta_teardown(void) { kl_http_router_free(&ta_router); mock_tls_alpn =
 
 /* ── minimal capturing HTTP/2 session (records KEEL's callbacks) ────── */
 
-typedef struct { KlH2ServerSession base; KlAllocator *alloc;
-                 KlH2ServerCallbacks cb; void *ud; } CapSession;
+typedef struct { KlHttp2ServerSession base; KlAllocator *alloc;
+                 KlHttp2ServerCallbacks cb; void *ud; } CapSession;
 static CapSession *ta_cap;
 
-static ssize_t cap_recv(KlH2ServerSession *s, const void *d, size_t l) { (void)s;(void)d; return (ssize_t)l; }
-static int cap_submit(KlH2ServerSession *s, uint32_t id, int st, const char **n,
+static ssize_t cap_recv(KlHttp2ServerSession *s, const void *d, size_t l) { (void)s;(void)d; return (ssize_t)l; }
+static int cap_submit(KlHttp2ServerSession *s, uint32_t id, int st, const char **n,
                       const char **v, int nh, const void *b, size_t bl) {
     (void)s;(void)id;(void)st;(void)n;(void)v;(void)nh;(void)b;(void)bl; return 0;
 }
-static int  cap_ww(KlH2ServerSession *s) { (void)s; return 0; }
-static int  cap_flush(KlH2ServerSession *s) { (void)s; return 0; }
-static int  cap_sd(KlH2ServerSession *s) { (void)s; return 0; }
-static void cap_destroy(KlH2ServerSession *s) { CapSession *c = (CapSession *)s; kl_free(c->alloc, c, sizeof(*c)); }
+static int  cap_ww(KlHttp2ServerSession *s) { (void)s; return 0; }
+static int  cap_flush(KlHttp2ServerSession *s) { (void)s; return 0; }
+static int  cap_sd(KlHttp2ServerSession *s) { (void)s; return 0; }
+static void cap_destroy(KlHttp2ServerSession *s) { CapSession *c = (CapSession *)s; kl_free(c->alloc, c, sizeof(*c)); }
 
-static KlH2ServerSession *cap_factory(KlAllocator *a, KlH2ServerCallbacks *cbs, void *ud) {
+static KlHttp2ServerSession *cap_factory(KlAllocator *a, KlHttp2ServerCallbacks *cbs, void *ud) {
     CapSession *c = kl_malloc(a, sizeof(*c));
     if (!c) return NULL;
     memset(c, 0, sizeof(*c));
@@ -85,7 +85,7 @@ static KlH2ServerSession *cap_factory(KlAllocator *a, KlH2ServerCallbacks *cbs, 
 }
 
 /* Build a KlHttpConn on a socketpair with mock TLS + h2 config, run the handshake. */
-static KlHttpConnState ta_handshake_with_alpn(KlHttpConn *conn, KlH2ServerConfig *h2cfg,
+static KlHttpConnState ta_handshake_with_alpn(KlHttpConn *conn, KlHttp2ServerConfig *h2cfg,
                                           int pfd[2], const char *alpn) {
     memset(conn, 0, sizeof(*conn));
     if (kl_test_socketpair(pfd) != 0) return KL_HTTP_CONN_CLOSED;
@@ -103,12 +103,12 @@ static KlHttpConnState ta_handshake_with_alpn(KlHttpConn *conn, KlH2ServerConfig
 
 UTEST(alpn, negotiated_h2_enters_http2_adapter) {
     ta_setup();
-    KlH2ServerConfig h2cfg = { .factory = cap_factory };
+    KlHttp2ServerConfig h2cfg = { .factory = cap_factory };
     KlHttpConn conn; int pfd[2];
     KlHttpConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, "h2");
     ASSERT_EQ(st, (KlHttpConnState)KL_HTTP_CONN_HTTP2);
     ASSERT_TRUE(conn.h2 != NULL);          /* HTTP/2 adapter owns the connection */
-    kl_h2_server_cleanup(&conn);
+    kl_http2_server_cleanup(&conn);
     conn.tls->destroy(conn.tls);
     kl_test_closesock(pfd[0]); kl_test_closesock(pfd[1]);
     ta_teardown();
@@ -116,7 +116,7 @@ UTEST(alpn, negotiated_h2_enters_http2_adapter) {
 
 UTEST(alpn, negotiated_http11_enters_http1_adapter) {
     ta_setup();
-    KlH2ServerConfig h2cfg = { .factory = cap_factory };
+    KlHttp2ServerConfig h2cfg = { .factory = cap_factory };
     KlHttpConn conn; int pfd[2];
     KlHttpConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, "http/1.1");
     ASSERT_EQ(st, (KlHttpConnState)KL_HTTP_CONN_READING);   /* HTTP/1.1 adapter */
@@ -128,7 +128,7 @@ UTEST(alpn, negotiated_http11_enters_http1_adapter) {
 
 UTEST(alpn, no_alpn_falls_back_to_http1) {
     ta_setup();
-    KlH2ServerConfig h2cfg = { .factory = cap_factory };
+    KlHttp2ServerConfig h2cfg = { .factory = cap_factory };
     KlHttpConn conn; int pfd[2];
     KlHttpConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, NULL);
     ASSERT_EQ(st, (KlHttpConnState)KL_HTTP_CONN_READING);   /* documented no-ALPN policy: HTTP/1.1 */
@@ -140,7 +140,7 @@ UTEST(alpn, no_alpn_falls_back_to_http1) {
 
 UTEST(alpn, unsupported_alpn_does_not_engage_http2) {
     ta_setup();
-    KlH2ServerConfig h2cfg = { .factory = cap_factory };
+    KlHttp2ServerConfig h2cfg = { .factory = cap_factory };
     KlHttpConn conn; int pfd[2];
     /* An unexpected/unsupported selection must NOT be treated as h2. */
     KlHttpConnState st = ta_handshake_with_alpn(&conn, &h2cfg, pfd, "spdy/3.1");
@@ -167,7 +167,7 @@ UTEST(alpn, h2_alpn_without_h2_config_stays_http1) {
 
 UTEST(alpn, http2_request_uses_shared_rest_layer) {
     ta_setup();
-    KlH2ServerConfig h2cfg = { .factory = cap_factory };
+    KlHttp2ServerConfig h2cfg = { .factory = cap_factory };
     ta_cap = NULL;
 
     /* Confirm the SAME router entry an HTTP/1.1 request would hit. */
@@ -181,7 +181,7 @@ UTEST(alpn, http2_request_uses_shared_rest_layer) {
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
     KlHttpConn conn; memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1]; conn.stream.alloc = &ta_alloc;
-    int up = kl_h2_server_upgrade(&conn, &ta_router, &h2cfg, NULL, 0);
+    int up = kl_http2_server_upgrade(&conn, &ta_router, &h2cfg, NULL, 0);
     ASSERT_EQ(up, (int)KL_HTTP_CONN_HTTP2);
     ASSERT_TRUE(ta_cap != NULL);
 
@@ -197,7 +197,7 @@ UTEST(alpn, http2_request_uses_shared_rest_layer) {
     ASSERT_EQ(ta_seen_version, 2);                       /* it was the HTTP/2 path */
     ASSERT_STREQ(ta_seen_host, "example.com");           /* :authority -> host */
 
-    kl_h2_server_cleanup(&conn);
+    kl_http2_server_cleanup(&conn);
     kl_test_closesock(pfd[0]); kl_test_closesock(pfd[1]);
     ta_teardown();
 }

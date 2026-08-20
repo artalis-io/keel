@@ -9,7 +9,7 @@
 #include <keel/http1_parser.h>
 #include <keel/http_router.h>
 #include <keel/tls.h>
-#include <keel/h2_server.h>
+#include <keel/http2_server.h>
 #include <keel/http_connection.h>
 #include <keel/listener_detail.h>  /* struct KlListener layout — KlHttpServer embeds it (step 6B-1) */
 #include <keel/event_ctx.h>
@@ -68,7 +68,7 @@ typedef struct KlHttpServerConfig {
                                   * only the last server to call kl_http_server_run() receives signals) */
     int drain_timeout_ms;        /**< graceful shutdown drain timeout (0 = immediate) */
     KlTlsConfig *tls;           /**< TLS config — NULL = plaintext (default) */
-    KlH2ServerConfig *h2;             /**< HTTP/2 config — NULL = disabled (default) */
+    KlHttp2ServerConfig *h2;             /**< HTTP/2 config — NULL = disabled (default) */
     size_t max_body_size;       /**< discard-path body limit; default: 1 MB */
     size_t max_header_size;     /**< max header block size; 0 = KL_HTTP_CONN_READ_BUF_SIZE (8192) */
     KlCompressConfig *compress; /**< compression config — NULL = disabled (default) */
@@ -118,7 +118,7 @@ typedef struct KlHttpServer {
     KlHttpServerConfig config;
     KlAllocator alloc_storage;  /**< owned copy if user didn't provide one */
     KlTlsConfig tls_storage;   /**< owned copy of TLS config (if provided) */
-    KlH2ServerConfig h2_storage;     /**< owned copy of H2 config (if provided) */
+    KlHttp2ServerConfig h2_storage;     /**< owned copy of H2 config (if provided) */
     KlCompressConfig compress_storage; /**< owned copy of compress config (if provided) */
     KlHttpRouter router;            /**< Route table */
     KlHttpConnPool pool;            /**< Connection pool */

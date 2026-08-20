@@ -27,27 +27,27 @@ typedef struct {
     char   resp_body[256]; size_t resp_body_len;
     int    resp_closed;
 
-    KlH2ServerSession *ss;
+    KlHttp2ServerSession *ss;
     int    responded;
 } Ctx;
 
 static int fail(const char *msg) { fprintf(stderr, "FAIL: %s\n", msg); return 1; }
 
-/* ── client callbacks (KlH2ClientSession keel_cbs) ──────────────────── */
+/* ── client callbacks (KlHttp2ClientSession keel_cbs) ──────────────────── */
 
-static int cli_on_send(KlH2ClientSession *s, const void *data, size_t len) {
+static int cli_on_send(KlHttp2ClientSession *s, const void *data, size_t len) {
     Ctx *c = s->keel_ctx;
     if (c->c2s_len + len > BUF_CAP) return -1;
     memcpy(c->c2s + c->c2s_len, data, len);
     c->c2s_len += len;
     return (int)len;
 }
-static void cli_on_response(KlH2ClientSession *s, int32_t sid, int status,
-                            const KlH2ClientHeader *hdrs, int n) {
+static void cli_on_response(KlHttp2ClientSession *s, int32_t sid, int status,
+                            const KlHttp2ClientHeader *hdrs, int n) {
     (void)sid; (void)hdrs; (void)n;
     ((Ctx *)s->keel_ctx)->resp_status = status;
 }
-static void cli_on_data(KlH2ClientSession *s, int32_t sid, const char *data, size_t len) {
+static void cli_on_data(KlHttp2ClientSession *s, int32_t sid, const char *data, size_t len) {
     (void)sid;
     Ctx *c = s->keel_ctx;
     if (c->resp_body_len + len < sizeof(c->resp_body)) {
@@ -55,12 +55,12 @@ static void cli_on_data(KlH2ClientSession *s, int32_t sid, const char *data, siz
         c->resp_body_len += len;
     }
 }
-static void cli_on_stream_close(KlH2ClientSession *s, int32_t sid, int err) {
+static void cli_on_stream_close(KlHttp2ClientSession *s, int32_t sid, int err) {
     (void)sid; (void)err;
     ((Ctx *)s->keel_ctx)->resp_closed = 1;
 }
 
-/* ── server callbacks (KlH2ServerCallbacks) ─────────────────────────── */
+/* ── server callbacks (KlHttp2ServerCallbacks) ─────────────────────────── */
 
 static int srv_on_request(void *ud, uint32_t sid,
                           const char *method, size_t method_len,
@@ -109,7 +109,7 @@ int main(void) {
     static Ctx c;
     memset(&c, 0, sizeof(c));
 
-    KlH2ClientSession *cs = kl_h2_nghttp2_client_session(&alloc);
+    KlHttp2ClientSession *cs = kl_http2_nghttp2_client_session(&alloc);
     if (!cs) return fail("client session create");
     cs->keel_cbs.on_send = cli_on_send;
     cs->keel_cbs.on_response = cli_on_response;
@@ -117,14 +117,14 @@ int main(void) {
     cs->keel_cbs.on_stream_close = cli_on_stream_close;
     cs->keel_ctx = &c;
 
-    KlH2ServerCallbacks scb = {
+    KlHttp2ServerCallbacks scb = {
         .on_request = srv_on_request,
         .on_data = srv_on_data,
         .on_stream_end = srv_on_stream_end,
         .on_stream_reset = srv_on_stream_reset,
         .send = srv_send,
     };
-    KlH2ServerSession *ss = kl_h2_nghttp2_server_session(&alloc, &scb, &c);
+    KlHttp2ServerSession *ss = kl_http2_nghttp2_server_session(&alloc, &scb, &c);
     if (!ss) { cs->destroy(cs); return fail("server session create"); }
     c.ss = ss;
 

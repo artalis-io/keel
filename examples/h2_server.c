@@ -18,19 +18,19 @@
 /* ── Stub H2 Session ─────────────────────────────────────────────── */
 
 typedef struct {
-    KlH2ServerSession base;
-    KlH2ServerCallbacks callbacks;
+    KlHttp2ServerSession base;
+    KlHttp2ServerCallbacks callbacks;
     void *cb_user_data;
     KlAllocator *alloc;
 } StubH2Session;
 
-static kl_ssize_t stub_recv(KlH2ServerSession *self, const void *data, size_t len) {
+static kl_ssize_t stub_recv(KlHttp2ServerSession *self, const void *data, size_t len) {
     (void)self; (void)data;
     /* A real implementation would parse HTTP/2 frames here */
     return (ssize_t)len;
 }
 
-static int stub_submit_response(KlH2ServerSession *self, uint32_t stream_id,
+static int stub_submit_response(KlHttp2ServerSession *self, uint32_t stream_id,
                                  int status, const char **hdr_names,
                                  const char **hdr_values, int num_headers,
                                  const void *body, size_t body_len) {
@@ -40,28 +40,28 @@ static int stub_submit_response(KlH2ServerSession *self, uint32_t stream_id,
     return 0;
 }
 
-static int stub_want_write(KlH2ServerSession *self) {
+static int stub_want_write(KlHttp2ServerSession *self) {
     (void)self;
     return 0;
 }
 
-static int stub_flush(KlH2ServerSession *self) {
+static int stub_flush(KlHttp2ServerSession *self) {
     (void)self;
     return 0;
 }
 
-static int stub_shutdown(KlH2ServerSession *self) {
+static int stub_shutdown(KlHttp2ServerSession *self) {
     (void)self;
     return 0;
 }
 
-static void stub_destroy(KlH2ServerSession *self) {
+static void stub_destroy(KlHttp2ServerSession *self) {
     StubH2Session *s = (StubH2Session *)self;
     kl_free(s->alloc, s, sizeof(*s));
 }
 
-static KlH2ServerSession *stub_factory(KlAllocator *alloc,
-                                  KlH2ServerCallbacks *callbacks,
+static KlHttp2ServerSession *stub_factory(KlAllocator *alloc,
+                                  KlHttp2ServerCallbacks *callbacks,
                                   void *user_data) {
     StubH2Session *s = kl_malloc(alloc, sizeof(*s));
     if (!s) return NULL;
@@ -97,7 +97,7 @@ int main(int argc, char **argv) {
         port = (int)val;
     }
 
-    KlH2ServerConfig h2_cfg = {
+    KlHttp2ServerConfig h2_cfg = {
         .factory = stub_factory,
         /* 0 = use defaults (128 streams, 65535 window) */
     };

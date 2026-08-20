@@ -176,7 +176,7 @@ ifdef KEEL_NO_COMPLETION
   COMPLETION_CORE = src/completion_absent.c
 else
   COMPLETION_CORE = src/completion_core.c src/completion_http_server.c \
-                    src/completion_h2.c src/completion_ws.c src/completion_dispatch.c
+                    src/completion_http2.c src/completion_ws.c src/completion_dispatch.c
   # A readiness EVENT_SRC (epoll/kqueue/poll/wsapoll) has no completion backend, so it
   # needs the kl_comp_ops_builtin→NULL stub the dispatch falls back to (never dereferenced).
   # A completion backend (COMPLETION_BACKEND=1) provides its own kl_comp_ops_builtin.
@@ -189,7 +189,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/http_body_reader_buffer.c \
            src/http_body_reader_multipart.c src/http1_chunked.c src/http_cors.c \
            src/websocket.c src/http_server_ws.c src/websocket_client.c \
-           src/server_h2.c src/h2_client.c src/thread_pool.c src/url.c \
+           src/http2_server.c src/http2_client.c src/thread_pool.c src/url.c \
            src/http_client_common.c src/http_client_sync.c src/http_client_async.c \
            src/http_client_proxy.c \
            src/http_client_pool.c src/http_redirect.c src/http_sse.c \
@@ -855,8 +855,8 @@ analyze:
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
 AXIS_PROTO_TUS = src/http_client_common.c src/http_client_sync.c src/http_client_async.c \
                  src/http_client_proxy.c \
-                 src/h2_client.c src/websocket_client.c \
-                 src/http_connection.c src/http_server.c src/server_h2.c src/websocket.c src/http_server_ws.c \
+                 src/http2_client.c src/websocket_client.c \
+                 src/http_connection.c src/http_server.c src/http2_server.c src/websocket.c src/http_server_ws.c \
                  src/http_sse.c src/http_response.c src/http_redirect.c src/http_client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:

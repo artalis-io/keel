@@ -3,106 +3,106 @@
  * @brief HTTP/2 client API
  *
  * Async HTTP/2 client driven by KlEventCtx watchers.
- * Uses a pluggable session vtable (KlH2ClientSession) so the actual
+ * Uses a pluggable session vtable (KlHttp2ClientSession) so the actual
  * HTTP/2 framing can be backed by nghttp2 or any other library.
  * Shared protocol constants (max streams, window size) from h2.h.
  */
 
-#ifndef KEEL_H2_CLIENT_H
-#define KEEL_H2_CLIENT_H
+#ifndef KEEL_HTTP2_CLIENT_H
+#define KEEL_HTTP2_CLIENT_H
 
 #include <stddef.h>
 #include <stdint.h>
 #include <keel/allocator.h>
 #include <keel/event_ctx.h>
-#include <keel/h2.h>
+#include <keel/http2.h>
 #include <keel/tls.h>
 
 /* ── Defaults ────────────────────────────────────────────────────── */
 
 /** @brief Default connect/request timeout (ms). */
-#define KL_H2_CLIENT_DEFAULT_TIMEOUT_MS  30000
+#define KL_HTTP2_CLIENT_DEFAULT_TIMEOUT_MS  30000
 /** @brief Receive buffer size (bytes). */
-#define KL_H2_CLIENT_RECV_BUF_SIZE       16384
+#define KL_HTTP2_CLIENT_RECV_BUF_SIZE       16384
 
 /* ── Types ───────────────────────────────────────────────────────── */
 
-typedef struct KlH2ClientConn    KlH2ClientConn;
-typedef struct KlH2ClientStream  KlH2ClientStream;
-typedef struct KlH2ClientSession KlH2ClientSession;
+typedef struct KlHttp2ClientConn    KlHttp2ClientConn;
+typedef struct KlHttp2ClientStream  KlHttp2ClientStream;
+typedef struct KlHttp2ClientSession KlHttp2ClientSession;
 
 typedef struct {
     const char *name;   /**< Header name. */
     const char *value;  /**< Header value. */
-} KlH2ClientHeader;
+} KlHttp2ClientHeader;
 
 /** Accumulated response from a single stream. */
 typedef struct {
     int              status;      /**< HTTP status code. */
-    KlH2ClientHeader *headers;   /**< Response headers array. */
+    KlHttp2ClientHeader *headers;   /**< Response headers array. */
     int              num_headers; /**< Number of response headers. */
     int              headers_cap; /**< Allocated capacity of headers array. */
     char             *body;       /**< Response body (allocator-owned). */
     size_t           body_len;    /**< Length of response body in bytes. */
     size_t           body_cap;    /**< Allocated capacity of body buffer. */
-} KlH2ClientResponse;
+} KlHttp2ClientResponse;
 
 /* ── Session callbacks (session -> KEEL) ─────────────────────────── */
 
 typedef struct {
     /** Session has data to send to the network. */
-    int  (*on_send)(KlH2ClientSession *s, const void *data, size_t len);
+    int  (*on_send)(KlHttp2ClientSession *s, const void *data, size_t len);
     /** Response headers received for a stream. */
-    void (*on_response)(KlH2ClientSession *s, int32_t stream_id,
-                        int status, const KlH2ClientHeader *hdrs, int n);
+    void (*on_response)(KlHttp2ClientSession *s, int32_t stream_id,
+                        int status, const KlHttp2ClientHeader *hdrs, int n);
     /** Response body data received for a stream. */
-    void (*on_data)(KlH2ClientSession *s, int32_t stream_id,
+    void (*on_data)(KlHttp2ClientSession *s, int32_t stream_id,
                     const char *data, size_t len);
     /** Stream closed (0 = no error). */
-    void (*on_stream_close)(KlH2ClientSession *s, int32_t stream_id, int err);
-} KlH2ClientCallbacks;
+    void (*on_stream_close)(KlHttp2ClientSession *s, int32_t stream_id, int err);
+} KlHttp2ClientCallbacks;
 
 /* ── Session vtable (user provides, wraps nghttp2 etc.) ──────────── */
 
-struct KlH2ClientSession {
+struct KlHttp2ClientSession {
     /** Feed received network data into the session. */
-    int (*recv)(KlH2ClientSession *self, const char *data, size_t len);
+    int (*recv)(KlHttp2ClientSession *self, const char *data, size_t len);
     /** Submit an HTTP/2 request, returns stream ID or -1. */
-    int32_t (*submit_request)(KlH2ClientSession *self,
+    int32_t (*submit_request)(KlHttp2ClientSession *self,
                               const char *method, const char *path,
                               const char *authority,
-                              const KlH2ClientHeader *hdrs, int n,
+                              const KlHttp2ClientHeader *hdrs, int n,
                               const char *body, size_t body_len);
     /** Flush pending output (triggers on_send callbacks). */
-    int (*flush)(KlH2ClientSession *self);
+    int (*flush)(KlHttp2ClientSession *self);
     /** Destroy session and free resources. */
-    void (*destroy)(KlH2ClientSession *self);
-    /** KEEL-managed: set by kl_h2_client_connect. */
-    KlH2ClientCallbacks keel_cbs;
-    /** KEEL-managed: opaque pointer to KlH2ClientConn. */
+    void (*destroy)(KlHttp2ClientSession *self);
+    /** KEEL-managed: set by kl_http2_client_connect. */
+    KlHttp2ClientCallbacks keel_cbs;
+    /** KEEL-managed: opaque pointer to KlHttp2ClientConn. */
     void *keel_ctx;
 };
 
 /** @brief Factory for creating client-side HTTP/2 sessions. */
-typedef KlH2ClientSession *(*KlH2ClientSessionFactory)(KlAllocator *alloc);
+typedef KlHttp2ClientSession *(*KlHttp2ClientSessionFactory)(KlAllocator *alloc);
 
 /* ── Config ──────────────────────────────────────────────────────── */
 
 typedef struct {
     int                       timeout_ms;              /**< 0 = default */
-    int                       max_concurrent_streams;  /**< 0 = KL_H2_DEFAULT_MAX_STREAMS */
+    int                       max_concurrent_streams;  /**< 0 = KL_HTTP2_DEFAULT_MAX_STREAMS */
     KlTlsConfig              *tls;
-    KlH2ClientSessionFactory  session;                 /**< required */
-} KlH2ClientConfig;
+    KlHttp2ClientSessionFactory  session;                 /**< required */
+} KlHttp2ClientConfig;
 
 /* ── Callbacks ───────────────────────────────────────────────────── */
 
 /** @brief Per-stream response completion callback. */
-typedef void (*KlH2ClientResponseFn)(KlH2ClientConn *c, int32_t stream_id,
-                                      const KlH2ClientResponse *resp,
+typedef void (*KlHttp2ClientResponseFn)(KlHttp2ClientConn *c, int32_t stream_id,
+                                      const KlHttp2ClientResponse *resp,
                                       void *user_data);
 /** @brief Connection-level error callback. */
-typedef void (*KlH2ClientErrorFn)(KlH2ClientConn *c, const char *msg,
+typedef void (*KlHttp2ClientErrorFn)(KlHttp2ClientConn *c, const char *msg,
                                    void *user_data);
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -121,10 +121,10 @@ typedef void (*KlH2ClientErrorFn)(KlH2ClientConn *c, const char *msg,
  * @param user_data Opaque pointer for callbacks.
  * @return Connection handle, or NULL on failure.
  */
-KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
-                                      const KlH2ClientConfig *cfg,
+KlHttp2ClientConn *kl_http2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
+                                      const KlHttp2ClientConfig *cfg,
                                       const char *url,
-                                      KlH2ClientErrorFn on_error,
+                                      KlHttp2ClientErrorFn on_error,
                                       void *user_data);
 
 /**
@@ -132,17 +132,17 @@ KlH2ClientConn *kl_h2_client_connect(KlEventCtx *ev, KlAllocator *alloc,
  *
  * @return Stream ID (>0) on success, -1 on error.
  */
-int32_t kl_h2_client_request(KlH2ClientConn *c, const char *method,
+int32_t kl_http2_client_request(KlHttp2ClientConn *c, const char *method,
                               const char *path,
-                              const KlH2ClientHeader *hdrs, int n,
+                              const KlHttp2ClientHeader *hdrs, int n,
                               const char *body, size_t body_len,
-                              KlH2ClientResponseFn on_resp, void *ud);
+                              KlHttp2ClientResponseFn on_resp, void *ud);
 
 /** @brief Close the HTTP/2 client connection. */
-void kl_h2_client_close(KlH2ClientConn *c);
+void kl_http2_client_close(KlHttp2ClientConn *c);
 /** @brief Free all HTTP/2 client resources. */
-void kl_h2_client_free(KlH2ClientConn *c);
+void kl_http2_client_free(KlHttp2ClientConn *c);
 /** @brief Free a response's headers and body (allocator-owned). */
-void kl_h2_client_response_free(KlH2ClientResponse *resp, KlAllocator *alloc);
+void kl_http2_client_response_free(KlHttp2ClientResponse *resp, KlAllocator *alloc);
 
 #endif

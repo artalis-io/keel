@@ -16,7 +16,7 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 }
 
 int main(void) {
-    KlH2ServerConfig h2cfg = { .factory = kl_h2_nghttp2_server_session };
+    KlHttp2ServerConfig h2cfg = { .factory = kl_http2_nghttp2_server_session };
     KlHttpServerConfig cfg = { .port = INTEROP_PORT, .bind_addr = "127.0.0.1", .h2 = &h2cfg };
     KlHttpServer s;
     if (kl_http_server_init(&s, &cfg) < 0) { fprintf(stderr, "server init failed\n"); return 1; }

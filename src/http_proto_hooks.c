@@ -20,29 +20,29 @@ static const void *hooks_set_once(const void *cur, const void *next) {
 }
 
 static const KlWsServerHooks *g_ws_hooks = NULL;
-static const KlH2ServerHooks *g_h2_hooks = NULL;
+static const KlHttp2ServerHooks *g_h2_hooks = NULL;
 
 const KlWsServerHooks *kl_ws_server_hooks(void) { return g_ws_hooks; }
 void kl_ws_server_hooks_set(const KlWsServerHooks *hooks) {
     g_ws_hooks = (const KlWsServerHooks *)hooks_set_once(g_ws_hooks, hooks);
 }
 
-const KlH2ServerHooks *kl_h2_server_hooks(void) { return g_h2_hooks; }
-void kl_h2_server_hooks_set(const KlH2ServerHooks *hooks) {
-    g_h2_hooks = (const KlH2ServerHooks *)hooks_set_once(g_h2_hooks, hooks);
+const KlHttp2ServerHooks *kl_http2_server_hooks(void) { return g_h2_hooks; }
+void kl_http2_server_hooks_set(const KlHttp2ServerHooks *hooks) {
+    g_h2_hooks = (const KlHttp2ServerHooks *)hooks_set_once(g_h2_hooks, hooks);
 }
 
 static const KlWsCompHooks *g_ws_comp_hooks = NULL;
-static const KlH2CompHooks *g_h2_comp_hooks = NULL;
+static const KlHttp2CompHooks *g_h2_comp_hooks = NULL;
 
 const KlWsCompHooks *kl_ws_comp_hooks(void) { return g_ws_comp_hooks; }
 void kl_ws_comp_hooks_set(const KlWsCompHooks *hooks) {
     g_ws_comp_hooks = (const KlWsCompHooks *)hooks_set_once(g_ws_comp_hooks, hooks);
 }
 
-const KlH2CompHooks *kl_h2_comp_hooks(void) { return g_h2_comp_hooks; }
-void kl_h2_comp_hooks_set(const KlH2CompHooks *hooks) {
-    g_h2_comp_hooks = (const KlH2CompHooks *)hooks_set_once(g_h2_comp_hooks, hooks);
+const KlHttp2CompHooks *kl_http2_comp_hooks(void) { return g_h2_comp_hooks; }
+void kl_http2_comp_hooks_set(const KlHttp2CompHooks *hooks) {
+    g_h2_comp_hooks = (const KlHttp2CompHooks *)hooks_set_once(g_h2_comp_hooks, hooks);
 }
 
 static const KlProxyHooks *g_proxy_hooks = NULL;

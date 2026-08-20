@@ -87,7 +87,7 @@ int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
      * archive). A freestanding HTTP/1.1 server never links these — the seam stays
      * NULL and the core runs pure HTTP/1.1. */
     kl_ws_server_hooks_install();
-    kl_h2_server_hooks_install();
+    kl_http2_server_hooks_install();
     kl_proxy_hooks_install();   /* PROXY parser + CIDR match (proxy_protocol.c) */
 #endif
 
@@ -558,7 +558,7 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
 void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now) {
     if (!atomic_load(&s->draining)) return;
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
-    const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+    const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     for (int j = 0; j < s->pool.capacity; j++) {
         if (wsh && wsh->drain_close && s->pool.conns[j].state == KL_HTTP_CONN_WEBSOCKET)
             wsh->drain_close(&s->pool.conns[j]);

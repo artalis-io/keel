@@ -57,15 +57,15 @@
 #include <keel/http1_chunked.h>
 #include <keel/drain.h>
 #include <keel/tls.h>
-#include <keel/h2.h>
-#include <keel/h2_client.h>
+#include <keel/http2.h>
+#include <keel/http2_client.h>
 #include <keel/http_response.h>
 #include <keel/file_io.h>
 /* Server protocol surface (S-1): the whole inbound public API, freestanding-clean. */
 #include <keel/http_router.h>
 #include <keel/compress.h>
 #include <keel/proxy_protocol.h>
-#include <keel/h2_server.h>
+#include <keel/http2_server.h>
 #include <keel/http_connection.h>
 #include <keel/http_server.h>
 

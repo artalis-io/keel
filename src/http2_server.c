@@ -1,4 +1,4 @@
-#include <keel/h2_server.h>
+#include <keel/http2_server.h>
 #include <keel/http_connection.h>
 #include <keel/http_router.h>
 #include <keel/http_body_reader.h>
@@ -11,7 +11,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include "internal.h"
-#include "h2_internal.h"       /* KlH2ServerConn / KlH2ServerStream bodies (opaque now) */
+#include "http2_internal.h"       /* KlHttp2ServerConn / KlHttp2ServerStream bodies (opaque now) */
 #include "platform.h"   /* kl_plat_file_pread */
 #include "http_proto_hooks.h"       /* H2 server upgrade seam — registered for the core */
 
@@ -19,7 +19,7 @@
  * Stream management (static helpers)
  * ═══════════════════════════════════════════════════════════════════ */
 
-static KlH2ServerStream *h2_stream_find(KlH2ServerConn *h2c,
+static KlHttp2ServerStream *h2_stream_find(KlHttp2ServerConn *h2c,
                                          uint32_t stream_id) {
     for (int i = 0; i < h2c->num_streams; i++) {
         if (h2c->streams[i].stream_id == stream_id)
@@ -28,19 +28,19 @@ static KlH2ServerStream *h2_stream_find(KlH2ServerConn *h2c,
     return NULL;
 }
 
-static KlH2ServerStream *h2_stream_create(KlH2ServerConn *h2c,
+static KlHttp2ServerStream *h2_stream_create(KlHttp2ServerConn *h2c,
                                             uint32_t stream_id) {
     if (h2c->num_streams >= h2c->max_streams)
         return NULL;
 
-    KlH2ServerStream *s = &h2c->streams[h2c->num_streams];
+    KlHttp2ServerStream *s = &h2c->streams[h2c->num_streams];
     memset(s, 0, sizeof(*s));
     s->stream_id = stream_id;
     h2c->num_streams++;
     return s;
 }
 
-static void h2_stream_destroy(KlH2ServerConn *h2c, KlH2ServerStream *stream) {
+static void h2_stream_destroy(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream) {
     if (stream->body_reader) {
         stream->body_reader->destroy(stream->body_reader);
         stream->body_reader = NULL;
@@ -112,7 +112,7 @@ static int h2_extract_response_headers(char *hdr_buf, size_t hdr_len,
  * Response submission
  * ═══════════════════════════════════════════════════════════════════ */
 
-static int h2_submit_response(KlH2ServerConn *h2c, KlH2ServerStream *stream) {
+static int h2_submit_response(KlHttp2ServerConn *h2c, KlHttp2ServerStream *stream) {
     if (stream->response_submitted) return 0;
     stream->response_submitted = 1;
 
@@ -191,7 +191,7 @@ static int h2_submit_response(KlH2ServerConn *h2c, KlH2ServerStream *stream) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * Callback implementations (wired into KlH2ServerCallbacks)
+ * Callback implementations (wired into KlHttp2ServerCallbacks)
  * ═══════════════════════════════════════════════════════════════════ */
 
 static int h2_cb_on_request(void *ud, uint32_t stream_id,
@@ -202,9 +202,9 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
                              const size_t *hdr_name_lens,
                              const size_t *hdr_value_lens,
                              int num_headers) {
-    KlH2ServerConn *h2c = ud;
+    KlHttp2ServerConn *h2c = ud;
 
-    KlH2ServerStream *stream = h2_stream_create(h2c, stream_id);
+    KlHttp2ServerStream *stream = h2_stream_create(h2c, stream_id);
     if (!stream) return -1;
 
     /* Clamp to max headers (vtable may provide unchecked value) */
@@ -399,8 +399,8 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
 
 static int h2_cb_on_data(void *ud, uint32_t stream_id,
                           const char *data, size_t len) {
-    KlH2ServerConn *h2c = ud;
-    KlH2ServerStream *stream = h2_stream_find(h2c, stream_id);
+    KlHttp2ServerConn *h2c = ud;
+    KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return -1;
 
     /* Enforce body size limit (mirrors HTTP/1.1 path in connection.c) */
@@ -418,8 +418,8 @@ static int h2_cb_on_data(void *ud, uint32_t stream_id,
 }
 
 static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
-    KlH2ServerConn *h2c = ud;
-    KlH2ServerStream *stream = h2_stream_find(h2c, stream_id);
+    KlHttp2ServerConn *h2c = ud;
+    KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return -1;
 
     stream->body_done = 1;
@@ -455,10 +455,10 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
 
 static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
                                     uint32_t error_code) {
-    KlH2ServerConn *h2c = ud;
+    KlHttp2ServerConn *h2c = ud;
     (void)error_code;
 
-    KlH2ServerStream *stream = h2_stream_find(h2c, stream_id);
+    KlHttp2ServerStream *stream = h2_stream_find(h2c, stream_id);
     if (!stream) return;
 
     if (stream->body_reader)
@@ -470,21 +470,21 @@ static void h2_cb_on_stream_reset(void *ud, uint32_t stream_id,
 /* Default output writer: write the socket (TLS-aware conn_write). Used on the readiness
  * path and whenever a completion driver has not installed a buffering writer. */
 static ssize_t h2_out_conn_write(void *ctx, const void *data, size_t len) {
-    KlH2ServerConn *h2c = ctx;
+    KlHttp2ServerConn *h2c = ctx;
     return conn_write(h2c->conn, data, len);
 }
 
 /* The session emits produced frame bytes here; route them through the output seam
  * (default: the socket; a completion driver can install a buffering writer — 8d-4). */
 static ssize_t h2_cb_send(void *ud, const void *data, size_t len) {
-    KlH2ServerConn *h2c = ud;
+    KlHttp2ServerConn *h2c = ud;
     return h2c->out_write(h2c->out_ctx, data, len);
 }
 
 /* Install a custom output writer (fn != NULL) or restore the default socket writer
  * (fn == NULL). The completion driver brackets a feed with this to capture the produced
  * frames into its own buffer for one ordered overlapped send. See internal.h. */
-void kl_h2_server_set_writer(KlHttpConn *c, KlH2WriteFn fn, void *ctx) {
+void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx) {
     if (!c->h2) return;
     if (fn) {
         c->h2->out_write = fn;
@@ -499,11 +499,11 @@ void kl_h2_server_set_writer(KlHttpConn *c, KlH2WriteFn fn, void *ctx) {
  * Connection lifecycle
  * ═══════════════════════════════════════════════════════════════════ */
 
-int kl_h2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *cfg,
+int kl_http2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlHttp2ServerConfig *cfg,
                           const char *leftover, size_t leftover_len) {
     KlAllocator *alloc = c->stream.alloc;
 
-    KlH2ServerConn *h2c = kl_malloc(alloc, sizeof(KlH2ServerConn));
+    KlHttp2ServerConn *h2c = kl_malloc(alloc, sizeof(KlHttp2ServerConn));
     if (!h2c) return KL_HTTP_CONN_CLOSED;
     memset(h2c, 0, sizeof(*h2c));
 
@@ -513,16 +513,16 @@ int kl_h2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *
 
     h2c->max_streams = cfg->max_concurrent_streams > 0
                        ? cfg->max_concurrent_streams
-                       : KL_H2_DEFAULT_MAX_STREAMS;
+                       : KL_HTTP2_DEFAULT_MAX_STREAMS;
 
-    if ((size_t)h2c->max_streams > SIZE_MAX / sizeof(KlH2ServerStream)) {
-        kl_free(alloc, h2c, sizeof(KlH2ServerConn));
+    if ((size_t)h2c->max_streams > SIZE_MAX / sizeof(KlHttp2ServerStream)) {
+        kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
         return KL_HTTP_CONN_CLOSED;
     }
-    size_t streams_size = sizeof(KlH2ServerStream) * (size_t)h2c->max_streams;
+    size_t streams_size = sizeof(KlHttp2ServerStream) * (size_t)h2c->max_streams;
     h2c->streams = kl_malloc(alloc, streams_size);
     if (!h2c->streams) {
-        kl_free(alloc, h2c, sizeof(KlH2ServerConn));
+        kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
         return KL_HTTP_CONN_CLOSED;
     }
     memset(h2c->streams, 0, streams_size);
@@ -538,7 +538,7 @@ int kl_h2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *
     h2c->session = cfg->factory(alloc, &h2c->callbacks, h2c);
     if (!h2c->session) {
         kl_free(alloc, h2c->streams, streams_size);
-        kl_free(alloc, h2c, sizeof(KlH2ServerConn));
+        kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
         return KL_HTTP_CONN_CLOSED;
     }
 
@@ -548,7 +548,7 @@ int kl_h2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *
         if (h2c->session->destroy)
             h2c->session->destroy(h2c->session);
         kl_free(alloc, h2c->streams, streams_size);
-        kl_free(alloc, h2c, sizeof(KlH2ServerConn));
+        kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
         return KL_HTTP_CONN_CLOSED;
     }
 
@@ -557,7 +557,7 @@ int kl_h2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *
         if (r < 0) {
             h2c->session->destroy(h2c->session);
             kl_free(alloc, h2c->streams, streams_size);
-            kl_free(alloc, h2c, sizeof(KlH2ServerConn));
+            kl_free(alloc, h2c, sizeof(KlHttp2ServerConn));
             return KL_HTTP_CONN_CLOSED;
         }
     }
@@ -576,20 +576,20 @@ static const char h2c_101_response[] =
     "Upgrade: h2c\r\n"
     "\r\n";
 
-int kl_h2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
-                                  KlH2ServerConfig *cfg,
+int kl_http2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
+                                  KlHttp2ServerConfig *cfg,
                                   const char *leftover, size_t leftover_len) {
     if (conn_write_all(c, h2c_101_response, sizeof(h2c_101_response) - 1) < 0)
         return KL_HTTP_CONN_CLOSED;
 
-    return kl_h2_server_upgrade(c, router, cfg, leftover, leftover_len);
+    return kl_http2_server_upgrade(c, router, cfg, leftover, leftover_len);
 }
 
 /* Transport-agnostic h2 core: feed already-received plaintext to the session (parse
  * frames + flush produced output). Shared by the readiness drive below and the
  * completion driver — see internal.h. */
-KlHttpConnState kl_h2_server_feed(KlHttpConn *c, const void *data, size_t len) {
-    KlH2ServerConn *h2c = c->h2;
+KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len) {
+    KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
 
     c->last_active_ms = kl_monotonic_ms();
@@ -615,7 +615,7 @@ KlHttpConnState kl_h2_server_feed(KlHttpConn *c, const void *data, size_t len) {
     return KL_HTTP_CONN_HTTP2;
 }
 
-int kl_h2_server_on_readable(KlHttpConn *c) {
+int kl_http2_server_on_readable(KlHttpConn *c) {
     if (!c->h2 || !c->h2->session) return KL_HTTP_CONN_CLOSED;
 
     int drains = 0;
@@ -624,7 +624,7 @@ read_more:
     ssize_t nr = conn_read(c, c->stream.read_buf, c->stream.read_cap);
     if (nr <= 0) return KL_HTTP_CONN_CLOSED;
 
-    KlHttpConnState st = kl_h2_server_feed(c, c->stream.read_buf, (size_t)nr);
+    KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, (size_t)nr);
     if (st != KL_HTTP_CONN_HTTP2) return (int)st;
 
     if (c->tls && c->tls->pending(c->tls) > 0 && ++drains < 256)
@@ -633,8 +633,8 @@ read_more:
     return KL_HTTP_CONN_HTTP2;
 }
 
-int kl_h2_server_on_writable(KlHttpConn *c) {
-    KlH2ServerConn *h2c = c->h2;
+int kl_http2_server_on_writable(KlHttpConn *c) {
+    KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return KL_HTTP_CONN_CLOSED;
 
     if (h2c->session->flush(h2c->session) < 0)
@@ -643,8 +643,8 @@ int kl_h2_server_on_writable(KlHttpConn *c) {
     return KL_HTTP_CONN_HTTP2;
 }
 
-void kl_h2_server_drain_shutdown(KlHttpConn *c) {
-    KlH2ServerConn *h2c = c->h2;
+void kl_http2_server_drain_shutdown(KlHttpConn *c) {
+    KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session || h2c->goaway_sent) return;
 
     h2c->session->shutdown(h2c->session);
@@ -653,8 +653,8 @@ void kl_h2_server_drain_shutdown(KlHttpConn *c) {
     h2c->goaway_sent = 1;
 }
 
-void kl_h2_server_cleanup(KlHttpConn *c) {
-    KlH2ServerConn *h2c = c->h2;
+void kl_http2_server_cleanup(KlHttpConn *c) {
+    KlHttp2ServerConn *h2c = c->h2;
     if (!h2c) return;
 
     while (h2c->num_streams > 0)
@@ -662,13 +662,13 @@ void kl_h2_server_cleanup(KlHttpConn *c) {
 
     if (h2c->streams) {
         kl_free(h2c->alloc, h2c->streams,
-                sizeof(KlH2ServerStream) * (size_t)h2c->max_streams);
+                sizeof(KlHttp2ServerStream) * (size_t)h2c->max_streams);
     }
 
     if (h2c->session)
         h2c->session->destroy(h2c->session);
 
-    kl_free(h2c->alloc, h2c, sizeof(KlH2ServerConn));
+    kl_free(h2c->alloc, h2c, sizeof(KlHttp2ServerConn));
     c->h2 = NULL;
 }
 
@@ -676,29 +676,29 @@ void kl_h2_server_cleanup(KlHttpConn *c) {
  * The shared server core reaches HTTP/2 only through this table; installing it
  * both wires the core and forces server_h2.o out of the static archive. */
 /* Readiness WRITE-interest predicate (h2 analogue of ws drain_pending): does the session
- * have queued output? Keeps server.c's rearm from peeking KlH2ServerConn internals. */
-static int kl_h2_server_want_write_hook(const KlHttpConn *c) {
+ * have queued output? Keeps server.c's rearm from peeking KlHttp2ServerConn internals. */
+static int kl_http2_server_want_write_hook(const KlHttpConn *c) {
     return c->h2 && c->h2->session && c->h2->session->want_write(c->h2->session);
 }
 
-static const KlH2ServerHooks kl_h2_server_hooks_table = {
-    .upgrade         = kl_h2_server_upgrade,
-    .upgrade_from_h1 = kl_h2_server_upgrade_from_h1,
-    .on_readable     = kl_h2_server_on_readable,
-    .on_writable     = kl_h2_server_on_writable,
-    .want_write      = kl_h2_server_want_write_hook,
-    .cleanup         = kl_h2_server_cleanup,
-    .drain_shutdown  = kl_h2_server_drain_shutdown,
+static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
+    .upgrade         = kl_http2_server_upgrade,
+    .upgrade_from_h1 = kl_http2_server_upgrade_from_h1,
+    .on_readable     = kl_http2_server_on_readable,
+    .on_writable     = kl_http2_server_on_writable,
+    .want_write      = kl_http2_server_want_write_hook,
+    .cleanup         = kl_http2_server_cleanup,
+    .drain_shutdown  = kl_http2_server_drain_shutdown,
 };
 
-void kl_h2_server_hooks_install(void) {
-    kl_h2_server_hooks_set(&kl_h2_server_hooks_table);
+void kl_http2_server_hooks_install(void) {
+    kl_http2_server_hooks_set(&kl_http2_server_hooks_table);
 }
 
 /* Also self-install at load, so a consumer driving connection.c's dispatch directly
  * (without kl_http_server_init — e.g. the unit tests) has the seam wired. Runs only if
- * this object is linked (a direct kl_h2_server_* reference pulls it in). */
+ * this object is linked (a direct kl_http2_server_* reference pulls it in). */
 __attribute__((constructor))
-static void kl_h2_server_hooks_autoinstall(void) {
-    kl_h2_server_hooks_install();
+static void kl_http2_server_hooks_autoinstall(void) {
+    kl_http2_server_hooks_install();
 }

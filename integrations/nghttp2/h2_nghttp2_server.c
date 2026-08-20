@@ -1,9 +1,9 @@
 /*
- * h2_nghttp2_server.c — server-side KlH2ServerSession backed by nghttp2.
+ * h2_nghttp2_server.c — server-side KlHttp2ServerSession backed by nghttp2.
  *
  * Maps the KEEL server session vtable (recv / submit_response / want_write /
  * flush / shutdown / destroy) onto an nghttp2 server session, and nghttp2's
- * receive callbacks back onto the KEEL-provided KlH2ServerCallbacks
+ * receive callbacks back onto the KEEL-provided KlHttp2ServerCallbacks
  * (on_request / on_data / on_stream_end / on_stream_reset / send). nghttp2 is
  * confined to this TU; no nghttp2 type crosses into KEEL headers.
  *
@@ -24,10 +24,10 @@
 /* ── Session + per-stream state ─────────────────────────────────────── */
 
 typedef struct {
-    KlH2ServerSession    base;       /* must be first */
+    KlHttp2ServerSession    base;       /* must be first */
     KlAllocator         *alloc;
     nghttp2_session     *ng;
-    KlH2ServerCallbacks *cbs;        /* KEEL-provided (borrowed) */
+    KlHttp2ServerCallbacks *cbs;        /* KEEL-provided (borrowed) */
     void                *ud;         /* KEEL user_data for cbs */
     int                  in_recv;    /* 1 while inside nghttp2_session_mem_recv */
 } NgServerSession;
@@ -225,7 +225,7 @@ static ssize_t ng_resp_body_read_cb(nghttp2_session *ng, int32_t stream_id,
 
 /* ── KEEL vtable ────────────────────────────────────────────────────── */
 
-static kl_ssize_t ng_server_recv(KlH2ServerSession *self, const void *data, size_t len) {
+static kl_ssize_t ng_server_recv(KlHttp2ServerSession *self, const void *data, size_t len) {
     NgServerSession *s = (NgServerSession *)self;
     /* Guard against re-entrant send: KEEL's h2.c submits a response + flushes
      * from within on_stream_end, which nghttp2 invokes inside mem_recv. Calling
@@ -233,7 +233,7 @@ static kl_ssize_t ng_server_recv(KlH2ServerSession *self, const void *data, size
      * frames in the same batch (an illegal trailing DATA/HEADERS would be missed).
      * Deferring the flush (see ng_server_flush) lets nghttp2 finish the whole
      * batch — generating the correct STREAM_CLOSED/PROTOCOL_ERROR — before KEEL's
-     * post-recv flush (kl_h2_server_feed) sends everything in order. */
+     * post-recv flush (kl_http2_server_feed) sends everything in order. */
     s->in_recv = 1;
     ssize_t r = nghttp2_session_mem_recv(s->ng, (const uint8_t *)data, len);
     s->in_recv = 0;
@@ -247,7 +247,7 @@ static kl_ssize_t ng_server_recv(KlH2ServerSession *self, const void *data, size
     return (ssize_t)r;
 }
 
-static int ng_server_submit_response(KlH2ServerSession *self, uint32_t stream_id,
+static int ng_server_submit_response(KlHttp2ServerSession *self, uint32_t stream_id,
                                      int status, const char **hdr_names,
                                      const char **hdr_values, int num_headers,
                                      const void *body, size_t body_len) {
@@ -293,17 +293,17 @@ static int ng_server_submit_response(KlH2ServerSession *self, uint32_t stream_id
     return rc == 0 ? 0 : -1;
 }
 
-static int ng_server_want_write(KlH2ServerSession *self) {
+static int ng_server_want_write(KlHttp2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
     return nghttp2_session_want_write(s->ng);
 }
 
-static int ng_server_want_read(KlH2ServerSession *self) {
+static int ng_server_want_read(KlHttp2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
     return nghttp2_session_want_read(s->ng);
 }
 
-static int ng_server_flush(KlH2ServerSession *self) {
+static int ng_server_flush(KlHttp2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
     /* Defer while inside recv (see ng_server_recv); KEEL flushes again right
      * after mem_recv returns, so nothing is lost. */
@@ -311,13 +311,13 @@ static int ng_server_flush(KlH2ServerSession *self) {
     return nghttp2_session_send(s->ng) == 0 ? 0 : -1;
 }
 
-static int ng_server_shutdown(KlH2ServerSession *self) {
+static int ng_server_shutdown(KlHttp2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
     /* Graceful GOAWAY carrying the last processed stream id. */
     return nghttp2_session_terminate_session(s->ng, NGHTTP2_NO_ERROR) == 0 ? 0 : -1;
 }
 
-static void ng_server_destroy(KlH2ServerSession *self) {
+static void ng_server_destroy(KlHttp2ServerSession *self) {
     NgServerSession *s = (NgServerSession *)self;
     if (!s) return;
     if (s->ng) nghttp2_session_del(s->ng);
@@ -326,8 +326,8 @@ static void ng_server_destroy(KlH2ServerSession *self) {
 
 /* ── Factory ────────────────────────────────────────────────────────── */
 
-KlH2ServerSession *kl_h2_nghttp2_server_session(KlAllocator *alloc,
-                                                KlH2ServerCallbacks *callbacks,
+KlHttp2ServerSession *kl_http2_nghttp2_server_session(KlAllocator *alloc,
+                                                KlHttp2ServerCallbacks *callbacks,
                                                 void *user_data) {
     if (!callbacks) return NULL;
     NgServerSession *s = kl_malloc(alloc, sizeof(*s));

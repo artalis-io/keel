@@ -107,10 +107,10 @@ void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
 /* Drive the HTTP/2 server session with already-received plaintext: parse frames +
  * flush produced output. Returns the next KlHttpConnState (KL_HTTP_CONN_HTTP2 / KL_HTTP_CONN_CLOSED).
  * The transport-agnostic h2 core (defined in h2.c): the readiness drive
- * (kl_h2_server_on_readable) is conn_read + this; the completion driver reads via its
- * own loop then calls this. Internal — the public h2 API and the KlH2ServerSession
+ * (kl_http2_server_on_readable) is conn_read + this; the completion driver reads via its
+ * own loop then calls this. Internal — the public h2 API and the KlHttp2ServerSession
  * vtable are unchanged, so the event axis stays invisible to h2 users. */
-KlHttpConnState kl_h2_server_feed(KlHttpConn *c, const void *data, size_t len);
+KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len);
 
 /* HTTP/2 output boundary seam (8d-4). The h2 server writes produced frame bytes through
  * a per-connection writer; the default writes the socket (conn_write). A completion
@@ -118,8 +118,8 @@ KlHttpConnState kl_h2_server_feed(KlHttpConn *c, const void *data, size_t len);
  * ordered overlapped send, then restores the default (fn == NULL). Symmetric with the
  * WebSocket server's kl_drain boundary; keeps all completion buffering in the driver, not
  * h2.c. Defined in h2.c. */
-typedef ssize_t (*KlH2WriteFn)(void *ctx, const void *data, size_t len);
-void kl_h2_server_set_writer(KlHttpConn *c, KlH2WriteFn fn, void *ctx);
+typedef ssize_t (*KlHttp2WriteFn)(void *ctx, const void *data, size_t len);
+void kl_http2_server_set_writer(KlHttpConn *c, KlHttp2WriteFn fn, void *ctx);
 
 /* Server logging helpers (defined in server.c; used by the per-platform
  * server_plat_*.c TUs too). */

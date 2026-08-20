@@ -186,11 +186,32 @@ outside HTTP.
 | `KlH2ServerSession` `KlH2ServerSessionFactory` `KlH2ServerConfig` `KlH2ServerConn` `KlH2ServerCallbacks` `KlH2ServerStream` | `KlHttp2ServerSession` `…Factory` `KlHttp2ServerConfig` `…Conn` `…Callbacks` `…Stream` |
 | `KlH2Client` `KlH2ClientSession(Factory)` `KlH2ClientConfig` `KlH2ClientConn` `KlH2ClientCallbacks` `KlH2ClientStream` `KlH2ClientResponse` `KlH2ClientHeader` `KlH2ClientResponseFn` `KlH2ClientErrorFn` | `KlHttp2Client…` (same suffixes) |
 | `KlH2WriteFn` (internal — `src/internal.h`/`h2_internal.h`, the h2 frame output sink) | `KlHttp2WriteFn` |
-| `kl_h2_*` (e.g. `kl_h2_server_set_writer`) | `kl_http2_*` |
+| `KlH2CompHooks` `KlH2ServerHooks` (internal completion/readiness hook structs, `http_proto_hooks.h`) | `KlHttp2CompHooks` `KlHttp2ServerHooks` |
+| `kl_h2_*` (e.g. `kl_h2_server_set_writer`) + `kl_comp_h2_drive` (completion driver, `completion_h2.c`) | `kl_http2_*` + `kl_comp_http2_drive` |
 
 The HTTP/2 **engine is not redesigned** — the session vtable seam, ALPN/h2c routing, completion paths,
 nghttp2 integration, and shared application-model convergence are preserved verbatim; only the
 classification prefix changes (`H2` → `Http2`).
+
+**Scope boundary (RULED).** The rename covers the three named token classes (`KlH2*`, `kl_h2_*`,
+`KL_H2_*`) + the coupled `kl_comp_h2_drive` + the `h2*` files. It deliberately does **not** touch
+(a) **file-local static identifiers** inside those TUs (e.g. `h2_stream_find`, `h2_cb_*`,
+`h2_submit_response`, `comp_h2_capture_write`, `CompH2Cap`, `g_h2_hooks`, `g_h2_comp_hooks`, `H2_INIT`)
+— implementation details with no linkage/API visibility, matched by no gate scan; nor (b) **genuine
+HTTP/2 wire/protocol terminology** — the ALPN token `"h2"`, the cleartext-upgrade name `h2c` and its
+state machine (`H2cState`, `h2c_*`, `H2C_*`), and the connection preface — which are protocol
+identifiers, not taxonomy labels. Renaming either would be churn without contract meaning; both are
+outside the frozen public/inter-TU surface.
+
+**Integration adapters (RULED — symbols now, files/prose in T3/T4).** The nghttp2 adapter's *symbols*
+are renamed in T2f with everything else (it exposes the `KlHttp2ServerSession` / `KlHttp2ClientSession`
+vtables and its `kl_h2_nghttp2_*` factories become `kl_http2_nghttp2_*`), and the integration builds
+green against the renamed core headers. Its *filenames* (`integrations/nghttp2/h2_nghttp2_{client,server}.c`,
+`keel_h2_nghttp2.h`), its archive (`libkeel_h2_nghttp2.a`), the matching `LIB`/`OBJ` tokens + comments in
+`integrations/nghttp2/Makefile`, and `integrations/nghttp2/README.md` prose are NOT in the frozen §4 core
+file map and are deferred to the T3/T4 integration + documentation reconciliation — same bucket as the
+other `integrations/*/README.md` and Makefile-comment deferrals. The §11 tree-wide scan requires no stale
+*symbol* in `integrations/`; it does not mandate integration *filename* renames.
 
 ### 3.3 HTTP/1.x internal → `KlHttp1*`
 
@@ -489,6 +510,7 @@ THREE independent scans (the `check-no-kludp` lesson: token-oriented, not line-f
   KlH2ServerSessionFactory KlH2ServerConfig KlH2ServerConn KlH2ServerCallbacks KlH2ServerStream
   KlH2Client KlH2ClientSession KlH2ClientSessionFactory KlH2ClientConfig KlH2ClientConn KlH2ClientCallbacks
   KlH2ClientStream KlH2ClientResponse KlH2ClientHeader KlH2ClientResponseFn KlH2ClientErrorFn KlH2WriteFn
+  KlH2CompHooks KlH2ServerHooks
   KlParserFactory KlAccessLogFn KlLogFn KlTransport KlClientState KlClientConnectAttempt`.
   (Not banned — deliberately KEPT generic: `KlCompress KlCompressConfig KlCompressCtx KlCompressFactory
   KlDecompress KlDecompressConfig KlDecompressStream KlSlotLease KlWs* KlCidr KlProxyResult KlAsyncOp
@@ -503,7 +525,10 @@ THREE independent scans (the `check-no-kludp` lesson: token-oriented, not line-f
 - **Function tokens — extracted individually** (`grep -o`, one per line with `file:line`), ban the old
   public families: `kl_server_ kl_client_ kl_request_ kl_response_ kl_conn_ kl_router_ kl_cors_
   kl_body_reader_ kl_buf_reader_ kl_multipart_ kl_sse_ kl_redirect_ kl_cpool_ kl_parser_ kl_chunked_
-  kl_h2_` (→ `kl_http2_`) **plus the exact internal server-log helpers `kl_log` / `kl_log_errno`**
+  kl_h2_` (→ `kl_http2_`) **plus the completion-axis h2 entry `kl_comp_h2_` (→ `kl_comp_http2_`; e.g.
+  `kl_comp_h2_drive`, the lib-internal driver defined in `completion_h2.c`→`completion_http2.c` — renamed
+  with its file so no `h2` infix survives on an exported symbol; NOT a `kl_h2_` prefix so listed
+  explicitly)** **plus the exact internal server-log helpers `kl_log` / `kl_log_errno`**
   (→ `kl_http_server_log` / `kl_http_server_log_errno`; exact tokens, not a `kl_log_` prefix)
   **plus the single HTTP adapter exception `kl_compress_stream_`** (while the
   codec family `kl_compress_*` and all of `kl_decompress_*` stay allowed). Retained generic roots

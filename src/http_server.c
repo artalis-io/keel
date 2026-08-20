@@ -537,7 +537,7 @@ rearm_listen:
 
             /* HTTP/2 — handle read/write events through the h2 seam. */
             if (c->state == KL_HTTP_CONN_HTTP2) {
-                const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+                const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
                 if (!h2h) { new_state = KL_HTTP_CONN_CLOSED; goto transition; }
                 if (events[i].ready & KL_EVENT_READ)
                     new_state = (KlHttpConnState)h2h->on_readable(c);
@@ -588,7 +588,7 @@ transition:
                 }
             } else if (new_state == KL_HTTP_CONN_HTTP2) {
                 KlEventMask mask = KL_EVENT_READ;
-                const KlH2ServerHooks *h2h = kl_h2_server_hooks();
+                const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
                 if (h2h && h2h->want_write && h2h->want_write(c))
                     mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
                 if (kl_event_mod(&s->ev.loop, c->stream.fd, mask, &c->stream) < 0) {
