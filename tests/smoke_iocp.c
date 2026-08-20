@@ -109,7 +109,7 @@ static void handle_bigstream(KlRequest *req, KlResponse *res, void *ctx) {
     kl_response_end_stream(res);
 }
 
-/* UDP echo over the IOCP completion loop (8b-4c): a KlUdp on the server's ctx
+/* UDP echo over the IOCP completion loop (8b-4c): a KlDatagram on the server's ctx
  * receives via WSARecvFrom completions and echoes each datagram back to its source
  * (synchronous sendto — overlapped UDP send is 8b-4d). */
 static KlDatagram g_udp;
@@ -455,7 +455,7 @@ int main(void) {
     int proxy_ok = (ok && post_ok && file_ok && stream_ok && bigfile_ok && bigstream_ok)
                        ? proxy_over_completion_ok() : 0;
 
-    /* UDP echo roundtrip — a raw datagram client hits the KlUdp on the IOCP loop. */
+    /* UDP echo roundtrip — a raw datagram client hits the KlDatagram on the IOCP loop. */
     int udp_ok = 0;
     if (ok && post_ok && file_ok && stream_ok && bigfile_ok && bigstream_ok && udp_ready) {
         SOCKET cs = socket(AF_INET, SOCK_DGRAM, 0);
