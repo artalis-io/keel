@@ -98,8 +98,6 @@ int kl_version_number(void);
 #include <keel/compress.h>
 #include <keel/decompress.h>
 #include <keel/drain.h>
-#include <keel/udp.h>
-#include <keel/udp_server.h>
 #include <keel/sse.h>
 #include <keel/timer.h>
 

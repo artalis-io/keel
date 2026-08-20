@@ -14,7 +14,6 @@
 #include "event_builtin.h"
 #include <keel/server.h>
 #include <keel/connection.h>
-#include <keel/udp.h>            /* KlUdp — datagram recv over completion (8b-4c) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
 #include "sockaddr_native.h"     /* KlSockAddr -> Winsock sockaddr for the overlapped UDP send */
@@ -97,7 +96,7 @@ typedef struct KlIocpOp {
     KlAllocator  *alloc;
     KlStream     *stream;                      /* READ / WRITE / SENDFILE target (raw transport) */
     /* Datagram ops (DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at post
-     * so the op NEVER dereferences KlUdpTransport afterwards (the owner may be freed while this op is in
+     * so the op NEVER dereferences the transport owner afterwards (the owner may be freed while this op is in
      * flight). The recv buffer + capacity + pktinfo flag are COPIED at post (buf/buflen/dg_pktinfo) so
      * the completion touches only the op; op_sock already carries the socket (CancelIoEx / GetOverlappedResult). */
     KlDgramLife  *life;
@@ -908,7 +907,7 @@ static int iocp_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int m
 
             /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op.
              * Transfer the token ref op → event (released after dispatch); NULL op->life so
-             * iocp_op_free does not double-release. Never dereference KlUdpTransport. */
+             * iocp_op_free does not double-release. Never dereference the transport owner. */
             memset(&out[count], 0, sizeof(out[count]));
             out[count].kind = KL_COMP_DGRAM_RECV;
             out[count].life = op->life; op->life = NULL;

@@ -46,7 +46,6 @@
 #include "event_builtin.h"
 #include <keel/server.h>
 #include <keel/connection.h>
-#include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include "sockaddr_native.h"     /* KlSockAddr -> host sockaddr for the overlapped UDP send */
 #include "event_caps.h"
@@ -100,7 +99,7 @@ typedef struct KlIouOp {
     KlSocketHandle fd;
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
     /* Datagram ops (IOU_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
-     * post so the op NEVER dereferences KlUdpTransport afterwards (the owner may be freed while this op is
+     * post so the op NEVER dereferences the transport owner afterwards (the owner may be freed while this op is
      * in flight). The recv buffer + capture flags are COPIED at post (into buf/buflen/dg_pktinfo/
      * dg_gro) so the completion touches only the op. */
     KlDgramLife   *life;
@@ -898,7 +897,7 @@ static int iou_complete(KlIouState *st, KlIouOp *op, int res, KlCompletionEvent 
     case IOU_DGRAM_RECV:
         /* The buffer + flags were COPIED at post; the token ref pins the buffer past this op. Transfer
          * the token ref op → event (released after dispatch); NULL op->life so iou_op_free does not
-         * double-release. Never dereference KlUdpTransport. */
+         * double-release. Never dereference the transport owner. */
         ev->kind = KL_COMP_DGRAM_RECV;
         ev->life = op->life; op->life = NULL;
         ev->ok = (res >= 0);

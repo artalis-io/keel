@@ -302,7 +302,7 @@ void kl_dgram_life_release(KlDgramLife *l);
 /* ── LC-3a: per-udp-socket slot ───────────────────────────────────────────────────
  * One slot per KlUdp bound over the raw backend. `pcb == NULL` = free slot. `life` is the stable
  * token the op retained at post (the drain transfers it to the KL_COMP_DGRAM_RECV/SEND event, so the
- * backend never dereferences the possibly-freed KlUdpTransport). The slot holds exactly
+ * backend never dereferences the possibly-freed transport owner). The slot holds exactly
  * `(rx_armed ? 1 : 0) + pend_send` token refs; close/teardown release that many. The receive side is
  * ONE held datagram (`held`/`has_held`, the one-held-packet contract) — a second arrival while one is
  * held is dropped, never buffered. `rx_armed` gates delivery to the completion contract's one-in-flight

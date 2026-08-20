@@ -126,7 +126,7 @@ typedef enum {
  * valid until the NEXT kl_lwr_udp_drain on that ctx (the backend delivers it inline before then).
  * `life` is the stable-liveness token (KlDgramLife*) the op retained at post; the drain TRANSFERS it
  * to the completion event (ev->life), so the backend recovers the owner through the token and never
- * dereferences the possibly-freed KlUdpTransport. See src/datagram_life.h + docs/datagram_contract.md §6. */
+ * dereferences the possibly-freed transport owner. See src/datagram_life.h + docs/datagram_contract.md §6. */
 typedef struct {
     KlLwrUdpKind kind;
     void        *life;        /* KlDgramLife* — token ref transferred op → event */

@@ -61,7 +61,7 @@
  * the glue-level T7 without pulling the src/ header. Resolves against libkeel's datagram_life.o.
  * (7B-2a: create gained the {kind, dispatch} completion-routing identity — unused here, so NULL.) */
 typedef struct KlDgramLife KlDgramLife;
-typedef enum { KL_DGRAM_OWNER_UDP = 0, KL_DGRAM_OWNER_DATAGRAM } KlDgramOwnerKind;
+typedef enum { KL_DGRAM_OWNER_DATAGRAM = 0 } KlDgramOwnerKind;
 struct KlCompletionEvent;
 typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);
 KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx,
@@ -286,8 +286,8 @@ static int t6_glue_one_held(void) {
     if (!rx || !tx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T6: rx bind"); }
     uint16_t port = kl_lwr_udp_local_port(rx);
 
-    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
-    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
+    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
     if (!lrx || !ltx) {
         kl_dgram_life_release(lrx); kl_dgram_life_release(ltx);
         kl_lwr_ctx_destroy(lwrctx); return fail("T6: token create");
@@ -359,8 +359,8 @@ static int t7_glue_unarmed_drop(void) {
     if (!rx || !tx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T7: rx bind"); }
     uint16_t port = kl_lwr_udp_local_port(rx);
 
-    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);   /* owner ref each */
-    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
+    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);   /* owner ref each */
+    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
     if (!lrx || !ltx) {                 /* release whichever succeeded (NULL-safe) before teardown */
         kl_dgram_life_release(lrx);
         kl_dgram_life_release(ltx);

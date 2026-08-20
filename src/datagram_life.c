@@ -7,10 +7,10 @@
 #include <string.h>
 
 struct KlDgramLife {
-    KlAllocator *alloc;                 /* event-ctx / backend allocator (outlives KlUdp) */
+    KlAllocator *alloc;                 /* event-ctx / backend allocator (outlives the transport) */
     int          refs;                  /* owner ref (1) + one per posted backend op */
-    int          live;                  /* 1 = target valid; 0 = owner freed (kl_udp_free) */
-    void        *target;                /* the owner (KlUdp), or NULL once dead */
+    int          live;                  /* 1 = target valid; 0 = owner torn down */
+    void        *target;                /* the owner (KlDgramCore), or NULL once dead */
     void       (*on_final)(void *ctx);  /* frees owner receive storage on the final release */
     void        *final_ctx;
     KlDgramOwnerKind  kind;             /* completion-routing identity (7B-2a) */
@@ -37,7 +37,7 @@ KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target,
 }
 
 KlDgramOwnerKind kl_dgram_life_kind(const KlDgramLife *l) {
-    return l ? l->kind : KL_DGRAM_OWNER_UDP;
+    return l ? l->kind : KL_DGRAM_OWNER_DATAGRAM;
 }
 KlDgramDispatchFn kl_dgram_life_dispatch(const KlDgramLife *l) {
     return l ? l->dispatch : (KlDgramDispatchFn)0;

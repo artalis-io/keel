@@ -211,10 +211,6 @@ jobs:
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-tcp
 
-      - name: Link + UDP datagram roundtrip smoke test
-        timeout-minutes: 3
-        run: make OS=windows CC=gcc smoke-udp
-
       - name: Link + public KlDatagram roundtrip smoke test
         timeout-minutes: 3
         run: make OS=windows CC=gcc smoke-datagram
@@ -276,14 +272,6 @@ jobs:
       - name: End-to-end async/thread-pool-over-IOCP roundtrip smoke test
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-async
-
-      # Datagram-over-IOCP: smoke_udp drives a real UDP roundtrip + teardown over the default
-      # (IOCP) loop, so this is the runtime gate for event_iocp.c's datagram completion path —
-      # WSARecvMsg/WSASendTo posts and, per phase-B.6.3, the stable-token retain/transfer/release
-      # (in-flight teardown frees the receive storage without touching the freed KlDatagram).
-      - name: End-to-end UDP-over-IOCP datagram roundtrip smoke test
-        timeout-minutes: 3
-        run: make OS=windows BACKEND=iocp CC=gcc smoke-udp
 
       # Public KlDatagram-over-IOCP (7B-7): smoke_datagram preps its fds through the socket seam and
       # drives a real roundtrip + clean DETACHED close over the IOCP loop. This is the RUNTIME proof of
@@ -382,7 +370,7 @@ jobs:
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 
-      - name: Freestanding datagram gate (KlUdp + Tier-1 machine; compile + header + symbol)
+      - name: Freestanding datagram gate (KlDatagram + Tier-1 machine; compile + header + symbol)
         run: make freestanding-dgram
 
       - name: Freestanding DNS gate (stock resolver, UDP-only; compile + header + symbol + composition)

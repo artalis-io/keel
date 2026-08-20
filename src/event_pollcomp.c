@@ -35,7 +35,6 @@
 #include "event_pollcomp_internal.h"
 #include <keel/server.h>
 #include <keel/connection.h>
-#include <keel/udp.h>            /* KlUdp — datagram recv/send over completion */
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED + seam */
@@ -63,7 +62,7 @@ typedef struct KlPcOp {
     KlSocketHandle fd;                    /* the descriptor this op polls */
     KlStream      *stream;               /* READ / WRITE / SENDFILE target (raw transport) */
     /* Datagram ops (PC_DGRAM_RECV/_SEND): the transport-neutral stable-liveness token, retained at
-     * post so the op NEVER dereferences KlUdpTransport afterwards. The recv buffer + capture flags are
+     * post so the op NEVER dereferences the transport owner afterwards. The recv buffer + capture flags are
      * COPIED at post (into buf/buflen/dg_pktinfo/dg_gro) so the completion touches only the op. */
     KlDgramLife   *life;
     int            dg_pktinfo;            /* UDP_RECV: capture pktinfo local addr */
@@ -472,7 +471,7 @@ static int pc_emit_abort(KlPcOp *op, KlCompletionEvent *ev) {
     case PC_READ:                    ev->kind = KL_COMP_READ;  ev->target = op->stream; return 1;
     case PC_WRITE: case PC_SENDFILE: ev->kind = KL_COMP_WRITE; ev->target = op->stream; return 1;
     /* Datagram: transfer the token reference op → event (released after dispatch); the op no longer
-     * owns it, so pc_op_free must not release it. Never touch KlUdpTransport. */
+     * owns it, so pc_op_free must not release it. Never touch the transport owner. */
     case PC_DGRAM_RECV:                ev->kind = KL_COMP_DGRAM_RECV; ev->life = op->life; op->life = NULL; return 1;
     case PC_DGRAM_SEND:                ev->kind = KL_COMP_DGRAM_SEND; ev->life = op->life; op->life = NULL; return 1;
     case PC_CONNECT:                 /* never reached: cancelled connect ops are freed in

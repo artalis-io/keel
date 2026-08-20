@@ -32,7 +32,7 @@
 /* KlDgramLife API (forward-declared to drive the glue directly, as raw_udp_test does; resolves against
  * libkeel's datagram_life.o without pulling the internal src/ header). */
 typedef struct KlDgramLife KlDgramLife;
-typedef enum { KL_DGRAM_OWNER_UDP = 0, KL_DGRAM_OWNER_DATAGRAM } KlDgramOwnerKind;
+typedef enum { KL_DGRAM_OWNER_DATAGRAM = 0 } KlDgramOwnerKind;
 struct KlCompletionEvent;
 typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);
 KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx,
@@ -143,7 +143,7 @@ static int t3_glue_cancel_semantics(void) {
     const uint8_t lo[4] = { 127, 0, 0, 1 };
     void *rx = kl_lwr_udp_new();
     if (!rx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T3 bind"); }
-    KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
+    KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
     if (!l) { kl_lwr_ctx_destroy(lwrctx); return fail("T3 token"); }
 
     int rc = 0;
@@ -195,7 +195,7 @@ static int t4_saturation_reuse(void) {
         void *p = kl_lwr_udp_new();
         if (!p) break;                          /* slot table full */
         if (n >= 16) { rc = fail("T4 slot count > 16"); break; }
-        KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, KL_DGRAM_OWNER_UDP, (KlDgramDispatchFn)0);
+        KlDgramLife *l = kl_dgram_life_create(&alloc, NULL, noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
         if (!l || kl_lwr_udp_bind(p, lo, 0) != 0 || kl_lwr_udp_post_recv(lwrctx, p, l) != 0) {
             kl_dgram_life_release(l); kl_lwr_udp_close(lwrctx, p); rc = fail("T4 arm"); break;
         }

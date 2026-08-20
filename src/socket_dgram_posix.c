@@ -2,8 +2,8 @@
  * socket_dgram_posix.c — the POSIX datagram data-plane (KlDatagramOps) for the
  * built-in POSIX socket provider. This is the primitive-only form of what used to
  * live in udp_io_posix.c: every op takes (ctx, fd, …) and speaks KlSockAddr, with
- * no KlUdp machine state — the send-queue walk, delivery, and interest tracking
- * stay in udp.c, which dispatches through KlSocketProvider.dgram.
+ * no datagram machine state — the send-queue walk, delivery, and interest tracking
+ * stay in the datagram core, which dispatches through KlSocketProvider.dgram.
  *
  * The recvmsg path always attaches a control buffer and parses opportunistically:
  * the kernel only fills the cmsgs that configure() enabled, so the primitive needs
@@ -411,7 +411,7 @@ static int pdg_mcast(void *ctx, KlSocketHandle fd, int family,
     return -1;
 }
 
-/* ── mmsg batching (Linux; NULL ops elsewhere → udp.c per-datagram loop) ── */
+/* ── mmsg batching (Linux; NULL ops elsewhere → the datagram core per-datagram loop) ── */
 
 #if defined(__linux__)
 typedef struct {

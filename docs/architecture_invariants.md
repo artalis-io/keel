@@ -122,7 +122,7 @@ nested / overflow / depth-0), demonstrated to fail against the pre-fix behavior.
   unreachable rather than merely survivable.
 - **Anchor:** [completion.h](../src/completion.h) `KlCompletionEvent.life` + `retain_life` (the
   borrowed-vs-transferred rule), released *iff* `!retain_life` at all three sites —
-  [completion_core.c](../src/completion_core.c), [datagram.c](../src/datagram.c), [udp.c](../src/udp.c).
+  [completion_core.c](../src/completion_core.c), [datagram.c](../src/datagram.c).
 - **Enforced by:** ASan/UBSan/LSan over the completion driver (`make smoke-pollcomp-asan`,
   container `make smoke-iouring-asan`); the R3 lifetime audit builds the full target table.
 
@@ -206,10 +206,9 @@ seam only when a missing semantic is documented and reviewed.
   via the Keel completion **tick** (`io_engine.h`: `kl_comp_run` / `kl_comp_post_connect`) — a Keel
   orchestration seam, not a backend internal. A new infrastructure TU that needs the headers is added
   to `TIER1_INFRA` with a reason; nothing else may include them.
-- **Address exceptions (separate, I6):** `udp_server.c` (its datagram handler API surfaces the source
-  `struct sockaddr`) and `dns_resolver.c` (the freestanding DNS-over-TCP fallback) carry deliberate,
-  documented *address* exceptions — which is why they sit outside the address-neutral set — and are
-  governed by the Tier-1 boundary (they include no platform/backend header).
+- **Address exceptions (separate, I6):** `dns_resolver.c` (the freestanding DNS-over-TCP fallback)
+  carries a deliberate, documented *address* exception — which is why it sits outside the
+  address-neutral set — and is governed by the Tier-1 boundary (it includes no platform/backend header).
 - **Enforced by:** `make check-tier1-boundary` (found zero defects); the protocol-independence
   inventory in [keel_axis_audit.md](keel_axis_audit.md) (Goal 4).
 

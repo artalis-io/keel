@@ -24,13 +24,12 @@
 
 struct KlServer;
 struct KlEventCtx;
-struct KlUdpTransport;   /* legacy datagram transport (KlUdp's) — the CALLER, not passed to the seam */
 struct sockaddr;
 
 /* ── Neutral datagram completion-op descriptors (7B-2b) ───────────────────────────────────────
- * post_dgram_send/recv are CORE-NATIVE: they carry everything the op needs by value, so BOTH the
- * legacy KlUdpTransport (via udp.c) and the public KlDatagram/KlDgramCore (7B-3) build them from their
- * own state — the backend never dereferences a transport object. OWNERSHIP (frozen §2.5.1): the caller
+ * post_dgram_send/recv are CORE-NATIVE: they carry everything the op needs by value, so the public
+ * KlDatagram/KlDgramCore (7B-3) builds them from its own state — the backend never dereferences a
+ * transport object. OWNERSHIP (frozen §2.5.1): the caller
  * retains one `life` ref and TRANSFERS it into the op ONLY on a SUCCESSFUL post; on failure the post
  * takes nothing and the CALLER releases its ref (the backend must not retain/release it). A send op's
  * payload AND dest/src/tos are COPIED before a successful return; a recv op's `buf` is LENT (the

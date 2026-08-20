@@ -16,10 +16,9 @@
  * (completion_driver.c) and the completion callers (async.c / server.c / udp.c) call
  * these free functions unchanged. See completion.h / event_dispatch.c.
  */
-#include <keel/event_ctx.h>   /* KlEventCtx (->loop), KlServer/KlConn/KlUdp reach the loop */
+#include <keel/event_ctx.h>   /* KlEventCtx (->loop), KlServer/KlConn reach the loop */
 #include <keel/server.h>      /* struct KlServer (->ev.loop) */
 #include <keel/connection.h>  /* struct KlConn (->ctx->loop) */
-#include <keel/udp.h>         /* struct KlUdp (->ctx->loop) */
 #include "completion.h"
 #include "io_engine.h"        /* kl_completion_axis_available */
 
