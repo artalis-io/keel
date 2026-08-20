@@ -34,7 +34,7 @@
 #include <keel/datagram_detail.h>    /* opt-in KlDatagram layout (stack-allocate the handle) */
 #include "../../src/datagram_open.h" /* kl_datagram_teardown — synchronous owner-destruction (Option A) */
 #include <keel/allocator.h>          /* KlAllocator (KlDgramLife tests) */
-#include <keel/event_ctx.h>          /* KlEventCtx (end-to-end KlUdp test) */
+#include <keel/event_ctx.h>          /* KlEventCtx (end-to-end KlDatagram test) */
 #include "../../src/datagram_life.h" /* KlDgramLife create/retain/release/mark_dead (6.4b-3b) */
 #include "../../src/socket.h"        /* KlSocketProvider, KlSocketOps, kl_handle_valid */
 #include "../../src/completion.h"    /* KlCompletionOps, KlCompletionEvent, KL_COMP_* */
@@ -634,7 +634,7 @@ static void talloc_free_all(void) { for (int i = 0; i < g_talloc.n; i++) free(g_
 static int g_on_final_ran;
 static void mock_on_final(void *ctx) { (void)ctx; g_on_final_ran++; }
 static int g_udp_e2e_drain_fired;
-static void udp_e2e_on_drain(KlUdp *u, void *ud) { (void)u; (void)ud; g_udp_e2e_drain_fired++; }
+static void udp_e2e_on_drain(void *ud) { (void)ud; g_udp_e2e_drain_fired++; }
 
 /* Fresh UDP datagram provider each test (re-inits the file-scope ctx over the fake bs). The
  * static slot pool is reclaimed as tests close their sockets; a quarantine test leaks one slot
@@ -1636,7 +1636,7 @@ static void t_dgram_life_delivered_recv(void) {
     CHECK(COMP(ep)->retire_dgram(NULL, life, KL_DGRAM_OP_RECV, &terr) == KL_DGRAM_RETIRE_RETIRED,
           "7B-2 retire_dgram: delivered+drained recv → RETIRED (op physically gone)");
     CHECK(terr == 0, "7B-2 retire_dgram: no transport error on a clean retirement");
-    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop (kl_udp_free) */
+    kl_dgram_life_mark_dead(life); kl_dgram_life_release(life);   /* owner drop (kl_datagram_free) */
     CHECK(g_on_final_ran == 1, "on_final RAN once event + owner refs released (confirmed retirement)");
     kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
 }
@@ -1676,57 +1676,69 @@ static void t_dgram_two_concurrent_sends(void) {
     kl_uefi_udp_close(fd); kl_uefi_event_provider_reset(); talloc_free_all();
 }
 
-/* End-to-end KlUdp (review-High #2): a source-pinned/TOS send routes to the sync dgram->send, which
- * must publish its OWN (fatal) classification into the unified provider's io_status — so udp.c DROPS
- * (returns -1), not queues (returns 0), even when the shared channel held a stale WOULD_BLOCK. */
+/* End-to-end KlDatagram (review-High #2): a per-packet-TOS send over EFI_UDP4 — which the EFI
+ * datagram provider cannot honour per packet — must be REJECTED (a non-ACCEPTED status, no Transmit),
+ * NOT silently queued, even when the shared provider io_status held a stale WOULD_BLOCK. Preserves the
+ * EFI unsupported-send coverage over the public API. */
 static void t_udp_e2e_unsupported_send_not_queued(void) {
-    T_CASE("udp e2e: KlUdp TOS send REJECTED (not queued) — dg_send publishes FATAL over stale io_status");
+    T_CASE("dgram e2e: KlDatagram TOS send REJECTED (not queued) over EFI_UDP4 despite stale io_status");
     reset_counters();
     kl_uefi_event_provider_reset();
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlEventCtx ev;
     CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
     ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);   /* unified provider (DATAGRAM) */
-    KlUdp udp;
-    KlUdpConfig uc; memset(&uc, 0, sizeof(uc)); uc.ctx = &ev; uc.family = AF_INET_; uc.alloc = &g_ta;
-    CHECK(kl_udp_init(&udp, &uc) == 0, "kl_udp_init over EFI_UDP4 (completion)");
+    KlDatagram udp;
+    KlDatagramSocketConfig uc; memset(&uc, 0, sizeof(uc)); uc.ctx = &ev; uc.family = AF_INET_; uc.alloc = &g_ta;
+    CHECK(kl_datagram_socket_init(&udp, &uc) == 0, "kl_datagram_socket_init over EFI_UDP4 (completion)");
     /* Poison the provider-global io_status with a stale WOULD_BLOCK (as a prior stream would-block would). */
     kl_uefi_provider_set_last_status(EFI_NOT_READY);
     KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
-    int r = kl_udp_send_to_tos(&udp, "x", 1, &dest, 5);   /* tos>=0 → sync dgram->send → reject */
-    CHECK(r < 0, "TOS send REJECTED (r<0) — NOT queued (a queued send would return 0)");
+    KlDatagramSendStatus r = kl_datagram_send(   /* tos>=0 → unsupported per-packet TOS over EFI → reject */
+        &udp, &(KlDatagramMessage){ .data = "x", .len = 1, .peer = &dest, .tos = 5 });
+    CHECK(r != KL_DATAGRAM_ACCEPTED, "TOS send REJECTED — NOT queued (an accepted send is KL_DATAGRAM_ACCEPTED)");
     CHECK(g_udp_tx_calls == 0, "no EFI Transmit for a rejected send");
-    kl_udp_free(&udp);
+    /* Public close lifecycle: abortive close → pump until CLOSED → free. */
+    (void)kl_datagram_close_cancel(&udp);
+    for (int i = 0; i < 16 && kl_datagram_close_state(&udp) != KL_DGRAM_CLOSE_CLOSED; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_close_state(&udp) == KL_DGRAM_CLOSE_CLOSED, "e2e close reached CLOSED");
+    kl_datagram_free(&udp);
     kl_event_ctx_free(&ev);
     kl_uefi_event_provider_reset();
 }
 
 /* End-to-end (review-High): a FAILED completion send must still release its full q_bytes reservation
- * — udp.c reserves snd_len at post and releases ev->bytes on completion, so the drain must emit snd_len
- * even on failure, else the send queue stays inflated and on_drain never fires (false backpressure). */
+ * — the datagram send machine reserves snd_len at post and releases ev->bytes on completion, so the
+ * drain must emit snd_len even on failure, else the send queue stays inflated and on_drain never fires
+ * (false backpressure). */
 static void t_udp_e2e_failed_send_releases_queue(void) {
-    T_CASE("udp e2e: a FAILED completion send releases its q_bytes reservation → queue→0 + on_drain fires");
+    T_CASE("dgram e2e: a FAILED completion send releases its q_bytes reservation → queue→0 + on_drain fires");
     reset_counters();
     kl_uefi_event_provider_reset();
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlEventCtx ev;
     CHECK(kl_event_ctx_init_ex(&ev, &g_ta, ep) == 0, "event ctx init (EFI completion)");
     ev.sockets = kl_uefi_socket_provider(&g_bs, (EFI_HANDLE)0x1);
-    KlUdp udp;
-    KlUdpConfig uc; memset(&uc, 0, sizeof(uc)); uc.ctx = &ev; uc.family = AF_INET_; uc.alloc = &g_ta;
-    CHECK(kl_udp_init(&udp, &uc) == 0, "kl_udp_init over EFI_UDP4 (completion)");
+    KlDatagram udp;
+    KlDatagramSocketConfig uc; memset(&uc, 0, sizeof(uc)); uc.ctx = &ev; uc.family = AF_INET_; uc.alloc = &g_ta;
+    CHECK(kl_datagram_socket_init(&udp, &uc) == 0, "kl_datagram_socket_init over EFI_UDP4 (completion)");
     g_udp_e2e_drain_fired = 0;
-    kl_udp_on_drain(&udp, udp_e2e_on_drain, NULL);
+    kl_datagram_on_drain(&udp, udp_e2e_on_drain, NULL);
     KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
     g_udp_transmit_mode   = TOK_COMPLETE_OK;
     g_udp_transmit_status = EFI_INVALID_PARAMETER;   /* the Transmit token completes with a FAILURE status */
-    int r = kl_udp_send_to(&udp, "hello", 5, &dest);   /* completion post → reserves 5 bytes */
-    CHECK(r == 0, "completion send accepted (posted + reserved)");
-    CHECK(kl_udp_send_queued(&udp) == 5, "5 bytes reserved in the send queue");
-    for (int i = 0; i < 4 && kl_udp_send_queued(&udp) > 0; i++) kl_event_ctx_run(&ev, 8, 0);
-    CHECK(kl_udp_send_queued(&udp) == 0, "FAILED send RELEASED its full reservation → queue back to 0");
+    KlDatagramSendStatus r = kl_datagram_send(   /* completion post → reserves 5 bytes */
+        &udp, &(KlDatagramMessage){ .data = "hello", .len = 5, .peer = &dest, .tos = -1 });
+    CHECK(r == KL_DATAGRAM_ACCEPTED, "completion send accepted (posted + reserved)");
+    CHECK(kl_datagram_send_queued_bytes(&udp) == 5, "5 bytes reserved in the send queue");
+    for (int i = 0; i < 4 && kl_datagram_send_queued_bytes(&udp) > 0; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_send_queued_bytes(&udp) == 0, "FAILED send RELEASED its full reservation → queue back to 0");
     CHECK(g_udp_e2e_drain_fired >= 1, "on_drain fired (non-empty → empty) after the failed send retired");
-    kl_udp_free(&udp);
+    /* Public close lifecycle: abortive close → pump until CLOSED → free. */
+    (void)kl_datagram_close_cancel(&udp);
+    for (int i = 0; i < 16 && kl_datagram_close_state(&udp) != KL_DGRAM_CLOSE_CLOSED; i++) kl_event_ctx_run(&ev, 8, 0);
+    CHECK(kl_datagram_close_state(&udp) == KL_DGRAM_CLOSE_CLOSED, "e2e close reached CLOSED");
+    kl_datagram_free(&udp);
     kl_event_ctx_free(&ev);
     kl_uefi_event_provider_reset();
 }
