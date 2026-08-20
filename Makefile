@@ -357,8 +357,8 @@ test: $(TEST_BIN)
 # tls_integration, peer_cert), which exercise the TLS server/client integration
 # against an in-test mock KlTls and need no mbedTLS.
 #
-# 8 not listed. 6 are genuinely POSIX/Linux-only: udp_batching (recvmmsg),
-# udp_offload (UDP GSO), udp_tos (Windows restricts IP_TOS/DSCP setsockopt),
+# 8 not listed. 6 are genuinely POSIX/Linux-only: (recvmmsg),
+# (UDP GSO), (Windows restricts IP_TOS/DSCP setsockopt),
 # unix_socket (SO_PEERCRED), file_io (POSIX file-path
 # assumptions). 2 build clean but have runtime failures needing Windows-native
 # iteration, deferred for now: dns_resolver (mock-UDP-nameserver + hosts/resolv.conf
@@ -612,7 +612,7 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # (udp_server) once the completion UDP recv captured the datagram's local (dest) address via
 # an IP_PKTINFO cmsg — a shared kl_udp_parse_local() reused by the readiness recv and the
 # completion backends (io_uring/pollcomp), so kl_udp_send_to_from reply-from works over completion)
-# → +2 (udp, udp_offload) once the completion recv finished cmsg parity: GRO segment size
+# → +2 (udp,) once the completion recv finished cmsg parity: GRO segment size
 # (kl_udp_parse_gro, shared via udp_cmsg.h) + MSG_TRUNC truncation counting, carried on a
 # KlUdpRxMeta to kl_udp_comp_on_recv. (udp_multicast's broadcast_flag_gates_send stays excluded:
 # it asserts a *synchronous* send EACCES, which only holds for readiness — completion sends are
@@ -662,8 +662,8 @@ IOURING_TEST_SUITES = allocator alpn async body_reader chunked client client_hap
                           multipart_stream overflow parser peer_addr peer_cert proxy \
                           proxy_protocol read_flow_control redirect request resolver_cache \
                           response response_parser router server_integration server_stats sockaddr sse \
-                          stream_single_shot stream_transport thread_pool timeout timer tls tls_integration udp udp_batching \
-                          udp_cmsg udp_offload udp_server udp_tos unix_socket url version websocket websocket_client
+                          stream_single_shot stream_transport thread_pool timeout timer tls tls_integration udp \
+                          udp_cmsg udp_server unix_socket url version websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
