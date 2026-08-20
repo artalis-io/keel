@@ -2,7 +2,7 @@
  * custom_socket_provider.c — bring-your-own socket stack (PAL Phase 4).
  *
  * Concepts: the KlSocketProvider / KlSocketOps vtable, the KL_SOCK_CAP_* flags,
- * and selecting a provider via KlHttpServerConfig.sockets (server) + KlClientConfig.sockets
+ * and selecting a provider via KlHttpServerConfig.sockets (server) + KlHttpClientConfig.sockets
  * (client). This provider is a *decorator*: it wraps the built-in provider
  * (kl_socket_provider_posix) and counts sockets + bytes, forwarding each op it
  * intercepts to the wrapped provider. Ops it does not implement are left NULL —
@@ -14,7 +14,7 @@
  */
 
 #include <keel/keel.h>
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -91,7 +91,7 @@ int main(void) {
         return 1;
     }
 
-    /* Client through its OWN counting decorator, selected via KlClientConfig. */
+    /* Client through its OWN counting decorator, selected via KlHttpClientConfig. */
     CountingCtx cli = { .base = kl_socket_provider_posix(), 0, 0, 0, 0 };
     KlSocketProvider cli_prov = { &counting_ops, &cli, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlAllocator alloc = kl_allocator_default();
@@ -100,17 +100,17 @@ int main(void) {
     for (int i = 0; i < 50 && !ok; i++) {
         struct timespec ts = { 0, 30 * 1000000L };
         nanosleep(&ts, NULL);
-        KlClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cli_prov };
-        KlClientResponse resp;
+        KlHttpClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cli_prov };
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        if (kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18099/hello",
+        if (kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18099/hello",
                               NULL, 0, NULL, 0, &resp) == 0) {
             if (resp.status == 200) {
                 ok = 1;
                 printf("--- response ---\n  status: %d\n  body:   %.*s\n\n",
                        resp.status, (int)resp.body_len, resp.body);
             }
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         }
     }
 

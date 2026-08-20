@@ -63,7 +63,7 @@ static EFI_GUID g_tcp4_guid    = EFI_TCP4_PROTOCOL_GUID;
 #define EFI_TCP4_EVT_TOKEN 0
 
 /* Bounded per-op pump. Each spin does Poll()+CheckEvent()+Stall(1ms). The overall
- * request deadline is owned above the seam (KlClientConfig.timeout_ms); this bound
+ * request deadline is owned above the seam (KlHttpClientConfig.timeout_ms); this bound
  * only stops a wedged single op from spinning forever. */
 #ifndef KL_EFI_PUMP_SPINS
 #define KL_EFI_PUMP_SPINS 60000   /* ~60 s worst case at 1 ms/spin (matches U-0) */

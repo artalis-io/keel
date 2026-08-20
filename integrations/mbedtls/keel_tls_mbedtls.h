@@ -182,8 +182,8 @@ int kl_tls_mbedtls_ctx_set_alpn(KlTlsCtx *ctx, const char **protos);
  * (`kl_socket_provider_lwip()`), matching the socket/event providers the server or
  * client is already configured with. Passing NULL restores the default.
  *
- * Optional and usually unnecessary with a KlHttpServer/KlClient: the framework
- * auto-wires each session's provider from `KlHttpServerConfig.sockets`/`KlClientConfig.sockets`
+ * Optional and usually unnecessary with a KlHttpServer/KlHttpClient: the framework
+ * auto-wires each session's provider from `KlHttpServerConfig.sockets`/`KlHttpClientConfig.sockets`
  * via the `KlTls.set_socket_provider` vtable hook (which overrides this ctx default
  * at handshake time). Use this setter for **standalone** KlTls use — driving the
  * vtable directly without connection.c/client.c. Set once on the context, before

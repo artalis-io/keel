@@ -1,13 +1,13 @@
 /*
  * resolver_cache.c — Caching DNS resolver decorator
  *
- * Flat array with linear scan (same pattern as KlClientPool).
+ * Flat array with linear scan (same pattern as KlHttpClientPool).
  * Cache sizes are small (default 64), so linear scan is cache-friendly.
  */
 
 #include <keel/resolver_cache.h>
 #include <keel/allocator.h>    /* kl_malloc / kl_free wrappers */
-#include <keel/client.h>       /* KL_CLIENT_HOSTNAME_MAX */
+#include <keel/http_client.h>       /* KL_HTTP_CLIENT_HOSTNAME_MAX */
 #include <keel/http_connection.h>   /* kl_monotonic_ms */
 
 #include <stdint.h>
@@ -16,7 +16,7 @@
 /* ── Cache entry ─────────────────────────────────────────────────── */
 
 typedef struct {
-    char            host[KL_CLIENT_HOSTNAME_MAX];
+    char            host[KL_HTTP_CLIENT_HOSTNAME_MAX];
     int             port;
     KlResolveResult result;
     uint64_t        deadline_ms;
@@ -59,7 +59,7 @@ typedef struct {
     KlResolveReq    *inner_req;   /* NULL if cache hit */
     KlResolveDoneFn  user_done;
     void            *user_data;
-    char             host[KL_CLIENT_HOSTNAME_MAX];
+    char             host[KL_HTTP_CLIENT_HOSTNAME_MAX];
     int              port;
     KlResolverCache *cache;
     int              in_resolve;     /* 1 while inside cache_resolve */
@@ -100,7 +100,7 @@ static void cache_insert(KlResolverCache *c, const char *host, int port,
 {
     /* Self-defend the fixed host[] buffer: callers already bound host length, but
      * keep the memcpy(strlen+1) copies below safe regardless of caller. */
-    if (strlen(host) >= KL_CLIENT_HOSTNAME_MAX)
+    if (strlen(host) >= KL_HTTP_CLIENT_HOSTNAME_MAX)
         return;
 
     uint64_t now = kl_monotonic_ms();
@@ -222,7 +222,7 @@ static KlResolveReq *cache_resolve(KlResolver *self, KlEventCtx *ctx,
         return NULL;
 
     size_t host_len = strlen(host);
-    if (host_len == 0 || host_len >= KL_CLIENT_HOSTNAME_MAX)
+    if (host_len == 0 || host_len >= KL_HTTP_CLIENT_HOSTNAME_MAX)
         return NULL;
 
     /* Allocate per-request handle */

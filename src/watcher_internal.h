@@ -1,7 +1,7 @@
 /*
  * watcher_internal.h — INTERNAL. Completion-connect watcher helpers (LC-0).
  *
- * The async KlClient drives connect over the completion axis (kl_comp_post_connect) when the
+ * The async KlHttpClient drives connect over the completion axis (kl_comp_post_connect) when the
  * loop advertises KL_EVENT_CAP_COMPLETION. Unlike the readiness path — which arms a
  * KL_EVENT_WRITE KlWatcher on the connecting fd — the completion path must NOT register a
  * backend readiness watch on the connecting fd (a completion backend would either poll it in

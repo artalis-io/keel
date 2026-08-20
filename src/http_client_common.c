@@ -5,13 +5,13 @@
  * sync client (client_sync.c) and the event-driven async client
  * (client_async.c): the CRLF injection guard, the plain/TLS I/O abstraction,
  * heap request formatting, response header helpers, response decompression
- * (buffered + streaming wrapper), and kl_client_response_free.
+ * (buffered + streaming wrapper), and kl_http_client_response_free.
  *
  * These must not pull the blocking path — no poll()/read()/write()/errno here.
  * All allocation through KlAllocator. No Hull dependencies.
  */
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/decompress.h>
 
 #include <limits.h>
@@ -21,12 +21,12 @@
 #include <sys/types.h>
 
 #include "socket.h"     /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
-#include "client_internal.h"
+#include "http_client_internal.h"
 #include "kl_cstr.h"    /* locale-free append builders + ASCII case compare */
 
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
-int kl_client_has_crlf(const char *s, size_t len)
+int kl_http_client_has_crlf(const char *s, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
         if (s[i] == '\r' || s[i] == '\n')
@@ -37,7 +37,7 @@ int kl_client_has_crlf(const char *s, size_t len)
 
 /* ── I/O abstraction (plain or TLS) ──────────────────────────────── */
 
-kl_ssize_t kl_client_io_write(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
+kl_ssize_t kl_http_client_io_write(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
                               const void *buf, size_t len)
 {
     if (tls)
@@ -45,7 +45,7 @@ kl_ssize_t kl_client_io_write(const KlSocketProvider *p, KlSocketHandle fd, KlTl
     return kl_sock_send(p, fd, buf, len);
 }
 
-kl_ssize_t kl_client_io_read(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
+kl_ssize_t kl_http_client_io_read(const KlSocketProvider *p, KlSocketHandle fd, KlTls *tls,
                              void *buf, size_t len)
 {
     if (tls)
@@ -55,14 +55,14 @@ kl_ssize_t kl_client_io_read(const KlSocketProvider *p, KlSocketHandle fd, KlTls
 
 /* ── Build request into heap buffer ──────────────────────────────── */
 
-char *kl_client_build_request(KlAllocator *alloc,
+char *kl_http_client_build_request(KlAllocator *alloc,
                               const char *method, const KlUrl *url,
-                              const KlClientHeader *headers, int num_headers,
+                              const KlHttpClientHeader *headers, int num_headers,
                               const char *body, size_t body_len,
                               size_t *out_len, int keep_alive,
                               const char *absolute_url)
 {
-    if (kl_client_has_crlf(method, strlen(method)))
+    if (kl_http_client_has_crlf(method, strlen(method)))
         return NULL;
     if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return NULL;
@@ -80,7 +80,7 @@ char *kl_client_build_request(KlAllocator *alloc,
         target_len = 1;
     }
 
-    char buf[KL_CLIENT_REQ_BUF_SIZE];
+    char buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     size_t off = 0;
     if (kl_buf_append(buf, sizeof(buf), &off, method) != 0 ||
         kl_buf_append_n(buf, sizeof(buf), &off, " ", 1) != 0 ||
@@ -91,8 +91,8 @@ char *kl_client_build_request(KlAllocator *alloc,
         return NULL;
 
     for (int i = 0; i < num_headers; i++) {
-        if (kl_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
-            kl_client_has_crlf(headers[i].value, strlen(headers[i].value)))
+        if (kl_http_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
+            kl_http_client_has_crlf(headers[i].value, strlen(headers[i].value)))
             return NULL;
         if (kl_buf_append(buf, sizeof(buf), &off, headers[i].name) != 0 ||
             kl_buf_append_n(buf, sizeof(buf), &off, ": ", 2) != 0 ||
@@ -131,14 +131,14 @@ char *kl_client_build_request(KlAllocator *alloc,
 
 /* ── Build headers-only request into heap buffer (chunked TE) ────── */
 
-char *kl_client_build_request_headers_only(KlAllocator *alloc,
+char *kl_http_client_build_request_headers_only(KlAllocator *alloc,
                                            const char *method, const KlUrl *url,
-                                           const KlClientHeader *headers,
+                                           const KlHttpClientHeader *headers,
                                            int num_headers, size_t *out_len,
                                            int keep_alive,
                                            const char *absolute_url)
 {
-    if (kl_client_has_crlf(method, strlen(method)))
+    if (kl_http_client_has_crlf(method, strlen(method)))
         return NULL;
     if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return NULL;
@@ -156,7 +156,7 @@ char *kl_client_build_request_headers_only(KlAllocator *alloc,
         target_len = 1;
     }
 
-    char buf[KL_CLIENT_REQ_BUF_SIZE];
+    char buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     size_t off = 0;
     if (kl_buf_append(buf, sizeof(buf), &off, method) != 0 ||
         kl_buf_append_n(buf, sizeof(buf), &off, " ", 1) != 0 ||
@@ -167,8 +167,8 @@ char *kl_client_build_request_headers_only(KlAllocator *alloc,
         return NULL;
 
     for (int i = 0; i < num_headers; i++) {
-        if (kl_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
-            kl_client_has_crlf(headers[i].value, strlen(headers[i].value)))
+        if (kl_http_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
+            kl_http_client_has_crlf(headers[i].value, strlen(headers[i].value)))
             return NULL;
         if (kl_buf_append(buf, sizeof(buf), &off, headers[i].name) != 0 ||
             kl_buf_append_n(buf, sizeof(buf), &off, ": ", 2) != 0 ||
@@ -194,7 +194,7 @@ char *kl_client_build_request_headers_only(KlAllocator *alloc,
 
 /* ── Response header helpers ──────────────────────────────────────── */
 
-const char *kl_client_find_header_value(const KlClientResponse *resp,
+const char *kl_http_client_find_header_value(const KlHttpClientResponse *resp,
                                         const char *name)
 {
     for (int i = 0; i < resp->num_headers; i++) {
@@ -204,7 +204,7 @@ const char *kl_client_find_header_value(const KlClientResponse *resp,
     return NULL;
 }
 
-void kl_client_remove_header(KlClientResponse *resp, const char *name)
+void kl_http_client_remove_header(KlHttpClientResponse *resp, const char *name)
 {
     for (int i = 0; i < resp->num_headers; i++) {
         if (kl_ascii_strcasecmp(resp->headers[i].name, name) == 0) {
@@ -222,7 +222,7 @@ void kl_client_remove_header(KlClientResponse *resp, const char *name)
     }
 }
 
-int kl_client_server_wants_close(const KlClientResponse *resp)
+int kl_http_client_server_wants_close(const KlHttpClientResponse *resp)
 {
     for (int i = 0; i < resp->num_headers; i++) {
         if (kl_ascii_strcasecmp(resp->headers[i].name, "Connection") == 0 &&
@@ -238,7 +238,7 @@ int kl_client_server_wants_close(const KlClientResponse *resp)
  * Post-process a buffered response: decompress body if Content-Encoding
  * matches the decompressor's encoding. Replaces body and removes header.
  */
-int kl_client_decompress_response_body(KlClientResponse *resp,
+int kl_http_client_decompress_response_body(KlHttpClientResponse *resp,
                                        KlDecompressConfig *dcfg)
 {
     if (!dcfg || !dcfg->factory)
@@ -246,7 +246,7 @@ int kl_client_decompress_response_body(KlClientResponse *resp,
     if (!resp->body || resp->body_len == 0)
         return 0;
 
-    const char *enc = kl_client_find_header_value(resp, "Content-Encoding");
+    const char *enc = kl_http_client_find_header_value(resp, "Content-Encoding");
     if (!enc)
         return 0;  /* no encoding — nothing to do */
 
@@ -277,7 +277,7 @@ int kl_client_decompress_response_body(KlClientResponse *resp,
     resp->body_len = out_len;
 
     /* Remove Content-Encoding header */
-    kl_client_remove_header(resp, "Content-Encoding");
+    kl_http_client_remove_header(resp, "Content-Encoding");
 
     return 0;
 }
@@ -292,7 +292,7 @@ static int decomp_emit_to_user(void *ctx, const char *data, size_t len)
     return w->user_on_body(data, len, w->user_data);
 }
 
-int kl_client_decomp_on_headers(int status, const KlClientHeader *headers,
+int kl_http_client_decomp_on_headers(int status, const KlHttpClientHeader *headers,
                                 int num_headers, void *user_data)
 {
     DecompStreamWrap *w = user_data;
@@ -322,7 +322,7 @@ int kl_client_decomp_on_headers(int status, const KlClientHeader *headers,
     return 0;
 }
 
-int kl_client_decomp_on_body(const char *data, size_t len, void *user_data)
+int kl_http_client_decomp_on_body(const char *data, size_t len, void *user_data)
 {
     DecompStreamWrap *w = user_data;
     if (w->active) {
@@ -335,7 +335,7 @@ int kl_client_decomp_on_body(const char *data, size_t len, void *user_data)
     return 0;
 }
 
-void kl_client_decomp_on_complete(void *user_data)
+void kl_http_client_decomp_on_complete(void *user_data)
 {
     DecompStreamWrap *w = user_data;
     if (w->active) {
@@ -351,7 +351,7 @@ void kl_client_decomp_on_complete(void *user_data)
 
 /* ── Response free ────────────────────────────────────────────────── */
 
-void kl_client_response_free(KlClientResponse *resp)
+void kl_http_client_response_free(KlHttpClientResponse *resp)
 {
     if (!resp || !resp->alloc.malloc)
         return;
@@ -370,7 +370,7 @@ void kl_client_response_free(KlClientResponse *resp)
                     strlen(resp->headers[i].value) + 1);
         }
         kl_free(&resp->alloc, resp->headers,
-                (size_t)resp->num_headers * sizeof(KlClientHeader));
+                (size_t)resp->num_headers * sizeof(KlHttpClientHeader));
         resp->headers = NULL;
     }
     resp->num_headers = 0;

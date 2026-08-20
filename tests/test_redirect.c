@@ -302,113 +302,113 @@ UTEST(redirect, sync_301) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "GET", test_url("/redir301"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "GET", test_url("/redir301"),
                                    NULL, 0, NULL, 0, &resp), 0);
     ASSERT_EQ(resp.status, 200);
     ASSERT_TRUE(resp.body != NULL);
     ASSERT_EQ(resp.body_len, 3u);
     ASSERT_TRUE(memcmp(resp.body, "GET", 3) == 0);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(redirect, sync_302_post_to_get) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "POST", test_url("/redir302"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "POST", test_url("/redir302"),
                                    NULL, 0, "data", 4, &resp), 0);
     ASSERT_EQ(resp.status, 200);
     ASSERT_TRUE(resp.body != NULL);
     ASSERT_EQ(resp.body_len, 3u);
     ASSERT_TRUE(memcmp(resp.body, "GET", 3) == 0);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(redirect, sync_303) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
 
     /* 303: PUT + body → GET (303 converts any non-GET/HEAD to GET) */
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "PUT", test_url("/redir303"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "PUT", test_url("/redir303"),
                                    NULL, 0, "data", 4, &resp), 0);
     ASSERT_EQ(resp.status, 200);
     ASSERT_TRUE(resp.body != NULL);
     ASSERT_EQ(resp.body_len, 3u);
     ASSERT_TRUE(memcmp(resp.body, "GET", 3) == 0);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(redirect, sync_307_preserve) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "POST", test_url("/redir307"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "POST", test_url("/redir307"),
                                    NULL, 0, "hello", 5, &resp), 0);
     ASSERT_EQ(resp.status, 200);
     ASSERT_TRUE(resp.body != NULL);
     ASSERT_EQ(resp.body_len, 5u);
     ASSERT_TRUE(memcmp(resp.body, "hello", 5) == 0);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(redirect, sync_308_preserve) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "POST", test_url("/redir308"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "POST", test_url("/redir308"),
                                    NULL, 0, "world", 5, &resp), 0);
     ASSERT_EQ(resp.status, 200);
     ASSERT_TRUE(resp.body != NULL);
     ASSERT_EQ(resp.body_len, 5u);
     ASSERT_TRUE(memcmp(resp.body, "world", 5) == 0);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(redirect, sync_no_redirect) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "GET", test_url("/dest"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "GET", test_url("/dest"),
                                    NULL, 0, NULL, 0, &resp), 0);
     ASSERT_EQ(resp.status, 200);
     ASSERT_TRUE(resp.body != NULL);
     ASSERT_EQ(resp.body_len, 3u);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(redirect, sync_max_exceeded) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlRedirectConfig redir = { .max_redirects = 2 };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpRedirectConfig redir = { .max_redirects = 2 };
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, &redir, "GET", test_url("/loop"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, &redir, "GET", test_url("/loop"),
                                    NULL, 0, NULL, 0, &resp), -1);
     ASSERT_EQ(resp.error, KL_ERR_REDIRECT_LOOP);
 }
@@ -417,43 +417,43 @@ UTEST(redirect, sync_missing_location) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "GET", test_url("/no_location"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "GET", test_url("/no_location"),
                                    NULL, 0, NULL, 0, &resp), 0);
     ASSERT_EQ(resp.status, 301);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(redirect, sync_relative_path) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "GET", test_url("/relative"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "GET", test_url("/relative"),
                                    NULL, 0, NULL, 0, &resp), 0);
     ASSERT_EQ(resp.status, 200);
     ASSERT_TRUE(resp.body != NULL);
     ASSERT_EQ(resp.body_len, 3u);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(redirect, sync_cross_origin_drops_auth) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
-    KlClientHeader headers[] = {
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
+    KlHttpClientHeader headers[] = {
         { "Authorization", "Bearer secret123" }
     };
 
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "GET",
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "GET",
                                    test_url("/cross_origin"),
                                    headers, 1, NULL, 0, &resp), 0);
     ASSERT_EQ(resp.status, 200);
@@ -461,12 +461,12 @@ UTEST(redirect, sync_cross_origin_drops_auth) {
     ASSERT_EQ(resp.body_len, 4u);
     ASSERT_TRUE(memcmp(resp.body, "none", 4) == 0);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(redirect, sync_null_args) {
-    KlClientResponse resp;
-    ASSERT_EQ(kl_redirect_request(NULL, NULL, NULL, "GET", "http://x",
+    KlHttpClientResponse resp;
+    ASSERT_EQ(kl_http_redirect_request(NULL, NULL, NULL, "GET", "http://x",
                                    NULL, 0, NULL, 0, &resp), -1);
 }
 
@@ -474,35 +474,35 @@ UTEST(redirect, sync_pooled) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientPool pool;
-    ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_redirect_request_pooled(&pool, &a, &cfg, NULL, "GET",
+    ASSERT_EQ(kl_http_redirect_request_pooled(&pool, &a, &cfg, NULL, "GET",
                                           test_url("/redir301"),
                                           NULL, 0, NULL, 0, &resp), 0);
     ASSERT_EQ(resp.status, 200);
 
-    kl_client_response_free(&resp);
-    kl_cpool_free(&pool);
+    kl_http_client_response_free(&resp);
+    kl_http_client_pool_free(&pool);
 }
 
 UTEST(redirect, sync_chain) {
     ensure_servers();
 
     KlAllocator a = kl_allocator_default();
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientResponse resp;
 
     /* /chain → 301 → /redir302 → 302 → /dest → 200 */
-    ASSERT_EQ(kl_redirect_request(&a, &cfg, NULL, "GET", test_url("/chain"),
+    ASSERT_EQ(kl_http_redirect_request(&a, &cfg, NULL, "GET", test_url("/chain"),
                                    NULL, 0, NULL, 0, &resp), 0);
     ASSERT_EQ(resp.status, 200);
     ASSERT_TRUE(resp.body != NULL);
     ASSERT_EQ(resp.body_len, 3u);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 /* ── Async redirect tests ───────────────────────────────────────── */
@@ -516,12 +516,12 @@ typedef struct {
     KlError last_error;
 } AsyncRedirCtx;
 
-static void async_redir_done(KlRedirectClient *rc, void *user_data) {
+static void async_redir_done(KlHttpRedirectClient *rc, void *user_data) {
     AsyncRedirCtx *ctx = user_data;
-    ctx->error = kl_redirect_error(rc);
-    ctx->last_error = kl_redirect_last_error(rc);
+    ctx->error = kl_http_redirect_error(rc);
+    ctx->last_error = kl_http_redirect_last_error(rc);
     if (ctx->error == 0) {
-        const KlClientResponse *resp = kl_redirect_response(rc);
+        const KlHttpClientResponse *resp = kl_http_redirect_response(rc);
         if (resp) {
             ctx->status = resp->status;
             if (resp->body && resp->body_len > 0) {
@@ -552,12 +552,12 @@ UTEST(redirect, async_301) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
 
     AsyncRedirCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    KlRedirectClient *rc = kl_redirect_start(&ev, &a, &cfg, NULL,
+    KlHttpRedirectClient *rc = kl_http_redirect_start(&ev, &a, &cfg, NULL,
                                              "GET", test_url("/redir301"),
                                              NULL, 0, NULL, 0,
                                              async_redir_done, &ctx);
@@ -570,7 +570,7 @@ UTEST(redirect, async_301) {
     ASSERT_EQ(ctx.body_len, 3u);
     ASSERT_TRUE(memcmp(ctx.body, "GET", 3) == 0);
 
-    kl_redirect_free(rc);
+    kl_http_redirect_free(rc);
     kl_event_ctx_free(&ev);
 }
 
@@ -580,12 +580,12 @@ UTEST(redirect, async_chain) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
 
     AsyncRedirCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    KlRedirectClient *rc = kl_redirect_start(&ev, &a, &cfg, NULL,
+    KlHttpRedirectClient *rc = kl_http_redirect_start(&ev, &a, &cfg, NULL,
                                              "GET", test_url("/chain"),
                                              NULL, 0, NULL, 0,
                                              async_redir_done, &ctx);
@@ -596,7 +596,7 @@ UTEST(redirect, async_chain) {
     ASSERT_EQ(ctx.error, 0);
     ASSERT_EQ(ctx.status, 200);
 
-    kl_redirect_free(rc);
+    kl_http_redirect_free(rc);
     kl_event_ctx_free(&ev);
 }
 
@@ -606,13 +606,13 @@ UTEST(redirect, async_max_exceeded) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
-    KlRedirectConfig redir = { .max_redirects = 2 };
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpRedirectConfig redir = { .max_redirects = 2 };
 
     AsyncRedirCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    KlRedirectClient *rc = kl_redirect_start(&ev, &a, &cfg, &redir,
+    KlHttpRedirectClient *rc = kl_http_redirect_start(&ev, &a, &cfg, &redir,
                                              "GET", test_url("/loop"),
                                              NULL, 0, NULL, 0,
                                              async_redir_done, &ctx);
@@ -623,7 +623,7 @@ UTEST(redirect, async_max_exceeded) {
     ASSERT_NE(ctx.error, 0);
     ASSERT_EQ(ctx.last_error, KL_ERR_REDIRECT_LOOP);
 
-    kl_redirect_free(rc);
+    kl_http_redirect_free(rc);
     kl_event_ctx_free(&ev);
 }
 
@@ -633,15 +633,15 @@ UTEST(redirect, async_pooled) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
 
-    KlClientPool pool;
-    ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, &ev), 0);
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, &ev), 0);
 
     AsyncRedirCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    KlRedirectClient *rc = kl_redirect_start_pooled(&pool, &ev, &a, &cfg, NULL,
+    KlHttpRedirectClient *rc = kl_http_redirect_start_pooled(&pool, &ev, &a, &cfg, NULL,
                                                     "GET", test_url("/redir301"),
                                                     NULL, 0, NULL, 0,
                                                     async_redir_done, &ctx);
@@ -658,8 +658,8 @@ UTEST(redirect, async_pooled) {
     ASSERT_EQ(ctx.error, 0);
     ASSERT_EQ(ctx.status, 200);
 
-    kl_redirect_free(rc);
-    kl_cpool_free(&pool);
+    kl_http_redirect_free(rc);
+    kl_http_client_pool_free(&pool);
     kl_event_ctx_free(&ev);
 }
 
@@ -669,35 +669,35 @@ UTEST(redirect, async_cancel) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
-    KlClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
+    KlHttpClientConfig cfg = { .timeout_ms = TEST_TIMEOUT_MS };
 
-    KlRedirectClient *rc = kl_redirect_start(&ev, &a, &cfg, NULL,
+    KlHttpRedirectClient *rc = kl_http_redirect_start(&ev, &a, &cfg, NULL,
                                              "GET", test_url("/loop"),
                                              NULL, 0, NULL, 0,
                                              async_redir_done, NULL);
     ASSERT_TRUE(rc != NULL);
 
-    kl_redirect_cancel(rc);
-    ASSERT_NE(kl_redirect_error(rc), 0);
+    kl_http_redirect_cancel(rc);
+    ASSERT_NE(kl_http_redirect_error(rc), 0);
 
-    kl_redirect_free(rc);
+    kl_http_redirect_free(rc);
     kl_event_ctx_free(&ev);
 }
 
 UTEST(redirect, async_null_args) {
-    ASSERT_TRUE(kl_redirect_start(NULL, NULL, NULL, NULL,
+    ASSERT_TRUE(kl_http_redirect_start(NULL, NULL, NULL, NULL,
                                    "GET", "http://x",
                                    NULL, 0, NULL, 0,
                                    NULL, NULL) == NULL);
 }
 
 UTEST(redirect, free_null) {
-    kl_redirect_free(NULL);
+    kl_http_redirect_free(NULL);
     ASSERT_TRUE(1);
 }
 
 UTEST(redirect, cancel_null) {
-    kl_redirect_cancel(NULL);
+    kl_http_redirect_cancel(NULL);
     ASSERT_TRUE(1);
 }
 

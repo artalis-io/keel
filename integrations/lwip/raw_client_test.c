@@ -1,17 +1,17 @@
 /*
- * raw_client_test.c — LC-1: a plaintext numeric-IPv4 async KlClient over the lwIP-raw
+ * raw_client_test.c — LC-1: a plaintext numeric-IPv4 async KlHttpClient over the lwIP-raw
  * completion backend, in-process over the loopback netif (NO_SYS=1, single-thread).
  *
  * The proof for the raw client (docs/phase10_lwip_raw_client_design.md §8 LC-1): ONE KlEventCtx
  * (== the one lwIP mainloop) runs BOTH a raw KlHttpServer (route GET / -> a known body) AND a raw
- * async KlClient that GETs http://127.0.0.1:PORT/. The server drives that one loop via
- * kl_http_server_run() on a background thread; the KlClient is created + driven ENTIRELY on that same
+ * async KlHttpClient that GETs http://127.0.0.1:PORT/. The server drives that one loop via
+ * kl_http_server_run() on a background thread; the KlHttpClient is created + driven ENTIRELY on that same
  * loop thread (started from a KEEL timer that fires on the loop thread, exactly the single-thread
  * marshalling discipline the Phase-9 raw tests use). So the client's connected_cb + request send +
  * response recv and the server's accept + recv + send all fire inline on the ONE thread — the
  * request round-trips over 127.0.0.1 with no data race (NO_SYS=1 has one lwIP stack, no locks).
  *
- * How the connect maps: kl_client_start (numeric literal -> a synchronous numeric resolver, no
+ * How the connect maps: kl_http_client_start (numeric literal -> a synchronous numeric resolver, no
  * DNS) -> start_connect on the completion loop -> kl_comp_post_connect -> lwr_comp_post_connect ->
  * kl_lwr_connect -> tcp_connect + lwr_cli_connected -> per-slot pend_connect -> KL_LWR_CONNECT ->
  * KL_COMP_CONNECT (mask-encoded) -> kl_event_dispatch -> the client's connect watcher -> SENDING.
@@ -25,7 +25,7 @@
  *
  * DNS is LC-3, TLS is LC-4, Happy-Eyeballs is LC-2: this test is plaintext numeric-IP ONLY. The
  * built-in kl_dns_resolver is NOT usable here (it eagerly kl_datagram_socket_init's, which lwip-raw rejects),
- * so the client is handed an explicit numeric-only KlResolver via KlClientConfig.resolver — the
+ * so the client is handed an explicit numeric-only KlResolver via KlHttpClientConfig.resolver — the
  * clean LC-1-scoped way to avoid any DNS machinery.
  *
  * Must be ASan+UBSan+LSan-clean.
@@ -90,24 +90,24 @@ typedef struct {
     KlHttpServer  *srv;
     const char *url;
     int         expect_ok;      /* 1 = expect 200+body; 0 = expect a clean connect error */
-    KlClient   *client;
+    KlHttpClient   *client;
     atomic_int  done;
     atomic_int  pass;
 } ClientCase;
 
-static void on_done(KlClient *client, void *ud) {
+static void on_done(KlHttpClient *client, void *ud) {
     ClientCase *cc = ud;
-    int err = kl_client_error(client);
+    int err = kl_http_client_error(client);
     if (cc->expect_ok) {
         int ok = 0;
         if (err == 0) {
-            const KlClientResponse *r = kl_client_response(client);
+            const KlHttpClientResponse *r = kl_http_client_response(client);
             ok = (r && r->status == 200 && r->body_len == sizeof(WANT_BODY) - 1 &&
                   r->body && memcmp(r->body, WANT_BODY, sizeof(WANT_BODY) - 1) == 0);
             if (!ok && r) printf("   [diag] status=%d body_len=%zu\n", r->status, r->body_len);
         } else {
             printf("   [diag] unexpected client error=%d last_error=%d\n",
-                   err, (int)kl_client_last_error(client));
+                   err, (int)kl_http_client_last_error(client));
         }
         atomic_store(&cc->pass, ok);
     } else {
@@ -118,15 +118,15 @@ static void on_done(KlClient *client, void *ud) {
     kl_http_server_stop(cc->srv);
 }
 
-/* Fired on the loop thread: start the async KlClient on the server's shared ctx (== the one lwIP
+/* Fired on the loop thread: start the async KlHttpClient on the server's shared ctx (== the one lwIP
  * mainloop). Everything the client does from here rides that ctx — its connect completion, its
  * data-plane watcher relay, its timers — all serviced by kl_http_server_run's completion tick. */
 static void start_client(void *ud) {
     ClientCase *cc = ud;
     static KlAllocator alloc;   /* stable storage: the response stores the allocator by value */
     alloc = kl_allocator_default();
-    KlClientConfig ccfg = { .timeout_ms = 5000, .resolver = &g_numres.base };
-    cc->client = kl_client_start(&cc->srv->ev, &alloc, &ccfg, "GET", cc->url,
+    KlHttpClientConfig ccfg = { .timeout_ms = 5000, .resolver = &g_numres.base };
+    cc->client = kl_http_client_start(&cc->srv->ev, &alloc, &ccfg, "GET", cc->url,
                                  NULL, 0, NULL, 0, on_done, cc);
     if (!cc->client) {
         /* An immediate start failure is a clean fail for the closed-port case; a failure for the
@@ -139,7 +139,7 @@ static void start_client(void *ud) {
 
 static void *server_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
 
-/* Run one case: bring up a raw server (kl_http_server_run on a bg thread) + start a raw KlClient on the
+/* Run one case: bring up a raw server (kl_http_server_run on a bg thread) + start a raw KlHttpClient on the
  * server's shared ctx (via a loop-thread timer); a bounded watchdog stops a hang. */
 static int run_case(const char *label, int port, const char *url, int expect_ok) {
     KlHttpServerConfig cfg = { .port = port, .bind_addr = "127.0.0.1",
@@ -178,7 +178,7 @@ static int run_case(const char *label, int port, const char *url, int expect_ok)
     else if (!atomic_load(&cc.pass)) { printf("LC-1 FAIL: (%s)\n", label); rc = 1; }
     else { printf("PASS LC-1 (%s)\n", label); }
 
-    if (cc.client) kl_client_free(cc.client);
+    if (cc.client) kl_http_client_free(cc.client);
     kl_http_server_free(&srv);
     return rc;
 }

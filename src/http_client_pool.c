@@ -1,12 +1,12 @@
 /*
  * client_pool.c — HTTP client connection pool
  *
- * Flat array of KlClientPoolEntry with linear scan. Pool sizes are
+ * Flat array of KlHttpClientPoolEntry with linear scan. Pool sizes are
  * small (32-128 max), so linear scan is cache-friendly and simpler
  * than a hash map.
  */
 
-#include <keel/client_pool.h>
+#include <keel/http_client_pool.h>
 #include <keel/http_connection.h>  /* kl_monotonic_ms */
 #include <keel/timer.h>
 #include "socket.h"
@@ -15,13 +15,13 @@
 #include <string.h>
 
 /* Socket provider for pooled fds (NULL -> POSIX default close). */
-static inline const KlSocketProvider *cpool_sp(const KlClientPool *pool) {
+static inline const KlSocketProvider *cpool_sp(const KlHttpClientPool *pool) {
     return (pool && pool->ev_ctx) ? pool->ev_ctx->sockets : NULL;
 }
 
 /* ── Entry helpers ───────────────────────────────────────────────── */
 
-static int entry_matches(const KlClientPoolEntry *e,
+static int entry_matches(const KlHttpClientPoolEntry *e,
                           const char *host, int port, int is_tls,
                           const char *proxy_host, int proxy_port)
 {
@@ -38,7 +38,7 @@ static int entry_matches(const KlClientPoolEntry *e,
     return e->proxy_host[0] == '\0';
 }
 
-static void entry_close(KlClientPoolEntry *e)
+static void entry_close(KlHttpClientPoolEntry *e)
 {
     if (e->tls) {
         e->tls->shutdown(e->tls, e->fd);
@@ -55,8 +55,8 @@ static void entry_close(KlClientPoolEntry *e)
 
 static void idle_timer_cb(void *user_data)
 {
-    KlClientPoolEntry *e = user_data;
-    KlClientPool *pool = e->pool;
+    KlHttpClientPoolEntry *e = user_data;
+    KlHttpClientPool *pool = e->pool;
 
     /* Entry may have been acquired/evicted since timer was scheduled */
     if (kl_handle_valid(e->fd)) {
@@ -68,7 +68,7 @@ static void idle_timer_cb(void *user_data)
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-int kl_cpool_init(KlClientPool *pool, const KlClientPoolConfig *cfg,
+int kl_http_client_pool_init(KlHttpClientPool *pool, const KlHttpClientPoolConfig *cfg,
                    KlAllocator *alloc, KlEventCtx *ev_ctx)
 {
     if (!pool || !alloc)
@@ -77,20 +77,20 @@ int kl_cpool_init(KlClientPool *pool, const KlClientPoolConfig *cfg,
     memset(pool, 0, sizeof(*pool));
 
     int cap = (cfg && cfg->capacity > 0) ? cfg->capacity
-                                          : KL_CPOOL_DEFAULT_CAPACITY;
+                                          : KL_HTTP_CLIENT_POOL_DEFAULT_CAPACITY;
     int mph = (cfg && cfg->max_per_host > 0) ? cfg->max_per_host
-                                               : KL_CPOOL_DEFAULT_MAX_PER_HOST;
+                                               : KL_HTTP_CLIENT_POOL_DEFAULT_MAX_PER_HOST;
     uint64_t idle = (cfg && cfg->idle_ms > 0) ? cfg->idle_ms
-                                                : KL_CPOOL_DEFAULT_IDLE_MS;
+                                                : KL_HTTP_CLIENT_POOL_DEFAULT_IDLE_MS;
 
     /* Overflow guard */
-    if ((size_t)cap > SIZE_MAX / sizeof(KlClientPoolEntry)) {
+    if ((size_t)cap > SIZE_MAX / sizeof(KlHttpClientPoolEntry)) {
         pool->last_error = KL_ERR_OVERFLOW;
         return -1;
     }
 
-    KlClientPoolEntry *entries = kl_malloc(alloc,
-                                            (size_t)cap * sizeof(KlClientPoolEntry));
+    KlHttpClientPoolEntry *entries = kl_malloc(alloc,
+                                            (size_t)cap * sizeof(KlHttpClientPoolEntry));
     if (!entries) {
         pool->last_error = KL_ERR_ALLOC;
         return -1;
@@ -121,7 +121,7 @@ int kl_cpool_init(KlClientPool *pool, const KlClientPoolConfig *cfg,
     return 0;
 }
 
-void kl_cpool_free(KlClientPool *pool)
+void kl_http_client_pool_free(KlHttpClientPool *pool)
 {
     if (!pool || !pool->entries)
         return;
@@ -136,22 +136,22 @@ void kl_cpool_free(KlClientPool *pool)
     }
 
     kl_free(pool->alloc, pool->entries,
-            (size_t)pool->capacity * sizeof(KlClientPoolEntry));
+            (size_t)pool->capacity * sizeof(KlHttpClientPoolEntry));
     pool->entries = NULL;
     pool->active = 0;
 }
 
 /* ── Acquire (test-on-borrow) ────────────────────────────────────── */
 
-int kl_cpool_acquire(KlClientPool *pool, const char *host, int port,
+int kl_http_client_pool_acquire(KlHttpClientPool *pool, const char *host, int port,
                       int is_tls, const char *proxy_host, int proxy_port,
-                      KlClientPoolConn *conn)
+                      KlHttpClientPoolConn *conn)
 {
     if (!pool || !host || !conn)
         return -1;
 
     for (int i = 0; i < pool->capacity; i++) {
-        KlClientPoolEntry *e = &pool->entries[i];
+        KlHttpClientPoolEntry *e = &pool->entries[i];
         if (!entry_matches(e, host, port, is_tls, proxy_host, proxy_port))
             continue;
 
@@ -198,7 +198,7 @@ int kl_cpool_acquire(KlClientPool *pool, const char *host, int port,
 
 /* ── Release ─────────────────────────────────────────────────────── */
 
-int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
+int kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
                       const char *host, int port, int is_tls,
                       const char *proxy_host, int proxy_port)
 {
@@ -206,15 +206,15 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
         return -1;
 
     size_t hlen = strlen(host);
-    if (hlen >= KL_CLIENT_HOSTNAME_MAX) {
+    if (hlen >= KL_HTTP_CLIENT_HOSTNAME_MAX) {
         pool->last_error = KL_ERR_INVALID_ARG;
-        kl_cpool_discard(pool, conn);
+        kl_http_client_pool_discard(pool, conn);
         return -1;
     }
 
-    if (proxy_host && strlen(proxy_host) >= KL_CLIENT_HOSTNAME_MAX) {
+    if (proxy_host && strlen(proxy_host) >= KL_HTTP_CLIENT_HOSTNAME_MAX) {
         pool->last_error = KL_ERR_INVALID_ARG;
-        kl_cpool_discard(pool, conn);
+        kl_http_client_pool_discard(pool, conn);
         return -1;
     }
 
@@ -224,7 +224,7 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
     uint64_t oldest_time = UINT64_MAX;
 
     for (int i = 0; i < pool->capacity; i++) {
-        const KlClientPoolEntry *e = &pool->entries[i];
+        const KlHttpClientPoolEntry *e = &pool->entries[i];
         if (entry_matches(e, host, port, is_tls, proxy_host, proxy_port)) {
             host_count++;
             if (e->idle_since_ms < oldest_time) {
@@ -235,7 +235,7 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
     }
 
     if (host_count >= pool->max_per_host && oldest_idx >= 0) {
-        KlClientPoolEntry *e = &pool->entries[oldest_idx];
+        KlHttpClientPoolEntry *e = &pool->entries[oldest_idx];
         if (pool->ev_ctx && e->timer_id >= 0)
             kl_timer_cancel(pool->ev_ctx, e->timer_id);
         entry_close(e);
@@ -258,14 +258,14 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
         oldest_idx = -1;
         oldest_time = UINT64_MAX;
         for (int i = 0; i < pool->capacity; i++) {
-            const KlClientPoolEntry *e = &pool->entries[i];
+            const KlHttpClientPoolEntry *e = &pool->entries[i];
             if (kl_handle_valid(e->fd) && e->idle_since_ms < oldest_time) {
                 oldest_time = e->idle_since_ms;
                 oldest_idx = i;
             }
         }
         if (oldest_idx >= 0) {
-            KlClientPoolEntry *e = &pool->entries[oldest_idx];
+            KlHttpClientPoolEntry *e = &pool->entries[oldest_idx];
             if (pool->ev_ctx && e->timer_id >= 0)
                 kl_timer_cancel(pool->ev_ctx, e->timer_id);
             entry_close(e);
@@ -277,12 +277,12 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
 
     if (slot < 0) {
         /* Should not happen — pool is fully occupied with no evictable entry */
-        kl_cpool_discard(pool, conn);
+        kl_http_client_pool_discard(pool, conn);
         return -1;
     }
 
     /* Populate slot */
-    KlClientPoolEntry *e = &pool->entries[slot];
+    KlHttpClientPoolEntry *e = &pool->entries[slot];
     memcpy(e->host, host, hlen + 1);
     e->port = port;
     e->is_tls = is_tls;
@@ -320,8 +320,8 @@ int kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
 /* ── Discard ─────────────────────────────────────────────────────── */
 
 /* cppcheck-suppress constParameterPointer ; kept non-const for API symmetry
-   with the rest of the kl_cpool_* family (which do mutate pool) */
-void kl_cpool_discard(KlClientPool *pool, KlClientPoolConn *conn)
+   with the rest of the kl_http_client_pool_* family (which do mutate pool) */
+void kl_http_client_pool_discard(KlHttpClientPool *pool, KlHttpClientPoolConn *conn)
 {
     if (!conn)
         return;
@@ -342,7 +342,7 @@ void kl_cpool_discard(KlClientPool *pool, KlClientPoolConn *conn)
 
 /* ── Maintenance ─────────────────────────────────────────────────── */
 
-int kl_cpool_evict_expired(KlClientPool *pool)
+int kl_http_client_pool_evict_expired(KlHttpClientPool *pool)
 {
     if (!pool || !pool->entries)
         return 0;
@@ -351,7 +351,7 @@ int kl_cpool_evict_expired(KlClientPool *pool)
     int evicted = 0;
 
     for (int i = 0; i < pool->capacity; i++) {
-        KlClientPoolEntry *e = &pool->entries[i];
+        KlHttpClientPoolEntry *e = &pool->entries[i];
         if (!kl_handle_valid(e->fd))
             continue;
 
@@ -375,14 +375,14 @@ int kl_cpool_evict_expired(KlClientPool *pool)
     return evicted;
 }
 
-int kl_cpool_idle_count(const KlClientPool *pool)
+int kl_http_client_pool_idle_count(const KlHttpClientPool *pool)
 {
     if (!pool)
         return 0;
     return pool->active;
 }
 
-int kl_cpool_host_count(const KlClientPool *pool, const char *host,
+int kl_http_client_pool_host_count(const KlHttpClientPool *pool, const char *host,
                          int port, int is_tls,
                          const char *proxy_host, int proxy_port)
 {
@@ -391,7 +391,7 @@ int kl_cpool_host_count(const KlClientPool *pool, const char *host,
 
     int count = 0;
     for (int i = 0; i < pool->capacity; i++) {
-        const KlClientPoolEntry *e = &pool->entries[i];
+        const KlHttpClientPoolEntry *e = &pool->entries[i];
         if (entry_matches(e, host, port, is_tls, proxy_host, proxy_port))
             count++;
     }

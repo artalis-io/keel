@@ -84,18 +84,18 @@ int main(void) {
     }
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig ccfg = { .timeout_ms = 2000 };
+    KlHttpClientConfig ccfg = { .timeout_ms = 2000 };
     int ok = 0;
     for (int i = 0; i < 50 && !ok; i++) {
         Sleep(50);
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18100/async",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18100/async",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
             ok = (resp.status == 200 && resp.body_len == sizeof(WANT) - 1 &&
                   resp.body && memcmp(resp.body, WANT, sizeof(WANT) - 1) == 0);
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         }
     }
 

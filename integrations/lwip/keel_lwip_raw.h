@@ -26,7 +26,7 @@
  *
  * SUPPORTED:
  *   - IPv4 TCP *server* (KlHttpServer): accept/recv/send over the loopback netif.
- *   - IPv4 TCP *client* (KlClient): outbound connect via the COMPLETION connect primitive
+ *   - IPv4 TCP *client* (KlHttpClient): outbound connect via the COMPLETION connect primitive
  *     (kl_comp_post_connect → tcp_connect), plaintext HTTP/1.1 (LC-1), Happy-Eyeballs address
  *     racing (LC-2), and HTTPS (LC-4). The client's send/recv ride an emulated readiness
  *     watcher over the raw loop.

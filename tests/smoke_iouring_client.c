@@ -1,7 +1,7 @@
 /*
- * smoke_iouring_client.c — async KlClient CONNECT over the io_uring completion loop (LC-0).
+ * smoke_iouring_client.c — async KlHttpClient CONNECT over the io_uring completion loop (LC-0).
  *
- * The io_uring counterpart of smoke_pollcomp_client: an async KlClient does GET / to a
+ * The io_uring counterpart of smoke_pollcomp_client: an async KlHttpClient does GET / to a
  * KlHttpServer, BOTH on the io_uring completion axis, with the client's connect driven over the
  * completion loop (kl_comp_post_connect → IORING_OP_CONNECT → KL_COMP_CONNECT → he_on_writable)
  * rather than the readiness WRITE-watcher shim. Build with BACKEND=iouring first so the server
@@ -39,11 +39,11 @@ static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); r
 
 typedef struct { int done; int ok; } ClientState;
 
-static void on_done(KlClient *client, void *user_data) {
+static void on_done(KlHttpClient *client, void *user_data) {
     ClientState *cs = user_data;
     cs->done = 1;
-    if (kl_client_error(client) == 0) {
-        const KlClientResponse *r = kl_client_response(client);
+    if (kl_http_client_error(client) == 0) {
+        const KlHttpClientResponse *r = kl_http_client_response(client);
         cs->ok = (r && r->status == 200 && r->body_len == sizeof(WANT) - 1 &&
                   r->body && memcmp(r->body, WANT, sizeof(WANT) - 1) == 0);
     }
@@ -74,12 +74,12 @@ int main(void) {
     }
 
     ClientState cs = { 0, 0 };
-    KlClientConfig ccfg = { .timeout_ms = 3000 };
-    KlClient *client = kl_client_start(&ev, &alloc, &ccfg, "GET",
+    KlHttpClientConfig ccfg = { .timeout_ms = 3000 };
+    KlHttpClient *client = kl_http_client_start(&ev, &alloc, &ccfg, "GET",
                                        "http://127.0.0.1:18102/",
                                        NULL, 0, NULL, 0, on_done, &cs);
     if (!client) {
-        fprintf(stderr, "smoke-iouring-client: kl_client_start failed\n");
+        fprintf(stderr, "smoke-iouring-client: kl_http_client_start failed\n");
         kl_event_ctx_free(&ev);
         kl_http_server_stop(&g_srv); pthread_join(th, NULL); kl_http_server_free(&g_srv);
         return 1;
@@ -89,7 +89,7 @@ int main(void) {
         if (kl_event_ctx_run(&ev, 16, 50) < 0) break;
     }
 
-    kl_client_free(client);
+    kl_http_client_free(client);
     kl_event_ctx_free(&ev);
 
     kl_http_server_stop(&g_srv);
@@ -101,6 +101,6 @@ int main(void) {
                         "(done=%d ok=%d)\n", cs.done, cs.ok);
         return 1;
     }
-    printf("smoke-iouring-client: async KlClient connect+GET over io_uring completion OK\n");
+    printf("smoke-iouring-client: async KlHttpClient connect+GET over io_uring completion OK\n");
     return 0;
 }

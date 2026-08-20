@@ -1,20 +1,20 @@
 /*
  * u4_selftest.c — U-4 acceptance self-test (UEFI EFI application).
  *
- * The TLS culmination of Phase 10: a STOCK libkeel_freestanding.a async KlClient
+ * The TLS culmination of Phase 10: a STOCK libkeel_freestanding.a async KlHttpClient
  * performs an HTTPS GET over the EFI_TCP4 completion backend on bare UEFI firmware.
  * TLS is the mbedTLS adapter (integrations/mbedtls/tls_mbedtls.c) built FREESTANDING
  * for the EFI target. mbedTLS's ciphertext BIO routes through the U-2 EFI socket
- * provider (kl_client_start sets ev_ctx->sockets = the EFI native provider, and
+ * provider (kl_http_client_start sets ev_ctx->sockets = the EFI native provider, and
  * src/client_async.c auto-wires it into the TLS session via set_socket_provider).
  *
- * Flow (all through the PUBLIC KlClient API — the client is model-blind):
+ * Flow (all through the PUBLIC KlHttpClient API — the client is model-blind):
  *   kl_uefi_platform_init(bs, st)            → monotonic clock + EFI_RNG
  *   kl_uefi_mbedtls_platform_init(bs)        → EFI heap + entropy for mbedTLS
  *   kl_uefi_event_provider(bs, image)        → completion provider (+ socket provider)
  *   kl_event_ctx_init_ex(&ev, alloc, ep)     → inject the provider on the stock archive
  *   ctx = kl_tls_mbedtls_client_ctx_create_from_buf(NULL,0,&alloc)  → verify-none TLS ctx
- *   kl_client_start(GET https://10.0.2.2:PORT/, cfg.tls=&tls)       → handshake + GET
+ *   kl_http_client_start(GET https://10.0.2.2:PORT/, cfg.tls=&tls)       → handshake + GET
  *   pump: kl_event_ctx_run + kl_timer_fire until done or bounded ticks
  *
  * Prints:
@@ -42,7 +42,7 @@
 
 #include <keel_tls_mbedtls.h>     /* client-ctx create + factory + destroy */
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/tls.h>
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
@@ -169,9 +169,9 @@ static void manual_diag(EFI_BOOT_SERVICES *bs, EFI_HANDLE image,
 /* ── the async completion callback ────────────────────────────────────────────── */
 typedef struct { int done; int status; KlError err; const char *body; size_t body_len; } DoneCtx;
 
-static void on_done(KlClient *cl, void *ud) {
+static void on_done(KlHttpClient *cl, void *ud) {
     DoneCtx *d = ud;
-    const KlClientResponse *r = kl_client_response(cl);
+    const KlHttpClientResponse *r = kl_http_client_response(cl);
     if (r) {
         d->status = r->status;
         d->body = r->body;
@@ -179,7 +179,7 @@ static void on_done(KlClient *cl, void *ud) {
     } else {
         d->status = -1;
     }
-    d->err = kl_client_last_error(cl);
+    d->err = kl_http_client_last_error(cl);
     d->done = 1;
 }
 
@@ -191,7 +191,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     EFI_BOOT_SERVICES *bs = st->BootServices;
 
     print_line("");
-    print_line("=== U-4 KlClient HTTPS GET over EFI_TCP4 + mbedTLS (freestanding) ===");
+    print_line("=== U-4 KlHttpClient HTTPS GET over EFI_TCP4 + mbedTLS (freestanding) ===");
     print("U-4: target = "); print_line(TARGET_URL);
 #ifdef KL_U4_PROD
     print_line("U-4: PROD mode — CA-verified TLS (dNSName SAN) + real EFI_RNG required");
@@ -290,7 +290,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     goto park;
 #endif
 
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     { unsigned char *p = (unsigned char *)&cfg; for (size_t i = 0; i < sizeof(cfg); i++) p[i] = 0; }
     cfg.timeout_ms = 60000;   /* generous: TCG + SLIRP + a full RSA/ECDHE handshake */
     cfg.tls = &tls;
@@ -299,10 +299,10 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     DoneCtx d;
     { unsigned char *p = (unsigned char *)&d; for (size_t i = 0; i < sizeof(d); i++) p[i] = 0; }
 
-    KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET", TARGET_URL,
+    KlHttpClient *c = kl_http_client_start(&ev, &alloc, &cfg, "GET", TARGET_URL,
                                   NULL, 0, NULL, 0, on_done, &d);
     if (!c) {
-        print_line("U-4: kl_client_start failed");
+        print_line("U-4: kl_http_client_start failed");
         kl_tls_mbedtls_ctx_destroy(tctx);
         kl_event_ctx_free(&ev);
         goto park;
@@ -331,7 +331,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         print_line("U-4: did not complete within the tick bound");
     }
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_tls_mbedtls_ctx_destroy(tctx);   /* destroy every TLS object FIRST ... */
     kl_uefi_mbedtls_platform_shutdown();/* F5: ... then drop the Boot Services heap ptr so
                                          * no later mbedTLS calloc/free can touch firmware */

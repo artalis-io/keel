@@ -10,7 +10,7 @@
  * ─────────────────────────────────────────────────────────────────────────
  * HOW THE CLIENT DRIVES A COMPLETION LOOP (the model the mocks reproduce)
  * ─────────────────────────────────────────────────────────────────────────
- * The async KlClient on a completion loop (KL_EVENT_CAP_COMPLETION) uses an
+ * The async KlHttpClient on a completion loop (KL_EVENT_CAP_COMPLETION) uses an
  * EMULATED-READINESS shape identical to the shipped pollcomp/lwip-raw backends:
  *
  *   - CONNECT rides the completion axis: the client posts kl_comp_post_connect
@@ -40,7 +40,7 @@
  * (built + run under ASan+UBSan+LSan by `make freestanding-harness`).
  */
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/resolver.h>
 #include <keel/allocator.h>
 #include <keel/event_ctx.h>
@@ -438,9 +438,9 @@ static KlResolver g_resolver = {
 
 typedef struct { int done; int status; KlError err; size_t body_len; char body[512]; } DoneCtx;
 
-static void on_done(KlClient *cl, void *ud) {
+static void on_done(KlHttpClient *cl, void *ud) {
     DoneCtx *d = ud;
-    const KlClientResponse *r = kl_client_response(cl);
+    const KlHttpClientResponse *r = kl_http_client_response(cl);
     if (r) {
         d->status = r->status;
         d->body_len = r->body_len;
@@ -449,7 +449,7 @@ static void on_done(KlClient *cl, void *ud) {
     } else {
         d->status = -1;
     }
-    d->err = kl_client_last_error(cl);
+    d->err = kl_http_client_last_error(cl);
     d->done = 1;
 }
 
@@ -486,13 +486,13 @@ static void script_full_200(MockFd *m) {
 
 /* Common setup: a client over the mock completion loop + mock socket provider +
  * mock resolver. Returns the started client (or NULL). */
-static KlClient *start_client(KlEventCtx *ev, KlAllocator *a, DoneCtx *d,
+static KlHttpClient *start_client(KlEventCtx *ev, KlAllocator *a, DoneCtx *d,
                               int timeout_ms) {
-    KlClientConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    KlHttpClientConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.resolver = &g_resolver;
     cfg.timeout_ms = timeout_ms;
     memset(d, 0, sizeof(*d));
-    return kl_client_start(ev, a, &cfg, "GET", "http://host.test/x",
+    return kl_http_client_start(ev, a, &cfg, "GET", "http://host.test/x",
                            NULL, 0, NULL, 0, on_done, d);
 }
 
@@ -504,7 +504,7 @@ static void scenario_1_happy(void) {
     CHECK(kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER) == 0, "ctx init");
 
     DoneCtx d;
-    KlClient *c = start_client(&ev, &a.base, &d, 5000);
+    KlHttpClient *c = start_client(&ev, &a.base, &d, 5000);
     CHECK(c != NULL, "client start");
     /* The socket fd is created during connect (first tick). Script recv after the
      * first pump so the fd exists — but simpler: script via a post-connect hook.
@@ -520,7 +520,7 @@ static void scenario_1_happy(void) {
     CHECK(d.status == 200, "status 200");
     CHECK(d.body_len == 5 && memcmp(d.body, "hello", 5) == 0, "body == hello");
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     CHECK(a.live == 0, "no leak (all freed)");
 }
@@ -533,9 +533,9 @@ static void scenario_2_refused(void) {
     kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER);
 
     DoneCtx d;
-    KlClient *c = start_client(&ev, &a.base, &d, 5000);
+    KlHttpClient *c = start_client(&ev, &a.base, &d, 5000);
     CHECK(c != NULL, "client start");
-    /* The mock resolver completes synchronously inside kl_client_start, so the
+    /* The mock resolver completes synchronously inside kl_http_client_start, so the
      * socket is already created + the connect op queued when start returns. Mark
      * the fd refused; drain reads connect_ok LIVE and surfaces KL_COMP_CONNECT(ok=0). */
     CHECK(g_sock.fds[0].in_use, "fd created at start");
@@ -546,7 +546,7 @@ static void scenario_2_refused(void) {
     CHECK(d.status == -1, "no response");
     CHECK(d.err == KL_ERR_CONNECT || d.err == KL_ERR_IO, "connect error");
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     CHECK(a.live == 0, "no leak");
 }
@@ -559,7 +559,7 @@ static void scenario_3_partial_send(void) {
     kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER);
 
     DoneCtx d;
-    KlClient *c = start_client(&ev, &a.base, &d, 5000);
+    KlHttpClient *c = start_client(&ev, &a.base, &d, 5000);
     CHECK(c != NULL, "client start");
     /* Script BEFORE pumping: the sync mock resolver already created the fd, and the
      * SENDING state runs on the first pump (right after the connect completion), so
@@ -577,7 +577,7 @@ static void scenario_3_partial_send(void) {
     CHECK(d.status == 200, "status 200");
     CHECK(m->send_i >= 2, "partial send path exercised");
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     CHECK(a.live == 0, "no leak");
 }
@@ -590,7 +590,7 @@ static void scenario_4_fragmented_recv(void) {
     kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER);
 
     DoneCtx d;
-    KlClient *c = start_client(&ev, &a.base, &d, 5000);
+    KlHttpClient *c = start_client(&ev, &a.base, &d, 5000);
     CHECK(c != NULL, "client start");
     pump(&ev, &d, 3);
     MockFd *m = &g_sock.fds[0];
@@ -608,7 +608,7 @@ static void scenario_4_fragmented_recv(void) {
     CHECK(d.status == 200, "status 200");
     CHECK(d.body_len == 5 && memcmp(d.body, "hello", 5) == 0, "reassembled body");
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     CHECK(a.live == 0, "no leak");
 }
@@ -621,7 +621,7 @@ static void scenario_5_peer_close(void) {
     kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER);
 
     DoneCtx d;
-    KlClient *c = start_client(&ev, &a.base, &d, 5000);
+    KlHttpClient *c = start_client(&ev, &a.base, &d, 5000);
     CHECK(c != NULL, "client start");
     pump(&ev, &d, 3);
     MockFd *m = &g_sock.fds[0];
@@ -636,7 +636,7 @@ static void scenario_5_peer_close(void) {
     CHECK(d.status == -1, "no valid response");
     CHECK(d.err != KL_ERR_NONE, "error reported");
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     CHECK(a.live == 0, "no leak");
 }
@@ -649,7 +649,7 @@ static void scenario_6_timeout(void) {
     kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER);
 
     DoneCtx d;
-    KlClient *c = start_client(&ev, &a.base, &d, 1000);   /* 1s deadline */
+    KlHttpClient *c = start_client(&ev, &a.base, &d, 1000);   /* 1s deadline */
     CHECK(c != NULL, "client start");
     pump(&ev, &d, 3);
     const MockFd *m = &g_sock.fds[0];
@@ -664,7 +664,7 @@ static void scenario_6_timeout(void) {
     CHECK(d.status == -1, "no response");
     CHECK(d.err == KL_ERR_TIMEOUT, "timeout error");
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     CHECK(a.live == 0, "no leak");
 }
@@ -677,15 +677,15 @@ static void scenario_7_cancel(void) {
     kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER);
 
     DoneCtx d;
-    KlClient *c = start_client(&ev, &a.base, &d, 5000);
+    KlHttpClient *c = start_client(&ev, &a.base, &d, 5000);
     CHECK(c != NULL, "client start");
     pump(&ev, &d, 3);   /* connect completes; client now in SENDING/RECEIVING */
     CHECK(!d.done, "still in flight");
-    kl_client_cancel(c);
+    kl_http_client_cancel(c);
     /* A further pump must NOT resurrect the client or touch freed memory. */
     pump(&ev, &d, 10);
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     CHECK(a.live == 0, "no leak after cancel");
 }
@@ -697,12 +697,12 @@ static void scenario_8_size_cap(void) {
     KlEventCtx ev;
     kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER);
 
-    KlClientConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    KlHttpClientConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.resolver = &g_resolver;
     cfg.timeout_ms = 5000;
     cfg.max_response_size = 16;   /* tiny cap: a real 200 body overflows it */
     DoneCtx d; memset(&d, 0, sizeof(d));
-    KlClient *c = kl_client_start(&ev, &a.base, &cfg, "GET", "http://host.test/x",
+    KlHttpClient *c = kl_http_client_start(&ev, &a.base, &cfg, "GET", "http://host.test/x",
                                   NULL, 0, NULL, 0, on_done, &d);
     CHECK(c != NULL, "client start");
     pump(&ev, &d, 3);
@@ -721,7 +721,7 @@ static void scenario_8_size_cap(void) {
     CHECK(d.status != 200, "capped, not a clean 200");
     CHECK(d.err != KL_ERR_NONE, "error reported");
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     CHECK(a.live == 0, "no leak");
 }
@@ -737,14 +737,14 @@ static void scenario_9_alloc_fail(void) {
         int ctx_ok = (kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER) == 0);
 
         DoneCtx d;
-        KlClient *c = start_client(&ev, &a.base, &d, 5000);
+        KlHttpClient *c = start_client(&ev, &a.base, &d, 5000);
         /* Either the start failed cleanly (NULL) or it proceeded; either way pump
          * and require no leak. If it started, a later scripted response finishes it. */
         if (c) {
             pump(&ev, &d, 3);
             if (g_sock.fds[0].in_use) script_full_200(&g_sock.fds[0]);
             pump(&ev, &d, 20);
-            kl_client_free(c);
+            kl_http_client_free(c);
         }
         if (ctx_ok) kl_event_ctx_free(&ev);
         CHECK(a.live == 0, "no leak on alloc failure");
@@ -759,7 +759,7 @@ static void scenario_10_stale_completion(void) {
     kl_event_ctx_init_ex(&ev, &a.base, &MOCK_EVENT_PROVIDER);
 
     DoneCtx d;
-    KlClient *c = start_client(&ev, &a.base, &d, 5000);
+    KlHttpClient *c = start_client(&ev, &a.base, &d, 5000);
     CHECK(c != NULL, "client start");
     /* Do NOT pump first: leave the connect op queued in the mock loop. Cancel now
      * (client_cancel calls kl_comp_cancel → mloop_cancel drops the queued op), so
@@ -768,7 +768,7 @@ static void scenario_10_stale_completion(void) {
      * a now-freed watcher to exercise the driver's liveness guard. */
     CHECK(g_loop.conns[0].in_use, "connect op queued");
     void *stale_udata = g_loop.conns[0].watcher_udata;
-    kl_client_cancel(c);
+    kl_http_client_cancel(c);
     CHECK(!g_loop.conns[0].in_use, "cancel dropped the queued connect op");
 
     /* Inject a stale completion by hand: a KL_COMP_CONNECT whose target watcher
@@ -783,7 +783,7 @@ static void scenario_10_stale_completion(void) {
     }
     pump(&ev, &d, 10);   /* must not crash / UAF (ASan-checked) */
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     CHECK(a.live == 0, "no leak after stale completion");
 }

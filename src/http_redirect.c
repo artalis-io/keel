@@ -1,27 +1,27 @@
 /*
  * redirect.c — HTTP redirect following (sync + async)
  *
- * Wraps kl_client_request / kl_client_start with automatic 3xx
+ * Wraps kl_http_client_request / kl_http_client_start with automatic 3xx
  * redirect following. Method transformation per RFC 7231/7538.
  * Does not modify client.c.
  */
 
-#include <keel/redirect.h>
+#include <keel/http_redirect.h>
 
 #include <string.h>
 #include <strings.h>
 
 /* ── Internal struct ─────────────────────────────────────────────── */
 
-struct KlRedirectClient {
-    KlClient          *inner;          /* current in-flight async client */
+struct KlHttpRedirectClient {
+    KlHttpClient          *inner;          /* current in-flight async client */
     KlAllocator       *alloc;
     KlEventCtx        *ev_ctx;
-    const KlClientConfig *cfg;
-    KlClientPool      *pool;           /* NULL if not pooled */
+    const KlHttpClientConfig *cfg;
+    KlHttpClientPool      *pool;           /* NULL if not pooled */
 
     /* Original request (heap-copied for async lifetime) */
-    KlClientHeader    *headers;        /* deep-copied array */
+    KlHttpClientHeader    *headers;        /* deep-copied array */
     int                num_headers;
     char              *body;           /* copied body (NULL if none) */
     size_t             body_len;
@@ -34,7 +34,7 @@ struct KlRedirectClient {
     char               current_method[16];
 
     /* Completion */
-    KlRedirectDoneFn   on_done;
+    KlHttpRedirectDoneFn   on_done;
     void              *user_data;
     KlError            error;
 };
@@ -84,7 +84,7 @@ static int is_cross_origin(const KlUrl *a, const KlUrl *b)
     return 0;
 }
 
-static const char *find_location(const KlClientResponse *resp)
+static const char *find_location(const KlHttpClientResponse *resp)
 {
     for (int i = 0; i < resp->num_headers; i++) {
         if (strcasecmp(resp->headers[i].name, "Location") == 0)
@@ -113,20 +113,20 @@ static int should_drop_header(const char *name, int body_dropped, int cross_orig
 
 /* ── Sync implementation ─────────────────────────────────────────── */
 
-static int do_sync_request(KlClientPool *pool, KlAllocator *alloc,
-                           const KlClientConfig *cfg,
-                           const KlRedirectConfig *redir,
+static int do_sync_request(KlHttpClientPool *pool, KlAllocator *alloc,
+                           const KlHttpClientConfig *cfg,
+                           const KlHttpRedirectConfig *redir,
                            const char *method, const char *url,
-                           const KlClientHeader *headers, int num_headers,
+                           const KlHttpClientHeader *headers, int num_headers,
                            const char *body, size_t body_len,
-                           KlClientResponse *resp)
+                           KlHttpClientResponse *resp)
 {
     if (!alloc || !method || !url || !resp)
         return -1;
 
     int max_redir = (redir && redir->max_redirects > 0)
                         ? redir->max_redirects
-                        : KL_REDIRECT_DEFAULT_MAX;
+                        : KL_HTTP_REDIRECT_DEFAULT_MAX;
 
     char cur_url[KL_URL_MAX];
     char cur_method[16];
@@ -146,7 +146,7 @@ static int do_sync_request(KlClientPool *pool, KlAllocator *alloc,
 
     for (int i = 0; i <= max_redir; i++) {
         /* Build filtered header array on stack */
-        KlClientHeader filtered[KL_CLIENT_MAX_REQ_HEADERS];
+        KlHttpClientHeader filtered[KL_HTTP_CLIENT_MAX_REQ_HEADERS];
         int nfiltered = 0;
 
         /* Determine if body is present for this hop */
@@ -163,7 +163,7 @@ static int do_sync_request(KlClientPool *pool, KlAllocator *alloc,
             }
         }
 
-        for (int h = 0; h < num_headers && nfiltered < KL_CLIENT_MAX_REQ_HEADERS; h++) {
+        for (int h = 0; h < num_headers && nfiltered < KL_HTTP_CLIENT_MAX_REQ_HEADERS; h++) {
             if (!should_drop_header(headers[h].name, body_dropped, cross_origin)) {
                 filtered[nfiltered++] = headers[h];
             }
@@ -171,11 +171,11 @@ static int do_sync_request(KlClientPool *pool, KlAllocator *alloc,
 
         int rc;
         if (pool) {
-            rc = kl_client_request_pooled(pool, alloc, cfg, cur_method, cur_url,
+            rc = kl_http_client_request_pooled(pool, alloc, cfg, cur_method, cur_url,
                                           filtered, nfiltered,
                                           cur_body, cur_body_len, resp);
         } else {
-            rc = kl_client_request(alloc, cfg, cur_method, cur_url,
+            rc = kl_http_client_request(alloc, cfg, cur_method, cur_url,
                                    filtered, nfiltered,
                                    cur_body, cur_body_len, resp);
         }
@@ -197,7 +197,7 @@ static int do_sync_request(KlClientPool *pool, KlAllocator *alloc,
         /* Resolve redirect URL */
         char next_url[KL_URL_MAX];
         if (kl_url_resolve(cur_url, location, next_url, sizeof(next_url)) != 0) {
-            kl_client_response_free(resp);
+            kl_http_client_response_free(resp);
             resp->error = KL_ERR_URL;
             return -1;
         }
@@ -210,12 +210,12 @@ static int do_sync_request(KlClientPool *pool, KlAllocator *alloc,
         }
 
         /* Free intermediate response */
-        kl_client_response_free(resp);
+        kl_http_client_response_free(resp);
 
         /* Advance */
         size_t nlen = strlen(next_url);
         if (nlen >= sizeof(cur_url)) {
-            /* Zero the struct before setting error — kl_client_response_free
+            /* Zero the struct before setting error — kl_http_client_response_free
              * above invalidated headers/body/num_headers; a caller that
              * inspects them after seeing error != 0 (perfectly reasonable)
              * would hit UAF.  Match the sibling pattern at line ~220
@@ -235,24 +235,24 @@ static int do_sync_request(KlClientPool *pool, KlAllocator *alloc,
     return -1;
 }
 
-int kl_redirect_request(KlAllocator *alloc, const KlClientConfig *cfg,
-                        const KlRedirectConfig *redir,
+int kl_http_redirect_request(KlAllocator *alloc, const KlHttpClientConfig *cfg,
+                        const KlHttpRedirectConfig *redir,
                         const char *method, const char *url,
-                        const KlClientHeader *headers, int num_headers,
+                        const KlHttpClientHeader *headers, int num_headers,
                         const char *body, size_t body_len,
-                        KlClientResponse *resp)
+                        KlHttpClientResponse *resp)
 {
     return do_sync_request(NULL, alloc, cfg, redir, method, url,
                            headers, num_headers, body, body_len, resp);
 }
 
-int kl_redirect_request_pooled(KlClientPool *pool,
-                               KlAllocator *alloc, const KlClientConfig *cfg,
-                               const KlRedirectConfig *redir,
+int kl_http_redirect_request_pooled(KlHttpClientPool *pool,
+                               KlAllocator *alloc, const KlHttpClientConfig *cfg,
+                               const KlHttpRedirectConfig *redir,
                                const char *method, const char *url,
-                               const KlClientHeader *headers, int num_headers,
+                               const KlHttpClientHeader *headers, int num_headers,
                                const char *body, size_t body_len,
-                               KlClientResponse *resp)
+                               KlHttpClientResponse *resp)
 {
     if (!pool)
         return -1;
@@ -262,20 +262,20 @@ int kl_redirect_request_pooled(KlClientPool *pool,
 
 /* ── Async helpers ───────────────────────────────────────────────── */
 
-static KlRedirectClient *alloc_redirect_client(KlAllocator *alloc,
+static KlHttpRedirectClient *alloc_redirect_client(KlAllocator *alloc,
                                                KlEventCtx *ev_ctx,
-                                               const KlClientConfig *cfg,
-                                               KlClientPool *pool,
-                                               const KlRedirectConfig *redir,
+                                               const KlHttpClientConfig *cfg,
+                                               KlHttpClientPool *pool,
+                                               const KlHttpRedirectConfig *redir,
                                                const char *method,
                                                const char *url,
-                                               const KlClientHeader *headers,
+                                               const KlHttpClientHeader *headers,
                                                int num_headers,
                                                const char *body, size_t body_len,
-                                               KlRedirectDoneFn on_done,
+                                               KlHttpRedirectDoneFn on_done,
                                                void *user_data)
 {
-    KlRedirectClient *rc = kl_malloc(alloc, sizeof(KlRedirectClient));
+    KlHttpRedirectClient *rc = kl_malloc(alloc, sizeof(KlHttpRedirectClient));
     if (!rc)
         return NULL;
     memset(rc, 0, sizeof(*rc));
@@ -288,12 +288,12 @@ static KlRedirectClient *alloc_redirect_client(KlAllocator *alloc,
     rc->user_data = user_data;
     rc->max_redirects = (redir && redir->max_redirects > 0)
                             ? redir->max_redirects
-                            : KL_REDIRECT_DEFAULT_MAX;
+                            : KL_HTTP_REDIRECT_DEFAULT_MAX;
 
     /* Copy method */
     size_t mlen = strlen(method);
     if (mlen >= sizeof(rc->current_method)) {
-        kl_free(alloc, rc, sizeof(KlRedirectClient));
+        kl_free(alloc, rc, sizeof(KlHttpRedirectClient));
         return NULL;
     }
     memcpy(rc->current_method, method, mlen + 1);
@@ -301,7 +301,7 @@ static KlRedirectClient *alloc_redirect_client(KlAllocator *alloc,
     /* Copy URL (both original and current) */
     size_t ulen = strlen(url);
     if (ulen >= sizeof(rc->current_url)) {
-        kl_free(alloc, rc, sizeof(KlRedirectClient));
+        kl_free(alloc, rc, sizeof(KlHttpRedirectClient));
         return NULL;
     }
     memcpy(rc->current_url, url, ulen + 1);
@@ -309,9 +309,9 @@ static KlRedirectClient *alloc_redirect_client(KlAllocator *alloc,
 
     /* Deep-copy headers */
     if (num_headers > 0 && headers) {
-        rc->headers = kl_malloc(alloc, (size_t)num_headers * sizeof(KlClientHeader));
+        rc->headers = kl_malloc(alloc, (size_t)num_headers * sizeof(KlHttpClientHeader));
         if (!rc->headers) {
-            kl_free(alloc, rc, sizeof(KlRedirectClient));
+            kl_free(alloc, rc, sizeof(KlHttpRedirectClient));
             return NULL;
         }
         for (int i = 0; i < num_headers; i++) {
@@ -330,8 +330,8 @@ static KlRedirectClient *alloc_redirect_client(KlAllocator *alloc,
                             strlen(rc->headers[j].value) + 1);
                 }
                 kl_free(alloc, rc->headers,
-                        (size_t)num_headers * sizeof(KlClientHeader));
-                kl_free(alloc, rc, sizeof(KlRedirectClient));
+                        (size_t)num_headers * sizeof(KlHttpClientHeader));
+                kl_free(alloc, rc, sizeof(KlHttpRedirectClient));
                 return NULL;
             }
             memcpy(n, headers[i].name, nlen);
@@ -355,8 +355,8 @@ static KlRedirectClient *alloc_redirect_client(KlAllocator *alloc,
             }
             if (rc->headers)
                 kl_free(alloc, rc->headers,
-                        (size_t)rc->num_headers * sizeof(KlClientHeader));
-            kl_free(alloc, rc, sizeof(KlRedirectClient));
+                        (size_t)rc->num_headers * sizeof(KlHttpClientHeader));
+            kl_free(alloc, rc, sizeof(KlHttpRedirectClient));
             return NULL;
         }
         memcpy(rc->body, body, body_len);
@@ -366,12 +366,12 @@ static KlRedirectClient *alloc_redirect_client(KlAllocator *alloc,
     return rc;
 }
 
-static void internal_on_done(KlClient *client, void *user_data);
+static void internal_on_done(KlHttpClient *client, void *user_data);
 
-static int start_next_request(KlRedirectClient *rc)
+static int start_next_request(KlHttpRedirectClient *rc)
 {
     /* Build filtered headers */
-    KlClientHeader filtered[KL_CLIENT_MAX_REQ_HEADERS];
+    KlHttpClientHeader filtered[KL_HTTP_CLIENT_MAX_REQ_HEADERS];
     int nfiltered = 0;
     int body_dropped = (rc->body == NULL || rc->body_len == 0);
 
@@ -385,20 +385,20 @@ static int start_next_request(KlRedirectClient *rc)
         }
     }
 
-    for (int h = 0; h < rc->num_headers && nfiltered < KL_CLIENT_MAX_REQ_HEADERS; h++) {
+    for (int h = 0; h < rc->num_headers && nfiltered < KL_HTTP_CLIENT_MAX_REQ_HEADERS; h++) {
         if (!should_drop_header(rc->headers[h].name, body_dropped, cross_origin))
             filtered[nfiltered++] = rc->headers[h];
     }
 
-    KlClient *inner;
+    KlHttpClient *inner;
     if (rc->pool) {
-        inner = kl_client_start_pooled(rc->pool, rc->ev_ctx, rc->alloc, rc->cfg,
+        inner = kl_http_client_start_pooled(rc->pool, rc->ev_ctx, rc->alloc, rc->cfg,
                                        rc->current_method, rc->current_url,
                                        filtered, nfiltered,
                                        rc->body, rc->body_len,
                                        internal_on_done, rc);
     } else {
-        inner = kl_client_start(rc->ev_ctx, rc->alloc, rc->cfg,
+        inner = kl_http_client_start(rc->ev_ctx, rc->alloc, rc->cfg,
                                 rc->current_method, rc->current_url,
                                 filtered, nfiltered,
                                 rc->body, rc->body_len,
@@ -412,20 +412,20 @@ static int start_next_request(KlRedirectClient *rc)
     return 0;
 }
 
-static void internal_on_done(KlClient *client, void *user_data)
+static void internal_on_done(KlHttpClient *client, void *user_data)
 {
-    KlRedirectClient *rc = user_data;
+    KlHttpRedirectClient *rc = user_data;
     (void)client;
 
     /* Error from inner client */
-    if (kl_client_error(rc->inner) != 0) {
-        rc->error = kl_client_last_error(rc->inner);
+    if (kl_http_client_error(rc->inner) != 0) {
+        rc->error = kl_http_client_last_error(rc->inner);
         if (rc->on_done)
             rc->on_done(rc, rc->user_data);
         return;
     }
 
-    const KlClientResponse *resp = kl_client_response(rc->inner);
+    const KlHttpClientResponse *resp = kl_http_client_response(rc->inner);
     if (!resp) {
         rc->error = KL_ERR_IO;
         if (rc->on_done)
@@ -488,7 +488,7 @@ static void internal_on_done(KlClient *client, void *user_data)
     memcpy(rc->current_url, next_url, nlen + 1);
 
     /* Free the intermediate client (and its response) */
-    kl_client_free(rc->inner);
+    kl_http_client_free(rc->inner);
     rc->inner = NULL;
 
     rc->redirects_done++;
@@ -503,100 +503,100 @@ static void internal_on_done(KlClient *client, void *user_data)
 
 /* ── Async public API ────────────────────────────────────────────── */
 
-KlRedirectClient *kl_redirect_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
-                                    const KlClientConfig *cfg,
-                                    const KlRedirectConfig *redir,
+KlHttpRedirectClient *kl_http_redirect_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
+                                    const KlHttpClientConfig *cfg,
+                                    const KlHttpRedirectConfig *redir,
                                     const char *method, const char *url,
-                                    const KlClientHeader *headers, int num_headers,
+                                    const KlHttpClientHeader *headers, int num_headers,
                                     const char *body, size_t body_len,
-                                    KlRedirectDoneFn on_done, void *user_data)
+                                    KlHttpRedirectDoneFn on_done, void *user_data)
 {
     if (!ev_ctx || !alloc || !method || !url)
         return NULL;
 
-    KlRedirectClient *rc = alloc_redirect_client(alloc, ev_ctx, cfg, NULL, redir,
+    KlHttpRedirectClient *rc = alloc_redirect_client(alloc, ev_ctx, cfg, NULL, redir,
                                                  method, url, headers, num_headers,
                                                  body, body_len, on_done, user_data);
     if (!rc)
         return NULL;
 
     if (start_next_request(rc) != 0) {
-        kl_redirect_free(rc);
+        kl_http_redirect_free(rc);
         return NULL;
     }
 
     return rc;
 }
 
-KlRedirectClient *kl_redirect_start_pooled(KlClientPool *pool,
+KlHttpRedirectClient *kl_http_redirect_start_pooled(KlHttpClientPool *pool,
                                            KlEventCtx *ev_ctx, KlAllocator *alloc,
-                                           const KlClientConfig *cfg,
-                                           const KlRedirectConfig *redir,
+                                           const KlHttpClientConfig *cfg,
+                                           const KlHttpRedirectConfig *redir,
                                            const char *method, const char *url,
-                                           const KlClientHeader *headers, int num_headers,
+                                           const KlHttpClientHeader *headers, int num_headers,
                                            const char *body, size_t body_len,
-                                           KlRedirectDoneFn on_done, void *user_data)
+                                           KlHttpRedirectDoneFn on_done, void *user_data)
 {
     if (!pool || !ev_ctx || !alloc || !method || !url)
         return NULL;
 
-    KlRedirectClient *rc = alloc_redirect_client(alloc, ev_ctx, cfg, pool, redir,
+    KlHttpRedirectClient *rc = alloc_redirect_client(alloc, ev_ctx, cfg, pool, redir,
                                                  method, url, headers, num_headers,
                                                  body, body_len, on_done, user_data);
     if (!rc)
         return NULL;
 
     if (start_next_request(rc) != 0) {
-        kl_redirect_free(rc);
+        kl_http_redirect_free(rc);
         return NULL;
     }
 
     return rc;
 }
 
-const KlClientResponse *kl_redirect_response(const KlRedirectClient *rc)
+const KlHttpClientResponse *kl_http_redirect_response(const KlHttpRedirectClient *rc)
 {
     if (!rc || !rc->inner)
         return NULL;
     if (rc->error != KL_ERR_NONE)
         return NULL;
-    return kl_client_response(rc->inner);
+    return kl_http_client_response(rc->inner);
 }
 
-int kl_redirect_error(const KlRedirectClient *rc)
+int kl_http_redirect_error(const KlHttpRedirectClient *rc)
 {
     if (!rc)
         return -1;
     if (rc->error != KL_ERR_NONE)
         return -1;
     if (rc->inner)
-        return kl_client_error(rc->inner);
+        return kl_http_client_error(rc->inner);
     return -1;
 }
 
-KlError kl_redirect_last_error(const KlRedirectClient *rc)
+KlError kl_http_redirect_last_error(const KlHttpRedirectClient *rc)
 {
     if (!rc)
         return KL_ERR_INVALID_ARG;
     if (rc->error != KL_ERR_NONE)
         return rc->error;
     if (rc->inner)
-        return kl_client_last_error(rc->inner);
+        return kl_http_client_last_error(rc->inner);
     return KL_ERR_NONE;
 }
 
-void kl_redirect_cancel(KlRedirectClient *rc)
+void kl_http_redirect_cancel(KlHttpRedirectClient *rc)
 {
     if (!rc)
         return;
     if (rc->inner) {
-        kl_client_cancel(rc->inner);
+        kl_http_client_cancel(rc->inner);
     }
     if (rc->error == KL_ERR_NONE)
         rc->error = KL_ERR_IO;
 }
 
-void kl_redirect_free(KlRedirectClient *rc)
+void kl_http_redirect_free(KlHttpRedirectClient *rc)
 {
     if (!rc)
         return;
@@ -604,7 +604,7 @@ void kl_redirect_free(KlRedirectClient *rc)
     KlAllocator *alloc = rc->alloc;
 
     if (rc->inner) {
-        kl_client_free(rc->inner);
+        kl_http_client_free(rc->inner);
         rc->inner = NULL;
     }
 
@@ -619,11 +619,11 @@ void kl_redirect_free(KlRedirectClient *rc)
     }
     if (rc->headers)
         kl_free(alloc, rc->headers,
-                (size_t)rc->num_headers * sizeof(KlClientHeader));
+                (size_t)rc->num_headers * sizeof(KlHttpClientHeader));
 
     /* Free copied body */
     if (rc->body)
         kl_free(alloc, rc->body, rc->body_len);
 
-    kl_free(alloc, rc, sizeof(KlRedirectClient));
+    kl_free(alloc, rc, sizeof(KlHttpRedirectClient));
 }

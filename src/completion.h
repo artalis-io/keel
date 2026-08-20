@@ -39,7 +39,7 @@ typedef enum {
                        * KL_COMP_ACCEPT for the OUTBOUND direction: pollcomp does a real
                        * connect()+POLLOUT+SO_ERROR, io_uring an IORING_OP_CONNECT, IOCP a
                        * ConnectEx, lwip-raw a tcp_connect+connected_cb (LC-1). The consumer is
-                       * the async KlClient, NOT the server driver — so, like KL_COMP_WATCHER,
+                       * the async KlHttpClient, NOT the server driver — so, like KL_COMP_WATCHER,
                        * the result is routed to a tagged KlWatcher (target = the tagged
                        * KlWatcher udata the client registered; `bytes` carries KL_EVENT_WRITE,
                        * `ok` reflects connect success) and dispatched via kl_event_dispatch to

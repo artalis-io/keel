@@ -4,15 +4,15 @@
  * Freestanding step B2b: the non-blocking state machine driven by KlEventCtx
  * watchers lives here — Happy Eyeballs (RFC 8305) racing connect, the
  * completion-connect path (LC-0), async DNS, the SENDING/RECEIVING/TLS/proxy
- * states, and the public kl_client_start[_s] + kl_client_start_pooled entry
+ * states, and the public kl_http_client_start[_s] + kl_http_client_start_pooled entry
  * points. The async path uses kl_sock_send/kl_sock_recv through the provider +
  * watchers, so this TU links without the blocking sync path (client_sync.c).
  *
  * All allocation through KlAllocator. No Hull dependencies.
  */
 
-#include <keel/client.h>
-#include <keel/client_pool.h>
+#include <keel/http_client.h>
+#include <keel/http_client_pool.h>
 #include <keel/decompress.h>
 #include <keel/dns_resolver.h>
 #include <keel/http1_parser.h>
@@ -29,25 +29,25 @@
 #include "event_caps.h" /* PAL Phase 7: event↔socket capability negotiation */
 #include "io_engine.h"  /* kl_comp_post_connect / kl_comp_cancel — completion connect (LC-0) */
 #include "watcher_internal.h" /* kl_watcher_add_detached — completion connect (LC-0) */
-#include "client_internal.h"
-#include "client_proxy.h" /* shared CONNECT serialization + status (no sync/async drift) */
+#include "http_client_internal.h"
+#include "http_client_proxy.h" /* shared CONNECT serialization + status (no sync/async drift) */
 #include "kl_cstr.h"    /* locale-free append builders + bounded find (no snprintf) */
 
 /* Forward declarations */
 static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data);
-static void async_complete_success(KlClient *c);
-static void async_complete_error(KlClient *c);
-static void async_handle_tls_handshake(KlClient *c);
-static void async_handle_sending_stream(KlClient *c);
-static void async_handle_proxy_connecting(KlClient *c);
-static void async_handle_proxy_handshake(KlClient *c);
-static int  start_connect(KlClient *c, const KlSockAddr *addr);
+static void async_complete_success(KlHttpClient *c);
+static void async_complete_error(KlHttpClient *c);
+static void async_handle_tls_handshake(KlHttpClient *c);
+static void async_handle_sending_stream(KlHttpClient *c);
+static void async_handle_proxy_connecting(KlHttpClient *c);
+static void async_handle_proxy_handshake(KlHttpClient *c);
+static int  start_connect(KlHttpClient *c, const KlSockAddr *addr);
 /* Happy Eyeballs via KlConnectOp (6C) — hooks + entry-point wrappers defined below start_connect */
-static void he_proceed_after_connect(KlClient *c);
-static void he_win(KlClient *c, KlSocketHandle fd);
-static void he_on_writable(KlClient *c, KlSocketHandle fd);
-static void he_on_connect_result(KlClient *c, KlSocketHandle fd, KlEventMask ready);
-static void he_cancel_timers(KlClient *c);
+static void he_proceed_after_connect(KlHttpClient *c);
+static void he_win(KlHttpClient *c, KlSocketHandle fd);
+static void he_on_writable(KlHttpClient *c, KlSocketHandle fd);
+static void he_on_connect_result(KlHttpClient *c, KlSocketHandle fd, KlEventMask ready);
+static void he_cancel_timers(KlHttpClient *c);
 static void he_on_deadline(void *user_data);
 static void he_on_delay(void *user_data);
 static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
@@ -55,7 +55,7 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
 
 /* ── Build CONNECT request into heap buffer ──────────────────────── */
 
-static int build_connect_request(KlClient *c, const char *host,
+static int build_connect_request(KlHttpClient *c, const char *host,
                                    uint16_t port, const char *auth)
 {
     char buf[KL_PROXY_RESPONSE_MAX];
@@ -78,7 +78,7 @@ static int build_connect_request(KlClient *c, const char *host,
 /* True when the client's loop is a completion loop (IOCP / io_uring / pollcomp): connect is
  * driven over the completion axis (kl_comp_post_connect) instead of a readiness WRITE watcher.
  * Readiness loops (epoll/kqueue/poll) return 0 → the existing watcher path is used unchanged. */
-static int client_loop_is_completion(const KlClient *c)
+static int client_loop_is_completion(const KlHttpClient *c)
 {
     return (kl_event_caps(&c->ev_ctx->loop) & KL_EVENT_CAP_COMPLETION) != 0;
 }
@@ -89,7 +89,7 @@ static int client_loop_is_completion(const KlClient *c)
  * KL_COMP_CONNECT → the driver → async_on_event (CONNECTING), which reads the win/fail result
  * the backend encoded in the delivered mask (KL_EVENT_WRITE = connected). Returns 0 if posted,
  * -1 on a hard local failure. */
-static int client_comp_connect(KlClient *c, KlSocketHandle fd, const KlSockAddr *addr)
+static int client_comp_connect(KlHttpClient *c, KlSocketHandle fd, const KlSockAddr *addr)
 {
     void *tag = kl_watcher_add_detached(c->ev_ctx, fd, async_on_event, c);
     if (!tag)
@@ -105,7 +105,7 @@ static int client_comp_connect(KlClient *c, KlSocketHandle fd, const KlSockAddr 
  * connect op still references the fd — drop it (kl_comp_cancel frees the PC_CONNECT op) before
  * removing the (detached) watcher + closing the fd, so no stale completion dispatches against
  * the freed watcher. On a readiness loop this is just watcher_del + close. */
-static void client_drop_connect_fd(KlClient *c, KlSocketHandle fd)
+static void client_drop_connect_fd(KlHttpClient *c, KlSocketHandle fd)
 {
     if (client_loop_is_completion(c))
         kl_comp_cancel(c->ev_ctx, fd);
@@ -113,7 +113,7 @@ static void client_drop_connect_fd(KlClient *c, KlSocketHandle fd)
     kl_sock_close(c->ev_ctx->sockets, fd);
 }
 
-static int start_connect(KlClient *c, const KlSockAddr *addr)
+static int start_connect(KlHttpClient *c, const KlSockAddr *addr)
 {
     int family = (kl_sockaddr_family(addr) == KL_AF_INET6) ? AF_INET6 :
                  (kl_sockaddr_family(addr) == KL_AF_UNIX)  ? AF_UNIX : AF_INET;
@@ -130,7 +130,7 @@ static int start_connect(KlClient *c, const KlSockAddr *addr)
     /* Completion loop: drive connect over the completion axis (no readiness WRITE watcher). */
     if (client_loop_is_completion(c)) {
         c->fd = fd;
-        c->state = KL_CLIENT_CONNECTING;   /* the connect completion advances us */
+        c->state = KL_HTTP_CLIENT_CONNECTING;   /* the connect completion advances us */
         if (client_comp_connect(c, fd, addr) != 0) {
             kl_sock_close(c->ev_ctx->sockets, fd);
             c->fd = KL_INVALID_SOCKET;
@@ -146,7 +146,7 @@ static int start_connect(KlClient *c, const KlSockAddr *addr)
     }
 
     c->fd = fd;
-    c->state = (rc == 0) ? KL_CLIENT_SENDING : KL_CLIENT_CONNECTING;
+    c->state = (rc == 0) ? KL_HTTP_CLIENT_SENDING : KL_HTTP_CLIENT_CONNECTING;
 
     if (kl_watcher_add(c->ev_ctx, fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
         kl_sock_close(c->ev_ctx->sockets, fd);
@@ -167,7 +167,7 @@ static int start_connect(KlClient *c, const KlSockAddr *addr)
 
 /* Cancel the (client-owned) overall deadline timer. The Connection Attempt Delay is a KlConnectOp
  * timer disarmed via cli_co_cancel_delay at the connect terminal; dropped defensively here too. */
-static void he_cancel_timers(KlClient *c)
+static void he_cancel_timers(KlHttpClient *c)
 {
     if (c->conn_delay_timer >= 0) {
         kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
@@ -180,7 +180,7 @@ static void he_cancel_timers(KlClient *c)
 }
 
 /* Map a racing fd back to its address index (the client owns the idx->fd map). -1 if not found. */
-static int he_idx_of_fd(const KlClient *c, KlSocketHandle fd)
+static int he_idx_of_fd(const KlHttpClient *c, KlSocketHandle fd)
 {
     for (int i = 0; i < c->conn_addrs.naddrs; i++)
         if (c->conn_attempts[i].active && c->conn_attempts[i].fd == fd)
@@ -188,7 +188,7 @@ static int he_idx_of_fd(const KlClient *c, KlSocketHandle fd)
     return -1;
 }
 
-/* ── KlConnectOp adapter hooks (ctx = the KlClient) ───────────────────────────────────────────── */
+/* ── KlConnectOp adapter hooks (ctx = the KlHttpClient) ───────────────────────────────────────────── */
 
 /* Begin name resolution: kick the (already-selected) resolver. dns_resolved drives on_resolved/
  * on_resolve_failed — possibly INLINE for a sync-completion-capable resolver, in which case the op
@@ -199,7 +199,7 @@ static int he_idx_of_fd(const KlClient *c, KlSocketHandle fd)
  * detach). */
 static int cli_co_start_resolve(void *ctx)
 {
-    KlClient *c = ctx;
+    KlHttpClient *c = ctx;
     KlResolveReq *rq = c->resolver->resolve(c->resolver, c->ev_ctx,
                                             c->resolve_host, c->resolve_port,
                                             dns_resolved, c);
@@ -212,7 +212,7 @@ static int cli_co_start_resolve(void *ctx)
 
 static void cli_co_cancel_resolve(void *ctx)
 {
-    KlClient *c = ctx;
+    KlHttpClient *c = ctx;
     if (c->resolve_req && c->resolver && c->resolver->cancel)
         c->resolver->cancel(c->resolve_req);
     c->resolve_req = NULL;
@@ -226,7 +226,7 @@ static void cli_co_cancel_resolve(void *ctx)
  * -1 = hard local failure (*out_err set; advance to the next address). */
 static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
 {
-    KlClient *c = ctx;
+    KlHttpClient *c = ctx;
     const KlSockAddr *sa = &c->conn_addrs.addrs[idx];
     int fam = (kl_sockaddr_family(sa) == KL_AF_INET6) ? AF_INET6 : AF_INET;
 
@@ -278,7 +278,7 @@ static int cli_co_start_attempt(void *ctx, int idx, int *out_err)
  * terminal/cancel dispatch. */
 static void cli_co_cancel_attempt(void *ctx, int idx)
 {
-    KlClient *c = ctx;
+    KlHttpClient *c = ctx;
     if (c->conn_attempts[idx].active) {
         client_drop_connect_fd(c, c->conn_attempts[idx].fd);
         c->conn_attempts[idx].active = 0;
@@ -290,7 +290,7 @@ static void cli_co_cancel_attempt(void *ctx, int idx)
 /* Dispose a connected non-winner descriptor (straggler / out-of-range / duplicate). */
 static void cli_co_dispose_fd(void *ctx, KlSocketHandle fd)
 {
-    KlClient *c = ctx;
+    KlHttpClient *c = ctx;
     int idx = he_idx_of_fd(c, fd);
     if (idx >= 0) { c->conn_attempts[idx].active = 0; c->conn_attempts[idx].fd = KL_INVALID_SOCKET; }
     client_drop_connect_fd(c, fd);
@@ -300,14 +300,14 @@ static void cli_co_dispose_fd(void *ctx, KlSocketHandle fd)
  * the delay is 0, so the machine fast-starts the next address without staggering. */
 static int cli_co_arm_delay(void *ctx)
 {
-    KlClient *c = ctx;
+    KlHttpClient *c = ctx;
     if (c->connect_delay_ms <= 0) return -1;
     c->conn_delay_timer = kl_timer_add(c->ev_ctx, (uint64_t)c->connect_delay_ms, he_on_delay, c);
     return (c->conn_delay_timer >= 0) ? 0 : -1;
 }
 static void cli_co_cancel_delay(void *ctx)
 {
-    KlClient *c = ctx;
+    KlHttpClient *c = ctx;
     if (c->conn_delay_timer >= 0) {
         kl_timer_cancel(c->ev_ctx, c->conn_delay_timer);
         c->conn_delay_timer = -1;
@@ -317,7 +317,7 @@ static void cli_co_cancel_delay(void *ctx)
 /* A winner has connected: adopt its fd + enter the shared post-connect path. The losers are
  * cancelled by the machine (co_request_cancels → cli_co_cancel_attempt) right after this returns;
  * the overall deadline stays armed (client-owned) to bound the remaining TLS/send/recv. */
-static void he_win(KlClient *c, KlSocketHandle fd)
+static void he_win(KlHttpClient *c, KlSocketHandle fd)
 {
     int idx = he_idx_of_fd(c, fd);
     if (idx >= 0) { c->conn_attempts[idx].active = 0; c->conn_attempts[idx].fd = KL_INVALID_SOCKET; }
@@ -329,7 +329,7 @@ static void he_win(KlClient *c, KlSocketHandle fd)
  * CANCELLED is the client's own doing (deadline / teardown) and completes separately. */
 static void cli_co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd, int error)
 {
-    KlClient *c = ctx;
+    KlHttpClient *c = ctx;
     if (result == KL_CONNECT_SUCCESS) {
         he_win(c, fd);
     } else if (result == KL_CONNECT_FAILED) {
@@ -346,7 +346,7 @@ static void cli_co_on_done(void *ctx, KlConnectResult result, KlSocketHandle fd,
 
 static void cli_co_on_detach(void *ctx)
 {
-    KlClient *c = ctx;
+    KlHttpClient *c = ctx;
     c->conn_racing = 0;   /* the connect op is fully retired — reusable */
 }
 
@@ -365,7 +365,7 @@ static const KlConnectOpHooks CLI_CONNECT_HOOKS = {
 /* A racing socket became writable: SO_ERROR==0 wins the race, else it failed. Map the fd to its
  * attempt index and drive the connect op; the client owns the failed socket, so drop it before
  * reporting the failure (the machine does not dispose a not-yet-connected attempt). */
-static void he_on_writable(KlClient *c, KlSocketHandle fd)
+static void he_on_writable(KlHttpClient *c, KlSocketHandle fd)
 {
     int idx = he_idx_of_fd(c, fd);
     if (idx < 0) return;
@@ -383,7 +383,7 @@ static void he_on_writable(KlClient *c, KlSocketHandle fd)
 /* Completion-loop connect result (LC-0): the backend delivered win/fail in the watcher mask
  * (KL_EVENT_WRITE = connected) rather than SO_ERROR (io_uring does not preserve it after a failed
  * IORING_OP_CONNECT). Mirrors he_on_writable's win/fail branch. */
-static void he_on_connect_result(KlClient *c, KlSocketHandle fd, KlEventMask ready)
+static void he_on_connect_result(KlHttpClient *c, KlSocketHandle fd, KlEventMask ready)
 {
     int idx = he_idx_of_fd(c, fd);
     if (idx < 0) return;
@@ -399,7 +399,7 @@ static void he_on_connect_result(KlClient *c, KlSocketHandle fd, KlEventMask rea
 /* Connection Attempt Delay fired: advance to the next address (the KEEL one-shot timer retired). */
 static void he_on_delay(void *user_data)
 {
-    KlClient *c = user_data;
+    KlHttpClient *c = user_data;
     c->conn_delay_timer = -1;
     kl_connect_op_on_delay(&c->connect_op);
 }
@@ -409,9 +409,9 @@ static void he_on_delay(void *user_data)
  * untimed post-connect TLS handshake / send / recv. */
 static void he_on_deadline(void *user_data)
 {
-    KlClient *c = user_data;
+    KlHttpClient *c = user_data;
     c->deadline_timer = -1;
-    if (c->state == KL_CLIENT_DONE)
+    if (c->state == KL_HTTP_CLIENT_DONE)
         return;
     kl_connect_op_cancel(&c->connect_op);   /* drop any racing sockets (idempotent if terminal) */
     c->error = KL_ERR_TIMEOUT;
@@ -421,7 +421,7 @@ static void he_on_deadline(void *user_data)
 /* ── Async DNS resolve callback ──────────────────────────────────── */
 
 /* Arm the overall request deadline (0 = none). */
-static void he_arm_deadline(KlClient *c)
+static void he_arm_deadline(KlHttpClient *c)
 {
     if (c->timeout_ms > 0)
         c->deadline_timer = kl_timer_add(c->ev_ctx, (uint64_t)c->timeout_ms,
@@ -431,7 +431,7 @@ static void he_arm_deadline(KlClient *c)
 static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
                           int error, void *user_data)
 {
-    KlClient *c = user_data;
+    KlHttpClient *c = user_data;
     (void)req;
     c->resolve_req = NULL;
 
@@ -449,7 +449,7 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
         c->conn_attempts[i].fd = KL_INVALID_SOCKET;
     }
     c->conn_racing = 1;
-    c->state = KL_CLIENT_CONNECTING;
+    c->state = KL_HTTP_CLIENT_CONNECTING;
 
     /* Arm the whole-request deadline (client-owned; bounds racing + post-connect), then hand the
      * address count to the connect op, which drives the racing via the adapter hooks. */
@@ -461,7 +461,7 @@ static void dns_resolved(KlResolveReq *req, const KlResolveResult *result,
  * (borrowed) → cfg->system_dns (NULL → blocking sync name resolution) → auto-created
  * built-in async resolver (owned; *owned = 1). Returns NULL to fall back to
  * sync name resolution (also on auto-create failure — better than failing the request). */
-static KlResolver *client_pick_resolver(const KlClientConfig *cfg,
+static KlResolver *client_pick_resolver(const KlHttpClientConfig *cfg,
                                         KlEventCtx *ev_ctx, int *owned) {
     *owned = 0;
     if (cfg && cfg->resolver)
@@ -488,7 +488,7 @@ static KlResolver *client_pick_resolver(const KlClientConfig *cfg,
 
 /* Single-fd connect completion (UNIX socket + sync sync name resolution paths). The
  * Happy Eyeballs path uses he_on_writable instead. */
-static void async_handle_connecting(KlClient *c)
+static void async_handle_connecting(KlHttpClient *c)
 {
     int err = 0;
     kl_sock_get_so_error(c->ev_ctx->sockets, c->fd, &err);
@@ -503,7 +503,7 @@ static void async_handle_connecting(KlClient *c)
 /* Shared post-connect path: c->fd is a connected socket (Happy Eyeballs winner,
  * or the single-fd UNIX / sync-sync name resolution connect). Advances to the proxy /
  * TLS / sending state. */
-static void he_proceed_after_connect(KlClient *c)
+static void he_proceed_after_connect(KlHttpClient *c)
 {
     /* Proxy: HTTPS target needs CONNECT tunnel first */
     if (c->is_proxied && c->is_tunnel) {
@@ -513,14 +513,14 @@ static void he_proceed_after_connect(KlClient *c)
             async_complete_error(c);
             return;
         }
-        c->state = KL_CLIENT_PROXY_CONNECTING;
+        c->state = KL_HTTP_CLIENT_PROXY_CONNECTING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
         return;
     }
 
     /* Proxy: HTTP target — request already has absolute-form URL, send directly */
     if (c->is_proxied) {
-        c->state = KL_CLIENT_SENDING;
+        c->state = KL_HTTP_CLIENT_SENDING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
         return;
     }
@@ -546,17 +546,17 @@ static void he_proceed_after_connect(KlClient *c)
             return;
         }
 
-        c->state = KL_CLIENT_TLS_HANDSHAKE;
+        c->state = KL_HTTP_CLIENT_TLS_HANDSHAKE;
         async_handle_tls_handshake(c);
     } else {
-        c->state = KL_CLIENT_SENDING;
+        c->state = KL_HTTP_CLIENT_SENDING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
     }
 }
 
 /* ── State: PROXY_CONNECTING (send CONNECT request) ──────────────── */
 
-static void async_handle_proxy_connecting(KlClient *c)
+static void async_handle_proxy_connecting(KlHttpClient *c)
 {
     while (c->connect_sent < c->connect_len) {
         /* Send the CONNECT request over the provider (not raw write) so the proxy
@@ -597,13 +597,13 @@ static void async_handle_proxy_connecting(KlClient *c)
     }
     c->proxy_recv_len = 0;
 
-    c->state = KL_CLIENT_PROXY_HANDSHAKE;
+    c->state = KL_HTTP_CLIENT_PROXY_HANDSHAKE;
     kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
 }
 
 /* ── State: PROXY_HANDSHAKE (read proxy 200 response) ────────────── */
 
-static void async_handle_proxy_handshake(KlClient *c)
+static void async_handle_proxy_handshake(KlHttpClient *c)
 {
     for (;;) {
         if (c->proxy_recv_len >= KL_PROXY_RESPONSE_MAX - 1) {
@@ -677,7 +677,7 @@ static void async_handle_proxy_handshake(KlClient *c)
             return;
         }
 
-        c->state = KL_CLIENT_TLS_HANDSHAKE;
+        c->state = KL_HTTP_CLIENT_TLS_HANDSHAKE;
         async_handle_tls_handshake(c);
         return;
     }
@@ -685,11 +685,11 @@ static void async_handle_proxy_handshake(KlClient *c)
 
 /* ── State: TLS_HANDSHAKE ────────────────────────────────────────── */
 
-static void async_handle_tls_handshake(KlClient *c)
+static void async_handle_tls_handshake(KlHttpClient *c)
 {
     KlTlsResult r = c->tls->handshake(c->tls, c->fd);
     if (r == KL_TLS_OK) {
-        c->state = KL_CLIENT_SENDING;
+        c->state = KL_HTTP_CLIENT_SENDING;
         kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_WRITE);
         return;
     }
@@ -707,10 +707,10 @@ static void async_handle_tls_handshake(KlClient *c)
 
 /* ── State: SENDING ──────────────────────────────────────────────── */
 
-static void async_handle_sending(KlClient *c)
+static void async_handle_sending(KlHttpClient *c)
 {
     while (c->request_sent < c->request_len) {
-        kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+        kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                               c->request_buf + c->request_sent,
                               c->request_len - c->request_sent);
         if (w < 0) {
@@ -732,19 +732,19 @@ static void async_handle_sending(KlClient *c)
 
     /* If streaming body, transition to chunk-send state */
     if (c->body_read) {
-        c->state = KL_CLIENT_SENDING_STREAM;
+        c->state = KL_HTTP_CLIENT_SENDING_STREAM;
         c->chunk_phase = 0;
         async_handle_sending_stream(c);
         return;
     }
 
-    c->state = KL_CLIENT_RECEIVING;
+    c->state = KL_HTTP_CLIENT_RECEIVING;
     kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
 }
 
 /* ── State: SENDING_STREAM (chunked body from body_read) ─────────── */
 
-static void async_handle_sending_stream(KlClient *c)
+static void async_handle_sending_stream(KlHttpClient *c)
 {
     for (;;) {
         switch (c->chunk_phase) {
@@ -758,8 +758,8 @@ static void async_handle_sending_stream(KlClient *c)
             }
             if (nr == 0) {
                 /* EOF — send final chunk */
-                memcpy(c->chunk_hdr, "0\r\n\r\n", KL_CLIENT_FINAL_CHUNK_LEN);
-                c->chunk_hdr_len = KL_CLIENT_FINAL_CHUNK_LEN;
+                memcpy(c->chunk_hdr, "0\r\n\r\n", KL_HTTP_CLIENT_FINAL_CHUNK_LEN);
+                c->chunk_hdr_len = KL_HTTP_CLIENT_FINAL_CHUNK_LEN;
                 c->chunk_hdr_sent = 0;
                 c->chunk_phase = 4;
                 continue;
@@ -784,7 +784,7 @@ static void async_handle_sending_stream(KlClient *c)
         case 1:
             /* Send chunk header */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w < 0) {
@@ -804,7 +804,7 @@ static void async_handle_sending_stream(KlClient *c)
         case 2:
             /* Send chunk data */
             while (c->chunk_sent < c->chunk_len) {
-                kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_buf + c->chunk_sent,
                                       c->chunk_len - c->chunk_sent);
                 if (w < 0) {
@@ -829,7 +829,7 @@ static void async_handle_sending_stream(KlClient *c)
         case 3:
             /* Send trailing \r\n */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w < 0) {
@@ -850,7 +850,7 @@ static void async_handle_sending_stream(KlClient *c)
         case 4:
             /* Send final chunk (0\r\n\r\n) */
             while (c->chunk_hdr_sent < c->chunk_hdr_len) {
-                kl_ssize_t w = kl_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
+                kl_ssize_t w = kl_http_client_io_write(c->ev_ctx->sockets, c->fd, c->tls,
                                       c->chunk_hdr + c->chunk_hdr_sent,
                                       c->chunk_hdr_len - c->chunk_hdr_sent);
                 if (w < 0) {
@@ -865,7 +865,7 @@ static void async_handle_sending_stream(KlClient *c)
                 c->chunk_hdr_sent += (size_t)w;
             }
             /* Done sending — switch to receiving */
-            c->state = KL_CLIENT_RECEIVING;
+            c->state = KL_HTTP_CLIENT_RECEIVING;
             kl_watcher_mod(c->ev_ctx, c->fd, KL_EVENT_READ);
             return;
 
@@ -878,12 +878,12 @@ static void async_handle_sending_stream(KlClient *c)
 
 /* ── State: RECEIVING ────────────────────────────────────────────── */
 
-static void async_handle_receiving(KlClient *c)
+static void async_handle_receiving(KlHttpClient *c)
 {
-    char buf[KL_CLIENT_RECV_BUF_SIZE];
+    char buf[KL_HTTP_CLIENT_RECV_BUF_SIZE];
 
     for (;;) {
-        kl_ssize_t nread = kl_client_io_read(c->ev_ctx->sockets, c->fd, c->tls, buf, sizeof(buf));
+        kl_ssize_t nread = kl_http_client_io_read(c->ev_ctx->sockets, c->fd, c->tls, buf, sizeof(buf));
         if (nread < 0) {
             if (kl_sock_io_status(c->ev_ctx->sockets) == KL_IO_WOULD_BLOCK) {
                 kl_watcher_rearm(c->ev_ctx, c->fd);
@@ -941,12 +941,12 @@ static void async_handle_receiving(KlClient *c)
 
 static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data)
 {
-    KlClient *c = user_data;
+    KlHttpClient *c = user_data;
 
     switch (c->state) {
-    case KL_CLIENT_RESOLVING:
+    case KL_HTTP_CLIENT_RESOLVING:
         break;  /* DNS resolution handled by resolver callback, not watcher */
-    case KL_CLIENT_CONNECTING:
+    case KL_HTTP_CLIENT_CONNECTING:
         /* Happy Eyeballs races several fds — dispatch by the fd that fired.
          * The single-fd UNIX / sync-sync name resolution path uses c->fd directly.
          * On a completion loop the connect result is carried in `ready` (KL_EVENT_WRITE =
@@ -964,32 +964,32 @@ static void async_on_event(KlSocketHandle fd, KlEventMask ready, void *user_data
             async_handle_connecting(c);
         }
         break;
-    case KL_CLIENT_PROXY_CONNECTING:
+    case KL_HTTP_CLIENT_PROXY_CONNECTING:
         async_handle_proxy_connecting(c);
         break;
-    case KL_CLIENT_PROXY_HANDSHAKE:
+    case KL_HTTP_CLIENT_PROXY_HANDSHAKE:
         async_handle_proxy_handshake(c);
         break;
-    case KL_CLIENT_TLS_HANDSHAKE:
+    case KL_HTTP_CLIENT_TLS_HANDSHAKE:
         async_handle_tls_handshake(c);
         break;
-    case KL_CLIENT_SENDING:
+    case KL_HTTP_CLIENT_SENDING:
         async_handle_sending(c);
         break;
-    case KL_CLIENT_SENDING_STREAM:
+    case KL_HTTP_CLIENT_SENDING_STREAM:
         async_handle_sending_stream(c);
         break;
-    case KL_CLIENT_RECEIVING:
+    case KL_HTTP_CLIENT_RECEIVING:
         async_handle_receiving(c);
         break;
-    case KL_CLIENT_DONE:
+    case KL_HTTP_CLIENT_DONE:
         break;
     }
 }
 
 /* ── Completion helpers ──────────────────────────────────────────── */
 
-static void async_complete_success(KlClient *c)
+static void async_complete_success(KlHttpClient *c)
 {
     he_cancel_timers(c);
     kl_watcher_del(c->ev_ctx, c->fd);
@@ -998,10 +998,10 @@ static void async_complete_success(KlClient *c)
         /* Pool-aware: release or discard based on Connection header */
         c->pool_conn.fd = c->fd;
         c->pool_conn.tls = c->tls;
-        if (kl_client_server_wants_close(&c->resp)) {
-            kl_cpool_discard(c->pool, &c->pool_conn);
+        if (kl_http_client_server_wants_close(&c->resp)) {
+            kl_http_client_pool_discard(c->pool, &c->pool_conn);
         } else {
-            kl_cpool_release(c->pool, &c->pool_conn,
+            kl_http_client_pool_release(c->pool, &c->pool_conn,
                               c->host_buf, c->pool_port, c->pool_is_tls,
                               NULL, 0);
         }
@@ -1028,16 +1028,16 @@ static void async_complete_success(KlClient *c)
 
     /* Decompress buffered response body if applicable */
     if (!c->decomp_wrap) {
-        kl_client_decompress_response_body(&c->resp, c->decompress_cfg);
+        kl_http_client_decompress_response_body(&c->resp, c->decompress_cfg);
     }
 
-    c->state = KL_CLIENT_DONE;
+    c->state = KL_HTTP_CLIENT_DONE;
     c->error = KL_ERR_NONE;
     if (c->on_done)
         c->on_done(c, c->user_data);
 }
 
-static void async_complete_error(KlClient *c)
+static void async_complete_error(KlHttpClient *c)
 {
     he_cancel_timers(c);
     if (kl_handle_valid(c->fd))
@@ -1047,7 +1047,7 @@ static void async_complete_error(KlClient *c)
         /* Pool-aware: discard the connection on error */
         c->pool_conn.fd = c->fd;
         c->pool_conn.tls = c->tls;
-        kl_cpool_discard(c->pool, &c->pool_conn);
+        kl_http_client_pool_discard(c->pool, &c->pool_conn);
         c->tls = NULL;
         c->fd = KL_INVALID_SOCKET;
     } else {
@@ -1083,7 +1083,7 @@ static void async_complete_error(KlClient *c)
         c->proxy_recv = NULL;
     }
 
-    c->state = KL_CLIENT_DONE;
+    c->state = KL_HTTP_CLIENT_DONE;
     /* error already set by caller — fallback if not set */
     if (c->error == KL_ERR_NONE)
         c->error = KL_ERR_IO;
@@ -1093,17 +1093,17 @@ static void async_complete_error(KlClient *c)
 
 /* ── Async public API ────────────────────────────────────────────── */
 
-KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
-                              const KlClientConfig *cfg,
+KlHttpClient *kl_http_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
+                              const KlHttpClientConfig *cfg,
                               const char *method, const char *url_str,
-                              const KlClientHeader *headers, int num_headers,
+                              const KlHttpClientHeader *headers, int num_headers,
                               const char *body, size_t body_len,
-                              const KlClientStreamCfg *stream,
-                              KlClientDoneFn on_done, void *user_data)
+                              const KlHttpClientStreamCfg *stream,
+                              KlHttpClientDoneFn on_done, void *user_data)
 {
     if (!ev_ctx || !alloc || !method || !url_str)
         return NULL;
-    if (num_headers < 0 || num_headers > KL_CLIENT_MAX_REQ_HEADERS)
+    if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return NULL;
     if (num_headers > 0 && !headers)
         return NULL;
@@ -1128,10 +1128,10 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         tls_cfg = NULL;
 
     size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
-                                                            : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
+                                                            : (size_t)KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
 
     /* Proxy routing */
-    const KlProxyConfig *proxy = cfg ? cfg->proxy : NULL;
+    const KlHttpProxyConfig *proxy = cfg ? cfg->proxy : NULL;
     int is_proxied = (proxy && proxy->host);
     int is_tunnel = is_proxied && parsed.is_https;
 
@@ -1139,10 +1139,10 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
      * but we don't do TLS on initial connect to proxy */
 
     /* Build absolute-form URL for HTTP forwarding through proxy */
-    char abs_url_buf[KL_CLIENT_REQ_BUF_SIZE];
+    char abs_url_buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     const char *absolute_url = NULL;
     if (is_proxied && !parsed.is_https) {
-        char host_z[KL_CLIENT_HOSTNAME_MAX];
+        char host_z[KL_HTTP_CLIENT_HOSTNAME_MAX];
         if (parsed.host_len >= sizeof(host_z))
             return NULL;
         memcpy(host_z, parsed.host, parsed.host_len);
@@ -1173,11 +1173,11 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     size_t req_len = 0;
     char *req_buf;
     if (stream && stream->body_read) {
-        req_buf = kl_client_build_request_headers_only(alloc, method, &parsed,
+        req_buf = kl_http_client_build_request_headers_only(alloc, method, &parsed,
                                                headers, num_headers, &req_len, 0,
                                                absolute_url);
     } else {
-        req_buf = kl_client_build_request(alloc, method, &parsed,
+        req_buf = kl_http_client_build_request(alloc, method, &parsed,
                                  headers, num_headers, body, body_len,
                                  &req_len, 0, absolute_url);
     }
@@ -1185,7 +1185,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
         return NULL;
 
     /* Copy hostname for SNI (always the target host, not the proxy) */
-    char host_buf[KL_CLIENT_HOSTNAME_MAX];
+    char host_buf[KL_HTTP_CLIENT_HOSTNAME_MAX];
     if (parsed.host_len >= sizeof(host_buf)) {
         kl_free(alloc, req_buf, req_len);
         return NULL;
@@ -1194,7 +1194,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     host_buf[parsed.host_len] = '\0';
 
     /* Allocate client */
-    KlClient *c = kl_malloc(alloc, sizeof(KlClient));
+    KlHttpClient *c = kl_malloc(alloc, sizeof(KlHttpClient));
     if (!c) {
         kl_free(alloc, req_buf, req_len);
         return NULL;
@@ -1215,7 +1215,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
      * provider's handles (native fds). Reject an incoherent pairing up front. */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlClient));
+        kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
     c->alloc = alloc;
@@ -1231,10 +1231,10 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     c->conn_delay_timer = -1;
     c->deadline_timer = -1;
     c->timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
-                                                 : KL_CLIENT_DEFAULT_TIMEOUT_MS;
+                                                 : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
     c->connect_delay_ms = (cfg && cfg->connect_attempt_delay_ms > 0)
                               ? cfg->connect_attempt_delay_ms
-                              : KL_CLIENT_CONNECT_ATTEMPT_DELAY_MS;
+                              : KL_HTTP_CLIENT_CONNECT_ATTEMPT_DELAY_MS;
 
     /* Proxy state */
     c->is_proxied = is_proxied;
@@ -1263,7 +1263,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             DecompStreamWrap *w = kl_malloc(alloc, sizeof(DecompStreamWrap));
             if (!w) {
                 kl_free(alloc, req_buf, req_len);
-                kl_free(alloc, c, sizeof(KlClient));
+                kl_free(alloc, c, sizeof(KlHttpClient));
                 return NULL;
             }
             memset(w, 0, sizeof(*w));
@@ -1276,9 +1276,9 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             c->decomp_wrap = w;
 
             c->parser = kl_http1_response_parser_llhttp_s(max_resp, alloc,
-                                                      kl_client_decomp_on_body,
-                                                      kl_client_decomp_on_headers,
-                                                      kl_client_decomp_on_complete,
+                                                      kl_http_client_decomp_on_body,
+                                                      kl_http_client_decomp_on_headers,
+                                                      kl_http_client_decomp_on_complete,
                                                       w);
         } else {
             c->parser = kl_http1_response_parser_llhttp_s(max_resp, alloc,
@@ -1295,7 +1295,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         }
         kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlClient));
+        kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
 
@@ -1308,7 +1308,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             kl_free(alloc, req_buf, req_len);
-            kl_free(alloc, c, sizeof(KlClient));
+            kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
         }
         he_arm_deadline(c);   /* bound the connect/send/recv (single-fd path) */
@@ -1329,7 +1329,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
          * the borrowed proxy host (valid through the request) when proxied — no dangling local. */
         c->resolve_host = is_proxied ? proxy->host : c->host_buf;
         c->resolve_port = resolve_port;
-        c->state = KL_CLIENT_RESOLVING;
+        c->state = KL_HTTP_CLIENT_RESOLVING;
         /* Drive resolve + Happy Eyeballs via KlConnectOp (6C). kl_connect_op_start runs start_resolve
          * synchronously (which kicks resolver->resolve); a sync-completion-capable resolver may drive
          * the whole request to terminal inline. init/start are infallible (valid static hook table). */
@@ -1346,7 +1346,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
-            kl_free(alloc, c, sizeof(KlClient));
+            kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
         }
         /* Otherwise: still RESOLVING (deferred; resolve_req stored by start_resolve) or the resolver
@@ -1356,7 +1356,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     }
 
     /* Sync DNS fallback (blocking sync name resolution) */
-    char dns_host_buf[KL_CLIENT_HOSTNAME_MAX];
+    char dns_host_buf[KL_HTTP_CLIENT_HOSTNAME_MAX];
     if (is_proxied) {
         size_t phl = strlen(proxy->host);
         if (phl >= sizeof(dns_host_buf)) {
@@ -1364,7 +1364,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
-            kl_free(alloc, c, sizeof(KlClient));
+            kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
         }
         memcpy(dns_host_buf, proxy->host, phl + 1);
@@ -1380,7 +1380,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlClient));
+        kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
 
@@ -1389,7 +1389,7 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlClient));
+        kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
 
@@ -1397,40 +1397,40 @@ KlClient *kl_client_start_s(KlEventCtx *ev_ctx, KlAllocator *alloc,
     return c;
 }
 
-KlClient *kl_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
-                           const KlClientConfig *cfg,
+KlHttpClient *kl_http_client_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
+                           const KlHttpClientConfig *cfg,
                            const char *method, const char *url_str,
-                           const KlClientHeader *headers, int num_headers,
+                           const KlHttpClientHeader *headers, int num_headers,
                            const char *body, size_t body_len,
-                           KlClientDoneFn on_done, void *user_data)
+                           KlHttpClientDoneFn on_done, void *user_data)
 {
-    return kl_client_start_s(ev_ctx, alloc, cfg, method, url_str,
+    return kl_http_client_start_s(ev_ctx, alloc, cfg, method, url_str,
                               headers, num_headers, body, body_len,
                               NULL, on_done, user_data);
 }
 
-const KlClientResponse *kl_client_response(const KlClient *client)
+const KlHttpClientResponse *kl_http_client_response(const KlHttpClient *client)
 {
     if (!client || client->error != KL_ERR_NONE)
         return NULL;
     return &client->resp;
 }
 
-int kl_client_error(const KlClient *client)
+int kl_http_client_error(const KlHttpClient *client)
 {
     if (!client)
         return -1;
     return client->error != KL_ERR_NONE ? -1 : 0;
 }
 
-KlError kl_client_last_error(const KlClient *client)
+KlError kl_http_client_last_error(const KlHttpClient *client)
 {
     if (!client)
         return KL_ERR_INVALID_ARG;
     return client->error;
 }
 
-void kl_client_cancel(KlClient *client)
+void kl_http_client_cancel(KlHttpClient *client)
 {
     if (!client)
         return;
@@ -1444,14 +1444,14 @@ void kl_client_cancel(KlClient *client)
     if (kl_handle_valid(client->fd)) {
         /* Single-fd completion connect still in flight: drop its pending connect op before the
          * watcher/fd go away (HE attempts were already dropped by he_close_attempts above). */
-        if (client->state == KL_CLIENT_CONNECTING && client_loop_is_completion(client))
+        if (client->state == KL_HTTP_CLIENT_CONNECTING && client_loop_is_completion(client))
             kl_comp_cancel(client->ev_ctx, client->fd);
         kl_watcher_del(client->ev_ctx, client->fd);
 
         if (client->pool) {
             client->pool_conn.fd = client->fd;
             client->pool_conn.tls = client->tls;
-            kl_cpool_discard(client->pool, &client->pool_conn);
+            kl_http_client_pool_discard(client->pool, &client->pool_conn);
             client->tls = NULL;
             client->fd = KL_INVALID_SOCKET;
         } else {
@@ -1466,19 +1466,19 @@ void kl_client_cancel(KlClient *client)
         }
     }
 
-    client->state = KL_CLIENT_DONE;
+    client->state = KL_HTTP_CLIENT_DONE;
     if (client->error == KL_ERR_NONE)
         client->error = KL_ERR_IO;
 }
 
-void kl_client_free(KlClient *client)
+void kl_http_client_free(KlHttpClient *client)
 {
     if (!client)
         return;
 
     /* Cancel if still in-flight (cancels any pending resolve_req first). */
-    if (client->state != KL_CLIENT_DONE)
-        kl_client_cancel(client);
+    if (client->state != KL_HTTP_CLIENT_DONE)
+        kl_http_client_cancel(client);
 
     /* Destroy the auto-created resolver (after any resolve_req was cancelled). */
     if (client->owns_resolver && client->resolver) {
@@ -1497,7 +1497,7 @@ void kl_client_free(KlClient *client)
         client->parser = NULL;
     }
 
-    kl_client_response_free(&client->resp);
+    kl_http_client_response_free(&client->resp);
 
     if (client->decomp_wrap) {
         if (client->decomp_wrap->active)
@@ -1517,24 +1517,24 @@ void kl_client_free(KlClient *client)
     }
 
     KlAllocator *alloc = client->alloc;
-    kl_free(alloc, client, sizeof(KlClient));
+    kl_free(alloc, client, sizeof(KlHttpClient));
 }
 
 /* ══════════════════════════════════════════════════════════════════════
  * Pooled async client API — connection pool integration
  * ══════════════════════════════════════════════════════════════════════ */
 
-KlClient *kl_client_start_pooled(KlClientPool *pool,
+KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
                                    KlEventCtx *ev_ctx, KlAllocator *alloc,
-                                   const KlClientConfig *cfg,
+                                   const KlHttpClientConfig *cfg,
                                    const char *method, const char *url_str,
-                                   const KlClientHeader *headers, int num_headers,
+                                   const KlHttpClientHeader *headers, int num_headers,
                                    const char *body, size_t body_len,
-                                   KlClientDoneFn on_done, void *user_data)
+                                   KlHttpClientDoneFn on_done, void *user_data)
 {
     if (!pool || !ev_ctx || !alloc || !method || !url_str)
         return NULL;
-    if (num_headers < 0 || num_headers > KL_CLIENT_MAX_REQ_HEADERS)
+    if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return NULL;
     if (num_headers > 0 && !headers)
         return NULL;
@@ -1545,7 +1545,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     /* UNIX sockets are not pooled (no host:port key); bypass the pool and
      * start a normal non-pooled async request. */
     if (parsed.is_unix) {
-        return kl_client_start_s(ev_ctx, alloc, cfg, method, url_str,
+        return kl_http_client_start_s(ev_ctx, alloc, cfg, method, url_str,
                                  headers, num_headers, body, body_len,
                                  NULL, on_done, user_data);
     }
@@ -1558,18 +1558,18 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
         tls_cfg = NULL;
 
     size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
-                                                            : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
+                                                            : (size_t)KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
 
     /* Build request buffer with keep-alive (pooled = no proxy in v1) */
     size_t req_len = 0;
-    char *req_buf = kl_client_build_request(alloc, method, &parsed,
+    char *req_buf = kl_http_client_build_request(alloc, method, &parsed,
                                    headers, num_headers, body, body_len,
                                    &req_len, 1, NULL);
     if (!req_buf)
         return NULL;
 
     /* Copy hostname for SNI + pool key */
-    char host_buf[KL_CLIENT_HOSTNAME_MAX];
+    char host_buf[KL_HTTP_CLIENT_HOSTNAME_MAX];
     if (parsed.host_len >= sizeof(host_buf)) {
         kl_free(alloc, req_buf, req_len);
         return NULL;
@@ -1578,7 +1578,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     host_buf[parsed.host_len] = '\0';
 
     /* Allocate client */
-    KlClient *c = kl_malloc(alloc, sizeof(KlClient));
+    KlHttpClient *c = kl_malloc(alloc, sizeof(KlHttpClient));
     if (!c) {
         kl_free(alloc, req_buf, req_len);
         return NULL;
@@ -1599,7 +1599,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
      * provider's handles (native fds). Reject an incoherent pairing up front. */
     if (!kl_event_ctx_sockets_compatible(c->ev_ctx)) {
         kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlClient));
+        kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
     c->alloc = alloc;
@@ -1623,15 +1623,15 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
     c->parser = kl_http1_response_parser_llhttp(max_resp, alloc);
     if (!c->parser) {
         kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlClient));
+        kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
 
     /* Try pool acquire */
-    KlClientPoolConn pconn;
+    KlHttpClientPoolConn pconn;
     memset(&pconn, 0, sizeof(pconn));
     pconn.fd = -1;
-    int acq = kl_cpool_acquire(pool, host_buf, parsed.port, is_tls,
+    int acq = kl_http_client_pool_acquire(pool, host_buf, parsed.port, is_tls,
                                 NULL, 0, &pconn);
 
     if (acq == 0) {
@@ -1639,17 +1639,17 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
         c->fd = pconn.fd;
         c->tls = pconn.tls;
         c->pool_conn = pconn;
-        c->state = KL_CLIENT_SENDING;
+        c->state = KL_HTTP_CLIENT_SENDING;
 
         if (kl_watcher_add(ev_ctx, c->fd, KL_EVENT_WRITE, async_on_event, c) != 0) {
             c->fd = KL_INVALID_SOCKET;
             c->tls = NULL;
-            kl_cpool_discard(pool, &pconn);
+            kl_http_client_pool_discard(pool, &pconn);
             if (c->decomp_wrap)
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
-            kl_free(alloc, c, sizeof(KlClient));
+            kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
         }
         return c;
@@ -1663,7 +1663,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
         c->owns_resolver = res_owned;
         c->resolve_host = c->host_buf;   /* persistent copy (set above); no dangling local */
         c->resolve_port = parsed.port;
-        c->state = KL_CLIENT_RESOLVING;
+        c->state = KL_HTTP_CLIENT_RESOLVING;
         /* Drive resolve + Happy Eyeballs via KlConnectOp (6C), same as the non-streaming path:
          * kl_connect_op_start runs start_resolve (kicks resolver->resolve) synchronously; a
          * start failure retires cleanly + returns NULL, an inline completion advances the op. */
@@ -1678,7 +1678,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
                 kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
             c->parser->destroy(c->parser);
             kl_free(alloc, req_buf, req_len);
-            kl_free(alloc, c, sizeof(KlClient));
+            kl_free(alloc, c, sizeof(KlHttpClient));
             return NULL;
         }
         return c;                 /* deferred (RESOLVING) or inline-completed — both return c */
@@ -1693,7 +1693,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlClient));
+        kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
 
@@ -1702,7 +1702,7 @@ KlClient *kl_client_start_pooled(KlClientPool *pool,
             kl_free(alloc, c->decomp_wrap, sizeof(DecompStreamWrap));
         c->parser->destroy(c->parser);
         kl_free(alloc, req_buf, req_len);
-        kl_free(alloc, c, sizeof(KlClient));
+        kl_free(alloc, c, sizeof(KlHttpClient));
         return NULL;
     }
 

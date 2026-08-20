@@ -190,9 +190,9 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            src/http_body_reader_multipart.c src/http1_chunked.c src/http_cors.c \
            src/websocket.c src/http_server_ws.c src/websocket_client.c \
            src/server_h2.c src/h2_client.c src/thread_pool.c src/url.c \
-           src/client_common.c src/client_sync.c src/client_async.c \
-           src/client_proxy.c \
-           src/client_pool.c src/redirect.c src/http_sse.c \
+           src/http_client_common.c src/http_client_sync.c src/http_client_async.c \
+           src/http_client_proxy.c \
+           src/http_client_pool.c src/http_redirect.c src/http_sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
@@ -478,12 +478,12 @@ smoke-pollcomp-async: $(SMOKE_POLLCOMP_ASYNC_BIN)
 $(SMOKE_POLLCOMP_ASYNC_BIN): tests/smoke_pollcomp_async.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# LC-0 PROOF: async KlClient connect+GET over the pollcomp completion loop — the completion
+# LC-0 PROOF: async KlHttpClient connect+GET over the pollcomp completion loop — the completion
 # CONNECT contract (KL_COMP_CONNECT / kl_comp_post_connect) driving the client's connect over
 # the completion axis instead of the readiness WRITE-watcher shim. Build with BACKEND=pollcomp
 # first so both the server and the client's KlEventCtx run on the poll() completion loop.
 SMOKE_POLLCOMP_CLIENT_BIN = tests/smoke_pollcomp_client$(EXE)
-# The async KlClient connect+GET over a pollcomp COMPLETION loop — the LC-0 proof. The smoke
+# The async KlHttpClient connect+GET over a pollcomp COMPLETION loop — the LC-0 proof. The smoke
 # wires kl_socket_provider_pollcomp() + the compiled-in ctx, so it is built BACKEND=pollcomp
 # (the completion backend compiled in), mirroring smoke-pollcomp-asan.
 smoke-pollcomp-client:
@@ -583,7 +583,7 @@ smoke-iouring-async: $(SMOKE_IOURING_ASYNC_BIN)
 $(SMOKE_IOURING_ASYNC_BIN): tests/smoke_iouring_async.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lkeel -lpthread $(LDFLAGS)
 
-# LC-0: async KlClient connect+GET over the io_uring completion loop — connect driven via
+# LC-0: async KlHttpClient connect+GET over the io_uring completion loop — connect driven via
 # IORING_OP_CONNECT (kl_comp_post_connect → KL_COMP_CONNECT → he_on_writable). Build with
 # BACKEND=iouring first.
 SMOKE_IOURING_CLIENT_BIN = tests/smoke_iouring_client$(EXE)
@@ -853,11 +853,11 @@ analyze:
 # no direct socket-header include. Address<->platform marshalling is confined to
 # the socket providers + the resolve_sync / sockaddr_native seams. Mechanical
 # backstop for docs/keel_sockaddr_design.md (Phase F); mirrors axis-audit Goal 4.
-AXIS_PROTO_TUS = src/client_common.c src/client_sync.c src/client_async.c \
-                 src/client_proxy.c \
+AXIS_PROTO_TUS = src/http_client_common.c src/http_client_sync.c src/http_client_async.c \
+                 src/http_client_proxy.c \
                  src/h2_client.c src/websocket_client.c \
                  src/http_connection.c src/http_server.c src/server_h2.c src/websocket.c src/http_server_ws.c \
-                 src/http_sse.c src/http_response.c src/redirect.c src/client_pool.c \
+                 src/http_sse.c src/http_response.c src/http_redirect.c src/http_client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:
 	@bad=0; \
@@ -892,7 +892,7 @@ TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard sr
               $(wildcard src/platform_*.c) $(wildcard src/http_server_plat_*.c) $(wildcard src/dns_sys_*.c) \
               $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
               src/listener.c src/connect_op.c \
-              src/event_ctx.c src/async.c src/http_server_core.c src/http_server.c src/client_async.c
+              src/event_ctx.c src/async.c src/http_server_core.c src/http_server.c src/http_client_async.c
 # The forbidden-header regex (shared by the file scan and the self-canary below). Covers the
 # completion + readiness/event platform interfaces (epoll/kqueue/eventfd/poll/select/io_uring/IOCP)
 # and the socket-ADDRESS headers, plus the internal completion.h / io_engine.h seams.
@@ -1190,7 +1190,7 @@ FREESTANDING_CLIENT_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c \
     src/sockaddr.c src/url.c src/timer.c src/event_ctx.c src/event_dispatch.c \
     src/completion_dispatch.c src/completion_core.c \
-    src/client_common.c src/client_async.c src/client_proxy.c src/client_pool.c src/decompress.c \
+    src/http_client_common.c src/http_client_async.c src/http_client_proxy.c src/http_client_pool.c src/decompress.c \
     src/connect_op.c \
     parsers/http1_response_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c

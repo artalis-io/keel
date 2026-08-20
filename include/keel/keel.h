@@ -92,9 +92,9 @@ int kl_version_number(void);
 #include <keel/resolver.h>
 #include <keel/resolver_cache.h>
 #include <keel/dns_resolver.h>
-#include <keel/client.h>
-#include <keel/client_pool.h>
-#include <keel/redirect.h>
+#include <keel/http_client.h>
+#include <keel/http_client_pool.h>
+#include <keel/http_redirect.h>
 #include <keel/compress.h>
 #include <keel/decompress.h>
 #include <keel/drain.h>

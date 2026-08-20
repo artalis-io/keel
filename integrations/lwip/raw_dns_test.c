@@ -1,6 +1,6 @@
 /*
  * raw_dns_test.c — LC-3: KEEL's OWN async DNS resolver (src/dns_resolver.c) resolving a name
- * over the lwIP-raw completion backend, then a plaintext KlClient GET / -> 200. In-process over
+ * over the lwIP-raw completion backend, then a plaintext KlHttpClient GET / -> 200. In-process over
  * the loopback netif (NO_SYS=1, single-thread).
  *
  * The whole point of LC-3 (docs/phase10_lwip_raw_client_design.md, as corrected on review): the
@@ -26,7 +26,7 @@
  *   A1  resolve("test.local") over lwip-raw via the KlDatagram responder -> 127.0.0.1 (the A leg).
  *   A2  resolve("127.0.0.1") numeric literal -> the deferred-literal fast path (no query, no
  *         responder); exercises the resolver's non-blocking literal completion.
- *   B1  a full KlClient GET http://test.local:<port>/ with the built-in DNS resolver -> 200 +
+ *   B1  a full KlHttpClient GET http://test.local:<port>/ with the built-in DNS resolver -> 200 +
  *         byte-exact body: resolve over raw + Happy-Eyeballs connect over raw + request/response.
  *
  * src/dns_resolver.c is UNCHANGED — only the raw provider + glue (from LC-1/LC-3a) supply the
@@ -266,22 +266,22 @@ typedef struct {
     DnsResponder *dr;
     KlResolver   *resolver;
     const char   *url;
-    KlClient     *client;
+    KlHttpClient     *client;
     atomic_int    done;
     atomic_int    pass;
 } ClientCase;
 
-static void b1_on_done(KlClient *client, void *ud) {
+static void b1_on_done(KlHttpClient *client, void *ud) {
     ClientCase *cc = ud;
-    int err = kl_client_error(client);
+    int err = kl_http_client_error(client);
     int ok = 0;
     if (err == 0) {
-        const KlClientResponse *r = kl_client_response(client);
+        const KlHttpClientResponse *r = kl_http_client_response(client);
         ok = (r && r->status == 200 && r->body_len == sizeof(WANT_BODY) - 1 &&
               r->body && memcmp(r->body, WANT_BODY, sizeof(WANT_BODY) - 1) == 0);
         if (!ok && r) printf("   [diag] status=%d body_len=%zu\n", r->status, r->body_len);
     } else {
-        printf("   [diag] client error=%d last_error=%d\n", err, (int)kl_client_last_error(client));
+        printf("   [diag] client error=%d last_error=%d\n", err, (int)kl_http_client_last_error(client));
     }
     atomic_store(&cc->pass, ok);
     atomic_store(&cc->done, 1);
@@ -304,10 +304,10 @@ static void b1_start(void *ud) {
         atomic_store(&cc->pass, 0); atomic_store(&cc->done, 1); kl_http_server_stop(cc->srv); return;
     }
 
-    static KlAllocator alloc;   /* stable storage: KlClientResponse stores the allocator by value */
+    static KlAllocator alloc;   /* stable storage: KlHttpClientResponse stores the allocator by value */
     alloc = kl_allocator_default();
-    KlClientConfig ccfg = { .timeout_ms = 5000, .resolver = cc->resolver };
-    cc->client = kl_client_start(ctx, &alloc, &ccfg, "GET", cc->url, NULL, 0, NULL, 0,
+    KlHttpClientConfig ccfg = { .timeout_ms = 5000, .resolver = cc->resolver };
+    cc->client = kl_http_client_start(ctx, &alloc, &ccfg, "GET", cc->url, NULL, 0, NULL, 0,
                                  b1_on_done, cc);
     if (!cc->client) {
         atomic_store(&cc->pass, 0); atomic_store(&cc->done, 1); kl_http_server_stop(cc->srv);
@@ -352,7 +352,7 @@ static int b1_client_get(void) {
     if (!atomic_load(&cc.done)) rc = fail("B1: HANG");
     else if (!atomic_load(&cc.pass)) rc = fail("B1: client GET failed");
 
-    if (cc.client)   kl_client_free(cc.client);
+    if (cc.client)   kl_http_client_free(cc.client);
     if (cc.resolver) cc.resolver->destroy(cc.resolver);
     responder_free(&dr);
     kl_http_server_free(&srv);

@@ -8,7 +8,7 @@
  * a Keel server/client carries so a non-POSIX stack (Winsock, lwIP) — or a
  * fault-injection mock — can replace the socket syscalls. This is the authoring
  * surface: to bring your own stack, implement KlSocketOps and hand Keel a
- * KlSocketProvider (via KlHttpServerConfig.sockets / KlClientConfig.sockets / KlEventCtx.
+ * KlSocketProvider (via KlHttpServerConfig.sockets / KlHttpClientConfig.sockets / KlEventCtx.
  * sockets). The built-in providers (kl_socket_provider_posix/winsock) are the
  * default.
  *

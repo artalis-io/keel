@@ -3,7 +3,7 @@
  *
  * The first real runtime validation of the IOCP completion connection driver:
  * a KlHttpServer running on the IOCP completion loop (BACKEND=iocp, the overlapped
- * provider) served by AcceptEx/WSARecv/WSASend, hit by the sync KlClient over
+ * provider) served by AcceptEx/WSARecv/WSASend, hit by the sync KlHttpClient over
  * loopback. Windows-only (references the internal IOCP provider); the Windows-IOCP
  * CI job is its oracle. Mirrors smoke_tcp.c, with the server pinned to the IOCP
  * completion axis. GET only — request bodies over IOCP are a later increment.
@@ -339,14 +339,14 @@ int main(void) {
     }
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig ccfg = { .timeout_ms = 1000 };
+    KlHttpClientConfig ccfg = { .timeout_ms = 1000 };
     int ok = 0, last_rc = -1, last_status = -1, last_err = 0;
     size_t last_len = 0;
     for (int i = 0; i < 50 && !ok; i++) {
         nap_ms(50);
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        last_rc = kl_client_request(&alloc, &ccfg, "GET",
+        last_rc = kl_http_client_request(&alloc, &ccfg, "GET",
                                     "http://127.0.0.1:18082/",
                                     NULL, 0, NULL, 0, &resp);
         if (last_rc == 0) {
@@ -356,7 +356,7 @@ int main(void) {
                   resp.body_len == sizeof(SMOKE_BODY) - 1 &&
                   resp.body &&
                   memcmp(resp.body, SMOKE_BODY, sizeof(SMOKE_BODY) - 1) == 0);
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else {
             last_err = (int)resp.error;
         }
@@ -365,9 +365,9 @@ int main(void) {
     /* POST /echo — exercise the request-body path (READING_BODY over IOCP, 8b-1). */
     int post_ok = 0;
     if (ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "POST",
+        int rc = kl_http_client_request(&alloc, &ccfg, "POST",
                                    "http://127.0.0.1:18082/echo",
                                    NULL, 0, SMOKE_POST, sizeof(SMOKE_POST) - 1, &resp);
         if (rc == 0) {
@@ -376,7 +376,7 @@ int main(void) {
                        resp.body &&
                        memcmp(resp.body, SMOKE_POST, sizeof(SMOKE_POST) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else {
             last_rc = rc;
         }
@@ -385,9 +385,9 @@ int main(void) {
     /* GET /file — exercise the file-response path (TransmitFile over IOCP, 8b-2). */
     int file_ok = 0;
     if (ok && post_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET",
                                    "http://127.0.0.1:18082/file",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
@@ -396,7 +396,7 @@ int main(void) {
                        resp.body &&
                        memcmp(resp.body, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else {
             last_rc = rc;
         }
@@ -406,9 +406,9 @@ int main(void) {
      * 8b-3). The client dechunks; the body is the concatenated chunks. */
     int stream_ok = 0;
     if (ok && post_ok && file_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET",
                                    "http://127.0.0.1:18082/stream",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
@@ -417,7 +417,7 @@ int main(void) {
                          resp.body &&
                          memcmp(resp.body, SMOKE_STREAM, sizeof(SMOKE_STREAM) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else {
             last_rc = rc;
         }
@@ -428,9 +428,9 @@ int main(void) {
      * would scramble/repeat bytes). KEEL_IOCP_TF_CHUNK=16384 → 16 chunks. */
     int bigfile_ok = 0;
     if (ok && post_ok && file_ok && stream_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET",
                                    "http://127.0.0.1:18082/bigfile",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
@@ -441,7 +441,7 @@ int main(void) {
                     if (b[i] != (unsigned char)(i & 0xFF)) { bigfile_ok = 0; break; }
             }
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else {
             last_rc = rc;
         }

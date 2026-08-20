@@ -71,7 +71,7 @@ int kl_comp_run(struct KlEventCtx *ctx, int max, int timeout_ms) {
             break;
         }
         case KL_COMP_CONNECT:
-            /* An outbound connect finished (LC-0). The consumer is the async KlClient, not
+            /* An outbound connect finished (LC-0). The consumer is the async KlHttpClient, not
              * the server driver — so route it exactly like KL_COMP_WATCHER: the backend has
              * done the native connect and left the socket so getsockopt(SO_ERROR) reports
              * the truth, then relayed the result against the client's tagged connect watcher.

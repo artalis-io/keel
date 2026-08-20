@@ -3,7 +3,7 @@
  *
  * NOT a utest suite — a standalone program built by the `smoke-tls` Makefile
  * target (needs KEEL_TLS=mbedtls). It wires the mbedTLS backend into a KlHttpServer
- * and a sync KlClient and drives one real HTTPS request over loopback, proving
+ * and a sync KlHttpClient and drives one real HTTPS request over loopback, proving
  * the backend both links and completes a genuine TLS handshake on the target
  * platform. This is the BYO/local validation gate for the mbedTLS backend on
  * POSIX and Windows (mbedTLS is not in CI). An embedded self-signed cert keeps
@@ -130,12 +130,12 @@ int main(void) {
             .ctx = cli_ctx, .factory = kl_tls_mbedtls_create,
             .ctx_destroy = kl_tls_mbedtls_ctx_destroy,
         };
-        KlClientConfig ccfg = { .timeout_ms = 2000, .tls = &cli_tls };
-        KlClientResponse resp;
+        KlHttpClientConfig ccfg = { .timeout_ms = 2000, .tls = &cli_tls };
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
         char url[48];
         snprintf(url, sizeof(url), "https://127.0.0.1:%d/", SMOKE_PORT);
-        last_rc = kl_client_request(&alloc, &ccfg, "GET", url,
+        last_rc = kl_http_client_request(&alloc, &ccfg, "GET", url,
                                     NULL, 0, NULL, 0, &resp);
         if (last_rc == 0) {
             last_status = resp.status;
@@ -143,7 +143,7 @@ int main(void) {
             ok = (resp.status == 200 &&
                   resp.body_len == sizeof(SMOKE_BODY) - 1 &&
                   resp.body && memcmp(resp.body, SMOKE_BODY, sizeof(SMOKE_BODY) - 1) == 0);
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else {
             last_err = (int)resp.error;
         }

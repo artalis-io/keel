@@ -1,5 +1,5 @@
 #include "utest.h"
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/resolver.h>
 #include <keel/allocator.h>
 #include <keel/http_server.h>
@@ -8,24 +8,24 @@
 #include <pthread.h>
 #include <unistd.h>
 
-/* ── kl_client_response_free tests ───────────────────────────────── */
+/* ── kl_http_client_response_free tests ───────────────────────────────── */
 
 UTEST(client, response_free_null) {
-    kl_client_response_free(NULL);
+    kl_http_client_response_free(NULL);
     ASSERT_TRUE(1);  /* should not crash */
 }
 
 UTEST(client, response_free_zeroed) {
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     /* alloc is zeroed — should be a no-op */
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     ASSERT_EQ(resp.status, 0);
 }
 
 UTEST(client, response_free_with_data) {
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
 
     /* Simulate what the response parser produces */
@@ -39,7 +39,7 @@ UTEST(client, response_free_with_data) {
     resp.body_len = 5;
 
     /* Allocate headers */
-    resp.headers = kl_malloc(&a, sizeof(KlClientHeader));
+    resp.headers = kl_malloc(&a, sizeof(KlHttpClientHeader));
     ASSERT_TRUE(resp.headers != NULL);
     resp.num_headers = 1;
 
@@ -50,7 +50,7 @@ UTEST(client, response_free_with_data) {
     resp.headers[0].name = name;
     resp.headers[0].value = value;
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     ASSERT_EQ(resp.status, 0);
     ASSERT_TRUE(resp.body == NULL);
     ASSERT_TRUE(resp.headers == NULL);
@@ -61,52 +61,52 @@ UTEST(client, response_free_with_data) {
 
 UTEST(client, request_null_args) {
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_client_request(NULL, NULL, "GET", "http://x", NULL, 0, NULL, 0, &resp), -1);
-    ASSERT_EQ(kl_client_request(&a, NULL, NULL, "http://x", NULL, 0, NULL, 0, &resp), -1);
-    ASSERT_EQ(kl_client_request(&a, NULL, "GET", NULL, NULL, 0, NULL, 0, &resp), -1);
-    ASSERT_EQ(kl_client_request(&a, NULL, "GET", "http://x", NULL, 0, NULL, 0, NULL), -1);
+    ASSERT_EQ(kl_http_client_request(NULL, NULL, "GET", "http://x", NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(kl_http_client_request(&a, NULL, NULL, "http://x", NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(kl_http_client_request(&a, NULL, "GET", NULL, NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(kl_http_client_request(&a, NULL, "GET", "http://x", NULL, 0, NULL, 0, NULL), -1);
 }
 
 UTEST(client, request_bad_url) {
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_client_request(&a, NULL, "GET", "ftp://example.com", NULL, 0, NULL, 0, &resp), -1);
-    ASSERT_EQ(kl_client_request(&a, NULL, "GET", "garbage", NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(kl_http_client_request(&a, NULL, "GET", "ftp://example.com", NULL, 0, NULL, 0, &resp), -1);
+    ASSERT_EQ(kl_http_client_request(&a, NULL, "GET", "garbage", NULL, 0, NULL, 0, &resp), -1);
 }
 
 UTEST(client, request_too_many_headers) {
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_client_request(&a, NULL, "GET", "http://example.com",
-                                 NULL, KL_CLIENT_MAX_REQ_HEADERS + 1,
+    ASSERT_EQ(kl_http_client_request(&a, NULL, "GET", "http://example.com",
+                                 NULL, KL_HTTP_CLIENT_MAX_REQ_HEADERS + 1,
                                  NULL, 0, &resp), -1);
 }
 
 UTEST(client, request_negative_headers) {
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
 
-    ASSERT_EQ(kl_client_request(&a, NULL, "GET", "http://example.com",
+    ASSERT_EQ(kl_http_client_request(&a, NULL, "GET", "http://example.com",
                                  NULL, -1, NULL, 0, &resp), -1);
 }
 
 UTEST(client, request_https_no_tls) {
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
 
     /* HTTPS without TLS config should fail */
-    ASSERT_EQ(kl_client_request(&a, NULL, "GET", "https://example.com",
+    ASSERT_EQ(kl_http_client_request(&a, NULL, "GET", "https://example.com",
                                  NULL, 0, NULL, 0, &resp), -1);
 }
 
 /* ── Async client input validation ───────────────────────────────── */
 
 UTEST(client, async_null_args) {
-    ASSERT_TRUE(kl_client_start(NULL, NULL, NULL, "GET", "http://x",
+    ASSERT_TRUE(kl_http_client_start(NULL, NULL, NULL, "GET", "http://x",
                                  NULL, 0, NULL, 0, NULL, NULL) == NULL);
 }
 
@@ -115,7 +115,7 @@ UTEST(client, async_bad_url) {
     KlEventCtx ev;
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
 
-    ASSERT_TRUE(kl_client_start(&ev, &a, NULL, "GET", "ftp://x",
+    ASSERT_TRUE(kl_http_client_start(&ev, &a, NULL, "GET", "ftp://x",
                                  NULL, 0, NULL, 0, NULL, NULL) == NULL);
 
     kl_event_ctx_free(&ev);
@@ -126,31 +126,31 @@ UTEST(client, async_https_no_tls) {
     KlEventCtx ev;
     ASSERT_EQ(kl_event_ctx_init(&ev, &a), 0);
 
-    ASSERT_TRUE(kl_client_start(&ev, &a, NULL, "GET", "https://example.com",
+    ASSERT_TRUE(kl_http_client_start(&ev, &a, NULL, "GET", "https://example.com",
                                  NULL, 0, NULL, 0, NULL, NULL) == NULL);
 
     kl_event_ctx_free(&ev);
 }
 
-/* ── kl_client_error/response on NULL ────────────────────────────── */
+/* ── kl_http_client_error/response on NULL ────────────────────────────── */
 
 UTEST(client, error_null) {
-    ASSERT_EQ(kl_client_error(NULL), -1);
+    ASSERT_EQ(kl_http_client_error(NULL), -1);
 }
 
 UTEST(client, response_null) {
-    ASSERT_TRUE(kl_client_response(NULL) == NULL);
+    ASSERT_TRUE(kl_http_client_response(NULL) == NULL);
 }
 
-/* ── kl_client_cancel/free NULL safety ───────────────────────────── */
+/* ── kl_http_client_cancel/free NULL safety ───────────────────────────── */
 
 UTEST(client, cancel_null) {
-    kl_client_cancel(NULL);
+    kl_http_client_cancel(NULL);
     ASSERT_TRUE(1);  /* should not crash */
 }
 
 UTEST(client, free_null) {
-    kl_client_free(NULL);
+    kl_http_client_free(NULL);
     ASSERT_TRUE(1);  /* should not crash */
 }
 
@@ -179,7 +179,7 @@ static void mock_resolver_destroy(KlResolver *self) {
     (void)self;
 }
 
-static void mock_done(KlClient *client, void *user_data) {
+static void mock_done(KlHttpClient *client, void *user_data) {
     (void)user_data;
     /* Client should have error set */
     (void)client;
@@ -196,18 +196,18 @@ UTEST(client, async_dns_with_resolver_error) {
         .destroy = mock_resolver_destroy,
     };
 
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.resolver = &resolver;
 
     /* The mock resolver calls done_fn with error synchronously.
-     * kl_client_start should still return a valid handle. */
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://example.com",
+     * kl_http_client_start should still return a valid handle. */
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://example.com",
                                     NULL, 0, NULL, 0, mock_done, NULL);
     /* Handle may be NULL if done_fn triggered cleanup, or non-NULL if kept */
     if (c) {
-        ASSERT_EQ(kl_client_error(c), -1);
-        kl_client_free(c);
+        ASSERT_EQ(kl_http_client_error(c), -1);
+        kl_http_client_free(c);
     }
 
     kl_event_ctx_free(&ev);
@@ -229,7 +229,7 @@ static KlResolveReq *mock_resolve_sync_null(KlResolver *self, KlEventCtx *ctx,
     return NULL;                                  /* ...and NULL return */
 }
 
-static void syncnull_done(KlClient *client, void *user_data) {
+static void syncnull_done(KlHttpClient *client, void *user_data) {
     (void)client; (void)user_data;
     syncnull_done_fired = 1;
 }
@@ -244,18 +244,18 @@ UTEST(client, async_resolver_sync_complete_null_return) {
         .cancel = mock_cancel,
         .destroy = mock_resolver_destroy,
     };
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.resolver = &resolver;
 
     syncnull_done_fired = 0;
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://example.com",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://example.com",
                                     NULL, 0, NULL, 0, syncnull_done, NULL);
 
     ASSERT_TRUE(syncnull_done_fired);      /* on_done fired synchronously */
     ASSERT_TRUE(c != NULL);                /* handle kept alive (not freed under us) */
-    ASSERT_EQ(kl_client_error(c), -1);     /* completed with the resolver error */
-    kl_client_free(c);                     /* caller owns it — no double-free/UAF */
+    ASSERT_EQ(kl_http_client_error(c), -1);     /* completed with the resolver error */
+    kl_http_client_free(c);                     /* caller owns it — no double-free/UAF */
 
     kl_event_ctx_free(&ev);
 }
@@ -263,14 +263,14 @@ UTEST(client, async_resolver_sync_complete_null_return) {
 UTEST(client, sync_dns_fallback) {
     /* NULL resolver should use sync getaddrinfo — just verify it doesn't crash */
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
 
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.resolver = NULL;
 
     /* This will fail to connect (no server), but exercises the code path */
-    int rc = kl_client_request(&a, &cfg, "GET", "http://127.0.0.1:1",
+    int rc = kl_http_client_request(&a, &cfg, "GET", "http://127.0.0.1:1",
                                 NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(rc, -1);  /* connection refused */
 }
@@ -298,18 +298,18 @@ UTEST(client, resolver_cancel_on_cleanup) {
         .destroy = mock_resolver_destroy,
     };
 
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.resolver = &pending_resolver;
 
     mock_cancel_called = 0;
 
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://example.com",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://example.com",
                                     NULL, 0, NULL, 0, NULL, NULL);
     ASSERT_TRUE(c != NULL);
 
     /* Free should cancel the pending request */
-    kl_client_free(c);
+    kl_http_client_free(c);
     ASSERT_TRUE(mock_cancel_called);
 
     kl_event_ctx_free(&ev);
@@ -319,11 +319,11 @@ UTEST(client, resolver_cancel_on_cleanup) {
 
 typedef struct { int done, error, status; } DnsWireCtx;
 
-static void wire_done(KlClient *client, void *ud) {
+static void wire_done(KlHttpClient *client, void *ud) {
     DnsWireCtx *c = ud;
-    c->error = kl_client_error(client);
+    c->error = kl_http_client_error(client);
     if (c->error == 0) {
-        const KlClientResponse *resp = kl_client_response(client);
+        const KlHttpClientResponse *resp = kl_http_client_response(client);
         if (resp) c->status = resp->status;
     }
     c->done = 1;
@@ -364,13 +364,13 @@ UTEST(client, async_default_resolver_localhost) {
     KlEventCtx ev;
     ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
     DnsWireCtx c = {0};
-    KlClient *cl = kl_client_start(&ev, &a, NULL, "GET", url,
+    KlHttpClient *cl = kl_http_client_start(&ev, &a, NULL, "GET", url,
                                    NULL, 0, NULL, 0, wire_done, &c);
     ASSERT_TRUE(cl != NULL);
     ASSERT_EQ(0, wire_run(&ev, &c, 3000));
     ASSERT_EQ(0, c.error);
     ASSERT_EQ(200, c.status);
-    kl_client_free(cl);            /* frees the auto-created resolver (ASan) */
+    kl_http_client_free(cl);            /* frees the auto-created resolver (ASan) */
     kl_event_ctx_free(&ev);
 
     kl_http_server_stop(&srv);
@@ -395,17 +395,17 @@ UTEST(client, async_system_dns) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev;
     ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.system_dns = 1;
     DnsWireCtx c = {0};
-    KlClient *cl = kl_client_start(&ev, &a, &cfg, "GET", url,
+    KlHttpClient *cl = kl_http_client_start(&ev, &a, &cfg, "GET", url,
                                    NULL, 0, NULL, 0, wire_done, &c);
     ASSERT_TRUE(cl != NULL);
     ASSERT_EQ(0, wire_run(&ev, &c, 3000));
     ASSERT_EQ(0, c.error);
     ASSERT_EQ(200, c.status);
-    kl_client_free(cl);
+    kl_http_client_free(cl);
     kl_event_ctx_free(&ev);
 
     kl_http_server_stop(&srv);

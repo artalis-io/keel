@@ -129,6 +129,7 @@ Beyond structs and functions, these public macros/enumerators are abstraction-sp
 |---|---|---|
 | response body mode | `KL_BODY_NONE KL_BODY_BUFFER KL_BODY_FILE KL_BODY_STREAM` | `KL_HTTP_BODY_*` |
 | HTTP client sizing | `KL_CLIENT_DEFAULT_TIMEOUT_MS KL_CLIENT_DEFAULT_MAX_RESP KL_CLIENT_CONNECT_ATTEMPT_DELAY_MS KL_CLIENT_RECV_BUF_SIZE KL_CLIENT_REQ_BUF_SIZE KL_CLIENT_CHUNK_BUF_SIZE KL_CLIENT_CHUNK_HDR_SIZE KL_CLIENT_FINAL_CHUNK_LEN KL_CLIENT_HOSTNAME_MAX KL_CLIENT_MAX_REQ_HEADERS` | `KL_HTTP_CLIENT_*` |
+| HTTP client state (internal, `client_internal.h`) enumerators of `KlClientState`→`KlHttpClientState` (+ `KlClientConnectAttempt`→`KlHttpClientConnectAttempt`) | `KL_CLIENT_RESOLVING KL_CLIENT_CONNECTING KL_CLIENT_TLS_HANDSHAKE KL_CLIENT_PROXY_CONNECTING KL_CLIENT_PROXY_HANDSHAKE KL_CLIENT_SENDING KL_CLIENT_SENDING_STREAM KL_CLIENT_RECEIVING KL_CLIENT_DONE` | `KL_HTTP_CLIENT_*` (same `KL_CLIENT_`→`KL_HTTP_CLIENT_` prefix shift; subsumed by the gate's prefix scan) |
 | HTTP/2 sizing | `KL_H2_DEFAULT_MAX_STREAMS KL_H2_DEFAULT_WINDOW_SIZE KL_H2_CLIENT_DEFAULT_TIMEOUT_MS KL_H2_CLIENT_RECV_BUF_SIZE` | `KL_HTTP2_*` |
 | HTTP/1 parse result | `KL_PARSE_OK KL_PARSE_HEADERS_OK KL_PARSE_INCOMPLETE KL_PARSE_ERROR` | `KL_HTTP1_PARSE_*` |
 | HTTP/1 chunk state | `KL_CHUNK_SIZE KL_CHUNK_SIZE_CR KL_CHUNK_EXT KL_CHUNK_DATA KL_CHUNK_DATA_CR KL_CHUNK_TRAILER KL_CHUNK_TRAILER_CR KL_CHUNK_DONE KL_CHUNK_ERROR` | `KL_HTTP1_CHUNK_*` |
@@ -488,7 +489,7 @@ THREE independent scans (the `check-no-kludp` lesson: token-oriented, not line-f
   KlH2ServerSessionFactory KlH2ServerConfig KlH2ServerConn KlH2ServerCallbacks KlH2ServerStream
   KlH2Client KlH2ClientSession KlH2ClientSessionFactory KlH2ClientConfig KlH2ClientConn KlH2ClientCallbacks
   KlH2ClientStream KlH2ClientResponse KlH2ClientHeader KlH2ClientResponseFn KlH2ClientErrorFn KlH2WriteFn
-  KlParserFactory KlAccessLogFn KlLogFn KlTransport`.
+  KlParserFactory KlAccessLogFn KlLogFn KlTransport KlClientState KlClientConnectAttempt`.
   (Not banned — deliberately KEPT generic: `KlCompress KlCompressConfig KlCompressCtx KlCompressFactory
   KlDecompress KlDecompressConfig KlDecompressStream KlSlotLease KlWs* KlCidr KlProxyResult KlAsyncOp
   KlAsyncFn`.)
@@ -528,9 +529,12 @@ change **only** as mechanically forced by a renamed embedded type.
 Validation each code increment (T2–T4): full default suite; `debug-test` ASan/UBSan; pollcomp +
 container io_uring suites; MinGW cross-compile; EFI host-mock + lwIP + freestanding gates; cppcheck;
 `make bench-build` (compile-only benchmark — a public-API consumer OUTSIDE src/tests/examples that a
-headline rename can otherwise miss, e.g. `bench/bench_server.c`); `check-tier1-boundary`;
+headline rename can otherwise miss, e.g. `bench/bench_server.c`); `make fuzz` (the libFuzzer targets are
+public-API consumers under `fuzz/` — a directory NO earlier scan covered, so a headline rename silently
+broke `fuzz/fuzz_response_parser.c` at T2e; compile ALL targets, or at minimum the affected fuzz source,
+with the normal fuzz configuration — macOS `CC=/opt/homebrew/opt/llvm@18/bin/clang`); `check-tier1-boundary`;
 `check-sockaddr-neutral`; `check-doc-refs`; `check-no-kludp`; `git diff --check`; and a tree-wide symbol
-scan (src/include/tests/examples/parsers/integrations/bench + Makefile) proving no unintended old public
+scan (src/include/tests/examples/parsers/integrations/bench/**fuzz** + Makefile) proving no unintended old public
 name remains. Review each renamed callback/vtable for
 type-correct function-pointer signatures and ownership/lifetime; ensure installed headers stay
 self-contained after `git mv`; ensure examples/tests consume public names (no private aliases).

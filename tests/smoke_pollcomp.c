@@ -5,7 +5,7 @@
  * driver (completion_driver.c) OFF Windows: a KlHttpServer pinned to the portable poll()
  * completion backend (BACKEND=pollcomp, the overlapped provider), served by the same
  * accept/recv/send/sendfile completion mechanics the IOCP backend implements — hit by
- * the sync KlClient over loopback. It proves the completion axis is genuinely
+ * the sync KlHttpClient over loopback. It proves the completion axis is genuinely
  * platform-independent (the driver is reused verbatim) and makes it CI-testable.
  *
  * POSIX sibling of smoke_iocp.c; identical coverage: GET + POST body + file (sendfile)
@@ -235,7 +235,7 @@ static int keepalive_churn(int n) {
 /* Resilience: an abrupt mid-request drop and a malformed request must be cleaned up
  * without crashing/leaking; then a normal request must still succeed (server survived).
  * The leak/UAF signal comes from the ASan CI run over these cleanup paths. */
-static int resilience_ok(KlAllocator *alloc, KlClientConfig *ccfg) {
+static int resilience_ok(KlAllocator *alloc, KlHttpClientConfig *ccfg) {
     int cs = connect_client();       /* 1. partial request, then abrupt close */
     if (cs >= 0) { (void)!write(cs, "GET / HTT", 9); close(cs); }
     cs = connect_client();           /* 2. malformed request */
@@ -246,12 +246,12 @@ static int resilience_ok(KlAllocator *alloc, KlClientConfig *ccfg) {
         close(cs);
     }
     nap_ms(50);
-    KlClientResponse resp;            /* 3. server survived */
+    KlHttpClientResponse resp;            /* 3. server survived */
     memset(&resp, 0, sizeof(resp));
-    int rc = kl_client_request(alloc, ccfg, "GET", "http://127.0.0.1:18092/",
+    int rc = kl_http_client_request(alloc, ccfg, "GET", "http://127.0.0.1:18092/",
                                NULL, 0, NULL, 0, &resp);
     int ok = (rc == 0 && resp.status == 200);
-    if (rc == 0) kl_client_response_free(&resp);
+    if (rc == 0) kl_http_client_response_free(&resp);
     return ok;
 }
 
@@ -607,21 +607,21 @@ int main(void) {
     }
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 2 * 1024 * 1024 };
+    KlHttpClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 2 * 1024 * 1024 };
     int ok = 0, last_rc = -1, last_status = -1, last_err = 0;
     size_t last_len = 0;
     for (int i = 0; i < 50 && !ok; i++) {
         nap_ms(50);
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        last_rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/",
+        last_rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/",
                                     NULL, 0, NULL, 0, &resp);
         if (last_rc == 0) {
             last_status = resp.status;
             last_len = resp.body_len;
             ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_BODY) - 1 &&
                   resp.body && memcmp(resp.body, SMOKE_BODY, sizeof(SMOKE_BODY) - 1) == 0);
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else {
             last_err = (int)resp.error;
         }
@@ -629,43 +629,43 @@ int main(void) {
 
     int post_ok = 0;
     if (ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "POST", "http://127.0.0.1:18092/echo",
+        int rc = kl_http_client_request(&alloc, &ccfg, "POST", "http://127.0.0.1:18092/echo",
                                    NULL, 0, SMOKE_POST, sizeof(SMOKE_POST) - 1, &resp);
         if (rc == 0) {
             post_ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_POST) - 1 &&
                        resp.body && memcmp(resp.body, SMOKE_POST, sizeof(SMOKE_POST) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else { last_rc = rc; }
     }
 
     int file_ok = 0;
     if (ok && post_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/file",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/file",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
             file_ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_FILE) - 1 &&
                        resp.body && memcmp(resp.body, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else { last_rc = rc; }
     }
 
     int stream_ok = 0;
     if (ok && post_ok && file_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/stream",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/stream",
                                    NULL, 0, NULL, 0, &resp);
         if (rc == 0) {
             stream_ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_STREAM) - 1 &&
                          resp.body && memcmp(resp.body, SMOKE_STREAM, sizeof(SMOKE_STREAM) - 1) == 0);
             last_status = resp.status;
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else { last_rc = rc; }
     }
 
@@ -719,12 +719,12 @@ int main(void) {
     int resil_ok = churn_ok ? resilience_ok(&alloc, &ccfg) : 0;  /* drop + malformed cleanup */
     int big_ok = 0;                                          /* partial-send WRITE loop */
     if (resil_ok) {
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        int rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/big",
+        int rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18092/big",
                                    NULL, 0, NULL, 0, &resp);
         big_ok = (rc == 0 && resp.status == 200 && resp.body_len == SMOKE_BIG_LEN);
-        if (rc == 0) kl_client_response_free(&resp);
+        if (rc == 0) kl_http_client_response_free(&resp);
     }
     /* 8g-1: overlapped streaming flush — a stalled slow reader must not block the loop, and
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */

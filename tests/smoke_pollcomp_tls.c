@@ -3,7 +3,7 @@
  *
  * The first RUNTIME validation of the TLS-over-completion driver off Windows/mbedTLS:
  * a KlHttpServer on the pollcomp completion loop with an identity mock TLS (mock_tls.h),
- * hit by the sync KlClient using the same mock TLS over loopback. Because the mock is a
+ * hit by the sync KlHttpClient using the same mock TLS over loopback. Because the mock is a
  * passthrough, no crypto/mbedTLS is needed — yet the driver's TLS paths run for real:
  * comp_tls_drive (handshake → feed → decrypt), comp_tls_send_response (buffered),
  * comp_tls_send_file_chunk (file), comp_tls_send_stream (chunked). Retires the
@@ -66,18 +66,18 @@ static KlHttpServer g_srv;
 static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
 /* One https request via the mock-TLS sync client; returns 1 if status/body match. */
-static int req(KlAllocator *alloc, KlClientConfig *ccfg, const char *method,
+static int req(KlAllocator *alloc, KlHttpClientConfig *ccfg, const char *method,
                const char *path, const char *reqbody, size_t reqlen,
                const char *want, size_t wantlen) {
     char url[128];
     snprintf(url, sizeof(url), "https://127.0.0.1:%d%s", PORT, path);
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
-    int rc = kl_client_request(alloc, ccfg, method, url, NULL, 0, reqbody, reqlen, &resp);
+    int rc = kl_http_client_request(alloc, ccfg, method, url, NULL, 0, reqbody, reqlen, &resp);
     if (rc != 0) return 0;
     int ok = (resp.status == 200 && resp.body_len == wantlen &&
               resp.body && memcmp(resp.body, want, wantlen) == 0);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
     return ok;
 }
 
@@ -111,7 +111,7 @@ int main(void) {
 
     KlAllocator alloc = kl_allocator_default();
     KlTlsConfig cli_tls = { .ctx = NULL, .factory = mock_tls_create, .ctx_destroy = NULL };
-    KlClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 2 * 1024 * 1024,
+    KlHttpClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 2 * 1024 * 1024,
                             .tls = &cli_tls };
 
     int get_ok = 0;

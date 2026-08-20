@@ -2,12 +2,12 @@
  * response_parser_llhttp.c — llhttp backend for KlHttp1ResponseParser vtable
  *
  * Uses llhttp in HTTP_RESPONSE mode to parse response status, headers,
- * and body. Accumulates headers and body into the KlClientResponse struct.
+ * and body. Accumulates headers and body into the KlHttpClientResponse struct.
  *
  * All dynamic memory goes through the KlAllocator vtable.
  */
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/http1_parser.h>
 #include <keel/allocator.h>
 #include "llhttp.h"
@@ -27,7 +27,7 @@ typedef struct {
     KlAllocator     *alloc;
 
     /* Accumulation state */
-    KlClientResponse *resp;
+    KlHttpClientResponse *resp;
     size_t           max_body;
     int              complete;
     int              error;
@@ -46,13 +46,13 @@ typedef struct {
     size_t           body_cap;
 
     /* Header array */
-    KlClientHeader  *headers;
+    KlHttpClientHeader  *headers;
     int              num_headers;
     int              headers_cap;
 
     /* Streaming callbacks (NULL = accumulate as before) */
-    KlClientBodyFn     on_body_cb;
-    KlClientHeadersFn  on_headers_cb;
+    KlHttpClientBodyFn     on_body_cb;
+    KlHttpClientHeadersFn  on_headers_cb;
     void             (*on_complete_cb)(void *user_data);
     void              *stream_data;
     size_t             body_streamed;   /**< total bytes forwarded (for size limit) */
@@ -100,9 +100,9 @@ static int flush_header(RespLlhttpParser *p)
         int new_cap = p->headers_cap ? p->headers_cap * 2 : 16;
         if (new_cap > KL_MAX_RESPONSE_HEADERS)
             new_cap = KL_MAX_RESPONSE_HEADERS;
-        size_t old_size = (size_t)p->headers_cap * sizeof(KlClientHeader);
-        size_t new_size = (size_t)new_cap * sizeof(KlClientHeader);
-        KlClientHeader *new_hdrs = kl_realloc(p->alloc, p->headers,
+        size_t old_size = (size_t)p->headers_cap * sizeof(KlHttpClientHeader);
+        size_t new_size = (size_t)new_cap * sizeof(KlHttpClientHeader);
+        KlHttpClientHeader *new_hdrs = kl_realloc(p->alloc, p->headers,
                                                 old_size, new_size);
         if (!new_hdrs)
             return -1;
@@ -256,7 +256,7 @@ static int resp_on_message_complete(llhttp_t *parser)
 /* ── Transfer parser data to response ─────────────────────────────── */
 
 static KlHttp1ParseResult transfer_to_response(RespLlhttpParser *p,
-                                            KlClientResponse *resp)
+                                            KlHttpClientResponse *resp)
 {
     /* Streaming mode: body was forwarded via callback, skip body transfer */
     if (p->on_body_cb) {
@@ -283,9 +283,9 @@ static KlHttp1ParseResult transfer_to_response(RespLlhttpParser *p,
 
     /* Make exact-sized copy of headers array */
     if (p->headers && p->num_headers > 0) {
-        size_t exact_size = (size_t)p->num_headers * sizeof(KlClientHeader);
-        size_t old_size = (size_t)p->headers_cap * sizeof(KlClientHeader);
-        KlClientHeader *exact_hdrs = kl_malloc(p->alloc, exact_size);
+        size_t exact_size = (size_t)p->num_headers * sizeof(KlHttpClientHeader);
+        size_t old_size = (size_t)p->headers_cap * sizeof(KlHttpClientHeader);
+        KlHttpClientHeader *exact_hdrs = kl_malloc(p->alloc, exact_size);
         if (!exact_hdrs)
             return KL_HTTP1_PARSE_ERROR;
         memcpy(exact_hdrs, p->headers, exact_size);
@@ -309,7 +309,7 @@ static KlHttp1ParseResult transfer_to_response(RespLlhttpParser *p,
 /* ── KlHttp1ResponseParser vtable ────────────────────────────────────── */
 
 static KlHttp1ParseResult resp_parser_parse(KlHttp1ResponseParser *self,
-                                         KlClientResponse *resp,
+                                         KlHttpClientResponse *resp,
                                          const char *buf, size_t len,
                                          size_t *consumed)
 {
@@ -369,7 +369,7 @@ static void resp_parser_reset(KlHttp1ResponseParser *self)
                 strlen(p->headers[i].value) + 1);
     }
     kl_free(p->alloc, p->headers,
-            (size_t)p->headers_cap * sizeof(KlClientHeader));
+            (size_t)p->headers_cap * sizeof(KlHttpClientHeader));
     p->headers = NULL;
     p->num_headers = 0;
     p->headers_cap = 0;
@@ -394,7 +394,7 @@ static void resp_parser_destroy(KlHttp1ResponseParser *self)
                 strlen(p->headers[i].value) + 1);
     }
     kl_free(alloc, p->headers,
-            (size_t)p->headers_cap * sizeof(KlClientHeader));
+            (size_t)p->headers_cap * sizeof(KlHttpClientHeader));
 
     kl_free(alloc, p, sizeof(RespLlhttpParser));
 }
@@ -403,8 +403,8 @@ static void resp_parser_destroy(KlHttp1ResponseParser *self)
 
 static KlHttp1ResponseParser *create_parser(size_t max_response_size,
                                          KlAllocator *alloc,
-                                         KlClientBodyFn on_body,
-                                         KlClientHeadersFn on_headers,
+                                         KlHttpClientBodyFn on_body,
+                                         KlHttpClientHeadersFn on_headers,
                                          void (*on_complete)(void *),
                                          void *stream_user_data)
 {
@@ -453,8 +453,8 @@ KlHttp1ResponseParser *kl_http1_response_parser_llhttp(size_t max_response_size,
 
 KlHttp1ResponseParser *kl_http1_response_parser_llhttp_s(size_t max_response_size,
                                                 KlAllocator *alloc,
-                                                KlClientBodyFn on_body,
-                                                KlClientHeadersFn on_headers,
+                                                KlHttpClientBodyFn on_body,
+                                                KlHttpClientHeadersFn on_headers,
                                                 void (*on_complete)(void *),
                                                 void *stream_user_data)
 {

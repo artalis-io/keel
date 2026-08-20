@@ -136,7 +136,7 @@ static const char *mock_tls_alpn_protocol(KlTls *self) {
     return mock_tls_alpn;
 }
 
-/* KlTlsFactory: usable as both KlHttpServerConfig.tls->factory and KlClientConfig.tls->factory. */
+/* KlTlsFactory: usable as both KlHttpServerConfig.tls->factory and KlHttpClientConfig.tls->factory. */
 static KlTls *mock_tls_create(KlTlsCtx *ctx, KlAllocator *alloc) {
     (void)ctx;
     MockTls *m = kl_malloc(alloc, sizeof(*m));

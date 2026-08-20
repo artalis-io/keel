@@ -7,8 +7,8 @@
 
 #include "utest.h"
 #include <keel/keel.h>
-#include <keel/client.h>
-#include <keel/client_pool.h>
+#include <keel/http_client.h>
+#include <keel/http_client_pool.h>
 
 #include <string.h>
 #include "net_compat.h"
@@ -78,7 +78,7 @@ static ssize_t read_until(int fd, char *buf, size_t buf_sz,
 
 typedef struct {
     KlAllocator    *alloc;
-    KlClientConfig *cfg;
+    KlHttpClientConfig *cfg;
     int             done;
     int             status;
     KlError         err;
@@ -89,12 +89,12 @@ typedef struct {
 static void *proxy_request_thread(void *arg)
 {
     ProxyReqCtx *c = arg;
-    KlClientResponse resp;
-    int rc = kl_client_request(c->alloc, c->cfg, c->method, c->url,
+    KlHttpClientResponse resp;
+    int rc = kl_http_client_request(c->alloc, c->cfg, c->method, c->url,
                                 NULL, 0, NULL, 0, &resp);
     c->status = (rc == 0) ? resp.status : -1;
     c->err = resp.error;
-    if (rc == 0) kl_client_response_free(&resp);
+    if (rc == 0) kl_http_client_response_free(&resp);
     c->done = 1;
     return NULL;
 }
@@ -108,7 +108,7 @@ static KlTls *null_tls_factory(KlTlsCtx *ctx, KlAllocator *alloc)
 /* ── Test 1: NULL proxy config = direct connection ───────────────── */
 
 UTEST(proxy, config_null) {
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.proxy = NULL;
     ASSERT_TRUE(cfg.proxy == NULL);
@@ -122,8 +122,8 @@ UTEST(proxy, absolute_url_http) {
     ASSERT_GE(listen_fd, 0);
 
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
-    KlClientConfig cfg;
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.proxy = &proxy;
     cfg.timeout_ms = 2000;
@@ -164,10 +164,10 @@ UTEST(proxy, connect_request_format) {
     ASSERT_GE(listen_fd, 0);
 
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
     /* Need a TLS config to get past the "HTTPS needs TLS" check */
     KlTlsConfig tls_cfg = { .factory = null_tls_factory };
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.proxy = &proxy;
     cfg.tls = &tls_cfg;
@@ -210,13 +210,13 @@ UTEST(proxy, connect_with_auth) {
     ASSERT_GE(listen_fd, 0);
 
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = {
+    KlHttpProxyConfig proxy = {
         .host = "127.0.0.1",
         .port = (uint16_t)proxy_port,
         .auth = "Basic dXNlcjpwYXNz"
     };
     KlTlsConfig tls_cfg = { .factory = null_tls_factory };
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.proxy = &proxy;
     cfg.tls = &tls_cfg;
@@ -256,10 +256,10 @@ UTEST(proxy, connect_success_transitions_to_tls) {
     ASSERT_GE(listen_fd, 0);
 
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
     /* null_tls_factory returns NULL → TLS init fails after CONNECT succeeds */
     KlTlsConfig tls_cfg = { .factory = null_tls_factory };
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.proxy = &proxy;
     cfg.tls = &tls_cfg;
@@ -300,9 +300,9 @@ UTEST(proxy, connect_rejected) {
     ASSERT_GE(listen_fd, 0);
 
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
     KlTlsConfig tls_cfg = { .factory = null_tls_factory };
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.proxy = &proxy;
     cfg.tls = &tls_cfg;
@@ -341,9 +341,9 @@ UTEST(proxy, connect_buf_overflow) {
     ASSERT_GE(listen_fd, 0);
 
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
     KlTlsConfig tls_cfg = { .factory = null_tls_factory };
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.proxy = &proxy;
     cfg.tls = &tls_cfg;
@@ -392,8 +392,8 @@ UTEST(proxy, dns_resolves_proxy_host) {
     ASSERT_GE(listen_fd, 0);
 
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
-    KlClientConfig cfg;
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.proxy = &proxy;
     cfg.timeout_ms = 2000;
@@ -431,8 +431,8 @@ UTEST(proxy, redirect_inherits) {
     ASSERT_GE(listen_fd, 0);
 
     KlAllocator alloc = kl_allocator_default();
-    KlProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
-    KlClientConfig cfg;
+    KlHttpProxyConfig proxy = { .host = "127.0.0.1", .port = (uint16_t)proxy_port, .auth = NULL };
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.proxy = &proxy;
     cfg.timeout_ms = 2000;
@@ -467,75 +467,75 @@ UTEST(proxy, redirect_inherits) {
 
 UTEST(proxy, pool_key_match) {
     KlAllocator a = kl_allocator_default();
-    KlClientPool pool;
-    ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2];
     ASSERT_EQ(kl_test_socketpair(fds), 0);
 
-    KlClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn, "target.com", 80, 0,
+    KlHttpClientPoolConn conn = { .fd = fds[0], .tls = NULL, .reused = 0, ._entry = NULL };
+    ASSERT_EQ(kl_http_client_pool_release(&pool, &conn, "target.com", 80, 0,
                                 "proxy.com", 8080), 0);
-    ASSERT_EQ(kl_cpool_idle_count(&pool), 1);
-    ASSERT_EQ(kl_cpool_host_count(&pool, "target.com", 80, 0,
+    ASSERT_EQ(kl_http_client_pool_idle_count(&pool), 1);
+    ASSERT_EQ(kl_http_client_pool_host_count(&pool, "target.com", 80, 0,
                                     "proxy.com", 8080), 1);
 
-    KlClientPoolConn acq;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "target.com", 80, 0,
+    KlHttpClientPoolConn acq;
+    ASSERT_EQ(kl_http_client_pool_acquire(&pool, "target.com", 80, 0,
                                 "proxy.com", 8080, &acq), 0);
     ASSERT_EQ(acq.reused, 1);
     ASSERT_EQ(acq.fd, fds[0]);
 
     kl_test_closesock(acq.fd);
     kl_test_closesock(fds[1]);
-    kl_cpool_free(&pool);
+    kl_http_client_pool_free(&pool);
 }
 
 /* ── Test 11: Pool key: direct entry doesn't match proxied ───────── */
 
 UTEST(proxy, pool_direct_no_match) {
     KlAllocator a = kl_allocator_default();
-    KlClientPool pool;
-    ASSERT_EQ(kl_cpool_init(&pool, NULL, &a, NULL), 0);
+    KlHttpClientPool pool;
+    ASSERT_EQ(kl_http_client_pool_init(&pool, NULL, &a, NULL), 0);
 
     int fds[2][2];
     ASSERT_EQ(kl_test_socketpair(fds[0]), 0);
     ASSERT_EQ(kl_test_socketpair(fds[1]), 0);
 
     /* Release a direct connection */
-    KlClientPoolConn conn1 = { .fd = fds[0][0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn1, "target.com", 80, 0,
+    KlHttpClientPoolConn conn1 = { .fd = fds[0][0], .tls = NULL, .reused = 0, ._entry = NULL };
+    ASSERT_EQ(kl_http_client_pool_release(&pool, &conn1, "target.com", 80, 0,
                                 NULL, 0), 0);
 
     /* Release a proxied connection to same target */
-    KlClientPoolConn conn2 = { .fd = fds[1][0], .tls = NULL, .reused = 0, ._entry = NULL };
-    ASSERT_EQ(kl_cpool_release(&pool, &conn2, "target.com", 80, 0,
+    KlHttpClientPoolConn conn2 = { .fd = fds[1][0], .tls = NULL, .reused = 0, ._entry = NULL };
+    ASSERT_EQ(kl_http_client_pool_release(&pool, &conn2, "target.com", 80, 0,
                                 "proxy.com", 3128), 0);
 
-    ASSERT_EQ(kl_cpool_idle_count(&pool), 2);
+    ASSERT_EQ(kl_http_client_pool_idle_count(&pool), 2);
 
     /* Acquire direct — should NOT return the proxied one */
-    KlClientPoolConn acq;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "target.com", 80, 0,
+    KlHttpClientPoolConn acq;
+    ASSERT_EQ(kl_http_client_pool_acquire(&pool, "target.com", 80, 0,
                                 NULL, 0, &acq), 0);
     ASSERT_EQ(acq.fd, fds[0][0]);
 
     /* Acquire proxied — should return the proxied one */
-    KlClientPoolConn acq2;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "target.com", 80, 0,
+    KlHttpClientPoolConn acq2;
+    ASSERT_EQ(kl_http_client_pool_acquire(&pool, "target.com", 80, 0,
                                 "proxy.com", 3128, &acq2), 0);
     ASSERT_EQ(acq2.fd, fds[1][0]);
 
     /* Acquire with different proxy — miss */
-    KlClientPoolConn acq3;
-    ASSERT_EQ(kl_cpool_acquire(&pool, "target.com", 80, 0,
+    KlHttpClientPoolConn acq3;
+    ASSERT_EQ(kl_http_client_pool_acquire(&pool, "target.com", 80, 0,
                                 "other-proxy.com", 3128, &acq3), 1);
 
     kl_test_closesock(acq.fd);
     kl_test_closesock(acq2.fd);
     kl_test_closesock(fds[0][1]);
     kl_test_closesock(fds[1][1]);
-    kl_cpool_free(&pool);
+    kl_http_client_pool_free(&pool);
 }
 
 UTEST_MAIN();

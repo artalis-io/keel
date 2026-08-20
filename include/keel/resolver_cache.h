@@ -2,7 +2,7 @@
  * resolver_cache.h — Caching DNS resolver decorator
  *
  * Wraps any KlResolver and caches successful results with configurable TTL.
- * Returns a KlResolver * that plugs directly into KlClientConfig.resolver.
+ * Returns a KlResolver * that plugs directly into KlHttpClientConfig.resolver.
  *
  * Cache miss → delegates to inner resolver, stores result on completion.
  * Cache hit  → calls done_fn synchronously, returns immediately.

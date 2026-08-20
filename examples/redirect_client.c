@@ -65,51 +65,51 @@ static void *server_thread(void *arg) {
 
 static void sync_demo(void) {
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig cfg = {.timeout_ms = 5000};
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = {.timeout_ms = 5000};
+    KlHttpClientResponse resp;
     char url[256];
 
     /* 1. Simple 301 redirect */
     printf("--- Sync: 301 redirect ---\n");
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/redirect", srv_port);
-    if (kl_redirect_request(&alloc, &cfg, NULL, "GET", url,
+    if (kl_http_redirect_request(&alloc, &cfg, NULL, "GET", url,
                              NULL, 0, NULL, 0, &resp) == 0) {
         printf("  status: %d\n", resp.status);
         printf("  body:   %.*s\n", (int)resp.body_len, resp.body);
-        kl_client_response_free(&resp);
+        kl_http_client_response_free(&resp);
     }
 
     /* 2. Chain: 302 → 301 → 200 */
     printf("\n--- Sync: redirect chain (302 → 301 → 200) ---\n");
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/chain", srv_port);
-    if (kl_redirect_request(&alloc, &cfg, NULL, "GET", url,
+    if (kl_http_redirect_request(&alloc, &cfg, NULL, "GET", url,
                              NULL, 0, NULL, 0, &resp) == 0) {
         printf("  status: %d\n", resp.status);
         printf("  body:   %.*s\n", (int)resp.body_len, resp.body);
-        kl_client_response_free(&resp);
+        kl_http_client_response_free(&resp);
     }
 
     /* 3. POST with 303 → method changes to GET */
     printf("\n--- Sync: 303 POST → GET ---\n");
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/post_redirect", srv_port);
-    if (kl_redirect_request(&alloc, &cfg, NULL, "POST", url,
+    if (kl_http_redirect_request(&alloc, &cfg, NULL, "POST", url,
                              NULL, 0, "payload", 7, &resp) == 0) {
         printf("  status: %d (method changed to GET)\n", resp.status);
         printf("  body:   %.*s\n", (int)resp.body_len, resp.body);
-        kl_client_response_free(&resp);
+        kl_http_client_response_free(&resp);
     }
 
     /* 4. Custom max_redirects */
     printf("\n--- Sync: max_redirects = 1 on a chain ---\n");
-    KlRedirectConfig redir = {.max_redirects = 1};
+    KlHttpRedirectConfig redir = {.max_redirects = 1};
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/chain", srv_port);
-    int rc = kl_redirect_request(&alloc, &cfg, &redir, "GET", url,
+    int rc = kl_http_redirect_request(&alloc, &cfg, &redir, "GET", url,
                                   NULL, 0, NULL, 0, &resp);
     if (rc < 0) {
         printf("  error: %s (expected — chain needs 2 hops, limit is 1)\n",
                kl_strerror(resp.error));
     } else {
-        kl_client_response_free(&resp);
+        kl_http_client_response_free(&resp);
     }
 }
 
@@ -117,19 +117,19 @@ static void sync_demo(void) {
 
 static int async_done;
 
-static void on_redirect_done(KlRedirectClient *rc, void *user_data) {
+static void on_redirect_done(KlHttpRedirectClient *rc, void *user_data) {
     (void)user_data;
     printf("--- Async: redirect completed ---\n");
 
-    if (kl_redirect_error(rc) == 0) {
-        const KlClientResponse *r = kl_redirect_response(rc);
+    if (kl_http_redirect_error(rc) == 0) {
+        const KlHttpClientResponse *r = kl_http_redirect_response(rc);
         printf("  status: %d\n", r->status);
         printf("  body:   %.*s\n", (int)r->body_len, r->body);
     } else {
-        printf("  error: %s\n", kl_strerror(kl_redirect_last_error(rc)));
+        printf("  error: %s\n", kl_strerror(kl_http_redirect_last_error(rc)));
     }
 
-    kl_redirect_free(rc);
+    kl_http_redirect_free(rc);
     async_done = 1;
 }
 
@@ -143,12 +143,12 @@ static void async_demo(void) {
         return;
     }
 
-    KlClientConfig cfg = {.timeout_ms = 5000};
+    KlHttpClientConfig cfg = {.timeout_ms = 5000};
     char url[256];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/redirect", srv_port);
 
     async_done = 0;
-    KlRedirectClient *rc = kl_redirect_start(&ev, &alloc, &cfg, NULL,
+    KlHttpRedirectClient *rc = kl_http_redirect_start(&ev, &alloc, &cfg, NULL,
                                               "GET", url,
                                               NULL, 0, NULL, 0,
                                               on_redirect_done, NULL);

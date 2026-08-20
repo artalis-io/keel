@@ -1,6 +1,6 @@
 #include "utest.h"
 #include <keel/decompress.h>
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/allocator.h>
 #include <string.h>
 
@@ -349,7 +349,7 @@ UTEST(decompress, stream_null_args) {
 /* ── Client integration tests (mock-based, no network) ───────────── */
 
 /**
- * Test that decompress_response_body works on a KlClientResponse.
+ * Test that decompress_response_body works on a KlHttpClientResponse.
  * We call the static helper indirectly through kl_decompress_body.
  */
 UTEST(decompress, client_decompress_buffered) {
@@ -357,7 +357,7 @@ UTEST(decompress, client_decompress_buffered) {
     g_factory_fail = 0;
 
     /* Build a mock response with Content-Encoding: mock */
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     resp.alloc = a;
     resp.status = 200;
@@ -371,7 +371,7 @@ UTEST(decompress, client_decompress_buffered) {
     resp.body_len = clen;
 
     /* Allocate headers */
-    resp.headers = kl_malloc(&a, 2 * sizeof(KlClientHeader));
+    resp.headers = kl_malloc(&a, 2 * sizeof(KlHttpClientHeader));
     resp.num_headers = 2;
 
     /* Content-Encoding header */
@@ -413,7 +413,7 @@ UTEST(decompress, client_decompress_buffered) {
     ASSERT_EQ(resp.body_len, (size_t)1);
     ASSERT_EQ(resp.body[0], 'X');
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(decompress, client_no_encoding) {
@@ -421,7 +421,7 @@ UTEST(decompress, client_no_encoding) {
     g_factory_fail = 0;
 
     /* Response with no Content-Encoding → body untouched */
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     resp.alloc = a;
     resp.status = 200;
@@ -440,7 +440,7 @@ UTEST(decompress, client_no_encoding) {
     ASSERT_EQ(resp.body_len, blen);
     ASSERT_EQ(memcmp(resp.body, "rawbody", blen), 0);
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 UTEST(decompress, client_encoding_mismatch) {

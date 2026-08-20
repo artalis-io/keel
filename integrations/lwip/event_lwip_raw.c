@@ -145,7 +145,7 @@ static int lwr_ev_init(KlEventLoop *loop) {
 /* SERVER connection I/O is driven by posted completions (recv/send via the tcp_* callbacks), not
  * readiness watches, so for server conns add/mod/del are inert — matching the IOCP model.
  *
- * CLIENT data plane (LC-1), however, rides a readiness watcher: the async KlClient arms a
+ * CLIENT data plane (LC-1), however, rides a readiness watcher: the async KlHttpClient arms a
  * KL_EVENT_WRITE/READ watcher on its connect pcb for the send/recv phase (it has no KlHttpConn, so it
  * cannot use the server-side completion post path). Since a NO_SYS=1 raw loop has no pollable fd,
  * add/mod RECORD the armed watcher (fd == the client pcb; udata == the tagged KlWatcher) into the
@@ -265,7 +265,7 @@ static int lwr_sock_bind(void *c, KlSocketHandle fd, const KlSockAddr *a) {
 }
 
 /* connect: UNSUPPORTED. lwip-raw is a SERVER-ONLY backend — no outbound connect. Fail EARLY
- * and CLEARLY (errno = ENOTSUP + return -1) so a KlClient on this provider aborts deterministically
+ * and CLEARLY (errno = ENOTSUP + return -1) so a KlHttpClient on this provider aborts deterministically
  * at connect rather than silently hanging. For an lwIP CLIENT, use the readiness socket-API lwIP
  * integration (kl_socket_provider_lwip / kl_event_provider_lwip in keel_lwip.h). */
 static int lwr_sock_connect(void *c, KlSocketHandle fd, const KlSockAddr *a) {
@@ -621,7 +621,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         }
 
         if (r->kind == KL_LWR_CONNECT) {
-            /* An outbound client connect finished (LC-1). The consumer is the async KlClient, not
+            /* An outbound client connect finished (LC-1). The consumer is the async KlHttpClient, not
              * the server driver — route it exactly like KL_COMP_WATCHER (the driver dispatches it
              * via kl_event_dispatch to the client's tagged connect watcher). r->owner carries the
              * tagged KlWatcher udata; the result is mask-encoded (KL_EVENT_WRITE = connected, 0 =
@@ -688,7 +688,7 @@ static int lwr_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int ma
         count++;
     }
 
-    /* (c) CLIENT data-plane readiness relay (LC-1): the async KlClient armed a KL_EVENT_WRITE/READ
+    /* (c) CLIENT data-plane readiness relay (LC-1): the async KlHttpClient armed a KL_EVENT_WRITE/READ
      * watcher on its connect pcb (recorded via lwr_ev_add/mod). Surface KL_COMP_WATCHER for each
      * client pcb whose armed condition is met (writable = sndbuf headroom; readable = rx queued or
      * peer-closed). The driver routes it via kl_event_dispatch to the client's watcher (async_on_

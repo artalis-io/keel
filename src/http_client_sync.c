@@ -3,8 +3,8 @@
  *
  * Freestanding step B2b: the blocking poll()-based request/response path lives
  * here — connect_with_timeout, the sync TLS handshake, sync proxy CONNECT, the
- * send_*_sync / recv_response_sync loops, and the public kl_client_request[_s]
- * + kl_client_request_pooled (blocking) entry points. All I/O routes through the
+ * send_*_sync / recv_response_sync loops, and the public kl_http_client_request[_s]
+ * + kl_http_client_request_pooled (blocking) entry points. All I/O routes through the
  * socket-provider seam (kl_sock_send/recv + kl_sock_io_status — no raw read()/
  * write()/errno); the only hosted dependencies are the blocking wait
  * (kl_plat_poll1) and blocking DNS, so a freestanding async build links
@@ -13,8 +13,8 @@
  * All allocation through KlAllocator. No Hull dependencies.
  */
 
-#include <keel/client.h>
-#include <keel/client_pool.h>
+#include <keel/http_client.h>
+#include <keel/http_client_pool.h>
 #include <keel/decompress.h>
 #include <keel/http1_parser.h>
 
@@ -30,8 +30,8 @@
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "resolve_sync.h" /* kl_resolve_sync — blocking name resolution -> KlSockAddr */
 #include "platform.h"     /* kl_plat_poll1 — sync readiness wait (poll/WSAPoll) */
-#include "client_internal.h"
-#include "client_proxy.h"   /* shared CONNECT serialization + status (no sync/async drift) */
+#include "http_client_internal.h"
+#include "http_client_proxy.h"   /* shared CONNECT serialization + status (no sync/async drift) */
 
 /* ── Connect with timeout ────────────────────────────────────────── */
 
@@ -40,7 +40,7 @@ static KlSocketHandle connect_with_timeout(const char *host, size_t host_len,
                                  const KlSocketProvider *sockets,
                                  KlError *out_err)
 {
-    char host_buf[KL_CLIENT_HOSTNAME_MAX];
+    char host_buf[KL_HTTP_CLIENT_HOSTNAME_MAX];
     if (host_len >= sizeof(host_buf)) {
         if (out_err) *out_err = KL_ERR_INVALID_ARG;
         return -1;
@@ -180,7 +180,7 @@ static KlTls *do_tls_handshake(KlSocketHandle fd, KlTlsConfig *tls_cfg,
      * does not fit the buffer, or set_hostname() reports failure, abort — a
      * missing hostname check would let a cert for the wrong host verify. */
     if (tls->set_hostname) {
-        char host_buf[KL_CLIENT_HOSTNAME_MAX];
+        char host_buf[KL_HTTP_CLIENT_HOSTNAME_MAX];
         if (host_len >= sizeof(host_buf)) {
             tls->destroy(tls);
             return NULL;
@@ -279,12 +279,12 @@ static int proxy_connect_sync(const KlSocketProvider *sockets, KlSocketHandle fd
 
 static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls,
                               const char *method, const KlUrl *url,
-                              const KlClientHeader *headers, int num_headers,
+                              const KlHttpClientHeader *headers, int num_headers,
                               const char *body, size_t body_len,
                               int timeout_ms, int keep_alive,
                               const char *absolute_url)
 {
-    if (kl_client_has_crlf(method, strlen(method)))
+    if (kl_http_client_has_crlf(method, strlen(method)))
         return -1;
     if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return -1;
@@ -304,7 +304,7 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         target_len = 1;
     }
 
-    char buf[KL_CLIENT_REQ_BUF_SIZE];
+    char buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
                        method,
                        target_len, target,
@@ -314,8 +314,8 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         return -1;
 
     for (int i = 0; i < num_headers; i++) {
-        if (kl_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
-            kl_client_has_crlf(headers[i].value, strlen(headers[i].value)))
+        if (kl_http_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
+            kl_http_client_has_crlf(headers[i].value, strlen(headers[i].value)))
             return -1;
         int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
                          "%s: %s\r\n", headers[i].name, headers[i].value);
@@ -346,7 +346,7 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         if (pr <= 0)
             return -1;
 
-        ssize_t w = kl_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
+        ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -360,7 +360,7 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
             if (pr <= 0)
                 return -1;
 
-            ssize_t w = kl_client_io_write(sockets, fd, tls, body + sent, body_len - sent);
+            ssize_t w = kl_http_client_io_write(sockets, fd, tls, body + sent, body_len - sent);
             if (w <= 0)
                 return -1;
             sent += (size_t)w;
@@ -374,11 +374,11 @@ static int send_request_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
 
 static int send_headers_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls,
                                const char *method, const KlUrl *url,
-                               const KlClientHeader *headers, int num_headers,
+                               const KlHttpClientHeader *headers, int num_headers,
                                int timeout_ms, int keep_alive,
                                const char *absolute_url)
 {
-    if (kl_client_has_crlf(method, strlen(method)))
+    if (kl_http_client_has_crlf(method, strlen(method)))
         return -1;
     if (url->path_len > INT_MAX || url->host_len > INT_MAX)
         return -1;
@@ -397,7 +397,7 @@ static int send_headers_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         target_len = 1;
     }
 
-    char buf[KL_CLIENT_REQ_BUF_SIZE];
+    char buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     int off = snprintf(buf, sizeof(buf), "%s %.*s HTTP/1.1\r\nHost: %.*s\r\n",
                        method,
                        target_len, target,
@@ -407,8 +407,8 @@ static int send_headers_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         return -1;
 
     for (int i = 0; i < num_headers; i++) {
-        if (kl_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
-            kl_client_has_crlf(headers[i].value, strlen(headers[i].value)))
+        if (kl_http_client_has_crlf(headers[i].name, strlen(headers[i].name)) ||
+            kl_http_client_has_crlf(headers[i].value, strlen(headers[i].value)))
             return -1;
         int n = snprintf(buf + off, sizeof(buf) - (size_t)off,
                          "%s: %s\r\n", headers[i].name, headers[i].value);
@@ -430,7 +430,7 @@ static int send_headers_sync(const KlSocketProvider *sockets, KlSocketHandle fd,
         if (pr <= 0)
             return -1;
 
-        ssize_t w = kl_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
+        ssize_t w = kl_http_client_io_write(sockets, fd, tls, buf + sent, (size_t)off - sent);
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -450,7 +450,7 @@ static int send_all_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlT
         if (pr <= 0)
             return -1;
 
-        ssize_t w = kl_client_io_write(sockets, fd, tls, data + sent, len - sent);
+        ssize_t w = kl_http_client_io_write(sockets, fd, tls, data + sent, len - sent);
         if (w <= 0)
             return -1;
         sent += (size_t)w;
@@ -459,11 +459,11 @@ static int send_all_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlT
 }
 
 static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls,
-                                    KlClientReadFn body_read, void *user_data,
+                                    KlHttpClientReadFn body_read, void *user_data,
                                     int timeout_ms)
 {
-    char data_buf[KL_CLIENT_CHUNK_BUF_SIZE];
-    char hdr_buf[KL_CLIENT_CHUNK_HDR_SIZE];
+    char data_buf[KL_HTTP_CLIENT_CHUNK_BUF_SIZE];
+    char hdr_buf[KL_HTTP_CLIENT_CHUNK_HDR_SIZE];
 
     for (;;) {
         ssize_t nread = body_read(data_buf, sizeof(data_buf), user_data);
@@ -473,7 +473,7 @@ static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandl
         if (nread == 0) {
             /* Final chunk: 0\r\n\r\n */
             if (send_all_sync(sockets, fd, tls, "0\r\n\r\n",
-                               KL_CLIENT_FINAL_CHUNK_LEN, timeout_ms) != 0)
+                               KL_HTTP_CLIENT_FINAL_CHUNK_LEN, timeout_ms) != 0)
                 return -1;
             return 0;
         }
@@ -494,10 +494,10 @@ static int send_body_chunked_sync(const KlSocketProvider *sockets, KlSocketHandl
 
 /* ── Receive + parse response (sync, with optional streaming) ────── */
 
-static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls, KlClientResponse *resp,
+static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd, KlTls *tls, KlHttpClientResponse *resp,
                                size_t max_response_size, int timeout_ms,
                                KlAllocator *alloc,
-                               const KlClientStreamCfg *stream)
+                               const KlHttpClientStreamCfg *stream)
 {
     KlHttp1ResponseParser *parser;
     if (stream && stream->on_body) {
@@ -512,7 +512,7 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
     if (!parser)
         return -1;
 
-    char buf[KL_CLIENT_RECV_BUF_SIZE];
+    char buf[KL_HTTP_CLIENT_RECV_BUF_SIZE];
     int ret = -1;
 
     for (;;) {
@@ -520,7 +520,7 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
         if (pr <= 0)
             break;
 
-        ssize_t nread = kl_client_io_read(sockets, fd, tls, buf, sizeof(buf));
+        ssize_t nread = kl_http_client_io_read(sockets, fd, tls, buf, sizeof(buf));
         if (nread < 0) {
             /* A clean TLS shutdown surfaces as read()==-1 (no distinct EOF code);
              * finalize a close-delimited response rather than failing it. */
@@ -551,16 +551,16 @@ static int recv_response_sync(const KlSocketProvider *sockets, KlSocketHandle fd
 
 /* ── Sync public API ─────────────────────────────────────────────── */
 
-int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
+int kl_http_client_request_s(KlAllocator *alloc, const KlHttpClientConfig *cfg,
                          const char *method, const char *url_str,
-                         const KlClientHeader *headers, int num_headers,
+                         const KlHttpClientHeader *headers, int num_headers,
                          const char *body, size_t body_len,
-                         const KlClientStreamCfg *stream,
-                         KlClientResponse *resp)
+                         const KlHttpClientStreamCfg *stream,
+                         KlHttpClientResponse *resp)
 {
     if (!alloc || !method || !url_str || !resp)
         return -1;
-    if (num_headers < 0 || num_headers > KL_CLIENT_MAX_REQ_HEADERS)
+    if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return -1;
     if (num_headers > 0 && !headers)
         return -1;
@@ -572,9 +572,9 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     const KlSocketProvider *sockets = cfg ? cfg->sockets : NULL;
 
     int timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
-                                                    : KL_CLIENT_DEFAULT_TIMEOUT_MS;
+                                                    : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
     size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
-                                                            : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
+                                                            : (size_t)KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
 
     KlUrl parsed;
     if (kl_url_parse(url_str, &parsed) != 0) {
@@ -591,7 +591,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
         tls_cfg = NULL;
 
     /* Proxy routing: connect to proxy host instead of target */
-    const KlProxyConfig *proxy = cfg ? cfg->proxy : NULL;
+    const KlHttpProxyConfig *proxy = cfg ? cfg->proxy : NULL;
     int is_proxied = (proxy && proxy->host);
 
     /* UNIX socket target: no host/port. Normalize the Host header to
@@ -628,7 +628,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
 
     if (is_proxied && parsed.is_https) {
         /* CONNECT tunnel through proxy, then TLS handshake */
-        char target_host[KL_CLIENT_HOSTNAME_MAX];
+        char target_host[KL_HTTP_CLIENT_HOSTNAME_MAX];
         if (parsed.host_len >= sizeof(target_host)) {
             resp->error = KL_ERR_INVALID_ARG;
             goto cleanup;
@@ -657,10 +657,10 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     }
 
     /* Build absolute-form URL for HTTP forwarding through proxy */
-    char abs_url_buf[KL_CLIENT_REQ_BUF_SIZE];
+    char abs_url_buf[KL_HTTP_CLIENT_REQ_BUF_SIZE];
     const char *absolute_url = NULL;
     if (is_proxied && !parsed.is_https) {
-        char host_z[KL_CLIENT_HOSTNAME_MAX];
+        char host_z[KL_HTTP_CLIENT_HOSTNAME_MAX];
         if (parsed.host_len >= sizeof(host_z)) {
             resp->error = KL_ERR_INVALID_ARG;
             goto cleanup;
@@ -689,8 +689,8 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
     /* Set up streaming decompression wrapper if needed */
     KlDecompressConfig *dcfg = cfg ? cfg->decompress : NULL;
     DecompStreamWrap decomp_wrap;
-    const KlClientStreamCfg *actual_stream = stream;
-    KlClientStreamCfg wrapped_stream;
+    const KlHttpClientStreamCfg *actual_stream = stream;
+    KlHttpClientStreamCfg wrapped_stream;
 
     if (dcfg && dcfg->factory && stream && stream->on_body) {
         memset(&decomp_wrap, 0, sizeof(decomp_wrap));
@@ -701,9 +701,9 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
         decomp_wrap.dcfg = dcfg;
         decomp_wrap.ds.alloc = alloc;
 
-        wrapped_stream.on_body = kl_client_decomp_on_body;
-        wrapped_stream.on_headers = kl_client_decomp_on_headers;
-        wrapped_stream.on_complete = kl_client_decomp_on_complete;
+        wrapped_stream.on_body = kl_http_client_decomp_on_body;
+        wrapped_stream.on_headers = kl_http_client_decomp_on_headers;
+        wrapped_stream.on_complete = kl_http_client_decomp_on_complete;
         wrapped_stream.body_read = stream->body_read;
         wrapped_stream.user_data = &decomp_wrap;
         actual_stream = &wrapped_stream;
@@ -740,7 +740,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
 
     /* Decompress buffered response body if applicable */
     if (!stream || !stream->on_body) {
-        if (kl_client_decompress_response_body(resp, dcfg) < 0) {
+        if (kl_http_client_decompress_response_body(resp, dcfg) < 0) {
             if (!resp->error) resp->error = KL_ERR_COMPRESS;
             goto cleanup;
         }
@@ -750,7 +750,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
 
 cleanup:
     /* Free the streaming decompressor session if it was installed.  It is
-     * otherwise freed only by kl_client_decomp_on_complete (fired on parser
+     * otherwise freed only by kl_http_client_decomp_on_complete (fired on parser
      * message-complete), so error paths and EOF-terminated success would
      * leak it.  kl_decompress_stream_free is idempotent, so freeing after a
      * normal completion is safe. */
@@ -763,18 +763,18 @@ cleanup:
     kl_sock_close(sockets, fd);
 
     if (ret != 0)
-        kl_client_response_free(resp);
+        kl_http_client_response_free(resp);
 
     return ret;
 }
 
-int kl_client_request(KlAllocator *alloc, const KlClientConfig *cfg,
+int kl_http_client_request(KlAllocator *alloc, const KlHttpClientConfig *cfg,
                       const char *method, const char *url_str,
-                      const KlClientHeader *headers, int num_headers,
+                      const KlHttpClientHeader *headers, int num_headers,
                       const char *body, size_t body_len,
-                      KlClientResponse *resp)
+                      KlHttpClientResponse *resp)
 {
-    return kl_client_request_s(alloc, cfg, method, url_str,
+    return kl_http_client_request_s(alloc, cfg, method, url_str,
                                 headers, num_headers, body, body_len,
                                 NULL, resp);
 }
@@ -783,16 +783,16 @@ int kl_client_request(KlAllocator *alloc, const KlClientConfig *cfg,
  * Pooled blocking request — connection pool integration (sync path)
  * ══════════════════════════════════════════════════════════════════════ */
 
-int kl_client_request_pooled(KlClientPool *pool,
-                              KlAllocator *alloc, const KlClientConfig *cfg,
+int kl_http_client_request_pooled(KlHttpClientPool *pool,
+                              KlAllocator *alloc, const KlHttpClientConfig *cfg,
                               const char *method, const char *url_str,
-                              const KlClientHeader *headers, int num_headers,
+                              const KlHttpClientHeader *headers, int num_headers,
                               const char *body, size_t body_len,
-                              KlClientResponse *resp)
+                              KlHttpClientResponse *resp)
 {
     if (!pool || !alloc || !method || !url_str || !resp)
         return -1;
-    if (num_headers < 0 || num_headers > KL_CLIENT_MAX_REQ_HEADERS)
+    if (num_headers < 0 || num_headers > KL_HTTP_CLIENT_MAX_REQ_HEADERS)
         return -1;
     if (num_headers > 0 && !headers)
         return -1;
@@ -804,9 +804,9 @@ int kl_client_request_pooled(KlClientPool *pool,
     const KlSocketProvider *sockets = cfg ? cfg->sockets : NULL;
 
     int timeout_ms = (cfg && cfg->timeout_ms > 0) ? cfg->timeout_ms
-                                                    : KL_CLIENT_DEFAULT_TIMEOUT_MS;
+                                                    : KL_HTTP_CLIENT_DEFAULT_TIMEOUT_MS;
     size_t max_resp = (cfg && cfg->max_response_size > 0) ? cfg->max_response_size
-                                                            : (size_t)KL_CLIENT_DEFAULT_MAX_RESP;
+                                                            : (size_t)KL_HTTP_CLIENT_DEFAULT_MAX_RESP;
 
     KlUrl parsed;
     if (kl_url_parse(url_str, &parsed) != 0) {
@@ -816,7 +816,7 @@ int kl_client_request_pooled(KlClientPool *pool,
     /* UNIX sockets have no host:port to key the pool on, so bypass the pool
      * and connect directly (local-socket connect is cheap). */
     if (parsed.is_unix) {
-        return kl_client_request_s(alloc, cfg, method, url_str,
+        return kl_http_client_request_s(alloc, cfg, method, url_str,
                                    headers, num_headers, body, body_len,
                                    NULL, resp);
     }
@@ -831,7 +831,7 @@ int kl_client_request_pooled(KlClientPool *pool,
         tls_cfg = NULL;
 
     /* Host string for pool key */
-    char host_buf[KL_CLIENT_HOSTNAME_MAX];
+    char host_buf[KL_HTTP_CLIENT_HOSTNAME_MAX];
     if (parsed.host_len >= sizeof(host_buf)) {
         resp->error = KL_ERR_INVALID_ARG;
         return -1;
@@ -840,10 +840,10 @@ int kl_client_request_pooled(KlClientPool *pool,
     host_buf[parsed.host_len] = '\0';
 
     /* Try to acquire from pool */
-    KlClientPoolConn pconn;
+    KlHttpClientPoolConn pconn;
     memset(&pconn, 0, sizeof(pconn));
     pconn.fd = -1;
-    int acq = kl_cpool_acquire(pool, host_buf, parsed.port, is_tls,
+    int acq = kl_http_client_pool_acquire(pool, host_buf, parsed.port, is_tls,
                                 NULL, 0, &pconn);
 
     KlSocketHandle fd;
@@ -896,7 +896,7 @@ int kl_client_request_pooled(KlClientPool *pool,
     /* Decompress buffered response body if applicable */
     {
         KlDecompressConfig *dcfg = cfg ? cfg->decompress : NULL;
-        if (kl_client_decompress_response_body(resp, dcfg) < 0) {
+        if (kl_http_client_decompress_response_body(resp, dcfg) < 0) {
             if (!resp->error) resp->error = KL_ERR_COMPRESS;
             goto cleanup;
         }
@@ -906,12 +906,12 @@ int kl_client_request_pooled(KlClientPool *pool,
 
 cleanup:
     if (ret != 0) {
-        kl_cpool_discard(pool, &pconn);
-        kl_client_response_free(resp);
-    } else if (kl_client_server_wants_close(resp)) {
-        kl_cpool_discard(pool, &pconn);
+        kl_http_client_pool_discard(pool, &pconn);
+        kl_http_client_response_free(resp);
+    } else if (kl_http_client_server_wants_close(resp)) {
+        kl_http_client_pool_discard(pool, &pconn);
     } else {
-        kl_cpool_release(pool, &pconn, host_buf, parsed.port, is_tls,
+        kl_http_client_pool_release(pool, &pconn, host_buf, parsed.port, is_tls,
                           NULL, 0);
     }
 

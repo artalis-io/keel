@@ -1,18 +1,18 @@
 /*
  * u3_selftest.c — U-3 acceptance self-test (UEFI EFI application).
  *
- * The culmination of Phase 10: a STOCK libkeel_freestanding.a async KlClient runs an
+ * The culmination of Phase 10: a STOCK libkeel_freestanding.a async KlHttpClient runs an
  * HTTP/1.1 GET on bare UEFI firmware, driven by the EFI completion backend (U-3,
  * event_efi.c) over the EFI_TCP4 socket provider (U-2, socket_efi_tcp4.c), with the
  * U-1 platform/allocator shims and a numeric resolver (resolve_uefi.c). No epoll /
  * kqueue / io_uring, no OS sockets, no errno, no libc — just the firmware's event
  * services pumping EFI_TCP4 completion tokens.
  *
- * Flow (all through the PUBLIC KlClient API — the client is model-blind):
+ * Flow (all through the PUBLIC KlHttpClient API — the client is model-blind):
  *   kl_uefi_platform_init(bs, st)          → monotonic clock + EFI_RNG
  *   kl_uefi_event_provider(bs, image)      → the completion provider (+ lazy socket provider)
  *   kl_event_ctx_init_ex(&ev, alloc, ep)   → inject the provider on the stock archive
- *   kl_client_start(GET http://10.0.2.2:PORT/)  → resolve(numeric) → post_connect →
+ *   kl_http_client_start(GET http://10.0.2.2:PORT/)  → resolve(numeric) → post_connect →
  *                                            drain KL_COMP_CONNECT → send/recv via the
  *                                            watcher relay → parse → on_done
  *   pump: kl_event_ctx_run + kl_timer_fire until done or bounded ticks
@@ -31,7 +31,7 @@
 #include "event_efi.h"
 #include "allocator_uefi.h"
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
 #include <keel/error.h>
@@ -89,9 +89,9 @@ static void print_int(int v) {
 /* ── the async completion callback ────────────────────────────────────────────── */
 typedef struct { int done; int status; KlError err; const char *body; size_t body_len; } DoneCtx;
 
-static void on_done(KlClient *cl, void *ud) {
+static void on_done(KlHttpClient *cl, void *ud) {
     DoneCtx *d = ud;
-    const KlClientResponse *r = kl_client_response(cl);
+    const KlHttpClientResponse *r = kl_http_client_response(cl);
     if (r) {
         d->status = r->status;
         d->body = r->body;
@@ -99,7 +99,7 @@ static void on_done(KlClient *cl, void *ud) {
     } else {
         d->status = -1;
     }
-    d->err = kl_client_last_error(cl);
+    d->err = kl_http_client_last_error(cl);
     d->done = 1;
 }
 
@@ -111,7 +111,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     EFI_BOOT_SERVICES *bs = st->BootServices;
 
     print_line("");
-    print_line("=== U-3 KlClient GET over EFI_TCP4 completion backend ===");
+    print_line("=== U-3 KlHttpClient GET over EFI_TCP4 completion backend ===");
     print("U-3: target = "); print_line(TARGET_URL);
 
     if (kl_uefi_platform_init(bs, st) != 0)
@@ -133,7 +133,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     }
     print_line("U-3: event ctx up (efi-tcp4-completion)");
 
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     { unsigned char *p = (unsigned char *)&cfg; for (size_t i = 0; i < sizeof(cfg); i++) p[i] = 0; }
     cfg.timeout_ms = 20000;   /* generous: DHCP + TCG + SLIRP */
     /* No cfg.resolver → client_pick_resolver returns NULL under FREESTANDING → the
@@ -142,9 +142,9 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     DoneCtx d;
     { unsigned char *p = (unsigned char *)&d; for (size_t i = 0; i < sizeof(d); i++) p[i] = 0; }
 
-    KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET", TARGET_URL,
+    KlHttpClient *c = kl_http_client_start(&ev, &alloc, &cfg, "GET", TARGET_URL,
                                   NULL, 0, NULL, 0, on_done, &d);
-    if (!c) { print_line("U-3: kl_client_start failed"); kl_event_ctx_free(&ev); goto park; }
+    if (!c) { print_line("U-3: kl_http_client_start failed"); kl_event_ctx_free(&ev); goto park; }
     print_line("U-3: client started; pumping the completion loop...");
 
     /* Drive the loop until the request completes (or a generous tick bound). Each
@@ -168,7 +168,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         print_line("U-3: did not complete within the tick bound");
     }
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
 
     if (d.done && d.status == 200)

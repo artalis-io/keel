@@ -123,7 +123,7 @@ fi
 cat > "$CERTDIR/tlsd.py" <<'PY'
 import ssl, socket, sys, threading
 port = int(sys.argv[1]); cert = sys.argv[2]; key = sys.argv[3]
-body = b"U-4 KlClient HTTPS responder OK\n"
+body = b"U-4 KlHttpClient HTTPS responder OK\n"
 resp = (b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body)) + body
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain(cert, key)

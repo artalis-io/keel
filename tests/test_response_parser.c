@@ -1,10 +1,10 @@
 #include "utest.h"
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/http1_parser.h>
 #include <keel/allocator.h>
 #include <string.h>
 
-#define free_client_response kl_client_response_free
+#define free_client_response kl_http_client_response_free
 
 UTEST(response_parser, create_and_destroy) {
     KlAllocator a = kl_allocator_default();
@@ -23,7 +23,7 @@ UTEST(response_parser, simple_200) {
                       "hello";
     size_t len = strlen(raw);
 
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
@@ -52,7 +52,7 @@ UTEST(response_parser, chunked_response) {
                       "0\r\n\r\n";
     size_t len = strlen(raw);
 
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
@@ -78,7 +78,7 @@ UTEST(response_parser, multiple_headers) {
                       "abc";
     size_t len = strlen(raw);
 
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
@@ -106,7 +106,7 @@ UTEST(response_parser, body_size_limit) {
                       "hello";
     size_t len = strlen(raw);
 
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
@@ -127,7 +127,7 @@ UTEST(response_parser, incomplete) {
                       "partial";
     size_t len = strlen(raw);
 
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
@@ -145,7 +145,7 @@ UTEST(response_parser, malformed) {
     const char *raw = "GARBAGE DATA\r\n\r\n";
     size_t len = strlen(raw);
 
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
@@ -166,7 +166,7 @@ UTEST(response_parser, status_404) {
                       "not found";
     size_t len = strlen(raw);
 
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
@@ -188,7 +188,7 @@ UTEST(response_parser, empty_body) {
                       "\r\n";
     size_t len = strlen(raw);
 
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 
@@ -210,7 +210,7 @@ UTEST(response_parser, reset_and_reparse) {
                        "\r\n"
                        "ok";
 
-    KlClientResponse resp1;
+    KlHttpClientResponse resp1;
     memset(&resp1, 0, sizeof(resp1));
     size_t consumed1 = 0;
 
@@ -225,7 +225,7 @@ UTEST(response_parser, reset_and_reparse) {
                        "Content-Length: 0\r\n"
                        "\r\n";
 
-    KlClientResponse resp2;
+    KlHttpClientResponse resp2;
     memset(&resp2, 0, sizeof(resp2));
     size_t consumed2 = 0;
 
@@ -250,7 +250,7 @@ UTEST(response_parser, empty_valued_header) {
                       "\r\n";
     size_t len = strlen(raw);
 
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     memset(&resp, 0, sizeof(resp));
     size_t consumed = 0;
 

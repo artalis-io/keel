@@ -4,18 +4,18 @@
  *
  * Caches idle TCP+TLS connections keyed by (host, port, is_tls),
  * enabling HTTP keep-alive reuse across requests. Opt-in: pass a
- * KlClientPool to the pooled request variants.
+ * KlHttpClientPool to the pooled request variants.
  *
  * Pool sizes are small (32-128), so entries use a flat array with
  * linear scan — cache-friendly and simpler than a hash map.
  */
 
-#ifndef KEEL_CLIENT_POOL_H
-#define KEEL_CLIENT_POOL_H
+#ifndef KEEL_HTTP_CLIENT_POOL_H
+#define KEEL_HTTP_CLIENT_POOL_H
 
 #include <keel/allocator.h>
 #include <keel/handle.h>
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/error.h>
 #include <keel/event_ctx.h>
 #include <keel/tls.h>
@@ -24,53 +24,53 @@
 /* ── Defaults ────────────────────────────────────────────────────── */
 
 /** @brief Default pool capacity. */
-#define KL_CPOOL_DEFAULT_CAPACITY      32
+#define KL_HTTP_CLIENT_POOL_DEFAULT_CAPACITY      32
 /** @brief Default max idle connections per host. */
-#define KL_CPOOL_DEFAULT_MAX_PER_HOST   4
+#define KL_HTTP_CLIENT_POOL_DEFAULT_MAX_PER_HOST   4
 /** @brief Default idle timeout (ms). */
-#define KL_CPOOL_DEFAULT_IDLE_MS    60000  /**< 60 seconds */
+#define KL_HTTP_CLIENT_POOL_DEFAULT_IDLE_MS    60000  /**< 60 seconds */
 
 /* ── Types ───────────────────────────────────────────────────────── */
 
-typedef struct KlClientPool KlClientPool;
+typedef struct KlHttpClientPool KlHttpClientPool;
 
 typedef struct {
     int         capacity;       /**< Total pool slots (0 = default 32) */
     int         max_per_host;   /**< Max idle per (host,port,tls) (0 = default 4) */
     uint64_t    idle_ms;        /**< Idle timeout ms (0 = default 60s) */
-} KlClientPoolConfig;
+} KlHttpClientPoolConfig;
 
 /**
  * @brief Acquired connection handle.
  *
- * Populated by kl_cpool_acquire on hit. Pass back to kl_cpool_release
- * or kl_cpool_discard when done.
+ * Populated by kl_http_client_pool_acquire on hit. Pass back to kl_http_client_pool_release
+ * or kl_http_client_pool_discard when done.
  */
 typedef struct {
     KlSocketHandle fd;       /**< TCP socket */
     KlTls *tls;      /**< TLS session (NULL for plaintext) */
     int    reused;   /**< 1 if from pool, 0 if fresh */
     void  *_entry;   /**< Internal bookkeeping -- do not touch */
-} KlClientPoolConn;
+} KlHttpClientPoolConn;
 
 /**
  * @brief Pool entry (internal, stored in flat array).
  */
-typedef struct KlClientPoolEntry {
-    char     host[KL_CLIENT_HOSTNAME_MAX]; /**< NUL-terminated key */
+typedef struct KlHttpClientPoolEntry {
+    char     host[KL_HTTP_CLIENT_HOSTNAME_MAX]; /**< NUL-terminated key */
     int      port;
     int      is_tls;
-    char     proxy_host[KL_CLIENT_HOSTNAME_MAX]; /**< "" = direct connection */
+    char     proxy_host[KL_HTTP_CLIENT_HOSTNAME_MAX]; /**< "" = direct connection */
     int      proxy_port;                          /**< 0 = direct connection */
     KlSocketHandle fd;            /**< -1 = free slot */
     KlTls   *tls;
     uint64_t idle_since_ms; /**< kl_monotonic_ms() when returned */
     int64_t  timer_id;      /**< idle timer (-1 = none) */
-    struct KlClientPool *pool; /**< back-pointer for timer callback */
-} KlClientPoolEntry;
+    struct KlHttpClientPool *pool; /**< back-pointer for timer callback */
+} KlHttpClientPoolEntry;
 
-struct KlClientPool {
-    KlClientPoolEntry *entries;
+struct KlHttpClientPool {
+    KlHttpClientPoolEntry *entries;
     int       capacity;
     int       active;       /**< idle connections in pool */
     int       max_per_host;
@@ -90,13 +90,13 @@ struct KlClientPool {
  * @param ev_ctx Event context for idle timers (NULL = manual eviction).
  * @return 0 on success, -1 on error.
  */
-int  kl_cpool_init(KlClientPool *pool, const KlClientPoolConfig *cfg,
+int  kl_http_client_pool_init(KlHttpClientPool *pool, const KlHttpClientPoolConfig *cfg,
                    KlAllocator *alloc, KlEventCtx *ev_ctx);
 
 /**
  * @brief Free all pool resources (closes all idle connections).
  */
-void kl_cpool_free(KlClientPool *pool);
+void kl_http_client_pool_free(KlHttpClientPool *pool);
 
 /* ── Acquire / release ───────────────────────────────────────────── */
 
@@ -111,22 +111,22 @@ void kl_cpool_free(KlClientPool *pool);
  * @param conn       Output: populated on hit.
  * @return 0 = hit (conn populated), 1 = miss, -1 = error.
  */
-int  kl_cpool_acquire(KlClientPool *pool, const char *host, int port,
+int  kl_http_client_pool_acquire(KlHttpClientPool *pool, const char *host, int port,
                       int is_tls, const char *proxy_host, int proxy_port,
-                      KlClientPoolConn *conn);
+                      KlHttpClientPoolConn *conn);
 
 /**
  * @brief Return a connection to the pool for reuse.
  * @return 0 on success, -1 on error (connection discarded).
  */
-int  kl_cpool_release(KlClientPool *pool, KlClientPoolConn *conn,
+int  kl_http_client_pool_release(KlHttpClientPool *pool, KlHttpClientPoolConn *conn,
                       const char *host, int port, int is_tls,
                       const char *proxy_host, int proxy_port);
 
 /**
  * @brief Close and discard a connection (not returned to pool).
  */
-void kl_cpool_discard(KlClientPool *pool, KlClientPoolConn *conn);
+void kl_http_client_pool_discard(KlHttpClientPool *pool, KlHttpClientPoolConn *conn);
 
 /* ── Maintenance ─────────────────────────────────────────────────── */
 
@@ -134,17 +134,17 @@ void kl_cpool_discard(KlClientPool *pool, KlClientPoolConn *conn);
  * @brief Evict expired idle connections (for sync-only pools without timers).
  * @return Number of connections evicted.
  */
-int  kl_cpool_evict_expired(KlClientPool *pool);
+int  kl_http_client_pool_evict_expired(KlHttpClientPool *pool);
 
 /**
  * @brief Count of idle connections in the pool.
  */
-int  kl_cpool_idle_count(const KlClientPool *pool);
+int  kl_http_client_pool_idle_count(const KlHttpClientPool *pool);
 
 /**
  * @brief Count idle connections for a specific host tuple.
  */
-int  kl_cpool_host_count(const KlClientPool *pool, const char *host,
+int  kl_http_client_pool_host_count(const KlHttpClientPool *pool, const char *host,
                          int port, int is_tls,
                          const char *proxy_host, int proxy_port);
 
@@ -153,29 +153,29 @@ int  kl_cpool_host_count(const KlClientPool *pool, const char *host,
 /**
  * @brief Synchronous HTTP request with connection pooling.
  *
- * Same as kl_client_request, but reuses connections from the pool.
- * The pool must have been initialized with kl_cpool_init.
+ * Same as kl_http_client_request, but reuses connections from the pool.
+ * The pool must have been initialized with kl_http_client_pool_init.
  */
-int kl_client_request_pooled(KlClientPool *pool,
-                              KlAllocator *alloc, const KlClientConfig *cfg,
+int kl_http_client_request_pooled(KlHttpClientPool *pool,
+                              KlAllocator *alloc, const KlHttpClientConfig *cfg,
                               const char *method, const char *url,
-                              const KlClientHeader *headers, int num_headers,
+                              const KlHttpClientHeader *headers, int num_headers,
                               const char *body, size_t body_len,
-                              KlClientResponse *resp);
+                              KlHttpClientResponse *resp);
 
 /**
  * @brief Asynchronous HTTP request with connection pooling.
  *
- * Same as kl_client_start, but reuses connections from the pool.
+ * Same as kl_http_client_start, but reuses connections from the pool.
  * On completion, the connection is returned to the pool unless the
  * server sent Connection: close.
  */
-KlClient *kl_client_start_pooled(KlClientPool *pool,
+KlHttpClient *kl_http_client_start_pooled(KlHttpClientPool *pool,
                                    KlEventCtx *ev_ctx, KlAllocator *alloc,
-                                   const KlClientConfig *cfg,
+                                   const KlHttpClientConfig *cfg,
                                    const char *method, const char *url,
-                                   const KlClientHeader *headers, int num_headers,
+                                   const KlHttpClientHeader *headers, int num_headers,
                                    const char *body, size_t body_len,
-                                   KlClientDoneFn on_done, void *user_data);
+                                   KlHttpClientDoneFn on_done, void *user_data);
 
-#endif /* KEEL_CLIENT_POOL_H */
+#endif /* KEEL_HTTP_CLIENT_POOL_H */

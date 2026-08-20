@@ -4,7 +4,7 @@
  *
  * The proof for LC-4 (docs/phase10_lwip_raw_client_design.md §6 + §8 LC-4): the SAME single-loop
  * model as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw
- * async KlClient on the loop thread), now with TLS on BOTH ends — a genuine mbedTLS handshake +
+ * async KlHttpClient on the loop thread), now with TLS on BOTH ends — a genuine mbedTLS handshake +
  * request round-trips over 127.0.0.1 on the loopif with zero lwIP-specific TLS code.
  *
  * TLS over raw rides two EXISTING, generic legs (no new TLS code in the lwIP backend):
@@ -23,7 +23,7 @@
  *      the send path. The raw KlHttpServer already uses completion_driver.c, so server TLS "just moves
  *      bytes".
  *
- * Case: a raw HTTPS KlClient GETs https://127.0.0.1:PORT/ from a raw TLS KlHttpServer -> handshake +
+ * Case: a raw HTTPS KlHttpClient GETs https://127.0.0.1:PORT/ from a raw TLS KlHttpServer -> handshake +
  * 200 + body BYTE-EXACT. Embedded self-signed EC cert (CN=127.0.0.1); the client skips CA
  * verification. Same test-only cert material as tests/smoke_tls.c / lwip_loopback_test.c.
  *
@@ -113,30 +113,30 @@ typedef struct {
     KlHttpServer   *srv;
     const char *url;
     KlTlsCtx   *client_ctx;   /* client TLS ctx — created on the loop thread, freed after done */
-    KlClient   *client;
+    KlHttpClient   *client;
     atomic_int  done;
     atomic_int  pass;
 } ClientCase;
 
-static void on_done(KlClient *client, void *ud) {
+static void on_done(KlHttpClient *client, void *ud) {
     ClientCase *cc = ud;
-    int err = kl_client_error(client);
+    int err = kl_http_client_error(client);
     int ok = 0;
     if (err == 0) {
-        const KlClientResponse *r = kl_client_response(client);
+        const KlHttpClientResponse *r = kl_http_client_response(client);
         ok = (r && r->status == 200 && r->body_len == sizeof(WANT_BODY) - 1 &&
               r->body && memcmp(r->body, WANT_BODY, sizeof(WANT_BODY) - 1) == 0);
         if (!ok && r) printf("   [diag] status=%d body_len=%zu\n", r->status, r->body_len);
     } else {
         printf("   [diag] unexpected client error=%d last_error=%d\n",
-               err, (int)kl_client_last_error(client));
+               err, (int)kl_http_client_last_error(client));
     }
     atomic_store(&cc->pass, ok);
     atomic_store(&cc->done, 1);
     kl_http_server_stop(cc->srv);
 }
 
-/* Fired on the loop thread: start the async HTTPS KlClient on the server's shared ctx (== the one
+/* Fired on the loop thread: start the async HTTPS KlHttpClient on the server's shared ctx (== the one
  * lwIP mainloop). The mbedTLS socket-BIO is auto-wired to the loop's socket provider
  * (kl_socket_provider_lwip_raw) via the KlTls.set_socket_provider hook — no explicit call. */
 static void start_client(void *ud) {
@@ -155,8 +155,8 @@ static void start_client(void *ud) {
     static KlTlsConfig ctls;   /* stable storage: referenced by the client for its lifetime */
     ctls = (KlTlsConfig){ .ctx = cc->client_ctx, .factory = kl_tls_mbedtls_create };
 
-    KlClientConfig ccfg = { .timeout_ms = 10000, .resolver = &g_numres.base, .tls = &ctls };
-    cc->client = kl_client_start(&cc->srv->ev, &alloc, &ccfg, "GET", cc->url,
+    KlHttpClientConfig ccfg = { .timeout_ms = 10000, .resolver = &g_numres.base, .tls = &ctls };
+    cc->client = kl_http_client_start(&cc->srv->ev, &alloc, &ccfg, "GET", cc->url,
                                  NULL, 0, NULL, 0, on_done, cc);
     if (!cc->client) {
         atomic_store(&cc->pass, 0);
@@ -222,7 +222,7 @@ int main(void) {
     else if (!atomic_load(&cc.pass)) { printf("LC-4 FAIL\n"); rc = 1; }
     else { printf("PASS LC-4 (HTTPS GET / -> 200, body byte-exact over raw)\n"); }
 
-    if (cc.client) kl_client_free(cc.client);
+    if (cc.client) kl_http_client_free(cc.client);
     if (cc.client_ctx) kl_tls_mbedtls_ctx_destroy(cc.client_ctx);
     kl_http_server_free(&srv);
     kl_tls_mbedtls_ctx_destroy(sctx);

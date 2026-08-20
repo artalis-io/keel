@@ -4,7 +4,7 @@
  *
  * The proof for LC-2 (docs/phase10_lwip_raw_client_design.md §8 LC-2): the SAME single-loop model
  * as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw async
- * KlClient on the loop thread), but now the client is handed a MULTI-ADDRESS resolver so its
+ * KlHttpClient on the loop thread), but now the client is handed a MULTI-ADDRESS resolver so its
  * Happy-Eyeballs layer (src/client.c: he_new_attempt/he_win/he_on_connect_result + the Connection-
  * Attempt-Delay + overall-deadline timers) races/fails-over several concurrent tcp_connect pcbs
  * natively. The winning pcb is adopted; every losing/connecting pcb is aborted (kl_comp_cancel ->
@@ -127,7 +127,7 @@ typedef struct {
     int         connect_delay_ms;   /* Connection-Attempt-Delay to configure */
     int         timeout_ms;         /* overall deadline */
     int         expect_ok;          /* 1 = expect 200+body; 0 = expect a clean terminal error */
-    KlClient   *client;
+    KlHttpClient   *client;
     atomic_int  done;
     atomic_int  pass;
     uint64_t    start_ms;           /* wall clock at client start (deadline-elapsed proof) */
@@ -140,20 +140,20 @@ static uint64_t now_ms(void) {
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000L);
 }
 
-static void on_done(KlClient *client, void *ud) {
+static void on_done(KlHttpClient *client, void *ud) {
     HeCase *cc = ud;
     cc->finish_ms = now_ms();
-    int err = kl_client_error(client);
+    int err = kl_http_client_error(client);
     if (cc->expect_ok) {
         int ok = 0;
         if (err == 0) {
-            const KlClientResponse *r = kl_client_response(client);
+            const KlHttpClientResponse *r = kl_http_client_response(client);
             ok = (r && r->status == 200 && r->body_len == sizeof(WANT_BODY) - 1 &&
                   r->body && memcmp(r->body, WANT_BODY, sizeof(WANT_BODY) - 1) == 0);
             if (!ok && r) printf("   [diag] status=%d body_len=%zu\n", r->status, r->body_len);
         } else {
             printf("   [diag] unexpected client error=%d last_error=%d\n",
-                   err, (int)kl_client_last_error(client));
+                   err, (int)kl_http_client_last_error(client));
         }
         atomic_store(&cc->pass, ok);
     } else {
@@ -165,20 +165,20 @@ static void on_done(KlClient *client, void *ud) {
     kl_http_server_stop(cc->srv);
 }
 
-/* Fired on the loop thread: start the async KlClient on the server's shared ctx (== the one lwIP
+/* Fired on the loop thread: start the async KlHttpClient on the server's shared ctx (== the one lwIP
  * mainloop). Its connect racing, its data-plane watcher relay, and its HE timers are all serviced
  * by kl_http_server_run's completion tick — single-thread NO_SYS=1 discipline. */
 static void start_client(void *ud) {
     HeCase *cc = ud;
     static KlAllocator alloc;   /* stable storage: the response stores the allocator by value */
     alloc = kl_allocator_default();
-    KlClientConfig ccfg = {
+    KlHttpClientConfig ccfg = {
         .timeout_ms = cc->timeout_ms,
         .resolver = cc->resolver,
         .connect_attempt_delay_ms = cc->connect_delay_ms,
     };
     cc->start_ms = now_ms();
-    cc->client = kl_client_start(&cc->srv->ev, &alloc, &ccfg, "GET", cc->url,
+    cc->client = kl_http_client_start(&cc->srv->ev, &alloc, &ccfg, "GET", cc->url,
                                  NULL, 0, NULL, 0, on_done, cc);
     if (!cc->client) {
         atomic_store(&cc->pass, cc->expect_ok ? 0 : 1);
@@ -189,7 +189,7 @@ static void start_client(void *ud) {
 
 static void *server_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
 
-/* Run one case: raw server on GOOD_PORT (kl_http_server_run on a bg thread) + a raw KlClient started on
+/* Run one case: raw server on GOOD_PORT (kl_http_server_run on a bg thread) + a raw KlHttpClient started on
  * the server's shared ctx via a loop-thread timer; a bounded watchdog stops a hang. `max_wait_ms`
  * bounds the watchdog (deadline cases need to outlast the client's own timeout). */
 static int run_case(const char *label, HeResolver *resolver, int connect_delay_ms, int timeout_ms,
@@ -241,7 +241,7 @@ static int run_case(const char *label, HeResolver *resolver, int connect_delay_m
         }
     }
 
-    if (cc.client) kl_client_free(cc.client);
+    if (cc.client) kl_http_client_free(cc.client);
     kl_http_server_free(&srv);
     return rc;
 }

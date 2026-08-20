@@ -43,7 +43,7 @@ static KlHttpServer g_srv;
 static void *srv_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return NULL; }
 
 static volatile int g_cli_done;
-static void cli_done(KlClient *c, void *ud) { (void)c; (void)ud; g_cli_done = 1; }
+static void cli_done(KlHttpClient *c, void *ud) { (void)c; (void)ud; g_cli_done = 1; }
 
 /* Phase 2: a Keel async HTTP client on the lwIP providers → the server.
  * Proves the outbound axis (connect + resolve_sync_lwip name resolution). */
@@ -56,24 +56,24 @@ static int keel_client_on_lwip(uint16_t port) {
 
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/", (unsigned)port);
-    KlClientConfig ccfg = {
+    KlHttpClientConfig ccfg = {
         .sockets    = kl_socket_provider_lwip(),
         .system_dns = 1,        /* blocking resolve → resolve_sync_lwip (lwip_getaddrinfo) */
         .timeout_ms = 5000,
     };
     g_cli_done = 0;
-    KlClient *cli = kl_client_start(&cev, &alloc, &ccfg, "GET", url,
+    KlHttpClient *cli = kl_http_client_start(&cev, &alloc, &ccfg, "GET", url,
                                     NULL, 0, NULL, 0, cli_done, NULL);
     int ok = 0;
     if (cli) {
         for (int i = 0; i < 500 && !g_cli_done; i++)
             kl_event_ctx_run(&cev, 16, 20);
-        if (g_cli_done && kl_client_error(cli) == 0) {
-            const KlClientResponse *r = kl_client_response(cli);
+        if (g_cli_done && kl_http_client_error(cli) == 0) {
+            const KlHttpClientResponse *r = kl_http_client_response(cli);
             ok = (r && r->status == 200 && r->body &&
                   strstr(r->body, "\"stack\":\"lwip\"") != NULL);
         }
-        kl_client_free(cli);
+        kl_http_client_free(cli);
     }
     kl_event_ctx_free(&cev);
     return ok;
@@ -149,7 +149,7 @@ static int keel_udp_on_lwip(void) {
 /* Phase 4: HTTPS on lwIP. A Keel TLS server (mbedTLS) + a Keel async TLS client,
  * both on the lwIP providers, with the mbedTLS socket-BIO routed through the lwIP
  * socket provider — which the framework auto-wires from KlHttpServerConfig.sockets /
- * KlClientConfig.sockets via the KlTls.set_socket_provider hook (no explicit
+ * KlHttpClientConfig.sockets via the KlTls.set_socket_provider hook (no explicit
  * per-ctx call needed) — so a genuine TLS handshake + request runs over lwIP with
  * zero lwIP-specific TLS code. Embedded
  * self-signed EC cert (CN=127.0.0.1); the client skips CA verification. Certs are
@@ -211,26 +211,26 @@ static int keel_https_on_lwip(void) {
         cev.sockets = kl_socket_provider_lwip();
         KlTlsCtx *cctx = kl_tls_mbedtls_client_ctx_create(NULL, &alloc);  /* NULL CA = skip verify */
         if (cctx) {
-            /* No explicit provider call — the client auto-wires it from KlClientConfig.sockets. */
+            /* No explicit provider call — the client auto-wires it from KlHttpClientConfig.sockets. */
             KlTlsConfig ctls = { .ctx = cctx, .factory = kl_tls_mbedtls_create };
             char url[64];
             snprintf(url, sizeof(url), "https://127.0.0.1:%u/", (unsigned)g_tls_srv.bound_port);
-            KlClientConfig ccfg = {
+            KlHttpClientConfig ccfg = {
                 .sockets = kl_socket_provider_lwip(), .system_dns = 1,
                 .timeout_ms = 5000, .tls = &ctls,
             };
             g_cli_done = 0;
-            KlClient *cli = kl_client_start(&cev, &alloc, &ccfg, "GET", url,
+            KlHttpClient *cli = kl_http_client_start(&cev, &alloc, &ccfg, "GET", url,
                                             NULL, 0, NULL, 0, cli_done, NULL);
             if (cli) {
                 for (int i = 0; i < 500 && !g_cli_done; i++)
                     kl_event_ctx_run(&cev, 16, 20);
-                if (g_cli_done && kl_client_error(cli) == 0) {
-                    const KlClientResponse *r = kl_client_response(cli);
+                if (g_cli_done && kl_http_client_error(cli) == 0) {
+                    const KlHttpClientResponse *r = kl_http_client_response(cli);
                     ok = (r && r->status == 200 && r->body &&
                           strstr(r->body, "\"tls\":\"lwip\"") != NULL);
                 }
-                kl_client_free(cli);
+                kl_http_client_free(cli);
             }
             kl_tls_mbedtls_ctx_destroy(cctx);
         }

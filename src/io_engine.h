@@ -132,7 +132,7 @@ KlDgramRetireResult kl_comp_retire_dgram(struct KlEventCtx *ctx, struct KlDgramL
                                          KlDgramOpKind kind, int *transport_err);
 
 /* Post one outbound connect on a completion loop (LC-0). `fd` is a nonblocking socket the
- * async KlClient created and owns; `addr` is the destination; `watcher_udata` is the tagged
+ * async KlHttpClient created and owns; `addr` is the destination; `watcher_udata` is the tagged
  * KlWatcher the client already registered on `fd` (kl_watcher_add). The backend performs the
  * native connect (pollcomp: connect()+POLLOUT+SO_ERROR; io_uring: IORING_OP_CONNECT; IOCP:
  * ConnectEx) and, on completion, surfaces a KL_COMP_CONNECT event targeting `watcher_udata`

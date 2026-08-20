@@ -43,7 +43,7 @@ struct KlSocketProvider;
  *
  * Contains the platform event loop, allocator, and watcher list.
  * Embedded in KlHttpServer via composition. Can also be used standalone
- * (e.g. by KlClient, KlThreadPool) without requiring a full server.
+ * (e.g. by KlHttpClient, KlThreadPool) without requiring a full server.
  */
 typedef struct KlEventCtx {
     KlEventLoop loop;             /**< Platform event loop */

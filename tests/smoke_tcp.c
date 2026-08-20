@@ -3,7 +3,7 @@
  *
  * NOT a utest suite (not tests/test_*.c) — a standalone program built by the
  * `smoke` Makefile target. It links the whole TCP core (KlHttpServer + sync
- * KlClient) and drives one real request over loopback, proving the library
+ * KlHttpClient) and drives one real request over loopback, proving the library
  * both links and runs on the target platform (the Windows CI gate). Runs on
  * POSIX too.
  *
@@ -60,15 +60,15 @@ int main(void) {
     }
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig ccfg = { .timeout_ms = 1000 };
+    KlHttpClientConfig ccfg = { .timeout_ms = 1000 };
     int ok = 0;
     int last_rc = -1, last_status = -1, last_err = 0;
     size_t last_len = 0;
     for (int i = 0; i < 50 && !ok; i++) {
         nap_ms(50);   /* let the listener come up; retry if not yet bound */
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        last_rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18080/",
+        last_rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18080/",
                                     NULL, 0, NULL, 0, &resp);
         if (last_rc == 0) {
             last_status = resp.status;
@@ -76,7 +76,7 @@ int main(void) {
             ok = (resp.status == 200 &&
                   resp.body_len == sizeof(SMOKE_BODY) - 1 &&
                   resp.body && memcmp(resp.body, SMOKE_BODY, sizeof(SMOKE_BODY) - 1) == 0);
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         } else {
             last_err = (int)resp.error;
         }

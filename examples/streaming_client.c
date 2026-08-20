@@ -1,8 +1,8 @@
 /*
  * streaming_client.c — HTTP/1.1 client with response and request streaming
  *
- * Concepts: kl_client_request_s (sync streaming), KlClientStreamCfg,
- * KlClientBodyFn (response push), KlClientReadFn (request pull).
+ * Concepts: kl_http_client_request_s (sync streaming), KlHttpClientStreamCfg,
+ * KlHttpClientBodyFn (response push), KlHttpClientReadFn (request pull).
  *
  * Build:  make examples
  * Run:    ./examples/streaming_client
@@ -23,7 +23,7 @@ static int on_body(const char *data, size_t len, void *user_data)
     return 0;
 }
 
-static int on_headers(int status, const KlClientHeader *headers,
+static int on_headers(int status, const KlHttpClientHeader *headers,
                        int num_headers, void *user_data)
 {
     (void)user_data;
@@ -44,17 +44,17 @@ static void response_streaming_demo(void)
     printf("--- Response Streaming GET ---\n");
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig cfg = {.timeout_ms = 5000};
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = {.timeout_ms = 5000};
+    KlHttpClientResponse resp;
 
-    KlClientStreamCfg stream = {
+    KlHttpClientStreamCfg stream = {
         .on_body     = on_body,
         .on_headers  = on_headers,
         .on_complete = on_complete,
         .user_data   = NULL,
     };
 
-    int rc = kl_client_request_s(&alloc, &cfg, "GET",
+    int rc = kl_http_client_request_s(&alloc, &cfg, "GET",
                                    "http://localhost:8080/hello",
                                    NULL, 0, NULL, 0, &stream, &resp);
     if (rc < 0) {
@@ -64,7 +64,7 @@ static void response_streaming_demo(void)
 
     printf("  resp.body is %s (body_len=%zu)\n",
            resp.body ? "set" : "NULL", resp.body_len);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 /* ── Request streaming demo ──────────────────────────────────────── */
@@ -92,8 +92,8 @@ static void request_streaming_demo(void)
     printf("\n--- Request Streaming POST ---\n");
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig cfg = {.timeout_ms = 5000};
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = {.timeout_ms = 5000};
+    KlHttpClientResponse resp;
 
     const char *payload = "{\"message\":\"streamed upload\"}";
     UploadCtx upload = {
@@ -102,16 +102,16 @@ static void request_streaming_demo(void)
         .pos  = 0,
     };
 
-    KlClientHeader headers[] = {
+    KlHttpClientHeader headers[] = {
         {"Content-Type", "application/json"},
     };
 
-    KlClientStreamCfg stream = {
+    KlHttpClientStreamCfg stream = {
         .body_read = upload_read,
         .user_data = &upload,
     };
 
-    int rc = kl_client_request_s(&alloc, &cfg, "POST",
+    int rc = kl_http_client_request_s(&alloc, &cfg, "POST",
                                    "http://localhost:8080/hello",
                                    headers, 1, NULL, 0, &stream, &resp);
     if (rc < 0) {
@@ -122,7 +122,7 @@ static void request_streaming_demo(void)
     printf("  status: %d\n", resp.status);
     if (resp.body)
         printf("  body:   %.*s\n", (int)resp.body_len, resp.body);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 /* ── Main ────────────────────────────────────────────────────────── */

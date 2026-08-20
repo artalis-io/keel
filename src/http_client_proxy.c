@@ -5,7 +5,7 @@
  * allocation-free; part of the freestanding client archive.
  */
 
-#include "client_proxy.h"
+#include "http_client_proxy.h"
 #include "kl_cstr.h"     /* kl_buf_append* (bounded, locale-free) + kl_strstr */
 #include <string.h>      /* memcmp */
 

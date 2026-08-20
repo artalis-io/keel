@@ -36,11 +36,11 @@ typedef KlHttp1RequestParser KlHttp1Parser;
 
 /* ── Response parser (client-side) ────────────────────────────────── */
 
-typedef struct KlClientResponse KlClientResponse;
+typedef struct KlHttpClientResponse KlHttpClientResponse;
 typedef struct KlHttp1ResponseParser KlHttp1ResponseParser;
 
 struct KlHttp1ResponseParser {
-    KlHttp1ParseResult (*parse)(KlHttp1ResponseParser *self, KlClientResponse *resp,
+    KlHttp1ParseResult (*parse)(KlHttp1ResponseParser *self, KlHttpClientResponse *resp,
                            const char *buf, size_t len, size_t *consumed); /**< Parse response bytes */
     void (*reset)(KlHttp1ResponseParser *self);   /**< Reset for next response */
     void (*destroy)(KlHttp1ResponseParser *self); /**< Free parser resources */

@@ -33,7 +33,7 @@
  * freestanding surface, not a hosted libc.
  */
 
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
@@ -66,13 +66,13 @@ int efi_main(void *image_handle, void *system_table) {
     /* Take the address of the client entry points so the archive objects that
      * define them (and everything they reference) participate in the link. */
     void *refs[] = {
-        (void *)&kl_client_start,
-        (void *)&kl_client_start_s,
-        (void *)&kl_client_response,
-        (void *)&kl_client_error,
-        (void *)&kl_client_last_error,
-        (void *)&kl_client_cancel,
-        (void *)&kl_client_free,
+        (void *)&kl_http_client_start,
+        (void *)&kl_http_client_start_s,
+        (void *)&kl_http_client_response,
+        (void *)&kl_http_client_error,
+        (void *)&kl_http_client_last_error,
+        (void *)&kl_http_client_cancel,
+        (void *)&kl_http_client_free,
         (void *)&kl_event_ctx_init,
     };
     /* Defeat dead-strip: derive the return from the refs without calling them. */

@@ -11,8 +11,8 @@
  * Both are locale-free and allocation-free, so client_proxy.c joins the freestanding
  * client archive alongside client_async.c.
  */
-#ifndef KEEL_CLIENT_PROXY_H
-#define KEEL_CLIENT_PROXY_H
+#ifndef KEEL_HTTP_CLIENT_PROXY_H
+#define KEEL_HTTP_CLIENT_PROXY_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -36,4 +36,4 @@ int kl_proxy_build_connect(char *buf, size_t cap, size_t *out_len,
  */
 int kl_proxy_connect_status(const char *buf, size_t len);
 
-#endif /* KEEL_CLIENT_PROXY_H */
+#endif /* KEEL_HTTP_CLIENT_PROXY_H */

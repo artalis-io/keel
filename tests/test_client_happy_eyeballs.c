@@ -9,7 +9,7 @@
  * stall is deterministic.
  */
 #include "../vendor/utest.h"
-#include <keel/client.h>
+#include <keel/http_client.h>
 #include <keel/resolver.h>
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
@@ -22,7 +22,7 @@
 
 /* Internal layout — the retirement/detachment assertions (6C review) inspect the embedded
  * KlConnectOp + conn_racing directly. INTERNAL/UNSTABLE, test-only. */
-#include "../src/client_internal.h"
+#include "../src/http_client_internal.h"
 #include <keel/connect_op.h>
 
 /* A blackhole address (RFC 5737 TEST-NET-1): a connect there stays pending
@@ -152,11 +152,11 @@ static int blackhole_stalls(void) {
 
 typedef struct { int done; int status; KlError err; } HeCtx;
 
-static void he_done(KlClient *cl, void *ud) {
+static void he_done(KlHttpClient *cl, void *ud) {
     HeCtx *x = ud;
-    const KlClientResponse *r = kl_client_response(cl);
+    const KlHttpClientResponse *r = kl_http_client_response(cl);
     x->status = r ? r->status : -1;
-    x->err = kl_client_last_error(cl);
+    x->err = kl_http_client_last_error(cl);
     x->done = 1;
 }
 
@@ -167,14 +167,14 @@ static void pump(KlEventCtx *ev, int *done, int max_iters) {
     }
 }
 
-static KlClientConfig he_cfg(int delay_ms, int timeout_ms) {
+static KlHttpClientConfig he_cfg(int delay_ms, int timeout_ms) {
     /* Reset the deferred/null/cancel mock knobs — they persist across UTEST cases (file statics). */
     g_res_defer = 0;
     g_res_return_null = 0;
     g_res_cancelled = 0;
     g_res_done = NULL;
     g_res_ud = NULL;
-    KlClientConfig cfg;
+    KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.resolver = &g_mock_resolver;
     cfg.connect_attempt_delay_ms = delay_ms;
@@ -184,7 +184,7 @@ static KlClientConfig he_cfg(int delay_ms, int timeout_ms) {
 
 /* Confirmed-detachment predicate (6C review): the embedded KlConnectOp has retired all outstanding
  * ops + fired on_detach, and the client's HE racing flag is cleared. Checked in every terminal path. */
-static int he_fully_detached(const KlClient *c) {
+static int he_fully_detached(const KlHttpClient *c) {
     return kl_connect_op_is_detached(&c->connect_op) && c->conn_racing == 0;
 }
 
@@ -201,10 +201,10 @@ UTEST(he, first_wins) {
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(30, 2000);
+    KlHttpClientConfig cfg = he_cfg(30, 2000);
 
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     pump(&ev, &x.done, 200);
@@ -215,7 +215,7 @@ UTEST(he, first_wins) {
     pump(&ev, &(int){0}, 5);                 /* let any loser cancellation retire */
     ASSERT_TRUE(he_fully_detached(c));       /* success path reaches confirmed detachment */
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     stop_server(&srv, tid);
 }
@@ -231,10 +231,10 @@ UTEST(he, fallback_on_refused) {
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(30, 2000);
+    KlHttpClientConfig cfg = he_cfg(30, 2000);
 
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     pump(&ev, &x.done, 200);
@@ -242,7 +242,7 @@ UTEST(he, fallback_on_refused) {
     ASSERT_TRUE(x.done);
     ASSERT_EQ(200, x.status);      /* recovered on the second address */
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     stop_server(&srv, tid);
 }
@@ -260,9 +260,9 @@ UTEST(he, all_fail) {
     g_res_ports[0] = reserve_closed_port();
     g_res_ports[1] = reserve_closed_port();
 
-    KlClientConfig cfg = he_cfg(30, 2000);
+    KlHttpClientConfig cfg = he_cfg(30, 2000);
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     pump(&ev, &x.done, 200);
@@ -271,7 +271,7 @@ UTEST(he, all_fail) {
     ASSERT_EQ(KL_ERR_CONNECT, x.err);
     ASSERT_TRUE(he_fully_detached(c));       /* all-fail path reaches confirmed detachment */
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
 }
 #endif
@@ -286,10 +286,10 @@ UTEST(he, single_address) {
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(30, 2000);
+    KlHttpClientConfig cfg = he_cfg(30, 2000);
 
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     pump(&ev, &x.done, 200);
@@ -297,7 +297,7 @@ UTEST(he, single_address) {
     ASSERT_TRUE(x.done);
     ASSERT_EQ(200, x.status);
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     stop_server(&srv, tid);
 }
@@ -316,10 +316,10 @@ UTEST(he, second_wins_on_slow_first) {
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(30, 3000);   /* short delay so addr[1] fires */
+    KlHttpClientConfig cfg = he_cfg(30, 3000);   /* short delay so addr[1] fires */
 
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     pump(&ev, &x.done, 400);
@@ -327,7 +327,7 @@ UTEST(he, second_wins_on_slow_first) {
     ASSERT_TRUE(x.done);
     ASSERT_EQ(200, x.status);      /* second address wins while first stalls */
 
-    kl_client_free(c);             /* cancels the still-pending first attempt */
+    kl_http_client_free(c);             /* cancels the still-pending first attempt */
     kl_event_ctx_free(&ev);
     stop_server(&srv, tid);
 }
@@ -342,10 +342,10 @@ UTEST(he, deadline_fires_on_blackhole) {
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(30, 120);    /* short overall deadline */
+    KlHttpClientConfig cfg = he_cfg(30, 120);    /* short overall deadline */
 
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     pump(&ev, &x.done, 400);         /* deadline should fire at ~120ms */
@@ -354,7 +354,7 @@ UTEST(he, deadline_fires_on_blackhole) {
     ASSERT_EQ(KL_ERR_TIMEOUT, x.err);
     ASSERT_TRUE(he_fully_detached(c));   /* deadline during racing → connect op retired + detached */
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
 }
 
@@ -374,9 +374,9 @@ UTEST(he_detach, winner_and_loser) {
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(0, 2000);    /* delay 0 → both attempts start together */
+    KlHttpClientConfig cfg = he_cfg(0, 2000);    /* delay 0 → both attempts start together */
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     pump(&ev, &x.done, 200);
@@ -385,57 +385,57 @@ UTEST(he_detach, winner_and_loser) {
     pump(&ev, &(int){0}, 5);                 /* let the loser's cancellation retire */
     ASSERT_TRUE(he_fully_detached(c));
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
     stop_server(&srv, tid);
 }
 
 /* Cancellation while still resolving → detachment. A deferred resolver keeps the op in RESOLVING;
- * kl_client_cancel must cancel the resolve AND report its retirement so the op detaches. */
+ * kl_http_client_cancel must cancel the resolve AND report its retirement so the op detaches. */
 UTEST(he_detach, cancel_during_dns) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(30, 2000);
+    KlHttpClientConfig cfg = he_cfg(30, 2000);
     g_res_defer = 1;                         /* resolve() defers — stays RESOLVING */
     g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
 
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     ASSERT_FALSE(he_fully_detached(c));       /* still resolving — not yet retired */
 
-    kl_client_cancel(c);
+    kl_http_client_cancel(c);
     ASSERT_TRUE(g_res_cancelled);             /* the resolver's cancel ran */
     ASSERT_TRUE(he_fully_detached(c));        /* ...and its retirement was reported → detached */
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
 }
 
 /* Cancellation with multiple in-flight attempts → detachment. Two stalling addresses keep both
- * connects pending; kl_client_cancel must retire every one. Needs a real connect stall. */
+ * connects pending; kl_http_client_cancel must retire every one. Needs a real connect stall. */
 UTEST(he_detach, cancel_multiple_attempts) {
     if (!blackhole_stalls())
         UTEST_SKIP("no reliable connect-stall in this environment");
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(0, 5000);    /* delay 0 → both attempts start together */
+    KlHttpClientConfig cfg = he_cfg(0, 5000);    /* delay 0 → both attempts start together */
     g_res_n = 2;
     g_res_ip[0] = BLACKHOLE_IP; g_res_ports[0] = 80;
     g_res_ip[1] = BLACKHOLE_IP; g_res_ports[1] = 81;
 
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     pump(&ev, &x.done, 5);                    /* let both attempts post (they stall) */
     ASSERT_FALSE(x.done);
 
-    kl_client_cancel(c);
+    kl_http_client_cancel(c);
     ASSERT_TRUE(he_fully_detached(c));        /* both racing attempts retired → detached */
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
 }
 
@@ -446,12 +446,12 @@ UTEST(he_detach, cancel_multiple_attempts) {
 UTEST(he_detach, resolve_failed_during_dns) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(30, 2000);
+    KlHttpClientConfig cfg = he_cfg(30, 2000);
     g_res_defer = 1;                          /* stays RESOLVING until we complete it */
     g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
 
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c != NULL);
     ASSERT_FALSE(he_fully_detached(c));        /* resolving — not retired */
@@ -462,7 +462,7 @@ UTEST(he_detach, resolve_failed_during_dns) {
     ASSERT_EQ(KL_ERR_DNS, x.err);
     ASSERT_TRUE(he_fully_detached(c));         /* resolve retired → terminal FAILED → detached */
 
-    kl_client_free(c);
+    kl_http_client_free(c);
     kl_event_ctx_free(&ev);
 }
 
@@ -471,12 +471,12 @@ UTEST(he_detach, resolve_failed_during_dns) {
 UTEST(he_detach, resolver_returns_null) {
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
-    KlClientConfig cfg = he_cfg(30, 2000);
+    KlHttpClientConfig cfg = he_cfg(30, 2000);
     g_res_return_null = 1;                    /* resolve() cannot start */
     g_res_n = 1; memset(g_res_ip, 0, sizeof(g_res_ip)); g_res_ports[0] = 9;
 
     HeCtx x = { 0, 0, 0 };
-    KlClient *c = kl_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
+    KlHttpClient *c = kl_http_client_start(&ev, &a, &cfg, "GET", "http://host.test/ok",
                                    NULL, 0, NULL, 0, he_done, &x);
     ASSERT_TRUE(c == NULL);                   /* start failure → NULL, no callback */
     ASSERT_FALSE(x.done);                     /* the request callback never fired */

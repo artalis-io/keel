@@ -1,7 +1,7 @@
 /**
  * resolver.h — Pluggable async DNS resolver vtable
  *
- * When set in KlClientConfig, the async client uses this for non-blocking
+ * When set in KlHttpClientConfig, the async client uses this for non-blocking
  * name resolution. When NULL, falls back to sync getaddrinfo (default).
  *
  * Users can plug in c-ares, a thread-pool wrapper, or a custom implementation.

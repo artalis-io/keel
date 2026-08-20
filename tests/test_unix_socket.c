@@ -72,11 +72,11 @@ typedef struct {
     size_t body_len;
 } UnixAsyncCtx;
 
-static void unix_async_done(KlClient *client, void *user_data) {
+static void unix_async_done(KlHttpClient *client, void *user_data) {
     UnixAsyncCtx *ctx = user_data;
-    ctx->error = kl_client_error(client);
+    ctx->error = kl_http_client_error(client);
     if (ctx->error == 0) {
-        const KlClientResponse *resp = kl_client_response(client);
+        const KlHttpClientResponse *resp = kl_http_client_response(client);
         if (resp) {
             ctx->status = resp->status;
             if (resp->body && resp->body_len > 0) {
@@ -556,25 +556,25 @@ UTEST(unix_socket, client_connects_over_http_unix) {
     snprintf(url, sizeof(url), "http+unix://%s/hello", enc);
 
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
-    int rc = kl_client_request(&a, NULL, "GET", url,
+    KlHttpClientResponse resp;
+    int rc = kl_http_client_request(&a, NULL, "GET", url,
                                NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(0, rc);
     ASSERT_EQ(200, resp.status);
     ASSERT_TRUE(resp.body != NULL &&
                 strstr(resp.body, "\"ok\":true") != NULL);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 
     /* Pooled path bypasses the pool for UNIX and still serves the request. */
-    KlClientResponse resp2;
-    KlClientPool pool;
-    ASSERT_EQ(0, kl_cpool_init(&pool, NULL, &a, NULL));
-    ASSERT_EQ(0, kl_client_request_pooled(&pool, &a, NULL, "GET", url,
+    KlHttpClientResponse resp2;
+    KlHttpClientPool pool;
+    ASSERT_EQ(0, kl_http_client_pool_init(&pool, NULL, &a, NULL));
+    ASSERT_EQ(0, kl_http_client_request_pooled(&pool, &a, NULL, "GET", url,
                                           NULL, 0, NULL, 0, &resp2));
     ASSERT_EQ(200, resp2.status);
     ASSERT_TRUE(resp2.body != NULL && strstr(resp2.body, "\"ok\":true") != NULL);
-    kl_client_response_free(&resp2);
-    kl_cpool_free(&pool);
+    kl_http_client_response_free(&resp2);
+    kl_http_client_pool_free(&pool);
 
     kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
@@ -613,27 +613,27 @@ UTEST(unix_socket, async_client_connects_over_http_unix) {
     /* Async, non-pooled. */
     UnixAsyncCtx actx;
     memset(&actx, 0, sizeof(actx));
-    KlClient *c = kl_client_start(&ev, &a, NULL, "GET", url,
+    KlHttpClient *c = kl_http_client_start(&ev, &a, NULL, "GET", url,
                                   NULL, 0, NULL, 0, unix_async_done, &actx);
     ASSERT_TRUE(c != NULL);
     ASSERT_EQ(0, unix_run_until_done(&ev, &actx, 3000));
     ASSERT_EQ(0, actx.error);
     ASSERT_EQ(200, actx.status);
     ASSERT_TRUE(strstr(actx.body, "\"ok\":true") != NULL);
-    kl_client_free(c);
+    kl_http_client_free(c);
 
     /* Async pooled path bypasses the pool for UNIX too. */
-    KlClientPool pool;
-    ASSERT_EQ(0, kl_cpool_init(&pool, NULL, &a, &ev));
+    KlHttpClientPool pool;
+    ASSERT_EQ(0, kl_http_client_pool_init(&pool, NULL, &a, &ev));
     UnixAsyncCtx pctx;
     memset(&pctx, 0, sizeof(pctx));
-    KlClient *pc = kl_client_start_pooled(&pool, &ev, &a, NULL, "GET", url,
+    KlHttpClient *pc = kl_http_client_start_pooled(&pool, &ev, &a, NULL, "GET", url,
                                           NULL, 0, NULL, 0, unix_async_done, &pctx);
     ASSERT_TRUE(pc != NULL);
     ASSERT_EQ(0, unix_run_until_done(&ev, &pctx, 3000));
     ASSERT_EQ(200, pctx.status);
-    kl_client_free(pc);
-    kl_cpool_free(&pool);
+    kl_http_client_free(pc);
+    kl_http_client_pool_free(&pool);
 
     kl_event_ctx_free(&ev);
     kl_http_server_stop(&srv);
@@ -668,15 +668,15 @@ UTEST(unix_socket, redirect_follows_over_http_unix) {
     snprintf(url, sizeof(url), "http+unix://%s/go", enc);
 
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
+    KlHttpClientResponse resp;
     /* /go → 302 → relative /hello → 200; redirect resolution keeps the
      * http+unix authority. */
-    int rc = kl_redirect_request(&a, NULL, NULL, "GET", url,
+    int rc = kl_http_redirect_request(&a, NULL, NULL, "GET", url,
                                  NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(0, rc);
     ASSERT_EQ(200, resp.status);
     ASSERT_TRUE(resp.body != NULL && strstr(resp.body, "\"ok\":true") != NULL);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 
     kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
@@ -777,17 +777,17 @@ UTEST(unix_socket, tls_over_https_unix) {
     /* Client speaks TLS (passthrough) over the UNIX socket; SNI defaults to
      * "localhost". Exercises the https+unix connect + handshake path. */
     KlTlsConfig cli_tls = { .factory = mock_tls_create };
-    KlClientConfig ccfg;
+    KlHttpClientConfig ccfg;
     memset(&ccfg, 0, sizeof(ccfg));
     ccfg.tls = &cli_tls;
 
     KlAllocator a = kl_allocator_default();
-    KlClientResponse resp;
-    int rc = kl_client_request(&a, &ccfg, "GET", url, NULL, 0, NULL, 0, &resp);
+    KlHttpClientResponse resp;
+    int rc = kl_http_client_request(&a, &ccfg, "GET", url, NULL, 0, NULL, 0, &resp);
     ASSERT_EQ(0, rc);
     ASSERT_EQ(200, resp.status);
     ASSERT_TRUE(resp.body != NULL && strstr(resp.body, "\"ok\":true") != NULL);
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 
     kl_http_server_stop(&srv);
     pthread_join(tid, NULL);

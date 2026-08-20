@@ -73,19 +73,19 @@ int main(void) {
     for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) nap_ms(5);
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 256 * 1024 };
+    KlHttpClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 256 * 1024 };
     int ok = 0, last_rc = -1, last_status = -1;
     for (int i = 0; i < 50 && !ok; i++) {
         nap_ms(50);
-        KlClientResponse resp;
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        last_rc = kl_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18142/",
+        last_rc = kl_http_client_request(&alloc, &ccfg, "GET", "http://127.0.0.1:18142/",
                                     NULL, 0, NULL, 0, &resp);
         if (last_rc == 0) {
             last_status = resp.status;
             ok = (resp.status == 200 && resp.body_len == sizeof(SMOKE_BODY) - 1 &&
                   resp.body && memcmp(resp.body, SMOKE_BODY, sizeof(SMOKE_BODY) - 1) == 0);
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         }
     }
 

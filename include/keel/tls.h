@@ -158,7 +158,7 @@ struct KlTls {
      * ciphertext send/recv on the socket `fd`. By default that uses the built-in
      * host socket ops; when this hook is set, KEEL's server/client call it before
      * the handshake with the *connection's own* provider (`KlHttpServerConfig.sockets` /
-     * `KlClientConfig.sockets`), so TLS I/O automatically matches the connection's
+     * `KlHttpClientConfig.sockets`), so TLS I/O automatically matches the connection's
      * socket provider — e.g. a non-kernel stack (lwIP) whose descriptors are not
      * host fds. Passing NULL selects the host default.
      *

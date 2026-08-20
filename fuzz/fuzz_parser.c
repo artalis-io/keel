@@ -8,7 +8,7 @@
  *   ./fuzz/fuzz_parser fuzz/corpus_parser/ -max_total_time=60
  */
 #include <keel/allocator.h>
-#include <keel/parser.h>
+#include <keel/http1_parser.h>
 #include <keel/http_request.h>
 #include <stdint.h>
 #include <string.h>

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_u4.sh — build the U-4 KlClient HTTPS-over-EFI_TCP4+mbedTLS self-test into
+# build_u4.sh — build the U-4 KlHttpClient HTTPS-over-EFI_TCP4+mbedTLS self-test into
 # BOOTX64.EFI.
 #
 # Extends build_u3.sh with a FREESTANDING mbedTLS build:

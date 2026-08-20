@@ -14,7 +14,7 @@
 #include <keel/datagram_detail.h>   /* D2: provider-threading tests use a stack KlDatagram now */
 #include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
 #include <keel/http_server.h>
-#include <keel/client.h>
+#include <keel/http_client.h>
 
 #include <errno.h>
 #include <string.h>
@@ -562,7 +562,7 @@ UTEST(sockprov, select_native_fd_guard) {
 }
 
 /* #2 — end-to-end selection: a decorator provider on BOTH the server
- * (KlHttpServerConfig.sockets) and the client (KlClientConfig.sockets), over a real
+ * (KlHttpServerConfig.sockets) and the client (KlHttpClientConfig.sockets), over a real
  * loopback request. The listen socket + accept flow through the server decorator;
  * the client socket + connect flow through the client decorator. (The listen
  * socket is created in kl_http_server_run, not _init, so this needs a running server.
@@ -583,13 +583,13 @@ UTEST(sockprov, provider_selection_end_to_end) {
     for (int i = 0; i < 50 && !ok; i++) {
         struct timespec ts = { 0, 30 * 1000000L };
         nanosleep(&ts, NULL);
-        KlClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cprov };
-        KlClientResponse resp;
+        KlHttpClientConfig ccfg = { .timeout_ms = 2000, .sockets = &cprov };
+        KlHttpClientResponse resp;
         memset(&resp, 0, sizeof(resp));
-        if (kl_client_request(&a, &ccfg, "GET", "http://127.0.0.1:19099/",
+        if (kl_http_client_request(&a, &ccfg, "GET", "http://127.0.0.1:19099/",
                               NULL, 0, NULL, 0, &resp) == 0) {
             ok = (resp.status == 200);
-            kl_client_response_free(&resp);
+            kl_http_client_response_free(&resp);
         }
     }
     kl_http_server_stop(&s);

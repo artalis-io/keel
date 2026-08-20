@@ -1,8 +1,8 @@
 /*
  * client.c — HTTP/1.1 sync + async client
  *
- * Concepts: kl_client_request (sync), kl_client_start (async),
- * KlClientConfig, KlClientResponse, KlEventCtx standalone event loop.
+ * Concepts: kl_http_client_request (sync), kl_http_client_start (async),
+ * KlHttpClientConfig, KlHttpClientResponse, KlEventCtx standalone event loop.
  *
  * Build:  make examples
  * Run:    ./examples/client
@@ -20,10 +20,10 @@ static void sync_demo(void) {
     printf("--- Sync GET ---\n");
 
     KlAllocator alloc = kl_allocator_default();
-    KlClientConfig cfg = {.timeout_ms = 5000};
-    KlClientResponse resp;
+    KlHttpClientConfig cfg = {.timeout_ms = 5000};
+    KlHttpClientResponse resp;
 
-    int rc = kl_client_request(&alloc, &cfg, "GET",
+    int rc = kl_http_client_request(&alloc, &cfg, "GET",
                                 "http://localhost:8080/hello",
                                 NULL, 0, NULL, 0, &resp);
     if (rc < 0) {
@@ -38,26 +38,26 @@ static void sync_demo(void) {
         printf("    %s: %s\n", resp.headers[i].name, resp.headers[i].value);
     }
 
-    kl_client_response_free(&resp);
+    kl_http_client_response_free(&resp);
 }
 
 /* ── Async client ─────────────────────────────────────────────────── */
 
 static int async_done_flag;
 
-static void on_done(KlClient *client, void *user_data) {
+static void on_done(KlHttpClient *client, void *user_data) {
     (void)user_data;
     printf("--- Async GET completed ---\n");
 
-    if (kl_client_error(client) < 0) {
+    if (kl_http_client_error(client) < 0) {
         fprintf(stderr, "  async request failed\n");
     } else {
-        const KlClientResponse *r = kl_client_response(client);
+        const KlHttpClientResponse *r = kl_http_client_response(client);
         printf("  status: %d\n", r->status);
         printf("  body:   %.*s\n", (int)r->body_len, r->body);
     }
 
-    kl_client_free(client);
+    kl_http_client_free(client);
     async_done_flag = 1;
 }
 
@@ -71,10 +71,10 @@ static void async_demo(void) {
         return;
     }
 
-    KlClientConfig cfg = {.timeout_ms = 5000};
+    KlHttpClientConfig cfg = {.timeout_ms = 5000};
     async_done_flag = 0;
 
-    KlClient *c = kl_client_start(&ev, &alloc, &cfg, "GET",
+    KlHttpClient *c = kl_http_client_start(&ev, &alloc, &cfg, "GET",
                                     "http://localhost:8080/hello",
                                     NULL, 0, NULL, 0, on_done, NULL);
     if (!c) {

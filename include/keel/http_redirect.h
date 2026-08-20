@@ -7,12 +7,12 @@
  * or client.c. Supports both unpooled and pooled variants.
  */
 
-#ifndef KEEL_REDIRECT_H
-#define KEEL_REDIRECT_H
+#ifndef KEEL_HTTP_REDIRECT_H
+#define KEEL_HTTP_REDIRECT_H
 
 #include <keel/allocator.h>
-#include <keel/client.h>
-#include <keel/client_pool.h>
+#include <keel/http_client.h>
+#include <keel/http_client_pool.h>
 #include <keel/error.h>
 #include <keel/event_ctx.h>
 #include <keel/url.h>
@@ -20,7 +20,7 @@
 /* ── Constants ────────────────────────────────────────────────────── */
 
 /** @brief Default maximum redirects. */
-#define KL_REDIRECT_DEFAULT_MAX 10
+#define KL_HTTP_REDIRECT_DEFAULT_MAX 10
 
 /* ── Config ───────────────────────────────────────────────────────── */
 
@@ -32,7 +32,7 @@ typedef struct {
      * Matches curl / fetch / most HTTP clients.  0 = use default 10.
      */
     int max_redirects;
-} KlRedirectConfig;
+} KlHttpRedirectConfig;
 
 /* ── Sync API ─────────────────────────────────────────────────────── */
 
@@ -45,95 +45,95 @@ typedef struct {
  *
  * @return 0 on success, -1 on error. Sets resp->error on failure.
  */
-int kl_redirect_request(KlAllocator *alloc, const KlClientConfig *cfg,
-                        const KlRedirectConfig *redir,
+int kl_http_redirect_request(KlAllocator *alloc, const KlHttpClientConfig *cfg,
+                        const KlHttpRedirectConfig *redir,
                         const char *method, const char *url,
-                        const KlClientHeader *headers, int num_headers,
+                        const KlHttpClientHeader *headers, int num_headers,
                         const char *body, size_t body_len,
-                        KlClientResponse *resp);
+                        KlHttpClientResponse *resp);
 
 /**
  * @brief Synchronous pooled HTTP request with automatic redirect following.
  */
-int kl_redirect_request_pooled(KlClientPool *pool,
-                               KlAllocator *alloc, const KlClientConfig *cfg,
-                               const KlRedirectConfig *redir,
+int kl_http_redirect_request_pooled(KlHttpClientPool *pool,
+                               KlAllocator *alloc, const KlHttpClientConfig *cfg,
+                               const KlHttpRedirectConfig *redir,
                                const char *method, const char *url,
-                               const KlClientHeader *headers, int num_headers,
+                               const KlHttpClientHeader *headers, int num_headers,
                                const char *body, size_t body_len,
-                               KlClientResponse *resp);
+                               KlHttpClientResponse *resp);
 
 /* ── Async API ────────────────────────────────────────────────────── */
 
-typedef struct KlRedirectClient KlRedirectClient;
+typedef struct KlHttpRedirectClient KlHttpRedirectClient;
 
 /**
  * @brief Callback invoked when an async redirect-following request completes.
  */
-typedef void (*KlRedirectDoneFn)(KlRedirectClient *rc, void *user_data);
+typedef void (*KlHttpRedirectDoneFn)(KlHttpRedirectClient *rc, void *user_data);
 
 /**
  * @brief Start an asynchronous HTTP request with automatic redirect following.
  * @return Client handle, or NULL on immediate failure.
  */
-KlRedirectClient *kl_redirect_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
-                                    const KlClientConfig *cfg,
-                                    const KlRedirectConfig *redir,
+KlHttpRedirectClient *kl_http_redirect_start(KlEventCtx *ev_ctx, KlAllocator *alloc,
+                                    const KlHttpClientConfig *cfg,
+                                    const KlHttpRedirectConfig *redir,
                                     const char *method, const char *url,
-                                    const KlClientHeader *headers, int num_headers,
+                                    const KlHttpClientHeader *headers, int num_headers,
                                     const char *body, size_t body_len,
-                                    KlRedirectDoneFn on_done, void *user_data);
+                                    KlHttpRedirectDoneFn on_done, void *user_data);
 
 /**
  * @brief Start an asynchronous pooled HTTP request with redirect following.
  * @return Client handle, or NULL on immediate failure.
  */
-KlRedirectClient *kl_redirect_start_pooled(KlClientPool *pool,
+KlHttpRedirectClient *kl_http_redirect_start_pooled(KlHttpClientPool *pool,
                                            KlEventCtx *ev_ctx, KlAllocator *alloc,
-                                           const KlClientConfig *cfg,
-                                           const KlRedirectConfig *redir,
+                                           const KlHttpClientConfig *cfg,
+                                           const KlHttpRedirectConfig *redir,
                                            const char *method, const char *url,
-                                           const KlClientHeader *headers, int num_headers,
+                                           const KlHttpClientHeader *headers, int num_headers,
                                            const char *body, size_t body_len,
-                                           KlRedirectDoneFn on_done, void *user_data);
+                                           KlHttpRedirectDoneFn on_done, void *user_data);
 
 /**
  * @brief Get the final response from a completed redirect client.
  *
- * Valid until @ref kl_redirect_free.  Returns NULL when the request
+ * Valid until @ref kl_http_redirect_free.  Returns NULL when the request
  * terminated in an error state (whether the failure occurred on the
  * initial request, a redirect-following step, or because the
- * @ref kl_redirect_start call itself never produced an inner client).
- * Callers should pair this with @ref kl_redirect_last_error to
+ * @ref kl_http_redirect_start call itself never produced an inner client).
+ * Callers should pair this with @ref kl_http_redirect_last_error to
  * distinguish "no response yet" from "no response ever."
  */
-const KlClientResponse *kl_redirect_response(const KlRedirectClient *rc);
+const KlHttpClientResponse *kl_http_redirect_response(const KlHttpRedirectClient *rc);
 
 /**
  * @brief Check if the redirect request completed with an error.
  * @return 0 on success, -1 on error.
  */
-int kl_redirect_error(const KlRedirectClient *rc);
+int kl_http_redirect_error(const KlHttpRedirectClient *rc);
 
 /**
  * @brief Get the specific error code from a completed redirect request.
  *
- * Defined post-completion (after the @ref KlRedirectDoneFn fires).
- * Together with @ref kl_redirect_response NULL, a non-zero error here
+ * Defined post-completion (after the @ref KlHttpRedirectDoneFn fires).
+ * Together with @ref kl_http_redirect_response NULL, a non-zero error here
  * is the only indicator a caller has that no response was ever
  * received — there is no separate "inner client construction failed"
  * vs. "all redirect hops failed" distinction in the public API.
  */
-KlError kl_redirect_last_error(const KlRedirectClient *rc);
+KlError kl_http_redirect_last_error(const KlHttpRedirectClient *rc);
 
 /**
  * @brief Cancel an in-flight redirect request.
  */
-void kl_redirect_cancel(KlRedirectClient *rc);
+void kl_http_redirect_cancel(KlHttpRedirectClient *rc);
 
 /**
  * @brief Free all redirect client resources.
  */
-void kl_redirect_free(KlRedirectClient *rc);
+void kl_http_redirect_free(KlHttpRedirectClient *rc);
 
-#endif /* KEEL_REDIRECT_H */
+#endif /* KEEL_HTTP_REDIRECT_H */
