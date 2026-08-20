@@ -1,7 +1,7 @@
 /*
  * streaming.c — Streaming chunked responses
  *
- * Concepts: kl_response_begin_stream, KlWriteFn, chunked transfer-encoding.
+ * Concepts: kl_http_response_begin_stream, KlHttpResponseWriteFn, chunked transfer-encoding.
  * Demonstrates how to stream JSON (or any data) without intermediate
  * buffering. Any serializer that accepts a write callback can plug in.
  *
@@ -14,7 +14,7 @@
 #include <stdio.h>
 
 /* Simple streaming writer — writes directly through KEEL's chunked response */
-static int write_json_key(KlWriteFn write_fn, void *ctx,
+static int write_json_key(KlHttpResponseWriteFn write_fn, void *ctx,
                           const char *key, const char *value) {
     char buf[256];
     int n = snprintf(buf, sizeof(buf), "\"%s\":\"%s\"", key, value);
@@ -22,14 +22,14 @@ static int write_json_key(KlWriteFn write_fn, void *ctx,
     return write_fn(ctx, buf, (size_t)n);
 }
 
-static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_stream(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
 
-    kl_response_header(res, "Content-Type", "application/json");
+    kl_http_response_header(res, "Content-Type", "application/json");
 
-    KlWriteFn write_fn;
+    KlHttpResponseWriteFn write_fn;
     void *write_ctx;
-    kl_response_begin_stream(res, 200, &write_fn, &write_ctx);
+    kl_http_response_begin_stream(res, 200, &write_fn, &write_ctx);
 
     write_fn(write_ctx, "{", 1);
 
@@ -50,7 +50,7 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
 
     write_fn(write_ctx, "}", 1);
 
-    kl_response_end_stream(res);
+    kl_http_response_end_stream(res);
 }
 
 int main(void) {

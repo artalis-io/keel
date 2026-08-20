@@ -175,7 +175,7 @@ void kl_conn_release(KlConnPool *pool, KlConn *c) {
         c->parser->reset(c->parser);
     }
     if (c->res.hdr_buf) {
-        kl_response_free(&c->res);
+        kl_http_response_free(&c->res);
     }
     c->async_op = NULL;
     c->state = KL_CONN_CLOSED;
@@ -216,7 +216,7 @@ void kl_conn_pool_free(KlConnPool *pool) {
                 pool->conns[i].tls->destroy(pool->conns[i].tls);
             }
             if (pool->conns[i].res.hdr_buf) {
-                kl_response_free(&pool->conns[i].res);
+                kl_http_response_free(&pool->conns[i].res);
             }
             if (pool->conns[i].stream.read_buf) {
                 kl_free(pool->alloc, pool->conns[i].stream.read_buf,
@@ -236,8 +236,8 @@ void kl_conn_pool_free(KlConnPool *pool) {
 static void conn_log_access(KlConn *c) {
     if (!c->access_log) return;
     size_t bytes = 0;
-    if (c->res.body_mode == KL_BODY_BUFFER) bytes = c->res.body_len;
-    else if (c->res.body_mode == KL_BODY_FILE && c->res.file_size > 0)
+    if (c->res.body_mode == KL_HTTP_BODY_BUFFER) bytes = c->res.body_len;
+    else if (c->res.body_mode == KL_HTTP_BODY_FILE && c->res.file_size > 0)
         bytes = (size_t)c->res.file_size;
     uint64_t now = kl_monotonic_ms();
     double duration = (double)(now - c->request_start_ms);
@@ -252,9 +252,9 @@ static int conn_init_response(KlConn *c) {
     c->req._server_ctx = c;
     c->request_start_ms = kl_monotonic_ms();
     if (c->res.hdr_buf) {
-        kl_response_reset(&c->res);
+        kl_http_response_reset(&c->res);
     } else {
-        if (kl_response_init(&c->res, c->res.alloc) < 0)
+        if (kl_http_response_init(&c->res, c->res.alloc) < 0)
             return -1;
     }
     c->res.conn_fd = c->stream.fd;
@@ -276,9 +276,9 @@ static KlConnState conn_process(KlConn *c) {
     if (c->route_result == 200 && c->route) {
         c->route->handler(&c->req, &c->res, c->route->user_data);
     } else if (c->route_result == 405) {
-        kl_response_error(&c->res, 405, "Method Not Allowed");
+        kl_http_response_error(&c->res, 405, "Method Not Allowed");
     } else {
-        kl_response_error(&c->res, 404, "Not Found");
+        kl_http_response_error(&c->res, 404, "Not Found");
     }
 
     /* If handler suspended the connection for async I/O, don't transition */
@@ -286,7 +286,7 @@ static KlConnState conn_process(KlConn *c) {
         return KL_CONN_SUSPENDED;
 
     /* If streaming, the handler already sent everything — unless drain is pending */
-    if (c->res.body_mode == KL_BODY_STREAM) {
+    if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
         if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
             c->state = KL_CONN_SENDING;
             return c->state;
@@ -308,7 +308,7 @@ static KlConnState conn_run_post_middleware_and_handle(KlConn *c,
                                                        KlRouter *router) {
     if (kl_router_run_post_middleware(router, &c->req, &c->res) != 0) {
         /* Body already consumed — keep_alive preserved */
-        if (c->res.body_mode == KL_BODY_STREAM) {
+        if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
             conn_log_access(c);
             c->state = KL_CONN_CLOSED;
             return c->state;
@@ -348,7 +348,7 @@ static KlConnState conn_invoke_streaming_handler(KlConn *c) {
     if (c->state == KL_CONN_READING_BODY) return KL_CONN_READING_BODY;
 
     /* Streaming response — handler already wrote chunks. */
-    if (c->res.body_mode == KL_BODY_STREAM) {
+    if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
         if (c->res.drain_enabled && kl_drain_pending(&c->res.drain)) {
             c->state = KL_CONN_SENDING;
             return c->state;
@@ -540,7 +540,7 @@ static KlConnState conn_dispatch_request(KlConn *c, KlRouter *router,
         /* Middleware short-circuited — body may be unread */
         c->req.keep_alive = 0;
         c->res.keep_alive = 0;
-        if (c->res.body_mode == KL_BODY_STREAM) {
+        if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
             conn_log_access(c);
             c->state = KL_CONN_CLOSED;
             return c->state;
@@ -916,7 +916,7 @@ read_more_body: ;
 
 static KlConnState conn_keepalive_reset(KlConn *c) {
     conn_cleanup_body_reader(c);
-    kl_response_reset(&c->res);
+    kl_http_response_reset(&c->res);
     c->parser->reset(c->parser);
     memset(&c->req, 0, sizeof(c->req));
     c->stream.read_len = 0;
@@ -1046,9 +1046,9 @@ KlConnState kl_conn_on_writable(KlConn *c) {
         return conn_file_flush(c);
 
     /* Start io_uring async file send (non-TLS only) */
-    if (c->res.body_mode == KL_BODY_FILE && !c->tls && c->file_io) {
+    if (c->res.body_mode == KL_HTTP_BODY_FILE && !c->tls && c->file_io) {
         if (!c->res.headers_sent) {
-            int r = kl_response_send(&c->res);
+            int r = kl_http_response_send(&c->res);
             if (r < 0) { c->state = KL_CONN_CLOSED; return c->state; }
             if (!c->res.headers_sent) return KL_CONN_SENDING;
         }
@@ -1057,7 +1057,7 @@ KlConnState kl_conn_on_writable(KlConn *c) {
         return conn_file_submit_read(c);
     }
 
-    int r = kl_response_send(&c->res);
+    int r = kl_http_response_send(&c->res);
     if (r < 0) {
         c->state = KL_CONN_CLOSED;
     } else if (r == 0) {

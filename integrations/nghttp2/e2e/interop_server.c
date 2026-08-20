@@ -10,9 +10,9 @@
 
 #define INTEROP_PORT 18478
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_json(res, 200, "{\"msg\":\"hello h2 e2e\"}", 21);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello h2 e2e\"}", 21);
 }
 
 int main(void) {

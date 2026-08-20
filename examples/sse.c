@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static void handle_events(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_events(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
 
     KlSse sse;

@@ -25,7 +25,7 @@
 #include <keel/event_ctx.h>      /* KlEventCtx (comp_conn_dispatch hook) */
 #include "internal.h"            /* kl_server_conn_release */
 #include "conn_internal.h"       /* kl_conn_dispatch_request / kl_conn_send_complete */
-#include "response_internal.h"   /* kl_response_build_iovec */
+#include "http_response_internal.h"   /* kl_http_response_build_iovec */
 #include "completion.h"          /* the abstract completion axis */
 #include "completion_internal.h" /* the cross-TU h2/ws drives + exported server helpers */
 #include "io_engine.h"           /* kl_io_engine_run_completion (the seam) */
@@ -96,11 +96,11 @@ static int comp_send_response(KlConn *c) {
     char cl_buf[48];
     KlIoVec iov[7];
     size_t total = 0;
-    int n = kl_response_build_iovec(&c->res, iov, 7, cl_buf, sizeof(cl_buf), &total);
+    int n = kl_http_response_build_iovec(&c->res, iov, 7, cl_buf, sizeof(cl_buf), &total);
     if (n < 0) return -1;
     /* FILE mode: the iovec is head-only; append the file bytes with sendfile. A HEAD
      * request has no body, so it falls through to the plain head send. */
-    if (c->res.body_mode == KL_BODY_FILE && !c->res.head_request)
+    if (c->res.body_mode == KL_HTTP_BODY_FILE && !c->res.head_request)
         return kl_comp_post_sendfile(c, iov, n, total,
                                      c->res.file_fd, (uint64_t)c->res.file_size);
     return kl_comp_post_send(c, iov, n, total);
@@ -156,9 +156,9 @@ static void comp_send_stream(struct KlServer *s, KlConn *c) {
         return;
     }
     /* No outbound buffer (no allocator at begin_stream): the legacy synchronous spin-write.
-     * Only reachable when kl_response_enable_drain was skipped, so a fully-produced stream. */
+     * Only reachable when kl_http_response_enable_drain was skipped, so a fully-produced stream. */
     int r;
-    do { r = kl_response_send(&c->res); } while (r == 1 && c->res.stream_ended);
+    do { r = kl_http_response_send(&c->res); } while (r == 1 && c->res.stream_ended);
     if (r < 0) { kl_comp_close(s, c); return; }
     KlConnState st = kl_conn_send_complete(c);
     if (st == KL_CONN_READING) {
@@ -300,22 +300,22 @@ static void comp_tls_send_response(struct KlServer *s, KlConn *c) {
     KlIoVec iov[7];
     size_t total = 0;
     /* For FILE mode this is head-only; the file bytes follow (comp_on_write). */
-    int n = kl_response_build_iovec(&c->res, iov, 7, cl_buf, sizeof(cl_buf), &total);
+    int n = kl_http_response_build_iovec(&c->res, iov, 7, cl_buf, sizeof(cl_buf), &total);
     if (n < 0) { kl_comp_close(s, c); return; }
     if (comp_tls_post_encrypted(c, iov, n) < 0) kl_comp_close(s, c);
 }
 
-/* Chunked/streaming response (KL_BODY_STREAM) over TLS. The TLS-aware streaming write
- * path (kl_response_send → stream_writev_all / response_drain_writer) already encrypts
+/* Chunked/streaming response (KL_HTTP_BODY_STREAM) over TLS. The TLS-aware streaming write
+ * path (kl_http_response_send → stream_writev_all / response_drain_writer) already encrypts
  * via tls->write, but in completion mode that only appends ciphertext to the engine's
  * out ring — so flush the ring to the socket after each send. Mirrors comp_send_stream
  * (same synchronous-stream subset + head-of-line caveat); a single synchronous batch is
- * bounded by the TLS out-ring cap. Reuses only kl_response_send + the vtable — no
+ * bounded by the TLS out-ring cap. Reuses only kl_http_response_send + the vtable — no
  * platform symbol. */
 static void comp_tls_send_stream(struct KlServer *s, KlConn *c) {
     int r;
     do {
-        r = kl_response_send(&c->res);         /* encrypts chunks into the out ring */
+        r = kl_http_response_send(&c->res);         /* encrypts chunks into the out ring */
         if (r < 0) { kl_comp_close(s, c); return; }
         if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }   /* ring → socket */
     } while (r == 1 && c->res.stream_ended);
@@ -331,11 +331,11 @@ static void comp_tls_send_stream(struct KlServer *s, KlConn *c) {
 static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
     if (st == KL_CONN_SENDING) {
         if (c->tls) {
-            if (c->res.body_mode == KL_BODY_STREAM)
+            if (c->res.body_mode == KL_HTTP_BODY_STREAM)
                 comp_tls_send_stream(s, c);    /* flush encrypted chunks synchronously */
             else
                 comp_tls_send_response(s, c);  /* buffered/file: encrypt + overlapped */
-        } else if (c->res.body_mode == KL_BODY_STREAM) {
+        } else if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
             comp_send_stream(s, c);
         } else if (comp_send_response(c) < 0) {
             kl_comp_close(s, c);
@@ -366,7 +366,7 @@ static void comp_after_state(struct KlServer *s, KlConn *c, KlConnState st) {
          * (the handler "already sent" it), but on a completion loop its chunks were
          * written into the memory-BIO out ring rather than the socket — flush them before
          * closing so the response is actually delivered. */
-        if (c->tls && c->res.body_mode == KL_BODY_STREAM)
+        if (c->tls && c->res.body_mode == KL_HTTP_BODY_STREAM)
             (void)kl_comp_tls_flush(c);
         kl_comp_close(s, c);
     }
@@ -741,7 +741,7 @@ static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
     }
     /* TLS file body still streaming: the head (or the previous chunk) just went out —
      * post the next encrypted file chunk. HEAD requests carry no body. */
-    if (c->tls && c->res.body_mode == KL_BODY_FILE && !c->res.head_request) {
+    if (c->tls && c->res.body_mode == KL_HTTP_BODY_FILE && !c->res.head_request) {
         int r = comp_tls_send_file_chunk(c);
         if (r < 0) { kl_comp_close(s, c); return; }
         if (r == 1) return;                    /* another chunk now in flight */
@@ -750,7 +750,7 @@ static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
     /* Plaintext streaming (8g-1): the posted stream chunk is out. Pump the next buffered
      * chunk (a slow client's remainder, or bytes an async producer wrote meanwhile), else
      * complete once the stream ended and the buffer drained. */
-    if (!c->tls && c->res.body_mode == KL_BODY_STREAM && c->res.drain_enabled) {
+    if (!c->tls && c->res.body_mode == KL_HTTP_BODY_STREAM && c->res.drain_enabled) {
         c->res.stream_inflight = 0;
         comp_stream_pump(s, c);
         return;

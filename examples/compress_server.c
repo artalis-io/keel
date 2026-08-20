@@ -1,7 +1,7 @@
 /*
  * compress_server.c — Response compression with miniz gzip backend
  *
- * Concepts: KlCompress vtable, KlCompressConfig, kl_response_body_compress,
+ * Concepts: KlCompress vtable, KlCompressConfig, kl_http_response_body_compress,
  * KlCompressStream, kl_compress_stream_begin/write/end.
  *
  * Demonstrates:
@@ -25,7 +25,7 @@ typedef struct {
 } AppCtx;
 
 /* Buffer body compression — compresses the entire response at once */
-static void handle_json(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_json(KlRequest *req, KlHttpResponse *res, void *user_data) {
     AppCtx *app = user_data;
     const char *json =
         "{\"message\":\"Hello from Keel!\","
@@ -35,26 +35,26 @@ static void handle_json(KlRequest *req, KlResponse *res, void *user_data) {
         "the original, Keel falls back to sending uncompressed data.\","
         "\"items\":[1,2,3,4,5,6,7,8,9,10]}";
 
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/json");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/json");
 
     /* Only compress if client accepts gzip */
     const char *ae = kl_request_header(req, "Accept-Encoding");
     if (ae && strstr(ae, "gzip") && app->compress) {
-        kl_response_body_compress(res, app->compress, json, strlen(json));
+        kl_http_response_body_compress(res, app->compress, json, strlen(json));
     } else {
-        kl_response_body_borrow(res, json, strlen(json));
+        kl_http_response_body_borrow(res, json, strlen(json));
     }
 }
 
 /* Streaming compression — compresses chunks as they are written */
-static void handle_stream(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_stream(KlRequest *req, KlHttpResponse *res, void *user_data) {
     AppCtx *app = user_data;
 
     const char *ae = kl_request_header(req, "Accept-Encoding");
     if (ae && strstr(ae, "gzip") && app->compress) {
         /* Compressed chunked stream */
-        kl_response_header(res, "Content-Type", "text/plain");
+        kl_http_response_header(res, "Content-Type", "text/plain");
 
         KlCompressStream cs;
         if (kl_compress_stream_begin(res, app->compress, 200, &cs) < 0)
@@ -70,10 +70,10 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *user_data) {
         kl_compress_stream_end(&cs);
     } else {
         /* Uncompressed chunked stream */
-        KlWriteFn write_fn;
+        KlHttpResponseWriteFn write_fn;
         void *write_ctx;
-        kl_response_header(res, "Content-Type", "text/plain");
-        if (kl_response_begin_stream(res, 200, &write_fn, &write_ctx) < 0)
+        kl_http_response_header(res, "Content-Type", "text/plain");
+        if (kl_http_response_begin_stream(res, 200, &write_fn, &write_ctx) < 0)
             return;
 
         for (int i = 0; i < 10; i++) {
@@ -83,7 +83,7 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *user_data) {
             if (write_fn(write_ctx, line, (size_t)n) < 0) break;
         }
 
-        kl_response_end_stream(res);
+        kl_http_response_end_stream(res);
     }
 }
 

@@ -14,11 +14,11 @@ make examples
 
 | Example | Port | Description | Key APIs |
 |---------|------|-------------|----------|
-| `hello_server` | 8080 (configurable) | Minimal JSON server | `KlServer`, `KlConfig`, `kl_response_json` |
+| `hello_server` | 8080 (configurable) | Minimal JSON server | `KlServer`, `KlConfig`, `kl_http_response_json` |
 | `rest_api_server` | 8080 | REST API with route params, POST body | `:id` params, `KlBufReader`, `kl_body_reader_buffer` |
 | `middleware` | 8080 | Pre/post-body middleware, CORS, auth | `kl_server_use`, `kl_server_use_post`, `kl_cors_middleware` |
-| `static_files` | 8080 | Static file server with sendfile | `kl_response_file`, MIME detection, path traversal guard |
-| `streaming` | 8080 | Chunked streaming responses | `kl_response_begin_stream`, `KlWriteFn` |
+| `static_files` | 8080 | Static file server with sendfile | `kl_http_response_file`, MIME detection, path traversal guard |
+| `streaming` | 8080 | Chunked streaming responses | `kl_http_response_begin_stream`, `KlHttpResponseWriteFn` |
 | `sse` | 8080 | Server-Sent Events streaming | `KlSse`, `kl_sse_begin`, `kl_sse_event`, `kl_sse_comment` |
 | `body_readers` | 8080 | Buffer + multipart body readers | `KlBufReader`, `KlMultipartReader`, `kl_body_reader_multipart` |
 | `async` | 8080 | Async suspend/resume with FD watchers | `KlWatcher`, `KlAsyncOp`, `kl_async_suspend/complete` |
@@ -140,7 +140,7 @@ make examples KEEL_COMPRESS=miniz MINIZ_DIR=/path/to/miniz
 
 | Example | Port | Description | Key APIs |
 |---------|------|-------------|----------|
-| `compress_server` | 8080 | Buffer + streaming gzip compression | `KlCompressConfig`, `kl_response_body_compress`, `KlCompressStream` |
+| `compress_server` | 8080 | Buffer + streaming gzip compression | `KlCompressConfig`, `kl_http_response_body_compress`, `KlCompressStream` |
 | `decompress_client` | — (self-contained) | Compress → decompress round-trip | `KlDecompressConfig`, `kl_decompress_body`, `KlDecompressStream` |
 
 Set `KlClientConfig.decompress` to automatically decompress gzip responses from servers.

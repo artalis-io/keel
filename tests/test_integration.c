@@ -9,12 +9,12 @@
 
 static int test_port;  /* set by start_server / individual tests */
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
 }
 
-static void handle_param(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_param(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     size_t id_len;
     const char *id = kl_request_param(req, "id", &id_len);
@@ -28,18 +28,18 @@ static void handle_param(KlRequest *req, KlResponse *res, void *ctx) {
         n = snprintf(body, sizeof(body), "{\"id\":null,\"num_params\":0}");
     }
     if (n < 0) n = 0;
-    kl_response_json(res, 200, body, (size_t)n);
+    kl_http_response_json(res, 200, body, (size_t)n);
 }
 
-static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0) {
-        kl_response_body_borrow(res, br->data, br->len);
+        kl_http_response_body_borrow(res, br->data, br->len);
     } else {
-        kl_response_body_borrow(res, "no body", 7);
+        kl_http_response_body_borrow(res, "no body", 7);
     }
 }
 
@@ -50,7 +50,7 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
  *
  * All allocations go through the keel allocator — no fixed-size static
  * buffers, no magic-constant part caps. The response body is sent via
- * kl_response_body_copy so Keel owns the bytes after this function
+ * kl_http_response_body_copy so Keel owns the bytes after this function
  * returns; the handler's scratch allocations are freed before return. */
 typedef struct {
     char  *name;
@@ -81,11 +81,11 @@ static char *handle_upload_dup(KlAllocator *a, const char *s, size_t n) {
     return d;
 }
 
-static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_upload(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBodyReader *br = req->body_reader;
     if (!br) {
-        kl_response_error(res, 400, "No reader");
+        kl_http_response_error(res, 400, "No reader");
         return;
     }
     KlAllocator alloc = kl_allocator_default();
@@ -107,7 +107,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
                 HandleUploadPart *np = kl_realloc(&alloc, parts, old_sz, new_sz);
                 if (!np) {
                     handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-                    kl_response_error(res, 500, "OOM");
+                    kl_http_response_error(res, 500, "OOM");
                     return;
                 }
                 parts = np;
@@ -121,7 +121,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
                  * (with NULL name) into the active count — later
                  * snprintf would deref it. Bail cleanly. */
                 handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-                kl_response_error(res, 500, "OOM");
+                kl_http_response_error(res, 500, "OOM");
                 return;
             }
             p->name_len = meta.name_len;
@@ -131,7 +131,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
                 if (!p->filename) {
                     kl_free(&alloc, p->name, p->name_len + 1);
                     handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-                    kl_response_error(res, 500, "OOM");
+                    kl_http_response_error(res, 500, "OOM");
                     return;
                 }
                 p->filename_len = meta.filename_len;
@@ -147,12 +147,12 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
         if (e == KL_MP_EVT_PART_END) continue;
         if (e == KL_MP_EVT_DONE)     break;
         handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-        kl_response_error(res, 400, "Parse error");
+        kl_http_response_error(res, 400, "Parse error");
         return;
     }
     if (parts_count == 0) {
         handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-        kl_response_error(res, 400, "No parts");
+        kl_http_response_error(res, 400, "No parts");
         return;
     }
 
@@ -164,7 +164,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     int n = snprintf(NULL, 0, "parts=%zu", parts_count);
     if (n < 0) {
         handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-        kl_response_error(res, 500, "snprintf");
+        kl_http_response_error(res, 500, "snprintf");
         return;
     }
     body_cap += (size_t)n;
@@ -173,7 +173,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
                      i, parts[i].name, i, parts[i].size);
         if (n < 0) {
             handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-            kl_response_error(res, 500, "snprintf");
+            kl_http_response_error(res, 500, "snprintf");
             return;
         }
         body_cap += (size_t)n;
@@ -182,7 +182,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     char *body = kl_malloc(&alloc, body_cap);
     if (!body) {
         handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-        kl_response_error(res, 500, "OOM");
+        kl_http_response_error(res, 500, "OOM");
         return;
     }
     size_t off = 0;
@@ -190,7 +190,7 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
     if (n < 0 || (size_t)n >= body_cap - off) {
         kl_free(&alloc, body, body_cap);
         handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-        kl_response_error(res, 500, "snprintf");
+        kl_http_response_error(res, 500, "snprintf");
         return;
     }
     off += (size_t)n;
@@ -201,24 +201,24 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
         if (n < 0 || (size_t)n >= body_cap - off) {
             kl_free(&alloc, body, body_cap);
             handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
-            kl_response_error(res, 500, "snprintf");
+            kl_http_response_error(res, 500, "snprintf");
             return;
         }
         off += (size_t)n;
     }
 
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
     /* body_copy: Keel takes its own copy, we free our scratch. */
-    kl_response_body_copy(res, body, off);
+    kl_http_response_body_copy(res, body, off);
 
     kl_free(&alloc, body, body_cap);
     handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
 }
 
-static void handle_no_reader(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_no_reader(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* ── Mid-stream early-exit on ERROR-return fixture ──────────────────
@@ -237,7 +237,7 @@ typedef struct {
     KlBodyReader  base;
     KlAllocator  *alloc;
     KlConn       *conn;
-    KlResponse   *res;
+    KlHttpResponse   *res;
     int           responded;
 } EarlyExitErrReader;
 
@@ -252,10 +252,10 @@ static int  eer_err_on_data(KlBodyReader *self, const char *data, size_t len) {
      * structured "handler" response BEFORE returning -1. The new
      * error-path branch in connection.c sees state == SENDING and
      * returns it without overwriting. */
-    kl_response_status(r->res, 413);
-    kl_response_header(r->res, "Content-Type", "text/plain");
+    kl_http_response_status(r->res, 413);
+    kl_http_response_header(r->res, "Content-Type", "text/plain");
     /* 31 bytes — em-dash is 3 bytes UTF-8 */
-    kl_response_body_borrow(r->res, "cap exceeded — handler caught", 31);
+    kl_http_response_body_borrow(r->res, "cap exceeded — handler caught", 31);
     r->conn->state = KL_CONN_SENDING;
     r->responded = 1;
     return -1;   /* simulate body-reader rejection */
@@ -281,10 +281,10 @@ static KlBodyReader *eer_err_factory(KlAllocator *alloc, const KlRequest *req,
     return &r->base;
 }
 
-static void handle_early_exit_err(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_early_exit_err(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     EarlyExitErrReader *r = (EarlyExitErrReader *)req->body_reader;
-    if (!r) { kl_response_error(res, 500, "no reader"); return; }
+    if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
     r->conn = kl_request_conn(req);
     r->res  = res;
     r->conn->state = KL_CONN_READING_BODY;
@@ -306,11 +306,11 @@ static void handle_early_exit_err(KlRequest *req, KlResponse *res, void *ctx) {
  */
 static volatile int eer_async_err_handler_called = 0;
 
-static void handle_early_exit_async_err(KlRequest *req, KlResponse *res,
+static void handle_early_exit_async_err(KlRequest *req, KlHttpResponse *res,
                                           void *ctx) {
     (void)ctx;
     EarlyExitErrReader *r = (EarlyExitErrReader *)req->body_reader;
-    if (!r) { kl_response_error(res, 500, "no reader"); return; }
+    if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
     r->conn = kl_request_conn(req);
     r->res  = res;
     r->conn->state = KL_CONN_READING_BODY;
@@ -357,12 +357,12 @@ static KlBodyReader *noop_factory(KlAllocator *alloc, const KlRequest *req,
 }
 
 /* Handler responds with 401 and returns — never touches body. */
-static void handle_async_sync_reject(KlRequest *req, KlResponse *res,
+static void handle_async_sync_reject(KlRequest *req, KlHttpResponse *res,
                                         void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 401);
-    kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body_borrow(res, "unauthorized", 12);
+    kl_http_response_status(res, 401);
+    kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(res, "unauthorized", 12);
 }
 
 /* ── Mid-stream early-exit fixture ───────────────────────────────────
@@ -386,7 +386,7 @@ typedef struct {
     KlBodyReader  base;
     KlAllocator  *alloc;
     KlConn       *conn;        /* stashed by handler at dispatch time */
-    KlResponse   *res;         /* same */
+    KlHttpResponse   *res;         /* same */
     int           responded;   /* one-shot guard */
 } EarlyExitReader;
 
@@ -398,9 +398,9 @@ static int  eer_on_data(KlBodyReader *self, const char *data, size_t len) {
      * transition state to SENDING. The new mid-stream early-exit
      * branch in connection.c sees the terminal state and returns it
      * instead of forcing READING_BODY. */
-    kl_response_status(r->res, 200);
-    kl_response_header(r->res, "Content-Type", "text/plain");
-    kl_response_body_borrow(r->res, "early exit", 10);
+    kl_http_response_status(r->res, 200);
+    kl_http_response_header(r->res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(r->res, "early exit", 10);
     r->conn->state = KL_CONN_SENDING;
     r->responded = 1;
     return 0;
@@ -426,14 +426,14 @@ static KlBodyReader *eer_factory(KlAllocator *alloc, const KlRequest *req,
     return &r->base;
 }
 
-static void handle_early_exit(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_early_exit(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     /* Stash conn + res on the body reader so on_data can wake "us"
      * with the response. Then yield by leaving state as READING_BODY
      * so conn_invoke_streaming_handler returns READING_BODY and the
      * event loop keeps pumping on_data. */
     EarlyExitReader *r = (EarlyExitReader *)req->body_reader;
-    if (!r) { kl_response_error(res, 500, "no reader"); return; }
+    if (!r) { kl_http_response_error(res, 500, "no reader"); return; }
     r->conn = kl_request_conn(req);
     r->res  = res;
     r->conn->state = KL_CONN_READING_BODY;
@@ -1573,38 +1573,38 @@ UTEST(integration, signal_stop) {
 
 /* ── Middleware integration tests ────────────────────────────────────── */
 
-static int cors_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+static int cors_middleware(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_header(res, "Access-Control-Allow-Origin", "*");
+    kl_http_response_header(res, "Access-Control-Allow-Origin", "*");
     return 0;
 }
 
-static int auth_middleware(KlRequest *req, KlResponse *res, void *ctx) {
+static int auth_middleware(KlRequest *req, KlHttpResponse *res, void *ctx) {
     const char *secret = ctx;
     size_t tok_len;
     const char *tok = kl_request_header_len(req, "Authorization", &tok_len);
     size_t secret_len = strlen(secret);
     if (!tok || tok_len != secret_len || memcmp(tok, secret, secret_len) != 0) {
-        kl_response_error(res, 401, "Unauthorized");
+        kl_http_response_error(res, 401, "Unauthorized");
         return 1;
     }
     return 0;
 }
 
-static void handle_mw_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_mw_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_mw_echo(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_mw_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
-        kl_response_body_borrow(res, br->data, br->len);
+        kl_http_response_body_borrow(res, br->data, br->len);
     else
-        kl_response_body_borrow(res, "no body", 7);
+        kl_http_response_body_borrow(res, "no body", 7);
 }
 
 static KlServer mw_server;
@@ -1714,15 +1714,15 @@ UTEST(integration, middleware_auth_pass) {
     stop_mw_server();
 }
 
-static int mw_add_x_first(KlRequest *req, KlResponse *res, void *ctx) {
+static int mw_add_x_first(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_header(res, "X-First", "1");
+    kl_http_response_header(res, "X-First", "1");
     return 0;
 }
 
-static int mw_add_x_second(KlRequest *req, KlResponse *res, void *ctx) {
+static int mw_add_x_second(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_header(res, "X-Second", "2");
+    kl_http_response_header(res, "X-Second", "2");
     return 0;
 }
 
@@ -1782,9 +1782,9 @@ static void *sc_body_server_thread(void *arg) {
     return NULL;
 }
 
-static int mw_reject_all(KlRequest *req, KlResponse *res, void *ctx) {
+static int mw_reject_all(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_error(res, 403, "Forbidden");
+    kl_http_response_error(res, 403, "Forbidden");
     return 1;
 }
 
@@ -1847,25 +1847,25 @@ UTEST(integration, route_params) {
 
 /* ── Post-body middleware integration tests ──────────────────────────── */
 
-static int post_mw_check_body(KlRequest *req, KlResponse *res, void *ctx) {
+static int post_mw_check_body(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (br && br->len >= 6 && memcmp(br->data, "secret", 6) == 0) {
         return 0;  /* continue to handler */
     }
-    kl_response_error(res, 403, "Forbidden");
+    kl_http_response_error(res, 403, "Forbidden");
     return 1;
 }
 
-static void handle_post_mw_echo(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_post_mw_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
-        kl_response_body_borrow(res, br->data, br->len);
+        kl_http_response_body_borrow(res, br->data, br->len);
     else
-        kl_response_body_borrow(res, "no body", 7);
+        kl_http_response_body_borrow(res, "no body", 7);
 }
 
 static KlServer post_mw_server;

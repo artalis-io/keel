@@ -1,5 +1,5 @@
-#ifndef KEEL_RESPONSE_H
-#define KEEL_RESPONSE_H
+#ifndef KEEL_HTTP_RESPONSE_H
+#define KEEL_HTTP_RESPONSE_H
 
 #include <keel/allocator.h>
 #include <keel/handle.h>
@@ -13,16 +13,16 @@ typedef struct KlTls KlTls;
 struct KlEventCtx;
 
 /** @brief Pluggable write callback — same signature as sh_json's ShJsonWriteFn. */
-typedef int (*KlWriteFn)(void *ctx, const char *data, size_t len);
+typedef int (*KlHttpResponseWriteFn)(void *ctx, const char *data, size_t len);
 
 typedef enum {
-    KL_BODY_NONE,       /**< No body */
-    KL_BODY_BUFFER,     /**< Buffered body */
-    KL_BODY_FILE,       /**< File body (sendfile) */
-    KL_BODY_STREAM      /**< Chunked streaming body */
-} KlBodyMode;
+    KL_HTTP_BODY_NONE,       /**< No body */
+    KL_HTTP_BODY_BUFFER,     /**< Buffered body */
+    KL_HTTP_BODY_FILE,       /**< File body (sendfile) */
+    KL_HTTP_BODY_STREAM      /**< Chunked streaming body */
+} KlHttpBodyMode;
 
-typedef struct KlResponse {
+typedef struct KlHttpResponse {
     KlAllocator *alloc;     /**< Allocator for header buffer */
     KlSocketHandle conn_fd;            /**< Connection file descriptor */
 
@@ -32,12 +32,12 @@ typedef struct KlResponse {
 
     int status;             /**< HTTP status code */
     int headers_sent;       /**< 1 if headers already flushed */
-    KlBodyMode body_mode;   /**< Body mode (none/buffer/file/stream) */
+    KlHttpBodyMode body_mode;   /**< Body mode (none/buffer/file/stream) */
 
     const char *body;       /**< Buffered body pointer (borrowed) */
     size_t body_len;        /**< Buffered body length */
 
-    char *body_owned;       /**< Owned body copy (for kl_response_body_copy) */
+    char *body_owned;       /**< Owned body copy (for kl_http_response_body_copy) */
     size_t body_owned_size; /**< Owned body copy size */
 
     int file_fd;            /**< File descriptor for sendfile */
@@ -59,7 +59,7 @@ typedef struct KlResponse {
     KlTls *tls;             /**< TLS session (NULL for plaintext) */
     struct KlEventCtx *ctx; /**< Back-pointer to event ctx (for ctx->sockets;
                                  bound with conn_fd, preserved across reset) */
-} KlResponse;
+} KlHttpResponse;
 
 /**
  * @brief Initialize a response, allocating the header buffer.
@@ -67,20 +67,20 @@ typedef struct KlResponse {
  * @param alloc Allocator for header buffer growth.
  * @return 0 on success, -1 on allocation failure.
  */
-int  kl_response_init(KlResponse *res, KlAllocator *alloc);
+int  kl_http_response_init(KlHttpResponse *res, KlAllocator *alloc);
 
 /** @brief Fast reinit for keep-alive — reuses header buffer, no alloc. */
-void kl_response_reset(KlResponse *res);
+void kl_http_response_reset(KlHttpResponse *res);
 
 /** @brief Set the HTTP status code (default 200). */
-void kl_response_status(KlResponse *res, int code);
+void kl_http_response_status(KlHttpResponse *res, int code);
 
 /**
  * @brief Append a header. Both name and value must be null-terminated.
  *        Strings containing CR or LF are rejected (header injection guard).
  * @return 0 on success, -1 on failure (CRLF injection, NULL args, alloc failure).
  */
-int kl_response_header(KlResponse *res, const char *name, const char *value);
+int kl_http_response_header(KlHttpResponse *res, const char *name, const char *value);
 
 /**
  * @brief Set a buffered body (pointer is borrowed, not copied).
@@ -88,13 +88,13 @@ int kl_response_header(KlResponse *res, const char *name, const char *value);
  * @param data Body bytes (must remain valid until send completes).
  * @param len  Length in bytes.
  */
-void kl_response_body_borrow(KlResponse *res, const char *data, size_t len);
+void kl_http_response_body_borrow(KlHttpResponse *res, const char *data, size_t len);
 
 /**
  * @brief Set a buffered body by copying data into an owned buffer.
  *
- * Unlike kl_response_body_borrow(), the data is copied into a response-owned
- * allocation that is freed by kl_response_reset() / kl_response_free().
+ * Unlike kl_http_response_body_borrow(), the data is copied into a response-owned
+ * allocation that is freed by kl_http_response_reset() / kl_http_response_free().
  * Safe when the source may be freed before the response is sent.
  *
  * @param res  Response.
@@ -102,7 +102,7 @@ void kl_response_body_borrow(KlResponse *res, const char *data, size_t len);
  * @param len  Length in bytes.
  * @return 0 on success, -1 on allocation failure.
  */
-int kl_response_body_copy(KlResponse *res, const char *data, size_t len);
+int kl_http_response_body_copy(KlHttpResponse *res, const char *data, size_t len);
 
 /**
  * @brief Set a file body for zero-copy sendfile transfer.
@@ -110,26 +110,26 @@ int kl_response_body_copy(KlResponse *res, const char *data, size_t len);
  * @param fd   Open file descriptor (ownership transferred to response).
  * @param size File size in bytes.
  */
-void kl_response_file(KlResponse *res, KlSocketHandle fd, uint64_t size);
+void kl_http_response_file(KlHttpResponse *res, KlSocketHandle fd, uint64_t size);
 
 /** @brief Free response resources (header buffer, close file fd). */
-void kl_response_free(KlResponse *res);
+void kl_http_response_free(KlHttpResponse *res);
 
 /**
  * @brief Convenience: set status, Content-Type: application/json, and body.
  */
-int kl_response_json(KlResponse *res, int code, const char *json, size_t len);
+int kl_http_response_json(KlHttpResponse *res, int code, const char *json, size_t len);
 
 /**
  * @brief Convenience: set status, Content-Type: text/plain, and error message.
  * @return 0 on success, -1 on header append failure.
  */
-int kl_response_error(KlResponse *res, int code, const char *message);
+int kl_http_response_error(KlHttpResponse *res, int code, const char *message);
 
 /**
  * @brief Enable drain-based backpressure for chunked streaming.
  *
- * Must be called before kl_response_begin_stream(). When enabled,
+ * Must be called before kl_http_response_begin_stream(). When enabled,
  * kl_stream_write() buffers data on would-block instead of spin-looping.
  *
  * @param res      Response.
@@ -137,7 +137,7 @@ int kl_response_error(KlResponse *res, int code, const char *message);
  * @param max_size Hard cap on buffered bytes (0 = unlimited).
  * @return 0 on success, -1 on error.
  */
-int kl_response_enable_drain(KlResponse *res, KlAllocator *alloc,
+int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
                               size_t max_size);
 
 /**
@@ -148,19 +148,19 @@ int kl_response_enable_drain(KlResponse *res, KlAllocator *alloc,
  * @param out_ctx   Receives the write callback context.
  * @return 0 on success, -1 on write error.
  */
-int kl_response_begin_stream(KlResponse *res, int status,
-                             KlWriteFn *out_write, void **out_ctx);
+int kl_http_response_begin_stream(KlHttpResponse *res, int status,
+                             KlHttpResponseWriteFn *out_write, void **out_ctx);
 
 /**
  * @brief End chunked stream (sends final zero-length chunk).
  * @return 0 on success, -1 on error.
  */
-int kl_response_end_stream(KlResponse *res);
+int kl_http_response_end_stream(KlHttpResponse *res);
 
 /**
  * @brief Flush headers + body to the connection fd.
  * @return 0 when done, positive if more to send, -1 on error.
  */
-int kl_response_send(KlResponse *res);
+int kl_http_response_send(KlHttpResponse *res);
 
 #endif

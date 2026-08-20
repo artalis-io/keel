@@ -80,9 +80,9 @@ static KlBodyReader *rfc_factory(KlAllocator *alloc, const KlRequest *req, void 
     return &r->base;
 }
 
-static void rfc_handler(KlRequest *req, KlResponse *res, void *ctx) {
+static void rfc_handler(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 static KlServer g_srv;

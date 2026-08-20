@@ -150,20 +150,20 @@ static int handler_status = 200;
 static const char *handler_body = "{\"ok\":true}";
 static size_t handler_body_len = 11;
 
-static void test_handler(KlRequest *req, KlResponse *res, void *ud) {
+static void test_handler(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     handler_called++;
-    kl_response_json(res, handler_status, handler_body, handler_body_len);
+    kl_http_response_json(res, handler_status, handler_body, handler_body_len);
 }
 
 static int middleware_called = 0;
 static int middleware_return = 0;  /* 0 = continue */
 
-static int test_middleware(KlRequest *req, KlResponse *res, void *ud) {
+static int test_middleware(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     middleware_called++;
     if (middleware_return != 0) {
-        kl_response_error(res, 403, "Forbidden");
+        kl_http_response_error(res, 403, "Forbidden");
     }
     return middleware_return;
 }
@@ -1052,7 +1052,7 @@ UTEST(h2, response_header_extraction) {
                                NULL, 0, NULL, NULL, NULL, NULL, 0);
     mock.callbacks.on_stream_end(mock.cb_user_data, 1);
 
-    /* Handler called kl_response_json → submit_response should have
+    /* Handler called kl_http_response_json → submit_response should have
      * Content-Type header and correct body */
     ASSERT_EQ(mock.submit_count, 1);
     ASSERT_EQ(mock.last_status, 200);

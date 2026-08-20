@@ -101,11 +101,11 @@ static const char KEY_PEM[] =
 /* ── server handler: a known, non-trivial body (byte-exactness proof) ────────── */
 #define WANT_BODY "{\"lc4\":true,\"raw\":\"tls\",\"loop\":\"lwip\",\"n\":424242}"
 
-static void handle_root(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/json");
-    kl_response_body_copy(res, WANT_BODY, sizeof(WANT_BODY) - 1);   /* COPY: survives async send */
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/json");
+    kl_http_response_body_copy(res, WANT_BODY, sizeof(WANT_BODY) - 1);   /* COPY: survives async send */
 }
 
 /* ── client completion state (all fields touched only on the loop thread) ─────── */

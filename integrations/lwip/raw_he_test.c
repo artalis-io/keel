@@ -112,11 +112,11 @@ static HeResolver g_res_blackhole = { { he_resolve, he_cancel, he_destroy }, { N
 /* ── server handler: a known, non-trivial body (byte-exactness proof) ────────── */
 #define WANT_BODY "{\"lc2\":true,\"raw\":\"happy-eyeballs\",\"n\":67890}"
 
-static void handle_root(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/json");
-    kl_response_body_copy(res, WANT_BODY, sizeof(WANT_BODY) - 1);   /* COPY: survives async send */
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/json");
+    kl_http_response_body_copy(res, WANT_BODY, sizeof(WANT_BODY) - 1);   /* COPY: survives async send */
 }
 
 /* ── per-case client state (all fields touched only on the loop thread) ───────── */

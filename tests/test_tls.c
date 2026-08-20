@@ -277,8 +277,8 @@ UTEST(tls, response_send_through_mock) {
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     /* Use a pipe for conn_fd (writev_all needs a valid fd for the
      * plaintext codepath, but TLS path ignores it — the mock captures
@@ -288,11 +288,11 @@ UTEST(tls, response_send_through_mock) {
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_json(&res, 200, "{\"tls\":true}", 12);
+    kl_http_response_json(&res, 200, "{\"tls\":true}", 12);
 
     /* Buffer body sends may return 1 (partial) via try_writev — loop */
     int r;
-    do { r = kl_response_send(&res); } while (r == 1);
+    do { r = kl_http_response_send(&res); } while (r == 1);
     ASSERT_EQ(r, 0);
 
     /* Verify the mock captured the full response */
@@ -306,7 +306,7 @@ UTEST(tls, response_send_through_mock) {
 
     kl_test_closesock(pipefd[0]);
     kl_test_closesock(pipefd[1]);
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(tls, response_stream_through_mock) {
@@ -315,24 +315,24 @@ UTEST(tls, response_stream_through_mock) {
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     int pipefd[2];
     ASSERT_EQ(kl_test_socketpair(pipefd), 0);
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_header(&res, "Content-Type", "text/plain");
+    kl_http_response_header(&res, "Content-Type", "text/plain");
 
-    KlWriteFn write_fn;
+    KlHttpResponseWriteFn write_fn;
     void *write_ctx;
-    ASSERT_EQ(kl_response_begin_stream(&res, 200, &write_fn, &write_ctx), 0);
+    ASSERT_EQ(kl_http_response_begin_stream(&res, 200, &write_fn, &write_ctx), 0);
 
     write_fn(write_ctx, "hello", 5);
     write_fn(write_ctx, " world", 6);
 
-    ASSERT_EQ(kl_response_end_stream(&res), 0);
+    ASSERT_EQ(kl_http_response_end_stream(&res), 0);
 
     /* Verify chunked encoding in mock buffer */
     m.write_buf[m.write_len] = '\0';
@@ -343,7 +343,7 @@ UTEST(tls, response_stream_through_mock) {
 
     kl_test_closesock(pipefd[0]);
     kl_test_closesock(pipefd[1]);
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 #if !defined(_WIN32)   /* mkstemp + hardcoded /tmp path — POSIX-specific */
@@ -353,8 +353,8 @@ UTEST(tls, response_file_through_mock) {
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     /* Create a temp file with known content */
     char tmppath[] = "/tmp/keel_test_tls_XXXXXX";
@@ -369,10 +369,10 @@ UTEST(tls, response_file_through_mock) {
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_file(&res, tmpfd, (uint64_t)file_len);
+    kl_http_response_file(&res, tmpfd, (uint64_t)file_len);
 
     /* Send headers + file */
-    int r = kl_response_send(&res);
+    int r = kl_http_response_send(&res);
     ASSERT_EQ(r, 0);
 
     /* Verify the mock captured headers and file content */
@@ -383,19 +383,19 @@ UTEST(tls, response_file_through_mock) {
     close(pipefd[0]);
     close(pipefd[1]);
     /* tmpfd is owned by res, closed by response_free */
-    kl_response_free(&res);
+    kl_http_response_free(&res);
     unlink(tmppath);
 }
 
 UTEST(tls, file_send_yields_on_want_write) {
     /* Mock that returns 0 (WANT_WRITE) on first write of file data
-     * should cause kl_response_send to return 1 (more to send) */
+     * should cause kl_http_response_send to return 1 (more to send) */
     MockTls m;
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     /* Create a temp file */
     char tmppath[] = "/tmp/keel_test_tls_yield_XXXXXX";
@@ -410,10 +410,10 @@ UTEST(tls, file_send_yields_on_want_write) {
 
     res.conn_fd = pipefd[1];
     res.tls = &m.base;
-    kl_response_file(&res, tmpfd, (uint64_t)data_len);
+    kl_http_response_file(&res, tmpfd, (uint64_t)data_len);
 
     /* First send: headers go through, file send starts */
-    int r = kl_response_send(&res);
+    int r = kl_http_response_send(&res);
     /* Should complete since our mock has space */
     ASSERT_EQ(r, 0);
 
@@ -422,7 +422,7 @@ UTEST(tls, file_send_yields_on_want_write) {
 
     close(pipefd[0]);
     close(pipefd[1]);
-    kl_response_free(&res);
+    kl_http_response_free(&res);
     unlink(tmppath);
 }
 #endif /* !_WIN32 */
@@ -434,17 +434,17 @@ UTEST(tls, response_reset_preserves_tls) {
     mock_tls_init(&m);
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
     res.tls = &m.base;
     res.conn_fd = 42;
 
     /* Add some headers to make the response non-empty */
-    kl_response_header(&res, "X-Test", "value");
+    kl_http_response_header(&res, "X-Test", "value");
     ASSERT_TRUE(res.hdr_len > 0);
 
     /* Reset for keep-alive */
-    kl_response_reset(&res);
+    kl_http_response_reset(&res);
 
     /* TLS pointer must survive the reset */
     ASSERT_EQ(res.tls, &m.base);
@@ -455,7 +455,7 @@ UTEST(tls, response_reset_preserves_tls) {
     /* Status reset */
     ASSERT_EQ(res.status, 200);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 /* ── Shutdown WANT_WRITE retry ───────────────────────────────────── */

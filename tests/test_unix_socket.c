@@ -22,7 +22,7 @@ static char       g_captured_label[256];
 static int        g_label_rc = -2;
 static int        g_addr_rc = -2;
 
-static void unix_handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
+static void unix_handle_whoami(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     char ip[64];
     uint16_t port = 0;
@@ -30,7 +30,7 @@ static void unix_handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
     g_label_rc = kl_request_peer_label(req, g_captured_label,
                                        sizeof(g_captured_label));
     g_addr_rc = kl_request_peer_addr(req, ip, sizeof(ip), &port);
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* WS server-side peer-cred capture (set in on_open, post-upgrade). */
@@ -99,10 +99,10 @@ static int unix_run_until_done(KlEventCtx *ev, UnixAsyncCtx *ctx, int timeout_ms
     return ctx->done ? 0 : -1;
 }
 
-static void unix_handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void unix_handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req;
     (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 static void *unix_server_thread(void *arg) {
@@ -111,11 +111,11 @@ static void *unix_server_thread(void *arg) {
 }
 
 /* 302 → relative /hello (redirect-over-unix). */
-static void unix_handle_redirect(KlRequest *req, KlResponse *res, void *ctx) {
+static void unix_handle_redirect(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 302);
-    kl_response_header(res, "Location", "/hello");
-    kl_response_body_borrow(res, "moved", 5);
+    kl_http_response_status(res, 302);
+    kl_http_response_header(res, "Location", "/hello");
+    kl_http_response_body_borrow(res, "moved", 5);
 }
 
 /* WebSocket echo callbacks (server side). */

@@ -97,15 +97,15 @@ UTEST(cors, middleware_no_origin) {
     req.path = "/api"; req.path_len = 4;
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     /* No Origin header — should pass through, no CORS headers added */
     int rc = kl_cors_middleware(&req, &res, &c);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(res.hdr_len, (size_t)0);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(cors, middleware_wildcard_origin) {
@@ -121,15 +121,15 @@ UTEST(cors, middleware_wildcard_origin) {
     req.num_headers = 1;
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     int rc = kl_cors_middleware(&req, &res, &c);
     ASSERT_EQ(rc, 0);  /* continue */
     /* Should have Access-Control-Allow-Origin: * */
     ASSERT_TRUE(res.hdr_len > 0);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(cors, middleware_specific_origin) {
@@ -145,14 +145,14 @@ UTEST(cors, middleware_specific_origin) {
     req.num_headers = 1;
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     int rc = kl_cors_middleware(&req, &res, &c);
     ASSERT_EQ(rc, 0);
     ASSERT_TRUE(res.hdr_len > 0);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(cors, middleware_disallowed_origin) {
@@ -168,14 +168,14 @@ UTEST(cors, middleware_disallowed_origin) {
     req.num_headers = 1;
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     int rc = kl_cors_middleware(&req, &res, &c);
     ASSERT_EQ(rc, 0);  /* continues, but no CORS headers */
     ASSERT_EQ(res.hdr_len, (size_t)0);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(cors, middleware_preflight) {
@@ -190,15 +190,15 @@ UTEST(cors, middleware_preflight) {
     req.num_headers = 1;
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     int rc = kl_cors_middleware(&req, &res, &c);
     ASSERT_EQ(rc, 1);  /* short-circuit */
     ASSERT_EQ(res.status, 204);
     ASSERT_TRUE(res.hdr_len > 0);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(cors, middleware_preflight_disallowed) {
@@ -214,14 +214,14 @@ UTEST(cors, middleware_preflight_disallowed) {
     req.num_headers = 1;
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     int rc = kl_cors_middleware(&req, &res, &c);
     ASSERT_EQ(rc, 0);  /* disallowed origin — no CORS, no preflight */
     ASSERT_EQ(res.hdr_len, (size_t)0);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST(cors, middleware_credentials) {
@@ -238,14 +238,14 @@ UTEST(cors, middleware_credentials) {
     req.num_headers = 1;
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     kl_cors_middleware(&req, &res, &c);
     /* Should contain both Allow-Origin and Allow-Credentials */
     ASSERT_TRUE(res.hdr_len > 0);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 /* ── Audit coverage ────────────────────────────────────────────────── */
@@ -256,14 +256,14 @@ UTEST(cors, middleware_null_user_data) {
     req.path = "/api"; req.path_len = 4;
 
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     /* NULL user_data should return 0 (pass-through), not crash */
     int rc = kl_cors_middleware(&req, &res, NULL);
     ASSERT_EQ(rc, 0);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST_MAIN();

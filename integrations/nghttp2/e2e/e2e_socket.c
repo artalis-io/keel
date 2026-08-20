@@ -30,9 +30,9 @@ static int fail(const char *m) { fprintf(stderr, "FAIL: %s\n", m); return 1; }
 
 /* ── server side ────────────────────────────────────────────────────── */
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_json(res, 200, "{\"msg\":\"hello h2 e2e\"}", 21);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello h2 e2e\"}", 21);
 }
 
 static KlServer g_srv;

@@ -57,11 +57,11 @@ static void pt_install_peer_cert(void) {
 static int        g_rc = -2;
 static KlPeerCert g_cert;
 
-static void handle(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&g_cert, 0xAA, sizeof(g_cert));   /* poison to prove it gets filled */
     g_rc = kl_request_peer_cert(req, &g_cert);
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 static void *srv_thread(void *a) { kl_server_run((KlServer *)a); return NULL; }

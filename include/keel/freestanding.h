@@ -65,7 +65,7 @@ int         kl_version_number(void);
 #include <keel/tls.h>
 #include <keel/h2.h>
 #include <keel/h2_client.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/file_io.h>
 
 #endif /* KEEL_FREESTANDING_H */

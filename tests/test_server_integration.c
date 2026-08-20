@@ -12,18 +12,18 @@
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* A large body forces partial sends through the serialized writev fallback. */
 static char g_big_body[64 * 1024];
-static void handle_big(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_big(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     for (size_t i = 0; i < sizeof(g_big_body); i++)
         g_big_body[i] = (char)('A' + (i % 26));
-    kl_response_json(res, 200, g_big_body, sizeof(g_big_body));
+    kl_http_response_json(res, 200, g_big_body, sizeof(g_big_body));
 }
 
 /* ── A provider with native fds but NO vectored/sendfile support: forces the
@@ -43,21 +43,21 @@ static const KlSocketProvider g_noviv = { &NOVIV_OPS, NULL, KL_SOCK_CAP_NATIVE_F
  * sendfile_fallback test, which is POSIX-only (hardcoded /tmp + CRT file I/O). */
 #if !defined(_WIN32)
 static char g_file_path[256];
-static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_file(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = open(g_file_path, O_RDONLY);
-    if (fd < 0) { kl_response_json(res, 500, "{}", 2); return; }
+    if (fd < 0) { kl_http_response_json(res, 500, "{}", 2); return; }
     struct stat st;
-    if (fstat(fd, &st) != 0) { close(fd); kl_response_json(res, 500, "{}", 2); return; }
-    kl_response_file(res, fd, st.st_size);   /* Keel closes fd on reset */
+    if (fstat(fd, &st) != 0) { close(fd); kl_http_response_json(res, 500, "{}", 2); return; }
+    kl_http_response_file(res, fd, st.st_size);   /* Keel closes fd on reset */
 }
 #endif
 
-static void handle_slow(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_slow(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int delay_ms = ctx ? *(int *)ctx : 100;
     usleep((unsigned)(delay_ms * 1000));
-    kl_response_json(res, 200, "{\"slow\":true}", 13);
+    kl_http_response_json(res, 200, "{\"slow\":true}", 13);
 }
 
 static void *server_thread_fn(void *arg) {
@@ -586,7 +586,7 @@ UTEST(server_integration, serialized_writev_fallback) {
     kl_server_free(&srv);
 }
 
-/* A provider without KL_SOCK_CAP_SENDFILE makes response.c serve KL_BODY_FILE
+/* A provider without KL_SOCK_CAP_SENDFILE makes response.c serve KL_HTTP_BODY_FILE
  * via pread + kl_sock_send instead of sendfile(); the file body must arrive
  * byte-correct. */
 #if !defined(_WIN32)   /* hardcoded /tmp path + CRT file I/O — POSIX-specific */

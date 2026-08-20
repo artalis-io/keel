@@ -48,7 +48,7 @@ static void done_fn(void *user_data) {
     if (n < 0) n = 0;
 
     KlConn *conn = ctx->op.conn;
-    kl_response_json(&conn->res, 200, body, (size_t)n);
+    kl_http_response_json(&conn->res, 200, body, (size_t)n);
 
     kl_async_complete(ctx->server, &ctx->op);
     free(ctx);
@@ -74,7 +74,7 @@ typedef struct {
     KlThreadPool *pool;
 } AppCtx;
 
-static void handle_work(KlRequest *req, KlResponse *res, void *user_data,
+static void handle_work(KlRequest *req, KlHttpResponse *res, void *user_data,
                          int work_ms) {
     (void)res;
     AppCtx *app = user_data;
@@ -82,7 +82,7 @@ static void handle_work(KlRequest *req, KlResponse *res, void *user_data,
 
     WorkCtx *ctx = malloc(sizeof(*ctx));
     if (!ctx) {
-        kl_response_error(res, 500, "Out of memory");
+        kl_http_response_error(res, 500, "Out of memory");
         return;
     }
     memset(ctx, 0, sizeof(*ctx));
@@ -101,23 +101,23 @@ static void handle_work(KlRequest *req, KlResponse *res, void *user_data,
         .user_data = ctx,
     };
     if (kl_thread_pool_submit(app->pool, &item) < 0) {
-        kl_response_error(res, 503, "Server busy");
+        kl_http_response_error(res, 503, "Server busy");
         kl_async_complete(app->server, &ctx->op);
         free(ctx);
     }
 }
 
-static void handle_fast(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_fast(KlRequest *req, KlHttpResponse *res, void *user_data) {
     handle_work(req, res, user_data, 10);
 }
 
-static void handle_slow(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_slow(KlRequest *req, KlHttpResponse *res, void *user_data) {
     handle_work(req, res, user_data, 200);
 }
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */

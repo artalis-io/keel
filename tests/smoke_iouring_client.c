@@ -30,9 +30,9 @@ static void nap_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 
-static void handle_root(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_json(res, 200, WANT, sizeof(WANT) - 1);
+    kl_http_response_json(res, 200, WANT, sizeof(WANT) - 1);
 }
 
 static void *server_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }

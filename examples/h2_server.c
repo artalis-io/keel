@@ -80,9 +80,9 @@ static KlH2ServerSession *stub_factory(KlAllocator *alloc,
 
 /* ── Handlers ─────────────────────────────────────────────────────── */
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello from h2\"}", 22);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello from h2\"}", 22);
 }
 
 int main(int argc, char **argv) {

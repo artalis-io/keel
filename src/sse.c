@@ -1,13 +1,13 @@
 #include <keel/sse.h>
 #include <string.h>
 
-int kl_sse_begin(KlResponse *res, KlSse *sse) {
+int kl_sse_begin(KlHttpResponse *res, KlSse *sse) {
     if (!res || !sse) return -1;
-    if (kl_response_header(res, "Content-Type", "text/event-stream") < 0)
+    if (kl_http_response_header(res, "Content-Type", "text/event-stream") < 0)
         return -1;
-    if (kl_response_header(res, "Cache-Control", "no-cache") < 0)
+    if (kl_http_response_header(res, "Cache-Control", "no-cache") < 0)
         return -1;
-    if (kl_response_begin_stream(res, 200, &sse->write_fn, &sse->write_ctx) < 0)
+    if (kl_http_response_begin_stream(res, 200, &sse->write_fn, &sse->write_ctx) < 0)
         return -1;
     sse->res = res;
     return 0;
@@ -65,5 +65,5 @@ int kl_sse_comment(KlSse *sse, const char *text, size_t len) {
 
 int kl_sse_end(KlSse *sse) {
     if (!sse) return -1;
-    return kl_response_end_stream(sse->res);
+    return kl_http_response_end_stream(sse->res);
 }

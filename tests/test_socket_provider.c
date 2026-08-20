@@ -538,9 +538,9 @@ static const KlSocketOps deco_ops = {
  * guard rejects it (its ops are never invoked). */
 static const KlSocketOps nonnative_ops = { .name = "nonnative" };
 
-static void deco_ok_handler(KlRequest *req, KlResponse *res, void *u) {
+static void deco_ok_handler(KlRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 static void *deco_server_thread(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
 

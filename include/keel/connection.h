@@ -6,7 +6,7 @@
 #include <keel/chunked.h>
 #include <keel/file_io.h>
 #include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/parser.h>
 #include <keel/router.h>
 #include <stddef.h>
@@ -60,7 +60,7 @@ typedef struct KlConn {
     size_t max_header_size;     /**< Max header size (from KlConfig) */
 
     KlRequest req;              /**< Current request */
-    KlResponse res;             /**< Current response */
+    KlHttpResponse res;             /**< Current response */
     KlParser *parser;           /**< HTTP parser */
 
     size_t hdr_sent;            /**< Header bytes sent */

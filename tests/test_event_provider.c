@@ -89,9 +89,9 @@ static const KlEventProvider EP_PROVIDER = { &EP_OPS, "test-poll" };
 
 #define EPP_PORT 18499
 static int g_handler_called;
-static void epp_handler(KlRequest *req, KlResponse *res, void *ud) {
+static void epp_handler(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud; g_handler_called++;
-    kl_response_json(res, 200, "{\"backend\":\"custom\"}", 20);
+    kl_http_response_json(res, 200, "{\"backend\":\"custom\"}", 20);
 }
 static KlServer g_srv;
 static void *epp_thread(void *a) { (void)a; kl_server_run(&g_srv); return NULL; }

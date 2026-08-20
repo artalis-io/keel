@@ -1,7 +1,7 @@
 /*
  * static_files.c — Static file server with sendfile
  *
- * Concepts: kl_response_file (sendfile), MIME type detection, path
+ * Concepts: kl_http_response_file (sendfile), MIME type detection, path
  * traversal guard, wildcard route.
  *
  * Build:  make examples
@@ -29,7 +29,7 @@ static const char *mime_type(const char *path, size_t len) {
     return "application/octet-stream";
 }
 
-static void handle_static(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_static(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
 
     /* Reject path traversal — portable check (req->path is not null-terminated) */
@@ -38,7 +38,7 @@ static void handle_static(KlRequest *req, KlResponse *res, void *ctx) {
         if (req->path[i] == '.' && req->path[i + 1] == '.') { has_dotdot = 1; break; }
     }
     if (has_dotdot) {
-        kl_response_error(res, 403, "Forbidden");
+        kl_http_response_error(res, 403, "Forbidden");
         return;
     }
 
@@ -49,21 +49,21 @@ static void handle_static(KlRequest *req, KlResponse *res, void *ctx) {
 
     int fd = open(filepath, O_RDONLY);
     if (fd < 0) {
-        kl_response_error(res, 404, "Not Found");
+        kl_http_response_error(res, 404, "Not Found");
         return;
     }
 
     struct stat st;
     if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
         close(fd);
-        kl_response_error(res, 404, "Not Found");
+        kl_http_response_error(res, 404, "Not Found");
         return;
     }
 
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type",
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type",
                        mime_type(req->path, req->path_len));
-    kl_response_file(res, fd, st.st_size);
+    kl_http_response_file(res, fd, st.st_size);
 }
 
 int main(void) {

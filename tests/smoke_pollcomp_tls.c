@@ -32,34 +32,34 @@ static void nap_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 
-static void h_ok(KlRequest *q, KlResponse *r, void *c) {
+static void h_ok(KlRequest *q, KlHttpResponse *r, void *c) {
     (void)q; (void)c;
-    kl_response_json(r, 200, BODY, sizeof(BODY) - 1);
+    kl_http_response_json(r, 200, BODY, sizeof(BODY) - 1);
 }
-static void h_echo(KlRequest *q, KlResponse *r, void *c) {
+static void h_echo(KlRequest *q, KlHttpResponse *r, void *c) {
     (void)c;
     KlBufReader *br = (KlBufReader *)q->body_reader;
-    if (!br || br->len == 0) { kl_response_error(r, 400, "body required"); return; }
-    kl_response_status(r, 200);
-    kl_response_body_borrow(r, br->data, br->len);
+    if (!br || br->len == 0) { kl_http_response_error(r, 400, "body required"); return; }
+    kl_http_response_status(r, 200);
+    kl_http_response_body_borrow(r, br->data, br->len);
 }
-static void h_file(KlRequest *q, KlResponse *r, void *c) {
+static void h_file(KlRequest *q, KlHttpResponse *r, void *c) {
     (void)q; (void)c;
     int fd = open(FPATH, O_RDONLY);
-    if (fd < 0) { kl_response_error(r, 500, "open"); return; }
+    if (fd < 0) { kl_http_response_error(r, 500, "open"); return; }
     off_t sz = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);
-    kl_response_status(r, 200);
-    kl_response_file(r, (KlSocketHandle)fd, sz);
+    kl_http_response_status(r, 200);
+    kl_http_response_file(r, (KlSocketHandle)fd, sz);
 }
-static void h_stream(KlRequest *q, KlResponse *r, void *c) {
+static void h_stream(KlRequest *q, KlHttpResponse *r, void *c) {
     (void)q; (void)c;
-    KlWriteFn w = NULL;
+    KlHttpResponseWriteFn w = NULL;
     void *wc = NULL;
-    if (kl_response_begin_stream(r, 200, &w, &wc) < 0) return;
+    if (kl_http_response_begin_stream(r, 200, &w, &wc) < 0) return;
     w(wc, "tls-chunk-one;", 14);
     w(wc, "tls-chunk-two", 13);
-    kl_response_end_stream(r);
+    kl_http_response_end_stream(r);
 }
 
 static KlServer g_srv;

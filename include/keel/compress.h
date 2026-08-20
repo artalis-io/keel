@@ -2,7 +2,7 @@
 #define KEEL_COMPRESS_H
 
 #include <keel/allocator.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <stddef.h>
 
 /**
@@ -93,9 +93,9 @@ typedef struct KlCompressConfig {
  */
 typedef struct {
     KlCompress  *comp;       /**< Compression session (owned) */
-    KlWriteFn    write_fn;   /**< Underlying chunked stream write */
+    KlHttpResponseWriteFn    write_fn;   /**< Underlying chunked stream write */
     void        *write_ctx;  /**< Underlying chunked stream context */
-    KlResponse  *res;        /**< Response (for end_stream) */
+    KlHttpResponse  *res;        /**< Response (for end_stream) */
     KlAllocator *alloc;      /**< For destroying comp */
     int          error;      /**< Sticky error flag */
 } KlCompressStream;
@@ -113,7 +113,7 @@ typedef struct {
  * @param len  Body data length.
  * @return 0 on success, -1 on error.
  */
-int kl_response_body_compress(KlResponse *res, KlCompressConfig *cfg,
+int kl_http_response_body_compress(KlHttpResponse *res, KlCompressConfig *cfg,
                                const char *data, size_t len);
 
 /**
@@ -128,7 +128,7 @@ int kl_response_body_compress(KlResponse *res, KlCompressConfig *cfg,
  * @param cs     Compress stream handle to initialize (caller-owned).
  * @return 0 on success, -1 on error.
  */
-int kl_compress_stream_begin(KlResponse *res, KlCompressConfig *cfg,
+int kl_compress_stream_begin(KlHttpResponse *res, KlCompressConfig *cfg,
                               int status, KlCompressStream *cs);
 
 /**

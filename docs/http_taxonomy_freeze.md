@@ -515,8 +515,11 @@ change **only** as mechanically forced by a renamed embedded type.
 
 Validation each code increment (T2–T4): full default suite; `debug-test` ASan/UBSan; pollcomp +
 container io_uring suites; MinGW cross-compile; EFI host-mock + lwIP + freestanding gates; cppcheck;
-`check-tier1-boundary`; `check-sockaddr-neutral`; `check-doc-refs`; `check-no-kludp`; `git diff --check`;
-and a symbol scan proving no unintended old public name remains. Review each renamed callback/vtable for
+`make bench-build` (compile-only benchmark — a public-API consumer OUTSIDE src/tests/examples that a
+headline rename can otherwise miss, e.g. `bench/bench_server.c`); `check-tier1-boundary`;
+`check-sockaddr-neutral`; `check-doc-refs`; `check-no-kludp`; `git diff --check`; and a tree-wide symbol
+scan (src/include/tests/examples/parsers/integrations/bench + Makefile) proving no unintended old public
+name remains. Review each renamed callback/vtable for
 type-correct function-pointer signatures and ownership/lifetime; ensure installed headers stay
 self-contained after `git mv`; ensure examples/tests consume public names (no private aliases).
 

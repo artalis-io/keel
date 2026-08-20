@@ -1,7 +1,7 @@
 #ifndef KEEL_SSE_H
 #define KEEL_SSE_H
 
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <stddef.h>
 
 /**
@@ -11,9 +11,9 @@
  * All writes go through write_fn — zero allocation.
  */
 typedef struct {
-    KlWriteFn  write_fn;   /**< Chunked stream write callback */
+    KlHttpResponseWriteFn  write_fn;   /**< Chunked stream write callback */
     void      *write_ctx;  /**< Chunked stream write context */
-    KlResponse *res;       /**< Response (for end_stream) */
+    KlHttpResponse *res;       /**< Response (for end_stream) */
 } KlSse;
 
 /**
@@ -26,7 +26,7 @@ typedef struct {
  * @param sse  SSE handle to initialize (caller-owned).
  * @return 0 on success, -1 on failure.
  */
-int kl_sse_begin(KlResponse *res, KlSse *sse);
+int kl_sse_begin(KlHttpResponse *res, KlSse *sse);
 
 /**
  * @brief Send an SSE event.
@@ -61,7 +61,7 @@ int kl_sse_comment(KlSse *sse, const char *text, size_t len);
 /**
  * @brief End the SSE stream.
  *
- * Sends the final zero-length chunk via kl_response_end_stream.
+ * Sends the final zero-length chunk via kl_http_response_end_stream.
  *
  * @param sse  SSE handle.
  * @return 0 on success, -1 on error.

@@ -130,118 +130,118 @@ static const char *test_url(const char *path) {
 
 /* ── Server handlers ─────────────────────────────────────────────── */
 
-static void handle_dest(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_dest(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body_borrow(res, req->method, strlen(req->method));
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(res, req->method, strlen(req->method));
 }
 
-static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
-        kl_response_body_borrow(res, br->data, br->len);
+        kl_http_response_body_borrow(res, br->data, br->len);
     else
-        kl_response_body_borrow(res, "no body", 7);
+        kl_http_response_body_borrow(res, "no body", 7);
 }
 
-static void handle_auth_check(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_auth_check(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     const char *auth = kl_request_header(req, "Authorization");
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
     if (auth)
-        kl_response_body_borrow(res, auth, strlen(auth));
+        kl_http_response_body_borrow(res, auth, strlen(auth));
     else
-        kl_response_body_borrow(res, "none", 4);
+        kl_http_response_body_borrow(res, "none", 4);
 }
 
-static void handle_301(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_301(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 301);
+    kl_http_response_status(res, 301);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/dest", redir_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "moved", 5);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "moved", 5);
 }
 
-static void handle_302(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_302(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 302);
+    kl_http_response_status(res, 302);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/dest", redir_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "found", 5);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "found", 5);
 }
 
-static void handle_303(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_303(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 303);
+    kl_http_response_status(res, 303);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/dest", redir_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "see other", 9);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "see other", 9);
 }
 
-static void handle_307(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_307(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 307);
+    kl_http_response_status(res, 307);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/echo", redir_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "temp", 4);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "temp", 4);
 }
 
-static void handle_308(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_308(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 308);
+    kl_http_response_status(res, 308);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/echo", redir_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "perm", 4);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "perm", 4);
 }
 
-static void handle_relative(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_relative(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 301);
-    kl_response_header(res, "Location", "/dest");
-    kl_response_body_borrow(res, "moved", 5);
+    kl_http_response_status(res, 301);
+    kl_http_response_header(res, "Location", "/dest");
+    kl_http_response_body_borrow(res, "moved", 5);
 }
 
-static void handle_no_location(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_no_location(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 301);
-    kl_response_body_borrow(res, "no location", 11);
+    kl_http_response_status(res, 301);
+    kl_http_response_body_borrow(res, "no location", 11);
 }
 
-static void handle_chain(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_chain(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 301);
+    kl_http_response_status(res, 301);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/redir302", redir_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "chain", 5);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "chain", 5);
 }
 
-static void handle_loop(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_loop(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 301);
+    kl_http_response_status(res, 301);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/loop", redir_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "loop", 4);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "loop", 4);
 }
 
-static void handle_cross_origin(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_cross_origin(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 301);
+    kl_http_response_status(res, 301);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/auth_check", redir_port2);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "cross", 5);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "cross", 5);
 }
 
 /* ── Server lifecycle (once per test run) ────────────────────────── */

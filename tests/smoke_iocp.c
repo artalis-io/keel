@@ -36,31 +36,31 @@ static void nap_ms(int ms) { Sleep(ms); }
 #define SMOKE_FILE_PATH "smoke_iocp_file.tmp"
 #define SMOKE_STREAM "chunk-one;chunk-two"   /* two chunks, dechunked by the client */
 
-static void handle_ok(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_ok(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
+    kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 
 /* POST /echo — reads the request body via the buffer reader (READING_BODY over
  * IOCP) and echoes it back, exercising the completion body path (8b-1). */
-static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
-    if (!br || br->len == 0) { kl_response_error(res, 400, "body required"); return; }
-    kl_response_status(res, 200);
-    kl_response_body_borrow(res, br->data, br->len);
+    if (!br || br->len == 0) { kl_http_response_error(res, 400, "body required"); return; }
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, br->data, br->len);
 }
 
-/* GET /file — serve a file body via kl_response_file (TransmitFile over IOCP, 8b-2).
+/* GET /file — serve a file body via kl_http_response_file (TransmitFile over IOCP, 8b-2).
  * Opens the pre-written temp file per request; the response owns and closes the fd. */
-static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_file(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = _open(SMOKE_FILE_PATH, _O_RDONLY | _O_BINARY);
-    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
     long size = _lseek(fd, 0, SEEK_END);
     _lseek(fd, 0, SEEK_SET);
-    kl_response_status(res, 200);
-    kl_response_file(res, (KlSocketHandle)fd, (off_t)size);
+    kl_http_response_status(res, 200);
+    kl_http_response_file(res, (KlSocketHandle)fd, (off_t)size);
 }
 
 /* GET /bigfile — serve a file larger than the (test-lowered, KEEL_IOCP_TF_CHUNK) TransmitFile
@@ -69,26 +69,26 @@ static void handle_file(KlRequest *req, KlResponse *res, void *ctx) {
  * right file offset (a wrong offset would scramble/repeat bytes). */
 #define SMOKE_BIGFILE_PATH "smoke_iocp_bigfile.tmp"
 #define SMOKE_BIGFILE_LEN  (256 * 1024)
-static void handle_bigfile(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_bigfile(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     int fd = _open(SMOKE_BIGFILE_PATH, _O_RDONLY | _O_BINARY);
-    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
     long size = _lseek(fd, 0, SEEK_END);
     _lseek(fd, 0, SEEK_SET);
-    kl_response_status(res, 200);
-    kl_response_file(res, (KlSocketHandle)fd, (off_t)size);
+    kl_http_response_status(res, 200);
+    kl_http_response_file(res, (KlSocketHandle)fd, (off_t)size);
 }
 
 /* GET /stream — a synchronous chunked stream produced during the handler
- * (KL_BODY_STREAM over IOCP, 8b-3). */
-static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
+ * (KL_HTTP_BODY_STREAM over IOCP, 8b-3). */
+static void handle_stream(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    KlWriteFn write = NULL;
+    KlHttpResponseWriteFn write = NULL;
     void *wctx = NULL;
-    if (kl_response_begin_stream(res, 200, &write, &wctx) < 0) return;
+    if (kl_http_response_begin_stream(res, 200, &write, &wctx) < 0) return;
     write(wctx, "chunk-one;", 10);
     write(wctx, "chunk-two", 9);
-    kl_response_end_stream(res);
+    kl_http_response_end_stream(res);
 }
 
 /* GET /bigstream — a chunked stream far larger than a slow client's receive window, so the
@@ -97,16 +97,16 @@ static void handle_stream(KlRequest *req, KlResponse *res, void *ctx) {
 #define SMOKE_BS_CHUNK   1024
 #define SMOKE_BS_CHUNKS  256
 #define SMOKE_BS_LEN     (SMOKE_BS_CHUNK * SMOKE_BS_CHUNKS)   /* 256 KiB payload */
-static void handle_bigstream(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_bigstream(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    KlWriteFn write = NULL;
+    KlHttpResponseWriteFn write = NULL;
     void *wctx = NULL;
-    if (kl_response_begin_stream(res, 200, &write, &wctx) < 0) return;
+    if (kl_http_response_begin_stream(res, 200, &write, &wctx) < 0) return;
     static char chunk[SMOKE_BS_CHUNK];
     memset(chunk, 'S', sizeof(chunk));
     for (int i = 0; i < SMOKE_BS_CHUNKS; i++)
         write(wctx, chunk, sizeof(chunk));
-    kl_response_end_stream(res);
+    kl_http_response_end_stream(res);
 }
 
 /* UDP echo over the IOCP completion loop (8b-4c): a KlDatagram on the server's ctx
@@ -139,12 +139,12 @@ static void *server_thread(void *arg) {
  * is plaintext even though this is a completion backend). */
 #define SMOKE_PROXY_PORT 18084
 static char g_proxy_ip[64];
-static void handle_proxy_probe(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_proxy_probe(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     uint16_t port = 0;
     g_proxy_ip[0] = '\0';
     kl_request_peer_addr(req, g_proxy_ip, sizeof(g_proxy_ip), &port);
-    kl_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
+    kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 static KlServer g_proxy_srv;
 static void *proxy_server_thread(void *arg) { (void)arg; kl_server_run(&g_proxy_srv); return NULL; }
@@ -402,7 +402,7 @@ int main(void) {
         }
     }
 
-    /* GET /stream — exercise the chunked/streaming path (KL_BODY_STREAM over IOCP,
+    /* GET /stream — exercise the chunked/streaming path (KL_HTTP_BODY_STREAM over IOCP,
      * 8b-3). The client dechunks; the body is the concatenated chunks. */
     int stream_ok = 0;
     if (ok && post_ok && file_ok) {

@@ -176,13 +176,13 @@ u32_t sys_now(void) {
 /* Max iov segments a single buffered send may carry (the response iovec is small: status line
  * + header block + Content-Length + keep-alive + CRLF + body = <= 6; file head is <= 5). A send
  * with more segments than this is rejected at send_begin (a documented, never-hit-in-practice
- * limit). Kept in sync with the driver's kl_response_build_iovec cap (7). */
+ * limit). Kept in sync with the driver's kl_http_response_build_iovec cap (7). */
 #define KL_LWR_MAX_TX_IOV 8
 
 /* A per-slot preallocated head-snapshot buffer holds a COPY of the small iov segments whose data
  * pointer may be transient (the driver's stack Content-Length scratch `cl_buf`) — any segment at
  * or below KL_LWR_TX_SNAP bytes is snapshotted here at send_begin; larger segments (body / large
- * header block, all owned by the live KlResponse) are referenced in place. Sized to hold every
+ * header block, all owned by the live KlHttpResponse) are referenced in place. Sized to hold every
  * snapshotted segment of one send: KL_LWR_MAX_TX_IOV * KL_LWR_TX_SNAP. */
 #define KL_LWR_TX_SNAP 256u
 #define KL_LWR_TX_HEAD (KL_LWR_MAX_TX_IOV * KL_LWR_TX_SNAP)
@@ -246,7 +246,7 @@ typedef struct {
     unsigned        watcher_mask;     /* client: armed readiness mask (KL_LWR_EV_READ/WRITE) */
 
     /* ── Stage B outgoing send state (BOUNDED, PREALLOCATED — no whole-payload copy) ──
-     * A send references its source in place (the live KlResponse segments) and pumps THROUGH a
+     * A send references its source in place (the live KlHttpResponse segments) and pumps THROUGH a
      * fixed preallocated window. `send_active` = a send is in flight (replaces the old
      * send_buf!=NULL sentinel). `send_total` = the whole logical payload; `send_off` = bytes
      * handed to tcp_write so far; `send_acked` = peer-acked. When send_acked == send_total the
@@ -1521,7 +1521,7 @@ size_t kl_lwr_take_staged(void *lwrctx, void *pcb, void *dst, size_t cap) {
  * Store a bounded COPY of the iov ARRAY into the slot (pointers + lengths). Small segments whose
  * data pointer may be transient (the driver's stack Content-Length scratch) are snapshotted into
  * the slot's preallocated head buffer; larger segments (body / large header block, all owned by
- * the live KlResponse) are referenced in PLACE. This copies at most KL_LWR_TX_HEAD bytes of tiny
+ * the live KlHttpResponse) are referenced in PLACE. This copies at most KL_LWR_TX_HEAD bytes of tiny
  * head data — NEVER the payload. Returns 0 on installed, -1 on an iov-count / snapshot-overflow
  * limit (the caller closes the conn). */
 static int lwr_store_iov(KlLwrCtx *ctx, KlLwrConn *cs, const KlLwrIoVec *iov, int iovcnt,

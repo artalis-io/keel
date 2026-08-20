@@ -314,8 +314,8 @@ UTEST(async, complete_calls_on_resume) {
 
     /* Need response initialized for kl_conn_on_writable to work */
     c->res.alloc = &s.alloc_storage;
-    kl_response_init(&c->res, c->res.alloc);
-    kl_response_json(&c->res, 200, "{}", 2);
+    kl_http_response_init(&c->res, c->res.alloc);
+    kl_http_response_json(&c->res, 200, "{}", 2);
     c->res.conn_fd = fds[1];
 
     AsyncCtx actx = {0};
@@ -370,8 +370,8 @@ UTEST(async, deadline_fires_on_timeout) {
     ASSERT_EQ(kl_event_add(&s.ev.loop, fds[1], KL_EVENT_READ, c), 0);
 
     c->res.alloc = &s.alloc_storage;
-    kl_response_init(&c->res, c->res.alloc);
-    kl_response_json(&c->res, 200, "{}", 2);
+    kl_http_response_init(&c->res, c->res.alloc);
+    kl_http_response_json(&c->res, 200, "{}", 2);
     c->res.conn_fd = fds[1];
 
     AsyncCtx actx = {.server = &s};
@@ -567,8 +567,8 @@ UTEST(async, watcher_completes_suspended_conn) {
 
     /* Init response for the connection */
     c->res.alloc = &s.alloc_storage;
-    kl_response_init(&c->res, c->res.alloc);
-    kl_response_json(&c->res, 200, "{\"ok\":true}", 11);
+    kl_http_response_init(&c->res, c->res.alloc);
+    kl_http_response_json(&c->res, 200, "{\"ok\":true}", 11);
     c->res.conn_fd = conn_fds[1];
 
     /* Create a pipe for the completion signal */
@@ -666,7 +666,7 @@ static void sleep_resume(KlAsyncOp *op, void *user_data) {
     (void)user_data;
     /* Handler completed: set up response, transition to SENDING */
     KlConn *c = op->conn;
-    kl_response_json(&c->res, 200, "{\"slept\":true}", 14);
+    kl_http_response_json(&c->res, 200, "{\"slept\":true}", 14);
     c->state = KL_CONN_SENDING;
 }
 
@@ -681,7 +681,7 @@ static void sleep_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data)
     kl_async_complete(ctx->server, &ctx->op);
 }
 
-static void handle_async_sleep(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_async_sleep(KlRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
     KlConn *conn = kl_request_conn(req);

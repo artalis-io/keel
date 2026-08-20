@@ -51,7 +51,7 @@ static void query_done_fn(void *user_data) {
     if (n < 0) n = 0;
 
     KlConn *conn = ctx->op.conn;
-    kl_response_json(&conn->res, 200, body, (size_t)n);
+    kl_http_response_json(&conn->res, 200, body, (size_t)n);
 
     kl_async_complete(ctx->server, &ctx->op);
     free(ctx);
@@ -80,14 +80,14 @@ typedef struct {
     KlThreadPool *pool;
 } AppCtx;
 
-static void handle_query(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_query(KlRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     AppCtx *app = user_data;
     KlConn *conn = kl_request_conn(req);
 
     QueryCtx *ctx = malloc(sizeof(*ctx));
     if (!ctx) {
-        kl_response_error(res, 500, "Out of memory");
+        kl_http_response_error(res, 500, "Out of memory");
         return;
     }
     memset(ctx, 0, sizeof(*ctx));
@@ -107,15 +107,15 @@ static void handle_query(KlRequest *req, KlResponse *res, void *user_data) {
     };
     if (kl_thread_pool_submit(app->pool, &item) < 0) {
         /* Queue full — resume and send error */
-        kl_response_error(res, 503, "Server busy");
+        kl_http_response_error(res, 503, "Server busy");
         kl_async_complete(app->server, &ctx->op);
         free(ctx);
     }
 }
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */

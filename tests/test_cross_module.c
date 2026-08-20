@@ -97,7 +97,7 @@ static int mock_compress_buf(KlCompress *self, const char *in, size_t in_len,
                               char **out, size_t *out_len, KlAllocator *alloc) {
     (void)self;
     /* "Compress" by copying data without change — must be smaller than input
-     * to pass the expansion check in kl_response_body_compress.
+     * to pass the expansion check in kl_http_response_body_compress.
      * We drop the last byte to simulate compression savings. */
     size_t clen = in_len > 1 ? in_len - 1 : 0;
     *out = kl_malloc(alloc, clen > 0 ? clen : 1);
@@ -316,7 +316,7 @@ static void tls_async_resume(KlAsyncOp *op, void *user_data) {
     TlsAsyncCtx *ctx = user_data;
     (void)op;
     KlConn *conn = ctx->op.conn;
-    kl_response_json(&conn->res, 200, "{\"async_tls\":true}", 18);
+    kl_http_response_json(&conn->res, 200, "{\"async_tls\":true}", 18);
     conn->state = KL_CONN_SENDING;
 }
 
@@ -331,7 +331,7 @@ static void tls_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_d
     kl_async_complete(ctx->server, &ctx->op);
 }
 
-static void handle_tls_async(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_tls_async(KlRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
     KlConn *conn = kl_request_conn(req);
@@ -398,12 +398,12 @@ UTEST(cross, tls_async_suspend_resume) {
  * reader → async handler that suspends, then resumes with body data.
  * ═══════════════════════════════════════════════════════════════════ */
 
-static int auth_middleware(KlRequest *req, KlResponse *res, void *user_data) {
+static int auth_middleware(KlRequest *req, KlHttpResponse *res, void *user_data) {
     (void)user_data;
     size_t key_len;
     const char *key = kl_request_header_len(req, "X-Auth", &key_len);
     if (!key || key_len != 6 || memcmp(key, "secret", 6) != 0) {
-        kl_response_error(res, 401, "Unauthorized");
+        kl_http_response_error(res, 401, "Unauthorized");
         return 1;
     }
     return 0;
@@ -424,11 +424,11 @@ static void mw_async_resume(KlAsyncOp *op, void *user_data) {
     /* Access body from the reader — should still be valid */
     KlBufReader *br = (KlBufReader *)ctx->saved_req->body_reader;
     if (br && br->len > 0) {
-        kl_response_status(&conn->res, 200);
-        kl_response_header(&conn->res, "Content-Type", "text/plain");
-        kl_response_body_borrow(&conn->res, br->data, br->len);
+        kl_http_response_status(&conn->res, 200);
+        kl_http_response_header(&conn->res, "Content-Type", "text/plain");
+        kl_http_response_body_borrow(&conn->res, br->data, br->len);
     } else {
-        kl_response_error(&conn->res, 400, "No body");
+        kl_http_response_error(&conn->res, 400, "No body");
     }
     conn->state = KL_CONN_SENDING;
 }
@@ -444,7 +444,7 @@ static void mw_async_watcher(KlSocketHandle fd, KlEventMask ready, void *user_da
     kl_async_complete(ctx->server, &ctx->op);
 }
 
-static void handle_mw_async(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_mw_async(KlRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
     KlConn *conn = kl_request_conn(req);
@@ -587,12 +587,12 @@ UTEST(cross, resolver_cache_client) {
 
 static KlCompressConfig g_compress_cfg;
 
-static void handle_compressed(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_compressed(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     const char *body = "Hello, compressed world!";
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body_compress(res, &g_compress_cfg, body, strlen(body));
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_compress(res, &g_compress_cfg, body, strlen(body));
 }
 
 UTEST(cross, tls_middleware_compress) {
@@ -668,7 +668,7 @@ static int hold_stats_suspended;
 static void hold_resume(KlAsyncOp *op, void *user_data) {
     (void)user_data;
     KlConn *conn = op->conn;
-    kl_response_json(&conn->res, 200, "{\"held\":true}", 13);
+    kl_http_response_json(&conn->res, 200, "{\"held\":true}", 13);
     conn->state = KL_CONN_SENDING;
 }
 
@@ -690,7 +690,7 @@ static void hold_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data) 
     kl_async_complete(ctx->server, &ctx->op);
 }
 
-static void handle_hold(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_hold(KlRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
     KlConn *conn = kl_request_conn(req);

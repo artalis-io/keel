@@ -75,7 +75,7 @@ static ssize_t read_response(int fd, char *buf, size_t buflen) {
 
 /* ── Handlers ─────────────────────────────────────────────────────── */
 
-static void handle_headers(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_headers(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
@@ -90,10 +90,10 @@ static void handle_headers(KlRequest *req, KlResponse *res, void *ctx) {
     test_state.found_empty = kl_request_header_len(req, "X-Empty",
                                                     &test_state.found_empty_len);
 
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_params(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_params(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
@@ -102,19 +102,19 @@ static void handle_params(KlRequest *req, KlResponse *res, void *ctx) {
     test_state.found_missing_param = kl_request_param(req, "nope",
                                                        &test_state.found_missing_param_len);
 
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_single_param(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_single_param(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
     test_state.found_id = kl_request_param(req, "id", &test_state.found_id_len);
 
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_query(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_query(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
@@ -122,10 +122,10 @@ static void handle_query(KlRequest *req, KlResponse *res, void *ctx) {
     test_state.query_len = req->query_len;
     test_state.query_null = (req->query == NULL) ? 1 : 0;
 
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void handle_nulterm(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_nulterm(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&test_state, 0, sizeof(test_state));
 
@@ -134,7 +134,7 @@ static void handle_nulterm(KlRequest *req, KlResponse *res, void *ctx) {
     test_state.nt_query = req->query;
     test_state.nt_host = kl_request_header(req, "Host");
 
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* ── Helper: send request, wait for 200. Returns 0 on success, -1 on failure. */

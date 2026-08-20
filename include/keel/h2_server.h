@@ -14,7 +14,7 @@
 #include <keel/handle.h>   /* kl_ssize_t */
 #include <keel/h2.h>
 #include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/body_reader.h>
 #include <keel/router.h>
 

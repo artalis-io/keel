@@ -46,7 +46,7 @@ static void delay_on_resume(KlAsyncOp *op, void *user_data) {
     if (n < 0) n = 0;
 
     KlConn *conn = op->conn;
-    kl_response_json(&conn->res, 200, body, (size_t)n);
+    kl_http_response_json(&conn->res, 200, body, (size_t)n);
 
     close(ctx->pipe_fds[0]);
     close(ctx->pipe_fds[1]);
@@ -91,7 +91,7 @@ static void *delay_thread(void *arg) {
 
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
-static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
+static void handle_delay(KlRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
     KlServer *srv = user_data;
     KlConn *conn = kl_request_conn(req);
@@ -113,7 +113,7 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     /* Allocate context (freed in on_resume or on_cancel) */
     DelayCtx *ctx = malloc(sizeof(*ctx));
     if (!ctx) {
-        kl_response_error(res, 500, "Out of memory");
+        kl_http_response_error(res, 500, "Out of memory");
         return;
     }
     memset(ctx, 0, sizeof(*ctx));
@@ -125,7 +125,7 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     /* Create pipe for signaling */
     if (pipe(ctx->pipe_fds) < 0) {
         free(ctx);
-        kl_response_error(res, 500, "pipe() failed");
+        kl_http_response_error(res, 500, "pipe() failed");
         return;
     }
 
@@ -135,7 +135,7 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
         close(ctx->pipe_fds[0]);
         close(ctx->pipe_fds[1]);
         free(ctx);
-        kl_response_error(res, 500, "watcher_add failed");
+        kl_http_response_error(res, 500, "watcher_add failed");
         return;
     }
 
@@ -150,7 +150,7 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     if (pthread_create(&th, &attr, delay_thread, ctx) != 0) {
         pthread_attr_destroy(&attr);
         /* Thread creation failed — resume connection with error */
-        kl_response_json(&conn->res, 500,
+        kl_http_response_json(&conn->res, 500,
                          "{\"error\":\"thread create failed\"}", 32);
         kl_async_complete(srv, &ctx->op);
         return;
@@ -158,9 +158,9 @@ static void handle_delay(KlRequest *req, KlResponse *res, void *user_data) {
     pthread_attr_destroy(&attr);
 }
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello (sync)\"}", 21);
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */

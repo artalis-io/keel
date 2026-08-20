@@ -4,7 +4,7 @@
  */
 #include "utest.h"
 #include <keel/allocator.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/connection.h>
 #include <keel/router.h>
 #include <keel/chunked.h>
@@ -302,7 +302,7 @@ UTEST(overflow, multipart_max_total_size_exceeded) {
 
 /* ── Router capacity overflow ────────────────────────────────────── */
 
-static void dummy_handler(KlRequest *req, KlResponse *res, void *ud) {
+static void dummy_handler(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)res; (void)ud;
 }
 

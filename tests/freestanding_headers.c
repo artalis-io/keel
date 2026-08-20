@@ -21,7 +21,7 @@
  *   response, file_io
  *
  * response.h / file_io.h joined the gate in the off_t-neutralization step: the
- * file size/offset types (KlResponse.file_size/offset, kl_response_file, the
+ * file size/offset types (KlHttpResponse.file_size/offset, kl_http_response_file, the
  * KlFileIO submit offset) are now uint64_t — non-negative, same neutral type as
  * the internal sendfile seam (src/socket.h) — so neither header needs the hosted
  * <sys/types.h> off_t any more.
@@ -59,7 +59,7 @@
 #include <keel/tls.h>
 #include <keel/h2.h>
 #include <keel/h2_client.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/file_io.h>
 /* Server protocol surface (S-1): the whole inbound public API, freestanding-clean. */
 #include <keel/router.h>

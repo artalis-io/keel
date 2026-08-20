@@ -73,7 +73,7 @@ int kl_version_number(void);
 #include <keel/body_reader_multipart.h>
 #include <keel/chunked.h>
 #include <keel/parser.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/router.h>
 #include <keel/tls.h>
 #include <keel/h2.h>

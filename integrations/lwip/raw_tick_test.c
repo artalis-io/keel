@@ -18,7 +18,7 @@
  *              until it has the full Content-Length, then asserts body length + an additive
  *              checksum + first/last byte match. This spans many tcp_sent rounds and hits
  *              tcp_sndbuf-full (ERR_MEM) backpressure, resumed on tcp_sent. → "P9-3 PASS (buffered)"
- *   (file)     GET /file → a temp file (64 KB, same pattern) served via kl_response_file
+ *   (file)     GET /file → a temp file (64 KB, same pattern) served via kl_http_response_file
  *              (FILE mode → kl_comp_post_sendfile → the glue preads it into the send buffer +
  *              reuses the send-pump). Client verifies the whole file body. → "P9-3 PASS (file)"
  *
@@ -106,9 +106,9 @@ static KlServer g_srv;
 static atomic_int g_done;       /* client saw "200" */
 static atomic_int g_srv_stop;   /* stop signal for the server thread */
 
-static void handle_root(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
+    kl_http_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
 }
 
 /* Fired on the tick thread once the server is bound + listening: start the raw client. */
@@ -207,26 +207,26 @@ static atomic_int g_p3_finished;/* both cases resolved (pass or fail) */
 
 static char g_file_path[256];   /* temp file path for the /file route (created in main) */
 
-static void handle_big(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_big(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    /* Build the 64 KB body on the stack; kl_response_body_copy takes an owned copy. */
+    /* Build the 64 KB body on the stack; kl_http_response_body_copy takes an owned copy. */
     static unsigned char body[P9_3_BODY_LEN];   /* static: 64 KB is large for a stack frame */
     fill_pattern(body, sizeof(body));
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body_copy(res, (const char *)body, sizeof(body));
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
+    kl_http_response_body_copy(res, (const char *)body, sizeof(body));
 }
 
-static void handle_file(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_file(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     int fd = open(g_file_path, O_RDONLY);
-    if (fd < 0) { kl_response_error(res, 500, "open failed"); return; }
+    if (fd < 0) { kl_http_response_error(res, 500, "open failed"); return; }
     off_t sz = (off_t)P9_3_BODY_LEN;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
     /* FILE mode → the completion driver posts kl_comp_post_sendfile. The response layer
-     * OWNS closing fd (kl_response_reset/free) — we do NOT close it here. */
-    kl_response_file(res, fd, sz);
+     * OWNS closing fd (kl_http_response_reset/free) — we do NOT close it here. */
+    kl_http_response_file(res, fd, sz);
 }
 
 /* Verify the accumulated response body against the known pattern. Runs on the tick thread. */
@@ -432,17 +432,17 @@ static atomic_int g_p4_fail;
 static atomic_int g_p4_finished;
 static int        g_p4_many_started;    /* how many roundtrips in C1 have been kicked */
 
-static void handle4_root(KlRequest *req, KlResponse *res, void *ud) {
+static void handle4_root(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
-    kl_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
+    kl_http_response_json(res, 200, P9_2_BODY, sizeof(P9_2_BODY) - 1);
 }
-static void handle4_big(KlRequest *req, KlResponse *res, void *ud) {
+static void handle4_big(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     static unsigned char body[P9_3_BODY_LEN];
     fill_pattern(body, sizeof(body));
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body_copy(res, (const char *)body, sizeof(body));
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
+    kl_http_response_body_copy(res, (const char *)body, sizeof(body));
 }
 
 static const uint8_t g_lo4[4] = { 127, 0, 0, 1 };

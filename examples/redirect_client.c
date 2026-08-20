@@ -19,41 +19,41 @@
 static KlServer srv;
 static int srv_port;
 
-static void handle_final(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_final(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/json");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/json");
     char body[128];
     int n = snprintf(body, sizeof(body),
                      "{\"method\":\"%s\",\"message\":\"arrived!\"}", req->method);
-    kl_response_body_copy(res, body, (size_t)n);
+    kl_http_response_body_copy(res, body, (size_t)n);
 }
 
-static void handle_redirect(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_redirect(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 301);
+    kl_http_response_status(res, 301);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/final", srv_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "moved", 5);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "moved", 5);
 }
 
-static void handle_chain(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_chain(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 302);
+    kl_http_response_status(res, 302);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/redirect", srv_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "chain", 5);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "chain", 5);
 }
 
-static void handle_post_redirect(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_post_redirect(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_status(res, 303);
+    kl_http_response_status(res, 303);
     char loc[128];
     snprintf(loc, sizeof(loc), "http://127.0.0.1:%d/final", srv_port);
-    kl_response_header(res, "Location", loc);
-    kl_response_body_borrow(res, "see other", 9);
+    kl_http_response_header(res, "Location", loc);
+    kl_http_response_body_borrow(res, "see other", 9);
 }
 
 static void *server_thread(void *arg) {

@@ -505,7 +505,7 @@ static int lwr_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt, 
  * file body chunk-by-chunk into the same preallocated TX window (constant memory regardless of
  * file size). One KL_COMP_WRITE follows when the whole head+file is acked; a file read error
  * surfaces a FAILED terminal (ok=0) so the driver closes. fd OWNERSHIP: the glue only READS
- * file_fd; the response layer closes res->file_fd (kl_response_reset/free) — not here. */
+ * file_fd; the response layer closes res->file_fd (kl_http_response_reset/free) — not here. */
 static int lwr_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_n,
                           size_t head_total, int file_fd, uint64_t count) {
     KlStream *stream = &c->stream;   /* post_sendfile stays KlConn-typed (Phase-A audit §8) */

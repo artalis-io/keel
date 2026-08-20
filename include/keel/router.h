@@ -3,19 +3,19 @@
 
 #include <keel/allocator.h>
 #include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/body_reader.h>
 #include <stddef.h>
 
 /** @brief Route handler function. */
-typedef void (*KlHandler)(KlRequest *req, KlResponse *res, void *user_data);
+typedef void (*KlHandler)(KlRequest *req, KlHttpResponse *res, void *user_data);
 
 /**
  * @brief Middleware function signature.
  * @return 0 to continue to next middleware/handler, non-zero to short-circuit
  *         (response must already be written by the middleware).
  */
-typedef int (*KlMiddleware)(KlRequest *req, KlResponse *res, void *user_data);
+typedef int (*KlMiddleware)(KlRequest *req, KlHttpResponse *res, void *user_data);
 
 typedef struct KlWsServerConfig KlWsServerConfig;
 
@@ -206,23 +206,23 @@ int  kl_router_use_post(KlRouter *r, const char *method, const char *pattern,
  * @brief Run all matching pre-body middleware in registration order.
  * @return 0 if all passed, non-zero if a middleware short-circuited.
  */
-int  kl_router_run_middleware(KlRouter *r, KlRequest *req, KlResponse *res);
+int  kl_router_run_middleware(KlRouter *r, KlRequest *req, KlHttpResponse *res);
 
 /**
  * @brief Run all matching post-body middleware in registration order.
  * @return 0 if all passed, non-zero if a middleware short-circuited.
  */
-int  kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlResponse *res);
+int  kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlHttpResponse *res);
 
 /**
  * @brief Run a fully-formed synthetic request through the router pipeline:
  *        match → pre-body middleware → post-body middleware → handler.
  *
  * The caller is responsible for initialising `req` (method, path,
- * headers, optional `body_reader`) and `res` (via `kl_response_init`).
+ * headers, optional `body_reader`) and `res` (via `kl_http_response_init`).
  * On return, `res` holds the response state the handler (or a
  * short-circuiting middleware) produced; the caller is responsible
- * for `kl_response_free` and for inspecting `res->status`,
+ * for `kl_http_response_free` and for inspecting `res->status`,
  * `res->body`, `res->hdr_buf`, etc.
  *
  * `req->num_params` / `req->params` are filled in from the match
@@ -247,7 +247,7 @@ int  kl_router_run_post_middleware(KlRouter *r, KlRequest *req, KlResponse *res)
  *         code if middleware short-circuited; -1 on invalid arguments.
  */
 int  kl_router_dispatch_synthetic(KlRouter *r, KlRequest *req,
-                                   KlResponse *res, int run_middleware);
+                                   KlHttpResponse *res, int run_middleware);
 
 /** @brief Free router resources. */
 void kl_router_free(KlRouter *r);

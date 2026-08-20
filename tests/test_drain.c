@@ -1,7 +1,7 @@
 #include "utest.h"
 #include <keel/drain.h>
 #include <keel/allocator.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/websocket_server.h>
 #include <keel/connection.h>
 #include "../src/drain_reserve.h"   /* Phase-B internal reservation + low-water API */
@@ -489,11 +489,11 @@ UTEST(drain, flush_fn_overreport) {
 
 UTEST(drain, response_drain_enable) {
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
     res.file_fd = -1;
 
-    ASSERT_EQ(kl_response_enable_drain(&res, &a, 4096), 0);
+    ASSERT_EQ(kl_http_response_enable_drain(&res, &a, 4096), 0);
     ASSERT_EQ(res.drain_enabled, 1);
     ASSERT_EQ(res.drain.max_size, (size_t)4096);
     ASSERT_TRUE(res.drain.write_fn != NULL);
@@ -503,11 +503,11 @@ UTEST(drain, response_drain_enable) {
 
 UTEST(drain, response_drain_enable_unlimited) {
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
     res.file_fd = -1;
 
-    ASSERT_EQ(kl_response_enable_drain(&res, &a, 0), 0);
+    ASSERT_EQ(kl_http_response_enable_drain(&res, &a, 0), 0);
     ASSERT_EQ(res.drain.max_size, (size_t)0);
 
     kl_drain_free(&res.drain);
@@ -519,10 +519,10 @@ UTEST(drain, response_stream_with_drain) {
     mock_init(&w);
     w.mode = 2;  /* would-block */
 
-    KlResponse res;
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
     res.file_fd = -1;
-    res.body_mode = KL_BODY_STREAM;
+    res.body_mode = KL_HTTP_BODY_STREAM;
 
     /* Enable drain with our mock writer */
     res.drain_enabled = 1;
@@ -559,16 +559,16 @@ UTEST(drain, response_end_stream_drain) {
     mock_init(&w);
     w.mode = 2;  /* would-block */
 
-    KlResponse res;
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
     res.file_fd = -1;
-    res.body_mode = KL_BODY_STREAM;
+    res.body_mode = KL_HTTP_BODY_STREAM;
     res.headers_sent = 1;
     res.drain_enabled = 1;
     kl_drain_init(&res.drain, mock_write, &w, &a);
 
     /* end_stream writes final chunk through drain */
-    ASSERT_EQ(kl_response_end_stream(&res), 0);
+    ASSERT_EQ(kl_http_response_end_stream(&res), 0);
     ASSERT_EQ(res.stream_ended, 1);
     ASSERT_EQ(kl_drain_buffered(&res.drain), (size_t)5);
     ASSERT_EQ(memcmp(res.drain.buf, "0\r\n\r\n", 5), 0);
@@ -586,10 +586,10 @@ UTEST(drain, response_send_stream_flush) {
     MockWriter w;
     mock_init(&w);
 
-    KlResponse res;
+    KlHttpResponse res;
     memset(&res, 0, sizeof(res));
     res.file_fd = -1;
-    res.body_mode = KL_BODY_STREAM;
+    res.body_mode = KL_HTTP_BODY_STREAM;
     res.headers_sent = 1;
     res.drain_enabled = 1;
     kl_drain_init(&res.drain, mock_write, &w, &a);
@@ -600,12 +600,12 @@ UTEST(drain, response_send_stream_flush) {
     res.stream_ended = 1;
 
     /* Send with would-block: returns 1 (more pending) */
-    int r = kl_response_send(&res);
+    int r = kl_http_response_send(&res);
     ASSERT_EQ(r, 1);
 
     /* Now writer accepts */
     w.mode = 0;
-    r = kl_response_send(&res);
+    r = kl_http_response_send(&res);
     ASSERT_EQ(r, 0);  /* fully drained + stream_ended → done */
     ASSERT_EQ(w.len, (size_t)5);
 
@@ -618,8 +618,8 @@ UTEST(drain, response_drain_cleanup) {
     mock_init(&w);
     w.mode = 2;  /* would-block */
 
-    KlResponse res;
-    ASSERT_EQ(kl_response_init(&res, &a), 0);
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &a), 0);
 
     /* Set up drain with mock writer (bypassing response_drain_writer
      * which needs a real fd) */
@@ -631,7 +631,7 @@ UTEST(drain, response_drain_cleanup) {
     ASSERT_TRUE(res.drain.buf != NULL);
 
     /* Reset should free drain buffer */
-    kl_response_reset(&res);
+    kl_http_response_reset(&res);
     ASSERT_EQ(res.drain_enabled, 0);
 
     /* Re-enable for free test */
@@ -639,7 +639,7 @@ UTEST(drain, response_drain_cleanup) {
     kl_drain_init(&res.drain, mock_write, &w, &a);
     kl_drain_write(&res.drain, "more", 4);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
     /* drain_enabled cleared by free */
 }
 

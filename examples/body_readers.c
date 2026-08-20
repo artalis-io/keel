@@ -28,7 +28,7 @@ static KlMultipartConfig mp_config = {
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
 /* HTML form with text input + file upload */
-static void handle_index(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_index(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     const char *html =
         "<h2>Body Readers</h2>"
@@ -43,22 +43,22 @@ static void handle_index(KlRequest *req, KlResponse *res, void *ctx) {
         "  <input name='file' type='file'><br>"
         "  <button>Upload</button>"
         "</form>";
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/html");
-    kl_response_body_borrow(res, html, strlen(html));
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/html");
+    kl_http_response_body_borrow(res, html, strlen(html));
 }
 
 /* POST /echo — buffer reader echoes body back */
-static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) {
-        kl_response_error(res, 400, "Request body required");
+        kl_http_response_error(res, 400, "Request body required");
         return;
     }
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
-    kl_response_body_borrow(res, br->data, br->len);
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
+    kl_http_response_body_borrow(res, br->data, br->len);
 }
 
 /* POST /upload — multipart streaming iterator parses form-data.
@@ -66,15 +66,15 @@ static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
  * Drives kl_multipart_next() to walk the events. The full body has
  * been received by the time the handler runs, so NEED_DATA never
  * fires here (it would in a handler that yields mid-stream). */
-static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_upload(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBodyReader *br = req->body_reader;
     if (!br) {
-        kl_response_error(res, 400, "No reader");
+        kl_http_response_error(res, 400, "No reader");
         return;
     }
 
-    /* Static so the slice handed to kl_response_body_borrow outlives the
+    /* Static so the slice handed to kl_http_response_body_borrow outlives the
      * handler return. Capped at 8 parts for the demo. */
     static char  body[1024];
     static char  names[8][128];
@@ -112,11 +112,11 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
         }
         if (e == KL_MP_EVT_PART_END) continue;
         if (e == KL_MP_EVT_DONE)     break;
-        kl_response_error(res, 400, "Parse error");
+        kl_http_response_error(res, 400, "Parse error");
         return;
     }
     if (parts == 0) {
-        kl_response_error(res, 400, "No parts received");
+        kl_http_response_error(res, 400, "No parts received");
         return;
     }
 
@@ -139,9 +139,9 @@ static void handle_upload(KlRequest *req, KlResponse *res, void *ctx) {
                         has_filename[i] ? ")" : "");
     }
 
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
-    kl_response_body_borrow(res, body, (size_t)off);
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_body_borrow(res, body, (size_t)off);
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */

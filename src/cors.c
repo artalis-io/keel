@@ -80,7 +80,7 @@ int kl_cors_is_allowed(const KlCorsConfig *config, const char *origin,
 /* ── Middleware function ────────────────────────────────────────────── */
 
 // cppcheck-suppress constParameterPointer
-int kl_cors_middleware(KlRequest *req, KlResponse *res, void *user_data) {
+int kl_cors_middleware(KlRequest *req, KlHttpResponse *res, void *user_data) {
     if (!user_data) return 0;
     const KlCorsConfig *config = user_data;
 
@@ -109,29 +109,29 @@ int kl_cors_middleware(KlRequest *req, KlResponse *res, void *user_data) {
     }
 
     /* Add CORS headers */
-    kl_response_header(res, "Access-Control-Allow-Origin", allow_origin);
+    kl_http_response_header(res, "Access-Control-Allow-Origin", allow_origin);
 
     if (config->allow_credentials && config->origin_count > 0)
-        kl_response_header(res, "Access-Control-Allow-Credentials", "true");
+        kl_http_response_header(res, "Access-Control-Allow-Credentials", "true");
 
     /* Handle OPTIONS preflight */
     int is_options = (req->method_len == 7 &&
                       memcmp(req->method, "OPTIONS", 7) == 0);
     if (is_options) {
         if (config->allowed_methods)
-            kl_response_header(res, "Access-Control-Allow-Methods",
+            kl_http_response_header(res, "Access-Control-Allow-Methods",
                                config->allowed_methods);
         if (config->allowed_headers)
-            kl_response_header(res, "Access-Control-Allow-Headers",
+            kl_http_response_header(res, "Access-Control-Allow-Headers",
                                config->allowed_headers);
         if (config->max_age_seconds > 0) {
             char age[16];
             snprintf(age, sizeof(age), "%d", config->max_age_seconds);
-            kl_response_header(res, "Access-Control-Max-Age", age);
+            kl_http_response_header(res, "Access-Control-Max-Age", age);
         }
 
-        kl_response_status(res, 204);
-        kl_response_body_borrow(res, "", 0);
+        kl_http_response_status(res, 204);
+        kl_http_response_body_borrow(res, "", 0);
         return 1;  /* short-circuit — preflight handled */
     }
 

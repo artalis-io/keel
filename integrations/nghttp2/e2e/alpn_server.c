@@ -40,18 +40,18 @@ static const char KEY_PEM[] =
 "-----END PRIVATE KEY-----\n";
 
 /* One protocol-independent handler, shared by h2 and http/1.1. */
-static void handle_root(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_root(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)ud;
     const char *host = kl_request_header(req, "host");
     char body[128];
     int n = snprintf(body, sizeof(body),
                      "{\"ok\":true,\"http\":%d,\"host\":\"%s\"}",
                      req->version_major, host ? host : "");
-    /* body_copy (not kl_response_json, which borrows) — the buffer is on the
+    /* body_copy (not kl_http_response_json, which borrows) — the buffer is on the
      * stack and the HTTP/1.1 path writes the body after this returns. */
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/json");
-    kl_response_body_copy(res, body, (size_t)n);
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/json");
+    kl_http_response_body_copy(res, body, (size_t)n);
 }
 
 int main(void) {

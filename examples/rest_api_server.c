@@ -14,38 +14,38 @@
 #include <stdio.h>
 #include <string.h>
 
-static void handle_get_users(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_get_users(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
     const char *json = "[{\"id\":1,\"name\":\"Alice\"},{\"id\":2,\"name\":\"Bob\"}]";
-    kl_response_json(res, 200, json, strlen(json));
+    kl_http_response_json(res, 200, json, strlen(json));
 }
 
-static void handle_get_user(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_get_user(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     size_t id_len;
     const char *id = kl_request_param(req, "id", &id_len);
     if (!id) {
-        kl_response_error(res, 400, "Missing id");
+        kl_http_response_error(res, 400, "Missing id");
         return;
     }
     static char json[256]; /* static: single-threaded event loop, outlives writev */
     int n = snprintf(json, sizeof(json),
                      "{\"id\":%.*s,\"name\":\"Alice\"}", (int)id_len, id);
     if (n < 0) n = 0;
-    kl_response_json(res, 200, json, (size_t)n);
+    kl_http_response_json(res, 200, json, (size_t)n);
 }
 
-static void handle_create_user(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_create_user(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) {
-        kl_response_error(res, 400, "Request body required");
+        kl_http_response_error(res, 400, "Request body required");
         return;
     }
     /* Echo back the body as "created" */
-    kl_response_status(res, 201);
-    kl_response_header(res, "Content-Type", "application/json");
-    kl_response_body_borrow(res, br->data, br->len);
+    kl_http_response_status(res, 201);
+    kl_http_response_header(res, "Content-Type", "application/json");
+    kl_http_response_body_borrow(res, br->data, br->len);
 }
 
 int main(void) {

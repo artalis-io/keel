@@ -2,7 +2,7 @@
 #define KEEL_CORS_H
 
 #include <keel/request.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <stddef.h>
 
 /** @file cors.h
@@ -68,6 +68,6 @@ int  kl_cors_is_allowed(const KlCorsConfig *config, const char *origin,
  *
  * @return 0 to continue, 1 to short-circuit (OPTIONS preflight).
  */
-int  kl_cors_middleware(KlRequest *req, KlResponse *res, void *user_data);
+int  kl_cors_middleware(KlRequest *req, KlHttpResponse *res, void *user_data);
 
 #endif

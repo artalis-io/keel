@@ -74,7 +74,7 @@ int kl_plat_cpu_count(void);
  * descriptor; @count is bounded by the caller's buffer (fits in int). */
 int kl_plat_file_pread(int fd, void *buf, size_t count, long long offset);
 
-/* Close a file-body descriptor opened for a KL_BODY_FILE response. A platform
+/* Close a file-body descriptor opened for a KL_HTTP_BODY_FILE response. A platform
  * seam (not a raw close()) so response.c stays freestanding: POSIX/Windows close
  * the CRT fd; a freestanding build (no filesystem) supplies its own — typically a
  * no-op. Ignores a negative fd. */

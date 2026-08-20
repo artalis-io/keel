@@ -1,7 +1,7 @@
 #include "utest.h"
 #include <keel/router.h>
 
-static void dummy_handler(KlRequest *req, KlResponse *res, void *ctx) {
+static void dummy_handler(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)res; (void)ctx;
 }
 
@@ -168,7 +168,7 @@ UTEST(router, user_data_passed) {
 
 /* ── Middleware tests ───────────────────────────────────────────────── */
 
-static int mw_noop(KlRequest *req, KlResponse *res, void *ctx) {
+static int mw_noop(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)res; (void)ctx;
     return 0;
 }
@@ -176,21 +176,21 @@ static int mw_noop(KlRequest *req, KlResponse *res, void *ctx) {
 /* Tracking middleware: appends a letter to a string buffer */
 typedef struct { char buf[64]; int pos; } MwTracker;
 
-static int mw_track_a(KlRequest *req, KlResponse *res, void *ctx) {
+static int mw_track_a(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)res;
     MwTracker *t = ctx;
     t->buf[t->pos++] = 'A';
     return 0;
 }
 
-static int mw_track_b(KlRequest *req, KlResponse *res, void *ctx) {
+static int mw_track_b(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)res;
     MwTracker *t = ctx;
     t->buf[t->pos++] = 'B';
     return 0;
 }
 
-static int mw_track_c_stop(KlRequest *req, KlResponse *res, void *ctx) {
+static int mw_track_c_stop(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)res;
     MwTracker *t = ctx;
     t->buf[t->pos++] = 'C';
@@ -221,7 +221,7 @@ UTEST(router, middleware_run_prefix) {
     req.method = "GET"; req.method_len = 3;
     req.path = "/anything"; req.path_len = 9;
 
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
     ASSERT_EQ(t.pos, 1);
     ASSERT_EQ(t.buf[0], 'A');
@@ -244,7 +244,7 @@ UTEST(router, middleware_run_exact) {
 
     KlRequest req = {0};
     req.method = "GET"; req.method_len = 3;
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
 
     req.path = "/health"; req.path_len = 7;
     ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
@@ -268,7 +268,7 @@ UTEST(router, middleware_api_prefix) {
 
     KlRequest req = {0};
     req.method = "GET"; req.method_len = 3;
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
 
     req.path = "/api/users"; req.path_len = 10;
     ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
@@ -300,7 +300,7 @@ UTEST(router, middleware_method_filter) {
     kl_router_use(&r, "GET", "/*", mw_track_a, &t);
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
 
     req.method = "GET"; req.method_len = 3;
     req.path = "/test"; req.path_len = 5;
@@ -324,7 +324,7 @@ UTEST(router, middleware_wildcard_method) {
     kl_router_use(&r, "*", "/*", mw_track_a, &t);
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     req.path = "/x"; req.path_len = 2;
 
     req.method = "GET"; req.method_len = 3;
@@ -348,7 +348,7 @@ UTEST(router, middleware_head_falls_back) {
     kl_router_use(&r, "GET", "/*", mw_track_a, &t);
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     req.method = "HEAD"; req.method_len = 4;
     req.path = "/test"; req.path_len = 5;
 
@@ -368,7 +368,7 @@ UTEST(router, middleware_order) {
     kl_router_use(&r, "*", "/*", mw_track_b, &t);
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/x"; req.path_len = 2;
 
@@ -391,7 +391,7 @@ UTEST(router, middleware_short_circuit) {
     kl_router_use(&r, "*", "/*", mw_track_b, &t);  /* should NOT run */
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/x"; req.path_len = 2;
 
@@ -413,7 +413,7 @@ UTEST(router, middleware_no_match) {
     kl_router_use(&r, "POST", "/admin/*", mw_track_a, &t);
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/public"; req.path_len = 7;
 
@@ -423,9 +423,9 @@ UTEST(router, middleware_no_match) {
     kl_router_free(&r);
 }
 
-static int mw_set_header(KlRequest *req, KlResponse *res, void *ctx) {
+static int mw_set_header(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_header(res, "X-Middleware", "applied");
+    kl_http_response_header(res, "X-Middleware", "applied");
     return 0;
 }
 
@@ -439,14 +439,14 @@ UTEST(router, middleware_sets_header) {
     req.method = "GET"; req.method_len = 3;
     req.path = "/test"; req.path_len = 5;
 
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
     ASSERT_EQ(kl_router_run_middleware(&r, &req, &res), 0);
 
     /* Verify the header was written to the response buffer */
     ASSERT_TRUE(res.hdr_len > 0);
 
-    kl_response_free(&res);
+    kl_http_response_free(&res);
     kl_router_free(&r);
 }
 
@@ -503,7 +503,7 @@ UTEST(router, post_middleware_run) {
     req.method = "POST"; req.method_len = 4;
     req.path = "/submit"; req.path_len = 7;
 
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     ASSERT_EQ(kl_router_run_post_middleware(&r, &req, &res), 0);
     ASSERT_EQ(t.pos, 1);
     ASSERT_EQ(t.buf[0], 'A');
@@ -521,7 +521,7 @@ UTEST(router, post_middleware_order) {
     kl_router_use_post(&r, "*", "/*", mw_track_b, &t);
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/x"; req.path_len = 2;
 
@@ -544,7 +544,7 @@ UTEST(router, post_middleware_short_circuit) {
     kl_router_use_post(&r, "*", "/*", mw_track_b, &t);  /* should NOT run */
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/x"; req.path_len = 2;
 
@@ -567,7 +567,7 @@ UTEST(router, post_middleware_independent_of_pre) {
     kl_router_use_post(&r, "*", "/*", mw_track_b, &t);
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
     req.method = "GET"; req.method_len = 3;
     req.path = "/x"; req.path_len = 2;
 
@@ -593,7 +593,7 @@ UTEST(router, post_middleware_method_filter) {
     kl_router_use_post(&r, "POST", "/*", mw_track_a, &t);
 
     KlRequest req = {0};
-    KlResponse res = {0};
+    KlHttpResponse res = {0};
 
     /* GET should be skipped */
     req.method = "GET"; req.method_len = 3;

@@ -113,8 +113,8 @@ UTEST(sse, write_error) {
 
 UTEST(sse, begin_sets_headers) {
     KlAllocator a = kl_allocator_default();
-    KlResponse res;
-    kl_response_init(&res, &a);
+    KlHttpResponse res;
+    kl_http_response_init(&res, &a);
 
     int pipefd[2];
     ASSERT_EQ(kl_test_socketpair(pipefd), 0);
@@ -129,10 +129,10 @@ UTEST(sse, begin_sets_headers) {
     ASSERT_TRUE(sse.write_fn != NULL);
     ASSERT_TRUE(sse.res == &res);
 
-    kl_response_end_stream(&res);
+    kl_http_response_end_stream(&res);
     kl_test_closesock(pipefd[0]);
     kl_test_closesock(pipefd[1]);
-    kl_response_free(&res);
+    kl_http_response_free(&res);
 }
 
 UTEST_MAIN();

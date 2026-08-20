@@ -8,9 +8,9 @@
 /* Short timeout for fast tests */
 #define TEST_TIMEOUT_MS 200
 
-static void handle_ok(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_ok(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* Static server shared by server_thread. Each test uses a unique port

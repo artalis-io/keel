@@ -2,7 +2,7 @@
 #include <keel/file_io.h>
 #include <keel/connection.h>
 #include <keel/allocator.h>
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/event.h>
 #include <string.h>
 #include <unistd.h>
@@ -115,7 +115,7 @@ UTEST(file_io, submit_called) {
 
     /* Set up response as file body with headers already sent */
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 1000;
     c.res.file_offset = 0;
@@ -137,7 +137,7 @@ UTEST(file_io, submit_called) {
 
 UTEST(file_io, headers_first) {
     /* Headers must be sent before file read is submitted.
-     * When headers_sent is 0, on_writable should call kl_response_send
+     * When headers_sent is 0, on_writable should call kl_http_response_send
      * first. Since we don't have a real fd, we just verify the logic path. */
     MockFileIO mock;
     mock_file_io_init(&mock);
@@ -155,7 +155,7 @@ UTEST(file_io, headers_first) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 100;
     c.res.headers_sent = 0;  /* headers not sent yet */
@@ -200,7 +200,7 @@ UTEST(file_io, complete_writes) {
     memcpy(c.stream.read_buf, "hello world", 11);
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 11;
     c.res.file_offset = 0;
@@ -253,7 +253,7 @@ UTEST(file_io, partial_write) {
     memcpy(c.stream.read_buf, "test data here", 14);
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 14;
     c.res.file_offset = 0;
@@ -291,7 +291,7 @@ UTEST(file_io, multi_chunk) {
     c.stream.read_cap = bufcap;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 250;  /* larger than buffer */
     c.res.file_offset = 0;
@@ -412,7 +412,7 @@ UTEST(file_io, tls_fallback) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 100;
     c.res.headers_sent = 1;
@@ -448,7 +448,7 @@ UTEST(file_io, head_request) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 100;
     c.res.headers_sent = 1;
@@ -514,7 +514,7 @@ UTEST(file_io, zero_copy_skips_write) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 500;
     c.res.file_offset = 0;
@@ -557,7 +557,7 @@ UTEST(file_io, zero_copy_multi_chunk) {
     c.stream.read_cap = bufcap;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 250;
     c.res.file_offset = 0;
@@ -627,7 +627,7 @@ UTEST(file_io, splice_fallback) {
     c.stream.read_cap = 8192;
 
     memset(&c.res, 0, sizeof(c.res));
-    c.res.body_mode = KL_BODY_FILE;
+    c.res.body_mode = KL_HTTP_BODY_FILE;
     c.res.file_fd = 10;
     c.res.file_size = 100;
     c.res.file_offset = 0;

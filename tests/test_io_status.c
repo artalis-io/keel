@@ -163,9 +163,9 @@ static KlResolver g_iod_resolver = {
     .resolve = iod_resolve, .cancel = iod_res_cancel, .destroy = iod_res_destroy,
 };
 
-static void iod_handler(KlRequest *req, KlResponse *res, void *u) {
+static void iod_handler(KlRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 static void *iod_server_thread(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
 

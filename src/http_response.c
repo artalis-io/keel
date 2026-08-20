@@ -1,8 +1,8 @@
-#include <keel/response.h>
+#include <keel/http_response.h>
 #include <keel/tls.h>
 #include <keel/event_ctx.h>
 #include "socket.h"
-#include "response_internal.h"
+#include "http_response_internal.h"
 #include "platform.h"
 #include <string.h>
 /* Would-block / EINTR classified via the kl_sock_io_status seam (KlIoStatus), not
@@ -106,7 +106,7 @@ static int format_chunk_hdr(char *buf, size_t n) {
 
 /* ── Header buffer management ────────────────────────────────────── */
 
-static int hdr_append(KlResponse *res, const char *data, size_t len) {
+static int hdr_append(KlHttpResponse *res, const char *data, size_t len) {
     if (len > SIZE_MAX - res->hdr_len) return -1;
     while (res->hdr_len + len > res->hdr_cap) {
         size_t new_cap;
@@ -126,7 +126,7 @@ static int hdr_append(KlResponse *res, const char *data, size_t len) {
 
 /* ── Init / Reset / Free ─────────────────────────────────────────── */
 
-int kl_response_init(KlResponse *res, KlAllocator *alloc) {
+int kl_http_response_init(KlHttpResponse *res, KlAllocator *alloc) {
     memset(res, 0, sizeof(*res));
     res->alloc = alloc;
     res->status = 200;
@@ -137,7 +137,7 @@ int kl_response_init(KlResponse *res, KlAllocator *alloc) {
     return 0;
 }
 
-void kl_response_reset(KlResponse *res) {
+void kl_http_response_reset(KlHttpResponse *res) {
     /* Close file descriptor if one was set for sendfile */
     if (res->file_fd >= 0) {
         kl_plat_file_close(res->file_fd);
@@ -170,7 +170,7 @@ void kl_response_reset(KlResponse *res) {
     res->hdr_cap = cap;
 }
 
-void kl_response_free(KlResponse *res) {
+void kl_http_response_free(KlHttpResponse *res) {
     if (res->file_fd >= 0) {
         kl_plat_file_close(res->file_fd);
         res->file_fd = -1;
@@ -192,7 +192,7 @@ void kl_response_free(KlResponse *res) {
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-void kl_response_status(KlResponse *res, int code) {
+void kl_http_response_status(KlHttpResponse *res, int code) {
     res->status = code;
 }
 
@@ -203,7 +203,7 @@ static int contains_crlf(const char *s, size_t len) {
     return 0;
 }
 
-int kl_response_header(KlResponse *res, const char *name, const char *value) {
+int kl_http_response_header(KlHttpResponse *res, const char *name, const char *value) {
     if (!name || !value) return -1;
     size_t name_len = strlen(name);
     size_t value_len = strlen(value);
@@ -220,14 +220,14 @@ int kl_response_header(KlResponse *res, const char *name, const char *value) {
     return 0;
 }
 
-void kl_response_body_borrow(KlResponse *res, const char *data, size_t len) {
+void kl_http_response_body_borrow(KlHttpResponse *res, const char *data, size_t len) {
     if (len > 0 && !data) return;
-    res->body_mode = KL_BODY_BUFFER;
+    res->body_mode = KL_HTTP_BODY_BUFFER;
     res->body = data;
     res->body_len = len;
 }
 
-int kl_response_body_copy(KlResponse *res, const char *data, size_t len) {
+int kl_http_response_body_copy(KlHttpResponse *res, const char *data, size_t len) {
     if (len > 0 && !data) return -1;
 
     /* Free previous owned body if any */
@@ -238,7 +238,7 @@ int kl_response_body_copy(KlResponse *res, const char *data, size_t len) {
     }
 
     if (len == 0) {
-        res->body_mode = KL_BODY_BUFFER;
+        res->body_mode = KL_HTTP_BODY_BUFFER;
         res->body = "";
         res->body_len = 0;
         return 0;
@@ -249,38 +249,38 @@ int kl_response_body_copy(KlResponse *res, const char *data, size_t len) {
     res->body_owned_size = len;
     memcpy(res->body_owned, data, len);
 
-    res->body_mode = KL_BODY_BUFFER;
+    res->body_mode = KL_HTTP_BODY_BUFFER;
     res->body = res->body_owned;
     res->body_len = len;
     return 0;
 }
 
-void kl_response_file(KlResponse *res, KlSocketHandle fd, uint64_t size) {
-    res->body_mode = KL_BODY_FILE;
+void kl_http_response_file(KlHttpResponse *res, KlSocketHandle fd, uint64_t size) {
+    res->body_mode = KL_HTTP_BODY_FILE;
     res->file_fd = fd;
     res->file_size = size;
     res->file_offset = 0;
 }
 
-int kl_response_json(KlResponse *res, int code, const char *json, size_t len) {
-    kl_response_status(res, code);
-    if (kl_response_header(res, "Content-Type", "application/json") < 0)
+int kl_http_response_json(KlHttpResponse *res, int code, const char *json, size_t len) {
+    kl_http_response_status(res, code);
+    if (kl_http_response_header(res, "Content-Type", "application/json") < 0)
         return -1;
-    kl_response_body_borrow(res, json, len);
+    kl_http_response_body_borrow(res, json, len);
     return 0;
 }
 
-int kl_response_error(KlResponse *res, int code, const char *message) {
-    kl_response_status(res, code);
-    if (kl_response_header(res, "Content-Type", "text/plain") < 0)
+int kl_http_response_error(KlHttpResponse *res, int code, const char *message) {
+    kl_http_response_status(res, code);
+    if (kl_http_response_header(res, "Content-Type", "text/plain") < 0)
         return -1;
     if (!message) message = "";
-    kl_response_body_borrow(res, message, strlen(message));
+    kl_http_response_body_borrow(res, message, strlen(message));
     return 0;
 }
 
 /* The socket provider for a response (ctx->sockets; NULL = POSIX). */
-static inline const KlSocketProvider *res_provider(const KlResponse *res) {
+static inline const KlSocketProvider *res_provider(const KlHttpResponse *res) {
     return res->ctx ? res->ctx->sockets : NULL;
 }
 
@@ -385,15 +385,15 @@ static int stream_writev_all(const KlSocketProvider *p, int fd, KlTls *tls,
 static const char kl_keepalive_hdr[] = "Connection: keep-alive\r\n";
 
 /* Assemble the buffered-response wire bytes into iov — the single source of truth
- * for the byte layout, shared by kl_response_send (synchronous seam writev) and the
+ * for the byte layout, shared by kl_http_response_send (synchronous seam writev) and the
  * IOCP completion driver (overlapped WSASend). See response_internal.h. */
-int kl_response_build_iovec(KlResponse *res, KlIoVec *iov, int cap,
+int kl_http_response_build_iovec(KlHttpResponse *res, KlIoVec *iov, int cap,
                             char *cl_buf, size_t cl_buf_cap, size_t *total_out) {
     (void)cl_buf_cap;   /* caller guarantees >= 48 (Content-Length line) */
     /* FILE mode assembles the HEAD only (Content-Length = file_size, no body iov);
      * the caller sends the file bytes separately (TransmitFile / sendfile). */
-    int is_file = (res->body_mode == KL_BODY_FILE);
-    if (res->body_mode != KL_BODY_BUFFER && res->body_mode != KL_BODY_NONE && !is_file)
+    int is_file = (res->body_mode == KL_HTTP_BODY_FILE);
+    if (res->body_mode != KL_HTTP_BODY_BUFFER && res->body_mode != KL_HTTP_BODY_NONE && !is_file)
         return -1;
     if (cap < 7)
         return -1;
@@ -431,13 +431,13 @@ int kl_response_build_iovec(KlResponse *res, KlIoVec *iov, int cap,
     return n;
 }
 
-int kl_response_send(KlResponse *res) {
+int kl_http_response_send(KlHttpResponse *res) {
     /* Buffer body path: single-attempt writev with send_offset tracking */
-    if (res->body_mode == KL_BODY_BUFFER || res->body_mode == KL_BODY_NONE) {
+    if (res->body_mode == KL_HTTP_BODY_BUFFER || res->body_mode == KL_HTTP_BODY_NONE) {
         char cl_buf[48];
         KlIoVec iov[7];
         size_t total = 0;
-        int iovcnt = kl_response_build_iovec(res, iov, 7, cl_buf,
+        int iovcnt = kl_http_response_build_iovec(res, iov, 7, cl_buf,
                                              sizeof(cl_buf), &total);
         if (iovcnt < 0) return -1;
 
@@ -471,7 +471,7 @@ int kl_response_send(KlResponse *res) {
 
         char cl_buf[48];
         int cl_len = 0;
-        if (res->body_mode == KL_BODY_FILE) {
+        if (res->body_mode == KL_HTTP_BODY_FILE) {
             cl_len = format_content_length(cl_buf, (size_t)res->file_size);
         }
 
@@ -513,7 +513,7 @@ int kl_response_send(KlResponse *res) {
     }
 
     /* Drain-based stream flush (backpressure path) */
-    if (res->body_mode == KL_BODY_STREAM && res->drain_enabled) {
+    if (res->body_mode == KL_HTTP_BODY_STREAM && res->drain_enabled) {
         int r = kl_drain_flush(&res->drain);
         if (r < 0) return -1;
         if (r == 1) return 1;  /* more pending */
@@ -523,7 +523,7 @@ int kl_response_send(KlResponse *res) {
     }
 
     /* Send file body (already skipped above for HEAD) */
-    if (res->body_mode == KL_BODY_FILE) {
+    if (res->body_mode == KL_HTTP_BODY_FILE) {
         if (res->tls) {
             /* TLS: sendfile bypasses userspace — incompatible with encryption.
              * Fall back to pread + tls->write, one chunk per event tick
@@ -599,7 +599,7 @@ int kl_response_send(KlResponse *res) {
 /* ── Drain writer — wraps raw write/TLS for KlDrainWriteFn ───────── */
 
 static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx) {
-    KlResponse *res = ctx;
+    KlHttpResponse *res = ctx;
     ssize_t nw;
     if (res->tls) {
         nw = res->tls->write(res->tls, res->conn_fd, data, len);
@@ -616,7 +616,7 @@ static kl_ssize_t response_drain_writer(const char *data, size_t len, void *ctx)
     return nw;
 }
 
-int kl_response_enable_drain(KlResponse *res, KlAllocator *alloc,
+int kl_http_response_enable_drain(KlHttpResponse *res, KlAllocator *alloc,
                               size_t max_size) {
     if (!res || !alloc) return -1;
     kl_drain_init(&res->drain, response_drain_writer, res, alloc);
@@ -629,7 +629,7 @@ int kl_response_enable_drain(KlResponse *res, KlAllocator *alloc,
 /* ── Chunked streaming ───────────────────────────────────────────── */
 
 static int kl_stream_write(void *ctx, const char *data, size_t len) {
-    KlResponse *res = ctx;
+    KlHttpResponse *res = ctx;
     if (res->stream_error) return -1;
     if (len == 0) return 0;
     if (res->head_request) return 0;
@@ -660,21 +660,21 @@ static int kl_stream_write(void *ctx, const char *data, size_t len) {
     return 0;
 }
 
-int kl_response_begin_stream(KlResponse *res, int status,
-                             KlWriteFn *out_write, void **out_ctx) {
-    res->body_mode = KL_BODY_STREAM;
-    kl_response_status(res, status);
-    if (kl_response_header(res, "Transfer-Encoding", "chunked") < 0)
+int kl_http_response_begin_stream(KlHttpResponse *res, int status,
+                             KlHttpResponseWriteFn *out_write, void **out_ctx) {
+    res->body_mode = KL_HTTP_BODY_STREAM;
+    kl_http_response_status(res, status);
+    if (kl_http_response_header(res, "Transfer-Encoding", "chunked") < 0)
         return -1;
 
     /* Wire the transport-neutral outbound stream buffer by default (8g-0): stream writes
      * go through KlDrain — a non-blocking inline send with the would-block remainder
      * buffered (bounded, backpressure), flushed by the transport (readiness:
-     * kl_conn_on_writable; completion: kl_response_send in comp_send_stream, and 8g-1's
+     * kl_conn_on_writable; completion: kl_http_response_send in comp_send_stream, and 8g-1's
      * overlapped drive). This replaces the busy-spin-then-drop behavior of stream_writev_all
      * on a slow client. If no allocator is available, fall back to the spin-write path. */
     if (!res->drain_enabled && res->alloc)
-        (void)kl_response_enable_drain(res, res->alloc, KL_STREAM_DRAIN_MAX);
+        (void)kl_http_response_enable_drain(res, res->alloc, KL_STREAM_DRAIN_MAX);
 
     KlStatusLine sl = status_line_for(res->status);
 
@@ -712,7 +712,7 @@ int kl_response_begin_stream(KlResponse *res, int status,
     return 0;
 }
 
-int kl_response_end_stream(KlResponse *res) {
+int kl_http_response_end_stream(KlHttpResponse *res) {
     if (res->stream_error) return -1;
     if (res->head_request) return 0;
 

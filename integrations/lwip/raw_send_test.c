@@ -114,24 +114,24 @@ static void cnt_reset(void) {
 /* ── response-size config (a route per phase, size chosen by g_resp_size) ───────── */
 static size_t g_resp_size;            /* bytes the size handler should emit */
 
-/* Generate a deterministic pattern body of g_resp_size bytes. Uses kl_response_body_copy (a
+/* Generate a deterministic pattern body of g_resp_size bytes. Uses kl_http_response_body_copy (a
  * COPY that survives the async send) — this DOES allocate on the response allocator (bounded by
  * the response size), which is separate from the SEND path. The bounded-memory / no-send-alloc
  * proofs use the FILE route (B6) where the response carries no in-memory body at all. */
-static void handle_size(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_size(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     size_t n = g_resp_size;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
-    if (n == 0) { kl_response_body_copy(res, "", 0); return; }
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
+    if (n == 0) { kl_http_response_body_copy(res, "", 0); return; }
     unsigned char *buf = malloc(n);
-    if (!buf) { kl_response_error(res, 500, "oom"); return; }
+    if (!buf) { kl_http_response_error(res, 500, "oom"); return; }
     for (size_t i = 0; i < n; i++) buf[i] = pat(i);
-    kl_response_body_copy(res, (const char *)buf, n);
+    kl_http_response_body_copy(res, (const char *)buf, n);
     free(buf);
 }
 
-/* ── file route: send a temp file of g_file_size bytes via kl_response_file ──────── */
+/* ── file route: send a temp file of g_file_size bytes via kl_http_response_file ──────── */
 static off_t  g_file_size;
 static int    g_file_truncate;        /* B9: shrink the file after headers to force a read error */
 static char   g_file_path[256];
@@ -152,15 +152,15 @@ static int make_pattern_file(off_t n) {
     return fd;
 }
 
-static void handle_file(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_file(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud;
     int fd = open(g_file_path, O_RDONLY);
-    if (fd < 0) { kl_response_error(res, 500, "open"); return; }
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/octet-stream");
+    if (fd < 0) { kl_http_response_error(res, 500, "open"); return; }
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/octet-stream");
     /* Declare the ORIGINAL size; B9 truncates the file on disk after this so the pump's pread
      * hits a short read / error mid-transmission -> failed terminal. */
-    kl_response_file(res, fd, g_file_size);
+    kl_http_response_file(res, fd, g_file_size);
     if (g_file_truncate) {
         /* Truncate the on-disk file to a fraction so the later preads read fewer bytes than
          * declared -> the pump surfaces a failed terminal (ok=0). */

@@ -50,7 +50,7 @@ static void h2_stream_destroy(KlH2ServerConn *h2c, KlH2ServerStream *stream) {
         stream->hdr_storage = NULL;
     }
     if (stream->res.hdr_buf) {
-        kl_response_free(&stream->res);
+        kl_http_response_free(&stream->res);
     }
 
     /* Swap-remove: replace this stream with the last one */
@@ -116,15 +116,15 @@ static int h2_submit_response(KlH2ServerConn *h2c, KlH2ServerStream *stream) {
     if (stream->response_submitted) return 0;
     stream->response_submitted = 1;
 
-    KlResponse *res = &stream->res;
+    KlHttpResponse *res = &stream->res;
     const void *body = NULL;
     size_t body_len = 0;
     char *file_buf = NULL;
 
-    if (res->body_mode == KL_BODY_BUFFER) {
+    if (res->body_mode == KL_HTTP_BODY_BUFFER) {
         body = res->body;
         body_len = res->body_len;
-    } else if (res->body_mode == KL_BODY_FILE) {
+    } else if (res->body_mode == KL_HTTP_BODY_FILE) {
         if (res->file_size > 16 * 1024 * 1024) {
             const char *err_names[] = {"content-type"};
             const char *err_values[] = {"text/plain"};
@@ -152,7 +152,7 @@ static int h2_submit_response(KlH2ServerConn *h2c, KlH2ServerStream *stream) {
                 body_len = (size_t)nr;
             }
         }
-    } else if (res->body_mode == KL_BODY_STREAM) {
+    } else if (res->body_mode == KL_HTTP_BODY_STREAM) {
         const char *err_names[] = {"content-type"};
         const char *err_values[] = {"text/plain"};
         const char *err_body = "Streaming responses not supported over HTTP/2";
@@ -351,7 +351,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     req->num_params = stream->num_params;
 
     /* Initialize response */
-    if (kl_response_init(&stream->res, h2c->alloc) < 0) {
+    if (kl_http_response_init(&stream->res, h2c->alloc) < 0) {
         h2_stream_destroy(h2c, stream);
         return -1;
     }
@@ -377,7 +377,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
         KlBodyReader *br = stream->route->body_reader(
             h2c->alloc, req, stream->route->user_data);
         if (!br) {
-            kl_response_error(&stream->res, 415, "Unsupported Media Type");
+            kl_http_response_error(&stream->res, 415, "Unsupported Media Type");
             int rc = h2_submit_response(h2c, stream);
             if (h2c->session->want_write(h2c->session))
                 h2c->session->flush(h2c->session);
@@ -440,9 +440,9 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
         stream->route->handler(&stream->req, &stream->res,
                                 stream->route->user_data);
     } else if (stream->route_result == 405) {
-        kl_response_error(&stream->res, 405, "Method Not Allowed");
+        kl_http_response_error(&stream->res, 405, "Method Not Allowed");
     } else {
-        kl_response_error(&stream->res, 404, "Not Found");
+        kl_http_response_error(&stream->res, 404, "Not Found");
     }
 
     int rc = h2_submit_response(h2c, stream);

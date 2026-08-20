@@ -20,38 +20,38 @@
  * backend's overlapped provider (8f-5a), so this default-provider server serves every backend
  * unchanged — no explicit provider needed. */
 
-static void handle_hello(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_hello(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
+    kl_http_response_json(res, 200, "{\"msg\":\"hello\"}", 15);
 }
 
-static void handle_user(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_user(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     size_t id_len;
     const char *id = kl_request_param(req, "id", &id_len);
-    if (!id) { kl_response_error(res, 400, "Missing id"); return; }
+    if (!id) { kl_http_response_error(res, 400, "Missing id"); return; }
     static char json[128];
     int n = snprintf(json, sizeof(json),
                      "{\"id\":%.*s,\"name\":\"Alice\"}", (int)id_len, id);
     if (n < 0) n = 0;
-    kl_response_json(res, 200, json, (size_t)n);
+    kl_http_response_json(res, 200, json, (size_t)n);
 }
 
-static int noop_mw(KlRequest *req, KlResponse *res, void *ctx) {
+static int noop_mw(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)req; (void)res; (void)ctx;
     return 0;
 }
 
-static void handle_echo(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_echo(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
     if (!br || br->len == 0) {
-        kl_response_json(res, 200, "{\"echo\":\"\"}", 11);
+        kl_http_response_json(res, 200, "{\"echo\":\"\"}", 11);
         return;
     }
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "application/json");
-    kl_response_body_borrow(res, br->data, br->len);
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "application/json");
+    kl_http_response_body_borrow(res, br->data, br->len);
 }
 
 int main(int argc, char **argv) {

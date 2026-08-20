@@ -28,7 +28,7 @@ static int          ta_mw_calls;
 static char         ta_seen_host[128];
 static int          ta_seen_version;   /* req->version_major observed by handler */
 
-static void ta_handler(KlRequest *req, KlResponse *res, void *ud) {
+static void ta_handler(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)ud;
     ta_handler_calls++;
     ta_seen_version = req->version_major;
@@ -36,10 +36,10 @@ static void ta_handler(KlRequest *req, KlResponse *res, void *ud) {
     ta_seen_host[0] = '\0';
     if (host) { strncpy(ta_seen_host, host, sizeof(ta_seen_host) - 1);
                 ta_seen_host[sizeof(ta_seen_host) - 1] = '\0'; }
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static int ta_middleware(KlRequest *req, KlResponse *res, void *ud) {
+static int ta_middleware(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)res; (void)ud;
     ta_mw_calls++;
     return 0;   /* continue */
@@ -214,12 +214,12 @@ UTEST(alpn, http1_host_and_http2_authority_converge) {
     req.headers[0].name = "Host"; req.headers[0].name_len = 4;
     req.headers[0].value = "example.com"; req.headers[0].value_len = 11;
     req.num_headers = 1;
-    KlResponse res; memset(&res, 0, sizeof(res));
-    kl_response_init(&res, &ta_alloc);
+    KlHttpResponse res; memset(&res, 0, sizeof(res));
+    kl_http_response_init(&res, &ta_alloc);
     ta_handler(&req, &res, NULL);
     ASSERT_EQ(ta_seen_version, 1);
     ASSERT_STREQ(ta_seen_host, "example.com");
-    kl_response_free(&res);
+    kl_http_response_free(&res);
     ta_teardown();
 }
 

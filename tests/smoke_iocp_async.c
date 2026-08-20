@@ -38,16 +38,16 @@ static void cancel_fn(void *ud) { free(ud); }
 static void done_fn(void *ud) {          /* event-loop thread (via the wakeup watcher) */
     WorkCtx *w = ud;
     KlConn *conn = w->op.conn;
-    kl_response_json(&conn->res, 200, WANT, sizeof(WANT) - 1);
+    kl_http_response_json(&conn->res, 200, WANT, sizeof(WANT) - 1);
     kl_async_complete(&g_srv, &w->op);
     free(w);
 }
 
-static void handle_async(KlRequest *req, KlResponse *res, void *ud) {
+static void handle_async(KlRequest *req, KlHttpResponse *res, void *ud) {
     (void)ud;
     KlConn *conn = kl_request_conn(req);
     WorkCtx *w = malloc(sizeof(*w));
-    if (!w) { kl_response_error(res, 500, "oom"); return; }
+    if (!w) { kl_http_response_error(res, 500, "oom"); return; }
     memset(w, 0, sizeof(*w));
     w->op.on_resume = on_resume;
     w->op.on_cancel = on_cancel;
@@ -55,7 +55,7 @@ static void handle_async(KlRequest *req, KlResponse *res, void *ud) {
     KlWorkItem item = { .work_fn = work_fn, .done_fn = done_fn,
                         .cancel_fn = cancel_fn, .user_data = w };
     if (kl_thread_pool_submit(g_pool, &item) < 0) {
-        kl_response_error(res, 503, "busy");
+        kl_http_response_error(res, 503, "busy");
         kl_async_complete(&g_srv, &w->op);
         free(w);
     }

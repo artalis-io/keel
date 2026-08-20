@@ -20,7 +20,7 @@
 #include <string.h>
 
 /* Report the connecting peer's credentials (UNIX-socket only). */
-static void handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
+static void handle_whoami(KlRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     KlPeerCred cred;
     char body[160];
@@ -38,7 +38,7 @@ static void handle_whoami(KlRequest *req, KlResponse *res, void *ctx) {
         n = snprintf(body, sizeof(body),
                      "{\"error\":\"peer credentials unavailable\"}");
     }
-    kl_response_json(res, 200, body, (size_t)n);
+    kl_http_response_json(res, 200, body, (size_t)n);
 }
 
 int main(int argc, char **argv) {

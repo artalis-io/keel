@@ -404,44 +404,44 @@ static void wait_for_bind(KlServer *s) {
 }
 
 /* Server handler: echo body back */
-static void srv_echo(KlRequest *req, KlResponse *res, void *ctx)
+static void srv_echo(KlRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)ctx;
     KlBufReader *br = (KlBufReader *)req->body_reader;
-    kl_response_status(res, 200);
-    kl_response_header(res, "Content-Type", "text/plain");
+    kl_http_response_status(res, 200);
+    kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
-        kl_response_body_borrow(res, br->data, br->len);
+        kl_http_response_body_borrow(res, br->data, br->len);
     else
-        kl_response_body_borrow(res, "no body", 7);
+        kl_http_response_body_borrow(res, "no body", 7);
 }
 
 /* Server handler: fixed JSON response */
-static void srv_hello(KlRequest *req, KlResponse *res, void *ctx)
+static void srv_hello(KlRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)req; (void)ctx;
-    kl_response_json(res, 200, "{\"ok\":true}", 11);
+    kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
 /* Server handler: streaming chunked response */
-static void srv_chunked(KlRequest *req, KlResponse *res, void *ctx)
+static void srv_chunked(KlRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)req; (void)ctx;
-    kl_response_header(res, "Content-Type", "text/plain");
-    KlWriteFn write_fn;
+    kl_http_response_header(res, "Content-Type", "text/plain");
+    KlHttpResponseWriteFn write_fn;
     void *write_ctx;
-    kl_response_begin_stream(res, 200, &write_fn, &write_ctx);
+    kl_http_response_begin_stream(res, 200, &write_fn, &write_ctx);
     write_fn(write_ctx, "chunk1", 6);
     write_fn(write_ctx, "chunk2", 6);
     write_fn(write_ctx, "chunk3", 6);
-    kl_response_end_stream(res);
+    kl_http_response_end_stream(res);
 }
 
 /* Server handler: 204 No Content */
-static void srv_no_content(KlRequest *req, KlResponse *res, void *ctx)
+static void srv_no_content(KlRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)req; (void)ctx;
-    kl_response_status(res, 204);
+    kl_http_response_status(res, 204);
 }
 
 static KlServer stream_test_server;
