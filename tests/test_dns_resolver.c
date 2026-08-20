@@ -1,7 +1,9 @@
 #include "utest.h"
 #include <keel/dns_resolver.h>
 #include <keel/resolver.h>
-#include <keel/udp_server.h>
+#include <keel/datagram.h>          /* D2: the fake nameserver + spoofer are bound KlDatagrams now */
+#include <keel/datagram_detail.h>   /* stack-allocate KlDatagram */
+#include "../src/datagram_open.h"   /* kl_datagram_teardown — synchronous harness teardown */
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/error.h>
@@ -99,7 +101,7 @@ static int    g_octet_from_name; /* A record's 4th octet = the query name's firs
 static int    g_wrong_source;    /* two-phase src-filter proof: send ONLY a POISONED answer from
                                   * g_spoof_sock (a non-nameserver source) + STASH the legit response +
                                   * the resolver's dest for the test to release later. No auto-reply. */
-static KlUdp *g_spoof_sock;      /* the wrong-source socket (bound to a different ephemeral port) */
+static KlDatagram *g_spoof_sock; /* the wrong-source socket (bound to a different ephemeral port) */
 static uint8_t    g_stash_resp[2][512]; /* stashed legit responses (A + AAAA), released in phase 2 */
 static size_t     g_stash_len[2];
 static int        g_stash_n;
@@ -179,9 +181,10 @@ static size_t dns_write_response(const uint8_t *q, size_t qend, int qtype,
 }
 
 /* Parse qtype from the question and emit a canned response. */
-static void mock_ns(KlUdpServer *s, const void *data, size_t len,
-                    const KlSockAddr *src, void *ud) {
-    (void)ud;
+static void mock_ns(void *ud, const void *data, size_t len,
+                    const KlSockAddr *src, const KlSockAddr *local, unsigned flags) {
+    (void)local; (void)flags;
+    KlDatagram *s = ud;   /* the bound nameserver KlDatagram (reply target) */
     if (len < 12) return;
     g_queries++;
 
@@ -285,7 +288,8 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
         memcpy(poison, resp, n);
         if (poison[7] >= 1)                     /* an A answer present (no cookie in this test) */
             poison[n - 1] = 0xEE;               /* 10.1.2.3 -> 10.1.2.238 (distinguishable) */
-        if (kl_udp_send_to(g_spoof_sock, poison, n, src) == 0)   /* count only submitted spoofs */
+        KlDatagramMessage pm = { .data = poison, .len = (size_t)n, .peer = src, .tos = -1 };
+        if (kl_datagram_send(g_spoof_sock, &pm) == KL_DATAGRAM_ACCEPTED)   /* count only submitted spoofs */
             g_poison_sent++;
         else
             g_poison_fail++;                    /* a send failure would falsely leave the resolver pending */
@@ -297,7 +301,8 @@ static void mock_ns(KlUdpServer *s, const void *data, size_t len,
         g_stash_dest = *src;
         return;                                 /* withhold the legit reply until phase 2 */
     }
-    kl_udp_server_reply(s, resp, n, src);
+    KlDatagramMessage rm = { .data = resp, .len = (size_t)n, .peer = src, .tos = -1 };
+    (void)kl_datagram_send(s, &rm);
 }
 
 /* ── Mock DNS-over-TCP server (event-loop driven, RFC 7766 framing) ─────── */
@@ -421,22 +426,23 @@ static void reset_dns(void) {
 }
 
 /* Start the mock nameserver and create a resolver pointed at it (custom cfg). */
-static KlResolver *make_resolver_cfg(KlEventCtx *ctx, KlUdpServer *ns,
+static KlResolver *make_resolver_cfg(KlEventCtx *ctx, KlDatagram *ns,
                                      KlDnsResolverConfig *dc) {
-    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    KlDatagramSocketConfig sc = { .ctx = ctx, .bind_addr = "127.0.0.1" };
     /* Diagnostic on any NULL return: pin the EXACT failing call + its Keel error + errno, so a
      * construction failure that only reproduces in some environments is actionable at a glance
      * (instead of a bare `r == NULL` from the 30+ resolver-backed cases). Two distinct failure
-     * points — the mock nameserver's KlUdpServer (unchanged by M3) vs the resolver's KlDatagram
-     * construction (kl_datagram_open -> _init -> _recv_start). */
+     * points — the mock nameserver's bound KlDatagram vs the resolver's own KlDatagram construction
+     * (kl_datagram_open -> _init -> _recv_start). */
     errno = 0;
-    if (kl_udp_server_init(ns, ctx, &sc, mock_ns, NULL) != 0) {
-        fprintf(stderr, "make_resolver: kl_udp_server_init FAILED: %s (errno=%d: %s)\n",
-                kl_strerror(kl_udp_server_last_error(ns)), errno, strerror(errno));
+    if (kl_datagram_socket_init(ns, &sc) != 0 ||
+        kl_datagram_recv_start(ns, mock_ns, ns) != 0) {
+        fprintf(stderr, "make_resolver: nameserver KlDatagram init FAILED: %s (errno=%d: %s)\n",
+                kl_strerror(kl_datagram_last_error(ns)), errno, strerror(errno));
         return NULL;
     }
     dc->nameserver = "127.0.0.1";
-    dc->port = kl_udp_server_local_port(ns);
+    dc->port = kl_datagram_local_port(ns);
     errno = 0;
     KlResolver *r = kl_dns_resolver_create(ctx, dc);
     if (!r)
@@ -446,7 +452,7 @@ static KlResolver *make_resolver_cfg(KlEventCtx *ctx, KlUdpServer *ns,
 }
 
 /* Build a resolver + mock nameserver on one ctx. Caller frees. */
-static KlResolver *make_resolver(KlEventCtx *ctx, KlUdpServer *ns, int timeout_ms,
+static KlResolver *make_resolver(KlEventCtx *ctx, KlDatagram *ns, int timeout_ms,
                                  int attempts) {
     KlDnsResolverConfig dc = { .timeout_ms = timeout_ms, .attempts = attempts };
     return make_resolver_cfg(ctx, ns, &dc);
@@ -464,17 +470,18 @@ extern KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsReso
                                                 int send_slots);
 
 /* Same as make_resolver_cfg but with an explicit outbound-slot count (the internal D-DNS-3 test hook). */
-static KlResolver *make_resolver_slots(KlEventCtx *ctx, KlUdpServer *ns,
+static KlResolver *make_resolver_slots(KlEventCtx *ctx, KlDatagram *ns,
                                        KlDnsResolverConfig *dc, int send_slots) {
-    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
+    KlDatagramSocketConfig sc = { .ctx = ctx, .bind_addr = "127.0.0.1" };
     errno = 0;
-    if (kl_udp_server_init(ns, ctx, &sc, mock_ns, NULL) != 0) {
-        fprintf(stderr, "make_resolver_slots: kl_udp_server_init FAILED: %s (errno=%d: %s)\n",
-                kl_strerror(kl_udp_server_last_error(ns)), errno, strerror(errno));
+    if (kl_datagram_socket_init(ns, &sc) != 0 ||
+        kl_datagram_recv_start(ns, mock_ns, ns) != 0) {
+        fprintf(stderr, "make_resolver_slots: nameserver KlDatagram init FAILED: %s (errno=%d: %s)\n",
+                kl_strerror(kl_datagram_last_error(ns)), errno, strerror(errno));
         return NULL;
     }
     dc->nameserver = "127.0.0.1";
-    dc->port = kl_udp_server_local_port(ns);
+    dc->port = kl_datagram_local_port(ns);
     errno = 0;
     KlResolver *r = kl_dns_resolver_create_slots(ctx, dc, send_slots);
     if (!r)
@@ -490,7 +497,7 @@ UTEST(dns, resolve_a) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -507,7 +514,7 @@ UTEST(dns, resolve_a) {
     ASSERT_EQ(1, g_res.naddrs);            /* resolver propagates the address list */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -518,7 +525,7 @@ UTEST(dns, fallback_a_to_aaaa) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -531,7 +538,7 @@ UTEST(dns, fallback_a_to_aaaa) {
     ASSERT_TRUE(g_queries >= 2);        /* A then AAAA */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -541,7 +548,7 @@ UTEST(dns, nxdomain_errors) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -552,7 +559,7 @@ UTEST(dns, nxdomain_errors) {
     ASSERT_EQ(KL_ERR_DNS, g_err);
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -562,7 +569,7 @@ UTEST(dns, timeout_errors) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 30, 1);   /* 30ms, 1 try/family */
     ASSERT_TRUE(r != NULL);
 
@@ -573,7 +580,7 @@ UTEST(dns, timeout_errors) {
     ASSERT_EQ(KL_ERR_DNS, g_err);
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -582,7 +589,7 @@ UTEST(dns, literal_ip_shortcut) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -599,7 +606,7 @@ UTEST(dns, literal_ip_shortcut) {
     ASSERT_EQ(0, g_queries);            /* no packet sent */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -609,7 +616,7 @@ UTEST(dns, localhost_shortcut) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -626,7 +633,7 @@ UTEST(dns, localhost_shortcut) {
     ASSERT_EQ(0, g_queries);            /* no packet sent */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -637,7 +644,7 @@ UTEST(dns, destroy_with_inflight) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 5000, 2);
     ASSERT_TRUE(r != NULL);
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
@@ -646,7 +653,7 @@ UTEST(dns, destroy_with_inflight) {
     r->destroy(r);                       /* in-flight req + timer freed here */
     ASSERT_EQ(0, g_done);                /* never completed */
 
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -669,7 +676,7 @@ UTEST(dns, destroy_from_within_on_recv) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
     g_reentrant_resolver = r;
@@ -678,7 +685,7 @@ UTEST(dns, destroy_from_within_on_recv) {
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(0, g_err);
     /* r was freed by the deferred teardown at the outermost leave — do NOT touch it. */
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -692,14 +699,14 @@ UTEST(dns, destroy_from_done_literal_timer) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
     g_reentrant_resolver = r;
     ASSERT_TRUE(r->resolve(r, &ctx, "192.0.2.10", 1234, on_done_destroy, NULL) != NULL);
     pump(&ctx, &g_done, 50);   /* dns_on_literal (0-timer) → dns_complete → done → destroy (no datagram frame) */
     ASSERT_EQ(1, g_done);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 UTEST(dns, destroy_from_done_on_timeout) {
@@ -708,7 +715,7 @@ UTEST(dns, destroy_from_done_on_timeout) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 40, 1);   /* short per-attempt timeout, one attempt */
     ASSERT_TRUE(r != NULL);
     g_reentrant_resolver = r;
@@ -716,7 +723,7 @@ UTEST(dns, destroy_from_done_on_timeout) {
     pump(&ctx, &g_done, 400);  /* timeout timer → dns_complete(error) → done → destroy (timer, no datagram frame) */
     ASSERT_EQ(1, g_done);
     ASSERT_NE(0, g_err);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -730,7 +737,7 @@ UTEST(dns, spoofed_question_rejected) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 30, 1);   /* fast timeout */
     ASSERT_TRUE(r != NULL);
 
@@ -742,7 +749,7 @@ UTEST(dns, spoofed_question_rejected) {
     ASSERT_TRUE(g_queries >= 1);         /* the spoof reply was seen and rejected */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -753,7 +760,7 @@ UTEST(dns, case_tamper_rejected) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 30, 1);
     ASSERT_TRUE(r != NULL);
 
@@ -763,7 +770,7 @@ UTEST(dns, case_tamper_rejected) {
     ASSERT_EQ(1, g_done);
     ASSERT_EQ(KL_ERR_DNS, g_err);
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -782,7 +789,7 @@ UTEST(dns, dns_0x20_randomizes_case) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -794,7 +801,7 @@ UTEST(dns, dns_0x20_randomizes_case) {
     ASSERT_TRUE(q_uppercase_count() > 0);   /* ~30 letters → all-lowercase is ~2^-30 */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -805,7 +812,7 @@ UTEST(dns, disable_0x20_lowercase_and_resolves) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlDnsResolverConfig dc = { .timeout_ms = 500, .attempts = 2, .disable_0x20 = 1 };
     KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
     ASSERT_TRUE(r != NULL);
@@ -818,7 +825,7 @@ UTEST(dns, disable_0x20_lowercase_and_resolves) {
     ASSERT_EQ(0, q_uppercase_count());      /* lowercase in, lowercase out: no 0x20 */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -829,7 +836,7 @@ UTEST(dns, transaction_ids_not_sequential) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -844,7 +851,7 @@ UTEST(dns, transaction_ids_not_sequential) {
     ASSERT_FALSE(g_seen_ids[0] == 1 && g_seen_ids[1] == 2 && g_seen_ids[2] == 3);
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -872,10 +879,10 @@ static const char *write_resolv(const char *content) {
 
 /* A nameserver that receives but never replies (to exercise failover). */
 static int g_silent_hits;
-static void silent_ns(KlUdpServer *s, const void *data, size_t len,
-                      const KlSockAddr *src, void *ud) {
-    (void)s; (void)data; (void)len; (void)src; (void)ud;
-    g_silent_hits++;
+static void silent_ns(void *ud, const void *data, size_t len,
+                      const KlSockAddr *src, const KlSockAddr *local, unsigned flags) {
+    (void)ud; (void)data; (void)len; (void)src; (void)local; (void)flags;
+    g_silent_hits++;   /* receives but never replies (timeout tests) */
 }
 
 UTEST(dns, hosts_file_lookup) {
@@ -885,7 +892,7 @@ UTEST(dns, hosts_file_lookup) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlDnsResolverConfig dc = { .timeout_ms = 500, .attempts = 2, .hosts_path = hp };
     KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
     ASSERT_TRUE(r != NULL);
@@ -904,7 +911,7 @@ UTEST(dns, hosts_file_lookup) {
     ASSERT_EQ(0, g_queries);            /* no packet sent */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
     unlink(hp);
 }
@@ -916,7 +923,7 @@ UTEST(dns, hosts_prefer_ipv6) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlDnsResolverConfig dc = { .prefer_ipv6 = 1, .hosts_path = hp };
     KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
     ASSERT_TRUE(r != NULL);
@@ -931,7 +938,7 @@ UTEST(dns, hosts_prefer_ipv6) {
     ASSERT_STREQ("2001:db8::1", ip);
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
     unlink(hp);
 }
@@ -942,7 +949,7 @@ UTEST(dns, edns0_opt_advertised) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);   /* EDNS0 on by default */
     ASSERT_TRUE(r != NULL);
 
@@ -954,7 +961,7 @@ UTEST(dns, edns0_opt_advertised) {
     ASSERT_EQ(1, g_last_arcount);           /* OPT record in the additional section */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -964,7 +971,7 @@ UTEST(dns, edns0_disabled) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlDnsResolverConfig dc = { .timeout_ms = 500, .attempts = 2, .disable_edns = 1 };
     KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
     ASSERT_TRUE(r != NULL);
@@ -976,7 +983,7 @@ UTEST(dns, edns0_disabled) {
     ASSERT_EQ(0, g_last_arcount);           /* no OPT record */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -992,12 +999,14 @@ UTEST(dns, nameserver_failover) {
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
 
-    KlUdpServer ns1, ns2;
-    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
-    ASSERT_EQ(0, kl_udp_server_init(&ns1, &ctx, &sc, silent_ns, NULL));
-    ASSERT_EQ(0, kl_udp_server_init(&ns2, &ctx, &sc, mock_ns, NULL));
-    uint16_t p1 = kl_udp_server_local_port(&ns1);
-    uint16_t p2 = kl_udp_server_local_port(&ns2);
+    KlDatagram ns1, ns2;
+    KlDatagramSocketConfig sc = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns1, &sc));
+    ASSERT_EQ(0, kl_datagram_recv_start(&ns1, silent_ns, &ns1));
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns2, &sc));
+    ASSERT_EQ(0, kl_datagram_recv_start(&ns2, mock_ns, &ns2));
+    uint16_t p1 = kl_datagram_local_port(&ns1);
+    uint16_t p2 = kl_datagram_local_port(&ns2);
 
     char rc[160];
     snprintf(rc, sizeof(rc),
@@ -1018,8 +1027,8 @@ UTEST(dns, nameserver_failover) {
     ASSERT_TRUE(g_silent_hits >= 1);     /* the first (silent) nameserver was tried */
 
     r->destroy(r);
-    kl_udp_server_free(&ns1);
-    kl_udp_server_free(&ns2);
+    kl_datagram_teardown(&ns1, NULL, NULL);
+    kl_datagram_teardown(&ns2, NULL, NULL);
     kl_event_ctx_free(&ctx);
     unlink(rcpath);
 }
@@ -1032,13 +1041,15 @@ UTEST(dns, all_nameservers_silent_times_out) {
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
 
-    KlUdpServer ns1, ns2;
-    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
-    ASSERT_EQ(0, kl_udp_server_init(&ns1, &ctx, &sc, silent_ns, NULL));
-    ASSERT_EQ(0, kl_udp_server_init(&ns2, &ctx, &sc, silent_ns, NULL));
+    KlDatagram ns1, ns2;
+    KlDatagramSocketConfig sc = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns1, &sc));
+    ASSERT_EQ(0, kl_datagram_recv_start(&ns1, silent_ns, &ns1));
+    ASSERT_EQ(0, kl_datagram_socket_init(&ns2, &sc));
+    ASSERT_EQ(0, kl_datagram_recv_start(&ns2, silent_ns, &ns2));
     char rc[160];
     snprintf(rc, sizeof(rc), "nameserver 127.0.0.1#%u\nnameserver 127.0.0.1#%u\n",
-             kl_udp_server_local_port(&ns1), kl_udp_server_local_port(&ns2));
+             kl_datagram_local_port(&ns1), kl_datagram_local_port(&ns2));
     const char *rcpath = write_resolv(rc);
 
     KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = 20, .attempts = 1 };
@@ -1053,8 +1064,8 @@ UTEST(dns, all_nameservers_silent_times_out) {
     ASSERT_TRUE(g_silent_hits >= 2);     /* both nameservers were tried */
 
     r->destroy(r);
-    kl_udp_server_free(&ns1);
-    kl_udp_server_free(&ns2);
+    kl_datagram_teardown(&ns1, NULL, NULL);
+    kl_datagram_teardown(&ns2, NULL, NULL);
     kl_event_ctx_free(&ctx);
     unlink(rcpath);
 }
@@ -1062,14 +1073,14 @@ UTEST(dns, all_nameservers_silent_times_out) {
 /* ── Phase 1b-ii: search domains + ndots ─────────────────────────────── */
 
 /* Build a resolver from a resolv.conf fixture with one mock nameserver. */
-static KlResolver *resolver_with_search(KlEventCtx *ctx, KlUdpServer *ns,
+static KlResolver *resolver_with_search(KlEventCtx *ctx, KlDatagram *ns,
                                         const char *search_line, int timeout_ms) {
-    KlUdpServerConfig sc = { .bind_addr = "127.0.0.1", .port = 0 };
-    if (kl_udp_server_init(ns, ctx, &sc, mock_ns, NULL) != 0)
+    KlDatagramSocketConfig sc = { .ctx = ctx, .bind_addr = "127.0.0.1" };
+    if (kl_datagram_socket_init(ns, &sc) != 0 || kl_datagram_recv_start(ns, mock_ns, ns) != 0)
         return NULL;
     static char rcbuf[256];
     snprintf(rcbuf, sizeof(rcbuf), "nameserver 127.0.0.1#%u\n%s\n",
-             kl_udp_server_local_port(ns), search_line);
+             kl_datagram_local_port(ns), search_line);
     const char *rcpath = write_resolv(rcbuf);
     if (!rcpath) return NULL;
     KlDnsResolverConfig dc = { .resolv_conf_path = rcpath, .timeout_ms = timeout_ms,
@@ -1084,7 +1095,7 @@ UTEST(dns, search_appended_for_unqualified) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = resolver_with_search(&ctx, &ns, "search corp.example", 500);
     ASSERT_TRUE(r != NULL);
 
@@ -1096,7 +1107,7 @@ UTEST(dns, search_appended_for_unqualified) {
     ASSERT_STREQ("myhost.corp.example", g_last_qname);   /* search-appended */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1107,7 +1118,7 @@ UTEST(dns, absolute_tried_first_when_ndots_met) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = resolver_with_search(&ctx, &ns, "search corp.example", 500);
     ASSERT_TRUE(r != NULL);
 
@@ -1118,7 +1129,7 @@ UTEST(dns, absolute_tried_first_when_ndots_met) {
     ASSERT_STREQ("my.host", g_last_qname);   /* queried absolute, not my.host.corp.example */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1130,7 +1141,7 @@ UTEST(dns, search_falls_back_to_bare) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = resolver_with_search(&ctx, &ns, "search corp.example", 500);
     ASSERT_TRUE(r != NULL);
 
@@ -1143,7 +1154,7 @@ UTEST(dns, search_falls_back_to_bare) {
     ASSERT_TRUE(g_queries >= 2);             /* both candidates were queried */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1268,7 +1279,7 @@ UTEST(dns, dual_family_returns_both) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -1288,7 +1299,7 @@ UTEST(dns, dual_family_returns_both) {
     ASSERT_EQ(80, (int)kl_sockaddr_port(&g_res.addrs[1]));
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1299,7 +1310,7 @@ UTEST(dns, dual_family_prefer_ipv6_orders_first) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlDnsResolverConfig dc = { .prefer_ipv6 = 1, .timeout_ms = 500, .attempts = 2 };
     KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
     ASSERT_TRUE(r != NULL);
@@ -1313,7 +1324,7 @@ UTEST(dns, dual_family_prefer_ipv6_orders_first) {
     ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&g_res.addrs[1]));
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1325,7 +1336,7 @@ UTEST(dns, resolution_delay_does_not_stall_on_slow_family) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlDnsResolverConfig dc = { .timeout_ms = 2000, .attempts = 1 };
     KlResolver *r = make_resolver_cfg(&ctx, &ns, &dc);
     ASSERT_TRUE(r != NULL);
@@ -1339,7 +1350,7 @@ UTEST(dns, resolution_delay_does_not_stall_on_slow_family) {
     ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&g_res.addrs[0]));
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1354,11 +1365,11 @@ UTEST(dns, tcp_fallback) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 2000, 1);
     ASSERT_TRUE(r != NULL);
     MockTcp tcp;
-    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_udp_server_local_port(&ns)));
+    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_datagram_local_port(&ns)));
 
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done, NULL) != NULL);
     pump(&ctx, &g_done, 200);
@@ -1374,7 +1385,7 @@ UTEST(dns, tcp_fallback) {
 
     r->destroy(r);
     mock_tcp_stop(&tcp);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1388,11 +1399,11 @@ UTEST(dns, tcp_persistent_reuse) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 2000, 1);
     ASSERT_TRUE(r != NULL);
     MockTcp tcp;
-    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_udp_server_local_port(&ns)));
+    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_datagram_local_port(&ns)));
 
     /* First resolve — both families pipeline over one connection. */
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
@@ -1412,7 +1423,7 @@ UTEST(dns, tcp_persistent_reuse) {
 
     r->destroy(r);
     mock_tcp_stop(&tcp);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1425,11 +1436,11 @@ UTEST(dns, tcp_drop) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 2000, 1);
     ASSERT_TRUE(r != NULL);
     MockTcp tcp;
-    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_udp_server_local_port(&ns)));
+    ASSERT_EQ(0, mock_tcp_start(&tcp, &ctx, kl_datagram_local_port(&ns)));
     tcp.drop_on_accept = 1;               /* accept then immediately close */
 
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 80, on_done, NULL) != NULL);
@@ -1441,7 +1452,7 @@ UTEST(dns, tcp_drop) {
 
     r->destroy(r);
     mock_tcp_stop(&tcp);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1456,7 +1467,7 @@ UTEST(dns, cookie_learned_and_echoed) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -1476,7 +1487,7 @@ UTEST(dns, cookie_learned_and_echoed) {
     ASSERT_EQ(0, memcmp(g_seen_server, g_srv_cookie, 8));
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1490,7 +1501,7 @@ UTEST(dns, cookie_badcookie_retry) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 1000, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -1506,7 +1517,7 @@ UTEST(dns, cookie_badcookie_retry) {
     ASSERT_EQ(8, g_seen_server_len);      /* the retry carried the server cookie */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1520,7 +1531,7 @@ UTEST(dns, cookie_client_mismatch_ignored) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 300, 1);  /* short timeout, single try */
     ASSERT_TRUE(r != NULL);
 
@@ -1531,18 +1542,17 @@ UTEST(dns, cookie_client_mismatch_ignored) {
     ASSERT_EQ(0, g_res.naddrs);           /* the mismatched-cookie answer was rejected */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
-/* ── Step 6.3: DNS-over-KlUdp receive-machine conformance ─────────────────────────────────────────
- * The built-in resolver transitively rides the shared serial-receive machine (KlDgramRecv over the
- * dedicated inbound slot) through kl_udp_recv_start(dns_on_recv) — exactly like KlUdpServer; no
- * DNS-specific receive seam exists. Its UDP SENDS (kl_udp_send_to) and TEARDOWN (kl_udp_free) keep the
- * existing KlUdp compatibility semantics until the public KlUdpTransport path (Step 7), and the TCP
- * fallback (mock above) is an independent byte-stream path, NOT the datagram machine. These two cases
- * cover the couplings dns_on_recv leans on THROUGH the machine — src on every recv (anti-spoof) and
- * txid demux across serial re-arms — and run on both readiness and completion backends. */
+/* ── DNS receive-machine conformance ──────────────────────────────────────────────────────────────
+ * The built-in resolver rides the shared serial-receive machine (KlDgramRecv over the dedicated inbound
+ * slot) via kl_datagram_recv_start(dns_on_recv); its UDP sends + synchronous teardown go through the same
+ * KlDatagram surface the fake nameserver + spoofer use here. The TCP fallback (mock above) is an
+ * independent byte-stream path, NOT the datagram machine. These cases cover the couplings dns_on_recv
+ * leans on THROUGH the machine — src on every recv (anti-spoof) and txid demux across serial re-arms —
+ * and run on both readiness and completion backends. */
 
 /* Two-phase proof that a valid-content response from a NON-nameserver socket is rejected at the src
  * (address+port) gate — independent of cross-socket scheduling. Phase 1: only the poisoned answer is
@@ -1557,17 +1567,17 @@ UTEST(dns, wrong_source_response_ignored) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 3000, 1);   /* long timeout, 1 attempt: no retransmit in phase 1 */
     ASSERT_TRUE(r != NULL);
 
-    KlUdp spoof;
-    KlUdpConfig sp = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
-    ASSERT_EQ(0, kl_udp_init(&spoof, &sp));
+    KlDatagram spoof;
+    KlDatagramSocketConfig sp = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&spoof, &sp));
     g_wrong_source = 1; g_spoof_sock = &spoof;
     /* Same address (127.0.0.1), DIFFERENT port — the port is what makes the spoofer's source not match
      * the configured nameserver, so the mismatch is purely the discriminator dns_ns_index rejects on. */
-    ASSERT_TRUE(kl_udp_local_port(&spoof) != kl_udp_server_local_port(&ns));
+    ASSERT_TRUE(kl_datagram_local_port(&spoof) != kl_datagram_local_port(&ns));
 
     ASSERT_TRUE(r->resolve(r, &ctx, "host.test", 8080, on_done, NULL) != NULL);
 
@@ -1586,8 +1596,11 @@ UTEST(dns, wrong_source_response_ignored) {
     ASSERT_EQ(0, g_done);                    /* poison rejected at the src gate — still pending */
 
     /* Phase 2: release the legit responses from the configured nameserver socket (correct src). */
-    for (int i = 0; i < g_stash_n; i++)
-        ASSERT_EQ(0, kl_udp_server_reply(&ns, g_stash_resp[i], g_stash_len[i], &g_stash_dest));
+    for (int i = 0; i < g_stash_n; i++) {
+        KlDatagramMessage sm = { .data = g_stash_resp[i], .len = g_stash_len[i],
+                                 .peer = &g_stash_dest, .tos = -1 };
+        ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&ns, &sm));
+    }
     pump(&ctx, &g_done, 200);
 
     ASSERT_EQ(1, g_done);
@@ -1598,9 +1611,9 @@ UTEST(dns, wrong_source_response_ignored) {
     ASSERT_STREQ("10.1.2.3", ip);            /* the LEGIT answer, released only in phase 2 */
 
     g_spoof_sock = NULL;
-    kl_udp_free(&spoof);
+    kl_datagram_teardown(&spoof, NULL, NULL);
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1623,7 +1636,7 @@ UTEST(dns, concurrent_distinct_resolutions) {
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    KlUdpServer ns;
+    KlDatagram ns;
     KlResolver *r = make_resolver(&ctx, &ns, 500, 2);
     ASSERT_TRUE(r != NULL);
 
@@ -1644,7 +1657,7 @@ UTEST(dns, concurrent_distinct_resolutions) {
     ASSERT_EQ(222, kl_sockaddr_port(&cb.res.addrs[0]));
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1705,7 +1718,7 @@ UTEST(dns, wouldblock_retries_on_writable_and_succeeds) {
     if (is_completion(&ctx)) { kl_event_ctx_free(&ctx); return; }   /* readiness-only vehicle */
     ctx.sockets = gating_provider();
 
-    KlUdpServer ns;
+    KlDatagram ns;
     KlDnsResolverConfig dc = { .timeout_ms = 500, .attempts = 2 };
     KlResolver *r = make_resolver_slots(&ctx, &ns, &dc, 1);   /* 1 slot → 2nd leg WOULD_BLOCKs */
     ASSERT_TRUE(r != NULL);
@@ -1724,7 +1737,7 @@ UTEST(dns, wouldblock_retries_on_writable_and_succeeds) {
     ASSERT_EQ((int)KL_AF_INET, (int)kl_sockaddr_family(&g_res.addrs[0]));
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -1739,7 +1752,7 @@ UTEST(dns, wouldblock_guard_fires_no_hang) {
     if (is_completion(&ctx)) { kl_event_ctx_free(&ctx); return; }   /* readiness-only vehicle */
     ctx.sockets = gating_provider();
 
-    KlUdpServer ns;
+    KlDatagram ns;
     KlDnsResolverConfig dc = { .timeout_ms = 40, .attempts = 1 };
     KlResolver *r = make_resolver_slots(&ctx, &ns, &dc, 1);   /* 1 slot → 2nd leg WOULD_BLOCKs */
     ASSERT_TRUE(r != NULL);
@@ -1755,7 +1768,7 @@ UTEST(dns, wouldblock_guard_fires_no_hang) {
     ASSERT_NE(0, g_err);                               /* KL_ERR_DNS — settled, not hung */
 
     r->destroy(r);
-    kl_udp_server_free(&ns);
+    kl_datagram_teardown(&ns, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
