@@ -54,7 +54,7 @@
 /* ── numeric-only KlResolver (no DNS, no UDP — same as LC-1) ────────────────────
  * Parses a numeric IPv4/IPv6 literal via kl_sockaddr_parse and completes SYNCHRONOUSLY inside
  * resolve() — the resolver sync-completion contract (CLAUDE.md). No UDP, no timers, no lwIP: the
- * built-in kl_dns_resolver is unusable on raw (it eagerly kl_udp_init's, which lwip-raw rejects). */
+ * built-in kl_dns_resolver is unusable on raw (it eagerly kl_datagram_socket_init's, which lwip-raw rejects). */
 typedef struct { KlResolver base; KlResolveReq req; } NumResolver;
 
 static KlResolveReq *num_resolve(KlResolver *self, KlEventCtx *ctx, const char *host, int port,

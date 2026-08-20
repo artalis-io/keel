@@ -514,7 +514,7 @@ UTEST(dgram_send, both_zero_length_bounded_by_slots) {
 }
 
 /* §10.5 — case (a) len > byte_budget, readiness: permanent TOO_LARGE on a blocked empty queue (no
- * full, no strand); but a socket-ready direct send still delivers it (KlUdp parity). */
+ * full, no strand); but a socket-ready direct send still delivers it (direct-send parity). */
 UTEST(dgram_send, both_oversize_readiness_permanent_or_direct) {
     KlAllocator a = kl_allocator_default();
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 128), 0);  /* slot_cap 128 */
@@ -538,7 +538,7 @@ UTEST(dgram_send, both_oversize_readiness_permanent_or_direct) {
 }
 
 /* §10.6 — case (a), completion: no fast path, so len > byte_budget is refused TOO_LARGE upfront and
- * nothing is submitted (matches KlUdp on a completion loop). */
+ * nothing is submitted (matches the completion-loop send model). */
 UTEST(dgram_send, both_oversize_completion_upfront) {
     KlAllocator a = kl_allocator_default();
     KlDgramSlots slots; ASSERT_EQ(kl_dgram_slots_init(&slots, &a, 4, 128), 0);

@@ -26,7 +26,7 @@
  *         reach the udp_recv callback in one netif_poll (synchronous glue sends, before any drain) — the
  *         backend holds exactly ONE and DROPS the second (no 16-entry ring), so precisely one is
  *         delivered. The public KlDatagram send posts a completion op flushed during a tick, so it cannot
- *         force both into one poll (KlUdp's eager synchronous udp_sendto did) — the property lives in the
+ *         force both into one poll (the legacy UDP object's eager synchronous udp_sendto did) — the property lives in the
  *         backend, so it is asserted at the glue seam like T7.
  *   T7  no stale capture while UNARMED (7A-5), driven at the GLUE level (kl_lwr_udp_*, its own ctx after
  *         the event ctx is freed): a datagram arriving with no recv armed is DROPPED at the callback, so
@@ -59,13 +59,12 @@
 
 /* The stable-liveness token (src/datagram_life.h), forward-declared so this test manages op tokens for
  * the glue-level T7 without pulling the src/ header. Resolves against libkeel's datagram_life.o.
- * (7B-2a: create gained the {kind, dispatch} completion-routing identity — unused here, so NULL.) */
+ * (create takes a `dispatch` completion-routing handler — unused at the glue level here, so NULL.) */
 typedef struct KlDgramLife KlDgramLife;
-typedef enum { KL_DGRAM_OWNER_DATAGRAM = 0 } KlDgramOwnerKind;
 struct KlCompletionEvent;
 typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *ev);
 KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target, void (*on_final)(void *), void *final_ctx,
-                                  KlDgramOwnerKind kind, KlDgramDispatchFn dispatch);
+                                  KlDgramDispatchFn dispatch);
 void         kl_dgram_life_release(KlDgramLife *l);
 static void  t7_noop_final(void *ctx) { (void)ctx; }
 
@@ -93,7 +92,7 @@ static void reset_capture(void) {
 }
 
 /* Public close lifecycle: abortive close_cancel -> pump the raw loop until CLOSED -> free.
- * Replaces the KlUdp synchronous kl_udp_free, exercising the canonical KlDatagram teardown over
+ * Replaces the legacy synchronous teardown, exercising the canonical KlDatagram teardown over
  * the lwIP-raw provider (the close coordinator's recv-cancel terminal + pending-send release). */
 static int dg_close_free(KlEventCtx *ctx, KlDatagram *dg) {
     if (kl_datagram_close_state(dg) != KL_DGRAM_CLOSE_CLOSED)
@@ -268,7 +267,7 @@ static int t5_close_with_undrained_sends(KlEventCtx *ctx) {
  * Through the public KlDatagram API the two datagrams cannot be forced into a SINGLE netif_poll:
  * KlDatagram posts each send as a completion op flushed DURING a loop tick (interleaved with the
  * lwIP poll), so back-to-back sends spread across ticks and the recv re-arms between them — both
- * would be delivered. KlUdp's kl_udp_send_to did a SYNCHRONOUS udp_sendto, so both landed before
+ * would be delivered. the legacy UDP object's send did a SYNCHRONOUS udp_sendto, so both landed before
  * the first poll; that eager-send timing is gone. The one-held-slot overflow is a BACKEND property,
  * deterministic only where the send is synchronous: the glue (kl_lwr_udp_send → udp_sendto). With a
  * recv armed, TWO datagrams delivered in one netif_poll must surface EXACTLY ONE RECV on drain (the
@@ -286,8 +285,8 @@ static int t6_glue_one_held(void) {
     if (!rx || !tx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T6: rx bind"); }
     uint16_t port = kl_lwr_udp_local_port(rx);
 
-    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
-    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, (KlDgramDispatchFn)0);
+    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, (KlDgramDispatchFn)0);
     if (!lrx || !ltx) {
         kl_dgram_life_release(lrx); kl_dgram_life_release(ltx);
         kl_lwr_ctx_destroy(lwrctx); return fail("T6: token create");
@@ -359,8 +358,8 @@ static int t7_glue_unarmed_drop(void) {
     if (!rx || !tx || kl_lwr_udp_bind(rx, lo, 0) != 0) { kl_lwr_ctx_destroy(lwrctx); return fail("T7: rx bind"); }
     uint16_t port = kl_lwr_udp_local_port(rx);
 
-    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);   /* owner ref each */
-    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *lrx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, (KlDgramDispatchFn)0);   /* owner ref each */
+    KlDgramLife *ltx = kl_dgram_life_create(&alloc, NULL, t7_noop_final, NULL, (KlDgramDispatchFn)0);
     if (!lrx || !ltx) {                 /* release whichever succeeded (NULL-safe) before teardown */
         kl_dgram_life_release(lrx);
         kl_dgram_life_release(ltx);

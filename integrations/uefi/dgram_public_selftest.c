@@ -3,7 +3,7 @@
  *
  * The PUBLIC KlDatagram facade (keel/datagram.h) over EFI_UDP4 on bare OVMF firmware —
  * the end-to-end gate the host-mock cannot provide. Unlike dgram_dns_selftest.c (which
- * drives KlUdp via the stock dns_resolver), this exercises the public kl_datagram_*
+ * drives a KlDatagram via the stock dns_resolver), this exercises the public kl_datagram_*
  * surface directly: init → recv_start → send → (round-trip) → graceful close → DETACHED.
  *
  * It is the runtime proof for 7B-9 (the confirmed-detachment close): at close the armed

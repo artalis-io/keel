@@ -2,8 +2,7 @@
  * test_socket_provider.c — the internal socket seam + provider vtable
  * (PAL Phase 2). Proves: POSIX default + fast path, provider dispatch, per-op
  * NULL fallback, deterministic fault injection (short write, EWOULDBLOCK,
- * ECONNRESET), a decorator over real socketpair I/O, and that a transport
- * (KlUdp) actually threads ctx->sockets to the seam.
+ * ECONNRESET), a decorator over real socketpair I/O, and that  * (a KlDatagram) actually threads ctx->sockets to the seam.
  */
 #include "utest.h"
 #include "../src/socket.h"
@@ -100,7 +99,7 @@ static const KlSocketOps MOCK_OPS = {
 
 static KlSocketProvider mock_provider(MockSock *m) {
     /* Decorate the stream ops (counted via MockSock); delegate the datagram
-     * data-plane to the built-in default so a KlUdp can run on this provider (its
+     * data-plane to the built-in default so a KlDatagram can run on this provider (its
      * socket lifecycle still threads the mock). */
     KlSocketProvider p = { &MOCK_OPS, m, KL_SOCK_CAP_DATAGRAM, kl_sockdef_dgram() };
     return p;
@@ -217,7 +216,7 @@ UTEST(sockprov, decorator_short_write_real_io) {
 
 /* End-to-end threading: a KlDatagram created on a ctx carrying the mock provider routes its setup calls
  * through the mock (proves ctx->sockets reaches the datagram construction, not just the seam in
- * isolation). D2: migrated from KlUdp. */
+ * isolation). D2: migrated from the legacy UDP object. */
 UTEST(sockprov, datagram_threads_provider) {
     MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1;
     KlSocketProvider p = mock_provider(&m);
@@ -288,7 +287,7 @@ static const KlDatagramOps MOCK_DGRAM_OPS = {
 };
 
 /* A provider whose stream ops are the built-in defaults (NULL ops → kl_sockdef_*
- * for the real socket()/bind() a KlUdp needs) but whose datagram data-plane is the
+ * for the real socket()/bind() a KlDatagram needs) but whose datagram data-plane is the
  * mock above. */
 static const KlSocketOps DGRAM_STREAM_OPS = { .name = "dgram-mock" }; /* all NULL → POSIX */
 

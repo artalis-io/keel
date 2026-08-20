@@ -4,8 +4,7 @@
  * A thin forwarding layer over the internal KlDgramCore assembly (7A). Its only real work is the TWO
  * adapter builders of the frozen §2.5 boundary: it manufactures the core's neutral hooks (submit / arm /
  * disarm / pull / cancel / retire / close_transport / deliver) by WRAPPING the existing backend seams —
- * NO per-backend code here. The mode is selected by the loop's capability (the same negotiation KlUdp
- * does), exactly two implementations:
+ * NO per-backend code here. The mode is selected by the loop's capability (XXX * uses everywhere), exactly two implementations:
  *
  *   completion (KL_EVENT_CAP_COMPLETION): submit → kl_comp_post_dgram_send; arm → kl_comp_post_dgram_recv;
  *       cancel → kl_comp_cancel_dgram; retire → kl_comp_retire_dgram; completions route back through the
@@ -15,10 +14,10 @@
  *       retire → always RETIRED; close_transport → provider close (both modes).
  *
  * fd ownership transfers to KlDatagram ONLY on a successful kl_datagram_init (the core adopts it then);
- * the close machine's backend-retirement step closes it exactly once. KlUdp is untouched (D-COMPAT §6).
+ * the close machine's backend-retirement step closes it exactly once.
  *
  * 7B-7: the COMPLETION adapter additionally uses the GENERIC fd↔loop registration (kl_event_add at init,
- * kl_event_del at close) — the same lifecycle KlUdp uses for completion loops. This is NOT part of the
+ * kl_event_del at close) — the generic completion-loop lifecycle. This is NOT part of the
  * post/cancel/retire datagram seam; it is inert on io_uring/pollcomp and CreateIoCompletionPort on IOCP.
  * Register once before posting; on registration failure init fails without adopting the fd; at close the
  * coordinator retires every op, then kl_event_del, then the socket close — exactly once. (See the 7B-7
@@ -41,7 +40,7 @@
 
 #include <string.h>
 
-/* ── provider accessors (mirror udp.c) ────────────────────────────────────────────────────────── */
+/* ── provider accessors ────────────────────────────────────────────────────────── */
 static inline const KlDatagramOps *dg_ops(const KlDatagram *dg) {
     const KlSocketProvider *sp = dg->sockets;
     return sp ? sp->dgram : kl_sockdef_dgram();
@@ -909,8 +908,8 @@ KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg) {
 }
 size_t kl_datagram_send_queued(const KlDatagram *dg)   { return (dg && dg->core) ? dg_send_queued(dg)   : 0; }
 size_t kl_datagram_send_inflight(const KlDatagram *dg) { return (dg && dg->core) ? dg_send_inflight(dg) : 0; }
-/* M6.0a: the BYTE view of the send backlog (queued + in-flight payload), for KlUdp's byte-reporting
- * kl_udp_send_queued. Distinct from the slot COUNT (kl_datagram_send_queued). */
+/* M6.0a: the BYTE view of the send backlog (queued + in-flight payload), for byte-based backpressure
+ * reporting. Distinct from the slot COUNT (kl_datagram_send_queued). */
 size_t kl_datagram_send_queued_bytes(const KlDatagram *dg) {
     return (dg && dg->core) ? kl_dgram_send_queued_bytes(&dg->core->send) : 0;
 }

@@ -1,11 +1,11 @@
 /*
  * datagram_open.c — M0 provider-neutral datagram socket-preparation helper.
  *
- * A standalone function that reproduces kl_udp_init's create/configure/bind prep (src/udp.c:501-529)
- * with the same per-step error cleanup, but WITHOUT the KlUdp machine and WITHOUT the completion-loop
- * association (kl_datagram_init owns that). It is transport INFRASTRUCTURE — it legitimately creates and
- * binds a platform datagram socket through the socket seam, exactly like listener.c / connect_op.c /
- * udp.c — so it lives below the Tier-1 facade (datagram.c) and is on the TIER1_INFRA allowlist. See
+ * A standalone function that does the datagram socket create/configure/bind prep with per-step error
+ * cleanup, but WITHOUT the send/receive machine and WITHOUT the completion-loop association
+ * (kl_datagram_init owns that). It is transport INFRASTRUCTURE — it legitimately creates and binds a
+ * platform datagram socket through the socket seam, exactly like listener.c / connect_op.c — so it
+ * lives below the Tier-1 facade (datagram.c) and is on the TIER1_INFRA allowlist. See
  * src/datagram_open.h for the ownership-handoff contract and docs/datagram_consolidation_design.md §2.
  */
 
@@ -36,7 +36,7 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
         return -1;   /* nothing created — the caller reclaims nothing */
 
     /* The datagram data-plane the provider supplies. NULL sockets = the built-in default provider (its
-     * default datagram ops), mirroring kl_udp_init's NULL handling. Reject BEFORE creating an fd a
+     * default datagram ops), mirroring the datagram initializer's NULL handling. Reject BEFORE creating an fd a
      * provider that either has no datagram vtable OR a partial one missing the required configure() op —
      * a partial vtable would otherwise crash at the configure() call. */
     dg = sockets ? sockets->dgram : kl_sockdef_dgram();
@@ -44,8 +44,8 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
     if (!dg || !dg->configure)
         return -1;   /* KL_ERR_INVALID_ARG — no/partial datagram data-plane */
 
-    /* Resolve family + optional numeric bind address — identical to kl_udp_init (src/udp.c:486-499).
-     * A bind address is numeric (no DNS), so this stays pure and works on lwIP too; its family wins. */
+    /* Resolve family + optional bind address. A bind address is numeric (no DNS), so this stays pure
+     * and works on lwIP too; its family wins. */
     family = cfg->family;
     if (cfg->bind_addr) {
         if (kl_sockaddr_parse(&bind_sa, cfg->bind_addr, cfg->bind_port) != 0)
@@ -72,7 +72,7 @@ int kl_datagram_open(const struct KlSocketProvider *sockets,
     }
 
     /* 3. provider datagram socket-option setup (reuse/bufs, broadcast/TOS/multicast, per-datagram
-     *    capture). Best-effort and folded into one call before bind — like kl_udp_init, which never
+     *    capture). Best-effort and folded into one call before bind — best-effort, which never
      *    fails here. Its return value is the bitmask of KL_DGRAM_RX_* capture options the kernel
      *    accepted; surface it (it cannot be reconstructed later). */
     out->rx_caps = dg->configure(sp_ctx, out->fd, family, cfg);

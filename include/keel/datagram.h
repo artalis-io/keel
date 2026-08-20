@@ -4,14 +4,10 @@
 /*
  * datagram.h — the public fixed-slot KlDatagram API (Phase B, step 7B-3).
  *
- * KlDatagram is the Tier-1 datagram primitive: a caller-owned, single-threaded, event-loop-driven
- * handle over a prepared UDP fd. It is a thin facade over the internal KlDgramCore assembly (7A) and is
- * exposed + validated INDEPENDENTLY of the legacy KlUdp byte-budget surface (D-COMPAT, §6): KlUdp is
- * NOT re-based onto fixed slots and keeps its exact semantics. The two coexist today: KlDatagram is the
- * canonical Tier-1 message transport for new portable protocols; KlUdp is the compatibility +
- * extended-UDP facility (batching/GSO/GRO/multicast/…), required by its current consumers, so it stays
- * supported and non-deprecated. Any consolidation/retirement is a separate, reviewed design + migration
- * increment (deferred). See docs/datagram_vs_udp.md for which to use.
+ * KlDatagram is THE datagram primitive: a caller-owned, single-threaded, event-loop-driven handle over
+ * a prepared UDP fd. It is a thin facade over the internal KlDgramCore assembly (7A) and is the single
+ * canonical message transport for portable protocols (batching/GSO/GRO/multicast/source-pin/per-packet
+ * TOS all ride this surface). The earlier byte-budget UDP object was consolidated into it and removed.
  *
  * This header is also the single home for the public datagram data TYPES (KlDatagramMessage,
  * KlDatagramSendStatus, KlDatagramCloseResult, KlDgramCloseState, KL_DGRAM_CAP_*, KL_DGRAM_HAS_LOCAL/
@@ -153,8 +149,8 @@ typedef struct {
                                              * with KL_ERR_UNSUPPORTED if the provider lacks any) */
     /* M6.0a: KL_DGRAM_CAP_* the consumer would LIKE but does not require — granted opportunistically
      * where the provider supports them, silently dropped otherwise (never an init failure). The granted
-     * cap set (kl_datagram_caps) is `want_caps | (optional_caps & provider_caps)`. Lets a wrapper (KlUdp)
-     * request every capability its API may use without regressing reduced/freestanding providers that
+     * cap set (kl_datagram_caps) is `want_caps | (optional_caps & provider_caps)`. Lets a consumer
+     * request every capability its use may need without regressing reduced/freestanding providers that
      * only support unconnected send_to. 0 = request nothing beyond want_caps. */
     unsigned                 optional_caps;
     /* M5: the KL_DGRAM_RX_* capture mask the socket actually has ENABLED (from the M0 prep's

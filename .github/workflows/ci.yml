@@ -367,6 +367,9 @@ jobs:
       - name: Documentation-reference gate (living-architecture doc links resolve)
         run: make check-doc-refs
 
+      - name: Stale-name gate (deleted KlUdp object API does not reappear)
+        run: make check-no-kludp
+
       - name: Freestanding-header gate (client subset compiles with no hosted libc)
         run: make freestanding-headers
 

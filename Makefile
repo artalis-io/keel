@@ -938,6 +938,37 @@ check-doc-refs:
 	if [ $$bad -ne 0 ]; then echo "check-doc-refs: FAILED"; exit 1; fi; \
 	echo "check-doc-refs: OK ($(words $(DOC_REF_FILES)) living-architecture docs, all in-repo links resolve)"
 
+# Stale-name gate (D3-3): the KlUdp/KlUdpServer object API was deleted; fail if it reappears in the
+# code tree (src/ include/ tests/ integrations/). TWO INDEPENDENT scans, so an allowed cmsg helper on a
+# line can NEVER conceal a forbidden name (a whole-line `grep -v` filter would let `KlUdp x; kl_udp_parse_tos()`
+# through):
+#   1. Object TYPES (KlUdp / KlUdpServer / KlUdpConfig / KlUdpTransport / KlUdpDatagram / KlUdpHandlerFn /
+#      KlUdpRxMeta) — rejected EVERYWHERE, no allowlist, no file exclusion (they are fully deleted, incl.
+#      inside the cmsg TUs).
+#   2. Function TOKENS (kl_udp_<name>) — each occurrence extracted INDIVIDUALLY (grep -o → one token per
+#      output line, keeping its file:line), then only the EXACT retained shared-cmsg helper FAMILIES are
+#      allowed: kl_udp_parse_*, kl_udp_build_control, kl_udp_send_family, the Winsock kl_udp_win_*. A token
+#      like kl_udp_init on a mixed line is surfaced on its own output line and cannot be masked.
+# Historical design docs under docs/ are NOT scanned — their recorded history stands. Binary files are
+# skipped (-I). Permanent mixed-line canary proves an allowed helper conceals neither KlUdp nor kl_udp_init.
+KLUDP_TYPES_RE = \bKlUdp(Server|Config|Transport|Datagram|HandlerFn|RxMeta)?\b
+KLUDP_FN_RE    = kl_udp_[A-Za-z0-9_]+
+KLUDP_FN_ALLOW = kl_udp_parse_[a-z0-9_]+|kl_udp_build_control|kl_udp_send_family|kl_udp_win_[a-z0-9_]+
+check-no-kludp:
+	@bad=0; \
+	canary='KlUdp x; kl_udp_parse_tos(a); kl_udp_init(b)'; \
+	if ! printf '%s\n' "$$canary" | grep -qE '$(KLUDP_TYPES_RE)'; then \
+	  echo "check-no-kludp: SELF-TEST FAILED — object-type regex no longer detects KlUdp on a mixed line"; exit 1; fi; \
+	leak=`printf '%s\n' "$$canary" | grep -oE '$(KLUDP_FN_RE)' | grep -vxE '$(KLUDP_FN_ALLOW)'`; \
+	if [ "$$leak" != "kl_udp_init" ]; then \
+	  echo "check-no-kludp: SELF-TEST FAILED — a cmsg helper concealed kl_udp_init on a mixed line (surfaced: '$$leak')"; exit 1; fi; \
+	types=`grep -rInE '$(KLUDP_TYPES_RE)' src include tests integrations 2>/dev/null`; \
+	if [ -n "$$types" ]; then echo "$$types"; echo "check-no-kludp: FAILED — a deleted KlUdp object TYPE reappeared (rejected tree-wide)"; bad=1; fi; \
+	fns=`grep -rInoE '$(KLUDP_FN_RE)' src include tests integrations 2>/dev/null | grep -vE ':($(KLUDP_FN_ALLOW))$$'`; \
+	if [ -n "$$fns" ]; then echo "$$fns"; echo "check-no-kludp: FAILED — a deleted kl_udp_* object function reappeared (allowlist: cmsg helper families only)"; bad=1; fi; \
+	if [ $$bad -ne 0 ]; then exit 1; fi; \
+	echo "check-no-kludp: OK (object types rejected tree-wide; every kl_udp_* token is a retained cmsg helper)"
+
 # Scoped suppressions for documented false-positives (not real defects):
 #  - dns_resolver.c unusedStructMember / knownConditionTrueFalse: cppcheck explores the
 #    KEEL_FREESTANDING config, where the DNS-over-TCP fallback (the whole KlDnsTcp struct usage +
@@ -1689,7 +1720,7 @@ uefi-dgram-gate:
 	if [ "$$got" -eq 0 ]; then echo "  SKIP: no PE arch compiled (no false green)"; exit 0; fi; \
 	echo "== uefi-dgram-gate OK ($$got/$$want arch(es): datagram [tcp4+udp4+event_efi] + TCP-only [tcp4+event_efi]) =="
 
-.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
+.PHONY: check-sockaddr-neutral check-tier1-boundary check-doc-refs check-no-kludp freestanding-headers freestanding-lib freestanding-lib-dgram freestanding-dgram freestanding-dgram-link freestanding-lib-dns freestanding-dns freestanding-dns-link freestanding-dns-harness uefi-dgram-gate freestanding-lib-selfcontained freestanding-lib-server freestanding-lib-server-selfcontained freestanding-lib-dns-selfcontained freestanding-lib-dgram-selfcontained freestanding-link freestanding-harness
 .PHONY: all test clean examples debug debug-test analyze cppcheck fuzz docs smoke \
         smoke-tcp smoke-dns install uninstall coverage bench \
         smoke-completion-inject smoke-completion-inject-asan

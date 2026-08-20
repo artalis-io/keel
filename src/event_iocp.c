@@ -498,7 +498,7 @@ static int iocp_comp_post_sendfile(KlConn *c, const KlIoVec *head_iov, int head_
 
 /* Post one overlapped UDP receive on the completion loop (8b-4c). Prefers WSARecvMsg
  * (WSAID_WSARECVMSG) so an IP_PKTINFO control message yields the datagram's local
- * (destination) address (KlCompletionEvent.local, used by kl_udp_send_to_from reply-from) —
+ * (destination) address (KlCompletionEvent.local, used for source-pinned reply-from) —
  * the Winsock analogue of the io_uring/pollcomp recvmsg path, sharing the fetch + parse with
  * the readiness Windows recv (udp_cmsg_win.h). Falls back to WSARecvFrom (source address
  * only, local left 0) if the extension is unavailable. Either way the completion surfaces a

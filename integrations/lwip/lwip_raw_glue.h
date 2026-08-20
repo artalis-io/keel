@@ -111,7 +111,7 @@ typedef struct {
     uint16_t  peer_port;   /* ACCEPT: peer port (host order) */
 } KlLwrRecord;
 
-/* ── LC-3a: UDP datagram completion path (KlUdp over raw) ──────────────────────────
+/* ── LC-3a: UDP datagram completion path (datagram over raw) ──────────────────────────
  * The datagram counterpart of the tcp_* path: a udp_pcb is created + bound + recv-armed via the
  * glue, and its inbound datagrams / completed sends surface as KlLwrUdpRecord's the backend
  * translates into KL_COMP_DGRAM_RECV / KL_COMP_DGRAM_SEND. All lwIP contact stays in the glue;
@@ -165,7 +165,7 @@ int   kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max);
  * longer complete) and moves it to a CONTEXT-owned pending-terminal record that SURVIVES kl_lwr_udp_close
  * — the drain later emits ONE terminal KL_LWR_DGRAM_RECV (terminal=1) transferring the arm's token ref,
  * so a KlDatagram completion-close retires recv_inflight. No allocation. Idempotent (a second call, or a
- * life with no armed recv, is a no-op — no duplicate terminal). Only KlDatagram calls this; KlUdp never
+ * life with no armed recv, is a no-op — no duplicate terminal). Only KlDatagram calls this (the removed UDP object never did).
  * does, so its close/teardown path is unchanged. */
 void  kl_lwr_udp_cancel_recv(void *lwrctx, void *life);
 /* 7B-8: 1 while a pending recv terminal is queued for `life` (retire → PENDING), 0 once it has drained

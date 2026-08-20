@@ -34,7 +34,7 @@
  *
  * CAPABILITIES (IPv4, loopback): listen/accept + recv/send/sendfile completion for a TCP
  * server, an outbound TCP client connect (LC-1), and — as of LC-3a — a UDP datagram data-plane
- * (KlUdp over raw): SOCK_DGRAM sockets create a udp_pcb, kl_comp_post_dgram_recv/send arm/send via
+ * (datagram over raw): SOCK_DGRAM sockets create a udp_pcb, kl_comp_post_dgram_recv/send arm/send via
  * the glue, and the drain surfaces KL_COMP_DGRAM_RECV/SEND. The socket-provider primitives operate
  * on real tcp_pcb/udp_pcb handles via the glue. Unsupported operations fail EARLY and CLEARLY
  * (see the socket ops below): outbound connect on the READINESS path returns -1/ENOTSUP (the raw
@@ -74,7 +74,7 @@
 #include "lwip_raw_glue.h"     /* the lwIP seam (no lwIP types) */
 #include "socket.h"            /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED (src/) */
 #include "completion.h"        /* the abstract completion axis this TU implements (src/) */
-#include "io_engine.h"         /* kl_comp_post_udp_* decls (forward-declares struct KlUdp) */
+#include "io_engine.h"         /* kl_comp_post_dgram_* decls */
 #include "datagram_life.h"     /* kl_dgram_life_release — drop the caller-transferred ref (7B-2b) */
 
 #include <string.h>
@@ -371,7 +371,7 @@ static kl_ssize_t lwr_sock_io(void *c, KlSocketHandle fd, void *b, size_t n) {
  * On a COMPLETION loop, udp.c drives recv/send through the completion primitives
  * (kl_comp_post_dgram_recv/send), NOT these ops — so send/recv are fail-stubs (the readiness /
  * source-pinned / TOS path that would call them never runs on this loop). The ONE op the machine
- * needs at init is configure(): kl_udp_init calls it to set socket options + learn which
+ * needs at init is configure(): kl_datagram_socket_init calls it to set socket options + learn which
  * per-datagram capture options (pktinfo/GRO/TOS) the stack accepted. For the raw loopback stack
  * NONE are supported, so configure accepts nothing and returns 0 (no KL_DGRAM_RX_* bits) — the
  * machine then runs with pktinfo/GRO/TOS all off, exactly matching a stack without them.
@@ -414,8 +414,8 @@ static const KlSocketOps lwip_raw_sock_ops = {
     .name = "lwip-raw",
 };
 
-/* LC-3a: advertise KL_SOCK_CAP_DATAGRAM + the datagram ops, so kl_udp_init accepts this provider
- * (udp_dg() non-NULL) and KlUdp runs over the raw completion loop. */
+/* LC-3a: advertise KL_SOCK_CAP_DATAGRAM + the datagram ops, so kl_datagram_socket_init accepts this provider
+ * (udp_dg() non-NULL) and a KlDatagram runs over the raw completion loop. */
 static const KlSocketProvider lwip_raw_provider = {
     &lwip_raw_sock_ops, NULL, KL_SOCK_CAP_OVERLAPPED | KL_SOCK_CAP_DATAGRAM, &lwip_raw_dgram_ops,
 };
@@ -566,7 +566,7 @@ static int lwr_comp_post_dgram_send(struct KlEventCtx *ctx, const KlDgramSendOp 
  * moves the armed recv to a context-owned pending TERMINAL the drain surfaces as an ok=0 completion
  * (kl_lwr_udp_cancel_recv), so recv_inflight retires. retire reports PENDING while that terminal is
  * queued, RETIRED once it has drained (or when there was nothing armed). lwIP never quarantines. Only
- * KlDatagram drives this; KlUdp never calls cancel_dgram, so its teardown path is unchanged. */
+ * KlDatagram drives this (the removed UDP object never used cancel_dgram). */
 static int lwr_comp_cancel_dgram(struct KlEventCtx *ctx, KlDgramLife *life, KlDgramOpKind kind) {
     if (kind != KL_DGRAM_OP_RECV) return 0;   /* sends drain synchronously — nothing to cancel */
     KlLwrState *st = ctx ? ctx->loop._backend : NULL;

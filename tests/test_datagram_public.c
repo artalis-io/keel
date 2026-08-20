@@ -324,7 +324,7 @@ UTEST(datagram_public, pause_holds_one_then_resume_delivers) {
 
 /* 7B-7: a completion transport registers its fd with the loop (kl_event_add) before posting. A
  * registration FAILURE must fail init cleanly — nothing adopted, posted, or closed; the caller keeps
- * the fd. (Mirrors KlUdp's fd↔loop lifecycle; inert on io_uring/pollcomp, CreateIoCompletionPort on IOCP.) */
+ * the fd. (The generic fd↔loop lifecycle; inert on io_uring/pollcomp, CreateIoCompletionPort on IOCP.) */
 UTEST(datagram_public, registration_failure_keeps_fd) {
     mk_ctx(); mc_reset();
     g_mc.add_fail = 1;   /* the loop refuses to register the fd */
@@ -956,7 +956,7 @@ UTEST(datagram_public, m_control_send_terminal_error_retires_once) {
 
 /* optional_caps are granted opportunistically = intersected with provider support. A provider that has
  * only a SUBSET of the requested optional caps grants exactly that subset (never fails init). This is what
- * lets KlUdp request every cap its API may use (CONNECTED|SOURCE_PIN|TOS|MULTICAST) unconditionally. */
+ * lets a consumer request every cap it may use (CONNECTED|SOURCE_PIN|TOS|MULTICAST) unconditionally. */
 UTEST(datagram_public, m6a_optional_caps_granted_intersection) {
     mk_ctx(); mc_reset(); g_mock_caps_null = 0;
     g_mock_caps = KL_DGRAM_CAP_SOURCE_PIN | KL_DGRAM_CAP_MULTICAST;   /* provider has 2 of the 4 */

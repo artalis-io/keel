@@ -13,7 +13,7 @@
  *
  * These definitions OWN the public kl_comp_* names; each completion backend renames its
  * own impls (static) and exposes them through kl_comp_ops_builtin(). The generic driver
- * (completion_driver.c) and the completion callers (async.c / server.c / udp.c) call
+ * (completion_driver.c) and the completion callers (async.c / server.c) call
  * these free functions unchanged. See completion.h / event_dispatch.c.
  */
 #include <keel/event_ctx.h>   /* KlEventCtx (->loop), KlServer/KlConn reach the loop */

@@ -2,7 +2,7 @@
  * test_datagram_open.c — M0 provider-neutral datagram socket-preparation helper
  * (docs/datagram_consolidation_design.md §2 D-DNS-2).
  *
- * kl_datagram_open() reproduces kl_udp_init's create/configure/bind prep, minus the KlUdp machine, and
+ * kl_datagram_open() reproduces the datagram socket create/configure/bind prep, minus the send/receive machine, and
  * hands the caller a prepared+bound fd plus the capture-option mask configure() enabled. This suite
  * proves what M0 owes:
  *

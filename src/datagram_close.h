@@ -83,14 +83,13 @@ int  kl_dgram_close_set_cancel(KlDgramClose *c, KlDgramCancelFn cancel_recv,
                                KlDgramCancelFn cancel_send, void *ctx);
 
 /* Backend per-op retirement classifier (§4.3). Frozen once close begins. If unset, every op is
- * treated as confirmed RETIRED → the terminal result is DETACHED (the readiness/pure-machine model,
- * and KlUdp's legacy path). 0 / -1. */
+ * treated as confirmed RETIRED → the terminal result is DETACHED (X * and the readiness/pure-machine model). 0 / -1. */
 int  kl_dgram_close_set_retire(KlDgramClose *c, KlDgramRetireFn retire, void *ctx);
 
 /* Backend retirement + fd-close hook (§4.1), run EXACTLY ONCE once the outbound queue has drained
  * (graceful) or been discarded (abortive) — regardless of recv state, since a datagram recv has no
  * natural EOF and this step is what retires it. Owns the physical fd close. Frozen once close begins.
- * If unset (KlUdp's legacy path, or a coordinator driven purely by machine retirements), no fd is
+ * If unset (a coordinator driven purely by machine retirements), no fd is
  * closed here. 0 / -1. */
 int  kl_dgram_close_set_backend_close(KlDgramClose *c, KlDgramBackendCloseFn fn, void *ctx);
 

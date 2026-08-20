@@ -4,7 +4,7 @@
  * Wires the built machines into one lifecycle: an OBJECT-owned outbound pool + send machine, a
  * LIFE-token-owned rx holder (inbound + recv, freed by on_final so it outlives a posted op AND the
  * caller-owned core), and the confirmed-detachment close coordinator with the §4.3 retirement seam.
- * Mirrors udp.c's proven rx-lifetime + interest wiring, but over neutral adapters (no provider/KlUdp).
+ * Mirrors the proven rx-lifetime + interest wiring over neutral adapters (no provider or transport coupling).
  */
 #include "datagram_core.h"
 
@@ -92,7 +92,7 @@ int kl_dgram_core_init(KlDgramCore *core, const KlDgramCoreConfig *cfg) {
      * (7B-3) installs kl_datagram_comp_dispatch so the driver routes this token via life->dispatch;
      * NULL (neutral-adapter tests) means completions are driven directly (kl_dgram_core_*_on_complete). */
     KlDgramLife *life = kl_dgram_life_create(a, core, core_rx_final, rx,
-                                             KL_DGRAM_OWNER_DATAGRAM, cfg->dispatch);
+                                             cfg->dispatch);
     if (!life) {
         kl_dgram_inbound_free(&rx->inbound);
         kl_free(a, rx, sizeof(*rx));

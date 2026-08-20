@@ -1,12 +1,12 @@
 /*
  * socket_dgram_win.c — the Winsock datagram data-plane (KlDatagramOps) for the
  * built-in Winsock socket provider. The primitive-only form of udp_io_win.c: every
- * op takes (ctx, fd, …) and speaks KlSockAddr, with no KlUdp machine state — the
- * send-queue walk, delivery, and interest tracking stay in udp.c, which dispatches
+ * op takes (ctx, fd, …) and speaks KlSockAddr, with no datagram machine state — the
+ * send-queue walk, delivery, and interest tracking stay in the datagram core, which dispatches
  * through KlSocketProvider.dgram.
  *
  * Winsock has no recvmmsg/sendmmsg batching, no UDP GSO, and no UDP GRO, so the
- * batch ops are NULL (udp.c uses the per-datagram loop) and send_gso reports
+ * batch ops are NULL (the datagram core uses the per-datagram loop) and send_gso reports
  * unsupported. The WSARecvMsg/WSARecvFrom recv always attaches a control buffer
  * and parses opportunistically, so the primitive needs no per-socket capture flags.
  */
@@ -36,7 +36,7 @@
 /* Shared with the IOCP backend (udp_cmsg_win.c) — one cached WSASendMsg fetch, no drift. */
 static LPFN_WSASENDMSG dgram_get_sendmsg(SOCKET s) { return kl_udp_win_get_sendmsg(s); }
 
-/* WSAEWOULDBLOCK -> EWOULDBLOCK (udp.c queues); anything else -> EIO (error path). */
+/* WSAEWOULDBLOCK -> EWOULDBLOCK (the datagram core queues); anything else -> EIO (error path). */
 static void dgram_set_errno_from_wsa(void) {
     int e = WSAGetLastError();
     errno = (e == WSAEWOULDBLOCK || e == WSAEINPROGRESS) ? EWOULDBLOCK : EIO;
@@ -190,7 +190,7 @@ static kl_ssize_t wdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
 static kl_ssize_t wdg_send_gso(void *ctx, KlSocketHandle fd, const void *data, size_t len,
                                uint16_t seg, const KlSockAddr *dest) {
     (void)ctx; (void)fd; (void)data; (void)len; (void)seg; (void)dest;
-    errno = EIO;   /* no UDP GSO on Winsock — udp.c falls back to per-segment sends */
+    errno = EIO;   /* no UDP GSO on Winsock — the datagram core falls back to per-segment sends */
     return -1;
 }
 

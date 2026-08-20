@@ -4,8 +4,8 @@
  * A readiness-only build that opts out of the completion axis entirely
  * (KEEL_NO_COMPLETION=1) still links the shared callers that REFERENCE the completion
  * entry points — async.c (kl_comp_run / kl_io_engine_resume_completion), server.c
- * (kl_io_engine_run_completion / kl_comp_cancel / kl_io_engine_post_read), udp.c
- * (kl_comp_post_udp_{recv,send}) — even though, on a readiness loop, those branches are
+ * (kl_io_engine_run_completion / kl_comp_cancel / kl_io_engine_post_read), datagram.c
+ * (kl_comp_post_dgram_{recv,send}) — even though, on a readiness loop, those branches are
  * gated behind KL_EVENT_CAP_COMPLETION and never taken. This TU provides every such
  * symbol so the link resolves without pulling in the completion driver / dispatch /
  * backend. Reaching any of them means the completion gate was bypassed — a build/logic

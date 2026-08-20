@@ -1577,7 +1577,7 @@ static void t_dgram_send_fifo_hole_reuse(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
     MockDgramXport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_HANG;   /* sends post but do NOT auto-complete — step them manually */
     KlSockAddr dA, dB, dC, dD;
@@ -1623,7 +1623,7 @@ static void t_dgram_life_delivered_recv(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);   /* refcount 1 (owner) */
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);   /* refcount 1 (owner) */
     CHECK(life != NULL, "KlDgramLife created (owner ref)");
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
@@ -1660,7 +1660,7 @@ static void t_dgram_two_concurrent_sends(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);   /* owner ref */
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);   /* owner ref */
     MockDgramXport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr d1, d2; mk_ipv4(&d1, 10, 0, 2, 3, 53); mk_ipv4(&d2, 10, 0, 2, 4, 5353);
@@ -1763,7 +1763,7 @@ static void t_dgram_deferred_post_failure_releases(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
     MockDgramXport dg; memset(&dg, 0, sizeof(dg)); dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr d1, d2; mk_ipv4(&d1, 10, 0, 2, 3, 53); mk_ipv4(&d2, 10, 0, 2, 4, 5353);
@@ -1793,7 +1793,7 @@ static void t_dgram_life_stale_release_recv(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -1829,7 +1829,7 @@ static void t_dgram_teardown_clean_release(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -1851,7 +1851,7 @@ static void t_dgram_life_quarantine_recv(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -1879,7 +1879,7 @@ static void t_dgram_life_quarantine_send(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.rx_life = life;
     g_udp_transmit_mode = TOK_HANG;
@@ -1909,7 +1909,7 @@ static void t_dgram_cancel_idempotent(void) {
     const KlEventProvider *ep = kl_uefi_event_provider(&g_bs, (EFI_HANDLE)0x1);
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;
@@ -2147,7 +2147,7 @@ static void t_dgram_router_retain_life_no_handler(void) {
     KlSocketHandle fd = dgl_socket();
     int owner = 0;
     /* NO dispatch handler → kl_comp_run routes the terminal via its no-handler fallback, not an owner. */
-    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, KL_DGRAM_OWNER_DATAGRAM, (KlDgramDispatchFn)0);
+    KlDgramLife *life = kl_dgram_life_create(&g_ta, &owner, mock_on_final, NULL, (KlDgramDispatchFn)0);
     unsigned char rbuf[64];
     MockDgramXport dg; memset(&dg, 0, sizeof(dg));
     dg.fd = fd; dg.recv_buf = rbuf; dg.recv_buf_size = sizeof(rbuf); dg.rx_life = life;

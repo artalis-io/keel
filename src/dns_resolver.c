@@ -1,7 +1,7 @@
 /*
  * dns_resolver.c — async A+AAAA resolver over KlDatagram (Do53), implementing KlResolver.
  *
- * The datagram transport is the Tier-1 KlDatagram (M3 of the KlUdp->KlDatagram consolidation,
+ * The datagram transport is the Tier-1 KlDatagram (M3 of the datagram consolidation,
  * docs/datagram_consolidation_design.md §2): a fixed-slot, count-budgeted, confirmed-detachment-close
  * datagram primitive. The socket is prepared provider-neutrally by kl_datagram_open (M0) and adopted by
  * kl_datagram_init. Send backpressure is a datagram COUNT (send_slots): a transient WOULD_BLOCK does NOT
@@ -67,7 +67,7 @@ _Static_assert(DNS_NAME_MAX == KL_DNS_SYS_NAME_MAX,
 #define DNS_TCP_IDLE_MS   10000 /* close an idle persistent TCP connection (RFC 7766) */
 #define DNS_TCP_MSG_MAX   65535 /* max DNS-over-TCP message (2-byte length prefix) */
 #define DNS_SEND_SLOTS    8     /* default outbound datagram slots (transient-burst tolerance, D-DNS-1) */
-#define DNS_RECV_CAP      2048  /* inbound slot payload capacity (parity with the old KlUdp recv default) */
+#define DNS_RECV_CAP      2048  /* inbound slot payload capacity (parity with the historical UDP recv default) */
 
 /* DNS-over-TCP connection state. */
 enum { DNS_TCP_CLOSED = 0, DNS_TCP_CONNECTING, DNS_TCP_READY };

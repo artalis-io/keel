@@ -54,7 +54,7 @@
  * (QUARANTINED/INVALID) — see el_drain.
  *
  * SEND SERIALIZATION (review-High): EFI_UDP4 allows only ONE outstanding Transmit token per socket, but
- * KlUdp's completion send lets multiple sends be posted before a drain (the resolver launches A + AAAA
+ * The datagram completion send lets multiple sends be posted before a drain (the resolver launches A + AAAA
  * synchronously). So the SEND ops form a per-socket PENDING QUEUE at THIS layer: el_post_dgram_send always
  * ACCEPTS (copies the payload+dest — the caller may free them right after), and only ONE send per fd is
  * posted to the substrate at a time; when it retires, the drain pumps the next queued send for that fd.
@@ -834,7 +834,7 @@ static const KlCompletionOps EFI_COMP_OPS = {
     /* post_sendfile = NULL: file responses (S-6) are out of scope for the S-4 plaintext
      * server. The CLIENT's stream send/recv still ride the SYNC socket provider relayed as
      * KL_COMP_WATCHER (post_connect + the drain watch loop); the datagram ops above serve
-     * KlUdp/dns_resolver over the completion axis without changing the stream client path. */
+     * the datagram resolver over the completion axis without changing the stream client path. */
 };
 
 static const KlEventOps EFI_EVENT_OPS = {

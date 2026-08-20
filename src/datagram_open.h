@@ -28,12 +28,12 @@ typedef struct {
  * M0 — provider-neutral datagram socket-preparation helper
  * (docs/datagram_consolidation_design.md §2 D-DNS-2).
  *
- * Mirrors kl_udp_init's prep EXACTLY, minus the KlUdp machine:
+ * Does the datagram socket prep, minus the send/receive machine:
  *
  *     kl_sock_socket(SOCK_DGRAM) -> set cloexec + nonblocking
  *       -> provider->configure(...) -> kl_sock_bind (only if cfg->bind_addr)
  *
- * and STOPS at bind. The completion-loop association kl_udp_init performs at init is instead done
+ * and STOPS at bind. The completion-loop association is instead done
  * INSIDE kl_datagram_init (7B-7, as KlDgramCore's pre-adoption hook), so a bind-prepared fd is exactly
  * what kl_datagram_init expects — the helper deliberately does not touch the event loop.
  *
@@ -46,13 +46,13 @@ typedef struct {
  * leaves it with the caller) or close it on your own error path. On ANY step failure the helper CLOSES
  * the fd it created — the caller reclaims nothing (no fd leak, no double-close).
  *
- * `sockets` NULL selects the built-in default provider (mirrors kl_udp_init's NULL-sockets handling: the
+ * `sockets` NULL selects the built-in default provider (mirrors the datagram initializer's NULL-sockets handling: the
  * kl_sockdef_* seam + default datagram ops). A non-NULL provider is rejected with KL_ERR_INVALID_ARG,
  * BEFORE any fd is created, if it has no datagram data-plane (no .dgram) OR a partial one that lacks the
  * required configure() op. `cfg` is required (it carries family/bind + the provider->configure
  * socket-option knobs); NULL is rejected with KL_ERR_INVALID_ARG.
  *
- * No consumer is migrated here (M0 is additive); M3 (DNS) and M4 (KlUdpServer) call this in later,
+ * No consumer is migrated here (M0 is additive); M3 (DNS) and M4 (the datagram server) call this in later,
  * separately-reviewed increments.
  */
 int kl_datagram_open(const struct KlSocketProvider *sockets,
@@ -69,8 +69,8 @@ typedef void (*KlDatagramReclaimFn)(void *ctx);
 
 /*
  * SYNCHRONOUS owner-destruction teardown of a KlDatagram (internal) — for a consumer bound to a
- * synchronous free contract, i.e. that must fully reclaim the handle before returning (the DNS resolver;
- * symmetric with kl_udp_free). See docs/datagram_sync_teardown_design.md (Option A + §4a).
+ * synchronous free contract, i.e. that must fully reclaim the handle before returning (the DNS
+ * resolver). See docs/datagram_sync_teardown_design.md (Option A + §4a).
  *
  * The public lifecycle (kl_datagram_close_begin/cancel then kl_datagram_free) is confirmed-detachment: on
  * a completion backend the recv op's cancel terminal drains on a LATER loop tick, so `free` is refused

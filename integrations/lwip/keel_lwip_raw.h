@@ -35,9 +35,9 @@
  *     kl_socket_provider_lwip_raw() (kl_sock_send/recv → tcp_write/read), and the server over
  *     the generic memory-BIO completion-TLS leg. Buffered HTTP/1.1 over TLS (no ALPN-h2, no
  *     TLS file/stream body). BYO mbedTLS.
- *   - UDP (KlUdp / udp_server): the provider exposes datagram ops (.dgram != NULL), so
- *     kl_udp_init() over the raw completion loop succeeds (LC-3a).
- *   - DNS: KEEL's built-in async resolver (src/dns_resolver.c) over KlUdp-on-raw (LC-3) —
+ *   - UDP (KlDatagram / udp_server): the provider exposes datagram ops (.dgram != NULL), so
+ *     kl_datagram_socket_init() over the raw completion loop succeeds (LC-3a).
+ *   - DNS: KEEL's built-in async resolver (src/dns_resolver.c) over KlDatagram-on-raw (LC-3) —
  *     one DNS path, no lwIP dns_gethostbyname.
  *   - Buffered, streaming, and file responses of UNBOUNDED size (transmit memory is bounded
  *     by a fixed per-conn window — the response/file size is not).

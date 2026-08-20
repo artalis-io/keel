@@ -470,7 +470,7 @@ UTEST(datagram_socket, wildcard_source_pin_cap_gate) {
 
 /* Source-pinned reply: a wildcard-bound datagram captures the datagram's local (hit) address on recv
  * and replies FROM it, so the reply egresses from the address the client contacted (migrated from
- * test_udp_server.c:reply_from_hit_address — the KlUdpServer convenience, expressed directly on
+ * the datagram-server source-pinned reply convenience, expressed directly on
  * KlDatagram). Linux-only: uses the 127.0.0.0/8 loopback range. */
 #if defined(__linux__)
 static KlSockAddr g_srv_local; static int g_srv_have_local; static KlSockAddr g_srv_peer;

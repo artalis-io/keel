@@ -16,7 +16,7 @@
  * The core is provider-NEUTRAL: it takes explicit adapter hooks (send submit, recv arm/disarm/pull,
  * cancel, retire classify) rather than a KlSocketProvider — 7B binds those to a real provider +
  * completion loop; a test scripts them. This is NOT the public API (no kl_datagram_* / ABI here) and
- * does NOT touch KlUdp (its byte-budget transport is untouched — D-COMPAT).
+ * is self-contained: no external transport is coupled to it.
  *
  * INTERNAL header — not installed, no ABI commitment.
  */

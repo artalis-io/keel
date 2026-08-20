@@ -125,7 +125,7 @@ u32_t sys_now(void) {
 /* tcp_write's u16_t len ceiling (Stage B send-pump chunking). */
 #define KL_LWR_TCP_WRITE_MAX 0xffffu
 
-/* ── LC-3a / 7A-5: UDP datagram-completion path (KlUdp over raw) ───────────────────
+/* ── LC-3a / 7A-5: UDP datagram-completion path (datagram over raw) ───────────────────
  * A datagram slot mirrors the TCP conn slot but for a udp_pcb. lwIP's udp_recv callback holds ONE
  * inbound datagram (the ONE-HELD-PACKET contract, docs/datagram_step7_public_api_design.md §3):
  * the payload is copied out of the pbuf + source IPv4/port into the slot's single held datagram,
@@ -152,7 +152,7 @@ u32_t sys_now(void) {
 #define KL_LWR_UDP_DGRAM_MAX 2048u
 #endif
 
-/* Number of udp slots per ctx. Small: loopback tests use one or two KlUdp sockets, and
+/* Number of udp slots per ctx. Small: loopback tests use one or two datagram sockets, and
  * MEMP_NUM_UDP_PCB (lwipopts_raw.h) caps concurrent udp pcbs anyway. */
 #ifndef KL_LWR_UDP_SLOTS
 #define KL_LWR_UDP_SLOTS 8
@@ -300,7 +300,7 @@ void kl_dgram_life_retain(KlDgramLife *l);
 void kl_dgram_life_release(KlDgramLife *l);
 
 /* ── LC-3a: per-udp-socket slot ───────────────────────────────────────────────────
- * One slot per KlUdp bound over the raw backend. `pcb == NULL` = free slot. `life` is the stable
+ * One slot per datagram bound over the raw backend. `pcb == NULL` = free slot. `life` is the stable
  * token the op retained at post (the drain transfers it to the KL_COMP_DGRAM_RECV/SEND event, so the
  * backend never dereferences the possibly-freed transport owner). The slot holds exactly
  * `(rx_armed ? 1 : 0) + pend_send` token refs; close/teardown release that many. The receive side is
@@ -602,7 +602,7 @@ void kl_lwr_ctx_destroy(void *lwrctx) {
 
     /* LC-3a: tear down any live udp pcbs (detach the recv cb + free the pcb). The single held
      * datagram is inline in the slot (no heap), cleared by the memset below implicitly. A slot
-     * still live here means kl_udp_free / kl_lwr_udp_close never ran (loop torn down before the
+     * still live here means the datagram close / kl_lwr_udp_close never ran (loop torn down before the
      * socket): release its outstanding op token refs so they don't leak (the owner ref may still
      * leak — the same free-sockets-before-the-loop contract as every backend). */
     for (int i = 0; i < KL_LWR_UDP_SLOTS; i++) {
@@ -1048,7 +1048,7 @@ long kl_lwr_srv_sync_send(void *lwrctx, void *pcb, const void *buf, size_t len, 
     return (long)chunk;
 }
 
-/* ── LC-3a: UDP datagram glue (udp_pcb ↔ KlUdp) ───────────────────────────────────
+/* ── LC-3a: UDP datagram glue (udp_pcb ↔ KlDatagram) ──────────────────────────────
  * A udp slot is created by kl_lwr_udp_new (lwr_sock_socket for SOCK_DGRAM), bound by
  * kl_lwr_udp_bind, recv-armed (taking a stable-token ref) by kl_lwr_udp_post_recv, and closed by
  * kl_lwr_udp_close. Inbound datagrams land in lwr_udp_recv_cb, which copies the payload out of the
@@ -1274,7 +1274,7 @@ int kl_lwr_udp_drain(void *lwrctx, KlLwrUdpRecord *out, int max) {
         if (s->rx_armed && s->has_held && n < max) {
             s->staged = s->held;
             s->has_held = 0;
-            s->rx_armed = 0;   /* consumed — udp.c re-posts via kl_udp_comp_on_recv */
+            s->rx_armed = 0;   /* consumed — the datagram core re-posts via its completion dispatch */
 
             KlLwrUdpRecord *r = &out[n++];
             memset(r, 0, sizeof(*r));

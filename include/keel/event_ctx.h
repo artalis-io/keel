@@ -59,11 +59,11 @@ typedef struct KlEventCtx {
     /* Internal: socket provider for transports created on this ctx (opaque;
      * NULL = POSIX). Set by tests / future providers, not public API. */
     const struct KlSocketProvider *sockets;
-    /* Internal completion-dispatch hooks (opaque; set by the server / kl_udp_init when
-     * those features are used, NULL otherwise). kl_comp_run routes the non-generic
-     * completion kinds through these so a client-only build links neither the server nor
-     * the UDP stack. The event arg is a const KlCompletionEvent* (opaque here, exactly as
-     * KlEventOps.completion). Additive — appended after `sockets`, do not reorder. */
+    /* Internal completion-dispatch hook (opaque; set by the server when its features are used,
+     * NULL otherwise). kl_comp_run routes the non-generic connection completion kinds through it
+     * so a client-only build links neither the server nor the datagram stack. The event arg is a
+     * const KlCompletionEvent* (opaque here, exactly as KlEventOps.completion). Additive — appended
+     * after `sockets`, do not reorder. */
     void (*comp_conn_dispatch)(struct KlEventCtx *ctx, const void *ev);  /* ACCEPT/READ/WRITE → server */
     /* R3b-W (watcher pointer-reuse ABA remedy). `dispatch_depth` counts nested
      * kl_event_ctx_dispatch_begin/end brackets; `retired` chains watcher nodes deleted DURING a
@@ -74,10 +74,10 @@ typedef struct KlEventCtx {
     int         dispatch_depth;
     KlWatcher  *retired;
     /* 7B-2a removed the datagram completion hook `comp_udp_dispatch` that sat here: datagram completions
-     * (UDP_RECV/UDP_SEND) are now routed by each token's own KlDgramDispatchFn (life->dispatch), so a
-     * KlUdp coexists with a public KlDatagram on one ctx. This is an INTENTIONAL pre-release ABI break —
-     * the datagram API is being reshaped in this branch and no released consumer holds this slot — so the
-     * field is dropped outright rather than kept as dead reserved clutter. */
+     * (DGRAM_RECV/DGRAM_SEND) are now routed by each token's own KlDgramDispatchFn (life->dispatch),
+     * not a ctx-global hook. This is an INTENTIONAL pre-release ABI break — the datagram API was
+     * reshaped in this branch and no released consumer holds this slot — so the field is dropped
+     * outright rather than kept as dead reserved clutter. */
 } KlEventCtx;
 
 /**

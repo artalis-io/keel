@@ -628,14 +628,13 @@ int kl_uefi_udp_close(KlSocketHandle fd) {
  * NULL and EVERY subsequent op on the socket fails. The point at which that failure SURFACES
  * differs, and is a documented, narrowed acceptance:
  *   - BOUND socket (cfg->bind_addr): the single Configure is done by kl_uefi_udp_bind(), whose
- *     -1 return kl_udp_init() checks (src/udp.c) → kl_udp_init() FAILS. (Nothing is configured
+ *     -1 return kl_datagram_socket_init() checks → it FAILS. (Nothing is configured
  *     here — see the single-Configure note below.)
- *   - UNBOUND / DHCP-default socket (the DNS resolver): kl_udp_init() makes no further provider
+ *   - UNBOUND / DHCP-default socket (the DNS resolver): kl_datagram_socket_init() makes no further provider
  *     call after configure(), so it still RETURNS SUCCESS on a fail-closed slot. The failure
- *     instead surfaces at the FIRST OPERATION — kl_udp_recv_start()'s post_dgram_recv (or a
+ *     instead surfaces at the FIRST OPERATION — kl_datagram_recv_start()'s post_dgram_recv (or a
  *     send) returns -1 on the dead slot. The stock resolver handles this cleanly:
- *     kl_dns_resolver_create() checks kl_udp_recv_start() and tears down (returns NULL). A raw
- *     KlUdp user who never starts receiving holds a socket whose every op fails (safe, not
+ *     kl_dns_resolver_create() checks kl_datagram_recv_start() and tears down (returns NULL).  *     datagram user who never starts receiving holds a socket whose every op fails (safe, not
  *     silently-wrong). This deferred-surface path is covered by the mock state-machine tests.
  *
  * SINGLE Configure per child (a second Configure on an already-started child returns

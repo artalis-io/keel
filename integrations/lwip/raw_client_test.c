@@ -24,7 +24,7 @@
  *   2. GET / to a CLOSED port   -> a clean connect error (no hang, no leak).
  *
  * DNS is LC-3, TLS is LC-4, Happy-Eyeballs is LC-2: this test is plaintext numeric-IP ONLY. The
- * built-in kl_dns_resolver is NOT usable here (it eagerly kl_udp_init's, which lwip-raw rejects),
+ * built-in kl_dns_resolver is NOT usable here (it eagerly kl_datagram_socket_init's, which lwip-raw rejects),
  * so the client is handed an explicit numeric-only KlResolver via KlClientConfig.resolver — the
  * clean LC-1-scoped way to avoid any DNS machinery.
  *

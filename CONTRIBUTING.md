@@ -14,7 +14,7 @@ make test   # run all tests
 - **C11** — compiled with `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -fstack-protector-strong`
 - **No direct malloc/free** — all allocation through the `KlAllocator` interface
 - **Public API prefix** — all public functions use `kl_` (e.g. `kl_router_init`)
-- **Datagram APIs** — new portable message protocols use `KlDatagram` (the canonical Tier-1 message transport) unless they require a documented `KlUdp` extension (batching, GSO/GRO, multicast/broadcast, per-packet TOS, source-pinned send); name the extension and why. See [docs/datagram_vs_udp.md](docs/datagram_vs_udp.md)
+- **Datagram APIs** — portable message protocols use `KlDatagram` (the canonical Tier-1 message transport). It covers the full datagram surface: batching, GSO/GRO, multicast/broadcast, per-packet TOS, source-pinned send, and confirmed-detachment close. See [`include/keel/datagram.h`](include/keel/datagram.h) + [docs/datagram_contract.md](docs/datagram_contract.md)
 - **Error handling** — return `-1` on failure, `0` on success (or positive value); set `last_error` at the point of failure
 - **Resource cleanup** — every `_init` has a corresponding `_free`
 - **Overflow guards** — check against `SIZE_MAX/2` or `INT_MAX/2` before arithmetic

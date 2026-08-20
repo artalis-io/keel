@@ -2,7 +2,7 @@
  * dgram_dns_selftest.c — 6.4c acceptance self-test (UEFI EFI application).
  *
  * The on-real-firmware validation for the EFI_UDP4 datagram provider (6.4b): the STOCK
- * src/dns_resolver.c resolves a hostname over KlUdp-over-EFI_UDP4 — the unified EFI socket
+ * src/dns_resolver.c resolves a hostname over KlDatagram-over-EFI_UDP4 — the unified EFI socket
  * provider (SOCK_DGRAM → EFI_UDP4 child, socket_efi_udp4.c) + the completion-native datagram
  * wiring in event_efi.c (post_dgram_recv/_send + drain, B.6 stable token) — with NO bespoke
  * dns_uefi.c on the path. (The retired U-5 build used the one-shot dns_uefi.c behind
@@ -101,7 +101,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     EFI_BOOT_SERVICES *bs = st->BootServices;
 
     print_line("");
-    print_line("=== 6.4c stock dns_resolver over KlUdp-over-EFI_UDP4 → GET ===");
+    print_line("=== 6.4c stock dns_resolver over KlDatagram-over-EFI_UDP4 → GET ===");
     print("6.4c: target = "); print(TARGET_URL);
     print(" nameserver = "); print_line(KL_U9_NAMESERVER);
 
@@ -119,7 +119,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
         goto done;
     }
     /* The unified EFI provider serves BOTH SOCK_STREAM (EFI_TCP4) and SOCK_DGRAM (EFI_UDP4):
-     * the resolver's KlUdp rides its .dgram data-plane; the GET rides its stream ops. */
+     * the resolver's KlDatagram rides its .dgram data-plane; the GET rides its stream ops. */
     ev.sockets = kl_uefi_socket_provider(bs, image_handle);
     if (!ev.sockets) { print_line("6.4c: no EFI socket provider (no network stack?)"); kl_event_ctx_free(&ev); goto done; }
     print_line("6.4c: event ctx up (efi completion) + unified socket provider");
@@ -132,7 +132,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
 
     KlResolver *res = kl_dns_resolver_create(&ev, &dcfg);
     if (!res) { print_line("6.4c: kl_dns_resolver_create failed"); kl_event_ctx_free(&ev); goto done; }
-    print_line("6.4c: stock resolver created (KlUdp over EFI_UDP4, completion)");
+    print_line("6.4c: stock resolver created (KlDatagram over EFI_UDP4, completion)");
 
     /* Inject the stock resolver: kl_client resolves KL_U9_HOSTNAME over EFI_UDP4 (A+AAAA,
      * RFC 8305) then connects to the resolved address over EFI_TCP4 and GETs. */
@@ -177,7 +177,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     if (d.err == KL_ERR_DNS)     print_line("6.4c: resolve-error = KL_ERR_DNS");
     if (d.err == KL_ERR_TIMEOUT) print_line("6.4c: resolve-error = KL_ERR_TIMEOUT");
 
-    /* Teardown BEFORE the live-count assertion: the resolver's KlUdp (EFI_UDP4 child) must
+    /* Teardown BEFORE the live-count assertion: the resolver's KlDatagram (EFI_UDP4 child) must
      * be reaped and no slot leaked/quarantined on the happy path (frozen §9.3). */
     if (c) kl_client_free(c);
     res->destroy(res);

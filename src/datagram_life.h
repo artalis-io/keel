@@ -41,13 +41,6 @@ typedef struct KlDgramLife KlDgramLife;
 
 struct KlCompletionEvent;   /* completion.h — the dispatch handler's event (fwd; avoids a header cycle) */
 
-/* Which owner a token belongs to — the completion-dispatch discriminator (7B-2a). A datagram
- * completion is routed by the token's own `dispatch`, never by guessing what kl_dgram_life_target()
- * points at. (The legacy KL_DGRAM_OWNER_UDP kind was retired with KlUdp in D3.) */
-typedef enum {
-    KL_DGRAM_OWNER_DATAGRAM = 0   /* target = KlDgramCore (kl_datagram_comp_dispatch, 7B-3) */
-} KlDgramOwnerKind;
-
 /* Which side of a datagram op a completion-axis cancel/retire query targets (7B-2). Shared by the
  * completion backend seam (KlCompletionOps.cancel_dgram/retire_dgram) and the close coordinator
  * (datagram_close.h KlDgramRetireFn), so it lives on this transport-neutral token header. */
@@ -70,16 +63,15 @@ typedef void (*KlDgramDispatchFn)(void *target, const struct KlCompletionEvent *
 
 /* Create a token with ONE owner reference (refs=1, live=1, target set). `on_final` runs on the FINAL
  * release — it frees the owner-side receive storage (inbound slot + machine) via `final_ctx`; the
- * token then frees itself. `kind` + `dispatch` are the completion routing identity (the driver calls
+ * token then frees itself. `dispatch` is the completion routing identity (the driver calls
  * `dispatch(target, ev)` for this token's completions). `alloc` MUST outlive every posted op (the
- * event-ctx / backend allocator, never storage that disappears with the KlUdp wrapper). Returns NULL
+ * event-ctx / backend allocator, never storage that disappears with the transport). Returns NULL
  * on allocation failure. */
 KlDgramLife *kl_dgram_life_create(KlAllocator *alloc, void *target,
                                   void (*on_final)(void *final_ctx), void *final_ctx,
-                                  KlDgramOwnerKind kind, KlDgramDispatchFn dispatch);
+                                  KlDgramDispatchFn dispatch);
 
-/* The token's completion-routing identity (7B-2a). */
-KlDgramOwnerKind  kl_dgram_life_kind(const KlDgramLife *l);
+/* The token's completion-routing handler (7B-2a). */
 KlDgramDispatchFn kl_dgram_life_dispatch(const KlDgramLife *l);
 
 /* Take a reference (a backend op, at post time). No-op on NULL. */

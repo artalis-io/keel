@@ -7,7 +7,7 @@ build against your own lwIP (`LWIP_DIR`) + `lwipopts.h`.
 
 - `socket_lwip.c` — `KlSocketProvider` mapping `KlSocketOps` → `lwip_*`, **and** the
   datagram data-plane (`KlDatagramOps` — `lwip_sendto`/`lwip_recvfrom`) folded onto
-  the same provider, so `KlUdp` (hence `udp_server` and the built-in async DNS
+  the same provider, so `KlDatagram` (hence `udp_server` and the built-in async DNS
   resolver) runs on lwIP with no separate link artifact. One runtime provider owns
   both stream + datagram I/O (axis-audit A2), using **only public Keel headers**.
   Per-datagram only (lwIP has no recvmmsg/GSO/GRO/pktinfo).
@@ -64,7 +64,7 @@ lwIP, linked against a **stock** `libkeel`:
 - a Keel async **client** on the lwIP providers → the same server (`200`), with
   name resolution via `resolve_sync_lwip.c` (`lwip_getaddrinfo`, linked ahead of
   the stock lib so it overrides the host `kl_resolve_sync`), and
-- a Keel **`KlUdp` echo** on the lwIP providers, bounced by a raw lwIP UDP client
+- a Keel **`KlDatagram` echo** on the lwIP providers, bounced by a raw lwIP UDP client
   (the datagram ops on `socket_lwip.c`).
 
 ```sh
@@ -76,7 +76,7 @@ make loopback LWIP_DIR=/path/to/lwip
 #    lwIP loopback: Keel UDP echo on lwIP round-tripped (correct)
 ```
 
-A third phase runs a Keel `KlUdp` echo on the lwIP providers (the datagram ops
+A third phase runs a Keel `KlDatagram` echo on the lwIP providers (the datagram ops
 folded onto `socket_lwip.c`), exercised by a raw lwIP UDP client — proving the
 datagram axis end to end.
 
@@ -145,8 +145,8 @@ support:
 | IPv4 TCP **client** (`KlClient`) | **Supported** (LC-1/2) | outbound connect via the **completion** connect primitive (`kl_comp_post_connect` → `tcp_connect`) + Happy-Eyeballs address racing; send/recv on an emulated readiness watcher |
 | HTTP/1.1 incl. keep-alive | **Supported** | rides `KlServer` / `KlClient` |
 | **HTTPS** (client + server) | **Supported** (LC-4) | client over the mbedTLS socket-BIO routed through `kl_socket_provider_lwip_raw()`; server over the generic memory-BIO completion-TLS leg. Buffered HTTP/1.1 over TLS (no ALPN-h2, no TLS file/stream body). BYO mbedTLS |
-| **UDP** / `udp_server` | **Supported** (LC-3a) | provider exposes datagram ops (`.dgram != NULL`); `kl_udp_init` runs `KlUdp` over the raw completion loop |
-| **DNS** | **Supported** (LC-3) | KEEL's built-in async resolver (`src/dns_resolver.c`) over `KlUdp`-on-raw — one DNS path, no lwIP `dns_gethostbyname` |
+| **UDP** / `udp_server` | **Supported** (LC-3a) | provider exposes datagram ops (`.dgram != NULL`); `kl_datagram_socket_init` runs `KlDatagram` over the raw completion loop |
+| **DNS** | **Supported** (LC-3) | KEEL's built-in async resolver (`src/dns_resolver.c`) over `KlDatagram`-on-raw — one DNS path, no lwIP `dns_gethostbyname` |
 | Buffered / streaming / file responses | **Supported** | **unbounded** response size; bounded transmit memory |
 | Request bodies | **Supported** | bounded per-conn receive flow-control (`ERR_MEM` backpressure) |
 | Router, middleware, CORS, SSE, body readers, compression | **Supported** | the server-path modules that ride `KlServer` |
