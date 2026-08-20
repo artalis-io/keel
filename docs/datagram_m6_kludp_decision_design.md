@@ -1,9 +1,33 @@
-# Post-M5 — KlUdp disposition (inventory + decision freeze, rev 7 — RULED: remove, don't wrap)
+# Post-M5 — KlUdp disposition (inventory + decision freeze, rev 8 — RULED: remove, don't wrap)
 
-**Status:** DECISION FREEZE (docs-only), **revision 7 — RULED**. No code this turn. The ruled direction
+**Status:** DECISION FREEZE (docs-only), **revision 8 — RULED**. No code this turn. The ruled direction
 is **§11–§18**; the historical inventory/options (§0–§6) are retained as context; the former
 **modified-Option-B KlUdp-wrapper plan (§7) and the M6.0a/M6.0b/M6.1 wrapper sequence (§8–§10) are
 SUPERSEDED** (kept for history, banner-marked). The prior "modified Option B" is withdrawn.
+
+### Rev 8 — GRO-activation + reconnect contracts (the last two D1 P1s)
+
+Rev 7 closed four gaps but left two mechanically/semantically unspecified; rev 8 freezes them (§12):
+
+- **P1-A (GRO activation — reviewer design #3).** Rev 7's "drop `recv_gro`, attach post-init" was
+  IMPOSSIBLE: `kl_datagram_batch_create`/`_attach_batch` only provide storage + splitting; they do NOT
+  enable `UDP_GRO` — that happens at `kl_datagram_open` via `recv_gro`, so without the knob
+  `accepted_rx_caps & RX_GRO` can never be set and the two-part gate stays dead. **Fix:**
+  `KlDatagramSocketConfig` **KEEPS `recv_gro`** (readiness-only GRO capture at configure), and
+  **`kl_datagram_recv_start` is HARDENED to REFUSE** (`KL_ERR_UNSUPPORTED`) whenever `RX_GRO` was
+  accepted but no actively-splitting batch is attached — the fail-loud net that makes the corruption
+  unrepresentable, without the initializer owning `recv_start` (§12.5). `mmsg_batch` stays absent (batch
+  size is a `kl_datagram_batch_create` argument).
+- **P1-C revised (reconnect).** "Provider-specific behavior governs" is too ambiguous for a canonical
+  facade, and the socket-provider connect seam does not report whether a failed UDP reconnect preserves
+  the old association. **Fix: reconnect is UNSUPPORTED in D1** — `kl_datagram_connect` on an
+  already-connected datagram is REFUSED (`KL_ERR_INVALID_ARG`) with no syscall. Connect is first-time
+  only; first-connect failure is unambiguous (`connected` stays false, usable unconnected). A reconnect
+  seam is a future increment (§12.4).
+- **P2 fixes:** SLOT's `send_slots` default is the exact frozen value **8** (not "e.g. 8"); an unknown
+  `queue_policy` → `KL_ERR_INVALID_ARG` (§12.3). A non-empty `multicast_group` is a **mandatory multicast
+  request** — the initializer OR-s `CAP_MULTICAST` into required caps, so a capable provider is never
+  rejected merely because the caller omitted the redundant bit (§12.1).
 
 ### Rev 7 — D1 contract reconciliation (four P1s + O-D6-2 ruling)
 
@@ -551,15 +575,20 @@ typedef struct {                    /* FROZEN public config — all pointers bor
     int          reuse_addr, reuse_port;
     int          recv_pktinfo;      /* capture each datagram's local (dest) addr */
     int          recv_tos;          /* deliver each datagram's TOS (kl_datagram_recv_tos) */
+    int          recv_gro;          /* enable UDP_GRO capture (readiness only; ignored on completion, per
+                                     * M5.4). Enabling it OBLIGES the caller to attach a splitting RECV
+                                     * batch before recv_start — else recv_start REFUSES (§12.5, P1-A). */
     int          broadcast;         /* SO_BROADCAST (IPv4) */
     int          multicast_ttl, multicast_disable_loop;
     unsigned     multicast_iface;   /* egress interface index; 0 = kernel default */
-    const char  *multicast_group;   /* optional numeric group joined at init (after bind); NULL = none */
+    const char  *multicast_group;   /* optional numeric group joined at init (after bind); NULL/"" = none.
+                                     * A NON-EMPTY group is a MANDATORY multicast request: the initializer
+                                     * OR-s KL_DGRAM_CAP_MULTICAST into required caps (fail-loud), so a
+                                     * capable provider is never rejected for an omitted want_caps bit (P2). */
     int          so_rcvbuf, so_sndbuf;
     int          tos;               /* socket-default TOS/Traffic-Class (IP_TOS/IPV6_TCLASS) */
-    /* NOTE (P1-A): recv_gro + mmsg_batch are DELIBERATELY ABSENT. Receive batching + GRO are set up
-     * post-init via the M5 batch APIs (§12.5), never enabled here — the initializer must never turn on
-     * GRO capture without an actively splitting batch (the M5.4 boundary-corruption hazard). */
+    /* NOTE: mmsg_batch is DELIBERATELY ABSENT — recv/send batch SIZE is a kl_datagram_batch_create
+     * argument, and receive batching/GRO are attached post-init via the M5 APIs (§12.5). */
 
     /* ── KlDatagram sizing + policy — EXPLICIT units, no reinterpretation (§12.3 defaults) ── */
     KlDatagramQueuePolicy queue_policy; /* 0 = DEFAULT = BOTH (O-D6-2) */
@@ -613,15 +642,16 @@ the loop model and go through the socket provider seam, so it works on POSIX, Wi
 Each field keeps its own unit; `0` selects a documented default:
 - `queue_policy == DEFAULT (0)` → **BOTH** (count + byte). `SLOT` → count-only (`send_byte_budget`
   ignored); `BOTH` → count + byte. Pure-SLOT is thus reachable from the convenience initializer (O-D6-2,
-  ruled) — NOT hidden behind the low-level prepared-fd API.
+  ruled) — NOT hidden behind the low-level prepared-fd API. **Any `queue_policy` value outside
+  `{DEFAULT, SLOT, BOTH}` → `KL_ERR_INVALID_ARG`** (init fails, nothing created).
 - `send_slot_cap == 0` → **65507** (a full UDP payload — one datagram per slot).
 - `send_byte_budget == 0` → **262144** (256 KiB, the legacy `max_send_queue` default); applied only under
   BOTH.
 - `recv_cap == 0` → **2048**, hard-capped at 65535.
-- `send_slots == 0` → derived **`max(1, send_byte_budget_eff / send_slot_cap_eff)`** under BOTH (the M4
+- `send_slots == 0` → under BOTH, derived **`max(1, send_byte_budget_eff / send_slot_cap_eff)`** (the M4
   `KlUdpServer` sizing; bytes÷bytes = a COUNT, a units-consistent documented derivation — not a
-  reinterpretation of one value under two units); under SLOT, `send_slots == 0` → a fixed small default
-  (e.g. 8).
+  reinterpretation of one value under two units); under SLOT (no budget to derive from), the exact frozen
+  default **`8`**.
 
 ### 12.4 Provider-neutral connect + connected state (FROZEN)
 
@@ -648,34 +678,43 @@ int kl_datagram_connect(KlDatagram *dg, const KlSockAddr *peer);
   successful connect returns `KL_DATAGRAM_UNSUPPORTED` — documented to cover BOTH "CONNECTED not granted"
   and "granted but not successfully connected." Never handed to the kernel on an unconnected socket;
   destination-addressed send (`msg.peer != NULL`) is unaffected.
-- **Reconnect + failure (P1-C — frozen conservatively/portably).** Repeated `kl_datagram_connect` is
-  ALLOWED (re-points the peer). Failure handling depends on the prior state, because a failed UDP
-  reconnect cannot portably be promised to yield an *unconnected* socket:
-  - **First connect (from unconnected) fails** → `connected` stays **false**; the datagram remains usable
-    for destination-addressed sends (the socket was never associated). No close.
-  - **Reconnect (from connected) fails** → the datagram **preserves its prior `connected` state + peer**
-    (the previous kernel association is assumed intact; the logical flag is NOT cleared, since clearing
-    it would falsely advertise an unconnected socket that may still be connected to the old peer).
-    Returns -1.
-  - A provider whose failed reconnect leaves the socket in an **indeterminate** state (cannot guarantee
-    the prior association persists) MUST, per its provider contract, either **refuse** the reconnect
-    (return -1 without attempting) or transition the datagram to an **unusable/error** state — it must
-    never silently present as unconnected. The socket is not closed by a failed connect.
+- **Reconnect is UNSUPPORTED in D1 (P1-C — revised).** `kl_datagram_connect` connects ONCE, from the
+  unconnected state. A second `kl_datagram_connect` on an already-`connected` datagram is **REFUSED with
+  `KL_ERR_INVALID_ARG` and performs no syscall** — so D1 never has to reason about whether a *failed* UDP
+  reconnect preserves the prior kernel association (a semantic the generic socket-provider connect seam
+  does not currently report). This keeps the connected-state contract unambiguous and portable:
+  - **First connect (from unconnected) succeeds** → `connected` true, peer recorded.
+  - **First connect fails** → `connected` stays **false**; the datagram remains usable for
+    destination-addressed sends (the socket was never associated). The socket is NOT closed.
+  - **Any connect while already `connected`** → `KL_ERR_INVALID_ARG`, state + peer unchanged.
+  Reconnect (re-point / disconnect-to-`AF_UNSPEC`) is deferred to a future increment that first
+  strengthens the provider connect contract or adds an explicit reconnect result/state seam.
 
-### 12.5 Receive batching + GRO stay OUT of the initializer (P1-A)
+### 12.5 GRO activation + the recv_start fail-loud guard (P1-A — design #3)
 
-`KlDatagramSocketConfig` does NOT carry `recv_gro`/`mmsg_batch`, and `kl_datagram_socket_init` never
-enables GRO capture — because GRO capture WITHOUT an actively splitting batch delivers multiple logical
-datagrams as one (the exact boundary-corruption bug M5.4 fixed, `src/udp_server.c:118`). Receive batching
-(recvmmsg) + GRO are set up **explicitly, post-init, before `recv_start`**, via the existing M5 APIs
-(`kl_datagram_batch_create(dg, KL_DGRAM_BATCH_RECV, …)` + `kl_datagram_recv_attach_batch`), which already
-enforce the full M5.4 contract: **readiness-only** (completion refuses attach, D-M5-3), **normalized
-batch sizing**, **pre-`recv_start` attachment**, the **§6.2 two-part GRO gate** (provider `CAP_GRO` AND
-accepted `RX_GRO`), and **fail-loud** when GRO is enabled but splitting is not active. Send batching +
-GSO are likewise post-init (`kl_datagram_batch_create(…, SEND, …)` + `kl_datagram_send_batch` /
-`kl_datagram_send_gso`). D1's job ends at a correctly-configured, adopted, optionally-connected socket;
-the batch/offload lifecycle is a separate, already-safe surface. (A future coupled "enable GRO capture +
-attach splitting batch" convenience is possible but out of D1 scope; it must remain atomic.)
+GRO capture can ONLY be enabled at socket configure time (`recv_gro` → `UDP_GRO` sockopt → the provider
+reports `RX_GRO` in `accepted_rx_caps`); `kl_datagram_batch_create`/`_attach_batch` provide only storage
++ splitting, never the sockopt. So the config KEEPS `recv_gro` (there is no other way to set
+`accepted_rx_caps & RX_GRO`), enabled **readiness-only** (a completion loop cannot split a coalesced
+buffer, so `recv_gro` is ignored there, per M5.4). The safety comes from a new fail-loud guard rather
+than from hiding the knob:
+
+- **`kl_datagram_recv_start` is HARDENED (D1 production change):** if the socket accepted `RX_GRO`
+  (`accepted_rx_caps & KL_DGRAM_RX_GRO`) but **no actively-splitting batch is attached** (no `core->ext`,
+  or the attached batch's two-part gate `gro_active` is false), `recv_start` **refuses with
+  `KL_ERR_UNSUPPORTED`** — GRO-without-splitting (the M5.4 boundary-corruption bug, `src/udp_server.c:118`)
+  is therefore *unrepresentable*: you cannot begin receiving on a GRO-enabled socket without a splitter.
+- **Caller flow when `recv_gro` is set:** `kl_datagram_socket_init(recv_gro=1)` →
+  `kl_datagram_batch_create(dg, KL_DGRAM_BATCH_RECV, n, bufsz)` → `kl_datagram_recv_attach_batch`
+  (activates the §6.2 two-part gate: provider `CAP_GRO` AND accepted `RX_GRO`) → `kl_datagram_recv_start`
+  (now succeeds). Omit the batch and `recv_start` fails loud. A caller that wants plain (unsplit) receive
+  simply leaves `recv_gro` unset.
+- The guard is backward-compatible: existing consumers either never set `recv_gro` (DNS) or attach a
+  splitting batch before `recv_start` (`KlUdpServer`, `test_datagram_batch`), so none regress.
+- **Batch sizing** is the `kl_datagram_batch_create(n, bufsz)` argument (not a config knob). Send
+  batching + GSO are likewise post-init (`kl_datagram_batch_create(…, SEND, …)` + `kl_datagram_send_batch`
+  / `kl_datagram_send_gso`). The initializer's job ends at a configured, adopted, optionally-connected
+  socket; the batch/offload lifecycle stays the separate, already-safe M5 surface.
 
 ## 13. D2 — migrate internal usage + coverage (old → new)
 
@@ -815,15 +854,23 @@ duplicate-of-existing vs delete vs keep).
 - **O-D6-3 (RULED — accepted):** send-before-connect returns `KL_DATAGRAM_UNSUPPORTED` (send-status),
   **documented to cover both "CONNECTED not granted" and "granted but not successfully connected"**;
   `kl_datagram_connect` itself returns `KL_ERR_UNSUPPORTED` (ungranted cap) / `KL_ERR_CONNECT` (syscall).
-- **P1-A/B/C/D (RULED — §12):** GRO/batch excluded from the config (post-init M5 setup, §12.5);
-  connect + peerless-send both gate on GRANTED caps and the initializer always requests CONNECTED
-  opportunistically (§12.4); failed-reconnect preserves prior connected state, never claims un-connection
-  (§12.4); `want_rx_caps` fail-loud required-RX mask + `kl_datagram_accepted_rx_caps` inspector (§12.1–2).
+- **P1-A (RULED — rev 8, reviewer design #3):** `recv_gro` STAYS in the config (the only way to set
+  `accepted_rx_caps & RX_GRO`); `kl_datagram_recv_start` is hardened to refuse `RX_GRO`-accepted-without-
+  active-splitter, making the M5.4 corruption unrepresentable (§12.5). `mmsg_batch` stays absent.
+- **P1-B (RULED — rev 7):** connect + peerless-send both gate on GRANTED caps; the initializer always
+  requests CONNECTED opportunistically (§12.4).
+- **P1-C (RULED — rev 8):** reconnect is UNSUPPORTED in D1 (`kl_datagram_connect` refuses an already-
+  connected datagram, no syscall) — sidesteps the unspecified failed-reconnect provider semantics (§12.4).
+- **P1-D (RULED — rev 7):** `want_rx_caps` fail-loud required-RX mask + `kl_datagram_accepted_rx_caps`
+  inspector (§12.1–2).
+- **P2 (RULED — rev 8):** SLOT `send_slots` default = exact **8**; unknown `queue_policy` →
+  `KL_ERR_INVALID_ARG` (§12.3); non-empty `multicast_group` = mandatory `CAP_MULTICAST` request (§12.1).
 - **No true blockers.** D1 needs no new engine/provider capability; connect uses the existing
-  `kl_sock_connect` seam; construction reuses M0; batching/GRO reuse the existing M5 batch APIs. Mode-B
-  `recv_batch` and native completion batch-receive remain out of scope and are NOT required for D1–D3.
+  `kl_sock_connect` seam (first-connect only); construction reuses M0; GRO/batching reuse the existing M5
+  batch APIs + the hardened `recv_start`. Mode-B `recv_batch` and native completion batch-receive remain
+  out of scope and are NOT required for D1–D3.
 
-## 18. Non-goals (rev 7) + validation
+## 18. Non-goals (rev 8) + validation
 
 **Non-goals:** no production code this turn; no HTTP-taxonomy rename; no `KlTcp*` APIs; no `KlUdpSocket`
 wrapper; no private `KlUdpServer` replacement; no Mode-B explicit `recv_batch` API and no native
