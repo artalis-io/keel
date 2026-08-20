@@ -1,7 +1,7 @@
 #include <keel/h2_server.h>
 #include <keel/http_connection.h>
-#include <keel/router.h>
-#include <keel/body_reader.h>
+#include <keel/http_router.h>
+#include <keel/http_body_reader.h>
 #include <keel/event.h>
 #include <keel/tls.h>
 #include <string.h>
@@ -13,7 +13,7 @@
 #include "internal.h"
 #include "h2_internal.h"       /* KlH2ServerConn / KlH2ServerStream bodies (opaque now) */
 #include "platform.h"   /* kl_plat_file_pread */
-#include "proto_hooks.h"       /* H2 server upgrade seam — registered for the core */
+#include "http_proto_hooks.h"       /* H2 server upgrade seam — registered for the core */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Stream management (static helpers)
@@ -341,13 +341,13 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     req->keep_alive = 1;
 
     /* Route match */
-    stream->route_result = kl_router_match(h2c->router,
+    stream->route_result = kl_http_router_match(h2c->router,
                                             req->method, req->method_len,
                                             req->path, req->path_len,
                                             &stream->route, stream->params,
                                             &stream->num_params);
     memcpy(req->params, stream->params,
-           sizeof(KlParam) * (size_t)stream->num_params);
+           sizeof(KlHttpParam) * (size_t)stream->num_params);
     req->num_params = stream->num_params;
 
     /* Initialize response */
@@ -363,7 +363,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
                                  memcmp(req->method, "HEAD", 4) == 0);
 
     /* Run middleware */
-    if (kl_router_run_middleware(h2c->router, req, &stream->res) != 0) {
+    if (kl_http_router_run_middleware(h2c->router, req, &stream->res) != 0) {
         int rc = h2_submit_response(h2c, stream);
         if (h2c->session->want_write(h2c->session))
             h2c->session->flush(h2c->session);
@@ -374,7 +374,7 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
     /* Create body reader if needed */
     int has_body = (req->content_length > 0);
     if (has_body && stream->route && stream->route->body_reader) {
-        KlBodyReader *br = stream->route->body_reader(
+        KlHttpBodyReader *br = stream->route->body_reader(
             h2c->alloc, req, stream->route->user_data);
         if (!br) {
             kl_http_response_error(&stream->res, 415, "Unsupported Media Type");
@@ -427,7 +427,7 @@ static int h2_cb_on_stream_end(void *ud, uint32_t stream_id) {
     if (stream->body_reader)
         stream->body_reader->on_complete(stream->body_reader);
 
-    if (kl_router_run_post_middleware(h2c->router, &stream->req,
+    if (kl_http_router_run_post_middleware(h2c->router, &stream->req,
                                       &stream->res) != 0) {
         int rc = h2_submit_response(h2c, stream);
         if (h2c->session->want_write(h2c->session))
@@ -499,7 +499,7 @@ void kl_h2_server_set_writer(KlHttpConn *c, KlH2WriteFn fn, void *ctx) {
  * Connection lifecycle
  * ═══════════════════════════════════════════════════════════════════ */
 
-int kl_h2_server_upgrade(KlHttpConn *c, KlRouter *router, KlH2ServerConfig *cfg,
+int kl_h2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *cfg,
                           const char *leftover, size_t leftover_len) {
     KlAllocator *alloc = c->stream.alloc;
 
@@ -576,7 +576,7 @@ static const char h2c_101_response[] =
     "Upgrade: h2c\r\n"
     "\r\n";
 
-int kl_h2_server_upgrade_from_h1(KlHttpConn *c, KlRouter *router,
+int kl_h2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
                                   KlH2ServerConfig *cfg,
                                   const char *leftover, size_t leftover_len) {
     if (conn_write_all(c, h2c_101_response, sizeof(h2c_101_response) - 1) < 0)
@@ -696,7 +696,7 @@ void kl_h2_server_hooks_install(void) {
 }
 
 /* Also self-install at load, so a consumer driving connection.c's dispatch directly
- * (without kl_server_init — e.g. the unit tests) has the seam wired. Runs only if
+ * (without kl_http_server_init — e.g. the unit tests) has the seam wired. Runs only if
  * this object is linked (a direct kl_h2_server_* reference pulls it in). */
 __attribute__((constructor))
 static void kl_h2_server_hooks_autoinstall(void) {

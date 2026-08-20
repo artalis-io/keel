@@ -1,7 +1,7 @@
-#include <keel/sse.h>
+#include <keel/http_sse.h>
 #include <string.h>
 
-int kl_sse_begin(KlHttpResponse *res, KlSse *sse) {
+int kl_http_sse_begin(KlHttpResponse *res, KlHttpSse *sse) {
     if (!res || !sse) return -1;
     if (kl_http_response_header(res, "Content-Type", "text/event-stream") < 0)
         return -1;
@@ -14,7 +14,7 @@ int kl_sse_begin(KlHttpResponse *res, KlSse *sse) {
 }
 
 /* Helper: write a field prefix + value + newline.  Returns -1 on error. */
-static int write_field(KlSse *sse, const char *prefix, size_t plen,
+static int write_field(KlHttpSse *sse, const char *prefix, size_t plen,
                        const char *value, size_t vlen) {
     if (sse->write_fn(sse->write_ctx, prefix, plen) < 0) return -1;
     if (sse->write_fn(sse->write_ctx, value, vlen) < 0) return -1;
@@ -22,7 +22,7 @@ static int write_field(KlSse *sse, const char *prefix, size_t plen,
     return 0;
 }
 
-int kl_sse_event(KlSse *sse, const char *event,
+int kl_http_sse_event(KlHttpSse *sse, const char *event,
                  const char *data, size_t data_len, const char *id) {
     if (!sse) return -1;
     if (data_len > 0 && !data) return -1;
@@ -57,13 +57,13 @@ int kl_sse_event(KlSse *sse, const char *event,
     return 0;
 }
 
-int kl_sse_comment(KlSse *sse, const char *text, size_t len) {
+int kl_http_sse_comment(KlHttpSse *sse, const char *text, size_t len) {
     if (!sse) return -1;
     if (len > 0 && !text) return -1;
     return write_field(sse, ": ", 2, text, len);
 }
 
-int kl_sse_end(KlSse *sse) {
+int kl_http_sse_end(KlHttpSse *sse) {
     if (!sse) return -1;
     return kl_http_response_end_stream(sse->res);
 }

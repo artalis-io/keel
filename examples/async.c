@@ -30,7 +30,7 @@
 
 typedef struct {
     KlAsyncOp op;
-    KlServer *server;
+    KlHttpServer *server;
     int pipe_fds[2];       /* [0]=read (watcher), [1]=write (thread) */
     int delay_ms;
 } DelayCtx;
@@ -93,7 +93,7 @@ static void *delay_thread(void *arg) {
 
 static void handle_delay(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
-    KlServer *srv = user_data;
+    KlHttpServer *srv = user_data;
     KlHttpConn *conn = kl_http_request_conn(req);
 
     /* Parse delay from route param */
@@ -166,20 +166,20 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 /* ── Main ───────────────────────────────────────────────────────────── */
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8080,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
-    kl_server_route(&s, "GET", "/",          handle_hello, NULL, NULL);
-    kl_server_route(&s, "GET", "/delay/:ms", handle_delay, &s,   NULL);
+    kl_http_server_route(&s, "GET", "/",          handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/delay/:ms", handle_delay, &s,   NULL);
 
     printf("async example listening on :8080\n");
     printf("  curl localhost:8080/delay/200\n");
     printf("  curl localhost:8080/\n");
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

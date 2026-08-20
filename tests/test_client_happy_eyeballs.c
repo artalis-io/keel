@@ -13,7 +13,7 @@
 #include <keel/resolver.h>
 #include <keel/event_ctx.h>
 #include <keel/timer.h>
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/allocator.h>
 
 #include "net_compat.h"
@@ -89,15 +89,15 @@ static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 static void *server_thread_fn(void *arg) {
-    kl_server_run((KlServer *)arg);
+    kl_http_server_run((KlHttpServer *)arg);
     return NULL;
 }
 
-static int start_server(KlServer *srv, pthread_t *tid) {
-    KlConfig cfg = { .port = 0, .max_connections = 8 };
-    if (kl_server_init(srv, &cfg) != 0)
+static int start_server(KlHttpServer *srv, pthread_t *tid) {
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 8 };
+    if (kl_http_server_init(srv, &cfg) != 0)
         return -1;
-    kl_server_route(srv, "GET", "/ok", handle_ok, NULL, NULL);
+    kl_http_server_route(srv, "GET", "/ok", handle_ok, NULL, NULL);
     if (pthread_create(tid, NULL, server_thread_fn, srv) != 0)
         return -1;
     for (int i = 0; i < 200 && srv->bound_port == 0; i++)
@@ -105,10 +105,10 @@ static int start_server(KlServer *srv, pthread_t *tid) {
     return srv->bound_port > 0 ? 0 : -1;
 }
 
-static void stop_server(KlServer *srv, pthread_t tid) {
-    kl_server_stop(srv);
+static void stop_server(KlHttpServer *srv, pthread_t tid) {
+    kl_http_server_stop(srv);
     pthread_join(tid, NULL);
-    kl_server_free(srv);
+    kl_http_server_free(srv);
 }
 
 /* Reserve a loopback port then close it — connecting there yields a fast
@@ -191,7 +191,7 @@ static int he_fully_detached(const KlClient *c) {
 /* ── Tests ───────────────────────────────────────────────────────────── */
 
 UTEST(he, first_wins) {
-    KlServer srv; pthread_t tid;
+    KlHttpServer srv; pthread_t tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
 
     memset(g_res_ip, 0, sizeof(g_res_ip));
@@ -221,7 +221,7 @@ UTEST(he, first_wins) {
 }
 
 UTEST(he, fallback_on_refused) {
-    KlServer srv; pthread_t tid;
+    KlHttpServer srv; pthread_t tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
 
     memset(g_res_ip, 0, sizeof(g_res_ip));
@@ -277,7 +277,7 @@ UTEST(he, all_fail) {
 #endif
 
 UTEST(he, single_address) {
-    KlServer srv; pthread_t tid;
+    KlHttpServer srv; pthread_t tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
 
     memset(g_res_ip, 0, sizeof(g_res_ip));
@@ -306,7 +306,7 @@ UTEST(he, second_wins_on_slow_first) {
     if (!blackhole_stalls())
         UTEST_SKIP("no default route: " BLACKHOLE_IP " does not stall here");
 
-    KlServer srv; pthread_t tid;
+    KlHttpServer srv; pthread_t tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
 
     memset(g_res_ip, 0, sizeof(g_res_ip));
@@ -365,7 +365,7 @@ UTEST(he, deadline_fires_on_blackhole) {
 /* Winner + (possibly outstanding) loser → confirmed detachment. Two live addresses raced with a
  * zero attempt-delay: one wins, the other is cancelled/disposed and must retire. */
 UTEST(he_detach, winner_and_loser) {
-    KlServer srv; pthread_t tid;
+    KlHttpServer srv; pthread_t tid;
     ASSERT_EQ(0, start_server(&srv, &tid));
     memset(g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;

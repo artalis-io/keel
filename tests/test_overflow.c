@@ -6,10 +6,10 @@
 #include <keel/allocator.h>
 #include <keel/http_response.h>
 #include <keel/http_connection.h>
-#include <keel/router.h>
+#include <keel/http_router.h>
 #include <keel/http1_chunked.h>
-#include <keel/body_reader.h>
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader.h>
+#include <keel/http_body_reader_multipart.h>
 #include <keel/websocket.h>
 #include <keel/h2.h>
 #include <keel/h2_server.h>
@@ -176,8 +176,8 @@ UTEST(overflow, chunked_no_digits_before_ext) {
 
 UTEST(overflow, multipart_max_parts_exceeded) {
     /* In the streaming parser, max_parts is enforced at PART_BEGIN
-     * inside kl_multipart_next (on_data is parse-free). Drive the
-     * iterator and assert the third part trips KL_MP_ERR_TOO_MANY_PARTS. */
+     * inside kl_http_multipart_next (on_data is parse-free). Drive the
+     * iterator and assert the third part trips KL_HTTP_MP_ERR_TOO_MANY_PARTS. */
     KlAllocator alloc = kl_allocator_default();
 
     KlHttpRequest req;
@@ -195,8 +195,8 @@ UTEST(overflow, multipart_max_parts_exceeded) {
     req.headers[0].value_len = strlen(ct);
     req.num_headers = 1;
 
-    KlMultipartConfig cfg = { .max_parts = 2 };
-    KlBodyReader *reader = kl_body_reader_multipart(&alloc, &req, &cfg);
+    KlHttpMultipartConfig cfg = { .max_parts = 2 };
+    KlHttpBodyReader *reader = kl_http_body_reader_multipart(&alloc, &req, &cfg);
     ASSERT_TRUE(reader != NULL);
 
     const char *data =
@@ -211,13 +211,13 @@ UTEST(overflow, multipart_max_parts_exceeded) {
     reader->on_complete(reader);
 
     int part_begins = 0;
-    KlMultipartEvent e;
+    KlHttpMultipartEvent e;
     do {
-        e = kl_multipart_next(reader, NULL, NULL, NULL);
-        if (e == KL_MP_EVT_PART_BEGIN) part_begins++;
-    } while (e != KL_MP_EVT_DONE && e != KL_MP_EVT_ERROR);
-    ASSERT_EQ(e, KL_MP_EVT_ERROR);
-    ASSERT_EQ(kl_multipart_last_error(reader), KL_MP_ERR_TOO_MANY_PARTS);
+        e = kl_http_multipart_next(reader, NULL, NULL, NULL);
+        if (e == KL_HTTP_MP_EVT_PART_BEGIN) part_begins++;
+    } while (e != KL_HTTP_MP_EVT_DONE && e != KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(e, KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(kl_http_multipart_last_error(reader), KL_HTTP_MP_ERR_TOO_MANY_PARTS);
     ASSERT_EQ(part_begins, 2);
 
     reader->destroy(reader);
@@ -225,7 +225,7 @@ UTEST(overflow, multipart_max_parts_exceeded) {
 
 UTEST(overflow, multipart_max_part_size_exceeded) {
     /* max_part_size is enforced as PART_DATA events accumulate inside
-     * kl_multipart_next. on_data is parse-free in the streaming model. */
+     * kl_http_multipart_next. on_data is parse-free in the streaming model. */
     KlAllocator alloc = kl_allocator_default();
 
     KlHttpRequest req;
@@ -243,8 +243,8 @@ UTEST(overflow, multipart_max_part_size_exceeded) {
     req.headers[0].value_len = strlen(ct);
     req.num_headers = 1;
 
-    KlMultipartConfig cfg = { .max_part_size = 10 };
-    KlBodyReader *reader = kl_body_reader_multipart(&alloc, &req, &cfg);
+    KlHttpMultipartConfig cfg = { .max_part_size = 10 };
+    KlHttpBodyReader *reader = kl_http_body_reader_multipart(&alloc, &req, &cfg);
     ASSERT_TRUE(reader != NULL);
 
     const char *data =
@@ -255,12 +255,12 @@ UTEST(overflow, multipart_max_part_size_exceeded) {
     ASSERT_EQ(reader->on_data(reader, data, strlen(data)), 0);
     reader->on_complete(reader);
 
-    KlMultipartEvent e;
+    KlHttpMultipartEvent e;
     do {
-        e = kl_multipart_next(reader, NULL, NULL, NULL);
-    } while (e != KL_MP_EVT_DONE && e != KL_MP_EVT_ERROR);
-    ASSERT_EQ(e, KL_MP_EVT_ERROR);
-    ASSERT_EQ(kl_multipart_last_error(reader), KL_MP_ERR_PART_TOO_LARGE);
+        e = kl_http_multipart_next(reader, NULL, NULL, NULL);
+    } while (e != KL_HTTP_MP_EVT_DONE && e != KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(e, KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(kl_http_multipart_last_error(reader), KL_HTTP_MP_ERR_PART_TOO_LARGE);
 
     reader->destroy(reader);
 }
@@ -284,8 +284,8 @@ UTEST(overflow, multipart_max_total_size_exceeded) {
     req.headers[0].value_len = strlen(ct);
     req.num_headers = 1;
 
-    KlMultipartConfig cfg = { .max_total_size = 10 };
-    KlBodyReader *reader = kl_body_reader_multipart(&alloc, &req, &cfg);
+    KlHttpMultipartConfig cfg = { .max_total_size = 10 };
+    KlHttpBodyReader *reader = kl_http_body_reader_multipart(&alloc, &req, &cfg);
     ASSERT_TRUE(reader != NULL);
 
     const char *data =
@@ -309,56 +309,56 @@ static void dummy_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 UTEST(overflow, router_capacity_overflow) {
     /* router.c:25 — capacity > INT_MAX / 2 */
     KlAllocator alloc = kl_allocator_default();
-    KlRouter r;
-    ASSERT_EQ(kl_router_init(&r, &alloc), 0);
+    KlHttpRouter r;
+    ASSERT_EQ(kl_http_router_init(&r, &alloc), 0);
 
     /* Artificially set capacity near INT_MAX/2 to test overflow guard */
     r.capacity = INT_MAX / 2 + 1;
     r.count = r.capacity;  /* force growth attempt */
 
-    int rc = kl_router_add(&r, "GET", "/test", dummy_handler, NULL, NULL);
+    int rc = kl_http_router_add(&r, "GET", "/test", dummy_handler, NULL, NULL);
     ASSERT_EQ(rc, -1);
 
     /* Reset to valid state for free */
     r.count = 0;
     r.capacity = 16;
-    kl_router_free(&r);
+    kl_http_router_free(&r);
 }
 
 UTEST(overflow, router_mw_overflow) {
     /* router.c:144 — mw_capacity > INT_MAX / 2 */
     KlAllocator alloc = kl_allocator_default();
-    KlRouter r;
-    ASSERT_EQ(kl_router_init(&r, &alloc), 0);
+    KlHttpRouter r;
+    ASSERT_EQ(kl_http_router_init(&r, &alloc), 0);
 
     r.mw_capacity = INT_MAX / 2 + 1;
     r.mw_count = r.mw_capacity;
 
-    int rc = kl_router_use(&r, "*", "/*", NULL, NULL);
+    int rc = kl_http_router_use(&r, "*", "/*", NULL, NULL);
     ASSERT_EQ(rc, -1);
 
     r.mw_count = 0;
     r.mw_capacity = 0;
     r.middleware = NULL;
-    kl_router_free(&r);
+    kl_http_router_free(&r);
 }
 
 UTEST(overflow, router_post_mw_overflow) {
     /* router.c:189 — post_mw_capacity > INT_MAX / 2 */
     KlAllocator alloc = kl_allocator_default();
-    KlRouter r;
-    ASSERT_EQ(kl_router_init(&r, &alloc), 0);
+    KlHttpRouter r;
+    ASSERT_EQ(kl_http_router_init(&r, &alloc), 0);
 
     r.post_mw_capacity = INT_MAX / 2 + 1;
     r.post_mw_count = r.post_mw_capacity;
 
-    int rc = kl_router_use_post(&r, "*", "/*", NULL, NULL);
+    int rc = kl_http_router_use_post(&r, "*", "/*", NULL, NULL);
     ASSERT_EQ(rc, -1);
 
     r.post_mw_count = 0;
     r.post_mw_capacity = 0;
     r.post_middleware = NULL;
-    kl_router_free(&r);
+    kl_http_router_free(&r);
 }
 
 /* ── Body reader buffer overflow ─────────────────────────────────── */
@@ -370,7 +370,7 @@ UTEST(overflow, body_reader_buffer_max_size) {
     memset(&req, 0, sizeof(req));
 
     /* Create a reader with 10-byte max */
-    KlBodyReader *reader = kl_body_reader_buffer(&alloc, &req, (void *)(size_t)10);
+    KlHttpBodyReader *reader = kl_http_body_reader_buffer(&alloc, &req, (void *)(size_t)10);
     ASSERT_TRUE(reader != NULL);
 
     char data[20];

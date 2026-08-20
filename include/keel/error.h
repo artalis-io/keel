@@ -4,7 +4,7 @@
 /**
  * @brief Diagnostic error codes for Keel public functions.
  *
- * Stored as a field on owning structs (KlServer, KlEventCtx, KlClientResponse,
+ * Stored as a field on owning structs (KlHttpServer, KlEventCtx, KlClientResponse,
  * KlClient). Set at the point of return -1, defaults to KL_ERR_NONE (0) via
  * existing memset initialization.
  */

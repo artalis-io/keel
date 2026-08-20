@@ -45,7 +45,7 @@ int  kl_plat_file_pread(int fd, void *buf, size_t count, long long offset) {
 void kl_plat_file_close(int fd) { (void)fd; }
 
 /* ── stop-wakeup self-pipe hook (S-7) — never reached on a freestanding EFI server ──
- * kl_server_free's self-pipe teardown references kl_plat_wakeup_close, but a freestanding
+ * kl_http_server_free's self-pipe teardown references kl_plat_wakeup_close, but a freestanding
  * server has no self-pipe (stop_wake_rd stays KL_INVALID_SOCKET — the wakeup init is
  * #ifndef KEEL_FREESTANDING), so the block is skipped and this stub is never called. It
  * only has to resolve the link. */

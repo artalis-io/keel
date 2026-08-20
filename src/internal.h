@@ -2,7 +2,7 @@
 #define KEEL_INTERNAL_H
 
 #include <keel/http_connection.h>
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/tls.h>
 #include <errno.h>            /* freestanding: supplied by the UEFI/cross shim */
 #ifdef KEEL_FREESTANDING
@@ -92,17 +92,17 @@ static inline void best_effort_conn_write(KlHttpConn *c, const void *buf, size_t
 }
 
 /* Release a connection and resume listening if paused (defined in server.c) */
-void kl_server_conn_release(KlServer *s, KlHttpConn *c);
+void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c);
 
 /* Server bisection (S-1): the completion run-loop tick lives in the freestanding-safe
  * server core (server_core.c); the idle/drain sweeps stay in server.c (they own
  * kl_408_response). One completion iteration; returns 0 to continue, -1 to break. */
-int  kl_server_run_completion_loop(KlServer *s);
+int  kl_http_server_run_completion_loop(KlHttpServer *s);
 /* Close the listen socket (+ unlink an owned AF_UNIX path, hosted). Non-static so the
- * freestanding kl_server_free (server_core.c) reaches it on the hosted path (S-7). */
-void kl_server_close_listener(KlServer *s);
-void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop);
-void kl_server_drain_progress(KlServer *s, uint64_t now);
+ * freestanding kl_http_server_free (server_core.c) reaches it on the hosted path (S-7). */
+void kl_http_server_close_listener(KlHttpServer *s);
+void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int completion_loop);
+void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now);
 
 /* Drive the HTTP/2 server session with already-received plaintext: parse frames +
  * flush produced output. Returns the next KlHttpConnState (KL_HTTP_CONN_HTTP2 / KL_HTTP_CONN_CLOSED).
@@ -124,7 +124,7 @@ void kl_h2_server_set_writer(KlHttpConn *c, KlH2WriteFn fn, void *ctx);
 /* Server logging helpers (defined in server.c; used by the per-platform
  * server_plat_*.c TUs too). */
 __attribute__((format(printf, 3, 4)))
-void kl_log(KlServer *s, int level, const char *fmt, ...);
-void kl_log_errno(KlServer *s, int level, const char *msg);
+void kl_http_server_log(KlHttpServer *s, int level, const char *fmt, ...);
+void kl_http_server_log_errno(KlHttpServer *s, int level, const char *msg);
 
 #endif

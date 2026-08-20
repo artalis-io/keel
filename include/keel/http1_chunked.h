@@ -1,7 +1,7 @@
 #ifndef KEEL_HTTP1_CHUNKED_H
 #define KEEL_HTTP1_CHUNKED_H
 
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 #include <stddef.h>
 
 typedef enum {
@@ -40,6 +40,6 @@ void kl_http1_chunked_init(KlHttp1ChunkedDecoder *dec);
  *         -1  parse error or body reader rejected
  */
 int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t len,
-                      KlBodyReader *reader);
+                      KlHttpBodyReader *reader);
 
 #endif

@@ -3,7 +3,7 @@
  *
  * The event/completion half of the real EFI provider. Together with the U-2 socket
  * provider (socket_efi_tcp4.c) it lets a STOCK freestanding libkeel async KlClient AND a
- * freestanding KlServer run HTTP(S) on bare UEFI firmware: no epoll/kqueue/io_uring, no
+ * freestanding KlHttpServer run HTTP(S) on bare UEFI firmware: no epoll/kqueue/io_uring, no
  * OS sockets, no errno — just EFI_TCP4 completion tokens pumped by the firmware event
  * services.
  *

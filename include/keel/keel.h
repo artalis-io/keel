@@ -69,20 +69,20 @@ int kl_version_number(void);
 #include <keel/event.h>
 #include <keel/event_ctx.h>
 #include <keel/http_request.h>
-#include <keel/body_reader.h>
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader.h>
+#include <keel/http_body_reader_multipart.h>
 #include <keel/http1_chunked.h>
 #include <keel/http1_parser.h>
 #include <keel/http_response.h>
-#include <keel/router.h>
+#include <keel/http_router.h>
 #include <keel/tls.h>
 #include <keel/h2.h>
 #include <keel/h2_server.h>
 #include <keel/h2_client.h>
 #include <keel/file_io.h>
 #include <keel/http_connection.h>
-#include <keel/server.h>
-#include <keel/cors.h>
+#include <keel/http_server.h>
+#include <keel/http_cors.h>
 #include <keel/websocket.h>
 #include <keel/websocket_server.h>
 #include <keel/websocket_client.h>
@@ -98,7 +98,7 @@ int kl_version_number(void);
 #include <keel/compress.h>
 #include <keel/decompress.h>
 #include <keel/drain.h>
-#include <keel/sse.h>
+#include <keel/http_sse.h>
 #include <keel/timer.h>
 
 /* Phase-B transport — STABLE contract headers. KlStream, KlListener, and KlConnectOp are an

@@ -18,17 +18,17 @@
 #define KEEL_SRC_HTTP_CONN_INTERNAL_H
 
 #include <keel/http_connection.h>
-#include <keel/router.h>
+#include <keel/http_router.h>
 
 /* Headers fully parsed in read_buf: null-terminate, run pre-body path, set up the
  * body reader, and dispatch. `leftover`/`leftover_len` is any body-bytes tail that
  * arrived in the same buffer. Returns the next connection state. */
-KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlRouter *router,
+KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                      const char *leftover, size_t leftover_len);
 
 /* Body fully consumed: run post-body middleware and the handler. Returns the next
  * connection state (typically KL_HTTP_CONN_SENDING). */
-KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlRouter *router);
+KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlHttpRouter *router);
 
 /* Feed `nread` freshly-received request-body bytes (already in read_buf[0..nread])
  * to the chunked decoder / body reader. Returns the next state (KL_HTTP_CONN_READING_BODY

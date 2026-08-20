@@ -15,7 +15,7 @@
 #include "../src/socket.h"
 
 #include <keel/client.h>
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/resolver.h>
 #include <keel/allocator.h>
 #include <keel/event_ctx.h>
@@ -167,7 +167,7 @@ static void iod_handler(KlHttpRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
-static void *iod_server_thread(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+static void *iod_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
 
 typedef struct { int done, status; } IodCtx;
 static void iod_done(KlClient *cl, void *ud) {
@@ -180,10 +180,10 @@ static void iod_done(KlClient *cl, void *ud) {
 UTEST(iostatus, async_client_consults_io_status_end_to_end) {
     memset(&g_cdeco, 0, sizeof(g_cdeco));
 
-    KlServer srv;
-    KlConfig scfg = { .port = 0, .max_connections = 8, .bind_addr = "127.0.0.1" };
-    ASSERT_EQ(0, kl_server_init(&srv, &scfg));
-    kl_server_route(&srv, "GET", "/ok", iod_handler, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig scfg = { .port = 0, .max_connections = 8, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &scfg));
+    kl_http_server_route(&srv, "GET", "/ok", iod_handler, NULL, NULL);
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, iod_server_thread, &srv));
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
@@ -217,9 +217,9 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
 
     kl_client_free(c);
     kl_event_ctx_free(&ev);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST_MAIN();

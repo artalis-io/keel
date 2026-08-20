@@ -16,7 +16,7 @@
 
 /* ── Test server (runs in background thread) ─────────────────────── */
 
-static KlServer srv;
+static KlHttpServer srv;
 static int srv_port;
 
 static void handle_final(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
@@ -57,7 +57,7 @@ static void handle_post_redirect(KlHttpRequest *req, KlHttpResponse *res, void *
 }
 
 static void *server_thread(void *arg) {
-    kl_server_run((KlServer *)arg);
+    kl_http_server_run((KlHttpServer *)arg);
     return NULL;
 }
 
@@ -171,12 +171,12 @@ int main(void) {
     printf("HTTP redirect client example\n\n");
 
     /* Start a local server with redirect routes */
-    KlConfig cfg = {.port = 0, .max_connections = 8, .max_body_size = 4096};
-    kl_server_init(&srv, &cfg);
-    kl_server_route(&srv, "GET", "/final", handle_final, NULL, NULL);
-    kl_server_route(&srv, "*", "/redirect", handle_redirect, NULL, NULL);
-    kl_server_route(&srv, "*", "/chain", handle_chain, NULL, NULL);
-    kl_server_route(&srv, "*", "/post_redirect", handle_post_redirect, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0, .max_connections = 8, .max_body_size = 4096};
+    kl_http_server_init(&srv, &cfg);
+    kl_http_server_route(&srv, "GET", "/final", handle_final, NULL, NULL);
+    kl_http_server_route(&srv, "*", "/redirect", handle_redirect, NULL, NULL);
+    kl_http_server_route(&srv, "*", "/chain", handle_chain, NULL, NULL);
+    kl_http_server_route(&srv, "*", "/post_redirect", handle_post_redirect, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, &srv);
@@ -187,9 +187,9 @@ int main(void) {
     async_demo();
 
     /* Clean up */
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 
     printf("\nDone.\n");
     return 0;

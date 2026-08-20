@@ -8,7 +8,7 @@
 #include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <keel/http1_parser.h>
-#include <keel/router.h>
+#include <keel/http_router.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <keel/sockaddr.h>   /* KlSockAddr peer_addr */
@@ -57,7 +57,7 @@ typedef struct KlHttpConn {
 
     uint8_t peer_source;                /**< KL_HTTP_PEER_SOCKET | KL_HTTP_PEER_PROXY */
 
-    size_t max_header_size;     /**< Max header size (from KlConfig) */
+    size_t max_header_size;     /**< Max header size (from KlHttpServerConfig) */
 
     KlHttpRequest req;              /**< Current request */
     KlHttpResponse res;             /**< Current response */
@@ -65,8 +65,8 @@ typedef struct KlHttpConn {
 
     size_t hdr_sent;            /**< Header bytes sent */
 
-    KlRoute *route;             /**< Matched route (set after HEADERS_OK) */
-    KlParam params[KL_MAX_PARAMS]; /**< Extracted route parameters */
+    KlHttpRoute *route;             /**< Matched route (set after HEADERS_OK) */
+    KlHttpParam params[KL_HTTP_ROUTER_MAX_PARAMS]; /**< Extracted route parameters */
     int num_params;             /**< Number of route parameters */
     int route_result;           /**< Router match result (200/404/405) */
 
@@ -90,8 +90,8 @@ typedef struct KlHttpConn {
 
     KlH2ServerConn *h2;         /**< HTTP/2 state (NULL until upgrade) */
     KlH2ServerConfig *h2_config; /**< HTTP/2 config (set once at pool init) */
-    KlRouter *router;           /**< Back-pointer to server router */
-    size_t max_body_size;       /**< Discard-path body limit (from KlConfig) */
+    KlHttpRouter *router;           /**< Back-pointer to server router */
+    size_t max_body_size;       /**< Discard-path body limit (from KlHttpServerConfig) */
 
     struct KlAsyncOp *async_op; /**< Active async op (non-NULL when SUSPENDED) */
     uint64_t suspend_start_ms;  /**< Monotonic time when suspended */
@@ -187,7 +187,7 @@ int kl_http_conn_ingest_proxy(KlHttpConn *c, size_t len);
  * @brief Process readable data on a connection (parse headers/body, invoke handler).
  * @return New connection state.
  */
-KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlRouter *router);
+KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlHttpRouter *router);
 
 /**
  * @brief Process writable event (send response data).

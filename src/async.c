@@ -4,11 +4,11 @@
  * The KlEventCtx + KlWatcher API + kl_event_ctx_run moved to event_ctx.c in the
  * freestanding phase (F0) — that half is client-usable and server-free. This TU
  * keeps only the connection-suspension machinery, which reaches into the server
- * connection driver (kl_http_conn_on_writable / kl_server_conn_release /
+ * connection driver (kl_http_conn_on_writable / kl_http_server_conn_release /
  * kl_io_engine_resume_completion) and so is not part of the freestanding client.
  */
 #include <keel/async.h>
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include <stdint.h>
 #include "internal.h"
@@ -17,7 +17,7 @@
 
 /* ── KlAsyncOp ─────────────────────────────────────────────────────── */
 
-int kl_async_suspend(KlServer *s, KlHttpConn *conn, KlAsyncOp *op) {
+int kl_async_suspend(KlHttpServer *s, KlHttpConn *conn, KlAsyncOp *op) {
     if (!s || !conn || !op) return -1;
     if (conn->state == KL_HTTP_CONN_SUSPENDED) return -1;
 
@@ -42,7 +42,7 @@ int kl_async_suspend(KlServer *s, KlHttpConn *conn, KlAsyncOp *op) {
  * connection's back-pointer, and mark it terminal. Returns the connection it was
  * attached to on the first (pending→terminal) call, or NULL if the op was already
  * retired — the exactly-one-terminal guard shared by complete and cancel. */
-static KlHttpConn *async_retire(KlServer *s, KlAsyncOp *op) {
+static KlHttpConn *async_retire(KlHttpServer *s, KlAsyncOp *op) {
     if (op->_terminal) return NULL;
     op->_terminal = 1;
 
@@ -57,7 +57,7 @@ static KlHttpConn *async_retire(KlServer *s, KlAsyncOp *op) {
     return conn;
 }
 
-void kl_async_complete(KlServer *s, KlAsyncOp *op) {
+void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
     if (!s || !op) return;
 
     /* Exactly-one-terminal: a second complete (or a complete racing a cancel)
@@ -96,16 +96,16 @@ void kl_async_complete(KlServer *s, KlAsyncOp *op) {
     /* Re-register FD with appropriate mask */
     if (new_state == KL_HTTP_CONN_SENDING) {
         if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_WRITE, &conn->stream) < 0)
-            kl_server_conn_release(s, conn);
+            kl_http_server_conn_release(s, conn);
     } else if (new_state == KL_HTTP_CONN_READING) {
         if (kl_event_add(&s->ev.loop, conn->stream.fd, KL_EVENT_READ, &conn->stream) < 0)
-            kl_server_conn_release(s, conn);
+            kl_http_server_conn_release(s, conn);
     } else if (new_state == KL_HTTP_CONN_CLOSED) {
-        kl_server_conn_release(s, conn);
+        kl_http_server_conn_release(s, conn);
     }
 }
 
-void kl_async_cancel(KlServer *s, KlAsyncOp *op) {
+void kl_async_cancel(KlHttpServer *s, KlAsyncOp *op) {
     if (!s || !op) return;
 
     /* Exactly-one-terminal: a cancel racing a completion (or a double cancel) is

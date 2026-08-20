@@ -16,8 +16,8 @@
  * (completion_driver.c) and the completion callers (async.c / server.c) call
  * these free functions unchanged. See completion.h / event_dispatch.c.
  */
-#include <keel/event_ctx.h>   /* KlEventCtx (->loop), KlServer/KlHttpConn reach the loop */
-#include <keel/server.h>      /* struct KlServer (->ev.loop) */
+#include <keel/event_ctx.h>   /* KlEventCtx (->loop), KlHttpServer/KlHttpConn reach the loop */
+#include <keel/http_server.h>      /* struct KlHttpServer (->ev.loop) */
 #include <keel/http_connection.h>  /* struct KlHttpConn (->ctx->loop) */
 #include "completion.h"
 #include "io_engine.h"        /* kl_completion_axis_available */
@@ -37,11 +37,11 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
     return kl_comp_ops(&ctx->loop)->drain(ctx, out, max, timeout_ms);
 }
 
-int kl_comp_prime_accepts(struct KlServer *s) {
+int kl_comp_prime_accepts(struct KlHttpServer *s) {
     return kl_comp_ops(&s->ev.loop)->prime_accepts(s);
 }
 
-int kl_comp_shutdown_accepts(struct KlServer *s) {
+int kl_comp_shutdown_accepts(struct KlHttpServer *s) {
     const KlCompletionOps *ops = kl_comp_ops(&s->ev.loop);
     /* ops is NULL on a readiness builtin (never reached — the caller gates on KL_EVENT_CAP_
      * COMPLETION); shutdown_accepts is NULL on an autonomous/no-accept backend. Both → success. */
@@ -60,7 +60,7 @@ int kl_comp_post_send_raw(KlStream *stream, const KlIoVec *iov, int iovcnt, size
     return kl_comp_ops(&stream->ctx->loop)->post_send(stream, iov, iovcnt, total);
 }
 
-int kl_comp_post_accept(struct KlServer *s) {
+int kl_comp_post_accept(struct KlHttpServer *s) {
     return kl_comp_ops(&s->ev.loop)->post_accept(s);
 }
 

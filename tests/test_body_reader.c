@@ -11,7 +11,7 @@
 UTEST(buf, create_destroy) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = {0};
-    KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_buffer(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
     br->destroy(br);
 }
@@ -19,13 +19,13 @@ UTEST(buf, create_destroy) {
 UTEST(buf, single_chunk) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = {0};
-    KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_buffer(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
 
     ASSERT_EQ(br->on_data(br, "hello", 5), 0);
     br->on_complete(br);
 
-    KlBufReader *b = (KlBufReader *)br;
+    KlHttpBufReader *b = (KlHttpBufReader *)br;
     ASSERT_EQ(b->len, (size_t)5);
     ASSERT_TRUE(memcmp(b->data, "hello", 5) == 0);
 
@@ -35,14 +35,14 @@ UTEST(buf, single_chunk) {
 UTEST(buf, multi_chunk) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = {0};
-    KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_buffer(&a, &req, NULL);
 
     ASSERT_EQ(br->on_data(br, "abc", 3), 0);
     ASSERT_EQ(br->on_data(br, "def", 3), 0);
     ASSERT_EQ(br->on_data(br, "ghi", 3), 0);
     br->on_complete(br);
 
-    KlBufReader *b = (KlBufReader *)br;
+    KlHttpBufReader *b = (KlHttpBufReader *)br;
     ASSERT_EQ(b->len, (size_t)9);
     ASSERT_TRUE(memcmp(b->data, "abcdefghi", 9) == 0);
 
@@ -52,7 +52,7 @@ UTEST(buf, multi_chunk) {
 UTEST(buf, growth) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = {0};
-    KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_buffer(&a, &req, NULL);
 
     /* Feed > 1024 bytes (initial cap) to trigger realloc */
     char chunk[256];
@@ -61,7 +61,7 @@ UTEST(buf, growth) {
         ASSERT_EQ(br->on_data(br, chunk, sizeof(chunk)), 0);
     br->on_complete(br);
 
-    KlBufReader *b = (KlBufReader *)br;
+    KlHttpBufReader *b = (KlHttpBufReader *)br;
     ASSERT_EQ(b->len, (size_t)(256 * 8));
     ASSERT_TRUE(b->cap >= b->len);
 
@@ -71,7 +71,7 @@ UTEST(buf, growth) {
 UTEST(buf, max_size_reject) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = {0};
-    KlBodyReader *br = kl_body_reader_buffer(&a, &req, (void *)(size_t)100);
+    KlHttpBodyReader *br = kl_http_body_reader_buffer(&a, &req, (void *)(size_t)100);
 
     char data[60];
     memset(data, 'X', sizeof(data));
@@ -85,14 +85,14 @@ UTEST(buf, max_size_reject) {
 UTEST(buf, exact_max_size) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = {0};
-    KlBodyReader *br = kl_body_reader_buffer(&a, &req, (void *)(size_t)100);
+    KlHttpBodyReader *br = kl_http_body_reader_buffer(&a, &req, (void *)(size_t)100);
 
     char data[100];
     memset(data, 'Y', sizeof(data));
     ASSERT_EQ(br->on_data(br, data, 100), 0);
     br->on_complete(br);
 
-    KlBufReader *b = (KlBufReader *)br;
+    KlHttpBufReader *b = (KlHttpBufReader *)br;
     ASSERT_EQ(b->len, (size_t)100);
 
     br->destroy(br);
@@ -101,11 +101,11 @@ UTEST(buf, exact_max_size) {
 UTEST(buf, empty_body) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = {0};
-    KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_buffer(&a, &req, NULL);
 
     br->on_complete(br);
 
-    KlBufReader *b = (KlBufReader *)br;
+    KlHttpBufReader *b = (KlHttpBufReader *)br;
     ASSERT_EQ(b->len, (size_t)0);
 
     br->destroy(br);

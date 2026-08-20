@@ -13,7 +13,7 @@
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>   /* D2: provider-threading tests use a stack KlDatagram now */
 #include "datagram_test_util.h"   /* kl_dg_close_free — public lifecycle */
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/client.h>
 
 #include <errno.h>
@@ -542,38 +542,38 @@ static void deco_ok_handler(KlHttpRequest *req, KlHttpResponse *res, void *u) {
     (void)req; (void)u;
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
-static void *deco_server_thread(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+static void *deco_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
 
 /* #1 — the native-fd guard: a non-native provider is rejected at init; a native
  * one (and NULL = built-in) is accepted. */
 UTEST(sockprov, select_native_fd_guard) {
     KlSocketProvider nonnative = { &nonnative_ops, NULL, 0, NULL };  /* no NATIVE_FD */
-    KlServer s;
-    KlConfig bad = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &nonnative };
-    ASSERT_EQ(-1, kl_server_init(&s, &bad));
+    KlHttpServer s;
+    KlHttpServerConfig bad = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &nonnative };
+    ASSERT_EQ(-1, kl_http_server_init(&s, &bad));
     ASSERT_EQ(KL_ERR_SOCKET, s.last_error);
 
     Deco d = {0,0,0};
     KlSocketProvider native = { &deco_ops, &d, KL_SOCK_CAP_NATIVE_FD, NULL };
-    KlServer s2;
-    KlConfig good = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &native };
-    ASSERT_EQ(0, kl_server_init(&s2, &good));
-    kl_server_free(&s2);
+    KlHttpServer s2;
+    KlHttpServerConfig good = { .port = 0, .bind_addr = "127.0.0.1", .sockets = &native };
+    ASSERT_EQ(0, kl_http_server_init(&s2, &good));
+    kl_http_server_free(&s2);
 }
 
 /* #2 — end-to-end selection: a decorator provider on BOTH the server
- * (KlConfig.sockets) and the client (KlClientConfig.sockets), over a real
+ * (KlHttpServerConfig.sockets) and the client (KlClientConfig.sockets), over a real
  * loopback request. The listen socket + accept flow through the server decorator;
  * the client socket + connect flow through the client decorator. (The listen
- * socket is created in kl_server_run, not _init, so this needs a running server.
+ * socket is created in kl_http_server_run, not _init, so this needs a running server.
  * Fixed port, like the smoke tests, to avoid a cross-thread bound_port read.) */
 UTEST(sockprov, provider_selection_end_to_end) {
     Deco sd = {0,0,0}, cd = {0,0,0};
     KlSocketProvider sprov = { &deco_ops, &sd, KL_SOCK_CAP_NATIVE_FD, NULL };
-    KlServer s;
-    KlConfig scfg = { .port = 19099, .bind_addr = "127.0.0.1", .sockets = &sprov };
-    ASSERT_EQ(0, kl_server_init(&s, &scfg));
-    kl_server_route(&s, "GET", "/", deco_ok_handler, NULL, NULL);
+    KlHttpServer s;
+    KlHttpServerConfig scfg = { .port = 19099, .bind_addr = "127.0.0.1", .sockets = &sprov };
+    ASSERT_EQ(0, kl_http_server_init(&s, &scfg));
+    kl_http_server_route(&s, "GET", "/", deco_ok_handler, NULL, NULL);
     pthread_t th;
     ASSERT_EQ(0, pthread_create(&th, NULL, deco_server_thread, &s));
 
@@ -592,9 +592,9 @@ UTEST(sockprov, provider_selection_end_to_end) {
             kl_client_response_free(&resp);
         }
     }
-    kl_server_stop(&s);
+    kl_http_server_stop(&s);
     pthread_join(th, NULL);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
 
     ASSERT_TRUE(ok);
     ASSERT_GT(sd.socket_calls, 0);   /* server listen socket via its provider */

@@ -33,7 +33,7 @@ static void handle_param(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0) {
@@ -46,7 +46,7 @@ static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 /* Handler that drives the streaming multipart iterator and reports a
  * "parts=N name0=... len0=..." summary line. The full body has been
  * received by the time the handler fires (in the non-streaming route),
- * so kl_multipart_next never returns NEED_DATA here.
+ * so kl_http_multipart_next never returns NEED_DATA here.
  *
  * All allocations go through the keel allocator — no fixed-size static
  * buffers, no magic-constant part caps. The response body is sent via
@@ -83,7 +83,7 @@ static char *handle_upload_dup(KlAllocator *a, const char *s, size_t n) {
 
 static void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBodyReader *br = req->body_reader;
+    KlHttpBodyReader *br = req->body_reader;
     if (!br) {
         kl_http_response_error(res, 400, "No reader");
         return;
@@ -94,12 +94,12 @@ static void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     size_t parts_count = 0;
     size_t parts_cap = 0;
 
-    KlMultipartPartMeta meta;
+    KlHttpMultipartPartMeta meta;
     const char *d = NULL;
     size_t      dn = 0;
     for (;;) {
-        KlMultipartEvent e = kl_multipart_next(br, &meta, &d, &dn);
-        if (e == KL_MP_EVT_PART_BEGIN) {
+        KlHttpMultipartEvent e = kl_http_multipart_next(br, &meta, &d, &dn);
+        if (e == KL_HTTP_MP_EVT_PART_BEGIN) {
             if (parts_count == parts_cap) {
                 size_t new_cap = parts_cap ? parts_cap * 2 : 4;
                 size_t old_sz  = parts_cap * sizeof(*parts);
@@ -140,12 +140,12 @@ static void handle_upload(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
             parts_count++;
             continue;
         }
-        if (e == KL_MP_EVT_PART_DATA) {
+        if (e == KL_HTTP_MP_EVT_PART_DATA) {
             if (parts_count > 0) parts[parts_count - 1].size += dn;
             continue;
         }
-        if (e == KL_MP_EVT_PART_END) continue;
-        if (e == KL_MP_EVT_DONE)     break;
+        if (e == KL_HTTP_MP_EVT_PART_END) continue;
+        if (e == KL_HTTP_MP_EVT_DONE)     break;
         handle_upload_free_parts(&alloc, parts, parts_count, parts_cap);
         kl_http_response_error(res, 400, "Parse error");
         return;
@@ -234,14 +234,14 @@ static void handle_no_reader(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 static volatile int eer_err_handler_called = 0;
 
 typedef struct {
-    KlBodyReader  base;
+    KlHttpBodyReader  base;
     KlAllocator  *alloc;
     KlHttpConn       *conn;
     KlHttpResponse   *res;
     int           responded;
 } EarlyExitErrReader;
 
-static int  eer_err_on_data(KlBodyReader *self, const char *data, size_t len) {
+static int  eer_err_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     EarlyExitErrReader *r = (EarlyExitErrReader *)self;
     (void)data; (void)len;
     /* First call (handler hasn't stashed conn+res yet) or already
@@ -260,14 +260,14 @@ static int  eer_err_on_data(KlBodyReader *self, const char *data, size_t len) {
     r->responded = 1;
     return -1;   /* simulate body-reader rejection */
 }
-static void eer_err_on_complete(KlBodyReader *self) { (void)self; }
-static void eer_err_on_error(KlBodyReader *self)    { (void)self; }
-static void eer_err_destroy(KlBodyReader *self) {
+static void eer_err_on_complete(KlHttpBodyReader *self) { (void)self; }
+static void eer_err_on_error(KlHttpBodyReader *self)    { (void)self; }
+static void eer_err_destroy(KlHttpBodyReader *self) {
     EarlyExitErrReader *r = (EarlyExitErrReader *)self;
     kl_free(r->alloc, r, sizeof(*r));
 }
 
-static KlBodyReader *eer_err_factory(KlAllocator *alloc, const KlHttpRequest *req,
+static KlHttpBodyReader *eer_err_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                        void *user_data) {
     (void)req; (void)user_data;
     EarlyExitErrReader *r = kl_malloc(alloc, sizeof(*r));
@@ -294,7 +294,7 @@ static void handle_early_exit_err(KlHttpRequest *req, KlHttpResponse *res, void 
 /* ── Streaming-async early-invoke fixture (v2.2.0) ───────────────────
  *
  * Same shape as handle_early_exit_err, but registered with
- * kl_server_route_streaming_async so the handler runs BEFORE leftover
+ * kl_http_server_route_streaming_async so the handler runs BEFORE leftover
  * is fed via on_data. That lets us close the single-read leftover-cap
  * gap: a body that arrives in the same kernel read as the header now
  * gets rejected via the parked handler's structured response, instead
@@ -328,21 +328,21 @@ static void handle_early_exit_async_err(KlHttpRequest *req, KlHttpResponse *res,
  * Body reader is a no-op — on_data succeeds silently so the dispatch
  * code path is the one under test, not the body reader. */
 typedef struct {
-    KlBodyReader  base;
+    KlHttpBodyReader  base;
     KlAllocator  *alloc;
 } NoopReader;
 
-static int  noop_on_data(KlBodyReader *self, const char *data, size_t len) {
+static int  noop_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     (void)self; (void)data; (void)len;
     return 0;
 }
-static void noop_on_complete(KlBodyReader *self) { (void)self; }
-static void noop_on_error(KlBodyReader *self)    { (void)self; }
-static void noop_destroy(KlBodyReader *self) {
+static void noop_on_complete(KlHttpBodyReader *self) { (void)self; }
+static void noop_on_error(KlHttpBodyReader *self)    { (void)self; }
+static void noop_destroy(KlHttpBodyReader *self) {
     NoopReader *r = (NoopReader *)self;
     kl_free(r->alloc, r, sizeof(*r));
 }
-static KlBodyReader *noop_factory(KlAllocator *alloc, const KlHttpRequest *req,
+static KlHttpBodyReader *noop_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                     void *user_data) {
     (void)req; (void)user_data;
     NoopReader *r = kl_malloc(alloc, sizeof(*r));
@@ -383,14 +383,14 @@ static void handle_async_sync_reject(KlHttpRequest *req, KlHttpResponse *res,
 static volatile int eer_handler_called = 0;
 
 typedef struct {
-    KlBodyReader  base;
+    KlHttpBodyReader  base;
     KlAllocator  *alloc;
     KlHttpConn       *conn;        /* stashed by handler at dispatch time */
     KlHttpResponse   *res;         /* same */
     int           responded;   /* one-shot guard */
 } EarlyExitReader;
 
-static int  eer_on_data(KlBodyReader *self, const char *data, size_t len) {
+static int  eer_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     EarlyExitReader *r = (EarlyExitReader *)self;
     (void)data; (void)len;
     if (r->responded || !r->conn || !r->res) return 0;
@@ -405,14 +405,14 @@ static int  eer_on_data(KlBodyReader *self, const char *data, size_t len) {
     r->responded = 1;
     return 0;
 }
-static void eer_on_complete(KlBodyReader *self) { (void)self; }
-static void eer_on_error(KlBodyReader *self)    { (void)self; }
-static void eer_destroy(KlBodyReader *self) {
+static void eer_on_complete(KlHttpBodyReader *self) { (void)self; }
+static void eer_on_error(KlHttpBodyReader *self)    { (void)self; }
+static void eer_destroy(KlHttpBodyReader *self) {
     EarlyExitReader *r = (EarlyExitReader *)self;
     kl_free(r->alloc, r, sizeof(*r));
 }
 
-static KlBodyReader *eer_factory(KlAllocator *alloc, const KlHttpRequest *req,
+static KlHttpBodyReader *eer_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                   void *user_data) {
     (void)req; (void)user_data;
     EarlyExitReader *r = kl_malloc(alloc, sizeof(*r));
@@ -442,11 +442,11 @@ static void handle_early_exit(KlHttpRequest *req, KlHttpResponse *res, void *ctx
     eer_handler_called = 1;
 }
 
-static KlServer test_server;
+static KlHttpServer test_server;
 
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&test_server);
+    kl_http_server_run(&test_server);
     return NULL;
 }
 
@@ -484,49 +484,49 @@ static ssize_t read_response(int fd, char *buf, size_t buflen) {
 static pthread_t server_tid;
 
 /* Wait for server to bind (max 2s) */
-static void wait_for_bind(KlServer *s) {
+static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
 }
 
 static void start_server(void) {
-    KlConfig cfg = {.port = 0, .max_body_size = 4096};
-    kl_server_init(&test_server, &cfg);
-    kl_server_route(&test_server, "GET", "/hello", handle_hello, NULL, NULL);
-    kl_server_route(&test_server, "POST", "/echo", handle_echo,
+    KlHttpServerConfig cfg = {.port = 0, .max_body_size = 4096};
+    kl_http_server_init(&test_server, &cfg);
+    kl_http_server_route(&test_server, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_route(&test_server, "POST", "/echo", handle_echo,
                     (void *)(size_t)(64 * 1024), /* 64KB max */
-                    kl_body_reader_buffer);
-    kl_server_route(&test_server, "POST", "/upload", handle_upload,
-                    NULL, kl_body_reader_multipart);
+                    kl_http_body_reader_buffer);
+    kl_http_server_route(&test_server, "POST", "/upload", handle_upload,
+                    NULL, kl_http_body_reader_multipart);
     /* Streaming variant: same handler, same body reader, but registered
-     * with kl_server_route_streaming so the dispatch path invokes the
+     * with kl_http_server_route_streaming so the dispatch path invokes the
      * handler after body-reader setup BEFORE on_complete. The handler
-     * itself doesn't yield (kl_multipart_next never returns NEED_DATA
+     * itself doesn't yield (kl_http_multipart_next never returns NEED_DATA
      * because the body arrives in one chunk in this test), so the
      * observable behaviour is the same response shape — the dispatch
      * path is exercised. */
-    kl_server_route_streaming(&test_server, "POST", "/upload-stream",
-                               handle_upload, NULL, kl_body_reader_multipart);
+    kl_http_server_route_streaming(&test_server, "POST", "/upload-stream",
+                               handle_upload, NULL, kl_http_body_reader_multipart);
     /* Mid-stream early-exit test route (Keel v2.1.1). */
-    kl_server_route_streaming(&test_server, "POST", "/early-exit",
+    kl_http_server_route_streaming(&test_server, "POST", "/early-exit",
                                handle_early_exit, NULL, eer_factory);
     /* Mid-stream early-exit on body-reader-ERROR-return route (v2.1.2). */
-    kl_server_route_streaming(&test_server, "POST", "/early-exit-err",
+    kl_http_server_route_streaming(&test_server, "POST", "/early-exit-err",
                                handle_early_exit_err, NULL, eer_err_factory);
     /* Streaming-async early-invoke route (v2.2.0) — handler runs BEFORE
      * leftover is fed via on_data, closing the single-read leftover-
      * cap gap. */
-    kl_server_route_streaming_async(&test_server, "POST", "/early-exit-async-err",
+    kl_http_server_route_streaming_async(&test_server, "POST", "/early-exit-async-err",
                                       handle_early_exit_async_err, NULL,
                                       eer_err_factory);
     /* Streaming-async synchronous-completion route (v2.2.0) — handler
      * responds with 401 without parking on the body reader. Tests the
      * keep-alive force-off contract on the synchronous return path. */
-    kl_server_route_streaming_async(&test_server, "POST", "/async-sync-reject",
+    kl_http_server_route_streaming_async(&test_server, "POST", "/async-sync-reject",
                                       handle_async_sync_reject, NULL,
                                       noop_factory);
-    kl_server_route(&test_server, "GET", "/users/:id", handle_param,
+    kl_http_server_route(&test_server, "GET", "/users/:id", handle_param,
                     NULL, NULL);
-    kl_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
+    kl_http_server_route(&test_server, "POST", "/no-reader", handle_no_reader,
                     NULL, NULL);
     pthread_create(&server_tid, NULL, server_thread, NULL);
     wait_for_bind(&test_server);
@@ -534,9 +534,9 @@ static void start_server(void) {
 }
 
 static void stop_server(void) {
-    kl_server_stop(&test_server);
+    kl_http_server_stop(&test_server);
     pthread_join(server_tid, NULL);
-    kl_server_free(&test_server);
+    kl_http_server_free(&test_server);
 }
 
 /* ── Tests ──────────────────────────────────────────────────────────── */
@@ -813,24 +813,24 @@ static void test_access_log_fn(const KlHttpRequest *req, int status,
     cap->call_count++;
 }
 
-static KlServer log_server;
+static KlHttpServer log_server;
 static AccessLogCapture log_capture;
 
 static void *log_server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&log_server);
+    kl_http_server_run(&log_server);
     return NULL;
 }
 
 UTEST(integration, access_log) {
     memset(&log_capture, 0, sizeof(log_capture));
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .access_log = test_access_log_fn,
         .access_log_data = &log_capture,
     };
-    kl_server_init(&log_server, &cfg);
-    kl_server_route(&log_server, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_init(&log_server, &cfg);
+    kl_http_server_route(&log_server, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, log_server_thread, NULL);
@@ -853,9 +853,9 @@ UTEST(integration, access_log) {
     /* Wait briefly for the log callback to fire (it fires after send completes) */
     usleep(50000);
 
-    kl_server_stop(&log_server);
+    kl_http_server_stop(&log_server);
     pthread_join(tid, NULL);
-    kl_server_free(&log_server);
+    kl_http_server_free(&log_server);
 
     ASSERT_EQ(1, log_capture.call_count);
     ASSERT_STREQ("GET", log_capture.method);
@@ -1077,13 +1077,13 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
 UTEST(integration, streaming_async_single_read_leftover_cap) {
     /* v2.2.0 — closes the single-read leftover-rejection gap that
      * v2.1.2's fix left behind. With the legacy
-     * kl_server_route_streaming, a body that arrives in the SAME
+     * kl_http_server_route_streaming, a body that arrives in the SAME
      * kernel read as the header gets processed as "leftover" inside
      * conn_dispatch_request BEFORE the handler runs — so on_data fires
      * with the body reader's conn+res still unstashed, the safety
      * guard kicks in (returns 0), and the cap goes silently undetected.
      *
-     * The new kl_server_route_streaming_async dispatches the handler
+     * The new kl_http_server_route_streaming_async dispatches the handler
      * FIRST. The handler stashes conn+res and parks (state ==
      * READING_BODY). Leftover processing then fires on_data with the
      * fixture's conn+res set, which writes the 413 + sets state =
@@ -1234,16 +1234,16 @@ UTEST(integration, streaming_route_no_body_runs_handler) {
 UTEST(integration, multipart_upload_streaming_route) {
     /* Same payload + handler as the non-streaming multipart_upload
      * test, but routed through /upload-stream which is registered with
-     * kl_server_route_streaming. Exercises the early-dispatch code
+     * kl_http_server_route_streaming. Exercises the early-dispatch code
      * path in conn_dispatch_request and the on_complete-skip-post-
      * middleware branch.
      *
      * NOTE: handle_upload is a plain C handler with no yield mechanism.
-     * If it gets KL_MP_EVT_NEED_DATA it errors out with 400 (since
+     * If it gets KL_HTTP_MP_EVT_NEED_DATA it errors out with 400 (since
      * yielding requires a coroutine, which lives in Hull, not Keel).
      * To exercise the happy path here, send headers + body in one
      * write so the entire body sits in the leftover buffer by the
-     * time the dispatcher invokes the handler — kl_multipart_next
+     * time the dispatcher invokes the handler — kl_http_multipart_next
      * never has to return NEED_DATA. Hull's bindings will provide
      * the yield path. */
     start_server();
@@ -1526,21 +1526,21 @@ UTEST(integration, chunked_large_body) {
  * Excluded from the Windows build; unchanged on POSIX. */
 #if !defined(_WIN32)
 
-static KlServer signal_server;
+static KlHttpServer signal_server;
 
 static void *signal_server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&signal_server);
+    kl_http_server_run(&signal_server);
     return NULL;
 }
 
 UTEST(integration, signal_stop) {
-    KlConfig cfg = {
+    KlHttpServerConfig cfg = {
         .port = 0,
         .install_signal_handlers = 1,
     };
-    kl_server_init(&signal_server, &cfg);
-    kl_server_route(&signal_server, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_init(&signal_server, &cfg);
+    kl_http_server_route(&signal_server, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, signal_server_thread, NULL);
@@ -1563,7 +1563,7 @@ UTEST(integration, signal_stop) {
     /* Send SIGTERM to ourselves — handler should stop the server */
     kill(getpid(), SIGTERM);
     pthread_join(tid, NULL);
-    kl_server_free(&signal_server);
+    kl_http_server_free(&signal_server);
 
     /* If we get here, the server exited cleanly */
     ASSERT_TRUE(1);
@@ -1598,7 +1598,7 @@ static void handle_mw_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) 
 
 static void handle_mw_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
@@ -1607,11 +1607,11 @@ static void handle_mw_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
         kl_http_response_body_borrow(res, "no body", 7);
 }
 
-static KlServer mw_server;
+static KlHttpServer mw_server;
 
 static void *mw_server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&mw_server);
+    kl_http_server_run(&mw_server);
     return NULL;
 }
 
@@ -1619,18 +1619,18 @@ static pthread_t mw_server_tid;
 static int mw_port;
 
 static void start_mw_server(void) {
-    KlConfig cfg = {.port = 0};
-    kl_server_init(&mw_server, &cfg);
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&mw_server, &cfg);
 
     /* Register middleware */
-    kl_server_use(&mw_server, "*", "/*", cors_middleware, NULL);
-    kl_server_use(&mw_server, "GET", "/api/*", auth_middleware, (void *)"secret123");
+    kl_http_server_use(&mw_server, "*", "/*", cors_middleware, NULL);
+    kl_http_server_use(&mw_server, "GET", "/api/*", auth_middleware, (void *)"secret123");
 
     /* Register routes */
-    kl_server_route(&mw_server, "GET", "/hello", handle_mw_hello, NULL, NULL);
-    kl_server_route(&mw_server, "GET", "/api/data", handle_mw_hello, NULL, NULL);
-    kl_server_route(&mw_server, "POST", "/api/echo", handle_mw_echo,
-                    (void *)(size_t)(64 * 1024), kl_body_reader_buffer);
+    kl_http_server_route(&mw_server, "GET", "/hello", handle_mw_hello, NULL, NULL);
+    kl_http_server_route(&mw_server, "GET", "/api/data", handle_mw_hello, NULL, NULL);
+    kl_http_server_route(&mw_server, "POST", "/api/echo", handle_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
 
     pthread_create(&mw_server_tid, NULL, mw_server_thread, NULL);
     wait_for_bind(&mw_server);
@@ -1638,9 +1638,9 @@ static void start_mw_server(void) {
 }
 
 static void stop_mw_server(void) {
-    kl_server_stop(&mw_server);
+    kl_http_server_stop(&mw_server);
     pthread_join(mw_server_tid, NULL);
-    kl_server_free(&mw_server);
+    kl_http_server_free(&mw_server);
 }
 
 UTEST(integration, middleware_cors) {
@@ -1726,20 +1726,20 @@ static int mw_add_x_second(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     return 0;
 }
 
-static KlServer chain_server;
+static KlHttpServer chain_server;
 
 static void *chain_server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&chain_server);
+    kl_http_server_run(&chain_server);
     return NULL;
 }
 
 UTEST(integration, middleware_chain_order) {
-    KlConfig cfg = {.port = 0};
-    kl_server_init(&chain_server, &cfg);
-    kl_server_use(&chain_server, "*", "/*", mw_add_x_first, NULL);
-    kl_server_use(&chain_server, "*", "/*", mw_add_x_second, NULL);
-    kl_server_route(&chain_server, "GET", "/hello", handle_mw_hello, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&chain_server, &cfg);
+    kl_http_server_use(&chain_server, "*", "/*", mw_add_x_first, NULL);
+    kl_http_server_use(&chain_server, "*", "/*", mw_add_x_second, NULL);
+    kl_http_server_route(&chain_server, "GET", "/hello", handle_mw_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, chain_server_thread, NULL);
@@ -1769,16 +1769,16 @@ UTEST(integration, middleware_chain_order) {
     ASSERT_TRUE(p2 != NULL);
     ASSERT_TRUE(p1 < p2);
 
-    kl_server_stop(&chain_server);
+    kl_http_server_stop(&chain_server);
     pthread_join(tid, NULL);
-    kl_server_free(&chain_server);
+    kl_http_server_free(&chain_server);
 }
 
-static KlServer sc_body_server;
+static KlHttpServer sc_body_server;
 
 static void *sc_body_server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&sc_body_server);
+    kl_http_server_run(&sc_body_server);
     return NULL;
 }
 
@@ -1789,11 +1789,11 @@ static int mw_reject_all(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 UTEST(integration, middleware_short_circuit_body) {
-    KlConfig cfg = {.port = 0};
-    kl_server_init(&sc_body_server, &cfg);
-    kl_server_use(&sc_body_server, "*", "/*", mw_reject_all, NULL);
-    kl_server_route(&sc_body_server, "POST", "/echo", handle_mw_echo,
-                    (void *)(size_t)(64 * 1024), kl_body_reader_buffer);
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&sc_body_server, &cfg);
+    kl_http_server_use(&sc_body_server, "*", "/*", mw_reject_all, NULL);
+    kl_http_server_route(&sc_body_server, "POST", "/echo", handle_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
 
     pthread_t tid;
     pthread_create(&tid, NULL, sc_body_server_thread, NULL);
@@ -1817,9 +1817,9 @@ UTEST(integration, middleware_short_circuit_body) {
 
     ASSERT_TRUE(strstr(buf, "403") != NULL);
 
-    kl_server_stop(&sc_body_server);
+    kl_http_server_stop(&sc_body_server);
     pthread_join(tid, NULL);
-    kl_server_free(&sc_body_server);
+    kl_http_server_free(&sc_body_server);
 }
 
 UTEST(integration, route_params) {
@@ -1849,7 +1849,7 @@ UTEST(integration, route_params) {
 
 static int post_mw_check_body(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (br && br->len >= 6 && memcmp(br->data, "secret", 6) == 0) {
         return 0;  /* continue to handler */
     }
@@ -1859,7 +1859,7 @@ static int post_mw_check_body(KlHttpRequest *req, KlHttpResponse *res, void *ctx
 
 static void handle_post_mw_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
@@ -1868,21 +1868,21 @@ static void handle_post_mw_echo(KlHttpRequest *req, KlHttpResponse *res, void *c
         kl_http_response_body_borrow(res, "no body", 7);
 }
 
-static KlServer post_mw_server;
+static KlHttpServer post_mw_server;
 
 static void *post_mw_server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&post_mw_server);
+    kl_http_server_run(&post_mw_server);
     return NULL;
 }
 
 UTEST(integration, post_middleware_body_access) {
-    KlConfig cfg = {.port = 0};
-    kl_server_init(&post_mw_server, &cfg);
-    kl_server_use_post(&post_mw_server, "POST", "/*", post_mw_check_body, NULL);
-    kl_server_route(&post_mw_server, "POST", "/submit", handle_post_mw_echo,
-                    (void *)(size_t)(64 * 1024), kl_body_reader_buffer);
-    kl_server_route(&post_mw_server, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&post_mw_server, &cfg);
+    kl_http_server_use_post(&post_mw_server, "POST", "/*", post_mw_check_body, NULL);
+    kl_http_server_route(&post_mw_server, "POST", "/submit", handle_post_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
+    kl_http_server_route(&post_mw_server, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, post_mw_server_thread, NULL);
@@ -1931,26 +1931,26 @@ UTEST(integration, post_middleware_body_access) {
     kl_test_closesock(fd);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
-    kl_server_stop(&post_mw_server);
+    kl_http_server_stop(&post_mw_server);
     pthread_join(tid, NULL);
-    kl_server_free(&post_mw_server);
+    kl_http_server_free(&post_mw_server);
 }
 
-static KlServer post_mw_ka_server;
+static KlHttpServer post_mw_ka_server;
 
 static void *post_mw_ka_server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&post_mw_ka_server);
+    kl_http_server_run(&post_mw_ka_server);
     return NULL;
 }
 
 UTEST(integration, post_middleware_keepalive_preserved) {
-    KlConfig cfg = {.port = 0};
-    kl_server_init(&post_mw_ka_server, &cfg);
-    kl_server_use_post(&post_mw_ka_server, "POST", "/*", post_mw_check_body, NULL);
-    kl_server_route(&post_mw_ka_server, "POST", "/submit", handle_post_mw_echo,
-                    (void *)(size_t)(64 * 1024), kl_body_reader_buffer);
-    kl_server_route(&post_mw_ka_server, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&post_mw_ka_server, &cfg);
+    kl_http_server_use_post(&post_mw_ka_server, "POST", "/*", post_mw_check_body, NULL);
+    kl_http_server_route(&post_mw_ka_server, "POST", "/submit", handle_post_mw_echo,
+                    (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
+    kl_http_server_route(&post_mw_ka_server, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, post_mw_ka_server_thread, NULL);
@@ -2001,9 +2001,9 @@ UTEST(integration, post_middleware_keepalive_preserved) {
     ASSERT_TRUE(strstr(buf2, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf2, "{\"msg\":\"hello\"}") != NULL);
 
-    kl_server_stop(&post_mw_ka_server);
+    kl_http_server_stop(&post_mw_ka_server);
     pthread_join(tid, NULL);
-    kl_server_free(&post_mw_ka_server);
+    kl_http_server_free(&post_mw_ka_server);
 }
 
 /* ── Global body size limit tests ─────────────────────────────────── */

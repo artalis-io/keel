@@ -33,7 +33,7 @@
  */
 #include <keel/event.h>
 #include "event_pollcomp_internal.h"
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include "udp_cmsg.h"            /* KL_UDP_RX_CTRL_SIZE, kl_udp_parse_local — pktinfo local addr (POSIX) */
 #include "event_caps.h"
@@ -304,7 +304,7 @@ static int pc_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int hea
     return 0;
 }
 
-static int pc_comp_post_accept(struct KlServer *s) {
+static int pc_comp_post_accept(struct KlHttpServer *s) {
     if (!s) return -1;
     KlPcState *st = s->ev.loop._backend;
     /* One accept op suffices: on completion the driver refills. Avoid stacking
@@ -427,7 +427,7 @@ static int pc_comp_post_connect(struct KlEventCtx *ctx, KlSocketHandle fd,
     return 0;
 }
 
-static int pc_comp_prime_accepts(struct KlServer *s) {
+static int pc_comp_prime_accepts(struct KlHttpServer *s) {
     if (!s) return -1;
     KlPcState *st = s->ev.loop._backend;
     if (st->primed) return 1;              /* setup already done — report the window (6B-3 2b-ii) */
@@ -757,7 +757,7 @@ static int pc_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max
  * drain (kl_comp_run) so every dequeued op gets its normal routing. This only marks each posted
  * accept aborted, so the next pc_comp_drain's abort pass (pc_emit_abort) emits a KL_COMP_ACCEPT
  * ok=0 that retires the listener. Synchronous → always succeeds. */
-static int pc_shutdown_accepts(struct KlServer *s) {
+static int pc_shutdown_accepts(struct KlHttpServer *s) {
     KlPcState *st = s->ev.loop._backend;
     for (KlPcOp *o = st->ops; o; o = o->next)
         if (o->type == PC_ACCEPT) o->aborted = 1;
@@ -780,7 +780,7 @@ const KlCompletionOps kl_pollcomp_completion_ops = {
 
 /* ── Runtime event provider (RC-2) ────────────────────────────────────────
  * The pure-runtime form: KlEventOps carrying the completion sub-vtable via .completion,
- * wrapped in a named KlEventProvider. Handed to KlConfig.event_provider to INJECT the
+ * wrapped in a named KlEventProvider. Handed to KlHttpServerConfig.event_provider to INJECT the
  * pollcomp completion axis into an otherwise-default (epoll/kqueue) libkeel — the RC-2
  * proof. No kl_event_*_builtin / kl_comp_ops_builtin appear in THIS TU, so it never
  * clashes with the default backend's compiled-in symbols. Mirrors event_lwip.c. */

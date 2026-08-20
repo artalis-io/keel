@@ -12,7 +12,7 @@
  */
 #include <keel/event.h>
 #include "event_builtin.h"
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include "event_caps.h"
 #include "socket.h"              /* KlSocketProvider + KL_SOCK_CAP_OVERLAPPED */
@@ -373,7 +373,7 @@ static int iocp_comp_post_send(KlStream *stream, const KlIoVec *iov, int iovcnt,
     return 0;
 }
 
-static int iocp_comp_post_accept(struct KlServer *s) {
+static int iocp_comp_post_accept(struct KlHttpServer *s) {
     if (!s) return -1;
     KlIocpState *st = s->ev.loop._backend;
     SOCKET a = WSASocketW(st->accept_family, SOCK_STREAM, IPPROTO_TCP,
@@ -740,7 +740,7 @@ static int iocp_connect_untrack(KlIocpState *st, const KlIocpOp *op) {
  * ctx-scoped/server-agnostic. Post-driven (6B-3 2b-ii): returns the AcceptEx window
  * (KL_IOCP_ACCEPT_BACKLOG) and posts NOTHING — the completion KlListener posts that many
  * AcceptEx ops, one reserved pool credit each, and replenishes one per accept completion. */
-static int iocp_comp_prime_accepts(struct KlServer *s) {
+static int iocp_comp_prime_accepts(struct KlHttpServer *s) {
     if (!s) return -1;
     KlIocpState *st = s->ev.loop._backend;
     if (st->started)
@@ -1085,7 +1085,7 @@ static void iocp_quiesce_port_for_close(KlIocpState *st) {
  * DEQUEUES every completion (accept OR read/write/udp/watcher) before freeing it (no OVERLAPPED is
  * freed while the kernel may still be writing → no use-after-free) and routes each ordinarily (no
  * completion lost); accept completions untrack + retire the listener. Nothing more to force here. */
-static int iocp_shutdown_accepts(struct KlServer *s) {
+static int iocp_shutdown_accepts(struct KlHttpServer *s) {
     KlIocpState *st = s->ev.loop._backend;
     st->quiescing = 1;   /* from now, iocp_comp_drain frees fired watchers instead of re-posting */
     return 0;

@@ -2,7 +2,7 @@
  * smoke_tcp.c — plaintext TCP link + roundtrip smoke test.
  *
  * NOT a utest suite (not tests/test_*.c) — a standalone program built by the
- * `smoke` Makefile target. It links the whole TCP core (KlServer + sync
+ * `smoke` Makefile target. It links the whole TCP core (KlHttpServer + sync
  * KlClient) and drives one real request over loopback, proving the library
  * both links and runs on the target platform (the Windows CI gate). Runs on
  * POSIX too.
@@ -36,26 +36,26 @@ static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&g_srv);
+    kl_http_server_run(&g_srv);
     return NULL;
 }
 
 int main(void) {
-    KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1" };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1" };
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke: server init failed\n");
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         fprintf(stderr, "smoke: pthread_create failed\n");
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -82,9 +82,9 @@ int main(void) {
         }
     }
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 
     if (!ok) {
         fprintf(stderr, "smoke: roundtrip FAILED (rc=%d status=%d body_len=%zu err=%d)\n",

@@ -33,7 +33,7 @@ static int    g_resumed;
 static int    g_completed;
 
 typedef struct {
-    KlBodyReader base;
+    KlHttpBodyReader base;
     KlAllocator *alloc;
     KlHttpRequest   *req;
     int          paused;
@@ -45,7 +45,7 @@ static void rfc_resume(void *ud) {
     kl_http_request_resume_body(r->req);
 }
 
-static int rfc_on_data(KlBodyReader *self, const char *data, size_t len) {
+static int rfc_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     (void)data;
     PauseReader *r = (PauseReader *)self;
     g_total += len;
@@ -59,14 +59,14 @@ static int rfc_on_data(KlBodyReader *self, const char *data, size_t len) {
     }
     return 0;
 }
-static void rfc_on_complete(KlBodyReader *self) { (void)self; g_completed = 1; }
-static void rfc_on_error(KlBodyReader *self) { (void)self; }
-static void rfc_destroy(KlBodyReader *self) {
+static void rfc_on_complete(KlHttpBodyReader *self) { (void)self; g_completed = 1; }
+static void rfc_on_error(KlHttpBodyReader *self) { (void)self; }
+static void rfc_destroy(KlHttpBodyReader *self) {
     PauseReader *r = (PauseReader *)self;
     kl_free(r->alloc, r, sizeof(*r));
 }
 
-static KlBodyReader *rfc_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+static KlHttpBodyReader *rfc_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
     (void)ud;
     PauseReader *r = kl_malloc(alloc, sizeof(*r));
     if (!r) return NULL;
@@ -85,8 +85,8 @@ static void rfc_handler(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static KlServer g_srv;
-static void *rfc_srv_thread(void *a) { (void)a; kl_server_run(&g_srv); return NULL; }
+static KlHttpServer g_srv;
+static void *rfc_srv_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return NULL; }
 
 static int rfc_connect(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -103,9 +103,9 @@ static int rfc_connect(int port) {
 UTEST(read_flow_control, pause_midbody_then_resume) {
     g_total = g_calls = g_calls_at_pause = g_resumed = g_completed = 0;
 
-    KlConfig cfg = { .port = RFC_PORT, .bind_addr = "127.0.0.1" };
-    ASSERT_EQ(0, kl_server_init(&g_srv, &cfg));
-    kl_server_route(&g_srv, "POST", "/p", rfc_handler, NULL, rfc_factory);
+    KlHttpServerConfig cfg = { .port = RFC_PORT, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_http_server_init(&g_srv, &cfg));
+    kl_http_server_route(&g_srv, "POST", "/p", rfc_handler, NULL, rfc_factory);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, rfc_srv_thread, NULL));
@@ -150,20 +150,20 @@ UTEST(read_flow_control, pause_midbody_then_resume) {
     ASSERT_EQ(1, g_completed);               /* orderly finish after resume */
 
     kl_test_closesock(fd);
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(tid, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 }
 
 /* A body reader that pauses on the first chunk and NEVER resumes. */
-static int rfc_pause_forever_on_data(KlBodyReader *self, const char *data, size_t len) {
+static int rfc_pause_forever_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     (void)data;
     PauseReader *r = (PauseReader *)self;
     g_total += len; g_calls++;
     if (!r->paused) { r->paused = 1; g_calls_at_pause = g_calls; kl_http_request_pause_body(r->req); }
     return 0;
 }
-static KlBodyReader *rfc_pause_forever_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
+static KlHttpBodyReader *rfc_pause_forever_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
     (void)ud;
     PauseReader *r = kl_malloc(alloc, sizeof(*r));
     if (!r) return NULL;
@@ -177,14 +177,14 @@ static KlBodyReader *rfc_pause_forever_factory(KlAllocator *alloc, const KlHttpR
 }
 
 /* Shutdown-while-paused: a conn parked in read-paused (no outstanding op on completion / READ
- * interest off on readiness) must tear down cleanly on kl_server_stop — no hang, no leak, no
+ * interest off on readiness) must tear down cleanly on kl_http_server_stop — no hang, no leak, no
  * UAF (the ASan run is the oracle for the last two; join returning is the oracle for no-hang). */
 UTEST(read_flow_control, shutdown_while_paused) {
     g_total = g_calls = g_calls_at_pause = g_resumed = g_completed = 0;
 
-    KlConfig cfg = { .port = RFC_PORT + 1, .bind_addr = "127.0.0.1" };
-    ASSERT_EQ(0, kl_server_init(&g_srv, &cfg));
-    kl_server_route(&g_srv, "POST", "/p", rfc_handler, NULL, rfc_pause_forever_factory);
+    KlHttpServerConfig cfg = { .port = RFC_PORT + 1, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_http_server_init(&g_srv, &cfg));
+    kl_http_server_route(&g_srv, "POST", "/p", rfc_handler, NULL, rfc_pause_forever_factory);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, rfc_srv_thread, NULL));
@@ -207,9 +207,9 @@ UTEST(read_flow_control, shutdown_while_paused) {
 
     /* Tear down with the conn still paused mid-body. join must return (no hang). */
     kl_test_closesock(fd);
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(tid, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 }
 
 UTEST_MAIN();

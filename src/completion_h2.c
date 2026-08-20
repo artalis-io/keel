@@ -5,12 +5,12 @@
  * kl_comp_tls_drain_output (completion_internal.h); reuses the h2 session vtable +
  * kl_h2_server_feed verbatim — no IOCP/pollcomp symbol appears here.
  */
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include "internal.h"            /* kl_h2_server_feed / kl_h2_server_set_writer */
 #include "completion.h"          /* kl_comp_post_send / post_recv */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_drain_output */
-#include "proto_hooks.h"         /* completion-drive seam registration */
+#include "http_proto_hooks.h"         /* completion-drive seam registration */
 #include <string.h>
 #include <stdint.h>              /* SIZE_MAX (h2 output capture growth guard) */
 
@@ -46,7 +46,7 @@ static ssize_t comp_h2_capture_write(void *ctx, const void *data, size_t len) {
  * are reused verbatim — this only inverts the transport, exactly as the HTTP/1.1 path
  * does. For TLS the received ciphertext was already fed to the engine (kl_comp_drain);
  * loop on pending() so coalesced records aren't stranded. */
-void kl_comp_h2_drive(struct KlServer *s, KlHttpConn *c) {
+void kl_comp_h2_drive(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->tls) {
         /* Decrypt + feed every currently-available record (the h2 session writes its
          * output ciphertext into the memory-BIO out ring via conn_write→tls->write),

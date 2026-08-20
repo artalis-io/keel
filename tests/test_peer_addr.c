@@ -18,7 +18,7 @@ static void handle(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void *srv_thread(void *a) { kl_server_run((KlServer *)a); return NULL; }
+static void *srv_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
 
 static void drain_response(int fd) {
     char buf[512];
@@ -29,10 +29,10 @@ static void drain_response(int fd) {
 }
 
 UTEST(peer_addr, tcp_ipv4) {
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/x", handle, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
 
     pthread_t t;
     ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
@@ -53,9 +53,9 @@ UTEST(peer_addr, tcp_ipv4) {
     drain_response(fd);
     kl_test_closesock(fd);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(t, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 
     ASSERT_EQ(0, g_rc);
     ASSERT_STREQ(g_ip, "127.0.0.1");
@@ -63,17 +63,17 @@ UTEST(peer_addr, tcp_ipv4) {
 }
 
 UTEST(peer_addr, tcp_ipv6) {
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .bind_addr = "::1", .max_connections = 4 };
-    if (kl_server_init(&srv, &cfg) != 0)
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "::1", .max_connections = 4 };
+    if (kl_http_server_init(&srv, &cfg) != 0)
         UTEST_SKIP("IPv6 unavailable");
 
-    kl_server_route(&srv, "GET", "/x", handle, NULL, NULL);
+    kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
     pthread_t t;
     ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
     if (srv.bound_port <= 0) {
-        kl_server_stop(&srv); pthread_join(t, NULL); kl_server_free(&srv);
+        kl_http_server_stop(&srv); pthread_join(t, NULL); kl_http_server_free(&srv);
         UTEST_SKIP("IPv6 bind failed");
     }
 
@@ -91,9 +91,9 @@ UTEST(peer_addr, tcp_ipv6) {
     }
     if (fd >= 0) kl_test_closesock(fd);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(t, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 
     if (crc != 0)
         UTEST_SKIP("IPv6 connect failed");
@@ -117,11 +117,11 @@ static int connect_local(int port) {
 
 UTEST(peer_addr, proxy_v1_trusted) {
     g_rc = -2; g_ip[0] = '\0'; g_port = 0;
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4,
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4,
                      .proxy_trusted_cidrs = "127.0.0.1/32" };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/x", handle, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
     pthread_t t;
     ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
@@ -136,7 +136,7 @@ UTEST(peer_addr, proxy_v1_trusted) {
     drain_response(fd);
     kl_test_closesock(fd);
 
-    kl_server_stop(&srv); pthread_join(t, NULL); kl_server_free(&srv);
+    kl_http_server_stop(&srv); pthread_join(t, NULL); kl_http_server_free(&srv);
     ASSERT_EQ(0, g_rc);
     ASSERT_STREQ("203.0.113.7", g_ip);   /* header address, not 127.0.0.1 */
     ASSERT_EQ(5000, g_port);
@@ -144,11 +144,11 @@ UTEST(peer_addr, proxy_v1_trusted) {
 
 UTEST(peer_addr, proxy_v2_trusted) {
     g_rc = -2; g_ip[0] = '\0'; g_port = 0;
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4,
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4,
                      .proxy_trusted_cidrs = "127.0.0.0/8" };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/x", handle, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
     pthread_t t;
     ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
@@ -173,7 +173,7 @@ UTEST(peer_addr, proxy_v2_trusted) {
     drain_response(fd);
     kl_test_closesock(fd);
 
-    kl_server_stop(&srv); pthread_join(t, NULL); kl_server_free(&srv);
+    kl_http_server_stop(&srv); pthread_join(t, NULL); kl_http_server_free(&srv);
     ASSERT_EQ(0, g_rc);
     ASSERT_STREQ("198.51.100.9", g_ip);
     ASSERT_EQ(40000, g_port);
@@ -182,11 +182,11 @@ UTEST(peer_addr, proxy_v2_trusted) {
 UTEST(peer_addr, proxy_trusted_no_header) {
     /* Trusted source, but a direct request (no PROXY header) → socket addr. */
     g_rc = -2; g_ip[0] = '\0'; g_port = 0;
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4,
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4,
                      .proxy_trusted_cidrs = "127.0.0.1/32" };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/x", handle, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/x", handle, NULL, NULL);
     pthread_t t;
     ASSERT_EQ(0, pthread_create(&t, NULL, srv_thread, &srv));
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
@@ -199,15 +199,15 @@ UTEST(peer_addr, proxy_trusted_no_header) {
     drain_response(fd);
     kl_test_closesock(fd);
 
-    kl_server_stop(&srv); pthread_join(t, NULL); kl_server_free(&srv);
+    kl_http_server_stop(&srv); pthread_join(t, NULL); kl_http_server_free(&srv);
     ASSERT_EQ(0, g_rc);
     ASSERT_STREQ("127.0.0.1", g_ip);
 }
 
 UTEST(peer_addr, proxy_bad_cidr_rejected) {
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .proxy_trusted_cidrs = "not-a-cidr" };
-    ASSERT_EQ(-1, kl_server_init(&srv, &cfg));
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .proxy_trusted_cidrs = "not-a-cidr" };
+    ASSERT_EQ(-1, kl_http_server_init(&srv, &cfg));
     ASSERT_EQ(srv.last_error, KL_ERR_INVALID_ARG);
 }
 

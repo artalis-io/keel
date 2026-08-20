@@ -2,7 +2,7 @@
  * smoke_iocp.c — end-to-end HTTP-over-IOCP roundtrip (PAL Phase 8a, 4b).
  *
  * The first real runtime validation of the IOCP completion connection driver:
- * a KlServer running on the IOCP completion loop (BACKEND=iocp, the overlapped
+ * a KlHttpServer running on the IOCP completion loop (BACKEND=iocp, the overlapped
  * provider) served by AcceptEx/WSARecv/WSASend, hit by the sync KlClient over
  * loopback. Windows-only (references the internal IOCP provider); the Windows-IOCP
  * CI job is its oracle. Mirrors smoke_tcp.c, with the server pinned to the IOCP
@@ -45,7 +45,7 @@ static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
  * IOCP) and echoes it back, exercising the completion body path (8b-1). */
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (!br || br->len == 0) { kl_http_response_error(res, 400, "body required"); return; }
     kl_http_response_status(res, 200);
     kl_http_response_body_borrow(res, br->data, br->len);
@@ -124,11 +124,11 @@ static void udp_echo(void *ud, const void *data, size_t len,
     (void)kl_datagram_send((KlDatagram *)ud, &m);
 }
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&g_srv);
+    kl_http_server_run(&g_srv);
     return NULL;
 }
 
@@ -146,16 +146,16 @@ static void handle_proxy_probe(KlHttpRequest *req, KlHttpResponse *res, void *ct
     kl_http_request_peer_addr(req, g_proxy_ip, sizeof(g_proxy_ip), &port);
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
-static KlServer g_proxy_srv;
-static void *proxy_server_thread(void *arg) { (void)arg; kl_server_run(&g_proxy_srv); return NULL; }
+static KlHttpServer g_proxy_srv;
+static void *proxy_server_thread(void *arg) { (void)arg; kl_http_server_run(&g_proxy_srv); return NULL; }
 static int proxy_over_completion_ok(void) {
-    KlConfig cfg = { .port = SMOKE_PROXY_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = SMOKE_PROXY_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_iocp(),
                      .proxy_trusted_cidrs = "127.0.0.1/32" };
-    if (kl_server_init(&g_proxy_srv, &cfg) != 0) return 0;   /* now supported, not rejected */
-    kl_server_route(&g_proxy_srv, "GET", "/p", handle_proxy_probe, NULL, NULL);
+    if (kl_http_server_init(&g_proxy_srv, &cfg) != 0) return 0;   /* now supported, not rejected */
+    kl_http_server_route(&g_proxy_srv, "GET", "/p", handle_proxy_probe, NULL, NULL);
     pthread_t th;
-    if (pthread_create(&th, NULL, proxy_server_thread, NULL) != 0) { kl_server_free(&g_proxy_srv); return 0; }
+    if (pthread_create(&th, NULL, proxy_server_thread, NULL) != 0) { kl_http_server_free(&g_proxy_srv); return 0; }
     for (int i = 0; i < 200 && g_proxy_srv.bound_port == 0; i++) nap_ms(5);
 
     int ok = 0;
@@ -184,9 +184,9 @@ static int proxy_over_completion_ok(void) {
         }
         closesocket(cs);
     }
-    kl_server_stop(&g_proxy_srv);
+    kl_http_server_stop(&g_proxy_srv);
     pthread_join(th, NULL);
-    kl_server_free(&g_proxy_srv);
+    kl_http_server_free(&g_proxy_srv);
     return ok;
 }
 
@@ -284,32 +284,32 @@ int main(void) {
     _putenv_s("KEEL_IOCP_TF_CHUNK", "16384");
 
     /* Pin the server to the IOCP completion loop + overlapped provider. */
-    KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_iocp() };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-iocp: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
-    kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
-    kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
+    kl_http_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_http_body_reader_buffer);
+    kl_http_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
 
     /* Write the file the /file route serves. */
     int wfd = _open(SMOKE_FILE_PATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
     if (wfd < 0 || _write(wfd, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) != (int)(sizeof(SMOKE_FILE) - 1)) {
         fprintf(stderr, "smoke-iocp: temp file write failed\n");
         if (wfd >= 0) _close(wfd);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
     _close(wfd);
 
     /* Write the /bigfile payload — a byte pattern so the client can verify chunk offsets. */
     int bfd = _open(SMOKE_BIGFILE_PATH, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0644);
-    if (bfd < 0) { fprintf(stderr, "smoke-iocp: bigfile create failed\n"); kl_server_free(&g_srv); return 1; }
+    if (bfd < 0) { fprintf(stderr, "smoke-iocp: bigfile create failed\n"); kl_http_server_free(&g_srv); return 1; }
     {
         static unsigned char bfbuf[SMOKE_BIGFILE_LEN];
         for (int i = 0; i < SMOKE_BIGFILE_LEN; i++) bfbuf[i] = (unsigned char)(i & 0xFF);
@@ -317,7 +317,7 @@ int main(void) {
         _close(bfd);
         if (wr != SMOKE_BIGFILE_LEN) {
             fprintf(stderr, "smoke-iocp: bigfile write failed\n");
-            kl_server_free(&g_srv);
+            kl_http_server_free(&g_srv);
             return 1;
         }
     }
@@ -334,7 +334,7 @@ int main(void) {
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         fprintf(stderr, "smoke-iocp: pthread_create failed\n");
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -481,10 +481,10 @@ int main(void) {
         }
     }
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now — safe to pump the public close */
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
     _unlink(SMOKE_FILE_PATH);
     _unlink(SMOKE_BIGFILE_PATH);
 

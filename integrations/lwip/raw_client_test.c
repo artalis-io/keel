@@ -3,9 +3,9 @@
  * completion backend, in-process over the loopback netif (NO_SYS=1, single-thread).
  *
  * The proof for the raw client (docs/phase10_lwip_raw_client_design.md §8 LC-1): ONE KlEventCtx
- * (== the one lwIP mainloop) runs BOTH a raw KlServer (route GET / -> a known body) AND a raw
+ * (== the one lwIP mainloop) runs BOTH a raw KlHttpServer (route GET / -> a known body) AND a raw
  * async KlClient that GETs http://127.0.0.1:PORT/. The server drives that one loop via
- * kl_server_run() on a background thread; the KlClient is created + driven ENTIRELY on that same
+ * kl_http_server_run() on a background thread; the KlClient is created + driven ENTIRELY on that same
  * loop thread (started from a KEEL timer that fires on the loop thread, exactly the single-thread
  * marshalling discipline the Phase-9 raw tests use). So the client's connected_cb + request send +
  * response recv and the server's accept + recv + send all fire inline on the ONE thread — the
@@ -87,7 +87,7 @@ static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 
 /* ── client completion state (all fields touched only on the loop thread) ─────── */
 typedef struct {
-    KlServer  *srv;
+    KlHttpServer  *srv;
     const char *url;
     int         expect_ok;      /* 1 = expect 200+body; 0 = expect a clean connect error */
     KlClient   *client;
@@ -115,12 +115,12 @@ static void on_done(KlClient *client, void *ud) {
         atomic_store(&cc->pass, err != 0);
     }
     atomic_store(&cc->done, 1);
-    kl_server_stop(cc->srv);
+    kl_http_server_stop(cc->srv);
 }
 
 /* Fired on the loop thread: start the async KlClient on the server's shared ctx (== the one lwIP
  * mainloop). Everything the client does from here rides that ctx — its connect completion, its
- * data-plane watcher relay, its timers — all serviced by kl_server_run's completion tick. */
+ * data-plane watcher relay, its timers — all serviced by kl_http_server_run's completion tick. */
 static void start_client(void *ud) {
     ClientCase *cc = ud;
     static KlAllocator alloc;   /* stable storage: the response stores the allocator by value */
@@ -133,20 +133,20 @@ static void start_client(void *ud) {
          * OK case is a test failure. */
         atomic_store(&cc->pass, cc->expect_ok ? 0 : 1);
         atomic_store(&cc->done, 1);
-        kl_server_stop(cc->srv);
+        kl_http_server_stop(cc->srv);
     }
 }
 
-static void *server_thread(void *a) { kl_server_run((KlServer *)a); return NULL; }
+static void *server_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
 
-/* Run one case: bring up a raw server (kl_server_run on a bg thread) + start a raw KlClient on the
+/* Run one case: bring up a raw server (kl_http_server_run on a bg thread) + start a raw KlClient on the
  * server's shared ctx (via a loop-thread timer); a bounded watchdog stops a hang. */
 static int run_case(const char *label, int port, const char *url, int expect_ok) {
-    KlConfig cfg = { .port = port, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = port, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_lwip_raw() };
-    KlServer srv;
-    if (kl_server_init(&srv, &cfg) != 0) { printf("LC-1 FAIL: server_init (%s)\n", label); return 1; }
-    kl_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
+    KlHttpServer srv;
+    if (kl_http_server_init(&srv, &cfg) != 0) { printf("LC-1 FAIL: server_init (%s)\n", label); return 1; }
+    kl_http_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
 
     ClientCase cc;
     memset(&cc, 0, sizeof(cc));
@@ -157,20 +157,20 @@ static int run_case(const char *label, int port, const char *url, int expect_ok)
     atomic_store(&cc.pass, 0);
 
     /* Marshal the client start onto the loop thread (single-thread NO_SYS=1 discipline): the timer
-     * fires inside kl_server_run's tick, so the client is created + driven on the loop thread. */
+     * fires inside kl_http_server_run's tick, so the client is created + driven on the loop thread. */
     kl_timer_add(&srv.ev, 20, start_client, &cc);
 
     /* Run the shared loop (server + client) on a bg thread; the main thread is a bounded watchdog
      * that stops the loop if the case hangs (a stall is a FAIL, never a wedge). */
     pthread_t srv_th;
     if (pthread_create(&srv_th, NULL, server_thread, &srv) != 0) {
-        printf("LC-1 FAIL: pthread_create (%s)\n", label); kl_server_free(&srv); return 1;
+        printf("LC-1 FAIL: pthread_create (%s)\n", label); kl_http_server_free(&srv); return 1;
     }
     for (int i = 0; i < 600 && !atomic_load(&cc.done); i++) {
         struct timespec sl = { 0, 10 * 1000000L };
         nanosleep(&sl, NULL);
     }
-    if (!atomic_load(&cc.done)) { kl_server_stop(&srv); }   /* hang guard */
+    if (!atomic_load(&cc.done)) { kl_http_server_stop(&srv); }   /* hang guard */
     pthread_join(srv_th, NULL);
 
     int rc = 0;
@@ -179,7 +179,7 @@ static int run_case(const char *label, int port, const char *url, int expect_ok)
     else { printf("PASS LC-1 (%s)\n", label); }
 
     if (cc.client) kl_client_free(cc.client);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     return rc;
 }
 

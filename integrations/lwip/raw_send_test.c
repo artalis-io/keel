@@ -23,7 +23,7 @@
  *          live allocation does NOT scale with response size (proves zero send-path alloc /
  *          bounded transmit memory).
  *
- * SINGLE-THREADED lwIP discipline (as in raw_recv_test.c): kl_server_run() blocks on a pthread
+ * SINGLE-THREADED lwIP discipline (as in raw_recv_test.c): kl_http_server_run() blocks on a pthread
  * that owns the lwIP tick; every lwIP-touching client call is marshalled onto that thread via
  * KEEL timers (kl_timer_add fires on the loop thread). In-process over the loopback netif.
  *
@@ -33,7 +33,7 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/timer.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 
 #include "keel_lwip_raw.h"
 #include "lwip_raw_testclient.h"
@@ -169,18 +169,18 @@ static void handle_file(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 }
 
 /* ── watchdog server runner ───────────────────────────────────────────────────── */
-static int run_watchdog(atomic_int *finished, KlServer *s, int max_10ms) {
+static int run_watchdog(atomic_int *finished, KlHttpServer *s, int max_10ms) {
     for (int i = 0; i < max_10ms && !atomic_load(finished); i++) {
         struct timespec sl = { 0, 10 * 1000000L };
         nanosleep(&sl, NULL);
     }
-    if (!atomic_load(finished)) { atomic_store(finished, 1); kl_server_stop(s); return 0; }
+    if (!atomic_load(finished)) { atomic_store(finished, 1); kl_http_server_stop(s); return 0; }
     return 1;
 }
 
 /* ═══════════════════════ BUFFERED + FILE BYTE-EXACT (B1..B6, B11) ═══════════════ */
 #define SEND_PORT 7810
-static KlServer g_ss;
+static KlHttpServer g_ss;
 static atomic_int g_s_finished, g_s_fail;
 
 /* A phase: a request path, the expected body length + checksum, and a peak-alloc bound (0 = no
@@ -241,8 +241,8 @@ static void s_build_req(const SendPhase *ph) {
 
 static void s_poll(void *ud);
 
-static void s_advance(KlServer *s) {
-    if (g_phase_i >= N_PHASES) { atomic_store(&g_s_finished, 1); kl_server_stop(s); return; }
+static void s_advance(KlHttpServer *s) {
+    if (g_phase_i >= N_PHASES) { atomic_store(&g_s_finished, 1); kl_http_server_stop(s); return; }
     s_build_req(&g_phases[g_phase_i]);
     g_started = 0; g_deadline = 2000;
     /* Await the previous connection's close before opening the next (single-slot accumulating
@@ -251,7 +251,7 @@ static void s_advance(KlServer *s) {
 }
 
 static void s_poll(void *ud) {
-    KlServer *s = ud;
+    KlHttpServer *s = ud;
     const SendPhase *ph = &g_phases[g_phase_i];
 
     if (!g_started) {
@@ -282,11 +282,11 @@ static void s_poll(void *ud) {
                       g_phase_i++; s_advance(s); }
             else { atomic_store(&g_s_fail, 1);
                    printf("B FAIL (%s): zero-length response not clean (blen %zu)\n", ph->name, blen);
-                   atomic_store(&g_s_finished, 1); kl_server_stop(s); return; }
+                   atomic_store(&g_s_finished, 1); kl_http_server_stop(s); return; }
         } else if (--g_deadline <= 0) {
             atomic_store(&g_s_fail, 1);
             printf("B FAIL (%s): zero-length response never closed\n", ph->name);
-            atomic_store(&g_s_finished, 1); kl_server_stop(s); return;
+            atomic_store(&g_s_finished, 1); kl_http_server_stop(s); return;
         }
         if (atomic_load(&g_s_finished)) return;
         kl_timer_add(&s->ev, 5, s_poll, s);
@@ -309,12 +309,12 @@ static void s_poll(void *ud) {
             atomic_store(&g_s_fail, 1);
             printf("B FAIL (%s): blen %zu/%zu chk %zu/%zu peak %zu bound %zu\n",
                    ph->name, blen, g_expect_body, chk, g_expect_chk, peak, ph->peak_bound);
-            atomic_store(&g_s_finished, 1); kl_server_stop(s); return;
+            atomic_store(&g_s_finished, 1); kl_http_server_stop(s); return;
         }
     } else if (--g_deadline <= 0) {
         atomic_store(&g_s_fail, 1);
         printf("B FAIL (%s): timed out %zu/%zu\n", ph->name, blen, g_expect_body);
-        atomic_store(&g_s_finished, 1); kl_server_stop(s); return;
+        atomic_store(&g_s_finished, 1); kl_http_server_stop(s); return;
     }
     if (atomic_load(&g_s_finished)) return;
     kl_timer_add(&s->ev, 5, s_poll, s);
@@ -326,7 +326,7 @@ static void *s_thread(void *arg) {
     (void)arg;
     kl_timer_add(&g_ss.ev, 20, s_start, NULL);
     kl_timer_add(&g_ss.ev, 40, s_poll, &g_ss);
-    kl_server_run(&g_ss);
+    kl_http_server_run(&g_ss);
     return NULL;
 }
 
@@ -335,22 +335,22 @@ static int run_send_phases(void) {
     KlAllocator alloc = counting_alloc();
     /* Small max_connections so the preallocated TX block (conn_cap*KL_LWR_TX_WIN) is small — the
      * bounded-memory proof then has real teeth (peak must stay tiny vs a multi-MiB file). */
-    KlConfig cfg = { .port = SEND_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = SEND_PORT, .bind_addr = "127.0.0.1",
                      .max_connections = 8,
                      .event_provider = kl_event_provider_lwip_raw(),
                      .alloc = &alloc };
-    if (kl_server_init(&g_ss, &cfg) != 0) { printf("B FAIL: server_init\n"); return 1; }
-    kl_server_route(&g_ss, "GET", "/s", handle_size, NULL, NULL);
+    if (kl_http_server_init(&g_ss, &cfg) != 0) { printf("B FAIL: server_init\n"); return 1; }
+    kl_http_server_route(&g_ss, "GET", "/s", handle_size, NULL, NULL);
     g_phase_i = 0;
     atomic_store(&g_s_finished, 0); atomic_store(&g_s_fail, 0);
 
     pthread_t th;
     if (pthread_create(&th, NULL, s_thread, NULL) != 0) {
-        printf("B FAIL: pthread_create\n"); kl_server_free(&g_ss); return 1;
+        printf("B FAIL: pthread_create\n"); kl_http_server_free(&g_ss); return 1;
     }
     run_watchdog(&g_s_finished, &g_ss, 6000);   /* up to 60s (24 MiB over loopback) */
     pthread_join(th, NULL);
-    kl_server_free(&g_ss);
+    kl_http_server_free(&g_ss);
     kl_lwr_client_release();
     free(g_req); g_req = NULL;
     unlink(g_file_path);
@@ -363,7 +363,7 @@ static int run_send_phases(void) {
  * assert the server survives (a follow-up roundtrip still gets a 200) and ASan/LSan report clean
  * (no leak/UAF on the torn-down in-flight send). */
 #define LC_PORT 7811
-static KlServer g_lcs;
+static KlHttpServer g_lcs;
 static atomic_int g_lc_finished, g_lc_fail;
 enum { LC_RST = 0, LC_FIN, LC_HEALTHY, LC_DONE };
 static int g_lc_stage;
@@ -378,8 +378,8 @@ static void lc_build(void) {
 }
 
 static void lc_poll(void *ud) {
-    KlServer *s = ud;
-    if (g_lc_stage == LC_DONE) { atomic_store(&g_lc_finished, 1); kl_server_stop(s); return; }
+    KlHttpServer *s = ud;
+    if (g_lc_stage == LC_DONE) { atomic_store(&g_lc_finished, 1); kl_http_server_stop(s); return; }
 
     if (!kl_lwr_lc_done()) { kl_timer_add(&s->ev, 5, lc_poll, s); return; }
 
@@ -420,26 +420,26 @@ static void *lc_thread(void *arg) {
     (void)arg;
     kl_timer_add(&g_lcs.ev, 20, lc_start, NULL);
     kl_timer_add(&g_lcs.ev, 60, lc_poll, &g_lcs);
-    kl_server_run(&g_lcs);
+    kl_http_server_run(&g_lcs);
     return NULL;
 }
 
 static int run_lifetime(void) {
-    KlConfig cfg = { .port = LC_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = LC_PORT, .bind_addr = "127.0.0.1",
                      .max_connections = 8,
                      .event_provider = kl_event_provider_lwip_raw() };
-    if (kl_server_init(&g_lcs, &cfg) != 0) { printf("B FAIL: lc server_init\n"); return 1; }
-    kl_server_route(&g_lcs, "GET", "/s", handle_size, NULL, NULL);
+    if (kl_http_server_init(&g_lcs, &cfg) != 0) { printf("B FAIL: lc server_init\n"); return 1; }
+    kl_http_server_route(&g_lcs, "GET", "/s", handle_size, NULL, NULL);
     atomic_store(&g_lc_finished, 0); atomic_store(&g_lc_fail, 0);
     kl_lwr_lc_reset_counter();
 
     pthread_t th;
     if (pthread_create(&th, NULL, lc_thread, NULL) != 0) {
-        printf("B FAIL: lc pthread_create\n"); kl_server_free(&g_lcs); return 1;
+        printf("B FAIL: lc pthread_create\n"); kl_http_server_free(&g_lcs); return 1;
     }
     run_watchdog(&g_lc_finished, &g_lcs, 4000);
     pthread_join(th, NULL);
-    kl_server_free(&g_lcs);
+    kl_http_server_free(&g_lcs);
     free(g_lc_req); g_lc_req = NULL;
     return atomic_load(&g_lc_fail) ? 1 : 0;
 }
@@ -450,7 +450,7 @@ static int run_lifetime(void) {
  * -> the driver closes. The client should see NO complete body (declared length never satisfied)
  * and the SERVER must survive to serve a follow-up healthy request. */
 #define FE_PORT 7812
-static KlServer g_fes;
+static KlHttpServer g_fes;
 static atomic_int g_fe_finished, g_fe_fail;
 enum { FE_TRUNC = 0, FE_HEALTHY, FE_DONE };
 static int g_fe_stage, g_fe_deadline, g_fe_started, g_fe_await;
@@ -458,8 +458,8 @@ static char *g_fe_req;
 static size_t g_fe_req_len;
 
 static void fe_poll(void *ud) {
-    KlServer *s = ud;
-    if (g_fe_stage == FE_DONE) { atomic_store(&g_fe_finished, 1); kl_server_stop(s); return; }
+    KlHttpServer *s = ud;
+    if (g_fe_stage == FE_DONE) { atomic_store(&g_fe_finished, 1); kl_http_server_stop(s); return; }
 
     if (g_fe_stage == FE_TRUNC) {
         if (!g_fe_started) {
@@ -479,7 +479,7 @@ static void fe_poll(void *ud) {
         if (blen >= 4u * 1024u * 1024u) {
             atomic_store(&g_fe_fail, 1);
             printf("B FAIL (file-read-error): got a COMPLETE body from a truncated file\n");
-            atomic_store(&g_fe_finished, 1); kl_server_stop(s); return;
+            atomic_store(&g_fe_finished, 1); kl_http_server_stop(s); return;
         }
         if (kl_lwr_client_closed() || --g_fe_deadline <= 0) {
             printf("PASS B (file read error mid-send -> failed terminal, conn closed)\n");
@@ -520,7 +520,7 @@ static void fe_start(void *ud) { (void)ud; g_fe_stage = FE_TRUNC; g_fe_await = 0
 static void *fe_thread(void *arg) {
     (void)arg;
     kl_timer_add(&g_fes.ev, 20, fe_start, &g_fes);
-    kl_server_run(&g_fes);
+    kl_http_server_run(&g_fes);
     return NULL;
 }
 
@@ -531,21 +531,21 @@ static int run_file_error(void) {
     if (fd < 0) { printf("B FAIL: fe make_pattern_file\n"); return 1; }
     close(fd);
 
-    KlConfig cfg = { .port = FE_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = FE_PORT, .bind_addr = "127.0.0.1",
                      .max_connections = 8,
                      .event_provider = kl_event_provider_lwip_raw() };
-    if (kl_server_init(&g_fes, &cfg) != 0) { printf("B FAIL: fe server_init\n"); unlink(g_file_path); return 1; }
-    kl_server_route(&g_fes, "GET", "/f", handle_file, NULL, NULL);
-    kl_server_route(&g_fes, "GET", "/s", handle_size, NULL, NULL);
+    if (kl_http_server_init(&g_fes, &cfg) != 0) { printf("B FAIL: fe server_init\n"); unlink(g_file_path); return 1; }
+    kl_http_server_route(&g_fes, "GET", "/f", handle_file, NULL, NULL);
+    kl_http_server_route(&g_fes, "GET", "/s", handle_size, NULL, NULL);
     atomic_store(&g_fe_finished, 0); atomic_store(&g_fe_fail, 0);
 
     pthread_t th;
     if (pthread_create(&th, NULL, fe_thread, NULL) != 0) {
-        printf("B FAIL: fe pthread_create\n"); kl_server_free(&g_fes); unlink(g_file_path); return 1;
+        printf("B FAIL: fe pthread_create\n"); kl_http_server_free(&g_fes); unlink(g_file_path); return 1;
     }
     run_watchdog(&g_fe_finished, &g_fes, 4000);
     pthread_join(th, NULL);
-    kl_server_free(&g_fes);
+    kl_http_server_free(&g_fes);
     free(g_fe_req); g_fe_req = NULL;
     unlink(g_file_path);
     return atomic_load(&g_fe_fail) ? 1 : 0;
@@ -564,15 +564,15 @@ static int run_fail_alloc(void) {
         cnt_reset();
         atomic_store(&g_cnt.fail_at, fp);
         KlAllocator alloc = counting_alloc();
-        KlConfig cfg = { .port = FA_PORT, .bind_addr = "127.0.0.1",
+        KlHttpServerConfig cfg = { .port = FA_PORT, .bind_addr = "127.0.0.1",
                          .max_connections = 8,
                          .event_provider = kl_event_provider_lwip_raw(),
                          .alloc = &alloc };
-        KlServer s;
-        int rc = kl_server_init(&s, &cfg);
+        KlHttpServer s;
+        int rc = kl_http_server_init(&s, &cfg);
         if (rc == 0) {
             /* This fail point didn't hit a required alloc — clean up and try the next. */
-            kl_server_free(&s);
+            kl_http_server_free(&s);
         } else {
             any_fail_seen = 1;   /* init failed cleanly (no crash) — good */
         }
@@ -581,16 +581,16 @@ static int run_fail_alloc(void) {
      * guard was left set by the earlier failures. */
     cnt_reset();
     KlAllocator alloc = counting_alloc();
-    KlConfig cfg = { .port = FA_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = FA_PORT, .bind_addr = "127.0.0.1",
                      .max_connections = 8,
                      .event_provider = kl_event_provider_lwip_raw(),
                      .alloc = &alloc };
-    KlServer s;
-    if (kl_server_init(&s, &cfg) != 0) {
+    KlHttpServer s;
+    if (kl_http_server_init(&s, &cfg) != 0) {
         printf("B FAIL: clean init after failing-alloc runs did NOT succeed (stale ctx guard?)\n");
         return 1;
     }
-    kl_server_free(&s);
+    kl_http_server_free(&s);
     printf("PASS B (failing allocator at ctx create: %s; clean init recovers)\n",
            any_fail_seen ? "init failed cleanly" : "no required alloc hit (still clean)");
     return 0;
@@ -603,7 +603,7 @@ static int run_fail_alloc(void) {
  * larger file's peak growth is within B6_PEAK_SLACK of the smaller file's — transmit memory is
  * bounded by the fixed TX window, NOT the file (a whole-file read would make it 4x larger). */
 #define FB_PORT 7814
-static KlServer g_fbs;
+static KlHttpServer g_fbs;
 static atomic_int g_fb_finished, g_fb_fail;
 /* Stages: 0 = WARMUP (small file, growth discarded — forces all lazy per-conn server buffers to
  * be allocated so they don't count as "growth" in the measured stages); 1 = measure small; 2 =
@@ -620,8 +620,8 @@ static size_t fb_size_for(int stage) {
 }
 
 static void fb_poll(void *ud) {
-    KlServer *s = ud;
-    if (g_fb_stage >= 3) { atomic_store(&g_fb_finished, 1); kl_server_stop(s); return; }
+    KlHttpServer *s = ud;
+    if (g_fb_stage >= 3) { atomic_store(&g_fb_finished, 1); kl_http_server_stop(s); return; }
     size_t fsz = fb_size_for(g_fb_stage);
 
     if (!g_fb_started) {
@@ -630,7 +630,7 @@ static void fb_poll(void *ud) {
         /* Rebuild the on-disk file at this stage's size. */
         int fd = make_pattern_file((off_t)fsz);
         if (fd < 0) { atomic_store(&g_fb_fail, 1); atomic_store(&g_fb_finished, 1);
-                      kl_server_stop(s); return; }
+                      kl_http_server_stop(s); return; }
         close(fd);
         g_resp_size = 0; g_file_size = (off_t)fsz; g_file_truncate = 0;
         g_fb_baseline = atomic_load(&g_cnt.live);       /* clean baseline before this send */
@@ -652,7 +652,7 @@ static void fb_poll(void *ud) {
             atomic_store(&g_fb_fail, 1);
             printf("B FAIL (file bounded-mem @%zuMiB): blen %zu/%zu chk mismatch\n",
                    fsz / (1024*1024), blen, fsz);
-            atomic_store(&g_fb_finished, 1); kl_server_stop(s); return;
+            atomic_store(&g_fb_finished, 1); kl_http_server_stop(s); return;
         }
         g_fb_growth[g_fb_stage] = growth;
         printf("     file %zuMiB (%s): byte-exact, peak growth during send = %zu bytes\n",
@@ -676,13 +676,13 @@ static void fb_poll(void *ud) {
                        B6_FILE_SMALL/(1024u*1024u), small, B6_FILE_LARGE/(1024u*1024u), large,
                        delta, B6_PEAK_SLACK);
             }
-            atomic_store(&g_fb_finished, 1); kl_server_stop(s); return;
+            atomic_store(&g_fb_finished, 1); kl_http_server_stop(s); return;
         }
     } else if (--g_fb_deadline <= 0) {
         atomic_store(&g_fb_fail, 1);
         printf("B FAIL (file bounded-mem @%zuMiB): timed out %zu/%zu\n",
                fsz / (1024*1024), blen, fsz);
-        atomic_store(&g_fb_finished, 1); kl_server_stop(s); return;
+        atomic_store(&g_fb_finished, 1); kl_http_server_stop(s); return;
     }
     if (atomic_load(&g_fb_finished)) return;
     kl_timer_add(&s->ev, 5, fb_poll, s);
@@ -691,29 +691,29 @@ static void fb_poll(void *ud) {
 static void *fb_thread(void *arg) {
     (void)arg;
     kl_timer_add(&g_fbs.ev, 30, fb_poll, &g_fbs);
-    kl_server_run(&g_fbs);
+    kl_http_server_run(&g_fbs);
     return NULL;
 }
 
 static int run_file_bounded(void) {
     cnt_reset();
     KlAllocator alloc = counting_alloc();
-    KlConfig cfg = { .port = FB_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = FB_PORT, .bind_addr = "127.0.0.1",
                      .max_connections = 8,
                      .event_provider = kl_event_provider_lwip_raw(),
                      .alloc = &alloc };
-    if (kl_server_init(&g_fbs, &cfg) != 0) { printf("B FAIL: fb server_init\n"); return 1; }
-    kl_server_route(&g_fbs, "GET", "/f", handle_file, NULL, NULL);
+    if (kl_http_server_init(&g_fbs, &cfg) != 0) { printf("B FAIL: fb server_init\n"); return 1; }
+    kl_http_server_route(&g_fbs, "GET", "/f", handle_file, NULL, NULL);
     atomic_store(&g_fb_finished, 0); atomic_store(&g_fb_fail, 0);
     g_fb_stage = 0; g_fb_started = 0; g_fb_await = 0;
 
     pthread_t th;
     if (pthread_create(&th, NULL, fb_thread, NULL) != 0) {
-        printf("B FAIL: fb pthread_create\n"); kl_server_free(&g_fbs); return 1;
+        printf("B FAIL: fb pthread_create\n"); kl_http_server_free(&g_fbs); return 1;
     }
     run_watchdog(&g_fb_finished, &g_fbs, 8000);
     pthread_join(th, NULL);
-    kl_server_free(&g_fbs);
+    kl_http_server_free(&g_fbs);
     kl_lwr_client_release();
     free(g_fb_req); g_fb_req = NULL;
     unlink(g_file_path);

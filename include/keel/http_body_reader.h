@@ -1,5 +1,5 @@
-#ifndef KEEL_BODY_READER_H
-#define KEEL_BODY_READER_H
+#ifndef KEEL_HTTP_BODY_READER_H
+#define KEEL_HTTP_BODY_READER_H
 
 #include <keel/allocator.h>
 #include <stddef.h>
@@ -16,22 +16,22 @@ typedef struct KlHttpRequest KlHttpRequest;
  * multiple socket reads.  Handlers should access body data exclusively
  * through the body reader, not through KlHttpRequest header fields.
  */
-typedef struct KlBodyReader KlBodyReader;
+typedef struct KlHttpBodyReader KlHttpBodyReader;
 
-struct KlBodyReader {
-    int  (*on_data)(KlBodyReader *self, const char *data, size_t len); /**< Feed body chunk; return -1 to abort */
-    void (*on_complete)(KlBodyReader *self);  /**< End of body signal */
-    void (*on_error)(KlBodyReader *self);     /**< Connection error cleanup */
-    void (*destroy)(KlBodyReader *self);      /**< Free all reader resources */
+struct KlHttpBodyReader {
+    int  (*on_data)(KlHttpBodyReader *self, const char *data, size_t len); /**< Feed body chunk; return -1 to abort */
+    void (*on_complete)(KlHttpBodyReader *self);  /**< End of body signal */
+    void (*on_error)(KlHttpBodyReader *self);     /**< Connection error cleanup */
+    void (*destroy)(KlHttpBodyReader *self);      /**< Free all reader resources */
 };
 
 /**
  * @brief Factory creates a body reader for a given request.
  *
- * user_data is the value passed to kl_server_route / kl_router_add.
+ * user_data is the value passed to kl_http_server_route / kl_http_router_add.
  * Return NULL to reject the request (KEEL sends 415 and closes).
  */
-typedef KlBodyReader *(*KlBodyReaderFactory)(KlAllocator *alloc,
+typedef KlHttpBodyReader *(*KlHttpBodyReaderFactory)(KlAllocator *alloc,
                                               const KlHttpRequest *req,
                                               void *user_data);
 
@@ -43,13 +43,13 @@ typedef KlBodyReader *(*KlBodyReaderFactory)(KlAllocator *alloc,
  * on_data, which aborts the parse and sends 413.
  */
 typedef struct {
-    KlBodyReader base;  /**< Base body reader vtable */
+    KlHttpBodyReader base;  /**< Base body reader vtable */
     KlAllocator *alloc; /**< Allocator for buffer growth */
     char *data;         /**< Accumulated body data */
     size_t len;         /**< Current data length */
     size_t cap;         /**< Buffer capacity */
     size_t max_size;    /**< 0 = unlimited */
-} KlBufReader;
+} KlHttpBufReader;
 
 /**
  * @brief Factory: create a buffer body reader.
@@ -62,7 +62,7 @@ typedef struct {
  * @param user_data Cast to size_t max_size limit.
  * @return Body reader, or NULL on allocation failure.
  */
-KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, const KlHttpRequest *req,
+KlHttpBodyReader *kl_http_body_reader_buffer(KlAllocator *alloc, const KlHttpRequest *req,
                                      void *user_data);
 
 #endif

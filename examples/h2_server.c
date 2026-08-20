@@ -102,17 +102,17 @@ int main(int argc, char **argv) {
         /* 0 = use defaults (128 streams, 65535 window) */
     };
 
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = port,
         .h2 = &h2_cfg,
     };
 
-    if (kl_server_init(&s, &cfg) < 0) return 1;
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
 
     fprintf(stderr, "h2_server: HTTP/2 enabled on port %d\n", port);
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

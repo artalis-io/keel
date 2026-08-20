@@ -26,7 +26,7 @@
 
 typedef struct {
     KlAsyncOp op;
-    KlServer *server;
+    KlHttpServer *server;
     KlThreadPool *pool;
     int work_ms;
     int result;
@@ -70,7 +70,7 @@ static void cancel_fn(void *user_data) {
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
 typedef struct {
-    KlServer *server;
+    KlHttpServer *server;
     KlThreadPool *pool;
 } AppCtx;
 
@@ -123,34 +123,34 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 /* ── Main ───────────────────────────────────────────────────────────── */
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8080,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
     KlThreadPoolConfig pool_cfg = {.num_workers = 4};
     KlThreadPool *pool = kl_thread_pool_create(&s.ev, &pool_cfg);
     if (!pool) {
         fprintf(stderr, "thread pool creation failed\n");
-        kl_server_free(&s);
+        kl_http_server_free(&s);
         return 1;
     }
 
     AppCtx app = {.server = &s, .pool = pool};
 
-    kl_server_route(&s, "GET", "/",     handle_hello, NULL, NULL);
-    kl_server_route(&s, "GET", "/fast", handle_fast,  &app, NULL);
-    kl_server_route(&s, "GET", "/slow", handle_slow,  &app, NULL);
+    kl_http_server_route(&s, "GET", "/",     handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/fast", handle_fast,  &app, NULL);
+    kl_http_server_route(&s, "GET", "/slow", handle_slow,  &app, NULL);
 
     printf("async_thread_pool example listening on :8080\n");
     printf("  curl localhost:8080/fast   # 10ms work\n");
     printf("  curl localhost:8080/slow   # 200ms work\n");
     printf("  curl localhost:8080/       # immediate\n");
-    kl_server_run(&s);
+    kl_http_server_run(&s);
 
     kl_thread_pool_free(pool);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
     return 0;
 }

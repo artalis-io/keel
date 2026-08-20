@@ -19,11 +19,11 @@
  * Contains NO platform (Win32/IOCP) type or symbol — a future io_uring-completion /
  * POSIX-AIO backend reuses it verbatim. See docs/phase8b_iocp_breadth_design.md.
  */
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include <keel/tls.h>            /* KlTls vtable ops — TLS-over-completion (8b-5b) */
 #include <keel/event_ctx.h>      /* KlEventCtx (comp_conn_dispatch hook) */
-#include "internal.h"            /* kl_server_conn_release */
+#include "internal.h"            /* kl_http_server_conn_release */
 #include "http_conn_internal.h"       /* kl_http_conn_dispatch_request / kl_http_conn_send_complete */
 #include "http_response_internal.h"   /* kl_http_response_build_iovec */
 #include "completion.h"          /* the abstract completion axis */
@@ -33,7 +33,7 @@
 #include <keel/sockaddr.h>       /* kl_sockaddr_family — neutral accept addrs from the event */
 #include "platform.h"            /* kl_plat_file_pread — TLS file body chunks (8c-2) */
 #include <keel/proxy_protocol.h> /* kl_cidr_match — PROXY-over-completion accept gate */
-#include "proto_hooks.h"         /* ws/h2 upgrade + completion-drive seams */
+#include "http_proto_hooks.h"         /* ws/h2 upgrade + completion-drive seams */
 #include <string.h>
 #include <stddef.h>              /* offsetof (server_of_ctx containerof) */
 #include <stdint.h>              /* SIZE_MAX */
@@ -53,8 +53,8 @@
 #define KL_COMP_TLS_FILE_CHUNK 16384
 
 /* Exported (completion_internal.h): release the connection. Called by the h2/ws drives. */
-void kl_comp_close(struct KlServer *s, KlHttpConn *c) {
-    kl_server_conn_release(s, c);   /* closes the socket + returns the pool slot */
+void kl_comp_close(struct KlHttpServer *s, KlHttpConn *c) {
+    kl_http_server_conn_release(s, c);   /* closes the socket + returns the pool slot */
 }
 
 /* Recover the containing KlHttpConn from a completion event's KlStream target. KlStream is the
@@ -75,7 +75,7 @@ static inline KlHttpConn *conn_of_stream(KlStream *st) {
  *   - ordinary plaintext → the read_buf sliding window. */
 int kl_comp_post_recv(KlHttpConn *c) {
     if (c->tls && c->state != KL_HTTP_CONN_PROXY_HEADER) {
-        /* comp_cipher is preallocated at server init for TLS+completion slots (kl_server_init);
+        /* comp_cipher is preallocated at server init for TLS+completion slots (kl_http_server_init);
          * a NULL here is a misconfiguration, not a runtime allocation — fail the recv. */
         if (!c->comp_cipher) return -1;
         return kl_comp_post_recv_raw(&c->stream, c->comp_cipher, c->comp_cipher_cap);
@@ -110,7 +110,7 @@ static int comp_send_response(KlHttpConn *c) {
  * the next receive. The body core (kl_http_conn_ingest_body) feeds read_buf[0..nread].
  * Read-side flow control (kl_http_request_pause_body): while paused, do NOT post the next recv —
  * the conn parks with no outstanding op until kl_http_request_resume_body re-posts it. */
-static void comp_start_body_read(struct KlServer *s, KlHttpConn *c) {
+static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
     c->stream.read_len = 0;
     if (c->stream.read_paused) return;   /* paused — resume re-posts via kl_io_engine_post_read */
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
@@ -124,7 +124,7 @@ static void comp_start_body_read(struct KlServer *s, KlHttpConn *c) {
  * backend surfaces one KL_COMP_WRITE when the whole chunk is out, at which point
  * comp_on_write pumps again — posting freshly-produced bytes (async producer) or completing
  * the response once the stream ended and the buffer drained. */
-static void comp_stream_pump(struct KlServer *s, KlHttpConn *c) {
+static void comp_stream_pump(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->res.stream_inflight)
         return;   /* a send is already in flight — its completion pumps the next */
 
@@ -150,7 +150,7 @@ static void comp_stream_pump(struct KlServer *s, KlHttpConn *c) {
     }
 }
 
-static void comp_send_stream(struct KlServer *s, KlHttpConn *c) {
+static void comp_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->res.drain_enabled) {   /* 8g-1: overlapped, non-blocking flush (no HOL) */
         comp_stream_pump(s, c);
         return;
@@ -295,7 +295,7 @@ static int comp_tls_send_file_chunk(KlHttpConn *c) {
  * blocks the loop. Buffered bodies go in one send. A file body sends the head here; its
  * bytes stream as overlapped chunks on subsequent WRITE completions (comp_on_write →
  * send_file_chunk). Streaming is handled by comp_tls_send_stream. */
-static void comp_tls_send_response(struct KlServer *s, KlHttpConn *c) {
+static void comp_tls_send_response(struct KlHttpServer *s, KlHttpConn *c) {
     char cl_buf[48];
     KlIoVec iov[7];
     size_t total = 0;
@@ -312,7 +312,7 @@ static void comp_tls_send_response(struct KlServer *s, KlHttpConn *c) {
  * (same synchronous-stream subset + head-of-line caveat); a single synchronous batch is
  * bounded by the TLS out-ring cap. Reuses only kl_http_response_send + the vtable — no
  * platform symbol. */
-static void comp_tls_send_stream(struct KlServer *s, KlHttpConn *c) {
+static void comp_tls_send_stream(struct KlHttpServer *s, KlHttpConn *c) {
     int r;
     do {
         r = kl_http_response_send(&c->res);         /* encrypts chunks into the out ring */
@@ -328,7 +328,7 @@ static void comp_tls_send_stream(struct KlServer *s, KlHttpConn *c) {
 }
 
 /* Act on the state a completed request produced. */
-static void comp_after_state(struct KlServer *s, KlHttpConn *c, KlHttpConnState st) {
+static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnState st) {
     if (st == KL_HTTP_CONN_SENDING) {
         if (c->tls) {
             if (c->res.body_mode == KL_HTTP_BODY_STREAM)
@@ -376,7 +376,7 @@ static void comp_after_state(struct KlServer *s, KlHttpConn *c, KlHttpConnState 
  * if more header bytes are needed (caller posts the next read, per its transport), 0
  * if the request was dispatched/acted-on (or the connection was closed). Split out so
  * the TLS read loop can reuse it across coalesced records via pending(). */
-static int comp_try_reading(struct KlServer *s, KlHttpConn *c) {
+static int comp_try_reading(struct KlHttpServer *s, KlHttpConn *c) {
     /* HTTP/2 prior-knowledge connection preface (before the HTTP/1.1 parser, 8d-2) —
      * mirrors the readiness read loop. A client with prior knowledge opens straight
      * into h2 by sending the 24-byte preface; upgrade and feed the leftover. */
@@ -411,13 +411,13 @@ static int comp_try_reading(struct KlServer *s, KlHttpConn *c) {
 }
 
 /* Plaintext headers path: parse what's in read_buf; on need-more, post a read. */
-static void comp_drive_reading(struct KlServer *s, KlHttpConn *c) {
+static void comp_drive_reading(struct KlHttpServer *s, KlHttpConn *c) {
     if (comp_try_reading(s, c) == 1 && kl_comp_post_recv(c) < 0)
         kl_comp_close(s, c);
 }
 
 /* Feed a completed body read through the model-blind body core, then act. */
-static void comp_drive_body(struct KlServer *s, KlHttpConn *c) {
+static void comp_drive_body(struct KlHttpServer *s, KlHttpConn *c) {
     comp_after_state(s, c, kl_http_conn_ingest_body(c, c->stream.read_len));
 }
 
@@ -427,7 +427,7 @@ static void comp_drive_body(struct KlServer *s, KlHttpConn *c) {
  * kl_http_conn_ingest_body verbatim. Because TLS records can arrive coalesced in one recv,
  * each decrypt phase loops on pending() so buffered plaintext isn't stranded waiting
  * for the next network read. Ciphertext output is flushed synchronously. */
-static void comp_tls_drive(struct KlServer *s, KlHttpConn *c) {
+static void comp_tls_drive(struct KlHttpServer *s, KlHttpConn *c) {
     /* Upgraded connections drive through the completion-drive seam (NULL in a
      * freestanding HTTP/1.1 build, which never reaches these states). */
     if (c->state == KL_HTTP_CONN_HTTP2) {
@@ -505,10 +505,10 @@ static void comp_tls_drive(struct KlServer *s, KlHttpConn *c) {
  * peer address + response allocator, choose the initial state (PROXY header / TLS handshake / HTTP
  * read), register the socket with the loop (identity = the raw KlStream), and post the first recv.
  * `lease` is the pool-owned release capability committed to this conn (consumed exactly once on
- * close via kl_server_conn_release); on the legacy autonomous path it is a zero lease (no credit
+ * close via kl_http_server_conn_release); on the legacy autonomous path it is a zero lease (no credit
  * accounting). On ANY failure the fd is closed and the lease consumed — the caller must not touch
  * `fd` afterward. Shared by the post-driven listener hook and the autonomous accept path. */
-static void comp_setup_accepted(struct KlServer *s, KlSocketHandle fd,
+static void comp_setup_accepted(struct KlHttpServer *s, KlSocketHandle fd,
                                 const KlSockAddr *peer, KlSlotLease lease) {
     KlHttpConn *nc = kl_http_conn_acquire(&s->pool, fd);
     if (!nc) {
@@ -571,30 +571,30 @@ static void comp_setup_accepted(struct KlServer *s, KlSocketHandle fd,
  * queues the rest) instead of accept-and-dropping when the pool is full. Autonomous backends
  * (EFI/lwip, prime_accepts → 0) keep their own capacity gate and never install this. ───────────── */
 static int comp_accept_reserve(void *ctx) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     return kl_http_conn_pool_reserve(&s->pool);
 }
 static void comp_accept_release(void *ctx) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     kl_http_conn_pool_return_credit(&s->pool);               /* free_credits++ ... */
     kl_listener_notify_slot_free(&s->accept_listener);  /* ...then resume the accept if paused */
 }
 static int comp_accept_arm(void *ctx) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     return kl_comp_post_accept(s);                       /* post ONE accept op */
 }
 static void comp_accept_cancel(void *ctx) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     /* Batch-cancel every posted accept on the listen fd; each completes as failed
      * (kl_listener_on_accept_failed → returns its credit + decrements inflight), so the
      * listener detaches only once every posted accept has retired (confirmed detachment). */
     kl_comp_cancel(&s->ev, s->listen_fd);
 }
 static void comp_accept_dispose(void *ctx, KlSocketHandle fd) {
-    kl_sock_close(((KlServer *)ctx)->ev.sockets, fd);   /* no local var: read-only, keep ctx void* */
+    kl_sock_close(((KlHttpServer *)ctx)->ev.sockets, fd);   /* no local var: read-only, keep ctx void* */
 }
 static void comp_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease lease) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     /* Commit the reserved credit to a KlHttpConn. The peer was stashed on the server just before
      * kl_listener_on_accepted (single-threaded, consumed immediately) — mirrors server.c. */
     comp_setup_accepted(s, fd, &s->accept_pending_peer, lease);
@@ -603,7 +603,7 @@ static void comp_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease leas
 /* Init + start the completion-mode KlListener with the backend's accept window. The reserve/release
  * hooks are the split-credit pool ops (same accounting as readiness); arm posts one accept, cancel
  * batch-cancels the whole window. Returns 0 on success, -1 on a listener setup failure. */
-static int comp_accept_listener_start(KlServer *s, int window) {
+static int comp_accept_listener_start(KlHttpServer *s, int window) {
     s->accept_alive = 1;                                /* liveness token live before any lease issues */
     KlListenerHooks h = {
         .reserve = comp_accept_reserve, .release = comp_accept_release, .credit_ctx = s,
@@ -616,7 +616,7 @@ static int comp_accept_listener_start(KlServer *s, int window) {
     return kl_listener_start(&s->accept_listener);
 }
 
-static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
+static void comp_on_accept(struct KlHttpServer *s, const KlCompletionEvent *ev) {
 #ifndef KEEL_FREESTANDING
     /* Register the completion-mode ws/h2 drive tables once, and (the reason this is
      * an explicit installer call, not a constructor) pull completion_ws.o /
@@ -661,7 +661,7 @@ static void comp_on_accept(struct KlServer *s, const KlCompletionEvent *ev) {
  * initial state — TLS handshake (enable the memory-BIO, feed the buffered ClientHello) or HTTP
  * read — processing any bytes that followed the header this tick. The header recv is plaintext
  * even for a TLS conn (post_recv skips the TLS branch while state == KL_HTTP_CONN_PROXY_HEADER). */
-static void comp_drive_proxy(struct KlServer *s, KlHttpConn *c) {
+static void comp_drive_proxy(struct KlHttpServer *s, KlHttpConn *c) {
     int consumed = kl_http_conn_ingest_proxy(c, c->stream.read_len);
     if (consumed == -1) { kl_comp_close(s, c); return; }       /* malformed / oversized */
     if (consumed == -2) {                                    /* need more header bytes */
@@ -693,7 +693,7 @@ static void comp_drive_proxy(struct KlServer *s, KlHttpConn *c) {
     }
 }
 
-static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
+static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }   /* peer closed */
     /* PROXY header phase (plaintext, before TLS/HTTP) — must run before the TLS branch since a
@@ -729,7 +729,7 @@ static void comp_on_read(struct KlServer *s, const KlCompletionEvent *ev) {
         comp_drive_reading(s, c);
 }
 
-static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
+static void comp_on_write(struct KlHttpServer *s, const KlCompletionEvent *ev) {
     KlHttpConn *c = conn_of_stream(ev->target);
     if (!ev->ok || ev->bytes == 0) { kl_comp_close(s, c); return; }
     /* h2 output send completed (8d-3): the frames produced by the last feed are out —
@@ -767,9 +767,9 @@ static void comp_on_write(struct KlServer *s, const KlCompletionEvent *ev) {
 
 /* Recover the server from its embedded event ctx. Every pooled connection's ctx is
  * &server->ev, and conn/accept completions only occur on a server's loop — so this
- * containerof is valid wherever it is used, without a public KlHttpConn/KlServer field. */
-static inline struct KlServer *server_of_ctx(struct KlEventCtx *ctx) {
-    return (struct KlServer *)((char *)ctx - offsetof(struct KlServer, ev));
+ * containerof is valid wherever it is used, without a public KlHttpConn/KlHttpServer field. */
+static inline struct KlHttpServer *server_of_ctx(struct KlEventCtx *ctx) {
+    return (struct KlHttpServer *)((char *)ctx - offsetof(struct KlHttpServer, ev));
 }
 
 /* The comp_conn_dispatch hook (completion_core.c → here): route a TCP conn completion
@@ -799,7 +799,7 @@ static void comp_server_conn_dispatch(struct KlEventCtx *ctx, const void *evp) {
  * drive the completion send path for the state on_resume produced — the same path a
  * normal request's dispatch takes. The io_engine seam kl_async_complete calls (only on a
  * completion loop). Keeps the async runtime free of completion knowledge. */
-void kl_io_engine_resume_completion(struct KlServer *s, struct KlHttpConn *conn) {
+void kl_io_engine_resume_completion(struct KlHttpServer *s, struct KlHttpConn *conn) {
     if (conn->state == KL_HTTP_CONN_READING) {   /* handler yielded without a response — read on */
         conn->stream.read_len = 0;
         if (kl_comp_post_recv(conn) < 0) kl_comp_close(s, conn);
@@ -826,7 +826,7 @@ void kl_io_engine_post_read(struct KlHttpConn *c) {
  * posted accept and PAUSEs (kernel backlog queues) when the pool is full instead of accept-and-
  * dropping. window==0 is an AUTONOMOUS backend (EFI/lwip) that gates capacity in its own drain; it
  * gets no listener and is re-primed each tick so a freed slot re-opens its gate (EFI top-up). */
-int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
+int kl_io_engine_run_completion(struct KlHttpServer *s, int timeout_ms) {
     s->ev.comp_conn_dispatch = comp_server_conn_dispatch;
     if (!s->accept_setup_done) {
         int window = kl_comp_prime_accepts(s);   /* one-time setup; returns the accept window */
@@ -849,7 +849,7 @@ int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
 /* Teardown accept quiescence (6B-3 2b review v4): force every posted accept to completion, then reap
  * to CONFIRMED DETACHMENT with a TEARDOWN-SPECIFIC dispatcher — NOT the live kl_comp_run tick.
  *
- * Called from kl_server_free() AFTER higher-level consumers (async ops, file_io) are torn down, so
+ * Called from kl_http_server_free() AFTER higher-level consumers (async ops, file_io) are torn down, so
  * the live tick is unsafe here: kl_comp_run would advance the HTTP state machine on READ/WRITE, run
  * watcher/connect/UDP callbacks, and fire timers — invoking application/consumer code against
  * logically destroyed state. Instead this drains raw completions (kl_comp_drain — no dispatch) and:
@@ -863,7 +863,7 @@ int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms) {
  * blocking kl_comp_drain reaps the pending completions. Returns 0, or -1 if the force could not be
  * guaranteed (caller leaves the backend close as the physical backstop). The listen socket must be
  * closed by the caller first (forces IOCP AcceptEx completion). */
-int kl_io_engine_quiesce_accepts(struct KlServer *s) {
+int kl_io_engine_quiesce_accepts(struct KlHttpServer *s) {
     if (kl_comp_shutdown_accepts(s) < 0) return -1;
     while (!kl_listener_is_detached(&s->accept_listener)) {
         KlCompletionEvent evs[KL_COMP_MAX_EVENTS];

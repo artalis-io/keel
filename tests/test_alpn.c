@@ -22,7 +22,7 @@
 /* ── shared router + handler (protocol-independent) ─────────────────── */
 
 static KlAllocator  ta_alloc;
-static KlRouter     ta_router;
+static KlHttpRouter     ta_router;
 static int          ta_handler_calls;
 static int          ta_mw_calls;
 static char         ta_seen_host[128];
@@ -47,14 +47,14 @@ static int ta_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 
 static void ta_setup(void) {
     ta_alloc = kl_allocator_default();
-    kl_router_init(&ta_router, &ta_alloc);
-    kl_router_add(&ta_router, "GET", "/x", ta_handler, NULL, NULL);
-    kl_router_use(&ta_router, "GET", "/*", ta_middleware, NULL);
+    kl_http_router_init(&ta_router, &ta_alloc);
+    kl_http_router_add(&ta_router, "GET", "/x", ta_handler, NULL, NULL);
+    kl_http_router_use(&ta_router, "GET", "/*", ta_middleware, NULL);
     ta_handler_calls = ta_mw_calls = ta_seen_version = 0;
     ta_seen_host[0] = '\0';
     mock_tls_alpn = NULL;
 }
-static void ta_teardown(void) { kl_router_free(&ta_router); mock_tls_alpn = NULL; }
+static void ta_teardown(void) { kl_http_router_free(&ta_router); mock_tls_alpn = NULL; }
 
 /* ── minimal capturing HTTP/2 session (records KEEL's callbacks) ────── */
 
@@ -171,8 +171,8 @@ UTEST(alpn, http2_request_uses_shared_rest_layer) {
     ta_cap = NULL;
 
     /* Confirm the SAME router entry an HTTP/1.1 request would hit. */
-    KlRoute *route = NULL; KlParam params[8]; int nparams = 0;
-    int rr = kl_router_match(&ta_router, "GET", 3, "/x", 2, &route, params, &nparams);
+    KlHttpRoute *route = NULL; KlHttpParam params[8]; int nparams = 0;
+    int rr = kl_http_router_match(&ta_router, "GET", 3, "/x", 2, &route, params, &nparams);
     ASSERT_EQ(rr, 200);
     ASSERT_TRUE(route != NULL && route->handler == ta_handler);
 

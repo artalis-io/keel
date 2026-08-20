@@ -20,7 +20,7 @@
  * like the readiness event_lwip.c: static ops grouped in a KlEventProvider, NO
  * kl_event_*_builtin / kl_comp_ops_builtin symbols. It links cleanly next to a STOCK
  * libkeel (whose default backend already defines those _builtin symbols) and is installed
- * at runtime via kl_event_provider_lwip_raw() (KlConfig.event_provider /
+ * at runtime via kl_event_provider_lwip_raw() (KlHttpServerConfig.event_provider /
  * kl_event_ctx_init_ex). The always-linked driver+dispatch in the stock lib reach this
  * backend's primitives through loop->ops->completion. BACKEND=lwipraw is retired.
  *
@@ -66,7 +66,7 @@
 #include <keel/event.h>
 #include <keel/event_ctx.h>    /* KlEventCtx — kl_comp_drain reaches loop._backend */
 #include <keel/http_connection.h>   /* KlStream — fd / ctx / alloc (raw transport target) */
-#include <keel/server.h>       /* KlServer — listen_fd (prime accepts) */
+#include <keel/http_server.h>       /* KlHttpServer — listen_fd (prime accepts) */
 #include <keel/allocator.h>    /* kl_malloc / kl_free */
 #include <keel/sockaddr.h>     /* KlSockAddr marshalling at the seam boundary */
 #include <keel/datagram.h>     /* KlDatagramOps (LC-3a datagram data-plane) */
@@ -121,7 +121,7 @@ typedef struct {
  * default path. Mirrors event_lwip.c. */
 
 /* Default per-conn slot capacity when the loop is created without a server (a standalone
- * KlEventCtx tick). A server sizes it AUTHORITATIVELY to KlConfig.max_connections at prime
+ * KlEventCtx tick). A server sizes it AUTHORITATIVELY to KlHttpServerConfig.max_connections at prime
  * (kl_lwr_ctx_ensure_cap). Matches KEEL's default max_connections so a default server needs no
  * regrow. */
 #define KL_LWR_DEFAULT_CONN_CAP 256
@@ -429,20 +429,20 @@ const KlSocketProvider *kl_socket_provider_lwip_raw(void) { return &lwip_raw_pro
  * callback and surface through drain's per-slot scan (below), bounded by the per-conn slot table
  * (sized to max_connections == pool capacity), NOT by posted ops. No completion KlListener is
  * installed; this one-time setup latches the relocated listen pcb. */
-static int lwr_comp_prime_accepts(struct KlServer *s) {
+static int lwr_comp_prime_accepts(struct KlHttpServer *s) {
     if (!s) return -1;
     KlLwrState *st = s->ev.loop._backend;
     if (st->primed) return 0;
     /* fix #2: unify capacity on the AUTHORITATIVE Keel limit. Size the glue's per-conn slot
      * table to max_connections (the same value that sizes s->pool) so arm/slot/accept capacity
      * are ONE number — no second, smaller limit. Grown here (before any accept); a default
-     * server needs no regrow (both default to KL_DEFAULT_MAX_CONNS). Fails init with a clear
+     * server needs no regrow (both default to KL_HTTP_SERVER_DEFAULT_MAX_CONNS). Fails init with a clear
      * error if the slot table can't be sized to the requested capacity. */
     int cap = s->config.max_connections;
     if (cap > 0 && kl_lwr_ctx_ensure_cap(st->lwrctx, cap) < 0) return -1;
     st->primed = 1;
     /* tcp_listen relocated the listen pcb (freeing the one server.c bound); adopt the live
-     * handle so s->listen_fd is valid for the eventual close (kl_server_close_listener). */
+     * handle so s->listen_fd is valid for the eventual close (kl_http_server_close_listener). */
     void *lp = kl_lwr_listen_pcb(st->lwrctx);
     if (lp) s->listen_fd = (KlSocketHandle)lp;
     /* The accept callback was armed by tcp_listen; accepts surface KL_LWR_ACCEPT via the drain's
@@ -450,7 +450,7 @@ static int lwr_comp_prime_accepts(struct KlServer *s) {
     return 0;
 }
 
-static int lwr_comp_post_accept(struct KlServer *s) {
+static int lwr_comp_post_accept(struct KlHttpServer *s) {
     /* Passive raw accept: the tcp_accept callback keeps the backlog filled on its own —
      * no per-accept op to re-post (unlike pollcomp's one accept op). Idempotent no-op. */
     (void)s;

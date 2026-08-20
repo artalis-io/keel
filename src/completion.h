@@ -24,10 +24,10 @@
 #include <stdint.h>            /* uint64_t (KlCompletionOps.post_sendfile) */
 #include <stddef.h>
 
-struct KlServer;   /* the accept ops (prime_accepts/post_accept) take it directly (6B-3) */
+struct KlHttpServer;   /* the accept ops (prime_accepts/post_accept) take it directly (6B-3) */
 
 /* KL_COMP_CIPHER_SIZE (the interim completion-mode TLS ciphertext scratch size) is an internal
- * detail defined in "internal.h", used at the allocation site (kl_server_init). The buffer's
+ * detail defined in "internal.h", used at the allocation site (kl_http_server_init). The buffer's
  * size travels with the connection as KlHttpConn.comp_cipher_cap, so this header does not need it. */
 
 /* Platform-independent completion op kinds. */
@@ -123,7 +123,7 @@ struct KlEventCtx;
  * exposes them via kl_comp_ops_builtin(). See docs/event_provider_design.md. */
 typedef struct KlCompletionOps {
     int  (*drain)(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int timeout_ms);
-    /* Accept ops take the KlServer directly (6B-3: KlAcceptTarget removed). prime_accepts is a
+    /* Accept ops take the KlHttpServer directly (6B-3: KlAcceptTarget removed). prime_accepts is a
      * one-time SETUP call that RETURNS the backend's accept window (6B-3 2b-ii) and does NOT post:
      *   >=1  post-driven — the completion KlListener drives accepts with this window, reserving one
      *        pool credit per posted accept and PAUSING (not accept-and-dropping) when the pool is
@@ -134,13 +134,13 @@ typedef struct KlCompletionOps {
      *   <0   fatal setup error.
      * post_accept posts exactly ONE accept op (post-driven backends). The server reaches its
      * pool/listen fd/event ctx as before. See docs/generic_transport_audit.md (6B-3). */
-    int  (*prime_accepts)(struct KlServer *s);
+    int  (*prime_accepts)(struct KlHttpServer *s);
     /* Raw transport I/O — the backend gets a KlStream and a caller-chosen buffer; it does
      * NOT inspect TLS/HTTP/connection state (that lives in the HTTP adapter). READ/WRITE
      * completions target the KlStream. */
     int  (*post_recv)(KlStream *stream, void *buf, size_t cap);
     int  (*post_send)(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total);
-    int  (*post_accept)(struct KlServer *s);
+    int  (*post_accept)(struct KlHttpServer *s);
     /* post_sendfile stays KlHttpConn-typed and HTTP/file-transfer-specific — NOT part of the
      * generic stream seam in Phase A (file transfer is an Optional capability; the generic
      * KlStream promises byte reads/writes only). See docs/generic_transport_audit.md §8. */
@@ -177,7 +177,7 @@ typedef struct KlCompletionOps {
      * guaranteed (the caller then skips the reap loop rather than risk an unbounded wait). Post-
      * driven backends only; an autonomous backend (EFI/lwip) never installs a listener → NULL slot,
      * treated as success (0) by kl_comp_shutdown_accepts. */
-    int (*shutdown_accepts)(struct KlServer *s);
+    int (*shutdown_accepts)(struct KlHttpServer *s);
 } KlCompletionOps;
 
 /* The compiled-in completion backend's vtable (one per completion backend TU). A
@@ -194,13 +194,13 @@ int kl_comp_drain(struct KlEventCtx *ctx, KlCompletionEvent *out, int max, int t
 
 /* Prime the server's accept backlog on its completion loop (idempotent — the backend
  * latches after the first call). Server-scoped; keeps kl_comp_drain server-agnostic. */
-int kl_comp_prime_accepts(struct KlServer *s);
+int kl_comp_prime_accepts(struct KlHttpServer *s);
 
 /* Teardown accept-side force-completion (6B-3 2b review): guarantee every posted accept will
  * complete so the caller's kl_comp_run drain reaps + retires each. See
  * KlCompletionOps.shutdown_accepts. Returns 0 (incl. a NULL/autonomous/readiness no-op), -1 if the
  * force could not be guaranteed. Call only after kl_listener_close() + closing the listen socket. */
-int kl_comp_shutdown_accepts(struct KlServer *s);
+int kl_comp_shutdown_accepts(struct KlHttpServer *s);
 
 /* HTTP-adapter helper (defined in completion_server.c): choose the receive buffer for the
  * connection's current phase — plaintext/PROXY → c->stream.read_buf; TLS → the per-conn
@@ -233,7 +233,7 @@ int kl_comp_post_send(KlHttpConn *c, const KlIoVec *iov, int iovcnt, size_t tota
 int kl_comp_post_send_raw(KlStream *stream, const KlIoVec *iov, int iovcnt, size_t total);
 
 /* Post one async accept on the server's listen socket (refill the backlog). */
-int kl_comp_post_accept(struct KlServer *s);
+int kl_comp_post_accept(struct KlHttpServer *s);
 
 /* Post one async file send: the serialized response head (`head_iov`) followed by
  * `count` bytes from `file_fd` at offset 0. On IOCP this is a single TransmitFile

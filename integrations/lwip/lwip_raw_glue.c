@@ -22,7 +22,7 @@
  *   #2 arm-capacity mismatch. The backend had a separate 8-entry armed table smaller than the
  *      glue's 32-slot conn table, itself smaller than Keel's max_connections (256). Now arm
  *      state lives in the per-conn slot (`armed`), and the slot table is sized to conn_cap =
- *      KlConfig.max_connections — ONE authoritative limit. A conn that has a slot always arms.
+ *      KlHttpServerConfig.max_connections — ONE authoritative limit. A conn that has a slot always arms.
  *
  *   #4 silent completion-ring drop. A fixed 64-entry global ring (lwr_rec_push) silently
  *      dropped completions when full — a lost terminal = a leaked/never-closed KlHttpConn. Gone:

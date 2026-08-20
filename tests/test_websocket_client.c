@@ -339,7 +339,7 @@ UTEST(wsc_config, status_codes) {
 /* ── Standalone KlEventCtx ───────────────────────────────────────── */
 
 UTEST(wsc_standalone, event_ctx_init_free) {
-    /* Proves KlEventCtx can be used without KlServer */
+    /* Proves KlEventCtx can be used without KlHttpServer */
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ev;
     int rc = kl_event_ctx_init(&ev, &alloc);

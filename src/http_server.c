@@ -1,4 +1,4 @@
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/async.h>
 #include <keel/timer.h>
 #include <keel/tls.h>
@@ -12,19 +12,19 @@
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* PAL Phase 7: event↔socket capability negotiation */
 #include "io_engine.h"    /* PAL Phase 8: completion-loop tick dispatch (IOCP) */
-#include "server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
-#include "platform.h"     /* KlPlatWakeup — self-pipe so kl_server_stop wakes the run loop */
+#include "http_server_plat.h"  /* AF_UNIX bind, peer creds, signals — per-platform, no #ifdef here */
+#include "platform.h"     /* KlPlatWakeup — self-pipe so kl_http_server_stop wakes the run loop */
 /* No websocket_server.h / h2_server.h / h2_internal.h: the readiness data plane now
  * dispatches ws/h2 (and PROXY) through proto_hooks.h — the same seam the completion
  * driver uses — so this TU names no optional-protocol type or symbol (Finding 1). */
-#include "proto_hooks.h"  /* ws/h2/proxy readiness + upgrade seam */
+#include "http_proto_hooks.h"  /* ws/h2/proxy readiness + upgrade seam */
 
 #define KL_LISTEN_BACKLOG  128
 #define KL_EVENTS_PER_TICK 64
 #define KL_POLL_TIMEOUT_MS 1000
 
 
-void kl_log(KlServer *s, int level, const char *fmt, ...) {
+void kl_http_server_log(KlHttpServer *s, int level, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     if (s->config.log_fn) {
@@ -37,15 +37,15 @@ void kl_log(KlServer *s, int level, const char *fmt, ...) {
     va_end(ap);
 }
 
-void kl_log_errno(KlServer *s, int level, const char *msg) {
-    kl_log(s, level, "%s: %s", msg, strerror(errno));
+void kl_http_server_log_errno(KlHttpServer *s, int level, const char *msg) {
+    kl_http_server_log(s, level, "%s: %s", msg, strerror(errno));
 }
 
-static int kl_server_bind_tcp(KlServer *s) {
+static int kl_http_server_bind_tcp(KlHttpServer *s) {
     /* Parse the numeric bind address (IPv4/IPv6 literal) — no DNS. */
     KlSockAddr bind_sa;
     if (kl_sockaddr_parse(&bind_sa, s->config.bind_addr, (uint16_t)s->config.port) != 0) {
-        kl_log(s, KL_LOG_ERROR, "invalid bind address '%s'", s->config.bind_addr);
+        kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "invalid bind address '%s'", s->config.bind_addr);
         s->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
@@ -53,7 +53,7 @@ static int kl_server_bind_tcp(KlServer *s) {
 
     s->listen_fd = kl_sock_socket(s->ev.sockets, family, SOCK_STREAM, 0);
     if (!kl_handle_valid(s->listen_fd)) {
-        kl_log_errno(s, KL_LOG_ERROR, "socket");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "socket");
         s->last_error = KL_ERR_SOCKET;
         return -1;
     }
@@ -67,7 +67,7 @@ static int kl_server_bind_tcp(KlServer *s) {
         (void)kl_sock_set_ipv6only(s->ev.sockets, s->listen_fd, 0);
 
     if (kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "bind");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
@@ -89,22 +89,22 @@ static int kl_server_bind_tcp(KlServer *s) {
  * family determines the transport, so TCP_NODELAY and unlink policy stay
  * correct. KEEL never owns (never unlinks) an adopted UNIX socket.
  */
-static int kl_server_adopt_fd(KlServer *s) {
+static int kl_http_server_adopt_fd(KlHttpServer *s) {
     s->listen_fd = s->config.listen_fd;
 
     KlSockAddr la;
     if (kl_sock_get_local_addr(s->ev.sockets, s->listen_fd, &la) != 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "getsockname on adopted fd");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "getsockname on adopted fd");
         s->last_error = KL_ERR_SOCKET;
         s->listen_fd = KL_INVALID_SOCKET;
         return -1;
     }
 
     if (kl_sockaddr_family(&la) == KL_AF_UNIX) {
-        s->config.transport = KL_TRANSPORT_UNIX;
+        s->config.transport = KL_HTTP_SERVER_TRANSPORT_UNIX;
         s->bound_port = 0;
     } else {
-        s->config.transport = KL_TRANSPORT_TCP;
+        s->config.transport = KL_HTTP_SERVER_TRANSPORT_TCP;
         s->bound_port = kl_sockaddr_port(&la);
     }
     /* Adopted fd is never unlinked — the supervisor owns the socket path. */
@@ -114,12 +114,12 @@ static int kl_server_adopt_fd(KlServer *s) {
     return 0;
 }
 
-static int kl_server_bind_listener(KlServer *s) {
+static int kl_http_server_bind_listener(KlHttpServer *s) {
     if (s->config.listen_fd > 0)
-        return kl_server_adopt_fd(s);
-    if (s->config.transport == KL_TRANSPORT_UNIX)
-        return kl_server_plat_bind_unix(s);
-    return kl_server_bind_tcp(s);
+        return kl_http_server_adopt_fd(s);
+    if (s->config.transport == KL_HTTP_SERVER_TRANSPORT_UNIX)
+        return kl_http_server_plat_bind_unix(s);
+    return kl_http_server_bind_tcp(s);
 }
 
 int kl_http_request_peer_cred(const KlHttpRequest *req, KlPeerCred *out) {
@@ -138,7 +138,7 @@ int kl_http_request_peer_label(const KlHttpRequest *req, char *buf, size_t bufle
     if (!conn || !kl_handle_valid(conn->stream.fd))
         return -1;
 
-    return kl_server_plat_peer_label_fd(conn->stream.fd, buf, buflen);
+    return kl_http_server_plat_peer_label_fd(conn->stream.fd, buf, buflen);
 }
 
 const KlSockAddr *kl_http_request_peer_sockaddr(const KlHttpRequest *req) {
@@ -183,29 +183,29 @@ int kl_http_request_peer_cert(const KlHttpRequest *req, KlPeerCert *out) {
  * (Finding 6): a self-contained responsibility, separate from the readiness loop,
  * TCP listener construction, and peer accessors. */
 
-/* Non-static so the freestanding kl_server_free (server_core.c) can call it on the
+/* Non-static so the freestanding kl_http_server_free (server_core.c) can call it on the
  * hosted path (it needs the AF_UNIX unlink); declared in internal.h. */
-void kl_server_close_listener(KlServer *s) {
+void kl_http_server_close_listener(KlHttpServer *s) {
     if (kl_handle_valid(s->listen_fd)) {
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
     }
-    kl_server_plat_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
+    kl_http_server_plat_unlink_owned_unix(s);   /* POSIX: lstat+S_ISSOCK+unlink; Win: DeleteFile */
 }
 
-/* kl_server_conn_release moved to the freestanding-safe server core (server_core.c)
+/* kl_http_server_conn_release moved to the freestanding-safe server core (server_core.c)
  * — the completion sweeps there call it, so the archive needs it in-core.
  *
- * kl_server_init (+ its stop-wakeup self-pipe helpers) also moved to server_core.c in
+ * kl_http_server_init (+ its stop-wakeup self-pipe helpers) also moved to server_core.c in
  * the Phase 10 UEFI server carve (S-4): a freestanding EFI server constructs its
- * KlServer from the archive alone. The hosted-only pieces (ws/h2/proxy hook installers,
+ * KlHttpServer from the archive alone. The hosted-only pieces (ws/h2/proxy hook installers,
  * PROXY CIDR allowlist, async file I/O, self-pipe) are #ifndef KEEL_FREESTANDING there. */
 
 
-/* Route + middleware registration (the kl_server_route / kl_server_use family) and
+/* Route + middleware registration (the kl_http_server_route / kl_http_server_use family) and
  * the read-side body flow control (kl_http_request_pause_body / resume_body) plus
- * kl_server_stats moved to the freestanding-safe server core (server_core.c) in the
- * S-1 bisection. kl_server_ws moved to server_ws.c (Finding 1): the WebSocket type +
+ * kl_http_server_stats moved to the freestanding-safe server core (server_core.c) in the
+ * S-1 bisection. kl_http_server_ws_upgrade moved to server_ws.c (Finding 1): the WebSocket type +
  * registration belong to the ws module, so this readiness TU owns no protocol type. */
 
 
@@ -215,33 +215,33 @@ void kl_server_close_listener(KlServer *s) {
  * installed for a readiness loop (!completion_loop); the completion path keeps its own accept
  * priming until 6B-3 part 2b-ii adopts the listener. */
 static int server_accept_reserve(void *ctx) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     return kl_http_conn_pool_reserve(&s->pool);
 }
 static void server_accept_release(void *ctx) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     kl_http_conn_pool_return_credit(&s->pool);               /* free_credits++ ... */
     kl_listener_notify_slot_free(&s->accept_listener);  /* ...then resume the accept if paused */
 }
 static int server_accept_arm(void *ctx) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     if (s->listen_registered) return 0;                 /* already armed (level-triggered) */
     if (kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL) < 0) return -1;
     s->listen_registered = 1;
     return 0;
 }
 static void server_accept_disarm(void *ctx) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     if (s->listen_registered) {
         kl_event_del(&s->ev.loop, s->listen_fd);
         s->listen_registered = 0;
     }
 }
 static void server_accept_dispose(void *ctx, KlSocketHandle fd) {
-    kl_sock_close(((KlServer *)ctx)->ev.sockets, fd);   /* no local var: read-only, keep ctx void* */
+    kl_sock_close(((KlHttpServer *)ctx)->ev.sockets, fd);   /* no local var: read-only, keep ctx void* */
 }
 static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease lease) {
-    KlServer *s = ctx;
+    KlHttpServer *s = ctx;
     KlHttpConn *nc = kl_http_conn_acquire(&s->pool, fd);         /* commit — credit already reserved */
     if (!nc) {
         /* Invariant failure (credit-backed accept but no free KlHttpConn): dispose the descriptor and
@@ -267,10 +267,10 @@ static void server_accept_on_accept(void *ctx, KlSocketHandle fd, KlSlotLease le
         nc->state = KL_HTTP_CONN_PROXY_HEADER;
     }
     if (kl_event_add(&s->ev.loop, fd, KL_EVENT_READ, &nc->stream) < 0)  /* identity = raw stream */
-        kl_server_conn_release(s, nc);                 /* releases the conn AND consumes the lease */
+        kl_http_server_conn_release(s, nc);                 /* releases the conn AND consumes the lease */
 }
 
-static int server_accept_listener_start(KlServer *s) {
+static int server_accept_listener_start(KlHttpServer *s) {
     s->accept_alive = 1;                               /* liveness token live before any lease issues */
     KlListenerHooks h = {
         .reserve = server_accept_reserve, .release = server_accept_release, .credit_ctx = s,
@@ -282,54 +282,54 @@ static int server_accept_listener_start(KlServer *s) {
     return kl_listener_start(&s->accept_listener);
 }
 
-int kl_server_run(KlServer *s) {
+int kl_http_server_run(KlHttpServer *s) {
     KlAllocator *alloc = &s->alloc_storage;
     (void)alloc;   /* the readiness accept path now configures conns via the listener adapter */
 
-    if (kl_server_bind_listener(s) < 0)
+    if (kl_http_server_bind_listener(s) < 0)
         return -1;
 
     /* An adopted fd (socket activation) is already listening — don't re-listen. */
     if (s->config.listen_fd <= 0 && kl_sock_listen(s->ev.sockets, s->listen_fd, KL_LISTEN_BACKLOG) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "listen");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "listen");
         s->last_error = KL_ERR_LISTEN;
-        kl_server_close_listener(s);
+        kl_http_server_close_listener(s);
         return -1;
     }
 
     if (kl_sock_set_nonblocking(s->ev.sockets, s->listen_fd) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "fcntl");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "fcntl");
         s->last_error = KL_ERR_SOCKET;
-        kl_server_close_listener(s);
+        kl_http_server_close_listener(s);
         return -1;
     }
 
     /* Register listen socket for read events */
     if (kl_event_add(&s->ev.loop, s->listen_fd, KL_EVENT_READ, NULL) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "event_add listen");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "event_add listen");
         s->last_error = KL_ERR_EVENT_ADD;
-        kl_server_close_listener(s);
+        kl_http_server_close_listener(s);
         return -1;
     }
     s->listen_registered = 1;   /* the readiness listener's arm hook treats this as already armed */
 
-    if (s->config.transport == KL_TRANSPORT_UNIX) {
+    if (s->config.transport == KL_HTTP_SERVER_TRANSPORT_UNIX) {
         /* An adopted fd (socket activation) has no path we own. */
-        kl_log(s, KL_LOG_INFO, "listening on unix:%s",
+        kl_http_server_log(s, KL_HTTP_SERVER_LOG_INFO, "listening on unix:%s",
                s->config.unix_socket_path ? s->config.unix_socket_path
                                           : "(inherited fd)");
     } else if (s->config.listen_fd > 0) {
-        kl_log(s, KL_LOG_INFO, "listening on inherited fd %d (port %d)",
+        kl_http_server_log(s, KL_HTTP_SERVER_LOG_INFO, "listening on inherited fd %d (port %d)",
                (int)s->listen_fd, s->bound_port);
     } else {
-        kl_log(s, KL_LOG_INFO, "listening on %s:%d",
+        kl_http_server_log(s, KL_HTTP_SERVER_LOG_INFO, "listening on %s:%d",
                s->config.bind_addr, s->bound_port);
     }
 
     /* Ignore SIGPIPE + install SIGTERM/SIGINT graceful-stop handlers (POSIX) or
      * a console Ctrl handler (Windows). Done here — past the setup early-returns
      * — so a failed bind never leaves handlers installed without a restore. */
-    kl_server_plat_signals_install(s);
+    kl_http_server_plat_signals_install(s);
 
     atomic_store(&s->running, 1);
     atomic_store(&s->draining, 0);
@@ -347,7 +347,7 @@ int kl_server_run(KlServer *s) {
     if (!completion_loop) {
         if (server_accept_listener_start(s) < 0) {
             s->last_error = KL_ERR_EVENT_ADD;
-            kl_server_close_listener(s);
+            kl_http_server_close_listener(s);
             return -1;
         }
         s->accept_via_listener = 1;
@@ -357,7 +357,7 @@ int kl_server_run(KlServer *s) {
         if (completion_loop) {
             /* One completion-loop tick — factored into the freestanding-safe server
              * core (server_core.c) so a freestanding EFI server shares it verbatim. */
-            if (kl_server_run_completion_loop(s) < 0)
+            if (kl_http_server_run_completion_loop(s) < 0)
                 break;
             continue;
         }
@@ -385,7 +385,7 @@ int kl_server_run(KlServer *s) {
          * file-I/O → dispatch → end on EVERY exit (timeout, error, EINTR, normal iteration). If begin
          * fails (max nesting — an unbalanced-bracket bug), fail-stop the run loop. */
         if (kl_event_ctx_dispatch_begin(&s->ev) < 0) {
-            kl_log(s, KL_LOG_ERROR, "dispatch nesting overflow");
+            kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "dispatch nesting overflow");
             break;
         }
 
@@ -394,7 +394,7 @@ int kl_server_run(KlServer *s) {
         if (n < 0) {
             kl_event_ctx_dispatch_end(&s->ev);
             if (errno == EINTR) continue;
-            kl_log_errno(s, KL_LOG_ERROR, "event_wait");
+            kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "event_wait");
             break;
         }
 
@@ -418,7 +418,7 @@ int kl_server_run(KlServer *s) {
                     kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
                 } else if (fstate == KL_HTTP_CONN_CLOSED) {
                     kl_event_del(&s->ev.loop, fc->stream.fd);
-                    kl_server_conn_release(s, fc);
+                    kl_http_server_conn_release(s, fc);
                 }
             }
         }
@@ -447,7 +447,7 @@ int kl_server_run(KlServer *s) {
                                                               &peer);
                     if (!kl_handle_valid(client_fd)) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                        kl_log_errno(s, KL_LOG_ERROR, "accept");
+                        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "accept");
                         break;
                     }
 
@@ -464,7 +464,7 @@ int kl_server_run(KlServer *s) {
                         /* Don't leak client connections into child processes. */
                         kl_sock_set_cloexec(s->ev.sockets, client_fd);
                     }
-                    if (s->config.transport == KL_TRANSPORT_TCP)
+                    if (s->config.transport == KL_HTTP_SERVER_TRANSPORT_TCP)
                         (void)kl_sock_set_tcp_nodelay(s->ev.sockets, client_fd, 1);
 
                     /* Hand the accepted fd to the listener: it commits the reserved credit to a
@@ -567,7 +567,7 @@ transition:
                 if (kl_event_mod(&s->ev.loop, c->stream.fd,
                                  (KlEventMask)c->tls_want, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
-                    kl_server_conn_release(s,c);
+                    kl_http_server_conn_release(s,c);
                 }
             } else if (new_state == KL_HTTP_CONN_SENDING) {
                 if (c->file_io_phase == 1) {
@@ -575,7 +575,7 @@ transition:
                 } else if (kl_event_mod(&s->ev.loop, c->stream.fd,
                                  KL_EVENT_WRITE, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
-                    kl_server_conn_release(s,c);
+                    kl_http_server_conn_release(s,c);
                 }
             } else if (new_state == KL_HTTP_CONN_WEBSOCKET) {
                 KlEventMask ws_mask = KL_EVENT_READ;
@@ -584,7 +584,7 @@ transition:
                     ws_mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
                 if (kl_event_mod(&s->ev.loop, c->stream.fd, ws_mask, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
-                    kl_server_conn_release(s,c);
+                    kl_http_server_conn_release(s,c);
                 }
             } else if (new_state == KL_HTTP_CONN_HTTP2) {
                 KlEventMask mask = KL_EVENT_READ;
@@ -593,7 +593,7 @@ transition:
                     mask = (KlEventMask)(KL_EVENT_READ | KL_EVENT_WRITE);
                 if (kl_event_mod(&s->ev.loop, c->stream.fd, mask, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
-                    kl_server_conn_release(s,c);
+                    kl_http_server_conn_release(s,c);
                 }
             } else if (new_state == KL_HTTP_CONN_READING ||
                        new_state == KL_HTTP_CONN_READING_BODY ||
@@ -605,14 +605,14 @@ transition:
                                      ? 0 : KL_EVENT_READ;
                 if (kl_event_mod(&s->ev.loop, c->stream.fd, rm, &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
-                    kl_server_conn_release(s,c);
+                    kl_http_server_conn_release(s,c);
                 }
             } else if (new_state == KL_HTTP_CONN_SUSPENDED) {
                 /* Handler suspended for async I/O — FD already removed
                  * from event loop by kl_async_suspend. */
             } else if (new_state == KL_HTTP_CONN_CLOSED) {
                 kl_event_del(&s->ev.loop, c->stream.fd);
-                kl_server_conn_release(s,c);
+                kl_http_server_conn_release(s,c);
             }
         }
         kl_event_ctx_dispatch_end(&s->ev);   /* R3b-W: reclaim watchers deferred during this batch */
@@ -622,7 +622,7 @@ transition:
          * complete, so connection states are stable.  Newly acquired slots
          * have fresh last_active_ms and won't be timed out. */
         now = kl_monotonic_ms();
-        kl_server_sweep_conn_timeouts(s, now, 0);
+        kl_http_server_sweep_conn_timeouts(s, now, 0);
 
         /* Sweep async op deadlines */
         {
@@ -642,15 +642,15 @@ transition:
         kl_timer_fire(&s->ev);
 
         /* Graceful drain: stop when all connections are idle or the deadline hits. */
-        kl_server_drain_progress(s, now);
+        kl_http_server_drain_progress(s, now);
     }
 
-    kl_server_plat_signals_restore(s);
+    kl_http_server_plat_signals_restore(s);
 
     return 0;
 }
 
-void kl_server_stop(KlServer *s) {
+void kl_http_server_stop(KlHttpServer *s) {
     if (s->config.drain_timeout_ms > 0 && !atomic_load(&s->draining)) {
         /* Enter drain mode: stop accepting, let in-flight finish */
         atomic_store(&s->draining, 1);
@@ -670,10 +670,10 @@ void kl_server_stop(KlServer *s) {
     }
 }
 
-/* kl_http_request_pause_body / kl_http_request_resume_body / kl_server_stats moved to the
+/* kl_http_request_pause_body / kl_http_request_resume_body / kl_http_server_stats moved to the
  * freestanding-safe server core (server_core.c) in the S-1 bisection. */
 
-/* kl_server_free moved to the freestanding-safe server core (server_core.c) in the
+/* kl_http_server_free moved to the freestanding-safe server core (server_core.c) in the
  * Phase 10 UEFI server S-7 teardown carve — a freestanding EFI server tears itself down
  * (close listener + accepted children, free pool/router, destroy TLS ctx) from the
  * archive alone, then kl_uefi_shutdown() releases the EFI providers before

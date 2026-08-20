@@ -58,7 +58,7 @@ static KlTls *pt_factory(KlTlsCtx *ctx, KlAllocator *alloc)
 
 /* ── Target server (runs in background thread) ───────────────────── */
 
-static KlServer target_srv;
+static KlHttpServer target_srv;
 static int target_port;
 
 static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
@@ -68,7 +68,7 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 static void *target_thread(void *arg) {
-    kl_server_run((KlServer *)arg);
+    kl_http_server_run((KlHttpServer *)arg);
     return NULL;
 }
 
@@ -386,9 +386,9 @@ int main(void) {
     printf("HTTP proxy client example\n\n");
 
     /* Start target server */
-    KlConfig cfg = { .port = 0, .max_connections = 8, .max_body_size = 4096 };
-    kl_server_init(&target_srv, &cfg);
-    kl_server_route(&target_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 8, .max_body_size = 4096 };
+    kl_http_server_init(&target_srv, &cfg);
+    kl_http_server_route(&target_srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t srv_tid;
     pthread_create(&srv_tid, NULL, target_thread, &target_srv);
@@ -400,9 +400,9 @@ int main(void) {
     proxy_listen_fd = proxy_make_listener();
     if (proxy_listen_fd < 0) {
         fprintf(stderr, "proxy listener failed\n");
-        kl_server_stop(&target_srv);
+        kl_http_server_stop(&target_srv);
         pthread_join(srv_tid, NULL);
-        kl_server_free(&target_srv);
+        kl_http_server_free(&target_srv);
         return 1;
     }
 
@@ -419,9 +419,9 @@ int main(void) {
     /* Cleanup */
     close(proxy_listen_fd);
     pthread_join(proxy_tid, NULL);
-    kl_server_stop(&target_srv);
+    kl_http_server_stop(&target_srv);
     pthread_join(srv_tid, NULL);
-    kl_server_free(&target_srv);
+    kl_http_server_free(&target_srv);
 
     printf("\nDone. (%d/4 passed)\n", 4 - failures);
     return failures ? 1 : 0;

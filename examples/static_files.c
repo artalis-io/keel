@@ -67,17 +67,17 @@ static void handle_static(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8080,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
-    kl_server_route(&s, "GET", "/*", handle_static, NULL, NULL);
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
+    kl_http_server_route(&s, "GET", "/*", handle_static, NULL, NULL);
 
     printf("static_files example serving %s on :8080\n", docroot);
     printf("  curl localhost:8080/index.html\n");
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

@@ -6,7 +6,7 @@
  *
  * Used when KEEL sits behind an L4 load balancer (HAProxy, AWS NLB, nginx
  * stream) that prepends the real client address to each connection. Only
- * honored from sources in a configured CIDR allowlist (see KlConfig.
+ * honored from sources in a configured CIDR allowlist (see KlHttpServerConfig.
  * proxy_trusted_cidrs) — a header from an untrusted peer could spoof any IP.
  */
 

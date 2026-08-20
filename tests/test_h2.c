@@ -4,8 +4,8 @@
 #include <keel/h2_server.h>
 #include "../src/h2_internal.h"
 #include <keel/http_connection.h>
-#include <keel/router.h>
-#include <keel/body_reader.h>
+#include <keel/http_router.h>
+#include <keel/http_body_reader.h>
 #include <string.h>
 #include "net_compat.h"
 
@@ -171,7 +171,7 @@ static int test_middleware(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 /* ── Test body reader ─────────────────────────────────────────────── */
 
 typedef struct {
-    KlBodyReader base;
+    KlHttpBodyReader base;
     char data[4096];
     size_t data_len;
     int complete_count;
@@ -179,7 +179,7 @@ typedef struct {
     int destroy_count;
 } TestBodyReader;
 
-static int test_br_on_data(KlBodyReader *self, const char *data, size_t len) {
+static int test_br_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     TestBodyReader *br = (TestBodyReader *)self;
     if (br->data_len + len > sizeof(br->data)) return -1;
     memcpy(br->data + br->data_len, data, len);
@@ -187,21 +187,21 @@ static int test_br_on_data(KlBodyReader *self, const char *data, size_t len) {
     return 0;
 }
 
-static void test_br_on_complete(KlBodyReader *self) {
+static void test_br_on_complete(KlHttpBodyReader *self) {
     ((TestBodyReader *)self)->complete_count++;
 }
 
-static void test_br_on_error(KlBodyReader *self) {
+static void test_br_on_error(KlHttpBodyReader *self) {
     ((TestBodyReader *)self)->error_count++;
 }
 
-static void test_br_destroy(KlBodyReader *self) {
+static void test_br_destroy(KlHttpBodyReader *self) {
     ((TestBodyReader *)self)->destroy_count++;
 }
 
 static TestBodyReader g_test_br;
 
-static KlBodyReader *test_br_factory(KlAllocator *alloc, const KlHttpRequest *req,
+static KlHttpBodyReader *test_br_factory(KlAllocator *alloc, const KlHttpRequest *req,
                                       void *ud) {
     (void)alloc; (void)req; (void)ud;
     memset(&g_test_br, 0, sizeof(g_test_br));
@@ -215,12 +215,12 @@ static KlBodyReader *test_br_factory(KlAllocator *alloc, const KlHttpRequest *re
 /* ── Helper: set up a minimal KlHttpConn with pipes for I/O ──────────── */
 
 static KlAllocator test_alloc;
-static KlRouter test_router;
+static KlHttpRouter test_router;
 static KlH2ServerConfig test_h2_cfg;
 
 static void test_setup(void) {
     test_alloc = kl_allocator_default();
-    kl_router_init(&test_router, &test_alloc);
+    kl_http_router_init(&test_router, &test_alloc);
     handler_called = 0;
     handler_status = 200;
     handler_body = "{\"ok\":true}";
@@ -232,7 +232,7 @@ static void test_setup(void) {
 }
 
 static void test_teardown(void) {
-    kl_router_free(&test_router);
+    kl_http_router_free(&test_router);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -330,7 +330,7 @@ UTEST(h2, stream_create) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "GET", "/test", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/test", test_handler, NULL, NULL);
 
     int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
     ASSERT_EQ(r, (int)KL_HTTP_CONN_HTTP2);
@@ -372,7 +372,7 @@ UTEST(h2, stream_max_limit) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "POST", "/data", test_handler, NULL,
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL,
                   test_br_factory);
 
     int r = kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -424,7 +424,7 @@ UTEST(h2, stream_destroy_cleanup) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "POST", "/upload", test_handler, NULL,
+    kl_http_router_add(&test_router, "POST", "/upload", test_handler, NULL,
                   test_br_factory);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -466,7 +466,7 @@ UTEST(h2, cb_on_request_creates_stream) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "GET", "/hello", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/hello", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -513,7 +513,7 @@ UTEST(h2, cb_on_request_routes) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "GET", "/users/:id", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/users/:id", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -555,8 +555,8 @@ UTEST(h2, cb_on_request_middleware) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "GET", "/protected", test_handler, NULL, NULL);
-    kl_router_use(&test_router, "*", "/*", test_middleware, NULL);
+    kl_http_router_add(&test_router, "GET", "/protected", test_handler, NULL, NULL);
+    kl_http_router_use(&test_router, "*", "/*", test_middleware, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -589,7 +589,7 @@ UTEST(h2, cb_on_data_forwards) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "POST", "/data", test_handler, NULL,
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL,
                   test_br_factory);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -628,7 +628,7 @@ UTEST(h2, cb_on_data_reject) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "POST", "/data", test_handler, NULL,
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL,
                   test_br_factory);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -667,7 +667,7 @@ UTEST(h2, cb_on_stream_end_handler) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "GET", "/hello", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/hello", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -736,7 +736,7 @@ UTEST(h2, cb_on_stream_reset_cleanup) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "POST", "/upload", test_handler, NULL,
+    kl_http_router_add(&test_router, "POST", "/upload", test_handler, NULL,
                   test_br_factory);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
@@ -910,9 +910,9 @@ UTEST(h2, multi_stream) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "GET", "/a", test_handler, NULL, NULL);
-    kl_router_add(&test_router, "GET", "/b", test_handler, NULL, NULL);
-    kl_router_add(&test_router, "GET", "/c", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/a", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/b", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/c", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -993,7 +993,7 @@ UTEST(h2, cleanup_frees_all) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "GET", "/x", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/x", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -1043,7 +1043,7 @@ UTEST(h2, response_header_extraction) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "GET", "/json", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/json", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -1091,7 +1091,7 @@ UTEST(h2, handler_same_api) {
     handler_status = 201;
     handler_body = "{\"id\":1}";
     handler_body_len = 8;
-    kl_router_add(&test_router, "POST", "/create", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "POST", "/create", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 
@@ -1124,7 +1124,7 @@ UTEST(h2, query_string_parsing) {
     memset(&conn, 0, sizeof(conn));
     conn.stream.fd = pfd[1];
     conn.stream.alloc = &test_alloc;
-    kl_router_add(&test_router, "GET", "/search", test_handler, NULL, NULL);
+    kl_http_router_add(&test_router, "GET", "/search", test_handler, NULL, NULL);
 
     kl_h2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
 

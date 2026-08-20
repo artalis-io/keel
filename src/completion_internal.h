@@ -33,12 +33,12 @@
 #include <keel/http_connection.h>   /* KlHttpConn */
 #include <stddef.h>            /* size_t */
 
-struct KlServer;
+struct KlHttpServer;
 
 /* ── server-side helpers the h2/ws drive TUs call back into ──────────────── */
 
 /* Release the connection (close the socket + return the pool slot). */
-void kl_comp_close(struct KlServer *s, KlHttpConn *c);
+void kl_comp_close(struct KlHttpServer *s, KlHttpConn *c);
 
 /* Push the TLS engine's pending outgoing ciphertext to the socket synchronously
  * (memory-BIO out ring → socket). Returns 0 on success, -1 on a fatal send error. */
@@ -53,9 +53,9 @@ int  kl_comp_tls_drain_output(KlHttpConn *c, unsigned char **out, size_t *outlen
 /* ── the h2/ws drive functions the server dispatch calls ─────────────────── */
 
 /* Drive an established HTTP/2 connection over the completion loop. */
-void kl_comp_h2_drive(struct KlServer *s, KlHttpConn *c);
+void kl_comp_h2_drive(struct KlHttpServer *s, KlHttpConn *c);
 
 /* Drive an established WebSocket connection over the completion loop. */
-void kl_comp_ws_drive(struct KlServer *s, KlHttpConn *c);
+void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c);
 
 #endif /* KEEL_SRC_COMPLETION_INTERNAL_H */

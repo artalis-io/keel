@@ -262,7 +262,7 @@ static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 }
 
 typedef struct {
-    KlServer     *srv;
+    KlHttpServer     *srv;
     DnsResponder *dr;
     KlResolver   *resolver;
     const char   *url;
@@ -285,7 +285,7 @@ static void b1_on_done(KlClient *client, void *ud) {
     }
     atomic_store(&cc->pass, ok);
     atomic_store(&cc->done, 1);
-    kl_server_stop(cc->srv);
+    kl_http_server_stop(cc->srv);
 }
 
 /* Fired on the loop thread: stand up the responder + the built-in DNS resolver, then start the
@@ -295,13 +295,13 @@ static void b1_start(void *ud) {
     KlEventCtx *ctx = &cc->srv->ev;
 
     if (responder_init(cc->dr, ctx) != 0) {
-        atomic_store(&cc->pass, 0); atomic_store(&cc->done, 1); kl_server_stop(cc->srv); return;
+        atomic_store(&cc->pass, 0); atomic_store(&cc->done, 1); kl_http_server_stop(cc->srv); return;
     }
     KlDnsResolverConfig dcfg = { .nameserver = "127.0.0.1", .port = DNS_PORT,
                                  .timeout_ms = 2000, .attempts = 1 };
     cc->resolver = kl_dns_resolver_create(ctx, &dcfg);
     if (!cc->resolver) {
-        atomic_store(&cc->pass, 0); atomic_store(&cc->done, 1); kl_server_stop(cc->srv); return;
+        atomic_store(&cc->pass, 0); atomic_store(&cc->done, 1); kl_http_server_stop(cc->srv); return;
     }
 
     static KlAllocator alloc;   /* stable storage: KlClientResponse stores the allocator by value */
@@ -310,19 +310,19 @@ static void b1_start(void *ud) {
     cc->client = kl_client_start(ctx, &alloc, &ccfg, "GET", cc->url, NULL, 0, NULL, 0,
                                  b1_on_done, cc);
     if (!cc->client) {
-        atomic_store(&cc->pass, 0); atomic_store(&cc->done, 1); kl_server_stop(cc->srv);
+        atomic_store(&cc->pass, 0); atomic_store(&cc->done, 1); kl_http_server_stop(cc->srv);
     }
 }
 
-static void *server_thread(void *a) { kl_server_run((KlServer *)a); return NULL; }
+static void *server_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
 
 static int b1_client_get(void) {
     const int port = 7860;
-    KlConfig cfg = { .port = port, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = port, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_lwip_raw() };
-    KlServer srv;
-    if (kl_server_init(&srv, &cfg) != 0) return fail("B1: server_init");
-    kl_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
+    KlHttpServer srv;
+    if (kl_http_server_init(&srv, &cfg) != 0) return fail("B1: server_init");
+    kl_http_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
 
     DnsResponder dr;
     memset(&dr, 0, sizeof(dr));
@@ -339,13 +339,13 @@ static int b1_client_get(void) {
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, &srv) != 0) {
-        kl_server_free(&srv); return fail("B1: pthread_create");
+        kl_http_server_free(&srv); return fail("B1: pthread_create");
     }
     for (int i = 0; i < 800 && !atomic_load(&cc.done); i++) {
         struct timespec sl = { 0, 10 * 1000000L };
         nanosleep(&sl, NULL);
     }
-    if (!atomic_load(&cc.done)) kl_server_stop(&srv);   /* hang guard */
+    if (!atomic_load(&cc.done)) kl_http_server_stop(&srv);   /* hang guard */
     pthread_join(th, NULL);
 
     int rc = 0;
@@ -355,7 +355,7 @@ static int b1_client_get(void) {
     if (cc.client)   kl_client_free(cc.client);
     if (cc.resolver) cc.resolver->destroy(cc.resolver);
     responder_free(&dr);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     if (rc) return rc;
     printf("PASS B1 (GET http://test.local/ -> 200, resolved over built-in DNS on lwip-raw)\n");
     return 0;
@@ -367,7 +367,7 @@ int main(void) {
     if (kl_event_ctx_init_ex(&ctx, &alloc, kl_event_provider_lwip_raw()) != 0)
         return fail("ctx init (bring up lwIP raw)");
     /* A standalone KlEventCtx leaves ctx.sockets NULL — a DNS/UDP consumer over raw MUST set it
-     * to the raw provider explicitly (the same auto-wire a KlServer does via native_provider). */
+     * to the raw provider explicitly (the same auto-wire a KlHttpServer does via native_provider). */
     ctx.sockets = kl_socket_provider_lwip_raw();
 
     int rc = 0;
@@ -376,7 +376,7 @@ int main(void) {
 
     kl_event_ctx_free(&ctx);
 
-    /* B1 uses its own KlServer (which owns its ctx) so the server run loop drives everything. */
+    /* B1 uses its own KlHttpServer (which owns its ctx) so the server run loop drives everything. */
     if (rc == 0) rc = b1_client_get();
 
     if (rc != 0) return 1;

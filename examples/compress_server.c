@@ -20,7 +20,7 @@
 #include <string.h>
 
 typedef struct {
-    KlServer *server;
+    KlHttpServer *server;
     KlCompressConfig *compress;
 } AppCtx;
 
@@ -99,23 +99,23 @@ int main(void) {
         .ctx_destroy = kl_compress_miniz_ctx_destroy,
     };
 
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8080,
         .compress = &comp,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
     AppCtx app = { .server = &s, .compress = &comp };
-    kl_server_route(&s, "GET", "/json", handle_json, &app, NULL);
-    kl_server_route(&s, "GET", "/stream", handle_stream, &app, NULL);
+    kl_http_server_route(&s, "GET", "/json", handle_json, &app, NULL);
+    kl_http_server_route(&s, "GET", "/stream", handle_stream, &app, NULL);
 
     printf("Compression example listening on :8080\n");
     printf("  curl -H 'Accept-Encoding: gzip' localhost:8080/json | gunzip\n");
     printf("  curl -H 'Accept-Encoding: gzip' localhost:8080/stream | gunzip\n");
     printf("  curl localhost:8080/json   (no compression)\n");
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

@@ -1,6 +1,6 @@
 #include "utest.h"
 #include <keel/keel.h>
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader_multipart.h>
 #include <stdio.h>   /* fprintf */
 #include <stdlib.h>  /* abort */
 #include <string.h>
@@ -10,10 +10,10 @@
  *
  * The parser is pull-shaped:
  *   on_data appends bytes to an internal buffer;
- *   kl_multipart_next returns one event per call.
+ *   kl_http_multipart_next returns one event per call.
  *
  * Most tests feed the body in a single on_data call and drive
- * kl_multipart_next to completion, asserting on the event sequence
+ * kl_http_multipart_next to completion, asserting on the event sequence
  * and per-part metadata/bytes. A few tests slice the body across
  * multiple on_data calls to exercise cross-chunk delimiter handling
  * and NEED_DATA back-pressure.
@@ -54,8 +54,8 @@ typedef struct {
     CollectedPart *parts;
     int            count;
     int            cap;
-    KlMultipartEvent last_event;
-    KlMultipartErrorCode last_error;
+    KlHttpMultipartEvent last_event;
+    KlHttpMultipartErrorCode last_error;
 } Collector;
 
 /* Abort on alloc failure — test code can't recover meaningfully and
@@ -83,7 +83,7 @@ static void xfree(KlAllocator *a, char *p, size_t n) {
     if (p) kl_free(a, p, n + 1);  /* +1 for the NUL */
 }
 
-static void collector_add_part(Collector *c, const KlMultipartPartMeta *m) {
+static void collector_add_part(Collector *c, const KlHttpMultipartPartMeta *m) {
     if (c->count >= c->cap) {
         int    nc       = c->cap ? c->cap * 2 : 4;
         size_t old_sz   = (size_t)c->cap * sizeof(*c->parts);
@@ -141,30 +141,30 @@ static void collector_free(Collector *c) {
  * been fed via on_data before calling, so NEED_DATA implies a malformed
  * truncation (treated as error).
  */
-static void collect_eager(KlBodyReader *br, Collector *c) {
+static void collect_eager(KlHttpBodyReader *br, Collector *c) {
     for (;;) {
-        KlMultipartPartMeta meta;
+        KlHttpMultipartPartMeta meta;
         const char *data = NULL;
         size_t      data_len = 0;
-        KlMultipartEvent e = kl_multipart_next(br, &meta, &data, &data_len);
+        KlHttpMultipartEvent e = kl_http_multipart_next(br, &meta, &data, &data_len);
         c->last_event = e;
         switch (e) {
-        case KL_MP_EVT_PART_BEGIN:
+        case KL_HTTP_MP_EVT_PART_BEGIN:
             collector_add_part(c, &meta);
             break;
-        case KL_MP_EVT_PART_DATA:
+        case KL_HTTP_MP_EVT_PART_DATA:
             collector_append_body(c, data, data_len);
             break;
-        case KL_MP_EVT_PART_END:
+        case KL_HTTP_MP_EVT_PART_END:
             break;
-        case KL_MP_EVT_DONE:
+        case KL_HTTP_MP_EVT_DONE:
             return;
-        case KL_MP_EVT_NEED_DATA:
+        case KL_HTTP_MP_EVT_NEED_DATA:
             /* Treat unexpected NEED_DATA after a full feed as error. */
-            c->last_error = kl_multipart_last_error(br);
+            c->last_error = kl_http_multipart_last_error(br);
             return;
-        case KL_MP_EVT_ERROR:
-            c->last_error = kl_multipart_last_error(br);
+        case KL_HTTP_MP_EVT_ERROR:
+            c->last_error = kl_http_multipart_last_error(br);
             return;
         }
     }
@@ -175,14 +175,14 @@ static void collect_eager(KlBodyReader *br, Collector *c) {
 UTEST(mp, reject_non_multipart_content_type) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request("application/json");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br == NULL);
 }
 
 UTEST(mp, reject_missing_boundary) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request("multipart/form-data");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br == NULL);
 }
 
@@ -193,7 +193,7 @@ UTEST(mp, reject_oversized_boundary) {
         "multipart/form-data; boundary="
         "01234567890123456789012345678901234567890123456789"
         "012345678901234567890");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br == NULL);
 }
 
@@ -201,7 +201,7 @@ UTEST(mp, accept_quoted_boundary) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=\"qb123\"");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
 
     const char *body =
@@ -214,7 +214,7 @@ UTEST(mp, accept_quoted_boundary) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].name, "x");
     ASSERT_STREQ(c.parts[0].body, "value");
@@ -230,7 +230,7 @@ UTEST(mp, single_field) {
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=abc123");
 
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
 
     const char *body =
@@ -244,7 +244,7 @@ UTEST(mp, single_field) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].name, "field1");
     ASSERT_EQ(c.parts[0].body_len, (size_t)6);
@@ -260,7 +260,7 @@ UTEST(mp, two_fields) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=sep");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--sep\r\n"
@@ -275,7 +275,7 @@ UTEST(mp, two_fields) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 2);
     ASSERT_STREQ(c.parts[0].name, "a");
     ASSERT_STREQ(c.parts[0].body, "alpha");
@@ -290,7 +290,7 @@ UTEST(mp, file_upload) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=fileBnd");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--fileBnd\r\n"
@@ -304,7 +304,7 @@ UTEST(mp, file_upload) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].name, "file");
     ASSERT_STREQ(c.parts[0].filename, "test.txt");
@@ -319,7 +319,7 @@ UTEST(mp, binary_body) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=BIN");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     /* Build body manually so we can include NUL bytes. */
     const char *prefix =
@@ -340,7 +340,7 @@ UTEST(mp, binary_body) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_EQ(c.parts[0].body_len, (size_t)8);
     ASSERT_EQ(memcmp(c.parts[0].body, binary, 8), 0);
@@ -355,7 +355,7 @@ UTEST(mp, three_fields_with_preamble) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=BND");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "This is the preamble, ignore me.\r\n"
@@ -371,7 +371,7 @@ UTEST(mp, three_fields_with_preamble) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 3);
     ASSERT_STREQ(c.parts[0].body, "1");
     ASSERT_STREQ(c.parts[1].body, "2");
@@ -388,7 +388,7 @@ UTEST(mp, body_byte_by_byte) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=BB");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--BB\r\n"
@@ -401,7 +401,7 @@ UTEST(mp, body_byte_by_byte) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].body, "hello world");
 
@@ -416,7 +416,7 @@ UTEST(mp, delimiter_split_across_chunks) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=XYZ");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *part_a =
         "--XYZ\r\n"
@@ -431,7 +431,7 @@ UTEST(mp, delimiter_split_across_chunks) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].body, "answer");
 
@@ -445,7 +445,7 @@ UTEST(mp, drain_then_need_data_then_resume) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=R");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *chunk1 =
         "--R\r\n"
@@ -453,19 +453,19 @@ UTEST(mp, drain_then_need_data_then_resume) {
         "abc";  /* part body, no terminator yet */
     ASSERT_EQ(br->on_data(br, chunk1, strlen(chunk1)), 0);
 
-    KlMultipartPartMeta m;
+    KlHttpMultipartPartMeta m;
     const char *d = NULL;
     size_t dn = 0;
 
-    KlMultipartEvent e = kl_multipart_next(br, &m, &d, &dn);
-    ASSERT_EQ(e, KL_MP_EVT_PART_BEGIN);
+    KlHttpMultipartEvent e = kl_http_multipart_next(br, &m, &d, &dn);
+    ASSERT_EQ(e, KL_HTTP_MP_EVT_PART_BEGIN);
     ASSERT_TRUE(memcmp(m.name, "f", m.name_len) == 0);
 
     /* Body is "abc" but we don't know if a delimiter is starting next.
      * Parser must hold back delimiter_len - 1 trailing bytes. So we
      * should NOT get all 3 bytes back yet. */
-    e = kl_multipart_next(br, &m, &d, &dn);
-    ASSERT_EQ(e, KL_MP_EVT_NEED_DATA);
+    e = kl_http_multipart_next(br, &m, &d, &dn);
+    ASSERT_EQ(e, KL_HTTP_MP_EVT_NEED_DATA);
 
     /* Feed more body. */
     const char *chunk2 = "def";
@@ -473,8 +473,8 @@ UTEST(mp, drain_then_need_data_then_resume) {
 
     /* Should now get some bytes (head of "abcdef"); exact length
      * depends on the delimiter length, but at least 1. */
-    e = kl_multipart_next(br, &m, &d, &dn);
-    ASSERT_EQ(e, KL_MP_EVT_PART_DATA);
+    e = kl_http_multipart_next(br, &m, &d, &dn);
+    ASSERT_EQ(e, KL_HTTP_MP_EVT_PART_DATA);
     ASSERT_TRUE(dn > 0);
 
     /* Feed the terminator. */
@@ -485,10 +485,10 @@ UTEST(mp, drain_then_need_data_then_resume) {
     /* Drain remaining DATA + PART_END + DONE. */
     size_t collected = dn;  /* already returned some */
     for (;;) {
-        e = kl_multipart_next(br, &m, &d, &dn);
-        if (e == KL_MP_EVT_PART_DATA) { collected += dn; continue; }
-        if (e == KL_MP_EVT_PART_END)  continue;
-        if (e == KL_MP_EVT_DONE)      break;
+        e = kl_http_multipart_next(br, &m, &d, &dn);
+        if (e == KL_HTTP_MP_EVT_PART_DATA) { collected += dn; continue; }
+        if (e == KL_HTTP_MP_EVT_PART_END)  continue;
+        if (e == KL_HTTP_MP_EVT_DONE)      break;
         ASSERT_TRUE(0);  /* unexpected */
     }
     ASSERT_EQ(collected, (size_t)6);  /* abc + def */
@@ -500,11 +500,11 @@ UTEST(mp, drain_then_need_data_then_resume) {
 
 UTEST(mp, max_part_size_exceeded_yields_part_too_large) {
     KlAllocator a = kl_allocator_default();
-    KlMultipartConfig cfg = {0};
+    KlHttpMultipartConfig cfg = {0};
     cfg.max_part_size = 4;
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=LIM");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
 
     const char *body =
         "--LIM\r\n"
@@ -516,8 +516,8 @@ UTEST(mp, max_part_size_exceeded_yields_part_too_large) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_ERROR);
-    ASSERT_EQ(c.last_error, KL_MP_ERR_PART_TOO_LARGE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(c.last_error, KL_HTTP_MP_ERR_PART_TOO_LARGE);
 
     collector_free(&c);
     br->destroy(br);
@@ -525,11 +525,11 @@ UTEST(mp, max_part_size_exceeded_yields_part_too_large) {
 
 UTEST(mp, max_total_size_exceeded_yields_total_too_large) {
     KlAllocator a = kl_allocator_default();
-    KlMultipartConfig cfg = {0};
+    KlHttpMultipartConfig cfg = {0};
     cfg.max_total_size = 30;
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=TOT");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
 
     const char *body =
         "--TOT\r\n"
@@ -539,18 +539,18 @@ UTEST(mp, max_total_size_exceeded_yields_total_too_large) {
     /* on_data itself signals failure. */
     int rc = br->on_data(br, body, strlen(body));
     ASSERT_EQ(rc, -1);
-    ASSERT_EQ(kl_multipart_last_error(br), KL_MP_ERR_TOTAL_TOO_LARGE);
+    ASSERT_EQ(kl_http_multipart_last_error(br), KL_HTTP_MP_ERR_TOTAL_TOO_LARGE);
 
     br->destroy(br);
 }
 
 UTEST(mp, max_parts_exceeded_yields_too_many_parts) {
     KlAllocator a = kl_allocator_default();
-    KlMultipartConfig cfg = {0};
+    KlHttpMultipartConfig cfg = {0};
     cfg.max_parts = 2;
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=MP");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
 
     const char *body =
         "--MP\r\n"
@@ -565,8 +565,8 @@ UTEST(mp, max_parts_exceeded_yields_too_many_parts) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_ERROR);
-    ASSERT_EQ(c.last_error, KL_MP_ERR_TOO_MANY_PARTS);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(c.last_error, KL_HTTP_MP_ERR_TOO_MANY_PARTS);
     /* First two parts were accepted before the cap tripped. */
     ASSERT_EQ(c.count, 2);
 
@@ -576,14 +576,14 @@ UTEST(mp, max_parts_exceeded_yields_too_many_parts) {
 
 UTEST(mp, max_input_buffer_exceeded) {
     /* Set a tiny input buffer (1 KiB). A small body that totals more
-     * than 1 KiB before the consumer drains via kl_multipart_next will
-     * make on_data return -1 with KL_MP_ERR_INPUT_OVERFLOW. */
+     * than 1 KiB before the consumer drains via kl_http_multipart_next will
+     * make on_data return -1 with KL_HTTP_MP_ERR_INPUT_OVERFLOW. */
     KlAllocator a = kl_allocator_default();
-    KlMultipartConfig cfg = {0};
+    KlHttpMultipartConfig cfg = {0};
     cfg.max_input_buffer = 1024;
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=IO");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
 
     /* Build a > 1024 KiB body without draining. */
     size_t big_n = 2048;
@@ -592,7 +592,7 @@ UTEST(mp, max_input_buffer_exceeded) {
     memset(big, 'A', big_n);
     int rc = br->on_data(br, big, big_n);
     ASSERT_EQ(rc, -1);
-    ASSERT_EQ(kl_multipart_last_error(br), KL_MP_ERR_INPUT_OVERFLOW);
+    ASSERT_EQ(kl_http_multipart_last_error(br), KL_HTTP_MP_ERR_INPUT_OVERFLOW);
 
     kl_free(&a, big, big_n);
     br->destroy(br);
@@ -602,11 +602,11 @@ UTEST(mp, headers_oversize) {
     /* Set an explicit per-part headers cap; the streaming parser has
      * no built-in default limit. */
     KlAllocator a = kl_allocator_default();
-    KlMultipartConfig cfg = {0};
+    KlHttpMultipartConfig cfg = {0};
     cfg.max_headers_size = 512;
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=HO");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
 
     /* Build > 512 bytes of header lines for the first part. */
     char header_line[80];
@@ -623,8 +623,8 @@ UTEST(mp, headers_oversize) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_ERROR);
-    ASSERT_EQ(c.last_error, KL_MP_ERR_HEADERS_TOO_LARGE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(c.last_error, KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
 
     collector_free(&c);
     br->destroy(br);
@@ -634,7 +634,7 @@ UTEST(mp, malformed_disposition_yields_error) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=E");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     /* Content-Disposition without name= attribute. */
     const char *body =
@@ -647,8 +647,8 @@ UTEST(mp, malformed_disposition_yields_error) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_ERROR);
-    ASSERT_EQ(c.last_error, KL_MP_ERR_MALFORMED);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(c.last_error, KL_HTTP_MP_ERR_MALFORMED);
 
     collector_free(&c);
     br->destroy(br);
@@ -658,7 +658,7 @@ UTEST(mp, premature_eof_mid_part_yields_error) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=PE");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     /* No closing boundary — connection truncated. */
     const char *body =
@@ -670,8 +670,8 @@ UTEST(mp, premature_eof_mid_part_yields_error) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_ERROR);
-    ASSERT_EQ(c.last_error, KL_MP_ERR_PREMATURE_EOF);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(c.last_error, KL_HTTP_MP_ERR_PREMATURE_EOF);
 
     collector_free(&c);
     br->destroy(br);
@@ -681,13 +681,13 @@ UTEST(mp, on_error_marks_reader) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=OE");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     br->on_error(br);
-    ASSERT_EQ(kl_multipart_last_error(br), KL_MP_ERR_PREMATURE_EOF);
+    ASSERT_EQ(kl_http_multipart_last_error(br), KL_HTTP_MP_ERR_PREMATURE_EOF);
 
-    KlMultipartEvent e = kl_multipart_next(br, NULL, NULL, NULL);
-    ASSERT_EQ(e, KL_MP_EVT_ERROR);
+    KlHttpMultipartEvent e = kl_http_multipart_next(br, NULL, NULL, NULL);
+    ASSERT_EQ(e, KL_HTTP_MP_EVT_ERROR);
 
     br->destroy(br);
 }
@@ -701,7 +701,7 @@ UTEST(mp, empty_name_attribute_rejected_as_malformed) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=EN");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--EN\r\n"
@@ -714,8 +714,8 @@ UTEST(mp, empty_name_attribute_rejected_as_malformed) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_ERROR);
-    ASSERT_EQ(c.last_error, KL_MP_ERR_MALFORMED);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(c.last_error, KL_HTTP_MP_ERR_MALFORMED);
 
     collector_free(&c);
     br->destroy(br);
@@ -728,7 +728,7 @@ UTEST(mp, empty_filename_attribute) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=EF");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--EF\r\n"
@@ -741,7 +741,7 @@ UTEST(mp, empty_filename_attribute) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_TRUE(c.parts[0].filename != NULL);
     ASSERT_EQ(c.parts[0].filename_len, (size_t)0);
@@ -757,7 +757,7 @@ UTEST(mp, empty_content_type_header) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=EC");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--EC\r\n"
@@ -771,7 +771,7 @@ UTEST(mp, empty_content_type_header) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_TRUE(c.parts[0].ctype != NULL);
     ASSERT_EQ(c.parts[0].ctype_len, (size_t)0);
@@ -786,7 +786,7 @@ UTEST(mp, zero_body_part_immediate_boundary) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=ZB");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--ZB\r\n"
@@ -799,22 +799,22 @@ UTEST(mp, zero_body_part_immediate_boundary) {
     br->on_complete(br);
 
     /* Walk the events explicitly to verify the sequence. */
-    KlMultipartPartMeta m;
+    KlHttpMultipartPartMeta m;
     const char *d = NULL;
     size_t dn = 0;
 
-    ASSERT_EQ(kl_multipart_next(br, &m, &d, &dn), KL_MP_EVT_PART_BEGIN);
+    ASSERT_EQ(kl_http_multipart_next(br, &m, &d, &dn), KL_HTTP_MP_EVT_PART_BEGIN);
     ASSERT_TRUE(memcmp(m.name, "empty", m.name_len) == 0);
     /* No PART_DATA — the next event is PART_END. */
-    ASSERT_EQ(kl_multipart_next(br, &m, &d, &dn), KL_MP_EVT_PART_END);
+    ASSERT_EQ(kl_http_multipart_next(br, &m, &d, &dn), KL_HTTP_MP_EVT_PART_END);
 
-    ASSERT_EQ(kl_multipart_next(br, &m, &d, &dn), KL_MP_EVT_PART_BEGIN);
+    ASSERT_EQ(kl_http_multipart_next(br, &m, &d, &dn), KL_HTTP_MP_EVT_PART_BEGIN);
     ASSERT_TRUE(memcmp(m.name, "after", m.name_len) == 0);
-    ASSERT_EQ(kl_multipart_next(br, &m, &d, &dn), KL_MP_EVT_PART_DATA);
+    ASSERT_EQ(kl_http_multipart_next(br, &m, &d, &dn), KL_HTTP_MP_EVT_PART_DATA);
     ASSERT_EQ(dn, (size_t)5);
     ASSERT_TRUE(memcmp(d, "value", 5) == 0);
-    ASSERT_EQ(kl_multipart_next(br, &m, &d, &dn), KL_MP_EVT_PART_END);
-    ASSERT_EQ(kl_multipart_next(br, &m, &d, &dn), KL_MP_EVT_DONE);
+    ASSERT_EQ(kl_http_multipart_next(br, &m, &d, &dn), KL_HTTP_MP_EVT_PART_END);
+    ASSERT_EQ(kl_http_multipart_next(br, &m, &d, &dn), KL_HTTP_MP_EVT_DONE);
 
     br->destroy(br);
 }
@@ -825,7 +825,7 @@ UTEST(mp, rejects_subtype_prefix_collision) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data-extra; boundary=PC");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br == NULL);
 }
 
@@ -835,11 +835,11 @@ UTEST(mp, headers_cap_not_tripped_by_co_resident_body) {
      * the body bytes toward max_headers_size — only the bytes up to
      * \r\n\r\n. */
     KlAllocator a = kl_allocator_default();
-    KlMultipartConfig cfg = {0};
+    KlHttpMultipartConfig cfg = {0};
     cfg.max_headers_size = 256;  /* tighter than total body */
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=CR");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, &cfg);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, &cfg);
     ASSERT_TRUE(br != NULL);
 
     /* Body has ~80 bytes of headers and ~2 KiB of body bytes — all in
@@ -864,7 +864,7 @@ UTEST(mp, headers_cap_not_tripped_by_co_resident_body) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_EQ(c.parts[0].body_len, body_n);
 
@@ -877,7 +877,7 @@ UTEST(mp, case_insensitive_boundary_param) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; BOUNDARY=CI");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
 
     const char *body =
@@ -890,7 +890,7 @@ UTEST(mp, case_insensitive_boundary_param) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].name, "x");
     ASSERT_STREQ(c.parts[0].body, "v");
@@ -903,7 +903,7 @@ UTEST(mp, case_insensitive_name_and_filename) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=NI");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--NI\r\n"
@@ -916,7 +916,7 @@ UTEST(mp, case_insensitive_name_and_filename) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].name, "upload");
     ASSERT_STREQ(c.parts[0].filename, "r.txt");
@@ -933,7 +933,7 @@ UTEST(mp, tab_terminates_unquoted_boundary_param) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=TB\t");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
 
     const char *body =
@@ -946,7 +946,7 @@ UTEST(mp, tab_terminates_unquoted_boundary_param) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].body, "ok");
 
@@ -960,7 +960,7 @@ UTEST(mp, duplicate_content_type_header_no_leak) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=DC");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--DC\r\n"
@@ -975,7 +975,7 @@ UTEST(mp, duplicate_content_type_header_no_leak) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     /* Second Content-Type wins. */
     ASSERT_STREQ(c.parts[0].ctype, "text/plain");
@@ -990,7 +990,7 @@ UTEST(mp, name_does_not_collide_with_other_param_suffix) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=NC");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--NC\r\n"
@@ -1003,7 +1003,7 @@ UTEST(mp, name_does_not_collide_with_other_param_suffix) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].name, "real");
 
@@ -1016,7 +1016,7 @@ UTEST(mp, filename_does_not_collide_with_other_param_suffix) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=FC");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--FC\r\n"
@@ -1029,7 +1029,7 @@ UTEST(mp, filename_does_not_collide_with_other_param_suffix) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].filename, "real.txt");
 
@@ -1043,7 +1043,7 @@ UTEST(mp, boundary_does_not_collide_with_other_param_suffix) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; xboundary=ghost; boundary=REAL");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
 
     /* Use the real boundary in the body to prove it parsed correctly. */
@@ -1057,7 +1057,7 @@ UTEST(mp, boundary_does_not_collide_with_other_param_suffix) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].body, "ok");
 
@@ -1071,7 +1071,7 @@ UTEST(mp, unquoted_param_trims_trailing_lws) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=TR");
-    KlBodyReader *br = kl_body_reader_multipart(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_multipart(&a, &req, NULL);
 
     const char *body =
         "--TR\r\n"
@@ -1084,7 +1084,7 @@ UTEST(mp, unquoted_param_trims_trailing_lws) {
 
     Collector c; collector_init(&c, &a);
     collect_eager(br, &c);
-    ASSERT_EQ(c.last_event, KL_MP_EVT_DONE);
+    ASSERT_EQ(c.last_event, KL_HTTP_MP_EVT_DONE);
     ASSERT_EQ(c.count, 1);
     ASSERT_STREQ(c.parts[0].name, "trimmed");
     ASSERT_STREQ(c.parts[0].filename, "fname");
@@ -1097,19 +1097,19 @@ UTEST(mp, rejects_null_alloc_or_req) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = make_mp_request(
         "multipart/form-data; boundary=NA");
-    ASSERT_TRUE(kl_body_reader_multipart(NULL, &req, NULL) == NULL);
-    ASSERT_TRUE(kl_body_reader_multipart(&a, NULL, NULL) == NULL);
+    ASSERT_TRUE(kl_http_body_reader_multipart(NULL, &req, NULL) == NULL);
+    ASSERT_TRUE(kl_http_body_reader_multipart(&a, NULL, NULL) == NULL);
 }
 
 UTEST(mp, wrong_reader_kind_in_next_yields_error) {
     KlAllocator a = kl_allocator_default();
     KlHttpRequest req = {0};
-    KlBodyReader *bufr = kl_body_reader_buffer(&a, &req, NULL);
+    KlHttpBodyReader *bufr = kl_http_body_reader_buffer(&a, &req, NULL);
     ASSERT_TRUE(bufr != NULL);
-    /* Pass a KlBufReader to kl_multipart_next — must not crash. */
-    KlMultipartEvent e = kl_multipart_next(bufr, NULL, NULL, NULL);
-    ASSERT_EQ(e, KL_MP_EVT_ERROR);
-    ASSERT_EQ(kl_multipart_last_error(bufr), KL_MP_ERR_NONE);
+    /* Pass a KlHttpBufReader to kl_http_multipart_next — must not crash. */
+    KlHttpMultipartEvent e = kl_http_multipart_next(bufr, NULL, NULL, NULL);
+    ASSERT_EQ(e, KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ(kl_http_multipart_last_error(bufr), KL_HTTP_MP_ERR_NONE);
     bufr->destroy(bufr);
 }
 

@@ -430,7 +430,7 @@ int main(void) {
     KlEventCtx ctx;
     if (kl_event_ctx_init_ex(&ctx, &alloc, kl_event_provider_lwip_raw()) != 0)
         return fail("ctx init (bring up lwIP raw)");
-    /* Wire the ctx's sockets to the raw provider — the same auto-wire a KlServer does via the
+    /* Wire the ctx's sockets to the raw provider — the same auto-wire a KlHttpServer does via the
      * loop's native_provider(). A standalone KlEventCtx leaves ctx.sockets NULL (POSIX default),
      * so a UDP consumer (like this test / the future DNS resolver) must set it explicitly. */
     ctx.sockets = kl_socket_provider_lwip_raw();

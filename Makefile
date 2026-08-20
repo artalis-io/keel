@@ -57,7 +57,7 @@ else ifdef WINDOWS
   SOCKET_SRC = src/socket_winsock.c
   PLATFORM_SRC = src/platform_win.c
   PLATFORM_WAKEUP_SRC = src/platform_wakeup_win.c
-  SERVER_PLAT_SRC = src/server_plat_win.c
+  SERVER_PLAT_SRC = src/http_server_plat_win.c
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
   UDP_CMSG_SRC = src/udp_cmsg_win.c    # shared WSARecvMsg fetch + pktinfo parse (IOCP + dgram)
   DNS_SYS_SRC = src/dns_sys_win.c
@@ -150,7 +150,7 @@ VENDOR_CFLAGS += -MMD -MP
 SOCKET_SRC ?= src/socket_posix.c
 PLATFORM_SRC ?= src/platform_posix.c
 PLATFORM_WAKEUP_SRC ?= src/platform_wakeup_posix.c
-SERVER_PLAT_SRC ?= src/server_plat_posix.c
+SERVER_PLAT_SRC ?= src/http_server_plat_posix.c
 # The POSIX datagram data-plane (KlDatagramOps) for the POSIX socket provider, and
 # the shared cmsg parsers the POSIX completion backends (io_uring/pollcomp) reuse.
 DGRAM_SRC ?= src/socket_dgram_posix.c
@@ -175,7 +175,7 @@ DNS_SYS_SRC ?= src/dns_sys_posix.c
 ifdef KEEL_NO_COMPLETION
   COMPLETION_CORE = src/completion_absent.c
 else
-  COMPLETION_CORE = src/completion_core.c src/completion_server.c \
+  COMPLETION_CORE = src/completion_core.c src/completion_http_server.c \
                     src/completion_h2.c src/completion_ws.c src/completion_dispatch.c
   # A readiness EVENT_SRC (epoll/kqueue/poll/wsapoll) has no completion backend, so it
   # needs the kl_comp_ops_builtin→NULL stub the dispatch falls back to (never dereferenced).
@@ -184,15 +184,15 @@ else
     COMPLETION_CORE += src/completion_readiness_stub.c
   endif
 endif
-CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/http_response.c src/router.c \
-           src/http_connection.c src/server.c src/server_core.c src/server_activation.c src/proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
-           src/body_reader_buffer.c \
-           src/body_reader_multipart.c src/http1_chunked.c src/cors.c \
-           src/websocket.c src/server_ws.c src/websocket_client.c \
+CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/error.c src/version.c src/sockaddr.c $(SOCKET_SRC) $(PLATFORM_SRC) $(PLATFORM_WAKEUP_SRC) src/http_response.c src/http_router.c \
+           src/http_connection.c src/http_server.c src/http_server_core.c src/http_server_activation.c src/http_proto_hooks.c $(SERVER_PLAT_SRC) src/event_ctx.c src/async.c src/timer.c \
+           src/http_body_reader_buffer.c \
+           src/http_body_reader_multipart.c src/http1_chunked.c src/http_cors.c \
+           src/websocket.c src/http_server_ws.c src/websocket_client.c \
            src/server_h2.c src/h2_client.c src/thread_pool.c src/url.c \
            src/client_common.c src/client_sync.c src/client_async.c \
            src/client_proxy.c \
-           src/client_pool.c src/redirect.c src/sse.c \
+           src/client_pool.c src/redirect.c src/http_sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
            src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            src/compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
@@ -856,8 +856,8 @@ analyze:
 AXIS_PROTO_TUS = src/client_common.c src/client_sync.c src/client_async.c \
                  src/client_proxy.c \
                  src/h2_client.c src/websocket_client.c \
-                 src/http_connection.c src/server.c src/server_h2.c src/websocket.c src/server_ws.c \
-                 src/sse.c src/http_response.c src/redirect.c src/client_pool.c \
+                 src/http_connection.c src/http_server.c src/server_h2.c src/websocket.c src/http_server_ws.c \
+                 src/http_sse.c src/http_response.c src/redirect.c src/client_pool.c \
                  src/resolver_cache.c
 check-sockaddr-neutral:
 	@bad=0; \
@@ -889,10 +889,10 @@ check-sockaddr-neutral:
 # they drive the loop / async connect via the Keel completion tick (io_engine.h). Everything NOT here
 # is governed.
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
-              $(wildcard src/platform_*.c) $(wildcard src/server_plat_*.c) $(wildcard src/dns_sys_*.c) \
+              $(wildcard src/platform_*.c) $(wildcard src/http_server_plat_*.c) $(wildcard src/dns_sys_*.c) \
               $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
               src/listener.c src/connect_op.c \
-              src/event_ctx.c src/async.c src/server_core.c src/server.c src/client_async.c
+              src/event_ctx.c src/async.c src/http_server_core.c src/http_server.c src/client_async.c
 # The forbidden-header regex (shared by the file scan and the self-canary below). Covers the
 # completion + readiness/event platform interfaces (epoll/kqueue/eventfd/poll/select/io_uring/IOCP)
 # and the socket-ADDRESS headers, plus the internal completion.h / io_engine.h seams.
@@ -999,7 +999,7 @@ cppcheck:
 # completion accept path (completion_server.c) still registers KlConn until 6B-3 and is excluded.
 check-readiness-identity:
 	@perl tools/check_readiness_identity.pl \
-	     src/server.c src/async.c src/server_core.c src/completion_server.c \
+	     src/http_server.c src/async.c src/http_server_core.c src/completion_http_server.c \
 	  && echo "readiness-identity: OK — all connection registrations use &conn->stream"
 
 # Self-test the audit gate against fixtures with single-line AND multiline violations (must FAIL)
@@ -1302,10 +1302,10 @@ freestanding-lib:
 FREESTANDING_SERVER_SRC = \
     src/error.c src/version.c src/allocator.c src/kl_cstr.c src/sockaddr.c \
     src/timer.c src/event_ctx.c src/event_dispatch.c \
-    src/completion_dispatch.c src/completion_core.c src/completion_server.c \
+    src/completion_dispatch.c src/completion_core.c src/completion_http_server.c \
     src/listener.c src/stream.c \
-    src/http_connection.c src/http_response.c src/router.c src/http1_chunked.c src/drain.c \
-    src/body_reader_buffer.c src/server_core.c src/proto_hooks.c \
+    src/http_connection.c src/http_response.c src/http_router.c src/http1_chunked.c src/drain.c \
+    src/http_body_reader_buffer.c src/http_server_core.c src/http_proto_hooks.c \
     parsers/http1_parser_llhttp.c \
     vendor/llhttp/llhttp.c vendor/llhttp/api.c vendor/llhttp/http.c
 

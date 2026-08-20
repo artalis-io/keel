@@ -7,11 +7,11 @@
  * NULL and the shared core runs pure HTTP/1.1.
  */
 
-#include "proto_hooks.h"
+#include "http_proto_hooks.h"
 
 /* Install-once guard (makes the "install-once global registration" invariant executable).
  * The hook tables are process-wide compiled-in capability registrations, not per-server
- * config — installed by a load-time constructor and/or kl_server_init, always with the
+ * config — installed by a load-time constructor and/or kl_http_server_init, always with the
  * SAME canonical static table. Accept: the first install, an idempotent re-install of the
  * identical table, or a reset to NULL. Silently keep the first table if a DIFFERENT
  * non-NULL table is offered (a programming error) rather than allowing live replacement. */

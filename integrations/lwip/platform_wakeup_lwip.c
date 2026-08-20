@@ -2,7 +2,7 @@
  * platform_wakeup_lwip.c — the lwIP run-loop wakeup channel.
  *
  * The host self-pipe (platform_wakeup_posix.c) is invisible to lwip_poll, so
- * kl_server_stop would only be noticed on the next poll tick. This provides a
+ * kl_http_server_stop would only be noticed on the next poll tick. This provides a
  * wakeup that IS an lwIP socket — a self-connected UDP socket on loopback: a
  * send-to-self delivers a datagram that wakes lwip_poll(POLLIN) immediately.
  *

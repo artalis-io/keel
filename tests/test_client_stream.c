@@ -399,7 +399,7 @@ static kl_ssize_t mock_body_read_error(char *buf, size_t buf_len, void *user_dat
  * ══════════════════════════════════════════════════════════════════ */
 
 /* Wait for server to bind (max 2s) */
-static void wait_for_bind(KlServer *s) {
+static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
 }
 
@@ -407,7 +407,7 @@ static void wait_for_bind(KlServer *s) {
 static void srv_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
 {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
@@ -444,13 +444,13 @@ static void srv_no_content(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
     kl_http_response_status(res, 204);
 }
 
-static KlServer stream_test_server;
+static KlHttpServer stream_test_server;
 static pthread_t stream_test_tid;
 
 static void *stream_server_thread(void *arg)
 {
     (void)arg;
-    kl_server_run(&stream_test_server);
+    kl_http_server_run(&stream_test_server);
     return NULL;
 }
 
@@ -458,17 +458,17 @@ static int stream_test_port;
 
 static void start_stream_server(void)
 {
-    KlConfig cfg = {.port = 0, .max_body_size = TEST_MAX_BODY};
-    kl_server_init(&stream_test_server, &cfg);
-    kl_server_route(&stream_test_server, "GET", "/hello",
+    KlHttpServerConfig cfg = {.port = 0, .max_body_size = TEST_MAX_BODY};
+    kl_http_server_init(&stream_test_server, &cfg);
+    kl_http_server_route(&stream_test_server, "GET", "/hello",
                     srv_hello, NULL, NULL);
-    kl_server_route(&stream_test_server, "GET", "/chunked",
+    kl_http_server_route(&stream_test_server, "GET", "/chunked",
                     srv_chunked, NULL, NULL);
-    kl_server_route(&stream_test_server, "GET", "/nocontent",
+    kl_http_server_route(&stream_test_server, "GET", "/nocontent",
                     srv_no_content, NULL, NULL);
-    kl_server_route(&stream_test_server, "POST", "/echo",
+    kl_http_server_route(&stream_test_server, "POST", "/echo",
                     srv_echo, (void *)(size_t)TEST_MAX_BODY,
-                    kl_body_reader_buffer);
+                    kl_http_body_reader_buffer);
     pthread_create(&stream_test_tid, NULL, stream_server_thread, NULL);
     wait_for_bind(&stream_test_server);
     stream_test_port = stream_test_server.bound_port;
@@ -476,9 +476,9 @@ static void start_stream_server(void)
 
 static void stop_stream_server(void)
 {
-    kl_server_stop(&stream_test_server);
+    kl_http_server_stop(&stream_test_server);
     pthread_join(stream_test_tid, NULL);
-    kl_server_free(&stream_test_server);
+    kl_http_server_free(&stream_test_server);
 }
 
 /* ── Async completion context ──────────────────────────────────────── */

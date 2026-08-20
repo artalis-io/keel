@@ -1,5 +1,5 @@
-#ifndef KEEL_SERVER_H
-#define KEEL_SERVER_H
+#ifndef KEEL_HTTP_SERVER_H
+#define KEEL_HTTP_SERVER_H
 
 #include <keel/allocator.h>
 #include <keel/handle.h>
@@ -7,11 +7,11 @@
 #include <keel/compress.h>
 #include <keel/error.h>
 #include <keel/http1_parser.h>
-#include <keel/router.h>
+#include <keel/http_router.h>
 #include <keel/tls.h>
 #include <keel/h2_server.h>
 #include <keel/http_connection.h>
-#include <keel/listener_detail.h>  /* struct KlListener layout — KlServer embeds it (step 6B-1) */
+#include <keel/listener_detail.h>  /* struct KlListener layout — KlHttpServer embeds it (step 6B-1) */
 #include <keel/event_ctx.h>
 #include <keel/proxy_protocol.h>
 #include <stdarg.h>
@@ -20,62 +20,62 @@
 
 typedef struct KlWsServerConfig KlWsServerConfig;
 /** @brief Factory function for creating request parsers. */
-typedef KlHttp1Parser *(*KlParserFactory)(KlAllocator *alloc);
+typedef KlHttp1Parser *(*KlHttp1ParserFactory)(KlAllocator *alloc);
 
 /** @brief Access log callback — called after each response is fully sent. NULL = disabled. */
-typedef void (*KlAccessLogFn)(const KlHttpRequest *req, int status,
+typedef void (*KlHttpAccessLogFn)(const KlHttpRequest *req, int status,
                                size_t body_bytes, double duration_ms,
                                void *user_data);
 
 /** @brief Log levels (values match rxi/log.c for zero-cost bridging). @{ */
-#define KL_LOG_TRACE 0  /**< Trace */
-#define KL_LOG_DEBUG 1  /**< Debug */
-#define KL_LOG_INFO  2  /**< Info */
-#define KL_LOG_WARN  3  /**< Warning */
-#define KL_LOG_ERROR 4  /**< Error */
-#define KL_LOG_FATAL 5  /**< Fatal */
+#define KL_HTTP_SERVER_LOG_TRACE 0  /**< Trace */
+#define KL_HTTP_SERVER_LOG_DEBUG 1  /**< Debug */
+#define KL_HTTP_SERVER_LOG_INFO  2  /**< Info */
+#define KL_HTTP_SERVER_LOG_WARN  3  /**< Warning */
+#define KL_HTTP_SERVER_LOG_ERROR 4  /**< Error */
+#define KL_HTTP_SERVER_LOG_FATAL 5  /**< Fatal */
 /** @} */
 
 /** @brief Diagnostic log callback. NULL = fprintf(stderr) fallback. */
-typedef void (*KlLogFn)(int level, const char *fmt, va_list ap,
+typedef void (*KlHttpServerLogFn)(int level, const char *fmt, va_list ap,
                          void *user_data);
 
 /** @brief Default max connections. */
-#define KL_DEFAULT_MAX_CONNS      256
+#define KL_HTTP_SERVER_DEFAULT_MAX_CONNS      256
 /** @brief Default read timeout (ms). */
-#define KL_DEFAULT_READ_TIMEOUT   30000           /**< ms */
+#define KL_HTTP_SERVER_DEFAULT_READ_TIMEOUT   30000           /**< ms */
 /** @brief Default max body size. */
-#define KL_DEFAULT_MAX_BODY_SIZE  (1024 * 1024)   /**< 1 MB */
+#define KL_HTTP_SERVER_DEFAULT_MAX_BODY_SIZE  (1024 * 1024)   /**< 1 MB */
 
 typedef enum {
-    KL_TRANSPORT_TCP = 0,   /**< TCP/IP stream socket (default) */
-    KL_TRANSPORT_UNIX = 1   /**< UNIX domain stream socket */
-} KlTransport;
+    KL_HTTP_SERVER_TRANSPORT_TCP = 0,   /**< TCP/IP stream socket (default) */
+    KL_HTTP_SERVER_TRANSPORT_UNIX = 1   /**< UNIX domain stream socket */
+} KlHttpServerTransport;
 
-typedef struct KlConfig {
+typedef struct KlHttpServerConfig {
     int port;
     const char *bind_addr;      /**< default: "0.0.0.0" */
-    int max_connections;        /**< default: KL_DEFAULT_MAX_CONNS */
-    int read_timeout_ms;        /**< default: KL_DEFAULT_READ_TIMEOUT */
+    int max_connections;        /**< default: KL_HTTP_SERVER_DEFAULT_MAX_CONNS */
+    int read_timeout_ms;        /**< default: KL_HTTP_SERVER_DEFAULT_READ_TIMEOUT */
     int body_timeout_ms;        /**< total body deadline; 0 = use read_timeout_ms */
     KlAllocator *alloc;         /**< default: stdlib */
-    KlParserFactory parser;     /**< default: kl_http1_parser_llhttp */
-    KlAccessLogFn access_log;   /**< default: NULL (disabled) */
+    KlHttp1ParserFactory parser;     /**< default: kl_http1_parser_llhttp */
+    KlHttpAccessLogFn access_log;   /**< default: NULL (disabled) */
     void *access_log_data;      /**< passed as user_data to access_log */
-    KlLogFn log_fn;             /**< default: NULL (fprintf stderr) */
+    KlHttpServerLogFn log_fn;             /**< default: NULL (fprintf stderr) */
     void   *log_user_data;
     int install_signal_handlers; /**< install SIGTERM/SIGINT handlers (single instance only —
-                                  * only the last server to call kl_server_run() receives signals) */
+                                  * only the last server to call kl_http_server_run() receives signals) */
     int drain_timeout_ms;        /**< graceful shutdown drain timeout (0 = immediate) */
     KlTlsConfig *tls;           /**< TLS config — NULL = plaintext (default) */
     KlH2ServerConfig *h2;             /**< HTTP/2 config — NULL = disabled (default) */
     size_t max_body_size;       /**< discard-path body limit; default: 1 MB */
     size_t max_header_size;     /**< max header block size; 0 = KL_HTTP_CONN_READ_BUF_SIZE (8192) */
     KlCompressConfig *compress; /**< compression config — NULL = disabled (default) */
-    KlTransport transport;      /**< default: KL_TRANSPORT_TCP. Setting unix_socket_path
+    KlHttpServerTransport transport;      /**< default: KL_HTTP_SERVER_TRANSPORT_TCP. Setting unix_socket_path
                                  *   forces UNIX regardless of this field (TCP == 0 is
                                  *   indistinguishable from unset, so a non-NULL path wins). */
-    const char *unix_socket_path; /**< AF_UNIX path when transport is KL_TRANSPORT_UNIX */
+    const char *unix_socket_path; /**< AF_UNIX path when transport is KL_HTTP_SERVER_TRANSPORT_UNIX */
     int unix_socket_unlink;     /**< unlink path before bind and on free after successful bind */
     unsigned int unix_socket_mode; /**< chmod socket path after bind; 0 = leave umask/default */
     const char *unix_socket_owner; /**< chown socket to this username; NULL = leave.
@@ -96,7 +96,7 @@ typedef struct KlConfig {
     const KlEventProvider *event_provider; /**< custom event backend (bring-your-own readiness
                                       *   loop, e.g. lwIP); NULL = compiled-in default. Pair it
                                       *   with a `sockets` provider whose handles it can poll. */
-} KlConfig;
+} KlHttpServerConfig;
 
 /**
  * @brief Peer credentials of a UNIX-domain-socket client.
@@ -114,13 +114,13 @@ typedef struct {
 
 typedef struct KlAsyncOp KlAsyncOp;
 
-typedef struct KlServer {
-    KlConfig config;
+typedef struct KlHttpServer {
+    KlHttpServerConfig config;
     KlAllocator alloc_storage;  /**< owned copy if user didn't provide one */
     KlTlsConfig tls_storage;   /**< owned copy of TLS config (if provided) */
     KlH2ServerConfig h2_storage;     /**< owned copy of H2 config (if provided) */
     KlCompressConfig compress_storage; /**< owned copy of compress config (if provided) */
-    KlRouter router;            /**< Route table */
+    KlHttpRouter router;            /**< Route table */
     KlHttpConnPool pool;            /**< Connection pool */
     KlEventCtx ev;              /**< event loop + watcher list */
     /* ── Accept via KlListener (step 6B) ────────────────────────────────────────────
@@ -141,17 +141,17 @@ typedef struct KlServer {
     _Atomic int running;        /**< Server is running */
     _Atomic int draining;       /**< Graceful shutdown in progress */
     uint64_t drain_deadline_ms; /**< Drain timeout deadline */
-    /* Self-pipe/loopback wakeup so kl_server_stop() wakes the run loop immediately
+    /* Self-pipe/loopback wakeup so kl_http_server_stop() wakes the run loop immediately
      * instead of waiting up to KL_POLL_TIMEOUT_MS for the current wait/drain to
      * return. The two handles are a KlPlatWakeup (internal type kept out of this
      * public header); server.c constructs the wrapper from them. KL_INVALID_SOCKET
      * if the pair couldn't be opened (falls back to tick-timeout latency). */
     KlSocketHandle stop_wake_rd; /**< wakeup read end (registered as a run-loop watcher) */
-    KlSocketHandle stop_wake_wr; /**< wakeup write end (kl_server_stop signals it) */
+    KlSocketHandle stop_wake_wr; /**< wakeup write end (kl_http_server_stop signals it) */
     KlAsyncOp *async_ops;       /**< active async ops list */
     KlFileIO *file_io;          /**< async file I/O (auto-created if backend supports it) */
     KlError last_error;         /**< diagnostic: set at point of return -1 */
-} KlServer;
+} KlHttpServer;
 
 /**
  * @brief Initialize server with the given configuration.
@@ -159,15 +159,15 @@ typedef struct KlServer {
  * @param config Configuration (defaults applied for zero fields).
  * @return 0 on success, -1 on failure.
  */
-int  kl_server_init(KlServer *s, const KlConfig *config);
+int  kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config);
 
 /**
  * @brief Register a route on the server.
  * @return 0 on success, -1 on failure.
  */
-int  kl_server_route(KlServer *s, const char *method, const char *pattern,
-                     KlHandler handler, void *user_data,
-                     KlBodyReaderFactory body_reader);
+int  kl_http_server_route(KlHttpServer *s, const char *method, const char *pattern,
+                     KlHttpHandler handler, void *user_data,
+                     KlHttpBodyReaderFactory body_reader);
 
 /**
  * @brief Register a streaming-handler route. The handler runs after
@@ -182,14 +182,14 @@ int  kl_server_route(KlServer *s, const char *method, const char *pattern,
  *
  * @return 0 on success, -1 on failure.
  */
-int  kl_server_route_streaming(KlServer *s, const char *method, const char *pattern,
-                                KlHandler handler, void *user_data,
-                                KlBodyReaderFactory body_reader);
+int  kl_http_server_route_streaming(KlHttpServer *s, const char *method, const char *pattern,
+                                KlHttpHandler handler, void *user_data,
+                                KlHttpBodyReaderFactory body_reader);
 
 /**
  * @brief Register an async-streaming-handler route (v2.2.0+).
  *
- *        Like kl_server_route_streaming, plus the handler is invoked
+ *        Like kl_http_server_route_streaming, plus the handler is invoked
  *        BEFORE any leftover body bytes are fed via on_data. The
  *        handler MUST yield on NEED_DATA — the body reader's on_data
  *        callback resumes it for the leftover and subsequent reads.
@@ -200,17 +200,17 @@ int  kl_server_route_streaming(KlServer *s, const char *method, const char *patt
  *        instead of clobbering with the hardcoded 413.
  *
  *        Synchronous C handlers that need the body fully buffered
- *        before they run should keep using kl_server_route_streaming.
+ *        before they run should keep using kl_http_server_route_streaming.
  *
- *        See router.h::kl_router_add_streaming_async for the full
+ *        See router.h::kl_http_router_add_streaming_async for the full
  *        contract.
  *
  * @return 0 on success, -1 on failure.
  */
-int  kl_server_route_streaming_async(KlServer *s, const char *method,
+int  kl_http_server_route_streaming_async(KlHttpServer *s, const char *method,
                                        const char *pattern,
-                                       KlHandler handler, void *user_data,
-                                       KlBodyReaderFactory body_reader);
+                                       KlHttpHandler handler, void *user_data,
+                                       KlHttpBodyReaderFactory body_reader);
 
 /**
  * @brief Register pre-body middleware on the server.
@@ -221,8 +221,8 @@ int  kl_server_route_streaming_async(KlServer *s, const char *method,
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on failure.
  */
-int  kl_server_use(KlServer *s, const char *method, const char *pattern,
-                   KlMiddleware fn, void *user_data);
+int  kl_http_server_use(KlHttpServer *s, const char *method, const char *pattern,
+                   KlHttpMiddleware fn, void *user_data);
 
 /**
  * @brief Register post-body middleware on the server.
@@ -237,8 +237,8 @@ int  kl_server_use(KlServer *s, const char *method, const char *pattern,
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on failure.
  */
-int  kl_server_use_post(KlServer *s, const char *method, const char *pattern,
-                        KlMiddleware fn, void *user_data);
+int  kl_http_server_use_post(KlHttpServer *s, const char *method, const char *pattern,
+                        KlHttpMiddleware fn, void *user_data);
 
 /**
  * @brief Register a WebSocket endpoint. Matches GET with Upgrade: websocket.
@@ -247,22 +247,22 @@ int  kl_server_use_post(KlServer *s, const char *method, const char *pattern,
  * @param config  WebSocket configuration (callbacks, limits). Must remain valid.
  * @return 0 on success, -1 on failure.
  */
-int  kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config);
+int  kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerConfig *config);
 
 /**
  * @brief Start the event loop (blocks until stopped).
  * @return 0 on clean shutdown, -1 on fatal error.
  */
-int  kl_server_run(KlServer *s);
+int  kl_http_server_run(KlHttpServer *s);
 
 /**
  * @brief Request server shutdown. If drain_timeout_ms is configured,
  *        enters drain mode first (stops accepting, waits for in-flight).
  */
-void kl_server_stop(KlServer *s);
+void kl_http_server_stop(KlHttpServer *s);
 
 /** @brief Free all server resources (pool, router, event loop). */
-void kl_server_free(KlServer *s);
+void kl_http_server_free(KlHttpServer *s);
 
 /** @brief Server load statistics — read-only snapshot for load-shedding decisions. */
 typedef struct {
@@ -270,14 +270,14 @@ typedef struct {
     int max_connections;       /**< Configured pool capacity */
     int async_suspended;       /**< Connections in async suspend */
     int listen_paused;         /**< 1 if listener paused (pool full) */
-} KlServerStats;
+} KlHttpServerStats;
 
 /**
  * @brief Populate a stats snapshot from current server state.
  * @param s    Server instance (may be NULL — zeroes out).
  * @param out  Output struct (may be NULL — no-op).
  */
-void kl_server_stats(const KlServer *s, KlServerStats *out);
+void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out);
 
 /**
  * @brief Optional platform capabilities.
@@ -391,7 +391,7 @@ int kl_http_request_peer_cert(const KlHttpRequest *req, KlPeerCert *out);
  * Implements the systemd LISTEN_FDS protocol: if LISTEN_PID matches this
  * process and LISTEN_FDS >= 1, returns the first passed fd (SD_LISTEN_FDS_START
  * = 3). The relevant environment variables are unset so they are not
- * inherited by children. Pass the result to KlConfig.listen_fd.
+ * inherited by children. Pass the result to KlHttpServerConfig.listen_fd.
  *
  * @return The inherited fd (>= 3), or -1 if socket activation is not in use.
  */

@@ -1,4 +1,4 @@
-#include <keel/body_reader_multipart.h>
+#include <keel/http_body_reader_multipart.h>
 #include <string.h>
 #include <strings.h>
 #include <stdint.h>
@@ -7,59 +7,59 @@
 /*
  * Streaming multipart parser.
  *
- * Push (on_data) → internal input buffer → pull (kl_multipart_next) →
+ * Push (on_data) → internal input buffer → pull (kl_http_multipart_next) →
  * event stream {PART_BEGIN, PART_DATA, PART_END, DONE, NEED_DATA, ERROR}.
  *
- * The state machine never blocks. on_data appends; kl_multipart_next
+ * The state machine never blocks. on_data appends; kl_http_multipart_next
  * consumes as far as it can and returns one event per call (or
  * NEED_DATA if more bytes are required).
  *
  * Body data is never copied: PART_DATA returns a borrowed slice of the
  * internal input buffer. The slice stays valid until the next
- * kl_multipart_next() call, at which point the buffer is shifted to
+ * kl_http_multipart_next() call, at which point the buffer is shifted to
  * reclaim consumed bytes.
  */
 
 /* ── Parser states ───────────────────────────────────────────────────── */
 
 typedef enum {
-    KL_MP_S_PREAMBLE,        /* before first boundary */
-    KL_MP_S_AFTER_BOUNDARY,  /* boundary seen, awaiting "\r\n" or "--" */
-    KL_MP_S_HEADERS,         /* accumulating part headers until \r\n\r\n */
-    KL_MP_S_BODY,            /* streaming part body until delimiter */
-    KL_MP_S_DONE,            /* terminator boundary seen */
-    KL_MP_S_ERROR            /* parser cannot continue */
-} KlMultipartParserState;
+    KL_HTTP_MP_S_PREAMBLE,        /* before first boundary */
+    KL_HTTP_MP_S_AFTER_BOUNDARY,  /* boundary seen, awaiting "\r\n" or "--" */
+    KL_HTTP_MP_S_HEADERS,         /* accumulating part headers until \r\n\r\n */
+    KL_HTTP_MP_S_BODY,            /* streaming part body until delimiter */
+    KL_HTTP_MP_S_DONE,            /* terminator boundary seen */
+    KL_HTTP_MP_S_ERROR            /* parser cannot continue */
+} KlHttpMultipartParserState;
 
 /* ── Reader struct ───────────────────────────────────────────────────── */
 
 /*
- * KL_MP_MAX_BOUNDARY (70) comes from RFC 2046 §5.1.1 — the multipart
+ * KL_HTTP_MP_MAX_BOUNDARY (70) comes from RFC 2046 §5.1.1 — the multipart
  * spec's hard limit on boundary length, NOT a Keel-imposed magic cap.
  * No other fixed-size buffer state exists; both the input buffer and
  * the per-part header accumulator grow on demand, capped by config.
  */
 
-struct KlMultipartReader {
-    KlBodyReader base;
+struct KlHttpMultipartReader {
+    KlHttpBodyReader base;
     KlAllocator *alloc;
 
     /* Delimiter: "\r\n--<boundary>" — what marks the END of a part
      * body. For the initial preamble we search for just "--<boundary>".
      * Bounded by the RFC 2046 cap on boundary length, so a static
      * inline buffer is the right shape here. */
-    char   delimiter[KL_MP_MAX_BOUNDARY + 6];
+    char   delimiter[KL_HTTP_MP_MAX_BOUNDARY + 6];
     size_t delimiter_len;
 
-    KlMultipartConfig      config;
-    KlMultipartParserState state;
-    KlMultipartErrorCode   last_error;
+    KlHttpMultipartConfig      config;
+    KlHttpMultipartParserState state;
+    KlHttpMultipartErrorCode   last_error;
 
     /* Input buffer: bytes received via on_data, not yet consumed. */
     char  *input;
     size_t input_len;
     size_t input_cap;
-    /* Bytes the most recent kl_multipart_next() call earmarked for
+    /* Bytes the most recent kl_http_multipart_next() call earmarked for
      * consumption. The shift happens at the START of the next call so
      * PART_DATA slices stay valid between calls. */
     size_t input_consumed;
@@ -84,7 +84,7 @@ struct KlMultipartReader {
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
-/* O(n*m) naive search — boundary is at most KL_MP_MAX_BOUNDARY + 4 bytes. */
+/* O(n*m) naive search — boundary is at most KL_HTTP_MP_MAX_BOUNDARY + 4 bytes. */
 static const void *mp_memmem(const void *hay, size_t hlen,
                               const void *needle, size_t nlen) {
     if (nlen == 0) return hay;
@@ -192,20 +192,20 @@ static int mp_grow_buf(KlAllocator *alloc, char **buf, size_t *cap,
     return 0;
 }
 
-static int mp_input_reserve(KlMultipartReader *mr, size_t additional) {
+static int mp_input_reserve(KlHttpMultipartReader *mr, size_t additional) {
     return mp_grow_buf(mr->alloc, &mr->input, &mr->input_cap,
                        mr->input_len, additional,
                        mr->config.max_input_buffer);
 }
 
-static int mp_hdr_reserve(KlMultipartReader *mr, size_t additional) {
+static int mp_hdr_reserve(KlHttpMultipartReader *mr, size_t additional) {
     return mp_grow_buf(mr->alloc, &mr->hdr, &mr->hdr_cap,
                        mr->hdr_len, additional,
                        mr->config.max_headers_size);
 }
 
-/* Apply the deferred consumption from the previous kl_multipart_next call. */
-static void mp_apply_consume(KlMultipartReader *mr) {
+/* Apply the deferred consumption from the previous kl_http_multipart_next call. */
+static void mp_apply_consume(KlHttpMultipartReader *mr) {
     if (mr->input_consumed == 0) return;
     if (mr->input_consumed >= mr->input_len) {
         mr->input_len = 0;
@@ -222,7 +222,7 @@ static void mp_apply_consume(KlMultipartReader *mr) {
 /*
  * Parse a Content-Disposition value for `name=` and `filename=` attrs.
  * Returns 0 on success, -1 on failure. On NOMEM, sets mr->last_error to
- * KL_MP_ERR_NOMEM so the caller can preserve the cause via mp_fail_or_keep.
+ * KL_HTTP_MP_ERR_NOMEM so the caller can preserve the cause via mp_fail_or_keep.
  * On any other failure (missing name=, empty name, unterminated quoted
  * attribute), leaves last_error alone — caller maps to MALFORMED.
  *
@@ -232,7 +232,7 @@ static void mp_apply_consume(KlMultipartReader *mr) {
  * zero-length string; clients legitimately send empty filename to mark
  * a part as binary-data-without-filename.
  */
-static int mp_parse_disposition(KlMultipartReader *mr, const char *val,
+static int mp_parse_disposition(KlHttpMultipartReader *mr, const char *val,
                                 size_t vlen) {
     mp_free_str(mr->alloc, &mr->cur_name, &mr->cur_name_len);
     mp_free_str(mr->alloc, &mr->cur_filename, &mr->cur_filename_len);
@@ -263,7 +263,7 @@ static int mp_parse_disposition(KlMultipartReader *mr, const char *val,
     if (name_len == 0) return -1;  /* empty form-field name → MALFORMED */
     if (mp_has_ctl(name_src, name_len)) return -1;  /* L6 → MALFORMED */
     mr->cur_name = mp_strdup(mr->alloc, name_src, name_len);
-    if (!mr->cur_name) { mr->last_error = KL_MP_ERR_NOMEM; return -1; }
+    if (!mr->cur_name) { mr->last_error = KL_HTTP_MP_ERR_NOMEM; return -1; }
     mr->cur_name_len = name_len;
 
     /* filename= is optional. */
@@ -291,7 +291,7 @@ static int mp_parse_disposition(KlMultipartReader *mr, const char *val,
     }
     if (mp_has_ctl(fn_src, fn_len)) return -1;  /* L6 → MALFORMED */
     mr->cur_filename = mp_strdup(mr->alloc, fn_src, fn_len);
-    if (!mr->cur_filename) { mr->last_error = KL_MP_ERR_NOMEM; return -1; }
+    if (!mr->cur_filename) { mr->last_error = KL_HTTP_MP_ERR_NOMEM; return -1; }
     mr->cur_filename_len = fn_len;
     return 0;
 }
@@ -301,7 +301,7 @@ static int mp_parse_disposition(KlMultipartReader *mr, const char *val,
  * Returns 0 if a Content-Disposition was found (name extracted) and -1
  * otherwise. Content-Type is optional.
  */
-static int mp_parse_headers(KlMultipartReader *mr) {
+static int mp_parse_headers(KlHttpMultipartReader *mr) {
     const char *buf = mr->hdr;
     size_t len = mr->hdr_len;
     int got_disposition = 0;
@@ -332,7 +332,7 @@ static int mp_parse_headers(KlMultipartReader *mr) {
                 mp_free_str(mr->alloc, &mr->cur_ctype, &mr->cur_ctype_len);
                 mr->cur_ctype = mp_strdup(mr->alloc, val, val_len);
                 if (!mr->cur_ctype) {
-                    mr->last_error = KL_MP_ERR_NOMEM;
+                    mr->last_error = KL_HTTP_MP_ERR_NOMEM;
                     return -1;
                 }
                 mr->cur_ctype_len = val_len;
@@ -351,28 +351,28 @@ static int mp_parse_headers(KlMultipartReader *mr) {
 
 /* ── on_data: push bytes into the input buffer ───────────────────────── */
 
-static int mp_on_data(KlBodyReader *self, const char *data, size_t len) {
-    KlMultipartReader *mr = (KlMultipartReader *)self;
-    if (mr->state == KL_MP_S_ERROR) return -1;
-    if (mr->state == KL_MP_S_DONE)  return 0;
+static int mp_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
+    KlHttpMultipartReader *mr = (KlHttpMultipartReader *)self;
+    if (mr->state == KL_HTTP_MP_S_ERROR) return -1;
+    if (mr->state == KL_HTTP_MP_S_DONE)  return 0;
 
     if (len == 0) return 0;
 
     if (len > SIZE_MAX - mr->total_received) {
-        mr->state = KL_MP_S_ERROR;
-        mr->last_error = KL_MP_ERR_TOTAL_TOO_LARGE;
+        mr->state = KL_HTTP_MP_S_ERROR;
+        mr->last_error = KL_HTTP_MP_ERR_TOTAL_TOO_LARGE;
         return -1;
     }
     if (mr->config.max_total_size > 0 &&
         mr->total_received + len > mr->config.max_total_size) {
-        mr->state = KL_MP_S_ERROR;
-        mr->last_error = KL_MP_ERR_TOTAL_TOO_LARGE;
+        mr->state = KL_HTTP_MP_S_ERROR;
+        mr->last_error = KL_HTTP_MP_ERR_TOTAL_TOO_LARGE;
         return -1;
     }
 
     if (mp_input_reserve(mr, len) < 0) {
-        mr->state = KL_MP_S_ERROR;
-        mr->last_error = KL_MP_ERR_INPUT_OVERFLOW;
+        mr->state = KL_HTTP_MP_S_ERROR;
+        mr->last_error = KL_HTTP_MP_ERR_INPUT_OVERFLOW;
         return -1;
     }
     memcpy(mr->input + mr->input_len, data, len);
@@ -381,22 +381,22 @@ static int mp_on_data(KlBodyReader *self, const char *data, size_t len) {
     return 0;
 }
 
-static void mp_on_complete(KlBodyReader *self) {
-    KlMultipartReader *mr = (KlMultipartReader *)self;
+static void mp_on_complete(KlHttpBodyReader *self) {
+    KlHttpMultipartReader *mr = (KlHttpMultipartReader *)self;
     mr->stream_ended = 1;
 }
 
-static void mp_on_error(KlBodyReader *self) {
-    KlMultipartReader *mr = (KlMultipartReader *)self;
-    if (mr->state != KL_MP_S_DONE) {
-        mr->state = KL_MP_S_ERROR;
-        if (mr->last_error == KL_MP_ERR_NONE)
-            mr->last_error = KL_MP_ERR_PREMATURE_EOF;
+static void mp_on_error(KlHttpBodyReader *self) {
+    KlHttpMultipartReader *mr = (KlHttpMultipartReader *)self;
+    if (mr->state != KL_HTTP_MP_S_DONE) {
+        mr->state = KL_HTTP_MP_S_ERROR;
+        if (mr->last_error == KL_HTTP_MP_ERR_NONE)
+            mr->last_error = KL_HTTP_MP_ERR_PREMATURE_EOF;
     }
 }
 
-static void mp_destroy(KlBodyReader *self) {
-    KlMultipartReader *mr = (KlMultipartReader *)self;
+static void mp_destroy(KlHttpBodyReader *self) {
+    KlHttpMultipartReader *mr = (KlHttpMultipartReader *)self;
     mp_free_str(mr->alloc, &mr->cur_name, &mr->cur_name_len);
     mp_free_str(mr->alloc, &mr->cur_filename, &mr->cur_filename_len);
     mp_free_str(mr->alloc, &mr->cur_ctype, &mr->cur_ctype_len);
@@ -405,31 +405,31 @@ static void mp_destroy(KlBodyReader *self) {
     kl_free(mr->alloc, mr, sizeof(*mr));
 }
 
-/* ── kl_multipart_next: pull events ──────────────────────────────────── */
+/* ── kl_http_multipart_next: pull events ──────────────────────────────────── */
 
-static KlMultipartEvent mp_fail(KlMultipartReader *mr,
-                                KlMultipartErrorCode code) {
-    mr->state = KL_MP_S_ERROR;
+static KlHttpMultipartEvent mp_fail(KlHttpMultipartReader *mr,
+                                KlHttpMultipartErrorCode code) {
+    mr->state = KL_HTTP_MP_S_ERROR;
     mr->last_error = code;
-    return KL_MP_EVT_ERROR;
+    return KL_HTTP_MP_EVT_ERROR;
 }
 
 /* Like mp_fail, but if an inner parser already pinned a more specific
- * cause (e.g. KL_MP_ERR_NOMEM from a failed allocation), keep it. */
-static KlMultipartEvent mp_fail_or_keep(KlMultipartReader *mr,
-                                        KlMultipartErrorCode fallback) {
-    mr->state = KL_MP_S_ERROR;
-    if (mr->last_error == KL_MP_ERR_NONE) mr->last_error = fallback;
-    return KL_MP_EVT_ERROR;
+ * cause (e.g. KL_HTTP_MP_ERR_NOMEM from a failed allocation), keep it. */
+static KlHttpMultipartEvent mp_fail_or_keep(KlHttpMultipartReader *mr,
+                                        KlHttpMultipartErrorCode fallback) {
+    mr->state = KL_HTTP_MP_S_ERROR;
+    if (mr->last_error == KL_HTTP_MP_ERR_NONE) mr->last_error = fallback;
+    return KL_HTTP_MP_EVT_ERROR;
 }
 
-static KlMultipartEvent mp_need_or_eof(KlMultipartReader *mr) {
-    if (mr->stream_ended) return mp_fail(mr, KL_MP_ERR_PREMATURE_EOF);
-    return KL_MP_EVT_NEED_DATA;
+static KlHttpMultipartEvent mp_need_or_eof(KlHttpMultipartReader *mr) {
+    if (mr->stream_ended) return mp_fail(mr, KL_HTTP_MP_ERR_PREMATURE_EOF);
+    return KL_HTTP_MP_EVT_NEED_DATA;
 }
 
-KlMultipartEvent kl_multipart_next(KlBodyReader *br,
-                                    KlMultipartPartMeta *meta,
+KlHttpMultipartEvent kl_http_multipart_next(KlHttpBodyReader *br,
+                                    KlHttpMultipartPartMeta *meta,
                                     const char **data,
                                     size_t *data_len) {
     /* Identity check via vtable: only a multipart reader's on_data is
@@ -437,9 +437,9 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
     if (!br || br->on_data != mp_on_data) {
         if (data) *data = NULL;
         if (data_len) *data_len = 0;
-        return KL_MP_EVT_ERROR;
+        return KL_HTTP_MP_EVT_ERROR;
     }
-    KlMultipartReader *mr = (KlMultipartReader *)br;
+    KlHttpMultipartReader *mr = (KlHttpMultipartReader *)br;
 
     /* Apply the deferred consumption from the previous call. */
     mp_apply_consume(mr);
@@ -448,12 +448,12 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
     if (data_len) *data_len = 0;
 
     for (;;) {
-        if (mr->state == KL_MP_S_ERROR) return KL_MP_EVT_ERROR;
-        if (mr->state == KL_MP_S_DONE)  return KL_MP_EVT_DONE;
+        if (mr->state == KL_HTTP_MP_S_ERROR) return KL_HTTP_MP_EVT_ERROR;
+        if (mr->state == KL_HTTP_MP_S_DONE)  return KL_HTTP_MP_EVT_DONE;
 
         switch (mr->state) {
 
-        case KL_MP_S_PREAMBLE: {
+        case KL_HTTP_MP_S_PREAMBLE: {
             /*
              * Search for "--<boundary>" (delimiter without the leading
              * \r\n). The preamble can contain arbitrary garbage; we
@@ -471,7 +471,7 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
                 size_t skip = (size_t)(found - mr->input) + nlen;
                 mr->input_consumed = skip;
                 mp_apply_consume(mr);  /* immediate — no slice handed out */
-                mr->state = KL_MP_S_AFTER_BOUNDARY;
+                mr->state = KL_HTTP_MP_S_AFTER_BOUNDARY;
                 continue;
             }
             /* Not found. Keep nlen-1 trailing bytes; shift the rest. */
@@ -483,33 +483,33 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
             return mp_need_or_eof(mr);
         }
 
-        case KL_MP_S_AFTER_BOUNDARY: {
+        case KL_HTTP_MP_S_AFTER_BOUNDARY: {
             if (mr->input_len < 2) return mp_need_or_eof(mr);
             char a = mr->input[0], b = mr->input[1];
             if (a == '-' && b == '-') {
                 mr->input_consumed = 2;
                 /* Optional trailing CRLF + epilogue is discarded. */
                 mp_apply_consume(mr);
-                mr->state = KL_MP_S_DONE;
-                return KL_MP_EVT_DONE;
+                mr->state = KL_HTTP_MP_S_DONE;
+                return KL_HTTP_MP_EVT_DONE;
             }
             if (a == '\r' && b == '\n') {
                 /* New part beginning. */
                 if (mr->config.max_parts > 0 &&
                     mr->parts_begun >= mr->config.max_parts)
-                    return mp_fail(mr, KL_MP_ERR_TOO_MANY_PARTS);
+                    return mp_fail(mr, KL_HTTP_MP_ERR_TOO_MANY_PARTS);
 
                 mr->input_consumed = 2;
                 mp_apply_consume(mr);
-                mr->state = KL_MP_S_HEADERS;
+                mr->state = KL_HTTP_MP_S_HEADERS;
                 mr->hdr_len = 0;
                 mr->current_part_size = 0;
                 continue;
             }
-            return mp_fail(mr, KL_MP_ERR_MALFORMED);
+            return mp_fail(mr, KL_HTTP_MP_ERR_MALFORMED);
         }
 
-        case KL_MP_S_HEADERS: {
+        case KL_HTTP_MP_S_HEADERS: {
             /*
              * Pull bytes from input into the growable header buffer
              * until "\r\n\r\n". We must NOT copy past max_headers_size,
@@ -525,12 +525,12 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
                 ? (cap_limit > mr->hdr_len ? cap_limit - mr->hdr_len : 0)
                 : SIZE_MAX;
             if (cap_limit > 0 && available == 0)
-                return mp_fail(mr, KL_MP_ERR_HEADERS_TOO_LARGE);
+                return mp_fail(mr, KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
 
             size_t take = mr->input_len < available ? mr->input_len : available;
 
             if (mp_hdr_reserve(mr, take) < 0)
-                return mp_fail(mr, KL_MP_ERR_HEADERS_TOO_LARGE);
+                return mp_fail(mr, KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
 
             memcpy(mr->hdr + mr->hdr_len, mr->input, take);
             mr->hdr_len += take;
@@ -544,7 +544,7 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
                  * what the caller permitted. */
                 if (cap_limit > 0 && mr->hdr_len >= cap_limit &&
                     mr->input_len > 0)
-                    return mp_fail(mr, KL_MP_ERR_HEADERS_TOO_LARGE);
+                    return mp_fail(mr, KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
                 return mp_need_or_eof(mr);
             }
 
@@ -556,7 +556,7 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
             size_t overshoot = mr->hdr_len - hdr_end;
             if (overshoot > 0) {
                 if (mp_input_reserve(mr, overshoot) < 0)
-                    return mp_fail(mr, KL_MP_ERR_INPUT_OVERFLOW);
+                    return mp_fail(mr, KL_HTTP_MP_ERR_INPUT_OVERFLOW);
                 if (mr->input_len > 0) {
                     memmove(mr->input + overshoot, mr->input, mr->input_len);
                 }
@@ -566,10 +566,10 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
 
             mr->hdr_len = hdr_end;
             if (mp_parse_headers(mr) < 0)
-                return mp_fail_or_keep(mr, KL_MP_ERR_MALFORMED);
+                return mp_fail_or_keep(mr, KL_HTTP_MP_ERR_MALFORMED);
 
             mr->parts_begun++;
-            mr->state = KL_MP_S_BODY;
+            mr->state = KL_HTTP_MP_S_BODY;
             mr->hdr_len = 0;  /* reuse hdr buffer for the next part */
 
             if (meta) {
@@ -580,10 +580,10 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
                 meta->content_type     = mr->cur_ctype;
                 meta->content_type_len = mr->cur_ctype_len;
             }
-            return KL_MP_EVT_PART_BEGIN;
+            return KL_HTTP_MP_EVT_PART_BEGIN;
         }
 
-        case KL_MP_S_BODY: {
+        case KL_HTTP_MP_S_BODY: {
             if (mr->input_len == 0) return mp_need_or_eof(mr);
 
             const char *found = mp_memmem(mr->input, mr->input_len,
@@ -598,20 +598,20 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
                         (body_len > mr->config.max_part_size ||
                          mr->current_part_size >
                              mr->config.max_part_size - body_len))
-                        return mp_fail(mr, KL_MP_ERR_PART_TOO_LARGE);
+                        return mp_fail(mr, KL_HTTP_MP_ERR_PART_TOO_LARGE);
 
                     mr->current_part_size += body_len;
                     if (data)     *data     = mr->input;
                     if (data_len) *data_len = body_len;
                     mr->input_consumed = body_len;
-                    return KL_MP_EVT_PART_DATA;
+                    return KL_HTTP_MP_EVT_PART_DATA;
                 }
                 /* body_len == 0: delimiter is at the very front. Consume
                  * it and emit PART_END. */
                 mr->input_consumed = mr->delimiter_len;
                 mp_apply_consume(mr);
-                mr->state = KL_MP_S_AFTER_BOUNDARY;
-                return KL_MP_EVT_PART_END;
+                mr->state = KL_HTTP_MP_S_AFTER_BOUNDARY;
+                return KL_HTTP_MP_EVT_PART_END;
             }
 
             /* Delimiter not in input. Emit a safe prefix that cannot be
@@ -622,13 +622,13 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
                     (safe > mr->config.max_part_size ||
                      mr->current_part_size >
                          mr->config.max_part_size - safe))
-                    return mp_fail(mr, KL_MP_ERR_PART_TOO_LARGE);
+                    return mp_fail(mr, KL_HTTP_MP_ERR_PART_TOO_LARGE);
 
                 mr->current_part_size += safe;
                 if (data)     *data     = mr->input;
                 if (data_len) *data_len = safe;
                 mr->input_consumed = safe;
-                return KL_MP_EVT_PART_DATA;
+                return KL_HTTP_MP_EVT_PART_DATA;
             }
 
             /* input could be a delimiter prefix — wait for more. */
@@ -636,21 +636,21 @@ KlMultipartEvent kl_multipart_next(KlBodyReader *br,
         }
 
         default:
-            return mp_fail(mr, KL_MP_ERR_MALFORMED);
+            return mp_fail(mr, KL_HTTP_MP_ERR_MALFORMED);
         }
     }
 }
 
-KlMultipartErrorCode kl_multipart_last_error(const KlBodyReader *br) {
-    if (!br || br->on_data != mp_on_data) return KL_MP_ERR_NONE;
-    const KlMultipartReader *mr = (const KlMultipartReader *)br;
+KlHttpMultipartErrorCode kl_http_multipart_last_error(const KlHttpBodyReader *br) {
+    if (!br || br->on_data != mp_on_data) return KL_HTTP_MP_ERR_NONE;
+    const KlHttpMultipartReader *mr = (const KlHttpMultipartReader *)br;
     return mr->last_error;
 }
 
 /* ── Factory ─────────────────────────────────────────────────────────── */
 
-/* cppcheck-suppress constParameterPointer ; signature must match KlBodyReaderFactory typedef */
-KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlHttpRequest *req, void *user_data) {
+/* cppcheck-suppress constParameterPointer ; signature must match KlHttpBodyReaderFactory typedef */
+KlHttpBodyReader *kl_http_body_reader_multipart(KlAllocator *alloc, const KlHttpRequest *req, void *user_data) {
     if (!alloc || !req) return NULL;
 
     size_t ct_len = 0;
@@ -691,9 +691,9 @@ KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlHttpRequest *
                bnd[bnd_len] != '\r' && bnd[bnd_len] != '\n')
             bnd_len++;
     }
-    if (bnd_len == 0 || bnd_len > KL_MP_MAX_BOUNDARY) return NULL;
+    if (bnd_len == 0 || bnd_len > KL_HTTP_MP_MAX_BOUNDARY) return NULL;
 
-    KlMultipartReader *mr = kl_malloc(alloc, sizeof(*mr));
+    KlHttpMultipartReader *mr = kl_malloc(alloc, sizeof(*mr));
     if (!mr) return NULL;
     memset(mr, 0, sizeof(*mr));
 
@@ -710,11 +710,11 @@ KlBodyReader *kl_body_reader_multipart(KlAllocator *alloc, const KlHttpRequest *
     memcpy(mr->delimiter + 4, bnd, bnd_len);
     mr->delimiter_len = 4 + bnd_len;
 
-    mr->state = KL_MP_S_PREAMBLE;
-    mr->last_error = KL_MP_ERR_NONE;
+    mr->state = KL_HTTP_MP_S_PREAMBLE;
+    mr->last_error = KL_HTTP_MP_ERR_NONE;
 
     if (user_data) {
-        mr->config = *(const KlMultipartConfig *)user_data;
+        mr->config = *(const KlHttpMultipartConfig *)user_data;
     }
     /* All cap fields default to 0 = unlimited. The caller decides. */
 

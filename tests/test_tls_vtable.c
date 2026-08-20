@@ -1,5 +1,5 @@
 /*
- * test_tls_vtable.c — kl_server_init must reject a malformed server TLS config WITHOUT
+ * test_tls_vtable.c — kl_http_server_init must reject a malformed server TLS config WITHOUT
  * crashing during error cleanup (regression for the S-7-review Finding 1):
  *   - a NULL factory pointer,
  *   - a factory that returns a session missing a REQUIRED vtable op (esp. destroy/shutdown).
@@ -49,18 +49,18 @@ static KlTls *vtable_factory(KlTlsCtx *ctx, KlAllocator *alloc) {
     return &g_session;
 }
 
-static int init_with_tls(KlServer *s, KlTlsConfig *tls) {
-    KlConfig cfg;
+static int init_with_tls(KlHttpServer *s, KlTlsConfig *tls) {
+    KlHttpServerConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.port = 0;
     cfg.max_connections = 2;   /* >1 so cleanup iterates multiple slots */
     cfg.tls = tls;
-    return kl_server_init(s, &cfg);
+    return kl_http_server_init(s, &cfg);
 }
 
 /* NULL factory → rejected up front (would crash on the first factory() call otherwise). */
 UTEST(tls_vtable, null_factory_rejected) {
-    KlServer s;
+    KlHttpServer s;
     KlTlsConfig tls; memset(&tls, 0, sizeof(tls));
     tls.factory = NULL;
     ASSERT_EQ(init_with_tls(&s, &tls), -1);
@@ -70,7 +70,7 @@ UTEST(tls_vtable, null_factory_rejected) {
 /* Missing destroy → detected as invalid; cleanup must NOT call the NULL destroy. THE
  * regression: previously kl_http_conn_pool_free crashed here. */
 UTEST(tls_vtable, missing_destroy_no_crash) {
-    KlServer s;
+    KlHttpServer s;
     KlTlsConfig tls; memset(&tls, 0, sizeof(tls));
     tls.factory = vtable_factory;
     g_omit = OMIT_DESTROY;
@@ -81,7 +81,7 @@ UTEST(tls_vtable, missing_destroy_no_crash) {
 
 /* Missing shutdown → invalid; destroy IS present, so init frees the bad session via it. */
 UTEST(tls_vtable, missing_shutdown_no_crash) {
-    KlServer s;
+    KlHttpServer s;
     KlTlsConfig tls; memset(&tls, 0, sizeof(tls));
     tls.factory = vtable_factory;
     g_omit = OMIT_SHUTDOWN;
@@ -95,7 +95,7 @@ UTEST(tls_vtable, missing_shutdown_no_crash) {
 UTEST(tls_vtable, each_missing_required_op_rejected) {
     int cases[] = { OMIT_HANDSHAKE, OMIT_READ, OMIT_WRITE, OMIT_PENDING, OMIT_RESET };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        KlServer s;
+        KlHttpServer s;
         KlTlsConfig tls; memset(&tls, 0, sizeof(tls));
         tls.factory = vtable_factory;
         g_omit = cases[i];
@@ -106,13 +106,13 @@ UTEST(tls_vtable, each_missing_required_op_rejected) {
 
 /* A fully-valid vtable still inits + frees cleanly (no false rejection). */
 UTEST(tls_vtable, valid_vtable_inits_and_frees) {
-    KlServer s;
+    KlHttpServer s;
     KlTlsConfig tls; memset(&tls, 0, sizeof(tls));
     tls.factory = vtable_factory;
     g_omit = OMIT_NONE;
     g_destroy_calls = 0;
     ASSERT_EQ(init_with_tls(&s, &tls), 0);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
     ASSERT_GT(g_destroy_calls, 0);   /* sessions were destroyed on free */
 }
 

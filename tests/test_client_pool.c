@@ -379,20 +379,20 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 static void *server_thread_fn(void *arg) {
-    kl_server_run((KlServer *)arg);
+    kl_http_server_run((KlHttpServer *)arg);
     return NULL;
 }
 
-static void wait_for_bind(KlServer *s) {
+static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
 }
 
 UTEST(cpool, sync_pooled_reuse) {
     /* Start a real server */
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .max_connections = 4 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -426,9 +426,9 @@ UTEST(cpool, sync_pooled_reuse) {
     ASSERT_EQ(kl_cpool_idle_count(&pool), 1);
 
     kl_cpool_free(&pool);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 typedef struct { int done; int status; } AsyncPoolCtx;
@@ -442,10 +442,10 @@ static void async_pool_done(KlClient *cl, void *ud) {
 
 UTEST(cpool, async_pooled_reuse) {
     /* Start a real server */
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .max_connections = 4 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -499,9 +499,9 @@ UTEST(cpool, async_pooled_reuse) {
 
     kl_cpool_free(&pool);
     kl_event_ctx_free(&ev);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 /* ── Pooled sync: input validation ───────────────────────────────── */

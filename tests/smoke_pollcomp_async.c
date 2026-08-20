@@ -1,7 +1,7 @@
 /*
  * smoke_pollcomp_async.c — async/thread-pool handler over the completion loop (8e-2b).
  *
- * Proves the whole watcher-relay + resume mechanism end to end: a KlServer on the pollcomp
+ * Proves the whole watcher-relay + resume mechanism end to end: a KlHttpServer on the pollcomp
  * completion loop, a KlThreadPool whose wakeup pipe is a kl_watcher on the server ctx, and
  * a handler that offloads blocking work to the pool and suspends the connection. The
  * worker finishes → writes the wakeup pipe → the completion loop's drain surfaces it as a
@@ -22,7 +22,7 @@
 #define PORT 18099
 #define WANT "{\"async\":true,\"result\":42}"
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 static KlThreadPool *g_pool;
 
 static void nap_ms(int ms) {
@@ -70,25 +70,25 @@ static void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     }
 }
 
-static void *server_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }
+static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
 int main(void) {
-    KlConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_pollcomp() };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-pollcomp-async: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
     KlThreadPoolConfig tpcfg = { .num_workers = 2, .queue_capacity = 16 };
     g_pool = kl_thread_pool_create(&g_srv.ev, &tpcfg);
-    if (!g_pool) { fprintf(stderr, "smoke-pollcomp-async: thread pool create failed\n"); kl_server_free(&g_srv); return 1; }
+    if (!g_pool) { fprintf(stderr, "smoke-pollcomp-async: thread pool create failed\n"); kl_http_server_free(&g_srv); return 1; }
 
-    kl_server_route(&g_srv, "GET", "/async", handle_async, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/async", handle_async, NULL, NULL);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         kl_thread_pool_free(g_pool);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -108,10 +108,10 @@ int main(void) {
         }
     }
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_thread_pool_free(g_pool);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 
     if (!ok) {
         fprintf(stderr, "smoke-pollcomp-async: async/thread-pool roundtrip FAILED\n");

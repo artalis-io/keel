@@ -30,7 +30,7 @@
 
 typedef struct {
     KlAsyncOp op;
-    KlServer *server;
+    KlHttpServer *server;
     int result;            /* set by work_fn, read by done_fn */
 } QueryCtx;
 
@@ -76,7 +76,7 @@ static void query_cancel_fn(void *user_data) {
 /* ── Handlers ───────────────────────────────────────────────────────── */
 
 typedef struct {
-    KlServer *server;
+    KlHttpServer *server;
     KlThreadPool *pool;
 } AppCtx;
 
@@ -121,33 +121,33 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 /* ── Main ───────────────────────────────────────────────────────────── */
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8080,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
     /* Create thread pool (4 workers, default queue) */
     KlThreadPoolConfig pool_cfg = {.num_workers = 4};
     KlThreadPool *pool = kl_thread_pool_create(&s.ev, &pool_cfg);
     if (!pool) {
         fprintf(stderr, "thread pool creation failed\n");
-        kl_server_free(&s);
+        kl_http_server_free(&s);
         return 1;
     }
 
     AppCtx app = {.server = &s, .pool = pool};
 
-    kl_server_route(&s, "GET", "/",      handle_hello, NULL, NULL);
-    kl_server_route(&s, "GET", "/query", handle_query, &app, NULL);
+    kl_http_server_route(&s, "GET", "/",      handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/query", handle_query, &app, NULL);
 
     printf("thread_pool example listening on :8080\n");
     printf("  curl localhost:8080/query\n");
     printf("  curl localhost:8080/\n");
-    kl_server_run(&s);
+    kl_http_server_run(&s);
 
     kl_thread_pool_free(pool);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
     return 0;
 }

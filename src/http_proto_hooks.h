@@ -1,5 +1,5 @@
-#ifndef KEEL_PROTO_HOOKS_H
-#define KEEL_PROTO_HOOKS_H
+#ifndef KEEL_HTTP_PROTO_HOOKS_H
+#define KEEL_HTTP_PROTO_HOOKS_H
 
 /*
  * proto_hooks.h — the per-protocol server upgrade seam.
@@ -16,7 +16,7 @@
  * KlH3ServerHooks + kl_h3_server_hooks() the same way, touching no existing table.
  *
  * A hosted build calls the installers (kl_ws_server_hooks_install / _h2_) from
- * kl_server_init — an explicit reference that both registers the table AND pulls the
+ * kl_http_server_init — an explicit reference that both registers the table AND pulls the
  * protocol object out of the static archive (a self-registering constructor alone
  * would be dropped by the linker now that the core no longer names its symbols). A
  * freestanding build never calls them, so kl_ws_server_hooks()/kl_h2_server_hooks()
@@ -24,7 +24,7 @@
  */
 
 #include <keel/http_connection.h>   /* KlHttpConn */
-#include <keel/router.h>       /* KlRouter */
+#include <keel/http_router.h>       /* KlHttpRouter */
 #include <keel/h2_server.h>    /* KlH2ServerConfig */
 #include <keel/proxy_protocol.h> /* KlProxyResult / KlCidr / KlSockAddr (PROXY seam) */
 #include <stddef.h>
@@ -54,9 +54,9 @@ void kl_ws_server_hooks_install(void);                /* defined in server_ws.c 
 /* ── HTTP/2 server upgrade seam ─────────────────────────────────────────────── */
 typedef struct KlH2ServerHooks {
     /* ALPN / prior-knowledge upgrade, and the h2c (HTTP/1.1 Upgrade) path. */
-    int  (*upgrade)(KlHttpConn *c, KlRouter *router, KlH2ServerConfig *cfg,
+    int  (*upgrade)(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *cfg,
                     const char *data, size_t len);
-    int  (*upgrade_from_h1)(KlHttpConn *c, KlRouter *router, KlH2ServerConfig *cfg,
+    int  (*upgrade_from_h1)(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *cfg,
                             const char *leftover, size_t leftover_len);
     /* Readiness data plane (KL_HTTP_CONN_HTTP2): drive a read/write-ready frame pump; each
      * returns the next KlHttpConnState as int (readiness counterpart of KlH2CompHooks.drive). */
@@ -79,17 +79,17 @@ void kl_h2_server_hooks_install(void);                /* defined in server_h2.c 
  * build compiles none of them (so nothing references the drives), and a freestanding
  * HTTP/1.1 server leaves the tables NULL (no upgrade ever occurs). completion_server.c
  * calls the installers, which also pull the completion TUs out of the static archive. */
-struct KlServer;
+struct KlHttpServer;
 
 typedef struct KlWsCompHooks {
-    void (*drive)(struct KlServer *s, KlHttpConn *c);
+    void (*drive)(struct KlHttpServer *s, KlHttpConn *c);
 } KlWsCompHooks;
 const KlWsCompHooks *kl_ws_comp_hooks(void);
 void kl_ws_comp_hooks_set(const KlWsCompHooks *hooks);
 void kl_ws_comp_hooks_install(void);                  /* defined in completion_ws.c */
 
 typedef struct KlH2CompHooks {
-    void (*drive)(struct KlServer *s, KlHttpConn *c);
+    void (*drive)(struct KlHttpServer *s, KlHttpConn *c);
 } KlH2CompHooks;
 const KlH2CompHooks *kl_h2_comp_hooks(void);
 void kl_h2_comp_hooks_set(const KlH2CompHooks *hooks);
@@ -101,7 +101,7 @@ void kl_h2_comp_hooks_install(void);                  /* defined in completion_h
  * the PROXY header and CIDR-matches the trusted source through this table; a
  * freestanding firmware server links no proxy_protocol.c, so the hooks are NULL and
  * no PROXY handling occurs. Unlike the completion drives, proxy_protocol.c is always
- * compiled in a hosted build, so kl_server_init installs this with no build-axis #ifdef. */
+ * compiled in a hosted build, so kl_http_server_init installs this with no build-axis #ifdef. */
 typedef struct KlProxyHooks {
     KlProxyResult (*parse)(const uint8_t *buf, size_t len, size_t *consumed,
                            KlSockAddr *peer);
@@ -111,4 +111,4 @@ const KlProxyHooks *kl_proxy_hooks(void);
 void kl_proxy_hooks_set(const KlProxyHooks *hooks);
 void kl_proxy_hooks_install(void);                    /* defined in proxy_protocol.c */
 
-#endif /* KEEL_PROTO_HOOKS_H */
+#endif /* KEEL_HTTP_PROTO_HOOKS_H */

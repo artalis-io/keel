@@ -1,8 +1,8 @@
 /*
  * middleware.c — Pre/post-body middleware, CORS, and access logging
  *
- * Concepts: kl_server_use (pre-body), kl_server_use_post (post-body),
- * kl_cors_middleware, req->ctx for middleware-to-handler data passing.
+ * Concepts: kl_http_server_use (pre-body), kl_http_server_use_post (post-body),
+ * kl_http_cors_middleware, req->ctx for middleware-to-handler data passing.
  *
  * Middleware chain:
  *   1. request_log   (pre-body)  — logs method + path, stores start time
@@ -76,7 +76,7 @@ static void handle_private(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 
 static void handle_data(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (!br || br->len == 0) {
         kl_http_response_error(res, 400, "Request body required");
         return;
@@ -89,36 +89,36 @@ static void handle_data(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 /* ── Main ───────────────────────────────────────────────────────────── */
 
 int main(void) {
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8080,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
     /* CORS — allow requests from localhost:3000 */
-    static KlCorsConfig cors;
-    kl_cors_init(&cors);
-    kl_cors_add_origin(&cors, "http://localhost:3000");
+    static KlHttpCorsConfig cors;
+    kl_http_cors_init(&cors);
+    kl_http_cors_add_origin(&cors, "http://localhost:3000");
 
     /* Pre-body middleware (runs before body is read) */
-    kl_server_use(&s, "*", "/*", request_log, NULL);
-    kl_server_use(&s, "*", "/*", kl_cors_middleware, &cors);
-    kl_server_use(&s, "*", "/api/*", auth_check, NULL);
+    kl_http_server_use(&s, "*", "/*", request_log, NULL);
+    kl_http_server_use(&s, "*", "/*", kl_http_cors_middleware, &cors);
+    kl_http_server_use(&s, "*", "/api/*", auth_check, NULL);
 
     /* Post-body middleware (runs after body is consumed) */
-    kl_server_use_post(&s, "*", "/*", access_log, NULL);
+    kl_http_server_use_post(&s, "*", "/*", access_log, NULL);
 
     /* Routes */
-    kl_server_route(&s, "GET",  "/api/public",  handle_public,  NULL, NULL);
-    kl_server_route(&s, "GET",  "/api/private", handle_private, NULL, NULL);
-    kl_server_route(&s, "POST", "/api/data",    handle_data,    NULL,
-                    kl_body_reader_buffer);
+    kl_http_server_route(&s, "GET",  "/api/public",  handle_public,  NULL, NULL);
+    kl_http_server_route(&s, "GET",  "/api/private", handle_private, NULL, NULL);
+    kl_http_server_route(&s, "POST", "/api/data",    handle_data,    NULL,
+                    kl_http_body_reader_buffer);
 
     printf("middleware example listening on :8080\n");
     printf("  curl localhost:8080/api/public\n");
     printf("  curl -H 'Authorization: Bearer tok' localhost:8080/api/private\n");
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

@@ -1,5 +1,5 @@
-#ifndef KEEL_SSE_H
-#define KEEL_SSE_H
+#ifndef KEEL_HTTP_SSE_H
+#define KEEL_HTTP_SSE_H
 
 #include <keel/http_response.h>
 #include <stddef.h>
@@ -14,7 +14,7 @@ typedef struct {
     KlHttpResponseWriteFn  write_fn;   /**< Chunked stream write callback */
     void      *write_ctx;  /**< Chunked stream write context */
     KlHttpResponse *res;       /**< Response (for end_stream) */
-} KlSse;
+} KlHttpSse;
 
 /**
  * @brief Begin an SSE stream.
@@ -26,7 +26,7 @@ typedef struct {
  * @param sse  SSE handle to initialize (caller-owned).
  * @return 0 on success, -1 on failure.
  */
-int kl_sse_begin(KlHttpResponse *res, KlSse *sse);
+int kl_http_sse_begin(KlHttpResponse *res, KlHttpSse *sse);
 
 /**
  * @brief Send an SSE event.
@@ -35,14 +35,14 @@ int kl_sse_begin(KlHttpResponse *res, KlSse *sse);
  * NULL event or id omits that field. Multiline data is auto-split
  * on '\n' — each line gets its own "data: " prefix.
  *
- * @param sse      SSE handle from kl_sse_begin.
+ * @param sse      SSE handle from kl_http_sse_begin.
  * @param event    Event type (NULL to omit).
  * @param data     Event data (may contain '\n' for multiline).
  * @param data_len Length of data in bytes.
  * @param id       Event ID (NULL to omit).
  * @return 0 on success, -1 on write error.
  */
-int kl_sse_event(KlSse *sse, const char *event,
+int kl_http_sse_event(KlHttpSse *sse, const char *event,
                  const char *data, size_t data_len, const char *id);
 
 /**
@@ -56,7 +56,7 @@ int kl_sse_event(KlSse *sse, const char *event,
  * @param len  Length of text in bytes.
  * @return 0 on success, -1 on write error.
  */
-int kl_sse_comment(KlSse *sse, const char *text, size_t len);
+int kl_http_sse_comment(KlHttpSse *sse, const char *text, size_t len);
 
 /**
  * @brief End the SSE stream.
@@ -66,6 +66,6 @@ int kl_sse_comment(KlSse *sse, const char *text, size_t len);
  * @param sse  SSE handle.
  * @return 0 on success, -1 on error.
  */
-int kl_sse_end(KlSse *sse);
+int kl_http_sse_end(KlHttpSse *sse);
 
 #endif

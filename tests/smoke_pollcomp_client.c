@@ -2,7 +2,7 @@
  * smoke_pollcomp_client.c — async KlClient CONNECT over a completion loop (LC-0 proof).
  *
  * The proof for the completion CONNECT contract (KL_COMP_CONNECT / kl_comp_post_connect):
- * an async KlClient does GET / to a KlServer, BOTH on the pollcomp completion axis, and the
+ * an async KlClient does GET / to a KlHttpServer, BOTH on the pollcomp completion axis, and the
  * client's connect is driven over the completion loop (kl_comp_post_connect → real
  * connect()+POLLOUT+SO_ERROR → KL_COMP_CONNECT → he_on_writable) rather than the readiness
  * WRITE-watcher shim. Before LC-0 the async client's connect only "worked by luck" on
@@ -28,7 +28,7 @@
 #define PORT 18101
 #define WANT "{\"lc0\":true,\"ok\":42}"
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 
 static void nap_ms(int ms) {
     struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
@@ -40,7 +40,7 @@ static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     kl_http_response_json(res, 200, WANT, sizeof(WANT) - 1);
 }
 
-static void *server_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }
+static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
 /* Async client completion state. */
 typedef struct { int done; int ok; } ClientState;
@@ -56,17 +56,17 @@ static void on_done(KlClient *client, void *user_data) {
 }
 
 int main(void) {
-    KlConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_pollcomp() };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-pollcomp-client: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", handle_root, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", handle_root, NULL, NULL);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
     nap_ms(100);   /* let the server bind + start accepting */
@@ -76,7 +76,7 @@ int main(void) {
     KlEventCtx ev;
     if (kl_event_ctx_init(&ev, &alloc) < 0) {
         fprintf(stderr, "smoke-pollcomp-client: client ctx init failed\n");
-        kl_server_stop(&g_srv); pthread_join(th, NULL); kl_server_free(&g_srv);
+        kl_http_server_stop(&g_srv); pthread_join(th, NULL); kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -88,7 +88,7 @@ int main(void) {
     if (!client) {
         fprintf(stderr, "smoke-pollcomp-client: kl_client_start failed\n");
         kl_event_ctx_free(&ev);
-        kl_server_stop(&g_srv); pthread_join(th, NULL); kl_server_free(&g_srv);
+        kl_http_server_stop(&g_srv); pthread_join(th, NULL); kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -100,9 +100,9 @@ int main(void) {
     kl_client_free(client);
     kl_event_ctx_free(&ev);
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 
     if (!cs.done || !cs.ok) {
         fprintf(stderr, "smoke-pollcomp-client: async client over completion FAILED "

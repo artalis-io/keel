@@ -1,5 +1,5 @@
 /*
- * server_core.c — the model-blind, freestanding-safe half of the KlServer.
+ * server_core.c — the model-blind, freestanding-safe half of the KlHttpServer.
  *
  * Split out of server.c for the Phase 10 UEFI *server* (docs/phase10_uefi_server_design.md,
  * S-1), mirroring the client's async.c -> event_ctx.c bisection. This TU holds the
@@ -8,13 +8,13 @@
  * readiness event loop, no stdio. A freestanding completion server (EFI_TCP4 +
  * the EFI completion backend) links it WITHOUT dragging in server.c's hosted half.
  *
- * The hosted half stays byte-identical in server.c: kl_log/kl_log_errno (stdio),
+ * The hosted half stays byte-identical in server.c: kl_http_server_log/kl_http_server_log_errno (stdio),
  * TCP/AF_UNIX bind + listen, systemd socket activation, signal handling, the
- * stop-wakeup self-pipe, and the readiness kl_server_run wait/accept/dispatch loop
- * (which delegates its completion branch to kl_server_run_completion_loop here).
+ * stop-wakeup self-pipe, and the readiness kl_http_server_run wait/accept/dispatch loop
+ * (which delegates its completion branch to kl_http_server_run_completion_loop here).
  */
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/async.h>
 #include <keel/timer.h>
 #include <keel/http_request.h>
@@ -22,7 +22,7 @@
 #include "io_engine.h"    /* kl_io_engine_run_completion / kl_io_engine_post_read / kl_comp_cancel */
 #include "event_caps.h"   /* kl_event_caps — completion vs readiness pause/resume */
 #include "platform.h"     /* kl_monotonic_ms */
-#include "proto_hooks.h"  /* ws/h2 upgrade seam — sweep/drain reach ws/h2 through it */
+#include "http_proto_hooks.h"  /* ws/h2 upgrade seam — sweep/drain reach ws/h2 through it */
 #include <keel/http1_parser.h>       /* kl_http1_parser_llhttp (default request parser) */
 #include <keel/event_ctx.h>    /* kl_event_ctx_init_ex / kl_watcher_add */
 #ifndef KEEL_FREESTANDING
@@ -38,25 +38,25 @@
 #define KL_POLL_TIMEOUT_MS 1000
 
 /* ── Stop-wakeup self-pipe (hosted only) ──────────────────────────────────────
- * kl_server_stop() writes a byte to wake the run loop promptly. A freestanding EFI
- * server has no self-pipe (no OS pipe/socketpair, no kl_server_stop caller) — it
+ * kl_http_server_stop() writes a byte to wake the run loop promptly. A freestanding EFI
+ * server has no self-pipe (no OS pipe/socketpair, no kl_http_server_stop caller) — it
  * runs the completion loop directly — so both the helpers and their init call are
  * compiled out under KEEL_FREESTANDING. */
 #ifndef KEEL_FREESTANDING
-static void kl_server_on_wakeup(KlSocketHandle fd, KlEventMask ready, void *user_data) {
+static void kl_http_server_on_wakeup(KlSocketHandle fd, KlEventMask ready, void *user_data) {
     (void)ready; (void)user_data;
     kl_plat_wakeup_drain(fd);
 }
 
 /* Open the stop-wakeup self-pipe and register its read end as a run-loop watcher. Best-
  * effort: on failure the loop simply falls back to tick-timeout stop latency. Called at the
- * end of kl_server_init, after the event ctx + provider are wired (so the watcher registers
+ * end of kl_http_server_init, after the event ctx + provider are wired (so the watcher registers
  * correctly on both readiness and completion loops). */
-static void kl_server_wakeup_init(KlServer *s) {
+static void kl_http_server_wakeup_init(KlHttpServer *s) {
     s->stop_wake_rd = s->stop_wake_wr = KL_INVALID_SOCKET;
     KlPlatWakeup w;
     if (kl_plat_wakeup_open(&w) < 0) return;
-    if (kl_watcher_add(&s->ev, w.rd, KL_EVENT_READ, kl_server_on_wakeup, s) < 0) {
+    if (kl_watcher_add(&s->ev, w.rd, KL_EVENT_READ, kl_http_server_on_wakeup, s) < 0) {
         kl_plat_wakeup_close(&w);
         return;
     }
@@ -67,12 +67,12 @@ static void kl_server_wakeup_init(KlServer *s) {
 
 /* ── Server construction (model-blind: pool + router + event ctx + provider) ───
  * Moved from server.c in the Phase 10 UEFI server carve so the freestanding EFI
- * server can construct a KlServer from the archive alone. The hosted-only pieces —
+ * server can construct a KlHttpServer from the archive alone. The hosted-only pieces —
  * the ws/h2/proxy upgrade-hook installers, the PROXY-protocol CIDR allowlist, the
  * async file-I/O backend, and the stop self-pipe — are compiled out under
  * KEEL_FREESTANDING (a freestanding server is pure HTTP/1.1, no PROXY, no async
  * file I/O, no self-pipe). Everything else is platform-neutral. */
-int kl_server_init(KlServer *s, const KlConfig *config) {
+int kl_http_server_init(KlHttpServer *s, const KlHttpServerConfig *config) {
     if (!s || !config) {
         if (s) s->last_error = KL_ERR_INVALID_ARG;
         return -1;
@@ -93,14 +93,14 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
 
     /* Apply defaults */
     s->config = *config;
-    if (s->config.transport != KL_TRANSPORT_TCP &&
-        s->config.transport != KL_TRANSPORT_UNIX) {
+    if (s->config.transport != KL_HTTP_SERVER_TRANSPORT_TCP &&
+        s->config.transport != KL_HTTP_SERVER_TRANSPORT_UNIX) {
         s->last_error = KL_ERR_INVALID_ARG;
         return -1;
     }
     if (s->config.unix_socket_path &&
-        s->config.transport == KL_TRANSPORT_TCP) {
-        s->config.transport = KL_TRANSPORT_UNIX;
+        s->config.transport == KL_HTTP_SERVER_TRANSPORT_TCP) {
+        s->config.transport = KL_HTTP_SERVER_TRANSPORT_UNIX;
     }
     /* listen_fd: 0 = disabled, > 0 = adopt (fds 0-2 are stdio, not listeners).
      * Reject a negative value rather than silently ignoring it. */
@@ -111,13 +111,13 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     if (s->config.bind_addr == NULL)
         s->config.bind_addr = "0.0.0.0";
     if (s->config.max_connections <= 0)
-        s->config.max_connections = KL_DEFAULT_MAX_CONNS;
+        s->config.max_connections = KL_HTTP_SERVER_DEFAULT_MAX_CONNS;
     if (s->config.read_timeout_ms <= 0)
-        s->config.read_timeout_ms = KL_DEFAULT_READ_TIMEOUT;
+        s->config.read_timeout_ms = KL_HTTP_SERVER_DEFAULT_READ_TIMEOUT;
     if (s->config.parser == NULL)
         s->config.parser = kl_http1_parser_llhttp;
     if (s->config.max_body_size == 0)
-        s->config.max_body_size = KL_DEFAULT_MAX_BODY_SIZE;
+        s->config.max_body_size = KL_HTTP_SERVER_DEFAULT_MAX_BODY_SIZE;
     if (s->config.max_header_size == 0)
         s->config.max_header_size = KL_HTTP_CONN_READ_BUF_SIZE;
     if (s->config.max_header_size > SIZE_MAX / 2) {
@@ -142,13 +142,13 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     KlAllocator *alloc = &s->alloc_storage;
 
     /* Init subsystems */
-    if (kl_router_init(&s->router, alloc) < 0) {
+    if (kl_http_router_init(&s->router, alloc) < 0) {
         s->last_error = KL_ERR_ALLOC;
         return -1;
     }
     if (kl_http_conn_pool_init(&s->pool, s->config.max_connections, alloc) < 0) {
         s->last_error = KL_ERR_ALLOC;
-        kl_router_free(&s->router);
+        kl_http_router_free(&s->router);
         return -1;
     }
 
@@ -182,7 +182,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         if (cn < 0) {
             s->last_error = KL_ERR_INVALID_ARG;
             kl_http_conn_pool_free(&s->pool);
-            kl_router_free(&s->router);
+            kl_http_router_free(&s->router);
             return -1;
         }
         if (cn > 0) {
@@ -190,7 +190,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
             if (!s->proxy_cidrs) {
                 s->last_error = KL_ERR_ALLOC;
                 kl_http_conn_pool_free(&s->pool);
-                kl_router_free(&s->router);
+                kl_http_router_free(&s->router);
                 return -1;
             }
             memcpy(s->proxy_cidrs, tmp, (size_t)cn * sizeof(KlCidr));
@@ -205,7 +205,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         if (!s->pool.conns[i].parser) {
             s->last_error = KL_ERR_ALLOC;
             kl_http_conn_pool_free(&s->pool);
-            kl_router_free(&s->router);
+            kl_http_router_free(&s->router);
             return -1;
         }
         s->pool.conns[i].access_log = s->config.access_log;
@@ -224,7 +224,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         if (!s->config.tls->factory) {
             s->last_error = KL_ERR_TLS_VTABLE;
             kl_http_conn_pool_free(&s->pool);
-            kl_router_free(&s->router);
+            kl_http_router_free(&s->router);
             return -1;
         }
         for (int i = 0; i < s->pool.capacity; i++) {
@@ -233,7 +233,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
             if (!s->pool.conns[i].tls) {
                 s->last_error = KL_ERR_TLS_INIT;
                 kl_http_conn_pool_free(&s->pool);
-                kl_router_free(&s->router);
+                kl_http_router_free(&s->router);
                 return -1;
             }
             /* Validate the vtable (all 7 required ops; alpn_protocol etc. optional). A
@@ -246,7 +246,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
                     s->pool.conns[i].tls->destroy(s->pool.conns[i].tls);
                 s->pool.conns[i].tls = NULL;
                 kl_http_conn_pool_free(&s->pool);
-                kl_router_free(&s->router);
+                kl_http_router_free(&s->router);
                 return -1;
             }
         }
@@ -257,7 +257,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     if (kl_event_ctx_init_ex(&s->ev, alloc, s->config.event_provider) < 0) {
         s->last_error = KL_ERR_EVENT_INIT;
         kl_http_conn_pool_free(&s->pool);
-        kl_router_free(&s->router);
+        kl_http_router_free(&s->router);
         return -1;
     }
     /* Route all socket ops (listen socket + accepted conns) through the selected
@@ -283,7 +283,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
         s->last_error = KL_ERR_SOCKET;
         kl_event_ctx_free(&s->ev);
         kl_http_conn_pool_free(&s->pool);
-        kl_router_free(&s->router);
+        kl_http_router_free(&s->router);
         return -1;
     }
 
@@ -299,7 +299,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
                 s->last_error = KL_ERR_ALLOC;
                 kl_event_ctx_free(&s->ev);
                 kl_http_conn_pool_free(&s->pool);
-                kl_router_free(&s->router);
+                kl_http_router_free(&s->router);
                 return -1;
             }
             s->pool.conns[i].comp_cipher_cap = KL_COMP_CIPHER_SIZE;
@@ -314,9 +314,9 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
     for (int i = 0; i < s->pool.capacity; i++)
         s->pool.conns[i].file_io = s->file_io;
 
-    /* Self-pipe wakeup so kl_server_stop() wakes the run loop promptly (both axes). */
+    /* Self-pipe wakeup so kl_http_server_stop() wakes the run loop promptly (both axes). */
 #ifndef KEEL_FREESTANDING
-    kl_server_wakeup_init(s);
+    kl_http_server_wakeup_init(s);
 #endif
 
     return 0;
@@ -329,7 +329,7 @@ int kl_server_init(KlServer *s, const KlConfig *config) {
  * (draining its EFI tokens), so after this the socket provider's live count is 0 — the
  * precondition for a clean ExitBootServices. Hosted-only pieces (async-op cancel, the
  * self-pipe, the AF_UNIX unlink) are compiled out under KEEL_FREESTANDING. */
-void kl_server_free(KlServer *s) {
+void kl_http_server_free(KlHttpServer *s) {
     /* Invalidate the accept liveness token BEFORE any teardown (step 6B-1): a slot lease released
      * while connections drain below must see accept_alive == 0 and no-op, never touching the
      * about-to-be-destroyed listener/pool. Ordered first, before the pool is freed. */
@@ -357,7 +357,7 @@ void kl_server_free(KlServer *s) {
          * posted accepts retire only once physically completed + reaped. Do it in a guaranteed,
          * memory-safe, no-completion-lost order:
          *   (1) close the listen socket — freestanding-safe; forces every posted IOCP AcceptEx to
-         *       complete (closesocket cancels its overlapped I/O). kl_server_close_listener below
+         *       complete (closesocket cancels its overlapped I/O). kl_http_server_close_listener below
          *       then only does the owned-AF_UNIX unlink (fd already invalid).
          *   (2) kl_comp_shutdown_accepts — the backend GUARANTEES every posted accept will complete
          *       (io_uring unconditionally submits a cancel per accept; pollcomp marks them aborted;
@@ -387,7 +387,7 @@ void kl_server_free(KlServer *s) {
     /* Close the listen socket. Hosted also unlinks an owned AF_UNIX path; a freestanding
      * EFI server has only the TCP listener, so close it directly. */
 #ifndef KEEL_FREESTANDING
-    kl_server_close_listener(s);
+    kl_http_server_close_listener(s);
 #else
     if (kl_handle_valid(s->listen_fd)) {
         kl_sock_close(s->ev.sockets, s->listen_fd);
@@ -411,7 +411,7 @@ void kl_server_free(KlServer *s) {
         s->proxy_cidr_count = 0;
     }
     kl_http_conn_pool_free(&s->pool);      /* closes every live accepted-child socket */
-    kl_router_free(&s->router);
+    kl_http_router_free(&s->router);
     if (s->config.tls && s->config.tls->ctx_destroy) {
         s->config.tls->ctx_destroy(s->config.tls->ctx);
     }
@@ -421,12 +421,12 @@ void kl_server_free(KlServer *s) {
 }
 
 /* ── Completion run-loop tick (the freestanding server's whole loop body) ──────
- * One iteration of the completion event loop, factored out of kl_server_run so
+ * One iteration of the completion event loop, factored out of kl_http_server_run so
  * BOTH the hosted completion backends (io_uring/IOCP/pollcomp) and a freestanding
  * EFI server share it verbatim. Uses only completion/timer/async seams. Returns 0
  * to continue the loop, -1 to break (the completion tick reported a fatal error).
  * The caller owns the `while (running)` guard + drain/running atomics. */
-int kl_server_run_completion_loop(KlServer *s) {
+int kl_http_server_run_completion_loop(KlHttpServer *s) {
     /* Bound the tick by the nearest async-op deadline / timer so they fire on time
      * — the completion loop is a full event loop (watchers relayed via
      * KL_COMP_WATCHER; timers + async deadlines serviced here, 8e-2). */
@@ -445,7 +445,7 @@ int kl_server_run_completion_loop(KlServer *s) {
     cnow = kl_monotonic_ms();
     /* Idle-timeout sweep on the completion loop too (slowloris defense) — the
      * completion path never falls through to the readiness sweep in server.c. */
-    kl_server_sweep_conn_timeouts(s, cnow, 1);
+    kl_http_server_sweep_conn_timeouts(s, cnow, 1);
     for (KlAsyncOp *aop = s->async_ops; aop; ) {   /* async-op deadlines */
         KlAsyncOp *next_aop = aop->next;
         if (!aop->_terminal && aop->deadline_ms > 0 && cnow >= aop->deadline_ms) {
@@ -456,7 +456,7 @@ int kl_server_run_completion_loop(KlServer *s) {
         aop = next_aop;
     }
     kl_timer_fire(&s->ev);                          /* due one-shot timers */
-    kl_server_drain_progress(s, cnow);              /* graceful drain (completion loop) */
+    kl_http_server_drain_progress(s, cnow);              /* graceful drain (completion loop) */
     return 0;
 }
 
@@ -467,7 +467,7 @@ int kl_server_run_completion_loop(KlServer *s) {
 
 /* Release a connection and resume the listen socket if it was paused due to pool
  * exhaustion. Called from the event loop, timeout sweep, and async completion. */
-void kl_server_conn_release(KlServer *s, KlHttpConn *c) {
+void kl_http_server_conn_release(KlHttpServer *s, KlHttpConn *c) {
     if (s->accept_via_listener) {
         /* Split-credit accept path (step 6B-1): return the physical KlHttpConn to the pool FIRST, then
          * consume the admission lease. The lease's release returns the credit and resumes the
@@ -492,7 +492,7 @@ static const char kl_408_response[] =
     "Connection: close\r\n"
     "\r\n";
 
-void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loop) {
+void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int completion_loop) {
     uint64_t timeout = (uint64_t)s->config.read_timeout_ms;
     uint64_t body_timeout = s->config.body_timeout_ms > 0
                             ? (uint64_t)s->config.body_timeout_ms
@@ -514,7 +514,7 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
                         kl_comp_cancel(&s->ev, tc->stream.fd);
                     } else {
                         kl_event_del(&s->ev.loop, tc->stream.fd);
-                        kl_server_conn_release(s, tc);
+                        kl_http_server_conn_release(s, tc);
                     }
                 }
             }
@@ -549,13 +549,13 @@ void kl_server_sweep_conn_timeouts(KlServer *s, uint64_t now, int completion_loo
                 kl_comp_cancel(&s->ev, tc->stream.fd);   /* abort op → release via its completion */
             } else {
                 kl_event_del(&s->ev.loop, tc->stream.fd);
-                kl_server_conn_release(s, tc);
+                kl_http_server_conn_release(s, tc);
             }
         }
     }
 }
 
-void kl_server_drain_progress(KlServer *s, uint64_t now) {
+void kl_http_server_drain_progress(KlHttpServer *s, uint64_t now) {
     if (!atomic_load(&s->draining)) return;
     const KlWsServerHooks *wsh = kl_ws_server_hooks();
     const KlH2ServerHooks *h2h = kl_h2_server_hooks();
@@ -574,36 +574,36 @@ void kl_server_drain_progress(KlServer *s, uint64_t now) {
 
 /* ── Route + middleware registration (thin router wrappers, seam-only) ───────── */
 
-int kl_server_route(KlServer *s, const char *method, const char *pattern,
-                    KlHandler handler, void *user_data,
-                    KlBodyReaderFactory body_reader) {
-    return kl_router_add(&s->router, method, pattern, handler, user_data,
+int kl_http_server_route(KlHttpServer *s, const char *method, const char *pattern,
+                    KlHttpHandler handler, void *user_data,
+                    KlHttpBodyReaderFactory body_reader) {
+    return kl_http_router_add(&s->router, method, pattern, handler, user_data,
                          body_reader);
 }
 
-int kl_server_route_streaming(KlServer *s, const char *method, const char *pattern,
-                               KlHandler handler, void *user_data,
-                               KlBodyReaderFactory body_reader) {
-    return kl_router_add_streaming(&s->router, method, pattern, handler,
+int kl_http_server_route_streaming(KlHttpServer *s, const char *method, const char *pattern,
+                               KlHttpHandler handler, void *user_data,
+                               KlHttpBodyReaderFactory body_reader) {
+    return kl_http_router_add_streaming(&s->router, method, pattern, handler,
                                     user_data, body_reader);
 }
 
-int kl_server_route_streaming_async(KlServer *s, const char *method,
+int kl_http_server_route_streaming_async(KlHttpServer *s, const char *method,
                                        const char *pattern,
-                                       KlHandler handler, void *user_data,
-                                       KlBodyReaderFactory body_reader) {
-    return kl_router_add_streaming_async(&s->router, method, pattern, handler,
+                                       KlHttpHandler handler, void *user_data,
+                                       KlHttpBodyReaderFactory body_reader) {
+    return kl_http_router_add_streaming_async(&s->router, method, pattern, handler,
                                             user_data, body_reader);
 }
 
-int kl_server_use(KlServer *s, const char *method, const char *pattern,
-                  KlMiddleware fn, void *user_data) {
-    return kl_router_use(&s->router, method, pattern, fn, user_data);
+int kl_http_server_use(KlHttpServer *s, const char *method, const char *pattern,
+                  KlHttpMiddleware fn, void *user_data) {
+    return kl_http_router_use(&s->router, method, pattern, fn, user_data);
 }
 
-int kl_server_use_post(KlServer *s, const char *method, const char *pattern,
-                       KlMiddleware fn, void *user_data) {
-    return kl_router_use_post(&s->router, method, pattern, fn, user_data);
+int kl_http_server_use_post(KlHttpServer *s, const char *method, const char *pattern,
+                       KlHttpMiddleware fn, void *user_data) {
+    return kl_http_router_use_post(&s->router, method, pattern, fn, user_data);
 }
 
 /* ── Read-side body flow control (event-axis-agnostic) ────────────────────────
@@ -630,7 +630,7 @@ void kl_http_request_resume_body(const KlHttpRequest *req) {
 }
 
 /* ── Read-only load snapshot ──────────────────────────────────────────────── */
-void kl_server_stats(const KlServer *s, KlServerStats *out) {
+void kl_http_server_stats(const KlHttpServer *s, KlHttpServerStats *out) {
     if (!out) return;
     memset(out, 0, sizeof(*out));
     if (!s) return;

@@ -1,7 +1,7 @@
 /*
  * smoke_iocp_async.c — async/thread-pool handler over IOCP on Windows (8e-2c).
  *
- * Runtime-tests the IOCP watcher relay: a KlServer on the IOCP completion loop, a
+ * Runtime-tests the IOCP watcher relay: a KlHttpServer on the IOCP completion loop, a
  * KlThreadPool whose loopback-socket wakeup is registered as a watcher, and a handler
  * that offloads blocking work and suspends. The worker finishes → writes the wakeup
  * socket → the overlapped WSARecv posted in event_iocp.c completes → the drain surfaces
@@ -22,7 +22,7 @@
 #define PORT 18100
 #define WANT "{\"async\":true,\"result\":42}"
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 static KlThreadPool *g_pool;
 
 typedef struct { KlAsyncOp op; int result; } WorkCtx;   /* op MUST be first */
@@ -61,25 +61,25 @@ static void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     }
 }
 
-static void *server_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }
+static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
 int main(void) {
-    KlConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_iocp() };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-iocp-async: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
     KlThreadPoolConfig tpcfg = { .num_workers = 2, .queue_capacity = 16 };
     g_pool = kl_thread_pool_create(&g_srv.ev, &tpcfg);
-    if (!g_pool) { fprintf(stderr, "smoke-iocp-async: thread pool create failed\n"); kl_server_free(&g_srv); return 1; }
+    if (!g_pool) { fprintf(stderr, "smoke-iocp-async: thread pool create failed\n"); kl_http_server_free(&g_srv); return 1; }
 
-    kl_server_route(&g_srv, "GET", "/async", handle_async, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/async", handle_async, NULL, NULL);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         kl_thread_pool_free(g_pool);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -99,10 +99,10 @@ int main(void) {
         }
     }
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_thread_pool_free(g_pool);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 
     if (!ok) {
         fprintf(stderr, "smoke-iocp-async: async/thread-pool roundtrip FAILED\n");

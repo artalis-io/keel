@@ -4,7 +4,7 @@
  *
  * Unlike test_roundtrip.c (which wires the two sessions in memory), this drives:
  *   - the SERVER adapter through KEEL's real HTTP/2 server path: kl_server with
- *     KlConfig.h2 = { .factory = kl_h2_nghttp2_server_session }, entered via h2c
+ *     KlHttpServerConfig.h2 = { .factory = kl_h2_nghttp2_server_session }, entered via h2c
  *     prior-knowledge (the "PRI * HTTP/2.0" preface), routing GET /hello; and
  *   - the CLIENT adapter through kl_h2_client_connect() over a cleartext http://
  *     connection, driven by a KlEventCtx run loop.
@@ -35,8 +35,8 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     kl_http_response_json(res, 200, "{\"msg\":\"hello h2 e2e\"}", 21);
 }
 
-static KlServer g_srv;
-static void *srv_thread(void *a) { (void)a; kl_server_run(&g_srv); return NULL; }
+static KlHttpServer g_srv;
+static void *srv_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return NULL; }
 
 /* ── client side ────────────────────────────────────────────────────── */
 
@@ -64,9 +64,9 @@ int main(void) {
 
     /* Server: real KEEL HTTP/2 (h2c prior-knowledge) via the nghttp2 factory. */
     KlH2ServerConfig h2cfg = { .factory = kl_h2_nghttp2_server_session };
-    KlConfig cfg = { .port = E2E_PORT, .bind_addr = "127.0.0.1", .h2 = &h2cfg };
-    if (kl_server_init(&g_srv, &cfg) < 0) return fail("server init");
-    kl_server_route(&g_srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServerConfig cfg = { .port = E2E_PORT, .bind_addr = "127.0.0.1", .h2 = &h2cfg };
+    if (kl_http_server_init(&g_srv, &cfg) < 0) return fail("server init");
+    kl_http_server_route(&g_srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) return fail("server thread");
@@ -95,14 +95,14 @@ int main(void) {
         if (kl_event_ctx_run(&ev, 16, 20) < 0) break;
     }
     if (sid < 0 && !st.err) { kl_h2_client_free(c); kl_event_ctx_free(&ev);
-        kl_server_stop(&g_srv); pthread_join(tid, NULL); kl_server_free(&g_srv);
+        kl_http_server_stop(&g_srv); pthread_join(tid, NULL); kl_http_server_free(&g_srv);
         return fail("request never submitted (connection never became ACTIVE)"); }
 
     kl_h2_client_free(c);
     kl_event_ctx_free(&ev);
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(tid, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 
     if (st.err)                 return fail("client reported error");
     if (!st.done)              return fail("timed out waiting for response");

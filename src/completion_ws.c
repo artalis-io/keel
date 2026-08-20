@@ -5,12 +5,12 @@
  * transport-agnostic WS frame core (kl_ws_server_*) verbatim — no WebSocket-protocol code
  * and no IOCP/pollcomp symbol appears here.
  */
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/http_connection.h>
 #include <keel/websocket_server.h> /* kl_ws_server_on_readable_data — WS over completion */
 #include "completion.h"          /* kl_comp_post_recv */
 #include "completion_internal.h" /* kl_comp_close / kl_comp_tls_flush */
-#include "proto_hooks.h"         /* completion-drive seam registration */
+#include "http_proto_hooks.h"         /* completion-drive seam registration */
 #include <stdint.h>
 #include <sys/types.h>           /* ssize_t (TLS read return) — previously pulled
                                     transitively via response.h before off_t neutralization */
@@ -21,7 +21,7 @@
  * memory-BIO out ring for TLS — which we flush (plus any drain-buffered output). Reuses
  * the WS core + KlTls vtable verbatim: no WebSocket-protocol code and no IOCP/pollcomp
  * symbol appears here, so the completion axis stays out of the WS layer entirely. */
-void kl_comp_ws_drive(struct KlServer *s, KlHttpConn *c) {
+void kl_comp_ws_drive(struct KlHttpServer *s, KlHttpConn *c) {
     if (c->tls) {
         for (;;) {
             ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);

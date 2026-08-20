@@ -1,9 +1,9 @@
 /*
  * test_event_provider.c — proves a runtime-injected event backend
- * (KlEventProvider) actually drives a real KlServer end to end.
+ * (KlEventProvider) actually drives a real KlHttpServer end to end.
  *
  * A self-contained poll()-based readiness backend is installed via
- * KlConfig.event_provider (not the compiled-in epoll/kqueue). A raw-socket client
+ * KlHttpServerConfig.event_provider (not the compiled-in epoll/kqueue). A raw-socket client
  * makes an HTTP/1.1 request; the handler must run and return 200 — driven only by
  * the custom backend. A call counter on the backend's wait() proves the loop ran
  * on the provider, not the builtin. This is the second consumer of the seam
@@ -93,17 +93,17 @@ static void epp_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)req; (void)ud; g_handler_called++;
     kl_http_response_json(res, 200, "{\"backend\":\"custom\"}", 20);
 }
-static KlServer g_srv;
-static void *epp_thread(void *a) { (void)a; kl_server_run(&g_srv); return NULL; }
+static KlHttpServer g_srv;
+static void *epp_thread(void *a) { (void)a; kl_http_server_run(&g_srv); return NULL; }
 static void epp_nap(int ms) { struct timespec t = {ms/1000,(long)(ms%1000)*1000000L}; nanosleep(&t,NULL); }
 
 UTEST(event_provider, server_runs_on_injected_backend) {
     ep_wait_calls = 0; g_handler_called = 0;
 
-    KlConfig cfg = { .port = EPP_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = EPP_PORT, .bind_addr = "127.0.0.1",
                      .event_provider = &EP_PROVIDER };   /* <-- runtime backend */
-    ASSERT_EQ(0, kl_server_init(&g_srv, &cfg));
-    kl_server_route(&g_srv, "GET", "/", epp_handler, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&g_srv, &cfg));
+    kl_http_server_route(&g_srv, "GET", "/", epp_handler, NULL, NULL);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, epp_thread, NULL));
@@ -133,9 +133,9 @@ UTEST(event_provider, server_runs_on_injected_backend) {
     ASSERT_TRUE(ep_wait_calls > 0);   /* the injected backend actually drove the loop */
 
     kl_test_closesock(fd);
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(tid, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 }
 
 UTEST_MAIN();

@@ -1,6 +1,6 @@
 #include "utest.h"
 #include <keel/error.h>
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/client.h>
 #include <limits.h>
 #include <string.h>
@@ -33,22 +33,22 @@ UTEST(error, strerror_out_of_range) {
     ASSERT_STREQ(kl_strerror((KlError)9999), "unknown error");
 }
 
-/* ── KlServer.last_error ─────────────────────────────────────────── */
+/* ── KlHttpServer.last_error ─────────────────────────────────────────── */
 
 UTEST(error, server_init_success) {
-    KlServer s;
-    KlConfig cfg;
+    KlHttpServer s;
+    KlHttpServerConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.port = 0;  /* unused — we won't run */
-    ASSERT_EQ(kl_server_init(&s, &cfg), 0);
+    ASSERT_EQ(kl_http_server_init(&s, &cfg), 0);
     ASSERT_EQ(s.last_error, KL_ERR_NONE);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
 }
 
 UTEST(error, server_init_null) {
-    KlServer s;
+    KlHttpServer s;
     memset(&s, 0, sizeof(s));
-    ASSERT_EQ(kl_server_init(&s, NULL), -1);
+    ASSERT_EQ(kl_http_server_init(&s, NULL), -1);
     ASSERT_EQ(s.last_error, KL_ERR_INVALID_ARG);
 }
 
@@ -71,16 +71,16 @@ UTEST(error, server_run_bind_in_use) {
     int port = ntohs(addr.sin_port);
 
     /* Try to bind keel on the same port */
-    KlServer s;
-    KlConfig cfg;
+    KlHttpServer s;
+    KlHttpServerConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.port = port;
     cfg.bind_addr = "127.0.0.1";
-    ASSERT_EQ(kl_server_init(&s, &cfg), 0);
-    ASSERT_EQ(kl_server_run(&s), -1);
+    ASSERT_EQ(kl_http_server_init(&s, &cfg), 0);
+    ASSERT_EQ(kl_http_server_run(&s), -1);
     ASSERT_EQ(s.last_error, KL_ERR_BIND);
 
-    kl_server_free(&s);
+    kl_http_server_free(&s);
     kl_test_closesock(sock);
 }
 

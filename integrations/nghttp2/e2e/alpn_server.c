@@ -74,18 +74,18 @@ int main(void) {
     KlTlsConfig tls = { .ctx = ctx, .factory = kl_tls_mbedtls_create,
                         .ctx_destroy = kl_tls_mbedtls_ctx_destroy };
     KlH2ServerConfig h2 = { .factory = kl_h2_nghttp2_server_session };
-    KlConfig cfg = { .port = ALPN_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = ALPN_PORT, .bind_addr = "127.0.0.1",
                      .tls = &tls, .h2 = &h2 };
 
-    KlServer s;
-    if (kl_server_init(&s, &cfg) < 0) {
+    KlHttpServer s;
+    if (kl_http_server_init(&s, &cfg) < 0) {
         fprintf(stderr, "server init failed\n");
         kl_tls_mbedtls_ctx_destroy(ctx);
         return 1;
     }
-    kl_server_route(&s, "GET", "/", handle_root, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/", handle_root, NULL, NULL);
     fprintf(stderr, "alpn_server: TLS h2+http/1.1 on 127.0.0.1:%d\n", ALPN_PORT);
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

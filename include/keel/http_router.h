@@ -1,21 +1,21 @@
-#ifndef KEEL_ROUTER_H
-#define KEEL_ROUTER_H
+#ifndef KEEL_HTTP_ROUTER_H
+#define KEEL_HTTP_ROUTER_H
 
 #include <keel/allocator.h>
 #include <keel/http_request.h>
 #include <keel/http_response.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 #include <stddef.h>
 
 /** @brief Route handler function. */
-typedef void (*KlHandler)(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
+typedef void (*KlHttpHandler)(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 
 /**
  * @brief Middleware function signature.
  * @return 0 to continue to next middleware/handler, non-zero to short-circuit
  *         (response must already be written by the middleware).
  */
-typedef int (*KlMiddleware)(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
+typedef int (*KlHttpMiddleware)(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
 
 typedef struct KlWsServerConfig KlWsServerConfig;
 
@@ -24,9 +24,9 @@ typedef struct {
     const char *pattern;               /**< URL pattern ("/path", "/path/:param") */
     size_t method_len;                 /**< Length of method string */
     size_t pattern_len;                /**< Length of pattern string */
-    KlHandler handler;                 /**< Handler function */
+    KlHttpHandler handler;                 /**< Handler function */
     void *user_data;                   /**< Opaque data passed to handler */
-    KlBodyReaderFactory body_reader;   /**< Body reader factory (NULL = discard body) */
+    KlHttpBodyReaderFactory body_reader;   /**< Body reader factory (NULL = discard body) */
     KlWsServerConfig *ws_config;       /**< WebSocket config (non-NULL = WebSocket endpoint) */
     int streaming_handler;             /**< 1 = invoke handler after body_reader setup
                                             BEFORE the body is fully read; the handler
@@ -42,41 +42,41 @@ typedef struct {
                                             AND subsequent socket reads.
 
                                             Implies streaming_handler=1 — set both via
-                                            kl_server_route_streaming_async.
+                                            kl_http_server_route_streaming_async.
 
                                             Enables the full error-path mid-stream
                                             early-exit (a structured response can be
                                             written even when the cap fires inside
                                             leftover processing). Routes that opt out
-                                            (use the legacy kl_server_route_streaming)
+                                            (use the legacy kl_http_server_route_streaming)
                                             still get the partial early-exit covering
                                             caps that fire after dispatch. */
-} KlRoute;
+} KlHttpRoute;
 
 typedef struct {
     const char *method;    /**< HTTP method filter */
     const char *pattern;   /**< URL pattern filter */
     size_t method_len;     /**< Length of method string */
     size_t pattern_len;    /**< Length of pattern string */
-    KlMiddleware fn;       /**< Middleware function */
+    KlHttpMiddleware fn;       /**< Middleware function */
     void *user_data;       /**< Opaque data passed to fn */
-} KlMiddlewareEntry;
+} KlHttpMiddlewareEntry;
 
-typedef struct KlRouter {
-    KlRoute *routes;                   /**< Route table array */
+typedef struct KlHttpRouter {
+    KlHttpRoute *routes;                   /**< Route table array */
     int count;                         /**< Number of registered routes */
     int capacity;                      /**< Route table capacity */
 
-    KlMiddlewareEntry *middleware;     /**< Pre-body middleware array */
+    KlHttpMiddlewareEntry *middleware;     /**< Pre-body middleware array */
     int mw_count;                      /**< Number of pre-body middleware entries */
     int mw_capacity;                   /**< Pre-body middleware capacity */
 
-    KlMiddlewareEntry *post_middleware; /**< Post-body middleware array */
+    KlHttpMiddlewareEntry *post_middleware; /**< Post-body middleware array */
     int post_mw_count;                 /**< Number of post-body middleware entries */
     int post_mw_capacity;              /**< Post-body middleware capacity */
 
     KlAllocator *alloc;                /**< Allocator for table growth */
-} KlRouter;
+} KlHttpRouter;
 
 /**
  * @brief Initialize a router with an empty route table.
@@ -84,7 +84,7 @@ typedef struct KlRouter {
  * @param alloc Allocator for route table growth.
  * @return 0 on success, -1 on allocation failure.
  */
-int  kl_router_init(KlRouter *r, KlAllocator *alloc);
+int  kl_http_router_init(KlHttpRouter *r, KlAllocator *alloc);
 
 /**
  * @brief Register a route. Pattern supports :param segments (e.g. "/users/:id").
@@ -96,12 +96,12 @@ int  kl_router_init(KlRouter *r, KlAllocator *alloc);
  * @param body_reader Factory for body reader, or NULL to discard body.
  * @return 0 on success, -1 on allocation failure.
  */
-int  kl_router_add(KlRouter *r, const char *method, const char *pattern,
-                   KlHandler handler, void *user_data,
-                   KlBodyReaderFactory body_reader);
+int  kl_http_router_add(KlHttpRouter *r, const char *method, const char *pattern,
+                   KlHttpHandler handler, void *user_data,
+                   KlHttpBodyReaderFactory body_reader);
 
 /**
- * @brief Register a streaming-handler route. Identical to kl_router_add
+ * @brief Register a streaming-handler route. Identical to kl_http_router_add
  *        except the handler runs after the body reader is set up but
  *        BEFORE the body is fully received. The handler is expected to
  *        consume the body incrementally (e.g. via the streaming
@@ -116,14 +116,14 @@ int  kl_router_add(KlRouter *r, const char *method, const char *pattern,
  *
  * @return 0 on success, -1 on allocation failure or NULL body_reader.
  */
-int  kl_router_add_streaming(KlRouter *r, const char *method, const char *pattern,
-                              KlHandler handler, void *user_data,
-                              KlBodyReaderFactory body_reader);
+int  kl_http_router_add_streaming(KlHttpRouter *r, const char *method, const char *pattern,
+                              KlHttpHandler handler, void *user_data,
+                              KlHttpBodyReaderFactory body_reader);
 
 /**
  * @brief Register an async-streaming-handler route (v2.2.0+).
  *
- *        Identical to kl_router_add_streaming, plus: the handler is
+ *        Identical to kl_http_router_add_streaming, plus: the handler is
  *        invoked BEFORE any leftover body bytes are fed via on_data.
  *        It MUST yield on NEED_DATA — the body reader's on_data
  *        callback will resume it when bytes arrive (both the leftover
@@ -133,14 +133,14 @@ int  kl_router_add_streaming(KlRouter *r, const char *method, const char *patter
  *        body reader rejects bytes (on_data returns -1) at any point,
  *        the parked handler is resumed via on_error and can catch the
  *        parser error to write a structured response. Routes that opt
- *        out (use the legacy kl_router_add_streaming) still get the
+ *        out (use the legacy kl_http_router_add_streaming) still get the
  *        partial early-exit covering caps that fire after dispatch
  *        but lose the structured response for caps that fire during
  *        leftover processing.
  *
  *        Synchronous C handlers that consume the body without yielding
  *        (i.e. they call into the body reader expecting events to be
- *        immediately available) must use the legacy kl_router_add_
+ *        immediately available) must use the legacy kl_http_router_add_
  *        streaming — they'll see NEED_DATA on the first call here
  *        and have no way to recover.
  *
@@ -152,10 +152,10 @@ int  kl_router_add_streaming(KlRouter *r, const char *method, const char *patter
  * @param body_reader Body reader factory (NULL rejected).
  * @return 0 on success, -1 on allocation failure or NULL body_reader.
  */
-int  kl_router_add_streaming_async(KlRouter *r, const char *method,
+int  kl_http_router_add_streaming_async(KlHttpRouter *r, const char *method,
                                      const char *pattern,
-                                     KlHandler handler, void *user_data,
-                                     KlBodyReaderFactory body_reader);
+                                     KlHttpHandler handler, void *user_data,
+                                     KlHttpBodyReaderFactory body_reader);
 
 /**
  * @brief Match a request against registered routes.
@@ -170,9 +170,9 @@ int  kl_router_add_streaming_async(KlRouter *r, const char *method,
  * @param num_params Receives the number of extracted params.
  * @return 200 on match, 404 if no path matches, 405 if path matches but method doesn't.
  */
-int  kl_router_match(KlRouter *r, const char *method, size_t method_len,
+int  kl_http_router_match(KlHttpRouter *r, const char *method, size_t method_len,
                      const char *path, size_t path_len,
-                     KlRoute **matched, KlParam *params, int *num_params);
+                     KlHttpRoute **matched, KlHttpParam *params, int *num_params);
 
 /**
  * @brief Register pre-body middleware that runs before body reading.
@@ -183,8 +183,8 @@ int  kl_router_match(KlRouter *r, const char *method, size_t method_len,
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on allocation failure.
  */
-int  kl_router_use(KlRouter *r, const char *method, const char *pattern,
-                   KlMiddleware fn, void *user_data);
+int  kl_http_router_use(KlHttpRouter *r, const char *method, const char *pattern,
+                   KlHttpMiddleware fn, void *user_data);
 
 /**
  * @brief Register post-body middleware that runs after body reading.
@@ -199,20 +199,20 @@ int  kl_router_use(KlRouter *r, const char *method, const char *pattern,
  * @param user_data Passed to fn on each invocation.
  * @return 0 on success, -1 on allocation failure.
  */
-int  kl_router_use_post(KlRouter *r, const char *method, const char *pattern,
-                        KlMiddleware fn, void *user_data);
+int  kl_http_router_use_post(KlHttpRouter *r, const char *method, const char *pattern,
+                        KlHttpMiddleware fn, void *user_data);
 
 /**
  * @brief Run all matching pre-body middleware in registration order.
  * @return 0 if all passed, non-zero if a middleware short-circuited.
  */
-int  kl_router_run_middleware(KlRouter *r, KlHttpRequest *req, KlHttpResponse *res);
+int  kl_http_router_run_middleware(KlHttpRouter *r, KlHttpRequest *req, KlHttpResponse *res);
 
 /**
  * @brief Run all matching post-body middleware in registration order.
  * @return 0 if all passed, non-zero if a middleware short-circuited.
  */
-int  kl_router_run_post_middleware(KlRouter *r, KlHttpRequest *req, KlHttpResponse *res);
+int  kl_http_router_run_post_middleware(KlHttpRouter *r, KlHttpRequest *req, KlHttpResponse *res);
 
 /**
  * @brief Run a fully-formed synthetic request through the router pipeline:
@@ -246,10 +246,10 @@ int  kl_router_run_post_middleware(KlRouter *r, KlHttpRequest *req, KlHttpRespon
  *         path matched but the method didn't; non-zero short-circuit
  *         code if middleware short-circuited; -1 on invalid arguments.
  */
-int  kl_router_dispatch_synthetic(KlRouter *r, KlHttpRequest *req,
+int  kl_http_router_dispatch_synthetic(KlHttpRouter *r, KlHttpRequest *req,
                                    KlHttpResponse *res, int run_middleware);
 
 /** @brief Free router resources. */
-void kl_router_free(KlRouter *r);
+void kl_http_router_free(KlHttpRouter *r);
 
 #endif

@@ -9,7 +9,7 @@
  * default backend's own _builtin. Now event_pollcomp.c is a PURE runtime provider (static
  * KlEventOps + KlCompletionOps + kl_event_provider_pollcomp(), no _builtin), so it links
  * as an extra object next to a default libkeel.a and injects its completion axis at runtime
- * via KlConfig.event_provider.
+ * via KlHttpServerConfig.event_provider.
  *
  * The server auto-wires the matched overlapped socket provider from the injected loop's
  * native_provider (server.c 8f-5a), exactly as the compiled-in completion path does — the
@@ -45,10 +45,10 @@ static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&g_srv);
+    kl_http_server_run(&g_srv);
     return NULL;
 }
 
@@ -56,18 +56,18 @@ int main(void) {
     /* An OTHERWISE-DEFAULT server: the ONLY non-default knob is the injected completion
      * provider. No .sockets — the server auto-adopts the provider's overlapped native
      * provider (server.c 8f-5a) since the injected loop advertises KL_EVENT_CAP_COMPLETION. */
-    KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_pollcomp() };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-inject: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         fprintf(stderr, "smoke-inject: pthread_create failed\n");
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
     for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) nap_ms(5);
@@ -89,9 +89,9 @@ int main(void) {
         }
     }
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 
     if (!ok) {
         fprintf(stderr, "smoke-inject: GET / over injected pollcomp FAILED (rc=%d status=%d)\n",

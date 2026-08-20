@@ -61,7 +61,7 @@ static void handle_slow(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 }
 
 static void *server_thread_fn(void *arg) {
-    kl_server_run((KlServer *)arg);
+    kl_http_server_run((KlHttpServer *)arg);
     return NULL;
 }
 
@@ -146,20 +146,20 @@ static ssize_t read_one_response(int fd, char *buf, size_t buflen, int timeout_m
 }
 
 /* Wait for server to bind (max 2s) */
-static void wait_for_bind(KlServer *s) {
+static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
 }
 
 /* ── Pool exhaustion ────────────────────────────────────────────────── */
 
 UTEST(server_integration, pool_exhaustion_rejects) {
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .port = 0,
         .max_connections = 2,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -177,8 +177,8 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     usleep(50000);
 
     /* Stats must reflect the readiness listener's PAUSED state when the pool is full (step 6B-1). */
-    KlServerStats st_full;
-    kl_server_stats(&srv, &st_full);
+    KlHttpServerStats st_full;
+    kl_http_server_stats(&srv, &st_full);
     ASSERT_EQ(st_full.active_connections, 2);
     ASSERT_EQ(st_full.listen_paused, 1);
 
@@ -215,39 +215,39 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     kl_test_closesock(fd4);
     kl_test_closesock(fd2);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
-/* ── Listener teardown (step 6B-1): kl_server_free must complete the accept listener's
+/* ── Listener teardown (step 6B-1): kl_http_server_free must complete the accept listener's
  *    close/detachment while armed AND while paused. ASan/UBSan verify no leak/UAF. ─────── */
 
 UTEST(server_integration, teardown_while_armed) {
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .max_connections = 4 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
     wait_for_bind(&srv);
     ASSERT_TRUE(srv.bound_port > 0);
 
     /* No connections → listener LISTENING (armed). */
-    KlServerStats st;
-    kl_server_stats(&srv, &st);
+    KlHttpServerStats st;
+    kl_http_server_stats(&srv, &st);
     ASSERT_EQ(st.listen_paused, 0);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);   /* must close+detach the armed listener cleanly */
+    kl_http_server_free(&srv);   /* must close+detach the armed listener cleanly */
 }
 
 UTEST(server_integration, teardown_while_paused) {
-    KlServer srv;
-    KlConfig cfg = { .port = 0, .max_connections = 1 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 1 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
     wait_for_bind(&srv);
@@ -256,15 +256,15 @@ UTEST(server_integration, teardown_while_paused) {
     int fd1 = connect_to(port);     /* fills the single slot */
     int fd2 = connect_nb(port);     /* backlog; listener PAUSED */
     usleep(50000);
-    KlServerStats st;
-    kl_server_stats(&srv, &st);
+    KlHttpServerStats st;
+    kl_http_server_stats(&srv, &st);
     ASSERT_EQ(st.listen_paused, 1);
 
     /* Free the server while the listener is PAUSED with a held reservation dropped and interest
      * disarmed — the close/detachment contract must complete. */
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     if (fd1 >= 0) kl_test_closesock(fd1);
     if (fd2 >= 0) kl_test_closesock(fd2);
 }
@@ -272,13 +272,13 @@ UTEST(server_integration, teardown_while_paused) {
 /* ── Backpressure recovery ──────────────────────────────────────────── */
 
 UTEST(server_integration, backpressure_recovery) {
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .port = 0,
         .max_connections = 2,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -325,18 +325,18 @@ UTEST(server_integration, backpressure_recovery) {
     kl_test_closesock(fd4);
     kl_test_closesock(fd5);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 /* ── Keep-alive pipeline ────────────────────────────────────────────── */
 
 UTEST(server_integration, keep_alive_pipeline) {
-    KlServer srv;
-    KlConfig cfg = { .port = 0 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -368,22 +368,22 @@ UTEST(server_integration, keep_alive_pipeline) {
 
     kl_test_closesock(fd);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 /* ── Drain completes in-flight ──────────────────────────────────────── */
 
 UTEST(server_integration, drain_completes_inflight) {
     static int delay_ms = 200;
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .port = 0,
         .drain_timeout_ms = 2000,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/slow", handle_slow, &delay_ms, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/slow", handle_slow, &delay_ms, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -400,7 +400,7 @@ UTEST(server_integration, drain_completes_inflight) {
 
     /* Immediately trigger drain — handler is still sleeping */
     usleep(50000);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
 
     /* Response should still complete (drain allows in-flight to finish) */
     char buf[1024];
@@ -411,20 +411,20 @@ UTEST(server_integration, drain_completes_inflight) {
     ASSERT_TRUE(strstr(buf, "{\"slow\":true}") != NULL);
 
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 /* ── Drain deadline forces exit with idle connections ────────────────── */
 
 UTEST(server_integration, drain_deadline_forces_exit) {
-    KlServer srv;
-    KlConfig cfg = {
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = {
         .port = 0,
         .drain_timeout_ms = 200,
         .read_timeout_ms = 30000,
     };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -445,7 +445,7 @@ UTEST(server_integration, drain_deadline_forces_exit) {
 
     /* Trigger drain with 200ms deadline — idle connections should be force-closed */
     uint64_t start = kl_monotonic_ms();
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
     uint64_t elapsed = kl_monotonic_ms() - start;
 
@@ -455,16 +455,16 @@ UTEST(server_integration, drain_deadline_forces_exit) {
 
     kl_test_closesock(fd1);
     kl_test_closesock(fd2);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 /* ── Concurrent requests ────────────────────────────────────────────── */
 
 UTEST(server_integration, concurrent_requests) {
-    KlServer srv;
-    KlConfig cfg = { .port = 0 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread_fn, &srv);
@@ -495,9 +495,9 @@ UTEST(server_integration, concurrent_requests) {
         kl_test_closesock(fds[i]);
     }
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 /* Conformance: driving accepted-connection I/O through the explicit POSIX
@@ -511,10 +511,10 @@ UTEST(server_integration, concurrent_requests) {
  * excluded from the Windows build, unchanged on POSIX. */
 #if !defined(_WIN32)
 UTEST(server_integration, explicit_posix_provider_roundtrip) {
-    KlServer srv;
-    KlConfig cfg = { .port = 0 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
     /* Post-init, pre-run: stamp the event ctx with the explicit POSIX provider;
      * accept() + accepted-connection reads/writes now dispatch through it. */
     srv.ev.sockets = kl_socket_provider_posix();
@@ -536,9 +536,9 @@ UTEST(server_integration, explicit_posix_provider_roundtrip) {
     ASSERT_TRUE(strstr(buf, "{\"ok\":true}") != NULL);
     kl_test_closesock(fd);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 #endif /* !_WIN32 */
 
@@ -546,10 +546,10 @@ UTEST(server_integration, explicit_posix_provider_roundtrip) {
  * vectored writes through kl_sock_send. The full 64 KB body must still arrive
  * byte-correct, proving the serialized writev fallback. */
 UTEST(server_integration, serialized_writev_fallback) {
-    KlServer srv;
-    KlConfig cfg = { .port = 0 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/big", handle_big, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/big", handle_big, NULL, NULL);
     srv.ev.sockets = &g_noviv;   /* native fds, no writev/sendfile */
 
     pthread_t tid;
@@ -581,9 +581,9 @@ UTEST(server_integration, serialized_writev_fallback) {
     free(buf);
     kl_test_closesock(fd);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 /* A provider without KL_SOCK_CAP_SENDFILE makes response.c serve KL_HTTP_BODY_FILE
@@ -602,10 +602,10 @@ UTEST(server_integration, sendfile_fallback) {
     }
     close(wf);
 
-    KlServer srv;
-    KlConfig cfg = { .port = 0 };
-    ASSERT_EQ(0, kl_server_init(&srv, &cfg));
-    kl_server_route(&srv, "GET", "/file", handle_file, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    kl_http_server_route(&srv, "GET", "/file", handle_file, NULL, NULL);
     srv.ev.sockets = &g_noviv;   /* no sendfile → pread+send fallback */
 
     pthread_t tid;
@@ -635,9 +635,9 @@ UTEST(server_integration, sendfile_fallback) {
     free(buf);
     kl_test_closesock(fd);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     unlink(g_file_path);
 }
 #endif

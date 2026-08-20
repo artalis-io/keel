@@ -10,9 +10,9 @@
  * <unistd.h> (the same chain server.c used), so cross-platform behavior is unchanged.
  */
 
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include "internal.h"      /* <unistd.h> (getpid) on a hosted build */
-#include "server_plat.h"   /* kl_server_plat_unsetenv */
+#include "http_server_plat.h"   /* kl_http_server_plat_unsetenv */
 #include <stdlib.h>        /* getenv, strtol */
 #include <string.h>        /* strchr, strlen, memcmp */
 
@@ -35,9 +35,9 @@ int kl_systemd_listen_fds(int *count) {
     }
 
     /* Clear so the variables are not inherited by child processes. */
-    kl_server_plat_unsetenv("LISTEN_PID");
-    kl_server_plat_unsetenv("LISTEN_FDS");
-    kl_server_plat_unsetenv("LISTEN_FDNAMES");
+    kl_http_server_plat_unsetenv("LISTEN_PID");
+    kl_http_server_plat_unsetenv("LISTEN_FDS");
+    kl_http_server_plat_unsetenv("LISTEN_FDNAMES");
     if (count)
         *count = n;
     return first;
@@ -79,8 +79,8 @@ int kl_systemd_listen_fd_by_name(const char *name) {
         }
     }
 
-    kl_server_plat_unsetenv("LISTEN_PID");
-    kl_server_plat_unsetenv("LISTEN_FDS");
-    kl_server_plat_unsetenv("LISTEN_FDNAMES");
+    kl_http_server_plat_unsetenv("LISTEN_PID");
+    kl_http_server_plat_unsetenv("LISTEN_FDS");
+    kl_http_server_plat_unsetenv("LISTEN_FDNAMES");
     return result;
 }

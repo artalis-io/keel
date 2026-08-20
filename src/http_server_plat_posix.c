@@ -12,8 +12,8 @@
  * variance behind #ifdef, exactly like socket_posix.c does for sendfile.
  */
 
-#include "server_plat.h"
-#include "internal.h"        /* kl_log / kl_log_errno + KlServer */
+#include "http_server_plat.h"
+#include "internal.h"        /* kl_http_server_log / kl_http_server_log_errno + KlHttpServer */
 #include "socket.h"
 #include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind currency) */
 #include <keel/allocator.h>
@@ -35,17 +35,17 @@
 /* ── Signal handling ─────────────────────────────────────────────────── */
 
 #if !defined(KL_NO_SIGNAL)
-static _Atomic(KlServer *) kl_signal_server = NULL;
+static _Atomic(KlHttpServer *) kl_signal_server = NULL;
 static struct sigaction    kl_old_term, kl_old_int;
 
 static void kl_signal_handler(int sig) {
     (void)sig;
-    KlServer *s = atomic_load(&kl_signal_server);
-    if (s) kl_server_stop(s);
+    KlHttpServer *s = atomic_load(&kl_signal_server);
+    if (s) kl_http_server_stop(s);
 }
 #endif
 
-void kl_server_plat_signals_install(KlServer *s) {
+void kl_http_server_plat_signals_install(KlHttpServer *s) {
 #if !defined(KL_NO_SIGNAL)
     signal(SIGPIPE, SIG_IGN);
     if (s->config.install_signal_handlers) {
@@ -63,13 +63,13 @@ void kl_server_plat_signals_install(KlServer *s) {
 #endif
 }
 
-/* cppcheck-suppress constParameterPointer ; symmetric with kl_server_plat_signals_install */
-void kl_server_plat_signals_restore(KlServer *s) {
+/* cppcheck-suppress constParameterPointer ; symmetric with kl_http_server_plat_signals_install */
+void kl_http_server_plat_signals_restore(KlHttpServer *s) {
 #if !defined(KL_NO_SIGNAL)
     if (s->config.install_signal_handlers) {
         sigaction(SIGTERM, &kl_old_term, NULL);
         sigaction(SIGINT, &kl_old_int, NULL);
-        atomic_store(&kl_signal_server, (KlServer *)NULL);
+        atomic_store(&kl_signal_server, (KlHttpServer *)NULL);
     }
 #else
     (void)s;
@@ -78,25 +78,25 @@ void kl_server_plat_signals_restore(KlServer *s) {
 
 /* ── AF_UNIX node lifecycle ──────────────────────────────────────────── */
 
-static int unlink_stale_unix_socket(KlServer *s, const char *path) {
+static int unlink_stale_unix_socket(KlHttpServer *s, const char *path) {
     struct stat st;
     if (lstat(path, &st) < 0) {
         if (errno == ENOENT)
             return 0;
-        kl_log_errno(s, KL_LOG_ERROR, "lstat unix socket");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "lstat unix socket");
         s->last_error = KL_ERR_BIND;
         return -1;
     }
 
     if (!S_ISSOCK(st.st_mode)) {
-        kl_log(s, KL_LOG_ERROR,
+        kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR,
                "refusing to unlink non-socket unix path '%s'", path);
         s->last_error = KL_ERR_BIND;
         return -1;
     }
 
     if (unlink(path) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "unlink unix socket");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "unlink unix socket");
         s->last_error = KL_ERR_BIND;
         return -1;
     }
@@ -106,7 +106,7 @@ static int unlink_stale_unix_socket(KlServer *s, const char *path) {
 
 /* Resolve a username to a uid via getpwnam_r. Returns 0 on success, -1 if the
  * user is unknown or on allocation failure (sets last_error accordingly). */
-static int resolve_uid(KlServer *s, const char *name, uid_t *out) {
+static int resolve_uid(KlHttpServer *s, const char *name, uid_t *out) {
     long hint = sysconf(_SC_GETPW_R_SIZE_MAX);
     size_t bufsz = (hint > 0) ? (size_t)hint : 4096;
     for (;;) {
@@ -127,7 +127,7 @@ static int resolve_uid(KlServer *s, const char *name, uid_t *out) {
 }
 
 /* Resolve a group name to a gid via getgrnam_r. Same contract as above. */
-static int resolve_gid(KlServer *s, const char *name, gid_t *out) {
+static int resolve_gid(KlHttpServer *s, const char *name, gid_t *out) {
     long hint = sysconf(_SC_GETGR_R_SIZE_MAX);
     size_t bufsz = (hint > 0) ? (size_t)hint : 4096;
     for (;;) {
@@ -147,7 +147,7 @@ static int resolve_gid(KlServer *s, const char *name, gid_t *out) {
     }
 }
 
-int kl_server_plat_bind_unix(KlServer *s) {
+int kl_http_server_plat_bind_unix(KlHttpServer *s) {
     const char *path = s->config.unix_socket_path;
     if (!path || path[0] == '\0') {
         s->last_error = KL_ERR_INVALID_ARG;
@@ -162,7 +162,7 @@ int kl_server_plat_bind_unix(KlServer *s) {
 
     s->listen_fd = kl_sock_socket(s->ev.sockets, AF_UNIX, SOCK_STREAM, 0);
     if (!kl_handle_valid(s->listen_fd)) {
-        kl_log_errno(s, KL_LOG_ERROR, "socket");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "socket");
         s->last_error = KL_ERR_SOCKET;
         return -1;
     }
@@ -199,7 +199,7 @@ int kl_server_plat_bind_unix(KlServer *s) {
     if (umask_set)
         umask(old_umask);
     if (bind_rc < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "bind");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
@@ -219,7 +219,7 @@ int kl_server_plat_bind_unix(KlServer *s) {
         if (s->config.unix_socket_owner &&
             resolve_uid(s, s->config.unix_socket_owner, &uid) < 0) {
             if (s->last_error != KL_ERR_ALLOC) {
-                kl_log(s, KL_LOG_ERROR, "unknown unix socket owner '%s'",
+                kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unknown unix socket owner '%s'",
                        s->config.unix_socket_owner);
                 s->last_error = KL_ERR_INVALID_ARG;
             }
@@ -228,14 +228,14 @@ int kl_server_plat_bind_unix(KlServer *s) {
         if (s->config.unix_socket_group &&
             resolve_gid(s, s->config.unix_socket_group, &gid) < 0) {
             if (s->last_error != KL_ERR_ALLOC) {
-                kl_log(s, KL_LOG_ERROR, "unknown unix socket group '%s'",
+                kl_http_server_log(s, KL_HTTP_SERVER_LOG_ERROR, "unknown unix socket group '%s'",
                        s->config.unix_socket_group);
                 s->last_error = KL_ERR_INVALID_ARG;
             }
             goto fail;
         }
         if (chown(path, uid, gid) < 0) {
-            kl_log_errno(s, KL_LOG_ERROR, "chown unix socket");
+            kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "chown unix socket");
             s->last_error = KL_ERR_BIND;
             goto fail;
         }
@@ -247,7 +247,7 @@ int kl_server_plat_bind_unix(KlServer *s) {
      * re-asserts them after any chown (which clears set-gid on some OSes). */
     if (s->config.unix_socket_mode != 0 &&
         chmod(path, (mode_t)s->config.unix_socket_mode) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "chmod unix socket");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "chmod unix socket");
         s->last_error = KL_ERR_BIND;
         goto fail;
     }
@@ -263,7 +263,7 @@ fail:
     return -1;
 }
 
-void kl_server_plat_unlink_owned_unix(KlServer *s) {
+void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s) {
     if (s->unix_socket_owned && s->config.unix_socket_unlink &&
         s->config.unix_socket_path) {
         /* Re-check that the path is still a socket before unlinking, so a
@@ -337,11 +337,11 @@ unsigned kl_platform_caps(void) {
     return caps;
 }
 
-void kl_server_plat_unsetenv(const char *name) {
+void kl_http_server_plat_unsetenv(const char *name) {
     unsetenv(name);
 }
 
-int kl_server_plat_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen) {
+int kl_http_server_plat_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen) {
 #if defined(__linux__) && defined(SO_PEERSEC)
     socklen_t len = (socklen_t)buflen;
     if (getsockopt((int)fd, SOL_SOCKET, SO_PEERSEC, buf, &len) != 0)

@@ -14,7 +14,7 @@
  *   - readiness  (kl_event_ctx_run over a mock loop whose .wait returns a scripted [A, staleB] batch)
  *   - completion (kl_event_ctx_run → kl_comp_run over a mock .drain returning [A, staleB] as
  *                 KL_COMP_WATCHER)
- *   - server     (a real kl_server_run: a pre-armed watcher runs a probe INSIDE the server's batch)
+ *   - server     (a real kl_http_server_run: a pre-armed watcher runs a probe INSIDE the server's batch)
  * plus unit checks for nested brackets, unmatched end, overflow refusal, and depth-0 reclamation.
  *
  * Pre-fix behaviour (kl_watcher_del freeing immediately even inside a batch) fails these: the deleted
@@ -267,12 +267,12 @@ UTEST(watcher_aba, overflow_refusal_completion_acquires_nothing) {
     ctx.dispatch_depth = 0;
 }
 
-/* ── server-loop ABA: the REAL kl_server_run loop receives a scripted [A, stale-B] readiness batch ─
- * A scripted readiness KlEventProvider is injected into KlServer (cfg.event_provider). Its .wait
+/* ── server-loop ABA: the REAL kl_http_server_run loop receives a scripted [A, stale-B] readiness batch ─
+ * A scripted readiness KlEventProvider is injected into KlHttpServer (cfg.event_provider). Its .wait
  * returns [tag(A), tag(stale-B)] once; the server dispatches them inside its own R3b-W bracket, so A
  * deletes B + adds C, and B's already-captured stale event must NOT be misdelivered to C — the exact
  * ABA sequence, driven through the server loop (not a probe). */
-static KlServer      g_srv;
+static KlHttpServer      g_srv;
 static volatile int  g_srv_batch_dispatched;
 
 static int srv_wait(KlEventLoop *l, KlEvent *out, int max, int timeout) {
@@ -284,7 +284,7 @@ static int srv_wait(KlEventLoop *l, KlEvent *out, int max, int timeout) {
         return n;
     }
     /* Second tick onward: the batch was fully dispatched last iteration. Signal + idle so
-     * kl_server_stop (running=0) is observed at the loop top without a hot spin. */
+     * kl_http_server_stop (running=0) is observed at the loop top without a hot spin. */
     __atomic_store_n(&g_srv_batch_dispatched, 1, __ATOMIC_RELEASE);
     struct timespec ts = { 0, 2 * 1000 * 1000 }; nanosleep(&ts, NULL);
     return 0;
@@ -294,15 +294,15 @@ static const KlEventOps SRV_RDY_OPS = {
     .wait = srv_wait, .close = noop_close, .caps = rdy_caps
 };
 static const KlEventProvider SRV_RDY_PROV = { &SRV_RDY_OPS, "aba-srv" };
-static void *srv_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }
+static void *srv_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
 UTEST(watcher_aba, server_loop_no_misdelivery) {
     fa_reset();
     KlAllocator a = fa_alloc();
-    KlConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    KlHttpServerConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.port = 0; cfg.bind_addr = "127.0.0.1"; cfg.alloc = &a;
     cfg.event_provider = &SRV_RDY_PROV;        /* scripted readiness backend → deterministic batch */
-    ASSERT_EQ(kl_server_init(&g_srv, &cfg), 0);
+    ASSERT_EQ(kl_http_server_init(&g_srv, &cfg), 0);
 
     g_ctx = &g_srv.ev; g_c_called = 0; g_Cnode = NULL;
     g_fdB = (KlSocketHandle)101; g_fdC = (KlSocketHandle)102;
@@ -324,14 +324,14 @@ UTEST(watcher_aba, server_loop_no_misdelivery) {
         struct timespec ts = { 0, 2 * 1000 * 1000 }; nanosleep(&ts, NULL);
     }
     int dispatched = __atomic_load_n(&g_srv_batch_dispatched, __ATOMIC_ACQUIRE);
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
 
     ASSERT_TRUE(dispatched);
     ASSERT_NE((uintptr_t)g_Cnode, (uintptr_t)g_Bnode);   /* C did not reuse B's address */
     ASSERT_EQ(g_c_called, 0);                            /* B's stale event NOT misdelivered to C */
 
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
     fa_reset();
 }
 

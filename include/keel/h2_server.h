@@ -15,8 +15,8 @@
 #include <keel/h2.h>
 #include <keel/http_request.h>
 #include <keel/http_response.h>
-#include <keel/body_reader.h>
-#include <keel/router.h>
+#include <keel/http_body_reader.h>
+#include <keel/http_router.h>
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
@@ -108,10 +108,10 @@ typedef struct KlH2ServerConfig {
 /* ── Internal functions (used by connection.c, server.c) ─────────── */
 
 /** @brief Upgrade a connection to HTTP/2 (direct h2c). */
-int  kl_h2_server_upgrade(KlHttpConn *c, KlRouter *router, KlH2ServerConfig *cfg,
+int  kl_h2_server_upgrade(KlHttpConn *c, KlHttpRouter *router, KlH2ServerConfig *cfg,
                            const char *leftover, size_t leftover_len);
 /** @brief Upgrade a connection to HTTP/2 from an HTTP/1.1 Upgrade request. */
-int  kl_h2_server_upgrade_from_h1(KlHttpConn *c, KlRouter *router,
+int  kl_h2_server_upgrade_from_h1(KlHttpConn *c, KlHttpRouter *router,
                                    KlH2ServerConfig *cfg,
                                    const char *leftover, size_t leftover_len);
 /** @brief Handle readable event on an HTTP/2 connection. */

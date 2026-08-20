@@ -1,7 +1,7 @@
 /*
  * s6_selftest.c — S-6 acceptance self-test (UEFI EFI application): HTTPS server.
  *
- * The TLS mirror of S-4: a STOCK freestanding KlServer answers `GET / -> 200` over
+ * The TLS mirror of S-4: a STOCK freestanding KlHttpServer answers `GET / -> 200` over
  * HTTPS (EFI_TCP4 + freestanding mbedTLS) on bare UEFI firmware, driven by the EFI
  * completion backend. The completion-mode TLS server is entirely in the model-blind
  * core (completion_server.c: comp_tls_drive / kl_comp_tls_flush / comp_tls_send_response);
@@ -11,12 +11,12 @@
  *   2. a synchronous send on the accepted socket for kl_comp_tls_flush (efi_sock_send).
  * The response ciphertext rides the same post_send as S-4 (content-agnostic).
  *
- * Flow (all through the PUBLIC KlServer API — zero protocol edits):
+ * Flow (all through the PUBLIC KlHttpServer API — zero protocol edits):
  *   kl_uefi_platform_init(bs, st)            → monotonic clock + EFI_RNG
  *   kl_uefi_mbedtls_platform_init(bs)        → EFI heap + entropy + cert clock for mbedTLS
  *   kl_tls_mbedtls_ctx_create_from_buf(cert,key,...)  → server TLS ctx (embedded PEM)
- *   kl_server_init(cfg{event_provider, tls}) → construct from the freestanding archive
- *   kl_server_route(GET "/", handler); bind(:443)/listen; run_completion_loop
+ *   kl_http_server_init(cfg{event_provider, tls}) → construct from the freestanding archive
+ *   kl_http_server_route(GET "/", handler); bind(:443)/listen; run_completion_loop
  *
  * Prints:  S-6: server up → listening on :443 → GO (served GET / 200)
  *
@@ -30,8 +30,8 @@
 #include "event_efi.h"
 #include "allocator_uefi.h"
 
-#include <keel/server.h>
-#include <keel/router.h>
+#include <keel/http_server.h>
+#include <keel/http_router.h>
 #include <keel/http_request.h>
 #include <keel/http_response.h>
 #include <keel/event_ctx.h>
@@ -51,7 +51,7 @@
 #define S6_BIND_PORT   443
 #define S6_BACKLOG     4
 
-extern int kl_server_run_completion_loop(KlServer *s);
+extern int kl_http_server_run_completion_loop(KlHttpServer *s);
 
 /* ── tiny ASCII console (no libc) ─────────────────────────────────────────────── */
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_out;
@@ -92,7 +92,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     EFI_BOOT_SERVICES *bs = st->BootServices;
 
     print_line("");
-    print_line("=== S-6 KlServer HTTPS GET / -> 200 over EFI_TCP4 + freestanding mbedTLS ===");
+    print_line("=== S-6 KlHttpServer HTTPS GET / -> 200 over EFI_TCP4 + freestanding mbedTLS ===");
 
     if (kl_uefi_platform_init(bs, st) != 0)
         print_line("S-6: (warn) platform_init failed — clock stuck, continuing");
@@ -124,7 +124,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     tls.factory     = kl_tls_mbedtls_create;
     tls.ctx_destroy = kl_tls_mbedtls_ctx_destroy;
 
-    KlConfig cfg;
+    KlHttpServerConfig cfg;
     { unsigned char *p = (unsigned char *)&cfg; for (size_t i = 0; i < sizeof(cfg); i++) p[i] = 0; }
     cfg.port            = S6_BIND_PORT;
     cfg.bind_addr       = "0.0.0.0";
@@ -133,17 +133,17 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     cfg.event_provider  = ep;
     cfg.tls             = &tls;
 
-    KlServer s;
-    if (kl_server_init(&s, &cfg) != 0) {
-        print("S-6: kl_server_init failed (err="); print_int((int)s.last_error); print_line(")");
+    KlHttpServer s;
+    if (kl_http_server_init(&s, &cfg) != 0) {
+        print("S-6: kl_http_server_init failed (err="); print_int((int)s.last_error); print_line(")");
         print_line("S-6: NO-GO-YET (needs network-enabled OVMF)");
         goto park;
     }
     print_line("S-6: server up (efi-tcp4-completion + mbedTLS)");
 
-    /* NB: kl_server_free is hosted-only (teardown is S-7). On error the firmware parks;
+    /* NB: kl_http_server_free is hosted-only (teardown is S-7). On error the firmware parks;
      * QEMU is power-cycled by the harness, so there is no leak to reclaim. */
-    if (kl_server_route(&s, "GET", "/", s6_handler, NULL, NULL) != 0) {
+    if (kl_http_server_route(&s, "GET", "/", s6_handler, NULL, NULL) != 0) {
         print_line("S-6: route registration failed"); goto park;
     }
 
@@ -168,14 +168,14 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
      * feed_input while comp_tls_drive handshakes / decrypts / responds — all model-blind. The handler prints GO on the first served
      * request; the loop keeps serving (the harness times out QEMU after curl's 200). */
     for (long tick = 0; tick < 100000000L; tick++) {
-        if (kl_server_run_completion_loop(&s) < 0) {
+        if (kl_http_server_run_completion_loop(&s) < 0) {
             print_line("S-6: completion loop reported fatal error");
             break;
         }
         kl_timer_fire(&s.ev);
     }
 
-    /* (No kl_server_free — hosted-only; teardown is S-7.) */
+    /* (No kl_http_server_free — hosted-only; teardown is S-7.) */
 
 park:
     print_line("S-6: (parked; harness will terminate QEMU)");

@@ -1,5 +1,5 @@
 #include <keel/http1_parser.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 #include <string.h>
 #include "llhttp.h"
 

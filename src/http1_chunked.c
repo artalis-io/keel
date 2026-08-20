@@ -23,7 +23,7 @@ void kl_http1_chunked_init(KlHttp1ChunkedDecoder *dec) {
  *   In DATA_CR state: 1 = already saw CR, expecting LF
  */
 int kl_http1_chunked_decode(KlHttp1ChunkedDecoder *dec, const char *data, size_t len,
-                      KlBodyReader *reader) {
+                      KlHttpBodyReader *reader) {
     size_t i = 0;
 
     while (i < len) {

@@ -15,8 +15,8 @@
 #include <keel/http_connection.h>   /* KlHttpConn */
 #include <keel/http_request.h>
 #include <keel/http_response.h>
-#include <keel/body_reader.h>
-#include <keel/router.h>
+#include <keel/http_body_reader.h>
+#include <keel/http_router.h>
 #include <stdint.h>
 #include <stddef.h>
 #include "internal.h"          /* KlH2WriteFn (the output seam type) */
@@ -27,9 +27,9 @@ struct KlH2ServerStream {
     uint32_t stream_id;         /**< HTTP/2 stream identifier. */
     KlHttpRequest req;              /**< Parsed request for this stream. */
     KlHttpResponse res;             /**< Response builder for this stream. */
-    KlBodyReader *body_reader;  /**< Body reader (route-provided or NULL). */
-    KlRoute *route;             /**< Matched route (NULL if no match). */
-    KlParam params[KL_MAX_PARAMS]; /**< Extracted route parameters. */
+    KlHttpBodyReader *body_reader;  /**< Body reader (route-provided or NULL). */
+    KlHttpRoute *route;             /**< Matched route (NULL if no match). */
+    KlHttpParam params[KL_HTTP_ROUTER_MAX_PARAMS]; /**< Extracted route parameters. */
     int num_params;             /**< Number of extracted parameters. */
     int route_result;           /**< Route match result code. */
     int headers_done;           /**< Non-zero after HEADERS frame received. */
@@ -46,7 +46,7 @@ struct KlH2ServerConn {
     KlH2ServerSession *session;    /**< Active HTTP/2 session (user-provided vtable). */
     KlH2ServerCallbacks callbacks; /**< Callbacks wired to KEEL internals. */
     KlHttpConn *conn;                  /**< Underlying TCP connection. */
-    KlRouter *router;              /**< Router for dispatching streams. */
+    KlHttpRouter *router;              /**< Router for dispatching streams. */
     KlAllocator *alloc;            /**< Allocator for stream/header storage. */
     KlH2ServerStream *streams;     /**< Array of active streams. */
     int num_streams;               /**< Number of active streams. */

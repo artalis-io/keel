@@ -2,7 +2,7 @@
  * smoke_pollcomp_tls.c — TLS-over-completion roundtrip on POSIX (mock-TLS backend).
  *
  * The first RUNTIME validation of the TLS-over-completion driver off Windows/mbedTLS:
- * a KlServer on the pollcomp completion loop with an identity mock TLS (mock_tls.h),
+ * a KlHttpServer on the pollcomp completion loop with an identity mock TLS (mock_tls.h),
  * hit by the sync KlClient using the same mock TLS over loopback. Because the mock is a
  * passthrough, no crypto/mbedTLS is needed — yet the driver's TLS paths run for real:
  * comp_tls_drive (handshake → feed → decrypt), comp_tls_send_response (buffered),
@@ -38,7 +38,7 @@ static void h_ok(KlHttpRequest *q, KlHttpResponse *r, void *c) {
 }
 static void h_echo(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     (void)c;
-    KlBufReader *br = (KlBufReader *)q->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)q->body_reader;
     if (!br || br->len == 0) { kl_http_response_error(r, 400, "body required"); return; }
     kl_http_response_status(r, 200);
     kl_http_response_body_borrow(r, br->data, br->len);
@@ -62,8 +62,8 @@ static void h_stream(KlHttpRequest *q, KlHttpResponse *r, void *c) {
     kl_http_response_end_stream(r);
 }
 
-static KlServer g_srv;
-static void *server_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }
+static KlHttpServer g_srv;
+static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
 /* One https request via the mock-TLS sync client; returns 1 if status/body match. */
 static int req(KlAllocator *alloc, KlClientConfig *ccfg, const char *method,
@@ -83,29 +83,29 @@ static int req(KlAllocator *alloc, KlClientConfig *ccfg, const char *method,
 
 int main(void) {
     KlTlsConfig srv_tls = { .ctx = NULL, .factory = mock_tls_create, .ctx_destroy = NULL };
-    KlConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_pollcomp(), .tls = &srv_tls };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-pollcomp-tls: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", h_ok, NULL, NULL);
-    kl_server_route(&g_srv, "POST", "/echo", h_echo, NULL, kl_body_reader_buffer);
-    kl_server_route(&g_srv, "GET", "/file", h_file, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/stream", h_stream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", h_ok, NULL, NULL);
+    kl_http_server_route(&g_srv, "POST", "/echo", h_echo, NULL, kl_http_body_reader_buffer);
+    kl_http_server_route(&g_srv, "GET", "/file", h_file, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/stream", h_stream, NULL, NULL);
 
     int wfd = open(FPATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (wfd < 0 || write(wfd, FDATA, sizeof(FDATA) - 1) != (ssize_t)(sizeof(FDATA) - 1)) {
         fprintf(stderr, "smoke-pollcomp-tls: temp file write failed\n");
         if (wfd >= 0) close(wfd);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
     close(wfd);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -126,9 +126,9 @@ int main(void) {
     int stream_ok = file_ok && req(&alloc, &ccfg, "GET", "/stream", NULL, 0,
                                    STREAMB, sizeof(STREAMB) - 1);
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
     unlink(FPATH);
 
     if (!get_ok)    { fprintf(stderr, "smoke-pollcomp-tls: GET (buffered) FAILED\n");   return 1; }

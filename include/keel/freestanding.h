@@ -59,7 +59,7 @@ int         kl_version_number(void);
 #include <keel/url.h>
 #include <keel/http1_parser.h>
 #include <keel/http_request.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 #include <keel/http1_chunked.h>
 #include <keel/drain.h>
 #include <keel/tls.h>

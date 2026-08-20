@@ -241,8 +241,8 @@ UTEST(tls, plaintext_null_tls) {
 }
 
 UTEST(tls, config_null_means_plaintext) {
-    /* KlConfig with tls=NULL (default zero-init) works as before */
-    KlConfig cfg;
+    /* KlHttpServerConfig with tls=NULL (default zero-init) works as before */
+    KlHttpServerConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     ASSERT_TRUE(cfg.tls == NULL);
 

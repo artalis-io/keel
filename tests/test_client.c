@@ -2,7 +2,7 @@
 #include <keel/client.h>
 #include <keel/resolver.h>
 #include <keel/allocator.h>
-#include <keel/server.h>
+#include <keel/http_server.h>
 #include <keel/event_ctx.h>
 #include <string.h>
 #include <pthread.h>
@@ -334,7 +334,7 @@ static void wire_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     kl_http_response_json(res, 200, "{\"ok\":true}", 11);
 }
 
-static void *wire_server_thread(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+static void *wire_server_thread(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
 
 static int wire_run(KlEventCtx *ev, DnsWireCtx *c, int timeout_ms) {
     int elapsed = 0;
@@ -348,10 +348,10 @@ static int wire_run(KlEventCtx *ev, DnsWireCtx *c, int timeout_ms) {
 /* Default config (no resolver, no system_dns): the async client auto-creates a
  * built-in resolver; "localhost" resolves via the shortcut → local server. */
 UTEST(client, async_default_resolver_localhost) {
-    KlServer srv;
-    KlConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
-    ASSERT_EQ(0, kl_server_init(&srv, &scfg));
-    kl_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &scfg));
+    kl_http_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
     pthread_t t;
     ASSERT_EQ(0, pthread_create(&t, NULL, wire_server_thread, &srv));
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
@@ -373,17 +373,17 @@ UTEST(client, async_default_resolver_localhost) {
     kl_client_free(cl);            /* frees the auto-created resolver (ASan) */
     kl_event_ctx_free(&ev);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(t, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 /* system_dns=1 routes the async client through blocking getaddrinfo. */
 UTEST(client, async_system_dns) {
-    KlServer srv;
-    KlConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
-    ASSERT_EQ(0, kl_server_init(&srv, &scfg));
-    kl_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
+    KlHttpServer srv;
+    KlHttpServerConfig scfg = { .port = 0, .bind_addr = "127.0.0.1", .max_connections = 4 };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &scfg));
+    kl_http_server_route(&srv, "GET", "/", wire_hello, NULL, NULL);
     pthread_t t;
     ASSERT_EQ(0, pthread_create(&t, NULL, wire_server_thread, &srv));
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) usleep(10000);
@@ -408,9 +408,9 @@ UTEST(client, async_system_dns) {
     kl_client_free(cl);
     kl_event_ctx_free(&ev);
 
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(t, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
 }
 
 UTEST_MAIN();

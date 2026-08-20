@@ -5,7 +5,7 @@
  * Sync API: blocking request/response with poll()-based I/O.
  * Async API: non-blocking state machine driven by KlEventCtx watchers.
  *
- * The async client requires only KlEventCtx (not KlServer), so it
+ * The async client requires only KlEventCtx (not KlHttpServer), so it
  * can be used standalone or embedded in any event-loop-based program.
  */
 
@@ -190,7 +190,7 @@ int kl_client_request_s(KlAllocator *alloc, const KlClientConfig *cfg,
  */
 void kl_client_response_free(KlClientResponse *resp);
 
-/* ── Async API (requires KlEventCtx, NOT KlServer) ───────────────── */
+/* ── Async API (requires KlEventCtx, NOT KlHttpServer) ───────────────── */
 
 typedef struct KlClient KlClient;
 
@@ -212,7 +212,7 @@ typedef void (*KlClientDoneFn)(KlClient *client, void *user_data);
  * When complete (or on error), on_done is called on the event loop thread.
  * The caller must then inspect the result and call kl_client_free().
  *
- * @param ev_ctx      Event context for watcher registration (NOT KlServer).
+ * @param ev_ctx      Event context for watcher registration (NOT KlHttpServer).
  * @param alloc       Allocator for client state and response.
  * @param cfg         Client config (timeouts, TLS, limits). May be NULL for defaults.
  * @param method      HTTP method.

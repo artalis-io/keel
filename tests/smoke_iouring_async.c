@@ -2,7 +2,7 @@
  * smoke_iouring_async.c — async/thread-pool handler over the io_uring completion loop
  * (PAL Phase 8f, the watcher relay).
  *
- * Runtime-tests the io_uring watcher relay end to end: a KlServer on the io_uring
+ * Runtime-tests the io_uring watcher relay end to end: a KlHttpServer on the io_uring
  * completion loop (BACKEND=iouring), a KlThreadPool whose wakeup pipe is a kl_watcher
  * on the server ctx, and a handler that offloads blocking work and suspends the connection.
  * The worker finishes → writes the wakeup pipe → the single-shot IORING_OP_POLL_ADD armed
@@ -25,7 +25,7 @@
 #define PORT 18096
 #define WANT "{\"async\":true,\"result\":42}"
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 static KlThreadPool *g_pool;
 
 static void nap_ms(int ms) {
@@ -73,29 +73,29 @@ static void handle_async(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     }
 }
 
-static void *server_thread(void *arg) { (void)arg; kl_server_run(&g_srv); return NULL; }
+static void *server_thread(void *arg) { (void)arg; kl_http_server_run(&g_srv); return NULL; }
 
 int main(void) {
     /* No .sockets set on purpose (8f-5a): a completion loop rejects the default provider,
-     * so kl_server_init must adopt the backend's native overlapped provider automatically
+     * so kl_http_server_init must adopt the backend's native overlapped provider automatically
      * (kl_event_native_provider). This proves the completion backend is a source-compatible
      * drop-in — the whole async/thread-pool/watcher-relay surface then runs over the
      * auto-wired provider, no explicit provider anywhere. */
-    KlConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1" };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    KlHttpServerConfig cfg = { .port = PORT, .bind_addr = "127.0.0.1" };
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-iouring-async: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
     KlThreadPoolConfig tpcfg = { .num_workers = 2, .queue_capacity = 16 };
     g_pool = kl_thread_pool_create(&g_srv.ev, &tpcfg);
-    if (!g_pool) { fprintf(stderr, "smoke-iouring-async: thread pool create failed\n"); kl_server_free(&g_srv); return 1; }
+    if (!g_pool) { fprintf(stderr, "smoke-iouring-async: thread pool create failed\n"); kl_http_server_free(&g_srv); return 1; }
 
-    kl_server_route(&g_srv, "GET", "/async", handle_async, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/async", handle_async, NULL, NULL);
 
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         kl_thread_pool_free(g_pool);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -115,10 +115,10 @@ int main(void) {
         }
     }
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_thread_pool_free(g_pool);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 
     if (!ok) {
         fprintf(stderr, "smoke-iouring-async: async/thread-pool roundtrip FAILED\n");

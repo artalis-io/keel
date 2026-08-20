@@ -2,7 +2,7 @@
  * custom_socket_provider.c — bring-your-own socket stack (PAL Phase 4).
  *
  * Concepts: the KlSocketProvider / KlSocketOps vtable, the KL_SOCK_CAP_* flags,
- * and selecting a provider via KlConfig.sockets (server) + KlClientConfig.sockets
+ * and selecting a provider via KlHttpServerConfig.sockets (server) + KlClientConfig.sockets
  * (client). This provider is a *decorator*: it wraps the built-in provider
  * (kl_socket_provider_posix) and counts sockets + bytes, forwarding each op it
  * intercepts to the wrapped provider. Ops it does not implement are left NULL —
@@ -65,7 +65,7 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *u) {
     static const char body[] = "{\"msg\":\"hello via decorated provider\"}";
     kl_http_response_json(res, 200, body, sizeof(body) - 1);
 }
-static void *run_server(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+static void *run_server(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
 
 #define DEMO_PORT 18099
 
@@ -77,17 +77,17 @@ int main(void) {
     CountingCtx srv = { .base = kl_socket_provider_posix(), 0, 0, 0, 0 };
     KlSocketProvider srv_prov = { &counting_ops, &srv, KL_SOCK_CAP_NATIVE_FD, NULL };
 
-    KlServer s;
-    KlConfig cfg = { .port = DEMO_PORT, .bind_addr = "127.0.0.1", .sockets = &srv_prov };
-    if (kl_server_init(&s, &cfg) < 0) {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = { .port = DEMO_PORT, .bind_addr = "127.0.0.1", .sockets = &srv_prov };
+    if (kl_http_server_init(&s, &cfg) < 0) {
         fprintf(stderr, "server init failed\n");
         return 1;
     }
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
 
     pthread_t th;
     if (pthread_create(&th, NULL, run_server, &s) != 0) {
-        kl_server_free(&s);
+        kl_http_server_free(&s);
         return 1;
     }
 
@@ -114,9 +114,9 @@ int main(void) {
         }
     }
 
-    kl_server_stop(&s);
+    kl_http_server_stop(&s);
     pthread_join(th, NULL);
-    kl_server_free(&s);
+    kl_http_server_free(&s);
 
     printf("--- server provider stats ---\n");
     printf("  sockets created: %d\n  accepts:         %d\n", srv.sockets, srv.accepts);

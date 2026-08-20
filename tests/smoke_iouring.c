@@ -3,7 +3,7 @@
  * io_uring backend (PAL Phase 8f).
  *
  * The runtime validation of the THIRD completion backend (event_iouring.c): a
- * KlServer pinned to the io_uring completion loop (BACKEND=iouring, the overlapped
+ * KlHttpServer pinned to the io_uring completion loop (BACKEND=iouring, the overlapped
  * provider), served by the SAME completion driver (completion_driver.c) the IOCP and
  * pollcomp backends drive — reused verbatim — hit by the sync KlClient over loopback. It
  * proves the completion axis is genuinely platform-independent on a real, completion-native
@@ -63,7 +63,7 @@ static void handle_big(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (!br || br->len == 0) { kl_http_response_error(res, 400, "body required"); return; }
     kl_http_response_status(res, 200);
     kl_http_response_body_borrow(res, br->data, br->len);
@@ -260,7 +260,7 @@ static int resilience_ok(KlAllocator *alloc, KlClientConfig *ccfg) {
     return ok;
 }
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 
 /* Async / long-lived streaming over the completion loop (Phase 8g): begin a stream and
  * write the first chunk during dispatch, then SUSPEND on a one-shot timer. The timer fires
@@ -386,7 +386,7 @@ static int bigstream_no_hol_ok(void) {
 
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&g_srv);
+    kl_http_server_run(&g_srv);
     return NULL;
 }
 
@@ -464,28 +464,28 @@ static int h2_prior_knowledge_roundtrip(void) {
 
 int main(void) {
     static KlH2ServerConfig h2cfg = { .factory = echo_factory };
-    KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_iouring(), .h2 = &h2cfg,
                      .read_timeout_ms = 400 };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-iouring: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
-    kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
-    kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/astream", handle_astream, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
+    kl_http_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_http_body_reader_buffer);
+    kl_http_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/astream", handle_astream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/bigfile", handle_bigfile, NULL, NULL);
     memset(g_big, 'A', sizeof(g_big));
 
     int wfd = open(SMOKE_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (wfd < 0 || write(wfd, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) != (ssize_t)(sizeof(SMOKE_FILE) - 1)) {
         fprintf(stderr, "smoke-iouring: temp file write failed\n");
         if (wfd >= 0) close(wfd);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
     close(wfd);
@@ -504,7 +504,7 @@ int main(void) {
     if (!bigfile_ok) {
         fprintf(stderr, "smoke-iouring: big temp file write failed\n");
         unlink(SMOKE_FILE_PATH);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -517,7 +517,7 @@ int main(void) {
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         fprintf(stderr, "smoke-iouring: pthread_create failed\n");
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -674,10 +674,10 @@ int main(void) {
         if (rc == 0) kl_client_response_free(&resp);
     }
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now — safe to pump the public close */
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
     unlink(SMOKE_FILE_PATH);
     unlink(SMOKE_BIGFILE_PATH);
 

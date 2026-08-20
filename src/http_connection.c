@@ -1,5 +1,5 @@
 #include <keel/http_connection.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 #include <keel/http1_chunked.h>
 #include <keel/event.h>
 #include <keel/tls.h>
@@ -7,7 +7,7 @@
 #include <keel/h2_server.h>
 #include <keel/proxy_protocol.h>
 #include "http_conn_internal.h"
-#include "proto_hooks.h"        /* ws/h2 upgrade seam — core never names ws/h2 directly */
+#include "http_proto_hooks.h"        /* ws/h2 upgrade seam — core never names ws/h2 directly */
 #include <assert.h>
 #include <string.h>
 #include "kl_cstr.h"          /* kl_ascii_strncasecmp — freestanding-safe, locale-free */
@@ -305,8 +305,8 @@ static KlHttpConnState conn_process(KlHttpConn *c) {
  * Body has already been consumed, so keep_alive is preserved on short-circuit.
  */
 static KlHttpConnState conn_run_post_middleware_and_handle(KlHttpConn *c,
-                                                       KlRouter *router) {
-    if (kl_router_run_post_middleware(router, &c->req, &c->res) != 0) {
+                                                       KlHttpRouter *router) {
+    if (kl_http_router_run_post_middleware(router, &c->req, &c->res) != 0) {
         /* Body already consumed — keep_alive preserved */
         if (c->res.body_mode == KL_HTTP_BODY_STREAM) {
             conn_log_access(c);
@@ -509,7 +509,7 @@ static void conn_null_terminate_headers(KlHttpConn *c) {
  * Called from both HEADERS_OK (has_leftover=true with leftover data) and
  * PARSE_OK (has_leftover=false, complete request with no body).
  */
-static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlRouter *router,
+static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                           const char *leftover_buf,
                                           size_t leftover_len) {
     /* Null-terminate the parsed request fields in read_buf so handlers get valid
@@ -520,7 +520,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlRouter *router,
     conn_null_terminate_headers(c);
 
     /* Route match */
-    c->route_result = kl_router_match(router,
+    c->route_result = kl_http_router_match(router,
                                        c->req.method, c->req.method_len,
                                        c->req.path, c->req.path_len,
                                        &c->route, c->params,
@@ -528,7 +528,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlRouter *router,
 
     /* Expose route params on request for handlers */
     memcpy(c->req.params, c->params,
-           sizeof(KlParam) * (size_t)c->num_params);
+           sizeof(KlHttpParam) * (size_t)c->num_params);
     c->req.num_params = c->num_params;
 
     /* Init response and run pre-body middleware */
@@ -536,7 +536,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlRouter *router,
         c->state = KL_HTTP_CONN_CLOSED;
         return c->state;
     }
-    if (kl_router_run_middleware(router, &c->req, &c->res) != 0) {
+    if (kl_http_router_run_middleware(router, &c->req, &c->res) != 0) {
         /* Middleware short-circuited — body may be unread */
         c->req.keep_alive = 0;
         c->res.keep_alive = 0;
@@ -578,7 +578,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlRouter *router,
 
     if (has_body && c->route && c->route->body_reader) {
         /* Create body reader — factory can inspect headers */
-        KlBodyReader *br = c->route->body_reader(
+        KlHttpBodyReader *br = c->route->body_reader(
             c->stream.alloc, &c->req, c->route->user_data);
         if (!br) {
             best_effort_conn_write(c, kl_415_response,
@@ -607,8 +607,8 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlRouter *router,
          * on the very first byte chunk. */
         if (c->route->streaming_handler && c->route->streaming_async) {
             /* streaming_async implies streaming_handler — enforced by
-             * kl_router_add_streaming_async. Assert here to catch
-             * downstream API misuse (direct KlRoute mutation) in
+             * kl_http_router_add_streaming_async. Assert here to catch
+             * downstream API misuse (direct KlHttpRoute mutation) in
              * debug builds without runtime cost in release. */
             assert(c->route->streaming_handler);
             KlHttpConnState s = conn_invoke_streaming_handler(c);
@@ -784,7 +784,7 @@ static KlHttpConnState conn_dispatch_request(KlHttpConn *c, KlRouter *router,
     }
 }
 
-KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlRouter *router) {
+KlHttpConnState kl_http_conn_on_readable(KlHttpConn *c, KlHttpRouter *router) {
     c->last_active_ms = kl_monotonic_ms();
 
     if (c->state == KL_HTTP_CONN_READING) {
@@ -1075,12 +1075,12 @@ KlHttpConnState kl_http_conn_on_writable(KlHttpConn *c) {
  * learning which event model produced the bytes. kl_http_conn_on_readable is unchanged
  * (still calls the statics directly), so the readiness path stays byte-identical.
  * See conn_internal.h / docs/phase8_iocp_design.md §4. */
-KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlRouter *router,
+KlHttpConnState kl_http_conn_dispatch_request(KlHttpConn *c, KlHttpRouter *router,
                                      const char *leftover, size_t leftover_len) {
     return conn_dispatch_request(c, router, leftover, leftover_len);
 }
 
-KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlRouter *router) {
+KlHttpConnState kl_http_conn_run_post_body(KlHttpConn *c, KlHttpRouter *router) {
     return conn_run_post_middleware_and_handle(c, router);
 }
 

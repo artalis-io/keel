@@ -78,7 +78,7 @@ long long kl_uefi_mbedtls_time(long long *t);   /* clock_snapshot.c; mbedtls_tim
 #define MBEDTLS_SSL_CLI_C
 /* Phase 10 UEFI *server* (S-6): the server-side handshake state machine. Additive —
  * the client (U-4) is unaffected; enabling it lets the same freestanding mbedTLS drive
- * an inbound HTTPS KlServer (ServerHello/Certificate/ServerKeyExchange + the RSA key
+ * an inbound HTTPS KlHttpServer (ServerHello/Certificate/ServerKeyExchange + the RSA key
  * operations, all pure crypto — no OS). Without it a server ctx parses but its handshake
  * never progresses. */
 #define MBEDTLS_SSL_SRV_C

@@ -1,5 +1,5 @@
 #include "utest.h"
-#include <keel/sse.h>
+#include <keel/http_sse.h>
 #include <keel/allocator.h>
 #include <string.h>
 #include "net_compat.h"
@@ -32,8 +32,8 @@ static void mock_init(MockCtx *m) {
     m->fail_after = -1;
 }
 
-/* Helper: set up an SSE handle with mock writer (bypasses kl_sse_begin) */
-static void setup_mock_sse(KlSse *sse, MockCtx *m) {
+/* Helper: set up an SSE handle with mock writer (bypasses kl_http_sse_begin) */
+static void setup_mock_sse(KlHttpSse *sse, MockCtx *m) {
     mock_init(m);
     sse->write_fn = mock_write;
     sse->write_ctx = m;
@@ -43,11 +43,11 @@ static void setup_mock_sse(KlSse *sse, MockCtx *m) {
 /* ── Tests ───────────────────────────────────────────────────────────── */
 
 UTEST(sse, basic_event) {
-    KlSse sse;
+    KlHttpSse sse;
     MockCtx m;
     setup_mock_sse(&sse, &m);
 
-    ASSERT_EQ(kl_sse_event(&sse, "update", "hello", 5, "42"), 0);
+    ASSERT_EQ(kl_http_sse_event(&sse, "update", "hello", 5, "42"), 0);
 
     const char *expected = "event: update\nid: 42\ndata: hello\n\n";
     ASSERT_EQ(m.len, strlen(expected));
@@ -55,11 +55,11 @@ UTEST(sse, basic_event) {
 }
 
 UTEST(sse, data_only) {
-    KlSse sse;
+    KlHttpSse sse;
     MockCtx m;
     setup_mock_sse(&sse, &m);
 
-    ASSERT_EQ(kl_sse_event(&sse, NULL, "payload", 7, NULL), 0);
+    ASSERT_EQ(kl_http_sse_event(&sse, NULL, "payload", 7, NULL), 0);
 
     const char *expected = "data: payload\n\n";
     ASSERT_EQ(m.len, strlen(expected));
@@ -67,11 +67,11 @@ UTEST(sse, data_only) {
 }
 
 UTEST(sse, multiline_data) {
-    KlSse sse;
+    KlHttpSse sse;
     MockCtx m;
     setup_mock_sse(&sse, &m);
 
-    ASSERT_EQ(kl_sse_event(&sse, NULL, "line1\nline2\nline3", 17, NULL), 0);
+    ASSERT_EQ(kl_http_sse_event(&sse, NULL, "line1\nline2\nline3", 17, NULL), 0);
 
     const char *expected = "data: line1\ndata: line2\ndata: line3\n\n";
     ASSERT_EQ(m.len, strlen(expected));
@@ -79,11 +79,11 @@ UTEST(sse, multiline_data) {
 }
 
 UTEST(sse, empty_data) {
-    KlSse sse;
+    KlHttpSse sse;
     MockCtx m;
     setup_mock_sse(&sse, &m);
 
-    ASSERT_EQ(kl_sse_event(&sse, NULL, "", 0, NULL), 0);
+    ASSERT_EQ(kl_http_sse_event(&sse, NULL, "", 0, NULL), 0);
 
     const char *expected = "data: \n\n";
     ASSERT_EQ(m.len, strlen(expected));
@@ -91,11 +91,11 @@ UTEST(sse, empty_data) {
 }
 
 UTEST(sse, comment) {
-    KlSse sse;
+    KlHttpSse sse;
     MockCtx m;
     setup_mock_sse(&sse, &m);
 
-    ASSERT_EQ(kl_sse_comment(&sse, "keepalive", 9), 0);
+    ASSERT_EQ(kl_http_sse_comment(&sse, "keepalive", 9), 0);
 
     const char *expected = ": keepalive\n";
     ASSERT_EQ(m.len, strlen(expected));
@@ -103,12 +103,12 @@ UTEST(sse, comment) {
 }
 
 UTEST(sse, write_error) {
-    KlSse sse;
+    KlHttpSse sse;
     MockCtx m;
     setup_mock_sse(&sse, &m);
     m.fail_after = 0;  /* fail on first write */
 
-    ASSERT_EQ(kl_sse_event(&sse, "test", "data", 4, NULL), -1);
+    ASSERT_EQ(kl_http_sse_event(&sse, "test", "data", 4, NULL), -1);
 }
 
 UTEST(sse, begin_sets_headers) {
@@ -120,8 +120,8 @@ UTEST(sse, begin_sets_headers) {
     ASSERT_EQ(kl_test_socketpair(pipefd), 0);
     res.conn_fd = pipefd[1];
 
-    KlSse sse;
-    ASSERT_EQ(kl_sse_begin(&res, &sse), 0);
+    KlHttpSse sse;
+    ASSERT_EQ(kl_http_sse_begin(&res, &sse), 0);
 
     /* Verify headers were set */
     ASSERT_TRUE(strstr(res.hdr_buf, "Content-Type: text/event-stream\r\n") != NULL);

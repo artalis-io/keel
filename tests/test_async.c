@@ -12,14 +12,14 @@ static int set_nonblocking(int fd) {
 }
 
 /* Minimal server init: event loop + pool, no listen socket */
-static void init_test_server(KlServer *s) {
+static void init_test_server(KlHttpServer *s) {
     memset(s, 0, sizeof(*s));
     s->listen_fd = -1;
     s->alloc_storage = kl_allocator_default();
     s->ev.alloc = &s->alloc_storage;
 }
 
-static void cleanup_test_server(KlServer *s) {
+static void cleanup_test_server(KlHttpServer *s) {
     /* Free watchers + close event loop */
     kl_event_ctx_free(&s->ev);
     /* Cancel ops */
@@ -61,7 +61,7 @@ typedef struct {
     int resume_called;
     int deadline_called;
     int cancel_called;
-    KlServer *server;         /* for kl_async_complete in deadline cb */
+    KlHttpServer *server;         /* for kl_async_complete in deadline cb */
 } AsyncCtx;
 
 static void test_resume_cb(KlAsyncOp *op, void *user_data) {
@@ -89,7 +89,7 @@ static void test_cancel_cb(KlAsyncOp *op, void *user_data) {
 /* ── Watcher Tests ────────────────────────────────────────────────── */
 
 UTEST(async, watcher_add_fires_on_read) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -117,7 +117,7 @@ UTEST(async, watcher_add_fires_on_read) {
 }
 
 UTEST(async, watcher_mod_changes_interest) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -145,7 +145,7 @@ UTEST(async, watcher_mod_changes_interest) {
 }
 
 UTEST(async, watcher_del_stops_events) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -173,7 +173,7 @@ UTEST(async, watcher_del_stops_events) {
 }
 
 UTEST(async, watcher_multiple_fds) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -218,7 +218,7 @@ UTEST(async, watcher_multiple_fds) {
 }
 
 UTEST(async, watcher_mod_not_found) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -229,7 +229,7 @@ UTEST(async, watcher_mod_not_found) {
 }
 
 UTEST(async, watcher_del_not_found) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 
@@ -242,7 +242,7 @@ UTEST(async, watcher_del_not_found) {
 /* ── Suspend / Resume Tests ───────────────────────────────────────── */
 
 UTEST(async, suspend_sets_state) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
@@ -294,7 +294,7 @@ UTEST(async, suspend_sets_state) {
 }
 
 UTEST(async, complete_calls_on_resume) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
@@ -351,7 +351,7 @@ UTEST(async, complete_calls_on_resume) {
 }
 
 UTEST(async, deadline_fires_on_timeout) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
@@ -413,7 +413,7 @@ UTEST(async, deadline_fires_on_timeout) {
 }
 
 UTEST(async, cancel_on_server_free) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
@@ -448,7 +448,7 @@ UTEST(async, cancel_on_server_free) {
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);
 
-    /* kl_server_free cancels ops — but we use cleanup helper
+    /* kl_http_server_free cancels ops — but we use cleanup helper
      * which mirrors the same behavior */
     while (s.async_ops) {
         KlAsyncOp *cop = s.async_ops;
@@ -466,7 +466,7 @@ UTEST(async, cancel_on_server_free) {
 }
 
 UTEST(async, suspend_exempt_from_idle_timeout) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
@@ -528,7 +528,7 @@ UTEST(async, suspend_exempt_from_idle_timeout) {
 /* ── Integration: watcher completes suspended conn ────────────────── */
 
 typedef struct {
-    KlServer *server;
+    KlHttpServer *server;
     KlAsyncOp *op;
     int pipe_read_fd;
 } WatcherCompleteCtx;
@@ -546,7 +546,7 @@ static void watcher_complete_cb(KlSocketHandle fd, KlEventMask ready, void *user
 }
 
 UTEST(async, watcher_completes_suspended_conn) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);
@@ -646,19 +646,19 @@ UTEST(async, server_ctx_set_on_request) {
 
 /* ── Integration test: async handler in real server ──────────────── */
 
-static KlServer async_server;
+static KlHttpServer async_server;
 static pthread_t async_server_tid;
 
 static void *async_server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&async_server);
+    kl_http_server_run(&async_server);
     return NULL;
 }
 
 /* Handler that suspends, then completes synchronously via a watcher */
 typedef struct {
     KlAsyncOp op;
-    KlServer *server;
+    KlHttpServer *server;
     int pipe_fds[2];
 } SleepCtx;
 
@@ -683,7 +683,7 @@ static void sleep_watcher(KlSocketHandle fd, KlEventMask ready, void *user_data)
 
 static void handle_async_sleep(KlHttpRequest *req, KlHttpResponse *res, void *user_data) {
     (void)res;
-    KlServer *srv = user_data;
+    KlHttpServer *srv = user_data;
     KlHttpConn *conn = kl_http_request_conn(req);
 
     /* Allocate sleep context */
@@ -737,9 +737,9 @@ static ssize_t read_response(int fd, char *buf, size_t buflen) {
 }
 
 UTEST(async, e2e_handler_suspend_resume) {
-    KlConfig cfg = {.port = 0};
-    kl_server_init(&async_server, &cfg);
-    kl_server_route(&async_server, "GET", "/async",
+    KlHttpServerConfig cfg = {.port = 0};
+    kl_http_server_init(&async_server, &cfg);
+    kl_http_server_route(&async_server, "GET", "/async",
                     handle_async_sleep, &async_server, NULL);
 
     pthread_create(&async_server_tid, NULL, async_server_thread, NULL);
@@ -762,9 +762,9 @@ UTEST(async, e2e_handler_suspend_resume) {
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_TRUE(strstr(buf, "{\"slept\":true}") != NULL);
 
-    kl_server_stop(&async_server);
+    kl_http_server_stop(&async_server);
     pthread_join(async_server_tid, NULL);
-    kl_server_free(&async_server);
+    kl_http_server_free(&async_server);
 }
 
 /* ── Exactly-one-terminal guarantees (Phase 4) ─────────────────────────
@@ -776,7 +776,7 @@ static void terminal_resume_cb(KlAsyncOp *op, void *ud) {
     (void)op; ((AsyncCtx *)ud)->resume_called++;
 }
 #define RFC_TERMINAL_SETUP()                                                   \
-    KlServer s; init_test_server(&s);                                          \
+    KlHttpServer s; init_test_server(&s);                                          \
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);                  \
     ASSERT_EQ(kl_http_conn_pool_init(&s.pool, 4, &s.alloc_storage), 0);             \
     for (int i = 0; i < 4; i++) {                                              \
@@ -869,7 +869,7 @@ UTEST(async, resuspend_after_terminal_is_pending) {
  * for that path (see docs/phase8f5 §4). */
 #define SOAK_ROUNDS 3000
 UTEST(async, watcher_mask_churn_soak) {
-    KlServer s;
+    KlHttpServer s;
     init_test_server(&s);
     ASSERT_EQ(kl_event_ctx_init(&s.ev, &s.alloc_storage), 0);
 

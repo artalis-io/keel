@@ -157,7 +157,7 @@ struct KlTls {
      * On the synchronous socket-BIO path (readiness loops), the backend does its
      * ciphertext send/recv on the socket `fd`. By default that uses the built-in
      * host socket ops; when this hook is set, KEEL's server/client call it before
-     * the handshake with the *connection's own* provider (`KlConfig.sockets` /
+     * the handshake with the *connection's own* provider (`KlHttpServerConfig.sockets` /
      * `KlClientConfig.sockets`), so TLS I/O automatically matches the connection's
      * socket provider — e.g. a non-kernel stack (lwIP) whose descriptors are not
      * host fds. Passing NULL selects the host default.
@@ -196,7 +196,7 @@ struct KlTls {
  * set; alpn_protocol/peer_cert/feed_input/drain_output/at_eof are optional. A factory that
  * returns a session missing any required op — including `destroy` — is unusable, and a
  * later cleanup path that blindly called the missing op would crash. Callers (e.g.
- * kl_server_init) reject such a session with KL_ERR_TLS_VTABLE and free it via its own
+ * kl_http_server_init) reject such a session with KL_ERR_TLS_VTABLE and free it via its own
  * `destroy` only when that pointer is non-NULL. Header-only so hosted + freestanding share
  * one definition.
  */
@@ -221,7 +221,7 @@ typedef struct KlTlsCtx KlTlsCtx;
 typedef KlTls *(*KlTlsFactory)(KlTlsCtx *ctx, KlAllocator *alloc);
 
 /**
- * @brief TLS configuration for KlConfig.
+ * @brief TLS configuration for KlHttpServerConfig.
  */
 typedef struct {
     KlTlsCtx    *ctx;          /**< Shared context (certs/keys) — user-owned */

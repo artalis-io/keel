@@ -1,6 +1,6 @@
 #include "utest.h"
 #include <keel/http1_parser.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 #include <string.h>
 
 UTEST(parser, create_and_destroy) {
@@ -92,7 +92,7 @@ UTEST(parser, parse_post_with_body) {
     ASSERT_EQ(req.content_length, (size_t)13);
 
     /* Set up buffer reader to receive body */
-    KlBodyReader *br = kl_body_reader_buffer(&a, &req, NULL);
+    KlHttpBodyReader *br = kl_http_body_reader_buffer(&a, &req, NULL);
     ASSERT_TRUE(br != NULL);
     req.body_reader = br;
 
@@ -103,7 +103,7 @@ UTEST(parser, parse_post_with_body) {
     result = p->parse(p, &req, raw + consumed, leftover, &consumed2);
     ASSERT_EQ(result, KL_HTTP1_PARSE_OK);
 
-    KlBufReader *buf = (KlBufReader *)br;
+    KlHttpBufReader *buf = (KlHttpBufReader *)br;
     ASSERT_EQ(buf->len, (size_t)13);
     ASSERT_EQ(memcmp(buf->data, "{\"key\":\"val\"}", 13), 0);
 

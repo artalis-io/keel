@@ -53,7 +53,7 @@
 #include <keel/url.h>
 #include <keel/http1_parser.h>
 #include <keel/http_request.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 #include <keel/http1_chunked.h>
 #include <keel/drain.h>
 #include <keel/tls.h>
@@ -62,12 +62,12 @@
 #include <keel/http_response.h>
 #include <keel/file_io.h>
 /* Server protocol surface (S-1): the whole inbound public API, freestanding-clean. */
-#include <keel/router.h>
+#include <keel/http_router.h>
 #include <keel/compress.h>
 #include <keel/proxy_protocol.h>
 #include <keel/h2_server.h>
 #include <keel/http_connection.h>
-#include <keel/server.h>
+#include <keel/http_server.h>
 
 /* Compile-time assertions that the neutral integer types are the intended
  * pointer-width shapes (and thus need no hosted <sys/types.h>). */

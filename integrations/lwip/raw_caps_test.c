@@ -20,7 +20,7 @@
  * they are not duplicated here.)
  *
  * These are pure provider-seam assertions — no server, no lwIP mainloop thread. K4 wires a
- * KlEventCtx's sockets to the raw provider (the same auto-wire a KlServer does via the loop's
+ * KlEventCtx's sockets to the raw provider (the same auto-wire a KlHttpServer does via the loop's
  * native_provider()) and confirms kl_datagram_socket_init accepts it.
  *
  * SPDX-License-Identifier: MIT
@@ -93,7 +93,7 @@ static int test_bind_family(void) {
 
 /* K4 — UDP is SUPPORTED (LC-3a): the raw provider exposes datagram ops, so kl_datagram_socket_init
  * succeeds. `ctx` is a LIVE raw ctx (lwIP already up); we wire its sockets to the raw provider exactly
- * as a KlServer does via the loop's native_provider(). kl_datagram_socket_init now creates a udp_pcb
+ * as a KlHttpServer does via the loop's native_provider(). kl_datagram_socket_init now creates a udp_pcb
  * through the provider's datagram data-plane (udp_dg() non-NULL). */
 static int test_udp_supported(KlEventCtx *ctx) {
     const KlSocketProvider *p = kl_socket_provider_lwip_raw();

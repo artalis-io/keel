@@ -46,17 +46,17 @@ static inline int kl_req_memeq(const char *a, const char *b, size_t n) {
 }
 
 /** @brief Forward declaration — full definition in body_reader.h. */
-typedef struct KlBodyReader KlBodyReader;
+typedef struct KlHttpBodyReader KlHttpBodyReader;
 
 typedef struct {
     const char *name;   /**< Parameter name pointer. */
     size_t name_len;    /**< Parameter name length. */
     const char *value;  /**< Parameter value pointer. */
     size_t value_len;   /**< Parameter value length. */
-} KlParam;
+} KlHttpParam;
 
 /** @brief Maximum number of route parameters. */
-#define KL_MAX_PARAMS 16
+#define KL_HTTP_ROUTER_MAX_PARAMS 16
 
 typedef struct KlHttpRequest KlHttpRequest;
 
@@ -79,10 +79,10 @@ struct KlHttpRequest {
 
     size_t content_length;       /**< Content-Length value. */
     int chunked;                 /**< 1 if Transfer-Encoding: chunked. */
-    KlBodyReader *body_reader;   /**< Set by connection layer, NULL if no body. */
+    KlHttpBodyReader *body_reader;   /**< Set by connection layer, NULL if no body. */
     void *ctx;                   /**< Opaque per-request context, set by middleware. */
 
-    KlParam params[KL_MAX_PARAMS]; /**< Matched route parameters. */
+    KlHttpParam params[KL_HTTP_ROUTER_MAX_PARAMS]; /**< Matched route parameters. */
     int num_params;              /**< Number of matched route parameters. */
 
     void *_server_ctx;           /**< Opaque — set to KlHttpConn* by connection layer (do not modify). */

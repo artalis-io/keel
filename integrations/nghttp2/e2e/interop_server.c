@@ -17,13 +17,13 @@ static void handle_hello(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 
 int main(void) {
     KlH2ServerConfig h2cfg = { .factory = kl_h2_nghttp2_server_session };
-    KlConfig cfg = { .port = INTEROP_PORT, .bind_addr = "127.0.0.1", .h2 = &h2cfg };
-    KlServer s;
-    if (kl_server_init(&s, &cfg) < 0) { fprintf(stderr, "server init failed\n"); return 1; }
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
-    kl_server_route(&s, "GET", "/", handle_hello, NULL, NULL);   /* h2spec default path */
+    KlHttpServerConfig cfg = { .port = INTEROP_PORT, .bind_addr = "127.0.0.1", .h2 = &h2cfg };
+    KlHttpServer s;
+    if (kl_http_server_init(&s, &cfg) < 0) { fprintf(stderr, "server init failed\n"); return 1; }
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/", handle_hello, NULL, NULL);   /* h2spec default path */
     fprintf(stderr, "interop_server: h2c on 127.0.0.1:%d\n", INTEROP_PORT);
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

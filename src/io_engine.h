@@ -11,7 +11,7 @@
  *   - readiness builds link the stub in io_engine.c (never called — the server only
  *     enters the completion branch when the loop advertises COMPLETION);
  *   - the IOCP build links the real tick in event_iocp.c.
- * KlServer is used by-pointer only, so an opaque forward declaration keeps this
+ * KlHttpServer is used by-pointer only, so an opaque forward declaration keeps this
  * header free of any other dependency. See docs/phase8_iocp_design.md.
  */
 #ifndef KEEL_SRC_IO_ENGINE_H
@@ -22,7 +22,7 @@
 #include <keel/sockaddr.h> /* KlSockAddr (kl_comp_post_dgram_send) */
 #include "datagram_life.h" /* KlDgramLife + KlDgramOpKind/KlDgramRetireResult (cancel_dgram/retire_dgram) */
 
-struct KlServer;
+struct KlHttpServer;
 struct KlEventCtx;
 struct sockaddr;
 
@@ -62,17 +62,17 @@ int kl_completion_axis_available(void);
 
 /* Run one completion-loop tick for the server: prime accepts, then drive one
  * generic tick over its event ctx. Returns 0 to continue the run loop, <0 to stop. */
-int kl_io_engine_run_completion(struct KlServer *s, int timeout_ms);
+int kl_io_engine_run_completion(struct KlHttpServer *s, int timeout_ms);
 
 /* Teardown accept quiescence (6B-3 2b review): force every posted accept to completion, then reap to
  * confirmed KlListener detachment with a TEARDOWN-SPECIFIC dispatcher that routes ONLY ACCEPT and
  * drops all other completions WITHOUT dispatch — so no HTTP step, application/consumer callback, or
  * timer runs against logically destroyed state (async ops / file_io already torn down). Called once
- * from kl_server_free AFTER kl_listener_close() and after the listen socket is closed. Returns 0, or
+ * from kl_http_server_free AFTER kl_listener_close() and after the listen socket is closed. Returns 0, or
  * -1 if the force could not be guaranteed (caller leaves the backend close as the physical backstop).
  * The impl (completion_server.c) owns the completion dispatch hook + the listener; server_core.c
  * stays decoupled from the internal completion vtable. Aborting stub under KEEL_NO_COMPLETION. */
-int kl_io_engine_quiesce_accepts(struct KlServer *s);
+int kl_io_engine_quiesce_accepts(struct KlHttpServer *s);
 
 /* The generic completion tick: drain the ctx's completion loop and route each op to
  * its consumer (connections; datagrams in 8b-4c). Shared by the server run loop and
@@ -99,7 +99,7 @@ void kl_comp_cancel(struct KlEventCtx *ctx, KlSocketHandle fd);
  * io_engine.c on readiness builds, where kl_async_complete never calls it (it branches on
  * KL_EVENT_CAP_COMPLETION). Keeps the async API free of any event-axis awareness. */
 struct KlHttpConn;
-void kl_io_engine_resume_completion(struct KlServer *s, struct KlHttpConn *conn);
+void kl_io_engine_resume_completion(struct KlHttpServer *s, struct KlHttpConn *conn);
 
 /* Re-arm a body read on a completion loop after read-side flow control resumes
  * (kl_http_request_resume_body): post a fresh recv for the conn. The readiness path re-arms READ

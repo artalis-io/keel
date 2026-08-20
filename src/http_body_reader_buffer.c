@@ -1,11 +1,11 @@
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 #include <string.h>
 #include <stdint.h>
 
 #define KL_BUF_READER_INIT_CAP 1024
 
-static int buf_on_data(KlBodyReader *self, const char *data, size_t len) {
-    KlBufReader *br = (KlBufReader *)self;
+static int buf_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
+    KlHttpBufReader *br = (KlHttpBufReader *)self;
 
     if (br->max_size > 0 && len > br->max_size - br->len)
         return -1;  /* exceeded limit */
@@ -33,28 +33,28 @@ static int buf_on_data(KlBodyReader *self, const char *data, size_t len) {
     return 0;
 }
 
-static void buf_on_complete(KlBodyReader *self) {
+static void buf_on_complete(KlHttpBodyReader *self) {
     (void)self;
 }
 
-static void buf_on_error(KlBodyReader *self) {
+static void buf_on_error(KlHttpBodyReader *self) {
     (void)self;
 }
 
-static void buf_destroy(KlBodyReader *self) {
-    KlBufReader *br = (KlBufReader *)self;
+static void buf_destroy(KlHttpBodyReader *self) {
+    KlHttpBufReader *br = (KlHttpBufReader *)self;
     if (br->data)
         kl_free(br->alloc, br->data, br->cap);
-    kl_free(br->alloc, br, sizeof(KlBufReader));
+    kl_free(br->alloc, br, sizeof(KlHttpBufReader));
 }
 
-/* user_data is void* (not const) to match the KlBodyReaderFactory typedef — it
+/* user_data is void* (not const) to match the KlHttpBodyReaderFactory typedef — it
  * carries max_size by value, not a pointer to read. */
 /* cppcheck-suppress constParameterPointer */
-KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, const KlHttpRequest *req, void *user_data) {
+KlHttpBodyReader *kl_http_body_reader_buffer(KlAllocator *alloc, const KlHttpRequest *req, void *user_data) {
     (void)req;
 
-    KlBufReader *br = kl_malloc(alloc, sizeof(KlBufReader));
+    KlHttpBufReader *br = kl_malloc(alloc, sizeof(KlHttpBufReader));
     if (!br) return NULL;
 
     size_t max_size = (size_t)user_data;
@@ -69,7 +69,7 @@ KlBodyReader *kl_body_reader_buffer(KlAllocator *alloc, const KlHttpRequest *req
     br->alloc = alloc;
     br->data = kl_malloc(alloc, init_cap);
     if (!br->data) {
-        kl_free(alloc, br, sizeof(KlBufReader));
+        kl_free(alloc, br, sizeof(KlHttpBufReader));
         return NULL;
     }
     br->len = 0;

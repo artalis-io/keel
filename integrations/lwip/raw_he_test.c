@@ -3,7 +3,7 @@
  * backend, in-process over the loopback netif (NO_SYS=1, single-thread).
  *
  * The proof for LC-2 (docs/phase10_lwip_raw_client_design.md §8 LC-2): the SAME single-loop model
- * as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlServer and a raw async
+ * as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw async
  * KlClient on the loop thread), but now the client is handed a MULTI-ADDRESS resolver so its
  * Happy-Eyeballs layer (src/client.c: he_new_attempt/he_win/he_on_connect_result + the Connection-
  * Attempt-Delay + overall-deadline timers) races/fails-over several concurrent tcp_connect pcbs
@@ -121,7 +121,7 @@ static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 
 /* ── per-case client state (all fields touched only on the loop thread) ───────── */
 typedef struct {
-    KlServer   *srv;
+    KlHttpServer   *srv;
     const char *url;
     KlResolver *resolver;
     int         connect_delay_ms;   /* Connection-Attempt-Delay to configure */
@@ -162,12 +162,12 @@ static void on_done(KlClient *client, void *ud) {
         atomic_store(&cc->pass, err != 0);
     }
     atomic_store(&cc->done, 1);
-    kl_server_stop(cc->srv);
+    kl_http_server_stop(cc->srv);
 }
 
 /* Fired on the loop thread: start the async KlClient on the server's shared ctx (== the one lwIP
  * mainloop). Its connect racing, its data-plane watcher relay, and its HE timers are all serviced
- * by kl_server_run's completion tick — single-thread NO_SYS=1 discipline. */
+ * by kl_http_server_run's completion tick — single-thread NO_SYS=1 discipline. */
 static void start_client(void *ud) {
     HeCase *cc = ud;
     static KlAllocator alloc;   /* stable storage: the response stores the allocator by value */
@@ -183,22 +183,22 @@ static void start_client(void *ud) {
     if (!cc->client) {
         atomic_store(&cc->pass, cc->expect_ok ? 0 : 1);
         atomic_store(&cc->done, 1);
-        kl_server_stop(cc->srv);
+        kl_http_server_stop(cc->srv);
     }
 }
 
-static void *server_thread(void *a) { kl_server_run((KlServer *)a); return NULL; }
+static void *server_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
 
-/* Run one case: raw server on GOOD_PORT (kl_server_run on a bg thread) + a raw KlClient started on
+/* Run one case: raw server on GOOD_PORT (kl_http_server_run on a bg thread) + a raw KlClient started on
  * the server's shared ctx via a loop-thread timer; a bounded watchdog stops a hang. `max_wait_ms`
  * bounds the watchdog (deadline cases need to outlast the client's own timeout). */
 static int run_case(const char *label, HeResolver *resolver, int connect_delay_ms, int timeout_ms,
                     int expect_ok, int max_wait_ms) {
-    KlConfig cfg = { .port = GOOD_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = GOOD_PORT, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_lwip_raw() };
-    KlServer srv;
-    if (kl_server_init(&srv, &cfg) != 0) { printf("LC-2 FAIL: server_init (%s)\n", label); return 1; }
-    kl_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
+    KlHttpServer srv;
+    if (kl_http_server_init(&srv, &cfg) != 0) { printf("LC-2 FAIL: server_init (%s)\n", label); return 1; }
+    kl_http_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
 
     HeCase cc;
     memset(&cc, 0, sizeof(cc));
@@ -215,14 +215,14 @@ static int run_case(const char *label, HeResolver *resolver, int connect_delay_m
 
     pthread_t srv_th;
     if (pthread_create(&srv_th, NULL, server_thread, &srv) != 0) {
-        printf("LC-2 FAIL: pthread_create (%s)\n", label); kl_server_free(&srv); return 1;
+        printf("LC-2 FAIL: pthread_create (%s)\n", label); kl_http_server_free(&srv); return 1;
     }
     int ticks = max_wait_ms / 10;
     for (int i = 0; i < ticks && !atomic_load(&cc.done); i++) {
         struct timespec sl = { 0, 10 * 1000000L };
         nanosleep(&sl, NULL);
     }
-    if (!atomic_load(&cc.done)) { kl_server_stop(&srv); }   /* hang guard */
+    if (!atomic_load(&cc.done)) { kl_http_server_stop(&srv); }   /* hang guard */
     pthread_join(srv_th, NULL);
 
     int rc = 0;
@@ -242,7 +242,7 @@ static int run_case(const char *label, HeResolver *resolver, int connect_delay_m
     }
 
     if (cc.client) kl_client_free(cc.client);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     return rc;
 }
 

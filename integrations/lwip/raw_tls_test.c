@@ -3,7 +3,7 @@
  * loopback netif (NO_SYS=1, single-thread).
  *
  * The proof for LC-4 (docs/phase10_lwip_raw_client_design.md §6 + §8 LC-4): the SAME single-loop
- * model as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlServer and a raw
+ * model as LC-1 (ONE KlEventCtx == the one lwIP mainloop, driving BOTH a raw KlHttpServer and a raw
  * async KlClient on the loop thread), now with TLS on BOTH ends — a genuine mbedTLS handshake +
  * request round-trips over 127.0.0.1 on the loopif with zero lwIP-specific TLS code.
  *
@@ -20,10 +20,10 @@
  *      comp_tls_drive + comp_tls_drain_output drive the abstract KlTls feed_input/drain_output
  *      vtable with zero mbedTLS knowledge: the raw backend delivers ciphertext via KL_COMP_READ, the
  *      driver feed_input's it, tls->read returns plaintext, drain_output ciphertext is posted via
- *      the send path. The raw KlServer already uses completion_driver.c, so server TLS "just moves
+ *      the send path. The raw KlHttpServer already uses completion_driver.c, so server TLS "just moves
  *      bytes".
  *
- * Case: a raw HTTPS KlClient GETs https://127.0.0.1:PORT/ from a raw TLS KlServer -> handshake +
+ * Case: a raw HTTPS KlClient GETs https://127.0.0.1:PORT/ from a raw TLS KlHttpServer -> handshake +
  * 200 + body BYTE-EXACT. Embedded self-signed EC cert (CN=127.0.0.1); the client skips CA
  * verification. Same test-only cert material as tests/smoke_tls.c / lwip_loopback_test.c.
  *
@@ -110,7 +110,7 @@ static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 
 /* ── client completion state (all fields touched only on the loop thread) ─────── */
 typedef struct {
-    KlServer   *srv;
+    KlHttpServer   *srv;
     const char *url;
     KlTlsCtx   *client_ctx;   /* client TLS ctx — created on the loop thread, freed after done */
     KlClient   *client;
@@ -133,7 +133,7 @@ static void on_done(KlClient *client, void *ud) {
     }
     atomic_store(&cc->pass, ok);
     atomic_store(&cc->done, 1);
-    kl_server_stop(cc->srv);
+    kl_http_server_stop(cc->srv);
 }
 
 /* Fired on the loop thread: start the async HTTPS KlClient on the server's shared ctx (== the one
@@ -149,7 +149,7 @@ static void start_client(void *ud) {
     if (!cc->client_ctx) {
         atomic_store(&cc->pass, 0);
         atomic_store(&cc->done, 1);
-        kl_server_stop(cc->srv);
+        kl_http_server_stop(cc->srv);
         return;
     }
     static KlTlsConfig ctls;   /* stable storage: referenced by the client for its lifetime */
@@ -161,11 +161,11 @@ static void start_client(void *ud) {
     if (!cc->client) {
         atomic_store(&cc->pass, 0);
         atomic_store(&cc->done, 1);
-        kl_server_stop(cc->srv);
+        kl_http_server_stop(cc->srv);
     }
 }
 
-static void *server_thread(void *a) { kl_server_run((KlServer *)a); return NULL; }
+static void *server_thread(void *a) { kl_http_server_run((KlHttpServer *)a); return NULL; }
 
 int main(void) {
     KlAllocator alloc = kl_allocator_default();
@@ -178,16 +178,16 @@ int main(void) {
     if (!sctx) { printf("LC-4 FAIL: server tls ctx create\n"); return 1; }
     KlTlsConfig stls = { .ctx = sctx, .factory = kl_tls_mbedtls_create };  /* destroy manually */
 
-    KlConfig cfg = { .port = 7860, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = 7860, .bind_addr = "127.0.0.1",
                      .event_provider = kl_event_provider_lwip_raw(),
                      .tls = &stls };
-    KlServer srv;
-    if (kl_server_init(&srv, &cfg) != 0) {
+    KlHttpServer srv;
+    if (kl_http_server_init(&srv, &cfg) != 0) {
         printf("LC-4 FAIL: server_init\n");
         kl_tls_mbedtls_ctx_destroy(sctx);
         return 1;
     }
-    kl_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
+    kl_http_server_route(&srv, "GET", "/", handle_root, NULL, NULL);
 
     ClientCase cc;
     memset(&cc, 0, sizeof(cc));
@@ -197,7 +197,7 @@ int main(void) {
     atomic_store(&cc.pass, 0);
 
     /* Marshal the client start onto the loop thread (single-thread NO_SYS=1 discipline): the timer
-     * fires inside kl_server_run's tick, so the client is created + driven on the loop thread. */
+     * fires inside kl_http_server_run's tick, so the client is created + driven on the loop thread. */
     kl_timer_add(&srv.ev, 20, start_client, &cc);
 
     /* Run the shared loop (server + client) on a bg thread; the main thread is a bounded watchdog
@@ -205,7 +205,7 @@ int main(void) {
     pthread_t srv_th;
     if (pthread_create(&srv_th, NULL, server_thread, &srv) != 0) {
         printf("LC-4 FAIL: pthread_create\n");
-        kl_server_free(&srv);
+        kl_http_server_free(&srv);
         kl_tls_mbedtls_ctx_destroy(sctx);
         return 1;
     }
@@ -214,7 +214,7 @@ int main(void) {
         struct timespec sl = { 0, 10 * 1000000L };
         nanosleep(&sl, NULL);
     }
-    if (!atomic_load(&cc.done)) { kl_server_stop(&srv); }   /* hang guard */
+    if (!atomic_load(&cc.done)) { kl_http_server_stop(&srv); }   /* hang guard */
     pthread_join(srv_th, NULL);
 
     int rc = 0;
@@ -224,7 +224,7 @@ int main(void) {
 
     if (cc.client) kl_client_free(cc.client);
     if (cc.client_ctx) kl_tls_mbedtls_ctx_destroy(cc.client_ctx);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     kl_tls_mbedtls_ctx_destroy(sctx);
 
     if (rc == 0) printf("LC-4 PASS\n");

@@ -11,8 +11,8 @@
  * a console control handler instead of SIGTERM/SIGINT.
  */
 
-#include "server_plat.h"
-#include "internal.h"   /* kl_log_errno + KlServer; pulls socket.h -> winsock2/afunix */
+#include "http_server_plat.h"
+#include "internal.h"   /* kl_http_server_log_errno + KlHttpServer; pulls socket.h -> winsock2/afunix */
 #include "socket.h"
 #include "sockaddr_native.h" /* KlSockAddr <-> sockaddr (bind currency) */
 
@@ -23,7 +23,7 @@
 
 /* ── Signal handling (console control handler) ───────────────────────── */
 
-static _Atomic(KlServer *) kl_signal_server = NULL;
+static _Atomic(KlHttpServer *) kl_signal_server = NULL;
 
 static BOOL WINAPI kl_ctrl_handler(DWORD type) {
     switch (type) {
@@ -32,8 +32,8 @@ static BOOL WINAPI kl_ctrl_handler(DWORD type) {
         case CTRL_CLOSE_EVENT:
         case CTRL_LOGOFF_EVENT:
         case CTRL_SHUTDOWN_EVENT: {
-            KlServer *s = atomic_load(&kl_signal_server);
-            if (s) { kl_server_stop(s); return TRUE; }
+            KlHttpServer *s = atomic_load(&kl_signal_server);
+            if (s) { kl_http_server_stop(s); return TRUE; }
             return FALSE;
         }
         default:
@@ -41,7 +41,7 @@ static BOOL WINAPI kl_ctrl_handler(DWORD type) {
     }
 }
 
-void kl_server_plat_signals_install(KlServer *s) {
+void kl_http_server_plat_signals_install(KlHttpServer *s) {
     /* No SIGPIPE on Windows — send() never raises it. */
     if (s->config.install_signal_handlers) {
         atomic_store(&kl_signal_server, s);
@@ -49,17 +49,17 @@ void kl_server_plat_signals_install(KlServer *s) {
     }
 }
 
-/* cppcheck-suppress constParameterPointer ; symmetric with kl_server_plat_signals_install */
-void kl_server_plat_signals_restore(KlServer *s) {
+/* cppcheck-suppress constParameterPointer ; symmetric with kl_http_server_plat_signals_install */
+void kl_http_server_plat_signals_restore(KlHttpServer *s) {
     if (s->config.install_signal_handlers) {
         SetConsoleCtrlHandler(kl_ctrl_handler, FALSE);
-        atomic_store(&kl_signal_server, (KlServer *)NULL);
+        atomic_store(&kl_signal_server, (KlHttpServer *)NULL);
     }
 }
 
 /* ── AF_UNIX node lifecycle ──────────────────────────────────────────── */
 
-int kl_server_plat_bind_unix(KlServer *s) {
+int kl_http_server_plat_bind_unix(KlHttpServer *s) {
     const char *path = s->config.unix_socket_path;
     if (!path || path[0] == '\0') {
         s->last_error = KL_ERR_INVALID_ARG;
@@ -74,7 +74,7 @@ int kl_server_plat_bind_unix(KlServer *s) {
 
     s->listen_fd = kl_sock_socket(s->ev.sockets, AF_UNIX, SOCK_STREAM, 0);
     if (!kl_handle_valid(s->listen_fd)) {
-        kl_log_errno(s, KL_LOG_ERROR, "socket");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "socket");
         s->last_error = KL_ERR_SOCKET;
         return -1;
     }
@@ -96,7 +96,7 @@ int kl_server_plat_bind_unix(KlServer *s) {
     KlSockAddr bind_sa;
     kl_sockaddr_from_native(&bind_sa, (struct sockaddr *)&addr, addr_len);
     if (kl_sock_bind(s->ev.sockets, s->listen_fd, &bind_sa) < 0) {
-        kl_log_errno(s, KL_LOG_ERROR, "bind");
+        kl_http_server_log_errno(s, KL_HTTP_SERVER_LOG_ERROR, "bind");
         s->last_error = KL_ERR_BIND;
         kl_sock_close(s->ev.sockets, s->listen_fd);
         s->listen_fd = KL_INVALID_SOCKET;
@@ -109,7 +109,7 @@ int kl_server_plat_bind_unix(KlServer *s) {
     return 0;
 }
 
-void kl_server_plat_unlink_owned_unix(KlServer *s) {
+void kl_http_server_plat_unlink_owned_unix(KlHttpServer *s) {
     if (s->unix_socket_owned && s->config.unix_socket_unlink &&
         s->config.unix_socket_path) {
         (void)DeleteFileA(s->config.unix_socket_path);
@@ -119,7 +119,7 @@ void kl_server_plat_unlink_owned_unix(KlServer *s) {
 
 /* ── Peer credentials (unsupported on Windows AF_UNIX) ───────────────── */
 
-void kl_server_plat_unsetenv(const char *name) {
+void kl_http_server_plat_unsetenv(const char *name) {
     (void)SetEnvironmentVariableA(name, NULL);   /* NULL value removes it */
 }
 
@@ -132,7 +132,7 @@ unsigned kl_platform_caps(void) {
     return 0;   /* no SO_PEERCRED, no systemd socket activation on Windows */
 }
 
-int kl_server_plat_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen) {
+int kl_http_server_plat_peer_label_fd(KlSocketHandle fd, char *buf, size_t buflen) {
     (void)fd; (void)buf; (void)buflen;
     return -1;
 }

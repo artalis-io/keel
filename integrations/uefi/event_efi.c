@@ -26,7 +26,7 @@
 #include "socket_efi_udp4.h"          /* 6.4b-3b: datagram completion primitives + KlUefiUdpOpResult */
 #include "../../src/datagram_life.h"   /* KlDgramLife retain/release — B.6 stable-token transfer */
 #endif
-#include <keel/server.h>               /* KlServer.pool — accept backpressure (S-3) */
+#include <keel/http_server.h>               /* KlHttpServer.pool — accept backpressure (S-3) */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -148,7 +148,7 @@ typedef struct {
 #endif
     /* S-3 server accept: latched by prime_accepts; drain hands back each ready child
      * from the S-2 Accept-token pool as KL_COMP_ACCEPT, with KlHttpConn-pool backpressure. */
-    struct KlServer   *server;
+    struct KlHttpServer   *server;
     KlSocketHandle     listen_fd;
     int                accept_primed;
 } EfiLoop;
@@ -215,7 +215,7 @@ static int el_wait(KlEventLoop *loop, KlEvent *out, int max, int timeout_ms) {
 }
 /* el_close (S-7 review): retire ALL outstanding records so nothing dangles after the
  * event ctx is freed (kl_event_ctx_free calls this before the conn pool is freed in
- * kl_server_free). No heap is owned now (server send iovecs are inline snapshots — no
+ * kl_http_server_free). No heap is owned now (server send iovecs are inline snapshots — no
  * kl_malloc), so this clears state only: connect ops, watches, server I/O ops, and the
  * latched server/listener. Prevents a stale KlHttpConn / watcher pointer from surviving into
  * a later run and closes the (former) leak window a pending send buffer could open. */
@@ -306,7 +306,7 @@ static void el_cancel(struct KlEventCtx *ctx, KlSocketHandle fd) {
  * records what drain needs. Idempotent. Returns 0 = AUTONOMOUS accept model (6B-3 2b-ii):
  * EFI generates accepts inside drain under its own capacity gate (below), so NO completion
  * KlListener is installed and the server re-calls this each tick to top the gate up. */
-static int el_prime_accepts(struct KlServer *s) {
+static int el_prime_accepts(struct KlHttpServer *s) {
     if (!s) return -1;
     g_efi.server = s;
     g_efi.listen_fd = s->listen_fd;
@@ -326,7 +326,7 @@ static int el_prime_accepts(struct KlServer *s) {
 
 /* post_accept: re-arm after the generic server consumed a slot. Identical to prime — the
  * arming is capacity-gated, so this just re-evaluates free capacity and tops up. */
-static int el_post_accept(struct KlServer *s) {
+static int el_post_accept(struct KlHttpServer *s) {
     return el_prime_accepts(s);
 }
 

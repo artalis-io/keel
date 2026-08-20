@@ -19,7 +19,7 @@
  * fixed g_recs completion ring, the glue now owns a per-context KlLwrCtx (opaque here) that
  * holds a KlAllocator, the listen pcb, the loop netif, and a conn_cap-sized array of
  * per-connection slots. The backend creates ONE ctx (kl_lwr_ctx_create, taking the
- * allocator + conn_cap derived from KlConfig.max_connections) and threads its opaque handle
+ * allocator + conn_cap derived from KlHttpServerConfig.max_connections) and threads its opaque handle
  * through every entry point. Under NO_SYS=1 the lwIP core (single loop netif + one timer
  * wheel) is a process-global singleton, so at most one raw ctx can be live at a time: a
  * second concurrent kl_lwr_ctx_create is rejected (returns NULL); sequential
@@ -51,7 +51,7 @@
 
 /* Create the per-context backend state. `alloc` is used for ALL glue-owned Stage-A
  * allocations (the slot array); `conn_cap` sizes the per-conn slot table (the authoritative
- * Keel capacity, KlConfig.max_connections). Also brings up NO_SYS=1 lwIP (once per process)
+ * Keel capacity, KlHttpServerConfig.max_connections). Also brings up NO_SYS=1 lwIP (once per process)
  * and attaches the loopback netif; the returned opaque handle carries the loop netif.
  *
  * Returns an opaque KlLwrCtx* on success, or NULL on failure OR if a raw ctx is already
@@ -69,7 +69,7 @@ void *kl_lwr_ctx_loopif(void *lwrctx);
 void *kl_lwr_active_ctx(void);
 
 /* Ensure the ctx's slot table holds at least `conn_cap` slots (grow if smaller). Called by the
- * backend at prime time, once the AUTHORITATIVE Keel capacity (KlConfig.max_connections) is
+ * backend at prime time, once the AUTHORITATIVE Keel capacity (KlHttpServerConfig.max_connections) is
  * known — unifying arm/slot capacity on that single limit. Safe only before any accept (no live
  * slots to relocate). Returns 0 on success, -1 on allocation failure. A no-op if already >=. */
 int kl_lwr_ctx_ensure_cap(void *lwrctx, int conn_cap);

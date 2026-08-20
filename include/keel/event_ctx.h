@@ -42,7 +42,7 @@ struct KlSocketProvider;
  * @brief Composable event loop context.
  *
  * Contains the platform event loop, allocator, and watcher list.
- * Embedded in KlServer via composition. Can also be used standalone
+ * Embedded in KlHttpServer via composition. Can also be used standalone
  * (e.g. by KlClient, KlThreadPool) without requiring a full server.
  */
 typedef struct KlEventCtx {
@@ -94,7 +94,7 @@ int  kl_event_ctx_init(KlEventCtx *ctx, KlAllocator *alloc);
  * Like kl_event_ctx_init, but installs @p event_provider (e.g. lwIP) as the
  * loop's backend instead of the compiled-in default. A NULL provider is
  * identical to kl_event_ctx_init. The provider must be paired with a compatible
- * socket provider (KlEventCtx.sockets / KlConfig.sockets) that it can poll.
+ * socket provider (KlEventCtx.sockets / KlHttpServerConfig.sockets) that it can poll.
  *
  * @param ctx            Event context to initialize.
  * @param alloc          Allocator (borrowed — must outlive ctx).
@@ -109,7 +109,7 @@ int  kl_event_ctx_init_ex(KlEventCtx *ctx, KlAllocator *alloc,
  */
 void kl_event_ctx_free(KlEventCtx *ctx);
 
-/* ── Watcher API (operates on KlEventCtx, not KlServer) ──────────── */
+/* ── Watcher API (operates on KlEventCtx, not KlHttpServer) ──────────── */
 
 /**
  * @brief Register a file descriptor with the event loop.

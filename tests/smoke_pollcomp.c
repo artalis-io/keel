@@ -2,7 +2,7 @@
  * smoke_pollcomp.c — end-to-end HTTP-over-completion roundtrip on POSIX (PAL 8d-0.5).
  *
  * The first runtime validation of the platform-independent completion connection
- * driver (completion_driver.c) OFF Windows: a KlServer pinned to the portable poll()
+ * driver (completion_driver.c) OFF Windows: a KlHttpServer pinned to the portable poll()
  * completion backend (BACKEND=pollcomp, the overlapped provider), served by the same
  * accept/recv/send/sendfile completion mechanics the IOCP backend implements — hit by
  * the sync KlClient over loopback. It proves the completion axis is genuinely
@@ -61,7 +61,7 @@ static void handle_big(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (!br || br->len == 0) { kl_http_response_error(res, 400, "body required"); return; }
     kl_http_response_status(res, 200);
     kl_http_response_body_borrow(res, br->data, br->len);
@@ -338,11 +338,11 @@ static int bigstream_no_hol_ok(void) {
     return b_ok && a_ok;
 }
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&g_srv);
+    kl_http_server_run(&g_srv);
     return NULL;
 }
 
@@ -440,16 +440,16 @@ static void handle_proxy_probe(KlHttpRequest *req, KlHttpResponse *res, void *ct
     kl_http_request_peer_addr(req, g_proxy_ip, sizeof(g_proxy_ip), &port);
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
-static void *run_server_arg(void *arg) { kl_server_run((KlServer *)arg); return NULL; }
+static void *run_server_arg(void *arg) { kl_http_server_run((KlHttpServer *)arg); return NULL; }
 static int proxy_over_completion_ok(void) {
-    KlServer srv;
-    KlConfig cfg = { .port = SMOKE_PROXY_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = SMOKE_PROXY_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_pollcomp(),
                      .proxy_trusted_cidrs = "127.0.0.1/32" };
-    if (kl_server_init(&srv, &cfg) != 0) return 0;   /* must NOT be rejected — now supported */
-    kl_server_route(&srv, "GET", "/p", handle_proxy_probe, NULL, NULL);
+    if (kl_http_server_init(&srv, &cfg) != 0) return 0;   /* must NOT be rejected — now supported */
+    kl_http_server_route(&srv, "GET", "/p", handle_proxy_probe, NULL, NULL);
     pthread_t th;
-    if (pthread_create(&th, NULL, run_server_arg, &srv) != 0) { kl_server_free(&srv); return 0; }
+    if (pthread_create(&th, NULL, run_server_arg, &srv) != 0) { kl_http_server_free(&srv); return 0; }
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) nap_ms(5);
 
     int ok = 0;
@@ -479,9 +479,9 @@ static int proxy_over_completion_ok(void) {
         }
         close(cs);
     }
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(th, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     return ok;
 }
 
@@ -505,15 +505,15 @@ static int read_until_body(int fd, char *buf, size_t cap) {   /* 1 if SMOKE_BODY
     return 0;
 }
 static int backlog_exhaustion_queues_not_drops(void) {
-    KlServer srv;
-    KlConfig cfg = { .port = SMOKE_BACKLOG_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = SMOKE_BACKLOG_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_pollcomp(),
                      .max_connections = 1,          /* exactly one connection slot */
                      .read_timeout_ms = 10000 };    /* generous, so A is not idle-swept mid-test */
-    if (kl_server_init(&srv, &cfg) != 0) return 0;
-    kl_server_route(&srv, "GET", "/", handle_ok, NULL, NULL);
+    if (kl_http_server_init(&srv, &cfg) != 0) return 0;
+    kl_http_server_route(&srv, "GET", "/", handle_ok, NULL, NULL);
     pthread_t th;
-    if (pthread_create(&th, NULL, run_server_arg, &srv) != 0) { kl_server_free(&srv); return 0; }
+    if (pthread_create(&th, NULL, run_server_arg, &srv) != 0) { kl_http_server_free(&srv); return 0; }
     for (int i = 0; i < 200 && srv.bound_port == 0; i++) nap_ms(5);
 
     int ok = 0, a = -1, b = -1;
@@ -557,9 +557,9 @@ static int backlog_exhaustion_queues_not_drops(void) {
 done:
     if (a >= 0) close(a);
     if (b >= 0) close(b);
-    kl_server_stop(&srv);
+    kl_http_server_stop(&srv);
     pthread_join(th, NULL);
-    kl_server_free(&srv);
+    kl_http_server_free(&srv);
     return ok;
 }
 
@@ -569,26 +569,26 @@ int main(void) {
     int backlog_ok = backlog_exhaustion_queues_not_drops();
 
     static KlH2ServerConfig h2cfg = { .factory = echo_factory };
-    KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1",
                      .sockets = kl_socket_provider_pollcomp(), .h2 = &h2cfg,
                      .read_timeout_ms = 400 };   /* short, to exercise the idle sweep */
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-pollcomp: server init failed (err=%d)\n", g_srv.last_error);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
-    kl_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
-    kl_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
-    kl_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
+    kl_http_server_route(&g_srv, "POST", "/echo", handle_echo, NULL, kl_http_body_reader_buffer);
+    kl_http_server_route(&g_srv, "GET", "/file", handle_file, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/stream", handle_stream, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/big", handle_big, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/bigstream", handle_bigstream, NULL, NULL);
     memset(g_big, 'A', sizeof(g_big));
 
     int wfd = open(SMOKE_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (wfd < 0 || write(wfd, SMOKE_FILE, sizeof(SMOKE_FILE) - 1) != (ssize_t)(sizeof(SMOKE_FILE) - 1)) {
         fprintf(stderr, "smoke-pollcomp: temp file write failed\n");
         if (wfd >= 0) close(wfd);
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
     close(wfd);
@@ -602,7 +602,7 @@ int main(void) {
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         fprintf(stderr, "smoke-pollcomp: pthread_create failed\n");
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -730,10 +730,10 @@ int main(void) {
      * the full stream must still arrive (comp_stream_pump + comp_on_write re-pump). */
     int bigstream_ok = big_ok ? bigstream_no_hol_ok() : 0;
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
     kl_dg_close_free(&g_srv.ev, &g_udp);   /* loop idle now — safe to pump the public close */
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
     unlink(SMOKE_FILE_PATH);
 
     if (!ok) {

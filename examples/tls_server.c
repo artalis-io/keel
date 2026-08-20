@@ -45,22 +45,22 @@ int main(int argc, char **argv) {
         .ctx_destroy = kl_tls_mbedtls_ctx_destroy,
     };
 
-    KlServer s;
-    KlConfig cfg = {
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {
         .port = 8443,
         .tls  = &tls_cfg,
         .install_signal_handlers = 1,
     };
-    if (kl_server_init(&s, &cfg) < 0) {
+    if (kl_http_server_init(&s, &cfg) < 0) {
         kl_tls_mbedtls_ctx_destroy(tls_ctx);
         return 1;
     }
 
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
 
     printf("tls example listening on :8443 (HTTPS)\n");
     printf("  curl -k https://localhost:8443/hello\n");
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }

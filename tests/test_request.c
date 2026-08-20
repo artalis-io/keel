@@ -12,7 +12,7 @@
  * ═══════════════════════════════════════════════════════════════════ */
 
 /* Wait for server to bind (max 2s) */
-static void wait_for_bind(KlServer *s) {
+static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
 }
 
@@ -44,11 +44,11 @@ static struct {
     const char *nt_host;
 } test_state;
 
-static KlServer req_server;
+static KlHttpServer req_server;
 
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&req_server);
+    kl_http_server_run(&req_server);
     return NULL;
 }
 
@@ -156,9 +156,9 @@ static int send_and_wait(int port, const char *raw_req) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(request, header_case_insensitive) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -175,15 +175,15 @@ UTEST(request, header_case_insensitive) {
     ASSERT_EQ(test_state.found_host_len, (size_t)9);
     ASSERT_TRUE(memcmp(test_state.found_host, "localhost", 9) == 0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, header_missing_returns_null) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -198,15 +198,15 @@ UTEST(request, header_missing_returns_null) {
 
     ASSERT_TRUE(test_state.found_missing == NULL);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, header_with_len) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -222,15 +222,15 @@ UTEST(request, header_with_len) {
     ASSERT_TRUE(test_state.found_host != NULL);
     ASSERT_EQ(test_state.found_host_len, (size_t)15);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, header_empty_value) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/hdr", handle_headers, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -247,9 +247,9 @@ UTEST(request, header_empty_value) {
     ASSERT_TRUE(test_state.found_empty != NULL);
     ASSERT_EQ(test_state.found_empty_len, (size_t)0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -257,9 +257,9 @@ UTEST(request, header_empty_value) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(request, param_basic) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/items/:id", handle_single_param,
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/items/:id", handle_single_param,
                     NULL, NULL);
 
     pthread_t tid;
@@ -277,15 +277,15 @@ UTEST(request, param_basic) {
     ASSERT_EQ(test_state.found_id_len, (size_t)2);
     ASSERT_TRUE(memcmp(test_state.found_id, "42", 2) == 0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, param_multi) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/users/:uid/posts/:pid",
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/users/:uid/posts/:pid",
                     handle_params, NULL, NULL);
 
     pthread_t tid;
@@ -307,15 +307,15 @@ UTEST(request, param_multi) {
     ASSERT_EQ(test_state.found_pid_len, (size_t)2);
     ASSERT_TRUE(memcmp(test_state.found_pid, "99", 2) == 0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, param_missing) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/users/:uid/posts/:pid",
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/users/:uid/posts/:pid",
                     handle_params, NULL, NULL);
 
     pthread_t tid;
@@ -332,9 +332,9 @@ UTEST(request, param_missing) {
     ASSERT_TRUE(test_state.found_missing_param == NULL);
     ASSERT_EQ(test_state.found_missing_param_len, (size_t)0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -342,9 +342,9 @@ UTEST(request, param_missing) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(request, query_basic) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -361,15 +361,15 @@ UTEST(request, query_basic) {
     ASSERT_EQ(test_state.query_len, (size_t)7);
     ASSERT_TRUE(memcmp(test_state.query, "foo=bar", 7) == 0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, query_empty) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -385,15 +385,15 @@ UTEST(request, query_empty) {
     ASSERT_TRUE(test_state.query != NULL);
     ASSERT_EQ(test_state.query_len, (size_t)0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, query_absent) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/q", handle_query, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -409,9 +409,9 @@ UTEST(request, query_absent) {
     ASSERT_EQ(test_state.query_null, 1);
     ASSERT_EQ(test_state.query_len, (size_t)0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -419,9 +419,9 @@ UTEST(request, query_absent) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 UTEST(request, header_null_terminated) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -437,15 +437,15 @@ UTEST(request, header_null_terminated) {
     ASSERT_TRUE(test_state.nt_host != NULL);
     ASSERT_EQ(strcmp(test_state.nt_host, "localhost"), 0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, method_null_terminated) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -461,15 +461,15 @@ UTEST(request, method_null_terminated) {
     ASSERT_TRUE(test_state.nt_method != NULL);
     ASSERT_EQ(strcmp(test_state.nt_method, "GET"), 0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, path_null_terminated) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -485,15 +485,15 @@ UTEST(request, path_null_terminated) {
     ASSERT_TRUE(test_state.nt_path != NULL);
     ASSERT_EQ(strcmp(test_state.nt_path, "/nultest"), 0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST(request, query_null_terminated) {
-    KlConfig cfg = {.port = 0};
-    ASSERT_EQ(kl_server_init(&req_server, &cfg), 0);
-    kl_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
+    KlHttpServerConfig cfg = {.port = 0};
+    ASSERT_EQ(kl_http_server_init(&req_server, &cfg), 0);
+    kl_http_server_route(&req_server, "GET", "/nultest", handle_nulterm, NULL, NULL);
 
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, NULL);
@@ -509,9 +509,9 @@ UTEST(request, query_null_terminated) {
     ASSERT_TRUE(test_state.nt_query != NULL);
     ASSERT_EQ(strcmp(test_state.nt_query, "a=1"), 0);
 
-    kl_server_stop(&req_server);
+    kl_http_server_stop(&req_server);
     pthread_join(tid, NULL);
-    kl_server_free(&req_server);
+    kl_http_server_free(&req_server);
 }
 
 UTEST_MAIN();

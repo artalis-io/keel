@@ -18,10 +18,10 @@
  *   #5 context (de-globalized KlLwrCtx + single-active guard):
  *        X1 second SIMULTANEOUS ctx is rejected (assert the error)
  *        X2 init/free/init again + two SEQUENTIAL servers on different ports
- *      (X2 is implicit: every phase runs its own kl_server_init/run/free in sequence,
+ *      (X2 is implicit: every phase runs its own kl_http_server_init/run/free in sequence,
  *       so a clean overall run proves sequential create/destroy/create + no stale state.)
  *
- * SINGLE-THREADED lwIP discipline (as in raw_tick_test.c): kl_server_run() blocks on a
+ * SINGLE-THREADED lwIP discipline (as in raw_tick_test.c): kl_http_server_run() blocks on a
  * pthread that owns the lwIP tick; every lwIP-touching client call is marshalled onto that
  * thread via KEEL timers (kl_timer_add fires on the loop thread). Runs in-process over the
  * loopback netif — no tap device, no root.
@@ -32,7 +32,7 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/timer.h>
-#include <keel/body_reader.h>
+#include <keel/http_body_reader.h>
 
 #include "keel_lwip_raw.h"
 #include "lwip_raw_testclient.h"
@@ -57,7 +57,7 @@ static size_t pat_checksum(const unsigned char *b, size_t n) {
 /* ── shared echo handler: copies the received body back verbatim ─────────────── */
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
     (void)ud;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (!br || br->len == 0) { kl_http_response_error(res, 400, "body required"); return; }
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "application/octet-stream");
@@ -69,18 +69,18 @@ static void handle_root(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 }
 
 /* ── a small watchdog-driven server runner ───────────────────────────────────── */
-static int run_watchdog(atomic_int *finished, KlServer *s, int max_10ms) {
+static int run_watchdog(atomic_int *finished, KlHttpServer *s, int max_10ms) {
     for (int i = 0; i < max_10ms && !atomic_load(finished); i++) {
         struct timespec sl = { 0, 10 * 1000000L };
         nanosleep(&sl, NULL);
     }
-    if (!atomic_load(finished)) { atomic_store(finished, 1); kl_server_stop(s); return 0; }
+    if (!atomic_load(finished)) { atomic_store(finished, 1); kl_http_server_stop(s); return 0; }
     return 1;
 }
 
 /* ═══════════════════════ RECEIVE PHASE (R1..R5) ═══════════════════════════════ */
 #define RECV_PORT 7790
-static KlServer g_rs;
+static KlHttpServer g_rs;
 static atomic_int g_r_finished;
 static atomic_int g_r_fail;
 static atomic_int g_r_stage;
@@ -181,9 +181,9 @@ static const char *r_stage_name(int s) {
 
 static int g_r_await_close;   /* wait for the previous conn to fully close before the next start */
 
-static void r_advance(KlServer *s) {
+static void r_advance(KlHttpServer *s) {
     int stage = atomic_load(&g_r_stage);
-    if (stage >= R_DONE) { atomic_store(&g_r_finished, 1); kl_server_stop(s); return; }
+    if (stage >= R_DONE) { atomic_store(&g_r_finished, 1); kl_http_server_stop(s); return; }
     r_prepare_stage(stage);
     g_r_await_close = 1;   /* between stages: let the previous connection fully close first */
 }
@@ -191,7 +191,7 @@ static void r_advance(KlServer *s) {
 static void r_poll(void *ud);
 
 static void r_poll(void *ud) {
-    KlServer *s = ud;
+    KlHttpServer *s = ud;
     int stage = atomic_load(&g_r_stage);
 
     if (!g_stage_started) {
@@ -215,7 +215,7 @@ static void r_poll(void *ud) {
             if (n > 0 && strstr(buf, " 200 ")) {
                 atomic_store(&g_r_fail, 1);
                 printf("R FAIL (%s): got a 200 for an over-8KiB header\n", r_stage_name(stage));
-                atomic_store(&g_r_finished, 1); kl_server_stop(s); return;
+                atomic_store(&g_r_finished, 1); kl_http_server_stop(s); return;
             }
             if (--g_stage_deadline <= 0) {
                 /* window elapsed with no 200 -> the server correctly rejected/closed it. */
@@ -239,13 +239,13 @@ static void r_poll(void *ud) {
                     atomic_store(&g_r_fail, 1);
                     printf("R FAIL (%s): body len got %zu want %zu; chk got %zu want %zu\n",
                            r_stage_name(stage), blen, g_expect_body, chk, g_expect_chk);
-                    atomic_store(&g_r_finished, 1); kl_server_stop(s); return;
+                    atomic_store(&g_r_finished, 1); kl_http_server_stop(s); return;
                 }
             } else if (--g_stage_deadline <= 0) {
                 atomic_store(&g_r_fail, 1);
                 printf("R FAIL (%s): timed out with %zu/%zu body bytes\n",
                        r_stage_name(stage), blen, g_expect_body);
-                atomic_store(&g_r_finished, 1); kl_server_stop(s); return;
+                atomic_store(&g_r_finished, 1); kl_http_server_stop(s); return;
             }
         }
     }
@@ -259,7 +259,7 @@ static void *r_thread(void *arg) {
     (void)arg;
     kl_timer_add(&g_rs.ev, 20, r_start, NULL);
     kl_timer_add(&g_rs.ev, 40, r_poll, &g_rs);
-    kl_server_run(&g_rs);
+    kl_http_server_run(&g_rs);
     return NULL;
 }
 
@@ -267,24 +267,24 @@ static int run_receive(void) {
     for (size_t i = 0; i < sizeof(g_body32); i++) g_body32[i] = pat(i);
     for (size_t i = 0; i < sizeof(g_bodybin); i++) g_bodybin[i] = pat(i);
 
-    KlConfig cfg = { .port = RECV_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = RECV_PORT, .bind_addr = "127.0.0.1",
                      .max_body_size = 1u << 20,
                      .event_provider = kl_event_provider_lwip_raw() };
-    if (kl_server_init(&g_rs, &cfg) != 0) { printf("R FAIL: server_init\n"); return 1; }
-    kl_server_route(&g_rs, "GET",  "/",     handle_root, NULL, NULL);
-    kl_server_route(&g_rs, "POST", "/echo", handle_echo, (void *)(size_t)(1u << 20),
-                    kl_body_reader_buffer);
+    if (kl_http_server_init(&g_rs, &cfg) != 0) { printf("R FAIL: server_init\n"); return 1; }
+    kl_http_server_route(&g_rs, "GET",  "/",     handle_root, NULL, NULL);
+    kl_http_server_route(&g_rs, "POST", "/echo", handle_echo, (void *)(size_t)(1u << 20),
+                    kl_http_body_reader_buffer);
     atomic_store(&g_r_stage, R_HDR_OK);
     atomic_store(&g_r_finished, 0);
     atomic_store(&g_r_fail, 0);
 
     pthread_t th;
     if (pthread_create(&th, NULL, r_thread, NULL) != 0) {
-        printf("R FAIL: pthread_create\n"); kl_server_free(&g_rs); return 1;
+        printf("R FAIL: pthread_create\n"); kl_http_server_free(&g_rs); return 1;
     }
     run_watchdog(&g_r_finished, &g_rs, 3000);   /* up to 30s */
     pthread_join(th, NULL);
-    kl_server_free(&g_rs);
+    kl_http_server_free(&g_rs);
     kl_lwr_client_release();
     free(g_req); g_req = NULL;
     return atomic_load(&g_r_fail) ? 1 : 0;
@@ -298,7 +298,7 @@ static int run_receive(void) {
 #define CONC_MAXCONNS   12
 #define CONC_BURST      9       /* >= 9 concurrent (task requirement); < CONC_MAXCONNS so all pass */
 #define REQ_ROOT        "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
-static KlServer g_cs;
+static KlHttpServer g_cs;
 static atomic_int g_c_finished;
 static atomic_int g_c_fail;
 static atomic_int g_c_stage;
@@ -326,17 +326,17 @@ static const char *c_stage_name(int s) {
 
 static void c_poll(void *ud);
 
-static void c_next(KlServer *s, int ok) {
-    if (!ok) { atomic_store(&g_c_fail, 1); atomic_store(&g_c_finished, 1); kl_server_stop(s); return; }
+static void c_next(KlHttpServer *s, int ok) {
+    if (!ok) { atomic_store(&g_c_fail, 1); atomic_store(&g_c_finished, 1); kl_http_server_stop(s); return; }
     int stage = atomic_load(&g_c_stage);
     printf("PASS C (%s)\n", c_stage_name(stage));
-    if (stage + 1 >= C_DONE) { atomic_store(&g_c_finished, 1); kl_server_stop(s); return; }
+    if (stage + 1 >= C_DONE) { atomic_store(&g_c_finished, 1); kl_http_server_stop(s); return; }
     atomic_store(&g_c_stage, stage + 1);
     g_c_started = 0;
 }
 
 static void c_poll(void *ud) {
-    KlServer *s = ud;
+    KlHttpServer *s = ud;
     int stage = atomic_load(&g_c_stage);
 
     if (!g_c_started) {
@@ -373,7 +373,7 @@ static void c_poll(void *ud) {
             atomic_store(&g_c_fail, 1);
             printf("C FAIL (%s): HANG — only %d/%d resolved (ok=%d refused=%d)\n",
                    c_stage_name(stage), done, g_c_n, ok, refused);
-            atomic_store(&g_c_finished, 1); kl_server_stop(s); return;
+            atomic_store(&g_c_finished, 1); kl_http_server_stop(s); return;
         }
     }
     if (atomic_load(&g_c_finished)) return;
@@ -383,16 +383,16 @@ static void c_poll(void *ud) {
 static void *c_thread(void *arg) {
     (void)arg;
     kl_timer_add(&g_cs.ev, 40, c_poll, &g_cs);
-    kl_server_run(&g_cs);
+    kl_http_server_run(&g_cs);
     return NULL;
 }
 
 static int run_concurrency(void) {
-    KlConfig cfg = { .port = CONC_PORT, .bind_addr = "127.0.0.1",
+    KlHttpServerConfig cfg = { .port = CONC_PORT, .bind_addr = "127.0.0.1",
                      .max_connections = CONC_MAXCONNS,
                      .event_provider = kl_event_provider_lwip_raw() };
-    if (kl_server_init(&g_cs, &cfg) != 0) { printf("C FAIL: server_init\n"); return 1; }
-    kl_server_route(&g_cs, "GET", "/", handle_root, NULL, NULL);
+    if (kl_http_server_init(&g_cs, &cfg) != 0) { printf("C FAIL: server_init\n"); return 1; }
+    kl_http_server_route(&g_cs, "GET", "/", handle_root, NULL, NULL);
     atomic_store(&g_c_stage, C_BURST);
     atomic_store(&g_c_finished, 0);
     atomic_store(&g_c_fail, 0);
@@ -400,11 +400,11 @@ static int run_concurrency(void) {
 
     pthread_t th;
     if (pthread_create(&th, NULL, c_thread, NULL) != 0) {
-        printf("C FAIL: pthread_create\n"); kl_server_free(&g_cs); return 1;
+        printf("C FAIL: pthread_create\n"); kl_http_server_free(&g_cs); return 1;
     }
     run_watchdog(&g_c_finished, &g_cs, 4000);   /* up to 40s */
     pthread_join(th, NULL);
-    kl_server_free(&g_cs);
+    kl_http_server_free(&g_cs);
     kl_lwr_mc_reset();
     return atomic_load(&g_c_fail) ? 1 : 0;
 }

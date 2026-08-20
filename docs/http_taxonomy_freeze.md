@@ -99,6 +99,10 @@ they move to `kl_http1_parser_*` (§5.3), not `kl_http_request_*`.
 | `KlClientHeadersFn` | `KlHttpClientHeadersFn` | |
 | `KlClientReadFn` | `KlHttpClientReadFn` | |
 | `KlClientStreamCfg` | `KlHttpClientStreamCfg` | |
+| `KlParserFactory` | `KlHttp1ParserFactory` | `KlHttpServerConfig.parser`; produces a `KlHttp1Parser` (HTTP/1-specific) |
+| `KlAccessLogFn` | `KlHttpAccessLogFn` | `KlHttpServerConfig.access_log`; signature embeds `KlHttpRequest*` |
+| `KlLogFn` | `KlHttpServerLogFn` | `KlHttpServerConfig.log_fn`; server diagnostic sink |
+| `KlTransport` | `KlHttpServerTransport` | `KlHttpServerConfig.transport` enum (TCP vs AF_UNIX listener) |
 
 Every callback whose signature embeds a renamed public type (above, plus router/body-reader/sse/etc.
 below) is updated in the same commit that renames the embedded type — see the per-module review
@@ -134,6 +138,9 @@ Beyond structs and functions, these public macros/enumerators are abstraction-sp
 | redirect default (`redirect.h`) | `KL_REDIRECT_DEFAULT_MAX` | `KL_HTTP_REDIRECT_DEFAULT_MAX` |
 | router param cap (`request.h`) | `KL_MAX_PARAMS` | `KL_HTTP_ROUTER_MAX_PARAMS` (explicit — it caps `KlHttpRoute` `:param` extraction) |
 | connection read buffer (`connection.h`) | `KL_READ_BUF_SIZE` | `KL_HTTP_CONN_READ_BUF_SIZE` |
+| server transport enum (`server.h`) | `KL_TRANSPORT_TCP KL_TRANSPORT_UNIX` | `KL_HTTP_SERVER_TRANSPORT_TCP KL_HTTP_SERVER_TRANSPORT_UNIX` — enumerators of `KlHttpServerTransport` |
+| server config defaults (`server.h`) | `KL_DEFAULT_MAX_CONNS KL_DEFAULT_READ_TIMEOUT KL_DEFAULT_MAX_BODY_SIZE` | `KL_HTTP_SERVER_DEFAULT_MAX_CONNS KL_HTTP_SERVER_DEFAULT_READ_TIMEOUT KL_HTTP_SERVER_DEFAULT_MAX_BODY_SIZE` — defaults for `KlHttpServerConfig` fields |
+| server log levels (`server.h`) | `KL_LOG_TRACE KL_LOG_DEBUG KL_LOG_INFO KL_LOG_WARN KL_LOG_ERROR KL_LOG_FATAL` | `KL_HTTP_SERVER_LOG_*` (same suffixes) — levels passed to `KlHttpServerLogFn` |
 | peer-address source (`connection.h`) | `KL_PEER_SOCKET KL_PEER_PROXY` | `KL_HTTP_PEER_SOCKET KL_HTTP_PEER_PROXY` — **fields of `KlHttpConn`, not generic stream metadata** (they tag whether the peer addr came from the accepted socket or a trusted PROXY header) |
 
 Enum *type* names for the above are already in §2.2/§3.1/§3.3 (`KlHttpBodyMode`, `KlHttpMultipartEvent`,
@@ -480,19 +487,24 @@ THREE independent scans (the `check-no-kludp` lesson: token-oriented, not line-f
   KlClientDoneFn KlClientBodyFn KlClientHeadersFn KlClientReadFn KlClientStreamCfg KlH2ServerSession
   KlH2ServerSessionFactory KlH2ServerConfig KlH2ServerConn KlH2ServerCallbacks KlH2ServerStream
   KlH2Client KlH2ClientSession KlH2ClientSessionFactory KlH2ClientConfig KlH2ClientConn KlH2ClientCallbacks
-  KlH2ClientStream KlH2ClientResponse KlH2ClientHeader KlH2ClientResponseFn KlH2ClientErrorFn KlH2WriteFn`.
+  KlH2ClientStream KlH2ClientResponse KlH2ClientHeader KlH2ClientResponseFn KlH2ClientErrorFn KlH2WriteFn
+  KlParserFactory KlAccessLogFn KlLogFn KlTransport`.
   (Not banned — deliberately KEPT generic: `KlCompress KlCompressConfig KlCompressCtx KlCompressFactory
   KlDecompress KlDecompressConfig KlDecompressStream KlSlotLease KlWs* KlCidr KlProxyResult KlAsyncOp
   KlAsyncFn`.)
 - **Constant/macro tokens — exact-prefix word list, rejected tree-wide.** Ban the OLD prefixes/tokens:
   `KL_CONN_ KL_BODY_ KL_CLIENT_ KL_H2_ KL_PARSE_ KL_CHUNK_ KL_MP_ KL_CORS_ KL_CPOOL_ KL_REDIRECT_
-  KL_READ_BUF_SIZE KL_PEER_SOCKET KL_PEER_PROXY KL_MAX_PARAMS`. Generic constant prefixes (`KL_EVENT_
+  KL_TRANSPORT_ KL_LOG_ KL_READ_BUF_SIZE KL_PEER_SOCKET KL_PEER_PROXY KL_MAX_PARAMS KL_DEFAULT_MAX_CONNS
+  KL_DEFAULT_READ_TIMEOUT KL_DEFAULT_MAX_BODY_SIZE`. Generic constant prefixes (`KL_EVENT_
   KL_DGRAM_ KL_SOCK_ KL_ERR_ KL_AF_ KL_TOS KL_DSCP_ KL_ECN_ KL_INVALID_SOCKET KL_WS_`) are never matched
-  (different roots). Note `KL_MAX_PARAMS`/`KL_READ_BUF_SIZE`/`KL_PEER_*` are exact tokens, not prefixes.
+  (different roots). Note `KL_MAX_PARAMS`/`KL_READ_BUF_SIZE`/`KL_PEER_*`/`KL_DEFAULT_MAX_CONNS`/
+  `KL_DEFAULT_READ_TIMEOUT`/`KL_DEFAULT_MAX_BODY_SIZE` are exact tokens, not prefixes.
 - **Function tokens — extracted individually** (`grep -o`, one per line with `file:line`), ban the old
   public families: `kl_server_ kl_client_ kl_request_ kl_response_ kl_conn_ kl_router_ kl_cors_
   kl_body_reader_ kl_buf_reader_ kl_multipart_ kl_sse_ kl_redirect_ kl_cpool_ kl_parser_ kl_chunked_
-  kl_h2_` (→ `kl_http2_`) **plus the single HTTP adapter exception `kl_compress_stream_`** (while the
+  kl_h2_` (→ `kl_http2_`) **plus the exact internal server-log helpers `kl_log` / `kl_log_errno`**
+  (→ `kl_http_server_log` / `kl_http_server_log_errno`; exact tokens, not a `kl_log_` prefix)
+  **plus the single HTTP adapter exception `kl_compress_stream_`** (while the
   codec family `kl_compress_*` and all of `kl_decompress_*` stay allowed). Retained generic roots
   (`kl_socket_ kl_stream_ kl_datagram_ kl_event_ kl_watcher_ kl_timer_ kl_tls_ kl_url_ kl_thread_pool_
   kl_async_ kl_drain_ kl_proxy_ kl_resolver_ kl_dns_ kl_ws_`) are never matched.

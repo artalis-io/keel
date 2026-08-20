@@ -76,7 +76,7 @@ typedef KlCompress *(*KlCompressFactory)(KlCompressCtx *ctx,
                                           KlAllocator *alloc);
 
 /**
- * @brief Compression configuration for KlConfig.
+ * @brief Compression configuration for KlHttpServerConfig.
  */
 typedef struct KlCompressConfig {
     KlCompressCtx     *ctx;         /**< Shared context — user-owned */
@@ -88,7 +88,7 @@ typedef struct KlCompressConfig {
  * @brief Compressed streaming handle.
  *
  * Wraps a chunked streaming response with compression.
- * Like KlSse, this is a caller-owned struct initialized by
+ * Like KlHttpSse, this is a caller-owned struct initialized by
  * kl_compress_stream_begin.
  */
 typedef struct {

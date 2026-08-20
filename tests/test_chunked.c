@@ -5,13 +5,13 @@
 /* --- Mock body reader that accumulates data into a buffer --- */
 
 typedef struct {
-    KlBodyReader base;
+    KlHttpBodyReader base;
     char data[65536];
     size_t len;
     int reject_after;  /* return -1 after this many bytes; 0 = never */
 } MockReader;
 
-static int mock_on_data(KlBodyReader *self, const char *data, size_t len) {
+static int mock_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     MockReader *m = (MockReader *)self;
     if (m->reject_after > 0 && m->len + len > (size_t)m->reject_after)
         return -1;
@@ -20,7 +20,7 @@ static int mock_on_data(KlBodyReader *self, const char *data, size_t len) {
     return 0;
 }
 
-static void mock_noop(KlBodyReader *self) { (void)self; }
+static void mock_noop(KlHttpBodyReader *self) { (void)self; }
 
 static MockReader make_mock(void) {
     MockReader m;

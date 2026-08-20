@@ -103,22 +103,22 @@ UTEST(url_resolve, bare_relative) {
 
 /* ── Test server globals ─────────────────────────────────────────── */
 
-static KlServer redir_srv;
+static KlHttpServer redir_srv;
 static pthread_t redir_tid;
 static int redir_port;
 
-static KlServer redir_srv2;
+static KlHttpServer redir_srv2;
 static pthread_t redir_tid2;
 static int redir_port2;
 
 static int servers_started;
 
 static void *server_thread(void *arg) {
-    kl_server_run((KlServer *)arg);
+    kl_http_server_run((KlHttpServer *)arg);
     return NULL;
 }
 
-static void wait_for_bind(KlServer *s) {
+static void wait_for_bind(KlHttpServer *s) {
     for (int i = 0; i < 200 && s->bound_port == 0; i++) usleep(10000);
 }
 
@@ -139,7 +139,7 @@ static void handle_dest(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     kl_http_response_status(res, 200);
     kl_http_response_header(res, "Content-Type", "text/plain");
     if (br && br->len > 0)
@@ -250,31 +250,31 @@ static void ensure_servers(void) {
     if (servers_started) return;
     servers_started = 1;
 
-    KlConfig cfg = { .port = 0, .max_connections = 16, .max_body_size = 4096 };
-    kl_server_init(&redir_srv, &cfg);
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 16, .max_body_size = 4096 };
+    kl_http_server_init(&redir_srv, &cfg);
 
-    kl_server_route(&redir_srv, "*", "/dest", handle_dest, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/echo", handle_echo, (void *)(size_t)4096,
-                    kl_body_reader_buffer);
-    kl_server_route(&redir_srv, "*", "/auth_check", handle_auth_check, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/redir301", handle_301, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/redir302", handle_302, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/redir303", handle_303, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/redir307", handle_307, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/redir308", handle_308, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/relative", handle_relative, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/no_location", handle_no_location, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/chain", handle_chain, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/loop", handle_loop, NULL, NULL);
-    kl_server_route(&redir_srv, "*", "/cross_origin", handle_cross_origin, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/dest", handle_dest, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/echo", handle_echo, (void *)(size_t)4096,
+                    kl_http_body_reader_buffer);
+    kl_http_server_route(&redir_srv, "*", "/auth_check", handle_auth_check, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/redir301", handle_301, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/redir302", handle_302, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/redir303", handle_303, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/redir307", handle_307, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/redir308", handle_308, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/relative", handle_relative, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/no_location", handle_no_location, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/chain", handle_chain, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/loop", handle_loop, NULL, NULL);
+    kl_http_server_route(&redir_srv, "*", "/cross_origin", handle_cross_origin, NULL, NULL);
 
     pthread_create(&redir_tid, NULL, server_thread, &redir_srv);
     wait_for_bind(&redir_srv);
     redir_port = redir_srv.bound_port;
 
-    KlConfig cfg2 = { .port = 0, .max_connections = 4 };
-    kl_server_init(&redir_srv2, &cfg2);
-    kl_server_route(&redir_srv2, "*", "/auth_check", handle_auth_check, NULL, NULL);
+    KlHttpServerConfig cfg2 = { .port = 0, .max_connections = 4 };
+    kl_http_server_init(&redir_srv2, &cfg2);
+    kl_http_server_route(&redir_srv2, "*", "/auth_check", handle_auth_check, NULL, NULL);
 
     pthread_create(&redir_tid2, NULL, server_thread, &redir_srv2);
     wait_for_bind(&redir_srv2);
@@ -284,13 +284,13 @@ static void ensure_servers(void) {
 /* Called via atexit — stops servers once when process exits */
 static void cleanup_servers(void) {
     if (!servers_started) return;
-    kl_server_stop(&redir_srv);
+    kl_http_server_stop(&redir_srv);
     pthread_join(redir_tid, NULL);
-    kl_server_free(&redir_srv);
+    kl_http_server_free(&redir_srv);
 
-    kl_server_stop(&redir_srv2);
+    kl_http_server_stop(&redir_srv2);
     pthread_join(redir_tid2, NULL);
-    kl_server_free(&redir_srv2);
+    kl_http_server_free(&redir_srv2);
     servers_started = 0;
 }
 

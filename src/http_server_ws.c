@@ -11,13 +11,13 @@
 #include <keel/websocket_server.h>
 #include <keel/http_connection.h>
 #include <keel/http_request.h>
-#include <keel/server.h>   /* KlServer — kl_server_ws registration API lives here */
-#include <keel/router.h>   /* kl_router_add + KlRoute.ws_config */
+#include <keel/http_server.h>   /* KlHttpServer — kl_http_server_ws_upgrade registration API lives here */
+#include <keel/http_router.h>   /* kl_http_router_add + KlHttpRoute.ws_config */
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
 #include "internal.h"
-#include "proto_hooks.h"   /* WS server upgrade seam — registered for the core */
+#include "http_proto_hooks.h"   /* WS server upgrade seam — registered for the core */
 #include "sha1.h"
 #include "base64.h"
 #include "utf8.h"
@@ -681,16 +681,16 @@ void kl_ws_server_hooks_install(void) {
 /* Public WebSocket route-registration API. Lives in the ws module (moved from server.c
  * in the Finding-1 decoupling) so the readiness server.c owns no WebSocket type — a
  * freestanding HTTP/1.1 server links neither this nor KlWsServerConfig. */
-int kl_server_ws(KlServer *s, const char *pattern, KlWsServerConfig *config) {
+int kl_http_server_ws_upgrade(KlHttpServer *s, const char *pattern, KlWsServerConfig *config) {
     /* Register as a GET route with no handler — ws_config triggers the upgrade. */
-    if (kl_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
+    if (kl_http_router_add(&s->router, "GET", pattern, NULL, NULL, NULL) < 0)
         return -1;
     s->router.routes[s->router.count - 1].ws_config = config;
     return 0;
 }
 
 /* Also self-install at load, so a consumer driving connection.c's dispatch directly
- * (without kl_server_init — e.g. the unit tests) has the seam wired. Runs only if
+ * (without kl_http_server_init — e.g. the unit tests) has the seam wired. Runs only if
  * this object is linked (a direct kl_ws_server_* reference pulls it in). */
 __attribute__((constructor))
 static void kl_ws_server_hooks_autoinstall(void) {

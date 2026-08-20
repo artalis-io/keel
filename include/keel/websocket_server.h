@@ -11,7 +11,7 @@
 
 #include <keel/websocket.h>
 #include <keel/drain.h>
-#include <keel/server.h>   /* KlPeerCred + kl_peer_cred_fd */
+#include <keel/http_server.h>   /* KlPeerCred + kl_peer_cred_fd */
 
 /* ── Forward declarations ────────────────────────────────────────── */
 

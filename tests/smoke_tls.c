@@ -2,7 +2,7 @@
  * smoke_tls.c — real mbedTLS handshake link + roundtrip smoke test.
  *
  * NOT a utest suite — a standalone program built by the `smoke-tls` Makefile
- * target (needs KEEL_TLS=mbedtls). It wires the mbedTLS backend into a KlServer
+ * target (needs KEEL_TLS=mbedtls). It wires the mbedTLS backend into a KlHttpServer
  * and a sync KlClient and drives one real HTTPS request over loopback, proving
  * the backend both links and completes a genuine TLS handshake on the target
  * platform. This is the BYO/local validation gate for the mbedTLS backend on
@@ -63,11 +63,11 @@ static void handle_ok(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     kl_http_response_json(res, 200, SMOKE_BODY, sizeof(SMOKE_BODY) - 1);
 }
 
-static KlServer g_srv;
+static KlHttpServer g_srv;
 
 static void *server_thread(void *arg) {
     (void)arg;
-    kl_server_run(&g_srv);
+    kl_http_server_run(&g_srv);
     return NULL;
 }
 
@@ -93,20 +93,20 @@ int main(void) {
      * the memory-BIO feed_input/drain_output path on an actual event loop + socket — the full e2e
      * counterpart to the in-memory smoke-tls-completion. The SMOKE_TLS_COMPLETION build asserts the
      * loop really is completion (below). */
-    KlConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1", .tls = &srv_tls };
-    if (kl_server_init(&g_srv, &cfg) < 0) {
+    KlHttpServerConfig cfg = { .port = SMOKE_PORT, .bind_addr = "127.0.0.1", .tls = &srv_tls };
+    if (kl_http_server_init(&g_srv, &cfg) < 0) {
         fprintf(stderr, "smoke-tls: server init failed\n");
         kl_tls_mbedtls_ctx_destroy(srv_ctx);
         return 1;
     }
-    kl_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
+    kl_http_server_route(&g_srv, "GET", "/", handle_ok, NULL, NULL);
 
 #ifdef SMOKE_TLS_COMPLETION
     /* Guard: this gate is meaningless unless the loop really is completion — fail loudly if built
      * against a readiness backend (build with BACKEND=pollcomp or BACKEND=iouring). */
     if (!(kl_event_caps(&g_srv.ev.loop) & KL_EVENT_CAP_COMPLETION)) {
         fprintf(stderr, "smoke-tls: not a completion loop — build with BACKEND=pollcomp|iouring\n");
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         kl_tls_mbedtls_ctx_destroy(srv_ctx);
         return 1;
     }
@@ -115,7 +115,7 @@ int main(void) {
     pthread_t th;
     if (pthread_create(&th, NULL, server_thread, NULL) != 0) {
         fprintf(stderr, "smoke-tls: pthread_create failed\n");
-        kl_server_free(&g_srv);
+        kl_http_server_free(&g_srv);
         return 1;
     }
 
@@ -150,9 +150,9 @@ int main(void) {
         kl_tls_mbedtls_ctx_destroy(cli_ctx);
     }
 
-    kl_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);
     pthread_join(th, NULL);
-    kl_server_free(&g_srv);
+    kl_http_server_free(&g_srv);
 
     if (!ok) {
         fprintf(stderr, "smoke-tls: HTTPS roundtrip FAILED (rc=%d status=%d body_len=%zu err=%d)\n",

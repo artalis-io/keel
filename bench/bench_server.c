@@ -5,7 +5,7 @@
  *   GET  /hello       — baseline: minimal JSON, no params, no middleware
  *   GET  /users/:id   — router: param extraction + snprintf response
  *   GET  /mw/hello    — middleware: same response through 2 pass-through middleware
- *   POST /echo        — body reading: KlBufReader + echo body back
+ *   POST /echo        — body reading: KlHttpBufReader + echo body back
  *
  * Build:  make bench
  * Run:    ./bench/bench_server [port]
@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <unistd.h>   /* fork, getpid — multi-worker (SO_REUSEPORT) mode */
 
-/* Backend-agnostic: over a completion loop (BACKEND=iouring) kl_server_init auto-adopts the
+/* Backend-agnostic: over a completion loop (BACKEND=iouring) kl_http_server_init auto-adopts the
  * backend's overlapped provider (8f-5a), so this default-provider server serves every backend
  * unchanged — no explicit provider needed. */
 
@@ -44,7 +44,7 @@ static int noop_mw(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
 
 static void handle_echo(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
-    KlBufReader *br = (KlBufReader *)req->body_reader;
+    KlHttpBufReader *br = (KlHttpBufReader *)req->body_reader;
     if (!br || br->len == 0) {
         kl_http_response_json(res, 200, "{\"echo\":\"\"}", 11);
         return;
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
         workers = (int)val;
     }
 
-    /* Multi-worker: fork (workers-1) children; every process runs its own KlServer on the
+    /* Multi-worker: fork (workers-1) children; every process runs its own KlHttpServer on the
      * same port. Each listen socket sets SO_REUSEPORT (server.c), so the kernel load-balances
      * incoming connections across the workers — Keel's horizontal-scaling model (one
      * single-threaded accept loop per core), demonstrated here for the connection-churn bench. */
@@ -86,22 +86,22 @@ int main(int argc, char **argv) {
         if (pid < 0) perror("fork");      /* parent: keep going with fewer workers */
     }
 
-    KlServer s;
-    KlConfig cfg = {.port = port, .install_signal_handlers = 1};
-    if (kl_server_init(&s, &cfg) < 0) return 1;
+    KlHttpServer s;
+    KlHttpServerConfig cfg = {.port = port, .install_signal_handlers = 1};
+    if (kl_http_server_init(&s, &cfg) < 0) return 1;
 
-    kl_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
-    kl_server_route(&s, "GET", "/users/:id", handle_user, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/hello", handle_hello, NULL, NULL);
+    kl_http_server_route(&s, "GET", "/users/:id", handle_user, NULL, NULL);
 
-    kl_server_use(&s, "*", "/mw/*", noop_mw, NULL);
-    kl_server_use(&s, "*", "/mw/*", noop_mw, NULL);
-    kl_server_route(&s, "GET", "/mw/hello", handle_hello, NULL, NULL);
+    kl_http_server_use(&s, "*", "/mw/*", noop_mw, NULL);
+    kl_http_server_use(&s, "*", "/mw/*", noop_mw, NULL);
+    kl_http_server_route(&s, "GET", "/mw/hello", handle_hello, NULL, NULL);
 
-    kl_server_route(&s, "POST", "/echo", handle_echo, NULL, kl_body_reader_buffer);
+    kl_http_server_route(&s, "POST", "/echo", handle_echo, NULL, kl_http_body_reader_buffer);
 
     printf("bench server listening on :%d (worker pid %d of %d)\n",
            port, (int)getpid(), workers);
-    kl_server_run(&s);
-    kl_server_free(&s);
+    kl_http_server_run(&s);
+    kl_http_server_free(&s);
     return 0;
 }
