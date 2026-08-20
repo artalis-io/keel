@@ -373,7 +373,7 @@ WIN_TEST_SUITES = allocator body_reader chunked cors decompress drain \
                   integration server_integration peer_addr client_happy_eyeballs \
                   async client_pool cross_module event_ctx event_caps \
                   h2 response socket_provider websocket compress event sse \
-                  udp udp_server udp_multicast \
+                  datagram_socket \
                   tls tls_integration peer_cert
 WIN_TEST_BIN = $(addprefix tests/test_,$(addsuffix $(EXE),$(WIN_TEST_SUITES)))
 
@@ -656,14 +656,14 @@ $(SMOKE_IOURING_CLIENT_BIN): tests/smoke_iouring_client.c $(LIB)
 # under ASan+UBSan in the Apple container).
 IOURING_TEST_SUITES = allocator alpn async body_reader chunked client client_happy_eyeballs client_pool \
                           client_stream compress connection cors cross_module \
-                          datagram_batch datagram_life datagram_public datagram_live datagram_socket \
+                          datagram_batch datagram_life datagram_public datagram_live datagram_socket datagram_multicast \
                           dgram_close dgram_core dgram_recv dgram_recv_classify dgram_send dgram_slots decompress \
                           dns_resolver drain error event_provider file_io h2 h2_client integration \
                           multipart_stream overflow parser peer_addr peer_cert proxy \
                           proxy_protocol read_flow_control redirect request resolver_cache \
                           response response_parser router server_integration server_stats sockaddr sse \
-                          stream_single_shot stream_transport thread_pool timeout timer tls tls_integration udp \
-                          udp_cmsg udp_server unix_socket url version websocket websocket_client
+                          stream_single_shot stream_transport thread_pool timeout timer tls tls_integration \
+                          udp_cmsg unix_socket url version websocket websocket_client
 IOURING_TEST_BIN = $(addprefix tests/test_,$(IOURING_TEST_SUITES))
 test-iouring: $(IOURING_TEST_BIN)
 	@failed=0; \
