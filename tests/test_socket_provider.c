@@ -11,7 +11,8 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/datagram.h>
-#include <keel/udp.h>
+#include <keel/datagram_detail.h>   /* D2: provider-threading tests use a stack KlDatagram now */
+#include "../src/datagram_open.h"   /* kl_datagram_teardown */
 #include <keel/server.h>
 #include <keel/client.h>
 
@@ -213,26 +214,26 @@ UTEST(sockprov, decorator_short_write_real_io) {
     kl_test_closesock(sv[0]); kl_test_closesock(sv[1]);
 }
 
-/* End-to-end threading: a KlUdp created on a ctx carrying the mock provider
- * routes its setup calls through the mock (proves ctx->sockets reaches the
- * transport, not just the seam in isolation). */
-UTEST(sockprov, udp_transport_threads_provider) {
+/* End-to-end threading: a KlDatagram created on a ctx carrying the mock provider routes its setup calls
+ * through the mock (proves ctx->sockets reaches the datagram construction, not just the seam in
+ * isolation). D2: migrated from KlUdp. */
+UTEST(sockprov, datagram_threads_provider) {
     MockSock m; memset(&m, 0, sizeof(m)); m.short_send = -1;
     KlSocketProvider p = mock_provider(&m);
 
     KlAllocator alloc = kl_allocator_default();
     KlEventCtx ctx;
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
-    ctx.sockets = &p;                                /* inject before creating the transport */
+    ctx.sockets = &p;                                /* inject before creating the datagram */
 
-    KlUdp udp;
-    KlUdpConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
-    ASSERT_EQ(0, kl_udp_init(&udp, &cfg));
+    KlDatagram dg;
+    KlDatagramSocketConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
 
     ASSERT_TRUE(m.nb_calls >= 1);                    /* set_nonblocking went through the mock */
     ASSERT_TRUE(m.cloexec_calls >= 1);               /* set_cloexec too */
 
-    kl_udp_free(&udp);
+    kl_datagram_teardown(&dg, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -307,16 +308,17 @@ UTEST(dgramprov, configure_caps_negotiated) {
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
     ctx.sockets = &p;
 
-    KlUdp udp;
-    KlUdpConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
-    ASSERT_EQ(0, kl_udp_init(&udp, &cfg));
+    KlDatagram dg;
+    KlDatagramSocketConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
 
     ASSERT_EQ(1, g_mdg.configure_calls);
-    ASSERT_EQ(1, udp.dg.pktinfo);    /* KL_DGRAM_RX_PKTINFO accepted → stored (raw transport state) */
-    ASSERT_EQ(0, udp.dg.recv_gro);   /* not reported → off */
-    ASSERT_EQ(1, udp.dg.recv_tos);   /* KL_DGRAM_RX_TOS accepted → stored */
+    unsigned rc = kl_datagram_accepted_rx_caps(&dg);
+    ASSERT_TRUE((rc & KL_DGRAM_RX_PKTINFO) != 0);    /* accepted → stored */
+    ASSERT_EQ((unsigned)0, (rc & KL_DGRAM_RX_GRO));  /* not reported → off */
+    ASSERT_TRUE((rc & KL_DGRAM_RX_TOS) != 0);        /* accepted → stored */
 
-    kl_udp_free(&udp);
+    kl_datagram_teardown(&dg, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
@@ -332,28 +334,31 @@ UTEST(dgramprov, send_success_then_eagain_enqueues) {
     ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
     ctx.sockets = &p;
 
-    KlUdp udp;
-    KlUdpConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1", .bind_port = 0 };
-    ASSERT_EQ(0, kl_udp_init(&udp, &cfg));
+    KlDatagram dg;
+    KlDatagramSocketConfig cfg = { .ctx = &ctx, .bind_addr = "127.0.0.1" };
+    ASSERT_EQ(0, kl_datagram_socket_init(&dg, &cfg));
 
     const uint8_t lo[4] = { 127, 0, 0, 1 };
     KlSockAddr dest;
     kl_sockaddr_from_ipv4(&dest, lo, 9999);
 
     /* Success: provider accepts the datagram; nothing left queued. */
-    ASSERT_EQ(0, kl_udp_send_to(&udp, "hello", 5, &dest));
+    KlDatagramMessage m1 = { .data = "hello", .len = 5, .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m1));
     ASSERT_EQ(1, g_mdg.send_calls);
     ASSERT_EQ((size_t)5, g_mdg.last_send_len);
-    ASSERT_EQ((size_t)0, kl_udp_send_queued(&udp));
+    ASSERT_EQ((size_t)0, kl_datagram_send_queued_bytes(&dg));
 
-    /* EAGAIN: udp.c queues the datagram for a later writable flush, not a drop. */
+    /* EAGAIN: the send machine QUEUES the datagram for a later writable flush, not a drop. */
     g_mdg.force_send_err = EWOULDBLOCK;
-    ASSERT_EQ(0, kl_udp_send_to(&udp, "world!!", 7, &dest));
-    ASSERT_EQ(2, g_mdg.send_calls);
-    ASSERT_EQ((size_t)7, kl_udp_send_queued(&udp));   /* queued behind backpressure */
-    ASSERT_EQ((uint64_t)0, kl_udp_dropped(&udp));     /* not dropped */
+    KlDatagramMessage m2 = { .data = "world!!", .len = 7, .peer = &dest, .tos = -1 };
+    ASSERT_EQ((int)KL_DATAGRAM_ACCEPTED, (int)kl_datagram_send(&dg, &m2));   /* taken + queued */
+    ASSERT_TRUE(g_mdg.send_calls >= 2);                          /* the provider was attempted (exact count
+                                                                 * is machine-specific: it may retry the head) */
+    ASSERT_EQ((size_t)7, kl_datagram_send_queued_bytes(&dg));   /* queued behind backpressure */
+    ASSERT_EQ((uint64_t)0, kl_datagram_dropped(&dg));           /* not dropped */
 
-    kl_udp_free(&udp);
+    kl_datagram_teardown(&dg, NULL, NULL);
     kl_event_ctx_free(&ctx);
 }
 
