@@ -45,7 +45,6 @@
 #include <keel/timer.h>
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>   /* opt-in KlDatagram layout — stack-allocate the handle */
-#include <keel/udp.h>               /* KlUdpConfig for the provider configure() */
 #include <keel/sockaddr.h>
 #include <keel/error.h>
 
@@ -155,7 +154,7 @@ int efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st) {
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET, SOCK_DGRAM, 0);
     if (!kl_handle_valid(fd)) { print_line("7b9: kl_uefi_udp_socket failed"); kl_event_ctx_free(&ev); goto done; }
     {
-        KlUdpConfig ucfg;
+        KlDatagramSocketConfig ucfg;
         { unsigned char *p = (unsigned char *)&ucfg; for (size_t i = 0; i < sizeof(ucfg); i++) p[i] = 0; }
         (void)kl_uefi_udp_dgram_ops()->configure(NULL, fd, AF_INET, &ucfg);   /* DHCP default */
     }

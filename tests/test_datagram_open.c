@@ -22,7 +22,7 @@
 
 #include "../vendor/utest.h"
 
-#include <keel/udp.h>          /* KlUdpConfig */
+#include <keel/datagram.h>   /* KlDatagramSocketConfig + KlDatagramOps */
 #include <keel/sockaddr.h>     /* KlSockAddr, kl_sockaddr_family/_port */
 #include <keel/error.h>        /* KlError */
 #include <keel/socket_dgram.h> /* KL_DGRAM_RX_* */
@@ -78,7 +78,7 @@ static const KlSocketOps MS_OPS = {
 };
 
 static uint32_t ms_dg_configure(void *ctx, KlSocketHandle fd, int family,
-                                const struct KlUdpConfig *cfg) {
+                                const struct KlDatagramSocketConfig *cfg) {
     (void)ctx; (void)fd; (void)cfg; g_ms.configure_calls++; g_ms.configure_family = family;
     return g_ms.configure_ret;   /* the accepted capture-option mask the helper must surface */
 }
@@ -94,14 +94,14 @@ static const KlSocketProvider MS_SP_PARTIAL = { .ops = &MS_OPS, .capabilities = 
 static void ms_reset(void) { memset(&g_ms, 0, sizeof(g_ms)); }
 
 /* An unbound-datagram config (family only). */
-static KlUdpConfig cfg_unbound(int family) {
-    KlUdpConfig c; memset(&c, 0, sizeof(c));
+static KlDatagramSocketConfig cfg_unbound(int family) {
+    KlDatagramSocketConfig c; memset(&c, 0, sizeof(c));
     c.family = family;
     return c;
 }
 /* A bound-datagram config (numeric address → drives the bind step). */
-static KlUdpConfig cfg_bound(const char *addr, uint16_t port) {
-    KlUdpConfig c; memset(&c, 0, sizeof(c));
+static KlDatagramSocketConfig cfg_bound(const char *addr, uint16_t port) {
+    KlDatagramSocketConfig c; memset(&c, 0, sizeof(c));
     c.bind_addr = addr; c.bind_port = port;
     return c;
 }
@@ -110,7 +110,7 @@ static KlUdpConfig cfg_bound(const char *addr, uint16_t port) {
 
 UTEST(datagram_open, null_out_rejected) {
     ms_reset();
-    KlUdpConfig c = cfg_unbound(AF_INET);
+    KlDatagramSocketConfig c = cfg_unbound(AF_INET);
     ASSERT_EQ(-1, kl_datagram_open(&MS_SP, &c, NULL));   /* no out → nothing to do */
     ASSERT_EQ(0, g_ms.socket_calls);
 }
@@ -128,7 +128,7 @@ UTEST(datagram_open, null_cfg_rejected) {
 
 UTEST(datagram_open, provider_without_datagram_rejected) {
     ms_reset();
-    KlUdpConfig c = cfg_unbound(AF_INET);
+    KlDatagramSocketConfig c = cfg_unbound(AF_INET);
     KlDatagramPrep p;
     ASSERT_EQ(-1, kl_datagram_open(&MS_SP_NODG, &c, &p));
     ASSERT_FALSE(kl_handle_valid(p.fd));
@@ -139,7 +139,7 @@ UTEST(datagram_open, provider_without_datagram_rejected) {
 
 UTEST(datagram_open, provider_with_partial_vtable_rejected) {
     ms_reset();
-    KlUdpConfig c = cfg_unbound(AF_INET);
+    KlDatagramSocketConfig c = cfg_unbound(AF_INET);
     KlDatagramPrep p;
     ASSERT_EQ(-1, kl_datagram_open(&MS_SP_PARTIAL, &c, &p));   /* .dgram non-NULL but .configure NULL */
     ASSERT_FALSE(kl_handle_valid(p.fd));
@@ -151,7 +151,7 @@ UTEST(datagram_open, provider_with_partial_vtable_rejected) {
 
 UTEST(datagram_open, bad_bind_address_rejected) {
     ms_reset();
-    KlUdpConfig c = cfg_bound("not-an-ip-address", 53);   /* numeric parse fails */
+    KlDatagramSocketConfig c = cfg_bound("not-an-ip-address", 53);   /* numeric parse fails */
     KlDatagramPrep p;
     ASSERT_EQ(-1, kl_datagram_open(&MS_SP, &c, &p));
     ASSERT_FALSE(kl_handle_valid(p.fd));
@@ -163,7 +163,7 @@ UTEST(datagram_open, bad_bind_address_rejected) {
 UTEST(datagram_open, socket_failure_creates_nothing) {
     ms_reset();
     g_ms.socket_fail = 1;
-    KlUdpConfig c = cfg_unbound(AF_INET);
+    KlDatagramSocketConfig c = cfg_unbound(AF_INET);
     KlDatagramPrep p;
     ASSERT_EQ(-1, kl_datagram_open(&MS_SP, &c, &p));
     ASSERT_FALSE(kl_handle_valid(p.fd));
@@ -177,7 +177,7 @@ UTEST(datagram_open, socket_failure_creates_nothing) {
 UTEST(datagram_open, nonblocking_failure_closes_fd_once) {
     ms_reset();
     g_ms.nonblock_fail = 1;
-    KlUdpConfig c = cfg_unbound(AF_INET);
+    KlDatagramSocketConfig c = cfg_unbound(AF_INET);
     KlDatagramPrep p;
     ASSERT_EQ(-1, kl_datagram_open(&MS_SP, &c, &p));
     ASSERT_FALSE(kl_handle_valid(p.fd));
@@ -193,7 +193,7 @@ UTEST(datagram_open, bind_failure_closes_fd_once) {
     ms_reset();
     g_ms.bind_fail = 1;
     g_ms.configure_ret = KL_DGRAM_RX_PKTINFO;          /* configure ran, but bind fails after it */
-    KlUdpConfig c = cfg_bound("127.0.0.1", 0);
+    KlDatagramSocketConfig c = cfg_bound("127.0.0.1", 0);
     KlDatagramPrep p;
     ASSERT_EQ(-1, kl_datagram_open(&MS_SP, &c, &p));
     ASSERT_FALSE(kl_handle_valid(p.fd));
@@ -210,7 +210,7 @@ UTEST(datagram_open, bind_failure_closes_fd_once) {
 
 UTEST(datagram_open, success_hands_off_fd_without_closing) {
     ms_reset();
-    KlUdpConfig c = cfg_bound("127.0.0.1", 0);
+    KlDatagramSocketConfig c = cfg_bound("127.0.0.1", 0);
     KlDatagramPrep p; memset(&p, 0xEE, sizeof(p));     /* poison to prove every field is written */
     ASSERT_EQ(0, kl_datagram_open(&MS_SP, &c, &p));
     ASSERT_TRUE(kl_handle_valid(p.fd));
@@ -231,7 +231,7 @@ UTEST(datagram_open, success_hands_off_fd_without_closing) {
 UTEST(datagram_open, surfaces_configure_capture_mask) {
     ms_reset();
     g_ms.configure_ret = KL_DGRAM_RX_PKTINFO | KL_DGRAM_RX_TOS;   /* provider enabled pktinfo + TOS */
-    KlUdpConfig c = cfg_unbound(AF_INET);
+    KlDatagramSocketConfig c = cfg_unbound(AF_INET);
     KlDatagramPrep p;
     ASSERT_EQ(0, kl_datagram_open(&MS_SP, &c, &p));
     ASSERT_TRUE(kl_handle_valid(p.fd));
@@ -241,7 +241,7 @@ UTEST(datagram_open, surfaces_configure_capture_mask) {
 
 UTEST(datagram_open, configure_receives_bind_family) {
     ms_reset();
-    KlUdpConfig c = cfg_unbound(AF_INET6);
+    KlDatagramSocketConfig c = cfg_unbound(AF_INET6);
     KlDatagramPrep p;
     ASSERT_EQ(0, kl_datagram_open(&MS_SP, &c, &p));
     ASSERT_TRUE(kl_handle_valid(p.fd));
@@ -253,7 +253,7 @@ UTEST(datagram_open, configure_receives_bind_family) {
 /* ── (2b) real default provider (sockets=NULL) → a genuinely prepared, bound loopback socket ──────── */
 
 UTEST(datagram_open, default_provider_binds_real_socket) {
-    KlUdpConfig c = cfg_bound("127.0.0.1", 0);   /* ephemeral port */
+    KlDatagramSocketConfig c = cfg_bound("127.0.0.1", 0);   /* ephemeral port */
     KlDatagramPrep p;
     ASSERT_EQ(0, kl_datagram_open(NULL, &c, &p));
     ASSERT_TRUE(kl_handle_valid(p.fd));
@@ -267,7 +267,7 @@ UTEST(datagram_open, default_provider_binds_real_socket) {
 }
 
 UTEST(datagram_open, default_provider_unbound_socket) {
-    KlUdpConfig c = cfg_unbound(AF_INET);        /* no bind address → unbound datagram socket */
+    KlDatagramSocketConfig c = cfg_unbound(AF_INET);        /* no bind address → unbound datagram socket */
     KlDatagramPrep p;
     ASSERT_EQ(0, kl_datagram_open(NULL, &c, &p));
     ASSERT_TRUE(kl_handle_valid(p.fd));

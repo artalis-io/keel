@@ -27,8 +27,6 @@
 
 #include <keel/datagram.h>
 #include <keel/datagram_detail.h>
-#include <keel/udp.h>           /* KlUdpConfig — the M0 sockopt config kl_datagram_socket_init maps into
-                                 * (O-D6-1: internal mapping during D1–D2; collapsed to the neutral name in D3) */
 #include <keel/event_ctx.h>     /* KlEventCtx, kl_watcher_add/_mod/_del, KlEventMask */
 #include <keel/event.h>         /* KL_EVENT_READ / KL_EVENT_WRITE */
 
@@ -448,8 +446,8 @@ int kl_datagram_init_ex(KlDatagram *dg, const KlDatagramConfig *cfg, size_t send
 }
 
 /* ── D1: public socket convenience (create + configure + bind + adopt) ────────────────────────────
- * Reuses the accepted M0 preparation (kl_datagram_open) internally by mapping the sockopt subset into a
- * local KlUdpConfig (O-D6-1: temporary during D1–D2; the neutral-name collapse is D3). See §12. */
+ * Reuses the accepted M0 preparation (kl_datagram_open) internally, passing the socket config straight
+ * through (D3 collapsed the config to a single type — the provider seam takes KlDatagramSocketConfig). */
 int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
     if (!dg) return -1;
     memset(dg, 0, sizeof(*dg));
@@ -467,28 +465,19 @@ int kl_datagram_socket_init(KlDatagram *dg, const KlDatagramSocketConfig *cfg) {
      * mixed with POSIX datagram ops. Use it consistently for open, adoption, and every pre-adoption close. */
     const KlSocketProvider *sockets = cfg->sockets ? cfg->sockets : cfg->ctx->sockets;
 
-    /* Map the sockopt subset → the M0 KlUdpConfig. GRO is readiness-only (M5.4): never enable UDP_GRO
-     * capture on a completion loop (the completion recv cannot split). multicast_group is joined
-     * post-init via M2 (not at configure). Batch sizing is a kl_datagram_batch_create arg, not here. */
+    /* M0 prep takes the socket config directly (D3: single config type). Only two adjustments vs the
+     * caller's config: GRO is readiness-only (M5.4) — never enable UDP_GRO capture on a completion loop
+     * (the completion recv cannot split a coalesced datagram); and multicast_group is joined post-init
+     * via M2, never at configure(). (Batch sizing is a kl_datagram_batch_create arg, not a socket option.) */
     size_t recv_cap = cfg->recv_cap ? cfg->recv_cap : 2048;
     if (recv_cap > 65535) recv_cap = 65535;
-    KlUdpConfig uc; memset(&uc, 0, sizeof(uc));
-    uc.ctx = cfg->ctx; uc.family = cfg->family;
-    uc.bind_addr = cfg->bind_addr; uc.bind_port = cfg->bind_port;
-    uc.recv_buf_size = recv_cap;
-    uc.reuse_addr = cfg->reuse_addr; uc.reuse_port = cfg->reuse_port;
-    uc.recv_pktinfo = cfg->recv_pktinfo; uc.recv_tos = cfg->recv_tos;
-    uc.recv_gro = (!completion && cfg->recv_gro) ? 1 : 0;
-    uc.so_rcvbuf = cfg->so_rcvbuf; uc.so_sndbuf = cfg->so_sndbuf;
-    uc.tos = cfg->tos; uc.broadcast = cfg->broadcast;
-    uc.multicast_ttl = cfg->multicast_ttl;
-    uc.multicast_disable_loop = cfg->multicast_disable_loop;
-    uc.multicast_iface = cfg->multicast_iface;
-    uc.multicast_group = NULL;   /* joined post-init (M2) */
-    uc.alloc = alloc;
+    KlDatagramSocketConfig oc = *cfg;
+    oc.recv_gro = (!completion && cfg->recv_gro) ? 1 : 0;
+    oc.multicast_group = NULL;   /* joined post-init (M2) */
+    oc.alloc = alloc;
 
     KlDatagramPrep prep;
-    if (kl_datagram_open(sockets, &uc, &prep) != 0) {
+    if (kl_datagram_open(sockets, &oc, &prep) != 0) {
         dg->last_error = prep.err;   /* open closed its own fd on failure — nothing to reclaim */
         return -1;
     }

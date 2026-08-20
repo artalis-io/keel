@@ -378,7 +378,7 @@ static kl_ssize_t lwr_sock_io(void *c, KlSocketHandle fd, void *b, size_t n) {
  * machine then runs with pktinfo/GRO/TOS all off, exactly matching a stack without them.
  * set_tos/mcast_membership/batch are unsupported (NULL / -1). All are neutral (fd + KlSockAddr). */
 static uint32_t lwr_dg_configure(void *ctx, KlSocketHandle fd, int family,
-                                 const struct KlUdpConfig *cfg) {
+                                 const struct KlDatagramSocketConfig *cfg) {
     (void)ctx; (void)fd; (void)family; (void)cfg;
     return 0;   /* loopback: no pktinfo/GRO/TOS capture — accept nothing */
 }

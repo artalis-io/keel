@@ -18,7 +18,7 @@
 #include "platform_uefi.h"            /* kl_uefi_after_ebs (F3 boot-services guard) */
 
 #include <keel/handle.h>
-#include <keel/udp.h>                 /* struct KlUdpConfig (configure signature) */
+#include <keel/datagram.h>            /* struct KlDatagramSocketConfig (configure signature) */
 
 /* ── constants (mirror the TCP TU; datagram-local names) ─────────────────────────── */
 #define KL_EFI_UDP_EVT_TOKEN     0            /* bare CheckEvent-polled token event */
@@ -643,7 +643,7 @@ int kl_uefi_udp_close(KlSocketHandle fd) {
  * bind_addr is DEFERRED to kl_uefi_udp_bind() (the only Configure for a bound socket); the
  * unbound/default case is configured here (no bind() follows). */
 static uint32_t dg_configure(void *ctx, KlSocketHandle fd, int family,
-                             const struct KlUdpConfig *cfg) {
+                             const struct KlDatagramSocketConfig *cfg) {
     (void)ctx; (void)family;
     KlUefiUdp *u = udp_of(fd);
     if (!u) return 0;

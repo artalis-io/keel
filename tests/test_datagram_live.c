@@ -25,7 +25,6 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
-#include <keel/udp.h>            /* KlUdpConfig — the dgram provider configure() arg */
 
 #include "../src/socket.h"       /* kl_sock_socket / _bind / _set_nonblocking / _get_local_addr */
 
@@ -53,7 +52,7 @@ static KlSocketHandle prep_fd(const KlSocketProvider *sp, const char *bind_ip, i
     KlSocketHandle fd = kl_sock_socket(sp, AF_INET, SOCK_DGRAM, 0);
     if (!kl_handle_valid(fd)) return fd;
     kl_sock_set_nonblocking(sp, fd);
-    KlUdpConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
+    KlDatagramSocketConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
     const KlDatagramOps *dg = sp ? sp->dgram : kl_sockdef_dgram();
     (void)dg->configure(sp ? sp->context : NULL, fd, AF_INET, &ucfg);   /* best-effort sockopts */
     if (bind_ip) {
@@ -71,7 +70,7 @@ static KlSocketHandle prep_fd_recvtos(const KlSocketProvider *sp, const char *bi
     KlSocketHandle fd = kl_sock_socket(sp, AF_INET, SOCK_DGRAM, 0);
     if (!kl_handle_valid(fd)) return fd;
     kl_sock_set_nonblocking(sp, fd);
-    KlUdpConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
+    KlDatagramSocketConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
     ucfg.recv_tos = 1;
     const KlDatagramOps *dg = sp ? sp->dgram : kl_sockdef_dgram();
     unsigned caps = dg->configure(sp ? sp->context : NULL, fd, AF_INET, &ucfg);
@@ -154,7 +153,7 @@ static KlSocketHandle prep_fd_pktinfo(const KlSocketProvider *sp, const char *bi
     KlSocketHandle fd = kl_sock_socket(sp, AF_INET, SOCK_DGRAM, 0);
     if (!kl_handle_valid(fd)) return fd;
     kl_sock_set_nonblocking(sp, fd);
-    KlUdpConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
+    KlDatagramSocketConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
     ucfg.recv_pktinfo = 1;
     const KlDatagramOps *dg = sp ? sp->dgram : kl_sockdef_dgram();
     (void)dg->configure(sp ? sp->context : NULL, fd, AF_INET, &ucfg);

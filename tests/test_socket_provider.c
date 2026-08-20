@@ -269,7 +269,7 @@ static kl_ssize_t mdg_recv(void *ctx, KlSocketHandle fd, void *buf, size_t bufle
     errno = EAGAIN; return -1;           /* always "drained" */
 }
 static uint32_t mdg_configure(void *ctx, KlSocketHandle fd, int family,
-                              const struct KlUdpConfig *cfg) {
+                              const struct KlDatagramSocketConfig *cfg) {
     (void)ctx; (void)fd; (void)family; (void)cfg;
     g_mdg.configure_calls++;
     return g_mdg.configure_caps;

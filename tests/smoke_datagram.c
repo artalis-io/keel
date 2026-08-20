@@ -14,7 +14,6 @@
 #include <keel/datagram_detail.h>
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
-#include <keel/udp.h>       /* KlUdpConfig — the provider configure() arg */
 #include <keel/net.h>       /* winsock (Windows) / AF_INET + inet_pton */
 
 #include "../src/socket.h"  /* kl_sock_socket / _bind / _set_nonblocking / _get_local_addr / _close */
@@ -41,7 +40,7 @@ static KlSocketHandle prep_fd(const KlSocketProvider *sp, int do_bind, uint16_t 
     KlSocketHandle fd = kl_sock_socket(sp, AF_INET, SOCK_DGRAM, 0);
     if (!kl_handle_valid(fd)) return fd;
     kl_sock_set_nonblocking(sp, fd);
-    KlUdpConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
+    KlDatagramSocketConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
     const KlDatagramOps *dg = sp ? sp->dgram : kl_sockdef_dgram();
     (void)dg->configure(sp ? sp->context : NULL, fd, AF_INET, &ucfg);
     if (do_bind) {

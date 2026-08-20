@@ -11,9 +11,8 @@
  * and parses opportunistically, so the primitive needs no per-socket capture flags.
  */
 
-#include <keel/datagram.h>
+#include <keel/datagram.h>     /* KlDatagramSocketConfig (configure) + KlDatagramOps */
 #include <keel/socket.h>
-#include <keel/udp.h>          /* KlUdpConfig */
 #include "sockaddr_native.h"   /* KlSockAddr <-> Winsock sockaddr at the boundary */
 #include "udp_cmsg_win.h"      /* kl_udp_win_get_recvmsg / kl_udp_win_parse_local (shared w/ IOCP) */
 
@@ -198,7 +197,7 @@ static kl_ssize_t wdg_send_gso(void *ctx, KlSocketHandle fd, const void *data, s
 /* ── Socket options (configure folds the three init-time setups) ──────── */
 
 static uint32_t wdg_configure(void *ctx, KlSocketHandle fd, int family,
-                              const struct KlUdpConfig *cfg) {
+                              const struct KlDatagramSocketConfig *cfg) {
     (void)ctx;
     SOCKET s = (SOCKET)fd;
     uint32_t caps = 0;

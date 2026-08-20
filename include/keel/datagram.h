@@ -61,7 +61,7 @@ typedef struct KlDatagram KlDatagram;
 #define KL_DGRAM_CAP_TOS         (1u << 1)   /* per-packet TOS/ECN on send */
 #define KL_DGRAM_CAP_CONNECTED   (1u << 2)   /* connected-mode send (msg.peer == NULL) */
 #define KL_DGRAM_CAP_MULTICAST   (1u << 3)   /* runtime multicast join/leave (kl_datagram_multicast_*) — M2 */
-#define KL_DGRAM_CAP_BROADCAST   (1u << 4)   /* SO_BROADCAST — IPv4 fds only (reported per-fd); config via KlUdpConfig — M2 */
+#define KL_DGRAM_CAP_BROADCAST   (1u << 4)   /* SO_BROADCAST — IPv4 fds only (reported per-fd); config via KlDatagramSocketConfig — M2 */
 /* Provider SUPPORT for the M5 high-throughput extension (kl_datagram_provider_caps). Directional, and
  * advisory for GSO/GRO: RX_BATCH/TX_BATCH = the provider has recvmmsg/sendmmsg; GSO = the send_gso op
  * exists (first-use may still fail → extension latch); GRO = the provider CAN capture UDP_GRO (per-socket
@@ -191,7 +191,8 @@ typedef enum {
     KL_DATAGRAM_QUEUE_BOTH,         /* count + byte backpressure */
 } KlDatagramQueuePolicy;
 
-typedef struct {                    /* all pointers borrowed */
+typedef struct KlDatagramSocketConfig {   /* named tag: the datagram provider seam (socket_dgram.h
+                                           * configure() + M0 kl_datagram_open) references it by tag */
     struct KlEventCtx             *ctx;        /* event loop (selects completion vs readiness) */
     const struct KlSocketProvider *sockets;    /* datagram-capable provider; NULL = ctx->sockets; if that
                                                 * is NULL too, the built-in default provider */
@@ -302,7 +303,7 @@ int kl_datagram_set_tos(KlDatagram *dg, int tos);
 /* M6.0a: the received TOS/Traffic-Class byte of the datagram currently being delivered, or -1 if
  * unavailable (RX_TOS capture not enabled on the socket, or none present). Only meaningful while inside
  * the KlDatagramRecvFn / on_recv_segments callback. Requires the socket to have been prepared with TOS
- * capture (KlUdpConfig.recv_tos) and that bit carried in KlDatagramConfig.accepted_rx_caps. */
+ * capture (KlDatagramSocketConfig.recv_tos) and that bit carried in KlDatagramConfig.accepted_rx_caps. */
 int kl_datagram_recv_tos(const KlDatagram *dg);
 KlDgramCloseState     kl_datagram_close_state(const KlDatagram *dg);   /* OPEN/CLOSING/CLOSED */
 KlDatagramCloseResult kl_datagram_close_result(const KlDatagram *dg);  /* terminal (NONE until CLOSED) */

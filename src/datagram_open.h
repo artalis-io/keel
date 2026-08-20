@@ -7,8 +7,8 @@
 
 #include <stdint.h>
 
-struct KlSocketProvider;   /* src/socket.h — the socket axis provider */
-struct KlUdpConfig;        /* keel/udp.h — the datagram socket-option config (borrowed) */
+struct KlSocketProvider;          /* src/socket.h — the socket axis provider */
+struct KlDatagramSocketConfig;    /* keel/datagram.h — the datagram socket-option config (borrowed) */
 
 /*
  * Result of kl_datagram_open — the prepared fd plus the capture options the provider's configure()
@@ -56,7 +56,7 @@ typedef struct {
  * separately-reviewed increments.
  */
 int kl_datagram_open(const struct KlSocketProvider *sockets,
-                     const struct KlUdpConfig *cfg,
+                     const struct KlDatagramSocketConfig *cfg,
                      KlDatagramPrep *out);
 
 struct KlDatagram;   /* keel/datagram.h (opaque layout in keel/datagram_detail.h) */

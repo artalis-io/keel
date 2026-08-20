@@ -17,9 +17,8 @@
 #define __APPLE_USE_RFC_3542
 #endif
 
-#include <keel/datagram.h>
+#include <keel/datagram.h>     /* KlDatagramSocketConfig (configure) + KlDatagramOps */
 #include <keel/socket.h>
-#include <keel/udp.h>          /* KlUdpConfig */
 #include "sockaddr_native.h"   /* KlSockAddr <-> host sockaddr at the boundary */
 #include "udp_cmsg.h"          /* kl_udp_build_control / kl_udp_send_family — shared send cmsg builder */
 /* Self-contained: the pktinfo/GRO cmsg parsers are dup'd static below rather than
@@ -251,7 +250,7 @@ static kl_ssize_t pdg_send_gso(void *ctx, KlSocketHandle fd, const void *data, s
 /* ── Socket options (configure folds the three init-time setups) ──────── */
 
 static uint32_t pdg_configure(void *ctx, KlSocketHandle fd, int family,
-                              const struct KlUdpConfig *cfg) {
+                              const struct KlDatagramSocketConfig *cfg) {
     (void)ctx;
     int s = (int)fd;
     uint32_t caps = 0;

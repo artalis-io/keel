@@ -11,15 +11,14 @@
 
 #include "datagram_open.h"
 
-#include <keel/udp.h>        /* KlUdpConfig — the datagram socket-option config */
-#include <keel/datagram.h>   /* KlDatagramOps — the provider datagram data-plane (configure) */
+#include <keel/datagram.h>   /* KlDatagramSocketConfig + KlDatagramOps — the provider datagram data-plane (configure) */
 #include <keel/sockaddr.h>   /* kl_sockaddr_parse / kl_sockaddr_family / KL_AF_INET6 */
 
 #include "socket.h"          /* seam: kl_sock_socket/_bind/_close/_set_*, KlSocketProvider, kl_sockdef_dgram
                               *       (transitively supplies SOCK_DGRAM / AF_INET / AF_INET6 via sockcompat.h) */
 
 int kl_datagram_open(const struct KlSocketProvider *sockets,
-                     const struct KlUdpConfig *cfg,
+                     const struct KlDatagramSocketConfig *cfg,
                      KlDatagramPrep *out) {
     const KlDatagramOps *dg;
     void *sp_ctx;

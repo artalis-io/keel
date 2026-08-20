@@ -21,7 +21,6 @@
 #include <keel/event_ctx.h>
 #include <keel/allocator.h>
 #include <keel/sockaddr.h>
-#include <keel/udp.h>       /* KlUdpConfig — the provider configure() arg */
 
 #include "keel_lwip_raw.h"  /* kl_event_provider_lwip_raw / kl_socket_provider_lwip_raw */
 #include "lwip_raw_glue.h"  /* T3 drives the glue directly (kl_lwr_udp_* / kl_lwr_ctx_*) */
@@ -66,7 +65,7 @@ static KlSocketHandle prep_fd(const KlSocketProvider *sp, int do_bind, uint16_t 
     KlSocketHandle fd = kl_sock_socket(sp, AF_INET, SOCK_DGRAM, 0);
     if (!kl_handle_valid(fd)) return fd;
     kl_sock_set_nonblocking(sp, fd);
-    KlUdpConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
+    KlDatagramSocketConfig ucfg; memset(&ucfg, 0, sizeof(ucfg));
     if (sp && sp->dgram && sp->dgram->configure) (void)sp->dgram->configure(sp->context, fd, AF_INET, &ucfg);
     if (do_bind) {
         KlSockAddr b; kl_sockaddr_parse(&b, "127.0.0.1", 0);

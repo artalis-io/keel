@@ -13,8 +13,7 @@
 
 #define KEEL_PLATFORM_LWIP 1     /* net.h → lwip/sockets.h, not host <sys/socket.h> */
 #include <keel/socket.h>
-#include <keel/datagram.h>       /* KlDatagramOps — the provider datagram data-plane */
-#include <keel/udp.h>            /* KlUdpConfig (public) */
+#include <keel/datagram.h>       /* KlDatagramOps + KlDatagramSocketConfig (configure) */
 
 #include "keel_lwip.h"
 
@@ -184,7 +183,7 @@ static kl_ssize_t lwdg_send_gso(void *c, KlSocketHandle fd, const void *data, si
 }
 
 static uint32_t lwdg_configure(void *c, KlSocketHandle fd, int family,
-                               const struct KlUdpConfig *cfg) {
+                               const struct KlDatagramSocketConfig *cfg) {
     (void)c; (void)family;
     int s = (int)fd;
     if (cfg->reuse_addr) { int o = 1; (void)lwip_setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &o, sizeof(o)); }

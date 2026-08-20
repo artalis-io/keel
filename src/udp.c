@@ -548,7 +548,19 @@ int kl_udp_init(KlUdp *udp, const KlUdpConfig *cfg) {
      * per-datagram pktinfo/GRO/TOS capture): the provider's configure() folds all
      * three and reports the capture options the kernel accepted. */
     {
-        uint32_t caps = udp_dg(udp)->configure(udp_sp_ctx(udp), udp->dg.fd, family, cfg);
+        /* D3: the provider configure() seam takes KlDatagramSocketConfig now; bridge KlUdp's config
+         * (sockopt subset only — this temporary map is removed with udp.c in D3-2). */
+        KlDatagramSocketConfig sc = {
+            .family = cfg->family,
+            .reuse_addr = cfg->reuse_addr, .reuse_port = cfg->reuse_port,
+            .recv_pktinfo = cfg->recv_pktinfo, .recv_tos = cfg->recv_tos, .recv_gro = cfg->recv_gro,
+            .so_rcvbuf = cfg->so_rcvbuf, .so_sndbuf = cfg->so_sndbuf,
+            .tos = cfg->tos, .broadcast = cfg->broadcast,
+            .multicast_ttl = cfg->multicast_ttl,
+            .multicast_disable_loop = cfg->multicast_disable_loop,
+            .multicast_iface = cfg->multicast_iface,
+        };
+        uint32_t caps = udp_dg(udp)->configure(udp_sp_ctx(udp), udp->dg.fd, family, &sc);
         udp->dg.pktinfo  = (caps & KL_DGRAM_RX_PKTINFO) ? 1 : 0;
         udp->dg.recv_gro = (caps & KL_DGRAM_RX_GRO) ? 1 : 0;
         udp->dg.recv_tos = (caps & KL_DGRAM_RX_TOS) ? 1 : 0;

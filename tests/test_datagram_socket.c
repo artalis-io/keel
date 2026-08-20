@@ -37,7 +37,7 @@ static KlAllocator g_alloc;
 /* ── copy-posix mock provider: drop caps / clamp configure RX mask / count closes ─────────────────── */
 static KlSocketProvider g_msp; static KlSocketOps g_mops; static KlDatagramOps g_mdg;
 static unsigned  (*g_real_caps)(void *, KlSocketHandle);
-static uint32_t  (*g_real_configure)(void *, KlSocketHandle, int, const struct KlUdpConfig *);
+static uint32_t  (*g_real_configure)(void *, KlSocketHandle, int, const struct KlDatagramSocketConfig *);
 static int       (*g_real_close)(void *, KlSocketHandle);
 static int       (*g_real_connect)(void *, KlSocketHandle, const KlSockAddr *);
 static unsigned  g_drop_caps;                 /* caps() drops these bits */
@@ -45,7 +45,7 @@ static uint32_t  g_rx_keep = 0xFFFFFFFFu;     /* configure() ANDs its accepted m
 static int       g_close_calls, g_configure_calls, g_connect_calls;
 
 static unsigned m_caps(void *c, KlSocketHandle fd) { return g_real_caps(c, fd) & ~g_drop_caps; }
-static uint32_t m_configure(void *c, KlSocketHandle fd, int fam, const struct KlUdpConfig *cfg) {
+static uint32_t m_configure(void *c, KlSocketHandle fd, int fam, const struct KlDatagramSocketConfig *cfg) {
     g_configure_calls++; return g_real_configure(c, fd, fam, cfg) & g_rx_keep;
 }
 static int m_close(void *c, KlSocketHandle fd) { g_close_calls++; return g_real_close(c, fd); }

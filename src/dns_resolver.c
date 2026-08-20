@@ -8,9 +8,8 @@
  * fail the leg — the leg is marked send_pending and retried on the writable edge, bounded by a
  * send-admission guard timer so a permanently-full/dead socket can never hang a resolve (D-DNS-3).
  *
- * NOTE: this still includes <keel/udp.h> for KlUdpConfig ONLY — that is the provider's datagram
- * socket-option config type (the kl_datagram_open prep input), not the KlUdp transport object; the
- * resolver no longer creates or drives a KlUdp.
+ * The resolver's query socket is a Tier-1 KlDatagram (M3); the kl_datagram_open prep input is a
+ * KlDatagramSocketConfig (the provider's datagram socket-option config), carrying family only.
  *
  * FREESTANDING (KEEL_FREESTANDING): the UDP query engine — dual-family queries,
  * 0x20 randomization, EDNS0, DNS cookies, the bounds-safe parser, and literal-IP /
@@ -30,8 +29,7 @@
  * TC-settles-clean branch is runtime-proven by tests/freestanding_dns_harness.c.
  */
 #include <keel/dns_resolver.h>
-#include <keel/udp.h>            /* KlUdpConfig ONLY — the kl_datagram_open prep socket-option config */
-#include <keel/datagram.h>       /* KlDatagram public API (Tier-1 datagram transport) */
+#include <keel/datagram.h>       /* KlDatagram public API + KlDatagramSocketConfig (kl_datagram_open prep) */
 #include <keel/datagram_detail.h>/* KlDatagram layout — the resolver embeds one by value */
 #include <keel/timer.h>
 #include <keel/event_ctx.h>
@@ -1567,8 +1565,8 @@ static int dns_build_ns_list(KlDnsResolver *r, const KlDnsResolverConfig *cfg, i
     if (nns == 0)
         return -1;
     r->nns = nns;
-    /* KlUdpConfig.family is a host domain (AF_INET/AF_INET6); map from the neutral family, exactly as
-     * the freestanding client (client_async.c) does when opening a socket. */
+    /* KlDatagramSocketConfig.family is a host domain (AF_INET/AF_INET6); map from the neutral family,
+     * exactly as the freestanding client (client_async.c) does when opening a socket. */
     *family = (fam == KL_AF_INET6) ? AF_INET6 : AF_INET;
     return 0;
 }
@@ -1627,7 +1625,7 @@ KlResolver *kl_dns_resolver_create_slots(KlEventCtx *ctx, const KlDnsResolverCon
      * source is a configured nameserver. Prepare the fd provider-neutrally (M0), then adopt it into a
      * fixed-slot KlDatagram (M3). The prep socket-option config carries family only — no bind (ephemeral
      * source port), no extensions (want_caps 0; the resolver reads neither `local` nor recv-TOS). */
-    KlUdpConfig uc = { .family = family };
+    KlDatagramSocketConfig uc = { .family = family };
     KlDatagramPrep prep;
     if (kl_datagram_open(ctx->sockets, &uc, &prep) != 0) {
         kl_free(alloc, r, sizeof(*r));

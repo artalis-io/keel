@@ -29,7 +29,7 @@
 #include "clock_snapshot.h"               /* TLS-platform-lifetime snapshot clock gate (U-8) */
 
 #include <keel/sockaddr.h>
-#include <keel/udp.h>                /* KlUdpConfig + KlUdpTransport layout (6.4b) */
+#include <keel/udp.h>                /* KlUdpTransport layout (6.4b) — provider datagram target */
 #include <keel/datagram.h>           /* public KlDatagram facade (7B-9 close e2e) */
 #include <keel/datagram_detail.h>    /* opt-in KlDatagram layout (stack-allocate the handle) */
 #include "../../src/datagram_open.h" /* kl_datagram_teardown — synchronous owner-destruction (Option A) */
@@ -1335,7 +1335,7 @@ static void t_udp_recv_normal(void) {
     CHECK(kl_handle_valid(fd), "udp socket created");
     CHECK(kl_efi_is_udp_handle(fd), "handle is UDP-tagged");
     const KlDatagramOps *ops = kl_uefi_udp_dgram_ops();
-    KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);   /* unbound DHCP-ephemeral configure */
     CHECK(g_udp_configure_calls == 1, "unbound configure() Configured once");
     unsigned long long gen = kl_uefi_udp_generation_h(fd);   /* the op identity captured at post */
@@ -1369,7 +1369,7 @@ static void t_udp_recv_truncate(void) {
     T_CASE("udp: over-capacity datagram truncates to the caller buffer");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     unsigned long long gen = kl_uefi_udp_generation_h(fd);
     memset(g_udp_resp, 'A', 20); g_udp_resp_len = 20; g_udp_receive_mode = TOK_COMPLETE_OK;
@@ -1386,7 +1386,7 @@ static void t_udp_send_normal(void) {
     T_CASE("udp: normal transmit (dest in session, completes ok)");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     unsigned long long gen = kl_uefi_udp_generation_h(fd);
     g_udp_transmit_mode = TOK_COMPLETE_OK;
@@ -1406,7 +1406,7 @@ static void t_udp_cancel_confirmed(void) {
     T_CASE("udp: confirmed cancel retires the token → clean close");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     unsigned long long gen = kl_uefi_udp_generation_h(fd);
     g_udp_receive_mode = TOK_HANG;
@@ -1429,7 +1429,7 @@ static void t_udp_quarantine_unconfirmed(void) {
     T_CASE("udp: unconfirmed Rx cancel at close → quarantine (leak) + QUARANTINED op result");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     unsigned long long gen = kl_uefi_udp_generation_h(fd);
     g_udp_receive_mode = TOK_HANG;
@@ -1459,7 +1459,7 @@ static void t_udp_quarantine_tx(void) {
     T_CASE("udp: unconfirmed Tx cancel at close → quarantine + QUARANTINED op result");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     unsigned long long gen = kl_uefi_udp_generation_h(fd);
     int q_before = kl_uefi_udp_provider_quarantined_count();   /* prior udp tests may have leaked slots */
@@ -1489,7 +1489,7 @@ static void t_udp_sync_send_quarantine(void) {
     T_CASE("udp: sync dgram->send timeout + unconfirmed cancel → centralized quarantine (gen bumped once)");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     unsigned long long gen = kl_uefi_udp_generation_h(fd);
     int q_before = kl_uefi_udp_provider_quarantined_count();
@@ -1520,7 +1520,7 @@ static KlSocketHandle dgl_socket(void) {
     fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
     const KlDatagramOps *ops = kl_uefi_udp_dgram_ops();
-    KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     return fd;
 }
@@ -2240,7 +2240,7 @@ static void t_udp_poll_recv_null_copy(void) {
     T_CASE("udp: poll_recv NULL-copy mode recycles a live signalled token without copying");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     unsigned long long gen = kl_uefi_udp_generation_h(fd);
     memcpy(g_udp_resp, "data", 4); g_udp_resp_len = 4; g_udp_receive_mode = TOK_COMPLETE_OK;
@@ -2262,7 +2262,7 @@ static void t_udp_stale_generation_drop(void) {
     T_CASE("udp: stale-generation poll drops without touching the reused slot's token");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     unsigned long long oldgen = kl_uefi_udp_generation_h(fd);
     memcpy(g_udp_resp, "old", 3); g_udp_resp_len = 3; g_udp_receive_mode = TOK_COMPLETE_OK;
@@ -2333,7 +2333,7 @@ static void t_udp_unified_provider(void) {
     CHECK(kl_handle_valid(tfd) && !kl_efi_is_udp_handle(tfd), "SOCK_STREAM → a stream handle (untagged)");
 
     /* A datagram round-trips through the unified provider's .dgram + completion primitives. */
-    KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)p->dgram->configure(p->context, ufd, AF_INET_, &cfg);
     unsigned long long gen = kl_uefi_udp_generation_h(ufd);
     memcpy(g_udp_resp, "ok", 2); g_udp_resp_len = 2; g_udp_receive_mode = TOK_COMPLETE_OK;
@@ -2356,7 +2356,7 @@ static void t_udp_bind_single_configure(void) {
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
     const KlDatagramOps *ops = kl_uefi_udp_dgram_ops();
-    KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg)); cfg.bind_addr = "10.0.2.15"; cfg.bind_port = 5300;
+    KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg)); cfg.bind_addr = "10.0.2.15"; cfg.bind_port = 5300;
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     CHECK(g_udp_configure_calls == 0, "configure() DEFERS the bind_addr case (no Configure yet)");
     KlSockAddr b; mk_ipv4(&b, 10, 0, 2, 15, 5300);
@@ -2376,7 +2376,7 @@ static void t_udp_configure_failclose(void) {
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
     const KlDatagramOps *ops = kl_uefi_udp_dgram_ops();
     g_udp_configure_status = EFI_INVALID_PARAMETER;   /* force Configure to fail */
-    KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));     /* unbound → configures here */
+    KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));     /* unbound → configures here */
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     CHECK(g_destroy_child_calls >= 1, "fail-close tore down the child (DestroyChild)");
     CHECK(kl_uefi_udp_post_recv(fd) == -1, "a subsequent op fails on the fail-closed slot");
@@ -2389,7 +2389,7 @@ static void t_udp_send_tos_and_srcpin(void) {
     T_CASE("udp: dgram->send TOS-reject + source-pin (valid lands pre-submit, invalid rejected)");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     g_udp_transmit_mode = TOK_COMPLETE_OK;
     KlSockAddr dest; mk_ipv4(&dest, 10, 0, 2, 3, 53);
@@ -2410,7 +2410,7 @@ static void t_udp_after_ebs_refuses(void) {
     T_CASE("udp: post-ExitBootServices ops are fail-closed (no firmware calls)");
     reset_counters(); fresh_udp();
     KlSocketHandle fd = kl_uefi_udp_socket(AF_INET_, SOCK_DGRAM_, 0);
-    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlUdpConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    const KlDatagramOps *ops = kl_uefi_udp_dgram_ops(); KlDatagramSocketConfig cfg; memset(&cfg, 0, sizeof(cfg));
     (void)ops->configure(NULL, fd, AF_INET_, &cfg);
     g_after_ebs = 1;
     int fw_before = g_firmware_calls;

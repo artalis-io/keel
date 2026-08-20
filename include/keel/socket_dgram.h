@@ -30,10 +30,10 @@
  * internal concern in src/io_engine.h — not here.
  */
 
-struct KlUdpConfig;   /* keel/udp.h — datagram socket-option config (borrowed) */
+struct KlDatagramSocketConfig;   /* keel/datagram.h — datagram socket-option config (borrowed) */
 
 /* Per-datagram receive-capture options a provider enabled during configure(),
- * returned so udp.c stores the matching state (kernel may reject any of them). */
+ * returned so the datagram core stores the matching state (kernel may reject any of them). */
 #define KL_DGRAM_RX_PKTINFO  (1u << 0)  /* local (dest) address via pktinfo */
 #define KL_DGRAM_RX_GRO      (1u << 1)  /* UDP_GRO receive coalescing */
 #define KL_DGRAM_RX_TOS      (1u << 2)  /* per-datagram TOS/Traffic-Class */
@@ -91,7 +91,7 @@ typedef struct KlDatagramOps {
      * Returns the bitmask of KL_DGRAM_RX_* capture options the kernel accepted
      * (udp.c stores the corresponding flags). */
     uint32_t (*configure)(void *ctx, KlSocketHandle fd, int family,
-                          const struct KlUdpConfig *cfg);
+                          const struct KlDatagramSocketConfig *cfg);
     /* Set the outgoing TOS/DSCP/ECN mark (dynamic, post-init). 0 / -1. */
     int (*set_tos)(void *ctx, KlSocketHandle fd, int family, int tos);
     /* Join (join=1) / leave (join=0) an any-source multicast group. 0 / -1. */

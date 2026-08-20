@@ -51,22 +51,20 @@ int kl_udp_server_init(KlUdpServer *s, KlEventCtx *ctx,
      * on a readiness loop, where the batch's borrowed-view seam splits it per-datagram. */
     int completion = (kl_event_caps(&ctx->loop) & KL_EVENT_CAP_COMPLETION) != 0;
 
-    /* Step 1: prepare the fd provider-neutrally (M0). recv_pktinfo on a wildcard bind (§4);
-     * multicast_group is joined post-init via M2 (§6), not at configure. M5.4: recv_gro is enabled on a
-     * readiness loop when requested (the recv batch splits it); mmsg_batch stays 0 here — the datagram's
-     * recvmmsg batching is a separate RECV KlDatagramBatch attached below, not KlUdp's own path. */
-    KlUdpConfig uc = {
+    /* Step 1: prepare the fd provider-neutrally (M0). Only the sockopt subset is read at prep — the
+     * recv slot cap + send byte budget come from the server cfg below (recv_cap/eff_budget), not this
+     * config. recv_pktinfo on a wildcard bind (§4); multicast_group is joined post-init via M2 (§6), not
+     * at configure. M5.4: recv_gro is enabled on a readiness loop when requested (the recv batch splits
+     * it). D3: the prep config is a KlDatagramSocketConfig (single config type). */
+    KlDatagramSocketConfig uc = {
         .ctx            = ctx,
         .bind_addr      = cfg->bind_addr ? cfg->bind_addr : "0.0.0.0",
         .bind_port      = cfg->port,
-        .recv_buf_size  = cfg->recv_buf_size,
-        .max_send_queue = cfg->max_send_queue,
         .reuse_addr     = 1,               /* servers want quick rebind */
         .reuse_port     = cfg->reuse_port,
         .recv_pktinfo   = wildcard,
         .so_rcvbuf      = cfg->so_rcvbuf,
         .so_sndbuf      = cfg->so_sndbuf,
-        .mmsg_batch     = 0,               /* KlUdp's own batching stays off; the datagram batch is separate */
         .recv_gro       = (!completion && cfg->recv_gro) ? 1 : 0,   /* GRO capture: readiness only (M5.4) */
         .tos            = cfg->tos,
         .recv_tos       = cfg->recv_tos,
