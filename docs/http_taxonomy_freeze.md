@@ -337,7 +337,10 @@ test_response→test_http_response  test_router→test_http_router  test_cors→
 test_connection→test_http_connection  test_body_reader→test_http_body_reader
 test_multipart_stream→test_http_multipart_stream  test_chunked→test_http1_chunked
 test_sse→test_http_sse  test_redirect→test_http_redirect  test_response_parser→test_http1_response_parser
-test_h2→test_http2  test_h2_client→test_http2_client  test_proxy→test_http_client_proxy`.
+test_parser→test_http1_parser  test_h2→test_http2  test_h2_client→test_http2_client  test_proxy→test_http_client_proxy`.
+(`test_parser` — the HTTP/1 request-parser unit test exercising `KlHttp1Parser`/`kl_http1_parser_llhttp`,
+the direct sibling of `test_response_parser` — was folded into T3 as a straggler the original inventory
+missed; renamed by the same "test file follows module" rule since `parser.h`→`http1_parser.h`.)
 
 **HTTP-specific tests with GENERIC names (reviewer audit) — also RENAME:**
 `test_integration→test_http_integration` (73 `KlServer` refs), `test_proto_hooks→test_http_proto_hooks`

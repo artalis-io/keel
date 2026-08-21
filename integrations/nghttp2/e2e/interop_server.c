@@ -5,7 +5,7 @@
  * 127.0.0.1:18478, route GET /hello -> JSON.
  */
 #include <keel/keel.h>
-#include "keel_h2_nghttp2.h"
+#include "keel_http2_nghttp2.h"
 #include <stdio.h>
 
 #define INTEROP_PORT 18478

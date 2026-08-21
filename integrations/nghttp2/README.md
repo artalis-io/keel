@@ -3,13 +3,13 @@
 First-party adapters implementing Keel's HTTP/2 **session** vtables on top of
 [nghttp2](https://github.com/nghttp2/nghttp2):
 
-- **client** — `KlH2ClientSession` (`include/keel/h2_client.h`)
-- **server** — `KlH2ServerSession` (`include/keel/h2_server.h`)
+- **client** — `KlHttp2ClientSession` (`include/keel/h2_client.h`)
+- **server** — `KlHttp2ServerSession` (`include/keel/h2_server.h`)
 
 Keel's HTTP/2 code is framing-agnostic: it drives a session vtable and never
 speaks HPACK/frames itself. These adapters plug nghttp2 in behind that seam.
 nghttp2 is confined to the adapter `.c` files — **no nghttp2 type appears in
-`keel_h2_nghttp2.h` or any Keel core header**.
+`keel_http2_nghttp2.h` or any Keel core header**.
 
 This lives **outside** the dependency-light core: plain `make` / `make test`
 never touch nghttp2.
@@ -44,32 +44,32 @@ make integration-nghttp2 NGHTTP2_DIR=$(brew --prefix libnghttp2)   # from repo r
 cd integrations/nghttp2 && make NGHTTP2_DIR=$(brew --prefix libnghttp2)
 ```
 
-Produces `libkeel_h2_nghttp2.a` (both client + server adapter objects).
+Produces `libkeel_http2_nghttp2.a` (both client + server adapter objects).
 
 ## Link & wire up
 
 ```sh
 cc app.c \
    -Iinclude -Iintegrations/nghttp2 \
-   -L. -lkeel -Lintegrations/nghttp2 -lkeel_h2_nghttp2 \
+   -L. -lkeel -Lintegrations/nghttp2 -lkeel_http2_nghttp2 \
    $(pkg-config --libs libnghttp2)
 ```
 
 Client:
 
 ```c
-KlH2ClientConfig cfg = {
+KlHttp2ClientConfig cfg = {
     .tls     = &my_tls_cfg,
-    .session = kl_h2_nghttp2_client_session,   // factory
+    .session = kl_http2_nghttp2_client_session,   // factory
 };
-KlH2ClientConn *c = kl_h2_client_connect(ev, &alloc, &cfg, url, on_err, ud);
+KlHttp2ClientConn *c = kl_http2_client_connect(ev, &alloc, &cfg, url, on_err, ud);
 ```
 
 Server:
 
 ```c
-KlH2ServerConfig h2 = { .factory = kl_h2_nghttp2_server_session };
-// wire into the server's HTTP/2 upgrade path (KlH2ServerConfig)
+KlHttp2ServerConfig h2 = { .factory = kl_http2_nghttp2_server_session };
+// wire into the server's HTTP/2 upgrade path (KlHttp2ServerConfig)
 ```
 
 Requests are issued with `:scheme` `https` (the Keel h2 client is TLS-oriented;
@@ -89,8 +89,8 @@ Three levels of coverage, all under [`e2e/`](e2e/):
    other's `recv`, so a full `GET / → 200`+body is exercised through real nghttp2
    framing. Validates both adapters against each other.
 2. **`e2e/e2e_socket.c`** (`make e2e`) — end-to-end over a **real loopback socket +
-   Keel event loop**: the Keel nghttp2 **client** (`kl_h2_client_connect`,
-   cleartext h2c) against the Keel nghttp2 **server** (`KlConfig.h2`, entered via
+   Keel event loop**: the Keel nghttp2 **client** (`kl_http2_client_connect`,
+   cleartext h2c) against the Keel nghttp2 **server** (`KlHttpServerConfig.h2`, entered via
    h2c prior-knowledge). Drives both adapters through the actual Keel driver paths.
 3. **`make interop-curl`** (`e2e/interop_server.c`) — third-party interop: stands
    up the Keel nghttp2 server and hits it with `curl --http2-prior-knowledge`.
@@ -103,9 +103,9 @@ Three levels of coverage, all under [`e2e/`](e2e/):
 > session stalls waiting for the magic and resets the connection. `test_roundtrip`
 > mirrors this by stripping the leading 24 bytes on its first server feed.
 
-> **Client submit timing.** `kl_h2_client_request` returns `-1` until the async
+> **Client submit timing.** `kl_http2_client_request` returns `-1` until the async
 > connect reaches its ACTIVE state (no connection-ready callback is exposed), so
-> a caller submitting immediately after `kl_h2_client_connect` must retry until it
+> a caller submitting immediately after `kl_http2_client_connect` must retry until it
 > succeeds — see the loop in `e2e_socket.c`.
 
 ### Conformance + third-party interop
@@ -134,7 +134,7 @@ one KEEL-specific delta is an abortive close (RST) where the reference does a
 graceful FIN — a core connection-teardown behavior, out of scope for the adapter.
 
 Getting there fixed three real adapter/integration bugs, all in
-`h2_nghttp2_server.c` (+ a `want_read` vtable method in `h2_server.h`):
+`http2_nghttp2_server.c` (+ a `want_read` vtable method in `h2_server.h`):
 - **`no_recv_client_magic`** (above) — the initial connect fix.
 - **`want_read`** → KEEL (`h2.c`) closes once the session wants neither read nor
   write (a terminated session, e.g. after a GOAWAY), instead of lingering until
@@ -155,7 +155,7 @@ container run --rm -v "$PWD:/src" ubuntu:24.04 bash -c '
   apt-get update && apt-get install -y build-essential libnghttp2-dev pkg-config
   cd /src && cc -g -O1 -fsanitize=address,undefined \
     -Iinclude -Iintegrations/nghttp2 $(pkg-config --cflags libnghttp2) \
-    integrations/nghttp2/h2_nghttp2_client.c integrations/nghttp2/h2_nghttp2_server.c \
+    integrations/nghttp2/http2_nghttp2_client.c integrations/nghttp2/http2_nghttp2_server.c \
     integrations/nghttp2/e2e/test_roundtrip.c src/allocator.c \
     $(pkg-config --libs libnghttp2) -o /tmp/rt && ASAN_OPTIONS=detect_leaks=1 /tmp/rt'
 ```
@@ -176,5 +176,5 @@ container run --rm -v "$PWD:/src" ubuntu:24.04 bash -c '
 
 ## Compatibility promise
 
-Source + static-relink only. The adapters track the public `KlH2ClientSession` /
-`KlH2ServerSession` vtables in `include/keel/`.
+Source + static-relink only. The adapters track the public `KlHttp2ClientSession` /
+`KlHttp2ServerSession` vtables in `include/keel/`.

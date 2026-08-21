@@ -1,5 +1,5 @@
 /*
- * keel_h2_nghttp2.h — nghttp2 backend for Keel's HTTP/2 session vtables.
+ * keel_http2_nghttp2.h — nghttp2 backend for Keel's HTTP/2 session vtables.
  *
  * Implements the client (KlHttp2ClientSession, include/keel/h2_client.h) and
  * server (KlHttp2ServerSession, include/keel/h2_server.h) session vtables on top
@@ -22,8 +22,8 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#ifndef KEEL_H2_NGHTTP2_H
-#define KEEL_H2_NGHTTP2_H
+#ifndef KEEL_HTTP2_NGHTTP2_H
+#define KEEL_HTTP2_NGHTTP2_H
 
 #include <keel/allocator.h>
 #include <keel/http2_client.h>
@@ -59,4 +59,4 @@ KlHttp2ServerSession *kl_http2_nghttp2_server_session(KlAllocator *alloc,
 }
 #endif
 
-#endif /* KEEL_H2_NGHTTP2_H */
+#endif /* KEEL_HTTP2_NGHTTP2_H */

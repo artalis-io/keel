@@ -13,7 +13,7 @@
  * just against each other in memory. Exits non-zero on any mismatch/timeout.
  */
 #include <keel/keel.h>
-#include "keel_h2_nghttp2.h"
+#include "keel_http2_nghttp2.h"
 
 #include <pthread.h>
 #include <stdio.h>

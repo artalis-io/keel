@@ -1,5 +1,5 @@
 /*
- * test_proxy.c — HTTP proxy support tests
+ * test_http_client_proxy.c — HTTP proxy support tests
  *
  * Tests proxy config handling, CONNECT request format, absolute-form URLs,
  * pool key matching with proxy fields, and error handling.

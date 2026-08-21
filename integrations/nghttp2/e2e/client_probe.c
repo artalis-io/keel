@@ -8,7 +8,7 @@
  * Usage: client_probe [host] [port] [path]   (defaults 127.0.0.1 18479 /)
  */
 #include <keel/keel.h>
-#include "keel_h2_nghttp2.h"
+#include "keel_http2_nghttp2.h"
 
 #include <stdio.h>
 #include <stdlib.h>

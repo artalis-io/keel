@@ -5,7 +5,7 @@
  * + response is exercised through real nghttp2 framing. Validates both adapters
  * against each other. Exits non-zero on any mismatch.
  */
-#include "keel_h2_nghttp2.h"
+#include "keel_http2_nghttp2.h"
 #include <keel/allocator.h>
 
 #include <stdio.h>

@@ -1,5 +1,5 @@
 /*
- * h2_nghttp2_client.c — client-side KlHttp2ClientSession backed by nghttp2.
+ * http2_nghttp2_client.c — client-side KlHttp2ClientSession backed by nghttp2.
  *
  * Maps the KEEL client session vtable (recv / submit_request / flush / destroy)
  * onto an nghttp2 client session, and nghttp2's receive callbacks back onto the
@@ -13,7 +13,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include "keel_h2_nghttp2.h"
+#include "keel_http2_nghttp2.h"
 
 #include <nghttp2/nghttp2.h>
 #include <stdint.h>

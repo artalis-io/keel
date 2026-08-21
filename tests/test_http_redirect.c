@@ -1,5 +1,5 @@
 /*
- * test_redirect.c — Tests for URL resolution and redirect following
+ * test_http_redirect.c — Tests for URL resolution and redirect following
  */
 
 #include "utest.h"

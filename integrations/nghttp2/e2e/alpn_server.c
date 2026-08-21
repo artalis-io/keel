@@ -14,7 +14,7 @@
  */
 #include <keel/keel.h>
 #include <keel_tls_mbedtls.h>
-#include "keel_h2_nghttp2.h"
+#include "keel_http2_nghttp2.h"
 #include <stdio.h>
 
 #define ALPN_PORT 18443
