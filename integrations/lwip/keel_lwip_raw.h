@@ -37,7 +37,7 @@
  *     TLS file/stream body). BYO mbedTLS.
  *   - UDP (KlDatagram / udp_server): the provider exposes datagram ops (.dgram != NULL), so
  *     kl_datagram_socket_init() over the raw completion loop succeeds (LC-3a).
- *   - DNS: KEEL's built-in async resolver (src/dns_resolver.c) over KlDatagram-on-raw (LC-3) —
+ *   - DNS: KEEL's built-in async resolver (protocols/dns/dns_resolver.c) over KlDatagram-on-raw (LC-3) —
  *     one DNS path, no lwIP dns_gethostbyname.
  *   - Buffered, streaming, and file responses of UNBOUNDED size (transmit memory is bounded
  *     by a fixed per-conn window — the response/file size is not).

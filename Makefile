@@ -60,7 +60,7 @@ else ifdef WINDOWS
   SERVER_PLAT_SRC = protocols/http/http_server_plat_win.c
   DGRAM_SRC = src/socket_dgram_win.c   # Winsock datagram ops (KlSocketProvider.dgram)
   UDP_CMSG_SRC = src/udp_cmsg_win.c    # shared WSARecvMsg fetch + pktinfo parse (IOCP + dgram)
-  DNS_SYS_SRC = src/dns_sys_win.c
+  DNS_SYS_SRC = protocols/dns/dns_sys_win.c
   FILE_IO_SRC = src/file_io.c
   TEST_COMPAT_SRC = tests/net_compat_win.c
   LDFLAGS += -lws2_32 -lmswsock -lbcrypt -liphlpapi
@@ -161,7 +161,7 @@ TEST_COMPAT_SRC ?= tests/net_compat_posix.c
 # DNS config discovery (nameservers/hosts/search): POSIX resolv.conf/hosts; the
 # Windows branch swaps the iphlpapi sibling. dns_resolver.c itself is #ifdef-free
 # and runs over the udp + socket.h seams.
-DNS_SYS_SRC ?= src/dns_sys_posix.c
+DNS_SYS_SRC ?= protocols/dns/dns_sys_posix.c
 # Completion axis core (RC-1; split in freestanding B2a). The generic tick
 # (completion_core.c: kl_comp_run — routes non-generic completion kinds through the two
 # opaque KlEventCtx hooks so it references neither the server nor UDP handlers) + the
@@ -194,7 +194,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            protocols/http/http_client_proxy.c \
            protocols/http/http_client_pool.c protocols/http/http_redirect.c protocols/http/http_sse.c \
            src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
-           src/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
+           protocols/dns/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            protocols/http/http_compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
            src/connect_op.c src/listener.c \
            $(COMPLETION_CORE) $(FILE_IO_SRC) src/event_dispatch.c $(EVENT_SRC)
@@ -903,7 +903,7 @@ check-sockaddr-neutral:
 # they drive the loop / async connect via the Keel completion tick (io_engine.h). Everything NOT here
 # is governed.
 TIER1_INFRA = $(wildcard src/event_*.c) $(wildcard src/socket_*.c) $(wildcard src/completion_*.c) \
-              $(wildcard src/platform_*.c) $(wildcard protocols/http/http_server_plat_*.c) $(wildcard protocols/http/completion_*.c) $(wildcard protocols/http2/completion_*.c) $(wildcard protocols/websocket/completion_*.c) $(wildcard src/dns_sys_*.c) \
+              $(wildcard src/platform_*.c) $(wildcard protocols/http/http_server_plat_*.c) $(wildcard protocols/http/completion_*.c) $(wildcard protocols/http2/completion_*.c) $(wildcard protocols/websocket/completion_*.c) $(wildcard protocols/dns/dns_sys_*.c) \
               $(wildcard src/udp_cmsg*.c) $(wildcard src/stream*.c) $(wildcard src/datagram*.c) \
               src/listener.c src/connect_op.c \
               src/event_ctx.c protocols/http/async.c protocols/http/http_server_core.c protocols/http/http_server.c protocols/http/http_client_async.c
@@ -1064,8 +1064,8 @@ cppcheck:
 	  --suppress=toomanyconfigs --suppress=staticFunction \
 	  --suppress=normalCheckLevelMaxBranches \
 	  --suppress=unmatchedSuppression \
-	  --suppress=unusedStructMember:src/dns_resolver.c \
-	  --suppress=knownConditionTrueFalse:src/dns_resolver.c \
+	  --suppress=unusedStructMember:protocols/dns/dns_resolver.c \
+	  --suppress=knownConditionTrueFalse:protocols/dns/dns_resolver.c \
 	  --suppress=constParameterCallback:src/event_iocp.c \
 	  --suppress=constParameterCallback:src/event_iouring.c \
 	  --suppress=constParameterCallback:src/event_pollcomp.c \
@@ -1492,7 +1492,7 @@ freestanding-dgram-link:
 	echo "== freestanding-dgram-link: OK — client + datagram archives compose:$$linked =="
 
 # ── Freestanding DNS layer (6.4a-2) ───────────────────────────────────────────
-# The stock async resolver (src/dns_resolver.c) freestanding-enabled: it rides the
+# The stock async resolver (protocols/dns/dns_resolver.c) freestanding-enabled: it rides the
 # datagram layer (KlUdp over a freestanding provider) for UDP-only Do53 against an
 # EXPLICIT cfg->nameserver. dns_resolver.c compiles its three hosted-only surfaces
 # out under KEEL_FREESTANDING — RFC 7766 TCP fallback, /etc/hosts, resolv.conf
@@ -1501,7 +1501,7 @@ freestanding-dgram-link:
 # errno / getaddrinfo / dns_sys / TCP-fallback symbol. This is the archive the future
 # EFI_UDP4 backend (6.4b) links the built-in resolver from; the bespoke dns_uefi.c was
 # retired against it separately (2026-08).
-FREESTANDING_DNS_SRC = $(FREESTANDING_DGRAM_SRC) src/dns_resolver.c
+FREESTANDING_DNS_SRC = $(FREESTANDING_DGRAM_SRC) protocols/dns/dns_resolver.c
 
 freestanding-lib-dns:
 	@echo "== freestanding DNS archive: toolchain = $(FREESTANDING_LIB_CC); targets = $(if $(FREESTANDING_IS_CLANG),$(FREESTANDING_TARGETS),native) =="
@@ -1606,7 +1606,7 @@ freestanding-lib-server-selfcontained:
 	$(call fs_build_and_gate,$(FREESTANDING_SERVER_SC_SRC),libkeel_freestanding_server_selfcontained,selfcontained,$(FREESTANDING_SC_EXTRA))
 
 # Self-contained DATAGRAM+DNS archive (6.4c UEFI EFI_UDP4 e2e): the datagram machine
-# (udp + datagram_* + completion) + the STOCK src/dns_resolver.c + in-archive mem*/
+# (udp + datagram_* + completion) + the STOCK protocols/dns/dns_resolver.c + in-archive mem*/
 # strlen (kl_cstr_builtin.c), for a bare EFI target with no libc/EDK2 BaseMemoryLib.
 # Same selfcontained gate — mem*/strlen must be DEFINED; the only undefined symbols are
 # the KEEL platform/provider hooks (+ PE __chkstk/_fltused). build_dgram_dns.sh links

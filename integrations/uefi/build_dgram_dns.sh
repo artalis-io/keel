@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build_dgram_dns.sh — build the 6.4c stock-dns_resolver-over-EFI_UDP4 self-test into BOOTX64.EFI.
 #
-# This links the STOCK src/dns_resolver.c — the real async Do53 engine — over KlDatagram-over-
+# This links the STOCK protocols/dns/dns_resolver.c — the real async Do53 engine — over KlDatagram-over-
 # EFI_UDP4. (The retired U-5 build linked a bespoke one-shot dns_uefi.c behind the synchronous
 # kl_resolve_sync; both build_u5.sh and dns_uefi.c have since been removed.) The transport is
 # the unified EFI socket provider (SOCK_DGRAM → EFI_UDP4, socket_efi_udp4.c) +

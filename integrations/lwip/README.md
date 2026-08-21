@@ -146,7 +146,7 @@ support:
 | HTTP/1.1 incl. keep-alive | **Supported** | rides `KlHttpServer` / `KlHttpClient` |
 | **HTTPS** (client + server) | **Supported** (LC-4) | client over the mbedTLS socket-BIO routed through `kl_socket_provider_lwip_raw()`; server over the generic memory-BIO completion-TLS leg. Buffered HTTP/1.1 over TLS (no ALPN-h2, no TLS file/stream body). BYO mbedTLS |
 | **UDP** / `udp_server` | **Supported** (LC-3a) | provider exposes datagram ops (`.dgram != NULL`); `kl_datagram_socket_init` runs `KlDatagram` over the raw completion loop |
-| **DNS** | **Supported** (LC-3) | KEEL's built-in async resolver (`src/dns_resolver.c`) over `KlDatagram`-on-raw — one DNS path, no lwIP `dns_gethostbyname` |
+| **DNS** | **Supported** (LC-3) | KEEL's built-in async resolver (`protocols/dns/dns_resolver.c`) over `KlDatagram`-on-raw — one DNS path, no lwIP `dns_gethostbyname` |
 | Buffered / streaming / file responses | **Supported** | **unbounded** response size; bounded transmit memory |
 | Request bodies | **Supported** | bounded per-conn receive flow-control (`ERR_MEM` backpressure) |
 | Router, middleware, CORS, SSE, body readers, compression | **Supported** | the server-path modules that ride `KlHttpServer` |
