@@ -1,12 +1,14 @@
 # R1 — Physical Restructure Inventory & Design Freeze (protocols/ + integrations/)
 
-Status: **DOCS-ONLY FREEZE, rev 2 — no code moved.** Pause for review before R2.
+Status: **DOCS-ONLY FREEZE, rev 3 — no code moved.** Pause for review before R2.
 Branch: `restructure/protocols-integrations` (off merged `main`, taxonomy T1–T4 present).
 
-Rev 2 folds in the reviewer rulings on D1–D7, the **governing classification principle**, the concrete
-splits it implies (compress, internal.h, clock, resolver bound), the **gate-timing rule** (existing gates
-repointed in the same commit as each move), and the **enumerated integration seam allowlist** (incl.
-same-role TLS adapter reuse). Corrects the stale §-references from rev 1.
+Rev 3 (this pass) applies §0.1 to the miniz codec **adapters** — backend-specific integration files that
+move to `integrations/codec/miniz/` (not substrate) — and replaces G3's wildcard "datagram_*.h detail
+seams" with the exact two headers integrations consume (`datagram_life.h`, `datagram_open.h`).
+Rev 2 folded in the D1–D7 rulings, the **governing classification principle** (§0.1), the concrete splits
+(compress, internal.h, clock, resolver bound), the **gate-timing rule**, and the enumerated integration
+seam allowlist incl. same-role TLS adapter reuse.
 
 ## 0. Scope & constraints
 
@@ -45,9 +47,10 @@ moves.
 src/                         # substrate: transport + runtime + generic codec
 include/keel/                # ALL public headers, flat (+ new clock.h, http_compress.h)
 protocols/{http,http2,websocket,dns,proxy_protocol}/
-integrations/{platform/{lwip,uefi}, tls/{openssl,mbedtls,boringssl,libressl}, http2/nghttp2}
-# no transports/quic/ (reserved, no impl). no integrations/codec/miniz/ — miniz is external
-# BYO (MINIZ_DIR); its adapter TUs (compress_miniz.c/decompress_miniz.c) are substrate (§2.7).
+integrations/{platform/{lwip,uefi}, tls/{openssl,mbedtls,boringssl,libressl}, http2/nghttp2, codec/miniz}
+# no transports/quic/ (reserved, no impl). integrations/codec/miniz/ holds Keel's miniz ADAPTER TUs
+# (compress_miniz.c/decompress_miniz.c) — backend-specific integration files (§2.7, §0.1 rule 5).
+# The miniz LIBRARY itself stays external BYO (MINIZ_DIR); its public adapter headers stay flat.
 ```
 
 ## 2. Classification inventory
@@ -58,7 +61,7 @@ integrations/{platform/{lwip,uefi}, tls/{openssl,mbedtls,boringssl,libressl}, ht
 
 **`.c` (substrate):** allocator.c, allocator_default_stdlib.c, completion_absent.c, completion_core.c,
 completion_dispatch.c, completion_readiness_stub.c, **compress.c (generic codec only — HTTP adapter
-extracted, §4.4)**, compress_miniz.c, decompress.c, decompress_miniz.c, connect_op.c, datagram*.c (11),
+extracted, §4.4)**, decompress.c, connect_op.c, datagram*.c (11),
 drain.c, error.c, event_*.c (11), file_io.c, kl_cstr.c, kl_cstr_builtin.c, listener.c, platform_posix.c,
 platform_win.c, platform_wakeup_posix.c, platform_wakeup_win.c, resolve_sync.c, resolver_cache.c,
 sockaddr.c, socket_posix.c, socket_winsock.c, socket_dgram_posix.c, socket_dgram_win.c, stream.c,
@@ -113,10 +116,19 @@ wire logic. Generic `resolver.h` + `resolver_cache.c` stay substrate.)
 | integrations/boringssl/ | integrations/tls/boringssl/ | recompiles `../openssl/tls_openssl.c` (compat macro) |
 | integrations/libressl/ | integrations/tls/libressl/ | recompiles `../openssl/tls_openssl.c` (compat macro) |
 | integrations/nghttp2/ | integrations/http2/nghttp2/ | HTTP/2 session adapter |
+| src/compress_miniz.c src/decompress_miniz.c | integrations/codec/miniz/ | **NEW dir** — Keel's miniz codec ADAPTER TUs |
 
-**miniz:** external BYO via `MINIZ_DIR` (defaults to `../miniz`, outside the repo). The adapter TUs
-`compress_miniz.c`/`decompress_miniz.c` are **substrate** (generic codec backends). **No
-`integrations/codec/miniz/` is created** — no files would move there.
+**miniz (rev-3 correction):** the miniz *library* is external BYO via `MINIZ_DIR` (defaults to `../miniz`,
+outside the repo) — that is unchanged. But **Keel's adapter implementations** `compress_miniz.c` /
+`decompress_miniz.c` are real **backend-specific integration files** (they `#include <miniz.h>` and
+implement the `KlCompress`/`KlDecompress` vtables for that one backend). Under §0.1 rule 5 they belong in
+`integrations/codec/miniz/`, not `src/`. They reach core **only** through the public headers
+`<keel/compress_miniz.h>` / `<keel/decompress_miniz.h>` (→ `<keel/compress.h>`/`<keel/decompress.h>`) +
+external `<miniz.h>` — verified: no internal `src/` seam include, so they need **no** G3 allowlist entry.
+Their public adapter headers stay flat in `include/keel/`. **Build model preserved (behavior-neutral):**
+the root Makefile keeps conditionally compiling them into `libkeel.a` when `KEEL_COMPRESS=miniz`, from the
+new path (§5). A standalone integration Makefile/archive (KEEL_ROOT pattern like siblings) is an OPTIONAL
+R3 refinement, not required for the move and deferred to avoid a build-model change.
 
 ## 3. Exact path-migration table
 
@@ -131,9 +143,10 @@ files `src/stream_io.h`, `include/keel/clock.h`, `protocols/http/http_compress.c
 | protocols/websocket/ | websocket.c websocket_client.c completion_ws.c http_server_ws.c base64.h sha1.h utf8.h |
 | protocols/dns/ | dns_resolver.c dns_sys_posix.c dns_sys_win.c dns_sys.h |
 | protocols/proxy_protocol/ | proxy_protocol.c |
+| integrations/codec/miniz/ | compress_miniz.c decompress_miniz.c (from src/) |
 | src/ (new/changed) | stream_io.h(NEW) compress.c(generic-only) |
 | include/keel/ (new) | clock.h(NEW) http_compress.h(NEW) |
-| integrations/ | whole-dir moves per §2.7 |
+| integrations/ | whole-dir moves per §2.7 (+ codec/miniz above) |
 
 ## 4. Dependency findings & rulings
 
@@ -216,8 +229,15 @@ is header-only. `FREESTANDING_{CLIENT,SERVER,DNS,*_SC,*_HARNESS}_SRC` (~L1259/13
 — highest-risk exact object lists; repoint every moved TU incl. `async.c` (freestanding client) and
 `http_compress.c` if a freestanding server compresses.
 
+**Makefile — miniz adapter (R3 codec):** `COMPRESS_MINIZ_SRC`/`COMPRESS_MINIZ_OBJ` (~L244–245) repoint
+`src/compress_miniz.c src/decompress_miniz.c` → `integrations/codec/miniz/…`; they stay conditionally
+linked into `$(LIB)` (~L259) when `KEEL_COMPRESS=miniz` (behavior-neutral). Repoint the `fuzz-decompress`
+target and the `compress_server` example build (both gated on `KEEL_COMPRESS=miniz`). `MINIZ_DIR`/
+`MINIZ_CFLAGS` (external include path) unchanged.
+
 **Makefile — include flags:** add `-Iprotocols/http` to the object recipes for `protocols/{http,http2,
 websocket}/*.c` (and any TU including a family seam). Do NOT add `-Iprotocols/*` to substrate recipes.
+The miniz adapter compiles need only `MINIZ_CFLAGS` + public `include/` (no protocol/seam `-I`).
 
 **Makefile — gate file-lists + scan roots (see §6 gate-timing):** `AXIS_PROTO_TUS` (~L856–860, repoint);
 `TIER1_INFRA` (~L891–895: `$(wildcard src/http_server_plat_*.c)`→`protocols/http/…`,
@@ -238,7 +258,10 @@ edits beyond what Makefile changes cover.
 nghttp2 ALPN `../mbedtls`→`../../tls/mbedtls`; lwip `loopback-*-tls` `../mbedtls`→`../../tls/mbedtls`;
 boringssl/libressl `../openssl/tls_openssl.c` stays `../openssl/…` (siblings under `tls/`). EFI/lwip build
 scripts use `-I$KEEL_ROOT/src` (substrate seams — unaffected; add `-I$KEEL_ROOT/protocols/http` only if a
-host-mock TU includes a moved http seam — verify per-integration at R3). Validated per integration in R3.
+host-mock TU includes a moved http seam — verify per-integration at R3). **Relative-path depth:** the EFI
+mock includes `"../../src/datagram_open.h"` (`mock_efi_test.c:34`); after `uefi` nests one level deeper
+(`integrations/platform/uefi/`) this becomes `"../../../src/datagram_open.h"` — a mechanical R3 fixup.
+Validated per integration in R3.
 
 ## 6. Gates
 
@@ -265,13 +288,17 @@ no whole-line allowlist masking):
 - **G5** — old `src/<proto>.c` / `parsers/http1_*.c` paths cannot reappear (path-qualified deleted refs;
   allow the new `protocols/…` paths). Fold into / sibling of `check-no-httplegacy`.
 
-### 6.3 G3 — frozen integration→internal-seam allowlist
-Integrations legitimately consume SUBSTRATE provider/platform seam headers (observed today):
+### 6.3 G3 — frozen integration→internal-seam allowlist (EXACT header names, no wildcards)
+Integrations legitimately consume these SUBSTRATE provider/platform seam headers — the **exact,
+enumerated** current set (no `*` patterns, so no future private header is silently authorized):
 `socket.h`, `platform.h`, `io_engine.h`, `event_caps.h`, `event_builtin.h`, `completion.h`,
-`sockaddr_native.h`, `sockcompat.h`, `watcher_internal.h`, `resolve_sync.h`, `datagram_life.h` (and
-`datagram_*.h` detail seams), `udp_cmsg*.h`. **These are the allowlist.** All are substrate; none is a
-protocol header. Extend the allowlist only for a new substrate seam, explicitly, with a reason. G3 forbids
-any integration including a `protocols/**` header or a moved protocol private header/`.c`.
+`sockaddr_native.h`, `sockcompat.h`, `watcher_internal.h`, `resolve_sync.h`, `datagram_life.h`,
+`datagram_open.h`, `udp_cmsg.h`, `udp_cmsg_win.h`. **This exact list is the allowlist.** (`datagram_life.h`
+← lwIP raw provider; `datagram_open.h` ← EFI host-mock via `"../../src/datagram_open.h"`.) All are
+substrate; none is a protocol header. **A new seam must be added to this list individually, by exact
+name, with a rationale** — never via a wildcard. G3 forbids any integration including a `protocols/**`
+header or a moved protocol private header/`.c`. (The miniz codec adapters need no entry — they reach core
+only through PUBLIC `<keel/compress_miniz.h>`/`<keel/decompress_miniz.h>`.)
 
 ### 6.4 G4 — same-role TLS adapter source reuse (explicit permission)
 `integrations/tls/boringssl/` and `integrations/tls/libressl/` **recompile the sibling
@@ -294,8 +321,12 @@ compiling its sibling's adapter source. This keeps G4 consistent with the frozen
   validates, pauses.
 - **R2 clock/resolver cleanup** — the `clock.h` extraction (§4.5) and `resolver_cache.c` bound (§4.6) land
   with R2a (they unblock substrate purity for `timer.c`/`resolver_cache.c`).
-- **R3** — integrations by role (platform/lwip, platform/uefi, http2/nghttp2, tls/*), fixing KEEL_ROOT
-  depth + cross-adapter paths + EFI/lwIP/QEMU commands; G2/G3 mature here. Pause each.
+- **R3** — integrations by role (platform/lwip, platform/uefi, http2/nghttp2, tls/*, **codec/miniz**),
+  fixing KEEL_ROOT depth + cross-adapter paths + EFI/lwIP/QEMU commands + the `datagram_open.h`
+  relative-path depth; G2/G3 mature here. The **codec/miniz** step moves `compress_miniz.c`/
+  `decompress_miniz.c`, repoints the `COMPRESS_MINIZ_SRC`/fuzz-decompress/compress-example references
+  (behavior-neutral, still opt-in into `libkeel` via `KEEL_COMPRESS=miniz`), and validates
+  `make ... KEEL_COMPRESS=miniz MINIZ_DIR=…` + `fuzz-decompress`. Pause each.
 - **R4** — finalize G1–G5 + doc reconciliation (README/CLAUDE/architecture/CONTRIBUTING/diagrams/module
   counts/CI comments/freestanding docs → new paths; historical design docs may keep historical paths).
 
@@ -318,6 +349,10 @@ lwIP raw + BSD provider; EFI host-mock + QEMU/OVMF; fuzz compile; `git diff --ch
   **ACCEPTED (revised)** (§4.5–4.6).
 - **D6** parsers **flat** `protocols/http/http1_*_llhttp.c`. **ACCEPTED.**
 - **D7** http_server_ws.c → `protocols/websocket/`. **ACCEPTED.**
+- **M (rev-3)** miniz codec ADAPTERS (`compress_miniz.c`/`decompress_miniz.c`) → `integrations/codec/miniz/`
+  (backend-specific integration files per §0.1 rule 5; they are NOT substrate). **ACCEPTED.** Build model
+  preserved (opt-in into `libkeel` via `KEEL_COMPRESS=miniz`, repointed path); public adapter headers stay
+  flat; no G3 allowlist entry needed (public-header reach only).
 
 **Deferred (out of this restructure's scope):** the `KlAsyncOp`→`KlHttpAsyncOp` public rename (§4.2), a
 future `include/keel/clock.h`-style hierarchical/public-API decisions beyond the two narrow ownership
