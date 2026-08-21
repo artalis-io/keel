@@ -154,11 +154,18 @@ files `src/stream_io.h`, `include/keel/clock.h`, `protocols/http/http_compress.c
 
 ## 4. Dependency findings & rulings
 
-### 4.1 Substrate completion/event/socket is clean (no upward edges — verified)
-`completion_core.c`/`completion_dispatch.c` route connection completions only through the opaque
-`KlEventCtx.comp_conn_dispatch` hook (installed by the server at init); `event_*.c`, `socket_*.c`,
-`platform_*.c`, `stream*.c`, `datagram*.c`, `timer.c`, `thread_pool.c` name no protocol symbol. The
-completion adapters move to `protocols/` with the substrate core untouched.
+### 4.1 Substrate completion/event/socket — PARTIALLY neutral (corrected; see §4.8/R2f)
+`completion_core.c` is fully neutral (routes connection completions only through the opaque
+`KlEventCtx.comp_conn_dispatch` hook; `event_*.c` READ/WRITE target `KlStream`, datagram carries
+`KlDgramLife`, connect carries fd+watcher). **CORRECTION (reviewer, post-R2e):** rev-1..3 overstated
+this — the completion **contract, dispatch, and backends still name HTTP types** for the ACCEPT family
+and SENDFILE. `src/completion.h` includes `<keel/http_connection.h>` and its `KlCompletionOps` vtable +
+`kl_comp_*` entry points are HTTP-typed for accept (`prime_accepts`/`post_accept`/`shutdown_accepts` take
+`struct KlHttpServer*`) and sendfile (`post_sendfile` takes `KlHttpConn*`); `completion_dispatch.c` and
+`event_{iocp,iouring,pollcomp}.c` include `<keel/http_server.h>` + `<keel/http_connection.h>`. This is a
+real G1 (substrate-purity) violation and is neutralized in **§4.8 / R2f** (a separate increment, not
+folded into any R2 move). `completion_core.c`, the `KlCompletionEvent` struct (already HTTP-free), and
+the READ/WRITE/datagram/connect ops are unaffected.
 
 ### 4.2 `async.c` → `protocols/http/` (D1 — ACCEPTED)
 `async.c` is wholly HTTP-connection-suspension (all four fns take `KlHttpServer*`/`KlHttpConn*`; calls
@@ -220,6 +227,134 @@ completion_http_server.c]). Per §147, `protocols/http2/` and `protocols/websock
 include these declared http seams; the build adds `-Iprotocols/http` to the http2/ws/http protocol
 compiles. Substrate compiles get **no** `-Iprotocols/*`. The R4 gates allow intra-`protocols/` seam
 includes; they forbid substrate→protocol and protocol→integration-impl (§6).
+
+### 4.8 Completion axis ↔ HTTP neutralization (R2f — dedicated increment)
+
+**The finding (verified by field-level trace).** The completion axis was neutralized for READ/WRITE
+(`KlStream`), datagram (`KlDgramLife`+descriptors), and connect (fd+watcher), but **accept and sendfile
+were left HTTP-typed**, so substrate still names HTTP:
+- `src/completion.h:20` `#include <keel/http_connection.h>`; the `KlCompletionOps` vtable ops
+  `prime_accepts`/`post_accept`/`shutdown_accepts` take `struct KlHttpServer*` and `post_sendfile` takes
+  `KlHttpConn*`; the `kl_comp_*` accept/sendfile entry-point decls are likewise HTTP-typed.
+- `src/completion_dispatch.c:19-21` includes `<keel/http_server.h>` + `<keel/http_connection.h>`; its
+  `kl_comp_prime_accepts`/`post_accept`/`post_sendfile`/`shutdown_accepts` are **trivial forwarders**
+  (they extract `&s->ev.loop` / `&c->stream.ctx->loop` and call the vtable — no HTTP-state deref).
+- `src/event_{iocp,iouring,pollcomp}.c` each `#include <keel/http_server.h>` + `<keel/http_connection.h>`.
+  Their accept impls deref **only** `s->listen_fd` + `s->ev.loop._backend` (no pool/conn/HTTP state);
+  their sendfile impls deref **only** `c->stream` (`.fd`, `.alloc`, `.ctx->loop`). No HTTP logic.
+
+`completion_core.c` and the `KlCompletionEvent` struct are already HTTP-free (target is `void*`/`KlStream*`;
+accept surfaces as a neutral `KL_COMP_ACCEPT` event with `accepted_fd`, dispatched via the neutral
+`comp_conn_dispatch` hook that the HTTP adapter owns).
+
+**Also in scope — `src/completion_absent.c` (the `KEEL_NO_COMPLETION` stub).** In that build,
+`completion_absent.c` is the **sole** completion TU: it substitutes for *both* the substrate
+(`completion_core.c` + `completion_dispatch.c`) *and* the HTTP adapter (`completion_http_server.c`), so it
+today `#include`s `io_engine.h` and defines HTTP-typed aborting stubs —
+`kl_comp_prime_accepts(struct KlHttpServer*)`, `kl_comp_post_accept(struct KlHttpServer*)`,
+`kl_comp_post_sendfile(KlHttpConn*)`, the `KlHttpConn`-typed `kl_comp_post_recv/post_send`, and the four
+`kl_io_engine_*` run-loop stubs (`run_completion`/`quiesce_accepts`/`resume_completion`/`post_read`,
+all `KlHttpServer*`/`KlHttpConn*`). It must split along the **identical** seam as the live path (below).
+
+**Also in scope — `src/io_engine.h` (mixed-role substrate header).** `io_engine.h` is the shared
+completion-seam header, but it too mixes roles: it declares the neutral completion surface (`kl_comp_run`,
+`kl_comp_cancel`, `kl_completion_axis_available`, the datagram descriptors + `kl_comp_post_dgram_*` /
+`kl_comp_cancel_dgram` / `kl_comp_retire_dgram`, `kl_comp_post_connect`) **and** four HTTP-typed run-loop
+APIs (`kl_io_engine_run_completion(KlHttpServer*)`, `kl_io_engine_quiesce_accepts(KlHttpServer*)`,
+`kl_io_engine_resume_completion(KlHttpServer*, KlHttpConn*)`, `kl_io_engine_post_read(KlHttpConn*)`) — the
+**only** `kl_io_engine_*`-named symbols and the only HTTP-typed decls in the header. So the HTTP wrappers
+alone are not enough: the run-loop APIs must move out of substrate too, or `io_engine.h` remains a
+substrate header naming HTTP types (a residual G1 violation). Current includers (`grep`), all for the
+**neutral surface only**: `completion.h`, `completion_{core,dispatch,absent}.c`, `event_ctx.c`
+(`kl_comp_run`), `event_dispatch.c`, `datagram.c`, and `integrations/lwip/event_lwip_raw.c` (`kl_comp_run`)
+— these stay on `io_engine.h`. Only the HTTP run-loop APIs are HTTP-typed, and their **call sites** are two
+HTTP TUs: `protocols/http/http_server_core.c` (`run`/`quiesce_accepts`/`post_read`) and
+`protocols/http/async.c` (`resume`); `completion_http_server.c` owns the definitions and
+`completion_absent.c` the `NO_COMPLETION` stubs. (`event_ctx.c`, `event_efi.c`, and `event_lwip_raw.c`
+merely *mention* `kl_io_engine_*` in explanatory comments — not calls; `event_efi.c` does not even include
+`io_engine.h`.)
+
+**The seam (generic descriptor / neutral-pointer — mirrors the existing `KlStream`/datagram ops).** Since
+the backends already touch only neutral fields, retype the four ops off HTTP. Because C has no overloading,
+the **neutral entry points take distinct `_raw` names** (matching the existing `kl_comp_post_recv_raw` /
+`kl_comp_post_send_raw(KlStream*)` convention); the HTTP-typed thin wrappers keep the current names:
+
+| concern | neutral substrate entry point (new name) | HTTP wrapper (unchanged name) → in `protocols/http/` |
+|---|---|---|
+| accept prime | `kl_comp_prime_accepts_raw(KlEventCtx*, KlSocketHandle listen_fd) -> int window` | `kl_comp_prime_accepts(KlHttpServer*)` → `&s->ev`, `s->listen_fd` |
+| accept re-post | `kl_comp_post_accept_raw(KlEventCtx*)` | `kl_comp_post_accept(KlHttpServer*)` → `&s->ev` |
+| accept shutdown | `kl_comp_shutdown_accepts_raw(KlEventCtx*)` | `kl_comp_shutdown_accepts(KlHttpServer*)` → `&s->ev` |
+| sendfile | `kl_comp_post_sendfile_raw(KlStream*, head_iov, head_n, head_total, file_fd, count)` | `kl_comp_post_sendfile(KlHttpConn*)` → `&c->stream` |
+
+(`recv`/`send` already follow this split: `kl_comp_post_recv_raw(KlStream*)` substrate +
+`kl_comp_post_recv(KlHttpConn*)` HTTP wrapper.) The `KlCompletionOps` **vtable fields are struct members**
+(no C symbol collision) — they simply retype to the neutral signatures; the backend still latches
+`listen_fd` in prime and reaches its state via `ctx->loop._backend`, exactly as today.
+
+**Naming — ownership-first, three tiers (frozen).** The prefix encodes the role, not the header:
+- `kl_comp_*_raw` — neutral completion substrate (the vtable-backed entry points; `src/`).
+- `kl_comp_*` — HTTP wrappers that **directly mirror** a neutral `_raw` operation 1:1 (`protocols/http/`).
+- `kl_http_comp_*` — HTTP-only completion **orchestration with no neutral counterpart** (`protocols/http/`).
+
+The four `kl_io_engine_*` run-loop APIs are tier 3 (HTTP-only orchestration, no `_raw` sibling), so they
+are **renamed** on the move — the `io_engine` prefix was a header artifact, not a description:
+
+| old (`src/io_engine.h`) | new (`protocols/http/completion_http.h`) |
+|---|---|
+| `kl_io_engine_run_completion(KlHttpServer*, int timeout_ms)` | `kl_http_comp_run(KlHttpServer *server, int timeout_ms)` |
+| `kl_io_engine_quiesce_accepts(KlHttpServer*)` | `kl_http_comp_quiesce_accepts(KlHttpServer *server)` |
+| `kl_io_engine_resume_completion(KlHttpServer*, KlHttpConn*)` | `kl_http_comp_resume(KlHttpServer *server, KlHttpConn *conn)` |
+| `kl_io_engine_post_read(KlHttpConn*)` | `kl_http_comp_post_read(KlHttpConn *conn)` |
+
+The actual production callers are the HTTP TUs — principally `protocols/http/async.c`
+(`resume`) and `protocols/http/http_server_core.c` (`run`/`quiesce_accepts`/`post_read`);
+`completion_http_server.c` owns the hosted definitions and the `completion_absent` split owns the
+`NO_COMPLETION` stubs. `event_ctx.c` calls only the neutral `kl_comp_run` (unaffected). All call sites and
+definitions are renamed **atomically in R2f**, and any living comments/tests that mention `kl_io_engine_*`
+(e.g. the explanatory notes in `event_ctx.c`, `event_efi.c`, `event_lwip_raw.c`) are reconciled in the same
+commit. These are private internal symbols → **no compatibility aliases**; the retired `kl_io_engine_*`
+prefix is added to the eventual stale-internal-name gate so it cannot reappear.
+
+Concretely:
+- **`completion.h`:** drop the `<keel/http_connection.h>` include; the vtable + the `_raw` neutral entry
+  points (accept/sendfile + the existing recv/send/drain/cancel/datagram/connect) are HTTP-free.
+- **`completion_dispatch.c` + `event_{iocp,iouring,pollcomp}.c`:** drop the `<keel/http_server.h>` +
+  `<keel/http_connection.h>` includes; retype the four op impls / `_raw` entry points to the neutral
+  signatures. No behavioral change (the derefs were already neutral).
+- **`src/io_engine.h`:** keep **only** the neutral completion surface (`kl_comp_run`, `kl_comp_cancel`,
+  `kl_completion_axis_available`, datagram descriptors + `kl_comp_post_dgram_*`/`cancel_dgram`/
+  `retire_dgram`, `kl_comp_post_connect`); drop the `struct KlHttpServer;`/`struct KlHttpConn;` forward
+  decls and the four HTTP run-loop APIs. It then names no HTTP type and no `kl_io_engine_*` symbol.
+- **`protocols/http/completion_http.h` (new HTTP completion seam):** declares the HTTP-typed wrapper
+  surface (`kl_comp_prime_accepts(KlHttpServer*)`, `kl_comp_post_accept`, `kl_comp_shutdown_accepts`,
+  `kl_comp_post_sendfile(KlHttpConn*)`, the `KlHttpConn` recv/send wrappers) **and** the renamed
+  `kl_http_comp_run`/`quiesce_accepts`/`resume`/`post_read`. Defined in `completion_http_server.c` (hosted)
+  and `completion_http_absent.c` (`NO_COMPLETION`). Every HTTP TU that used the run-loop APIs switches its
+  include from `io_engine.h` → `completion_http.h`; TUs needing only the neutral surface keep `io_engine.h`.
+- **`completion_dispatch.c` + `event_{iocp,iouring,pollcomp}.c`:** the wrapper definitions live in
+  `completion_http_server.c`, so these substrate/backend TUs implement only the `_raw` neutral entry
+  points + retyped vtable ops.
+- **`completion_absent.c` splits:** the neutral `_raw` stubs (accept/sendfile + recv/send/drain/cancel/
+  datagram/connect/`kl_comp_run`) stay in `src/completion_absent.c` (HTTP-free; drop `io_engine.h`'s HTTP
+  decls — it now includes only the purified `io_engine.h`); the HTTP-typed stubs
+  (`kl_comp_prime_accepts(KlHttpServer*)`, `post_accept`, `post_sendfile(KlHttpConn*)`, `shutdown_accepts`,
+  the `KlHttpConn` recv/send wrappers, and the four `kl_http_comp_*`) move to a new
+  **`protocols/http/completion_http_absent.c`** (includes `completion_http.h`), added to the
+  `KEEL_NO_COMPLETION` source list next to `completion_absent.c`. This mirrors the hosted split (substrate
+  dispatch vs `completion_http_server.c`) so the `NO_COMPLETION` build stays G1-clean too.
+
+**Responsibility split (result):** substrate owns the *neutral* completion vtable + `_raw` entry points +
+the purified `io_engine.h` (hosted **and** absent); `protocols/http/` owns the HTTP-typed wrapper surface +
+`kl_http_comp_*` orchestration behind `completion_http.h` (hosted `completion_http_server.c`, absent
+`completion_http_absent.c`). After R2f, `src/completion.h`, `io_engine.h`, `completion_dispatch.c`,
+`completion_absent.c`, and the three backends name **no** HTTP type and no `kl_io_engine_*` symbol survives
+anywhere → G1 (`check-substrate-purity`) is satisfiable for the completion axis. Behavior-neutral: no
+accept/sendfile/lifetime semantics change; the `KL_COMP_ACCEPT`/dispatch path is untouched.
+
+**Sequencing (frozen):** R2f runs **after** R2e (accepted) and **before** the test-layout refactor. It is
+its own reviewed increment — NOT folded into a protocol move — and validated across every completion
+backend (pollcomp/io_uring/IOCP) + readiness + `KEEL_NO_COMPLETION` + freestanding, since it retypes the
+backend vtable and splits the absent stub.
 
 ## 5. Build / CI / test / fuzz / integration reference inventory
 
@@ -322,7 +457,20 @@ compiling its sibling's adapter source. This keeps G4 consistent with the frozen
   `check-sockaddr-neutral` in the same commit** (§6.1); begins G1/G4/G5 as they mature. Validate, pause.
 - **R2b http2**, **R2c websocket** (incl. `http_server_ws.c`), **R2d dns**, **R2e proxy_protocol** — each
   moves its family, consumes the http seam where needed, repoints the existing gates in the same commit,
-  validates, pauses.
+  validates, pauses. *(R2a–R2e DONE.)*
+- **R2f — completion↔HTTP neutralization (§4.8).** Retype the accept + sendfile completion ops off
+  `KlHttpServer`/`KlHttpConn` onto neutral args (`KlEventCtx`+`listen_fd` / `KlStream`) under distinct
+  `_raw` entry-point names (C has no overloading; matches `kl_comp_post_recv_raw`); drop the
+  `<keel/http_connection.h>`/`<keel/http_server.h>` includes from `completion.h`,
+  `completion_dispatch.c`, and `event_{iocp,iouring,pollcomp}.c`; **purify `src/io_engine.h`** to the
+  neutral completion surface only, moving its four HTTP-typed run-loop APIs to the new
+  `protocols/http/completion_http.h` seam **renamed `kl_io_engine_*` → `kl_http_comp_*`** (tier-3
+  ownership-first naming; all callers renamed atomically, no aliases, old prefix added to the stale-name
+  gate); move the HTTP-typed `kl_comp_*` accept/sendfile/recv/send wrappers to `completion_http.h` too
+  (defined in `completion_http_server.c`); **split `completion_absent.c`** — neutral `_raw` stubs stay
+  substrate, HTTP-typed stubs + `kl_http_comp_*` move to `protocols/http/completion_http_absent.c` (new
+  `KEEL_NO_COMPLETION` source). Behavior-neutral; validated across pollcomp/io_uring/IOCP + readiness +
+  `KEEL_NO_COMPLETION` + freestanding. Runs **before** the test-layout refactor. Its own reviewed commit.
 - **R2 clock/resolver cleanup** — the `clock.h` extraction (§4.5) and `resolver_cache.c` bound (§4.6) land
   with R2a (they unblock substrate purity for `timer.c`/`resolver_cache.c`).
 - **R3** — integrations by role (platform/lwip, platform/uefi, http2/nghttp2, tls/*, **codec/miniz**),
