@@ -13,7 +13,7 @@
 #include <keel/websocket.h>
 #include <keel/http2.h>
 #include <keel/http2_server.h>
-#include "../src/http2_internal.h"
+#include "../protocols/http2/http2_internal.h"
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>

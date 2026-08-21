@@ -100,7 +100,7 @@ typedef struct KlHttp2ServerConfig {
 } KlHttp2ServerConfig;
 
 /* Per-stream (KlHttp2ServerStream) and per-connection (KlHttp2ServerConn) state are opaque —
- * their bodies are internal (src/http2_internal.h). Users interact with HTTP/2 only through
+ * their bodies are internal (protocols/http2/http2_internal.h). Users interact with HTTP/2 only through
  * the KlHttp2ServerSession vtable + KlHttp2ServerConfig above; the connection is passed to the
  * session callbacks as an opaque void*. Keeping the bodies out of this public header lets
  * KEEL evolve internal h2 state (buffering seams, etc.) without a public-API change. */
