@@ -193,7 +193,7 @@ CORE_SRC = src/allocator.c src/allocator_default_stdlib.c src/kl_cstr.c src/erro
            protocols/http/http_client_common.c protocols/http/http_client_sync.c protocols/http/http_client_async.c \
            protocols/http/http_client_proxy.c \
            protocols/http/http_client_pool.c protocols/http/http_redirect.c protocols/http/http_sse.c \
-           src/resolver_cache.c src/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
+           src/resolver_cache.c protocols/proxy_protocol/proxy_protocol.c src/datagram_slots.c src/datagram_send.c src/datagram_recv.c src/datagram_close.c src/datagram_core.c src/datagram_life.c src/datagram.c src/datagram_batch.c src/datagram_open.c $(DGRAM_SRC) $(UDP_CMSG_SRC) \
            protocols/dns/dns_resolver.c $(DNS_SYS_SRC) src/resolve_sync.c \
            protocols/http/http_compress.c src/decompress.c src/drain.c src/stream.c src/stream_write.c src/stream_read.c src/stream_close.c \
            src/connect_op.c src/listener.c \
@@ -281,10 +281,6 @@ endif
 	$(CC) $(CFLAGS) $(EXTRA_INC) -c -o $@ $<
 
 protocols/%.o: EXTRA_INC = -Isrc -Iprotocols/http -Iprotocols/http2
-# INTERIM: the PROXY parser (proxy_protocol.c) still resides in src/ and registers a proto-hook, so it
-# consumes the moved HTTP seam header http_proto_hooks.h in protocols/http/. This exception is removed
-# when the PROXY protocol moves to protocols/proxy_protocol/ (R2e).
-src/proxy_protocol.o: EXTRA_INC = -Isrc -Iprotocols/http
 
 # The lwIP-raw completion backend (integrations/lwip/event_lwip_raw.o +
 # lwip_raw_glue.o) is a RUNTIME PROVIDER built next to a STOCK libkeel, NOT compiled into
@@ -1123,7 +1119,6 @@ FUZZ_LIB_OBJ = $(CORE_SRC:%.c=%.fuzz.o) $(LLHTTP_SRC:%.c=%.fuzz.o) \
 	$(CC) $(FUZZ_INSTR_CFLAGS) $(EXTRA_INC) -c -o $@ $<
 # Protocol + interim-src fuzz objects need the same seam includes as their plain-object twins.
 protocols/%.fuzz.o: EXTRA_INC = -Isrc -Iprotocols/http -Iprotocols/http2
-src/proxy_protocol.fuzz.o: EXTRA_INC = -Isrc -Iprotocols/http
 
 $(FUZZ_LIB): $(FUZZ_LIB_OBJ)
 	$(AR) rcs $@ $^
